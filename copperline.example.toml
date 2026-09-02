@@ -16,8 +16,8 @@ rom = "kickstart.rom"
 # [paths] -- where Copperline writes what it produces, and where its file
 # dialogs open when the field they were launched from is empty. Every key is
 # optional; the defaults are folders of these names under the host-data
-# directory (~/.config/copperline, %APPDATA%\copperline, or the executable's
-# folder in a portable install). Relative paths hang off `base`, absolute
+# directory (~/Documents/Copperline, %USERPROFILE%\Documents\Copperline, or
+# the executable's folder in a portable install). Relative paths hang off `base`, absolute
 # paths are used as given. Entries naming folders this machine cannot reach
 # are ignored with a log warning and the default is used instead.
 # [paths]
@@ -48,6 +48,12 @@ rom = "kickstart.rom"
 # button cold-boots the machine (clears RAM); powering off returns it to
 # that cold test-screen state.
 power_on = true
+
+# When true, the launcher runs this configuration the moment it opens it:
+# starting Copperline with this file as the saved default boots straight
+# into the machine, and Load... in the launcher does the same. Only the
+# launcher reads it -- command-line launches are unaffected.
+auto_launch = false
 
 # Real-mode pacing budget. "cycles" (default) clocks the CPU by each
 # instruction's actual m68k cycle cost plus chip-bus waits, matching real
@@ -94,6 +100,14 @@ pacing_budget = "cycles"
 # Warp boot until an absolute emulated timestamp instead: deterministic,
 # for a setup whose boot time is known (mutually exclusive with warp_boot).
 # warp_until = 12.0
+
+# The WinUAE-compatible "uaelib" trap at $F0FF60 (on by default): a guest
+# program can toggle warp speed (warpmode() in the vscode-amiga-debug
+# template), log debug text to the host console and the control protocol
+# (KPrintF), and register its bitmaps, palettes and copper lists for the
+# debugger (see docs/guide/run.md). Set false for a machine with nothing at
+# $F0FF60. A CDTV's extended ROM occupies $F00000 and hides the trap anyway.
+# uaelib = true
 
 # Record rewind history from power-on, so Cmd+Z / Alt+Z (and the Rewind menu
 # item) can step the machine back through it. Off by default because it is
@@ -427,8 +441,9 @@ slow = "512K"
 #
 # controller picks the host adapter:
 #   "a2091" - Zorro II, WD33C93. The default on machines without onboard SCSI.
-#             Needs an A590/A2091 boot ROM (6.6+, 16K/32K; rom_odd takes the
-#             odd half of a split even/odd EPROM dump).
+#             Omit rom to load the bundled open-source 64K A2091 ROM. External
+#             A590/A2091 ROMs may be 16K, 32K, or 64K; rom_odd takes the odd
+#             half of a split even/odd EPROM dump.
 #   "a4091" - Zorro III, NCR 53C710. The boot ROM is a raw A4091 EPROM image;
 #             omit to load the bundled open-source A4091 ROM.
 #   "a3000" - the A3000's built-in SCSI, and the default on that machine.
@@ -436,7 +451,7 @@ slow = "512K"
 #             from an RDB drive.
 # [scsi]
 # controller = "a2091"
-# rom = "a2091-v6.6.rom"
+# rom = "a2091-v7.0.rom"  # optional replacement for the bundled open ROM
 # unit0 = "workbench.hdf"
 # unit1 = "data.hdf"
 # unit2 = "game.cue"
@@ -614,12 +629,22 @@ video = "PAL"
 # scanline, so a 320x256 lo-res screen is an exact 640x512 -- handy for
 # pixel-exact comparison against square-pixel emulators). scaling: how that
 # canvas reaches the window. "smooth" (default; fit to the window preserving
-# aspect ratio, interpolated) or "integer" (the largest whole-number multiple
-# of the canvas that fits, centred in black borders and point-sampled, in the
-# spirit of WinUAE/Amiberry integer scaling). Integer covers RTG modes too,
-# at multiples of their own native resolution, and falls back to the smooth
-# fit when the window is too small for even 1x rather than cropping.
-# Pair it with pixel_aspect = "square" for a fully pixel-exact picture.
+# aspect ratio, interpolated) or "integer" (whole-number multiples of the
+# unresampled canvas, centred in black borders and point-sampled, in the
+# spirit of WinUAE/Amiberry integer scaling). Under the tv aspect the two
+# axes take separate whole numbers -- pixels per column and per scan line,
+# chosen for the 4:3 pixel shape, so an NTSC game on a 1080p screen draws
+# at 4:5 pixels (1280x1000 with autocrop) rather than squat square ones;
+# under square pixels the multiple is uniform. Integer covers RTG modes
+# too, at multiples of their own native resolution, and falls back to the
+# smooth fit when the window is too small for even 1x rather than cropping.
+# autocrop: crop the window presentation to the display window the
+# hardware programs (default false), so a game using fewer lines than the
+# full scan fills more of a 16:9/21:9 screen; with integer scaling the
+# whole-number fit is retaken against the crop. Window-only (captures
+# keep their aperture); composes with the CRT shader presets, crops
+# programmable (multisync) scans through their own sync window, and is
+# suspended under a bezel and for RTG scanout.
 # deinterlace: motion-adaptive weaving of interlaced displays (default
 # true); false line-doubles every field, showing interlace bob/flicker like
 # a bare TV.
@@ -665,6 +690,7 @@ video = "PAL"
 # tv_v_centre = 0
 # pixel_aspect = "tv"
 # scaling = "smooth"
+# autocrop = false
 # deinterlace = true
 # phosphor = 0.4
 # shader = "none"

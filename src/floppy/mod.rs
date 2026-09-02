@@ -238,9 +238,6 @@ pub struct FloppyController {
     last_dskdatr: u16,
     last_dskbytr_byte: u8,
     dskbyte_valid: bool,
-    last_dskbytr_pos: Option<DiskBytePos>,
-    last_stream_sync_pos: Option<DiskWordPos>,
-    word_equal_latch: bool,
     sync_irq_latch: bool,
     index_pulse_cck: u32,
     index_flag_sync_cck: u32,
@@ -318,9 +315,6 @@ impl Default for FloppyController {
             last_dskdatr: 0,
             last_dskbytr_byte: 0,
             dskbyte_valid: false,
-            last_dskbytr_pos: None,
-            last_stream_sync_pos: None,
-            word_equal_latch: false,
             sync_irq_latch: false,
             index_pulse_cck: 0,
             index_flag_sync_cck: 0,
@@ -472,7 +466,17 @@ impl FloppyController {
         if drive.cylinder != 0 {
             bits |= CIAA_DSKTRACK0;
         }
-        if !drive.rdy_line_asserted() {
+        // The internal DF0 mechanism has no drive-ID circuit; with its motor
+        // off, the /RDY line it presents mirrors the /TRK0 sensor instead
+        // (the behaviour WinUAE derived from A500/A2000 hardware, where the
+        // external units answer with their ID shift register). With the
+        // motor on, /RDY is the spun-up platter as on every drive.
+        let rdy_asserted = if idx == 0 && !drive.motor_on {
+            drive.cylinder == 0
+        } else {
+            drive.rdy_line_asserted()
+        };
+        if !rdy_asserted {
             bits |= CIAA_DSKRDY;
         }
         bits
@@ -1044,15 +1048,28 @@ impl FloppyController {
             let select_activated = !was_selected && selected;
             let select_deactivated = was_selected && !selected;
 
-            if idx == 0 {
-                if selected {
-                    let motor_on = val & CIAB_DSKMOTOR == 0;
+            // Every Amiga drive, the internal DF0 included, feeds /MTR into
+            // a latch clocked by its own /SEL falling edge: the motor state
+            // changes only at the instant the drive becomes selected, and
+            // the level of the MTR line while it stays selected is ignored.
+            // That is why trackdisk.device and every trackloader deselect,
+            // set MTR, then reselect -- and why a loader may restore an
+            // old PRB shadow with MTR high right after that sequence
+            // without stopping the motor it just started (Spooky Town's
+            // loader does exactly this under Kickstart 1.3). A write that
+            // drops SEL and MTR together starts the motor -- the latch sees
+            // MTR low on one side of the edge -- while stopping it needs MTR
+            // high on both sides, the rule WinUAE and vAmiga derived from
+            // hardware. External units additionally run the drive-ID shift
+            // register off the same edges; DF0 has no ID circuit.
+            if select_activated {
+                let motor_on = (prev & CIAB_DSKMOTOR == 0) || (val & CIAB_DSKMOTOR == 0);
+                if idx == 0 {
                     self.drives[idx].set_motor(motor_on);
+                } else {
+                    self.drives[idx].latch_mtrxd(motor_on);
                 }
-            } else if select_activated {
-                let motor_on = val & CIAB_DSKMOTOR == 0;
-                self.drives[idx].latch_mtrxd(motor_on);
-            } else if select_deactivated {
+            } else if idx != 0 && select_deactivated {
                 self.drives[idx].advance_external_id();
             }
 
@@ -1177,7 +1194,7 @@ impl FloppyController {
 
     pub fn write_dsksync(&mut self, val: u16) -> bool {
         self.dsksync = val;
-        self.word_equal_latch = false;
+        self.read_shifter.set_sync(val);
         if self.current_disk_word_matches_sync() {
             self.record_sync_match();
             true
@@ -1264,7 +1281,21 @@ impl FloppyController {
         self.last_dskdatr
     }
 
-    pub fn read_dskbytr(&mut self, dmacon: u16, adkcon: u16) -> u16 {
+    /// DSKBYTR. The byte and DSKBYT come from Paula's read shifter on its
+    /// own framing: the bit counter that a DSKSYNC match resets under
+    /// WORDSYNC. After a sync, the bytes a polling reader collects therefore
+    /// start exactly where the sync word ended, whatever bit phase that sync
+    /// has on the track -- an IPF or flux track carries its syncs at any
+    /// phase, and only a synthesised AmigaDOS track keeps them on the word
+    /// grid. (Rob Northen's Copylock reads its key sector this way: it waits
+    /// for WORDEQUAL, then reads the sector byte by byte through DSKBYTR
+    /// while counting poll iterations, and rejects the read unless the first
+    /// two bytes are the MFM of the sector's first data byte.) WORDEQUAL is
+    /// the comparator's live level: true for the one cell in which the shift
+    /// register equals DSKSYNC and gone once the next cell shifts in, so a
+    /// polling loop can miss a match and wait a revolution for the next --
+    /// as it does on the hardware. Only DSKBYT is reset by the read.
+    pub fn read_dskbytr(&mut self, dmacon: u16) -> u16 {
         let mut status = 0u16;
         if self.dma_enabled(dmacon) {
             status |= DMAON;
@@ -1272,61 +1303,25 @@ impl FloppyController {
         if self.dsklen & DSKLEN_WRITE != 0 {
             status |= DISKWRITE;
         }
-        let dskbytr_load_allowed = self.dsklen & (DSKLEN_DMAEN | DSKLEN_WRITE) != DSKLEN_WRITE;
+        // Write mode with the DMA disarmed (DSKLEN WRITE without DMAEN) holds
+        // the byte register: nothing loads until the write bit clears.
+        let load_allowed = self.dsklen & (DSKLEN_DMAEN | DSKLEN_WRITE) != DSKLEN_WRITE;
         let active_write_dma = self.dma.as_ref().is_some_and(|dma| dma.write);
-        let mut current_word = None;
-        let mut new_disk_word = false;
-        if let Some((idx, track)) = self.selected_ready_track() {
-            self.ensure_track(idx, track);
-            let drive = &self.drives[idx];
-            if let Some(rev) = drive.cur_rev() {
-                let bit = drive.rotation_bit;
-                let byte_index = bit / 8;
-                let word_index = bit / 16;
-                let word = rev.word_at(word_index * 16);
-                let byte = rev.byte_at(byte_index * 8);
-                let byte_pos = DiskBytePos {
-                    drive: idx,
-                    track,
-                    word: byte_index,
-                    byte_phase: 0,
-                };
-                let word_pos = DiskWordPos {
-                    drive: idx,
-                    track,
-                    word: word_index,
-                };
-                current_word = Some(word);
-                new_disk_word = self.last_stream_sync_pos != Some(word_pos);
-                self.last_stream_sync_pos = Some(word_pos);
-                if dskbytr_load_allowed && self.last_dskbytr_pos != Some(byte_pos) {
-                    if active_write_dma {
-                        self.last_dskbytr_byte = 0;
-                    } else {
-                        self.last_dskdatr = word;
-                        self.last_dskbytr_byte = byte;
-                    }
-                    self.dskbyte_valid = true;
-                    self.last_dskbytr_pos = Some(byte_pos);
-                }
+        if let Some(byte) = self.read_shifter.take_dskbyt() {
+            if load_allowed {
+                // During a write transfer the shifter is Paula's output path
+                // and the byte register reads as zero.
+                self.last_dskbytr_byte = if active_write_dma { 0 } else { byte };
+                self.dskbyte_valid = true;
             }
-        } else {
-            self.last_dskbytr_pos = None;
-            self.last_stream_sync_pos = None;
         }
-        let current_word_equal = current_word.is_some_and(|word| word == self.dsksync);
-        let sync_irq_allowed = adkcon & ADK_MSBSYNC == 0 && !active_write_dma;
-        if current_word_equal && new_disk_word && sync_irq_allowed {
-            self.record_sync_match();
-        }
-        if self.word_equal_latch || current_word_equal {
+        if self.read_shifter.sync_matched() {
             status |= WORDEQUAL;
         }
         if self.dskbyte_valid {
             status |= DSKBYT;
             self.dskbyte_valid = false;
         }
-        self.word_equal_latch = false;
         status | self.last_dskbytr_byte as u16
     }
 
@@ -1563,20 +1558,20 @@ impl FloppyController {
                 }
             }
             if comparator_match && sync_enabled && self.adkcon & ADK_WORDSYNC != 0 {
-                if let Some(dma) = read_dma.as_mut() {
-                    if !dma.wait_sync {
-                        // With WORDSYNC set, Paula re-frames the word boundary
-                        // on every DSKSYNC match, not only on the one that
-                        // starts the transfer. A revolution whose cell count
-                        // is not a multiple of 16 otherwise leaves every
-                        // sector after the index wrap off the word grid, and
-                        // a reader that scans its buffer on that grid (AROS
-                        // trackdisk.device) never finds them. Re-framing on
-                        // every matching cell of a run parks the framing at
-                        // the run's end, where the first word after it starts.
-                        self.read_shifter.reframe();
-                    }
-                }
+                // With WORDSYNC set, Paula re-frames the word boundary on
+                // every DSKSYNC match, not only on the one that starts a
+                // transfer. A revolution whose cell count is not a multiple
+                // of 16 otherwise leaves every sector after the index wrap
+                // off the word grid, and a reader that scans its buffer on
+                // that grid (AROS trackdisk.device) never finds them.
+                // Re-framing on every matching cell of a run parks the
+                // framing at the run's end, where the first word after it
+                // starts. The same bit counter frames DSKBYTR, so the reset
+                // applies with no transfer running too: a reader polling
+                // bytes after WORDEQUAL gets them framed from the sync. (A
+                // transfer that was waiting for this sync already realigned
+                // on the edge above; re-framing again is idempotent.)
+                self.read_shifter.reframe();
             }
 
             if self.drives[idx].advance_head_bit() {
@@ -1596,8 +1591,6 @@ impl FloppyController {
                             self.debug_watched_write = Some((self.dskpt, word));
                         }
                         self.last_dskdatr = word;
-                        self.last_dskbytr_byte = (word & 0x00FF) as u8;
-                        self.dskbyte_valid = true;
                         self.advance_dskpt();
                         dma.remaining -= 1;
                         if dma.remaining == 0 {
@@ -1669,6 +1662,11 @@ impl FloppyController {
                     index_pulse = true;
                 }
             }
+            // The shifter is Paula's output path during a write: DSKBYT
+            // still pulses as it clocks bytes out, but the byte register
+            // holds nothing readable.
+            self.last_dskbytr_byte = 0;
+            self.dskbyte_valid = true;
             dma.remaining -= 1;
             if dma.remaining == 0 {
                 irq = true;
@@ -2235,8 +2233,29 @@ impl FloppyController {
             .is_some_and(|word| word == self.dsksync)
     }
 
+    /// Test helper: put the head on a word boundary with a fresh read
+    /// shifter, so the shifter's framing follows the track's word grid from
+    /// here and the cells it samples are exactly the ones ticked from now.
+    #[cfg(test)]
+    fn park_head_at_word(&mut self, idx: usize, word: usize) {
+        self.drives[idx].set_rotation_word(word);
+        self.drives[idx].rotation_acc_cck = 0;
+        self.read_shifter = PaulaDiskReadDpllFifo::new();
+    }
+
+    /// Test helper: advance the platter exactly `cells` MFM cells, one tick
+    /// per cell, returning whether any tick raised DSKBLK.
+    #[cfg(test)]
+    fn tick_cells(&mut self, idx: usize, cells: usize, dmacon: u16) -> bool {
+        let mut irq = false;
+        for _ in 0..cells {
+            let cell = self.drives[idx].head_cell_cck();
+            irq |= self.tick(cell, dmacon, &mut []);
+        }
+        irq
+    }
+
     fn record_sync_match(&mut self) {
-        self.word_equal_latch = true;
         self.sync_irq_latch = true;
     }
 
@@ -3193,11 +3212,43 @@ impl FloppyDrive {
 /// 16-bit word at this revolution's length; per-bit timing is derived so each
 /// aligned 16-bit group sums to exactly `word_cck`, keeping synthetic (ADF)
 /// word cadence identical to the old word-grid model.
+///
+/// `density` is empty for a uniform revolution. Otherwise it lists the runs
+/// of cells written at a rate other than nominal -- the shape a mastering
+/// protection's key track takes, where some sectors are written with cells a
+/// few per cent longer or shorter than 2 us so a loader timing them can tell
+/// the original from a copy -- and every cell's cck scales by its run's
+/// per-mille weight.
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 struct TrackRev {
     words: Vec<u16>,
     bit_len: usize,
     word_cck: u32,
+    /// Every bit offset at which a 16-bit window ending there equals the
+    /// sync word the index was built for, in ascending order. Derived from
+    /// `words`, so it is built lazily on first use and neither serialized
+    /// nor part of the emulated state; a save state rebuilds it on demand,
+    /// and a DSKSYNC change replaces it.
+    #[serde(skip)]
+    sync_index: std::cell::RefCell<Option<SyncIndex>>,
+    density: Vec<DensityRun>,
+}
+
+#[derive(Clone)]
+struct SyncIndex {
+    sync: u16,
+    ends: Vec<u32>,
+}
+
+/// A run of cells from `start_bit` to the next run's start (or the index)
+/// written at `permille` / 1000 of the nominal cell time. `weight_before` is
+/// the per-mille weight summed over every cell ahead of the run, so a
+/// cumulative cell time is one multiply from any bit inside it.
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+struct DensityRun {
+    start_bit: usize,
+    permille: u32,
+    weight_before: u64,
 }
 
 impl TrackRev {
@@ -3216,6 +3267,8 @@ impl TrackRev {
             words: vec![0xFFFF; bit_len.div_ceil(16)],
             bit_len,
             word_cck: word_cck.max(1),
+            sync_index: Default::default(),
+            density: Vec::new(),
         }
     }
 
@@ -3225,7 +3278,54 @@ impl TrackRev {
             words,
             bit_len,
             word_cck: word_cck.max(1),
+            sync_index: Default::default(),
+            density: Vec::new(),
         }
+    }
+
+    /// A revolution whose cells are not all the nominal length: `spans`
+    /// lists, in ascending bit order, where each new cell rate starts. A
+    /// profile that is nominal throughout collapses to the uniform model.
+    fn with_density(
+        words: Vec<u16>,
+        bit_len: usize,
+        word_cck: u32,
+        spans: &[formats::DensitySpan],
+    ) -> Self {
+        let mut rev = Self::new(words, bit_len, word_cck);
+        if spans.iter().all(|span| span.permille == 1000) {
+            return rev;
+        }
+        let mut runs: Vec<DensityRun> = Vec::with_capacity(spans.len() + 1);
+        // The profile starts nominal unless a span says otherwise from bit 0.
+        if spans.first().is_none_or(|span| span.start_bit != 0) {
+            runs.push(DensityRun {
+                start_bit: 0,
+                permille: 1000,
+                weight_before: 0,
+            });
+        }
+        for span in spans {
+            let start_bit = (span.start_bit as usize).min(rev.bit_len);
+            if let Some(last) = runs.last() {
+                if start_bit <= last.start_bit {
+                    continue;
+                }
+            }
+            runs.push(DensityRun {
+                start_bit,
+                permille: u32::from(span.permille).max(1),
+                weight_before: 0,
+            });
+        }
+        let mut weight = 0u64;
+        for i in 0..runs.len() {
+            runs[i].weight_before = weight;
+            let end = runs.get(i + 1).map_or(rev.bit_len, |next| next.start_bit);
+            weight += (end - runs[i].start_bit) as u64 * u64::from(runs[i].permille);
+        }
+        rev.density = runs;
+        rev
     }
 
     fn bit(&self, bit: usize) -> bool {
@@ -3245,20 +3345,26 @@ impl TrackRev {
         value
     }
 
-    /// The 8-bit byte starting at `bit` (MSB-first), wrapping at `bit_len`.
-    fn byte_at(&self, bit: usize) -> u8 {
-        let mut value = 0u8;
-        for offset in 0..8 {
-            value = (value << 1) | u8::from(self.bit(bit + offset));
-        }
-        value
-    }
-
     /// Cumulative cck from the start of the revolution to the start of `bit`.
-    /// `prefix(16k) == k*word_cck` exactly, so aligned word boundaries match
-    /// the old uniform word clock.
+    /// On a uniform revolution `prefix(16k) == k*word_cck` exactly, so aligned
+    /// word boundaries match the old uniform word clock. With a density
+    /// profile each cell is weighted by its run's per-mille rate instead, so a
+    /// sector written with longer cells takes proportionally longer to pass
+    /// the head -- which is what a protection's timing loop measures.
     fn prefix_cck(&self, bit: usize) -> u64 {
-        (bit as u64 * self.word_cck as u64 + 8) / 16
+        if self.density.is_empty() {
+            return (bit as u64 * self.word_cck as u64 + 8) / 16;
+        }
+        let run = self
+            .density
+            .iter()
+            .rev()
+            .find(|run| run.start_bit <= bit)
+            .or(self.density.first())
+            .expect("a density profile has at least one run");
+        let weight =
+            run.weight_before + bit.saturating_sub(run.start_bit) as u64 * u64::from(run.permille);
+        (weight * self.word_cck as u64 + 8000) / 16000
     }
 
     fn cell_cck(&self, bit: usize) -> u32 {
@@ -3272,25 +3378,53 @@ impl TrackRev {
     /// Bit distance from `from` to the next bit-aligned 16-bit window equal to
     /// `sync`, scanning forward within the revolution (wrapping once). Returns
     /// the number of bits until the matched window's last bit has been read.
+    ///
+    /// Answered from a per-sync-word index of matching window ends, so the
+    /// cost is a binary search rather than a walk over the ~100k cells of a
+    /// revolution: the STOP-state pacer asks this on every idle slice while
+    /// a trackloader waits on DSKSYNC, and a linear scan there multiplies
+    /// into seconds of host time per track (the Spooky Town loader ran at
+    /// half real time through its loading phase).
     fn bits_until_sync(&self, from: usize, sync: u16) -> Option<usize> {
         if self.bit_len == 0 {
             return None;
         }
+        let from = from % self.bit_len;
+        let mut cache = self.sync_index.borrow_mut();
+        if cache.as_ref().is_none_or(|index| index.sync != sync) {
+            *cache = Some(self.build_sync_index(sync));
+        }
+        let index = cache.as_ref().expect("sync index was just built");
+        if index.ends.is_empty() {
+            return None;
+        }
+        let pos = index.ends.partition_point(|&end| (end as usize) < from);
+        let end = match index.ends.get(pos) {
+            Some(&end) => end as usize,
+            None => index.ends[0] as usize + self.bit_len,
+        };
+        Some(end - from + 1)
+    }
+
+    /// Every bit offset `end` in the revolution at which the 16-bit window
+    /// covering bits `end-15..=end` (wrapping at `bit_len`, as the head sees
+    /// it) equals `sync`.
+    fn build_sync_index(&self, sync: u16) -> SyncIndex {
+        let mut ends = Vec::new();
         let mut window = 0u16;
-        // Prime the 15 bits before `from` so the first compared window ends at
-        // `from` (the bit about to be read).
-        for i in 0..15 {
-            let b = (from + self.bit_len - 15 + i) % self.bit_len;
+        // Prime with the 15 cells that precede bit 0: the tail of the
+        // revolution, so a window straddling the wrap is compared too.
+        for back in (1..=15).rev() {
+            let b = (self.bit_len - back % self.bit_len) % self.bit_len;
             window = (window << 1) | u16::from(self.bit(b));
         }
-        for step in 0..self.bit_len {
-            let b = (from + step) % self.bit_len;
-            window = (window << 1) | u16::from(self.bit(b));
+        for end in 0..self.bit_len {
+            window = (window << 1) | u16::from(self.bit(end));
             if window == sync {
-                return Some(step + 1);
+                ends.push(end as u32);
             }
         }
-        None
+        SyncIndex { sync, ends }
     }
 }
 
@@ -3416,8 +3550,12 @@ fn apply_extended_adf_write(
             revolutions,
             legacy_sync,
             bitcell_ns,
+            density,
         } => {
+            // A track the guest wrote over carries the drive's own uniform
+            // cell rate, not the mastered profile.
             *bitcell_ns = None;
+            *density = None;
             if legacy_extended_adf || legacy_sync.is_some() {
                 apply_legacy_raw_mfm_write(
                     words,
@@ -3837,21 +3975,6 @@ struct DiskDirectWrite {
     write_start_bit: u8,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-struct DiskBytePos {
-    drive: usize,
-    track: usize,
-    word: usize,
-    byte_phase: u8,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-struct DiskWordPos {
-    drive: usize,
-    track: usize,
-    word: usize,
-}
-
 // Bit-granular accessor over a packed MFM word slice. The live read path uses
 // `TrackRev::word_at`/`byte_at` directly; this remains for the bit-stream and
 // DPLL-FIFO unit tests.
@@ -4018,6 +4141,24 @@ impl PaulaDiskReadDpllFifo {
     /// comparator's level, where `take_sync_irq` reports only its edge.
     fn sync_matched(&self) -> bool {
         self.word_equal
+    }
+
+    /// Re-evaluate the comparator against a freshly written DSKSYNC: it is
+    /// combinational on the shift register, so the level follows the new
+    /// value at once. The edge that raises DSKSYN belongs to the cell that
+    /// completes a match, so it is left to `sample_bit`.
+    fn set_sync(&mut self, sync: u16) {
+        self.word_equal = self.shift_word == sync;
+    }
+
+    /// The byte the shifter last completed, if one has completed since the
+    /// previous call: DSKBYT, cleared by the DSKBYTR read that consumes it.
+    fn take_dskbyt(&mut self) -> Option<u8> {
+        if !self.dskbyt {
+            return None;
+        }
+        self.dskbyt = false;
+        Some(self.dskbytr_byte)
     }
 
     #[cfg(test)]

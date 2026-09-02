@@ -13,6 +13,7 @@ pub mod menu;
 #[cfg(feature = "frontend")]
 pub mod nav;
 pub mod present_common;
+pub mod resource_preview;
 #[cfg(feature = "frontend")]
 pub mod ui;
 #[cfg(feature = "frontend")]
@@ -121,8 +122,10 @@ pub fn set_pixel_aspect(aspect: crate::config::PixelAspect) {
 /// How the presentation canvas is scaled into the window
 /// (`[display] scaling`, runtime-toggled by the menu's Scaling item).
 /// Main thread only, like [`SQUARE_PIXEL_ASPECT`]; the atomic only
-/// satisfies `static` safety. Independent of the pixel aspect: that
-/// decides what the canvas is, this decides how it reaches the window.
+/// satisfies `static` safety. The pixel aspect decides the picture's
+/// shape and this decides how it reaches the window -- but integer
+/// scaling draws from the unresampled canvas, so it has a say in the
+/// canvas height too ([`square_canvas`]).
 static INTEGER_SCALING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn set_display_scaling(scaling: crate::config::DisplayScaling) {
@@ -138,6 +141,36 @@ pub fn display_scaling() -> crate::config::DisplayScaling {
     } else {
         crate::config::DisplayScaling::Smooth
     }
+}
+
+/// Whether a monitor bezel is drawn around the picture (`[display] bezel`,
+/// runtime-toggled by the menu and its shortcut). A mirror of the window's
+/// own style field for the canvas rule below: a bezel's fixed 4:3 opening
+/// keeps the tv canvas under integer scaling, so the canvas height has to
+/// know. Main thread only, like [`SQUARE_PIXEL_ASPECT`]; the atomic only
+/// satisfies `static` safety.
+static BEZEL_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_bezel_shown(shown: bool) {
+    BEZEL_SHOWN.store(shown, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn bezel_shown() -> bool {
+    BEZEL_SHOWN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether the window presentation crops to the display window the
+/// hardware programs (`[display] autocrop`, runtime-toggled by the
+/// menu's Autocrop item). Main thread only, like
+/// [`SQUARE_PIXEL_ASPECT`]; the atomic only satisfies `static` safety.
+static AUTOCROP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_autocrop(autocrop: bool) {
+    AUTOCROP.store(autocrop, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn autocrop() -> bool {
+    AUTOCROP.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Whether the status bar is hidden, so the emulated display scales to fill the
@@ -348,14 +381,61 @@ pub fn pixel_aspect() -> crate::config::PixelAspect {
     }
 }
 
-/// Presentation height for the active pixel aspect. The pure
-/// [`present_height_for`] variant is what unit tests target, so they
-/// never have to mutate the process-global mode.
+/// Height of the window's presentation canvas: the display region of the
+/// backing texture, which the window, the tool windows and every overlay
+/// size themselves from. The pure [`present_height_for`] variant is what
+/// unit tests target, so they never have to mutate the process-global
+/// modes.
 pub fn present_height() -> usize {
-    present_height_for(pixel_aspect())
+    present_height_for(pixel_aspect(), display_scaling(), bezel_shown())
 }
 
-pub fn present_height_for(aspect: crate::config::PixelAspect) -> usize {
+/// Whether the window canvas keeps one row per woven scanline
+/// (`PRESENT_HEIGHT_SQUARE`) rather than the 4:3 resample
+/// (`PRESENT_HEIGHT_TV`). The square-pixel aspect asks for that outright.
+/// Integer scaling asks for it too, whatever the aspect: a whole-number
+/// draw is only pixel-exact from an unresampled canvas, and under the tv
+/// aspect the scaler pass then draws the square canvas with a separate
+/// whole-number factor per axis to put the 4:3 shape back
+/// (`window/present.rs`, `per_axis_fit`). A monitor bezel is the exception:
+/// its fixed opening frames the whole glass and shows the aperture
+/// resampled onto it, so it keeps the tv canvas for the tv aspect.
+pub fn square_canvas() -> bool {
+    square_canvas_for(pixel_aspect(), display_scaling(), bezel_shown())
+}
+
+pub fn square_canvas_for(
+    aspect: crate::config::PixelAspect,
+    scaling: crate::config::DisplayScaling,
+    bezel_shown: bool,
+) -> bool {
+    aspect == crate::config::PixelAspect::Square
+        || (scaling == crate::config::DisplayScaling::Integer && !bezel_shown)
+}
+
+pub fn present_height_for(
+    aspect: crate::config::PixelAspect,
+    scaling: crate::config::DisplayScaling,
+    bezel_shown: bool,
+) -> usize {
+    if square_canvas_for(aspect, scaling, bezel_shown) {
+        PRESENT_HEIGHT_SQUARE
+    } else {
+        PRESENT_HEIGHT_TV
+    }
+}
+
+/// Height of the capture canvas: the pixel aspect's own presentation of
+/// the field, which screenshots, frame dumps and video recordings save.
+/// Captures are presentation-independent -- the scaling mode and the
+/// bezel decide how the window draws, never what a saved picture is -- so
+/// this follows the aspect alone, where [`present_height`] follows the
+/// window's canvas rule.
+pub fn capture_height() -> usize {
+    capture_height_for(pixel_aspect())
+}
+
+pub fn capture_height_for(aspect: crate::config::PixelAspect) -> usize {
     match aspect {
         crate::config::PixelAspect::Tv => PRESENT_HEIGHT_TV,
         crate::config::PixelAspect::Square => PRESENT_HEIGHT_SQUARE,
@@ -371,4 +451,37 @@ pub fn blend_rgba(a: u32, b: u32, frac: u32) -> u32 {
     let rb = ((a & 0x00FF_00FF) * inv + (b & 0x00FF_00FF) * frac) >> 8;
     let ag = (((a >> 8) & 0x00FF_00FF) * inv + ((b >> 8) & 0x00FF_00FF) * frac) >> 8;
     (rb & 0x00FF_00FF) | ((ag & 0x00FF_00FF) << 8)
+}
+
+#[cfg(test)]
+mod canvas_rule_tests {
+    use super::*;
+    use crate::config::{DisplayScaling, PixelAspect};
+
+    /// The canvas is square for the square aspect, and for integer
+    /// scaling under either aspect unless a bezel is drawn; captures
+    /// follow the aspect alone.
+    #[test]
+    fn integer_scaling_takes_the_square_canvas_unless_a_bezel_is_drawn() {
+        let tv = PixelAspect::Tv;
+        let square = PixelAspect::Square;
+        let (smooth, integer) = (DisplayScaling::Smooth, DisplayScaling::Integer);
+        assert_eq!(present_height_for(tv, smooth, false), PRESENT_HEIGHT_TV);
+        assert_eq!(
+            present_height_for(tv, integer, false),
+            PRESENT_HEIGHT_SQUARE
+        );
+        assert_eq!(present_height_for(tv, integer, true), PRESENT_HEIGHT_TV);
+        assert_eq!(present_height_for(tv, smooth, true), PRESENT_HEIGHT_TV);
+        for scaling in [smooth, integer] {
+            for bezel in [false, true] {
+                assert_eq!(
+                    present_height_for(square, scaling, bezel),
+                    PRESENT_HEIGHT_SQUARE
+                );
+            }
+        }
+        assert_eq!(capture_height_for(tv), PRESENT_HEIGHT_TV);
+        assert_eq!(capture_height_for(square), PRESENT_HEIGHT_SQUARE);
+    }
 }

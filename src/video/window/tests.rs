@@ -5,7 +5,6 @@
 //! and keep full access to the parent's private items via `super::`.
 
 use super::ui::{AnalyzerTab, Panel, UiControl};
-use super::ScalingMode;
 use super::{
     bar_layout, center_present_frame_for_visible_start, center_present_frame_horizontally,
     control_at, copperline_icon_image, copperline_logo_image, copy_present_frame,
@@ -4728,6 +4727,82 @@ fn a_rejected_serial_address_blocks_the_control_it_interrupted() {
 }
 
 #[test]
+fn auto_launch_runs_only_when_the_config_asks() {
+    use crate::video::launcher::LauncherField;
+
+    // Off (the default): opening the launcher and asking leaves it open,
+    // exactly as today.
+    let mut app = test_app();
+    app.powered_on = false;
+    app.open_launcher();
+    app.auto_launch_if_asked();
+    assert!(
+        matches!(&app.ui.panel, Some(Panel::Launcher(_))),
+        "an ordinary config must still show the configuration screen"
+    );
+    assert!(!app.powered_on);
+
+    // On: the ask runs the machine at once. The test machine's config
+    // fails validation the same way a bad Run click would, which is the
+    // observable half we can assert headlessly: the run was *attempted*
+    // (an error status appears) rather than the screen simply sitting.
+    let mut app = test_app();
+    app.powered_on = false;
+    app.open_launcher();
+    if let Some(Panel::Launcher(state)) = app.ui.panel.as_mut() {
+        state.setup.cycle(LauncherField::AutoLaunch, true);
+        state
+            .setup
+            .set_path(LauncherField::Df0Image, PathBuf::from("/no/such/disk.adf"));
+    }
+    app.auto_launch_if_asked();
+    if let Some(Panel::Launcher(state)) = &app.ui.panel {
+        assert!(
+            state.status.as_ref().is_some(),
+            "auto_launch should have attempted the run"
+        );
+    }
+    assert!(
+        !app.run_honors_power_on,
+        "the one-shot intent must not leak into a later manual Run"
+    );
+}
+
+#[test]
+fn an_automatic_run_keeps_the_configured_power_state() {
+    // Exercised at run_machine, below the staging that needs a live audio
+    // device (which CI has none of): the launcher's two automatic paths
+    // set `run_honors_power_on` around launcher_run, and run_machine is
+    // where the flag lands.
+    let mut raw = crate::config::RawConfig::default();
+    raw.emulation.power_on = Some(false);
+    raw.emulation.warp_boot = Some(true);
+    let cfg = crate::config::Config::try_from(raw.clone()).expect("config");
+
+    // An automatic run keeps power_on = false: the machine sits at the
+    // test screen -- the state a command-line start of the same file gives
+    // -- with the warp-boot gate armed for the power button, not engaged.
+    let mut app = test_app();
+    let emu = test_emulator(Box::new(NullSink), crate::config::CpuModel::M68000, &[]);
+    app.run_honors_power_on = true;
+    app.run_machine(emu, &cfg, raw.clone());
+    assert!(!app.powered_on, "power_on = false was overridden");
+    let gate = app.warp_boot.as_ref().expect("warp-boot gate constructed");
+    assert!(
+        !gate.engaged,
+        "the gate belongs to the first power-on, not to a powered-off machine"
+    );
+
+    // The manual Run button keeps its meaning: pressing it IS the power-on,
+    // and the gate engages with the machine it starts.
+    let mut app = test_app();
+    let emu = test_emulator(Box::new(NullSink), crate::config::CpuModel::M68000, &[]);
+    app.run_machine(emu, &cfg, raw);
+    assert!(app.powered_on, "the Run button powers on regardless");
+    assert!(app.warp_boot.as_ref().is_some_and(|g| g.engaged));
+}
+
+#[test]
 fn launcher_run_keeps_panel_open_on_error() {
     use crate::video::launcher::LauncherField;
 
@@ -8434,49 +8509,699 @@ fn cursor_mapping_rejects_pillarbox_clicks() {
 }
 
 /// `[display] scaling = "integer"` fits in whole *canvas* pixels against
-/// the physical surface, and the supersample factor follows that fit: the
-/// canvas is rendered at the fitted factor and PixelPerfect draws it 1:1.
-/// Deriving the factor from the fit rather than the host DPI is what makes
-/// odd physical multiples reachable -- a DPI-supersampled texture can only
-/// be drawn at whole multiples of itself, which on a 2x display skips 1x
-/// and 3x physical pixels per canvas pixel. Only a surface smaller than the
-/// canvas (no whole multiple at all; PixelPerfect would crop) falls back to
-/// the smooth DPI-supersampled Fill plan.
+/// the physical surface: the multiple is the fit itself, uncapped, and
+/// the supersample factor follows it up to `MAX_INTEGER_TEXTURE_SCALE`.
+/// Deriving the multiple from the fit rather than the host DPI is what
+/// makes odd physical multiples reachable -- a DPI-supersampled texture
+/// can only be drawn at whole multiples of itself, which on a 2x display
+/// skips 1x and 3x physical pixels per canvas pixel. Only a surface
+/// smaller than the canvas (no whole multiple at all; 1x would crop)
+/// falls back to the smooth DPI-supersampled plan.
 #[test]
 fn integer_scaling_fits_in_whole_canvas_pixels() {
-    // ScalingMode is not PartialEq, so extract the planned factor and
-    // whether the integer mode was chosen rather than comparing values.
     let plan = |requested, dpi, surface| {
-        let (scale, mode) = plan_present_scaling_for(requested, dpi, surface, (716, 581));
-        (scale, matches!(mode, ScalingMode::PixelPerfect))
+        let plan = plan_present_scaling_for(requested, dpi, surface, (716, 581));
+        (plan.texture_scale, plan.multiple)
     };
 
     // A 2x-DPI laptop panel (3024x1964) holds three whole canvas pixels per
     // axis but not four: an odd multiple a 2x texture could never reach.
-    assert_eq!(plan(true, 2.0, (3024, 1964)), (3, true));
+    assert_eq!(plan(true, 2.0, (3024, 1964)), (3, Some(3)));
     // The canvas-sized window on the same panel: exactly 2x physical.
-    assert_eq!(plan(true, 2.0, (1432, 1162)), (2, true));
+    assert_eq!(plan(true, 2.0, (1432, 1162)), (2, Some(2)));
     // A window shrunk below the default still holds one physical pixel per
     // canvas pixel, so it stays integer (small and crisp) instead of
     // falling back to smooth.
-    assert_eq!(plan(true, 2.0, (1000, 840)), (1, true));
+    assert_eq!(plan(true, 2.0, (1000, 840)), (1, Some(1)));
     // The 150% fractional-DPI desktop's canvas-sized window (1.5x physical)
     // holds a whole 1x too -- under the old texture-multiple fit this was a
     // forced smooth fallback.
-    assert_eq!(plan(true, 1.5, (1074, 872)), (1, true));
+    assert_eq!(plan(true, 1.5, (1074, 872)), (1, Some(1)));
     // The exact-fit boundary, and one pixel short in either dimension:
-    // below the canvas there is no whole multiple, and PixelPerfect would
-    // crop, so the plan is the smooth one (DPI-supersampled Fill).
-    assert_eq!(plan(true, 2.0, (716, 581)), (1, true));
-    assert_eq!(plan(true, 2.0, (715, 581)), (2, false));
-    assert_eq!(plan(true, 2.0, (716, 580)), (2, false));
-    // A huge surface caps the supersample; PixelPerfect's own whole
-    // multiples of the capped texture carry on above it.
-    assert_eq!(plan(true, 2.0, (8000, 5000)), (4, true));
+    // below the canvas there is no whole multiple, and 1x would crop, so
+    // the plan is the smooth one (DPI-supersampled sharp bilinear).
+    assert_eq!(plan(true, 2.0, (716, 581)), (1, Some(1)));
+    assert_eq!(plan(true, 2.0, (715, 581)), (2, None));
+    assert_eq!(plan(true, 2.0, (716, 580)), (2, None));
+    // A huge surface caps the supersample factor but not the multiple:
+    // the scaler pass draws the full fit from the capped texture (a 5K
+    // display fits 7x across but only 5x down with this canvas).
+    assert_eq!(plan(true, 2.0, (8000, 5000)), (4, Some(8)));
+    assert_eq!(plan(true, 2.0, (5120, 2880)), (4, Some(4)));
+    assert_eq!(plan(true, 2.0, (6016, 3384)), (4, Some(5)));
 
-    // Smooth never leaves Fill or the DPI factor, whatever the room.
-    assert_eq!(plan(false, 2.0, (3024, 1964)), (2, false));
-    assert_eq!(plan(false, 1.0, (3024, 1964)), (1, false));
+    // Smooth never leaves the DPI factor or gains a multiple, whatever
+    // the room.
+    assert_eq!(plan(false, 2.0, (3024, 1964)), (2, None));
+    assert_eq!(plan(false, 1.0, (3024, 1964)), (1, None));
+}
+
+/// The content envelope follows a standard field through the exact
+/// shifts the pixels took: vertical centring by
+/// `presentation_source_y_offset`, horizontal recentring by `h_shift`,
+/// then each field row onto its two woven rows.
+#[test]
+fn standard_placement_applies_the_post_process_shifts_and_weaves() {
+    use crate::video::bitplane::ContentRect;
+    use crate::video::present_common::FieldPlacement;
+    let rect = ContentRect {
+        x0: 100,
+        x1: 500,
+        y0: 30,
+        y1: 230,
+    };
+    let y_off = super::presentation_source_y_offset(0x2C);
+
+    let woven = FieldPlacement::standard(crate::video::FB_HEIGHT, 0x2C, 10)
+        .content_rect(rect, 570)
+        .expect("standard frame maps");
+    assert_eq!((woven.x0, woven.x1), (90, 490));
+    assert_eq!((woven.y0, woven.y1), (2 * (30 + y_off), 2 * (230 + y_off)));
+
+    // The woven rows clamp to the frame actually presented, and a rect
+    // shifted entirely off the canvas collapses to None rather than an
+    // inverted interval.
+    let low = ContentRect {
+        x0: 0,
+        x1: 4,
+        y0: 280,
+        y1: 285,
+    };
+    assert_eq!(
+        FieldPlacement::standard(crate::video::FB_HEIGHT, 0x2C, 8).content_rect(low, 570),
+        None
+    );
+}
+
+/// The canvas-space inversion agrees with the copy it mirrors: every
+/// canvas row and column the rect includes maps into the content
+/// interval under the forward TV-aperture mapping, and the rows just
+/// outside it do not.
+#[test]
+fn canvas_content_rect_inverts_the_tv_aperture_mapping() {
+    use crate::video::bitplane::ContentRect;
+    let aperture_rows = TV_PAL_PRESENT_HEIGHT;
+    let canvas_rows = crate::video::PRESENT_HEIGHT_TV;
+    let content = ContentRect {
+        x0: 120,
+        x1: 620,
+        y0: 100,
+        y1: 400,
+    };
+    let (x, y, w, h) = super::canvas_content_rect(
+        content,
+        570,
+        FB_WIDTH,
+        Overscan::Tv,
+        crate::config::TvCentre::default(),
+        Some(aperture_rows),
+        canvas_rows,
+    )
+    .expect("content inside the aperture maps");
+    assert!(w > 0 && h > 0);
+    // The rect stays on the canvas.
+    assert!(x + w <= FB_WIDTH && y + h <= canvas_rows);
+    // Forward-map the returned row range: rows inside land in the
+    // content interval, the rows just outside do not.
+    let src_of = |canvas_y: usize| {
+        super::tv_aperture_source_row(canvas_y, canvas_rows, 1, aperture_rows)
+            .map(|crop_y| TV_PRESENT_SOURCE_Y + crop_y)
+    };
+    for canvas_y in y..y + h {
+        let src = src_of(canvas_y).expect("aperture row");
+        assert!(
+            (content.y0..content.y1).contains(&src),
+            "canvas row {canvas_y} maps to {src}, outside content"
+        );
+    }
+    if y > 0 {
+        let src = src_of(y - 1).expect("aperture row");
+        assert!(!(content.y0..content.y1).contains(&src));
+    }
+    if let Some(src) = src_of(y + h) {
+        assert!(!(content.y0..content.y1).contains(&src));
+    }
+
+    // The plain (full-overscan) branch is a straight row map: content
+    // rows come back as themselves when the canvas matches the source.
+    let (px, py, pw, ph) = super::canvas_content_rect(
+        content,
+        570,
+        FB_WIDTH,
+        Overscan::Full,
+        crate::config::TvCentre::default(),
+        None,
+        570,
+    )
+    .expect("plain branch maps");
+    assert_eq!((px, py, pw, ph), (120, 100, 500, 300));
+
+    // Content entirely outside the aperture (deep top overscan) crops to
+    // nothing rather than a degenerate rect.
+    let off_glass = ContentRect {
+        x0: 120,
+        x1: 620,
+        y0: 0,
+        y1: TV_PRESENT_SOURCE_Y / 2,
+    };
+    assert_eq!(
+        super::canvas_content_rect(
+            off_glass,
+            570,
+            FB_WIDTH,
+            Overscan::Tv,
+            crate::config::TvCentre::default(),
+            Some(aperture_rows),
+            canvas_rows,
+        ),
+        None
+    );
+}
+
+/// A programmable scan's glass presents through the plain copy: its rows
+/// rescale onto the canvas height, and a 35 ns canvas folds two buffer
+/// columns onto each canvas column, so the envelope's columns come back
+/// halved and its rows follow the row map -- content at the glass edges
+/// reaches the canvas edges.
+#[test]
+fn canvas_content_rect_folds_a_programmable_glass_onto_the_canvas() {
+    use crate::video::bitplane::ContentRect;
+    let glass_rows = 552;
+    let canvas_rows = crate::video::PRESENT_HEIGHT_SQUARE;
+    let content = ContentRect {
+        x0: 200,
+        x1: 1000,
+        y0: 40,
+        y1: 500,
+    };
+    let (x, y, w, h) = super::canvas_content_rect(
+        content,
+        glass_rows,
+        2 * FB_WIDTH,
+        Overscan::Tv,
+        crate::config::TvCentre::default(),
+        None,
+        canvas_rows,
+    )
+    .expect("glass content maps");
+    assert_eq!((x, w), (100, 400));
+    // Forward-map the returned row range like the plain copy does.
+    for canvas_y in y..y + h {
+        let src = crate::screenshot::scaled_source_row(canvas_y, glass_rows, canvas_rows);
+        assert!((content.y0..content.y1).contains(&src), "row {canvas_y}");
+    }
+    assert!(
+        !(content.y0..content.y1).contains(&crate::screenshot::scaled_source_row(
+            y - 1,
+            glass_rows,
+            canvas_rows
+        ))
+    );
+    assert!(
+        !(content.y0..content.y1).contains(&crate::screenshot::scaled_source_row(
+            y + h,
+            glass_rows,
+            canvas_rows
+        ))
+    );
+
+    // The whole glass is the whole canvas.
+    let whole = ContentRect {
+        x0: 0,
+        x1: 2 * FB_WIDTH,
+        y0: 0,
+        y1: glass_rows,
+    };
+    assert_eq!(
+        super::canvas_content_rect(
+            whole,
+            glass_rows,
+            2 * FB_WIDTH,
+            Overscan::Tv,
+            crate::config::TvCentre::default(),
+            None,
+            canvas_rows,
+        ),
+        Some((0, 0, FB_WIDTH, canvas_rows))
+    );
+}
+
+/// Autocrop presents a programmable (multisync) scan's content the way
+/// it presents a standard one's: the display source is the content
+/// rect on the canvas, at the uniform pixel shape (a programmable
+/// scan's rows are not woven pairs for the per-axis fit to step by
+/// half a row), and the same suspensions -- a bezel, RTG scanout --
+/// still apply.
+#[test]
+fn display_canvas_src_crops_a_programmable_scan() {
+    use crate::video::bitplane::ContentRect;
+    let mut app = test_app();
+    app.present_programmable = true;
+    app.present_rows = 552;
+    app.present_width = FB_WIDTH;
+    app.present_tv_aperture_rows = None;
+    app.present_content_rect = Some(ContentRect {
+        x0: 40,
+        x1: 680,
+        y0: 20,
+        y1: 532,
+    });
+    let expected = super::canvas_content_rect(
+        app.present_content_rect.unwrap(),
+        552,
+        FB_WIDTH,
+        app.overscan,
+        app.tv_centre,
+        None,
+        present_height(),
+    )
+    .unwrap();
+
+    let src = app
+        .display_canvas_src_for(false, true)
+        .expect("autocrop crops the programmable scan");
+    assert_eq!(src.rect, expected);
+    assert_eq!(src.par, (1, 1));
+
+    // Per-axis integer scaling keeps the uniform multiple on a
+    // programmable scan, cropped or not.
+    let per_axis = app.display_canvas_src_for(true, true).unwrap();
+    assert_eq!(per_axis, src);
+    let uncropped = app.display_canvas_src_for(true, false).unwrap();
+    assert_eq!(uncropped.rect, (0, 0, FB_WIDTH, present_height()));
+    assert_eq!(uncropped.par, (1, 1));
+
+    // Both modes off: the classic layout.
+    assert_eq!(app.display_canvas_src_for(false, false), None);
+    // A standard scan under per-axis scaling asks for the glass shape.
+    app.present_programmable = false;
+    app.present_rows = crate::video::deinterlace::OUT_HEIGHT;
+    app.present_tv_aperture_rows = Some(TV_PAL_PRESENT_HEIGHT);
+    let standard = app.display_canvas_src_for(true, false).unwrap();
+    assert_ne!(standard.par, (1, 1));
+}
+
+/// The autocrop latch grows immediately (content must never be cut),
+/// holds through border-only frames, and shrinks only after the smaller
+/// envelope has held steady for its stability window.
+#[test]
+fn autocrop_latch_grows_fast_and_shrinks_only_when_stable() {
+    use crate::video::bitplane::ContentRect;
+    let rect = |y0: usize, y1: usize| ContentRect {
+        x0: 100,
+        x1: 600,
+        y0,
+        y1,
+    };
+    let mut latch = super::AutocropLatch::default();
+
+    // First content adopts outright.
+    assert_eq!(latch.resolve(Some(rect(100, 400))), Some(rect(100, 400)));
+    // Growth is immediate, to the union.
+    assert_eq!(latch.resolve(Some(rect(50, 400))), Some(rect(50, 400)));
+    // A border-only frame holds the crop.
+    assert_eq!(latch.resolve(None), Some(rect(50, 400)));
+    // A smaller envelope has to persist before the crop tightens...
+    for _ in 0..super::AutocropLatch::SHRINK_STABLE_FRAMES - 1 {
+        assert_eq!(latch.resolve(Some(rect(100, 350))), Some(rect(50, 400)));
+    }
+    // ...and adopts on the Nth consecutive frame.
+    assert_eq!(latch.resolve(Some(rect(100, 350))), Some(rect(100, 350)));
+
+    // A shrink candidate interrupted by a different frame starts over.
+    let mut latch = super::AutocropLatch::default();
+    latch.resolve(Some(rect(50, 400)));
+    for _ in 0..super::AutocropLatch::SHRINK_STABLE_FRAMES - 1 {
+        latch.resolve(Some(rect(100, 350)));
+    }
+    assert_eq!(latch.resolve(Some(rect(50, 400))), Some(rect(50, 400)));
+    assert_eq!(latch.resolve(Some(rect(100, 350))), Some(rect(50, 400)));
+
+    // Reset forgets everything, like a power cycle.
+    latch.reset();
+    assert_eq!(latch.resolve(None), None);
+}
+
+/// The sub-rect layout splits the chrome band off at the width-fit
+/// scale, and integer scaling re-fits its whole multiple against the
+/// rect rather than the full canvas -- the display using fewer lines is
+/// what earns the larger multiple. A square shape (a canvas that already
+/// has the picture's shape) takes the uniform multiple.
+#[test]
+fn display_src_layout_refits_the_multiple_against_the_rect() {
+    use super::scaler::ScaleFilter::{Nearest, SharpBilinear};
+    let crop = |rect| super::DisplaySrc { rect, par: (1, 1) };
+    let game = (38, 69, 640, 400);
+    // A 200-line lo-res game (400 woven rows, 640 canvas px wide) on a
+    // 2000x1200 surface, above a pre-sized 100-row chrome band (the
+    // caller sizes the band at the classic letterbox scale).
+    let chrome = (30u32, 1100u32, 1940u32, 100u32);
+    let layout = super::display_src_layout((2000, 1200), true, crop(game), Some(chrome));
+    // The band passes through untouched, and the crop fits 2x whole
+    // (min(2000/640, 1100/400) = 2), centred in the region above it.
+    assert_eq!(layout.chrome_dst, Some(chrome));
+    assert_eq!(
+        layout.display_dst,
+        ((2000 - 1280) / 2, (1100 - 800) / 2, 1280, 800)
+    );
+    assert_eq!(layout.filter, Nearest);
+    assert_eq!(layout.src_canvas, game);
+    // Two pixels per column, four per two-row field line.
+    assert_eq!(layout.factors, Some((2, 4)));
+
+    // The classic full canvas only fits 1x on the same surface: the crop
+    // doubled the picture.
+    assert_eq!(
+        super::scaler::clip_rect_for((2000, 1200), (716, 581), Some(1)).2,
+        716
+    );
+
+    // Without a whole multiple the crop falls back to its smooth fit.
+    let layout = super::display_src_layout((600, 500), true, crop(game), None);
+    assert_eq!(layout.filter, SharpBilinear);
+    assert_eq!(layout.factors, None);
+    assert!(layout.display_dst.2 <= 600);
+
+    // A surface too small for the whole 716-wide canvas still holds a
+    // whole multiple of a 640-wide crop: the fit is the crop's own, not
+    // an inherited fallback from the classic full-canvas plan.
+    let layout = super::display_src_layout((700, 500), true, crop(game), None);
+    assert_eq!(layout.filter, Nearest);
+    assert_eq!((layout.display_dst.2, layout.display_dst.3), (640, 400));
+
+    // Smooth scaling keeps the sharp-bilinear fit of the crop.
+    let layout = super::display_src_layout((2000, 1200), false, crop(game), None);
+    assert_eq!(layout.chrome_dst, None);
+    assert_eq!(layout.filter, SharpBilinear);
+    assert_eq!(layout.factors, None);
+    // Aspect preserved: 640x400 into 2000x1200 is height-limited.
+    assert_eq!(layout.display_dst.3, 1200);
+}
+
+/// The glass ratio is the tv aspect's own model read back: the tv canvas
+/// widens the captured aperture's columns onto the glass width and its
+/// rows onto the glass height, and the ratio of the two is the shape of
+/// a square-canvas pixel on that glass -- PAL a shade wider than tall,
+/// NTSC the 5:6 of a 200-line display on a 4:3 screen. Full overscan
+/// puts the whole woven field on the glass, both standards alike.
+#[test]
+fn glass_par_is_the_tv_canvas_model_read_back() {
+    use crate::video::deinterlace::OUT_HEIGHT;
+    use crate::video::PRESENT_HEIGHT_TV;
+    let ratio = |(w, h): (u32, u32)| f64::from(w) / f64::from(h);
+    let pal = super::glass_par(Overscan::Tv, Some(TV_PAL_PRESENT_HEIGHT), OUT_HEIGHT);
+    let ntsc = super::glass_par(Overscan::Tv, Some(TV_NTSC_PRESENT_HEIGHT), OUT_HEIGHT);
+    assert_eq!(
+        pal,
+        (
+            (FB_WIDTH * TV_PAL_PRESENT_HEIGHT) as u32,
+            (PRESENT_HEIGHT_TV * TV_CAPTURED_WIDTH) as u32
+        )
+    );
+    assert!(
+        (ratio(pal) - 1.0778).abs() < 5e-4,
+        "PAL glass shape {}",
+        ratio(pal)
+    );
+    assert!(
+        (ratio(ntsc) - 0.8543).abs() < 5e-4,
+        "NTSC glass shape {}",
+        ratio(ntsc)
+    );
+    let field = (OUT_HEIGHT as u32, PRESENT_HEIGHT_TV as u32);
+    for rows in [
+        Some(TV_PAL_PRESENT_HEIGHT),
+        Some(TV_NTSC_PRESENT_HEIGHT),
+        None,
+    ] {
+        assert_eq!(super::glass_par(Overscan::Full, rows, OUT_HEIGHT), field);
+    }
+    // The browser reads the same shapes off its presentation buffer
+    // (`buffer_glass_par`): the captured aperture at its woven rows, or the
+    // whole field, shown in a 4:3 element.
+    let same_shape = |a: (u32, u32), b: (u32, u32)| {
+        u64::from(a.0) * u64::from(b.1) == u64::from(b.0) * u64::from(a.1)
+    };
+    assert!(same_shape(
+        pal,
+        super::buffer_glass_par(TV_CAPTURED_WIDTH, TV_PAL_PRESENT_HEIGHT)
+    ));
+    assert!(same_shape(
+        ntsc,
+        super::buffer_glass_par(TV_CAPTURED_WIDTH, TV_NTSC_PRESENT_HEIGHT)
+    ));
+    assert!(same_shape(
+        field,
+        super::buffer_glass_par(FB_WIDTH, OUT_HEIGHT)
+    ));
+    assert_eq!(super::glass_par(Overscan::Tv, None, OUT_HEIGHT), field);
+}
+
+/// The TV aperture's rect on the square canvas is the aperture between
+/// its side pads and bezel bands, and its first row is the aperture's
+/// first -- an even woven row, the start of a field-line pair -- with a
+/// whole number of lines below it. Every display rect starts on a pair
+/// like this: it is what lets the per-axis draw give a field line an odd
+/// number of surface rows and still land each non-interlaced line, whose
+/// two woven rows are identical, as one exact block (`per_axis_fit`).
+#[test]
+fn display_rects_start_on_field_lines() {
+    use crate::video::PRESENT_HEIGHT_SQUARE;
+    assert_eq!(TV_PRESENT_SOURCE_Y % 2, 0);
+    for rows in [TV_PAL_PRESENT_HEIGHT, TV_NTSC_PRESENT_HEIGHT] {
+        let rect = super::aperture_canvas_rect(rows);
+        assert_eq!(
+            rect,
+            (
+                TV_LIVE_PAD_X,
+                (PRESENT_HEIGHT_SQUARE - rows) / 2,
+                TV_CAPTURED_WIDTH,
+                rows
+            )
+        );
+        assert_eq!(
+            tv_aperture_source_row(rect.1, PRESENT_HEIGHT_SQUARE, 1, rows),
+            Some(0)
+        );
+        assert_eq!(rect.3 % 2, 0);
+    }
+    // A content rect on the square canvas keeps its woven bounds, which
+    // the renderer states in whole field lines.
+    use crate::config::TvCentre;
+    let content = crate::video::bitplane::ContentRect {
+        x0: 52,
+        x1: 692,
+        y0: 2 * 20,
+        y1: 2 * 220,
+    };
+    let rect = super::canvas_content_rect(
+        content,
+        crate::video::deinterlace::OUT_HEIGHT,
+        FB_WIDTH,
+        Overscan::Tv,
+        TvCentre::default(),
+        Some(TV_NTSC_PRESENT_HEIGHT),
+        PRESENT_HEIGHT_SQUARE,
+    )
+    .unwrap();
+    let pad = (PRESENT_HEIGHT_SQUARE - TV_NTSC_PRESENT_HEIGHT) / 2;
+    assert_eq!(rect.1, pad + content.y0 - TV_PRESENT_SOURCE_Y);
+    assert_eq!(rect.3, content.y1 - content.y0);
+}
+
+/// The per-axis fit reaches the NTSC shapes amiga.vision's guide gives
+/// ordinary displays -- 4:5 at 1080p and 4K, 6:7 at 1440p, 5:6 at 5K --
+/// by counting pixels per field line rather than per woven row, prefers
+/// a taller fit within the tolerance to a marginally truer one, settles
+/// for the closest shape when nothing fits inside it, and gives up (to
+/// the smooth fit) only below one pixel per column and per line. PAL's
+/// glass shape is within the tolerance of square, so its fits are the
+/// uniform multiples until the zoom admits a taller near-miss (8:7 with
+/// seven rows per line) or a truer shape (16:15 with fifteen).
+#[test]
+fn per_axis_fit_reaches_the_ntsc_shapes_of_ordinary_displays() {
+    use crate::video::deinterlace::OUT_HEIGHT;
+    let ntsc = super::glass_par(Overscan::Tv, Some(TV_NTSC_PRESENT_HEIGHT), OUT_HEIGHT);
+    let pal = super::glass_par(Overscan::Tv, Some(TV_PAL_PRESENT_HEIGHT), OUT_HEIGHT);
+    let fit = super::per_axis_fit;
+    // A 200-line lo-res display's content rect: 640 columns, 400 woven
+    // rows (200 field lines).
+    let game = (640, 400);
+    // 1080p under a 44-row status bar: two pixels per column, five per
+    // line -- 4:5, 1280x1000.
+    assert_eq!(fit((1920, 1036), game, ntsc), Some((2, 5)));
+    // 1440p with the bar hidden: 6:7 at 1920x1400; under the bar the
+    // 1400 rows do not fit and 4:5 stands.
+    assert_eq!(fit((2560, 1440), game, ntsc), Some((3, 7)));
+    assert_eq!(fit((2560, 1396), game, ntsc), Some((2, 5)));
+    // 4K: 4:5 at 2560x2000.
+    assert_eq!(fit((3840, 2072), game, ntsc), Some((4, 10)));
+    // 5K: thirteen rows per line offers 12:13 inside the tolerance, and
+    // being taller it takes 3840x2600 over the truer 5:6 at 2400 rows;
+    // with the bar hidden the fourteenth row admits 6:7, the truest of
+    // all, at 3840x2800.
+    assert_eq!(fit((5120, 2792), game, ntsc), Some((6, 13)));
+    assert_eq!(fit((5120, 2880), game, ntsc), Some((6, 14)));
+    // Taller beats truer inside the tolerance: room for 16 rows per line
+    // takes 7:8 at 4480x3200 over 5:6 at 2400 rows.
+    assert_eq!(fit((4480, 3200), game, ntsc), Some((7, 16)));
+    // Nothing inside the tolerance: the closest shape, 1:1 at 640x400,
+    // over the 2:3 that would stand taller.
+    assert_eq!(fit((800, 600), game, ntsc), Some((1, 2)));
+    // Below one pixel per column, or per line: no whole-number fit.
+    assert_eq!(fit((600, 300), game, ntsc), None);
+    assert_eq!(fit((700, 199), game, ntsc), None);
+
+    let aperture = (TV_CAPTURED_WIDTH, TV_PAL_PRESENT_HEIGHT);
+    assert_eq!(fit((1920, 1036), aperture, pal), Some((1, 2)));
+    assert_eq!(fit((2560, 1396), aperture, pal), Some((2, 4)));
+    // 4K under the bar: 8:7 at 2672x1890 stands taller than 1:1 at 3x;
+    // with the bar hidden, 1:1 at 4x fills the height.
+    assert_eq!(fit((3840, 2072), aperture, pal), Some((4, 7)));
+    assert_eq!(fit((3840, 2160), aperture, pal), Some((4, 8)));
+    // Fifteen rows per line: 16:15 is truer than 15:15 and takes it.
+    assert_eq!(
+        fit(
+            (
+                16 * TV_CAPTURED_WIDTH as u32,
+                15 * TV_PAL_PRESENT_HEIGHT as u32
+            ),
+            aperture,
+            pal
+        ),
+        Some((16, 30))
+    );
+}
+
+/// The fit evaluates only the two column counts astride the ideal at
+/// each height, and that loses nothing against trying every column: the
+/// shape is monotone in the count at a fixed height, so the closest count
+/// is one of the two, and the tolerance band holds one of them if it
+/// holds any. Checked against the exhaustive rule over a grid of small
+/// surfaces, rects and shapes; and a one-line autocrop rect on a large
+/// surface, which the exhaustive scan would spend millions of steps on
+/// per redraw, still answers.
+#[test]
+fn per_axis_fit_prunes_to_the_columns_astride_the_ideal() {
+    use crate::video::deinterlace::OUT_HEIGHT;
+    let exhaustive = |avail: (u32, u32), (w, h): (usize, usize), par: (u32, u32)| {
+        let (max_columns, max_lines) = (avail.0 as usize / w, 2 * avail.1 as usize / h);
+        let (pw, ph) = (u64::from(par.0), u64::from(par.1));
+        let dev = |c: usize, l: usize| {
+            let (a, b) = (2 * c as u64 * ph, l as u64 * pw);
+            (a.max(b), a.min(b))
+        };
+        let within = |(hi, lo): (u64, u64)| hi * 10 <= lo * 11;
+        let cmp = |a: (u64, u64), b: (u64, u64)| (a.0 * b.1).cmp(&(b.0 * a.1));
+        type Candidate = ((usize, usize), (u64, u64), bool);
+        let mut best: Option<Candidate> = None;
+        for l in 1..=max_lines {
+            for c in 1..=max_columns {
+                let d = dev(c, l);
+                let ok = within(d);
+                let better = match best {
+                    None => true,
+                    Some((_, _, bok)) if ok != bok => ok,
+                    Some((b, bd, true)) => l.cmp(&b.1).then(cmp(bd, d)).then(c.cmp(&b.0)).is_gt(),
+                    Some((b, bd, false)) => cmp(bd, d).then(l.cmp(&b.1)).then(c.cmp(&b.0)).is_gt(),
+                };
+                if better {
+                    best = Some(((c, l), d, ok));
+                }
+            }
+        }
+        best.map(|(f, _, _)| f)
+    };
+    let shapes = [
+        super::glass_par(Overscan::Tv, Some(TV_PAL_PRESENT_HEIGHT), OUT_HEIGHT),
+        super::glass_par(Overscan::Tv, Some(TV_NTSC_PRESENT_HEIGHT), OUT_HEIGHT),
+        super::glass_par(Overscan::Full, None, OUT_HEIGHT),
+        (1, 3),
+        (3, 1),
+    ];
+    for par in shapes {
+        for (w, h) in [(2, 2), (3, 2), (5, 4), (7, 6), (16, 10), (40, 30)] {
+            for avail in [
+                (1, 1),
+                (7, 5),
+                (40, 30),
+                (97, 61),
+                (160, 90),
+                (200, 200),
+                (300, 120),
+            ] {
+                assert_eq!(
+                    super::per_axis_fit(avail, (w, h), par),
+                    exhaustive(avail, (w, h), par),
+                    "par {par:?} rect {w}x{h} on {avail:?}"
+                );
+            }
+        }
+    }
+    // A one-line, two-column rect on a 4K surface: thousands of counts
+    // on each axis, answered without the cross product.
+    let ntsc = shapes[1];
+    assert!(super::per_axis_fit((3840, 2160), (2, 2), ntsc).is_some());
+}
+
+/// Per-axis integer scaling draws the rect at exactly its factors -- the
+/// columns times the horizontal one, the field lines times the vertical
+/// one -- centred and point-sampled, and the cursor mapping inverts that
+/// rect; the chrome band takes its rows off the fit; without a fit the
+/// rect falls back to the smooth fit at the glass shape.
+#[test]
+fn per_axis_layout_draws_the_rect_at_its_factors() {
+    use super::scaler::ScaleFilter::{Nearest, SharpBilinear};
+    use crate::video::deinterlace::OUT_HEIGHT;
+    let ntsc = super::glass_par(Overscan::Tv, Some(TV_NTSC_PRESENT_HEIGHT), OUT_HEIGHT);
+    let src = super::DisplaySrc {
+        rect: (38, 71, 640, 400),
+        par: ntsc,
+    };
+    let layout = super::display_src_layout((1920, 1036), true, src, None);
+    assert_eq!(layout.factors, Some((2, 5)));
+    assert_eq!(
+        layout.display_dst,
+        ((1920 - 1280) / 2, (1036 - 1000) / 2, 1280, 1000)
+    );
+    assert_eq!(layout.filter, Nearest);
+    assert_eq!(layout.src_canvas, src.rect);
+    let (dx, dy, dw, dh) = layout.display_dst;
+    let at = |x: u32, y: u32| {
+        layout.cursor_position(winit::dpi::PhysicalPosition::new(
+            f64::from(x),
+            f64::from(y),
+        ))
+    };
+    assert_eq!(at(dx, dy), Some((38, 71)));
+    assert_eq!(at(dx + dw - 1, dy + dh - 1), Some((38 + 639, 71 + 399)));
+    assert_eq!(at(dx + dw, dy), None);
+
+    // A 100-row chrome band leaves 936 rows: four per line (1:1, the
+    // closest shape with no 4:5 room) at 1280x800, centred above it.
+    let chrome = (0u32, 936u32, 1920u32, 100u32);
+    let layout = super::display_src_layout((1920, 1036), true, src, Some(chrome));
+    assert_eq!(layout.factors, Some((2, 4)));
+    assert_eq!(
+        layout.display_dst,
+        ((1920 - 1280) / 2, (936 - 800) / 2, 1280, 800)
+    );
+    assert_eq!(layout.chrome_dst, Some(chrome));
+
+    // Too small for one pixel per column: the smooth fit, at the glass
+    // shape rather than the rect's own.
+    let shaped = 640.0 * f64::from(ntsc.0) / f64::from(ntsc.1) / 400.0;
+    let layout = super::display_src_layout((600, 500), true, src, None);
+    assert_eq!(layout.factors, None);
+    assert_eq!(layout.filter, SharpBilinear);
+    let (_, _, w, h) = layout.display_dst;
+    assert!(w <= 600 && h <= 500);
+    assert!((f64::from(w) / f64::from(h) - shaped).abs() < 0.01);
+    // Smooth scaling draws the same shape: height-limited here.
+    let layout = super::display_src_layout((2000, 1200), false, src, None);
+    assert_eq!(layout.factors, None);
+    assert_eq!(layout.display_dst.3, 1200);
+    assert!((f64::from(layout.display_dst.2) / 1200.0 - shaped).abs() < 0.01);
 }
 
 /// A redraw that finds the host window at a size the surface was not
@@ -8592,6 +9317,12 @@ fn perf_overlay_lines_format_one_data_point_per_line() {
     );
 }
 
+/// The classic overlay anchor: the whole display region, what every
+/// call site passes while autocrop is not presenting.
+fn full_anchor() -> (usize, usize, usize, usize) {
+    (0, 0, crate::video::FB_WIDTH, super::present_height())
+}
+
 #[test]
 fn perf_overlay_draws_top_right_and_steps_below_the_record_badge() {
     let scale = 1;
@@ -8601,7 +9332,7 @@ fn perf_overlay_draws_top_right_and_steps_below_the_record_badge() {
     let probe_y = margin + 2;
 
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    super::draw_perf_overlay(&mut frame, &lines, scale, false, 0);
+    super::draw_perf_overlay(&mut frame, &lines, scale, false, 0, full_anchor());
     // The backing box reaches the top-right margin corner...
     assert_ne!(pixel(&frame, probe_x, probe_y, scale), [0, 0, 0, 0]);
     // ...and the top-left of the display is untouched.
@@ -8610,12 +9341,12 @@ fn perf_overlay_draws_top_right_and_steps_below_the_record_badge() {
     // With the record badge up the block starts below it, leaving the
     // badge's corner rows alone.
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    super::draw_perf_overlay(&mut frame, &lines, scale, true, 0);
+    super::draw_perf_overlay(&mut frame, &lines, scale, true, 0, full_anchor());
     assert_eq!(pixel(&frame, probe_x, probe_y, scale), [0, 0, 0, 0]);
 
     // Nothing to draw is a no-op, not a stray empty box.
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    super::draw_perf_overlay(&mut frame, &[], scale, false, 0);
+    super::draw_perf_overlay(&mut frame, &[], scale, false, 0, full_anchor());
     assert!(frame.iter().all(|&b| b == 0));
 
     // A monitor front and a bowed preset round that corner away, so the
@@ -8634,7 +9365,7 @@ fn perf_overlay_draws_top_right_and_steps_below_the_record_badge() {
         "the inset must clear the probe to be tested"
     );
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    super::draw_perf_overlay(&mut frame, &lines, scale, false, inset);
+    super::draw_perf_overlay(&mut frame, &lines, scale, false, inset, full_anchor());
     assert_eq!(pixel(&frame, probe_x, probe_y, scale), [0, 0, 0, 0]);
     assert_ne!(
         pixel(&frame, probe_x - inset, probe_y + inset, scale),
@@ -8683,7 +9414,7 @@ fn the_overlays_leave_the_corner_on_both_axes() {
     // The message is in the bottom-left corner: in from the left and up
     // from the foot of the picture, by the inset on each.
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    super::draw_osd(&mut frame, "corner", false, scale, inset);
+    super::draw_osd(&mut frame, "corner", false, scale, inset, full_anchor());
     let (x0, _, _, y1) = bounds(&frame);
     assert_eq!(x0, margin + inset, "the OSD did not come in from the left");
     assert_eq!(
@@ -8694,7 +9425,7 @@ fn the_overlays_leave_the_corner_on_both_axes() {
 
     // The badge and the readout share the top-right one.
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    super::draw_record_badge(&mut frame, scale, inset);
+    super::draw_record_badge(&mut frame, scale, inset, full_anchor());
     let (_, x1, y0, _) = bounds(&frame);
     assert_eq!(
         x1,
@@ -8704,7 +9435,14 @@ fn the_overlays_leave_the_corner_on_both_axes() {
     assert_eq!(y0, margin + inset, "the record badge did not drop");
 
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    super::draw_perf_overlay(&mut frame, &["50.0 fps".to_string()], scale, false, inset);
+    super::draw_perf_overlay(
+        &mut frame,
+        &["50.0 fps".to_string()],
+        scale,
+        false,
+        inset,
+        full_anchor(),
+    );
     let (_, x1, y0, _) = bounds(&frame);
     assert_eq!(
         x1,
@@ -8785,4 +9523,1122 @@ fn manual_warp_toggle_cancels_the_warp_boot_gate() {
     app.toggle_warp();
     assert!(app.warp_boot.is_none(), "the toggle cancels the gate");
     assert!(app.emu.paced(), "one press lands on paced, audible");
+}
+
+/// Programmatic warp (a control client or the guest) versus the manual
+/// toggle: only the former mutes live audio and records a hold.
+#[test]
+fn programmatic_warp_mutes_audio_but_manual_warp_does_not() {
+    use super::app_session::WarpSource;
+    let states = Rc::new(RefCell::new(Vec::new()));
+    let mut app = test_app_with_audio(Box::new(SuspensionSink {
+        states: Rc::clone(&states),
+    }));
+    app.powered_on = true;
+    app.emu.set_paced(true);
+    app.sync_live_audio_suspension();
+    assert_eq!(states.borrow().last(), Some(&false));
+
+    let outcome = app.set_warp(true, WarpSource::Guest);
+    assert!(outcome.changed);
+    assert!(outcome.note.is_none());
+    assert!(!app.emu.paced());
+    assert_eq!(app.warp_hold, Some(WarpSource::Guest));
+    assert_eq!(states.borrow().last(), Some(&true), "guest warp is silent");
+
+    // One press of the hotkey ends it: paced and audible again.
+    app.toggle_warp();
+    assert!(app.emu.paced());
+    assert_eq!(app.warp_hold, None);
+    assert_eq!(states.borrow().last(), Some(&false));
+
+    // The manual toggle warps without a hold and without muting.
+    app.toggle_warp();
+    assert!(!app.emu.paced());
+    assert_eq!(app.warp_hold, None);
+    assert_eq!(states.borrow().last(), Some(&false));
+    app.toggle_warp();
+    assert!(app.emu.paced());
+
+    // Warp off is a complete action whoever asks: a control client's
+    // request releases a guest hold too.
+    app.set_warp(true, WarpSource::Guest);
+    let outcome = app.set_warp(false, WarpSource::Control);
+    assert!(outcome.changed);
+    assert!(app.emu.paced());
+    assert_eq!(app.warp_hold, None);
+}
+
+#[test]
+fn power_off_releases_a_programmatic_hold() {
+    use super::app_session::WarpSource;
+    let states = Rc::new(RefCell::new(Vec::new()));
+    let mut app = test_app_with_audio(Box::new(SuspensionSink {
+        states: Rc::clone(&states),
+    }));
+    app.powered_on = true;
+    app.emu.set_paced(true);
+    app.set_warp(true, WarpSource::Control);
+    assert!(!app.emu.paced());
+    app.power_off();
+    assert!(app.emu.paced(), "the hold goes with the machine");
+    assert_eq!(app.warp_hold, None);
+}
+
+/// Control-protocol warp control through the windowed drain.
+#[cfg(feature = "control")]
+mod warp_control {
+    use super::super::app_session::WarpSource;
+    use super::{test_app, test_app_with_audio, SuspensionSink};
+    use crate::control::exec::parse_method;
+    use crate::control::windowed::{ControlHandle, CtlMsg};
+    use serde_json::{json, Value};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::mpsc::{Receiver, Sender};
+
+    type App = super::super::App;
+
+    fn attach(app: &mut App) -> (Sender<CtlMsg>, Receiver<String>) {
+        let (handle, cmd_tx, reply_rx) = ControlHandle::test_pair();
+        app.attach_control(handle, &crate::control::Config::new(":0".into()));
+        (cmd_tx, reply_rx)
+    }
+
+    fn call(
+        app: &mut App,
+        cmd_tx: &Sender<CtlMsg>,
+        reply_rx: &Receiver<String>,
+        id: u64,
+        method: &str,
+        params: Value,
+    ) -> Value {
+        let req = parse_method(method, &params).expect("request should parse");
+        cmd_tx.send(CtlMsg::Request { id: json!(id), req }).unwrap();
+        app.drain_control();
+        loop {
+            let line = reply_rx.try_recv().expect("a reply should be queued");
+            let msg: Value = serde_json::from_str(&line).expect("replies are JSON");
+            if msg["id"] == id {
+                return msg["result"].clone();
+            }
+        }
+    }
+
+    /// Every queued line whose method is `method`.
+    fn events(reply_rx: &Receiver<String>, method: &str) -> Vec<Value> {
+        let mut found = Vec::new();
+        while let Ok(line) = reply_rx.try_recv() {
+            let msg: Value = serde_json::from_str(&line).expect("lines are JSON");
+            if msg["method"] == method {
+                found.push(msg["params"].clone());
+            }
+        }
+        found
+    }
+
+    fn audio_app() -> (App, Rc<RefCell<Vec<bool>>>) {
+        let states = Rc::new(RefCell::new(Vec::new()));
+        let mut app = test_app_with_audio(Box::new(SuspensionSink {
+            states: Rc::clone(&states),
+        }));
+        app.powered_on = true;
+        // A windowed session is paced; the fixture's emulator starts
+        // unpaced like a headless run.
+        app.emu.set_paced(true);
+        app.sync_live_audio_suspension();
+        (app, states)
+    }
+
+    fn fit_uaelib(app: &mut App) {
+        let mut lib = crate::uaelib::UaeLib::new();
+        lib.mute_stdout();
+        app.emu.bus_mut().attach_uaelib(lib);
+    }
+
+    fn profile_options(dir: &std::path::Path) -> crate::profile::ProfileOptions {
+        crate::profile::ProfileOptions {
+            path: dir.to_path_buf(),
+            frames: 100,
+            slots: false,
+            screenshots: crate::profile::ScreenshotMode::None,
+            pc_samples: false,
+        }
+    }
+
+    #[test]
+    fn closing_the_analyzer_panel_keeps_a_profiling_session_armed() {
+        let mut app = test_app();
+        app.powered_on = true;
+        app.open_frame_analyzer();
+        assert!(app.emu.bus().frame_analyzer_enabled());
+        let dir =
+            std::env::temp_dir().join(format!("copperline-profile-panel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        app.emu.profile_start(profile_options(&dir)).unwrap();
+        app.close_tool_panel(super::super::ToolPanelKind::FrameAnalyzer);
+        assert!(
+            app.emu.bus().frame_analyzer_enabled(),
+            "the capture adopts the arming instead of losing its trace"
+        );
+        let status = app
+            .emu
+            .profile_stop(serde_json::Value::Null, serde_json::json!([]))
+            .unwrap();
+        assert_eq!(status["active"], false);
+        assert!(
+            !app.emu.bus().frame_analyzer_enabled(),
+            "stop disarms the adopted arming"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn profile_stop_rearms_an_open_analyzer_panel() {
+        let (mut app, _states) = audio_app();
+        app.open_frame_analyzer();
+        let dir =
+            std::env::temp_dir().join(format!("copperline-profile-rearm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (tx, rx) = attach(&mut app);
+        // profile.start via the drain would need a JSON path; drive the
+        // emulator directly and stop through the protocol, which is the
+        // ownership-sensitive step.
+        app.emu.profile_start(profile_options(&dir)).unwrap();
+        let reply = call(&mut app, &tx, &rx, 1, "profile.stop", json!({}));
+        assert_eq!(reply["active"], false);
+        assert!(
+            app.emu.bus().frame_analyzer_enabled(),
+            "an open pane keeps its trace after profile.stop"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn warp_set_unpaces_mutes_audio_and_names_the_hold() {
+        let (mut app, states) = audio_app();
+        let (tx, rx) = attach(&mut app);
+        let reply = call(&mut app, &tx, &rx, 1, "warp.set", json!({"on": true}));
+        assert_eq!(reply["on"], true);
+        assert_eq!(reply["paced"], false);
+        assert_eq!(reply["source"], "control");
+        assert_eq!(reply["headless"], false);
+        assert!(reply["note"].is_null());
+        assert!(!app.emu.paced());
+        assert_eq!(app.warp_hold, Some(WarpSource::Control));
+        assert_eq!(
+            states.borrow().last(),
+            Some(&true),
+            "control warp is silent"
+        );
+        let osd = app.active_osd_text().expect("an OSD names the requester").0;
+        assert!(osd.contains("control client"), "{osd}");
+        assert!(
+            events(&rx, "event.warp").is_empty(),
+            "the client's own warp.set gets a reply, not an event"
+        );
+
+        let reply = call(&mut app, &tx, &rx, 2, "warp.set", json!({"on": false}));
+        assert_eq!(reply["on"], false);
+        assert_eq!(reply["source"], "none");
+        assert!(app.emu.paced());
+        assert_eq!(app.warp_hold, None);
+        assert_eq!(states.borrow().last(), Some(&false));
+
+        let reply = call(&mut app, &tx, &rx, 3, "warp.get", json!({}));
+        assert_eq!(reply["on"], false);
+        assert_eq!(reply["source"], "none");
+    }
+
+    #[test]
+    fn warp_get_reports_an_engaged_gate_and_warp_set_false_cancels_it() {
+        let mut app = test_app();
+        app.powered_on = true;
+        app.emu.set_paced(true);
+        app.warp_boot = Some(crate::warpboot::WarpBootGate::new(
+            crate::warpboot::WarpBootCondition::StorageIdle(10.0),
+        ));
+        app.engage_warp_boot();
+        assert!(!app.emu.paced());
+        let (tx, rx) = attach(&mut app);
+        let reply = call(&mut app, &tx, &rx, 1, "warp.get", json!({}));
+        assert_eq!(reply["on"], true);
+        assert_eq!(reply["source"], "boot");
+        call(&mut app, &tx, &rx, 2, "warp.set", json!({"on": false}));
+        assert!(app.warp_boot.is_none(), "warp off cancels the gate");
+        assert!(app.emu.paced());
+    }
+
+    #[test]
+    fn control_warp_hold_outlives_a_finishing_boot_gate() {
+        let (mut app, states) = audio_app();
+        app.warp_boot = Some(crate::warpboot::WarpBootGate::new(
+            crate::warpboot::WarpBootCondition::Until(0.05),
+        ));
+        app.engage_warp_boot();
+        let (tx, rx) = attach(&mut app);
+        let reply = call(&mut app, &tx, &rx, 1, "warp.set", json!({"on": true}));
+        assert_eq!(reply["source"], "control");
+
+        // Run past the gate's timestamp: the gate ends, the hold keeps
+        // the machine warping and silent.
+        let mut ended = false;
+        for _ in 0..12 {
+            app.emu.step_frame().unwrap();
+            if app.poll_warp_boot() {
+                ended = true;
+                break;
+            }
+        }
+        assert!(ended, "the gate should end within a dozen frames");
+        assert!(app.warp_boot.is_none());
+        assert!(!app.emu.paced());
+        assert_eq!(app.warp_hold, Some(WarpSource::Control));
+        assert_eq!(states.borrow().last(), Some(&true));
+        assert!(
+            events(&rx, "event.warp").is_empty(),
+            "pacing did not change"
+        );
+
+        // The hotkey ends it, and the client hears about it.
+        app.toggle_warp();
+        assert!(app.emu.paced());
+        assert_eq!(app.warp_hold, None);
+        assert_eq!(states.borrow().last(), Some(&false));
+        let warp = events(&rx, "event.warp");
+        assert_eq!(warp.len(), 1);
+        assert_eq!(warp[0]["on"], false);
+        assert_eq!(warp[0]["source"], "manual");
+        assert!(warp[0]["position"]["frame"].is_number());
+    }
+
+    #[test]
+    fn guest_warp_request_flips_pacing_and_notifies_the_client() {
+        let (mut app, states) = audio_app();
+        fit_uaelib(&mut app);
+        let (tx, rx) = attach(&mut app);
+        assert!(!app.service_uaelib(), "nothing pending");
+
+        app.emu
+            .bus_mut()
+            .uaelib
+            .as_mut()
+            .unwrap()
+            .request_warp(true);
+        assert!(app.service_uaelib(), "pacing changed: the burst breaks");
+        assert!(!app.emu.paced());
+        assert_eq!(app.warp_hold, Some(WarpSource::Guest));
+        assert_eq!(states.borrow().last(), Some(&true));
+        let warp = events(&rx, "event.warp");
+        assert_eq!(warp.len(), 1);
+        assert_eq!(warp[0]["on"], true);
+        assert_eq!(warp[0]["source"], "guest");
+        let reply = call(&mut app, &tx, &rx, 1, "warp.get", json!({}));
+        assert_eq!(reply["source"], "guest");
+
+        app.emu
+            .bus_mut()
+            .uaelib
+            .as_mut()
+            .unwrap()
+            .request_warp(false);
+        assert!(app.service_uaelib());
+        assert!(app.emu.paced());
+        assert_eq!(app.warp_hold, None);
+        assert_eq!(states.borrow().last(), Some(&false));
+        let warp = events(&rx, "event.warp");
+        assert_eq!(warp.len(), 1);
+        assert_eq!(warp[0]["on"], false);
+        assert_eq!(warp[0]["source"], "guest");
+    }
+
+    #[test]
+    fn control_disconnect_releases_a_control_hold() {
+        let (mut app, states) = audio_app();
+        let (tx, rx) = attach(&mut app);
+        call(&mut app, &tx, &rx, 1, "warp.set", json!({"on": true}));
+        assert_eq!(app.warp_hold, Some(WarpSource::Control));
+        tx.send(CtlMsg::Disconnected).unwrap();
+        app.drain_control();
+        assert!(
+            app.emu.paced(),
+            "a warp the client engaged has no client left to release it"
+        );
+        assert_eq!(app.warp_hold, None);
+        assert_eq!(states.borrow().last(), Some(&false));
+    }
+
+    #[test]
+    fn warp_set_is_refused_during_a_capture_run() {
+        let mut app = test_app();
+        app.powered_on = true;
+        app.auto_shot
+            .push((50.0, std::path::PathBuf::from("shot.png")));
+        app.emu.set_paced(false);
+        let (tx, rx) = attach(&mut app);
+        let reply = call(&mut app, &tx, &rx, 1, "warp.set", json!({"on": false}));
+        assert!(reply["note"].is_string(), "{reply}");
+        assert!(!app.emu.paced(), "a capture run is never re-paced");
+        assert_eq!(
+            reply["source"], "capture",
+            "not misreported as a manual toggle"
+        );
+        let reply = call(&mut app, &tx, &rx, 2, "warp.set", json!({"on": true}));
+        assert!(reply["note"].is_string());
+        assert_eq!(app.warp_hold, None);
+        let reply = call(&mut app, &tx, &rx, 3, "warp.get", json!({}));
+        assert_eq!(reply["on"], true);
+        assert_eq!(reply["source"], "capture");
+    }
+
+    #[test]
+    fn debug_subscription_streams_guest_lines_through_the_drain() {
+        let mut app = test_app();
+        app.powered_on = true;
+        fit_uaelib(&mut app);
+        let (tx, rx) = attach(&mut app);
+        let state = call(
+            &mut app,
+            &tx,
+            &rx,
+            1,
+            "events.subscribe",
+            json!({"events": ["debug"]}),
+        );
+        assert_eq!(state["active"], json!(["debug"]));
+        app.emu
+            .bus_mut()
+            .uaelib
+            .as_mut()
+            .unwrap()
+            .queue_debug_line("hello from the guest");
+        app.control_emit_events();
+        let debug = events(&rx, "event.debug");
+        assert_eq!(debug.len(), 1);
+        assert_eq!(debug[0]["kind"], "log");
+        assert_eq!(debug[0]["text"], "hello from the guest");
+    }
+}
+
+#[cfg(feature = "gdb")]
+mod gdb_drain {
+    use super::test_app;
+    use crate::gdbstub::core::{checksum, hex_encode};
+    use crate::gdbstub::windowed::{GdbHandle, GdbMsg};
+    use std::sync::mpsc::{Receiver, Sender};
+
+    fn attached_app() -> (super::super::App, Sender<GdbMsg>, Receiver<String>) {
+        let mut app = test_app();
+        let (handle, cmd_tx, frame_rx) = GdbHandle::test_pair();
+        app.attach_gdb(handle, &crate::gdbstub::Config::new(":0".into()));
+        cmd_tx.send(GdbMsg::Connected).unwrap();
+        (app, cmd_tx, frame_rx)
+    }
+
+    fn packet(cmd_tx: &Sender<GdbMsg>, payload: &str) {
+        cmd_tx.send(GdbMsg::Packet(payload.to_string())).unwrap();
+    }
+
+    fn monitor(cmd_tx: &Sender<GdbMsg>, command: &str) {
+        packet(cmd_tx, &format!("qRcmd,{}", hex_encode(command.as_bytes())));
+    }
+
+    /// The wire framing `GdbHandle::send_packet` produces for `payload`.
+    fn frame(payload: &str) -> String {
+        format!("${payload}#{:02x}", checksum(payload.as_bytes()))
+    }
+
+    fn frames(frame_rx: &Receiver<String>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(f) = frame_rx.try_recv() {
+            out.push(f);
+        }
+        out
+    }
+
+    #[test]
+    fn attach_pauses_and_a_breakpoint_completes_a_deferred_continue() {
+        let (mut app, cmd_tx, frame_rx) = attached_app();
+        app.drain_gdb();
+        assert!(app.paused, "attaching stops the target");
+
+        // A Z0 breakpoint installs into the machine's break store (the
+        // burst loop steps whole frames; the core's polled list alone
+        // would never fire here).
+        let target = app.emu.machine.pc().wrapping_add(8) & 0x00FF_FFFF;
+        packet(&cmd_tx, &format!("Z0,{target:x},2"));
+        app.drain_gdb();
+        assert_eq!(frames(&frame_rx), vec![frame("OK")]);
+        assert!(app.emu.machine.ui_breaks().is_breakpoint(target));
+
+        // Continue defers its reply and lets the frame loop run.
+        packet(&cmd_tx, "c");
+        app.drain_gdb();
+        assert!(!app.paused, "continue resumes the machine");
+        assert!(frames(&frame_rx).is_empty(), "the stop reply is deferred");
+
+        // The hit surfaces mid-frame, answers the client, and leaves the
+        // local debugger window closed.
+        app.emu.step_frame().expect("frame");
+        assert!(app.surface_debug_stop());
+        assert!(app.paused);
+        assert_eq!(app.emu.machine.pc() & 0x00FF_FFFF, target);
+        assert_eq!(frames(&frame_rx), vec![frame("T05hwbreak:;thread:1;")]);
+        assert!(
+            app.debugger_panel.is_none(),
+            "a remote stop must not commandeer the local debugger"
+        );
+    }
+
+    #[test]
+    fn an_interrupt_pauses_and_always_gets_a_stop_reply() {
+        let (mut app, cmd_tx, frame_rx) = attached_app();
+        app.drain_gdb();
+        packet(&cmd_tx, "c");
+        app.drain_gdb();
+        assert!(!app.paused);
+        cmd_tx.send(GdbMsg::Interrupt).unwrap();
+        app.drain_gdb();
+        assert!(app.paused, "0x03 pauses the machine");
+        assert_eq!(frames(&frame_rx), vec![frame("T05thread:1;")]);
+    }
+
+    #[test]
+    fn a_step_replies_synchronously_and_stays_paused() {
+        let (mut app, cmd_tx, frame_rx) = attached_app();
+        app.drain_gdb();
+        let before = app.emu.retired_instructions();
+        packet(&cmd_tx, "s");
+        app.drain_gdb();
+        assert!(app.paused);
+        assert!(app.emu.retired_instructions() > before);
+        assert_eq!(frames(&frame_rx), vec![frame("T05thread:1;")]);
+    }
+
+    #[test]
+    fn detach_removes_only_gdb_installed_break_state() {
+        let (mut app, cmd_tx, frame_rx) = attached_app();
+        app.drain_gdb();
+        // The GUI owns a breakpoint of its own.
+        let gui_break = app.emu.machine.pc().wrapping_add(0x20) & 0x00FF_FFFF;
+        app.emu.machine.ui_set_breakpoint(gui_break, None, 0);
+        // The client sets one at the same spot (never touched: the GUI
+        // owns it) and one of its own, plus a register watch through the
+        // intercepted monitor command.
+        let own_break = app.emu.machine.pc().wrapping_add(0x40) & 0x00FF_FFFF;
+        packet(&cmd_tx, &format!("Z0,{gui_break:x},2"));
+        packet(&cmd_tx, &format!("Z0,{own_break:x},2"));
+        monitor(&cmd_tx, "watch-reg DMACON");
+        app.drain_gdb();
+        assert!(app.emu.machine.ui_breaks().is_breakpoint(own_break));
+        assert!(app.emu.machine.ui_breaks().reg_watches.contains(&0x096));
+        let sent = frames(&frame_rx);
+        assert_eq!(sent.last(), Some(&frame("OK")));
+        assert!(
+            sent.iter()
+                .any(|f| f.contains(&hex_encode(b"watching DMACON"))),
+            "monitor output arrives as O packets: {sent:?}"
+        );
+
+        cmd_tx.send(GdbMsg::Disconnected).unwrap();
+        app.drain_gdb();
+        assert!(
+            app.emu.machine.ui_breaks().is_breakpoint(gui_break),
+            "detach must leave GUI-owned points alone"
+        );
+        assert!(!app.emu.machine.ui_breaks().is_breakpoint(own_break));
+        assert!(!app.emu.machine.ui_breaks().reg_watches.contains(&0x096));
+    }
+
+    #[test]
+    fn monitor_warp_holds_until_disconnect_releases_it() {
+        let (mut app, cmd_tx, _frame_rx) = attached_app();
+        // The fixture starts unpaced; warp semantics are defined against
+        // a paced interactive session.
+        app.emu.set_paced(true);
+        app.drain_gdb();
+        monitor(&cmd_tx, "warp on");
+        app.drain_gdb();
+        assert!(!app.emu.paced(), "monitor warp on unpaces the machine");
+        assert_eq!(
+            app.warp_hold,
+            Some(super::super::app_session::WarpSource::Gdb)
+        );
+        cmd_tx.send(GdbMsg::Disconnected).unwrap();
+        app.drain_gdb();
+        assert!(
+            app.emu.paced(),
+            "a disconnect releases the client's warp hold"
+        );
+        assert!(app.warp_hold.is_none());
+    }
+
+    #[test]
+    fn kill_detaches_and_the_window_survives() {
+        let (mut app, cmd_tx, frame_rx) = attached_app();
+        app.drain_gdb();
+        let own_break = app.emu.machine.pc().wrapping_add(8) & 0x00FF_FFFF;
+        packet(&cmd_tx, &format!("Z0,{own_break:x},2"));
+        packet(&cmd_tx, "k");
+        app.drain_gdb();
+        assert!(!app.emu.machine.ui_breaks().is_breakpoint(own_break));
+        assert!(
+            app.gdb.is_some(),
+            "the server keeps serving for the next client"
+        );
+        assert!(
+            !app.gdb.as_ref().unwrap().handle.connected(),
+            "kill closes the connection instead of exiting the window"
+        );
+        let _ = frames(&frame_rx);
+    }
+
+    #[test]
+    fn a_gui_removed_gdb_breakpoint_is_restored_on_the_next_sync() {
+        let (mut app, cmd_tx, frame_rx) = attached_app();
+        app.drain_gdb();
+        let target = app.emu.machine.pc().wrapping_add(8) & 0x00FF_FFFF;
+        packet(&cmd_tx, &format!("Z0,{target:x},2"));
+        app.drain_gdb();
+        assert!(app.emu.machine.ui_breaks().is_breakpoint(target));
+        // The GUI toggles the client's point off; the client's
+        // acknowledged break state is authoritative for its own points,
+        // so the next packet's sync restores it.
+        app.emu.machine.ui_set_breakpoint(target, None, 0);
+        assert!(!app.emu.machine.ui_breaks().is_breakpoint(target));
+        packet(&cmd_tx, "qC");
+        app.drain_gdb();
+        assert!(
+            app.emu.machine.ui_breaks().is_breakpoint(target),
+            "an acknowledged Z0 point must not silently stay gone"
+        );
+        // And a z0 removal still takes it out for good.
+        packet(&cmd_tx, &format!("z0,{target:x},2"));
+        app.drain_gdb();
+        assert!(!app.emu.machine.ui_breaks().is_breakpoint(target));
+        let _ = frames(&frame_rx);
+    }
+
+    #[test]
+    fn a_memory_write_packet_does_not_fire_the_machine_word_watch() {
+        let (mut app, cmd_tx, frame_rx) = attached_app();
+        app.drain_gdb();
+        // The fixture boots with the reset ROM overlay on, which shadows
+        // low chip RAM; drop it so the write lands.
+        app.emu.bus_mut().mem.overlay = false;
+        let addr = 0x0005_0000u32;
+        packet(&cmd_tx, &format!("Z2,{addr:x},2"));
+        app.drain_gdb();
+        assert!(app
+            .emu
+            .machine
+            .ui_breaks()
+            .watches
+            .iter()
+            .any(|w| w.addr == addr));
+        let _ = frames(&frame_rx);
+        // Writing the watched word through the stub must not fire the
+        // watch on the next step: the machine baselines are refreshed
+        // like CCP's memory.write does.
+        packet(&cmd_tx, &format!("M{addr:x},2:beef"));
+        packet(&cmd_tx, "s");
+        app.drain_gdb();
+        assert_eq!(
+            frames(&frame_rx),
+            vec![frame("OK"), frame("T05thread:1;")],
+            "the stub's own write must not report a watchpoint hit"
+        );
+    }
+
+    #[test]
+    fn qxfer_libraries_read_arms_the_machine_loadseg_catch() {
+        let (mut app, cmd_tx, frame_rx) = attached_app();
+        app.drain_gdb();
+        assert!(app.emu.machine.ui_breaks().loadseg_catch.is_none());
+        packet(&cmd_tx, "qXfer:libraries:read::0,1000");
+        app.drain_gdb();
+        assert_eq!(
+            frames(&frame_rx),
+            vec![frame("l<library-list version=\"1.0\"/>")]
+        );
+        assert!(
+            app.emu.machine.ui_breaks().loadseg_catch.is_some(),
+            "library events arm the machine-level loadseg catch"
+        );
+        // Detach disarms it again (it was ours).
+        cmd_tx.send(GdbMsg::Disconnected).unwrap();
+        app.drain_gdb();
+        assert!(app.emu.machine.ui_breaks().loadseg_catch.is_none());
+    }
+}
+
+/// Part-1 insight-pane tests: guest-registered uaelib resources feeding
+/// the heat presets, the heat view, and the console's DBGRES command.
+mod uaelib_insights {
+    use super::test_app;
+
+    type App = super::super::App;
+
+    fn fit_uaelib(app: &mut App) {
+        let mut lib = crate::uaelib::UaeLib::new();
+        lib.mute_stdout();
+        let bus = app.emu.bus_mut();
+        bus.attach_uaelib(lib);
+        // Post-boot reality: the reset ROM overlay is long gone, so the
+        // debugger's reads see chip RAM like the DMA view does.
+        bus.mem.overlay = false;
+    }
+
+    /// The template's 50-byte `struct debug_resource`, big-endian.
+    fn resource_bytes(
+        address: u32,
+        size: u32,
+        name: &str,
+        kind: u16,
+        flags: u16,
+        union: [u16; 3],
+    ) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&address.to_be_bytes());
+        bytes.extend_from_slice(&size.to_be_bytes());
+        let mut padded = [0u8; 32];
+        padded[..name.len()].copy_from_slice(name.as_bytes());
+        bytes.extend_from_slice(&padded);
+        bytes.extend_from_slice(&kind.to_be_bytes());
+        bytes.extend_from_slice(&flags.to_be_bytes());
+        for value in union {
+            bytes.extend_from_slice(&value.to_be_bytes());
+        }
+        bytes
+    }
+
+    fn register(app: &mut App, staging: u32, bytes: &[u8]) {
+        let mask = app.emu.machine.ui_addr_mask();
+        let bus = app.emu.bus_mut();
+        bus.mem.chip_ram[staging as usize..staging as usize + bytes.len()].copy_from_slice(bytes);
+        let mem = &mut bus.mem;
+        let lib = bus.uaelib.as_mut().unwrap();
+        lib.call(
+            crate::uaelib::FN_DEBUG_CMD,
+            [crate::uaelib::CMD_REGISTER_RESOURCE, staging, 0, 0, 0],
+            mem,
+            mask,
+            0,
+            7,
+        );
+    }
+
+    #[test]
+    fn analyzer_heat_presets_append_registered_resources() {
+        let mut app = test_app();
+        fit_uaelib(&mut app);
+        register(
+            &mut app,
+            0x5000,
+            &resource_bytes(0x2_0000, 51200, "screenbitmap", 0, 1, [320, 256, 5]),
+        );
+        // A resource named like a machine preset gets the dedup suffix.
+        register(
+            &mut app,
+            0x5100,
+            &resource_bytes(0x3_0000, 64, "Chip", 1, 0, [32, 0, 0]),
+        );
+        let presets = super::super::analyzer_heat_presets(app.emu.bus());
+        let labels: Vec<&str> = presets.iter().map(|p| p.label.as_str()).collect();
+        assert!(
+            labels.contains(&"screenbi"),
+            "resource names are truncated to 8: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l.starts_with("Chip $")),
+            "colliding names are disambiguated by base: {labels:?}"
+        );
+        assert_eq!(
+            labels.last(),
+            Some(&"24-bit"),
+            "the 24-bit overview stays last"
+        );
+        let screen = presets.iter().find(|p| p.label == "screenbi").unwrap();
+        assert_eq!((screen.base, screen.span), (0x2_0000, 51200));
+    }
+
+    #[test]
+    fn heat_view_carries_registered_resources_sorted() {
+        let mut app = test_app();
+        fit_uaelib(&mut app);
+        register(
+            &mut app,
+            0x5000,
+            &resource_bytes(0x3_0000, 64, "pal", 1, 0, [32, 0, 0]),
+        );
+        register(
+            &mut app,
+            0x5100,
+            &resource_bytes(0x2_0000, 51200, "screen", 0, 0, [320, 256, 5]),
+        );
+        app.emu.bus_mut().set_heat_map(Some((0, 0x10_0000)));
+        let panel = crate::video::ui::FrameAnalyzerPanel::new();
+        let view = app.build_analyzer_heat_view(&panel).expect("map armed");
+        let named: Vec<(u32, u32, &str, &str)> = view
+            .resources
+            .iter()
+            .map(|r| (r.start, r.end, r.name.as_str(), r.kind))
+            .collect();
+        assert_eq!(
+            named,
+            vec![
+                (0x2_0000, 0x2_0000 + 51200, "screen", "bitmap"),
+                (0x3_0000, 0x3_0040, "pal", "palette"),
+            ],
+            "sorted by start, exclusive end"
+        );
+    }
+
+    #[test]
+    fn guest_debug_lines_reach_an_open_console() {
+        let mut app = test_app();
+        fit_uaelib(&mut app);
+        app.open_console();
+        let mask = app.emu.machine.ui_addr_mask();
+        {
+            let bus = app.emu.bus_mut();
+            bus.mem.chip_ram[0x2000..0x2006].copy_from_slice(b"hello\0");
+            let mem = &mut bus.mem;
+            let lib = bus.uaelib.as_mut().unwrap();
+            lib.call(
+                crate::uaelib::FN_DEBUG_LOG,
+                [0x2000, 0, 0, 0, 0],
+                mem,
+                mask,
+                0,
+                0,
+            );
+        }
+        assert!(!app.service_uaelib(), "a log line changes no pacing");
+        let panel = app.console_panel.as_ref().unwrap();
+        assert_eq!(panel.output.back().map(String::as_str), Some("DBG: hello"));
+    }
+
+    #[test]
+    fn guest_debug_lines_while_the_console_is_closed_are_discarded() {
+        let mut app = test_app();
+        fit_uaelib(&mut app);
+        let mask = app.emu.machine.ui_addr_mask();
+        {
+            let bus = app.emu.bus_mut();
+            bus.mem.chip_ram[0x2000..0x2006].copy_from_slice(b"early\0");
+            let mem = &mut bus.mem;
+            let lib = bus.uaelib.as_mut().unwrap();
+            lib.call(
+                crate::uaelib::FN_DEBUG_LOG,
+                [0x2000, 0, 0, 0, 0],
+                mem,
+                mask,
+                0,
+                0,
+            );
+        }
+        app.service_uaelib();
+        app.open_console();
+        app.service_uaelib();
+        let panel = app.console_panel.as_ref().unwrap();
+        assert!(
+            !panel.output.iter().any(|line| line.starts_with("DBG:")),
+            "lines from before the pane opened are not replayed"
+        );
+    }
+
+    #[test]
+    fn resources_tab_lists_the_registry_and_previews_a_selected_bitmap() {
+        let mut app = test_app();
+        fit_uaelib(&mut app);
+        // A 16x2x1 bitmap whose only set bit is pixel (0, 0), and a
+        // 2-entry palette: index 0 = black, index 1 = pure red ($0F00).
+        {
+            let bus = app.emu.bus_mut();
+            bus.mem.chip_ram[0x2_0000] = 0x80;
+            bus.mem.chip_ram[0x3_0000..0x3_0004].copy_from_slice(&[0x00, 0x00, 0x0F, 0x00]);
+        }
+        register(
+            &mut app,
+            0x5000,
+            &resource_bytes(0x3_0000, 4, "pal", 1, 0, [2, 0, 0]),
+        );
+        register(
+            &mut app,
+            0x5100,
+            &resource_bytes(0x2_0000, 4, "screen", 0, 0, [16, 2, 1]),
+        );
+        app.open_frame_analyzer();
+        app.frame_analyzer_set_tab(crate::video::ui::AnalyzerTab::Resources);
+        // Row 1 is the bitmap (registry order: pal first, then screen).
+        app.frame_analyzer_select_resource(1);
+        let panel = app.frame_analyzer_panel.clone().unwrap();
+        assert_eq!(panel.resource_selected, Some(0x2_0000));
+        let view = app.build_frame_analyzer_view(&panel);
+        let resources = view.resources.expect("built while the tab is up");
+        assert_eq!(resources.rows.len(), 2);
+        assert!(
+            resources.rows[0].text.contains("pal"),
+            "{}",
+            resources.rows[0].text
+        );
+        assert!(resources.rows[1].selected);
+        assert_eq!((resources.hidden_above, resources.hidden_below), (0, 0));
+        let crate::video::ui::AnalyzerResourceDetail::Bitmap(preview) =
+            resources.detail.expect("bitmap preview")
+        else {
+            panic!("expected a bitmap detail");
+        };
+        assert_eq!((preview.width, preview.height), (16, 2));
+        // Pixel (0,0) is palette index 1 = red through the registered
+        // palette; its neighbour is index 0 = black.
+        let red = crate::chipset::denise::rgb24_to_rgba8(0x00FF_0000);
+        let black = crate::chipset::denise::rgb24_to_rgba8(0);
+        assert_eq!(preview.pixels[0], red);
+        assert_eq!(preview.pixels[1], black);
+        assert!(preview.note.is_none(), "{:?}", preview.note);
+
+        // An out-of-range row click changes nothing.
+        app.frame_analyzer_select_resource(9);
+        let panel = app.frame_analyzer_panel.clone().unwrap();
+        assert_eq!(panel.resource_selected, Some(0x2_0000));
+    }
+
+    #[test]
+    fn resources_tab_scrolls_to_reach_a_large_registry() {
+        use winit::keyboard::KeyCode;
+        let mut app = test_app();
+        fit_uaelib(&mut app);
+        // 13 palettes: three more than the table shows at once.
+        for i in 0..13u32 {
+            register(
+                &mut app,
+                0x5000 + i * 0x40,
+                &resource_bytes(
+                    0x2_0000 + i * 0x100,
+                    64,
+                    &format!("pal{i:02}"),
+                    1,
+                    0,
+                    [32, 0, 0],
+                ),
+            );
+        }
+        app.open_frame_analyzer();
+        app.activate_ui_control(super::super::ui::UiControl::AnalyzerTab(
+            super::super::ui::AnalyzerTab::Resources,
+        ));
+        let panel = app.frame_analyzer_panel.clone().unwrap();
+        let view = app.build_analyzer_resources_view(&panel);
+        assert_eq!(
+            view.rows.len(),
+            super::super::ui::ANALYZER_RESOURCE_ROWS_MAX
+        );
+        assert_eq!((view.hidden_above, view.hidden_below), (0, 3));
+        assert!(view.rows[0].text.contains("pal00"));
+
+        // Scrolling down re-windows the table; the hint counts flip.
+        app.ui_handle_frame_analyzer_key(KeyCode::PageDown);
+        let panel = app.frame_analyzer_panel.clone().unwrap();
+        let view = app.build_analyzer_resources_view(&panel);
+        assert_eq!((view.hidden_above, view.hidden_below), (3, 0));
+        assert!(
+            view.rows.last().unwrap().text.contains("pal12"),
+            "the tail of the registry is reachable"
+        );
+
+        // A row click resolves through the same scroll window the rows
+        // were drawn with: row 0 is now pal03.
+        app.frame_analyzer_select_resource(0);
+        let panel = app.frame_analyzer_panel.clone().unwrap();
+        assert_eq!(panel.resource_selected, Some(0x2_0300));
+
+        // The scroll clamps at both ends.
+        app.ui_handle_frame_analyzer_key(KeyCode::ArrowDown);
+        assert_eq!(
+            app.frame_analyzer_panel.as_ref().unwrap().resource_scroll,
+            3
+        );
+        for _ in 0..20 {
+            app.ui_handle_frame_analyzer_key(KeyCode::ArrowUp);
+        }
+        assert_eq!(
+            app.frame_analyzer_panel.as_ref().unwrap().resource_scroll,
+            0
+        );
+    }
+
+    #[test]
+    fn resource_presets_are_capped_so_the_machine_windows_survive() {
+        let mut app = test_app();
+        fit_uaelib(&mut app);
+        for i in 0..6u32 {
+            register(
+                &mut app,
+                0x5000 + i * 0x40,
+                &resource_bytes(
+                    0x2_0000 + i * 0x100,
+                    64,
+                    &format!("res{i}"),
+                    1,
+                    0,
+                    [32, 0, 0],
+                ),
+            );
+        }
+        let presets = super::super::analyzer_heat_presets(app.emu.bus());
+        let labels: Vec<&str> = presets.iter().map(|p| p.label.as_str()).collect();
+        assert!(labels.contains(&"res3"), "{labels:?}");
+        assert!(
+            !labels.contains(&"res4"),
+            "only the first four resources become presets: {labels:?}"
+        );
+        assert_eq!(labels.last(), Some(&"24-bit"), "{labels:?}");
+    }
+
+    #[test]
+    fn a_multibyte_resource_name_truncates_without_panicking() {
+        let mut app = test_app();
+        fit_uaelib(&mut app);
+        // Seven ASCII characters then a two-byte character: a byte-wise
+        // truncate at 8 would split it and panic.
+        register(
+            &mut app,
+            0x5000,
+            &resource_bytes(0x2_0000, 64, "abcdefg\u{00e9}xyz", 1, 0, [32, 0, 0]),
+        );
+        let presets = super::super::analyzer_heat_presets(app.emu.bus());
+        assert!(
+            presets.iter().any(|p| p.label == "abcdefg\u{00e9}"),
+            "eight characters survive, wherever the bytes fall"
+        );
+        app.open_frame_analyzer();
+        app.activate_ui_control(super::super::ui::UiControl::AnalyzerTab(
+            super::super::ui::AnalyzerTab::Resources,
+        ));
+        let panel = app.frame_analyzer_panel.clone().unwrap();
+        let view = app.build_analyzer_resources_view(&panel);
+        assert!(view.rows[0].text.contains("abcdefg"));
+    }
+
+    #[test]
+    fn resources_tab_survives_a_hostile_geometry() {
+        let mut app = test_app();
+        fit_uaelib(&mut app);
+        register(
+            &mut app,
+            0x5000,
+            &resource_bytes(
+                0x2_0000,
+                0xFFFF_FF00,
+                "evil",
+                0,
+                0,
+                [0xFFFF, 0xFFFF, 0xFFFF],
+            ),
+        );
+        app.open_frame_analyzer();
+        app.frame_analyzer_set_tab(crate::video::ui::AnalyzerTab::Resources);
+        app.frame_analyzer_select_resource(0);
+        let panel = app.frame_analyzer_panel.clone().unwrap();
+        let view = app.build_frame_analyzer_view(&panel);
+        let resources = view.resources.expect("built while the tab is up");
+        let crate::video::ui::AnalyzerResourceDetail::Bitmap(preview) =
+            resources.detail.expect("clamped preview")
+        else {
+            panic!("expected a bitmap detail");
+        };
+        assert!(
+            preview.width * preview.height <= crate::video::resource_preview::PREVIEW_MAX_PIXELS
+        );
+        assert!(preview.note.is_some());
+    }
+
+    #[test]
+    fn resources_tab_shows_a_palette_and_a_copperlist_detail() {
+        let mut app = test_app();
+        fit_uaelib(&mut app);
+        {
+            let bus = app.emu.bus_mut();
+            bus.mem.chip_ram[0x3_0000..0x3_0004].copy_from_slice(&[0x0F, 0x00, 0x00, 0x8F]);
+            bus.mem.chip_ram[0x4_0000..0x4_0008]
+                .copy_from_slice(&[0x01, 0x80, 0x0F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE]);
+        }
+        register(
+            &mut app,
+            0x5000,
+            &resource_bytes(0x3_0000, 4, "pal", 1, 0, [2, 0, 0]),
+        );
+        register(
+            &mut app,
+            0x5100,
+            &resource_bytes(0x4_0000, 8, "cop", 2, 0, [0, 0, 0]),
+        );
+        app.open_frame_analyzer();
+        app.frame_analyzer_set_tab(crate::video::ui::AnalyzerTab::Resources);
+
+        app.frame_analyzer_select_resource(0);
+        let panel = app.frame_analyzer_panel.clone().unwrap();
+        let view = app.build_frame_analyzer_view(&panel);
+        let crate::video::ui::AnalyzerResourceDetail::Palette { colours } =
+            view.resources.unwrap().detail.expect("palette detail")
+        else {
+            panic!("expected a palette detail");
+        };
+        assert_eq!(
+            colours,
+            vec![
+                crate::chipset::denise::rgb24_to_rgba8(0x00FF_0000),
+                crate::chipset::denise::rgb24_to_rgba8(0x0000_88FF),
+            ]
+        );
+
+        app.frame_analyzer_select_resource(1);
+        let panel = app.frame_analyzer_panel.clone().unwrap();
+        let view = app.build_frame_analyzer_view(&panel);
+        let crate::video::ui::AnalyzerResourceDetail::Copperlist { lines } =
+            view.resources.unwrap().detail.expect("copper detail")
+        else {
+            panic!("expected a copperlist detail");
+        };
+        assert!(lines[0].starts_with("040000:"), "{}", lines[0]);
+        assert!(lines[0].contains("$DFF180"), "{}", lines[0]);
+    }
+
+    #[test]
+    fn console_dbgres_lists_the_registry() {
+        let mut app = test_app();
+        fit_uaelib(&mut app);
+        register(
+            &mut app,
+            0x5000,
+            &resource_bytes(0x2_0000, 51200, "screen", 0, 1, [320, 256, 5]),
+        );
+        app.open_console();
+        let lines = super::console_run(&mut app, "DBGRES");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(
+            lines[0],
+            "bitmap 'screen': $020000..$02C800  (51200 bytes)  320x256x5 interleaved  frame 7"
+        );
+    }
+
+    #[test]
+    fn console_dbgres_reports_a_missing_trap_and_an_empty_registry() {
+        let mut app = test_app();
+        app.open_console();
+        let lines = super::console_run(&mut app, "DBGRES");
+        assert_eq!(
+            lines,
+            vec!["!uaelib trap not fitted ([emulation] uaelib = false)".to_string()],
+            "the ! prefix marks the line as an error in the pane"
+        );
+        fit_uaelib(&mut app);
+        let lines = super::console_run(&mut app, "DBGRES");
+        assert_eq!(
+            lines,
+            vec!["no resources registered (uaelib debug_register_*)".to_string()]
+        );
+    }
 }

@@ -4,6 +4,48 @@
 
 use super::*;
 
+/// Who asked for a warp change: the keyboard/menu, a control-protocol
+/// client, or the guest through the uaelib trap (`crate::uaelib`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WarpSource {
+    Manual,
+    Control,
+    Gdb,
+    Guest,
+}
+
+impl WarpSource {
+    /// The wire name (`warp.get` / `event.warp` `source`).
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Control => "control",
+            Self::Gdb => "gdb",
+            Self::Guest => "guest",
+        }
+    }
+
+    fn describe(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Control => "control client",
+            Self::Gdb => "gdb client",
+            Self::Guest => "guest request",
+        }
+    }
+}
+
+/// What `App::set_warp` did: whether pacing actually changed, and why not
+/// when a request could not be honoured.
+pub(super) struct WarpOutcome {
+    pub changed: bool,
+    pub note: Option<&'static str>,
+}
+
+pub(super) const WARP_NOTE_BRIDGED: &str =
+    "a bridged physical floppy drive keeps the machine paced";
+pub(super) const WARP_NOTE_CAPTURE: &str = "capture run is unpaced end to end; warp is fixed";
+
 impl App {
     /// Toggle borderless fullscreen on the main window. Borderless (not
     /// exclusive) keeps the compositor path and the existing Resized-driven
@@ -62,6 +104,10 @@ impl App {
             );
         }
         self.sync_live_audio_suspension();
+        #[cfg(feature = "control")]
+        if unpaced {
+            self.control_notify_warp("launch");
+        }
     }
 
     /// One warp-launch poll, once per retired emulated frame (inside the
@@ -85,13 +131,13 @@ impl App {
         match launch.note(now, loaded.as_deref()) {
             crate::runprog::WarpLaunchOutcome::Waiting => false,
             crate::runprog::WarpLaunchOutcome::Loaded => {
-                info!("warp launch: {target} loaded; real-time pacing resumes");
+                info!("warp launch: {target} loaded; automatic warp phase ends");
                 self.finish_warp_launch();
                 self.show_osd(format!("Warp launch: {target} running"));
                 true
             }
             crate::runprog::WarpLaunchOutcome::Finished => {
-                info!("warp launch: {target} already ran to completion; real-time pacing resumes");
+                info!("warp launch: {target} already ran to completion; automatic warp phase ends");
                 self.finish_warp_launch();
                 self.show_osd(format!("Warp launch: {target} finished"));
                 true
@@ -99,7 +145,7 @@ impl App {
             crate::runprog::WarpLaunchOutcome::TimedOut => {
                 warn!(
                     "warp launch: {target} was not loaded within {:.0} emulated seconds; \
-                     resuming real-time pacing anyway",
+                     ending the automatic warp phase anyway",
                     crate::runprog::WARP_LAUNCH_TIMEOUT_SECS
                 );
                 self.finish_warp_launch();
@@ -110,11 +156,28 @@ impl App {
     }
 
     /// End the launch phase: back to real-time pacing (set_paced
-    /// re-anchors the pacing clock) and live audio.
+    /// re-anchors the pacing clock) and live audio, unless a control
+    /// client or the guest holds warp on.
     pub(super) fn finish_warp_launch(&mut self) {
         self.warp_launch = None;
-        self.emu.set_paced(true);
+        self.end_gate_warp("warp launch", "launch");
+    }
+
+    /// A boot gate's warp phase is over: re-pace unless a programmatic
+    /// hold keeps the machine warping, and tell an attached control client.
+    fn end_gate_warp(&mut self, what: &str, source: &'static str) {
+        let was_paced = self.emu.paced();
+        match self.warp_hold {
+            Some(hold) => info!("{what}: done; warp stays on for the {}", hold.describe()),
+            None => self.emu.set_paced(true),
+        }
         self.sync_live_audio_suspension();
+        #[cfg(feature = "control")]
+        if self.emu.paced() != was_paced {
+            self.control_notify_warp(source);
+        }
+        #[cfg(not(feature = "control"))]
+        let _ = (was_paced, source);
     }
 
     /// Start the general warp-boot phase (`--warp-boot`/`--warp-until`,
@@ -145,6 +208,10 @@ impl App {
             );
         }
         self.sync_live_audio_suspension();
+        #[cfg(feature = "control")]
+        if unpaced {
+            self.control_notify_warp("boot");
+        }
     }
 
     /// One warp-boot poll, once per retired emulated frame (inside the
@@ -168,14 +235,15 @@ impl App {
         match gate.note(now, storage_active) {
             crate::warpboot::WarpBootOutcome::Waiting => false,
             crate::warpboot::WarpBootOutcome::Done => {
-                info!("warp boot: done at {now:.1}s emulated; real-time pacing resumes");
+                info!("warp boot: done at {now:.1}s emulated; automatic warp phase ends");
                 self.finish_warp_boot();
                 self.show_osd("Warp boot: done");
                 true
             }
             crate::warpboot::WarpBootOutcome::TimedOut => {
                 warn!(
-                    "warp boot: storage never settled within {:.0} emulated seconds; resuming real-time pacing anyway",
+                    "warp boot: storage never settled within {:.0} emulated seconds; \
+                     ending the automatic warp phase anyway",
                     crate::warpboot::WARP_BOOT_TIMEOUT_SECS
                 );
                 self.finish_warp_boot();
@@ -186,11 +254,115 @@ impl App {
     }
 
     /// End the warp-boot phase: back to real-time pacing (set_paced
-    /// re-anchors the pacing clock) and live audio.
+    /// re-anchors the pacing clock) and live audio, unless a control
+    /// client or the guest holds warp on.
     pub(super) fn finish_warp_boot(&mut self) {
         self.warp_boot = None;
-        self.emu.set_paced(true);
+        self.end_gate_warp("warp boot", "boot");
+    }
+
+    /// Whether this is a capture run (`--screenshot-after` / `--dump-frames`):
+    /// unpaced end to end, one frame per loop, never re-paced.
+    pub(super) fn headless_capture_active(&self) -> bool {
+        !self.auto_shot.is_empty() || self.frame_dump.is_some()
+    }
+
+    /// Drop a pending or engaged warp launch / warp boot. Returns whether
+    /// there was one.
+    fn cancel_warp_gates(&mut self, by: &str) -> bool {
+        let mut cancelled = false;
+        if self.warp_launch.take().is_some() {
+            info!("warp launch: cancelled by {by}");
+            cancelled = true;
+        }
+        if self.warp_boot.take().is_some() {
+            info!("warp boot: cancelled by {by}");
+            cancelled = true;
+        }
+        cancelled
+    }
+
+    /// The one place warp is switched for any reason other than a boot
+    /// gate's own engage/finish: the keyboard and menu, a control-protocol
+    /// `warp.set`, and the guest's `warpmode()` all land here.
+    ///
+    /// Warp off is a complete action whoever asks: it drops a pending
+    /// launch/boot gate, releases any programmatic hold, and re-paces.
+    /// Warp on from a control client or the guest records a hold, which
+    /// mutes live audio like the boot gates do (fast-forward Paula output
+    /// is noise) and keeps a gate's finish from re-pacing underneath it;
+    /// the manual toggle records no hold and keeps its audible behaviour.
+    /// A capture run is never re-paced, and a bridged physical drive keeps
+    /// the machine paced (`Emulator::set_paced`), which the outcome's note
+    /// reports.
+    pub(super) fn set_warp(&mut self, on: bool, source: WarpSource) -> WarpOutcome {
+        if self.headless_capture_active() {
+            info!(
+                "warp: {} request ignored: a capture run is unpaced end to end",
+                source.label()
+            );
+            return WarpOutcome {
+                changed: false,
+                note: Some(WARP_NOTE_CAPTURE),
+            };
+        }
+        let was_paced = self.emu.paced();
+        let mut cancelled = false;
+        if on {
+            self.emu.set_paced(false);
+            let unpaced = !self.emu.paced();
+            self.warp_hold = match source {
+                WarpSource::Manual => None,
+                programmatic if unpaced => Some(programmatic),
+                _ => None,
+            };
+        } else {
+            cancelled = self.cancel_warp_gates(source.describe());
+            self.warp_hold = None;
+            self.emu.set_paced(true);
+        }
         self.sync_live_audio_suspension();
+        let paced = self.emu.paced();
+        let changed = paced != was_paced;
+        let note = (on && paced).then_some(WARP_NOTE_BRIDGED);
+        if on && paced {
+            info!(
+                "warp: {} request refused: {WARP_NOTE_BRIDGED}",
+                source.label()
+            );
+            self.show_osd("Warp unavailable: physical floppy drive attached");
+        } else {
+            match (source, on) {
+                (WarpSource::Manual, true) => {
+                    let limit = self.warp_speed.label();
+                    info!("warp speed on (emulation unpaced, limit {limit})");
+                    self.show_osd(format!("Warp speed on ({limit})"));
+                }
+                (WarpSource::Manual, false) => {
+                    info!("warp speed off (real-time pacing)");
+                    self.show_osd(if cancelled {
+                        "Warp off"
+                    } else {
+                        "Warp speed off"
+                    });
+                }
+                (_, true) if changed => {
+                    info!("warp on ({})", source.describe());
+                    self.show_osd(format!("Warp on ({})", source.describe()));
+                }
+                (_, false) if changed || cancelled => {
+                    info!("warp off ({})", source.describe());
+                    self.show_osd(format!("Warp off ({})", source.describe()));
+                }
+                _ => {}
+            }
+        }
+        #[cfg(feature = "control")]
+        if changed && source != WarpSource::Control {
+            self.control_notify_warp(source.label());
+        }
+        self.request_redraw();
+        WarpOutcome { changed, note }
     }
 
     /// Toggle warp speed: emulation runs unpaced (as fast as the host
@@ -201,31 +373,31 @@ impl App {
         // emulation -- a complete action, not a second toggle on top. On
         // a machine that refused to unpace (a bridged physical drive)
         // the gate is pending while the emulator is still paced, and
-        // falling through would read that press as "warp on".
-        let mut cancelled = false;
-        if self.warp_launch.take().is_some() {
-            info!("warp launch: cancelled by manual warp toggle");
-            cancelled = true;
+        // falling through would read that press as "warp on". A warp a
+        // control client or the guest holds ends the same way.
+        let gate_pending = self.warp_launch.is_some() || self.warp_boot.is_some();
+        let on = self.emu.paced() && !gate_pending;
+        self.set_warp(on, WarpSource::Manual);
+    }
+
+    /// The guest's `warpmode()` through the uaelib trap, once per retired
+    /// frame. Returns true when pacing changed, so the burst can break and
+    /// the new pacing takes effect at this frame.
+    pub(super) fn service_uaelib(&mut self) -> bool {
+        // Drain the console mirror every committed frame (keeping the ring
+        // from sitting full); the lines only land somewhere when the pane
+        // is open. Ones emitted while it is closed are not replayed: they
+        // already reached stdout, and opening the console is opening a new
+        // terminal on the channel, not a scrollback of the old one.
+        let lines = self.emu.take_uaelib_console_lines();
+        if let Some(panel) = self.console_panel.as_mut() {
+            for line in lines {
+                panel.push_output(format!("DBG: {line}"));
+            }
         }
-        if self.warp_boot.take().is_some() {
-            info!("warp boot: cancelled by manual warp toggle");
-            cancelled = true;
-        }
-        if cancelled {
-            self.emu.set_paced(true);
-            self.sync_live_audio_suspension();
-            self.show_osd("Warp off");
-            return;
-        }
-        let warp = self.emu.paced();
-        self.emu.set_paced(!warp);
-        if warp {
-            let limit = self.warp_speed.label();
-            info!("warp speed on (emulation unpaced, limit {limit})");
-            self.show_osd(format!("Warp speed on ({limit})"));
-        } else {
-            info!("warp speed off (real-time pacing)");
-            self.show_osd("Warp speed off");
+        match self.emu.take_uaelib_warp_request() {
+            Some(on) => self.set_warp(on, WarpSource::Guest).changed,
+            None => false,
         }
     }
 
@@ -663,7 +835,11 @@ impl App {
     }
 
     pub(super) fn start_recording_to(&mut self, path: PathBuf) {
-        match crate::recorder::VideoRecorder::create(&path, FB_WIDTH, present_height()) {
+        // The capture canvas: a recording is the aspect's own picture,
+        // whatever the window is drawing (integer scaling of the tv aspect
+        // draws from a square canvas the recording never sees).
+        let rows = crate::video::capture_height();
+        match crate::recorder::VideoRecorder::create(&path, FB_WIDTH, rows) {
             Ok(rec) => {
                 // The Paula tap collects the mixed stereo output from this
                 // point on; capture_recorder_output drains it every frame.
@@ -734,7 +910,7 @@ impl App {
                         &self.record_scratch_fb,
                         FB_WIDTH,
                         self.present_rows,
-                        present_height(),
+                        crate::video::capture_height(),
                         &mut self.record_fb,
                     );
                 } else {
@@ -742,7 +918,7 @@ impl App {
                         &self.present_fb,
                         FB_WIDTH,
                         self.present_rows,
-                        present_height(),
+                        crate::video::capture_height(),
                         &mut self.record_fb,
                     );
                 }
@@ -839,9 +1015,12 @@ impl App {
         // The warp-launch catch-up is silent: unpaced Paula output is
         // fast-forward noise, and the machine snaps back to live audio
         // the moment the launch finishes (or is cancelled).
-        let warp_launching = self.warp_launch.as_ref().is_some_and(|l| l.engaged)
-            || self.warp_boot.as_ref().is_some_and(|g| g.engaged);
-        let suspended = !self.powered_on || self.cpu_halted || self.paused || warp_launching;
+        // A warp a control client or the guest engaged is silent the same
+        // way; the manual toggle is not.
+        let warp_muted = self.warp_launch.as_ref().is_some_and(|l| l.engaged)
+            || self.warp_boot.as_ref().is_some_and(|g| g.engaged)
+            || self.warp_hold.is_some();
+        let suspended = !self.powered_on || self.cpu_halted || self.paused || warp_muted;
         self.emu.set_live_audio_suspended(suspended);
     }
 
@@ -1080,6 +1259,8 @@ impl App {
             // the client learns where the machine stopped.
             #[cfg(feature = "control")]
             self.control_complete_pending("user_pause", "paused from the window");
+            #[cfg(feature = "gdb")]
+            self.gdb_complete_pending_stop("paused from the window");
         } else {
             info!("pause button: emulation resumed");
         }
@@ -1107,6 +1288,14 @@ impl App {
             }
             info!("warp boot: cancelled by power off");
         }
+        // A warp a control client or the guest holds goes with the machine
+        // too: the guest is gone, and a client's warp.set was for it.
+        if let Some(hold) = self.warp_hold.take() {
+            info!("warp: {} hold released by power off", hold.describe());
+            self.emu.set_paced(true);
+            #[cfg(feature = "control")]
+            self.control_notify_warp("power_off");
+        }
         self.powered_on = false;
         self.paused = false;
         self.sync_live_audio_suspension();
@@ -1130,6 +1319,8 @@ impl App {
         info!("power button: machine powered off (cold boot state)");
         #[cfg(feature = "control")]
         self.control_complete_pending("pause", "power state changed");
+        #[cfg(feature = "gdb")]
+        self.gdb_complete_pending_stop("power state changed");
         if let Err(e) = self.emu.power_on_reset() {
             error!("cold power-on reset failed: {e:#}");
             self.cpu_halted = true;

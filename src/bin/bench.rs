@@ -150,7 +150,7 @@ fn main() -> Result<()> {
                     emu.bus_mut(),
                     &mut fb,
                     &mut repeated_frame_detector,
-                );
+                ) == bitplane::ReuseRender::Reused;
                 if reused {
                     reused_frames += 1;
                     render_skipped_frames += 1;
@@ -166,7 +166,8 @@ fn main() -> Result<()> {
                         visible_start_vpos,
                         0,
                         Overscan::Tv,
-                    );
+                    )
+                    .rows;
                     let base = emu.bus().frame_render_base();
                     let (next_rows, next_width) = deinterlacer.present_field_into(
                         &fb,

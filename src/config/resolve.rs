@@ -164,6 +164,7 @@ pub fn resolve_tint(from_config: Tint) -> Tint {
 /// real paths. An explicit `extended_rom` still wins over the AROS one.
 pub fn resolve_bundled_rom(cfg: &mut Config) -> Result<()> {
     // An A4091 may want its bundled ROM regardless of what Kickstart is in use.
+    resolve_bundled_a2091_rom(cfg)?;
     resolve_bundled_a4091_rom(cfg)?;
     resolve_bundled_lide_rom(cfg)?;
     resolve_bundled_fmv_rom(cfg)?;
@@ -186,6 +187,29 @@ pub fn resolve_bundled_rom(cfg: &mut Config) -> Result<()> {
     );
     cfg.rom_path = aros.main;
     cfg.extended_rom_path.get_or_insert(aros.extended);
+    Ok(())
+}
+
+/// Resolve a [`BUNDLED_A2091_ROM`] sentinel to Copperline's bundled open
+/// A2091/A590 autoboot ROM.
+fn resolve_bundled_a2091_rom(cfg: &mut Config) -> Result<()> {
+    if cfg.scsi.rom.as_deref() != Some(Path::new(BUNDLED_A2091_ROM)) {
+        return Ok(());
+    }
+    let rom = crate::romsearch::find_bundled_a2091().ok_or_else(|| {
+        anyhow!(
+            "[scsi] controller = \"a2091\" but the bundled open ROM was not \
+             found. Set [scsi] rom = \"...\" (and rom_odd for split EPROMs), \
+             or install {} next to the binary or under \
+             share/copperline/a2091/.",
+            crate::romsearch::A2091_ROM_FILE
+        )
+    })?;
+    log::info!(
+        "no A2091 ROM specified; using bundled open ROM ({})",
+        rom.display()
+    );
+    cfg.scsi.rom = Some(rom);
     Ok(())
 }
 

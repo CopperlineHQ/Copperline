@@ -251,14 +251,22 @@ impl Default for DebuggerPanel {
 pub enum AnalyzerTab {
     Beam,
     Memory,
+    /// The debug resources the guest registered through the uaelib trap
+    /// (crate::uaelib): a table plus a decoded preview of the selection.
+    Resources,
 }
 
-pub const ANALYZER_TABS: [AnalyzerTab; 2] = [AnalyzerTab::Beam, AnalyzerTab::Memory];
+pub const ANALYZER_TABS: [AnalyzerTab; 3] = [
+    AnalyzerTab::Beam,
+    AnalyzerTab::Memory,
+    AnalyzerTab::Resources,
+];
 
 fn analyzer_tab_label(tab: AnalyzerTab) -> &'static str {
     match tab {
         AnalyzerTab::Beam => "Beam",
         AnalyzerTab::Memory => "Memory",
+        AnalyzerTab::Resources => "Resources",
     }
 }
 
@@ -289,6 +297,12 @@ pub struct FrameAnalyzerPanel {
     /// Memory tab: the pinned cell (an index into the 256x256 grid) whose
     /// address range and last toucher are reported under the map.
     pub heat_selected: Option<usize>,
+    /// Resources tab: the selected resource, keyed by its guest address so
+    /// the selection survives registry churn between draw and click.
+    pub resource_selected: Option<u32>,
+    /// Resources tab: the first listed registry entry (cursor keys
+    /// scroll), so a registry larger than the table stays reachable.
+    pub resource_scroll: usize,
 }
 
 impl FrameAnalyzerPanel {
@@ -301,6 +315,8 @@ impl FrameAnalyzerPanel {
             show_scrub: false,
             heat_presets: Vec::new(),
             heat_selected: None,
+            resource_selected: None,
+            resource_scroll: 0,
         }
     }
 
@@ -638,6 +654,16 @@ pub fn panel_control_at(panel: &Panel, pos: (i32, i32)) -> Option<UiControl> {
                         return Some(control);
                     }
                 }
+                AnalyzerTab::Resources => {
+                    // Rows are hit-tested by position alone; a click past
+                    // the listed resources maps to an index the selection
+                    // handler bounds-checks into a no-op.
+                    for (control, row_rect) in analyzer_resource_row_rects(rect) {
+                        if row_rect.contains(pos) {
+                            return Some(control);
+                        }
+                    }
+                }
             }
             for (control, button_rect) in analyzer_tab_button_rects(rect, panel.tab) {
                 if button_rect.contains(pos) {
@@ -785,6 +811,8 @@ pub enum UiControl {
     AnalyzerHeatPreset(u8),
     /// Memory tab: pick a heat map cell, in grid coordinates (0..=255 on
     /// both axes, so the mapping does not depend on the map's pixel size).
+    /// A row of the Resources tab's table (index into the displayed rows).
+    AnalyzerResourceRow(u8),
     AnalyzerHeatPick {
         x: u8,
         y: u8,
@@ -1441,6 +1469,43 @@ fn analyzer_preset_rects(rect: Rect, presets: &[HeatPreset]) -> Vec<(UiControl, 
     out
 }
 
+/// Height of one Resources-tab table row, and how many the panel lists.
+const ANALYZER_RESOURCE_ROW_H: usize = 12;
+pub const ANALYZER_RESOURCE_ROWS_MAX: usize = 10;
+
+/// The Resources tab's table rows, top to bottom under the header line.
+fn analyzer_resource_row_rects(rect: Rect) -> Vec<(UiControl, Rect)> {
+    let top = analyzer_content_top(rect) + 16;
+    (0..ANALYZER_RESOURCE_ROWS_MAX)
+        .map(|index| {
+            (
+                UiControl::AnalyzerResourceRow(index as u8),
+                Rect {
+                    x: rect.x + 10,
+                    y: top + index * ANALYZER_RESOURCE_ROW_H,
+                    w: rect.w - 20,
+                    h: ANALYZER_RESOURCE_ROW_H,
+                },
+            )
+        })
+        .collect()
+}
+
+/// The Resources tab's preview area, between the table and the transport
+/// buttons.
+fn analyzer_resource_detail_rect(rect: Rect) -> Rect {
+    let top =
+        analyzer_content_top(rect) + 16 + ANALYZER_RESOURCE_ROWS_MAX * ANALYZER_RESOURCE_ROW_H + 18;
+    Rect {
+        x: rect.x + 10,
+        y: top,
+        w: rect.w - 20,
+        h: (rect.y + rect.h)
+            .saturating_sub(DEBUG_BUTTON_H + 12 + 14)
+            .saturating_sub(top),
+    }
+}
+
 /// The Memory tab's map: a 368 px square nearest-sampled from the 256x256
 /// grid (not an integral scale, so a cell lands on 1-2 px).
 fn analyzer_heat_map_rect(rect: Rect) -> Rect {
@@ -1483,7 +1548,7 @@ fn analyzer_tab_button_rects(rect: Rect, tab: AnalyzerTab) -> Vec<(UiControl, Re
     let all = analyzer_button_rects(rect);
     match tab {
         AnalyzerTab::Beam => all.to_vec(),
-        AnalyzerTab::Memory => all[..2].to_vec(),
+        AnalyzerTab::Memory | AnalyzerTab::Resources => all[..2].to_vec(),
     }
 }
 
@@ -1856,6 +1921,40 @@ pub struct AnalyzerHeatView {
     /// The pinned cell's record, when a cell is pinned and the map has
     /// something recorded for it.
     pub selected: Option<AnalyzerHeatCell>,
+    /// Guest-registered debug resources (crate::uaelib), sorted by start,
+    /// so cells and presets can be named after what the program says
+    /// lives there.
+    pub resources: Vec<AnalyzerHeatResource>,
+}
+
+/// One guest-registered resource as the Memory tab names it.
+pub struct AnalyzerHeatResource {
+    pub start: u32,
+    /// Exclusive end.
+    pub end: u32,
+    pub name: String,
+    pub kind: &'static str,
+}
+
+/// The Resources tab's table and the selected resource's decoded preview.
+pub struct AnalyzerResourcesView {
+    pub rows: Vec<AnalyzerResourceRowView>,
+    /// Registry entries scrolled off either end of the table, reported
+    /// under it with the scroll hint.
+    pub hidden_above: usize,
+    pub hidden_below: usize,
+    pub detail: Option<AnalyzerResourceDetail>,
+}
+
+pub struct AnalyzerResourceRowView {
+    pub text: String,
+    pub selected: bool,
+}
+
+pub enum AnalyzerResourceDetail {
+    Bitmap(crate::video::resource_preview::BitmapPreview),
+    Palette { colours: Vec<u32> },
+    Copperlist { lines: Vec<String> },
 }
 
 pub struct FrameAnalyzerView {
@@ -1868,6 +1967,8 @@ pub struct FrameAnalyzerView {
     pub scrub: bool,
     /// The Memory tab's data; None while the heat map is not armed.
     pub heat: Option<AnalyzerHeatView>,
+    /// The Resources tab's data; built only while that tab is up.
+    pub resources: Option<AnalyzerResourcesView>,
 }
 
 pub enum PanelViewData {
@@ -3941,6 +4042,7 @@ fn draw_frame_analyzer(
     match panel.tab {
         AnalyzerTab::Beam => draw_analyzer_beam_tab(frame, rect, view, hover, scale),
         AnalyzerTab::Memory => draw_analyzer_heat_tab(frame, rect, panel, view, hover, scale),
+        AnalyzerTab::Resources => draw_analyzer_resources_tab(frame, rect, view, hover, scale),
     }
     // Transport buttons (and the beam tab's checkboxes) are bottom-anchored
     // chrome under whichever tab's content sits above them.
@@ -4208,6 +4310,225 @@ fn heat_cell_range(base: u32, bytes_per_cell: u32, cell: usize) -> String {
     format!("${start:06X}-${end:06X}")
 }
 
+/// The guest-registered resource covering any byte of `cell`, if one does.
+fn heat_resource_at(view: &AnalyzerHeatView, cell: usize) -> Option<&AnalyzerHeatResource> {
+    let start = view
+        .base
+        .saturating_add((cell as u32).saturating_mul(view.bytes_per_cell));
+    let end = start.saturating_add(view.bytes_per_cell.saturating_sub(1));
+    view.resources
+        .iter()
+        .find(|resource| resource.start <= end && start < resource.end)
+}
+
+/// `  in 'name' (kind)` when a registered resource covers the cell.
+fn heat_resource_suffix(view: &AnalyzerHeatView, cell: usize) -> String {
+    heat_resource_at(view, cell)
+        .map(|resource| format!("  in '{}' ({})", resource.name, resource.kind))
+        .unwrap_or_default()
+}
+
+fn draw_analyzer_resources_tab(
+    frame: &mut [u8],
+    rect: Rect,
+    view: &FrameAnalyzerView,
+    hover: Option<UiControl>,
+    scale: usize,
+) {
+    let content_top = analyzer_content_top(rect);
+    let Some(resources) = &view.resources else {
+        return;
+    };
+    if resources.rows.is_empty() {
+        draw_panel_text(
+            frame,
+            rect.x + 10,
+            content_top,
+            "no resources registered (uaelib debug_register_*)",
+            PANEL_TEXT_DIM,
+            1,
+            scale,
+        );
+        return;
+    }
+    draw_panel_text(
+        frame,
+        rect.x + 10,
+        content_top,
+        "name         type        address    size      geometry",
+        PANEL_TEXT_DIM,
+        1,
+        scale,
+    );
+    for ((control, row_rect), row) in analyzer_resource_row_rects(rect)
+        .into_iter()
+        .zip(&resources.rows)
+    {
+        if row.selected {
+            fill_rect(frame, scale_rect(row_rect, scale), ENTRY_BG, scale);
+        }
+        let colour = if row.selected {
+            PANEL_TEXT_HILIGHT
+        } else if hover == Some(control) {
+            PANEL_TEXT_ACCENT
+        } else {
+            PANEL_TEXT
+        };
+        draw_panel_text(
+            frame,
+            row_rect.x,
+            row_rect.y + 2,
+            &row.text,
+            colour,
+            1,
+            scale,
+        );
+    }
+    let more_y = analyzer_content_top(rect) + 16 + resources.rows.len() * ANALYZER_RESOURCE_ROW_H;
+    if resources.hidden_above > 0 || resources.hidden_below > 0 {
+        draw_panel_text(
+            frame,
+            rect.x + 10,
+            more_y,
+            &format!(
+                "{} above / {} below (cursor keys scroll)",
+                resources.hidden_above, resources.hidden_below
+            ),
+            PANEL_TEXT_DIM,
+            1,
+            scale,
+        );
+    }
+
+    let detail_rect = analyzer_resource_detail_rect(rect);
+    match &resources.detail {
+        None => draw_panel_text(
+            frame,
+            detail_rect.x,
+            detail_rect.y,
+            "click a resource to preview it",
+            PANEL_TEXT_DIM,
+            1,
+            scale,
+        ),
+        Some(AnalyzerResourceDetail::Bitmap(preview)) => {
+            draw_resource_bitmap_preview(frame, detail_rect, preview, scale);
+        }
+        Some(AnalyzerResourceDetail::Palette { colours }) => {
+            for (idx, colour) in colours.iter().enumerate().take(256) {
+                fill_rect(
+                    frame,
+                    scale_rect(
+                        Rect {
+                            x: detail_rect.x + (idx % 32) * VIDEO_PALETTE_CELL_W,
+                            y: detail_rect.y + (idx / 32) * VIDEO_PALETTE_CELL_H,
+                            w: VIDEO_PALETTE_CELL_W - 1,
+                            h: VIDEO_PALETTE_CELL_H - 1,
+                        },
+                        scale,
+                    ),
+                    *colour,
+                    scale,
+                );
+            }
+        }
+        Some(AnalyzerResourceDetail::Copperlist { lines }) => {
+            for (idx, line) in lines.iter().enumerate() {
+                let y = detail_rect.y + idx * 10;
+                if y + 8 > detail_rect.y + detail_rect.h {
+                    break;
+                }
+                draw_panel_text(frame, detail_rect.x, y, line, PANEL_TEXT, 1, scale);
+            }
+        }
+    }
+}
+
+/// Nearest-sample a decoded bitmap preview into the detail area,
+/// preserving its aspect (the [`draw_heat_map`] sampling pattern), with
+/// the decoder's note underneath.
+fn draw_resource_bitmap_preview(
+    frame: &mut [u8],
+    detail_rect: Rect,
+    preview: &crate::video::resource_preview::BitmapPreview,
+    scale: usize,
+) {
+    let note_h = 12;
+    let box_h = detail_rect.h.saturating_sub(note_h);
+    if preview.width == 0 || preview.height == 0 || box_h < 8 {
+        draw_panel_text(
+            frame,
+            detail_rect.x,
+            detail_rect.y,
+            preview.note.as_deref().unwrap_or("nothing to preview"),
+            PANEL_TEXT_DIM,
+            1,
+            scale,
+        );
+        return;
+    }
+    // Fit the picture into the box: integer upscale when it is small,
+    // proportional downsample when it is big.
+    let fit = |avail: usize, src: usize| -> usize {
+        if src <= avail {
+            (src * (avail / src).max(1)).min(avail)
+        } else {
+            avail
+        }
+    };
+    let scale_num = usize::min(
+        fit(detail_rect.w, preview.width) * 1000 / preview.width,
+        fit(box_h, preview.height) * 1000 / preview.height,
+    );
+    let out_w = (preview.width * scale_num / 1000).max(1);
+    let out_h = (preview.height * scale_num / 1000).max(1);
+    let shown = Rect {
+        x: detail_rect.x,
+        y: detail_rect.y,
+        w: out_w,
+        h: out_h,
+    };
+    for y in 0..out_h {
+        let src_y = y * preview.height / out_h;
+        for x in 0..out_w {
+            let src_x = x * preview.width / out_w;
+            let pixel = preview
+                .pixels
+                .get(src_y * preview.width + src_x)
+                .copied()
+                .unwrap_or(0xFF00_0000);
+            fill_rect(
+                frame,
+                scale_rect(
+                    Rect {
+                        x: shown.x + x,
+                        y: shown.y + y,
+                        w: 1,
+                        h: 1,
+                    },
+                    scale,
+                ),
+                pixel,
+                scale,
+            );
+        }
+    }
+    draw_outline(frame, shown, BUTTON_EDGE_LIGHT, scale);
+    let caption = match &preview.note {
+        Some(note) => format!("{}x{}  {}", preview.width, preview.height, note),
+        None => format!("{}x{}", preview.width, preview.height),
+    };
+    draw_panel_text(
+        frame,
+        detail_rect.x,
+        shown.y + out_h + 4,
+        &caption,
+        PANEL_TEXT_DIM,
+        1,
+        scale,
+    );
+}
+
 fn draw_analyzer_heat_tab(
     frame: &mut [u8],
     rect: Rect,
@@ -4308,21 +4629,27 @@ fn draw_analyzer_heat_tab(
     let readout_y = map.y + map.h + 10;
     let (text, colour, swatch) = match (hovered, panel.heat_selected) {
         (Some(cell), _) => (
-            heat_cell_range(heat.base, heat.bytes_per_cell, cell),
+            format!(
+                "{}{}",
+                heat_cell_range(heat.base, heat.bytes_per_cell, cell),
+                heat_resource_suffix(heat, cell)
+            ),
             PANEL_TEXT,
             None,
         ),
         (None, Some(cell)) => {
             let range = heat_cell_range(heat.base, heat.bytes_per_cell, cell);
+            let in_resource = heat_resource_suffix(heat, cell);
             match heat.selected.as_ref().filter(|sel| sel.cell == cell) {
                 Some(sel) => {
                     let mut text = format!("{range}  {}", sel.toucher.unwrap_or("untouched"));
                     if let Some(age) = sel.age_frames {
                         text.push_str(&format!("  age {age}f"));
                     }
+                    text.push_str(&in_resource);
                     (text, PANEL_TEXT_HILIGHT, Some(sel.colour))
                 }
-                None => (format!("{range}  untouched"), PANEL_TEXT, None),
+                None => (format!("{range}  untouched{in_resource}"), PANEL_TEXT, None),
             }
         }
         (None, None) => ("click a cell to inspect".to_string(), PANEL_TEXT_DIM, None),
@@ -5955,7 +6282,7 @@ fn launcher_path_inherits(setup: &launcher::MachineSetup, field: LauncherField) 
             && (field != LauncherField::FmvRom || !setup.fmv_rom_disabled());
     }
     if field == LauncherField::ScsiRom {
-        return setup.scsi_controller_is_a4091() && setup.path(field).is_none();
+        return setup.scsi_bundled_rom_label().is_some() && setup.path(field).is_none();
     }
     field.is_paths_field() && field != LauncherField::PathsBase && !setup.paths_is_set(field)
 }

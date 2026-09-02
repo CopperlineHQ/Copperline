@@ -53,6 +53,11 @@ pub const PLAYER_SETTINGS_FILE: &str = "settings.toml";
 /// the bundled A4091 ROM, or fail. A real `rom = "..."` replaces it.
 pub const BUNDLED_A4091_ROM: &str = "<bundled-a4091>";
 
+/// Sentinel `[scsi] rom` for an A2091/A590 fitted without a named ROM:
+/// resolve to Copperline's open replacement ROM, or fail. Explicit merged
+/// and split-EPROM paths continue to take precedence.
+pub const BUNDLED_A2091_ROM: &str = "<bundled-a2091>";
+
 /// Sentinel `[lide] rom` for a board fitted (an explicit `board`, or a drive
 /// image) without a named ROM: resolve to the bundled ROM for that board's
 /// personality (`lide.rom` for RIPPLE/RIDE, `lide-atbus.rom` for AT-Bus
@@ -315,9 +320,16 @@ pub struct Config {
     pub pixel_aspect: PixelAspect,
     /// How the presentation canvas is scaled into the window: aspect-fit
     /// with filtering, or whole-number multiples only. See
-    /// [`DisplayScaling`]. Orthogonal to `pixel_aspect`, which decides what
-    /// the canvas itself is.
+    /// [`DisplayScaling`]. A separate question from `pixel_aspect`, which
+    /// decides the shape of the picture; integer scaling draws that shape
+    /// from the unresampled canvas under either aspect.
     pub scaling: DisplayScaling,
+    /// Crop the window presentation to the display window the hardware
+    /// programs (`[display] autocrop`, default off), so a display using
+    /// fewer lines than the full scan fills more of the window -- the
+    /// Amiberry-style autocrop. A window-presentation setting only:
+    /// captures always keep their configured aperture.
+    pub autocrop: bool,
     /// Motion-adaptive deinterlacing of LACE content (on by default).
     /// Off, every field is plain line-doubled as it arrives, which shows
     /// interlace bob/flicker like a real TV without persistence.
@@ -479,11 +491,15 @@ pub enum DisplayScaling {
     /// whatever the ratio works out to. The default.
     #[default]
     Smooth,
-    /// Draw the canvas at the largest whole-number multiple of itself that
-    /// fits the window, centred in black borders and point-sampled, so
-    /// every canvas pixel is the same square block of host pixels. Falls
-    /// back to the smooth fit when the window is too small for even 1x,
-    /// which shrinks rather than crops.
+    /// Draw the canvas at whole-number multiples, centred in black borders
+    /// and point-sampled, so every canvas pixel is the same block of host
+    /// pixels. Always from the unresampled (square) canvas: the largest
+    /// uniform multiple under the square aspect, and under the tv aspect a
+    /// separate whole number per axis -- pixels per column and per scan
+    /// line -- chosen to approximate the 4:3 pixel shape
+    /// (`video::window::present::per_axis_fit`). Falls back to the smooth
+    /// fit when the window is too small for even 1x, which shrinks rather
+    /// than crops.
     Integer,
 }
 
@@ -1203,8 +1219,8 @@ pub struct ScsiConfig {
 
 impl ScsiConfig {
     /// Whether a `[scsi]` section asked for a board at all. A bare
-    /// `controller` with no ROM or drives fits nothing -- except an A4091,
-    /// which validation gives the bundled ROM, so `rom` is then set.
+    /// `controller` with no ROM or drives fits nothing -- except an A2091 or
+    /// A4091, which validation gives a bundled ROM, so `rom` is then set.
     pub fn enabled(&self) -> bool {
         self.rom.is_some() || self.units.iter().any(Option::is_some)
     }
@@ -1278,6 +1294,12 @@ pub struct Emulation {
     /// the status-bar power button is clicked -- handy for arming video
     /// capture beforehand. The power button cold-boots the machine.
     pub power_on: bool,
+    /// Whether opening this configuration in the launcher runs it at once,
+    /// skipping the configuration screen (default false). Read only by the
+    /// launcher -- at startup for the default configuration, and by its
+    /// Load... button -- never by a machine started from the command line,
+    /// which was never going to show the screen anyway.
+    pub auto_launch: bool,
     /// How real-mode pacing debits its per-frame instruction budget. See
     /// `PacingBudget`. The `COPPERLINE_REAL_PACING_BUDGET` env var overrides
     /// this for one run.
@@ -1303,6 +1325,10 @@ pub struct Emulation {
     /// Warp boot until an absolute emulated timestamp instead: the
     /// deterministic variant for a setup whose boot time is known.
     pub warp_until: Option<f64>,
+    /// The WinUAE-compatible uaelib trap at $F0FF60 (`crate::uaelib`):
+    /// guest programs toggle warp, log debug text and register resources
+    /// through it. On by default; `uaelib = false` leaves $F0FF60 floating.
+    pub uaelib: bool,
     /// Record rewind history from power-on, so the rewind hotkey and menu item
     /// work without opening the debugger. Off by default: capturing costs a
     /// whole-machine serialize every `rewind_interval_frames` and the retained
@@ -2322,12 +2348,14 @@ impl Default for Config {
             cpu_jit: false,
             emulation: Emulation {
                 power_on: true,
+                auto_launch: false,
                 pacing_budget: PacingBudget::Cycles,
                 realtime_priority: false,
                 warp_speed: WarpSpeed::default(),
                 warp_boot: false,
                 warp_boot_idle: 10.0,
                 warp_until: None,
+                uaelib: true,
                 rewind: false,
                 rewind_budget_mb: REWIND_DEFAULT_BUDGET_MB,
                 rewind_interval_frames: REWIND_DEFAULT_INTERVAL_FRAMES,
@@ -2396,6 +2424,7 @@ impl Default for Config {
             tv_centre: TvCentre::default(),
             pixel_aspect: PixelAspect::Tv,
             scaling: DisplayScaling::Smooth,
+            autocrop: false,
             deinterlace: true,
             phosphor: 0.0,
             shader: ShaderMode::None,

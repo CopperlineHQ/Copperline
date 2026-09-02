@@ -159,6 +159,14 @@ copperline-ctl --info /tmp/ccp.json --repl
 events.subscribe {"events":["frame","serial","interrupt","media"],"frame_interval":50}
 ```
 
+An MCP-capable agent (Claude Code, Cursor, ...) gets the same protocol as
+tools: `claude mcp add copperline -- copperline-ctl --mcp` (or an `.mcp.json`
+entry), then `session_launch {"config": "my.toml"}` or `session_attach
+{"info_file": "/tmp/ccp.json"}`, `break_add`, `continue {"wait_ms": 5000}`
+(the bridge pauses the machine when the wait expires), `capture_screenshot`
+(returned as an image), `events_next`. Tool names are the method names with
+dots as underscores; see the "MCP server" section of the reference.
+
 The event streams are bounded, so check their drop counts when observations
 must be complete. The same session can use `trace.start`/`trace.stop` and
 `waveform.start`/`waveform.stop` to bracket file-backed diagnostics at runtime
@@ -176,7 +184,11 @@ debuggers.
   environment variables: breakpoints, watchpoints, instruction traces,
   Copper-list dumps, per-hit screenshots (`docs/debugger/headless.md`).
   All `COPPERLINE_*` variables are snapshotted at startup and cannot change
-  at runtime.
+  at runtime. Arming them is timeline-transparent: the debugged run
+  retires the same instructions at the same colour clocks as the plain
+  run, so instruments can be added one at a time to the same run (the one
+  exception is `[cpu] jit`, which falls back to precise timing while any
+  hook is armed and says so in the log).
 - `--waveform out.vcd` with `--wave-trigger`/`--wave-duration` exports a VCD
   chip-signal trace for GTKWave (`docs/debugger/waveform.md`).
 - `--benchmark-until SECS` measures host-CPU cost of the deterministic

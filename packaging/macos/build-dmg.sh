@@ -61,7 +61,8 @@ done
 echo "==> Staging $app_name"
 rm -rf "$stage"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/aros" \
-  "$app/Contents/Resources/a4091" "$app/Contents/Resources/lide"
+  "$app/Contents/Resources/a2091" "$app/Contents/Resources/a4091" \
+  "$app/Contents/Resources/lide"
 
 # Universal binary from the per-arch builds (a single-arch lipo is a no-op copy).
 bins=()
@@ -105,6 +106,11 @@ done
 # the binary artifact.
 for f in a4091_cdfs.rom README.md THIRD_PARTY_NOTICES.txt; do
   cp "assets/a4091/$f" "$app/Contents/Resources/a4091/$f"
+done
+
+# Copperline's open A2091/A590 autoboot ROM.
+for f in copperline-a2091.rom README.md THIRD_PARTY_NOTICES.txt; do
+  cp "assets/a2091/$f" "$app/Contents/Resources/a2091/$f"
 done
 
 # Bundled open-source lide.device autoboot ROM and CD-filesystem bank

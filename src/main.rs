@@ -139,10 +139,18 @@ fn validate_run_args(cli: &CliArgs) -> Result<()> {
 
 fn validate_gdb_args(cli: &CliArgs) -> Result<()> {
     #[cfg(not(feature = "gdb"))]
-    if cli.gdb.is_some() {
+    if cli.gdb.is_some() || cli.gdb_gui.is_some() {
         return Err(anyhow!(
             "this build was compiled without the gdb feature; \
-             rebuild with --features gdb for --gdb"
+             rebuild with --features gdb for --gdb/--gdb-gui"
+        ));
+    }
+    if cli.gdb.is_some() && cli.gdb_gui.is_some() {
+        return Err(anyhow!("--gdb and --gdb-gui cannot be combined"));
+    }
+    if cli.gdb_gui.is_some() && cli.benchmark_until.is_some() {
+        return Err(anyhow!(
+            "--gdb-gui cannot be combined with --benchmark-until"
         ));
     }
     if cli.gdb.is_none() {
@@ -197,9 +205,9 @@ fn validate_control_args(cli: &CliArgs) -> Result<()> {
         ));
     }
     if cli.control.is_some() || cli.control_gui.is_some() {
-        if cli.gdb.is_some() {
+        if cli.gdb.is_some() || cli.gdb_gui.is_some() {
             return Err(anyhow!(
-                "--control/--control-gui cannot be combined with --gdb"
+                "--control/--control-gui cannot be combined with --gdb/--gdb-gui"
             ));
         }
         if cli.benchmark_until.is_some() {
@@ -729,16 +737,27 @@ fn main() -> Result<()> {
     // The modem's stored profile (AT&W/ATZ) is the frontend's to ask for
     // too, same promise as the synth's battery-backed memory above.
     copperline::modem::profile::set_persistence(!cli.factory);
+    // With nothing specified, open the configuration screen instead of
+    // booting a default machine. Decided before the config is validated --
+    // not just before the bundled ROM resolves -- so the launcher opens
+    // even when no Kickstart/AROS is present *and* when the saved default
+    // no longer validates (a floppy image gone missing, say): the screen
+    // is where such a config gets fixed, and its Run button is where the
+    // error shows. An auto-launching default rides the same rule -- its
+    // failed run lands back on the open screen rather than exiting. (A
+    // bare launcher start has no --rom to fold in: launcher_requested
+    // requires its absence.)
+    if launcher_requested(&cli) {
+        return run_configuration_screen(load_raw_config(
+            cli.config_path.as_deref(),
+            &cli.overrides,
+            cli.factory,
+        )?);
+    }
+
     let (cfg, mut raw_cfg) = load_config(cli.config_path.as_deref(), &cli.overrides, cli.factory)?;
     if let Some(p) = &cli.rom_path {
         raw_cfg.rom = Some(p.to_string_lossy().into_owned());
-    }
-
-    // With nothing specified, open the configuration screen instead of booting
-    // a default machine. Decided before resolving the bundled ROM so the
-    // launcher opens even when no Kickstart/AROS is present.
-    if launcher_requested(&cli) {
-        return run_configuration_screen(raw_cfg);
     }
 
     let mut cfg = cfg.with_rom_override(cli.rom_path.clone());
@@ -1004,6 +1023,7 @@ fn main() -> Result<()> {
     });
     video::set_pixel_aspect(config::resolve_pixel_aspect(cfg.pixel_aspect));
     video::set_display_scaling(cfg.scaling);
+    video::set_autocrop(cfg.autocrop);
     video::set_menu_scale(cfg.menu_scale);
     // A fascia belongs to a machine that carries the instrument: with the
     // serial port out of MIDI mode, or another device chosen, the strip
@@ -1028,8 +1048,9 @@ fn main() -> Result<()> {
     // window-server access), and a capture run must work anywhere.
     // --control-gui keeps the windowed path: it explicitly asks for an
     // interactive session.
-    let windowless_capture =
-        (!cli.screenshot_after.is_empty() || cli.frame_dump.is_some()) && cli.control_gui.is_none();
+    let windowless_capture = (!cli.screenshot_after.is_empty() || cli.frame_dump.is_some())
+        && cli.control_gui.is_none()
+        && cli.gdb_gui.is_none();
     // The warp-launch gate belongs to interactive sessions only: a capture
     // run is already unpaced end to end and must never be re-paced when the
     // program loads.
@@ -1101,6 +1122,17 @@ fn main() -> Result<()> {
         config.info_file = cli.control_info;
         let handle = copperline::control::windowed::ControlHandle::bind(&config)?;
         app.attach_control(handle, &config);
+    }
+    #[cfg(feature = "gdb")]
+    if let Some(listen) = cli.gdb_gui {
+        // Same shape for the windowed GDB stub: bind before the window
+        // opens, socket threads start inside App::run.
+        let mut config = gdbstub::Config::new(listen);
+        // --run + --gdb-gui: stop at the program's first instruction,
+        // the moment the guest OS loads it.
+        config.stop_on_load = run_prog_name.clone();
+        let handle = copperline::gdbstub::windowed::GdbHandle::bind(&config)?;
+        app.attach_gdb(handle, &config);
     }
 
     // Elevate the thread that is about to run the event loop and the pacer.
@@ -1175,6 +1207,7 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
     // the default aspect and scaling; the machine it starts applies its own
     // (see start_configured_machine).
     video::set_display_scaling(config::DisplayScaling::Smooth);
+    video::set_autocrop(false);
     // The launcher opens before a machine config is built, so the menu size
     // comes straight off the raw file.
     video::set_menu_scale(raw_cfg.menu_scale());
@@ -1228,6 +1261,9 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         copperline::sampler::SamplerRequest::default(),
     );
     app.open_launcher();
+    // `[emulation] auto_launch` in the configuration the launcher opened
+    // showing: straight to the machine, no configuration screen first.
+    app.auto_launch_if_asked();
     app.run()
 }
 
@@ -1253,6 +1289,7 @@ fn launcher_requested(cli: &CliArgs) -> bool {
         && cli.frame_dump.is_none()
         && cli.benchmark_until.is_none()
         && cli.gdb.is_none()
+        && cli.gdb_gui.is_none()
         && cli.control.is_none()
         && cli.control_gui.is_none()
         && cli.load_state.is_none()
@@ -1376,6 +1413,21 @@ fn load_config(
     overrides: &ConfigOverrides,
     factory: bool,
 ) -> Result<(Config, config::RawConfig)> {
+    let raw = load_raw_config(explicit, overrides, factory)?;
+    let cfg = Config::try_from(raw.clone())?;
+    Ok((cfg, raw))
+}
+
+/// The raw half of [`load_config`]: find and parse the file, put its
+/// `[paths]` in force, validate nothing. The configuration screen starts
+/// from this -- validation belongs to its Run button, where a missing
+/// floppy image is a status line to fix rather than an exit before the
+/// screen that could fix it ever opens.
+fn load_raw_config(
+    explicit: Option<&Path>,
+    overrides: &ConfigOverrides,
+    factory: bool,
+) -> Result<config::RawConfig> {
     // Resolve which file (if any) backs the config: the explicit --config
     // path, then ./copperline.toml if present, then the configuration saved
     // with Save default, otherwise the built-in defaults. CLI overrides
@@ -1402,14 +1454,13 @@ fn load_config(
         None
     };
     let raw = Config::load_raw(path, overrides)?;
-    // Before the conversion, not after: `Config::try_from` resolves the
-    // implicit battery-RAM backing files through the paths in force, so
-    // adopting afterwards would site this run's NVRAM by the previous
-    // answer. Whatever this host cannot reach is dropped here and inherits
+    // Before any conversion: `Config::try_from` resolves the implicit
+    // battery-RAM backing files through the paths in force, so adopting
+    // afterwards would site this run's NVRAM by the previous answer.
+    // Whatever this host cannot reach is dropped here and inherits
     // instead, so a config naming somebody else's memory stick still starts.
     copperline::paths::adopt(raw.paths());
-    let cfg = Config::try_from(raw.clone())?;
-    Ok((cfg, raw))
+    Ok(raw)
 }
 
 #[cfg(test)]
@@ -1909,6 +1960,30 @@ mod tests {
         assert_eq!(args.gdb.as_deref(), Some(":2345"));
         assert!(!args.audio_live);
         validate_gdb_args(&args)?;
+        Ok(())
+    }
+
+    #[test]
+    fn gdb_gui_parses_and_excludes_the_contending_modes() -> Result<()> {
+        // The windowed stub keeps live audio: the machine stays paced
+        // and audible like any interactive session.
+        let args = parse(&["--gdb-gui", ":2345"])?;
+        assert_eq!(args.gdb_gui.as_deref(), Some(":2345"));
+        assert!(args.audio_live);
+        validate_gdb_args(&args)?;
+        validate_control_args(&args)?;
+
+        let args = parse(&["--gdb-gui", ":2345", "--gdb", ":2346"])?;
+        let err = validate_gdb_args(&args).unwrap_err();
+        assert!(err.to_string().contains("cannot be combined"), "{err:#}");
+
+        let args = parse(&["--gdb-gui", ":2345", "--benchmark-until", "5"])?;
+        let err = validate_gdb_args(&args).unwrap_err();
+        assert!(err.to_string().contains("--benchmark-until"), "{err:#}");
+
+        let args = parse(&["--gdb-gui", ":2345", "--control-gui", ":7710"])?;
+        let err = validate_control_args(&args).unwrap_err();
+        assert!(err.to_string().contains("--gdb-gui"), "{err:#}");
         Ok(())
     }
 

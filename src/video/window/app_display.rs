@@ -298,13 +298,42 @@ impl App {
     /// Draw a given monitor front for the rest of the run (the config file
     /// default is unchanged; set `[display] bezel` to make it stick).
     pub(super) fn set_bezel(&mut self, style: BezelStyle) {
-        self.bezel = style;
-        if style.is_on() {
-            self.bezel_last = style;
+        if !self.apply_bezel_style(style) {
+            self.show_osd("Monitor bezel unchanged: the display texture could not be resized");
+            self.request_redraw();
+            return;
         }
         info!("monitor bezel: {}", style.label());
         self.show_osd(format!("Monitor bezel: {}", style.menu_label()));
         self.request_redraw();
+    }
+
+    /// Adopt a bezel style: the window's own field, the canvas rule's
+    /// mirror of it (`video::set_bezel_shown`), and -- when that moves
+    /// the canvas between the tv and the square geometry, which it does
+    /// under integer scaling of the tv aspect (`video::square_canvas`) --
+    /// the texture and window that follow the canvas. Says nothing on
+    /// screen: the toggle announces itself, a machine start does not.
+    /// False, with the previous style back in force, when the texture
+    /// could not follow the canvas change.
+    pub(super) fn apply_bezel_style(&mut self, style: BezelStyle) -> bool {
+        let was_canvas_sized = self.window_is_canvas_sized();
+        let canvas_before = window_present_height();
+        let previous = (self.bezel, self.bezel_last);
+        self.bezel = style;
+        if style.is_on() {
+            self.bezel_last = style;
+        }
+        crate::video::set_bezel_shown(style.is_on());
+        if window_present_height() != canvas_before
+            && !self.resync_canvas_geometry(was_canvas_sized, canvas_before)
+        {
+            (self.bezel, self.bezel_last) = previous;
+            crate::video::set_bezel_shown(self.bezel.is_on());
+            self.replan_main_texture();
+            return false;
+        }
+        true
     }
 
     /// Cmd/Alt+P: toggle the performance overlay for the rest of the run
@@ -444,19 +473,49 @@ impl App {
         // note the height that verdict is measured against.
         let was_canvas_sized = self.window_is_canvas_sized();
         let canvas_before = window_present_height();
+        let previous = crate::video::pixel_aspect();
         crate::video::set_pixel_aspect(aspect);
+        // The square aspect and integer scaling of the tv aspect share the
+        // square canvas, so the height need not change; the geometry
+        // resync is a no-op then, and the texture is re-planned regardless.
+        if !self.resync_canvas_geometry(was_canvas_sized, canvas_before) {
+            crate::video::set_pixel_aspect(previous);
+            self.replan_main_texture();
+            self.show_osd("Pixel aspect unchanged: the display texture could not be resized");
+            return;
+        }
+        self.request_redraw();
+    }
+
+    /// Follow a change of the canvas height that came from a presentation
+    /// setting -- the pixel aspect, integer scaling under the tv aspect,
+    /// the bezel (`video::present_height`): re-plan the main texture for
+    /// the new canvas (the integer fit and its supersample factor are
+    /// re-decided for it, and the texture resized like a DPI change, see
+    /// `resync_render_scale`), put the tool windows -- whose texture
+    /// layout is the canvas's, panel centring reading the live height --
+    /// on the new size too, and move the window with it
+    /// (`follow_canvas_change`).
+    ///
+    /// False when the main texture could not be resized for the new
+    /// canvas, and then nothing else is touched. The draw helpers slice
+    /// the texture by the live canvas height, so a taller canvas over the
+    /// old, shorter texture would index past it on the next redraw: the
+    /// caller must put its setting back and re-plan for the canvas it
+    /// went back to ([`Self::replan_main_texture`]), as the status-bar
+    /// toggle does.
+    pub(super) fn resync_canvas_geometry(
+        &mut self,
+        was_canvas_sized: bool,
+        canvas_before: usize,
+    ) -> bool {
         if let Some(r) = self.render.as_mut() {
-            // The canvas height changes with the aspect, so re-plan: the
-            // integer fit (and its supersample factor) is re-decided for the
-            // new canvas, and the texture resized to it.
             let surface = r.window.inner_size();
             if let Err(e) = sync_main_present_scaling(r, (surface.width, surface.height)) {
-                warn!("resize texture buffer for pixel aspect failed: {e}");
+                warn!("resize texture buffer for the canvas change failed: {e}");
+                return false;
             }
         }
-        // Tool windows share the canvas-sized texture layout (panel
-        // centring reads the live canvas height), so their buffers and
-        // windows must follow the new size too.
         let size = LogicalSize::new(FB_WIDTH as f64, window_present_height() as f64);
         for kind in ToolPanelKind::ALL {
             let mut applied = None;
@@ -465,7 +524,7 @@ impl App {
                     texture_width(tool.texture_scale) as u32,
                     texture_height(tool.texture_scale) as u32,
                 ) {
-                    warn!("resize tool texture buffer for pixel aspect failed: {e}");
+                    warn!("resize tool texture buffer for the canvas change failed: {e}");
                 }
                 applied = tool.window.request_inner_size(size);
             }
@@ -475,22 +534,48 @@ impl App {
             }
         }
         self.follow_canvas_change(was_canvas_sized, canvas_before);
-        self.request_redraw();
+        true
+    }
+
+    /// Re-plan the main texture for the canvas a reverted setting went
+    /// back to. The plan taken for the canvas that never materialised is
+    /// stale; the texture kept its old extent (`resize_buffer` leaves it
+    /// on failure), so this re-take is what makes texture and canvas
+    /// agree again before the next redraw.
+    pub(super) fn replan_main_texture(&mut self) {
+        if let Some(r) = self.render.as_mut() {
+            let surface = r.window.inner_size();
+            let _ = sync_main_present_scaling(r, (surface.width, surface.height));
+        }
     }
 
     /// Switch how the presentation canvas is scaled into the window live.
     ///
-    /// The canvas itself never changes -- integer mode may re-render it at a
-    /// different supersample factor, but its pixel content, the window size
-    /// and a video recording (whose frames are the 1x canvas, averaged down
-    /// like any supersample) all carry on -- so unlike a pixel-aspect switch
-    /// there is no recording to refuse and no window to re-size.
+    /// Under the square aspect the canvas itself never changes -- integer
+    /// mode may re-render it at a different supersample factor, but its
+    /// pixel content and the window size carry on -- so only the plan is
+    /// re-taken. Under the tv aspect, integer scaling moves the canvas to
+    /// the square geometry and back (`video::square_canvas`: the
+    /// whole-number draw is only exact from an unresampled canvas), which
+    /// is a pixel-aspect-sized change the texture, the tool windows and
+    /// the window all follow. A video recording carries on either way:
+    /// its frames are the aspect's capture canvas, never the window's.
     pub(super) fn apply_display_scaling(&mut self, scaling: DisplayScaling) {
         if scaling == crate::video::display_scaling() {
             return;
         }
+        let was_canvas_sized = self.window_is_canvas_sized();
+        let canvas_before = window_present_height();
+        let previous = crate::video::display_scaling();
         crate::video::set_display_scaling(scaling);
-        if let Some(r) = self.render.as_mut() {
+        if window_present_height() != canvas_before {
+            if !self.resync_canvas_geometry(was_canvas_sized, canvas_before) {
+                crate::video::set_display_scaling(previous);
+                self.replan_main_texture();
+                self.show_osd("Scaling unchanged: the display texture could not be resized");
+                return;
+            }
+        } else if let Some(r) = self.render.as_mut() {
             // A minimized window has no surface to re-plan against; the
             // Resized event that restores it re-plans itself.
             if !r.minimized {
@@ -508,6 +593,114 @@ impl App {
             }
         }
         self.show_osd(format!("Scaling: {}", scaling.label()));
+        self.request_redraw();
+    }
+
+    /// The sub-rect of the display region the presentation shows, in
+    /// canvas pixels, with the pixel shape it is drawn at -- or `None`
+    /// whenever the classic whole-canvas layout must present instead.
+    /// Two modes show a sub-rect: autocrop (the content rect the hardware
+    /// fetches), and per-axis integer scaling -- integer scaling of the
+    /// tv aspect, which draws the square canvas with its own whole-number
+    /// factor per axis at the glass's pixel shape (`glass_par`), and
+    /// shows the TV aperture's rect of that canvas (`aperture_canvas_rect`)
+    /// unless autocrop tightens it to the content. Neither applies to a
+    /// frame it cannot draw: the bezel frames the whole glass with a fixed
+    /// opening (and keeps the tv canvas, so there is no per-axis draw to
+    /// make), and RTG board frames present their own geometry. A
+    /// programmable (multisync) scan crops like a standard one -- its
+    /// envelope arrives mapped through the scan's own sync-anchored
+    /// window -- but takes the uniform multiple rather than the per-axis
+    /// glass shape. The CRT presets compose: the pass re-draws whatever
+    /// rect the layout shows.
+    ///
+    /// While a mode is on, the layout never falls back to the classic
+    /// letterbox: an open menu or panel widens the rect to the full
+    /// display region instead, as does a session with no content yet
+    /// under autocrop alone. The overlays draw into the display region
+    /// against the full canvas mapping, so this keeps them entirely
+    /// visible -- and it keeps the status-bar band pinned to the window
+    /// bottom, rather than hopping between the bottom-anchored band and
+    /// the letterbox's centred bar every time a menu opens.
+    pub(super) fn display_canvas_src(&self) -> Option<DisplaySrc> {
+        self.display_canvas_src_for(per_axis_scaling_requested(), crate::video::autocrop())
+    }
+
+    /// [`Self::display_canvas_src`] for the given mode requests, pure of
+    /// the live globals.
+    pub(super) fn display_canvas_src_for(
+        &self,
+        per_axis: bool,
+        autocrop: bool,
+    ) -> Option<DisplaySrc> {
+        if self.rtg_present_dims.is_some() || self.bezel.is_on() {
+            return None;
+        }
+        if !per_axis && !autocrop {
+            return None;
+        }
+        // A programmable scan's glass is the whole canvas, with no woven
+        // pairs for a per-line factor to step by half a row: it keeps
+        // the uniform multiple of the square canvas, so only the tv
+        // canvas of a standard scan asks for the glass shape.
+        let par = if per_axis && !self.present_programmable {
+            glass_par(
+                self.overscan,
+                self.present_tv_aperture_rows,
+                self.present_rows,
+            )
+        } else {
+            (1, 1)
+        };
+        let full = (0, 0, FB_WIDTH, present_height());
+        if self.ui.active() {
+            return Some(DisplaySrc { rect: full, par });
+        }
+        // What the per-axis draw shows with nothing tighter to show: the
+        // aperture the tv canvas fills its glass with, not the pads
+        // around it. (The full-overscan canvas is its own aperture.)
+        let base = match self.present_tv_aperture_rows {
+            Some(rows) if per_axis && self.overscan == Overscan::Tv => aperture_canvas_rect(rows),
+            _ => full,
+        };
+        let rect = if autocrop {
+            self.present_content_rect
+                .and_then(|content| {
+                    canvas_content_rect(
+                        content,
+                        self.present_rows,
+                        self.present_width,
+                        self.overscan,
+                        self.tv_centre,
+                        self.present_tv_aperture_rows,
+                        present_height(),
+                    )
+                })
+                .unwrap_or(base)
+        } else {
+            base
+        };
+        Some(DisplaySrc { rect, par })
+    }
+
+    /// Switch the autocrop presentation live. Purely a scaler-pass
+    /// input -- the canvas, texture and window are untouched -- so
+    /// nothing needs rebuilding; the next redraw draws the other layout.
+    pub(super) fn apply_autocrop(&mut self, autocrop: bool) {
+        if autocrop == crate::video::autocrop() {
+            return;
+        }
+        crate::video::set_autocrop(autocrop);
+        // Turning it on under a bezel changes nothing on screen (the
+        // front's fixed opening owns the glass and the crop suspends
+        // itself); say so, or the toggle looks broken.
+        let suspended = self.bezel.is_on();
+        self.show_osd(match (autocrop, suspended) {
+            (true, true) => "Autocrop: on (suspended while a bezel is on)",
+            (true, false) => "Autocrop: on",
+            (false, _) => "Autocrop: off",
+        });
+        self.main_presentation_dirty = true;
         self.request_redraw();
     }
 
@@ -616,11 +809,37 @@ impl App {
         self.present_width = width;
     }
 
+    /// A different scan geometry is a different coordinate space for the
+    /// content envelope -- a programmable scan's own glass rows against
+    /// the standard woven field, a 35 ns canvas against the classic one,
+    /// a mode's LACE toggling its rows -- so the latch's union and shrink
+    /// clock start over across one, the way the deinterlacer drops its
+    /// weave history there. The screen changes wholesale at such a switch
+    /// anyway; there is no zoom to hold steady through it.
+    fn reset_autocrop_latch_across_scan_change(
+        &mut self,
+        programmable: bool,
+        present_rows: usize,
+        present_width: usize,
+    ) {
+        if (programmable, present_rows, present_width)
+            != (
+                self.present_programmable,
+                self.present_rows,
+                self.present_width,
+            )
+        {
+            self.autocrop_latch.reset();
+        }
+    }
+
     pub(super) fn reset_render_pipeline(&mut self) {
         self.render_generation = self.render_generation.wrapping_add(1);
         self.last_rendered_emulated_frame = None;
         self.last_submitted_render_frame = None;
         self.presentation_latch.reset();
+        self.autocrop_latch.reset();
+        self.present_content_rect = None;
         self.last_main_redraw_state = None;
         self.main_presentation_dirty = true;
         let _ = self.collect_threaded_render_results(false);
@@ -637,6 +856,22 @@ impl App {
                 self.render_recycle_fb = result.presentation_fb;
             }
             return false;
+        }
+
+        // Advance the autocrop smoothing on every rendered frame, reused
+        // ones included: a static screen is exactly what lets a smaller
+        // envelope prove itself stable. A change to the *presented* crop
+        // must repaint even when the pixels themselves are unchanged
+        // (the shrink adoption fires on the Nth identical frame).
+        self.reset_autocrop_latch_across_scan_change(
+            result.programmable,
+            result.present_rows,
+            result.present_width,
+        );
+        let smoothed = self.autocrop_latch.resolve(result.content_rect);
+        if smoothed != self.present_content_rect {
+            self.present_content_rect = smoothed;
+            self.main_presentation_dirty = true;
         }
 
         if result.reused_previous {
@@ -806,6 +1041,8 @@ impl App {
             // buffer instead of producing the first returning chipset frame.
             self.render_generation = self.render_generation.wrapping_add(1);
             self.presentation_latch.reset();
+            self.autocrop_latch.reset();
+            self.present_content_rect = None;
         }
         self.rtg_present_dims = Some((native_w, native_h));
         self.main_presentation_dirty = true;
@@ -852,10 +1089,10 @@ impl App {
         } else {
             0
         };
-        bitplane::render(self.emu.bus_mut(), &mut self.fb);
+        let field_content = bitplane::render(self.emu.bus_mut(), &mut self.fb);
         let geometry = self.emu.bus().frame_geometry();
         let canvas_scale = self.emu.bus().frame_canvas_scale();
-        let field_rows = post_process_rendered_field(
+        let placement = post_process_rendered_field(
             &mut self.fb,
             geometry,
             canvas_scale,
@@ -871,13 +1108,21 @@ impl App {
         let mut next_present_fb = std::mem::take(&mut self.render_recycle_fb);
         let (rows, width) = self.deinterlacer.present_field_into(
             &self.fb,
-            field_rows,
+            placement.rows,
             FB_WIDTH * canvas_scale,
             base.bplcon0 & 0x0004 != 0,
             base.long_field,
             !geometry.programmable,
             &mut next_present_fb,
         );
+        self.reset_autocrop_latch_across_scan_change(geometry.programmable, rows, width);
+        let smoothed = self
+            .autocrop_latch
+            .resolve(field_content.and_then(|rect| placement.content_rect(rect, rows)));
+        if smoothed != self.present_content_rect {
+            self.present_content_rect = smoothed;
+            self.main_presentation_dirty = true;
+        }
         let next_tv_aperture_rows = self
             .presentation_latch
             .resolve_tv_aperture(standard_tv_aperture_frame(geometry, rows, &base));

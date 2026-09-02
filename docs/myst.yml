@@ -56,6 +56,7 @@ project:
         - file: debugger/headless.md
         - file: debugger/reverse.md
         - file: debugger/waveform.md
+        - file: debugger/profiling.md
         - file: debugger/gdb.md
         - file: debugger/control.md
         - file: debugger/workflows.md
@@ -102,6 +103,7 @@ project:
         - debugger/headless.md
         - debugger/reverse.md
         - debugger/waveform.md
+        - debugger/profiling.md
         - debugger/gdb.md
         - debugger/control.md
         - debugger/workflows.md

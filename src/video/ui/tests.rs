@@ -484,6 +484,19 @@ fn analyzer_ui(tab: AnalyzerTab, presets: Vec<HeatPreset>) -> UiState {
     }
 }
 
+#[test]
+fn analyzer_resources_rows_hit_test_only_on_their_tab() {
+    let ui = analyzer_ui(AnalyzerTab::Resources, Vec::new());
+    let rect = panel_rect(ui.panel.as_ref().unwrap());
+    let rows = analyzer_resource_row_rects(rect);
+    let (control, row) = rows[2];
+    let pos = (row.x as i32 + 4, row.y as i32 + 4);
+    assert_eq!(ui.control_at(pos), Some(control));
+    // The same spot on the Beam tab belongs to that tab's controls.
+    let ui = analyzer_ui(AnalyzerTab::Beam, Vec::new());
+    assert_ne!(ui.control_at(pos), Some(control));
+}
+
 fn heat_preset(label: &str, base: u32, span: u32) -> HeatPreset {
     HeatPreset {
         label: label.to_string(),
@@ -529,6 +542,7 @@ fn heat_view(lit: &[(usize, crate::heatmap::Toucher)]) -> AnalyzerHeatView {
             })
             .collect(),
         selected: None,
+        resources: Vec::new(),
     }
 }
 
@@ -543,6 +557,7 @@ fn analyzer_view(
         underlay: None,
         scrub: false,
         heat,
+        resources: None,
     })
 }
 
@@ -2357,6 +2372,7 @@ fn panels_render_into_their_rects() {
         status: "paused frame 1234 24.68s".to_string(),
         scrub: true,
         heat: None,
+        resources: None,
         trace: Some(trace),
         underlay: Some(AnalyzerUnderlayView {
             fb: std::rc::Rc::new(under_fb),
@@ -2444,6 +2460,69 @@ fn panels_render_into_their_rects() {
     );
     assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
     save(&frame, "frame-analyzer-memory");
+
+    // Frame analyzer, Resources tab: the registry table over a decoded
+    // bitmap preview.
+    let mut frame = vec![0u8; w * h * 4];
+    let preview = crate::video::resource_preview::decode_bitmap(
+        &{
+            // A 32x16x2 stripe picture: plane 0 lights the first byte
+            // column, plane 1 the last.
+            let mut data = vec![0u8; 4 * 16 * 2];
+            for row in 0..16 {
+                data[row * 4] = 0xF0;
+                data[64 + row * 4 + 3] = 0xFF;
+            }
+            data
+        },
+        32,
+        16,
+        2,
+        false,
+        false,
+        false,
+        &[0xFF20_2020, 0xFF00_00FF, 0xFF00_FF00, 0xFFFF_0000],
+    );
+    let resources_view = AnalyzerResourcesView {
+        rows: vec![
+            AnalyzerResourceRowView {
+                text: "screen       bitmap     $020000     51200  320x256x5 ilv".to_string(),
+                selected: true,
+            },
+            AnalyzerResourceRowView {
+                text: "pal          palette    $030000        64  32 entries".to_string(),
+                selected: false,
+            },
+            AnalyzerResourceRowView {
+                text: "cop          copperlist $040000      1000".to_string(),
+                selected: false,
+            },
+        ],
+        hidden_above: 0,
+        hidden_below: 0,
+        detail: Some(AnalyzerResourceDetail::Bitmap(preview)),
+    };
+    let data = PanelViewData::FrameAnalyzer(Box::new(FrameAnalyzerView {
+        running: false,
+        status: "paused frame 4321".to_string(),
+        trace: None,
+        underlay: None,
+        scrub: false,
+        heat: None,
+        resources: Some(resources_view),
+    }));
+    let mut panel = FrameAnalyzerPanel::new();
+    panel.tab = AnalyzerTab::Resources;
+    panel.resource_selected = Some(0x2_0000);
+    let ui = UiState {
+        menu_open: false,
+        menu_rows: Vec::new(),
+        menu_nav: menu::MenuNav::default(),
+        panel: Some(Panel::FrameAnalyzer(panel)),
+    };
+    draw(&mut frame, scale, &ui, None, Some(&data));
+    assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
+    save(&frame, "frame-analyzer-resources");
 
     // Console: a session transcript over the prompt line.
     let mut frame = vec![0u8; w * h * 4];
@@ -3079,6 +3158,7 @@ fn panels_render_into_their_rects() {
         ],
         pixel_aspect: PixelAspect::Tv,
         scaling: crate::config::DisplayScaling::Smooth,
+        autocrop: false,
         tv_centre: crate::config::TvCentre::default(),
         tv_centre_applies: true,
         shader: crate::config::ShaderKind::None,

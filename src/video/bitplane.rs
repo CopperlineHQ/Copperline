@@ -4297,6 +4297,20 @@ impl RenderInput {
     }
 }
 
+/// The display-window envelope the frame's playfield painted, in field
+/// canvas coordinates: `x0..x1` framebuffer pixels, `y0..y1` rendered
+/// field rows (both half-open). The hardware-derived source for the
+/// presentation-side autocrop -- rows and spans come from the same
+/// per-line display-window bounds the painter runs, so mid-frame DIW
+/// rewrites and carried-open flops are already folded in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContentRect {
+    pub x0: usize,
+    pub x1: usize,
+    pub y0: usize,
+    pub y1: usize,
+}
+
 /// Outputs of `render_from_input`. Render timing is always recorded back on
 /// the main thread. `clxdat` is applied only by the synchronous wrapper; the
 /// threaded path completes CPU-visible Denise collision state at frame end
@@ -4305,6 +4319,9 @@ pub struct RenderResult {
     pub timing: VideoRenderFrameTiming,
     pub clxdat: u16,
     pub(crate) chip_ram_reads: Option<Vec<ChipRamReadDependency>>,
+    /// Playfield content envelope of this field, or `None` for a
+    /// border-only frame (see [`ContentRect`]).
+    pub content_rect: Option<ContentRect>,
 }
 
 /// Large renderer work buffers retained per host thread. The browser calls
@@ -4382,7 +4399,9 @@ impl SpriteSubpixelState {
 /// Paint the just-finished frame through the synchronous compatibility path.
 /// The render itself is a pure function of the owned snapshot
 /// (`render_from_input`); this wrapper owns the remaining bus coupling.
-pub fn render(bus: &mut Bus, fb: &mut [u32]) {
+/// Returns the frame's playfield content envelope (see [`ContentRect`]);
+/// callers with no use for it just drop the value.
+pub fn render(bus: &mut Bus, fb: &mut [u32]) -> Option<ContentRect> {
     // This path re-snapshots the bus every frame; keep one RenderInput per
     // thread so its buffers are reused instead of reallocated each time.
     thread_local! {
@@ -4405,19 +4424,33 @@ pub fn render(bus: &mut Bus, fb: &mut [u32]) {
             .as_mut()
             .expect("scratch render input present")
             .release_shared_frame_data();
-    });
+        result.content_rect
+    })
 }
 
-/// Synchronous render wrapper with exact previous-frame reuse. Returns true
-/// when `fb` already contains the identical progressive frame and no render
-/// was needed. This is primarily the frontend-free benchmark companion to the
-/// threaded window cache; [`render`] preserves its always-render contract.
+/// What [`render_reusing_previous`] did with the frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReuseRender {
+    /// `fb` already held the identical progressive frame; nothing was
+    /// rendered.
+    Reused,
+    /// The frame was rendered, with its playfield content envelope (see
+    /// [`ContentRect`]), as [`render`] reports it.
+    Rendered(Option<ContentRect>),
+}
+
+/// Synchronous render wrapper with exact previous-frame reuse. Reports
+/// [`ReuseRender::Reused`] when `fb` already contains the identical
+/// progressive frame and no render was needed, and the fresh render's
+/// content envelope otherwise. This is primarily the frontend-free
+/// benchmark companion to the threaded window cache; [`render`] preserves
+/// its always-render contract.
 #[doc(hidden)]
 pub fn render_reusing_previous(
     bus: &mut Bus,
     fb: &mut [u32],
     detector: &mut RepeatedFrameDetector,
-) -> bool {
+) -> ReuseRender {
     thread_local! {
         static REUSED_RENDER_INPUT_SCRATCH: std::cell::RefCell<Option<RenderInput>> =
             const { std::cell::RefCell::new(None) };
@@ -4435,7 +4468,7 @@ pub fn render_reusing_previous(
                 .as_mut()
                 .expect("scratch render input present")
                 .release_shared_frame_data();
-            return true;
+            return ReuseRender::Reused;
         }
         let mut result = if detector.should_track_read_dependencies(input) {
             render_from_input_tracking_reuse(input, fb)
@@ -4449,7 +4482,7 @@ pub fn render_reusing_previous(
             .as_mut()
             .expect("scratch render input present")
             .release_shared_frame_data();
-        false
+        ReuseRender::Rendered(result.content_rect)
     })
 }
 
@@ -4949,6 +4982,7 @@ fn render_from_input_with_scratch(
         });
 
     let playfield_started = render_timing_start();
+    let mut content_rect: Option<ContentRect> = None;
     if (has_captured_bitplane_rows || state.bplpt[0] != 0)
         && any_bitplane_control
         && (has_captured_bitplane_rows || any_bitplane_dma_control)
@@ -5071,6 +5105,37 @@ fn render_from_input_with_scratch(
             let dma_planes = line_max_dma_planes(control, row_control_segments);
             if !line_has_valid_ddf_window(control, row_control_segments) {
                 continue;
+            }
+            // This row paints playfield: fold its display-window span into
+            // the frame's content envelope. Purely an accumulation for the
+            // presentation-side autocrop; the paint below is untouched.
+            // Only rows that carry fetched bitplane data count: the
+            // display window is routinely left open past the last fetched
+            // line (a 200-line game inside the Kickstart 256-line window),
+            // and those rows show border or repeated data, not picture --
+            // the crop should tighten to the picture the way the eye
+            // does. A frame with no captures at all (the RAM re-fetch
+            // compatibility path) counts every window row instead.
+            let row_has_fetched_data = !has_captured_bitplane_rows
+                || captured_bitplane_rows
+                    .get(y)
+                    .and_then(Option::as_ref)
+                    .is_some();
+            if row_has_fetched_data {
+                content_rect = Some(match content_rect {
+                    None => ContentRect {
+                        x0: x_start,
+                        x1: x_stop,
+                        y0: y,
+                        y1: y + 1,
+                    },
+                    Some(rect) => ContentRect {
+                        x0: rect.x0.min(x_start),
+                        x1: rect.x1.max(x_stop),
+                        y0: rect.y0.min(y),
+                        y1: rect.y1.max(y + 1),
+                    },
+                });
             }
             // A captured sequencer run with a comparator-anchored origin is
             // the authority for the row's word count: mid-row DDF rewrites
@@ -5527,6 +5592,15 @@ fn render_from_input_with_scratch(
         rows,
     );
     blank_rows_past_frame_end(input.frame_lines, fb, visible_line0, rows);
+    let content_rect = content_rect.and_then(|rect| {
+        trim_content_rect_to_blanking(
+            rect,
+            input.programmable_vertical_blank,
+            input.programmable_horizontal_blank,
+            input.frame_lines,
+            visible_line0,
+        )
+    });
     maybe_log_frame_pixel_samples(
         "final",
         input.emulated_seconds,
@@ -5553,10 +5627,25 @@ fn render_from_input_with_scratch(
     scratch.dma_output_start_x_by_line = dma_output_start_x_by_line;
     scratch.h_window_rows = h_window_rows;
     scratch.ham_select_pixels = ham_select_pixels;
+    // COPPERLINE_DIAG_AUTOCROP: log the per-frame content envelope the
+    // autocrop presentation feeds on, in field canvas coordinates (x at
+    // the hi-res pitch, y in rendered rows). The tool for judging what a
+    // title's crop will be from a headless run; `programmable` says which
+    // window model the presentation will carry it through (a multisync
+    // scan's sync-anchored glass, else the standard centring).
+    if crate::envcfg::flag("COPPERLINE_DIAG_AUTOCROP") {
+        log::info!(
+            "[DIAG_AUTOCROP] secs={:.3} programmable={} content_rect={:?}",
+            input.emulated_seconds,
+            geometry.programmable,
+            content_rect
+        );
+    }
     RenderResult {
         timing: render_timing,
         clxdat,
         chip_ram_reads,
+        content_rect,
     }
 }
 
@@ -5634,6 +5723,72 @@ fn blank_rows_past_frame_end(frame_lines: u32, fb: &mut [u32], visible_line0: i3
     fb[first_blank_row * out_w..rows * out_w].fill(BLANK_RGBA);
 }
 
+/// Whether beam position `pos` lies inside a programmable blank window:
+/// blank asserts at the STRT match and clears at the STOP match, so a
+/// window with STRT >= STOP wraps through the frame/line origin.
+fn blank_window_contains(pos: u32, strt: u32, stop: u32) -> bool {
+    if strt < stop {
+        pos >= strt && pos < stop
+    } else {
+        pos >= strt || pos < stop
+    }
+}
+
+/// The colour clock a framebuffer column sits in, as
+/// [`apply_programmable_blanking`] tests it against HBSTRT/HBSTOP: one
+/// colour clock spans two lo-res DIW positions, i.e. four hi-res
+/// framebuffer pixels.
+fn framebuffer_column_cck(x: usize) -> u32 {
+    let diw_pos = DIW_HSTART_FB0 + (x as i32) / 2;
+    (diw_pos / 2).max(0) as u32
+}
+
+/// Trim the content envelope to what the blanking left showing: rows the
+/// programmable vertical blank or the frame end blacked, and columns the
+/// programmable horizontal blank blacked, are border to the eye whatever
+/// the display window said of them (a programmable scan's VBSTRT/VBSTOP
+/// routinely cross a window Kickstart leaves open past the picture).
+/// Edges only: a blank cutting through the middle of a picture is not a
+/// shape one crop can follow, and the pixels are already black there.
+fn trim_content_rect_to_blanking(
+    rect: ContentRect,
+    programmable_vertical_blank: Option<(u32, u32)>,
+    programmable_horizontal_blank: Option<(u32, u32)>,
+    frame_lines: u32,
+    visible_line0: i32,
+) -> Option<ContentRect> {
+    let row_blanked = |y: usize| {
+        let vpos = visible_line0 + y as i32;
+        vpos >= frame_lines as i32
+            || programmable_vertical_blank
+                .is_some_and(|(strt, stop)| blank_window_contains(vpos.max(0) as u32, strt, stop))
+    };
+    let column_blanked = |x: usize| {
+        programmable_horizontal_blank.is_some_and(|(strt, stop)| {
+            blank_window_contains(framebuffer_column_cck(x), strt, stop)
+        })
+    };
+    let ContentRect {
+        mut x0,
+        mut x1,
+        mut y0,
+        mut y1,
+    } = rect;
+    while y0 < y1 && row_blanked(y0) {
+        y0 += 1;
+    }
+    while y1 > y0 && row_blanked(y1 - 1) {
+        y1 -= 1;
+    }
+    while x0 < x1 && column_blanked(x0) {
+        x0 += 1;
+    }
+    while x1 > x0 && column_blanked(x1 - 1) {
+        x1 -= 1;
+    }
+    (x1 > x0 && y1 > y0).then_some(ContentRect { x0, x1, y0, y1 })
+}
+
 /// ECS programmable blanking (plan 1.2): force the composite blank windows
 /// to black on the finished frame. Vertical blanking follows VBSTRT/VBSTOP
 /// under BEAMCON0.VARVBEN; horizontal blanking follows HBSTRT/HBSTOP under
@@ -5653,13 +5808,7 @@ fn apply_programmable_blanking(
     rows: usize,
 ) {
     const BLANK_RGBA: u32 = 0xFF00_0000;
-    let in_window = |pos: u32, strt: u32, stop: u32| {
-        if strt < stop {
-            pos >= strt && pos < stop
-        } else {
-            pos >= strt || pos < stop
-        }
-    };
+    let in_window = blank_window_contains;
 
     let canvas_scale = active_canvas_scale();
     let out_w = FB_WIDTH * canvas_scale;
@@ -5678,9 +5827,7 @@ fn apply_programmable_blanking(
         let mut blank_cols = [false; FB_WIDTH];
         let mut any = false;
         for (x, blank) in blank_cols.iter_mut().enumerate() {
-            let diw_pos = DIW_HSTART_FB0 + (x as i32) / 2;
-            let cck = (diw_pos / 2).max(0) as u32;
-            if in_window(cck, strt, stop) {
+            if in_window(framebuffer_column_cck(x), strt, stop) {
                 *blank = true;
                 any = true;
             }

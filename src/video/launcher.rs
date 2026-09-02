@@ -698,6 +698,7 @@ pub enum LauncherField {
     Overscan,
     PixelAspect,
     Scaling,
+    Autocrop,
     Tint,
     Deinterlace,
     Phosphor,
@@ -711,6 +712,7 @@ pub enum LauncherField {
     FloppySounds,
     FloppyVolume,
     PowerOn,
+    AutoLaunch,
     PacingBudget,
     RealtimePriority,
     Warp,
@@ -1243,11 +1245,12 @@ const SOUND_ROWS: [Row; 1] = [row(F::Toccata, "  Toccata", Cycle)];
 // The emulated picture, in signal order -- what the monitor is fed and how
 // it is drawn -- with the shader pair last, since strength greys off the
 // shader. The host window's own settings are DISPLAY_ROWS.
-const VIDEO_ROWS: [Row; 9] = [
+const VIDEO_ROWS: [Row; 10] = [
     row(F::Bezel, "Monitor bezel", Cycle),
     row(F::Overscan, "Overscan", Cycle),
     row(F::PixelAspect, "Pixel aspect", Cycle),
     row(F::Scaling, "Scaling", Cycle),
+    row(F::Autocrop, "Autocrop", Cycle),
     row(F::Deinterlace, "Deinterlace", Cycle),
     row(F::Tint, "Screen tint", Cycle),
     row(F::Phosphor, "Phosphor", Cycle),
@@ -1271,8 +1274,9 @@ const AUDIO_ROWS: [Row; 6] = [
     row(F::FloppyVolume, "Floppy volume", Cycle),
 ];
 #[cfg(not(feature = "game-library"))]
-const EMULATION_ROWS: [Row; 6] = [
+const EMULATION_ROWS: [Row; 7] = [
     row(F::PowerOn, "Power on startup", Cycle),
+    row(F::AutoLaunch, "Run on startup", Cycle),
     row(F::RealtimePriority, "Realtime priority", Cycle),
     row(F::PacingBudget, "Pacing budget", Cycle),
     row(F::Warp, "Warp speed", Cycle),
@@ -1280,8 +1284,9 @@ const EMULATION_ROWS: [Row; 6] = [
     row(F::WarpBootIdle, "Warp boot idle", Cycle),
 ];
 #[cfg(feature = "game-library")]
-const EMULATION_ROWS: [Row; 7] = [
+const EMULATION_ROWS: [Row; 8] = [
     row(F::PowerOn, "Power on startup", Cycle),
+    row(F::AutoLaunch, "Run on startup", Cycle),
     row(F::RealtimePriority, "Realtime priority", Cycle),
     row(F::PacingBudget, "Pacing budget", Cycle),
     row(F::Warp, "Warp speed", Cycle),
@@ -2308,6 +2313,9 @@ pub struct MachineSetup {
     pixel_aspect: PixelAspect,
     /// How the canvas is scaled into the window ([display] scaling).
     scaling: DisplayScaling,
+    /// Crop the presentation to the programmed display window
+    /// ([display] autocrop).
+    autocrop: bool,
     /// Motion-adaptive interlace weaving ([display] deinterlace).
     deinterlace: bool,
     phosphor: f32,
@@ -2350,6 +2358,7 @@ pub struct MachineSetup {
     floppy_sounds: bool,
     floppy_volume: u8,
     power_on: bool,
+    auto_launch: bool,
     pacing_budget: PacingBudget,
     realtime_priority: bool,
     warp: WarpSpeed,
@@ -2361,6 +2370,8 @@ pub struct MachineSetup {
     warp_boot: bool,
     warp_boot_idle: f64,
     warp_until: Option<f64>,
+    /// Same again for the uaelib trap (crate::uaelib).
+    uaelib: bool,
     joystick_input_mode: JoystickInputMode,
     mouse_sensitivity: u8,
     mouse_capture: MouseCapture,
@@ -2629,6 +2640,7 @@ impl MachineSetup {
             overscan: cfg.overscan,
             pixel_aspect: cfg.pixel_aspect,
             scaling: cfg.scaling,
+            autocrop: cfg.autocrop,
             deinterlace: cfg.deinterlace,
             phosphor: cfg.phosphor,
             shader: cfg.shader.clone(),
@@ -2654,6 +2666,7 @@ impl MachineSetup {
             floppy_sounds: cfg.audio.floppy_sounds,
             floppy_volume: cfg.audio.floppy_sounds_volume,
             power_on: cfg.emulation.power_on,
+            auto_launch: cfg.emulation.auto_launch,
             pacing_budget: cfg.emulation.pacing_budget,
             realtime_priority: cfg.emulation.realtime_priority,
             warp: cfg.emulation.warp_speed,
@@ -2661,6 +2674,7 @@ impl MachineSetup {
             warp_boot: cfg.emulation.warp_boot,
             warp_boot_idle: cfg.emulation.warp_boot_idle,
             warp_until: cfg.emulation.warp_until,
+            uaelib: cfg.emulation.uaelib,
             joystick_input_mode: cfg.joystick_input_mode,
             mouse_sensitivity: cfg.mouse_sensitivity,
             mouse_capture: cfg.mouse_capture,
@@ -2720,6 +2734,14 @@ impl MachineSetup {
 
     pub fn midi_out_is_csynth(&self) -> bool {
         crate::config::midi_out_is_csynth(self.midi_out.as_deref())
+    }
+
+    /// Whether this configuration asks the launcher to run it the moment
+    /// it is opened -- `[emulation] auto_launch`. The command line never
+    /// consults it: a machine given on the command line was never going to
+    /// see the configuration screen this skips.
+    pub fn auto_launch(&self) -> bool {
+        self.auto_launch
     }
 
     pub fn serial_mode(&self) -> SerialMode {
@@ -3153,6 +3175,9 @@ impl MachineSetup {
         if self.scaling != base.scaling {
             raw.display.scaling = Some(display_scaling_name(self.scaling).to_string());
         }
+        if self.autocrop != base.autocrop {
+            raw.display.autocrop = Some(self.autocrop);
+        }
         if self.deinterlace != base.deinterlace {
             raw.display.deinterlace = Some(self.deinterlace);
         }
@@ -3222,6 +3247,9 @@ impl MachineSetup {
         if self.power_on != base.emulation.power_on {
             raw.emulation.power_on = Some(self.power_on);
         }
+        if self.auto_launch != base.emulation.auto_launch {
+            raw.emulation.auto_launch = Some(self.auto_launch);
+        }
         if self.pacing_budget != base.emulation.pacing_budget {
             raw.emulation.pacing_budget = Some(pacing_name(self.pacing_budget).to_string());
         }
@@ -3242,6 +3270,9 @@ impl MachineSetup {
         }
         if self.warp_until != base.emulation.warp_until {
             raw.emulation.warp_until = self.warp_until;
+        }
+        if self.uaelib != base.emulation.uaelib {
+            raw.emulation.uaelib = Some(self.uaelib);
         }
         if self.joystick_input_mode != base.joystick_input_mode {
             raw.input.joystick = Some(self.joystick_input_mode.label().to_string());
@@ -3499,6 +3530,7 @@ impl MachineSetup {
         self.overscan = base.overscan;
         self.pixel_aspect = base.pixel_aspect;
         self.scaling = base.scaling;
+        self.autocrop = base.autocrop;
         self.deinterlace = base.deinterlace;
         self.phosphor = base.phosphor;
         // The remembered user-shader path survives: it came from the config
@@ -3524,10 +3556,12 @@ impl MachineSetup {
         self.floppy_sounds = base.audio.floppy_sounds;
         self.floppy_volume = base.audio.floppy_sounds_volume;
         self.power_on = base.emulation.power_on;
+        self.auto_launch = base.emulation.auto_launch;
         self.pacing_budget = base.emulation.pacing_budget;
         self.realtime_priority = base.emulation.realtime_priority;
         self.warp = base.emulation.warp_speed;
         self.run_ahead_frames = base.emulation.run_ahead_frames;
+        self.uaelib = base.emulation.uaelib;
         self.joystick_input_mode = base.joystick_input_mode;
         self.mouse_sensitivity = base.mouse_sensitivity;
         self.mouse_capture = base.mouse_capture;
@@ -3871,12 +3905,14 @@ impl MachineSetup {
             F::FloppySounds => self.floppy_sounds,
             F::StartFullscreen => self.start_fullscreen,
             F::ShowStatusBar => self.show_status_bar,
+            F::Autocrop => self.autocrop,
             F::Deinterlace => self.deinterlace,
             F::PerfOverlay => self.perf_overlay,
             F::Mt32Panel => self.mt32_panel,
             #[cfg(feature = "midi")]
             F::SerialTelnet => self.serial_telnet,
             F::PowerOn => self.power_on,
+            F::AutoLaunch => self.auto_launch,
             F::RealtimePriority => self.realtime_priority,
             F::Toccata => self.toccata,
             #[cfg(feature = "mhi")]
@@ -3885,10 +3921,13 @@ impl MachineSetup {
         }
     }
 
-    /// Whether the SCSI controller is the A4091, whose boot ROM has a
-    /// bundled default the row reads as one.
-    pub fn scsi_controller_is_a4091(&self) -> bool {
-        matches!(self.scsi_controller, Some(ScsiController::A4091))
+    /// The bundled-ROM label for the selected SCSI controller.
+    pub fn scsi_bundled_rom_label(&self) -> Option<&'static str> {
+        match self.scsi_controller {
+            Some(ScsiController::A2091) => Some("(bundled open A2091 ROM)"),
+            Some(ScsiController::A4091) => Some("(bundled A4091 ROM)"),
+            _ => None,
+        }
     }
 
     /// Whether the CD32 FMV cartridge was explicitly removed rather than
@@ -4415,9 +4454,11 @@ impl MachineSetup {
             F::StartFullscreen => enabled_label(self.start_fullscreen),
             F::ShowStatusBar => enabled_label(self.show_status_bar),
             F::PerfOverlay => enabled_label(self.perf_overlay),
+            F::Autocrop => enabled_label(self.autocrop),
             F::Deinterlace => enabled_label(self.deinterlace),
             F::FloppySounds => enabled_label(self.floppy_sounds),
             F::PowerOn => enabled_label(self.power_on),
+            F::AutoLaunch => enabled_label(self.auto_launch),
             F::RealtimePriority => enabled_label(self.realtime_priority),
             F::Toccata => enabled_label(self.toccata),
             #[cfg(feature = "mhi")]
@@ -4477,10 +4518,11 @@ impl MachineSetup {
             F::Warp => self.warp.label().to_string(),
             F::WarpBoot => match (self.warp_until, self.warp_boot) {
                 // A warp_until from the TOML shows as its own state; the
-                // panel's own two states are Off and storage-idle.
+                // panel's own two states are Disabled -- the word every
+                // other toggle on the page uses -- and storage-idle.
                 (Some(secs), _) => format!("Until {}", format_secs(secs)),
                 (None, true) => "Storage idle".to_string(),
-                (None, false) => "Off".to_string(),
+                (None, false) => "Disabled".to_string(),
             },
             F::WarpBootIdle => format_secs(self.warp_boot_idle),
             F::Joystick => self.joystick_input_mode.menu_label().to_string(),
@@ -4682,10 +4724,9 @@ impl MachineSetup {
             F::Rom => self.path_label(field, "(bundled AROS)"),
             F::FmvRom if self.fmv_rom_disabled => "(no FMV module)".to_string(),
             F::FmvRom => self.path_label(field, "(bundled open FMV ROM)"),
-            // The A4091 autoboots from a bundled open-source ROM when no
-            // image names one; the other controllers have no such default.
-            F::ScsiRom if self.scsi_controller_is_a4091() => {
-                self.path_label(field, "(bundled A4091 ROM)")
+            // Both Zorro SCSI boards have bundled open autoboot ROMs.
+            F::ScsiRom if self.scsi_bundled_rom_label().is_some() => {
+                self.path_label(field, self.scsi_bundled_rom_label().unwrap())
             }
             // A fitted lide board defaults to a bundled ROM: lide.rom for
             // RIPPLE/RIDE, lide-atbus.rom for AT-Bus 2008 -- not the same
@@ -4900,9 +4941,11 @@ impl MachineSetup {
             F::StartFullscreen => self.start_fullscreen = !self.start_fullscreen,
             F::ShowStatusBar => self.show_status_bar = !self.show_status_bar,
             F::PerfOverlay => self.perf_overlay = !self.perf_overlay,
+            F::Autocrop => self.autocrop = !self.autocrop,
             F::Deinterlace => self.deinterlace = !self.deinterlace,
             F::FloppySounds => self.floppy_sounds = !self.floppy_sounds,
             F::PowerOn => self.power_on = !self.power_on,
+            F::AutoLaunch => self.auto_launch = !self.auto_launch,
             F::RealtimePriority => self.realtime_priority = !self.realtime_priority,
             F::Toccata => self.toccata = !self.toccata,
             #[cfg(feature = "mhi")]

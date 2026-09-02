@@ -162,12 +162,7 @@ pub fn stretch_rows_x(fb: &mut [u32], width: usize, rows: usize, src_num: u32, s
         let row = &mut fb[y * width..(y + 1) * width];
         scratch.copy_from_slice(row);
         for (x, out) in row.iter_mut().enumerate() {
-            // Source-pixel centre in 24.8 fixed point:
-            // (x + 0.5) * src_num / src_den - 0.5.
-            let pos = ((2 * x as i64 + 1) * src_num as i64 * 128 / src_den as i64 - 128)
-                .clamp(0, ((width - 1) as i64) << 8) as usize;
-            let src_x0 = pos >> 8;
-            let frac = (pos & 0xFF) as u32;
+            let (src_x0, frac) = stretch_rows_x_source(x, width, src_num, src_den);
             *out = if frac == 0 || src_x0 + 1 >= width {
                 scratch[src_x0]
             } else {
@@ -175,6 +170,21 @@ pub fn stretch_rows_x(fb: &mut [u32], width: usize, rows: usize, src_num: u32, s
             };
         }
     }
+}
+
+/// The source taps output column `x` of [`stretch_rows_x`] reads: the
+/// integer source column and the 8-bit fraction toward its right
+/// neighbour (a zero fraction, or a neighbour past the row end, reads
+/// the one column alone). The resample and the presentation's
+/// content-envelope mapping share this, so a crop follows exactly the
+/// columns the resample painted.
+#[inline]
+pub fn stretch_rows_x_source(x: usize, width: usize, src_num: u32, src_den: u32) -> (usize, u32) {
+    // Source-pixel centre in 24.8 fixed point:
+    // (x + 0.5) * src_num / src_den - 0.5.
+    let pos = ((2 * x as i64 + 1) * src_num as i64 * 128 / src_den as i64 - 128)
+        .clamp(0, ((width - 1) as i64) << 8) as usize;
+    (pos >> 8, (pos & 0xFF) as u32)
 }
 
 /// Like [`stretch_rows_x`], but resampling an explicit source window:
@@ -195,13 +205,7 @@ pub fn stretch_rows_x_window(fb: &mut [u32], width: usize, rows: usize, src_x0: 
         let row = &mut fb[y * width..(y + 1) * width];
         scratch.copy_from_slice(row);
         for (x, out) in row.iter_mut().enumerate() {
-            // Source-pixel centre in 24.8 fixed point:
-            // src_x0 + (x + 0.5) * src_w / width - 0.5.
-            let pos = ((src_x0 as i64) << 8)
-                + ((2 * x as i64 + 1) * src_w as i64 * 128 / width as i64 - 128);
-            let pos = pos.clamp(0, ((width - 1) as i64) << 8) as usize;
-            let src_x0i = pos >> 8;
-            let frac = (pos & 0xFF) as u32;
+            let (src_x0i, frac) = stretch_rows_x_window_source(x, width, src_x0, src_w);
             *out = if frac == 0 || src_x0i + 1 >= width {
                 scratch[src_x0i]
             } else {
@@ -209,6 +213,33 @@ pub fn stretch_rows_x_window(fb: &mut [u32], width: usize, rows: usize, src_x0: 
             };
         }
     }
+}
+
+/// The source taps output column `x` of [`stretch_rows_x_window`] reads,
+/// as [`stretch_rows_x_source`] gives them for the whole-line map.
+#[inline]
+pub fn stretch_rows_x_window_source(
+    x: usize,
+    width: usize,
+    src_x0: i32,
+    src_w: u32,
+) -> (usize, u32) {
+    // Source-pixel centre in 24.8 fixed point:
+    // src_x0 + (x + 0.5) * src_w / width - 0.5.
+    let pos =
+        ((src_x0 as i64) << 8) + ((2 * x as i64 + 1) * src_w as i64 * 128 / width as i64 - 128);
+    let pos = pos.clamp(0, ((width - 1) as i64) << 8) as usize;
+    (pos >> 8, (pos & 0xFF) as u32)
+}
+
+/// Whether an output column with source taps `taps` (from
+/// [`stretch_rows_x_source`] or [`stretch_rows_x_window_source`]) in a
+/// `width`-column row reads any source column in `x0..x1`: the tap
+/// itself, or the right neighbour a non-zero fraction blends in.
+pub fn resampled_column_reads(taps: (usize, u32), width: usize, x0: usize, x1: usize) -> bool {
+    let (src, frac) = taps;
+    let reads = |column: usize| (x0..x1).contains(&column);
+    reads(src) || (frac != 0 && src + 1 < width && reads(src + 1))
 }
 
 /// Pick a default filename for an interactive screenshot grab.
@@ -245,5 +276,55 @@ mod tests {
         let fb = [0x0000_0003, 0x0000_0006, 0x0000_0009];
         downsample_x_into(&fb, 3, 1, 1, &mut out);
         assert_eq!(out, vec![0x0000_0006]);
+    }
+
+    /// The tap helpers describe exactly which source columns each
+    /// resampled column reads: a row carrying one lit column comes out
+    /// lit (fully or blended) in precisely the output columns whose taps
+    /// read it, under both the whole-line map and a sync-anchored window
+    /// that starts left of the buffer.
+    #[test]
+    fn resample_taps_name_the_columns_the_resamplers_read() {
+        const WIDTH: usize = 64;
+        let lit = 0xFFFF_FFFF;
+        let lit_column = 20;
+        let fresh = || {
+            let mut fb = vec![0u32; WIDTH];
+            fb[lit_column] = lit;
+            fb
+        };
+
+        let mut linear = fresh();
+        stretch_rows_x(&mut linear, WIDTH, 1, 130, 227);
+        for (x, px) in linear.iter().enumerate() {
+            let taps = stretch_rows_x_source(x, WIDTH, 130, 227);
+            let reads = resampled_column_reads(taps, WIDTH, lit_column, lit_column + 1);
+            assert_eq!(*px != 0, reads, "linear column {x} taps {taps:?}");
+        }
+
+        let mut window = fresh();
+        stretch_rows_x_window(&mut window, WIDTH, 1, -8, 40);
+        let mut any = false;
+        for (x, px) in window.iter().enumerate() {
+            let taps = stretch_rows_x_window_source(x, WIDTH, -8, 40);
+            let reads = resampled_column_reads(taps, WIDTH, lit_column, lit_column + 1);
+            assert_eq!(*px != 0, reads, "window column {x} taps {taps:?}");
+            any |= reads;
+        }
+        assert!(any);
+
+        // Off the source's left edge the window clamps to column 0, so a
+        // lit edge column is read by every output column the sync tail
+        // covers; a window past the right edge reads the last column.
+        assert!(resampled_column_reads(
+            stretch_rows_x_window_source(0, WIDTH, -8, 40),
+            WIDTH,
+            0,
+            1
+        ));
+        assert_eq!(
+            stretch_rows_x_window_source(WIDTH - 1, WIDTH, 40, 40),
+            (WIDTH - 1, 0)
+        );
     }
 }

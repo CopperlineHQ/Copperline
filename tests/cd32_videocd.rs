@@ -109,7 +109,8 @@ fn open_videocd_library_parses_the_philips_sampler() -> Result<(), Box<dyn std::
 
     let output = Command::new(env!("CARGO_BIN_EXE_copperline"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .env("XDG_CONFIG_HOME", &config_home)
+        .env("HOME", &config_home)
+        .env("USERPROFILE", &config_home)
         .env("RUST_LOG", "copperline=warn")
         .arg("--factory")
         .arg("--config")
@@ -206,7 +207,8 @@ fn video_cd_autoboot_player_plays_and_aborts_track() -> Result<(), Box<dyn std::
 
     let output = Command::new(env!("CARGO_BIN_EXE_copperline"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .env("XDG_CONFIG_HOME", &config_home)
+        .env("HOME", &config_home)
+        .env("USERPROFILE", &config_home)
         .env("RUST_LOG", "copperline::cd32_fmv=trace,copperline=warn")
         .arg("--factory")
         .arg("--config")

@@ -17,6 +17,9 @@ impl Bus {
         if self.collision_tracking_active {
             self.accumulate_live_collisions_to_frame_end();
         }
+        if let Some(uaelib) = self.uaelib.as_mut() {
+            uaelib.note_frame_start(self.emulated_cck);
+        }
         self.log_bus_accounting_frame();
         self.finish_frame_bus_trace();
         let promote_render_frame = !self.current_frame_render_blocked;
@@ -147,6 +150,7 @@ impl Bus {
         // write path merges half writes into `display_dma_bplpt` directly.
         self.display_dma_sprpt = self.denise.sprpt;
         self.reset_display_sprite_dma_states();
+        self.sprite_dma_replay = SpriteDmaReplayCursor::default();
         self.display_dma_clipped_rows_advanced = false;
         self.lazy_collision_vpos = self.current_frame_visible_start_vpos;
         self.lazy_collision_hpos = RENDER_COPPER_WAIT_HPOS_FB0;
@@ -408,10 +412,34 @@ impl Bus {
     }
 
     pub(super) fn advance_sprite_dma_to_display_start(&mut self) {
+        self.advance_sprite_dma_replay_to(self.display_start_vpos_for_current_control(), 0);
+    }
+
+    /// Replay pre-display sprite DMA up to (not including) beam position
+    /// `limit_vpos`/`limit_hpos`, continuing from wherever the frame's replay
+    /// last stopped.
+    ///
+    /// This runs in step with the beam -- driven slot by slot as the beam
+    /// passes them -- rather than in one batch at the display start, because
+    /// `fetch_sprite_words` reads chip RAM as it is *now*. The vertical-blank
+    /// control-word fetch happens on PAL line $19, while the display start is
+    /// typically line $2C, and software routinely rewrites its sprite
+    /// descriptors from the vertical-blank interrupt in between: a batched
+    /// replay read the rewritten descriptor instead of the one the hardware
+    /// latched, which left a channel's comparators pointing at the wrong lines
+    /// for the rest of the field (Ghostown's Spooky Town scrolls its credits
+    /// that way, and lost one of four Copper-multiplexed sprite channels on
+    /// alternate frames).
+    pub(super) fn advance_sprite_dma_replay_to(&mut self, limit_vpos: u32, limit_hpos: u32) {
         let display_start = self.display_start_vpos_for_current_control();
         if display_start == 0 {
             return;
         }
+        let (limit_vpos, limit_hpos) = if limit_vpos >= display_start {
+            (display_start, 0)
+        } else {
+            (limit_vpos, limit_hpos)
+        };
 
         // Sprite DMA runs from the top of the frame, independent of the bitplane
         // display window. The frame snapshot is taken at the DIW-derived display
@@ -424,43 +452,56 @@ impl Bus {
         // SPRxPOS/CTL writes across the span and run the sprite slots only on
         // lines where SPREN was actually enabled, rather than sampling registers
         // at the display start.
-        let base = self.current_frame_render_base;
-        // Seed from the previous field's carried SPRxPT frontier rather than the
-        // last Copper/CPU write captured in `base.sprpt`. See
-        // `sprite_dma_frame_start_ptr` for why channels must not snap back to
-        // their stale control-word address.
-        self.current_frame_sprite_lines
-            .retain(|line| line.beam_y >= display_start as i32);
-        for lines in &mut self.current_frame_sprite_lines_by_y {
-            lines.retain(|line| line.beam_y >= display_start as i32);
+        if !self.sprite_dma_replay.started {
+            // Seed from the previous field's carried SPRxPT frontier rather
+            // than the last Copper/CPU write captured in `base.sprpt`. See
+            // `sprite_dma_frame_start_ptr` for why channels must not snap back
+            // to their stale control-word address.
+            self.current_frame_sprite_lines
+                .retain(|line| line.beam_y >= display_start as i32);
+            for lines in &mut self.current_frame_sprite_lines_by_y {
+                lines.retain(|line| line.beam_y >= display_start as i32);
+            }
+            self.current_frame_sprite_collision_sources = empty_sprite_collision_sources();
+            self.current_frame_sprite_display_enable_x_by_y = empty_sprite_display_enable_x_by_y();
+            self.current_frame_sprite_dma_observed = !self.current_frame_sprite_lines.is_empty();
+            self.display_dma_sprpt = self.sprite_dma_frame_start_ptr;
+            self.reset_display_sprite_dma_states();
+            self.sprite_dma_replay = SpriteDmaReplayCursor {
+                started: true,
+                vpos: 0,
+                slot_idx: 0,
+                event_idx: 0,
+                dmacon: self.current_frame_render_base.dmacon,
+            };
         }
-        self.current_frame_sprite_collision_sources = empty_sprite_collision_sources();
-        self.current_frame_sprite_display_enable_x_by_y = empty_sprite_display_enable_x_by_y();
-        self.current_frame_sprite_dma_observed = !self.current_frame_sprite_lines.is_empty();
-        self.display_dma_sprpt = self.sprite_dma_frame_start_ptr;
-        self.reset_display_sprite_dma_states();
-        let mut dmacon = base.dmacon;
-        let writes: Vec<(u32, u32, u16, u16)> = self
-            .current_render_events()
-            .iter()
-            .filter(|w| {
-                let off = w.offset & 0x01FE;
-                w.vpos < display_start
-                    && (off == 0x096
-                        || (0x120..=0x13F).contains(&off)
-                        || (0x140..=0x17F).contains(&off))
-            })
-            .map(|w| (w.vpos, w.hpos, w.offset & 0x01FE, w.value))
-            .collect();
-        let mut idx = 0;
-        for vpos in 0..display_start {
-            for (sprite, &slot1_hpos) in SPRITE_DMA_SLOT1_HPOS.iter().enumerate() {
-                for slot_hpos in [slot1_hpos, slot1_hpos + 2] {
-                    while idx < writes.len()
-                        && (writes[idx].0 < vpos
-                            || (writes[idx].0 == vpos && writes[idx].1 < slot_hpos))
-                    {
-                        let (event_vpos, event_hpos, offset, value) = writes[idx];
+        // The event cursor indexes this frame's render-event log directly and
+        // only moves forward, so driving the replay from the beam costs the
+        // events it actually consumes rather than a fresh filtered copy of the
+        // whole log on every call.
+        let events_len = self.current_render_events().len();
+        let mut dmacon = self.sprite_dma_replay.dmacon;
+        let mut idx = self.sprite_dma_replay.event_idx.min(events_len);
+        let mut vpos = self.sprite_dma_replay.vpos;
+        let mut slot_idx = self.sprite_dma_replay.slot_idx;
+        // Walk the line's sixteen sprite DMA slots in beam order, stopping at
+        // the requested beam position so a slot is replayed while chip RAM
+        // still holds what that slot would have read.
+        loop {
+            if vpos > limit_vpos || (vpos == limit_vpos && limit_hpos == 0) {
+                break;
+            }
+            if slot_idx >= 2 * SPRITE_DMA_SLOT1_HPOS.len() {
+                // End of the line: apply whatever is left of its writes and
+                // step to the next line.
+                while let Some((event_vpos, event_hpos, offset, value)) =
+                    self.sprite_dma_replay_event_at(idx, events_len)
+                {
+                    if event_vpos != vpos {
+                        break;
+                    }
+                    idx += 1;
+                    if Self::is_sprite_dma_replay_offset(offset) {
                         self.apply_sprite_dma_replay_write(
                             offset,
                             value,
@@ -468,52 +509,90 @@ impl Bus {
                             event_hpos,
                             &mut dmacon,
                         );
-                        idx += 1;
-                    }
-
-                    // The start-of-line comparator update runs on every line,
-                    // even where the vertical blank or DDF conflicts inhibit
-                    // the DMA slots themselves.
-                    if slot_hpos == slot1_hpos {
-                        self.sprite_comparators_catch_up(sprite, vpos, dmacon);
-                    }
-                    if self.sprite_dma_inhibited_by_vertical_blank_at(vpos) {
-                        continue;
-                    }
-                    let spren =
-                        dmacon & (DMACON_DMAEN | DMACON_SPREN) == (DMACON_DMAEN | DMACON_SPREN);
-                    let ddf_blocked = sprite_dma_disabled_by_bitplane_ddf(
-                        sprite,
-                        self.agnus.revision(),
-                        self.effective_bitplane_bplcon0(),
-                        self.agnus.fmode(),
-                        self.effective_bitplane_dmacon(),
-                        self.denise.ddfstrt,
-                        self.denise.ddfstop,
-                        self.harddis_active(),
-                    );
-                    if slot_hpos == slot1_hpos {
-                        self.sprite_slot1(sprite, vpos, spren, ddf_blocked, true);
-                    } else {
-                        // Off-screen lines evolve the channel state only;
-                        // the visible field's capture starts at the display
-                        // start.
-                        let _ = self.sprite_slot2(sprite, vpos, spren, ddf_blocked, true);
                     }
                 }
+                vpos += 1;
+                slot_idx = 0;
+                continue;
             }
-            while idx < writes.len() && writes[idx].0 == vpos {
-                let (event_vpos, event_hpos, offset, value) = writes[idx];
-                self.apply_sprite_dma_replay_write(
-                    offset,
-                    value,
-                    event_vpos,
-                    event_hpos,
-                    &mut dmacon,
-                );
+            let sprite = slot_idx / 2;
+            let is_slot1 = slot_idx.is_multiple_of(2);
+            let slot1_hpos = SPRITE_DMA_SLOT1_HPOS[sprite];
+            let slot_hpos = if is_slot1 { slot1_hpos } else { slot1_hpos + 2 };
+            if vpos == limit_vpos && slot_hpos >= limit_hpos {
+                break;
+            }
+            while let Some((event_vpos, event_hpos, offset, value)) =
+                self.sprite_dma_replay_event_at(idx, events_len)
+            {
+                if event_vpos > vpos || (event_vpos == vpos && event_hpos >= slot_hpos) {
+                    break;
+                }
                 idx += 1;
+                if Self::is_sprite_dma_replay_offset(offset) {
+                    self.apply_sprite_dma_replay_write(
+                        offset,
+                        value,
+                        event_vpos,
+                        event_hpos,
+                        &mut dmacon,
+                    );
+                }
             }
+
+            // The start-of-line comparator update runs on every line,
+            // even where the vertical blank or DDF conflicts inhibit
+            // the DMA slots themselves.
+            if is_slot1 {
+                self.sprite_comparators_catch_up(sprite, vpos, dmacon);
+            }
+            if !self.sprite_dma_inhibited_by_vertical_blank_at(vpos) {
+                let spren = dmacon & (DMACON_DMAEN | DMACON_SPREN) == (DMACON_DMAEN | DMACON_SPREN);
+                let ddf_blocked = sprite_dma_disabled_by_bitplane_ddf(
+                    sprite,
+                    self.agnus.revision(),
+                    self.effective_bitplane_bplcon0(),
+                    self.agnus.fmode(),
+                    self.effective_bitplane_dmacon(),
+                    self.denise.ddfstrt,
+                    self.denise.ddfstop,
+                    self.harddis_active(),
+                );
+                if is_slot1 {
+                    self.sprite_slot1(sprite, vpos, spren, ddf_blocked, true);
+                } else {
+                    // Off-screen lines evolve the channel state only;
+                    // the visible field's capture starts at the display
+                    // start.
+                    let _ = self.sprite_slot2(sprite, vpos, spren, ddf_blocked, true);
+                }
+            }
+            slot_idx += 1;
         }
+        self.sprite_dma_replay.vpos = vpos;
+        self.sprite_dma_replay.slot_idx = slot_idx;
+        self.sprite_dma_replay.event_idx = idx;
+        self.sprite_dma_replay.dmacon = dmacon;
+    }
+
+    /// The registers the pre-display sprite-DMA replay tracks: DMACON, the
+    /// SPRxPT halves, and the SPRxPOS/CTL/DATA/DATB block.
+    fn is_sprite_dma_replay_offset(offset: u16) -> bool {
+        offset == 0x096 || (0x120..=0x13F).contains(&offset) || (0x140..=0x17F).contains(&offset)
+    }
+
+    /// One render event as `(vpos, hpos, masked offset, value)`, or `None`
+    /// past the end of the log.
+    fn sprite_dma_replay_event_at(
+        &self,
+        idx: usize,
+        events_len: usize,
+    ) -> Option<(u32, u32, u16, u16)> {
+        if idx >= events_len {
+            return None;
+        }
+        let w = &self.current_render_events()[idx];
+        Some((w.vpos, w.hpos, w.offset & 0x01FE, w.value))
     }
 
     pub(super) fn apply_sprite_dma_replay_write(
@@ -606,7 +685,14 @@ impl Bus {
         // rewrite that moves the display start re-runs the overlap; the
         // accurate model writes the latch once, at the single hardware
         // fetch time of each slot.
+        // Pre-display lines belong to the beam-paced replay
+        // (`advance_sprite_dma_replay_to`), which owns their event timeline and
+        // runs each line once its slots have passed. Running them here as well
+        // would fetch every pre-display line twice.
         let latch_write_through = vpos >= self.display_start_vpos_for_current_control();
+        if !latch_write_through {
+            return;
+        }
         for (sprite, &slot1_hpos) in SPRITE_DMA_SLOT1_HPOS.iter().enumerate() {
             // Each sprite line uses two hardware DMA slots: $15+4N fetches
             // POS or DATA, $17+4N fetches CTL or DATB. Both crossings are

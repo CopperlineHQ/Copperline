@@ -9,6 +9,46 @@ Copperline includes a built-in GDB remote debugging stub:
 Port-only syntax (`2345` or `:2345`) binds to `127.0.0.1`. To bind to all
 interfaces on a trusted local network, specify `0.0.0.0:2345`.
 
+## Headless and windowed modes
+
+`--gdb` runs headless: the stub owns the machine, starts it halted at
+reset, advances it unpaced, and cannot be combined with a window or the
+scheduled capture flags.
+
+`--gdb-gui ADDR` attaches the same stub to the normal interactive
+window instead, the way `--control-gui` attaches the control server:
+
+```sh
+./target/release/copperline --config copperline.example.toml --gdb-gui :2345
+```
+
+- The machine stays visible and paced to real time; `continue` runs at
+  Amiga speed unless the client turns pacing off with `monitor warp on`
+  (`monitor warp off` re-paces, and a disconnect releases the client's
+  warp hold automatically).
+- Attaching pauses the machine. Detaching (`detach`, a dropped
+  connection, or GDB's `kill`) leaves the window running and the stub
+  listening for the next client -- `kill` deliberately detaches instead
+  of ending the session, because the window belongs to the user and
+  VS Code sends `kill` on Stop Debugging.
+- Breakpoints, watchpoints, and register watches install into the same
+  machine break stores the debugger window uses, so they hit inside the
+  windowed frame loop. Points the window's own debugger set are never
+  touched, and a detach removes exactly what the client installed.
+- A stop while the client's `continue` is outstanding answers the
+  client; any other debug stop (a GUI breakpoint, a watchpoint) opens
+  the local debugger window as usual, and a plain pause from the window
+  just pauses.
+- `--run` break-at-entry works exactly as with `--gdb` (below).
+- `--gdb-gui` cannot be combined with `--gdb`, `--control`,
+  `--control-gui`, or `--benchmark-until`.
+
+Stock GDB frontends debug either mode: VS Code's cppdbg configuration
+(`"MIMode": "gdb"`, `"miDebuggerServerAddress": "localhost:2345"`,
+`"miDebuggerPath"` pointing at `m68k-amigaos-gdb`) or Native Debug's
+`target remote` setup, with `--gdb-gui` keeping the Amiga screen
+interactive beside the editor.
+
 ## Connecting from GDB
 
 Start a 68k-aware GDB (such as `m68k-amigaos-gdb` or multiarch `gdb`) and connect:
@@ -46,6 +86,11 @@ Copper disassembly, and Exec structures:
 (gdb) monitor tasks            # List Exec ready, waiting, and active tasks
 (gdb) monitor memlist          # List Exec memory allocations
 ```
+
+A windowed session (`--gdb-gui`) additionally answers
+`monitor warp on|off|status`, toggling the App's warp hold: the machine
+runs unpaced (audio muted) until the client turns it back off or
+disconnects.
 
 ## Source-level debugging and program loading
 

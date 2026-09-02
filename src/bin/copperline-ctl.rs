@@ -11,12 +11,18 @@
 //! REPL (one `METHOD [JSON-PARAMS]` per line on stdin):
 //!   copperline-ctl --info /tmp/ccp.json --repl
 //!
+//! MCP server over stdio (docs/debugger/control.md, "MCP server"), for
+//! coding agents; with no connection arguments the agent launches or
+//! attaches a session through the session_* tools:
+//!   copperline-ctl --mcp [--info FILE | --connect ADDR --token TOKEN]
+//!
 //! Responses print to stdout as one JSON object per line; server
 //! notifications (event.*) print as they arrive. Exit status is nonzero
 //! when a one-shot request returns a JSON-RPC error.
 //!
-//! Deliberately std + serde_json only, so it stays a trivially portable
-//! sidecar for scripts and agents.
+//! Deliberately std + serde_json only (the MCP mode is the library's
+//! hand-rolled `control::mcp`, no async runtime), so it stays a trivially
+//! portable sidecar for scripts and agents.
 
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
@@ -27,19 +33,22 @@ struct Options {
     connect: Option<String>,
     token: Option<String>,
     repl: bool,
+    mcp: bool,
     method: Option<String>,
     params: Value,
 }
 
 fn usage() -> &'static str {
     "usage: copperline-ctl (--info FILE | --connect ADDR --token TOKEN) \
-     [--repl | METHOD [JSON-PARAMS]]"
+     [--repl | METHOD [JSON-PARAMS]]\n       \
+     copperline-ctl --mcp [--info FILE | --connect ADDR --token TOKEN]"
 }
 
 fn parse_options() -> Result<Options, String> {
     let mut connect = None;
     let mut token = None;
     let mut repl = false;
+    let mut mcp = false;
     let mut method = None;
     let mut params = Value::Null;
     let mut args = std::env::args().skip(1);
@@ -69,6 +78,7 @@ fn parse_options() -> Result<Options, String> {
                     .or(token);
             }
             "--repl" => repl = true,
+            "--mcp" => mcp = true,
             "-h" | "--help" => return Err(usage().to_string()),
             _ if method.is_none() && !arg.starts_with('-') => method = Some(arg),
             _ if method.is_some() && params.is_null() => {
@@ -78,16 +88,26 @@ fn parse_options() -> Result<Options, String> {
             other => return Err(format!("unexpected argument {other:?}\n{}", usage())),
         }
     }
-    if connect.is_none() {
-        return Err(format!("no server address\n{}", usage()));
-    }
-    if !repl && method.is_none() {
-        return Err(format!("no method\n{}", usage()));
+    if mcp {
+        if repl || method.is_some() {
+            return Err(format!("--mcp takes no method or --repl\n{}", usage()));
+        }
+        if connect.is_some() && token.is_none() {
+            return Err(format!("--mcp --connect needs --token\n{}", usage()));
+        }
+    } else {
+        if connect.is_none() {
+            return Err(format!("no server address\n{}", usage()));
+        }
+        if !repl && method.is_none() {
+            return Err(format!("no method\n{}", usage()));
+        }
     }
     Ok(Options {
         connect,
         token,
         repl,
+        mcp,
         method,
         params,
     })
@@ -279,6 +299,29 @@ fn read_repl_messages(
     }
 }
 
+/// `--mcp`: serve MCP on stdin/stdout, attached to the session named on
+/// the command line if there is one.
+fn run_mcp(options: &Options) -> ExitCode {
+    use copperline::control::bridge::Bridge;
+    let attach = match (&options.connect, &options.token) {
+        (Some(addr), Some(token)) => match Bridge::connect(addr, token) {
+            Ok(bridge) => Some(bridge),
+            Err(message) => {
+                eprintln!("copperline-ctl: {message}");
+                return ExitCode::FAILURE;
+            }
+        },
+        _ => None,
+    };
+    match copperline::control::mcp::run_stdio(attach) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("copperline-ctl: mcp transport: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let options = match parse_options() {
         Ok(options) => options,
@@ -287,6 +330,9 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if options.mcp {
+        return run_mcp(&options);
+    }
     let addr = options.connect.as_deref().expect("checked in parsing");
     let mut client = match Client::connect(addr) {
         Ok(client) => client,

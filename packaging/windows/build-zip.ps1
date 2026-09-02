@@ -76,6 +76,13 @@ foreach ($f in @("a4091_cdfs.rom", "README.md", "THIRD_PARTY_NOTICES.txt")) {
     Copy-Item (Join-Path "assets\a4091" $f) (Join-Path $a4091Dir $f)
 }
 
+# Copperline's open A2091/A590 autoboot ROM.
+$a2091Dir = Join-Path $stage "a2091"
+New-Item -ItemType Directory -Force -Path $a2091Dir | Out-Null
+foreach ($f in @("copperline-a2091.rom", "README.md", "THIRD_PARTY_NOTICES.txt")) {
+    Copy-Item (Join-Path "assets\a2091" $f) (Join-Path $a2091Dir $f)
+}
+
 # Bundled open-source lide.device autoboot ROM and CD-filesystem bank
 # (default for a fitted [lide] board without a named rom/rom_bank2);
 # romsearch.rs probes a sibling lide\ next to the exe.

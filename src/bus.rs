@@ -465,6 +465,20 @@ enum SpriteControlRegisterWrite {
     Ctl,
 }
 
+/// Where the pre-display sprite-DMA replay has got to in the current frame.
+/// `started` is false until the frame's first replay call has seeded the
+/// channels from the carried SPRxPT frontier.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+struct SpriteDmaReplayCursor {
+    started: bool,
+    vpos: u32,
+    /// Next of the line's sixteen sprite DMA slots (sprite N's slot 1 and 2
+    /// interleaved in beam order) still to replay.
+    slot_idx: usize,
+    event_idx: usize,
+    dmacon: u16,
+}
+
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 struct BitplaneDmaconDelay {
     previous: u16,
@@ -743,6 +757,12 @@ pub struct Bus {
     /// $DD2020.
     #[serde(default)]
     pub ide_a4000: Option<crate::ide_a4000::IdeA4000>,
+    /// WinUAE-compatible uaelib trap at $F0FF60 (`[emulation] uaelib`): a
+    /// guest-callable warp toggle, debug log and resource registry
+    /// (`crate::uaelib`). None when disabled; a CDTV extended ROM at
+    /// $F00000 decodes ahead of it and hides it.
+    #[serde(default)]
+    pub uaelib: Option<crate::uaelib::UaeLib>,
     /// `[debug] log_unmapped`: log CPU accesses in this range that no device
     /// decodes, to find the registers a guest expects and we do not provide.
     #[serde(default)]
@@ -808,6 +828,12 @@ pub struct Bus {
     /// Diagnostic crash context: set when a blit is started whose D
     /// destination lands in the exception-vector / low-memory region, so
     /// the CPU wrapper can dump its instruction history at that moment.
+    /// Host diagnostics, not machine state: only `COPPERLINE_DIAG_CRASH`
+    /// ever consumes it, so on an undiagnosed run it stays latched from the
+    /// first such blit on. Excluded from the serialized layout so a save
+    /// state written after that blit is byte-identical whether the run was
+    /// resumed (which launders the alarm) or not.
+    #[serde(skip)]
     pub diag_lowmem_blit: bool,
 
     /// Latched agnus-frame-crossing that has not yet been ORed into
@@ -840,11 +866,20 @@ pub struct Bus {
     /// Paula INTREQ -> CPU IPL-pin propagation pipe (COPPERLINE_IRQ_LATENCY_CCK,
     /// see DEFAULT_IRQ_LATENCY_CCK). When the setting is non-zero, a newly
     /// raised maskable interrupt is held invisible to the CPU for that many cck
-    /// (`irq_latency_mask` = the delayed bits, `irq_latency_cck` = countdown,
+    /// (`irq_latency_mask` = the delayed bits, `irq_latency_visible_at` = the
+    /// colour clock each delayed bit reaches the pins at,
     /// `irq_latency_last_pending` = previous pending set for rising-edge detect).
     /// INTREQR reads are NOT delayed (the pipe sits between the level encoder
     /// and the pins, not on the register).
-    irq_latency_cck: u32,
+    ///
+    /// Each source pipes independently: every source has its own path through
+    /// the level encoder, so one asserting cannot hold another that is already
+    /// on its way to the pins. A single shared countdown restarted by every new
+    /// source stretched an earlier interrupt's delay by the later one's, which
+    /// on a machine with several active sources (audio channels, the Copper,
+    /// vertical blank) jittered handler entry across tens of raster lines
+    /// instead of the few colour clocks the pipe is worth.
+    irq_latency_visible_at: [u64; 16],
     irq_latency_mask: u16,
     irq_latency_last_pending: u16,
     /// Configured IPL-pipe length in cck (from COPPERLINE_IRQ_LATENCY_CCK or the
@@ -1208,6 +1243,17 @@ pub struct Bus {
     /// re-derived at load time.
     #[serde(default)]
     sprite_dma_frame_start_ptr: [u32; 8],
+    /// Cursor for the pre-display sprite-DMA replay, which runs in step with
+    /// the beam rather than in one batch at the display start: a fetch has to
+    /// read chip RAM at its own beam time, and software commonly rewrites the
+    /// sprite descriptors during vertical blank, after the vertical-blank
+    /// control-word fetch has already happened on hardware. `vpos` is the next
+    /// pre-display line to replay, `event_idx` the position reached in this
+    /// frame's render-event list, and `dmacon` the DMACON value the replayed
+    /// writes have built up so far. Serialized so a state saved part way
+    /// through the pre-display window resumes the replay where it stopped.
+    #[serde(default)]
+    sprite_dma_replay: SpriteDmaReplayCursor,
     // The register-level sprite DMA state (comparator copies, DMA
     // flip-flops, display latches). Chip state: serialized and restored
     // exactly by save states.
@@ -2621,6 +2667,7 @@ impl Bus {
             gary: None,
             sdmac: None,
             ide_a4000: None,
+            uaelib: None,
             log_unmapped: None,
             akiko: None,
             cdtv: None,
@@ -2644,7 +2691,7 @@ impl Bus {
             pending_copper_irq_beam: None,
             delivered_copper_irq_beam: None,
             coper_cpu_irq_delay_cck: 0,
-            irq_latency_cck: 0,
+            irq_latency_visible_at: [0; 16],
             irq_latency_mask: 0,
             irq_latency_last_pending: 0,
             irq_latency_setting: irq_latency_setting_from_env(),
@@ -2772,6 +2819,7 @@ impl Bus {
             display_dma_bplpt: [0; 8],
             display_dma_sprpt: [0; 8],
             sprite_dma_frame_start_ptr: [0; 8],
+            sprite_dma_replay: SpriteDmaReplayCursor::default(),
             display_dma_sprite_state: [DisplaySpriteDmaState::default(); 8],
             display_dma_clipped_rows_advanced: false,
             bitplane_dmacon_delay: None,
@@ -3564,6 +3612,10 @@ impl Bus {
         self.gayle = Some(gayle);
     }
 
+    pub fn attach_uaelib(&mut self, uaelib: crate::uaelib::UaeLib) {
+        self.uaelib = Some(uaelib);
+    }
+
     pub fn attach_ramsey(&mut self, ramsey: crate::ramsey::Ramsey) {
         self.ramsey = Some(ramsey);
     }
@@ -3829,6 +3881,9 @@ impl Bus {
         for dev in &mut self.devices {
             crate::zorro_device::ZorroDevice::reset(dev);
         }
+        if let Some(uaelib) = self.uaelib.as_mut() {
+            uaelib.reset();
+        }
         self.mem.zorro.warm_reset();
         self.hdd_led_until_cck = 0;
         self.overlay_disable_pending = false;
@@ -3847,7 +3902,7 @@ impl Bus {
         self.pending_copper_irq_beam = None;
         self.delivered_copper_irq_beam = None;
         self.coper_cpu_irq_delay_cck = 0;
-        self.irq_latency_cck = 0;
+        self.irq_latency_visible_at = [0; 16];
         self.irq_latency_mask = 0;
         self.irq_latency_last_pending = 0;
         self.beam_top_palette = Palette::new();
@@ -3910,6 +3965,11 @@ impl Bus {
         self.display_dma_bplpt = [0; 8];
         self.display_dma_sprpt = [0; 8];
         self.sprite_dma_frame_start_ptr = [0; 8];
+        // The pre-display replay cursor indexes the frame's render-event log
+        // and the pointers cleared above, so it has to restart with them: a
+        // cursor carried over would resume part way down a field that no
+        // longer exists and skip the first field's sprite DMA.
+        self.sprite_dma_replay = SpriteDmaReplayCursor::default();
         self.display_dma_clipped_rows_advanced = false;
         self.bitplane_dmacon_delay = None;
         self.bitplane_bplcon0_delay = None;
@@ -5800,9 +5860,15 @@ impl Bus {
         if self.coper_cpu_irq_delay_cck != 0 {
             visible &= !INT_COPER;
         }
-        // Hold a newly-raised interrupt invisible during its recognition latency.
-        if self.irq_latency_cck != 0 {
-            visible &= !self.irq_latency_mask;
+        // Hold each newly-raised interrupt invisible until its own pipe delay
+        // has elapsed; sources released earlier stay visible.
+        let mut delayed = self.irq_latency_mask;
+        while delayed != 0 {
+            let bit = delayed.trailing_zeros() as usize;
+            delayed &= delayed - 1;
+            if self.emulated_cck < self.irq_latency_visible_at[bit] {
+                visible &= !(1u16 << bit);
+            }
         }
         visible
     }
@@ -5816,13 +5882,45 @@ impl Bus {
         }
         let pending = self.current_enabled_irq_sources();
         let newly = pending & !self.irq_latency_last_pending;
-        if newly != 0 {
-            self.irq_latency_mask |= newly;
-            self.irq_latency_cck = setting;
-        }
+        self.arm_irq_latency_bits(newly, setting);
         // Drop any bits that are no longer pending (acked while still delayed).
         self.irq_latency_mask &= pending;
         self.irq_latency_last_pending = pending;
+    }
+
+    /// Colour clocks until the earliest interrupt still inside its
+    /// recognition pipe reaches the CPU's IPL pins, for bounding an idle
+    /// STOP nap. `None` when nothing is in flight.
+    pub fn next_irq_visible_cck(&self) -> Option<u32> {
+        let mut delayed = self.irq_latency_mask;
+        let mut soonest: Option<u64> = None;
+        while delayed != 0 {
+            let bit = delayed.trailing_zeros() as usize;
+            delayed &= delayed - 1;
+            let at = self.irq_latency_visible_at[bit];
+            if at > self.emulated_cck {
+                let remaining = at - self.emulated_cck;
+                soonest = Some(soonest.map_or(remaining, |s: u64| s.min(remaining)));
+            }
+        }
+        soonest.map(|cck| cck.min(u64::from(u32::MAX)) as u32)
+    }
+
+    /// Start each named source's own recognition pipe. A source already on its
+    /// way to the pins keeps the deadline it has: re-arming it here is what
+    /// made one source's assertion postpone another's.
+    fn arm_irq_latency_bits(&mut self, bits: u16, setting: u32) {
+        let mut remaining = bits & !self.irq_latency_mask;
+        if remaining == 0 {
+            return;
+        }
+        let deadline = self.emulated_cck.saturating_add(u64::from(setting));
+        self.irq_latency_mask |= remaining;
+        while remaining != 0 {
+            let bit = remaining.trailing_zeros() as usize;
+            remaining &= remaining - 1;
+            self.irq_latency_visible_at[bit] = deadline;
+        }
     }
 
     fn current_enabled_irq_sources(&self) -> u16 {
@@ -5847,8 +5945,7 @@ impl Bus {
         let newly = pending & !self.irq_latency_last_pending;
         let delayed = newly & !INT_PORTS;
         if delayed != 0 && self.irq_latency_setting != 0 {
-            self.irq_latency_mask |= delayed;
-            self.irq_latency_cck = self.irq_latency_setting;
+            self.arm_irq_latency_bits(delayed, self.irq_latency_setting);
         }
         self.irq_latency_mask &= pending;
         self.irq_latency_last_pending = pending;
@@ -6418,6 +6515,10 @@ impl Bus {
         } else {
             frame_lines
         }
+    }
+
+    pub fn frame_analyzer_enabled(&self) -> bool {
+        self.frame_analyzer_enabled
     }
 
     pub fn set_frame_analyzer_enabled(&mut self, enabled: bool) {
@@ -7275,6 +7376,17 @@ impl Bus {
             if a >= base && a.wrapping_sub(base) + 1 < mem.len() {
                 let off = a - base;
                 return ((mem[off] as u16) << 8) | mem[off + 1] as u16;
+            }
+        }
+        // The uaelib trap stub (after the ROM windows: a CDTV extended ROM
+        // at $F00000 hides it on the real bus too).
+        if crate::uaelib::UaeLib::decodes(addr) {
+            if let Some(word) = self
+                .uaelib
+                .as_ref()
+                .and_then(|u| u.peek_word(addr.wrapping_sub(crate::uaelib::UAELIB_BASE)))
+            {
+                return word;
             }
         }
         0

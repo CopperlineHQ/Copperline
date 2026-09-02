@@ -353,10 +353,16 @@ impl Bus {
                 self.blit_irq_delay_cck = Some(delay);
             }
         }
-        if self.irq_latency_cck != 0 {
-            self.irq_latency_cck = self.irq_latency_cck.saturating_sub(cck);
-            if self.irq_latency_cck == 0 {
-                self.irq_latency_mask = 0;
+        // Retire each delayed source as its own pipe deadline passes; the
+        // deadlines are absolute colour clocks, so nothing to count down here.
+        if self.irq_latency_mask != 0 {
+            let mut delayed = self.irq_latency_mask;
+            while delayed != 0 {
+                let bit = delayed.trailing_zeros() as usize;
+                delayed &= delayed - 1;
+                if self.emulated_cck >= self.irq_latency_visible_at[bit] {
+                    self.irq_latency_mask &= !(1u16 << bit);
+                }
             }
         }
         let tick = self.agnus.advance_by_cck(cck);
@@ -365,6 +371,21 @@ impl Bus {
         }
         if self.wave_on {
             self.wave_note_beam((old_vpos, old_hpos), old_frame_lines, tick.new_frames);
+        }
+        // Pre-display sprite DMA is replayed in step with the beam: once a
+        // line's sprite slots have passed, replay that line while chip RAM
+        // still holds what those fetches would have read. Batching the whole
+        // pre-display span at the display start instead let a vertical-blank
+        // descriptor rewrite land before the control-word fetch was modelled.
+        if tick.new_frames == 0 && old_vpos < self.display_start_vpos_for_current_control() {
+            // Replay every pre-display sprite slot the beam has now passed, so
+            // each fetch reads chip RAM at its own beam time. A line crossing
+            // completes the line just left; otherwise stop at the current hpos.
+            if tick.new_lines != 0 {
+                self.advance_sprite_dma_replay_to(self.agnus.vpos, 0);
+            } else {
+                self.advance_sprite_dma_replay_to(old_vpos, self.agnus.hpos);
+            }
         }
         if tick.new_frames == 0 && tick.new_lines == 0 {
             self.capture_sprite_dma_words_if_due(

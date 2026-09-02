@@ -212,9 +212,9 @@ once something is moved. The launcher edits the same keys on its **A/V &
 Emu -> Paths** page.
 
 Each default is a folder of that name under the host-data directory --
-`~/.config/copperline` on macOS and Linux, `%APPDATA%\copperline` on
-Windows, or the executable's own folder in a [portable
-installation](ui.md#where-files-go). A relative path is taken from
+`~/Documents/Copperline` on macOS and Linux,
+`%USERPROFILE%\Documents\Copperline` on Windows, or the executable's own
+folder in a [portable installation](ui.md#where-files-go). A relative path is taken from
 `base` (itself taken from the host-data directory when relative or unset),
 an absolute path is used as given. Output folders are created on first
 write; the dialog folders are never created, and a dialog only starts in
@@ -376,12 +376,14 @@ section uses the same Rev 6A defaults; select `A500OCS` or set
 ```toml
 [emulation]
 power_on = true            # false = start powered off at the test screen
+auto_launch = false        # true = the launcher runs this file at once
 pacing_budget = "cycles"   # "cycles" (hardware-accurate) or "instructions"
 realtime_priority = false  # true = raise the pacer/audio thread priority
 warp_speed = "max"         # turbo limit: "2x", "4x", "8x", "16x", or "max"
 warp_boot = false          # warp the boot until storage goes idle
 warp_boot_idle = 10        # ...for this many emulated seconds
 # warp_until = 12.0        # or warp until an absolute emulated time
+uaelib = true              # WinUAE-compatible uaelib trap at $F0FF60
 rewind = false             # true = record rewind history from power-on
 rewind_budget_mb = 256     # host memory the rewind history may hold
 rewind_interval_frames = 25 # emulated frames per rewind step
@@ -398,6 +400,12 @@ carried no information.)
   until you click the status-bar power button -- useful for arming video
   capture first. The power button cold-boots (reinitialising RAM according to
   `[memory] init`).
+- `auto_launch = true` makes the launcher run this configuration the moment
+  it opens it -- starting Copperline with it as the saved default boots the
+  machine with no configuration screen first, and the launcher's **Load...**
+  button does the same. The launcher's **A/V & Emu -> Emulation -> Run on
+  startup** row sets it. It only concerns the launcher: a machine given on
+  the command line never shows the screen this key skips.
 - `pacing_budget` selects how real-time pacing budgets CPU work per frame:
   `"cycles"` (default) charges each instruction its actual 68000 cycle cost
   plus chip-bus waits, matching real hardware speed; `"instructions"` uses a
@@ -447,12 +455,20 @@ carried no information.)
   `warp_until = SECS` is the deterministic alternative: warp until an
   absolute emulated timestamp, for a setup whose boot time is known. The two
   are mutually exclusive, `--warp-boot`/`--warp-until` set them from the
-  command line, the manual warp toggle cancels the phase, headless captures
-  (already unpaced end to end) ignore both, and `--run` (whose own warp
-  launch ends at a sharper condition) cannot combine with them. The
-  launcher's *Warp boot* and *Warp boot idle* rows (*A/V & Emu*,
-  *Emulation*) edit the storage-idle mode; a `warp_until` loaded from a
-  config shows there as its own *Until Ns* state, which one press clears.
+  command line, the manual warp toggle (or `warp.set {"on": false}` over the
+  control protocol) cancels the phase, headless captures (already unpaced
+  end to end) ignore both, and `--run` (whose own warp launch ends at a
+  sharper condition) cannot combine with them. The launcher's *Warp boot*
+  and *Warp boot idle* rows (*A/V & Emu*, *Emulation*) edit the
+  storage-idle mode; a `warp_until` loaded from a config shows there as its
+  own *Until Ns* state, which one press clears.
+- `uaelib = true` (the default) fits the WinUAE-compatible "uaelib" trap at
+  `$F0FF60`, through which a guest program can toggle warp (`warpmode()` in
+  the vscode-amiga-debug template), log debug text, and register its
+  bitmaps, palettes and copper lists for the debugger; see the uaelib trap
+  section of [](run). `false` leaves `$F0FF60` floating. A CDTV's extended
+  ROM hides the trap regardless. There is no launcher row; the setting
+  survives the configuration screen's round trip.
 - `rewind = true` records rewind history from power-on, so `Cmd+Z` / `Alt+Z`
   and the **Rewind** menu item can step the whole machine backward through
   it. It rides the same deterministic snapshot ring as the debugger's reverse
@@ -720,36 +736,97 @@ flips the mode live without touching the config, and
 a separate question from what the canvas is. The default `"smooth"` fits the
 canvas to the window preserving its aspect ratio and interpolates, so the
 picture always uses the full window height (or width) whatever fraction the
-scale works out to. `"integer"` instead draws the canvas at the largest
-whole-number multiple of itself that fits the window, measured in physical
-device pixels, centred in black borders and point-sampled: every canvas
-pixel becomes the same square block of host pixels, with no row or column
-sampled twice, which is the look WinUAE and Amiberry call integer scaling.
+scale works out to. `"integer"` instead draws the canvas at whole-number
+multiples -- the largest that fits the window, measured in physical device
+pixels, and under the TV aspect a separate whole number per axis (below)
+-- centred in black borders and point-sampled: every canvas pixel becomes
+the same block of host pixels, with no row or column sampled twice, which
+is the look WinUAE and Amiberry call integer scaling.
 The fit is taken in whole canvas pixels against the physical surface --
 the canvas is re-rendered at whatever factor fits, rather than drawn at
 whole multiples of a fixed high-DPI texture -- so every step exists on
 every display: a 2x-DPI laptop whose screen holds three physical pixels
-per canvas pixel but not four gets the 3x picture, and fractional desktop
-scales such as 150% take their whole physical multiples the same way. The
-status bar and menus are rendered at the fitted factor too, so they stay
-sharp at any step (the factor is capped at 4x; larger fits continue as
-whole multiples of the 4x canvas). Only when the window is too small for
-even a 1:1 copy -- smaller than the canvas itself in physical pixels --
-does the picture fall back to the smooth fit rather than cropping to what
-fits. RTG board modes follow the setting too: their frame is scaled
+per canvas pixel but not four gets the 3x picture, fractional desktop
+scales such as 150% take their whole physical multiples the same way,
+and a 5K or 6K display in fullscreen fills as much of its height as the
+next whole multiple allows (the internal render factor is capped at 4x,
+but the displayed multiple is not -- the display's pixels stay exact
+whole blocks past the cap; only the status bar and menus, drawn at the
+capped factor, are resampled there). Only when the window is too small
+for even a 1:1 copy -- smaller than the canvas itself in physical pixels
+-- does the picture fall back to the smooth fit rather than cropping to
+what fits. RTG board modes follow the setting too: their frame is scaled
 from its own native resolution, so a 640x480 board screen is drawn at 1x,
 2x, 3x of *those* pixels inside the display area.
 
-`pixel_aspect = "square"` with `scaling = "integer"` is the fully
-pixel-exact combination: the square-pixel canvas is one host row per woven
-scanline, so a whole-number window scale carries the emulated bitmap to the
-screen untouched. Integer scaling of the default TV aspect is still crisp,
-but crisp pixels of an already-resampled image -- that canvas fits the scan
-onto 537 rows for the 4:3 shape before presentation. The monitor-bezel mode
-(`bezel`) composes with either, but its picture opening is a fraction of
-the window by design and is not itself integer-exact. The menu's *Video
-Settings > Scaling* item switches modes live without touching the config;
-there is no environment-variable override.
+Integer scaling always draws from the unresampled canvas -- one host row
+per woven scanline, the canvas `pixel_aspect = "square"` presents -- so a
+whole-number scale carries the emulated bitmap to the screen untouched
+under either aspect. Under the default TV aspect the two axes take
+separate whole numbers: the picture is the TV aperture, drawn at a whole
+number of device pixels per hi-res column and a whole number per scan
+line, chosen to approximate the pixel shape of the 4:3 glass (the shape
+the smooth TV presentation resamples to: a PAL pixel about 1.08 times
+wider than tall, an NTSC one about 0.85). The choice is the tallest fit
+whose shape stays within a tenth of the glass's, so an NTSC 200-line game
+on a 1080p screen gets two pixels per column and five per line -- the
+4:5 pixel of [amiga.vision's NTSC guide](https://amiga.vision/ntsc), a
+1280x1000 picture -- 6:7 at 1440p and 4:5 again at 4K, while PAL, whose
+glass shape is within a tenth of square, takes the square multiples until
+a display is tall enough for 8:7. The count per scan line may be odd: a
+non-interlaced display's two woven rows per line are identical, so the
+line still lands as one exact block, and only an interlaced display shows
+its two fields' rows at alternating heights then. A window too short for
+even one pixel per line falls back to the smooth fit of the same shape.
+`pixel_aspect = "square"` with `"integer"` keeps the uniform square
+multiples instead, exact in the same way, for side-by-side pixel
+comparison. Pair either with `autocrop` (below): the fit is retaken
+against the picture the hardware draws, which is what earns the extra
+lines a taller shape needs (the uncropped NTSC aperture on a 1080p screen
+only has room for square pixels). The window resizes to the unresampled
+canvas when the TV aspect switches to or from integer scaling, as it does
+for a pixel-aspect change; captures keep the aspect's own shape whatever
+the window draws. The monitor-bezel mode (`bezel`) keeps the resampled TV
+canvas under either scaling: its picture opening is a fraction of the
+window by design and is not itself integer-exact. Programmable (ECS/AGA
+VARBEAMEN) scans and RTG board screens, which present their own geometry,
+take a uniform multiple of the canvas. The menu's *Video Settings >
+Scaling* item switches modes live without touching the config; there is
+no environment-variable override.
+
+`autocrop` (default off) crops the window presentation to the display
+window the hardware actually programs, instead of the fixed TV aperture:
+most games drive well under the full scan (a 320x200 display uses 400 of
+the 570 woven lines), and cropping the unused border lets the picture
+fill far more of a 16:9 or 21:9 screen -- with `scaling = "integer"` the
+whole-number fit is retaken against the cropped picture, so a 200-line
+game often earns a full multiple more than the uncropped canvas would.
+The crop is derived every frame from the display-window rows that carry
+fetched bitplane data (the same per-line model the renderer paints
+with, so mid-frame rewrites and DIW tricks are already folded in --
+and a window left open around a shorter picture, as Kickstart's
+256-line default routinely is, crops to the picture, not the window).
+It grows instantly when a program opens a larger display, and tightens
+only after a smaller one has held steady for about half a second, so
+screen transitions do not pump the zoom.
+The status bar and any instrument panels keep their size in a band
+pinned along the window bottom; opening a menu or panel widens the
+picture to the full display area while it is up (so nothing of the
+overlay is cropped away) and the band stays put. A
+window-presentation setting only: screenshots, frame dumps and
+recordings always keep their configured aperture. The CRT shader
+presets compose with it (the scanlines, mask or tube face are drawn
+over the cropped picture). Programmable (ECS/AGA VARBEAMEN) multisync
+scans -- a DblPAL or Multiscan Workbench, a 31 kHz Linux console --
+crop too: their envelope is the same fetched-rows model carried
+through the scan's own sync-anchored window and blanking, so a
+doubled Workbench screen fills the window like a 15 kHz one, at the
+uniform multiple under integer scaling (a progressive scan's rows are
+not woven pairs for the per-axis fit to step by). Automatically
+suspended where it cannot apply -- under a monitor bezel (whose fixed
+opening frames the whole glass) and for RTG board scanout. The menu's
+*Video Settings > Autocrop* toggle flips it live without touching the
+config.
 
 `deinterlace` controls how interlaced (LACE) displays are presented. On
 (the default), a motion-adaptive deinterlacer weaves the two fields into a
@@ -1647,7 +1724,7 @@ filesystems the same way a `[scsi]` CD-ROM unit does.
 ```toml
 [scsi]
 # controller = "a2091"       # a2091 (default), a4091, or a3000
-rom = "a2091-v6.6.rom"       # boot ROM (a2091 needs one; a4091 defaults to bundled; a3000 none)
+# rom = "a2091-v7.0.rom"     # optional replacement; A2091/A4091 default to bundled open ROMs
 # rom_odd = "a2091-odd.rom"  # a2091 only: split even/odd EPROM dumps
 unit0 = "workbench.hdf"      # SCSI IDs 0-6
 unit1 = "data.hdf"
@@ -1662,7 +1739,10 @@ drives**. `controller` picks which one:
   A2091 (Commodore DMAC + WD33C93A) as a Zorro II autoconfig board. It
   works on **any machine model** (the board needs no Gayle) and has no
   dependence on the Kickstart IDE driver -- the board's own boot ROM
-  carries `scsi.device` and autoboots on Kickstart 1.3 and newer, which
+  carries `scsi.device` and autoboots on Kickstart 1.3 and newer. Omit
+  `rom` to use Copperline's bundled clean-room open ROM, which uses PIO for
+  control commands and 24-bit DMAC transfers with safe bounce buffers for
+  inaccessible or unaligned memory. This
   also sidesteps the stock A600/A1200 `scsi.device` only probing the IDE
   master. `[ide]` remains available, and both can be used at once.
 - `"a4091"`: a Commodore A4091 (NCR 53C710 SCSI-2) as a Zorro III
@@ -1677,13 +1757,14 @@ drives**. `controller` picks which one:
   and autoboots from an RDB drive. It is only valid on a machine with the
   Super DMAC (the A3000).
 
-For the A2091, `rom` must point at an A590/A2091 boot ROM image (version
-6.6 or later; 16K/32K, available from the same vendors and dump sets as
-Kickstart ROMs). Dumps split into even/odd EPROM halves can be given as
+For the A2091, omit `rom` to use `assets/a2091/copperline-a2091.rom`, or
+point it at another 16K/32K/64K A590/A2091 boot ROM image. Dumps split into
+even/odd EPROM halves can be given as
 `rom` (even, U13) plus `rom_odd` (odd, U12). The ROM is required on the
 Zorro boards because the autoboot DiagArea and the scsi.device driver
 itself live in it; the autoconfig identity comes from the board (the
-A2091 is Commodore product 3, with its DiagArea vector at `$2000`).
+A2091 is Commodore product 3, with its DiagArea vector at `$2000`). The
+replacement ROM sources and EPROM-pair build outputs live in `a2091-rom/`.
 
 Each `unitN` accepts everything `[ide]` paths do: RDB images, bare
 partition hardfiles (a synthesized RDB advertises a bootable `DHn`

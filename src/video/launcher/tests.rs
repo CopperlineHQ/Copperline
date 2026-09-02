@@ -28,7 +28,7 @@ fn warp_boot_rows_cycle_and_round_trip() {
     // rounded into a different-looking one.
     assert_eq!(setup.value_label(F::WarpBoot), "Until 12.5s");
     setup.cycle(F::WarpBoot, true);
-    assert_eq!(setup.value_label(F::WarpBoot), "Off");
+    assert_eq!(setup.value_label(F::WarpBoot), "Disabled");
     assert_eq!(setup.value_label(F::WarpBootIdle), "10s");
     let out = setup.to_raw();
     assert_eq!(out.emulation.warp_until, None);
@@ -50,6 +50,18 @@ fn warp_boot_settings_survive_the_config_screen_round_trip() {
     let raw: RawConfig = toml::from_str("[emulation]\nwarp_until = 12.5\n").unwrap();
     let setup = MachineSetup::from_raw(&raw).unwrap();
     assert_eq!(setup.to_raw().emulation.warp_until, Some(12.5));
+}
+
+#[test]
+fn uaelib_setting_survives_the_config_screen_round_trip() {
+    // No config-screen control: a saved `uaelib = false` must not revert
+    // to the default on Run/Save.
+    let raw: RawConfig = toml::from_str("[emulation]\nuaelib = false\n").unwrap();
+    let setup = MachineSetup::from_raw(&raw).unwrap();
+    assert_eq!(setup.to_raw().emulation.uaelib, Some(false));
+    let raw: RawConfig = toml::from_str("").unwrap();
+    let setup = MachineSetup::from_raw(&raw).unwrap();
+    assert_eq!(setup.to_raw().emulation.uaelib, None);
 }
 
 #[test]
@@ -3693,6 +3705,35 @@ fn scsi_rows_hidden_until_a_controller_is_chosen() {
     for f in scsi_rows {
         assert!(s.row_hidden(f), "{f:?} shown after the controller left");
     }
+}
+
+#[test]
+fn auto_launch_round_trips_and_defaults_off() {
+    use LauncherField as F;
+    // Off by default, and an untouched setup writes no key.
+    let s = MachineSetup::default();
+    assert!(!s.auto_launch());
+    assert!(s.to_raw().emulation.auto_launch.is_none());
+
+    // Toggled on, it survives the round trip.
+    let mut s = s;
+    s.cycle(F::AutoLaunch, true);
+    assert!(s.auto_launch());
+    let raw = s.to_raw();
+    assert_eq!(raw.emulation.auto_launch, Some(true));
+    assert!(MachineSetup::from_raw(&raw).unwrap().auto_launch());
+
+    // And the row sits directly below Power on startup on the Emulation
+    // page, as its sibling.
+    let page = rows(
+        LauncherTab::AvEmulation,
+        ParallelDevice::None,
+        SerialMode::default(),
+        false,
+        false,
+    );
+    let power = page.iter().position(|r| r.field == F::PowerOn).unwrap();
+    assert_eq!(page[power + 1].field, F::AutoLaunch);
 }
 
 #[test]

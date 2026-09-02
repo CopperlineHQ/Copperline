@@ -8,6 +8,7 @@
 use super::{exec, proto};
 use crate::emulator::Emulator;
 use crate::serial::SERIAL_OBSERVATION_CAPACITY;
+use crate::uaelib::DebugEvent;
 use serde_json::{json, Value};
 
 pub const MAX_FRAME_INTERVAL: u64 = 1_000_000;
@@ -17,6 +18,7 @@ const FRAME: u8 = 1 << 0;
 const SERIAL: u8 = 1 << 1;
 const INTERRUPT: u8 = 1 << 2;
 const MEDIA: u8 = 1 << 3;
+const DEBUG: u8 = 1 << 4;
 
 /// Event families exposed by `events.subscribe`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,10 +27,18 @@ pub enum EventKind {
     Serial,
     Interrupt,
     Media,
+    /// Guest debug output through the uaelib trap (`crate::uaelib`).
+    Debug,
 }
 
 impl EventKind {
-    pub const ALL: [Self; 4] = [Self::Frame, Self::Serial, Self::Interrupt, Self::Media];
+    pub const ALL: [Self; 5] = [
+        Self::Frame,
+        Self::Serial,
+        Self::Interrupt,
+        Self::Media,
+        Self::Debug,
+    ];
 
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
@@ -36,6 +46,7 @@ impl EventKind {
             "serial" => Some(Self::Serial),
             "interrupt" => Some(Self::Interrupt),
             "media" => Some(Self::Media),
+            "debug" => Some(Self::Debug),
             _ => None,
         }
     }
@@ -46,6 +57,7 @@ impl EventKind {
             Self::Serial => "serial",
             Self::Interrupt => "interrupt",
             Self::Media => "media",
+            Self::Debug => "debug",
         }
     }
 
@@ -55,6 +67,7 @@ impl EventKind {
             Self::Serial => SERIAL,
             Self::Interrupt => INTERRUPT,
             Self::Media => MEDIA,
+            Self::Debug => DEBUG,
         }
     }
 }
@@ -122,6 +135,8 @@ impl Observer {
                 EventKind::Serial => emu.bus_mut().paula.set_serial_observation_enabled(true),
                 EventKind::Interrupt => self.last_interrupt = Some(interrupt_state(emu)),
                 EventKind::Media => self.last_media = Some(media_state(emu)),
+                // The queue is always on; a fresh subscription starts clean.
+                EventKind::Debug => emu.clear_uaelib_debug_events(),
             }
         }
         self.list_value()
@@ -130,7 +145,7 @@ impl Observer {
     pub fn unsubscribe(&mut self, emu: &mut Emulator, events: Option<&[EventKind]>) -> Value {
         let remove = events
             .map(|events| events.iter().fold(0, |bits, event| bits | event.bit()))
-            .unwrap_or(FRAME | SERIAL | INTERRUPT | MEDIA);
+            .unwrap_or(FRAME | SERIAL | INTERRUPT | MEDIA | DEBUG);
         let serial_was_active = self.active & SERIAL != 0;
         self.active &= !remove;
 
@@ -169,6 +184,8 @@ impl Observer {
             "dropped_notifications": self.dropped_notifications,
             "limits": {
                 "serial_records": SERIAL_OBSERVATION_CAPACITY,
+                "debug_events": crate::uaelib::DEBUG_EVENT_CAPACITY,
+                "debug_resources": crate::uaelib::RESOURCE_MAX,
                 "windowed_outbound_notifications": OUTBOUND_NOTIFICATION_CAPACITY,
             },
         })
@@ -264,6 +281,31 @@ impl Observer {
             self.last_media = Some(current);
         }
 
+        if self.active & DEBUG != 0 {
+            let (drained, dropped) = emu.take_uaelib_debug_events();
+            if !drained.is_empty() {
+                let (frame, seconds) = {
+                    let bus = emu.bus();
+                    (bus.emulated_frames(), bus.emulated_seconds())
+                };
+                for event in drained {
+                    let mut params = match event {
+                        DebugEvent::Log(text) => json!({ "kind": "log", "text": text }),
+                        DebugEvent::Resource { action, resource } => json!({
+                            "kind": "resource",
+                            "action": action.name(),
+                            "resource": exec::resource_value(&resource),
+                        }),
+                    };
+                    params["seconds"] = json!(seconds);
+                    params["frame"] = json!(frame);
+                    params["dropped_events"] = json!(dropped);
+                    params["dropped_notifications"] = json!(self.dropped_notifications);
+                    events.push(proto::event_line("event.debug", params));
+                }
+            }
+        }
+
         if self.active & FRAME != 0 {
             let current = emu.bus().emulated_frames();
             let previous = self.last_frame.unwrap_or(current);
@@ -271,6 +313,7 @@ impl Observer {
                 let mut params = json!({
                     "position": position(emu),
                     "previous_frame": previous,
+                    "guest_idle_cck": emu.uaelib_idle().and_then(|idle| idle.last_frame_idle_cck()),
                     "dropped_notifications": self.dropped_notifications,
                 });
                 if self.frame_digest {
@@ -323,7 +366,7 @@ fn media_state(emu: &Emulator) -> MediaState {
     }
 }
 
-fn position(emu: &Emulator) -> Value {
+pub(crate) fn position(emu: &Emulator) -> Value {
     let bus = emu.bus();
     json!({
         "frame": bus.emulated_frames(),
@@ -382,5 +425,135 @@ mod tests {
         let state = observer.unsubscribe(&mut emu, None);
         assert_eq!(state["active"], json!([]));
         assert_eq!(state["frame_digest"], false);
+    }
+
+    fn uaelib_emulator() -> Emulator {
+        let mut emu = test_emulator();
+        let mut lib = crate::uaelib::UaeLib::new();
+        lib.mute_stdout();
+        emu.bus_mut().attach_uaelib(lib);
+        emu
+    }
+
+    /// Register a copper list called "cop" the way the guest does.
+    fn register_copperlist(emu: &mut Emulator) {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x0004_0000u32.to_be_bytes());
+        bytes.extend_from_slice(&1000u32.to_be_bytes());
+        let mut name = [0u8; 32];
+        name[..3].copy_from_slice(b"cop");
+        bytes.extend_from_slice(&name);
+        bytes.extend_from_slice(&2u16.to_be_bytes());
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&[0; 6]);
+        let bus = emu.bus_mut();
+        bus.mem.chip_ram[0x5000..0x5000 + bytes.len()].copy_from_slice(&bytes);
+        let mem = &mut bus.mem;
+        let lib = bus.uaelib.as_mut().unwrap();
+        lib.call(
+            crate::uaelib::FN_DEBUG_CMD,
+            [crate::uaelib::CMD_REGISTER_RESOURCE, 0x5000, 0, 0, 0],
+            mem,
+            0x00FF_FFFF,
+            0,
+            0,
+        );
+    }
+
+    #[test]
+    fn debug_family_is_named_listed_and_cleared() {
+        assert_eq!(EventKind::from_name("debug"), Some(EventKind::Debug));
+        assert_eq!(EventKind::Debug.name(), "debug");
+        assert_eq!(EventKind::ALL.len(), 5);
+        let mut emu = uaelib_emulator();
+        let mut observer = Observer::new();
+        let state = observer.subscribe(&mut emu, &[EventKind::Debug], None, None);
+        assert_eq!(state["active"], json!(["debug"]));
+        assert_eq!(
+            state["limits"]["debug_events"],
+            crate::uaelib::DEBUG_EVENT_CAPACITY
+        );
+        assert_eq!(
+            state["limits"]["debug_resources"],
+            crate::uaelib::RESOURCE_MAX
+        );
+        let state = observer.unsubscribe(&mut emu, None);
+        assert_eq!(state["active"], json!([]));
+    }
+
+    #[test]
+    fn debug_subscription_streams_one_notification_per_event() {
+        let mut emu = uaelib_emulator();
+        let mut observer = Observer::new();
+        // Queued before the subscription: a fresh subscription starts clean.
+        emu.bus_mut()
+            .uaelib
+            .as_mut()
+            .unwrap()
+            .queue_debug_line("stale");
+        observer.subscribe(&mut emu, &[EventKind::Debug], None, None);
+        assert!(observer.poll(&mut emu).is_empty());
+
+        {
+            let lib = emu.bus_mut().uaelib.as_mut().unwrap();
+            lib.queue_debug_line("first");
+            lib.queue_debug_line("second");
+        }
+        register_copperlist(&mut emu);
+        let events = observer.poll(&mut emu);
+        assert_eq!(events.len(), 3);
+        let first: Value = serde_json::from_str(&events[0]).unwrap();
+        assert_eq!(first["method"], "event.debug");
+        assert_eq!(first["params"]["kind"], "log");
+        assert_eq!(first["params"]["text"], "first");
+        assert_eq!(first["params"]["frame"], emu.bus().emulated_frames());
+        assert_eq!(first["params"]["dropped_events"], 0);
+        let second: Value = serde_json::from_str(&events[1]).unwrap();
+        assert_eq!(second["params"]["text"], "second");
+        let third: Value = serde_json::from_str(&events[2]).unwrap();
+        assert_eq!(third["params"]["kind"], "resource");
+        assert_eq!(third["params"]["action"], "registered");
+        assert_eq!(third["params"]["resource"]["name"], "cop");
+        assert_eq!(third["params"]["resource"]["type"], "copperlist");
+        assert_eq!(third["params"]["resource"]["size"], 1000);
+        assert!(observer.poll(&mut emu).is_empty());
+
+        // An unsubscribed observer leaves the queue to whoever asks next.
+        observer.unsubscribe(&mut emu, Some(&[EventKind::Debug]));
+        emu.bus_mut()
+            .uaelib
+            .as_mut()
+            .unwrap()
+            .queue_debug_line("later");
+        assert!(observer.poll(&mut emu).is_empty());
+        assert_eq!(emu.take_uaelib_debug_events().0.len(), 1);
+    }
+
+    #[test]
+    fn frame_events_carry_guest_idle_cck_once_used() {
+        let mut emu = uaelib_emulator();
+        let mut observer = Observer::new();
+        observer.subscribe(&mut emu, &[EventKind::Frame], Some(1), Some(false));
+        let start = emu.bus().emulated_frames();
+        observer.last_frame = Some(start + 1);
+        let events = observer.poll(&mut emu);
+        assert_eq!(events.len(), 1);
+        let event: Value = serde_json::from_str(&events[0]).unwrap();
+        assert!(event["params"]["guest_idle_cck"].is_null());
+
+        {
+            let bus = emu.bus_mut();
+            let mem = &mut bus.mem;
+            let lib = bus.uaelib.as_mut().unwrap();
+            let cmd = crate::uaelib::FN_DEBUG_CMD;
+            let set_idle = crate::uaelib::CMD_SET_IDLE;
+            lib.call(cmd, [set_idle, 1, 0, 0, 0], mem, 0x00FF_FFFF, 100, 0);
+            lib.call(cmd, [set_idle, 0, 0, 0, 0], mem, 0x00FF_FFFF, 400, 0);
+            lib.note_frame_start(1000);
+        }
+        observer.last_frame = Some(start + 1);
+        let events = observer.poll(&mut emu);
+        let event: Value = serde_json::from_str(&events[0]).unwrap();
+        assert_eq!(event["params"]["guest_idle_cck"], 300);
     }
 }

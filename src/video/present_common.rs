@@ -179,6 +179,11 @@ pub fn tv_glass_sample(row: &[u32], out_x: usize, source_x_offset: i32) -> u32 {
     crate::video::blend_rgba(row[i], row[(i + 1).min(FB_WIDTH - 1)], frac)
 }
 
+/// Turn a rendered field into a presentable frame in place, and report
+/// how it was placed ([`FieldPlacement`]). Returns the placement rather
+/// than only its row count so a coordinate stated in field space -- the
+/// autocrop content envelope -- can follow the pixels through the same
+/// maps, and the two cannot disagree.
 pub fn post_process_rendered_field(
     fb: &mut [u32],
     geometry: FrameGeometry,
@@ -188,7 +193,7 @@ pub fn post_process_rendered_field(
     visible_start_vpos: u32,
     h_shift: usize,
     overscan: Overscan,
-) -> usize {
+) -> FieldPlacement {
     let canvas_width = FB_WIDTH * canvas_scale;
     let field_rows = geometry.visible_lines.min(fb.len() / canvas_width);
     // Vertical centring, optional full-overscan horizontal recentring, and the
@@ -204,29 +209,222 @@ pub fn post_process_rendered_field(
         if overscan == Overscan::Tv {
             mask_present_frame_to_tv(fb, h_shift, standard_window_top_row(visible_start_vpos));
         }
-        return field_rows;
+        return FieldPlacement {
+            rows: field_rows,
+            canvas_scale,
+            map: PlacementMap::Standard {
+                y_offset: presentation_source_y_offset(visible_start_vpos),
+                h_shift,
+            },
+        };
     }
-    if let Some((src_x0, src_w)) = presentation_h_window {
+    let columns = if let Some((src_x0, src_w)) = presentation_h_window {
         // A multisync monitor locks its horizontal deflection to the
         // programmed sync pulse: the glass shows the line from the sync
         // trailing edge to the next pulse, centring the picture the way
         // the mode's own porches place it. The window is computed in
         // classic-canvas pixels; scale it to this frame's pitch.
-        screenshot::stretch_rows_x_window(
-            fb,
-            canvas_width,
-            field_rows,
-            src_x0 * canvas_scale as i32,
-            src_w * canvas_scale as u32,
-        );
+        let (src_x0, src_w) = (src_x0 * canvas_scale as i32, src_w * canvas_scale as u32);
+        screenshot::stretch_rows_x_window(fb, canvas_width, field_rows, src_x0, src_w);
+        ColumnMap::Window { src_x0, src_w }
     } else if geometry.line_cck != 227 {
         // No programmed sync to anchor on: fall back to the time-linear
         // whole-line map (each colour clock of this scan's shorter/longer
         // line covers 227/line_cck of the glass a standard line's clock
         // would).
         screenshot::stretch_rows_x(fb, canvas_width, field_rows, geometry.line_cck, 227);
+        ColumnMap::Linear {
+            src_num: geometry.line_cck,
+            src_den: 227,
+        }
+    } else {
+        ColumnMap::Identity
+    };
+    let rows =
+        presentation_v_window_placement(field_rows, fb.len() / canvas_width, presentation_v_window);
+    place_presentation_v_window(fb, canvas_width, field_rows, rows);
+    FieldPlacement {
+        rows: rows.rows,
+        canvas_scale,
+        map: PlacementMap::Programmable { columns, rows },
     }
-    apply_presentation_v_window(fb, canvas_width, field_rows, presentation_v_window)
+}
+
+/// How [`post_process_rendered_field`] placed a rendered field on the
+/// presentation buffer: the rows it left, and the maps it moved the
+/// pixels through. Built by the function from what it did, so a
+/// field-space coordinate mapped through it ([`Self::content_rect`])
+/// lands exactly where the pixels went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FieldPlacement {
+    /// Rows of the placed field.
+    pub rows: usize,
+    /// The canvas pitch the field was rendered at
+    /// (`bitplane::canvas_scale_for`): 1, or 2 for a 35 ns canvas.
+    canvas_scale: usize,
+    map: PlacementMap,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlacementMap {
+    /// A standard scan: rows moved down by the vertical centring, columns
+    /// left by the full-overscan recentring shift.
+    Standard { y_offset: usize, h_shift: usize },
+    /// A programmable scan: columns resampled onto the glass width, rows
+    /// placed inside the sync-anchored vertical window.
+    Programmable {
+        columns: ColumnMap,
+        rows: VerticalPlacement,
+    },
+}
+
+/// The horizontal resample a programmable scan's line takes onto the
+/// glass width.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ColumnMap {
+    /// A standard-length line with no programmed sync: columns stay put.
+    Identity,
+    /// [`screenshot::stretch_rows_x_window`], the sync-anchored window.
+    Window { src_x0: i32, src_w: u32 },
+    /// [`screenshot::stretch_rows_x`], the time-linear whole-line map.
+    Linear { src_num: u32, src_den: u32 },
+}
+
+impl ColumnMap {
+    /// The source taps output column `x` of a `width`-column row reads.
+    fn source(self, x: usize, width: usize) -> (usize, u32) {
+        match self {
+            Self::Identity => (x, 0),
+            Self::Window { src_x0, src_w } => {
+                screenshot::stretch_rows_x_window_source(x, width, src_x0, src_w)
+            }
+            Self::Linear { src_num, src_den } => {
+                screenshot::stretch_rows_x_source(x, width, src_num, src_den)
+            }
+        }
+    }
+}
+
+impl FieldPlacement {
+    /// A standard placement, for callers that present a field the
+    /// classic way without the post-process pass.
+    pub fn standard(rows: usize, visible_start_vpos: u32, h_shift: usize) -> Self {
+        Self {
+            rows,
+            canvas_scale: 1,
+            map: PlacementMap::Standard {
+                y_offset: presentation_source_y_offset(visible_start_vpos),
+                h_shift,
+            },
+        }
+    }
+
+    /// Follow a content envelope the renderer stated in field canvas
+    /// space (`x` in hi-res-pitch pixels, `y` in rendered field rows)
+    /// through this placement and onto the `present_rows`-row buffer the
+    /// deinterlacer built from the placed field: the buffer rows and
+    /// columns that show any of the envelope. A standard field takes the
+    /// centring and recentring shifts, then two woven rows per field row;
+    /// a programmable field's columns are scanned against the resample's
+    /// own taps (so a partially blended edge column counts, and the
+    /// sync tail left of the capture, which clamps to the edge column,
+    /// counts when that column is picture), its rows are the captured
+    /// rows the vertical window kept, and the deinterlacer's row count
+    /// says whether the placed rows were woven (LACE) or passed through
+    /// at native height. `None` when nothing of the envelope reaches the
+    /// buffer -- a picture entirely off the glass.
+    pub fn content_rect(
+        &self,
+        rect: bitplane::ContentRect,
+        present_rows: usize,
+    ) -> Option<bitplane::ContentRect> {
+        let width = FB_WIDTH * self.canvas_scale;
+        // The renderer's x is the hi-res pitch; a 35 ns canvas fans each
+        // logical pixel out to `canvas_scale` columns.
+        let (x0, x1) = (rect.x0 * self.canvas_scale, rect.x1 * self.canvas_scale);
+        let (x0, x1, y0, y1) = match self.map {
+            PlacementMap::Standard { y_offset, h_shift } => {
+                let x0 = x0.saturating_sub(h_shift).min(width);
+                let x1 = x1.saturating_sub(h_shift).clamp(x0, width);
+                let y0 = (rect.y0 + y_offset).min(self.rows);
+                let y1 = (rect.y1 + y_offset).clamp(y0, self.rows);
+                (x0, x1, y0, y1)
+            }
+            PlacementMap::Programmable { columns, rows } => {
+                let mut shown = (0..width).filter(|&x| {
+                    screenshot::resampled_column_reads(columns.source(x, width), width, x0, x1)
+                });
+                let first = shown.next()?;
+                let last = shown.next_back().unwrap_or(first);
+                let kept = rows.skip_top..rows.skip_top + rows.content_rows;
+                let y0 = rect.y0.max(kept.start);
+                let y1 = rect.y1.min(kept.end);
+                if y1 <= y0 {
+                    return None;
+                }
+                let placed = |y: usize| y - rows.skip_top + rows.pad_top;
+                (first, last + 1, placed(y0), placed(y1))
+            }
+        };
+        // The deinterlacer wove or line-doubled the placed rows onto the
+        // buffer (two per row), or passed a programmable progressive field
+        // through at native height.
+        let row_scale = if present_rows >= 2 * self.rows { 2 } else { 1 };
+        let y0 = (row_scale * y0).min(present_rows);
+        let y1 = (row_scale * y1).clamp(y0, present_rows);
+        (x1 > x0 && y1 > y0).then_some(bitplane::ContentRect { x0, x1, y0, y1 })
+    }
+}
+
+/// Where [`apply_presentation_v_window`] puts the captured rows of a
+/// `field_rows`-row field: the rows it skips off the glass top, the
+/// blanked rows it pads above them, how many captured rows it keeps, and
+/// the rows of the result. Without a programmed vertical sync, or with a
+/// glass no taller than the field, the field is left as it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VerticalPlacement {
+    pub skip_top: usize,
+    pub pad_top: usize,
+    pub content_rows: usize,
+    pub rows: usize,
+}
+
+pub fn presentation_v_window_placement(
+    field_rows: usize,
+    buf_rows: usize,
+    presentation_v_window: Option<(i32, u32)>,
+) -> VerticalPlacement {
+    let unplaced = VerticalPlacement {
+        skip_top: 0,
+        pad_top: 0,
+        content_rows: field_rows,
+        rows: field_rows,
+    };
+    let Some((v_offset, glass_rows)) = presentation_v_window else {
+        return unplaced;
+    };
+    let glass_rows = (glass_rows as usize).min(buf_rows).max(1);
+    if glass_rows <= field_rows {
+        return unplaced;
+    }
+    // Rows the sync-anchored glass top cuts off the capture (offset < 0)
+    // vs. blanked glass rows above the captured window (offset > 0).
+    let skip_top = (-v_offset).max(0) as usize;
+    let pad_top = (v_offset).max(0) as usize;
+    if skip_top >= field_rows || pad_top >= glass_rows {
+        return VerticalPlacement {
+            skip_top,
+            pad_top,
+            content_rows: 0,
+            rows: glass_rows,
+        };
+    }
+    VerticalPlacement {
+        skip_top,
+        pad_top,
+        content_rows: (field_rows - skip_top).min(glass_rows - pad_top),
+        rows: glass_rows,
+    }
 }
 
 /// Vertical counterpart of the sync-anchored horizontal window: place the
@@ -240,24 +438,34 @@ pub fn apply_presentation_v_window(
     field_rows: usize,
     presentation_v_window: Option<(i32, u32)>,
 ) -> usize {
-    let Some((v_offset, glass_rows)) = presentation_v_window else {
-        return field_rows;
-    };
-    let buf_rows = fb.len() / canvas_width;
-    let glass_rows = (glass_rows as usize).min(buf_rows).max(1);
+    let placement =
+        presentation_v_window_placement(field_rows, fb.len() / canvas_width, presentation_v_window);
+    place_presentation_v_window(fb, canvas_width, field_rows, placement);
+    placement.rows
+}
+
+/// Move a `field_rows`-row field's pixels where
+/// [`presentation_v_window_placement`] decided.
+fn place_presentation_v_window(
+    fb: &mut [u32],
+    canvas_width: usize,
+    field_rows: usize,
+    placement: VerticalPlacement,
+) {
+    let VerticalPlacement {
+        skip_top,
+        pad_top,
+        content_rows,
+        rows: glass_rows,
+    } = placement;
     if glass_rows <= field_rows {
-        return field_rows;
+        return;
     }
-    // Rows the sync-anchored glass top cuts off the capture (offset < 0)
-    // vs. blanked glass rows above the captured window (offset > 0).
-    let skip_top = (-v_offset).max(0) as usize;
-    let pad_top = (v_offset).max(0) as usize;
     let black = rgba(0, 0, 0);
-    if skip_top >= field_rows || pad_top >= glass_rows {
+    if content_rows == 0 {
         fb[..glass_rows * canvas_width].fill(black);
-        return glass_rows;
+        return;
     }
-    let content_rows = (field_rows - skip_top).min(glass_rows - pad_top);
     if pad_top > skip_top {
         for row in (0..content_rows).rev() {
             let src = (skip_top + row) * canvas_width;
@@ -273,7 +481,6 @@ pub fn apply_presentation_v_window(
     }
     fb[..pad_top * canvas_width].fill(black);
     fb[(pad_top + content_rows) * canvas_width..glass_rows * canvas_width].fill(black);
-    glass_rows
 }
 
 /// `[display] overscan = "tv"`: black out the deep-overscan margins like the
@@ -496,6 +703,388 @@ pub fn standard_tv_aperture_frame(
         | bitplane::HorizontalContentClass::Overscan => TvApertureFrame::Standard(rows),
         bitplane::HorizontalContentClass::Neutral => TvApertureFrame::Neutral(rows),
     }
+}
+
+/// Presentation smoothing for the autocrop rect. Per-frame content
+/// envelopes jitter -- loaders blank the screen, screen transitions
+/// rebuild the copper list over a frame or two, games flip between
+/// differently-sized displays -- and the presented crop must not pump
+/// with them. The latch grows immediately (content must never be cut)
+/// to the union of the old and new envelopes, holds through border-only
+/// frames like the aperture latch does, and shrinks only after the
+/// smaller envelope has held steady for [`Self::SHRINK_STABLE_FRAMES`]
+/// consecutive rendered frames. Shared by the desktop window (in woven
+/// presentation space) and the browser wrapper (in its presentation
+/// buffer's space); the envelope's coordinate space is the caller's.
+#[derive(Default, Debug)]
+pub struct AutocropLatch {
+    active: Option<bitplane::ContentRect>,
+    candidate: Option<bitplane::ContentRect>,
+    stable_frames: u32,
+}
+
+impl AutocropLatch {
+    /// Rendered frames a strictly-smaller envelope must persist for
+    /// before the presentation tightens onto it: about half a second of
+    /// PAL frames, long enough to sit out a screen transition.
+    pub const SHRINK_STABLE_FRAMES: u32 = 25;
+
+    pub fn resolve(
+        &mut self,
+        frame: Option<bitplane::ContentRect>,
+    ) -> Option<bitplane::ContentRect> {
+        let Some(frame) = frame else {
+            // Border-only frame: keep presenting the previous crop, and
+            // keep any shrink candidate's clock running from zero again
+            // once content returns.
+            self.candidate = None;
+            self.stable_frames = 0;
+            return self.active;
+        };
+        let Some(active) = self.active else {
+            self.active = Some(frame);
+            return self.active;
+        };
+        let contained = frame.x0 >= active.x0
+            && frame.x1 <= active.x1
+            && frame.y0 >= active.y0
+            && frame.y1 <= active.y1;
+        if !contained {
+            self.active = Some(bitplane::ContentRect {
+                x0: active.x0.min(frame.x0),
+                x1: active.x1.max(frame.x1),
+                y0: active.y0.min(frame.y0),
+                y1: active.y1.max(frame.y1),
+            });
+            self.candidate = None;
+            self.stable_frames = 0;
+        } else if frame != active {
+            if self.candidate == Some(frame) {
+                self.stable_frames += 1;
+                if self.stable_frames >= Self::SHRINK_STABLE_FRAMES {
+                    self.active = Some(frame);
+                    self.candidate = None;
+                    self.stable_frames = 0;
+                }
+            } else {
+                self.candidate = Some(frame);
+                self.stable_frames = 1;
+            }
+        } else {
+            self.candidate = None;
+            self.stable_frames = 0;
+        }
+        self.active
+    }
+
+    /// Forget the crop across a presentation discontinuity (power cycle,
+    /// RTG entry), like `PresentationLatch::reset`.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// How far a whole-number pixel shape may stray from the glass ratio
+/// before a taller fit stops being worth it: max(shape/par, par/shape)
+/// at most 11/10. Wide enough that NTSC's 0.854 admits 4:5 (6.8% off)
+/// through 6:7, 7:8 and 12:13 -- the family amiga.vision's NTSC guide
+/// reaches for, 4:5 being its 1080p and 4K answer -- while excluding
+/// 3:4 (14%) and the squat 1:1 (17%); and that PAL's 1.078 admits the
+/// square 1:1 (7.2%) and 8:7 (6%) but not 6:5 (11%).
+const PAR_TOLERANCE: (u64, u64) = (11, 10);
+
+/// The per-axis whole-number fit of a `w` x `h` canvas rect (hi-res
+/// columns by woven rows) into `avail` surface pixels, drawn at the
+/// pixel shape `par`: `(columns, lines)` -- surface pixels per canvas
+/// column, and per *field line*, the scan's own vertical unit. The
+/// woven canvas carries two rows per line so interlaced fields can be
+/// woven; a non-interlaced display's two are identical, so a whole
+/// number of pixels per line is exact for it whether or not the number
+/// is even (an odd count lands as alternate rows of the pair, which is
+/// only visible on an interlaced display). Stepping the vertical factor
+/// by half a woven row is what makes the NTSC shapes reachable on
+/// ordinary displays: 4:5 is two pixels per column and five per line,
+/// 1000 rows for a 200-line display -- the 1080p answer.
+///
+/// The choice is the tallest fit whose shape stays within
+/// [`PAR_TOLERANCE`] of `par` (a bigger picture beats a marginally truer
+/// one), the closest shape among fits of that height, and the widest
+/// among equals; with no fit inside the tolerance, the closest shape at
+/// the largest size. `None` when not even one pixel per column and per
+/// line fits, where the caller falls back to the smooth fit. Exact
+/// integer arithmetic throughout, so every host agrees on the answer.
+pub fn per_axis_fit(
+    avail: (u32, u32),
+    (w, h): (usize, usize),
+    par: (u32, u32),
+) -> Option<(usize, usize)> {
+    if w == 0 || h == 0 || par.0 == 0 || par.1 == 0 {
+        return None;
+    }
+    let max_columns = avail.0 as usize / w;
+    // `h` woven rows are `h / 2` field lines: `lines` pixels per line
+    // puts `h * lines / 2` rows on the surface.
+    let max_lines = 2 * avail.1 as usize / h;
+    if max_columns == 0 || max_lines == 0 {
+        return None;
+    }
+    let (par_w, par_h) = (u64::from(par.0), u64::from(par.1));
+    // A shape's deviation from `par`, as the two cross products ordered
+    // (max, min): their quotient is the symmetric ratio error, and two
+    // deviations compare exactly by cross-multiplying.
+    let deviation = |columns: usize, lines: usize| -> (u64, u64) {
+        let shape = 2 * columns as u64 * par_h;
+        let glass = lines as u64 * par_w;
+        (shape.max(glass), shape.min(glass))
+    };
+    let within = |(hi, lo): (u64, u64)| hi * PAR_TOLERANCE.1 <= lo * PAR_TOLERANCE.0;
+    let compare = |a: (u64, u64), b: (u64, u64)| (a.0 * b.1).cmp(&(b.0 * a.1));
+    // A candidate: its factors, its deviation, and whether that is
+    // within the tolerance.
+    type Candidate = ((usize, usize), (u64, u64), bool);
+    let mut best: Option<Candidate> = None;
+    for lines in 1..=max_lines {
+        // At a given height the shape grows with the column count, so
+        // only the two counts astride the ideal one (lines * par / 2)
+        // can be the closest -- and the tolerance band, an interval
+        // around the ideal, holds one of them if it holds any. Two
+        // candidates per height instead of every column: a one-line
+        // autocrop rect on a large surface has thousands of both, and
+        // the fit runs on every redraw and cursor move.
+        let ideal = (lines as u64 * par_w / (2 * par_h)) as usize;
+        let astride = [
+            ideal.clamp(1, max_columns),
+            (ideal + 1).clamp(1, max_columns),
+        ];
+        for columns in astride {
+            let dev = deviation(columns, lines);
+            let ok = within(dev);
+            let better = match best {
+                None => true,
+                Some((_, _, cand_ok)) if ok != cand_ok => ok,
+                Some((cand, cand_dev, true)) => lines
+                    .cmp(&cand.1)
+                    .then(compare(cand_dev, dev))
+                    .then(columns.cmp(&cand.0))
+                    .is_gt(),
+                Some((cand, cand_dev, false)) => compare(cand_dev, dev)
+                    .then(lines.cmp(&cand.1))
+                    .then(columns.cmp(&cand.0))
+                    .is_gt(),
+            };
+            if better {
+                best = Some(((columns, lines), dev, ok));
+            }
+        }
+    }
+    best.map(|(factors, _, _)| factors)
+}
+
+/// Where a `w` x `h` canvas rect lands in `avail` at whole-number
+/// factors `(columns, lines)`: exactly `w * columns` by `h * lines / 2`,
+/// centred. The rect's rows are whole field lines (an even count) so the
+/// height is exact -- every display rect's are, starting on a woven pair
+/// (`display_rects_start_on_field_lines`).
+pub fn per_axis_rect(
+    avail: (u32, u32),
+    (w, h): (usize, usize),
+    (columns, lines): (usize, usize),
+) -> (u32, u32, u32, u32) {
+    let dw = ((w * columns) as u32).min(avail.0);
+    let dh = ((h * lines / 2) as u32).min(avail.1);
+    ((avail.0 - dw) / 2, (avail.1 - dh) / 2, dw, dh)
+}
+
+/// The smooth fit of a `w` x `h` canvas rect drawn at pixel shape
+/// `par`: the aspect-preserving letterbox of `w * par` by `h` in
+/// `avail`, the classic letterbox (`clip_rect_for`'s smooth fit) with
+/// the shape folded into the width (at `(1, 1)` it is that fit). Exact
+/// integer arithmetic, so a rect whose shape is the viewport's fills it
+/// to the pixel: the browser draws its whole presentation buffer into a
+/// 4:3 element this way, where a truncated last column would show as a
+/// black seam.
+pub fn smooth_fit_rect(
+    avail: (u32, u32),
+    (w, h): (usize, usize),
+    par: (u32, u32),
+) -> (u32, u32, u32, u32) {
+    if avail.0 == 0 || avail.1 == 0 || w == 0 || h == 0 || par.0 == 0 || par.1 == 0 {
+        return (0, 0, 0, 0);
+    }
+    // The rect's shape on the surface is `w * par.0 : h * par.1`; the
+    // fit is width-limited when the viewport is narrower than that
+    // shape at the viewport's own height.
+    let (avail_w, avail_h) = (u64::from(avail.0), u64::from(avail.1));
+    let shaped_w = w as u64 * u64::from(par.0);
+    let shaped_h = h as u64 * u64::from(par.1);
+    let (dw, dh) = if avail_w * shaped_h <= avail_h * shaped_w {
+        (avail_w, avail_w * shaped_h / shaped_w)
+    } else {
+        (avail_h * shaped_w / shaped_h, avail_h)
+    };
+    let dw = (dw as u32).clamp(1, avail.0);
+    let dh = (dh as u32).clamp(1, avail.1);
+    ((avail.0 - dw) / 2, (avail.1 - dh) / 2, dw, dh)
+}
+
+/// A sub-rect draw's fit ([`sub_rect_fit`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SubRectFit {
+    /// The whole-number factors of an integer draw, as surface pixels
+    /// `(per column, per field line)` -- a uniform multiple `m` is
+    /// `(m, 2 * m)` -- or `None` for a smooth fit.
+    pub factors: Option<(usize, usize)>,
+    /// Where the rect lands, `(x, y, w, h)` in surface pixels.
+    pub dst: (u32, u32, u32, u32),
+}
+
+/// The whole-number factors and the destination of a sub-rect draw: the
+/// `rect` (`(x, y, w, h)` in canvas or buffer pixels) drawn at the pixel
+/// shape `par` into `avail` surface pixels. Under `integer` the fit is
+/// retaken against the rect -- a display using fewer lines earns a
+/// larger whole multiple, which is the point of autocrop -- as a
+/// uniform multiple when the pixels are asked for as square, and as the
+/// per-axis fit ([`per_axis_fit`]) at a glass shape; either falls back
+/// to the smooth fit of the rect at its shape ([`smooth_fit_rect`])
+/// when not even 1x fits. The desktop's `display_src_layout` and the
+/// browser's [`buffer_layout`] both draw with this.
+pub fn sub_rect_fit(
+    avail: (u32, u32),
+    integer: bool,
+    rect: (usize, usize, usize, usize),
+    par: (u32, u32),
+) -> SubRectFit {
+    let (w, h) = (rect.2.max(1), rect.3.max(1));
+    let factors = if !integer {
+        None
+    } else if par.0 == par.1 {
+        // The uniform multiple is the per-axis fit's answer for a square
+        // shape, but stated directly: the tolerance that lets a glass
+        // shape prefer a taller near-miss must not apply to a canvas
+        // asked for as square.
+        let fit = (avail.0 as usize / w).min(avail.1 as usize / h);
+        (fit >= 1).then_some((fit, 2 * fit))
+    } else {
+        per_axis_fit(avail, (w, h), par)
+    };
+    let dst = match factors {
+        Some(factors) => per_axis_rect(avail, (w, h), factors),
+        None => smooth_fit_rect(avail, (w, h), par),
+    };
+    SubRectFit { factors, dst }
+}
+
+/// The shape of one pixel of a `width` x `rows` presentation buffer
+/// drawn to fill a 4:3 glass, as a ratio `(width, height)` in lowest
+/// terms. The browser's glass model: the page shows whatever buffer the
+/// wrapper presents in a 4:3 element, so the buffer's own dimensions
+/// state its pixel shape. It is the desktop's tv canvas read back
+/// (`window::present::glass_par`) -- the captured TV aperture,
+/// `TV_CAPTURED_WIDTH` columns by its woven rows, lands at PAL 1.078
+/// and NTSC 0.854, and the full-overscan field at `rows` /
+/// `PRESENT_HEIGHT_TV` (the glass is `FB_WIDTH` by `PRESENT_HEIGHT_TV`,
+/// itself 4:3).
+pub fn buffer_glass_par(width: usize, rows: usize) -> (u32, u32) {
+    let (w, h) = (4 * rows.max(1) as u64, 3 * width.max(1) as u64);
+    let g = gcd(w, h);
+    ((w / g) as u32, (h / g) as u32)
+}
+
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
+/// Follow a content envelope stated in woven presentation-field space
+/// through the deinterlacer's region copy
+/// (`Deinterlacer::present_field_region_into`): the rows and columns of
+/// the `destination_width` x `destination_rows` buffer that show any of
+/// it. The copy reads woven column `source_x + x` for buffer column `x`,
+/// and woven row `source_y + scaled_source_row(y)` for buffer row `y`
+/// (`screenshot::scaled_source_row`, the centre-aligned resample of
+/// `source_rows` onto `destination_rows`). The rows are scanned against
+/// that map rather than derived in closed form, like the desktop's
+/// `canvas_content_rect`: a few hundred iterations per rendered frame,
+/// and immune to drifting out of agreement with the copy it mirrors.
+/// `None` when nothing of the envelope reaches the buffer.
+pub fn region_present_content_rect(
+    rect: bitplane::ContentRect,
+    source_x: i32,
+    source_y: i32,
+    source_rows: usize,
+    destination_width: usize,
+    destination_rows: usize,
+) -> Option<bitplane::ContentRect> {
+    let x0 = (rect.x0 as i64 - i64::from(source_x)).clamp(0, destination_width as i64);
+    let x1 = (rect.x1 as i64 - i64::from(source_x)).clamp(x0, destination_width as i64);
+    if x1 <= x0 {
+        return None;
+    }
+    let (mut y_min, mut y_max) = (None, None);
+    for y in 0..destination_rows {
+        let woven = i64::from(source_y)
+            + screenshot::scaled_source_row(y, source_rows, destination_rows) as i64;
+        if (rect.y0 as i64..rect.y1 as i64).contains(&woven) {
+            y_min.get_or_insert(y);
+            y_max = Some(y);
+        }
+    }
+    Some(bitplane::ContentRect {
+        x0: x0 as usize,
+        x1: x1 as usize,
+        y0: y_min?,
+        y1: y_max? + 1,
+    })
+}
+
+/// Where a presentation buffer lands on a viewport: the browser
+/// wrapper's answer to the desktop's `display_src_layout`, for a page
+/// that draws the wrapper's `width` x `rows` buffer itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BufferLayout {
+    /// The buffer sub-rect shown, `(x, y, w, h)` in buffer pixels.
+    pub src: (usize, usize, usize, usize),
+    /// Where it lands, `(x, y, w, h)` in viewport pixels; the viewport
+    /// outside it is black.
+    pub dst: (u32, u32, u32, u32),
+    /// The whole-number factors of an integer draw, as viewport pixels
+    /// `(per buffer column, per field line)` -- a uniform multiple `m`
+    /// is `(m, 2 * m)` -- or `None` for a smooth fit.
+    pub factors: Option<(usize, usize)>,
+}
+
+/// The layout of a `width` x `rows` presentation buffer on an `avail`
+/// viewport under the browser's display settings: `content` is the
+/// autocrop rect to show (the latched envelope in buffer pixels), or
+/// `None` to show the whole buffer; `integer` asks for whole-number
+/// factors. The buffer's pixel shape is the 4:3 glass's
+/// ([`buffer_glass_par`]): drawn smooth, the whole buffer fills a 4:3
+/// viewport exactly as the page's plain stretch did, and a crop keeps
+/// that shape in a letterbox; drawn integer, a standard scan takes the
+/// per-axis fit at that shape, while a `programmable` scan takes the
+/// uniform multiple (its rows are not woven pairs for the per-line
+/// factor to step by), as on the desktop.
+pub fn buffer_layout(
+    avail: (u32, u32),
+    (width, rows): (usize, usize),
+    programmable: bool,
+    integer: bool,
+    content: Option<bitplane::ContentRect>,
+) -> BufferLayout {
+    let full = (0, 0, width, rows);
+    let src = content
+        .map(|rect| (rect.x0, rect.y0, rect.x1 - rect.x0, rect.y1 - rect.y0))
+        .filter(|rect| rect.2 > 0 && rect.3 > 0)
+        .unwrap_or(full);
+    let par = if programmable && integer {
+        (1, 1)
+    } else {
+        buffer_glass_par(width, rows)
+    };
+    let SubRectFit { factors, dst } = sub_rect_fit(avail, integer, src, par);
+    BufferLayout { src, dst, factors }
 }
 
 #[cfg(test)]
@@ -801,6 +1390,173 @@ mod tests {
         }
     }
 
+    /// The placement a programmable field reports carries its content
+    /// envelope exactly where the pixels went: columns through the
+    /// sync-anchored resample's own taps (a window starting left of the
+    /// capture pushes the picture right and widens it onto the glass),
+    /// rows through the vertical window's skip and pad, and the
+    /// deinterlacer's row count decides between native rows and woven
+    /// pairs.
+    #[test]
+    fn programmable_placement_maps_the_content_envelope_through_its_windows() {
+        use crate::video::bitplane::ContentRect;
+        let geometry = FrameGeometry {
+            programmable: true,
+            visible_start_vpos: 20,
+            visible_lines: 100,
+            line_cck: 130,
+            frame_lines: 140,
+            lace: false,
+        };
+        let mut fb = vec![0u32; FB_WIDTH * 120];
+        let lit = 0xFFFF_FFFF;
+        let content = ContentRect {
+            x0: 100,
+            x1: 300,
+            y0: 10,
+            y1: 60,
+        };
+        for y in content.y0..content.y1 {
+            fb[y * FB_WIDTH + content.x0..y * FB_WIDTH + content.x1].fill(lit);
+        }
+        // A sync-anchored window from 40 columns left of the capture, 400
+        // wide, and a glass of 120 rows whose top sits 5 captured rows
+        // down.
+        let placement = post_process_rendered_field(
+            &mut fb,
+            geometry,
+            1,
+            Some((-40, 400)),
+            Some((-5, 120)),
+            geometry.visible_start_vpos,
+            0,
+            Overscan::Tv,
+        );
+        assert_eq!(placement.rows, 120);
+        let mapped = placement
+            .content_rect(content, placement.rows)
+            .expect("content reaches the glass");
+        // Every lit output pixel (any colour in it: a blended edge counts,
+        // the opaque black padding does not) lies inside the mapped rect,
+        // and the rect's edge columns and rows carry lit pixels (no
+        // slack).
+        let is_lit = |px: u32| px & 0x00FF_FFFF != 0;
+        for y in 0..placement.rows {
+            for x in 0..FB_WIDTH {
+                if is_lit(fb[y * FB_WIDTH + x]) {
+                    assert!(
+                        (mapped.x0..mapped.x1).contains(&x) && (mapped.y0..mapped.y1).contains(&y),
+                        "lit pixel ({x}, {y}) outside {mapped:?}"
+                    );
+                }
+            }
+        }
+        let lit_in_column = |x: usize| (0..placement.rows).any(|y| is_lit(fb[y * FB_WIDTH + x]));
+        let lit_in_row = |y: usize| (0..FB_WIDTH).any(|x| is_lit(fb[y * FB_WIDTH + x]));
+        assert!(lit_in_column(mapped.x0) && lit_in_column(mapped.x1 - 1));
+        assert!(lit_in_row(mapped.y0) && lit_in_row(mapped.y1 - 1));
+        // Rows: captured rows 10..60 minus the 5 skipped, at the glass top.
+        assert_eq!((mapped.y0, mapped.y1), (5, 55));
+        // Columns: source 100..300 of a 400-wide window at -40 spans
+        // (140..340) * 716 / 400 of the glass, give or take the blend.
+        assert!((248..=252).contains(&mapped.x0), "{mapped:?}");
+        assert!((606..=612).contains(&mapped.x1), "{mapped:?}");
+
+        // Woven (LACE) presentation doubles the rows.
+        let woven = placement.content_rect(content, 2 * placement.rows).unwrap();
+        assert_eq!((woven.y0, woven.y1), (10, 110));
+
+        // Content entirely above the glass top maps to nothing.
+        let above = ContentRect {
+            x0: 100,
+            x1: 300,
+            y0: 0,
+            y1: 5,
+        };
+        assert_eq!(placement.content_rect(above, placement.rows), None);
+        // Content entirely left of the sync-anchored window (the sync
+        // tail clamps to the edge column, which is border here) maps
+        // to nothing either.
+        let mut fb = vec![0u32; FB_WIDTH * 120];
+        let placement = post_process_rendered_field(
+            &mut fb,
+            geometry,
+            1,
+            Some((300, 400)),
+            None,
+            geometry.visible_start_vpos,
+            0,
+            Overscan::Tv,
+        );
+        let left = ContentRect {
+            x0: 100,
+            x1: 200,
+            y0: 10,
+            y1: 60,
+        };
+        assert_eq!(placement.content_rect(left, placement.rows), None);
+        // Without a programmed vertical sync the rows stay as captured,
+        // and a standard-length line without programmed horizontal sync
+        // keeps its columns.
+        let native = FrameGeometry {
+            line_cck: 227,
+            ..geometry
+        };
+        let placement = post_process_rendered_field(
+            &mut fb,
+            native,
+            1,
+            None,
+            None,
+            geometry.visible_start_vpos,
+            0,
+            Overscan::Tv,
+        );
+        assert_eq!(placement.rows, 100);
+        assert_eq!(placement.content_rect(left, 100), Some(left));
+    }
+
+    /// A 35 ns canvas fans each hi-res-pitch column of the envelope out
+    /// to two buffer columns before the window resample.
+    #[test]
+    fn programmable_placement_scales_the_envelope_to_the_canvas_pitch() {
+        use crate::video::bitplane::ContentRect;
+        let geometry = FrameGeometry {
+            programmable: true,
+            visible_start_vpos: 20,
+            visible_lines: 50,
+            line_cck: 227,
+            frame_lines: 80,
+            lace: false,
+        };
+        let mut fb = vec![0u32; 2 * FB_WIDTH * 50];
+        let placement = post_process_rendered_field(
+            &mut fb,
+            geometry,
+            2,
+            None,
+            None,
+            geometry.visible_start_vpos,
+            0,
+            Overscan::Tv,
+        );
+        let content = ContentRect {
+            x0: 100,
+            x1: 300,
+            y0: 10,
+            y1: 40,
+        };
+        assert_eq!(
+            placement.content_rect(content, 50),
+            Some(ContentRect {
+                x0: 200,
+                x1: 600,
+                y0: 10,
+                y1: 40
+            })
+        );
+    }
+
     #[test]
     fn presentation_v_window_absent_or_degenerate_keeps_the_field() {
         let mut fb = v_window_fixture(4, 12);
@@ -812,5 +1568,209 @@ mod tests {
             4
         );
         assert_eq!(fb[0], 1);
+    }
+
+    #[test]
+    fn smooth_fit_rect_fills_a_viewport_of_the_rects_own_shape_exactly() {
+        // The browser's whole-buffer draw: every buffer the wrapper presents
+        // -- the 50 Hz aperture, the 60 Hz aperture at its own rows, a full
+        // overscan field, the square canvas -- fills a 4:3 viewport to the
+        // pixel at the glass shape read off the buffer, at any size. The
+        // f32 fit this replaces could truncate the last column away.
+        for (w, h) in [(668, 540), (668, 428), (716, 626), (716, 570)] {
+            let par = buffer_glass_par(w, h);
+            for avail in [
+                (1440, 1080),
+                (2880, 2160),
+                (1024, 768),
+                (716, 537),
+                (3840, 2880),
+            ] {
+                assert_eq!(
+                    smooth_fit_rect(avail, (w, h), par),
+                    (0, 0, avail.0, avail.1),
+                    "{w}x{h} in {avail:?}"
+                );
+            }
+        }
+        // A rect narrower than the viewport at its shape is height-limited
+        // and centred: 640 x 400 of the native NTSC aperture (0.854 pixels)
+        // on a 16:9 screen.
+        let ntsc = buffer_glass_par(668, 428);
+        assert_eq!(
+            smooth_fit_rect((1920, 1080), (640, 400), ntsc),
+            (222, 0, 1476, 1080)
+        );
+        assert_eq!(smooth_fit_rect((0, 10), (640, 400), ntsc), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn buffer_glass_par_is_the_4_3_glass_read_off_the_buffer() {
+        // The PAL and NTSC apertures land at the desktop's glass shapes
+        // (`glass_par`: 1.078 and 0.854), in lowest terms.
+        let ratio = |(w, h): (u32, u32)| f64::from(w) / f64::from(h);
+        let pal = buffer_glass_par(TV_CAPTURED_WIDTH, TV_PAL_PRESENT_HEIGHT);
+        let ntsc = buffer_glass_par(TV_CAPTURED_WIDTH, TV_NTSC_PRESENT_HEIGHT);
+        assert_eq!(pal, (180, 167));
+        assert!((ratio(pal) - 1.0778).abs() < 5e-4, "PAL {}", ratio(pal));
+        assert!((ratio(ntsc) - 0.8543).abs() < 5e-4, "NTSC {}", ratio(ntsc));
+        // The full-overscan field: rows over PRESENT_HEIGHT_TV, the glass
+        // being FB_WIDTH x PRESENT_HEIGHT_TV (itself 4:3).
+        assert_eq!(
+            buffer_glass_par(FB_WIDTH, OUT_HEIGHT),
+            (
+                OUT_HEIGHT as u32 / 3,
+                crate::video::PRESENT_HEIGHT_TV as u32 / 3
+            )
+        );
+        assert_eq!(buffer_glass_par(0, 0), (4, 3));
+    }
+
+    #[test]
+    fn region_present_content_rect_inverts_the_aperture_copy() {
+        use crate::video::bitplane::ContentRect;
+        // A 640-wide standard window, 200 lines woven to rows 64..464 of
+        // the field, presented through the 50 Hz aperture copy: the
+        // capture starts TV_CAPTURED_MARGIN_X left of the window and its
+        // rows are the identity from woven row TV_PRESENT_SOURCE_Y.
+        let x0 = bitplane::STANDARD_VISIBLE_X0;
+        let rect = ContentRect {
+            x0,
+            x1: x0 + 640,
+            y0: 64,
+            y1: 464,
+        };
+        let (source_x, source_y) = (TV_CAPTURED_SOURCE_X as i32, TV_PRESENT_SOURCE_Y as i32);
+        assert_eq!(
+            region_present_content_rect(rect, source_x, source_y, 540, TV_CAPTURED_WIDTH, 540),
+            Some(ContentRect {
+                x0: TV_CAPTURED_MARGIN_X,
+                x1: TV_CAPTURED_MARGIN_X + 640,
+                y0: 46,
+                y1: 446,
+            })
+        );
+        // A tv-centre nudge moves the capture, so the buffer rect moves the
+        // other way.
+        let nudged = region_present_content_rect(
+            rect,
+            source_x - 8,
+            source_y + 4,
+            540,
+            TV_CAPTURED_WIDTH,
+            540,
+        )
+        .unwrap();
+        assert_eq!(
+            (nudged.x0, nudged.x1),
+            (TV_CAPTURED_MARGIN_X + 8, TV_CAPTURED_MARGIN_X + 648)
+        );
+        assert_eq!((nudged.y0, nudged.y1), (42, 442));
+        // The 60 Hz aperture resampled onto the 50 Hz row count (428 -> 540,
+        // the smooth presentation): rows 64..364 land on the buffer rows
+        // whose centre-aligned source falls inside them, 58..437; at its
+        // own rows (the integer presentation) the map is the identity.
+        let ntsc = ContentRect { y1: 364, ..rect };
+        let resampled =
+            region_present_content_rect(ntsc, source_x, source_y, 428, TV_CAPTURED_WIDTH, 540)
+                .unwrap();
+        assert_eq!((resampled.y0, resampled.y1), (58, 437));
+        let native =
+            region_present_content_rect(ntsc, source_x, source_y, 428, TV_CAPTURED_WIDTH, 428)
+                .unwrap();
+        assert_eq!((native.y0, native.y1), (46, 346));
+        // Off the buffer entirely: above the aperture, or left of the capture.
+        let above = ContentRect {
+            y0: 0,
+            y1: 10,
+            ..rect
+        };
+        assert_eq!(
+            region_present_content_rect(above, source_x, source_y, 540, TV_CAPTURED_WIDTH, 540),
+            None
+        );
+        let left = ContentRect {
+            x0: 0,
+            x1: 4,
+            ..rect
+        };
+        assert_eq!(
+            region_present_content_rect(left, source_x, source_y, 540, TV_CAPTURED_WIDTH, 540),
+            None
+        );
+        // Partly off: the shown part, clipped.
+        let wide = ContentRect {
+            x0: 0,
+            x1: FB_WIDTH,
+            ..rect
+        };
+        let shown =
+            region_present_content_rect(wide, source_x, source_y, 540, TV_CAPTURED_WIDTH, 540)
+                .unwrap();
+        assert_eq!((shown.x0, shown.x1), (0, TV_CAPTURED_WIDTH));
+    }
+
+    #[test]
+    fn buffer_layout_places_the_browser_buffer() {
+        use crate::video::bitplane::ContentRect;
+        // Smooth, whole buffer: the 4:3 element, exactly -- the page's
+        // plain stretch, so the modes' draw path shows the same picture.
+        let pal = (TV_CAPTURED_WIDTH, TV_PAL_PRESENT_HEIGHT);
+        assert_eq!(
+            buffer_layout((1440, 1080), pal, false, false, None),
+            BufferLayout {
+                src: (0, 0, 668, 540),
+                dst: (0, 0, 1440, 1080),
+                factors: None,
+            }
+        );
+        // Integer, the PAL aperture on a 1080p screen: two pixels per
+        // column and four per line (square, within a tenth of PAL's
+        // 1.078), 1336 x 1080 centred.
+        let layout = buffer_layout((1440, 1080), pal, false, true, None);
+        assert_eq!(layout.factors, Some((2, 4)));
+        assert_eq!(layout.dst, (52, 0, 1336, 1080));
+        // Integer with autocrop, a 640 x 400 NTSC display of the native-row
+        // aperture on a 1080p screen: amiga.vision's 4:5 pixel, 1280 x 1000.
+        let ntsc = (TV_CAPTURED_WIDTH, TV_NTSC_PRESENT_HEIGHT);
+        let content = ContentRect {
+            x0: 14,
+            x1: 654,
+            y0: 14,
+            y1: 414,
+        };
+        let layout = buffer_layout((1920, 1080), ntsc, false, true, Some(content));
+        assert_eq!(layout.src, (14, 14, 640, 400));
+        assert_eq!(layout.factors, Some((2, 5)));
+        assert_eq!(layout.dst, (320, 40, 1280, 1000));
+        // Smooth with autocrop: the crop at the glass shape, letterboxed.
+        let layout = buffer_layout((1920, 1080), ntsc, false, false, Some(content));
+        assert_eq!(layout.factors, None);
+        assert_eq!(layout.dst, (222, 0, 1476, 1080));
+        // A programmable scan (a 716 x 552 DblPAL field) under integer
+        // scaling takes the uniform multiple, its rows not being woven
+        // pairs; drawn smooth it fills the glass like any buffer.
+        let layout = buffer_layout((1440, 1080), (716, 552), true, true, None);
+        assert_eq!(layout.factors, Some((1, 2)));
+        assert_eq!(layout.dst, (362, 264, 716, 552));
+        assert_eq!(
+            buffer_layout((1440, 1080), (716, 552), true, false, None).dst,
+            (0, 0, 1440, 1080)
+        );
+        // Too small for one pixel per column: the smooth fit of the same shape.
+        let layout = buffer_layout((600, 500), pal, false, true, None);
+        assert_eq!(layout.factors, None);
+        assert_eq!(layout.dst, (0, 25, 600, 450));
+        // An empty envelope shows the whole buffer.
+        let empty = ContentRect {
+            x0: 10,
+            x1: 10,
+            y0: 0,
+            y1: 5,
+        };
+        assert_eq!(
+            buffer_layout((1440, 1080), pal, false, false, Some(empty)).src,
+            (0, 0, 668, 540)
+        );
     }
 }

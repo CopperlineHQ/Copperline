@@ -195,8 +195,10 @@ fn assert_checkpoints_match(label: &str, expected: &[Fingerprint], actual: &[Fin
 }
 
 /// The uninterrupted history: boot, step straight through the split point and
-/// every checkpoint, fingerprinting on the way past.
-fn uninterrupted_run() -> anyhow::Result<(Fingerprint, Vec<Fingerprint>)> {
+/// every checkpoint, fingerprinting on the way past. The state written at the
+/// last checkpoint (`final_state`) is the byte-for-byte record a resumed run
+/// must reproduce.
+fn uninterrupted_run(final_state: &Path) -> anyhow::Result<(Fingerprint, Vec<Fingerprint>)> {
     let started = Instant::now();
     let (mut emu, split_frame) = boot_to_split()?;
     let at_split = Fingerprint::capture(&emu);
@@ -216,7 +218,33 @@ fn uninterrupted_run() -> anyhow::Result<(Fingerprint, Vec<Fingerprint>)> {
         last.fb_hash,
         last.chip_hash,
     );
+    emu.save_state(final_state)?;
     Ok((at_split, checkpoints))
+}
+
+/// A resumed run's state file at the last checkpoint must be byte-identical
+/// to the uninterrupted run's: the fingerprints prove the timeline agrees,
+/// this proves nothing host-side leaked into (or was laundered out of) the
+/// serialized machine along the way. A single differing byte is a field
+/// that belongs out of the layout (host diagnostics) or a field the loader
+/// fails to carry across.
+fn assert_final_states_identical(label: &str, expected: &Path, actual: &Path) {
+    let want = std::fs::read(expected).expect("read the uninterrupted run's final state");
+    let got = std::fs::read(actual).expect("read the resumed run's final state");
+    if want == got {
+        return;
+    }
+    let first = want
+        .iter()
+        .zip(got.iter())
+        .position(|(a, b)| a != b)
+        .unwrap_or(want.len().min(got.len()));
+    panic!(
+        "{label}: the final state file differs from the uninterrupted run's \
+         (sizes {} vs {}, first difference at byte {first})",
+        want.len(),
+        got.len()
+    );
 }
 
 /// The resumed history: a second machine boots independently to the split
@@ -227,6 +255,7 @@ fn resumed_run(
     state_path: &Path,
     at_split: &Fingerprint,
     expected: &[Fingerprint],
+    final_state: &Path,
 ) -> anyhow::Result<()> {
     let started = Instant::now();
     let (mut emu, split_frame) = boot_to_split()?;
@@ -265,6 +294,10 @@ fn resumed_run(
         t1.elapsed().as_secs_f64()
     );
     assert_checkpoints_match("resumed", expected, &actual);
+    let resumed_final = scratch_path("final-resumed.clstate");
+    resumed.save_state(&resumed_final)?;
+    assert_final_states_identical("resumed", final_state, &resumed_final);
+    let _ = std::fs::remove_file(&resumed_final);
     Ok(())
 }
 
@@ -318,7 +351,8 @@ fn resume_matches_uninterrupted_run() {
     pin_bundled_aros();
 
     println!("run A: uninterrupted");
-    let (at_split, checkpoints) = uninterrupted_run().expect("uninterrupted run");
+    let final_state = scratch_path("final.clstate");
+    let (at_split, checkpoints) = uninterrupted_run(&final_state).expect("uninterrupted run");
 
     // Sanity: the machine actually advanced across the checkpoint span. All
     // equal would make the comparison vacuous.
@@ -331,12 +365,13 @@ fn resume_matches_uninterrupted_run() {
 
     println!("run B: save at T, resume in a fresh machine");
     let state_path = scratch_path("split.clstate");
-    resumed_run(&state_path, &at_split, &checkpoints).expect("resumed run");
+    resumed_run(&state_path, &at_split, &checkpoints, &final_state).expect("resumed run");
 
     println!("run C: same state into a differently constructed machine");
     resumed_run_alternate_construction(&state_path, &checkpoints).expect("alternate run");
 
     let _ = std::fs::remove_file(&state_path);
+    let _ = std::fs::remove_file(&final_state);
 }
 
 /// Two independent builds stepped to the same emulated instant must already

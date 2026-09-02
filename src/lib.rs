@@ -101,6 +101,8 @@ pub mod paths;
 pub mod picasso2;
 pub mod pointer;
 pub mod priority;
+#[cfg(feature = "control")]
+pub mod profile;
 pub mod ramsey;
 pub mod recorder;
 pub mod regcheck;
@@ -120,6 +122,7 @@ pub mod timebase;
 pub mod timestamp;
 pub mod timetravel;
 pub mod toccata;
+pub mod uaelib;
 pub mod video;
 pub mod warpboot;
 pub mod wasm_manifest;

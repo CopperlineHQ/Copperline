@@ -32,7 +32,7 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 | `Cmd+F` | `Alt+F` | Toggle fullscreen on / off |
 | `Cmd+Shift+F` | `Alt+Shift+F` | Show / hide the status bar |
 | `Cmd+P` | `Alt+P` | Toggle the [performance overlay](#performance-overlay) (`[display] perf_overlay` sets the start-up value) |
-| `Cmd+W` | `Alt+W` | Toggle Warp Speed (turbo) on / off |
+| `Cmd+W` | `Alt+W` | Toggle Warp Speed (turbo) on / off; one press also ends a warp a control client, the guest, or a boot phase engaged |
 | `Cmd+Shift+W` | `Alt+Shift+W` | Cycle the Warp Speed limit: 2x, 4x, 8x, 16x, Max |
 | `Cmd+Z` | `Alt+Z` | Rewind the machine one step (needs `[emulation] rewind` or *Emulation Settings > Rewind*) |
 | `Esc` | `Esc` | Close an open menu or overlay panel (in a tool window, that window); otherwise passed through to the Amiga |
@@ -312,10 +312,11 @@ belongs to the Amiga.
   ([below](#machine-configuration-screen)) to reconfigure the machine and
   relaunch it. The same screen opens automatically on a no-machine start.
 - **Frame Analyzer...**: pauses the machine and opens a separate diagnostic
-  window with two tabs: which chip-bus owner had each Agnus colour clock
-  across the captured frame, including overscan and blanking, and a memory
-  heat map of what last touched each part of the address space; see
-  [](../debugger/window.md#frame-analyzer-pane).
+  window with three tabs: which chip-bus owner had each Agnus colour clock
+  across the captured frame, including overscan and blanking; a memory
+  heat map of what last touched each part of the address space; and the
+  debug resources the guest registered through the uaelib trap, with
+  decoded previews; see [](../debugger/window.md#frame-analyzer-pane).
 - **Debugger...** (also `Cmd+B` / `Alt+B`): pauses the machine and opens the
   tabbed debugger in a tool window; see [](../debugger/window).
 - **Console...** (also `Cmd+K` / `Alt+K`): a GDB-flavoured debugger
@@ -343,17 +344,33 @@ belongs to the Amiga.
   (see [Configuration](configuration.md)).
 - **Scaling**: how that canvas is drawn into the window -- **Smooth** (the
   default: fit to the window preserving aspect ratio, interpolated) or
-  **Integer** (the largest whole-number multiple of the canvas that fits,
-  centred in black borders and point-sampled, so every canvas pixel is the
-  same square block of host pixels). The fit is taken in whole canvas
-  pixels, so every step exists on high-DPI and fractional-scale displays
-  alike. Integer scaling applies to RTG board modes too, at multiples of
-  their own native resolution, and gives way to the smooth fit when the
-  window cannot hold even a 1:1 copy rather than cropping the picture. The
-  window never resizes when it changes, and a video recording carries on
-  underneath. The start-up mode is
-  `[display] scaling`, which also notes which pixel-aspect pairing is
-  fully pixel-exact (see [Configuration](configuration.md)).
+  **Integer** (whole-number multiples of the unresampled canvas, centred
+  in black borders and point-sampled, so every canvas pixel is the same
+  block of host pixels). Under the TV aspect the two axes take separate
+  whole numbers -- pixels per column and per scan line -- chosen to
+  approximate the 4:3 pixel shape, so an NTSC game on a 1080p screen is
+  drawn at 4:5 pixels rather than squat square ones; under square pixels
+  the multiple is uniform. The fit is taken in whole canvas pixels, so
+  every step exists on high-DPI and fractional-scale displays alike.
+  Integer scaling applies to RTG board modes too, at multiples of their
+  own native resolution, and gives way to the smooth fit when the window
+  cannot hold even a 1:1 copy rather than cropping the picture. Under the
+  TV aspect the window resizes to the unresampled canvas when the mode
+  changes, as it does for a pixel-aspect change; a video recording carries
+  on underneath either way, at the aspect's own shape. The start-up mode
+  is `[display] scaling`, which describes the per-axis fit and its
+  pairing with autocrop (see [Configuration](configuration.md)).
+- **Autocrop**: crop the presentation to the picture the hardware
+  fetches, so a game driving fewer lines than the full scan fills more
+  of a wide screen; with integer scaling the whole-number fit is retaken
+  against the crop. The status bar and panels keep their size in a band
+  pinned along the window bottom; an open menu or panel widens the
+  picture to the full display area while it is up, and the band stays
+  put. Presentation-only (captures keep their aperture); the CRT
+  shader presets compose with it, programmable (multisync) scans crop
+  through their own sync-anchored window, and a bezel or RTG scanout
+  suspends it. The start-up value is `[display] autocrop` (see
+  [Configuration](configuration.md)).
 - **Screen Centring**: nudge where the TV picture sits on the glass, the
   H-CENTER/V-CENTER controls a real monitor carried on its front.
   **Picture Left/Right** step one lo-res pixel (up to 16 each way),
@@ -480,7 +497,11 @@ Shown only when something is on the port.
 ### Warp Settings
 
 - **Warp Speed** (also `Cmd+W` / `Alt+W`): runs the emulator unpaced for
-  fast-forward. Toggling back re-anchors real-time pacing cleanly.
+  fast-forward. Toggling back re-anchors real-time pacing cleanly. A
+  control-protocol client (`warp.set`) or the guest program (`warpmode()`
+  through the uaelib trap, see [Direct launching](run.md)) can engage warp
+  too; such a warp mutes live audio, the OSD names who asked, and one press
+  of the shortcut ends it.
 - **Warp Limit** (also `Cmd+Shift+W` / `Alt+Shift+W`): how fast warp runs.
   Because the window presents with vsync, emulating one frame per presented
   frame would cap warp at the host monitor's refresh rate (about 1.2x for
@@ -655,7 +676,9 @@ The layout is:
   shader and shader strength), **Display** -- the host window (start
   fullscreen, status bar, perf overlay, menu size),
   **Emulation**
-  (power-on, realtime priority, pacing, warp speed),
+  (power-on, run on startup -- `[emulation] auto_launch`, the launcher
+  running an opened configuration at once -- realtime priority, pacing,
+  warp speed),
   and **Paths** -- opening on Audio, and switched freely between the five.
   The Paths page edits the `[paths]` section of the configuration (see
   [](configuration.md)): the base folder on top, then one row per folder.
@@ -945,9 +968,9 @@ directory is:
 
 | Host | Location |
 |---|---|
-| Linux/BSD | `$XDG_CONFIG_HOME/copperline/`, else `~/.config/copperline/` |
-| macOS | `~/.config/copperline/` |
-| Windows | `%APPDATA%\copperline\` |
+| Linux/BSD | `~/Documents/Copperline/` |
+| macOS | `~/Documents/Copperline/` |
+| Windows | `%USERPROFILE%\Documents\Copperline\` |
 
 with a folder inside it for each kind of file: `screenshots/`, `states/`
 (named saves and the quick-save slots), `recordings/` (video captures and
@@ -1159,9 +1182,9 @@ holding one hands the panel's Save and Cancel buttons to the pad, so a
 calibration can be finished without the mouse.
 
 Calibrations are saved per controller UUID in
-`~/.config/copperline/gamepads.toml` (`$XDG_CONFIG_HOME` respected;
-`%APPDATA%\copperline\` on Windows, or beside the executable in
-[portable mode](#quick-save-slots)). A calibration recorded by a
+`~/Documents/Copperline/gamepads.toml`
+(`%USERPROFILE%\Documents\Copperline\` on Windows, or beside the
+executable in [portable mode](#quick-save-slots)). A calibration recorded by a
 Copperline version that predates the bundled controller database can
 resolve a stick direction reversed on a database-covered pad; the log
 suggests recalibrating when it loads such a file, and recalibrating
@@ -1195,5 +1218,5 @@ before -- including from the other mapping -- so the two controllers can
 never end up fighting over one key.
 
 Saved maps live next to the gamepad calibrations, in
-`~/.config/copperline/keymap.toml` (same per-platform locations as above).
+`~/Documents/Copperline/keymap.toml` (same per-platform locations as above).
 Deleting the file restores the defaults.

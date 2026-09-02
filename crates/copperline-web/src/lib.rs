@@ -19,8 +19,8 @@ use copperline::audio::AudioSink;
 use copperline::bus::PortDevice;
 use copperline::chipset::agnus::VideoStandard;
 use copperline::config::{
-    machine_profile_defaults, parse_machine_model, parse_video_standard, Config, Overscan,
-    TvCentre, TV_H_CENTRE_RANGE, TV_V_CENTRE_RANGE,
+    machine_profile_defaults, parse_machine_model, parse_video_standard, Config, DisplayScaling,
+    Overscan, TvCentre, TV_H_CENTRE_RANGE, TV_V_CENTRE_RANGE,
 };
 use copperline::emulator::{build_machine, Emulator};
 use copperline::serial::{ChannelSerialHandle, ChannelSerialSink};
@@ -257,6 +257,29 @@ pub struct WebEmu {
     /// previous presentation geometry instead of snapping to the full
     /// framebuffer, so the canvas does not jump at every mode change.
     presentation_latch: present_common::PresentationLatch,
+    /// Presentation scaling, the desktop's `[display] scaling` knob. See
+    /// [`Self::set_scaling`].
+    scaling: DisplayScaling,
+    /// Whether [`Self::present_layout`] crops to the content envelope,
+    /// the desktop's `[display] autocrop`. See [`Self::set_autocrop`].
+    autocrop: bool,
+    /// The autocrop smoothing (the desktop's latch), judging envelopes in
+    /// presentation-buffer pixels: the space the page draws in.
+    autocrop_latch: present_common::AutocropLatch,
+    /// The latched content envelope the presentation shows, in
+    /// presentation-buffer pixels; `None` until content has been seen.
+    present_content_rect: Option<bitplane::ContentRect>,
+    /// The envelope the last rendered field presented with, re-fed to the
+    /// latch on an exactly reused frame so a static screen still lets a
+    /// smaller envelope prove itself stable.
+    last_content_rect: Option<bitplane::ContentRect>,
+    /// Whether the presented scan is programmable (VARBEAMEN), which
+    /// takes the uniform multiple under integer scaling.
+    present_programmable: bool,
+    /// The scan geometry the latch is judging in -- programmable, woven
+    /// rows and width, presented rows and width -- so a switch to another
+    /// coordinate space starts the latch over, as on the desktop.
+    present_scan: Option<(bool, usize, usize, usize, usize)>,
     /// Exact previous-frame reuse, the desktop render cache's detector via
     /// the same path the benchmark uses: a frame whose render input matches
     /// the previous one skips the whole render/present pipeline, since the
@@ -348,6 +371,13 @@ impl WebEmu {
             monitor_bezel: false,
             tv_centre: TvCentre::default(),
             presentation_latch: present_common::PresentationLatch::default(),
+            scaling: DisplayScaling::Smooth,
+            autocrop: false,
+            autocrop_latch: present_common::AutocropLatch::default(),
+            present_content_rect: None,
+            last_content_rect: None,
+            present_programmable: false,
+            present_scan: None,
             repeated_frame_detector: bitplane::RepeatedFrameDetector::default(),
             last_run_core_ms: 0.0,
             last_run_render_ms: 0.0,
@@ -517,25 +547,38 @@ impl WebEmu {
             return;
         }
         let visible_start_vpos = self.emu.bus().frame_visible_start_vpos();
-        if self.deinterlacer.phosphor() == 0.0 {
+        let field_content = if self.deinterlacer.phosphor() == 0.0 {
             // A frame identical to the previous render needs no pipeline at
             // all: the present buffer already shows it, and the detector
             // carries the frame's CLXDAT so collisions still accumulate.
-            if bitplane::render_reusing_previous(
+            match bitplane::render_reusing_previous(
                 self.emu.bus_mut(),
                 &mut self.fb,
                 &mut self.repeated_frame_detector,
             ) {
-                self.last_rendered_frame = Some(emulated_frame);
-                return;
+                bitplane::ReuseRender::Reused => {
+                    self.last_rendered_frame = Some(emulated_frame);
+                    // The autocrop smoothing advances on a reused frame
+                    // too, as on the desktop: a static screen is exactly
+                    // what lets a smaller envelope prove itself stable.
+                    // The envelope is the one the held presentation was
+                    // rendered with, and a crop the latch adopts on it
+                    // must reach the page although the pixels did not
+                    // change: the revision is the page's only redraw cue.
+                    if self.latch_content_rect(self.last_content_rect) {
+                        self.presentation_revision = self.presentation_revision.wrapping_add(1);
+                    }
+                    return;
+                }
+                bitplane::ReuseRender::Rendered(content) => content,
             }
         } else {
             // Phosphor changes the presentation on every field while its
             // trail decays, even when the emulated pixels repeat exactly.
             // Render the field unconditionally so every repeated frame
             // reaches the persistence blend.
-            bitplane::render(self.emu.bus_mut(), &mut self.fb);
-        }
+            bitplane::render(self.emu.bus_mut(), &mut self.fb)
+        };
         let geometry = self.emu.bus().frame_geometry();
         let canvas_scale = self.emu.bus().frame_canvas_scale();
         let base = self.emu.bus().frame_render_base();
@@ -547,7 +590,7 @@ impl WebEmu {
         let h_shift = self
             .presentation_latch
             .presentation_h_shift(&base, self.overscan);
-        let field_rows = present_common::post_process_rendered_field(
+        let placement = present_common::post_process_rendered_field(
             &mut self.fb,
             geometry,
             canvas_scale,
@@ -557,6 +600,7 @@ impl WebEmu {
             h_shift,
             self.overscan,
         );
+        let field_rows = placement.rows;
         let canvas_width = FB_WIDTH * canvas_scale;
         let lace = base.bplcon0 & 0x0004 != 0;
         let double_rows = !geometry.programmable;
@@ -565,6 +609,12 @@ impl WebEmu {
         } else {
             field_rows
         };
+        // The content envelope, followed through the placement onto the
+        // woven field the deinterlacer builds -- the desktop's
+        // `present_content_rect` space -- and below through whichever
+        // copy fills the presentation buffer, into the buffer's own
+        // pixels, which are what the page draws.
+        let woven_content = field_content.and_then(|rect| placement.content_rect(rect, woven_rows));
         let tv_aperture_rows = if self.overscan == Overscan::Tv {
             self.presentation_latch
                 .resolve_tv_aperture(present_common::standard_tv_aperture_frame(
@@ -573,7 +623,7 @@ impl WebEmu {
         } else {
             None
         };
-        if let Some(aperture_rows) = tv_aperture_rows {
+        let present_content = if let Some(aperture_rows) = tv_aperture_rows {
             // Standard 15 kHz display: present the captured TV aperture, the
             // browser counterpart of the desktop's TV-aperture crop. Clipped
             // to real framebuffer columns so the canvas never shows the
@@ -599,8 +649,23 @@ impl WebEmu {
                     present_common::TV_GLASS_PRESENT_ROWS,
                 )
             };
+            // Integer scaling draws the unresampled aperture, as the
+            // desktop draws its unresampled canvas: one buffer row per
+            // woven row, so the page's whole-number factors carry every
+            // scan line to the screen as one exact block. The 50 Hz
+            // aperture already has the glass's row count; this keeps the
+            // 60 Hz one at its own. A drawn bezel suspends the mode (its
+            // fixed opening owns the glass) and keeps the tube view.
+            let destination_rows = if self.scaling == DisplayScaling::Integer && !self.monitor_bezel
+            {
+                source_rows
+            } else {
+                destination_rows
+            };
             let (source_x_offset, source_y_offset) =
                 present_common::tv_centre_source_offset(self.tv_centre);
+            let source_x = present_common::TV_CAPTURED_SOURCE_X as i32 + source_x_offset;
+            let source_y = source_y as i32 + source_y_offset;
             (self.present_rows, self.present_width) =
                 self.deinterlacer.present_field_region_into_elapsed(
                     &self.fb,
@@ -609,8 +674,8 @@ impl WebEmu {
                     lace,
                     base.long_field,
                     double_rows,
-                    present_common::TV_CAPTURED_SOURCE_X as i32 + source_x_offset,
-                    source_y as i32 + source_y_offset,
+                    source_x,
+                    source_y,
                     source_rows,
                     present_common::TV_CAPTURED_WIDTH,
                     destination_rows,
@@ -622,6 +687,16 @@ impl WebEmu {
             // whatever row count it was scaled onto (the desktop's
             // crt_scanline_count, without its bezel-padding rescale).
             self.present_crt_lines = (source_rows / 2).max(1) as f32;
+            woven_content.and_then(|rect| {
+                present_common::region_present_content_rect(
+                    rect,
+                    source_x,
+                    source_y,
+                    source_rows,
+                    present_common::TV_CAPTURED_WIDTH,
+                    destination_rows,
+                )
+            })
         } else {
             (self.present_rows, self.present_width) = self.deinterlacer.present_field_into_elapsed(
                 &self.fb,
@@ -641,9 +716,60 @@ impl WebEmu {
             } else {
                 (woven_rows / 2).max(1) as f32
             };
+            // The whole woven field is the buffer: the envelope needs no
+            // further map.
+            woven_content
+        };
+        self.present_programmable = geometry.programmable;
+        // A different scan geometry is a different coordinate space for
+        // the envelope -- a programmable scan's own rows against the
+        // standard woven field, a 35 ns canvas against the classic one, a
+        // mode's LACE toggling its rows, the aperture switching between
+        // the resampled and native row counts -- so the latch's union and
+        // shrink clock start over across one, as on the desktop. The
+        // screen changes wholesale at such a switch anyway.
+        let scan = (
+            geometry.programmable,
+            woven_rows,
+            canvas_width,
+            self.present_rows,
+            self.present_width,
+        );
+        if self
+            .present_scan
+            .replace(scan)
+            .is_some_and(|previous| previous != scan)
+        {
+            self.autocrop_latch.reset();
         }
+        self.last_content_rect = present_content;
+        self.latch_content_rect(present_content);
         self.last_rendered_frame = Some(emulated_frame);
         self.presentation_revision = self.presentation_revision.wrapping_add(1);
+    }
+
+    /// Advance the autocrop smoothing with a frame's envelope (in
+    /// presentation-buffer pixels) and adopt what it presents; true when
+    /// the presented crop changed.
+    fn latch_content_rect(&mut self, content: Option<bitplane::ContentRect>) -> bool {
+        let smoothed = self.autocrop_latch.resolve(content);
+        if smoothed == self.present_content_rect {
+            return false;
+        }
+        self.present_content_rect = smoothed;
+        true
+    }
+
+    /// Forget the presentation's latched decisions across a discontinuity
+    /// (power cycle, state load, overscan change), like the desktop's
+    /// `reset_render_pipeline`: the aperture latch and the autocrop crop
+    /// start over with the next frame.
+    fn reset_presentation_latches(&mut self) {
+        self.presentation_latch.reset();
+        self.autocrop_latch.reset();
+        self.present_content_rect = None;
+        self.last_content_rect = None;
+        self.present_scan = None;
     }
 
     /// Presentation buffer: RGBA bytes in memory order, `present_width() x
@@ -663,6 +789,11 @@ impl WebEmu {
         self.presentation_revision
     }
 
+    /// Rows of the presentation buffer. The 50 Hz TV aperture's row count
+    /// for a standard scan under the default smooth scaling (a 60 Hz
+    /// aperture is resampled onto it, so both fill the same 4:3 glass),
+    /// the aperture's own woven rows under integer scaling (see
+    /// `set_scaling`), the whole field's rows in full overscan.
     pub fn present_rows(&self) -> u32 {
         self.present_rows as u32
     }
@@ -1066,7 +1197,7 @@ impl WebEmu {
         // stepping the machine. The presentation latch belongs to the old
         // timeline, so it starts over too.
         self.last_rendered_frame = None;
-        self.presentation_latch.reset();
+        self.reset_presentation_latches();
         self.deinterlacer.reset_history();
         // The reuse detector's snapshot belongs to the replaced machine;
         // the repaint below must render, not match against it.
@@ -1087,7 +1218,7 @@ impl WebEmu {
         // fresh one, and the presentation latch starts over with it.
         self.mouse_remainder = (0.0, 0.0);
         self.mouse_pending = (0, 0);
-        self.presentation_latch.reset();
+        self.reset_presentation_latches();
         self.deinterlacer.reset_history();
         self.repeated_frame_detector = bitplane::RepeatedFrameDetector::default();
         Ok(())
@@ -1123,7 +1254,7 @@ impl WebEmu {
         // latched under the old one. The reuse detector resets with it:
         // the frame's content has not changed, but its presentation has,
         // so the repaint below must run the pipeline, not match.
-        self.presentation_latch.reset();
+        self.reset_presentation_latches();
         self.last_rendered_frame = None;
         self.repeated_frame_detector = bitplane::RepeatedFrameDetector::default();
         self.render_completed_frame();
@@ -1150,7 +1281,12 @@ impl WebEmu {
         // The frame's content has not changed, but its presentation has,
         // so the repaint below must run the pipeline, not match the reuse
         // detector. The latch keeps its decisions: the nudge translates
-        // the same aperture, it is not a new geometry judgement.
+        // the same aperture, it is not a new geometry judgement. The
+        // autocrop crop, judged in the nudged buffer's own pixels, moves
+        // with the picture at once rather than growing to the union of
+        // the two positions first.
+        self.autocrop_latch.reset();
+        self.present_content_rect = None;
         self.last_rendered_frame = None;
         self.repeated_frame_detector = bitplane::RepeatedFrameDetector::default();
         self.render_completed_frame();
@@ -1179,6 +1315,124 @@ impl WebEmu {
         self.last_rendered_frame = None;
         self.repeated_frame_detector = bitplane::RepeatedFrameDetector::default();
         self.render_completed_frame();
+    }
+
+    /// Presentation scaling, the desktop's `[display] scaling` knob:
+    /// "smooth" (the default) or "integer" -- whole-number device pixels
+    /// per buffer column and per scan line, centred in black, the look
+    /// WinUAE and Amiberry call integer scaling. Unknown names are
+    /// ignored, like `set_overscan`. The page draws the picture, so the
+    /// setting mostly shapes `present_layout`'s answer; it also changes
+    /// the buffer itself for a standard 60 Hz scan, whose captured
+    /// aperture is presented at its own woven rows rather than resampled
+    /// onto the 50 Hz aperture's row count (the desktop draws its
+    /// unresampled canvas under integer scaling the same way), so the
+    /// factors carry every scan line to the screen as one exact block.
+    /// The last completed frame is re-presented under the new setting,
+    /// like `set_overscan`, so a paused page repaints without stepping
+    /// the machine.
+    pub fn set_scaling(&mut self, mode: &str) {
+        let scaling = match mode.trim().to_ascii_lowercase().as_str() {
+            "smooth" => DisplayScaling::Smooth,
+            "integer" => DisplayScaling::Integer,
+            _ => return,
+        };
+        if scaling == self.scaling {
+            return;
+        }
+        self.scaling = scaling;
+        // The frame's content has not changed, but its presentation may
+        // have (the 60 Hz aperture's row count), so the repaint below must
+        // run the pipeline, not match the reuse detector. The latches keep
+        // their decisions; a changed buffer shape starts the crop over on
+        // its own (`present_scan`).
+        self.last_rendered_frame = None;
+        self.repeated_frame_detector = bitplane::RepeatedFrameDetector::default();
+        self.render_completed_frame();
+    }
+
+    /// The desktop's `[display] autocrop` (default off): `present_layout`
+    /// crops the presentation to the display window the hardware actually
+    /// programs -- the rows and columns that carry fetched bitplane data,
+    /// smoothed across frames exactly as the desktop smooths its crop --
+    /// instead of the fixed TV aperture, so a 200-line game fills far
+    /// more of a 16:9 screen, and under integer scaling earns the larger
+    /// whole multiple the cropped picture fits. A layout setting alone:
+    /// the buffer, screenshots and `present_content_rect` are unchanged,
+    /// so the page redraws its held picture rather than re-presenting.
+    pub fn set_autocrop(&mut self, autocrop: bool) {
+        self.autocrop = autocrop;
+    }
+
+    /// The latched autocrop envelope in presentation-buffer pixels, as
+    /// `[x, y, width, height]`, or empty while no content has been seen
+    /// since the last presentation discontinuity. Tracked whether or not
+    /// autocrop is on (it is what `present_layout` crops to), and it can
+    /// change between frames like `present_width`: it grows at once when
+    /// a program opens a larger display and tightens only after a smaller
+    /// one has held steady for about half a second.
+    pub fn present_content_rect(&self) -> Vec<u32> {
+        match self.present_content_rect {
+            Some(rect) => vec![
+                rect.x0 as u32,
+                rect.y0 as u32,
+                (rect.x1 - rect.x0) as u32,
+                (rect.y1 - rect.y0) as u32,
+            ],
+            None => Vec::new(),
+        }
+    }
+
+    /// Where the presentation buffer lands on an `avail_w` x `avail_h`
+    /// device-pixel viewport under the scaling and autocrop settings, for
+    /// a page that draws the buffer itself: `[sx, sy, sw, sh, dx, dy, dw,
+    /// dh, columns, lines]` -- the buffer sub-rect to show (the autocrop
+    /// envelope, or the whole buffer), where to draw it (the viewport
+    /// outside it is black), and the whole-number factors of an integer
+    /// draw as device pixels per buffer column and per scan line (0, 0
+    /// for a smooth fit). Empty until a frame has been presented.
+    ///
+    /// The buffer's pixel shape is the 4:3 glass's, read off the buffer
+    /// itself (the page shows the whole buffer in a 4:3 element): drawn
+    /// smooth, the whole buffer fills such a viewport exactly as the
+    /// page's stretch does, and a crop keeps that shape in a letterbox;
+    /// drawn integer, a standard scan takes a whole number per axis
+    /// approximating that shape -- the desktop's per-axis fit, 4:5 pixels
+    /// for a 200-line NTSC game on a 1080p screen -- and a programmable
+    /// scan the uniform multiple. The page decides when to ask: the
+    /// hosted page keeps its plain stretch while both settings are off,
+    /// and while a bezel mode's fixed opening owns the glass.
+    pub fn present_layout(&self, avail_w: u32, avail_h: u32) -> Vec<u32> {
+        if self.present_rows == 0 || self.present_width == 0 {
+            return Vec::new();
+        }
+        let content = if self.autocrop {
+            self.present_content_rect
+        } else {
+            None
+        };
+        let layout = present_common::buffer_layout(
+            (avail_w.max(1), avail_h.max(1)),
+            (self.present_width, self.present_rows),
+            self.present_programmable,
+            self.scaling == DisplayScaling::Integer,
+            content,
+        );
+        let (sx, sy, sw, sh) = layout.src;
+        let (dx, dy, dw, dh) = layout.dst;
+        let (columns, lines) = layout.factors.unwrap_or((0, 0));
+        vec![
+            sx as u32,
+            sy as u32,
+            sw as u32,
+            sh as u32,
+            dx,
+            dy,
+            dw,
+            dh,
+            columns as u32,
+            lines as u32,
+        ]
     }
 
     /// Enable motion-adaptive LACE field merging. The browser defaults this
@@ -1295,6 +1549,56 @@ mod tests {
     fn web_constructor_accepts_no_floppy_drives() {
         let web = WebEmu::new(Some("A500".into()), Some("PAL".into()), Some(0.0)).unwrap();
         assert!((0..4).all(|idx| !web.emu.bus().floppy.drive_connected(idx)));
+    }
+
+    /// Step a machine on a synthetic wall clock until a frame has been
+    /// presented; the page's animation loop, without the page.
+    fn present_first_frame(web: &mut WebEmu) {
+        let mut now = 0.0;
+        web.run(now, 1).unwrap();
+        while web.present_rows() == 0 {
+            now += 20.0;
+            assert!(now < 5000.0, "no frame presented");
+            web.run(now, 4).unwrap();
+        }
+    }
+
+    #[test]
+    fn present_layout_follows_the_scaling_and_autocrop_settings() {
+        let mut web = WebEmu::new(Some("A500".into()), Some("NTSC".into()), Some(1.0)).unwrap();
+        assert!(web.present_layout(1440, 1080).is_empty());
+        present_first_frame(&mut web);
+        // Smooth: the 60 Hz aperture is resampled onto the 50 Hz aperture's
+        // row count, and the whole buffer fills a 4:3 viewport exactly --
+        // the page's stretch.
+        assert_eq!((web.present_width(), web.present_rows()), (668, 540));
+        assert_eq!(
+            web.present_layout(1440, 1080),
+            vec![0, 0, 668, 540, 0, 0, 1440, 1080, 0, 0]
+        );
+        // Integer: the aperture at its own woven rows, drawn per axis at
+        // the NTSC glass shape -- two pixels per column, five per line on
+        // a 1080p screen -- and re-presented on the spot.
+        let revision = web.presentation_revision();
+        web.set_scaling("integer");
+        assert_ne!(web.presentation_revision(), revision);
+        assert_eq!((web.present_width(), web.present_rows()), (668, 428));
+        assert_eq!(
+            web.present_layout(1920, 1080),
+            vec![0, 0, 668, 428, 292, 5, 1336, 1070, 2, 5]
+        );
+        // Unknown names are ignored; the smooth buffer comes back.
+        web.set_scaling("nearest");
+        assert_eq!(web.present_rows(), 428);
+        web.set_scaling("smooth");
+        assert_eq!(web.present_rows(), 540);
+        // Autocrop alone changes only the layout, never the buffer: with no
+        // content seen on this ROM-less machine it shows the whole buffer.
+        let revision = web.presentation_revision();
+        web.set_autocrop(true);
+        assert_eq!(web.presentation_revision(), revision);
+        assert!(web.present_content_rect().is_empty());
+        assert_eq!(&web.present_layout(1440, 1080)[..4], &[0, 0, 668, 540]);
     }
 
     #[test]

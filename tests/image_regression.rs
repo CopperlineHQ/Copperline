@@ -811,8 +811,9 @@ fn hostfs_boot_aros_runs_a_guest_binary_and_writes_to_the_host(
 /// (Startup-Sequence only), the bundled AROS ROM boots it at priority 6,
 /// and the Startup-Sequence CDs to the program volume and runs the guest
 /// probe -- which writes FROM-GUEST next to the binary on the host. The
-/// staging is redirected via XDG_CONFIG_HOME so the invoking user's real
-/// config directory is never touched.
+/// staging is redirected via a scratch HOME (and USERPROFILE, for a
+/// Windows host) so the invoking user's real Documents/Copperline is
+/// never touched.
 #[test]
 #[ignore = "runs the emulator"]
 fn run_flag_boots_and_runs_a_guest_binary() -> Result<(), Box<dyn std::error::Error>> {
@@ -832,7 +833,8 @@ fn run_flag_boots_and_runs_a_guest_binary() -> Result<(), Box<dyn std::error::Er
     let output = Command::new(env!("CARGO_BIN_EXE_copperline"))
         .env("RUST_LOG", "copperline=warn")
         .env("COPPERLINE_AROS_DIR", repo_root().join("assets/aros"))
-        .env("XDG_CONFIG_HOME", &config_home)
+        .env("HOME", &config_home)
+        .env("USERPROFILE", &config_home)
         .arg("--noaudio")
         .arg("--run")
         .arg(prog_dir.join("mkfile"))
@@ -877,6 +879,104 @@ fn run_flag_boots_and_runs_a_guest_binary() -> Result<(), Box<dyn std::error::Er
     );
     let _ = std::fs::remove_file(shot);
     let _ = std::fs::remove_dir_all(&scratch);
+    Ok(())
+}
+
+/// Boot the uaelib probe (guest/uaelib-test, the vscode-amiga-debug
+/// template's helpers as written) under `--run` on the bundled AROS ROM,
+/// with an optional extra configuration, and return the run's stdout and
+/// the `UAELIB-RESULT` line the probe wrote next to itself.
+fn run_uaelib_probe(
+    name: &str,
+    config: Option<&str>,
+) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let scratch = std::env::temp_dir().join(format!("copperline-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    let prog_dir = scratch.join("build");
+    let config_home = scratch.join("config");
+    std::fs::create_dir_all(&prog_dir)?;
+    std::fs::create_dir_all(&config_home)?;
+    std::fs::copy(
+        repo_root().join("guest/uaelib-test/uaelibtest"),
+        prog_dir.join("uaelibtest"),
+    )?;
+    let config_path = match config {
+        Some(contents) => Some(write_temp_config(name, contents)?),
+        None => None,
+    };
+
+    let shot = screenshot_path(name);
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_copperline"));
+    cmd.env("RUST_LOG", "copperline=warn")
+        .env("COPPERLINE_AROS_DIR", repo_root().join("assets/aros"))
+        .env("HOME", &config_home)
+        .env("USERPROFILE", &config_home);
+    if let Some(path) = &config_path {
+        cmd.arg("--config").arg(path);
+    }
+    let output = cmd
+        .arg("--noaudio")
+        .arg("--run")
+        .arg(prog_dir.join("uaelibtest"))
+        .arg("--screenshot-after")
+        .arg("50.0")
+        .arg(&shot)
+        .output()?;
+    if !output.status.success() {
+        panic!(
+            "copperline exited with {}\nstdout tail:\n{}\nstderr tail:\n{}",
+            output.status,
+            tail_text(&output.stdout),
+            tail_text(&output.stderr)
+        );
+    }
+    let result = std::fs::read_to_string(prog_dir.join("UAELIB-RESULT"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let _ = std::fs::remove_file(shot);
+    let _ = std::fs::remove_dir_all(&scratch);
+    if let Some(path) = config_path {
+        let _ = std::fs::remove_file(path);
+    }
+    Ok((stdout, result))
+}
+
+/// The uaelib trap end to end: the template's detection word, `KPrintF`
+/// through function 86 echoed on stdout as `DBG:` lines, `warpmode()` and
+/// the resource helpers accepted, and the documented return values.
+#[test]
+#[ignore = "runs the emulator"]
+fn run_flag_runs_the_uaelib_probe_and_echoes_debug_lines_on_stdout(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = lock_emulator_tests();
+    let (stdout, result) = run_uaelib_probe("uaelib-probe", None)?;
+    // RawDoFmt's hex case differs between Kickstarts (AROS prints upper).
+    assert_eq!(
+        result.trim().to_ascii_lowercase(),
+        "present=4eb9 r86=1 r0=0 r88=0 r82=0 r82e=ffffffff out=0"
+    );
+    assert!(
+        stdout.contains("DBG: hello from uaelib 42"),
+        "stdout:\n{stdout}"
+    );
+    assert!(stdout.contains("DBG: second line"), "stdout:\n{stdout}");
+    Ok(())
+}
+
+/// With the trap disabled the template finds no `JSR` at $F0FF60, makes
+/// no calls, and `KPrintF` reaches the host through the serial port.
+#[test]
+#[ignore = "runs the emulator"]
+fn run_flag_without_the_uaelib_trap_falls_back_to_serial_debug_output(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = lock_emulator_tests();
+    let (stdout, result) = run_uaelib_probe("uaelib-off", Some("[emulation]\nuaelib = false\n"))?;
+    assert!(result.starts_with("present="), "{result}");
+    assert!(
+        !result.to_ascii_lowercase().starts_with("present=4eb9"),
+        "{result}"
+    );
+    assert!(stdout.contains("hello from uaelib 42"), "stdout:\n{stdout}");
+    assert!(!stdout.contains("DBG:"), "stdout:\n{stdout}");
     Ok(())
 }
 

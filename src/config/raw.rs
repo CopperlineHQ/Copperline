@@ -251,6 +251,7 @@ impl RawConfig {
             &overlay.display.pixel_aspect,
         );
         take(&mut self.display.scaling, &overlay.display.scaling);
+        take(&mut self.display.autocrop, &overlay.display.autocrop);
         take(&mut self.display.menu_scale, &overlay.display.menu_scale);
         take(&mut self.display.shader, &overlay.display.shader);
         take(
@@ -317,6 +318,11 @@ pub(crate) struct RawDisplay {
     /// -number multiples of the canvas, centred, point-sampled).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) scaling: Option<String>,
+    /// Crop the window presentation to the display window the hardware
+    /// programs (default false). Window-only; captures keep their
+    /// configured aperture.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) autocrop: Option<bool>,
     /// Motion-adaptive deinterlacing of interlaced content (default
     /// true); false line-doubles every field as it arrives.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1075,6 +1081,12 @@ pub(crate) struct RawEmulation {
     pub(crate) speed: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) power_on: Option<bool>,
+    /// Skip the configuration screen when this file is opened in the
+    /// launcher and run the machine at once (default false). Only the
+    /// launcher reads it; a machine started from the command line is
+    /// already past the screen this key skips.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) auto_launch: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) pacing_budget: Option<String>,
     /// Best-effort realtime-like thread priority for the pacer and audio
@@ -1099,6 +1111,11 @@ pub(crate) struct RawEmulation {
     /// exclusive.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) warp_until: Option<f64>,
+    /// The WinUAE-compatible uaelib trap at $F0FF60 (default true): guest
+    /// programs toggle warp, log debug text and register resources through
+    /// it. Set false for a machine with nothing at $F0FF60.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) uaelib: Option<bool>,
     /// Record rewind history from power-on (default false), so the rewind
     /// hotkey works outside the debugger.
     #[serde(skip_serializing_if = "Option::is_none")]

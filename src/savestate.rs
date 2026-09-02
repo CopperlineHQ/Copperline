@@ -332,11 +332,38 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      (`toc_spin_up_cck`) and the dump-exclusive command hold
 //      (`command_deferred_for_toc`), both calibrated against a real-CD32
 //      boot video and the cd32-probe rows.
-//  71: copperhf.device's asynchronous worker-thread I/O (M5): CopperhfBoard
+//  71: the Bus gained two pieces of beam-timed interrupt/sprite state.
+//      `sprite_dma_replay` is the pre-display sprite-DMA replay cursor
+//      (line, slot, render-event index and running DMACON): that replay is
+//      now paced by the beam rather than batched at the display start, and a
+//      snapshot can be taken part way through the pre-display window, so the
+//      cursor has to travel with the state. `irq_latency_visible_at` replaces
+//      the single IPL-pipe countdown with one delivery deadline per interrupt
+//      source, in absolute colour clocks.
+//  72: the floppy controller lost the DSKBYTR track-grid position tracking
+//      and the WORDEQUAL latch (`last_dskbytr_pos`, `last_stream_sync_pos`,
+//      `word_equal_latch`): DSKBYTR's byte and WORDEQUAL now come from
+//      Paula's read shifter on the framing a WORDSYNC match resets, as on
+//      hardware. Raw track images
+//      (`FloppyTrackImage::RawMfm`) and cached revolutions (`TrackRev`)
+//      gained the mastered cell-rate profile of IPF density models.
+//  73: the bus gained the WinUAE-compatible uaelib trap (`uaelib`): its
+//      result/doorbell latch image, the pending warp request, the debug
+//      event queue, the resource registry and the idle accounting travel
+//      with the state, so run-ahead and rewind restore them together with
+//      the guest state that produced them.
+//  74: the bus dropped the `diag_lowmem_blit` crash-context alarm from the
+//      layout. It is host diagnostics (consumed only by
+//      COPPERLINE_DIAG_CRASH) and the loader already cleared it, so a run
+//      resumed from a state and the uninterrupted run it was taken from now
+//      write byte-identical states again.
+//  75: copperhf.device's asynchronous worker-thread I/O (M5): CopperhfBoard
 //      gained a per-unit cached `total_sectors` (`unit_sectors`) alongside
 //      the existing per-unit state; always serialized quiesced (no
 //      in-flight requests), so the shape otherwise stays close to M4's.
-pub const STATE_VERSION: u32 = 71;
+//      (Was 71 on the copperhf-device branch before upstream's own 71-74
+//      landed; renumbered at the merge.)
+pub const STATE_VERSION: u32 = 75;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

@@ -145,7 +145,24 @@ scoped. ECS adds BLTSIZV/BLTSIZH for larger blits.
 ## Paula (`paula.rs`)
 
 Paula owns the interrupt system (INTENA/INTREQ, delivered through the
-modelled IPL-pin pipe and 68000 boundary sampling), serial, and audio:
+modelled IPL-pin pipe and 68000 boundary sampling), serial, and audio.
+
+The IPL pipe (`DEFAULT_IRQ_LATENCY_CCK`, 5 cck) holds a newly raised source
+invisible to the CPU for the propagation through the level encoder to the
+pins. Two properties matter beyond its length. Each source pipes
+**independently** -- every source has its own path to the pins, so one
+asserting cannot hold back another already on its way; a single countdown
+restarted by each new source stretched an earlier interrupt's delay by the
+later one's. And the pipe **bounds an idle STOP nap**: a halted CPU has
+nothing but the IPL pins to wake it, so the idle fast-forward
+([](cpu.md)) must stop at the pipe's delivery point rather than sleeping on
+to the next unrelated device event. Together these kept handler entry within
+the few colour clocks the pipe is worth instead of jittering it across tens
+of raster lines, which is what a demo notices when it schedules work
+relative to a fixed raster line (Ghostown's Spooky Town updates its sprite
+descriptors immediately after the vertical-blank sprite fetch).
+
+The rest of Paula:
 
 - **Audio**: four channels running the HRM per-channel state machine
   (states 000/001/101/010/011): AUDxDAT arrivals, the period counter,
@@ -378,6 +395,19 @@ later DSKSYNC match during it, so the sectors after an index wrap on a track
 whose cell count is not a multiple of 16 still land word-aligned (AROS's
 trackdisk.device reads 1.08 revolutions this way and scans the buffer on the
 word grid; Kickstart's reads without WORDSYNC and bit-searches itself).
+DSKBYTR is served by that same read shifter: its byte and DSKBYT come from
+the shifter's bit counter, the one a WORDSYNC match resets whether or not a
+transfer is running, and WORDEQUAL is the comparator's live level -- true for
+the one cell in which the shift register equals DSKSYNC, so a poll that
+arrives a cell late sees nothing and waits for the next revolution, as on
+the hardware; reading the register resets DSKBYT alone, while the DSKSYNC
+interrupt is the latched edge of the same comparator. A reader that waits
+for WORDEQUAL and then collects bytes
+through DSKBYTR therefore gets them framed from the end of the sync word at
+whatever bit phase the sync sits on the track -- IPF and flux tracks carry
+their syncs at arbitrary phases, and Rob Northen's Copylock reads its key
+sector exactly this way (Lemmings, issue #610), rejecting the read unless the
+first two bytes are the MFM of the sector's first data byte.
 Supported image
 formats: ADF (read/write), gzip ADZ, single file ZIP, DMS (decompressed by
  `dms.rs`), UAE extended ADF, and read-only IPF (decoded by `ipf.rs`) and SCP
@@ -405,16 +435,37 @@ repeated byte or from forward and backward gap streams whose loop samples
 stretch to meet at the write splice in the middle. Each track is checked
 against the bit counts its descriptors declare and then rotated so the
 revolution starts at the index, matching the shape a flux capture already
-has. Two modelling gaps remain: the variable cell-*rate* density profiles
-(Copylock, Speedlock, Brierley) decode with uniform 2 us cells and log a
-warning, and weak bits replay as the one deterministic revolution the file
-stores rather than varying per revolution -- `FloppyTrackImage::RawMfm` can
-already carry both (`bitcell_ns` and multiple revolutions) when the
-per-protection profiles are modelled.
+has. A track's cell-*rate* density model (the IMGE density field) becomes a
+per-track profile of cell-time weights, in per-mille of nominal, following the
+CAPS library's own definitions: Copylock Amiga masters three consecutive key
+sectors at -5.5%, -0.5% and +4.5% (blocks 4-6, or 0-2 on the newer scheme),
+each run starting at the gap before its block; Copylock ST, Speedlock and the
+Brierley models weight single blocks by +-5..15%, and the Brierley density-key
+model takes a bit per block from block 0's gap value. The floppy model scales
+each cell's clock by its run's weight (`TrackRev::prefix_cck`), so a loader
+that reads two key sectors byte by byte through DSKBYTR and compares how often
+it polled between bytes sees the few-per-cent difference the master put
+there -- Copylock's check on Lemmings wants `$8911`'s sector at least 2%
+slower than `$8912`'s (issue #610). One modelling gap remains: weak bits
+replay as the one deterministic revolution the file stores rather than
+varying per revolution -- `FloppyTrackImage::RawMfm` can already carry
+multiple revolutions, so closing it is a decoder change alone.
 
 The synthesized drive sounds ([](../guide/configuration)) are driven by
 this model's real state transitions -- motor spin-up, seeks, the
 empty-drive poll click.
+
+The motor is a latch inside every drive, the internal DF0 included: /MTR is
+sampled by the drive's own /SEL falling edge and the MTR level while the
+drive stays selected is ignored, which is why trackdisk and the trackloaders
+deselect, set MTR, then reselect. A write that drops SEL and MTR together
+starts the motor (the latch sees MTR low on one side of the edge); stopping
+it needs MTR high on both sides of the edge -- the rule WinUAE and vAmiga
+derived from hardware. A loader that restores a stale PRB shadow with MTR
+high while the drive remains selected therefore leaves the motor running
+(Ghostown's Spooky Town does this under Kickstart 1.3). External units run
+their drive-ID shift register off the same select edges while the motor is
+off; DF0 has no ID circuit.
 
 Disk DMA against a mechanism that cannot deliver cells -- no media in the
 drive, or the motor line off -- arms normally and then pends: Paula has no

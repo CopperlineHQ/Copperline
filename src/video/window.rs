@@ -213,9 +213,10 @@ const MAX_TEXTURE_SCALE: usize = 2;
 /// Cap on the integer-scaling supersample factor, which follows the window
 /// fit rather than the host DPI (see `plan_present_scaling`). Bounds the
 /// backing texture and the per-frame present copy on very large displays;
-/// at 4x the canvas the picture is already 2864 physical pixels wide, and
-/// beyond it PixelPerfect's own whole multiples of the capped texture keep
-/// the fit integer.
+/// at 4x the canvas the texture is already 2864 physical pixels wide. The
+/// *displayed* multiple is not capped: the scaler pass draws the planned
+/// multiple whatever the texture factor, and its point sampling of the
+/// replicated display region stays exact past the cap (see `scaler`).
 const MAX_INTEGER_TEXTURE_SCALE: usize = 4;
 const STATUS_BAR_HEIGHT: usize = 44;
 /// How long the pointer rests on a menu category before it opens.
@@ -879,6 +880,28 @@ fn analyzer_heat_presets(bus: &crate::bus::Bus) -> Vec<ui::HeatPreset> {
             }
         })
         .collect();
+    // Guest-registered debug resources (crate::uaelib) are windows too: a
+    // program that told the emulator where its bitmaps, palettes and
+    // copper lists live gets a preset per resource, named by the guest.
+    // Rebuilt on tab entry, so a resource registered while the tab is up
+    // appears the next time the Memory tab is entered.
+    if let Some(uaelib) = bus.uaelib.as_ref() {
+        // Bounded so a large registry cannot push the machine windows'
+        // trailing presets (notably 24-bit) off the single preset row;
+        // the Resources tab lists and scrolls the full registry.
+        const RESOURCE_PRESETS_MAX: usize = 4;
+        for resource in uaelib.resources().iter().take(RESOURCE_PRESETS_MAX) {
+            // By characters, not bytes: the name is guest data run
+            // through from_utf8_lossy, and a byte-indexed truncate can
+            // panic inside a multibyte character.
+            let label: String = resource.name.chars().take(8).collect();
+            presets.push(ui::HeatPreset {
+                label,
+                base: resource.address,
+                span: resource.size.max(1),
+            });
+        }
+    }
     // Two boards of the same kind would otherwise offer two buttons with
     // the same name; the base address tells them apart.
     let labels: Vec<String> = presets.iter().map(|preset| preset.label.clone()).collect();
@@ -941,6 +964,16 @@ pub struct App {
     /// presentation geometry instead of snapping to the full framebuffer,
     /// so the picture does not jump at every Kickstart mode change.
     presentation_latch: PresentationLatch,
+    /// The smoothed playfield content envelope the autocrop presentation
+    /// shows, in woven presentation-buffer space (see [`AutocropLatch`]);
+    /// `None` until a standard frame has painted playfield.
+    present_content_rect: Option<bitplane::ContentRect>,
+    /// The last layout the COPPERLINE_DIAG_AUTOCROP trace logged, so the
+    /// trace reports changes rather than every redraw. Unused while the
+    /// flag is off.
+    last_diag_layout: Option<PresentLayout>,
+    /// The grow-fast/shrink-stable smoothing behind it.
+    autocrop_latch: AutocropLatch,
     /// Whether the presented frame came from a programmable (multisync) scan
     /// rather than a woven 15 kHz one. Those fields reach the presentation
     /// buffer at their native height, so neither the CRT pass nor its
@@ -993,6 +1026,11 @@ pub struct App {
     /// the machine sits powered off until the status-bar power button
     /// is clicked. Distinct from the emulated (CIA-driven) power LED.
     powered_on: bool,
+    /// Whether the next `run_machine` keeps the configuration's own
+    /// `power_on` rather than the Run button's power-it-on. Set around the
+    /// two automatic launches (`auto_launch_if_asked`, Load...): nobody
+    /// pressed Run there, so nobody overrode the file.
+    run_honors_power_on: bool,
     /// Host-level pause state. When true the emulator does not step but
     /// stays powered on, so the last rendered frame is held on screen and
     /// emulation resumes from the same point when unpaused.
@@ -1029,6 +1067,9 @@ pub struct App {
     /// drained at the top of `about_to_wait` (see window/control.rs).
     #[cfg(feature = "control")]
     control: Option<control::ControlState>,
+    /// The windowed GDB stub (`--gdb-gui`), when attached.
+    #[cfg(feature = "gdb")]
+    gdb: Option<gdb::GdbGuiState>,
     /// Scheduled relative port-1 mouse motions from --mouse-after,
     /// one-shot per entry; (at_emulated_secs, dx, dy).
     auto_mouse: Vec<(f64, i32, i32, u8)>,
@@ -1061,6 +1102,11 @@ pub struct App {
     /// real-time pacing (src/warpboot.rs). One-shot; None once finished
     /// or cancelled. Host-side only, never serialized.
     warp_boot: Option<crate::warpboot::WarpBootGate>,
+    /// A warp a control client or the guest engaged (`App::set_warp`):
+    /// mutes live audio like the boot gates, outlives a gate that ends
+    /// under it, and is released by any warp-off, the manual toggle, or
+    /// power off. Never `Manual`. Host-side only, never serialized.
+    warp_hold: Option<app_session::WarpSource>,
     /// Live-input recorder: logs every input event that reaches the
     /// emulated machine and writes a --script-replayable file on stop.
     /// None while not recording.
@@ -1101,8 +1147,12 @@ pub struct App {
     cursor_pos: Option<(i32, i32)>,
     last_display_cursor_pos: Option<(i32, i32)>,
     /// Most recent raw host cursor position (physical pixels) from the last
-    /// CursorMoved. Kept only for the COPPERLINE_DIAG_CURSOR click trace, which
-    /// needs the un-mapped coordinate alongside the mapped pixel.
+    /// CursorMoved while the pointer is inside the window (cleared on
+    /// CursorLeft). The redraw re-maps `cursor_pos` from it whenever the
+    /// presentation layout changes under a stationary pointer (autocrop
+    /// latch adoption, a menu suspending the crop), and the
+    /// COPPERLINE_DIAG_CURSOR click trace logs it alongside the mapped
+    /// pixel.
     last_cursor_phys: Option<winit::dpi::PhysicalPosition<f64>>,
     volume_dragging: bool,
     /// A scroll arrow held down: which control, and when its next repeat is
@@ -1465,6 +1515,11 @@ struct Render {
     window: Arc<Window>,
     pixels: Pixels<'static>,
     texture_scale: usize,
+    /// The pass that puts the composited buffer on the surface (see
+    /// [`scaler`]): the emulator window's replacement for the `pixels`
+    /// built-in scaling renderer, so the displayed integer multiple is
+    /// not welded to the texture's supersample factor.
+    scaler: scaler::PresentScaler,
     /// Native-resolution RTG display texture, drawn over the UI buffer in
     /// the `pixels` render pass (see [`rtg_texture`]). Present whenever the
     /// window is (its pipeline uses the same GPU device as `pixels`).
@@ -1588,6 +1643,11 @@ struct RenderWorkerResult {
     /// frames keep the previous geometry.
     tv_aperture: TvApertureFrame,
     programmable: bool,
+    /// Playfield content envelope in presentation-buffer space (x in
+    /// buffer columns, y in buffer rows: the woven field of a standard
+    /// scan, the sync-anchored glass of a programmable one), for the
+    /// autocrop presentation; `None` for a border-only frame.
+    content_rect: Option<bitplane::ContentRect>,
     /// The job's frame snapshot, handed back for buffer reuse.
     input: bitplane::RenderInput,
 }
@@ -1961,6 +2021,11 @@ impl App {
             .run_ahead_frames
             .unwrap_or(0)
             .min(crate::config::RUN_AHEAD_MAX_FRAMES);
+        // The canvas rule reads the bezel through its own mirror
+        // (`present_height`), and the window is sized from the canvas
+        // before the first frame: seed it with the style the window opens
+        // with, as `main` seeds the aspect and the scaling.
+        crate::video::set_bezel_shown(bezel.is_on());
         let mut app = Self {
             emu,
             serial_is_midi,
@@ -1979,6 +2044,9 @@ impl App {
             rtg_present_dims: None,
             present_tv_aperture_rows: Some(TV_PAL_PRESENT_HEIGHT),
             presentation_latch: PresentationLatch::default(),
+            present_content_rect: None,
+            last_diag_layout: None,
+            autocrop_latch: AutocropLatch::default(),
             present_programmable: false,
             render: None,
             debugger_tool_window: None,
@@ -1999,6 +2067,7 @@ impl App {
             render_recycle_input: None,
             cpu_halted: false,
             powered_on,
+            run_honors_power_on: false,
             paused: false,
             auto_shot: Vec::new(),
             pending_auto_shot: screenshot_after,
@@ -2016,6 +2085,8 @@ impl App {
             auto_joy_engaged: [false; 2],
             #[cfg(feature = "control")]
             control: None,
+            #[cfg(feature = "gdb")]
+            gdb: None,
             auto_mouse: Vec::new(),
             pending_auto_mouse: mouse_after,
             auto_mouse_to: Vec::new(),
@@ -2030,6 +2101,7 @@ impl App {
             warp_launch: run_warp_target,
             warp_launch_tracker: crate::amigaos::LibraryTracker::default(),
             warp_boot: warp_boot_gate,
+            warp_hold: None,
             input_recorder: record_input
                 .is_some()
                 .then(|| crate::inputrec::InputRecorder::new(0.0)),
@@ -2857,6 +2929,14 @@ impl App {
                 let _ = proxy.send_event(());
             }));
         }
+        // Same for the windowed GDB stub's socket threads.
+        #[cfg(feature = "gdb")]
+        if let Some(gdb) = app.gdb.as_mut() {
+            let proxy = event_loop.create_proxy();
+            gdb.handle.start(Box::new(move || {
+                let _ = proxy.send_event(());
+            }));
+        }
         event_loop
             .run_app(&mut app)
             .map_err(|e| anyhow!("event loop: {e}"))?;
@@ -3359,11 +3439,12 @@ impl ApplicationHandler for App {
         #[cfg(target_os = "macos")]
         set_macos_dock_icon();
         let inner = window.inner_size();
-        let (texture_scale, scaling_mode) = plan_present_scaling(
+        let texture_scale = plan_present_scaling(
             integer_scaling_requested(),
             window.scale_factor(),
             (inner.width.max(1), inner.height.max(1)),
-        );
+        )
+        .texture_scale;
         // On Linux, restrict wgpu to the Vulkan backend. wgpu's GL fallback
         // initializes its EGL instance without a display handle (pixels uses
         // InstanceDescriptor::new_without_display_handle), so EGL drops to the
@@ -3377,23 +3458,22 @@ impl ApplicationHandler for App {
         // Other platforms keep wgpu's default backend set (Metal on macOS,
         // DX12/Vulkan on Windows). cfg!() (not #[cfg]) keeps the Linux branch
         // type-checked on every host.
-        let pixels =
-            match build_pixels_for_window(window.clone(), texture_scale, true, scaling_mode) {
-                Ok(p) => p,
-                Err(e) => {
-                    error!("pixels init failed: {e}");
-                    if cfg!(target_os = "linux") {
-                        error!(
-                            "Copperline requires a Vulkan driver on Linux. Update your GPU \
+        let pixels = match build_pixels_for_window(window.clone(), texture_scale, true) {
+            Ok(p) => p,
+            Err(e) => {
+                error!("pixels init failed: {e}");
+                if cfg!(target_os = "linux") {
+                    error!(
+                        "Copperline requires a Vulkan driver on Linux. Update your GPU \
                          drivers, or install a software Vulkan ICD (lavapipe): \
                          'vulkan-swrast' on Arch, 'mesa-vulkan-drivers' on Debian/Ubuntu, \
                          'mesa-vulkan-drivers' (or 'vulkan-loader') on Fedora."
-                        );
-                    }
-                    event_loop.exit();
-                    return;
+                    );
                 }
-            };
+                event_loop.exit();
+                return;
+            }
+        };
         info!(
             "window + pixels surface ready ({}x{}, texture {}x{})",
             inner.width,
@@ -3401,6 +3481,7 @@ impl ApplicationHandler for App {
             texture_width(texture_scale),
             texture_height(texture_scale)
         );
+        let scaler = scaler::PresentScaler::new(pixels.device(), pixels.render_texture_format());
         let rtg_texture =
             rtg_texture::RtgTexture::new(pixels.device(), pixels.render_texture_format());
         let mut crt_shader =
@@ -3430,6 +3511,7 @@ impl ApplicationHandler for App {
             window,
             pixels,
             texture_scale,
+            scaler,
             rtg_texture,
             crt_shader,
             bezel_shader,
@@ -3746,10 +3828,11 @@ impl ApplicationHandler for App {
             WindowEvent::CursorMoved { position, .. } => {
                 let previous_cursor_pos = self.cursor_pos;
                 self.last_cursor_phys = Some(position);
+                let display_src = self.display_canvas_src();
                 let pos = self
                     .render
                     .as_ref()
-                    .and_then(|r| cursor_texture_position(&r.pixels, position, r.texture_scale));
+                    .and_then(|r| main_cursor_position(r, display_src, position));
                 // A button held on the dial turns it by following the hand
                 // round the face.
                 #[cfg(feature = "mt32")]
@@ -3831,6 +3914,7 @@ impl ApplicationHandler for App {
             WindowEvent::CursorLeft { .. } => {
                 let previous_cursor_pos = self.cursor_pos;
                 self.cursor_pos = None;
+                self.last_cursor_phys = None;
                 self.last_display_cursor_pos = None;
                 self.volume_dragging = false;
                 self.analyzer_dragging = false;
@@ -4107,13 +4191,11 @@ impl ApplicationHandler for App {
                 // resizes the surface via the Resized event that follows, but
                 // the backing texture is sized FB_WIDTH x window height
                 // times an integer supersample factor captured at window
-                // creation. Left stale, cursor_texture_position maps clicks
-                // against a texture extent that no longer matches the surface,
-                // so a status-bar click is mis-classified as a display click
-                // and grabs the mouse. Re-plan for the new scale (which also
-                // re-fits integer scaling, whose factor tracks the surface
-                // rather than the DPI); the Resized event that follows
-                // recomputes the scaling matrix from it.
+                // creation. Left stale, the UI drawn into it keeps the old
+                // monitor's crispness. Re-plan for the new scale (which also
+                // re-fits integer scaling's texture factor, which tracks the
+                // surface rather than the DPI); the redraw recomputes the
+                // clip rect from the same plan.
                 if let Some(r) = self.render.as_mut() {
                     let surface = r.window.inner_size();
                     if let Err(e) = sync_main_present_scaling(r, (surface.width, surface.height)) {
@@ -4131,6 +4213,16 @@ impl ApplicationHandler for App {
                 if self.render.as_ref().is_some_and(|r| r.minimized) {
                     return;
                 }
+                // The presentation layout can change under a stationary
+                // pointer -- the autocrop latch adopting a new crop, a menu
+                // suspending it, a toggle -- and every such change requests
+                // a redraw, so re-mapping the cached host position here
+                // keeps hover and click hit-testing aligned with the
+                // pixels this frame actually shows.
+                let display_src = self.display_canvas_src();
+                if let (Some(phys), Some(r)) = (self.last_cursor_phys, self.render.as_ref()) {
+                    self.cursor_pos = main_cursor_position(r, display_src, phys);
+                }
                 let status = status_with_latched_fdd_track(
                     self.emu.bus().front_panel_status(),
                     &mut self.last_fdd_track,
@@ -4140,14 +4232,17 @@ impl ApplicationHandler for App {
                     .cursor_pos
                     .and_then(|pos| control_at(pos, &bar_layout(&media)));
                 let control_connected = {
+                    #[allow(unused_mut)]
+                    let mut connected = false;
                     #[cfg(feature = "control")]
                     {
-                        self.control.as_ref().is_some_and(|c| c.handle.connected())
+                        connected |= self.control.as_ref().is_some_and(|c| c.handle.connected());
                     }
-                    #[cfg(not(feature = "control"))]
+                    #[cfg(feature = "gdb")]
                     {
-                        false
+                        connected |= self.gdb.as_ref().is_some_and(|g| g.handle.connected());
                     }
+                    connected
                 };
                 let view = StatusBarView {
                     status,
@@ -4306,10 +4401,20 @@ impl ApplicationHandler for App {
                         self.shader_strength,
                         r.texture_scale,
                     );
+                    // The corner overlays anchor to the display region the
+                    // viewer actually sees: the whole display classically,
+                    // the sub-rect while autocrop or per-axis scaling
+                    // presents one.
+                    let overlay_anchor = display_src.map(|src| src.rect).unwrap_or((
+                        0,
+                        0,
+                        FB_WIDTH,
+                        present_height(),
+                    ));
                     if recording {
                         // Painted into the presentation texture only, so
                         // the badge never appears in the recorded file.
-                        draw_record_badge(frame, r.texture_scale, corner);
+                        draw_record_badge(frame, r.texture_scale, corner, overlay_anchor);
                     }
                     if self.perf_overlay {
                         draw_perf_overlay(
@@ -4318,10 +4423,18 @@ impl ApplicationHandler for App {
                             r.texture_scale,
                             recording,
                             corner,
+                            overlay_anchor,
                         );
                     }
                     if let Some((text, warning)) = &osd {
-                        draw_osd(frame, text, *warning, r.texture_scale, corner);
+                        draw_osd(
+                            frame,
+                            text,
+                            *warning,
+                            r.texture_scale,
+                            corner,
+                            overlay_anchor,
+                        );
                     }
                     // The focus lights its control the way the pointer
                     // does, breathing between the two.
@@ -4334,6 +4447,70 @@ impl ApplicationHandler for App {
                     if self.drop_hover && !matches!(self.ui.panel, Some(Panel::Launcher(_))) {
                         ui::draw_drop_hint(frame, r.texture_scale);
                     }
+                    // The scaler pass draws the composited buffer with this
+                    // layout; every overlay pass below keys its viewport off
+                    // the same display rect, and the cursor mapping inverts
+                    // the same layout, so all of them agree by construction.
+                    // The branches that draw over the display (RTG, CRT,
+                    // bezel) only run when the sub-rect modes are
+                    // suspended, so their layout is the classic
+                    // whole-texture letterbox.
+                    let layout = main_present_layout(r, display_src);
+                    // COPPERLINE_DIAG_AUTOCROP: the window half of the
+                    // renderer-side envelope trace -- the exact rects the
+                    // scaler pass draws this frame, logged when they
+                    // change, with the mode spelled out: a classic layout
+                    // must say WHY it is classic (both modes off, or which
+                    // condition suspended them), because the envelope
+                    // line prints whether or not a mode is on and the
+                    // difference is invisible from it alone. The factors
+                    // are the whole-number draw's pixels per canvas
+                    // column and per field line, the shape is the glass
+                    // ratio a per-axis draw aims at, and the scan says
+                    // which window model the envelope came through (a
+                    // programmable scan crops too, at the uniform
+                    // multiple).
+                    if crate::envcfg::flag("COPPERLINE_DIAG_AUTOCROP")
+                        && self.last_diag_layout != Some(layout)
+                    {
+                        let autocrop = crate::video::autocrop();
+                        let per_axis = per_axis_scaling_requested();
+                        let mode = if !autocrop && !per_axis {
+                            "off"
+                        } else if self.rtg_present_dims.is_some() {
+                            "suspended(rtg)"
+                        } else if self.bezel.is_on() {
+                            "suspended(bezel)"
+                        } else if autocrop && per_axis {
+                            "active(autocrop+per-axis)"
+                        } else if per_axis {
+                            "active(per-axis)"
+                        } else {
+                            "active(autocrop)"
+                        };
+                        info!(
+                            "[DIAG_AUTOCROP] layout mode={} scan={} surface={:?} \
+                             src_canvas={:?} display_dst={:?} chrome_dst={:?} filter={:?} \
+                             factors={:?} shape={:?}",
+                            mode,
+                            if self.present_programmable {
+                                "programmable"
+                            } else {
+                                "standard"
+                            },
+                            r.surface_size,
+                            layout.src_canvas,
+                            layout.display_dst,
+                            layout.chrome_dst,
+                            layout.filter,
+                            layout.factors,
+                            display_src.map(|src| src.par),
+                        );
+                        self.last_diag_layout = Some(layout);
+                    }
+                    let present_clip = layout.display_dst;
+                    let present_draws = layout.draws();
+                    let scaler = &mut r.scaler;
                     let render_result = if rtg_gpu {
                         // Draw the UI buffer, then overdraw the display region
                         // with the native RTG texture (GPU-scaled). The display
@@ -4343,11 +4520,18 @@ impl ApplicationHandler for App {
                         // The board frame is drawn straight to the surface,
                         // so integer scaling applies to it in its own native
                         // pixels rather than through the canvas texture the
-                        // scaling renderer letterboxed above.
+                        // scaler pass letterboxed above.
                         let integer_scaling = integer_scaling_requested();
                         r.pixels.render_with(|encoder, target, ctx| {
-                            ctx.scaling_renderer.render(encoder, target);
-                            let (cx, cy, cw, ch) = ctx.scaling_renderer.clip_rect();
+                            scaler.render(
+                                &ctx.device,
+                                &ctx.queue,
+                                &ctx.texture,
+                                encoder,
+                                target,
+                                &present_draws,
+                            );
+                            let (cx, cy, cw, ch) = present_clip;
                             let disp_h = ch as f32 * present_height() as f32
                                 / window_present_height() as f32;
                             rtg.render(
@@ -4394,6 +4578,20 @@ impl ApplicationHandler for App {
                         let kind = self.crt_shader_kind;
                         let strength = self.shader_strength;
                         let bezel_style = self.bezel;
+                        // Under a sub-rect layout the preset re-draws the
+                        // rect into the rect's own viewport -- the same
+                        // sub-rect the scaler pass just drew -- with the
+                        // beam-line count scaled to the rows the rect shows.
+                        // The bezel suspends the sub-rect modes, so this is
+                        // never the bezel case.
+                        let crt_crop = display_src.map(|_| {
+                            (
+                                layout.display_dst,
+                                layout.src_canvas,
+                                scanlines * layout.src_canvas.3 as f32
+                                    / present_height().max(1) as f32,
+                            )
+                        });
                         // The closure is FnOnce and captures `r`, so the
                         // shaders have to be split out of it as separate
                         // borrows rather than reached through `r` inside.
@@ -4401,16 +4599,36 @@ impl ApplicationHandler for App {
                         let bezel_shader = &mut r.bezel_shader;
                         let sticker_pass = &mut r.sticker_pass;
                         r.pixels.render_with(|encoder, target, ctx| {
-                            ctx.scaling_renderer.render(encoder, target);
-                            let (uniforms, viewport) = crt_shader::uniforms_for(
-                                kind,
-                                strength,
-                                ctx.scaling_renderer.clip_rect(),
-                                present_height(),
-                                window_present_height(),
-                                (ctx.texture_extent.width, ctx.texture_extent.height),
-                                scanlines,
+                            scaler.render(
+                                &ctx.device,
+                                &ctx.queue,
+                                &ctx.texture,
+                                encoder,
+                                target,
+                                &present_draws,
                             );
+                            let texture_extent =
+                                (ctx.texture_extent.width, ctx.texture_extent.height);
+                            let (uniforms, viewport) = match crt_crop {
+                                Some((dst, src, crop_scanlines)) => crt_shader::uniforms_for_rect(
+                                    kind,
+                                    strength,
+                                    dst,
+                                    src,
+                                    (FB_WIDTH, window_present_height()),
+                                    texture_extent,
+                                    crop_scanlines,
+                                ),
+                                None => crt_shader::uniforms_for(
+                                    kind,
+                                    strength,
+                                    present_clip,
+                                    present_height(),
+                                    window_present_height(),
+                                    texture_extent,
+                                    scanlines,
+                                ),
+                            };
                             if bezel_active {
                                 let opening = bezel::opening_rect(bezel_style, viewport);
                                 if crt_active {
@@ -4461,7 +4679,17 @@ impl ApplicationHandler for App {
                             Ok(())
                         })
                     } else {
-                        r.pixels.render()
+                        r.pixels.render_with(|encoder, target, ctx| {
+                            scaler.render(
+                                &ctx.device,
+                                &ctx.queue,
+                                &ctx.texture,
+                                encoder,
+                                target,
+                                &present_draws,
+                            );
+                            Ok(())
+                        })
                     };
                     if let Err(e) = render_result {
                         error!("pixels.render: {e}");
@@ -4502,6 +4730,11 @@ impl ApplicationHandler for App {
                 return;
             }
         }
+        #[cfg(feature = "gdb")]
+        self.drain_gdb();
+        // Frames retired outside the burst (a control step, a debugger
+        // step) may have carried a guest warp request.
+        self.service_uaelib();
         if self.render.is_none() {
             return;
         }
@@ -4670,7 +4903,7 @@ impl ApplicationHandler for App {
         // frame per loop (request_redraw is skipped below), and every captured
         // frame must be rendered, so warp's output frame-skip burst must not
         // apply there.
-        let headless_capture = !self.auto_shot.is_empty() || self.frame_dump.is_some();
+        let headless_capture = self.headless_capture_active();
         // A completed run-ahead burst renders its future frame before the
         // anchor is restored. Suppress the generic post-step render in that
         // case or it would immediately replace the future image with the
@@ -4740,6 +4973,14 @@ impl ApplicationHandler for App {
                 // The warp-boot gate ends its warp the frame its
                 // timestamp or storage-idle condition holds.
                 if self.poll_warp_boot() {
+                    burst_complete = false;
+                    break;
+                }
+                // The guest's warpmode() through the uaelib trap starts or
+                // ends its warp at the frame it was made. Committed frames
+                // only: a flip on a speculative frame would abandon the
+                // run-ahead anchor mid-burst.
+                if !speculative && self.service_uaelib() {
                     burst_complete = false;
                     break;
                 }
@@ -5202,14 +5443,17 @@ impl App {
             status.fdd_track = self.last_fdd_track;
         }
         let control_connected = {
+            #[allow(unused_mut)]
+            let mut connected = false;
             #[cfg(feature = "control")]
             {
-                self.control.as_ref().is_some_and(|c| c.handle.connected())
+                connected |= self.control.as_ref().is_some_and(|c| c.handle.connected());
             }
-            #[cfg(not(feature = "control"))]
+            #[cfg(feature = "gdb")]
             {
-                false
+                connected |= self.gdb.as_ref().is_some_and(|g| g.handle.connected());
             }
+            connected
         };
         #[cfg(feature = "mt32")]
         let mt32_face = if crate::video::mt32_panel_shown() {
@@ -6143,6 +6387,7 @@ impl App {
             UiControl::DropDrive(drive_idx) => self.drop_chooser_route(drive_idx),
             UiControl::AnalyzerTab(_)
             | UiControl::AnalyzerHeatPreset(_)
+            | UiControl::AnalyzerResourceRow(_)
             | UiControl::AnalyzerHeatPick { .. } => {
                 self.activate_tool_control(ToolPanelKind::FrameAnalyzer, control)
             }
@@ -6212,12 +6457,15 @@ mod control;
 mod crt_shader;
 #[cfg(feature = "coppersynth")]
 mod csynthpanel;
+#[cfg(feature = "gdb")]
+mod gdb;
 mod host_input;
 mod kbdpanel;
 #[cfg(feature = "mt32")]
 mod mt32panel;
 mod present;
 mod rtg_texture;
+mod scaler;
 pub(in crate::video) mod statusbar;
 mod stickers;
 pub(super) use present::{scale_rect, texture_height, texture_width, Rect};

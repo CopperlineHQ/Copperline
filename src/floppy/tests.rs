@@ -161,9 +161,15 @@ fn drive_deselect_prb(motor_on: bool) -> u8 {
 }
 
 fn read_external_drive_id(ctrl: &mut FloppyController, idx: usize) -> u32 {
+    // Motor on, then off: the MTR line is set while every drive is
+    // deselected and latched by the following select edge. Raising MTR in
+    // the same write that selects the drive would not stop the motor (the
+    // latch samples MTR low on the near side of its edge), so the motor-off
+    // step raises MTR first.
     ctrl.write_prb(drive_deselect_prb(true));
     ctrl.write_prb(drive_select_prb(idx, true));
     ctrl.write_prb(drive_deselect_prb(true));
+    ctrl.write_prb(drive_deselect_prb(false));
     ctrl.write_prb(drive_select_prb(idx, false));
     ctrl.write_prb(drive_deselect_prb(false));
 
@@ -465,7 +471,8 @@ fn empty_internal_drive_keeps_disk_change_asserted_until_media_steps() -> Result
     ctrl.write_prb(inward_high);
     let status = ctrl.cia_a_status_bits();
     assert_eq!(status & CIAA_DSKCHANGE, 0);
-    assert_ne!(status & CIAA_DSKRDY, 0);
+    // Motor off at cylinder 0: the internal drive's /RDY mirrors /TRK0.
+    assert_eq!(status & CIAA_DSKRDY, 0);
 
     ctrl.write_prb(inward_high & !CIAB_DSKSTEP);
     ctrl.tick(DISK_STATUS_SETTLE_CCK, 0, &mut []);
@@ -583,6 +590,16 @@ fn cia_status_ready_line_tracks_motor_spinup_and_off() -> Result<()> {
     let mut ctrl = FloppyController::from_config(&cfg)?;
     let selected_motor_on = !CIAB_DSKMOTOR & !CIAB_DSKSEL0;
     let selected_motor_off = !CIAB_DSKSEL0;
+
+    // Park the head on cylinder 1 first: with the motor off the internal
+    // drive's /RDY mirrors /TRK0, which at cylinder 0 would hide the
+    // motor-driven ready line this test is about.
+    ctrl.write_prb(selected_motor_off & !CIAB_DSKDIREC);
+    ctrl.write_prb(selected_motor_off & !CIAB_DSKDIREC & !CIAB_DSKSTEP);
+    ctrl.write_prb(selected_motor_off);
+    assert_ne!(ctrl.cia_a_status_bits() & CIAA_DSKTRACK0, 0);
+    assert_ne!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
+    ctrl.write_prb(0xFF);
 
     ctrl.write_prb(selected_motor_on);
     assert_ne!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
@@ -1024,15 +1041,194 @@ fn a_machine_with_no_floppy_drives_leaves_the_bus_unanswered() {
 }
 
 #[test]
-fn internal_df0_motor_follows_selected_motor_line_level() {
+fn internal_df0_motor_latches_mtr_on_select_falling_edge() {
     let mut ctrl = FloppyController::default();
 
+    // Select with MTR low from the all-deselected idle state: the SEL
+    // falling edge latches the motor on.
     ctrl.write_prb(drive_select_prb(0, true));
+    assert!(ctrl.drives[0].motor_on);
+    // Raising MTR while the drive stays selected is not an edge: ignored.
+    ctrl.write_prb(drive_select_prb(0, false));
+    assert!(ctrl.drives[0].motor_on);
+    ctrl.write_prb(drive_select_prb(0, true));
+    assert!(ctrl.drives[0].motor_on);
+
+    // Stopping the motor needs the same dance with MTR high on both sides
+    // of the select edge.
+    ctrl.write_prb(drive_deselect_prb(false));
     assert!(ctrl.drives[0].motor_on);
     ctrl.write_prb(drive_select_prb(0, false));
     assert!(!ctrl.drives[0].motor_on);
+    // ...and dropping MTR while selected does not restart it.
     ctrl.write_prb(drive_select_prb(0, true));
+    assert!(!ctrl.drives[0].motor_on);
+}
+
+#[test]
+fn internal_df0_motor_survives_prb_shadow_restore_with_mtr_high() {
+    // A trackloader's motor-on routine: deselect all with MTR as it was
+    // ($F9), select DF0 with MTR low ($71, the latching edge), then write
+    // back its stale PRB shadow ($F1: still selected, MTR high) before
+    // polling CIA-A /RDY. The drive must keep spinning and report ready
+    // once up to speed.
+    let mut ctrl = FloppyController::default();
+    ctrl.insert_disk_image_bytes(0, vec![0; ADF_SIZE], PathBuf::from("spooky.adf"), true)
+        .unwrap();
+
+    ctrl.write_prb(0xF9);
+    assert!(!ctrl.drives[0].motor_on);
+    ctrl.write_prb(0x71);
     assert!(ctrl.drives[0].motor_on);
+    ctrl.write_prb(0xF1);
+    assert!(ctrl.drives[0].motor_on);
+
+    assert_ne!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
+    ctrl.tick(MOTOR_READY_CCK, 0, &mut []);
+    assert_eq!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
+}
+
+#[test]
+fn internal_df0_motor_starts_when_sel_and_mtr_drop_in_one_write() {
+    // Both lines fall in the same CIA write: the latch sees MTR low on the
+    // far side of its clock edge and the motor starts. Stopping it in one
+    // write (MTR rising with the select edge) does not work: the latch saw
+    // MTR low before the edge.
+    let mut ctrl = FloppyController::default();
+
+    ctrl.write_prb(0x77);
+    assert!(ctrl.drives[0].motor_on);
+    ctrl.write_prb(0x7F);
+    assert!(ctrl.drives[0].motor_on);
+    ctrl.write_prb(0xF7);
+    assert!(ctrl.drives[0].motor_on);
+    ctrl.write_prb(0xFF);
+    ctrl.write_prb(0xF7);
+    assert!(!ctrl.drives[0].motor_on);
+}
+
+#[test]
+fn internal_df0_rdy_mirrors_track0_while_motor_is_off() {
+    // The internal mechanism has no drive-ID circuit: with the motor off its
+    // /RDY output follows the /TRK0 sensor, media or not. With the motor on
+    // it is the spun-up platter, whatever the cylinder.
+    let mut ctrl = FloppyController::default();
+    ctrl.insert_disk_image_bytes(0, vec![0; ADF_SIZE], PathBuf::from("trk0.adf"), true)
+        .unwrap();
+    let selected_off = !CIAB_DSKSEL0;
+    let selected_on = selected_off & !CIAB_DSKMOTOR;
+
+    ctrl.write_prb(selected_off);
+    assert_eq!(ctrl.cia_a_status_bits() & CIAA_DSKTRACK0, 0);
+    assert_eq!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
+
+    // Step inward: off cylinder 0, /RDY goes high with the motor still off.
+    ctrl.write_prb(selected_off & !CIAB_DSKDIREC);
+    ctrl.write_prb(selected_off & !CIAB_DSKDIREC & !CIAB_DSKSTEP);
+    ctrl.write_prb(selected_off);
+    assert_ne!(ctrl.cia_a_status_bits() & CIAA_DSKTRACK0, 0);
+    assert_ne!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
+
+    // Motor on: /RDY is the platter, asserted once up to speed.
+    ctrl.write_prb(0xFF);
+    ctrl.write_prb(selected_on);
+    assert_ne!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
+    ctrl.tick(MOTOR_READY_CCK, 0, &mut []);
+    assert_eq!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
+
+    // Motor off again at cylinder 1: high. Step back out to 0: low again.
+    ctrl.write_prb(0xFF);
+    ctrl.write_prb(selected_off);
+    assert_ne!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
+    ctrl.write_prb(selected_off & !CIAB_DSKSTEP);
+    ctrl.write_prb(selected_off);
+    assert_eq!(ctrl.cia_a_status_bits() & CIAA_DSKTRACK0, 0);
+    assert_eq!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
+
+    // An external unit keeps answering with its ID bit instead.
+    ctrl.set_connected_drives([true, true, false, false]);
+    ctrl.write_prb(0xFF);
+    ctrl.write_prb(drive_select_prb(1, false));
+    assert_ne!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
+}
+
+/// The reference the sync index must reproduce: walk the revolution one
+/// cell at a time from `from` and report how many cells until a 16-bit
+/// window equal to `sync` has been read in full.
+fn bits_until_sync_by_scan(rev: &TrackRev, from: usize, sync: u16) -> Option<usize> {
+    if rev.bit_len == 0 {
+        return None;
+    }
+    let mut window = 0u16;
+    for i in 0..15 {
+        let b = (from + rev.bit_len * 16 - 15 + i) % rev.bit_len;
+        window = (window << 1) | u16::from(rev.bit(b));
+    }
+    for step in 0..rev.bit_len {
+        window = (window << 1) | u16::from(rev.bit((from + step) % rev.bit_len));
+        if window == sync {
+            return Some(step + 1);
+        }
+    }
+    None
+}
+
+#[test]
+fn sync_index_matches_cell_scan_across_wrap_and_sync_changes() {
+    // Deterministic pseudo-random revolutions, including a bit length that is
+    // not a word multiple so windows straddle the wrap, and sync words that
+    // never occur.
+    let mut seed = 0x2545_F491_u32;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed
+    };
+    for &(words, bit_len) in &[(64usize, 1024usize), (40, 633), (2, 32), (1, 16), (3, 41)] {
+        let data: Vec<u16> = (0..words)
+            .map(|_| {
+                if next() % 5 == 0 {
+                    0x4489
+                } else {
+                    next() as u16
+                }
+            })
+            .collect();
+        let rev = TrackRev::new(data, bit_len, 64);
+        for &sync in &[0x4489u16, 0x4489 ^ 0x0100, 0xFFFF, 0x0000, 0x5224] {
+            for from in 0..bit_len {
+                assert_eq!(
+                    rev.bits_until_sync(from, sync),
+                    bits_until_sync_by_scan(&rev, from, sync),
+                    "words={words} bit_len={bit_len} sync={sync:#06x} from={from}"
+                );
+            }
+        }
+    }
+
+    // A standard AmigaDOS track: the head parked anywhere finds the next
+    // $4489 exactly where the scan does, and an offset that is many
+    // revolutions ahead is folded like the scan folds it.
+    let rev = TrackRev::new(encode_adf_track(0, &vec![0u8; ADF_SIZE]), 6334 * 16, 64);
+    for from in [
+        0usize,
+        1,
+        15,
+        16,
+        17,
+        5000,
+        6334 * 16 - 1,
+        6334 * 16 * 3 + 7,
+    ] {
+        assert_eq!(
+            rev.bits_until_sync(from, 0x4489),
+            bits_until_sync_by_scan(&rev, from % rev.bit_len, 0x4489),
+            "from={from}"
+        );
+    }
+    assert!(rev.bits_until_sync(0, 0x4489).is_some());
+    assert_eq!(rev.bits_until_sync(0, 0x1234), None);
 }
 
 #[test]
@@ -1115,19 +1311,24 @@ fn dskbytr_byte_valid_tracks_new_rotation_words() -> Result<()> {
     ctrl.tick(MOTOR_READY_CCK, 0, &mut []);
 
     ctrl.ensure_track(0, 0);
-    let first_word = ctrl.drives[0].cached_words()[ctrl.drives[0].rotation_word_index()];
+    ctrl.park_head_at_word(0, 0);
+    let first_word = ctrl.drives[0].cached_words()[0];
     ctrl.write_dsksync(first_word);
 
-    let first = ctrl.read_dskbytr(0, 0);
+    // A whole word shifted in: its low byte is ready and the comparator
+    // sees the word DSKSYNC was set to.
+    ctrl.tick(ctrl.word_cck(), 0, &mut []);
+    let first = ctrl.read_dskbytr(0);
     assert_ne!(first & DSKBYT, 0);
     assert_ne!(first & WORDEQUAL, 0);
 
-    let second = ctrl.read_dskbytr(0, 0);
+    // The read resets DSKBYT; WORDEQUAL holds while no cell has moved.
+    let second = ctrl.read_dskbytr(0);
     assert_eq!(second & DSKBYT, 0);
     assert_ne!(second & WORDEQUAL, 0);
 
     ctrl.tick(ctrl.word_cck(), 0, &mut []);
-    let third = ctrl.read_dskbytr(0, 0);
+    let third = ctrl.read_dskbytr(0);
     assert_ne!(third & DSKBYT, 0);
 
     let _ = fs::remove_file(path);
@@ -1156,31 +1357,101 @@ fn dskbytr_reports_current_disk_byte_phase() -> Result<()> {
     ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
     ctrl.tick(MOTOR_READY_CCK, 0, &mut []);
     ctrl.ensure_track(0, 0);
-    ctrl.drives[0].set_rotation_word(0);
-    ctrl.drives[0].rotation_acc_cck = 0;
+    ctrl.park_head_at_word(0, 0);
     let word_cck = FloppyController::word_cck_for_track_words(raw_words.len());
     let half_word_cck = word_cck.div_ceil(2);
 
-    let high = ctrl.read_dskbytr(0, 0);
+    // Nothing has completed at the word boundary itself: a byte is ready
+    // once its eight cells have shifted through.
+    assert_eq!(ctrl.read_dskbytr(0) & DSKBYT, 0);
+
+    ctrl.tick(half_word_cck, 0, &mut []);
+    let high = ctrl.read_dskbytr(0);
     assert_ne!(high & DSKBYT, 0);
     assert_eq!(high & 0x00FF, 0x12);
 
-    let repeat_high = ctrl.read_dskbytr(0, 0);
+    // The byte stays readable, without DSKBYT, until the next completes.
+    let repeat_high = ctrl.read_dskbytr(0);
     assert_eq!(repeat_high & DSKBYT, 0);
     assert_eq!(repeat_high & 0x00FF, 0x12);
 
-    ctrl.tick(half_word_cck, 0, &mut []);
-    let low = ctrl.read_dskbytr(0, 0);
+    ctrl.tick(word_cck - half_word_cck, 0, &mut []);
+    let low = ctrl.read_dskbytr(0);
     assert_ne!(low & DSKBYT, 0);
     assert_eq!(low & 0x00FF, 0x34);
 
-    ctrl.tick(word_cck - half_word_cck, 0, &mut []);
-    let next_high = ctrl.read_dskbytr(0, 0);
+    ctrl.tick(half_word_cck, 0, &mut []);
+    let next_high = ctrl.read_dskbytr(0);
     assert_ne!(next_high & DSKBYT, 0);
     assert_eq!(next_high & 0x00FF, 0xAB);
 
     let _ = fs::remove_file(path);
     Ok(())
+}
+
+/// A mastered cell-rate profile scales each run's cells by its per-mille
+/// weight: the cells of a sector written 5% slow take 5% longer to pass the
+/// head, so the revolution and everything timed against it stretch with it.
+#[test]
+fn track_rev_density_profile_scales_the_cells_it_covers() {
+    let spans = [
+        DensitySpan {
+            start_bit: 16,
+            permille: 500,
+        },
+        DensitySpan {
+            start_bit: 32,
+            permille: 1000,
+        },
+    ];
+    let rev = TrackRev::with_density(vec![0; 4], 64, 1600, &spans);
+
+    // Nominal cells are 100 cck; the run from bit 16 to 32 halves them.
+    assert_eq!(rev.cell_cck(0), 100);
+    assert_eq!(rev.cell_cck(15), 100);
+    assert_eq!(rev.cell_cck(16), 50);
+    assert_eq!(rev.cell_cck(31), 50);
+    assert_eq!(rev.cell_cck(32), 100);
+    assert_eq!(rev.prefix_cck(16), 1600);
+    assert_eq!(rev.prefix_cck(32), 2400);
+    assert_eq!(rev.rev_cck(), 5600);
+
+    // A profile that is nominal throughout is the uniform revolution.
+    let uniform = TrackRev::with_density(
+        vec![0; 4],
+        64,
+        1600,
+        &[DensitySpan {
+            start_bit: 0,
+            permille: 1000,
+        }],
+    );
+    assert!(uniform.density.is_empty());
+    assert_eq!(uniform.prefix_cck(16), 1600);
+    assert_eq!(uniform.rev_cck(), 6400);
+}
+
+/// A raw track image carrying a density profile hands it to every revolution
+/// it is split into, and a track without one stays uniform.
+#[test]
+fn raw_mfm_track_stream_carries_the_density_profile() {
+    let words = vec![0u16; 8];
+    let spans = [DensitySpan {
+        start_bit: 32,
+        permille: 1050,
+    }];
+    let stream = raw_mfm_track_stream(&words, 64, 2, false, &spans);
+    assert_eq!(stream.revs.len(), 2);
+    for rev in &stream.revs {
+        assert_eq!(rev.cell_cck(0), rev.word_cck / 16);
+        assert!(rev.rev_cck() > u64::from(rev.word_cck) * 4);
+    }
+
+    let uniform = raw_mfm_track_stream(&words, 64, 2, false, &[]);
+    for rev in &uniform.revs {
+        assert!(rev.density.is_empty());
+        assert_eq!(rev.rev_cck(), u64::from(rev.word_cck) * 4);
+    }
 }
 
 #[test]
@@ -1360,22 +1631,38 @@ fn dskbytr_wordequal_tracks_current_word() -> Result<()> {
     ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
     ctrl.tick(MOTOR_READY_CCK, 0, &mut []);
     ctrl.ensure_track(0, 0);
-    ctrl.drives[0].set_rotation_word(0);
-    ctrl.drives[0].rotation_acc_cck = 0;
-    ctrl.write_dsksync(raw_words[0]);
+    ctrl.park_head_at_word(0, 0);
+    let word_cck = FloppyController::word_cck_for_track_words(raw_words.len());
 
-    let first = ctrl.read_dskbytr(0, 0);
-    assert_ne!(first & WORDEQUAL, 0);
-    let repeat = ctrl.read_dskbytr(0, 0);
+    // WORDEQUAL is the comparator's live level. Writing DSKSYNC while the
+    // head is inside a matching word raises the interrupt, but the shift
+    // register has not seen the word's last cell yet, so the level is low.
+    assert!(ctrl.write_dsksync(raw_words[0]));
+    assert!(ctrl.take_sync_irq());
+    assert_eq!(ctrl.read_dskbytr(0) & WORDEQUAL, 0);
+
+    // The word's last cell completes the match: the level is high for that
+    // one cell, and reading the register does not clear it.
+    ctrl.tick(word_cck, 0, &mut []);
+    let matched = ctrl.read_dskbytr(0);
+    assert_ne!(matched & WORDEQUAL, 0);
+    let repeat = ctrl.read_dskbytr(0);
     assert_ne!(repeat & WORDEQUAL, 0);
 
-    ctrl.tick(
-        FloppyController::word_cck_for_track_words(raw_words.len()),
-        0,
-        &mut [],
-    );
-    let next = ctrl.read_dskbytr(0, 0);
-    assert_eq!(next & WORDEQUAL, 0);
+    // The next cell shifts the match out, whether or not anyone read it in
+    // time: a poll that arrives late sees nothing, as on the hardware.
+    ctrl.tick_cells(0, 1, 0);
+    assert_eq!(ctrl.read_dskbytr(0) & WORDEQUAL, 0);
+    // The second word completes fifteen cells on; sixteen carry the match
+    // through and out again before anyone reads it.
+    ctrl.write_dsksync(raw_words[1]);
+    ctrl.tick_cells(0, 16, 0);
+    assert_eq!(ctrl.read_dskbytr(0) & WORDEQUAL, 0);
+    // A revolution later the poll lands on the matching cell itself.
+    ctrl.tick_cells(0, 31, 0);
+    assert_ne!(ctrl.read_dskbytr(0) & WORDEQUAL, 0);
+    ctrl.tick_cells(0, 1, 0);
+    assert_eq!(ctrl.read_dskbytr(0) & WORDEQUAL, 0);
 
     let _ = fs::remove_file(path);
     Ok(())
@@ -1403,10 +1690,15 @@ fn msbsync_dskbytr_keeps_wordequal_without_stream_irq() -> Result<()> {
     ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
     ctrl.tick(MOTOR_READY_CCK, 0, &mut []);
     ctrl.ensure_track(0, 0);
-    ctrl.drives[0].set_rotation_word(0);
-    ctrl.drives[0].rotation_acc_cck = 0;
+    ctrl.park_head_at_word(0, 0);
+    ctrl.set_adkcon(ADK_MSBSYNC);
+    ctrl.tick(
+        FloppyController::word_cck_for_track_words(raw_words.len()),
+        0,
+        &mut [],
+    );
 
-    let first = ctrl.read_dskbytr(0, ADK_MSBSYNC);
+    let first = ctrl.read_dskbytr(0);
     assert_ne!(first & DSKBYT, 0);
     assert_ne!(first & WORDEQUAL, 0);
     assert!(!ctrl.take_sync_irq());
@@ -1437,14 +1729,20 @@ fn write_dma_dskbytr_keeps_wordequal_without_stream_irq() -> Result<()> {
     ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
     ctrl.tick(MOTOR_READY_CCK, 0, &mut []);
     ctrl.ensure_track(0, 0);
-    ctrl.drives[0].set_rotation_word(0);
-    ctrl.drives[0].rotation_acc_cck = 0;
+    ctrl.park_head_at_word(0, 0);
+    // The sync word shifts in with WORDSYNC clear: the comparator level
+    // rises, but it interrupts nothing.
+    ctrl.tick(
+        FloppyController::word_cck_for_track_words(raw_words.len()),
+        0,
+        &mut [],
+    );
 
     let len = DSKLEN_DMAEN | DSKLEN_WRITE | 1;
     assert!(!ctrl.write_dsklen(len, 0));
     assert!(!ctrl.write_dsklen(len, 0));
 
-    let status = ctrl.read_dskbytr(DMACON_DMAEN | DMACON_DISK, 0);
+    let status = ctrl.read_dskbytr(DMACON_DMAEN | DMACON_DISK);
     assert_ne!(status & DSKBYT, 0);
     assert_ne!(status & DMAON, 0);
     assert_ne!(status & DISKWRITE, 0);
@@ -1458,7 +1756,7 @@ fn write_dma_dskbytr_keeps_wordequal_without_stream_irq() -> Result<()> {
 
 #[test]
 fn dskbytr_write_mode_without_dma_suppresses_byte_loads() -> Result<()> {
-    let raw_words = [0x1234, DEFAULT_DSKSYNC];
+    let raw_words = [0x1234, DEFAULT_DSKSYNC, 0xABCD];
     let path = temp_ext2_raw(&raw_words)?;
     let cfg = FloppyConfig {
         bridges: std::array::from_fn(|_| None),
@@ -1478,29 +1776,37 @@ fn dskbytr_write_mode_without_dma_suppresses_byte_loads() -> Result<()> {
     ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
     ctrl.tick(MOTOR_READY_CCK, 0, &mut []);
     ctrl.ensure_track(0, 0);
-    ctrl.drives[0].set_rotation_word(0);
-    ctrl.drives[0].rotation_acc_cck = 0;
+    ctrl.park_head_at_word(0, 0);
+    ctrl.set_adkcon(ADK_WORDSYNC);
+    let word_cck = FloppyController::word_cck_for_track_words(raw_words.len());
+    let half_word_cck = word_cck.div_ceil(2);
 
-    let first = ctrl.read_dskbytr(0, 0);
+    ctrl.tick(half_word_cck, 0, &mut []);
+    let first = ctrl.read_dskbytr(0);
     assert_ne!(first & DSKBYT, 0);
     assert_eq!(first & 0x00FF, 0x12);
 
     assert!(!ctrl.write_dsksync(DEFAULT_DSKSYNC));
     assert!(!ctrl.write_dsklen(DSKLEN_WRITE, 0));
-    let word_cck = FloppyController::word_cck_for_track_words(raw_words.len());
+    // Through the rest of the first word and the whole sync word: the
+    // comparator matches and interrupts, but the byte register does not
+    // load while DSKLEN holds WRITE with the DMA disarmed.
+    ctrl.tick(word_cck - half_word_cck, 0, &mut []);
     ctrl.tick(word_cck, 0, &mut []);
 
-    let write_mode = ctrl.read_dskbytr(0, 0);
+    let write_mode = ctrl.read_dskbytr(0);
     assert_ne!(write_mode & DISKWRITE, 0);
     assert_eq!(write_mode & DSKBYT, 0);
     assert_ne!(write_mode & WORDEQUAL, 0);
     assert_eq!(write_mode & 0x00FF, 0x12);
     assert!(ctrl.take_sync_irq());
 
+    // Loads resume with the next byte to complete once the write bit clears.
     assert!(!ctrl.write_dsklen(0, 0));
-    let resumed = ctrl.read_dskbytr(0, 0);
+    ctrl.tick(half_word_cck, 0, &mut []);
+    let resumed = ctrl.read_dskbytr(0);
     assert_ne!(resumed & DSKBYT, 0);
-    assert_eq!(resumed & 0x00FF, 0x44);
+    assert_eq!(resumed & 0x00FF, 0xAB);
 
     let _ = fs::remove_file(path);
     Ok(())
@@ -1531,11 +1837,11 @@ fn dskbytr_dmaon_waits_for_double_dsklen_arm() -> Result<()> {
     let len = DSKLEN_DMAEN | 1;
     let dmacon = DMACON_DMAEN | DMACON_DISK;
     assert!(!ctrl.write_dsklen(len, 0));
-    assert_eq!(ctrl.read_dskbytr(dmacon, 0) & DMAON, 0);
+    assert_eq!(ctrl.read_dskbytr(dmacon) & DMAON, 0);
 
     assert!(!ctrl.write_dsklen(len, 0));
-    assert_ne!(ctrl.read_dskbytr(dmacon, 0) & DMAON, 0);
-    assert_eq!(ctrl.read_dskbytr(0, 0) & DMAON, 0);
+    assert_ne!(ctrl.read_dskbytr(dmacon) & DMAON, 0);
+    assert_eq!(ctrl.read_dskbytr(0) & DMAON, 0);
 
     let _ = fs::remove_file(path);
     Ok(())
@@ -1569,7 +1875,7 @@ fn dskbytr_dmaon_stays_set_while_armed_dma_waits_for_the_motor() -> Result<()> {
     let dmacon = DMACON_DMAEN | DMACON_DISK;
     assert!(!ctrl.write_dsklen(len, 0));
     assert!(!ctrl.write_dsklen(len, 0));
-    assert_ne!(ctrl.read_dskbytr(dmacon, 0) & DMAON, 0);
+    assert_ne!(ctrl.read_dskbytr(dmacon) & DMAON, 0);
     assert_eq!(ctrl.next_completion_cck(dmacon), None);
     let mut chip_ram = vec![0u8; 4];
     assert!(!ctrl.tick(MOTOR_READY_CCK * 4, dmacon, &mut chip_ram));
@@ -1595,7 +1901,7 @@ fn read_dma_with_no_media_arms_and_pends_until_media_arrives() -> Result<()> {
     let dmacon = DMACON_DMAEN | DMACON_DISK;
     assert!(!ctrl.write_dsklen(len, 0));
     assert!(!ctrl.write_dsklen(len, 0));
-    assert_ne!(ctrl.read_dskbytr(dmacon, 0) & DMAON, 0);
+    assert_ne!(ctrl.read_dskbytr(dmacon) & DMAON, 0);
     assert_eq!(ctrl.next_completion_cck(dmacon), None);
 
     // Several revolutions of waiting deliver nothing.
@@ -1655,8 +1961,10 @@ fn read_dma_with_motor_off_pends_until_the_motor_starts() -> Result<()> {
     assert!(!ctrl.tick(MOTOR_READY_CCK * 3, dmacon, &mut chip_ram));
     assert_eq!(read_chip_word(&chip_ram, 0), 0);
 
-    // Starting the motor spins the platter up and the pending transfer
-    // completes with the track data.
+    // Starting the motor (MTR low while deselected, latched by the select
+    // edge) spins the platter up and the pending transfer completes with
+    // the track data.
+    ctrl.write_prb(!CIAB_DSKMOTOR);
     ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
     let word_cck = FloppyController::word_cck_for_track_words(raw_words.len());
     let mut completed = false;
@@ -1704,7 +2012,7 @@ fn read_dma_started_during_motor_spinup_arms_and_transfers() -> Result<()> {
     assert!(!ctrl.write_dsklen(len, 0));
     let dmacon = DMACON_DMAEN | DMACON_DISK;
 
-    assert_ne!(ctrl.read_dskbytr(dmacon, 0) & DMAON, 0);
+    assert_ne!(ctrl.read_dskbytr(dmacon) & DMAON, 0);
     assert!(ctrl.tick(
         FloppyController::word_cck_for_track_words(raw_words.len()),
         dmacon,
@@ -2016,7 +2324,7 @@ fn motor_off_blocks_read_dma_until_next_spinup() -> Result<()> {
     assert_eq!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
     ctrl.write_prb(0xFF);
     ctrl.write_prb(selected_motor_off);
-    assert_ne!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
+    assert!(!ctrl.drives[0].motor_on);
 
     ctrl.set_dskpt_low(0);
     let len = DSKLEN_DMAEN | 1;
@@ -2025,7 +2333,7 @@ fn motor_off_blocks_read_dma_until_next_spinup() -> Result<()> {
     // pends: no cells pass under the head, so nothing completes.
     assert!(!ctrl.write_dsklen(len, 0));
     assert!(!ctrl.write_dsklen(len, 0));
-    assert_ne!(ctrl.read_dskbytr(dmacon, 0) & DMAON, 0);
+    assert_ne!(ctrl.read_dskbytr(dmacon) & DMAON, 0);
 
     // Leave the motor off long enough for the platter to spin down fully,
     // so the drive must spin back up before data can flow.
@@ -2110,12 +2418,143 @@ fn reset_dsksync_defaults_to_amigados_mfm_sync_word() -> Result<()> {
     ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
     ctrl.tick(MOTOR_READY_CCK, 0, &mut []);
     ctrl.ensure_track(0, 0);
-    ctrl.drives[0].set_rotation_word(0);
-    ctrl.drives[0].rotation_acc_cck = 0;
+    ctrl.park_head_at_word(0, 0);
+    ctrl.set_adkcon(ADK_WORDSYNC);
+    ctrl.tick(
+        FloppyController::word_cck_for_track_words(raw_words.len()),
+        0,
+        &mut [],
+    );
 
-    let status = ctrl.read_dskbytr(0, 0);
+    let status = ctrl.read_dskbytr(0);
     assert_ne!(status & WORDEQUAL, 0);
     assert!(ctrl.take_sync_irq());
+
+    let _ = fs::remove_file(path);
+    Ok(())
+}
+
+/// A raw track whose sync word sits one cell off the word grid, followed
+/// by known data: `0 | 8911 | 2A91 4511 1445 | 0101...`. That is the shape
+/// of an IPF or flux track (Copylock's key track on Lemmings has its
+/// per-sector sync at bit phase 1), where nothing keeps syncs word-aligned.
+fn off_grid_sync_track() -> Vec<u16> {
+    let mut bits = vec![false];
+    for word in [0x8911u16, 0x2A91, 0x4511, 0x1445] {
+        bits.extend((0..16).rev().map(|shift| word & (1 << shift) != 0));
+    }
+    while bits.len() < 128 {
+        bits.push(bits.len() % 2 == 1);
+    }
+    bits.chunks(16)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .fold(0u16, |word, &bit| (word << 1) | u16::from(bit))
+        })
+        .collect()
+}
+
+/// Paula frames DSKBYTR with the bit counter a WORDSYNC match resets, so a
+/// reader that waits for WORDEQUAL and then collects bytes gets them from
+/// the end of the sync word, not from the track's byte grid. Rob Northen's
+/// Copylock reads its key sector this way and rejects the read unless the
+/// first two bytes are the MFM of the sector's first data byte.
+#[test]
+fn dskbytr_bytes_frame_from_the_sync_at_any_bit_phase() -> Result<()> {
+    let raw_words = off_grid_sync_track();
+    let path = temp_ext2_raw(&raw_words)?;
+    let cfg = FloppyConfig {
+        bridges: std::array::from_fn(|_| None),
+        speed: 100,
+        drives: [
+            Some(FloppyDriveConfig {
+                path: path.clone(),
+                write_protected: true,
+            }),
+            None,
+            None,
+            None,
+        ],
+    };
+    let mut ctrl = FloppyController::from_config(&cfg)?;
+    ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
+    ctrl.tick(MOTOR_READY_CCK, 0, &mut []);
+    ctrl.ensure_track(0, 0);
+    ctrl.park_head_at_word(0, 0);
+    ctrl.set_adkcon(ADK_WORDSYNC);
+    assert!(!ctrl.write_dsksync(0x8911));
+
+    // Sixteen cells in, the shifter holds the grid's first word, which is
+    // not the sync: the comparator stays quiet.
+    assert!(!ctrl.tick_cells(0, 16, 0));
+    assert_eq!(ctrl.read_dskbytr(0) & WORDEQUAL, 0);
+    assert!(!ctrl.take_sync_irq());
+
+    // One more cell completes the sync word.
+    assert!(!ctrl.tick_cells(0, 1, 0));
+    assert_ne!(ctrl.read_dskbytr(0) & WORDEQUAL, 0);
+    assert!(ctrl.take_sync_irq());
+
+    // The bytes that follow are framed from the end of the sync.
+    for expected in [0x2Au16, 0x91, 0x45, 0x11, 0x14, 0x45] {
+        ctrl.tick_cells(0, 8, 0);
+        let status = ctrl.read_dskbytr(0);
+        assert_ne!(status & DSKBYT, 0, "DSKBYT for byte {expected:#04X}");
+        assert_eq!(status & 0x00FF, expected);
+        assert_eq!(ctrl.read_dskbytr(0) & DSKBYT, 0);
+    }
+
+    let _ = fs::remove_file(path);
+    Ok(())
+}
+
+/// Copylock's idiom: it arms a zero-length read (DSKLEN=$8000 twice), which
+/// completes on arming with DSKBLK and leaves no transfer behind, then waits
+/// for WORDEQUAL from the free-running comparator and polls the key sector's
+/// bytes through DSKBYTR -- so the framing reset on that match must not
+/// depend on a transfer being in flight.
+#[test]
+fn zero_length_arm_then_polled_bytes_frame_from_the_sync() -> Result<()> {
+    let raw_words = off_grid_sync_track();
+    let path = temp_ext2_raw(&raw_words)?;
+    let cfg = FloppyConfig {
+        bridges: std::array::from_fn(|_| None),
+        speed: 100,
+        drives: [
+            Some(FloppyDriveConfig {
+                path: path.clone(),
+                write_protected: true,
+            }),
+            None,
+            None,
+            None,
+        ],
+    };
+    let mut ctrl = FloppyController::from_config(&cfg)?;
+    ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
+    ctrl.tick(MOTOR_READY_CCK, 0, &mut []);
+    ctrl.ensure_track(0, 0);
+    ctrl.park_head_at_word(0, 0);
+    ctrl.set_adkcon(ADK_WORDSYNC);
+    assert!(!ctrl.write_dsksync(0x8911));
+    assert!(!ctrl.write_dsklen(DSKLEN_DMAEN, ADK_WORDSYNC));
+    // The zero-length transfer completes on arming: DSKBLK, no DMA pending.
+    assert!(ctrl.write_dsklen(DSKLEN_DMAEN, ADK_WORDSYNC));
+    let dmacon = DMACON_DMAEN | DMACON_DISK;
+    assert_eq!(ctrl.read_dskbytr(dmacon) & DMAON, 0);
+
+    assert!(!ctrl.tick_cells(0, 16, dmacon));
+    assert_eq!(ctrl.read_dskbytr(dmacon) & WORDEQUAL, 0);
+    assert!(!ctrl.tick_cells(0, 1, dmacon));
+    assert_ne!(ctrl.read_dskbytr(dmacon) & WORDEQUAL, 0);
+
+    for expected in [0x2Au16, 0x91] {
+        ctrl.tick_cells(0, 8, dmacon);
+        let status = ctrl.read_dskbytr(dmacon);
+        assert_ne!(status & DSKBYT, 0, "DSKBYT for byte {expected:#04X}");
+        assert_eq!(status & 0x00FF, expected);
+    }
 
     let _ = fs::remove_file(path);
     Ok(())
@@ -2517,11 +2956,17 @@ fn active_read_dma_dsksync_change_updates_dskbytr_wordequal() -> Result<()> {
     assert_eq!(read_chip_word(&chip_ram, 0), raw_words[0]);
     assert!(!ctrl.take_sync_irq());
 
+    // The comparator is live: the new sync word has not shifted in yet...
     assert!(ctrl.write_dsksync(raw_words[1]));
-    let status = ctrl.read_dskbytr(dmacon, 0);
+    let status = ctrl.read_dskbytr(dmacon);
     assert_ne!(status & DMAON, 0);
-    assert_ne!(status & WORDEQUAL, 0);
+    assert_eq!(status & WORDEQUAL, 0);
     assert!(ctrl.take_sync_irq());
+
+    // ...and WORDEQUAL reports it once the cell that completes it is in.
+    assert!(!ctrl.tick(word_cck, dmacon, &mut chip_ram));
+    assert_eq!(read_chip_word(&chip_ram, 2), raw_words[1]);
+    assert_ne!(ctrl.read_dskbytr(dmacon) & WORDEQUAL, 0);
 
     let _ = fs::remove_file(path);
     Ok(())
@@ -3778,7 +4223,7 @@ fn cpu_dskdat_write_without_dma_overlays_raw_track() -> Result<()> {
     ctrl.drives[0].rotation_acc_cck = 0;
 
     assert!(!ctrl.write_dsklen(DSKLEN_WRITE | 1, 0));
-    let status = ctrl.read_dskbytr(0, 0);
+    let status = ctrl.read_dskbytr(0);
     assert_eq!(status & DMAON, 0);
     assert_ne!(status & DISKWRITE, 0);
 
