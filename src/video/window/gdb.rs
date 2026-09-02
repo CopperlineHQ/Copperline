@@ -240,6 +240,19 @@ impl GdbBreaks {
     }
 }
 
+/// Whether `packet` moves the machine's position rather than reading or
+/// resuming it in place: reverse step/continue, `sADDR` / `cADDR` (the
+/// core writes the PC before returning the resume), and a write to the
+/// PC register (regnum 17, `P11=`). Bare `s`/`c`, memory writes and other
+/// register writes are in-place, like the control protocol's own
+/// `allowed_while_running` set.
+fn repositions_machine(packet: &str) -> bool {
+    packet == "bs"
+        || packet == "bc"
+        || (packet.len() > 1 && (packet.starts_with('s') || packet.starts_with('c')))
+        || packet.starts_with("P11=")
+}
+
 /// The decoded text of a qRcmd (monitor) packet, when it is one.
 fn decode_qrcmd(packet: &str) -> Option<String> {
     let hex = packet.strip_prefix("qRcmd,")?;
@@ -379,10 +392,11 @@ impl App {
                 return;
             }
         }
-        // Reverse execution repositions the timeline; refused while a
-        // control client's resume is outstanding, as the control protocol
-        // refuses its own reverse verbs while a GDB continue runs.
-        if (packet == "bs" || packet == "bc") && self.remote_resume_pending() {
+        // Packets that reposition the machine -- reverse execution, a
+        // resume at an address, a PC write -- are refused while a control
+        // client's resume is outstanding, as the control protocol refuses
+        // its own repositioning verbs while a GDB continue runs.
+        if repositions_machine(packet) && self.remote_resume_pending() {
             if let Some(g) = self.gdb.as_mut() {
                 g.core.console.push(
                     "machine is running (a control client resume is pending); pause first\n"

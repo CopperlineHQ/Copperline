@@ -384,6 +384,7 @@ impl App {
             };
         }
         let was_paced = self.emu.paced();
+        let holds_before = self.warp_holds;
         let mut cancelled = false;
         // The holds still in force after a release that could not re-pace
         // the machine because another holder remains.
@@ -457,10 +458,16 @@ impl App {
                 _ => {}
             }
         }
+        // A control client hears of any change it did not make itself:
+        // pacing flipping, or the holder set changing under an unchanged
+        // pacing (a second holder joining, one of two releasing), so its
+        // view of `holders` never goes stale.
         #[cfg(feature = "control")]
-        if changed && source != WarpSource::Control {
+        if (changed || self.warp_holds != holds_before) && source != WarpSource::Control {
             self.control_notify_warp(source.label());
         }
+        #[cfg(not(feature = "control"))]
+        let _ = holds_before;
         self.request_redraw();
         WarpOutcome { changed, note }
     }

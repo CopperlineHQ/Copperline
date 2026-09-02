@@ -11110,6 +11110,7 @@ mod gdb_and_control {
         let far = d.app.emu.bus().emulated_frames() + 1000;
         push(&d.ctl_tx, 3, "run_until", json!({"frame": far}));
         d.app.drain_control();
+        let _ = lines(&d.ctl_rx);
         packet(&d.gdb_tx, "bs");
         d.app.drain_gdb();
         let sent = frames(&d.gdb_rx);
@@ -11118,6 +11119,33 @@ mod gdb_and_control {
             sent.iter().any(|f| f.contains(&hex_encode(b"pause first"))),
             "{sent:?}"
         );
+        // So are a resume at an address (the core writes the PC before
+        // handing back the resume) and a PC register write ...
+        let pc = d.app.emu.machine.pc();
+        packet(&d.gdb_tx, &format!("s{pc:x}"));
+        packet(&d.gdb_tx, &format!("c{pc:x}"));
+        packet(&d.gdb_tx, "P11=00001000");
+        d.app.drain_gdb();
+        assert_eq!(
+            frames(&d.gdb_rx)
+                .iter()
+                .filter(|f| *f == &frame("E01"))
+                .count(),
+            3,
+            "sADDR, cADDR and a PC write are all refused"
+        );
+        assert!(!d.app.paused, "the control run is still going");
+        assert_eq!(d.app.emu.machine.pc(), pc, "nothing moved the PC");
+        // ... while a bare step pauses the machine, ending the control
+        // run, and then steps in place.
+        packet(&d.gdb_tx, "s");
+        d.app.drain_gdb();
+        assert!(d.app.paused);
+        let ctl = lines(&d.ctl_rx);
+        assert_eq!(ctl.len(), 1, "{ctl:?}");
+        assert_eq!(ctl[0]["id"], 3);
+        assert_eq!(ctl[0]["result"]["reason"], "pause");
+        assert_eq!(frames(&d.gdb_rx).last(), Some(&frame("T05thread:1;")));
     }
 
     #[test]
@@ -11145,6 +11173,32 @@ mod gdb_and_control {
         let msg = reply(&d.ctl_rx);
         assert_eq!(msg["result"]["source"], "control");
         assert_eq!(msg["result"]["holders"], json!(["control", "gdb"]));
+
+        // A holder joining or leaving without pacing changing still
+        // reaches the control client as event.warp, so its holder list
+        // never goes stale.
+        d.app
+            .set_warp(true, super::super::app_session::WarpSource::Guest);
+        let evs = lines(&d.ctl_rx);
+        let joined = evs
+            .iter()
+            .find(|l| l["method"] == "event.warp")
+            .expect("event.warp for a joining holder");
+        assert_eq!(joined["params"]["on"], true);
+        assert_eq!(joined["params"]["source"], "guest");
+        assert_eq!(
+            joined["params"]["holders"],
+            json!(["control", "gdb", "guest"])
+        );
+        d.app
+            .set_warp(false, super::super::app_session::WarpSource::Guest);
+        let evs = lines(&d.ctl_rx);
+        let left = evs
+            .iter()
+            .find(|l| l["method"] == "event.warp")
+            .expect("event.warp for a leaving holder");
+        assert_eq!(left["params"]["on"], true, "still warping");
+        assert_eq!(left["params"]["holders"], json!(["control", "gdb"]));
 
         // Releasing the control hold leaves the gdb hold in force.
         push(&d.ctl_tx, 2, "warp.set", json!({"on": false}));

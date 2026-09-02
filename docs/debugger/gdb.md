@@ -44,8 +44,11 @@ session:
   naming the reason. Local debugger breakpoints open the internal debugger
   window only when neither client had a resume pending; a plain pause from
   the window just pauses (and completes any outstanding resume).
-- Reverse execution (`reverse-step`, `reverse-continue`) is refused while a
-  control-protocol resume is outstanding: pause first.
+- Anything that repositions the machine -- reverse execution
+  (`reverse-step`, `reverse-continue`), resuming or stepping at an address
+  (`continue ADDR`, `jump`), a write to `pc` -- is refused while a
+  control-protocol resume is outstanding: pause first. Plain `continue`,
+  `stepi`, memory and other register writes stay allowed.
 - `--run` break-at-entry functions identically to headless `--gdb`.
 - `--gdb-gui` cannot be combined with `--gdb`, `--control`, or
   `--benchmark-until`. It can share the window with `--control-gui`: a GDB
