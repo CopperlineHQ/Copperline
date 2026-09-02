@@ -141,6 +141,25 @@ impl App {
             self.activate_tool_control(ToolPanelKind::FrameAnalyzer, control);
             return true;
         }
+        // Resources tab: cursor/page keys scroll the table, so every
+        // registry entry stays reachable however many are registered.
+        if self
+            .frame_analyzer_panel
+            .as_ref()
+            .is_some_and(|panel| panel.tab == ui::AnalyzerTab::Resources)
+        {
+            let rows = match code {
+                KeyCode::ArrowUp => Some(-1isize),
+                KeyCode::ArrowDown => Some(1),
+                KeyCode::PageUp => Some(-(ui::ANALYZER_RESOURCE_ROWS_MAX as isize)),
+                KeyCode::PageDown => Some(ui::ANALYZER_RESOURCE_ROWS_MAX as isize),
+                _ => None,
+            };
+            if let Some(rows) = rows {
+                self.frame_analyzer_scroll_resources(rows);
+                return true;
+            }
+        }
         let delta = match code {
             KeyCode::ArrowLeft => Some((-1, 0)),
             KeyCode::ArrowRight => Some((1, 0)),
@@ -286,6 +305,197 @@ impl App {
             }
         }
         self.request_redraw();
+    }
+
+    /// Select a Resources-tab row. The index maps through the live
+    /// registry (the same order the rows were drawn from); one past the
+    /// end does nothing, and the selection is kept by address so registry
+    /// churn cannot re-point it at a different resource.
+    pub(super) fn frame_analyzer_select_resource(&mut self, index: u8) {
+        let resources = self.emu.uaelib_resources();
+        let scroll = self
+            .frame_analyzer_panel
+            .as_ref()
+            .map(|panel| {
+                panel.resource_scroll.min(
+                    resources
+                        .len()
+                        .saturating_sub(ui::ANALYZER_RESOURCE_ROWS_MAX),
+                )
+            })
+            .unwrap_or(0);
+        let Some(address) = resources
+            .get(scroll + usize::from(index))
+            .map(|resource| resource.address)
+        else {
+            return;
+        };
+        if let Some(panel) = self.frame_analyzer_panel.as_mut() {
+            panel.resource_selected = Some(address);
+        }
+        self.request_redraw();
+    }
+
+    /// Scroll the Resources tab's table window by `rows`, clamped to the
+    /// registry.
+    pub(super) fn frame_analyzer_scroll_resources(&mut self, rows: isize) {
+        let max_scroll = self
+            .emu
+            .uaelib_resources()
+            .len()
+            .saturating_sub(ui::ANALYZER_RESOURCE_ROWS_MAX) as isize;
+        if let Some(panel) = self.frame_analyzer_panel.as_mut() {
+            let scroll = (panel.resource_scroll as isize)
+                .saturating_add(rows)
+                .clamp(0, max_scroll);
+            panel.resource_scroll = scroll as usize;
+        }
+        self.request_redraw();
+    }
+
+    /// The Resources tab's table and the selected resource's preview,
+    /// decoded fresh from guest memory each build so the pane tracks what
+    /// the program draws (crate::video::resource_preview).
+    pub(super) fn build_analyzer_resources_view(
+        &self,
+        panel: &ui::FrameAnalyzerPanel,
+    ) -> ui::AnalyzerResourcesView {
+        use crate::uaelib::{
+            ResourceKind, RESOURCE_FLAG_HAM, RESOURCE_FLAG_INTERLEAVED, RESOURCE_FLAG_MASKED,
+        };
+        use crate::video::resource_preview;
+
+        let resources = self.emu.uaelib_resources();
+        // The scroll clamps to the registry as it is NOW, so a shrunk
+        // registry cannot leave the window past the end.
+        let scroll = panel.resource_scroll.min(
+            resources
+                .len()
+                .saturating_sub(ui::ANALYZER_RESOURCE_ROWS_MAX),
+        );
+        let rows = resources
+            .iter()
+            .skip(scroll)
+            .take(ui::ANALYZER_RESOURCE_ROWS_MAX)
+            .map(|r| {
+                // Character-wise: a byte truncate can panic inside a
+                // multibyte character of a lossily-decoded guest name.
+                let name: String = r.name.chars().take(12).collect();
+                let geometry = match r.kind {
+                    ResourceKind::Bitmap {
+                        width,
+                        height,
+                        planes,
+                    } => {
+                        let mut text = format!("{width}x{height}x{planes}");
+                        if r.flags & RESOURCE_FLAG_INTERLEAVED != 0 {
+                            text.push_str(" ilv");
+                        }
+                        if r.flags & RESOURCE_FLAG_MASKED != 0 {
+                            text.push_str(" msk");
+                        }
+                        if r.flags & RESOURCE_FLAG_HAM != 0 {
+                            text.push_str(" ham");
+                        }
+                        text
+                    }
+                    ResourceKind::Palette { entries } => format!("{entries} entries"),
+                    ResourceKind::Copperlist => String::new(),
+                    ResourceKind::Unknown(code) => format!("type {code}"),
+                };
+                ui::AnalyzerResourceRowView {
+                    text: format!(
+                        "{name:<12} {kind:<10} ${addr:06X}  {size:>8}  {geometry}",
+                        kind = r.kind_name(),
+                        addr = r.address,
+                        size = r.size,
+                    ),
+                    selected: panel.resource_selected == Some(r.address),
+                }
+            })
+            .collect();
+        let hidden_above = scroll;
+        let hidden_below = resources
+            .len()
+            .saturating_sub(scroll + ui::ANALYZER_RESOURCE_ROWS_MAX);
+
+        let detail = panel
+            .resource_selected
+            .and_then(|address| resources.iter().find(|r| r.address == address))
+            .and_then(|r| match r.kind {
+                ResourceKind::Bitmap {
+                    width,
+                    height,
+                    planes,
+                } => {
+                    let len = (r.size.max(1) as usize).min(512 * 1024);
+                    let data = self.emu.machine.debug_read_memory(r.address, len);
+                    let palette = self.analyzer_resource_palette();
+                    Some(ui::AnalyzerResourceDetail::Bitmap(
+                        resource_preview::decode_bitmap(
+                            &data,
+                            width,
+                            height,
+                            planes,
+                            r.flags & RESOURCE_FLAG_INTERLEAVED != 0,
+                            r.flags & RESOURCE_FLAG_MASKED != 0,
+                            r.flags & RESOURCE_FLAG_HAM != 0,
+                            &palette,
+                        ),
+                    ))
+                }
+                ResourceKind::Palette { entries } => {
+                    let data = self
+                        .emu
+                        .machine
+                        .debug_read_memory(r.address, usize::from(entries) * 2);
+                    Some(ui::AnalyzerResourceDetail::Palette {
+                        colours: resource_preview::decode_palette_words(&data, entries),
+                    })
+                }
+                ResourceKind::Copperlist => {
+                    let bus = self.emu.bus();
+                    let lines =
+                        crate::disasm::dump_copper_list(|a| bus.peek_word_any(a), r.address, 12)
+                            .into_iter()
+                            .map(|(addr, text)| format!("{addr:06X}: {text}"))
+                            .collect();
+                    Some(ui::AnalyzerResourceDetail::Copperlist { lines })
+                }
+                ResourceKind::Unknown(_) => None,
+            });
+
+        ui::AnalyzerResourcesView {
+            rows,
+            hidden_above,
+            hidden_below,
+            detail,
+        }
+    }
+
+    /// The palette a bitmap preview is decoded with: the first palette
+    /// the guest registered (read from guest memory), else the live
+    /// Denise palette -- the same source the Video tab shows.
+    fn analyzer_resource_palette(&self) -> Vec<u32> {
+        if let Some((address, entries)) =
+            self.emu
+                .uaelib_resources()
+                .iter()
+                .find_map(|r| match r.kind {
+                    crate::uaelib::ResourceKind::Palette { entries } => Some((r.address, entries)),
+                    _ => None,
+                })
+        {
+            let data = self
+                .emu
+                .machine
+                .debug_read_memory(address, usize::from(entries) * 2);
+            return crate::video::resource_preview::decode_palette_words(&data, entries);
+        }
+        let palette = &self.emu.bus().denise.palette;
+        (0..32)
+            .map(|entry| crate::chipset::denise::rgb24_to_rgba8(palette.rgb24(entry)))
+            .collect()
     }
 
     /// Point the heat map at preset `index`. An index past the end does
@@ -907,6 +1117,8 @@ impl App {
                 if !self.control_complete_pending("double_fault", &message) {
                     self.control_notify_stopped("double_fault", &message);
                 }
+                #[cfg(feature = "gdb")]
+                self.gdb_complete_pending_stop(&message);
                 self.show_osd(message);
                 self.request_redraw();
                 return true;
@@ -923,6 +1135,17 @@ impl App {
         // pauses without commandeering the local debugger window.
         #[cfg(feature = "control")]
         if self.control_completes_stop(&stop) {
+            self.paused = true;
+            self.sync_live_audio_suspension();
+            self.last_debug_stop = Some(message.clone());
+            self.show_osd(message);
+            self.request_redraw();
+            return true;
+        }
+        // Same rule for a pending GDB continue: the stop answers the
+        // client and pauses without opening the local debugger window.
+        #[cfg(feature = "gdb")]
+        if self.gdb_completes_stop(&stop) {
             self.paused = true;
             self.sync_live_audio_suspension();
             self.last_debug_stop = Some(message.clone());
@@ -1294,6 +1517,8 @@ impl App {
         // something to show even on a frame the analyzer captured no trace
         // for: built before the no-trace return and carried by both arms.
         let heat = self.build_analyzer_heat_view(panel);
+        let resources = (panel.tab == ui::AnalyzerTab::Resources)
+            .then(|| self.build_analyzer_resources_view(panel));
         let Some(trace) = bus.frame_bus_trace() else {
             return ui::FrameAnalyzerView {
                 running: !self.paused,
@@ -1302,6 +1527,7 @@ impl App {
                 underlay: None,
                 scrub: false,
                 heat,
+                resources,
             };
         };
         let underlay = (panel.underlay_active() && self.analyzer_underlay_rows > 0).then(|| {
@@ -1381,6 +1607,7 @@ impl App {
             underlay,
             scrub: panel.show_scrub,
             heat,
+            resources,
             trace: Some(ui::AnalyzerTraceView {
                 frame: trace.frame,
                 seconds: trace.seconds,
@@ -1453,6 +1680,20 @@ impl App {
                 age_frames: record.map(|(_, stamp)| (frame as u32).saturating_sub(stamp)),
             }
         });
+        // Registered resources, sorted, so the pane can name what the
+        // guest says lives under a cell (crate::uaelib).
+        let mut resources: Vec<ui::AnalyzerHeatResource> = self
+            .emu
+            .uaelib_resources()
+            .iter()
+            .map(|resource| ui::AnalyzerHeatResource {
+                start: resource.address,
+                end: resource.address.saturating_add(resource.size.max(1)),
+                name: resource.name.clone(),
+                kind: resource.kind_name(),
+            })
+            .collect();
+        resources.sort_by_key(|resource| resource.start);
         Some(ui::AnalyzerHeatView {
             image,
             base: map.base(),
@@ -1461,6 +1702,7 @@ impl App {
             frame,
             census,
             selected,
+            resources,
         })
     }
 

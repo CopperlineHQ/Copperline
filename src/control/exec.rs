@@ -73,7 +73,9 @@ pub enum CoreOp {
     CustomDump,
     /// Dump the live Denise palette: all 256 AGA entries as their high and
     /// low nibble-plane words (debug aid; not part of the stable surface).
-    PaletteDump,
+    PaletteDump {
+        resource: Option<String>,
+    },
     CustomRead {
         off: u16,
     },
@@ -130,6 +132,8 @@ pub enum CoreOp {
     CartridgeFreeze,
     CopperList {
         addr: Option<u32>,
+        /// Start at a guest-registered Copperlist resource instead.
+        resource: Option<String>,
         max: usize,
     },
     LastWriter {
@@ -163,6 +167,12 @@ pub enum CoreOp {
     },
     WaveformStop,
     WaveformStatus,
+    /// Start a per-frame profile capture (docs/debugger/profiling.md).
+    ProfileStart {
+        options: crate::profile::ProfileOptions,
+    },
+    ProfileStop,
+    ProfileStatus,
     StateSave {
         path: PathBuf,
     },
@@ -204,7 +214,7 @@ impl CoreOp {
                 | CoreOp::MemRead { .. }
                 | CoreOp::Disasm { .. }
                 | CoreOp::CustomDump
-                | CoreOp::PaletteDump
+                | CoreOp::PaletteDump { .. }
                 | CoreOp::CustomRead { .. }
                 | CoreOp::CustomWriter { .. }
                 | CoreOp::ChipsetReport
@@ -226,6 +236,7 @@ impl CoreOp {
                 | CoreOp::EventsList
                 | CoreOp::TraceStatus
                 | CoreOp::WaveformStatus
+                | CoreOp::ProfileStatus
                 | CoreOp::Digest
                 | CoreOp::RegionDigest { .. }
                 | CoreOp::Screenshot { .. }
@@ -784,7 +795,9 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
             count: p.usize_or("count", 16)?.clamp(1, 256),
         }),
         "custom.dump" => core(CoreOp::CustomDump),
-        "palette.dump" => core(CoreOp::PaletteDump),
+        "palette.dump" => core(CoreOp::PaletteDump {
+            resource: p.str_opt("resource")?,
+        }),
         "custom.read" => core(CoreOp::CustomRead {
             off: parse_custom_reg_param(&p)?,
         }),
@@ -903,10 +916,18 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
         }
         "cartridge.get" => core(CoreOp::CartridgeGet),
         "cartridge.freeze" => core(CoreOp::CartridgeFreeze),
-        "copper.list" => core(CoreOp::CopperList {
-            addr: p.u32_opt("addr")?,
-            max: p.usize_or("max", 32)?.clamp(1, 256),
-        }),
+        "copper.list" => {
+            let addr = p.u32_opt("addr")?;
+            let resource = p.str_opt("resource")?;
+            if addr.is_some() && resource.is_some() {
+                return Err(CtlError::invalid_params("give addr or resource, not both"));
+            }
+            core(CoreOp::CopperList {
+                addr,
+                resource,
+                max: p.usize_or("max", 32)?.clamp(1, 256),
+            })
+        }
         "last_writer" => core(CoreOp::LastWriter {
             addr: p.u32_req("addr")?,
         }),
@@ -1087,6 +1108,37 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
         }
         "waveform.stop" => core(CoreOp::WaveformStop),
         "waveform.status" => core(CoreOp::WaveformStatus),
+        "profile.start" => {
+            let frames = p
+                .u64_opt("frames")?
+                .unwrap_or(crate::profile::DEFAULT_PROFILE_FRAMES);
+            if frames == 0 || frames > crate::profile::MAX_PROFILE_FRAMES {
+                return Err(CtlError::invalid_params(format!(
+                    "frames must be 1..={}",
+                    crate::profile::MAX_PROFILE_FRAMES
+                )));
+            }
+            let screenshots = match p.str_opt("screenshots")?.as_deref() {
+                None => crate::profile::ScreenshotMode::None,
+                Some(word) => crate::profile::ScreenshotMode::parse(word).ok_or_else(|| {
+                    CtlError::invalid_params("screenshots must be none|every|last")
+                })?,
+            };
+            core(CoreOp::ProfileStart {
+                options: crate::profile::ProfileOptions {
+                    path: p
+                        .str_opt("path")?
+                        .map(PathBuf::from)
+                        .unwrap_or_else(crate::paths::profile_dir),
+                    frames,
+                    slots: p.bool_or("slots", false)?,
+                    screenshots,
+                    pc_samples: p.bool_or("pc_samples", false)?,
+                },
+            })
+        }
+        "profile.stop" => core(CoreOp::ProfileStop),
+        "profile.status" => core(CoreOp::ProfileStatus),
         "state.save" => core(CoreOp::StateSave {
             path: PathBuf::from(p.str_req("path")?),
         }),
@@ -1671,7 +1723,39 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             }
             Ok(json!({"regs": regs}))
         }
-        CoreOp::PaletteDump => {
+        CoreOp::PaletteDump { resource } => {
+            if let Some(name) = resource {
+                let r = find_debug_resource(
+                    emu,
+                    name,
+                    |kind| matches!(kind, crate::uaelib::ResourceKind::Palette { .. }),
+                    "palette",
+                )?;
+                let crate::uaelib::ResourceKind::Palette { entries } = r.kind else {
+                    unreachable!("finder returns only palettes here");
+                };
+                let resource_json = resource_value(r);
+                let data = emu
+                    .machine
+                    .debug_read_memory(r.address, usize::from(entries) * 2);
+                let words: Vec<Value> = data
+                    .chunks_exact(2)
+                    .map(|w| Value::from(u16::from_be_bytes([w[0], w[1]]) & 0x0FFF))
+                    .collect();
+                let rgb24: Vec<Value> = data
+                    .chunks_exact(2)
+                    .map(|w| {
+                        Value::from(crate::chipset::denise::rgb12_to_rgb24(u16::from_be_bytes(
+                            [w[0], w[1]],
+                        )))
+                    })
+                    .collect();
+                return Ok(json!({
+                    "resource": resource_json,
+                    "words": words,
+                    "rgb24": rgb24,
+                }));
+            }
             let palette = &emu.bus().denise.palette;
             let mut hi = Vec::with_capacity(256);
             let mut lo = Vec::with_capacity(256);
@@ -1828,10 +1912,27 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             }
             Ok(result)
         }
-        CoreOp::CopperList { addr, max } => {
+        CoreOp::CopperList {
+            addr,
+            resource,
+            max,
+        } => {
+            let start = match (addr, resource) {
+                (Some(addr), _) => Some(*addr),
+                (None, Some(name)) => {
+                    let r = find_debug_resource(
+                        emu,
+                        name,
+                        |kind| matches!(kind, crate::uaelib::ResourceKind::Copperlist),
+                        "copperlist",
+                    )?;
+                    Some(r.address)
+                }
+                (None, None) => None,
+            };
             let bus = emu.bus();
             let copper_pc = bus.copper.pc();
-            let start = addr.unwrap_or_else(|| copper_pc.saturating_sub(4 * 4));
+            let start = start.unwrap_or_else(|| copper_pc.saturating_sub(4 * 4));
             let entries: Vec<Value> = crate::disasm::dump_copper_list(
                 |a| bus.peek_word_any(a),
                 start,
@@ -1954,6 +2055,23 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             None => Ok(json!({"active": false, "present": false})),
         },
         CoreOp::WaveformStatus => Ok(waveform_status_value(emu)),
+        CoreOp::ProfileStart { options } => {
+            if emu.profile_active() {
+                return Err(CtlError::invalid_state(
+                    "a profile capture is already running; call profile.stop first",
+                ));
+            }
+            emu.profile_start(options.clone())
+                .map_err(|e| CtlError::io(format!("starting profile: {e}")))?;
+            Ok(emu.profile_status_value())
+        }
+        CoreOp::ProfileStop => {
+            let resources: Vec<Value> = emu.uaelib_resources().iter().map(resource_value).collect();
+            let machine = serde_json::to_value(emu.machine_descriptor()).unwrap_or(Value::Null);
+            emu.profile_stop(machine, Value::from(resources))
+                .map_err(|e| CtlError::io(format!("stopping profile: {e}")))
+        }
+        CoreOp::ProfileStatus => Ok(emu.profile_status_value()),
         CoreOp::StateSave { path } => {
             emu.save_state(path)
                 .map_err(|e| CtlError::io(format!("saving state: {e:#}")))?;
@@ -2280,6 +2398,48 @@ fn cartridge_value(cartridge: &crate::cartridge::Cartridge) -> Value {
     })
 }
 
+/// The registered resource called `name` whose kind satisfies `want`,
+/// or an error the client can act on: the trap being disabled, the name
+/// existing only with other kinds, or a listing of the names that do
+/// exist. Names are not unique (the registry replaces by address), so
+/// the kind filter keeps a palette lookup from being shadowed by, say,
+/// a bitmap registered under the same name.
+fn find_debug_resource<'a>(
+    emu: &'a Emulator,
+    name: &str,
+    want: fn(&crate::uaelib::ResourceKind) -> bool,
+    want_name: &str,
+) -> Result<&'a crate::uaelib::DebugResource, CtlError> {
+    if !emu.uaelib_fitted() {
+        return Err(CtlError::not_found(UAELIB_DISABLED));
+    }
+    let same_name: Vec<&crate::uaelib::DebugResource> = emu
+        .uaelib_resources()
+        .iter()
+        .filter(|resource| resource.name == name)
+        .collect();
+    if let Some(resource) = same_name.iter().find(|resource| want(&resource.kind)) {
+        return Ok(resource);
+    }
+    if !same_name.is_empty() {
+        let kinds: Vec<&str> = same_name.iter().map(|r| r.kind_name()).collect();
+        return Err(CtlError::invalid_params(format!(
+            "'{name}' is a {}, not a {want_name}",
+            kinds.join("/")
+        )));
+    }
+    let known: Vec<String> = emu
+        .uaelib_resources()
+        .iter()
+        .map(|resource| format!("\"{}\"", resource.name))
+        .collect();
+    Err(CtlError::not_found(if known.is_empty() {
+        format!("no resource {name:?}; none registered")
+    } else {
+        format!("no resource {name:?}; registered: {}", known.join(", "))
+    }))
+}
+
 /// A guest-registered resource as `debug.resources` and `event.debug`
 /// report it: the template's `struct debug_resource`, flags spelled out.
 pub(crate) fn resource_value(r: &crate::uaelib::DebugResource) -> Value {
@@ -2512,7 +2672,7 @@ fn wave_status_value(status: &crate::waveform::WaveStatus) -> Value {
 /// display path, returning the buffer and its visible line count. Both
 /// `capture.digest` and `capture.screenshot` use this in BOTH server
 /// modes, so captures are mode-identical and comparable.
-fn render_frame(emu: &Emulator) -> (Vec<u32>, usize, usize) {
+pub(crate) fn render_frame(emu: &Emulator) -> (Vec<u32>, usize, usize) {
     // An RTG board driving the display supersedes the chipset output,
     // exactly as the window presentation does.
     let mut fb = Vec::new();
@@ -2533,7 +2693,7 @@ const FNV1A64_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 
 /// FNV-1a over the framebuffer words (little-endian byte order), for
 /// cheap change detection without pulling pixels over the wire.
-fn fnv1a64(words: &[u32]) -> u64 {
+pub(crate) fn fnv1a64(words: &[u32]) -> u64 {
     fnv1a64_from(FNV1A64_OFFSET, words)
 }
 
@@ -3520,6 +3680,378 @@ mod tests {
         assert!(detail.contains("100"));
         let (reason, _) = stop_reason_of(&DebugStop::Breakpoint { pc: 0x1000 });
         assert_eq!(reason, "breakpoint");
+    }
+
+    #[test]
+    fn parse_profile_start_defaults_and_bounds() {
+        let op = core("profile.start", json!({}));
+        let CoreOp::ProfileStart { options } = op else {
+            panic!("expected ProfileStart");
+        };
+        assert_eq!(options.frames, crate::profile::DEFAULT_PROFILE_FRAMES);
+        assert!(!options.slots);
+        assert!(!options.pc_samples);
+        assert_eq!(options.screenshots, crate::profile::ScreenshotMode::None);
+
+        for params in [json!({"frames": 0}), json!({"frames": 200_000})] {
+            let err = parse_method("profile.start", &params).unwrap_err();
+            assert_eq!(err.code, proto::INVALID_PARAMS, "{params}");
+        }
+        let err = parse_method("profile.start", &json!({"screenshots": "sometimes"})).unwrap_err();
+        assert_eq!(err.code, proto::INVALID_PARAMS);
+        assert!(CoreOp::ProfileStatus.collectable());
+    }
+
+    fn profile_scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "copperline-profile-e2e-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn profile_start_while_active_is_refused() {
+        let mut emu = uaelib_emulator();
+        let mut ctx = SessionCtx::new();
+        let options = crate::profile::ProfileOptions {
+            path: profile_scratch("refused"),
+            frames: 3,
+            slots: false,
+            screenshots: crate::profile::ScreenshotMode::None,
+            pc_samples: false,
+        };
+        let start = CoreOp::ProfileStart {
+            options: options.clone(),
+        };
+        exec_core(&mut emu, &mut ctx, &start).unwrap();
+        // A second start must not close the running capture with an
+        // invented summary; the caller stops it first.
+        let err = exec_core(&mut emu, &mut ctx, &start).unwrap_err();
+        assert_eq!(err.code, proto::INVALID_STATE);
+        assert!(err.message.contains("profile.stop"), "{}", err.message);
+        let status = exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStatus).unwrap();
+        assert_eq!(status["active"], true, "the running capture survives");
+        exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStop).unwrap();
+    }
+
+    #[test]
+    fn profile_writes_one_record_per_committed_frame() {
+        let mut emu = uaelib_emulator();
+        let mut ctx = SessionCtx::new();
+        let dir = profile_scratch("records");
+        let status = exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::ProfileStart {
+                options: crate::profile::ProfileOptions {
+                    path: dir.clone(),
+                    frames: 3,
+                    slots: true,
+                    screenshots: crate::profile::ScreenshotMode::None,
+                    pc_samples: true,
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(status["active"], true);
+        assert_eq!(status["frames_written"], 0);
+        assert!(
+            emu.bus().frame_analyzer_enabled(),
+            "the trace feeds the records"
+        );
+
+        for _ in 0..4 {
+            emu.step_frame().unwrap();
+        }
+        let status = exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStatus).unwrap();
+        assert_eq!(status["frames_written"], 3);
+        assert_eq!(status["done"], true, "self-stops at the cap");
+
+        let summary = exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStop).unwrap();
+        assert_eq!(summary["active"], false);
+        assert_eq!(summary["frames_written"], 3);
+        assert!(
+            !emu.bus().frame_analyzer_enabled(),
+            "stop disarms the analyzer it armed"
+        );
+
+        let jsonl = std::fs::read_to_string(dir.join("profile.jsonl")).unwrap();
+        let records: Vec<Value> = jsonl
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records.len(), 3);
+        let frames: Vec<u64> = records
+            .iter()
+            .map(|r| r["frame"].as_u64().unwrap())
+            .collect();
+        assert!(frames.windows(2).all(|w| w[1] == w[0] + 1), "{frames:?}");
+        assert_eq!(records[0]["traced"], true);
+        assert!(records[0]["owner_cck"]["refresh"].as_u64().unwrap() > 0);
+        assert!(records[0]["slots"].as_array().unwrap().len() > 100);
+        assert!(records[0]["pc"].as_str().unwrap().starts_with("0x"));
+        assert!(records[0]["retired"].as_u64().unwrap() > 0);
+
+        let header: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("profile.json")).unwrap())
+                .unwrap();
+        assert_eq!(header["version"], 1);
+        assert_eq!(header["owners"][7], "cpu");
+        assert!(header["machine"].is_object());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn speculative_frames_never_reach_the_profile() {
+        let mut emu = uaelib_emulator();
+        let mut ctx = SessionCtx::new();
+        let dir = profile_scratch("spec");
+        exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::ProfileStart {
+                options: crate::profile::ProfileOptions {
+                    path: dir.clone(),
+                    frames: 10,
+                    slots: false,
+                    screenshots: crate::profile::ScreenshotMode::None,
+                    pc_samples: false,
+                },
+            },
+        )
+        .unwrap();
+        emu.set_runahead_speculative(true);
+        emu.step_frame().unwrap();
+        emu.set_runahead_speculative(false);
+        let status = exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStatus).unwrap();
+        assert_eq!(status["frames_written"], 0);
+        emu.step_frame().unwrap();
+        let status = exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStatus).unwrap();
+        assert_eq!(status["frames_written"], 1);
+        exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStop).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn palette_resource_bytes(address: u32, name: &str, entries: u16) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&address.to_be_bytes());
+        bytes.extend_from_slice(&(u32::from(entries) * 2).to_be_bytes());
+        let mut padded = [0u8; 32];
+        padded[..name.len()].copy_from_slice(name.as_bytes());
+        bytes.extend_from_slice(&padded);
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&entries.to_be_bytes());
+        bytes.extend_from_slice(&[0; 4]);
+        bytes
+    }
+
+    fn copperlist_resource_bytes(address: u32, name: &str, size: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&address.to_be_bytes());
+        bytes.extend_from_slice(&size.to_be_bytes());
+        let mut padded = [0u8; 32];
+        padded[..name.len()].copy_from_slice(name.as_bytes());
+        bytes.extend_from_slice(&padded);
+        bytes.extend_from_slice(&2u16.to_be_bytes());
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&[0; 6]);
+        bytes
+    }
+
+    fn register_resource(emu: &mut Emulator, staging: u32, bytes: &[u8]) {
+        let mask = emu.machine.ui_addr_mask();
+        let bus = emu.bus_mut();
+        bus.mem.chip_ram[staging as usize..staging as usize + bytes.len()].copy_from_slice(bytes);
+        let mem = &mut bus.mem;
+        let lib = bus.uaelib.as_mut().unwrap();
+        lib.call(
+            crate::uaelib::FN_DEBUG_CMD,
+            [crate::uaelib::CMD_REGISTER_RESOURCE, staging, 0, 0, 0],
+            mem,
+            mask,
+            0,
+            0,
+        );
+    }
+
+    #[test]
+    fn palette_dump_reads_a_registered_palette_resource() {
+        let mut emu = uaelib_emulator();
+        let mut ctx = SessionCtx::new();
+        emu.bus_mut().mem.chip_ram[0x3000..0x3004].copy_from_slice(&[0x0F, 0x00, 0x00, 0x8F]);
+        register_resource(&mut emu, 0x5000, &palette_resource_bytes(0x3000, "pal", 2));
+        let value = exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::PaletteDump {
+                resource: Some("pal".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(value["resource"]["name"], "pal");
+        assert_eq!(value["words"], json!([0x0F00, 0x008F]));
+        assert_eq!(value["rgb24"], json!([0x00FF_0000, 0x0000_88FF]));
+        // Without the param the live COLORxx dump is unchanged.
+        let live = exec_core(&mut emu, &mut ctx, &CoreOp::PaletteDump { resource: None }).unwrap();
+        assert_eq!(live["hi"].as_array().unwrap().len(), 256);
+    }
+
+    #[test]
+    fn palette_dump_unknown_resource_lists_known_names() {
+        let mut emu = uaelib_emulator();
+        let mut ctx = SessionCtx::new();
+        register_resource(&mut emu, 0x5000, &palette_resource_bytes(0x3000, "pal", 2));
+        let err = exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::PaletteDump {
+                resource: Some("nope".into()),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.code, proto::NOT_FOUND);
+        assert!(err.message.contains("\"pal\""), "{}", err.message);
+
+        // Without the trap the error names the config key instead.
+        let mut plain = test_emulator();
+        let err = exec_core(
+            &mut plain,
+            &mut ctx,
+            &CoreOp::PaletteDump {
+                resource: Some("pal".into()),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.code, proto::NOT_FOUND);
+        assert!(err.message.contains("uaelib"), "{}", err.message);
+    }
+
+    #[test]
+    fn palette_dump_rejects_a_non_palette_resource() {
+        let mut emu = uaelib_emulator();
+        let mut ctx = SessionCtx::new();
+        let bytes = bitmap_resource_bytes();
+        let mask = emu.machine.ui_addr_mask();
+        {
+            let bus = emu.bus_mut();
+            bus.mem.chip_ram[0x5000..0x5000 + bytes.len()].copy_from_slice(&bytes);
+            let mem = &mut bus.mem;
+            let lib = bus.uaelib.as_mut().unwrap();
+            lib.call(
+                crate::uaelib::FN_DEBUG_CMD,
+                [crate::uaelib::CMD_REGISTER_RESOURCE, 0x5000, 0, 0, 0],
+                mem,
+                mask,
+                0,
+                0,
+            );
+        }
+        let err = exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::PaletteDump {
+                resource: Some("screen".into()),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.code, proto::INVALID_PARAMS);
+        assert!(err.message.contains("bitmap"), "{}", err.message);
+    }
+
+    #[test]
+    fn copper_list_resolves_a_registered_copperlist() {
+        let mut emu = uaelib_emulator();
+        let mut ctx = SessionCtx::new();
+        // MOVE #$0FFF,COLOR00 then the end-of-list wait.
+        emu.bus_mut().mem.chip_ram[0x4000..0x4008]
+            .copy_from_slice(&[0x01, 0x80, 0x0F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE]);
+        register_resource(
+            &mut emu,
+            0x5000,
+            &copperlist_resource_bytes(0x4000, "cop", 8),
+        );
+        let value = exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::CopperList {
+                addr: None,
+                resource: Some("cop".into()),
+                max: 8,
+            },
+        )
+        .unwrap();
+        assert_eq!(value["entries"][0]["addr"], 0x4000);
+        let text = value["entries"][0]["text"].as_str().unwrap();
+        assert!(text.contains("$DFF180"), "{text}");
+
+        let err = exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::CopperList {
+                addr: None,
+                resource: Some("nope".into()),
+                max: 8,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.code, proto::NOT_FOUND);
+    }
+
+    #[test]
+    fn parse_resource_params_for_palette_and_copper() {
+        assert_eq!(
+            core("palette.dump", json!({"resource": "pal"})),
+            CoreOp::PaletteDump {
+                resource: Some("pal".into())
+            }
+        );
+        assert_eq!(
+            core("copper.list", json!({"resource": "cop"})),
+            CoreOp::CopperList {
+                addr: None,
+                resource: Some("cop".into()),
+                max: 32
+            }
+        );
+        let err =
+            parse_method("copper.list", &json!({"addr": 100, "resource": "cop"})).unwrap_err();
+        assert_eq!(err.code, proto::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn palette_dump_prefers_the_matching_kind_among_duplicate_names() {
+        // Names are not unique (the registry replaces by address): a
+        // bitmap registered first under the same name must not shadow
+        // the palette the client asked for.
+        let mut emu = uaelib_emulator();
+        let mut ctx = SessionCtx::new();
+        let mut bitmap = Vec::new();
+        bitmap.extend_from_slice(&0x0002_0000u32.to_be_bytes());
+        bitmap.extend_from_slice(&51200u32.to_be_bytes());
+        let mut name = [0u8; 32];
+        name[..3].copy_from_slice(b"pal");
+        bitmap.extend_from_slice(&name);
+        bitmap.extend_from_slice(&0u16.to_be_bytes()); // bitmap
+        bitmap.extend_from_slice(&0u16.to_be_bytes());
+        for v in [320u16, 256, 5] {
+            bitmap.extend_from_slice(&v.to_be_bytes());
+        }
+        register_resource(&mut emu, 0x5000, &bitmap);
+        emu.bus_mut().mem.chip_ram[0x3000..0x3004].copy_from_slice(&[0x0F, 0x00, 0x00, 0x8F]);
+        register_resource(&mut emu, 0x5100, &palette_resource_bytes(0x3000, "pal", 2));
+        let value = exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::PaletteDump {
+                resource: Some("pal".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(value["resource"]["type"], "palette");
+        assert_eq!(value["words"], json!([0x0F00, 0x008F]));
     }
 
     fn uaelib_emulator() -> Emulator {

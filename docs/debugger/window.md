@@ -145,6 +145,10 @@ that colour clock cycle (CPU, Copper, Blitter, Bitplane, Sprite, Audio, Disk, Re
 - **Beam scrub (`B`):** Progressively displays the frame up to the selected raster position.
 - **To slot (`T`):** Advances execution until the beam reaches the selected colour clock.
 
+A control-protocol profile capture ([](profiling)) shares the analyzer's
+trace arming: closing this pane does not disarm a running capture, and
+stopping the capture keeps an open pane recording.
+
 (frame-analyzer-memory-tab)=
 ### Memory heatmap tab
 
@@ -158,3 +162,40 @@ Frame Analyzer Memory tab displaying address space activity.
 The Memory tab displays a 256x256 grid representing memory activity across configured
 RAM banks (Chip, Slow, Fast, Motherboard, Zorro II/III). Cells reflect recent read/write
 activity by subsystem and fade over 32 frames.
+
+Debug resources the guest registered through the
+[uaelib trap](../guide/run.md#uaelib-trap) join the window presets (named by
+the guest, rebuilt when the tab is entered; the first four registered
+resources, so a large registry cannot push the machine windows off the
+row -- the Resources tab reaches them all), and the readout under the map
+names the resource a hovered or pinned cell falls in.
+
+### Resources tab
+
+```{figure} ../images/ui-preview-frame-analyzer-resources.png
+:alt: The Frame Analyzer Resources tab
+:width: 90%
+
+Frame Analyzer Resources tab previewing a registered bitmap.
+```
+
+The Resources tab lists what the running program registered through the
+uaelib trap's `debug_register_bitmap` / `_palette` / `_copperlist` helpers:
+name, type, address, size, and geometry. The cursor and page keys scroll
+the table when the registry outgrows it. Selecting a row decodes it fresh
+from guest memory each repaint, so the preview tracks what the program
+draws:
+
+- **Bitmap**: planar or interleaved layouts per the registered flags, up to
+  8 planes, drawn with the first registered palette resource (or the live
+  Denise palette when none is registered). A masked bitmap's mask plane is
+  skipped; a HAM bitmap is shown as plain indexed pixels; hostile or stale
+  geometry is clamped, with a note under the preview saying what was
+  glossed over.
+- **Palette**: a swatch grid of the 12-bit entries as Denise would show
+  them.
+- **Copper list**: the first instructions disassembled at the registered
+  address.
+
+The same registry is served over the control protocol (`debug.resources`)
+and listed by the console's `DBGRES` command.

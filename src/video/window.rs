@@ -880,6 +880,28 @@ fn analyzer_heat_presets(bus: &crate::bus::Bus) -> Vec<ui::HeatPreset> {
             }
         })
         .collect();
+    // Guest-registered debug resources (crate::uaelib) are windows too: a
+    // program that told the emulator where its bitmaps, palettes and
+    // copper lists live gets a preset per resource, named by the guest.
+    // Rebuilt on tab entry, so a resource registered while the tab is up
+    // appears the next time the Memory tab is entered.
+    if let Some(uaelib) = bus.uaelib.as_ref() {
+        // Bounded so a large registry cannot push the machine windows'
+        // trailing presets (notably 24-bit) off the single preset row;
+        // the Resources tab lists and scrolls the full registry.
+        const RESOURCE_PRESETS_MAX: usize = 4;
+        for resource in uaelib.resources().iter().take(RESOURCE_PRESETS_MAX) {
+            // By characters, not bytes: the name is guest data run
+            // through from_utf8_lossy, and a byte-indexed truncate can
+            // panic inside a multibyte character.
+            let label: String = resource.name.chars().take(8).collect();
+            presets.push(ui::HeatPreset {
+                label,
+                base: resource.address,
+                span: resource.size.max(1),
+            });
+        }
+    }
     // Two boards of the same kind would otherwise offer two buttons with
     // the same name; the base address tells them apart.
     let labels: Vec<String> = presets.iter().map(|preset| preset.label.clone()).collect();
@@ -1045,6 +1067,9 @@ pub struct App {
     /// drained at the top of `about_to_wait` (see window/control.rs).
     #[cfg(feature = "control")]
     control: Option<control::ControlState>,
+    /// The windowed GDB stub (`--gdb-gui`), when attached.
+    #[cfg(feature = "gdb")]
+    gdb: Option<gdb::GdbGuiState>,
     /// Scheduled relative port-1 mouse motions from --mouse-after,
     /// one-shot per entry; (at_emulated_secs, dx, dy).
     auto_mouse: Vec<(f64, i32, i32, u8)>,
@@ -2065,6 +2090,8 @@ impl App {
             auto_joy_engaged: [false; 2],
             #[cfg(feature = "control")]
             control: None,
+            #[cfg(feature = "gdb")]
+            gdb: None,
             auto_mouse: Vec::new(),
             pending_auto_mouse: mouse_after,
             auto_mouse_to: Vec::new(),
@@ -2906,6 +2933,14 @@ impl App {
         if let Some(ctl) = app.control.as_mut() {
             let proxy = event_loop.create_proxy();
             ctl.handle.start(Box::new(move || {
+                let _ = proxy.send_event(());
+            }));
+        }
+        // Same for the windowed GDB stub's socket threads.
+        #[cfg(feature = "gdb")]
+        if let Some(gdb) = app.gdb.as_mut() {
+            let proxy = event_loop.create_proxy();
+            gdb.handle.start(Box::new(move || {
                 let _ = proxy.send_event(());
             }));
         }
@@ -4236,14 +4271,17 @@ impl ApplicationHandler for App {
                     .cursor_pos
                     .and_then(|pos| control_at(pos, &bar_layout(&media)));
                 let control_connected = {
+                    #[allow(unused_mut)]
+                    let mut connected = false;
                     #[cfg(feature = "control")]
                     {
-                        self.control.as_ref().is_some_and(|c| c.handle.connected())
+                        connected |= self.control.as_ref().is_some_and(|c| c.handle.connected());
                     }
-                    #[cfg(not(feature = "control"))]
+                    #[cfg(feature = "gdb")]
                     {
-                        false
+                        connected |= self.gdb.as_ref().is_some_and(|g| g.handle.connected());
                     }
+                    connected
                 };
                 let view = StatusBarView {
                     status,
@@ -4731,6 +4769,8 @@ impl ApplicationHandler for App {
                 return;
             }
         }
+        #[cfg(feature = "gdb")]
+        self.drain_gdb();
         // Frames retired outside the burst (a control step, a debugger
         // step) may have carried a guest warp request.
         self.service_uaelib();
@@ -5442,14 +5482,17 @@ impl App {
             status.fdd_track = self.last_fdd_track;
         }
         let control_connected = {
+            #[allow(unused_mut)]
+            let mut connected = false;
             #[cfg(feature = "control")]
             {
-                self.control.as_ref().is_some_and(|c| c.handle.connected())
+                connected |= self.control.as_ref().is_some_and(|c| c.handle.connected());
             }
-            #[cfg(not(feature = "control"))]
+            #[cfg(feature = "gdb")]
             {
-                false
+                connected |= self.gdb.as_ref().is_some_and(|g| g.handle.connected());
             }
+            connected
         };
         #[cfg(feature = "mt32")]
         let mt32_face = if crate::video::mt32_panel_shown() {
@@ -6383,6 +6426,7 @@ impl App {
             UiControl::DropDrive(drive_idx) => self.drop_chooser_route(drive_idx),
             UiControl::AnalyzerTab(_)
             | UiControl::AnalyzerHeatPreset(_)
+            | UiControl::AnalyzerResourceRow(_)
             | UiControl::AnalyzerHeatPick { .. } => {
                 self.activate_tool_control(ToolPanelKind::FrameAnalyzer, control)
             }
@@ -6452,6 +6496,8 @@ mod control;
 mod crt_shader;
 #[cfg(feature = "coppersynth")]
 mod csynthpanel;
+#[cfg(feature = "gdb")]
+mod gdb;
 mod host_input;
 mod kbdpanel;
 #[cfg(feature = "mt32")]

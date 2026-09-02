@@ -13,6 +13,7 @@ pub mod menu;
 #[cfg(feature = "frontend")]
 pub mod nav;
 pub mod present_common;
+pub mod resource_preview;
 #[cfg(feature = "frontend")]
 pub mod ui;
 #[cfg(feature = "frontend")]

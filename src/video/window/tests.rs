@@ -9657,6 +9657,64 @@ mod warp_control {
         app.emu.bus_mut().attach_uaelib(lib);
     }
 
+    fn profile_options(dir: &std::path::Path) -> crate::profile::ProfileOptions {
+        crate::profile::ProfileOptions {
+            path: dir.to_path_buf(),
+            frames: 100,
+            slots: false,
+            screenshots: crate::profile::ScreenshotMode::None,
+            pc_samples: false,
+        }
+    }
+
+    #[test]
+    fn closing_the_analyzer_panel_keeps_a_profiling_session_armed() {
+        let mut app = test_app();
+        app.powered_on = true;
+        app.open_frame_analyzer();
+        assert!(app.emu.bus().frame_analyzer_enabled());
+        let dir =
+            std::env::temp_dir().join(format!("copperline-profile-panel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        app.emu.profile_start(profile_options(&dir)).unwrap();
+        app.close_tool_panel(super::super::ToolPanelKind::FrameAnalyzer);
+        assert!(
+            app.emu.bus().frame_analyzer_enabled(),
+            "the capture adopts the arming instead of losing its trace"
+        );
+        let status = app
+            .emu
+            .profile_stop(serde_json::Value::Null, serde_json::json!([]))
+            .unwrap();
+        assert_eq!(status["active"], false);
+        assert!(
+            !app.emu.bus().frame_analyzer_enabled(),
+            "stop disarms the adopted arming"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn profile_stop_rearms_an_open_analyzer_panel() {
+        let (mut app, _states) = audio_app();
+        app.open_frame_analyzer();
+        let dir =
+            std::env::temp_dir().join(format!("copperline-profile-rearm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (tx, rx) = attach(&mut app);
+        // profile.start via the drain would need a JSON path; drive the
+        // emulator directly and stop through the protocol, which is the
+        // ownership-sensitive step.
+        app.emu.profile_start(profile_options(&dir)).unwrap();
+        let reply = call(&mut app, &tx, &rx, 1, "profile.stop", json!({}));
+        assert_eq!(reply["active"], false);
+        assert!(
+            app.emu.bus().frame_analyzer_enabled(),
+            "an open pane keeps its trace after profile.stop"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn warp_set_unpaces_mutes_audio_and_names_the_hold() {
         let (mut app, states) = audio_app();
@@ -9860,5 +9918,728 @@ mod warp_control {
         assert_eq!(debug.len(), 1);
         assert_eq!(debug[0]["kind"], "log");
         assert_eq!(debug[0]["text"], "hello from the guest");
+    }
+}
+
+#[cfg(feature = "gdb")]
+mod gdb_drain {
+    use super::test_app;
+    use crate::gdbstub::core::{checksum, hex_encode};
+    use crate::gdbstub::windowed::{GdbHandle, GdbMsg};
+    use std::sync::mpsc::{Receiver, Sender};
+
+    fn attached_app() -> (super::super::App, Sender<GdbMsg>, Receiver<String>) {
+        let mut app = test_app();
+        let (handle, cmd_tx, frame_rx) = GdbHandle::test_pair();
+        app.attach_gdb(handle, &crate::gdbstub::Config::new(":0".into()));
+        cmd_tx.send(GdbMsg::Connected).unwrap();
+        (app, cmd_tx, frame_rx)
+    }
+
+    fn packet(cmd_tx: &Sender<GdbMsg>, payload: &str) {
+        cmd_tx.send(GdbMsg::Packet(payload.to_string())).unwrap();
+    }
+
+    fn monitor(cmd_tx: &Sender<GdbMsg>, command: &str) {
+        packet(cmd_tx, &format!("qRcmd,{}", hex_encode(command.as_bytes())));
+    }
+
+    /// The wire framing `GdbHandle::send_packet` produces for `payload`.
+    fn frame(payload: &str) -> String {
+        format!("${payload}#{:02x}", checksum(payload.as_bytes()))
+    }
+
+    fn frames(frame_rx: &Receiver<String>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(f) = frame_rx.try_recv() {
+            out.push(f);
+        }
+        out
+    }
+
+    #[test]
+    fn attach_pauses_and_a_breakpoint_completes_a_deferred_continue() {
+        let (mut app, cmd_tx, frame_rx) = attached_app();
+        app.drain_gdb();
+        assert!(app.paused, "attaching stops the target");
+
+        // A Z0 breakpoint installs into the machine's break store (the
+        // burst loop steps whole frames; the core's polled list alone
+        // would never fire here).
+        let target = app.emu.machine.pc().wrapping_add(8) & 0x00FF_FFFF;
+        packet(&cmd_tx, &format!("Z0,{target:x},2"));
+        app.drain_gdb();
+        assert_eq!(frames(&frame_rx), vec![frame("OK")]);
+        assert!(app.emu.machine.ui_breaks().is_breakpoint(target));
+
+        // Continue defers its reply and lets the frame loop run.
+        packet(&cmd_tx, "c");
+        app.drain_gdb();
+        assert!(!app.paused, "continue resumes the machine");
+        assert!(frames(&frame_rx).is_empty(), "the stop reply is deferred");
+
+        // The hit surfaces mid-frame, answers the client, and leaves the
+        // local debugger window closed.
+        app.emu.step_frame().expect("frame");
+        assert!(app.surface_debug_stop());
+        assert!(app.paused);
+        assert_eq!(app.emu.machine.pc() & 0x00FF_FFFF, target);
+        assert_eq!(frames(&frame_rx), vec![frame("T05hwbreak:;thread:1;")]);
+        assert!(
+            app.debugger_panel.is_none(),
+            "a remote stop must not commandeer the local debugger"
+        );
+    }
+
+    #[test]
+    fn an_interrupt_pauses_and_always_gets_a_stop_reply() {
+        let (mut app, cmd_tx, frame_rx) = attached_app();
+        app.drain_gdb();
+        packet(&cmd_tx, "c");
+        app.drain_gdb();
+        assert!(!app.paused);
+        cmd_tx.send(GdbMsg::Interrupt).unwrap();
+        app.drain_gdb();
+        assert!(app.paused, "0x03 pauses the machine");
+        assert_eq!(frames(&frame_rx), vec![frame("T05thread:1;")]);
+    }
+
+    #[test]
+    fn a_step_replies_synchronously_and_stays_paused() {
+        let (mut app, cmd_tx, frame_rx) = attached_app();
+        app.drain_gdb();
+        let before = app.emu.retired_instructions();
+        packet(&cmd_tx, "s");
+        app.drain_gdb();
+        assert!(app.paused);
+        assert!(app.emu.retired_instructions() > before);
+        assert_eq!(frames(&frame_rx), vec![frame("T05thread:1;")]);
+    }
+
+    #[test]
+    fn detach_removes_only_gdb_installed_break_state() {
+        let (mut app, cmd_tx, frame_rx) = attached_app();
+        app.drain_gdb();
+        // The GUI owns a breakpoint of its own.
+        let gui_break = app.emu.machine.pc().wrapping_add(0x20) & 0x00FF_FFFF;
+        app.emu.machine.ui_set_breakpoint(gui_break, None, 0);
+        // The client sets one at the same spot (never touched: the GUI
+        // owns it) and one of its own, plus a register watch through the
+        // intercepted monitor command.
+        let own_break = app.emu.machine.pc().wrapping_add(0x40) & 0x00FF_FFFF;
+        packet(&cmd_tx, &format!("Z0,{gui_break:x},2"));
+        packet(&cmd_tx, &format!("Z0,{own_break:x},2"));
+        monitor(&cmd_tx, "watch-reg DMACON");
+        app.drain_gdb();
+        assert!(app.emu.machine.ui_breaks().is_breakpoint(own_break));
+        assert!(app.emu.machine.ui_breaks().reg_watches.contains(&0x096));
+        let sent = frames(&frame_rx);
+        assert_eq!(sent.last(), Some(&frame("OK")));
+        assert!(
+            sent.iter()
+                .any(|f| f.contains(&hex_encode(b"watching DMACON"))),
+            "monitor output arrives as O packets: {sent:?}"
+        );
+
+        cmd_tx.send(GdbMsg::Disconnected).unwrap();
+        app.drain_gdb();
+        assert!(
+            app.emu.machine.ui_breaks().is_breakpoint(gui_break),
+            "detach must leave GUI-owned points alone"
+        );
+        assert!(!app.emu.machine.ui_breaks().is_breakpoint(own_break));
+        assert!(!app.emu.machine.ui_breaks().reg_watches.contains(&0x096));
+    }
+
+    #[test]
+    fn monitor_warp_holds_until_disconnect_releases_it() {
+        let (mut app, cmd_tx, _frame_rx) = attached_app();
+        // The fixture starts unpaced; warp semantics are defined against
+        // a paced interactive session.
+        app.emu.set_paced(true);
+        app.drain_gdb();
+        monitor(&cmd_tx, "warp on");
+        app.drain_gdb();
+        assert!(!app.emu.paced(), "monitor warp on unpaces the machine");
+        assert_eq!(
+            app.warp_hold,
+            Some(super::super::app_session::WarpSource::Gdb)
+        );
+        cmd_tx.send(GdbMsg::Disconnected).unwrap();
+        app.drain_gdb();
+        assert!(
+            app.emu.paced(),
+            "a disconnect releases the client's warp hold"
+        );
+        assert!(app.warp_hold.is_none());
+    }
+
+    #[test]
+    fn kill_detaches_and_the_window_survives() {
+        let (mut app, cmd_tx, frame_rx) = attached_app();
+        app.drain_gdb();
+        let own_break = app.emu.machine.pc().wrapping_add(8) & 0x00FF_FFFF;
+        packet(&cmd_tx, &format!("Z0,{own_break:x},2"));
+        packet(&cmd_tx, "k");
+        app.drain_gdb();
+        assert!(!app.emu.machine.ui_breaks().is_breakpoint(own_break));
+        assert!(
+            app.gdb.is_some(),
+            "the server keeps serving for the next client"
+        );
+        assert!(
+            !app.gdb.as_ref().unwrap().handle.connected(),
+            "kill closes the connection instead of exiting the window"
+        );
+        let _ = frames(&frame_rx);
+    }
+
+    #[test]
+    fn a_gui_removed_gdb_breakpoint_is_restored_on_the_next_sync() {
+        let (mut app, cmd_tx, frame_rx) = attached_app();
+        app.drain_gdb();
+        let target = app.emu.machine.pc().wrapping_add(8) & 0x00FF_FFFF;
+        packet(&cmd_tx, &format!("Z0,{target:x},2"));
+        app.drain_gdb();
+        assert!(app.emu.machine.ui_breaks().is_breakpoint(target));
+        // The GUI toggles the client's point off; the client's
+        // acknowledged break state is authoritative for its own points,
+        // so the next packet's sync restores it.
+        app.emu.machine.ui_set_breakpoint(target, None, 0);
+        assert!(!app.emu.machine.ui_breaks().is_breakpoint(target));
+        packet(&cmd_tx, "qC");
+        app.drain_gdb();
+        assert!(
+            app.emu.machine.ui_breaks().is_breakpoint(target),
+            "an acknowledged Z0 point must not silently stay gone"
+        );
+        // And a z0 removal still takes it out for good.
+        packet(&cmd_tx, &format!("z0,{target:x},2"));
+        app.drain_gdb();
+        assert!(!app.emu.machine.ui_breaks().is_breakpoint(target));
+        let _ = frames(&frame_rx);
+    }
+
+    #[test]
+    fn a_memory_write_packet_does_not_fire_the_machine_word_watch() {
+        let (mut app, cmd_tx, frame_rx) = attached_app();
+        app.drain_gdb();
+        // The fixture boots with the reset ROM overlay on, which shadows
+        // low chip RAM; drop it so the write lands.
+        app.emu.bus_mut().mem.overlay = false;
+        let addr = 0x0005_0000u32;
+        packet(&cmd_tx, &format!("Z2,{addr:x},2"));
+        app.drain_gdb();
+        assert!(app
+            .emu
+            .machine
+            .ui_breaks()
+            .watches
+            .iter()
+            .any(|w| w.addr == addr));
+        let _ = frames(&frame_rx);
+        // Writing the watched word through the stub must not fire the
+        // watch on the next step: the machine baselines are refreshed
+        // like CCP's memory.write does.
+        packet(&cmd_tx, &format!("M{addr:x},2:beef"));
+        packet(&cmd_tx, "s");
+        app.drain_gdb();
+        assert_eq!(
+            frames(&frame_rx),
+            vec![frame("OK"), frame("T05thread:1;")],
+            "the stub's own write must not report a watchpoint hit"
+        );
+    }
+
+    #[test]
+    fn qxfer_libraries_read_arms_the_machine_loadseg_catch() {
+        let (mut app, cmd_tx, frame_rx) = attached_app();
+        app.drain_gdb();
+        assert!(app.emu.machine.ui_breaks().loadseg_catch.is_none());
+        packet(&cmd_tx, "qXfer:libraries:read::0,1000");
+        app.drain_gdb();
+        assert_eq!(
+            frames(&frame_rx),
+            vec![frame("l<library-list version=\"1.0\"/>")]
+        );
+        assert!(
+            app.emu.machine.ui_breaks().loadseg_catch.is_some(),
+            "library events arm the machine-level loadseg catch"
+        );
+        // Detach disarms it again (it was ours).
+        cmd_tx.send(GdbMsg::Disconnected).unwrap();
+        app.drain_gdb();
+        assert!(app.emu.machine.ui_breaks().loadseg_catch.is_none());
+    }
+}
+
+/// Part-1 insight-pane tests: guest-registered uaelib resources feeding
+/// the heat presets, the heat view, and the console's DBGRES command.
+mod uaelib_insights {
+    use super::test_app;
+
+    type App = super::super::App;
+
+    fn fit_uaelib(app: &mut App) {
+        let mut lib = crate::uaelib::UaeLib::new();
+        lib.mute_stdout();
+        let bus = app.emu.bus_mut();
+        bus.attach_uaelib(lib);
+        // Post-boot reality: the reset ROM overlay is long gone, so the
+        // debugger's reads see chip RAM like the DMA view does.
+        bus.mem.overlay = false;
+    }
+
+    /// The template's 50-byte `struct debug_resource`, big-endian.
+    fn resource_bytes(
+        address: u32,
+        size: u32,
+        name: &str,
+        kind: u16,
+        flags: u16,
+        union: [u16; 3],
+    ) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&address.to_be_bytes());
+        bytes.extend_from_slice(&size.to_be_bytes());
+        let mut padded = [0u8; 32];
+        padded[..name.len()].copy_from_slice(name.as_bytes());
+        bytes.extend_from_slice(&padded);
+        bytes.extend_from_slice(&kind.to_be_bytes());
+        bytes.extend_from_slice(&flags.to_be_bytes());
+        for value in union {
+            bytes.extend_from_slice(&value.to_be_bytes());
+        }
+        bytes
+    }
+
+    fn register(app: &mut App, staging: u32, bytes: &[u8]) {
+        let mask = app.emu.machine.ui_addr_mask();
+        let bus = app.emu.bus_mut();
+        bus.mem.chip_ram[staging as usize..staging as usize + bytes.len()].copy_from_slice(bytes);
+        let mem = &mut bus.mem;
+        let lib = bus.uaelib.as_mut().unwrap();
+        lib.call(
+            crate::uaelib::FN_DEBUG_CMD,
+            [crate::uaelib::CMD_REGISTER_RESOURCE, staging, 0, 0, 0],
+            mem,
+            mask,
+            0,
+            7,
+        );
+    }
+
+    #[test]
+    fn analyzer_heat_presets_append_registered_resources() {
+        let mut app = test_app();
+        fit_uaelib(&mut app);
+        register(
+            &mut app,
+            0x5000,
+            &resource_bytes(0x2_0000, 51200, "screenbitmap", 0, 1, [320, 256, 5]),
+        );
+        // A resource named like a machine preset gets the dedup suffix.
+        register(
+            &mut app,
+            0x5100,
+            &resource_bytes(0x3_0000, 64, "Chip", 1, 0, [32, 0, 0]),
+        );
+        let presets = super::super::analyzer_heat_presets(app.emu.bus());
+        let labels: Vec<&str> = presets.iter().map(|p| p.label.as_str()).collect();
+        assert!(
+            labels.contains(&"screenbi"),
+            "resource names are truncated to 8: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l.starts_with("Chip $")),
+            "colliding names are disambiguated by base: {labels:?}"
+        );
+        assert_eq!(
+            labels.last(),
+            Some(&"24-bit"),
+            "the 24-bit overview stays last"
+        );
+        let screen = presets.iter().find(|p| p.label == "screenbi").unwrap();
+        assert_eq!((screen.base, screen.span), (0x2_0000, 51200));
+    }
+
+    #[test]
+    fn heat_view_carries_registered_resources_sorted() {
+        let mut app = test_app();
+        fit_uaelib(&mut app);
+        register(
+            &mut app,
+            0x5000,
+            &resource_bytes(0x3_0000, 64, "pal", 1, 0, [32, 0, 0]),
+        );
+        register(
+            &mut app,
+            0x5100,
+            &resource_bytes(0x2_0000, 51200, "screen", 0, 0, [320, 256, 5]),
+        );
+        app.emu.bus_mut().set_heat_map(Some((0, 0x10_0000)));
+        let panel = crate::video::ui::FrameAnalyzerPanel::new();
+        let view = app.build_analyzer_heat_view(&panel).expect("map armed");
+        let named: Vec<(u32, u32, &str, &str)> = view
+            .resources
+            .iter()
+            .map(|r| (r.start, r.end, r.name.as_str(), r.kind))
+            .collect();
+        assert_eq!(
+            named,
+            vec![
+                (0x2_0000, 0x2_0000 + 51200, "screen", "bitmap"),
+                (0x3_0000, 0x3_0040, "pal", "palette"),
+            ],
+            "sorted by start, exclusive end"
+        );
+    }
+
+    #[test]
+    fn guest_debug_lines_reach_an_open_console() {
+        let mut app = test_app();
+        fit_uaelib(&mut app);
+        app.open_console();
+        let mask = app.emu.machine.ui_addr_mask();
+        {
+            let bus = app.emu.bus_mut();
+            bus.mem.chip_ram[0x2000..0x2006].copy_from_slice(b"hello\0");
+            let mem = &mut bus.mem;
+            let lib = bus.uaelib.as_mut().unwrap();
+            lib.call(
+                crate::uaelib::FN_DEBUG_LOG,
+                [0x2000, 0, 0, 0, 0],
+                mem,
+                mask,
+                0,
+                0,
+            );
+        }
+        assert!(!app.service_uaelib(), "a log line changes no pacing");
+        let panel = app.console_panel.as_ref().unwrap();
+        assert_eq!(panel.output.back().map(String::as_str), Some("DBG: hello"));
+    }
+
+    #[test]
+    fn guest_debug_lines_while_the_console_is_closed_are_discarded() {
+        let mut app = test_app();
+        fit_uaelib(&mut app);
+        let mask = app.emu.machine.ui_addr_mask();
+        {
+            let bus = app.emu.bus_mut();
+            bus.mem.chip_ram[0x2000..0x2006].copy_from_slice(b"early\0");
+            let mem = &mut bus.mem;
+            let lib = bus.uaelib.as_mut().unwrap();
+            lib.call(
+                crate::uaelib::FN_DEBUG_LOG,
+                [0x2000, 0, 0, 0, 0],
+                mem,
+                mask,
+                0,
+                0,
+            );
+        }
+        app.service_uaelib();
+        app.open_console();
+        app.service_uaelib();
+        let panel = app.console_panel.as_ref().unwrap();
+        assert!(
+            !panel.output.iter().any(|line| line.starts_with("DBG:")),
+            "lines from before the pane opened are not replayed"
+        );
+    }
+
+    #[test]
+    fn resources_tab_lists_the_registry_and_previews_a_selected_bitmap() {
+        let mut app = test_app();
+        fit_uaelib(&mut app);
+        // A 16x2x1 bitmap whose only set bit is pixel (0, 0), and a
+        // 2-entry palette: index 0 = black, index 1 = pure red ($0F00).
+        {
+            let bus = app.emu.bus_mut();
+            bus.mem.chip_ram[0x2_0000] = 0x80;
+            bus.mem.chip_ram[0x3_0000..0x3_0004].copy_from_slice(&[0x00, 0x00, 0x0F, 0x00]);
+        }
+        register(
+            &mut app,
+            0x5000,
+            &resource_bytes(0x3_0000, 4, "pal", 1, 0, [2, 0, 0]),
+        );
+        register(
+            &mut app,
+            0x5100,
+            &resource_bytes(0x2_0000, 4, "screen", 0, 0, [16, 2, 1]),
+        );
+        app.open_frame_analyzer();
+        app.frame_analyzer_set_tab(crate::video::ui::AnalyzerTab::Resources);
+        // Row 1 is the bitmap (registry order: pal first, then screen).
+        app.frame_analyzer_select_resource(1);
+        let panel = app.frame_analyzer_panel.clone().unwrap();
+        assert_eq!(panel.resource_selected, Some(0x2_0000));
+        let view = app.build_frame_analyzer_view(&panel);
+        let resources = view.resources.expect("built while the tab is up");
+        assert_eq!(resources.rows.len(), 2);
+        assert!(
+            resources.rows[0].text.contains("pal"),
+            "{}",
+            resources.rows[0].text
+        );
+        assert!(resources.rows[1].selected);
+        assert_eq!((resources.hidden_above, resources.hidden_below), (0, 0));
+        let crate::video::ui::AnalyzerResourceDetail::Bitmap(preview) =
+            resources.detail.expect("bitmap preview")
+        else {
+            panic!("expected a bitmap detail");
+        };
+        assert_eq!((preview.width, preview.height), (16, 2));
+        // Pixel (0,0) is palette index 1 = red through the registered
+        // palette; its neighbour is index 0 = black.
+        let red = crate::chipset::denise::rgb24_to_rgba8(0x00FF_0000);
+        let black = crate::chipset::denise::rgb24_to_rgba8(0);
+        assert_eq!(preview.pixels[0], red);
+        assert_eq!(preview.pixels[1], black);
+        assert!(preview.note.is_none(), "{:?}", preview.note);
+
+        // An out-of-range row click changes nothing.
+        app.frame_analyzer_select_resource(9);
+        let panel = app.frame_analyzer_panel.clone().unwrap();
+        assert_eq!(panel.resource_selected, Some(0x2_0000));
+    }
+
+    #[test]
+    fn resources_tab_scrolls_to_reach_a_large_registry() {
+        use winit::keyboard::KeyCode;
+        let mut app = test_app();
+        fit_uaelib(&mut app);
+        // 13 palettes: three more than the table shows at once.
+        for i in 0..13u32 {
+            register(
+                &mut app,
+                0x5000 + i * 0x40,
+                &resource_bytes(
+                    0x2_0000 + i * 0x100,
+                    64,
+                    &format!("pal{i:02}"),
+                    1,
+                    0,
+                    [32, 0, 0],
+                ),
+            );
+        }
+        app.open_frame_analyzer();
+        app.activate_ui_control(super::super::ui::UiControl::AnalyzerTab(
+            super::super::ui::AnalyzerTab::Resources,
+        ));
+        let panel = app.frame_analyzer_panel.clone().unwrap();
+        let view = app.build_analyzer_resources_view(&panel);
+        assert_eq!(
+            view.rows.len(),
+            super::super::ui::ANALYZER_RESOURCE_ROWS_MAX
+        );
+        assert_eq!((view.hidden_above, view.hidden_below), (0, 3));
+        assert!(view.rows[0].text.contains("pal00"));
+
+        // Scrolling down re-windows the table; the hint counts flip.
+        app.ui_handle_frame_analyzer_key(KeyCode::PageDown);
+        let panel = app.frame_analyzer_panel.clone().unwrap();
+        let view = app.build_analyzer_resources_view(&panel);
+        assert_eq!((view.hidden_above, view.hidden_below), (3, 0));
+        assert!(
+            view.rows.last().unwrap().text.contains("pal12"),
+            "the tail of the registry is reachable"
+        );
+
+        // A row click resolves through the same scroll window the rows
+        // were drawn with: row 0 is now pal03.
+        app.frame_analyzer_select_resource(0);
+        let panel = app.frame_analyzer_panel.clone().unwrap();
+        assert_eq!(panel.resource_selected, Some(0x2_0300));
+
+        // The scroll clamps at both ends.
+        app.ui_handle_frame_analyzer_key(KeyCode::ArrowDown);
+        assert_eq!(
+            app.frame_analyzer_panel.as_ref().unwrap().resource_scroll,
+            3
+        );
+        for _ in 0..20 {
+            app.ui_handle_frame_analyzer_key(KeyCode::ArrowUp);
+        }
+        assert_eq!(
+            app.frame_analyzer_panel.as_ref().unwrap().resource_scroll,
+            0
+        );
+    }
+
+    #[test]
+    fn resource_presets_are_capped_so_the_machine_windows_survive() {
+        let mut app = test_app();
+        fit_uaelib(&mut app);
+        for i in 0..6u32 {
+            register(
+                &mut app,
+                0x5000 + i * 0x40,
+                &resource_bytes(
+                    0x2_0000 + i * 0x100,
+                    64,
+                    &format!("res{i}"),
+                    1,
+                    0,
+                    [32, 0, 0],
+                ),
+            );
+        }
+        let presets = super::super::analyzer_heat_presets(app.emu.bus());
+        let labels: Vec<&str> = presets.iter().map(|p| p.label.as_str()).collect();
+        assert!(labels.contains(&"res3"), "{labels:?}");
+        assert!(
+            !labels.contains(&"res4"),
+            "only the first four resources become presets: {labels:?}"
+        );
+        assert_eq!(labels.last(), Some(&"24-bit"), "{labels:?}");
+    }
+
+    #[test]
+    fn a_multibyte_resource_name_truncates_without_panicking() {
+        let mut app = test_app();
+        fit_uaelib(&mut app);
+        // Seven ASCII characters then a two-byte character: a byte-wise
+        // truncate at 8 would split it and panic.
+        register(
+            &mut app,
+            0x5000,
+            &resource_bytes(0x2_0000, 64, "abcdefg\u{00e9}xyz", 1, 0, [32, 0, 0]),
+        );
+        let presets = super::super::analyzer_heat_presets(app.emu.bus());
+        assert!(
+            presets.iter().any(|p| p.label == "abcdefg\u{00e9}"),
+            "eight characters survive, wherever the bytes fall"
+        );
+        app.open_frame_analyzer();
+        app.activate_ui_control(super::super::ui::UiControl::AnalyzerTab(
+            super::super::ui::AnalyzerTab::Resources,
+        ));
+        let panel = app.frame_analyzer_panel.clone().unwrap();
+        let view = app.build_analyzer_resources_view(&panel);
+        assert!(view.rows[0].text.contains("abcdefg"));
+    }
+
+    #[test]
+    fn resources_tab_survives_a_hostile_geometry() {
+        let mut app = test_app();
+        fit_uaelib(&mut app);
+        register(
+            &mut app,
+            0x5000,
+            &resource_bytes(
+                0x2_0000,
+                0xFFFF_FF00,
+                "evil",
+                0,
+                0,
+                [0xFFFF, 0xFFFF, 0xFFFF],
+            ),
+        );
+        app.open_frame_analyzer();
+        app.frame_analyzer_set_tab(crate::video::ui::AnalyzerTab::Resources);
+        app.frame_analyzer_select_resource(0);
+        let panel = app.frame_analyzer_panel.clone().unwrap();
+        let view = app.build_frame_analyzer_view(&panel);
+        let resources = view.resources.expect("built while the tab is up");
+        let crate::video::ui::AnalyzerResourceDetail::Bitmap(preview) =
+            resources.detail.expect("clamped preview")
+        else {
+            panic!("expected a bitmap detail");
+        };
+        assert!(
+            preview.width * preview.height <= crate::video::resource_preview::PREVIEW_MAX_PIXELS
+        );
+        assert!(preview.note.is_some());
+    }
+
+    #[test]
+    fn resources_tab_shows_a_palette_and_a_copperlist_detail() {
+        let mut app = test_app();
+        fit_uaelib(&mut app);
+        {
+            let bus = app.emu.bus_mut();
+            bus.mem.chip_ram[0x3_0000..0x3_0004].copy_from_slice(&[0x0F, 0x00, 0x00, 0x8F]);
+            bus.mem.chip_ram[0x4_0000..0x4_0008]
+                .copy_from_slice(&[0x01, 0x80, 0x0F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE]);
+        }
+        register(
+            &mut app,
+            0x5000,
+            &resource_bytes(0x3_0000, 4, "pal", 1, 0, [2, 0, 0]),
+        );
+        register(
+            &mut app,
+            0x5100,
+            &resource_bytes(0x4_0000, 8, "cop", 2, 0, [0, 0, 0]),
+        );
+        app.open_frame_analyzer();
+        app.frame_analyzer_set_tab(crate::video::ui::AnalyzerTab::Resources);
+
+        app.frame_analyzer_select_resource(0);
+        let panel = app.frame_analyzer_panel.clone().unwrap();
+        let view = app.build_frame_analyzer_view(&panel);
+        let crate::video::ui::AnalyzerResourceDetail::Palette { colours } =
+            view.resources.unwrap().detail.expect("palette detail")
+        else {
+            panic!("expected a palette detail");
+        };
+        assert_eq!(
+            colours,
+            vec![
+                crate::chipset::denise::rgb24_to_rgba8(0x00FF_0000),
+                crate::chipset::denise::rgb24_to_rgba8(0x0000_88FF),
+            ]
+        );
+
+        app.frame_analyzer_select_resource(1);
+        let panel = app.frame_analyzer_panel.clone().unwrap();
+        let view = app.build_frame_analyzer_view(&panel);
+        let crate::video::ui::AnalyzerResourceDetail::Copperlist { lines } =
+            view.resources.unwrap().detail.expect("copper detail")
+        else {
+            panic!("expected a copperlist detail");
+        };
+        assert!(lines[0].starts_with("040000:"), "{}", lines[0]);
+        assert!(lines[0].contains("$DFF180"), "{}", lines[0]);
+    }
+
+    #[test]
+    fn console_dbgres_lists_the_registry() {
+        let mut app = test_app();
+        fit_uaelib(&mut app);
+        register(
+            &mut app,
+            0x5000,
+            &resource_bytes(0x2_0000, 51200, "screen", 0, 1, [320, 256, 5]),
+        );
+        app.open_console();
+        let lines = super::console_run(&mut app, "DBGRES");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(
+            lines[0],
+            "bitmap 'screen': $020000..$02C800  (51200 bytes)  320x256x5 interleaved  frame 7"
+        );
+    }
+
+    #[test]
+    fn console_dbgres_reports_a_missing_trap_and_an_empty_registry() {
+        let mut app = test_app();
+        app.open_console();
+        let lines = super::console_run(&mut app, "DBGRES");
+        assert_eq!(
+            lines,
+            vec!["!uaelib trap not fitted ([emulation] uaelib = false)".to_string()],
+            "the ! prefix marks the line as an error in the pane"
+        );
+        fit_uaelib(&mut app);
+        let lines = super::console_run(&mut app, "DBGRES");
+        assert_eq!(
+            lines,
+            vec!["no resources registered (uaelib debug_register_*)".to_string()]
+        );
     }
 }

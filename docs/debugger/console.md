@@ -14,6 +14,12 @@ Debugger console interface with active breakpoint output.
 Opening the console pauses emulation (`RUN` resumes execution). Closing the
 console restores the previous execution state.
 
+Guest debug output sent through the
+[uaelib trap](../guide/run.md#uaelib-trap)'s `KPrintF` appears in the pane
+as `DBG:` lines while it is open (it always also reaches the host terminal,
+whatever the pane's state). Lines emitted while the pane is closed are not
+replayed: opening the console starts a fresh view of the channel.
+
 Input navigation:
 - `Enter`: Execute command.
 - `Up` / `Down`: Navigate command history.
@@ -70,6 +76,7 @@ Commands are case-insensitive. Addresses and data values use hexadecimal notatio
 | `BLITS` | List all blits started in the traced frame (with control words, size, pointers, and start/end beam positions; requires Frame Analyzer) |
 | `FIND HEXBYTES [START]` | Search CPU-visible memory (RAM and ROM) for byte sequence |
 | `WRITER ADDR` | Query last instruction that modified memory at `ADDR` |
+| `DBGRES` | List the debug resources the guest registered through the uaelib trap (bitmaps, palettes, copper lists); distinct from `RESOURCES`, which lists Exec's OS resource nodes |
 | `HISTORY [N]` (or `H`) | Display recent instruction history |
 | `STACK` (or `BT`) | Heuristic stack trace of recent return addresses |
 | `POKE ADDR VAL` | Write word value to memory |

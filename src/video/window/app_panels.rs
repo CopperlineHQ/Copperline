@@ -1081,6 +1081,9 @@ impl App {
             (ToolPanelKind::FrameAnalyzer, UiControl::AnalyzerHeatPick { x, y }) => {
                 self.frame_analyzer_heat_pick(x, y)
             }
+            (ToolPanelKind::FrameAnalyzer, UiControl::AnalyzerResourceRow(index)) => {
+                self.frame_analyzer_select_resource(index)
+            }
             _ => {}
         }
         self.request_redraw();
@@ -1232,6 +1235,17 @@ impl App {
             ToolPanelKind::FrameAnalyzer => {
                 if self.frame_analyzer_panel.is_some() {
                     self.paused = self.paused_before_analyzer;
+                    // A running profile capture shares the analyzer arming
+                    // (the heat map's ownership pattern): closing the pane
+                    // hands the arming to the capture instead of wiping a
+                    // recording mid-profile.
+                    #[cfg(feature = "control")]
+                    if self.emu.profile_active() {
+                        self.emu.profile_adopt_frame_analyzer();
+                    } else {
+                        self.emu.bus_mut().set_frame_analyzer_enabled(false);
+                    }
+                    #[cfg(not(feature = "control"))]
                     self.emu.bus_mut().set_frame_analyzer_enabled(false);
                     self.sync_live_audio_suspension();
                 }

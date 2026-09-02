@@ -455,6 +455,15 @@ pub fn waveform_file() -> PathBuf {
     )
 }
 
+/// Default directory for a control-protocol profile capture, beside the
+/// instruction traces.
+pub fn profile_dir() -> PathBuf {
+    output(
+        |p, h| p.traces_dir(h),
+        format!("copperline-profile-{}", epoch_stamp()),
+    )
+}
+
 /// Default name for an instruction trace. The debugger console and the
 /// control protocol both start traces, and each had its own copy of this;
 /// they now cannot drift.

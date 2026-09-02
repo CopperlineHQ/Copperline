@@ -55,6 +55,10 @@ pub struct CliArgs {
     /// not the `gdb` feature is compiled in; rejected at validation when
     /// it is not, like the control flags.
     pub gdb: Option<String>,
+    /// `--gdb-gui ADDR`: attach a GDB remote-protocol server to the
+    /// normal windowed session instead of owning the machine, the way
+    /// `--control-gui` attaches the control server.
+    pub gdb_gui: Option<String>,
     /// `--control ADDR`: run the headless Copperline Control Protocol
     /// server (JSON-RPC over loopback TCP), pausing at reset until a
     /// client resumes. `--control-token`/`--control-info` refine it.
@@ -344,6 +348,7 @@ where
     let mut load_state: Option<PathBuf> = None;
     let mut benchmark_until: Option<f32> = None;
     let mut gdb: Option<String> = None;
+    let mut gdb_gui: Option<String> = None;
     let mut control_listen: Option<String> = None;
     let mut control_gui_listen: Option<String> = None;
     let mut control_token: Option<String> = None;
@@ -1016,6 +1021,12 @@ where
                     .ok_or_else(|| anyhow!("--gdb requires ADDR, :PORT, or PORT"))?;
                 gdb = Some(listen);
             }
+            "--gdb-gui" => {
+                let listen = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--gdb-gui requires ADDR, :PORT, or PORT"))?;
+                gdb_gui = Some(listen);
+            }
             "--control" => {
                 let listen = args
                     .next()
@@ -1267,6 +1278,7 @@ where
         load_state,
         benchmark_until,
         gdb,
+        gdb_gui,
         control: control_listen,
         control_gui: control_gui_listen,
         control_token,
@@ -1424,6 +1436,7 @@ fn print_help() {
          \x20                            time SECS, report counters, then exit\n  \
          --gdb ADDR                     run a headless GDB remote server on ADDR,\n  \
          \x20                            :PORT, or PORT; port-only forms bind 127.0.0.1\n  \
+         --gdb-gui ADDR                 attach the GDB remote server to the normal window\n  \
          --control ADDR                 run the headless JSON-RPC control server on ADDR\n  \
          \x20                            (port 0 picks a free port; see docs/debugger/control.md)\n  \
          --control-gui ADDR             attach the control server to the normal window\n  \

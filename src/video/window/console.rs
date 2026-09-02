@@ -212,7 +212,7 @@ const CONSOLE_HELP: &[&str] = &[
     "            catchtask [NAME]   catchalert   breaks (list)   clearbreaks",
     "inspect:    status  regs/r  mem/m ADDR [BYTES]  dis/d [ADDR] [N]",
     "            copper [pc|ADDR] [N]   custom   blits   find HEX [START]",
-    "            writer ADDR",
+    "            writer ADDR   dbgres",
     "            history/h [N]   stack/bt",
     "os:         tasks  task [ADDR|NAME]  execbase  memlist  segments",
     "            libs  devs  resources  ports  guru [CODE]",
@@ -580,6 +580,7 @@ impl App {
             }
             "PORTS" => ConsoleOutcome::lines(self.console_os_list(crate::amigaos::OsList::Ports)),
             "SEGMENTS" => ConsoleOutcome::lines(self.console_segments()),
+            "DBGRES" => ConsoleOutcome::lines(self.console_debug_resources()),
             "CATCHTASK" => {
                 if args.is_empty() {
                     self.emu.machine.ui_set_task_catch(None);
@@ -1308,6 +1309,60 @@ impl App {
                 lines
             }
         }
+    }
+
+    /// DBGRES: the debug resources the guest registered through the
+    /// uaelib trap (bitmaps, palettes, copper lists; crate::uaelib) --
+    /// distinct from RESOURCES, which lists Exec's OS resource nodes.
+    fn console_debug_resources(&self) -> Vec<String> {
+        use crate::uaelib::{
+            ResourceKind, RESOURCE_FLAG_HAM, RESOURCE_FLAG_INTERLEAVED, RESOURCE_FLAG_MASKED,
+        };
+        let Some(uaelib) = self.emu.bus().uaelib.as_ref() else {
+            return vec!["!uaelib trap not fitted ([emulation] uaelib = false)".to_string()];
+        };
+        let resources = uaelib.resources();
+        if resources.is_empty() {
+            return vec!["no resources registered (uaelib debug_register_*)".to_string()];
+        }
+        resources
+            .iter()
+            .map(|r| {
+                let mut line = format!(
+                    "{} '{}': ${:06X}..${:06X}  ({} bytes)",
+                    r.kind_name(),
+                    r.name,
+                    r.address,
+                    r.address.saturating_add(r.size),
+                    r.size
+                );
+                match r.kind {
+                    ResourceKind::Bitmap {
+                        width,
+                        height,
+                        planes,
+                    } => {
+                        line.push_str(&format!("  {width}x{height}x{planes}"));
+                        if r.flags & RESOURCE_FLAG_INTERLEAVED != 0 {
+                            line.push_str(" interleaved");
+                        }
+                        if r.flags & RESOURCE_FLAG_MASKED != 0 {
+                            line.push_str(" masked");
+                        }
+                        if r.flags & RESOURCE_FLAG_HAM != 0 {
+                            line.push_str(" ham");
+                        }
+                    }
+                    ResourceKind::Palette { entries } => {
+                        line.push_str(&format!("  {entries} entries"));
+                    }
+                    ResourceKind::Copperlist => {}
+                    ResourceKind::Unknown(code) => line.push_str(&format!("  type {code}")),
+                }
+                line.push_str(&format!("  frame {}", r.registered_frame));
+                line
+            })
+            .collect()
     }
 
     /// Run `walk` against a validated ExecBase using peeks over the bus,

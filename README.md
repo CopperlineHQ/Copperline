@@ -16,7 +16,7 @@ It boots out of the box with the bundled open-source AROS Kickstart replacement,
 - **Storage and media**: Floppy disk images (ADF, ADZ, DMS, IPF, SCP), physical floppy drives via Greaseweazle (FluxBridge), IDE (Gayle/A4000), SCSI (A2091, A3000, A4091), CD-ROM, and host directory filesystem mounting.
 - **Audio and video**: 4-channel Paula audio, RTG graphics cards (Picasso II/II+, Z3660), host MIDI in/out bridging, and built-in Roland MT-32 and General MIDI synthesis.
 - **Expansion and networking**: Zorro II/III autoconfig, A2065 Ethernet, host-backed bsdsocket.library, and sandboxed WebAssembly expansion plugins.
-- **Debugging and automation**: In-window interactive debugger with reverse stepping, signal waveform export (VCD), GDB remote stub, deterministic save states, headless scripting, and a JSON-RPC control protocol (`copperline-ctl`).
+- **Debugging and automation**: In-window interactive debugger with reverse stepping, signal waveform export (VCD), GDB remote stub, deterministic save states, headless scripting, and a JSON-RPC control protocol (`copperline-ctl`, also served as MCP tools for coding agents by `copperline-ctl --mcp`).
 - **Freezer cartridge**: The bundled HRTMon monitor as an Action Replay-style cartridge (`--cartridge hrtmon`): freeze any running program into a system monitor from the menu, a hotkey, a headless `--freeze-after`, or the control protocol.
 - **Direct launching**: Boot directly into WHDLoad game packages (`--whdload`) or host-built Amiga executables (`--run`), with a WinUAE-compatible `uaelib` trap so cross-compiler workflows can toggle warp, log, and register debug resources from the guest.
 - **WebAssembly build**: Run directly in modern web browsers at [copperline.dev/try](https://copperline.dev/try/).
