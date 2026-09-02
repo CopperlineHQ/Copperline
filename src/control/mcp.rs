@@ -40,6 +40,11 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "
 /// for the machine to land on a quantum boundary and reply.
 const PAUSE_GRACE: Duration = Duration::from_secs(30);
 
+/// Once the stop has landed, how long the bridge waits for the pause's
+/// own reply (the server writes it right behind the stop) before
+/// forgetting the id, so a later arrival is dropped rather than kept.
+const PAUSE_REPLY_GRACE: Duration = Duration::from_millis(50);
+
 /// Default `events_next` wait.
 const DEFAULT_EVENT_WAIT: Duration = Duration::from_secs(1);
 
@@ -541,6 +546,13 @@ const NO_SESSION: &str = "no session attached; call session_launch or session_at
 
 /// Send a resume verb and wait `wait` for its stop; on expiry, pause the
 /// machine and return the stop that produces.
+///
+/// Every id this opens is answered or forgotten before it returns: the
+/// server answers the pause with the same stop position right behind the
+/// stop, so the bridge takes that reply when it is prompt and forgets the
+/// id otherwise (the reader then drops a late arrival), and a resume
+/// still unanswered after `PAUSE_GRACE` is forgotten the same way. The
+/// pending map therefore cannot grow across timed resumes.
 fn resume_with_wait(
     bridge: &mut Bridge,
     method: &str,
@@ -550,9 +562,20 @@ fn resume_with_wait(
     let id = bridge.send(method, params)?;
     match bridge.wait(id, Some(wait))? {
         Reply::TimedOut => {
-            let pause_id = bridge.send("pause", Value::Null)?;
-            let reply = bridge.wait(id, Some(PAUSE_GRACE))?;
-            let _ = bridge.wait(pause_id, Some(Duration::from_millis(1)));
+            let pause_id = match bridge.send("pause", Value::Null) {
+                Ok(pause_id) => pause_id,
+                Err(e) => {
+                    bridge.forget(id);
+                    return Err(e);
+                }
+            };
+            let reply = bridge.wait(id, Some(PAUSE_GRACE));
+            let _ = bridge.wait(pause_id, Some(PAUSE_REPLY_GRACE));
+            bridge.forget(pause_id);
+            let reply = reply?;
+            if reply == Reply::TimedOut {
+                bridge.forget(id);
+            }
             Ok(match reply {
                 Reply::Ok(mut stop) => {
                     stop["bridge"] = json!({"paused_after_ms": wait.as_millis() as u64});
@@ -781,7 +804,10 @@ pub fn run_stdio(attach: Option<Bridge>) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control::bridge::test_support::{hello_reply, scripted_server};
     use crate::control::headless::spawn_test_session;
+    use std::net::TcpListener;
+    use std::sync::Mutex;
     use std::thread::JoinHandle;
 
     fn request(id: u64, method: &str, params: Value) -> String {
@@ -1065,6 +1091,70 @@ mod tests {
         let result = call(&mut server, 6, "continue", json!({"wait_ms": 0}));
         assert_eq!(result["isError"], true);
         close(server, handle);
+    }
+
+    #[test]
+    fn a_late_pause_reply_leaves_nothing_pending() {
+        // A scripted server that never stops on its own: `continue` gets
+        // no reply until `pause` arrives, which is answered with the stop
+        // for the resume only; the pause's own reply is held back until
+        // the next request, well past the bridge's grace for it.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ids = Mutex::new((None::<Value>, None::<Value>));
+        let server = scripted_server(listener, move |req| {
+            if let Some(hello) = hello_reply(req) {
+                return vec![hello];
+            }
+            let mut ids = ids.lock().unwrap();
+            let stop = json!({"reason": "pause", "frame": 7});
+            match req["method"].as_str() {
+                Some("continue") => {
+                    ids.0 = Some(req["id"].clone());
+                    vec![]
+                }
+                Some("pause") => {
+                    ids.1 = Some(req["id"].clone());
+                    vec![proto::ok_line(
+                        ids.0.as_ref().expect("continue first"),
+                        stop,
+                    )]
+                }
+                Some("status") => {
+                    let mut lines = Vec::new();
+                    if let Some(pause_id) = ids.1.take() {
+                        lines.push(proto::ok_line(&pause_id, stop));
+                    }
+                    lines.push(proto::ok_line(&req["id"], json!({"frame": 7})));
+                    lines
+                }
+                _ => vec![],
+            }
+        });
+        let mut bridge = Bridge::connect(&addr.to_string(), "ok").unwrap();
+        for round in 0..3 {
+            let reply = resume_with_wait(
+                &mut bridge,
+                "continue",
+                Value::Null,
+                Duration::from_millis(20),
+            )
+            .unwrap();
+            let Reply::Ok(stop) = reply else {
+                panic!("round {round}: {reply:?}");
+            };
+            assert_eq!(stop["reason"], "pause");
+            assert_eq!(stop["bridge"]["paused_after_ms"], 20);
+            assert_eq!(bridge.outstanding(), 0, "round {round}");
+            // The pause reply lands now, late, and is dropped unread.
+            assert_eq!(
+                bridge.call("status", Value::Null).unwrap(),
+                Reply::Ok(json!({"frame": 7}))
+            );
+            assert_eq!(bridge.outstanding(), 0, "round {round}");
+        }
+        bridge.close();
+        server.join().unwrap();
     }
 
     #[test]

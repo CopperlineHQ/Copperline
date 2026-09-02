@@ -208,6 +208,18 @@ impl Bridge {
         self.wait(id, None)
     }
 
+    /// Stop waiting for `id`: its pending entry is dropped, so a reply
+    /// that arrives later is discarded by the reader rather than kept for
+    /// a waiter that never comes. A no-op once the reply has been taken.
+    pub fn forget(&self, id: u64) {
+        self.shared.lock().pending.remove(&id);
+    }
+
+    /// Requests sent and neither answered nor forgotten.
+    pub fn outstanding(&self) -> usize {
+        self.shared.lock().pending.len()
+    }
+
     /// The next queued notification, waiting up to `timeout` for one.
     pub fn next_event(&self, timeout: Duration) -> Option<Value> {
         let deadline = Instant::now() + timeout;
@@ -291,6 +303,8 @@ fn read_loop(mut reader: BufReader<TcpStream>, shared: Arc<Shared>) {
             }
             state.events.push_back(msg);
         } else if let Some(id) = msg.get("id").and_then(Value::as_u64) {
+            // A reply to a forgotten id (a wait that timed out) has no
+            // taker and is dropped here rather than parked in the map.
             if let Some(slot) = state.pending.get_mut(&id) {
                 *slot = Some(msg);
             }
@@ -498,16 +512,18 @@ pub fn launch(spec: &LaunchSpec) -> Result<(Bridge, Launched), String> {
     }
 }
 
+/// Scripted control servers for the bridge's and the MCP server's tests.
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
     use std::io::{BufRead, Write};
     use std::net::TcpListener;
 
-    /// A scripted server: answers hello, then replies to each request
-    /// per `script` (id -> reply line builder), interleaving the given
-    /// notifications before the reply.
-    fn scripted_server(
+    /// A scripted server on `listener`: `respond` maps each request to
+    /// the lines to send back (replies and notifications, in order, or
+    /// nothing) until the client closes. Token `ok` authenticates; see
+    /// [`hello_reply`].
+    pub(crate) fn scripted_server(
         listener: TcpListener,
         respond: impl Fn(&Value) -> Vec<String> + Send + 'static,
     ) -> JoinHandle<()> {
@@ -528,7 +544,9 @@ mod tests {
         })
     }
 
-    fn hello_reply(req: &Value) -> Option<String> {
+    /// The `hello` reply for a scripted server, `None` for any other
+    /// request.
+    pub(crate) fn hello_reply(req: &Value) -> Option<String> {
         (req["method"] == "hello").then(|| {
             proto::ok_line(
                 &req["id"],
@@ -536,6 +554,13 @@ mod tests {
             )
         })
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::{hello_reply, scripted_server};
+    use super::*;
+    use std::net::TcpListener;
 
     #[test]
     fn connects_authenticates_and_routes_replies_and_events() {
@@ -583,6 +608,61 @@ mod tests {
             Reply::TimedOut
         );
         assert!(bridge.next_event(Duration::from_millis(10)).is_none());
+        bridge.close();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_forgotten_request_s_late_reply_is_dropped() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        // `slow` is never answered on its own: its reply goes out late,
+        // ahead of the next request's, once the waiter has given up.
+        let held = Mutex::new(None::<Value>);
+        let server = scripted_server(listener, move |req| {
+            if let Some(hello) = hello_reply(req) {
+                return vec![hello];
+            }
+            let mut held = held.lock().unwrap();
+            match req["method"].as_str() {
+                Some("slow") => {
+                    *held = Some(req["id"].clone());
+                    vec![]
+                }
+                Some("status") => {
+                    let mut lines = Vec::new();
+                    if let Some(id) = held.take() {
+                        lines.push(proto::ok_line(&id, json!({"late": true})));
+                    }
+                    lines.push(proto::ok_line(&req["id"], json!({"frame": 3})));
+                    lines
+                }
+                _ => vec![],
+            }
+        });
+        let mut bridge = Bridge::connect(&addr.to_string(), "ok").unwrap();
+        for round in 0..3 {
+            let id = bridge.send("slow", Value::Null).unwrap();
+            assert_eq!(
+                bridge.wait(id, Some(Duration::from_millis(10))).unwrap(),
+                Reply::TimedOut
+            );
+            assert_eq!(bridge.outstanding(), 1, "round {round}");
+            bridge.forget(id);
+            assert_eq!(bridge.outstanding(), 0, "round {round}");
+            assert_eq!(
+                bridge.call("status", Value::Null).unwrap(),
+                Reply::Ok(json!({"frame": 3}))
+            );
+            assert_eq!(
+                bridge.outstanding(),
+                0,
+                "round {round}: the late reply must not be kept"
+            );
+        }
+        // Forgetting an answered or unknown id is harmless.
+        bridge.forget(9999);
+        assert_eq!(bridge.outstanding(), 0);
         bridge.close();
         server.join().unwrap();
     }
