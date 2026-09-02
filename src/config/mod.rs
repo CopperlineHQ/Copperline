@@ -3061,6 +3061,14 @@ impl ConfigOverrides {
         }
         if let Some(model) = &self.cartridge {
             raw.cartridge.model = Some(model.clone());
+            // `--cartridge none` unfits the cartridge outright, so an image
+            // the config file named goes with it: left in place, validation
+            // would reject the rom as having no cartridge to apply to. Any
+            // other value (a model, or a misspelling) keeps the file's image
+            // for validation to pair with the model or report.
+            if matches!(CartridgeConfig::parse_model(model), Ok(None)) {
+                raw.cartridge.rom = None;
+            }
         }
     }
 }

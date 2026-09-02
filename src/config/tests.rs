@@ -3646,6 +3646,43 @@ fn cartridge_cli_override_matches_the_config_field() -> Result<()> {
     Ok(())
 }
 
+/// `--cartridge` layered over a config file that names its own image:
+/// `none` unfits the cartridge and drops the inherited image with it
+/// (validation would otherwise reject an image with no cartridge), while a
+/// model keeps the file's image rather than falling back to the bundled
+/// one.
+#[test]
+fn cartridge_none_override_clears_an_inherited_image() -> Result<()> {
+    use crate::cartridge::CartridgeModel;
+    use std::path::Path;
+    let file = "[cartridge]\nmodel = \"hrtmon\"\nrom = \"/roms/hrtmon.rom\"\n";
+    let layered = |cartridge: &str| -> Result<Config> {
+        let mut raw: RawConfig = toml::from_str(file)?;
+        ConfigOverrides {
+            cartridge: Some(cartridge.to_string()),
+            ..ConfigOverrides::default()
+        }
+        .apply_to(&mut raw);
+        raw.try_into()
+    };
+
+    let cfg = layered("none")?;
+    assert!(!cfg.cartridge.fitted());
+    assert_eq!(cfg.cartridge.rom, None);
+
+    let cfg = layered("hrtmon")?;
+    assert_eq!(cfg.cartridge.model, Some(CartridgeModel::Hrtmon));
+    assert_eq!(
+        cfg.cartridge.rom.as_deref(),
+        Some(Path::new("/roms/hrtmon.rom"))
+    );
+
+    // A misspelt model is still the parser's to report, image or not.
+    let err = layered("actionreplay").unwrap_err();
+    assert!(err.to_string().contains("unknown cartridge model"), "{err}");
+    Ok(())
+}
+
 #[test]
 fn mhi_is_absent_by_default_and_fits_when_enabled() -> Result<()> {
     assert!(!parse_config("")?.mhi);
