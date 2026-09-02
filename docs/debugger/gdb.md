@@ -36,11 +36,12 @@ window instead, the way `--control-gui` attaches the control server:
   windowed frame loop. Points the window's own debugger set are never
   touched, and a detach removes exactly what the client installed.
 - A stop while the client's `continue` is outstanding answers the
-  client; any other stop (a GUI breakpoint, the pause hotkey) opens the
-  local debugger window as usual.
+  client; any other debug stop (a GUI breakpoint, a watchpoint) opens
+  the local debugger window as usual, and a plain pause from the window
+  just pauses.
 - `--run` break-at-entry works exactly as with `--gdb` (below).
-- `--gdb-gui` cannot be combined with `--gdb`, `--control`, or
-  `--control-gui`.
+- `--gdb-gui` cannot be combined with `--gdb`, `--control`,
+  `--control-gui`, or `--benchmark-until`.
 
 Stock GDB frontends debug either mode: VS Code's cppdbg configuration
 (`"MIMode": "gdb"`, `"miDebuggerServerAddress": "localhost:2345"`,

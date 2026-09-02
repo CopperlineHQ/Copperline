@@ -74,7 +74,11 @@ impl GdbBreaks {
         let desired: Vec<u32> = core.breakpoints.iter().map(|&a| a & mask).collect();
         self.pc.retain(|&addr| {
             if desired.contains(&addr) {
-                return true;
+                // The GUI may have toggled our point off meanwhile;
+                // dropping the stale ownership entry lets the insertion
+                // pass restore it. The client's acknowledged break state
+                // is authoritative for its own points.
+                return emu.machine.ui_breaks().is_breakpoint(addr);
             }
             if emu.machine.ui_breaks().is_breakpoint(addr) {
                 emu.machine.ui_set_breakpoint(addr, None, 0);
@@ -127,7 +131,9 @@ impl GdbBreaks {
         };
         self.watch_words.retain(|&addr| {
             if desired_words.contains(&addr) {
-                return true;
+                // Same rule as PC breakpoints: a GUI-removed word comes
+                // back through the insertion pass.
+                return word_watched(emu, addr);
             }
             if word_watched(emu, addr) {
                 emu.machine.ui_toggle_watch(addr);
@@ -149,7 +155,8 @@ impl GdbBreaks {
             |emu: &Emulator, off: u16| emu.machine.ui_breaks().reg_watches.contains(&off);
         self.reg_watches.retain(|&off| {
             if core.reg_watches.contains(&off) {
-                return true;
+                // Same rule: a GUI-removed watch comes back below.
+                return reg_watched(emu, off);
             }
             if reg_watched(emu, off) {
                 emu.machine.ui_toggle_reg_watch(off);
@@ -187,6 +194,12 @@ impl GdbBreaks {
                 self.loadseg = None;
             }
             (Some(_), false, false) => self.loadseg = None, // GUI beat us to it
+            (Some(_), true, false) => {
+                // The GUI removed our catch while the client still wants
+                // it; restore it, like the other break kinds.
+                emu.machine.ui_toggle_loadseg_catch(filter.clone());
+                self.loadseg = Some(filter);
+            }
             (None, true, false) => {
                 emu.machine.ui_toggle_loadseg_catch(filter.clone());
                 self.loadseg = Some(filter);
@@ -365,6 +378,13 @@ impl App {
                 self.gdb_send_packet("E01");
             }
             Ok(CoreReply::Packet(reply)) => {
+                if packet.starts_with('M') {
+                    // The core refreshed its own watch snapshots; the
+                    // machine-installed word watches need the same, or
+                    // the write itself fires them on the next step
+                    // (CCP's memory.write does likewise).
+                    self.emu.machine.ui_rebaseline_watches();
+                }
                 self.gdb_sync_machine_debug_state();
                 self.gdb_flush_console();
                 self.gdb_send_packet(&reply);

@@ -10036,6 +10036,63 @@ mod gdb_drain {
     }
 
     #[test]
+    fn a_gui_removed_gdb_breakpoint_is_restored_on_the_next_sync() {
+        let (mut app, cmd_tx, frame_rx) = attached_app();
+        app.drain_gdb();
+        let target = app.emu.machine.pc().wrapping_add(8) & 0x00FF_FFFF;
+        packet(&cmd_tx, &format!("Z0,{target:x},2"));
+        app.drain_gdb();
+        assert!(app.emu.machine.ui_breaks().is_breakpoint(target));
+        // The GUI toggles the client's point off; the client's
+        // acknowledged break state is authoritative for its own points,
+        // so the next packet's sync restores it.
+        app.emu.machine.ui_set_breakpoint(target, None, 0);
+        assert!(!app.emu.machine.ui_breaks().is_breakpoint(target));
+        packet(&cmd_tx, "qC");
+        app.drain_gdb();
+        assert!(
+            app.emu.machine.ui_breaks().is_breakpoint(target),
+            "an acknowledged Z0 point must not silently stay gone"
+        );
+        // And a z0 removal still takes it out for good.
+        packet(&cmd_tx, &format!("z0,{target:x},2"));
+        app.drain_gdb();
+        assert!(!app.emu.machine.ui_breaks().is_breakpoint(target));
+        let _ = frames(&frame_rx);
+    }
+
+    #[test]
+    fn a_memory_write_packet_does_not_fire_the_machine_word_watch() {
+        let (mut app, cmd_tx, frame_rx) = attached_app();
+        app.drain_gdb();
+        // The fixture boots with the reset ROM overlay on, which shadows
+        // low chip RAM; drop it so the write lands.
+        app.emu.bus_mut().mem.overlay = false;
+        let addr = 0x0005_0000u32;
+        packet(&cmd_tx, &format!("Z2,{addr:x},2"));
+        app.drain_gdb();
+        assert!(app
+            .emu
+            .machine
+            .ui_breaks()
+            .watches
+            .iter()
+            .any(|w| w.addr == addr));
+        let _ = frames(&frame_rx);
+        // Writing the watched word through the stub must not fire the
+        // watch on the next step: the machine baselines are refreshed
+        // like CCP's memory.write does.
+        packet(&cmd_tx, &format!("M{addr:x},2:beef"));
+        packet(&cmd_tx, "s");
+        app.drain_gdb();
+        assert_eq!(
+            frames(&frame_rx),
+            vec![frame("OK"), frame("T05thread:1;")],
+            "the stub's own write must not report a watchpoint hit"
+        );
+    }
+
+    #[test]
     fn qxfer_libraries_read_arms_the_machine_loadseg_catch() {
         let (mut app, cmd_tx, frame_rx) = attached_app();
         app.drain_gdb();
