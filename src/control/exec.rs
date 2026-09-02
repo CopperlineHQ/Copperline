@@ -1966,6 +1966,11 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
         },
         CoreOp::WaveformStatus => Ok(waveform_status_value(emu)),
         CoreOp::ProfileStart { options } => {
+            if emu.profile_active() {
+                return Err(CtlError::invalid_state(
+                    "a profile capture is already running; call profile.stop first",
+                ));
+            }
             emu.profile_start(options.clone())
                 .map_err(|e| CtlError::io(format!("starting profile: {e}")))?;
             Ok(emu.profile_status_value())
@@ -3558,6 +3563,31 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    #[test]
+    fn profile_start_while_active_is_refused() {
+        let mut emu = uaelib_emulator();
+        let mut ctx = SessionCtx::new();
+        let options = crate::profile::ProfileOptions {
+            path: profile_scratch("refused"),
+            frames: 3,
+            slots: false,
+            screenshots: crate::profile::ScreenshotMode::None,
+            pc_samples: false,
+        };
+        let start = CoreOp::ProfileStart {
+            options: options.clone(),
+        };
+        exec_core(&mut emu, &mut ctx, &start).unwrap();
+        // A second start must not close the running capture with an
+        // invented summary; the caller stops it first.
+        let err = exec_core(&mut emu, &mut ctx, &start).unwrap_err();
+        assert_eq!(err.code, proto::INVALID_STATE);
+        assert!(err.message.contains("profile.stop"), "{}", err.message);
+        let status = exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStatus).unwrap();
+        assert_eq!(status["active"], true, "the running capture survives");
+        exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStop).unwrap();
     }
 
     #[test]

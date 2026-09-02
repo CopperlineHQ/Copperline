@@ -3,7 +3,9 @@
 `profile.start` over the [control protocol](control.md) brackets a
 per-frame capture the way `trace.start` and `waveform.start` bracket
 theirs, for external profiler views (a VS Code extension, a notebook, a
-script):
+script). One capture runs at a time: `profile.start` while one is
+active is refused -- `profile.stop` it first, so the running capture
+gets its real summary.
 
 ```text
 profile.start {"path": "out/profile", "frames": 500, "slots": true,
@@ -42,7 +44,7 @@ One object per committed frame, in order:
 | `blitter` | `busy_cck` the blitter wanted the bus, and `starve_cck` per owner that held it off. |
 | `blits` | Blits started in the frame (capped at 64): control words, size, pointers, start/end beam positions. |
 | `partial` | The trace did not cover the whole frame (armed mid-frame). |
-| `slots` | With `"slots": true: one string per raster row, the per-colour-clock owner grid run-length encoded as `<count><code>` runs (`"12R3B497."`). The single-character codes match vAmiga's DMA debugger (`R` refresh, `B` bitplane, `S` sprite, `D` disk, `A` audio, `C` copper, `L` blitter, `P` CPU, `.` idle). |
+| `slots` | With `"slots": true`: one string per raster row, the per-colour-clock owner grid run-length encoded as `<count><code>` runs (`"12R3B497."`). The single-character codes match vAmiga's DMA debugger (`R` refresh, `B` bitplane, `S` sprite, `D` disk, `A` audio, `C` copper, `L` blitter, `P` CPU, `.` idle). |
 | `screenshot`, `digest` | With `"screenshots": "every"`: the frame's PNG (written through the same side-effect-free renderer as `capture.screenshot`, so it is mode-identical) and its FNV-1a64 digest. |
 
 A reverse step or a state load moves the timeline backwards; the stream

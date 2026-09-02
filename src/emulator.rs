@@ -558,15 +558,20 @@ impl Emulator {
         )
     }
 
-    /// Start (or replace) a profile capture. The frame analyzer's
-    /// per-slot trace feeds the records, so it is armed for the whole
-    /// session -- which blocks run-ahead, the analyzer's existing rule --
-    /// and disarmed at stop only if the capture armed (or adopted) it.
+    /// Start a profile capture. Refused while one is running: closing
+    /// the active capture here would have to invent its summary metadata
+    /// (machine descriptor, resources) and could swallow its final write
+    /// errors -- the caller stops it first, with a real summary. The
+    /// frame analyzer's per-slot trace feeds the records, so it is armed
+    /// for the whole session -- which blocks run-ahead, the analyzer's
+    /// existing rule -- and disarmed at stop only if the capture armed
+    /// (or adopted) it.
     #[cfg(feature = "control")]
     pub fn profile_start(&mut self, opts: crate::profile::ProfileOptions) -> std::io::Result<()> {
         if self.profile.is_some() {
-            // A replaced capture is closed properly, summary and all.
-            let _ = self.profile_stop(serde_json::Value::Null, serde_json::json!([]));
+            return Err(std::io::Error::other(
+                "a profile capture is already running; stop it first",
+            ));
         }
         let already = self.bus().frame_analyzer_enabled();
         self.bus_mut().set_frame_analyzer_enabled(true);

@@ -210,6 +210,13 @@ impl App {
                     ctl.ctx.powered_on = powered_on;
                     exec::exec_core(&mut self.emu, &mut ctl.ctx, &op)
                 };
+                // profile.stop removes the capture and disarms the
+                // analyzer it armed before its summary write can fail,
+                // so an open pane wants its trace back on every outcome,
+                // not just success.
+                if matches!(op, CoreOp::ProfileStop) && self.frame_analyzer_panel.is_some() {
+                    self.emu.bus_mut().set_frame_analyzer_enabled(true);
+                }
                 let line = match result {
                     Ok(value) => {
                         // A memory.heatmap request that took effect makes
@@ -218,12 +225,6 @@ impl App {
                         // must no longer release the map when it closes.
                         if matches!(op, CoreOp::HeatMapSet { .. }) {
                             self.heatmap_armed_by_panel = false;
-                        }
-                        // profile.stop disarms the analyzer it armed; an
-                        // open pane still wants its trace, so re-arm for it.
-                        if matches!(op, CoreOp::ProfileStop) && self.frame_analyzer_panel.is_some()
-                        {
-                            self.emu.bus_mut().set_frame_analyzer_enabled(true);
                         }
                         proto::ok_line(&id, value)
                     }
