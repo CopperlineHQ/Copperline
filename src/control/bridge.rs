@@ -21,6 +21,7 @@ use std::io::{BufReader, Write as _};
 use std::net::{Shutdown, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -413,29 +414,48 @@ pub fn resolve_binary(explicit: Option<&Path>) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Per-process launch counter, so launches issued in the same
+/// millisecond (parallel tests, agents opening several sessions at once)
+/// never share a temp-file name.
+static LAUNCH_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Pick the `--control-info` path and create the log file for one launch.
+///
+/// The emulator announces its token on stderr, so the log is readable by
+/// the owner only from the moment it exists, like the info file, and is
+/// never an existing file: a symlink planted under a predictable name in a
+/// shared temp dir would carry the token away. A name that already exists
+/// is simply skipped for the next one in the sequence.
+fn create_launch_files() -> Result<(PathBuf, PathBuf, std::fs::File), String> {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let mut last_err = None;
+    for _ in 0..64 {
+        let seq = LAUNCH_SEQ.fetch_add(1, Ordering::Relaxed);
+        let stamp = format!("copperline-mcp-{}-{millis}-{seq}", std::process::id());
+        let info_path = std::env::temp_dir().join(format!("{stamp}.json"));
+        let log_path = std::env::temp_dir().join(format!("{stamp}.log"));
+        match super::owner_only_create().create_new(true).open(&log_path) {
+            Ok(log) => {
+                let _ = std::fs::remove_file(&info_path);
+                return Ok((info_path, log_path, log));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                last_err = Some(format!("creating {}: {e}", log_path.display()));
+            }
+            Err(e) => return Err(format!("creating {}: {e}", log_path.display())),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| "creating the launch log: no free name".into()))
+}
+
 /// Start a headless emulator with a control server on an ephemeral
 /// loopback port, wait for its endpoint, connect and authenticate.
 pub fn launch(spec: &LaunchSpec) -> Result<(Bridge, Launched), String> {
     let binary = resolve_binary(spec.binary.as_deref());
-    let stamp = format!(
-        "copperline-mcp-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
-    );
-    let info_path = std::env::temp_dir().join(format!("{stamp}.json"));
-    let log_path = std::env::temp_dir().join(format!("{stamp}.log"));
-    let _ = std::fs::remove_file(&info_path);
-    // The emulator announces its token on stderr, so the log is readable
-    // by the owner only from the moment it exists, like the info file,
-    // and is never an existing file: a symlink planted under the
-    // predictable name in a shared temp dir would carry the token away.
-    let log = super::owner_only_create()
-        .create_new(true)
-        .open(&log_path)
-        .map_err(|e| format!("creating {}: {e}", log_path.display()))?;
+    let (info_path, log_path, log) = create_launch_files()?;
     let log_err = log
         .try_clone()
         .map_err(|e| format!("cloning the log handle: {e}"))?;
@@ -457,9 +477,14 @@ pub fn launch(spec: &LaunchSpec) -> Result<(Bridge, Launched), String> {
     let command_line: Vec<String> = std::iter::once(binary.display().to_string())
         .chain(command.get_args().map(|a| a.to_string_lossy().into_owned()))
         .collect();
-    let child = command
-        .spawn()
-        .map_err(|e| format!("starting {}: {e}", binary.display()))?;
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            // Nothing ran, so nothing was logged: leave no empty file behind.
+            let _ = std::fs::remove_file(&log_path);
+            return Err(format!("starting {}: {e}", binary.display()));
+        }
+    };
     let mut launched = Launched {
         child,
         command: command_line,
@@ -731,6 +756,28 @@ mod tests {
             .unwrap_err()
             .contains("reading"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn launches_in_the_same_millisecond_get_distinct_private_files() {
+        // The unit suite runs launch tests in parallel threads of one
+        // process; the temp-file names carry a per-process sequence so
+        // two launches in the same millisecond never race on one path.
+        let (info_a, log_a, _file_a) = create_launch_files().unwrap();
+        let (info_b, log_b, _file_b) = create_launch_files().unwrap();
+        assert_ne!(log_a, log_b);
+        assert_ne!(info_a, info_b);
+        assert!(log_a.is_file() && log_b.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            for log in [&log_a, &log_b] {
+                let mode = std::fs::metadata(log).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600, "{}", log.display());
+            }
+        }
+        std::fs::remove_file(&log_a).ok();
+        std::fs::remove_file(&log_b).ok();
     }
 
     #[test]
