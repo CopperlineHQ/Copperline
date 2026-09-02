@@ -30,18 +30,25 @@ start from a plain `--screenshot-after` run and add breakpoints, watches,
 catches, traces, and dumps one at a time, knowing that each new
 instrument sees the same run the previous one did. The guarantee is held
 by `tests/debugger_transparency.rs`, which boots the bundled ROM twice,
-once with every hook armed, and compares the two machines after every
-frame.
+once with every hook that has a programmatic switch armed (the whole
+breakpoint/watchpoint/catch/trace debugger plus the CPU-level `MEMW`,
+`FC`, `SPREN`, `IRQ`, `DIAG_IPL`, `DIAG_PCHIST` and `DIAG_CRASH`
+observers), and compares the two machines after every frame. The
+bus-level log-only knobs (`DBG_CIA`, `DBG_DSKLEN`, `DBG_BLIT`,
+`DBG_FRAMESTATE`) read the environment at their log sites; they were
+verified by hand the same way (save-state and screenshot hashes at 25 s on
+three workloads, identical with each knob armed).
 
 Two things do move a timeline, and both are documented behaviour rather
 than instrumentation cost:
 
 - A `[cpu] jit` machine (`--jit`) runs the batch/trace core, which bills
   time in coarse batches instead of per instruction. Any armed debug or
-  diagnostic hook needs the per-instruction loop, so the machine drops back
-  to it for the whole run and logs a warning at start-up: the debugged run
-  is then the precise-timing run, not the JIT run. Compare debugged and
-  undebugged runs with JIT off.
+  diagnostic hook (every variable in this chapter's first two sections,
+  `DBG_MEMW` included) needs the per-instruction loop, so the machine
+  drops back to it for the whole run and logs a warning at start-up: the
+  debugged run is then the precise-timing run, not the JIT run. Compare
+  debugged and undebugged runs with JIT off.
 - Model knobs are not observation: `COPPERLINE_IRQ_LATENCY_CCK`,
   `COPPERLINE_DBG_EXTCCK`, the CPU model, and any input script change the
   machine and so change the timeline by design.

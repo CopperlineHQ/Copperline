@@ -11,10 +11,15 @@
 //! instrumentation without changing what it is investigating.
 //!
 //! Two machines boot the bundled AROS ROM side by side from the same
-//! configuration. One is armed with every hook the environment could arm
-//! (chosen so they all fire during the boot), the other is left alone. Both
-//! are stepped frame by frame and fingerprinted after every frame; the first
-//! mismatch names the frame.
+//! configuration. One is armed with every hook that has a programmatic
+//! switch: the whole `Debugger` (watch, breakpoint, exception catch, Alert()
+//! catch, dumps, trace) and the CPU-level diagnostic observers
+//! (`DiagnosticHooks`: MEMW, FC, SPREN, IRQ, IPL split, PC histogram, crash
+//! ring), chosen so they all fire during the boot; the other is left alone.
+//! Both are stepped frame by frame and fingerprinted after every frame; the
+//! first mismatch names the frame. The bus-level log-only knobs (CIA,
+//! DSKLEN, BLIT, FRAMESTATE) read the environment at their log sites and
+//! are covered by the CLI probe recorded in PR #617 instead.
 //!
 //! Asset-free: the bundled AROS ROM boots with an empty DF0. The guest clock
 //! is pinned with a fixed RTC seed so the two builds agree.
@@ -31,6 +36,7 @@ use std::time::Instant;
 
 use copperline::audio::NullSink;
 use copperline::config::Config;
+use copperline::cpu::DiagnosticHooks;
 use copperline::debugger::{Debugger, Watch};
 use copperline::emulator::{build_machine, Emulator};
 use copperline::video::{bitplane, FB_WIDTH, MAX_CANVAS_PIXELS};
@@ -89,6 +95,24 @@ fn armed_debugger(emu: &Emulator) -> Debugger {
     dbg.until_secs = f64::INFINITY;
     dbg.max_hits = u64::MAX;
     dbg
+}
+
+/// The CPU-level diagnostic observers, all on: the single-word CPU write
+/// watch and the frame-counter change log on a low chip-RAM word the boot
+/// rewrites, sprite-enable clear reports, the interrupt log over an open
+/// window, the per-frame IPL cycle split, the PC histogram and the crash
+/// ring. The bus-level log-only knobs (CIA, DSKLEN, BLIT, FRAMESTATE) have
+/// no programmatic switch; the CLI probe on record in PR #617 covers them.
+fn armed_diagnostic_hooks() -> DiagnosticHooks {
+    DiagnosticHooks {
+        memw_addr: Some(0x0000_0400),
+        frame_counter_addr: Some(0x0000_0400),
+        spren_clear: true,
+        irq_window: Some((0.0, f64::INFINITY)),
+        ipl_split: true,
+        pc_histogram: true,
+        crash_ring: true,
+    }
 }
 
 fn fnv1a64_from(mut hash: u64, bytes: &[u8]) -> u64 {
@@ -165,8 +189,9 @@ fn run_side_by_side(plain: &mut Emulator, armed: &mut Emulator) -> anyhow::Resul
 }
 
 /// Arming breakpoints, watchpoints, exception catches, Alert() catching,
-/// memory dumps and an instruction trace leaves every frame of the boot
-/// byte-identical to an undebugged run.
+/// memory dumps, an instruction trace and every CPU-level diagnostic
+/// observer leaves every frame of the boot byte-identical to an undebugged
+/// run.
 #[test]
 fn armed_headless_debugger_leaves_the_timeline_unchanged() {
     if cfg!(debug_assertions) {
@@ -183,6 +208,7 @@ fn armed_headless_debugger_leaves_the_timeline_unchanged() {
     let mut armed = build().expect("armed machine");
     let dbg = armed_debugger(&armed);
     armed.machine.arm_headless_debugger(Some(dbg));
+    armed.machine.arm_diagnostic_hooks(armed_diagnostic_hooks());
     assert!(armed.machine.headless_debugger_armed());
     assert!(!plain.machine.headless_debugger_armed());
 
