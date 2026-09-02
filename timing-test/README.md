@@ -61,9 +61,13 @@ memory bank.
 The probe header compares predicted timings for A4000 models
 (`tt-a4000-060/-040/-030.toml`) with real-hardware measurements from an A4000
 (equipped with BFG9060 68060/50, A3640 68040/25, and a 25 MHz 68030 board).
-Key findings show that basic 68040 execution is currently over-penalized
-~2-2.5x, CPU-slot bridge reads to chip RAM introduce 2.5-3.4 us latency, and
-fast RAM exhibits distinct speed classes on real hardware. The probe detects
+Key findings: basic 68040 execution was over-penalized ~2-2.5x by the old
+scaled-68000 approximation and the 68030 rows land on the 68020 tables (both
+addressed upstream in m68k 0.12: the 030 now runs the MC68020UM tables and
+the 040 its own single-issue pipeline model, see `docs/internals/cpu.md`),
+CPU-slot bridge reads to chip RAM introduce 2.5-3.4 us latency, and fast RAM
+exhibits distinct speed classes on real hardware (both still open on the
+Copperline side). The probe detects
 the CPU model automatically and initializes cache state; on a standard 68000
 it displays only its header signature. Boot the probe from cold and power-cycle
 afterwards, as write benchmarking overwrites memory in each enumerated region.
