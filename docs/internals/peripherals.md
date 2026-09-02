@@ -378,12 +378,18 @@ works unchanged (user-facing description in the uaelib trap section of
   `cfgfile_uaelib_modify` would (pairs, `index` -1, `size` 0 = NUL-terminated,
   `out` cleared) and latches only `warp`; 86 echoes the text on stdout
   (withheld while a run-ahead frame is speculative, like Paula's serial sink)
-  and queues it; 88 keeps the resource registry and the idle accounting
-  (per-frame colour clocks, closed at `begin_new_beam_frame`). Everything
-  else returns 0.
+  and queues it; 88 keeps the resource registry, the idle accounting
+  (per-frame colour clocks, closed at `begin_new_beam_frame`), and the
+  overlay display list (packed signed-short corners clamped into the
+  768x576 space, text read at call time, capped at `OVERLAY_CAP` with the
+  new command dropped and counted; `clear` restarts the list). Everything
+  else returns 0. The window composites the overlay onto the presented
+  display sub-rect after the capture copy (`statusbar::draw_guest_overlay`),
+  so captures stay clean by construction.
 - **State.** The latch image, the pending warp request, the bounded event
-  queue, the registry and the idle accounting are machine state inside
-  `Bus` (save-state version 73): run-ahead and rewind restore them with the
+  queue, the registry, the idle accounting and the overlay display list
+  are machine state inside
+  `Bus` (save-state version 76): run-ahead and rewind restore them with the
   guest that made them. The pending request is drained by the frontends
   once per committed frame (`App::service_uaelib`, the headless control
   server's `emit_events`); the queue by a control-protocol `debug`
@@ -451,7 +457,7 @@ expansion bus and snoops the chip-register writes itself.
   VBR it was delivered under for reverse-debug replay
   (`ReplayAction::Freeze`).
 - **State.** The bank, the shadows, the pending interrupt and the press
-  count are machine state inside `Bus` (save-state version 74): run-ahead,
+  count are machine state inside `Bus` (save-state version 75): run-ahead,
   rewind and save states restore a monitor session with the guest.
 
 ## A2065 Ethernet (`a2065.rs`, `net/`)

@@ -4185,6 +4185,27 @@ mod tests {
     }
 
     #[test]
+    fn guest_overlay_commands_do_not_change_capture_digests() {
+        let mut emu = uaelib_emulator();
+        let mut ctx = SessionCtx::new();
+        let before = exec_core(&mut emu, &mut ctx, &CoreOp::Digest).unwrap();
+        emu.bus_mut().uaelib.as_mut().unwrap().queue_overlay(
+            crate::uaelib::OverlayCmd::FilledRect {
+                l: 0,
+                t: 0,
+                r: 768,
+                b: 576,
+                colour: 0x00FF_0000,
+            },
+        );
+        let after = exec_core(&mut emu, &mut ctx, &CoreOp::Digest).unwrap();
+        assert_eq!(
+            before, after,
+            "the overlay is presentation-only and never in a capture"
+        );
+    }
+
+    #[test]
     fn debug_methods_report_not_found_without_the_trap() {
         let mut emu = test_emulator();
         let mut ctx = SessionCtx::new();

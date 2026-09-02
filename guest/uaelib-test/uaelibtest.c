@@ -198,6 +198,22 @@ void debug_unregister(const void* addr) {
 	debug_cmd(barto_cmd_unregister_resource, (unsigned int)addr, 0, 0);
 }
 
+void debug_clear() {
+	debug_cmd(barto_cmd_clear, 0, 0, 0);
+}
+
+void debug_rect(short left, short top, short right, short bottom, unsigned int color) {
+	debug_cmd(barto_cmd_rect, ((unsigned int)left << 16) | (unsigned short)top, ((unsigned int)right << 16) | (unsigned short)bottom, color);
+}
+
+void debug_filled_rect(short left, short top, short right, short bottom, unsigned int color) {
+	debug_cmd(barto_cmd_filled_rect, ((unsigned int)left << 16) | (unsigned short)top, ((unsigned int)right << 16) | (unsigned short)bottom, color);
+}
+
+void debug_text(short left, short top, const char* text, unsigned int color) {
+	debug_cmd(barto_cmd_text, ((unsigned int)left << 16) | (unsigned short)top, (unsigned int)text, color);
+}
+
 void debug_start_idle() {
 	debug_cmd(barto_cmd_set_idle, 1, 0, 0);
 }
@@ -228,6 +244,11 @@ LONG entry(void)
     debug_register_copperlist((const void *)0x40000, "cop", 1000, 0);
     debug_start_idle();
     debug_stop_idle();
+    // A windowed session shows these over the picture; headless runs
+    // record them as accepted commands.
+    debug_filled_rect(16, 16, 200, 60, 0x224488);
+    debug_rect(12, 12, 204, 64, 0xFFFFFF);
+    debug_text(24, 32, "uaelib overlay", 0xFFFF00);
 
     LONG r86 = 0, r0 = 0, r88 = 0, r82 = 0, r82e = 0;
     char out = 0x55;
