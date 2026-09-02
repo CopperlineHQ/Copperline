@@ -7496,12 +7496,12 @@ mod control_drain {
         (app, cmd_tx, reply_rx)
     }
 
-    fn push(cmd_tx: &Sender<CtlMsg>, id: u64, method: &str, params: Value) {
+    pub(super) fn push(cmd_tx: &Sender<CtlMsg>, id: u64, method: &str, params: Value) {
         let req = parse_method(method, &params).expect("request should parse");
         cmd_tx.send(CtlMsg::Request { id: json!(id), req }).unwrap();
     }
 
-    fn reply(reply_rx: &Receiver<String>) -> Value {
+    pub(super) fn reply(reply_rx: &Receiver<String>) -> Value {
         serde_json::from_str(&reply_rx.try_recv().expect("a reply should be queued"))
             .expect("replies are JSON")
     }
@@ -9774,30 +9774,42 @@ fn programmatic_warp_mutes_audio_but_manual_warp_does_not() {
     assert!(outcome.changed);
     assert!(outcome.note.is_none());
     assert!(!app.emu.paced());
-    assert_eq!(app.warp_hold, Some(WarpSource::Guest));
+    assert!(app.warp_holds.contains(WarpSource::Guest));
     assert_eq!(states.borrow().last(), Some(&true), "guest warp is silent");
 
     // One press of the hotkey ends it: paced and audible again.
     app.toggle_warp();
     assert!(app.emu.paced());
-    assert_eq!(app.warp_hold, None);
+    assert!(app.warp_holds.is_empty());
     assert_eq!(states.borrow().last(), Some(&false));
 
     // The manual toggle warps without a hold and without muting.
     app.toggle_warp();
     assert!(!app.emu.paced());
-    assert_eq!(app.warp_hold, None);
+    assert!(app.warp_holds.is_empty());
     assert_eq!(states.borrow().last(), Some(&false));
     app.toggle_warp();
     assert!(app.emu.paced());
 
-    // Warp off is a complete action whoever asks: a control client's
-    // request releases a guest hold too.
+    // Holds are independent: a control client's warp-off releases only
+    // its own hold, so a guest hold keeps the machine warping (the
+    // outcome says who) until the guest releases it.
     app.set_warp(true, WarpSource::Guest);
     let outcome = app.set_warp(false, WarpSource::Control);
+    assert!(!outcome.changed);
+    assert!(
+        outcome.note.as_deref().is_some_and(|n| n.contains("guest")),
+        "{:?}",
+        outcome.note
+    );
+    assert!(!app.emu.paced());
+    assert!(app.warp_holds.contains(WarpSource::Guest));
+    assert_eq!(states.borrow().last(), Some(&true), "still silent");
+    let outcome = app.set_warp(false, WarpSource::Guest);
     assert!(outcome.changed);
     assert!(app.emu.paced());
-    assert_eq!(app.warp_hold, None);
+    assert!(app.warp_holds.is_empty());
+    assert_eq!(states.borrow().last(), Some(&false));
 }
 
 #[test]
@@ -9813,7 +9825,7 @@ fn power_off_releases_a_programmatic_hold() {
     assert!(!app.emu.paced());
     app.power_off();
     assert!(app.emu.paced(), "the hold goes with the machine");
-    assert_eq!(app.warp_hold, None);
+    assert!(app.warp_holds.is_empty());
 }
 
 /// Control-protocol warp control through the windowed drain.
@@ -9956,7 +9968,7 @@ mod warp_control {
         assert_eq!(reply["headless"], false);
         assert!(reply["note"].is_null());
         assert!(!app.emu.paced());
-        assert_eq!(app.warp_hold, Some(WarpSource::Control));
+        assert!(app.warp_holds.contains(WarpSource::Control));
         assert_eq!(
             states.borrow().last(),
             Some(&true),
@@ -9973,7 +9985,7 @@ mod warp_control {
         assert_eq!(reply["on"], false);
         assert_eq!(reply["source"], "none");
         assert!(app.emu.paced());
-        assert_eq!(app.warp_hold, None);
+        assert!(app.warp_holds.is_empty());
         assert_eq!(states.borrow().last(), Some(&false));
 
         let reply = call(&mut app, &tx, &rx, 3, "warp.get", json!({}));
@@ -10024,7 +10036,7 @@ mod warp_control {
         assert!(ended, "the gate should end within a dozen frames");
         assert!(app.warp_boot.is_none());
         assert!(!app.emu.paced());
-        assert_eq!(app.warp_hold, Some(WarpSource::Control));
+        assert!(app.warp_holds.contains(WarpSource::Control));
         assert_eq!(states.borrow().last(), Some(&true));
         assert!(
             events(&rx, "event.warp").is_empty(),
@@ -10034,7 +10046,7 @@ mod warp_control {
         // The hotkey ends it, and the client hears about it.
         app.toggle_warp();
         assert!(app.emu.paced());
-        assert_eq!(app.warp_hold, None);
+        assert!(app.warp_holds.is_empty());
         assert_eq!(states.borrow().last(), Some(&false));
         let warp = events(&rx, "event.warp");
         assert_eq!(warp.len(), 1);
@@ -10058,7 +10070,7 @@ mod warp_control {
             .request_warp(true);
         assert!(app.service_uaelib(), "pacing changed: the burst breaks");
         assert!(!app.emu.paced());
-        assert_eq!(app.warp_hold, Some(WarpSource::Guest));
+        assert!(app.warp_holds.contains(WarpSource::Guest));
         assert_eq!(states.borrow().last(), Some(&true));
         let warp = events(&rx, "event.warp");
         assert_eq!(warp.len(), 1);
@@ -10075,7 +10087,7 @@ mod warp_control {
             .request_warp(false);
         assert!(app.service_uaelib());
         assert!(app.emu.paced());
-        assert_eq!(app.warp_hold, None);
+        assert!(app.warp_holds.is_empty());
         assert_eq!(states.borrow().last(), Some(&false));
         let warp = events(&rx, "event.warp");
         assert_eq!(warp.len(), 1);
@@ -10088,14 +10100,14 @@ mod warp_control {
         let (mut app, states) = audio_app();
         let (tx, rx) = attach(&mut app);
         call(&mut app, &tx, &rx, 1, "warp.set", json!({"on": true}));
-        assert_eq!(app.warp_hold, Some(WarpSource::Control));
+        assert!(app.warp_holds.contains(WarpSource::Control));
         tx.send(CtlMsg::Disconnected).unwrap();
         app.drain_control();
         assert!(
             app.emu.paced(),
             "a warp the client engaged has no client left to release it"
         );
-        assert_eq!(app.warp_hold, None);
+        assert!(app.warp_holds.is_empty());
         assert_eq!(states.borrow().last(), Some(&false));
     }
 
@@ -10116,7 +10128,7 @@ mod warp_control {
         );
         let reply = call(&mut app, &tx, &rx, 2, "warp.set", json!({"on": true}));
         assert!(reply["note"].is_string());
-        assert_eq!(app.warp_hold, None);
+        assert!(app.warp_holds.is_empty());
         let reply = call(&mut app, &tx, &rx, 3, "warp.get", json!({}));
         assert_eq!(reply["on"], true);
         assert_eq!(reply["source"], "capture");
@@ -10166,20 +10178,20 @@ mod gdb_drain {
         (app, cmd_tx, frame_rx)
     }
 
-    fn packet(cmd_tx: &Sender<GdbMsg>, payload: &str) {
+    pub(super) fn packet(cmd_tx: &Sender<GdbMsg>, payload: &str) {
         cmd_tx.send(GdbMsg::Packet(payload.to_string())).unwrap();
     }
 
-    fn monitor(cmd_tx: &Sender<GdbMsg>, command: &str) {
+    pub(super) fn monitor(cmd_tx: &Sender<GdbMsg>, command: &str) {
         packet(cmd_tx, &format!("qRcmd,{}", hex_encode(command.as_bytes())));
     }
 
     /// The wire framing `GdbHandle::send_packet` produces for `payload`.
-    fn frame(payload: &str) -> String {
+    pub(super) fn frame(payload: &str) -> String {
         format!("${payload}#{:02x}", checksum(payload.as_bytes()))
     }
 
-    fn frames(frame_rx: &Receiver<String>) -> Vec<String> {
+    pub(super) fn frames(frame_rx: &Receiver<String>) -> Vec<String> {
         let mut out = Vec::new();
         while let Ok(f) = frame_rx.try_recv() {
             out.push(f);
@@ -10291,17 +10303,16 @@ mod gdb_drain {
         monitor(&cmd_tx, "warp on");
         app.drain_gdb();
         assert!(!app.emu.paced(), "monitor warp on unpaces the machine");
-        assert_eq!(
-            app.warp_hold,
-            Some(super::super::app_session::WarpSource::Gdb)
-        );
+        assert!(app
+            .warp_holds
+            .contains(super::super::app_session::WarpSource::Gdb));
         cmd_tx.send(GdbMsg::Disconnected).unwrap();
         app.drain_gdb();
         assert!(
             app.emu.paced(),
             "a disconnect releases the client's warp hold"
         );
-        assert!(app.warp_hold.is_none());
+        assert!(app.warp_holds.is_empty());
     }
 
     #[test]
@@ -10871,5 +10882,350 @@ mod uaelib_insights {
             lines,
             vec!["no resources registered (uaelib debug_register_*)".to_string()]
         );
+    }
+}
+
+/// GDB and the control protocol sharing one window (`--gdb-gui` with
+/// `--control-gui`): a stop answers every outstanding resume, either
+/// client's pause ends the other's run, repositioning is refused while
+/// either runs the machine, and warp holds are per client.
+#[cfg(all(feature = "control", feature = "gdb"))]
+mod gdb_and_control {
+    use super::control_drain::{push, reply};
+    use super::gdb_drain::{frame, frames, monitor, packet};
+    use super::test_app;
+    use crate::control::windowed::{ControlHandle, CtlMsg};
+    use crate::gdbstub::core::hex_encode;
+    use crate::gdbstub::windowed::{GdbHandle, GdbMsg};
+    use serde_json::{json, Value};
+    use std::sync::mpsc::{Receiver, Sender};
+
+    type App = super::super::App;
+
+    struct Duo {
+        app: App,
+        ctl_tx: Sender<CtlMsg>,
+        ctl_rx: Receiver<String>,
+        gdb_tx: Sender<GdbMsg>,
+        gdb_rx: Receiver<String>,
+    }
+
+    /// Both clients attached to one window; with `connect_gdb` the GDB
+    /// client has connected, which pauses the machine.
+    fn attached(connect_gdb: bool) -> Duo {
+        let mut app = test_app();
+        let (ctl_handle, ctl_tx, ctl_rx) = ControlHandle::test_pair();
+        app.attach_control(ctl_handle, &crate::control::Config::new(":0".into()));
+        let (gdb_handle, gdb_tx, gdb_rx) = GdbHandle::test_pair();
+        app.attach_gdb(gdb_handle, &crate::gdbstub::Config::new(":0".into()));
+        if connect_gdb {
+            gdb_tx.send(GdbMsg::Connected).unwrap();
+            app.drain_gdb();
+        }
+        Duo {
+            app,
+            ctl_tx,
+            ctl_rx,
+            gdb_tx,
+            gdb_rx,
+        }
+    }
+
+    fn drain(app: &mut App) {
+        app.drain_control();
+        app.drain_gdb();
+    }
+
+    /// Every line the control client received so far (replies and
+    /// notifications).
+    fn lines(rx: &Receiver<String>) -> Vec<Value> {
+        let mut out = Vec::new();
+        while let Ok(line) = rx.try_recv() {
+            out.push(serde_json::from_str(&line).expect("json line"));
+        }
+        out
+    }
+
+    /// The framed `O` packet carrying a console line.
+    fn console(text: &str) -> String {
+        frame(&format!("O{}", hex_encode(text.as_bytes())))
+    }
+
+    /// The window's burst loop per frame, up to `n` frames: step, surface
+    /// stops, check control targets. True when a stop or target ended it.
+    fn run_frames(app: &mut App, n: usize) -> bool {
+        for _ in 0..n {
+            app.emu.step_frame().expect("frame");
+            if app.surface_debug_stop() {
+                return true;
+            }
+            if app.control_run_target_reached() {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn a_breakpoint_answers_both_pending_clients_and_keeps_the_panel_closed() {
+        let mut d = attached(true);
+        assert!(d.app.paused, "attaching gdb stops the target");
+        let target = d.app.emu.machine.pc().wrapping_add(8) & 0x00FF_FFFF;
+        packet(&d.gdb_tx, &format!("Z0,{target:x},2"));
+        push(&d.ctl_tx, 1, "continue", json!({}));
+        packet(&d.gdb_tx, "c");
+        drain(&mut d.app);
+        assert!(!d.app.paused);
+        assert_eq!(
+            frames(&d.gdb_rx),
+            vec![frame("OK")],
+            "Z0 answered, c deferred"
+        );
+        assert!(lines(&d.ctl_rx).is_empty(), "continue deferred");
+
+        assert!(run_frames(&mut d.app, 4), "the breakpoint hits");
+        assert!(d.app.paused);
+        assert_eq!(d.app.emu.machine.pc() & 0x00FF_FFFF, target);
+        let ctl = lines(&d.ctl_rx);
+        assert_eq!(ctl.len(), 1, "{ctl:?}");
+        assert_eq!(ctl[0]["id"], 1);
+        assert_eq!(ctl[0]["result"]["reason"], "breakpoint");
+        assert_eq!(frames(&d.gdb_rx), vec![frame("T05hwbreak:;thread:1;")]);
+        assert!(
+            d.app.debugger_panel.is_none(),
+            "a stop both clients consumed must not open the local panel"
+        );
+    }
+
+    #[test]
+    fn a_control_pause_completes_a_pending_gdb_continue() {
+        let mut d = attached(true);
+        packet(&d.gdb_tx, "c");
+        drain(&mut d.app);
+        assert!(!d.app.paused);
+        assert!(frames(&d.gdb_rx).is_empty());
+        push(&d.ctl_tx, 1, "pause", json!({}));
+        d.app.drain_control();
+        assert!(d.app.paused);
+        let msg = reply(&d.ctl_rx);
+        assert_eq!(msg["id"], 1);
+        assert_eq!(msg["result"]["reason"], "pause");
+        assert_eq!(
+            frames(&d.gdb_rx),
+            vec![console("paused by client\n"), frame("T05thread:1;")],
+            "the gdb continue ends with the client's pause"
+        );
+    }
+
+    #[test]
+    fn a_gdb_interrupt_completes_a_pending_control_run_until() {
+        let mut d = attached(true);
+        let far = d.app.emu.bus().emulated_frames() + 1000;
+        push(&d.ctl_tx, 1, "run_until", json!({"frame": far}));
+        d.app.drain_control();
+        assert!(!d.app.paused);
+        d.gdb_tx.send(GdbMsg::Interrupt).unwrap();
+        d.app.drain_gdb();
+        assert!(d.app.paused);
+        let ctl = lines(&d.ctl_rx);
+        assert_eq!(ctl.len(), 1, "{ctl:?}");
+        assert_eq!(ctl[0]["result"]["reason"], "pause");
+        assert!(
+            ctl[0]["result"]["detail"]
+                .as_str()
+                .is_some_and(|d| d.contains("gdb")),
+            "{ctl:?}"
+        );
+        assert_eq!(
+            frames(&d.gdb_rx),
+            vec![frame("T05thread:1;")],
+            "exactly one stop reply for the interrupt"
+        );
+    }
+
+    #[test]
+    fn a_control_frame_target_completes_a_pending_gdb_continue() {
+        let mut d = attached(true);
+        let target = d.app.emu.bus().emulated_frames() + 2;
+        push(&d.ctl_tx, 1, "run_until", json!({"frame": target}));
+        packet(&d.gdb_tx, "c");
+        drain(&mut d.app);
+        assert!(!d.app.paused);
+        assert!(run_frames(&mut d.app, 6), "the frame target lands");
+        assert!(d.app.paused);
+        let msg = reply(&d.ctl_rx);
+        assert_eq!(msg["result"]["reason"], "target");
+        assert_eq!(
+            frames(&d.gdb_rx),
+            vec![console(&format!("frame {target}\n")), frame("T05thread:1;")]
+        );
+    }
+
+    #[test]
+    fn a_gdb_attach_mid_run_completes_the_control_pending() {
+        let mut d = attached(false);
+        push(&d.ctl_tx, 1, "continue", json!({}));
+        d.app.drain_control();
+        assert!(!d.app.paused);
+        d.gdb_tx.send(GdbMsg::Connected).unwrap();
+        d.app.drain_gdb();
+        assert!(d.app.paused, "attaching stops the target");
+        let msg = reply(&d.ctl_rx);
+        assert_eq!(msg["result"]["reason"], "pause");
+        assert!(
+            msg["result"]["detail"]
+                .as_str()
+                .is_some_and(|d| d.contains("attached")),
+            "{msg}"
+        );
+        assert!(
+            frames(&d.gdb_rx).is_empty(),
+            "the new client must not get a stale stop reply"
+        );
+    }
+
+    #[test]
+    fn repositioning_is_refused_while_the_other_client_runs_the_machine() {
+        let mut d = attached(true);
+        packet(&d.gdb_tx, "c");
+        drain(&mut d.app);
+        // A control reverse step under the gdb continue is refused; reads
+        // are still fine.
+        push(&d.ctl_tx, 1, "reverse_step", json!({"n": 1}));
+        push(&d.ctl_tx, 2, "regs.get", Value::Null);
+        d.app.drain_control();
+        let ctl = lines(&d.ctl_rx);
+        assert_eq!(ctl.len(), 2, "{ctl:?}");
+        assert!(
+            ctl[0]["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("pause before repositioning")),
+            "{ctl:?}"
+        );
+        assert_eq!(ctl[1]["result"]["pc"], d.app.emu.machine.pc());
+        // And gdb's reverse step under a control run_until likewise.
+        d.gdb_tx.send(GdbMsg::Interrupt).unwrap();
+        d.app.drain_gdb();
+        let _ = frames(&d.gdb_rx);
+        let far = d.app.emu.bus().emulated_frames() + 1000;
+        push(&d.ctl_tx, 3, "run_until", json!({"frame": far}));
+        d.app.drain_control();
+        let _ = lines(&d.ctl_rx);
+        packet(&d.gdb_tx, "bs");
+        d.app.drain_gdb();
+        let sent = frames(&d.gdb_rx);
+        assert_eq!(sent.last(), Some(&frame("E01")), "{sent:?}");
+        assert!(
+            sent.iter().any(|f| f.contains(&hex_encode(b"pause first"))),
+            "{sent:?}"
+        );
+        // So are a resume at an address (the core writes the PC before
+        // handing back the resume) and a PC register write ...
+        let pc = d.app.emu.machine.pc();
+        packet(&d.gdb_tx, &format!("s{pc:x}"));
+        packet(&d.gdb_tx, &format!("c{pc:x}"));
+        packet(&d.gdb_tx, "P11=00001000");
+        d.app.drain_gdb();
+        assert_eq!(
+            frames(&d.gdb_rx)
+                .iter()
+                .filter(|f| *f == &frame("E01"))
+                .count(),
+            3,
+            "sADDR, cADDR and a PC write are all refused"
+        );
+        assert!(!d.app.paused, "the control run is still going");
+        assert_eq!(d.app.emu.machine.pc(), pc, "nothing moved the PC");
+        // ... while a bare step pauses the machine, ending the control
+        // run, and then steps in place.
+        packet(&d.gdb_tx, "s");
+        d.app.drain_gdb();
+        assert!(d.app.paused);
+        let ctl = lines(&d.ctl_rx);
+        assert_eq!(ctl.len(), 1, "{ctl:?}");
+        assert_eq!(ctl[0]["id"], 3);
+        assert_eq!(ctl[0]["result"]["reason"], "pause");
+        assert_eq!(frames(&d.gdb_rx).last(), Some(&frame("T05thread:1;")));
+    }
+
+    #[test]
+    fn warp_holds_are_per_client_and_release_independently() {
+        let mut d = attached(true);
+        d.app.emu.set_paced(true);
+        monitor(&d.gdb_tx, "warp on");
+        d.app.drain_gdb();
+        assert!(!d.app.emu.paced());
+        assert!(d
+            .app
+            .warp_holds
+            .contains(super::super::app_session::WarpSource::Gdb));
+        // The control client hears about the gdb hold.
+        let evs = lines(&d.ctl_rx);
+        let warp_on = evs
+            .iter()
+            .find(|l| l["method"] == "event.warp")
+            .expect("event.warp");
+        assert_eq!(warp_on["params"]["source"], "gdb");
+        assert_eq!(warp_on["params"]["holders"], json!(["gdb"]));
+
+        push(&d.ctl_tx, 1, "warp.set", json!({"on": true}));
+        d.app.drain_control();
+        let msg = reply(&d.ctl_rx);
+        assert_eq!(msg["result"]["source"], "control");
+        assert_eq!(msg["result"]["holders"], json!(["control", "gdb"]));
+
+        // A holder joining or leaving without pacing changing still
+        // reaches the control client as event.warp, so its holder list
+        // never goes stale.
+        d.app
+            .set_warp(true, super::super::app_session::WarpSource::Guest);
+        let evs = lines(&d.ctl_rx);
+        let joined = evs
+            .iter()
+            .find(|l| l["method"] == "event.warp")
+            .expect("event.warp for a joining holder");
+        assert_eq!(joined["params"]["on"], true);
+        assert_eq!(joined["params"]["source"], "guest");
+        assert_eq!(
+            joined["params"]["holders"],
+            json!(["control", "gdb", "guest"])
+        );
+        d.app
+            .set_warp(false, super::super::app_session::WarpSource::Guest);
+        let evs = lines(&d.ctl_rx);
+        let left = evs
+            .iter()
+            .find(|l| l["method"] == "event.warp")
+            .expect("event.warp for a leaving holder");
+        assert_eq!(left["params"]["on"], true, "still warping");
+        assert_eq!(left["params"]["holders"], json!(["control", "gdb"]));
+
+        // Releasing the control hold leaves the gdb hold in force.
+        push(&d.ctl_tx, 2, "warp.set", json!({"on": false}));
+        d.app.drain_control();
+        let msg = reply(&d.ctl_rx);
+        assert_eq!(msg["result"]["on"], true);
+        assert_eq!(msg["result"]["holders"], json!(["gdb"]));
+        assert!(
+            msg["result"]["note"]
+                .as_str()
+                .is_some_and(|n| n.contains("gdb")),
+            "{msg}"
+        );
+        assert!(!d.app.emu.paced());
+
+        // The gdb client going away releases the last hold.
+        d.gdb_tx.send(GdbMsg::Disconnected).unwrap();
+        d.app.drain_gdb();
+        assert!(d.app.emu.paced());
+        assert!(d.app.warp_holds.is_empty());
+        let evs = lines(&d.ctl_rx);
+        let warp_off = evs
+            .iter()
+            .find(|l| l["method"] == "event.warp")
+            .expect("event.warp on release");
+        assert_eq!(warp_off["params"]["source"], "gdb");
+        assert_eq!(warp_off["params"]["on"], false);
+        assert_eq!(warp_off["params"]["holders"], json!([]));
     }
 }

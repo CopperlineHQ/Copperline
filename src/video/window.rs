@@ -1108,11 +1108,12 @@ pub struct App {
     /// real-time pacing (src/warpboot.rs). One-shot; None once finished
     /// or cancelled. Host-side only, never serialized.
     warp_boot: Option<crate::warpboot::WarpBootGate>,
-    /// A warp a control client or the guest engaged (`App::set_warp`):
-    /// mutes live audio like the boot gates, outlives a gate that ends
-    /// under it, and is released by any warp-off, the manual toggle, or
-    /// power off. Never `Manual`. Host-side only, never serialized.
-    warp_hold: Option<app_session::WarpSource>,
+    /// The warps a control client, a GDB client, or the guest engaged
+    /// (`App::set_warp`): each mutes live audio like the boot gates,
+    /// outlives a gate that ends under it, and is released per holder
+    /// (its own warp-off or disconnect), all at once by the manual toggle
+    /// or power off. Host-side only, never serialized.
+    warp_holds: app_session::WarpHolds,
     /// Live-input recorder: logs every input event that reaches the
     /// emulated machine and writes a --script-replayable file on stop.
     /// None while not recording.
@@ -2111,7 +2112,7 @@ impl App {
             warp_launch: run_warp_target,
             warp_launch_tracker: crate::amigaos::LibraryTracker::default(),
             warp_boot: warp_boot_gate,
-            warp_hold: None,
+            warp_holds: app_session::WarpHolds::default(),
             input_recorder: record_input
                 .is_some()
                 .then(|| crate::inputrec::InputRecorder::new(0.0)),

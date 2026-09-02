@@ -24,8 +24,11 @@ session:
 
 - The emulated machine remains interactive in the window and runs at real-time
   speed. Execution advances in real time on `continue` unless unthrottled via
-  `monitor warp on` (`monitor warp off` restores pacing; disconnecting
-  automatically releases warp holds).
+  `monitor warp on`, which engages a warp hold for the GDB client. `monitor
+  warp off` releases that hold only: the machine re-paces once no other holder
+  (a control client's `warp.set`, the guest's `warpmode()`) remains, and the
+  console line names who still holds it. Disconnecting releases the GDB hold
+  the same way; the window's warp shortcut ends every hold at once.
 - Attaching a debugger pauses the machine. Detaching (`detach`, connection loss,
   or GDB `kill`) leaves the window open and listening for new connections
   (`kill` detaches rather than terminating the process so that VS Code "Stop
@@ -34,11 +37,24 @@ session:
   during the windowed frame loop. Breakpoints set within the UI remain independent,
   and detaching GDB removes only points set by the remote client.
 - When execution halts during an active GDB `continue`, the stop event is sent
-  to the client. Manual UI pauses or local debugger breakpoints open the
-  internal debugger window normally.
+  to the client. With `--control-gui` attached to the same window, a
+  control-protocol resume outstanding at the same time gets its stop reply
+  too, and a stop the control client causes (its `pause`, a `run_until`
+  target) completes the GDB `continue` with a plain `T05` and a console line
+  naming the reason. Local debugger breakpoints open the internal debugger
+  window only when neither client had a resume pending; a plain pause from
+  the window just pauses (and completes any outstanding resume).
+- Anything that repositions the machine -- reverse execution
+  (`reverse-step`, `reverse-continue`), resuming or stepping at an address
+  (`continue ADDR`, `jump`), a write to `pc` -- is refused while a
+  control-protocol resume is outstanding: pause first. Plain `continue`,
+  `stepi`, memory and other register writes stay allowed.
 - `--run` break-at-entry functions identically to headless `--gdb`.
-- `--gdb-gui` cannot be combined with `--gdb`, `--control`, `--control-gui`, or
-  `--benchmark-until`.
+- `--gdb-gui` cannot be combined with `--gdb`, `--control`, or
+  `--benchmark-until`. It can share the window with `--control-gui`: a GDB
+  frontend for source-level debugging and a control-protocol client for
+  observation and control attach to one session (see
+  [Control Protocol](control.md)).
 
 Standard GDB frontends work with both modes: VS Code cppdbg configurations
 (`"MIMode": "gdb"`, `"miDebuggerServerAddress": "localhost:2345"`,
@@ -83,8 +99,10 @@ Copper disassembly, and Exec structures:
 (gdb) monitor memlist          # List Exec memory allocations
 ```
 
-In windowed mode (`--gdb-gui`), `monitor warp on|off|status` controls warp
-mode, running unthrottled with audio muted until disabled or disconnected.
+In windowed mode (`--gdb-gui`), `monitor warp on|off|status` controls the GDB
+client's warp hold, running unthrottled with audio muted until that hold is
+released or the client disconnects (another holder keeps the machine
+warping; `status` names every holder).
 
 ## Source-level debugging and program loading
 

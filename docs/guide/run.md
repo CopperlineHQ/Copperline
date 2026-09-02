@@ -48,14 +48,16 @@ Additional operational notes:
 - **File naming:** Target filenames must use printable ASCII characters without quotes (`"`),
   colons (`:`), or slashes (`/`). Spaces in executable names are supported and quoted automatically.
 - **Manual override:** Pressing the warp toggle shortcut (`Cmd+W` / `Alt+W`) cancels
-  the automatic warp phase and any programmatic warp, returning to real-time
-  execution.
-- **Programmatic warp:** A control-protocol client can engage warp at any time
-  with `warp.set {"on": true}` (see [Control Protocol](../debugger/control.md)),
-  and the guest program itself can call `warpmode(1)` / `warpmode(0)` through
-  the [uaelib trap](#uaelib-trap) below (e.g. during heavy computation or asset loading).
-  Both mute live audio while engaged; `warp.set {"on": false}`, `warpmode(0)`, or the
-  shortcut return to real time.
+  the automatic warp phase and every programmatic warp hold at once, returning
+  to real-time execution.
+- **Programmatic warp:** A control-protocol client (`warp.set {"on": true}`, see
+  [Control Protocol](../debugger/control.md)), a GDB client (`monitor warp on`,
+  see [GDB](../debugger/gdb.md)), and the guest program itself (`warpmode(1)` /
+  `warpmode(0)` through the [uaelib trap](#uaelib-trap) below, e.g. during heavy
+  computation or asset loading) each hold warp independently. All mute live
+  audio while engaged; `warp.set {"on": false}`, `monitor warp off`, or
+  `warpmode(0)` release only that holder, real time returns when the last hold
+  goes, and the shortcut returns to real time regardless.
 - **Physical floppy drives:** If a physical floppy drive (FluxBridge) is attached, warp
   mode is disabled to match the physical drive rate.
 - **Headless mode:** Headless capture runs (`--screenshot-after`, `--dump-frames`) run
@@ -109,7 +111,7 @@ if (*(UWORD *)UaeConf == 0x4eb9 || *(UWORD *)UaeConf == 0xa00e) {
 - Enabled by default; set `[emulation] uaelib = false` to leave `$F0FF60` unmapped.
 - A CDTV extended ROM occupies `$F00000` and covers this address space.
 - Without the trap, `KPrintF` falls back to Exec `RawPutChar` and emits over the serial port.
-- Guest-initiated warp mutes live audio; press `Cmd+W` / `Alt+W` to cancel.
+- Guest-initiated warp mutes live audio; `warpmode(0)` releases the guest's hold, and `Cmd+W` / `Alt+W` ends every hold.
 - The return latch is shared: uaelib calls from interrupt handlers between a main-thread doorbell write and result read may overwrite D0.
 
 ## Kickstart compatibility

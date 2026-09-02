@@ -206,17 +206,19 @@ fn validate_control_args(cli: &CliArgs) -> Result<()> {
              rebuild with --features control for --control/--control-gui"
         ));
     }
-    if cli.control.is_some() || cli.control_gui.is_some() {
-        if cli.gdb.is_some() || cli.gdb_gui.is_some() {
-            return Err(anyhow!(
-                "--control/--control-gui cannot be combined with --gdb/--gdb-gui"
-            ));
-        }
-        if cli.benchmark_until.is_some() {
-            return Err(anyhow!(
-                "--control/--control-gui cannot be combined with --benchmark-until"
-            ));
-        }
+    if (cli.control.is_some() || cli.control_gui.is_some()) && cli.benchmark_until.is_some() {
+        return Err(anyhow!(
+            "--control/--control-gui cannot be combined with --benchmark-until"
+        ));
+    }
+    // The headless servers each own the machine's run loop, so --control
+    // and --gdb exclude everything else. The two windowed forms share one
+    // interactive session: --control-gui with --gdb-gui is allowed.
+    if cli.control.is_some() && (cli.gdb.is_some() || cli.gdb_gui.is_some()) {
+        return Err(anyhow!("--control cannot be combined with --gdb/--gdb-gui"));
+    }
+    if cli.control_gui.is_some() && cli.gdb.is_some() {
+        return Err(anyhow!("--control-gui cannot be combined with --gdb"));
     }
     if cli.control.is_none() {
         return Ok(());
@@ -1988,9 +1990,17 @@ mod tests {
         let err = validate_gdb_args(&args).unwrap_err();
         assert!(err.to_string().contains("--benchmark-until"), "{err:#}");
 
+        // The two windowed forms share one interactive session; the
+        // headless forms each own the machine and still exclude the other.
         let args = parse(&["--gdb-gui", ":2345", "--control-gui", ":7710"])?;
+        validate_gdb_args(&args)?;
+        validate_control_args(&args)?;
+        let args = parse(&["--gdb-gui", ":2345", "--control", ":7710"])?;
         let err = validate_control_args(&args).unwrap_err();
-        assert!(err.to_string().contains("--gdb-gui"), "{err:#}");
+        assert!(err.to_string().contains("--control cannot"), "{err:#}");
+        let args = parse(&["--control-gui", ":7710", "--gdb", ":2345"])?;
+        let err = validate_control_args(&args).unwrap_err();
+        assert!(err.to_string().contains("--gdb"), "{err:#}");
         Ok(())
     }
 

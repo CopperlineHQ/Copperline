@@ -1113,12 +1113,11 @@ impl App {
                 }
                 self.paused = true;
                 self.sync_live_audio_suspension();
+                // Notify first (it self-suppresses while a resume is
+                // pending), then answer every pending resume.
                 #[cfg(feature = "control")]
-                if !self.control_complete_pending("double_fault", &message) {
-                    self.control_notify_stopped("double_fault", &message);
-                }
-                #[cfg(feature = "gdb")]
-                self.gdb_complete_pending_stop(&message);
+                self.control_notify_stopped("double_fault", &message);
+                self.complete_remote_resumes("double_fault", &message);
                 self.show_osd(message);
                 self.request_redraw();
                 return true;
@@ -1131,32 +1130,28 @@ impl App {
         };
         let message = stop.describe();
         info!("debugger stop: {message}");
-        // A stop while a remote resume is pending answers the client and
-        // pauses without commandeering the local debugger window.
+        // A stop while a remote resume is pending answers every client
+        // that has one -- a control-protocol continue and a GDB continue
+        // can both be outstanding when both share the window -- and pauses
+        // without commandeering the local debugger window; a control
+        // client with nothing pending still hears of it as event.stopped.
+        // Only a stop no client consumed opens the panel.
+        #[allow(unused_mut)]
+        let mut consumed = false;
         #[cfg(feature = "control")]
-        if self.control_completes_stop(&stop) {
-            self.paused = true;
-            self.sync_live_audio_suspension();
-            self.last_debug_stop = Some(message.clone());
-            self.show_osd(message);
-            self.request_redraw();
-            return true;
+        {
+            consumed |= self.control_completes_stop(&stop);
         }
-        // Same rule for a pending GDB continue: the stop answers the
-        // client and pauses without opening the local debugger window.
         #[cfg(feature = "gdb")]
-        if self.gdb_completes_stop(&stop) {
-            self.paused = true;
-            self.sync_live_audio_suspension();
-            self.last_debug_stop = Some(message.clone());
-            self.show_osd(message);
-            self.request_redraw();
-            return true;
+        {
+            consumed |= self.gdb_completes_stop(&stop);
         }
         self.paused = true;
-        self.paused_before_debugger = true;
         self.sync_live_audio_suspension();
-        self.open_debugger();
+        if !consumed {
+            self.paused_before_debugger = true;
+            self.open_debugger();
+        }
         self.last_debug_stop = Some(message.clone());
         self.show_osd(message);
         self.request_redraw();

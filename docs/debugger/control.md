@@ -16,6 +16,13 @@ execution, inject input events, change media, and capture framebuffers.
 ./target/release/copperline --config kick13.example.toml --control-gui :7710
 ```
 
+`--control-gui` can share the window with `--gdb-gui` (see [GDB](gdb.md)):
+a machine stop answers whichever resumes are pending on both clients, a stop
+the control client did not request arrives as `event.stopped`, and
+`reverse_*`, `memory.last_writer`, `mouse.to`, and `state.load` are refused
+while the GDB client's `continue` is outstanding (`pause` first). Either
+client's pause ends the other's run with reason `pause`.
+
 When `--control-info FILE` is specified, connection details are written to a
 JSON file:
 
@@ -197,10 +204,14 @@ events.unsubscribe {"events":["serial"]}
   reports it). `dropped_events` counts items the bounded queue lost before
   this batch.
 - **`event.warp`:** Sent without a subscription, in both modes, whenever warp
-  changes for a reason other than the client's own `warp.set`:
-  `{"on", "paced", "source", "position"}` with `source` one of `manual`,
-  `guest`, `launch`, `boot`, `power_off`. The headless server reports the
-  guest's `warpmode()` request with `paced` always false.
+  or its holder set changes for a reason other than the client's own
+  `warp.set`: `{"on", "paced", "source", "position"}` with `source` one of
+  `manual`, `guest`, `gdb`, `launch`, `boot`, `power_off`. A windowed session
+  adds `holders`, every programmatic hold still in force (`control`, `gdb`,
+  `guest`), and also sends the event when a holder joins or leaves without
+  pacing changing, so the list never goes stale. The headless server has no
+  holds (it is unpaced end to end), omits `holders`, and reports the guest's
+  `warpmode()` request with `paced` always false.
 
 ## Command reference summary
 
@@ -222,8 +233,8 @@ events.unsubscribe {"events":["serial"]}
 - `machine.reset {"kind": "warm"|"cold"}`: Reset the emulated machine (default: warm).
 
 ### Speed
-- `warp.get`: Report whether warp (unpaced emulation) is active, whether the machine is paced, and the source holding warp (`none`, `manual`, `control`, `guest`, `launch`, `boot`, `capture`, or `headless`).
-- `warp.set {"on": true|false}`: Engage or release warp speed (unthrottled execution with audio muted). Disabling warp also cancels active `--run` or `--warp-boot` phases.
+- `warp.get`: Report whether warp (unpaced emulation) is active, whether the machine is paced, and the source holding warp (`none`, `manual`, `control`, `gdb`, `guest`, `launch`, `boot`, `capture`, or `headless`); in a windowed session `holders` lists every programmatic hold in force (`control`, `gdb`, `guest`), `source` being the first (the headless server has no holds and omits the field).
+- `warp.set {"on": true|false}`: Engage or release the client's own warp hold (unthrottled execution with audio muted). Holds are independent: releasing yours re-paces the machine only when no other holder (a GDB client, the guest) remains, and the reply's `note` says who still holds it. Disabling warp also cancels active `--run` or `--warp-boot` phases.
 
 ### Reverse execution
 - `reverse_step {"n": 1}`: Step backward by instruction.

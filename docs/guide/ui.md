@@ -33,7 +33,7 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 | `Cmd+F` | `Alt+F` | Toggle fullscreen on / off |
 | `Cmd+Shift+F` | `Alt+Shift+F` | Show / hide the status bar |
 | `Cmd+P` | `Alt+P` | Toggle the [performance overlay](#performance-overlay) (`[display] perf_overlay` sets the start-up value) |
-| `Cmd+W` | `Alt+W` | Toggle Warp Speed (turbo) on / off; one press also ends a warp a control client, the guest, or a boot phase engaged |
+| `Cmd+W` | `Alt+W` | Toggle Warp Speed (turbo) on / off; one press also ends every warp a control client, a GDB client, the guest, or a boot phase engaged |
 | `Cmd+Shift+W` | `Alt+Shift+W` | Cycle the Warp Speed limit: 2x, 4x, 8x, 16x, Max |
 | `Cmd+Z` | `Alt+Z` | Rewind the machine one step (needs `[emulation] rewind` or *Emulation Settings > Rewind*) |
 | `Esc` | `Esc` | Close an open menu or overlay panel (in a tool window, that window); otherwise passed through to the Amiga |
@@ -510,10 +510,11 @@ Shown only when something is on the port.
 
 - **Warp Speed** (also `Cmd+W` / `Alt+W`): runs the emulator unpaced for
   fast-forward. Toggling back re-anchors real-time pacing cleanly. A
-  control-protocol client (`warp.set`) or the guest program (`warpmode()`
-  through the uaelib trap, see [Direct launching](run.md)) can engage warp
-  too; such a warp mutes live audio, the OSD names who asked, and one press
-  of the shortcut ends it.
+  control-protocol client (`warp.set`), a GDB client (`monitor warp`), or the
+  guest program (`warpmode()` through the uaelib trap, see
+  [Direct launching](run.md)) can engage warp too; each holds it
+  independently and releases only its own, such a warp mutes live audio, the
+  OSD names who asked, and one press of the shortcut ends them all.
 - **Warp Limit** (also `Cmd+Shift+W` / `Alt+Shift+W`): how fast warp runs.
   Because the window presents with vsync, emulating one frame per presented
   frame would cap warp at the host monitor's refresh rate (about 1.2x for

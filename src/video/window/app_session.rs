@@ -35,11 +35,84 @@ impl WarpSource {
     }
 }
 
+/// The programmatic warp holds in force, one slot per source that can
+/// hold one (`Manual` never does). Each holder releases only its own; the
+/// machine re-paces when the last one goes, and the manual toggle or power
+/// off clears them all. A control client and a GDB client sharing the
+/// window therefore cannot take each other's warp away.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct WarpHolds(u8);
+
+impl WarpHolds {
+    /// Report order: the wire `source` is the first holder in it.
+    const ORDER: [WarpSource; 3] = [WarpSource::Control, WarpSource::Gdb, WarpSource::Guest];
+
+    fn bit(source: WarpSource) -> u8 {
+        match source {
+            WarpSource::Manual => 0,
+            WarpSource::Control => 1,
+            WarpSource::Gdb => 2,
+            WarpSource::Guest => 4,
+        }
+    }
+
+    pub(super) fn insert(&mut self, source: WarpSource) {
+        self.0 |= Self::bit(source);
+    }
+
+    pub(super) fn remove(&mut self, source: WarpSource) {
+        self.0 &= !Self::bit(source);
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.0 = 0;
+    }
+
+    pub(super) fn contains(self, source: WarpSource) -> bool {
+        let bit = Self::bit(source);
+        bit != 0 && self.0 & bit != 0
+    }
+
+    pub(super) fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    pub(super) fn iter(self) -> impl Iterator<Item = WarpSource> {
+        Self::ORDER.into_iter().filter(move |s| self.contains(*s))
+    }
+
+    /// The wire `source`: the first holder in report order.
+    #[cfg(feature = "control")]
+    pub(super) fn first(self) -> Option<WarpSource> {
+        self.iter().next()
+    }
+
+    /// The wire names of every holder, in report order.
+    #[cfg(feature = "control")]
+    pub(super) fn labels(self) -> Vec<&'static str> {
+        self.iter().map(WarpSource::label).collect()
+    }
+
+    /// "control client and gdb client", for logs, notes and the OSD.
+    pub(super) fn describe(self) -> String {
+        let parts: Vec<&str> = self.iter().map(WarpSource::describe).collect();
+        match parts.len() {
+            0 => "nobody".to_string(),
+            1 => parts[0].to_string(),
+            n => format!("{} and {}", parts[..n - 1].join(", "), parts[n - 1]),
+        }
+    }
+}
+
 /// What `App::set_warp` did: whether pacing actually changed, and why not
-/// when a request could not be honoured.
+/// when a request could not be honoured (or a release left the machine
+/// warping for another holder).
 pub(super) struct WarpOutcome {
     pub changed: bool,
-    pub note: Option<&'static str>,
+    /// Read by the remote drivers' replies; the guest path only needs
+    /// `changed`.
+    #[cfg_attr(not(any(feature = "control", feature = "gdb")), allow(dead_code))]
+    pub note: Option<String>,
 }
 
 pub(super) const WARP_NOTE_BRIDGED: &str =
@@ -167,9 +240,13 @@ impl App {
     /// hold keeps the machine warping, and tell an attached control client.
     fn end_gate_warp(&mut self, what: &str, source: &'static str) {
         let was_paced = self.emu.paced();
-        match self.warp_hold {
-            Some(hold) => info!("{what}: done; warp stays on for the {}", hold.describe()),
-            None => self.emu.set_paced(true),
+        if self.warp_holds.is_empty() {
+            self.emu.set_paced(true);
+        } else {
+            info!(
+                "{what}: done; warp stays on for the {}",
+                self.warp_holds.describe()
+            );
         }
         self.sync_live_audio_suspension();
         #[cfg(feature = "control")]
@@ -303,28 +380,44 @@ impl App {
             );
             return WarpOutcome {
                 changed: false,
-                note: Some(WARP_NOTE_CAPTURE),
+                note: Some(WARP_NOTE_CAPTURE.to_string()),
             };
         }
         let was_paced = self.emu.paced();
+        let holds_before = self.warp_holds;
         let mut cancelled = false;
+        // The holds still in force after a release that could not re-pace
+        // the machine because another holder remains.
+        let mut remaining: Option<WarpHolds> = None;
         if on {
             self.emu.set_paced(false);
             let unpaced = !self.emu.paced();
-            self.warp_hold = match source {
-                WarpSource::Manual => None,
-                programmatic if unpaced => Some(programmatic),
-                _ => None,
-            };
+            match source {
+                WarpSource::Manual => self.warp_holds.clear(),
+                programmatic if unpaced => self.warp_holds.insert(programmatic),
+                // A refused request (bridged drive) leaves other holds alone.
+                _ => {}
+            }
         } else {
             cancelled = self.cancel_warp_gates(source.describe());
-            self.warp_hold = None;
-            self.emu.set_paced(true);
+            match source {
+                WarpSource::Manual => self.warp_holds.clear(),
+                programmatic => self.warp_holds.remove(programmatic),
+            }
+            if self.warp_holds.is_empty() {
+                self.emu.set_paced(true);
+            } else {
+                remaining = Some(self.warp_holds);
+            }
         }
         self.sync_live_audio_suspension();
         let paced = self.emu.paced();
         let changed = paced != was_paced;
-        let note = (on && paced).then_some(WARP_NOTE_BRIDGED);
+        let note = if on && paced {
+            Some(WARP_NOTE_BRIDGED.to_string())
+        } else {
+            remaining.map(|holds| format!("warp stays on: held by {}", holds.describe()))
+        };
         if on && paced {
             info!(
                 "warp: {} request refused: {WARP_NOTE_BRIDGED}",
@@ -350,6 +443,14 @@ impl App {
                     info!("warp on ({})", source.describe());
                     self.show_osd(format!("Warp on ({})", source.describe()));
                 }
+                (_, false) if remaining.is_some() => {
+                    let holders = remaining.map(|h| h.describe()).unwrap_or_default();
+                    info!(
+                        "warp off ({}) requested; warp stays on for the {holders}",
+                        source.describe()
+                    );
+                    self.show_osd(format!("Warp stays on ({holders})"));
+                }
                 (_, false) if changed || cancelled => {
                     info!("warp off ({})", source.describe());
                     self.show_osd(format!("Warp off ({})", source.describe()));
@@ -357,10 +458,16 @@ impl App {
                 _ => {}
             }
         }
+        // A control client hears of any change it did not make itself:
+        // pacing flipping, or the holder set changing under an unchanged
+        // pacing (a second holder joining, one of two releasing), so its
+        // view of `holders` never goes stale.
         #[cfg(feature = "control")]
-        if changed && source != WarpSource::Control {
+        if (changed || self.warp_holds != holds_before) && source != WarpSource::Control {
             self.control_notify_warp(source.label());
         }
+        #[cfg(not(feature = "control"))]
+        let _ = holds_before;
         self.request_redraw();
         WarpOutcome { changed, note }
     }
@@ -1045,7 +1152,7 @@ impl App {
         // way; the manual toggle is not.
         let warp_muted = self.warp_launch.as_ref().is_some_and(|l| l.engaged)
             || self.warp_boot.as_ref().is_some_and(|g| g.engaged)
-            || self.warp_hold.is_some();
+            || !self.warp_holds.is_empty();
         let suspended = !self.powered_on || self.cpu_halted || self.paused || warp_muted;
         self.emu.set_live_audio_suspended(suspended);
     }
@@ -1281,16 +1388,59 @@ impl App {
         self.sync_live_audio_suspension();
         if self.paused {
             info!("pause button: emulation paused");
-            // A user pause completes a remote client's pending resume;
-            // the client learns where the machine stopped.
-            #[cfg(feature = "control")]
-            self.control_complete_pending("user_pause", "paused from the window");
-            #[cfg(feature = "gdb")]
-            self.gdb_complete_pending_stop("paused from the window");
+            // A user pause completes every remote client's pending
+            // resume; the clients learn where the machine stopped.
+            self.complete_remote_resumes("user_pause", "paused from the window");
         } else {
             info!("pause button: emulation resumed");
         }
         self.request_redraw();
+    }
+
+    /// The machine came to a stop for a host-side reason: a user or client
+    /// pause, a GDB interrupt or attach, a run_until target, power off, a
+    /// double fault. Every remote resume still outstanding is answered here
+    /// -- a control-protocol continue/run_until and a GDB continue can both
+    /// be pending when both clients share the window -- so neither client
+    /// waits on a stop the other one caused. `reason` is the control
+    /// protocol's stop reason; `detail` reaches both clients (the control
+    /// reply's `detail`, a GDB `O` console line before `T05thread:1;`).
+    /// Returns whether any pending resume was completed.
+    pub(super) fn complete_remote_resumes(&mut self, reason: &str, detail: &str) -> bool {
+        #[allow(unused_mut)]
+        let mut completed = false;
+        #[cfg(feature = "control")]
+        {
+            completed |= self.control_complete_pending(reason, detail);
+        }
+        #[cfg(feature = "gdb")]
+        {
+            completed |= self.gdb_complete_pending_stop(detail);
+        }
+        // Only the control reply carries the reason; a build without it
+        // (or without either driver) still takes both for one call shape.
+        #[cfg(not(feature = "control"))]
+        let _ = reason;
+        #[cfg(not(any(feature = "control", feature = "gdb")))]
+        let _ = detail;
+        completed
+    }
+
+    /// Whether any remote client's resume is outstanding: the machine is
+    /// running on a client's behalf, so nothing may reposition it.
+    #[cfg(any(feature = "control", feature = "gdb"))]
+    pub(super) fn remote_resume_pending(&self) -> bool {
+        #[allow(unused_mut)]
+        let mut pending = false;
+        #[cfg(feature = "control")]
+        {
+            pending |= self.control_resume_pending();
+        }
+        #[cfg(feature = "gdb")]
+        {
+            pending |= self.gdb_resume_pending();
+        }
+        pending
     }
 
     /// Power off: drop into a cold-boot state (RAM cleared) and park the
@@ -1316,8 +1466,12 @@ impl App {
         }
         // A warp a control client or the guest holds goes with the machine
         // too: the guest is gone, and a client's warp.set was for it.
-        if let Some(hold) = self.warp_hold.take() {
-            info!("warp: {} hold released by power off", hold.describe());
+        if !self.warp_holds.is_empty() {
+            info!(
+                "warp: {} hold released by power off",
+                self.warp_holds.describe()
+            );
+            self.warp_holds.clear();
             self.emu.set_paced(true);
             #[cfg(feature = "control")]
             self.control_notify_warp("power_off");
@@ -1343,10 +1497,7 @@ impl App {
             info!("power button: {released} host disk(s) off with the machine, still held for it");
         }
         info!("power button: machine powered off (cold boot state)");
-        #[cfg(feature = "control")]
-        self.control_complete_pending("pause", "power state changed");
-        #[cfg(feature = "gdb")]
-        self.gdb_complete_pending_stop("power state changed");
+        self.complete_remote_resumes("pause", "power state changed");
         if let Err(e) = self.emu.power_on_reset() {
             error!("cold power-on reset failed: {e:#}");
             self.cpu_halted = true;

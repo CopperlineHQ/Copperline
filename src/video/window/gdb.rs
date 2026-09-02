@@ -240,6 +240,19 @@ impl GdbBreaks {
     }
 }
 
+/// Whether `packet` moves the machine's position rather than reading or
+/// resuming it in place: reverse step/continue, `sADDR` / `cADDR` (the
+/// core writes the PC before returning the resume), and a write to the
+/// PC register (regnum 17, `P11=`). Bare `s`/`c`, memory writes and other
+/// register writes are in-place, like the control protocol's own
+/// `allowed_while_running` set.
+fn repositions_machine(packet: &str) -> bool {
+    packet == "bs"
+        || packet == "bc"
+        || (packet.len() > 1 && (packet.starts_with('s') || packet.starts_with('c')))
+        || packet.starts_with("P11=")
+}
+
 /// The decoded text of a qRcmd (monitor) packet, when it is one.
 fn decode_qrcmd(packet: &str) -> Option<String> {
     let hex = packet.strip_prefix("qRcmd,")?;
@@ -261,6 +274,11 @@ impl App {
             reverse_budget_mb: config.reverse_budget_mb,
             reverse_interval_frames: config.reverse_interval_frames,
         });
+    }
+
+    /// Whether this client's continue is outstanding.
+    pub(super) fn gdb_resume_pending(&self) -> bool {
+        self.gdb.as_ref().is_some_and(|g| g.pending)
     }
 
     /// Drain queued GDB messages. Runs at the top of `about_to_wait`,
@@ -303,11 +321,14 @@ impl App {
             warn!("gdb: arming time travel failed: {e:#}");
         }
         // Attaching stops the target: gdb's first packets read registers
-        // and memory expecting a stopped inferior.
+        // and memory expecting a stopped inferior. A control client's
+        // resume outstanding on the same window ends here (this client's
+        // own pending was cleared above, so no stale stop reply is sent).
         if !self.paused {
             self.paused = true;
             self.sync_live_audio_suspension();
         }
+        self.complete_remote_resumes("pause", "paused: gdb client attached");
         self.show_osd("GDB client attached");
         self.request_redraw();
     }
@@ -320,8 +341,9 @@ impl App {
         };
         g.pending = false;
         g.breaks.remove_all(&mut self.emu);
-        // A warp the client engaged has no client left to release it.
-        if self.warp_hold == Some(WarpSource::Gdb) {
+        // A warp the client engaged has no client left to release it;
+        // another holder's warp (a control client, the guest) stays.
+        if self.warp_holds.contains(WarpSource::Gdb) {
             self.set_warp(false, WarpSource::Gdb);
         }
         self.show_osd(why.to_string());
@@ -336,6 +358,10 @@ impl App {
             self.paused = true;
             self.sync_live_audio_suspension();
         }
+        // A control client's resume outstanding on the same window ends
+        // with the interrupt (this client's own pending is already
+        // cleared, so exactly one stop reply follows).
+        self.complete_remote_resumes("pause", "interrupted by gdb");
         // Ctrl-C always gets a stop reply, pending continue or not (the
         // headless driver answers the raw 0x03 the same way).
         self.gdb_send_packet("T05thread:1;");
@@ -365,6 +391,21 @@ impl App {
                 self.gdb_send_packet("OK");
                 return;
             }
+        }
+        // Packets that reposition the machine -- reverse execution, a
+        // resume at an address, a PC write -- are refused while a control
+        // client's resume is outstanding, as the control protocol refuses
+        // its own repositioning verbs while a GDB continue runs.
+        if repositions_machine(packet) && self.remote_resume_pending() {
+            if let Some(g) = self.gdb.as_mut() {
+                g.core.console.push(
+                    "machine is running (a control client resume is pending); pause first\n"
+                        .to_string(),
+                );
+            }
+            self.gdb_flush_console();
+            self.gdb_send_packet("E01");
+            return;
         }
         let Some(mut g) = self.gdb.take() else {
             return;
@@ -450,9 +491,11 @@ impl App {
     fn gdb_sync_step(&mut self) {
         if !self.paused {
             // A step against a free-running machine would race the burst
-            // loop; gdb only ever steps a stopped target anyway.
+            // loop; gdb only ever steps a stopped target anyway. A control
+            // client's resume that was running the machine ends here.
             self.paused = true;
             self.sync_live_audio_suspension();
+            self.complete_remote_resumes("pause", "paused for a gdb step");
         }
         let reply = match self.emu.debug_step_realtime() {
             Err(e) => {
@@ -488,17 +531,28 @@ impl App {
                     }
                 }
                 Some("off") => {
-                    self.set_warp(false, WarpSource::Gdb);
-                    "warp off (real-time pacing)\n".to_string()
-                }
-                Some("status") | None => format!(
-                    "warp {}\n",
-                    if self.emu.paced() {
-                        "off (paced)"
-                    } else {
-                        "on (unpaced)"
+                    let outcome = self.set_warp(false, WarpSource::Gdb);
+                    match outcome.note {
+                        // Another holder keeps the machine warping.
+                        Some(note) => format!("warp off for gdb; {note}\n"),
+                        None => "warp off (real-time pacing)\n".to_string(),
                     }
-                ),
+                }
+                Some("status") | None => {
+                    let held = if self.warp_holds.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (held by {})", self.warp_holds.describe())
+                    };
+                    format!(
+                        "warp {}{held}\n",
+                        if self.emu.paced() {
+                            "off (paced)"
+                        } else {
+                            "on (unpaced)"
+                        }
+                    )
+                }
                 Some(_) => "usage: monitor warp on|off|status\n".to_string(),
             }),
             "watch-reg" | "unwatch-reg" => {
