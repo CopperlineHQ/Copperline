@@ -116,6 +116,15 @@ modules:
         -t ${FLATPAK_DEST}/share/copperline/lide/
       - install -Dm644 assets/lide/THIRD_PARTY_NOTICES.txt
         -t ${FLATPAK_DEST}/share/copperline/lide/
+      # Bundled HRTMon freezer-cartridge image (default for [cartridge]
+      # model = "hrtmon" without a named rom); romsearch.rs resolves it via
+      # <prefix>/share/copperline/hrtmon.
+      - install -Dm644 assets/hrtmon/hrtmon.rom
+        -t ${FLATPAK_DEST}/share/copperline/hrtmon/
+      - install -Dm644 assets/hrtmon/README.md
+        -t ${FLATPAK_DEST}/share/copperline/hrtmon/
+      - install -Dm644 assets/hrtmon/LICENSE
+        -t ${FLATPAK_DEST}/share/copperline/hrtmon/
       # Desktop integration metadata.
       - install -Dm644 packaging/flatpak/dev.copperline.Copperline.desktop
         ${FLATPAK_DEST}/share/applications/dev.copperline.Copperline.desktop

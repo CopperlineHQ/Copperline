@@ -151,6 +151,41 @@ pub enum ResourceKind {
     Unknown(u16),
 }
 
+/// The overlay display list: the guest's coordinate space (PAL hires
+/// interlace, as Bartman's WinUAE fork composites it), the list bound,
+/// and the cap on a text command's string.
+pub const OVERLAY_WIDTH: u32 = 768;
+pub const OVERLAY_HEIGHT: u32 = 576;
+pub const OVERLAY_CAP: usize = 2048;
+pub const OVERLAY_TEXT_MAX: usize = 256;
+
+/// One fn-88 overlay command, clamped into the 768x576 space. Colours are
+/// the guest's 0x00RRGGBB. Hash feeds the window's rasterization cache
+/// key.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum OverlayCmd {
+    Rect {
+        l: u16,
+        t: u16,
+        r: u16,
+        b: u16,
+        colour: u32,
+    },
+    FilledRect {
+        l: u16,
+        t: u16,
+        r: u16,
+        b: u16,
+        colour: u32,
+    },
+    Text {
+        l: u16,
+        t: u16,
+        text: String,
+        colour: u32,
+    },
+}
+
 /// `debug_resource_flags` in the template.
 pub const RESOURCE_FLAG_INTERLEAVED: u16 = 1 << 0;
 pub const RESOURCE_FLAG_MASKED: u16 = 1 << 1;
@@ -283,6 +318,12 @@ pub struct UaeLib {
     /// Function-88 registry, one entry per address.
     resources: Vec<DebugResource>,
     idle: IdleAccounting,
+    /// Function-88 overlay display list: what the guest asked to be drawn
+    /// over the picture, until it sends `clear`. Guest state (serialized):
+    /// run-ahead and rewind restore the picture's annotations with the
+    /// picture.
+    overlay: Vec<OverlayCmd>,
+    overlay_dropped: u64,
     /// Host-only: while a run-ahead frame is speculative the console echo
     /// is withheld (Paula's `speculative_host_quiet`); the queued event is
     /// guest state and is rewound with the frame.
@@ -316,6 +357,8 @@ impl UaeLib {
             debug_dropped: 0,
             resources: Vec::new(),
             idle: IdleAccounting::default(),
+            overlay: Vec::new(),
+            overlay_dropped: 0,
             speculative_host_quiet: false,
             stdout_muted: false,
             console_lines: VecDeque::new(),
@@ -339,6 +382,8 @@ impl UaeLib {
         self.pending_warp = None;
         self.clear_registry();
         self.idle = IdleAccounting::default();
+        self.overlay.clear();
+        self.overlay_dropped = 0;
     }
 
     /// Drop every registered resource, queueing a `Cleared` event per
@@ -600,7 +645,7 @@ impl UaeLib {
         cck: u64,
         frame: u64,
     ) -> (u32, bool) {
-        let [cmd, a2, _a3, _a4, _] = args;
+        let [cmd, a2, a3, a4, _] = args;
         match cmd {
             CMD_REGISTER_RESOURCE => {
                 match parse_resource(mem, a2 & address_mask, address_mask, frame) {
@@ -613,8 +658,41 @@ impl UaeLib {
             }
             CMD_SET_IDLE => self.idle.set(a2 != 0, cck),
             CMD_UNREGISTER_RESOURCE => self.unregister_resource(a2 & address_mask),
-            CMD_CLEAR | CMD_RECT | CMD_FILLED_RECT | CMD_TEXT => {
-                log::trace!("uaelib: overlay command {cmd} accepted and not drawn");
+            CMD_CLEAR => {
+                self.overlay.clear();
+                self.overlay_dropped = 0;
+            }
+            CMD_RECT | CMD_FILLED_RECT => {
+                // a2 = (left << 16) | top, a3 = (right << 16) | bottom,
+                // both halves signed shorts; a4 = 0x00RRGGBB.
+                let (l, t) = unpack_overlay_point(a2);
+                let (r, b) = unpack_overlay_point(a3);
+                if r > l && b > t {
+                    let colour = a4 & 0x00FF_FFFF;
+                    let cmd = if cmd == CMD_RECT {
+                        OverlayCmd::Rect { l, t, r, b, colour }
+                    } else {
+                        OverlayCmd::FilledRect { l, t, r, b, colour }
+                    };
+                    self.push_overlay(cmd);
+                }
+            }
+            CMD_TEXT => {
+                // The string is read at call time, like function 86: the
+                // guest's buffer may be reused the moment the call returns.
+                let (l, t) = unpack_overlay_point(a2);
+                match guest_cstring(mem, a3 & address_mask, OVERLAY_TEXT_MAX, address_mask) {
+                    Some(bytes) => self.push_overlay(OverlayCmd::Text {
+                        l,
+                        t,
+                        text: String::from_utf8_lossy(&bytes).into_owned(),
+                        colour: a4 & 0x00FF_FFFF,
+                    }),
+                    None => log::debug!(
+                        "uaelib: overlay text at {:#010X} is not readable; dropped",
+                        a3 & address_mask
+                    ),
+                }
             }
             CMD_LOAD | CMD_SAVE => {
                 log::debug!("uaelib: debug_load/debug_save are not provided; returning 0");
@@ -666,6 +744,17 @@ impl UaeLib {
         }
     }
 
+    /// Append to the overlay display list. At the cap the NEW command is
+    /// dropped (the entries the guest asked for first stand; `clear`
+    /// restarts the list), counted so diagnostics can say so.
+    fn push_overlay(&mut self, cmd: OverlayCmd) {
+        if self.overlay.len() >= OVERLAY_CAP {
+            self.overlay_dropped = self.overlay_dropped.saturating_add(1);
+            return;
+        }
+        self.overlay.push(cmd);
+    }
+
     /// Frame boundary: closes the idle accounting of the frame just ended.
     pub fn note_frame_start(&mut self, cck: u64) {
         self.idle.note_frame_start(cck);
@@ -698,6 +787,21 @@ impl UaeLib {
         &self.resources
     }
 
+    /// The overlay display list, in the order the guest drew it.
+    pub fn overlay(&self) -> &[OverlayCmd] {
+        &self.overlay
+    }
+
+    pub fn overlay_dropped(&self) -> u64 {
+        self.overlay_dropped
+    }
+
+    /// Test hook: append an overlay command as function 88 would.
+    #[cfg(test)]
+    pub fn queue_overlay(&mut self, cmd: OverlayCmd) {
+        self.push_overlay(cmd);
+    }
+
     pub fn idle(&self) -> &IdleAccounting {
         &self.idle
     }
@@ -720,6 +824,15 @@ impl UaeLib {
     pub fn queue_debug_line(&mut self, text: &str) {
         self.push_event(DebugEvent::Log(text.to_string()));
     }
+}
+
+/// Unpack a packed overlay point: each half a signed short, clamped into
+/// the 768x576 space (negative coordinates saturate to the edge rather
+/// than wrapping to huge offsets).
+fn unpack_overlay_point(packed: u32) -> (u16, u16) {
+    let x = ((packed >> 16) as i16).clamp(0, OVERLAY_WIDTH as i16) as u16;
+    let y = (packed as i16).clamp(0, OVERLAY_HEIGHT as i16) as u16;
+    (x, y)
 }
 
 /// A guest byte the way a bus master sees it: RAM through the DMA view,
@@ -1542,23 +1655,159 @@ mod tests {
     }
 
     #[test]
-    fn overlay_and_file_commands_are_accepted_no_ops() {
+    fn file_commands_are_accepted_no_ops() {
         let mut lib = UaeLib::new();
         let mut mem = memory();
-        for cmd in [
-            CMD_CLEAR,
-            CMD_RECT,
-            CMD_FILLED_RECT,
-            CMD_TEXT,
-            CMD_LOAD,
-            CMD_SAVE,
-            99,
-        ] {
+        for cmd in [CMD_LOAD, CMD_SAVE, 99] {
             let r = lib.call(FN_DEBUG_CMD, [cmd, 0x2000, 3, 4, 0], &mut mem, MASK24, 0, 0);
             assert_eq!(r, (0, false), "{cmd}");
         }
         assert!(lib.take_debug_events().0.is_empty());
         assert!(lib.resources().is_empty());
         assert!(!lib.idle().used());
+        assert!(lib.overlay().is_empty());
+    }
+
+    fn overlay_cmd(lib: &mut UaeLib, mem: &mut Memory, cmd: u32, a2: u32, a3: u32, a4: u32) {
+        let r = lib.call(FN_DEBUG_CMD, [cmd, a2, a3, a4, 0], mem, MASK24, 0, 0);
+        assert_eq!(r, (0, false));
+    }
+
+    #[test]
+    fn overlay_rect_commands_unpack_packed_corners_and_colour() {
+        let mut lib = UaeLib::new();
+        let mut mem = memory();
+        overlay_cmd(
+            &mut lib,
+            &mut mem,
+            CMD_RECT,
+            (10 << 16) | 20,
+            (110 << 16) | 220,
+            0xFFAA_BB01,
+        );
+        overlay_cmd(
+            &mut lib,
+            &mut mem,
+            CMD_FILLED_RECT,
+            0,
+            (768 << 16) | 576,
+            0x0000_FF00,
+        );
+        assert_eq!(
+            lib.overlay(),
+            &[
+                OverlayCmd::Rect {
+                    l: 10,
+                    t: 20,
+                    r: 110,
+                    b: 220,
+                    // The guest's stray alpha byte is dropped.
+                    colour: 0x00AA_BB01,
+                },
+                OverlayCmd::FilledRect {
+                    l: 0,
+                    t: 0,
+                    r: 768,
+                    b: 576,
+                    colour: 0x0000_FF00,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn overlay_coordinates_clamp_to_the_pal_hires_space() {
+        let mut lib = UaeLib::new();
+        let mut mem = memory();
+        // Negative left/top saturate to 0; oversized right/bottom to the
+        // space's edge.
+        let neg = ((-20i16 as u16 as u32) << 16) | (-4i16 as u16 as u32);
+        let big = (4000u32 << 16) | 3000;
+        overlay_cmd(&mut lib, &mut mem, CMD_FILLED_RECT, neg, big, 1);
+        assert_eq!(
+            lib.overlay(),
+            &[OverlayCmd::FilledRect {
+                l: 0,
+                t: 0,
+                r: 768,
+                b: 576,
+                colour: 1,
+            }]
+        );
+        // A rect empty after clamping is skipped.
+        overlay_cmd(
+            &mut lib,
+            &mut mem,
+            CMD_RECT,
+            (50 << 16) | 50,
+            (50 << 16) | 50,
+            1,
+        );
+        overlay_cmd(
+            &mut lib,
+            &mut mem,
+            CMD_RECT,
+            (90 << 16) | 50,
+            (50 << 16) | 90,
+            1,
+        );
+        assert_eq!(lib.overlay().len(), 1);
+    }
+
+    #[test]
+    fn overlay_text_reads_the_guest_string_at_call_time() {
+        let mut lib = UaeLib::new();
+        let mut mem = memory();
+        put_str(&mut mem, 0x2000, "score 42");
+        overlay_cmd(
+            &mut lib,
+            &mut mem,
+            CMD_TEXT,
+            (8 << 16) | 16,
+            0x2000,
+            0x00FF_FFFF,
+        );
+        // The guest may reuse its buffer the moment the call returns; the
+        // stored text stands.
+        put_str(&mut mem, 0x2000, "clobbered");
+        assert_eq!(
+            lib.overlay(),
+            &[OverlayCmd::Text {
+                l: 8,
+                t: 16,
+                text: "score 42".to_string(),
+                colour: 0x00FF_FFFF,
+            }]
+        );
+        // An unreadable pointer drops the command.
+        overlay_cmd(&mut lib, &mut mem, CMD_TEXT, 0, 0x00F0_0000, 0);
+        assert_eq!(lib.overlay().len(), 1);
+    }
+
+    #[test]
+    fn overlay_clear_empties_the_list_and_the_cap_counts_drops() {
+        let mut lib = UaeLib::new();
+        let mut mem = memory();
+        for _ in 0..OVERLAY_CAP + 3 {
+            overlay_cmd(&mut lib, &mut mem, CMD_FILLED_RECT, 0, (8 << 16) | 8, 2);
+        }
+        assert_eq!(lib.overlay().len(), OVERLAY_CAP);
+        assert_eq!(
+            lib.overlay_dropped(),
+            3,
+            "the new command is the one dropped"
+        );
+        overlay_cmd(&mut lib, &mut mem, CMD_CLEAR, 0, 0, 0);
+        assert!(lib.overlay().is_empty());
+        assert_eq!(lib.overlay_dropped(), 0);
+    }
+
+    #[test]
+    fn overlay_list_goes_with_a_machine_reset() {
+        let mut lib = UaeLib::new();
+        let mut mem = memory();
+        overlay_cmd(&mut lib, &mut mem, CMD_FILLED_RECT, 0, (8 << 16) | 8, 2);
+        lib.reset();
+        assert!(lib.overlay().is_empty());
     }
 }

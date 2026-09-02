@@ -1070,6 +1070,8 @@ pub struct App {
     /// The windowed GDB stub (`--gdb-gui`), when attached.
     #[cfg(feature = "gdb")]
     gdb: Option<gdb::GdbGuiState>,
+    /// Rasterization cache for the guest's fn-88 debug overlay.
+    guest_overlay_cache: statusbar::GuestOverlayCache,
     /// Scheduled relative port-1 mouse motions from --mouse-after,
     /// one-shot per entry; (at_emulated_secs, dx, dy).
     auto_mouse: Vec<(f64, i32, i32, u8)>,
@@ -1090,6 +1092,10 @@ pub struct App {
     /// (at_emulated_secs, image path).
     auto_cd_inserts: Vec<(f64, PathBuf)>,
     pending_auto_cd_inserts: Vec<(f32, PathBuf)>,
+    /// Scheduled freezer-cartridge button presses from --freeze-after
+    /// (one-shot each), at emulated seconds.
+    auto_freezes: Vec<f64>,
+    pending_auto_freezes: Vec<f32>,
     /// Warp launch (`--run`): warp from power-on until the guest OS loads
     /// the target program, then return to real-time pacing. One-shot;
     /// None once finished or cancelled. Host-side only, never serialized.
@@ -1932,6 +1938,7 @@ impl App {
         pot_after: Vec<(f32, u8, u8, u8)>,
         disk_insert_after: Vec<DiskInsertSpec>,
         cd_insert_after: Vec<(f32, PathBuf)>,
+        freeze_after: Vec<f32>,
         record_input: Option<PathBuf>,
         run_warp_target: Option<crate::runprog::WarpLaunch>,
         warp_boot_gate: Option<crate::warpboot::WarpBootGate>,
@@ -2087,6 +2094,7 @@ impl App {
             control: None,
             #[cfg(feature = "gdb")]
             gdb: None,
+            guest_overlay_cache: Default::default(),
             auto_mouse: Vec::new(),
             pending_auto_mouse: mouse_after,
             auto_mouse_to: Vec::new(),
@@ -2098,6 +2106,8 @@ impl App {
             pending_auto_disk_inserts: disk_insert_after,
             auto_cd_inserts: Vec::new(),
             pending_auto_cd_inserts: cd_insert_after,
+            auto_freezes: Vec::new(),
+            pending_auto_freezes: freeze_after,
             warp_launch: run_warp_target,
             warp_launch_tracker: crate::amigaos::LibraryTracker::default(),
             warp_boot: warp_boot_gate,
@@ -3138,6 +3148,10 @@ impl App {
             );
             self.auto_cd_inserts.push((secs.max(0.0) as f64, path));
         }
+        for secs in self.pending_auto_freezes.drain(..) {
+            info!("auto-freeze armed: cartridge freeze at {secs:.1}s emulated time");
+            self.auto_freezes.push(secs.max(0.0) as f64);
+        }
     }
 
     /// Fire any scheduled key/click/joy/mouse/pot/disk/CD events whose
@@ -3293,6 +3307,23 @@ impl App {
                     "--insert-cd-after {}: no CD drive on this machine",
                     path.display()
                 );
+            }
+        }
+        // Fire any scheduled --freeze-after presses (one-shot each).
+        let mut freezes = 0usize;
+        self.auto_freezes.retain(|&at| {
+            if emu_secs >= at {
+                freezes += 1;
+                false
+            } else {
+                true
+            }
+        });
+        for _ in 0..freezes {
+            if self.emu.cartridge_fitted() {
+                self.freeze_cartridge();
+            } else {
+                warn!("--freeze-after: no freezer cartridge on this machine ([cartridge] model)");
             }
         }
         // Input recording: with every input source for this quantum
@@ -3633,6 +3664,17 @@ impl ApplicationHandler for App {
                         if host_shortcut_modifier_pressed(self.modifiers) =>
                     {
                         self.toggle_menu();
+                    }
+                    (KeyCode::KeyB, ElementState::Pressed)
+                        if host_shortcut_modifier_pressed(self.modifiers)
+                            && self.modifiers.shift_key() =>
+                    {
+                        // The freezer cartridge's button: acts on the
+                        // running machine, so not under a menu or panel,
+                        // and never in a player build.
+                        if !crate::video::player_profile() && !self.modal_ui_active() {
+                            self.freeze_cartridge();
+                        }
                     }
                     (KeyCode::KeyB, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers) =>
@@ -4255,6 +4297,10 @@ impl ApplicationHandler for App {
                     control_connected,
                 };
                 let osd = self.active_osd_text();
+                // Hoisted before the render borrow: the guest's fn-88
+                // overlay list is machine state on the bus.
+                let guest_overlay: Vec<crate::uaelib::OverlayCmd> =
+                    self.emu.uaelib_overlay().to_vec();
                 let ui_hover = self.cursor_pos.and_then(|p| self.main_ui_control_at(p));
                 // Decided out here: inside the render borrow the frame is
                 // the renderer's, and the focus is the window's business.
@@ -4286,7 +4332,12 @@ impl ApplicationHandler for App {
                     // Fall back to the CPU present, which composites the UI on
                     // top as usual, at the cost of the FB_WIDTH downscale for
                     // as long as the overlay is open.
-                    let rtg_gpu = self.rtg_present_dims.is_some() && !self.ui.active();
+                    // The guest's fn-88 overlay is composited on the CPU
+                    // canvas too, so it needs the same fallback: the GPU
+                    // RTG pass would overdraw it.
+                    let rtg_gpu = self.rtg_present_dims.is_some()
+                        && !self.ui.active()
+                        && guest_overlay.is_empty();
                     // The CRT pass re-draws the display rect from the same
                     // buffer, so it also re-draws whatever the UI composited
                     // into it -- through curvature and a phosphor mask, which
@@ -4411,6 +4462,19 @@ impl ApplicationHandler for App {
                         FB_WIDTH,
                         present_height(),
                     ));
+                    if !guest_overlay.is_empty() {
+                        // The guest's debug overlay sits directly on the
+                        // picture, under every piece of host chrome, and --
+                        // like everything from here down -- never in a
+                        // capture.
+                        draw_guest_overlay(
+                            frame,
+                            &mut self.guest_overlay_cache,
+                            &guest_overlay,
+                            r.texture_scale,
+                            overlay_anchor,
+                        );
+                    }
                     if recording {
                         // Painted into the presentation texture only, so
                         // the badge never appears in the recorded file.

@@ -97,6 +97,16 @@ install -Dm644 assets/lide/README.md \
 install -Dm644 assets/lide/THIRD_PARTY_NOTICES.txt \
   "$appdir/usr/share/copperline/lide/THIRD_PARTY_NOTICES.txt"
 
+# Bundled HRTMon freezer-cartridge image (default for [cartridge] model =
+# "hrtmon" without a named rom); romsearch.rs looks under
+# share/copperline/hrtmon.
+install -Dm644 assets/hrtmon/hrtmon.rom \
+  "$appdir/usr/share/copperline/hrtmon/hrtmon.rom"
+install -Dm644 assets/hrtmon/README.md \
+  "$appdir/usr/share/copperline/hrtmon/README.md"
+install -Dm644 assets/hrtmon/LICENSE \
+  "$appdir/usr/share/copperline/hrtmon/LICENSE"
+
 # WHDLoad support archives (direct WHDLoad boot, src/whdload.rs); fetched
 # with pinned checksums, shipped unmodified with their provenance README.
 # whdload::find_whdboot_assets looks under share/copperline/whdboot.

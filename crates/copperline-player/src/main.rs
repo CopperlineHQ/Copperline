@@ -134,6 +134,8 @@ fn main() -> Result<()> {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        // No scripted freeze: a bundle fits no freezer cartridge.
+        Vec::new(),
         None,
         run_warp_target,
         // Publisher bundles boot their staged program via the warp launch

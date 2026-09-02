@@ -22,6 +22,7 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 | `Cmd+D` | `Alt+D` | Swap to the next disk in a drive's configured playlist |
 | `Cmd+G` | `Alt+G` | Capture / release the host mouse (clicking the display also captures) |
 | `Cmd+B` | `Alt+B` | Open the [debugger window](../debugger/window) |
+| `Cmd+Shift+B` | `Alt+Shift+B` | Press the freezer cartridge's button: enter the HRTMon monitor (`[cartridge] model`, see [Configuration](configuration.md#freezer-cartridge)) |
 | `Cmd+K` | `Alt+K` | Open the [debugger console](../debugger/console) |
 | `Cmd+J` | `Alt+J` | Toggle joystick input mode: gamepad / keyboard (also the status-bar icon) |
 | `Cmd+M` | `Alt+M` | Turn the monitor bezel off, or back on to the chosen front (*Video Settings > Monitor Bezel* picks it; `[display] bezel` sets the start-up value) |
@@ -233,6 +234,19 @@ run, and `--perf-overlay` shows it from the command line; the launcher's
 counters are exported through the control protocol's `status` reply for
 headless runs (see [](../debugger/control)).
 
+## Guest debug overlay
+
+A program built against the vscode-amiga-debug template can draw over the
+picture through the uaelib trap's `debug_rect` / `debug_filled_rect` /
+`debug_text` helpers (see the uaelib trap section of [](run)). The commands
+describe a 768x576 canvas that is stretched over the visible display --
+tracking autocrop and per-axis scaling -- and stay up until the program
+sends `debug_clear`. The overlay sits directly on the picture, under every
+piece of host chrome (status bar, OSD, performance overlay), and is painted
+into the presentation only: screenshots, frame dumps, recordings and
+control-protocol captures never include it. Setting `[emulation] uaelib =
+false` removes the whole trap, overlay included.
+
 ## Drag and drop
 
 Disk images can be dropped anywhere on the emulator window:
@@ -321,6 +335,12 @@ belongs to the Amiga.
   tabbed debugger in a tool window; see [](../debugger/window).
 - **Console...** (also `Cmd+K` / `Alt+K`): a GDB-flavoured debugger
   command line in its own tool window; see [](../debugger/console).
+- **Freeze (HRTMon)** (also `Cmd+Shift+B` / `Alt+Shift+B`): presses the
+  freezer cartridge's button, so the machine runs on into the HRTMon
+  monitor on its own screen; the monitor's `x` command returns to the
+  program. Greyed out unless a cartridge is fitted (`[cartridge] model`,
+  or the configuration screen's *Freezer cartridge* row); see
+  [Configuration](configuration.md#freezer-cartridge).
 
 ### Audio Settings
 
@@ -593,7 +613,8 @@ The layout is:
   CD image
   on a machine with no CD drive) are dropped so they cannot block a launch.
 - **Category tabs** (left sidebar). *System* (chipset and Agnus/Denise
-  overrides, video standard, RTC, identify board, RTG card), *CPU* (model,
+  overrides, video standard, RTC, identify board, RTG card, freezer
+  cartridge), *CPU* (model,
   FPU, clock, caches, and the experimental not-cycle-exact JIT mode --
   see `[cpu] jit` in [Configuration](configuration.md)),
   *Memory* (cold power-on fill -- zero, deterministic random, or a typed fixed

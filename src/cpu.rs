@@ -1523,6 +1523,20 @@ impl M68kMachine {
         self.cpu.get_sr()
     }
 
+    /// The vector base register (always 0 on a 68000).
+    pub fn vbr(&self) -> u32 {
+        self.cpu.vbr
+    }
+
+    /// Press the freezer cartridge's button: the bus snapshots the
+    /// register shadows, points the level-7 vector under the current VBR
+    /// at the monitor and raises the non-maskable interrupt, taken at the
+    /// next instruction boundary. Returns the monitor's entry address.
+    pub fn cartridge_freeze(&mut self) -> Result<u32, crate::cartridge::FreezeError> {
+        let vbr = self.cpu.vbr;
+        self.bus.bus.cartridge_freeze(vbr)
+    }
+
     pub fn a(&self, reg: usize) -> u32 {
         self.cpu.a(reg)
     }
@@ -2840,6 +2854,12 @@ impl M68kMachine {
 
     fn pending_irq_level(&self) -> u8 {
         let bus = &self.bus.bus;
+        // A freezer cartridge's button drives IPL to 7: non-maskable, so
+        // Paula's INTENA and the SR mask have no say. The vector was just
+        // written, so the bring-up guard below does not apply.
+        if bus.cartridge_nmi_pending() {
+            return 7;
+        }
         if bus.paula.intena & INT_MASTER == 0 {
             return 0;
         }
@@ -2912,6 +2932,8 @@ enum PlainMemRegion {
     Rom(usize),
     Wcs(usize),
     ExtendedRom(usize),
+    /// The freezer cartridge's RAM bank (`crate::cartridge`).
+    Cartridge(usize),
 }
 
 impl CpuBus {
@@ -2956,6 +2978,14 @@ impl CpuBus {
             size,
         ) {
             return Some(PlainMemRegion::ExtendedRom(off));
+        }
+        if let Some(off) = self
+            .bus
+            .cartridge
+            .as_ref()
+            .and_then(|c| c.offset(addr, size))
+        {
+            return Some(PlainMemRegion::Cartridge(off));
         }
         None
     }
@@ -3099,6 +3129,9 @@ impl CpuBus {
             Some(PlainMemRegion::AccelRam(off)) => self.bus.mem.accel_ram[off],
             Some(PlainMemRegion::Wcs(off)) => self.bus.mem.wcs[off],
             Some(PlainMemRegion::ExtendedRom(off)) => self.bus.mem.extended_rom[off],
+            Some(PlainMemRegion::Cartridge(off)) => {
+                self.bus.cartridge.as_ref().map_or(0xFF, |c| c.bank()[off])
+            }
             None => {
                 if crate::uaelib::UaeLib::decodes(addr) {
                     if let Some(b) = self
@@ -3140,6 +3173,13 @@ impl CpuBus {
             }
             Some(PlainMemRegion::AccelRam(off)) => {
                 self.bus.mem.accel_ram[off] = value;
+                self.invalidate_debug_write(addr, 1);
+                true
+            }
+            Some(PlainMemRegion::Cartridge(off)) => {
+                if let Some(cartridge) = self.bus.cartridge.as_mut() {
+                    cartridge.bank_mut()[off] = value;
+                }
                 self.invalidate_debug_write(addr, 1);
                 true
             }
@@ -3339,6 +3379,7 @@ impl CpuBus {
                 1,
             )
             .is_some()
+            || self.bus.cartridge.as_ref().is_some_and(|c| c.decodes(addr))
     }
 
     /// What the data cache may hold: expansion RAM, motherboard RAM,
@@ -3365,6 +3406,7 @@ impl CpuBus {
                 1,
             )
             .is_some()
+            || self.bus.cartridge.as_ref().is_some_and(|c| c.decodes(addr))
     }
 
     fn read_sized_uncached(&mut self, address: u32, size: usize, kind: CpuBusAccessKind) -> u32 {
@@ -3419,6 +3461,16 @@ impl CpuBus {
             Some(PlainMemRegion::ExtendedRom(off)) => {
                 self.bill_external_access(size);
                 return read_be(&self.bus.mem.extended_rom, off, size);
+            }
+            Some(PlainMemRegion::Cartridge(off)) => {
+                // The freezer cartridge's bank: RAM on the expansion bus,
+                // off the chip bus, at external-bus cost like Zorro RAM.
+                self.bill_external_access(size);
+                return self
+                    .bus
+                    .cartridge
+                    .as_ref()
+                    .map_or(0xFFFF_FFFF, |c| read_be(c.bank(), off, size));
             }
             None => {}
         }
@@ -3733,6 +3785,14 @@ impl CpuBus {
                 self.bill_external_access(size);
                 return;
             }
+            Some(PlainMemRegion::Cartridge(off)) => {
+                self.bill_external_access(size);
+                if let Some(cartridge) = self.bus.cartridge.as_mut() {
+                    write_be(cartridge.bank_mut(), off, size, value);
+                }
+                self.dbg_note_memw(addr, size);
+                return;
+            }
             None => {}
         }
 
@@ -3993,7 +4053,9 @@ impl CpuBus {
         if self.ipl_sample_held {
             return;
         }
-        self.sampled_irq_level = if self.bus.paula.intena & INT_MASTER != 0 {
+        self.sampled_irq_level = if self.bus.cartridge_nmi_pending() {
+            7
+        } else if self.bus.paula.intena & INT_MASTER != 0 {
             pending_ipl(self.bus.paula.intena & self.bus.cpu_visible_intreq())
         } else {
             0
@@ -4231,6 +4293,19 @@ impl AddressBus for CpuBus {
     }
 
     fn interrupt_acknowledge(&mut self, level: u8) -> u32 {
+        // A freezer cartridge's level-7 interrupt: consumed at its
+        // acknowledge, so the monitor is entered exactly once per press
+        // (the 68000 recognises level 7 on its transition). The vector the
+        // freeze wrote may sit under a stale data-cache line when VBR
+        // points into fast RAM, so the cache is dropped before the core
+        // fetches it.
+        if level == 7 && self.bus.cartridge_take_nmi() {
+            if let Some(dcache) = self.dcache.as_deref_mut() {
+                dcache.clear_all();
+            }
+            trace!("freezer cartridge NMI acknowledged");
+            return AUTOVECTOR_SENTINEL;
+        }
         let pending = self.bus.paula.intena & self.bus.cpu_visible_intreq();
         self.bus.delivered_irq_pending = pending;
         if pending & crate::chipset::paula::INT_COPER != 0 {
@@ -6185,6 +6260,83 @@ mod tests {
         assert_eq!(machine.d(0), 0);
         assert_eq!(machine.pc(), 0x00FC_00DC);
         assert_ne!(machine.sr() & 0x0004, 0);
+        Ok(())
+    }
+
+    /// A stub freezer-cartridge image: `HRT!` at +4 and, at the level-7
+    /// entry (+12), a handler that writes a marker word into chip RAM and
+    /// returns: MOVE.W #$1234,($1000).W ; RTE.
+    fn stub_cartridge() -> crate::cartridge::Cartridge {
+        let mut image = vec![0u8; 0x60];
+        image[4..8].copy_from_slice(b"HRT!");
+        for (i, word) in [0x31FCu16, 0x1234, 0x1000, 0x4E73].iter().enumerate() {
+            let at = crate::cartridge::HRTMON_ENTRY_OFFSET as usize + i * 2;
+            image[at..at + 2].copy_from_slice(&word.to_be_bytes());
+        }
+        crate::cartridge::Cartridge::hrtmon(&image).unwrap()
+    }
+
+    #[test]
+    fn cartridge_freeze_delivers_one_level7_interrupt_through_the_written_vector() -> Result<()> {
+        use crate::cartridge::{HRTMON_BASE, HRTMON_CUSTOM_SHADOW, HRTMON_ENTRY_OFFSET};
+        let mut bus = test_bus_with_pc(0x0000_0100);
+        // Mask every level Paula can raise, set COLOR00 (a write the
+        // cartridge shadows), then idle in a two-NOP loop the freeze
+        // interrupts.
+        write_program(
+            &mut bus,
+            0x0000_0100,
+            &[
+                0x46FC, 0x2700, // MOVE #$2700,SR
+                0x33FC, 0x0F00, 0x00DF, 0xF180, // MOVE.W #$0F00,$DFF180
+                0x4E71, // $10C: NOP
+                0x4E71, // $10E: NOP
+                0x60FA, // $110: BRA.S $10C
+            ],
+        );
+        bus.attach_cartridge(stub_cartridge());
+        // The delivery mechanism, not the recognition latency (exercised by
+        // the timing-test ROM): immediate IPL like the Paula test below.
+        bus.irq_latency_setting = 0;
+        let mut machine = M68kMachine::new(bus, CpuModel::M68000, false)?;
+        machine.step_slice(4)?; // SR, COLOR00, NOP, NOP
+        assert_eq!(machine.pc(), 0x0000_0110);
+        assert_eq!(machine.sr() & 0x0700, 0x0700);
+        assert!(!machine.bus().cartridge_nmi_pending());
+
+        // The button: the vector under VBR (0 on a 68000) now names the
+        // cartridge entry, the shadows are in the bank, the interrupt waits.
+        let entry = machine.cartridge_freeze().unwrap();
+        assert_eq!(entry, HRTMON_BASE + HRTMON_ENTRY_OFFSET);
+        assert_eq!(read_chip_long(machine.bus(), 0x7C), entry);
+        assert!(machine.bus().cartridge_nmi_pending());
+        let bank = machine.bus().cartridge.as_ref().unwrap().bank();
+        assert_eq!(
+            &bank[HRTMON_CUSTOM_SHADOW + 0x180..HRTMON_CUSTOM_SHADOW + 0x182],
+            &[0x0F, 0x00],
+            "the COLOR00 write reached the shadow the monitor reads"
+        );
+
+        // Taken at the next boundary despite the mask of 7: the handler in
+        // the bank ran (the marker landed), RTE brought the loop back with
+        // its SR, and the request was consumed at the acknowledge.
+        let slice = machine.step_slice(3)?; // MOVE.W, RTE, BRA
+        assert_eq!(slice.instructions, 3);
+        assert_eq!(read_chip_word(machine.bus(), 0x1000), 0x1234);
+        assert_eq!(machine.pc(), 0x0000_010C);
+        assert_eq!(machine.sr() & 0x0700, 0x0700, "RTE restored the mask");
+        assert!(!machine.bus().cartridge_nmi_pending());
+        assert_eq!(machine.bus().cartridge.as_ref().unwrap().freezes(), 1);
+
+        // Level 7 is recognised on its transition, not its level: nothing
+        // re-enters the handler until the button is pressed again.
+        machine.bus_mut().mem.chip_ram[0x1000..0x1002].copy_from_slice(&[0, 0]);
+        machine.step_slice(30)?;
+        assert_eq!(read_chip_word(machine.bus(), 0x1000), 0);
+        machine.cartridge_freeze().unwrap();
+        machine.step_slice(3)?;
+        assert_eq!(read_chip_word(machine.bus(), 0x1000), 0x1234);
+        assert_eq!(machine.bus().cartridge.as_ref().unwrap().freezes(), 2);
         Ok(())
     }
 

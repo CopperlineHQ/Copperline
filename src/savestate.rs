@@ -357,13 +357,20 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      COPPERLINE_DIAG_CRASH) and the loader already cleared it, so a run
 //      resumed from a state and the uninterrupted run it was taken from now
 //      write byte-identical states again.
-//  75: copperhf.device's asynchronous worker-thread I/O (M5): CopperhfBoard
+//  75: the bus gained the freezer cartridge (`cartridge`): its 1 MiB bank,
+//      the custom/CIA register shadows kept for it and the pending level-7
+//      freeze interrupt travel with the state, so a monitor session and
+//      the snapshot it took of the interrupted program survive a resume.
+//  76: the uaelib trap gained the fn-88 overlay display list (the rects
+//      and text the guest asked to be drawn over the picture) and its
+//      drop counter, guest state like the registry.
+//  77: copperhf.device's asynchronous worker-thread I/O (M5): CopperhfBoard
 //      gained a per-unit cached `total_sectors` (`unit_sectors`) alongside
 //      the existing per-unit state; always serialized quiesced (no
 //      in-flight requests), so the shape otherwise stays close to M4's.
-//      (Was 71 on the copperhf-device branch before upstream's own 71-74
-//      landed; renumbered at the merge.)
-pub const STATE_VERSION: u32 = 75;
+//      (Was 71, then 75 on the copperhf-device branch; renumbered past
+//      upstream's own 71-76 at each merge.)
+pub const STATE_VERSION: u32 = 77;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {
@@ -954,6 +961,46 @@ mod tests {
         assert!(!plain_machine.bus().cd_drive_present());
         load(&mut plain_machine, &path).unwrap();
         assert!(plain_machine.bus().cd_drive_present());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn cartridge_bank_and_shadows_travel_in_the_state() {
+        use crate::cartridge::{Cartridge, CartridgeModel, HRTMON_CUSTOM_SHADOW};
+        // A monitor session lives in the cartridge's own bank, so the bank,
+        // the register shadows the host keeps for it and a freeze still
+        // waiting for the CPU all resume with the guest.
+        let path = temp_state("cartridge");
+        let mut machine = test_machine();
+        let mut image = vec![0u8; 0x60];
+        image[4..8].copy_from_slice(b"HRT!");
+        let mut cartridge = Cartridge::hrtmon(&image).unwrap();
+        cartridge.bank_mut()[0x1234] = 0xAB; // the monitor's own variables
+        cartridge.note_custom_write(0x180, 0x0F00);
+        machine.bus_mut().attach_cartridge(cartridge);
+        machine.bus_mut().cartridge_freeze(0).unwrap();
+        save(&machine, &MachineDescriptor::default(), &path).unwrap();
+
+        let mut plain_machine = test_machine();
+        assert!(plain_machine.bus().cartridge.is_none());
+        load(&mut plain_machine, &path).unwrap();
+        let cartridge = plain_machine
+            .bus()
+            .cartridge
+            .as_ref()
+            .expect("the state fits the cartridge");
+        assert_eq!(cartridge.model(), CartridgeModel::Hrtmon);
+        assert_eq!(cartridge.bank()[0x1234], 0xAB);
+        assert_eq!(
+            &cartridge.bank()[HRTMON_CUSTOM_SHADOW + 0x180..HRTMON_CUSTOM_SHADOW + 0x182],
+            &[0x0F, 0x00]
+        );
+        assert_eq!(&cartridge.custom_shadow()[0x180..0x182], &[0x0F, 0x00]);
+        assert!(
+            cartridge.nmi_pending(),
+            "a freeze not yet taken is still waiting"
+        );
+        assert_eq!(cartridge.freezes(), 1);
         let _ = std::fs::remove_file(&path);
     }
 }

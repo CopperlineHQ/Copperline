@@ -4162,6 +4162,7 @@ fn test_app_with_audio_cpu_and_program(
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
         None,
         None,
         None,
@@ -4230,6 +4231,7 @@ fn test_app_with_copperhf_units(units: &[(usize, PathBuf)]) -> super::App {
         Vec::new(),
         Vec::new(),
         None,
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -9405,6 +9407,236 @@ fn perf_overlay_lines_format_one_data_point_per_line() {
 /// call site passes while autocrop is not presenting.
 fn full_anchor() -> (usize, usize, usize, usize) {
     (0, 0, crate::video::FB_WIDTH, super::present_height())
+}
+
+#[test]
+fn guest_overlay_maps_rects_and_text_onto_the_anchor() {
+    use crate::uaelib::OverlayCmd;
+    let scale = 1;
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    // A full-space filled rect covers the whole anchor in the guest's red
+    // (0x00RRGGBB -> R in the low texture byte).
+    let cmds = vec![OverlayCmd::FilledRect {
+        l: 0,
+        t: 0,
+        r: 768,
+        b: 576,
+        colour: 0x00FF_0000,
+    }];
+    super::statusbar::draw_guest_overlay(
+        &mut frame,
+        &mut super::statusbar::GuestOverlayCache::default(),
+        &cmds,
+        scale,
+        full_anchor(),
+    );
+    assert_eq!(pixel(&frame, 0, 0, scale), [255, 0, 0, 255]);
+    assert_eq!(
+        pixel(
+            &frame,
+            crate::video::FB_WIDTH - 1,
+            super::present_height() - 1,
+            scale
+        ),
+        [255, 0, 0, 255]
+    );
+
+    // A sub-rect anchor maps the same command onto only that rect.
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    super::statusbar::draw_guest_overlay(
+        &mut frame,
+        &mut super::statusbar::GuestOverlayCache::default(),
+        &cmds,
+        scale,
+        (100, 50, 200, 100),
+    );
+    assert_eq!(pixel(&frame, 99, 50, scale), [0, 0, 0, 0]);
+    assert_eq!(pixel(&frame, 100, 50, scale), [255, 0, 0, 255]);
+    assert_eq!(pixel(&frame, 299, 149, scale), [255, 0, 0, 255]);
+    assert_eq!(pixel(&frame, 300, 149, scale), [0, 0, 0, 0]);
+
+    // A half-space rect lands proportionally: the guest's 384 maps to the
+    // anchor's midpoint.
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    let cmds = vec![OverlayCmd::FilledRect {
+        l: 384,
+        t: 0,
+        r: 768,
+        b: 576,
+        colour: 0x0000_00FF,
+    }];
+    super::statusbar::draw_guest_overlay(
+        &mut frame,
+        &mut super::statusbar::GuestOverlayCache::default(),
+        &cmds,
+        scale,
+        (0, 0, 200, 100),
+    );
+    assert_eq!(pixel(&frame, 99, 10, scale), [0, 0, 0, 0]);
+    assert_eq!(pixel(&frame, 100, 10, scale), [0, 0, 255, 255]);
+
+    // Text paints glyph pixels in the guest colour.
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    let cmds = vec![OverlayCmd::Text {
+        l: 0,
+        t: 0,
+        text: "X".to_string(),
+        colour: 0x0000_FF00,
+    }];
+    super::statusbar::draw_guest_overlay(
+        &mut frame,
+        &mut super::statusbar::GuestOverlayCache::default(),
+        &cmds,
+        scale,
+        full_anchor(),
+    );
+    let lit = (0..8 * 8)
+        .filter(|i| pixel(&frame, i % 8, i / 8, scale) == [0, 255, 0, 255])
+        .count();
+    assert!(lit > 4, "an X paints several glyph pixels, got {lit}");
+
+    // An empty list is a strict no-op.
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    super::statusbar::draw_guest_overlay(
+        &mut frame,
+        &mut super::statusbar::GuestOverlayCache::default(),
+        &[],
+        scale,
+        full_anchor(),
+    );
+    assert!(frame.iter().all(|&b| b == 0));
+}
+
+#[test]
+fn guest_overlay_rasterization_budget_drops_trailing_commands() {
+    use crate::uaelib::OverlayCmd;
+    let scale = 1;
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    // 40 full-anchor fills: the budget (32 anchor-fulls) lands the first
+    // 32 and drops the tail, matching the trap's own drop-newest rule.
+    // The last landed colour is command 31's green channel value.
+    let cmds: Vec<OverlayCmd> = (0..40)
+        .map(|i| OverlayCmd::FilledRect {
+            l: 0,
+            t: 0,
+            r: 768,
+            b: 576,
+            colour: 0x0000_0100 * (i + 1),
+        })
+        .collect();
+    super::statusbar::draw_guest_overlay(
+        &mut frame,
+        &mut super::statusbar::GuestOverlayCache::default(),
+        &cmds,
+        scale,
+        full_anchor(),
+    );
+    assert_eq!(
+        pixel(&frame, 10, 10, scale),
+        [0, 32, 0, 255],
+        "the 32nd fill is the last to land; the 40th never draws"
+    );
+}
+
+#[test]
+fn guest_overlay_cache_replays_only_on_a_changed_list() {
+    use crate::uaelib::OverlayCmd;
+    let scale = 1;
+    let mut cache = super::statusbar::GuestOverlayCache::default();
+    let red = vec![OverlayCmd::FilledRect {
+        l: 0,
+        t: 0,
+        r: 768,
+        b: 576,
+        colour: 0x00FF_0000,
+    }];
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    super::statusbar::draw_guest_overlay(&mut frame, &mut cache, &red, scale, full_anchor());
+    assert_eq!(pixel(&frame, 5, 5, scale), [255, 0, 0, 255]);
+    // Same list, same cache: the cached raster composites identically.
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    super::statusbar::draw_guest_overlay(&mut frame, &mut cache, &red, scale, full_anchor());
+    assert_eq!(pixel(&frame, 5, 5, scale), [255, 0, 0, 255]);
+    // A changed list re-rasterizes through the same cache.
+    let green = vec![OverlayCmd::FilledRect {
+        l: 0,
+        t: 0,
+        r: 768,
+        b: 576,
+        colour: 0x0000_FF00,
+    }];
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    super::statusbar::draw_guest_overlay(&mut frame, &mut cache, &green, scale, full_anchor());
+    assert_eq!(pixel(&frame, 5, 5, scale), [0, 255, 0, 255]);
+}
+
+#[test]
+fn guest_overlay_text_scales_up_and_clips_to_the_anchor() {
+    use crate::uaelib::OverlayCmd;
+    // texture_scale 2: the anchor ratio sits just under 2 (about 1.86),
+    // which flooring rendered at half size; the nearest whole scale is 2.
+    let scale = 2;
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    let cmds = vec![OverlayCmd::Text {
+        l: 0,
+        t: 0,
+        text: "M".to_string(),
+        colour: 0x0000_FF00,
+    }];
+    super::statusbar::draw_guest_overlay(
+        &mut frame,
+        &mut super::statusbar::GuestOverlayCache::default(),
+        &cmds,
+        scale,
+        full_anchor(),
+    );
+    let lit_wide = (0..16 * 16)
+        .filter(|i| {
+            let (x, y) = (i % 16, i / 16);
+            x >= 8 && pixel(&frame, x, y, scale) == [0, 255, 0, 255]
+        })
+        .count();
+    assert!(
+        lit_wide > 0,
+        "a 2x glyph reaches past the 1x glyph cell's 8-pixel width"
+    );
+
+    // A sub-rect anchor: text placed at the overlay's right edge clips
+    // at the anchor boundary instead of painting into the letterbox.
+    let scale = 1;
+    let anchor = (100, 50, 200, 100);
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    let cmds = vec![OverlayCmd::Text {
+        l: 760,
+        t: 280,
+        text: "MMMM".to_string(),
+        colour: 0x00FF_0000,
+    }];
+    super::statusbar::draw_guest_overlay(
+        &mut frame,
+        &mut super::statusbar::GuestOverlayCache::default(),
+        &cmds,
+        scale,
+        anchor,
+    );
+    let (ax, ay, aw, ah) = anchor;
+    let mut inside = 0;
+    for y in 0..texture_height(scale) {
+        for x in 0..texture_width(scale) {
+            if pixel(&frame, x, y, scale) == [0, 0, 0, 0] {
+                continue;
+            }
+            assert!(
+                x >= ax && x < ax + aw && y >= ay && y < ay + ah,
+                "overlay pixel at ({x},{y}) escaped the anchor rect"
+            );
+            inside += 1;
+        }
+    }
+    assert!(
+        inside > 0,
+        "the clipped text still paints inside the anchor"
+    );
 }
 
 #[test]

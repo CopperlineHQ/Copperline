@@ -2003,6 +2003,218 @@ pub(super) fn draw_record_badge(
 /// Painted into the presentation texture only, like the record badge, so
 /// captures never include it; while a recording badge is up the block
 /// starts below it instead of fighting for the corner.
+/// The guest's fn-88 debug overlay (crate::uaelib): rects and text in a
+/// 768x576 PAL hires space, mapped proportionally onto the display
+/// sub-rect the viewer sees (`anchor`, canvas pixels) -- the way
+/// Bartman's WinUAE fork stretches its overlay buffer over the picture.
+/// Painted into the presentation texture only, after the frame capture
+/// copy, so it can never appear in screenshots, dumps or recordings.
+/// Cached rasterization of the guest's fn-88 overlay. The display list
+/// is replayed into an anchor-sized RGBA buffer only when the list or
+/// the destination geometry changes; every redraw then pays one bounded
+/// alpha-tested composite of the anchor rect, so a large legal list (or
+/// one the guest has stopped touching) cannot stall the window by being
+/// replayed at full cost on every frame. Drawing into the local buffer
+/// also clips everything -- text glyphs included -- to the anchor, so a
+/// cropped sub-rect presentation never leaks overlay pixels into the
+/// letterbox or host chrome.
+#[derive(Default)]
+pub(super) struct GuestOverlayCache {
+    key: u64,
+    w: usize,
+    h: usize,
+    pixels: Vec<u8>,
+}
+
+/// Rasterization work budget, in filled pixels, per list change: enough
+/// for many full-anchor fills, far short of the hundreds of millions of
+/// writes a maximal hostile list could otherwise demand in one pass.
+/// Commands past the budget are dropped from the tail, matching the
+/// trap's own drop-newest rule at the list cap.
+const OVERLAY_RASTER_BUDGET_FILLS: usize = 32;
+
+pub(super) fn draw_guest_overlay(
+    frame: &mut [u8],
+    cache: &mut GuestOverlayCache,
+    cmds: &[crate::uaelib::OverlayCmd],
+    texture_scale: usize,
+    anchor: (usize, usize, usize, usize),
+) {
+    let s = texture_scale;
+    let (ax, ay, aw, ah) = anchor;
+    let (x0, y0, w, h) = (ax * s, ay * s, aw * s, ah * s);
+    if w == 0 || h == 0 {
+        return;
+    }
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (s, anchor).hash(&mut hasher);
+        cmds.hash(&mut hasher);
+        hasher.finish()
+    };
+    if cache.key != key || cache.w != w || cache.h != h {
+        rasterize_guest_overlay(cache, cmds, s, w, h);
+        cache.key = key;
+    }
+    // Composite: drawn pixels carry alpha 0xFF, untouched ones 0; only
+    // the drawn ones reach the presentation.
+    let (tex_w, tex_h) = (texture_width(s), texture_height(s));
+    for row in 0..h {
+        let fy = y0 + row;
+        if fy >= tex_h {
+            break;
+        }
+        for col in 0..w {
+            let fx = x0 + col;
+            if fx >= tex_w {
+                break;
+            }
+            let src = (row * w + col) * 4;
+            if cache.pixels[src + 3] == 0 {
+                continue;
+            }
+            let dst = (fy * tex_w + fx) * 4;
+            frame[dst..dst + 4].copy_from_slice(&cache.pixels[src..src + 4]);
+        }
+    }
+}
+
+fn rasterize_guest_overlay(
+    cache: &mut GuestOverlayCache,
+    cmds: &[crate::uaelib::OverlayCmd],
+    texture_scale: usize,
+    w: usize,
+    h: usize,
+) {
+    use crate::uaelib::{OverlayCmd, OVERLAY_HEIGHT, OVERLAY_WIDTH};
+    cache.w = w;
+    cache.h = h;
+    cache.pixels.clear();
+    cache.pixels.resize(w * h * 4, 0);
+    let map_x = |v: u16| usize::from(v) * w / OVERLAY_WIDTH as usize;
+    let map_y = |v: u16| usize::from(v) * h / OVERLAY_HEIGHT as usize;
+    // 0x00RRGGBB -> the texture's memory order (R low byte, alpha high).
+    let guest_colour =
+        |c: u32| 0xFF00_0000 | ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF);
+    let mut budget = OVERLAY_RASTER_BUDGET_FILLS.saturating_mul(w * h);
+    let fill = |buf: &mut [u8],
+                budget: &mut usize,
+                x: usize,
+                y: usize,
+                fw: usize,
+                fh: usize,
+                colour: u32| {
+        let x1 = (x + fw).min(w);
+        let y1 = (y + fh).min(h);
+        let (x, y) = (x.min(w), y.min(h));
+        let area = x1.saturating_sub(x) * y1.saturating_sub(y);
+        if area > *budget {
+            *budget = 0;
+            return;
+        }
+        *budget -= area;
+        let bytes = colour.to_le_bytes();
+        for yy in y..y1 {
+            for xx in x..x1 {
+                let off = (yy * w + xx) * 4;
+                buf[off..off + 4].copy_from_slice(&bytes);
+            }
+        }
+    };
+    let thickness = texture_scale.max(1);
+    // Text keeps whole glyph blocks at the nearest integer scale from
+    // the overlay space (rounded, floored at 1: flooring rendered the
+    // text half-sized against its rectangles on HiDPI windows, where
+    // the ratio sits just under the next whole scale).
+    let px = ((w as f32 / OVERLAY_WIDTH as f32).round() as usize)
+        .min((h as f32 / OVERLAY_HEIGHT as f32).round() as usize)
+        .max(1);
+    for cmd in cmds {
+        if budget == 0 {
+            log::warn!("guest overlay: rasterization budget exhausted; dropping trailing commands");
+            break;
+        }
+        match cmd {
+            OverlayCmd::FilledRect { l, t, r, b, colour } => {
+                let (x, y) = (map_x(*l), map_y(*t));
+                fill(
+                    &mut cache.pixels,
+                    &mut budget,
+                    x,
+                    y,
+                    map_x(*r).saturating_sub(x),
+                    map_y(*b).saturating_sub(y),
+                    guest_colour(*colour),
+                );
+            }
+            OverlayCmd::Rect { l, t, r, b, colour } => {
+                let (x, y) = (map_x(*l), map_y(*t));
+                let (rw, rh) = (map_x(*r).saturating_sub(x), map_y(*b).saturating_sub(y));
+                let colour = guest_colour(*colour);
+                fill(
+                    &mut cache.pixels,
+                    &mut budget,
+                    x,
+                    y,
+                    rw,
+                    thickness.min(rh),
+                    colour,
+                );
+                fill(
+                    &mut cache.pixels,
+                    &mut budget,
+                    x,
+                    (y + rh).saturating_sub(thickness).max(y),
+                    rw,
+                    thickness.min(rh),
+                    colour,
+                );
+                fill(
+                    &mut cache.pixels,
+                    &mut budget,
+                    x,
+                    y,
+                    thickness.min(rw),
+                    rh,
+                    colour,
+                );
+                fill(
+                    &mut cache.pixels,
+                    &mut budget,
+                    (x + rw).saturating_sub(thickness).max(x),
+                    y,
+                    thickness.min(rw),
+                    rh,
+                    colour,
+                );
+            }
+            OverlayCmd::Text { l, t, text, colour } => {
+                // Glyph work is bounded like the fills, by the text's
+                // covered area.
+                let area = text.chars().count() * 8 * 8 * px * px;
+                if area > budget {
+                    budget = 0;
+                    continue;
+                }
+                budget -= area;
+                // Drawn into the anchor-sized buffer, so glyphs clip to
+                // the anchor exactly like the rectangles.
+                font::draw_text(
+                    &mut cache.pixels,
+                    w,
+                    h,
+                    map_x(*l),
+                    map_y(*t),
+                    text,
+                    guest_colour(*colour),
+                    px,
+                );
+            }
+        }
+    }
+}
+
 pub(super) fn draw_perf_overlay(
     frame: &mut [u8],
     lines: &[String],

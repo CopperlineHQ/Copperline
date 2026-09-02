@@ -81,6 +81,8 @@ pub struct RawConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) toccata: RawToccata,
     #[serde(default, skip_serializing_if = "is_default")]
+    pub(crate) cartridge: RawCartridge,
+    #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) mhi: RawMhi,
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) hostsocket: RawHostSocket,
@@ -909,6 +911,18 @@ pub(crate) struct RawToccata {
     /// Fit the board. Absent/false means no Toccata is on the chain.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) enabled: Option<bool>,
+}
+
+/// `[cartridge]` freezer cartridge (`crate::cartridge`).
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawCartridge {
+    /// Which cartridge: "none" (the default) or "hrtmon".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) model: Option<String>,
+    /// A cartridge image of the user's own instead of the bundled one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rom: Option<String>,
 }
 
 /// `[mhi]` MHI virtual MPEG audio decoder board.

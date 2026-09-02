@@ -54,6 +54,9 @@ pub enum ReplayAction {
     /// be reconstructed from the log (the inserted image is host-file state),
     /// so the engine warns rather than silently diverging.
     DiskChange,
+    /// The freezer cartridge's button, with the vector base it was pressed
+    /// under: the level-7 vector lands at the same slot on replay.
+    Freeze { vbr: u32 },
 }
 
 impl ReplayAction {
@@ -89,6 +92,11 @@ impl ReplayAction {
                     "reverse-debug replay crossed a floppy media change; \
                      reconstruction past it may diverge"
                 );
+            }
+            ReplayAction::Freeze { vbr } => {
+                if let Err(e) = bus.cartridge_freeze(vbr) {
+                    log::warn!("reverse-debug replay could not replay a freeze: {e}");
+                }
             }
         }
     }

@@ -13,9 +13,7 @@ use crate::floppy::FloppyController;
 use crate::memory::Memory;
 use crate::serial::StdoutSink;
 use crate::timebase::{Duration, Instant};
-#[cfg(feature = "cd32-fmv")]
-use anyhow::Context;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use log::{info, warn};
 
 const INSTRUCTIONS_PER_SLICE: usize = 32_000;
@@ -768,6 +766,35 @@ impl Emulator {
         self.bus().uaelib.is_some()
     }
 
+    /// The fitted freezer cartridge (`[cartridge] model`,
+    /// `crate::cartridge`), if any.
+    pub fn cartridge(&self) -> Option<&crate::cartridge::Cartridge> {
+        self.bus().cartridge.as_ref()
+    }
+
+    pub fn cartridge_fitted(&self) -> bool {
+        self.bus().cartridge.is_some()
+    }
+
+    /// Press the freezer cartridge's button. The freeze is journaled for
+    /// reverse-debug replay with the VBR it was delivered under. Returns
+    /// the monitor's entry address the level-7 vector now holds.
+    pub fn cartridge_freeze(&mut self) -> Result<u32> {
+        let Some(cartridge) = self.cartridge() else {
+            return Err(crate::cartridge::FreezeError::NotFitted.into());
+        };
+        let model = cartridge.model();
+        let vbr = self.machine.vbr();
+        let entry = self.machine.cartridge_freeze()?;
+        log::info!(
+            "cartridge: {} freeze, level-7 vector at {:#010X} -> {entry:#010X}",
+            model.label(),
+            vbr.wrapping_add(0x7C)
+        );
+        self.tt_note_input(crate::inputsched::ReplayAction::Freeze { vbr });
+        Ok(entry)
+    }
+
     /// The guest's latest `warpmode()` request through the uaelib trap,
     /// if any since the last take.
     pub fn take_uaelib_warp_request(&mut self) -> Option<bool> {
@@ -800,6 +827,11 @@ impl Emulator {
         if let Some(uaelib) = self.bus_mut().uaelib.as_mut() {
             uaelib.clear_debug_events();
         }
+    }
+
+    /// The overlay display list the guest drew through the uaelib trap.
+    pub fn uaelib_overlay(&self) -> &[crate::uaelib::OverlayCmd] {
+        self.bus().uaelib.as_ref().map_or(&[], |u| u.overlay())
     }
 
     /// The resources the guest registered through the uaelib trap.
@@ -3454,6 +3486,32 @@ pub fn build_machine(
     }
     if cd_image.is_some() {
         warn!("cd image configured but this machine has no CD controller; the disc is not mounted");
+    }
+    // The freezer cartridge (crate::cartridge): its bank at $A10000 and the
+    // configuration block describing this machine, written from the boards
+    // fitted so far, so it goes on after the IDE interfaces and the CD
+    // controllers the block reports.
+    if let Some(model) = cfg.cartridge.model {
+        let path = cfg.cartridge.rom.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("[cartridge] model = \"{}\" needs an image", model.label())
+        })?;
+        let image = std::fs::read(path)
+            .with_context(|| format!("reading cartridge image {}", path.display()))?;
+        let cartridge = match model {
+            crate::cartridge::CartridgeModel::Hrtmon => crate::cartridge::Cartridge::hrtmon(&image)
+                .with_context(|| format!("cartridge image {}", path.display()))?,
+        };
+        let version = cartridge
+            .version()
+            .map_or_else(String::new, |(v, r)| format!(" {v}.{r:02}"));
+        info!(
+            "cartridge: {}{version} at {:#08X}-{:#08X} ({})",
+            model.label(),
+            cartridge.base(),
+            cartridge.base() + cartridge.size() as u32 - 1,
+            path.display()
+        );
+        bus.attach_cartridge(cartridge);
     }
     if let Some(machine) = cfg.machine {
         info!(

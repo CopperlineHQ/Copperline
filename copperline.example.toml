@@ -389,6 +389,18 @@ slow = "512K"
 # enabled = true
 
 
+# Freezer cartridge: an Action Replay-style system monitor in its own bank
+# at $A10000, entered by a level-7 (non-maskable) interrupt when you press
+# its button (Tools > Freeze in the menu, Cmd+Shift+B / Alt+Shift+B,
+# --freeze-after SECS headless, or the control protocol's cartridge.freeze).
+# "hrtmon" fits the bundled HRTMon 2.39 image (GPL, built from source by
+# hrtmon-rom/build.sh); rom = "..." replaces it with an HRTMon cartridge
+# image of your own. The monitor's x command returns to the program.
+# [cartridge]
+# model = "hrtmon"
+# rom = "/roms/hrtmon.rom"
+
+
 # MHI: a virtual MPEG-1/2/2.5 Layer III audio decoder board, serving the
 # Amiga MHI API through the ported mhi_copperline.library (guest/mhi/) so
 # MHI-aware guest software (e.g. AmigaAMP) gets MP3 decoding. No other

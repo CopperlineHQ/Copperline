@@ -378,16 +378,87 @@ works unchanged (user-facing description in the uaelib trap section of
   `cfgfile_uaelib_modify` would (pairs, `index` -1, `size` 0 = NUL-terminated,
   `out` cleared) and latches only `warp`; 86 echoes the text on stdout
   (withheld while a run-ahead frame is speculative, like Paula's serial sink)
-  and queues it; 88 keeps the resource registry and the idle accounting
-  (per-frame colour clocks, closed at `begin_new_beam_frame`). Everything
-  else returns 0.
+  and queues it; 88 keeps the resource registry, the idle accounting
+  (per-frame colour clocks, closed at `begin_new_beam_frame`), and the
+  overlay display list (packed signed-short corners clamped into the
+  768x576 space, text read at call time, capped at `OVERLAY_CAP` with the
+  new command dropped and counted; `clear` restarts the list). Everything
+  else returns 0. The window composites the overlay onto the presented
+  display sub-rect after the capture copy (`statusbar::draw_guest_overlay`),
+  so captures stay clean by construction.
 - **State.** The latch image, the pending warp request, the bounded event
-  queue, the registry and the idle accounting are machine state inside
-  `Bus` (save-state version 73): run-ahead and rewind restore them with the
+  queue, the registry, the idle accounting and the overlay display list
+  are machine state inside
+  `Bus` (save-state version 76): run-ahead and rewind restore them with the
   guest that made them. The pending request is drained by the frontends
   once per committed frame (`App::service_uaelib`, the headless control
   server's `emit_events`); the queue by a control-protocol `debug`
   subscriber.
+
+## Freezer cartridge (`cartridge.rs`)
+
+An Action Replay-style system monitor in its own memory bank, entered by
+the 68000's non-maskable level-7 interrupt when the user presses the
+cartridge's button (user-facing description in the `[cartridge]` section
+of [](../guide/configuration)). One model is fitted so far: HRTMon in its
+UAE cartridge build, the image `assets/hrtmon/hrtmon.rom` that
+`hrtmon-rom/build.sh` assembles from the upstream GPL source (HRTMon 2.39,
+`UAE`, `CARTRIDGE` and `SAVE_CUSTOM` switched on; the build README has the
+provenance, the flags and the five-line patch). The model follows what
+that source expects of its host, which is also how WinUAE hosts it;
+nothing here is Amiga hardware -- a real Action Replay sits on the
+expansion bus and snoops the chip-register writes itself.
+
+- **Bank.** 1 MiB at `$A10000` (`ORG $A10000` in the source), the image at
+  its start and `$FF` beyond it. It is plain read/write memory on the CPU
+  side, decoded by `classify_plain_memory` after RAM, ROM and the extended
+  ROM at external-bus cost like Zorro RAM, cacheable, and present at all
+  times -- the monitor keeps its variables, stack and screen buffers in it,
+  and a state taken inside the monitor must resume inside it.
+- **Configuration block.** The header's fields at `+20`..`+72` (`mon_size`,
+  the two screen colours, `ide`, `a1200`, `aga`, `cd32`, `screenmode`,
+  `novbr`, `entered`, `hexmode`, `max_chip`) tell the monitor what it is
+  running on. `Bus::attach_cartridge` writes them from the boards fitted
+  (Gayle or the A4000 IDE, Akiko, the chipset revision, the video
+  standard, the chip RAM size) and `reset_for_keyboard_reset` writes them
+  again, clearing `entered` -- the flag the monitor sets while it is
+  active -- so a freeze after a reset installs it afresh. The values are
+  the ones WinUAE's `hrtmon_configure` writes (dark blue on white,
+  `novbr` and `hexmode` on); the `whd_*` fields belong to WHDLoad and are
+  left alone.
+- **Register shadows.** The monitor cannot read the write-only custom
+  registers back, so the bus keeps a 512-byte image of the last value
+  written to (or driven on a read of) every custom register, CPU and
+  Copper writes alike (`write_custom_word_from`, `custom_read`), and the
+  last byte written to each CIA register. A freeze copies them into the
+  bank where the `SAVE_CUSTOM` build reads them: the custom image at
+  `PTR_CUSTOM` (`$A9F000`), the CIA bytes at `$A9E000` (CIA-A, on the odd
+  lane at `reg * $100 + 1`) and `$A9D000` (CIA-B, even lane), so the
+  monitor shows and, on exit, restores the registers the interrupted
+  program had set.
+- **Entry.** `Cartridge::freeze` copies the shadows, writes the level-7
+  autovector (VBR + `$7C`, through the same RAM-only writer DMA masters
+  use, so a VBR in fast RAM works and a VBR in ROM refuses the press)
+  to the `bra.w monitor` at `+12`, and arms the interrupt.
+  `pending_irq_level` and the IPL sample report 7 while it is armed, the
+  core takes level 7 whatever the SR mask (`Cpu::check_interrupts`), and
+  `interrupt_acknowledge(7)` consumes it -- so the monitor is entered
+  exactly once per press, as a 68000 recognises level 7 on its transition
+  and not its level, and the RTE the monitor exits through does not
+  re-enter it. The data cache is dropped at the acknowledge in case the
+  vector slot sat under a stale line. The monitor installs itself on the
+  first entry (`init_code`, including a CIA-TOD-timed probe of an IDE
+  port when the block reports one) and paints its screen in the block's
+  colours.
+- **Triggers.** `Emulator::cartridge_freeze` is the one entry point: the
+  menu row and `Cmd+Shift+B`, `--freeze-after` (a scheduled input like
+  the others, `freeze-after` in a script or an input recording), and the
+  control protocol's `cartridge.freeze`. It journals the press with the
+  VBR it was delivered under for reverse-debug replay
+  (`ReplayAction::Freeze`).
+- **State.** The bank, the shadows, the pending interrupt and the press
+  count are machine state inside `Bus` (save-state version 75): run-ahead,
+  rewind and save states restore a monitor session with the guest.
 
 ## A2065 Ethernet (`a2065.rs`, `net/`)
 
