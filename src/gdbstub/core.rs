@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The transport-free core of the GDB stub: packet semantics against the
 //! machine, with no socket and no ownership of the emulator. The headless
 //! driver ([`super::headless`]) runs it from a blocking loop; a windowed

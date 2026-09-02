@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Test fixtures shared by the GDB stub drivers: a canned emulator whose
 //! ROM program performs a LoadSeg-style hand-off, and a minimal RSP wire
 //! client. Compiled only for tests.
