@@ -1156,6 +1156,40 @@ pub struct Debugger {
 }
 
 impl Debugger {
+    /// An armed debugger with nothing configured: no breakpoints, watches,
+    /// catches, or trace, an open time window, and the default hit budget.
+    /// Hosts that arm the headless debugger programmatically (tests, the
+    /// transparency check) fill in the public fields; `from_env` is the
+    /// environment-driven equivalent.
+    pub fn new(addr_mask: u32) -> Self {
+        Self {
+            addr_mask,
+            breakpoints: Vec::new(),
+            watches: Vec::new(),
+            dumps: Vec::new(),
+            trace: false,
+            trace_full: false,
+            trace_lo: 0,
+            trace_hi: u32::MAX,
+            catches: Vec::new(),
+            catch_alert: false,
+            alert_break: None,
+            after_secs: 0.0,
+            until_secs: f64::INFINITY,
+            max_hits: 200,
+            hits: 0,
+            shot_prefix: None,
+            shot_seq: 0,
+            trace_lines: 0,
+            copper_dump: None,
+            copper_dumped: false,
+            ram_dump: None,
+            ram_dumped: false,
+            listcheck: Vec::new(),
+            listcheck_reported: false,
+        }
+    }
+
     /// Build a debugger from the `COPPERLINE_DBG_*` environment, or `None` when no
     /// breakpoint, watchpoint, or trace is configured.
     pub fn from_env(addr_mask: u32) -> Option<Self> {

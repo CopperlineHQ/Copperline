@@ -56,8 +56,12 @@ Deliberately excluded, with the mechanism in parentheses:
   restored Paula stream; this is host presentation state, not serialized
   audio hardware.
 - **Memo caches and transient diagnostics**: the bitplane slot-plan `Cell`
-  cache and the pending debugger-window register hit (skipped; rebuilt or
-  irrelevant).
+  cache, the pending debugger-window register hit, and the low-memory
+  blit crash-context alarm (`diag_lowmem_blit`, consumed only by
+  `COPPERLINE_DIAG_CRASH`) are skipped; rebuilt or irrelevant. Keeping
+  host diagnostics out of the layout is what lets a resumed run and the
+  uninterrupted run it came from write byte-identical states
+  (`tests/savestate_roundtrip.rs` compares the files).
 
 The ROM bytes are embedded in the state, not loaded from a path: a state
 is self-contained with respect to everything that was in memory, so

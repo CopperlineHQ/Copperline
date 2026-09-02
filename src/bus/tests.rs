@@ -9567,6 +9567,18 @@ fn lowmem_blit_diagnostic_uses_mode_specific_write_gate() {
         !bus.diag_lowmem_blit,
         "a restored save state must not replay stale diagnostic alarms"
     );
+
+    // The alarm is host diagnostics, not machine state: it never enters
+    // the serialized layout, so a state written while it is latched is
+    // byte-identical to one written while it is clear.
+    bus.diag_lowmem_blit = true;
+    let latched = bincode::serialize(&bus).expect("serialize bus with the alarm latched");
+    bus.diag_lowmem_blit = false;
+    let clear = bincode::serialize(&bus).expect("serialize bus with the alarm clear");
+    assert_eq!(
+        latched, clear,
+        "diag_lowmem_blit must be excluded from the save-state layout"
+    );
 }
 
 #[test]

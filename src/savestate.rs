@@ -352,11 +352,16 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      event queue, the resource registry and the idle accounting travel
 //      with the state, so run-ahead and rewind restore them together with
 //      the guest state that produced them.
-//  74: the bus gained the freezer cartridge (`cartridge`): its 1 MiB bank,
+//  74: the bus dropped the `diag_lowmem_blit` crash-context alarm from the
+//      layout. It is host diagnostics (consumed only by
+//      COPPERLINE_DIAG_CRASH) and the loader already cleared it, so a run
+//      resumed from a state and the uninterrupted run it was taken from now
+//      write byte-identical states again.
+//  75: the bus gained the freezer cartridge (`cartridge`): its 1 MiB bank,
 //      the custom/CIA register shadows kept for it and the pending level-7
 //      freeze interrupt travel with the state, so a monitor session and
 //      the snapshot it took of the interrupted program survive a resume.
-pub const STATE_VERSION: u32 = 74;
+pub const STATE_VERSION: u32 = 75;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

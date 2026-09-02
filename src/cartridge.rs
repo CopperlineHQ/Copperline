@@ -36,7 +36,7 @@
 //! Nothing here models Amiga hardware: a real Action Replay sits on the
 //! expansion bus and snoops the chip-register writes itself. The bank,
 //! the shadows and the pending interrupt are machine state (save-state
-//! version 74) so run-ahead and rewind restore them with the guest.
+//! version 75) so run-ahead and rewind restore them with the guest.
 
 use crate::memory::Memory;
 use crate::zorro_device::dma_write_byte;
