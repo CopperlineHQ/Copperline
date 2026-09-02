@@ -43,6 +43,7 @@ anywhere in the ROM window are silently dropped. `DIAG_OFFSET`
 locks the byte at that offset to the DiagArea's `da_Config` value so the
 Rust constant and the ROM's own layout cannot silently drift apart.
 
+(copperhf-register-map)=
 ## Register map
 
 See `guest/copperhf/copperhf_board.h` for the full, authoritative table

@@ -656,11 +656,12 @@ The layout is:
   [](host-disks.md)); **Lide**, the built-in `[lide]` Zorro II IDE board --
   personality (RIPPLE/RIDE/AT-Bus 2008), boot ROM(s), and up to four drives
   (two on RIDE/AT-Bus 2008, any of which can likewise be a CD image);
-  **copperhf**, Copperline's own virtual hardfile controller
-  (`copperhf.device`, see [](configuration.md)) -- up to seven units, always
+  **Copperline HD**, the emulator's own virtual hardfile controller
+  (`copperhf.device`, configured as `[copperhf]` -- see
+  [](configuration.md)) -- up to seven units, always
   shown with no controller or personality to pick first (there is no real
   hardware behind it), and hard disks only: unlike IDE, SCSI, and Lide a
-  copperhf unit cannot be a CD image. A unit configured here attaches at
+  Copperline HD unit cannot be a CD image. A unit configured here attaches at
   boot, the same as any other drive; swapping one's media while the machine
   runs is not a screen or menu action here but a
   [control-protocol](../debugger/control.md) call
@@ -722,13 +723,13 @@ The layout is:
 - **Settings rows** (right pane). `[<]`/`[>]` step through a value, On/Off
   buttons flip a toggle, and the **Browse** and **Clear** buttons set or remove
   a file path through a native file dialog. On the *Storage* tab (IDE master/
-  slave, a SCSI unit, a lide drive, or a Copperhf unit), **Browse** lets you
+  slave, a SCSI unit, a lide drive, or a Copperline HD unit), **Browse** lets you
   pick a directory as well as a file -- on macOS -- since any of those slots
   can be a host directory mounted as an in-memory FFS volume instead of a raw
   image; on other platforms the dialog is file-only there too, matching the
   rest of the launcher, and a directory target still has to be set some other
   way (e.g. editing the config file directly). Once an IDE, SCSI, lide, or
-  Copperhf drive has an image a small editable box appears next to **Browse**:
+  Copperline HD drive has an image a small editable box appears next to **Browse**:
   click it and type to set the volume name for a directory mount (left blank, a
   directory mount inherits the host directory's name; the box has no effect on a
   raw HDF). Once that image is a host **directory** specifically, an **FFS/OFS**
@@ -749,10 +750,10 @@ The layout is:
   priority and writes the -128 "disabled" sentinel, so the volume mounts but
   never boots.
   A drive with no image, or a CD image, is greyed ("No drive" / "CD-ROM"),
-  with no stepper to reach for. A SCSI unit, Lide drive, or Copperhf unit
+  with no stepper to reach for. A SCSI unit, Lide drive, or Copperline HD unit
   appears only once it carries a disk, so the page lists what the machine
   can actually boot from. The two IDE bays come first, then the SCSI units,
-  then the Lide board's drives, then the Copperhf units. More drives than
+  then the Lide board's drives, then the Copperline HD units. More drives than
   one page holds run onto further pages, each reached by **Next Page >**
   beside the Back button; every page's own **< Back**
   returns to the first. The note below the rows stays on the first page.

@@ -309,7 +309,7 @@ impl LauncherTab {
             LauncherTab::HostDisk => "Host Disk",
             LauncherTab::Cd => "CD",
             LauncherTab::Lide => "Lide",
-            LauncherTab::Copperhf => "copperhf",
+            LauncherTab::Copperhf => "Copperline HD",
             LauncherTab::IoPorts => "I/O Ports",
             LauncherTab::IoParallel => "Parallel Port",
             LauncherTab::IoNetworking => "Networking",
@@ -426,7 +426,7 @@ const STORAGE_NAV: &[(&str, LauncherTab)] = &[
     ("Host Folder", LauncherTab::HostFs),
     ("Host Disk", LauncherTab::HostDisk),
     ("Lide", LauncherTab::Lide),
-    ("copperhf", LauncherTab::Copperhf),
+    ("Copperline HD", LauncherTab::Copperhf),
     // Four to a row, so copperhf wraps onto the second alongside what is
     // done with the hardware above: the boot order across everything, and
     // the one entry that makes something rather than attaching something.
