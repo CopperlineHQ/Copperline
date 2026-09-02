@@ -11,18 +11,6 @@ use crate::report::ImportReport;
 use std::collections::HashMap;
 use toml_edit::DocumentMut;
 
-/// Where a drive with no controller of its own can go on this machine.
-#[derive(PartialEq, Eq, Clone, Copy)]
-enum Port {
-    /// The A600/A1200/A4000's own Gayle/A4000 IDE port.
-    Ide,
-    /// The A3000's motherboard SCSI: no board and no boot ROM needed.
-    Scsi,
-    /// Neither -- IDE is still the closest thing, but the machine needs
-    /// changing for it to exist.
-    IdeMissing,
-}
-
 /// (chipset revision, CPU model, chip RAM, fast RAM) for the common
 /// `amiga_model` presets. Not exhaustive -- FS-UAE's database covers many
 /// more variants (CD32, CDTV, A3000, A4000/040, ...); unrecognized presets
@@ -62,7 +50,6 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
 
     // --- amiga_model preset, applied first so explicit keys below can
     // override individual axes of it -----------------------------------
-    let mut machine_profile = "";
     if by_key("amiga_model").is_none() {
         report.note(
             "the source config named no machine model (amiga_model), so the machine is whatever Copperline defaults to -- currently a stock A500 (68000 at 7.09MHz, 512K chip plus 512K slow, ECS Agnus with OCS Denise, PAL). Set [machine] profile if you wanted something else; the CPU/chipset/memory keys that did translate still override it either way.",
@@ -79,7 +66,6 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
                 // chipset/CPU/memory set here still override whatever the
                 // profile would have supplied.
                 set_str(&mut doc, &["machine"], "profile", profile);
-                machine_profile = profile;
                 set_str(&mut doc, &["chipset"], "revision", chipset);
                 set_str(&mut doc, &["cpu"], "model", cpu);
                 set_str(&mut doc, &["memory"], "chip", chip_mem);
@@ -267,6 +253,7 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
     // (`[[host_disk]]`, deliberately not auto-configured: handing a real
     // disk to a guest should be an explicit choice, not an import
     // side-effect). Both of the latter are flagged rather than guessed.
+    let mut copperhf_next = 0usize;
     for i in 0..8u32 {
         let key = format!("hard_drive_{i}");
         let Some(e) = by_key(&key) else { continue };
@@ -311,46 +298,41 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
         // An unnamed controller is not "whichever bus this machine has":
         // FS-UAE's default is its own `uae` virtual controller
         // (uaehf.device), served by the emulator rather than by hardware
-        // the Amiga can see. Copperline has no counterpart, so -- as with
-        // WinUAE's `uae` hardfiles -- the drive goes on the real IDE port,
-        // which is a substitution worth saying rather than a like-for-like
-        // move. Inventing a SCSI adapter instead would fit hardware the
-        // source never had.
+        // the Amiga can see. Copperline's [copperhf] (copperhf.device) is
+        // the exact analogue of that same virtual controller, so these
+        // drives go there, unit for unit in the order they're encountered
+        // -- a like-for-like translation, not a substitution onto real
+        // hardware the source never had.
         let named = controller.map(|c| c.value.trim().to_ascii_lowercase());
         let virtual_controller = matches!(named.as_deref(), None | Some("") | Some("uae"));
-        // Where the substitution lands depends on what the machine
-        // actually has: the A600/A1200/A4000's own IDE port, or the
-        // A3000's motherboard SCSI (which needs no board and no boot ROM).
-        // A machine with neither goes on IDE anyway rather than onto a
-        // Zorro SCSI board the source never fitted -- that would need a
-        // ROM image as well, and fail validation for want of it.
-        let onboard = match machine_profile {
-            "A600" | "A1200" | "A4000" => Port::Ide,
-            "A3000" => Port::Scsi,
-            _ => Port::IdeMissing,
-        };
         if virtual_controller {
-            let port = match onboard {
-                Port::Ide => ", which puts the image behind the Kickstart's own size limits",
-                Port::Scsi => "'s motherboard SCSI",
-                Port::IdeMissing => {
-                    ", which this machine does not have -- set [machine] profile to an \
-                     A600/A1200/A4000 (or move the drive to [scsi] or [lide] by hand)"
-                }
-            };
-            report.approximated(
-                &e.key,
-                &e.value,
-                format!(
-                    "FS-UAE served this drive through its own uaehf.device virtual controller, \
-                     which Copperline has no equivalent for; attached to the machine{port}"
-                ),
-            );
+            if copperhf_next <= 6 {
+                let unit_key = format!("unit{copperhf_next}");
+                set_str(&mut doc, &["copperhf"], &unit_key, path);
+                annotate(
+                    &mut doc,
+                    &["copperhf"],
+                    &unit_key,
+                    &format!(
+                        "from {} -- FS-UAE served this drive through its own uaehf.device \
+                         virtual controller; Copperline's [copperhf] (copperhf.device) is the \
+                         exact analogue, so this is an exact translation",
+                        e.key
+                    ),
+                );
+                copperhf_next += 1;
+            } else {
+                report.approximated(
+                    &e.key,
+                    &e.value,
+                    "Copperline's [copperhf] has only seven units (0-6), all already used by \
+                     earlier virtual-controller drives; attach this one to [scsi] or [lide] by \
+                     hand",
+                );
+            }
+            continue;
         }
-        let scsi = match &named {
-            Some(c) if !c.is_empty() => c.starts_with("scsi"),
-            _ => onboard == Port::Scsi,
-        };
+        let scsi = named.as_deref().is_some_and(|c| c.starts_with("scsi"));
         if scsi {
             if i < 7 {
                 set_str(&mut doc, &["scsi"], &format!("unit{i}"), path);
@@ -445,39 +427,73 @@ mod tests {
     }
 
     #[test]
-    fn an_unnamed_controller_is_the_virtual_one_and_says_so() {
+    fn an_unnamed_controller_is_the_virtual_one_and_maps_exactly_onto_copperhf() {
         // FS-UAE's default is its own uaehf.device, not whichever bus the
-        // machine has, so every one of these is a substitution and has to
-        // be reported as one -- but it still has to land somewhere the
-        // machine can actually carry it.
+        // machine has -- but Copperline's [copperhf] (copperhf.device) is
+        // the exact analogue of that same virtual controller, so this is a
+        // like-for-like translation, not a substitution: nothing lands in
+        // the flagged report, and the machine profile is irrelevant to
+        // where the drive goes.
         let entries = crate::parse::parse("amiga_model = A1200\nhard_drive_1 = data.hdf\n");
         let out = map(&entries);
         assert!(
-            out.doc.to_string().contains(r#"slave = "data.hdf""#),
+            out.doc.to_string().contains(r#"unit0 = "data.hdf""#),
             "{}",
             out.doc
         );
-        assert!(out.report.flagged[0].note.contains("uaehf.device"));
+        assert!(!out.doc.to_string().contains("slave ="), "{}", out.doc);
+        assert!(out.report.flagged.is_empty(), "{:?}", out.report.flagged);
+        assert!(
+            out.doc.to_string().contains("copperhf.device"),
+            "{}",
+            out.doc
+        );
 
-        // The A3000's motherboard SCSI needs no board and no boot ROM, so
-        // that is where its drives go; IDE there would be a port the
-        // machine has not got.
+        // Same result regardless of machine model -- [copperhf] needs no
+        // board, no ROM, and no particular IDE/SCSI port to exist on.
         let out = convert("amiga_model = A3000\nhard_drive_0 = os.hdf\n");
         assert!(out.contains(r#"unit0 = "os.hdf""#), "{out}");
         assert!(!out.contains("master ="), "{out}");
 
-        // A machine with neither: IDE anyway (the closest real port), with
-        // the machine change named. Putting it on [scsi] instead would fit
-        // a Zorro board the source never had and fail validation for want
-        // of its ROM.
-        let entries = crate::parse::parse("hard_drive_0 = os.hdf\n");
-        let out = map(&entries);
-        assert!(
-            out.doc.to_string().contains(r#"master = "os.hdf""#),
-            "{}",
-            out.doc
+        let out = convert("hard_drive_0 = os.hdf\n");
+        assert!(out.contains(r#"unit0 = "os.hdf""#), "{out}");
+        assert!(!out.contains("master ="), "{out}");
+    }
+
+    #[test]
+    fn successive_virtual_controller_drives_take_successive_copperhf_units() {
+        let out = convert(
+            "hard_drive_0 = a.hdf\nhard_drive_1 = b.hdf\nhard_drive_2 = c.hdf\n\
+             hard_drive_2_controller = scsi\n",
         );
-        assert!(out.report.flagged[0].note.contains("[machine] profile"));
+        assert!(out.contains(r#"unit0 = "a.hdf""#), "{out}");
+        assert!(out.contains(r#"unit1 = "b.hdf""#), "{out}");
+        // An explicit non-virtual controller does not consume a copperhf
+        // unit -- it goes straight to [scsi] under its own drive index.
+        assert!(out.contains(r#"unit2 = "c.hdf""#), "{out}");
+        assert!(!out.contains("unit3 ="), "{out}");
+    }
+
+    #[test]
+    fn more_than_seven_virtual_controller_drives_are_flagged_past_the_ceiling() {
+        let mut src = String::new();
+        for i in 0..8u32 {
+            src.push_str(&format!("hard_drive_{i} = d{i}.hdf\n"));
+        }
+        let entries = crate::parse::parse(&src);
+        let out = map(&entries);
+        for i in 0..7u32 {
+            assert!(
+                out.doc
+                    .to_string()
+                    .contains(&format!(r#"unit{i} = "d{i}.hdf""#)),
+                "{}",
+                out.doc
+            );
+        }
+        assert!(!out.doc.to_string().contains("d7.hdf"), "{}", out.doc);
+        assert_eq!(out.report.flagged.len(), 1);
+        assert!(out.report.flagged[0].note.contains("seven units"));
     }
 
     #[test]
@@ -519,10 +535,11 @@ mod tests {
         assert!(!out.doc.to_string().contains("master ="), "{}", out.doc);
         assert_eq!(out.report.flagged.len(), 1);
 
-        // ...and a real image under such a parent still is one.
+        // ...and a real image under such a parent still is one -- landing
+        // on [copperhf] (the default virtual controller), not [ide].
         let entries = crate::parse::parse("hard_drive_0 = /home/me/.fs-uae/hd/System.hdf\n");
         let out = map(&entries);
-        assert!(out.doc.to_string().contains("master ="), "{}", out.doc);
+        assert!(out.doc.to_string().contains("unit0 ="), "{}", out.doc);
     }
 
     #[test]
