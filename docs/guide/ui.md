@@ -312,10 +312,11 @@ belongs to the Amiga.
   ([below](#machine-configuration-screen)) to reconfigure the machine and
   relaunch it. The same screen opens automatically on a no-machine start.
 - **Frame Analyzer...**: pauses the machine and opens a separate diagnostic
-  window with two tabs: which chip-bus owner had each Agnus colour clock
-  across the captured frame, including overscan and blanking, and a memory
-  heat map of what last touched each part of the address space; see
-  [](../debugger/window.md#frame-analyzer-pane).
+  window with three tabs: which chip-bus owner had each Agnus colour clock
+  across the captured frame, including overscan and blanking; a memory
+  heat map of what last touched each part of the address space; and the
+  debug resources the guest registered through the uaelib trap, with
+  decoded previews; see [](../debugger/window.md#frame-analyzer-pane).
 - **Debugger...** (also `Cmd+B` / `Alt+B`): pauses the machine and opens the
   tabbed debugger in a tool window; see [](../debugger/window).
 - **Console...** (also `Cmd+K` / `Alt+K`): a GDB-flavoured debugger

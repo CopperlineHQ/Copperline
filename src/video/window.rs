@@ -880,6 +880,28 @@ fn analyzer_heat_presets(bus: &crate::bus::Bus) -> Vec<ui::HeatPreset> {
             }
         })
         .collect();
+    // Guest-registered debug resources (crate::uaelib) are windows too: a
+    // program that told the emulator where its bitmaps, palettes and
+    // copper lists live gets a preset per resource, named by the guest.
+    // Rebuilt on tab entry, so a resource registered while the tab is up
+    // appears the next time the Memory tab is entered.
+    if let Some(uaelib) = bus.uaelib.as_ref() {
+        // Bounded so a large registry cannot push the machine windows'
+        // trailing presets (notably 24-bit) off the single preset row;
+        // the Resources tab lists and scrolls the full registry.
+        const RESOURCE_PRESETS_MAX: usize = 4;
+        for resource in uaelib.resources().iter().take(RESOURCE_PRESETS_MAX) {
+            // By characters, not bytes: the name is guest data run
+            // through from_utf8_lossy, and a byte-indexed truncate can
+            // panic inside a multibyte character.
+            let label: String = resource.name.chars().take(8).collect();
+            presets.push(ui::HeatPreset {
+                label,
+                base: resource.address,
+                span: resource.size.max(1),
+            });
+        }
+    }
     // Two boards of the same kind would otherwise offer two buttons with
     // the same name; the base address tells them apart.
     let labels: Vec<String> = presets.iter().map(|preset| preset.label.clone()).collect();
@@ -6365,6 +6387,7 @@ impl App {
             UiControl::DropDrive(drive_idx) => self.drop_chooser_route(drive_idx),
             UiControl::AnalyzerTab(_)
             | UiControl::AnalyzerHeatPreset(_)
+            | UiControl::AnalyzerResourceRow(_)
             | UiControl::AnalyzerHeatPick { .. } => {
                 self.activate_tool_control(ToolPanelKind::FrameAnalyzer, control)
             }

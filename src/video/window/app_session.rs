@@ -384,6 +384,17 @@ impl App {
     /// frame. Returns true when pacing changed, so the burst can break and
     /// the new pacing takes effect at this frame.
     pub(super) fn service_uaelib(&mut self) -> bool {
+        // Drain the console mirror every committed frame (keeping the ring
+        // from sitting full); the lines only land somewhere when the pane
+        // is open. Ones emitted while it is closed are not replayed: they
+        // already reached stdout, and opening the console is opening a new
+        // terminal on the channel, not a scrollback of the old one.
+        let lines = self.emu.take_uaelib_console_lines();
+        if let Some(panel) = self.console_panel.as_mut() {
+            for line in lines {
+                panel.push_output(format!("DBG: {line}"));
+            }
+        }
         match self.emu.take_uaelib_warp_request() {
             Some(on) => self.set_warp(on, WarpSource::Guest).changed,
             None => false,

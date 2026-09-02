@@ -256,12 +256,12 @@ events.unsubscribe {"events":["serial"]}
 - `disasm {"addr": ..., "count": ...}`: Disassemble instructions at address (default: PC).
 - `custom.read {"reg": ...}` / `custom.dump`: Query custom chipset registers.
 - `custom.writer {"reg": ...}`: Query last PC and beam cycle that wrote to custom register.
-- `palette.dump`: Query active 32-color or 256-color palette.
+- `palette.dump {"resource": ...}`: Query the active 32-color or 256-color palette; with `resource`, read a guest-registered palette resource from memory instead (`words` as 12-bit values plus `rgb24`).
 - `cia.get {"cia": "a"|"b"}`: Query CIA-A or CIA-B timer, port, and interrupt states.
 - `beam.get`: Query raster beam coordinates (VPOS, HPOS, colour clock).
 - `display.get`: Query active display parameters, viewport size, and pixel format.
 - `rtc.get` / `rtc.set {"unix": ..., "time": "...", "advance": ..., "frozen": ...}`: Inspect or move real-time clock.
-- `copper.list {"addr": ..., "max": ...}`: Disassemble Copper instructions.
+- `copper.list {"addr": ..., "resource": ..., "max": ...}`: Disassemble Copper instructions (default: around the live Copper PC; `resource` starts at a guest-registered copper list; `addr` and `resource` are mutually exclusive).
 - `pc_history`: Return recently executed instruction addresses.
 
 ### Diagnostics and profiling
@@ -271,7 +271,7 @@ events.unsubscribe {"events":["serial"]}
 - `fault.list` / `fault.clear`: List or clear active memory bus faults.
 - `memory.heatmap {"enabled": ..., "base": ..., "span": ...}`: Enable or configure address-space access tracking.
 - `memory.heatmap.report {"path": "..."}`: Export memory access heatmap.
-- `debug.resources`: List the bitmaps, palettes and copper lists the guest registered through the [uaelib trap](../guide/run.md#uaelib-trap) (`address`, `size`, `name`, `type`, `flags`, geometry, `registered_frame`).
+- `debug.resources`: List the bitmaps, palettes and copper lists the guest registered through the [uaelib trap](../guide/run.md#uaelib-trap) (`address`, `size`, `name`, `type`, `flags`, geometry, `registered_frame`); the Frame Analyzer's Resources tab shows the same registry.
 - `debug.idle`: The guest's uaelib idle markers: current state, whether ever used, and the last completed frame's `idle_cck` / `frame_cck`.
 - `trace.start {"path": "...", "max_lines": ...}` / `trace.stop` / `trace.status`: Control instruction execution trace logging.
 - `waveform.start {"path": "...", "trigger": "...", "duration": "...", "signals": "..."}` / `waveform.stop` / `waveform.status`: Control VCD logic analyzer waveform capture.

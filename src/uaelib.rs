@@ -75,6 +75,9 @@ const ARG_BASE: u32 = 8;
 pub const DEBUG_EVENT_CAPACITY: usize = 256;
 /// Bound of the resource registry.
 pub const RESOURCE_MAX: usize = 256;
+/// Bound of the console mirror of the debug log (matches the debugger
+/// console pane's scrollback; uaelib must not depend on the video layer).
+pub const CONSOLE_LINE_CAPACITY: usize = 500;
 /// WinUAE's `cfgfile_uaelib_modify` refuses an `outsize` this large and
 /// measures an unsized parameter string no further than this.
 const CFG_STRING_MAX: usize = 32_768;
@@ -287,6 +290,12 @@ pub struct UaeLib {
     speculative_host_quiet: bool,
     #[serde(skip)]
     stdout_muted: bool,
+    /// Host-only mirror of the echo for the debugger console pane:
+    /// bounded, oldest dropped, drained once per committed frame by
+    /// `App::service_uaelib`. Fed inside the run-ahead gate but NOT the
+    /// stdout mute (a muted terminal must not blind the pane).
+    #[serde(skip)]
+    console_lines: VecDeque<String>,
     #[cfg(test)]
     #[serde(skip)]
     echoed: Vec<String>,
@@ -309,6 +318,7 @@ impl UaeLib {
             idle: IdleAccounting::default(),
             speculative_host_quiet: false,
             stdout_muted: false,
+            console_lines: VecDeque::new(),
             #[cfg(test)]
             echoed: Vec::new(),
         }
@@ -542,7 +552,19 @@ impl UaeLib {
     /// that already ends in a newline; the terminator is normalised here
     /// instead.
     fn echo(&mut self, text: &str) {
-        if self.speculative_host_quiet || self.stdout_muted {
+        if self.speculative_host_quiet {
+            return;
+        }
+        // The console pane's mirror rides the same run-ahead gate as
+        // stdout, but not the stdout mute: silencing the terminal (test
+        // harnesses running many machines) must not blind the pane.
+        for line in text.split('\n').filter(|line| !line.is_empty()) {
+            if self.console_lines.len() >= CONSOLE_LINE_CAPACITY {
+                self.console_lines.pop_front();
+            }
+            self.console_lines.push_back(line.to_string());
+        }
+        if self.stdout_muted {
             return;
         }
         #[cfg(test)]
@@ -659,6 +681,11 @@ impl UaeLib {
         let events = self.debug_events.drain(..).collect();
         let dropped = std::mem::take(&mut self.debug_dropped);
         (events, dropped)
+    }
+
+    /// Queued console-pane lines since the last take.
+    pub fn take_console_lines(&mut self) -> Vec<String> {
+        self.console_lines.drain(..).collect()
     }
 
     /// Discard queued events: a fresh subscription starts clean.
@@ -1101,6 +1128,45 @@ mod tests {
         assert_eq!(r, (0, false));
         assert!(lib.take_debug_events().0.is_empty());
         assert_eq!(lib.echoed.len(), 1);
+    }
+
+    #[test]
+    fn console_ring_mirrors_the_echo_and_drains_once() {
+        let mut lib = UaeLib::new();
+        let mut mem = memory();
+        put_str(&mut mem, 0x2000, "one\ntwo\n");
+        lib.call(FN_DEBUG_LOG, [0x2000, 0, 0, 0, 0], &mut mem, MASK24, 0, 0);
+        assert_eq!(lib.take_console_lines(), vec!["one", "two"]);
+        assert_eq!(lib.take_console_lines(), Vec::<String>::new());
+        // The CCP-facing event queue is untouched by the console mirror.
+        assert_eq!(lib.take_debug_events().0.len(), 1);
+    }
+
+    #[test]
+    fn console_ring_is_gated_by_speculative_quiet_but_not_stdout_mute() {
+        let mut lib = UaeLib::new();
+        let mut mem = memory();
+        put_str(&mut mem, 0x2000, "spec");
+        lib.set_speculative_host_quiet(true);
+        lib.call(FN_DEBUG_LOG, [0x2000, 0, 0, 0, 0], &mut mem, MASK24, 0, 0);
+        assert!(lib.take_console_lines().is_empty());
+        lib.set_speculative_host_quiet(false);
+        lib.mute_stdout();
+        lib.call(FN_DEBUG_LOG, [0x2000, 0, 0, 0, 0], &mut mem, MASK24, 0, 0);
+        assert_eq!(lib.take_console_lines(), vec!["spec"]);
+        assert!(lib.echoed.is_empty(), "stdout stayed muted");
+    }
+
+    #[test]
+    fn console_ring_caps_at_capacity() {
+        let mut lib = UaeLib::new();
+        let mut mem = memory();
+        put_str(&mut mem, 0x2000, "x");
+        lib.mute_stdout();
+        for _ in 0..CONSOLE_LINE_CAPACITY + 3 {
+            lib.call(FN_DEBUG_LOG, [0x2000, 0, 0, 0, 0], &mut mem, MASK24, 0, 0);
+        }
+        assert_eq!(lib.take_console_lines().len(), CONSOLE_LINE_CAPACITY);
     }
 
     #[test]

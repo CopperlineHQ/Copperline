@@ -787,6 +787,15 @@ impl Emulator {
             .unwrap_or_default()
     }
 
+    /// Queued guest debug lines for the debugger console pane (uaelib
+    /// function 86), mirroring the stdout echo.
+    pub fn take_uaelib_console_lines(&mut self) -> Vec<String> {
+        self.bus_mut()
+            .uaelib
+            .as_mut()
+            .map_or_else(Vec::new, |uaelib| uaelib.take_console_lines())
+    }
+
     pub fn clear_uaelib_debug_events(&mut self) {
         if let Some(uaelib) = self.bus_mut().uaelib.as_mut() {
             uaelib.clear_debug_events();
