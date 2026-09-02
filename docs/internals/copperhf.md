@@ -244,7 +244,12 @@ unconditionally before serializing (both methods take `&mut self` as of
 M5, to allow it), and the CCP `copperhf.attach`/`copperhf.eject` handlers
 (`src/control/exec.rs`) call it before touching a unit, matching
 `attach_unit`/`hot_attach_unit`/`eject_unit`'s own precondition that the
-pipeline is already empty. A save state is therefore always captured with
+pipeline is already empty. There is no windowed-UI menu row or drag-and-drop
+path onto a `[copperhf]` unit -- a running unit's media only changes through
+`copperhf.attach`/`copperhf.eject` over the control protocol -- but a
+windowed session surfaces that CCP-initiated change with an on-screen notice
+the same way it does any other host-initiated media swap (see
+`docs/guide/ui.md`). A save state is therefore always captured with
 an empty copperhf pipeline, so resuming it reproduces an uninterrupted
 run's history byte-for-byte -- the same save-state contract every other
 board on this project holds to (`AGENTS.md`'s "Save states"), just with an

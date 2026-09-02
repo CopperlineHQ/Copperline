@@ -4191,6 +4191,90 @@ fn test_app_with_audio_cpu_and_program(
     )
 }
 
+/// A 256 KiB bare hardfile: the smallest image the shared harddrive layer
+/// accepts (mirrors `tests/copperhf_machine.rs`'s `temp_hardfile`).
+fn copperhf_temp_hardfile(name: &str) -> PathBuf {
+    static UNIQUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let unique = UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "copperline-window-copperhf-test-{}-{unique}-{name}",
+        std::process::id()
+    ));
+    std::fs::write(&path, vec![0u8; 256 * 1024]).unwrap();
+    path
+}
+
+/// An interactive App around a real machine with one or more `[copperhf]`
+/// units configured, built over the bundled AROS ROM the way
+/// `tests/copperhf_machine.rs` does (the NOP-sled `test_app` fixture has no
+/// Zorro chain, so it cannot carry a `BoardDevice::Copperhf`). `units` is
+/// `(unit number, image path)` pairs; each attaches at boot like a real
+/// `[copperhf] unitN = "..."` config line.
+fn test_app_with_copperhf_units(units: &[(usize, PathBuf)]) -> super::App {
+    std::env::set_var(
+        "COPPERLINE_AROS_DIR",
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/aros"),
+    );
+    let mut toml = String::from("[copperhf]\n");
+    for (unit, path) in units {
+        toml.push_str(&format!("unit{unit} = {:?}\n", path.to_string_lossy()));
+    }
+    let raw: crate::config::RawConfig = toml::from_str(&toml).expect("copperhf test config");
+    let mut cfg = crate::config::Config::try_from(raw.clone()).expect("config validates");
+    crate::config::resolve_bundled_rom(&mut cfg).expect("bundled AROS ROM resolves");
+    let emu = crate::emulator::build_machine(&cfg, Box::new(NullSink), false, false)
+        .expect("machine with [copperhf] builds");
+    super::App::new(
+        emu,
+        true,
+        Vec::new(),
+        Vec::new(),
+        None,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        None,
+        None,
+        None,
+        std::array::from_fn(|_| Vec::new()),
+        [true; 4],
+        crate::config::Overscan::Full,
+        crate::config::TvCentre::default(),
+        true,
+        0.0,
+        crate::config::ShaderMode::None,
+        1.0,
+        crate::config::BezelStyle::None,
+        None,
+        false,
+        crate::config::Tint::None,
+        false,
+        false,
+        crate::config::WarpSpeed::Max,
+        crate::config::JoystickInputMode::Gamepad,
+        50,
+        crate::config::MouseCapture::Click,
+        vec!["Machine: test".to_string()],
+        raw,
+        None,
+        true,
+        crate::sampler::SamplerRequest::default(),
+    )
+}
+
+#[test]
+fn copperhf_test_fixture_builds_a_machine_with_the_configured_unit() {
+    let image = copperhf_temp_hardfile("smoke");
+    let mut app = test_app_with_copperhf_units(&[(0, image.clone())]);
+    assert!(app.emu.bus_mut().copperhf_board_mut().is_some());
+    let _ = std::fs::remove_file(&image);
+}
+
 // ---------------------------------------------------------------------
 // A test machine that draws a hardware pointer.
 //
