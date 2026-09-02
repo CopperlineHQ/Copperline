@@ -5,7 +5,7 @@
 //! boot autoboots the DiagArea-resident device against a 2-unit config, the
 //! guest probe (`guest/copperhf-test/chftest_m4`) `OpenDevice`s both units
 //! and drives NSCMD_DEVICEQUERY, TD_CHANGENUM/CHANGESTATE/PROTSTATUS,
-//! TD_READ64, HD_SCSICMD INQUIRY/READ CAPACITY(10), and the
+//! TD_READ64, HD_SCSICMD INQUIRY/READ CAPACITY(10)/autosense, and the
 //! TD_ADDCHANGEINT/TD_EJECT/TD_REMCHANGEINT change-interrupt story, then
 //! this test verifies each subtest by reading its own marker straight back
 //! out of unit 0's image file -- the same "no hostfs plumbing needed" trick
@@ -31,7 +31,7 @@ use std::process::Command;
 
 const SECTOR_SIZE: usize = 512;
 // Block 0: the seeded i % 251 pattern TD_READ64 verifies against. Blocks
-// 1-8: one marker per subtest (guest/copperhf-test/chftest_m4.c's BLK_*
+// 1-9: one marker per subtest (guest/copperhf-test/chftest_m4.c's BLK_*
 // constants). A few spare sectors of headroom past that.
 const IMAGE_SECTORS: usize = 16;
 const UNIT1_SECTORS: usize = 8; // never read/written; just needs to exist.
@@ -93,6 +93,12 @@ const SUBTESTS: &[Subtest] = &[
         name: "TD_ADDCHANGEINT/TD_EJECT/TD_REMCHANGEINT change-interrupt story",
         ok_marker: "M4-CHGINT-OK",
         bad_marker: "M4-CHGINT-BAD",
+    },
+    Subtest {
+        block: 9,
+        name: "HD_SCSICMD autosense at the real (2-byte-aligned) sense offsets",
+        ok_marker: "M4-SENSE-OK",
+        bad_marker: "M4-SENSE-BAD",
     },
 ];
 

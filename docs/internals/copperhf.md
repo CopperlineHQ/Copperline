@@ -117,7 +117,7 @@ geometry command; `TD_CHANGENUM`/`TD_CHANGESTATE`/`TD_PROTSTATUS` and
 
 ### `HD_SCSICMD`
 
-`io_Data` points at a `struct SCSICmd` (`devices/scsidisk.h`, 32 bytes on
+`io_Data` points at a `struct SCSICmd` (`devices/scsidisk.h`, 30 bytes on
 m68k). The board answers the CDB in `scsi_Command` against the unit's own
 image with no SCSI bus underneath, reusing `src/scsi.rs::ScsiDisk`'s CDB
 machinery (the same target model the A2091/A4091 boards drive over the

@@ -203,9 +203,22 @@ const HFERR_BAD_STATUS: i8 = 45;
 
 const SECTOR_SIZE: usize = 512;
 
-// struct SCSICmd field offsets (devices/scsidisk.h; 32 bytes on m68k with
-// natural 4-byte alignment for the pointer/ULONG fields -- 2 bytes of
-// padding fall between scsi_Status and scsi_SenseData).
+// struct SCSICmd field offsets (devices/scsidisk.h; 30 bytes on m68k).
+//
+// HARD-WON (devsoak's -X HD_SCSICMD phase caught this): the classic Amiga
+// m68k ABI aligns EVERYTHING -- pointers and ULONGs included -- to 2
+// bytes, never 4. There is NO padding between scsi_Status (UBYTE at 21)
+// and the scsi_SenseData pointer: it sits at 22, not 24. An earlier
+// version of the three sense-field constants below assumed 4-byte pointer
+// alignment (+2 on each), which read a mangled sense pointer (the real
+// pointer's low half spliced with scsi_SenseLength), DMA'd the autosense
+// bytes to a wrong guest address, and wrote scsi_SenseActual one byte
+// PAST the caller's 30-byte struct -- while this file's own unit tests
+// passed, because their fixture wrote through the same wrong constants
+// (self-consistent both ways). The authoritative cross-check is
+// guest-side: chftest_m4.c _Static_asserts these offsets against the real
+// NDK <devices/scsidisk.h> with the real m68k compiler, so a drift here
+// fails the guest probe build rather than corrupting guest memory.
 const SCSI_DATA: u32 = 0; // UWORD *scsi_Data
 const SCSI_LENGTH: u32 = 4; // ULONG scsi_Length
 const SCSI_ACTUAL: u32 = 8; // ULONG scsi_Actual
@@ -214,9 +227,9 @@ const SCSI_CMDLENGTH: u32 = 16; // UWORD scsi_CmdLength
 const SCSI_CMDACTUAL: u32 = 18; // UWORD scsi_CmdActual
 /// scsi_Flags (high byte) / scsi_Status (low byte): one big-endian word.
 const SCSI_FLAGS: u32 = 20;
-const SCSI_SENSEDATA: u32 = 24; // UBYTE *scsi_SenseData
-const SCSI_SENSELENGTH: u32 = 28; // UWORD scsi_SenseLength
-const SCSI_SENSEACTUAL: u32 = 30; // UWORD scsi_SenseActual
+const SCSI_SENSEDATA: u32 = 22; // UBYTE *scsi_SenseData
+const SCSI_SENSELENGTH: u32 = 26; // UWORD scsi_SenseLength
+const SCSI_SENSEACTUAL: u32 = 28; // UWORD scsi_SenseActual
 
 /// Bound on the completion queue purely as a sanity backstop: exactly one
 /// completion is produced per doorbell write, so the queue only grows if the
@@ -979,7 +992,7 @@ impl CopperhfBoard {
         });
     }
 
-    /// `HD_SCSICMD`: `io_Data` points at a `struct SCSICmd` (32 bytes on
+    /// `HD_SCSICMD`: `io_Data` points at a `struct SCSICmd` (30 bytes on
     /// m68k -- `devices/scsidisk.h`). This board answers it against the
     /// unit's own image without a real SCSI bus underneath, reusing
     /// `src/scsi.rs::ScsiDisk`'s CDB machinery on the worker thread (the

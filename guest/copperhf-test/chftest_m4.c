@@ -42,6 +42,30 @@
 #include <devices/scsidisk.h>
 #include <proto/exec.h>
 #include <clib/alib_protos.h>
+#include <stddef.h>
+
+// ABI tripwire (devsoak's -X HD_SCSICMD phase caught the original bug):
+// src/copperhf.rs mirrors these struct SCSICmd offsets as hand-kept
+// constants, and an earlier version had the three sense fields +2 (it
+// assumed 4-byte pointer alignment; the classic m68k ABI aligns to 2, so
+// scsi_SenseData directly follows scsi_Status with NO padding and the
+// whole struct is 30 bytes, not 32). The Rust side's own unit tests
+// could not catch that -- they read and wrote through the same wrong
+// constants -- so the REAL m68k compiler against the REAL NDK header is
+// the authority: if any of these fire, fix src/copperhf.rs's SCSI_*
+// constants, never these asserts.
+_Static_assert(offsetof(struct SCSICmd, scsi_Data) == 0, "scsi_Data @0");
+_Static_assert(offsetof(struct SCSICmd, scsi_Length) == 4, "scsi_Length @4");
+_Static_assert(offsetof(struct SCSICmd, scsi_Actual) == 8, "scsi_Actual @8");
+_Static_assert(offsetof(struct SCSICmd, scsi_Command) == 12, "scsi_Command @12");
+_Static_assert(offsetof(struct SCSICmd, scsi_CmdLength) == 16, "scsi_CmdLength @16");
+_Static_assert(offsetof(struct SCSICmd, scsi_CmdActual) == 18, "scsi_CmdActual @18");
+_Static_assert(offsetof(struct SCSICmd, scsi_Flags) == 20, "scsi_Flags @20");
+_Static_assert(offsetof(struct SCSICmd, scsi_Status) == 21, "scsi_Status @21");
+_Static_assert(offsetof(struct SCSICmd, scsi_SenseData) == 22, "scsi_SenseData @22");
+_Static_assert(offsetof(struct SCSICmd, scsi_SenseLength) == 26, "scsi_SenseLength @26");
+_Static_assert(offsetof(struct SCSICmd, scsi_SenseActual) == 28, "scsi_SenseActual @28");
+_Static_assert(sizeof(struct SCSICmd) == 30, "sizeof(SCSICmd) == 30");
 
 // copperhf.device's M4 command numbers (guest/copperhf/copperhf_board.h is
 // this project's shared source of truth for the full register/command
@@ -71,6 +95,7 @@
 #define BLK_SCSI_INQUIRY 6
 #define BLK_SCSI_READCAP 7
 #define BLK_CHANGEINT_STORY 8
+#define BLK_SCSI_SENSE 9
 
 static struct MsgPort *port0;
 static struct IOStdReq *req0; /* unit 0: DoIO round trips */
@@ -254,6 +279,63 @@ static BOOL test_scsi_inquiry(void)
     return TRUE;
 }
 
+// HD_SCSICMD autosense on an unsupported opcode (0xFF): the target must
+// answer CHECK CONDITION, the device must report HFERR_BadStatus in
+// io_Error, and -- the part the original M4 implementation got wrong,
+// found by devsoak -- SCSIF_AUTOSENSE must deliver the sense bytes into
+// scsi_SenseData at the struct's REAL (2-byte-aligned) sense-field
+// offsets, with scsi_SenseActual reporting how many. A wrong-offset
+// implementation reads a mangled sense pointer, writes the sense to a
+// wrong guest address, and leaves the real scsi_SenseActual untouched at
+// 0 -- exactly what this subtest distinguishes from success.
+static BOOL test_scsi_autosense(void)
+{
+    UBYTE cdb[6];
+    UBYTE sense[32];
+    struct SCSICmd cmd;
+    long i;
+
+    for (i = 0; i < (long)sizeof(cdb); i++)
+        cdb[i] = 0;
+    cdb[0] = 0xFF; /* not a SCSI opcode this target implements */
+
+    for (i = 0; i < (long)sizeof(sense); i++)
+        sense[i] = 0xA5; /* devsoak-style prefill: proves what got written */
+
+    cmd.scsi_Data = NULL;
+    cmd.scsi_Length = 0;
+    cmd.scsi_Actual = 0;
+    cmd.scsi_Command = cdb;
+    cmd.scsi_CmdLength = sizeof(cdb);
+    cmd.scsi_CmdActual = 0;
+    cmd.scsi_Flags = SCSIF_READ | SCSIF_AUTOSENSE;
+    cmd.scsi_Status = 0;
+    cmd.scsi_SenseData = sense;
+    cmd.scsi_SenseLength = 18;
+    cmd.scsi_SenseActual = 0;
+
+    req0->io_Command = HD_SCSICMD;
+    req0->io_Length = sizeof(cmd);
+    req0->io_Data = &cmd;
+    DoIO((struct IORequest *)req0);
+
+    if (req0->io_Error != HFERR_BadStatus)
+        return FALSE;
+    if (cmd.scsi_Status != 0x02) /* CHECK CONDITION */
+        return FALSE;
+    if (cmd.scsi_SenseActual != 18)
+        return FALSE;
+    if (sense[0] != 0x70) /* current-error response code */
+        return FALSE;
+    if ((sense[2] & 0x0F) != 0x05) /* ILLEGAL REQUEST */
+        return FALSE;
+    if (sense[12] != 0x20) /* ASC: invalid command operation code */
+        return FALSE;
+    if (sense[18] != 0xA5) /* nothing written past scsi_SenseLength */
+        return FALSE;
+    return TRUE;
+}
+
 // HD_SCSICMD READ CAPACITY(10): standard 10-byte CDB, 8-byte response
 // (last LBA, block length). Only checks the block length -- 512, this
 // device's only sector size -- since the exact last LBA depends on the
@@ -404,6 +486,8 @@ int main(void)
                                     "M4-READCAP-BAD");
             all_ok &= write_marker(BLK_CHANGEINT_STORY, test_change_interrupt_story(),
                                     "M4-CHGINT-OK", "M4-CHGINT-BAD");
+            all_ok &= write_marker(BLK_SCSI_SENSE, test_scsi_autosense(), "M4-SENSE-OK",
+                                    "M4-SENSE-BAD");
 
             // Flush every marker to the backing image before the host test
             // reads the file.
