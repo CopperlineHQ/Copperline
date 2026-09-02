@@ -100,6 +100,8 @@ pub mod paths;
 pub mod picasso2;
 pub mod pointer;
 pub mod priority;
+#[cfg(feature = "control")]
+pub mod profile;
 pub mod ramsey;
 pub mod recorder;
 pub mod regcheck;

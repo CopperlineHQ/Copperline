@@ -153,6 +153,7 @@ events.unsubscribe {"events":["serial"]}
 - `debug.idle`: The guest's uaelib idle markers: current state, whether ever used, and the last completed frame's `idle_cck` / `frame_cck`.
 - `trace.start {"path": "...", "max_lines": ...}` / `trace.stop` / `trace.status`: Control instruction execution trace logging.
 - `waveform.start {"path": "...", "trigger": "...", "duration": "...", "signals": "..."}` / `waveform.stop` / `waveform.status`: Control VCD logic analyzer waveform capture.
+- `profile.start {"path": "...", "frames": ..., "slots": ..., "screenshots": "none"|"every"|"last", "pc_samples": ...}` / `profile.stop` / `profile.status`: Per-frame profile export -- DMA ownership, blit records, guest idle time, retired instructions, optional owner grids and screenshots -- streamed to `profile.jsonl` with a `profile.json` summary at stop; see [](profiling). Arms the Frame Analyzer's trace for the session, which suspends run-ahead.
 
 ### Breakpoints and traps
 - `break.add`: Add breakpoint (`pc`, `watch`, `reg_watch`, `beam`, `copper`, `catch`, `loadseg`).

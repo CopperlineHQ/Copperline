@@ -106,6 +106,10 @@ pub struct Emulator {
     /// to match the state. Set from the boot `Config`; updated on a load that
     /// swaps in a different machine.
     descriptor: crate::config::MachineDescriptor,
+    /// A running control-protocol profile capture (`profile.start`);
+    /// host-side only, never serialized.
+    #[cfg(feature = "control")]
+    profile: Option<crate::profile::ProfileCapture>,
 }
 
 /// What a save-state load did, for the caller to surface. A `.clstate` always
@@ -471,6 +475,8 @@ impl Emulator {
             tt_input: None,
             tt_rwatch: None,
             descriptor: crate::config::MachineDescriptor::default(),
+            #[cfg(feature = "control")]
+            profile: None,
         })
     }
 
@@ -527,6 +533,233 @@ impl Emulator {
 
     pub fn bus_mut(&mut self) -> &mut Bus {
         self.machine.bus_mut()
+    }
+
+    /// Whether a control-protocol profile capture is running.
+    #[cfg(feature = "control")]
+    pub fn profile_active(&self) -> bool {
+        self.profile.is_some()
+    }
+
+    /// The frame analyzer pane closed while a capture runs: the capture
+    /// adopts the arming and disarms it at stop.
+    #[cfg(feature = "control")]
+    pub fn profile_adopt_frame_analyzer(&mut self) {
+        if let Some(profile) = self.profile.as_mut() {
+            profile.adopt_frame_analyzer();
+        }
+    }
+
+    #[cfg(feature = "control")]
+    pub fn profile_status_value(&self) -> serde_json::Value {
+        self.profile.as_ref().map_or_else(
+            || serde_json::json!({ "active": false }),
+            |profile| profile.status_value(true),
+        )
+    }
+
+    /// Start a profile capture. Refused while one is running: closing
+    /// the active capture here would have to invent its summary metadata
+    /// (machine descriptor, resources) and could swallow its final write
+    /// errors -- the caller stops it first, with a real summary. The
+    /// frame analyzer's per-slot trace feeds the records, so it is armed
+    /// for the whole session -- which blocks run-ahead, the analyzer's
+    /// existing rule -- and disarmed at stop only if the capture armed
+    /// (or adopted) it.
+    #[cfg(feature = "control")]
+    pub fn profile_start(&mut self, opts: crate::profile::ProfileOptions) -> std::io::Result<()> {
+        if self.profile.is_some() {
+            return Err(std::io::Error::other(
+                "a profile capture is already running; stop it first",
+            ));
+        }
+        let already = self.bus().frame_analyzer_enabled();
+        self.bus_mut().set_frame_analyzer_enabled(true);
+        let frame = self.bus().emulated_frames();
+        let seconds = self.bus().emulated_seconds();
+        let retired = self.retired_instructions();
+        let capture =
+            crate::profile::ProfileCapture::create(opts, frame, seconds, retired, !already)?;
+        log::info!(
+            "profile: capturing up to {} frame(s) into {} (slots {}, screenshots {}, pc {})",
+            capture.options().frames,
+            capture.dir().display(),
+            capture.options().slots,
+            capture.options().screenshots.name(),
+            capture.options().pc_samples,
+        );
+        self.profile = Some(capture);
+        Ok(())
+    }
+
+    /// Stop a running capture: optional final screenshot, the
+    /// `profile.json` summary, analyzer disarm if this capture armed (or
+    /// adopted) it. Returns the final status, or `{"active": false}`.
+    #[cfg(feature = "control")]
+    pub fn profile_stop(
+        &mut self,
+        machine: serde_json::Value,
+        resources: serde_json::Value,
+    ) -> std::io::Result<serde_json::Value> {
+        let Some(mut capture) = self.profile.take() else {
+            return Ok(serde_json::json!({ "active": false }));
+        };
+        if matches!(
+            capture.options().screenshots,
+            crate::profile::ScreenshotMode::Last
+        ) {
+            let (fb, lines, width) = crate::control::exec::render_frame(self);
+            let path = capture.dir().join("frame-last.png");
+            if let Err(e) =
+                crate::screenshot::save(&path, &fb[..width * lines], width as u32, lines as u32)
+            {
+                log::warn!("profile: final screenshot failed: {e:#}");
+            }
+        }
+        if capture.armed_analyzer() {
+            self.bus_mut().set_frame_analyzer_enabled(false);
+        }
+        let frame = self.bus().emulated_frames();
+        let seconds = self.bus().emulated_seconds();
+        let status = capture.finish(machine, resources, frame, seconds)?;
+        log::info!(
+            "profile: {} frame(s) written to {}",
+            status["frames_written"],
+            capture.dir().display()
+        );
+        Ok(status)
+    }
+
+    /// One committed frame for a running capture: gather, then append.
+    #[cfg(feature = "control")]
+    fn profile_poll(&mut self) -> Result<()> {
+        use serde_json::{json, Value};
+        let Some(opts) = self
+            .profile
+            .as_ref()
+            .filter(|profile| !profile.done())
+            .map(|profile| profile.options().clone())
+        else {
+            return Ok(());
+        };
+        let frame = self.bus().emulated_frames();
+        match self.profile.as_ref().and_then(|p| p.last_frame_seen()) {
+            Some(last) if frame == last => return Ok(()),
+            Some(last) if frame < last => {
+                let retired = self.retired_instructions();
+                if let Some(profile) = self.profile.as_mut() {
+                    profile
+                        .note_reposition(frame, retired)
+                        .map_err(|e| anyhow!("profile reposition marker: {e}"))?;
+                }
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        // Renders first: they borrow the whole emulator immutably.
+        let (mut screenshot, mut digest) = (None, None);
+        if matches!(opts.screenshots, crate::profile::ScreenshotMode::Every) {
+            let (fb, lines, width) = crate::control::exec::render_frame(self);
+            let name = format!("frame-{frame:06}.png");
+            match crate::screenshot::save(
+                &opts.path.join(&name),
+                &fb[..width * lines],
+                width as u32,
+                lines as u32,
+            ) {
+                Ok(()) => {
+                    digest = Some(format!(
+                        "{:016x}",
+                        crate::control::exec::fnv1a64(&fb[..width * lines])
+                    ));
+                    screenshot = Some(name);
+                }
+                Err(e) => log::warn!("profile: screenshot for frame {frame} failed: {e:#}"),
+            }
+        }
+
+        let bus = self.bus();
+        let seconds = bus.emulated_seconds();
+        let idle_cck = bus
+            .uaelib
+            .as_ref()
+            .and_then(|uaelib| uaelib.idle().last_frame())
+            .map(|(idle, _)| idle);
+        let pc = opts.pc_samples.then(|| self.machine.pc());
+        let mut record = json!({
+            "frame": frame,
+            "seconds": seconds,
+            "idle_cck": idle_cck,
+            "traced": false,
+        });
+        if let Some(trace) = bus.frame_bus_trace() {
+            let owners: Value = crate::bus::CHIP_BUS_OWNER_NAMES
+                .iter()
+                .zip(trace.owner_cck.iter())
+                .map(|(name, cck)| (name.to_string(), Value::from(*cck)))
+                .collect::<serde_json::Map<String, Value>>()
+                .into();
+            let starve: Value = crate::bus::CHIP_BUS_OWNER_NAMES
+                .iter()
+                .zip(trace.blitter_starve_cck.iter())
+                .filter(|(_, cck)| **cck != 0)
+                .map(|(name, cck)| (name.to_string(), Value::from(*cck)))
+                .collect::<serde_json::Map<String, Value>>()
+                .into();
+            let blits: Vec<Value> = trace
+                .blits
+                .iter()
+                .map(|blit| {
+                    json!({
+                        "bltcon0": format!("{:#06X}", blit.bltcon0),
+                        "bltcon1": format!("{:#06X}", blit.bltcon1),
+                        "width_words": blit.width_words,
+                        "height": blit.height,
+                        "apt": format!("{:#010X}", blit.apt),
+                        "bpt": format!("{:#010X}", blit.bpt),
+                        "cpt": format!("{:#010X}", blit.cpt),
+                        "dpt": format!("{:#010X}", blit.dpt),
+                        "start": [blit.start.0, blit.start.1],
+                        "end": blit.end.map(|(v, h)| json!([v, h])),
+                    })
+                })
+                .collect();
+            record["traced"] = Value::Bool(true);
+            record["rows"] = Value::from(trace.rows);
+            record["line_cck"] = Value::from(trace.line_cck);
+            record["cck_length"] = Value::from(trace.rows as u64 * u64::from(trace.line_cck));
+            record["owner_cck"] = owners;
+            record["blitter"] = json!({
+                "busy_cck": trace.blitter_busy_cck,
+                "starve_cck": starve,
+            });
+            record["blits"] = Value::from(blits);
+            record["partial"] = Value::Bool(trace.partial);
+            if opts.slots {
+                let rows: Vec<Value> = (0..trace.rows)
+                    .filter_map(|vpos| trace.owner_row(vpos))
+                    .map(|row| Value::from(crate::profile::rle_owner_row(row)))
+                    .collect();
+                record["slots"] = Value::from(rows);
+            }
+        }
+        if let Some(pc) = pc {
+            record["pc"] = Value::from(format!("{pc:#010X}"));
+        }
+        if let Some(name) = screenshot {
+            record["screenshot"] = Value::from(name);
+            record["digest"] = Value::from(digest.unwrap_or_default());
+        }
+
+        let retired_now = self.retired_instructions();
+        if let Some(profile) = self.profile.as_mut() {
+            record["retired"] = Value::from(profile.take_retired_delta(retired_now));
+            profile
+                .record(frame, &record)
+                .map_err(|e| anyhow!("profile record: {e}"))?;
+        }
+        Ok(())
     }
 
     /// Whether the WinUAE-compatible uaelib trap is fitted
@@ -1693,6 +1926,11 @@ impl Emulator {
         // Evaluate a time-targeted reverse watchpoint when its target is
         // reached (no-op unless armed).
         self.tt_poll_reverse_watch()?;
+        // Feed a running profile capture from committed frames only.
+        #[cfg(feature = "control")]
+        if !self.runahead_speculative {
+            self.profile_poll()?;
+        }
         if !self.runahead_speculative
             && crate::envcfg::flag("COPPERLINE_DIAG_PCSAMPLE")
             && self.stats.frames.is_multiple_of(50)

@@ -145,6 +145,10 @@ that colour clock cycle (CPU, Copper, Blitter, Bitplane, Sprite, Audio, Disk, Re
 - **Beam scrub (`B`):** Progressively displays the frame up to the selected raster position.
 - **To slot (`T`):** Advances execution until the beam reaches the selected colour clock.
 
+A control-protocol profile capture ([](profiling)) shares the analyzer's
+trace arming: closing this pane does not disarm a running capture, and
+stopping the capture keeps an open pane recording.
+
 (frame-analyzer-memory-tab)=
 ### Memory heatmap tab
 

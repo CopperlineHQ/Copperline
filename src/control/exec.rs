@@ -159,6 +159,12 @@ pub enum CoreOp {
     },
     WaveformStop,
     WaveformStatus,
+    /// Start a per-frame profile capture (docs/debugger/profiling.md).
+    ProfileStart {
+        options: crate::profile::ProfileOptions,
+    },
+    ProfileStop,
+    ProfileStatus,
     StateSave {
         path: PathBuf,
     },
@@ -221,6 +227,7 @@ impl CoreOp {
                 | CoreOp::EventsList
                 | CoreOp::TraceStatus
                 | CoreOp::WaveformStatus
+                | CoreOp::ProfileStatus
                 | CoreOp::Digest
                 | CoreOp::RegionDigest { .. }
                 | CoreOp::Screenshot { .. }
@@ -1080,6 +1087,37 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
         }
         "waveform.stop" => core(CoreOp::WaveformStop),
         "waveform.status" => core(CoreOp::WaveformStatus),
+        "profile.start" => {
+            let frames = p
+                .u64_opt("frames")?
+                .unwrap_or(crate::profile::DEFAULT_PROFILE_FRAMES);
+            if frames == 0 || frames > crate::profile::MAX_PROFILE_FRAMES {
+                return Err(CtlError::invalid_params(format!(
+                    "frames must be 1..={}",
+                    crate::profile::MAX_PROFILE_FRAMES
+                )));
+            }
+            let screenshots = match p.str_opt("screenshots")?.as_deref() {
+                None => crate::profile::ScreenshotMode::None,
+                Some(word) => crate::profile::ScreenshotMode::parse(word).ok_or_else(|| {
+                    CtlError::invalid_params("screenshots must be none|every|last")
+                })?,
+            };
+            core(CoreOp::ProfileStart {
+                options: crate::profile::ProfileOptions {
+                    path: p
+                        .str_opt("path")?
+                        .map(PathBuf::from)
+                        .unwrap_or_else(crate::paths::profile_dir),
+                    frames,
+                    slots: p.bool_or("slots", false)?,
+                    screenshots,
+                    pc_samples: p.bool_or("pc_samples", false)?,
+                },
+            })
+        }
+        "profile.stop" => core(CoreOp::ProfileStop),
+        "profile.status" => core(CoreOp::ProfileStatus),
         "state.save" => core(CoreOp::StateSave {
             path: PathBuf::from(p.str_req("path")?),
         }),
@@ -1927,6 +1965,23 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             None => Ok(json!({"active": false, "present": false})),
         },
         CoreOp::WaveformStatus => Ok(waveform_status_value(emu)),
+        CoreOp::ProfileStart { options } => {
+            if emu.profile_active() {
+                return Err(CtlError::invalid_state(
+                    "a profile capture is already running; call profile.stop first",
+                ));
+            }
+            emu.profile_start(options.clone())
+                .map_err(|e| CtlError::io(format!("starting profile: {e}")))?;
+            Ok(emu.profile_status_value())
+        }
+        CoreOp::ProfileStop => {
+            let resources: Vec<Value> = emu.uaelib_resources().iter().map(resource_value).collect();
+            let machine = serde_json::to_value(emu.machine_descriptor()).unwrap_or(Value::Null);
+            emu.profile_stop(machine, Value::from(resources))
+                .map_err(|e| CtlError::io(format!("stopping profile: {e}")))
+        }
+        CoreOp::ProfileStatus => Ok(emu.profile_status_value()),
         CoreOp::StateSave { path } => {
             emu.save_state(path)
                 .map_err(|e| CtlError::io(format!("saving state: {e:#}")))?;
@@ -2471,7 +2526,7 @@ fn wave_status_value(status: &crate::waveform::WaveStatus) -> Value {
 /// display path, returning the buffer and its visible line count. Both
 /// `capture.digest` and `capture.screenshot` use this in BOTH server
 /// modes, so captures are mode-identical and comparable.
-fn render_frame(emu: &Emulator) -> (Vec<u32>, usize, usize) {
+pub(crate) fn render_frame(emu: &Emulator) -> (Vec<u32>, usize, usize) {
     // An RTG board driving the display supersedes the chipset output,
     // exactly as the window presentation does.
     let mut fb = Vec::new();
@@ -2492,7 +2547,7 @@ const FNV1A64_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 
 /// FNV-1a over the framebuffer words (little-endian byte order), for
 /// cheap change detection without pulling pixels over the wire.
-fn fnv1a64(words: &[u32]) -> u64 {
+pub(crate) fn fnv1a64(words: &[u32]) -> u64 {
     fnv1a64_from(FNV1A64_OFFSET, words)
 }
 
@@ -3479,6 +3534,158 @@ mod tests {
         assert!(detail.contains("100"));
         let (reason, _) = stop_reason_of(&DebugStop::Breakpoint { pc: 0x1000 });
         assert_eq!(reason, "breakpoint");
+    }
+
+    #[test]
+    fn parse_profile_start_defaults_and_bounds() {
+        let op = core("profile.start", json!({}));
+        let CoreOp::ProfileStart { options } = op else {
+            panic!("expected ProfileStart");
+        };
+        assert_eq!(options.frames, crate::profile::DEFAULT_PROFILE_FRAMES);
+        assert!(!options.slots);
+        assert!(!options.pc_samples);
+        assert_eq!(options.screenshots, crate::profile::ScreenshotMode::None);
+
+        for params in [json!({"frames": 0}), json!({"frames": 200_000})] {
+            let err = parse_method("profile.start", &params).unwrap_err();
+            assert_eq!(err.code, proto::INVALID_PARAMS, "{params}");
+        }
+        let err = parse_method("profile.start", &json!({"screenshots": "sometimes"})).unwrap_err();
+        assert_eq!(err.code, proto::INVALID_PARAMS);
+        assert!(CoreOp::ProfileStatus.collectable());
+    }
+
+    fn profile_scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "copperline-profile-e2e-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn profile_start_while_active_is_refused() {
+        let mut emu = uaelib_emulator();
+        let mut ctx = SessionCtx::new();
+        let options = crate::profile::ProfileOptions {
+            path: profile_scratch("refused"),
+            frames: 3,
+            slots: false,
+            screenshots: crate::profile::ScreenshotMode::None,
+            pc_samples: false,
+        };
+        let start = CoreOp::ProfileStart {
+            options: options.clone(),
+        };
+        exec_core(&mut emu, &mut ctx, &start).unwrap();
+        // A second start must not close the running capture with an
+        // invented summary; the caller stops it first.
+        let err = exec_core(&mut emu, &mut ctx, &start).unwrap_err();
+        assert_eq!(err.code, proto::INVALID_STATE);
+        assert!(err.message.contains("profile.stop"), "{}", err.message);
+        let status = exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStatus).unwrap();
+        assert_eq!(status["active"], true, "the running capture survives");
+        exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStop).unwrap();
+    }
+
+    #[test]
+    fn profile_writes_one_record_per_committed_frame() {
+        let mut emu = uaelib_emulator();
+        let mut ctx = SessionCtx::new();
+        let dir = profile_scratch("records");
+        let status = exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::ProfileStart {
+                options: crate::profile::ProfileOptions {
+                    path: dir.clone(),
+                    frames: 3,
+                    slots: true,
+                    screenshots: crate::profile::ScreenshotMode::None,
+                    pc_samples: true,
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(status["active"], true);
+        assert_eq!(status["frames_written"], 0);
+        assert!(
+            emu.bus().frame_analyzer_enabled(),
+            "the trace feeds the records"
+        );
+
+        for _ in 0..4 {
+            emu.step_frame().unwrap();
+        }
+        let status = exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStatus).unwrap();
+        assert_eq!(status["frames_written"], 3);
+        assert_eq!(status["done"], true, "self-stops at the cap");
+
+        let summary = exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStop).unwrap();
+        assert_eq!(summary["active"], false);
+        assert_eq!(summary["frames_written"], 3);
+        assert!(
+            !emu.bus().frame_analyzer_enabled(),
+            "stop disarms the analyzer it armed"
+        );
+
+        let jsonl = std::fs::read_to_string(dir.join("profile.jsonl")).unwrap();
+        let records: Vec<Value> = jsonl
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records.len(), 3);
+        let frames: Vec<u64> = records
+            .iter()
+            .map(|r| r["frame"].as_u64().unwrap())
+            .collect();
+        assert!(frames.windows(2).all(|w| w[1] == w[0] + 1), "{frames:?}");
+        assert_eq!(records[0]["traced"], true);
+        assert!(records[0]["owner_cck"]["refresh"].as_u64().unwrap() > 0);
+        assert!(records[0]["slots"].as_array().unwrap().len() > 100);
+        assert!(records[0]["pc"].as_str().unwrap().starts_with("0x"));
+        assert!(records[0]["retired"].as_u64().unwrap() > 0);
+
+        let header: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("profile.json")).unwrap())
+                .unwrap();
+        assert_eq!(header["version"], 1);
+        assert_eq!(header["owners"][7], "cpu");
+        assert!(header["machine"].is_object());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn speculative_frames_never_reach_the_profile() {
+        let mut emu = uaelib_emulator();
+        let mut ctx = SessionCtx::new();
+        let dir = profile_scratch("spec");
+        exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::ProfileStart {
+                options: crate::profile::ProfileOptions {
+                    path: dir.clone(),
+                    frames: 10,
+                    slots: false,
+                    screenshots: crate::profile::ScreenshotMode::None,
+                    pc_samples: false,
+                },
+            },
+        )
+        .unwrap();
+        emu.set_runahead_speculative(true);
+        emu.step_frame().unwrap();
+        emu.set_runahead_speculative(false);
+        let status = exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStatus).unwrap();
+        assert_eq!(status["frames_written"], 0);
+        emu.step_frame().unwrap();
+        let status = exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStatus).unwrap();
+        assert_eq!(status["frames_written"], 1);
+        exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStop).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn uaelib_emulator() -> Emulator {

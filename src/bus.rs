@@ -6490,6 +6490,10 @@ impl Bus {
         }
     }
 
+    pub fn frame_analyzer_enabled(&self) -> bool {
+        self.frame_analyzer_enabled
+    }
+
     pub fn set_frame_analyzer_enabled(&mut self, enabled: bool) {
         if self.frame_analyzer_enabled == enabled {
             return;
