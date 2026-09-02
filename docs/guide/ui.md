@@ -236,16 +236,15 @@ headless runs (see [](../debugger/control)).
 
 ## Guest debug overlay
 
-A program built against the vscode-amiga-debug template can draw over the
-picture through the uaelib trap's `debug_rect` / `debug_filled_rect` /
-`debug_text` helpers (see the uaelib trap section of [](run)). The commands
-describe a 768x576 canvas that is stretched over the visible display --
-tracking autocrop and per-axis scaling -- and stay up until the program
-sends `debug_clear`. The overlay sits directly on the picture, under every
-piece of host chrome (status bar, OSD, performance overlay), and is painted
-into the presentation only: screenshots, frame dumps, recordings and
-control-protocol captures never include it. Setting `[emulation] uaelib =
-false` removes the whole trap, overlay included.
+Guest programs (such as those using the vscode-amiga-debug template) can render
+custom debug shapes and text onto the screen using uaelib trap helpers
+(`debug_rect`, `debug_filled_rect`, and `debug_text`; see [](run)). Overlay
+commands use a virtual 768x576 coordinate space mapped across the active display
+area, adapting automatically to autocrop and scaling settings until cleared with
+`debug_clear`. The debug overlay is rendered beneath host UI elements (status
+bar, OSD, performance overlay) and affects only live window presentation;
+screenshots, frame dumps, and video recordings exclude it. Disabling
+`[emulation] uaelib` removes the uaelib trap entirely.
 
 ## Drag and drop
 
@@ -362,34 +361,27 @@ belongs to the Amiga.
   square-pixel emulators). The window and its backing texture resize with the
   mode. The start-up mode comes from `[display] pixel_aspect`
   (see [Configuration](configuration.md)).
-- **Scaling**: how that canvas is drawn into the window -- **Smooth** (the
-  default: fit to the window preserving aspect ratio, interpolated) or
-  **Integer** (whole-number multiples of the unresampled canvas, centred
-  in black borders and point-sampled, so every canvas pixel is the same
-  block of host pixels). Under the TV aspect the two axes take separate
-  whole numbers -- pixels per column and per scan line -- chosen to
-  approximate the 4:3 pixel shape, so an NTSC game on a 1080p screen is
-  drawn at 4:5 pixels rather than squat square ones; under square pixels
-  the multiple is uniform. The fit is taken in whole canvas pixels, so
-  every step exists on high-DPI and fractional-scale displays alike.
-  Integer scaling applies to RTG board modes too, at multiples of their
-  own native resolution, and gives way to the smooth fit when the window
-  cannot hold even a 1:1 copy rather than cropping the picture. Under the
-  TV aspect the window resizes to the unresampled canvas when the mode
-  changes, as it does for a pixel-aspect change; a video recording carries
-  on underneath either way, at the aspect's own shape. The start-up mode
-  is `[display] scaling`, which describes the per-axis fit and its
-  pairing with autocrop (see [Configuration](configuration.md)).
-- **Autocrop**: crop the presentation to the picture the hardware
-  fetches, so a game driving fewer lines than the full scan fills more
-  of a wide screen; with integer scaling the whole-number fit is retaken
-  against the crop. The status bar and panels keep their size in a band
-  pinned along the window bottom; an open menu or panel widens the
-  picture to the full display area while it is up, and the band stays
-  put. Presentation-only (captures keep their aperture); the CRT
-  shader presets compose with it, programmable (multisync) scans crop
-  through their own sync-anchored window, and a bezel or RTG scanout
-  suspends it. The start-up value is `[display] autocrop` (see
+- **Scaling**: How the display canvas is mapped to the window:
+  - **Smooth** (default): Fits the display canvas to the window while preserving
+    aspect ratio, using linear interpolation.
+  - **Integer**: Scales using whole-number multiples of the native canvas,
+    centered with black borders and point-sampled. Under the default TV aspect,
+    horizontal and vertical axes scale using independent integer multiples to
+    preserve the 4:3 aspect ratio (e.g. 4:5 pixel aspect for NTSC on 1080p).
+    In square pixel mode, scaling is uniform. Integer scaling also applies to
+    RTG modes at multiples of native resolution, falling back to smooth scaling
+    if the window is smaller than 1:1. Toggling integer scaling in TV mode
+    resizes the window to the native canvas. Configured via `[display] scaling`
+    (see [Configuration](configuration.md)).
+- **Autocrop**: Automatically crops the presentation to the active raster lines
+  programmed by the Amiga hardware, allowing games with smaller viewports to
+  fill more of wide screens. When combined with integer scaling, the integer
+  scale multiplier is recalculated against the cropped area. The status bar and
+  overlay panels remain docked at the bottom of the window; opening a menu or
+  panel temporarily expands the display to the full area so controls remain
+  accessible. Presentation-only (captures always use full aperture), supports
+  CRT shaders, works with programmable multisync modes, and is suspended when
+  using monitor bezels or RTG modes. Configured via `[display] autocrop` (see
   [Configuration](configuration.md)).
 - **Screen Centring**: nudge where the TV picture sits on the glass, the
   H-CENTER/V-CENTER controls a real monitor carried on its front.
@@ -669,13 +661,13 @@ The layout is:
   beneath its heading: serial mode and MIDI endpoints, with the emulated
   MT-32's ROM
   images, front panel and display style when it is the chosen output (see
-  [The MT-32](mt32.md)), and, for the TCP and modem modes, the address that
-  mode needs -- **Connect** (`tcp-connect`) for where to dial, or
-  **Listen** (`tcp`, `modem`) for the local bind address -- as a pair of
-  boxes, host and port, each typed into by clicking it. A box left empty
-  keeps its greyed default -- host `127.0.0.1` (Connect, with no host to
-  assume, prompts `Host/IP`), port `1234` -- and emptying one reverts it; the port takes 1-65535, and on macOS and Linux a Listen port below
-  1025 needs Copperline run as root (dialing out has no such bar); the
+  [The MT-32](mt32.md)), and, for TCP and modem modes, the connection
+  address -- **Connect** (`tcp-connect`) for the remote target, or **Listen**
+  (`tcp`, `modem`) for the local bind address -- configured via host and
+  port fields. Leaving a field blank uses the default (host `127.0.0.1` for
+  Listen, port `1234`; Connect requires a host/IP). Valid ports are 1-65535;
+  on macOS and Linux, binding a Listen port below 1024 requires root
+  privileges (outbound connections have no port restrictions); the
   parallel device -- None, Printer, or Sampler -- with, for the printer, its
   capture output file, or for the sampler, its host audio input and input gain;
   and the A2065 Ethernet and HostSocket bsdsocket.library boards, each --
@@ -738,16 +730,14 @@ The layout is:
   column's **Bootable** box is ticked by default; clearing it greys that row's
   priority and writes the -128 "disabled" sentinel, so the volume mounts but
   never boots.
-  A drive with no image, or a CD image, is greyed ("No drive" / "CD-ROM"),
-  with no stepper to reach for. A SCSI unit or Lide drive appears only once
-  it carries a disk, so the page lists what the machine can actually boot
-  from. The two IDE bays come first, then the SCSI units, then the Lide
-  board's drives. More drives than one page holds run onto a second, reached
-  by **Next Page >** beside the Back button; that page's own **< Back**
-  returns to the first. The note below the rows stays on the first page.
-  Drives you add here with no priority of their own cascade so they do not tie:
-  the first is 0 (just under DF0:'s 5), and each later one drops below the
-  floppies -- -35, -40, -45. A drive already carrying a priority in the config
+  Drives without media or configured as CD-ROMs are disabled ("No drive" /
+  "CD-ROM"). SCSI and Lide units appear only when media is attached,
+  ensuring the list reflects valid boot sources. Drives are listed in order:
+  IDE bays, SCSI units, and Lide drives. If the list exceeds one page, use
+  **Next Page >** and **< Back** to navigate between pages. Newly added
+  drives are assigned cascading default priorities (0 for the first hard
+  drive, followed by -35, -40, -45) to avoid boot conflicts. A drive
+  already carrying a priority in the config
   keeps it, and one that just names a device with no `bootpri` stays at 0. See
   [](configuration.md) for how the priority ranks against Kickstart's DF0: boot
   node at 5.

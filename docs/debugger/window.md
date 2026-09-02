@@ -145,9 +145,9 @@ that colour clock cycle (CPU, Copper, Blitter, Bitplane, Sprite, Audio, Disk, Re
 - **Beam scrub (`B`):** Progressively displays the frame up to the selected raster position.
 - **To slot (`T`):** Advances execution until the beam reaches the selected colour clock.
 
-A control-protocol profile capture ([](profiling)) shares the analyzer's
-trace arming: closing this pane does not disarm a running capture, and
-stopping the capture keeps an open pane recording.
+Profile captures over the control protocol ([](profiling)) share bus tracing
+with the Frame Analyzer: closing the pane does not interrupt an active capture,
+and stopping a capture keeps an open pane recording.
 
 (frame-analyzer-memory-tab)=
 ### Memory heatmap tab
@@ -163,12 +163,11 @@ The Memory tab displays a 256x256 grid representing memory activity across confi
 RAM banks (Chip, Slow, Fast, Motherboard, Zorro II/III). Cells reflect recent read/write
 activity by subsystem and fade over 32 frames.
 
-Debug resources the guest registered through the
-[uaelib trap](../guide/run.md#uaelib-trap) join the window presets (named by
-the guest, rebuilt when the tab is entered; the first four registered
-resources, so a large registry cannot push the machine windows off the
-row -- the Resources tab reaches them all), and the readout under the map
-names the resource a hovered or pinned cell falls in.
+The first four debug resources registered by the guest via the
+[uaelib trap](../guide/run.md#uaelib-trap) appear as memory window presets
+alongside hardware banks (the Resources tab lists all registered items).
+Hovering or pinning a cell in the heatmap displays the name of any registered
+resource mapped at that address.
 
 ### Resources tab
 
@@ -179,23 +178,21 @@ names the resource a hovered or pinned cell falls in.
 Frame Analyzer Resources tab previewing a registered bitmap.
 ```
 
-The Resources tab lists what the running program registered through the
-uaelib trap's `debug_register_bitmap` / `_palette` / `_copperlist` helpers:
-name, type, address, size, and geometry. The cursor and page keys scroll
-the table when the registry outgrows it. Selecting a row decodes it fresh
-from guest memory each repaint, so the preview tracks what the program
-draws:
+The Resources tab inspects memory structures registered by guest software via
+uaelib trap helpers (`debug_register_bitmap`, `debug_register_palette`,
+`debug_register_copperlist`):
 
-- **Bitmap**: planar or interleaved layouts per the registered flags, up to
-  8 planes, drawn with the first registered palette resource (or the live
-  Denise palette when none is registered). A masked bitmap's mask plane is
-  skipped; a HAM bitmap is shown as plain indexed pixels; hostile or stale
-  geometry is clamped, with a note under the preview saying what was
-  glossed over.
-- **Palette**: a swatch grid of the 12-bit entries as Denise would show
-  them.
-- **Copper list**: the first instructions disassembled at the registered
-  address.
+- **Bitmap**: Decodes planar or interleaved bitmaps up to 8 bitplanes using the
+  first registered palette resource (or the active Denise palette if none is
+  registered). Masked planes and HAM modes are rendered as indexed pixels;
+  invalid geometry dimensions are clamped safely.
+- **Palette**: Displays a swatch grid of 12-bit palette entries as rendered by
+  Denise.
+- **Copper list**: Disassembles initial instructions from the registered copper
+  list address.
 
-The same registry is served over the control protocol (`debug.resources`)
-and listed by the console's `DBGRES` command.
+Selecting an entry decodes its contents dynamically from guest memory on every
+repaint, allowing live visual inspection as the program executes.
+
+The same registry is accessible over the control protocol (`debug.resources`)
+and via the console's `DBGRES` command.

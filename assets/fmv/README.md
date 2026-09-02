@@ -30,9 +30,9 @@ Compatibility validated on 2026-08-30:
   diagnostic to prevent the legacy Commodore ROM replacing AROS's
   `cd.device`.
 
-Under CD32 Kickstart, the library classifies and parses Video CD metadata; the
-Philips Media Retail Sampler '95 probe returns two video tracks and 45 entry
-points. Its version 41 `cdstrap` cold-boots that disc to a controller-driven
-track menu; Red plays a track and Blue aborts playback and returns to the
-menu. Non-Video-CD media chain to the displaced stock strap. AROS PR 1089
-skips cartridge diagnostics, so it does not install these residents.
+Under CD32 Kickstart, the library classifies and parses Video CD metadata
+(verified with Philips Media Retail Sampler '95 returning two video tracks and
+45 entry points). Version 41 `cdstrap` cold-boots Video CDs into a track menu:
+Red plays a track and Blue stops playback and returns to the menu. Standard game
+discs chain to the displaced stock strap. AROS PR 1089 skips cartridge
+diagnostics, so it does not install these residents.

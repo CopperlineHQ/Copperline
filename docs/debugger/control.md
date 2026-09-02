@@ -44,14 +44,14 @@ copperline-ctl --info /tmp/ccp.json --repl
 (mcp-server)=
 ## MCP server
 
-`copperline-ctl --mcp` turns the same client into a
-[Model Context Protocol](https://modelcontextprotocol.io) server over stdio,
-so an agent in Claude Code, Cursor, or any other MCP client drives a live
-machine through tools instead of a REPL. Every control-protocol method is a
-tool, and a few bridge-owned tools manage the session.
+`copperline-ctl --mcp` exposes the control protocol over standard I/O as a
+[Model Context Protocol](https://modelcontextprotocol.io) server. This allows AI
+coding agents in environments like Claude Code or Cursor to drive and inspect the
+emulator directly via structured tool calls. Protocol methods map directly to
+MCP tools alongside session management utilities.
 
 ```sh
-# Unattached: the agent launches or attaches a session with the session tools.
+# Unattached: the agent launches or attaches a session with session tools.
 copperline-ctl --mcp
 
 # Attached at startup to a running control server:
@@ -65,7 +65,7 @@ Claude Code registers it with one command:
 claude mcp add copperline -- copperline-ctl --mcp
 ```
 
-or, checked into a project, `.mcp.json`:
+or via `.mcp.json` in a project:
 
 ```json
 {
@@ -80,88 +80,69 @@ or, checked into a project, `.mcp.json`:
 ```
 
 `initialize` returns an `instructions` summary of the workflow, and
-`tools/list` carries a description, a JSON Schema and the parameter
-conventions for every tool, so the agent needs nothing else from this
-chapter.
+`tools/list` provides descriptions, JSON schemas, and parameter conventions
+for all tools.
 
 ### Tool names
 
-MCP tool names allow only `[a-zA-Z0-9_-]`, so a method's tool is the method
-with dots replaced by underscores: `warp.get` is `warp_get`,
-`media.floppy.insert` is `media_floppy_insert`, `capture.screenshot` is
-`capture_screenshot`; methods without dots (`status`, `run_until`) keep their
-names. The arguments are the method's params, addresses included
-(integers or hex strings), and the text result is the method's result. A
-control-protocol error is returned as a tool result with `isError` set and
-the error code and message in the text, never as a transport failure.
-`hello` and `auth` are the bridge's own handshake and are not tools.
+MCP tool names support `[a-zA-Z0-9_-]`, so protocol methods map to tool names
+with dots replaced by underscores (e.g. `warp.get` becomes `warp_get`,
+`media.floppy.insert` becomes `media_floppy_insert`, and `capture.screenshot`
+becomes `capture_screenshot`). Methods without dots (such as `status` or
+`run_until`) retain their exact names. Tool arguments correspond to method
+parameters (addresses accept hex strings or integers). Protocol errors return
+with `isError: true` containing the error code and message. Connection
+handshake methods (`hello`, `auth`) are handled internally by the bridge and
+not exposed as tools.
 
 ### Session tools
 
-The bridge holds one session at a time:
+The bridge manages one active session at a time:
 
 - `session_launch {"config", "model", "run", "whdload", "factory", "args",
-  "binary", "cwd", "timeout_ms"}` spawns a headless emulator as
-  `copperline --control :0 --control-info TMP --noaudio` plus `--config`,
-  `--model`, `--run`, `--whdload`, `--factory` and any further flags given
-  verbatim in `args`, waits for the endpoint, connects and authenticates.
-  The binary is `binary`, else `$COPPERLINE_BIN`, else the `copperline` next
-  to `copperline-ctl`, else the `PATH`. The emulator's own output goes to a
-  log file named in the result, which also carries the pid, the address and
-  the initial `status`. The machine starts paused at power-on.
-- `session_attach {"info_file"}` or `session_attach {"listen", "token"}`
-  attaches to a running `--control` or `--control-gui` server.
-- `session_status` reports the bridge's state: attached, address, the pid and
-  log of a launched emulator, whether the connection is still open, and the
-  event queue's depth and drop count.
-- `session_close` disconnects (the server drops the session's breakpoints
-  and subscriptions) and shuts down an emulator this server launched,
-  killing it after 3 s if it does not exit. Closing the server's stdin does
-  the same, so no emulator outlives its agent.
+  "binary", "cwd", "timeout_ms"}`: Spawns a headless emulator instance
+  (`copperline --control :0 --control-info TMP --noaudio`) with optional
+  configuration flags, connects, and authenticates. Output is redirected to a
+  temporary log file. The instance starts paused at reset.
+- `session_attach {"info_file"}` or `session_attach {"listen", "token"}`:
+  Attaches to an already running `--control` or `--control-gui` server.
+- `session_status`: Reports connection state, endpoint address, process ID and
+  log path of any launched emulator, and event queue statistics.
+- `session_close`: Disconnects from the server and terminates any emulator process
+  launched by the bridge (sending SIGKILL after a 3-second grace period). Closing
+  standard input automatically closes the session.
 
 ### Blocking and `wait_ms`
 
-The resume verbs reply with the eventual stop event, and MCP serves one
-request at a time, so a `continue` with no breakpoint would block the server
-for good. `continue`, `run_until`, `step`, `step_over`, `step_out`,
-`step_copper` and `step_frame` therefore take an extra `wait_ms`: if the
-machine has not stopped within that many host milliseconds the bridge sends
-`pause` and returns the resulting stop event with `bridge.paused_after_ms`
-set. A stop that arrives in time is returned as it is. Without `wait_ms` the
-call blocks until the machine stops on its own.
+Execution methods (`continue`, `run_until`, `step`, `step_over`, `step_out`,
+`step_copper`, `step_frame`) accept an optional `wait_ms` parameter. If the
+emulated machine does not halt within this time limit (in host milliseconds),
+the bridge automatically pauses execution and returns the stop event with
+`bridge.paused_after_ms` set. Without `wait_ms`, calls block until a breakpoint
+or stop condition is reached.
 
 ### Events
 
-A reader thread owns the socket and queues `event.*` notifications (bounded
-to 1024, drops counted) while requests are in flight, so a subscription made
-with `events_subscribe` keeps collecting during a long `run_until`.
-`events_next {"timeout_ms"}` blocks until the next event or the timeout
-(default 1 s) and returns `{method, params}` or `timed_out`;
-`events_drain` returns everything queued. Both report the queue depth and
-the drop count.
+An internal reader thread maintains an event queue (up to 1,024 items) to
+collect asynchronous events during execution. Use `events_next` to retrieve
+individual events with a timeout or `events_drain` to retrieve all queued
+notifications. Both report queue depth and dropped event counts.
 
 ### Screenshots
 
-`capture_screenshot` returns the PNG as an MCP image content block
-(`{"type": "image", "mimeType": "image/png"}`) alongside the text result, so
-the model can look at the screen. With no `path` the file is temporary and
-deleted after it is read; with a `path` it is kept there. A relative `path`
-is resolved against `copperline-ctl`'s working directory (not the
-emulator's, which can differ) and forwarded absolute, and the text result
-carries that absolute path. A PNG the emulator wrote but the bridge cannot
-read back is reported as a tool error, not as a result without its image.
+`capture_screenshot` returns the PNG image as an MCP image content block
+(`image/png`) alongside text output. If `path` is omitted, a temporary file is
+used and deleted after reading. When `path` is provided, the image is saved to
+that path (relative paths resolve against `copperline-ctl`'s working directory).
 
 ### Protocol subset
 
-MCP 2025-06-18 over stdio, newline-delimited JSON-RPC 2.0: `initialize`
-(an earlier revision the client names is echoed; the served subset is the
-same), `notifications/initialized`, `ping`, `tools/list`, `tools/call`.
-A message that is not a JSON-RPC 2.0 request (no `"jsonrpc": "2.0"`, an
-`id` that is not a string or an integer, a missing method) is answered with
-`-32600`, unparseable input with `-32700`, and unknown methods with
-`-32601`; unknown notifications (a method and no `id`) are ignored; stdout
-carries protocol messages only and diagnostics go to stderr. The server
-exits on stdin EOF.
+MCP 2025-06-18 over stdio (newline-delimited JSON-RPC 2.0): supports
+`initialize`, `notifications/initialized`, `ping`, `tools/list`, and
+`tools/call`. Invalid requests return standard JSON-RPC error codes (`-32600`,
+`-32700`, `-32601`). Standard output is reserved strictly for protocol
+messages; diagnostic logs are sent to stderr. The server exits upon EOF on
+stdin.
 
 ## Protocol overview
 
@@ -241,8 +222,8 @@ events.unsubscribe {"events":["serial"]}
 - `machine.reset {"kind": "warm"|"cold"}`: Reset the emulated machine (default: warm).
 
 ### Speed
-- `warp.get`: Report whether warp (unpaced emulation) is on, whether the machine is paced, and who holds it (`source`: `none`, `manual`, `control`, `guest`, `launch`, `boot`, `capture` for a windowed capture run, which is unpaced end to end, or `headless`).
-- `warp.set {"on": true|false}`: Engage or release warp. On mutes live audio like `--warp-boot`; off also cancels a pending `--run` / `--warp-boot` phase. `Cmd+W` / `Alt+W`, the guest's `warpmode(0)`, a client disconnect, or a cold `machine.reset` release a client's warp. Accepted while a resume is pending. A bridged physical floppy drive keeps the machine paced (the reply carries a `note`), and the headless server, unpaced end to end, accepts it as a no-op (`"headless": true` plus a `note`).
+- `warp.get`: Report whether warp (unpaced emulation) is active, whether the machine is paced, and the source holding warp (`none`, `manual`, `control`, `guest`, `launch`, `boot`, `capture`, or `headless`).
+- `warp.set {"on": true|false}`: Engage or release warp speed (unthrottled execution with audio muted). Disabling warp also cancels active `--run` or `--warp-boot` phases.
 
 ### Reverse execution
 - `reverse_step {"n": 1}`: Step backward by instruction.
@@ -256,14 +237,14 @@ events.unsubscribe {"events":["serial"]}
 - `disasm {"addr": ..., "count": ...}`: Disassemble instructions at address (default: PC).
 - `custom.read {"reg": ...}` / `custom.dump`: Query custom chipset registers.
 - `custom.writer {"reg": ...}`: Query last PC and beam cycle that wrote to custom register.
-- `palette.dump {"resource": ...}`: Query the active 32-color or 256-color palette; with `resource`, read a guest-registered palette resource from memory instead (`words` as 12-bit values plus `rgb24`).
+- `palette.dump {"resource": ...}`: Query active 32-color or 256-color palette; with `resource`, read a guest-registered palette resource (`words` as 12-bit values plus `rgb24`).
 - `cia.get {"cia": "a"|"b"}`: Query CIA-A or CIA-B timer, port, and interrupt states.
 - `beam.get`: Query raster beam coordinates (VPOS, HPOS, colour clock).
 - `display.get`: Query active display parameters, viewport size, and pixel format.
 - `rtc.get` / `rtc.set {"unix": ..., "time": "...", "advance": ..., "frozen": ...}`: Inspect or move real-time clock.
-- `cartridge.get`: Describe the fitted freezer cartridge (`[cartridge] model`): `model`, `base` and `size` of its bank, the monitor's `version`, whether the monitor is `entered`, whether a press is still waiting for the CPU (`nmi_pending`), and the count of `freezes`. Not found without a cartridge.
-- `cartridge.freeze`: Press the freezer cartridge's button: the level-7 vector under the current VBR is pointed at the monitor and the non-maskable interrupt raised for the next instruction boundary; the machine keeps running (resume it if stopped) and enters the monitor. Replies with the `cartridge.get` fields plus the `vector` slot written and the `entry` address it holds. Not found without a cartridge.
-- `copper.list {"addr": ..., "resource": ..., "max": ...}`: Disassemble Copper instructions (default: around the live Copper PC; `resource` starts at a guest-registered copper list; `addr` and `resource` are mutually exclusive).
+- `cartridge.get`: Query freezer cartridge state (`model`, memory `base`/`size`, monitor `version`, `entered` status, `nmi_pending`, and freeze count).
+- `cartridge.freeze`: Trigger the freezer cartridge NMI (level 7), transferring execution to the monitor.
+- `copper.list {"addr": ..., "resource": ..., "max": ...}`: Disassemble Copper instructions starting at `addr` or a registered `resource` (default: current Copper PC).
 - `pc_history`: Return recently executed instruction addresses.
 
 ### Diagnostics and profiling
@@ -273,11 +254,11 @@ events.unsubscribe {"events":["serial"]}
 - `fault.list` / `fault.clear`: List or clear active memory bus faults.
 - `memory.heatmap {"enabled": ..., "base": ..., "span": ...}`: Enable or configure address-space access tracking.
 - `memory.heatmap.report {"path": "..."}`: Export memory access heatmap.
-- `debug.resources`: List the bitmaps, palettes and copper lists the guest registered through the [uaelib trap](../guide/run.md#uaelib-trap) (`address`, `size`, `name`, `type`, `flags`, geometry, `registered_frame`); the Frame Analyzer's Resources tab shows the same registry.
-- `debug.idle`: The guest's uaelib idle markers: current state, whether ever used, and the last completed frame's `idle_cck` / `frame_cck`.
+- `debug.resources`: List bitmaps, palettes, and copper lists registered by guest software via the [uaelib trap](../guide/run.md#uaelib-trap).
+- `debug.idle`: Query guest idle time statistics reported via uaelib idle markers.
 - `trace.start {"path": "...", "max_lines": ...}` / `trace.stop` / `trace.status`: Control instruction execution trace logging.
 - `waveform.start {"path": "...", "trigger": "...", "duration": "...", "signals": "..."}` / `waveform.stop` / `waveform.status`: Control VCD logic analyzer waveform capture.
-- `profile.start {"path": "...", "frames": ..., "slots": ..., "screenshots": "none"|"every"|"last", "pc_samples": ...}` / `profile.stop` / `profile.status`: Per-frame profile export -- DMA ownership, blit records, guest idle time, retired instructions, optional owner grids and screenshots -- streamed to `profile.jsonl` with a `profile.json` summary at stop; see [](profiling). Arms the Frame Analyzer's trace for the session, which suspends run-ahead.
+- `profile.start {"path": "...", "frames": ..., "slots": ..., "screenshots": "none"|"every"|"last", "pc_samples": ...}` / `profile.stop` / `profile.status`: Export per-frame profiling data (DMA ownership, blit records, guest idle time, retired instructions) streamed to `profile.jsonl` with a `profile.json` summary upon stop; see [](profiling). Arms Frame Analyzer tracing for the session.
 
 ### Breakpoints and traps
 - `break.add`: Add breakpoint (`pc`, `watch`, `reg_watch`, `beam`, `copper`, `catch`, `loadseg`).

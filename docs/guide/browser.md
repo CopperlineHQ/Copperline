@@ -26,22 +26,17 @@ The web version runs at [copperline.dev/try](https://copperline.dev/try/):
   - **Monitor presentation:** Select CRT shader and bezel frames (**1084**, **Classic**,
     **CRT filter**, or **Plain**).
   - **View (Overscan):** Crop to standard TV aperture or view full overscan border areas.
-  - **Scaling:** **Smooth** (the default) fits the picture to the monitor. **Integer** is
-    the desktop's `[display] scaling = "integer"`: the picture is drawn at whole device
-    pixels per hi-res column and per scan line, a separate whole number per axis chosen to
-    approximate the 4:3 glass shape (4:5 pixels for a 200-line NTSC game on a 1080p screen,
-    square multiples for PAL), centred in black. It takes the fit against every device pixel
-    the element has, so fullscreen on a 16:9 laptop or TV is where it gains the most.
-  - **Autocrop:** The desktop's `[display] autocrop`: crop the picture to the display window
-    the program actually draws (the rows and columns carrying fetched bitplane data, smoothed
-    across frames so screen transitions do not pump the zoom) instead of the fixed TV aperture.
-    With **Integer** scaling the whole-number fit is retaken against the crop, so a 200-line
-    game usually earns a full multiple more. In fullscreen the picture may use the whole
-    screen rather than a 4:3 box. Both settings stand down while a monitor bezel is drawn
-    (the frame's fixed opening owns the glass), as on the desktop. Screenshots capture the
-    presentation buffer at its smooth shape: the capture drops integer scaling (and a drawn
-    bezel) around the buffer read, as the desktop's captures keep the aspect's own shape
-    whatever its window draws.
+  - **Scaling:** **Smooth** (default) fits the picture to the display element using
+    linear interpolation. **Integer** matches desktop `[display] scaling = "integer"`:
+    the picture scales by whole device pixels per column and scan line using independent
+    per-axis integer multipliers to approximate the 4:3 CRT aspect ratio (e.g. 4:5
+    pixels for 200-line NTSC on 1080p, square multipliers for PAL).
+  - **Autocrop:** Matches desktop `[display] autocrop`: dynamically crops the display
+    to the active raster area containing fetched bitplane data rather than the fixed TV
+    aperture. When paired with **Integer** scaling, integer multipliers recalculate
+    against the cropped viewport. Both scaling and autocrop are automatically suspended
+    when monitor bezels are enabled. Screenshots capture the standard presentation buffer
+    geometry.
   - **Screen tint:** Monochrome simulation presets (Black & White, Green, Amber, Sepia).
   - **Deinterlacing:** Motion-adaptive field merging for interlaced display modes.
   - **Phosphor persistence:** Simulates CRT phosphor decay trails.
@@ -169,20 +164,16 @@ requestAnimationFrame(renderLoop);
 - `save_state()`: Export full machine state as `Uint8Array`.
 - `load_state(stateBytes)`: Restore machine state from `Uint8Array`.
 - `set_overscan(mode)`: `"tv"` (default) or `"full"` presentation overscan.
-- `set_scaling(mode)`: `"smooth"` (default) or `"integer"`. Under `"integer"` a 60 Hz
-  standard scan presents its captured aperture at its own woven rows (`present_rows()`
-  follows) instead of resampled onto the 50 Hz aperture's row count, so whole-number factors
-  carry every scan line to the screen as one block.
-- `set_autocrop(on)`: Crop `present_layout()` to the content envelope.
-- `present_content_rect()`: The latched content envelope as `[x, y, width, height]` in
-  presentation-buffer pixels, or an empty array before any content has been seen.
-- `present_layout(availWidth, availHeight)`: Where the presentation buffer lands on a
-  viewport of that many device pixels under the scaling and autocrop settings:
-  `[sx, sy, sw, sh, dx, dy, dw, dh, columns, lines]` -- the buffer sub-rect to draw, its
-  destination rect (paint the rest black), and the whole-number factors of an integer draw
-  (`0, 0` for a smooth fit). Empty until a frame has been presented. A page that draws the
-  buffer itself asks for this instead of stretching the buffer over its element; the bundled
-  `try.js` does so whenever either setting is on and no bezel is drawn.
+- `set_scaling(mode)`: `"smooth"` (default) or `"integer"`. Under `"integer"`, 60 Hz
+  standard scans present captured apertures at native scanlines without resampling.
+- `set_autocrop(on)`: Enable or disable autocrop.
+- `present_content_rect()`: Returns the active content bounding box as `[x, y, width, height]`
+  in presentation-buffer pixels, or an empty array if no frame has been drawn.
+- `present_layout(availWidth, availHeight)`: Computes presentation placement for a viewport
+  given device pixel dimensions: `[sx, sy, sw, sh, dx, dy, dw, dh, columns, lines]`,
+  containing the source sub-rect, destination rect, and integer scale multipliers (`0, 0` for
+  smooth scaling). Returns an empty array until the first frame is presented. Used by `try.js`
+  when integer scaling or autocrop is enabled without a monitor bezel.
 
 ### HTML element hooks in `try.js`
 

@@ -147,20 +147,17 @@ scoped. ECS adds BLTSIZV/BLTSIZH for larger blits.
 Paula owns the interrupt system (INTENA/INTREQ, delivered through the
 modelled IPL-pin pipe and 68000 boundary sampling), serial, and audio.
 
-The IPL pipe (`DEFAULT_IRQ_LATENCY_CCK`, 5 cck) holds a newly raised source
-invisible to the CPU for the propagation through the level encoder to the
-pins. Two properties matter beyond its length. Each source pipes
-**independently** -- every source has its own path to the pins, so one
-asserting cannot hold back another already on its way; a single countdown
-restarted by each new source stretched an earlier interrupt's delay by the
-later one's. And the pipe **bounds an idle STOP nap**: a halted CPU has
-nothing but the IPL pins to wake it, so the idle fast-forward
-([](cpu.md)) must stop at the pipe's delivery point rather than sleeping on
-to the next unrelated device event. Together these kept handler entry within
-the few colour clocks the pipe is worth instead of jittering it across tens
-of raster lines, which is what a demo notices when it schedules work
-relative to a fixed raster line (Ghostown's Spooky Town updates its sprite
-descriptors immediately after the vertical-blank sprite fetch).
+The IPL pipeline (`DEFAULT_IRQ_LATENCY_CCK`, 5 cck) models the propagation
+delay from interrupt assertion through the level encoder to the CPU IPL pins:
+
+- **Independent pipelines**: Each interrupt source propagates independently to
+  the IPL pins, ensuring an asserted interrupt does not delay a pending
+  higher-priority interrupt.
+- **Waking from STOP**: A halted CPU waiting in `STOP` is awakened specifically
+  when the signal exits the pipeline rather than at arbitrary event boundaries.
+  This prevents interrupt handling jitter across raster lines, ensuring
+  cycle-accurate timing for demos that update sprite descriptors immediately
+  following the vertical blank (such as *Spooky Town* by Ghostown).
 
 The rest of Paula:
 
@@ -295,33 +292,22 @@ latch is part of the save state: it is history-dependent, and control
 sessions can snapshot mid-frame where no register-derived reconstruction
 is exact.
 
-The tie has a deliberate use: parking DIWSTRT.V and DIWSTOP.V on the same
-line (below the visible area, via DIWHIGH's high bits) programs a window
-that never opens, blanking every bitplane for the frame while the program
-redraws its buffers. Sprites have no bitplane vertical comparator, so a
-backdrop kept on BPLCON3.BRDRSPRT sprites stays on screen across the
-blank (Nexus 7 blanks its scene transitions this way, DIWSTRT.V =
-DIWSTOP.V = 301, over a sprite spiral backdrop). The renderer's
-register-derived level approximation of the flop must read the tie as
-closed too: reading it as a wrap-around window painted such frames with
-buffer contents the hardware never fetched, and because a never-open
-frame captures no DMA rows at all, the DMA-capture authority that
-normally blanks uncaptured rows had nothing to say. The
-`vdiwprobe-empty` golden render pins this whole-frame case
-(vAmiga-verified bijectively); `vdiwprobe-flop`'s tie band pins the
-mid-frame one.
+Setting `DIWSTRT.V == DIWSTOP.V` on the same scanline (often below the visible
+area via `DIWHIGH`) creates a vertical display window that never opens,
+blanking bitplanes for the entire frame while buffers are redrawn. Sprites
+remain unaffected because they do not use the bitplane vertical comparator,
+allowing backdrop sprites (`BPLCON3.BRDRSPRT`) to remain visible across the
+blanking interval (e.g. *Nexus 7* scene transitions with
+`DIWSTRT.V = DIWSTOP.V = 301`). The level-based window test treats this tie as
+closed; `vdiwprobe-empty` validates this whole-frame blanking behavior
+(verified against vAmiga).
 
-A tie only guarantees the window never opens, though: rewriting the
-registers to a tie mid-frame over a flop an earlier DIWSTRT match
-already set changes nothing until the beam reaches the shared comparator
-line, where reset wins. The level approximation cannot see that history,
-so everywhere the renderer consults it, a row whose DMA capture recorded
-a fetch overrides it as open -- the capture is the Agnus flop's own
-per-line record -- and the level test decides only rows where nothing
-was fetched. The same applies on the bus side: the live collision replay
-takes the current line's flop, and only the future-line lookahead falls
-back to the level test. The `vdiwprobe-tieopen` golden render pins the
-tie-over-an-open-flop case (vAmiga-verified).
+If the registers are rewritten to matching values mid-frame after an earlier
+`DIWSTRT` match already opened the window, the window remains open until the
+beam reaches the shared comparator line, where reset takes precedence. The
+renderer uses DMA capture history as the authoritative vertical window state
+and falls back to level tests only when no DMA rows were fetched
+(`vdiwprobe-tieopen`).
 
 The interlace long-frame latch (VPOSR bit 15) auto-toggles only while
 BPLCON0 LACE is set; outside interlace it holds its value - the power-on
@@ -395,19 +381,13 @@ later DSKSYNC match during it, so the sectors after an index wrap on a track
 whose cell count is not a multiple of 16 still land word-aligned (AROS's
 trackdisk.device reads 1.08 revolutions this way and scans the buffer on the
 word grid; Kickstart's reads without WORDSYNC and bit-searches itself).
-DSKBYTR is served by that same read shifter: its byte and DSKBYT come from
-the shifter's bit counter, the one a WORDSYNC match resets whether or not a
-transfer is running, and WORDEQUAL is the comparator's live level -- true for
-the one cell in which the shift register equals DSKSYNC, so a poll that
-arrives a cell late sees nothing and waits for the next revolution, as on
-the hardware; reading the register resets DSKBYT alone, while the DSKSYNC
-interrupt is the latched edge of the same comparator. A reader that waits
-for WORDEQUAL and then collects bytes
-through DSKBYTR therefore gets them framed from the end of the sync word at
-whatever bit phase the sync sits on the track -- IPF and flux tracks carry
-their syncs at arbitrary phases, and Rob Northen's Copylock reads its key
-sector exactly this way (Lemmings, issue #610), rejecting the read unless the
-first two bytes are the MFM of the sector's first data byte.
+DSKBYTR is driven by the track read shifter: received bytes and `DSKBYT`
+reflect the shifter's bit counter (reset by `WORDSYNC` matches whether or not
+a DMA transfer is active), while `WORDEQUAL` reflects the instantaneous comparator
+level (true only for the single cell matching `DSKSYNC`). Reading `DSKBYTR` clears
+`DSKBYT`, while the `DSKSYNC` interrupt latches the comparator edge. This ensures
+byte framing from arbitrary sync word phases on IPF and flux tracks, which is
+required by protection schemes such as Copylock (e.g. *Lemmings*).
 Supported image
 formats: ADF (read/write), gzip ADZ, single file ZIP, DMS (decompressed by
  `dms.rs`), UAE extended ADF, and read-only IPF (decoded by `ipf.rs`) and SCP
@@ -435,37 +415,26 @@ repeated byte or from forward and backward gap streams whose loop samples
 stretch to meet at the write splice in the middle. Each track is checked
 against the bit counts its descriptors declare and then rotated so the
 revolution starts at the index, matching the shape a flux capture already
-has. A track's cell-*rate* density model (the IMGE density field) becomes a
-per-track profile of cell-time weights, in per-mille of nominal, following the
-CAPS library's own definitions: Copylock Amiga masters three consecutive key
-sectors at -5.5%, -0.5% and +4.5% (blocks 4-6, or 0-2 on the newer scheme),
-each run starting at the gap before its block; Copylock ST, Speedlock and the
-Brierley models weight single blocks by +-5..15%, and the Brierley density-key
-model takes a bit per block from block 0's gap value. The floppy model scales
-each cell's clock by its run's weight (`TrackRev::prefix_cck`), so a loader
-that reads two key sectors byte by byte through DSKBYTR and compares how often
-it polled between bytes sees the few-per-cent difference the master put
-there -- Copylock's check on Lemmings wants `$8911`'s sector at least 2%
-slower than `$8912`'s (issue #610). One modelling gap remains: weak bits
-replay as the one deterministic revolution the file stores rather than
-varying per revolution -- `FloppyTrackImage::RawMfm` can already carry
-multiple revolutions, so closing it is a decoder change alone.
+has. IPF track density variations (`IMGE` density field) are modeled as cell-time
+weights relative to nominal speed according to CAPS library specifications:
+Copylock Amiga masters key sectors at -5.5%, -0.5%, and +4.5% (blocks 4-6 or
+0-2), while Copylock ST, Speedlock, and Brierley models apply +/-5-15%
+weighting per block. Scaling the cell clock (`TrackRev::prefix_cck`) allows
+timing loops polling `DSKBYTR` to detect intentional cell density differences
+(such as Copylock checks on *Lemmings*). Weak bits currently replay as the
+single deterministic revolution stored in the file.
 
 The synthesized drive sounds ([](../guide/configuration)) are driven by
 this model's real state transitions -- motor spin-up, seeks, the
 empty-drive poll click.
 
-The motor is a latch inside every drive, the internal DF0 included: /MTR is
-sampled by the drive's own /SEL falling edge and the MTR level while the
-drive stays selected is ignored, which is why trackdisk and the trackloaders
-deselect, set MTR, then reselect. A write that drops SEL and MTR together
-starts the motor (the latch sees MTR low on one side of the edge); stopping
-it needs MTR high on both sides of the edge -- the rule WinUAE and vAmiga
-derived from hardware. A loader that restores a stale PRB shadow with MTR
-high while the drive remains selected therefore leaves the motor running
-(Ghostown's Spooky Town does this under Kickstart 1.3). External units run
-their drive-ID shift register off the same select edges while the motor is
-off; DF0 has no ID circuit.
+Floppy drive motors are controlled by an internal latch: `/MTR` is sampled on
+the falling edge of `/SEL`, and the level of `MTR` while selected is ignored.
+Starting the motor requires asserting `/SEL` while `/MTR` is low; stopping
+requires `/MTR` to be high before and after the select transition (matching
+WinUAE and vAmiga hardware tests). External drives clock their drive ID shift
+registers off these select edges while the motor is stopped; `DF0:` contains
+no ID hardware.
 
 Disk DMA against a mechanism that cannot deliver cells -- no media in the
 drive, or the motor line off -- arms normally and then pends: Paula has no
