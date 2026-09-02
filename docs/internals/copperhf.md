@@ -255,9 +255,11 @@ an empty copperhf pipeline, so resuming it reproduces an uninterrupted
 run's history byte-for-byte -- the same save-state contract every other
 board on this project holds to (`AGENTS.md`'s "Save states"), just with an
 explicit drain step to get there instead of nothing-in-flight-by
-construction. The state format's version 71 (`src/savestate.rs`) reflects
-this: `CopperhfBoard` gained a cached per-unit `total_sectors` field
-alongside its existing per-unit state, always serialized quiesced.
+construction. The state format version this landed at (`src/savestate.rs`'s
+own changelog names the exact number, since it has shifted at each
+upstream merge since) reflects this: `CopperhfBoard` gained a cached
+per-unit `total_sectors` field alongside its existing per-unit state,
+always serialized quiesced.
 
 `tests/copperhf_m5.rs` pins both properties end to end against a real AROS
 boot that drives dense doorbell traffic (the M3 RDSK/PART mounter walk

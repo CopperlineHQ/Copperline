@@ -95,7 +95,9 @@
 //! sync. The guest-visible protocol is unchanged from M4.
 
 use crate::harddrive::{HardDriveImage, RDB_HEADS, RDB_SPT};
-use crate::scsi::{ScsiDisk, ScsiExec, CHECK_CONDITION};
+use crate::scsi::{
+    ScsiDisk, ScsiExec, ASC_PARAMETER_LIST_LENGTH_ERROR, CHECK_CONDITION, SK_ILLEGAL_REQUEST,
+};
 use crate::zorro_device::{DeviceHost, ZorroDevice};
 use std::collections::VecDeque;
 #[cfg(not(target_arch = "wasm32"))]
@@ -200,6 +202,16 @@ const TDERR_DISK_CHANGED: i8 = 29;
 // devices/scsidisk.h: HD_SCSICMD's io_Error when the target returned a
 // non-GOOD scsi_Status (the request itself was delivered and answered).
 const HFERR_BAD_STATUS: i8 = 45;
+/// Bound on `scsi_Length` before it is ever handed to [`dma_read_bytes`]
+/// (which allocates a same-size `Vec` up front): unlike `CMD_READ`/`WRITE`,
+/// whose transfer length is bounded by `check_range_cached` against the
+/// unit's own size, `HD_SCSICMD`'s data length is a raw guest-supplied
+/// field with no such ceiling. Far above any real CDB this device answers
+/// (a full-disk INQUIRY/MODE SENSE page is a few hundred bytes; a maximal
+/// multi-sector DATA OUT is still well under a MiB), but small enough that
+/// a request near `u32::MAX` fails cleanly with `IOERR_BADLENGTH` instead
+/// of attempting a multi-gigabyte host allocation.
+const SCSI_MAX_XFER: usize = 16 * 1024 * 1024;
 
 const SECTOR_SIZE: usize = 512;
 
@@ -295,7 +307,7 @@ enum WorkerResult {
     Ejected,
     /// The unit named by the job had no media by the time the worker
     /// reached it -- the worker's own unit table is authoritative for this,
-    /// since only it seesthe true in-order effect of an earlier-queued
+    /// since only it sees the true in-order effect of an earlier-queued
     /// `TD_EJECT` on the same unit.
     DiskChanged,
     RwOk {
@@ -306,6 +318,10 @@ enum WorkerResult {
     },
     RwFailed,
     UpdateOk,
+    /// The unit's `flush()` returned an error: distinct from `UpdateOk` so
+    /// the guest is told CMD_UPDATE failed rather than being lied to about
+    /// durability (see this job's own dispatch site in `execute_job`).
+    UpdateFailed,
     ScsiOk {
         status: u8,
         data_len: usize,
@@ -527,12 +543,13 @@ fn execute_job(units: &UnitsShared, job: WorkerJob) -> WorkerResult {
         WorkerJob::Update { unit } => {
             let mut guard = units.lock().unwrap();
             match guard[unit].as_mut() {
-                Some(disk) => {
-                    if let Err(e) = disk.disk.flush() {
+                Some(disk) => match disk.disk.flush() {
+                    Ok(()) => WorkerResult::UpdateOk,
+                    Err(e) => {
                         log::warn!("copperhf: unit {unit}: CMD_UPDATE flush failed: {e}");
+                        WorkerResult::UpdateFailed
                     }
-                    WorkerResult::UpdateOk
-                }
+                },
                 None => WorkerResult::DiskChanged,
             }
         }
@@ -553,12 +570,26 @@ fn execute_job(units: &UnitsShared, job: WorkerJob) -> WorkerResult {
                     (n, Some(data[..n].to_vec()))
                 }
                 ScsiExec::DataOut(expected) => {
-                    let mut payload = data_out.unwrap_or_default();
-                    let n = expected.min(want_len);
-                    payload.truncate(n);
-                    payload.resize(expected, 0);
-                    status = disk.complete_out(&cdb, &payload);
-                    (n, None)
+                    // A guest that supplies less than the CDB's own
+                    // transfer length is a real error, not something to
+                    // paper over: the previous version zero-padded the
+                    // missing tail and committed it anyway, silently
+                    // writing zeros the guest never sent (e.g. a two-sector
+                    // WRITE(10) with scsi_Length == 512 zeroed the second
+                    // sector on disk with no error reported). Reject with
+                    // CHECK CONDITION / PARAMETER LIST LENGTH ERROR
+                    // instead, matching real target behavior.
+                    if want_len < expected {
+                        status = disk
+                            .check(SK_ILLEGAL_REQUEST, ASC_PARAMETER_LIST_LENGTH_ERROR)
+                            .1;
+                        (0, None)
+                    } else {
+                        let mut payload = data_out.unwrap_or_default();
+                        payload.truncate(expected);
+                        status = disk.complete_out(&cdb, &payload);
+                        (expected, None)
+                    }
                 }
                 ScsiExec::NoData => (0, None),
             };
@@ -678,6 +709,10 @@ impl CopperhfBoard {
     /// looked like when the guest first saw it.
     pub fn attach_unit(&mut self, unit: usize, image: HardDriveImage) {
         debug_assert!(
+            unit < NUM_UNITS,
+            "copperhf: attach_unit: unit {unit} out of range"
+        );
+        debug_assert!(
             self.in_flight.is_empty(),
             "copperhf: attach_unit called with requests in flight -- quiesce first"
         );
@@ -715,6 +750,10 @@ impl CopperhfBoard {
     /// Must only be called while the pipeline is quiesced, exactly like
     /// [`Self::attach_unit`].
     pub fn eject_unit(&mut self, unit: usize) -> Option<HardDriveImage> {
+        debug_assert!(
+            unit < NUM_UNITS,
+            "copperhf: eject_unit: unit {unit} out of range"
+        );
         debug_assert!(
             self.in_flight.is_empty(),
             "copperhf: eject_unit called with requests in flight -- quiesce first"
@@ -1016,6 +1055,10 @@ impl CopperhfBoard {
             return;
         };
         let want_len = cmd.length as usize;
+        if want_len > SCSI_MAX_XFER {
+            self.push_precomputed(ptr, header.flags, IOERR_BADLENGTH, 0);
+            return;
+        }
         let data_out = if want_len == 0 {
             Some(Vec::new())
         } else {
@@ -1211,6 +1254,17 @@ impl CopperhfBoard {
     /// it to) if autosense was not requested or the sense pointer cannot be
     /// reached -- a `SCSICmd` without autosense has no sense buffer to write
     /// into at all.
+    /// Silent on a bad/unmapped `scsi_SenseData` pointer or a failed sense
+    /// DMA write, by design and not just omission: the CDB itself already
+    /// completed with a definite `io_Error`/`scsi_Status` (CHECK CONDITION)
+    /// by the time this runs, and real SCSI hardware has no side channel
+    /// to report "your sense buffer pointer was garbage" back through the
+    /// `SCSICmd` it was just handed -- `scsi_SenseActual` simply stays
+    /// whatever the guest initialized it to, which is indistinguishable
+    /// from "no autosense requested" and matches every other host-write
+    /// failure path's fallback (drop the write-back, keep the completion).
+    /// Logged for host-side diagnosis, since a guest driver has no way to
+    /// surface this either.
     fn write_scsi_sense(
         &self,
         req_data: u32,
@@ -1222,6 +1276,7 @@ impl CopperhfBoard {
             return;
         }
         let Some(sense_ptr) = read_u32(host, req_data + SCSI_SENSEDATA) else {
+            log::warn!("copperhf: HD_SCSICMD autosense: could not read scsi_SenseData pointer");
             return;
         };
         if sense_ptr == 0 {
@@ -1229,6 +1284,10 @@ impl CopperhfBoard {
         }
         let n = (cmd.sense_length as usize).min(sense.len());
         if n > 0 && !dma_write_bytes(host, sense_ptr, &sense[..n]) {
+            log::warn!(
+                "copperhf: HD_SCSICMD autosense: could not write sense data to \
+                 {sense_ptr:#010X} (bad guest pointer?)"
+            );
             return;
         }
         let _ = write_u16(host, req_data + SCSI_SENSEACTUAL, n as u16);
@@ -1307,6 +1366,7 @@ impl CopperhfBoard {
             }
             (IoDrainKind::Rw { .. }, WorkerResult::RwFailed) => (IOERR_BADADDRESS, 0),
             (IoDrainKind::Update, WorkerResult::UpdateOk) => (0, 0),
+            (IoDrainKind::Update, WorkerResult::UpdateFailed) => (IOERR_BADADDRESS, 0),
             (
                 IoDrainKind::Scsi(drain),
                 WorkerResult::ScsiOk {
@@ -1634,7 +1694,17 @@ fn dma_write_bytes(host: &mut DeviceHost, addr: u32, data: &[u8]) -> bool {
     }
     let rem = chunks.remainder();
     if !rem.is_empty() {
-        let w = u16::from(rem[0]) << 8;
+        // An odd-length transfer's trailing byte still has to go through a
+        // 16-bit `dma_write_word` (the bus is word-wide), which touches
+        // BOTH bytes at `a` -- but only the high byte (`a`) was actually
+        // requested; `a + 1` lies one byte past the guest's buffer. A
+        // blind `rem[0] << 8` zeroed that low byte unconditionally,
+        // corrupting whatever guest data happens to sit immediately after
+        // (a real risk for HD_SCSICMD DataIn/sense payloads, which are
+        // not sector-multiple like CMD_READ and so can legitimately be
+        // odd-length). Read the word back first and preserve its low byte.
+        let low = host.dma_read_word(a).map(|old| old & 0x00FF).unwrap_or(0);
+        let w = (u16::from(rem[0]) << 8) | low;
         if !host.dma_write_word(a, w) {
             return false;
         }

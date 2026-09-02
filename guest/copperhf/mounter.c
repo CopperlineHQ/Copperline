@@ -248,6 +248,19 @@ static BOOL lseg_read_word(struct LsegStream *s, UWORD *out)
  * ------------------------------------------------------------------- */
 
 #define CHF_MAX_HUNKS 16
+/* Bound on a single hunk's declared memory size, chosen far above any real
+ * filesystem handler this device will ever LSEG-load (pfs3aio, the
+ * largest common one, is ~60 KiB) but far enough below the ULONG range
+ * that `hunk_size + 8` (the seglist link/size header, see
+ * chf_load_lseg_chain) can never wrap. HARD-WON: an unbounded hunk size
+ * read straight off disk is exploitable, not just theoretical -- a
+ * crafted image naming a hunk size near 0x3FFFFFFF makes
+ * `AllocMem(size + 8, ...)` wrap to a handful of bytes (`+8` overflows
+ * ULONG), so the allocation "succeeds" tiny while every later bounds
+ * check still trusts the huge unwrapped `sizes[i]`, and the hunk body
+ * copy that follows heap-overflows guest memory with attacker-controlled
+ * bytes. */
+#define CHF_MAX_HUNK_BYTES (4UL * 1024 * 1024)
 
 static BPTR chf_load_lseg_chain(struct ExecBase *_sysbase, UBYTE *board, ULONG unit,
                                  LONG first_block, UBYTE *buf)
@@ -300,6 +313,12 @@ static BPTR chf_load_lseg_chain(struct ExecBase *_sysbase, UBYTE *board, ULONG u
         if (!lseg_read_long(&s, &sz))
             return 0;
         sizes[i] = (sz & 0x3FFFFFFFUL) * 4;
+        /* Reject anything past CHF_MAX_HUNK_BYTES before it ever reaches
+         * an AllocMem call -- see that constant's own comment for why an
+         * unbounded size here is a heap-overflow primitive, not just a
+         * wasteful allocation. */
+        if (sizes[i] > CHF_MAX_HUNK_BYTES)
+            return 0;
         segs[i] = NULL;
     }
 
@@ -378,7 +397,21 @@ static BPTR chf_load_lseg_chain(struct ExecBase *_sysbase, UBYTE *board, ULONG u
                     }
                     if (count == 0)
                         break;
-                    if (!lseg_read_long(&s, &idx) || idx >= nhunks || segs[idx] == NULL) {
+                    /* A reloc record's hunk number is ABSOLUTE (the file's
+                     * global first_hunk..last_hunk numbering, per the hunk
+                     * format -- see this loop's own comment on why the
+                     * memory-size table is read in that same numbering),
+                     * not a 0-based index into this file's own local
+                     * segs[]/sizes[] tables -- normalize by first_hunk
+                     * before indexing. first_hunk is 0 for almost every
+                     * real linked executable, which is why this bug is
+                     * silent until a file legitimately sets it. */
+                    if (!lseg_read_long(&s, &idx) || idx < first_hunk || idx > last_hunk) {
+                        ok = FALSE;
+                        break;
+                    }
+                    idx -= first_hunk;
+                    if (segs[idx] == NULL) {
                         ok = FALSE;
                         break;
                     }
@@ -424,7 +457,15 @@ static BPTR chf_load_lseg_chain(struct ExecBase *_sysbase, UBYTE *board, ULONG u
                     words++;
                     if (count == 0)
                         break;
-                    if (!lseg_read_word(&s, &idx) || idx >= nhunks || segs[idx] == NULL) {
+                    /* Same absolute-vs-local hunk-number normalization as
+                     * the HUNK_RELOC32 loop above -- see its comment. */
+                    if (!lseg_read_word(&s, &idx) || (ULONG)idx < first_hunk ||
+                        (ULONG)idx > last_hunk) {
+                        ok = FALSE;
+                        break;
+                    }
+                    idx = (UWORD)((ULONG)idx - first_hunk);
+                    if (segs[idx] == NULL) {
                         ok = FALSE;
                         break;
                     }

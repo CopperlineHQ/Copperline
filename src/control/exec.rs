@@ -353,6 +353,21 @@ pub fn copperhf_attach(
     if emu.bus_mut().copperhf_board_mut().is_none() {
         return Err(CtlError::unsupported("no [copperhf] controller configured"));
     }
+    // Same validation a `[copperhf]` config entry gets at parse time
+    // (config::raw::copperhf_drive_image) -- copperhf.device serves hard
+    // disks only, and a hot-attach must not let a CCP client attach what a
+    // config file cannot express.
+    if crate::config::is_cd_image_path(path) {
+        return Err(CtlError::invalid_params(format!(
+            "{}: copperhf.device serves hard disks only, not CD images",
+            path.display()
+        )));
+    }
+    if let Some(name) = &volume_name {
+        if let Some(err) = crate::filesys::volume_name_error(name) {
+            return Err(CtlError::invalid_params(err));
+        }
+    }
     let disk = crate::harddrive::HardDriveImage::open(
         path,
         &format!("DH{unit}"),

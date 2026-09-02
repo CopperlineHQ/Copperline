@@ -15,7 +15,7 @@
 # Layout (three hunks, matching an ordinary LoadSeg-able file -- exactly
 # what an RDB FSHD's LSEG chain carries):
 #
-#   hunk 0, CODE (40 bytes, header size == body size, no truncation):
+#   hunk 0, CODE (128 bytes, header size == body size, no truncation):
 #     offset 0x00: entry point. Plain 68000 code, no OS calls, JSR-safe.
 #       Follows a relocated pointer chain code -> data -> bss -> data ->
 #       code and folds three values into D0:

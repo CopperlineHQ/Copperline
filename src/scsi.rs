@@ -118,6 +118,12 @@ pub(crate) const ASC_LUN_NOT_SUPPORTED: u8 = 0x25;
 pub(crate) const ASC_MEDIUM_MAY_HAVE_CHANGED: u8 = 0x28;
 pub(crate) const ASC_MEDIUM_NOT_PRESENT: u8 = 0x3A;
 pub(crate) const ASC_ILLEGAL_MODE_FOR_THIS_TRACK: u8 = 0x64;
+pub(crate) const ASC_PARAMETER_LIST_LENGTH_ERROR: u8 = 0x1A;
+
+/// Bound on a single READ/WRITE CDB's own transfer request, checked in
+/// `ScsiDisk::rw_command` before any host allocation. See that function's
+/// own comment for why `lba + count > total` alone is not enough.
+const MAX_SCSI_RW_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const SENSE_LEN: usize = 18;
 
 /// Emulated delay (chip-bus colour clocks) between issuing a command and
@@ -264,7 +270,7 @@ impl ScsiDisk {
         self.sense = [0u8; SENSE_LEN];
     }
 
-    fn check(&mut self, key: u8, asc: u8) -> (ScsiExec, u8) {
+    pub(crate) fn check(&mut self, key: u8, asc: u8) -> (ScsiExec, u8) {
         self.set_sense(key, asc);
         (ScsiExec::NoData, CHECK_CONDITION)
     }
@@ -539,10 +545,37 @@ impl ScsiDisk {
     }
 
     fn rw_command(&mut self, read: bool, lba: u64, count: u64, total: u64) -> (ScsiExec, u8) {
-        if lba + count > total {
+        // `lba`/`count` come straight from a guest-supplied CDB (READ/WRITE
+        // 12 and 16 carry a full 32-bit count, 16 a full 64-bit LBA), so
+        // both the range check and the byte-count conversion below use
+        // checked arithmetic: `lba + count` can wrap a 64-bit sum for an
+        // LBA near u64::MAX, and `count * SECTOR_SIZE` can wrap a 32-bit
+        // `usize` on this crate's wasm32 targets even though it cannot on a
+        // 64-bit host. Either wrap would let an out-of-range or
+        // multi-terabyte request slip past the bound below.
+        let Some(end) = lba.checked_add(count) else {
+            return self.check(SK_ILLEGAL_REQUEST, ASC_LBA_OUT_OF_RANGE);
+        };
+        if end > total {
             return self.check(SK_ILLEGAL_REQUEST, ASC_LBA_OUT_OF_RANGE);
         }
-        let bytes = (count as usize) * SECTOR_SIZE;
+        let Some(bytes) = count
+            .checked_mul(SECTOR_SIZE as u64)
+            .and_then(|b| usize::try_from(b).ok())
+        else {
+            return self.check(SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD_IN_CDB);
+        };
+        // A single CDB's own transfer request is capped well above any
+        // real multi-sector burst a driver issues in one go (scsi.device
+        // itself chunks at MaxTransfer, typically far smaller), but far
+        // below "attempt to allocate the whole disk in one shot" -- the
+        // `lba + count > total` bound above is necessary but not
+        // sufficient on its own: a large but legitimately-sized attached
+        // hardfile still lets a single crafted CDB request its entire
+        // multi-gigabyte extent as one host allocation.
+        if bytes > MAX_SCSI_RW_BYTES {
+            return self.check(SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD_IN_CDB);
+        }
         if !read {
             return (ScsiExec::DataOut(bytes), GOOD);
         }

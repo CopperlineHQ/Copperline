@@ -40,9 +40,9 @@
 //               fhb_GlobalVec = -1, fhb_SegListBlocks = 3, fhb_Next =
 //               -1 (only FSHD on the list).
 //     block 3:  LSEG. lsb_ID = 'LSEG', lsb_Next = -1 (chain is exactly
-//               one block: gen_lsegfix.py's fixture is 160 bytes, well
+//               one block: gen_lsegfix.py's fixture is 248 bytes, well
 //               under one 492-byte LoadSegBlock payload).
-//               lsb_LoadData[0..40) = guest/copperhf-test/lsegfix's
+//               lsb_LoadData[0..248) = guest/copperhf-test/lsegfix's
 //               bytes verbatim, zero-padded to the full 492-byte
 //               payload.
 //     blocks 4..511: unused (rest of the RDB cylinder).

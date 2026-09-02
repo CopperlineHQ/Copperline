@@ -222,7 +222,9 @@ fn build_fshd_block() -> Vec<u8> {
 
 /// A single `LoadSegBlock` at block 3, carrying `guest/copperhf-test/
 /// lsegfix`'s bytes verbatim, zero-padded to the 492-byte payload;
-/// `lsb_Next = -1` since 160 bytes fits in one block.
+/// `lsb_Next = -1` since the fixture (248 bytes as of this writing --
+/// see the assert below, which is the actual guard, not this comment)
+/// fits in one block.
 fn build_lseg_block(fixture: &[u8]) -> Vec<u8> {
     assert!(
         fixture.len() <= 492,

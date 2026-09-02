@@ -511,8 +511,8 @@ slow = "512K"
 # controllers. Hard disks only -- a CD image path (.cue/.iso/.nrg/.chd) is
 # rejected; attach CD images to [scsi] or [ide]/[lide] instead. No rom key:
 # the board's boot ROM and device driver are built into Copperline itself
-# (arriving in a later milestone -- see COPPERHF-DEVICE-PLAN.md), not a
-# loadable image.
+# (an autoboot DiagArea ROM and RDB mounter -- see COPPERHF-DEVICE-PLAN.md
+# and docs/internals/copperhf.md), not a loadable image.
 # [copperhf]
 # unit0 = "workbench.hdf"
 # unit1 = { path = "data.hdf", bootpri = 6 }   # table form, as for [ide]

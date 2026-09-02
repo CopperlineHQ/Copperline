@@ -1241,8 +1241,8 @@ impl ScsiConfig {
 /// zero emulated cost instead of modelling a real chip's register timing.
 /// RDB and RDB-less images are handled identically to `[ide]`/`[scsi]`/
 /// `[lide]` through the shared hardfile layer. Guest-visible as
-/// `copperhf.device` units 0-6; see `docs/internals/copperhf.md` (added in a
-/// later milestone) for the register-level protocol.
+/// `copperhf.device` units 0-6; see `docs/internals/copperhf.md` for the
+/// register-level protocol.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CopperhfConfig {
     /// Drive images by unit number (0-6).
