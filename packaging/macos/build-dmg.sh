@@ -120,6 +120,14 @@ for f in lide.rom lide-atbus.rom cdfs.rom README.md THIRD_PARTY_NOTICES.txt; do
   cp "assets/lide/$f" "$app/Contents/Resources/lide/$f"
 done
 
+# Bundled HRTMon freezer-cartridge image (default for [cartridge] model =
+# "hrtmon" without a named rom); romsearch.rs resolves
+# Contents/Resources/hrtmon. GPL-2.0-or-later: ship its notice and license.
+mkdir -p "$app/Contents/Resources/hrtmon"
+for f in hrtmon.rom README.md LICENSE; do
+  cp "assets/hrtmon/$f" "$app/Contents/Resources/hrtmon/$f"
+done
+
 # WHDLoad support archives (direct WHDLoad boot, src/whdload.rs); fetched
 # with pinned checksums, shipped unmodified with their provenance README.
 # whdload::find_whdboot_assets resolves Contents/Resources/whdboot.

@@ -10,7 +10,8 @@
 #      so the bundle needs no Visual C++ Redistributable.
 #   2. Stages a folder holding copperline.exe with a sibling aros\ directory,
 #      which is the first location romsearch.rs probes, so the bundled AROS
-#      ROM is found with no configuration.
+#      ROM is found with no configuration; the other bundled ROM assets
+#      (fmv\, a4091\, a2091\, lide\, hrtmon\) sit beside it the same way.
 #   3. Zips the folder into Copperline-<version>-win-<x64|arm64>.zip,
 #      mirroring the AppImage/Homebrew version naming so release assets are
 #      self-describing.
@@ -90,6 +91,16 @@ $lideDir = Join-Path $stage "lide"
 New-Item -ItemType Directory -Force -Path $lideDir | Out-Null
 foreach ($f in @("lide.rom", "lide-atbus.rom", "cdfs.rom", "README.md", "THIRD_PARTY_NOTICES.txt")) {
     Copy-Item (Join-Path "assets\lide" $f) (Join-Path $lideDir $f)
+}
+
+# Bundled HRTMon freezer-cartridge image (default for [cartridge] model =
+# "hrtmon" / --cartridge hrtmon without a named rom); romsearch.rs probes a
+# sibling hrtmon\ next to the exe. GPL-2.0-or-later: ship its notice and
+# license.
+$hrtmonDir = Join-Path $stage "hrtmon"
+New-Item -ItemType Directory -Force -Path $hrtmonDir | Out-Null
+foreach ($f in @("hrtmon.rom", "README.md", "LICENSE")) {
+    Copy-Item (Join-Path "assets\hrtmon" $f) (Join-Path $hrtmonDir $f)
 }
 
 # WHDLoad support archives (direct WHDLoad boot, src/whdload.rs); fetched

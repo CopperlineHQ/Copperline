@@ -566,6 +566,26 @@ fn build() -> Vec<ToolDef> {
             json!({"time": "2005-03-18 01:58:29"}),
         ),
         entry(
+            "cartridge.get",
+            "Describe the fitted freezer cartridge (`[cartridge] model`): model, the base \
+             and size of its bank, the monitor's version, whether the monitor is entered, \
+             whether a press is still waiting for the CPU (`nmi_pending`), and the count \
+             of freezes so far. Not found without a cartridge.",
+            no_params(),
+            json!({}),
+        ),
+        entry(
+            "cartridge.freeze",
+            "Press the freezer cartridge's button: the level-7 vector under the current VBR \
+             is pointed at the monitor and a non-maskable interrupt is raised for the next \
+             instruction boundary. The machine keeps running (resume it if stopped) and \
+             enters the monitor; the reply carries the `cartridge.get` fields plus the \
+             `vector` slot written and the `entry` address it holds. Not found without a \
+             cartridge.",
+            no_params(),
+            json!({}),
+        ),
+        entry(
             "copper.list",
             "Disassemble up to `max` Copper instructions (default 32, at most 256) from \
              `addr` (default: the Copper's current program counter): MOVE, WAIT, SKIP, \
@@ -724,6 +744,48 @@ fn build() -> Vec<ToolDef> {
         entry(
             "trace.status",
             "Report whether an instruction trace is running, its path and line count.",
+            no_params(),
+            json!({}),
+        ),
+        entry(
+            "profile.start",
+            "Start a per-frame profile export: DMA ownership, blit records, guest idle \
+             time and retired instructions per frame, streamed as `profile.jsonl` under \
+             `path` (default: the configured profile directory) with a `profile.json` \
+             summary written at stop. Stops by itself after `frames` (default 500, at \
+             most 100000); `slots` adds per-frame chip-bus owner grids, `screenshots` \
+             saves the frame image for none, every or the last frame, `pc_samples` adds \
+             a sampled PC histogram. Arms the frame analyzer's trace for the session, \
+             which suspends run-ahead.",
+            object(
+                vec![
+                    ("path", string("Host directory for the profile files (optional)")),
+                    ("frames", uint("Frames to profile", Some(1), Some(100_000))),
+                    ("slots", boolean("Include per-frame chip-bus owner grids")),
+                    (
+                        "screenshots",
+                        enumeration(
+                            "Which profiled frames to save as PNG",
+                            &["none", "every", "last"],
+                        ),
+                    ),
+                    ("pc_samples", boolean("Include a sampled PC histogram per frame")),
+                ],
+                &[],
+            ),
+            json!({"path": "/tmp/profile", "frames": 100, "screenshots": "last"}),
+        ),
+        entry(
+            "profile.stop",
+            "Stop the profile export, write the `profile.json` summary and report the \
+             frames recorded.",
+            no_params(),
+            json!({}),
+        ),
+        entry(
+            "profile.status",
+            "Report the profile export: `active`, `path`, `frames_written`, `frames_limit` \
+             and `done` (or just `active: false` when none was started).",
             no_params(),
             json!({}),
         ),

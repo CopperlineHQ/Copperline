@@ -763,6 +763,12 @@ pub struct Bus {
     /// $F00000 decodes ahead of it and hides it.
     #[serde(default)]
     pub uaelib: Option<crate::uaelib::UaeLib>,
+    /// Freezer cartridge (`[cartridge] model`, `crate::cartridge`): the
+    /// monitor's 1 MiB bank at $A10000, the custom/CIA register shadows
+    /// kept for it, and the pending level-7 freeze interrupt. None when
+    /// nothing is fitted.
+    #[serde(default)]
+    pub cartridge: Option<crate::cartridge::Cartridge>,
     /// `[debug] log_unmapped`: log CPU accesses in this range that no device
     /// decodes, to find the registers a guest expects and we do not provide.
     #[serde(default)]
@@ -2668,6 +2674,7 @@ impl Bus {
             sdmac: None,
             ide_a4000: None,
             uaelib: None,
+            cartridge: None,
             log_unmapped: None,
             akiko: None,
             cdtv: None,
@@ -3616,6 +3623,50 @@ impl Bus {
         self.uaelib = Some(uaelib);
     }
 
+    /// Fit a freezer cartridge and write its configuration block for this
+    /// machine. Fit it after the boards that shape the block (Gayle, the
+    /// A4000 IDE, Akiko) so the monitor is told about them.
+    pub fn attach_cartridge(&mut self, mut cartridge: crate::cartridge::Cartridge) {
+        cartridge.configure(self.cartridge_traits());
+        self.cartridge = Some(cartridge);
+    }
+
+    /// What the cartridge's configuration block says about this machine
+    /// (WinUAE's `hrtmon_configure` inputs).
+    fn cartridge_traits(&self) -> crate::cartridge::MachineTraits {
+        crate::cartridge::MachineTraits {
+            aga: self.aga_enabled(),
+            cd32: self.akiko.is_some(),
+            ntsc: self.agnus.video_standard() == VideoStandard::Ntsc,
+            ide: self.gayle.is_some() || self.ide_a4000.is_some(),
+            gayle_ide: self.gayle.is_some(),
+            chip_ram_bytes: self.mem.chip_ram.len() as u32,
+        }
+    }
+
+    /// The cartridge's freeze button: snapshot the register shadows into
+    /// the bank, point the level-7 vector (`vbr` + $7C) at the monitor and
+    /// raise the non-maskable interrupt, which the CPU adapter delivers at
+    /// the next instruction boundary. Returns the entry address.
+    pub fn cartridge_freeze(&mut self, vbr: u32) -> Result<u32, crate::cartridge::FreezeError> {
+        let Some(cartridge) = self.cartridge.as_mut() else {
+            return Err(crate::cartridge::FreezeError::NotFitted);
+        };
+        cartridge.freeze(&mut self.mem, vbr)
+    }
+
+    /// Whether a freeze interrupt is waiting for the CPU.
+    #[inline]
+    pub fn cartridge_nmi_pending(&self) -> bool {
+        self.cartridge.as_ref().is_some_and(|c| c.nmi_pending())
+    }
+
+    /// Consume the pending freeze interrupt at its acknowledge.
+    #[inline]
+    pub fn cartridge_take_nmi(&mut self) -> bool {
+        self.cartridge.as_mut().is_some_and(|c| c.take_nmi())
+    }
+
     pub fn attach_ramsey(&mut self, ramsey: crate::ramsey::Ramsey) {
         self.ramsey = Some(ramsey);
     }
@@ -3883,6 +3934,12 @@ impl Bus {
         }
         if let Some(uaelib) = self.uaelib.as_mut() {
             uaelib.reset();
+        }
+        if self.cartridge.is_some() {
+            let traits = self.cartridge_traits();
+            if let Some(cartridge) = self.cartridge.as_mut() {
+                cartridge.reset(traits);
+            }
         }
         self.mem.zorro.warm_reset();
         self.hdd_led_until_cck = 0;
@@ -6721,6 +6778,9 @@ impl Bus {
         let byte = (val & 0xFF) as u8;
         let reg = reg_from_addr(addr);
         trace!("cia_a W reg={:X} sz={} val={:02X}", reg, size, byte);
+        if let Some(cartridge) = self.cartridge.as_mut() {
+            cartridge.note_cia_write(false, reg, byte);
+        }
         let eff = self.cia_a.write(reg, byte);
         if self.cia_a.irq_line_asserted() {
             self.paula.intreq |= INT_PORTS;
@@ -6848,6 +6908,9 @@ impl Bus {
         };
         let reg = reg_from_addr(addr);
         trace!("cia_b W reg={:X} sz={} val={:02X}", reg, size, byte);
+        if let Some(cartridge) = self.cartridge.as_mut() {
+            cartridge.note_cia_write(true, reg, byte);
+        }
         let anchor_tod = reg == REG_TODLO && !self.cia_b.tod_writes_alarm();
         let eff = self.cia_b.write(reg, byte);
         if self.cia_b.irq_line_asserted() {
@@ -7314,6 +7377,9 @@ impl Bus {
                 self.mem.extended_rom.len() as u32,
             ));
         }
+        if let Some(cartridge) = self.cartridge.as_ref() {
+            regions.push((cartridge.base(), cartridge.size() as u32));
+        }
         regions.sort_by_key(|(base, _)| *base);
         regions
     }
@@ -7361,6 +7427,11 @@ impl Bus {
             {
                 return word;
             }
+        }
+        // The freezer cartridge's bank.
+        if let Some(off) = self.cartridge.as_ref().and_then(|c| c.offset(addr, 2)) {
+            let bank = self.cartridge.as_ref().map_or(&[][..], |c| c.bank());
+            return ((bank[off] as u16) << 8) | bank[off + 1] as u16;
         }
         0
     }

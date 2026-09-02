@@ -47,6 +47,7 @@ range checks as the equivalent TOML fields:
 | `--cpu-clock MHZ` | `[cpu] clock_mhz` | a number of MHz |
 | `--fpu` / `--no-fpu` | `[cpu] fpu` | fit / omit a 68881/68882 |
 | `--jit` / `--no-jit` | `[cpu] jit` | experimental fast batch/trace-JIT CPU execution (68020+; not cycle-exact) |
+| `--cartridge MODEL` | `[cartridge] model` | `none` (default) or `hrtmon`, the bundled HRTMon freezer cartridge |
 | `--chip SIZE` | `[memory] chip` | `512K`, `1M`, `2M`, ... |
 | `--fast SIZE` | `[memory] fast` | `0`, `1M`, `4M`, `8M`, ... |
 | `--slow SIZE` | `[memory] slow` | `0`, up to `512K` |
@@ -2383,6 +2384,50 @@ The Z3660 board's stock monitor ships with the `DISPLAYCHAIN=NO` tooltype, which
 models the real hardware's separate RTG monitor and never hands the display
 back to the native screen. On a single-window emulator you usually want
 `DISPLAYCHAIN=YES`, so the one window follows whichever screen is active.
+
+(freezer-cartridge)=
+## `[cartridge]` -- freezer cartridge
+
+```toml
+[cartridge]
+model = "hrtmon"                # "none" (the default) or "hrtmon"
+# rom = "/roms/hrtmon.rom"      # an HRTMon cartridge image of your own
+```
+
+Fits an Action Replay-style freezer cartridge: a system monitor that lives
+in its own memory bank and takes the machine over when you press its
+button, whatever the running program is doing. The one model so far is
+HRTMon (`model = "hrtmon"`), Alain Malek's monitor as maintained by Bert
+Jahn and contributors, bundled as `assets/hrtmon/hrtmon.rom` -- HRTMon 2.39
+assembled from the upstream source in its UAE cartridge configuration
+(`hrtmon-rom/README.md` has the provenance and the build recipe; the
+monitor is GPL-2.0-or-later, its license text sits beside the image).
+`model` alone fits the bundled image; `rom = "..."` replaces it with any
+HRTMon cartridge image (`HRT!` at offset 0 or 4). `--cartridge hrtmon` is
+the command-line form, and the launcher's **System** tab has a matching
+*Freezer cartridge* row.
+
+The cartridge is present from power-on: a 1 MiB bank at `$A10000` (plain
+read/write memory; the monitor keeps its variables, stack and screen
+there) plus the snapshot of the custom and CIA registers the host keeps
+for it, since the monitor cannot read the write-only registers back.
+Pressing the button -- *Tools > Freeze (HRTMon)* in the menu, `Cmd+Shift+B`
+/ `Alt+Shift+B`, `--freeze-after SECS` in a headless run, or the control
+protocol's `cartridge.freeze` -- raises the 68000's non-maskable level-7
+interrupt, and the monitor comes up on its own screen showing the
+interrupted program's registers. The monitor's `x` command returns to the
+program exactly where it was, and the Help key shows its command list.
+The host tells the monitor what it is running on through the
+configuration block at the start of the image (chipset, video standard,
+IDE port, CD32, chip RAM size), written at power-on and at every reset;
+a reset also clears the monitor's "entered" flag, so a freeze after a
+reset installs it afresh.
+
+The bank, the register snapshot and a not-yet-taken press are machine
+state: save states and rewind carry a monitor session, and a
+`--record-input` session replays a press at the same emulated instant
+(the `freeze-after` script directive). See [](../internals/peripherals)
+for the model.
 
 ## `[debug]` -- diagnostics
 

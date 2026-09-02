@@ -12859,3 +12859,101 @@ fn beam_timed_live_pixel_decode_applies_clxcon2_like_the_renderer() {
         "raw pixels overlap but the gated match fails"
     );
 }
+
+/// A stub freezer-cartridge image with the 2.x config-block tag.
+fn stub_cartridge_image() -> Vec<u8> {
+    let mut image = vec![0u8; 0x60];
+    image[4..8].copy_from_slice(b"HRT!");
+    image[crate::cartridge::CFG_ID..crate::cartridge::CFG_ID + 6].copy_from_slice(b"NEWHRT");
+    image[crate::cartridge::CFG_VERSION..crate::cartridge::CFG_VERSION + 2]
+        .copy_from_slice(&2u16.to_be_bytes());
+    image[crate::cartridge::CFG_REVISION..crate::cartridge::CFG_REVISION + 2]
+        .copy_from_slice(&39u16.to_be_bytes());
+    image
+}
+
+#[test]
+fn cartridge_config_block_describes_the_machine_and_is_rewritten_by_a_reset() {
+    use crate::cartridge::{
+        Cartridge, CFG_A1200, CFG_AGA, CFG_CD32, CFG_COLOR0, CFG_ENTERED, CFG_IDE, CFG_MAX_CHIP,
+        CFG_NOVBR, CFG_SCREEN, HRTMON_BASE,
+    };
+    // An AGA NTSC machine with a Gayle IDE port and a CD32's Akiko: every
+    // field the block reports is on.
+    let mut bus = empty_bus_with_chip_ram(2 * 1024 * 1024);
+    bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+    bus.set_video_standard(VideoStandard::Ntsc);
+    bus.attach_gayle(crate::gayle::Gayle::new(0xD0));
+    bus.attach_akiko(crate::akiko::Akiko::new());
+    bus.attach_cartridge(Cartridge::hrtmon(&stub_cartridge_image()).unwrap());
+
+    let block = |bus: &Bus| bus.cartridge.as_ref().unwrap().bank()[..0x48].to_vec();
+    let written = block(&bus);
+    assert_eq!(
+        &written[CFG_COLOR0..CFG_COLOR0 + 4],
+        &[0x00, 0x5A, 0x0F, 0xFF]
+    );
+    assert_eq!(written[CFG_IDE], 1);
+    assert_eq!(written[CFG_A1200], 1, "Gayle: the A600/A1200 IDE port");
+    assert_eq!(written[CFG_AGA], 1);
+    assert_eq!(written[CFG_CD32], 1);
+    assert_eq!(written[CFG_SCREEN], 1, "NTSC");
+    assert_eq!(written[CFG_NOVBR], 1);
+    assert_eq!(written[CFG_ENTERED], 0);
+    assert_eq!(
+        &written[CFG_MAX_CHIP..CFG_MAX_CHIP + 4],
+        &[0x00, 0x20, 0x00, 0x00]
+    );
+    assert_eq!(bus.cartridge.as_ref().unwrap().version(), Some((2, 39)));
+
+    // The bank is CPU memory: the header reads through the bus, and a
+    // write lands (the monitor keeps its variables there).
+    assert_eq!(
+        bus.peek_word_any(HRTMON_BASE + 4),
+        u16::from_be_bytes(*b"HR")
+    );
+    assert_eq!(
+        bus.peek_word_any(HRTMON_BASE + 0x1000),
+        0xFFFF,
+        "past the image: $FF"
+    );
+
+    // The monitor is inside and a second press is waiting when the user
+    // resets: the block is rewritten for the same machine, the monitor is
+    // no longer inside, and the pending interrupt goes with the reset.
+    bus.cartridge.as_mut().unwrap().bank_mut()[CFG_ENTERED] = 1;
+    bus.cartridge_freeze(0).unwrap();
+    assert!(bus.cartridge_nmi_pending());
+    bus.reset_for_keyboard_reset();
+    let cartridge = bus.cartridge.as_ref().unwrap();
+    assert!(!cartridge.entered());
+    assert!(!cartridge.nmi_pending());
+    assert_eq!(block(&bus), written, "same machine, same block");
+}
+
+#[test]
+fn cartridge_shadows_follow_custom_and_cia_writes_into_the_bank_on_a_freeze() {
+    use crate::cartridge::{
+        Cartridge, HRTMON_CIAA_SHADOW, HRTMON_CIAB_SHADOW, HRTMON_CUSTOM_SHADOW,
+    };
+    let mut bus = empty_bus();
+    bus.attach_cartridge(Cartridge::hrtmon(&stub_cartridge_image()).unwrap());
+    // Write-only custom registers the monitor cannot read back, one CPU
+    // write and one Copper write, and a CIA register on each chip.
+    assert!(!bus.custom_write(0x180, 2, 0x0F00)); // COLOR00 from the CPU
+    let _ = bus.write_custom_word_from(0x182, 0x0ABC, BeamWriteSource::Copper); // COLOR01
+    let _ = bus.cia_a_write(0x00BF_E001 + 0x02 * 0x100, 1, 0x03); // CIA-A DDRA
+    let _ = bus.cia_b_write(0x00BF_D000 + 0x100, 1, 0x7F); // CIA-B PRB
+    let shadow = bus.cartridge.as_ref().unwrap().custom_shadow();
+    assert_eq!(&shadow[0x180..0x184], &[0x0F, 0x00, 0x0A, 0xBC]);
+
+    bus.cartridge_freeze(0).unwrap();
+    let bank = bus.cartridge.as_ref().unwrap().bank();
+    assert_eq!(
+        &bank[HRTMON_CUSTOM_SHADOW + 0x180..HRTMON_CUSTOM_SHADOW + 0x184],
+        &[0x0F, 0x00, 0x0A, 0xBC]
+    );
+    assert_eq!(bank[HRTMON_CIAA_SHADOW + 0x02 * 0x100 + 1], 0x03);
+    assert_eq!(bank[HRTMON_CIAB_SHADOW + 0x100], 0x7F);
+    assert_eq!(&bus.mem.chip_ram[0x7C..0x80], &0x00A1_000Cu32.to_be_bytes());
+}

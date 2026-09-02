@@ -1090,6 +1090,10 @@ pub struct App {
     /// (at_emulated_secs, image path).
     auto_cd_inserts: Vec<(f64, PathBuf)>,
     pending_auto_cd_inserts: Vec<(f32, PathBuf)>,
+    /// Scheduled freezer-cartridge button presses from --freeze-after
+    /// (one-shot each), at emulated seconds.
+    auto_freezes: Vec<f64>,
+    pending_auto_freezes: Vec<f32>,
     /// Warp launch (`--run`): warp from power-on until the guest OS loads
     /// the target program, then return to real-time pacing. One-shot;
     /// None once finished or cancelled. Host-side only, never serialized.
@@ -1932,6 +1936,7 @@ impl App {
         pot_after: Vec<(f32, u8, u8, u8)>,
         disk_insert_after: Vec<DiskInsertSpec>,
         cd_insert_after: Vec<(f32, PathBuf)>,
+        freeze_after: Vec<f32>,
         record_input: Option<PathBuf>,
         run_warp_target: Option<crate::runprog::WarpLaunch>,
         warp_boot_gate: Option<crate::warpboot::WarpBootGate>,
@@ -2098,6 +2103,8 @@ impl App {
             pending_auto_disk_inserts: disk_insert_after,
             auto_cd_inserts: Vec::new(),
             pending_auto_cd_inserts: cd_insert_after,
+            auto_freezes: Vec::new(),
+            pending_auto_freezes: freeze_after,
             warp_launch: run_warp_target,
             warp_launch_tracker: crate::amigaos::LibraryTracker::default(),
             warp_boot: warp_boot_gate,
@@ -3138,6 +3145,10 @@ impl App {
             );
             self.auto_cd_inserts.push((secs.max(0.0) as f64, path));
         }
+        for secs in self.pending_auto_freezes.drain(..) {
+            info!("auto-freeze armed: cartridge freeze at {secs:.1}s emulated time");
+            self.auto_freezes.push(secs.max(0.0) as f64);
+        }
     }
 
     /// Fire any scheduled key/click/joy/mouse/pot/disk/CD events whose
@@ -3293,6 +3304,23 @@ impl App {
                     "--insert-cd-after {}: no CD drive on this machine",
                     path.display()
                 );
+            }
+        }
+        // Fire any scheduled --freeze-after presses (one-shot each).
+        let mut freezes = 0usize;
+        self.auto_freezes.retain(|&at| {
+            if emu_secs >= at {
+                freezes += 1;
+                false
+            } else {
+                true
+            }
+        });
+        for _ in 0..freezes {
+            if self.emu.cartridge_fitted() {
+                self.freeze_cartridge();
+            } else {
+                warn!("--freeze-after: no freezer cartridge on this machine ([cartridge] model)");
             }
         }
         // Input recording: with every input source for this quantum
@@ -3633,6 +3661,17 @@ impl ApplicationHandler for App {
                         if host_shortcut_modifier_pressed(self.modifiers) =>
                     {
                         self.toggle_menu();
+                    }
+                    (KeyCode::KeyB, ElementState::Pressed)
+                        if host_shortcut_modifier_pressed(self.modifiers)
+                            && self.modifiers.shift_key() =>
+                    {
+                        // The freezer cartridge's button: acts on the
+                        // running machine, so not under a menu or panel,
+                        // and never in a player build.
+                        if !crate::video::player_profile() && !self.modal_ui_active() {
+                            self.freeze_cartridge();
+                        }
                     }
                     (KeyCode::KeyB, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers) =>

@@ -126,6 +126,10 @@ pub enum CoreOp {
         advance: Option<i64>,
         frozen: Option<bool>,
     },
+    /// Describe the fitted freezer cartridge.
+    CartridgeGet,
+    /// Press the freezer cartridge's button.
+    CartridgeFreeze,
     CopperList {
         addr: Option<u32>,
         /// Start at a guest-registered Copperlist resource instead.
@@ -222,6 +226,7 @@ impl CoreOp {
                 | CoreOp::DisplayGet
                 | CoreOp::InputPortsGet
                 | CoreOp::RtcGet
+                | CoreOp::CartridgeGet
                 | CoreOp::DebugResources
                 | CoreOp::DebugIdle
                 | CoreOp::CopperList { .. }
@@ -909,6 +914,8 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
                 frozen,
             })
         }
+        "cartridge.get" => core(CoreOp::CartridgeGet),
+        "cartridge.freeze" => core(CoreOp::CartridgeFreeze),
         "copper.list" => {
             let addr = p.u32_opt("addr")?;
             let resource = p.str_opt("resource")?;
@@ -1825,6 +1832,26 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             };
             Ok(idle_value(idle))
         }
+        CoreOp::CartridgeGet => {
+            let Some(cartridge) = emu.cartridge() else {
+                return Err(CtlError::not_found(NO_CARTRIDGE));
+            };
+            Ok(cartridge_value(cartridge))
+        }
+        CoreOp::CartridgeFreeze => {
+            if emu.cartridge().is_none() {
+                return Err(CtlError::not_found(NO_CARTRIDGE));
+            }
+            let vbr = emu.machine.vbr();
+            let entry = emu
+                .cartridge_freeze()
+                .map_err(|e| CtlError::internal(e.to_string()))?;
+            let cartridge = emu.cartridge().expect("checked above");
+            let mut result = cartridge_value(cartridge);
+            result["vector"] = json!(format!("{:#010X}", vbr.wrapping_add(0x7C)));
+            result["entry"] = json!(format!("{entry:#010X}"));
+            Ok(result)
+        }
         CoreOp::RtcGet => {
             let bus = emu.bus();
             let secs = bus.emulated_seconds();
@@ -2356,6 +2383,20 @@ fn reverse_result(emu: &Emulator, outcome: ReverseOutcome<String>) -> Result<Val
 }
 
 const UAELIB_DISABLED: &str = "uaelib trap not fitted ([emulation] uaelib = false)";
+const NO_CARTRIDGE: &str = "no freezer cartridge fitted ([cartridge] model = \"hrtmon\")";
+
+/// The `cartridge.get` / `cartridge.freeze` reply body.
+fn cartridge_value(cartridge: &crate::cartridge::Cartridge) -> Value {
+    json!({
+        "model": cartridge.model().label(),
+        "base": format!("{:#010X}", cartridge.base()),
+        "size": cartridge.size(),
+        "version": cartridge.version().map(|(v, r)| format!("{v}.{r:02}")),
+        "entered": cartridge.entered(),
+        "nmi_pending": cartridge.nmi_pending(),
+        "freezes": cartridge.freezes(),
+    })
+}
 
 /// The registered resource called `name` whose kind satisfies `want`,
 /// or an error the client can act on: the trap being disabled, the name
@@ -4068,6 +4109,65 @@ mod tests {
             let err = parse_method("warp.set", &params).unwrap_err();
             assert_eq!(err.code, proto::INVALID_PARAMS, "{params}");
         }
+    }
+
+    #[test]
+    fn parse_cartridge_methods_map_to_core_ops() {
+        assert_eq!(core("cartridge.get", Value::Null), CoreOp::CartridgeGet);
+        assert_eq!(
+            core("cartridge.freeze", Value::Null),
+            CoreOp::CartridgeFreeze
+        );
+        assert!(CoreOp::CartridgeGet.collectable());
+        assert!(!CoreOp::CartridgeFreeze.collectable());
+    }
+
+    fn cartridge_emulator() -> Emulator {
+        let mut emu = test_emulator();
+        let mut image = vec![0u8; 0x60];
+        image[4..8].copy_from_slice(b"HRT!");
+        image[50..56].copy_from_slice(b"NEWHRT");
+        image[56..58].copy_from_slice(&2u16.to_be_bytes());
+        image[58..60].copy_from_slice(&39u16.to_be_bytes());
+        emu.bus_mut()
+            .attach_cartridge(crate::cartridge::Cartridge::hrtmon(&image).unwrap());
+        emu
+    }
+
+    #[test]
+    fn cartridge_methods_report_not_found_without_a_cartridge() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        for op in [CoreOp::CartridgeGet, CoreOp::CartridgeFreeze] {
+            let err = exec_core(&mut emu, &mut ctx, &op).unwrap_err();
+            assert_eq!(err.code, proto::NOT_FOUND, "{op:?}");
+        }
+    }
+
+    #[test]
+    fn cartridge_get_describes_the_bank_and_freeze_arms_the_interrupt() {
+        let mut emu = cartridge_emulator();
+        let mut ctx = SessionCtx::new();
+        let get = exec_core(&mut emu, &mut ctx, &CoreOp::CartridgeGet).unwrap();
+        assert_eq!(get["model"], "hrtmon");
+        assert_eq!(get["base"], "0x00A10000");
+        assert_eq!(get["size"], 0x10_0000);
+        assert_eq!(get["version"], "2.39");
+        assert_eq!(get["entered"], false);
+        assert_eq!(get["nmi_pending"], false);
+        assert_eq!(get["freezes"], 0);
+
+        let freeze = exec_core(&mut emu, &mut ctx, &CoreOp::CartridgeFreeze).unwrap();
+        assert_eq!(freeze["model"], "hrtmon");
+        assert_eq!(freeze["vector"], "0x0000007C");
+        assert_eq!(freeze["entry"], "0x00A1000C");
+        assert_eq!(freeze["nmi_pending"], true);
+        assert_eq!(freeze["freezes"], 1);
+        assert_eq!(
+            &emu.bus().mem.chip_ram[0x7C..0x80],
+            &0x00A1_000Cu32.to_be_bytes(),
+            "the level-7 vector under VBR 0 names the cartridge entry"
+        );
     }
 
     #[test]

@@ -4416,6 +4416,47 @@ fn hostsocket_board_cycles_and_round_trips() {
 }
 
 #[test]
+fn the_freezer_cartridge_row_cycles_and_round_trips() {
+    use crate::cartridge::CartridgeModel;
+    let mut s = MachineSetup::default();
+    // No cartridge is the baseline, so nothing is written until one is
+    // fitted.
+    assert_eq!(s.value_label(LauncherField::Cartridge), "None");
+    assert!(s.to_raw().cartridge.model.is_none());
+
+    s.cycle(LauncherField::Cartridge, true);
+    assert_eq!(s.value_label(LauncherField::Cartridge), "HRTMon");
+    let raw = s.to_raw();
+    assert_eq!(raw.cartridge.model.as_deref(), Some("hrtmon"));
+    assert!(
+        raw.cartridge.rom.is_none(),
+        "the bundled image needs no rom key"
+    );
+    let cfg = s.build_config().expect("valid config");
+    assert_eq!(cfg.cartridge.model, Some(CartridgeModel::Hrtmon));
+    let back = MachineSetup::from_raw(&raw).expect("valid raw");
+    assert_eq!(back.value_label(LauncherField::Cartridge), "HRTMon");
+
+    s.cycle(LauncherField::Cartridge, true);
+    assert_eq!(s.value_label(LauncherField::Cartridge), "None");
+    assert!(s.to_raw().cartridge.model.is_none());
+
+    // An image of the user's own has no row of its own: it rides along
+    // while the cartridge stays fitted and goes when it is unfitted.
+    let raw: RawConfig =
+        toml::from_str("[cartridge]\nmodel = \"hrtmon\"\nrom = \"/roms/hrtmon.rom\"\n").unwrap();
+    let mut setup = MachineSetup::from_raw(&raw).unwrap();
+    assert_eq!(setup.value_label(LauncherField::Cartridge), "HRTMon");
+    assert_eq!(
+        setup.to_raw().cartridge.rom.as_deref(),
+        Some("/roms/hrtmon.rom")
+    );
+    setup.cycle(LauncherField::Cartridge, true);
+    assert!(setup.to_raw().cartridge.model.is_none());
+    assert!(setup.to_raw().cartridge.rom.is_none());
+}
+
+#[test]
 fn toccata_and_mhi_boards_toggle_and_round_trip() {
     let mut s = MachineSetup::default();
     // Off is the baseline for both, so nothing is written until fitted.

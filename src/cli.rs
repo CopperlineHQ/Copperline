@@ -125,6 +125,9 @@ pub struct CliArgs {
     /// landing in whichever CD drive the machine has (CDTV, CD32, or a
     /// SCSI CD-ROM unit).
     pub cd_insert_after: Vec<(f32, PathBuf)>,
+    /// `--freeze-after SECS`: press the freezer cartridge's button at SECS
+    /// emulated seconds (`[cartridge] model`), one-shot each.
+    pub freeze_after: Vec<f32>,
     /// Real-time stereo audio output through cpal. Enabled by default;
     /// `--noaudio` disables it, and `--audio-wav` selects WAV output.
     pub audio_live: bool,
@@ -198,7 +201,7 @@ pub fn parse_args() -> Result<CliArgs> {
 /// the flag names (without the leading dashes) whose effects accumulate;
 /// anything else in a script is an error so a typo cannot silently change
 /// emulator configuration.
-const SCRIPT_DIRECTIVES: [&str; 11] = [
+const SCRIPT_DIRECTIVES: [&str; 12] = [
     "press-after",
     "key-after",
     "hold-key-after",
@@ -210,6 +213,7 @@ const SCRIPT_DIRECTIVES: [&str; 11] = [
     "insert-disk-after",
     "defer-disk-insert",
     "insert-cd-after",
+    "freeze-after",
 ];
 
 /// Split one script line into tokens: whitespace-separated, with
@@ -365,6 +369,7 @@ where
     let mut wave_signals: Option<copperline::waveform::SignalSet> = None;
     let mut disk_insert_after: Vec<CliDiskInsert> = Vec::new();
     let mut cd_insert_after: Vec<(f32, PathBuf)> = Vec::new();
+    let mut freeze_after: Vec<f32> = Vec::new();
     let mut factory = false;
     let mut audio_live = true;
     let mut explicit_audio_live = false;
@@ -939,6 +944,20 @@ where
                 let path = args.next().ok_or_else(|| anyhow!(USAGE))?;
                 cd_insert_after.push((secs, PathBuf::from(path)));
             }
+            "--freeze-after" => {
+                let secs: f32 = next_arg(
+                    &mut args,
+                    "--freeze-after requires SECS",
+                    "--freeze-after SECS must be a number",
+                )?;
+                freeze_after.push(secs);
+            }
+            "--cartridge" => {
+                overrides.cartridge = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow!("--cartridge requires a model (none/hrtmon)"))?,
+                );
+            }
             "--press-after" => {
                 const USAGE: &str = "--press-after requires SECS KEY";
                 let secs: f32 = next_arg(&mut args, USAGE, "--press-after SECS must be a number")?;
@@ -1275,6 +1294,7 @@ where
         record_input,
         disk_insert_after,
         cd_insert_after,
+        freeze_after,
         audio_live,
         audio_live_forced: explicit_audio_live,
         audio_wav,
@@ -1372,6 +1392,9 @@ fn print_help() {
          --fpu / --no-fpu               fit / omit a 68881/68882 (68040/68060 on-die)\n  \
          --jit / --no-jit               fast batch/trace-JIT CPU execution (not cycle-exact,\n  \
          \x20                            like an accelerator card; default: off)\n  \
+         --cartridge MODEL              freezer cartridge: none (default) or hrtmon (the\n  \
+         \x20                            bundled HRTMon monitor, entered with --freeze-after,\n  \
+         \x20                            the Freeze menu item, or cartridge.freeze)\n  \
          --chip SIZE                    chip RAM size, e.g. 512K, 1M, 2M\n  \
          --fast SIZE                    Zorro II fast RAM size, e.g. 0, 1M, 4M, 8M\n  \
          --slow SIZE                    trapdoor slow RAM at $C00000, e.g. 0, 512K\n  \
@@ -1461,6 +1484,8 @@ fn print_help() {
          --insert-cd-after SECS PATH    swap the CD image (cue/iso/nrg/chd) in the machine's CD\n  \
          \x20                            drive (CDTV, CD32, or a SCSI CD-ROM unit) after\n  \
          \x20                            SECS seconds\n  \
+         --freeze-after SECS            press the freezer cartridge's button (--cartridge\n  \
+         \x20                            hrtmon) after SECS seconds\n  \
          --audio                        enable real-time stereo audio output via cpal (default)\n  \
          --noaudio                      disable real-time audio output\n  \
          --audio-device NAME            host audio output device (substring match)\n  \

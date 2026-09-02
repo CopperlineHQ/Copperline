@@ -106,6 +106,7 @@ fn validate_benchmark_args(cli: &CliArgs) -> Result<()> {
         || !cli.mouse_after.is_empty()
         || !cli.mouse_to_after.is_empty()
         || !cli.pot_after.is_empty()
+        || !cli.freeze_after.is_empty()
     {
         return Err(anyhow!(
             "--benchmark-until cannot be combined with scheduled input events"
@@ -180,6 +181,7 @@ fn validate_gdb_args(cli: &CliArgs) -> Result<()> {
         || !cli.mouse_after.is_empty()
         || !cli.mouse_to_after.is_empty()
         || !cli.pot_after.is_empty()
+        || !cli.freeze_after.is_empty()
     {
         return Err(anyhow!(
             "--gdb cannot be combined with scheduled input events"
@@ -246,9 +248,11 @@ fn validate_control_args(cli: &CliArgs) -> Result<()> {
         || !cli.mouse_after.is_empty()
         || !cli.mouse_to_after.is_empty()
         || !cli.pot_after.is_empty()
+        || !cli.freeze_after.is_empty()
     {
         return Err(anyhow!(
-            "--control cannot be combined with scheduled input events (use input.*)"
+            "--control cannot be combined with scheduled input events (use input.* \
+             and cartridge.freeze)"
         ));
     }
     if !cli.disk_insert_after.is_empty() {
@@ -1081,6 +1085,7 @@ fn main() -> Result<()> {
         cli.pot_after,
         disk_insert_after,
         cli.cd_insert_after,
+        cli.freeze_after,
         cli.record_input,
         run_warp_target,
         warp_boot_gate,
@@ -1228,6 +1233,7 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
         None,
         None,
         None,
@@ -1299,6 +1305,7 @@ fn launcher_requested(cli: &CliArgs) -> bool {
         && cli.mouse_after.is_empty()
         && cli.mouse_to_after.is_empty()
         && cli.pot_after.is_empty()
+        && cli.freeze_after.is_empty()
         && cli.disk_insert_after.is_empty()
         && cli.record_input.is_none()
         && cli.audio_wav.is_none()

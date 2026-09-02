@@ -4162,6 +4162,7 @@ fn test_app_with_audio_cpu_and_program(
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
         None,
         None,
         None,

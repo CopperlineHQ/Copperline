@@ -29,6 +29,8 @@ pub enum MenuAction {
     OpenFrameAnalyzer,
     OpenDebugger,
     OpenConsole,
+    /// Press the freezer cartridge's button (`[cartridge] model`).
+    FreezeCartridge,
     OpenInputMapping,
     OpenCalibration,
     OpenShortcuts,
@@ -132,6 +134,7 @@ impl MenuAction {
                 | MenuAction::SaveState
                 | MenuAction::LoadState
                 | MenuAction::ResetMachine
+                | MenuAction::FreezeCartridge
                 | MenuAction::Quit
         )
     }
@@ -450,6 +453,9 @@ pub struct MenuState<'a> {
     pub player_save_states: bool,
     /// Whether emulation is paused, for the player tree's Pause toggle.
     pub paused: bool,
+    /// The fitted freezer cartridge's name, when one is fitted: the Freeze
+    /// row is offered greyed out without one.
+    pub cartridge: Option<&'a str>,
     pub fullscreen: bool,
     pub status_bar_hidden: bool,
     /// Which monitor front the bezel pass is drawing, if any.
@@ -578,6 +584,11 @@ pub fn build(s: &MenuState) -> Vec<MenuRow> {
         MenuRow::action("Frame Analyzer...", MenuAction::OpenFrameAnalyzer),
         MenuRow::action("Debugger...", MenuAction::OpenDebugger),
         MenuRow::action("Console...", MenuAction::OpenConsole),
+        MenuRow::action(
+            &format!("Freeze ({})", s.cartridge.unwrap_or("HRTMon")),
+            MenuAction::FreezeCartridge,
+        )
+        .available(s.cartridge.is_some()),
         MenuRow::submenu("Audio Settings", audio_rows(s)),
         MenuRow::submenu("Video Settings", video_rows(s)),
         MenuRow::submenu("Input Settings", input_rows(s)),
@@ -1320,6 +1331,7 @@ mod tests {
             player: false,
             player_save_states: false,
             paused: false,
+            cartridge: None,
             fullscreen: false,
             status_bar_hidden: false,
             bezel: BezelStyle::None,
@@ -1413,6 +1425,32 @@ mod tests {
             assert_eq!(tail, ["Quit", "About..."]);
             assert!(find(&rows, "Quit").expect("quit").closes_menu());
         }
+    }
+
+    /// The freezer cartridge's button is a row under Tools: greyed out
+    /// with no cartridge fitted, live (and closing the menu, since the
+    /// machine runs on into the monitor) with one.
+    #[test]
+    fn the_freeze_row_is_offered_only_with_a_cartridge_fitted() {
+        let slots = empty_slots();
+        let none: [String; 0] = [];
+        let mut s = state(&none, &none, &none, &none, &slots);
+        let rows = build(&s);
+        let row = find(&rows, "Freeze (HRTMon)").expect("freeze row");
+        assert!(
+            !row.enabled,
+            "no cartridge: the row is shown but cannot be picked"
+        );
+
+        s.cartridge = Some("HRTMon");
+        let rows = build(&s);
+        let row = find(&rows, "Freeze (HRTMon)").expect("freeze row");
+        assert!(row.enabled);
+        assert!(matches!(
+            row.kind,
+            MenuRowKind::Action(MenuAction::FreezeCartridge)
+        ));
+        assert!(row.closes_menu());
     }
 
     /// Exactly one value of a setting is marked, and it is the one in force.
