@@ -443,11 +443,12 @@ public repository.
 
 Unlike the suites above, `probe_golden.rs` (the golden-render suite for
 those probes) needs no external assets: it boots the bundled AROS ROM and
-runs in CI on every push. `hrtmon_freeze.rs` is asset-free the same way
-(bundled AROS plus the bundled HRTMon cartridge image) and release-only:
-it freezes the booted machine through the library and through the binary's
-`--freeze-after`, and checks the monitor's `entered` flag, its screen, and
-that a state taken inside the monitor resumes inside it.
+runs in CI on every push. `hrtmon_freeze.rs` is similarly self-contained
+(using bundled AROS and the bundled HRTMon ROM) and gated on `--release`
+(`cargo test --release --test hrtmon_freeze -- --ignored`): it verifies
+freezer cartridge behavior both via the library interface and the
+`--freeze-after` CLI flag, asserting the monitor's active status, screen
+output, and save state roundtripping.
 
 `audio_stems_determinism.rs` also needs no external assets (bundled AROS,
 an empty default DF0) -- it is `#[ignore = "runs the emulator"]` rather

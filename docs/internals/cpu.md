@@ -373,22 +373,21 @@ paths. The 68000 and 68010 timing paths are unchanged, and the 68030/040
 retain the earlier scaled approximation rather than incorrectly inheriting
 68020 silicon timings.
 
-That approximation now has real-hardware measurements against it:
-`timing-test/accelprobe.asm` carries columns captured on a real A4000 with
-a 25 MHz 68030 board, a 25 MHz A3640 (68040), and a 50 MHz BFG9060
-(68060), with per-row verdicts in the probe header. The headlines: the
-scaled approximation over-bills plain 68040 execution about 2-2.5x (real
-taken `dbra` is ~4 clocks against the model's ~8, `mulu.w` ~10 against
-~27) while the real 030's core rows land on the same figures the real
-A1200 measured for the 68020 (taken `dbra` 6 clocks, `mulu.w` ~29) --
-evidence that the 030 belongs on the MC68020UM tables and the 040 needs a
-pipeline model of its own. The same columns quantify what no CPU table
-covers: the A3640/BFG9060 CPU-slot bridge makes a chip-RAM `move.l` read
-cost 2.5-3.4 us (the 030 board's chip path matches the emulated cost
-tick-exactly), and the three fast-RAM classes are genuinely three speeds
-on real silicon (CPU-card ~66 ns, motherboard ~320 ns, Zorro III ~530 ns
-per sequential longword read) where the emulated machine bills them all at
-CPU speed.
+Real-hardware measurements in `timing-test/accelprobe.asm` document timing on
+an A4000 with a 25 MHz 68030 board, a 25 MHz A3640 (68040), and a 50 MHz
+BFG9060 (68060). Key findings:
+
+- The scaled approximation over-penalizes basic 68040 instruction execution
+  by ~2-2.5x (a taken `dbra` measures ~4 clocks on hardware vs ~8 in the model;
+  `mulu.w` is ~10 vs ~27).
+- Real 68030 instruction execution matches measured 68020 timings (taken
+  `dbra` is 6 clocks; `mulu.w` is ~29 clocks), indicating 68030 timing aligns
+  with MC68020UM tables while 68040 requires dedicated pipeline modeling.
+- The A3640/BFG9060 CPU-slot bridge increases chip-RAM `move.l` read latency
+  to 2.5-3.4 us (the 68030 chip path matches emulated timing directly).
+- Fast RAM regions exhibit distinct access speeds on hardware (CPU-card ~66 ns,
+  motherboard ~320 ns, Zorro III ~530 ns per sequential longword read) whereas
+  the current emulator bills all fast RAM at native CPU clock rates.
 
 The manual's totals assume aligned operands and stack, a 32-bit bus, and
 three-clock no-wait reads and writes. They include those ideal transfers.

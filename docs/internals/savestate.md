@@ -58,10 +58,10 @@ Deliberately excluded, with the mechanism in parentheses:
 - **Memo caches and transient diagnostics**: the bitplane slot-plan `Cell`
   cache, the pending debugger-window register hit, and the low-memory
   blit crash-context alarm (`diag_lowmem_blit`, consumed only by
-  `COPPERLINE_DIAG_CRASH`) are skipped; rebuilt or irrelevant. Keeping
-  host diagnostics out of the layout is what lets a resumed run and the
-  uninterrupted run it came from write byte-identical states
-  (`tests/savestate_roundtrip.rs` compares the files).
+  `COPPERLINE_DIAG_CRASH`) are skipped (rebuilt or transient). Excluding
+  host diagnostics from the state payload ensures that resumed runs and
+  uninterrupted runs produce byte-identical save states
+  (verified by `tests/savestate_roundtrip.rs`).
 
 The ROM bytes are embedded in the state, not loaded from a path: a state
 is self-contained with respect to everything that was in memory, so

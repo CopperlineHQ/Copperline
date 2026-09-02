@@ -32,9 +32,8 @@ copperline --model A1200 --fast 8M KICK31.ROM --run build/demo
 ## Fast-forward boot (Warp mode)
 
 In interactive windowed sessions, `--run` automatically enables warp mode during boot.
-(For a configuration that boots from its own media rather than through
-`--run`, the same idea is available as `--warp-boot` / `--warp-until`; see
-[Configuration](configuration.md).)
+(For configurations booting from media rather than `--run`, warp boot is also available via
+`--warp-boot` / `--warp-until`; see [Configuration](configuration.md).)
 The emulator runs unthrottled with audio muted until the guest OS loads the executable
 (tracked at the `LoadSeg` call before executing the first instruction). Once loaded,
 emulation and audio immediately return to normal real-time playback.
@@ -49,19 +48,18 @@ Additional operational notes:
 - **File naming:** Target filenames must use printable ASCII characters without quotes (`"`),
   colons (`:`), or slashes (`/`). Spaces in executable names are supported and quoted automatically.
 - **Manual override:** Pressing the warp toggle shortcut (`Cmd+W` / `Alt+W`) cancels
-  the automatic warp phase, and any programmatic warp, and returns to real-time
+  the automatic warp phase and any programmatic warp, returning to real-time
   execution.
 - **Programmatic warp:** A control-protocol client can engage warp at any time
   with `warp.set {"on": true}` (see [Control Protocol](../debugger/control.md)),
   and the guest program itself can call `warpmode(1)` / `warpmode(0)` through
-  the [uaelib trap](#uaelib-trap) below -- around a slow loading or
-  precalculation phase, say. Both mute live audio while engaged, exactly like
-  the automatic phase; `warp.set {"on": false}`, `warpmode(0)`, or the
+  the [uaelib trap](#uaelib-trap) below (e.g. during heavy computation or asset loading).
+  Both mute live audio while engaged; `warp.set {"on": false}`, `warpmode(0)`, or the
   shortcut return to real time.
 - **Physical floppy drives:** If a physical floppy drive (FluxBridge) is attached, warp
   mode is disabled to match the physical drive rate.
 - **Headless mode:** Headless capture runs (`--screenshot-after`, `--dump-frames`) run
-  unthrottled by default and work seamlessly with `--run`.
+  unthrottled by default and work with `--run`.
 
 ## Debugging
 
@@ -82,16 +80,15 @@ load events using a `loadseg` breakpoint.
 (uaelib-trap)=
 ### WinUAE-compatible `uaelib` trap
 
-WinUAE's boot ROM offers guest programs a small service entry point, the
-"uaelib" trap at `$F0FF60`, and cross-compiler toolchains use it: the
-vscode-amiga-debug template's `warpmode()`, `KPrintF()` and
-`debug_register_*()` helpers all call it. Copperline answers the same ABI at
-the same address, so code written for that template works unchanged.
+WinUAE's boot ROM provides guest programs with a lightweight service interface,
+the "uaelib" trap at `$F0FF60`. Cross-compiler toolchains and templates (such
+as `vscode-amiga-debug`) use this trap for helpers like `warpmode()`, `KPrintF()`,
+and `debug_register_*()`. Copperline implements the same ABI at the same address,
+allowing code written for that template to work unmodified.
 
-The guest tests the first word at `$F0FF60` (`0x4EB9`, a `JSR`; the same test
-also accepts WinUAE's A-line form `0xA00E`) and calls the address like a C
-function, with the function number as the first stack argument; the result
-comes back in D0:
+Guest code checks the instruction word at `$F0FF60` (`0x4EB9` for a `JSR`, or
+WinUAE's A-line `0xA00E`) and invokes the address as a C function, passing the
+function index as the first stack parameter and receiving the return value in D0:
 
 ```c
 long (*UaeConf)(long fn, int index, const char *param, int len, char *out, int outlen)
@@ -104,22 +101,16 @@ if (*(UWORD *)UaeConf == 0x4eb9 || *(UWORD *)UaeConf == 0xa00e) {
 
 | Function | WinUAE meaning | Copperline |
 |---|---|---|
-| 82 | `uae-configuration`-style `"key value"` line | `warp true` / `warp false` (also `yes` / `no`) engages or releases warp. The template's `cpu_speed` and `*_cycle_exact` keys are accepted and ignored: the core is always cycle-exact. Returns 0, as WinUAE does. |
-| 86 | Debug log string | Printed on the host console as `DBG: <text>` (the same channel as serial output), streamed to control-protocol `debug` subscribers as `event.debug`, and echoed into the debugger console pane while it is open. Returns 1. |
-| 88 | `debug_cmd` multiplexer | `debug_register_bitmap` / `_palette` / `_copperlist` and `debug_unregister` are recorded and served by `debug.resources`, previewed in the Frame Analyzer's Resources tab, named in its Memory tab, seedable into `palette.dump` / `copper.list`, and listed by the console's `DBGRES`; `debug_start_idle` / `debug_stop_idle` feed `debug.idle` and the `guest_idle_cck` field of `event.frame`. Overlay drawing (`debug_clear` / `debug_rect` / `debug_filled_rect` / `debug_text`, a 768x576 space stretched over the visible picture) is drawn in the window, never in screenshots, frame dumps or recordings; `debug_load` / `debug_save` are accepted no-ops (`debug_load` returns 0, not found). |
-| others | version, disks, RTG, ... | Return 0 with no side effect; Copperline does not report a WinUAE version. |
+| 82 | `uae-configuration`-style `"key value"` line | `warp true` / `warp false` (also `yes` / `no`) toggles warp mode. Parameters like `cpu_speed` and `*_cycle_exact` are accepted as no-ops. Returns 0. |
+| 86 | Debug log string | Printed to the host console as `DBG: <text>` (shared with serial output), streamed to control-protocol `debug` subscribers as `event.debug`, and mirrored into the debugger console. Returns 1. |
+| 88 | `debug_cmd` multiplexer | `debug_register_bitmap` / `_palette` / `_copperlist` and `debug_unregister` register guest assets, viewable in the Frame Analyzer (Resources and Memory tabs), searchable via `palette.dump` / `copper.list`, and listed with the console `DBGRES` command; `debug_start_idle` / `debug_stop_idle` report guest idle time in `debug.idle` and `event.frame.guest_idle_cck`. Overlay drawing (`debug_clear` / `debug_rect` / `debug_filled_rect` / `debug_text` on a 768x576 virtual canvas) renders on screen in the window (excluded from captures and recordings); `debug_load` / `debug_save` are accepted no-ops (`debug_load` returns 0). |
+| others | version, disks, RTG, ... | Return 0 with no side effects. |
 
-- The trap is fitted by default; `[emulation] uaelib = false` leaves `$F0FF60`
-  floating for a machine that must have nothing there.
-- A CDTV's extended ROM occupies `$F00000` and hides the trap, as WinUAE's own
-  relocation does on that machine.
-- Without the trap, the template's `KPrintF` falls back to exec's
-  `RawPutChar`, which reaches the host through the serial port: `KPrintF`
-  output is visible either way.
-- A warp the guest engages mutes live audio; `Cmd+W` / `Alt+W` ends it.
-- The result latch is shared: a uaelib call made from an interrupt handler
-  between another call's doorbell and its result read clobbers that call's
-  D0.
+- Enabled by default; set `[emulation] uaelib = false` to leave `$F0FF60` unmapped.
+- A CDTV extended ROM occupies `$F00000` and covers this address space.
+- Without the trap, `KPrintF` falls back to Exec `RawPutChar` and emits over the serial port.
+- Guest-initiated warp mutes live audio; press `Cmd+W` / `Alt+W` to cancel.
+- The return latch is shared: uaelib calls from interrupt handlers between a main-thread doorbell write and result read may overwrite D0.
 
 ## Kickstart compatibility
 
