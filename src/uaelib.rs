@@ -160,8 +160,9 @@ pub const OVERLAY_CAP: usize = 2048;
 pub const OVERLAY_TEXT_MAX: usize = 256;
 
 /// One fn-88 overlay command, clamped into the 768x576 space. Colours are
-/// the guest's 0x00RRGGBB.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// the guest's 0x00RRGGBB. Hash feeds the window's rasterization cache
+/// key.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum OverlayCmd {
     Rect {
         l: u16,

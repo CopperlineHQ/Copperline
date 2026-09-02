@@ -1070,6 +1070,8 @@ pub struct App {
     /// The windowed GDB stub (`--gdb-gui`), when attached.
     #[cfg(feature = "gdb")]
     gdb: Option<gdb::GdbGuiState>,
+    /// Rasterization cache for the guest's fn-88 debug overlay.
+    guest_overlay_cache: statusbar::GuestOverlayCache,
     /// Scheduled relative port-1 mouse motions from --mouse-after,
     /// one-shot per entry; (at_emulated_secs, dx, dy).
     auto_mouse: Vec<(f64, i32, i32, u8)>,
@@ -2092,6 +2094,7 @@ impl App {
             control: None,
             #[cfg(feature = "gdb")]
             gdb: None,
+            guest_overlay_cache: Default::default(),
             auto_mouse: Vec::new(),
             pending_auto_mouse: mouse_after,
             auto_mouse_to: Vec::new(),
@@ -4329,7 +4332,12 @@ impl ApplicationHandler for App {
                     // Fall back to the CPU present, which composites the UI on
                     // top as usual, at the cost of the FB_WIDTH downscale for
                     // as long as the overlay is open.
-                    let rtg_gpu = self.rtg_present_dims.is_some() && !self.ui.active();
+                    // The guest's fn-88 overlay is composited on the CPU
+                    // canvas too, so it needs the same fallback: the GPU
+                    // RTG pass would overdraw it.
+                    let rtg_gpu = self.rtg_present_dims.is_some()
+                        && !self.ui.active()
+                        && guest_overlay.is_empty();
                     // The CRT pass re-draws the display rect from the same
                     // buffer, so it also re-draws whatever the UI composited
                     // into it -- through curvature and a phosphor mask, which
@@ -4459,7 +4467,13 @@ impl ApplicationHandler for App {
                         // picture, under every piece of host chrome, and --
                         // like everything from here down -- never in a
                         // capture.
-                        draw_guest_overlay(frame, &guest_overlay, r.texture_scale, overlay_anchor);
+                        draw_guest_overlay(
+                            frame,
+                            &mut self.guest_overlay_cache,
+                            &guest_overlay,
+                            r.texture_scale,
+                            overlay_anchor,
+                        );
                     }
                     if recording {
                         // Painted into the presentation texture only, so
