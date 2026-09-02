@@ -72,12 +72,15 @@
 ;   row 30 bare page step tst.l + 4K adda   x512
 ;   row 31 E-clock ticks per video frame (PAL ~28375)
 ;
-; Copperline PREDICTED columns (v2 binary $ACCE1B02, A4000 profile, PAL,
-; tt-a4000-060/-040/-030.toml: 2M motherboard RAM mirroring the real
-; machine -- Copperline bases it top-down at $07E00020 exactly like real
-; Ramsey -- plus 128M Z3; 060 also 64M CPU-card RAM). The v2 composite
-; walks the LARGEST fast region (Z3 here); Copperline's numbers match v1's
-; region-1 walk because it bills every fast class identically.
+; Copperline PREDICTED columns, m68k 0.11 -- HISTORICAL: the model every
+; VERDICTS block below was written against, kept so those verdicts stay
+; readable; the m68k 0.12 columns follow this table. (v2 binary
+; $ACCE1B02, A4000 profile, PAL, tt-a4000-060/-040/-030.toml: 2M
+; motherboard RAM mirroring the real machine -- Copperline bases it
+; top-down at $07E00020 exactly like real Ramsey -- plus 128M Z3; 060 also
+; 64M CPU-card RAM). The v2 composite walks the LARGEST fast region (Z3
+; here); Copperline's numbers match v1's region-1 walk because it bills
+; every fast class identically.
 ;   row    060@50MHz  040@25MHz  030@25MHz   row    060       040       030
 ;   06 reg 00000040   00000498   00000498    16 crd 000009B4  00000CDF  00000CDF
 ;   07 dbr 0000003E   000003AC   000003AC    17 cwr 00000671  00000671  00000673
@@ -94,6 +97,36 @@
 ;   Fast regions: 060 f1=accel $08000020, f2=mb $07E00020, f3=Z3 $40000020;
 ;   040/030 (no CPU-card RAM) f1=mb $07E00020, f2=Z3, f3 absent.
 ;
+; Copperline PREDICTED columns, m68k 0.12 (same binary and configs; the
+; 030 now runs the MC68020UM tables and the 040 its single-issue pipeline
+; model, both calibrated on the real columns below -- docs/internals/cpu.md
+; "68020 timing" / "68040 timing"; the 060 model is unchanged):
+;   row    060@50MHz  040@25MHz  030@25MHz   row    060       040       030
+;   06 reg 00000040   000001DA   000003AE    16 crd 000009B4  000009B4  00000CE1
+;   07 dbr 0000003E   00000163   00000337    17 cwr 00000671  00000671  00000671
+;   08 mul 000000B4   000005F5   00001078    19 f1r 00000078  0000050A  000007CA
+;   09 trC 0000101C   000010E9   000011BC    20 f1w 00000078  0000050A  0000083D
+;   10 trF 0000033A   0000059D   0000073A    22 f2r 00000078  0000050A  000007CA
+;   11 jsr 00000CE0   00000CE0   00001029    23 f2w 00000078  0000050A  0000083D
+;   12 jsv 0000168A   0000168A   000019BA    25 f3r 00000078  0 absent  0 absent
+;   13 jsf 00000CE0   00000CDF   00001028    26 f3w 00000078  0 absent  0 absent
+;   14 mvm 0000099D   0000138F   000013E7    27 cfu 0000073D  00000E71  0 skip
+;   15 cpl 0000007A   00000754   0 skip      28 cnt 00000613  00000BA2  0 skip
+;   30 stp 00000013   000000A5   000000FD    29 cnc 0000073C  00000DA5  00000EDC
+;   31 frame length: 00003780/1 on all three, as before.
+;   vs the real columns below: 040 row 6 is tick-exact ($1DA), rows 8 and
+;   15 within 7%, row 7 3.0 vs 4.06 clk (the model's documented compromise:
+;   no overlap stage, so the empty dbra loop under-reads while the
+;   one-clock-body loop is exact); the 040 trap rows stay 1.4-1.7x under
+;   (exception entries keep the legacy scaled costs) and movem 1.4x over.
+;   030 rows 6/8/10 within 1%, row 7 1.18x over (was 1.35x); its call,
+;   movem and chip-stack trap rows are bus-bound and unchanged, its chip
+;   rows stay tick-exact. The memory rows (16-26) and the composite walk
+;   move only by the cheaper loop overhead: the region/bridge billing
+;   itself is unchanged, so on the 040 the chip-over-bridge read under-bill
+;   widens from 3x to 4x and the Z3 read from 2.6x to 4.8x, while the
+;   030's motherboard read goes from 1.12x over to 5% under.
+;
 ; REAL A4000 + BFG9060 (68060 rev 5 @ 50 MHz, PCR $04300502 with DFP set at
 ; entry, AttnFlags $000F, VBR 0), CPU-card RAM f1=$08000020, 2M motherboard
 ; RAM f2=$07E00020 (top-down: only 2M fitted), ZZ9000 Z3 RAM f3=$50000020.
@@ -108,7 +141,8 @@
 ; Internal consistency: rows 11 and 13 identical (cached call target's
 ; region is irrelevant); rows 27-28 = 617 ticks/512 pages = 1.70us/trap =
 ; row 10 exactly; rows 27-29 = 185/512 = 0.51us/cpushl ~ row 15's 0.44us.
-; VERDICTS vs the Copperline predicted column (060@50):
+; VERDICTS vs the m68k 0.11 Copperline predicted column (060@50; the 060
+; model is unchanged in 0.12, so these still stand):
 ;   - Fast RAM is NOT one class on real silicon: line-read cost CPU-card
 ;     263ns / motherboard 1.22us / ZZ9000 Z3 2.04us per 16 bytes, where
 ;     Copperline bills all three 41ns (6x / 30x / 50x under-billed).
@@ -163,8 +197,9 @@
 ; real silicon. Combined with the ~2x plain-execution over-bill, the
 ; emulated AmigaVision 040 boot is slow for the WRONG reasons: the CPU
 ; share should shrink ~2x and the walk share should grow ~1.6x.
-; VERDICTS vs the Copperline predicted 040@25 column -- the direction
-; INVERTS on the CPU core:
+; VERDICTS vs the m68k 0.11 Copperline predicted 040@25 column
+; (HISTORICAL: the 0.12 pipeline model closes the CPU-core items, see the
+; 0.12 table above) -- the direction INVERTS on the CPU core:
 ;   - Plain execution is OVER-billed ~2-2.5x: reg+dbra real 4.1 clk/iter
 ;     vs CL 10.1; bare taken dbra real ~4 clk vs CL ~8; mulu.w real ~14
 ;     clk (databook figure) vs CL ~35. Copperline's 040 runs plain code
@@ -195,8 +230,9 @@
 ;   07 dbr 000002BB   11 jsr 00000992   16 crd 00000CDE   22 f2r 00000AA9
 ;   08 mul 0000105A   12 jsv 00001028   17 cwr 00000671   23 f2w 00000573
 ;   09 trC 00000E88   13 jsf 00000991   19 f1r 0000082E   31 frm 0000377C
-; VERDICTS vs the Copperline predicted 030@25 column -- the closest model
-; of the three:
+; VERDICTS vs the m68k 0.11 Copperline predicted 030@25 column
+; (HISTORICAL: 0.12 moves the 030 onto the MC68020UM tables, see the 0.12
+; table above) -- the closest model of the three:
 ;   - Chip RAM is TICK-EXACT: read real $CDE vs CL $CDF, write $671/$671.
 ;     The 3x chip gap on the 040/060 cards is their CPU-slot bridge, not
 ;     the motherboard path.
@@ -214,11 +250,12 @@
 ;     under (real 2.56us = 64 clk vs 85 on real 040/060).
 ;   - Composite rows 0 on this machine (v1 guard + <040 cpushl skips);
 ;     row 29 (no-cpushl walk) needs a v2 re-run to land.
-; Notable predictions to test against real silicon: Copperline bills the
-; 030 and 040 identically on most CPU rows, bills all three fast-RAM
-; classes identically (real Z3 over a Zorro III bus is far slower than
-; CPU-card RAM), and its CPUSHL is nearly free (the cache-op is modelled
-; as an invalidate). The trap rows and the composite walk are the direct
+; Notable m68k 0.11 predictions the real columns tested: Copperline billed
+; the 030 and 040 identically on most CPU rows (no longer so in 0.12),
+; bills all three fast-RAM classes identically (real Z3 over a Zorro III
+; bus is far slower than CPU-card RAM; still open), and its 060 CPUSHL is
+; nearly free (the cache-op is modelled as an invalidate; the 040 model
+; bills ~12 clocks). The trap rows and the composite walk are the direct
 ; check on the boot-time MMU page-walk cost that scales with fitted RAM.
 ;
 ; Scratch chip addresses (all below the 2M A4000 chip ceiling):
