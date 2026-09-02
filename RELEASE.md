@@ -185,7 +185,9 @@ main CI runs on macOS only).
 The zips are self-contained: the MSVC C runtime is linked statically (see
 `.cargo/config.toml`) so they need no Visual C++ Redistributable, and the
 bundled AROS ROM sits in a sibling `aros\` folder that `romsearch.rs` probes
-first. To build one by hand on a Windows host (add
+first; the other bundled ROM assets (`fmv\`, `a4091\`, `a2091\`, `lide\`,
+`hrtmon\`) are staged beside it the same way. To build one by hand on a
+Windows host (add
 `-Target aarch64-pc-windows-msvc` for the ARM64 zip):
 
 ```pwsh
