@@ -13,9 +13,7 @@ use crate::floppy::FloppyController;
 use crate::memory::Memory;
 use crate::serial::StdoutSink;
 use crate::timebase::{Duration, Instant};
-#[cfg(feature = "cd32-fmv")]
-use anyhow::Context;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use log::{info, warn};
 
 const INSTRUCTIONS_PER_SLICE: usize = 32_000;
