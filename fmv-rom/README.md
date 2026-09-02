@@ -77,17 +77,16 @@ Fodder disc passed on both supported boot environments:
   more than 1,000 decoded 352x288 frames, no malformed reset, full-colour FMV,
   and non-silent stereo.
 
-Video Creator v1.1 reaches the same application screen as the proprietary ROM
-and opens the decoder. On 2026-08-31, the guest-side probe opened the new
-`videocd.library` under CD32 Kickstart, classified the Philips Media Retail
-Sampler '95 as type 4, and parsed its two video tracks and 45 entry points.
-The same disc now cold-boots directly into the cartridge player: its two
-tracks and durations are shown, Red starts a 352x240 stream, and Blue aborts
-the asynchronous request and returns to the menu. A non-Video-CD cold boot of
-Cannon Fodder still chains to the stock strap and reaches its 352x288 intro.
-AROS PR 1089 deliberately skips cartridge diagnostics; consequently these
-cartridge residents are installed by Kickstart only, while AROS continues to
-use its system-ROM MPEG device.
+Video Creator v1.1 initializes the decoder interface and reaches the main
+application screen. On 2026-08-31, guest probe tests verified that
+`videocd.library` correctly classified the Philips Media Retail Sampler '95
+(type 4) and parsed its two video tracks and 45 entry points. The disc
+cold-boots into the cartridge player: displaying tracks and durations, playing
+352x240 MPEG streams via Red, and aborting playback back to the menu via Blue.
+Standard CD32 game discs (such as Cannon Fodder) chain to the stock strap and
+boot normally. Because AROS PR 1089 bypasses cartridge diagnostics, these
+cartridge residents load under Kickstart, while AROS relies on its system-ROM
+MPEG device.
 
 See [NOTES-api.md](NOTES-api.md) for the recovered request ABI and the root
 [FMV-ROM-REPLACEMENT-PLAN.md](../FMV-ROM-REPLACEMENT-PLAN.md) for the design

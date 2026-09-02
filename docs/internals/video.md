@@ -243,20 +243,14 @@ sprite DMA and crossing an empty sprite pair slot is not enough to make
 captured DMA authoritative; the frame must contain actual fetched or held
 sprite data.
 
-Sprite DMA runs from the top of the field, above the render window, so the
-lines between the vertical-blank sprite-DMA start (PAL line $19, NTSC $14)
-and the display start are reconstructed by a replay in `frame_capture.rs`
-rather than by the live capture path. That replay is paced by the beam --
-each of a line's sixteen sprite slots runs as the beam passes it, with the
-frame's DMACON, SPRxPT and SPRxPOS/CTL writes applied in between -- because
-a fetch reads chip RAM, and chip RAM keeps changing. Batching the whole
-pre-display span at the display start instead let a descriptor rewritten by
-the vertical-blank interrupt reach a control-word fetch the hardware had
-already made lines earlier, latching the wrong vertical comparators for the
-rest of the field. Ghostown's Spooky Town is the regression example: it
-paints its credit-scroll background by multiplexing four sprites five times
-per line from the Copper, and lost one channel to that stale fetch on
-alternate frames.
+Sprite DMA starts at the top of the field above the active display window
+(PAL line $19, NTSC $14). The pre-display scanlines are reconstructed by replay
+in `frame_capture.rs`. This replay is paced cycle-by-cycle with the raster beam --
+executing sprite slots as the beam advances and applying intermediate `DMACON`,
+`SPRxPT`, and `SPRxPOS`/`SPRxCTL` writes -- because DMA reads dynamic Chip RAM.
+Replaying pre-display cycles at display start previously allowed descriptors
+modified by vertical blank interrupts to corrupt earlier sprite control fetches
+(*Spooky Town* regression).
 
 A DMA fetch arms the channel as it lands, but the serializer still only
 copies the latches when the horizontal comparator fires, so a SPRxCTL write
@@ -487,26 +481,15 @@ changes such as a resize, tint, monitor mode or WebGL context restoration can
 force a draw of the held texture without pretending the emulated picture
 changed.
 
-The browser's integer scaling and autocrop reuse the desktop's machinery
-rather than re-deriving it in JavaScript. `present_common` carries the
-pure pieces both frontends need: the autocrop smoothing (`AutocropLatch`),
-the per-axis whole-number fit and its smooth fallback (`per_axis_fit`,
-`sub_rect_fit`), and the two maps that follow the renderer's content
-envelope into presentation-buffer pixels -- `FieldPlacement::content_rect`
-onto the woven field, then `region_present_content_rect`, the inverse of
-the deinterlacer's aperture copy, onto the buffer the page draws. The
-wrapper latches that rect per frame (a reused frame re-feeds the previous
-envelope, so a static screen can still prove a smaller crop stable) and
-answers `present_layout` from `buffer_layout`, which reads the glass pixel
-shape off the buffer itself (`buffer_glass_par`: the page shows the buffer
-in a 4:3 element, so a 668 x 540 PAL aperture states the same 1.078 shape
-the desktop's `glass_par` derives from its tv canvas). Under integer
-scaling the wrapper presents a 60 Hz aperture at its own woven rows rather
-than resampled onto the 50 Hz row count -- the browser's equivalent of the
-desktop drawing its unresampled canvas -- so the factors are exact per
-scan line. The page draws the answer: the GL monitor passes take the
-sub-rect through a `u_src` uniform mirroring `crt.wgsl`'s `src_rect`, and
-the 2D fallback scales a staging canvas into a device-resolution store.
+The WebAssembly frontend shares presentation mathematics with the desktop
+client via `present_common`: autocrop hysteresis (`AutocropLatch`), per-axis
+integer fitting (`per_axis_fit`), and coordinate mappings translating renderer
+content boundaries to presentation buffer pixels (`FieldPlacement::content_rect`
+and `region_present_content_rect`). Under integer scaling, 60 Hz NTSC modes
+present native scanlines without vertical resampling to PAL row counts. WebGL
+monitor passes draw the cropped sub-rectangle via the `u_src` uniform (matching
+`crt.wgsl`'s `src_rect`), while 2D canvas fallback scales to the device
+viewport.
 
 For a progressive frame without phosphor persistence, presentation writes
 directly into the frontend-owned buffer instead of first filling the
@@ -610,93 +593,33 @@ is fed from `present_fb`, the post-processed presentation buffer produced by
 either the render worker or the synchronous fallback.
 
 The emulator window is drawn onto the surface by its own scaling pass
-(`window/scaler.rs`), not the `pixels` crate's built-in renderer (the tool
-windows keep the built-in Fill renderer). The built-in renderer can only
-place the texture at whole multiples of *itself*, which welds the displayed
-integer multiple to the texture's supersample factor and capped fullscreen
-integer scaling at 4x on large displays; the scaler pass takes the
-destination rect and filter as inputs instead, so the planned multiple is
-drawn whatever the texture factor is. Point sampling stays exact past the
-cap because the CPU present copy replicates each canvas pixel into an
-S-wide texel block: every sample inside a canvas pixel reads the same
-colour, and sample centres can never land on a canvas-pixel boundary
-(`window/scaler.rs` carries the arithmetic). The smooth filter is the same
-texel-snapped sharp bilinear the built-in Fill renderer used, in the pass's
-own WGSL. `PresentLayout` (`window/present.rs`) is the single source for
-the pass's draws, the cursor mapping and the overlay anchors.
+(`window/scaler.rs`), not the `pixels` crate default renderer (tool windows
+retain the built-in Fill renderer). The custom scaler pass accepts destination
+rectangles and filter modes directly, allowing integer scaling multipliers beyond
+4x on high-resolution displays. Point sampling remains exact because the present
+copy replicates each canvas pixel into a uniform texel block. Smooth filtering
+uses a sharp bilinear shader with texel snapping. `PresentLayout`
+(`window/present.rs`) is the single source of truth for display geometry, cursor
+coordinates, and overlay positioning.
 
-`[display] autocrop` presents through the same pass with a second draw:
-the display quad samples the content sub-rect of the canvas -- derived
-each frame from the display-window rows that carry fetched bitplane data
-(`RenderResult::content_rect`: the renderer's own per-line window model
-intersected with the captured rows, so a window left open around a
-shorter picture crops to the picture, and trimmed to the rows and columns
-the programmable blanking windows or the frame end blacked; carried
-through the same shifts `post_process_rendered_field` applies and
-inverted through the same row/column maps the present copy uses) -- and
-the chrome band (panels and status bar) is drawn separately,
-bottom-anchored at exactly the size the classic letterbox gives it, so
-the band never eats what the crop gains. `post_process_rendered_field`
-returns the `FieldPlacement` it applied, and the envelope follows the
-pixels through it: a standard field's centring and recentring shifts and
-then two woven rows per line; a programmable scan's sync-anchored column
-resample (`stretch_rows_x_window`, scanned against the resampler's own
-taps so a partly blended edge column counts), the vertical window's
-skipped and padded rows, and native rows or woven pairs as the
-deinterlacer left them. So a multisync scan -- DblPAL Workbench, a 31 kHz
-console -- crops like a 15 kHz one; it keeps the uniform multiple under
-integer scaling (its rows are not woven pairs for the per-axis fit), and
-a scan-geometry change resets the latch, the way the deinterlacer drops
-its weave history there. `AutocropLatch` smooths the per-frame envelope: growth is adopted
-immediately, border-only frames hold the previous crop (like the aperture
-latch), and a strictly smaller envelope is adopted only after holding
-steady for its stability window, so screen transitions do not pump the
-zoom. While the mode is on, the layout never snaps back to the classic
-letterbox: an open menu or panel (which draws into the display region
-against the full canvas mapping) widens the display quad to the whole
-region instead of suspending, so the overlay stays fully visible and the
-chrome band stays pinned rather than hopping to the letterbox's centred
-bar. The CRT presets compose with the crop: `uniforms_for_rect` aims the
-pass at the layout's display rect and crop sub-rect (the same numbers
-the scaler pass drew), with the beam-line count scaled to the rows the
-crop shows. Only a pass that owns the whole display rect falls back to
-the classic layout -- the bezel's fixed opening, RTG scanout; captures
-never see the crop.
+`[display] autocrop` samples the active content sub-rectangle of the canvas each
+frame (`RenderResult::content_rect`), computed from raster lines containing
+fetched bitplane data. Chrome elements (panels and status bar) are drawn
+separately in a docked bottom band sized identically to the letterboxed layout.
+`AutocropLatch` filters frame-to-frame variations: viewport expansions apply
+immediately, while reductions require stability over a debounce window to prevent
+zoom pumping during transitions. Opening menus or panels expands the display
+quad to the full display area so overlays remain visible. CRT presets render over
+the cropped area. Programmable multisync modes (e.g. DblPAL) are cropped using
+their sync-anchored windows. Autocrop is suspended when using monitor bezels or
+RTG modes; capture outputs retain full aperture.
 
-Integer scaling presents from the square canvas under either aspect
-(`video::square_canvas`): `present_height()` -- the window canvas the
-texture, the tool windows and every overlay size themselves from -- is
-`PRESENT_HEIGHT_SQUARE` for the square aspect and for integer scaling,
-`PRESENT_HEIGHT_TV` otherwise and under a bezel; captures size themselves
-from `capture_height()`, the aspect's own, so a scaling or bezel toggle
-never changes a saved picture. A whole-number draw is only pixel-exact
-from an unresampled canvas, and under the tv aspect the layout then puts
-the 4:3 shape back with a separate whole-number factor per axis.
-`DisplaySrc` (`window/present.rs`) carries the sub-rect to show -- the TV
-aperture's rect on the square canvas (`aperture_canvas_rect`), or the
-autocrop content rect -- and the pixel shape to draw it at: `glass_par`,
-the tv canvas's own resample read back (`FB_WIDTH / TV_CAPTURED_WIDTH`
-wide by `PRESENT_HEIGHT_TV / aperture rows` tall: PAL 1.078, NTSC 0.854;
-the whole field over the glass for full overscan). `per_axis_fit` then
-picks surface pixels per canvas column and per *field line*: the tallest
-fit whose shape is within 11/10 of the glass's, the closest shape among
-those of that height, and the closest shape at the largest size when
-none is inside the tolerance -- exact integer arithmetic, so every host
-agrees. Counting per field line rather than per woven row is what
-reaches 4:5 on a 1080p display: a non-interlaced line's two woven rows
-are identical, so an odd count per line is still one exact block per
-line, and the scaler's sample centres can never coincide with a line
-boundary -- every display rect starts on a woven pair, and the sample
-positions a half-row factor leaves ambiguous fall between the two rows
-of a pair (`display_rects_start_on_field_lines`). The chrome band, the
-cursor mapping and the CRT-preset viewport follow the rect exactly as
-they do for autocrop, and the two modes compose (autocrop supplies the
-rect, the per-axis fit the factors). A bezel keeps the tv canvas -- its
-opening resamples the whole glass -- and the canvas change it, the
-scaling toggle and the pixel aspect each provoke goes through one path
-(`App::resync_canvas_geometry`); RTG board frames take the classic
-uniform multiple of the square canvas, and programmable scans the
-uniform multiple of their (cropped or whole) glass.
+Integer scaling presents from the unresampled canvas in both TV and square pixel
+modes (`video::square_canvas`). In TV mode, `per_axis_fit` calculates horizontal
+and vertical integer multipliers independently to match the 4:3 CRT pixel aspect
+ratio (`glass_par`). On a 1080p display, 200-line NTSC content scales to a 4:5
+pixel aspect (1280x1000). Monitor bezels retain the resampled TV canvas, while
+RTG and programmable modes scale uniformly.
 
 Every redraw first re-syncs the surface to the host window's current size
 (`resync_surface_size`), rather than trusting the Resized event to have

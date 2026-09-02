@@ -13,13 +13,12 @@ rom = "kickstart.rom"
 # identify = false           # drop it from the Zorro chain (default: present)
 
 
-# [paths] -- where Copperline writes what it produces, and where its file
-# dialogs open when the field they were launched from is empty. Every key is
-# optional; the defaults are folders of these names under the host-data
-# directory (~/Documents/Copperline, %USERPROFILE%\Documents\Copperline, or
-# the executable's folder in a portable install). Relative paths hang off `base`, absolute
-# paths are used as given. Entries naming folders this machine cannot reach
-# are ignored with a log warning and the default is used instead.
+# [paths] -- specifies where Copperline saves generated files and where file
+# dialogs default to when a field is empty. Every key is optional; defaults
+# use subdirectories in the host data directory (~/Documents/Copperline,
+# %USERPROFILE%\Documents\Copperline, or the application folder in portable
+# mode). Relative paths are resolved against `base`, while absolute paths
+# are used as provided. Unreachable paths log a warning and revert to defaults.
 # [paths]
 # base = "/somewhere/else"    # move the whole tree in one line
 # states = "states"           # save states, incl. the quick-save slots
@@ -49,10 +48,10 @@ rom = "kickstart.rom"
 # that cold test-screen state.
 power_on = true
 
-# When true, the launcher runs this configuration the moment it opens it:
-# starting Copperline with this file as the saved default boots straight
-# into the machine, and Load... in the launcher does the same. Only the
-# launcher reads it -- command-line launches are unaffected.
+# When true, the launcher automatically starts this configuration upon opening.
+# Setting this in the default configuration boots straight into the machine,
+# and selecting 'Load...' in the launcher immediately runs the loaded config.
+# This only affects the launcher; command-line launches are unaffected.
 auto_launch = false
 
 # Real-mode pacing budget. "cycles" (default) clocks the CPU by each
@@ -84,29 +83,26 @@ pacing_budget = "cycles"
 # it live from Warp Settings > Warp Limit or Cmd+Shift+W / Alt+Shift+W.
 # warp_speed = "max"
 
-# Warp boot: run unpaced (audio muted) from power-on until the boot storage
-# -- the floppy and hard-disk activity the front-panel LEDs show -- has been
-# idle for warp_boot_idle emulated seconds, then resume real-time pacing.
-# Same idea as --run's automatic warp launch, for any configuration that
-# boots from its own media (a Workbench install, a hard-disk setup, a CD).
-# The idle threshold must outlast the boot's longest storage-quiet stretch:
-# a big-RAM machine's SetPatch MMU table build keeps the disk idle for
-# seconds while the CPU walks every page of fitted RAM. The manual warp
-# toggle cancels the phase; headless captures are already unpaced and
-# ignore it. CD audio does not count as activity.
+# Warp boot: runs in unthrottled warp mode (audio muted) from power-on until
+# storage activity (floppy and hard drive) has been idle for `warp_boot_idle`
+# emulated seconds, then automatically returns to real-time speed. This is
+# useful for speeding up OS boot sequences (Workbench, hard drive setups, CDs).
+# Set `warp_boot_idle` high enough to bridge pauses in disk access during boot
+# (e.g. while SetPatch processes large memory configurations). Toggling warp
+# manually cancels this phase. CD audio playback does not count as storage activity.
 # warp_boot = false
 # warp_boot_idle = 10
 
-# Warp boot until an absolute emulated timestamp instead: deterministic,
-# for a setup whose boot time is known (mutually exclusive with warp_boot).
+# Warp boot until an absolute emulated timestamp (in seconds). Deterministic
+# alternative to `warp_boot` for configurations with predictable boot times
+# (mutually exclusive with `warp_boot`).
 # warp_until = 12.0
 
-# The WinUAE-compatible "uaelib" trap at $F0FF60 (on by default): a guest
-# program can toggle warp speed (warpmode() in the vscode-amiga-debug
-# template), log debug text to the host console and the control protocol
-# (KPrintF), and register its bitmaps, palettes and copper lists for the
-# debugger (see docs/guide/run.md). Set false for a machine with nothing at
-# $F0FF60. A CDTV's extended ROM occupies $F00000 and hides the trap anyway.
+# WinUAE-compatible "uaelib" trap at $F0FF60 (enabled by default): allows guest
+# software to toggle warp speed, emit KPrintF debug logs to the host console and
+# control protocol, and register bitmaps/palettes/copper lists with the debugger
+# (see docs/guide/run.md). Set to false to leave $F0FF60 unmapped. The trap is
+# automatically disabled on CDTV configurations where extended ROM occupies $F00000.
 # uaelib = true
 
 # Record rewind history from power-on, so Cmd+Z / Alt+Z (and the Rewind menu
@@ -234,10 +230,10 @@ model = "68000"
 # main rom.
 # extended_rom = "cdtv-extended.rom"
 
-# CD32 Full Motion Video module ROM. The CD32 profile fits Copperline's bundled
-# open 256 KiB replacement by default. Name another image (including the
-# Commodore v40.30 ROM) to override it, or use an empty string for a stock CD32
-# without the cartridge.
+# CD32 Full Motion Video module ROM. The CD32 profile automatically loads
+# Copperline's bundled open-source 256 KiB FMV ROM by default. Specify a custom
+# ROM file (such as the Commodore v40.30 ROM) to override it, or set to an
+# empty string to emulate a CD32 without the FMV cartridge.
 # fmv_rom = "another-fmv.rom"
 # fmv_rom = ""
 
@@ -389,13 +385,12 @@ slow = "512K"
 # enabled = true
 
 
-# Freezer cartridge: an Action Replay-style system monitor in its own bank
-# at $A10000, entered by a level-7 (non-maskable) interrupt when you press
-# its button (Tools > Freeze in the menu, Cmd+Shift+B / Alt+Shift+B,
-# --freeze-after SECS headless, or the control protocol's cartridge.freeze).
-# "hrtmon" fits the bundled HRTMon 2.39 image (GPL, built from source by
-# hrtmon-rom/build.sh); rom = "..." replaces it with an HRTMon cartridge
-# image of your own. The monitor's x command returns to the program.
+# Freezer cartridge: an Action Replay-style system monitor mapped at $A10000,
+# entered via level-7 NMI when triggered (Tools > Freeze in the menu,
+# Cmd+Shift+B / Alt+Shift+B, headless --freeze-after SECS, or cartridge.freeze
+# over JSON-RPC). Set model to "hrtmon" to use the bundled HRTMon 2.39 ROM
+# (GPL, built from source in hrtmon-rom/), or set rom = "..." to provide a
+# custom HRTMon image. Enter 'x' in the monitor to resume execution.
 # [cartridge]
 # model = "hrtmon"
 # rom = "/roms/hrtmon.rom"
@@ -627,20 +622,18 @@ video = "PAL"
 # canvas reaches the window. "smooth" (default; fit to the window preserving
 # aspect ratio, interpolated) or "integer" (whole-number multiples of the
 # unresampled canvas, centred in black borders and point-sampled, in the
-# spirit of WinUAE/Amiberry integer scaling). Under the tv aspect the two
-# axes take separate whole numbers -- pixels per column and per scan line,
-# chosen for the 4:3 pixel shape, so an NTSC game on a 1080p screen draws
-# at 4:5 pixels (1280x1000 with autocrop) rather than squat square ones;
-# under square pixels the multiple is uniform. Integer covers RTG modes
-# too, at multiples of their own native resolution, and falls back to the
-# smooth fit when the window is too small for even 1x rather than cropping.
-# autocrop: crop the window presentation to the display window the
-# hardware programs (default false), so a game using fewer lines than the
-# full scan fills more of a 16:9/21:9 screen; with integer scaling the
-# whole-number fit is retaken against the crop. Window-only (captures
-# keep their aperture); composes with the CRT shader presets, crops
-# programmable (multisync) scans through their own sync window, and is
-# suspended under a bezel and for RTG scanout.
+# spirit of WinUAE/Amiberry integer scaling). In 'tv' aspect mode, horizontal and
+# vertical scaling use independent integer factors to match the 4:3 display ratio
+# (e.g. 4:5 pixel aspect for NTSC on 1080p). In 'square' aspect mode, scaling is
+# uniform. Integer scaling also applies to RTG modes at multiples of native
+# resolution, falling back to smooth scaling if the window is smaller than 1x.
+# autocrop: automatically crops the window display area to the active display
+# window programmed by hardware (default false), allowing games with smaller
+# viewports to fill more of wide screens. When combined with integer scaling,
+# the integer multiplier is recalculated against the cropped area. Autocrop
+# only affects window presentation (capture outputs retain full aperture),
+# works with CRT shaders and programmable multisync modes, and is automatically
+# suspended when using monitor bezels or RTG modes.
 # deinterlace: motion-adaptive weaving of interlaced displays (default
 # true); false line-doubles every field, showing interlace bob/flicker like
 # a bare TV.

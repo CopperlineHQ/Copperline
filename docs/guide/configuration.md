@@ -152,26 +152,23 @@ pairs for the 32-bit machines are not accepted; use the matching single-file
 image instead.
 
 `fmv_rom` fits the CD32 Full Motion Video module and is valid only with the
-`CD32` machine profile. The profile uses Copperline's bundled, open 256 KiB
-replacement ROM by default. An explicit 256 KiB path overrides it (including
-the released Commodore v40.30 image); `fmv_rom = ""` leaves the cartridge slot
-empty. The module autoconfigures ahead of the normal Zorro chain and drives
-the CL450 video and L64111 MPEG Layer II audio decoders through guest code, not
-through a per-title host shortcut. The launcher's **ROM** tab exposes the same
-setting as **FMV module ROM** and labels the bundled default explicitly.
+`CD32` machine profile. The profile loads Copperline's bundled open-source 256 KiB
+replacement ROM by default. Supplying a path overrides it with a custom image (such
+as the Commodore v40.30 ROM); `fmv_rom = ""` leaves the cartridge slot empty. The
+module autoconfigures ahead of the standard Zorro chain, driving the CL450 video
+and L64111 MPEG Layer II audio decoders through guest code. The launcher's **ROM**
+tab exposes this setting as **FMV module ROM**.
 
-The open ROM contains the Cannon Fodder-compatible `cd32mpeg.device` and a
-standards-based `videocd.library`, and works with CD32 Kickstart 3.1. The
-library classifies an inserted Video CD and parses its album, track, and entry
-metadata. On CD32 Kickstart its version 41 `cdstrap` autoboots Video CDs to a
-track menu: use up/down to select, Red to play, and Blue to stop or leave the
-player. Non-Video-CD media chain to the stock CD32 strap and boot normally.
-The bundled AROS carries the matching PR 1089 MPEG device, including
-Copperline's chronological-CDXL fix as PR commit `ebfc7d9`, but
-deliberately skips cartridge diagnostics, so the cartridge library and player
-are currently a Kickstart path. Neither path ships Commodore code or CL450
-microcode; Copperline's command-level CL450 model does not execute the
-uploaded firmware.
+The open ROM includes a clean-room `cd32mpeg.device` and `videocd.library` compatible
+with CD32 Kickstart 3.1. The library identifies inserted Video CDs and parses their
+metadata. Under CD32 Kickstart, the bundled version 41 `cdstrap` autoboots Video CDs
+into a track menu: navigate with Up/Down, press Red to play, and press Blue to stop
+or exit. Standard CD32 game discs pass through to the default boot sequence. Bundled
+AROS includes the corresponding PR 1089 MPEG device and Copperline's
+chronological-CDXL fix (commit `ebfc7d9`), but bypasses cartridge diagnostics, so the
+cartridge library and player are currently Kickstart-specific. Neither path requires
+proprietary Commodore code or CL450 microcode, as Copperline models the CL450
+command interface at the host level.
 
 Copperline also names the ROM it is given. A ROM file's name is whatever its
 dumper called it, so the image is identified by checksum against a table of
@@ -206,20 +203,16 @@ simply goes unnamed and boots as usual.
 # cds = "cds"
 ```
 
-Where Copperline writes what it produces, and where its file dialogs open
-when the field they were launched from is empty. Every key is optional and
-an omitted key uses the default shown, so the section only needs to exist
-once something is moved. The launcher edits the same keys on its **A/V &
-Emu -> Paths** page.
+Specifies where Copperline writes output files and where file dialogs open
+when no path is set. Every key is optional and falls back to the default
+directory structure under the host data path (`~/Documents/Copperline` on macOS
+and Linux, `%USERPROFILE%\Documents\Copperline` on Windows, or the application
+folder in a [portable installation](ui.md#where-files-go)).
 
-Each default is a folder of that name under the host-data directory --
-`~/Documents/Copperline` on macOS and Linux,
-`%USERPROFILE%\Documents\Copperline` on Windows, or the executable's own
-folder in a [portable installation](ui.md#where-files-go). A relative path is taken from
-`base` (itself taken from the host-data directory when relative or unset),
-an absolute path is used as given. Output folders are created on first
-write; the dialog folders are never created, and a dialog only starts in
-one that exists.
+Relative paths are resolved against `base` (which itself defaults to the host
+data directory), while absolute paths are used directly. Output folders are
+created automatically on first write. Dialog folders are not created
+automatically and only open in existing directories.
 
 These name folders on the machine that runs the configuration, so a config
 copied to another machine may name folders that are not there. At startup
@@ -401,12 +394,11 @@ carried no information.)
   until you click the status-bar power button -- useful for arming video
   capture first. The power button cold-boots (reinitialising RAM according to
   `[memory] init`).
-- `auto_launch = true` makes the launcher run this configuration the moment
-  it opens it -- starting Copperline with it as the saved default boots the
-  machine with no configuration screen first, and the launcher's **Load...**
-  button does the same. The launcher's **A/V & Emu -> Emulation -> Run on
-  startup** row sets it. It only concerns the launcher: a machine given on
-  the command line never shows the screen this key skips.
+- `auto_launch = true` causes the launcher to immediately run this
+  configuration upon opening. When set in the default configuration,
+  Copperline boots directly into the machine without showing the configuration
+  screen. The launcher's **A/V & Emu -> Emulation -> Run on startup** row
+  controls this setting. Command-line launches are unaffected.
 - `pacing_budget` selects how real-time pacing budgets CPU work per frame:
   `"cycles"` (default) charges each instruction its actual 68000 cycle cost
   plus chip-bus waits, matching real hardware speed; `"instructions"` uses a
@@ -439,37 +431,33 @@ carried no information.)
   out and still presents at vsync. Adjust it live from the **Warp Limit**
   menu item or `Cmd+Shift+W` / `Alt+Shift+W` (see [The window and its
   controls](ui.md)).
-- `warp_boot = true` warps the boot: from power-on the machine runs unpaced
-  with audio muted -- exactly like the automatic warp launch `--run` performs
-  -- until the boot storage (the floppy and hard-disk activity the
-  front-panel LEDs show) has been idle for `warp_boot_idle` emulated seconds
-  (default 10), then real-time pacing and audio resume. A hard-disk setup
-  like AmigaVision lands at its menu in a couple of wall-clock seconds.
-  Landing a few emulated seconds late is free -- the extra idle time passes
-  at warp speed -- but the idle threshold must outlast the boot's longest
-  storage-quiet stretch: a big-RAM machine's boot-time MMU table build keeps
-  the disk idle for seconds while the CPU walks every page of fitted RAM, so
-  raise `warp_boot_idle` if the warp ends early on such a machine. CD audio
-  deliberately does not count as activity (CD *data* traffic rides the
-  hard-disk LED), so a menu's background CD-DA cannot hold the warp forever;
-  a boot whose storage never settles gives up after 600 emulated seconds.
-  `warp_until = SECS` is the deterministic alternative: warp until an
-  absolute emulated timestamp, for a setup whose boot time is known. The two
-  are mutually exclusive, `--warp-boot`/`--warp-until` set them from the
-  command line, the manual warp toggle (or `warp.set {"on": false}` over the
-  control protocol) cancels the phase, headless captures (already unpaced
-  end to end) ignore both, and `--run` (whose own warp launch ends at a
-  sharper condition) cannot combine with them. The launcher's *Warp boot*
-  and *Warp boot idle* rows (*A/V & Emu*, *Emulation*) edit the
-  storage-idle mode; a `warp_until` loaded from a config shows there as its
-  own *Until Ns* state, which one press clears.
-- `uaelib = true` (the default) fits the WinUAE-compatible "uaelib" trap at
-  `$F0FF60`, through which a guest program can toggle warp (`warpmode()` in
-  the vscode-amiga-debug template), log debug text, and register its
-  bitmaps, palettes and copper lists for the debugger; see the uaelib trap
-  section of [](run). `false` leaves `$F0FF60` floating. A CDTV's extended
-  ROM hides the trap regardless. There is no launcher row; the setting
-  survives the configuration screen's round trip.
+- `warp_boot = true` accelerates boot sequences: from power-on, the machine
+  runs unthrottled in warp mode (with audio muted) until storage activity
+  (floppy and hard disk) remains idle for `warp_boot_idle` emulated seconds
+  (default 10), at which point normal real-time execution and audio resume.
+  This allows media-rich environments like AmigaVision or standard Workbench
+  to boot quickly to their menus. Set `warp_boot_idle` high enough to bridge
+  expected pauses in disk access during boot (such as when SetPatch builds
+  MMU tables across large memory configurations). CD audio playback does not
+  count as storage activity, preventing background CD-DA tracks from stalling
+  the warp phase. If storage never becomes idle, warp boot times out after
+  600 emulated seconds.
+  `warp_until = SECS` provides a deterministic alternative that runs in warp
+  mode until a specified emulated timestamp. `warp_boot` and `warp_until` are
+  mutually exclusive and cannot be combined with `--run` (which manages its own
+  warp phase); `--warp-boot` and `--warp-until` set them from the
+  command line. Toggling warp manually (`Cmd+W` / `Alt+W`) or sending
+  `warp.set {"on": false}` over the control protocol cancels the warp phase
+  immediately. Headless captures ignore warp boot settings since they run
+  unthrottled by default. The launcher's **Warp boot** and **Warp boot idle**
+  rows (*A/V & Emu*, *Emulation*) configure storage-idle mode, while a loaded
+  `warp_until` setting appears as its own *Until Ns* option.
+- `uaelib = true` (default) enables the WinUAE-compatible service trap at
+  `$F0FF60`. Guest programs can use this interface to toggle warp mode (via
+  `warpmode()` in the vscode-amiga-debug template), emit debug log messages,
+  and register bitmaps, palettes, and copper lists with the debugger (see
+  [](run)). Setting this to `false` leaves `$F0FF60` unmapped. On CDTV
+  configurations, the extended ROM occupies `$F00000` and covers this space.
 - `rewind = true` records rewind history from power-on, so `Cmd+Z` / `Alt+Z`
   and the **Rewind** menu item can step the whole machine backward through
   it. It rides the same deterministic snapshot ring as the debugger's reverse
@@ -760,74 +748,47 @@ what fits. RTG board modes follow the setting too: their frame is scaled
 from its own native resolution, so a 640x480 board screen is drawn at 1x,
 2x, 3x of *those* pixels inside the display area.
 
-Integer scaling always draws from the unresampled canvas -- one host row
-per woven scanline, the canvas `pixel_aspect = "square"` presents -- so a
-whole-number scale carries the emulated bitmap to the screen untouched
-under either aspect. Under the default TV aspect the two axes take
-separate whole numbers: the picture is the TV aperture, drawn at a whole
-number of device pixels per hi-res column and a whole number per scan
-line, chosen to approximate the pixel shape of the 4:3 glass (the shape
-the smooth TV presentation resamples to: a PAL pixel about 1.08 times
-wider than tall, an NTSC one about 0.85). The choice is the tallest fit
-whose shape stays within a tenth of the glass's, so an NTSC 200-line game
-on a 1080p screen gets two pixels per column and five per line -- the
-4:5 pixel of [amiga.vision's NTSC guide](https://amiga.vision/ntsc), a
-1280x1000 picture -- 6:7 at 1440p and 4:5 again at 4K, while PAL, whose
-glass shape is within a tenth of square, takes the square multiples until
-a display is tall enough for 8:7. The count per scan line may be odd: a
-non-interlaced display's two woven rows per line are identical, so the
-line still lands as one exact block, and only an interlaced display shows
-its two fields' rows at alternating heights then. A window too short for
-even one pixel per line falls back to the smooth fit of the same shape.
-`pixel_aspect = "square"` with `"integer"` keeps the uniform square
-multiples instead, exact in the same way, for side-by-side pixel
-comparison. Pair either with `autocrop` (below): the fit is retaken
-against the picture the hardware draws, which is what earns the extra
-lines a taller shape needs (the uncropped NTSC aperture on a 1080p screen
-only has room for square pixels). The window resizes to the unresampled
-canvas when the TV aspect switches to or from integer scaling, as it does
-for a pixel-aspect change; captures keep the aspect's own shape whatever
-the window draws. The monitor-bezel mode (`bezel`) keeps the resampled TV
-canvas under either scaling: its picture opening is a fraction of the
-window by design and is not itself integer-exact. Programmable (ECS/AGA
-VARBEAMEN) scans and RTG board screens, which present their own geometry,
-take a uniform multiple of the canvas. The menu's *Video Settings >
-Scaling* item switches modes live without touching the config; there is
-no environment-variable override.
+Integer scaling draws from the unresampled canvas (one host row per woven
+scanline, matching `pixel_aspect = "square"`). Under the default TV aspect,
+horizontal and vertical axes scale using independent integer multiples to
+approximate the 4:3 CRT pixel aspect ratio (e.g. PAL pixels ~1.08x wider than
+tall; NTSC ~0.85x). The scaler selects the tallest integer fit whose aspect
+ratio is within 10% of the display shape. When paired with `autocrop` (which
+frees vertical margin from unused borders), NTSC 200-line games on 1080p
+displays achieve a 4:5 pixel aspect (1280x1000 active area), 6:7 at 1440p, and 4:5 at 4K.
+PAL displays use square integer multiples until the display height accommodates
+an 8:7 ratio. Odd scanline multipliers remain crisp on progressive displays
+because woven line pairs are identical. If the window is too small for a 1:1
+fit, scaling smoothly falls back to interpolated scaling. Selecting
+`pixel_aspect = "square"` with `"integer"` enforces uniform square integer
+multipliers for side-by-side pixel comparisons. When combined with `autocrop`,
+integer multiples are recalculated against the active display area.
+Switching integer scaling in TV mode resizes the window to the unresampled
+canvas; captures always retain the configured aspect geometry. Monitor bezels
+(`bezel`) use the resampled TV canvas under both scaling modes. Programmable
+(ECS/AGA VARBEAMEN) and RTG displays scale with uniform integer multipliers.
+The menu's *Video Settings > Scaling* item toggles modes at runtime.
 
-`autocrop` (default off) crops the window presentation to the display
-window the hardware actually programs, instead of the fixed TV aperture:
-most games drive well under the full scan (a 320x200 display uses 400 of
-the 570 woven lines), and cropping the unused border lets the picture
-fill far more of a 16:9 or 21:9 screen -- with `scaling = "integer"` the
-whole-number fit is retaken against the cropped picture, so a 200-line
-game often earns a full multiple more than the uncropped canvas would.
-The crop is derived every frame from the display-window rows that carry
-fetched bitplane data (the same per-line model the renderer paints
-with, so mid-frame rewrites and DIW tricks are already folded in --
-and a window left open around a shorter picture, as Kickstart's
-256-line default routinely is, crops to the picture, not the window).
-It grows instantly when a program opens a larger display, and tightens
-only after a smaller one has held steady for about half a second, so
-screen transitions do not pump the zoom.
-The status bar and any instrument panels keep their size in a band
-pinned along the window bottom; opening a menu or panel widens the
-picture to the full display area while it is up (so nothing of the
-overlay is cropped away) and the band stays put. A
-window-presentation setting only: screenshots, frame dumps and
-recordings always keep their configured aperture. The CRT shader
-presets compose with it (the scanlines, mask or tube face are drawn
-over the cropped picture). Programmable (ECS/AGA VARBEAMEN) multisync
-scans -- a DblPAL or Multiscan Workbench, a 31 kHz Linux console --
-crop too: their envelope is the same fetched-rows model carried
-through the scan's own sync-anchored window and blanking, so a
-doubled Workbench screen fills the window like a 15 kHz one, at the
-uniform multiple under integer scaling (a progressive scan's rows are
-not woven pairs for the per-axis fit to step by). Automatically
-suspended where it cannot apply -- under a monitor bezel (whose fixed
-opening frames the whole glass) and for RTG board scanout. The menu's
-*Video Settings > Autocrop* toggle flips it live without touching the
-config.
+`autocrop` (default off) crops the window display to the active raster window
+programmed by hardware rather than displaying the entire TV aperture. Because
+most software occupies less than the full raster (for example, a 320x200 screen
+using 400 of 570 PAL woven lines), cropping unused borders allows the active
+image to fill more of 16:9 or 21:9 monitors. When paired with `scaling = "integer"`,
+the integer multiplier recalculates based on the cropped dimensions, often
+allowing a larger integer scale factor.
+
+The crop area is computed dynamically each frame from scanlines containing
+fetched bitplane data. The viewport expands immediately when a program opens a
+larger display and tightens smoothly after a smaller viewport has remained
+stable for roughly half a second, preventing visual jitter during scene changes.
+The status bar and overlay panels remain docked at the bottom of the window;
+opening a menu or panel temporarily reveals the full display area so no controls
+are obscured. Autocrop only affects window presentation (screenshots, frame
+dumps, and recordings always capture the full configured aperture). CRT shader
+presets render over the cropped area. Programmable multisync modes (such as
+DblPAL or 31 kHz displays) are also cropped based on their active display
+windows. Autocrop is automatically suspended when using monitor bezels or RTG
+modes. The menu's *Video Settings > Autocrop* option toggles it at runtime.
 
 `deinterlace` controls how interlaced (LACE) displays are presented. On
 (the default), a motion-adaptive deinterlacer weaves the two fields into a
@@ -2394,40 +2355,32 @@ model = "hrtmon"                # "none" (the default) or "hrtmon"
 # rom = "/roms/hrtmon.rom"      # an HRTMon cartridge image of your own
 ```
 
-Fits an Action Replay-style freezer cartridge: a system monitor that lives
-in its own memory bank and takes the machine over when you press its
-button, whatever the running program is doing. The one model so far is
-HRTMon (`model = "hrtmon"`), Alain Malek's monitor as maintained by Bert
-Jahn and contributors, bundled as `assets/hrtmon/hrtmon.rom` -- HRTMon 2.39
-assembled from the upstream source in its UAE cartridge configuration
-(`hrtmon-rom/README.md` has the provenance and the build recipe; the
-monitor is GPL-2.0-or-later, its license text sits beside the image).
-`model` alone fits the bundled image; `rom = "..."` replaces it with any
-HRTMon cartridge image (`HRT!` at offset 0 or 4). `--cartridge hrtmon` is
-the command-line form, and the launcher's **System** tab has a matching
-*Freezer cartridge* row.
+Enables Action Replay-style freezer cartridge support, providing a system
+monitor mapped into its own memory space that can interrupt and inspect running
+software at any time.
 
-The cartridge is present from power-on: a 1 MiB bank at `$A10000` (plain
-read/write memory; the monitor keeps its variables, stack and screen
-there) plus the snapshot of the custom and CIA registers the host keeps
-for it, since the monitor cannot read the write-only registers back.
-Pressing the button -- *Tools > Freeze (HRTMon)* in the menu, `Cmd+Shift+B`
-/ `Alt+Shift+B`, `--freeze-after SECS` in a headless run, or the control
-protocol's `cartridge.freeze` -- raises the 68000's non-maskable level-7
-interrupt, and the monitor comes up on its own screen showing the
-interrupted program's registers. The monitor's `x` command returns to the
-program exactly where it was, and the Help key shows its command list.
-The host tells the monitor what it is running on through the
-configuration block at the start of the image (chipset, video standard,
-IDE port, CD32, chip RAM size), written at power-on and at every reset;
-a reset also clears the monitor's "entered" flag, so a freeze after a
-reset installs it afresh.
+Configuration:
+- `model = "hrtmon"`: Enables the cartridge using the bundled HRTMon 2.39
+  monitor (`assets/hrtmon/hrtmon.rom`), built from upstream source
+  (`hrtmon-rom/README.md`) under GPL-2.0-or-later.
+- `rom = "path/to/image.rom"`: Optional path to override the bundled ROM with
+  a custom HRTMon-compatible cartridge ROM (used alongside `model = "hrtmon"`;
+  identified by `HRT!` signature at offset 0 or 4).
 
-The bank, the register snapshot and a not-yet-taken press are machine
-state: save states and rewind carry a monitor session, and a
-`--record-input` session replays a press at the same emulated instant
-(the `freeze-after` script directive). See [](../internals/peripherals)
-for the model.
+The cartridge can also be enabled from the command line using `--cartridge hrtmon`
+or via the launcher's **System -> Freezer cartridge** setting.
+
+When enabled, the cartridge maps a 1 MiB memory bank at `$A10000` and maintains
+live register snapshots for write-only custom and CIA registers. Triggering a
+freeze (via **Tools > Freeze (HRTMon)**, `Cmd+Shift+B` / `Alt+Shift+B`, headless
+`--freeze-after SECS`, or the JSON-RPC `cartridge.freeze` method) asserts a level-7
+NMI, transferring execution immediately to the HRTMon monitor. Entering `x` in
+the monitor resumes normal execution, while `help` displays available commands.
+
+Cartridge memory, register snapshots, and active monitor sessions are preserved
+across save states and rewind history. Input scripts and recordings log the
+timed button press itself via `freeze-after SECS`. See
+[](../internals/peripherals) for architectural details.
 
 ## `[debug]` -- diagnostics
 

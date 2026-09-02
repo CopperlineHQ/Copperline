@@ -48,32 +48,25 @@ bytes across its 32-bit chip bus in one cycle; the header says what
 would be needed to settle that.
 
 `./build.sh accelprobe` builds `accelprobe.adf`, a 32-row probe for
-accelerator CPUs (68020/030/040/060): exception round trips (supervisor
-stack in chip vs fast RAM), call and MOVEM costs, CPUSHL, and the raw
-read/write rate of the chip window plus every fast-RAM region the machine
-actually has -- the probe walks the exec MemList at boot, so one binary
-adapts to whichever CPU card and RAM mix is fitted (CPU-card, motherboard,
-Zorro III) and reports each region's base address alongside its numbers.
-Rows 27-29 replicate, primitive by primitive, the per-4K-page sequence the
-SetPatch/68040.library/mmu.library boot-time MMU table build performs
-(observed by tracing a real mmu.library run), which is why big-RAM machines
-pause at boot: that walk's cost scales with fitted RAM; from v2 (signature
-$ACCE1B02) the walk covers the LARGEST fast region, the one that dominates
-a real table build. The header records the Copperline predicted columns for
-an A4000 with a 50 MHz 68060 (CPU-card RAM), a 25 MHz 68040 and a 25 MHz
-68030 (`tt-a4000-060/-040/-030.toml`), plus REAL columns captured on the
-maintainer's A4000 (BFG9060 68060/50, a RAM-less A3640 68040/25, and a
-25 MHz Commodore 68030 CPU-slot board) with
-per-row verdicts: the 040's plain execution is over-billed ~2-2.5x while
-buses and traps are under-billed, fast RAM is three distinct speed classes
-on real silicon (CPU-card / motherboard / Zorro III), and the CPU-slot
-bridge makes a real chip-RAM read cost ~2.5-3.4 us. When adding columns,
-capture the 9600-baud serial stream, or type numbers from the CRT, never
-read them off a photo by eye. Boot it from
-a cold start and expect to power-cycle afterwards: the region rows scribble
-on fast RAM, so the OS is gone once the probe runs. The probe detects the
-CPU itself (MOVEC PCR/ITT0 probes with fault recovery) and sets a defined
-cache state per family; on a plain 68000 it renders only its signature rows.
+accelerator CPUs (68020/030/040/060): measuring exception round trips
+(supervisor stack in chip vs fast RAM), call and `MOVEM` costs, `CPUSHL`, and
+raw read/write throughput for chip memory and configured fast RAM regions. The
+probe dynamically enumerates Exec's `MemList` at startup, adapting automatically
+to the fitted CPU card and memory architecture (CPU-slot RAM, motherboard RAM,
+Zorro III) and reporting base addresses alongside timing measurements. Rows
+27-29 benchmark the per-4K page sequence executed during OS MMU table setup
+(`SetPatch` / `68040.library` / `mmu.library`), benchmarking the largest fast
+memory bank.
+
+The probe header compares predicted timings for A4000 models
+(`tt-a4000-060/-040/-030.toml`) with real-hardware measurements from an A4000
+(equipped with BFG9060 68060/50, A3640 68040/25, and a 25 MHz 68030 board).
+Key findings show that basic 68040 execution is currently over-penalized
+~2-2.5x, CPU-slot bridge reads to chip RAM introduce 2.5-3.4 us latency, and
+fast RAM exhibits distinct speed classes on real hardware. The probe detects
+the CPU model automatically and initializes cache state; on a standard 68000
+it displays only its header signature. Boot the probe from cold and power-cycle
+afterwards, as write benchmarking overwrites memory in each enumerated region.
 
 ## Running
 
@@ -619,20 +612,13 @@ the frame's last raster line, which forces a reset, so the next frame's
 top starts closed. The Kang Fu CD32 screen-split class; the probe caught
 Copperline carrying the flop across the vertical blank and lighting the
 whole top of the frame. vAmiga-verified byte-for-byte), and
-`vdiwprobe-empty` (a whole-frame empty window, DIWSTRT.V == DIWSTOP.V
-parked on line 301 via DIWHIGH, never opens: no bitplane may display
-anywhere -- and because the frame captures no DMA rows at all, every row
-rides the synthesized register-derived render path, where a level window
-test read the tie as a full wrap-around window and lit the frame with
-undisplayed buffer contents. BRDRSPRT sprites stay visible over the
-closed frame -- the Nexus 7 scene-transition corrupted-ball class;
-vAmiga-5-verified bijectively exact), and
-`vdiwprobe-tieopen` (a DIWSTRT.V == DIWSTOP.V tie armed mid-frame over
-an ALREADY-OPEN vertical flop changes nothing until the shared
-comparator line, where reset wins: the rows between the rewrite and
-that line keep fetching and displaying, so the renderer takes the row's
-DMA capture as the vertical authority and reads the tie as closed only
-where nothing was fetched; vAmiga-verified), and
+`vdiwprobe-empty` (a whole-frame empty window, `DIWSTRT.V == DIWSTOP.V` on
+line 301 via `DIWHIGH`, never opens: bitplanes are blanked throughout the frame
+while `BRDRSPRT` sprites remain visible, verifying against *Nexus 7* transitions;
+verified against vAmiga 5), and
+`vdiwprobe-tieopen` (`DIWSTRT.V == DIWSTOP.V` set mid-frame over an already-open
+window continues displaying scanlines until the beam reaches the shared
+comparator line; verified against vAmiga), and
 `dpfprobe-aga` (Lisa's eight-plane dual playfield: planes 7/8 extend each
 field's index to four bits -- the Zool AGA decode class, where a 3-bit
 decode flips the probe's red/blue columns to magenta/green -- PF2 reads

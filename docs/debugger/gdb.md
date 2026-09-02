@@ -11,43 +11,39 @@ interfaces on a trusted local network, specify `0.0.0.0:2345`.
 
 ## Headless and windowed modes
 
-`--gdb` runs headless: the stub owns the machine, starts it halted at
-reset, advances it unpaced, and cannot be combined with a window or the
+`--gdb` runs headless: the stub takes control of the machine, halts at reset,
+advances unthrottled, and cannot be combined with an interactive window or
 scheduled capture flags.
 
-`--gdb-gui ADDR` attaches the same stub to the normal interactive
-window instead, the way `--control-gui` attaches the control server:
+`--gdb-gui ADDR` attaches the GDB remote stub to an interactive windowed
+session:
 
 ```sh
 ./target/release/copperline --config copperline.example.toml --gdb-gui :2345
 ```
 
-- The machine stays visible and paced to real time; `continue` runs at
-  Amiga speed unless the client turns pacing off with `monitor warp on`
-  (`monitor warp off` re-paces, and a disconnect releases the client's
-  warp hold automatically).
-- Attaching pauses the machine. Detaching (`detach`, a dropped
-  connection, or GDB's `kill`) leaves the window running and the stub
-  listening for the next client -- `kill` deliberately detaches instead
-  of ending the session, because the window belongs to the user and
-  VS Code sends `kill` on Stop Debugging.
-- Breakpoints, watchpoints, and register watches install into the same
-  machine break stores the debugger window uses, so they hit inside the
-  windowed frame loop. Points the window's own debugger set are never
-  touched, and a detach removes exactly what the client installed.
-- A stop while the client's `continue` is outstanding answers the
-  client; any other debug stop (a GUI breakpoint, a watchpoint) opens
-  the local debugger window as usual, and a plain pause from the window
-  just pauses.
-- `--run` break-at-entry works exactly as with `--gdb` (below).
-- `--gdb-gui` cannot be combined with `--gdb`, `--control`,
-  `--control-gui`, or `--benchmark-until`.
+- The emulated machine remains interactive in the window and runs at real-time
+  speed. Execution advances in real time on `continue` unless unthrottled via
+  `monitor warp on` (`monitor warp off` restores pacing; disconnecting
+  automatically releases warp holds).
+- Attaching a debugger pauses the machine. Detaching (`detach`, connection loss,
+  or GDB `kill`) leaves the window open and listening for new connections
+  (`kill` detaches rather than terminating the process so that VS Code "Stop
+  Debugging" does not close the window).
+- Breakpoints and watchpoints are shared with the internal debugger and trigger
+  during the windowed frame loop. Breakpoints set within the UI remain independent,
+  and detaching GDB removes only points set by the remote client.
+- When execution halts during an active GDB `continue`, the stop event is sent
+  to the client. Manual UI pauses or local debugger breakpoints open the
+  internal debugger window normally.
+- `--run` break-at-entry functions identically to headless `--gdb`.
+- `--gdb-gui` cannot be combined with `--gdb`, `--control`, `--control-gui`, or
+  `--benchmark-until`.
 
-Stock GDB frontends debug either mode: VS Code's cppdbg configuration
+Standard GDB frontends work with both modes: VS Code cppdbg configurations
 (`"MIMode": "gdb"`, `"miDebuggerServerAddress": "localhost:2345"`,
-`"miDebuggerPath"` pointing at `m68k-amigaos-gdb`) or Native Debug's
-`target remote` setup, with `--gdb-gui` keeping the Amiga screen
-interactive beside the editor.
+`"miDebuggerPath"` pointing to `m68k-amigaos-gdb`) or Native Debug's `target remote`
+setup, with `--gdb-gui` keeping the Amiga display live alongside the IDE.
 
 ## Connecting from GDB
 
@@ -87,10 +83,8 @@ Copper disassembly, and Exec structures:
 (gdb) monitor memlist          # List Exec memory allocations
 ```
 
-A windowed session (`--gdb-gui`) additionally answers
-`monitor warp on|off|status`, toggling the App's warp hold: the machine
-runs unpaced (audio muted) until the client turns it back off or
-disconnects.
+In windowed mode (`--gdb-gui`), `monitor warp on|off|status` controls warp
+mode, running unthrottled with audio muted until disabled or disconnected.
 
 ## Source-level debugging and program loading
 
