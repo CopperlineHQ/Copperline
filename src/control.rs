@@ -21,8 +21,11 @@
 //!
 //! [`Emulator`]: crate::emulator::Emulator
 
+pub mod bridge;
+pub mod catalogue;
 pub mod exec;
 pub mod headless;
+pub mod mcp;
 pub mod observe;
 pub mod proto;
 pub mod session;
@@ -135,17 +138,26 @@ pub fn announce(
     Ok(())
 }
 
-/// Write `contents` to `path` readable by the owner only (0600 on unix),
-/// truncating any previous file.
-fn write_private_file(path: &PathBuf, contents: &[u8]) -> std::io::Result<()> {
+/// Open options that create a file readable by the owner only (0600 on
+/// unix, the platform default elsewhere), for the files that carry a
+/// session token: the `--control-info` file, and the log the MCP bridge
+/// points a launched emulator's stderr at. The mode is set as the file is
+/// created, never by a chmod afterwards.
+pub(crate) fn owner_only_create() -> std::fs::OpenOptions {
     let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    opts.write(true).create(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
         opts.mode(0o600);
     }
-    let mut f = opts.open(path)?;
+    opts
+}
+
+/// Write `contents` to `path` readable by the owner only (0600 on unix),
+/// truncating any previous file.
+fn write_private_file(path: &PathBuf, contents: &[u8]) -> std::io::Result<()> {
+    let mut f = owner_only_create().truncate(true).open(path)?;
     f.write_all(contents)?;
     f.flush()
 }

@@ -134,8 +134,10 @@ net-nat = ["dep:smoltcp"]
 # copperline-net-helper when an unprivileged open is denied), macOS uses the
 # system libpcap, and Windows loads an installed Npcap at runtime.
 net-bridge = ["dep:pcap", "dep:libloading"]
-# The `copperline-ctl` command-line client for the control protocol.
-ctl-bin = ["dep:serde_json"]
+# The `copperline-ctl` command-line client for the control protocol, and
+# its `--mcp` mode (src/control/mcp.rs), an MCP server over stdio that
+# exposes the protocol as tools for coding agents.
+ctl-bin = ["dep:serde_json", "control"]
 # The `copperline-import-uae` converter for WinUAE/Amiberry/FS-UAE
 # configuration files.
 import-uae-bin = ["dep:toml_edit"]

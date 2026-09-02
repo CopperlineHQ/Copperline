@@ -159,6 +159,14 @@ copperline-ctl --info /tmp/ccp.json --repl
 events.subscribe {"events":["frame","serial","interrupt","media"],"frame_interval":50}
 ```
 
+An MCP-capable agent (Claude Code, Cursor, ...) gets the same protocol as
+tools: `claude mcp add copperline -- copperline-ctl --mcp` (or an `.mcp.json`
+entry), then `session_launch {"config": "my.toml"}` or `session_attach
+{"info_file": "/tmp/ccp.json"}`, `break_add`, `continue {"wait_ms": 5000}`
+(the bridge pauses the machine when the wait expires), `capture_screenshot`
+(returned as an image), `events_next`. Tool names are the method names with
+dots as underscores; see the "MCP server" section of the reference.
+
 The event streams are bounded, so check their drop counts when observations
 must be complete. The same session can use `trace.start`/`trace.stop` and
 `waveform.start`/`waveform.stop` to bracket file-backed diagnostics at runtime
