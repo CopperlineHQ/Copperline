@@ -907,6 +907,8 @@ impl App {
                 if !self.control_complete_pending("double_fault", &message) {
                     self.control_notify_stopped("double_fault", &message);
                 }
+                #[cfg(feature = "gdb")]
+                self.gdb_complete_pending_stop(&message);
                 self.show_osd(message);
                 self.request_redraw();
                 return true;
@@ -923,6 +925,17 @@ impl App {
         // pauses without commandeering the local debugger window.
         #[cfg(feature = "control")]
         if self.control_completes_stop(&stop) {
+            self.paused = true;
+            self.sync_live_audio_suspension();
+            self.last_debug_stop = Some(message.clone());
+            self.show_osd(message);
+            self.request_redraw();
+            return true;
+        }
+        // Same rule for a pending GDB continue: the stop answers the
+        // client and pauses without opening the local debugger window.
+        #[cfg(feature = "gdb")]
+        if self.gdb_completes_stop(&stop) {
             self.paused = true;
             self.sync_live_audio_suspension();
             self.last_debug_stop = Some(message.clone());

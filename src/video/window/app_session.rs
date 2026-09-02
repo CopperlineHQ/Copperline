@@ -10,6 +10,7 @@ use super::*;
 pub(super) enum WarpSource {
     Manual,
     Control,
+    Gdb,
     Guest,
 }
 
@@ -19,6 +20,7 @@ impl WarpSource {
         match self {
             Self::Manual => "manual",
             Self::Control => "control",
+            Self::Gdb => "gdb",
             Self::Guest => "guest",
         }
     }
@@ -27,6 +29,7 @@ impl WarpSource {
         match self {
             Self::Manual => "manual",
             Self::Control => "control client",
+            Self::Gdb => "gdb client",
             Self::Guest => "guest request",
         }
     }
@@ -1245,6 +1248,8 @@ impl App {
             // the client learns where the machine stopped.
             #[cfg(feature = "control")]
             self.control_complete_pending("user_pause", "paused from the window");
+            #[cfg(feature = "gdb")]
+            self.gdb_complete_pending_stop("paused from the window");
         } else {
             info!("pause button: emulation resumed");
         }
@@ -1303,6 +1308,8 @@ impl App {
         info!("power button: machine powered off (cold boot state)");
         #[cfg(feature = "control")]
         self.control_complete_pending("pause", "power state changed");
+        #[cfg(feature = "gdb")]
+        self.gdb_complete_pending_stop("power state changed");
         if let Err(e) = self.emu.power_on_reset() {
             error!("cold power-on reset failed: {e:#}");
             self.cpu_halted = true;

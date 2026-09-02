@@ -1045,6 +1045,9 @@ pub struct App {
     /// drained at the top of `about_to_wait` (see window/control.rs).
     #[cfg(feature = "control")]
     control: Option<control::ControlState>,
+    /// The windowed GDB stub (`--gdb-gui`), when attached.
+    #[cfg(feature = "gdb")]
+    gdb: Option<gdb::GdbGuiState>,
     /// Scheduled relative port-1 mouse motions from --mouse-after,
     /// one-shot per entry; (at_emulated_secs, dx, dy).
     auto_mouse: Vec<(f64, i32, i32, u8)>,
@@ -2060,6 +2063,8 @@ impl App {
             auto_joy_engaged: [false; 2],
             #[cfg(feature = "control")]
             control: None,
+            #[cfg(feature = "gdb")]
+            gdb: None,
             auto_mouse: Vec::new(),
             pending_auto_mouse: mouse_after,
             auto_mouse_to: Vec::new(),
@@ -2899,6 +2904,14 @@ impl App {
         if let Some(ctl) = app.control.as_mut() {
             let proxy = event_loop.create_proxy();
             ctl.handle.start(Box::new(move || {
+                let _ = proxy.send_event(());
+            }));
+        }
+        // Same for the windowed GDB stub's socket threads.
+        #[cfg(feature = "gdb")]
+        if let Some(gdb) = app.gdb.as_mut() {
+            let proxy = event_loop.create_proxy();
+            gdb.handle.start(Box::new(move || {
                 let _ = proxy.send_event(());
             }));
         }
@@ -4197,14 +4210,17 @@ impl ApplicationHandler for App {
                     .cursor_pos
                     .and_then(|pos| control_at(pos, &bar_layout(&media)));
                 let control_connected = {
+                    #[allow(unused_mut)]
+                    let mut connected = false;
                     #[cfg(feature = "control")]
                     {
-                        self.control.as_ref().is_some_and(|c| c.handle.connected())
+                        connected |= self.control.as_ref().is_some_and(|c| c.handle.connected());
                     }
-                    #[cfg(not(feature = "control"))]
+                    #[cfg(feature = "gdb")]
                     {
-                        false
+                        connected |= self.gdb.as_ref().is_some_and(|g| g.handle.connected());
                     }
+                    connected
                 };
                 let view = StatusBarView {
                     status,
@@ -4692,6 +4708,8 @@ impl ApplicationHandler for App {
                 return;
             }
         }
+        #[cfg(feature = "gdb")]
+        self.drain_gdb();
         // Frames retired outside the burst (a control step, a debugger
         // step) may have carried a guest warp request.
         self.service_uaelib();
@@ -5403,14 +5421,17 @@ impl App {
             status.fdd_track = self.last_fdd_track;
         }
         let control_connected = {
+            #[allow(unused_mut)]
+            let mut connected = false;
             #[cfg(feature = "control")]
             {
-                self.control.as_ref().is_some_and(|c| c.handle.connected())
+                connected |= self.control.as_ref().is_some_and(|c| c.handle.connected());
             }
-            #[cfg(not(feature = "control"))]
+            #[cfg(feature = "gdb")]
             {
-                false
+                connected |= self.gdb.as_ref().is_some_and(|g| g.handle.connected());
             }
+            connected
         };
         #[cfg(feature = "mt32")]
         let mt32_face = if crate::video::mt32_panel_shown() {
@@ -6413,6 +6434,8 @@ mod control;
 mod crt_shader;
 #[cfg(feature = "coppersynth")]
 mod csynthpanel;
+#[cfg(feature = "gdb")]
+mod gdb;
 mod host_input;
 mod kbdpanel;
 #[cfg(feature = "mt32")]
