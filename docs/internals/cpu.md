@@ -3,7 +3,7 @@
 ## The wrapper and the bus adapter
 
 `M68kMachine` (`src/cpu.rs`) wraps the published pure-Rust
-[`m68k` 0.11 core](https://docs.rs/crate/m68k/0.11.0). The core sees
+[`m68k` 0.12 core](https://docs.rs/crate/m68k/0.12.1). The core sees
 the machine through an adapter implementing its `AddressBus` trait, so
 every CPU-visible access -- RAM, ROM, custom registers, CIA, RTC,
 autoconfig, Gayle, Akiko -- routes into the shared `Bus` and is billed in
@@ -35,7 +35,7 @@ fits a 68881/68882 to any 020/030 (and is on by default for the 68040,
 whose FPU is on-die): the `m68k` core executes the 6888x instruction
 set in true 80-bit extended precision via a pure-Rust software floating-
 point engine
-([`softfloat.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.11.0/src/fpu/softfloat.rs)).
+([`softfloat.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.12.1/src/fpu/softfloat.rs)).
 Arithmetic (add, sub,
 mul, div, sqrt, and the single-accuracy FSGLMUL/FSGLDIV, which round the
 mantissa to 24 bits but keep the extended exponent range -- gcc -m68040
@@ -53,13 +53,13 @@ whose saved FPU frame carries a foreign size) are all modelled. The transcendent
 FASIN/FACOS/FATAN, the hyperbolics, FETOX/FETOXM1/FTWOTOX/FTENTOX,
 FLOGN/FLOGNP1/FLOG2/FLOG10) and FSINCOS run in extended precision too: a
 double-`FloatX80` ("double-double", ~128-bit) layer
-([`dd.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.11.0/src/fpu/dd.rs))
+([`dd.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.12.1/src/fpu/dd.rs))
 evaluates Taylor/atanh series over reduced
 ranges and rounds the result to extended under the FPCR mode, setting INEX
 and the domain flags (OPERR/DZ). Accuracy is validated against an
 arbitrary-precision oracle (the pure-Rust `astro-float`, a dev-only
 dependency;
-[`fpu_accuracy.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.11.0/tests/fpu_accuracy.rs)):
+[`fpu_accuracy.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.12.1/tests/fpu_accuracy.rs)):
 every function is within
 1 ULP across a wide sweep and all four rounding modes, and round-to-nearest
 is correctly rounded in practice. They are not chip-bit-exact -- the real
@@ -69,7 +69,7 @@ quotient byte. This covers Kickstart's
 detection and per-task FPU context switching. The
 68000's per-instruction cycle counts in the `m68k` core have been
 corrected to exact totals across the SingleStepTests 68000 cycle corpus
-([validation details](https://github.com/benletchford/m68k-rs/tree/m68k-v0.11.0#validation--testing)),
+([validation details](https://github.com/benletchford/m68k-rs/tree/m68k-v0.12.1#validation--testing)),
 which is what makes
 cycle-budgeted pacing trustworthy.
 
@@ -139,7 +139,7 @@ precise.
 
 The 68000's two-word instruction prefetch queue (IRD/IRC) is modelled in
 the `m68k` core
-([`prefetch_queue`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.11.0/src/core/cpu.rs)):
+([`prefetch_queue`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.12.1/src/core/cpu.rs)):
 the
 next opcode is fetched before the current instruction finishes, so
 self-modifying code that overwrites the *next* instruction executes the
@@ -201,13 +201,13 @@ DBcc loop mode: a DBcc that branches -4 back to a loopable one-word
 instruction holds the body/DBcc pair in the prefetch queue and re-executes
 it with no instruction fetches until the condition turns true, the counter
 expires, or an exception intervenes (`loop_mode` in
-[`core/cpu.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.11.0/src/core/cpu.rs);
+[`core/cpu.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.12.1/src/core/cpu.rs);
 the loopable set and the DBcc entry/exit arms live in
-[`core/decode.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.11.0/src/core/decode.rs)).
+[`core/decode.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.12.1/src/core/decode.rs)).
 A looping DBcc iteration costs 6 internal
 clocks and touches the bus only for the body's operands, which is what
 makes tight copy/clear loops measurably faster on a real 68010.
-[`loop_mode_timing_tests.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.11.0/tests/loop_mode_timing_tests.rs)
+[`loop_mode_timing_tests.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.12.1/tests/loop_mode_timing_tests.rs)
 pins engagement, the
 68000's non-engagement, and the no-fetch iteration cost.
 
@@ -231,7 +231,7 @@ the STOP itself, so the handler's RTE re-executes it; a pending trace
 (T set in the SR the instruction started with) has priority and recovers
 from the stop, while a T bit loaded *by* STOP does not fire while
 stopped.
-[`stop_and_68010_timing_tests.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.11.0/tests/stop_and_68010_timing_tests.rs)
+[`stop_and_68010_timing_tests.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.12.1/tests/stop_and_68010_timing_tests.rs)
 pins all of these.
 
 ## Caches
@@ -315,7 +315,7 @@ shares the 040's three-level walker and TC[15] enable; PTEST is gone
 faulting with the format $4 frame.
 
 **Timing.**
-[`timing_060.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.11.0/src/core/timing_060.rs)
+[`timing_060.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.12.1/src/core/timing_060.rs)
 replaces the 020+
 scaling formula for the 060: every opcode word classifies (a build-once
 64K table over a pure function) into the MC68060UM Chapter 10 dispatch
@@ -357,7 +357,7 @@ instruction cache, a three-stage pipeline, execution overlap, dynamic bus
 sizing, and alignment-dependent transfers, so an opcode does not have one
 context-free cycle count.
 
-[`timing_020.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.11.0/src/core/timing_020.rs)
+[`timing_020.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.12.1/src/core/timing_020.rs)
 transcribes the integer timing tables
 from section 8.2 of the
 [MC68020 User's Manual](https://www.nxp.com/docs/en/data-sheet/MC68020UM.pdf).
@@ -369,22 +369,61 @@ immediate fetches hit the instruction cache; any instruction-stream miss
 selects Worst Case. This covers the standard effective-address tables, the
 complete MOVE matrix, arithmetic and logical instructions, multiply/divide,
 shifts, bit/bitfield operations, branches, control flow, and save/restore
-paths. The 68000 and 68010 timing paths are unchanged, and the 68030/040
-retain the earlier scaled approximation rather than incorrectly inheriting
-68020 silicon timings.
+paths. The 68000 and 68010 timing paths are unchanged.
 
-Real-hardware measurements in `timing-test/accelprobe.asm` document timing on
-an A4000 with a 25 MHz 68030 board, a 25 MHz A3640 (68040), and a 50 MHz
-BFG9060 (68060). Key findings:
+The 68030 runs the same MC68020UM tables (m68k 0.12): its integer core is
+the 020's, and the real-hardware columns in `timing-test/accelprobe.asm`
+(a 25 MHz 68030 CPU-slot board in an A4000) measure the same anchor
+figures the real A1200's 020 did -- taken `dbra` 6 clocks, `mulu.w` ~29.
+Re-running the probe on `tt-a4000-030.toml` after the switch lands the
+`move.w`, `mulu.w`, and fast-stack `trap` rows within 1% of the board
+(the scaled-68000 approximation had the `move.w` loop 1.26x over and the
+fast-stack `trap` 1.13x under; `mulu.w` was already exact) and pulls the
+bare taken `dbra` from 1.35x to 1.18x over. The call, `movem`, and chip-stack
+`trap` rows are bus-bound and unchanged at 1.2-1.7x over.
 
-- The scaled approximation over-penalizes basic 68040 instruction execution
-  by ~2-2.5x (a taken `dbra` measures ~4 clocks on hardware vs ~8 in the model;
-  `mulu.w` is ~10 vs ~27).
-- Real 68030 instruction execution matches measured 68020 timings (taken
-  `dbra` is 6 clocks; `mulu.w` is ~29 clocks), indicating 68030 timing aligns
-  with MC68020UM tables while 68040 requires dedicated pipeline modeling.
+## 68040 timing
+
+[`timing_040.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.12.1/src/core/timing_040.rs)
+(m68k 0.12) gives the 68040 a single-issue pipeline model in place of the
+scaled approximation, which the same accelprobe columns (a 25 MHz A3640,
+two byte-identical serial captures) measured as ~2-2.5x pessimistic on
+plain execution: a taken-`dbra` loop runs 4.06 clocks per iteration where
+the approximation billed ~8, a `move.w`+`dbra` loop 4.08 (the one-clock
+body hides entirely in the branch resolution), and `mulu.w #imm`+`dbra`
+14.0 against ~35. The model reuses the 68060 opcode classifier: most
+ALU/move instructions cost their one-clock occupancy, data-dependent and
+unclassified costs derive from the corrected 68000 reference count as
+`(raw/4).max(1)`, an indexed EA adds a clock, and branches pay small static
+costs (taken Bcc/BRA 3, not-taken 2, DBcc 3 either way, computed flow
+changes a 4-clock refill floor) -- the 040 has no branch cache, so there is
+nothing to predict or fold. CINV/CPUSH cost a dozen clocks even on a clean
+line (the A3640 measures ~12 per `CPUSHL DC,(An)`, accelprobe row 15).
+Memory latency stays billed by the host bus per access, as on the 020 and
+060 paths, and exception entries keep the legacy scaled costs so the
+exception timing calibration is unchanged.
+
+DBcc-taken at 3 clocks lands the ubiquitous one-clock-body loop on the
+measured 4 per iteration; the empty `dbra` loop then reads 3 against the
+measured 4.06, the deliberate compromise of a model with no
+overlap/absorption stage. Residuals are not uniformly conservative: there
+is no execute-stage overlap (pessimistic), shifts and bit operations take
+the 060 class costs (optimistic where real 040 silicon runs those forms a
+clock or two slower), and the write-back stage and store buffer are not
+modelled (writes bill at bus rate).
+
+Re-running the probe on `tt-a4000-040.toml` against the A3640 captures:
+the `move.w`+`dbra` row is tick-exact, `mulu.w` and `cpushl` are within
+7%, and the bare `dbra` reads the documented 3.0 against 4.06 clocks. The
+`trap` rows stay 1.4-1.7x under (exception entries keep the legacy scaled
+costs) and `movem` 1.4x over; everything else that still differs is the
+bridge and fast-RAM region billing below, not the core.
+
+What no CPU table covers, the same accelprobe columns quantify and remain
+open on the Copperline side:
+
 - The A3640/BFG9060 CPU-slot bridge increases chip-RAM `move.l` read latency
-  to 2.5-3.4 us (the 68030 chip path matches emulated timing directly).
+  to 2.5-3.4 us (the 68030 board's chip path matches emulated timing directly).
 - Fast RAM regions exhibit distinct access speeds on hardware (CPU-card ~66 ns,
   motherboard ~320 ns, Zorro III ~530 ns per sequential longword read) whereas
   the current emulator bills all fast RAM at native CPU clock rates.
@@ -524,7 +563,7 @@ The same column appeared to show 020 result forwarding -- the RAW-dependent
 MOVE pair of `timing-test` row 29 runs one clock per iteration faster than
 the independent pair of row 28 -- and m68k modelled it as such up to and
 including 0.5.0. **That model was wrong; it was removed upstream in m68k
-0.5.1, and remains absent from this tree's 0.11.0 dependency.** A second probe disk
+0.5.1, and remains absent from this tree's 0.12.1 dependency.** A second probe disk
 (`timing-test/fwdprobe.asm`) ran the same two
 loops at the opposite alignments on the same machine and reversed the
 ordering, which closes the 2x2: with the register dependency and the branch
