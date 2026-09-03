@@ -4,7 +4,7 @@
 # every guest build picks up together -- a stale copy in one directory would
 # silently build that target with a different compiler than the rest.
 
-IMAGE   = stefanreinauer/amiga-gcc:gcc-v16.1
+IMAGE   = stefanreinauer/amiga-gcc:gcc-v16.2
 DOCKER  = docker run --rm --user $(shell id -u):$(shell id -g) \
           -v "$(CURDIR):/src" -w /src $(IMAGE)
 CC      = $(DOCKER) m68k-amigaos-gcc

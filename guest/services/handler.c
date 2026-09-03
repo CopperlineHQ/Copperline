@@ -72,6 +72,12 @@
 #include <libraries/expansion.h>
 #include <libraries/expansionbase.h>
 
+// __NOLIBBASE__: the sfdc 1.12 inline headers (amiga-gcc 16.2 image)
+// define the ...Tags varargs wrappers as file-scope static functions that
+// name DOS_BASE_NAME directly, which cannot resolve to a function-local
+// base; with __NOLIBBASE__ they take the base as an explicit argument at
+// the call site instead, where the local is in scope.
+#define __NOLIBBASE__
 #define EXEC_BASE_NAME _sysbase
 #define EXPANSION_BASE_NAME _expbase
 #define DOS_BASE_NAME _dosbase

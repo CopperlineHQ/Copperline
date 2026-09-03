@@ -77,7 +77,7 @@ exactly one input shape -- there is no bare-partition path to handle.
 make
 ```
 
-Needs Docker (`stefanreinauer/amiga-gcc:gcc-v16.1`, pulled automatically);
+Needs Docker (`stefanreinauer/amiga-gcc:gcc-v16.2`, pulled automatically);
 see `guest/toolchain.mk`. Installs `assets/copperhf/copperhf_rom.bin`. A
 plain `cargo build` never needs Docker -- it embeds the committed artifact
 via `include_bytes!`.
