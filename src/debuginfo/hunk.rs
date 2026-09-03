@@ -388,12 +388,11 @@ impl HunkFile {
                     trailing_debug.clear();
                     trailing_symbols.clear();
                 }
-                HUNK_RELOC32 | HUNK_RELOC16 | HUNK_RELOC8 | HUNK_RELRELOC32 | HUNK_ABSRELOC16 => {
-                    skip_reloc32(&mut r)?
-                }
-                HUNK_RELOC32SHORT | HUNK_DREL32 | HUNK_DREL16 | HUNK_DREL8 => {
-                    skip_reloc_short(&mut r)?
-                }
+                // DREL16/DREL8 keep the long table encoding of an object
+                // file; only DREL32 takes the short form in an executable.
+                HUNK_RELOC32 | HUNK_RELOC16 | HUNK_RELOC8 | HUNK_RELRELOC32 | HUNK_ABSRELOC16
+                | HUNK_DREL16 | HUNK_DREL8 => skip_reloc32(&mut r)?,
+                HUNK_RELOC32SHORT | HUNK_DREL32 => skip_reloc_short(&mut r)?,
                 HUNK_SYMBOL => {
                     let symbols = read_symbols(&mut r)?;
                     match current.as_mut() {

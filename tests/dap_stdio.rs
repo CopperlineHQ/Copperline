@@ -138,7 +138,7 @@ fn dap_over_stdio_debugs_the_hello_probe_by_source_line() {
             .unwrap_or_else(|| panic!("no line containing {needle:?}"))
     };
     let counter_line = line_of("counter = counter + sum");
-    let r_line = line_of("r = r << 2");
+    let call_line = line_of("LONG r = add(n, 0);");
 
     let mut child = Command::new(ctl)
         .arg("--dap")
@@ -328,15 +328,19 @@ fn dap_over_stdio_debugs_the_hello_probe_by_source_line() {
         "{dis}"
     );
 
-    // Step back one line, then out to scale().
+    // Step back one line (to the breakpoint's line), then out to the
+    // call site in scale().
     c.call("stepBack", json!({"threadId": 1}));
     let stop = c.stopped();
     assert_eq!(stop["reason"], "step");
+    let frames = c.call("stackTrace", json!({"threadId": 1}));
+    assert_eq!(frames["stackFrames"][0]["name"], "add", "{frames}");
+    assert_eq!(frames["stackFrames"][0]["line"], counter_line, "{frames}");
     c.call("stepOut", json!({"threadId": 1}));
     c.stopped();
     let frames = c.call("stackTrace", json!({"threadId": 1}));
     assert_eq!(frames["stackFrames"][0]["name"], "scale", "{frames}");
-    let _ = r_line;
+    assert_eq!(frames["stackFrames"][0]["line"], call_line, "{frames}");
 
     // Clear the breakpoints and let the program finish: its greeting
     // reaches the serial port, which the adapter shows as stdout.

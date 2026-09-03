@@ -186,7 +186,10 @@ impl Adapter {
         match msg {
             Msg::Request(req) => self.request(req),
             Msg::ClientClosed => {
-                self.close_session(true);
+                // The client went away without a disconnect: stop an
+                // emulator this session launched, leave an attached one.
+                let launched = self.session.as_ref().is_some_and(|s| s.launched());
+                self.close_session(launched);
                 self.finished = true;
             }
             Msg::Resume {
@@ -324,7 +327,10 @@ impl Adapter {
         let Some((command, args)) = self.start_args.clone() else {
             return Err("nothing to restart".into());
         };
-        self.close_session(true);
+        // A launched emulator is replaced; an attached one is kept and
+        // re-attached.
+        let launched = self.session.as_ref().is_some_and(|s| s.launched());
+        self.close_session(launched);
         let started = match command.as_str() {
             "launch" => Session::launch(&args, self.tx.clone()),
             _ => session::connect_from_args(&args)
@@ -418,7 +424,8 @@ pub fn serve(
             Err(_) => break,
         }
     }
-    adapter.close_session(true);
+    let launched = adapter.session.as_ref().is_some_and(|s| s.launched());
+    adapter.close_session(launched);
     Ok(())
 }
 

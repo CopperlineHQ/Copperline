@@ -190,7 +190,68 @@ impl BreakTable {
             .collect();
         for id in gone {
             if let Some(bp) = self.points.remove(&id) {
-                uninstall(bridge, &bp);
+                self.uninstall(bridge, &bp);
+            }
+        }
+    }
+
+    /// Install a PC breakpoint for `bp` at `addr`. An address another of
+    /// our breakpoints already holds is shared when the conditions agree
+    /// (recorded with id 0; the owner's removal hands the machine
+    /// breakpoint over, see `uninstall`), refused when they differ; one
+    /// the GUI owns is shared as-is, since its stop still reaches us.
+    fn install_pc(&self, bridge: &Bridge, bp: &mut Breakpoint, addr: u32) {
+        let mut params = json!({"kind": "pc", "addr": addr});
+        if let Some(cond) = &bp.cond {
+            params["cond"] = cond_value(cond);
+        }
+        if bp.ignore > 0 {
+            params["ignore"] = json!(bp.ignore);
+        }
+        match bridge.call("break.add", params) {
+            Ok(Reply::Ok(v)) => {
+                if let Some(id) = v["id"].as_u64() {
+                    bp.installed.push((addr, id as u32));
+                }
+            }
+            Ok(Reply::Err { message, .. }) if message.contains("already set") => {
+                let owner = self.points.values().find(|other| {
+                    other.id != bp.id
+                        && other.installed.iter().any(|(a, id)| *a == addr && *id != 0)
+                });
+                match owner {
+                    Some(owner) if owner.cond != bp.cond || owner.ignore != bp.ignore => {
+                        bp.message = Some(format!(
+                            "0x{addr:X} already has a breakpoint with a different condition"
+                        ));
+                    }
+                    _ => bp.installed.push((addr, 0)),
+                }
+            }
+            Ok(Reply::Err { message, .. }) => bp.message = Some(message),
+            Ok(Reply::TimedOut) | Err(_) => {}
+        }
+    }
+
+    /// Remove `bp`'s machine breakpoints, except one another of our
+    /// breakpoints shares: that one changes owner instead.
+    fn uninstall(&mut self, bridge: &Bridge, bp: &Breakpoint) {
+        for (addr, id) in &bp.installed {
+            if *id == 0 {
+                continue;
+            }
+            let sharer = self.points.values_mut().find(|other| {
+                other.id != bp.id && other.installed.iter().any(|(a, i)| a == addr && *i == 0)
+            });
+            match sharer {
+                Some(other) => {
+                    for slot in other.installed.iter_mut().filter(|(a, _)| a == addr) {
+                        slot.1 = *id;
+                    }
+                }
+                None => {
+                    let _ = bridge.call("break.remove", json!({"id": id}));
+                }
             }
         }
     }
@@ -278,7 +339,7 @@ impl BreakTable {
                 installed: Vec::new(),
             };
             if bp.message.is_none() {
-                install_pc(bridge, &mut bp, *addr);
+                self.install_pc(bridge, &mut bp, *addr);
             }
             ids.push(bp.id);
             self.points.insert(bp.id, bp);
@@ -303,10 +364,14 @@ impl BreakTable {
                 message: None,
                 installed: Vec::new(),
             };
-            let words = usize::try_from(bytes.max(&1).div_ceil(2)).unwrap_or(1);
-            let capped = words.min(DATA_WORD_CAP);
+            // Words from the aligned start through the last byte, so an
+            // odd start still covers its final byte.
+            let start = addr & !1;
+            let end = addr.saturating_add((*bytes).max(1));
+            let words = usize::try_from(end.saturating_sub(start).div_ceil(2)).unwrap_or(1);
+            let capped = words.clamp(1, DATA_WORD_CAP);
             for i in 0..capped {
-                let word = (addr & !1).wrapping_add(i as u32 * 2);
+                let word = start.wrapping_add(i as u32 * 2);
                 match bridge.call("break.add", json!({"kind": "watch", "addr": word})) {
                     Ok(Reply::Ok(v)) => {
                         if let Some(id) = v["id"].as_u64() {
@@ -382,7 +447,7 @@ impl BreakTable {
                 continue;
             };
             let before = (bp.verified(), bp.installed.clone(), bp.message.clone());
-            uninstall(bridge, &bp);
+            self.uninstall(bridge, &bp);
             bp.installed.clear();
             if let Some(message) = &bp.message {
                 // A condition that never parsed stays unverified.
@@ -430,11 +495,11 @@ impl BreakTable {
                 };
                 *resolved_line = Some(actual);
                 for addr in addrs {
-                    install_pc(bridge, bp, addr);
+                    self.install_pc(bridge, bp, addr);
                 }
             }
             Kind::Function { name } => match info.lookup(name) {
-                Some(addr) => install_pc(bridge, bp, addr),
+                Some(addr) => self.install_pc(bridge, bp, addr),
                 None => bp.message = Some(format!("unresolved: no symbol {name}")),
             },
             _ => {}
@@ -443,10 +508,15 @@ impl BreakTable {
 
     /// Detach everything (session end).
     pub fn clear(&mut self, bridge: &Bridge) {
-        for bp in self.points.values() {
-            uninstall(bridge, bp);
-        }
+        let all: Vec<Breakpoint> = self.points.values().cloned().collect();
         self.points.clear();
+        for bp in &all {
+            for (_, id) in &bp.installed {
+                if *id != 0 {
+                    let _ = bridge.call("break.remove", json!({"id": id}));
+                }
+            }
+        }
         if let Some(id) = self.loadseg_id.take() {
             let _ = bridge.call("break.remove", json!({"id": id}));
         }
@@ -455,42 +525,6 @@ impl BreakTable {
 
 /// Word watches per data breakpoint, like the GDB stub's cap.
 const DATA_WORD_CAP: usize = 8;
-
-fn install_pc(bridge: &Bridge, bp: &mut Breakpoint, addr: u32) {
-    let mut params = json!({"kind": "pc", "addr": addr});
-    if let Some(cond) = &bp.cond {
-        params["cond"] = cond_value(cond);
-    }
-    if bp.ignore > 0 {
-        params["ignore"] = json!(bp.ignore);
-    }
-    match bridge.call("break.add", params) {
-        Ok(Reply::Ok(v)) => {
-            if let Some(id) = v["id"].as_u64() {
-                bp.installed.push((addr, id as u32));
-            }
-        }
-        Ok(Reply::Err { message, .. }) => {
-            // "already set": another breakpoint (or the GUI) owns this
-            // address; the stop still reaches us, so count it as bound
-            // without an id to remove.
-            if message.contains("already set") {
-                bp.installed.push((addr, 0));
-            } else {
-                bp.message = Some(message);
-            }
-        }
-        Ok(Reply::TimedOut) | Err(_) => {}
-    }
-}
-
-fn uninstall(bridge: &Bridge, bp: &Breakpoint) {
-    for (_, id) in &bp.installed {
-        if *id != 0 {
-            let _ = bridge.call("break.remove", json!({"id": id}));
-        }
-    }
-}
 
 /// The control protocol's condition object.
 fn cond_value(cond: &BreakCond) -> Value {
@@ -515,9 +549,9 @@ fn cond_value(cond: &BreakCond) -> Value {
 }
 
 /// A client condition (`d0 == 5`, `[$DFF006].w & 1`, `a0 != 0`) and
-/// hit condition (`5`, `>= 3`, `% 2`) as the machine's own condition
-/// and ignore count. Anything richer is refused with a message rather
-/// than silently ignored.
+/// hit condition (`5`, `== 5`, `>= 5` stop on the fifth hit, `> 5` on
+/// the sixth) as the machine's own condition and ignore count. Anything
+/// richer is refused with a message rather than silently ignored.
 fn parse_conditions(
     condition: Option<&str>,
     hit: Option<&str>,
@@ -535,13 +569,19 @@ fn parse_conditions(
     };
     let ignore = match hit.map(str::trim).filter(|h| !h.is_empty()) {
         Some(text) => {
-            let digits = text.trim_start_matches(['=', '>', ' ']);
-            match digits.parse::<u32>() {
-                Ok(n) if text.starts_with('%') => {
-                    message.get_or_insert(format!("hit condition {text} not supported"));
-                    let _ = n;
-                    0
-                }
+            let (strict, digits) = if let Some(rest) = text.strip_prefix(">=") {
+                (false, rest)
+            } else if let Some(rest) = text.strip_prefix('>') {
+                (true, rest)
+            } else if let Some(rest) = text.strip_prefix("==") {
+                (false, rest)
+            } else if let Some(rest) = text.strip_prefix('=') {
+                (false, rest)
+            } else {
+                (false, text)
+            };
+            match digits.trim().parse::<u32>() {
+                Ok(n) if strict => n,
                 Ok(n) => n.saturating_sub(1),
                 Err(_) => {
                     message.get_or_insert(format!("hit condition {text} not supported"));
@@ -564,6 +604,10 @@ mod tests {
         assert_eq!((ignore, msg), (4, None));
         let (_, ignore, msg) = parse_conditions(None, Some(">= 3"));
         assert_eq!((ignore, msg), (2, None));
+        let (_, ignore, msg) = parse_conditions(None, Some("> 3"));
+        assert_eq!((ignore, msg), (3, None), "strictly greater: the fourth hit");
+        let (_, ignore, msg) = parse_conditions(None, Some("== 2"));
+        assert_eq!((ignore, msg), (1, None));
         let (_, ignore, msg) = parse_conditions(None, Some("% 2"));
         assert_eq!(ignore, 0);
         assert!(msg.unwrap().contains("not supported"));

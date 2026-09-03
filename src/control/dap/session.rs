@@ -123,13 +123,17 @@ fn parse_launch(args: &Value) -> Result<LaunchArgs, String> {
     let run_args = match args.get("args") {
         None | Some(Value::Null) => None,
         Some(Value::String(s)) => Some(s.clone()),
+        // An array is argv already split: quote each element for the
+        // AmigaDOS command line so it stays one argument.
         Some(Value::Array(items)) => Some(
             items
                 .iter()
                 .map(|i| {
-                    i.as_str()
-                        .map(String::from)
-                        .unwrap_or_else(|| i.to_string())
+                    amigados_quote(
+                        &i.as_str()
+                            .map(String::from)
+                            .unwrap_or_else(|| i.to_string()),
+                    )
                 })
                 .collect::<Vec<_>>()
                 .join(" "),
@@ -148,6 +152,30 @@ fn parse_launch(args: &Value) -> Result<LaunchArgs, String> {
         cwd: opt_string(args, "cwd").map(PathBuf::from),
         timeout: Duration::from_millis(args["timeoutMs"].as_u64().unwrap_or(60_000)),
     })
+}
+
+/// One argv element as the AmigaDOS shell (ReadArgs) reads it: quoted
+/// when it holds whitespace or the quote/escape characters, with `*` as
+/// the escape inside quotes (`*"`, `**`, `*N`).
+fn amigados_quote(arg: &str) -> String {
+    let plain = !arg.is_empty()
+        && !arg
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '"' | '*' | '='));
+    if plain {
+        return arg.to_string();
+    }
+    let mut out = String::from("\"");
+    for c in arg.chars() {
+        match c {
+            '"' => out.push_str("*\""),
+            '*' => out.push_str("**"),
+            '\n' => out.push_str("*N"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// `attach`: connect from `controlInfo` or `address` + `token`.
@@ -893,8 +921,10 @@ impl Session {
                     .values()
                     .filter(|b| match (&b.kind, word) {
                         (breaks::Kind::Data { addr, bytes }, Some(word)) => {
+                            // Half-open ranges: the word [word, word+2)
+                            // against [addr, addr+bytes).
                             word.saturating_add(2) > *addr
-                                && word < addr.saturating_add(bytes.max(&1).saturating_add(1))
+                                && word < addr.saturating_add((*bytes).max(1))
                         }
                         _ => false,
                     })
@@ -982,15 +1012,18 @@ impl Session {
         }
     }
 
-    /// End the session: a launched emulator is shut down when
-    /// `terminate`, an attached one is left running.
+    /// End the session: `terminate` shuts the emulator down (the
+    /// adapter asks that of a launched one by default, of an attached
+    /// one only when the client says so).
     pub fn close(mut self, terminate: bool) {
         if self.bridge.closed().is_none() {
             self.breaks.clear(&self.bridge);
             for id in std::mem::take(&mut self.temp_breaks) {
                 let _ = self.bridge.call("break.remove", json!({"id": id}));
             }
-            if terminate && self.launched.is_some() {
+            // An explicit terminate stops the emulator whether this
+            // session launched it or attached to it.
+            if terminate {
                 let _ = self.bridge.call("shutdown", json!({}));
             }
         }
@@ -1803,6 +1836,29 @@ impl Session {
             Some((m, p)) => (m, p.trim()),
             None => (raw, ""),
         };
+        // Run control belongs to the debugger's own requests: a raw
+        // `continue` would block this loop until a stop that nothing the
+        // client sends could then cause, and a raw step would move the
+        // machine without a `stopped` event.
+        if matches!(
+            method,
+            "continue"
+                | "run_until"
+                | "step"
+                | "step_over"
+                | "step_out"
+                | "step_copper"
+                | "step_frame"
+                | "reverse_step"
+                | "reverse_frame"
+                | "reverse_continue"
+                | "pause"
+                | "shutdown"
+        ) {
+            return Err(format!(
+                "{method}: use the debugger's own run controls (continue, step, pause, stop)"
+            ));
+        }
         let params: Value = if params.is_empty() {
             json!({})
         } else {
