@@ -29,7 +29,7 @@ const CONTRIBUTORS: &[&str] = &[
     "Volker Schwaberow",
     "Matt Harlum",
 ];
-const PATREON_SPONSORS: &[&str] = &["Lee Hobson"];
+const PATREON_SPONSORS: &[&str] = &["Lee Hobson", "Sphair"];
 
 /// One title letter every so often: ten letters make the
 /// near-three-second assembly.
