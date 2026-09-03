@@ -73,7 +73,6 @@ pub struct CdTrack {
     /// Disc sector of the track's INDEX 01 (where the TOC points).
     pub start_sector: u32,
     /// Sectors from INDEX 01 to the end of the track's region.
-    #[allow(dead_code)]
     pub sector_count: u32,
 }
 
