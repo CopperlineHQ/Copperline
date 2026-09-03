@@ -112,14 +112,34 @@ pub(crate) struct FileAuthority {
 }
 
 impl FileAuthority {
-    #[cfg(not(target_arch = "wasm32"))]
-    fn open(&self, relative: &Path) -> std::io::Result<cap_std::fs::File> {
-        self.dir.open(relative)
+    fn open(&self, relative: &Path) -> std::io::Result<std::fs::File> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.dir.open(relative).map(cap_std::fs::File::into_std)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = relative;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "uaelib file access is unavailable in browser builds",
+            ))
+        }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    fn create(&self, relative: &Path) -> std::io::Result<cap_std::fs::File> {
-        self.dir.create(relative)
+    fn create(&self, relative: &Path) -> std::io::Result<std::fs::File> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.dir.create(relative).map(cap_std::fs::File::into_std)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = relative;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "uaelib file access is unavailable in browser builds",
+            ))
+        }
     }
 }
 
