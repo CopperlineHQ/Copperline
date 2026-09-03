@@ -3663,6 +3663,7 @@ fn identify_false_drops_the_board() -> Result<()> {
 fn uaelib_trap_is_fitted_by_default() -> Result<()> {
     let cfg = parse_config("")?;
     assert!(cfg.emulation.uaelib);
+    assert!(!cfg.emulation.uaelib_files);
     Ok(())
 }
 
@@ -3670,6 +3671,13 @@ fn uaelib_trap_is_fitted_by_default() -> Result<()> {
 fn emulation_uaelib_false_drops_the_trap() -> Result<()> {
     let cfg = parse_config("[emulation]\nuaelib = false")?;
     assert!(!cfg.emulation.uaelib);
+    Ok(())
+}
+
+#[test]
+fn emulation_uaelib_files_is_an_explicit_opt_in() -> Result<()> {
+    let cfg = parse_config("[emulation]\nuaelib_files = true")?;
+    assert!(cfg.emulation.uaelib_files);
     Ok(())
 }
 

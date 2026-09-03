@@ -223,7 +223,9 @@ uaelib trap helpers (`debug_register_bitmap`, `debug_register_palette`,
   list address.
 
 Selecting an entry decodes its contents dynamically from guest memory on every
-repaint, allowing live visual inspection as the program executes.
+repaint, allowing live visual inspection as the program executes. **Save...**
+exports a selected bitmap or palette as PNG through that same decoder.
 
-The same registry is accessible over the control protocol (`debug.resources`)
+The same registry is accessible over the control protocol (`debug.resources`,
+`debug.resource.export`)
 and via the console's `DBGRES` command.

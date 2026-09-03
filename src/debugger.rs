@@ -85,6 +85,53 @@ pub struct UiWatch {
     /// A word a dozen routines all poke is otherwise unwatchable: this is
     /// how you ask about the one caller you care about.
     pub pc: Option<u32>,
+    /// Whether reads, writes, or both should stop.
+    pub access: WatchAccess,
+}
+
+/// Access class for a memory watchpoint.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WatchAccess {
+    #[default]
+    Write,
+    Read,
+    Access,
+}
+
+impl WatchAccess {
+    pub fn parse(word: &str) -> Option<Self> {
+        match word.to_ascii_lowercase().as_str() {
+            "write" => Some(Self::Write),
+            "read" => Some(Self::Read),
+            "access" | "readwrite" | "read_write" => Some(Self::Access),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Write => "write",
+            Self::Read => "read",
+            Self::Access => "access",
+        }
+    }
+
+    pub fn reads(self) -> bool {
+        matches!(self, Self::Read | Self::Access)
+    }
+
+    pub fn writes(self) -> bool {
+        matches!(self, Self::Write | Self::Access)
+    }
+
+    /// Combine two requests for the same watched word.
+    pub fn union(self, other: Self) -> Self {
+        if self == other {
+            self
+        } else {
+            Self::Access
+        }
+    }
 }
 
 /// Who touched a watched memory word: attributed at the access site (the
@@ -207,6 +254,7 @@ pub enum DebugStop {
         source: WatchSource,
         vpos: u16,
         hpos: u16,
+        access: WatchAccess,
     },
     /// A watched custom chipset register was written (by any source: CPU
     /// or Copper), at the given beam position.
@@ -267,17 +315,19 @@ impl DebugStop {
                 source,
                 vpos,
                 hpos,
+                access,
             } => match source {
-                WatchSource::Cpu => {
-                    format!("Watch ${addr:06X}: {old:04X}->{new:04X} (pc ${writer_pc:06X})")
-                }
-                // A read-side DMA channel leaves the word alone, so an
-                // unchanged value is the tell that this was a fetch, not
-                // a write.
-                _ if old == new => format!(
+                WatchSource::Cpu if access.reads() && old == new => format!(
+                    "Watch ${addr:06X}: {new:04X} read by {} (pc ${writer_pc:06X}, v{vpos} h{hpos})",
+                    source.describe()
+                ),
+                _ if access.reads() && old == new => format!(
                     "Watch ${addr:06X}: {new:04X} read by {} (v{vpos} h{hpos})",
                     source.describe()
                 ),
+                WatchSource::Cpu => {
+                    format!("Watch ${addr:06X}: {old:04X}->{new:04X} (pc ${writer_pc:06X})")
+                }
                 _ => format!(
                     "Watch ${addr:06X}: {old:04X}->{new:04X} ({} write, v{vpos} h{hpos})",
                     source.describe()
@@ -956,6 +1006,7 @@ impl InteractiveBreaks {
         current: u16,
         filter: Option<WatchSource>,
         pc: Option<u32>,
+        access: WatchAccess,
     ) -> bool {
         let added = match self.watches.iter().position(|w| w.addr == addr) {
             Some(pos) => {
@@ -968,6 +1019,7 @@ impl InteractiveBreaks {
                     last: current,
                     filter,
                     pc,
+                    access,
                 });
                 true
             }
@@ -1663,7 +1715,7 @@ mod tests {
     #[test]
     fn interactive_watches_record_baselines_and_clear() {
         let mut breaks = InteractiveBreaks::new(UI_ADDR_MASK);
-        assert!(breaks.toggle_watch(0x1000, 0xABCD, None, None));
+        assert!(breaks.toggle_watch(0x1000, 0xABCD, None, None, WatchAccess::Write));
         assert_eq!(breaks.watches[0].last, 0xABCD);
         // The register watch normalizes a full $DFFxxx address to the
         // word offset.
@@ -1790,6 +1842,7 @@ mod tests {
             source: WatchSource::Bitplane(2),
             vpos: 100,
             hpos: 40,
+            access: WatchAccess::Read,
         };
         assert_eq!(
             stop.describe(),
@@ -1812,6 +1865,7 @@ mod tests {
                 source: WatchSource::Cpu,
                 vpos: 44,
                 hpos: 100,
+                access: WatchAccess::Write,
             }
             .describe(),
             "Watch $C09580: 0012->0013 (pc $C03374)"
@@ -1825,6 +1879,7 @@ mod tests {
                 source: WatchSource::Blitter,
                 vpos: 44,
                 hpos: 100,
+                access: WatchAccess::Write,
             }
             .describe(),
             "Watch $C09580: 0012->0013 (blitter write, v44 h100)"

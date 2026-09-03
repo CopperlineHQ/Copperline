@@ -306,7 +306,8 @@ fn build() -> Vec<ToolDef> {
         resume_entry(
             "run_until",
             format!(
-                "Run until exactly one target is reached: `pc` (an address), `vpos` \
+                "Run until exactly one target is reached: `pc` (an address), `pc_outside` \
+                 ([low, high], or true for the $F80000-$FFFFFF ROM window), `vpos` \
                  (optionally with `hpos`, the next time the beam reaches that line), \
                  `frame` (absolute frame number), `cck` (absolute colour clock), \
                  `seconds` (absolute emulated seconds), or `stable_frames` (the display \
@@ -316,6 +317,16 @@ fn build() -> Vec<ToolDef> {
             ),
             vec![
                 ("pc", addr("Stop when PC reaches this address")),
+                (
+                    "pc_outside",
+                    json!({
+                        "description": "Stop when PC leaves [low, high]; true uses the ROM window",
+                        "oneOf": [
+                            {"type": "boolean", "const": true},
+                            {"type": "array", "minItems": 2, "maxItems": 2, "items": {"description": "address"}}
+                        ]
+                    }),
+                ),
                 ("vpos", uint("Stop at this beam line (0-based)", Some(0), Some(65535))),
                 (
                     "hpos",
@@ -431,7 +442,8 @@ fn build() -> Vec<ToolDef> {
         // State inspection
         entry(
             "regs.get",
-            "Read the CPU registers: d0-d7, a0-a7, pc, sr, usp/ssp and the status flags.",
+            "Read the CPU registers: d0-d7, a0-a7, pc, sr and stopped state; when an FPU \
+             is fitted, `fpu` contains exact raw fp0-fp7 values plus fpcr/fpsr/fpiar.",
             no_params(),
             json!({}),
         ),
@@ -735,6 +747,19 @@ fn build() -> Vec<ToolDef> {
             json!({}),
         ),
         entry(
+            "debug.resource.export",
+            "Export one registered bitmap or palette as a PNG through the same safe, \
+             clamped decoder the Frame Analyzer Resources tab uses.",
+            object(
+                vec![
+                    ("address", addr("Registered resource address")),
+                    ("path", string("Host PNG path")),
+                ],
+                &["address", "path"],
+            ),
+            json!({"address": "0x20000", "path": "/tmp/resource.png"}),
+        ),
+        entry(
             "debug.idle",
             "Report the guest's uaelib idle markers (debug_start_idle/stop_idle): current \
              state, whether ever used, and the last completed frame's idle_cck/frame_cck.",
@@ -776,8 +801,10 @@ fn build() -> Vec<ToolDef> {
              with a `profile.json` summary written at stop. Stops by itself after \
              `frames` (default 500, at most 100000); `slots` adds per-frame chip-bus \
              owner and CPU-wait grids, `screenshots` saves the frame image for none, \
-             every or the last frame, `pc_samples` adds a sampled PC histogram. Arms \
-             the frame analyzer's trace for the session, which suspends run-ahead.",
+             every or the last frame, `pc_samples` adds a sampled PC histogram. An \
+             optional `trigger` ({frame:N} or {busy_cck_over:N}) defers recording while \
+             leaving the capture armed. Arms the frame analyzer's trace for the session, \
+             which suspends run-ahead.",
             object(
                 vec![
                     ("path", string("Host directory for the profile files (optional)")),
@@ -791,6 +818,19 @@ fn build() -> Vec<ToolDef> {
                         ),
                     ),
                     ("pc_samples", boolean("Include a sampled PC histogram per frame")),
+                    (
+                        "trigger",
+                        json!({
+                            "type": "object",
+                            "description": "Begin at an absolute frame or when busy cck exceeds a threshold",
+                            "properties": {
+                                "frame": {"type": "integer", "minimum": 0},
+                                "busy_cck_over": {"type": "integer", "minimum": 0}
+                            },
+                            "minProperties": 1,
+                            "maxProperties": 1
+                        }),
+                    ),
                 ],
                 &[],
             ),
@@ -847,7 +887,7 @@ fn build() -> Vec<ToolDef> {
             "Install a breakpoint and return its `id`. `kind` selects the trap: `pc` (an \
              `addr`, optional `cond` {lhs, op, rhs} over registers, immediates or \
              {\"mem\": addr} words with op eq/ne/lt/gt/le/ge/and, and `ignore` count), \
-             `watch` (any access to `addr`, optionally by `class` cpu|blitter|disk|copper| \
+             `watch` (`access` write/read/access at `addr`, optionally by `class` cpu|blitter|disk|copper| \
              bpl1..bpl8|spr0..spr7|aud0..aud3 and, for cpu, a `pc`), `reg_watch` (a write \
              to custom register `reg`), `beam` (`vpos`, optional `hpos`), `copper` (the \
              Copper fetching `addr`), `catch` (exception `vector` number), `loadseg` (an \
@@ -878,6 +918,10 @@ fn build() -> Vec<ToolDef> {
                     ),
                     ("ignore", uint("pc: skip this many hits first", Some(0), None)),
                     ("class", string("watch: cpu | blitter | disk | copper | bpl1..bpl8 | spr0..spr7 | aud0..aud3")),
+                    (
+                        "access",
+                        enumeration("watch access type (default write)", &["write", "read", "access"]),
+                    ),
                     ("pc", addr("watch (cpu class): only accesses by the instruction at this PC")),
                     ("reg", addr("reg_watch: custom register name or offset")),
                     ("vpos", uint("beam: the line", Some(0), Some(65535))),

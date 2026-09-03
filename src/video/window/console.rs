@@ -205,7 +205,7 @@ pub(super) fn wave_status_lines(status: &crate::waveform::WaveStatus) -> Vec<Str
 
 const CONSOLE_HELP: &[&str] = &[
     "execution:  run  pause  step/s [N]  over  out  frame/f  line  cstep",
-    "            runto ADDR   toslot V [H]   rstep [N]  rframe  rrun",
+    "            runto ADDR   outrom   toslot V [H]   rstep [N]  rframe  rrun",
     "stops:      break/b ADDR [COND] [IGN N]   watch/w ADDR [CPU|BLITTER|DISK]",
     "            rwatch REG",
     "            btrap V [H]   cbreak ADDR   catch irq N|trap N|vec N",
@@ -396,6 +396,14 @@ impl App {
                     Ok((!reached).then(|| format!("${addr:06X} not reached (budget)")))
                 })
             }
+            "OUTROM" => self.console_exec_report(|app| {
+                let reached = app.emu.debug_run_until_pc_outside(
+                    crate::memory::ROM_BASE as u32,
+                    0x00FF_FFFF,
+                    CONSOLE_RUN_TO_BUDGET,
+                )?;
+                Ok((!reached).then(|| "program code not reached (budget or debugger stop)".into()))
+            }),
             "TOSLOT" => {
                 let Some(vpos) = args.first().and_then(|t| dec_u16(t)) else {
                     return ConsoleOutcome::error("usage: TOSLOT VPOS [HPOS] (decimal)");

@@ -952,13 +952,29 @@ fn run_flag_runs_the_uaelib_probe_and_echoes_debug_lines_on_stdout(
     // RawDoFmt's hex case differs between Kickstarts (AROS prints upper).
     assert_eq!(
         result.trim().to_ascii_lowercase(),
-        "present=4eb9 r86=1 r0=0 r88=0 r82=0 r82e=ffffffff out=0"
+        "present=4eb9 r86=1 r0=0 r88=0 r82=0 r82e=ffffffff out=0 load=0 match=0"
     );
     assert!(
         stdout.contains("DBG: hello from uaelib 42"),
         "stdout:\n{stdout}"
     );
     assert!(stdout.contains("DBG: second line"), "stdout:\n{stdout}");
+    Ok(())
+}
+
+/// The file half of Bartman's function-88 helpers is a separate trust
+/// decision: once opted in it is rooted beside the `--run` executable and a
+/// guest save/load round trip succeeds there.
+#[test]
+#[ignore = "runs the emulator"]
+fn run_flag_uaelib_file_helpers_round_trip_when_opted_in() -> Result<(), Box<dyn std::error::Error>>
+{
+    let _guard = lock_emulator_tests();
+    let (_, result) = run_uaelib_probe("uaelib-files", Some("[emulation]\nuaelib_files = true\n"))?;
+    assert_eq!(
+        result.trim().to_ascii_lowercase(),
+        "present=4eb9 r86=1 r0=0 r88=0 r82=0 r82e=ffffffff out=0 load=12 match=1"
+    );
     Ok(())
 }
 

@@ -37,8 +37,14 @@ Add a launch configuration (the *Copperline: launch a program* snippet):
 
 Press F5: Copperline opens a window, warp-boots to the program, stops at
 its entry point, and the IDE shows its source. Add `"model"`, `"fast"`,
-`"config"` and friends to pick the machine; `"headless": true` runs
-without a window.
+`"config"` and friends to pick the machine. `"memoryFill": "0xDEAD"`
+fills cold-start RAM with a diagnostic pattern, `"fpu": true` fits an FPU,
+`"stack": 32768` sets the guest CLI stack, `"ntsc": true` selects NTSC,
+`"detach": true` closes the boot CLI after starting the program, and
+`"emulatorLog": true` mirrors the emulator log into the Debug Console.
+`"headless": true` runs without a window. Data breakpoints support read,
+write, and read/write access; fitted FPU registers appear in the Registers
+scope.
 
 To attach to an emulator you started yourself:
 

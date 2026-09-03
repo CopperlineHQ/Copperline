@@ -2726,6 +2726,7 @@ fn panels_render_into_their_rects() {
         hidden_above: 0,
         hidden_below: 0,
         detail: Some(AnalyzerResourceDetail::Bitmap(preview)),
+        exportable: true,
     };
     let data = PanelViewData::FrameAnalyzer(Box::new(FrameAnalyzerView {
         running: false,

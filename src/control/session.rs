@@ -5,7 +5,7 @@
 //! [`MachineInputState`] follows the emulated machine across connection
 //! turnover and owns deferred input plus the headless recording hook.
 
-use crate::debugger::{BreakCond, WatchSource};
+use crate::debugger::{BreakCond, WatchAccess, WatchSource};
 use crate::emulator::Emulator;
 use crate::inputrec::InputRecorder;
 use crate::inputsched::{JoyState, ReplayAction};
@@ -26,6 +26,7 @@ pub enum BreakSpec {
         source: Option<WatchSource>,
         /// Stop only when this instruction made the access.
         pc: Option<u32>,
+        access: WatchAccess,
     },
     RegWatch {
         off: u16,
@@ -331,12 +332,18 @@ fn normalize_spec(emu: &Emulator, spec: BreakSpec) -> BreakSpec {
             cond,
             ignore,
         },
-        BreakSpec::Watch { addr, source, pc } => BreakSpec::Watch {
+        BreakSpec::Watch {
+            addr,
+            source,
+            pc,
+            access,
+        } => BreakSpec::Watch {
             addr: addr & addr_mask & !1,
             source,
             // Instruction addresses are even; an odd one could never
             // equal a writer PC, so the watch would never fire.
             pc: pc.map(|pc| pc & addr_mask & !1),
+            access,
         },
         BreakSpec::Copper { addr } => BreakSpec::Copper {
             addr: addr & 0x00FF_FFFE,
@@ -375,9 +382,14 @@ fn toggle_spec(emu: &mut Emulator, spec: &BreakSpec) -> bool {
         BreakSpec::Pc { addr, cond, ignore } => {
             emu.machine.ui_set_breakpoint(*addr, *cond, *ignore)
         }
-        BreakSpec::Watch { addr, source, pc } => {
-            emu.machine.ui_toggle_watch_qualified(*addr, *source, *pc)
-        }
+        BreakSpec::Watch {
+            addr,
+            source,
+            pc,
+            access,
+        } => emu
+            .machine
+            .ui_toggle_watch_access(*addr, *source, *pc, *access),
         BreakSpec::RegWatch { off } => emu.machine.ui_toggle_reg_watch(*off),
         BreakSpec::Beam { vpos, hpos } => emu.bus_mut().ui_toggle_beam_trap(*vpos, *hpos),
         BreakSpec::Copper { addr } => emu.bus_mut().ui_toggle_copper_break(*addr),
@@ -400,8 +412,14 @@ pub fn describe_spec(spec: &BreakSpec) -> String {
             }
             s
         }
-        BreakSpec::Watch { addr, source, pc } => format!(
-            "memory watch at ${addr:06X}{}{}",
+        BreakSpec::Watch {
+            addr,
+            source,
+            pc,
+            access,
+        } => format!(
+            "memory {} watch at ${addr:06X}{}{}",
+            access.name(),
             source
                 .map(|f| format!(" ({} accesses)", f.describe()))
                 .unwrap_or_default(),
@@ -737,6 +755,7 @@ mod tests {
                 addr: 0x3_0001,
                 source: None,
                 pc: None,
+                access: WatchAccess::Write,
             },
         )
         .unwrap();
@@ -746,6 +765,7 @@ mod tests {
                 addr: 0x3_0000,
                 source: None,
                 pc: None,
+                access: WatchAccess::Write,
             },
         );
         assert!(dup.is_err());

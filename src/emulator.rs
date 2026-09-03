@@ -13,7 +13,7 @@ use crate::floppy::FloppyController;
 use crate::memory::Memory;
 use crate::serial::StdoutSink;
 use crate::timebase::{Duration, Instant};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use log::{info, warn};
 
 const INSTRUCTIONS_PER_SLICE: usize = 32_000;
@@ -655,6 +655,29 @@ impl Emulator {
             _ => {}
         }
 
+        let retired_now = self.retired_instructions();
+        let busy_cck = {
+            let bus = self.bus();
+            if let Some((idle, total)) = bus
+                .uaelib
+                .as_ref()
+                .and_then(|uaelib| uaelib.idle().last_frame())
+            {
+                total.saturating_sub(idle)
+            } else {
+                bus.frame_bus_trace()
+                    .map(|trace| trace.rows as u64 * u64::from(trace.line_cck))
+                    .unwrap_or(0)
+            }
+        };
+        if self
+            .profile
+            .as_mut()
+            .is_some_and(|profile| !profile.should_record(frame, busy_cck, retired_now))
+        {
+            return Ok(());
+        }
+
         // Renders first: they borrow the whole emulator immutably.
         let (mut screenshot, mut digest) = (None, None);
         if matches!(opts.screenshots, crate::profile::ScreenshotMode::Every) {
@@ -782,7 +805,6 @@ impl Emulator {
             record["digest"] = Value::from(digest.unwrap_or_default());
         }
 
-        let retired_now = self.retired_instructions();
         if let Some(profile) = self.profile.as_mut() {
             record["retired"] = Value::from(profile.take_retired_delta(retired_now));
             profile
@@ -869,6 +891,108 @@ impl Emulator {
     /// The resources the guest registered through the uaelib trap.
     pub fn uaelib_resources(&self) -> &[crate::uaelib::DebugResource] {
         self.bus().uaelib.as_ref().map_or(&[], |u| u.resources())
+    }
+
+    /// Export a registered bitmap or palette to PNG using the same decoder
+    /// as the frame analyzer's Resources tab.
+    pub fn export_uaelib_resource(
+        &self,
+        address: u32,
+        path: &std::path::Path,
+    ) -> Result<ResourceExport> {
+        use crate::uaelib::{
+            ResourceKind, RESOURCE_FLAG_HAM, RESOURCE_FLAG_INTERLEAVED, RESOURCE_FLAG_MASKED,
+        };
+        use crate::video::resource_preview;
+
+        let resource = self
+            .uaelib_resources()
+            .iter()
+            .find(|resource| resource.address == address)
+            .ok_or_else(|| anyhow!("no registered debug resource at ${address:06X}"))?;
+        let (pixels, width, height, note) = match resource.kind {
+            ResourceKind::Bitmap {
+                width,
+                height,
+                planes,
+            } => {
+                let data = self
+                    .machine
+                    .debug_read_memory(address, (resource.size.max(1) as usize).min(512 * 1024));
+                let palette = self.uaelib_resource_palette();
+                let preview = resource_preview::decode_bitmap(
+                    &data,
+                    width,
+                    height,
+                    planes,
+                    resource.flags & RESOURCE_FLAG_INTERLEAVED != 0,
+                    resource.flags & RESOURCE_FLAG_MASKED != 0,
+                    resource.flags & RESOURCE_FLAG_HAM != 0,
+                    &palette,
+                );
+                if preview.width == 0 || preview.height == 0 {
+                    bail!("resource {} has degenerate bitmap geometry", resource.name);
+                }
+                (preview.pixels, preview.width, preview.height, preview.note)
+            }
+            ResourceKind::Palette { entries } => {
+                let data = self
+                    .machine
+                    .debug_read_memory(address, usize::from(entries) * 2);
+                let colours = resource_preview::decode_palette_words(&data, entries);
+                if colours.is_empty() {
+                    bail!("resource {} has no palette entries", resource.name);
+                }
+                let columns = colours.len().min(16);
+                let rows = colours.len().div_ceil(columns);
+                let cell = 16usize;
+                let width = columns * cell;
+                let height = rows * cell;
+                let mut pixels = vec![0xFF20_2020; width * height];
+                for (index, colour) in colours.into_iter().enumerate() {
+                    let x0 = (index % columns) * cell;
+                    let y0 = (index / columns) * cell;
+                    for y in y0..y0 + cell {
+                        pixels[y * width + x0..y * width + x0 + cell].fill(colour);
+                    }
+                }
+                (pixels, width, height, None)
+            }
+            ResourceKind::Copperlist => bail!("Copperlist resources cannot be exported as PNG"),
+            ResourceKind::Unknown(kind) => {
+                bail!("resource {} has unknown type {kind}", resource.name)
+            }
+        };
+        crate::screenshot::save(path, &pixels, width as u32, height as u32)?;
+        Ok(ResourceExport {
+            name: resource.name.clone(),
+            kind: resource.kind_name(),
+            width,
+            height,
+            note,
+        })
+    }
+
+    fn uaelib_resource_palette(&self) -> Vec<u32> {
+        if let Some((address, entries)) =
+            self.uaelib_resources()
+                .iter()
+                .find_map(|resource| match resource.kind {
+                    crate::uaelib::ResourceKind::Palette { entries } => {
+                        Some((resource.address, entries))
+                    }
+                    _ => None,
+                })
+        {
+            let data = self
+                .machine
+                .debug_read_memory(address, usize::from(entries) * 2);
+            return crate::video::resource_preview::decode_palette_words(&data, entries);
+        }
+        let palette = &self.bus().denise.palette;
+        (0..32)
+            .map(|entry| crate::chipset::denise::rgb24_to_rgba8(palette.rgb24(entry)))
+            .collect()
     }
 
     /// The guest's idle-marker accounting, when the trap is fitted.
@@ -995,10 +1119,18 @@ impl Emulator {
         // Channel mode, stereo separation, and the filter override are host
         // preferences, not part of the saved machine, so carry the current
         // choices across the load.
+        let uaelib_file_root = self
+            .bus()
+            .uaelib
+            .as_ref()
+            .and_then(|uaelib| uaelib.file_root().map(std::path::Path::to_path_buf));
         let mono = self.bus_mut().paula.mono_output();
         let separation = self.bus_mut().paula.stereo_separation();
         let filter = self.bus_mut().paula.led_filter_mode();
         let loaded = load(&mut self.machine)?;
+        if let Some(uaelib) = self.bus_mut().uaelib.as_mut() {
+            uaelib.set_file_root(uaelib_file_root);
+        }
         self.bus_mut().paula.set_mono_output(mono);
         self.bus_mut().paula.set_stereo_separation(separation);
         self.bus_mut().paula.set_led_filter_mode(filter);
@@ -1158,11 +1290,19 @@ impl Emulator {
     fn restore_blob(&mut self, blob: &[u8], pos: u64) -> Result<()> {
         // Preserve host-side channel mode, separation, and filter override
         // across the restore (see load_state).
+        let uaelib_file_root = self
+            .bus()
+            .uaelib
+            .as_ref()
+            .and_then(|uaelib| uaelib.file_root().map(std::path::Path::to_path_buf));
         let mono = self.bus_mut().paula.mono_output();
         let separation = self.bus_mut().paula.stereo_separation();
         let filter = self.bus_mut().paula.led_filter_mode();
         let mut cursor = std::io::Cursor::new(blob);
         self.machine.apply_state(&mut cursor)?;
+        if let Some(uaelib) = self.bus_mut().uaelib.as_mut() {
+            uaelib.set_file_root(uaelib_file_root);
+        }
         self.bus_mut().paula.set_mono_output(mono);
         self.bus_mut().paula.set_stereo_separation(separation);
         self.bus_mut().paula.set_led_filter_mode(filter);
@@ -1212,11 +1352,19 @@ impl Emulator {
     /// coordinate keeps marching forward while emulated time oscillates
     /// within the burst. Host-side Paula settings survive as usual.
     pub fn runahead_restore(&mut self, blob: &[u8]) -> Result<()> {
+        let uaelib_file_root = self
+            .bus()
+            .uaelib
+            .as_ref()
+            .and_then(|uaelib| uaelib.file_root().map(std::path::Path::to_path_buf));
         let mono = self.bus_mut().paula.mono_output();
         let separation = self.bus_mut().paula.stereo_separation();
         let filter = self.bus_mut().paula.led_filter_mode();
         let mut cursor = std::io::Cursor::new(blob);
         self.machine.apply_state(&mut cursor)?;
+        if let Some(uaelib) = self.bus_mut().uaelib.as_mut() {
+            uaelib.set_file_root(uaelib_file_root);
+        }
         self.bus_mut().paula.set_mono_output(mono);
         self.bus_mut().paula.set_stereo_separation(separation);
         self.bus_mut().paula.set_led_filter_mode(filter);
@@ -1921,6 +2069,28 @@ impl Emulator {
         Ok(false)
     }
 
+    /// Run until the program counter leaves an inclusive address window.
+    /// This is the debugger's return-from-ROM primitive.
+    pub fn debug_run_until_pc_outside(
+        &mut self,
+        lo: u32,
+        hi: u32,
+        max_instructions: usize,
+    ) -> Result<bool> {
+        let mask = self.machine.ui_addr_mask();
+        for _ in 0..max_instructions {
+            let pc = self.machine.pc() & mask;
+            if !(lo..=hi).contains(&pc) {
+                return Ok(true);
+            }
+            self.debug_step_one_with_idle()?;
+            if self.machine.ui_debug_stop_pending() {
+                return Ok(false);
+            }
+        }
+        Ok(false)
+    }
+
     /// Run until the Agnus beam reaches (`vpos`, `hpos`) -- `hpos: None`
     /// means the first colour clock of that line -- up to
     /// `max_instructions`. Arms a one-shot beam trap, so the stop lands at
@@ -2371,6 +2541,15 @@ impl Emulator {
             cpu_stopped: run.stopped,
         })
     }
+}
+
+/// Metadata for a successful registered-resource PNG export.
+pub struct ResourceExport {
+    pub name: String,
+    pub kind: &'static str,
+    pub width: usize,
+    pub height: usize,
+    pub note: Option<String>,
 }
 
 fn real_slice_accounting(
@@ -3484,7 +3663,35 @@ pub fn build_machine(
     // both, and a later ROM reload may take the extended ROM away.
     if cfg.emulation.uaelib {
         let shadowed = !bus.mem.extended_rom.is_empty() && bus.mem.extended_rom_base == 0x00F0_0000;
-        bus.attach_uaelib(crate::uaelib::UaeLib::new());
+        let mut uaelib = crate::uaelib::UaeLib::new();
+        if cfg.emulation.uaelib_files {
+            let root = cfg.run_program_dir.as_ref().and_then(|program_dir| {
+                match std::fs::canonicalize(program_dir) {
+                    Ok(path) => Some(path),
+                    Err(e) => {
+                        log::warn!(
+                            "uaelib: cannot enable file commands below {}: {e}",
+                            program_dir.display()
+                        );
+                        None
+                    }
+                }
+            });
+            match root {
+                Some(root) => {
+                    info!(
+                        "uaelib: debug_load/debug_save enabled below {}",
+                        root.display()
+                    );
+                    uaelib.set_file_root(Some(root));
+                }
+                None => log::warn!(
+                    "[emulation] uaelib_files = true has no --run program directory; \
+                     debug_load/debug_save remain disabled"
+                ),
+            }
+        }
+        bus.attach_uaelib(uaelib);
         if shadowed {
             info!("uaelib: trap at $F0FF60 fitted but hidden behind the $F00000 extended ROM");
         } else {
@@ -4335,7 +4542,12 @@ mod tests {
         // Watch a chip-RAM word and point bitplane 1 at it, then let a
         // frame's display DMA run. A fetch changes nothing, so only the
         // per-channel read attribution can see this at all.
-        assert!(emu.machine.ui_toggle_watch(0x60000));
+        assert!(emu.machine.ui_toggle_watch_access(
+            0x60000,
+            None,
+            None,
+            crate::debugger::WatchAccess::Read,
+        ));
         {
             let bus = emu.bus_mut();
             bus.custom_write(0x0E0, 4, 0x0006_0000); // BPL1PT = $60000

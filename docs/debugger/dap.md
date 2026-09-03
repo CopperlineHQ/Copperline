@@ -80,6 +80,12 @@ configuration says. Arguments:
 | `config` | A TOML configuration file (`--config`). Default: the launcher's saved default. |
 | `factory` | Ignore the saved default configuration (`--factory`). |
 | `model`, `chipset`, `cpu`, `chip`, `fast`, `slow` | The matching `copperline` flags. |
+| `memoryFill` | `--ram-init`: `zero`, `random[:SEED]`, `pattern:WORD`, or `0xWORD` for uninitialised-read testing. |
+| `fpu` | Fit or omit an FPU (`--fpu` / `--no-fpu`). |
+| `stack` | AmigaDOS CLI stack size before launch (`--run-stack`). |
+| `ntsc` | Select NTSC timing when true, PAL when false (`--video`). |
+| `detach` | Start the guest executable asynchronously and close the boot CLI (`--run-detach`). |
+| `emulatorLog` | Mirror the launched emulator's stdout/stderr log into the Debug Console. |
 | `rtcTime` | `--rtc-time`: the guest clock's seed. Default: the launch time, pinned, so reverse execution replays exactly (a guest reading the host clock would diverge; see [Reverse debugging](reverse.md)). |
 | `extraArgs` | Further emulator flags, as an array. |
 | `headless` | No window (`--control`). |
@@ -134,19 +140,19 @@ global(s), call-frame info`.
 | DAP | Copperline |
 |---|---|
 | Source, function and instruction breakpoints | `break.add {"kind": "pc"}`; a source line without code binds to the next line that has some, like GDB. Conditions are one comparison the machine evaluates itself (`d0 == 5`, `[$DFF006] != 0`, `a0 >= d1`, `sr & $2000`; a memory operand compares the 16-bit word at the address); hit conditions are ignore counts. |
-| Data breakpoints | `break.add {"kind": "watch"}` on the words of the variable (writes only, eight words at most). |
-| Exception breakpoints | `break.add {"kind": "catch"}`: bus error, address error, illegal instruction, zero divide, CHK/TRAPV, privilege violation, line-A, line-F. |
+| Data breakpoints | `break.add {"kind": "watch"}` on the words of the variable, with read, write, or read/write access (eight words at most). |
+| Exception breakpoints | `break.add {"kind": "catch"}`: bus error, address error, illegal instruction, zero divide, CHK/TRAPV, privilege violation, line-A, line-F, and TRAP #7. Address error, illegal instruction, and TRAP #7 are selected by default, and launch sessions arm them only after the target program loads so the OS boot does not stop first. |
 | Continue / Pause | `continue` / `pause`. |
-| Step Over / Into / Out | `step_over` / `step` / `step_out`, repeated until the source line changes (statement granularity) or once (instruction granularity). Stepping into code without lines runs it to its return. A line that outgrows 64 single steps (a loop) gets temporary breakpoints on the function's other lines and the return address instead. |
+| Step Over / Into / Out | `step_over` / `step` / `step_out`, repeated until the source line changes (statement granularity) or once (instruction granularity). Step Out while the PC is in Kickstart uses `run_until {"pc_outside": true}` to return to program code. Stepping into code without lines runs it to its return. A line that outgrows 64 single steps (a loop) gets temporary breakpoints on the function's other lines and the return address instead. |
 | Step Back / Reverse Continue | `reverse_step` / `reverse_continue` from the snapshot ring (see [Reverse debugging](reverse.md)); Step Back also repeats until the line changes. The adapter takes a snapshot (`reverse_anchor`) at every stop a run ends in, so stepping back replays from there: the boot volume `--run` stages is a host directory mount, whose traffic a replay from an older snapshot could not reproduce. |
 | Call stack | Call-frame information when the DWARF has it, else a scan of the stack for return addresses that follow a `JSR`/`BSR`. Frames beyond the innermost are looked up at the call site. |
-| Scopes | Registers (D0-D7, A0-A7, PC, SR with its flags), Locals, Globals, Chipset (every custom register and the beam position). |
+| Scopes | Registers (D0-D7, A0-A7, PC, SR with its flags, plus FP0-FP7/FPCR/FPSR/FPIAR when an FPU is fitted), Locals, Globals, Chipset (every custom register and the beam position). |
 | Set variable | `regs.set` for the innermost frame's registers; `mem.write` for base-type variables and members. |
 | Evaluate / hover / watch | Registers, variables and symbols by name, numbers (`$DFF000`, `0x1234`, `%1010`), `+ - * /`, `[expr]` / `[expr].w` / `[expr].b` memory reads, `d0.w`. In the Debug Console, `!method {json}` sends a raw control-protocol request and prints the reply (`!status`, `!beam.get`, `!capture.screenshot {"path": "/tmp/s.png"}`). |
 | Memory view | `mem.read` / `mem.write` (base64). |
 | Disassembly view | `disasm`, with symbols and source lines; backwards disassembly anchors at the nearest function or symbol start. |
 | Jump to cursor | `regs.set {"reg": "pc"}`. |
-| Debug Console output | Serial output (which is where `KPrintF` goes) as `stdout`; uaelib function 86 (`debug_log`) text and the adapter's own notes as `console`. |
+| Debug Console output | Serial output (which is where `KPrintF` goes) as `stdout`; uaelib function 86 (`debug_log`), optional `emulatorLog`, and the adapter's own notes as `console`. |
 | Modules / loaded sources | The program with its first hunk's address, and the source files its debug information names. |
 
 A stop from a breakpoint the debugger window set, or from a `catch`, `reg
@@ -160,8 +166,6 @@ reflected in the IDE.
 - Locals are shown for simple location expressions and one level of
   struct/array nesting; optimised code, location lists and DWARF
   expressions render as unsupported.
-- Data breakpoints trigger on writes (Copperline's memory watches); read
-  watchpoints are not offered.
 - One thread (the CPU) is presented; Exec tasks are not separate threads.
 - The `sourceMap` is a prefix replacement; when a recorded path does not
   exist on the host, the adapter also tries the path's tail under the

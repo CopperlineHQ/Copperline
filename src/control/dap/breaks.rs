@@ -19,6 +19,7 @@ pub struct ExceptionFilter {
     pub label: &'static str,
     pub description: &'static str,
     pub vector: u16,
+    pub default: bool,
 }
 
 pub const EXCEPTION_FILTERS: &[ExceptionFilter] = &[
@@ -27,48 +28,63 @@ pub const EXCEPTION_FILTERS: &[ExceptionFilter] = &[
         label: "Bus error",
         description: "Vector 2: access to an unmapped or unusable address.",
         vector: 2,
+        default: false,
     },
     ExceptionFilter {
         filter: "address-error",
         label: "Address error",
-        description: "Vector 3: a word or long access at an odd address.",
+        description: "SIGBUS (vector 3): a word or long access at an odd address.",
         vector: 3,
+        default: true,
     },
     ExceptionFilter {
         filter: "illegal-instruction",
         label: "Illegal instruction",
-        description: "Vector 4.",
+        description: "SIGILL (vector 4): an illegal 68k instruction.",
         vector: 4,
+        default: true,
     },
     ExceptionFilter {
         filter: "zero-divide",
         label: "Division by zero",
         description: "Vector 5: DIVU/DIVS by zero.",
         vector: 5,
+        default: false,
     },
     ExceptionFilter {
         filter: "chk",
         label: "CHK / TRAPV",
         description: "Vectors 6 and 7: bound check and overflow traps.",
         vector: 6,
+        default: false,
     },
     ExceptionFilter {
         filter: "privilege-violation",
         label: "Privilege violation",
         description: "Vector 8: a supervisor instruction in user mode.",
         vector: 8,
+        default: false,
     },
     ExceptionFilter {
         filter: "line-a",
         label: "Line-A emulator",
         description: "Vector 10: an $Axxx opcode.",
         vector: 10,
+        default: false,
     },
     ExceptionFilter {
         filter: "line-f",
         label: "Line-F emulator",
         description: "Vector 11: an $Fxxx opcode (coprocessor instruction with no FPU).",
         vector: 11,
+        default: false,
+    },
+    ExceptionFilter {
+        filter: "trap7",
+        label: "TRAP #7",
+        description: "SIGTRAP (vector 39): the conventional debugger break instruction.",
+        vector: 39,
+        default: true,
     },
 ];
 
@@ -105,6 +121,7 @@ pub enum Kind {
     Data {
         addr: u32,
         bytes: u32,
+        access: String,
     },
     Exception {
         vector: u16,
@@ -139,7 +156,13 @@ impl Breakpoint {
             Kind::Instruction { addr } => {
                 v["instructionReference"] = Value::from(format!("0x{addr:X}"));
             }
-            Kind::Function { .. } | Kind::Data { .. } | Kind::Exception { .. } => {}
+            Kind::Data { access, .. } => {
+                v["accessType"] = Value::from(match access.as_str() {
+                    "access" => "readWrite",
+                    other => other,
+                });
+            }
+            Kind::Function { .. } | Kind::Exception { .. } => {}
         }
         if let Some((addr, _)) = self.installed.first() {
             if !matches!(self.kind, Kind::Data { .. } | Kind::Exception { .. }) {
@@ -349,15 +372,16 @@ impl BreakTable {
 
     /// `setDataBreakpoints`: replace them all. Each covers the words of
     /// `[addr, addr + bytes)`, up to a cap like the GDB stub's.
-    pub fn set_data(&mut self, bridge: &Bridge, requests: &[(u32, u32)]) -> Vec<i64> {
+    pub fn set_data(&mut self, bridge: &Bridge, requests: &[(u32, u32, String)]) -> Vec<i64> {
         self.retire(bridge, |b| !matches!(b.kind, Kind::Data { .. }));
         let mut ids = Vec::new();
-        for (addr, bytes) in requests {
+        for (addr, bytes, access) in requests {
             let mut bp = Breakpoint {
                 id: self.fresh_id(),
                 kind: Kind::Data {
                     addr: *addr,
                     bytes: *bytes,
+                    access: access.clone(),
                 },
                 cond: None,
                 ignore: 0,
@@ -372,7 +396,10 @@ impl BreakTable {
             let capped = words.clamp(1, DATA_WORD_CAP);
             for i in 0..capped {
                 let word = start.wrapping_add(i as u32 * 2);
-                match bridge.call("break.add", json!({"kind": "watch", "addr": word})) {
+                match bridge.call(
+                    "break.add",
+                    json!({"kind": "watch", "addr": word, "access": access}),
+                ) {
                     Ok(Reply::Ok(v)) => {
                         if let Some(id) = v["id"].as_u64() {
                             bp.installed.push((word, id as u32));
@@ -397,7 +424,12 @@ impl BreakTable {
     }
 
     /// `setExceptionBreakpoints`: the filters that are on.
-    pub fn set_exceptions(&mut self, bridge: &Bridge, filters: &[String]) -> Vec<i64> {
+    pub fn set_exceptions(
+        &mut self,
+        bridge: &Bridge,
+        filters: &[String],
+        install: bool,
+    ) -> Vec<i64> {
         self.retire(bridge, |b| !matches!(b.kind, Kind::Exception { .. }));
         let mut ids = Vec::new();
         for f in EXCEPTION_FILTERS
@@ -414,19 +446,56 @@ impl BreakTable {
                 message: None,
                 installed: Vec::new(),
             };
+            if install {
+                for &vector in vectors {
+                    match bridge.call("break.add", json!({"kind": "catch", "vector": vector})) {
+                        Ok(Reply::Ok(v)) => {
+                            if let Some(id) = v["id"].as_u64() {
+                                bp.installed.push((u32::from(vector), id as u32));
+                            }
+                        }
+                        Ok(Reply::Err { message, .. }) => bp.message = Some(message),
+                        _ => {}
+                    }
+                }
+            }
+            ids.push(bp.id);
+            self.points.insert(bp.id, bp);
+        }
+        ids
+    }
+
+    /// Install exception points that were deliberately kept dormant while
+    /// the operating system was loading the debug target.
+    pub fn install_exceptions(&mut self, bridge: &Bridge) -> Vec<i64> {
+        let ids: Vec<i64> = self
+            .points
+            .iter()
+            .filter_map(|(id, bp)| {
+                matches!(bp.kind, Kind::Exception { .. })
+                    .then_some(*id)
+                    .filter(|_| bp.installed.is_empty())
+            })
+            .collect();
+        for id in &ids {
+            let Some(bp) = self.points.get_mut(id) else {
+                continue;
+            };
+            let Kind::Exception { vector } = bp.kind else {
+                continue;
+            };
+            let vectors: &[u16] = if vector == 6 { &[6, 7] } else { &[vector] };
             for &vector in vectors {
                 match bridge.call("break.add", json!({"kind": "catch", "vector": vector})) {
                     Ok(Reply::Ok(v)) => {
-                        if let Some(id) = v["id"].as_u64() {
-                            bp.installed.push((u32::from(vector), id as u32));
+                        if let Some(control_id) = v["id"].as_u64() {
+                            bp.installed.push((u32::from(vector), control_id as u32));
                         }
                     }
                     Ok(Reply::Err { message, .. }) => bp.message = Some(message),
                     _ => {}
                 }
             }
-            ids.push(bp.id);
-            self.points.insert(bp.id, bp);
         }
         ids
     }

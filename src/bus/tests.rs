@@ -7032,7 +7032,7 @@ fn fmode_page_sprite_dma_observer_reports_only_driven_addresses() {
     bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(4);
 
-    assert!(bus.take_ui_dma_hit().is_none());
+    assert!(bus.take_ui_mem_reads().is_empty());
     let lines = bus.frame_captured_sprite_lines();
     assert_eq!(lines.len(), 1, "the watched data fetch must have run");
     assert_eq!(lines[0].data, 0xAAAA);

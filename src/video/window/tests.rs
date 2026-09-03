@@ -10078,6 +10078,7 @@ mod warp_control {
             slots: false,
             screenshots: crate::profile::ScreenshotMode::None,
             pc_samples: false,
+            trigger: None,
         }
     }
 

@@ -26,6 +26,10 @@ pub struct CliArgs {
     /// `--run-args STRING`: extra guest command-line arguments appended to
     /// the `--run` program's invocation.
     pub run_args: Option<String>,
+    /// `--run-stack BYTES`: issue `Stack BYTES` before the run program.
+    pub run_stack: Option<u32>,
+    /// `--run-detach`: start the run program asynchronously and close its CLI.
+    pub run_detach: bool,
     /// `--warp-boot`: warp boot -- run unpaced from power-on until the
     /// boot storage has been idle for `[emulation] warp_boot_idle`
     /// emulated seconds, then resume real-time pacing (src/warpboot.rs).
@@ -343,6 +347,8 @@ where
     let mut warp_boot = false;
     let mut warp_until: Option<f64> = None;
     let mut run_args: Option<String> = None;
+    let mut run_stack: Option<u32> = None;
+    let mut run_detach = false;
     let mut screenshot_after: Vec<(f32, PathBuf)> = Vec::new();
     let mut save_state_after: Vec<(f32, PathBuf)> = Vec::new();
     let mut load_state: Option<PathBuf> = None;
@@ -488,6 +494,18 @@ where
                     .ok_or_else(|| anyhow!("--run-args requires an argument string"))?;
                 run_args = Some(v);
             }
+            "--run-stack" => {
+                let bytes: u32 = next_arg(
+                    &mut args,
+                    "--run-stack requires BYTES",
+                    "--run-stack BYTES must be an integer",
+                )?;
+                if bytes < 4 {
+                    bail!("--run-stack BYTES must be at least 4");
+                }
+                run_stack = Some(bytes);
+            }
+            "--run-detach" => run_detach = true,
             "--warp-boot" => {
                 warp_boot = true;
             }
@@ -512,6 +530,12 @@ where
                 overrides.chipset = Some(
                     args.next()
                         .ok_or_else(|| anyhow!("--chipset requires OCS/ECS/AGA"))?,
+                );
+            }
+            "--video" => {
+                overrides.video = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow!("--video requires PAL or NTSC"))?,
                 );
             }
             "--cpu" => {
@@ -1273,6 +1297,8 @@ where
         warp_boot,
         warp_until,
         run_args,
+        run_stack,
+        run_detach,
         screenshot_after,
         save_state_after,
         load_state,
@@ -1381,12 +1407,15 @@ fn print_help() {
          \x20                            the host, unthrottled until the OS loads it\n  \
          \x20                            (see docs/guide/run.md)\n  \
          --run-args STRING              extra guest command-line arguments for --run\n  \
+         --run-stack BYTES              issue AmigaDOS Stack BYTES before --run\n  \
+         --run-detach                   start --run asynchronously and close the boot CLI\n  \
          --warp-boot                    warp the boot: unthrottled until the boot storage has\n  \
          \x20                            been idle for [emulation] warp_boot_idle seconds\n  \
          --warp-until SECS              warp the boot until an absolute emulated time\n  \
          --model NAME                   machine profile: A1000, A500, A500OCS, A500Plus, A600,\n  \
          \x20                              A1200, A3000, A4000, CDTV, CD32\n  \
          --chipset NAME                 chipset preset: OCS, ECS, or AGA\n  \
+         --video STANDARD               video timing: PAL or NTSC\n  \
          --cpu MODEL                    CPU: 68000, 68010, 68EC020, 68020, 68030, 68040, or 68060\n  \
          --cpu-clock MHZ                CPU clock in MHz (default: the model's stock speed)\n  \
          --fpu / --no-fpu               fit / omit a 68881/68882 (68040/68060 on-die)\n  \

@@ -77,7 +77,7 @@ Start a 68k-aware GDB (such as `m68k-amigaos-gdb` or multiarch `gdb`) and connec
 The target starts halted at reset. The stub supports:
 - Register reading and writing (`d0`-`d7`, `a0`-`a5`, `fp`, `sp`, `ps`, `pc`)
 - Memory read and write operations
-- Breakpoints and watchpoints
+- Breakpoints plus write (`Z2`), read (`Z3`), and access (`Z4`) watchpoints
 - Single-stepping and continuation
 - Ctrl-C interrupt handling
 - Reverse execution (`reverse-step`, `reverse-continue`)
@@ -100,6 +100,7 @@ Copper disassembly, and Exec structures:
 (gdb) monitor segments         # List loaded hunk segments for current process
 (gdb) monitor tasks            # List Exec ready, waiting, and active tasks
 (gdb) monitor memlist          # List Exec memory allocations
+(gdb) monitor return-to-program # Run until PC leaves $F80000-$FFFFFF
 ```
 
 In windowed mode (`--gdb-gui`), `monitor warp on|off|status` controls the GDB

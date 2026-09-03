@@ -7,6 +7,7 @@ This is particularly useful when developing with an Amiga cross-compiler toolcha
 ```sh
 copperline --run build/hello
 copperline --run build/hello --run-args "-level 2"
+copperline --run build/hello --run-stack 32768 --run-detach
 ```
 
 ## How it works
@@ -23,6 +24,8 @@ host filesystem interface:
    by the program are saved to the same host directory.
 
 Other machine settings are configured normally via configuration files or CLI flags.
+`--run-stack BYTES` emits an AmigaDOS `Stack` command before the executable;
+`--run-detach` launches it through `Run >NIL: <NIL:` and closes the boot CLI.
 By default, the bundled AROS Kickstart replacement is used on the standard machine profile:
 
 ```sh
@@ -74,7 +77,8 @@ m68k-amiga-elf-gdb hello.elf -ex "target remote :2345" -ex continue
 ```
 
 When halted, the GDB stub reports the base address of the first hunk for symbol loading
-via `add-symbol-file`. The GDB monitor command `monitor segments` lists all hunk addresses.
+via `add-symbol-file`. The GDB monitor command `monitor segments` lists all hunk addresses;
+`monitor return-to-program` runs out of the Kickstart ROM window after an OS call.
 
 The [control protocol](../debugger/control.md) gets the same break-at-entry: with
 `--run`, `--control` and `--control-gui` arm a one-shot `loadseg` stop for the
@@ -112,10 +116,17 @@ if (*(UWORD *)UaeConf == 0x4eb9 || *(UWORD *)UaeConf == 0xa00e) {
 |---|---|---|
 | 82 | `uae-configuration`-style `"key value"` line | `warp true` / `warp false` (also `yes` / `no`) toggles warp mode. Parameters like `cpu_speed` and `*_cycle_exact` are accepted as no-ops. Returns 0. |
 | 86 | Debug log string | Printed to the host console as `DBG: <text>` (shared with serial output), streamed to control-protocol `debug` subscribers as `event.debug`, and mirrored into the debugger console. Returns 1. |
-| 88 | `debug_cmd` multiplexer | `debug_register_bitmap` / `_palette` / `_copperlist` and `debug_unregister` register guest assets, viewable in the Frame Analyzer (Resources and Memory tabs), searchable via `palette.dump` / `copper.list`, and listed with the console `DBGRES` command; `debug_start_idle` / `debug_stop_idle` report guest idle time in `debug.idle` and `event.frame.guest_idle_cck`. Overlay drawing (`debug_clear` / `debug_rect` / `debug_filled_rect` / `debug_text` on a 768x576 virtual canvas) renders on screen in the window (excluded from captures and recordings); `debug_load` / `debug_save` are accepted no-ops (`debug_load` returns 0). |
+| 88 | `debug_cmd` multiplexer | `debug_register_bitmap` / `_palette` / `_copperlist` and `debug_unregister` register guest assets, viewable in the Frame Analyzer (Resources and Memory tabs), exportable as PNG there or with `debug.resource.export`, searchable via `palette.dump` / `copper.list`, and listed with the console `DBGRES` command; `debug_start_idle` / `debug_stop_idle` report guest idle time in `debug.idle` and `event.frame.guest_idle_cck`. Overlay drawing (`debug_clear` / `debug_rect` / `debug_filled_rect` / `debug_text` on a 768x576 virtual canvas) renders on screen in the window (excluded from captures and recordings). `debug_load` / `debug_save` are disabled by default; see below. |
 | others | version, disks, RTG, ... | Return 0 with no side effects. |
 
 - Enabled by default; set `[emulation] uaelib = false` to leave `$F0FF60` unmapped.
+- Set `[emulation] uaelib_files = true` to let `debug_load(address, name)` and
+  `debug_save(address, size, name)` access the host. Paths are confined below
+  the `--run` program directory: absolute paths, `..`, symlink escapes, invalid
+  UTF-8, unmapped guest-memory ranges, and transfers over 16 MiB are rejected.
+  `debug_load` returns the byte count, or 0 when disabled or rejected. This is
+  an explicit trust decision for the launched guest and has no effect without
+  a `--run` program directory.
 - A CDTV extended ROM occupies `$F00000` and covers this address space.
 - Without the trap, `KPrintF` falls back to Exec `RawPutChar` and emits over the serial port.
 - Guest-initiated warp mutes live audio; `warpmode(0)` releases the guest's hold, and `Cmd+W` / `Alt+W` ends every hold.

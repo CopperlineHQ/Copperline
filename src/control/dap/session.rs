@@ -77,6 +77,10 @@ struct LaunchArgs {
     factory: bool,
     headless: bool,
     noaudio: bool,
+    stack: Option<u32>,
+    detach: bool,
+    ntsc: Option<bool>,
+    emulator_log: bool,
     extra: Vec<String>,
     cwd: Option<PathBuf>,
     timeout: Duration,
@@ -101,6 +105,7 @@ fn parse_launch(args: &Value) -> Result<LaunchArgs, String> {
         ("chip", "--chip"),
         ("fast", "--fast"),
         ("slow", "--slow"),
+        ("memoryFill", "--ram-init"),
         ("rtcTime", "--rtc-time"),
     ] {
         if let Some(value) = args.get(key).filter(|v| !v.is_null()) {
@@ -112,6 +117,25 @@ fn parse_launch(args: &Value) -> Result<LaunchArgs, String> {
             extra.push(text);
         }
     }
+    if let Some(value) = args.get("fpu").filter(|v| !v.is_null()) {
+        let on = value.as_bool().ok_or("fpu must be a boolean")?;
+        extra.push(if on { "--fpu" } else { "--no-fpu" }.into());
+    }
+    let stack = match args.get("stack").filter(|v| !v.is_null()) {
+        Some(value) => {
+            let bytes = value.as_u64().ok_or("stack must be a positive integer")?;
+            if !(4..=u32::MAX as u64).contains(&bytes) {
+                return Err("stack must be between 4 and 4294967295".into());
+            }
+            Some(bytes as u32)
+        }
+        None => None,
+    };
+    let ntsc = args
+        .get("ntsc")
+        .filter(|v| !v.is_null())
+        .map(|value| value.as_bool().ok_or("ntsc must be a boolean"))
+        .transpose()?;
     if let Some(list) = args.get("extraArgs").and_then(Value::as_array) {
         for item in list {
             match item.as_str() {
@@ -148,6 +172,10 @@ fn parse_launch(args: &Value) -> Result<LaunchArgs, String> {
         factory: args["factory"].as_bool().unwrap_or(false),
         headless: args["headless"].as_bool().unwrap_or(false),
         noaudio: args["noAudio"].as_bool().unwrap_or(false),
+        stack,
+        detach: args["detach"].as_bool().unwrap_or(false),
+        ntsc,
+        emulator_log: args["emulatorLog"].as_bool().unwrap_or(false),
         extra,
         cwd: opt_string(args, "cwd").map(PathBuf::from),
         timeout: Duration::from_millis(args["timeoutMs"].as_u64().unwrap_or(60_000)),
@@ -224,6 +252,8 @@ pub struct Session {
     tick: u32,
     /// Events to send after the current request's response.
     deferred: Vec<(String, Value)>,
+    emulator_log: bool,
+    emulator_log_offset: u64,
 }
 
 impl Session {
@@ -257,6 +287,17 @@ impl Session {
             spec.args.push("--run-args".into());
             spec.args.push(run_args.clone());
         }
+        if let Some(stack) = launch.stack {
+            spec.args.push("--run-stack".into());
+            spec.args.push(stack.to_string());
+        }
+        if launch.detach {
+            spec.args.push("--run-detach".into());
+        }
+        if let Some(ntsc) = launch.ntsc {
+            spec.args.push("--video".into());
+            spec.args.push(if ntsc { "NTSC" } else { "PAL" }.into());
+        }
         spec.args.extend(launch.extra.iter().cloned());
         // A guest that reads the host clock makes reverse replay diverge
         // (docs/debugger/reverse.md): pin the clock to the launch time
@@ -276,6 +317,7 @@ impl Session {
             launched.log_path.display()
         );
         let mut session = Self::new(bridge, Some(launched), !launch.headless, tx)?;
+        session.emulator_log = launch.emulator_log;
         session.load_program_info(&program, args);
         session.stop_on_entry = args["stopOnEntry"].as_bool().unwrap_or(true);
         session.phase = Phase::AwaitingLoad;
@@ -411,6 +453,8 @@ impl Session {
             first_hunk: None,
             tick: 0,
             deferred: Vec::new(),
+            emulator_log: false,
+            emulator_log_offset: 0,
         })
     }
 
@@ -696,6 +740,14 @@ impl Session {
                 }
             }
         }
+        for id in self.breaks.install_exceptions(&self.bridge) {
+            if let Some(bp) = self.breaks.points.get(&id) {
+                emit.event(
+                    "breakpoint",
+                    json!({"reason": "changed", "breakpoint": bp.to_value(true)}),
+                );
+            }
+        }
     }
 
     fn module_value(&self) -> Value {
@@ -920,7 +972,7 @@ impl Session {
                     .points
                     .values()
                     .filter(|b| match (&b.kind, word) {
-                        (breaks::Kind::Data { addr, bytes }, Some(word)) => {
+                        (breaks::Kind::Data { addr, bytes, .. }, Some(word)) => {
                             // Half-open ranges: the word [word, word+2)
                             // against [addr, addr+bytes).
                             word.saturating_add(2) > *addr
@@ -977,6 +1029,7 @@ impl Session {
     /// that notices pauses and resumes made from the window.
     pub fn tick(&mut self, emit: &mut Emit) {
         self.tick = self.tick.wrapping_add(1);
+        self.drain_emulator_log(emit);
         if !self.serial_buf.is_empty() {
             self.serial_idle_ticks += 1;
             if self.serial_idle_ticks >= 4 {
@@ -1009,6 +1062,33 @@ impl Session {
                 emit.stopped("pause", Some("paused from the window"), &[]);
             }
             _ => {}
+        }
+    }
+
+    fn drain_emulator_log(&mut self, emit: &mut Emit) {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let Some(path) = self
+            .launched
+            .as_ref()
+            .filter(|_| self.emulator_log)
+            .map(|launched| &launched.log_path)
+        else {
+            return;
+        };
+        let Ok(mut file) = std::fs::File::open(path) else {
+            return;
+        };
+        if file
+            .seek(SeekFrom::Start(self.emulator_log_offset))
+            .is_err()
+        {
+            return;
+        }
+        let mut output = Vec::new();
+        if file.read_to_end(&mut output).is_ok() && !output.is_empty() {
+            self.emulator_log_offset += output.len() as u64;
+            emit.output("console", &String::from_utf8_lossy(&output));
         }
     }
 
@@ -1102,7 +1182,16 @@ impl Session {
             .and_then(|i| i.line_for(pc))
             .map(|h| (h.file, h.line));
         if instruction || start.is_none() || method == "step_out" {
-            let stop = self.call_stop(method, json!({}))?;
+            let stop = if method == "step_out"
+                && (crate::memory::ROM_BASE as u32..=0x00FF_FFFF).contains(&pc)
+            {
+                self.call_stop(
+                    "run_until",
+                    json!({"pc_outside": [crate::memory::ROM_BASE, 0x00FF_FFFFu32]}),
+                )?
+            } else {
+                self.call_stop(method, json!({}))?
+            };
             self.finish_bounded(emit, &stop, None);
             return Ok(Value::Null);
         }
@@ -1345,7 +1434,17 @@ impl Session {
             let (addr, bytes) = data_id
                 .split_once(':')
                 .ok_or_else(|| format!("bad dataId {data_id}"))?;
-            requests.push((parse_address(addr)?, bytes.parse::<u32>().unwrap_or(4)));
+            let access = match bp["accessType"].as_str().unwrap_or("write") {
+                "read" => "read",
+                "write" => "write",
+                "readWrite" => "access",
+                other => return Err(format!("unsupported data breakpoint accessType {other}")),
+            };
+            requests.push((
+                parse_address(addr)?,
+                bytes.parse::<u32>().unwrap_or(4),
+                access.to_string(),
+            ));
         }
         let ids = self.breaks.set_data(&self.bridge, &requests);
         Ok(json!({"breakpoints": self.breakpoint_values(&ids, true)}))
@@ -1361,7 +1460,7 @@ impl Session {
             return Ok(json!({
                 "dataId": format!("0x{addr:X}:{bytes}"),
                 "description": format!("{bytes} byte(s) at 0x{addr:X}"),
-                "accessTypes": ["write"],
+                "accessTypes": ["read", "write", "readWrite"],
                 "canPersist": true,
             }));
         }
@@ -1398,7 +1497,7 @@ impl Session {
         Ok(json!({
             "dataId": format!("0x{addr:X}:{bytes}"),
             "description": format!("{name} ({bytes} byte(s) at 0x{addr:X})"),
-            "accessTypes": ["write"],
+            "accessTypes": ["read", "write", "readWrite"],
             "canPersist": false,
         }))
     }
@@ -1437,7 +1536,9 @@ impl Session {
                 filters.push(id.to_string());
             }
         }
-        let ids = self.breaks.set_exceptions(&self.bridge, &filters);
+        let ids = self
+            .breaks
+            .set_exceptions(&self.bridge, &filters, self.first_hunk.is_some());
         Ok(json!({"breakpoints": self.breakpoint_values(&ids, true)}))
     }
 
@@ -1642,8 +1743,12 @@ impl Session {
                 };
                 let mut out = vars::registers(&f.regs, frame == 0);
                 if frame == 0 {
-                    let (_, sr) = self.regs()?;
+                    let regs = self.call("regs.get", json!({}))?;
+                    let sr = regs["sr"].as_u64().unwrap_or(0) as u16;
                     out.push(vars::status_register(&mut self.vars, sr));
+                    if let Some(fpu) = regs.get("fpu") {
+                        out.extend(vars::fpu_registers(fpu));
+                    }
                 }
                 out
             }
@@ -2142,12 +2247,25 @@ impl Session {
             .and_then(|rest| rest.split(')').next())
             .map(|v| format!("vector {v}"))
             .unwrap_or_else(|| reason.clone());
+        let description = exception_description(detail).unwrap_or(detail);
         Ok(json!({
             "exceptionId": id,
-            "description": detail,
+            "description": description,
             "breakMode": "always",
-            "details": {"message": detail, "typeName": reason},
+            "details": {"message": description, "typeName": reason},
         }))
+    }
+}
+
+fn exception_description(detail: &str) -> Option<&'static str> {
+    if detail.contains("vector 3)") {
+        Some("SIGBUS: address error (vector 3)")
+    } else if detail.contains("vector 4)") {
+        Some("SIGILL: illegal instruction (vector 4)")
+    } else if detail.contains("vector 39)") {
+        Some("SIGTRAP: TRAP #7 (vector 39)")
+    } else {
+        None
     }
 }
 
@@ -2265,6 +2383,12 @@ mod tests {
             "args": ["a", "b"],
             "model": "A1200",
             "fast": "8M",
+            "memoryFill": "0xDEAD",
+            "fpu": true,
+            "stack": 32768,
+            "ntsc": true,
+            "detach": true,
+            "emulatorLog": true,
             "headless": true,
             "extraArgs": ["--noaudio"],
         }))
@@ -2272,9 +2396,28 @@ mod tests {
         assert_eq!(args.run_args.as_deref(), Some("a b"));
         assert_eq!(
             args.extra,
-            vec!["--model", "A1200", "--fast", "8M", "--noaudio"]
+            vec![
+                "--model",
+                "A1200",
+                "--fast",
+                "8M",
+                "--ram-init",
+                "0xDEAD",
+                "--fpu",
+                "--noaudio"
+            ]
         );
         assert!(args.headless);
+        assert_eq!(args.stack, Some(32_768));
+        assert_eq!(args.ntsc, Some(true));
+        assert!(args.detach);
+        assert!(args.emulator_log);
+        assert!(parse_launch(&json!({
+            "program": prog.display().to_string(),
+            "fpu": "yes"
+        }))
+        .unwrap_err()
+        .contains("boolean"));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -1087,6 +1087,9 @@ impl App {
             (ToolPanelKind::FrameAnalyzer, UiControl::AnalyzerResourceRow(index)) => {
                 self.frame_analyzer_select_resource(index)
             }
+            (ToolPanelKind::FrameAnalyzer, UiControl::AnalyzerResourceSave) => {
+                self.frame_analyzer_save_resource()
+            }
             _ => {}
         }
         self.request_redraw();

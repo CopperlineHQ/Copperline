@@ -7,7 +7,11 @@
 // makes, then records what each direct call returned in UAELIB-RESULT
 // next to the binary:
 //
-//   present=4eb9 r86=1 r0=0 r88=0 r82=0 r82e=ffffffff out=0
+//   present=4eb9 r86=1 r0=0 r88=0 r82=0 r82e=ffffffff out=0 load=0 match=0
+//
+// With `[emulation] uaelib_files = true`, the final fields instead report
+// `load=12 match=1` after a save-clear-load round trip rooted beside this
+// executable.
 //
 // (hex case as the Kickstart's RawDoFmt prints it; AROS uses upper case).
 //
@@ -228,6 +232,21 @@ void debug_stop_idle() {
 	debug_cmd(barto_cmd_set_idle, 0, 0, 0);
 }
 
+unsigned int debug_load(void* addr, const char* name) {
+	long(*UaeLib)(unsigned int arg0, unsigned int arg1, unsigned int arg2, unsigned int arg3, unsigned int arg4);
+	UaeLib = (long(*)(unsigned int, unsigned int, unsigned int, unsigned int, unsigned int))0xf0ff60;
+	if(*((UWORD *)UaeLib) == 0x4eb9 || *((UWORD *)UaeLib) == 0xa00e)
+		return UaeLib(88, barto_cmd_load, (unsigned int)addr, (unsigned int)name, 0);
+	return 0;
+}
+
+void debug_save(const void* addr, unsigned int size, const char* name) {
+	long(*UaeLib)(unsigned int arg0, unsigned int arg1, unsigned int arg2, unsigned int arg3, unsigned int arg4);
+	UaeLib = (long(*)(unsigned int, unsigned int, unsigned int, unsigned int, unsigned int))0xf0ff60;
+	if(*((UWORD *)UaeLib) == 0x4eb9 || *((UWORD *)UaeLib) == 0xa00e)
+		UaeLib(88, barto_cmd_save, (unsigned int)addr, size, (unsigned int)name);
+}
+
 // ---- end of template code ----
 
 LONG entry(void)
@@ -256,6 +275,23 @@ LONG entry(void)
     debug_rect(12, 12, 204, 64, 0xFFFFFF);
     debug_text(24, 32, "uaelib overlay", 0xFFFF00);
 
+    static const char payload[] = "host bridge";
+    // The trap ABI carries the pointer as an integer, so make the buffer
+    // volatile: otherwise GCC cannot see that debug_load writes through it
+    // and may constant-fold the comparison after the clear below.
+    volatile char filebuf[sizeof(payload)];
+    debug_save(payload, sizeof(payload), "UAELIB-BLOB");
+    for (unsigned int i = 0; i < sizeof(filebuf); i++)
+        filebuf[i] = 0;
+    LONG rload = (LONG) debug_load((void *)filebuf, "UAELIB-BLOB");
+    __asm volatile("" : : : "memory");
+    LONG filematch = 1;
+    for (unsigned int i = 0; i < sizeof(filebuf); i++) {
+        if (filebuf[i] != payload[i]) {
+            filematch = 0;
+            break;
+        }
+    }
     LONG r86 = 0, r0 = 0, r88 = 0, r82 = 0, r82e = 0;
     char out = 0x55;
     if (fitted) {
@@ -273,9 +309,9 @@ LONG entry(void)
     }
     debug_unregister(0);
 
-    LONG args[7] = { present, r86, r0, r88, r82, r82e, out };
-    char line[96];
-    RawDoFmt((CONST_STRPTR) "present=%04lx r86=%ld r0=%ld r88=%ld r82=%ld r82e=%lx out=%ld\n",
+    LONG args[9] = { present, r86, r0, r88, r82, r82e, out, rload, filematch };
+    char line[128];
+    RawDoFmt((CONST_STRPTR) "present=%04lx r86=%ld r0=%ld r88=%ld r82=%ld r82e=%lx out=%ld load=%ld match=%ld\n",
              args, PutChar, line);
     LONG len = (LONG) strlen(line);
 

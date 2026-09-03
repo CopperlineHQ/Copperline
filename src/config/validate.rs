@@ -146,6 +146,10 @@ impl TryFrom<RawConfig> for Config {
             },
             warp_until,
             uaelib: raw.emulation.uaelib.unwrap_or(defaults.emulation.uaelib),
+            uaelib_files: raw
+                .emulation
+                .uaelib_files
+                .unwrap_or(defaults.emulation.uaelib_files),
             rewind: raw.emulation.rewind.unwrap_or(defaults.emulation.rewind),
             rewind_budget_mb: match raw.emulation.rewind_budget_mb {
                 None => defaults.emulation.rewind_budget_mb,
@@ -1264,6 +1268,7 @@ impl TryFrom<RawConfig> for Config {
                     readonly: m.readonly.unwrap_or(false),
                 })
                 .collect(),
+            run_program_dir: raw.run_program_dir,
             chipset,
             agnus_revision,
             denise_revision,

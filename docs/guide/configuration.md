@@ -378,6 +378,7 @@ warp_boot = false          # warp the boot until storage goes idle
 warp_boot_idle = 10        # ...for this many emulated seconds
 # warp_until = 12.0        # or warp until an absolute emulated time
 uaelib = true              # WinUAE-compatible uaelib trap at $F0FF60
+uaelib_files = false       # opt-in file helpers, below the --run directory
 rewind = false             # true = record rewind history from power-on
 rewind_budget_mb = 256     # host memory the rewind history may hold
 rewind_interval_frames = 25 # emulated frames per rewind step

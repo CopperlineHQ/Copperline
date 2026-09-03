@@ -11,7 +11,7 @@
 use super::observe::{EventKind, MAX_FRAME_INTERVAL};
 use super::proto::{self, CtlError, StopEvent};
 use super::session::{BreakSpec, InputAction, SessionCtx};
-use crate::debugger::{BreakCond, CondOp, CondOperand, DebugStop, WatchSource};
+use crate::debugger::{BreakCond, CondOp, CondOperand, DebugStop, WatchAccess, WatchSource};
 use crate::emulator::Emulator;
 use crate::inputsched::JoyState;
 use crate::pointer::{PointerServo, ServoStep};
@@ -50,6 +50,11 @@ pub enum CoreOp {
     Status,
     /// The guest's uaelib function-88 resource registry (`debug.resources`).
     DebugResources,
+    /// Export a registered bitmap or palette through the shared preview decoder.
+    DebugResourceExport {
+        address: u32,
+        path: PathBuf,
+    },
     /// The guest's uaelib idle-marker accounting (`debug.idle`).
     DebugIdle,
     RegsGet,
@@ -605,6 +610,7 @@ pub enum ResumeKind {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RunTarget {
     Pc(u32),
+    PcOutside { lo: u32, hi: u32 },
     Beam { vpos: u16, hpos: Option<u16> },
     Frame(u64),
     Cck(u64),
@@ -617,6 +623,9 @@ impl RunTarget {
         match self {
             RunTarget::Stable(spec) => format!("{} stable frame(s)", spec.frames),
             RunTarget::Pc(pc) => format!("pc ${pc:06X}"),
+            RunTarget::PcOutside { lo, hi } => {
+                format!("pc outside ${lo:06X}-${hi:06X}")
+            }
             RunTarget::Beam { vpos, hpos } => format!(
                 "beam v{vpos}{}",
                 hpos.map(|h| format!(" h{h}")).unwrap_or_default()
@@ -1247,6 +1256,25 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
                     CtlError::invalid_params("screenshots must be none|every|last")
                 })?,
             };
+            let trigger = match p.get("trigger") {
+                None | Some(Value::Null) => None,
+                Some(Value::Object(obj)) if obj.len() == 1 => {
+                    if let Some(value) = obj.get("frame").and_then(value_as_u64) {
+                        Some(crate::profile::ProfileTrigger::Frame(value))
+                    } else if let Some(value) = obj.get("busy_cck_over").and_then(value_as_u64) {
+                        Some(crate::profile::ProfileTrigger::BusyCckOver(value))
+                    } else {
+                        return Err(CtlError::invalid_params(
+                            "trigger must be {frame:N} or {busy_cck_over:N}",
+                        ));
+                    }
+                }
+                Some(_) => {
+                    return Err(CtlError::invalid_params(
+                        "trigger must be {frame:N} or {busy_cck_over:N}",
+                    ))
+                }
+            };
             core(CoreOp::ProfileStart {
                 options: crate::profile::ProfileOptions {
                     path: p
@@ -1257,6 +1285,7 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
                     slots: p.bool_or("slots", false)?,
                     screenshots,
                     pc_samples: p.bool_or("pc_samples", false)?,
+                    trigger,
                 },
             })
         }
@@ -1291,6 +1320,10 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
             on: p.bool_req("on")?,
         }),
         "debug.resources" => core(CoreOp::DebugResources),
+        "debug.resource.export" => core(CoreOp::DebugResourceExport {
+            address: p.u32_req("address")?,
+            path: PathBuf::from(p.str_req("path")?),
+        }),
         "debug.idle" => core(CoreOp::DebugIdle),
         other => Err(CtlError::method_not_found(other)),
     }
@@ -1411,6 +1444,27 @@ fn parse_run_target(p: &ParamReader) -> Result<RunTarget, CtlError> {
     if let Some(pc) = p.u32_opt("pc")? {
         targets.push(RunTarget::Pc(pc));
     }
+    if let Some(value) = p.get("pc_outside") {
+        let (lo, hi) = if value.as_bool() == Some(true) {
+            (crate::memory::ROM_BASE as u32, 0x00FF_FFFF)
+        } else {
+            let range = value
+                .as_array()
+                .filter(|a| a.len() == 2)
+                .ok_or_else(|| CtlError::invalid_params("pc_outside must be true or [LOW,HIGH]"))?;
+            let lo = value_as_u32(&range[0])
+                .ok_or_else(|| CtlError::invalid_params("bad pc_outside low address"))?;
+            let hi = value_as_u32(&range[1])
+                .ok_or_else(|| CtlError::invalid_params("bad pc_outside high address"))?;
+            if lo > hi {
+                return Err(CtlError::invalid_params(
+                    "pc_outside low address must not exceed high address",
+                ));
+            }
+            (lo, hi)
+        };
+        targets.push(RunTarget::PcOutside { lo, hi });
+    }
     if let Some(vpos) = p.u16_opt("vpos")? {
         targets.push(RunTarget::Beam {
             vpos,
@@ -1459,7 +1513,7 @@ fn parse_run_target(p: &ParamReader) -> Result<RunTarget, CtlError> {
     match targets.len() {
         1 => Ok(targets.remove(0)),
         0 => Err(CtlError::invalid_params(
-            "run_until needs exactly one of pc, vpos[+hpos], frame, cck, seconds, stable_frames",
+            "run_until needs exactly one of pc, pc_outside, vpos[+hpos], frame, cck, seconds, stable_frames",
         )),
         _ => Err(CtlError::invalid_params(
             "run_until takes exactly one target",
@@ -1501,6 +1555,12 @@ fn parse_break_spec(p: &ParamReader) -> Result<BreakSpec, CtlError> {
                 addr: p.u32_req("addr")?,
                 source,
                 pc,
+                access: match p.str_opt("access")?.as_deref() {
+                    None => WatchAccess::Write,
+                    Some(word) => WatchAccess::parse(word).ok_or_else(|| {
+                        CtlError::invalid_params("access must be write|read|access")
+                    })?,
+                },
             })
         }
         "reg_watch" => Ok(BreakSpec::RegWatch {
@@ -1948,6 +2008,20 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             }
             let resources: Vec<Value> = emu.uaelib_resources().iter().map(resource_value).collect();
             Ok(json!({ "resources": resources }))
+        }
+        CoreOp::DebugResourceExport { address, path } => {
+            let exported = emu
+                .export_uaelib_resource(*address, path)
+                .map_err(|e| CtlError::invalid_state(format!("exporting resource: {e:#}")))?;
+            Ok(json!({
+                "address": address,
+                "path": path.display().to_string(),
+                "name": exported.name,
+                "type": exported.kind,
+                "width": exported.width,
+                "height": exported.height,
+                "note": exported.note,
+            }))
         }
         CoreOp::DebugIdle => {
             let Some(idle) = emu.uaelib_idle() else {
@@ -2681,13 +2755,24 @@ fn regs_value(emu: &Emulator) -> Value {
     let machine = &emu.machine;
     let d: Vec<u32> = (0..8).map(|n| machine.d(n)).collect();
     let a: Vec<u32> = (0..8).map(|n| machine.a(n)).collect();
-    json!({
+    let mut value = json!({
         "d": d,
         "a": a,
         "pc": machine.pc(),
         "sr": machine.sr(),
         "stopped": machine.stopped(),
-    })
+    });
+    if let Some((fp, fpcr, fpsr, fpiar)) = machine.debug_fpu_registers() {
+        value["fpu"] = json!({
+            "fp": fp.map(|(sign_exp, mantissa)| {
+                format!("0x{sign_exp:04X}{mantissa:016X}")
+            }),
+            "fpcr": fpcr,
+            "fpsr": fpsr,
+            "fpiar": fpiar,
+        });
+    }
+    value
 }
 
 fn break_list_value(emu: &Emulator, ctx: &SessionCtx) -> Value {
@@ -2716,8 +2801,10 @@ fn break_list_value(emu: &Emulator, ctx: &SessionCtx) -> Value {
             addr: w.addr,
             source: w.filter,
             pc: w.pc,
+            access: w.access,
         };
         let mut entry = json!({"kind": "watch", "addr": w.addr});
+        entry["access"] = Value::from(w.access.name());
         if let Some(class) = w.filter {
             entry["class"] = Value::from(class.describe());
         }
@@ -2976,6 +3063,25 @@ mod tests {
             ),
             other => panic!("expected resume, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn run_until_parses_pc_outside_ranges_and_rom_default() {
+        assert_eq!(
+            run_target(json!({"pc_outside": ["0xF80000", "0xFFFFFF"]})),
+            RunTarget::PcOutside {
+                lo: 0x00F8_0000,
+                hi: 0x00FF_FFFF,
+            }
+        );
+        assert_eq!(
+            run_target(json!({"pc_outside": true})),
+            RunTarget::PcOutside {
+                lo: crate::memory::ROM_BASE as u32,
+                hi: 0x00FF_FFFF,
+            }
+        );
+        assert!(parse_method("run_until", &json!({"pc_outside": [3, 2]})).is_err());
     }
 
     #[test]
@@ -3910,6 +4016,28 @@ mod tests {
         assert!(!options.slots);
         assert!(!options.pc_samples);
         assert_eq!(options.screenshots, crate::profile::ScreenshotMode::None);
+        assert_eq!(options.trigger, None);
+
+        let CoreOp::ProfileStart { options } = core(
+            "profile.start",
+            json!({"trigger": {"busy_cck_over": 12_345}}),
+        ) else {
+            panic!("expected ProfileStart");
+        };
+        assert_eq!(
+            options.trigger,
+            Some(crate::profile::ProfileTrigger::BusyCckOver(12_345))
+        );
+
+        let CoreOp::ProfileStart { options } =
+            core("profile.start", json!({"trigger": {"frame": 987}}))
+        else {
+            panic!("expected ProfileStart");
+        };
+        assert_eq!(
+            options.trigger,
+            Some(crate::profile::ProfileTrigger::Frame(987))
+        );
 
         for params in [json!({"frames": 0}), json!({"frames": 200_000})] {
             let err = parse_method("profile.start", &params).unwrap_err();
@@ -3917,6 +4045,15 @@ mod tests {
         }
         let err = parse_method("profile.start", &json!({"screenshots": "sometimes"})).unwrap_err();
         assert_eq!(err.code, proto::INVALID_PARAMS);
+        for trigger in [
+            json!({}),
+            json!({"frame": 1, "busy_cck_over": 2}),
+            json!({"unknown": 1}),
+            json!({"frame": "one"}),
+        ] {
+            let err = parse_method("profile.start", &json!({"trigger": trigger})).unwrap_err();
+            assert_eq!(err.code, proto::INVALID_PARAMS);
+        }
         assert!(CoreOp::ProfileStatus.collectable());
     }
 
@@ -3939,6 +4076,7 @@ mod tests {
             slots: false,
             screenshots: crate::profile::ScreenshotMode::None,
             pc_samples: false,
+            trigger: None,
         };
         let start = CoreOp::ProfileStart {
             options: options.clone(),
@@ -3969,6 +4107,7 @@ mod tests {
                     slots: true,
                     screenshots: crate::profile::ScreenshotMode::None,
                     pc_samples: true,
+                    trigger: None,
                 },
             },
         )
@@ -4040,6 +4179,7 @@ mod tests {
                     slots: true,
                     screenshots: crate::profile::ScreenshotMode::None,
                     pc_samples: false,
+                    trigger: None,
                 },
             },
         )
@@ -4157,6 +4297,7 @@ mod tests {
                     slots: false,
                     screenshots: crate::profile::ScreenshotMode::None,
                     pc_samples: false,
+                    trigger: None,
                 },
             },
         )
@@ -4613,6 +4754,31 @@ mod tests {
         assert_eq!(r["flags"]["raw"], 1);
         assert_eq!(r["registered_frame"], 7);
         assert!(r.get("entries").is_none());
+    }
+
+    #[test]
+    fn debug_resource_export_writes_palette_png() {
+        let mut emu = uaelib_emulator();
+        let mut ctx = SessionCtx::new();
+        emu.bus_mut().mem.chip_ram[0x3000..0x3004].copy_from_slice(&[0x0F, 0x00, 0x00, 0x8F]);
+        register_resource(&mut emu, 0x5000, &palette_resource_bytes(0x3000, "pal", 2));
+        let dir = profile_scratch("resource-export");
+        let path = dir.join("pal.png");
+        let value = exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::DebugResourceExport {
+                address: 0x3000,
+                path: path.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(value["type"], "palette");
+        assert_eq!(value["width"], 32);
+        assert!(std::fs::read(&path)
+            .unwrap()
+            .starts_with(b"\x89PNG\r\n\x1a\n"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

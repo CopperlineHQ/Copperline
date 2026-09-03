@@ -824,6 +824,8 @@ pub enum UiControl {
     /// both axes, so the mapping does not depend on the map's pixel size).
     /// A row of the Resources tab's table (index into the displayed rows).
     AnalyzerResourceRow(u8),
+    /// Save the selected bitmap or palette resource as PNG.
+    AnalyzerResourceSave,
     AnalyzerHeatPick {
         x: u8,
         y: u8,
@@ -1559,7 +1561,8 @@ fn analyzer_tab_button_rects(rect: Rect, tab: AnalyzerTab) -> Vec<(UiControl, Re
     let all = analyzer_button_rects(rect);
     match tab {
         AnalyzerTab::Beam => all.to_vec(),
-        AnalyzerTab::Memory | AnalyzerTab::Resources => all[..2].to_vec(),
+        AnalyzerTab::Memory => all[..2].to_vec(),
+        AnalyzerTab::Resources => vec![all[0], all[1], (UiControl::AnalyzerResourceSave, all[2].1)],
     }
 }
 
@@ -2032,6 +2035,7 @@ pub struct AnalyzerResourcesView {
     pub hidden_above: usize,
     pub hidden_below: usize,
     pub detail: Option<AnalyzerResourceDetail>,
+    pub exportable: bool,
 }
 
 pub struct AnalyzerResourceRowView {
@@ -4436,9 +4440,22 @@ fn draw_frame_analyzer(
             UiControl::AnalyzerRun if view.running => "Pause",
             UiControl::AnalyzerRun => "Run",
             UiControl::AnalyzerFrame => "Frame",
+            UiControl::AnalyzerResourceSave => "Save...",
             _ => "To slot",
         };
-        draw_text_button(frame, button_rect, label, true, lit(hover, control), scale);
+        let enabled = control != UiControl::AnalyzerResourceSave
+            || view
+                .resources
+                .as_ref()
+                .is_some_and(|resources| resources.exportable);
+        draw_text_button(
+            frame,
+            button_rect,
+            label,
+            enabled,
+            lit(hover, control),
+            scale,
+        );
     }
     if panel.tab == AnalyzerTab::Beam {
         draw_analyzer_checkboxes(frame, rect, panel, hover, scale);

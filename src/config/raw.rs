@@ -39,6 +39,11 @@ pub(crate) fn raw_from_path(path: &Path) -> Result<RawConfig> {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawConfig {
+    /// Host-only authority installed by `--run`. Never accepted from or
+    /// written to TOML, so a configuration file cannot manufacture a uaelib
+    /// file root by naming a mount `RunProg`.
+    #[serde(skip)]
+    pub(crate) run_program_dir: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rom: Option<String>,
     /// Extended ROM image (CD32 512K at $E00000, CDTV 256K at $F00000).
@@ -1130,6 +1135,10 @@ pub(crate) struct RawEmulation {
     /// it. Set false for a machine with nothing at $F0FF60.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) uaelib: Option<bool>,
+    /// Allow the uaelib `debug_load` / `debug_save` commands to access files
+    /// below the `--run` program directory. Security-sensitive, default false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) uaelib_files: Option<bool>,
     /// Record rewind history from power-on (default false), so the rewind
     /// hotkey works outside the debugger.
     #[serde(skip_serializing_if = "Option::is_none")]

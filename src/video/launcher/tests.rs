@@ -56,12 +56,15 @@ fn warp_boot_settings_survive_the_config_screen_round_trip() {
 fn uaelib_setting_survives_the_config_screen_round_trip() {
     // No config-screen control: a saved `uaelib = false` must not revert
     // to the default on Run/Save.
-    let raw: RawConfig = toml::from_str("[emulation]\nuaelib = false\n").unwrap();
+    let raw: RawConfig =
+        toml::from_str("[emulation]\nuaelib = false\nuaelib_files = true\n").unwrap();
     let setup = MachineSetup::from_raw(&raw).unwrap();
     assert_eq!(setup.to_raw().emulation.uaelib, Some(false));
+    assert_eq!(setup.to_raw().emulation.uaelib_files, Some(true));
     let raw: RawConfig = toml::from_str("").unwrap();
     let setup = MachineSetup::from_raw(&raw).unwrap();
     assert_eq!(setup.to_raw().emulation.uaelib, None);
+    assert_eq!(setup.to_raw().emulation.uaelib_files, None);
 }
 
 #[test]

@@ -192,6 +192,33 @@ pub fn registers(regs: &Registers, live: bool) -> Vec<Value> {
     out
 }
 
+/// Exact 80-bit floating-point and FPU control registers from `regs.get`.
+pub fn fpu_registers(fpu: &Value) -> Vec<Value> {
+    let mut out = Vec::new();
+    for (i, value) in fpu["fp"].as_array().into_iter().flatten().enumerate() {
+        let value = value.as_str().unwrap_or("0x00000000000000000000");
+        out.push(json!({
+            "name": format!("fp{i}"),
+            "value": value,
+            "type": "extended",
+            "variablesReference": 0,
+            "presentationHint": {"kind": "data", "attributes": ["readOnly"]},
+        }));
+    }
+    for name in ["fpcr", "fpsr", "fpiar"] {
+        if let Some(value) = fpu[name].as_u64() {
+            out.push(json!({
+                "name": name,
+                "value": format!("0x{value:08X}"),
+                "type": "long",
+                "variablesReference": 0,
+                "presentationHint": {"kind": "data", "attributes": ["readOnly"]},
+            }));
+        }
+    }
+    out
+}
+
 /// The status register, live only (frame 0).
 pub fn status_register(store: &mut VarStore, sr: u16) -> Value {
     json!({

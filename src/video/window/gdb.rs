@@ -27,13 +27,8 @@
 use super::app_session::WarpSource;
 use super::*;
 use crate::debugger::DebugStop;
-use crate::gdbstub::core::{hex_decode, CoreReply, GdbCore, ResumeRequest};
+use crate::gdbstub::core::{hex_decode, CoreReply, GdbCore, ResumeRequest, GDB_WATCH_WORD_CAP};
 use crate::gdbstub::windowed::{GdbHandle, GdbMsg};
-
-/// Machine word watches installed per GDB watchpoint request. Every
-/// covered word is a per-instruction comparison on the stop path, so a
-/// huge Z2 range must not turn into thousands of them.
-const GDB_WATCH_WORD_CAP: usize = 8;
 
 /// Per-connection GDB state owned by the `App`.
 pub(super) struct GdbGuiState {
@@ -57,7 +52,7 @@ pub(super) struct GdbGuiState {
 #[derive(Default)]
 struct GdbBreaks {
     pc: Vec<u32>,
-    watch_words: Vec<u32>,
+    watch_words: Vec<(u32, crate::debugger::WatchAccess)>,
     reg_watches: Vec<u16>,
     /// `Some(filter)` when this session armed the machine loadseg catch.
     loadseg: Option<Option<String>>,
@@ -95,57 +90,44 @@ impl GdbBreaks {
 
         // Watchpoints: every covered word becomes a machine word watch,
         // bounded by the cap.
-        let mut desired_words: Vec<u32> = Vec::new();
-        let mut truncated = false;
-        'expand: for watch in &core.watchpoints {
-            let len = watch.len.max(1) as u32;
-            let start = watch.addr & mask & !1;
-            let last = watch.addr.wrapping_add(len - 1) & mask & !1;
-            let mut addr = start;
-            loop {
-                if !desired_words.contains(&addr) {
-                    if desired_words.len() == GDB_WATCH_WORD_CAP {
-                        truncated = true;
-                        break 'expand;
-                    }
-                    desired_words.push(addr);
-                }
-                if addr == last {
-                    break;
-                }
-                addr = addr.wrapping_add(2) & mask;
-            }
-        }
+        let (desired_words, truncated) = core.machine_watch_words(mask);
         if truncated {
             notes.push(format!(
                 "watchpoints cover more than {GDB_WATCH_WORD_CAP} words; \
                  watching the first {GDB_WATCH_WORD_CAP}\n"
             ));
         }
-        let word_watched = |emu: &Emulator, addr: u32| {
+        let word_watched = |emu: &Emulator, addr: u32, access| {
+            emu.machine
+                .ui_breaks()
+                .watches
+                .iter()
+                .any(|w| w.addr == addr && w.access == access)
+        };
+        let word_watched_at = |emu: &Emulator, addr: u32| {
             emu.machine
                 .ui_breaks()
                 .watches
                 .iter()
                 .any(|w| w.addr == addr)
         };
-        self.watch_words.retain(|&addr| {
-            if desired_words.contains(&addr) {
+        self.watch_words.retain(|&(addr, access)| {
+            if desired_words.contains(&(addr, access)) {
                 // Same rule as PC breakpoints: a GUI-removed word comes
                 // back through the insertion pass.
-                return word_watched(emu, addr);
+                return word_watched(emu, addr, access);
             }
-            if word_watched(emu, addr) {
+            if word_watched(emu, addr, access) {
                 emu.machine.ui_toggle_watch(addr);
             }
             false
         });
-        for &addr in &desired_words {
-            if self.watch_words.contains(&addr) || word_watched(emu, addr) {
+        for &(addr, access) in &desired_words {
+            if self.watch_words.contains(&(addr, access)) || word_watched_at(emu, addr) {
                 continue;
             }
-            emu.machine.ui_toggle_watch(addr);
-            self.watch_words.push(addr);
+            emu.machine.ui_toggle_watch_access(addr, None, None, access);
+            self.watch_words.push((addr, access));
         }
 
         // Chipset register watches (fed by the intercepted monitor
@@ -218,13 +200,13 @@ impl GdbBreaks {
                 emu.machine.ui_set_breakpoint(addr, None, 0);
             }
         }
-        for addr in self.watch_words.drain(..) {
+        for (addr, access) in self.watch_words.drain(..) {
             if emu
                 .machine
                 .ui_breaks()
                 .watches
                 .iter()
-                .any(|w| w.addr == addr)
+                .any(|w| w.addr == addr && w.access == access)
             {
                 emu.machine.ui_toggle_watch(addr);
             }
@@ -595,7 +577,22 @@ impl App {
     fn gdb_map_stop(&mut self, stop: &DebugStop) -> String {
         match stop {
             DebugStop::Breakpoint { .. } => "T05hwbreak:;thread:1;".to_string(),
-            DebugStop::Watch { addr, .. } => format!("T05watch:{addr:x};thread:1;"),
+            DebugStop::Watch { addr, access, .. } => {
+                let access = self
+                    .gdb
+                    .as_ref()
+                    .and_then(|g| {
+                        g.core
+                            .watch_access_at(*addr, self.emu.machine.ui_addr_mask())
+                    })
+                    .unwrap_or(*access);
+                let key = match access {
+                    crate::debugger::WatchAccess::Write => "watch",
+                    crate::debugger::WatchAccess::Read => "rwatch",
+                    crate::debugger::WatchAccess::Access => "awatch",
+                };
+                format!("T05{key}:{addr:x};thread:1;")
+            }
             DebugStop::LoadSeg { name, addr } => {
                 let Some(g) = self.gdb.as_mut() else {
                     return "T05thread:1;".to_string();

@@ -1160,13 +1160,13 @@ pub struct Bus {
     ui_mem_watch_addrs: Vec<u32>,
     #[serde(skip)]
     ui_mem_writers: Vec<UiMemWriter>,
-    /// A watched word touched by a read-side DMA channel since the
+    /// Watched words touched by read-side CPU or DMA accesses since the
     /// debugger last polled. Reads leave the value alone, so the
     /// value-compare watch loop cannot see them at all; the channels
-    /// latch the access here instead and the CPU's post-step check
+    /// latch the accesses here instead and the CPU's post-step check
     /// promotes it. Transient debug state.
     #[serde(skip)]
-    ui_dma_hit: Option<UiMemWriter>,
+    ui_mem_reads: Vec<UiMemWriter>,
     /// The Copper PC at the last breakpoint check, so arrival at an
     /// address fires once instead of on every eligible colour clock the
     /// PC rests there.
@@ -3021,7 +3021,7 @@ impl Bus {
             wave: None,
             ui_reg_watches: Vec::new(),
             ui_reg_hit: None,
-            ui_dma_hit: None,
+            ui_mem_reads: Vec::new(),
             cpu_pc: 0,
             regcheck: None,
             reg_writers: None,
@@ -3551,6 +3551,7 @@ impl Bus {
     pub fn set_ui_mem_watches(&mut self, addrs: &[u32]) {
         self.ui_mem_watch_addrs = addrs.to_vec();
         self.ui_mem_writers.clear();
+        self.ui_mem_reads.clear();
         self.blitter.set_debug_watch_addrs(addrs);
         self.floppy.set_debug_watch_addrs(addrs);
     }
@@ -3636,20 +3637,37 @@ impl Bus {
                 crate::heatmap::Toucher::from_watch_source(source),
             );
         }
-        if self.ui_mem_watch_addrs.is_empty() || self.ui_dma_hit.is_some() {
+        self.ui_note_memory_read(source, addr, len);
+    }
+
+    /// Latch a data read for debugger read/access watchpoints. CPU callers
+    /// use this directly so instruction fetches stay excluded.
+    pub(crate) fn ui_note_memory_read(
+        &mut self,
+        source: crate::debugger::WatchSource,
+        addr: u32,
+        len: u32,
+    ) {
+        if self.ui_mem_watch_addrs.is_empty() {
             return;
         }
-        let start = addr & 0x00FF_FFFE;
-        let end = addr.wrapping_add(len.max(2));
+        let start = u64::from(addr);
+        let end = start + u64::from(len.max(1));
         for &watch in &self.ui_mem_watch_addrs {
-            if watch.wrapping_add(1) >= start && watch < end {
-                self.ui_dma_hit = Some(UiMemWriter {
+            let watch_start = u64::from(watch);
+            if watch_start < end && watch_start + 2 > start {
+                let hit = UiMemWriter {
                     addr: watch,
                     source,
                     vpos: self.agnus.vpos.min(u32::from(u16::MAX)) as u16,
                     hpos: self.agnus.hpos.min(u32::from(u16::MAX)) as u16,
-                });
-                return;
+                };
+                self.ui_mem_reads
+                    .retain(|old| old.addr != hit.addr || old.source != hit.source);
+                if self.ui_mem_reads.len() >= 8 {
+                    self.ui_mem_reads.remove(0);
+                }
+                self.ui_mem_reads.push(hit);
             }
         }
     }
@@ -3662,9 +3680,9 @@ impl Bus {
         !self.ui_mem_watch_addrs.is_empty() || self.heatmap.is_some()
     }
 
-    /// Take the pending DMA-read watch hit, if any.
-    pub fn take_ui_dma_hit(&mut self) -> Option<UiMemWriter> {
-        self.ui_dma_hit.take()
+    /// Take the pending read-watch hits in access order.
+    pub fn take_ui_mem_reads(&mut self) -> Vec<UiMemWriter> {
+        std::mem::take(&mut self.ui_mem_reads)
     }
 
     fn push_ui_mem_writer(writers: &mut Vec<UiMemWriter>, writer: UiMemWriter) {

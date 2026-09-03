@@ -54,6 +54,7 @@ struct PendingResume {
     /// Stop-translation targets: a matching stop reports
     /// `reason_on_target` instead of its raw trap reason.
     pc_target: Option<u32>,
+    pc_outside: Option<(u32, u32)>,
     beam_target: Option<u16>,
     frame_target: Option<u64>,
     cck_target: Option<u64>,
@@ -69,6 +70,7 @@ impl PendingResume {
             id,
             collect,
             pc_target: None,
+            pc_outside: None,
             beam_target: None,
             frame_target: None,
             cck_target: None,
@@ -606,6 +608,9 @@ impl App {
                             }
                         }
                     }
+                    RunTarget::PcOutside { lo, hi } => {
+                        pending.pc_outside = Some((lo, hi));
+                    }
                     RunTarget::Beam { vpos, hpos } => {
                         pending.beam_target = Some(vpos);
                         self.emu.bus_mut().ui_arm_beam_trap_once(vpos, hpos);
@@ -857,9 +862,10 @@ impl App {
         let Some(pending) = self.control.as_ref().and_then(|c| c.pending.as_ref()) else {
             return false;
         };
-        let (frame_target, cck_target, reason) = (
+        let (frame_target, cck_target, pc_outside, reason) = (
             pending.frame_target,
             pending.cck_target,
+            pending.pc_outside,
             pending.reason_on_target,
         );
         // The burst loop calls this once per emulated frame, which is the
@@ -895,6 +901,19 @@ impl App {
                 self.paused = true;
                 self.sync_live_audio_suspension();
                 self.complete_remote_resumes(reason, &format!("frame {frame}"));
+                self.request_redraw();
+                return true;
+            }
+        }
+        if let Some((lo, hi)) = pc_outside {
+            let pc = self.emu.machine.pc() & self.emu.machine.ui_addr_mask();
+            if !(lo..=hi).contains(&pc) {
+                self.paused = true;
+                self.sync_live_audio_suspension();
+                self.complete_remote_resumes(
+                    reason,
+                    &format!("pc ${pc:06X} outside ${lo:06X}-${hi:06X}"),
+                );
                 self.request_redraw();
                 return true;
             }
