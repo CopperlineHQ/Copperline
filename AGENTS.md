@@ -179,6 +179,16 @@ format is newline-delimited JSON-RPC, so anything that speaks TCP can drive it
 directly. A remote GDB stub (`--gdb`, `docs/debugger/gdb.md`) serves 68k-aware
 debuggers.
 
+For source-level debugging from an IDE, `copperline-ctl --dap` is a Debug
+Adapter Protocol server over the same control protocol
+(`docs/debugger/dap.md`): a VS Code launch configuration (extension in
+`tools/vscode-copperline`) or nvim-dap names the program, the adapter launches
+Copperline with `--run`, stops at the entry point, and debugs by source line
+using the executable's own debug information (vasm `LINE` hunks, amiga-gcc
+6.5 DWARF, or an ELF sibling). `--run` with `--control`/`--control-gui` arms
+the same one-shot `loadseg` stop `--gdb` has, and `segments.list` reports
+the loaded hunks.
+
 ## Diagnostics and benchmarking
 
 - A headless debugger rides along on any run via `COPPERLINE_DBG_*`

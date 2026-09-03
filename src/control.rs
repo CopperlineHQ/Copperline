@@ -23,6 +23,8 @@
 
 pub mod bridge;
 pub mod catalogue;
+#[cfg(feature = "dap")]
+pub mod dap;
 pub mod exec;
 pub mod headless;
 pub mod mcp;

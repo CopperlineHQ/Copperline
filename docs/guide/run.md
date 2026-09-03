@@ -81,6 +81,11 @@ The [control protocol](../debugger/control.md) gets the same break-at-entry: wit
 program, and `segments.list` reports its hunk addresses at that stop. Scripts can
 also arm their own `loadseg` breakpoint to catch every load.
 
+For an IDE, the [Debug Adapter Protocol](../debugger/dap.md) server does all of
+this by itself: a VS Code (or nvim-dap) launch configuration naming the program
+starts Copperline, stops at the entry point, and debugs by source line from the
+executable's own debug information.
+
 (uaelib-trap)=
 ### WinUAE-compatible `uaelib` trap
 

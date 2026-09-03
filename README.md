@@ -16,7 +16,7 @@ It boots out of the box with the bundled open-source AROS Kickstart replacement,
 - **Storage and media**: Floppy disk images (ADF, ADZ, DMS, IPF, SCP), physical floppy drives via Greaseweazle (FluxBridge), IDE (Gayle/A4000), SCSI (A2091, A3000, A4091), CD-ROM, and host directory filesystem mounting.
 - **Audio and video**: 4-channel Paula audio, RTG graphics cards (Picasso II/II+, Z3660), host MIDI in/out bridging, and built-in Roland MT-32 and General MIDI synthesis.
 - **Expansion and networking**: Zorro II/III autoconfig, A2065 Ethernet, host-backed bsdsocket.library, and sandboxed WebAssembly expansion plugins.
-- **Debugging and automation**: In-window interactive debugger with reverse stepping, signal waveform export (VCD), GDB remote stub, deterministic save states, headless scripting, and a JSON-RPC control protocol (`copperline-ctl`, with an MCP server mode for AI coding agents via `copperline-ctl --mcp`).
+- **Debugging and automation**: In-window interactive debugger with reverse stepping, signal waveform export (VCD), GDB remote stub, a Debug Adapter Protocol server for VS Code and other IDEs (`copperline-ctl --dap`, source-level from the hunk executable's own debug information), deterministic save states, headless scripting, and a JSON-RPC control protocol (`copperline-ctl`, with an MCP server mode for AI coding agents via `copperline-ctl --mcp`).
 - **Freezer cartridge**: Action Replay-style cartridge support with bundled HRTMon (`--cartridge hrtmon`), allowing running software to be frozen into the monitor via the menu, a hotkey, headless `--freeze-after`, or the control protocol.
 - **Direct launching**: Boot directly into WHDLoad game packages (`--whdload`) or host-built Amiga executables (`--run`), with a WinUAE-compatible `uaelib` trap allowing guest code to control warp speed, log debug messages, and register debug resources.
 - **WebAssembly build**: Run directly in modern web browsers at [copperline.dev/try](https://copperline.dev/try/).
@@ -126,6 +126,7 @@ Comprehensive documentation is published at [copperline.dev](https://copperline.
 - [Floppy Hardware Bridge](docs/guide/fluxbridge.md) - Real floppy drives via Greaseweazle
 - [Headless Mode](docs/guide/headless.md) - Scripted runs and screenshot/frame dumps
 - [Debugging](docs/debugger/window.md) - In-window, headless, and GDB debugging
+- [IDE Debugging](docs/debugger/dap.md) - Debug Adapter Protocol server for VS Code and nvim-dap (`copperline-ctl --dap`)
 - [Control Protocol](docs/debugger/control.md) - JSON-RPC control interface (`copperline-ctl`)
 - [Internals](docs/internals/architecture.md) - Architecture, chipset, and timing models
 

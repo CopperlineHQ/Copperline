@@ -16,13 +16,20 @@
 //! attaches a session through the session_* tools:
 //!   copperline-ctl --mcp [--info FILE | --connect ADDR --token TOKEN]
 //!
+//! Debug Adapter Protocol server (docs/debugger/dap.md) for VS Code,
+//! nvim-dap and other DAP clients, on stdio or a TCP listener; with a
+//! connection given, the client's launch or attach uses that session:
+//!   copperline-ctl --dap [--info FILE | --connect ADDR --token TOKEN]
+//!   copperline-ctl --dap-listen ADDR
+//!
 //! Responses print to stdout as one JSON object per line; server
 //! notifications (event.*) print as they arrive. Exit status is nonzero
 //! when a one-shot request returns a JSON-RPC error.
 //!
-//! Deliberately std + serde_json only (the MCP mode is the library's
-//! hand-rolled `control::mcp`, no async runtime), so it stays a trivially
-//! portable sidecar for scripts and agents.
+//! Deliberately std + serde_json only (the MCP and DAP modes are the
+//! library's hand-rolled `control::mcp` and `control::dap`, no async
+//! runtime), so it stays a trivially portable sidecar for scripts,
+//! agents and editors.
 
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
@@ -34,6 +41,8 @@ struct Options {
     token: Option<String>,
     repl: bool,
     mcp: bool,
+    dap: bool,
+    dap_listen: Option<String>,
     method: Option<String>,
     params: Value,
 }
@@ -41,7 +50,9 @@ struct Options {
 fn usage() -> &'static str {
     "usage: copperline-ctl (--info FILE | --connect ADDR --token TOKEN) \
      [--repl | METHOD [JSON-PARAMS]]\n       \
-     copperline-ctl --mcp [--info FILE | --connect ADDR --token TOKEN]"
+     copperline-ctl --mcp [--info FILE | --connect ADDR --token TOKEN]\n       \
+     copperline-ctl --dap [--info FILE | --connect ADDR --token TOKEN]\n       \
+     copperline-ctl --dap-listen ADDR [--info FILE | --connect ADDR --token TOKEN]"
 }
 
 fn parse_options() -> Result<Options, String> {
@@ -49,6 +60,8 @@ fn parse_options() -> Result<Options, String> {
     let mut token = None;
     let mut repl = false;
     let mut mcp = false;
+    let mut dap = false;
+    let mut dap_listen = None;
     let mut method = None;
     let mut params = Value::Null;
     let mut args = std::env::args().skip(1);
@@ -79,6 +92,10 @@ fn parse_options() -> Result<Options, String> {
             }
             "--repl" => repl = true,
             "--mcp" => mcp = true,
+            "--dap" => dap = true,
+            "--dap-listen" => {
+                dap_listen = Some(args.next().ok_or("--dap-listen requires ADDR")?);
+            }
             "-h" | "--help" => return Err(usage().to_string()),
             _ if method.is_none() && !arg.starts_with('-') => method = Some(arg),
             _ if method.is_some() && params.is_null() => {
@@ -88,12 +105,17 @@ fn parse_options() -> Result<Options, String> {
             other => return Err(format!("unexpected argument {other:?}\n{}", usage())),
         }
     }
-    if mcp {
+    let dap = dap || dap_listen.is_some();
+    if mcp && dap {
+        return Err(format!("--mcp and --dap are exclusive\n{}", usage()));
+    }
+    if mcp || dap {
+        let mode = if mcp { "--mcp" } else { "--dap" };
         if repl || method.is_some() {
-            return Err(format!("--mcp takes no method or --repl\n{}", usage()));
+            return Err(format!("{mode} takes no method or --repl\n{}", usage()));
         }
         if connect.is_some() && token.is_none() {
-            return Err(format!("--mcp --connect needs --token\n{}", usage()));
+            return Err(format!("{mode} --connect needs --token\n{}", usage()));
         }
     } else {
         if connect.is_none() {
@@ -108,6 +130,8 @@ fn parse_options() -> Result<Options, String> {
         token,
         repl,
         mcp,
+        dap,
+        dap_listen,
         method,
         params,
     })
@@ -322,6 +346,33 @@ fn run_mcp(options: &Options) -> ExitCode {
     }
 }
 
+/// `--dap` / `--dap-listen`: serve the Debug Adapter Protocol, attached
+/// to the session named on the command line if there is one.
+fn run_dap(options: &Options) -> ExitCode {
+    use copperline::control::bridge::Bridge;
+    let attach = match (&options.connect, &options.token) {
+        (Some(addr), Some(token)) => match Bridge::connect(addr, token) {
+            Ok(bridge) => Some(bridge),
+            Err(message) => {
+                eprintln!("copperline-ctl: {message}");
+                return ExitCode::FAILURE;
+            }
+        },
+        _ => None,
+    };
+    let result = match &options.dap_listen {
+        Some(addr) => copperline::control::dap::run_listen(addr, attach),
+        None => copperline::control::dap::run_stdio(attach),
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("copperline-ctl: dap transport: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let options = match parse_options() {
         Ok(options) => options,
@@ -332,6 +383,9 @@ fn main() -> ExitCode {
     };
     if options.mcp {
         return run_mcp(&options);
+    }
+    if options.dap {
+        return run_dap(&options);
     }
     let addr = options.connect.as_deref().expect("checked in parsing");
     let mut client = match Client::connect(addr) {

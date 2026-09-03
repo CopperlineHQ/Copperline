@@ -20,7 +20,9 @@ src/
   debugger.rs       # env-driven headless debugger
   waveform.rs       # trigger-based VCD chipset-signal capture (GTKWave)
   disasm.rs         # 68000 + Copper-list disassemblers
-  gdbstub.rs        # GDB remote-protocol stub (host debugger transport)
+  gdbstub/          # GDB remote-protocol stub (transport-free core, headless and windowed drivers)
+  control/          # control protocol (JSON-RPC over TCP), its MCP server and DAP adapter (control/dap/)
+  debuginfo/        # guest program debug information: hunk symbols, LINE hunks, DWARF, unwinding
   amigaos.rs        # read-only exec.library structure walking for the debugger
   cpu.rs            # m68k core wrapper and CPU-visible bus adapter
   cache.rs          # 68020/030/040 on-chip instruction/data cache model
