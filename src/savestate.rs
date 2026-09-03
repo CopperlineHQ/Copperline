@@ -370,7 +370,12 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      in-flight requests), so the shape otherwise stays close to M4's.
 //      (Was 71, then 75 on the copperhf-device branch; renumbered past
 //      upstream's own 71-76 at each merge.)
-pub const STATE_VERSION: u32 = 77;
+//  78: Akiko's dump-exclusive command hold (`command_deferred_for_toc`)
+//      became the drive's unparsed receive buffer (`tx_fifo`): the TX DMA
+//      now drains the guest's command ring into it regardless of the
+//      drive's state, and the drive parses commands out of it only
+//      between dumps.
+pub const STATE_VERSION: u32 = 78;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {
