@@ -243,9 +243,13 @@ impl Ad1848 {
         }
         if v & 0x01 != 0 {
             self.active |= STATUS_FIFO_PLAY;
+        } else {
+            self.active &= !STATUS_FIFO_PLAY;
         }
         if v & 0x02 != 0 {
             self.active |= STATUS_FIFO_RECORD;
+        } else {
+            self.active &= !STATUS_FIFO_RECORD;
         }
         self.regs[9] = v;
     }
@@ -715,6 +719,24 @@ mod tests {
         chip.write_data(0x10); // stop: SDC bit only, play/record enable cleared
         assert!(!chip.play_active());
         assert_eq!(chip.peek_last_sample(), (0.0, 0.0));
+    }
+
+    #[test]
+    fn play_active_clears_when_only_play_enable_drops_with_capture_still_set() {
+        // Regression for a latched-active bug: `write_reg9` used to only
+        // clear `active` (and so `play_active()`) when both PEN and CEN
+        // dropped to zero together, via the full `codec_stop()` path. A
+        // driver that disables playback (PEN) while leaving capture (CEN)
+        // enabled -- 0x03 -> 0x02 -- never took that path, so
+        // `play_active()` stayed stuck true and the mixer fallback kept
+        // emitting the final sample forever, exactly like the bug this
+        // whole fix addresses.
+        let mut chip = Ad1848::new();
+        chip.write_index(9);
+        chip.write_data(0x03); // PEN + CEN both enabled
+        assert!(chip.play_active());
+        chip.write_data(0x02); // PEN cleared, CEN still set
+        assert!(!chip.play_active());
     }
 
     #[test]
