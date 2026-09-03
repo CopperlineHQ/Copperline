@@ -280,7 +280,19 @@ impl Ad1848 {
     /// codec's own causally-paced cadence (`Toccata::advance_codec`) has
     /// produced yet, so a resampler's internal lookahead/priming can
     /// never pull `produce_one_sample`'s side effects out of order.
+    ///
+    /// Only valid while the codec is actively playing: once stopped,
+    /// `advance_codec` no longer runs at all, so without this guard the
+    /// resampler would keep pulling this same fallback and hold the final
+    /// decoded sample as a constant DC offset for the rest of the capture
+    /// -- forever, not just across one underrun. A real codec's DAC line
+    /// may hold that voltage too, but nothing downstream of it (the mixer,
+    /// the master mix, a stem capture) should still be observing a stopped
+    /// channel's last note.
     pub fn peek_last_sample(&self) -> (f32, f32) {
+        if !self.play_active() {
+            return (0.0, 0.0);
+        }
         let (l, r) = self.last_sample;
         (l * self.left_volume, r * self.right_volume)
     }
@@ -678,6 +690,31 @@ mod tests {
         assert!(first.0 > 0.9);
         let repeated = chip.produce_one_sample(); // FIFO now empty: underrun
         assert_eq!(repeated, first);
+    }
+
+    #[test]
+    fn peek_last_sample_falls_silent_once_the_codec_stops() {
+        let mut chip = Ad1848::new();
+        enable_play(&mut chip);
+        chip.write_index(8);
+        chip.write_data(0x00); // mono 8-bit
+        chip.write_index(6);
+        chip.write_data(0x00);
+        chip.write_index(7);
+        chip.write_data(0x00);
+        latch_format(&mut chip); // reg 9 rising edge -> codec_start(), play_active() true
+        chip.write_fifo_byte(0xff); // one full sample: (255-128)/128 ~= 0.992
+        let last = chip.produce_one_sample();
+        assert!(last.0 > 0.9);
+        assert!(chip.play_active());
+        assert_eq!(chip.peek_last_sample(), last);
+        // Stopping playback (reg 9 bit 0 cleared) must not leave the
+        // resampler's fallback holding this sample as a permanent DC
+        // offset.
+        chip.write_index(9);
+        chip.write_data(0x10); // stop: SDC bit only, play/record enable cleared
+        assert!(!chip.play_active());
+        assert_eq!(chip.peek_last_sample(), (0.0, 0.0));
     }
 
     #[test]
