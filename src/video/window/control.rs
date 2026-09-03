@@ -81,6 +81,21 @@ impl PendingResume {
 }
 
 impl App {
+    /// Retire the next ordinary window quantum, switching to precise stepping
+    /// only for the one run target whose correctness depends on observing
+    /// every instruction boundary.
+    pub(super) fn control_step_frame(&mut self) -> anyhow::Result<()> {
+        let pc_outside = self
+            .control
+            .as_ref()
+            .and_then(|control| control.pending.as_ref())
+            .and_then(|pending| pending.pc_outside);
+        match pc_outside {
+            Some((lo, hi)) => self.emu.step_frame_until_pc_outside(lo, hi).map(|_| ()),
+            None => self.emu.step_frame(),
+        }
+    }
+
     /// Adopt a bound control server; called from `main` between
     /// `App::new` and `run()`.
     pub fn attach_control(&mut self, handle: ControlHandle, config: &crate::control::Config) {
@@ -855,7 +870,7 @@ impl App {
         }
     }
 
-    /// Burst-loop check: complete a pending frame/cck target when the
+    /// Burst-loop check: complete a pending run target when the
     /// machine has reached it. Returns true when the run finished (the
     /// burst should end).
     pub(super) fn control_run_target_reached(&mut self) -> bool {

@@ -5005,7 +5005,11 @@ impl ApplicationHandler for App {
             loop {
                 let speculative = runahead > 0 && frames_done > 0;
                 self.emu.set_runahead_speculative(speculative);
-                if let Err(e) = self.emu.step_frame() {
+                #[cfg(feature = "control")]
+                let step = self.control_step_frame();
+                #[cfg(not(feature = "control"))]
+                let step = self.emu.step_frame();
+                if let Err(e) = step {
                     error!("emulator step halted: {e:?}");
                     self.cpu_halted = true;
                     self.sync_live_audio_suspension();

@@ -70,6 +70,7 @@ pub struct PreparedRun {
 /// runs, and exits inside a single frame; the marker is host-visible the
 /// moment the guest writes it, so even the fastest program ends the warp.
 pub const DONE_MARKER: &str = "done";
+const DETACHED_SCRIPT: &str = "Detached-Run";
 
 /// Guest-shell options used by debugger launches.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -80,13 +81,10 @@ pub struct RunOptions {
     pub detach: bool,
 }
 
-/// The generated `S/Startup-Sequence`: fail only on real errors, make the
-/// program's own directory current (so its relative asset paths work),
-/// run it by absolute path, and drop the completion marker when it
-/// returns. `Echo` is internal alongside `CD`/`FailAt` from Kickstart 2.0
-/// on; on 1.3 the marker line is skipped like the others and the warp
-/// gate falls back to its LoadSeg poll and deadline.
-fn startup_sequence(prog_name: &str, extra_args: Option<&str>, options: RunOptions) -> String {
+/// The script that actually runs the program and drops the completion marker
+/// when it returns. Detached launches execute this in their child CLI, so
+/// closing the boot CLI cannot skip the marker.
+fn program_sequence(prog_name: &str, extra_args: Option<&str>, stack: Option<u32>) -> String {
     let mut run = format!("\"{PROG_VOLUME}:{prog_name}\"");
     if let Some(args) = extra_args {
         let args = args.trim();
@@ -95,17 +93,26 @@ fn startup_sequence(prog_name: &str, extra_args: Option<&str>, options: RunOptio
             run.push_str(args);
         }
     }
-    let stack = options
-        .stack
-        .map_or_else(String::new, |n| format!("Stack {n}\n"));
-    let run = if options.detach {
-        format!("Run >NIL: <NIL: {run}\nEndCLI")
-    } else {
-        run
-    };
+    let stack = stack.map_or_else(String::new, |n| format!("Stack {n}\n"));
     format!(
         "FailAt 21\n{stack}CD \"{PROG_VOLUME}:\"\n{run}\nEcho >\"{BOOT_VOLUME}:{DONE_MARKER}\" \"done\"\n"
     )
+}
+
+/// The generated `S/Startup-Sequence`: a foreground launch performs the work
+/// directly. A detached launch starts a child `Execute` script and closes only
+/// the parent CLI; the child owns both the program and completion marker.
+/// `Echo` is internal alongside `CD`/`FailAt` from Kickstart 2.0 on; on 1.3
+/// the marker line is skipped like the others and the warp gate falls back to
+/// its LoadSeg poll and deadline.
+fn startup_sequence(prog_name: &str, extra_args: Option<&str>, options: RunOptions) -> String {
+    if options.detach {
+        format!(
+            "FailAt 21\nRun >NIL: <NIL: Execute \"{BOOT_VOLUME}:S/{DETACHED_SCRIPT}\"\nEndCLI\n"
+        )
+    } else {
+        program_sequence(prog_name, extra_args, options.stack)
+    }
 }
 
 /// Whether the guest can address this file name at all. The services
@@ -190,6 +197,18 @@ pub fn prepare_with_options(
         startup_sequence(&prog_name, extra_args, options),
     )
     .with_context(|| format!("writing the Startup-Sequence under {}", boot_dir.display()))?;
+    if options.detach {
+        std::fs::write(
+            boot_dir.join("S").join(DETACHED_SCRIPT),
+            program_sequence(&prog_name, extra_args, options.stack),
+        )
+        .with_context(|| {
+            format!(
+                "writing the detached run script under {}",
+                boot_dir.display()
+            )
+        })?;
+    }
 
     Ok(PreparedRun {
         boot_dir,
@@ -365,9 +384,34 @@ mod tests {
                     detach: true,
                 },
             ),
-            format!(
-                "FailAt 21\nStack 32768\nCD \"RunProg:\"\nRun >NIL: <NIL: \"RunProg:hello\" -x\nEndCLI\n{DONE_LINE}"
-            )
+            "FailAt 21\nRun >NIL: <NIL: Execute \"RunBoot:S/Detached-Run\"\nEndCLI\n"
+        );
+        assert_eq!(
+            program_sequence("hello", Some("-x"), Some(32_768)),
+            format!("FailAt 21\nStack 32768\nCD \"RunProg:\"\n\"RunProg:hello\" -x\n{DONE_LINE}")
+        );
+    }
+
+    #[test]
+    fn detached_prepare_stages_the_child_completion_script() {
+        let dir = temp_dir("runprog-detached");
+        let program = dir.join("hello");
+        std::fs::write(&program, b"hunk").unwrap();
+        let prepared = prepare_with_options(
+            &program,
+            Some("-x"),
+            RunOptions {
+                stack: Some(32_768),
+                detach: true,
+            },
+            Some(&dir.join("stage")),
+        )
+        .unwrap();
+        let child =
+            std::fs::read_to_string(prepared.boot_dir.join("S").join(DETACHED_SCRIPT)).unwrap();
+        assert_eq!(
+            child,
+            format!("FailAt 21\nStack 32768\nCD \"RunProg:\"\n\"RunProg:hello\" -x\n{DONE_LINE}")
         );
     }
 

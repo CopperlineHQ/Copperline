@@ -54,6 +54,14 @@
 use std::collections::VecDeque;
 use std::path::{Component, Path, PathBuf};
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Arc;
+
+#[cfg(not(target_arch = "wasm32"))]
+use cap_std::ambient_authority;
+#[cfg(not(target_arch = "wasm32"))]
+use cap_std::fs::Dir;
+
 use crate::memory::Memory;
 use crate::zorro_device::{dma_read_byte, dma_write_byte};
 
@@ -91,6 +99,29 @@ const DEBUG_FILE_NAME_MAX: usize = 4_096;
 pub const DEBUG_FILE_MAX: usize = 16 * 1024 * 1024;
 /// `sizeof(struct debug_resource)` in the template.
 const RESOURCE_STRUCT_SIZE: usize = 50;
+
+/// Host-only authority for the opt-in file bridge. Keeping the directory
+/// handle open is the security boundary: every guest path is resolved by
+/// `cap_std` relative to this handle with beneath/no-follow protections, so a
+/// concurrent symlink swap cannot redirect an already-authorized operation.
+#[derive(Clone, Debug)]
+pub(crate) struct FileAuthority {
+    root: PathBuf,
+    #[cfg(not(target_arch = "wasm32"))]
+    dir: Arc<Dir>,
+}
+
+impl FileAuthority {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn open(&self, relative: &Path) -> std::io::Result<cap_std::fs::File> {
+        self.dir.open(relative)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn create(&self, relative: &Path) -> std::io::Result<cap_std::fs::File> {
+        self.dir.create(relative)
+    }
+}
 
 pub const FN_GET_VERSION: u32 = 0;
 pub const FN_CFG_READ: u32 = 81;
@@ -337,11 +368,11 @@ pub struct UaeLib {
     speculative_host_quiet: bool,
     #[serde(skip)]
     stdout_muted: bool,
-    /// Canonical `--run` program directory for the opt-in file commands.
-    /// Host authority never travels in a save state; the running session
-    /// reapplies this after timeline restores.
+    /// Held `--run` directory capability for the opt-in file commands. Host
+    /// authority never travels in a save state; the running session reapplies
+    /// this exact handle after timeline restores.
     #[serde(skip)]
-    file_root: Option<PathBuf>,
+    file_authority: Option<FileAuthority>,
     /// Host-only mirror of the echo for the debugger console pane:
     /// bounded, oldest dropped, drained once per committed frame by
     /// `App::service_uaelib`. Fed inside the run-ahead gate but NOT the
@@ -372,7 +403,7 @@ impl UaeLib {
             overlay_dropped: 0,
             speculative_host_quiet: false,
             stdout_muted: false,
-            file_root: None,
+            file_authority: None,
             console_lines: VecDeque::new(),
             #[cfg(test)]
             echoed: Vec::new(),
@@ -718,30 +749,47 @@ impl UaeLib {
     }
 
     /// Give the opt-in file commands their one host authority. `root` must
-    /// already be canonical: all target paths are canonicalized against it
-    /// before use, including an existing symlink leaf.
-    pub fn set_file_root(&mut self, root: Option<PathBuf>) {
-        self.file_root = root;
+    /// already be canonical. It is opened once; guest operations never look
+    /// it up again by ambient host path.
+    pub fn set_file_root(&mut self, root: Option<PathBuf>) -> std::io::Result<()> {
+        self.file_authority = match root {
+            None => None,
+            #[cfg(not(target_arch = "wasm32"))]
+            Some(root) => Some(FileAuthority {
+                dir: Arc::new(Dir::open_ambient_dir(&root, ambient_authority())?),
+                root,
+            }),
+            #[cfg(target_arch = "wasm32")]
+            Some(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "host file authority is unavailable in browser builds",
+                ));
+            }
+        };
+        Ok(())
     }
 
     /// Host-only file authority, used by the emulator to preserve it across
     /// save-state, reverse, and run-ahead restores.
     pub fn file_root(&self) -> Option<&Path> {
-        self.file_root.as_deref()
+        self.file_authority
+            .as_ref()
+            .map(|authority| authority.root.as_path())
     }
 
-    /// Resolve a guest filename below the configured root. `for_write`
-    /// permits a nonexistent leaf, but its parent must already exist and
-    /// canonicalize below the root. Absolute paths, prefixes and `..` never
-    /// reach the host filesystem.
-    fn debug_file_path(
-        &self,
-        mem: &Memory,
-        ptr: u32,
-        address_mask: u32,
-        for_write: bool,
-    ) -> Option<PathBuf> {
-        let root = self.file_root.as_ref()?;
+    pub(crate) fn file_authority(&self) -> Option<FileAuthority> {
+        self.file_authority.clone()
+    }
+
+    pub(crate) fn set_file_authority(&mut self, authority: Option<FileAuthority>) {
+        self.file_authority = authority;
+    }
+
+    /// Parse a guest filename as a relative path. Absolute paths, prefixes and
+    /// `..` never reach the capability-backed host filesystem.
+    fn debug_file_name(&self, mem: &Memory, ptr: u32, address_mask: u32) -> Option<PathBuf> {
+        self.file_authority.as_ref()?;
         let bytes = guest_cstring(mem, ptr & address_mask, DEBUG_FILE_NAME_MAX, address_mask)?;
         let name = std::str::from_utf8(&bytes).ok()?;
         let relative = Path::new(name);
@@ -757,18 +805,7 @@ impl UaeLib {
             log::debug!("uaelib: rejected file name {name:?}");
             return None;
         }
-
-        let joined = root.join(relative);
-        if !for_write || joined.exists() {
-            let target = std::fs::canonicalize(&joined).ok()?;
-            return target.starts_with(root).then_some(target);
-        }
-
-        let parent = std::fs::canonicalize(joined.parent()?).ok()?;
-        if !parent.starts_with(root) {
-            return None;
-        }
-        Some(parent.join(joined.file_name()?))
+        Some(relative.to_path_buf())
     }
 
     fn debug_load(
@@ -780,11 +817,16 @@ impl UaeLib {
     ) -> (u32, bool) {
         use std::io::Read as _;
 
-        let Some(path) = self.debug_file_path(mem, name_ptr, address_mask, false) else {
+        let Some(relative) = self.debug_file_name(mem, name_ptr, address_mask) else {
             return (0, false);
         };
+        let authority = self
+            .file_authority
+            .as_ref()
+            .expect("checked by debug_file_name");
+        let display_path = authority.root.join(&relative);
         let loaded = (|| -> std::io::Result<Vec<u8>> {
-            let file = std::fs::File::open(&path)?;
+            let file = authority.open(&relative)?;
             if file.metadata()?.len() > DEBUG_FILE_MAX as u64 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -805,7 +847,7 @@ impl UaeLib {
         let bytes = match loaded {
             Ok(bytes) => bytes,
             Err(e) => {
-                log::debug!("uaelib: debug_load {} failed: {e}", path.display());
+                log::debug!("uaelib: debug_load {} failed: {e}", display_path.display());
                 return (0, false);
             }
         };
@@ -814,7 +856,7 @@ impl UaeLib {
         {
             log::debug!(
                 "uaelib: debug_load {} destination {address:#010X}+{} is not writable RAM",
-                path.display(),
+                display_path.display(),
                 bytes.len()
             );
             return (0, false);
@@ -829,6 +871,8 @@ impl UaeLib {
     }
 
     fn debug_save(&self, address: u32, size: u32, name_ptr: u32, mem: &Memory, address_mask: u32) {
+        use std::io::Write as _;
+
         let Ok(size) = usize::try_from(size) else {
             return;
         };
@@ -840,7 +884,7 @@ impl UaeLib {
             log::debug!("uaelib: debug_save source {address:#010X}+{size} is unreadable");
             return;
         };
-        let Some(path) = self.debug_file_path(mem, name_ptr, address_mask, true) else {
+        let Some(relative) = self.debug_file_name(mem, name_ptr, address_mask) else {
             return;
         };
         // A speculative run-ahead frame will be replayed on the committed
@@ -848,8 +892,16 @@ impl UaeLib {
         if self.speculative_host_quiet {
             return;
         }
-        if let Err(e) = std::fs::write(&path, bytes) {
-            log::debug!("uaelib: debug_save {} failed: {e}", path.display());
+        let authority = self
+            .file_authority
+            .as_ref()
+            .expect("checked by debug_file_name");
+        let display_path = authority.root.join(&relative);
+        let saved = authority
+            .create(&relative)
+            .and_then(|mut file| file.write_all(&bytes));
+        if let Err(e) = saved {
+            log::debug!("uaelib: debug_save {} failed: {e}", display_path.display());
         }
     }
 
@@ -1866,7 +1918,7 @@ mod tests {
         std::fs::write(root.join("data/input.bin"), b"from host").unwrap();
 
         let mut lib = UaeLib::new();
-        lib.set_file_root(Some(root.clone()));
+        lib.set_file_root(Some(root.clone())).unwrap();
         let mut mem = memory();
         put_str(&mut mem, 0x2000, "data/input.bin");
         put_str(&mut mem, 0x2100, "data/output.bin");
@@ -1919,7 +1971,7 @@ mod tests {
             .unwrap();
 
         let mut lib = UaeLib::new();
-        lib.set_file_root(Some(root.clone()));
+        lib.set_file_root(Some(root.clone())).unwrap();
         let mut mem = memory();
         for (at, name) in [
             (0x2000, "../escape.bin"),
@@ -1980,6 +2032,23 @@ mod tests {
                 std::fs::read(outside.join("secret.bin")).unwrap(),
                 b"secret"
             );
+
+            // A dangling leaf is still an existing symlink entry. Creating
+            // through it must not materialize its out-of-root target.
+            symlink(outside.join("created.bin"), root.join("dangling.bin")).unwrap();
+            put_str(&mut mem, 0x2500, "dangling.bin");
+            assert_eq!(
+                lib.call(
+                    FN_DEBUG_CMD,
+                    [CMD_SAVE, 0x1_1000, 6, 0x2500, 0],
+                    &mut mem,
+                    MASK24,
+                    0,
+                    0,
+                ),
+                (0, false)
+            );
+            assert!(!outside.join("created.bin").exists());
             std::fs::remove_dir_all(outside).unwrap();
         }
 
@@ -2013,7 +2082,7 @@ mod tests {
         let target = root.join("saved.bin");
 
         let mut lib = UaeLib::new();
-        lib.set_file_root(Some(root));
+        lib.set_file_root(Some(root)).unwrap();
         let mut mem = memory();
         put_str(&mut mem, 0x2000, "saved.bin");
         put(&mut mem, 0x3000, b"data");
@@ -2042,11 +2111,20 @@ mod tests {
 
     #[test]
     fn file_authority_does_not_travel_in_serialized_guest_state() {
+        let dir = std::env::temp_dir().join(format!(
+            "copperline-uaelib-authority-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
         let mut lib = UaeLib::new();
-        lib.set_file_root(Some(PathBuf::from("/host/authority")));
+        lib.set_file_root(Some(std::fs::canonicalize(&dir).unwrap()))
+            .unwrap();
         let encoded = bincode::serialize(&lib).unwrap();
         let restored: UaeLib = bincode::deserialize(&encoded).unwrap();
         assert!(restored.file_root().is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn overlay_cmd(lib: &mut UaeLib, mem: &mut Memory, cmd: u32, a2: u32, a3: u32, a4: u32) {

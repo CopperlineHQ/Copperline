@@ -43,6 +43,7 @@ range checks as the equivalent TOML fields:
 |---|---|---|
 | `--model NAME` | `[machine] profile` | `A1000`, `A500`, `A500OCS`, `A500Plus`, `A600`, `A1200`, `A3000`, `A4000`, `CDTV`, `CD32` |
 | `--chipset NAME` | `[chipset] revision` | `OCS`, `ECS`, `AGA` |
+| `--video STANDARD` | `[chipset] video` | `PAL`, `NTSC` |
 | `--cpu MODEL` | `[cpu] model` | `68000`, `68010`, `68EC020`, `68020`, `68030`, `68040`, `68060` |
 | `--cpu-clock MHZ` | `[cpu] clock_mhz` | a number of MHz |
 | `--fpu` / `--no-fpu` | `[cpu] fpu` | fit / omit a 68881/68882 |

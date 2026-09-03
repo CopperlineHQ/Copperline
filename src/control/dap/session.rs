@@ -249,6 +249,10 @@ pub struct Session {
     /// The first hunk's address from the load stop, for a session
     /// without debug information.
     first_hunk: Option<u32>,
+    /// Exception catches stay dormant only while this session is deliberately
+    /// running the operating system toward its named debug target. An attach
+    /// without a program has no first hunk either, but is not waiting for one.
+    waiting_for_target_load: bool,
     tick: u32,
     /// Events to send after the current request's response.
     deferred: Vec<(String, Value)>,
@@ -321,6 +325,7 @@ impl Session {
         session.load_program_info(&program, args);
         session.stop_on_entry = args["stopOnEntry"].as_bool().unwrap_or(true);
         session.phase = Phase::AwaitingLoad;
+        session.waiting_for_target_load = true;
         session.subscribe();
         Ok(session)
     }
@@ -351,6 +356,7 @@ impl Session {
         // Is the program already running? Its segment list has the
         // hunks the file describes.
         let loaded = session.try_relocate_current();
+        session.waiting_for_target_load = !loaded && session.info.is_some();
         session.phase = match (loaded, running) {
             (true, true) => Phase::RunningExternal,
             (true, false) => Phase::Paused,
@@ -451,6 +457,7 @@ impl Session {
             last_exception: None,
             temp_breaks: Vec::new(),
             first_hunk: None,
+            waiting_for_target_load: false,
             tick: 0,
             deferred: Vec::new(),
             emulator_log: false,
@@ -684,6 +691,7 @@ impl Session {
     /// first instruction): relocate, announce the module, bind the
     /// breakpoints that were waiting.
     fn on_loaded(&mut self, emit: &mut Emit, detail: &str) {
+        self.waiting_for_target_load = false;
         // "Program loaded: NAME (first hunk $XXXXXX)"
         if let Some(hex) = detail.rsplit('$').next() {
             let hex = hex.trim_end_matches(')');
@@ -1538,7 +1546,7 @@ impl Session {
         }
         let ids = self
             .breaks
-            .set_exceptions(&self.bridge, &filters, self.first_hunk.is_some());
+            .set_exceptions(&self.bridge, &filters, !self.waiting_for_target_load);
         Ok(json!({"breakpoints": self.breakpoint_values(&ids, true)}))
     }
 
@@ -2241,20 +2249,24 @@ impl Session {
         let Some((reason, detail)) = &self.last_exception else {
             return Err("no exception has been caught".into());
         };
-        let id = detail
-            .split("(vector ")
-            .nth(1)
-            .and_then(|rest| rest.split(')').next())
-            .map(|v| format!("vector {v}"))
-            .unwrap_or_else(|| reason.clone());
-        let description = exception_description(detail).unwrap_or(detail);
-        Ok(json!({
-            "exceptionId": id,
-            "description": description,
-            "breakMode": "always",
-            "details": {"message": description, "typeName": reason},
-        }))
+        Ok(exception_info_payload(reason, detail))
     }
+}
+
+fn exception_info_payload(reason: &str, detail: &str) -> Value {
+    let id = detail
+        .split("(vector ")
+        .nth(1)
+        .and_then(|rest| rest.split(')').next())
+        .map(|v| format!("vector {v}"))
+        .unwrap_or_else(|| reason.to_string());
+    let description = exception_description(detail).unwrap_or(detail);
+    json!({
+        "exceptionId": id,
+        "description": description,
+        "breakMode": "always",
+        "details": {"message": detail, "typeName": reason},
+    })
 }
 
 fn exception_description(detail: &str) -> Option<&'static str> {
@@ -2366,6 +2378,21 @@ mod tests {
         assert_eq!(parse_address("4096"), Ok(4096));
         assert!(parse_address("zz").is_err());
         assert!(parse_address("0x1FFFFFFFF").is_err());
+    }
+
+    #[test]
+    fn exception_info_keeps_the_raw_handler_detail() {
+        let payload =
+            exception_info_payload("exception", "Caught exception (vector 4), handler $F80010");
+        assert_eq!(payload["exceptionId"], "vector 4");
+        assert_eq!(
+            payload["description"],
+            "SIGILL: illegal instruction (vector 4)"
+        );
+        assert_eq!(
+            payload["details"]["message"],
+            "Caught exception (vector 4), handler $F80010"
+        );
     }
 
     #[test]

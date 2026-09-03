@@ -2183,15 +2183,21 @@ impl M68kMachine {
         // value alone, so the compare loop below can never see it; the
         // channels latch the access on the bus and it is promoted here.
         for hit in read_hits {
-            if let Some(watch) = self.ui_breaks.watches.iter().find(|w| {
+            if let Some(index) = self.ui_breaks.watches.iter().position(|w| {
                 w.addr == hit.addr
                     && w.access.reads()
                     && (w.pc.is_none()
                         || (hit.source == crate::debugger::WatchSource::Cpu
                             && w.pc == Some(writer_pc)))
             }) {
+                let watch = &self.ui_breaks.watches[index];
                 if watch.filter.is_none_or(|f| f.accepts(hit.source)) {
                     let value = self.bus.bus.peek_word_any(hit.addr);
+                    // A read-modify-write instruction has completed its write
+                    // by this boundary too. The read stop wins, but that write
+                    // must not become a second stale stop on resume.
+                    self.ui_breaks.watches[index].last = value;
+                    let _ = self.bus.bus.ui_take_mem_writer(hit.addr);
                     self.ui_stop = Some(DebugStop::Watch {
                         addr: hit.addr,
                         old: value,
@@ -5954,6 +5960,36 @@ mod tests {
         write.ui_toggle_watch(0x0400);
         write.step_slice(1)?;
         assert!(write.take_ui_debug_stop().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn access_watch_rebaselines_a_read_modify_write_before_resume() -> Result<()> {
+        let pc = ROM_BASE as u32 + 0x0100;
+        let program = &[
+            0x4AF9, 0x0000, 0x0400, // TAS.B $00000400
+            0x4E71, // NOP
+        ];
+        let mut machine = machine_with_program(pc, program)?;
+        machine.bus_mut().mem.chip_ram[0x0400] = 0x12;
+        machine.ui_toggle_watch_access(0x0400, None, None, crate::debugger::WatchAccess::Access);
+
+        machine.step_slice(1)?;
+        assert!(matches!(
+            machine.take_ui_debug_stop(),
+            Some(crate::debugger::DebugStop::Watch {
+                addr: 0x0400,
+                access: crate::debugger::WatchAccess::Read,
+                ..
+            })
+        ));
+        assert!(machine.bus_mut().ui_take_mem_writer(0x0400).is_none());
+
+        machine.step_slice(1)?;
+        assert!(
+            machine.take_ui_debug_stop().is_none(),
+            "the TAS write must not surface as a stale second stop"
+        );
         Ok(())
     }
 

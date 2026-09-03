@@ -1119,17 +1119,17 @@ impl Emulator {
         // Channel mode, stereo separation, and the filter override are host
         // preferences, not part of the saved machine, so carry the current
         // choices across the load.
-        let uaelib_file_root = self
+        let uaelib_file_authority = self
             .bus()
             .uaelib
             .as_ref()
-            .and_then(|uaelib| uaelib.file_root().map(std::path::Path::to_path_buf));
+            .and_then(crate::uaelib::UaeLib::file_authority);
         let mono = self.bus_mut().paula.mono_output();
         let separation = self.bus_mut().paula.stereo_separation();
         let filter = self.bus_mut().paula.led_filter_mode();
         let loaded = load(&mut self.machine)?;
         if let Some(uaelib) = self.bus_mut().uaelib.as_mut() {
-            uaelib.set_file_root(uaelib_file_root);
+            uaelib.set_file_authority(uaelib_file_authority);
         }
         self.bus_mut().paula.set_mono_output(mono);
         self.bus_mut().paula.set_stereo_separation(separation);
@@ -1290,18 +1290,18 @@ impl Emulator {
     fn restore_blob(&mut self, blob: &[u8], pos: u64) -> Result<()> {
         // Preserve host-side channel mode, separation, and filter override
         // across the restore (see load_state).
-        let uaelib_file_root = self
+        let uaelib_file_authority = self
             .bus()
             .uaelib
             .as_ref()
-            .and_then(|uaelib| uaelib.file_root().map(std::path::Path::to_path_buf));
+            .and_then(crate::uaelib::UaeLib::file_authority);
         let mono = self.bus_mut().paula.mono_output();
         let separation = self.bus_mut().paula.stereo_separation();
         let filter = self.bus_mut().paula.led_filter_mode();
         let mut cursor = std::io::Cursor::new(blob);
         self.machine.apply_state(&mut cursor)?;
         if let Some(uaelib) = self.bus_mut().uaelib.as_mut() {
-            uaelib.set_file_root(uaelib_file_root);
+            uaelib.set_file_authority(uaelib_file_authority);
         }
         self.bus_mut().paula.set_mono_output(mono);
         self.bus_mut().paula.set_stereo_separation(separation);
@@ -1352,18 +1352,18 @@ impl Emulator {
     /// coordinate keeps marching forward while emulated time oscillates
     /// within the burst. Host-side Paula settings survive as usual.
     pub fn runahead_restore(&mut self, blob: &[u8]) -> Result<()> {
-        let uaelib_file_root = self
+        let uaelib_file_authority = self
             .bus()
             .uaelib
             .as_ref()
-            .and_then(|uaelib| uaelib.file_root().map(std::path::Path::to_path_buf));
+            .and_then(crate::uaelib::UaeLib::file_authority);
         let mono = self.bus_mut().paula.mono_output();
         let separation = self.bus_mut().paula.stereo_separation();
         let filter = self.bus_mut().paula.led_filter_mode();
         let mut cursor = std::io::Cursor::new(blob);
         self.machine.apply_state(&mut cursor)?;
         if let Some(uaelib) = self.bus_mut().uaelib.as_mut() {
-            uaelib.set_file_root(uaelib_file_root);
+            uaelib.set_file_authority(uaelib_file_authority);
         }
         self.bus_mut().paula.set_mono_output(mono);
         self.bus_mut().paula.set_stereo_separation(separation);
@@ -2020,7 +2020,7 @@ impl Emulator {
             remaining = self.instruction_budget();
             cpu_idle = false;
         }
-        let accounting = self.run_one_step(&mut cpu_idle, remaining)?;
+        let accounting = self.run_one_precise_step(&mut cpu_idle, remaining)?;
         remaining = remaining.saturating_sub(accounting.budget_debit);
         self.realtime_quantum_remaining = remaining;
         self.realtime_quantum_cpu_idle = remaining != 0 && cpu_idle;
@@ -2180,10 +2180,32 @@ impl Emulator {
     }
 
     pub fn step_frame(&mut self) -> Result<()> {
+        self.step_frame_with_pc_outside(None).map(|_| ())
+    }
+
+    /// Execute one normal window quantum, but stop on the first instruction
+    /// boundary outside `lo..=hi`. This retains the same pacing, time-travel,
+    /// profiling, and partial-quantum bookkeeping as [`Self::step_frame`].
+    pub fn step_frame_until_pc_outside(&mut self, lo: u32, hi: u32) -> Result<bool> {
+        self.step_frame_with_pc_outside(Some((lo, hi)))
+    }
+
+    fn step_frame_with_pc_outside(&mut self, pc_outside: Option<(u32, u32)>) -> Result<bool> {
+        let outside = |machine: &cpu::M68kMachine| {
+            pc_outside.is_some_and(|(lo, hi)| {
+                let pc = machine.pc() & machine.ui_addr_mask();
+                !(lo..=hi).contains(&pc)
+            })
+        };
+        // A run request may already be satisfied when it reaches the window
+        // thread. Do not manufacture an execution/statistics quantum for it.
+        if outside(&self.machine) {
+            return Ok(true);
+        }
         if self.stats.started_at.is_none() {
             self.stats.started_at = Some(crate::timebase::Instant::now());
         }
-        self.step_real()?;
+        let reached = self.step_real_until(pc_outside)?;
         if !self.runahead_speculative {
             self.stats.frames += 1;
         }
@@ -2211,10 +2233,10 @@ impl Emulator {
                 self.machine.sr()
             );
         }
-        Ok(())
+        Ok(reached)
     }
 
-    fn step_real(&mut self) -> Result<()> {
+    fn step_real_until(&mut self, pc_outside: Option<(u32, u32)>) -> Result<bool> {
         // Host cost of this frame for the performance overlay: everything
         // in this call except the real-time pacing sleep.
         let busy_started = Instant::now();
@@ -2233,9 +2255,21 @@ impl Emulator {
         // then drop straight back to single-instruction stepping so the
         // wake-up interrupt handler, which often performs mid-frame
         // display writes, is cycle-accurate too.
+        let mut reached = false;
         while remaining > 0 {
-            let accounting = self.run_one_step(&mut cpu_idle, remaining)?;
+            let accounting = if pc_outside.is_some() {
+                self.run_one_precise_step(&mut cpu_idle, remaining)?
+            } else {
+                self.run_one_step(&mut cpu_idle, remaining)?
+            };
             remaining = remaining.saturating_sub(accounting.budget_debit);
+            if let Some((lo, hi)) = pc_outside {
+                let pc = self.machine.pc() & self.machine.ui_addr_mask();
+                if !(lo..=hi).contains(&pc) {
+                    reached = true;
+                    break;
+                }
+            }
             // An interactive breakpoint/watch hit ends the frame early;
             // the window surfaces it and pauses. (Checked after the device
             // advance so a hit during an idle fast-forward is seen too.)
@@ -2255,7 +2289,7 @@ impl Emulator {
             Duration::ZERO
         };
         self.stats.busy += busy_started.elapsed().saturating_sub(slept);
-        Ok(())
+        Ok(reached)
     }
 
     fn reset_realtime_quantum(&mut self) {
@@ -2276,9 +2310,29 @@ impl Emulator {
         cpu_idle: &mut bool,
         idle_cap: usize,
     ) -> Result<RealSliceAccounting> {
+        self.run_one_step_mode(cpu_idle, idle_cap, false)
+    }
+
+    /// Debugger-controlled stepping must not let the JIT retire a batch past
+    /// an exact PC target. STOP-state fast-forwarding remains bounded exactly
+    /// as in the ordinary real-time loop.
+    fn run_one_precise_step(
+        &mut self,
+        cpu_idle: &mut bool,
+        idle_cap: usize,
+    ) -> Result<RealSliceAccounting> {
+        self.run_one_step_mode(cpu_idle, idle_cap, true)
+    }
+
+    fn run_one_step_mode(
+        &mut self,
+        cpu_idle: &mut bool,
+        idle_cap: usize,
+        force_precise: bool,
+    ) -> Result<RealSliceAccounting> {
         let chunk = if *cpu_idle {
             self.idle_fast_forward_chunk(idle_cap)
-        } else if self.cpu_jit {
+        } else if self.cpu_jit && !force_precise {
             // JIT mode hands the machine a fixed multi-instruction slice;
             // batching (and interrupt recognition) inside it is handled by
             // `step_slice_jit`. A fixed size -- never derived from the
@@ -3679,11 +3733,13 @@ pub fn build_machine(
             });
             match root {
                 Some(root) => {
-                    info!(
-                        "uaelib: debug_load/debug_save enabled below {}",
-                        root.display()
-                    );
-                    uaelib.set_file_root(Some(root));
+                    let display = root.display().to_string();
+                    match uaelib.set_file_root(Some(root)) {
+                        Ok(()) => info!("uaelib: debug_load/debug_save enabled below {display}"),
+                        Err(e) => {
+                            log::warn!("uaelib: cannot enable file commands below {display}: {e}")
+                        }
+                    }
                 }
                 None => log::warn!(
                     "[emulation] uaelib_files = true has no --run program directory; \

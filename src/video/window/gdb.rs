@@ -16,8 +16,9 @@
 //! - The core's session breakpoint list is polled per instruction by the
 //!   headless continue loop and never seen by the CPU hot loop, so here
 //!   every core-held break translates into machine-installed debug state
-//!   ([`GdbBreaks`]), with the control session's ownership rule: never
-//!   touch a point the local GUI owns, remove only our own on detach.
+//!   ([`GdbBreaks`]), with the control session's ownership rule: share
+//!   compatible local points, temporarily union incompatible memory-watch
+//!   access classes, and restore local state on detach.
 //! - `monitor warp` engages the App's warp hold (`WarpSource::Gdb`), and
 //!   the register-watch monitors go through the machine's toggle API so
 //!   they compose with GUI-set watches instead of clobbering them.
@@ -45,17 +46,52 @@ pub(super) struct GdbGuiState {
 }
 
 /// The machine-installed debug state this GDB session owns. Everything
-/// here went in through the same toggle APIs the GUI debugger uses, so
-/// the rule from the control session applies: a point that already
-/// existed is never touched (or removed), and detach removes exactly
-/// what this session installed and no more.
+/// here went in through the same toggle APIs the GUI debugger uses. PC and
+/// register points that already existed are shared untouched; incompatible
+/// memory watches are saved, replaced by their unfiltered access union, and
+/// restored when the session releases them.
 #[derive(Default)]
 struct GdbBreaks {
     pc: Vec<u32>,
-    watch_words: Vec<(u32, crate::debugger::WatchAccess)>,
+    watch_words: Vec<GdbWatchWord>,
     reg_watches: Vec<u16>,
     /// `Some(filter)` when this session armed the machine loadseg catch.
     loadseg: Option<Option<String>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SavedWatch {
+    filter: Option<crate::debugger::WatchSource>,
+    pc: Option<u32>,
+    access: crate::debugger::WatchAccess,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct GdbWatchWord {
+    addr: u32,
+    requested: crate::debugger::WatchAccess,
+    installed: crate::debugger::WatchAccess,
+    /// A local GUI watch displaced by the unfiltered union installed for GDB.
+    /// It is restored when the GDB request is removed or the client detaches.
+    prior: Option<SavedWatch>,
+}
+
+fn watch_at(emu: &Emulator, addr: u32) -> Option<SavedWatch> {
+    emu.machine
+        .ui_breaks()
+        .watches
+        .iter()
+        .find(|watch| watch.addr == addr)
+        .map(|watch| SavedWatch {
+            filter: watch.filter,
+            pc: watch.pc,
+            access: watch.access,
+        })
+}
+
+fn toggle_watch(emu: &mut Emulator, addr: u32, watch: SavedWatch) {
+    emu.machine
+        .ui_toggle_watch_access(addr, watch.filter, watch.pc, watch.access);
 }
 
 impl GdbBreaks {
@@ -97,37 +133,59 @@ impl GdbBreaks {
                  watching the first {GDB_WATCH_WORD_CAP}\n"
             ));
         }
-        let word_watched = |emu: &Emulator, addr: u32, access| {
-            emu.machine
-                .ui_breaks()
-                .watches
-                .iter()
-                .any(|w| w.addr == addr && w.access == access)
-        };
-        let word_watched_at = |emu: &Emulator, addr: u32| {
-            emu.machine
-                .ui_breaks()
-                .watches
-                .iter()
-                .any(|w| w.addr == addr)
-        };
-        self.watch_words.retain(|&(addr, access)| {
-            if desired_words.contains(&(addr, access)) {
-                // Same rule as PC breakpoints: a GUI-removed word comes
-                // back through the insertion pass.
-                return word_watched(emu, addr, access);
-            }
-            if word_watched(emu, addr, access) {
-                emu.machine.ui_toggle_watch(addr);
-            }
-            false
-        });
-        for &(addr, access) in &desired_words {
-            if self.watch_words.contains(&(addr, access)) || word_watched_at(emu, addr) {
+        // Reconcile owned words first. When the machine still contains the
+        // exact unfiltered union we installed, remove it and restore any GUI
+        // watch it displaced. A GUI edit/removal wins and is never overwritten
+        // with stale saved state.
+        let mut kept = Vec::new();
+        for owned in self.watch_words.drain(..) {
+            let current = watch_at(emu, owned.addr);
+            let installed = SavedWatch {
+                filter: None,
+                pc: None,
+                access: owned.installed,
+            };
+            if desired_words.contains(&(owned.addr, owned.requested)) && current == Some(installed)
+            {
+                kept.push(owned);
                 continue;
             }
-            emu.machine.ui_toggle_watch_access(addr, None, None, access);
-            self.watch_words.push((addr, access));
+            if current == Some(installed) {
+                emu.machine.ui_toggle_watch(owned.addr);
+                if let Some(prior) = owned.prior {
+                    toggle_watch(emu, owned.addr, prior);
+                }
+            }
+        }
+        self.watch_words = kept;
+        for &(addr, requested) in &desired_words {
+            if self
+                .watch_words
+                .iter()
+                .any(|owned| owned.addr == addr && owned.requested == requested)
+            {
+                continue;
+            }
+            let prior = watch_at(emu, addr);
+            if prior.is_some_and(|watch| {
+                watch.filter.is_none()
+                    && watch.pc.is_none()
+                    && watch.access.union(requested) == watch.access
+            }) {
+                continue; // an unqualified GUI watch already covers GDB
+            }
+            if prior.is_some() {
+                emu.machine.ui_toggle_watch(addr);
+            }
+            let installed = prior.map_or(requested, |watch| watch.access.union(requested));
+            emu.machine
+                .ui_toggle_watch_access(addr, None, None, installed);
+            self.watch_words.push(GdbWatchWord {
+                addr,
+                requested,
+                installed,
+                prior,
+            });
         }
 
         // Chipset register watches (fed by the intercepted monitor
@@ -200,15 +258,17 @@ impl GdbBreaks {
                 emu.machine.ui_set_breakpoint(addr, None, 0);
             }
         }
-        for (addr, access) in self.watch_words.drain(..) {
-            if emu
-                .machine
-                .ui_breaks()
-                .watches
-                .iter()
-                .any(|w| w.addr == addr && w.access == access)
-            {
-                emu.machine.ui_toggle_watch(addr);
+        for owned in self.watch_words.drain(..) {
+            let installed = SavedWatch {
+                filter: None,
+                pc: None,
+                access: owned.installed,
+            };
+            if watch_at(emu, owned.addr) == Some(installed) {
+                emu.machine.ui_toggle_watch(owned.addr);
+                if let Some(prior) = owned.prior {
+                    toggle_watch(emu, owned.addr, prior);
+                }
             }
         }
         for off in self.reg_watches.drain(..) {
@@ -578,12 +638,21 @@ impl App {
         match stop {
             DebugStop::Breakpoint { .. } => "T05hwbreak:;thread:1;".to_string(),
             DebugStop::Watch { addr, access, .. } => {
-                let access = self
-                    .gdb
-                    .as_ref()
-                    .and_then(|g| {
-                        g.core
-                            .watch_access_at(*addr, self.emu.machine.ui_addr_mask())
+                let requested = self.gdb.as_ref().and_then(|g| {
+                    g.core
+                        .watch_access_at(*addr, self.emu.machine.ui_addr_mask())
+                });
+                // A GUI watch may contribute the other half of a temporary
+                // union at this address. Only label the stop as the GDB
+                // request when that request includes the access that actually
+                // fired; otherwise retain the machine's real access class.
+                let access = requested
+                    .filter(|requested| match access {
+                        crate::debugger::WatchAccess::Read => requested.reads(),
+                        crate::debugger::WatchAccess::Write => requested.writes(),
+                        crate::debugger::WatchAccess::Access => {
+                            *requested == crate::debugger::WatchAccess::Access
+                        }
                     })
                     .unwrap_or(*access);
                 let key = match access {
