@@ -4022,6 +4022,127 @@ mod tests {
     }
 
     #[test]
+    fn profile_records_carry_the_cpu_wait_schema() {
+        // The documented `cpu` object and `cpu_wait` grid of every record:
+        // zero entries omitted from the maps, the maps summing to the
+        // total, stalled PCs formatted and ordered, and one run-length row
+        // per traced line covering the line's colour clocks.
+        let mut emu = uaelib_emulator();
+        let mut ctx = SessionCtx::new();
+        let dir = profile_scratch("cpu-wait");
+        exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::ProfileStart {
+                options: crate::profile::ProfileOptions {
+                    path: dir.clone(),
+                    frames: 3,
+                    slots: true,
+                    screenshots: crate::profile::ScreenshotMode::None,
+                    pc_samples: false,
+                },
+            },
+        )
+        .unwrap();
+        for _ in 0..4 {
+            emu.step_frame().unwrap();
+        }
+        exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStop).unwrap();
+
+        let jsonl = std::fs::read_to_string(dir.join("profile.jsonl")).unwrap();
+        let records: Vec<Value> = jsonl
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records.len(), 3);
+        let mut waited_anywhere = false;
+        for record in &records {
+            let cpu = record["cpu"].as_object().expect("cpu object");
+            let wait_cck = cpu["wait_cck"].as_u64().unwrap();
+            waited_anywhere |= wait_cck > 0;
+            let sum_map = |key: &str, names: &[&str]| -> u64 {
+                let map = cpu[key].as_object().expect(key);
+                for (name, value) in map {
+                    assert!(names.contains(&name.as_str()), "{key}: {name}");
+                    assert!(value.as_u64().unwrap() > 0, "{key}: zero entry {name}");
+                }
+                map.values().map(|v| v.as_u64().unwrap()).sum()
+            };
+            assert_eq!(
+                sum_map("wait_by", &crate::bus::CPU_WAIT_CLASS_NAMES),
+                wait_cck
+            );
+            assert_eq!(
+                sum_map("wait_by_kind", &crate::bus::CPU_BUS_ACCESS_KIND_NAMES),
+                wait_cck
+            );
+            let pcs = cpu["stall_pcs"].as_array().unwrap();
+            assert!(pcs.len() <= crate::profile::PROFILE_STALL_PCS);
+            assert!(pcs.len() as u64 <= cpu["stall_pcs_distinct"].as_u64().unwrap());
+            assert!(cpu["stall_pcs_other"].is_u64());
+            let mut last = u64::MAX;
+            let mut pc_total = 0;
+            for entry in pcs {
+                let pc = entry["pc"].as_str().unwrap();
+                assert!(
+                    pc.len() == 10
+                        && pc.starts_with("0x")
+                        && pc[2..].bytes().all(|b| b.is_ascii_hexdigit()),
+                    "{pc}"
+                );
+                let cck = entry["cck"].as_u64().unwrap();
+                assert!(cck > 0 && cck <= last, "unsorted: {pcs:?}");
+                last = cck;
+                pc_total += cck;
+            }
+            if pcs.len() < crate::profile::PROFILE_STALL_PCS {
+                // Every stalled PC is listed, so they account for it all.
+                assert_eq!(
+                    pc_total + cpu["stall_pcs_other"].as_u64().unwrap(),
+                    wait_cck
+                );
+            }
+            assert_eq!(wait_cck == 0, pcs.is_empty());
+
+            let rows = record["rows"].as_u64().unwrap() as usize;
+            let line_cck = record["line_cck"].as_u64().unwrap() as usize;
+            let grid = record["cpu_wait"].as_array().expect("cpu_wait grid");
+            assert_eq!(grid.len(), rows);
+            assert_eq!(grid.len(), record["slots"].as_array().unwrap().len());
+            let mut waited_slots = 0;
+            for row in grid {
+                let mut covered = 0;
+                let mut run = String::new();
+                for ch in row.as_str().unwrap().chars() {
+                    if ch.is_ascii_digit() {
+                        run.push(ch);
+                    } else {
+                        let len: usize = run.parse().unwrap();
+                        run.clear();
+                        assert!(".RBSDACLNp".contains(ch), "code {ch:?}");
+                        covered += len;
+                        if ch != '.' {
+                            waited_slots += len;
+                        }
+                    }
+                }
+                assert_eq!(covered, line_cck.min(512));
+            }
+            assert_eq!(waited_slots as u64, wait_cck);
+        }
+        assert!(
+            waited_anywhere,
+            "the fixture's chip-RAM program never waited"
+        );
+
+        let header: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("profile.json")).unwrap())
+                .unwrap();
+        assert_eq!(header["cpu_wait_classes"][7], "blitter_nasty");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn speculative_frames_never_reach_the_profile() {
         let mut emu = uaelib_emulator();
         let mut ctx = SessionCtx::new();

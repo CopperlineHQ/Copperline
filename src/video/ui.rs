@@ -4156,44 +4156,88 @@ const ANALYZER_GUTTER_BG: u32 = rgba(16, 18, 22);
 
 /// The CPU wait view's counters column: what the CPU waited for, by
 /// denier and by access kind, and the instructions that waited longest.
+/// Pitch of one counters-column row.
+const ANALYZER_COUNTER_ROW_H: usize = 12;
+
+/// A row cursor for the counters column: rows are drawn top down and
+/// none may start past `bottom`, so a busy trace (every class and access
+/// kind non-zero, a full PC list) truncates its lower sections instead of
+/// running into the selected-slot line under the raster.
+struct CounterRows {
+    y: usize,
+    bottom: usize,
+}
+
+impl CounterRows {
+    /// The y of the next row if it fits, advancing the cursor; None once
+    /// the column is full.
+    fn next(&mut self) -> Option<usize> {
+        if self.y + ANALYZER_COUNTER_ROW_H > self.bottom {
+            return None;
+        }
+        let y = self.y;
+        self.y += ANALYZER_COUNTER_ROW_H;
+        Some(y)
+    }
+
+    /// A small gap before a new section, only when a row still fits.
+    fn gap(&mut self) {
+        if self.y + 4 + ANALYZER_COUNTER_ROW_H <= self.bottom {
+            self.y += 4;
+        }
+    }
+}
+
+/// The CPU wait view's counters column: what the CPU waited for, by
+/// denier and by access kind, and the instructions that waited longest.
+/// Sections are drawn in that order of importance and each stops at
+/// `bottom`.
 fn draw_cpu_wait_counters(
     frame: &mut [u8],
     x: usize,
-    mut y: usize,
+    y: usize,
+    bottom: usize,
     trace: &AnalyzerTraceView,
     scale: usize,
 ) {
-    draw_panel_text(frame, x, y, "CPU wait cck", PANEL_TEXT_HILIGHT, 1, scale);
-    y += 12;
-    draw_panel_text(
-        frame,
-        x,
-        y,
-        &format!(
-            "waited {:>6} {:>4.1}%",
-            trace.cpu_wait_cck,
-            trace.cpu_wait_percent()
-        ),
-        PANEL_TEXT_ACCENT,
-        1,
-        scale,
-    );
-    y += 12;
-    draw_panel_text(
-        frame,
-        x,
-        y,
-        &format!("granted {:>5}", trace.owner_cck[7]),
-        PANEL_TEXT_DIM,
-        1,
-        scale,
-    );
-    y += 12;
+    let mut rows = CounterRows { y, bottom };
+    if let Some(y) = rows.next() {
+        draw_panel_text(frame, x, y, "CPU wait cck", PANEL_TEXT_HILIGHT, 1, scale);
+    }
+    if let Some(y) = rows.next() {
+        draw_panel_text(
+            frame,
+            x,
+            y,
+            &format!(
+                "waited {:>6} {:>4.1}%",
+                trace.cpu_wait_cck,
+                trace.cpu_wait_percent()
+            ),
+            PANEL_TEXT_ACCENT,
+            1,
+            scale,
+        );
+    }
+    if let Some(y) = rows.next() {
+        draw_panel_text(
+            frame,
+            x,
+            y,
+            &format!("granted {:>5}", trace.owner_cck[7]),
+            PANEL_TEXT_DIM,
+            1,
+            scale,
+        );
+    }
     for (idx, name) in crate::bus::CPU_WAIT_CLASS_NAMES.iter().enumerate() {
         let cck = trace.cpu_wait_by_class[idx];
         if cck == 0 {
             continue;
         }
+        let Some(y) = rows.next() else {
+            break;
+        };
         let code = *b"RBSDACLNp".get(idx).unwrap_or(&b'.');
         fill_rect(
             frame,
@@ -4225,7 +4269,6 @@ fn draw_cpu_wait_counters(
             1,
             scale,
         );
-        y += 12;
     }
     let kinds: Vec<String> = crate::bus::CPU_BUS_ACCESS_KIND_NAMES
         .iter()
@@ -4234,19 +4277,26 @@ fn draw_cpu_wait_counters(
         .map(|(name, cck)| format!("{name} {cck}"))
         .collect();
     if !kinds.is_empty() {
-        y += 4;
-        draw_panel_text(frame, x, y, "by access", PANEL_TEXT_DIM, 1, scale);
-        y += 12;
+        rows.gap();
+        if let Some(y) = rows.next() {
+            draw_panel_text(frame, x, y, "by access", PANEL_TEXT_DIM, 1, scale);
+        }
         for kind in kinds {
+            let Some(y) = rows.next() else {
+                break;
+            };
             draw_panel_text(frame, x, y, &kind, PANEL_TEXT_DIM, 1, scale);
-            y += 12;
         }
     }
     if !trace.top_stalled_pcs.is_empty() {
-        y += 4;
-        draw_panel_text(frame, x, y, "Top stalled PCs", PANEL_TEXT_HILIGHT, 1, scale);
-        y += 12;
+        rows.gap();
+        if let Some(y) = rows.next() {
+            draw_panel_text(frame, x, y, "Top stalled PCs", PANEL_TEXT_HILIGHT, 1, scale);
+        }
         for (pc, cck) in trace.top_stalled_pcs.iter().take(ANALYZER_TOP_STALLED_PCS) {
+            let Some(y) = rows.next() else {
+                break;
+            };
             draw_panel_text(
                 frame,
                 x,
@@ -4256,7 +4306,6 @@ fn draw_cpu_wait_counters(
                 1,
                 scale,
             );
-            y += 12;
         }
     }
 }
@@ -4502,7 +4551,16 @@ fn draw_analyzer_beam_tab(
     draw_cpu_wait_gutter(frame, analyzer_gutter_rect(rect), trace, scale);
     let counters_x = analyzer_counters_x(rect);
     if cpu_wait {
-        draw_cpu_wait_counters(frame, counters_x, raster.y, trace, scale);
+        // The column ends with the raster: the selected-slot line sits
+        // just under it.
+        draw_cpu_wait_counters(
+            frame,
+            counters_x,
+            raster.y,
+            raster.y + raster.h,
+            trace,
+            scale,
+        );
     } else {
         draw_owner_counters(frame, counters_x, raster.y, trace, scale);
     }

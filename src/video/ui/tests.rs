@@ -1452,6 +1452,68 @@ fn cpu_wait_view_lights_denied_slots_and_dims_the_rest() {
 }
 
 #[test]
+fn cpu_wait_counters_stop_at_the_column_bottom() {
+    use super::super::window::{texture_height, texture_width};
+
+    // The busiest trace the column can be asked to show: every denier
+    // class and access kind non-zero and a full PC list, which needs more
+    // rows than the raster is tall.
+    let scale = 1;
+    let (w, h) = (texture_width(scale), texture_height(scale));
+    let mut frame = vec![0u8; w * h * 4];
+    let trace = AnalyzerTraceView {
+        frame: 1,
+        seconds: 0.0,
+        rows: 4,
+        cols: 4,
+        line_cck: 4,
+        visible_start_vpos: 0,
+        visible_lines: 2,
+        display_hpos_start: 0,
+        display_hpos_end: 4,
+        owner_cck: [1; 9],
+        blitter_busy_cck: 0,
+        blitter_starve_cck: [0; 9],
+        partial: false,
+        selected_vpos: 0,
+        selected_hpos: 0,
+        selected_owner: "idle",
+        selected_owner_code: b'.',
+        owners: vec![b'.'; 16],
+        markers: Vec::new(),
+        selected_blit: None,
+        diw_v: None,
+        diw_h_cck: None,
+        ddf_cck: None,
+        cpu_waits: vec![b'.'; 16],
+        cpu_wait_cck: 45,
+        cpu_wait_by_class: [1, 2, 3, 4, 5, 6, 7, 8, 9],
+        cpu_wait_by_kind: [10, 11, 12, 12],
+        top_stalled_pcs: (0..ANALYZER_TOP_STALLED_PCS as u32)
+            .map(|i| (0x1000 + i * 2, 100 - i))
+            .collect(),
+        selected_cpu_wait_code: b'.',
+    };
+    let (x, top, bottom) = (40usize, 20usize, 20 + 246);
+    draw_cpu_wait_counters(&mut frame, x, top, bottom, &trace, scale);
+
+    let painted = |frame: &[u8], y: usize| -> bool {
+        (x..x + 200).any(|px| frame[(y * w + px) * 4 + 3] != 0)
+    };
+    // The heading, totals and the first class rows are drawn...
+    assert!(painted(&frame, top + 2));
+    assert!(painted(&frame, top + 3 * 12 + 2));
+    // ...and nothing lands on or below the bound, however much was asked.
+    for y in bottom..bottom + 60 {
+        assert!(!painted(&frame, y), "row {y} painted past the bound");
+    }
+    // A bound too short for anything draws nothing at all.
+    let mut bare = vec![0u8; w * h * 4];
+    draw_cpu_wait_counters(&mut bare, x, top, top + 4, &trace, scale);
+    assert!((top..top + 60).all(|y| !painted(&bare, y)));
+}
+
+#[test]
 fn frame_analyzer_top_edge_overlays_clip_to_raster() {
     use super::super::window::{texture_height, texture_width};
 
