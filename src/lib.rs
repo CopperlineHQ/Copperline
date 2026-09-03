@@ -37,6 +37,10 @@ pub mod copperhf;
 pub mod cpu;
 pub mod crashlog;
 pub mod debugger;
+// Guest debug information (hunk symbols, LINE debug hunks, DWARF) for the
+// DAP adapter. Pure parsing over host files; gated with the adapter.
+#[cfg(feature = "dap")]
+pub mod debuginfo;
 pub mod dirfs;
 pub mod disasm;
 pub mod diskimage;
