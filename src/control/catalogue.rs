@@ -411,6 +411,16 @@ fn build() -> Vec<ToolDef> {
             json!({}),
         ),
         entry(
+            "reverse_anchor",
+            "Snapshot the machine into the reverse-debug ring at the current position, so \
+             reverse_step / reverse_continue replay from here instead of an older frame \
+             boundary. Take one at a stop you will step back from when the guest has \
+             talked to a host directory mount or disk image since the last snapshot: that \
+             host-side state is not rolled back, and a replay from before it diverges.",
+            no_params(),
+            json!({}),
+        ),
+        entry(
             "last_writer",
             "Find the instruction that last wrote the given memory address by replaying \
              the recorded history: returns the writer PC, position, and value. Time travel \
@@ -603,6 +613,16 @@ fn build() -> Vec<ToolDef> {
             "pc_history",
             "Return the most recently executed instruction addresses (newest last), the \
              trail that led to the current PC.",
+            no_params(),
+            json!({}),
+        ),
+        entry(
+            "segments.list",
+            "List the hunk segments of the program the scheduled process is running \
+             (`current`: {start, size} per hunk, first hunk first) and the programs an armed \
+             loadseg catch has seen loaded (`modules`: name, task, seglist, segments). At a \
+             `loadseg` stop `current` is the just-loaded program: the addresses to relocate \
+             its symbols and debug information by.",
             no_params(),
             json!({}),
         ),

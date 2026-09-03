@@ -1848,6 +1848,12 @@ impl M68kMachine {
         }
     }
 
+    /// The programs the armed loadseg catch has seen loaded, oldest
+    /// first (empty while no catch is armed).
+    pub fn ui_loadseg_modules(&self) -> &[crate::amigaos::TrackedModule] {
+        self.ui_loadseg_tracker.modules()
+    }
+
     /// ExecBase->ThisTask via side-effect-free peeks, when plausible.
     fn ui_peek_this_task(&self) -> Option<u32> {
         let peek32 = |addr: u32| {
