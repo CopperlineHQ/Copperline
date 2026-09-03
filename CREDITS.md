@@ -27,6 +27,7 @@ does.
 Thank you to:
 
 - Lee Hobson
+- Sphair
 
 ## Bundled third-party code
 
