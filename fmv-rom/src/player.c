@@ -15,6 +15,7 @@
 
 #include <clib/alib_protos.h>
 #include <devices/inputevent.h>
+#include <dos/dos.h>
 #include <exec/errors.h>
 #include <exec/execbase.h>
 #include <exec/io.h>

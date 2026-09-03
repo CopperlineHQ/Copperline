@@ -9,7 +9,7 @@
 //! ```sh
 //! git clone https://github.com/BlitterStudio/zz9000-sdk
 //! cd zz9000-sdk && git checkout <pinned commit>
-//! docker run --rm -v "$PWD:/work" -w /work stefanreinauer/amiga-gcc:gcc-v16.1 sh -c '
+//! docker run --rm -v "$PWD:/work" -w /work stefanreinauer/amiga-gcc:gcc-v16.2 sh -c '
 //!   mkdir -p build/m68k
 //!   CFLAGS="-noixemul -fcommon -Os -m68000 -s -Iinclude -Ihost/include"
 //!   m68k-amigaos-gcc $CFLAGS -c host/src/zz9k_host.c -o build/m68k/zz9k_host.o

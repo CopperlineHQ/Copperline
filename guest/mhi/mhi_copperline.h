@@ -18,6 +18,7 @@
 #ifndef MHI_COPPERLINE_H
 #define MHI_COPPERLINE_H
 
+#include <dos/dos.h>
 #include <exec/interrupts.h>
 #include <exec/libraries.h>
 #include <exec/semaphores.h>
