@@ -10,11 +10,11 @@ function activate(context) {
   const factory = {
     createDebugAdapterDescriptor(session) {
       const settings = vscode.workspace.getConfiguration("copperline");
-      const ctl = settings.get("ctlPath") || "copperline-ctl";
+      const ctl = settings.get("ctlExecutable") || "copperline-ctl";
       const env = {};
       // A launch configuration's own "copperline" wins in the adapter;
       // the setting reaches it as the environment the bridge consults.
-      const emulator = settings.get("emulatorPath");
+      const emulator = settings.get("emulatorExecutable");
       if (emulator) {
         env.COPPERLINE_BIN = emulator;
       }

@@ -31,15 +31,15 @@
     "configuration": {
       "title": "Copperline",
       "properties": {
-        "copperline.ctlPath": {
+        "copperline.ctlExecutable": {
           "type": "string",
           "default": "copperline-ctl",
-          "description": "The copperline-ctl executable that serves the debug adapter (copperline-ctl --dap). A bare name is looked up on PATH."
+          "description": "Path to the copperline-ctl executable file (not its directory); it serves the debug adapter as copperline-ctl --dap. A bare name is looked up on PATH."
         },
-        "copperline.emulatorPath": {
+        "copperline.emulatorExecutable": {
           "type": "string",
           "default": "",
-          "description": "The copperline executable a launch starts. Empty: the one next to copperline-ctl, else PATH. A launch configuration's \"copperline\" attribute overrides this."
+          "description": "Path to the copperline executable file (not its directory) that a launch starts. Empty: the copperline next to copperline-ctl, else PATH. A launch configuration's \"copperline\" attribute overrides this."
         }
       }
     },
@@ -82,7 +82,7 @@
               },
               "copperline": {
                 "type": "string",
-                "description": "The copperline executable to start (default: the copperline.emulatorPath setting, then PATH)."
+                "description": "The copperline executable file to start (default: the copperline.emulatorExecutable setting, then the copperline next to copperline-ctl, then PATH)."
               },
               "config": {
                 "type": "string",

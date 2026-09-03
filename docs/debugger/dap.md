@@ -26,7 +26,10 @@ Install the extension in `tools/vscode-copperline` (no build step:
 `npx @vscode/vsce package` there and `code --install-extension` the
 `.vsix`, or symlink the directory into `~/.vscode/extensions/`). It
 contributes the `copperline` debug type and runs `copperline-ctl --dap`
-from your PATH (setting `copperline.ctlPath`). A launch configuration:
+from your PATH. The settings `copperline.ctlExecutable` and
+`copperline.emulatorExecutable` name the two executable files when they
+are elsewhere (a source build's `target/release/copperline-ctl` and
+`target/release/copperline`). A launch configuration:
 
 ```json
 {

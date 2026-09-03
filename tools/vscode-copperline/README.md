@@ -12,8 +12,11 @@ documentation, *Debug Adapter Protocol* chapter (`docs/debugger/dap.md`).
 
 ## Requirements
 
-- Copperline 0.19 or later, with `copperline-ctl` on your PATH (or set
-  `copperline.ctlPath`).
+- Copperline 0.19 or later, with `copperline-ctl` on your PATH, or the
+  `copperline.ctlExecutable` setting pointing at the executable file.
+  `copperline.emulatorExecutable` names the `copperline` executable file
+  to launch when it is not next to `copperline-ctl` (a source build's
+  `target/release/copperline`, say).
 - A program built with debug information: vasm `-linedebug`, amiga-gcc
   6.5 `-g`, or an ELF + `elf2hunk` toolchain (`symbolFile`). Without any,
   you still get hunk symbols, disassembly and registers.
