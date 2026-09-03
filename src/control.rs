@@ -23,6 +23,8 @@
 
 pub mod bridge;
 pub mod catalogue;
+#[cfg(feature = "dap")]
+pub mod dap;
 pub mod exec;
 pub mod headless;
 pub mod mcp;
@@ -50,6 +52,10 @@ pub struct Config {
     /// Journal control-injected input into this `.clscript`
     /// (`--record-input`, headless mode).
     pub record_input: Option<PathBuf>,
+    /// `--run PROG`: arm a one-shot loadseg catch for this program at
+    /// startup, so the first resume stops the moment the guest OS loads
+    /// it (before its first instruction), like `gdbstub::Config`.
+    pub stop_on_load: Option<String>,
     pub reverse_budget_mb: usize,
     pub reverse_interval_frames: u64,
 }
@@ -61,6 +67,7 @@ impl Config {
             token: None,
             info_file: None,
             record_input: None,
+            stop_on_load: None,
             reverse_budget_mb: crate::envcfg::var("COPPERLINE_DBG_RR_BUDGET_MB")
                 .and_then(|s| s.trim().parse::<usize>().ok())
                 .unwrap_or(crate::debugger::RR_DEFAULT_BUDGET_MB),

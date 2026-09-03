@@ -34,6 +34,7 @@ default = [
     "cd-mp3",
     "cd32-fmv",
     "gdb",
+    "dap",
 ]
 # MT-32 emulation through CopperlineHQ/mt32-rs, reachable as a MIDI-Out
 # target. Off builds carry none of it.
@@ -137,7 +138,7 @@ net-bridge = ["dep:pcap", "dep:libloading"]
 # The `copperline-ctl` command-line client for the control protocol, and
 # its `--mcp` mode (src/control/mcp.rs), an MCP server over stdio that
 # exposes the protocol as tools for coding agents.
-ctl-bin = ["dep:serde_json", "control"]
+ctl-bin = ["dep:serde_json", "control", "dap"]
 # The `copperline-import-uae` converter for WinUAE/Amiberry/FS-UAE
 # configuration files.
 import-uae-bin = ["dep:toml_edit"]
@@ -145,6 +146,14 @@ import-uae-bin = ["dep:toml_edit"]
 # TCP. Default on; player builds (crates/copperline-player) leave it out so
 # a shipped game carries no debugger surface.
 gdb = []
+# The Debug Adapter Protocol adapter (`copperline-ctl --dap`,
+# src/control/dap/) and the guest debug-info reader behind it
+# (src/debuginfo/: hunk symbol tables, vasm LINE debug hunks, DWARF from
+# a bebbo debug hunk or an ELF sibling). A control-protocol client like
+# the MCP mode, so it needs serde_json like `control`, plus gimli and
+# object for DWARF and ELF. Off in player builds with the rest of the
+# debugger surface.
+dap = ["control", "dep:serde_json", "dep:gimli", "dep:object"]
 # Real floppy drives through FluxBridge (src/fluxbridge/): the Greaseweazle
 # driver enabled on the dependency below stands in for a disk image on any bay.
 # FluxBridge is a pure-Rust library, so there is nothing to install and no C++
@@ -165,6 +174,11 @@ log = "0.4"
 env_logger = { version = "0.11", optional = true }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", optional = true }
+# DWARF and ELF readers for the DAP adapter's debug-info module
+# (src/debuginfo/): line tables, functions, variable locations, and CFI
+# unwinding. Both pure Rust (MIT OR Apache-2.0).
+gimli = { version = "0.34", default-features = false, features = ["read", "std"], optional = true }
+object = { version = "0.40", default-features = false, features = ["read_core", "elf", "std"], optional = true }
 # Formatting-preserving TOML writer, so the generated config can carry
 # per-setting comments (copperline-import-uae only).
 toml_edit = { version = "0.25", optional = true }

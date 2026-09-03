@@ -15,7 +15,7 @@ use crate::control::exec::{
     CCK_FINE_WINDOW, RUN_BUDGET,
 };
 use crate::control::proto::{self, CtlError};
-use crate::control::session::{InputAction, MachineInputState, SessionCtx};
+use crate::control::session::{BreakSpec, InputAction, MachineInputState, SessionCtx};
 use crate::control::windowed::{ControlHandle, CtlMsg};
 use crate::debugger::DebugStop;
 use serde_json::{json, Value};
@@ -34,6 +34,16 @@ pub(super) struct ControlState {
     exit_requested: bool,
     reverse_budget_mb: usize,
     reverse_interval_frames: u64,
+    /// `--run` + `--control-gui`: the program whose first load stops the
+    /// machine once, consumed when it fires.
+    run_stop: Option<String>,
+    /// Whether the machine loadseg catch standing behind `run_stop` is
+    /// ours to remove (the GUI may own one instead).
+    run_catch_armed: bool,
+    /// The run stop fired with no client attached: delivered as
+    /// `event.stopped` to the next client, which would otherwise never
+    /// learn the machine is parked at the program's load.
+    run_stop_fired: Option<(String, u32)>,
 }
 
 /// A resume verb whose JSON-RPC response is deferred until the machine
@@ -72,6 +82,17 @@ impl App {
     /// Adopt a bound control server; called from `main` between
     /// `App::new` and `run()`.
     pub fn attach_control(&mut self, handle: ControlHandle, config: &crate::control::Config) {
+        // --run: arm the one-shot loadseg catch now, before the first
+        // frame can run the boot, so a client attaching after the warp
+        // boot cannot miss the program's load (the catch baselines on
+        // the running task world when armed).
+        let run_stop = config.stop_on_load.clone();
+        let run_catch_armed = match &run_stop {
+            Some(name) if self.emu.machine.ui_breaks().loadseg_catch.is_none() => {
+                self.emu.machine.ui_toggle_loadseg_catch(Some(name.clone()))
+            }
+            _ => false,
+        };
         self.control = Some(ControlState {
             handle,
             ctx: SessionCtx::new(),
@@ -81,7 +102,37 @@ impl App {
             exit_requested: false,
             reverse_budget_mb: config.reverse_budget_mb,
             reverse_interval_frames: config.reverse_interval_frames,
+            run_stop,
+            run_catch_armed,
+            run_stop_fired: None,
         });
+    }
+
+    /// Whether `stop` is `--run`'s one-shot load stop; consuming it
+    /// disarms the catch behind it (unless a client or the GUI owns
+    /// the catch by now), so the program running again later is
+    /// ordinary execution.
+    fn control_note_run_stop(&mut self, stop: &DebugStop) -> bool {
+        let DebugStop::LoadSeg { name, .. } = stop else {
+            return false;
+        };
+        let Some(ctl) = self.control.as_mut() else {
+            return false;
+        };
+        if !ctl
+            .run_stop
+            .as_deref()
+            .is_some_and(|target| name.eq_ignore_ascii_case(target))
+        {
+            return false;
+        }
+        ctl.run_stop = None;
+        let ours = std::mem::take(&mut ctl.run_catch_armed);
+        let session_owned = ctl.ctx.id_for(&BreakSpec::LoadSeg { name: None }).is_some();
+        if ours && !session_owned && self.emu.machine.ui_breaks().loadseg_catch.is_some() {
+            self.emu.machine.ui_toggle_loadseg_catch(None);
+        }
+        true
     }
 
     /// Whether this client's own resume (continue / run_until) is
@@ -167,6 +218,11 @@ impl App {
         self.emu.machine.ui_set_pc_history_enabled(true);
         self.show_osd("Control client attached");
         self.request_redraw();
+        // A --run stop that fired before any client attached left the
+        // machine parked at the program's load; tell this client.
+        if let Some((name, addr)) = self.control.as_mut().and_then(|c| c.run_stop_fired.take()) {
+            self.control_notify_stopped_of(&DebugStop::LoadSeg { name, addr });
+        }
     }
 
     fn control_on_disconnected(&mut self) {
@@ -670,10 +726,24 @@ impl App {
     /// the stop answers the client instead of commandeering the local
     /// debugger window. Returns whether the stop was consumed remotely.
     pub(super) fn control_completes_stop(&mut self, stop: &DebugStop) -> bool {
+        let run_stop = self.control_note_run_stop(stop);
         let Some(ctl) = self.control.as_ref() else {
             return false;
         };
         let Some(pending) = ctl.pending.as_ref() else {
+            if run_stop {
+                // --run's own stop belongs to the control client, not
+                // the local debugger window: deliver it now, or hold it
+                // for the client that has not attached yet.
+                if ctl.handle.connected() {
+                    self.control_notify_stopped_of(stop);
+                } else if let (DebugStop::LoadSeg { name, addr }, Some(ctl)) =
+                    (stop, self.control.as_mut())
+                {
+                    ctl.run_stop_fired = Some((name.clone(), *addr));
+                }
+                return true;
+            }
             self.control_notify_stopped_of(stop);
             return false;
         };

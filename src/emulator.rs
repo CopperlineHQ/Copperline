@@ -1214,6 +1214,25 @@ impl Emulator {
         if !due {
             return Ok(());
         }
+        self.tt_capture_now()
+    }
+
+    /// Snapshot the machine into the reverse-debug ring at the current
+    /// position, regardless of the capture interval. A debugger takes one
+    /// at a stop the user will step back from, so the replay starts
+    /// there rather than at an older frame boundary: host-side state a
+    /// snapshot cannot roll back (a directory mount's file handles, a
+    /// hard-disk image) may have changed since, and a replay from before
+    /// that traffic diverges. No-op unless reverse mode is armed.
+    pub fn debug_time_travel_anchor_now(&mut self) -> Result<()> {
+        if self.tt_ring.is_none() {
+            return Ok(());
+        }
+        self.tt_capture_now()
+    }
+
+    fn tt_capture_now(&mut self) -> Result<()> {
+        let frame = self.bus().emulated_frames();
         let pos = self.retired_instructions;
         let cck = self.bus().emulated_cck();
         let blob = self.snapshot_blob()?;

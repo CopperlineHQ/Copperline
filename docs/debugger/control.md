@@ -30,6 +30,15 @@ JSON file:
 {"listen": "127.0.0.1:52114", "token": "1f0c...", "proto": 1}
 ```
 
+With `--run PROG`, either mode arms a one-shot `loadseg` stop for the
+program before the machine runs, the break-at-entry `--gdb` has: the first
+`continue` (or, windowed, the boot already under way) stops with reason
+`loadseg` the moment the guest OS loads the program, before its first
+instruction, and `segments.list` then reports its hunks. A windowed session
+that reaches the stop before any client attached parks there and tells the
+first client with `event.stopped`. The stop fires once; a client wanting
+every load arms its own `loadseg` break.
+
 ## Client usage (`copperline-ctl`)
 
 Copperline includes a CLI tool (`copperline-ctl`) to interact with active control sessions:
@@ -49,6 +58,13 @@ copperline-ctl --info /tmp/ccp.json --repl
 ```
 
 (mcp-server)=
+## Debug adapter
+
+`copperline-ctl --dap` serves the [Debug Adapter Protocol](dap.md) over the
+same bridge: an IDE debugs a program in the emulator with source-level
+breakpoints, variables and reverse stepping, while the control protocol
+underneath stays available from the Debug Console (`!status`, `!beam.get`).
+
 ## MCP server
 
 `copperline-ctl --mcp` exposes the control protocol over standard I/O as a
@@ -240,6 +256,7 @@ events.unsubscribe {"events":["serial"]}
 - `reverse_step {"n": 1}`: Step backward by instruction.
 - `reverse_frame`: Step backward by video frame.
 - `reverse_continue`: Execute backward to previous breakpoint.
+- `reverse_anchor`: Snapshot the machine into the reverse-debug ring at the current position, so the reverse verbs replay from here rather than from an older frame boundary. Take one at a stop to step back from when the guest has used a host directory mount or a disk image since the last snapshot: that host-side state is not rolled back by a restore, and a replay from before it diverges (the DAP adapter does this at every run stop).
 - `last_writer {"addr": "..."}`: Find the instruction that last wrote to memory address.
 
 ### State inspection and modification
@@ -257,6 +274,7 @@ events.unsubscribe {"events":["serial"]}
 - `cartridge.freeze`: Trigger the freezer cartridge NMI (level 7), transferring execution to the monitor.
 - `copper.list {"addr": ..., "resource": ..., "max": ...}`: Disassemble Copper instructions starting at `addr` or a registered `resource` (default: current Copper PC).
 - `pc_history`: Return recently executed instruction addresses.
+- `segments.list`: The hunk segments (`current`: `{start, size}` per hunk, first hunk first) of the program the scheduled process is running, and every program an armed `loadseg` catch has seen loaded (`modules`). At a `loadseg` stop, `current` is the just-loaded program: the addresses to relocate its symbols and debug information by.
 
 ### Diagnostics and profiling
 - `chipset.validate {"enabled": ..., "clear": ...}` / `chipset.report`: Arm or query custom register access validator.

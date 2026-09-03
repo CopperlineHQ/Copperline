@@ -76,8 +76,15 @@ m68k-amiga-elf-gdb hello.elf -ex "target remote :2345" -ex continue
 When halted, the GDB stub reports the base address of the first hunk for symbol loading
 via `add-symbol-file`. The GDB monitor command `monitor segments` lists all hunk addresses.
 
-Scripts using the [Control Protocol](../debugger/control.md) can also wait for program
-load events using a `loadseg` breakpoint.
+The [control protocol](../debugger/control.md) gets the same break-at-entry: with
+`--run`, `--control` and `--control-gui` arm a one-shot `loadseg` stop for the
+program, and `segments.list` reports its hunk addresses at that stop. Scripts can
+also arm their own `loadseg` breakpoint to catch every load.
+
+For an IDE, the [Debug Adapter Protocol](../debugger/dap.md) server does all of
+this by itself: a VS Code (or nvim-dap) launch configuration naming the program
+starts Copperline, stops at the entry point, and debugs by source line from the
+executable's own debug information.
 
 (uaelib-trap)=
 ### WinUAE-compatible `uaelib` trap

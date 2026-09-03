@@ -77,6 +77,9 @@ For reverse replay to be exact:
 2. **Deterministic input:** Input events must be repeatable (scripted input and recorded
    interactive inputs are handled automatically).
 3. **Storage:** RAM contents and floppy disk states are captured directly in memory
-   snapshots. However, hard drive and CD images are accessed live from the host filesystem
-   and are not rolled back on restore; guest disk writes or host-side image modifications
-   occurring after a snapshot point will cause replayed execution to diverge.
+   snapshots. However, hard drive and CD images, and host directory mounts (including
+   the volumes `--run` and `--whdload` stage), are accessed live from the host and are
+   not rolled back on restore; guest disk traffic or host-side modifications occurring
+   after a snapshot point will cause replayed execution to diverge. A debugger avoids
+   this by taking a fresh snapshot at the stop it steps back from (the control
+   protocol's `reverse_anchor`; the DAP adapter does so at every run stop).

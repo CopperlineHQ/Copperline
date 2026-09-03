@@ -319,6 +319,8 @@ impl McpServer {
                     .unwrap_or(bridge::DEFAULT_LAUNCH_TIMEOUT.as_millis() as u64),
             ),
             args: Vec::new(),
+            windowed: false,
+            noaudio: true,
         };
         if args.get("factory").and_then(Value::as_bool) == Some(true) {
             spec.args.push("--factory".into());
@@ -698,10 +700,7 @@ fn screenshot(session: &mut Session, args: &Value, seq: u64) -> ToolResult {
 /// offered first when `ask` (the connection is still usable), then the
 /// process gets `EXIT_GRACE` to exit before it is killed.
 fn close_session(session: Session, ask: bool) -> Value {
-    let Session {
-        mut bridge,
-        launched,
-    } = session;
+    let Session { bridge, launched } = session;
     let mut report = json!({"closed": true, "listen": bridge.listen()});
     match launched {
         None => {

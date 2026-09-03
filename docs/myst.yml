@@ -58,6 +58,7 @@ project:
         - file: debugger/waveform.md
         - file: debugger/profiling.md
         - file: debugger/gdb.md
+        - file: debugger/dap.md
         - file: debugger/control.md
         - file: debugger/workflows.md
     - title: Internals
@@ -105,6 +106,7 @@ project:
         - debugger/waveform.md
         - debugger/profiling.md
         - debugger/gdb.md
+        - debugger/dap.md
         - debugger/control.md
         - debugger/workflows.md
         - internals/architecture.md

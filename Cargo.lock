@@ -565,6 +565,7 @@ dependencies = [
  "flate2",
  "fluxbridge",
  "gilrs",
+ "gimli 0.34.0",
  "hound",
  "libc",
  "libloading 0.9.0",
@@ -574,6 +575,7 @@ dependencies = [
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "object 0.40.0",
  "pcap",
  "pixels",
  "plmpeg",
@@ -1548,6 +1550,15 @@ dependencies = [
  "fnv",
  "hashbrown 0.16.1",
  "indexmap",
+ "stable_deref_trait",
+]
+
+[[package]]
+name = "gimli"
+version = "0.34.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1033caf0b349c518623b5396bfb2cf0bddf44f0306d543a250e5743297aafd10"
+dependencies = [
  "stable_deref_trait",
 ]
 
@@ -2702,6 +2713,15 @@ dependencies = [
  "crc32fast",
  "hashbrown 0.15.5",
  "indexmap",
+ "memchr",
+]
+
+[[package]]
+name = "object"
+version = "0.40.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd229a0361b9d0d4396176e02d65897f487eebeab7caa6d443855ee152ca0b9c"
+dependencies = [
  "memchr",
 ]
 
@@ -4238,7 +4258,7 @@ dependencies = [
  "log",
  "mach2 0.4.3",
  "memfd",
- "object",
+ "object 0.37.3",
  "once_cell",
  "postcard",
  "pulley-interpreter",
@@ -4273,7 +4293,7 @@ dependencies = [
  "gimli 0.32.3",
  "indexmap",
  "log",
- "object",
+ "object 0.37.3",
  "postcard",
  "serde",
  "serde_derive",
@@ -4319,7 +4339,7 @@ dependencies = [
  "gimli 0.32.3",
  "itertools",
  "log",
- "object",
+ "object 0.37.3",
  "pulley-interpreter",
  "smallvec",
  "target-lexicon",
@@ -4405,7 +4425,7 @@ dependencies = [
  "cfg-if",
  "cranelift-codegen 0.123.14",
  "log",
- "object",
+ "object 0.37.3",
 ]
 
 [[package]]

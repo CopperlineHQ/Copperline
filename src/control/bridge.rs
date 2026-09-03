@@ -84,9 +84,13 @@ impl Shared {
 }
 
 /// One authenticated control-protocol connection.
+///
+/// Sending takes `&self`: the DAP adapter keeps one thread blocked in
+/// [`Bridge::wait`] for an outstanding resume while another sends
+/// `pause` and breakpoint changes, so the send side is its own lock.
 pub struct Bridge {
-    writer: TcpStream,
-    next_id: u64,
+    writer: Mutex<TcpStream>,
+    next_id: AtomicU64,
     shared: Arc<Shared>,
     reader: Option<JoinHandle<()>>,
     listen: String,
@@ -111,8 +115,8 @@ impl Bridge {
             .spawn(move || read_loop(BufReader::new(read_side), reader_shared))
             .map_err(|e| format!("starting the reader thread: {e}"))?;
         let mut bridge = Self {
-            writer: stream,
-            next_id: 1,
+            writer: Mutex::new(stream),
+            next_id: AtomicU64::new(1),
             shared,
             reader: Some(reader),
             listen: addr.to_string(),
@@ -149,20 +153,21 @@ impl Bridge {
     }
 
     /// Send a request and return its id without waiting.
-    pub fn send(&mut self, method: &str, params: Value) -> Result<u64, String> {
+    pub fn send(&self, method: &str, params: Value) -> Result<u64, String> {
         if let Some(reason) = self.closed() {
             return Err(format!("session lost: {reason}"));
         }
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.shared.lock().pending.insert(id, None);
         let msg = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
         let line = format!("{msg}\n");
-        if let Err(e) = self
-            .writer
-            .write_all(line.as_bytes())
-            .and_then(|_| self.writer.flush())
-        {
+        let written = {
+            let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+            writer
+                .write_all(line.as_bytes())
+                .and_then(|_| writer.flush())
+        };
+        if let Err(e) = written {
             self.shared.lock().pending.remove(&id);
             return Err(format!("sending {method}: {e}"));
         }
@@ -204,7 +209,7 @@ impl Bridge {
     }
 
     /// One request-reply round trip with no timeout.
-    pub fn call(&mut self, method: &str, params: Value) -> Result<Reply, String> {
+    pub fn call(&self, method: &str, params: Value) -> Result<Reply, String> {
         let id = self.send(method, params)?;
         self.wait(id, None)
     }
@@ -256,6 +261,14 @@ impl Bridge {
         (state.events.len(), state.dropped)
     }
 
+    /// Shut the socket without waiting for the reader: every thread
+    /// blocked in `wait` or `next_event` wakes up with the connection
+    /// reported lost, which is how a bridge shared between threads
+    /// (the DAP adapter's) is taken down.
+    pub fn disconnect(&self) {
+        self.shutdown_socket();
+    }
+
     /// Shut the connection and join the reader. The server tears down
     /// session-owned breakpoints and subscriptions on disconnect.
     pub fn close(mut self) {
@@ -265,8 +278,9 @@ impl Bridge {
         }
     }
 
-    fn shutdown_socket(&mut self) {
-        let _ = self.writer.shutdown(Shutdown::Both);
+    fn shutdown_socket(&self) {
+        let writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = writer.shutdown(Shutdown::Both);
     }
 }
 
@@ -346,9 +360,16 @@ pub struct LaunchSpec {
     pub args: Vec<String>,
     pub cwd: Option<PathBuf>,
     pub timeout: Duration,
+    /// An interactive window with the control server attached
+    /// (`--control-gui`) instead of a headless server (`--control`).
+    pub windowed: bool,
+    /// Pass `--noaudio`. Headless servers want it (nothing to hear, and
+    /// no audio device to open); a windowed debug session usually wants
+    /// its sound.
+    pub noaudio: bool,
 }
 
-/// A headless emulator this bridge started, with its log.
+/// An emulator this bridge started, with its log.
 pub struct Launched {
     pub child: Child,
     pub command: Vec<String>,
@@ -451,8 +472,9 @@ fn create_launch_files() -> Result<(PathBuf, PathBuf, std::fs::File), String> {
     Err(last_err.unwrap_or_else(|| "creating the launch log: no free name".into()))
 }
 
-/// Start a headless emulator with a control server on an ephemeral
-/// loopback port, wait for its endpoint, connect and authenticate.
+/// Start an emulator with a control server on an ephemeral loopback
+/// port (headless, or windowed with `spec.windowed`), wait for its
+/// endpoint, connect and authenticate.
 pub fn launch(spec: &LaunchSpec) -> Result<(Bridge, Launched), String> {
     let binary = resolve_binary(spec.binary.as_deref());
     let (info_path, log_path, log) = create_launch_files()?;
@@ -462,11 +484,18 @@ pub fn launch(spec: &LaunchSpec) -> Result<(Bridge, Launched), String> {
 
     let mut command = Command::new(&binary);
     command
-        .arg("--control")
+        .arg(if spec.windowed {
+            "--control-gui"
+        } else {
+            "--control"
+        })
         .arg(":0")
         .arg("--control-info")
-        .arg(&info_path)
-        .arg("--noaudio")
+        .arg(&info_path);
+    if spec.noaudio {
+        command.arg("--noaudio");
+    }
+    command
         .args(&spec.args)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
@@ -608,7 +637,7 @@ mod tests {
                 _ => vec![],
             }
         });
-        let mut bridge = Bridge::connect(&addr.to_string(), "ok").unwrap();
+        let bridge = Bridge::connect(&addr.to_string(), "ok").unwrap();
         assert_eq!(bridge.hello()["emulator"], "test");
         assert_eq!(
             bridge.call("status", Value::Null).unwrap(),
@@ -665,7 +694,7 @@ mod tests {
                 _ => vec![],
             }
         });
-        let mut bridge = Bridge::connect(&addr.to_string(), "ok").unwrap();
+        let bridge = Bridge::connect(&addr.to_string(), "ok").unwrap();
         for round in 0..3 {
             let id = bridge.send("slow", Value::Null).unwrap();
             assert_eq!(
@@ -719,7 +748,7 @@ mod tests {
             lines.push(String::new());
             lines
         });
-        let mut bridge = Bridge::connect(&addr.to_string(), "ok").unwrap();
+        let bridge = Bridge::connect(&addr.to_string(), "ok").unwrap();
         let id = bridge.send("status", Value::Null).unwrap();
         // The scripted server returns from its loop only when we close,
         // so wait for the flood to land, then close our side to end it.

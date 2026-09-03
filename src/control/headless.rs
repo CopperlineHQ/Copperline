@@ -18,7 +18,7 @@ use super::exec::{
     CCK_FINE_WINDOW, RUN_BUDGET,
 };
 use super::proto::{self, AuthGate, CtlError, Gate, MAX_LINE_BYTES};
-use super::session::{MachineInputState, SessionCtx};
+use super::session::{BreakSpec, MachineInputState, SessionCtx};
 use super::Config;
 use crate::debugger::DebugStop;
 use crate::emulator::Emulator;
@@ -49,6 +49,17 @@ pub fn run(mut emu: Emulator, config: Config) -> Result<()> {
     emu.debug_ensure_time_travel_anchor()?;
     emu.machine.ui_set_pc_history_enabled(true);
 
+    // --run + --control: a one-shot loadseg catch for the program, armed
+    // before the first resume can step the machine (as --gdb does), so
+    // the first `continue` stops with reason `loadseg` when the guest OS
+    // loads it and the client can read its segments before it runs.
+    let mut run_stop = config.stop_on_load.clone();
+    if let Some(name) = &run_stop {
+        if emu.machine.ui_breaks().loadseg_catch.is_none() {
+            emu.machine.ui_toggle_loadseg_catch(Some(name.clone()));
+        }
+    }
+
     let recorder = config
         .record_input
         .as_ref()
@@ -60,6 +71,7 @@ pub fn run(mut emu: Emulator, config: Config) -> Result<()> {
         log::info!("control: connection from {peer}");
         stream.set_nodelay(true).ok();
         let mut session = Session::new(emu, stream, &token, &config, input);
+        session.run_stop = run_stop.take();
         let end = match session.serve() {
             Ok(end) => end,
             Err(e) => {
@@ -68,6 +80,7 @@ pub fn run(mut emu: Emulator, config: Config) -> Result<()> {
             }
         };
         session.teardown();
+        run_stop = session.run_stop.take();
         emu = session.emu;
         input = session.input;
         match end {
@@ -222,6 +235,8 @@ struct Session {
     input: MachineInputState,
     reverse_budget_mb: usize,
     reverse_interval_frames: u64,
+    /// `--run`'s pending one-shot stop target (see `run`).
+    run_stop: Option<String>,
 }
 
 impl Session {
@@ -245,6 +260,32 @@ impl Session {
             input,
             reverse_budget_mb: config.reverse_budget_mb,
             reverse_interval_frames: config.reverse_interval_frames,
+            run_stop: None,
+        }
+    }
+
+    /// `--run`'s stop is one-shot: the first load of the target program
+    /// consumes the catch, so the program running again later is
+    /// ordinary execution (a client wanting every load arms its own
+    /// `loadseg` break).
+    fn note_run_stop(&mut self, stop: &DebugStop) {
+        let DebugStop::LoadSeg { name, .. } = stop else {
+            return;
+        };
+        if !self
+            .run_stop
+            .as_deref()
+            .is_some_and(|target| name.eq_ignore_ascii_case(target))
+        {
+            return;
+        }
+        self.run_stop = None;
+        let session_owned = self
+            .ctx
+            .id_for(&BreakSpec::LoadSeg { name: None })
+            .is_some();
+        if self.emu.machine.ui_breaks().loadseg_catch.is_some() && !session_owned {
+            self.emu.machine.ui_toggle_loadseg_catch(None);
         }
     }
 
@@ -783,6 +824,7 @@ impl Session {
                 );
             }
             if let Some(debug_stop) = self.emu.machine.take_ui_debug_stop() {
+                self.note_run_stop(&debug_stop);
                 let (mut reason, detail) = exec::stop_reason_of(&debug_stop);
                 if let (Some(RunTarget::Beam { vpos, .. }), DebugStop::Beam { vpos: at, .. }) =
                     (target, &debug_stop)
@@ -829,10 +871,9 @@ impl Session {
         if self.emu.machine.cpu_double_faulted() {
             return Some(("double_fault", "CPU double fault (halted)".to_string()));
         }
-        self.emu
-            .machine
-            .take_ui_debug_stop()
-            .map(|stop| exec::stop_reason_of(&stop))
+        let stop = self.emu.machine.take_ui_debug_stop()?;
+        self.note_run_stop(&stop);
+        Some(exec::stop_reason_of(&stop))
     }
 
     /// Service requests that arrive while the machine is running. Runs

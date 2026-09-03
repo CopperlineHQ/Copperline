@@ -140,6 +140,9 @@ pub enum CoreOp {
         addr: u32,
     },
     PcHistory,
+    /// The scheduled process's hunk segments plus the programs the armed
+    /// loadseg catch has seen loaded (`segments.list`).
+    SegmentsList,
     BreakAdd(BreakSpec),
     BreakRemove {
         id: u32,
@@ -188,6 +191,9 @@ pub enum CoreOp {
     },
     ReverseFrame,
     ReverseContinue,
+    /// Snapshot the machine into the reverse-debug ring here
+    /// (`reverse_anchor`).
+    ReverseAnchor,
 }
 
 impl CoreOp {
@@ -231,6 +237,7 @@ impl CoreOp {
                 | CoreOp::DebugIdle
                 | CoreOp::CopperList { .. }
                 | CoreOp::PcHistory
+                | CoreOp::SegmentsList
                 | CoreOp::BreakList
                 | CoreOp::FloppyQuery
                 | CoreOp::EventsList
@@ -822,6 +829,7 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
         }),
         "reverse_frame" => core(CoreOp::ReverseFrame),
         "reverse_continue" => core(CoreOp::ReverseContinue),
+        "reverse_anchor" => core(CoreOp::ReverseAnchor),
         "regs.get" => core(CoreOp::RegsGet),
         "regs.set" => core(CoreOp::RegsSet {
             reg: parse_reg_name(&p.str_req("reg")?)?,
@@ -1014,6 +1022,7 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
             addr: p.u32_req("addr")?,
         }),
         "pc_history" => core(CoreOp::PcHistory),
+        "segments.list" => core(CoreOp::SegmentsList),
         "break.add" => core(CoreOp::BreakAdd(parse_break_spec(&p)?)),
         "break.remove" => core(CoreOp::BreakRemove {
             id: p.u32_req("id")?,
@@ -2095,6 +2104,7 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             Ok(result)
         }
         CoreOp::PcHistory => Ok(json!({"pcs": emu.machine.ui_pc_history()})),
+        CoreOp::SegmentsList => Ok(segments_value(emu)),
         CoreOp::BreakAdd(spec) => match ctx.install_break(emu, spec.clone()) {
             Ok(id) => Ok(json!({"id": id})),
             Err(msg) => Err(CtlError::invalid_params(msg)),
@@ -2406,6 +2416,12 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
                 }),
             )
         }
+        CoreOp::ReverseAnchor => {
+            require_time_travel(emu)?;
+            emu.debug_time_travel_anchor_now()
+                .map_err(|e| CtlError::internal(format!("{e:#}")))?;
+            Ok(json!({"position": emu.retired_instructions()}))
+        }
         CoreOp::ReverseContinue => {
             require_time_travel(emu)?;
             let outcome = emu
@@ -2629,6 +2645,36 @@ fn status_value(emu: &Emulator, ctx: &SessionCtx) -> Value {
         "audio_lead_ms": audio.output_lead_seconds * 1000.0,
         "audio_underrun_frames": audio.callback_underrun_frames,
     })
+}
+
+/// `segments.list`: the hunks of the program the scheduled process is
+/// running (the just-loaded program at a `loadseg` stop, so a client can
+/// relocate its symbols by them), and every program the armed loadseg
+/// catch has recorded.
+fn segments_value(emu: &Emulator) -> Value {
+    let seg = |s: &crate::amigaos::Segment| json!({"start": s.start, "size": s.size});
+    let (current, note) = match crate::amigaos::segments_on_bus(emu.bus()) {
+        Ok(segs) => (segs.iter().map(seg).collect::<Vec<_>>(), None),
+        Err(why) => (Vec::new(), Some(why)),
+    };
+    let modules: Vec<Value> = emu
+        .machine
+        .ui_loadseg_modules()
+        .iter()
+        .map(|m| {
+            json!({
+                "name": m.name,
+                "task": m.task,
+                "seglist": m.seglist,
+                "segments": m.segments.iter().map(seg).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let mut value = json!({"current": current, "modules": modules});
+    if let Some(note) = note {
+        value["note"] = Value::from(note);
+    }
+    value
 }
 
 fn regs_value(emu: &Emulator) -> Value {

@@ -824,10 +824,10 @@ fn main() -> Result<()> {
         ));
         run_prog_name = Some(prepared.prog_name);
     }
-    // Only the gdb dispatch reads the program name; without the feature,
-    // keep the binding "used" so the staging code is one shape in both
-    // builds.
-    #[cfg(not(feature = "gdb"))]
+    // Only the gdb and control dispatches read the program name; without
+    // either feature, keep the binding "used" so the staging code is one
+    // shape in every build.
+    #[cfg(not(any(feature = "gdb", feature = "control")))]
     let _ = &run_prog_name;
     // --warp-boot/--warp-until (src/warpboot.rs): validate the flag combos
     // before any mode dispatch, so a bad combination errors even on the
@@ -1019,6 +1019,9 @@ fn main() -> Result<()> {
         // The headless server owns the machine, so it journals
         // --record-input itself; windowed mode journals through the App.
         config.record_input = cli.record_input.clone();
+        // --run + --control: the first resume stops the moment the guest
+        // OS loads the program, like --gdb.
+        config.stop_on_load = run_prog_name.clone();
         return copperline::control::headless::run(emu, config);
     }
     let disk_write_protected = std::array::from_fn(|idx| {
@@ -1127,6 +1130,10 @@ fn main() -> Result<()> {
         let mut config = copperline::control::Config::new(listen);
         config.token = cli.control_token;
         config.info_file = cli.control_info;
+        // --run + --control-gui: arm the one-shot stop at the program's
+        // load before the first frame runs, so a client attaching after
+        // the boot cannot miss it.
+        config.stop_on_load = run_prog_name.clone();
         let handle = copperline::control::windowed::ControlHandle::bind(&config)?;
         app.attach_control(handle, &config);
     }

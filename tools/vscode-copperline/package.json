@@ -1,0 +1,262 @@
+{
+  "name": "copperline-debug",
+  "displayName": "Copperline Amiga Debug",
+  "description": "Debug Amiga programs in the Copperline emulator: source-level stepping, registers, memory, chipset state and reverse execution through copperline-ctl --dap.",
+  "version": "0.1.0",
+  "publisher": "copperline",
+  "license": "GPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/CopperlineHQ/Copperline"
+  },
+  "homepage": "https://copperline.dev",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Debuggers"
+  ],
+  "keywords": [
+    "amiga",
+    "68000",
+    "m68k",
+    "emulator",
+    "debugger"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onDebugResolve:copperline"
+  ],
+  "contributes": {
+    "configuration": {
+      "title": "Copperline",
+      "properties": {
+        "copperline.ctlExecutable": {
+          "type": "string",
+          "default": "copperline-ctl",
+          "description": "Path to the copperline-ctl executable file (not its directory); it serves the debug adapter as copperline-ctl --dap. A bare name is looked up on PATH."
+        },
+        "copperline.emulatorExecutable": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the copperline executable file (not its directory) that a launch starts. Empty: the copperline next to copperline-ctl, else PATH. A launch configuration's \"copperline\" attribute overrides this."
+        }
+      }
+    },
+    "breakpoints": [
+      { "language": "c" },
+      { "language": "cpp" },
+      { "language": "m68k" },
+      { "language": "asm" },
+      { "language": "amiga-assembly" },
+      { "language": "vasm" }
+    ],
+    "debuggers": [
+      {
+        "type": "copperline",
+        "label": "Copperline (Amiga)",
+        "languages": [
+          "c",
+          "cpp",
+          "m68k",
+          "asm"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "program"
+            ],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "The Amiga executable (hunk file) to run, on the host. Its directory is mounted in the guest and it is started from the shell.",
+                "default": "${workspaceFolder}/${fileBasenameNoExtension}"
+              },
+              "args": {
+                "type": [
+                  "string",
+                  "array"
+                ],
+                "description": "Command-line arguments for the program.",
+                "default": []
+              },
+              "copperline": {
+                "type": "string",
+                "description": "The copperline executable file to start (default: the copperline.emulatorExecutable setting, then the copperline next to copperline-ctl, then PATH)."
+              },
+              "config": {
+                "type": "string",
+                "description": "A Copperline TOML configuration file for the machine (default: the launcher's saved default configuration)."
+              },
+              "factory": {
+                "type": "boolean",
+                "description": "Ignore the saved default configuration (copperline --factory).",
+                "default": false
+              },
+              "model": {
+                "type": "string",
+                "description": "Machine model (A500, A600, A1200, A4000, CD32...)."
+              },
+              "chipset": {
+                "type": "string",
+                "description": "OCS, ECS or AGA."
+              },
+              "cpu": {
+                "type": "string",
+                "description": "68000 to 68060."
+              },
+              "chip": {
+                "type": "string",
+                "description": "Chip RAM size (512K, 1M, 2M)."
+              },
+              "fast": {
+                "type": "string",
+                "description": "Fast RAM size (8M, 32M...)."
+              },
+              "slow": {
+                "type": "string",
+                "description": "Slow RAM size."
+              },
+              "rtcTime": {
+                "type": "string",
+                "description": "Seed the guest clock (copperline --rtc-time), for reproducible runs."
+              },
+              "extraArgs": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Further copperline command-line arguments.",
+                "default": []
+              },
+              "headless": {
+                "type": "boolean",
+                "description": "Run without a window (copperline --control instead of --control-gui). The screen is then only reachable through the control protocol.",
+                "default": false
+              },
+              "noAudio": {
+                "type": "boolean",
+                "description": "Start the window without audio.",
+                "default": false
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "Stop at the program's entry point once it is loaded.",
+                "default": true
+              },
+              "entryPoint": {
+                "type": "string",
+                "description": "The symbol to treat as the entry point (default: the first instruction of the first hunk). \"main\" or \"entry\" for C programs with a startup stub."
+              },
+              "symbolFile": {
+                "type": "string",
+                "description": "An ELF with DWARF the program was converted from (elf2hunk); \"program.elf\" is tried automatically."
+              },
+              "sourceMap": {
+                "type": "object",
+                "description": "Source path prefixes recorded in the debug information mapped to host paths, {\"/build/dir\": \"${workspaceFolder}\"}.",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "cwd": {
+                "type": "string",
+                "description": "Working directory for the emulator process."
+              },
+              "timeoutMs": {
+                "type": "number",
+                "description": "How long to wait for the emulator to announce its control endpoint.",
+                "default": 60000
+              }
+            }
+          },
+          "attach": {
+            "properties": {
+              "controlInfo": {
+                "type": "string",
+                "description": "The JSON file a running copperline wrote with --control-info."
+              },
+              "address": {
+                "type": "string",
+                "description": "The control server address (with token) when no info file is at hand."
+              },
+              "token": {
+                "type": "string",
+                "description": "The control server token (with address)."
+              },
+              "program": {
+                "type": "string",
+                "description": "The executable the guest is running or about to run, for its symbols and source lines."
+              },
+              "symbolFile": {
+                "type": "string",
+                "description": "An ELF with DWARF the program was converted from."
+              },
+              "sourceMap": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "entryPoint": {
+                "type": "string"
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "When the program is not loaded yet, stop at its entry point once it is.",
+                "default": false
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "copperline",
+            "request": "launch",
+            "name": "Run in Copperline",
+            "program": "${workspaceFolder}/${fileBasenameNoExtension}",
+            "stopOnEntry": true
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "Copperline: launch a program",
+            "description": "Start Copperline, boot to the program and stop at its entry point",
+            "body": {
+              "type": "copperline",
+              "request": "launch",
+              "name": "Run ${1:hello} in Copperline",
+              "program": "^\"\\${workspaceFolder}/${1:hello}\"",
+              "stopOnEntry": true
+            }
+          },
+          {
+            "label": "Copperline: launch with a machine configuration",
+            "description": "Start Copperline with a TOML configuration and stop at main",
+            "body": {
+              "type": "copperline",
+              "request": "launch",
+              "name": "Run ${1:hello} on ${2:A1200}",
+              "program": "^\"\\${workspaceFolder}/${1:hello}\"",
+              "model": "${2:A1200}",
+              "fast": "8M",
+              "entryPoint": "main",
+              "stopOnEntry": true
+            }
+          },
+          {
+            "label": "Copperline: attach to a running emulator",
+            "description": "Attach to copperline --control-gui ... --control-info FILE",
+            "body": {
+              "type": "copperline",
+              "request": "attach",
+              "name": "Attach to Copperline",
+              "controlInfo": "${1:/tmp/ccp.json}",
+              "program": "^\"\\${workspaceFolder}/${2:hello}\""
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

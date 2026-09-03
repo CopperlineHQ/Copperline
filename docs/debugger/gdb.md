@@ -60,6 +60,9 @@ Standard GDB frontends work with both modes: VS Code cppdbg configurations
 (`"MIMode": "gdb"`, `"miDebuggerServerAddress": "localhost:2345"`,
 `"miDebuggerPath"` pointing to `m68k-amigaos-gdb`) or Native Debug's `target remote`
 setup, with `--gdb-gui` keeping the Amiga display live alongside the IDE.
+For IDE debugging without a GDB at all, with source lines read straight from
+the hunk executable, see the [Debug Adapter Protocol](dap.md) server
+(`copperline-ctl --dap`).
 
 ## Connecting from GDB
 
