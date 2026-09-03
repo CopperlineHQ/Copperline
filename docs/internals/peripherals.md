@@ -621,9 +621,8 @@ that buffer one at a time between dumps. That distinction matters
 because Kickstart's driver queues a 3-byte LED packet for every TOC
 entry it receives (and an unpause right behind the request itself): on a
 disc with more than about 25 tracks those packets outrun a 256-byte ring
-that nothing consumes, and the lapped bytes then parse as garbage --
-checksum-error replies in place of the LED toggles and the unpause --
-after the dump: the driver's LED toggles and its unpause come back as
+that nothing consumes, and the lapped bytes then parse as garbage after
+the dump: the driver's LED toggles and its unpause come back as
 checksum-error replies, which the real machine never produces (observed
 with Pinball Illusions CD32, 39 tracks, whose boot showed four such
 replies before the first data read). A data locate

@@ -877,11 +877,11 @@ impl Akiko {
                 // PIO command port (the ROM uses TX DMA instead).
                 if self.flags & CDFLAG_TXD == 0 {
                     self.intreq &= !CDINT_DRIVEXMIT;
-                    if self.tx_fifo.len() < TX_FIFO_BYTES {
+                    if self.tx_fifo_has_room() {
                         self.tx_fifo.push_back(value);
                     }
                     self.parse_commands();
-                    if self.can_send_command() {
+                    if self.transmitter_ready() {
                         self.intreq |= CDINT_DRIVEXMIT;
                     }
                 }
@@ -1122,6 +1122,19 @@ impl Akiko {
         self.cd_initialized != 0 && self.command_active == 0 && self.receive_length == 0
     }
 
+    /// The drive's receive buffer can take another byte.
+    fn tx_fifo_has_room(&self) -> bool {
+        self.tx_fifo.len() < TX_FIFO_BYTES
+    }
+
+    /// Akiko's transmitter-ready latch condition, as a PIO producer polls
+    /// it before each command byte: the drive is ready to parse a command
+    /// and its receive buffer has room. A byte written while this is
+    /// false is lost, like an overrun on the real link.
+    fn transmitter_ready(&self) -> bool {
+        self.can_send_command() && self.tx_fifo_has_room()
+    }
+
     /// TX DMA: fetch command bytes from the TX ring, wherever in the
     /// 24-bit space the guest placed it, into the drive's receive buffer.
     ///
@@ -1143,7 +1156,7 @@ impl Akiko {
         if self.tx_dma_delay_cck > 0 {
             return;
         }
-        if self.tx_fifo.len() >= TX_FIFO_BYTES {
+        if !self.tx_fifo_has_room() {
             return;
         }
         // The TX address folds to the 256-byte command page, like RX: the
@@ -1255,7 +1268,9 @@ impl Akiko {
             _ => 0,
         };
         if len == 0 {
-            self.intreq |= CDINT_DRIVEXMIT;
+            if self.tx_fifo_has_room() {
+                self.intreq |= CDINT_DRIVEXMIT;
+            }
             return;
         }
         self.start_return_data(len);
@@ -1559,7 +1574,9 @@ impl Akiko {
             // The next packet begins at base + the visible index.
             self.rx_dma_offset = u16::from(self.cdcomrxinx);
             self.intreq &= !CDINT_DRIVERECV;
-            self.intreq |= CDINT_DRIVEXMIT;
+            if self.tx_fifo_has_room() {
+                self.intreq |= CDINT_DRIVEXMIT;
+            }
         }
     }
 
@@ -2873,6 +2890,69 @@ mod tests {
         assert_eq!(response, vec![0x15, 0x01, 0xE9]);
         // The drained response re-arms the transmitter-ready latch.
         assert_ne!(akiko.intreq & CDINT_DRIVEXMIT, 0);
+    }
+
+    #[test]
+    fn pio_port_reports_transmitter_busy_while_the_drive_buffer_is_full() {
+        // A PIO producer polls DRIVEXMIT before each command byte. While
+        // the drive's receive buffer is full (a lead-in dump keeps the
+        // drive from parsing), the latch stays clear and a byte written
+        // anyway is an overrun that is dropped, never queued past the
+        // buffer: the latch only ever promises room that exists.
+        let mut ring = CdAudioRing::default();
+        let mut chip = vec![0u8; 64 * 1024];
+        let mut akiko = Akiko::new();
+        akiko.insert_disc(test_disc());
+        akiko.tick(2048, &mut chip, &mut ring);
+        akiko.cd_initialized = 2;
+        akiko.receive_length = 0;
+        akiko.intena = 0;
+        akiko.intreq = CDINT_DRIVEXMIT;
+        akiko.write(AKIKO_BASE + 0x24, 4, 0, &mut chip);
+
+        // A dump in flight (still behind the spin-up gate, so no entry
+        // streams): the drive parses nothing until it ends. Fill its
+        // buffer with LED packets; the last one is still two bytes short.
+        akiko.toc_counter = 0;
+        akiko.toc_spin_up_cck = i64::MAX / 4;
+        let led = [0x15u8, 0x00, 0xEA];
+        for i in 0..TX_FIFO_BYTES {
+            akiko.tx_fifo.push_back(led[i % 3]);
+        }
+        akiko.write(AKIKO_BASE + 0x28, 1, 0x00, &mut chip);
+        assert_eq!(akiko.tx_fifo.len(), TX_FIFO_BYTES, "overrun byte dropped");
+        assert_eq!(
+            akiko.read(AKIKO_BASE + 0x04, 4, &mut chip) & CDINT_DRIVEXMIT,
+            0,
+            "no room: transmitter stays busy"
+        );
+
+        // The dump ends and the drive drains its backlog, one packet per
+        // turnaround, every one still aligned.
+        akiko.toc_counter = -1;
+        akiko.toc_spin_up_cck = 0;
+        for _ in 0..(TX_FIFO_BYTES / 3 + 4) {
+            akiko.tick(CMD_EXEC_DELAY_CCK, &mut chip, &mut ring);
+        }
+        assert!(akiko.tx_fifo.is_empty(), "drive parsed the whole backlog");
+        assert!(!akiko.checksum_error, "packets stayed aligned");
+        assert_ne!(
+            akiko.intreq & CDINT_DRIVEXMIT,
+            0,
+            "room again: transmitter ready"
+        );
+
+        // The producer finishes the packet it was holding back.
+        for &byte in &[0x00u8, 0xEA] {
+            assert_ne!(
+                akiko.read(AKIKO_BASE + 0x04, 4, &mut chip) & CDINT_DRIVEXMIT,
+                0
+            );
+            akiko.write(AKIKO_BASE + 0x28, 1, u32::from(byte), &mut chip);
+        }
+        akiko.tick(CMD_EXEC_DELAY_CCK, &mut chip, &mut ring);
+        assert!(!akiko.checksum_error);
+        assert_eq!(akiko.command_length, 0, "the held packet completed and ran");
     }
 
     /// Two-bank space: chip at 0 and "fast" at $200000, like a CD32 with
