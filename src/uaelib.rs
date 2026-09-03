@@ -1970,6 +1970,7 @@ mod tests {
             std::fs::read(root.join("data/output.bin")).unwrap(),
             b"from guest"
         );
+        drop(lib);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -2086,6 +2087,7 @@ mod tests {
             (0, false)
         );
         assert_eq!(guest_bytes(&mem, end, 2, MASK24).unwrap(), b"xx");
+        drop(lib);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -2126,6 +2128,7 @@ mod tests {
             0,
         );
         assert_eq!(std::fs::read(&target).unwrap(), b"data");
+        drop(lib);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -2144,6 +2147,7 @@ mod tests {
         let encoded = bincode::serialize(&lib).unwrap();
         let restored: UaeLib = bincode::deserialize(&encoded).unwrap();
         assert!(restored.file_root().is_none());
+        drop(lib);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
