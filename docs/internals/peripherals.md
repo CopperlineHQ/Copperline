@@ -530,6 +530,19 @@ audio mixes into the host output, and both light the blue CD LED. The
 512 KiB extended ROM sits at `$E00000`, and the CD32 pad protocol drives
 port 2.
 
+Every sector the pickup delivers, data read or CD-DA play alike, comes with
+its 96-byte subcode frame: with the subcode flag enabled Akiko DMAs it into
+the misc page's subcode area (alternating 128-byte halves, `$FFFF $0000` end
+marker, offset register advanced by 100) and raises the subcode interrupt.
+Image formats carry no subchannel data, so the Q channel is regenerated from
+the TOC as an ADR 1 position packet (control, track, index, track-relative
+and absolute MSF in BCD, CRC) with P and R-W blank. That stream is what the
+Kickstart `cd.device` turns into `CD_ADDFRAMEINT` server calls and
+`CD_QCODEMSF`/`CD_QCODELSN` positions, and the drive's SubQ command reports
+the same position while a play is running or paused (regression example:
+Liberation's CD32 intro busy-waits on its first frame interrupt after
+`CD_PLAYTRACK`).
+
 ### CD32 Full Motion Video module (`cd32_fmv.rs`)
 
 The CD32 profile fits a 1 MiB Zorro II FMV cartridge by default using the

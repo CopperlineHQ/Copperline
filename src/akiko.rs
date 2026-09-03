@@ -32,7 +32,7 @@
 //! CD-DA sectors into the host mixer ring (44.1 kHz, the mixer's native
 //! rate) and sends the drive's start/end notification packets.
 
-use crate::cdrom::{to_bcd, CdImage, LEADIN_SECTORS, RAW_SECTOR_BYTES};
+use crate::cdrom::{to_bcd, CdImage, CdTrack, LEADIN_SECTORS, RAW_SECTOR_BYTES};
 use crate::chipset::paula::CdAudioRing;
 
 pub const AKIKO_BASE: u32 = 0x00B8_0000;
@@ -78,6 +78,9 @@ const TOC_REPEAT: u32 = 3;
 
 /// Colour clocks per 1/75th second (one single-speed CD frame).
 const CCK_PER_CD_FRAME: u32 = crate::chipset::paula::PAULA_CLOCK_HZ / 75;
+/// One subcode frame per sector: 98 bytes of P-W symbols less the two
+/// sync patterns, as the drive hands them to Akiko.
+const SUBCODE_FRAME_BYTES: usize = 96;
 
 /// The drive firmware returns its cached TOC over the command channel,
 /// independently of the 75-sector/s optical data path. A single-track TOC
@@ -997,15 +1000,20 @@ impl Akiko {
         self.audio_counter_cck -= cck as i32;
         if self.audio_counter_cck <= 0 {
             self.audio_counter_cck += CCK_PER_CD_FRAME as i32;
-            self.stream_audio_sector(cd_audio);
+            self.stream_audio_sector(mem, cd_audio);
         }
 
         self.handler();
         self.run_internal(mem);
     }
 
-    /// Produce the next CD-DA sector of the running play command.
-    fn stream_audio_sector(&mut self, cd_audio: &mut CdAudioRing) {
+    /// Produce the next CD-DA sector of the running play command, with
+    /// the subcode frame the drive reads alongside it.
+    fn stream_audio_sector(
+        &mut self,
+        mem: &mut (impl DmaSpace + ?Sized),
+        cd_audio: &mut CdAudioRing,
+    ) {
         if !self.playing || self.paused {
             return;
         }
@@ -1029,6 +1037,11 @@ impl Akiko {
             }
         }
         self.play_position += 1;
+        // The pickup decodes P-W subcode for every frame it plays, not
+        // only for data reads: this stream is what the KS cd.device's
+        // subcode interrupt server turns into CD_ADDFRAMEINT calls and
+        // CD_QCODE positions while audio plays.
+        self.deliver_subcode(mem, sector);
     }
 
     /// Status push-backs the drive volunteers between commands.
@@ -1367,8 +1380,23 @@ impl Akiko {
     fn command_subq(&mut self) -> usize {
         self.result_buffer[0] = self.command;
         self.result_buffer[1] = 0;
-        // No audio position model: the 11 SubQ bytes stay zero, which
-        // software reads as "no valid position yet".
+        self.result_buffer[2..13].fill(0);
+        // The drive reports its Q-channel position only while an audio
+        // play is in progress or paused (WinUAE's cd_qcode gates the same
+        // way); the all-zero packet otherwise reads as "no valid position
+        // yet". Layout after the two header bytes: zero, control/ADR,
+        // track, index, track-relative MSF, zero, absolute MSF.
+        if self.playing {
+            if let Some(disc) = self.disc.as_ref() {
+                let q = q_channel_position(disc.tracks(), self.play_position.max(0) as u32);
+                let d = &mut self.result_buffer[2..13];
+                d[1] = q[0];
+                d[2] = q[1];
+                d[3] = q[2];
+                d[4..7].copy_from_slice(&q[3..6]);
+                d[8..11].copy_from_slice(&q[7..10]);
+            }
+        }
         15
     }
 
@@ -1597,22 +1625,8 @@ impl Akiko {
         self.pbx &= !(1 << slot);
         self.intreq |= CDINT_PBX;
 
-        if self.flags & CDFLAG_SUBCODE != 0 {
-            // Sector-synchronous subcode delivery: zeroed payload with
-            // the hardware's end markers.
-            self.subcodeoffset = if self.subcodeoffset >= 128 { 0 } else { 128 };
-            mem.dma_put_bytes(
-                self.subcode_address + u32::from(self.subcodeoffset),
-                &[0u8; 96],
-            );
-            let tail = self.subcode_address + u32::from(self.subcodeoffset) + 96;
-            mem.dma_put(tail, 0xFF);
-            mem.dma_put(tail + 1, 0xFF);
-            mem.dma_put(tail + 2, 0);
-            mem.dma_put(tail + 3, 0);
-            self.subcodeoffset = self.subcodeoffset.wrapping_add(100);
-            self.intreq |= CDINT_SUBCODE;
-        }
+        // Sector-synchronous subcode delivery alongside the payload.
+        self.deliver_subcode(mem, read_sector as u32);
 
         self.sector_counter += 1;
         if at_end {
@@ -1622,6 +1636,29 @@ impl Akiko {
             self.data_offset = -1;
             self.data_end = -1;
         }
+    }
+
+    /// Hand the subcode frame of `sector` to the host. Akiko DMAs each
+    /// 96-byte frame into the misc page's subcode area (+$100),
+    /// alternating between its two 128-byte halves, appends the $FFFF
+    /// $0000 end marker, advances the offset register by 100, and raises
+    /// the subcode interrupt -- WinUAE's akiko.cpp delivery sequence.
+    /// Only the Q channel carries anything: image formats store no
+    /// subchannel data, so it is regenerated from the TOC.
+    fn deliver_subcode(&mut self, mem: &mut (impl DmaSpace + ?Sized), sector: u32) {
+        if self.flags & CDFLAG_SUBCODE == 0 {
+            return;
+        }
+        let frame = match self.disc.as_ref() {
+            Some(disc) => subcode_frame(disc.tracks(), sector),
+            None => [0u8; SUBCODE_FRAME_BYTES],
+        };
+        self.subcodeoffset = if self.subcodeoffset >= 128 { 0 } else { 128 };
+        let base = self.subcode_address + u32::from(self.subcodeoffset);
+        mem.dma_put_bytes(base, &frame);
+        mem.dma_put_bytes(base + SUBCODE_FRAME_BYTES as u32, &[0xFF, 0xFF, 0x00, 0x00]);
+        self.subcodeoffset = self.subcodeoffset.wrapping_add(100);
+        self.intreq |= CDINT_SUBCODE;
     }
 
     // ----- C2P -------------------------------------------------------------
@@ -1844,6 +1881,79 @@ fn sector_in_data_track(toc: &[TocEntry], sector: u32) -> bool {
     false
 }
 
+/// The Q-channel CRC: CRC-16-CCITT (x^16 + x^12 + x^5 + 1, zero seed)
+/// over the ten payload bytes, transmitted inverted (Red Book).
+fn q_channel_crc(payload: &[u8]) -> u16 {
+    let mut crc: u16 = 0;
+    for &byte in payload {
+        crc ^= u16::from(byte) << 8;
+        for _ in 0..8 {
+            crc = if crc & 0x8000 != 0 {
+                (crc << 1) ^ 0x1021
+            } else {
+                crc << 1
+            };
+        }
+    }
+    !crc
+}
+
+fn write_bcd_msf(out: &mut [u8], frames: u32) {
+    out[0] = to_bcd((frames / (60 * 75)) as u8);
+    out[1] = to_bcd(((frames / 75) % 60) as u8);
+    out[2] = to_bcd((frames % 75) as u8);
+}
+
+/// The twelve Q-channel bytes of the subcode frame at disc sector
+/// `sector`: an ADR 1 position packet (control nibble, track, index,
+/// track-relative MSF, zero, absolute MSF, CRC), all BCD. A sector in
+/// the gap before a track's INDEX 01 belongs to that track as index 0
+/// with the relative time counting down, as the pickup sees it.
+fn q_channel_position(tracks: &[CdTrack], sector: u32) -> [u8; 12] {
+    let mut q = [0u8; 12];
+    let (control, number, index, relative) =
+        match tracks.iter().rposition(|t| sector >= t.start_sector) {
+            Some(i) => {
+                let track = &tracks[i];
+                let next = tracks.get(i + 1);
+                match next {
+                    Some(next) if sector >= track.start_sector + track.sector_count => {
+                        (next.kind, next.number, 0, next.start_sector - sector)
+                    }
+                    _ => (track.kind, track.number, 1, sector - track.start_sector),
+                }
+            }
+            // Lead-in side of the first track: its pregap, counting down.
+            None => match tracks.first() {
+                Some(first) => (first.kind, first.number, 0, first.start_sector - sector),
+                None => return q,
+            },
+        };
+    q[0] = if control.is_data() { 0x41 } else { 0x01 };
+    q[1] = to_bcd(number);
+    q[2] = to_bcd(index);
+    write_bcd_msf(&mut q[3..6], relative);
+    write_bcd_msf(&mut q[7..10], sector + LEADIN_SECTORS);
+    let crc = q_channel_crc(&q[..10]);
+    q[10] = (crc >> 8) as u8;
+    q[11] = crc as u8;
+    q
+}
+
+/// One subcode frame as the drive delivers it: bit-interleaved, byte i
+/// carrying bit i of every channel with P in bit 7 and Q in bit 6. P
+/// and R-W stay blank; Q is the position packet.
+fn subcode_frame(tracks: &[CdTrack], sector: u32) -> [u8; SUBCODE_FRAME_BYTES] {
+    let q = q_channel_position(tracks, sector);
+    let mut frame = [0u8; SUBCODE_FRAME_BYTES];
+    for (i, byte) in frame.iter_mut().enumerate() {
+        if q[i / 8] & (0x80 >> (i % 8)) != 0 {
+            *byte |= 0x40;
+        }
+    }
+    frame
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1897,7 +2007,8 @@ mod tests {
         akiko.play_position = 4;
         akiko.play_end = 6;
         let mut ring = CdAudioRing::default();
-        akiko.stream_audio_sector(&mut ring);
+        let mut chip = no_chip();
+        akiko.stream_audio_sector(&mut chip, &mut ring);
         assert_eq!(akiko.current_track(), Some(2));
 
         akiko.eject_disc();
@@ -2263,6 +2374,220 @@ mod tests {
         let ring_bytes = &chip[rx_base..rx_base + 0x100];
         let found = (0..0x100).any(|i| ring_bytes[i] == 4 && ring_bytes[(i + 1) & 0xFF] == 0x01);
         assert!(found, "play-end notification not found in RX ring");
+    }
+
+    /// Two 2048-byte data sectors then four CD-DA sectors in one file.
+    /// Track 2 starts at file sector 2; with `pregap` > 0 its INDEX 00
+    /// sits there and INDEX 01 that many sectors later.
+    fn test_audio_disc(pregap: u32) -> CdImage {
+        static UNIQUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let unique = UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir();
+        let cue = dir.join(format!("copperline-akiko-subq-{pid}-{unique}.cue"));
+        let bin = dir.join(format!("copperline-akiko-subq-{pid}-{unique}.bin"));
+        let mut bytes = vec![0u8; 2 * DATA_SECTOR_BYTES];
+        for _ in 0..4 * (RAW_SECTOR_BYTES / 4) {
+            bytes.extend_from_slice(&[0x00, 0x10, 0x00, 0x20]);
+        }
+        let track2 = if pregap > 0 {
+            format!(
+                "  TRACK 02 AUDIO\n    INDEX 00 00:00:02\n    INDEX 01 00:00:{:02}\n",
+                2 + pregap
+            )
+        } else {
+            "  TRACK 02 AUDIO\n    INDEX 01 00:00:02\n".to_string()
+        };
+        std::fs::write(
+            &cue,
+            format!(
+                "FILE \"{}\" BINARY\n  TRACK 01 MODE1/2048\n    INDEX 01 00:00:00\n{track2}",
+                bin.file_name().unwrap().to_string_lossy()
+            ),
+        )
+        .unwrap();
+        std::fs::write(&bin, &bytes).unwrap();
+        let image = CdImage::load(&cue).unwrap();
+        let _ = std::fs::remove_file(&cue);
+        let _ = std::fs::remove_file(&bin);
+        image
+    }
+
+    /// Decode the Q channel back out of an interleaved subcode frame.
+    fn q_channel_of(frame: &[u8]) -> [u8; 12] {
+        let mut q = [0u8; 12];
+        for (i, byte) in frame.iter().enumerate().take(SUBCODE_FRAME_BYTES) {
+            if byte & 0x40 != 0 {
+                q[i / 8] |= 0x80 >> (i % 8);
+            }
+        }
+        q
+    }
+
+    #[test]
+    fn q_channel_crc_is_inverted_crc16_ccitt() {
+        // CRC-16/XMODEM's check value for "123456789" is $31C3; the Q
+        // channel transmits the complement.
+        assert_eq!(q_channel_crc(b"123456789"), !0x31C3);
+    }
+
+    #[test]
+    fn q_channel_position_places_sectors_by_track_index_and_msf() {
+        let disc = test_audio_disc(0);
+        let tracks = disc.tracks();
+        // Data track 1, one sector in: control 4 / ADR 1, index 1,
+        // 00:00:01 into the track, absolute 00:02:01 (lead-in offset).
+        let q = q_channel_position(tracks, 1);
+        assert_eq!(
+            &q[..10],
+            &[0x41, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x02, 0x01]
+        );
+        assert_eq!([q[10], q[11]], q_channel_crc(&q[..10]).to_be_bytes());
+        // Audio track 2 from sector 2: the relative time restarts and the
+        // data control bit clears.
+        let q = q_channel_position(tracks, 5);
+        assert_eq!(
+            &q[..10],
+            &[0x01, 0x02, 0x01, 0x00, 0x00, 0x03, 0x00, 0x00, 0x02, 0x05]
+        );
+    }
+
+    #[test]
+    fn q_channel_counts_a_pregap_down_as_index_zero_of_the_next_track() {
+        // Track 2's INDEX 00 at sector 2, INDEX 01 at sector 3.
+        let disc = test_audio_disc(1);
+        let tracks = disc.tracks();
+        assert_eq!(tracks[1].start_sector, 3);
+        let q = q_channel_position(tracks, 2);
+        assert_eq!(
+            &q[..10],
+            &[0x01, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x02, 0x02],
+            "pregap sector: track 2 index 0, one frame before INDEX 01"
+        );
+        let q = q_channel_position(tracks, 3);
+        assert_eq!(
+            &q[..10],
+            &[0x01, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x03]
+        );
+    }
+
+    #[test]
+    fn audio_play_delivers_a_subcode_frame_per_sector() {
+        let mut chip = vec![0u8; 64 * 1024];
+        let mut ring = CdAudioRing::default();
+        let mut akiko = Akiko::new();
+        akiko.insert_disc(test_audio_disc(0));
+        akiko.tick(2048, &mut chip, &mut ring);
+        akiko.cd_initialized = 2;
+        akiko.receive_length = 0;
+        const MISC: u32 = 0x0000_1000;
+        akiko.write(AKIKO_BASE + 0x14, 4, MISC, &mut chip);
+        let sub = (MISC | 0x100) as usize;
+
+        // With subcode DMA off a play streams audio but touches no
+        // subcode memory and raises no subcode interrupt.
+        akiko.playing = true;
+        akiko.play_position = 2;
+        akiko.play_end = 6;
+        akiko.intreq = 0;
+        akiko.tick(CCK_PER_CD_FRAME, &mut chip, &mut ring);
+        assert_eq!(akiko.play_position, 3);
+        assert_eq!(akiko.intreq & CDINT_SUBCODE, 0);
+        assert!(chip[sub..sub + 0x100].iter().all(|&b| b == 0));
+
+        // With CDFLAG_SUBCODE set (the KS cd.device's frame-interrupt
+        // feed) every streamed sector lands one frame: upper half first,
+        // end marker after the 96 bytes, offset register advanced by 100.
+        akiko.write(AKIKO_BASE + 0x24, 4, CDFLAG_SUBCODE, &mut chip);
+        akiko.tick(CCK_PER_CD_FRAME, &mut chip, &mut ring);
+        assert_eq!(akiko.play_position, 4);
+        assert_ne!(akiko.intreq & CDINT_SUBCODE, 0);
+        let q = q_channel_of(&chip[sub + 128..sub + 128 + 96]);
+        assert_eq!(
+            &q[..10],
+            &[0x01, 0x02, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x02, 0x03],
+            "sector 3: track 2 index 1 at 00:00:01, absolute 00:02:03"
+        );
+        assert_eq!(
+            &chip[sub + 128 + 96..sub + 128 + 100],
+            &[0xFF, 0xFF, 0x00, 0x00]
+        );
+        assert_eq!(akiko.read(AKIKO_BASE + 0x18, 1, &mut chip), 228);
+        // P and R-W stay blank: only the Q bit of any byte is ever set.
+        assert!(chip[sub + 128..sub + 128 + 96]
+            .iter()
+            .all(|&b| b & !0x40 == 0));
+
+        // The next sector takes the lower half.
+        akiko.tick(CCK_PER_CD_FRAME, &mut chip, &mut ring);
+        let q = q_channel_of(&chip[sub..sub + 96]);
+        assert_eq!(
+            &q[..10],
+            &[0x01, 0x02, 0x01, 0x00, 0x00, 0x02, 0x00, 0x00, 0x02, 0x04]
+        );
+        assert_eq!(akiko.read(AKIKO_BASE + 0x18, 1, &mut chip), 100);
+
+        // Paused, the pickup holds: no sector, no frame.
+        akiko.paused = true;
+        akiko.intreq = 0;
+        akiko.tick(CCK_PER_CD_FRAME, &mut chip, &mut ring);
+        assert_eq!(akiko.play_position, 5);
+        assert_eq!(akiko.intreq & CDINT_SUBCODE, 0);
+    }
+
+    #[test]
+    fn data_read_delivers_the_q_position_with_each_sector() {
+        let mut chip = vec![0u8; 256 * 1024];
+        let mut akiko = Akiko::new();
+        akiko.insert_disc(test_disc());
+        const MISC: u32 = 0x0000_1000;
+        akiko.write(AKIKO_BASE + 0x14, 4, MISC, &mut chip);
+        akiko.addressdata = 0x0001_0000;
+        akiko.flags = CDFLAG_ENABLE | CDFLAG_PBX | CDFLAG_CAS | CDFLAG_SUBCODE;
+        akiko.data_offset = 3;
+        akiko.data_end = 8;
+        akiko.pbx = 0x0001;
+        akiko.run_sector_read(&mut chip);
+        assert_ne!(akiko.intreq & CDINT_SUBCODE, 0);
+        let sub = (MISC | 0x100) as usize;
+        let q = q_channel_of(&chip[sub + 128..sub + 128 + 96]);
+        assert_eq!(
+            &q[..10],
+            &[0x41, 0x01, 0x01, 0x00, 0x00, 0x03, 0x00, 0x00, 0x02, 0x03],
+            "sector 3 of data track 1"
+        );
+    }
+
+    #[test]
+    fn subq_command_reports_the_position_of_a_running_or_paused_play() {
+        let mut chip = vec![0u8; 64 * 1024];
+        let mut ring = CdAudioRing::default();
+        let mut akiko = Akiko::new();
+        akiko.insert_disc(test_audio_disc(0));
+        akiko.tick(2048, &mut chip, &mut ring);
+        akiko.cd_initialized = 2;
+        akiko.receive_length = 0;
+
+        // Idle: no valid position, the packet stays zero.
+        let response = dma_command(&mut akiko, &mut chip, &[0x06]);
+        assert_eq!(response[0], 0x06);
+        assert!(
+            response[1..13].iter().all(|&b| b == 0),
+            "idle SubQ packet: {response:02X?}"
+        );
+
+        // Paused two sectors into track 2 (the pickup holds at sector 4):
+        // zero, control/ADR, track, index, relative MSF, zero, absolute.
+        akiko.playing = true;
+        akiko.paused = true;
+        akiko.play_position = 4;
+        akiko.play_end = 6;
+        let response = dma_command(&mut akiko, &mut chip, &[0x06]);
+        assert_eq!(
+            &response[..13],
+            &[0x06, 0x00, 0x00, 0x01, 0x02, 0x01, 0x00, 0x00, 0x02, 0x00, 0x00, 0x02, 0x04],
+            "{response:02X?}"
+        );
     }
 
     /// Run the full DMA command/response round trip the CD32 ROM uses:
