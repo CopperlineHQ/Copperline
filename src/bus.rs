@@ -1097,6 +1097,12 @@ pub struct Bus {
     dbg_slotmap_dumped: bool,
     #[serde(skip)]
     frame_analyzer_enabled: bool,
+    /// While the CPU is inside a chip-bus wait loop with the analyzer armed:
+    /// the pending access and who is denying it, re-evaluated before every
+    /// colour clock the CPU misses so the trace can attribute that clock.
+    /// Diagnostic only; never set while the analyzer is off.
+    #[serde(skip)]
+    cpu_bus_wait: Option<CpuWaitSample>,
     #[serde(skip)]
     current_frame_bus_trace: FrameBusTrace,
     #[serde(skip)]
@@ -1666,6 +1672,117 @@ impl ChipBusOwner {
     }
 }
 
+/// Why a CPU chip-bus access was denied the colour clock it asked for: the
+/// agent that held the slot, split for the blitter by DMACON BLTPRI, since
+/// the two holds have different remedies. `Port` is the 020+ chip port's
+/// two-clock turnaround (`cpu_chip_port_free_at`): the CPU is waiting, but
+/// on its own bus unit, not on another DMA channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuWaitClass {
+    Refresh,
+    Bitplane,
+    Sprite,
+    Disk,
+    Audio,
+    Copper,
+    /// Blitter holding the bus with BLTPRI clear: the "nice" hold before
+    /// the blitter-slowdown counter yields a slot.
+    BlitterNice,
+    /// Blitter holding the bus with BLTPRI set ("blitter nasty"), including
+    /// the warm-up fence, where the blitter's own slot needs no bus and the
+    /// recorded slot owner is idle.
+    BlitterNasty,
+    Port,
+}
+
+pub const CPU_WAIT_CLASS_NAMES: [&str; 9] = [
+    "refresh",
+    "bitplane",
+    "sprite",
+    "disk",
+    "audio",
+    "copper",
+    "blitter",
+    "blitter_nasty",
+    "port",
+];
+
+/// Grid code for a slot the CPU waited through: the denier's owner letter,
+/// `N` for the BLTPRI-set blitter, `p` for the 020+ port turnaround, and
+/// `.` when the CPU was not waiting (see `chip_bus_owner_code`).
+pub fn cpu_wait_class_code(class: CpuWaitClass) -> u8 {
+    match class {
+        CpuWaitClass::Refresh => b'R',
+        CpuWaitClass::Bitplane => b'B',
+        CpuWaitClass::Sprite => b'S',
+        CpuWaitClass::Disk => b'D',
+        CpuWaitClass::Audio => b'A',
+        CpuWaitClass::Copper => b'C',
+        CpuWaitClass::BlitterNice => b'L',
+        CpuWaitClass::BlitterNasty => b'N',
+        CpuWaitClass::Port => b'p',
+    }
+}
+
+pub fn cpu_wait_class_name_for_code(code: u8) -> Option<&'static str> {
+    let idx = match code {
+        b'R' => 0,
+        b'B' => 1,
+        b'S' => 2,
+        b'D' => 3,
+        b'A' => 4,
+        b'C' => 5,
+        b'L' => 6,
+        b'N' => 7,
+        b'p' => 8,
+        _ => return None,
+    };
+    Some(CPU_WAIT_CLASS_NAMES[idx])
+}
+
+impl CpuWaitClass {
+    fn accounting_index(self) -> usize {
+        match self {
+            CpuWaitClass::Refresh => 0,
+            CpuWaitClass::Bitplane => 1,
+            CpuWaitClass::Sprite => 2,
+            CpuWaitClass::Disk => 3,
+            CpuWaitClass::Audio => 4,
+            CpuWaitClass::Copper => 5,
+            CpuWaitClass::BlitterNice => 6,
+            CpuWaitClass::BlitterNasty => 7,
+            CpuWaitClass::Port => 8,
+        }
+    }
+}
+
+pub const CPU_BUS_ACCESS_KIND_NAMES: [&str; 4] = ["fetch", "read", "write", "custom"];
+
+impl CpuBusAccessKind {
+    fn accounting_index(self) -> usize {
+        match self {
+            CpuBusAccessKind::Fetch => 0,
+            CpuBusAccessKind::Read => 1,
+            CpuBusAccessKind::Write => 2,
+            CpuBusAccessKind::Custom => 3,
+        }
+    }
+}
+
+/// One colour clock the CPU spent waiting for the chip bus, as the
+/// analyzer's trace attributes it: who denied the slot, what kind of access
+/// was pending, and the instruction that made it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuWaitSample {
+    pub class: CpuWaitClass,
+    pub kind: CpuBusAccessKind,
+    pub pc: u32,
+}
+
+/// Distinct stalled PCs the trace keeps per frame; further PCs pool into
+/// `cpu_wait_pc_other`.
+pub const CPU_WAIT_PC_CAP: usize = 4096;
+
 /// One blit started during the traced frame (Frame Analyzer / console
 /// BLITS). `end` stays None while the blit is still running (or when it
 /// finishes in a later frame).
@@ -1706,6 +1823,20 @@ pub struct FrameBusTrace {
     /// Blits started this frame (capped; see FRAME_BLIT_RECORD_CAP).
     pub blits: Vec<FrameBlitRecord>,
     owners: Vec<u8>,
+    /// Colour clocks the CPU spent waiting for the chip bus, by the class
+    /// that denied it (`CpuWaitClass::accounting_index`) and by the kind of
+    /// access that was pending (`CpuBusAccessKind::accounting_index`).
+    pub cpu_wait_cck: u64,
+    pub cpu_wait_by_class: [u64; 9],
+    pub cpu_wait_by_kind: [u64; 4],
+    /// Waited colour clocks per stalled instruction start PC, capped at
+    /// `CPU_WAIT_PC_CAP` distinct PCs; the overflow pools in
+    /// `cpu_wait_pc_other`. Only ever read out sorted (`top_stalled_pcs`).
+    cpu_wait_pcs: std::collections::HashMap<u32, u32>,
+    pub cpu_wait_pc_other: u64,
+    /// Per-slot CPU wait grid parallel to `owners`: `cpu_wait_class_code`
+    /// of the denier, or `.` where the CPU was not waiting.
+    cpu_waits: Vec<u8>,
 }
 
 /// Blit records kept per traced frame.
@@ -1729,6 +1860,12 @@ impl Default for FrameBusTrace {
             partial: false,
             blits: Vec::new(),
             owners: Vec::new(),
+            cpu_wait_cck: 0,
+            cpu_wait_by_class: [0; 9],
+            cpu_wait_by_kind: [0; 4],
+            cpu_wait_pcs: std::collections::HashMap::new(),
+            cpu_wait_pc_other: 0,
+            cpu_waits: Vec::new(),
         }
     }
 }
@@ -1762,6 +1899,17 @@ impl FrameBusTrace {
         self.blits.clear();
         self.owners.resize(self.rows * self.cols, b'.');
         self.owners.fill(b'.');
+        self.reset_cpu_waits();
+        self.cpu_waits.resize(self.rows * self.cols, b'.');
+        self.cpu_waits.fill(b'.');
+    }
+
+    fn reset_cpu_waits(&mut self) {
+        self.cpu_wait_cck = 0;
+        self.cpu_wait_by_class = [0; 9];
+        self.cpu_wait_by_kind = [0; 4];
+        self.cpu_wait_pcs.clear();
+        self.cpu_wait_pc_other = 0;
     }
 
     fn finish_window(&mut self, visible_start_vpos: u32, visible_lines: usize) {
@@ -1777,9 +1925,19 @@ impl FrameBusTrace {
         self.blitter_busy_cck = 0;
         self.blitter_starve_cck = [0; 9];
         self.partial = false;
+        self.cpu_waits.clear();
+        self.reset_cpu_waits();
     }
 
-    fn record(&mut self, vpos: u32, hpos: u32, cck: u32, owner: ChipBusOwner, blitter_busy: bool) {
+    fn record(
+        &mut self,
+        vpos: u32,
+        hpos: u32,
+        cck: u32,
+        owner: ChipBusOwner,
+        blitter_busy: bool,
+        cpu_wait: Option<CpuWaitSample>,
+    ) {
         if self.rows == 0 || self.cols == 0 {
             return;
         }
@@ -1798,8 +1956,40 @@ impl FrameBusTrace {
             }
         }
         let code = chip_bus_owner_code(owner);
-        let row = &mut self.owners[v * self.cols..(v + 1) * self.cols];
+        let start = v * self.cols;
         let end = (h + cck as usize).min(self.cols);
+        let row = &mut self.owners[start..start + self.cols];
+        for slot in row.iter_mut().take(end).skip(h) {
+            *slot = code;
+        }
+        if let Some(wait) = cpu_wait {
+            self.record_cpu_wait(start, h, end, cck, wait);
+        }
+    }
+
+    fn record_cpu_wait(
+        &mut self,
+        start: usize,
+        h: usize,
+        end: usize,
+        cck: u32,
+        wait: CpuWaitSample,
+    ) {
+        let cck64 = u64::from(cck);
+        self.cpu_wait_cck = self.cpu_wait_cck.saturating_add(cck64);
+        let class = wait.class.accounting_index();
+        self.cpu_wait_by_class[class] = self.cpu_wait_by_class[class].saturating_add(cck64);
+        let kind = wait.kind.accounting_index();
+        self.cpu_wait_by_kind[kind] = self.cpu_wait_by_kind[kind].saturating_add(cck64);
+        if let Some(total) = self.cpu_wait_pcs.get_mut(&wait.pc) {
+            *total = total.saturating_add(cck);
+        } else if self.cpu_wait_pcs.len() < CPU_WAIT_PC_CAP {
+            self.cpu_wait_pcs.insert(wait.pc, cck);
+        } else {
+            self.cpu_wait_pc_other = self.cpu_wait_pc_other.saturating_add(cck64);
+        }
+        let code = cpu_wait_class_code(wait.class);
+        let row = &mut self.cpu_waits[start..start + self.cols];
         for slot in row.iter_mut().take(end).skip(h) {
             *slot = code;
         }
@@ -1818,6 +2008,41 @@ impl FrameBusTrace {
         }
         let start = vpos * self.cols;
         Some(&self.owners[start..start + self.cols])
+    }
+
+    /// The CPU wait code at a slot (`cpu_wait_class_code`, or `.`).
+    pub fn cpu_wait_code_at(&self, vpos: usize, hpos: usize) -> u8 {
+        if vpos >= self.rows || hpos >= self.cols {
+            return b'.';
+        }
+        self.cpu_waits[vpos * self.cols + hpos]
+    }
+
+    pub fn cpu_wait_row(&self, vpos: usize) -> Option<&[u8]> {
+        if vpos >= self.rows || self.cols == 0 {
+            return None;
+        }
+        let start = vpos * self.cols;
+        Some(&self.cpu_waits[start..start + self.cols])
+    }
+
+    /// The `n` instruction PCs that waited longest for the chip bus this
+    /// frame, as `(pc, waited cck)`, longest first; ties order by PC so
+    /// the readout is deterministic whatever the map's iteration order.
+    pub fn top_stalled_pcs(&self, n: usize) -> Vec<(u32, u32)> {
+        let mut pcs: Vec<(u32, u32)> = self
+            .cpu_wait_pcs
+            .iter()
+            .map(|(&pc, &cck)| (pc, cck))
+            .collect();
+        pcs.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        pcs.truncate(n);
+        pcs
+    }
+
+    /// Distinct stalled PCs recorded (before the cap's overflow pool).
+    pub fn stalled_pc_count(&self) -> usize {
+        self.cpu_wait_pcs.len()
     }
 
     pub fn has_samples(&self) -> bool {
@@ -2787,6 +3012,7 @@ impl Bus {
             dbg_slotmap_on: crate::envcfg::flag("COPPERLINE_DIAG_SLOTMAP"),
             dbg_slotmap_dumped: false,
             frame_analyzer_enabled: false,
+            cpu_bus_wait: None,
             current_frame_bus_trace: FrameBusTrace::default(),
             last_frame_bus_trace: None,
             wave_on: false,
@@ -5481,12 +5707,16 @@ impl Bus {
             while !self.cpu_can_use_current_slot()
                 || (self.cpu_short_bus_cycle && self.emulated_cck < self.cpu_chip_port_free_at)
             {
+                if self.frame_analyzer_enabled {
+                    self.cpu_bus_wait = Some(self.cpu_bus_wait_sample(kind));
+                }
                 let (cck, tick) = self.advance_one_chip_bus_quantum(None);
                 wait_cck += cck;
                 self.note_cpu_missed_chip_bus_cycle();
                 self.record_slice_bus_advance(cck, tick);
                 self.flush_audio_before_audio_dma_slot();
             }
+            self.cpu_bus_wait = None;
             let grant_slot = (self.agnus.vpos, self.agnus.hpos);
             if matches!(kind, CpuBusAccessKind::Custom) {
                 // Remember the slot that carries a custom-register access:
@@ -5685,11 +5915,31 @@ impl Bus {
     fn settle_cpu_posted_writes(&mut self) {
         while self.cpu_posted_write_debt > 0 {
             let debt_before = self.cpu_posted_write_debt;
+            if self.frame_analyzer_enabled {
+                // Attributed as the write it is retiring; a quantum that
+                // does drain it records the CPU as the slot owner instead,
+                // so the sample only lands on genuinely missed clocks.
+                self.cpu_bus_wait = Some(self.cpu_bus_wait_sample(CpuBusAccessKind::Write));
+            }
             let (cck, tick) = self.advance_one_chip_bus_quantum(None);
             if self.cpu_posted_write_debt == debt_before {
                 self.note_cpu_missed_chip_bus_cycle();
             }
             self.record_slice_bus_advance(cck, tick);
+        }
+        self.cpu_bus_wait = None;
+    }
+
+    /// The analyzer's attribution of the colour clock the CPU is about to
+    /// miss: who holds the slot from the CPU's point of view (the BLTPRI
+    /// warm-up fence included, unlike the recorded owner), what access is
+    /// pending, and the instruction that made it. Side-effect free; only
+    /// evaluated while the frame analyzer is armed.
+    fn cpu_bus_wait_sample(&self, kind: CpuBusAccessKind) -> CpuWaitSample {
+        CpuWaitSample {
+            class: self.cpu_bus_denial_class(),
+            kind,
+            pc: self.cpu_pc,
         }
     }
 

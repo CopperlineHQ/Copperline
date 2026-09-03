@@ -1069,6 +1069,9 @@ impl App {
             (ToolPanelKind::FrameAnalyzer, UiControl::AnalyzerScrub) => {
                 self.frame_analyzer_toggle_scrub()
             }
+            (ToolPanelKind::FrameAnalyzer, UiControl::AnalyzerCpuWait) => {
+                self.frame_analyzer_toggle_cpu_wait()
+            }
             (ToolPanelKind::FrameAnalyzer, UiControl::AnalyzerRunTo) => {
                 self.frame_analyzer_run_to_slot()
             }

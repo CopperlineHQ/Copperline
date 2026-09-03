@@ -574,6 +574,19 @@ Agnus-arbitrated accesses, each subject to the same back-pressure rule.
 Tests: `blithog_clear_busy_blitter_yields_to_cpu_only_after_starvation`,
 `bltpri_stalls_cpu_chip_access_through_blitter_access_cycles`.
 
+The Frame Analyzer's CPU wait view (and the `cpu` record of a
+`profile.start` export) attributes every colour clock the CPU spends in
+this wait loop to the case that denied it: fixed DMA (`refresh`,
+`bitplane`, `sprite`, `disk`, `audio`), the Copper's access clock,
+`blitter` for the nice hold before the counter yields, `blitter_nasty` for
+a BLTPRI-set blitter including the warm-up fence (where the slot's recorded
+owner is idle), and `port` for the 020+ chip port's two-clock turnaround,
+which is a wait on the CPU's own bus unit rather than a denial. The class is
+taken from the CPU's view of the arbitration before each missed clock and
+recorded on the cold bus-observer path, so arming it leaves the timeline
+untouched. Tests: `frame_analyzer_attributes_cpu_wait_to_nice_blitter`,
+`frame_analyzer_attributes_cpu_wait_to_bltpri_fence`.
+
 ### Area fill
 
 Area fill is applied only when BLTCON1.DESC is set (the HRM requires

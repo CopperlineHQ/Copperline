@@ -58,6 +58,9 @@ impl ScreenshotMode {
     }
 }
 
+/// Stalled-PC rows each `profile.jsonl` record lists under `cpu.stall_pcs`.
+pub const PROFILE_STALL_PCS: usize = 16;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfileOptions {
     /// The capture directory; `profile.jsonl`, `profile.json` and any
@@ -205,6 +208,7 @@ impl ProfileCapture {
                 "pc_samples": self.opts.pc_samples,
             },
             "owners": crate::bus::CHIP_BUS_OWNER_NAMES,
+            "cpu_wait_classes": crate::bus::CPU_WAIT_CLASS_NAMES,
             "started": { "frame": self.started.0, "seconds": self.started.1 },
             "ended": { "frame": frame, "seconds": seconds },
             "frames_written": self.frames_written,

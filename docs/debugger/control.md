@@ -287,7 +287,7 @@ events.unsubscribe {"events":["serial"]}
 - `debug.idle`: Query guest idle time statistics reported via uaelib idle markers.
 - `trace.start {"path": "...", "max_lines": ...}` / `trace.stop` / `trace.status`: Control instruction execution trace logging.
 - `waveform.start {"path": "...", "trigger": "...", "duration": "...", "signals": "..."}` / `waveform.stop` / `waveform.status`: Control VCD logic analyzer waveform capture.
-- `profile.start {"path": "...", "frames": ..., "slots": ..., "screenshots": "none"|"every"|"last", "pc_samples": ...}` / `profile.stop` / `profile.status`: Export per-frame profiling data (DMA ownership, blit records, guest idle time, retired instructions) streamed to `profile.jsonl` with a `profile.json` summary upon stop; see [](profiling). Arms Frame Analyzer tracing for the session.
+- `profile.start {"path": "...", "frames": ..., "slots": ..., "screenshots": "none"|"every"|"last", "pc_samples": ...}` / `profile.stop` / `profile.status`: Export per-frame profiling data (DMA ownership, blit records, CPU chip-bus wait attribution by denier and access kind with the top stalled PCs, guest idle time, retired instructions) streamed to `profile.jsonl` with a `profile.json` summary upon stop; see [](profiling). Arms Frame Analyzer tracing for the session.
 
 ### Breakpoints and traps
 - `break.add`: Add breakpoint (`pc`, `watch`, `reg_watch`, `beam`, `copper`, `catch`, `loadseg`).
