@@ -291,6 +291,10 @@ pub struct FrameAnalyzerPanel {
     /// Beam scrub: show the picture only up to the selected slot -- what
     /// the CRT had drawn when the beam was there. Implies the underlay.
     pub show_scrub: bool,
+    /// CPU wait view: paint the slots the CPU waited through in the colour
+    /// of whoever denied them, dim everything else, and swap the counters
+    /// column for the wait breakdown and the top stalled PCs.
+    pub show_cpu_wait: bool,
     /// Memory tab: the address-space windows offered as buttons. Empty
     /// until window.rs builds them from the machine's memory map.
     pub heat_presets: Vec<HeatPreset>,
@@ -313,6 +317,7 @@ impl FrameAnalyzerPanel {
             selected_hpos: 0x28,
             show_underlay: false,
             show_scrub: false,
+            show_cpu_wait: false,
             heat_presets: Vec::new(),
             heat_selected: None,
             resource_selected: None,
@@ -643,6 +648,9 @@ pub fn panel_control_at(panel: &Panel, pos: (i32, i32)) -> Option<UiControl> {
                     if analyzer_scrub_rect(rect).contains(pos) {
                         return Some(UiControl::AnalyzerScrub);
                     }
+                    if analyzer_cpu_wait_rect(rect).contains(pos) {
+                        return Some(UiControl::AnalyzerCpuWait);
+                    }
                 }
                 AnalyzerTab::Memory => {
                     for (control, button_rect) in analyzer_preset_rects(rect, &panel.heat_presets) {
@@ -801,6 +809,9 @@ pub enum UiControl {
     /// Frame analyzer: toggle beam scrubbing (the underlay shows only
     /// what the CRT had drawn up to the selected slot).
     AnalyzerScrub,
+    /// Frame analyzer: toggle the CPU wait view (slots the CPU was denied,
+    /// coloured by the denier, with the wait breakdown in the counters).
+    AnalyzerCpuWait,
     /// Frame analyzer: run until the beam reaches the selected slot
     /// (a one-shot beam trap at the selected vpos/hpos).
     AnalyzerRunTo,
@@ -1612,6 +1623,41 @@ fn analyzer_scrub_rect(rect: Rect) -> Rect {
     }
 }
 
+/// Label of the CPU-wait checkbox, right of the scrub one.
+const ANALYZER_CPU_WAIT_LABEL: &str = "CPU wait";
+
+/// Hit/draw rect of the CPU-wait checkbox.
+fn analyzer_cpu_wait_rect(rect: Rect) -> Rect {
+    let scrub = analyzer_scrub_rect(rect);
+    Rect {
+        x: scrub.x + scrub.w + 16,
+        y: scrub.y,
+        w: 12 + 6 + ANALYZER_CPU_WAIT_LABEL.len() * font::GLYPH_W,
+        h: DEBUG_BUTTON_H,
+    }
+}
+
+/// The per-line CPU stall gutter beside the raster: one texel row per
+/// heat-map row, a bar as long as the share of the line's colour clocks the
+/// CPU spent waiting, in the colour of the line's dominant denier.
+const ANALYZER_GUTTER_W: usize = 20;
+
+fn analyzer_gutter_rect(rect: Rect) -> Rect {
+    let raster = analyzer_raster_rect(rect);
+    Rect {
+        x: raster.x + raster.w + 4,
+        y: raster.y,
+        w: ANALYZER_GUTTER_W,
+        h: raster.h,
+    }
+}
+
+/// Left edge of the counters column, right of the gutter.
+fn analyzer_counters_x(rect: Rect) -> usize {
+    let gutter = analyzer_gutter_rect(rect);
+    gutter.x + gutter.w + 12
+}
+
 fn analyzer_pick_control(rect: Rect, pos: (i32, i32)) -> Option<UiControl> {
     for (pick_rect, scanline) in [
         (analyzer_raster_rect(rect), false),
@@ -1844,6 +1890,18 @@ pub struct AnalyzerTraceView {
     /// Frame-start bitplane fetch bounds (DDFSTRT, DDFSTOP) in colour
     /// clocks.
     pub ddf_cck: Option<(u16, u16)>,
+    /// Per-slot CPU wait grid parallel to `owners`
+    /// (`crate::bus::cpu_wait_class_code`, `.` where the CPU was not
+    /// waiting), with its totals by denier class
+    /// (`crate::bus::CPU_WAIT_CLASS_NAMES` order) and by access kind
+    /// (`crate::bus::CPU_BUS_ACCESS_KIND_NAMES` order).
+    pub cpu_waits: Vec<u8>,
+    pub cpu_wait_cck: u64,
+    pub cpu_wait_by_class: [u64; 9],
+    pub cpu_wait_by_kind: [u64; 4],
+    /// The instructions that waited longest, `(pc, cck)`, longest first.
+    pub top_stalled_pcs: Vec<(u32, u32)>,
+    pub selected_cpu_wait_code: u8,
 }
 
 impl AnalyzerTraceView {
@@ -1860,6 +1918,36 @@ impl AnalyzerTraceView {
         }
         let start = vpos * self.cols;
         Some(&self.owners[start..start + self.cols])
+    }
+
+    fn cpu_wait_code_at(&self, vpos: usize, hpos: usize) -> u8 {
+        if vpos >= self.rows || hpos >= self.cols {
+            return b'.';
+        }
+        self.cpu_waits
+            .get(vpos * self.cols + hpos)
+            .copied()
+            .unwrap_or(b'.')
+    }
+
+    fn cpu_wait_row(&self, vpos: usize) -> Option<&[u8]> {
+        if vpos >= self.rows || self.cols == 0 {
+            return None;
+        }
+        let start = vpos * self.cols;
+        self.cpu_waits.get(start..start + self.cols)
+    }
+
+    /// The share of `total` (the CPU's granted plus waited clocks) it
+    /// spent waiting, as a percentage.
+    fn cpu_wait_percent(&self) -> f64 {
+        let granted = self.owner_cck[7];
+        let total = granted.saturating_add(self.cpu_wait_cck);
+        if total == 0 {
+            0.0
+        } else {
+            self.cpu_wait_cck as f64 * 100.0 / total as f64
+        }
     }
 }
 
@@ -3451,6 +3539,34 @@ fn owner_name_for_code(code: u8) -> &'static str {
     }
 }
 
+/// Colour of a CPU wait code (`crate::bus::cpu_wait_class_code`): the
+/// denier's owner colour, a hotter red for the BLTPRI-set blitter, grey for
+/// the 020+ port turnaround.
+fn cpu_wait_color(code: u8) -> u32 {
+    match code {
+        b'N' => rgba(255, 40, 40),
+        b'p' => rgba(150, 150, 150),
+        b'.' => rgba(20, 22, 26),
+        other => owner_color(other),
+    }
+}
+
+/// Legend name of a CPU wait code, short enough for the legend row.
+fn cpu_wait_name_for_code(code: u8) -> &'static str {
+    match code {
+        b'N' => "bltpri",
+        b'p' => "port",
+        b'.' => "none",
+        other => owner_name_for_code(other),
+    }
+}
+
+/// Quarter the brightness of an RGBA pixel, keeping it opaque: the rest of
+/// the grid while the CPU wait view is on.
+fn quarter_rgba(pix: u32) -> u32 {
+    ((pix >> 2) & 0x003F_3F3F) | 0xFF00_0000
+}
+
 fn draw_outline(frame: &mut [u8], rect: Rect, color: u32, scale: usize) {
     if rect.w == 0 || rect.h == 0 {
         return;
@@ -3642,6 +3758,7 @@ fn draw_owner_heatmap(
     trace: &AnalyzerTraceView,
     underlay: Option<&AnalyzerUnderlayView>,
     scrub: bool,
+    cpu_wait: bool,
     scale: usize,
 ) {
     fill_rect(frame, scale_rect(rect, scale), rgba(10, 12, 14), scale);
@@ -3649,8 +3766,20 @@ fn draw_owner_heatmap(
         let vpos = y * trace.rows / rect.h.max(1);
         for x in 0..rect.w {
             let hpos = x * trace.cols / rect.w.max(1);
-            let code = trace.owner_code_at(vpos, hpos);
-            let mut color = owner_color(code);
+            let owner_code = trace.owner_code_at(vpos, hpos);
+            // The CPU wait view keeps the owner grid faintly visible under
+            // the slots the CPU was denied, so a stall reads against the
+            // DMA pattern that caused it.
+            let (code, mut color) = if cpu_wait {
+                let wait_code = trace.cpu_wait_code_at(vpos, hpos);
+                if wait_code != b'.' {
+                    (wait_code, cpu_wait_color(wait_code))
+                } else {
+                    (owner_code, quarter_rgba(owner_color(owner_code)))
+                }
+            } else {
+                (owner_code, owner_color(owner_code))
+            };
             if let Some(pix) =
                 underlay.and_then(|under| underlay_sample(under, trace, rect, x, vpos))
             {
@@ -3799,12 +3928,33 @@ fn draw_owner_heatmap(
     draw_outline(frame, rect, BUTTON_EDGE_LIGHT, scale);
 }
 
-fn draw_scanline_strip(frame: &mut [u8], rect: Rect, trace: &AnalyzerTraceView, scale: usize) {
+fn draw_scanline_strip(
+    frame: &mut [u8],
+    rect: Rect,
+    trace: &AnalyzerTraceView,
+    cpu_wait: bool,
+    scale: usize,
+) {
     fill_rect(frame, scale_rect(rect, scale), rgba(10, 12, 14), scale);
     if let Some(row) = trace.owner_row(trace.selected_vpos) {
+        let waits = trace.cpu_wait_row(trace.selected_vpos);
         for x in 0..rect.w {
             let hpos = x * trace.cols / rect.w.max(1);
-            let color = owner_color(row[hpos.min(row.len().saturating_sub(1))]);
+            let slot = hpos.min(row.len().saturating_sub(1));
+            // The wait view overlays the denied slots on the dimmed owner
+            // pattern, exactly as the raster does.
+            let wait_code = if cpu_wait {
+                waits.map_or(b'.', |waits| waits[slot.min(waits.len().saturating_sub(1))])
+            } else {
+                b'.'
+            };
+            let color = if wait_code != b'.' {
+                cpu_wait_color(wait_code)
+            } else if cpu_wait {
+                quarter_rgba(owner_color(row[slot]))
+            } else {
+                owner_color(row[slot])
+            };
             fill_rect(
                 frame,
                 scale_rect(
@@ -3939,8 +4089,232 @@ fn draw_owner_counters(
     }
 }
 
-/// The picture-underlay and beam-scrub tick boxes on the analyzer's
-/// button row.
+/// The per-line CPU stall gutter: for each heat-map row, a bar as long as
+/// the share of that beam line's colour clocks the CPU spent waiting, in
+/// the colour of the class that denied it most on that line. Reads as a
+/// profile of where the frame chokes the CPU, whichever view is on.
+fn draw_cpu_wait_gutter(frame: &mut [u8], rect: Rect, trace: &AnalyzerTraceView, scale: usize) {
+    // No outline: the bars share the raster's row mapping, and a frame
+    // would hide the first and last lines' bars.
+    fill_rect(frame, scale_rect(rect, scale), ANALYZER_GUTTER_BG, scale);
+    let inner_w = rect.w.saturating_sub(2);
+    for y in 0..rect.h {
+        let vpos = y * trace.rows / rect.h.max(1);
+        let Some(row) = trace.cpu_wait_row(vpos) else {
+            continue;
+        };
+        let mut waited = 0usize;
+        let mut by_code: [(u8, usize); 9] = [
+            (b'R', 0),
+            (b'B', 0),
+            (b'S', 0),
+            (b'D', 0),
+            (b'A', 0),
+            (b'C', 0),
+            (b'L', 0),
+            (b'N', 0),
+            (b'p', 0),
+        ];
+        for &code in row {
+            if code == b'.' {
+                continue;
+            }
+            waited += 1;
+            if let Some(entry) = by_code.iter_mut().find(|(c, _)| *c == code) {
+                entry.1 += 1;
+            }
+        }
+        if waited == 0 {
+            continue;
+        }
+        let dominant = by_code
+            .iter()
+            .max_by_key(|(_, n)| *n)
+            .map(|(code, _)| *code)
+            .unwrap_or(b'.');
+        let w = (waited * inner_w / trace.cols.max(1)).clamp(1, inner_w);
+        fill_rect(
+            frame,
+            scale_rect(
+                Rect {
+                    x: rect.x + 1,
+                    y: rect.y + y,
+                    w,
+                    h: 1,
+                },
+                scale,
+            ),
+            cpu_wait_color(dominant),
+            scale,
+        );
+    }
+}
+
+/// Background of the stall gutter, a shade lighter than the raster so the
+/// strip reads as its own column.
+const ANALYZER_GUTTER_BG: u32 = rgba(16, 18, 22);
+
+/// The CPU wait view's counters column: what the CPU waited for, by
+/// denier and by access kind, and the instructions that waited longest.
+/// Pitch of one counters-column row.
+const ANALYZER_COUNTER_ROW_H: usize = 12;
+
+/// A row cursor for the counters column: rows are drawn top down and
+/// none may start past `bottom`, so a busy trace (every class and access
+/// kind non-zero, a full PC list) truncates its lower sections instead of
+/// running into the selected-slot line under the raster.
+struct CounterRows {
+    y: usize,
+    bottom: usize,
+}
+
+impl CounterRows {
+    /// The y of the next row if it fits, advancing the cursor; None once
+    /// the column is full.
+    fn next(&mut self) -> Option<usize> {
+        if self.y + ANALYZER_COUNTER_ROW_H > self.bottom {
+            return None;
+        }
+        let y = self.y;
+        self.y += ANALYZER_COUNTER_ROW_H;
+        Some(y)
+    }
+
+    /// A small gap before a new section, only when a row still fits.
+    fn gap(&mut self) {
+        if self.y + 4 + ANALYZER_COUNTER_ROW_H <= self.bottom {
+            self.y += 4;
+        }
+    }
+}
+
+/// The CPU wait view's counters column: what the CPU waited for, by
+/// denier and by access kind, and the instructions that waited longest.
+/// Sections are drawn in that order of importance and each stops at
+/// `bottom`.
+fn draw_cpu_wait_counters(
+    frame: &mut [u8],
+    x: usize,
+    y: usize,
+    bottom: usize,
+    trace: &AnalyzerTraceView,
+    scale: usize,
+) {
+    let mut rows = CounterRows { y, bottom };
+    if let Some(y) = rows.next() {
+        draw_panel_text(frame, x, y, "CPU wait cck", PANEL_TEXT_HILIGHT, 1, scale);
+    }
+    if let Some(y) = rows.next() {
+        draw_panel_text(
+            frame,
+            x,
+            y,
+            &format!(
+                "waited {:>6} {:>4.1}%",
+                trace.cpu_wait_cck,
+                trace.cpu_wait_percent()
+            ),
+            PANEL_TEXT_ACCENT,
+            1,
+            scale,
+        );
+    }
+    if let Some(y) = rows.next() {
+        draw_panel_text(
+            frame,
+            x,
+            y,
+            &format!("granted {:>5}", trace.owner_cck[7]),
+            PANEL_TEXT_DIM,
+            1,
+            scale,
+        );
+    }
+    for (idx, name) in crate::bus::CPU_WAIT_CLASS_NAMES.iter().enumerate() {
+        let cck = trace.cpu_wait_by_class[idx];
+        if cck == 0 {
+            continue;
+        }
+        let Some(y) = rows.next() else {
+            break;
+        };
+        let code = *b"RBSDACLNp".get(idx).unwrap_or(&b'.');
+        fill_rect(
+            frame,
+            scale_rect(
+                Rect {
+                    x,
+                    y: y + 2,
+                    w: 8,
+                    h: 8,
+                },
+                scale,
+            ),
+            cpu_wait_color(code),
+            scale,
+        );
+        let pct = if trace.cpu_wait_cck == 0 {
+            0.0
+        } else {
+            cck as f64 * 100.0 / trace.cpu_wait_cck as f64
+        };
+        // "blitter_nasty" is wider than the column's name field.
+        let label = if code == b'N' { "bltpri" } else { name };
+        draw_panel_text(
+            frame,
+            x + 14,
+            y,
+            &format!("{label:<8} {cck:>5} {pct:>4.1}%"),
+            PANEL_TEXT,
+            1,
+            scale,
+        );
+    }
+    let kinds: Vec<String> = crate::bus::CPU_BUS_ACCESS_KIND_NAMES
+        .iter()
+        .zip(trace.cpu_wait_by_kind.iter())
+        .filter(|(_, cck)| **cck != 0)
+        .map(|(name, cck)| format!("{name} {cck}"))
+        .collect();
+    if !kinds.is_empty() {
+        rows.gap();
+        if let Some(y) = rows.next() {
+            draw_panel_text(frame, x, y, "by access", PANEL_TEXT_DIM, 1, scale);
+        }
+        for kind in kinds {
+            let Some(y) = rows.next() else {
+                break;
+            };
+            draw_panel_text(frame, x, y, &kind, PANEL_TEXT_DIM, 1, scale);
+        }
+    }
+    if !trace.top_stalled_pcs.is_empty() {
+        rows.gap();
+        if let Some(y) = rows.next() {
+            draw_panel_text(frame, x, y, "Top stalled PCs", PANEL_TEXT_HILIGHT, 1, scale);
+        }
+        for (pc, cck) in trace.top_stalled_pcs.iter().take(ANALYZER_TOP_STALLED_PCS) {
+            let Some(y) = rows.next() else {
+                break;
+            };
+            draw_panel_text(
+                frame,
+                x,
+                y,
+                &format!("${pc:08X} {cck:>6}"),
+                PANEL_TEXT,
+                1,
+                scale,
+            );
+        }
+    }
+}
+
+/// Stalled-PC rows the counters column lists.
+pub const ANALYZER_TOP_STALLED_PCS: usize = 6;
+
+/// The picture-underlay, beam-scrub and CPU-wait tick boxes on the
+/// analyzer's button row.
 fn draw_analyzer_checkboxes(
     frame: &mut [u8],
     rect: Rect,
@@ -3960,6 +4334,12 @@ fn draw_analyzer_checkboxes(
             ANALYZER_SCRUB_LABEL,
             panel.show_scrub,
             UiControl::AnalyzerScrub,
+        ),
+        (
+            analyzer_cpu_wait_rect(rect),
+            ANALYZER_CPU_WAIT_LABEL,
+            panel.show_cpu_wait,
+            UiControl::AnalyzerCpuWait,
         ),
     ] {
         draw_analyzer_checkbox(
@@ -4045,7 +4425,7 @@ fn draw_frame_analyzer(
     // the memory view is built from the live map, so it has something to
     // show whether or not a beam trace has ever been captured.
     match panel.tab {
-        AnalyzerTab::Beam => draw_analyzer_beam_tab(frame, rect, view, hover, scale),
+        AnalyzerTab::Beam => draw_analyzer_beam_tab(frame, rect, panel, view, hover, scale),
         AnalyzerTab::Memory => draw_analyzer_heat_tab(frame, rect, panel, view, hover, scale),
         AnalyzerTab::Resources => draw_analyzer_resources_tab(frame, rect, view, hover, scale),
     }
@@ -4102,10 +4482,12 @@ fn draw_analyzer_tabs(
 fn draw_analyzer_beam_tab(
     frame: &mut [u8],
     rect: Rect,
+    panel: &FrameAnalyzerPanel,
     view: &FrameAnalyzerView,
     hover: Option<UiControl>,
     scale: usize,
 ) {
+    let cpu_wait = panel.show_cpu_wait;
     let content_top = analyzer_content_top(rect);
     let Some(trace) = &view.trace else {
         let mut y = content_top + 26;
@@ -4146,7 +4528,11 @@ fn draw_analyzer_beam_tab(
         frame,
         rect.x + 10,
         content_top + 14,
-        "x=hpos colour clocks, y=vpos lines; white=captured display, orange=DIW, cyan=DDF",
+        if cpu_wait {
+            "CPU wait: slots the CPU was denied, coloured by the denier; gutter=stall share per line"
+        } else {
+            "x=hpos colour clocks, y=vpos lines; white=captured display, orange=DIW, cyan=DDF"
+        },
         PANEL_TEXT_DIM,
         1,
         scale,
@@ -4159,10 +4545,25 @@ fn draw_analyzer_beam_tab(
         trace,
         view.underlay.as_ref(),
         view.scrub,
+        cpu_wait,
         scale,
     );
-    let counters_x = raster.x + raster.w + 16;
-    draw_owner_counters(frame, counters_x, raster.y, trace, scale);
+    draw_cpu_wait_gutter(frame, analyzer_gutter_rect(rect), trace, scale);
+    let counters_x = analyzer_counters_x(rect);
+    if cpu_wait {
+        // The column ends with the raster: the selected-slot line sits
+        // just under it.
+        draw_cpu_wait_counters(
+            frame,
+            counters_x,
+            raster.y,
+            raster.y + raster.h,
+            trace,
+            scale,
+        );
+    } else {
+        draw_owner_counters(frame, counters_x, raster.y, trace, scale);
+    }
 
     let mut selected = format!(
         "selected v={:03} h={:03}  owner={} ({})",
@@ -4171,6 +4572,13 @@ fn draw_analyzer_beam_tab(
         trace.selected_owner,
         trace.selected_owner_code as char
     );
+    // Short legend names keep the line inside the panel with a blit suffix.
+    if trace.selected_cpu_wait_code != b'.' {
+        selected.push_str(&format!(
+            "  wait={}",
+            cpu_wait_name_for_code(trace.selected_cpu_wait_code)
+        ));
+    }
     if let Some(blit) = &trace.selected_blit {
         selected.push_str("  ");
         selected.push_str(blit);
@@ -4237,12 +4645,18 @@ fn draw_analyzer_beam_tab(
         1,
         scale,
     );
-    draw_scanline_strip(frame, scanline, trace, scale);
+    draw_scanline_strip(frame, scanline, trace, cpu_wait, scale);
 
     let mut y = scanline.y + scanline.h + 14;
     draw_panel_text(frame, rect.x + 10, y, "Legend", PANEL_TEXT_DIM, 1, scale);
     let mut x = rect.x + 66;
-    for code in *b"RBSDACLP." {
+    let codes: &[u8] = if cpu_wait { b"RBSDACLNp" } else { b"RBSDACLP." };
+    for &code in codes {
+        let (color, name) = if cpu_wait {
+            (cpu_wait_color(code), cpu_wait_name_for_code(code))
+        } else {
+            (owner_color(code), owner_name_for_code(code))
+        };
         fill_rect(
             frame,
             scale_rect(
@@ -4254,19 +4668,12 @@ fn draw_analyzer_beam_tab(
                 },
                 scale,
             ),
-            owner_color(code),
+            color,
             scale,
         );
-        draw_panel_text(
-            frame,
-            x + 12,
-            y,
-            owner_name_for_code(code),
-            PANEL_TEXT,
-            1,
-            scale,
-        );
-        x += if code == b'.' { 54 } else { 82 };
+        draw_panel_text(frame, x + 12, y, name, PANEL_TEXT, 1, scale);
+        // Entries pack by label so the wait legend's extra row fits.
+        x += 12 + name.len() * font::GLYPH_W + 10;
     }
     y += 18;
     let marker_count = format!(

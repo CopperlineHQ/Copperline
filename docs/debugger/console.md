@@ -73,6 +73,7 @@ Commands are case-insensitive. Addresses and data values use hexadecimal notatio
 | `COPPER [PC\|ADDR] [N]` | Disassemble Copper list |
 | `CUSTOM` | Display custom chipset register summary |
 | `BLITS` | List all blits started in the traced frame (with control words, size, pointers, and start/end beam positions; requires Frame Analyzer) |
+| `CPUWAIT` | Summarise the traced frame's CPU chip-bus waits: waited clocks by denier (bitplane, Copper, blitter with BLTPRI clear or set, ...) and by access kind, and the instructions that waited longest (requires Frame Analyzer; see [the CPU wait view](window.md#frame-analyzer-pane)) |
 | `FIND HEXBYTES [START]` | Search CPU-visible memory (RAM and ROM) for byte sequence |
 | `WRITER ADDR` | Query last instruction that modified memory at `ADDR` |
 | `DBGRES` | List debug resources (bitmaps, palettes, copper lists) registered by guest code via the uaelib trap (distinct from `RESOURCES`, which lists Exec OS resource nodes) |

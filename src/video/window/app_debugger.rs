@@ -128,6 +128,7 @@ impl App {
             KeyCode::KeyR => Some(UiControl::AnalyzerRun),
             KeyCode::KeyU => Some(UiControl::AnalyzerUnderlay),
             KeyCode::KeyB => Some(UiControl::AnalyzerScrub),
+            KeyCode::KeyW => Some(UiControl::AnalyzerCpuWait),
             KeyCode::KeyT => Some(UiControl::AnalyzerRunTo),
             // One key flips between the two views of the traced machine.
             KeyCode::KeyM => Some(UiControl::AnalyzerTab(if memory_tab {
@@ -559,6 +560,13 @@ impl App {
             if !panel.show_underlay {
                 panel.show_scrub = false;
             }
+            self.request_redraw();
+        }
+    }
+
+    pub(super) fn frame_analyzer_toggle_cpu_wait(&mut self) {
+        if let Some(panel) = self.frame_analyzer_panel.as_mut() {
+            panel.show_cpu_wait = !panel.show_cpu_wait;
             self.request_redraw();
         }
     }
@@ -1536,10 +1544,15 @@ impl App {
         let selected_hpos = usize::from(panel.selected_hpos).min(trace.cols.saturating_sub(1));
         let selected_owner_code = trace.owner_code_at(selected_vpos, selected_hpos);
         let selected_owner = owner_name_from_code(selected_owner_code);
+        let selected_cpu_wait_code = trace.cpu_wait_code_at(selected_vpos, selected_hpos);
         let mut owners = Vec::with_capacity(trace.rows * trace.cols);
+        let mut cpu_waits = Vec::with_capacity(trace.rows * trace.cols);
         for vpos in 0..trace.rows {
             if let Some(row) = trace.owner_row(vpos) {
                 owners.extend_from_slice(row);
+            }
+            if let Some(row) = trace.cpu_wait_row(vpos) {
+                cpu_waits.extend_from_slice(row);
             }
         }
         // Marker capacity bounds the per-redraw copy, not what is worth
@@ -1627,6 +1640,12 @@ impl App {
                 diw_v,
                 diw_h_cck,
                 ddf_cck,
+                cpu_waits,
+                cpu_wait_cck: trace.cpu_wait_cck,
+                cpu_wait_by_class: trace.cpu_wait_by_class,
+                cpu_wait_by_kind: trace.cpu_wait_by_kind,
+                top_stalled_pcs: trace.top_stalled_pcs(ui::ANALYZER_TOP_STALLED_PCS),
+                selected_cpu_wait_code,
             }),
         }
     }

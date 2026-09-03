@@ -734,12 +734,44 @@ impl Emulator {
             });
             record["blits"] = Value::from(blits);
             record["partial"] = Value::Bool(trace.partial);
+            let wait_by: Value = crate::bus::CPU_WAIT_CLASS_NAMES
+                .iter()
+                .zip(trace.cpu_wait_by_class.iter())
+                .filter(|(_, cck)| **cck != 0)
+                .map(|(name, cck)| (name.to_string(), Value::from(*cck)))
+                .collect::<serde_json::Map<String, Value>>()
+                .into();
+            let wait_by_kind: Value = crate::bus::CPU_BUS_ACCESS_KIND_NAMES
+                .iter()
+                .zip(trace.cpu_wait_by_kind.iter())
+                .filter(|(_, cck)| **cck != 0)
+                .map(|(name, cck)| (name.to_string(), Value::from(*cck)))
+                .collect::<serde_json::Map<String, Value>>()
+                .into();
+            let stall_pcs: Vec<Value> = trace
+                .top_stalled_pcs(crate::profile::PROFILE_STALL_PCS)
+                .into_iter()
+                .map(|(pc, cck)| json!({"pc": format!("{pc:#010X}"), "cck": cck}))
+                .collect();
+            record["cpu"] = json!({
+                "wait_cck": trace.cpu_wait_cck,
+                "wait_by": wait_by,
+                "wait_by_kind": wait_by_kind,
+                "stall_pcs": stall_pcs,
+                "stall_pcs_distinct": trace.stalled_pc_count(),
+                "stall_pcs_other": trace.cpu_wait_pc_other,
+            });
             if opts.slots {
                 let rows: Vec<Value> = (0..trace.rows)
                     .filter_map(|vpos| trace.owner_row(vpos))
                     .map(|row| Value::from(crate::profile::rle_owner_row(row)))
                     .collect();
                 record["slots"] = Value::from(rows);
+                let waits: Vec<Value> = (0..trace.rows)
+                    .filter_map(|vpos| trace.cpu_wait_row(vpos))
+                    .map(|row| Value::from(crate::profile::rle_owner_row(row)))
+                    .collect();
+                record["cpu_wait"] = Value::from(waits);
             }
         }
         if let Some(pc) = pc {

@@ -211,7 +211,7 @@ const CONSOLE_HELP: &[&str] = &[
     "            btrap V [H]   cbreak ADDR   catch irq N|trap N|vec N",
     "            catchtask [NAME]   catchalert   breaks (list)   clearbreaks",
     "inspect:    status  regs/r  mem/m ADDR [BYTES]  dis/d [ADDR] [N]",
-    "            copper [pc|ADDR] [N]   custom   blits   find HEX [START]",
+    "            copper [pc|ADDR] [N]   custom   blits   cpuwait   find HEX [START]",
     "            writer ADDR   dbgres",
     "            history/h [N]   stack/bt",
     "os:         tasks  task [ADDR|NAME]  execbase  memlist  segments",
@@ -870,6 +870,55 @@ impl App {
                         blit.cpt & 0x00FF_FFFF,
                         blit.dpt & 0x00FF_FFFF,
                     ));
+                }
+                ConsoleOutcome::lines(lines)
+            }
+            "CPUWAIT" => {
+                let Some(trace) = self.emu.bus().frame_bus_trace() else {
+                    return ConsoleOutcome::one(
+                        "no frame trace: open the Frame Analyzer (its Frame button captures one)",
+                    );
+                };
+                let granted = trace.owner_cck[7];
+                let total = granted.saturating_add(trace.cpu_wait_cck);
+                let pct = if total == 0 {
+                    0.0
+                } else {
+                    trace.cpu_wait_cck as f64 * 100.0 / total as f64
+                };
+                let mut lines = vec![format!(
+                    "frame {}: cpu waited {} cck of {} chip-bus cck ({pct:.1}%), granted {}",
+                    trace.frame, trace.cpu_wait_cck, total, granted
+                )];
+                for (name, cck) in crate::bus::CPU_WAIT_CLASS_NAMES
+                    .iter()
+                    .zip(trace.cpu_wait_by_class.iter())
+                    .filter(|(_, cck)| **cck != 0)
+                {
+                    lines.push(format!("  {name:<14} {cck:>7}"));
+                }
+                let kinds: Vec<String> = crate::bus::CPU_BUS_ACCESS_KIND_NAMES
+                    .iter()
+                    .zip(trace.cpu_wait_by_kind.iter())
+                    .filter(|(_, cck)| **cck != 0)
+                    .map(|(name, cck)| format!("{name} {cck}"))
+                    .collect();
+                if !kinds.is_empty() {
+                    lines.push(format!("  by access: {}", kinds.join("  ")));
+                }
+                let top = trace.top_stalled_pcs(16);
+                if !top.is_empty() {
+                    lines.push("top stalled PCs:".to_string());
+                    for (pc, cck) in top {
+                        lines.push(format!("  ${pc:08X} {cck:>7}"));
+                    }
+                    if trace.cpu_wait_pc_other != 0 {
+                        lines.push(format!(
+                            "  (+{} cck across PCs past the {} distinct kept)",
+                            trace.cpu_wait_pc_other,
+                            crate::bus::CPU_WAIT_PC_CAP
+                        ));
+                    }
                 }
                 ConsoleOutcome::lines(lines)
             }

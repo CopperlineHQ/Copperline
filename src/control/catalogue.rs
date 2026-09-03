@@ -769,14 +769,15 @@ fn build() -> Vec<ToolDef> {
         ),
         entry(
             "profile.start",
-            "Start a per-frame profile export: DMA ownership, blit records, guest idle \
-             time and retired instructions per frame, streamed as `profile.jsonl` under \
-             `path` (default: the configured profile directory) with a `profile.json` \
-             summary written at stop. Stops by itself after `frames` (default 500, at \
-             most 100000); `slots` adds per-frame chip-bus owner grids, `screenshots` \
-             saves the frame image for none, every or the last frame, `pc_samples` adds \
-             a sampled PC histogram. Arms the frame analyzer's trace for the session, \
-             which suspends run-ahead.",
+            "Start a per-frame profile export: DMA ownership, blit records, CPU chip-bus \
+             wait attribution (waited clocks by denier and access kind, top stalled \
+             PCs), guest idle time and retired instructions per frame, streamed as \
+             `profile.jsonl` under `path` (default: the configured profile directory) \
+             with a `profile.json` summary written at stop. Stops by itself after \
+             `frames` (default 500, at most 100000); `slots` adds per-frame chip-bus \
+             owner and CPU-wait grids, `screenshots` saves the frame image for none, \
+             every or the last frame, `pc_samples` adds a sampled PC histogram. Arms \
+             the frame analyzer's trace for the session, which suspends run-ahead.",
             object(
                 vec![
                     ("path", string("Host directory for the profile files (optional)")),

@@ -144,6 +144,37 @@ that colour clock cycle (CPU, Copper, Blitter, Bitplane, Sprite, Audio, Disk, Re
 - **Picture underlay (`U`):** Overlays the rendered video frame beneath the bus heatmap.
 - **Beam scrub (`B`):** Progressively displays the frame up to the selected raster position.
 - **To slot (`T`):** Advances execution until the beam reaches the selected colour clock.
+- **CPU wait (`W`):** Switches the heatmap, scanline strip, legend and counters
+  column to the CPU's side of the arbitration. Every colour clock the CPU asked
+  for the chip bus and was denied is painted in the colour of what held it:
+  bitplane, sprite, disk, audio, refresh, Copper, the blitter with BLTPRI clear
+  (the "nice" hold before the slowdown counter yields), a hotter red for the
+  blitter with BLTPRI set (its warm-up fence included, where the slot itself is
+  idle), and grey for the 020+ chip port's own turnaround. Everything else is
+  dimmed so the stolen cycles read against the DMA pattern that took them. The
+  counters column shows the waited clocks as a share of the CPU's chip-bus
+  time, the breakdown by denier and by access kind (read, which includes
+  opcode prefetches; fetch, for immediate and extension words read outside
+  the prefetch queue; write; custom register), and the instructions that
+  waited longest ("Top stalled PCs": per
+  instruction on the precise CPU loop, per batch under `[cpu] jit`). The
+  selected-slot line names the denier whenever the selected slot was a CPU
+  wait, in either view.
+- **Stall gutter:** the narrow strip right of the heatmap is drawn in both
+  views: one bar per line, as long as the share of that line's colour clocks
+  the CPU spent waiting, in the colour of the line's dominant denier -- a
+  profile of where the frame chokes the CPU.
+
+```{figure} ../images/ui-preview-frame-analyzer-cpu-wait.png
+:alt: The Frame Analyzer's CPU wait view
+:width: 90%
+
+Frame Analyzer Beam tab in the CPU wait view: denied slots lit by denier, the
+stall gutter, and the wait breakdown with the top stalled PCs.
+```
+
+The console's `CPUWAIT` command prints the same summary for the traced frame,
+and a [profile capture](profiling) exports it per frame.
 
 Profile captures over the control protocol ([](profiling)) share bus tracing
 with the Frame Analyzer: closing the pane does not interrupt an active capture,

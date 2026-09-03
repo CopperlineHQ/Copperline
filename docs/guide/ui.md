@@ -326,7 +326,9 @@ belongs to the Amiga.
   relaunch it. The same screen opens automatically on a no-machine start.
 - **Frame Analyzer...**: pauses the machine and opens a separate diagnostic
   window with three tabs: which chip-bus owner had each Agnus colour clock
-  across the captured frame, including overscan and blanking; a memory
+  across the captured frame, including overscan and blanking, with a CPU
+  wait view that attributes every clock the CPU was denied to the DMA
+  channel that held it and names the stalled instructions; a memory
   heat map of what last touched each part of the address space; and the
   debug resources the guest registered through the uaelib trap, with
   decoded previews; see [](../debugger/window.md#frame-analyzer-pane).

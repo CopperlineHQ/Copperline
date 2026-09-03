@@ -6035,6 +6035,52 @@ fn frame_analyzer_underlay_toggles_and_renders() {
 }
 
 #[test]
+fn frame_analyzer_cpu_wait_toggles_and_renders() {
+    let mut app = test_app();
+    app.open_frame_analyzer();
+    app.frame_analyzer_step_frame();
+    assert!(app.emu.bus().frame_bus_trace().is_some());
+
+    // Off by default; the W key ticks the checkbox on.
+    assert!(app
+        .frame_analyzer_panel
+        .as_ref()
+        .is_some_and(|panel| !panel.show_cpu_wait));
+    assert!(app.ui_handle_tool_key(ToolPanelKind::FrameAnalyzer, KeyCode::KeyW));
+    assert!(app
+        .frame_analyzer_panel
+        .as_ref()
+        .is_some_and(|panel| panel.show_cpu_wait));
+
+    // The view carries a wait grid the size of the owner grid, and every
+    // waited clock in the grid is counted once in each breakdown.
+    let panel = app.frame_analyzer_panel.clone().unwrap();
+    let view = app.build_frame_analyzer_view(&panel);
+    let trace = view.trace.expect("trace attached to view");
+    assert_eq!(trace.cpu_waits.len(), trace.owners.len());
+    let waited = trace.cpu_waits.iter().filter(|&&code| code != b'.').count() as u64;
+    assert_eq!(waited, trace.cpu_wait_cck);
+    assert_eq!(
+        trace.cpu_wait_by_class.iter().sum::<u64>(),
+        trace.cpu_wait_cck
+    );
+    assert_eq!(
+        trace.cpu_wait_by_kind.iter().sum::<u64>(),
+        trace.cpu_wait_cck
+    );
+    // A waited slot is never one the CPU owned.
+    for (owner, wait) in trace.owners.iter().zip(trace.cpu_waits.iter()) {
+        assert!(!(*owner == b'P' && *wait != b'.'));
+    }
+    // Toggling off via the control.
+    app.activate_ui_control(UiControl::AnalyzerCpuWait);
+    assert!(app
+        .frame_analyzer_panel
+        .as_ref()
+        .is_some_and(|panel| !panel.show_cpu_wait));
+}
+
+#[test]
 fn frame_analyzer_scrub_enable_snaps_predisplay_selection_to_frame_end() {
     let mut app = test_app();
     app.open_frame_analyzer();
@@ -6819,6 +6865,47 @@ fn console_history_and_stack_walk() {
     let out = console_run(&mut app, "STACK");
     assert!(out[0].starts_with("#0 pc $"), "{out:?}");
     assert!(out.iter().any(|l| l.contains("#1 ret $008002")), "{out:?}");
+}
+
+#[test]
+fn console_cpuwait_summarises_the_traced_frame() {
+    let mut app = test_app();
+    app.open_console();
+
+    // Listed by HELP, and honest about needing a trace.
+    let out = console_run(&mut app, "HELP");
+    assert!(out.iter().any(|l| l.contains("cpuwait")), "{out:?}");
+    let out = console_run(&mut app, "CPUWAIT");
+    assert!(out[0].contains("no frame trace"), "{out:?}");
+
+    // With a traced frame: the headline, and every listed class and PC
+    // accounts for a share of the waited clocks.
+    app.open_frame_analyzer();
+    app.frame_analyzer_step_frame();
+    let trace = app.emu.bus().frame_bus_trace().expect("traced frame");
+    let (frame, waited) = (trace.frame, trace.cpu_wait_cck);
+    let out = console_run(&mut app, "CPUWAIT");
+    assert!(
+        out[0].starts_with(&format!("frame {frame}: cpu waited {waited} cck")),
+        "{out:?}"
+    );
+    let classes = out
+        .iter()
+        .filter(|l| {
+            crate::bus::CPU_WAIT_CLASS_NAMES
+                .iter()
+                .any(|name| l.trim_start().starts_with(name))
+        })
+        .count();
+    let pcs = out
+        .iter()
+        .filter(|l| l.trim_start().starts_with('$'))
+        .count();
+    if waited == 0 {
+        assert_eq!((classes, pcs), (0, 0), "{out:?}");
+    } else {
+        assert!(classes >= 1 && pcs >= 1, "{out:?}");
+    }
 }
 
 #[test]

@@ -239,12 +239,20 @@ impl Bus {
             }
         }
         if self.frame_analyzer_enabled {
+            // A slot the CPU ends up owning (a posted write draining) is a
+            // grant, not a missed clock, whatever the wait loop expected.
+            let cpu_wait = if matches!(owner, ChipBusOwner::Cpu) {
+                None
+            } else {
+                self.cpu_bus_wait
+            };
             self.current_frame_bus_trace.record(
                 self.agnus.vpos,
                 hpos,
                 cck,
                 owner,
                 self.blitter.busy,
+                cpu_wait,
             );
         }
         if self.wave_on {
@@ -515,6 +523,32 @@ impl Bus {
             self.scheduled_dma_owner(true),
             ChipBusOwner::Cpu | ChipBusOwner::Idle
         )
+    }
+
+    /// Who is denying the CPU the current colour clock, for the frame
+    /// analyzer's wait attribution. `for_cpu` selects the arbitration view
+    /// the waiting access is actually subject to: a synchronous grant sees
+    /// the CPU's view (`scheduled_dma_owner(true)`), so a BLTPRI warm-up
+    /// fence reads as the blitter even though the slot's recorded owner is
+    /// idle, and the slowdown counter's yield reads as a free slot; a posted
+    /// 020+ write drains through the ordinary arbitration
+    /// (`scheduled_dma_owner(false)`), where a busy blitter keeps every
+    /// access cycle. A slot the access could have used is the 020+ port
+    /// turnaround wait.
+    pub(super) fn cpu_bus_denial_class(&self, for_cpu: bool) -> CpuWaitClass {
+        match self.scheduled_dma_owner(for_cpu) {
+            ChipBusOwner::Refresh => CpuWaitClass::Refresh,
+            ChipBusOwner::Bitplane => CpuWaitClass::Bitplane,
+            ChipBusOwner::Sprite => CpuWaitClass::Sprite,
+            ChipBusOwner::Disk => CpuWaitClass::Disk,
+            ChipBusOwner::Audio => CpuWaitClass::Audio,
+            ChipBusOwner::Copper => CpuWaitClass::Copper,
+            ChipBusOwner::Blitter if self.agnus.dmacon & DMACON_BLTPRI != 0 => {
+                CpuWaitClass::BlitterNasty
+            }
+            ChipBusOwner::Blitter => CpuWaitClass::BlitterNice,
+            ChipBusOwner::Cpu | ChipBusOwner::Idle => CpuWaitClass::Port,
+        }
     }
 
     pub(super) fn scheduled_dma_owner(&self, for_cpu: bool) -> ChipBusOwner {

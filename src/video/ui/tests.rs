@@ -465,10 +465,24 @@ fn frame_analyzer_controls_hit_test() {
         ui.control_at((underlay.x as i32 + 2, underlay.y as i32 + 2)),
         Some(UiControl::AnalyzerUnderlay)
     );
-    // The checkbox must not overlap the transport buttons.
+    let cpu_wait = analyzer_cpu_wait_rect(rect);
+    assert_eq!(
+        ui.control_at((cpu_wait.x as i32 + 2, cpu_wait.y as i32 + 2)),
+        Some(UiControl::AnalyzerCpuWait)
+    );
+    // The checkboxes must not overlap the transport buttons, each other,
+    // or run past the panel.
+    let scrub = analyzer_scrub_rect(rect);
     for (_, button) in analyzer_button_rects(rect) {
         assert!(button.x + button.w <= underlay.x || underlay.x + underlay.w <= button.x);
     }
+    assert!(underlay.x + underlay.w <= scrub.x);
+    assert!(scrub.x + scrub.w <= cpu_wait.x);
+    assert!(cpu_wait.x + cpu_wait.w <= rect.x + rect.w);
+    // The gutter sits between the raster and the counters column.
+    let gutter = analyzer_gutter_rect(rect);
+    assert!(raster.x + raster.w <= gutter.x);
+    assert!(gutter.x + gutter.w <= analyzer_counters_x(rect));
 }
 
 /// A Frame Analyzer panel in `tab`, with `presets` on the Memory tab.
@@ -602,6 +616,10 @@ fn analyzer_tabs_hit_test_and_gate_their_tab_controls() {
         (
             analyzer_scrub_rect(rect).x as i32 + 2,
             analyzer_scrub_rect(rect).y as i32 + 2,
+        ),
+        (
+            analyzer_cpu_wait_rect(rect).x as i32 + 2,
+            analyzer_cpu_wait_rect(rect).y as i32 + 2,
         ),
         (
             analyzer_button_rects(rect)[2].1.x as i32 + 2,
@@ -795,6 +813,12 @@ fn the_beam_tab_draws_below_the_tab_row() {
         diw_v: None,
         diw_h_cck: None,
         ddf_cck: None,
+        cpu_waits: vec![b'.'; 16],
+        cpu_wait_cck: 0,
+        cpu_wait_by_class: [0; 9],
+        cpu_wait_by_kind: [0; 4],
+        top_stalled_pcs: Vec::new(),
+        selected_cpu_wait_code: b'.',
     };
     let view = analyzer_view(Some(trace), None);
     draw_frame_analyzer(&mut frame, rect, &panel, &view, None, scale);
@@ -964,6 +988,12 @@ fn analyzer_underlay_sample_maps_display_box_to_framebuffer() {
         diw_v: None,
         diw_h_cck: None,
         ddf_cck: None,
+        cpu_waits: vec![b'.'; 312 * 227],
+        cpu_wait_cck: 0,
+        cpu_wait_by_class: [0; 9],
+        cpu_wait_by_kind: [0; 4],
+        top_stalled_pcs: Vec::new(),
+        selected_cpu_wait_code: b'.',
     };
     let mut fb = vec![0u32; FB_WIDTH * 285];
     fb[0] = 0xFF11_2233; // beam (0x1A, 0x30): framebuffer origin
@@ -1340,6 +1370,150 @@ fn wrap_text_keeps_long_lines_whole() {
 }
 
 #[test]
+fn cpu_wait_view_lights_denied_slots_and_dims_the_rest() {
+    use super::super::window::{texture_height, texture_width};
+
+    let scale = 1;
+    let (w, h) = (texture_width(scale), texture_height(scale));
+    let mut frame = vec![0u8; w * h * 4];
+    // Two texels per colour clock and per line, so slot interiors are
+    // readable past the display-box and selection outlines.
+    let raster = Rect {
+        x: 20,
+        y: 20,
+        w: 8,
+        h: 8,
+    };
+    let mut cpu_waits = vec![b'.'; 16];
+    cpu_waits[0] = b'B';
+    let trace = AnalyzerTraceView {
+        frame: 1,
+        seconds: 0.0,
+        rows: 4,
+        cols: 4,
+        line_cck: 4,
+        visible_start_vpos: 0,
+        visible_lines: 2,
+        display_hpos_start: 0,
+        display_hpos_end: 4,
+        owner_cck: [0, 16, 0, 0, 0, 0, 0, 0, 0],
+        blitter_busy_cck: 0,
+        blitter_starve_cck: [0; 9],
+        partial: false,
+        selected_vpos: 0,
+        selected_hpos: 0,
+        selected_owner: "bitplane",
+        selected_owner_code: b'B',
+        owners: vec![b'B'; 16],
+        markers: Vec::new(),
+        selected_blit: None,
+        diw_v: None,
+        diw_h_cck: None,
+        ddf_cck: None,
+        cpu_waits,
+        cpu_wait_cck: 1,
+        cpu_wait_by_class: [0, 1, 0, 0, 0, 0, 0, 0, 0],
+        cpu_wait_by_kind: [1, 0, 0, 0],
+        top_stalled_pcs: vec![(0x1000, 1)],
+        selected_cpu_wait_code: b'B',
+    };
+    let pixel = |frame: &[u8], x: usize, y: usize| -> [u8; 4] {
+        frame[(y * w + x) * 4..(y * w + x) * 4 + 4]
+            .try_into()
+            .unwrap()
+    };
+
+    // Owner view: every slot is the bitplane colour.
+    draw_owner_heatmap(&mut frame, raster, &trace, None, false, false, scale);
+    assert_eq!(pixel(&frame, 21, 21), owner_color(b'B').to_le_bytes());
+    assert_eq!(pixel(&frame, 22, 21), owner_color(b'B').to_le_bytes());
+
+    // CPU wait view: the denied slot keeps the denier's colour at full
+    // brightness, its neighbour drops to a quarter.
+    draw_owner_heatmap(&mut frame, raster, &trace, None, false, true, scale);
+    assert_eq!(pixel(&frame, 21, 21), cpu_wait_color(b'B').to_le_bytes());
+    assert_eq!(
+        pixel(&frame, 22, 21),
+        quarter_rgba(owner_color(b'B')).to_le_bytes()
+    );
+
+    // The gutter bars a quarter of its width for the one waited clock of
+    // the four on line 0, and nothing on a line without waits.
+    let gutter = Rect {
+        x: 40,
+        y: 20,
+        w: 10,
+        h: 4,
+    };
+    draw_cpu_wait_gutter(&mut frame, gutter, &trace, scale);
+    assert_eq!(pixel(&frame, 41, 20), cpu_wait_color(b'B').to_le_bytes());
+    assert_eq!(pixel(&frame, 43, 20), ANALYZER_GUTTER_BG.to_le_bytes());
+    assert_eq!(pixel(&frame, 41, 21), ANALYZER_GUTTER_BG.to_le_bytes());
+}
+
+#[test]
+fn cpu_wait_counters_stop_at_the_column_bottom() {
+    use super::super::window::{texture_height, texture_width};
+
+    // The busiest trace the column can be asked to show: every denier
+    // class and access kind non-zero and a full PC list, which needs more
+    // rows than the raster is tall.
+    let scale = 1;
+    let (w, h) = (texture_width(scale), texture_height(scale));
+    let mut frame = vec![0u8; w * h * 4];
+    let trace = AnalyzerTraceView {
+        frame: 1,
+        seconds: 0.0,
+        rows: 4,
+        cols: 4,
+        line_cck: 4,
+        visible_start_vpos: 0,
+        visible_lines: 2,
+        display_hpos_start: 0,
+        display_hpos_end: 4,
+        owner_cck: [1; 9],
+        blitter_busy_cck: 0,
+        blitter_starve_cck: [0; 9],
+        partial: false,
+        selected_vpos: 0,
+        selected_hpos: 0,
+        selected_owner: "idle",
+        selected_owner_code: b'.',
+        owners: vec![b'.'; 16],
+        markers: Vec::new(),
+        selected_blit: None,
+        diw_v: None,
+        diw_h_cck: None,
+        ddf_cck: None,
+        cpu_waits: vec![b'.'; 16],
+        cpu_wait_cck: 45,
+        cpu_wait_by_class: [1, 2, 3, 4, 5, 6, 7, 8, 9],
+        cpu_wait_by_kind: [10, 11, 12, 12],
+        top_stalled_pcs: (0..ANALYZER_TOP_STALLED_PCS as u32)
+            .map(|i| (0x1000 + i * 2, 100 - i))
+            .collect(),
+        selected_cpu_wait_code: b'.',
+    };
+    let (x, top, bottom) = (40usize, 20usize, 20 + 246);
+    draw_cpu_wait_counters(&mut frame, x, top, bottom, &trace, scale);
+
+    let painted = |frame: &[u8], y: usize| -> bool {
+        (x..x + 200).any(|px| frame[(y * w + px) * 4 + 3] != 0)
+    };
+    // The heading, totals and the first class rows are drawn...
+    assert!(painted(&frame, top + 2));
+    assert!(painted(&frame, top + 3 * 12 + 2));
+    // ...and nothing lands on or below the bound, however much was asked.
+    for y in bottom..bottom + 60 {
+        assert!(!painted(&frame, y), "row {y} painted past the bound");
+    }
+    // A bound too short for anything draws nothing at all.
+    let mut bare = vec![0u8; w * h * 4];
+    draw_cpu_wait_counters(&mut bare, x, top, top + 4, &trace, scale);
+    assert!((top..top + 60).all(|y| !painted(&bare, y)));
+}
+
+#[test]
 fn frame_analyzer_top_edge_overlays_clip_to_raster() {
     use super::super::window::{texture_height, texture_width};
 
@@ -1382,9 +1556,15 @@ fn frame_analyzer_top_edge_overlays_clip_to_raster() {
         diw_v: None,
         diw_h_cck: None,
         ddf_cck: None,
+        cpu_waits: vec![b'.'; 16],
+        cpu_wait_cck: 0,
+        cpu_wait_by_class: [0; 9],
+        cpu_wait_by_kind: [0; 4],
+        top_stalled_pcs: Vec::new(),
+        selected_cpu_wait_code: b'.',
     };
 
-    draw_owner_heatmap(&mut frame, raster, &trace, None, false, scale);
+    draw_owner_heatmap(&mut frame, raster, &trace, None, false, false, scale);
 
     let pixel = |frame: &[u8], x: usize, y: usize| -> [u8; 4] {
         frame[(y * w + x) * 4..(y * w + x) * 4 + 4]
@@ -2321,6 +2501,28 @@ fn panels_render_into_their_rects() {
             owners[vpos * cols + hpos] = owner;
         }
     }
+    // CPU waits: a code loop in chip RAM losing every other fetch slot to
+    // the display on a third of the lines, and the blitter (nice, then
+    // BLTPRI on its last rows) holding it off across its stripe.
+    let mut cpu_waits = vec![b'.'; rows * cols];
+    for vpos in 0..rows {
+        for hpos in 0..cols {
+            let wait = if (60..260).contains(&vpos)
+                && vpos % 3 == 0
+                && (0x38..0xD0).contains(&hpos)
+                && hpos % 2 == 0
+            {
+                b'B'
+            } else if (100..130).contains(&vpos) && (0x10..0x28).contains(&hpos) && hpos % 4 != 3 {
+                b'L'
+            } else if (130..140).contains(&vpos) && (0x10..0x28).contains(&hpos) {
+                b'N'
+            } else {
+                b'.'
+            };
+            cpu_waits[vpos * cols + hpos] = wait;
+        }
+    }
     let underlay_rows = 285usize;
     let mut under_fb = vec![0u32; FB_WIDTH * underlay_rows];
     for (i, pix) in under_fb.iter_mut().enumerate() {
@@ -2366,6 +2568,12 @@ fn panels_render_into_their_rects() {
         diw_v: Some((0x2C, 0x12C)),
         diw_h_cck: Some((0x81 / 2, 0x1C1 / 2)),
         ddf_cck: Some((0x38, 0xD0)),
+        cpu_waits,
+        cpu_wait_cck: 6420,
+        cpu_wait_by_class: [0, 5016, 0, 0, 0, 0, 1080, 324, 0],
+        cpu_wait_by_kind: [3900, 1800, 720, 0],
+        top_stalled_pcs: vec![(0x0002_1A3C, 2140), (0x0002_1A40, 1690), (0x0002_0F10, 610)],
+        selected_cpu_wait_code: b'B',
     };
     let data = PanelViewData::FrameAnalyzer(Box::new(FrameAnalyzerView {
         running: false,
@@ -2400,6 +2608,23 @@ fn panels_render_into_their_rects() {
     );
     assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
     save(&frame, "frame-analyzer");
+
+    // The same trace in the CPU wait view: denied slots lit, the rest
+    // dimmed, the wait breakdown and stalled PCs in the counters column.
+    let mut frame = vec![0u8; w * h * 4];
+    let mut panel = FrameAnalyzerPanel::new();
+    panel.show_cpu_wait = true;
+    panel.selected_vpos = 120;
+    panel.selected_hpos = 0x40;
+    let ui = UiState {
+        menu_open: false,
+        menu_rows: Vec::new(),
+        menu_nav: menu::MenuNav::default(),
+        panel: Some(Panel::FrameAnalyzer(panel)),
+    };
+    draw(&mut frame, scale, &ui, None, Some(&data));
+    assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
+    save(&frame, "frame-analyzer-cpu-wait");
 
     // Frame analyzer, Memory tab: the address space instead of the
     // beam. A window with a few busy regions so the map, the census

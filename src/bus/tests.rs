@@ -12,15 +12,16 @@ use super::{
     live_playfield_collision_pixel, live_sprite_playfield_collision_bits_in_range,
     live_sprite_sprite_collision_bits, sprite_hstart_for_fmode, visible_start_vpos_for_diw,
     BeamChipRamWrite, BeamRegisterWrite, BeamWriteSource, BitplaneBplcon0Delay, Bus,
-    CapturedBitplaneRow, CapturedSpriteLine, ChipBusOwner, CpuBusAccessKind, DeviceClock,
-    DisplaySpriteDmaState, DisplaySpriteLineData, FrameBusTrace, LiveCollisionControl,
-    LiveCollisionLineReplay, LiveSpriteCollisionSource, PortDevice, RenderRegisterSnapshot,
-    BLITTER_SLOWDOWN_CPU_MISS_LIMIT, BLTCON0_USE_A, BLTCON0_USE_C, BLTCON0_USE_D, BLTCON1_DOFF,
-    BLTCON1_LINE, BPLCON0_ECSENA, BPLCON3_BRDRBLNK, BPLCON3_BRDSPRT, BPLCON3_SPRES_HIRES,
-    BPLCON3_SPRES_SHRES, DENISE_HPOS_LAG_CCK, DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN,
-    DMACON_SPREN, PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS, RENDER_COPPER_WAIT_HPOS_FB0,
-    RENDER_DIW_HSTART_FB0, RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_LINES,
-    RENDER_VISIBLE_START_VPOS, SPRITE_DMA_SLOT1_HPOS, SPRITE_OUTPUT_DELAY_LORES,
+    CapturedBitplaneRow, CapturedSpriteLine, ChipBusOwner, CpuBusAccessKind, CpuWaitClass,
+    CpuWaitSample, DeviceClock, DisplaySpriteDmaState, DisplaySpriteLineData, FrameBusTrace,
+    LiveCollisionControl, LiveCollisionLineReplay, LiveSpriteCollisionSource, PortDevice,
+    RenderRegisterSnapshot, BLITTER_SLOWDOWN_CPU_MISS_LIMIT, BLTCON0_USE_A, BLTCON0_USE_C,
+    BLTCON0_USE_D, BLTCON1_DOFF, BLTCON1_LINE, BPLCON0_ECSENA, BPLCON3_BRDRBLNK, BPLCON3_BRDSPRT,
+    BPLCON3_SPRES_HIRES, BPLCON3_SPRES_SHRES, CPU_WAIT_PC_CAP, DENISE_HPOS_LAG_CCK, DMACON_BLTEN,
+    DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN, PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS,
+    RENDER_COPPER_WAIT_HPOS_FB0, RENDER_DIW_HSTART_FB0, RENDER_MIN_OVERSCAN_START_VPOS,
+    RENDER_VISIBLE_LINES, RENDER_VISIBLE_START_VPOS, SPRITE_DMA_SLOT1_HPOS,
+    SPRITE_OUTPUT_DELAY_LORES,
 };
 use crate::audio::AudioSink;
 use crate::chipset::agnus::{
@@ -62,10 +63,10 @@ fn frame_analyzer_records_owner_spans_and_blitter_wait_cck() {
     let mut trace = FrameBusTrace::default();
     trace.reset_for_frame(7, 0.140, 4, 16, 1, 2, false);
 
-    trace.record(1, 2, 3, ChipBusOwner::Bitplane, false);
-    trace.record(1, 5, 2, ChipBusOwner::Copper, true);
-    trace.record(1, 7, 2, ChipBusOwner::Blitter, true);
-    trace.record(8, 0, 4, ChipBusOwner::Cpu, true);
+    trace.record(1, 2, 3, ChipBusOwner::Bitplane, false, None);
+    trace.record(1, 5, 2, ChipBusOwner::Copper, true, None);
+    trace.record(1, 7, 2, ChipBusOwner::Blitter, true, None);
+    trace.record(8, 0, 4, ChipBusOwner::Cpu, true, None);
     trace.finish_window(2, 1);
 
     assert_eq!(trace.frame, 7);
@@ -98,6 +99,342 @@ fn frame_analyzer_records_owner_spans_and_blitter_wait_cck() {
         trace.blitter_starve_cck[ChipBusOwner::Blitter.accounting_index()],
         0
     );
+}
+
+#[test]
+fn frame_analyzer_records_cpu_wait_samples() {
+    let mut trace = FrameBusTrace::default();
+    trace.reset_for_frame(7, 0.140, 4, 16, 1, 2, false);
+    let wait = |class, kind, pc| Some(CpuWaitSample { class, kind, pc });
+
+    // Three clocks denied by the display, one by a BLTPRI blitter whose
+    // own slot is idle, then the grant.
+    trace.record(
+        1,
+        2,
+        3,
+        ChipBusOwner::Bitplane,
+        false,
+        wait(CpuWaitClass::Bitplane, CpuBusAccessKind::Fetch, 0x1000),
+    );
+    trace.record(
+        1,
+        5,
+        1,
+        ChipBusOwner::Idle,
+        true,
+        wait(CpuWaitClass::BlitterNasty, CpuBusAccessKind::Read, 0x1004),
+    );
+    trace.record(1, 6, 1, ChipBusOwner::Cpu, true, None);
+
+    assert_eq!(trace.cpu_wait_cck, 4);
+    assert_eq!(
+        trace.cpu_wait_by_class[CpuWaitClass::Bitplane.accounting_index()],
+        3
+    );
+    assert_eq!(
+        trace.cpu_wait_by_class[CpuWaitClass::BlitterNasty.accounting_index()],
+        1
+    );
+    assert_eq!(
+        trace.cpu_wait_by_kind[CpuBusAccessKind::Fetch.accounting_index()],
+        3
+    );
+    assert_eq!(
+        trace.cpu_wait_by_kind[CpuBusAccessKind::Read.accounting_index()],
+        1
+    );
+    let row = trace.cpu_wait_row(1).expect("recorded beam row");
+    assert_eq!(&row[..8], b"..BBBN..");
+    assert_eq!(trace.cpu_wait_code_at(1, 5), b'N');
+    assert_eq!(trace.owner_code_at(1, 5), b'.');
+    assert_eq!(trace.cpu_wait_code_at(1, 6), b'.');
+    assert_eq!(trace.cpu_wait_code_at(3, 0), b'.');
+    // Longest wait first; a tie orders by PC.
+    trace.record(
+        2,
+        0,
+        3,
+        ChipBusOwner::Copper,
+        false,
+        wait(CpuWaitClass::Copper, CpuBusAccessKind::Write, 0x0800),
+    );
+    assert_eq!(
+        trace.top_stalled_pcs(8),
+        vec![(0x0800, 3), (0x1000, 3), (0x1004, 1)]
+    );
+    assert_eq!(trace.top_stalled_pcs(1), vec![(0x0800, 3)]);
+    assert_eq!(trace.stalled_pc_count(), 3);
+
+    // The wait grid and totals reset with the frame.
+    trace.reset_for_frame(8, 0.160, 4, 16, 1, 2, false);
+    assert_eq!(trace.cpu_wait_cck, 0);
+    assert_eq!(trace.cpu_wait_code_at(1, 2), b'.');
+    assert!(trace.top_stalled_pcs(8).is_empty());
+}
+
+#[test]
+fn frame_analyzer_pools_stalled_pcs_past_the_cap() {
+    let mut trace = FrameBusTrace::default();
+    trace.reset_for_frame(1, 0.0, 2, 8, 0, 1, false);
+    for pc in 0..(CPU_WAIT_PC_CAP as u32 + 5) {
+        trace.record(
+            0,
+            0,
+            1,
+            ChipBusOwner::Bitplane,
+            false,
+            Some(CpuWaitSample {
+                class: CpuWaitClass::Bitplane,
+                kind: CpuBusAccessKind::Fetch,
+                pc: pc * 2,
+            }),
+        );
+    }
+    assert_eq!(trace.stalled_pc_count(), CPU_WAIT_PC_CAP);
+    assert_eq!(trace.cpu_wait_pc_other, 5);
+    assert_eq!(trace.cpu_wait_cck, CPU_WAIT_PC_CAP as u64 + 5);
+    // A PC already kept keeps accumulating past the cap.
+    trace.record(
+        0,
+        1,
+        1,
+        ChipBusOwner::Bitplane,
+        false,
+        Some(CpuWaitSample {
+            class: CpuWaitClass::Bitplane,
+            kind: CpuBusAccessKind::Fetch,
+            pc: 0,
+        }),
+    );
+    assert_eq!(trace.top_stalled_pcs(1), vec![(0, 2)]);
+    assert_eq!(trace.cpu_wait_pc_other, 5);
+}
+
+#[test]
+fn frame_analyzer_attributes_cpu_wait_to_nice_blitter() {
+    // The blithog_clear_busy_blitter_yields_to_cpu_only_after_starvation
+    // scenario with the analyzer armed: the clocks the CPU misses before
+    // the nice blitter yields are attributed to the blitter with BLTPRI
+    // clear, the granted clock is not, the stalled instruction is named,
+    // and arming the trace moves nothing on the timeline.
+    let mut bus = empty_bus();
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BLTEN;
+    bus.agnus.hpos = 0x20;
+    bus.blitter.bltcon0 = 0x0E00;
+    bus.blitter.bltcon1 = 0;
+    bus.blitter.bltafwm = 0xFFFF;
+    bus.blitter.bltalwm = 0xFFFF;
+    bus.blitter.bltapt = 0x10;
+    bus.blitter.bltbpt = 0x20;
+    bus.blitter.bltcpt = 0x30;
+    for (off, val) in [
+        (0x10, 0x1111),
+        (0x12, 0x2222),
+        (0x14, 0x3333),
+        (0x16, 0x4444),
+        (0x20, 0xAAAA),
+        (0x22, 0xBBBB),
+        (0x24, 0xCCCC),
+        (0x26, 0xDDDD),
+        (0x30, 0x5555),
+        (0x32, 0x6666),
+        (0x34, 0x7777),
+        (0x36, 0x8888),
+    ] {
+        write_chip_word(&mut bus, off, val);
+    }
+    bus.blitter.start_scheduled((1 << 6) | 4, &bus.mem.chip_ram);
+    bus.advance_chipset(4);
+    bus.set_frame_analyzer_enabled(true);
+    bus.cpu_pc = 0x00FC_1234;
+    bus.set_cpu_bus_arbitration_enabled(true);
+    bus.begin_cpu_slice();
+
+    let _ = bus.custom_read(0x002, 2);
+    let (poll_cck, _) = bus.take_slice_bus_advance();
+    // Same cost as the unarmed scenario pins.
+    assert_eq!(poll_cck, u32::from(BLITTER_SLOWDOWN_CPU_MISS_LIMIT) + 2);
+
+    let trace = bus
+        .frame_bus_trace()
+        .expect("the armed analyzer records the slice");
+    let limit = usize::from(BLITTER_SLOWDOWN_CPU_MISS_LIMIT);
+    assert_eq!(trace.cpu_wait_cck, limit as u64);
+    assert_eq!(
+        trace.cpu_wait_by_class[CpuWaitClass::BlitterNice.accounting_index()],
+        limit as u64
+    );
+    assert_eq!(
+        trace.cpu_wait_by_kind[CpuBusAccessKind::Custom.accounting_index()],
+        limit as u64
+    );
+    let vpos = bus.agnus.vpos as usize;
+    let waits = trace.cpu_wait_row(vpos).expect("traced beam row");
+    let owners = trace.owner_row(vpos).expect("traced beam row");
+    let first = 0x24usize;
+    let grant = first + limit;
+    assert_eq!(&waits[first..grant], vec![b'L'; limit].as_slice());
+    assert_eq!(waits[grant], b'.');
+    assert_eq!(owners[grant], b'P');
+    assert_eq!(
+        trace.top_stalled_pcs(4),
+        vec![(0x00FC_1234, BLITTER_SLOWDOWN_CPU_MISS_LIMIT as u32)]
+    );
+}
+
+#[test]
+fn frame_analyzer_attributes_cpu_wait_to_fixed_dma() {
+    // A CPU fetch landing on a refresh slot waits one clock for fixed
+    // DMA; the trace attributes that clock to refresh and the grant that
+    // follows to nobody.
+    let mut bus = empty_bus();
+    bus.agnus.dmacon = DMACON_DMAEN;
+    bus.agnus.hpos = 0x001;
+    bus.set_frame_analyzer_enabled(true);
+    bus.set_cpu_bus_arbitration_enabled(true);
+
+    bus.grant_cpu_bus_access(2, CpuBusAccessKind::Fetch);
+    let (cck, _) = bus.take_slice_bus_advance();
+    assert_eq!(cck, 3);
+
+    let trace = bus
+        .frame_bus_trace()
+        .expect("the armed analyzer records the slice");
+    assert_eq!(trace.cpu_wait_cck, 1);
+    assert_eq!(
+        trace.cpu_wait_by_class[CpuWaitClass::Refresh.accounting_index()],
+        1
+    );
+    assert_eq!(
+        trace.cpu_wait_by_kind[CpuBusAccessKind::Fetch.accounting_index()],
+        1
+    );
+    let vpos = bus.agnus.vpos as usize;
+    let waits = trace.cpu_wait_row(vpos).expect("traced beam row");
+    let owners = trace.owner_row(vpos).expect("traced beam row");
+    assert_eq!(waits[1], b'R');
+    assert_eq!(owners[1], b'R');
+    assert_eq!(waits[2], b'.');
+    assert_eq!(owners[2], b'P');
+}
+
+#[test]
+fn frame_analyzer_attributes_posted_write_drain_waits_to_the_blitter() {
+    // A posted 020 chip write drains through the ordinary arbitration, in
+    // which a busy nice blitter keeps every access cycle: the slowdown
+    // yield that frees a synchronous grant after three misses does not
+    // apply to the drain, so every clock it waits belongs to the blitter,
+    // however many in a row the CPU misses. Only the port turnaround the
+    // following read pays after the drain is the CPU's own.
+    let mut bus = empty_bus();
+    bus.set_chipset_revisions(AgnusRevision::Ecs8375, DeniseRevision::Ecs8373);
+    bus.set_cpu_clocks_per_cck(4);
+    bus.set_cpu_short_bus_cycle(true);
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BLTEN;
+    bus.agnus.hpos = 0x20;
+    bus.blitter.bltcon0 = 0x0E00;
+    bus.blitter.bltcon1 = 0;
+    bus.blitter.bltafwm = 0xFFFF;
+    bus.blitter.bltalwm = 0xFFFF;
+    bus.blitter.bltapt = 0x10;
+    bus.blitter.bltbpt = 0x20;
+    bus.blitter.bltcpt = 0x30;
+    for (off, val) in [
+        (0x10, 0x1111),
+        (0x12, 0x2222),
+        (0x14, 0x3333),
+        (0x16, 0x4444),
+        (0x20, 0xAAAA),
+        (0x22, 0xBBBB),
+        (0x24, 0xCCCC),
+        (0x26, 0xDDDD),
+        (0x30, 0x5555),
+        (0x32, 0x6666),
+        (0x34, 0x7777),
+        (0x36, 0x8888),
+    ] {
+        write_chip_word(&mut bus, off, val);
+    }
+    bus.blitter.start_scheduled((1 << 6) | 4, &bus.mem.chip_ram);
+    bus.advance_chipset(4);
+    bus.set_frame_analyzer_enabled(true);
+    bus.set_cpu_bus_arbitration_enabled(true);
+
+    // The write posts without stalling; the read that follows first
+    // retires it, waiting out the blit's remaining source fetches.
+    bus.grant_cpu_bus_access_at(Some(0x0002_0000), 2, CpuBusAccessKind::Write);
+    assert_eq!(bus.take_slice_bus_advance().0, 0);
+    bus.grant_cpu_bus_access_at(Some(0x0002_0000), 2, CpuBusAccessKind::Read);
+    let (cck, _) = bus.take_slice_bus_advance();
+    assert!(!bus.blitter.busy);
+
+    let trace = bus
+        .frame_bus_trace()
+        .expect("the armed analyzer records the slice");
+    let nice = trace.cpu_wait_by_class[CpuWaitClass::BlitterNice.accounting_index()];
+    let port = trace.cpu_wait_by_class[CpuWaitClass::Port.accounting_index()];
+    assert!(
+        nice > u64::from(BLITTER_SLOWDOWN_CPU_MISS_LIMIT),
+        "drain waits stay the blitter's past the slowdown limit: {nice} of {cck}"
+    );
+    assert_eq!(
+        trace.cpu_wait_by_kind[CpuBusAccessKind::Write.accounting_index()],
+        nice
+    );
+    assert!(port >= 1, "the read pays the port turnaround: {port}");
+    assert_eq!(
+        trace.cpu_wait_by_kind[CpuBusAccessKind::Read.accounting_index()],
+        port
+    );
+    assert_eq!(trace.cpu_wait_cck, nice + port);
+}
+
+#[test]
+fn frame_analyzer_attributes_cpu_wait_to_bltpri_fence() {
+    // The bltpri_stalls_cpu_chip_access_through_blitter_access_cycles
+    // scenario with the analyzer armed: the A fetch and the fenced first-D
+    // bubble are both CPU waits on the BLTPRI blitter, even though the
+    // bubble's recorded slot owner is idle.
+    let mut bus = empty_bus();
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BLTEN | DMACON_BLTPRI;
+    bus.agnus.hpos = 0x20;
+    bus.blitter.bltcon0 = 0x09F0;
+    bus.blitter.bltafwm = 0xFFFF;
+    bus.blitter.bltalwm = 0xFFFF;
+    bus.blitter.bltapt = 0x10;
+    bus.blitter.bltdpt = 0x20;
+    bus.mem.chip_ram[0x10] = 0x12;
+    bus.mem.chip_ram[0x11] = 0x34;
+    bus.blitter.start_scheduled((1 << 6) | 1, &bus.mem.chip_ram);
+    bus.advance_chipset(4);
+    bus.set_frame_analyzer_enabled(true);
+    bus.set_cpu_bus_arbitration_enabled(true);
+
+    bus.grant_cpu_bus_access(2, CpuBusAccessKind::Read);
+    let (cck, _) = bus.take_slice_bus_advance();
+    assert_eq!(cck, 4);
+
+    let trace = bus
+        .frame_bus_trace()
+        .expect("the armed analyzer records the slice");
+    assert_eq!(trace.cpu_wait_cck, 2);
+    assert_eq!(
+        trace.cpu_wait_by_class[CpuWaitClass::BlitterNasty.accounting_index()],
+        2
+    );
+    assert_eq!(
+        trace.cpu_wait_by_kind[CpuBusAccessKind::Read.accounting_index()],
+        2
+    );
+    let vpos = bus.agnus.vpos as usize;
+    let waits = trace.cpu_wait_row(vpos).expect("traced beam row");
+    let owners = trace.owner_row(vpos).expect("traced beam row");
+    assert_eq!(&waits[0x24..0x26], b"NN");
+    assert_eq!(owners[0x24], b'L');
+    assert_eq!(owners[0x25], b'.');
+    assert_eq!(waits[0x26], b'.');
+    assert_eq!(owners[0x26], b'P');
 }
 
 #[test]
