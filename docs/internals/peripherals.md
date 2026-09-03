@@ -614,7 +614,18 @@ disc is genuinely readable, which is why a real CD32 with a bootable disc
 inserted at power-on goes straight from the Kickstart grey screen to the
 boot display without ever starting the fly-in show, and why the emulated
 cold boot now reaches the startup-sequence within 50 ms of the filmed real
-machine (14.36 s vs 14.31 s). A data locate
+machine (14.36 s vs 14.31 s). The hold is the drive's, not Akiko's: the
+TX DMA keeps draining the guest's command ring into the drive's receive
+buffer whatever the drive is doing, and the drive parses commands out of
+that buffer one at a time between dumps. That distinction matters
+because Kickstart's driver queues a 3-byte LED packet for every TOC
+entry it receives (and an unpause right behind the request itself): on a
+disc with more than about 25 tracks those packets outrun a 256-byte ring
+that nothing consumes, and the lapped bytes then parse as garbage after
+the dump: the driver's LED toggles and its unpause come back as
+checksum-error replies, which the real machine never produces (observed
+with Pinball Illusions CD32, 39 tracks, whose boot showed four such
+replies before the first data read). A data locate
 also pays the tray mechanism's real seek time, calibrated against a real
 CD32 with `tools/cd32-probe`: a +500-sector hop costs 253 ms, +1000 costs
 301 ms, and long strokes flatten out around 1.4 s (WinUAE bills a single

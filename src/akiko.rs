@@ -102,6 +102,12 @@ const WARM_SPIN_UP_SECS: f64 = 3.5;
 /// TX/RX DMA restart delay: ~3 scanlines, expressed in colour clocks.
 const DMA_RESTART_DELAY_CCK: u32 = 3 * 227;
 
+/// Bound on the drive's unparsed command bytes before the TX DMA stalls.
+/// The real buffer's size is unmeasured; this only has to clear the
+/// deepest legitimate backlog, Kickstart's one LED packet per TOC entry
+/// on a 99-track audio CD (102 points x 3 copies x 3 bytes), with room.
+const TX_FIFO_BYTES: usize = 4096;
+
 /// Drive-microcontroller command turnaround: a received command executes
 /// this much emulated time after its last byte arrives, roughly 1 ms.
 /// The real Chinon takes at least that long, and drivers depend on the
@@ -455,9 +461,17 @@ pub struct Akiko {
     /// reset keeps the drive spinning and the lead-in cached, so reset()
     /// clears the gate.
     toc_spin_up_cck: i64,
-    /// A parsed command is waiting for an in-flight lead-in dump to
-    /// finish before the drive acts on it (see the hold in `tick`).
-    command_deferred_for_toc: bool,
+    /// Command bytes the TX DMA has delivered to the drive but its
+    /// microcontroller has not parsed yet. Akiko's DMA engine drains the
+    /// guest's 256-byte command ring whenever the comparator indices
+    /// differ; the drive parses one command at a time and, while a
+    /// lead-in dump streams, none at all (see `parse_commands`). The
+    /// buffer is what keeps the ring index moving meanwhile: Kickstart's
+    /// driver queues a 3-byte LED packet for every TOC entry it receives,
+    /// which on a many-track disc (39 tracks is 126 packets, 378 bytes)
+    /// laps the ring if nothing consumes it, and the lapped bytes then
+    /// parse as garbage that fails its checksum.
+    tx_fifo: std::collections::VecDeque<u8>,
     toc_counter: i32,
     data_offset: i64,
     /// Exclusive end sector supplied by the drive's READ DATA command.
@@ -498,7 +512,7 @@ impl Default for Akiko {
             pending_disc: None,
             insert_delay_cck: -1,
             toc_spin_up_cck: 0,
-            command_deferred_for_toc: false,
+            tx_fifo: std::collections::VecDeque::new(),
             intreq: 0,
             intena: 0,
             subcodeoffset: 0,
@@ -863,11 +877,12 @@ impl Akiko {
                 // PIO command port (the ROM uses TX DMA instead).
                 if self.flags & CDFLAG_TXD == 0 {
                     self.intreq &= !CDINT_DRIVEXMIT;
-                    if self.can_send_command() {
-                        self.add_command_byte(value);
-                        if self.can_send_command() {
-                            self.intreq |= CDINT_DRIVEXMIT;
-                        }
+                    if self.tx_fifo_has_room() {
+                        self.tx_fifo.push_back(value);
+                    }
+                    self.parse_commands();
+                    if self.transmitter_ready() {
+                        self.intreq |= CDINT_DRIVEXMIT;
                     }
                 }
             }
@@ -936,19 +951,6 @@ impl Akiko {
                     // ring drains; the host cannot send another one
                     // meanwhile (can_send_command gates on both).
                     self.command_active = 1;
-                } else if self.toc_counter >= 0 {
-                    // A lead-in dump is in flight (or pending behind
-                    // the spin-up gate): the drive's microcontroller
-                    // finishes streaming it before it acts on the next
-                    // queued command. Executing the follow-up mid-dump
-                    // delivers its reply early, and the KS driver's
-                    // dump wait -- which waits on reply-or-TOC-complete
-                    // -- aborts and reports "no disc" to the CDUI's
-                    // one-shot CD_CHANGESTATE, starting the boot-screen
-                    // show a real cold boot with a disc inserted never
-                    // shows. Parked outside command_active so the dump
-                    // itself keeps streaming.
-                    self.command_deferred_for_toc = true;
                 } else if self.intreq & self.intena & CDINT_TXDMADONE != 0 {
                     // The three-wire drive link is half duplex. Akiko may
                     // already have the drive's reply buffered, but it does
@@ -962,11 +964,6 @@ impl Akiko {
                     self.execute_command();
                 }
             }
-        }
-
-        if self.command_deferred_for_toc && self.toc_counter < 0 {
-            self.command_deferred_for_toc = false;
-            self.command_active = 1;
         }
 
         self.read_counter_cck -= cck as i32;
@@ -1109,6 +1106,7 @@ impl Akiko {
     fn run_internal(&mut self, mem: &mut (impl DmaSpace + ?Sized)) {
         self.return_data(mem);
         self.run_command_dma(mem);
+        self.parse_commands();
         // Command execution is paced by emulated time (`command_active`
         // counts down in tick()), never by register accesses: the drive's
         // microcontroller answers after CMD_EXEC_DELAY_CCK, while the
@@ -1117,12 +1115,34 @@ impl Akiko {
 
     // ----- command path ----------------------------------------------------
 
+    /// The drive's microcontroller is ready to parse its next command:
+    /// it has been probed, holds no command in its turnaround, and has
+    /// no reply undelivered.
     fn can_send_command(&self) -> bool {
         self.cd_initialized != 0 && self.command_active == 0 && self.receive_length == 0
     }
 
+    /// The drive's receive buffer can take another byte.
+    fn tx_fifo_has_room(&self) -> bool {
+        self.tx_fifo.len() < TX_FIFO_BYTES
+    }
+
+    /// Akiko's transmitter-ready latch condition, as a PIO producer polls
+    /// it before each command byte: the drive is ready to parse a command
+    /// and its receive buffer has room. A byte written while this is
+    /// false is lost, like an overrun on the real link.
+    fn transmitter_ready(&self) -> bool {
+        self.can_send_command() && self.tx_fifo_has_room()
+    }
+
     /// TX DMA: fetch command bytes from the TX ring, wherever in the
-    /// 24-bit space the guest placed it.
+    /// 24-bit space the guest placed it, into the drive's receive buffer.
+    ///
+    /// The engine is not gated on the drive's command state: whether the
+    /// drive is mid-turnaround, has a reply pending, or is streaming a
+    /// lead-in dump, Akiko keeps shifting queued bytes across the link
+    /// and the guest's comparator index keeps advancing. Only the
+    /// (generous) receive buffer bound stalls it.
     fn run_command_dma(&mut self, mem: &mut (impl DmaSpace + ?Sized)) {
         if self.flags & CDFLAG_TXD == 0 {
             return;
@@ -1136,7 +1156,7 @@ impl Akiko {
         if self.tx_dma_delay_cck > 0 {
             return;
         }
-        if !self.can_send_command() {
+        if !self.tx_fifo_has_room() {
             return;
         }
         // The TX address folds to the 256-byte command page, like RX: the
@@ -1146,11 +1166,34 @@ impl Akiko {
         // page offset 0, and carrying the address into the following page
         // reads garbage there and fails the packet's checksum).
         let byte = mem.dma_get(self.cdtx_address + u32::from(self.tx_dma_offset & 0xFF));
-        self.add_command_byte(byte);
+        self.tx_fifo.push_back(byte);
         self.tx_dma_offset = self.tx_dma_offset.wrapping_add(1);
         self.cdcomtxinx = self.cdcomtxinx.wrapping_add(1);
         if self.cdcomtxinx == self.cdcomtxcmp {
             self.intreq |= CDINT_TXDMADONE;
+        }
+    }
+
+    /// Drive side of the command link: parse delivered bytes into the
+    /// command buffer, one command at a time. Parsing pauses at a
+    /// complete command (its turnaround then runs in `tick`), while a
+    /// reply is undelivered, and for the whole of a lead-in dump.
+    ///
+    /// The dump hold is calibrated against a real CD32: the drive's
+    /// microcontroller finishes streaming the TOC (spin-up included)
+    /// before it acts on the next queued command. Acting on it mid-dump
+    /// delivers its reply early, and the KS driver's dump wait -- which
+    /// waits on reply-or-TOC-complete -- aborts and reports "no disc" to
+    /// the CDUI's one-shot CD_CHANGESTATE, starting the boot-screen show
+    /// a real cold boot with a disc inserted never shows. The bytes
+    /// behind the held command keep arriving from the TX DMA, so the
+    /// queued commands come out intact and in order once the dump ends.
+    fn parse_commands(&mut self) {
+        while self.can_send_command() && self.toc_counter < 0 {
+            let Some(byte) = self.tx_fifo.pop_front() else {
+                break;
+            };
+            self.add_command_byte(byte);
         }
     }
 
@@ -1225,7 +1268,9 @@ impl Akiko {
             _ => 0,
         };
         if len == 0 {
-            self.intreq |= CDINT_DRIVEXMIT;
+            if self.tx_fifo_has_room() {
+                self.intreq |= CDINT_DRIVEXMIT;
+            }
             return;
         }
         self.start_return_data(len);
@@ -1529,7 +1574,9 @@ impl Akiko {
             // The next packet begins at base + the visible index.
             self.rx_dma_offset = u16::from(self.cdcomrxinx);
             self.intreq &= !CDINT_DRIVERECV;
-            self.intreq |= CDINT_DRIVEXMIT;
+            if self.tx_fifo_has_room() {
+                self.intreq |= CDINT_DRIVEXMIT;
+            }
         }
     }
 
@@ -2845,6 +2892,69 @@ mod tests {
         assert_ne!(akiko.intreq & CDINT_DRIVEXMIT, 0);
     }
 
+    #[test]
+    fn pio_port_reports_transmitter_busy_while_the_drive_buffer_is_full() {
+        // A PIO producer polls DRIVEXMIT before each command byte. While
+        // the drive's receive buffer is full (a lead-in dump keeps the
+        // drive from parsing), the latch stays clear and a byte written
+        // anyway is an overrun that is dropped, never queued past the
+        // buffer: the latch only ever promises room that exists.
+        let mut ring = CdAudioRing::default();
+        let mut chip = vec![0u8; 64 * 1024];
+        let mut akiko = Akiko::new();
+        akiko.insert_disc(test_disc());
+        akiko.tick(2048, &mut chip, &mut ring);
+        akiko.cd_initialized = 2;
+        akiko.receive_length = 0;
+        akiko.intena = 0;
+        akiko.intreq = CDINT_DRIVEXMIT;
+        akiko.write(AKIKO_BASE + 0x24, 4, 0, &mut chip);
+
+        // A dump in flight (still behind the spin-up gate, so no entry
+        // streams): the drive parses nothing until it ends. Fill its
+        // buffer with LED packets; the last one is still two bytes short.
+        akiko.toc_counter = 0;
+        akiko.toc_spin_up_cck = i64::MAX / 4;
+        let led = [0x15u8, 0x00, 0xEA];
+        for i in 0..TX_FIFO_BYTES {
+            akiko.tx_fifo.push_back(led[i % 3]);
+        }
+        akiko.write(AKIKO_BASE + 0x28, 1, 0x00, &mut chip);
+        assert_eq!(akiko.tx_fifo.len(), TX_FIFO_BYTES, "overrun byte dropped");
+        assert_eq!(
+            akiko.read(AKIKO_BASE + 0x04, 4, &mut chip) & CDINT_DRIVEXMIT,
+            0,
+            "no room: transmitter stays busy"
+        );
+
+        // The dump ends and the drive drains its backlog, one packet per
+        // turnaround, every one still aligned.
+        akiko.toc_counter = -1;
+        akiko.toc_spin_up_cck = 0;
+        for _ in 0..(TX_FIFO_BYTES / 3 + 4) {
+            akiko.tick(CMD_EXEC_DELAY_CCK, &mut chip, &mut ring);
+        }
+        assert!(akiko.tx_fifo.is_empty(), "drive parsed the whole backlog");
+        assert!(!akiko.checksum_error, "packets stayed aligned");
+        assert_ne!(
+            akiko.intreq & CDINT_DRIVEXMIT,
+            0,
+            "room again: transmitter ready"
+        );
+
+        // The producer finishes the packet it was holding back.
+        for &byte in &[0x00u8, 0xEA] {
+            assert_ne!(
+                akiko.read(AKIKO_BASE + 0x04, 4, &mut chip) & CDINT_DRIVEXMIT,
+                0
+            );
+            akiko.write(AKIKO_BASE + 0x28, 1, u32::from(byte), &mut chip);
+        }
+        akiko.tick(CMD_EXEC_DELAY_CCK, &mut chip, &mut ring);
+        assert!(!akiko.checksum_error);
+        assert_eq!(akiko.command_length, 0, "the held packet completed and ran");
+    }
+
     /// Two-bank space: chip at 0 and "fast" at $200000, like a CD32 with
     /// a Zorro II RAM expansion.
     struct SplitSpace {
@@ -3283,6 +3393,184 @@ mod tests {
             frame_phase_after_dump(0),
             frame_phase_after_dump(0x40),
             "the data-speed bit must not change cached TOC pacing"
+        );
+    }
+
+    #[test]
+    fn tx_dma_drains_the_command_ring_while_a_toc_dump_streams() {
+        // Kickstart's driver queues an unpause right behind its lead-in
+        // request, then a 3-byte LED packet for every TOC entry it
+        // receives. The drive acts on none of them until the dump ends,
+        // but Akiko's TX DMA must keep draining the ring into the drive
+        // meanwhile: on a 39-track disc the 126 LED packets (378 bytes)
+        // lap the 256-byte ring otherwise, and the lapped bytes -- and
+        // the held unpause, overwritten by them -- parse as garbage
+        // that fails its checksum once the dump ends (observed at boot
+        // with Pinball Illusions CD32, 39 tracks: four checksum-error
+        // replies the real drive never sends).
+        fn queue_packet(akiko: &mut Akiko, chip: &mut [u8], tx_base: usize, packet: &[u8]) {
+            // Eight-bit producer index arithmetic, like Kickstart's.
+            let start = akiko.cdcomtxcmp as usize;
+            let mut checksum = 0xFFu8;
+            for (i, b) in packet.iter().enumerate() {
+                chip[tx_base + ((start + i) & 0xFF)] = *b;
+                checksum = checksum.wrapping_sub(*b);
+            }
+            chip[tx_base + ((start + packet.len()) & 0xFF)] = checksum;
+            let end = (start + packet.len() + 1) as u8;
+            akiko.write(AKIKO_BASE + 0x1D, 1, u32::from(end), chip);
+        }
+        fn packet_len(first: u8) -> usize {
+            match first & 0x0F {
+                0x00 => 2,
+                0x06 => 16,
+                0x07 => 21,
+                _ => 3,
+            }
+        }
+
+        let mut ring = CdAudioRing::default();
+        let mut chip = vec![0u8; 64 * 1024];
+        let mut akiko = Akiko::new();
+        akiko.insert_disc(test_disc());
+        akiko.toc_spin_up_cck = 0;
+        akiko.tick(2048, &mut chip, &mut ring);
+        akiko.cd_initialized = 2;
+        akiko.receive_length = 0;
+        // A 39-track disc's cached TOC: three session entries plus one
+        // per track, 42 points x TOC_REPEAT = 126 packets.
+        const TRACKS: u8 = 39;
+        let mut toc = vec![
+            TocEntry {
+                point: 0xA0,
+                control: 0,
+                address: 1,
+            },
+            TocEntry {
+                point: 0xA1,
+                control: 0,
+                address: u32::from(TRACKS),
+            },
+            TocEntry {
+                point: 0xA2,
+                control: 0,
+                address: 300_000,
+            },
+        ];
+        for track in 1..=TRACKS {
+            toc.push(TocEntry {
+                point: track,
+                control: if track == 1 { 0x04 } else { 0 },
+                address: u32::from(track) * 5_000,
+            });
+        }
+        akiko.toc = toc;
+        let toc_packets = 42 * TOC_REPEAT as usize;
+
+        const MISC: u32 = 0x0000_1000;
+        akiko.write(AKIKO_BASE + 0x14, 4, MISC, &mut chip);
+        akiko.write(AKIKO_BASE + 0x24, 4, CDFLAG_TXD | CDFLAG_RXD, &mut chip);
+        let tx_base = (MISC | 0x200) as usize;
+        let rx_base = MISC as usize;
+        akiko.write(
+            AKIKO_BASE + 0x1F,
+            1,
+            u32::from(akiko.cdcomrxinx.wrapping_sub(1)),
+            &mut chip,
+        );
+
+        // Lead-in play (the TOC request), then the unpause queued behind
+        // it before a single entry has arrived.
+        queue_packet(
+            &mut akiko,
+            &mut chip,
+            tx_base,
+            &[
+                0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00,
+            ],
+        );
+        queue_packet(&mut akiko, &mut chip, tx_base, &[0x23]);
+
+        // Consume the response stream as the driver would, and answer
+        // every TOC entry with an LED toggle.
+        let mut stream: Vec<u8> = Vec::new();
+        let mut packets: Vec<Vec<u8>> = Vec::new();
+        let mut parsed = 0usize;
+        let mut seen = akiko.cdcomrxinx;
+        let mut toc_seen = 0usize;
+        let mut sequence = 3u8;
+        let mut max_lag = 0u8;
+        let mut dump_done_at = None;
+        for step in 0..20_000 {
+            akiko.tick(500, &mut chip, &mut ring);
+            while seen != akiko.cdcomrxinx {
+                stream.push(chip[rx_base + seen as usize]);
+                seen = seen.wrapping_add(1);
+            }
+            if akiko.cdcomrxcmp.wrapping_sub(akiko.cdcomrxinx) < 32 {
+                akiko.write(
+                    AKIKO_BASE + 0x1F,
+                    1,
+                    u32::from(akiko.cdcomrxinx.wrapping_sub(1)),
+                    &mut chip,
+                );
+            }
+            while parsed < stream.len() && stream.len() - parsed >= packet_len(stream[parsed]) {
+                let len = packet_len(stream[parsed]);
+                let packet = stream[parsed..parsed + len].to_vec();
+                parsed += len;
+                if packet[0] & 0x0F == 0x06 {
+                    toc_seen += 1;
+                    let led = [(sequence << 4) | 0x05, (toc_seen & 1) as u8];
+                    sequence = (sequence % 15) + 1;
+                    queue_packet(&mut akiko, &mut chip, tx_base, &led);
+                }
+                packets.push(packet);
+            }
+            max_lag = max_lag.max(akiko.cdcomtxcmp.wrapping_sub(akiko.cdcomtxinx));
+            if akiko.toc_counter < 0 && dump_done_at.is_none() && toc_seen == toc_packets {
+                dump_done_at = Some(step);
+            }
+            if dump_done_at.is_some_and(|at| step > at + 64)
+                && akiko.tx_fifo.is_empty()
+                && akiko.command_active == 0
+                && akiko.receive_length == 0
+            {
+                break;
+            }
+        }
+
+        // The TX DMA kept up with the producer instead of letting the
+        // ring lap: a packet or two in flight at most, never 256 bytes.
+        assert!(max_lag < 16, "TX ring lagged by {max_lag} bytes");
+        assert_eq!(akiko.cdcomtxinx, akiko.cdcomtxcmp, "ring fully drained");
+        assert!(akiko.tx_fifo.is_empty(), "drive parsed every byte");
+
+        // Response order: the request's ack, every TOC entry, and only
+        // then the unpause reply -- intact, not an error, and nothing
+        // else (the LED packets asked for no reply, and none of them
+        // parsed as garbage).
+        assert_eq!(packets[0][0], 0x14, "lead-in play acknowledged");
+        let toc_replies: Vec<&Vec<u8>> = packets.iter().filter(|p| p[0] & 0x0F == 6).collect();
+        assert_eq!(toc_replies.len(), toc_packets);
+        assert_eq!(
+            packets.len(),
+            toc_packets + 2,
+            "unexpected replies: {:02x?}",
+            packets
+                .iter()
+                .filter(|p| p[0] & 0x0F != 6)
+                .collect::<Vec<_>>()
+        );
+        let last = packets.last().unwrap();
+        assert_eq!(
+            last[0], 0x23,
+            "unpause answered after the dump: {last:02x?}"
+        );
+        assert_eq!(last[1] & 0x80, 0, "unpause not an error: {last:02x?}");
+        assert!(
+            packets[packets.len() - 2][0] & 0x0F == 6,
+            "the unpause waited for the last TOC entry"
         );
     }
 
