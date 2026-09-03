@@ -582,9 +582,11 @@ this wait loop to the case that denied it: fixed DMA (`refresh`,
 a BLTPRI-set blitter including the warm-up fence (where the slot's recorded
 owner is idle), and `port` for the 020+ chip port's two-clock turnaround,
 which is a wait on the CPU's own bus unit rather than a denial. The class is
-taken from the CPU's view of the arbitration before each missed clock and
-recorded on the cold bus-observer path, so arming it leaves the timeline
-untouched. Tests: `frame_analyzer_attributes_cpu_wait_to_nice_blitter`,
+taken before each missed clock from the arbitration view the waiting access
+is subject to: a synchronous grant sees the CPU's view (fence and yield
+included); a posted 020+ write drains through the ordinary arbitration,
+where a busy blitter keeps every access cycle. It is recorded on the cold
+bus-observer path, so arming it leaves the timeline untouched. Tests: `frame_analyzer_attributes_cpu_wait_to_nice_blitter`,
 `frame_analyzer_attributes_cpu_wait_to_bltpri_fence`.
 
 ### Area fill

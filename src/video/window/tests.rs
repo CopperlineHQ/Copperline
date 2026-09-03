@@ -6868,6 +6868,47 @@ fn console_history_and_stack_walk() {
 }
 
 #[test]
+fn console_cpuwait_summarises_the_traced_frame() {
+    let mut app = test_app();
+    app.open_console();
+
+    // Listed by HELP, and honest about needing a trace.
+    let out = console_run(&mut app, "HELP");
+    assert!(out.iter().any(|l| l.contains("cpuwait")), "{out:?}");
+    let out = console_run(&mut app, "CPUWAIT");
+    assert!(out[0].contains("no frame trace"), "{out:?}");
+
+    // With a traced frame: the headline, and every listed class and PC
+    // accounts for a share of the waited clocks.
+    app.open_frame_analyzer();
+    app.frame_analyzer_step_frame();
+    let trace = app.emu.bus().frame_bus_trace().expect("traced frame");
+    let (frame, waited) = (trace.frame, trace.cpu_wait_cck);
+    let out = console_run(&mut app, "CPUWAIT");
+    assert!(
+        out[0].starts_with(&format!("frame {frame}: cpu waited {waited} cck")),
+        "{out:?}"
+    );
+    let classes = out
+        .iter()
+        .filter(|l| {
+            crate::bus::CPU_WAIT_CLASS_NAMES
+                .iter()
+                .any(|name| l.trim_start().starts_with(name))
+        })
+        .count();
+    let pcs = out
+        .iter()
+        .filter(|l| l.trim_start().starts_with('$'))
+        .count();
+    if waited == 0 {
+        assert_eq!((classes, pcs), (0, 0), "{out:?}");
+    } else {
+        assert!(classes >= 1 && pcs >= 1, "{out:?}");
+    }
+}
+
+#[test]
 fn console_inspection_and_stop_commands() {
     let mut app = test_app();
     app.open_console();

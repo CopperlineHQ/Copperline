@@ -3936,19 +3936,24 @@ fn draw_scanline_strip(
     scale: usize,
 ) {
     fill_rect(frame, scale_rect(rect, scale), rgba(10, 12, 14), scale);
-    let row = if cpu_wait {
-        trace.cpu_wait_row(trace.selected_vpos)
-    } else {
-        trace.owner_row(trace.selected_vpos)
-    };
-    if let Some(row) = row {
+    if let Some(row) = trace.owner_row(trace.selected_vpos) {
+        let waits = trace.cpu_wait_row(trace.selected_vpos);
         for x in 0..rect.w {
             let hpos = x * trace.cols / rect.w.max(1);
-            let code = row[hpos.min(row.len().saturating_sub(1))];
-            let color = if cpu_wait {
-                cpu_wait_color(code)
+            let slot = hpos.min(row.len().saturating_sub(1));
+            // The wait view overlays the denied slots on the dimmed owner
+            // pattern, exactly as the raster does.
+            let wait_code = if cpu_wait {
+                waits.map_or(b'.', |waits| waits[slot.min(waits.len().saturating_sub(1))])
             } else {
-                owner_color(code)
+                b'.'
+            };
+            let color = if wait_code != b'.' {
+                cpu_wait_color(wait_code)
+            } else if cpu_wait {
+                quarter_rgba(owner_color(row[slot]))
+            } else {
+                owner_color(row[slot])
             };
             fill_rect(
                 frame,

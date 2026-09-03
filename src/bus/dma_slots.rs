@@ -526,12 +526,17 @@ impl Bus {
     }
 
     /// Who is denying the CPU the current colour clock, for the frame
-    /// analyzer's wait attribution. Uses the CPU's own view of the
-    /// arbitration (`scheduled_dma_owner(true)`), so a BLTPRI warm-up fence
-    /// reads as the blitter even though the slot's recorded owner is idle;
-    /// a slot the CPU could have used is the 020+ port turnaround wait.
-    pub(super) fn cpu_bus_denial_class(&self) -> CpuWaitClass {
-        match self.scheduled_dma_owner(true) {
+    /// analyzer's wait attribution. `for_cpu` selects the arbitration view
+    /// the waiting access is actually subject to: a synchronous grant sees
+    /// the CPU's view (`scheduled_dma_owner(true)`), so a BLTPRI warm-up
+    /// fence reads as the blitter even though the slot's recorded owner is
+    /// idle, and the slowdown counter's yield reads as a free slot; a posted
+    /// 020+ write drains through the ordinary arbitration
+    /// (`scheduled_dma_owner(false)`), where a busy blitter keeps every
+    /// access cycle. A slot the access could have used is the 020+ port
+    /// turnaround wait.
+    pub(super) fn cpu_bus_denial_class(&self, for_cpu: bool) -> CpuWaitClass {
+        match self.scheduled_dma_owner(for_cpu) {
             ChipBusOwner::Refresh => CpuWaitClass::Refresh,
             ChipBusOwner::Bitplane => CpuWaitClass::Bitplane,
             ChipBusOwner::Sprite => CpuWaitClass::Sprite,

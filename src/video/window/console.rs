@@ -211,7 +211,7 @@ const CONSOLE_HELP: &[&str] = &[
     "            btrap V [H]   cbreak ADDR   catch irq N|trap N|vec N",
     "            catchtask [NAME]   catchalert   breaks (list)   clearbreaks",
     "inspect:    status  regs/r  mem/m ADDR [BYTES]  dis/d [ADDR] [N]",
-    "            copper [pc|ADDR] [N]   custom   blits   find HEX [START]",
+    "            copper [pc|ADDR] [N]   custom   blits   cpuwait   find HEX [START]",
     "            writer ADDR   dbgres",
     "            history/h [N]   stack/bt",
     "os:         tasks  task [ADDR|NAME]  execbase  memlist  segments",

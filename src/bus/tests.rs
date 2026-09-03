@@ -320,6 +320,77 @@ fn frame_analyzer_attributes_cpu_wait_to_fixed_dma() {
 }
 
 #[test]
+fn frame_analyzer_attributes_posted_write_drain_waits_to_the_blitter() {
+    // A posted 020 chip write drains through the ordinary arbitration, in
+    // which a busy nice blitter keeps every access cycle: the slowdown
+    // yield that frees a synchronous grant after three misses does not
+    // apply to the drain, so every clock it waits belongs to the blitter,
+    // however many in a row the CPU misses. Only the port turnaround the
+    // following read pays after the drain is the CPU's own.
+    let mut bus = empty_bus();
+    bus.set_chipset_revisions(AgnusRevision::Ecs8375, DeniseRevision::Ecs8373);
+    bus.set_cpu_clocks_per_cck(4);
+    bus.set_cpu_short_bus_cycle(true);
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BLTEN;
+    bus.agnus.hpos = 0x20;
+    bus.blitter.bltcon0 = 0x0E00;
+    bus.blitter.bltcon1 = 0;
+    bus.blitter.bltafwm = 0xFFFF;
+    bus.blitter.bltalwm = 0xFFFF;
+    bus.blitter.bltapt = 0x10;
+    bus.blitter.bltbpt = 0x20;
+    bus.blitter.bltcpt = 0x30;
+    for (off, val) in [
+        (0x10, 0x1111),
+        (0x12, 0x2222),
+        (0x14, 0x3333),
+        (0x16, 0x4444),
+        (0x20, 0xAAAA),
+        (0x22, 0xBBBB),
+        (0x24, 0xCCCC),
+        (0x26, 0xDDDD),
+        (0x30, 0x5555),
+        (0x32, 0x6666),
+        (0x34, 0x7777),
+        (0x36, 0x8888),
+    ] {
+        write_chip_word(&mut bus, off, val);
+    }
+    bus.blitter.start_scheduled((1 << 6) | 4, &bus.mem.chip_ram);
+    bus.advance_chipset(4);
+    bus.set_frame_analyzer_enabled(true);
+    bus.set_cpu_bus_arbitration_enabled(true);
+
+    // The write posts without stalling; the read that follows first
+    // retires it, waiting out the blit's remaining source fetches.
+    bus.grant_cpu_bus_access_at(Some(0x0002_0000), 2, CpuBusAccessKind::Write);
+    assert_eq!(bus.take_slice_bus_advance().0, 0);
+    bus.grant_cpu_bus_access_at(Some(0x0002_0000), 2, CpuBusAccessKind::Read);
+    let (cck, _) = bus.take_slice_bus_advance();
+    assert!(!bus.blitter.busy);
+
+    let trace = bus
+        .frame_bus_trace()
+        .expect("the armed analyzer records the slice");
+    let nice = trace.cpu_wait_by_class[CpuWaitClass::BlitterNice.accounting_index()];
+    let port = trace.cpu_wait_by_class[CpuWaitClass::Port.accounting_index()];
+    assert!(
+        nice > u64::from(BLITTER_SLOWDOWN_CPU_MISS_LIMIT),
+        "drain waits stay the blitter's past the slowdown limit: {nice} of {cck}"
+    );
+    assert_eq!(
+        trace.cpu_wait_by_kind[CpuBusAccessKind::Write.accounting_index()],
+        nice
+    );
+    assert!(port >= 1, "the read pays the port turnaround: {port}");
+    assert_eq!(
+        trace.cpu_wait_by_kind[CpuBusAccessKind::Read.accounting_index()],
+        port
+    );
+    assert_eq!(trace.cpu_wait_cck, nice + port);
+}
+
+#[test]
 fn frame_analyzer_attributes_cpu_wait_to_bltpri_fence() {
     // The bltpri_stalls_cpu_chip_access_through_blitter_access_cycles
     // scenario with the analyzer armed: the A fetch and the fenced first-D

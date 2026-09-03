@@ -5708,7 +5708,7 @@ impl Bus {
                 || (self.cpu_short_bus_cycle && self.emulated_cck < self.cpu_chip_port_free_at)
             {
                 if self.frame_analyzer_enabled {
-                    self.cpu_bus_wait = Some(self.cpu_bus_wait_sample(kind));
+                    self.cpu_bus_wait = Some(self.cpu_bus_wait_sample(kind, true));
                 }
                 let (cck, tick) = self.advance_one_chip_bus_quantum(None);
                 wait_cck += cck;
@@ -5916,10 +5916,12 @@ impl Bus {
         while self.cpu_posted_write_debt > 0 {
             let debt_before = self.cpu_posted_write_debt;
             if self.frame_analyzer_enabled {
-                // Attributed as the write it is retiring; a quantum that
-                // does drain it records the CPU as the slot owner instead,
-                // so the sample only lands on genuinely missed clocks.
-                self.cpu_bus_wait = Some(self.cpu_bus_wait_sample(CpuBusAccessKind::Write));
+                // Attributed as the write it is retiring, from the ordinary
+                // arbitration the drain is subject to (no BLS yield, no
+                // fence). A quantum that does drain it records the CPU as
+                // the slot owner instead, so the sample only lands on
+                // genuinely missed clocks.
+                self.cpu_bus_wait = Some(self.cpu_bus_wait_sample(CpuBusAccessKind::Write, false));
             }
             let (cck, tick) = self.advance_one_chip_bus_quantum(None);
             if self.cpu_posted_write_debt == debt_before {
@@ -5931,13 +5933,14 @@ impl Bus {
     }
 
     /// The analyzer's attribution of the colour clock the CPU is about to
-    /// miss: who holds the slot from the CPU's point of view (the BLTPRI
-    /// warm-up fence included, unlike the recorded owner), what access is
-    /// pending, and the instruction that made it. Side-effect free; only
-    /// evaluated while the frame analyzer is armed.
-    fn cpu_bus_wait_sample(&self, kind: CpuBusAccessKind) -> CpuWaitSample {
+    /// miss: who holds the slot from the waiting access's point of view
+    /// (`for_cpu`: the CPU's own view for a synchronous grant, the ordinary
+    /// arbitration for a posted-write drain; see `cpu_bus_denial_class`),
+    /// what access is pending, and the instruction that made it.
+    /// Side-effect free; only evaluated while the frame analyzer is armed.
+    fn cpu_bus_wait_sample(&self, kind: CpuBusAccessKind, for_cpu: bool) -> CpuWaitSample {
         CpuWaitSample {
-            class: self.cpu_bus_denial_class(),
+            class: self.cpu_bus_denial_class(for_cpu),
             kind,
             pc: self.cpu_pc,
         }
