@@ -106,6 +106,48 @@ pub fn build_image(
     Ok(b.finish())
 }
 
+/// Build a standard DD floppy filesystem from a host directory tree.
+///
+/// Unlike [`build_image`], whose geometry is a partition hardfile, this pins
+/// the volume to 80 tracks x 2 sides x 11 sectors and installs the AmigaDOS
+/// floppy boot code when requested. The directory/hash/file writer is shared,
+/// so exported ADFs and directory-backed hardfiles cannot drift in their OFS
+/// layout.
+pub fn build_floppy_image(
+    dir: &Path,
+    volume_name: &str,
+    filesystem: crate::diskimage::FileSystem,
+    bootable: bool,
+) -> anyhow::Result<Vec<u8>> {
+    debug_assert!(
+        filesystem.variant == crate::diskimage::Variant::Plain,
+        "dirfs only builds plain OFS/FFS volumes"
+    );
+    let entries = scan_tree(dir)?;
+    let total_blocks = crate::diskimage::FLOPPY_DD_BLOCKS as usize;
+    let content_blocks: u64 = 3 + entries
+        .iter()
+        .map(|entry| entry.blocks_needed(filesystem))
+        .sum::<u64>();
+    let available = total_blocks as u64 - bitmap_overhead(total_blocks as u64);
+    if content_blocks > available {
+        anyhow::bail!(
+            "directory {} does not fit on a DD floppy (needs at least {} content blocks, {} available)",
+            dir.display(),
+            content_blocks,
+            available
+        );
+    }
+    let mut builder = Builder::new(total_blocks, volume_name, filesystem);
+    let root_key = builder.root_key;
+    builder.write_tree(dir, &entries, root_key)?;
+    let root = u64::from(builder.root_key);
+    let mut image = builder.finish();
+    image[..BSIZE].copy_from_slice(&crate::diskimage::boot_block(filesystem, bootable, root));
+    image[BSIZE..BSIZE * 2].fill(0);
+    Ok(image)
+}
+
 /// One directory entry found by the host-tree scan.
 struct EntryPlan {
     name: Vec<u8>,
@@ -678,6 +720,31 @@ mod tests {
         std::fs::write(dir.join("Sub/Deeper/empty"), b"").unwrap();
         std::fs::write(dir.join("spaß"), b"sharp_s").unwrap();
         dir
+    }
+
+    #[test]
+    fn bootable_floppy_reuses_the_directory_tree_writer() {
+        let source = temp_tree();
+        let image = build_floppy_image(
+            &source,
+            "Copperline",
+            crate::diskimage::FileSystem::OFS,
+            true,
+        )
+        .expect("floppy image");
+        assert_eq!(
+            image.len(),
+            crate::diskimage::FLOPPY_DD_BLOCKS as usize * BSIZE
+        );
+        assert_eq!(&image[..4], b"DOS\0");
+        assert_ne!(&image[12..32], &[0; 20], "boot code missing");
+        let reader = Reader::ofs(&image);
+        assert_eq!(reader.root_key(), 880);
+        let readme = reader
+            .lookup(reader.root_key(), b"ReadMe.txt")
+            .expect("root file");
+        assert_eq!(reader.read_file(readme), b"hello amiga\n");
+        std::fs::remove_dir_all(source).ok();
     }
 
     #[test]

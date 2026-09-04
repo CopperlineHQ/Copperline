@@ -75,6 +75,7 @@ struct LaunchArgs {
     run_args: Option<String>,
     binary: Option<PathBuf>,
     config: Option<String>,
+    rom: Option<PathBuf>,
     factory: bool,
     headless: bool,
     noaudio: bool,
@@ -170,6 +171,7 @@ fn parse_launch(args: &Value) -> Result<LaunchArgs, String> {
         run_args,
         binary: opt_string(args, "copperline").map(PathBuf::from),
         config: opt_string(args, "config"),
+        rom: opt_string(args, "rom").map(PathBuf::from),
         factory: args["factory"].as_bool().unwrap_or(false),
         headless: args["headless"].as_bool().unwrap_or(false),
         noaudio: args["noAudio"].as_bool().unwrap_or(false),
@@ -283,6 +285,9 @@ impl Session {
         if let Some(config) = &launch.config {
             spec.args.push("--config".into());
             spec.args.push(config.clone());
+        }
+        if let Some(rom) = &launch.rom {
+            spec.args.push(rom.display().to_string());
         }
         let program = launch
             .program
@@ -1173,6 +1178,11 @@ impl Session {
             "exceptionInfo" => self.exception_info(),
             "source" => Err("source content is not available from the adapter".into()),
             "copperline/profile" => self.profile(emit, args),
+            "copperline/chipset" => Ok(json!({"registers": vars::chipset(&self.bridge)})),
+            "copperline/ui.show" => {
+                let window = args["window"].as_str().ok_or("ui.show needs a window")?;
+                self.call("ui.show", json!({"window": window}))
+            }
             other => Err(format!("{other}: not supported")),
         };
         result
@@ -2242,9 +2252,17 @@ impl Session {
                             .join(" ")
                     })
                     .unwrap_or_default();
+                let instruction = line["text"].as_str().unwrap_or("??");
+                let timing = match (line["cycles_min"].as_u64(), line["cycles_max"].as_u64()) {
+                    (Some(minimum), Some(maximum)) if minimum == maximum => {
+                        format!(" ; {minimum} cyc")
+                    }
+                    (Some(minimum), Some(maximum)) => format!(" ; {minimum}-{maximum} cyc"),
+                    _ => String::new(),
+                };
                 out.push(json!({
                     "address": format!("0x{a:X}"),
-                    "instruction": line["text"].as_str().unwrap_or("??"),
+                    "instruction": format!("{instruction}{timing}"),
                     "instructionBytes": bytes,
                 }));
                 at = a.wrapping_add(len);
@@ -2515,6 +2533,7 @@ mod tests {
         std::fs::write(&prog, b"x").unwrap();
         let args = parse_launch(&json!({
             "program": prog.display().to_string(),
+            "rom": prog.display().to_string(),
             "args": ["a", "b"],
             "model": "A1200",
             "fast": "8M",
@@ -2529,6 +2548,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(args.run_args.as_deref(), Some("a b"));
+        assert_eq!(args.rom.as_deref(), Some(prog.as_path()));
         assert_eq!(
             args.extra,
             vec![

@@ -57,6 +57,17 @@ named from the running guest's live library/device vectors (for example,
 `[exec] AllocMem+$12` and `[Kick]exec/AllocMem`); no matching ROM ELF is
 required.
 
+The debug toolbar also opens Copperline's native Debugger, Console, and Frame
+Analyzer windows. The Debug sidebar has a DAP-fed **Custom Registers** tree
+whose tooltips come from Copperline's register documentation. From the command
+palette, **Init Amiga Project** creates a C demo (system takeover, Copper,
+blitter bob, VBL interrupt and uaelib helpers) with Bartman, bebbo, and
+vbcc/vasm Makefile support plus six machine launch presets. **Convert EXE to
+ADF** and **Profile File Size** expose the matching `copperline-ctl` tools.
+
+The extension pack recommends `prb28.amiga-assembly` for Amiga assembly syntax,
+documentation, and language tooling rather than duplicating those features.
+
 To attach to an emulator you started yourself:
 
 ```sh

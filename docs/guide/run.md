@@ -10,6 +10,14 @@ copperline --run build/hello --run-args "-level 2"
 copperline --run build/hello --run-stack 32768 --run-detach
 ```
 
+To turn an already linked hunk executable into a standard 880 KiB floppy, use
+`copperline-ctl exe2adf PROG --boot [--out PROG.adf]`. It writes the executable
+and `S/Startup-Sequence` through the same OFS directory-tree writer used by
+Copperline's virtual filesystems; `--boot` installs the AmigaDOS boot block.
+Omit `--boot` for a mountable data disk. The executable's filename must be 1-30
+Latin-1 characters and cannot contain `:` or `/`; the generated script uses the
+same single-byte name stored in the disk directory.
+
 ## How it works
 
 When `--run` is used, Copperline mounts two virtual filesystem volumes using the

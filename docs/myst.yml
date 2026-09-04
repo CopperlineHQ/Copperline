@@ -49,6 +49,11 @@ project:
     - title: Extending
       children:
         - file: zorro.md
+    - title: Reference
+      children:
+        - file: reference/custom-registers/index.md
+        - pattern: reference/custom-registers/*.md
+          hidden: true
     - title: Debugging
       children:
         - file: debugger/window.md

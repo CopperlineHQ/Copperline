@@ -71,7 +71,7 @@ Commands are case-insensitive. Addresses and data values use hexadecimal notatio
 | `MEM ADDR [BYTES]` (or `M`) | Hex/ASCII memory dump (default 64 bytes) |
 | `DIS [ADDR] [N]` (or `D`) | Disassemble `N` instructions starting at `ADDR` (default: PC) |
 | `COPPER [PC\|ADDR] [N]` | Disassemble Copper list |
-| `CUSTOM` | Display custom chipset register summary |
+| `CUSTOM [REG]` | Display the chipset summary, or one register with shared access/chipset documentation and decoded fields |
 | `BLITS` | List all blits referenced by the traced frame, including stable ID, cross-frame beam span, direction/fill/line mode, channels, pointers/modulos, shifts/masks/minterm, and clocks used versus stalled (requires Frame Analyzer) |
 | `CPUWAIT` | Summarise the traced frame's CPU chip-bus waits: waited clocks by denier (bitplane, Copper, blitter with BLTPRI clear or set, ...) and by access kind, and the instructions that waited longest (requires Frame Analyzer; see [the CPU wait view](window.md#frame-analyzer-pane)) |
 | `FIND HEXBYTES [START]` | Search CPU-visible memory (RAM and ROM) for byte sequence |

@@ -400,6 +400,13 @@ impl Session {
 
     fn dispatch_host(&mut self, id: Value, op: HostOp) -> Result<Option<SessionEnd>> {
         match op {
+            HostOp::UiShow { .. } => {
+                self.write(&proto::err_line(
+                    &id,
+                    &CtlError::unsupported("ui.show requires a windowed --control-gui session"),
+                ))?;
+                Ok(None)
+            }
             HostOp::Pause => {
                 // Already paused: reply with the current position.
                 let stop = exec::stop_snapshot(&self.emu, "pause", "already paused");
@@ -979,6 +986,7 @@ impl Session {
                 }
                 Request::Host(
                     op @ (HostOp::FloppyInsert { .. }
+                    | HostOp::UiShow { .. }
                     | HostOp::FloppyEject { .. }
                     | HostOp::CdInsert { .. }
                     | HostOp::CdEject

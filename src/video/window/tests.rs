@@ -7698,6 +7698,21 @@ mod control_drain {
     }
 
     #[test]
+    fn ui_show_opens_each_native_tool_window() {
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        for (id, window) in [(1, "debugger"), (2, "console"), (3, "analyzer")] {
+            push(&cmd_tx, id, "ui.show", json!({"window": window}));
+            app.drain_control();
+            let response = reply(&reply_rx);
+            assert_eq!(response["result"]["window"], window);
+            assert_eq!(response["result"]["shown"], true);
+        }
+        assert!(app.debugger_panel.is_some());
+        assert!(app.console_panel.is_some());
+        assert!(app.frame_analyzer_panel.is_some());
+    }
+
+    #[test]
     fn a_control_heatmap_request_takes_the_map_over_from_the_pane() {
         use crate::video::ui::{AnalyzerTab, UiControl};
 

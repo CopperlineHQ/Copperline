@@ -21,6 +21,169 @@ const CC: [&str; 16] = [
     "T", "F", "HI", "LS", "CC", "CS", "NE", "EQ", "VC", "VS", "PL", "MI", "GE", "LT", "GT", "LE",
 ];
 
+/// A side-effect-free bus used to ask the m68k core for the timing of one
+/// instruction. The copied instruction stream lives at `BASE`; every other
+/// byte reads as zero and writes stay inside this private buffer.
+struct TimingBus {
+    instruction: [u8; 64],
+    instruction_len: usize,
+    writes: Vec<(u16, u8)>,
+    cached: bool,
+}
+
+impl TimingBus {
+    const BASE: u32 = 0x1000;
+
+    fn new(instruction: &[u8], cached: bool) -> Self {
+        let mut bytes = [0; 64];
+        bytes[..instruction.len()].copy_from_slice(instruction);
+        Self {
+            instruction: bytes,
+            instruction_len: instruction.len(),
+            writes: Vec::with_capacity(16),
+            cached,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.writes.clear();
+    }
+
+    fn read(&self, address: u32) -> u8 {
+        let address = address as u16;
+        if let Some((_, value)) = self
+            .writes
+            .iter()
+            .rev()
+            .find(|(written, _)| *written == address)
+        {
+            return *value;
+        }
+        let offset = address.wrapping_sub(Self::BASE as u16) as usize;
+        if offset < self.instruction_len {
+            self.instruction[offset]
+        } else {
+            0
+        }
+    }
+
+    fn write(&mut self, address: u32, value: u8) {
+        let address = address as u16;
+        if let Some((_, old)) = self
+            .writes
+            .iter_mut()
+            .rev()
+            .find(|(written, _)| *written == address)
+        {
+            *old = value;
+        } else {
+            self.writes.push((address, value));
+        }
+    }
+}
+
+impl m68k::AddressBus for TimingBus {
+    fn read_byte(&mut self, address: u32) -> u8 {
+        self.read(address)
+    }
+
+    fn read_word(&mut self, address: u32) -> u16 {
+        u16::from_be_bytes([self.read(address), self.read(address.wrapping_add(1))])
+    }
+
+    fn read_long(&mut self, address: u32) -> u32 {
+        u32::from_be_bytes([
+            self.read(address),
+            self.read(address.wrapping_add(1)),
+            self.read(address.wrapping_add(2)),
+            self.read(address.wrapping_add(3)),
+        ])
+    }
+
+    fn write_byte(&mut self, address: u32, value: u8) {
+        self.write(address, value);
+    }
+
+    fn write_word(&mut self, address: u32, value: u16) {
+        let [hi, lo] = value.to_be_bytes();
+        self.write(address, hi);
+        self.write(address.wrapping_add(1), lo);
+    }
+
+    fn write_long(&mut self, address: u32, value: u32) {
+        for (offset, byte) in value.to_be_bytes().into_iter().enumerate() {
+            self.write(address.wrapping_add(offset as u32), byte);
+        }
+    }
+
+    fn last_fetch_was_cached(&self) -> bool {
+        self.cached
+    }
+
+    fn instruction_fetches_were_cached(&self) -> bool {
+        self.cached
+    }
+}
+
+/// The m68k core's theoretical cycle range for one copied instruction.
+///
+/// Timing can depend on condition codes, register counts/data, instruction
+/// cache state and (on the 68060) pipeline classification. Run representative
+/// extrema through the core's own generation-specific timing paths and report
+/// the minimum/maximum result. This never touches the live CPU or bus, so a
+/// disassembly request cannot alter the emulation timeline.
+pub fn theoretical_cycles(
+    read: impl Fn(u32) -> u16,
+    pc: u32,
+    cpu_type: CpuType,
+    len: u32,
+) -> Option<(u32, u32)> {
+    const STATES: [(u16, u32); 9] = [
+        (0x0000, 0x0000_0000),
+        (0x0001, 0x0000_0001),
+        (0x0002, 0x0000_0010),
+        (0x0004, 0x0000_001f),
+        (0x0008, 0x0000_7fff),
+        (0x0010, 0x0000_8000),
+        (0x0005, 0x0000_ffff),
+        (0x000a, 0x8000_0000),
+        (0x001f, 0xffff_ffff),
+    ];
+    let byte_len = usize::try_from(len.max(2)).ok()?.min(64);
+    let mut instruction = Vec::with_capacity(byte_len.next_multiple_of(2));
+    for offset in (0..byte_len).step_by(2) {
+        instruction.extend_from_slice(&read(pc.wrapping_add(offset as u32)).to_be_bytes());
+    }
+    let mut minimum = u32::MAX;
+    let mut maximum = 0u32;
+    let mut any = false;
+    for cached in [true, false] {
+        let mut bus = TimingBus::new(&instruction, cached);
+        for (flags, data) in STATES {
+            bus.reset();
+            let mut cpu = m68k::CpuCore::new();
+            cpu.set_cpu_type(cpu_type);
+            cpu.set_sr_noint_nosp(0x2000 | flags);
+            cpu.set_sp(0x7000);
+            for reg in 0..8 {
+                cpu.set_d(reg, data.rotate_left(reg as u32));
+                cpu.set_a(reg, 0x4000 + reg as u32 * 0x100);
+            }
+            cpu.set_sp(0x7000);
+            cpu.pc = TimingBus::BASE;
+            let mut hle = m68k::NoOpHleHandler;
+            if let m68k::StepResult::Ok { cycles } = cpu.step_with_hle_handler(&mut bus, &mut hle) {
+                if let Ok(cycles) = u32::try_from(cycles) {
+                    minimum = minimum.min(cycles);
+                    maximum = maximum.max(cycles);
+                    any = true;
+                }
+            }
+        }
+    }
+    any.then_some((minimum, maximum))
+}
+
 /// Sequential reader over the instruction stream. Tracks the absolute
 /// address of each extension word so PC-relative operands resolve correctly.
 struct Stream<'a> {
@@ -784,6 +947,22 @@ mod tests {
         assert_eq!(dis(&[0x4E75], 0).0, "RTS");
         assert_eq!(dis(&[0x4E73], 0).0, "RTE");
         assert_eq!(dis(&[0x4E77], 0).0, "RTR");
+    }
+
+    #[test]
+    fn theoretical_cycles_come_from_the_execution_core() {
+        let nop = theoretical_cycles(|_| 0x4e71, 0, CpuType::M68000, 2).unwrap();
+        assert_eq!(nop, (4, 4));
+
+        let words = [0x6602, 0x4e71]; // BNE.S: condition state selects taken/not-taken.
+        let branch = theoretical_cycles(
+            |address| words.get((address / 2) as usize).copied().unwrap_or(0),
+            0,
+            CpuType::M68000,
+            2,
+        )
+        .unwrap();
+        assert!(branch.0 < branch.1, "{branch:?}");
     }
 
     #[test]

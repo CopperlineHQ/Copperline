@@ -5,6 +5,12 @@ per-frame performance data for external profilers, analysis tools, and scripts.
 Only one profile capture can run at a time; call `profile.stop` on an active
 session before starting a new one.
 
+For static footprint rather than runtime cost, `copperline-ctl size-report
+PROG [--elf PROG.elf] [--out FILE]` emits a `.cpuprofile` weighted in bytes.
+Its hierarchy is hunk, section, and function, with unattributed bytes kept as
+an explicit node. The VS Code extension's **Profile File Size** command runs
+the same converter and opens the result.
+
 ```text
 profile.start {"path": "out/profile", "frames": 500, "slots": true,
                "memory": true, "screenshots": "last", "pc_samples": true}

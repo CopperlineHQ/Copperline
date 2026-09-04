@@ -55,7 +55,9 @@ fn usage() -> &'static str {
      copperline-ctl --dap-listen ADDR [--info FILE | --connect ADDR --token TOKEN]\n       \
      copperline-ctl profile-report DIR --program PROG [--elf PROG.ELF] \
        --out FILE [--format chrome|bartman] [--per-frame] \
-       [--source-map FROM=TO ...]"
+       [--source-map FROM=TO ...]\n       \
+     copperline-ctl exe2adf PROG [--boot] [--out FILE]\n\
+     copperline-ctl size-report PROG [--elf PROG.ELF] [--out FILE]"
 }
 
 fn parse_options() -> Result<Options, String> {
@@ -432,7 +434,132 @@ fn run_profile_report() -> Result<Vec<std::path::PathBuf>, String> {
     })
 }
 
+fn run_exe2adf() -> Result<std::path::PathBuf, String> {
+    use std::path::{Path, PathBuf};
+
+    let mut args = std::env::args().skip(2);
+    let program = PathBuf::from(args.next().ok_or("exe2adf requires PROG")?);
+    let mut bootable = false;
+    let mut out = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--boot" => bootable = true,
+            "--out" => out = Some(PathBuf::from(args.next().ok_or("--out requires FILE")?)),
+            other => return Err(format!("unexpected exe2adf argument {other:?}")),
+        }
+    }
+    if !program.is_file() {
+        return Err(format!(
+            "{} is not a regular executable file",
+            program.display()
+        ));
+    }
+    let name = program
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("the executable name is not valid UTF-8")?;
+    let amiga_name = encode_amiga_name(name)?;
+    let out = out.unwrap_or_else(|| program.with_extension("adf"));
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let staging = std::env::temp_dir().join(format!(
+        "copperline-exe2adf-{}-{unique}",
+        std::process::id()
+    ));
+    let result = (|| {
+        std::fs::create_dir_all(staging.join("S"))
+            .map_err(|error| format!("creating staging directory: {error}"))?;
+        std::fs::copy(&program, staging.join(name))
+            .map_err(|error| format!("copying {}: {error}", program.display()))?;
+        let mut startup = Vec::with_capacity(5 + amiga_name.len());
+        startup.extend_from_slice(b"SYS:");
+        startup.extend_from_slice(&amiga_name);
+        startup.push(b'\n');
+        std::fs::write(staging.join("S").join("Startup-Sequence"), startup)
+            .map_err(|error| format!("writing Startup-Sequence: {error}"))?;
+        let image = copperline::dirfs::build_floppy_image(
+            &staging,
+            "Copperline",
+            copperline::diskimage::FileSystem::OFS,
+            bootable,
+        )
+        .map_err(|error| error.to_string())?;
+        copperline::diskimage::write_standard_adf(Path::new(&out), &image)
+            .map_err(|error| format!("writing {}: {error}", out.display()))?;
+        Ok(out.clone())
+    })();
+    if let Err(error) = std::fs::remove_dir_all(&staging) {
+        eprintln!(
+            "copperline-ctl: exe2adf: warning: removing {}: {error}",
+            staging.display()
+        );
+    }
+    result
+}
+
+fn encode_amiga_name(name: &str) -> Result<Vec<u8>, String> {
+    let encoded: Vec<u8> = name
+        .chars()
+        .map(|ch| u8::try_from(ch as u32))
+        .collect::<Result<_, _>>()
+        .map_err(|_| "the Amiga executable name must use Latin-1 characters")?;
+    if encoded.is_empty() || encoded.len() > 30 {
+        return Err("the Amiga executable name must be 1..30 Latin-1 characters".into());
+    }
+    if encoded.iter().any(|byte| matches!(byte, b':' | b'/')) {
+        return Err("the Amiga executable name must not contain ':' or '/'".into());
+    }
+    Ok(encoded)
+}
+
+fn run_size_report() -> Result<std::path::PathBuf, String> {
+    use std::path::PathBuf;
+
+    let mut args = std::env::args().skip(2);
+    let program = PathBuf::from(args.next().ok_or("size-report requires PROG")?);
+    let mut elf = None;
+    let mut out = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--elf" => elf = Some(PathBuf::from(args.next().ok_or("--elf requires FILE")?)),
+            "--out" => out = Some(PathBuf::from(args.next().ok_or("--out requires FILE")?)),
+            other => return Err(format!("unexpected size-report argument {other:?}")),
+        }
+    }
+    let out = out.unwrap_or_else(|| {
+        let mut name = program.as_os_str().to_os_string();
+        name.push(".size.cpuprofile");
+        PathBuf::from(name)
+    });
+    copperline::profile::size::generate(&program, elf.as_deref(), &out)
+}
+
 fn main() -> ExitCode {
+    if std::env::args().nth(1).as_deref() == Some("size-report") {
+        return match run_size_report() {
+            Ok(path) => {
+                println!("{}", path.display());
+                ExitCode::SUCCESS
+            }
+            Err(message) => {
+                eprintln!("copperline-ctl: size-report: {message}");
+                ExitCode::from(2)
+            }
+        };
+    }
+    if std::env::args().nth(1).as_deref() == Some("exe2adf") {
+        return match run_exe2adf() {
+            Ok(path) => {
+                println!("{}", path.display());
+                ExitCode::SUCCESS
+            }
+            Err(message) => {
+                eprintln!("copperline-ctl: exe2adf: {message}");
+                ExitCode::from(2)
+            }
+        };
+    }
     if std::env::args().nth(1).as_deref() == Some("profile-report") {
         return match run_profile_report() {
             Ok(paths) => {
@@ -497,6 +624,16 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn amiga_executable_names_are_single_byte_and_path_safe() {
+        assert_eq!(encode_amiga_name("caf\u{e9}").unwrap(), b"caf\xe9");
+        assert!(encode_amiga_name("bad:name").is_err());
+        assert!(encode_amiga_name("bad/name").is_err());
+        assert!(encode_amiga_name("snowman-\u{2603}").is_err());
+        assert!(encode_amiga_name("").is_err());
+        assert!(encode_amiga_name(&"x".repeat(31)).is_err());
+    }
 
     #[test]
     fn request_lines_are_json_rpc_shaped() {

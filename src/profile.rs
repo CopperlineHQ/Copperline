@@ -30,6 +30,8 @@ use serde_json::{json, Value};
 #[cfg(feature = "dap")]
 pub mod report;
 pub mod samples;
+#[cfg(feature = "dap")]
+pub mod size;
 
 /// Bounds on `profile.start {"frames"}`: about ten seconds of PAL by
 /// default, and a hard cap so a typo cannot fill a disk.
