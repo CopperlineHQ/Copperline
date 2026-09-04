@@ -2052,6 +2052,56 @@ fn spun_up_speed_controller(raw_words: &[u16], speed: u16) -> Result<(FloppyCont
 }
 
 #[test]
+fn dma_trace_reports_only_actual_words_with_memory_direction() -> Result<()> {
+    let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
+    let word_cck = FloppyController::word_cck_for_track_words(raw_words.len());
+    let dmacon = DMACON_DMAEN | DMACON_DISK;
+    let (mut ctrl, path) = spun_up_speed_controller(&raw_words, 100)?;
+    ctrl.set_dma_trace_enabled(true);
+    let mut chip_ram = vec![0u8; 8];
+
+    let read_len = DSKLEN_DMAEN | 2;
+    assert!(!ctrl.write_dsklen(read_len, 0));
+    assert!(!ctrl.write_dsklen(read_len, 0));
+    assert!(ctrl.tick(word_cck * 2, dmacon, &mut chip_ram));
+    assert_eq!(
+        ctrl.take_dma_trace(),
+        vec![
+            DiskDmaTransfer {
+                addr: 0,
+                data: 0x1111,
+                memory_write: true,
+            },
+            DiskDmaTransfer {
+                addr: 2,
+                data: 0x2222,
+                memory_write: true,
+            },
+        ]
+    );
+
+    ctrl.drives[0].set_rotation_word(0);
+    ctrl.drives[0].rotation_acc_cck = 0;
+    ctrl.set_dskpt_low(4);
+    write_chip_word(&mut chip_ram, 4, 0xABCD);
+    let write_len = DSKLEN_DMAEN | DSKLEN_WRITE | 1;
+    assert!(!ctrl.write_dsklen(write_len, 0));
+    assert!(!ctrl.write_dsklen(write_len, 0));
+    assert!(ctrl.tick(word_cck, dmacon, &mut chip_ram));
+    assert_eq!(
+        ctrl.take_dma_trace(),
+        vec![DiskDmaTransfer {
+            addr: 4,
+            data: 0xABCD,
+            memory_write: false,
+        }]
+    );
+
+    let _ = fs::remove_file(path);
+    Ok(())
+}
+
+#[test]
 fn floppy_speed_800_compresses_read_dma_eightfold_with_identical_data() -> Result<()> {
     let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
     let word_cck = FloppyController::word_cck_for_track_words(raw_words.len());

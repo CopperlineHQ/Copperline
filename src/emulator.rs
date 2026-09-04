@@ -571,6 +571,12 @@ impl Emulator {
                 "a profile capture is already running; stop it first",
             ));
         }
+        if opts.memory && opts.trigger.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "memory snapshots cannot be combined with a deferred trigger",
+            ));
+        }
         let requested_full = opts.slots;
         let already = self.bus().frame_analyzer_enabled();
         let already_full = self.bus().frame_analyzer_full();

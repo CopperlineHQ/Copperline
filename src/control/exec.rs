@@ -1282,6 +1282,12 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
                     ))
                 }
             };
+            let memory = p.bool_or("memory", false)?;
+            if memory && trigger.is_some() {
+                return Err(CtlError::invalid_params(
+                    "memory=true cannot be combined with trigger; the RAM baseline must align with the first recorded frame",
+                ));
+            }
             let samples = p.bool_or("samples", false)?;
             let registers = p.bool_or("registers", false)?;
             if registers && !samples {
@@ -1379,7 +1385,7 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
                         .unwrap_or_else(crate::paths::profile_dir),
                     frames,
                     slots: p.bool_or("slots", false)?,
-                    memory: p.bool_or("memory", false)?,
+                    memory,
                     screenshots,
                     pc_samples: p.bool_or("pc_samples", false)?,
                     samples,
@@ -4236,6 +4242,13 @@ mod tests {
             let err = parse_method("profile.start", &json!({"trigger": trigger})).unwrap_err();
             assert_eq!(err.code, proto::INVALID_PARAMS);
         }
+        let err = parse_method(
+            "profile.start",
+            &json!({"memory": true, "trigger": {"frame": 987}}),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, proto::INVALID_PARAMS);
+        assert!(err.message.contains("RAM baseline"));
         assert!(CoreOp::ProfileStatus.collectable());
     }
 

@@ -1117,7 +1117,7 @@ pub struct Bus {
     #[serde(skip)]
     cpu_trace_access: Option<CpuTraceAccess>,
     #[serde(skip)]
-    cpu_trace_last_slot: Option<(u32, u32)>,
+    cpu_trace_slots: Vec<CpuTraceSlot>,
     #[serde(skip)]
     cia_trace_phase: u8,
     #[serde(skip)]
@@ -1816,6 +1816,53 @@ struct CpuTraceAccess {
     addr: u32,
     size: u8,
     kind: CpuBusAccessKind,
+    /// Byte offset of this bus slot inside the CPU's big-endian operand.
+    value_offset: u8,
+    /// Whole operand width, used to select this slot's data after the memory
+    /// operation has completed.
+    value_size: u8,
+    /// Posted writes can retire after the CPU-side write has completed. Keep
+    /// their already-known slot value here instead of peeking unrelated RAM.
+    data: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CpuTraceSlot {
+    vpos: u32,
+    hpos: u32,
+    value_offset: u8,
+    size: u8,
+}
+
+fn cpu_trace_access_for_slot(
+    addr: u32,
+    size: usize,
+    kind: CpuBusAccessKind,
+    wide_bus: bool,
+    slot: u32,
+) -> CpuTraceAccess {
+    let stride = if wide_bus { 4 } else { 2 };
+    let value_offset = (slot * stride) as usize;
+    let slot_size = size.saturating_sub(value_offset).min(stride as usize);
+    CpuTraceAccess {
+        addr: addr.wrapping_add(value_offset as u32),
+        size: slot_size.clamp(1, 8) as u8,
+        kind,
+        value_offset: value_offset.min(7) as u8,
+        value_size: size.clamp(1, 8) as u8,
+        data: None,
+    }
+}
+
+fn cpu_trace_data_chunk(value: u64, value_size: u8, value_offset: u8, size: u8) -> u64 {
+    let trailing_bytes = value_size.saturating_sub(value_offset.saturating_add(size));
+    let shifted = value >> (u32::from(trailing_bytes) * 8);
+    let bits = u32::from(size) * 8;
+    if bits >= 64 {
+        shifted
+    } else {
+        shifted & ((1u64 << bits) - 1)
+    }
 }
 
 /// Distinct stalled PCs the trace keeps per frame; further PCs pool into
@@ -3320,7 +3367,7 @@ impl Bus {
             frame_analyzer_full: false,
             cpu_bus_wait: None,
             cpu_trace_access: None,
-            cpu_trace_last_slot: None,
+            cpu_trace_slots: Vec::new(),
             cia_trace_phase: 0,
             cia_trace_slot: None,
             trace_cia_irq_pins: (false, false),
@@ -4065,6 +4112,9 @@ impl Bus {
         self.ui_copper_breaks = previous.ui_copper_breaks.clone();
         self.ui_copper_last_pc = previous.ui_copper_last_pc;
         self.ui_layer_masks = previous.ui_layer_masks;
+        self.frame_analyzer_enabled = previous.frame_analyzer_enabled;
+        self.frame_analyzer_full = previous.frame_analyzer_full;
+        self.floppy.set_dma_trace_enabled(self.frame_analyzer_full);
         let watches = previous.ui_mem_watch_addrs.clone();
         self.set_ui_mem_watches(&watches);
     }
@@ -5128,6 +5178,15 @@ impl Bus {
         std::mem::swap(&mut self.parallel_port, &mut live.parallel_port);
         self.blitter_trace = live.blitter_trace.take();
         self.paula.adopt_host_taps(&mut live.paula);
+        // Bus-event subscriptions belong to live control connections, not to
+        // the emulated timeline. Preserve their queue and monotonic sequence
+        // so an observer's existing cursor remains valid after state.load.
+        std::mem::swap(&mut self.bus_event_observers, &mut live.bus_event_observers);
+        std::mem::swap(&mut self.bus_events, &mut live.bus_events);
+        std::mem::swap(
+            &mut self.bus_event_next_sequence,
+            &mut live.bus_event_next_sequence,
+        );
         // Drive speed is host configuration, not machine state: a loaded
         // state keeps the running session's setting.
         self.floppy.set_speed_percent(live.floppy.speed_percent());
@@ -5321,7 +5380,14 @@ impl Bus {
         self.dbg_slotmap_dumped = false;
         self.bus_accounting = BusAccounting::from_env();
         self.trace_intreq = self.paula.intreq & IRQ_SOURCE_BITS;
+        self.trace_cia_irq_pins = (
+            self.cia_a.irq_line_asserted(),
+            self.cia_b.irq_line_asserted(),
+        );
         self.refresh_chip_bus_observers();
+        if self.frame_analyzer_enabled {
+            self.reset_current_frame_bus_trace(true);
+        }
     }
 
     pub fn emulated_seconds(&self) -> f64 {
@@ -6006,6 +6072,7 @@ impl Bus {
         // only after any posted write has retired, so reads cannot pass a
         // pending write and a second write stalls on the one in-flight cycle.
         self.settle_cpu_posted_writes();
+        self.cpu_trace_slots.clear();
         if self.cpu_short_bus_cycle && matches!(kind, CpuBusAccessKind::Write) {
             // Post the write instead of stalling for its slot: the 020+ bus
             // unit accepts it at the end of its 3-clock cycle and the
@@ -6020,12 +6087,8 @@ impl Bus {
                 }
                 self.cpu_posted_write_debt = 1;
                 if self.frame_analyzer_full {
-                    let stride = if wide_bus { 4 } else { 2 };
-                    self.cpu_trace_access = addr.map(|addr| CpuTraceAccess {
-                        addr: addr.wrapping_add(slot * stride),
-                        size: size.min(4) as u8,
-                        kind,
-                    });
+                    self.cpu_trace_access = addr
+                        .map(|addr| cpu_trace_access_for_slot(addr, size, kind, wide_bus, slot));
                 }
                 self.cpu_bus_overlap_clocks = self.cpu_bus_overlap_clocks.saturating_add(3);
             }
@@ -6077,12 +6140,8 @@ impl Bus {
                 self.wave_note_cpu_access(addr, kind, wait_cck);
             }
             if self.frame_analyzer_full {
-                let stride = if wide_bus { 4 } else { 2 };
-                self.cpu_trace_access = addr.map(|addr| CpuTraceAccess {
-                    addr: addr.wrapping_add(slot * stride),
-                    size: size.min(4) as u8,
-                    kind,
-                });
+                self.cpu_trace_access =
+                    addr.map(|addr| cpu_trace_access_for_slot(addr, size, kind, wide_bus, slot));
             }
             let slot_start_cck = self.emulated_cck;
             let (cck, tick) = self.advance_one_chip_bus_quantum(Some(ChipBusOwner::Cpu));
@@ -7000,7 +7059,25 @@ impl Bus {
         // already zeroed and the tails decay in Paula's mixer.
         if !self.floppy.is_idle_cached() {
             self.floppy.set_adkcon(self.paula.adkcon);
-            if self.floppy.tick(cck, dmacon, &mut self.mem.chip_ram) {
+            let disk_irq = self.floppy.tick(cck, dmacon, &mut self.mem.chip_ram);
+            for transfer in self.floppy.take_dma_trace() {
+                self.annotate_bus_slot(
+                    self.agnus.vpos,
+                    self.agnus.hpos,
+                    BUS_RECORD_DISK,
+                    0,
+                    if transfer.memory_write {
+                        0x0008
+                    } else {
+                        0x0026
+                    },
+                    transfer.addr,
+                    u64::from(transfer.data),
+                    2,
+                    u16::from(transfer.memory_write),
+                );
+            }
+            if disk_irq {
                 self.paula.intreq |= INT_DSKBLK;
                 // Companion to COPPERLINE_DBG_DSKLEN: the wall-time DSKBLK
                 // raise, closing each arm -> completion interval.
@@ -7249,6 +7326,7 @@ impl Bus {
         self.frame_analyzer_enabled = enabled;
         if !enabled {
             self.frame_analyzer_full = false;
+            self.floppy.set_dma_trace_enabled(false);
         }
         self.refresh_chip_bus_observers();
         if enabled {
@@ -7269,6 +7347,7 @@ impl Bus {
         let was_enabled = self.frame_analyzer_enabled;
         let changed = self.frame_analyzer_full != enabled;
         self.frame_analyzer_full = enabled;
+        self.floppy.set_dma_trace_enabled(enabled);
         if enabled {
             self.frame_analyzer_enabled = true;
             if changed {
@@ -7484,13 +7563,13 @@ impl Bus {
         } else {
             0x1000
         };
-        let data = match access.size {
+        let data = access.data.unwrap_or_else(|| match access.size {
             4 => {
                 (u64::from(self.peek_word_any(access.addr)) << 16)
                     | u64::from(self.peek_word_any(access.addr.wrapping_add(2)))
             }
             _ => u64::from(self.peek_word_any(access.addr)),
-        };
+        });
         self.annotate_bus_slot(
             vpos,
             hpos,
@@ -7502,18 +7581,28 @@ impl Bus {
             access.size,
             u16::from(matches!(access.kind, CpuBusAccessKind::Write)),
         );
-        self.cpu_trace_last_slot = Some((vpos, hpos));
+        self.cpu_trace_slots.push(CpuTraceSlot {
+            vpos,
+            hpos,
+            value_offset: access.value_offset,
+            size: access.size,
+        });
     }
 
-    fn update_last_cpu_trace_data(&mut self, data: u64, size: u8) {
-        let Some((vpos, hpos)) = self.cpu_trace_last_slot else {
-            return;
-        };
-        self.current_frame_bus_trace
-            .annotate_at(vpos, hpos, |record| {
-                record.data = data;
-                record.size = size;
-            });
+    pub(crate) fn update_last_cpu_trace_data(&mut self, data: u64, size: u8) {
+        for slot in &self.cpu_trace_slots {
+            let chunk = cpu_trace_data_chunk(data, size, slot.value_offset, slot.size);
+            self.current_frame_bus_trace
+                .annotate_at(slot.vpos, slot.hpos, |record| record.data = chunk);
+        }
+        if let Some(access) = self.cpu_trace_access.as_mut() {
+            access.data = Some(cpu_trace_data_chunk(
+                data,
+                access.value_size,
+                access.value_offset,
+                access.size,
+            ));
+        }
     }
 
     fn annotate_cia_access(

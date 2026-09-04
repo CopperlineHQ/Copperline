@@ -886,7 +886,7 @@ impl Bus {
         sprite: usize,
         vpos: u32,
         hpos: u32,
-        second_slot: bool,
+        register: u16,
     ) -> Option<[u16; 4]> {
         if self.mem.chip_ram.is_empty() {
             return None;
@@ -912,7 +912,7 @@ impl Bus {
             hpos,
             BUS_RECORD_SPRITE,
             sprite as u8,
-            0x0140 + sprite as u16 * 8 + u16::from(second_slot) * 2,
+            register + sprite as u16 * 8,
             ptr,
             data,
             (quantum * 2) as u8,
@@ -960,7 +960,7 @@ impl Bus {
             state.dma_enabled = false;
             if spren && !ddf_blocked {
                 if let Some(words) =
-                    self.fetch_sprite_words(sprite, vpos, SPRITE_DMA_SLOT1_HPOS[sprite], false)
+                    self.fetch_sprite_words(sprite, vpos, SPRITE_DMA_SLOT1_HPOS[sprite], 0x0140)
                 {
                     state.poke_pos(words[0]);
                     state.reevaluate_comparators_at(beam_y);
@@ -975,7 +975,7 @@ impl Bus {
             && !self.sprite_scan_repeat_line(&state, beam_y)
         {
             if let Some(words) =
-                self.fetch_sprite_words(sprite, vpos, SPRITE_DMA_SLOT1_HPOS[sprite], false)
+                self.fetch_sprite_words(sprite, vpos, SPRITE_DMA_SLOT1_HPOS[sprite], 0x0144)
             {
                 state.pending_data = Some((words[0], [words[1], words[2], words[3]]));
                 state.pending_line_vpos = beam_y;
@@ -1017,7 +1017,7 @@ impl Bus {
             state.dma_enabled = false;
             if spren && !ddf_blocked {
                 if let Some(words) =
-                    self.fetch_sprite_words(sprite, vpos, SPRITE_DMA_SLOT1_HPOS[sprite] + 2, true)
+                    self.fetch_sprite_words(sprite, vpos, SPRITE_DMA_SLOT1_HPOS[sprite] + 2, 0x0142)
                 {
                     state.poke_ctl(words[0]);
                     state.reevaluate_comparators_at(beam_y);
@@ -1041,7 +1041,7 @@ impl Bus {
             && !self.sprite_scan_repeat_line(&state, beam_y)
         {
             if let Some(words) =
-                self.fetch_sprite_words(sprite, vpos, SPRITE_DMA_SLOT1_HPOS[sprite] + 2, true)
+                self.fetch_sprite_words(sprite, vpos, SPRITE_DMA_SLOT1_HPOS[sprite] + 2, 0x0146)
             {
                 datb_fetched = Some((words[0], [words[1], words[2], words[3]]));
                 // The DATB fetch lands in SPRxDATB like a manual write.

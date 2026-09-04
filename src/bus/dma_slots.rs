@@ -90,7 +90,7 @@ impl Bus {
             // cannot fetch here, so the slot is never taken from its owner;
             // copper_cycle_free=false also keeps the post-WAIT wake-up off
             // this owned color clock.
-            if self.frame_analyzer_full
+            if (self.frame_analyzer_full || self.bus_event_observers != 0)
                 && self.copper.state_label() == "run"
                 && Copper::hpos_is_access_cycle(hpos)
             {
@@ -153,17 +153,6 @@ impl Bus {
                     0,
                     0,
                 ),
-                ChipBusOwner::Disk => self.annotate_bus_slot(
-                    self.agnus.vpos,
-                    hpos,
-                    BUS_RECORD_DISK,
-                    0,
-                    0x0026,
-                    self.floppy.dskpt(),
-                    u64::from(self.data_bus),
-                    2,
-                    0,
-                ),
                 ChipBusOwner::Blitter => {
                     if let Some(access) = self.blitter.current_bus_access(&self.mem.chip_ram) {
                         let subtype = access.channel
@@ -186,6 +175,33 @@ impl Bus {
                                 Some("blitter_final_d"),
                             );
                         }
+                    }
+                }
+                ChipBusOwner::Cpu if self.blitter.busy => self.note_bus_event_named(
+                    BUS_EVENT_CPU_BLITTER_STEAL,
+                    Some("blitter_denied_by_cpu"),
+                ),
+                _ => {}
+            }
+            if self
+                .cpu_bus_wait
+                .is_some_and(|wait| matches!(wait.class, CpuWaitClass::BlitterNasty))
+            {
+                self.note_bus_event_named(
+                    BUS_EVENT_CPU_BLITTER_STOLEN,
+                    Some("cpu_denied_by_blitter"),
+                );
+            }
+        }
+        if !self.frame_analyzer_full && self.bus_event_observers != 0 {
+            match owner {
+                ChipBusOwner::Blitter => {
+                    if self
+                        .blitter
+                        .current_bus_access(&self.mem.chip_ram)
+                        .is_some_and(|access| access.final_d)
+                    {
+                        self.note_bus_event_named(BUS_EVENT_BLIT_FINAL_D, Some("blitter_final_d"));
                     }
                 }
                 ChipBusOwner::Cpu if self.blitter.busy => self.note_bus_event_named(

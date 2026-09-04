@@ -7,7 +7,10 @@ session before starting a new one.
 
 ```text
 profile.start {"path": "out/profile", "frames": 500, "slots": true,
-               "memory": true, "screenshots": "last", "pc_samples": true,
+               "memory": true, "screenshots": "last", "pc_samples": true}
+
+# A deferred trigger starts without a RAM baseline:
+profile.start {"path": "out/triggered", "frames": 500, "slots": true,
                "trigger": {"busy_cck_over": 60000}}
 
 # Precise instruction sampling (registers are optional):
@@ -33,6 +36,9 @@ an absolute emulated `frame` is reached or a completed frame's busy colour-clock
 count exceeds `busy_cck_over`. Busy clocks are the frame length minus uaelib
 idle markers when the guest supplies them; otherwise the traced frame length is
 used. `profile.status` reports `triggered` and `triggered_at`.
+Because a deferred trigger omits the preceding slot writes, `memory: true`
+cannot be combined with `trigger`: an offline consumer would not have a RAM
+baseline aligned with the first recorded frame.
 
 Running a profile capture activates the Frame Analyzer's cheap owner tracing.
 `"slots": true` promotes it to the full per-colour-clock record level, which
@@ -97,7 +103,7 @@ in raster order (`VPOS * line_cck + HPOS`) and use this packed, little-endian
 
 | Offset | Type | Field |
 |---:|---|---|
-| 0 | u16 | `reg`: custom-register offset, `0x1000` for CPU memory, or `0xffff` when not applicable |
+| 0 | u16 | `reg`: custom-register offset; bit `0x1000` marks a CPU access (`0x1000` alone is ordinary CPU memory, while `0x1000 | offset` is a CPU custom-register access); `0xffff` when not applicable |
 | 2 | u8 | `kind`: refresh 1, CPU 2, Copper 3, audio 4, blitter 5, bitplane 6, sprite 7, disk 8, conflict 9 |
 | 3 | u8 | `subtype`: CPU code/data; Copper move/wait/skip; audio 0-3; bitplane 1-8; sprite 0-7; blitter A-D plus fill bit `0x10` and line bit `0x20` |
 | 4 | u8 | `size`: transferred bytes (2, 4, or 8; zero when no data transfer is attached) |
