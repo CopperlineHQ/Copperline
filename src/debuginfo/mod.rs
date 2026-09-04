@@ -123,6 +123,27 @@ impl Function {
     }
 }
 
+/// An optimized function instance whose code lives inside another function.
+/// A single inline DIE may cover discontiguous machine-code ranges.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InlineFunction {
+    pub name: String,
+    pub ranges: Vec<(HunkAddr, u32)>,
+    pub file: Option<u32>,
+    pub line: Option<u32>,
+    pub depth: u32,
+}
+
+impl InlineFunction {
+    fn contains(&self, at: HunkAddr) -> bool {
+        self.ranges.iter().any(|(start, size)| {
+            start.hunk == at.hunk
+                && at.offset >= start.offset
+                && at.offset - start.offset < (*size).max(1)
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Encoding {
     Signed,
@@ -238,6 +259,7 @@ pub struct DebugInfo {
     pub rows: Vec<LineRow>,
     /// Sorted by address.
     pub functions: Vec<Function>,
+    pub inline_functions: Vec<InlineFunction>,
     pub globals: Vec<Variable>,
     pub types: Vec<TypeDesc>,
     pub cfi: Option<dwarf::Cfi>,
@@ -423,6 +445,12 @@ impl DebugInfo {
                 ..f
             });
         }
+        for inline in loaded.inline_functions {
+            self.inline_functions.push(InlineFunction {
+                file: inline.file.and_then(|i| file_map.get(i as usize).copied()),
+                ..inline
+            });
+        }
         self.globals
             .extend(loaded.globals.into_iter().map(remap_var));
         if loaded.cfi.is_some() {
@@ -445,6 +473,7 @@ impl DebugInfo {
     fn finish(&mut self) {
         self.rows.sort_by_key(|r| (r.at, r.end_sequence));
         self.functions.sort_by_key(|f| f.at);
+        self.inline_functions.sort_by_key(|inline| inline.depth);
         self.symbols.sort_by_key(|s| s.at);
     }
 
@@ -462,6 +491,59 @@ impl DebugInfo {
 
     pub fn bases(&self) -> &[u32] {
         &self.bases
+    }
+
+    /// Encode hunk 0's call-frame information in Bartman's compact unwind
+    /// format (one three-word row per two bytes of text). Missing or
+    /// unrepresentable rows use the m68k ABI's ordinary `4(A7)` CFA / `-4(CFA)`
+    /// return address rule, matching vscode-amiga-debug.
+    pub fn bartman_unwind_table(&self) -> Result<(u32, Vec<u8>), String> {
+        use dwarf::RegRule;
+
+        let base = *self
+            .bases
+            .first()
+            .ok_or("debug information has not been relocated")?;
+        let text_size = self.hunks.first().ok_or("program has no text hunk")?.size;
+        let mut bytes = Vec::with_capacity(text_size.div_ceil(2) as usize * 6);
+        for offset in (0..text_size).step_by(2) {
+            let default = (15u16, 4i16, -1i16, -4i16);
+            let row = self
+                .link
+                .to_link(HunkAddr::new(0, offset))
+                .and_then(|link| self.cfi.as_ref()?.row_for(link))
+                .and_then(|row| {
+                    if !matches!(row.cfa_reg, 13 | 15) || !(0..=0x0fff).contains(&row.cfa_offset) {
+                        return None;
+                    }
+                    let ra = row.rules.iter().find_map(|(reg, rule)| {
+                        (*reg == row.ra_reg)
+                            .then_some(rule)
+                            .and_then(|rule| match rule {
+                                RegRule::Offset(offset) => i16::try_from(*offset).ok(),
+                                _ => None,
+                            })
+                    })?;
+                    let r13 = row
+                        .rules
+                        .iter()
+                        .find_map(|(reg, rule)| {
+                            (*reg == 13).then_some(rule).and_then(|rule| match rule {
+                                RegRule::Offset(offset) => i16::try_from(*offset).ok(),
+                                RegRule::SameValue => Some(-1),
+                                _ => None,
+                            })
+                        })
+                        .unwrap_or(-1);
+                    Some((row.cfa_reg, i16::try_from(row.cfa_offset).ok()?, r13, ra))
+                })
+                .unwrap_or(default);
+            let cfa = (row.0 << 12) | (row.1 as u16 & 0x0fff);
+            bytes.extend_from_slice(&cfa.to_le_bytes());
+            bytes.extend_from_slice(&row.2.to_le_bytes());
+            bytes.extend_from_slice(&row.3.to_le_bytes());
+        }
+        Ok((base, bytes))
     }
 
     /// The runtime address of `at`, once relocated.
@@ -587,6 +669,17 @@ impl DebugInfo {
             .map(|i| &self.functions[i])
             .take_while(|f| f.at.hunk == at.hunk)
             .find(|f| f.contains(at))
+    }
+
+    /// Inlined functions covering `addr`, outermost first.
+    pub fn inline_functions_at(&self, addr: u32) -> Vec<&InlineFunction> {
+        let Some(at) = self.locate(addr) else {
+            return Vec::new();
+        };
+        self.inline_functions
+            .iter()
+            .filter(|inline| inline.contains(at))
+            .collect()
     }
 
     /// The nearest symbol at or below `addr` in the same hunk, with the

@@ -1275,6 +1275,39 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
                     ))
                 }
             };
+            let samples = p.bool_or("samples", false)?;
+            let registers = p.bool_or("registers", false)?;
+            if registers && !samples {
+                return Err(CtlError::invalid_params("registers requires samples=true"));
+            }
+            let unwind = match p.get("unwind") {
+                None | Some(Value::Null) => None,
+                Some(Value::Object(obj)) => {
+                    if !samples {
+                        return Err(CtlError::invalid_params("unwind requires samples=true"));
+                    }
+                    let base = obj
+                        .get("base")
+                        .and_then(value_as_u32)
+                        .ok_or_else(|| CtlError::invalid_params("unwind.base is required"))?;
+                    let table = obj
+                        .get("table")
+                        .and_then(Value::as_str)
+                        .and_then(crate::control::proto::decode_base64)
+                        .ok_or_else(|| {
+                            CtlError::invalid_params("unwind.table must be valid base64")
+                        })?;
+                    Some(
+                        crate::profile::samples::CompactUnwindTable::decode(base, &table)
+                            .map_err(CtlError::invalid_params)?,
+                    )
+                }
+                Some(_) => {
+                    return Err(CtlError::invalid_params(
+                        "unwind must be {base:ADDR, table:BASE64}",
+                    ))
+                }
+            };
             core(CoreOp::ProfileStart {
                 options: crate::profile::ProfileOptions {
                     path: p
@@ -1285,6 +1318,9 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
                     slots: p.bool_or("slots", false)?,
                     screenshots,
                     pc_samples: p.bool_or("pc_samples", false)?,
+                    samples,
+                    registers,
+                    unwind,
                     trigger,
                 },
             })
@@ -4015,6 +4051,9 @@ mod tests {
         assert_eq!(options.frames, crate::profile::DEFAULT_PROFILE_FRAMES);
         assert!(!options.slots);
         assert!(!options.pc_samples);
+        assert!(!options.samples);
+        assert!(!options.registers);
+        assert!(options.unwind.is_none());
         assert_eq!(options.screenshots, crate::profile::ScreenshotMode::None);
         assert_eq!(options.trigger, None);
 
@@ -4045,6 +4084,22 @@ mod tests {
         }
         let err = parse_method("profile.start", &json!({"screenshots": "sometimes"})).unwrap_err();
         assert_eq!(err.code, proto::INVALID_PARAMS);
+        for params in [
+            json!({"registers": true}),
+            json!({"unwind": {"base": 0x1000, "table": "BAD!"}}),
+        ] {
+            let err = parse_method("profile.start", &params).unwrap_err();
+            assert_eq!(err.code, proto::INVALID_PARAMS, "{params}");
+        }
+        let table = proto::encode_base64(&[4, 0xf0, 0xff, 0xff, 0xfc, 0xff]);
+        let CoreOp::ProfileStart { options } = core(
+            "profile.start",
+            json!({"samples": true, "registers": true, "unwind": {"base": 0x1000, "table": table}}),
+        ) else {
+            panic!("expected ProfileStart");
+        };
+        assert!(options.samples && options.registers);
+        assert_eq!(options.unwind.unwrap().base(), 0x1000);
         for trigger in [
             json!({}),
             json!({"frame": 1, "busy_cck_over": 2}),
@@ -4076,6 +4131,9 @@ mod tests {
             slots: false,
             screenshots: crate::profile::ScreenshotMode::None,
             pc_samples: false,
+            samples: false,
+            registers: false,
+            unwind: None,
             trigger: None,
         };
         let start = CoreOp::ProfileStart {
@@ -4107,6 +4165,9 @@ mod tests {
                     slots: true,
                     screenshots: crate::profile::ScreenshotMode::None,
                     pc_samples: true,
+                    samples: false,
+                    registers: false,
+                    unwind: None,
                     trigger: None,
                 },
             },
@@ -4179,6 +4240,9 @@ mod tests {
                     slots: true,
                     screenshots: crate::profile::ScreenshotMode::None,
                     pc_samples: false,
+                    samples: false,
+                    registers: false,
+                    unwind: None,
                     trigger: None,
                 },
             },
@@ -4297,6 +4361,9 @@ mod tests {
                     slots: false,
                     screenshots: crate::profile::ScreenshotMode::None,
                     pc_samples: false,
+                    samples: false,
+                    registers: false,
+                    unwind: None,
                     trigger: None,
                 },
             },
@@ -4311,6 +4378,54 @@ mod tests {
         let status = exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStatus).unwrap();
         assert_eq!(status["frames_written"], 1);
         exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStop).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn precise_sampling_is_timeline_transparent() {
+        let mut plain = uaelib_emulator();
+        let mut sampled = uaelib_emulator();
+        let dir = profile_scratch("transparent");
+        sampled
+            .profile_start(crate::profile::ProfileOptions {
+                path: dir.clone(),
+                frames: 1,
+                slots: false,
+                screenshots: crate::profile::ScreenshotMode::None,
+                pc_samples: false,
+                samples: true,
+                registers: true,
+                unwind: None,
+                trigger: None,
+            })
+            .unwrap();
+        for _ in 0..2 {
+            plain.step_frame().unwrap();
+            sampled.step_frame().unwrap();
+        }
+
+        assert_eq!(plain.machine.pc(), sampled.machine.pc());
+        assert_eq!(plain.bus().emulated_cck(), sampled.bus().emulated_cck());
+        assert_eq!(
+            digest_value(&plain),
+            digest_value(&sampled),
+            "instruction sampling must not perturb the committed framebuffer"
+        );
+        let mut ctx = SessionCtx::new();
+        let status = exec_core(&mut sampled, &mut ctx, &CoreOp::ProfileStop).unwrap();
+        assert!(status["samples_total"].as_u64().unwrap() > 0);
+        let record: Value = serde_json::from_str(
+            std::fs::read_to_string(dir.join("profile.jsonl"))
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(dir.join(record["samples"].as_str().unwrap()).is_file());
+        assert!(dir.join(record["samples_meta"].as_str().unwrap()).is_file());
+        assert_eq!(record["sample_count"], status["samples_total"]);
+        assert_eq!(record["samples_total"], status["samples_total"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

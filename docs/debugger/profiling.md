@@ -9,6 +9,11 @@ session before starting a new one.
 profile.start {"path": "out/profile", "frames": 500, "slots": true,
                "screenshots": "last", "pc_samples": true,
                "trigger": {"busy_cck_over": 60000}}
+
+# Precise instruction sampling (registers are optional):
+profile.start {"path": "out/profile", "frames": 60, "samples": true,
+               "registers": true,
+               "unwind": {"base": "0x123400", "table": "<base64>"}}
 profile.stop
 profile.status
 ```
@@ -53,6 +58,8 @@ One JSON object per committed frame:
 | `slots` | When `"slots": true`: run-length encoded per-clock owner grid for each scanline (`"12R3B497."`). Codes match vAmiga DMA debugger (`R` refresh, `B` bitplane, `S` sprite, `D` disk, `A` audio, `C` copper, `L` blitter, `P` CPU, `.` idle). |
 | `cpu_wait` | When `"slots": true`: the CPU wait grid per scanline in the same run-length encoding. Codes are the denier's owner letter (`R`, `B`, `S`, `D`, `A`, `C`, `L` for the blitter with BLTPRI clear), `N` for the blitter with BLTPRI set, `p` for the port turnaround, and `.` where the CPU was not waiting. |
 | `screenshot`, `digest` | When `"screenshots": "every"`: frame screenshot PNG filename and FNV-1a64 hash digest. |
+| `samples`, `samples_meta` | With `"samples": true`, the filenames of this frame's compact instruction stream and Copperline timing metadata. |
+| `sample_count`, `samples_total`, `irq_cck` | Encoded samples in this frame, cumulative encoded samples, and interrupt-dispatch colour clocks in this frame. |
 
 `stall_pcs` names the instruction that was executing when each wait began.
 On the precise CPU loop that is the current instruction; under `[cpu] jit`
@@ -70,8 +77,64 @@ classes (`cpu_wait_classes`), `started`/`ended` timeline points,
 `frames_written`, and a snapshot of registered uaelib resources (matching
 `debug.resources`) for address labeling.
 
+When precise sampling is enabled, the summary also records
+`cck_per_cpu_cycle`, `samples_total`, `irq_cck`, the loaded text base and size,
+and the sidecar layouts. Samples use colour clocks (CCK), Copperline's native
+chipset time unit; `cck_per_cpu_cycle` converts the configured CPU clock to
+that unit.
+
+## Precise CPU samples and unwinding
+
+`"samples": true` moves a JIT-configured CPU temporarily onto the precise
+per-instruction path. It does not change the emulated timeline. Every retired
+instruction records its PC and colour-clock cost. `"registers": true` appends
+D0-D7, A0-A7 and SR. Interrupt entry is a distinct `[IRQ]` sample; its metadata
+contains the interrupt level and exception vector rather than inferring them
+from the cost.
+
+Each `samples-NNNNNN.bin` is a little-endian u32 stream compatible with
+vscode-amiga-debug/WinUAE: leaf-to-root call-stack PCs, `0xffffffff - cck`,
+then the 17 optional register words. PCs in the supplied text range are
+relative to its base; Kickstart PCs in `$F80000..$FFFFFF` remain absolute.
+Samples longer than 65535 CCK are split so their cost word cannot be mistaken
+for a PC by existing parsers.
+
+The optional live unwind table has one six-byte row for every two bytes of
+text: `(cfa_register << 12) | cfa_offset`, saved-A5 offset, return-address
+offset, all little-endian i16 words. CFA register 13 is A5 and 15 is A7. The
+emulator keeps expanded offsets as i32, follows the return address at sample
+time, and stops when it leaves the supplied text. `copperline-ctl --dap`
+builds this table directly from the already-loaded DWARF call-frame
+information; no objdump process is involved.
+
+`samples-NNNNNN.meta` starts with `CLSM`, u32 version 1, and a u32 row count.
+Each row is five little-endian u32 values: total CCK, instruction CCK,
+chip-bus-wait CCK, IRQ level, and IRQ vector. The latter two are `0xffffffff`
+for ordinary instructions. This parallel file lets Copperline reports expose
+`[Bus wait]` below the responsible function while leaving the main stream
+compatible with Bartman's reader.
+
+## Converting to a CPU profile
+
+Convert an offline capture with the same hunk executable and, when applicable,
+its ELF debug sibling:
+
+```sh
+copperline-ctl profile-report out/profile --program hello \
+  --elf hello.elf --out hello.cpuprofile
+```
+
+The default is one merged Chrome DevTools `.cpuprofile`. Add `--per-frame` for
+one numbered file per captured frame, `--format bartman` for Bartman's `$amiga`
+annotations, or repeat `--source-map FROM=TO` to rewrite recorded build paths.
+Functions, source lines, and optimized inline frames come from Copperline's
+native debug-info reader. VS Code opens `.cpuprofile` files directly; its CPU
+profile flame-chart extension adds the graphical flame view.
+
 ## Storage overhead
 
 Enabling `slots` adds roughly 2-20 KB per frame (two run-length encoded
 grids). Setting `"screenshots": "every"` produces 50 PNG images per emulated
-second in PAL. Both options are disabled by default.
+second in PAL. Precise sampling is larger: without registers each sample is
+the call stack plus one word; registers add 68 bytes per sample. All three
+options are disabled by default. Captures up to 100,000 frames are accepted.

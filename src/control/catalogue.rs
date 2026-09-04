@@ -801,7 +801,10 @@ fn build() -> Vec<ToolDef> {
              with a `profile.json` summary written at stop. Stops by itself after \
              `frames` (default 500, at most 100000); `slots` adds per-frame chip-bus \
              owner and CPU-wait grids, `screenshots` saves the frame image for none, \
-             every or the last frame, `pc_samples` adds a sampled PC histogram. An \
+             every or the last frame, `pc_samples` adds a frame-boundary PC. \
+             `samples` records every instruction in Bartman/WinUAE binary form; \
+             `registers` appends D0-D7/A0-A7/SR, and `unwind` supplies the text base \
+             plus a base64 compact unwind table. An \
              optional `trigger` ({frame:N} or {busy_cck_over:N}) defers recording while \
              leaving the capture armed. Arms the frame analyzer's trace for the session, \
              which suspends run-ahead.",
@@ -817,7 +820,19 @@ fn build() -> Vec<ToolDef> {
                             &["none", "every", "last"],
                         ),
                     ),
-                    ("pc_samples", boolean("Include a sampled PC histogram per frame")),
+                    ("pc_samples", boolean("Include the frame-boundary PC")),
+                    ("samples", boolean("Record precise instruction samples per frame")),
+                    ("registers", boolean("Append 17 CPU registers to each sample")),
+                    (
+                        "unwind",
+                        object(
+                            vec![
+                                ("base", addr("Runtime base of program text")),
+                                ("table", string("Base64 compact unwind table")),
+                            ],
+                            &["base", "table"],
+                        ),
+                    ),
                     (
                         "trigger",
                         json!({
@@ -834,7 +849,7 @@ fn build() -> Vec<ToolDef> {
                 ],
                 &[],
             ),
-            json!({"path": "/tmp/profile", "frames": 100, "screenshots": "last"}),
+            json!({"path": "/tmp/profile", "frames": 100, "samples": true, "registers": true}),
         ),
         entry(
             "profile.stop",

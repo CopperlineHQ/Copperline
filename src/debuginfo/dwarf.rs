@@ -17,8 +17,8 @@
 
 use super::hunk::DwarfBlock;
 use super::{
-    Encoding, Function, HunkAddr, HunkMeta, LineRow, LinkMap, LinkSegment, Location, Member,
-    Symbol, TypeDesc, TypeId, Variable,
+    Encoding, Function, HunkAddr, HunkMeta, InlineFunction, LineRow, LinkMap, LinkSegment,
+    Location, Member, Symbol, TypeDesc, TypeId, Variable,
 };
 use gimli::{
     AttributeValue, BigEndian, DebuggingInformationEntry, Dwarf, EndianSlice, Reader, Unit,
@@ -38,6 +38,7 @@ pub struct Loaded {
     pub files: Vec<String>,
     pub rows: Vec<LineRow>,
     pub functions: Vec<Function>,
+    pub inline_functions: Vec<InlineFunction>,
     pub globals: Vec<Variable>,
     pub types: Vec<TypeDesc>,
     pub cfi: Option<Cfi>,
@@ -366,6 +367,7 @@ type StaticMap<'a> = dyn Fn(&str, u64) -> Option<HunkAddr> + 'a;
 /// What a DIE on the current path contributes to its descendants.
 enum Frame {
     Function(usize),
+    Inline,
     Block(Option<(HunkAddr, u32)>),
     Struct(TypeId),
     Enum(TypeId),
@@ -459,6 +461,24 @@ impl<'d, 'a> Ctx<'d, 'a> {
         let at = (self.addr_map)(low)?;
         let size = u32::try_from(high.saturating_sub(low)).ok()?;
         Some((at, size))
+    }
+
+    /// Every code range of a DIE, including DW_AT_ranges used by optimized
+    /// inlined subroutines.
+    fn pc_ranges(&self, unit: &Unit<Slice<'a>>, entry: &Die<'a>) -> Vec<(HunkAddr, u32)> {
+        let mut ranges = Vec::new();
+        let Ok(mut iter) = self.dwarf.die_ranges(unit, entry) else {
+            return ranges;
+        };
+        while let Ok(Some(range)) = iter.next() {
+            let Some(at) = (self.addr_map)(range.begin) else {
+                continue;
+            };
+            if let Ok(size) = u32::try_from(range.end.saturating_sub(range.begin)) {
+                ranges.push((at, size));
+            }
+        }
+        ranges
     }
 
     /// A single-operation location expression.
@@ -638,6 +658,33 @@ impl<'d, 'a> Ctx<'d, 'a> {
                     line: line.and_then(|l| u32::try_from(l).ok()),
                 });
                 Frame::Function(self.out.functions.len() - 1)
+            }
+            gimli::DW_TAG_inlined_subroutine => {
+                let ranges = self.pc_ranges(unit, entry);
+                if ranges.is_empty() {
+                    return Frame::Other;
+                }
+                let name = self
+                    .name_via_origin(unit, entry)
+                    .unwrap_or_else(|| format!("inline_{:x}", entry.offset().0));
+                let file = Self::udata(entry, gimli::DW_AT_call_file)
+                    .or_else(|| Self::udata(entry, gimli::DW_AT_decl_file))
+                    .and_then(|index| self.decl_file(unit, index));
+                let line = Self::udata(entry, gimli::DW_AT_call_line)
+                    .or_else(|| Self::udata(entry, gimli::DW_AT_decl_line))
+                    .and_then(|line| u32::try_from(line).ok());
+                let depth = stack
+                    .iter()
+                    .filter(|frame| matches!(frame, Frame::Inline))
+                    .count() as u32;
+                self.out.inline_functions.push(InlineFunction {
+                    name,
+                    ranges,
+                    file,
+                    line,
+                    depth,
+                });
+                Frame::Inline
             }
             gimli::DW_TAG_lexical_block => Frame::Block(self.pc_range(entry)),
             gimli::DW_TAG_formal_parameter => {

@@ -10174,18 +10174,18 @@ fn normal_blitter_idle_slots_do_not_feed_bls_back_pressure() {
     for _ in 0..4 {
         assert!(!bus.blitter.tick_scheduled_slot(&mut bus.mem.chip_ram));
     }
-    bus.note_cpu_missed_chip_bus_cycle();
+    bus.note_cpu_missed_chip_bus_cycle(1);
     assert_eq!(bus.blitter_slowdown_cpu_misses, 0);
 
     // The first D phase is also the empty destination pipeline bubble.
     assert!(!bus.blitter.tick_scheduled_slot(&mut bus.mem.chip_ram)); // A0.
-    bus.note_cpu_missed_chip_bus_cycle();
+    bus.note_cpu_missed_chip_bus_cycle(1);
     assert_eq!(bus.blitter_slowdown_cpu_misses, 0);
 
     // Once a real destination write is pending, misses do feed BLS pressure.
     assert!(!bus.blitter.tick_scheduled_slot(&mut bus.mem.chip_ram)); // D0 bubble.
     assert!(!bus.blitter.tick_scheduled_slot(&mut bus.mem.chip_ram)); // A1.
-    bus.note_cpu_missed_chip_bus_cycle();
+    bus.note_cpu_missed_chip_bus_cycle(1);
     assert_eq!(bus.blitter_slowdown_cpu_misses, 1);
 }
 
@@ -10205,7 +10205,7 @@ fn fill_idle_slots_feed_bls_back_pressure() {
         assert!(!bus.blitter.tick_scheduled_slot(&mut bus.mem.chip_ram));
     }
     bus.blitter_slowdown_cpu_misses = 0;
-    bus.note_cpu_missed_chip_bus_cycle();
+    bus.note_cpu_missed_chip_bus_cycle(1);
     assert_eq!(bus.blitter_slowdown_cpu_misses, 1);
 }
 

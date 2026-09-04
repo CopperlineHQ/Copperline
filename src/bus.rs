@@ -1019,6 +1019,13 @@ pub struct Bus {
     cpu_bus_arbitration_enabled: bool,
     cpu_granted_chip_slots: u64,
     cpu_missed_chip_slots: u64,
+    /// Monotonic colour clocks spent waiting for a chip-bus grant. Unlike
+    /// `cpu_missed_chip_slots`, this is never reset by the optional
+    /// per-frame diagnostic logger, so an instruction profiler can take
+    /// exact before/after deltas without depending on host diagnostics.
+    /// Observer-only state: it is deliberately absent from save states.
+    #[serde(skip)]
+    cpu_wait_cck_total: u64,
     /// Sub-cck remainder from CPU-internal clock reporting (the core reports
     /// CPU clocks; the bus advances in `cpu_clocks_per_cck`-clock color
     /// clocks).
@@ -3007,6 +3014,7 @@ impl Bus {
             cpu_custom_request_slot: None,
             cpu_granted_chip_slots: 0,
             cpu_missed_chip_slots: 0,
+            cpu_wait_cck_total: 0,
             dbg_bpl_cck: vec![0; 340],
             dbg_slotmap: Vec::new(),
             dbg_slotmap_on: crate::envcfg::flag("COPPERLINE_DIAG_SLOTMAP"),
@@ -4263,6 +4271,7 @@ impl Bus {
         self.cpu_chip_port_free_at = 0;
         self.cpu_chip_clock_phase = 0;
         self.cpu_bus_overlap_clocks = 0;
+        self.cpu_wait_cck_total = 0;
         self.display_dma_bplpt = [0; 8];
         self.display_dma_sprpt = [0; 8];
         self.sprite_dma_frame_start_ptr = [0; 8];
@@ -5730,7 +5739,7 @@ impl Bus {
                 }
                 let (cck, tick) = self.advance_one_chip_bus_quantum(None);
                 wait_cck += cck;
-                self.note_cpu_missed_chip_bus_cycle();
+                self.note_cpu_missed_chip_bus_cycle(cck);
                 self.record_slice_bus_advance(cck, tick);
                 self.flush_audio_before_audio_dma_slot();
             }
@@ -5943,7 +5952,7 @@ impl Bus {
             }
             let (cck, tick) = self.advance_one_chip_bus_quantum(None);
             if self.cpu_posted_write_debt == debt_before {
-                self.note_cpu_missed_chip_bus_cycle();
+                self.note_cpu_missed_chip_bus_cycle(cck);
             }
             self.record_slice_bus_advance(cck, tick);
         }
@@ -5988,8 +5997,9 @@ impl Bus {
         self.record_slice_bus_advance(cck, tick);
     }
 
-    fn note_cpu_missed_chip_bus_cycle(&mut self) {
+    fn note_cpu_missed_chip_bus_cycle(&mut self, cck: u32) {
         self.cpu_missed_chip_slots = self.cpu_missed_chip_slots.wrapping_add(1);
+        self.cpu_wait_cck_total = self.cpu_wait_cck_total.wrapping_add(u64::from(cck));
         if self.blitter_slowdown_counter_enabled() && self.blitter.current_slot_counts_for_bls() {
             self.blitter_slowdown_cpu_misses = self
                 .blitter_slowdown_cpu_misses
@@ -5998,6 +6008,11 @@ impl Bus {
         } else {
             self.blitter_slowdown_cpu_misses = 0;
         }
+    }
+
+    /// Monotonic colour clocks for which CPU accesses were denied the chip bus.
+    pub fn cpu_wait_cck_total(&self) -> u64 {
+        self.cpu_wait_cck_total
     }
 
     fn note_cpu_granted_chip_bus_cycle(&mut self) {

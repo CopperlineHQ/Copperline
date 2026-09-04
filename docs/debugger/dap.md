@@ -49,6 +49,15 @@ entry point with the source open; breakpoints, Step Over/Into/Out, Step
 Back, the Variables view, hovers, the Disassembly view, the memory viewer
 and the Debug Console all work from there. Stop closes the window.
 
+While the program is paused, the debug toolbar's **Profile** button captures
+one emulated frame and **Profile (Multi)** prompts for a frame count. The
+adapter sends the custom `copperline/profile {"frames": N}` request, derives a
+compact live unwind table from the session's DWARF, captures precise
+instruction samples, converts them to a source-mapped `.cpuprofile`, and opens
+the result in VS Code. The profile contains optimized inline frames and a
+`[Bus wait]` child that isolates time lost to chip-DMA contention. Other DAP
+clients can send the same custom request and open the returned `path`.
+
 ## Other clients
 
 nvim-dap, with the adapter on stdio:
@@ -153,6 +162,7 @@ global(s), call-frame info`.
 | Disassembly view | `disasm`, with symbols and source lines; backwards disassembly anchors at the nearest function or symbol start. |
 | Jump to cursor | `regs.set {"reg": "pc"}`. |
 | Debug Console output | Serial output (which is where `KPrintF` goes) as `stdout`; uaelib function 86 (`debug_log`), optional `emulatorLog`, and the adapter's own notes as `console`. |
+| CPU profiling | Custom `copperline/profile {"frames": N}` -> precise `profile.start`, bounded frame step, `profile.stop`, and a merged `.cpuprofile` path. |
 | Modules / loaded sources | The program with its first hunk's address, and the source files its debug information names. |
 
 A stop from a breakpoint the debugger window set, or from a `catch`, `reg

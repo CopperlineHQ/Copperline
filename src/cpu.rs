@@ -148,6 +148,11 @@ pub struct M68kMachine {
     /// Console-started instruction trace (TRACE START/STOP), None when
     /// off; per-instruction cost only while tracing.
     ui_trace: Option<UiTrace>,
+    /// Host-side precise CPU sampler used by `profile.start`. Like the other
+    /// debugger observers it never enters a save state and forces the precise
+    /// instruction loop while armed.
+    #[cfg(feature = "control")]
+    profile_samples: Option<crate::profile::samples::InstructionSampler>,
     // COPPERLINE_DBG_SPREN: previous DMACON, to detect the instruction that
     // clears the sprite-DMA-enable bit.
     dbg_prev_dmacon: u16,
@@ -219,6 +224,15 @@ pub struct CpuStepSlice {
     pub cpu_cck: u32,
     pub bus_advanced_cck: u32,
     pub stopped: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct IrqDispatch {
+    cycles: i32,
+    #[cfg(feature = "control")]
+    level: u8,
+    #[cfg(feature = "control")]
+    vector: u16,
 }
 
 /// Exact FP0-FP7 extended values followed by FPCR, FPSR and FPIAR.
@@ -440,6 +454,8 @@ impl M68kMachine {
             ui_pc_history_len: 0,
             ui_pc_history_enabled: false,
             ui_trace: None,
+            #[cfg(feature = "control")]
+            profile_samples: None,
             dbg_prev_dmacon: 0,
             dbg_prev_fc: 0,
             dbg_fc_count: 0,
@@ -1629,6 +1645,93 @@ impl M68kMachine {
         self.cpu_clocks_per_cck
     }
 
+    #[cfg(feature = "control")]
+    fn profile_registers(&self) -> [u32; crate::profile::samples::REGISTER_COUNT] {
+        let mut registers = [0; crate::profile::samples::REGISTER_COUNT];
+        for reg in 0..8 {
+            registers[reg] = self.cpu.d(reg);
+            registers[reg + 8] = self.cpu.a(reg);
+        }
+        registers[16] = u32::from(self.cpu.get_sr());
+        registers
+    }
+
+    #[cfg(feature = "control")]
+    fn profile_sample_start(
+        &self,
+        pc: u32,
+        bus_wait_cck: u64,
+    ) -> Option<crate::profile::samples::SampleStart> {
+        self.profile_samples.as_ref().map(|sampler| {
+            sampler.start(
+                pc & self.cpu.address_mask,
+                self.profile_registers(),
+                bus_wait_cck,
+            )
+        })
+    }
+
+    #[cfg(feature = "control")]
+    fn profile_finish_instruction_sample(
+        &mut self,
+        start: crate::profile::samples::SampleStart,
+        instruction_cck: u32,
+    ) {
+        if let Some(sampler) = self.profile_samples.as_mut() {
+            sampler.finish_instruction(start, instruction_cck, &self.bus.bus);
+        }
+    }
+
+    #[cfg(feature = "control")]
+    fn profile_finish_irq_sample(
+        &mut self,
+        start: crate::profile::samples::SampleStart,
+        instruction_cck: u32,
+        level: u8,
+        vector: u16,
+    ) {
+        if let Some(sampler) = self.profile_samples.as_mut() {
+            sampler.finish_irq(
+                start,
+                instruction_cck,
+                crate::profile::samples::IrqInfo { level, vector },
+                &self.bus.bus,
+            );
+        }
+    }
+
+    #[cfg(feature = "control")]
+    pub fn start_profile_samples(
+        &mut self,
+        unwind: Option<crate::profile::samples::CompactUnwindTable>,
+        registers: bool,
+    ) {
+        self.profile_samples = Some(crate::profile::samples::InstructionSampler::new(
+            unwind, registers,
+        ));
+        self.note_jit_debug_fallback();
+    }
+
+    #[cfg(feature = "control")]
+    pub fn stop_profile_samples(&mut self) {
+        self.profile_samples = None;
+    }
+
+    #[cfg(feature = "control")]
+    pub fn take_profile_samples(&mut self) -> Vec<crate::profile::samples::InstructionSample> {
+        self.profile_samples
+            .as_mut()
+            .map(crate::profile::samples::InstructionSampler::take)
+            .unwrap_or_default()
+    }
+
+    #[cfg(feature = "control")]
+    pub fn discard_profile_samples(&mut self) {
+        if let Some(sampler) = self.profile_samples.as_mut() {
+            sampler.clear();
+        }
+    }
+
     /// Whether the CPU is halted in STOP waiting for an interrupt.
     pub fn stopped(&self) -> bool {
         self.cpu.stopped != 0
@@ -2365,6 +2468,16 @@ impl M68kMachine {
             || self.ui_breaks.armed()
             || self.ui_pc_history_enabled
             || self.ui_trace.is_some()
+            || {
+                #[cfg(feature = "control")]
+                {
+                    self.profile_samples.is_some()
+                }
+                #[cfg(not(feature = "control"))]
+                {
+                    false
+                }
+            }
             || self.bus.bus.wave_pc_trigger
             || self.bus.bus.smc.is_some()
     }
@@ -2387,6 +2500,16 @@ impl M68kMachine {
             || self.ui_stop.is_some()
             || self.ui_pc_history_enabled
             || self.ui_trace.is_some()
+            || {
+                #[cfg(feature = "control")]
+                {
+                    self.profile_samples.is_some()
+                }
+                #[cfg(not(feature = "control"))]
+                {
+                    false
+                }
+            }
             || self.bus.bus.wave_pc_trigger
             || self.bus.bus.smc.is_some()
             || diag_cpu_sync_on()
@@ -2422,10 +2545,16 @@ impl M68kMachine {
         while instructions < count {
             let bus_before = self.bus.bus.slice_bus_advanced_cck();
             let cpu_cck_before = cpu_cck;
-            if let Some(irq_cycles) = self.service_pending_irq_cycles() {
-                cpu_cycles = cpu_cycles.saturating_add(positive_cpu_cycles(irq_cycles));
-                cpu_cck =
-                    cpu_cck.saturating_add(self.charge_cpu_clocks_less_bus_overlap(irq_cycles));
+            #[cfg(feature = "control")]
+            let irq_wait_before = self.bus.bus.cpu_wait_cck_total();
+            if let Some(irq) = self.service_pending_irq_cycles() {
+                cpu_cycles = cpu_cycles.saturating_add(positive_cpu_cycles(irq.cycles));
+                let irq_cck = self.charge_cpu_clocks_less_bus_overlap(irq.cycles);
+                cpu_cck = cpu_cck.saturating_add(irq_cck);
+                #[cfg(feature = "control")]
+                if let Some(start) = self.profile_sample_start(self.cpu.pc, irq_wait_before) {
+                    self.profile_finish_irq_sample(start, irq_cck, irq.level, irq.vector);
+                }
                 // An interrupt dispatch can land the PC on a breakpoint or
                 // a caught vector; stop before the handler's first
                 // instruction executes.
@@ -2445,6 +2574,9 @@ impl M68kMachine {
                     }
                 }
             }
+            #[cfg(feature = "control")]
+            let profile_start =
+                self.profile_sample_start(self.cpu.pc, self.bus.bus.cpu_wait_cck_total());
             if self.force_fpu_line_f_if_needed() {
                 instructions = instructions.saturating_add(1);
                 cpu_cycles = cpu_cycles.saturating_add(34);
@@ -2452,7 +2584,12 @@ impl M68kMachine {
                 // IRQ or a core-raised exception. Consume any posted-write
                 // overlap inside this exception's charge so it cannot leak
                 // into the handler's first instruction.
-                cpu_cck = cpu_cck.saturating_add(self.charge_cpu_clocks_less_bus_overlap(34));
+                let instruction_cck = self.charge_cpu_clocks_less_bus_overlap(34);
+                cpu_cck = cpu_cck.saturating_add(instruction_cck);
+                #[cfg(feature = "control")]
+                if let Some(start) = profile_start {
+                    self.profile_finish_instruction_sample(start, instruction_cck);
+                }
             } else {
                 let dbg_pc_before = self.cpu.pc;
                 let dbg_ipl_before = if DEBUG_HOOKS {
@@ -2505,8 +2642,12 @@ impl M68kMachine {
                         }
                         instructions = instructions.saturating_add(1);
                         cpu_cycles = cpu_cycles.saturating_add(positive_cpu_cycles(cycles));
-                        cpu_cck =
-                            cpu_cck.saturating_add(self.charge_cpu_clocks_less_bus_overlap(cycles));
+                        let instruction_cck = self.charge_cpu_clocks_less_bus_overlap(cycles);
+                        cpu_cck = cpu_cck.saturating_add(instruction_cck);
+                        #[cfg(feature = "control")]
+                        if let Some(start) = profile_start {
+                            self.profile_finish_instruction_sample(start, instruction_cck);
+                        }
                         if DEBUG_HOOKS {
                             if let Some(snapshot) = dbg_watch_snapshot {
                                 self.debug_after_step(snapshot);
@@ -2655,9 +2796,9 @@ impl M68kMachine {
         while instructions < count {
             let bus_before = self.bus.bus.slice_bus_advanced_cck();
             let cpu_cck_before = cpu_cck;
-            if let Some(irq_cycles) = self.service_pending_irq_cycles() {
-                cpu_cycles = cpu_cycles.saturating_add(positive_cpu_cycles(irq_cycles));
-                cpu_cck = cpu_cck.saturating_add(self.charge_cpu_clocks(irq_cycles));
+            if let Some(irq) = self.service_pending_irq_cycles() {
+                cpu_cycles = cpu_cycles.saturating_add(positive_cpu_cycles(irq.cycles));
+                cpu_cck = cpu_cck.saturating_add(self.charge_cpu_clocks(irq.cycles));
             }
             // A level the boundary could not deliver (the CPU is still
             // inside a handler at that priority) must not ride into the
@@ -2895,12 +3036,27 @@ impl M68kMachine {
         );
     }
 
-    fn service_pending_irq_cycles(&mut self) -> Option<i32> {
+    fn service_pending_irq_cycles(&mut self) -> Option<IrqDispatch> {
         self.refresh_irq_line();
         if !self.cpu.check_interrupts() {
             return None;
         }
-        Some(self.cpu.execute(&mut self.bus, 0))
+        let cycles = self.cpu.execute(&mut self.bus, 0);
+        #[cfg(feature = "control")]
+        let level = ((self.cpu.get_sr() >> 8) & 7) as u8;
+        #[cfg(feature = "control")]
+        let vector = self
+            .cpu
+            .last_exception_vector
+            .unwrap_or(u32::from(level) + 24)
+            .min(u32::from(u16::MAX)) as u16;
+        Some(IrqDispatch {
+            cycles,
+            #[cfg(feature = "control")]
+            level,
+            #[cfg(feature = "control")]
+            vector,
+        })
     }
 
     fn pending_irq_level(&self) -> u8 {
