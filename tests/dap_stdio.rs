@@ -403,6 +403,8 @@ fn dap_over_stdio_debugs_the_hello_probe_by_source_line() {
     let profile = c.call("copperline/profile", json!({"frames": 1}));
     assert_eq!(profile["framesCaptured"], 1, "{profile}");
     assert!(profile["samples"].as_u64().unwrap() > 0, "{profile}");
+    let stop = c.stopped();
+    assert_eq!(stop["reason"], "step", "{stop}");
     let profile_path = std::path::PathBuf::from(profile["path"].as_str().unwrap());
     let cpu_profile: Value =
         serde_json::from_slice(&std::fs::read(&profile_path).unwrap()).unwrap();

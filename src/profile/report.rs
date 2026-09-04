@@ -203,18 +203,27 @@ impl<'a> ProfileBuilder<'a> {
         }
         let mut locations = Vec::with_capacity(sample.pcs.len());
         for (index, &stored_pc) in sample.pcs.iter().enumerate().rev() {
-            let mut pc = if (0x00f8_0000..0x0100_0000).contains(&stored_pc) {
-                stored_pc
-            } else {
-                self.base
-                    .map_or(stored_pc, |base| base.wrapping_add(stored_pc))
-            };
+            let mut pc = self.runtime_pc(stored_pc);
             if index != 0 && !(0x00f8_0000..0x0100_0000).contains(&pc) {
                 pc = pc.wrapping_sub(2);
             }
             locations.extend(self.locations_for_pc(pc));
         }
         locations
+    }
+
+    fn runtime_pc(&self, stored_pc: u32) -> u32 {
+        if (0x00f8_0000..0x0100_0000).contains(&stored_pc) || self.debug.locate(stored_pc).is_some()
+        {
+            return stored_pc;
+        }
+        let hunk0_size = self.debug.hunks.first().map_or(0, |hunk| hunk.size);
+        if stored_pc < hunk0_size {
+            self.base
+                .map_or(stored_pc, |base| base.wrapping_add(stored_pc))
+        } else {
+            stored_pc
+        }
     }
 
     fn locations_for_pc(&self, pc: u32) -> Vec<Location> {
@@ -240,7 +249,7 @@ impl<'a> ProfileBuilder<'a> {
                 })
             })
             .unwrap_or_else(|| format!("${pc:08X}"));
-        let (url, line, column) = self.debug.line_for(pc).map_or_else(
+        let current_location = self.debug.line_for(pc).map_or_else(
             || (String::new(), 0, 0),
             |hit| {
                 let path = self
@@ -256,25 +265,42 @@ impl<'a> ProfileBuilder<'a> {
                 )
             },
         );
+        let inlines = self.debug.inline_functions_at(pc);
+        let call_site = |inline: &crate::debuginfo::InlineFunction| {
+            let url = inline
+                .file
+                .and_then(|file| self.debug.files.get(file as usize))
+                .map(|file| apply_source_map(file.path.clone(), self.source_map))
+                .unwrap_or_default();
+            (
+                url,
+                inline
+                    .line
+                    .map_or(0, |line| i64::from(line.saturating_sub(1))),
+                0,
+            )
+        };
+        // DW_AT_call_file/line belong to the caller. Give each parent the
+        // next inline's call site; only the innermost inline owns the current
+        // line-table location.
+        let (url, line, column) = inlines
+            .first()
+            .map_or_else(|| current_location.clone(), |inline| call_site(inline));
         let mut locations = vec![Location {
             function,
             url,
             line,
             column,
         }];
-        for inline in self.debug.inline_functions_at(pc) {
-            let url = inline
-                .file
-                .and_then(|file| self.debug.files.get(file as usize))
-                .map(|file| apply_source_map(file.path.clone(), self.source_map))
-                .unwrap_or_default();
+        for (index, inline) in inlines.iter().enumerate() {
+            let (url, line, column) = inlines
+                .get(index + 1)
+                .map_or_else(|| current_location.clone(), |child| call_site(child));
             locations.push(Location {
                 function: format!("{} (inlined)", inline.name),
                 url,
-                line: inline
-                    .line
-                    .map_or(0, |line| i64::from(line.saturating_sub(1))),
-                column: 0,
+                line,
+                column,
             });
         }
         locations
@@ -369,9 +395,19 @@ pub fn generate(options: &ReportOptions) -> Result<Vec<PathBuf>, String> {
     )
     .map_err(|e| format!("profile.json: {e}"))?;
     let registers = summary["options"]["registers"].as_bool().unwrap_or(false);
-    let base = summary["sampling"]["unwind_base"]
+    let unwind_base = summary["sampling"]["unwind_base"]
         .as_u64()
         .and_then(|base| u32::try_from(base).ok());
+    let mut relocation_bases: Vec<u32> = summary["sampling"]["relocation_bases"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|base| base.as_u64().and_then(|base| u32::try_from(base).ok()))
+        .collect();
+    if relocation_bases.is_empty() {
+        relocation_bases.extend(unwind_base);
+    }
+    let base = relocation_bases.first().copied();
     let program =
         fs::read(&options.program).map_err(|e| format!("{}: {e}", options.program.display()))?;
     let elf = options
@@ -380,8 +416,8 @@ pub fn generate(options: &ReportOptions) -> Result<Vec<PathBuf>, String> {
         .map(|path| fs::read(path).map_err(|e| format!("{}: {e}", path.display())))
         .transpose()?;
     let mut debug = crate::debuginfo::DebugInfo::load(&program, elf.as_deref())?;
-    if let Some(base) = base {
-        debug.relocate(vec![base]);
+    if !relocation_bases.is_empty() {
+        debug.relocate(relocation_bases);
     }
     let frames = load_frames(&options.input_dir, registers)?;
     if frames.is_empty() {
@@ -390,12 +426,15 @@ pub fn generate(options: &ReportOptions) -> Result<Vec<PathBuf>, String> {
 
     if options.per_frame {
         let mut outputs = Vec::with_capacity(frames.len());
+        let mut occurrences = HashMap::<u64, u64>::new();
         for frame in &frames {
             let mut builder =
                 ProfileBuilder::new(&debug, base, &options.source_map, options.format);
             builder.add_frame(frame);
             let value = builder.finish(&[frame.frame]);
-            let path = frame_output_path(&options.out, frame.frame);
+            let occurrence = occurrences.entry(frame.frame).or_default();
+            *occurrence += 1;
+            let path = frame_output_path(&options.out, frame.frame, *occurrence);
             write_json(&path, &value)?;
             outputs.push(path);
         }
@@ -418,7 +457,7 @@ fn write_json(path: &Path, value: &Value) -> Result<(), String> {
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
-fn frame_output_path(out: &Path, frame: u64) -> PathBuf {
+fn frame_output_path(out: &Path, frame: u64, occurrence: u64) -> PathBuf {
     let parent = out.parent().unwrap_or_else(|| Path::new(""));
     let stem = out
         .file_stem()
@@ -428,7 +467,11 @@ fn frame_output_path(out: &Path, frame: u64) -> PathBuf {
         .extension()
         .and_then(|s| s.to_str())
         .unwrap_or("cpuprofile");
-    parent.join(format!("{stem}-{frame:06}.{extension}"))
+    if occurrence == 1 {
+        parent.join(format!("{stem}-{frame:06}.{extension}"))
+    } else {
+        parent.join(format!("{stem}-{frame:06}-{occurrence:03}.{extension}"))
+    }
 }
 
 fn load_frames(dir: &Path, registers: bool) -> Result<Vec<FrameSamples>, String> {
@@ -525,6 +568,123 @@ fn parse_frame(stream: &[u8], metadata: &[u8], registers: bool) -> Result<Vec<Ra
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn absolute_pcs_in_later_hunks_are_not_rebased_through_hunk_zero() {
+        let mut debug = crate::debuginfo::DebugInfo::default();
+        debug.hunks = vec![
+            crate::debuginfo::HunkMeta {
+                kind: crate::debuginfo::hunk::HunkKind::Code,
+                size: 0x20,
+            },
+            crate::debuginfo::HunkMeta {
+                kind: crate::debuginfo::hunk::HunkKind::Code,
+                size: 0x20,
+            },
+        ];
+        debug.relocate(vec![0x1000, 0x3000]);
+        let builder = ProfileBuilder::new(&debug, Some(0x1000), &[], ReportFormat::Chrome);
+        assert_eq!(builder.runtime_pc(4), 0x1004);
+        assert_eq!(builder.runtime_pc(0x3004), 0x3004);
+    }
+
+    #[test]
+    fn inline_call_sites_are_assigned_to_their_parent_frames() {
+        use crate::debuginfo::{Function, HunkAddr, HunkMeta, InlineFunction, LineRow, SourceFile};
+        let mut debug = crate::debuginfo::DebugInfo::default();
+        debug.hunks = vec![HunkMeta {
+            kind: crate::debuginfo::hunk::HunkKind::Code,
+            size: 0x100,
+        }];
+        debug.files = vec![
+            SourceFile {
+                path: "parent.c".into(),
+            },
+            SourceFile {
+                path: "outer.c".into(),
+            },
+            SourceFile {
+                path: "leaf.c".into(),
+            },
+        ];
+        debug.rows = vec![LineRow {
+            at: HunkAddr::new(0, 0x20),
+            file: 2,
+            line: 300,
+            column: 7,
+            is_stmt: true,
+            end_sequence: false,
+        }];
+        debug.functions = vec![Function {
+            name: "parent".into(),
+            at: HunkAddr::new(0, 0),
+            size: 0x100,
+            frame_base: crate::debuginfo::Location::Unsupported,
+            params: Vec::new(),
+            locals: Vec::new(),
+            file: Some(0),
+            line: Some(1),
+        }];
+        debug.inline_functions = vec![
+            InlineFunction {
+                name: "outer".into(),
+                ranges: vec![(HunkAddr::new(0, 0x20), 2)],
+                file: Some(0),
+                line: Some(10),
+                depth: 0,
+            },
+            InlineFunction {
+                name: "leaf".into(),
+                ranges: vec![(HunkAddr::new(0, 0x20), 2)],
+                file: Some(1),
+                line: Some(20),
+                depth: 1,
+            },
+        ];
+        debug.relocate(vec![0x1000]);
+        let builder = ProfileBuilder::new(&debug, Some(0x1000), &[], ReportFormat::Chrome);
+        let locations = builder.locations_for_pc(0x1020);
+        assert_eq!(
+            locations[0],
+            Location {
+                function: "parent".into(),
+                url: "parent.c".into(),
+                line: 9,
+                column: 0
+            }
+        );
+        assert_eq!(
+            locations[1],
+            Location {
+                function: "outer (inlined)".into(),
+                url: "outer.c".into(),
+                line: 19,
+                column: 0
+            }
+        );
+        assert_eq!(
+            locations[2],
+            Location {
+                function: "leaf (inlined)".into(),
+                url: "leaf.c".into(),
+                line: 299,
+                column: 6
+            }
+        );
+    }
+
+    #[test]
+    fn repeated_per_frame_outputs_are_not_overwritten() {
+        let out = Path::new("profile.cpuprofile");
+        assert_eq!(
+            frame_output_path(out, 42, 1),
+            PathBuf::from("profile-000042.cpuprofile")
+        );
+        assert_eq!(
+            frame_output_path(out, 42, 2),
+            PathBuf::from("profile-000042-002.cpuprofile")
+        );
+    }
 
     #[test]
     fn parses_bartman_stream_and_contention_metadata() {

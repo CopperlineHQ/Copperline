@@ -100,6 +100,10 @@ pub struct ProfileOptions {
     pub registers: bool,
     /// Optional program text base plus compact DWARF-derived unwind rows.
     pub unwind: Option<samples::CompactUnwindTable>,
+    /// Runtime bases of every hunk, for offline source relocation.
+    pub relocation_bases: Vec<u32>,
+    /// Runtime ranges of executable hunks, for compact-unwind boundaries.
+    pub code_ranges: Vec<(u32, u32)>,
     /// Keep the capture armed but write nothing until this condition matches.
     pub trigger: Option<ProfileTrigger>,
 }
@@ -121,6 +125,7 @@ pub struct ProfileCapture {
     triggered_at: Option<u64>,
     samples_total: u64,
     irq_cck: u64,
+    sample_sequence: u64,
     cck_per_cpu_cycle: f64,
 }
 
@@ -150,6 +155,7 @@ impl ProfileCapture {
             triggered_at: triggered.then_some(frame),
             samples_total: 0,
             irq_cck: 0,
+            sample_sequence: 0,
             cck_per_cpu_cycle: 1.0 / f64::from(cpu_clocks_per_cck.max(1)),
         })
     }
@@ -265,8 +271,10 @@ impl ProfileCapture {
         frame: u64,
         samples: &[samples::InstructionSample],
     ) -> io::Result<SampleFrameStats> {
-        let samples_name = format!("samples-{frame:06}.bin");
-        let metadata_name = format!("samples-{frame:06}.meta");
+        let sequence = self.sample_sequence;
+        self.sample_sequence = self.sample_sequence.saturating_add(1);
+        let samples_name = format!("samples-{sequence:06}-frame-{frame:06}.bin");
+        let metadata_name = format!("samples-{sequence:06}-frame-{frame:06}.meta");
         let mut stream = BufWriter::new(File::create(self.opts.path.join(&samples_name))?);
         let mut metadata = BufWriter::new(File::create(self.opts.path.join(&metadata_name))?);
         metadata.write_all(b"CLSM")?;
@@ -377,6 +385,8 @@ impl ProfileCapture {
                 "metadata": "CLSM v1: count, then total_cck/instruction_cck/bus_wait_cck/irq_level/vector as little-endian u32",
                 "unwind_base": self.opts.unwind.as_ref().map(samples::CompactUnwindTable::base),
                 "unwind_text_size": self.opts.unwind.as_ref().map(samples::CompactUnwindTable::text_size),
+                "relocation_bases": self.opts.relocation_bases,
+                "code_ranges": self.opts.code_ranges.iter().map(|(base, size)| json!({"base": base, "size": size})).collect::<Vec<_>>(),
             })),
             "triggered_at": self.triggered_at,
             "resources": resources,
@@ -449,6 +459,8 @@ mod tests {
             samples: false,
             registers: false,
             unwind: None,
+            relocation_bases: Vec::new(),
+            code_ranges: Vec::new(),
             trigger: None,
         };
         let mut capture = ProfileCapture::create(opts, 100, 2.0, 1000, true, 2).unwrap();
@@ -490,6 +502,8 @@ mod tests {
             samples: false,
             registers: false,
             unwind: None,
+            relocation_bases: Vec::new(),
+            code_ranges: Vec::new(),
             trigger: Some(ProfileTrigger::BusyCckOver(100)),
         };
         let mut capture = ProfileCapture::create(opts, 5, 0.1, 10, false, 2).unwrap();
@@ -499,6 +513,35 @@ mod tests {
         let status = capture.status_value(true);
         assert_eq!(status["triggered"], true);
         assert_eq!(status["triggered_at"], 7);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repeated_frame_samples_use_monotonic_sidecar_names() {
+        let dir =
+            std::env::temp_dir().join(format!("copperline-profile-repeat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let opts = ProfileOptions {
+            path: dir.clone(),
+            frames: 2,
+            slots: false,
+            screenshots: ScreenshotMode::None,
+            pc_samples: false,
+            samples: true,
+            registers: false,
+            unwind: None,
+            relocation_bases: Vec::new(),
+            code_ranges: Vec::new(),
+            trigger: None,
+        };
+        let mut capture = ProfileCapture::create(opts, 10, 0.1, 0, false, 2).unwrap();
+        let first = capture.write_samples(11, &[]).unwrap();
+        capture.note_reposition(10, 0).unwrap();
+        let second = capture.write_samples(11, &[]).unwrap();
+        assert_ne!(first.samples_name, second.samples_name);
+        assert_ne!(first.metadata_name, second.metadata_name);
+        assert!(dir.join(first.samples_name).is_file());
+        assert!(dir.join(second.samples_name).is_file());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

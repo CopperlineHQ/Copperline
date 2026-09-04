@@ -596,6 +596,7 @@ impl Emulator {
         if capture.options().samples {
             self.machine.start_profile_samples(
                 capture.options().unwind.clone(),
+                capture.options().code_ranges.clone(),
                 capture.options().registers,
             );
         }

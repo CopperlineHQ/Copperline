@@ -803,8 +803,10 @@ fn build() -> Vec<ToolDef> {
              owner and CPU-wait grids, `screenshots` saves the frame image for none, \
              every or the last frame, `pc_samples` adds a frame-boundary PC. \
              `samples` records every instruction in Bartman/WinUAE binary form; \
-             `registers` appends D0-D7/A0-A7/SR, and `unwind` supplies the text base \
-             plus a base64 compact unwind table. An \
+             `registers` appends D0-D7/A0-A7/SR, `unwind` supplies the text base \
+             plus a base64 compact unwind table, `relocation_bases` preserves \
+             every loaded hunk base for offline source mapping, and `code_ranges` \
+             identifies executable hunks outside that table. An \
              optional `trigger` ({frame:N} or {busy_cck_over:N}) defers recording while \
              leaving the capture armed. Arms the frame analyzer's trace for the session, \
              which suspends run-ahead.",
@@ -832,6 +834,30 @@ fn build() -> Vec<ToolDef> {
                             ],
                             &["base", "table"],
                         ),
+                    ),
+                    (
+                        "relocation_bases",
+                        json!({
+                            "type": "array",
+                            "description": "Runtime base of each loaded program hunk, in file order",
+                            "items": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "string"}]}
+                        }),
+                    ),
+                    (
+                        "code_ranges",
+                        json!({
+                            "type": "array",
+                            "description": "Runtime ranges of loaded executable hunks",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "base": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "string"}]},
+                                    "size": {"oneOf": [{"type": "integer", "minimum": 1}, {"type": "string"}]}
+                                },
+                                "required": ["base", "size"],
+                                "additionalProperties": false
+                            }
+                        }),
                     ),
                     (
                         "trigger",

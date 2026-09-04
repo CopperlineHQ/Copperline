@@ -10081,6 +10081,8 @@ mod warp_control {
             samples: false,
             registers: false,
             unwind: None,
+            relocation_bases: Vec::new(),
+            code_ranges: Vec::new(),
             trigger: None,
         }
     }

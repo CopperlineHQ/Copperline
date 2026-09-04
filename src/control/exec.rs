@@ -1308,6 +1308,62 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
                     ))
                 }
             };
+            let relocation_bases = match p.get("relocation_bases") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(Value::Array(values)) if samples => values
+                    .iter()
+                    .map(|value| {
+                        value_as_u32(value).ok_or_else(|| {
+                            CtlError::invalid_params("relocation_bases must contain only addresses")
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                Some(Value::Array(_)) => {
+                    return Err(CtlError::invalid_params(
+                        "relocation_bases requires samples=true",
+                    ))
+                }
+                Some(_) => {
+                    return Err(CtlError::invalid_params(
+                        "relocation_bases must be an array of addresses",
+                    ))
+                }
+            };
+            let code_ranges = match p.get("code_ranges") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(Value::Array(values)) if samples => values
+                    .iter()
+                    .map(|value| {
+                        let range = value.as_object().ok_or_else(|| {
+                            CtlError::invalid_params(
+                                "code_ranges must contain {base:ADDR, size:N} objects",
+                            )
+                        })?;
+                        let base = range.get("base").and_then(value_as_u32).ok_or_else(|| {
+                            CtlError::invalid_params("code_ranges entry requires base")
+                        })?;
+                        let size = range.get("size").and_then(value_as_u32).ok_or_else(|| {
+                            CtlError::invalid_params("code_ranges entry requires size")
+                        })?;
+                        if range.len() != 2 || size == 0 {
+                            return Err(CtlError::invalid_params(
+                                "code_ranges entries need only nonzero base and size",
+                            ));
+                        }
+                        Ok((base, size))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                Some(Value::Array(_)) => {
+                    return Err(CtlError::invalid_params(
+                        "code_ranges requires samples=true",
+                    ))
+                }
+                Some(_) => {
+                    return Err(CtlError::invalid_params(
+                        "code_ranges must be an array of {base:ADDR, size:N} objects",
+                    ))
+                }
+            };
             core(CoreOp::ProfileStart {
                 options: crate::profile::ProfileOptions {
                     path: p
@@ -1321,6 +1377,8 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
                     samples,
                     registers,
                     unwind,
+                    relocation_bases,
+                    code_ranges,
                     trigger,
                 },
             })
@@ -4054,6 +4112,8 @@ mod tests {
         assert!(!options.samples);
         assert!(!options.registers);
         assert!(options.unwind.is_none());
+        assert!(options.relocation_bases.is_empty());
+        assert!(options.code_ranges.is_empty());
         assert_eq!(options.screenshots, crate::profile::ScreenshotMode::None);
         assert_eq!(options.trigger, None);
 
@@ -4099,7 +4159,20 @@ mod tests {
             panic!("expected ProfileStart");
         };
         assert!(options.samples && options.registers);
+        assert!(options.relocation_bases.is_empty());
         assert_eq!(options.unwind.unwrap().base(), 0x1000);
+        let CoreOp::ProfileStart { options } = core(
+            "profile.start",
+            json!({
+                "samples": true,
+                "relocation_bases": ["0x1000", 0x3000],
+                "code_ranges": [{"base": "0x1000", "size": 0x400}]
+            }),
+        ) else {
+            panic!("expected ProfileStart");
+        };
+        assert_eq!(options.relocation_bases, vec![0x1000, 0x3000]);
+        assert_eq!(options.code_ranges, vec![(0x1000, 0x400)]);
         for trigger in [
             json!({}),
             json!({"frame": 1, "busy_cck_over": 2}),
@@ -4134,6 +4207,8 @@ mod tests {
             samples: false,
             registers: false,
             unwind: None,
+            relocation_bases: Vec::new(),
+            code_ranges: Vec::new(),
             trigger: None,
         };
         let start = CoreOp::ProfileStart {
@@ -4168,6 +4243,8 @@ mod tests {
                     samples: false,
                     registers: false,
                     unwind: None,
+                    relocation_bases: Vec::new(),
+                    code_ranges: Vec::new(),
                     trigger: None,
                 },
             },
@@ -4243,6 +4320,8 @@ mod tests {
                     samples: false,
                     registers: false,
                     unwind: None,
+                    relocation_bases: Vec::new(),
+                    code_ranges: Vec::new(),
                     trigger: None,
                 },
             },
@@ -4364,6 +4443,8 @@ mod tests {
                     samples: false,
                     registers: false,
                     unwind: None,
+                    relocation_bases: Vec::new(),
+                    code_ranges: Vec::new(),
                     trigger: None,
                 },
             },
@@ -4396,6 +4477,8 @@ mod tests {
                 samples: true,
                 registers: true,
                 unwind: None,
+                relocation_bases: Vec::new(),
+                code_ranges: Vec::new(),
                 trigger: None,
             })
             .unwrap();

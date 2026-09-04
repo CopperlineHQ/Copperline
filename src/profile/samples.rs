@@ -76,6 +76,7 @@ impl CompactUnwindTable {
         &self,
         mut pc: u32,
         registers: &[u32; REGISTER_COUNT],
+        code_ranges: &[(u32, u32)],
         mut read32: impl FnMut(u32) -> u32,
     ) -> Callstack {
         let mut out = Callstack::default();
@@ -88,6 +89,16 @@ impl CompactUnwindTable {
         let mut r15 = registers[15];
         while out.depth < MAX_CALLSTACK_DEPTH {
             let Some(normalized) = self.normalize_pc(pc) else {
+                // Only hunk 0 has Bartman's compact unwind rows. Keep a leaf
+                // or caller in another program code hunk as an absolute PC so
+                // the offline converter can still source-map it, then stop
+                // because there is no row with which to continue the walk.
+                if code_ranges
+                    .iter()
+                    .any(|&(base, size)| pc >= base && pc.wrapping_sub(base) < size.max(1))
+                {
+                    out.push(pc);
+                }
                 break;
             };
             out.push(normalized);
@@ -159,18 +170,25 @@ pub struct SampleStart {
     pc: u32,
     registers: [u32; REGISTER_COUNT],
     bus_wait_cck: u64,
+    timeline_cck: u32,
 }
 
 pub struct InstructionSampler {
     unwind: Option<CompactUnwindTable>,
+    code_ranges: Vec<(u32, u32)>,
     include_registers: bool,
     pending: Vec<InstructionSample>,
 }
 
 impl InstructionSampler {
-    pub fn new(unwind: Option<CompactUnwindTable>, include_registers: bool) -> Self {
+    pub fn new(
+        unwind: Option<CompactUnwindTable>,
+        code_ranges: Vec<(u32, u32)>,
+        include_registers: bool,
+    ) -> Self {
         Self {
             unwind,
+            code_ranges,
             include_registers,
             pending: Vec::new(),
         }
@@ -181,21 +199,42 @@ impl InstructionSampler {
         pc: u32,
         registers: [u32; REGISTER_COUNT],
         bus_wait_cck: u64,
+        timeline_cck: u32,
     ) -> SampleStart {
         SampleStart {
             pc,
             registers,
             bus_wait_cck,
+            timeline_cck,
+        }
+    }
+
+    fn elapsed(start: SampleStart, charged_instruction_cck: u32, bus: &Bus) -> (u32, u32, u32) {
+        let wait = bus.cpu_wait_cck_total().wrapping_sub(start.bus_wait_cck);
+        let bus_wait_cck = wait.min(u64::from(u32::MAX)) as u32;
+        if bus.cpu_short_bus_cycle() {
+            // On a 020+ every chip access credits its elapsed transfer clocks
+            // out of the core's nominal charge. The shared timeline already
+            // contains both those transfers and the remaining CPU-internal
+            // charge, so its delta is the complete sample duration.
+            let total_cck = bus
+                .slice_bus_advanced_cck()
+                .saturating_sub(start.timeline_cck);
+            let instruction_cck = total_cck.saturating_sub(bus_wait_cck);
+            (total_cck, instruction_cck, bus_wait_cck)
+        } else {
+            let total_cck = charged_instruction_cck.saturating_add(bus_wait_cck);
+            (total_cck, charged_instruction_cck, bus_wait_cck)
         }
     }
 
     pub fn finish_instruction(&mut self, start: SampleStart, instruction_cck: u32, bus: &Bus) {
-        let wait = bus.cpu_wait_cck_total().wrapping_sub(start.bus_wait_cck);
-        let bus_wait_cck = wait.min(u64::from(u32::MAX)) as u32;
-        let total_cck = instruction_cck.saturating_add(bus_wait_cck);
+        let (total_cck, instruction_cck, bus_wait_cck) = Self::elapsed(start, instruction_cck, bus);
         let mut callstack = Callstack::default();
         if let Some(unwind) = &self.unwind {
-            callstack = unwind.unwind(start.pc, &start.registers, |addr| peek_long(bus, addr));
+            callstack = unwind.unwind(start.pc, &start.registers, &self.code_ranges, |addr| {
+                peek_long(bus, addr)
+            });
         } else {
             callstack.push(start.pc);
         }
@@ -217,12 +256,11 @@ impl InstructionSampler {
         irq: IrqInfo,
         bus: &Bus,
     ) {
-        let wait = bus.cpu_wait_cck_total().wrapping_sub(start.bus_wait_cck);
-        let bus_wait_cck = wait.min(u64::from(u32::MAX)) as u32;
+        let (total_cck, instruction_cck, bus_wait_cck) = Self::elapsed(start, instruction_cck, bus);
         self.pending.push(InstructionSample {
             callstack: [IRQ_MARKER; MAX_CALLSTACK_DEPTH],
             callstack_depth: 1,
-            total_cck: instruction_cck.saturating_add(bus_wait_cck),
+            total_cck,
             instruction_cck,
             bus_wait_cck,
             registers: self.include_registers.then_some(start.registers),
@@ -271,11 +309,20 @@ mod tests {
         let table = CompactUnwindTable::decode(0x1000, &bytes).unwrap();
         let mut registers = [0; REGISTER_COUNT];
         registers[15] = 0x2000;
-        let stack = table.unwind(0x1000, &registers, |addr| {
+        let stack = table.unwind(0x1000, &registers, &[], |addr| {
             assert_eq!(addr, 0x27fc);
             0x9000
         });
         assert_eq!(stack.depth, 1, "the external return address stops the walk");
         assert_eq!(stack.pcs[0], 0);
+    }
+
+    #[test]
+    fn leaf_outside_hunk_zero_is_retained_as_an_absolute_pc() {
+        let bytes = [0x04, 0xf0, 0xff, 0xff, 0xfc, 0xff];
+        let table = CompactUnwindTable::decode(0x1000, &bytes).unwrap();
+        let stack = table.unwind(0x3000, &[0; REGISTER_COUNT], &[(0x3000, 0x100)], |_| 0);
+        assert_eq!(stack.depth, 1);
+        assert_eq!(stack.pcs[0], 0x3000);
     }
 }

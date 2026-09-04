@@ -1171,7 +1171,7 @@ impl Session {
             "loadedSources" => Ok(json!({"sources": self.loaded_sources()})),
             "exceptionInfo" => self.exception_info(),
             "source" => Err("source content is not available from the adapter".into()),
-            "copperline/profile" => self.profile(args),
+            "copperline/profile" => self.profile(emit, args),
             other => Err(format!("{other}: not supported")),
         };
         result
@@ -1179,7 +1179,7 @@ impl Session {
 
     /// Capture a bounded number of committed frames from the paused session,
     /// then convert them to a source-mapped CPU profile for the editor.
-    fn profile(&mut self, args: &Value) -> Result<Value, String> {
+    fn profile(&mut self, emit: &mut Emit, args: &Value) -> Result<Value, String> {
         self.require_paused()?;
         let frames = args["frames"].as_u64().unwrap_or(1).clamp(1, 100_000);
         let info = self
@@ -1188,6 +1188,14 @@ impl Session {
             .filter(|info| info.relocated())
             .ok_or("profiling needs a loaded program with relocated debug information")?;
         let (base, unwind) = info.bartman_unwind_table()?;
+        let relocation_bases = info.bases().to_vec();
+        let code_ranges: Vec<Value> = info
+            .bases()
+            .iter()
+            .zip(&info.hunks)
+            .filter(|(_, hunk)| hunk.kind == crate::debuginfo::hunk::HunkKind::Code)
+            .map(|(&base, hunk)| json!({"base": base, "size": hunk.size}))
+            .collect();
         let program = self
             .program_path
             .clone()
@@ -1209,11 +1217,13 @@ impl Session {
                     "base": base,
                     "table": proto::encode_base64(&unwind),
                 },
+                "relocation_bases": relocation_bases,
+                "code_ranges": code_ranges,
             }),
         )?;
         let stepped = self.call_stop("step_frame", json!({"n": frames}));
         let stopped = self.call("profile.stop", json!({}));
-        stepped?;
+        let stepped = stepped?;
         let stopped = stopped?;
 
         let out = capture.join("profile.cpuprofile");
@@ -1228,7 +1238,7 @@ impl Session {
         })?;
         self.vars.clear();
         self.frames.clear();
-        self.phase = Phase::Paused;
+        self.finish_bounded(emit, &stepped, None);
         Ok(json!({
             "path": generated[0].display().to_string(),
             "capturePath": capture.display().to_string(),

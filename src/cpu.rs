@@ -1667,6 +1667,7 @@ impl M68kMachine {
                 pc & self.cpu.address_mask,
                 self.profile_registers(),
                 bus_wait_cck,
+                self.bus.bus.slice_bus_advanced_cck(),
             )
         })
     }
@@ -1704,10 +1705,13 @@ impl M68kMachine {
     pub fn start_profile_samples(
         &mut self,
         unwind: Option<crate::profile::samples::CompactUnwindTable>,
+        code_ranges: Vec<(u32, u32)>,
         registers: bool,
     ) {
         self.profile_samples = Some(crate::profile::samples::InstructionSampler::new(
-            unwind, registers,
+            unwind,
+            code_ranges,
+            registers,
         ));
         self.note_jit_debug_fallback();
     }
@@ -2546,13 +2550,14 @@ impl M68kMachine {
             let bus_before = self.bus.bus.slice_bus_advanced_cck();
             let cpu_cck_before = cpu_cck;
             #[cfg(feature = "control")]
-            let irq_wait_before = self.bus.bus.cpu_wait_cck_total();
+            let irq_profile_start =
+                self.profile_sample_start(self.cpu.pc, self.bus.bus.cpu_wait_cck_total());
             if let Some(irq) = self.service_pending_irq_cycles() {
                 cpu_cycles = cpu_cycles.saturating_add(positive_cpu_cycles(irq.cycles));
                 let irq_cck = self.charge_cpu_clocks_less_bus_overlap(irq.cycles);
                 cpu_cck = cpu_cck.saturating_add(irq_cck);
                 #[cfg(feature = "control")]
-                if let Some(start) = self.profile_sample_start(self.cpu.pc, irq_wait_before) {
+                if let Some(start) = irq_profile_start {
                     self.profile_finish_irq_sample(start, irq_cck, irq.level, irq.vector);
                 }
                 // An interrupt dispatch can land the PC on a breakpoint or
@@ -6897,6 +6902,59 @@ mod tests {
         assert_eq!(read_chip_word(machine.bus(), machine.a(7)), 0x2000);
         assert_eq!(read_chip_long(machine.bus(), machine.a(7) + 2), 0x0000_0104);
         assert_eq!(machine.bus().delivered_irq_pending & INT_PORTS, INT_PORTS);
+        Ok(())
+    }
+
+    #[cfg(feature = "control")]
+    #[test]
+    fn irq_profile_snapshot_precedes_exception_frame_and_handler_state() -> Result<()> {
+        let mut bus = test_bus_with_pc(0x0000_0100);
+        write_program(&mut bus, 0x0000_0100, &[0x4E71]);
+        write_program(&mut bus, 0x0000_0200, &[0x4E71]);
+        set_autovector(&mut bus, 2, 0x0000_0200);
+        bus.paula.intena = INT_MASTER | INT_PORTS;
+        bus.paula.intreq = INT_PORTS;
+        bus.irq_latency_setting = 0;
+
+        let mut machine = M68kMachine::new(bus, CpuModel::M68000, false)?;
+        machine.cpu.set_sr(0x2000);
+        machine.cpu.set_d(0, 0x1234_5678);
+        let pre_irq_sp = machine.a(7);
+        machine.start_profile_samples(None, Vec::new(), true);
+        machine.step_slice(1)?;
+
+        let samples = machine.take_profile_samples();
+        let irq = samples.iter().find(|sample| sample.irq.is_some()).unwrap();
+        let registers = irq.registers.expect("IRQ registers");
+        assert_eq!(registers[0], 0x1234_5678);
+        assert_eq!(
+            registers[15], pre_irq_sp,
+            "A7 must precede the exception frame"
+        );
+        assert_eq!(registers[16], 0x2000, "SR must precede the raised IPL mask");
+        Ok(())
+    }
+
+    #[cfg(feature = "control")]
+    #[test]
+    fn short_bus_profile_accounts_for_granted_transfer_time() -> Result<()> {
+        // MOVE.W D0,(A0) fetches and writes through the 020's chip-bus port.
+        let mut machine = machine_with_program_model(0x100, &[0x3080], CpuModel::M68020)?;
+        machine.cpu.set_a(0, 0x200);
+        machine.start_profile_samples(None, Vec::new(), false);
+        let slice = machine.step_slice(1)?;
+        let samples = machine.take_profile_samples();
+        assert_eq!(samples.len(), 1);
+        let sample = &samples[0];
+        assert_eq!(sample.total_cck, slice.bus_advanced_cck);
+        assert_eq!(
+            sample.instruction_cck + sample.bus_wait_cck,
+            sample.total_cck
+        );
+        assert!(
+            sample.instruction_cck > 0,
+            "granted clocks must be retained"
+        );
         Ok(())
     }
 

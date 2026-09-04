@@ -54,7 +54,8 @@ fn usage() -> &'static str {
      copperline-ctl --dap [--info FILE | --connect ADDR --token TOKEN]\n       \
      copperline-ctl --dap-listen ADDR [--info FILE | --connect ADDR --token TOKEN]\n       \
      copperline-ctl profile-report DIR --program PROG [--elf PROG.ELF] \
-       --out FILE [--format chrome|bartman] [--per-frame]"
+       --out FILE [--format chrome|bartman] [--per-frame] \
+       [--source-map FROM=TO ...]"
 }
 
 fn parse_options() -> Result<Options, String> {

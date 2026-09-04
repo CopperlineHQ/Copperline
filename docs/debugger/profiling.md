@@ -13,7 +13,9 @@ profile.start {"path": "out/profile", "frames": 500, "slots": true,
 # Precise instruction sampling (registers are optional):
 profile.start {"path": "out/profile", "frames": 60, "samples": true,
                "registers": true,
-               "unwind": {"base": "0x123400", "table": "<base64>"}}
+               "unwind": {"base": "0x123400", "table": "<base64>"},
+               "relocation_bases": ["0x123400", "0x20a000"],
+               "code_ranges": [{"base": "0x123400", "size": "0x6000"}]}
 profile.stop
 profile.status
 ```
@@ -78,8 +80,9 @@ classes (`cpu_wait_classes`), `started`/`ended` timeline points,
 `debug.resources`) for address labeling.
 
 When precise sampling is enabled, the summary also records
-`cck_per_cpu_cycle`, `samples_total`, `irq_cck`, the loaded text base and size,
-and the sidecar layouts. Samples use colour clocks (CCK), Copperline's native
+`cck_per_cpu_cycle`, `samples_total`, `irq_cck`, every loaded hunk base and
+executable range, the unwind text base and size, and the sidecar layouts.
+Samples use colour clocks (CCK), Copperline's native
 chipset time unit; `cck_per_cpu_cycle` converts the configured CPU clock to
 that unit.
 
@@ -92,7 +95,7 @@ D0-D7, A0-A7 and SR. Interrupt entry is a distinct `[IRQ]` sample; its metadata
 contains the interrupt level and exception vector rather than inferring them
 from the cost.
 
-Each `samples-NNNNNN.bin` is a little-endian u32 stream compatible with
+Each `samples-SSSSSS-frame-NNNNNN.bin` is a little-endian u32 stream compatible with
 vscode-amiga-debug/WinUAE: leaf-to-root call-stack PCs, `0xffffffff - cck`,
 then the 17 optional register words. PCs in the supplied text range are
 relative to its base; Kickstart PCs in `$F80000..$FFFFFF` remain absolute.
@@ -107,12 +110,20 @@ time, and stops when it leaves the supplied text. `copperline-ctl --dap`
 builds this table directly from the already-loaded DWARF call-frame
 information; no objdump process is involved.
 
-`samples-NNNNNN.meta` starts with `CLSM`, u32 version 1, and a u32 row count.
+`samples-SSSSSS-frame-NNNNNN.meta` starts with `CLSM`, u32 version 1, and a u32 row count.
 Each row is five little-endian u32 values: total CCK, instruction CCK,
 chip-bus-wait CCK, IRQ level, and IRQ vector. The latter two are `0xffffffff`
 for ordinary instructions. This parallel file lets Copperline reports expose
 `[Bus wait]` below the responsible function while leaving the main stream
 compatible with Bartman's reader.
+
+`SSSSSS` is a monotonic capture sequence, so revisiting the same emulated
+frame through reverse execution or state loading never overwrites an earlier
+sidecar. `relocation_bases` is ordered by hunk and lets the offline converter
+map absolute samples from every code hunk. `code_ranges` lets the live compact
+unwinder retain a leaf or caller from a code hunk outside its hunk-0 table while
+still stopping at external code. Older captures without relocation data fall
+back to the unwind table's hunk-0 base.
 
 ## Converting to a CPU profile
 
