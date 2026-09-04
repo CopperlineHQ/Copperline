@@ -224,6 +224,15 @@ pub(crate) struct DiskDmaTransfer {
     pub data: u16,
     /// Direction at the chip-RAM side of the DMA transfer.
     pub memory_write: bool,
+    /// Zero-based colour-clock offset within the enclosing `tick` batch.
+    pub cck_offset: u32,
+}
+
+fn dma_trace_cck_offset(total_data_cck: u32, remaining_data_cck: u32, scale: u32) -> u32 {
+    total_data_cck
+        .saturating_sub(remaining_data_cck)
+        .div_ceil(scale.max(1))
+        .saturating_sub(1)
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1411,12 +1420,15 @@ impl FloppyController {
         // bit-identical to real speed. Mechanics (motor, seek, settle, index
         // pulse width) above tick at real time regardless. A bridged bay is
         // excluded: its data rate belongs to the real disk.
-        let data_cck = cck.saturating_mul(self.drive_speed_multiplier(idx));
+        let data_scale = self.drive_speed_multiplier(idx);
+        let data_cck = cck.saturating_mul(data_scale);
         let mut irq = match active_dma {
             Some((dma_idx, _, true)) if dma_idx == idx => {
-                self.tick_write_dma(idx, data_cck, is_selected, chip_ram)
+                self.tick_write_dma(idx, data_cck, data_scale, is_selected, chip_ram)
             }
-            _ => self.tick_read_and_rotate(idx, data_cck, dmacon, is_selected, chip_ram),
+            _ => {
+                self.tick_read_and_rotate(idx, data_cck, data_scale, dmacon, is_selected, chip_ram)
+            }
         };
         // A zero-time turbo burst can move many words at one beam position,
         // which cannot be represented by the one-record-per-colour-clock bus
@@ -1489,9 +1501,9 @@ impl FloppyController {
             };
             let burst = burst.min(u64::from(u32::MAX)) as u32;
             irq |= if write {
-                self.tick_write_dma(idx, burst, is_selected, chip_ram)
+                self.tick_write_dma(idx, burst, 1, is_selected, chip_ram)
             } else {
-                self.tick_read_and_rotate(idx, burst, dmacon, is_selected, chip_ram)
+                self.tick_read_and_rotate(idx, burst, 1, dmacon, is_selected, chip_ram)
             };
             if irq {
                 break;
@@ -1511,6 +1523,7 @@ impl FloppyController {
         &mut self,
         idx: usize,
         cck: u32,
+        data_scale: u32,
         dmacon: u16,
         is_selected: bool,
         chip_ram: &mut [u8],
@@ -1624,6 +1637,11 @@ impl FloppyController {
                                 addr,
                                 data: word,
                                 memory_write: true,
+                                cck_offset: dma_trace_cck_offset(
+                                    cck,
+                                    self.drives[idx].rotation_acc_cck,
+                                    data_scale,
+                                ),
                             });
                         }
                         if !self.debug_watch_addrs.is_empty()
@@ -1663,6 +1681,7 @@ impl FloppyController {
         &mut self,
         idx: usize,
         cck: u32,
+        data_scale: u32,
         is_selected: bool,
         chip_ram: &mut [u8],
     ) -> bool {
@@ -1702,6 +1721,11 @@ impl FloppyController {
                     addr,
                     data: word,
                     memory_write: false,
+                    cck_offset: dma_trace_cck_offset(
+                        cck,
+                        self.drives[idx].rotation_acc_cck,
+                        data_scale,
+                    ),
                 });
             }
             dma.write_words.push(word);

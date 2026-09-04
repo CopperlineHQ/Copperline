@@ -120,7 +120,8 @@ little-endian 24-byte layout:
 | 20 | u32 | `events`: hardware-edge bits listed below |
 
 The same fields are available live from `frame.slots {"row": V}` and in the
-Frame Analyzer's selected/hovered-slot readout.
+Frame Analyzer's selected/hovered-slot readout. On that JSON surface, `data`
+is a fixed-width hexadecimal string so all 64 bits remain exact.
 
 | Bit | Event |
 |---:|---|

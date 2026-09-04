@@ -1257,6 +1257,12 @@ pub struct Bus {
     pending_device_cck: u32,
     #[serde(skip)]
     pending_device_tick: AgnusTick,
+    /// Raster spans covered by `pending_device_cck` while exact bus-event
+    /// metadata is armed. Timed devices still advance in their ordinary
+    /// instruction-boundary batch; these transient spans only map events
+    /// reported by that batch back to the colour clock where they occurred.
+    #[serde(skip)]
+    pending_device_trace_spans: Vec<BusTraceSpan>,
     audio_pending_cck: u32,
     last_chip_bus_owner: ChipBusOwner,
     /// Last 16-bit value driven on the chip data bus by a real access (display/
@@ -1976,6 +1982,30 @@ struct BusTracePosition {
     cck: u64,
     vpos: u32,
     hpos: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct BusTraceSpan {
+    position: BusTracePosition,
+    offset: u32,
+    cck: u32,
+}
+
+impl BusTraceSpan {
+    fn position_at(self, offset: u32) -> Option<BusTracePosition> {
+        let within = offset.checked_sub(self.offset)?;
+        (within < self.cck).then_some(BusTracePosition {
+            frame: self.position.frame,
+            cck: self.position.cck.saturating_add(u64::from(within)),
+            vpos: self.position.vpos,
+            hpos: self.position.hpos.saturating_add(within),
+        })
+    }
+}
+
+fn bus_trace_position_at(spans: &[BusTraceSpan], offset: u32) -> Option<BusTracePosition> {
+    let index = spans.partition_point(|span| span.offset.saturating_add(span.cck) <= offset);
+    spans.get(index)?.position_at(offset)
 }
 
 /// Fixed 24-byte sidecar record, one per Agnus colour clock. `reg` is a
@@ -3415,6 +3445,7 @@ impl Bus {
             slice_bus_tick: AgnusTick::default(),
             pending_device_cck: 0,
             pending_device_tick: AgnusTick::default(),
+            pending_device_trace_spans: Vec::new(),
             audio_pending_cck: 0,
             last_chip_bus_owner: ChipBusOwner::Idle,
             data_bus: 0,
@@ -6552,11 +6583,11 @@ impl Bus {
     /// deadline optimization to pay for itself.
     pub fn advance_cpu_idle_devices(&mut self, cck: u32) -> AgnusTick {
         self.flush_timed_devices();
-        let precise = self.precise_timed_device_trace();
         let tick = self.advance_chipset_cpu_idle(cck);
-        if !precise {
-            self.tick_timed_devices(cck, tick, None);
-        }
+        let spans = std::mem::take(&mut self.pending_device_trace_spans);
+        self.tick_timed_devices(cck, tick, &spans);
+        self.pending_device_trace_spans = spans;
+        self.pending_device_trace_spans.clear();
         tick
     }
 
@@ -6565,11 +6596,11 @@ impl Bus {
         // this (idle/stopped-CPU or test-driven) span, so device time stays
         // ordered, then tick this span directly.
         self.flush_timed_devices();
-        let precise = self.precise_timed_device_trace();
         let tick = self.advance_chipset(cck);
-        if !precise {
-            self.tick_timed_devices(cck, tick, None);
-        }
+        let spans = std::mem::take(&mut self.pending_device_trace_spans);
+        self.tick_timed_devices(cck, tick, &spans);
+        self.pending_device_trace_spans = spans;
+        self.pending_device_trace_spans.clear();
         tick
     }
 
@@ -6866,7 +6897,7 @@ impl Bus {
         &mut self,
         cck: u32,
         agnus_tick: AgnusTick,
-        trace_position: Option<BusTracePosition>,
+        trace_spans: &[BusTraceSpan],
     ) {
         if agnus_tick.new_frames > 0 {
             self.pending_vbi = 1;
@@ -6981,7 +7012,14 @@ impl Bus {
             }
         }
 
+        let cia_remainder = self.device_clock.cia_tick_remainder_cck;
         let ticks = self.device_clock.cia_ticks_for_cck(cck);
+        let cia_a_edge_tick = (!trace_spans.is_empty() && !self.trace_cia_irq_pins.0)
+            .then(|| self.cia_a.first_irq_edge_tick_within(ticks))
+            .flatten();
+        let cia_b_edge_tick = (!trace_spans.is_empty() && !self.trace_cia_irq_pins.1)
+            .then(|| self.cia_b.first_irq_edge_tick_within(ticks))
+            .flatten();
         // Cached once: this runs on the per-device-tick path, so a live env
         // lookup here would cost real-time performance for a debug-only logger.
         let dbg_cia = dbg_cia_on();
@@ -7007,12 +7045,21 @@ impl Bus {
                 );
             }
         }
-        // Full slot traces and live bus-event observers advance timed devices
-        // one colour clock at a time. Stamp timer-driven CIA pin edges on that
-        // clock's slot, before line/frame TOD and device inputs below can add
-        // their own edges at the post-advance beam position.
-        if trace_position.is_some() {
-            self.refresh_cia_irq_lines_at(trace_position);
+        // Predicting on cloned CIAs above leaves this live update batched, but
+        // still lets the diagnostic trace stamp each timer-driven pin edge on
+        // its exact E-clock slot before TOD and external inputs below can add
+        // edges at the post-advance beam position.
+        if !trace_spans.is_empty() {
+            let position_for_tick = |tick: u32| {
+                let first_elapsed_cck = 5u32.saturating_sub(cia_remainder);
+                let elapsed_cck =
+                    first_elapsed_cck.saturating_add(tick.saturating_sub(1).saturating_mul(5));
+                bus_trace_position_at(trace_spans, elapsed_cck.saturating_sub(1))
+            };
+            self.refresh_cia_irq_lines_at_positions(
+                cia_a_edge_tick.and_then(position_for_tick),
+                cia_b_edge_tick.and_then(position_for_tick),
+            );
         }
 
         for _ in 0..agnus_tick.new_frames {
@@ -7090,6 +7137,12 @@ impl Bus {
             self.floppy.set_adkcon(self.paula.adkcon);
             let disk_irq = self.floppy.tick(cck, dmacon, &mut self.mem.chip_ram);
             for transfer in self.floppy.take_dma_trace() {
+                let trace_position = bus_trace_position_at(trace_spans, transfer.cck_offset)
+                    .or_else(|| {
+                        trace_spans.last().and_then(|span| {
+                            span.position_at(span.offset.saturating_add(span.cck).saturating_sub(1))
+                        })
+                    });
                 self.annotate_bus_slot_at(
                     trace_position,
                     BUS_RECORD_DISK,
@@ -7157,15 +7210,23 @@ impl Bus {
     }
 
     fn refresh_cia_irq_lines_at(&mut self, trace_position: Option<BusTracePosition>) {
+        self.refresh_cia_irq_lines_at_positions(trace_position, trace_position);
+    }
+
+    fn refresh_cia_irq_lines_at_positions(
+        &mut self,
+        cia_a_position: Option<BusTracePosition>,
+        cia_b_position: Option<BusTracePosition>,
+    ) {
         let pins = (
             self.cia_a.irq_line_asserted(),
             self.cia_b.irq_line_asserted(),
         );
         if pins.0 && !self.trace_cia_irq_pins.0 {
-            self.note_bus_event_named_at(BUS_EVENT_CIAA_IRQ, Some("cia_a_irq"), trace_position);
+            self.note_bus_event_named_at(BUS_EVENT_CIAA_IRQ, Some("cia_a_irq"), cia_a_position);
         }
         if pins.1 && !self.trace_cia_irq_pins.1 {
-            self.note_bus_event_named_at(BUS_EVENT_CIAB_IRQ, Some("cia_b_irq"), trace_position);
+            self.note_bus_event_named_at(BUS_EVENT_CIAB_IRQ, Some("cia_b_irq"), cia_b_position);
         }
         self.trace_cia_irq_pins = pins;
         if pins.0 {
@@ -7351,6 +7412,9 @@ impl Bus {
         if self.frame_analyzer_enabled == enabled {
             return;
         }
+        if !enabled && self.frame_analyzer_full {
+            self.flush_timed_devices();
+        }
         self.frame_analyzer_enabled = enabled;
         if !enabled {
             self.frame_analyzer_full = false;
@@ -7374,7 +7438,7 @@ impl Bus {
     pub fn set_frame_analyzer_full(&mut self, enabled: bool) {
         let was_enabled = self.frame_analyzer_enabled;
         let changed = self.frame_analyzer_full != enabled;
-        if enabled && changed && !self.precise_timed_device_trace() {
+        if changed {
             self.flush_timed_devices();
         }
         self.frame_analyzer_full = enabled;
@@ -7538,9 +7602,7 @@ impl Bus {
     pub fn set_bus_event_observation_enabled(&mut self, enabled: bool) {
         if enabled {
             if self.bus_event_observers == 0 {
-                if !self.frame_analyzer_full {
-                    self.flush_timed_devices();
-                }
+                self.flush_timed_devices();
                 self.bus_events.clear();
                 self.trace_cia_irq_pins = (
                     self.cia_a.irq_line_asserted(),
@@ -7550,6 +7612,9 @@ impl Bus {
             }
             self.bus_event_observers = self.bus_event_observers.saturating_add(1);
         } else {
+            if self.bus_event_observers == 1 {
+                self.flush_timed_devices();
+            }
             self.bus_event_observers = self.bus_event_observers.saturating_sub(1);
             if self.bus_event_observers == 0 {
                 self.bus_events.clear();
@@ -7747,10 +7812,21 @@ impl Bus {
             | u16::from(cia_b) << 2
             | (reg as u16 & 0x0F) << 8
             | u16::from(self.cia_trace_phase.min(7)) << 12;
+        let (base, window_size) = if cia_b {
+            (crate::cpu::CIA_B_BASE, crate::cpu::CIA_B_SIZE)
+        } else {
+            (crate::cpu::CIA_A_BASE, crate::cpu::CIA_A_SIZE)
+        };
+        let raw_addr = addr as u32;
+        let cpu_addr = if (base..base + window_size).contains(&raw_addr) {
+            raw_addr
+        } else {
+            base.wrapping_add(raw_addr)
+        };
         self.current_frame_bus_trace
             .annotate_at(vpos, hpos, |record| {
                 record.reg = 0x1000;
-                record.addr = addr as u32;
+                record.addr = cpu_addr;
                 record.data = u64::from(value);
                 record.size = size.min(2) as u8;
                 record.flags |= flags;

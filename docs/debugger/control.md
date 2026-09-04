@@ -277,7 +277,9 @@ events.unsubscribe {"events":["serial"]}
   (row 0 through 2047, covering the ECS 11-bit programmable vertical range)
   of the latest full Frame Analyzer/profile trace. Each entry has HPOS,
   register, address, data/size, kind/subtype, flags, IPL, raw event bits, and
-  decoded event names. Owner-only traces and out-of-range rows return errors.
+  decoded event names. `data` is a fixed-width hexadecimal string so grouped
+  64-bit AGA fetches remain lossless in JSON. Owner-only traces and out-of-range
+  rows return errors.
 - `display.get`: Query active display parameters, viewport size, and pixel format.
 - `rtc.get` / `rtc.set {"unix": ..., "time": "...", "advance": ..., "frozen": ...}`: Inspect or move real-time clock.
 - `cartridge.get`: Query freezer cartridge state (`model`, memory `base`/`size`, monitor `version`, `entered` status, `nmi_pending`, and freeze count).

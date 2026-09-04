@@ -1958,6 +1958,24 @@ impl<'a> ParamReader<'a> {
 
 /// Execute a [`CoreOp`] against the machine. Both server modes call
 /// this for everything that is not run control, input, or media.
+fn bus_slot_json(hpos: usize, record: &crate::bus::BusSlotRecord) -> Value {
+    json!({
+        "hpos": hpos,
+        "reg": record.reg,
+        "addr": record.addr,
+        // JSON numbers cannot represent every u64 exactly. Keep grouped AGA
+        // fetches lossless on every client by using a fixed-width hex string.
+        "data": format!("0x{:016X}", record.data),
+        "size": record.size,
+        "kind": record.kind,
+        "subtype": record.subtype,
+        "ipl": record.ipl,
+        "flags": record.flags,
+        "events": record.events,
+        "event_names": crate::bus::bus_event_names(record.events),
+    })
+}
+
 pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Result<Value, CtlError> {
     match op {
         CoreOp::Status => Ok(status_value(emu, ctx)),
@@ -2111,21 +2129,7 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             let records: Vec<Value> = records
                 .iter()
                 .enumerate()
-                .map(|(hpos, record)| {
-                    json!({
-                        "hpos": hpos,
-                        "reg": record.reg,
-                        "addr": record.addr,
-                        "data": record.data,
-                        "size": record.size,
-                        "kind": record.kind,
-                        "subtype": record.subtype,
-                        "ipl": record.ipl,
-                        "flags": record.flags,
-                        "events": record.events,
-                        "event_names": crate::bus::bus_event_names(record.events),
-                    })
-                })
+                .map(|(hpos, record)| bus_slot_json(hpos, record))
                 .collect();
             Ok(json!({
                 "frame": trace.frame,
@@ -3176,6 +3180,17 @@ mod tests {
                 count: 2
             }
         );
+    }
+
+    #[test]
+    fn frame_slot_json_preserves_full_width_data() {
+        let record = crate::bus::BusSlotRecord {
+            data: 0xFEDC_BA98_7654_3210,
+            ..crate::bus::BusSlotRecord::default()
+        };
+        let value = bus_slot_json(7, &record);
+        assert_eq!(value["hpos"], 7);
+        assert_eq!(value["data"], "0xFEDCBA9876543210");
     }
 
     #[test]

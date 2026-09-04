@@ -46,14 +46,34 @@ impl Bus {
         copper_invariant_before_deadline: bool,
     ) -> (u32, AgnusTick) {
         let cck = self.next_chip_bus_quantum().min(max_cck).max(1);
-        let trace_position = self
-            .precise_timed_device_trace()
-            .then_some(BusTracePosition {
+        if self.precise_timed_device_trace() {
+            let position = BusTracePosition {
                 frame: self.emulated_frames,
                 cck: self.emulated_cck,
                 vpos: self.agnus.vpos,
                 hpos: self.agnus.hpos,
+            };
+            let extends_last = self.pending_device_trace_spans.last().is_some_and(|span| {
+                span.position.frame == position.frame
+                    && span.position.vpos == position.vpos
+                    && span.position.cck.saturating_add(u64::from(span.cck)) == position.cck
+                    && span.position.hpos.saturating_add(span.cck) == position.hpos
             });
+            if extends_last {
+                let last = self.pending_device_trace_spans.last_mut().unwrap();
+                last.cck = last.cck.saturating_add(cck);
+            } else {
+                let offset = self
+                    .pending_device_trace_spans
+                    .last()
+                    .map_or(0, |span| span.offset.saturating_add(span.cck));
+                self.pending_device_trace_spans.push(BusTraceSpan {
+                    position,
+                    offset,
+                    cck,
+                });
+            }
+        }
         self.flush_audio_before_audio_dma_slot();
 
         // Advance the Copper's two-cycle cadence on every Copper-eligible color
@@ -291,9 +311,6 @@ impl Bus {
             for _ in 0..tick.new_lines {
                 self.paula.transfer_audio_dma_requests();
             }
-        }
-        if trace_position.is_some() {
-            self.tick_timed_devices(cck, tick, trace_position);
         }
         (cck, tick)
     }
@@ -1591,17 +1608,12 @@ impl Bus {
         if self.device_clock.realtime_enabled {
             self.device_clock.note_realtime_device_advance(cck);
         }
-        // Ordinarily defer the timed-device tick: accumulate these color clocks
-        // and apply them in one batch at the next device observation or
-        // instruction boundary (see `flush_timed_devices`). Full slot tracing
-        // and bus-event observation instead tick them in the per-colour-clock
-        // quantum above, so asynchronous events retain their exact raster slot.
-        // The chipset/beam advance already happened per color clock; only the
-        // CIA/serial/pots/audio/floppy/Akiko devices are batched here.
-        if !self.precise_timed_device_trace() {
-            self.pending_device_cck = self.pending_device_cck.saturating_add(cck);
-            add_agnus_tick(&mut self.pending_device_tick, tick);
-        }
+        // Defer timed devices exactly as the ordinary path does. When detailed
+        // tracing is armed, the quantum stepper has also recorded compact
+        // raster spans so events returned by this batch can be placed at their
+        // precise colour clocks without changing when device state mutates.
+        self.pending_device_cck = self.pending_device_cck.saturating_add(cck);
+        add_agnus_tick(&mut self.pending_device_tick, tick);
     }
 
     /// Apply any deferred timed-device color clocks (see `record_slice_bus_
@@ -1613,9 +1625,13 @@ impl Bus {
     pub fn flush_timed_devices(&mut self) {
         let cck = std::mem::take(&mut self.pending_device_cck);
         if cck == 0 {
+            self.pending_device_trace_spans.clear();
             return;
         }
         let tick = std::mem::take(&mut self.pending_device_tick);
-        self.tick_timed_devices(cck, tick, None);
+        let spans = std::mem::take(&mut self.pending_device_trace_spans);
+        self.tick_timed_devices(cck, tick, &spans);
+        self.pending_device_trace_spans = spans;
+        self.pending_device_trace_spans.clear();
     }
 }

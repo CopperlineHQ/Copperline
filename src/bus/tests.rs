@@ -223,20 +223,33 @@ fn full_bus_record_carries_cia_register_and_e_clock_phase() {
     bus.set_cpu_bus_arbitration_enabled(true);
     bus.cpu_cia_access(1);
     let (vpos, hpos) = bus.cia_trace_slot.unwrap();
-    let _ = bus.cia_a_write(0x00BF_E001 + u64::from(REG_DDRA as u32) * 0x100, 1, 0x5A);
+    let cia_a_offset = 1 + u64::from(REG_DDRA as u32) * 0x100;
+    let _ = bus.cia_a_write(cia_a_offset, 1, 0x5A);
 
     let record = bus
         .current_frame_bus_trace
         .record_at(vpos as usize, hpos as usize)
         .unwrap();
-    assert_eq!(record.addr, 0x00BF_E001 + REG_DDRA as u32 * 0x100);
+    assert_eq!(record.addr, crate::cpu::CIA_A_BASE + cia_a_offset as u32);
     assert_eq!(record.data, 0x5A);
+    assert_eq!(record.size, 1);
     assert_ne!(record.flags & 1, 0, "CIA write flag");
     assert_ne!(record.flags & (1 << 1), 0, "CIA access flag");
     assert_eq!(record.flags & (1 << 2), 0, "CIA-A selector");
     assert_eq!((record.flags >> 8) & 0x0F, REG_DDRA as u16);
     assert_eq!((record.flags >> 12) & 7, 0, "initial E-clock phase");
     assert_ne!(record.events & BUS_EVENT_SPECIAL, 0);
+
+    bus.cpu_cia_access(1);
+    let (vpos, hpos) = bus.cia_trace_slot.unwrap();
+    let cia_b_offset = u64::from(REG_DDRB as u32) * 0x100;
+    let _ = bus.cia_b_write(cia_b_offset, 1, 0xA5);
+    let record = bus
+        .current_frame_bus_trace
+        .record_at(vpos as usize, hpos as usize)
+        .unwrap();
+    assert_eq!(record.addr, crate::cpu::CIA_B_BASE + cia_b_offset as u32);
+    assert_ne!(record.flags & (1 << 2), 0, "CIA-B selector");
 }
 
 #[test]
@@ -461,6 +474,35 @@ fn cia_irq_trace_uses_underflow_slot_during_batched_advance() {
         0,
         "the event must not be stamped at the end of the 20-cck caller batch"
     );
+}
+
+#[test]
+fn detailed_bus_tracing_keeps_timed_devices_on_instruction_boundary_batches() {
+    let mut ordinary = empty_bus();
+    let mut full_trace = empty_bus();
+    let mut event_trace = empty_bus();
+    for bus in [&mut ordinary, &mut full_trace, &mut event_trace] {
+        bus.cia_a.write(REG_TALO, 10);
+        bus.cia_a.write(REG_TAHI, 0);
+        bus.cia_a.write(REG_CRA, 0x01);
+    }
+    full_trace.set_frame_analyzer_full(true);
+    event_trace.set_bus_event_observation_enabled(true);
+
+    for bus in [&mut ordinary, &mut full_trace, &mut event_trace] {
+        for _ in 0..8 {
+            let (cck, tick) = bus.advance_one_chip_bus_quantum(None);
+            bus.record_slice_bus_advance(cck, tick);
+        }
+    }
+
+    assert_eq!(full_trace.cia_a.ta_count, ordinary.cia_a.ta_count);
+    assert_eq!(event_trace.cia_a.ta_count, ordinary.cia_a.ta_count);
+    for bus in [&mut ordinary, &mut full_trace, &mut event_trace] {
+        bus.flush_timed_devices();
+    }
+    assert_eq!(full_trace.cia_a.ta_count, ordinary.cia_a.ta_count);
+    assert_eq!(event_trace.cia_a.ta_count, ordinary.cia_a.ta_count);
 }
 
 #[test]

@@ -2071,11 +2071,13 @@ fn dma_trace_reports_only_actual_words_with_memory_direction() -> Result<()> {
                 addr: 0,
                 data: 0x1111,
                 memory_write: true,
+                cck_offset: word_cck - 1,
             },
             DiskDmaTransfer {
                 addr: 2,
                 data: 0x2222,
                 memory_write: true,
+                cck_offset: word_cck * 2 - 1,
             },
         ]
     );
@@ -2094,6 +2096,7 @@ fn dma_trace_reports_only_actual_words_with_memory_direction() -> Result<()> {
             addr: 4,
             data: 0xABCD,
             memory_write: false,
+            cck_offset: word_cck - 1,
         }]
     );
 
