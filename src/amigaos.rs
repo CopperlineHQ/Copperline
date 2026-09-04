@@ -1018,6 +1018,29 @@ pub fn with_bus_memory<R>(bus: &crate::bus::Bus, f: impl FnOnce(&OsMemory) -> R)
     f(&os)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StackBounds {
+    pub system_lower: u32,
+    pub system_upper: u32,
+    pub task_lower: u32,
+    pub task_upper: u32,
+}
+
+/// ExecBase and ThisTask stack bounds, using the same side-effect-free guest
+/// structure walk as the console's TASK command.
+pub fn stack_bounds_on_bus(bus: &crate::bus::Bus) -> Option<StackBounds> {
+    with_bus_memory(bus, |os| {
+        let exec = os.exec_info(os.exec_base().ok()?);
+        let task = (exec.this_task != 0).then(|| os.task_info(exec.this_task));
+        Some(StackBounds {
+            system_lower: exec.sys_stk_lower,
+            system_upper: exec.sys_stk_upper,
+            task_lower: task.as_ref().map_or(0, |task| task.sp_lower),
+            task_upper: task.as_ref().map_or(0, |task| task.sp_upper),
+        })
+    })
+}
+
 /// Bus-backed convenience wrapper: the current process's segments, or
 /// why exec is not walkable. Shared by the console SEGMENTS command and
 /// the GDB stub (monitor segments / qOffsets).

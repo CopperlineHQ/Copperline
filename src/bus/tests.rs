@@ -11,17 +11,19 @@ use super::{
     live_bitplane_collision_pixel_at, live_display_window_x, live_manual_sprite_collision_sources,
     live_playfield_collision_pixel, live_sprite_playfield_collision_bits_in_range,
     live_sprite_sprite_collision_bits, sprite_hstart_for_fmode, visible_start_vpos_for_diw,
-    BeamChipRamWrite, BeamRegisterWrite, BeamWriteSource, BitplaneBplcon0Delay, Bus,
+    BeamChipRamWrite, BeamRegisterWrite, BeamWriteSource, BitplaneBplcon0Delay, Bus, BusSlotRecord,
     CapturedBitplaneRow, CapturedSpriteLine, ChipBusOwner, CpuBusAccessKind, CpuWaitClass,
     CpuWaitSample, DeviceClock, DisplaySpriteDmaState, DisplaySpriteLineData, FrameBusTrace,
     LiveCollisionControl, LiveCollisionLineReplay, LiveSpriteCollisionSource, PortDevice,
     RenderRegisterSnapshot, BLITTER_SLOWDOWN_CPU_MISS_LIMIT, BLTCON0_USE_A, BLTCON0_USE_C,
     BLTCON0_USE_D, BLTCON1_DOFF, BLTCON1_LINE, BPLCON0_ECSENA, BPLCON3_BRDRBLNK, BPLCON3_BRDSPRT,
-    BPLCON3_SPRES_HIRES, BPLCON3_SPRES_SHRES, CPU_WAIT_PC_CAP, DENISE_HPOS_LAG_CCK, DMACON_BLTEN,
-    DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN, PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS,
-    RENDER_COPPER_WAIT_HPOS_FB0, RENDER_DIW_HSTART_FB0, RENDER_MIN_OVERSCAN_START_VPOS,
-    RENDER_VISIBLE_LINES, RENDER_VISIBLE_START_VPOS, SPRITE_DMA_SLOT1_HPOS,
-    SPRITE_OUTPUT_DELAY_LORES,
+    BPLCON3_SPRES_HIRES, BPLCON3_SPRES_SHRES, BUS_EVENT_BLIT_FINAL_D, BUS_EVENT_COPPER_WAKE,
+    BUS_EVENT_DDFSTRT, BUS_EVENT_INTREQ, BUS_EVENT_LOF, BUS_EVENT_LOL, BUS_EVENT_SPECIAL,
+    BUS_EVENT_VB, BUS_EVENT_VDIW, BUS_EVENT_VS, BUS_RECORD_BLITTER, CPU_WAIT_PC_CAP,
+    DENISE_HPOS_LAG_CCK, DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN,
+    PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS, RENDER_COPPER_WAIT_HPOS_FB0, RENDER_DIW_HSTART_FB0,
+    RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_LINES, RENDER_VISIBLE_START_VPOS,
+    SPRITE_DMA_SLOT1_HPOS, SPRITE_OUTPUT_DELAY_LORES,
 };
 use crate::audio::AudioSink;
 use crate::chipset::agnus::{
@@ -57,6 +59,187 @@ const STANDARD_VISIBLE_X0: usize = ((STANDARD_DIW_HSTART - RENDER_DIW_HSTART_FB0
 // writes that feed delayed shifter/control paths.
 const RENDER_COLOR_WRITE_HPOS_FB0: u32 = 0x35;
 static BUS_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn full_bus_record_is_exactly_24_bytes_and_owner_only_trace_stays_cheap() {
+    assert_eq!(
+        std::mem::size_of::<BusSlotRecord>(),
+        BusSlotRecord::BYTE_SIZE
+    );
+
+    let mut trace = FrameBusTrace::default();
+    trace.reset_for_frame(7, 0.140, 4, 16, 1, 2, false);
+    assert!(!trace.full());
+    assert!(trace.records().is_none());
+
+    trace.reset_for_frame_with_level(
+        8,
+        0.160,
+        4,
+        16,
+        1,
+        2,
+        false,
+        true,
+        super::FrameRegisterSnapshot::default(),
+    );
+    assert!(trace.full());
+    assert_eq!(trace.records().unwrap().len(), 4 * 16);
+
+    let record = BusSlotRecord {
+        reg: 0x1234,
+        kind: 2,
+        subtype: 3,
+        size: 8,
+        ipl: 5,
+        flags: 0x6789,
+        addr: 0xAABB_CCDD,
+        data: 0x0123_4567_89AB_CDEF,
+        events: 0x1020_3040,
+    };
+    let mut bytes = Vec::new();
+    record.write_to(&mut bytes).unwrap();
+    assert_eq!(bytes.len(), BusSlotRecord::BYTE_SIZE);
+    assert_eq!(&bytes[0..2], &0x1234u16.to_le_bytes());
+    assert_eq!(&bytes[2..6], &[2, 3, 8, 5]);
+    assert_eq!(&bytes[6..8], &0x6789u16.to_le_bytes());
+    assert_eq!(&bytes[8..12], &0xAABB_CCDDu32.to_le_bytes());
+    assert_eq!(&bytes[12..20], &0x0123_4567_89AB_CDEFu64.to_le_bytes());
+    assert_eq!(&bytes[20..24], &0x1020_3040u32.to_le_bytes());
+}
+
+#[test]
+fn full_bus_events_match_ddf_blitter_and_copper_probe_cadence() {
+    // The DDF sequencer comparator fires at DDFSTRT itself ($38), one
+    // colour clock before the standard low-resolution table's first fetch.
+    let mut ddf = empty_bus();
+    ddf.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+    ddf.denise.diwstrt = 0x2C81;
+    ddf.denise.diwstop = 0xF4C1;
+    ddf.denise.ddfstrt = 0x0038;
+    ddf.denise.ddfstop = 0x00D0;
+    ddf.denise.bplcon0 = 0x1200;
+    ddf.agnus.vpos = 0x50;
+    ddf.agnus.hpos = 0x38;
+    ddf.set_frame_analyzer_full(true);
+    ddf.advance_chipset(1);
+    assert_ne!(
+        ddf.frame_bus_trace()
+            .unwrap()
+            .record_at(0x50, 0x38)
+            .unwrap()
+            .events
+            & BUS_EVENT_DDFSTRT,
+        0
+    );
+
+    // A one-word D-only blit spends four lead-in clocks, the body/bubble
+    // clocks, then writes its queued word on terminal F at start + 7.
+    let mut blit = empty_bus();
+    blit.agnus.dmacon = DMACON_DMAEN | DMACON_BLTEN;
+    blit.agnus.hpos = 0x20;
+    blit.blitter.bltcon0 = BLTCON0_USE_D;
+    blit.blitter.bltdpt = 0x100;
+    blit.set_frame_analyzer_full(true);
+    assert!(!blit.custom_write(0x058, 2, (1 << 6) | 1));
+    blit.advance_chipset(8);
+    let final_d = blit.frame_bus_trace().unwrap().record_at(0, 0x27).unwrap();
+    assert_eq!(final_d.kind, BUS_RECORD_BLITTER);
+    assert_eq!(final_d.subtype & 0x0F, 3, "terminal write is channel D");
+    assert_ne!(final_d.events & BUS_EVENT_BLIT_FINAL_D, 0);
+
+    // WAIT $0033 compares against hpos + 2, so its fixed wake cycle is
+    // $30 and the following instruction fetch may land at the $32 target.
+    let mut copper = empty_bus();
+    copper.agnus.dmacon = DMACON_DMAEN | DMACON_COPEN;
+    copper.agnus.hpos = 0x30;
+    copper.copper.wait(CopperWait::new(0x0033, 0x80FE));
+    copper.set_frame_analyzer_full(true);
+    copper.advance_chipset(1);
+    assert_ne!(
+        copper
+            .frame_bus_trace()
+            .unwrap()
+            .record_at(0, 0x30)
+            .unwrap()
+            .events
+            & BUS_EVENT_COPPER_WAKE,
+        0
+    );
+}
+
+#[test]
+fn full_bus_line_markers_match_bartman_signal_state() {
+    let mut pal = empty_bus();
+    pal.denise.diwstrt = 0x2C81;
+    pal.denise.diwstop = 0xF4C1;
+
+    let top = pal.beam_trace_events_at(0, 1);
+    assert_ne!(top & BUS_EVENT_VB, 0);
+    assert_eq!(top & (BUS_EVENT_VS | BUS_EVENT_VDIW), 0);
+
+    let pal_sync = pal.beam_trace_events_at(3, 1);
+    assert_eq!(
+        pal_sync & (BUS_EVENT_VB | BUS_EVENT_VS),
+        BUS_EVENT_VB | BUS_EVENT_VS
+    );
+    assert_eq!(pal.beam_trace_events_at(25, 1) & BUS_EVENT_VB, 0);
+    assert_ne!(pal.beam_trace_events_at(PAL_LINES - 1, 1) & BUS_EVENT_VB, 0);
+
+    assert_ne!(pal.beam_trace_events_at(44, 1) & BUS_EVENT_VDIW, 0);
+    assert_ne!(pal.beam_trace_events_at(44, 3) & BUS_EVENT_LOF, 0);
+    pal.agnus.lol = true;
+    assert_ne!(pal.beam_trace_events_at(44, 3) & BUS_EVENT_LOL, 0);
+
+    let mut ntsc = empty_bus();
+    ntsc.set_video_standard(VideoStandard::Ntsc);
+    assert_ne!(ntsc.beam_trace_events_at(3, 1) & BUS_EVENT_VS, 0);
+    assert_eq!(ntsc.beam_trace_events_at(20, 1) & BUS_EVENT_VB, 0);
+    assert_ne!(
+        ntsc.beam_trace_events_at(ntsc.agnus.current_frame_lines() - 1, 1) & BUS_EVENT_VB,
+        0
+    );
+}
+
+#[test]
+fn full_bus_record_carries_cia_register_and_e_clock_phase() {
+    let mut bus = empty_bus();
+    bus.set_frame_analyzer_full(true);
+    bus.set_cpu_bus_arbitration_enabled(true);
+    bus.cpu_cia_access(1);
+    let (vpos, hpos) = bus.cia_trace_slot.unwrap();
+    let _ = bus.cia_a_write(0x00BF_E001 + u64::from(REG_DDRA as u32) * 0x100, 1, 0x5A);
+
+    let record = bus
+        .current_frame_bus_trace
+        .record_at(vpos as usize, hpos as usize)
+        .unwrap();
+    assert_eq!(record.addr, 0x00BF_E001 + REG_DDRA as u32 * 0x100);
+    assert_eq!(record.data, 0x5A);
+    assert_ne!(record.flags & 1, 0, "CIA write flag");
+    assert_ne!(record.flags & (1 << 1), 0, "CIA access flag");
+    assert_eq!(record.flags & (1 << 2), 0, "CIA-A selector");
+    assert_eq!((record.flags >> 8) & 0x0F, REG_DDRA as u16);
+    assert_eq!((record.flags >> 12) & 7, 0, "initial E-clock phase");
+    assert_ne!(record.events & BUS_EVENT_SPECIAL, 0);
+}
+
+#[test]
+fn full_bus_records_intreq_edges_before_interrupt_enable() {
+    let mut bus = empty_bus();
+    bus.set_frame_analyzer_full(true);
+    let (vpos, hpos) = (bus.agnus.vpos, bus.agnus.hpos);
+
+    bus.paula.intreq |= INT_AUD0;
+    bus.arm_irq_recognition_latency();
+
+    let record = bus
+        .current_frame_bus_trace
+        .record_at(vpos as usize, hpos as usize)
+        .unwrap();
+    assert_ne!(record.events & BUS_EVENT_INTREQ, 0);
+    assert_eq!(record.ipl, 0, "disabled source does not yet raise CPU IPL");
+}
 
 #[test]
 fn frame_analyzer_records_owner_spans_and_blitter_wait_cck() {

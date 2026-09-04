@@ -10076,6 +10076,7 @@ mod warp_control {
             path: dir.to_path_buf(),
             frames: 100,
             slots: false,
+            memory: false,
             screenshots: crate::profile::ScreenshotMode::None,
             pc_samples: false,
             samples: false,

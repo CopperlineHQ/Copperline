@@ -140,6 +140,9 @@ Frame Analyzer: chip-bus owner heatmap overlaid on rendered frame.
 Displays a 2D heatmap indexed by raster beam coordinates (`X` = colour clock HPOS,
 `Y` = scanline VPOS). Each cell indicates which subsystem owned the chip bus during
 that colour clock cycle (CPU, Copper, Blitter, Bitplane, Sprite, Audio, Disk, Refresh, Idle).
+Pointing at a cell shows its full slot record below the raster; clicking pins
+the same readout. It includes the custom register, address, transfer data and
+width, owner subtype, CPU-visible IPL, and decoded hardware events.
 
 - **Picture underlay (`U`):** Overlays the rendered video frame beneath the bus heatmap.
 - **Beam scrub (`B`):** Progressively displays the frame up to the selected raster position.

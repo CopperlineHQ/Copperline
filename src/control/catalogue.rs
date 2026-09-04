@@ -556,6 +556,13 @@ fn build() -> Vec<ToolDef> {
             json!({}),
         ),
         entry(
+            "frame.slots",
+            "Return one bounded scanline of the last full Frame Analyzer trace, including \
+             register, address, data, subtype, IPL and Bartman event bits for every colour clock.",
+            object(vec![("row", uint("Beam row", Some(0), Some(511)))], &["row"]),
+            json!({"row": 100}),
+        ),
+        entry(
             "display.get",
             "Report the active display: video standard, canvas size and pixel format, \
              the display window and fetch registers as decoded, bitplane count, \
@@ -800,7 +807,8 @@ fn build() -> Vec<ToolDef> {
              `profile.jsonl` under `path` (default: the configured profile directory) \
              with a `profile.json` summary written at stop. Stops by itself after \
              `frames` (default 500, at most 100000); `slots` adds per-frame chip-bus \
-             owner and CPU-wait grids, `screenshots` saves the frame image for none, \
+             owner and CPU-wait grids plus raw 24-byte records, `memory` snapshots chip \
+             and slow RAM once, `screenshots` saves the frame image for none, \
              every or the last frame, `pc_samples` adds a frame-boundary PC. \
              `samples` records every instruction in Bartman/WinUAE binary form; \
              `registers` appends D0-D7/A0-A7/SR, `unwind` supplies the text base \
@@ -815,6 +823,7 @@ fn build() -> Vec<ToolDef> {
                     ("path", string("Host directory for the profile files (optional)")),
                     ("frames", uint("Frames to profile", Some(1), Some(100_000))),
                     ("slots", boolean("Include per-frame chip-bus owner grids")),
+                    ("memory", boolean("Dump chip and slow RAM once at capture start")),
                     (
                         "screenshots",
                         enumeration(
@@ -1207,7 +1216,8 @@ fn build() -> Vec<ToolDef> {
              for events_next / events_drain: `frame` (every `frame_interval` frames, \
              default 1, with an optional framebuffer digest), `serial` (Paula serial \
              output), `interrupt` (INTREQ/INTENA transitions), `media` (disk and CD \
-             changes), `debug` (guest uaelib log lines and resource registrations). The \
+             changes), `debug` (guest uaelib log lines and resource registrations), and \
+             `bus` (named hardware events such as blitter completion and Copper wake). The \
              queues are bounded; check the drop counts.",
             object(
                 vec![
@@ -1216,7 +1226,7 @@ fn build() -> Vec<ToolDef> {
                         json!({
                             "type": "array",
                             "description": "Event families to subscribe to",
-                            "items": {"type": "string", "enum": ["frame", "serial", "interrupt", "media", "debug"]},
+                            "items": {"type": "string", "enum": ["frame", "serial", "interrupt", "media", "debug", "bus"]},
                             "minItems": 1
                         }),
                     ),

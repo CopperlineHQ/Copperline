@@ -19,6 +19,7 @@ const SERIAL: u8 = 1 << 1;
 const INTERRUPT: u8 = 1 << 2;
 const MEDIA: u8 = 1 << 3;
 const DEBUG: u8 = 1 << 4;
+const BUS: u8 = 1 << 5;
 
 /// Event families exposed by `events.subscribe`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,15 +30,18 @@ pub enum EventKind {
     Media,
     /// Guest debug output through the uaelib trap (`crate::uaelib`).
     Debug,
+    /// Exact hardware events emitted by the slot arbiter.
+    Bus,
 }
 
 impl EventKind {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Frame,
         Self::Serial,
         Self::Interrupt,
         Self::Media,
         Self::Debug,
+        Self::Bus,
     ];
 
     pub fn from_name(name: &str) -> Option<Self> {
@@ -47,6 +51,7 @@ impl EventKind {
             "interrupt" => Some(Self::Interrupt),
             "media" => Some(Self::Media),
             "debug" => Some(Self::Debug),
+            "bus" => Some(Self::Bus),
             _ => None,
         }
     }
@@ -58,6 +63,7 @@ impl EventKind {
             Self::Interrupt => "interrupt",
             Self::Media => "media",
             Self::Debug => "debug",
+            Self::Bus => "bus",
         }
     }
 
@@ -68,6 +74,7 @@ impl EventKind {
             Self::Interrupt => INTERRUPT,
             Self::Media => MEDIA,
             Self::Debug => DEBUG,
+            Self::Bus => BUS,
         }
     }
 }
@@ -95,6 +102,7 @@ pub struct Observer {
     last_interrupt: Option<InterruptState>,
     last_media: Option<MediaState>,
     dropped_notifications: u64,
+    bus_cursor: u64,
 }
 
 impl Observer {
@@ -107,6 +115,7 @@ impl Observer {
             last_interrupt: None,
             last_media: None,
             dropped_notifications: 0,
+            bus_cursor: 0,
         }
     }
 
@@ -137,6 +146,10 @@ impl Observer {
                 EventKind::Media => self.last_media = Some(media_state(emu)),
                 // The queue is always on; a fresh subscription starts clean.
                 EventKind::Debug => emu.clear_uaelib_debug_events(),
+                EventKind::Bus => {
+                    self.bus_cursor = emu.bus().bus_event_cursor();
+                    emu.bus_mut().set_bus_event_observation_enabled(true);
+                }
             }
         }
         self.list_value()
@@ -145,8 +158,9 @@ impl Observer {
     pub fn unsubscribe(&mut self, emu: &mut Emulator, events: Option<&[EventKind]>) -> Value {
         let remove = events
             .map(|events| events.iter().fold(0, |bits, event| bits | event.bit()))
-            .unwrap_or(FRAME | SERIAL | INTERRUPT | MEDIA | DEBUG);
+            .unwrap_or(FRAME | SERIAL | INTERRUPT | MEDIA | DEBUG | BUS);
         let serial_was_active = self.active & SERIAL != 0;
+        let bus_was_active = self.active & BUS != 0;
         self.active &= !remove;
 
         if remove & FRAME != 0 {
@@ -161,6 +175,10 @@ impl Observer {
         }
         if serial_was_active && self.active & SERIAL == 0 {
             emu.bus_mut().paula.set_serial_observation_enabled(false);
+        }
+        if bus_was_active && self.active & BUS == 0 {
+            emu.bus_mut().set_bus_event_observation_enabled(false);
+            self.bus_cursor = 0;
         }
         self.list_value()
     }
@@ -187,6 +205,7 @@ impl Observer {
                 "debug_events": crate::uaelib::DEBUG_EVENT_CAPACITY,
                 "debug_resources": crate::uaelib::RESOURCE_MAX,
                 "windowed_outbound_notifications": OUTBOUND_NOTIFICATION_CAPACITY,
+                "bus_events": crate::bus::BUS_EVENT_OBSERVATION_CAPACITY,
             },
         })
     }
@@ -199,6 +218,30 @@ impl Observer {
     /// lines. The caller owns transport-specific bounded delivery.
     pub fn poll(&mut self, emu: &mut Emulator) -> Vec<String> {
         let mut events = Vec::new();
+
+        if self.active & BUS != 0 {
+            let (records, cursor, dropped) = emu.bus().bus_events_since(self.bus_cursor);
+            self.bus_cursor = cursor;
+            for event in records {
+                events.push(proto::event_line(
+                    "event.bus",
+                    json!({
+                        "name": event.name,
+                        "events": event.events,
+                        "event_names": crate::bus::bus_event_names(event.events),
+                        "position": {
+                            "frame": event.frame,
+                            "cck": event.cck,
+                            "vpos": event.vpos,
+                            "hpos": event.hpos,
+                        },
+                        "ipl": event.ipl,
+                        "dropped_events": dropped,
+                        "dropped_notifications": self.dropped_notifications,
+                    }),
+                ));
+            }
+        }
 
         if self.active & SERIAL != 0 {
             let (records, dropped) = emu.bus_mut().paula.take_serial_observations();
@@ -418,6 +461,37 @@ mod tests {
     }
 
     #[test]
+    fn bus_subscription_streams_named_events_without_full_frame_tracing() {
+        let mut emu = test_emulator();
+        let mut observer = Observer::new();
+        let state = observer.subscribe(&mut emu, &[EventKind::Bus], None, None);
+        assert_eq!(state["active"], json!(["bus"]));
+        assert!(!emu.bus().frame_analyzer_enabled());
+
+        {
+            let bus = emu.bus_mut();
+            bus.agnus.dmacon =
+                crate::chipset::paula::DMACON_DMAEN | crate::chipset::copper::DMACON_COPEN;
+            bus.agnus.hpos = 0x30;
+            bus.copper
+                .wait(crate::chipset::copper::CopperWait::new(0x0033, 0x80FE));
+            bus.advance_chipset(1);
+        }
+        let events = observer.poll(&mut emu);
+        assert_eq!(events.len(), 1);
+        let event: Value = serde_json::from_str(&events[0]).unwrap();
+        assert_eq!(event["method"], "event.bus");
+        assert_eq!(event["params"]["name"], "copper_wake");
+        assert_eq!(event["params"]["events"], crate::bus::BUS_EVENT_COPPER_WAKE);
+        assert_eq!(event["params"]["dropped_events"], 0);
+        assert!(observer.poll(&mut emu).is_empty());
+
+        observer.unsubscribe(&mut emu, Some(&[EventKind::Bus]));
+        emu.bus_mut().record_frame_blit_start(1, 1);
+        assert!(observer.poll(&mut emu).is_empty());
+    }
+
+    #[test]
     fn unsubscribe_disables_all_families() {
         let mut emu = test_emulator();
         let mut observer = Observer::new();
@@ -464,7 +538,7 @@ mod tests {
     fn debug_family_is_named_listed_and_cleared() {
         assert_eq!(EventKind::from_name("debug"), Some(EventKind::Debug));
         assert_eq!(EventKind::Debug.name(), "debug");
-        assert_eq!(EventKind::ALL.len(), 5);
+        assert_eq!(EventKind::ALL.len(), 6);
         let mut emu = uaelib_emulator();
         let mut observer = Observer::new();
         let state = observer.subscribe(&mut emu, &[EventKind::Debug], None, None);

@@ -199,7 +199,7 @@ stdin.
 An authenticated client can subscribe to asynchronous event notifications:
 
 ```text
-events.subscribe {"events":["frame","serial","interrupt","media","debug"],"frame_interval":50,"frame_digest":true}
+events.subscribe {"events":["frame","serial","interrupt","media","debug","bus"],"frame_interval":50,"frame_digest":true}
 events.list
 events.unsubscribe {"events":["serial"]}
 ```
@@ -219,6 +219,11 @@ events.unsubscribe {"events":["serial"]}
   `resource` (`action` and the registered `resource`, as `debug.resources`
   reports it). `dropped_events` counts items the bounded queue lost before
   this batch.
+- **`event.bus`:** A named hardware edge from the exact chip-bus timeline,
+  including blitter start/final-D/finish/IRQ, Copper wake/denial/SKIP, CPU
+  interrupt and STOP edges, INTREQ, and CIA IRQ pins. Each notification carries
+  the raw `events` mask, decoded `event_names`, beam/timeline `position`, `ipl`,
+  and queue drop count. Subscribing does not allocate a full frame trace.
 - **`event.warp`:** Sent without a subscription, in both modes, whenever warp
   or its holder set changes for a reason other than the client's own
   `warp.set`: `{"on", "paced", "source", "position"}` with `source` one of
@@ -268,6 +273,10 @@ events.unsubscribe {"events":["serial"]}
 - `palette.dump {"resource": ...}`: Query active 32-color or 256-color palette; with `resource`, read a guest-registered palette resource (`words` as 12-bit values plus `rgb24`).
 - `cia.get {"cia": "a"|"b"}`: Query CIA-A or CIA-B timer, port, and interrupt states.
 - `beam.get`: Query raster beam coordinates (VPOS, HPOS, colour clock).
+- `frame.slots {"row": V}`: Return the bounded full records for one scanline
+  of the latest full Frame Analyzer/profile trace. Each entry has HPOS,
+  register, address, data/size, kind/subtype, flags, IPL, raw event bits, and
+  decoded event names. Owner-only traces and out-of-range rows return errors.
 - `display.get`: Query active display parameters, viewport size, and pixel format.
 - `rtc.get` / `rtc.set {"unix": ..., "time": "...", "advance": ..., "frozen": ...}`: Inspect or move real-time clock.
 - `cartridge.get`: Query freezer cartridge state (`model`, memory `base`/`size`, monitor `version`, `entered` status, `nmi_pending`, and freeze count).
@@ -288,7 +297,7 @@ events.unsubscribe {"events":["serial"]}
 - `debug.idle`: Query guest idle time statistics reported via uaelib idle markers.
 - `trace.start {"path": "...", "max_lines": ...}` / `trace.stop` / `trace.status`: Control instruction execution trace logging.
 - `waveform.start {"path": "...", "trigger": "...", "duration": "...", "signals": "..."}` / `waveform.stop` / `waveform.status`: Control VCD logic analyzer waveform capture.
-- `profile.start {"path": "...", "frames": ..., "slots": ..., "screenshots": "none"|"every"|"last", "pc_samples": ..., "samples": ..., "registers": ..., "unwind": {"base": ADDR, "table": BASE64}, "relocation_bases": [ADDR, ...], "code_ranges": [{"base": ADDR, "size": N}, ...], "trigger": {"frame": F}|{"busy_cck_over": N}}` / `profile.stop` / `profile.status`: Export per-frame profiling data (DMA ownership, blit records, CPU chip-bus wait attribution by denier and access kind with the top stalled PCs, guest idle time, retired instructions). `samples` adds a WinUAE/Bartman-compatible per-instruction binary sidecar; `registers` adds D0-D7/A0-A7/SR, the optional compact unwind table supplies live call stacks, `relocation_bases` preserves every program hunk's runtime base for offline source mapping, and `code_ranges` identifies executable hunks outside the compact hunk-0 table. Data streams to `profile.jsonl` with a `profile.json` summary upon stop; see [](profiling). Arms Frame Analyzer tracing immediately and begins recording only when an optional trigger matches.
+- `profile.start {"path": "...", "frames": ..., "slots": ..., "memory": ..., "screenshots": "none"|"every"|"last", "pc_samples": ..., "samples": ..., "registers": ..., "unwind": {"base": ADDR, "table": BASE64}, "relocation_bases": [ADDR, ...], "code_ranges": [{"base": ADDR, "size": N}, ...], "trigger": {"frame": F}|{"busy_cck_over": N}}` / `profile.stop` / `profile.status`: Export per-frame profiling data (DMA ownership, full slot/event records, frame-start custom registers and palette, blit records, CPU chip-bus wait attribution, guest idle time, retired instructions, and stack bounds). `memory` snapshots chip and slow RAM once; `slots` writes a raw 24-byte-record sidecar per frame. `samples` adds a WinUAE/Bartman-compatible per-instruction binary sidecar; `registers` adds D0-D7/A0-A7/SR, the optional compact unwind table supplies live call stacks, `relocation_bases` preserves every program hunk's runtime base for offline source mapping, and `code_ranges` identifies executable hunks outside the compact hunk-0 table. Data streams to `profile.jsonl` with a `profile.json` summary upon stop; see [](profiling). Arms Frame Analyzer tracing immediately and begins recording only when an optional trigger matches.
 
 ### Breakpoints and traps
 - `break.add`: Add breakpoint (`pc`, `watch`, `reg_watch`, `beam`, `copper`, `catch`, `loadseg`). A memory watch accepts `"access": "write"|"read"|"access"` (default `write`).

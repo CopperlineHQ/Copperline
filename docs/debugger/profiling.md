@@ -7,7 +7,7 @@ session before starting a new one.
 
 ```text
 profile.start {"path": "out/profile", "frames": 500, "slots": true,
-               "screenshots": "last", "pc_samples": true,
+               "memory": true, "screenshots": "last", "pc_samples": true,
                "trigger": {"busy_cck_over": 60000}}
 
 # Precise instruction sampling (registers are optional):
@@ -34,7 +34,8 @@ count exceeds `busy_cck_over`. Busy clocks are the frame length minus uaelib
 idle markers when the guest supplies them; otherwise the traced frame length is
 used. `profile.status` reports `triggered` and `triggered_at`.
 
-Running a profile capture activates Frame Analyzer bus tracing, which
+Running a profile capture activates the Frame Analyzer's cheap owner tracing.
+`"slots": true` promotes it to the full per-colour-clock record level, which
 temporarily suspends run-ahead input latency reduction. Tracing is shared with
 the Frame Analyzer UI pane: closing the UI pane does not interrupt an active
 profile capture, and stopping a profile capture leaves tracing enabled if the
@@ -57,8 +58,10 @@ One JSON object per committed frame:
 | `blits` | List of blits started during the frame (max 64): control words, size, pointers, and start/end beam positions. |
 | `cpu` | The CPU's side of the arbitration: `wait_cck` (colour clocks the CPU asked for the chip bus and was denied), `wait_by` (those clocks by denier: `refresh`, `bitplane`, `sprite`, `disk`, `audio`, `copper`, `blitter` with BLTPRI clear, `blitter_nasty` with BLTPRI set including its warm-up fence, and `port` for the 020+ chip port's own turnaround), `wait_by_kind` (by the pending access: `read`, which includes the 68000's opcode prefetches since the CPU core issues them as plain word reads; `fetch` for immediate and extension words read outside the prefetch queue; `write`; `custom` for custom-register accesses), `stall_pcs` (up to 16 `{"pc", "cck"}` entries, the instructions that waited longest, longest first), `stall_pcs_distinct` and `stall_pcs_other` (clocks pooled once 4096 distinct PCs are kept). Zero entries are omitted from the maps. |
 | `partial` | True if tracing was enabled mid-frame. |
+| `registers` | Frame-start snapshot: all 256 custom-register words, `chipset_flags`, and the AGA palette's 256 high and low nibbles. Present on every traced frame. |
 | `slots` | When `"slots": true`: run-length encoded per-clock owner grid for each scanline (`"12R3B497."`). Codes match vAmiga DMA debugger (`R` refresh, `B` bitplane, `S` sprite, `D` disk, `A` audio, `C` copper, `L` blitter, `P` CPU, `.` idle). |
 | `cpu_wait` | When `"slots": true`: the CPU wait grid per scanline in the same run-length encoding. Codes are the denier's owner letter (`R`, `B`, `S`, `D`, `A`, `C`, `L` for the blitter with BLTPRI clear), `N` for the blitter with BLTPRI set, `p` for the port turnaround, and `.` where the CPU was not waiting. |
+| `slots_file`, `slots_record_bytes` | When `"slots": true`: raw full-record sidecar filename and its fixed 24-byte stride. |
 | `screenshot`, `digest` | When `"screenshots": "every"`: frame screenshot PNG filename and FNV-1a64 hash digest. |
 | `samples`, `samples_meta` | With `"samples": true`, the filenames of this frame's compact instruction stream and Copperline timing metadata. |
 | `sample_count`, `samples_total`, `irq_cck` | Encoded samples in this frame, cumulative encoded samples, and interrupt-dispatch colour clocks in this frame. |
@@ -77,7 +80,62 @@ Written when the profile stops: contains `version`, machine configuration,
 capture options, the list of chip-bus owner names (`owners`) and CPU wait
 classes (`cpu_wait_classes`), `started`/`ended` timeline points,
 `frames_written`, and a snapshot of registered uaelib resources (matching
-`debug.resources`) for address labeling.
+`debug.resources`) for address labeling. It also records `systemStackLower`,
+`systemStackUpper`, `stackLower`, and `stackUpper`, read from ExecBase and
+ThisTask when a valid AmigaOS task is running (otherwise null).
+
+With `"memory": true`, `chip-ram.bin` and `slow-ram.bin` are written once,
+at capture start. Together with the per-slot write records these let an offline
+consumer reconstruct memory at any later colour clock without running the
+emulator.
+
+## Full chip-bus slot records
+
+`"slots": true` writes one `slots-NNNNNN.bin` per recorded frame. Records are
+in raster order (`VPOS * line_cck + HPOS`) and use this packed, little-endian
+24-byte layout:
+
+| Offset | Type | Field |
+|---:|---|---|
+| 0 | u16 | `reg`: custom-register offset, `0x1000` for CPU memory, or `0xffff` when not applicable |
+| 2 | u8 | `kind`: refresh 1, CPU 2, Copper 3, audio 4, blitter 5, bitplane 6, sprite 7, disk 8, conflict 9 |
+| 3 | u8 | `subtype`: CPU code/data; Copper move/wait/skip; audio 0-3; bitplane 1-8; sprite 0-7; blitter A-D plus fill bit `0x10` and line bit `0x20` |
+| 4 | u8 | `size`: transferred bytes (2, 4, or 8; zero when no data transfer is attached) |
+| 5 | u8 | `ipl`: CPU-visible interrupt level at this slot |
+| 6 | u16 | `flags`: bit 0 write; bit 1 CIA access valid; bit 2 CIA-B; bits 8-11 CIA register; bits 12-14 E-clock phase |
+| 8 | u32 | `addr`: chip/CPU address |
+| 12 | u64 | `data`: transfer data, including 32/64-bit AGA FMODE fetch groups |
+| 20 | u32 | `events`: hardware-edge bits listed below |
+
+The same fields are available live from `frame.slots {"row": V}` and in the
+Frame Analyzer's selected/hovered-slot readout.
+
+| Bit | Event |
+|---:|---|
+| 0 | blitter interrupt request |
+| 1 | blitter final D write |
+| 2 | blitter start or finish (the streamed event name distinguishes the edge) |
+| 3 | bitplane fetch/update |
+| 4 | Copper WAIT wake |
+| 5 | CPU interrupt recognition |
+| 6 | INTREQ set |
+| 7 | Copper wanted a fixed-DMA-owned slot |
+| 8 | no requester received the slot |
+| 9 | blitter denied by CPU |
+| 10 | CPU denied by BLTPRI blitter |
+| 11 | Copper SKIP taken |
+| 12-14 | DDFSTRT, DDFSTOP, hard DDF stop |
+| 15 | CIA register access |
+| 16-26 | VB, VS, LOF, LOL, HBS, HBE, HDIWS, HDIWE, VDIW, HSS, HSE |
+| 27-28 | CIA-A and CIA-B IRQ pin assertions |
+| 29-30 | CPU STOP entered and STOP IPL wake |
+
+VB, VS, and VDIW are signal-state markers on the first refresh slot of every
+line; LOF and LOL similarly mark the second refresh slot. HBS/HBE, HSS/HSE,
+HDIWS/HDIWE, and DDF events mark their programmable comparator edges.
+
+`registers.chipset_flags` uses bit 0 for AGA, bit 1 for ECS Agnus or newer,
+bit 2 for NTSC, bit 3 for interlace, and bit 4 for the LOF field.
 
 When precise sampling is enabled, the summary also records
 `cck_per_cpu_cycle`, `samples_total`, `irq_cck`, every loaded hunk base and
@@ -144,8 +202,10 @@ profile flame-chart extension adds the graphical flame view.
 
 ## Storage overhead
 
-Enabling `slots` adds roughly 2-20 KB per frame (two run-length encoded
-grids). Setting `"screenshots": "every"` produces 50 PNG images per emulated
+Enabling `slots` keeps one 24-byte record per colour clock live (about 1.7 MiB
+for a 313x227 PAL frame) and writes about the same amount per frame, plus the
+roughly 2-20 KB run-length encoded grids. Setting `"memory": true` adds one
+copy each of chip and slow RAM. Setting `"screenshots": "every"` produces 50 PNG images per emulated
 second in PAL. Precise sampling is larger: without registers each sample is
 the call stack plus one word; registers add 68 bytes per sample. All three
 options are disabled by default. Captures up to 100,000 frames are accepted.

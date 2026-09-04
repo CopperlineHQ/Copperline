@@ -571,8 +571,13 @@ impl Emulator {
                 "a profile capture is already running; stop it first",
             ));
         }
+        let requested_full = opts.slots;
         let already = self.bus().frame_analyzer_enabled();
+        let already_full = self.bus().frame_analyzer_full();
         self.bus_mut().set_frame_analyzer_enabled(true);
+        if requested_full {
+            self.bus_mut().set_frame_analyzer_full(true);
+        }
         let frame = self.bus().emulated_frames();
         let seconds = self.bus().emulated_seconds();
         let retired = self.retired_instructions();
@@ -583,16 +588,34 @@ impl Emulator {
             seconds,
             retired,
             !already,
+            requested_full && !already_full,
             clocks_per_cck,
         ) {
             Ok(capture) => capture,
             Err(error) => {
                 if !already {
                     self.bus_mut().set_frame_analyzer_enabled(false);
+                } else if requested_full && !already_full {
+                    self.bus_mut().set_frame_analyzer_full(false);
                 }
                 return Err(error);
             }
         };
+        if capture.options().memory {
+            let memory_result = (|| {
+                std::fs::write(capture.dir().join("chip-ram.bin"), &self.bus().mem.chip_ram)?;
+                std::fs::write(capture.dir().join("slow-ram.bin"), &self.bus().mem.slow_ram)?;
+                Ok::<(), std::io::Error>(())
+            })();
+            if let Err(error) = memory_result {
+                if !already {
+                    self.bus_mut().set_frame_analyzer_enabled(false);
+                } else if requested_full && !already_full {
+                    self.bus_mut().set_frame_analyzer_full(false);
+                }
+                return Err(error);
+            }
+        }
         if capture.options().samples {
             self.machine.start_profile_samples(
                 capture.options().unwind.clone(),
@@ -625,6 +648,7 @@ impl Emulator {
         let Some(mut capture) = self.profile.take() else {
             return Ok(serde_json::json!({ "active": false }));
         };
+        capture.set_stack_bounds(crate::amigaos::stack_bounds_on_bus(self.bus()));
         self.machine.stop_profile_samples();
         if matches!(
             capture.options().screenshots,
@@ -640,6 +664,8 @@ impl Emulator {
         }
         if capture.armed_analyzer() {
             self.bus_mut().set_frame_analyzer_enabled(false);
+        } else if capture.armed_full() {
+            self.bus_mut().set_frame_analyzer_full(false);
         }
         let frame = self.bus().emulated_frames();
         let seconds = self.bus().emulated_seconds();
@@ -733,6 +759,7 @@ impl Emulator {
         }
 
         let bus = self.bus();
+        let mut full_slot_records = None;
         let seconds = bus.emulated_seconds();
         let idle_cck = bus
             .uaelib
@@ -789,6 +816,14 @@ impl Emulator {
             });
             record["blits"] = Value::from(blits);
             record["partial"] = Value::Bool(trace.partial);
+            record["registers"] = json!({
+                "custom": trace.registers.custom,
+                "chipset_flags": trace.registers.chipset_flags,
+                "palette": {
+                    "hi": trace.registers.palette_hi,
+                    "lo": trace.registers.palette_lo,
+                },
+            });
             let wait_by: Value = crate::bus::CPU_WAIT_CLASS_NAMES
                 .iter()
                 .zip(trace.cpu_wait_by_class.iter())
@@ -827,6 +862,7 @@ impl Emulator {
                     .map(|row| Value::from(crate::profile::rle_owner_row(row)))
                     .collect();
                 record["cpu_wait"] = Value::from(waits);
+                full_slot_records = trace.records_arc();
             }
         }
         if let Some(pc) = pc {
@@ -839,6 +875,13 @@ impl Emulator {
 
         if let Some(profile) = self.profile.as_mut() {
             record["retired"] = Value::from(profile.take_retired_delta(retired_now));
+            if let Some(records) = full_slot_records.as_deref() {
+                let name = profile
+                    .write_slots(frame, records)
+                    .map_err(|e| anyhow!("profile slots: {e}"))?;
+                record["slots_file"] = Value::from(name);
+                record["slots_record_bytes"] = Value::from(crate::bus::BusSlotRecord::BYTE_SIZE);
+            }
             if opts.samples {
                 let stats = profile
                     .write_samples(frame, &instruction_samples)

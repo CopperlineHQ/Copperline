@@ -123,6 +123,9 @@ pub enum CoreOp {
         b: bool,
     },
     BeamGet,
+    FrameSlots {
+        row: usize,
+    },
     DisplayGet,
     InputPortsGet,
     RtcGet,
@@ -234,6 +237,7 @@ impl CoreOp {
                 | CoreOp::HeatMapReport { .. }
                 | CoreOp::CiaGet { .. }
                 | CoreOp::BeamGet
+                | CoreOp::FrameSlots { .. }
                 | CoreOp::DisplayGet
                 | CoreOp::InputPortsGet
                 | CoreOp::RtcGet
@@ -978,6 +982,9 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
             },
         }),
         "beam.get" => core(CoreOp::BeamGet),
+        "frame.slots" => core(CoreOp::FrameSlots {
+            row: p.usize_or("row", 0)?,
+        }),
         "display.get" => core(CoreOp::DisplayGet),
         "rtc.get" => core(CoreOp::RtcGet),
         "rtc.set" => {
@@ -1372,6 +1379,7 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
                         .unwrap_or_else(crate::paths::profile_dir),
                     frames,
                     slots: p.bool_or("slots", false)?,
+                    memory: p.bool_or("memory", false)?,
                     screenshots,
                     pc_samples: p.bool_or("pc_samples", false)?,
                     samples,
@@ -1450,7 +1458,7 @@ fn parse_event_list(
         };
         let Some(event) = EventKind::from_name(name) else {
             return Err(CtlError::invalid_params(format!(
-                "unknown event {name}; expected frame|serial|interrupt|media"
+                "unknown event {name}; expected frame|serial|interrupt|media|debug|bus"
             )));
         };
         if !events.contains(&event) {
@@ -2080,6 +2088,45 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
                 "cck": bus.emulated_cck(),
                 "frame": bus.emulated_frames(),
                 "seconds": bus.emulated_seconds(),
+            }))
+        }
+        CoreOp::FrameSlots { row } => {
+            let Some(trace) = emu.bus().frame_bus_trace() else {
+                return Err(CtlError::invalid_state(
+                    "no frame trace is available; open the Frame Analyzer or start a profile",
+                ));
+            };
+            let Some(records) = trace.record_row(*row) else {
+                return Err(CtlError::invalid_params(format!(
+                    "row must address a full traced scanline (0..{})",
+                    trace.rows.saturating_sub(1)
+                )));
+            };
+            let records: Vec<Value> = records
+                .iter()
+                .enumerate()
+                .map(|(hpos, record)| {
+                    json!({
+                        "hpos": hpos,
+                        "reg": record.reg,
+                        "addr": record.addr,
+                        "data": record.data,
+                        "size": record.size,
+                        "kind": record.kind,
+                        "subtype": record.subtype,
+                        "ipl": record.ipl,
+                        "flags": record.flags,
+                        "events": record.events,
+                        "event_names": crate::bus::bus_event_names(record.events),
+                    })
+                })
+                .collect();
+            Ok(json!({
+                "frame": trace.frame,
+                "row": row,
+                "line_cck": trace.line_cck,
+                "record_bytes": crate::bus::BusSlotRecord::BYTE_SIZE,
+                "records": records,
             }))
         }
         CoreOp::DisplayGet => {
@@ -3208,13 +3255,13 @@ mod tests {
             core(
                 "events.subscribe",
                 json!({
-                    "events": ["frame", "serial", "frame"],
+                    "events": ["frame", "serial", "bus", "frame"],
                     "frame_interval": 25,
                     "frame_digest": true,
                 }),
             ),
             CoreOp::EventsSubscribe {
-                events: vec![EventKind::Frame, EventKind::Serial],
+                events: vec![EventKind::Frame, EventKind::Serial, EventKind::Bus],
                 frame_interval: Some(25),
                 frame_digest: Some(true),
             }
@@ -4108,6 +4155,7 @@ mod tests {
         };
         assert_eq!(options.frames, crate::profile::DEFAULT_PROFILE_FRAMES);
         assert!(!options.slots);
+        assert!(!options.memory);
         assert!(!options.pc_samples);
         assert!(!options.samples);
         assert!(!options.registers);
@@ -4116,6 +4164,12 @@ mod tests {
         assert!(options.code_ranges.is_empty());
         assert_eq!(options.screenshots, crate::profile::ScreenshotMode::None);
         assert_eq!(options.trigger, None);
+
+        let CoreOp::ProfileStart { options } = core("profile.start", json!({"memory": true}))
+        else {
+            panic!("expected ProfileStart");
+        };
+        assert!(options.memory);
 
         let CoreOp::ProfileStart { options } = core(
             "profile.start",
@@ -4202,6 +4256,7 @@ mod tests {
             path: profile_scratch("refused"),
             frames: 3,
             slots: false,
+            memory: false,
             screenshots: crate::profile::ScreenshotMode::None,
             pc_samples: false,
             samples: false,
@@ -4226,6 +4281,48 @@ mod tests {
     }
 
     #[test]
+    fn profile_memory_snapshot_is_written_once_at_capture_start() {
+        let mut emu = uaelib_emulator();
+        emu.bus_mut().mem.chip_ram[0..4].copy_from_slice(&[1, 2, 3, 4]);
+        emu.bus_mut().mem.slow_ram = vec![5, 6, 7];
+        let mut ctx = SessionCtx::new();
+        let dir = profile_scratch("memory");
+        exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::ProfileStart {
+                options: crate::profile::ProfileOptions {
+                    path: dir.clone(),
+                    frames: 1,
+                    slots: false,
+                    memory: true,
+                    screenshots: crate::profile::ScreenshotMode::None,
+                    pc_samples: false,
+                    samples: false,
+                    registers: false,
+                    unwind: None,
+                    relocation_bases: Vec::new(),
+                    code_ranges: Vec::new(),
+                    trigger: None,
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            &std::fs::read(dir.join("chip-ram.bin")).unwrap()[0..4],
+            &[1, 2, 3, 4]
+        );
+        assert_eq!(std::fs::read(dir.join("slow-ram.bin")).unwrap(), [5, 6, 7]);
+        emu.bus_mut().mem.chip_ram[0..4].fill(9);
+        assert_eq!(
+            &std::fs::read(dir.join("chip-ram.bin")).unwrap()[0..4],
+            &[1, 2, 3, 4]
+        );
+        exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStop).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn profile_writes_one_record_per_committed_frame() {
         let mut emu = uaelib_emulator();
         let mut ctx = SessionCtx::new();
@@ -4238,6 +4335,7 @@ mod tests {
                     path: dir.clone(),
                     frames: 3,
                     slots: true,
+                    memory: false,
                     screenshots: crate::profile::ScreenshotMode::None,
                     pc_samples: true,
                     samples: false,
@@ -4264,6 +4362,11 @@ mod tests {
         assert_eq!(status["frames_written"], 3);
         assert_eq!(status["done"], true, "self-stops at the cap");
 
+        let row = exec_core(&mut emu, &mut ctx, &CoreOp::FrameSlots { row: 0 }).unwrap();
+        assert_eq!(row["record_bytes"], crate::bus::BusSlotRecord::BYTE_SIZE);
+        assert_eq!(row["records"].as_array().unwrap().len(), row["line_cck"]);
+        assert_eq!(row["records"][0]["hpos"], 0);
+
         let summary = exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStop).unwrap();
         assert_eq!(summary["active"], false);
         assert_eq!(summary["frames_written"], 3);
@@ -4286,6 +4389,34 @@ mod tests {
         assert_eq!(records[0]["traced"], true);
         assert!(records[0]["owner_cck"]["refresh"].as_u64().unwrap() > 0);
         assert!(records[0]["slots"].as_array().unwrap().len() > 100);
+        assert_eq!(
+            records[0]["registers"]["custom"].as_array().unwrap().len(),
+            256
+        );
+        assert_eq!(
+            records[0]["registers"]["palette"]["hi"]
+                .as_array()
+                .unwrap()
+                .len(),
+            256
+        );
+        assert_eq!(
+            records[0]["registers"]["palette"]["lo"]
+                .as_array()
+                .unwrap()
+                .len(),
+            256
+        );
+        assert!(records[0]["registers"]["chipset_flags"].is_u64());
+        assert_eq!(records[0]["slots_record_bytes"], 24);
+        let slots_file = records[0]["slots_file"].as_str().unwrap();
+        let sidecar_len = std::fs::metadata(dir.join(slots_file)).unwrap().len();
+        assert_eq!(
+            sidecar_len,
+            records[0]["rows"].as_u64().unwrap()
+                * records[0]["line_cck"].as_u64().unwrap()
+                * crate::bus::BusSlotRecord::BYTE_SIZE as u64
+        );
         assert!(records[0]["pc"].as_str().unwrap().starts_with("0x"));
         assert!(records[0]["retired"].as_u64().unwrap() > 0);
 
@@ -4295,6 +4426,17 @@ mod tests {
         assert_eq!(header["version"], 1);
         assert_eq!(header["owners"][7], "cpu");
         assert!(header["machine"].is_object());
+        for key in [
+            "systemStackLower",
+            "systemStackUpper",
+            "stackLower",
+            "stackUpper",
+        ] {
+            assert!(
+                header.as_object().unwrap().contains_key(key),
+                "missing {key}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4315,6 +4457,7 @@ mod tests {
                     path: dir.clone(),
                     frames: 3,
                     slots: true,
+                    memory: false,
                     screenshots: crate::profile::ScreenshotMode::None,
                     pc_samples: false,
                     samples: false,
@@ -4438,6 +4581,7 @@ mod tests {
                     path: dir.clone(),
                     frames: 10,
                     slots: false,
+                    memory: false,
                     screenshots: crate::profile::ScreenshotMode::None,
                     pc_samples: false,
                     samples: false,
@@ -4472,6 +4616,7 @@ mod tests {
                 path: dir.clone(),
                 frames: 1,
                 slots: false,
+                memory: false,
                 screenshots: crate::profile::ScreenshotMode::None,
                 pc_samples: false,
                 samples: true,

@@ -89,6 +89,8 @@ pub struct ProfileOptions {
     pub frames: u64,
     /// Also write the per-colour-clock owner grid, RLE'd per row.
     pub slots: bool,
+    /// Dump chip and slow RAM once at capture start for offline replay.
+    pub memory: bool,
     pub screenshots: ScreenshotMode,
     /// Sample the PC once per frame (frame-boundary sample; no
     /// precise-loop cost, unlike a per-instruction histogram).
@@ -120,6 +122,8 @@ pub struct ProfileCapture {
     /// Whether this capture armed the frame analyzer (and must disarm it),
     /// or adopted one the analyzer pane handed over on close.
     armed_analyzer: bool,
+    /// Whether this capture promoted an existing cheap trace to full records.
+    armed_full: bool,
     done: bool,
     triggered: bool,
     triggered_at: Option<u64>,
@@ -127,6 +131,7 @@ pub struct ProfileCapture {
     irq_cck: u64,
     sample_sequence: u64,
     cck_per_cpu_cycle: f64,
+    stack_bounds: Option<crate::amigaos::StackBounds>,
 }
 
 impl ProfileCapture {
@@ -136,6 +141,7 @@ impl ProfileCapture {
         seconds: f64,
         retired: u64,
         armed_analyzer: bool,
+        armed_full: bool,
         cpu_clocks_per_cck: u32,
     ) -> io::Result<Self> {
         crate::paths::ensure_parent(&opts.path)?;
@@ -150,6 +156,7 @@ impl ProfileCapture {
             last_frame_seen: Some(frame),
             last_retired: retired,
             armed_analyzer,
+            armed_full,
             done: false,
             triggered,
             triggered_at: triggered.then_some(frame),
@@ -157,6 +164,7 @@ impl ProfileCapture {
             irq_cck: 0,
             sample_sequence: 0,
             cck_per_cpu_cycle: 1.0 / f64::from(cpu_clocks_per_cck.max(1)),
+            stack_bounds: None,
         })
     }
 
@@ -176,10 +184,18 @@ impl ProfileCapture {
         self.armed_analyzer
     }
 
+    pub fn armed_full(&self) -> bool {
+        self.armed_full
+    }
+
     /// The frame analyzer pane closed while this capture runs: its arming
     /// is adopted, so the capture disarms it at stop.
     pub fn adopt_frame_analyzer(&mut self) {
         self.armed_analyzer = true;
+    }
+
+    pub fn set_stack_bounds(&mut self, bounds: Option<crate::amigaos::StackBounds>) {
+        self.stack_bounds = bounds;
     }
 
     pub fn last_frame_seen(&self) -> Option<u64> {
@@ -250,6 +266,7 @@ impl ProfileCapture {
             "frames_written": self.frames_written,
             "frames_limit": self.opts.frames,
             "slots": self.opts.slots,
+            "memory": self.opts.memory,
             "screenshots": self.opts.screenshots.name(),
             "pc_samples": self.opts.pc_samples,
             "samples": self.opts.samples,
@@ -349,6 +366,21 @@ impl ProfileCapture {
         })
     }
 
+    /// Write the full 24-byte little-endian DMA records for one frame.
+    pub fn write_slots(
+        &self,
+        frame: u64,
+        records: &[crate::bus::BusSlotRecord],
+    ) -> io::Result<String> {
+        let name = format!("slots-{frame:06}.bin");
+        let mut out = BufWriter::new(File::create(self.opts.path.join(&name))?);
+        for record in records {
+            record.write_to(&mut out)?;
+        }
+        out.flush()?;
+        Ok(name)
+    }
+
     /// Close the capture: flush the stream, write the `profile.json`
     /// summary, and return the final status.
     pub fn finish(
@@ -365,6 +397,7 @@ impl ProfileCapture {
             "options": {
                 "frames": self.opts.frames,
                 "slots": self.opts.slots,
+                "memory": self.opts.memory,
                 "screenshots": self.opts.screenshots.name(),
                 "pc_samples": self.opts.pc_samples,
                 "samples": self.opts.samples,
@@ -390,6 +423,10 @@ impl ProfileCapture {
             })),
             "triggered_at": self.triggered_at,
             "resources": resources,
+            "systemStackLower": self.stack_bounds.map(|bounds| bounds.system_lower),
+            "systemStackUpper": self.stack_bounds.map(|bounds| bounds.system_upper),
+            "stackLower": self.stack_bounds.map(|bounds| bounds.task_lower),
+            "stackUpper": self.stack_bounds.map(|bounds| bounds.task_upper),
         });
         std::fs::write(
             self.opts.path.join("profile.json"),
@@ -454,6 +491,7 @@ mod tests {
             path: dir.clone(),
             frames: 2,
             slots: false,
+            memory: false,
             screenshots: ScreenshotMode::None,
             pc_samples: false,
             samples: false,
@@ -463,7 +501,7 @@ mod tests {
             code_ranges: Vec::new(),
             trigger: None,
         };
-        let mut capture = ProfileCapture::create(opts, 100, 2.0, 1000, true, 2).unwrap();
+        let mut capture = ProfileCapture::create(opts, 100, 2.0, 1000, true, false, 2).unwrap();
         assert_eq!(capture.take_retired_delta(1500), 500);
         capture.record(101, &json!({"frame": 101})).unwrap();
         assert!(!capture.done());
@@ -497,6 +535,7 @@ mod tests {
             path: dir.clone(),
             frames: 2,
             slots: false,
+            memory: false,
             screenshots: ScreenshotMode::None,
             pc_samples: false,
             samples: false,
@@ -506,7 +545,7 @@ mod tests {
             code_ranges: Vec::new(),
             trigger: Some(ProfileTrigger::BusyCckOver(100)),
         };
-        let mut capture = ProfileCapture::create(opts, 5, 0.1, 10, false, 2).unwrap();
+        let mut capture = ProfileCapture::create(opts, 5, 0.1, 10, false, false, 2).unwrap();
         assert!(!capture.should_record(6, 100, 20));
         assert!(capture.should_record(7, 101, 30));
         assert_eq!(capture.take_retired_delta(30), 10);
@@ -525,6 +564,7 @@ mod tests {
             path: dir.clone(),
             frames: 2,
             slots: false,
+            memory: false,
             screenshots: ScreenshotMode::None,
             pc_samples: false,
             samples: true,
@@ -534,7 +574,7 @@ mod tests {
             code_ranges: Vec::new(),
             trigger: None,
         };
-        let mut capture = ProfileCapture::create(opts, 10, 0.1, 0, false, 2).unwrap();
+        let mut capture = ProfileCapture::create(opts, 10, 0.1, 0, false, false, 2).unwrap();
         let first = capture.write_samples(11, &[]).unwrap();
         capture.note_reposition(10, 0).unwrap();
         let second = capture.write_samples(11, &[]).unwrap();
@@ -542,6 +582,47 @@ mod tests {
         assert_ne!(first.metadata_name, second.metadata_name);
         assert!(dir.join(first.samples_name).is_file());
         assert!(dir.join(second.samples_name).is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn full_slot_sidecar_uses_the_documented_little_endian_record() {
+        let dir =
+            std::env::temp_dir().join(format!("copperline-profile-slots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let opts = ProfileOptions {
+            path: dir.clone(),
+            frames: 1,
+            slots: true,
+            memory: false,
+            screenshots: ScreenshotMode::None,
+            pc_samples: false,
+            samples: false,
+            registers: false,
+            unwind: None,
+            relocation_bases: Vec::new(),
+            code_ranges: Vec::new(),
+            trigger: None,
+        };
+        let capture = ProfileCapture::create(opts, 0, 0.0, 0, true, true, 2).unwrap();
+        let record = crate::bus::BusSlotRecord {
+            reg: 0x0100,
+            kind: crate::bus::BUS_RECORD_CPU,
+            subtype: 1,
+            size: 4,
+            ipl: 3,
+            flags: 1,
+            addr: 0x0012_3456,
+            data: 0x89AB_CDEF,
+            events: crate::bus::BUS_EVENT_CPU_IRQ,
+        };
+        let name = capture.write_slots(42, &[record]).unwrap();
+        assert_eq!(name, "slots-000042.bin");
+        let bytes = std::fs::read(dir.join(name)).unwrap();
+        assert_eq!(bytes.len(), crate::bus::BusSlotRecord::BYTE_SIZE);
+        let mut expected = Vec::new();
+        record.write_to(&mut expected).unwrap();
+        assert_eq!(bytes, expected);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

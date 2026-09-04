@@ -2618,6 +2618,7 @@ impl M68kMachine {
                 };
                 self.bus.diag_current_pc = dbg_pc_before;
                 self.bus.bus.cpu_pc = dbg_pc_before;
+                let cpu_was_stopped = self.cpu.is_stopped();
                 // The no-op handler declines every trap, so the CPU takes the
                 // real exception -- the plain step() would surface traps as
                 // StepResults instead of raising them.
@@ -2686,6 +2687,9 @@ impl M68kMachine {
                         }
                     }
                     StepResult::Stopped => {
+                        if !cpu_was_stopped {
+                            self.bus.bus.note_cpu_stop(false);
+                        }
                         stopped = true;
                         break;
                     }
@@ -2815,6 +2819,7 @@ impl M68kMachine {
             let budget = (count - instructions).min(JIT_BATCH_INSTRUCTIONS) as u32;
             self.bus.diag_current_pc = self.cpu.pc;
             self.bus.bus.cpu_pc = self.cpu.pc;
+            let cpu_was_stopped = self.cpu.is_stopped();
             let result = self.cpu.run_batch(&mut self.bus, budget, &[]);
             if self.bus.icache.is_some() || self.bus.dcache.is_some() {
                 // A CACR write inside the batch (MOVEC) must reach the
@@ -2890,6 +2895,9 @@ impl M68kMachine {
             }
 
             if exit_stopped {
+                if !cpu_was_stopped {
+                    self.bus.bus.note_cpu_stop(false);
+                }
                 stopped = true;
                 break;
             }
@@ -3046,9 +3054,13 @@ impl M68kMachine {
         if !self.cpu.check_interrupts() {
             return None;
         }
+        let was_stopped = self.cpu.is_stopped();
         let cycles = self.cpu.execute(&mut self.bus, 0);
-        #[cfg(feature = "control")]
         let level = ((self.cpu.get_sr() >> 8) & 7) as u8;
+        self.bus.bus.note_cpu_irq_recognized(level);
+        if was_stopped {
+            self.bus.bus.note_cpu_stop(true);
+        }
         #[cfg(feature = "control")]
         let vector = self
             .cpu

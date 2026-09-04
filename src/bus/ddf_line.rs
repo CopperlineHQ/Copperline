@@ -24,6 +24,9 @@ pub(super) const DDF_WRITE_COMMIT_CCK: u16 = 4;
 const DDF_SEQ_SLOT_PLANE_MASK: u16 = 0x000F;
 const DDF_SEQ_SLOT_MODULO: u16 = 0x0010;
 const DDF_SEQ_SLOT_WORD_SHIFT: u32 = 5;
+const DDF_TRACE_STRT: u8 = 1;
+const DDF_TRACE_STOP: u8 = 2;
+const DDF_TRACE_STOP2: u8 = 4;
 
 /// A DDFSTRT/DDFSTOP/BPLCON0/DMACON write that reached the sequencer during
 /// the current line, at the colour clock where it takes effect.
@@ -80,6 +83,10 @@ pub(super) struct DdfSeqLine {
     /// keep their position when DMA enables mid-line: the ordinal counts
     /// table slots, and unfetched earlier slots stay zero words).
     pub word_idx_at: [u16; DDF_SEQ_MAX_LINE_CCKS],
+    /// Comparator strobes at each colour clock (start, programmable stop,
+    /// hard stop). Kept beside the fetch plan because mid-line DDF writes
+    /// use the same delayed-signal reconstruction.
+    event_at: [u8; DDF_SEQ_MAX_LINE_CCKS],
     /// First fetch colour clock of the line, if any.
     pub first_fetch_cck: Option<u16>,
     /// The run's first fetch-unit boundary (first fetch minus its unit
@@ -105,6 +112,7 @@ impl DdfSeqLine {
             words_per_row: 0,
             dma_planes: 0,
             word_idx_at: [0; DDF_SEQ_MAX_LINE_CCKS],
+            event_at: [0; DDF_SEQ_MAX_LINE_CCKS],
             first_fetch_cck: None,
             run_origin_cck: None,
             end_state: state,
@@ -155,6 +163,7 @@ pub(super) struct DdfSeqHotLine {
     valid: std::cell::Cell<bool>,
     vpos: std::cell::Cell<u32>,
     slot_at: [std::cell::Cell<u16>; DDF_SEQ_MAX_LINE_CCKS],
+    event_at: [std::cell::Cell<u8>; DDF_SEQ_MAX_LINE_CCKS],
     words_per_row: std::cell::Cell<u16>,
     dma_planes: std::cell::Cell<u8>,
     run_origin_cck: std::cell::Cell<Option<u16>>,
@@ -171,6 +180,7 @@ impl DdfSeqHotLine {
             valid: std::cell::Cell::new(false),
             vpos: std::cell::Cell::new(0),
             slot_at: std::array::from_fn(|_| std::cell::Cell::new(0)),
+            event_at: std::array::from_fn(|_| std::cell::Cell::new(0)),
             words_per_row: std::cell::Cell::new(0),
             dma_planes: std::cell::Cell::new(0),
             run_origin_cck: std::cell::Cell::new(None),
@@ -193,6 +203,7 @@ impl DdfSeqHotLine {
                 }
                 packed |= line.word_idx_at[cck] << DDF_SEQ_SLOT_WORD_SHIFT;
                 slot.set(packed);
+                self.event_at[cck].set(line.event_at[cck]);
             }
         }
         self.words_per_row.set(line.words_per_row);
@@ -336,6 +347,15 @@ impl Bus {
             let shres = crate::chipset::agnus::bitplane_shres(state.bplcon0);
             let hires = crate::chipset::agnus::bitplane_hires(state.bplcon0);
             let mut line = DdfSeqLine::empty(vpos, state, Some(key));
+            if usize::from(ddfstrt) < DDF_SEQ_MAX_LINE_CCKS {
+                line.event_at[usize::from(ddfstrt)] |= DDF_TRACE_STRT;
+            }
+            if usize::from(ddfstop) < DDF_SEQ_MAX_LINE_CCKS {
+                line.event_at[usize::from(ddfstop)] |= DDF_TRACE_STOP;
+            }
+            if usize::from(hard_stop) < DDF_SEQ_MAX_LINE_CCKS {
+                line.event_at[usize::from(hard_stop)] |= DDF_TRACE_STOP2;
+            }
             seq::walk_static_line_into(
                 aga,
                 ecs,
@@ -408,14 +428,14 @@ impl Bus {
             true,
             &mut stop_strobes,
         );
-        for cck in strt_strobes {
+        for &cck in &strt_strobes {
             extra.push(DdfSignal {
                 cck,
                 bits: seq::sig::BPHSTART,
                 bplcon0: 0,
             });
         }
-        for cck in stop_strobes {
+        for &cck in &stop_strobes {
             extra.push(DdfSignal {
                 cck,
                 bits: seq::sig::BPHSTOP,
@@ -441,6 +461,19 @@ impl Bus {
         );
 
         let mut line = DdfSeqLine::empty(vpos, state, None);
+        for cck in strt_strobes {
+            if usize::from(cck) < DDF_SEQ_MAX_LINE_CCKS {
+                line.event_at[usize::from(cck)] |= DDF_TRACE_STRT;
+            }
+        }
+        for cck in stop_strobes {
+            if usize::from(cck) < DDF_SEQ_MAX_LINE_CCKS {
+                line.event_at[usize::from(cck)] |= DDF_TRACE_STOP;
+            }
+        }
+        if usize::from(hard_stop) < DDF_SEQ_MAX_LINE_CCKS {
+            line.event_at[usize::from(hard_stop)] |= DDF_TRACE_STOP2;
+        }
         let shres = crate::chipset::agnus::bitplane_shres(state.bplcon0);
         let hires = crate::chipset::agnus::bitplane_hires(state.bplcon0);
         for fetch in fetches {
@@ -479,6 +512,27 @@ impl Bus {
         };
         self.ddf_seq_ensure_hot_line();
         slot.get() & DDF_SEQ_SLOT_PLANE_MASK != 0
+    }
+
+    pub(super) fn ddf_trace_events_at(&self, hpos: u32) -> u32 {
+        let Some(event) = self.ddf_seq_hot_line.event_at.get(hpos as usize) else {
+            return 0;
+        };
+        self.ddf_seq_ensure_hot_line();
+        let event = event.get();
+        (if event & DDF_TRACE_STRT != 0 {
+            BUS_EVENT_DDFSTRT
+        } else {
+            0
+        }) | (if event & DDF_TRACE_STOP != 0 {
+            BUS_EVENT_DDFSTOP
+        } else {
+            0
+        }) | (if event & DDF_TRACE_STOP2 != 0 {
+            BUS_EVENT_DDFSTOP2
+        } else {
+            0
+        })
     }
 
     /// Invalidate the current line's table (a register write changed the
@@ -642,6 +696,21 @@ impl Bus {
             }
             let fetched = read_chip_word_wrapping(&self.mem.chip_ram, addr);
             self.data_bus = fetched;
+            self.annotate_bus_slot(
+                vpos,
+                hpos,
+                BUS_RECORD_BITPLANE,
+                plane as u8 + 1,
+                0x0110 + plane as u16 * 2,
+                addr,
+                u64::from(fetched),
+                2,
+                0,
+            );
+            self.current_frame_bus_trace
+                .annotate_at(vpos, hpos, |record| {
+                    record.events |= BUS_EVENT_BPL_FETCH_UPDATE;
+                });
             if self.capture_bitplane_fetch_word(
                 fb_y,
                 display_planes,
