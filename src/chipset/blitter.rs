@@ -559,6 +559,13 @@ impl Blitter {
         self.b_hold_latch = shift_combine(self.bltbold, val, bsh, desc);
     }
 
+    /// Effective constant B input for USEB-off area blits. This is a
+    /// diagnostic snapshot accessor; the sequencer remains its only
+    /// production consumer.
+    pub(crate) fn b_hold_latch(&self) -> u16 {
+        self.b_hold_latch
+    }
+
     pub fn write_bltcdat(&mut self, val: u16) {
         self.bltcdat = val;
     }

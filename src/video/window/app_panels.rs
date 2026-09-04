@@ -1090,6 +1090,9 @@ impl App {
             (ToolPanelKind::FrameAnalyzer, UiControl::AnalyzerResourceSave) => {
                 self.frame_analyzer_save_resource()
             }
+            (ToolPanelKind::FrameAnalyzer, UiControl::AnalyzerBlitRow(index)) => {
+                self.frame_analyzer_select_blit(index)
+            }
             _ => {}
         }
         self.request_redraw();

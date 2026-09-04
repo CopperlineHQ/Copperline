@@ -290,11 +290,26 @@ events.unsubscribe {"events":["serial"]}
   rows return errors. `instantaneous_records` contains any ordered zero-time
   floppy-turbo transfers at positions on the requested row; replay these after
   the ordinary record at the matching HPOS.
+- `blit.render {"index": N, "channel": "A"|"B"|"C"|"D"|"result", "path": "..."}`:
+  Reconstruct a recorded blit channel from the exact DMA word stream and write
+  it as PNG. The reply includes the selected plane count and whether it came
+  from a registered bitmap containing BLTDPT or the frame's BPLCON0, plus the
+  safely decoded `render_planes`, interleaving status, and simplified Boolean
+  minterm formula. Non-interleaved resources and the BPLCON0 fallback render
+  one plane rather than guessing that consecutive blit rows are planes of one
+  image. Disabled A/B/C channels use their effective constant input (including
+  BLTBDAT's write-time-shifted hold latch). `result` uses captured D writes and
+  returns an error when no destination stream exists rather than approximating
+  the hardware shift/mask/fill pipeline. The path is optional.
 - `display.get`: Query active display parameters, viewport size, and pixel format.
 - `rtc.get` / `rtc.set {"unix": ..., "time": "...", "advance": ..., "frozen": ...}`: Inspect or move real-time clock.
 - `cartridge.get`: Query freezer cartridge state (`model`, memory `base`/`size`, monitor `version`, `entered` status, `nmi_pending`, and freeze count).
 - `cartridge.freeze`: Trigger the freezer cartridge NMI (level 7), transferring execution to the monitor.
-- `copper.list {"addr": ..., "resource": ..., "max": ...}`: Disassemble Copper instructions starting at `addr` or a registered `resource` (default: current Copper PC).
+- `copper.list {"addr": ..., "resource": ..., "max": ..., "trace": true}`:
+  Disassemble Copper instructions starting at `addr` or a registered
+  `resource` (default: current Copper PC). With `trace`, each instruction that
+  ran in the last full Frame Analyzer trace carries its exact frame, VPOS and
+  HPOS execution slot.
 - `pc_history`: Return recently executed instruction addresses.
 - `segments.list`: The hunk segments (`current`: `{start, size}` per hunk, first hunk first) of the program the scheduled process is running, and every program an armed `loadseg` catch has seen loaded (`modules`). At a `loadseg` stop, `current` is the just-loaded program: the addresses to relocate its symbols and debug information by.
 
@@ -341,7 +356,13 @@ events.unsubscribe {"events":["serial"]}
 - `state.load {"path": "..."}`: Restore machine state from file.
 
 ### Framebuffer capture
-- `capture.screenshot {"path": "..."}`: Write PNG screenshot of framebuffer.
+- `capture.screenshot {"path": "...", "overlays": ["blits", "overdraw", "sources"]}`:
+  Write a PNG from the side-effect-free display renderer. Optional overlays
+  outline recorded blitter destinations, heat pixels by repeated D-channel
+  and other chip-memory writes from a full Phase 2 trace (falling back to the
+  captured D stream without one), and colour final Denise/Lisa output by playfield 1, playfield 2,
+  sprite number, background, or outside-DIW provenance. They work in headless
+  sessions and the MCP bridge returns the resulting PNG as its image block.
 - `capture.digest`: Return FNV-1a hash digest of current frame.
 - `capture.region_digest {"x": ..., "y": ..., "w": ..., "h": ...}`: Return hash of screen region.
 

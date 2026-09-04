@@ -4,6 +4,45 @@
 
 use super::*;
 
+fn copper_register_colour(offset: u16) -> u32 {
+    let rgb = match offset & 0x01FE {
+        0x040..=0x074 => [244, 96, 88],   // blitter
+        0x0A0..=0x0DA => [112, 208, 244], // audio
+        0x0E0..=0x11E => [92, 224, 150],  // bitplanes/display data
+        0x120..=0x17E => [212, 112, 244], // sprites
+        0x180..=0x1BE => [244, 208, 80],  // palette
+        _ => [184, 190, 202],             // timing/control
+    };
+    u32::from_le_bytes([rgb[0], rgb[1], rgb[2], 0xFF])
+}
+
+fn analyzer_blit_selection(
+    panel: &ui::FrameAnalyzerPanel,
+    trace: &crate::bus::FrameBusTrace,
+) -> Option<(u64, usize)> {
+    let selected_id = panel
+        .blit_selected
+        .filter(|id| trace.blits.iter().any(|blit| blit.id == *id))
+        .or_else(|| trace.blits.first().map(|blit| blit.id))?;
+    let selected_index = trace
+        .blits
+        .iter()
+        .position(|blit| blit.id == selected_id)
+        .unwrap_or(0);
+    let scroll = analyzer_blit_scroll(trace.blits.len(), selected_index, panel.blit_scroll);
+    Some((selected_id, scroll))
+}
+
+fn analyzer_blit_scroll(len: usize, selected: usize, requested: usize) -> usize {
+    let mut scroll = requested.min(len.saturating_sub(ui::ANALYZER_BLIT_ROWS_MAX));
+    if selected < scroll {
+        scroll = selected;
+    } else if selected >= scroll + ui::ANALYZER_BLIT_ROWS_MAX {
+        scroll = selected + 1 - ui::ANALYZER_BLIT_ROWS_MAX;
+    }
+    scroll
+}
+
 impl App {
     pub(super) fn ui_handle_debugger_key(&mut self, code: KeyCode) -> bool {
         let Some(panel) = self.debugger_panel.as_mut() else {
@@ -158,6 +197,21 @@ impl App {
             };
             if let Some(rows) = rows {
                 self.frame_analyzer_scroll_resources(rows);
+                return true;
+            }
+        }
+        if self
+            .frame_analyzer_panel
+            .as_ref()
+            .is_some_and(|panel| panel.tab == ui::AnalyzerTab::Blits)
+        {
+            let delta = match code {
+                KeyCode::ArrowUp => Some(-1),
+                KeyCode::ArrowDown => Some(1),
+                _ => None,
+            };
+            if let Some(delta) = delta {
+                self.frame_analyzer_move_blit_selection(delta);
                 return true;
             }
         }
@@ -335,6 +389,163 @@ impl App {
             panel.resource_selected = Some(address);
         }
         self.request_redraw();
+    }
+
+    pub(super) fn frame_analyzer_select_blit(&mut self, index: u8) {
+        let Some(trace) = self.emu.bus().frame_bus_trace() else {
+            return;
+        };
+        let Some((_, scroll)) = self
+            .frame_analyzer_panel
+            .as_ref()
+            .and_then(|panel| analyzer_blit_selection(panel, trace))
+        else {
+            return;
+        };
+        let Some(id) = trace
+            .blits
+            .get(scroll + usize::from(index))
+            .map(|blit| blit.id)
+        else {
+            return;
+        };
+        if let Some(panel) = self.frame_analyzer_panel.as_mut() {
+            panel.blit_selected = Some(id);
+        }
+        self.request_redraw();
+    }
+
+    pub(super) fn frame_analyzer_move_blit_selection(&mut self, delta: isize) {
+        let Some(trace) = self.emu.bus().frame_bus_trace() else {
+            return;
+        };
+        if trace.blits.is_empty() {
+            return;
+        }
+        let selected = self
+            .frame_analyzer_panel
+            .as_ref()
+            .and_then(|panel| panel.blit_selected)
+            .and_then(|id| trace.blits.iter().position(|blit| blit.id == id))
+            .unwrap_or(0);
+        let next = selected
+            .saturating_add_signed(delta)
+            .min(trace.blits.len().saturating_sub(1));
+        let id = trace.blits[next].id;
+        if let Some(panel) = self.frame_analyzer_panel.as_mut() {
+            panel.blit_selected = Some(id);
+            if next < panel.blit_scroll {
+                panel.blit_scroll = next;
+            } else if next >= panel.blit_scroll + ui::ANALYZER_BLIT_ROWS_MAX {
+                panel.blit_scroll = next + 1 - ui::ANALYZER_BLIT_ROWS_MAX;
+            }
+        }
+        self.request_redraw();
+    }
+
+    fn build_analyzer_blits_view(
+        &self,
+        panel: &ui::FrameAnalyzerPanel,
+        trace: &crate::bus::FrameBusTrace,
+    ) -> Option<ui::AnalyzerBlitsView> {
+        let (selected_id, scroll) = analyzer_blit_selection(panel, trace)?;
+        let rows = trace
+            .blits
+            .iter()
+            .enumerate()
+            .skip(scroll)
+            .take(ui::ANALYZER_BLIT_ROWS_MAX)
+            .map(|(index, blit)| {
+                let channels: String = blit
+                    .channels
+                    .iter()
+                    .zip(['A', 'B', 'C', 'D'])
+                    .filter_map(|(enabled, name)| enabled.then_some(name))
+                    .collect();
+                let end = blit
+                    .end
+                    .map(|(v, h)| format!("{v:03}:{h:03}"))
+                    .unwrap_or_else(|| "running".to_string());
+                let mode = if blit.line_mode {
+                    "line"
+                } else if blit.fill_mode {
+                    "fill"
+                } else if blit.descending {
+                    "desc"
+                } else {
+                    "copy"
+                };
+                ui::AnalyzerBlitRowView {
+                    text: format!(
+                        "{index:<2} {:03}:{:03}->{end:<7} {mode:<4}/{channels:<4} {:>3}x{:<4} {:>5}/{:<5} ${:06X}",
+                        blit.start.0,
+                        blit.start.1,
+                        blit.width_words,
+                        blit.height,
+                        blit.cycles_used,
+                        blit.cycles_stalled,
+                        blit.dpt & 0x00FF_FFFF,
+                    ),
+                    selected: blit.id == selected_id,
+                }
+            })
+            .collect();
+        let blit = trace.blits.iter().find(|blit| blit.id == selected_id)?;
+        let layout = crate::blitviz::plane_layout_for_blit(
+            blit,
+            self.emu.uaelib_resources(),
+            self.emu.bus().frame_render_base(),
+        );
+        let source_channel = [
+            crate::blitviz::BlitChannel::A,
+            crate::blitviz::BlitChannel::B,
+            crate::blitviz::BlitChannel::C,
+        ]
+        .into_iter()
+        .find(|channel| {
+            let index = match channel {
+                crate::blitviz::BlitChannel::A => 0,
+                crate::blitviz::BlitChannel::B => 1,
+                _ => 2,
+            };
+            blit.channels[index]
+        })
+        .unwrap_or(crate::blitviz::BlitChannel::A);
+        Some(ui::AnalyzerBlitsView {
+            rows,
+            hidden_above: scroll,
+            hidden_below: trace
+                .blits
+                .len()
+                .saturating_sub(scroll + ui::ANALYZER_BLIT_ROWS_MAX),
+            source_label: source_channel.name(),
+            source: crate::blitviz::render_blit(blit, source_channel, layout.render_planes).ok(),
+            destination: crate::blitviz::render_blit(
+                blit,
+                crate::blitviz::BlitChannel::Result,
+                layout.render_planes,
+            )
+            .ok(),
+            formula: format!(
+                "minterm ${:02X}: {}",
+                blit.minterm,
+                crate::blitviz::minterm_formula(blit.minterm)
+            ),
+            detail: format!(
+                "{} plane(s), {}; {}; shifts A{} B{} masks ${:04X}/${:04X}",
+                layout.planes,
+                layout.source,
+                if layout.interleaved {
+                    "interleaved preview"
+                } else {
+                    "single-plane preview"
+                },
+                blit.shifts[0],
+                blit.shifts[1],
+                blit.masks[0],
+                blit.masks[1]
+            ),
+        })
     }
 
     /// Scroll the Resources tab's table window by `rows`, clamped to the
@@ -1598,8 +1809,12 @@ impl App {
                 scrub: false,
                 heat,
                 resources,
+                blits: None,
             };
         };
+        let blits = (panel.tab == ui::AnalyzerTab::Blits)
+            .then(|| self.build_analyzer_blits_view(panel, trace))
+            .flatten();
         let underlay = (panel.underlay_active() && self.analyzer_underlay_rows > 0).then(|| {
             ui::AnalyzerUnderlayView {
                 fb: std::rc::Rc::clone(&self.analyzer_underlay_fb),
@@ -1626,9 +1841,10 @@ impl App {
         // seeing: a Copper writing a palette split on every line stays
         // well inside it.
         const MARKER_CAP: usize = 4000;
-        let markers = bus
+        let mut markers: Vec<ui::AnalyzerMarker> = bus
             .frame_render_events()
             .iter()
+            .filter(|event| !matches!(event.source, BeamWriteSource::Copper))
             .take(MARKER_CAP)
             .map(|event| ui::AnalyzerMarker {
                 vpos: event.vpos.min(u32::from(u16::MAX)) as u16,
@@ -1638,10 +1854,32 @@ impl App {
                 source: match event.source {
                     BeamWriteSource::Cpu => "cpu",
                     BeamWriteSource::CpuCopperIrq => "irq",
-                    BeamWriteSource::Copper => "copper",
+                    BeamWriteSource::Copper => unreachable!("filtered above"),
                 },
+                copper_addr: None,
+                colour: u32::from_le_bytes([238, 166, 42, 0xFF]),
             })
             .collect();
+        if let Some(records) = trace.records() {
+            markers.extend(
+                records
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, record)| {
+                        record.kind == crate::bus::BUS_RECORD_COPPER && record.flags & 1 != 0
+                    })
+                    .take(MARKER_CAP.saturating_sub(markers.len()))
+                    .map(|(slot, record)| ui::AnalyzerMarker {
+                        vpos: (slot / trace.cols).min(usize::from(u16::MAX)) as u16,
+                        hpos: (slot % trace.cols).min(usize::from(u16::MAX)) as u16,
+                        offset: record.reg & 0x01FE,
+                        value: record.data as u16,
+                        source: "copper",
+                        copper_addr: Some(record.addr.saturating_sub(2)),
+                        colour: copper_register_colour(record.reg),
+                    }),
+            );
+        }
         // Frame-start DIW/DDF overlays, decoded with the display model's
         // own rules (DiwHigh carries the OCS implicit bits or the ECS
         // DIWHIGH extension; DIW h units are lores pixels, two per cck).
@@ -1666,8 +1904,15 @@ impl App {
         // contains it, so clicking a blitter run names the blit.
         let selected_beam = (selected_vpos as u16, selected_hpos as u16);
         let selected_blit = trace.blits.iter().enumerate().find_map(|(i, blit)| {
-            let end = blit.end?;
-            (blit.start <= selected_beam && selected_beam <= end).then(|| {
+            let starts_before_slot = trace.frame > blit.start_frame
+                || (trace.frame == blit.start_frame && selected_beam >= blit.start);
+            let ends_after_slot = match (blit.end_frame, blit.end) {
+                (Some(end_frame), Some(end)) => {
+                    trace.frame < end_frame || (trace.frame == end_frame && selected_beam <= end)
+                }
+                _ => true,
+            };
+            (starts_before_slot && ends_after_slot).then(|| {
                 format!(
                     "in blit #{i} ({}x{} D ${:06X})",
                     blit.width_words,
@@ -1692,6 +1937,7 @@ impl App {
             scrub: panel.show_scrub,
             heat,
             resources,
+            blits,
             trace: Some(ui::AnalyzerTraceView {
                 frame: trace.frame,
                 seconds: trace.seconds,
@@ -2644,5 +2890,17 @@ impl App {
             video,
             audio,
         }
+    }
+}
+
+#[cfg(test)]
+mod analyzer_blit_tests {
+    use super::analyzer_blit_scroll;
+
+    #[test]
+    fn stale_scroll_is_clamped_to_the_rows_that_are_actually_drawn() {
+        assert_eq!(analyzer_blit_scroll(2, 0, 55), 0);
+        assert_eq!(analyzer_blit_scroll(20, 12, 0), 5);
+        assert_eq!(analyzer_blit_scroll(20, 3, 9), 3);
     }
 }

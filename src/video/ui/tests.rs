@@ -572,6 +572,7 @@ fn analyzer_view(
         scrub: false,
         heat,
         resources: None,
+        blits: None,
     })
 }
 
@@ -951,6 +952,8 @@ fn analyzer_marker_radius_and_label() {
         offset: 0x180,
         value: 0x0F00,
         source: "copper",
+        copper_addr: None,
+        colour: PANEL_TEXT_ACCENT,
     };
     // Within a line and two colour clocks counts as near.
     assert!(marker.near(100, 50));
@@ -1556,6 +1559,8 @@ fn frame_analyzer_top_edge_overlays_clip_to_raster() {
             offset: 0x096,
             value: 0x0000,
             source: "copper",
+            copper_addr: None,
+            colour: PANEL_TEXT_ACCENT,
         }],
         selected_blit: None,
         diw_v: None,
@@ -2567,6 +2572,8 @@ fn panels_render_into_their_rects() {
             offset: 0x180,
             value: 0x0F00,
             source: "copper",
+            copper_addr: None,
+            colour: PANEL_TEXT_ACCENT,
         }],
         selected_blit: Some("in blit #2 (20x100 D $060000)".to_string()),
         // A standard PAL display window and fetch bounds, so the
@@ -2591,6 +2598,7 @@ fn panels_render_into_their_rects() {
         scrub: true,
         heat: None,
         resources: None,
+        blits: None,
         trace: Some(trace),
         underlay: Some(AnalyzerUnderlayView {
             fb: std::rc::Rc::new(under_fb),
@@ -2746,6 +2754,7 @@ fn panels_render_into_their_rects() {
         scrub: false,
         heat: None,
         resources: Some(resources_view),
+        blits: None,
     }));
     let mut panel = FrameAnalyzerPanel::new();
     panel.tab = AnalyzerTab::Resources;

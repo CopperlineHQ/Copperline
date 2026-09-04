@@ -1339,6 +1339,8 @@ pub(super) fn render_attached_sprite_pair_lines(
                 out_base,
                 canvas_scale,
                 &mut sprite_subpixels.pixels[fb_idx],
+                sprite_subpixels.sources.get_mut(fb_idx),
+                even_sprite,
                 left,
                 right,
             );
@@ -1448,6 +1450,8 @@ fn paint_sprite_subpixel_pair(
     out_base: usize,
     canvas_scale: usize,
     composite: &mut [u32; 2],
+    sources: Option<&mut [u8; 2]>,
+    sprite: usize,
     left: Option<u32>,
     right: Option<u32>,
 ) {
@@ -1456,6 +1460,15 @@ fn paint_sprite_subpixel_pair(
     }
     if let Some(pixel) = right {
         composite[1] = pixel;
+    }
+    if let Some(sources) = sources {
+        let source = super::PIXEL_SOURCE_SPRITE0 + sprite.min(7) as u8;
+        if left.is_some() {
+            sources[0] = source;
+        }
+        if right.is_some() {
+            sources[1] = source;
+        }
     }
     if left.is_none() && right.is_none() {
         return;
@@ -1572,6 +1585,8 @@ pub(super) fn draw_sprite_line(
             out_base,
             canvas_scale,
             &mut sprite_subpixels.pixels[fb_idx],
+            sprite_subpixels.sources.get_mut(fb_idx),
+            sprite,
             left,
             right,
         );

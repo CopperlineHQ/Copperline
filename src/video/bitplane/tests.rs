@@ -61,6 +61,7 @@ fn repeated_frame_test_result(chip_ram_reads: Option<Vec<ChipRamReadDependency>>
         clxdat: 0x1234,
         chip_ram_reads,
         content_rect: None,
+        pixel_sources: None,
     }
 }
 
@@ -8972,6 +8973,49 @@ fn fast_playfield_interior_matches_scalar_oracle() {
             "case {case}: collision pixels diverged"
         );
     }
+}
+
+#[test]
+fn fast_playfield_provenance_uses_the_resolved_dual_playfield_winner() {
+    let mut outputs = [DenisePlayfieldOutput {
+        color: 0,
+        color_latch: 0,
+        pf_mask: 0,
+    }; 256];
+    outputs[3].pf_mask = 1;
+    let mut collision_table = [CollisionPixel::default(); 256];
+    collision_table[3] = CollisionPixel::new(true, true, false, false);
+    let mut fb = vec![0u32; FB_WIDTH];
+    let mut playfield_mask = vec![0u8; FB_WIDTH];
+    let mut sprite_subpixels = SpriteSubpixelState {
+        playfield_masks: vec![[0; 2]; FB_WIDTH],
+        pixels: vec![[0; 2]; FB_WIDTH],
+        sources: vec![[PIXEL_SOURCE_OUTSIDE_DIW; 2]; FB_WIDTH],
+    };
+    let mut collision_pixels = vec![CollisionPixel::default(); FB_WIDTH];
+    let mut clxdat = 0;
+    let mut ham_color = 0;
+
+    render_fast_playfield_run(
+        &[3],
+        u8::MAX,
+        &outputs,
+        &collision_table,
+        &mut fb,
+        &mut playfield_mask,
+        &mut sprite_subpixels,
+        &mut collision_pixels,
+        &mut clxdat,
+        &mut ham_color,
+        0,
+        0,
+        1,
+        FB_WIDTH,
+        1,
+    );
+
+    assert_eq!(playfield_mask[0], 3);
+    assert_eq!(sprite_subpixels.sources[0], [PIXEL_SOURCE_PLAYFIELD1; 2]);
 }
 
 /// The oracle above would pass vacuously if the eligibility check always
