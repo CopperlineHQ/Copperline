@@ -145,7 +145,7 @@ import-uae-bin = ["dep:toml_edit"]
 # The remote GDB stub (`--gdb`, src/gdbstub.rs): a 68k-aware gdbserver over
 # TCP. Default on; player builds (crates/copperline-player) leave it out so
 # a shipped game carries no debugger surface.
-gdb = []
+gdb = ["control"]
 # The Debug Adapter Protocol adapter (`copperline-ctl --dap`,
 # src/control/dap/) and the guest debug-info reader behind it
 # (src/debuginfo/: hunk symbol tables, vasm LINE debug hunks, DWARF from

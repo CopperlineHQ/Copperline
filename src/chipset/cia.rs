@@ -130,6 +130,39 @@ const CRA_SPMODE: u8 = 1 << 6;
 const CRA_TODIN: u8 = 1 << 7;
 
 impl Cia {
+    /// Restore the portable CIA register/latch prefix of a validated USS
+    /// chunk. WinUAE's input-pipe delays are deliberately reconstructed.
+    pub(crate) fn from_uss(which: Which, bytes: &[u8]) -> Self {
+        let mut cia = Self::new(which);
+        let le24 = |offset| {
+            u32::from(bytes[offset])
+                | (u32::from(bytes[offset + 1]) << 8)
+                | (u32::from(bytes[offset + 2]) << 16)
+        };
+        for reg in [REG_PRA, REG_PRB, REG_DDRA, REG_DDRB, REG_CRA, REG_CRB] {
+            cia.write(
+                reg,
+                bytes[reg] & if reg >= REG_CRA { !CR_LOAD } else { 0xff },
+            );
+        }
+        cia.ta_count = crate::uss::be16(bytes, 4);
+        cia.tb_count = crate::uss::be16(bytes, 6);
+        cia.ta_latch = u16::from_le_bytes([bytes[17], bytes[18]]);
+        cia.tb_latch = u16::from_le_bytes([bytes[19], bytes[20]]);
+        cia.tod_count = le24(8);
+        cia.tod_latch = le24(21);
+        cia.tod_alarm = le24(24);
+        cia.tod_latched = bytes[27] & 1 != 0;
+        cia.tod_stopped = bytes[27] & 2 == 0;
+        cia.tod_matching = cia.tod_count == cia.tod_alarm;
+        cia.sdr = bytes[12];
+        cia.icr_data = bytes[13];
+        cia.icr_mask = bytes[16] & 0x1f;
+        cia.irq_pin = cia.icr_data & cia.icr_mask & 0x1f != 0;
+        cia.irq_pin_delay_eticks = 0;
+        cia
+    }
+
     pub fn new(which: Which) -> Self {
         let mut regs = [0u8; 16];
         // CIA-A PRA bits are all open-drain pulled high (=released)

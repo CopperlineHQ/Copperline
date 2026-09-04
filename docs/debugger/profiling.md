@@ -250,3 +250,34 @@ copy each of chip and slow RAM. Setting `"screenshots": "every"` produces 50 PNG
 second in PAL. Precise sampling is larger: without registers each sample is
 the call stack plus one word; registers add 68 bytes per sample. All three
 options are disabled by default. Captures up to 100,000 frames are accepted.
+
+
+## Profiling a saved machine offline
+
+`copperline-ctl profile` boots no guest volume and needs no running server:
+
+```sh
+copperline-ctl profile scene.clstate --frames 2 --out out/scene
+copperline-ctl profile scene.uss --rom kickstart.rom --frames 2 --out out/scene-uss
+copperline-ctl profile scene.uss --rom kickstart.rom --frames 2 \
+  --format bartman --out out/scene.profile
+```
+
+The default writes the native capture directory with instruction/register
+samples, DMA slots, replay memory and screenshots. `--frames` accepts 1-100.
+A native state supplies its own ROM; a USS file requires the matching ROM
+and discards a reconstructed frame before profiling. See
+[USS coverage and limitations](../guide/winuae-state.md).
+
+Here `--format bartman` selects the legacy binary file documented under
+[GDB compatibility](gdb.md#bartman-extension-backend). The separate
+`profile-report --format bartman` command still writes an annotated JSON
+`.cpuprofile` from an existing native capture.
+
+
+For interoperability checks, compile the upstream extension (`npm ci`,
+`npx tsc -p .`) and run its real parser against the exported file:
+
+```sh
+node tools/check-bartman-profile.cjs /path/to/vscode-amiga-debug scene.profile
+```

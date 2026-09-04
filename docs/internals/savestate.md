@@ -322,3 +322,45 @@ The same host boundary as save states applies, plus the requirement that
   `inputsched::tests` cover the replay-log cursor and pruning;
   `window::tests::opening_the_debugger_arms_reverse_and_step_reconstructs`
   drives the window controls.
+
+
+## WinUAE interchange (`uss.rs`)
+
+USS import is separate from native serialization and does not change
+`STATE_VERSION`. `UssFile` parses and validates the complete ASF chunk stream
+before installing RAM, CPU registers and hardware latches in a newly built
+machine. Lengths include the 12-byte chunk header; bit 0 requests zlib with
+a big-endian inflated length prefix. Padding is `4 - (payload_length % 4)`,
+including four bytes for an aligned chunk. END has an eight-byte header.
+Input and total inflated bytes are limited to 256 MiB, individual chunks to
+128 MiB, and the stream to 4096 chunks.
+
+The compact CHIP layout omits audio and sprite register blocks, which are
+restored from AUD0-3 and SPR0-7. Custom writes skip command/trigger registers
+such as BLTSIZE, COPJMP and DSKLEN; importing them as ordinary writes would
+start transfers absent from the snapshot. CIA counters use big-endian words
+while their saved latches and TOD bytes use little-endian ordering. ROM
+matching uses the declared CRC over the normalized 256/512 KiB image,
+accepting a mirrored 256 KiB ROM and naming a mismatch through `romdb`.
+
+WinUAE's event queue, CPU prefetch/cache contents, Copper phase and shift
+register pipelines have no direct Copperline representation. Import starts
+at a reconstructed beam boundary, restarts Copper from COP1LC, and advances
+one discarded frame through the normal CPU/chipset path. This is an
+interchange approximation, not byte-identical resumption of WinUAE timing.
+Unsupported active blitter/disk operations and device chunks are rejected;
+other omitted chunks are reported. See the
+[coverage assessment](../guide/winuae-state.md#coverage) before extending it.
+
+The Bartman binary profile writer (`profile/bartman.rs`) is a driver-owned
+bounded operation shared by headless and GUI GDB and the offline CLI. It
+uses the normal precise CPU sampler and full bus trace, translates wire
+record fields explicitly, and embeds the real framebuffer. Its temporary
+file, progress transport and instrumentation are host state and never enter
+native snapshots.
+
+
+An externally forced debugger PC write invalidates the instruction prefetch
+queue before execution resumes at the new address. Native snapshot restores
+retain their saved queue for exact replay; USS imports start with a cold
+queue at the imported PC.

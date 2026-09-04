@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
+pub mod bartman;
 #[cfg(feature = "dap")]
 pub mod report;
 pub mod samples;

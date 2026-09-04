@@ -111,7 +111,7 @@ async function initProject(context) {
   });
   if (!toolchain) return;
 
-  const relativeFiles = ["main.c", "uaelib.c", "uaelib.h", "startup.s", "format_gcc.s", "format_vasm.asm", "Makefile"];
+  const relativeFiles = ["main.c", "uaelib.c", "uaelib.h", "startup.s", "runtime.c", "format_gcc.s", "format_vasm.asm", "Makefile"];
   const vscodeDir = vscode.Uri.joinPath(destination, ".vscode");
   const targets = relativeFiles.map((name) => vscode.Uri.joinPath(destination, name));
   targets.push(vscode.Uri.joinPath(vscodeDir, "launch.json"));

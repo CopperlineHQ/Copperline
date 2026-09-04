@@ -57,6 +57,7 @@ struct GdbBreaks {
     reg_watches: Vec<u16>,
     /// `Some(filter)` when this session armed the machine loadseg catch.
     loadseg: Option<Option<String>>,
+    catches: Vec<u16>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,6 +101,14 @@ impl GdbBreaks {
     fn sync(&mut self, emu: &mut Emulator, core: &GdbCore) -> Vec<String> {
         let mut notes = Vec::new();
         let mask = emu.machine.ui_addr_mask();
+        if core.bartman && core.run_stop.is_none() {
+            for vector in [3, 4, 39] {
+                if !emu.machine.ui_breaks().catches.contains(&vector) {
+                    emu.machine.ui_toggle_catch(vector);
+                    self.catches.push(vector);
+                }
+            }
+        }
 
         // PC breakpoints: the core list is the desired set.
         let desired: Vec<u32> = core.breakpoints.iter().map(|&a| a & mask).collect();
@@ -253,6 +262,11 @@ impl GdbBreaks {
     /// Remove everything this session installed (detach). GUI-set points
     /// are left alone; a point the GUI already removed counts as done.
     fn remove_all(&mut self, emu: &mut Emulator) {
+        for vector in self.catches.drain(..) {
+            if emu.machine.ui_breaks().catches.contains(&vector) {
+                emu.machine.ui_toggle_catch(vector);
+            }
+        }
         for addr in self.pc.drain(..) {
             if emu.machine.ui_breaks().is_breakpoint(addr) {
                 emu.machine.ui_set_breakpoint(addr, None, 0);
@@ -293,6 +307,11 @@ fn repositions_machine(packet: &str) -> bool {
         || packet == "bc"
         || (packet.len() > 1 && (packet.starts_with('s') || packet.starts_with('c')))
         || packet.starts_with("P11=")
+        || packet == "qOffsets"
+        || ((packet.starts_with('C') || packet.starts_with('S')) && packet.contains(';'))
+        || decode_qrcmd(packet).is_some_and(|command| {
+            matches!(command.split_whitespace().next(), Some("profile" | "reset"))
+        })
 }
 
 /// The decoded text of a qRcmd (monitor) packet, when it is one.
@@ -306,7 +325,8 @@ impl App {
     /// Adopt a bound GDB server; called from `main` between `App::new`
     /// and `run()`.
     pub fn attach_gdb(&mut self, handle: GdbHandle, config: &crate::gdbstub::Config) {
-        let core = GdbCore::new(&self.emu, config.stop_on_load.clone());
+        let mut core = GdbCore::new(&self.emu, config.stop_on_load.clone());
+        core.bartman = config.bartman;
         self.gdb = Some(GdbGuiState {
             handle,
             core,
@@ -349,7 +369,9 @@ impl App {
             // A fresh core re-arms the stop-on-load target; its tracker
             // absorbs an already-running program so nothing fires
             // spuriously (same as the headless per-connection session).
+            let bartman = g.core.bartman;
             g.core = GdbCore::new(&self.emu, g.stop_on_load.clone());
+            g.core.bartman = bartman;
         }
         let (budget, interval) = match self.gdb.as_ref() {
             Some(g) => (g.reverse_budget_mb, g.reverse_interval_frames),
@@ -406,7 +428,7 @@ impl App {
         self.complete_remote_resumes("pause", "interrupted by gdb");
         // Ctrl-C always gets a stop reply, pending continue or not (the
         // headless driver answers the raw 0x03 the same way).
-        self.gdb_send_packet("T05thread:1;");
+        self.gdb_send_packet(self.gdb_plain_stop());
         self.last_debug_stop = Some("interrupted by gdb".to_string());
         self.show_osd("GDB: interrupted");
         self.finish_render_for_current_frame();
@@ -438,7 +460,12 @@ impl App {
         // resume at an address, a PC write -- are refused while a control
         // client's resume is outstanding, as the control protocol refuses
         // its own repositioning verbs while a GDB continue runs.
-        if repositions_machine(packet) && self.remote_resume_pending() {
+        let bootstraps_bartman = packet == "?"
+            && self
+                .gdb
+                .as_ref()
+                .is_some_and(|g| g.core.bartman && g.core.run_stop.is_some());
+        if (repositions_machine(packet) || bootstraps_bartman) && self.remote_resume_pending() {
             if let Some(g) = self.gdb.as_mut() {
                 g.core.console.push(
                     "machine is running (a control client resume is pending); pause first\n"
@@ -453,6 +480,24 @@ impl App {
             return;
         };
         let result = g.core.handle_packet(&mut self.emu, packet);
+        let result = if g.core.outside_rom
+            && matches!(result, Ok(CoreReply::Resume(ResumeRequest::Continue)))
+        {
+            match self.emu.debug_run_until_pc_outside(
+                crate::memory::ROM_BASE as u32,
+                0x00ff_ffff,
+                5_000_000,
+            ) {
+                Ok(true) => {
+                    g.core.outside_rom = false;
+                    Ok(CoreReply::Packet("S05".into()))
+                }
+                Ok(false) => Ok(CoreReply::Packet("E01".into())),
+                Err(e) => Err(e),
+            }
+        } else {
+            result
+        };
         self.gdb = Some(g);
         match result {
             Err(e) => {
@@ -515,6 +560,26 @@ impl App {
                 // repeats this cleanup harmlessly.
                 self.gdb_detach_cleanup("GDB client detached");
             }
+            Ok(CoreReply::Profile(request)) => {
+                let mut g = self.gdb.take().unwrap();
+                g.breaks.remove_all(&mut self.emu);
+                let reply =
+                    match crate::profile::bartman::capture(&mut self.emu, &request, |line| {
+                        g.handle.send_console(line);
+                        Ok(())
+                    }) {
+                        Ok(()) => "OK",
+                        Err(error) => {
+                            g.handle.send_console(&format!("DBG: {error:#}\n"));
+                            "E01"
+                        }
+                    };
+                self.gdb = Some(g);
+                self.gdb_sync_machine_debug_state();
+                self.gdb_send_packet(reply);
+                self.finish_render_for_current_frame();
+                self.request_redraw();
+            }
             Ok(CoreReply::Kill) => {
                 // A windowed session outlives its debugger: `k` detaches
                 // (VS Code sends it on Stop Debugging; killing the
@@ -544,11 +609,11 @@ impl App {
                 error!("gdb: step halted the machine: {e:?}");
                 self.cpu_halted = true;
                 self.sync_live_audio_suspension();
-                "T05thread:1;".to_string()
+                self.gdb_plain_stop().to_string()
             }
             Ok(()) => match self.emu.machine.take_ui_debug_stop() {
                 Some(stop) => self.gdb_map_stop(&stop),
-                None => "T05thread:1;".to_string(),
+                None => self.gdb_plain_stop().to_string(),
             },
         };
         self.gdb_sync_machine_debug_state();
@@ -635,6 +700,16 @@ impl App {
     /// `--run` target and queueing the loadseg console notices the
     /// headless check_stop prints.
     fn gdb_map_stop(&mut self, stop: &DebugStop) -> String {
+        if self.gdb.as_ref().is_some_and(|g| g.core.bartman)
+            && !matches!(stop, DebugStop::LoadSeg { .. })
+        {
+            return match stop {
+                DebugStop::Exception { vector: 3, .. } => "S0A",
+                DebugStop::Exception { vector: 4, .. } => "S04",
+                _ => "S05",
+            }
+            .into();
+        }
         match stop {
             DebugStop::Breakpoint { .. } => "T05hwbreak:;thread:1;".to_string(),
             DebugStop::Watch { addr, access, .. } => {
@@ -663,8 +738,9 @@ impl App {
                 format!("T05{key}:{addr:x};thread:1;")
             }
             DebugStop::LoadSeg { name, addr } => {
+                let plain = self.gdb_plain_stop().to_string();
                 let Some(g) = self.gdb.as_mut() else {
-                    return "T05thread:1;".to_string();
+                    return plain;
                 };
                 let hint = format!(
                     "first hunk ${addr:06X} (monitor segments / add-symbol-file FILE 0x{addr:X})\n"
@@ -680,17 +756,17 @@ impl App {
                     g.core
                         .console
                         .push(format!("run target loaded: {name} {hint}"));
-                    "T05thread:1;".to_string()
+                    plain.clone()
                 } else if g.core.loadseg_break {
                     g.core.console.push(format!("loadseg: {name} {hint}"));
-                    "T05thread:1;".to_string()
+                    plain.clone()
                 } else if g.core.lib_events_armed {
                     "T05library:;thread:1;".to_string()
                 } else {
-                    "T05thread:1;".to_string()
+                    plain.clone()
                 }
             }
-            _ => "T05thread:1;".to_string(),
+            _ => self.gdb_plain_stop().to_string(),
         }
     }
 
@@ -725,15 +801,36 @@ impl App {
             g.pending = false;
         }
         if let Some(g) = self.gdb.as_ref() {
-            g.handle.send_console(&format!("{detail}\n"));
+            g.handle.send_console(&format!(
+                "{}{detail}\n",
+                if g.core.bartman { "DBG: " } else { "" }
+            ));
         }
-        self.gdb_send_packet("T05thread:1;");
+        self.gdb_send_packet(self.gdb_plain_stop());
         true
+    }
+
+    fn gdb_plain_stop(&self) -> &'static str {
+        if self.gdb.as_ref().is_some_and(|g| g.core.bartman) {
+            "S05"
+        } else {
+            "T05thread:1;"
+        }
     }
 
     fn gdb_send_packet(&self, payload: &str) {
         if let Some(g) = &self.gdb {
             g.handle.send_packet(payload);
+        }
+    }
+
+    pub(super) fn gdb_log_lines(&self, lines: &[String]) {
+        if let Some(g) = self.gdb.as_ref().filter(|g| g.core.bartman) {
+            for text in lines {
+                for line in text.lines() {
+                    g.handle.send_console(&format!("DBG: {line}\n"));
+                }
+            }
         }
     }
 

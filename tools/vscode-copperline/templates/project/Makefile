@@ -18,8 +18,8 @@ CFLAGS := -g -O2 -m68000 -Wall -Wextra
 
 ifeq ($(TOOLCHAIN),bartman)
   CC := m68k-amiga-elf-gcc
-  SOURCES += startup.s format_gcc.s
-  CFLAGS += -nostdlib -ffunction-sections -fdata-sections -DCOPPERLINE_BARE_STARTUP
+  SOURCES += startup.s format_gcc.s runtime.c
+  CFLAGS += -nostdlib -ffreestanding -ffunction-sections -fdata-sections -DCOPPERLINE_BARE_STARTUP
   LDFLAGS := -Wl,--emit-relocs,--gc-sections,-Ttext=0,-e,_start,-Map=$(PROGRAM).map
   TARGET := $(PROGRAM).elf
 else ifeq ($(TOOLCHAIN),bebbo)

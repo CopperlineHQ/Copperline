@@ -169,3 +169,12 @@ Test options:
 - `COPPERLINE_VAMIGATS_OUT=DIR`: Directory to save test screenshots.
 - `COPPERLINE_VAMIGATS_BASELINE=DIR`: Baseline directory for automated PNG comparison.
 - `COPPERLINE_VAMIGATS_VAMIGA=PATH`: Path to reference `VAHeadless` binary.
+
+
+## Importing a WinUAE state
+
+`--load-uss scene.uss` derives the CPU, chipset and memory from a WinUAE
+AmigaStateFile, verifies the configured ROM, and skips one reconstructed
+frame. Scheduled times start on Copperline's new timeline. See
+[WinUAE state import](winuae-state.md) for commands, supported chunks and
+limits on using these states for frame profiling.

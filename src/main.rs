@@ -148,6 +148,9 @@ fn validate_gdb_args(cli: &CliArgs) -> Result<()> {
              rebuild with --features gdb for --gdb/--gdb-gui"
         ));
     }
+    if cli.gdb_dialect.is_some() && cli.gdb.is_none() && cli.gdb_gui.is_none() {
+        return Err(anyhow!("--gdb-dialect requires --gdb or --gdb-gui"));
+    }
     if cli.gdb.is_some() && cli.gdb_gui.is_some() {
         return Err(anyhow!("--gdb and --gdb-gui cannot be combined"));
     }
@@ -684,6 +687,13 @@ fn main() -> Result<()> {
     crashlog::install();
 
     let cli = parse_args()?;
+    if cli.load_uss.is_some()
+        && (cli.load_state.is_some() || cli.run.is_some() || cli.whdload.is_some())
+    {
+        return Err(anyhow!(
+            "--load-uss cannot combine with --load-state, --run or --whdload"
+        ));
+    }
     validate_benchmark_args(&cli)?;
     validate_run_args(&cli)?;
     validate_gdb_args(&cli)?;
@@ -769,6 +779,14 @@ fn main() -> Result<()> {
     }
 
     let mut cfg = cfg.with_rom_override(cli.rom_path.clone());
+    let uss = cli
+        .load_uss
+        .as_ref()
+        .map(|path| copperline::uss::UssFile::read(path))
+        .transpose()?;
+    if let Some(uss) = &uss {
+        uss.configure(&mut cfg)?;
+    }
     // Direct WHDLoad boot: stage the package and derive the machine before
     // the bundled-ROM sentinel resolves, so a Kickstart 3.1 found in the
     // user's collection can serve as the machine ROM. Explicit machine, ROM,
@@ -778,8 +796,8 @@ fn main() -> Result<()> {
     // An explicit --run outranks a game remembered in [whdload]: the two
     // stage competing boot volumes (--run with --whdload itself is already
     // a validation error).
-    let config_game = if cli.run.is_some() && config_game.is_some() {
-        info!("run: ignoring the configured [whdload] game for this session");
+    let config_game = if (cli.run.is_some() || uss.is_some()) && config_game.is_some() {
+        info!("ignoring the configured [whdload] game for this session");
         None
     } else {
         config_game
@@ -962,6 +980,9 @@ fn main() -> Result<()> {
     }
     info!("emulation timing: deterministic core, paced={paced}");
     let mut emu = emulator::build_machine(&cfg, audio, paced, cli.load_state.is_some())?;
+    if let Some(uss) = &uss {
+        uss.load(&mut emu)?;
+    }
     if let Some(path) = &cli.load_state {
         let outcome = emu.load_state(path)?;
         info!(
@@ -1016,6 +1037,7 @@ fn main() -> Result<()> {
     #[cfg(feature = "gdb")]
     if let Some(listen) = cli.gdb {
         let mut gdb = gdbstub::Config::new(listen);
+        gdb.bartman = cli.gdb_dialect.as_deref() == Some("bartman");
         // --run + --gdb: stop at the program's first instruction, the
         // moment the guest OS loads it.
         gdb.stop_on_load = run_prog_name.clone();
@@ -1152,6 +1174,7 @@ fn main() -> Result<()> {
         // Same shape for the windowed GDB stub: bind before the window
         // opens, socket threads start inside App::run.
         let mut config = gdbstub::Config::new(listen);
+        config.bartman = cli.gdb_dialect.as_deref() == Some("bartman");
         // --run + --gdb-gui: stop at the program's first instruction,
         // the moment the guest OS loads it.
         config.stop_on_load = run_prog_name.clone();
@@ -1318,6 +1341,7 @@ fn launcher_requested(cli: &CliArgs) -> bool {
         && cli.control.is_none()
         && cli.control_gui.is_none()
         && cli.load_state.is_none()
+        && cli.load_uss.is_none()
         && cli.press_after.is_empty()
         && cli.click_after.is_empty()
         && cli.joy_after.is_empty()

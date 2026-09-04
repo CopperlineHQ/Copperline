@@ -6,6 +6,7 @@
 #include <exec/memory.h>
 #include <exec/types.h>
 #include <graphics/gfxbase.h>
+#include <hardware/intbits.h>
 #include <proto/exec.h>
 #include <proto/graphics.h>
 

@@ -145,7 +145,7 @@ if (*(UWORD *)UaeConf == 0x4eb9 || *(UWORD *)UaeConf == 0xa00e) {
 The generated `Startup-Sequence` relies on shell commands (`CD`, `FailAt`) present in
 Kickstart 2.0 and newer (including the bundled AROS ROM).
 
-On Kickstart 1.3, these commands emit error messages but the binary is still executed;
-however, the working directory remains `SYS:`, meaning relative asset paths may fail to
-resolve. Kickstart 1.2 lacks filesystem autoconfig support and cannot boot host-directory
+A bare Kickstart 1.3 boot does not provide those commands: `FailAt` can stop
+the startup script before the binary runs. Use Kickstart 2.0 or newer, or
+omit the ROM to use bundled AROS, for the generated `--run` volume. Kickstart 1.2 lacks filesystem autoconfig support and cannot boot host-directory
 volumes.

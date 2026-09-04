@@ -17,6 +17,7 @@ use std::net::{TcpListener, TcpStream};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub listen: String,
+    pub bartman: bool,
     pub reverse_budget_mb: usize,
     pub reverse_interval_frames: u64,
     /// `--run` + `--gdb`: stop (once) the moment the guest OS loads a
@@ -28,6 +29,7 @@ impl Config {
     pub fn new(listen: String) -> Self {
         Self {
             listen,
+            bartman: false,
             reverse_budget_mb: crate::envcfg::var("COPPERLINE_DBG_RR_BUDGET_MB")
                 .and_then(|s| s.trim().parse::<usize>().ok())
                 .unwrap_or(crate::debugger::RR_DEFAULT_BUDGET_MB),
@@ -48,7 +50,7 @@ pub fn run(mut emu: Emulator, config: Config) -> Result<()> {
     emu.enable_time_travel(config.reverse_budget_mb, config.reverse_interval_frames);
     emu.debug_ensure_time_travel_anchor()?;
 
-    serve(listener, emu, config.stop_on_load)
+    serve_dialect(listener, emu, config.stop_on_load, config.bartman)
 }
 
 /// Accept GDB connections one at a time against the same machine. A
@@ -56,7 +58,16 @@ pub fn run(mut emu: Emulator, config: Config) -> Result<()> {
 /// for the next client -- reattaching re-runs `qOffsets`, which is the
 /// documented way to pick up a program loaded mid-session -- while
 /// GDB's `kill` ends the server.
-fn serve(listener: TcpListener, mut emu: Emulator, stop_on_load: Option<String>) -> Result<()> {
+#[cfg(test)]
+fn serve(listener: TcpListener, emu: Emulator, stop_on_load: Option<String>) -> Result<()> {
+    serve_dialect(listener, emu, stop_on_load, false)
+}
+fn serve_dialect(
+    listener: TcpListener,
+    mut emu: Emulator,
+    stop_on_load: Option<String>,
+    bartman: bool,
+) -> Result<()> {
     loop {
         let (stream, peer) = listener.accept().context("accepting GDB connection")?;
         log::info!("gdb: connection from {peer}");
@@ -65,6 +76,7 @@ fn serve(listener: TcpListener, mut emu: Emulator, stop_on_load: Option<String>)
         // client wants the same break-at-entry, and the fresh tracker
         // absorbs an already-running program so nothing fires spuriously.
         let mut session = Session::new(emu, stream, stop_on_load.clone());
+        session.core.bartman = bartman;
         let end = session.run()?;
         session.clear_debug_hardware();
         emu = session.emu;
@@ -89,6 +101,7 @@ struct Session {
     no_ack: bool,
     core: GdbCore,
     watch_words: Vec<(u32, crate::debugger::WatchAccess)>,
+    catches: Vec<u16>,
 }
 
 impl Session {
@@ -100,6 +113,7 @@ impl Session {
             no_ack: false,
             core,
             watch_words: Vec::new(),
+            catches: Vec::new(),
         }
     }
 
@@ -113,7 +127,14 @@ impl Session {
                 self.no_ack = true;
                 continue;
             }
-            let action = self.core.handle_packet(&mut self.emu, &packet)?;
+            let action = match self.core.handle_packet(&mut self.emu, &packet) {
+                Ok(action) => action,
+                Err(error) => {
+                    self.send_console(&format!("DBG: {error:#}\n"))?;
+                    self.send_packet("E01")?;
+                    continue;
+                }
+            };
             self.sync_watchpoints();
             let reply = match action {
                 CoreReply::Packet(reply) => reply,
@@ -127,6 +148,21 @@ impl Session {
                     return Ok(SessionEnd::Detached);
                 }
                 CoreReply::Kill => return Ok(SessionEnd::Killed),
+                CoreReply::Profile(request) => {
+                    let stream = &mut self.stream;
+                    match crate::profile::bartman::capture(&mut self.emu, &request, |line| {
+                        let payload = format!("O{}", hex_encode(line.as_bytes()));
+                        write!(stream, "${payload}#{:02x}", checksum(payload.as_bytes()))?;
+                        stream.flush()?;
+                        Ok(())
+                    }) {
+                        Ok(()) => "OK".into(),
+                        Err(error) => {
+                            self.send_console(&format!("DBG: {error:#}\n"))?;
+                            "E01".into()
+                        }
+                    }
+                }
             };
             self.flush_console()?;
             self.send_packet(&reply)?;
@@ -147,6 +183,11 @@ impl Session {
     /// watches, beam traps, Copper breakpoints), so a stale hit cannot
     /// stop the next client's first continue.
     fn clear_debug_hardware(&mut self) {
+        for vector in self.catches.drain(..) {
+            if self.emu.machine.ui_breaks().catches.contains(&vector) {
+                self.emu.machine.ui_toggle_catch(vector);
+            }
+        }
         for (addr, _) in self.watch_words.drain(..) {
             if self
                 .emu
@@ -165,6 +206,14 @@ impl Session {
     }
 
     fn sync_watchpoints(&mut self) {
+        if self.core.bartman && self.core.run_stop.is_none() {
+            for vector in [3, 4, 39] {
+                if !self.emu.machine.ui_breaks().catches.contains(&vector) {
+                    self.emu.machine.ui_toggle_catch(vector);
+                    self.catches.push(vector);
+                }
+            }
+        }
         let mask = self.emu.machine.ui_addr_mask();
         let (desired, _) = self.core.machine_watch_words(mask);
         for (addr, access) in self.watch_words.clone() {
@@ -261,6 +310,14 @@ impl Session {
     fn continue_forward(&mut self) -> Result<String> {
         loop {
             self.core.step_once(&mut self.emu)?;
+            if self.core.bartman {
+                if let Some(uaelib) = self.emu.bus_mut().uaelib.as_mut() {
+                    let lines = uaelib.take_console_lines();
+                    for line in lines {
+                        self.send_console(&format!("DBG: {line}\n"))?;
+                    }
+                }
+            }
             if let Some(stop) = self.core.check_stop(&mut self.emu)? {
                 self.core.stop = stop;
                 return Ok(self.core.stop_reply());
