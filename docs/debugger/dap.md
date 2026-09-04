@@ -154,12 +154,12 @@ global(s), call-frame info`.
 | Continue / Pause | `continue` / `pause`. |
 | Step Over / Into / Out | `step_over` / `step` / `step_out`, repeated until the source line changes (statement granularity) or once (instruction granularity). Step Out while the PC is in Kickstart uses `run_until {"pc_outside": true}` to return to program code. Stepping into code without lines runs it to its return. A line that outgrows 64 single steps (a loop) gets temporary breakpoints on the function's other lines and the return address instead. |
 | Step Back / Reverse Continue | `reverse_step` / `reverse_continue` from the snapshot ring (see [Reverse debugging](reverse.md)); Step Back also repeats until the line changes. The adapter takes a snapshot (`reverse_anchor`) at every stop a run ends in, so stepping back replays from there: the boot volume `--run` stages is a host directory mount, whose traffic a replay from an older snapshot could not reproduce. |
-| Call stack | Call-frame information when the DWARF has it, else a scan of the stack for return addresses that follow a `JSR`/`BSR`. Frames beyond the innermost are looked up at the call site. |
+| Call stack | Call-frame information when the DWARF has it, else a scan of the stack for return addresses that follow a `JSR`/`BSR`. Frames beyond the innermost are looked up at the call site. ROM frames use live names such as `[exec] AllocMem+$12`, derived from the running guest rather than a per-ROM symbol file. |
 | Scopes | Registers (D0-D7, A0-A7, PC, SR with its flags, plus FP0-FP7/FPCR/FPSR/FPIAR when an FPU is fitted), Locals, Globals, Chipset (every custom register and the beam position). |
 | Set variable | `regs.set` for the innermost frame's registers; `mem.write` for base-type variables and members. |
 | Evaluate / hover / watch | Registers, variables and symbols by name, numbers (`$DFF000`, `0x1234`, `%1010`), `+ - * /`, `[expr]` / `[expr].w` / `[expr].b` memory reads, `d0.w`. In the Debug Console, `!method {json}` sends a raw control-protocol request and prints the reply (`!status`, `!beam.get`, `!capture.screenshot {"path": "/tmp/s.png"}`). |
 | Memory view | `mem.read` / `mem.write` (base64). |
-| Disassembly view | `disasm`, with symbols and source lines; backwards disassembly anchors at the nearest function or symbol start. |
+| Disassembly view | `disasm`, with program symbols, source lines, and live ROM/LVO names; backwards disassembly anchors at the nearest program or ROM function start. |
 | Jump to cursor | `regs.set {"reg": "pc"}`. |
 | Debug Console output | Serial output (which is where `KPrintF` goes) as `stdout`; uaelib function 86 (`debug_log`), optional `emulatorLog`, and the adapter's own notes as `console`. |
 | CPU profiling | Custom `copperline/profile {"frames": N}` -> precise `profile.start`, bounded frame step, `profile.stop`, and a merged `.cpuprofile` path. |

@@ -75,6 +75,12 @@ pub enum CoreOp {
         addr: Option<u32>,
         count: usize,
     },
+    /// Resolve one live address through active AmigaOS LVOs/resident tags.
+    SymbolsResolve {
+        addr: u32,
+    },
+    /// Snapshot every live AmigaOS LVO target and ROM resident module.
+    SymbolsRom,
     CustomDump,
     /// Dump the live Denise palette: all 256 AGA entries as their high and
     /// low nibble-plane words (debug aid; not part of the stable surface).
@@ -227,6 +233,8 @@ impl CoreOp {
                 | CoreOp::RegsGet
                 | CoreOp::MemRead { .. }
                 | CoreOp::Disasm { .. }
+                | CoreOp::SymbolsResolve { .. }
+                | CoreOp::SymbolsRom
                 | CoreOp::CustomDump
                 | CoreOp::PaletteDump { .. }
                 | CoreOp::CustomRead { .. }
@@ -897,6 +905,10 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
             addr: p.u32_opt("addr")?,
             count: p.usize_or("count", 16)?.clamp(1, 256),
         }),
+        "symbols.resolve" => core(CoreOp::SymbolsResolve {
+            addr: p.u32_req("addr")?,
+        }),
+        "symbols.rom" => core(CoreOp::SymbolsRom),
         "custom.dump" => core(CoreOp::CustomDump),
         "palette.dump" => core(CoreOp::PaletteDump {
             resource: p.str_opt("resource")?,
@@ -2021,6 +2033,15 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
                 pc = pc.wrapping_add(len);
             }
             Ok(json!({"lines": lines}))
+        }
+        CoreOp::SymbolsResolve { addr } => {
+            let snapshot = crate::amigaos::symbols::snapshot_on_bus(emu.bus());
+            let symbol = snapshot.resolve(*addr);
+            Ok(json!({"addr": addr, "found": symbol.is_some(), "symbol": symbol}))
+        }
+        CoreOp::SymbolsRom => {
+            serde_json::to_value(crate::amigaos::symbols::snapshot_on_bus(emu.bus()))
+                .map_err(|error| CtlError::internal(error.to_string()))
         }
         CoreOp::CustomDump => {
             let bus = emu.bus();
@@ -3192,6 +3213,28 @@ mod tests {
                 count: 2
             }
         );
+        assert_eq!(
+            core("symbols.resolve", json!({"addr": "$F80010"})),
+            CoreOp::SymbolsResolve { addr: 0xF80010 }
+        );
+    }
+
+    #[test]
+    fn symbol_methods_are_read_only_before_amigaos_boots() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::default();
+        let all = exec_core(&mut emu, &mut ctx, &CoreOp::SymbolsRom).unwrap();
+        assert_eq!(all["version"], 1);
+        assert!(all["symbols"].as_array().unwrap().is_empty());
+
+        let one = exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::SymbolsResolve { addr: 0xF80010 },
+        )
+        .unwrap();
+        assert_eq!(one["found"], false);
+        assert!(one["symbol"].is_null());
     }
 
     #[test]

@@ -87,7 +87,10 @@ Written when the profile stops: contains `version`, machine configuration,
 capture options, the list of chip-bus owner names (`owners`) and CPU wait
 classes (`cpu_wait_classes`), `started`/`ended` timeline points,
 `frames_written`, and a snapshot of registered uaelib resources (matching
-`debug.resources`) for address labeling. It also records `systemStackLower`,
+`debug.resources`) for address labeling. `rom_symbols` snapshots the running
+guest's ROM ranges, resident modules, and live library/device LVO targets at
+capture stop; this makes conversion deterministic while still reflecting
+`SetFunction()` patches. It also records `systemStackLower`,
 `systemStackUpper`, `stackLower`, and `stackUpper`, read from ExecBase and
 ThisTask when a valid AmigaOS task is running. An unreadable ExecBase makes
 all four fields null; an unavailable or implausible ThisTask leaves the two
@@ -218,7 +221,9 @@ one numbered file per captured frame, `--format bartman` for Bartman's `$amiga`
 annotations, or repeat `--source-map FROM=TO` to rewrite recorded build paths.
 Functions, source lines, and optimized inline frames come from Copperline's
 native debug-info reader. VS Code opens `.cpuprofile` files directly; its CPU
-profile flame-chart extension adds the graphical flame view.
+profile flame-chart extension adds the graphical flame view. ROM samples use
+the captured live names, for example `[Kick]exec/AllocMem`; older captures
+without `rom_symbols` retain the generic `[Kickstart]` label.
 
 ## Storage overhead
 

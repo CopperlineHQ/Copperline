@@ -22,3 +22,23 @@ and [](cpu.md)). The remaining reference material lives in the repository:
 : The public project overview, including the hardware-first compatibility
   principle: model the chip behaviour instead of branching on individual
   software titles.
+
+## Debugger ABI reference data
+
+The live ROM symbol resolver uses only public ABI names from the AROS module
+configuration files, generated into `assets/symbols/amigaos-lvo.tsv` by
+`tools/generate-amigaos-lvos.py`. The current table is from AROS commit
+`d13e9e537f9e6f53e5fc255899c0e234be5d5ee2`, also pinned in its header;
+`assets/symbols/LICENSE.AROS` carries the AROS Public License 1.1. It contains
+module names, LVO numbers, and public function names, never ROM addresses.
+The generator excludes entries explicitly marked as AROS-only extensions in
+private ABI slots, because those slot numbers are not portable to classic
+Kickstart libraries.
+
+At runtime, Copperline obtains addresses from Exec's active library/device
+lists and their negative `JMP abs.l` vectors, and obtains other ROM module
+names and bounds from the live resident-tag list. This is intentionally the
+entire address model: no Kickstart checksum/address map or undocumented
+private-entry byte signature is accepted. A documented private signature can
+be added later as a guarded pattern, but public `RawDoFmt` and `RawPutChar`
+already resolve through their Exec LVOs.

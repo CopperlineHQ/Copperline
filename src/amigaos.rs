@@ -11,6 +11,7 @@
 
 pub mod dos;
 pub mod dump;
+pub mod symbols;
 
 use std::collections::HashMap;
 

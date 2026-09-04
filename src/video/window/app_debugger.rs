@@ -1676,6 +1676,15 @@ impl App {
                 )
             })
         });
+        let rom_symbols = crate::amigaos::symbols::snapshot_on_bus(bus);
+        let top_stalled_pcs = trace
+            .top_stalled_pcs(ui::ANALYZER_TOP_STALLED_PCS)
+            .into_iter()
+            .map(|(pc, cck)| {
+                let symbol = rom_symbols.resolve(pc).map(|symbol| symbol.display_name());
+                (pc, cck, symbol)
+            })
+            .collect();
         ui::FrameAnalyzerView {
             running: !self.paused,
             status,
@@ -1712,7 +1721,7 @@ impl App {
                 cpu_wait_cck: trace.cpu_wait_cck,
                 cpu_wait_by_class: trace.cpu_wait_by_class,
                 cpu_wait_by_kind: trace.cpu_wait_by_kind,
-                top_stalled_pcs: trace.top_stalled_pcs(ui::ANALYZER_TOP_STALLED_PCS),
+                top_stalled_pcs,
                 selected_cpu_wait_code,
             }),
         }

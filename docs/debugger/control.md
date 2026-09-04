@@ -268,6 +268,14 @@ events.unsubscribe {"events":["serial"]}
 - `regs.get` / `regs.set {"reg": "...", "value": ...}`: Read or modify 68k registers. `regs.get` includes exact raw FP0-FP7 plus FPCR/FPSR/FPIAR when an FPU is fitted.
 - `mem.read {"addr": ..., "len": ..., "encoding": "hex"|"base64"}` / `mem.write {"addr": ..., "data": "...", "encoding": "hex"|"base64"}`: Read or modify memory.
 - `disasm {"addr": ..., "count": ...}`: Disassemble instructions at address (default: PC).
+- `symbols.resolve {"addr": ...}`: Resolve one address against the running
+  guest's library/device jump targets and ROM resident modules. The result
+  reports `found` and, when found, the symbol's start, module, name, offset,
+  kind (`lvo` or `resident`), and vector/LVO metadata.
+- `symbols.rom`: Snapshot the actual ROM ranges, resident tags, and named live
+  LVO targets. It walks Exec and reads each `JMP abs.l`, so patched entries and
+  every Kickstart/AROS revision use their current addresses rather than a
+  per-ROM database.
 - `custom.read {"reg": ...}` / `custom.dump`: Query custom chipset registers.
 - `custom.writer {"reg": ...}`: Query last PC and beam cycle that wrote to custom register.
 - `palette.dump {"resource": ...}`: Query active 32-color or 256-color palette; with `resource`, read a guest-registered palette resource (`words` as 12-bit values plus `rgb24`).

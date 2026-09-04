@@ -6362,6 +6362,15 @@ fn console_os_introspection_and_task_catch() {
 }
 
 #[test]
+fn console_who_accepts_a_rom_address() {
+    let mut app = test_app();
+    app.open_console();
+    let out = console_run(&mut app, "WHO F80010");
+    assert!(out.iter().any(|line| line.contains("$00F80010")), "{out:?}");
+    assert!(!out.iter().any(|line| line.contains("usage:")), "{out:?}");
+}
+
+#[test]
 fn console_execbase_dumps_the_scheduler_state() {
     let mut app = test_app();
     app.open_console();

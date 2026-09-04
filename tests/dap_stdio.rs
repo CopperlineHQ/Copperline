@@ -10,6 +10,8 @@
 //! ```sh
 //! cargo test --release --test dap_stdio -- --ignored
 //! ```
+//! Set `COPPERLINE_BLESS_DAP_PROFILE=1` to replace the deterministic CPU
+//! profile golden after reviewing an intentional profiler-format change.
 
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -269,6 +271,31 @@ fn dap_over_stdio_debugs_the_hello_probe_by_source_line() {
     );
     let entry_line = top["line"].as_u64().unwrap();
     assert!(entry_line > 40, "{top}");
+    let rom_frame = frames["stackFrames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|frame| frame["presentationHint"] == "subtle")
+        .unwrap_or_else(|| panic!("no ROM frame in {frames}"));
+    assert!(
+        rom_frame["name"]
+            .as_str()
+            .is_some_and(|name| name.starts_with('[')),
+        "{rom_frame}"
+    );
+    let rom_dis = c.call(
+        "disassemble",
+        json!({
+            "memoryReference": rom_frame["instructionPointerReference"],
+            "instructionCount": 1,
+        }),
+    );
+    assert!(
+        rom_dis["instructions"][0]["symbol"]
+            .as_str()
+            .is_some_and(|name| name.starts_with('[')),
+        "{rom_dis}"
+    );
 
     // Run to the function breakpoint: scale(1).
     c.call("continue", json!({"threadId": 1}));
@@ -423,9 +450,17 @@ fn dap_over_stdio_debugs_the_hello_probe_by_source_line() {
             .any(|node| node["callFrame"]["functionName"] == "[Bus wait]"),
         "{cpu_profile}"
     );
-    let golden: Value =
-        serde_json::from_str(include_str!("golden/hello-one-frame.cpuprofile")).unwrap();
-    assert_eq!(canonical_profile(&cpu_profile), golden);
+    let canonical = canonical_profile(&cpu_profile);
+    if std::env::var_os("COPPERLINE_BLESS_DAP_PROFILE").is_some() {
+        let golden_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/golden/hello-one-frame.cpuprofile");
+        std::fs::write(&golden_path, serde_json::to_vec(&canonical).unwrap()).unwrap();
+        eprintln!("blessed {}", golden_path.display());
+    } else {
+        let golden: Value =
+            serde_json::from_str(include_str!("golden/hello-one-frame.cpuprofile")).unwrap();
+        assert_eq!(canonical, golden);
+    }
     c.call("continue", json!({"threadId": 1}));
     c.wait(
         "the guest's greeting",

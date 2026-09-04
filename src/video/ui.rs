@@ -1903,8 +1903,10 @@ pub struct AnalyzerTraceView {
     pub cpu_wait_cck: u64,
     pub cpu_wait_by_class: [u64; 9],
     pub cpu_wait_by_kind: [u64; 4],
-    /// The instructions that waited longest, `(pc, cck)`, longest first.
-    pub top_stalled_pcs: Vec<(u32, u32)>,
+    /// The instructions that waited longest, `(pc, cck, live ROM symbol)`,
+    /// longest first. The optional name keeps the view useful before Exec
+    /// has initialised its lists and for ordinary program PCs.
+    pub top_stalled_pcs: Vec<(u32, u32, Option<String>)>,
     pub selected_cpu_wait_code: u8,
 }
 
@@ -4305,15 +4307,16 @@ fn draw_cpu_wait_counters(
         if let Some(y) = rows.next() {
             draw_panel_text(frame, x, y, "Top stalled PCs", PANEL_TEXT_HILIGHT, 1, scale);
         }
-        for (pc, cck) in trace.top_stalled_pcs.iter().take(ANALYZER_TOP_STALLED_PCS) {
+        for (pc, cck, symbol) in trace.top_stalled_pcs.iter().take(ANALYZER_TOP_STALLED_PCS) {
             let Some(y) = rows.next() else {
                 break;
             };
+            let address = format!("${pc:08X}");
             draw_panel_text(
                 frame,
                 x,
                 y,
-                &format!("${pc:08X} {cck:>6}"),
+                &format!("{} {cck:>6}", symbol.as_deref().unwrap_or(&address)),
                 PANEL_TEXT,
                 1,
                 scale,

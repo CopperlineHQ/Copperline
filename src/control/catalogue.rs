@@ -512,6 +512,22 @@ fn build() -> Vec<ToolDef> {
             json!({"count": 8}),
         ),
         entry(
+            "symbols.resolve",
+            "Resolve an address through Exec's live library/device jump tables and ROM resident \
+             modules. Returns the exact LVO target or containing module with its offset; live \
+             SetFunction patches are reflected.",
+            object(vec![("addr", addr("Address to resolve"))], &["addr"]),
+            json!({"addr": "0xF81234"}),
+        ),
+        entry(
+            "symbols.rom",
+            "Snapshot the current ROM ranges, resident modules, and every named target in the \
+             active AmigaOS library/device jump tables. Addresses come from the running guest, \
+             not a per-ROM database.",
+            no_params(),
+            json!({}),
+        ),
+        entry(
             "custom.dump",
             "Dump the custom chip register file ($DFF000-$DFF1FE) as name/offset/value \
              entries: DMACON, INTENA, BPLCON0, COPxLC, sprite and audio pointers, and the \

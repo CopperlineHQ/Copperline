@@ -1417,7 +1417,7 @@ fn cpu_wait_view_lights_denied_slots_and_dims_the_rest() {
         cpu_wait_cck: 1,
         cpu_wait_by_class: [0, 1, 0, 0, 0, 0, 0, 0, 0],
         cpu_wait_by_kind: [1, 0, 0, 0],
-        top_stalled_pcs: vec![(0x1000, 1)],
+        top_stalled_pcs: vec![(0x1000, 1, None)],
         selected_cpu_wait_code: b'B',
     };
     let pixel = |frame: &[u8], x: usize, y: usize| -> [u8; 4] {
@@ -1494,7 +1494,7 @@ fn cpu_wait_counters_stop_at_the_column_bottom() {
         cpu_wait_by_class: [1, 2, 3, 4, 5, 6, 7, 8, 9],
         cpu_wait_by_kind: [10, 11, 12, 12],
         top_stalled_pcs: (0..ANALYZER_TOP_STALLED_PCS as u32)
-            .map(|i| (0x1000 + i * 2, 100 - i))
+            .map(|i| (0x1000 + i * 2, 100 - i, None))
             .collect(),
         selected_cpu_wait_code: b'.',
     };
@@ -2578,7 +2578,11 @@ fn panels_render_into_their_rects() {
         cpu_wait_cck: 6420,
         cpu_wait_by_class: [0, 5016, 0, 0, 0, 0, 1080, 324, 0],
         cpu_wait_by_kind: [3900, 1800, 720, 0],
-        top_stalled_pcs: vec![(0x0002_1A3C, 2140), (0x0002_1A40, 1690), (0x0002_0F10, 610)],
+        top_stalled_pcs: vec![
+            (0x0002_1A3C, 2140, Some("[exec] AllocMem".into())),
+            (0x0002_1A40, 1690, None),
+            (0x0002_0F10, 610, None),
+        ],
         selected_cpu_wait_code: b'B',
     };
     let data = PanelViewData::FrameAnalyzer(Box::new(FrameAnalyzerView {

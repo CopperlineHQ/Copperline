@@ -13816,6 +13816,30 @@ fn motherboard_ram_reaches_the_debugger_helpers() {
         .contains(&(base, 1024 * 1024_u32)));
 }
 
+#[test]
+fn a1000_wcs_reaches_debugger_reads_and_rom_symbols() {
+    let mut bus = empty_bus();
+    bus.mem
+        .rom
+        .truncate((crate::memory::WCS_BASE - crate::memory::ROM_BASE) as usize);
+    bus.mem.wcs = vec![0u8; crate::memory::WCS_SIZE];
+    bus.mem.wcs[0x20] = 0x4E;
+    bus.mem.wcs[0x21] = 0xF9;
+    assert_eq!(
+        bus.peek_word_any(crate::memory::WCS_BASE as u32 + 0x20),
+        0x4EF9
+    );
+    assert!(bus.searchable_regions().contains(&(
+        crate::memory::WCS_BASE as u32,
+        crate::memory::WCS_SIZE as u32
+    )));
+    let symbols = crate::amigaos::symbols::snapshot_on_bus(&bus);
+    assert!(symbols.is_rom_address(crate::memory::WCS_BASE as u32));
+    assert!(
+        symbols.is_rom_address(crate::memory::WCS_BASE as u32 + crate::memory::WCS_SIZE as u32 - 1)
+    );
+}
+
 /// A debugger pattern search sweeps the decoded map, so it must offer the
 /// RAM banks that sit past the 24-bit space -- the Ramsey motherboard
 /// bank, the CPU-slot accelerator bank, and Zorro III boards -- alongside

@@ -52,7 +52,10 @@ count. Copperline records source-mapped instruction call stacks and opens the
 resulting `.cpuprofile` in VS Code. Profiles separate each function's CPU work
 from a `[Bus wait]` child showing chip-DMA contention; register snapshots and
 IRQ level/vector metadata remain in the capture directory returned by the
-adapter.
+adapter. Kickstart and AROS call-stack frames, disassembly, and profiles are
+named from the running guest's live library/device vectors (for example,
+`[exec] AllocMem+$12` and `[Kick]exec/AllocMem`); no matching ROM ELF is
+required.
 
 To attach to an emulator you started yourself:
 

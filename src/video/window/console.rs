@@ -215,7 +215,7 @@ const CONSOLE_HELP: &[&str] = &[
     "            writer ADDR   dbgres",
     "            history/h [N]   stack/bt",
     "os:         tasks  task [ADDR|NAME]  execbase  memlist  segments",
-    "            libs  devs  resources  ports  guru [CODE]",
+    "            libs  devs  resources  ports  who ADDR  guru [CODE]",
     "hunt:       hunt start [B|W]  hunt eq/ne/lt/gt VAL  hunt same|diff  hunt list",
     "modify:     poke ADDR VAL   setreg REG VAL   trace start [PATH]|stop",
     "waveform:   wave start [PATH] [TRIGGER] [DURATION] [SIGNALS]   wave stop   wave",
@@ -588,6 +588,12 @@ impl App {
             }
             "PORTS" => ConsoleOutcome::lines(self.console_os_list(crate::amigaos::OsList::Ports)),
             "SEGMENTS" => ConsoleOutcome::lines(self.console_segments()),
+            "WHO" => {
+                let Some(addr) = args.first().and_then(|token| hex32(token)) else {
+                    return ConsoleOutcome::error("usage: WHO ADDR (hex)");
+                };
+                ConsoleOutcome::lines(self.console_who(addr))
+            }
             "DBGRES" => ConsoleOutcome::lines(self.console_debug_resources()),
             "CATCHTASK" => {
                 if args.is_empty() {
@@ -1365,6 +1371,23 @@ impl App {
                 ));
                 lines
             }
+        }
+    }
+
+    /// WHO: resolve an address through the current Exec lists and ROM
+    /// residents. This deliberately uses no ROM-version address table.
+    fn console_who(&self, addr: u32) -> Vec<String> {
+        let snapshot = crate::amigaos::symbols::snapshot_on_bus(self.emu.bus());
+        match snapshot.resolve(addr) {
+            Some(symbol) => vec![format!(
+                "${addr:08X}  {} (symbol ${:08X})",
+                symbol.display_name(),
+                symbol.address
+            )],
+            None if snapshot.is_rom_address(addr) => {
+                vec![format!("${addr:08X}  ROM (no named resident or live LVO)")]
+            }
+            None => vec![format!("${addr:08X}  no live AmigaOS symbol")],
         }
     }
 

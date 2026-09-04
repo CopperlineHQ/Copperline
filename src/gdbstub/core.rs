@@ -664,6 +664,24 @@ impl GdbCore {
             )),
             "custom" => Ok(self.monitor_custom(emu)),
             "segments" => Ok(self.monitor_segments(emu)),
+            "who" => {
+                let Some(addr) = parts.next() else {
+                    return Ok("usage: monitor who ADDR\n".to_string());
+                };
+                let addr = parse_hex_u32(addr)?;
+                let snapshot = crate::amigaos::symbols::snapshot_on_bus(emu.bus());
+                Ok(match snapshot.resolve(addr) {
+                    Some(symbol) => format!(
+                        "${addr:08X} {} (symbol ${:08X})\n",
+                        symbol.display_name(),
+                        symbol.address
+                    ),
+                    None if snapshot.is_rom_address(addr) => {
+                        format!("${addr:08X} ROM (no named resident or live LVO)\n")
+                    }
+                    None => format!("${addr:08X} no live AmigaOS symbol\n"),
+                })
+            }
             "execbase" => Ok(self.monitor_os(emu, crate::amigaos::dump::exec)),
             "tasks" => Ok(self.monitor_os(emu, crate::amigaos::dump::task_list)),
             "task" => {
@@ -1003,6 +1021,7 @@ pub(crate) fn monitor_help() -> String {
      copper [auto|pc|ADDR] [COUNT]\n\
      last-writer ADDR\n\
      segments\n\
+     who ADDR\n\
      execbase | tasks | task [ADDR|NAME] | memlist\n\
      loadseg-break | loadseg-list\n"
         .to_string()
@@ -1110,6 +1129,16 @@ mod tests {
         assert_eq!(console.len(), 1);
         assert!(console[0].contains("segments"), "help text: {}", console[0]);
         assert!(core.take_console().is_empty(), "take_console drains");
+        Ok(())
+    }
+
+    #[test]
+    fn monitor_who_accepts_a_rom_address() -> Result<()> {
+        let mut emu = crate::gdbstub::testkit::emulator_with_loadseg_program();
+        let mut core = GdbCore::new(&emu, None);
+        let output = core.handle_monitor(&mut emu, "who F80010")?;
+        assert!(output.contains("$00F80010"), "{output}");
+        assert!(monitor_help().contains("who ADDR"));
         Ok(())
     }
 
