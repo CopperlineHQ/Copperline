@@ -9,6 +9,7 @@ use super::breaks::{self, BreakTable};
 use super::proto::Request;
 use super::vars::{self, GuestMem, Node, VarStore};
 use super::{eval, Emit, Msg};
+use crate::amigaos::symbols::SymbolSnapshot;
 use crate::control::bridge::{self, Bridge, LaunchSpec, Launched, Reply};
 use crate::control::proto;
 use crate::debuginfo::unwind::{self, Frame, Registers};
@@ -1696,13 +1697,14 @@ impl Session {
         self.ensure_frames()?;
         let start = args["startFrame"].as_u64().unwrap_or(0) as usize;
         let levels = args["levels"].as_u64().unwrap_or(0) as usize;
+        let rom_symbols = self.rom_symbols();
         let mut out = Vec::new();
         for (i, frame) in self.frames.iter().enumerate().skip(start) {
             if levels > 0 && out.len() >= levels {
                 break;
             }
             let lookup = vars::lookup_pc(frame, i);
-            let name = self.frame_name(frame.pc, lookup);
+            let name = self.frame_name(frame.pc, lookup, &rom_symbols);
             let mut v = json!({
                 "id": FRAME_ID_BASE + i as i64,
                 "name": name,
@@ -1737,7 +1739,7 @@ impl Session {
         Ok(json!({"stackFrames": out, "totalFrames": self.frames.len()}))
     }
 
-    fn frame_name(&self, pc: u32, lookup: u32) -> String {
+    fn frame_name(&self, pc: u32, lookup: u32, rom_symbols: &SymbolSnapshot) -> String {
         if let Some(info) = &self.info {
             if let Some(f) = info.function_at(lookup) {
                 return f.name.trim_start_matches('_').to_string();
@@ -1751,7 +1753,20 @@ impl Session {
                 };
             }
         }
+        if let Some(symbol) = rom_symbols
+            .resolve(lookup)
+            .or_else(|| (lookup != pc).then(|| rom_symbols.resolve(pc)).flatten())
+        {
+            return symbol.display_name();
+        }
         format!("0x{pc:06X}")
+    }
+
+    fn rom_symbols(&self) -> SymbolSnapshot {
+        self.call("symbols.rom", json!({}))
+            .ok()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default()
     }
 
     /// The DAP `Source`, line and column for an address.
@@ -2130,10 +2145,11 @@ impl Session {
             .as_u64()
             .unwrap_or(0)
             .min(DISASSEMBLE_CAP as u64) as usize;
+        let rom_symbols = self.rom_symbols();
         let mut out: Vec<Value> = Vec::new();
         if instruction_offset < 0 {
             let back = instruction_offset.unsigned_abs() as usize;
-            let before = self.disassemble_before(reference, back)?;
+            let before = self.disassemble_before(reference, back, &rom_symbols)?;
             // Pad the front when fewer than asked could be recovered,
             // with placeholder entries below the earliest real one.
             let first = before
@@ -2167,11 +2183,18 @@ impl Session {
             else {
                 continue;
             };
+            let mut program_symbol = false;
             if let Some(info) = &self.info {
                 if let Some((sym, off)) = info.symbol_at(addr) {
                     if off == 0 {
                         entry["symbol"] = Value::from(sym.name.clone());
+                        program_symbol = true;
                     }
+                }
+            }
+            if !program_symbol {
+                if let Some(symbol) = rom_symbols.resolve(addr) {
+                    entry["symbol"] = Value::from(symbol.display_name());
                 }
             }
             if let Some((source, line, _)) = self.source_at(addr) {
@@ -2236,8 +2259,13 @@ impl Session {
     /// Up to `back` instructions ending exactly at `reference`, found
     /// by disassembling forward from the nearest known instruction
     /// boundary (a function or symbol start) below it.
-    fn disassemble_before(&mut self, reference: u32, back: usize) -> Result<Vec<Value>, String> {
-        let anchor = self.info.as_ref().and_then(|info| {
+    fn disassemble_before(
+        &mut self,
+        reference: u32,
+        back: usize,
+        rom_symbols: &SymbolSnapshot,
+    ) -> Result<Vec<Value>, String> {
+        let program_anchor = self.info.as_ref().and_then(|info| {
             let f = info.function_at(reference).and_then(|f| info.runtime(f.at));
             let s = info
                 .symbol_at(reference)
@@ -2247,6 +2275,11 @@ impl Session {
                 (a, b) => a.or(b),
             }
         });
+        let rom_anchor = rom_symbols.resolve(reference).map(|symbol| symbol.address);
+        let anchor = match (program_anchor, rom_anchor) {
+            (Some(program), Some(rom)) => Some(program.max(rom)),
+            (a, b) => a.or(b),
+        };
         let Some(anchor) = anchor.filter(|a| *a < reference) else {
             return Ok(Vec::new());
         };

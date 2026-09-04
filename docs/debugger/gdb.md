@@ -98,10 +98,16 @@ Copper disassembly, and Exec structures:
 (gdb) monitor beam-trap 100 40 # Break when beam reaches VPOS 100, HPOS 40
 (gdb) monitor copper-break C01000 # Break when Copper PC reaches address
 (gdb) monitor segments         # List loaded hunk segments for current process
+(gdb) monitor who F81234       # Name a live ROM/LVO address and offset
 (gdb) monitor tasks            # List Exec ready, waiting, and active tasks
 (gdb) monitor memlist          # List Exec memory allocations
 (gdb) monitor return-to-program # Run until PC leaves $F80000-$FFFFFF
 ```
+
+`monitor who` reads the running guest's Exec library and device vectors, so it
+follows `SetFunction()` patches and does not depend on the Kickstart version.
+Addresses not reached through a public vector are identified by their
+containing ROM resident module when possible.
 
 In windowed mode (`--gdb-gui`), `monitor warp on|off|status` controls the GDB
 client's warp hold, running unthrottled with audio muted until that hold is

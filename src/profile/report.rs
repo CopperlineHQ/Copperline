@@ -85,6 +85,7 @@ struct Node {
 
 struct ProfileBuilder<'a> {
     debug: &'a crate::debuginfo::DebugInfo,
+    rom_symbols: &'a crate::amigaos::symbols::SymbolSnapshot,
     base: Option<u32>,
     source_map: &'a [(String, String)],
     format: ReportFormat,
@@ -100,12 +101,14 @@ struct ProfileBuilder<'a> {
 impl<'a> ProfileBuilder<'a> {
     fn new(
         debug: &'a crate::debuginfo::DebugInfo,
+        rom_symbols: &'a crate::amigaos::symbols::SymbolSnapshot,
         base: Option<u32>,
         source_map: &'a [(String, String)],
         format: ReportFormat,
     ) -> Self {
         Self {
             debug,
+            rom_symbols,
             base,
             source_map,
             format,
@@ -173,11 +176,7 @@ impl<'a> ProfileBuilder<'a> {
                 column: 0,
             }];
         }
-        if sample
-            .pcs
-            .first()
-            .is_some_and(|pc| (0x00f8_0000..0x0100_0000).contains(pc))
-        {
+        if sample.pcs.first().is_some_and(|pc| self.is_rom_pc(*pc)) {
             let mut locations: Vec<_> = last_stack
                 .iter()
                 .filter(|location| !location.url.is_empty())
@@ -204,7 +203,7 @@ impl<'a> ProfileBuilder<'a> {
         let mut locations = Vec::with_capacity(sample.pcs.len());
         for (index, &stored_pc) in sample.pcs.iter().enumerate().rev() {
             let mut pc = self.runtime_pc(stored_pc);
-            if index != 0 && !(0x00f8_0000..0x0100_0000).contains(&pc) {
+            if index != 0 && !self.is_rom_pc(pc) {
                 pc = pc.wrapping_sub(2);
             }
             locations.extend(self.locations_for_pc(pc));
@@ -213,8 +212,7 @@ impl<'a> ProfileBuilder<'a> {
     }
 
     fn runtime_pc(&self, stored_pc: u32) -> u32 {
-        if (0x00f8_0000..0x0100_0000).contains(&stored_pc) || self.debug.locate(stored_pc).is_some()
-        {
+        if self.is_rom_pc(stored_pc) || self.debug.locate(stored_pc).is_some() {
             return stored_pc;
         }
         let hunk0_size = self.debug.hunks.first().map_or(0, |hunk| hunk.size);
@@ -227,7 +225,15 @@ impl<'a> ProfileBuilder<'a> {
     }
 
     fn locations_for_pc(&self, pc: u32) -> Vec<Location> {
-        if (0x00f8_0000..0x0100_0000).contains(&pc) {
+        if let Some(symbol) = self.rom_symbols.resolve(pc) {
+            return vec![Location {
+                function: symbol.profile_name(),
+                url: String::new(),
+                line: 0,
+                column: 0,
+            }];
+        }
+        if self.is_rom_pc(pc) {
             return vec![Location {
                 function: "[Kickstart]".into(),
                 url: String::new(),
@@ -304,6 +310,11 @@ impl<'a> ProfileBuilder<'a> {
             });
         }
         locations
+    }
+
+    fn is_rom_pc(&self, pc: u32) -> bool {
+        self.rom_symbols.is_rom_address(pc)
+            || (self.rom_symbols.rom_ranges.is_empty() && (0x00f8_0000..0x0100_0000).contains(&pc))
     }
 
     fn add_weight(&mut self, stack: &[Location], cck: u32) {
@@ -395,6 +406,8 @@ pub fn generate(options: &ReportOptions) -> Result<Vec<PathBuf>, String> {
     )
     .map_err(|e| format!("profile.json: {e}"))?;
     let registers = summary["options"]["registers"].as_bool().unwrap_or(false);
+    let rom_symbols: crate::amigaos::symbols::SymbolSnapshot =
+        serde_json::from_value(summary["rom_symbols"].clone()).unwrap_or_default();
     let unwind_base = summary["sampling"]["unwind_base"]
         .as_u64()
         .and_then(|base| u32::try_from(base).ok());
@@ -428,8 +441,13 @@ pub fn generate(options: &ReportOptions) -> Result<Vec<PathBuf>, String> {
         let mut outputs = Vec::with_capacity(frames.len());
         let mut occurrences = HashMap::<u64, u64>::new();
         for frame in &frames {
-            let mut builder =
-                ProfileBuilder::new(&debug, base, &options.source_map, options.format);
+            let mut builder = ProfileBuilder::new(
+                &debug,
+                &rom_symbols,
+                base,
+                &options.source_map,
+                options.format,
+            );
             builder.add_frame(frame);
             let value = builder.finish(&[frame.frame]);
             let occurrence = occurrences.entry(frame.frame).or_default();
@@ -440,7 +458,13 @@ pub fn generate(options: &ReportOptions) -> Result<Vec<PathBuf>, String> {
         }
         Ok(outputs)
     } else {
-        let mut builder = ProfileBuilder::new(&debug, base, &options.source_map, options.format);
+        let mut builder = ProfileBuilder::new(
+            &debug,
+            &rom_symbols,
+            base,
+            &options.source_map,
+            options.format,
+        );
         for frame in &frames {
             builder.add_frame(frame);
         }
@@ -583,7 +607,14 @@ mod tests {
             },
         ];
         debug.relocate(vec![0x1000, 0x3000]);
-        let builder = ProfileBuilder::new(&debug, Some(0x1000), &[], ReportFormat::Chrome);
+        let rom_symbols = crate::amigaos::symbols::SymbolSnapshot::default();
+        let builder = ProfileBuilder::new(
+            &debug,
+            &rom_symbols,
+            Some(0x1000),
+            &[],
+            ReportFormat::Chrome,
+        );
         assert_eq!(builder.runtime_pc(4), 0x1004);
         assert_eq!(builder.runtime_pc(0x3004), 0x3004);
     }
@@ -642,7 +673,14 @@ mod tests {
             },
         ];
         debug.relocate(vec![0x1000]);
-        let builder = ProfileBuilder::new(&debug, Some(0x1000), &[], ReportFormat::Chrome);
+        let rom_symbols = crate::amigaos::symbols::SymbolSnapshot::default();
+        let builder = ProfileBuilder::new(
+            &debug,
+            &rom_symbols,
+            Some(0x1000),
+            &[],
+            ReportFormat::Chrome,
+        );
         let locations = builder.locations_for_pc(0x1020);
         assert_eq!(
             locations[0],
@@ -670,6 +708,41 @@ mod tests {
                 line: 299,
                 column: 6
             }
+        );
+    }
+
+    #[test]
+    fn live_rom_symbols_name_profile_locations() {
+        let debug = crate::debuginfo::DebugInfo::default();
+        let rom_symbols = crate::amigaos::symbols::SymbolSnapshot {
+            version: 1,
+            rom_ranges: vec![crate::amigaos::symbols::RomRange {
+                base: 0x00F8_0000,
+                size: 0x80000,
+            }],
+            residents: vec![crate::amigaos::symbols::ResidentModule {
+                tag: 0x00F8_0000,
+                end: 0x00F8_4000,
+                name: "exec.library".into(),
+                id: String::new(),
+                flags: 0,
+                version: 40,
+                node_type: 9,
+                priority: 0,
+                init: 0,
+            }],
+            symbols: vec![crate::amigaos::symbols::LiveSymbol {
+                address: 0x00F8_1000,
+                module: "exec.library".into(),
+                name: "AllocMem".into(),
+                lvo: 33,
+                vector: 0x1000,
+            }],
+        };
+        let builder = ProfileBuilder::new(&debug, &rom_symbols, None, &[], ReportFormat::Chrome);
+        assert_eq!(
+            builder.locations_for_pc(0x00F8_1012)[0].function,
+            "[Kick]exec/AllocMem"
         );
     }
 

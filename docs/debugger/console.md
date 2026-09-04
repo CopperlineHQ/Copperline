@@ -110,6 +110,7 @@ Commands are case-insensitive. Addresses and data values use hexadecimal notatio
 | `DEVS` (or `DEVICES`) | List active device drivers |
 | `RESOURCES`, `PORTS` | List Exec resources and public message ports |
 | `SEGMENTS` | Display loaded hunk segments for current CLI process |
+| `WHO ADDR` | Resolve an address through live library/device LVO targets and ROM resident modules (for example, `[exec] AllocMem+$12`) |
 | `CATCHTASK NAME` | Break when Exec schedules a task matching `NAME` |
 | `CATCHALERT` | Break on `exec.library/Alert()` (Guru Meditation) calls |
 | `GURU [CODE]` | Decode Guru alert numbers into human-readable descriptions |

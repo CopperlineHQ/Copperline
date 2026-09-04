@@ -662,7 +662,8 @@ impl Emulator {
         }
         let frame = self.bus().emulated_frames();
         let seconds = self.bus().emulated_seconds();
-        let status = capture.finish(machine, resources, frame, seconds)?;
+        let rom_symbols = crate::amigaos::symbols::snapshot_on_bus(self.bus());
+        let status = capture.finish(machine, resources, rom_symbols, frame, seconds)?;
         log::info!(
             "profile: {} frame(s) written to {}",
             status["frames_written"],

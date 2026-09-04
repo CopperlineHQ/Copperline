@@ -160,7 +160,9 @@ width, owner subtype, CPU-visible IPL, and decoded hardware events.
   opcode prefetches; fetch, for immediate and extension words read outside
   the prefetch queue; write; custom register), and the instructions that
   waited longest ("Top stalled PCs": per
-  instruction on the precise CPU loop, per batch under `[cpu] jit`). The
+  instruction on the precise CPU loop, per batch under `[cpu] jit`). A ROM PC
+  is shown with its live LVO or resident name, such as `[exec] AllocMem+$12`,
+  after AmigaOS has initialised the relevant Exec lists. The
   selected-slot line names the denier whenever the selected slot was a CPU
   wait, in either view.
 - **Stall gutter:** the narrow strip right of the heatmap is drawn in both

@@ -393,6 +393,7 @@ impl ProfileCapture {
         &mut self,
         machine: Value,
         resources: Value,
+        rom_symbols: crate::amigaos::symbols::SymbolSnapshot,
         frame: u64,
         seconds: f64,
     ) -> io::Result<Value> {
@@ -429,6 +430,7 @@ impl ProfileCapture {
             })),
             "triggered_at": self.triggered_at,
             "resources": resources,
+            "rom_symbols": rom_symbols,
             "systemStackLower": self.stack_bounds.map(|bounds| bounds.system_lower),
             "systemStackUpper": self.stack_bounds.map(|bounds| bounds.system_upper),
             "stackLower": self.stack_bounds.map(|bounds| bounds.task_lower),
@@ -516,7 +518,15 @@ mod tests {
         // A record past the cap is dropped, not written.
         capture.record(103, &json!({"frame": 103})).unwrap();
         capture.note_reposition(50, 100).unwrap();
-        let status = capture.finish(Value::Null, json!([]), 103, 2.06).unwrap();
+        let status = capture
+            .finish(
+                Value::Null,
+                json!([]),
+                crate::amigaos::symbols::SymbolSnapshot::default(),
+                103,
+                2.06,
+            )
+            .unwrap();
         assert_eq!(status["frames_written"], 2);
         assert_eq!(status["done"], true);
 
@@ -529,6 +539,7 @@ mod tests {
         assert_eq!(summary["version"], 1);
         assert_eq!(summary["owners"][6], "blitter");
         assert_eq!(summary["started"]["frame"], 100);
+        assert_eq!(summary["rom_symbols"]["version"], 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

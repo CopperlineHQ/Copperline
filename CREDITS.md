@@ -31,6 +31,11 @@ Thank you to:
 
 ## Bundled third-party code
 
+- **[AROS](https://github.com/aros-development-team/AROS)** public module
+  configuration files provide the library/device LVO names used by the live
+  ROM symbol resolver. The compact generated ABI table records its exact
+  source revision and is distributed under the AROS Public License 1.1; the
+  notice and license are kept in `assets/symbols/`.
 - **[plmpeg](https://github.com/CopperlineHQ/plmpeg-rs)** provides the safe,
   pure-Rust incremental MPEG-1 video decoder used by the CD32 Full Motion
   Video module. Its reconstruction core descends from Native32Emu's
