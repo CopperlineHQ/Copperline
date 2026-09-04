@@ -8809,6 +8809,9 @@ impl Bus {
         if !self.mem.rom.is_empty() {
             regions.push((crate::memory::ROM_BASE as u32, self.mem.rom.len() as u32));
         }
+        if !self.mem.wcs.is_empty() {
+            regions.push((crate::memory::WCS_BASE as u32, self.mem.wcs.len() as u32));
+        }
         if !self.mem.extended_rom.is_empty() {
             regions.push((
                 self.mem.extended_rom_base as u32,
@@ -8823,10 +8826,10 @@ impl Bus {
     }
 
     /// Read a 16-bit big-endian word from whichever RAM/ROM region maps
-    /// `addr` (chip, fast, slow, motherboard, accelerator, or ROM), for the
+    /// `addr` (chip, fast, slow, motherboard, accelerator, ROM, or WCS), for the
     /// debugger's memory dumps. Returns 0 for unmapped addresses.
     pub fn peek_word_any(&self, addr: u32) -> u16 {
-        use crate::memory::{ACCEL_RAM_BASE, CHIP_WINDOW_SIZE, ROM_BASE, SLOW_RAM_BASE};
+        use crate::memory::{ACCEL_RAM_BASE, CHIP_WINDOW_SIZE, ROM_BASE, SLOW_RAM_BASE, WCS_BASE};
         if let Some((board, off)) = self.mem.zorro.region_at(addr, 2) {
             let ram = self.mem.zorro.board_ram(board);
             return ((ram[off] as u16) << 8) | ram[off + 1] as u16;
@@ -8853,11 +8856,12 @@ impl Bus {
             }
         }
         let a = addr as usize;
-        let regions: [(usize, &[u8]); 5] = [
+        let regions: [(usize, &[u8]); 6] = [
             (SLOW_RAM_BASE as usize, &self.mem.slow_ram),
             (self.mem.mb_ram_base() as usize, &self.mem.mb_ram),
             (ACCEL_RAM_BASE as usize, &self.mem.accel_ram),
             (ROM_BASE as usize, &self.mem.rom),
+            (WCS_BASE as usize, &self.mem.wcs),
             (self.mem.extended_rom_base as usize, &self.mem.extended_rom),
         ];
         for (base, mem) in regions {

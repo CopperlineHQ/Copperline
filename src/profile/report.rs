@@ -225,21 +225,23 @@ impl<'a> ProfileBuilder<'a> {
     }
 
     fn locations_for_pc(&self, pc: u32) -> Vec<Location> {
-        if let Some(symbol) = self.rom_symbols.resolve(pc) {
-            return vec![Location {
-                function: symbol.profile_name(),
-                url: String::new(),
-                line: 0,
-                column: 0,
-            }];
-        }
-        if self.is_rom_pc(pc) {
-            return vec![Location {
-                function: "[Kickstart]".into(),
-                url: String::new(),
-                line: 0,
-                column: 0,
-            }];
+        if self.debug.locate(pc).is_none() {
+            if let Some(symbol) = self.rom_symbols.resolve(pc) {
+                return vec![Location {
+                    function: symbol.profile_name(),
+                    url: String::new(),
+                    line: 0,
+                    column: 0,
+                }];
+            }
+            if self.is_rom_pc(pc) {
+                return vec![Location {
+                    function: "[Kickstart]".into(),
+                    url: String::new(),
+                    line: 0,
+                    column: 0,
+                }];
+            }
         }
         let function = self
             .debug
@@ -743,6 +745,44 @@ mod tests {
         assert_eq!(
             builder.locations_for_pc(0x00F8_1012)[0].function,
             "[Kick]exec/AllocMem"
+        );
+    }
+
+    #[test]
+    fn program_debug_info_wins_over_a_patched_live_vector() {
+        use crate::debuginfo::{Function, HunkAddr, HunkMeta};
+        let mut debug = crate::debuginfo::DebugInfo::default();
+        debug.hunks = vec![HunkMeta {
+            kind: crate::debuginfo::hunk::HunkKind::Code,
+            size: 0x100,
+        }];
+        debug.functions = vec![Function {
+            name: "patched_entry".into(),
+            at: HunkAddr::new(0, 0),
+            size: 0x100,
+            frame_base: crate::debuginfo::Location::Unsupported,
+            params: Vec::new(),
+            locals: Vec::new(),
+            file: None,
+            line: None,
+        }];
+        debug.relocate(vec![0x2000]);
+        let rom_symbols = crate::amigaos::symbols::SymbolSnapshot {
+            version: 1,
+            rom_ranges: Vec::new(),
+            residents: Vec::new(),
+            symbols: vec![crate::amigaos::symbols::LiveSymbol {
+                address: 0x2000,
+                module: "exec.library".into(),
+                name: "AllocMem".into(),
+                lvo: 33,
+                vector: 0x1000,
+            }],
+        };
+        let builder = ProfileBuilder::new(&debug, &rom_symbols, None, &[], ReportFormat::Chrome);
+        assert_eq!(
+            builder.locations_for_pc(0x2010)[0].function,
+            "patched_entry"
         );
     }
 

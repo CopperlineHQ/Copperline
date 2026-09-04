@@ -31,6 +31,9 @@ configuration files, generated into `assets/symbols/amigaos-lvo.tsv` by
 `d13e9e537f9e6f53e5fc255899c0e234be5d5ee2`, also pinned in its header;
 `assets/symbols/LICENSE.AROS` carries the AROS Public License 1.1. It contains
 module names, LVO numbers, and public function names, never ROM addresses.
+The generator excludes entries explicitly marked as AROS-only extensions in
+private ABI slots, because those slot numbers are not portable to classic
+Kickstart libraries.
 
 At runtime, Copperline obtains addresses from Exec's active library/device
 lists and their negative `JMP abs.l` vectors, and obtains other ROM module

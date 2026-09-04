@@ -22,7 +22,7 @@ const VECTOR_CAP: u32 = 2048;
 
 const RES_MODULES: u32 = 0x12C;
 const RESLIST_JUMP: u32 = 0x8000_0000;
-const RESIDENT_CAP: usize = 512;
+const RESIDENT_SLOT_CAP: usize = 512;
 const RTC_MATCHWORD: u16 = 0x4AFC;
 const RT_MATCH_TAG: u32 = 2;
 const RT_END_SKIP: u32 = 6;
@@ -292,7 +292,9 @@ fn resident_modules(
     let mut slot = (os.peek32)(execbase.wrapping_add(RES_MODULES));
     let mut seen_slots = HashSet::new();
     let mut residents = Vec::new();
-    while slot != 0 && residents.len() < RESIDENT_CAP && seen_slots.insert(slot) {
+    let mut inspected_slots = 0;
+    while slot != 0 && inspected_slots < RESIDENT_SLOT_CAP && seen_slots.insert(slot) {
+        inspected_slots += 1;
         let entry = (os.peek32)(slot);
         if entry == 0 {
             break;
@@ -404,6 +406,12 @@ pub fn snapshot_on_bus(bus: &crate::bus::Bus) -> SymbolSnapshot {
         ranges.push(RomRange {
             base: crate::memory::ROM_BASE as u32,
             size: bus.mem.rom.len() as u32,
+        });
+    }
+    if !bus.mem.wcs.is_empty() {
+        ranges.push(RomRange {
+            base: crate::memory::WCS_BASE as u32,
+            size: bus.mem.wcs.len() as u32,
         });
     }
     if !bus.mem.extended_rom.is_empty() {
@@ -604,6 +612,33 @@ mod tests {
     }
 
     #[test]
+    fn malformed_resident_list_is_bounded_by_slots_inspected() {
+        let mut mem = FakeMem::new();
+        let (exec, list) = (0x400, 0x600);
+        mem.exec(exec);
+        mem.put32(exec + RES_MODULES, list);
+        for index in 0..RESIDENT_SLOT_CAP as u32 {
+            mem.put32(list + index * 4, 0x1000 + index * 2);
+        }
+        let valid_slot = list + RESIDENT_SLOT_CAP as u32 * 4;
+        mem.put32(valid_slot, 0x00F8_0100);
+        mem.put32(valid_slot + 4, 0);
+        mem.resident(0x00F8_0100, 0x00F8_0200, 0x00F8_0180, "too-late.library");
+        mem.list(exec, super::super::LIB_LIST, &[]);
+        mem.list(exec, super::super::DEVICE_LIST, &[]);
+        let snapshot = mem.with_os(|os| {
+            snapshot(
+                os,
+                vec![RomRange {
+                    base: 0x00F8_0000,
+                    size: 0x80000,
+                }],
+            )
+        });
+        assert!(snapshot.residents.is_empty());
+    }
+
+    #[test]
     fn required_abi_tables_are_bundled() {
         let tables = lvo_tables();
         for module in [
@@ -628,5 +663,9 @@ mod tests {
         ] {
             assert!(tables.contains_key(module), "missing {module}");
         }
+        let graphics = &tables["graphics.library"];
+        assert!(!graphics.contains_key(&107));
+        assert!(!graphics.contains_key(&108));
+        assert!(!graphics.contains_key(&181));
     }
 }

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+import subprocess
 import sys
 
 
@@ -69,6 +70,14 @@ TABLES = (
     ("ramdrive.device", "workbench/devs/ramdrive.conf", 7),
 )
 
+# These slots are explicitly identified by the pinned AROS configuration as
+# AROS-specific. They cannot safely name an arbitrary classic AmigaOS vector:
+# graphics 107-108 occupy otherwise unused/private slots, and 181 onward is
+# the AROS extension block in MorphOS-private space.
+AROS_ONLY_LVOS = {
+    "graphics.library": frozenset({107, 108, *range(181, 202)}),
+}
+
 
 def function_rows(path: pathlib.Path, first_lvo: int) -> list[tuple[int, str]]:
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -116,11 +125,17 @@ def main() -> int:
         print(f"not an AROS checkout: {aros}", file=sys.stderr)
         return 2
     try:
-        revision = __import__("subprocess").check_output(
-            ["git", "-C", str(aros), "rev-parse", "HEAD"], text=True
+        revision = subprocess.check_output(
+            ["git", "-C", str(aros), "rev-parse", "--verify", "HEAD"],
+            text=True,
+            stderr=subprocess.STDOUT,
         ).strip()
-    except Exception:
-        revision = "unknown"
+    except (OSError, subprocess.CalledProcessError) as error:
+        print(f"cannot determine AROS Git revision for {aros}: {error}", file=sys.stderr)
+        return 2
+    if not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", revision):
+        print(f"invalid AROS Git revision for {aros}: {revision!r}", file=sys.stderr)
+        return 2
 
     output = pathlib.Path(__file__).resolve().parents[1] / "assets/symbols/amigaos-lvo.tsv"
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -132,6 +147,8 @@ def main() -> int:
     ]
     for module, relative, first_lvo in TABLES:
         for lvo, name in function_rows(aros / relative, first_lvo):
+            if lvo in AROS_ONLY_LVOS.get(module, ()):
+                continue
             rows.append(f"{module}\t{lvo}\t{name}")
     output.write_text("\n".join(rows) + "\n", encoding="utf-8")
     print(f"wrote {output} ({len(rows) - 4} functions)")
