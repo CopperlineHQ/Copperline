@@ -12,7 +12,7 @@ use super::app_session::WarpSource;
 use super::*;
 use crate::control::exec::{
     self, CoreOp, HostOp, Request, ResumeKind, ResumeVerb, RunTarget, StableStep, StableWatch,
-    CCK_FINE_WINDOW, RUN_BUDGET,
+    UiWindow, CCK_FINE_WINDOW, RUN_BUDGET,
 };
 use crate::control::proto::{self, CtlError};
 use crate::control::session::{BreakSpec, InputAction, MachineInputState, SessionCtx};
@@ -330,6 +330,25 @@ impl App {
 
     fn control_dispatch_host(&mut self, id: Value, op: HostOp) {
         match op {
+            HostOp::UiShow { window } => {
+                match window {
+                    UiWindow::Debugger => self.open_debugger(),
+                    UiWindow::Console => self.open_console(),
+                    UiWindow::Analyzer => self.open_frame_analyzer(),
+                }
+                self.request_redraw();
+                self.control_send(proto::ok_line(
+                    &id,
+                    json!({
+                        "window": match window {
+                            UiWindow::Debugger => "debugger",
+                            UiWindow::Console => "console",
+                            UiWindow::Analyzer => "analyzer",
+                        },
+                        "shown": true,
+                    }),
+                ));
+            }
             HostOp::Pause => {
                 let had_pending = self.control_resume_pending();
                 // A GDB continue outstanding on the same window ends here

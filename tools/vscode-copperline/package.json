@@ -2,7 +2,7 @@
   "name": "copperline-debug",
   "displayName": "Copperline Amiga Debug",
   "description": "Debug Amiga programs in the Copperline emulator: source-level stepping, registers, memory, chipset state and reverse execution through copperline-ctl --dap.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "copperline",
   "license": "GPL-3.0-or-later",
   "repository": {
@@ -14,7 +14,8 @@
     "vscode": "^1.85.0"
   },
   "categories": [
-    "Debuggers"
+    "Debuggers",
+    "Extension Packs"
   ],
   "keywords": [
     "amiga",
@@ -24,10 +25,20 @@
     "debugger"
   ],
   "main": "./extension.js",
+  "extensionPack": [
+    "prb28.amiga-assembly"
+  ],
   "activationEvents": [
     "onDebugResolve:copperline",
     "onCommand:copperline.profile",
-    "onCommand:copperline.profileMulti"
+    "onCommand:copperline.profileMulti",
+    "onCommand:copperline.showDebugger",
+    "onCommand:copperline.showConsole",
+    "onCommand:copperline.showAnalyzer",
+    "onCommand:copperline.initProject",
+    "onCommand:copperline.exe2adf",
+    "onCommand:copperline.sizeReport",
+    "onView:copperline.customRegisters"
   ],
   "contributes": {
     "configuration": {
@@ -63,10 +74,66 @@
         "command": "copperline.profileMulti",
         "title": "Copperline: Profile (Multi)",
         "icon": "$(pulse)"
+      },
+      {
+        "command": "copperline.showDebugger",
+        "title": "Copperline: Open Debugger Window",
+        "icon": "$(debug-alt)"
+      },
+      {
+        "command": "copperline.showConsole",
+        "title": "Copperline: Open Console Window",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "copperline.showAnalyzer",
+        "title": "Copperline: Open Frame Analyzer",
+        "icon": "$(inspect)"
+      },
+      {
+        "command": "copperline.refreshCustomRegisters",
+        "title": "Copperline: Refresh Custom Registers",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "copperline.initProject",
+        "title": "Copperline: Init Amiga Project"
+      },
+      {
+        "command": "copperline.exe2adf",
+        "title": "Copperline: Convert EXE to ADF"
+      },
+      {
+        "command": "copperline.sizeReport",
+        "title": "Copperline: Profile File Size"
       }
     ],
+    "views": {
+      "debug": [
+        {
+          "id": "copperline.customRegisters",
+          "name": "Custom Registers",
+          "when": "debugType == copperline"
+        }
+      ]
+    },
     "menus": {
       "debug/toolBar": [
+        {
+          "command": "copperline.showDebugger",
+          "when": "debugType == copperline",
+          "group": "navigation@40"
+        },
+        {
+          "command": "copperline.showConsole",
+          "when": "debugType == copperline",
+          "group": "navigation@41"
+        },
+        {
+          "command": "copperline.showAnalyzer",
+          "when": "debugType == copperline",
+          "group": "navigation@42"
+        },
         {
           "command": "copperline.profile",
           "when": "debugType == copperline",
@@ -76,6 +143,13 @@
           "command": "copperline.profileMulti",
           "when": "debugType == copperline",
           "group": "navigation@51"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "copperline.refreshCustomRegisters",
+          "when": "view == copperline.customRegisters",
+          "group": "navigation"
         }
       ]
     },
@@ -115,6 +189,10 @@
               "config": {
                 "type": "string",
                 "description": "A Copperline TOML configuration file for the machine (default: the launcher's saved default configuration)."
+              },
+              "rom": {
+                "type": "string",
+                "description": "A Kickstart ROM path supplied positionally to Copperline. The bundled AROS ROM is used when omitted."
               },
               "factory": {
                 "type": "boolean",
@@ -285,17 +363,58 @@
             }
           },
           {
-            "label": "Copperline: launch with a machine configuration",
-            "description": "Start Copperline with a TOML configuration and stop at main",
+            "label": "Copperline: A500 KS1.3 512K+512K",
+            "description": "A500, 68000, 512K chip + 512K slow RAM, with a Kickstart 1.3 ROM",
             "body": {
-              "type": "copperline",
-              "request": "launch",
-              "name": "Run ${1:hello} on ${2:A1200}",
-              "program": "^\"\\${workspaceFolder}/${1:hello}\"",
-              "model": "${2:A1200}",
-              "fast": "8M",
-              "entryPoint": "main",
-              "stopOnEntry": true
+              "type": "copperline", "request": "launch", "name": "A500 KS1.3 512K+512K",
+              "program": "^\"\\${workspaceFolder}/${1:demo}\"", "symbolFile": "^\"\\${workspaceFolder}/${1:demo}.elf\"",
+              "rom": "${2:/path/to/kick13.rom}", "model": "A500", "cpu": "68000",
+              "chip": "512K", "slow": "512K", "entryPoint": "main", "stopOnEntry": true
+            }
+          },
+          {
+            "label": "Copperline: A1200",
+            "description": "Stock A1200 preset",
+            "body": {
+              "type": "copperline", "request": "launch", "name": "A1200",
+              "program": "^\"\\${workspaceFolder}/${1:demo}\"", "symbolFile": "^\"\\${workspaceFolder}/${1:demo}.elf\"",
+              "model": "A1200", "entryPoint": "main", "stopOnEntry": true
+            }
+          },
+          {
+            "label": "Copperline: A1200-FAST",
+            "description": "A1200 with 8 MiB fast RAM",
+            "body": {
+              "type": "copperline", "request": "launch", "name": "A1200-FAST",
+              "program": "^\"\\${workspaceFolder}/${1:demo}\"", "symbolFile": "^\"\\${workspaceFolder}/${1:demo}.elf\"",
+              "model": "A1200", "fast": "8M", "entryPoint": "main", "stopOnEntry": true
+            }
+          },
+          {
+            "label": "Copperline: A1200-030",
+            "description": "A1200 with a 68030 and 8 MiB fast RAM",
+            "body": {
+              "type": "copperline", "request": "launch", "name": "A1200-030",
+              "program": "^\"\\${workspaceFolder}/${1:demo}\"", "symbolFile": "^\"\\${workspaceFolder}/${1:demo}.elf\"",
+              "model": "A1200", "cpu": "68030", "fast": "8M", "entryPoint": "main", "stopOnEntry": true
+            }
+          },
+          {
+            "label": "Copperline: A3000",
+            "description": "Stock A3000 preset",
+            "body": {
+              "type": "copperline", "request": "launch", "name": "A3000",
+              "program": "^\"\\${workspaceFolder}/${1:demo}\"", "symbolFile": "^\"\\${workspaceFolder}/${1:demo}.elf\"",
+              "model": "A3000", "entryPoint": "main", "stopOnEntry": true
+            }
+          },
+          {
+            "label": "Copperline: A4000",
+            "description": "Stock A4000 preset",
+            "body": {
+              "type": "copperline", "request": "launch", "name": "A4000",
+              "program": "^\"\\${workspaceFolder}/${1:demo}\"", "symbolFile": "^\"\\${workspaceFolder}/${1:demo}.elf\"",
+              "model": "A4000", "entryPoint": "main", "stopOnEntry": true
             }
           },
           {

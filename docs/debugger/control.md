@@ -268,6 +268,9 @@ events.unsubscribe {"events":["serial"]}
 - `regs.get` / `regs.set {"reg": "...", "value": ...}`: Read or modify 68k registers. `regs.get` includes exact raw FP0-FP7 plus FPCR/FPSR/FPIAR when an FPU is fitted.
 - `mem.read {"addr": ..., "len": ..., "encoding": "hex"|"base64"}` / `mem.write {"addr": ..., "data": "...", "encoding": "hex"|"base64"}`: Read or modify memory.
 - `disasm {"addr": ..., "count": ...}`: Disassemble instructions at address (default: PC).
+  Every line includes `cycles_min` and `cycles_max`, evaluated through the
+  selected 68000-family core's generation-specific timing path. These are
+  theoretical CPU cycles; precise profiles additionally measure bus contention.
 - `symbols.resolve {"addr": ...}`: Resolve one address against the running
   guest's library/device jump targets and ROM resident modules. The result
   reports `found` and, when found, the symbol's start, module, name, offset,
@@ -277,6 +280,9 @@ events.unsubscribe {"events":["serial"]}
   every Kickstart/AROS revision use their current addresses rather than a
   per-ROM database.
 - `custom.read {"reg": ...}` / `custom.dump`: Query custom chipset registers.
+  `custom.dump.regs` is the compact name/value map; `registers` adds offset,
+  access direction, chipset availability, summary, and the shared
+  [Markdown register page](../reference/custom-registers/index.md).
 - `custom.writer {"reg": ...}`: Query last PC and beam cycle that wrote to custom register.
 - `palette.dump {"resource": ...}`: Query active 32-color or 256-color palette; with `resource`, read a guest-registered palette resource (`words` as 12-bit values plus `rgb24`).
 - `cia.get {"cia": "a"|"b"}`: Query CIA-A or CIA-B timer, port, and interrupt states.
@@ -312,6 +318,12 @@ events.unsubscribe {"events":["serial"]}
   HPOS execution slot.
 - `pc_history`: Return recently executed instruction addresses.
 - `segments.list`: The hunk segments (`current`: `{start, size}` per hunk, first hunk first) of the program the scheduled process is running, and every program an armed `loadseg` catch has seen loaded (`modules`). At a `loadseg` stop, `current` is the just-loaded program: the addresses to relocate its symbols and debug information by.
+
+### Windowed UI
+
+- `ui.show {"window": "debugger"|"console"|"analyzer"}`: Open or focus one of
+  Copperline's native tool windows. This is available only from a windowed
+  `--control-gui` session; a headless server returns an unsupported error.
 
 ### Diagnostics and profiling
 - `chipset.validate {"enabled": ..., "clear": ...}` / `chipset.report`: Arm or query custom register access validator.

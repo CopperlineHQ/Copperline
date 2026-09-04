@@ -270,12 +270,17 @@ pub fn chipset(bridge: &Bridge) -> Vec<Value> {
         }
     }
     if let Ok(Reply::Ok(dump)) = bridge.call("custom.dump", json!({})) {
-        if let Some(regs) = dump["regs"].as_object() {
-            for (name, value) in regs {
-                let v = value.as_u64().unwrap_or(0);
+        if let Some(regs) = dump["registers"].as_array() {
+            for register in regs {
+                let v = register["value"].as_u64().unwrap_or(0);
                 out.push(json!({
-                    "name": name,
+                    "name": register["name"],
                     "value": format!("0x{v:04X}"),
+                    "offset": register["offset"],
+                    "access": register["access"],
+                    "chipset": register["chipset"],
+                    "description": register["summary"],
+                    "documentation": register["documentation"],
                     "variablesReference": 0,
                     "presentationHint": {"attributes": ["readOnly"]},
                 }));

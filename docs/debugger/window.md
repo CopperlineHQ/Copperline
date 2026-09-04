@@ -61,6 +61,11 @@ Hexadecimal and ASCII memory dump viewer (256 bytes per page).
   stride.
 
 ### IO Map
+
+The selected register includes access direction, chipset availability, and a
+summary from the checked-in [custom-register Markdown catalogue](../reference/custom-registers/index.md).
+The console, control protocol, DAP Chipset scope, and VS Code Custom Registers
+tree consume the same generated table.
 Interactive memory map of custom chipset registers (`$DFF000` - `$DFF1FE`).
 Selecting a register decodes its individual bitfields (e.g. `DMACON`, `INTENA`,
 `BPLCON0`, `ADKCON`).

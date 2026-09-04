@@ -37,6 +37,7 @@ pub mod control;
 pub mod copperhf;
 pub mod cpu;
 pub mod crashlog;
+pub mod customregs;
 pub mod debugger;
 // Guest debug information (hunk symbols, LINE debug hunks, DWARF) for the
 // DAP adapter. Pure parsing over host files; gated with the adapter.

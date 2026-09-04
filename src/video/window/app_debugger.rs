@@ -2707,6 +2707,12 @@ impl App {
                         lines.push(ui::DbgLine::plain(format!("  {line}")));
                     }
                 }
+                if let Some(doc) = crate::customregs::by_offset(off) {
+                    lines.push(ui::DbgLine::plain(format!(
+                        "  {} | {} | {}",
+                        doc.access, doc.chipset, doc.summary
+                    )));
+                }
             }
             ui::DebugTab::Break => {
                 // Leave room for the toggle buttons drawn at the top of

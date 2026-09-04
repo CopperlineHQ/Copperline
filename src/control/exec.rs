@@ -571,6 +571,12 @@ impl StableWatch {
 /// restore, and reset.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HostOp {
+    /// Open one of the desktop frontend's native tool windows. Headless
+    /// drivers reject this explicitly; the control layer never creates a
+    /// second UI for the same state.
+    UiShow {
+        window: UiWindow,
+    },
     Pause,
     Resume(ResumeVerb),
     Input(InputCmd),
@@ -636,6 +642,14 @@ pub enum HostOp {
         tolerance: i32,
         max_frames: u32,
     },
+}
+
+/// Native desktop tool windows addressable through `ui.show`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiWindow {
+    Debugger,
+    Console,
+    Analyzer,
 }
 
 /// A resume-type command: the machine runs and the JSON-RPC response is
@@ -865,6 +879,18 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
     let host = |op: HostOp| Ok(Request::Host(op));
     match method {
         "status" => core(CoreOp::Status),
+        "ui.show" => host(HostOp::UiShow {
+            window: match p.str_req("window")?.as_str() {
+                "debugger" => UiWindow::Debugger,
+                "console" => UiWindow::Console,
+                "analyzer" => UiWindow::Analyzer,
+                other => {
+                    return Err(CtlError::invalid_params(format!(
+                        "window must be debugger|console|analyzer, got {other}"
+                    )))
+                }
+            },
+        }),
         "pause" => host(HostOp::Pause),
         "continue" => resume(ResumeKind::Continue, &p),
         "step" => resume(
@@ -2105,7 +2131,14 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             for _ in 0..*count {
                 let (text, len) =
                     crate::disasm::disassemble(|a| bus.peek_word_any(a), pc, cpu_type);
-                lines.push(json!({"addr": pc, "text": text, "len": len}));
+                let cycles =
+                    crate::disasm::theoretical_cycles(|a| bus.peek_word_any(a), pc, cpu_type, len);
+                let mut line = json!({"addr": pc, "text": text, "len": len});
+                if let Some((minimum, maximum)) = cycles {
+                    line["cycles_min"] = Value::from(minimum);
+                    line["cycles_max"] = Value::from(maximum);
+                }
+                lines.push(line);
                 pc = pc.wrapping_add(len);
             }
             Ok(json!({"lines": lines}))
@@ -2122,12 +2155,25 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
         CoreOp::CustomDump => {
             let bus = emu.bus();
             let mut regs = Map::new();
+            let mut registers = Vec::new();
             for off in (0u16..0x200).step_by(2) {
                 if let Some(value) = bus.debug_custom_word(off) {
-                    regs.insert(crate::debugger::custom_reg_name(off), Value::from(value));
+                    let name = crate::debugger::custom_reg_name(off);
+                    regs.insert(name.clone(), Value::from(value));
+                    if let Some(doc) = crate::customregs::by_offset(off) {
+                        registers.push(json!({
+                            "offset": off,
+                            "name": name,
+                            "value": value,
+                            "access": doc.access,
+                            "chipset": doc.chipset,
+                            "summary": doc.summary,
+                            "documentation": doc.markdown,
+                        }));
+                    }
                 }
             }
-            Ok(json!({"regs": regs}))
+            Ok(json!({"regs": regs, "registers": registers}))
         }
         CoreOp::PaletteDump { resource } => {
             if let Some(name) = resource {
@@ -3645,6 +3691,38 @@ mod tests {
             core("symbols.resolve", json!({"addr": "$F80010"})),
             CoreOp::SymbolsResolve { addr: 0xF80010 }
         );
+    }
+
+    #[test]
+    fn ui_show_parses_only_the_three_native_windows() {
+        assert!(matches!(
+            parse_method("ui.show", &json!({"window": "debugger"})).unwrap(),
+            Request::Host(HostOp::UiShow {
+                window: UiWindow::Debugger
+            })
+        ));
+        let error = parse_method("ui.show", &json!({"window": "webview"})).unwrap_err();
+        assert!(error.message.contains("debugger|console|analyzer"));
+    }
+
+    #[test]
+    fn custom_dump_carries_the_shared_register_documentation() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        let dump = exec_core(&mut emu, &mut ctx, &CoreOp::CustomDump).unwrap();
+        assert!(dump["regs"].get("DMACON").is_some());
+        let dmacon = dump["registers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|register| register["name"] == "DMACON")
+            .unwrap();
+        assert_eq!(dmacon["offset"], 0x096);
+        assert_eq!(dmacon["access"], "write");
+        assert!(dmacon["documentation"]
+            .as_str()
+            .unwrap()
+            .contains("## Bitfields"));
     }
 
     #[test]

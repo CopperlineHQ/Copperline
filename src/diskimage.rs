@@ -538,7 +538,7 @@ const BOOT_CODE_FFS: [u8; 84] = [
 /// written here fits the first, and the second stays zero -- which
 /// contributes nothing to a sum. An unformatted volume gets no boot block
 /// at all, so this is only reached when there is a filesystem to tag.
-fn boot_block(fs: FileSystem, bootable: bool, root: u64) -> [u8; BLOCK_BYTES] {
+pub(crate) fn boot_block(fs: FileSystem, bootable: bool, root: u64) -> [u8; BLOCK_BYTES] {
     let mut b = [0u8; BLOCK_BYTES];
     put_long(&mut b, 0, fs.dos_type());
     if bootable {
@@ -870,6 +870,25 @@ pub fn create_floppy(path: &Path, spec: &FloppySpec) -> io::Result<Created> {
             Container::Adf => file.write_all(&image)?,
             Container::ExtendedAdf => write_extended_adf(&mut file, &image, spec.density)?,
         }
+        file.flush()?;
+        Ok(Created {
+            bytes: file.metadata()?.len(),
+            geometry: None,
+        })
+    })
+}
+
+/// Atomically write a standard sector ADF assembled by another project tool.
+/// The byte length must be one of the two real Amiga floppy geometries.
+pub fn write_standard_adf(path: &Path, image: &[u8]) -> io::Result<Created> {
+    if image.len() as u64 != Density::Dd.bytes() && image.len() as u64 != Density::Hd.bytes() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a standard ADF must be exactly 880 KiB or 1.76 MiB",
+        ));
+    }
+    writing_image(path, |mut file| {
+        file.write_all(image)?;
         file.flush()?;
         Ok(Created {
             bytes: file.metadata()?.len(),

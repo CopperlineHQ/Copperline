@@ -58,6 +58,14 @@ the result in VS Code. The profile contains optimized inline frames and a
 `[Bus wait]` child that isolates time lost to chip-DMA contention. Other DAP
 clients can send the same custom request and open the returned `path`.
 
+The same toolbar can open Copperline's native Debugger, Console, and Frame
+Analyzer windows without reimplementing them in a webview. The Debug sidebar's
+**Custom Registers** tree is fed by the adapter's Chipset scope; hovering a
+register shows its shared access, chipset, and bit-field documentation. The
+command palette also provides **Init Amiga Project**, **Convert EXE to ADF**,
+and **Profile File Size**. The project template detects Bartman's installed
+toolchain through `amiga.bin-path`, or can select bebbo amiga-gcc or vbcc/vasm.
+
 ## Other clients
 
 nvim-dap, with the adapter on stdio:
@@ -87,6 +95,7 @@ configuration says. Arguments:
 | `args` | Command-line arguments for the program (a string or an array). |
 | `copperline` | The emulator binary. Default: `COPPERLINE_BIN`, then a `copperline` next to `copperline-ctl`, then PATH. |
 | `config` | A TOML configuration file (`--config`). Default: the launcher's saved default. |
+| `rom` | A Kickstart ROM supplied as Copperline's positional ROM argument. Omit it to use the bundled AROS ROM. |
 | `factory` | Ignore the saved default configuration (`--factory`). |
 | `model`, `chipset`, `cpu`, `chip`, `fast`, `slow` | The matching `copperline` flags. |
 | `memoryFill` | `--ram-init`: `zero`, `random[:SEED]`, `pattern:WORD`, or `0xWORD` for uninitialised-read testing. |
@@ -156,6 +165,7 @@ global(s), call-frame info`.
 | Step Back / Reverse Continue | `reverse_step` / `reverse_continue` from the snapshot ring (see [Reverse debugging](reverse.md)); Step Back also repeats until the line changes. The adapter takes a snapshot (`reverse_anchor`) at every stop a run ends in, so stepping back replays from there: the boot volume `--run` stages is a host directory mount, whose traffic a replay from an older snapshot could not reproduce. |
 | Call stack | Call-frame information when the DWARF has it, else a scan of the stack for return addresses that follow a `JSR`/`BSR`. Frames beyond the innermost are looked up at the call site. ROM frames use live names such as `[exec] AllocMem+$12`, derived from the running guest rather than a per-ROM symbol file. |
 | Scopes | Registers (D0-D7, A0-A7, PC, SR with its flags, plus FP0-FP7/FPCR/FPSR/FPIAR when an FPU is fitted), Locals, Globals, Chipset (every custom register and the beam position). |
+| Disassembly | `disasm`; each instruction text ends in its theoretical cycle count or range, while a precise profile measures additional contention actually encountered. |
 | Set variable | `regs.set` for the innermost frame's registers; `mem.write` for base-type variables and members. |
 | Evaluate / hover / watch | Registers, variables and symbols by name, numbers (`$DFF000`, `0x1234`, `%1010`), `+ - * /`, `[expr]` / `[expr].w` / `[expr].b` memory reads, `d0.w`. In the Debug Console, `!method {json}` sends a raw control-protocol request and prints the reply (`!status`, `!beam.get`, `!capture.screenshot {"path": "/tmp/s.png"}`). |
 | Memory view | `mem.read` / `mem.write` (base64). |

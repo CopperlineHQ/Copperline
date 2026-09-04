@@ -211,7 +211,7 @@ const CONSOLE_HELP: &[&str] = &[
     "            btrap V [H]   cbreak ADDR   catch irq N|trap N|vec N",
     "            catchtask [NAME]   catchalert   breaks (list)   clearbreaks",
     "inspect:    status  regs/r  mem/m ADDR [BYTES]  dis/d [ADDR] [N]",
-    "            copper [pc|ADDR] [N]   custom   blits   cpuwait   find HEX [START]",
+    "            copper [pc|ADDR] [N]   custom [REG]   blits   cpuwait   find HEX [START]",
     "            writer ADDR   dbgres",
     "            history/h [N]   stack/bt",
     "os:         tasks  task [ADDR|NAME]  execbase  memlist  segments",
@@ -951,6 +951,26 @@ impl App {
             }
             "CUSTOM" => {
                 let bus = self.emu.bus();
+                if let Some(reg) = args.first() {
+                    let Some(off) = crate::debugger::parse_custom_reg(reg) else {
+                        return ConsoleOutcome::error("usage: CUSTOM [NAME|OFFSET]");
+                    };
+                    let Some(value) = bus.debug_custom_word(off) else {
+                        return ConsoleOutcome::error("custom register has no visible latch");
+                    };
+                    let name = crate::debugger::custom_reg_name(off);
+                    let mut lines = vec![format!("${off:03X} {name} = ${value:04X}")];
+                    if let Some(doc) = crate::customregs::by_offset(off) {
+                        lines.push(format!("{}; {}", doc.access, doc.chipset));
+                        lines.push(doc.summary.to_string());
+                    }
+                    lines.extend(
+                        crate::debugger::custom_reg_bit_decode(off, value)
+                            .into_iter()
+                            .map(|line| format!("  {line}")),
+                    );
+                    return ConsoleOutcome::lines(lines);
+                }
                 let mut lines = vec![format!(
                     "beam v{} h{}  frame {}",
                     bus.agnus.vpos,

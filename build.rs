@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
@@ -30,7 +31,79 @@ fn main() {
 
     println!("cargo:rustc-env=COPPERLINE_DISPLAY_VERSION={display_version}");
 
+    generate_custom_register_docs();
     set_windows_main_thread_stack();
+}
+
+/// Compile the checked-in, human-readable register pages into the one table
+/// consumed by the core debugger, CCP/DAP, console and editor extension.
+fn generate_custom_register_docs() {
+    let source = Path::new("docs/reference/custom-registers");
+    println!("cargo:rerun-if-changed={}", source.display());
+    let mut pages: Vec<PathBuf> = std::fs::read_dir(source)
+        .unwrap_or_else(|error| panic!("reading {}: {error}", source.display()))
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.extension().and_then(|ext| ext.to_str()) == Some("md")
+                && path.file_name().and_then(|name| name.to_str()) != Some("index.md")
+        })
+        .collect();
+    pages.sort();
+    let mut generated = String::from(
+        "// Generated from docs/reference/custom-registers/*.md by build.rs.\n\
+         pub static CUSTOM_REGISTER_DOCS: &[CustomRegisterDoc] = &[\n",
+    );
+    let mut previous = None;
+    for path in pages {
+        println!("cargo:rerun-if-changed={}", path.display());
+        let markdown = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+        if !markdown.is_ascii() {
+            panic!("{} must contain ASCII only", path.display());
+        }
+        let mut lines = markdown.lines();
+        let name = lines
+            .next()
+            .and_then(|line| line.strip_prefix("# "))
+            .unwrap_or_else(|| panic!("{}: first line must be '# NAME'", path.display()));
+        let offset_text = lines
+            .next()
+            .and_then(|line| line.strip_prefix("Offset: $"))
+            .unwrap_or_else(|| panic!("{}: second line must be 'Offset: $NNN'", path.display()));
+        let offset = u16::from_str_radix(offset_text, 16)
+            .unwrap_or_else(|_| panic!("{}: bad offset {offset_text:?}", path.display()));
+        let access = lines
+            .next()
+            .and_then(|line| line.strip_prefix("Access: "))
+            .unwrap_or_else(|| panic!("{}: third line must be 'Access: ...'", path.display()));
+        let chipset = lines
+            .next()
+            .and_then(|line| line.strip_prefix("Chipset: "))
+            .unwrap_or_else(|| panic!("{}: fourth line must be 'Chipset: ...'", path.display()));
+        if previous.is_some_and(|old| offset <= old) {
+            panic!(
+                "{}: register pages must sort by increasing offset",
+                path.display()
+            );
+        }
+        previous = Some(offset);
+        let summary = markdown
+            .split("\n\n")
+            .nth(1)
+            .map(str::trim)
+            .filter(|summary| !summary.is_empty())
+            .unwrap_or_else(|| panic!("{}: missing summary paragraph", path.display()));
+        writeln!(
+            generated,
+            "    CustomRegisterDoc {{ offset: {offset:#05x}, name: {name:?}, access: {access:?}, chipset: {chipset:?}, summary: {summary:?}, markdown: {markdown:?} }},"
+        )
+        .expect("write to String");
+    }
+    generated.push_str("];\n");
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"))
+        .join("custom_register_docs.rs");
+    std::fs::write(&out, generated)
+        .unwrap_or_else(|error| panic!("writing {}: {error}", out.display()));
 }
 
 /// Give the Windows binaries the same ~8 MiB main-thread stack that Linux and

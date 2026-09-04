@@ -501,7 +501,8 @@ fn build() -> Vec<ToolDef> {
             "disasm",
             "Disassemble `count` 68k instructions (default 16, at most 256) starting at \
              `addr` (default: the current PC). Each line carries the address, opcode words \
-             and mnemonic.",
+             and mnemonic, plus `cycles_min`/`cycles_max` from the configured CPU's \
+             generation-specific timing model when the instruction can be evaluated.",
             object(
                 vec![
                     ("addr", addr("Start address (default: PC)")),
@@ -510,6 +511,18 @@ fn build() -> Vec<ToolDef> {
                 &[],
             ),
             json!({"count": 8}),
+        ),
+        entry(
+            "ui.show",
+            "Open one of Copperline's native desktop tool windows. This is available only on a windowed --control-gui session; headless sessions return unsupported.",
+            object(
+                vec![(
+                    "window",
+                    enumeration("Native tool window", &["debugger", "console", "analyzer"]),
+                )],
+                &["window"],
+            ),
+            json!({"window": "debugger"}),
         ),
         entry(
             "symbols.resolve",
@@ -529,9 +542,9 @@ fn build() -> Vec<ToolDef> {
         ),
         entry(
             "custom.dump",
-            "Dump the custom chip register file ($DFF000-$DFF1FE) as name/offset/value \
-             entries: DMACON, INTENA, BPLCON0, COPxLC, sprite and audio pointers, and the \
-             rest. Read-only.",
+            "Dump the custom chip register file ($DFF000-$DFF1FE). `regs` retains the compact \
+             name/value map; `registers` adds offset, access, chipset, summary and the same \
+             Markdown documentation used by the native debugger and DAP sidebar. Read-only.",
             no_params(),
             json!({}),
         ),
