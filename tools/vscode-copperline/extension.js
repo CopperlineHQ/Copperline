@@ -111,7 +111,7 @@ async function initProject(context) {
   });
   if (!toolchain) return;
 
-  const relativeFiles = ["main.c", "uaelib.c", "uaelib.h", "startup.s", "Makefile"];
+  const relativeFiles = ["main.c", "uaelib.c", "uaelib.h", "startup.s", "format_gcc.s", "format_vasm.asm", "Makefile"];
   const vscodeDir = vscode.Uri.joinPath(destination, ".vscode");
   const targets = relativeFiles.map((name) => vscode.Uri.joinPath(destination, name));
   targets.push(vscode.Uri.joinPath(vscodeDir, "launch.json"));
@@ -144,9 +144,12 @@ async function initProject(context) {
     inputs: [{ id: "kick13", type: "promptString", description: "Path to a licensed Kickstart 1.3 ROM" }],
   };
   const taskEnvironment = {};
-  if (bartmanBin) taskEnvironment.PATH = `${bartmanBin}${path.delimiter}${"${env:PATH}"}`;
+  if (bartmanBin) {
+    taskEnvironment.PATH = [path.join(bartmanBin, "opt", "bin"), bartmanBin, "${env:PATH}"].join(path.delimiter);
+  }
+  const makeCommand = bartmanBin && process.platform === "win32" ? "gnumake.exe" : "make";
   const task = (label, target, group) => ({
-    label, type: "process", command: "make", args: [`TOOLCHAIN=${toolchain.id}`, target],
+    label, type: "process", command: makeCommand, args: [`TOOLCHAIN=${toolchain.id}`, target],
     options: { cwd: "${workspaceFolder}", env: taskEnvironment },
     problemMatcher: ["$gcc"], group,
   });

@@ -458,9 +458,7 @@ fn run_exe2adf() -> Result<std::path::PathBuf, String> {
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or("the executable name is not valid UTF-8")?;
-    if name.is_empty() || name.len() > 30 || !name.chars().all(|c| (c as u32) <= 0xff) {
-        return Err("the Amiga executable name must be 1..30 Latin-1 characters".into());
-    }
+    let amiga_name = encode_amiga_name(name)?;
     let out = out.unwrap_or_else(|| program.with_extension("adf"));
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -474,11 +472,12 @@ fn run_exe2adf() -> Result<std::path::PathBuf, String> {
             .map_err(|error| format!("creating staging directory: {error}"))?;
         std::fs::copy(&program, staging.join(name))
             .map_err(|error| format!("copying {}: {error}", program.display()))?;
-        std::fs::write(
-            staging.join("S").join("Startup-Sequence"),
-            format!("SYS:{name}\n"),
-        )
-        .map_err(|error| format!("writing Startup-Sequence: {error}"))?;
+        let mut startup = Vec::with_capacity(5 + amiga_name.len());
+        startup.extend_from_slice(b"SYS:");
+        startup.extend_from_slice(&amiga_name);
+        startup.push(b'\n');
+        std::fs::write(staging.join("S").join("Startup-Sequence"), startup)
+            .map_err(|error| format!("writing Startup-Sequence: {error}"))?;
         let image = copperline::dirfs::build_floppy_image(
             &staging,
             "Copperline",
@@ -497,6 +496,21 @@ fn run_exe2adf() -> Result<std::path::PathBuf, String> {
         );
     }
     result
+}
+
+fn encode_amiga_name(name: &str) -> Result<Vec<u8>, String> {
+    let encoded: Vec<u8> = name
+        .chars()
+        .map(|ch| u8::try_from(ch as u32))
+        .collect::<Result<_, _>>()
+        .map_err(|_| "the Amiga executable name must use Latin-1 characters")?;
+    if encoded.is_empty() || encoded.len() > 30 {
+        return Err("the Amiga executable name must be 1..30 Latin-1 characters".into());
+    }
+    if encoded.iter().any(|byte| matches!(byte, b':' | b'/')) {
+        return Err("the Amiga executable name must not contain ':' or '/'".into());
+    }
+    Ok(encoded)
 }
 
 fn run_size_report() -> Result<std::path::PathBuf, String> {
@@ -610,6 +624,16 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn amiga_executable_names_are_single_byte_and_path_safe() {
+        assert_eq!(encode_amiga_name("caf\u{e9}").unwrap(), b"caf\xe9");
+        assert!(encode_amiga_name("bad:name").is_err());
+        assert!(encode_amiga_name("bad/name").is_err());
+        assert!(encode_amiga_name("snowman-\u{2603}").is_err());
+        assert!(encode_amiga_name("").is_err());
+        assert!(encode_amiga_name(&"x".repeat(31)).is_err());
+    }
 
     #[test]
     fn request_lines_are_json_rpc_shaped() {

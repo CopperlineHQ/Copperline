@@ -18,15 +18,17 @@ CFLAGS := -g -O2 -m68000 -Wall -Wextra
 
 ifeq ($(TOOLCHAIN),bartman)
   CC := m68k-amiga-elf-gcc
-  SOURCES += startup.s
+  SOURCES += startup.s format_gcc.s
   CFLAGS += -nostdlib -ffunction-sections -fdata-sections -DCOPPERLINE_BARE_STARTUP
   LDFLAGS := -Wl,--emit-relocs,--gc-sections,-Ttext=0,-e,_start,-Map=$(PROGRAM).map
   TARGET := $(PROGRAM).elf
 else ifeq ($(TOOLCHAIN),bebbo)
   CC := m68k-amigaos-gcc
+  SOURCES += format_gcc.s
   TARGET := $(PROGRAM)
 else ifeq ($(TOOLCHAIN),vasm)
   CC := vc
+  SOURCES += format_vasm.asm
   CFLAGS := +kick13 -g -O2 -cpu=68000
   TARGET := $(PROGRAM)
 else

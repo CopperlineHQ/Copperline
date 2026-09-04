@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: CC0-1.0 */
 #include <exec/types.h>
 #include <proto/exec.h>
+#include <stdarg.h>
 #include "uaelib.h"
 
 typedef LONG (*UaeConfig)(LONG, LONG, const char *, LONG, char *, LONG);
@@ -13,6 +14,9 @@ struct ExecBase *SysBase;
 
 enum { DEBUG_REGISTER = 4, DEBUG_UNREGISTER = 6 };
 enum { DEBUG_BITMAP = 0, DEBUG_COPPERLIST = 2 };
+enum { DEBUG_BITMAP_MASKED = 1 << 1 };
+
+void CopperlineFormatPutChar(void);
 
 struct DebugResource {
     ULONG address;
@@ -33,8 +37,14 @@ static int present(void)
 
 void KPrintF(const char *format, ...)
 {
-    if (present())
-        ((UaeLog)0xf0ff60u)(86, format);
+    if (present()) {
+        char text[512];
+        va_list args;
+        va_start(args, format);
+        RawDoFmt((CONST_STRPTR)format, args, CopperlineFormatPutChar, text);
+        va_end(args);
+        ((UaeLog)0xf0ff60u)(86, text);
+    }
 }
 
 void warpmode(int enabled)
@@ -55,7 +65,9 @@ void debug_register_bitmap(const void *address, const char *name,
                            UWORD width, UWORD height, UWORD planes, UWORD flags)
 {
     struct DebugResource resource = {
-        (ULONG)address, (ULONG)(width / 8) * height * planes, "",
+        (ULONG)address,
+        (ULONG)(width / 8) * height
+            * (planes + ((flags & DEBUG_BITMAP_MASKED) != 0)), "",
         DEBUG_BITMAP, flags, width, height, planes
     };
     {

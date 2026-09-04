@@ -25,64 +25,94 @@ const CC: [&str; 16] = [
 /// instruction. The copied instruction stream lives at `BASE`; every other
 /// byte reads as zero and writes stay inside this private buffer.
 struct TimingBus {
-    bytes: Vec<u8>,
+    instruction: [u8; 64],
+    instruction_len: usize,
+    writes: Vec<(u16, u8)>,
     cached: bool,
 }
 
 impl TimingBus {
     const BASE: u32 = 0x1000;
-    const SIZE: usize = 0x10000;
 
     fn new(instruction: &[u8], cached: bool) -> Self {
-        let mut bytes = vec![0; Self::SIZE];
-        let at = Self::BASE as usize;
-        bytes[at..at + instruction.len()].copy_from_slice(instruction);
-        Self { bytes, cached }
+        let mut bytes = [0; 64];
+        bytes[..instruction.len()].copy_from_slice(instruction);
+        Self {
+            instruction: bytes,
+            instruction_len: instruction.len(),
+            writes: Vec::with_capacity(16),
+            cached,
+        }
     }
 
-    fn at(address: u32) -> usize {
-        address as usize & (Self::SIZE - 1)
+    fn reset(&mut self) {
+        self.writes.clear();
+    }
+
+    fn read(&self, address: u32) -> u8 {
+        let address = address as u16;
+        if let Some((_, value)) = self
+            .writes
+            .iter()
+            .rev()
+            .find(|(written, _)| *written == address)
+        {
+            return *value;
+        }
+        let offset = address.wrapping_sub(Self::BASE as u16) as usize;
+        if offset < self.instruction_len {
+            self.instruction[offset]
+        } else {
+            0
+        }
+    }
+
+    fn write(&mut self, address: u32, value: u8) {
+        let address = address as u16;
+        if let Some((_, old)) = self
+            .writes
+            .iter_mut()
+            .rev()
+            .find(|(written, _)| *written == address)
+        {
+            *old = value;
+        } else {
+            self.writes.push((address, value));
+        }
     }
 }
 
 impl m68k::AddressBus for TimingBus {
     fn read_byte(&mut self, address: u32) -> u8 {
-        self.bytes[Self::at(address)]
+        self.read(address)
     }
 
     fn read_word(&mut self, address: u32) -> u16 {
-        u16::from_be_bytes([
-            self.bytes[Self::at(address)],
-            self.bytes[Self::at(address.wrapping_add(1))],
-        ])
+        u16::from_be_bytes([self.read(address), self.read(address.wrapping_add(1))])
     }
 
     fn read_long(&mut self, address: u32) -> u32 {
         u32::from_be_bytes([
-            self.bytes[Self::at(address)],
-            self.bytes[Self::at(address.wrapping_add(1))],
-            self.bytes[Self::at(address.wrapping_add(2))],
-            self.bytes[Self::at(address.wrapping_add(3))],
+            self.read(address),
+            self.read(address.wrapping_add(1)),
+            self.read(address.wrapping_add(2)),
+            self.read(address.wrapping_add(3)),
         ])
     }
 
     fn write_byte(&mut self, address: u32, value: u8) {
-        let at = Self::at(address);
-        self.bytes[at] = value;
+        self.write(address, value);
     }
 
     fn write_word(&mut self, address: u32, value: u16) {
         let [hi, lo] = value.to_be_bytes();
-        let at = Self::at(address);
-        let next = Self::at(address.wrapping_add(1));
-        self.bytes[at] = hi;
-        self.bytes[next] = lo;
+        self.write(address, hi);
+        self.write(address.wrapping_add(1), lo);
     }
 
     fn write_long(&mut self, address: u32, value: u32) {
         for (offset, byte) in value.to_be_bytes().into_iter().enumerate() {
-            let at = Self::at(address.wrapping_add(offset as u32));
-            self.bytes[at] = byte;
+            self.write(address.wrapping_add(offset as u32), byte);
         }
     }
 
@@ -128,8 +158,9 @@ pub fn theoretical_cycles(
     let mut maximum = 0u32;
     let mut any = false;
     for cached in [true, false] {
+        let mut bus = TimingBus::new(&instruction, cached);
         for (flags, data) in STATES {
-            let mut bus = TimingBus::new(&instruction, cached);
+            bus.reset();
             let mut cpu = m68k::CpuCore::new();
             cpu.set_cpu_type(cpu_type);
             cpu.set_sr_noint_nosp(0x2000 | flags);

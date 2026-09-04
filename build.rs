@@ -58,6 +58,10 @@ fn generate_custom_register_docs() {
         println!("cargo:rerun-if-changed={}", path.display());
         let markdown = std::fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+        // Git may materialise Markdown with CRLF on Windows.  Keep the
+        // generated debugger text deterministic and make paragraph parsing
+        // independent of the checkout's line-ending policy.
+        let markdown = markdown.replace("\r\n", "\n").replace('\r', "\n");
         if !markdown.is_ascii() {
             panic!("{} must contain ASCII only", path.display());
         }
