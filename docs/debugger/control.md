@@ -279,7 +279,9 @@ events.unsubscribe {"events":["serial"]}
   register, address, data/size, kind/subtype, flags, IPL, raw event bits, and
   decoded event names. `data` is a fixed-width hexadecimal string so grouped
   64-bit AGA fetches remain lossless in JSON. Owner-only traces and out-of-range
-  rows return errors.
+  rows return errors. `instantaneous_records` contains any ordered zero-time
+  floppy-turbo transfers at positions on the requested row; replay these after
+  the ordinary record at the matching HPOS.
 - `display.get`: Query active display parameters, viewport size, and pixel format.
 - `rtc.get` / `rtc.set {"unix": ..., "time": "...", "advance": ..., "frozen": ...}`: Inspect or move real-time clock.
 - `cartridge.get`: Query freezer cartridge state (`model`, memory `base`/`size`, monitor `version`, `entered` status, `nmi_pending`, and freeze count).

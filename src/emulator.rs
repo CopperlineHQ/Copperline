@@ -588,6 +588,7 @@ impl Emulator {
         if requested_full {
             self.bus_mut().set_frame_analyzer_full(true);
         }
+        self.bus_mut().restart_frame_analyzer_trace();
         let frame = self.bus().emulated_frames();
         let seconds = self.bus().emulated_seconds();
         let retired = self.retired_instructions();
@@ -873,6 +874,30 @@ impl Emulator {
                     .collect();
                 record["cpu_wait"] = Value::from(waits);
                 full_slot_records = trace.records_arc();
+                let instantaneous: Vec<Value> = trace
+                    .instantaneous_records()
+                    .iter()
+                    .map(|entry| {
+                        let slot = &entry.record;
+                        json!({
+                            "vpos": entry.vpos,
+                            "hpos": entry.hpos,
+                            "reg": slot.reg,
+                            "addr": slot.addr,
+                            "data": format!("0x{:016X}", slot.data),
+                            "size": slot.size,
+                            "kind": slot.kind,
+                            "subtype": slot.subtype,
+                            "ipl": slot.ipl,
+                            "flags": slot.flags,
+                            "events": slot.events,
+                            "event_names": crate::bus::bus_event_names(slot.events),
+                        })
+                    })
+                    .collect();
+                if !instantaneous.is_empty() {
+                    record["instantaneous_slots"] = Value::from(instantaneous);
+                }
             }
         }
         if let Some(pc) = pc {

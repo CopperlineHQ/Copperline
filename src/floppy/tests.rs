@@ -2072,12 +2072,14 @@ fn dma_trace_reports_only_actual_words_with_memory_direction() -> Result<()> {
                 data: 0x1111,
                 memory_write: true,
                 cck_offset: word_cck - 1,
+                instantaneous: false,
             },
             DiskDmaTransfer {
                 addr: 2,
                 data: 0x2222,
                 memory_write: true,
                 cck_offset: word_cck * 2 - 1,
+                instantaneous: false,
             },
         ]
     );
@@ -2097,6 +2099,7 @@ fn dma_trace_reports_only_actual_words_with_memory_direction() -> Result<()> {
             data: 0xABCD,
             memory_write: false,
             cck_offset: word_cck - 1,
+            instantaneous: false,
         }]
     );
 
@@ -2160,7 +2163,7 @@ fn floppy_turbo_bursts_read_dma_after_two_line_grace() -> Result<()> {
 }
 
 #[test]
-fn floppy_full_dma_trace_suppresses_zero_time_turbo_burst() -> Result<()> {
+fn floppy_full_dma_trace_preserves_zero_time_turbo_burst() -> Result<()> {
     let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
     let dmacon = DMACON_DMAEN | DMACON_DISK;
     let (mut ctrl, path) = spun_up_speed_controller(&raw_words, SPEED_TURBO)?;
@@ -2170,13 +2173,14 @@ fn floppy_full_dma_trace_suppresses_zero_time_turbo_burst() -> Result<()> {
     assert!(!ctrl.write_dsklen(len, 0));
     assert!(!ctrl.write_dsklen(len, 0));
 
-    assert!(!ctrl.tick(TURBO_DMA_GRACE_CCK, dmacon, &mut chip_ram));
-    assert!(
-        ctrl.dma.is_some(),
-        "the zero-time burst must remain deferred"
-    );
-    assert!(ctrl.take_dma_trace().is_empty());
-    assert_eq!(read_chip_word(&chip_ram, 0), 0);
+    assert!(ctrl.tick(TURBO_DMA_GRACE_CCK, dmacon, &mut chip_ram));
+    assert!(ctrl.dma.is_none(), "tracing must not defer the turbo burst");
+    assert_eq!(read_chip_word(&chip_ram, 0), 0x1111);
+    assert_eq!(read_chip_word(&chip_ram, 2), 0x2222);
+    assert_eq!(read_chip_word(&chip_ram, 4), 0x3333);
+    let trace = ctrl.take_dma_trace();
+    assert_eq!(trace.len(), 3);
+    assert!(trace.iter().all(|transfer| transfer.instantaneous));
 
     let _ = fs::remove_file(path);
     Ok(())

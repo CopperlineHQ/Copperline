@@ -2131,12 +2131,19 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
                 .enumerate()
                 .map(|(hpos, record)| bus_slot_json(hpos, record))
                 .collect();
+            let instantaneous_records: Vec<Value> = trace
+                .instantaneous_records()
+                .iter()
+                .filter(|entry| entry.vpos as usize == *row)
+                .map(|entry| bus_slot_json(entry.hpos as usize, &entry.record))
+                .collect();
             Ok(json!({
                 "frame": trace.frame,
                 "row": row,
                 "line_cck": trace.line_cck,
                 "record_bytes": crate::bus::BusSlotRecord::BYTE_SIZE,
                 "records": records,
+                "instantaneous_records": instantaneous_records,
             }))
         }
         CoreOp::DisplayGet => {
@@ -4347,6 +4354,51 @@ mod tests {
             &[1, 2, 3, 4]
         );
         exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStop).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn profile_start_restarts_an_existing_full_trace_epoch() {
+        let mut emu = uaelib_emulator();
+        emu.bus_mut().set_frame_analyzer_full(true);
+        emu.bus_mut().advance_chipset(4);
+        assert!(emu.bus().frame_bus_trace().is_some());
+
+        let mut ctx = SessionCtx::new();
+        let dir = profile_scratch("fresh-trace");
+        exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::ProfileStart {
+                options: crate::profile::ProfileOptions {
+                    path: dir.clone(),
+                    frames: 1,
+                    slots: true,
+                    memory: true,
+                    screenshots: crate::profile::ScreenshotMode::None,
+                    pc_samples: false,
+                    samples: false,
+                    registers: false,
+                    unwind: None,
+                    relocation_bases: Vec::new(),
+                    code_ranges: Vec::new(),
+                    trigger: None,
+                },
+            },
+        )
+        .unwrap();
+
+        assert!(
+            emu.bus().frame_bus_trace().is_none(),
+            "pre-capture slots must not survive the memory baseline"
+        );
+        emu.bus_mut().advance_chipset(1);
+        let trace = emu.bus().frame_bus_trace().unwrap();
+        assert!(trace.partial);
+        assert_eq!(trace.owner_cck.iter().sum::<u64>(), 1);
+
+        exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStop).unwrap();
+        assert!(emu.bus().frame_analyzer_full());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

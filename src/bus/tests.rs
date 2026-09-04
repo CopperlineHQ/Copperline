@@ -22,9 +22,9 @@ use super::{
     BUS_EVENT_LOL, BUS_EVENT_SPECIAL, BUS_EVENT_VB, BUS_EVENT_VDIW, BUS_EVENT_VS,
     BUS_RECORD_BLITTER, BUS_RECORD_COPPER, BUS_RECORD_CPU, BUS_RECORD_DISK, BUS_RECORD_SPRITE,
     CPU_WAIT_PC_CAP, DENISE_HPOS_LAG_CCK, DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN,
-    PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS, RENDER_COPPER_WAIT_HPOS_FB0, RENDER_DIW_HSTART_FB0,
-    RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_LINES, RENDER_VISIBLE_START_VPOS,
-    SPRITE_DMA_SLOT1_HPOS, SPRITE_OUTPUT_DELAY_LORES,
+    IRQ_SOURCE_BITS, PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS, RENDER_COPPER_WAIT_HPOS_FB0,
+    RENDER_DIW_HSTART_FB0, RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_LINES,
+    RENDER_VISIBLE_START_VPOS, SPRITE_DMA_SLOT1_HPOS, SPRITE_OUTPUT_DELAY_LORES,
 };
 use crate::audio::AudioSink;
 use crate::chipset::agnus::{
@@ -39,8 +39,8 @@ use crate::chipset::copper::{CopperWait, DMACON_COPEN};
 use crate::chipset::denise::BPLCON2_RDRAM;
 use crate::chipset::denise::{rgb12_to_rgba8, DeniseRevision, DiwHigh, COLOR_TRANSPARENCY_BIT};
 use crate::chipset::paula::{
-    Paula, DMACON_DMAEN, INT_AUD0, INT_BLIT, INT_COPER, INT_EXTER, INT_MASTER, INT_PORTS,
-    INT_VERTB, PAULA_CLOCK_HZ,
+    pending_ipl, Paula, DMACON_DMAEN, INT_AUD0, INT_BLIT, INT_COPER, INT_EXTER, INT_MASTER,
+    INT_PORTS, INT_VERTB, PAULA_CLOCK_HZ,
 };
 use crate::floppy::{FloppyController, ADF_SIZE};
 use crate::memory::Memory;
@@ -506,6 +506,29 @@ fn detailed_bus_tracing_keeps_timed_devices_on_instruction_boundary_batches() {
 }
 
 #[test]
+fn recognized_irq_event_stream_uses_the_delivered_level() {
+    let mut bus = empty_bus();
+    bus.set_bus_event_observation_enabled(true);
+    bus.paula.intena = INT_MASTER | IRQ_SOURCE_BITS;
+    bus.paula.intreq = IRQ_SOURCE_BITS;
+
+    bus.note_cpu_irq_recognized(2);
+
+    let (events, _, dropped) = bus.bus_events_since(0);
+    assert_eq!(dropped, 0);
+    let event = events
+        .iter()
+        .find(|event| event.name == "cpu_irq_recognized")
+        .unwrap();
+    assert_eq!(event.ipl, 2);
+    assert_ne!(
+        pending_ipl(bus.paula.intena & bus.cpu_visible_intreq()),
+        event.ipl,
+        "the fixture must distinguish live pending IPL from the delivered level"
+    );
+}
+
+#[test]
 fn cpu_custom_trace_uses_cpu_bit_and_register_offset() {
     let mut bus = empty_bus();
     bus.agnus.hpos = 0x20;
@@ -558,6 +581,33 @@ fn reserved_disk_slot_has_no_transfer_until_floppy_dma_moves_a_word() {
     assert_eq!(record.size, 0, "no floppy word was actually transferred");
     assert_eq!(record.addr, 0);
     assert_eq!(record.data, 0);
+}
+
+#[test]
+fn zero_time_dma_records_preserve_every_transfer_at_one_beam_position() {
+    let mut bus = empty_bus();
+    bus.agnus.hpos = 0x20;
+    bus.set_frame_analyzer_full(true);
+
+    for (addr, data) in [(0x100, 0x1111), (0x102, 0x2222), (0x104, 0x3333)] {
+        bus.record_instantaneous_bus_slot_at(None, BUS_RECORD_DISK, 0, 0x0008, addr, data, 2, 1);
+    }
+
+    let records = bus.current_frame_bus_trace.instantaneous_records();
+    assert_eq!(records.len(), 3);
+    assert!(records.iter().all(|entry| entry.hpos == 0x20));
+    assert_eq!(
+        records
+            .iter()
+            .map(|entry| (entry.record.addr, entry.record.data))
+            .collect::<Vec<_>>(),
+        [(0x100, 0x1111), (0x102, 0x2222), (0x104, 0x3333)]
+    );
+    assert_eq!(
+        bus.current_frame_bus_trace.record_at(0, 0x20).unwrap().kind,
+        0,
+        "zero-time transfers must not overwrite each other in the raster slot"
+    );
 }
 
 #[test]

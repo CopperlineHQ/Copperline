@@ -68,6 +68,7 @@ One JSON object per committed frame:
 | `slots` | When `"slots": true`: run-length encoded per-clock owner grid for each scanline (`"12R3B497."`). Codes match vAmiga DMA debugger (`R` refresh, `B` bitplane, `S` sprite, `D` disk, `A` audio, `C` copper, `L` blitter, `P` CPU, `.` idle). |
 | `cpu_wait` | When `"slots": true`: the CPU wait grid per scanline in the same run-length encoding. Codes are the denier's owner letter (`R`, `B`, `S`, `D`, `A`, `C`, `L` for the blitter with BLTPRI clear), `N` for the blitter with BLTPRI set, `p` for the port turnaround, and `.` where the CPU was not waiting. |
 | `slots_file`, `slots_record_bytes` | When `"slots": true`: raw full-record sidecar filename and its fixed 24-byte stride. |
+| `instantaneous_slots` | When `"slots": true` and zero-time floppy turbo DMA occurred: ordered `{vpos, hpos, ...record}` entries that cannot share the one-record-per-clock sidecar slot. |
 | `screenshot`, `digest` | When `"screenshots": "every"`: frame screenshot PNG filename and FNV-1a64 hash digest. |
 | `samples`, `samples_meta` | With `"samples": true`, the filenames of this frame's compact instruction stream and Copperline timing metadata. |
 | `sample_count`, `samples_total`, `irq_cck` | Encoded samples in this frame, cumulative encoded samples, and interrupt-dispatch colour clocks in this frame. |
@@ -102,10 +103,8 @@ emulator.
 `"slots": true` writes one `slots-NNNNNN-frame-MMMMMM.bin` per recorded frame,
 where the first number is a monotonic capture sequence and the second is the
 emulated frame. The sequence keeps repeated frames distinct after rewind or
-state loading. While a full slot trace is armed, floppy turbo bursts use the
-ordinary timed DMA path so that every transferred word has a distinct slot.
-Records are in raster order (`VPOS * line_cck + HPOS`) and use this packed,
-little-endian 24-byte layout:
+state loading. Records are in raster order (`VPOS * line_cck + HPOS`) and use
+this packed, little-endian 24-byte layout:
 
 | Offset | Type | Field |
 |---:|---|---|
@@ -122,6 +121,14 @@ little-endian 24-byte layout:
 The same fields are available live from `frame.slots {"row": V}` and in the
 Frame Analyzer's selected/hovered-slot readout. On that JSON surface, `data`
 is a fixed-width hexadecimal string so all 64 bits remain exact.
+
+Floppy turbo DMA deliberately consumes no emulated time, so several transfers
+can occur at one beam position and cannot occupy the single raster record for
+that colour clock. Those transfers remain zero-time while tracing and are
+exported in order as `instantaneous_slots` in the frame's JSONL record, with
+`vpos`, `hpos`, and the same record fields above. Apply them after the ordinary
+record at that position when replaying memory. `frame.slots` exposes the same
+ordered entries for its requested row as `instantaneous_records`.
 
 | Bit | Event |
 |---:|---|

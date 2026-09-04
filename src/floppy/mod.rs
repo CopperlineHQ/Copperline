@@ -226,6 +226,10 @@ pub(crate) struct DiskDmaTransfer {
     pub memory_write: bool,
     /// Zero-based colour-clock offset within the enclosing `tick` batch.
     pub cck_offset: u32,
+    /// The transfer belongs to a turbo burst that consumes no emulated time.
+    /// Such transfers cannot share the ordinary one-record-per-clock grid and
+    /// are exported in order through the trace's instantaneous-record list.
+    pub instantaneous: bool,
 }
 
 fn dma_trace_cck_offset(total_data_cck: u32, remaining_data_cck: u32, scale: u32) -> u32 {
@@ -1424,17 +1428,22 @@ impl FloppyController {
         let data_cck = cck.saturating_mul(data_scale);
         let mut irq = match active_dma {
             Some((dma_idx, _, true)) if dma_idx == idx => {
-                self.tick_write_dma(idx, data_cck, data_scale, is_selected, chip_ram)
+                self.tick_write_dma(idx, data_cck, data_scale, is_selected, chip_ram, false)
             }
-            _ => {
-                self.tick_read_and_rotate(idx, data_cck, data_scale, dmacon, is_selected, chip_ram)
-            }
+            _ => self.tick_read_and_rotate(
+                idx,
+                data_cck,
+                data_scale,
+                dmacon,
+                is_selected,
+                chip_ram,
+                false,
+            ),
         };
-        // A zero-time turbo burst can move many words at one beam position,
-        // which cannot be represented by the one-record-per-colour-clock bus
-        // trace. Keep DMA on the ordinary timed path while a full trace is
-        // armed so every transferred word gets a distinct replayable slot.
-        if self.turbo() && !self.trace_dma_enabled {
+        // Turbo remains a zero-emulated-time operation while tracing. Its
+        // transfers are tagged below so the bus trace can retain all of them
+        // in a separate ordered list at the burst's beam position.
+        if self.turbo() {
             irq |= self.turbo_burst(cck, dmacon, chip_ram);
         }
         irq
@@ -1501,9 +1510,9 @@ impl FloppyController {
             };
             let burst = burst.min(u64::from(u32::MAX)) as u32;
             irq |= if write {
-                self.tick_write_dma(idx, burst, 1, is_selected, chip_ram)
+                self.tick_write_dma(idx, burst, 1, is_selected, chip_ram, true)
             } else {
-                self.tick_read_and_rotate(idx, burst, 1, dmacon, is_selected, chip_ram)
+                self.tick_read_and_rotate(idx, burst, 1, dmacon, is_selected, chip_ram, true)
             };
             if irq {
                 break;
@@ -1527,6 +1536,7 @@ impl FloppyController {
         dmacon: u16,
         is_selected: bool,
         chip_ram: &mut [u8],
+        instantaneous: bool,
     ) -> bool {
         // A bridged bay retains a filler track while its physical drive is
         // empty. No media still means no cells reach Paula, regardless of
@@ -1642,6 +1652,7 @@ impl FloppyController {
                                     self.drives[idx].rotation_acc_cck,
                                     data_scale,
                                 ),
+                                instantaneous,
                             });
                         }
                         if !self.debug_watch_addrs.is_empty()
@@ -1684,6 +1695,7 @@ impl FloppyController {
         data_scale: u32,
         is_selected: bool,
         chip_ram: &mut [u8],
+        instantaneous: bool,
     ) -> bool {
         // Match the read path: a bridge filler track must not make an empty
         // physical drive accept a write.
@@ -1726,6 +1738,7 @@ impl FloppyController {
                         self.drives[idx].rotation_acc_cck,
                         data_scale,
                     ),
+                    instantaneous,
                 });
             }
             dma.write_words.push(word);

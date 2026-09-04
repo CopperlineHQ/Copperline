@@ -558,7 +558,8 @@ fn build() -> Vec<ToolDef> {
         entry(
             "frame.slots",
             "Return one bounded scanline of the last full Frame Analyzer trace, including \
-             register, address, lossless hex data, subtype, IPL and Bartman event bits for every colour clock.",
+             register, address, lossless hex data, subtype, IPL and Bartman event bits for every colour clock, \
+             plus ordered zero-time turbo-DMA records.",
             object(
                 vec![(
                     "row",

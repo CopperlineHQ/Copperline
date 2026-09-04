@@ -1976,6 +1976,16 @@ pub struct BusEvent {
     pub ipl: u8,
 }
 
+/// A transfer performed without advancing the emulated beam. Floppy turbo
+/// DMA can move several words at one position, so those records cannot fit in
+/// the one-record-per-colour-clock raster grid.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstantaneousBusRecord {
+    pub vpos: u32,
+    pub hpos: u32,
+    pub record: BusSlotRecord,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct BusTracePosition {
     frame: u64,
@@ -2105,6 +2115,7 @@ pub struct FrameBusTrace {
     owners: Vec<u8>,
     /// Full Bartman-style records. Absent at the cheap owner-only level.
     records: Option<std::sync::Arc<Vec<BusSlotRecord>>>,
+    instantaneous_records: Vec<InstantaneousBusRecord>,
     pub registers: FrameRegisterSnapshot,
     /// Colour clocks the CPU spent waiting for the chip bus, by the class
     /// that denied it (`CpuWaitClass::accounting_index`) and by the kind of
@@ -2144,6 +2155,7 @@ impl Default for FrameBusTrace {
             blits: Vec::new(),
             owners: Vec::new(),
             records: None,
+            instantaneous_records: Vec::new(),
             registers: FrameRegisterSnapshot::default(),
             cpu_wait_cck: 0,
             cpu_wait_by_class: [0; 9],
@@ -2188,6 +2200,7 @@ impl FrameBusTrace {
         self.owners.fill(b'.');
         self.records = full
             .then(|| std::sync::Arc::new(vec![BusSlotRecord::default(); self.rows * self.cols]));
+        self.instantaneous_records.clear();
         self.registers = registers;
         self.reset_cpu_waits();
         self.cpu_waits.resize(self.rows * self.cols, b'.');
@@ -2236,6 +2249,7 @@ impl FrameBusTrace {
         self.cols = 0;
         self.owners.clear();
         self.records = None;
+        self.instantaneous_records.clear();
         self.registers = FrameRegisterSnapshot::default();
         self.owner_cck = [0; 9];
         self.blitter_busy_cck = 0;
@@ -2401,6 +2415,16 @@ impl FrameBusTrace {
 
     pub fn records_arc(&self) -> Option<std::sync::Arc<Vec<BusSlotRecord>>> {
         self.records.clone()
+    }
+
+    pub fn instantaneous_records(&self) -> &[InstantaneousBusRecord] {
+        &self.instantaneous_records
+    }
+
+    fn push_instantaneous_record(&mut self, record: InstantaneousBusRecord) {
+        if self.records.is_some() {
+            self.instantaneous_records.push(record);
+        }
     }
 
     fn annotate_at(&mut self, vpos: u32, hpos: u32, f: impl FnOnce(&mut BusSlotRecord)) {
@@ -6748,7 +6772,12 @@ impl Bus {
     }
 
     pub fn note_cpu_irq_recognized(&mut self, level: u8) {
-        self.note_bus_event_named(BUS_EVENT_CPU_IRQ, Some("cpu_irq_recognized"));
+        self.note_bus_event_named_at(
+            BUS_EVENT_CPU_IRQ,
+            Some("cpu_irq_recognized"),
+            None,
+            Some(level),
+        );
         if self.frame_analyzer_full {
             self.current_frame_bus_trace
                 .annotate_at(self.agnus.vpos, self.agnus.hpos, |record| {
@@ -7137,26 +7166,46 @@ impl Bus {
             self.floppy.set_adkcon(self.paula.adkcon);
             let disk_irq = self.floppy.tick(cck, dmacon, &mut self.mem.chip_ram);
             for transfer in self.floppy.take_dma_trace() {
-                let trace_position = bus_trace_position_at(trace_spans, transfer.cck_offset)
-                    .or_else(|| {
+                let trace_position = if transfer.instantaneous {
+                    trace_spans.last().and_then(|span| {
+                        span.position_at(span.offset.saturating_add(span.cck).saturating_sub(1))
+                    })
+                } else {
+                    bus_trace_position_at(trace_spans, transfer.cck_offset).or_else(|| {
                         trace_spans.last().and_then(|span| {
                             span.position_at(span.offset.saturating_add(span.cck).saturating_sub(1))
                         })
-                    });
-                self.annotate_bus_slot_at(
-                    trace_position,
-                    BUS_RECORD_DISK,
-                    0,
-                    if transfer.memory_write {
-                        0x0008
-                    } else {
-                        0x0026
-                    },
-                    transfer.addr,
-                    u64::from(transfer.data),
-                    2,
-                    u16::from(transfer.memory_write),
-                );
+                    })
+                };
+                let reg = if transfer.memory_write {
+                    0x0008
+                } else {
+                    0x0026
+                };
+                let flags = u16::from(transfer.memory_write);
+                if transfer.instantaneous {
+                    self.record_instantaneous_bus_slot_at(
+                        trace_position,
+                        BUS_RECORD_DISK,
+                        0,
+                        reg,
+                        transfer.addr,
+                        u64::from(transfer.data),
+                        2,
+                        flags,
+                    );
+                } else {
+                    self.annotate_bus_slot_at(
+                        trace_position,
+                        BUS_RECORD_DISK,
+                        0,
+                        reg,
+                        transfer.addr,
+                        u64::from(transfer.data),
+                        2,
+                        flags,
+                    );
+                }
             }
             if disk_irq {
                 self.paula.intreq |= INT_DSKBLK;
@@ -7223,10 +7272,20 @@ impl Bus {
             self.cia_b.irq_line_asserted(),
         );
         if pins.0 && !self.trace_cia_irq_pins.0 {
-            self.note_bus_event_named_at(BUS_EVENT_CIAA_IRQ, Some("cia_a_irq"), cia_a_position);
+            self.note_bus_event_named_at(
+                BUS_EVENT_CIAA_IRQ,
+                Some("cia_a_irq"),
+                cia_a_position,
+                None,
+            );
         }
         if pins.1 && !self.trace_cia_irq_pins.1 {
-            self.note_bus_event_named_at(BUS_EVENT_CIAB_IRQ, Some("cia_b_irq"), cia_b_position);
+            self.note_bus_event_named_at(
+                BUS_EVENT_CIAB_IRQ,
+                Some("cia_b_irq"),
+                cia_b_position,
+                None,
+            );
         }
         self.trace_cia_irq_pins = pins;
         if pins.0 {
@@ -7459,6 +7518,18 @@ impl Bus {
         }
     }
 
+    /// Start a new trace epoch at the current beam position without changing
+    /// the analyzer's level. Profiles use this before taking their RAM
+    /// baseline so no pre-capture slots can be replayed against that snapshot.
+    pub fn restart_frame_analyzer_trace(&mut self) {
+        if !self.frame_analyzer_enabled {
+            return;
+        }
+        self.flush_timed_devices();
+        self.last_frame_bus_trace = None;
+        self.reset_current_frame_bus_trace(true);
+    }
+
     pub fn frame_bus_trace(&self) -> Option<&FrameBusTrace> {
         self.last_frame_bus_trace
             .as_ref()
@@ -7544,12 +7615,60 @@ impl Bus {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn record_instantaneous_bus_slot_at(
+        &mut self,
+        trace_position: Option<BusTracePosition>,
+        kind: u8,
+        subtype: u8,
+        reg: u16,
+        addr: u32,
+        data: u64,
+        size: u8,
+        flags: u16,
+    ) {
+        if !self.frame_analyzer_full {
+            return;
+        }
+        let position = trace_position.unwrap_or(BusTracePosition {
+            frame: self.emulated_frames,
+            cck: self.emulated_cck,
+            vpos: self.agnus.vpos,
+            hpos: self.agnus.hpos,
+        });
+        let ipl = pending_ipl(self.paula.intena & self.cpu_visible_intreq());
+        let trace = if self.current_frame_bus_trace.frame == position.frame {
+            Some(&mut self.current_frame_bus_trace)
+        } else {
+            self.last_frame_bus_trace
+                .as_mut()
+                .filter(|trace| trace.frame == position.frame)
+        };
+        if let Some(trace) = trace {
+            trace.push_instantaneous_record(InstantaneousBusRecord {
+                vpos: position.vpos,
+                hpos: position.hpos,
+                record: BusSlotRecord {
+                    reg,
+                    kind,
+                    subtype,
+                    size,
+                    ipl,
+                    flags,
+                    addr,
+                    data,
+                    events: 0,
+                },
+            });
+        }
+    }
+
     pub fn note_bus_event(&mut self, events: u32) {
         self.note_bus_event_named(events, None);
     }
 
     fn note_bus_event_named(&mut self, events: u32, name: Option<&'static str>) {
-        self.note_bus_event_named_at(events, name, None);
+        self.note_bus_event_named_at(events, name, None, None);
     }
 
     fn note_bus_event_named_at(
@@ -7557,6 +7676,7 @@ impl Bus {
         events: u32,
         name: Option<&'static str>,
         trace_position: Option<BusTracePosition>,
+        ipl_override: Option<u8>,
     ) {
         let position = trace_position.unwrap_or(BusTracePosition {
             frame: self.emulated_frames,
@@ -7593,7 +7713,9 @@ impl Bus {
                     cck: position.cck,
                     vpos: position.vpos,
                     hpos: position.hpos,
-                    ipl: pending_ipl(self.paula.intena & self.cpu_visible_intreq()),
+                    ipl: ipl_override.unwrap_or_else(|| {
+                        pending_ipl(self.paula.intena & self.cpu_visible_intreq())
+                    }),
                 });
             }
         }
