@@ -70,14 +70,21 @@ pub struct PreparedRun {
 /// runs, and exits inside a single frame; the marker is host-visible the
 /// moment the guest writes it, so even the fastest program ends the warp.
 pub const DONE_MARKER: &str = "done";
+const DETACHED_SCRIPT: &str = "Detached-Run";
 
-/// The generated `S/Startup-Sequence`: fail only on real errors, make the
-/// program's own directory current (so its relative asset paths work),
-/// run it by absolute path, and drop the completion marker when it
-/// returns. `Echo` is internal alongside `CD`/`FailAt` from Kickstart 2.0
-/// on; on 1.3 the marker line is skipped like the others and the warp
-/// gate falls back to its LoadSeg poll and deadline.
-fn startup_sequence(prog_name: &str, extra_args: Option<&str>) -> String {
+/// Guest-shell options used by debugger launches.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RunOptions {
+    /// Shell stack size in bytes (`Stack N`) before starting the program.
+    pub stack: Option<u32>,
+    /// Start the program asynchronously and close the boot shell.
+    pub detach: bool,
+}
+
+/// The script that actually runs the program and drops the completion marker
+/// when it returns. Detached launches execute this in their child CLI, so
+/// closing the boot CLI cannot skip the marker.
+fn program_sequence(prog_name: &str, extra_args: Option<&str>, stack: Option<u32>) -> String {
     let mut run = format!("\"{PROG_VOLUME}:{prog_name}\"");
     if let Some(args) = extra_args {
         let args = args.trim();
@@ -86,9 +93,26 @@ fn startup_sequence(prog_name: &str, extra_args: Option<&str>) -> String {
             run.push_str(args);
         }
     }
+    let stack = stack.map_or_else(String::new, |n| format!("Stack {n}\n"));
     format!(
-        "FailAt 21\nCD \"{PROG_VOLUME}:\"\n{run}\nEcho >\"{BOOT_VOLUME}:{DONE_MARKER}\" \"done\"\n"
+        "FailAt 21\n{stack}CD \"{PROG_VOLUME}:\"\n{run}\nEcho >\"{BOOT_VOLUME}:{DONE_MARKER}\" \"done\"\n"
     )
+}
+
+/// The generated `S/Startup-Sequence`: a foreground launch performs the work
+/// directly. A detached launch starts a child `Execute` script and closes only
+/// the parent CLI; the child owns both the program and completion marker.
+/// `Echo` is internal alongside `CD`/`FailAt` from Kickstart 2.0 on; on 1.3
+/// the marker line is skipped like the others and the warp gate falls back to
+/// its LoadSeg poll and deadline.
+fn startup_sequence(prog_name: &str, extra_args: Option<&str>, options: RunOptions) -> String {
+    if options.detach {
+        format!(
+            "FailAt 21\nRun >NIL: <NIL: Execute \"{BOOT_VOLUME}:S/{DETACHED_SCRIPT}\"\nEndCLI\n"
+        )
+    } else {
+        program_sequence(prog_name, extra_args, options.stack)
+    }
 }
 
 /// Whether the guest can address this file name at all. The services
@@ -114,6 +138,16 @@ fn guest_safe_name(name: &str) -> bool {
 pub fn prepare(
     program: &Path,
     extra_args: Option<&str>,
+    stage_root: Option<&Path>,
+) -> Result<PreparedRun> {
+    prepare_with_options(program, extra_args, RunOptions::default(), stage_root)
+}
+
+/// Stage a run with debugger-controlled guest shell options.
+pub fn prepare_with_options(
+    program: &Path,
+    extra_args: Option<&str>,
+    options: RunOptions,
     stage_root: Option<&Path>,
 ) -> Result<PreparedRun> {
     let program =
@@ -160,9 +194,21 @@ pub fn prepare(
         .with_context(|| format!("creating {}", boot_dir.join("S").display()))?;
     std::fs::write(
         boot_dir.join("S").join("Startup-Sequence"),
-        startup_sequence(&prog_name, extra_args),
+        startup_sequence(&prog_name, extra_args, options),
     )
     .with_context(|| format!("writing the Startup-Sequence under {}", boot_dir.display()))?;
+    if options.detach {
+        std::fs::write(
+            boot_dir.join("S").join(DETACHED_SCRIPT),
+            program_sequence(&prog_name, extra_args, options.stack),
+        )
+        .with_context(|| {
+            format!(
+                "writing the detached run script under {}",
+                boot_dir.display()
+            )
+        })?;
+    }
 
     Ok(PreparedRun {
         boot_dir,
@@ -205,6 +251,7 @@ fn sweep_stale_boot_dirs(stage_root: &Path, current: &Path) {
 /// WHDLoad derivation the machine, ROM, and memory stay whatever the
 /// configuration and CLI flags say.
 pub fn apply_to_raw(raw: &mut RawConfig, prepared: &PreparedRun) {
+    raw.run_program_dir = Some(prepared.prog_dir.clone());
     raw.filesys.push(RawFilesysMount {
         path: prepared.boot_dir.to_string_lossy().into_owned(),
         volume: Some(BOOT_VOLUME.to_string()),
@@ -312,17 +359,59 @@ mod tests {
     #[test]
     fn startup_sequence_quotes_the_program_and_cds_to_the_volume() {
         assert_eq!(
-            startup_sequence("hello", None),
+            startup_sequence("hello", None, RunOptions::default()),
             format!("FailAt 21\nCD \"RunProg:\"\n\"RunProg:hello\"\n{DONE_LINE}")
         );
         assert_eq!(
-            startup_sequence("my game", Some("  -level 2  ")),
+            startup_sequence("my game", Some("  -level 2  "), RunOptions::default()),
             format!("FailAt 21\nCD \"RunProg:\"\n\"RunProg:my game\" -level 2\n{DONE_LINE}")
         );
         // Whitespace-only args collapse to none.
         assert_eq!(
-            startup_sequence("hello", Some("   ")),
+            startup_sequence("hello", Some("   "), RunOptions::default()),
             format!("FailAt 21\nCD \"RunProg:\"\n\"RunProg:hello\"\n{DONE_LINE}")
+        );
+    }
+
+    #[test]
+    fn startup_sequence_honours_stack_and_detach() {
+        assert_eq!(
+            startup_sequence(
+                "hello",
+                Some("-x"),
+                RunOptions {
+                    stack: Some(32_768),
+                    detach: true,
+                },
+            ),
+            "FailAt 21\nRun >NIL: <NIL: Execute \"RunBoot:S/Detached-Run\"\nEndCLI\n"
+        );
+        assert_eq!(
+            program_sequence("hello", Some("-x"), Some(32_768)),
+            format!("FailAt 21\nStack 32768\nCD \"RunProg:\"\n\"RunProg:hello\" -x\n{DONE_LINE}")
+        );
+    }
+
+    #[test]
+    fn detached_prepare_stages_the_child_completion_script() {
+        let dir = temp_dir("runprog-detached");
+        let program = dir.join("hello");
+        std::fs::write(&program, b"hunk").unwrap();
+        let prepared = prepare_with_options(
+            &program,
+            Some("-x"),
+            RunOptions {
+                stack: Some(32_768),
+                detach: true,
+            },
+            Some(&dir.join("stage")),
+        )
+        .unwrap();
+        let child =
+            std::fs::read_to_string(prepared.boot_dir.join("S").join(DETACHED_SCRIPT)).unwrap();
+        assert_eq!(
+            child,
+            format!("FailAt 21\nStack 32768\nCD \"RunProg:\"\n\"RunProg:hello\" -x\n{DONE_LINE}")
         );
     }
 
@@ -407,6 +496,10 @@ mod tests {
         let mut raw = RawConfig::default();
         apply_to_raw(&mut raw, &prepared);
         assert_eq!(raw.filesys.len(), 2);
+        assert_eq!(
+            raw.run_program_dir.as_deref(),
+            Some(prepared.prog_dir.as_path())
+        );
         assert_eq!(raw.filesys[0].volume.as_deref(), Some(BOOT_VOLUME));
         assert_eq!(raw.filesys[0].bootpri, Some(6));
         assert_eq!(

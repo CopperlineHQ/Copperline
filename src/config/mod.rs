@@ -156,6 +156,10 @@ pub struct Config {
     /// AmigaDOS devices `HOSTFS0:`, `HOSTFS1:`, ... (experimental). Empty:
     /// no services board on the autoconfig chain.
     pub filesys: Vec<crate::filesys::MountSpec>,
+    /// Host-only `--run` program directory. This is not a TOML setting; it is
+    /// the authority root for opt-in uaelib file commands.
+    #[doc(hidden)]
+    pub run_program_dir: Option<PathBuf>,
     /// `[[host_disk]]` real host disks attached to the machine. Empty is the
     /// ordinary case: a machine with no real storage bolted to it.
     pub host_disks: Vec<HostDiskConfig>,
@@ -1371,6 +1375,10 @@ pub struct Emulation {
     /// guest programs toggle warp, log debug text and register resources
     /// through it. On by default; `uaelib = false` leaves $F0FF60 floating.
     pub uaelib: bool,
+    /// Permit uaelib function 88's `debug_load` / `debug_save` helpers to
+    /// access files below the `--run` program directory. Off by default: the
+    /// trap is commonly exposed to downloaded guest programs.
+    pub uaelib_files: bool,
     /// Record rewind history from power-on, so the rewind hotkey and menu item
     /// work without opening the debugger. Off by default: capturing costs a
     /// whole-machine serialize every `rewind_interval_frames` and the retained
@@ -2398,6 +2406,7 @@ impl Default for Config {
                 warp_boot_idle: 10.0,
                 warp_until: None,
                 uaelib: true,
+                uaelib_files: false,
                 rewind: false,
                 rewind_budget_mb: REWIND_DEFAULT_BUDGET_MB,
                 rewind_interval_frames: REWIND_DEFAULT_INTERVAL_FRAMES,
@@ -2414,6 +2423,7 @@ impl Default for Config {
             wasm_boards: Vec::new(),
             identify_board: true,
             filesys: Vec::new(),
+            run_program_dir: None,
             host_disks: Vec::new(),
             // The no-[machine] default models the most common and most-
             // targeted Amiga: the A500 Rev 6A (the ECS "Fatter" 8372A Agnus
@@ -2628,6 +2638,8 @@ impl Config {
 pub struct ConfigOverrides {
     pub model: Option<String>,
     pub chipset: Option<String>,
+    /// PAL/NTSC video standard (`--video`).
+    pub video: Option<String>,
     pub cpu: Option<String>,
     pub fpu: Option<bool>,
     pub cpu_clock_mhz: Option<f64>,
@@ -2779,6 +2791,7 @@ impl ConfigOverrides {
     pub fn is_empty(&self) -> bool {
         self.model.is_none()
             && self.chipset.is_none()
+            && self.video.is_none()
             && self.cpu.is_none()
             && self.fpu.is_none()
             && self.cpu_clock_mhz.is_none()
@@ -2842,6 +2855,9 @@ impl ConfigOverrides {
         }
         if let Some(chipset) = &self.chipset {
             raw.chipset.revision = Some(chipset.clone());
+        }
+        if let Some(video) = &self.video {
+            raw.chipset.video = Some(video.clone());
         }
         if let Some(cpu) = &self.cpu {
             raw.cpu.model = Some(cpu.clone());

@@ -117,6 +117,32 @@
                 "type": "string",
                 "description": "Slow RAM size."
               },
+              "memoryFill": {
+                "type": "string",
+                "description": "Cold-start RAM contents: zero, random[:SEED], pattern:WORD, or 0xWORD (copperline --ram-init)."
+              },
+              "fpu": {
+                "type": "boolean",
+                "description": "Fit or omit an FPU (copperline --fpu / --no-fpu)."
+              },
+              "stack": {
+                "type": "integer",
+                "minimum": 4,
+                "description": "Set the AmigaDOS CLI stack before launching the program."
+              },
+              "ntsc": {
+                "type": "boolean",
+                "description": "Use NTSC video timing when true, PAL when false."
+              },
+              "detach": {
+                "type": "boolean",
+                "description": "Launch the guest program asynchronously and close the boot CLI."
+              },
+              "emulatorLog": {
+                "type": "boolean",
+                "description": "Mirror the launched emulator log into the Debug Console.",
+                "default": false
+              },
               "rtcTime": {
                 "type": "string",
                 "description": "Seed the guest clock (copperline --rtc-time), for reproducible runs."

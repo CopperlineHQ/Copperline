@@ -77,6 +77,7 @@ Commands are case-insensitive. Addresses and data values use hexadecimal notatio
 | `FIND HEXBYTES [START]` | Search CPU-visible memory (RAM and ROM) for byte sequence |
 | `WRITER ADDR` | Query last instruction that modified memory at `ADDR` |
 | `DBGRES` | List debug resources (bitmaps, palettes, copper lists) registered by guest code via the uaelib trap (distinct from `RESOURCES`, which lists Exec OS resource nodes) |
+| `OUTROM` | Run until PC leaves the default Kickstart ROM window (`$F80000-$FFFFFF`) |
 | `HISTORY [N]` (or `H`) | Display recent instruction history |
 | `STACK` (or `BT`) | Heuristic stack trace of recent return addresses |
 | `POKE ADDR VAL` | Write word value to memory |

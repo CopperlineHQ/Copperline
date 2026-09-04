@@ -751,6 +751,17 @@ impl Session {
                 {
                     return finish("target", format!("pc ${pc:06X}"), extra_ids, false);
                 }
+                Some(RunTarget::PcOutside { lo, hi }) => {
+                    let pc = self.emu.machine.pc() & self.emu.machine.ui_addr_mask();
+                    if !(lo..=hi).contains(&pc) {
+                        return finish(
+                            "target",
+                            format!("pc ${pc:06X} outside ${lo:06X}-${hi:06X}"),
+                            extra_ids,
+                            false,
+                        );
+                    }
+                }
                 Some(RunTarget::Frame(frame)) if self.emu.bus().emulated_frames() >= frame => {
                     return finish("target", format!("frame {frame}"), extra_ids, false);
                 }
@@ -789,6 +800,16 @@ impl Session {
                         if self.emu.machine.pc() & mask == pc & mask
                             || self.emu.machine.ui_debug_stop_pending()
                         {
+                            break;
+                        }
+                    }
+                }
+                Some(RunTarget::PcOutside { lo, hi }) => {
+                    let mask = self.emu.machine.ui_addr_mask();
+                    for _ in 0..PC_POLL_CHUNK {
+                        self.emu.debug_step_realtime()?;
+                        let pc = self.emu.machine.pc() & mask;
+                        if !(lo..=hi).contains(&pc) || self.emu.machine.ui_debug_stop_pending() {
                             break;
                         }
                     }

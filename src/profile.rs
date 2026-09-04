@@ -32,6 +32,22 @@ use serde_json::{json, Value};
 pub const DEFAULT_PROFILE_FRAMES: u64 = 500;
 pub const MAX_PROFILE_FRAMES: u64 = 100_000;
 
+/// Deferred start condition for a profile capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileTrigger {
+    Frame(u64),
+    BusyCckOver(u64),
+}
+
+impl ProfileTrigger {
+    pub fn value(self) -> Value {
+        match self {
+            Self::Frame(frame) => json!({"frame": frame}),
+            Self::BusyCckOver(cck) => json!({"busy_cck_over": cck}),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenshotMode {
     None,
@@ -73,6 +89,8 @@ pub struct ProfileOptions {
     /// Sample the PC once per frame (frame-boundary sample; no
     /// precise-loop cost, unlike a per-instruction histogram).
     pub pc_samples: bool,
+    /// Keep the capture armed but write nothing until this condition matches.
+    pub trigger: Option<ProfileTrigger>,
 }
 
 /// A running capture: the streamed record file plus the bookkeeping the
@@ -88,6 +106,8 @@ pub struct ProfileCapture {
     /// or adopted one the analyzer pane handed over on close.
     armed_analyzer: bool,
     done: bool,
+    triggered: bool,
+    triggered_at: Option<u64>,
 }
 
 impl ProfileCapture {
@@ -101,6 +121,7 @@ impl ProfileCapture {
         crate::paths::ensure_parent(&opts.path)?;
         std::fs::create_dir_all(&opts.path)?;
         let jsonl = BufWriter::new(File::create(opts.path.join("profile.jsonl"))?);
+        let triggered = opts.trigger.is_none();
         Ok(Self {
             opts,
             jsonl,
@@ -110,6 +131,8 @@ impl ProfileCapture {
             last_retired: retired,
             armed_analyzer,
             done: false,
+            triggered,
+            triggered_at: triggered.then_some(frame),
         })
     }
 
@@ -137,6 +160,27 @@ impl ProfileCapture {
 
     pub fn last_frame_seen(&self) -> Option<u64> {
         self.last_frame_seen
+    }
+
+    /// Decide whether this frame is part of the capture. Skipped frames
+    /// rebaseline both the frame and retired-instruction counters.
+    pub fn should_record(&mut self, frame: u64, busy_cck: u64, retired: u64) -> bool {
+        if self.triggered {
+            return true;
+        }
+        let fired = match self.opts.trigger {
+            Some(ProfileTrigger::Frame(target)) => frame >= target,
+            Some(ProfileTrigger::BusyCckOver(limit)) => busy_cck > limit,
+            None => true,
+        };
+        if fired {
+            self.triggered = true;
+            self.triggered_at = Some(frame);
+        } else {
+            self.last_frame_seen = Some(frame);
+            self.last_retired = retired;
+        }
+        fired
     }
 
     /// Retired instructions since the last take, rebaselining.
@@ -184,6 +228,9 @@ impl ProfileCapture {
             "slots": self.opts.slots,
             "screenshots": self.opts.screenshots.name(),
             "pc_samples": self.opts.pc_samples,
+            "trigger": self.opts.trigger.map(ProfileTrigger::value),
+            "triggered": self.triggered,
+            "triggered_at": self.triggered_at,
             "done": self.done,
         })
     }
@@ -206,12 +253,14 @@ impl ProfileCapture {
                 "slots": self.opts.slots,
                 "screenshots": self.opts.screenshots.name(),
                 "pc_samples": self.opts.pc_samples,
+                "trigger": self.opts.trigger.map(ProfileTrigger::value),
             },
             "owners": crate::bus::CHIP_BUS_OWNER_NAMES,
             "cpu_wait_classes": crate::bus::CPU_WAIT_CLASS_NAMES,
             "started": { "frame": self.started.0, "seconds": self.started.1 },
             "ended": { "frame": frame, "seconds": seconds },
             "frames_written": self.frames_written,
+            "triggered_at": self.triggered_at,
             "resources": resources,
         });
         std::fs::write(
@@ -271,6 +320,7 @@ mod tests {
             slots: false,
             screenshots: ScreenshotMode::None,
             pc_samples: false,
+            trigger: None,
         };
         let mut capture = ProfileCapture::create(opts, 100, 2.0, 1000, true).unwrap();
         assert_eq!(capture.take_retired_delta(1500), 500);
@@ -294,6 +344,29 @@ mod tests {
         assert_eq!(summary["version"], 1);
         assert_eq!(summary["owners"][6], "blitter");
         assert_eq!(summary["started"]["frame"], 100);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deferred_triggers_arm_without_recording_early_frames() {
+        let dir =
+            std::env::temp_dir().join(format!("copperline-profile-trigger-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let opts = ProfileOptions {
+            path: dir.clone(),
+            frames: 2,
+            slots: false,
+            screenshots: ScreenshotMode::None,
+            pc_samples: false,
+            trigger: Some(ProfileTrigger::BusyCckOver(100)),
+        };
+        let mut capture = ProfileCapture::create(opts, 5, 0.1, 10, false).unwrap();
+        assert!(!capture.should_record(6, 100, 20));
+        assert!(capture.should_record(7, 101, 30));
+        assert_eq!(capture.take_retired_delta(30), 10);
+        let status = capture.status_value(true);
+        assert_eq!(status["triggered"], true);
+        assert_eq!(status["triggered_at"], 7);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

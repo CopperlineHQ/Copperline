@@ -221,6 +221,9 @@ pub struct CpuStepSlice {
     pub stopped: bool,
 }
 
+/// Exact FP0-FP7 extended values followed by FPCR, FPSR and FPIAR.
+pub type DebugFpuRegisters = ([(u16, u64); 8], u32, u32, u32);
+
 /// Bincode wrappers naming the save-state component in errors (bincode's
 /// boxed error does not satisfy anyhow's `.context` bounds directly).
 fn serialize_component<W: std::io::Write, T: serde::Serialize>(
@@ -1564,6 +1567,20 @@ impl M68kMachine {
         }
     }
 
+    /// Raw 80-bit FPU registers and the three control registers, when an
+    /// FPU is fitted. The `(sign+exponent, mantissa)` form is exact and
+    /// stable for debugger protocols.
+    pub fn debug_fpu_registers(&self) -> Option<DebugFpuRegisters> {
+        self.fpu_enabled.then(|| {
+            (
+                self.cpu.fpr.map(|f| (f.sign_exp, f.mantissa)),
+                self.cpu.fpcr,
+                self.cpu.fpsr,
+                self.cpu.fpiar,
+            )
+        })
+    }
+
     /// Set one GDB-style core register: D0-D7, A0-A7, SR, PC.
     pub fn debug_set_register(&mut self, reg: usize, value: u32) -> bool {
         match reg {
@@ -1797,12 +1814,25 @@ impl M68kMachine {
         filter: Option<crate::debugger::WatchSource>,
         pc: Option<u32>,
     ) -> bool {
+        self.ui_toggle_watch_access(addr, filter, pc, crate::debugger::WatchAccess::Write)
+    }
+
+    /// Toggle a word watch with an explicit read/write access class.
+    pub fn ui_toggle_watch_access(
+        &mut self,
+        addr: u32,
+        filter: Option<crate::debugger::WatchSource>,
+        pc: Option<u32>,
+        access: crate::debugger::WatchAccess,
+    ) -> bool {
         let addr = addr & self.cpu.address_mask & !1;
         let current = self.bus.bus.peek_word_any(addr);
         // Even, like every instruction address: an odd qualifier could
         // never match a writer PC and the watch would never fire.
         let pc = pc.map(|pc| pc & self.cpu.address_mask & !1);
-        let added = self.ui_breaks.toggle_watch(addr, current, filter, pc);
+        let added = self
+            .ui_breaks
+            .toggle_watch(addr, current, filter, pc, access);
         let addrs: Vec<u32> = self.ui_breaks.watches.iter().map(|w| w.addr).collect();
         self.bus.bus.set_ui_mem_watches(&addrs);
         added
@@ -2118,6 +2148,9 @@ impl M68kMachine {
     fn ui_check_breaks_after_step(&mut self) {
         use crate::debugger::DebugStop;
         let pc = self.cpu.pc & self.cpu.address_mask;
+        // Drain read latches even when a higher-priority stop wins, so a
+        // breakpoint cannot leave a stale read to fire after resume.
+        let read_hits = self.bus.bus.take_ui_mem_reads();
         // Exception catchpoints: the core records every exception entry
         // (trap, fault, or interrupt) as it loads the handler vector;
         // drain it here so a hit stops at the handler's first
@@ -2149,15 +2182,22 @@ impl M68kMachine {
         // A read-side DMA channel touching a watched word leaves the
         // value alone, so the compare loop below can never see it; the
         // channels latch the access on the bus and it is promoted here.
-        if let Some(hit) = self.bus.bus.take_ui_dma_hit() {
-            if let Some(watch) = self
-                .ui_breaks
-                .watches
-                .iter()
-                .find(|w| w.addr == hit.addr && w.pc.is_none())
-            {
+        for hit in read_hits {
+            if let Some(index) = self.ui_breaks.watches.iter().position(|w| {
+                w.addr == hit.addr
+                    && w.access.reads()
+                    && (w.pc.is_none()
+                        || (hit.source == crate::debugger::WatchSource::Cpu
+                            && w.pc == Some(writer_pc)))
+            }) {
+                let watch = &self.ui_breaks.watches[index];
                 if watch.filter.is_none_or(|f| f.accepts(hit.source)) {
                     let value = self.bus.bus.peek_word_any(hit.addr);
+                    // A read-modify-write instruction has completed its write
+                    // by this boundary too. The read stop wins, but that write
+                    // must not become a second stale stop on resume.
+                    self.ui_breaks.watches[index].last = value;
+                    let _ = self.bus.bus.ui_take_mem_writer(hit.addr);
                     self.ui_stop = Some(DebugStop::Watch {
                         addr: hit.addr,
                         old: value,
@@ -2166,6 +2206,7 @@ impl M68kMachine {
                         source: hit.source,
                         vpos: hit.vpos,
                         hpos: hit.hpos,
+                        access: crate::debugger::WatchAccess::Read,
                     });
                     return;
                 }
@@ -2179,6 +2220,9 @@ impl M68kMachine {
             }
             let old = self.ui_breaks.watches[i].last;
             self.ui_breaks.watches[i].last = new;
+            if !self.ui_breaks.watches[i].access.writes() {
+                continue;
+            }
             // Attribute the change: a DMA engine that flagged a write to
             // this word wins over the default CPU story.
             let writer = self.bus.bus.ui_take_mem_writer(addr);
@@ -2211,6 +2255,7 @@ impl M68kMachine {
                 source,
                 vpos,
                 hpos,
+                access: crate::debugger::WatchAccess::Write,
             });
             return;
         }
@@ -3283,6 +3328,10 @@ impl CpuBus {
 
     fn read_sized(&mut self, address: u32, size: usize, kind: CpuBusAccessKind) -> u32 {
         let addr = self.mask(address);
+        if kind == CpuBusAccessKind::Read {
+            self.bus
+                .ui_note_memory_read(crate::debugger::WatchSource::Cpu, addr, size as u32);
+        }
         if self.bus.heat_map_armed() {
             // Instruction fetches count as reads: seeing where the CPU is
             // executing is half of what the map is for.
@@ -5886,6 +5935,81 @@ mod tests {
             14,
             18,
         );
+        Ok(())
+    }
+
+    #[test]
+    fn cpu_data_reads_fire_read_but_not_write_watchpoints() -> Result<()> {
+        let program = &[0x3039, 0x0000, 0x0400]; // MOVE.W $00000400,D0
+        let pc = ROM_BASE as u32 + 0x0100;
+
+        let mut read = machine_with_program(pc, program)?;
+        read.ui_toggle_watch_access(0x0400, None, None, crate::debugger::WatchAccess::Read);
+        read.step_slice(1)?;
+        assert!(matches!(
+            read.take_ui_debug_stop(),
+            Some(crate::debugger::DebugStop::Watch {
+                addr: 0x0400,
+                access: crate::debugger::WatchAccess::Read,
+                source: crate::debugger::WatchSource::Cpu,
+                ..
+            })
+        ));
+
+        let mut write = machine_with_program(pc, program)?;
+        write.ui_toggle_watch(0x0400);
+        write.step_slice(1)?;
+        assert!(write.take_ui_debug_stop().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn access_watch_rebaselines_a_read_modify_write_before_resume() -> Result<()> {
+        let pc = ROM_BASE as u32 + 0x0100;
+        let program = &[
+            0x4AF9, 0x0000, 0x0400, // TAS.B $00000400
+            0x4E71, // NOP
+        ];
+        let mut machine = machine_with_program(pc, program)?;
+        machine.bus_mut().mem.chip_ram[0x0400] = 0x12;
+        machine.ui_toggle_watch_access(0x0400, None, None, crate::debugger::WatchAccess::Access);
+
+        machine.step_slice(1)?;
+        assert!(matches!(
+            machine.take_ui_debug_stop(),
+            Some(crate::debugger::DebugStop::Watch {
+                addr: 0x0400,
+                access: crate::debugger::WatchAccess::Read,
+                ..
+            })
+        ));
+        assert!(machine.bus_mut().ui_take_mem_writer(0x0400).is_none());
+
+        machine.step_slice(1)?;
+        assert!(
+            machine.take_ui_debug_stop().is_none(),
+            "the TAS write must not surface as a stale second stop"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn odd_byte_read_touches_only_the_word_that_contains_it() -> Result<()> {
+        let pc = ROM_BASE as u32 + 0x0100;
+        let program = &[0x1039, 0x0000, 0x0401]; // MOVE.B $00000401,D0
+
+        let mut containing = machine_with_program(pc, program)?;
+        containing.ui_toggle_watch_access(0x0400, None, None, crate::debugger::WatchAccess::Read);
+        containing.step_slice(1)?;
+        assert!(matches!(
+            containing.take_ui_debug_stop(),
+            Some(crate::debugger::DebugStop::Watch { addr: 0x0400, .. })
+        ));
+
+        let mut adjacent = machine_with_program(pc, program)?;
+        adjacent.ui_toggle_watch_access(0x0402, None, None, crate::debugger::WatchAccess::Read);
+        adjacent.step_slice(1)?;
+        assert!(adjacent.take_ui_debug_stop().is_none());
         Ok(())
     }
 

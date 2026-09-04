@@ -392,7 +392,7 @@ pub fn capabilities() -> Value {
             "filter": f.filter,
             "label": f.label,
             "description": f.description,
-            "default": false,
+            "default": f.default,
         })).collect::<Vec<_>>(),
     })
 }

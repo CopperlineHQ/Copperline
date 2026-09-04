@@ -244,7 +244,7 @@ events.unsubscribe {"events":["serial"]}
 - `step_out`: Step out of current subroutine.
 - `step_copper`: Step single Copper instruction.
 - `step_frame {"n": 1}`: Step video frames.
-- `run_until {"pc" | "vpos" | "frame" | "cck" | "seconds" | "stable_frames"}`: Run until condition.
+- `run_until {"pc" | "pc_outside" | "vpos" | "frame" | "cck" | "seconds" | "stable_frames"}`: Run until condition. `pc_outside` is `[LOW,HIGH]`, or `true` for the default Kickstart window `$F80000-$FFFFFF`.
 - `pause`: Pause active execution.
 - `machine.reset {"kind": "warm"|"cold"}`: Reset the emulated machine (default: warm).
 
@@ -260,7 +260,7 @@ events.unsubscribe {"events":["serial"]}
 - `last_writer {"addr": "..."}`: Find the instruction that last wrote to memory address.
 
 ### State inspection and modification
-- `regs.get` / `regs.set {"reg": "...", "value": ...}`: Read or modify 68000 registers.
+- `regs.get` / `regs.set {"reg": "...", "value": ...}`: Read or modify 68k registers. `regs.get` includes exact raw FP0-FP7 plus FPCR/FPSR/FPIAR when an FPU is fitted.
 - `mem.read {"addr": ..., "len": ..., "encoding": "hex"|"base64"}` / `mem.write {"addr": ..., "data": "...", "encoding": "hex"|"base64"}`: Read or modify memory.
 - `disasm {"addr": ..., "count": ...}`: Disassemble instructions at address (default: PC).
 - `custom.read {"reg": ...}` / `custom.dump`: Query custom chipset registers.
@@ -284,13 +284,14 @@ events.unsubscribe {"events":["serial"]}
 - `memory.heatmap {"enabled": ..., "base": ..., "span": ...}`: Enable or configure address-space access tracking.
 - `memory.heatmap.report {"path": "..."}`: Export memory access heatmap.
 - `debug.resources`: List bitmaps, palettes, and copper lists registered by guest software via the [uaelib trap](../guide/run.md#uaelib-trap).
+- `debug.resource.export {"address": ..., "path": "...png"}`: Export a registered bitmap or palette through the same decoder as the Resources tab.
 - `debug.idle`: Query guest idle time statistics reported via uaelib idle markers.
 - `trace.start {"path": "...", "max_lines": ...}` / `trace.stop` / `trace.status`: Control instruction execution trace logging.
 - `waveform.start {"path": "...", "trigger": "...", "duration": "...", "signals": "..."}` / `waveform.stop` / `waveform.status`: Control VCD logic analyzer waveform capture.
-- `profile.start {"path": "...", "frames": ..., "slots": ..., "screenshots": "none"|"every"|"last", "pc_samples": ...}` / `profile.stop` / `profile.status`: Export per-frame profiling data (DMA ownership, blit records, CPU chip-bus wait attribution by denier and access kind with the top stalled PCs, guest idle time, retired instructions) streamed to `profile.jsonl` with a `profile.json` summary upon stop; see [](profiling). Arms Frame Analyzer tracing for the session.
+- `profile.start {"path": "...", "frames": ..., "slots": ..., "screenshots": "none"|"every"|"last", "pc_samples": ..., "trigger": {"frame": F}|{"busy_cck_over": N}}` / `profile.stop` / `profile.status`: Export per-frame profiling data (DMA ownership, blit records, CPU chip-bus wait attribution by denier and access kind with the top stalled PCs, guest idle time, retired instructions) streamed to `profile.jsonl` with a `profile.json` summary upon stop; see [](profiling). Arms Frame Analyzer tracing immediately and begins recording only when an optional trigger matches.
 
 ### Breakpoints and traps
-- `break.add`: Add breakpoint (`pc`, `watch`, `reg_watch`, `beam`, `copper`, `catch`, `loadseg`).
+- `break.add`: Add breakpoint (`pc`, `watch`, `reg_watch`, `beam`, `copper`, `catch`, `loadseg`). A memory watch accepts `"access": "write"|"read"|"access"` (default `write`).
 - `break.remove {"id": ...}`: Remove breakpoint by ID.
 - `break.list`: List all active breakpoints.
 - `break.clear`: Remove all breakpoints.

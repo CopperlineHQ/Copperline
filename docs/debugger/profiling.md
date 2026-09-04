@@ -7,7 +7,8 @@ session before starting a new one.
 
 ```text
 profile.start {"path": "out/profile", "frames": 500, "slots": true,
-               "screenshots": "last", "pc_samples": true}
+               "screenshots": "last", "pc_samples": true,
+               "trigger": {"busy_cck_over": 60000}}
 profile.stop
 profile.status
 ```
@@ -19,6 +20,12 @@ ensures that recorded data is preserved even if emulation stops unexpectedly.
 The `frames` parameter defaults to 500 (approx. 10 seconds in PAL) and is
 capped at 100,000. When the frame budget is reached, capture halts
 automatically (`profile.status` reports `done`).
+
+An optional `trigger` keeps the profiler armed but does not write records until
+an absolute emulated `frame` is reached or a completed frame's busy colour-clock
+count exceeds `busy_cck_over`. Busy clocks are the frame length minus uaelib
+idle markers when the guest supplies them; otherwise the traced frame length is
+used. `profile.status` reports `triggered` and `triggered_at`.
 
 Running a profile capture activates Frame Analyzer bus tracing, which
 temporarily suspends run-ahead input latency reduction. Tracing is shared with

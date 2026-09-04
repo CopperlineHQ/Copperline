@@ -127,8 +127,10 @@ fn validate_benchmark_args(cli: &CliArgs) -> Result<()> {
 }
 
 fn validate_run_args(cli: &CliArgs) -> Result<()> {
-    if cli.run_args.is_some() && cli.run.is_none() {
-        return Err(anyhow!("--run-args needs --run"));
+    if (cli.run_args.is_some() || cli.run_stack.is_some() || cli.run_detach) && cli.run.is_none() {
+        return Err(anyhow!(
+            "--run-args, --run-stack, and --run-detach need --run"
+        ));
     }
     if cli.run.is_some() && cli.whdload.is_some() {
         return Err(anyhow!(
@@ -808,7 +810,15 @@ fn main() -> Result<()> {
     let mut run_prog_name: Option<String> = None;
     let mut run_warp: Option<copperline::runprog::WarpLaunch> = None;
     if let Some(program) = &cli.run {
-        let prepared = copperline::runprog::prepare(program, cli.run_args.as_deref(), None)?;
+        let prepared = copperline::runprog::prepare_with_options(
+            program,
+            cli.run_args.as_deref(),
+            copperline::runprog::RunOptions {
+                stack: cli.run_stack,
+                detach: cli.run_detach,
+            },
+            None,
+        )?;
         let mut derived = raw_cfg.clone();
         copperline::runprog::apply_to_raw(&mut derived, &prepared);
         cfg = Config::try_from(derived)?;
@@ -1610,9 +1620,20 @@ mod tests {
 
     #[test]
     fn run_flags_parse_and_validate() {
-        let cli = parse(&["--run", "build/hello", "--run-args", "-level 2"]).unwrap();
+        let cli = parse(&[
+            "--run",
+            "build/hello",
+            "--run-args",
+            "-level 2",
+            "--run-stack",
+            "32768",
+            "--run-detach",
+        ])
+        .unwrap();
         assert_eq!(cli.run.as_deref(), Some(Path::new("build/hello")));
         assert_eq!(cli.run_args.as_deref(), Some("-level 2"));
+        assert_eq!(cli.run_stack, Some(32_768));
+        assert!(cli.run_detach);
         assert!(validate_run_args(&cli).is_ok());
 
         // --run-args without --run is a mistake worth catching.
@@ -2370,6 +2391,8 @@ mod tests {
             "3",
             "--chipset",
             "AGA",
+            "--video",
+            "NTSC",
             "--jit",
         ])?;
         assert_eq!(args.overrides.model.as_deref(), Some("A1200"));
@@ -2383,6 +2406,7 @@ mod tests {
         assert_eq!(args.overrides.ram_init.as_deref(), Some("pattern:0x5555"));
         assert_eq!(args.overrides.floppy_drives, Some(3));
         assert_eq!(args.overrides.chipset.as_deref(), Some("AGA"));
+        assert_eq!(args.overrides.video.as_deref(), Some("NTSC"));
         Ok(())
     }
 

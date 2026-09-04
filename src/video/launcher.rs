@@ -2460,6 +2460,9 @@ pub struct MachineSetup {
     warp_until: Option<f64>,
     /// Same again for the uaelib trap (crate::uaelib).
     uaelib: bool,
+    /// Host-file commands have no launcher control, but a loaded opt-in must
+    /// survive Save just like the uaelib enable itself.
+    uaelib_files: bool,
     joystick_input_mode: JoystickInputMode,
     mouse_sensitivity: u8,
     mouse_capture: MouseCapture,
@@ -2795,6 +2798,7 @@ impl MachineSetup {
             warp_boot_idle: cfg.emulation.warp_boot_idle,
             warp_until: cfg.emulation.warp_until,
             uaelib: cfg.emulation.uaelib,
+            uaelib_files: cfg.emulation.uaelib_files,
             joystick_input_mode: cfg.joystick_input_mode,
             mouse_sensitivity: cfg.mouse_sensitivity,
             mouse_capture: cfg.mouse_capture,
@@ -3439,6 +3443,9 @@ impl MachineSetup {
         if self.uaelib != base.emulation.uaelib {
             raw.emulation.uaelib = Some(self.uaelib);
         }
+        if self.uaelib_files != base.emulation.uaelib_files {
+            raw.emulation.uaelib_files = Some(self.uaelib_files);
+        }
         if self.joystick_input_mode != base.joystick_input_mode {
             raw.input.joystick = Some(self.joystick_input_mode.label().to_string());
         }
@@ -3735,6 +3742,7 @@ impl MachineSetup {
         self.warp = base.emulation.warp_speed;
         self.run_ahead_frames = base.emulation.run_ahead_frames;
         self.uaelib = base.emulation.uaelib;
+        self.uaelib_files = base.emulation.uaelib_files;
         self.cartridge = base.cartridge.model;
         self.cartridge_rom = None;
         self.joystick_input_mode = base.joystick_input_mode;

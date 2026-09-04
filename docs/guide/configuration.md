@@ -43,6 +43,7 @@ range checks as the equivalent TOML fields:
 |---|---|---|
 | `--model NAME` | `[machine] profile` | `A1000`, `A500`, `A500OCS`, `A500Plus`, `A600`, `A1200`, `A3000`, `A4000`, `CDTV`, `CD32` |
 | `--chipset NAME` | `[chipset] revision` | `OCS`, `ECS`, `AGA` |
+| `--video STANDARD` | `[chipset] video` | `PAL`, `NTSC` |
 | `--cpu MODEL` | `[cpu] model` | `68000`, `68010`, `68EC020`, `68020`, `68030`, `68040`, `68060` |
 | `--cpu-clock MHZ` | `[cpu] clock_mhz` | a number of MHz |
 | `--fpu` / `--no-fpu` | `[cpu] fpu` | fit / omit a 68881/68882 |
@@ -378,6 +379,7 @@ warp_boot = false          # warp the boot until storage goes idle
 warp_boot_idle = 10        # ...for this many emulated seconds
 # warp_until = 12.0        # or warp until an absolute emulated time
 uaelib = true              # WinUAE-compatible uaelib trap at $F0FF60
+uaelib_files = false       # opt-in file helpers, below the --run directory
 rewind = false             # true = record rewind history from power-on
 rewind_budget_mb = 256     # host memory the rewind history may hold
 rewind_interval_frames = 25 # emulated frames per rewind step

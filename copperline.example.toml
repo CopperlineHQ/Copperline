@@ -105,6 +105,12 @@ pacing_budget = "cycles"
 # automatically disabled on CDTV configurations where extended ROM occupies $F00000.
 # uaelib = true
 
+# Permit uaelib debug_load/debug_save calls to read and write files below the
+# --run program's directory. Disabled by default because guest programs may be
+# untrusted. Absolute paths, parent-directory traversal and transfers over
+# 16 MiB are always rejected.
+# uaelib_files = false
+
 # Record rewind history from power-on, so Cmd+Z / Alt+Z (and the Rewind menu
 # item) can step the machine back through it. Off by default because it is
 # not free: every rewind_interval_frames the whole machine is serialized, and

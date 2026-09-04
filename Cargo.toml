@@ -303,6 +303,13 @@ ureq = { version = "3", default-features = false, features = [
     "gzip",
 ], optional = true }
 
+# The opt-in uaelib file bridge opens guest paths through a held directory
+# capability, so path lookup remains beneath the --run directory even when a
+# hostile process swaps symlinks concurrently. Browser builds have no host
+# filesystem authority and do not compile this dependency.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+cap-std = "4.0"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSImage"] }

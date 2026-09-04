@@ -465,13 +465,80 @@ impl App {
                 }
                 ResourceKind::Unknown(_) => None,
             });
+        let exportable = panel.resource_selected.is_some_and(|address| {
+            resources.iter().any(|resource| {
+                resource.address == address
+                    && matches!(
+                        resource.kind,
+                        ResourceKind::Bitmap { .. } | ResourceKind::Palette { .. }
+                    )
+            })
+        });
 
         ui::AnalyzerResourcesView {
             rows,
             hidden_above,
             hidden_below,
             detail,
+            exportable,
         }
+    }
+
+    /// Save the selected guest bitmap/palette with the protocol export path.
+    pub(super) fn frame_analyzer_save_resource(&mut self) {
+        let Some(resource) = self
+            .frame_analyzer_panel
+            .as_ref()
+            .and_then(|panel| panel.resource_selected)
+            .and_then(|address| {
+                self.emu
+                    .uaelib_resources()
+                    .iter()
+                    .find(|resource| resource.address == address)
+                    .cloned()
+            })
+        else {
+            self.show_osd("Select a bitmap or palette resource first");
+            return;
+        };
+        if !matches!(
+            resource.kind,
+            crate::uaelib::ResourceKind::Bitmap { .. }
+                | crate::uaelib::ResourceKind::Palette { .. }
+        ) {
+            self.show_osd("Only bitmap and palette resources export as PNG");
+            return;
+        }
+        let name: String = resource
+            .name
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        self.suspend_live_audio_for_host_io();
+        let picked = rfd::FileDialog::new()
+            .set_title("Save debug resource")
+            .set_file_name(format!(
+                "{}.png",
+                if name.is_empty() { "resource" } else { &name }
+            ))
+            .add_filter("PNG image", &["png"])
+            .save_file();
+        if let Some(path) = picked {
+            match self.emu.export_uaelib_resource(resource.address, &path) {
+                Ok(_) => self.show_osd(format!("Saved {}", display_file_name(&path))),
+                Err(error) => {
+                    warn!("resource export failed ({}): {error:#}", path.display());
+                    self.show_osd("Resource export failed (see log)");
+                }
+            }
+        }
+        self.finish_host_io_pause();
     }
 
     /// The palette a bitmap preview is decoded with: the first palette

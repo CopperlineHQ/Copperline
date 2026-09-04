@@ -19,8 +19,9 @@
 //!   subscribers.
 //! - **88** the template's `debug_cmd` multiplexer: resource registration
 //!   (bitmaps, palettes, copper lists) and idle markers are recorded for the
-//!   control protocol; overlay drawing and file load/save are accepted
-//!   no-ops.
+//!   control protocol; overlay drawing is presented by the window. File
+//!   load/save is disabled unless `[emulation] uaelib_files = true`, and is
+//!   then confined to the `--run` program directory.
 //! - everything else returns 0 with no side effects (Copperline does not
 //!   impersonate WinUAE's version through function 0).
 //!
@@ -51,6 +52,15 @@
 //! and hides it, as WinUAE relocates its rtarea on that machine.
 
 use std::collections::VecDeque;
+use std::path::{Component, Path, PathBuf};
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Arc;
+
+#[cfg(not(target_arch = "wasm32"))]
+use cap_std::ambient_authority;
+#[cfg(not(target_arch = "wasm32"))]
+use cap_std::fs::Dir;
 
 use crate::memory::Memory;
 use crate::zorro_device::{dma_read_byte, dma_write_byte};
@@ -83,8 +93,55 @@ pub const CONSOLE_LINE_CAPACITY: usize = 500;
 const CFG_STRING_MAX: usize = 32_768;
 /// Sanity cap on a function-86 string.
 const DEBUG_TEXT_MAX: usize = 4_096;
+/// Bound both guest-provided file names and the allocation used to copy one.
+const DEBUG_FILE_NAME_MAX: usize = 4_096;
+/// Hard cap for either direction of the opt-in guest/host file bridge.
+pub const DEBUG_FILE_MAX: usize = 16 * 1024 * 1024;
 /// `sizeof(struct debug_resource)` in the template.
 const RESOURCE_STRUCT_SIZE: usize = 50;
+
+/// Host-only authority for the opt-in file bridge. Keeping the directory
+/// handle open is the security boundary: every guest path is resolved by
+/// `cap_std` relative to this handle with beneath/no-follow protections, so a
+/// concurrent symlink swap cannot redirect an already-authorized operation.
+#[derive(Clone, Debug)]
+pub(crate) struct FileAuthority {
+    root: PathBuf,
+    #[cfg(not(target_arch = "wasm32"))]
+    dir: Arc<Dir>,
+}
+
+impl FileAuthority {
+    fn open(&self, relative: &Path) -> std::io::Result<std::fs::File> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.dir.open(relative).map(cap_std::fs::File::into_std)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = relative;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "uaelib file access is unavailable in browser builds",
+            ))
+        }
+    }
+
+    fn create(&self, relative: &Path) -> std::io::Result<std::fs::File> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.dir.create(relative).map(cap_std::fs::File::into_std)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = relative;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "uaelib file access is unavailable in browser builds",
+            ))
+        }
+    }
+}
 
 pub const FN_GET_VERSION: u32 = 0;
 pub const FN_CFG_READ: u32 = 81;
@@ -331,6 +388,11 @@ pub struct UaeLib {
     speculative_host_quiet: bool,
     #[serde(skip)]
     stdout_muted: bool,
+    /// Held `--run` directory capability for the opt-in file commands. Host
+    /// authority never travels in a save state; the running session reapplies
+    /// this exact handle after timeline restores.
+    #[serde(skip)]
+    file_authority: Option<FileAuthority>,
     /// Host-only mirror of the echo for the debugger console pane:
     /// bounded, oldest dropped, drained once per committed frame by
     /// `App::service_uaelib`. Fed inside the run-ahead gate but NOT the
@@ -361,6 +423,7 @@ impl UaeLib {
             overlay_dropped: 0,
             speculative_host_quiet: false,
             stdout_muted: false,
+            file_authority: None,
             console_lines: VecDeque::new(),
             #[cfg(test)]
             echoed: Vec::new(),
@@ -640,7 +703,7 @@ impl UaeLib {
     fn debug_cmd(
         &mut self,
         args: [u32; 5],
-        mem: &Memory,
+        mem: &mut Memory,
         address_mask: u32,
         cck: u64,
         frame: u64,
@@ -694,12 +757,172 @@ impl UaeLib {
                     ),
                 }
             }
-            CMD_LOAD | CMD_SAVE => {
-                log::debug!("uaelib: debug_load/debug_save are not provided; returning 0");
+            CMD_LOAD => {
+                return self.debug_load(a2 & address_mask, a3, mem, address_mask);
+            }
+            CMD_SAVE => {
+                self.debug_save(a2 & address_mask, a3, a4, mem, address_mask);
             }
             other => log::trace!("uaelib: debug command {other} is not provided"),
         }
         (0, false)
+    }
+
+    /// Give the opt-in file commands their one host authority. `root` must
+    /// already be canonical. It is opened once; guest operations never look
+    /// it up again by ambient host path.
+    pub fn set_file_root(&mut self, root: Option<PathBuf>) -> std::io::Result<()> {
+        self.file_authority = match root {
+            None => None,
+            #[cfg(not(target_arch = "wasm32"))]
+            Some(root) => Some(FileAuthority {
+                dir: Arc::new(Dir::open_ambient_dir(&root, ambient_authority())?),
+                root,
+            }),
+            #[cfg(target_arch = "wasm32")]
+            Some(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "host file authority is unavailable in browser builds",
+                ));
+            }
+        };
+        Ok(())
+    }
+
+    /// Host-only file authority, used by the emulator to preserve it across
+    /// save-state, reverse, and run-ahead restores.
+    pub fn file_root(&self) -> Option<&Path> {
+        self.file_authority
+            .as_ref()
+            .map(|authority| authority.root.as_path())
+    }
+
+    pub(crate) fn file_authority(&self) -> Option<FileAuthority> {
+        self.file_authority.clone()
+    }
+
+    pub(crate) fn set_file_authority(&mut self, authority: Option<FileAuthority>) {
+        self.file_authority = authority;
+    }
+
+    /// Parse a guest filename as a relative path. Absolute paths, prefixes and
+    /// `..` never reach the capability-backed host filesystem.
+    fn debug_file_name(&self, mem: &Memory, ptr: u32, address_mask: u32) -> Option<PathBuf> {
+        self.file_authority.as_ref()?;
+        let bytes = guest_cstring(mem, ptr & address_mask, DEBUG_FILE_NAME_MAX, address_mask)?;
+        let name = std::str::from_utf8(&bytes).ok()?;
+        let relative = Path::new(name);
+        if name.is_empty()
+            || relative.is_absolute()
+            || relative.components().any(|part| {
+                matches!(
+                    part,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
+        {
+            log::debug!("uaelib: rejected file name {name:?}");
+            return None;
+        }
+        Some(relative.to_path_buf())
+    }
+
+    fn debug_load(
+        &self,
+        address: u32,
+        name_ptr: u32,
+        mem: &mut Memory,
+        address_mask: u32,
+    ) -> (u32, bool) {
+        use std::io::Read as _;
+
+        let Some(relative) = self.debug_file_name(mem, name_ptr, address_mask) else {
+            return (0, false);
+        };
+        let authority = self
+            .file_authority
+            .as_ref()
+            .expect("checked by debug_file_name");
+        let display_path = authority.root.join(&relative);
+        let loaded = (|| -> std::io::Result<Vec<u8>> {
+            let file = authority.open(&relative)?;
+            if file.metadata()?.len() > DEBUG_FILE_MAX as u64 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "file exceeds the 16 MiB uaelib limit",
+                ));
+            }
+            let mut bytes = Vec::new();
+            file.take(DEBUG_FILE_MAX as u64 + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > DEBUG_FILE_MAX {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "file grew beyond the 16 MiB uaelib limit",
+                ));
+            }
+            Ok(bytes)
+        })();
+        let bytes = match loaded {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                log::debug!("uaelib: debug_load {} failed: {e}", display_path.display());
+                return (0, false);
+            }
+        };
+        if !guest_span_fits(address, bytes.len(), address_mask)
+            || (0..bytes.len()).any(|i| dma_read_byte(mem, address + i as u32).is_none())
+        {
+            log::debug!(
+                "uaelib: debug_load {} destination {address:#010X}+{} is not writable RAM",
+                display_path.display(),
+                bytes.len()
+            );
+            return (0, false);
+        }
+        for (i, byte) in bytes.iter().copied().enumerate() {
+            // The preflight above proved the whole range writable, so this
+            // cannot leave a partial transfer behind.
+            let written = dma_write_byte(mem, address + i as u32, byte);
+            debug_assert!(written);
+        }
+        (bytes.len() as u32, !bytes.is_empty())
+    }
+
+    fn debug_save(&self, address: u32, size: u32, name_ptr: u32, mem: &Memory, address_mask: u32) {
+        use std::io::Write as _;
+
+        let Ok(size) = usize::try_from(size) else {
+            return;
+        };
+        if size > DEBUG_FILE_MAX || !guest_span_fits(address, size, address_mask) {
+            log::debug!("uaelib: rejected debug_save size {size}");
+            return;
+        }
+        let Some(bytes) = guest_bytes(mem, address, size, address_mask) else {
+            log::debug!("uaelib: debug_save source {address:#010X}+{size} is unreadable");
+            return;
+        };
+        let Some(relative) = self.debug_file_name(mem, name_ptr, address_mask) else {
+            return;
+        };
+        // A speculative run-ahead frame will be replayed on the committed
+        // timeline. Delay its irreversible host write until that replay.
+        if self.speculative_host_quiet {
+            return;
+        }
+        let authority = self
+            .file_authority
+            .as_ref()
+            .expect("checked by debug_file_name");
+        let display_path = authority.root.join(&relative);
+        let saved = authority
+            .create(&relative)
+            .and_then(|mut file| file.write_all(&bytes));
+        if let Err(e) = saved {
+            log::debug!("uaelib: debug_save {} failed: {e}", display_path.display());
+        }
     }
 
     fn register_resource(&mut self, resource: DebugResource) {
@@ -867,6 +1090,19 @@ fn guest_bytes(mem: &Memory, addr: u32, n: usize, address_mask: u32) -> Option<V
     (0..n)
         .map(|i| guest_byte(mem, addr.wrapping_add(i as u32) & address_mask))
         .collect()
+}
+
+/// Whether a transfer stays within both `u32` and the CPU's address bus.
+/// File commands reject wrapping spans instead of silently folding their tail
+/// to address zero as ordinary individual CPU accesses would.
+fn guest_span_fits(addr: u32, len: usize, address_mask: u32) -> bool {
+    let Some(last) = len.checked_sub(1) else {
+        return addr <= address_mask;
+    };
+    u32::try_from(last)
+        .ok()
+        .and_then(|last| addr.checked_add(last))
+        .is_some_and(|end| end <= address_mask)
 }
 
 /// A NUL-terminated guest string of at most `max` bytes; `None` when its
@@ -1655,17 +1891,264 @@ mod tests {
     }
 
     #[test]
-    fn file_commands_are_accepted_no_ops() {
+    fn file_commands_are_disabled_without_an_explicit_root() {
         let mut lib = UaeLib::new();
         let mut mem = memory();
-        for cmd in [CMD_LOAD, CMD_SAVE, 99] {
-            let r = lib.call(FN_DEBUG_CMD, [cmd, 0x2000, 3, 4, 0], &mut mem, MASK24, 0, 0);
-            assert_eq!(r, (0, false), "{cmd}");
-        }
+        put_str(&mut mem, 0x2000, "asset.bin");
+        assert_eq!(
+            lib.call(
+                FN_DEBUG_CMD,
+                [CMD_LOAD, 0x3000, 0x2000, 0, 0],
+                &mut mem,
+                MASK24,
+                0,
+                0,
+            ),
+            (0, false)
+        );
+        assert_eq!(
+            lib.call(
+                FN_DEBUG_CMD,
+                [CMD_SAVE, 0x3000, 4, 0x2000, 0],
+                &mut mem,
+                MASK24,
+                0,
+                0,
+            ),
+            (0, false)
+        );
+        let r = lib.call(FN_DEBUG_CMD, [99, 0x2000, 3, 4, 0], &mut mem, MASK24, 0, 0);
+        assert_eq!(r, (0, false));
         assert!(lib.take_debug_events().0.is_empty());
         assert!(lib.resources().is_empty());
         assert!(!lib.idle().used());
         assert!(lib.overlay().is_empty());
+    }
+
+    #[test]
+    fn file_commands_round_trip_below_the_configured_root() {
+        let dir = std::env::temp_dir().join(format!(
+            "copperline-uaelib-files-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let root = std::fs::canonicalize(&dir).unwrap();
+        std::fs::write(root.join("data/input.bin"), b"from host").unwrap();
+
+        let mut lib = UaeLib::new();
+        lib.set_file_root(Some(root.clone())).unwrap();
+        let mut mem = memory();
+        put_str(&mut mem, 0x2000, "data/input.bin");
+        put_str(&mut mem, 0x2100, "data/output.bin");
+        let loaded = lib.call(
+            FN_DEBUG_CMD,
+            [CMD_LOAD, 0x1_0000, 0x2000, 0, 0],
+            &mut mem,
+            MASK24,
+            0,
+            0,
+        );
+        assert_eq!(loaded, (9, true));
+        assert_eq!(
+            guest_bytes(&mem, 0x1_0000, 9, MASK24).unwrap(),
+            b"from host"
+        );
+
+        put(&mut mem, 0x1_1000, b"from guest");
+        let saved = lib.call(
+            FN_DEBUG_CMD,
+            [CMD_SAVE, 0x1_1000, 10, 0x2100, 0],
+            &mut mem,
+            MASK24,
+            0,
+            0,
+        );
+        assert_eq!(saved, (0, false));
+        assert_eq!(
+            std::fs::read(root.join("data/output.bin")).unwrap(),
+            b"from guest"
+        );
+        drop(lib);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn file_commands_reject_escapes_oversize_and_partly_unmapped_loads() {
+        let dir = std::env::temp_dir().join(format!(
+            "copperline-uaelib-files-reject-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = std::fs::canonicalize(&dir).unwrap();
+        std::fs::write(root.join("small.bin"), b"four").unwrap();
+        let oversized = root.join("oversized.bin");
+        std::fs::File::create(&oversized)
+            .unwrap()
+            .set_len(DEBUG_FILE_MAX as u64 + 1)
+            .unwrap();
+
+        let mut lib = UaeLib::new();
+        lib.set_file_root(Some(root.clone())).unwrap();
+        let mut mem = memory();
+        for (at, name) in [
+            (0x2000, "../escape.bin"),
+            (0x2100, "/absolute.bin"),
+            (0x2200, "oversized.bin"),
+            (0x2300, "small.bin"),
+        ] {
+            put_str(&mut mem, at, name);
+        }
+        for name in [0x2000, 0x2100, 0x2200] {
+            assert_eq!(
+                lib.call(
+                    FN_DEBUG_CMD,
+                    [CMD_LOAD, 0x1_0000, name, 0, 0],
+                    &mut mem,
+                    MASK24,
+                    0,
+                    0,
+                ),
+                (0, false)
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let outside = dir.with_extension("outside");
+            let _ = std::fs::remove_dir_all(&outside);
+            std::fs::create_dir_all(&outside).unwrap();
+            std::fs::write(outside.join("secret.bin"), b"secret").unwrap();
+            symlink(&outside, root.join("escape")).unwrap();
+            put_str(&mut mem, 0x2400, "escape/secret.bin");
+            assert_eq!(
+                lib.call(
+                    FN_DEBUG_CMD,
+                    [CMD_LOAD, 0x1_0000, 0x2400, 0, 0],
+                    &mut mem,
+                    MASK24,
+                    0,
+                    0,
+                ),
+                (0, false)
+            );
+            put(&mut mem, 0x1_1000, b"guest!");
+            assert_eq!(
+                lib.call(
+                    FN_DEBUG_CMD,
+                    [CMD_SAVE, 0x1_1000, 6, 0x2400, 0],
+                    &mut mem,
+                    MASK24,
+                    0,
+                    0,
+                ),
+                (0, false)
+            );
+            assert_eq!(
+                std::fs::read(outside.join("secret.bin")).unwrap(),
+                b"secret"
+            );
+
+            // A dangling leaf is still an existing symlink entry. Creating
+            // through it must not materialize its out-of-root target.
+            symlink(outside.join("created.bin"), root.join("dangling.bin")).unwrap();
+            put_str(&mut mem, 0x2500, "dangling.bin");
+            assert_eq!(
+                lib.call(
+                    FN_DEBUG_CMD,
+                    [CMD_SAVE, 0x1_1000, 6, 0x2500, 0],
+                    &mut mem,
+                    MASK24,
+                    0,
+                    0,
+                ),
+                (0, false)
+            );
+            assert!(!outside.join("created.bin").exists());
+            std::fs::remove_dir_all(outside).unwrap();
+        }
+
+        let end = mem.chip_ram.len() as u32 - 2;
+        put(&mut mem, end, b"xx");
+        assert_eq!(
+            lib.call(
+                FN_DEBUG_CMD,
+                [CMD_LOAD, end, 0x2300, 0, 0],
+                &mut mem,
+                MASK24,
+                0,
+                0,
+            ),
+            (0, false)
+        );
+        assert_eq!(guest_bytes(&mem, end, 2, MASK24).unwrap(), b"xx");
+        drop(lib);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn speculative_file_save_waits_for_the_committed_replay() {
+        let dir = std::env::temp_dir().join(format!(
+            "copperline-uaelib-files-spec-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = std::fs::canonicalize(&dir).unwrap();
+        let target = root.join("saved.bin");
+
+        let mut lib = UaeLib::new();
+        lib.set_file_root(Some(root)).unwrap();
+        let mut mem = memory();
+        put_str(&mut mem, 0x2000, "saved.bin");
+        put(&mut mem, 0x3000, b"data");
+        lib.set_speculative_host_quiet(true);
+        lib.call(
+            FN_DEBUG_CMD,
+            [CMD_SAVE, 0x3000, 4, 0x2000, 0],
+            &mut mem,
+            MASK24,
+            0,
+            0,
+        );
+        assert!(!target.exists());
+        lib.set_speculative_host_quiet(false);
+        lib.call(
+            FN_DEBUG_CMD,
+            [CMD_SAVE, 0x3000, 4, 0x2000, 0],
+            &mut mem,
+            MASK24,
+            0,
+            0,
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"data");
+        drop(lib);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn file_authority_does_not_travel_in_serialized_guest_state() {
+        let dir = std::env::temp_dir().join(format!(
+            "copperline-uaelib-authority-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut lib = UaeLib::new();
+        lib.set_file_root(Some(std::fs::canonicalize(&dir).unwrap()))
+            .unwrap();
+        let encoded = bincode::serialize(&lib).unwrap();
+        let restored: UaeLib = bincode::deserialize(&encoded).unwrap();
+        assert!(restored.file_root().is_none());
+        drop(lib);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn overlay_cmd(lib: &mut UaeLib, mem: &mut Memory, cmd: u32, a2: u32, a3: u32, a4: u32) {

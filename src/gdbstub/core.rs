@@ -13,6 +13,8 @@ use anyhow::{anyhow, Context, Result};
 /// Instruction budget for the `monitor stepover` / `monitor finish` helpers, so
 /// a call or subroutine that never returns cannot wedge the debug server.
 const MONITOR_STEP_BUDGET: usize = 5_000_000;
+/// Machine word watches installed per one GDB connection.
+pub(crate) const GDB_WATCH_WORD_CAP: usize = 8;
 
 pub(crate) const TARGET_XML: &str = r#"<?xml version="1.0"?>
 <target>
@@ -44,6 +46,7 @@ pub(crate) const TARGET_XML: &str = r#"<?xml version="1.0"?>
 pub(crate) struct Watchpoint {
     pub(crate) addr: u32,
     pub(crate) len: usize,
+    pub(crate) access: crate::debugger::WatchAccess,
     last: Vec<u8>,
 }
 
@@ -52,7 +55,7 @@ pub(crate) enum StopReason {
     Attached,
     Step,
     Breakpoint,
-    Watchpoint(u32),
+    Watchpoint(u32, crate::debugger::WatchAccess),
     RegisterWatch,
     BeamTrap,
     CopperBreak,
@@ -233,7 +236,14 @@ impl GdbCore {
 
     pub(crate) fn stop_reply(&self) -> String {
         match &self.stop {
-            StopReason::Watchpoint(addr) => format!("T05watch:{addr:x};thread:1;"),
+            StopReason::Watchpoint(addr, access) => {
+                let key = match access {
+                    crate::debugger::WatchAccess::Write => "watch",
+                    crate::debugger::WatchAccess::Read => "rwatch",
+                    crate::debugger::WatchAccess::Access => "awatch",
+                };
+                format!("T05{key}:{addr:x};thread:1;")
+            }
             StopReason::RegisterWatch => "T05thread:1;".to_string(),
             StopReason::Breakpoint => "T05hwbreak:;thread:1;".to_string(),
             StopReason::LibraryLoad => "T05library:;thread:1;".to_string(),
@@ -338,26 +348,34 @@ impl GdbCore {
 
     fn add_watchpoint(&mut self, emu: &Emulator, packet: &str) -> Result<String> {
         let (addr, len) = parse_z_packet(packet)?;
+        let access = watch_access_from_packet(packet)?;
         let addr = addr & emu.machine.ui_addr_mask();
         let len = len.max(1);
         let last = emu.machine.debug_read_memory(addr, len);
         if let Some(existing) = self
             .watchpoints
             .iter_mut()
-            .find(|w| w.addr == addr && w.len == len)
+            .find(|w| w.addr == addr && w.len == len && w.access == access)
         {
             existing.last = last;
         } else {
-            self.watchpoints.push(Watchpoint { addr, len, last });
+            self.watchpoints.push(Watchpoint {
+                addr,
+                len,
+                access,
+                last,
+            });
         }
         Ok("OK".to_string())
     }
 
     fn remove_watchpoint(&mut self, emu: &Emulator, packet: &str) -> Result<String> {
         let (addr, len) = parse_z_packet(packet)?;
+        let access = watch_access_from_packet(packet)?;
         let addr = addr & emu.machine.ui_addr_mask();
-        self.watchpoints
-            .retain(|watch| watch.addr != addr || watch.len != len.max(1));
+        self.watchpoints.retain(|watch| {
+            watch.addr != addr || watch.len != len.max(1) || watch.access != access
+        });
         Ok("OK".to_string())
     }
 
@@ -395,6 +413,15 @@ impl GdbCore {
     }
 
     pub(crate) fn check_stop(&mut self, emu: &mut Emulator) -> Result<Option<StopReason>> {
+        if let Some(crate::debugger::DebugStop::Watch { addr, access, .. }) =
+            emu.machine.take_ui_debug_stop()
+        {
+            let access = self
+                .watch_access_at(addr, emu.machine.ui_addr_mask())
+                .unwrap_or(access);
+            self.refresh_watchpoints(emu);
+            return Ok(Some(StopReason::Watchpoint(addr, access)));
+        }
         if emu.bus_mut().take_ui_reg_hit().is_some() {
             return Ok(Some(StopReason::RegisterWatch));
         }
@@ -409,10 +436,13 @@ impl GdbCore {
             return Ok(Some(StopReason::Breakpoint));
         }
         for watch in &mut self.watchpoints {
+            if !watch.access.writes() {
+                continue;
+            }
             let cur = emu.machine.debug_read_memory(watch.addr, watch.len);
             if cur != watch.last {
                 watch.last = cur;
-                return Ok(Some(StopReason::Watchpoint(watch.addr)));
+                return Ok(Some(StopReason::Watchpoint(watch.addr, watch.access)));
             }
         }
         if self.lib_events_armed || self.loadseg_break || self.run_stop.is_some() {
@@ -453,6 +483,48 @@ impl GdbCore {
             }
         }
         Ok(None)
+    }
+
+    /// Expand byte-range GDB watchpoints into the machine's word-granular
+    /// watch store. Overlapping read and write requests become one access
+    /// watch instead of toggling the same machine word twice.
+    pub(crate) fn machine_watch_words(
+        &self,
+        mask: u32,
+    ) -> (Vec<(u32, crate::debugger::WatchAccess)>, bool) {
+        let mut words: Vec<(u32, crate::debugger::WatchAccess)> = Vec::new();
+        let mut truncated = false;
+        'watches: for watch in &self.watchpoints {
+            let start = watch.addr & mask & !1;
+            let last = watch.addr.wrapping_add(watch.len.max(1) as u32 - 1) & mask & !1;
+            let mut addr = start;
+            loop {
+                if let Some((_, access)) = words.iter_mut().find(|(word, _)| *word == addr) {
+                    *access = access.union(watch.access);
+                } else if words.len() == GDB_WATCH_WORD_CAP {
+                    truncated = true;
+                    break 'watches;
+                } else {
+                    words.push((addr, watch.access));
+                }
+                if addr == last {
+                    break;
+                }
+                addr = addr.wrapping_add(2) & mask;
+            }
+        }
+        (words, truncated)
+    }
+
+    pub(crate) fn watch_access_at(
+        &self,
+        addr: u32,
+        mask: u32,
+    ) -> Option<crate::debugger::WatchAccess> {
+        self.machine_watch_words(mask)
+            .0
+            .into_iter()
+            .find_map(|(word, access)| (word == addr).then_some(access))
     }
 
     fn refresh_watchpoints(&mut self, emu: &Emulator) {
@@ -633,6 +705,20 @@ impl GdbCore {
                 emu.debug_step_out(MONITOR_STEP_BUDGET)?;
                 self.refresh_watchpoints(emu);
                 Ok(format!("pc=${:08X}\n", emu.machine.pc()))
+            }
+            "return-to-program" => {
+                self.cpu_idle = false;
+                let reached = emu.debug_run_until_pc_outside(
+                    crate::memory::ROM_BASE as u32,
+                    0x00FF_FFFF,
+                    MONITOR_STEP_BUDGET,
+                )?;
+                self.refresh_watchpoints(emu);
+                Ok(format!(
+                    "pc=${:08X}{}\n",
+                    emu.machine.pc(),
+                    if reached { "" } else { " (not reached)" }
+                ))
             }
             "reg" => {
                 let Some(name) = parts.next() else {
@@ -908,7 +994,7 @@ pub(crate) fn monitor_help() -> String {
     "monitor commands:\n\
      help\n\
      status | beam | custom\n\
-     stepover | finish\n\
+     stepover | finish | return-to-program\n\
      reg NAME|OFFSET\n\
      write-reg NAME|OFFSET VALUE\n\
      watch-reg NAME|OFFSET | unwatch-reg NAME|OFFSET | clear-reg-watches\n\
@@ -935,6 +1021,15 @@ pub(crate) fn parse_z_packet(packet: &str) -> Result<(u32, usize)> {
         .next()
         .unwrap_or("1");
     Ok((parse_hex_u32(addr)?, parse_hex_usize(kind)?))
+}
+
+fn watch_access_from_packet(packet: &str) -> Result<crate::debugger::WatchAccess> {
+    match packet.as_bytes().get(1) {
+        Some(b'2') => Ok(crate::debugger::WatchAccess::Write),
+        Some(b'3') => Ok(crate::debugger::WatchAccess::Read),
+        Some(b'4') => Ok(crate::debugger::WatchAccess::Access),
+        _ => Err(anyhow!("not a watchpoint packet")),
+    }
 }
 
 pub(crate) fn parse_hex_u16(input: &str) -> Result<u16> {
@@ -1015,6 +1110,35 @@ mod tests {
         assert_eq!(console.len(), 1);
         assert!(console[0].contains("segments"), "help text: {}", console[0]);
         assert!(core.take_console().is_empty(), "take_console drains");
+        Ok(())
+    }
+
+    #[test]
+    fn z2_z3_and_z4_preserve_watch_access_type() -> Result<()> {
+        let mut emu = crate::gdbstub::testkit::emulator_with_loadseg_program();
+        let mut core = GdbCore::new(&emu, None);
+        for (packet, expected) in [
+            ("Z2,1000,2", crate::debugger::WatchAccess::Write),
+            ("Z3,1002,2", crate::debugger::WatchAccess::Read),
+            ("Z4,1004,2", crate::debugger::WatchAccess::Access),
+        ] {
+            assert!(matches!(
+                core.handle_packet(&mut emu, packet)?,
+                CoreReply::Packet(reply) if reply == "OK"
+            ));
+            assert_eq!(core.watchpoints.last().unwrap().access, expected);
+        }
+        assert_eq!(
+            watch_access_from_packet("z3,1002,2")?,
+            crate::debugger::WatchAccess::Read
+        );
+        assert!(matches!(
+            core.handle_packet(&mut emu, "Z3,1000,2")?,
+            CoreReply::Packet(reply) if reply == "OK"
+        ));
+        let (words, truncated) = core.machine_watch_words(0x00FF_FFFF);
+        assert!(!truncated);
+        assert!(words.contains(&(0x1000, crate::debugger::WatchAccess::Access)));
         Ok(())
     }
 }

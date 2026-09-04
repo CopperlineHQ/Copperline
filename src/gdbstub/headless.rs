@@ -88,6 +88,7 @@ struct Session {
     stream: TcpStream,
     no_ack: bool,
     core: GdbCore,
+    watch_words: Vec<(u32, crate::debugger::WatchAccess)>,
 }
 
 impl Session {
@@ -98,6 +99,7 @@ impl Session {
             stream,
             no_ack: false,
             core,
+            watch_words: Vec::new(),
         }
     }
 
@@ -111,7 +113,9 @@ impl Session {
                 self.no_ack = true;
                 continue;
             }
-            let reply = match self.core.handle_packet(&mut self.emu, &packet)? {
+            let action = self.core.handle_packet(&mut self.emu, &packet)?;
+            self.sync_watchpoints();
+            let reply = match action {
                 CoreReply::Packet(reply) => reply,
                 // The bounded step answers at once; an open-ended continue
                 // runs the per-instruction loop below, socket poll and all.
@@ -143,9 +147,41 @@ impl Session {
     /// watches, beam traps, Copper breakpoints), so a stale hit cannot
     /// stop the next client's first continue.
     fn clear_debug_hardware(&mut self) {
+        for (addr, _) in self.watch_words.drain(..) {
+            if self
+                .emu
+                .machine
+                .ui_breaks()
+                .watches
+                .iter()
+                .any(|watch| watch.addr == addr)
+            {
+                self.emu.machine.ui_toggle_watch(addr);
+            }
+        }
         self.emu.bus_mut().set_ui_reg_watches(&[]);
         self.emu.bus_mut().ui_clear_beam_traps();
         self.emu.bus_mut().ui_clear_copper_breaks();
+    }
+
+    fn sync_watchpoints(&mut self) {
+        let mask = self.emu.machine.ui_addr_mask();
+        let (desired, _) = self.core.machine_watch_words(mask);
+        for (addr, access) in self.watch_words.clone() {
+            if !desired.contains(&(addr, access)) {
+                self.emu.machine.ui_toggle_watch(addr);
+                self.watch_words.retain(|owned| *owned != (addr, access));
+            }
+        }
+        for &(addr, access) in &desired {
+            if self.watch_words.contains(&(addr, access)) {
+                continue;
+            }
+            self.emu
+                .machine
+                .ui_toggle_watch_access(addr, None, None, access);
+            self.watch_words.push((addr, access));
+        }
     }
 
     fn read_packet(&mut self) -> Result<Option<String>> {

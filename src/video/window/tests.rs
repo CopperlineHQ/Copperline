@@ -10078,6 +10078,7 @@ mod warp_control {
             slots: false,
             screenshots: crate::profile::ScreenshotMode::None,
             pc_samples: false,
+            trigger: None,
         }
     }
 
@@ -11231,6 +11232,71 @@ mod gdb_and_control {
             frames(&d.gdb_rx),
             vec![console(&format!("frame {target}\n")), frame("T05thread:1;")]
         );
+    }
+
+    #[test]
+    fn windowed_pc_outside_stops_at_the_first_instruction_boundary() {
+        let mut d = attached(true);
+        d.app.emu.bus_mut().mem.overlay = false;
+        assert_eq!(
+            d.app
+                .emu
+                .machine
+                .debug_write_memory(0x0003_0000, &[0x4E, 0x71, 0x4E, 0x71]),
+            4
+        );
+        assert!(d.app.emu.machine.debug_set_register(17, 0x0003_0000));
+        push(
+            &d.ctl_tx,
+            1,
+            "run_until",
+            json!({"pc_outside": ["0x30000", "0x30000"]}),
+        );
+        d.app.drain_control();
+        assert!(!d.app.paused);
+
+        d.app.control_step_frame().unwrap();
+        assert!(d.app.control_run_target_reached());
+        assert_eq!(d.app.emu.machine.pc(), 0x0003_0002);
+        let msg = reply(&d.ctl_rx);
+        assert_eq!(msg["result"]["reason"], "target");
+    }
+
+    #[test]
+    fn gdb_unions_an_incompatible_gui_watch_and_restores_it() {
+        let mut d = attached(true);
+        let addr = 0x0400;
+        assert!(d.app.emu.machine.ui_toggle_watch(addr));
+
+        packet(&d.gdb_tx, &format!("Z3,{addr:x},2"));
+        d.app.drain_gdb();
+        assert_eq!(frames(&d.gdb_rx), vec![frame("OK")]);
+        let watch = d
+            .app
+            .emu
+            .machine
+            .ui_breaks()
+            .watches
+            .iter()
+            .find(|watch| watch.addr == addr)
+            .unwrap();
+        assert_eq!(watch.access, crate::debugger::WatchAccess::Access);
+        assert!(watch.filter.is_none());
+        assert!(watch.pc.is_none());
+
+        packet(&d.gdb_tx, &format!("z3,{addr:x},2"));
+        d.app.drain_gdb();
+        assert_eq!(frames(&d.gdb_rx), vec![frame("OK")]);
+        let watch = d
+            .app
+            .emu
+            .machine
+            .ui_breaks()
+            .watches
+            .iter()
+            .find(|watch| watch.addr == addr)
+            .unwrap();
+        assert_eq!(watch.access, crate::debugger::WatchAccess::Write);
     }
 
     #[test]
