@@ -1881,6 +1881,7 @@ pub struct AnalyzerTraceView {
     pub selected_owner: &'static str,
     pub selected_owner_code: u8,
     pub owners: Vec<u8>,
+    pub records: Option<std::sync::Arc<Vec<crate::bus::BusSlotRecord>>>,
     pub markers: Vec<AnalyzerMarker>,
     /// "in blit #N ..." when the selected slot lies inside a recorded
     /// blit's beam span.
@@ -1931,6 +1932,13 @@ impl AnalyzerTraceView {
             .get(vpos * self.cols + hpos)
             .copied()
             .unwrap_or(b'.')
+    }
+
+    fn record_at(&self, vpos: usize, hpos: usize) -> Option<&crate::bus::BusSlotRecord> {
+        if vpos >= self.rows || hpos >= self.cols {
+            return None;
+        }
+        self.records.as_ref()?.get(vpos * self.cols + hpos)
     }
 
     fn cpu_wait_row(&self, vpos: usize) -> Option<&[u8]> {
@@ -4625,6 +4633,36 @@ fn draw_analyzer_beam_tab(
         ),
         _ => (trace.selected_vpos, trace.selected_hpos),
     };
+    let slot_detail_drawn = if let Some(record) = trace.record_at(probe_vpos, probe_hpos) {
+        let event_names = crate::bus::bus_event_names(record.events).join("|");
+        let detail = format!(
+            "reg=${:04X} addr=${:08X} data=${:016X}/{} kind={}:{} ipl={} events={}",
+            record.reg,
+            record.addr,
+            record.data,
+            record.size,
+            record.kind,
+            record.subtype,
+            record.ipl,
+            if event_names.is_empty() {
+                "-"
+            } else {
+                &event_names
+            },
+        );
+        draw_panel_text(
+            frame,
+            rect.x + 10,
+            raster.y + raster.h + 22,
+            &detail,
+            PANEL_TEXT_ACCENT,
+            1,
+            scale,
+        );
+        true
+    } else {
+        false
+    };
     let mut near = trace
         .markers
         .iter()
@@ -4644,7 +4682,7 @@ fn draw_analyzer_beam_tab(
         draw_panel_text(
             frame,
             rect.x + 10,
-            raster.y + raster.h + 22,
+            raster.y + raster.h + if slot_detail_drawn { 34 } else { 22 },
             &marker_text,
             PANEL_TEXT_ACCENT,
             1,

@@ -46,6 +46,34 @@ impl Bus {
         copper_invariant_before_deadline: bool,
     ) -> (u32, AgnusTick) {
         let cck = self.next_chip_bus_quantum().min(max_cck).max(1);
+        if self.precise_timed_device_trace() {
+            let position = BusTracePosition {
+                frame: self.emulated_frames,
+                cck: self.emulated_cck,
+                vpos: self.agnus.vpos,
+                hpos: self.agnus.hpos,
+            };
+            let extends_last = self.pending_device_trace_spans.last().is_some_and(|span| {
+                span.position.frame == position.frame
+                    && span.position.vpos == position.vpos
+                    && span.position.cck.saturating_add(u64::from(span.cck)) == position.cck
+                    && span.position.hpos.saturating_add(span.cck) == position.hpos
+            });
+            if extends_last {
+                let last = self.pending_device_trace_spans.last_mut().unwrap();
+                last.cck = last.cck.saturating_add(cck);
+            } else {
+                let offset = self
+                    .pending_device_trace_spans
+                    .last()
+                    .map_or(0, |span| span.offset.saturating_add(span.cck));
+                self.pending_device_trace_spans.push(BusTraceSpan {
+                    position,
+                    offset,
+                    cck,
+                });
+            }
+        }
         self.flush_audio_before_audio_dma_slot();
 
         // Advance the Copper's two-cycle cadence on every Copper-eligible color
@@ -90,6 +118,12 @@ impl Bus {
             // cannot fetch here, so the slot is never taken from its owner;
             // copper_cycle_free=false also keeps the post-WAIT wake-up off
             // this owned color clock.
+            if (self.frame_analyzer_full || self.bus_event_observers != 0)
+                && self.copper.state_label() == "run"
+                && Copper::hpos_is_access_cycle(hpos)
+            {
+                self.note_bus_event_named(BUS_EVENT_COPPER_WANTED, Some("copper_wanted_denied"));
+            }
             let _ = self.step_copper_eligible_slot(false, false);
         }
 
@@ -133,6 +167,94 @@ impl Bus {
         self.last_chip_bus_owner = owner;
         if self.chip_bus_observers_on {
             self.observe_chip_bus_quantum(owner, cck, hpos);
+        }
+        if self.frame_analyzer_full {
+            match owner {
+                ChipBusOwner::Refresh => self.annotate_bus_slot(
+                    self.agnus.vpos,
+                    hpos,
+                    BUS_RECORD_REFRESH,
+                    0,
+                    0x01FE,
+                    0,
+                    0,
+                    0,
+                    0,
+                ),
+                ChipBusOwner::Blitter => {
+                    if let Some(access) = self.blitter.current_bus_access(&self.mem.chip_ram) {
+                        let subtype = access.channel
+                            | if access.fill { 0x10 } else { 0 }
+                            | if access.line { 0x20 } else { 0 };
+                        self.annotate_bus_slot(
+                            self.agnus.vpos,
+                            hpos,
+                            BUS_RECORD_BLITTER,
+                            subtype,
+                            [0x0050, 0x004C, 0x0048, 0x0054][usize::from(access.channel)],
+                            access.addr,
+                            u64::from(access.data),
+                            access.size,
+                            u16::from(access.write),
+                        );
+                        if access.final_d {
+                            self.note_bus_event_named(
+                                BUS_EVENT_BLIT_FINAL_D,
+                                Some("blitter_final_d"),
+                            );
+                        }
+                    }
+                }
+                ChipBusOwner::Cpu
+                    if self.blitter_dma_enabled() && self.blitter.current_slot_needs_bus() =>
+                {
+                    self.note_bus_event_named(
+                        BUS_EVENT_CPU_BLITTER_STEAL,
+                        Some("blitter_denied_by_cpu"),
+                    )
+                }
+                _ => {}
+            }
+            if self
+                .cpu_bus_wait
+                .is_some_and(|wait| matches!(wait.class, CpuWaitClass::BlitterNasty))
+            {
+                self.note_bus_event_named(
+                    BUS_EVENT_CPU_BLITTER_STOLEN,
+                    Some("cpu_denied_by_blitter"),
+                );
+            }
+        }
+        if !self.frame_analyzer_full && self.bus_event_observers != 0 {
+            match owner {
+                ChipBusOwner::Blitter => {
+                    if self
+                        .blitter
+                        .current_bus_access(&self.mem.chip_ram)
+                        .is_some_and(|access| access.final_d)
+                    {
+                        self.note_bus_event_named(BUS_EVENT_BLIT_FINAL_D, Some("blitter_final_d"));
+                    }
+                }
+                ChipBusOwner::Cpu
+                    if self.blitter_dma_enabled() && self.blitter.current_slot_needs_bus() =>
+                {
+                    self.note_bus_event_named(
+                        BUS_EVENT_CPU_BLITTER_STEAL,
+                        Some("blitter_denied_by_cpu"),
+                    )
+                }
+                _ => {}
+            }
+            if self
+                .cpu_bus_wait
+                .is_some_and(|wait| matches!(wait.class, CpuWaitClass::BlitterNasty))
+            {
+                self.note_bus_event_named(
+                    BUS_EVENT_CPU_BLITTER_STOLEN,
+                    Some("cpu_denied_by_blitter"),
+                );
+            }
         }
         // The Copper was already stepped above (or is held without fetching at
         // the end-of-line lockout); only drive the other owners here.
@@ -246,14 +368,25 @@ impl Bus {
             } else {
                 self.cpu_bus_wait
             };
-            self.current_frame_bus_trace.record(
+            self.current_frame_bus_trace.record_with_ipl(
                 self.agnus.vpos,
                 hpos,
                 cck,
                 owner,
                 self.blitter.busy,
                 cpu_wait,
+                pending_ipl(self.paula.intena & self.cpu_visible_intreq()),
             );
+            let beam_events = self.beam_trace_events_at(self.agnus.vpos, hpos);
+            if beam_events != 0 {
+                self.current_frame_bus_trace
+                    .annotate_at(self.agnus.vpos, hpos, |record| {
+                        record.events |= beam_events;
+                    });
+            }
+            if matches!(owner, ChipBusOwner::Cpu) {
+                self.annotate_pending_cpu_access(self.agnus.vpos, hpos);
+            }
         }
         if self.wave_on {
             self.wave_tap_quantum(owner);
@@ -276,7 +409,10 @@ impl Bus {
         let blitter_busy = self.blitter.busy;
         let line_cck = self.agnus.current_line_cck();
         // The Copper's PC before the slot, for attribution below.
-        let fetch_pc = self.mem_watches_armed().then(|| self.copper.pc());
+        let trace_full = self.frame_analyzer_full;
+        let trace_copper_events = trace_full || self.bus_event_observers != 0;
+        let fetch_pc = (self.mem_watches_armed() || trace_full).then(|| self.copper.pc());
+        let sleeping_before = trace_copper_events && self.copper.sleeping_wait().is_some();
         let mut copper = std::mem::take(&mut self.copper);
         let action = copper.step_eligible_slot(
             &self.mem.chip_ram,
@@ -290,6 +426,9 @@ impl Bus {
             copper_cycle_free,
         );
         self.copper = copper;
+        if sleeping_before && self.copper.sleeping_wait().is_none() {
+            self.note_bus_event_named(BUS_EVENT_COPPER_WAKE, Some("copper_wake"));
+        }
         // Attributed only when the Copper actually took the slot. A
         // WAITing or stopped Copper leaves its PC pointing at the next
         // instruction and touches nothing, so noting the read before the
@@ -306,8 +445,34 @@ impl Bus {
         }
         match action {
             CopperSlotAction::Idle => false,
-            CopperSlotAction::BusUsed => true,
+            CopperSlotAction::BusUsed { subtype, word } => {
+                if let Some(pc) = fetch_pc {
+                    self.annotate_bus_slot(
+                        vpos,
+                        hpos,
+                        BUS_RECORD_COPPER,
+                        subtype,
+                        0x008C,
+                        pc,
+                        u64::from(word),
+                        2,
+                        0,
+                    );
+                }
+                true
+            }
             CopperSlotAction::Move { register, value } => {
+                self.annotate_bus_slot(
+                    vpos,
+                    hpos,
+                    BUS_RECORD_COPPER,
+                    0,
+                    register,
+                    fetch_pc.unwrap_or(0),
+                    u64::from(value),
+                    2,
+                    1,
+                );
                 if diag_cop_writes_on() {
                     eprintln!(
                         "COPPROBE MOVE   v={:03x} h={:02x} reg={:03x} val={:04x}",
@@ -321,7 +486,19 @@ impl Bus {
                 }
                 true
             }
-            CopperSlotAction::SkippedMove { register } => {
+            CopperSlotAction::SkippedMove { register, value } => {
+                self.annotate_bus_slot(
+                    vpos,
+                    hpos,
+                    BUS_RECORD_COPPER,
+                    2,
+                    register,
+                    fetch_pc.unwrap_or(0),
+                    u64::from(value),
+                    2,
+                    0,
+                );
+                self.note_bus_event_named(BUS_EVENT_COPPER_SKIP, Some("copper_skip"));
                 // The SKIP suppresses the write, not the illegal-register
                 // decode: a forbidden MOVE stops the Copper even when skipped.
                 if !self.copper_can_write_custom(register) {
@@ -484,6 +661,17 @@ impl Bus {
         }
         let word = self.read_chip_word_for_audio_dma(request.address);
         self.data_bus = word;
+        self.annotate_bus_slot(
+            self.agnus.vpos,
+            self.agnus.hpos,
+            BUS_RECORD_AUDIO,
+            channel as u8,
+            0x00AA + channel as u16 * 0x10,
+            request.address,
+            u64::from(word),
+            2,
+            0,
+        );
         let irq = self.paula.grant_audio_dma(channel, word, self.agnus.dmacon);
         self.paula.latch_interrupt_sources(irq);
     }
@@ -1428,12 +1616,10 @@ impl Bus {
         if self.device_clock.realtime_enabled {
             self.device_clock.note_realtime_device_advance(cck);
         }
-        // Defer the timed-device tick: accumulate these color clocks and apply
-        // them in one batch at the next device observation or instruction
-        // boundary (see `flush_timed_devices`). The chipset/beam advance above
-        // already happened per color clock; only the CIA/serial/pots/audio/
-        // floppy/Akiko devices, whose state the CPU can only observe through a
-        // register read or an interrupt, are batched.
+        // Defer timed devices exactly as the ordinary path does. When detailed
+        // tracing is armed, the quantum stepper has also recorded compact
+        // raster spans so events returned by this batch can be placed at their
+        // precise colour clocks without changing when device state mutates.
         self.pending_device_cck = self.pending_device_cck.saturating_add(cck);
         add_agnus_tick(&mut self.pending_device_tick, tick);
     }
@@ -1447,9 +1633,13 @@ impl Bus {
     pub fn flush_timed_devices(&mut self) {
         let cck = std::mem::take(&mut self.pending_device_cck);
         if cck == 0 {
+            self.pending_device_trace_spans.clear();
             return;
         }
         let tick = std::mem::take(&mut self.pending_device_tick);
-        self.tick_timed_devices(cck, tick);
+        let spans = std::mem::take(&mut self.pending_device_trace_spans);
+        self.tick_timed_devices(cck, tick, &spans);
+        self.pending_device_trace_spans = spans;
+        self.pending_device_trace_spans.clear();
     }
 }

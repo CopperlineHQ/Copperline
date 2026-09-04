@@ -319,12 +319,14 @@ pub enum CopperSlotAction {
     Idle,
     /// The Copper used the bus this color clock but produced no register write
     /// the caller must apply (a first-word fetch, an applied COPJMP/WAIT/SKIP).
-    BusUsed,
+    /// `subtype` is 0 for a first word/MOVE/COPJMP, 1 for WAIT, and 2 for
+    /// SKIP; `word` is the word fetched in this exact slot.
+    BusUsed { subtype: u8, word: u16 },
     /// The Copper fetched a MOVE that an active SKIP suppresses. The write is
     /// omitted, but the register still passes through the illegal-address
     /// decode: a MOVE the Copper may not perform stops it even when skipped
     /// (real-Agnus behaviour, vAmigaTS Copper/Skip/copskip4).
-    SkippedMove { register: u16 },
+    SkippedMove { register: u16, value: u16 },
     /// The Copper used the bus and decoded a `MOVE`; the caller applies the
     /// custom-register write (subject to COPCON) or stops the Copper.
     Move { register: u16, value: u16 },
@@ -756,23 +758,38 @@ impl Copper {
                 }
                 match self.fetch_decode(chip_ram) {
                     CopperFetch::Idle => CopperSlotAction::Idle,
-                    CopperFetch::FirstWord { .. } => CopperSlotAction::BusUsed,
-                    CopperFetch::SkippedMove { first, .. } => CopperSlotAction::SkippedMove {
-                        register: first & 0x01FE,
-                    },
-                    CopperFetch::Instruction { instruction, .. } => {
+                    CopperFetch::FirstWord { word, .. } => {
+                        CopperSlotAction::BusUsed { subtype: 0, word }
+                    }
+                    CopperFetch::SkippedMove { first, second, .. } => {
+                        CopperSlotAction::SkippedMove {
+                            register: first & 0x01FE,
+                            value: second,
+                        }
+                    }
+                    CopperFetch::Instruction {
+                        second,
+                        instruction,
+                        ..
+                    } => {
                         match instruction {
                             CopperInstruction::Move {
                                 register: 0x088, ..
                             } => {
                                 self.start_jump_tail(false);
-                                CopperSlotAction::BusUsed
+                                CopperSlotAction::BusUsed {
+                                    subtype: 0,
+                                    word: second,
+                                }
                             }
                             CopperInstruction::Move {
                                 register: 0x08A, ..
                             } => {
                                 self.start_jump_tail(true);
-                                CopperSlotAction::BusUsed
+                                CopperSlotAction::BusUsed {
+                                    subtype: 0,
+                                    word: second,
+                                }
                             }
                             CopperInstruction::Move { register, value } => {
                                 CopperSlotAction::Move { register, value }
@@ -783,7 +800,10 @@ impl Copper {
                                 } else {
                                     self.start_wait_instruction(wait);
                                 }
-                                CopperSlotAction::BusUsed
+                                CopperSlotAction::BusUsed {
+                                    subtype: 1,
+                                    word: second,
+                                }
                             }
                             CopperInstruction::Skip(skip) => {
                                 // The SKIP comparator does not act immediately:
@@ -791,7 +811,10 @@ impl Copper {
                                 // (WAITSKIP1/WAITSKIP2) before the decision takes
                                 // effect, matching a WAIT's timing.
                                 self.start_skip_instruction(skip);
-                                CopperSlotAction::BusUsed
+                                CopperSlotAction::BusUsed {
+                                    subtype: 2,
+                                    word: second,
+                                }
                             }
                         }
                     }

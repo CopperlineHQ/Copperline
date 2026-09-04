@@ -123,6 +123,9 @@ pub enum CoreOp {
         b: bool,
     },
     BeamGet,
+    FrameSlots {
+        row: usize,
+    },
     DisplayGet,
     InputPortsGet,
     RtcGet,
@@ -234,6 +237,7 @@ impl CoreOp {
                 | CoreOp::HeatMapReport { .. }
                 | CoreOp::CiaGet { .. }
                 | CoreOp::BeamGet
+                | CoreOp::FrameSlots { .. }
                 | CoreOp::DisplayGet
                 | CoreOp::InputPortsGet
                 | CoreOp::RtcGet
@@ -978,6 +982,9 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
             },
         }),
         "beam.get" => core(CoreOp::BeamGet),
+        "frame.slots" => core(CoreOp::FrameSlots {
+            row: p.usize_or("row", 0)?,
+        }),
         "display.get" => core(CoreOp::DisplayGet),
         "rtc.get" => core(CoreOp::RtcGet),
         "rtc.set" => {
@@ -1275,6 +1282,12 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
                     ))
                 }
             };
+            let memory = p.bool_or("memory", false)?;
+            if memory && trigger.is_some() {
+                return Err(CtlError::invalid_params(
+                    "memory=true cannot be combined with trigger; the RAM baseline must align with the first recorded frame",
+                ));
+            }
             let samples = p.bool_or("samples", false)?;
             let registers = p.bool_or("registers", false)?;
             if registers && !samples {
@@ -1372,6 +1385,7 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
                         .unwrap_or_else(crate::paths::profile_dir),
                     frames,
                     slots: p.bool_or("slots", false)?,
+                    memory,
                     screenshots,
                     pc_samples: p.bool_or("pc_samples", false)?,
                     samples,
@@ -1450,7 +1464,7 @@ fn parse_event_list(
         };
         let Some(event) = EventKind::from_name(name) else {
             return Err(CtlError::invalid_params(format!(
-                "unknown event {name}; expected frame|serial|interrupt|media"
+                "unknown event {name}; expected frame|serial|interrupt|media|debug|bus"
             )));
         };
         if !events.contains(&event) {
@@ -1944,6 +1958,24 @@ impl<'a> ParamReader<'a> {
 
 /// Execute a [`CoreOp`] against the machine. Both server modes call
 /// this for everything that is not run control, input, or media.
+fn bus_slot_json(hpos: usize, record: &crate::bus::BusSlotRecord) -> Value {
+    json!({
+        "hpos": hpos,
+        "reg": record.reg,
+        "addr": record.addr,
+        // JSON numbers cannot represent every u64 exactly. Keep grouped AGA
+        // fetches lossless on every client by using a fixed-width hex string.
+        "data": format!("0x{:016X}", record.data),
+        "size": record.size,
+        "kind": record.kind,
+        "subtype": record.subtype,
+        "ipl": record.ipl,
+        "flags": record.flags,
+        "events": record.events,
+        "event_names": crate::bus::bus_event_names(record.events),
+    })
+}
+
 pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Result<Value, CtlError> {
     match op {
         CoreOp::Status => Ok(status_value(emu, ctx)),
@@ -2080,6 +2112,43 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
                 "cck": bus.emulated_cck(),
                 "frame": bus.emulated_frames(),
                 "seconds": bus.emulated_seconds(),
+            }))
+        }
+        CoreOp::FrameSlots { row } => {
+            let Some(trace) = emu.bus().frame_bus_trace() else {
+                return Err(CtlError::invalid_state(
+                    "no frame trace is available; open the Frame Analyzer or start a profile",
+                ));
+            };
+            if !trace.full() {
+                return Err(CtlError::invalid_state(
+                    "the available frame trace is owner-only; enable full Frame Analyzer tracing or start a profile with slots=true",
+                ));
+            }
+            let Some(records) = trace.record_row(*row) else {
+                return Err(CtlError::invalid_params(format!(
+                    "row must address a full traced scanline (0..{})",
+                    trace.rows.saturating_sub(1)
+                )));
+            };
+            let records: Vec<Value> = records
+                .iter()
+                .enumerate()
+                .map(|(hpos, record)| bus_slot_json(hpos, record))
+                .collect();
+            let instantaneous_records: Vec<Value> = trace
+                .instantaneous_records()
+                .iter()
+                .filter(|entry| entry.vpos as usize == *row)
+                .map(|entry| bus_slot_json(entry.hpos as usize, &entry.record))
+                .collect();
+            Ok(json!({
+                "frame": trace.frame,
+                "row": row,
+                "line_cck": trace.line_cck,
+                "record_bytes": crate::bus::BusSlotRecord::BYTE_SIZE,
+                "records": records,
+                "instantaneous_records": instantaneous_records,
             }))
         }
         CoreOp::DisplayGet => {
@@ -3126,6 +3195,17 @@ mod tests {
     }
 
     #[test]
+    fn frame_slot_json_preserves_full_width_data() {
+        let record = crate::bus::BusSlotRecord {
+            data: 0xFEDC_BA98_7654_3210,
+            ..crate::bus::BusSlotRecord::default()
+        };
+        let value = bus_slot_json(7, &record);
+        assert_eq!(value["hpos"], 7);
+        assert_eq!(value["data"], "0xFEDCBA9876543210");
+    }
+
+    #[test]
     fn parse_rejects_out_of_range_targets() {
         // u16 beam coordinates must not silently wrap.
         let err = parse_method("run_until", &json!({"vpos": 70000})).unwrap_err();
@@ -3208,13 +3288,13 @@ mod tests {
             core(
                 "events.subscribe",
                 json!({
-                    "events": ["frame", "serial", "frame"],
+                    "events": ["frame", "serial", "bus", "frame"],
                     "frame_interval": 25,
                     "frame_digest": true,
                 }),
             ),
             CoreOp::EventsSubscribe {
-                events: vec![EventKind::Frame, EventKind::Serial],
+                events: vec![EventKind::Frame, EventKind::Serial, EventKind::Bus],
                 frame_interval: Some(25),
                 frame_digest: Some(true),
             }
@@ -4108,6 +4188,7 @@ mod tests {
         };
         assert_eq!(options.frames, crate::profile::DEFAULT_PROFILE_FRAMES);
         assert!(!options.slots);
+        assert!(!options.memory);
         assert!(!options.pc_samples);
         assert!(!options.samples);
         assert!(!options.registers);
@@ -4116,6 +4197,12 @@ mod tests {
         assert!(options.code_ranges.is_empty());
         assert_eq!(options.screenshots, crate::profile::ScreenshotMode::None);
         assert_eq!(options.trigger, None);
+
+        let CoreOp::ProfileStart { options } = core("profile.start", json!({"memory": true}))
+        else {
+            panic!("expected ProfileStart");
+        };
+        assert!(options.memory);
 
         let CoreOp::ProfileStart { options } = core(
             "profile.start",
@@ -4182,6 +4269,13 @@ mod tests {
             let err = parse_method("profile.start", &json!({"trigger": trigger})).unwrap_err();
             assert_eq!(err.code, proto::INVALID_PARAMS);
         }
+        let err = parse_method(
+            "profile.start",
+            &json!({"memory": true, "trigger": {"frame": 987}}),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, proto::INVALID_PARAMS);
+        assert!(err.message.contains("RAM baseline"));
         assert!(CoreOp::ProfileStatus.collectable());
     }
 
@@ -4202,6 +4296,7 @@ mod tests {
             path: profile_scratch("refused"),
             frames: 3,
             slots: false,
+            memory: false,
             screenshots: crate::profile::ScreenshotMode::None,
             pc_samples: false,
             samples: false,
@@ -4226,6 +4321,194 @@ mod tests {
     }
 
     #[test]
+    fn profile_memory_snapshot_is_written_once_at_capture_start() {
+        let mut emu = uaelib_emulator();
+        emu.bus_mut().mem.chip_ram[0..4].copy_from_slice(&[1, 2, 3, 4]);
+        emu.bus_mut().mem.slow_ram = vec![5, 6, 7];
+        let mut ctx = SessionCtx::new();
+        let dir = profile_scratch("memory");
+        exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::ProfileStart {
+                options: crate::profile::ProfileOptions {
+                    path: dir.clone(),
+                    frames: 1,
+                    slots: false,
+                    memory: true,
+                    screenshots: crate::profile::ScreenshotMode::None,
+                    pc_samples: false,
+                    samples: false,
+                    registers: false,
+                    unwind: None,
+                    relocation_bases: Vec::new(),
+                    code_ranges: Vec::new(),
+                    trigger: None,
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            &std::fs::read(dir.join("chip-ram.bin")).unwrap()[0..4],
+            &[1, 2, 3, 4]
+        );
+        assert_eq!(std::fs::read(dir.join("slow-ram.bin")).unwrap(), [5, 6, 7]);
+        emu.bus_mut().mem.chip_ram[0..4].fill(9);
+        assert_eq!(
+            &std::fs::read(dir.join("chip-ram.bin")).unwrap()[0..4],
+            &[1, 2, 3, 4]
+        );
+        exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStop).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn profile_start_restarts_an_existing_full_trace_epoch() {
+        let mut emu = uaelib_emulator();
+        emu.bus_mut().set_frame_analyzer_full(true);
+        emu.bus_mut().advance_chipset(4);
+        assert!(emu.bus().frame_bus_trace().is_some());
+
+        let mut ctx = SessionCtx::new();
+        let dir = profile_scratch("fresh-trace");
+        exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::ProfileStart {
+                options: crate::profile::ProfileOptions {
+                    path: dir.clone(),
+                    frames: 1,
+                    slots: true,
+                    memory: true,
+                    screenshots: crate::profile::ScreenshotMode::None,
+                    pc_samples: false,
+                    samples: false,
+                    registers: false,
+                    unwind: None,
+                    relocation_bases: Vec::new(),
+                    code_ranges: Vec::new(),
+                    trigger: None,
+                },
+            },
+        )
+        .unwrap();
+
+        assert!(
+            emu.bus().frame_bus_trace().is_none(),
+            "pre-capture slots must not survive the memory baseline"
+        );
+        emu.bus_mut().advance_chipset(1);
+        let trace = emu.bus().frame_bus_trace().unwrap();
+        assert!(trace.partial);
+        assert_eq!(trace.owner_cck.iter().sum::<u64>(), 1);
+
+        exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStop).unwrap();
+        assert!(emu.bus().frame_analyzer_full());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_profile_start_preserves_an_existing_analyzer_trace() {
+        let mut emu = uaelib_emulator();
+        emu.bus_mut().set_frame_analyzer_full(true);
+        emu.bus_mut().advance_chipset(4);
+        let owner_cck_before = emu
+            .bus()
+            .frame_bus_trace()
+            .unwrap()
+            .owner_cck
+            .iter()
+            .sum::<u64>();
+        let options = |path| crate::profile::ProfileOptions {
+            path,
+            frames: 1,
+            slots: true,
+            memory: true,
+            screenshots: crate::profile::ScreenshotMode::None,
+            pc_samples: false,
+            samples: false,
+            registers: false,
+            unwind: None,
+            relocation_bases: Vec::new(),
+            code_ranges: Vec::new(),
+            trigger: None,
+        };
+
+        let blocked_parent = profile_scratch("failed-start");
+        std::fs::write(&blocked_parent, b"not a directory").unwrap();
+        let mut ctx = SessionCtx::new();
+        let err = exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::ProfileStart {
+                options: options(blocked_parent.join("profile")),
+            },
+        )
+        .expect_err("a profile beneath a regular file must fail");
+        assert_eq!(err.code, proto::IO_ERROR);
+        assert!(emu.bus().frame_analyzer_full());
+        assert_eq!(
+            emu.bus()
+                .frame_bus_trace()
+                .unwrap()
+                .owner_cck
+                .iter()
+                .sum::<u64>(),
+            owner_cck_before,
+            "failed setup must not reset the active analyzer epoch"
+        );
+        let _ = std::fs::remove_file(&blocked_parent);
+
+        let memory_failure = profile_scratch("failed-memory");
+        std::fs::create_dir_all(memory_failure.join("chip-ram.bin")).unwrap();
+        let err = exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::ProfileStart {
+                options: options(memory_failure.clone()),
+            },
+        )
+        .expect_err("a RAM snapshot cannot replace a directory");
+        assert_eq!(err.code, proto::IO_ERROR);
+        assert!(emu.bus().frame_analyzer_full());
+        assert_eq!(
+            emu.bus()
+                .frame_bus_trace()
+                .unwrap()
+                .owner_cck
+                .iter()
+                .sum::<u64>(),
+            owner_cck_before,
+            "failed RAM setup must not reset the active analyzer epoch"
+        );
+        let _ = std::fs::remove_dir_all(&memory_failure);
+    }
+
+    #[test]
+    fn frame_slots_distinguishes_owner_only_state_from_a_bad_row() {
+        let mut emu = uaelib_emulator();
+        let mut ctx = SessionCtx::new();
+        emu.bus_mut().set_frame_analyzer_enabled(true);
+        emu.bus_mut().advance_chipset(1);
+
+        let owner_only = exec_core(&mut emu, &mut ctx, &CoreOp::FrameSlots { row: 0 })
+            .expect_err("an owner-only trace has no detailed records");
+        assert_eq!(owner_only.code, proto::INVALID_STATE);
+
+        emu.bus_mut().set_frame_analyzer_full(true);
+        emu.bus_mut().advance_chipset(1);
+        let bad_row = exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::FrameSlots {
+                row: crate::bus::FRAME_ANALYZER_MAX_VPOS,
+            },
+        )
+        .expect_err("the row lies outside the traced frame");
+        assert_eq!(bad_row.code, proto::INVALID_PARAMS);
+    }
+
+    #[test]
     fn profile_writes_one_record_per_committed_frame() {
         let mut emu = uaelib_emulator();
         let mut ctx = SessionCtx::new();
@@ -4238,6 +4521,7 @@ mod tests {
                     path: dir.clone(),
                     frames: 3,
                     slots: true,
+                    memory: false,
                     screenshots: crate::profile::ScreenshotMode::None,
                     pc_samples: true,
                     samples: false,
@@ -4264,6 +4548,11 @@ mod tests {
         assert_eq!(status["frames_written"], 3);
         assert_eq!(status["done"], true, "self-stops at the cap");
 
+        let row = exec_core(&mut emu, &mut ctx, &CoreOp::FrameSlots { row: 0 }).unwrap();
+        assert_eq!(row["record_bytes"], crate::bus::BusSlotRecord::BYTE_SIZE);
+        assert_eq!(row["records"].as_array().unwrap().len(), row["line_cck"]);
+        assert_eq!(row["records"][0]["hpos"], 0);
+
         let summary = exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStop).unwrap();
         assert_eq!(summary["active"], false);
         assert_eq!(summary["frames_written"], 3);
@@ -4286,6 +4575,34 @@ mod tests {
         assert_eq!(records[0]["traced"], true);
         assert!(records[0]["owner_cck"]["refresh"].as_u64().unwrap() > 0);
         assert!(records[0]["slots"].as_array().unwrap().len() > 100);
+        assert_eq!(
+            records[0]["registers"]["custom"].as_array().unwrap().len(),
+            256
+        );
+        assert_eq!(
+            records[0]["registers"]["palette"]["hi"]
+                .as_array()
+                .unwrap()
+                .len(),
+            256
+        );
+        assert_eq!(
+            records[0]["registers"]["palette"]["lo"]
+                .as_array()
+                .unwrap()
+                .len(),
+            256
+        );
+        assert!(records[0]["registers"]["chipset_flags"].is_u64());
+        assert_eq!(records[0]["slots_record_bytes"], 24);
+        let slots_file = records[0]["slots_file"].as_str().unwrap();
+        let sidecar_len = std::fs::metadata(dir.join(slots_file)).unwrap().len();
+        assert_eq!(
+            sidecar_len,
+            records[0]["rows"].as_u64().unwrap()
+                * records[0]["line_cck"].as_u64().unwrap()
+                * crate::bus::BusSlotRecord::BYTE_SIZE as u64
+        );
         assert!(records[0]["pc"].as_str().unwrap().starts_with("0x"));
         assert!(records[0]["retired"].as_u64().unwrap() > 0);
 
@@ -4295,6 +4612,17 @@ mod tests {
         assert_eq!(header["version"], 1);
         assert_eq!(header["owners"][7], "cpu");
         assert!(header["machine"].is_object());
+        for key in [
+            "systemStackLower",
+            "systemStackUpper",
+            "stackLower",
+            "stackUpper",
+        ] {
+            assert!(
+                header.as_object().unwrap().contains_key(key),
+                "missing {key}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4315,6 +4643,7 @@ mod tests {
                     path: dir.clone(),
                     frames: 3,
                     slots: true,
+                    memory: false,
                     screenshots: crate::profile::ScreenshotMode::None,
                     pc_samples: false,
                     samples: false,
@@ -4438,6 +4767,7 @@ mod tests {
                     path: dir.clone(),
                     frames: 10,
                     slots: false,
+                    memory: false,
                     screenshots: crate::profile::ScreenshotMode::None,
                     pc_samples: false,
                     samples: false,
@@ -4472,6 +4802,7 @@ mod tests {
                 path: dir.clone(),
                 frames: 1,
                 slots: false,
+                memory: false,
                 screenshots: crate::profile::ScreenshotMode::None,
                 pc_samples: false,
                 samples: true,

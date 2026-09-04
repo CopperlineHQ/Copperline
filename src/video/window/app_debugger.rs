@@ -263,7 +263,7 @@ impl App {
             self.paused_before_analyzer = self.paused;
             self.paused = true;
             self.sync_live_audio_suspension();
-            self.emu.bus_mut().set_frame_analyzer_enabled(true);
+            self.emu.bus_mut().set_frame_analyzer_full(true);
             self.frame_analyzer_panel = Some(ui::FrameAnalyzerPanel::new());
         }
     }
@@ -273,12 +273,12 @@ impl App {
         self.paused_before_analyzer = self.paused;
         self.sync_live_audio_suspension();
         if !self.paused {
-            self.emu.bus_mut().set_frame_analyzer_enabled(true);
+            self.emu.bus_mut().set_frame_analyzer_full(true);
         }
     }
 
     pub(super) fn frame_analyzer_step_frame(&mut self) {
-        self.emu.bus_mut().set_frame_analyzer_enabled(true);
+        self.emu.bus_mut().set_frame_analyzer_full(true);
         self.debugger_step_frame();
     }
 
@@ -1077,7 +1077,7 @@ impl App {
         else {
             return;
         };
-        self.emu.bus_mut().set_frame_analyzer_enabled(true);
+        self.emu.bus_mut().set_frame_analyzer_full(true);
         self.run_to_beam_target(vpos, Some(hpos), RUN_TO_SLOT_BUDGET, "Beam slot");
     }
 
@@ -1702,6 +1702,7 @@ impl App {
                 selected_owner,
                 selected_owner_code,
                 owners,
+                records: trace.records_arc(),
                 markers,
                 selected_blit,
                 diw_v,

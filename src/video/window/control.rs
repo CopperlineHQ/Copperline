@@ -299,7 +299,7 @@ impl App {
                 // so an open pane wants its trace back on every outcome,
                 // not just success.
                 if matches!(op, CoreOp::ProfileStop) && self.frame_analyzer_panel.is_some() {
-                    self.emu.bus_mut().set_frame_analyzer_enabled(true);
+                    self.emu.bus_mut().set_frame_analyzer_full(true);
                 }
                 let line = match result {
                     Ok(value) => {

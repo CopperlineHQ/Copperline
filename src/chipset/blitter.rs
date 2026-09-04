@@ -65,6 +65,24 @@ pub enum BlitSlotClass {
     Internal,
 }
 
+/// Side-effect-free description of the transfer performed by the next
+/// scheduled bus slot. The bus trace samples this immediately before the
+/// sequencer consumes the slot, so addresses and final-D qualification are
+/// exact even when the transfer completes the blit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlitBusAccess {
+    pub channel: u8,
+    pub addr: u32,
+    pub data: u16,
+    /// Bytes transferred in this occupied bus slot. Zero denotes a locked
+    /// bus cycle with no memory access, such as a SING-suppressed line D slot.
+    pub size: u8,
+    pub write: bool,
+    pub final_d: bool,
+    pub line: bool,
+    pub fill: bool,
+}
+
 /// The blitter can only DMA from populated chip RAM. Addresses outside
 /// the configured chip range do not mirror into low RAM; they hit
 /// unpopulated space.
@@ -863,6 +881,89 @@ impl Blitter {
                 LineBlitPhase::Done => "LDONE",
             },
             None => "-",
+        }
+    }
+
+    pub fn current_bus_access(&self, ram: &[u8]) -> Option<BlitBusAccess> {
+        match self.pending.as_ref()? {
+            PendingBlit::Normal(state) => {
+                let fill = state.ife || state.efe;
+                let access = match state.phase {
+                    NormalBlitPhase::A if state.use_a => {
+                        let snap = state.snap_a.get(state.snap_a_idx).copied().unwrap_or(0);
+                        (
+                            0,
+                            state.apt,
+                            state.overlay_read(state.apt, snap, ram.len()),
+                            false,
+                            false,
+                        )
+                    }
+                    NormalBlitPhase::B if state.use_b => {
+                        let snap = state.snap_b.get(state.snap_b_idx).copied().unwrap_or(0);
+                        (
+                            1,
+                            state.bpt,
+                            state.overlay_read(state.bpt, snap, ram.len()),
+                            false,
+                            false,
+                        )
+                    }
+                    NormalBlitPhase::C if state.use_c => {
+                        (2, state.cpt, read_word(ram, state.cpt), false, false)
+                    }
+                    NormalBlitPhase::D if state.pipeline_full && state.write_d => {
+                        (3, state.d_hold_pt, state.d_hold, true, false)
+                    }
+                    NormalBlitPhase::F if state.pipeline_full && state.write_d => {
+                        (3, state.d_hold_pt, state.d_hold, true, true)
+                    }
+                    _ => return None,
+                };
+                Some(BlitBusAccess {
+                    channel: access.0,
+                    addr: access.1,
+                    data: access.2,
+                    size: 2,
+                    write: access.3,
+                    final_d: access.4,
+                    line: false,
+                    fill,
+                })
+            }
+            PendingBlit::Line(state) => {
+                let access = match state.phase {
+                    LineBlitPhase::LB if state.use_b => {
+                        (1, state.bpt, read_word(ram, state.bpt), 2, false)
+                    }
+                    LineBlitPhase::L2 if state.use_c => {
+                        (2, state.cpt, read_word(ram, state.cpt), 2, false)
+                    }
+                    LineBlitPhase::L4 if state.use_c => {
+                        let a = state.a_word >> state.ash_now as u32;
+                        let b = if state.bdat & 1 != 0 { 0xFFFF } else { 0 };
+                        let write = !state.sing || !state.one_dot;
+                        (
+                            3,
+                            state.dpt,
+                            minterm(state.lf, a, b, state.cur_c),
+                            if write { 2 } else { 0 },
+                            write,
+                        )
+                    }
+                    _ => return None,
+                };
+                Some(BlitBusAccess {
+                    channel: access.0,
+                    addr: access.1,
+                    data: access.2,
+                    size: access.3,
+                    write: access.4,
+                    final_d: access.0 == 3 && access.4 && state.npixels_remaining == 1,
+                    line: true,
+                    fill: false,
+                })
+            }
         }
     }
 
@@ -3090,6 +3191,46 @@ mod tests {
         assert!(!b.tick_scheduled_slot(&mut ram)); // terminal NOTHING cycle.
         assert!(b.tick_scheduled_slot(&mut ram)); // terminal BLTDONE cycle.
         assert!(!b.busy);
+    }
+
+    #[test]
+    fn scheduled_line_sing_reports_locked_d_slots_without_memory_writes() {
+        let mut ram = vec![0u8; 1024];
+        let mut b = Blitter::new();
+        b.bltcon0 = 0x0BCA;
+        b.bltcon1 = BLTCON1_LINE | BLTCON1_SIGN | BLTCON1_SING | BLTCON1_SUD;
+        b.bltafwm = 0xFFFF;
+        b.bltalwm = 0xFFFF;
+        b.bltadat = 0x8000;
+        b.bltbdat = 0xFFFF;
+        b.bltcpt = 0;
+        b.bltdpt = 0;
+        b.bltcmod = 32;
+        b.bltdmod = 32;
+        b.bltamod = -60;
+        b.bltbmod = 0;
+        b.bltapt = (-30i16) as u16 as u32;
+        b.start_scheduled((16u16 << 6) | 2, &ram);
+
+        let mut d_slots = Vec::new();
+        loop {
+            if let Some(access) = b.current_bus_access(&ram) {
+                if access.channel == 3 {
+                    d_slots.push(access);
+                }
+            }
+            if b.tick_scheduled_slot(&mut ram) {
+                break;
+            }
+        }
+
+        assert_eq!(d_slots.iter().filter(|access| access.write).count(), 1);
+        assert_eq!(d_slots.iter().filter(|access| access.size == 2).count(), 1);
+        assert!(d_slots
+            .iter()
+            .skip(1)
+            .all(|access| !access.write && access.size == 0));
+        assert!(!d_slots.iter().any(|access| access.final_d));
     }
 
     #[test]

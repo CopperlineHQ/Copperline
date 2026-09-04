@@ -1018,6 +1018,31 @@ pub fn with_bus_memory<R>(bus: &crate::bus::Bus, f: impl FnOnce(&OsMemory) -> R)
     f(&os)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StackBounds {
+    pub system_lower: u32,
+    pub system_upper: u32,
+    pub task_lower: u32,
+    pub task_upper: u32,
+}
+
+/// ExecBase and ThisTask stack bounds, using the same side-effect-free guest
+/// structure walk as the console's TASK command.
+pub fn stack_bounds_on_bus(bus: &crate::bus::Bus) -> Option<StackBounds> {
+    with_bus_memory(bus, stack_bounds)
+}
+
+fn stack_bounds(os: &OsMemory<'_>) -> Option<StackBounds> {
+    let exec = os.exec_info(os.exec_base().ok()?);
+    let task = os.this_task(exec.base).map(|task| os.task_info(task.addr));
+    Some(StackBounds {
+        system_lower: exec.sys_stk_lower,
+        system_upper: exec.sys_stk_upper,
+        task_lower: task.as_ref().map_or(0, |task| task.sp_lower),
+        task_upper: task.as_ref().map_or(0, |task| task.sp_upper),
+    })
+}
+
 /// Bus-backed convenience wrapper: the current process's segments, or
 /// why exec is not walkable. Shared by the console SEGMENTS command and
 /// the GDB stub (monitor segments / qOffsets).
@@ -1638,6 +1663,26 @@ mod tests {
         let peek32 = |a: u32| mem.peek32(a);
         let err = os(&peek8, &peek32).exec_base().unwrap_err();
         assert!(err.contains("ChkBase"), "{err}");
+    }
+
+    #[test]
+    fn stack_bounds_ignore_an_implausible_this_task_pointer() {
+        let mut mem = build_exec_world();
+        let base = mem.peek32(4);
+        mem.put32(base + SYS_STK_LOWER, 0x0001_0000);
+        mem.put32(base + SYS_STK_UPPER, 0x0001_8000);
+        mem.put32(base + THIS_TASK, 1);
+        // Garbage at the wrapped task offsets must not escape as stack bounds.
+        mem.put32(1u32.wrapping_add(TC_SP_LOWER), 0xDEAD_BEEF);
+        mem.put32(1u32.wrapping_add(TC_SP_UPPER), 0xCAFE_BABE);
+
+        let peek8 = |a: u32| mem.peek8(a);
+        let peek32 = |a: u32| mem.peek32(a);
+        let bounds = stack_bounds(&os(&peek8, &peek32)).expect("valid ExecBase");
+        assert_eq!(bounds.system_lower, 0x0001_0000);
+        assert_eq!(bounds.system_upper, 0x0001_8000);
+        assert_eq!(bounds.task_lower, 0);
+        assert_eq!(bounds.task_upper, 0);
     }
 
     /// Exec structures live wherever exec allocated them. On a big-box

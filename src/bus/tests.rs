@@ -11,17 +11,20 @@ use super::{
     live_bitplane_collision_pixel_at, live_display_window_x, live_manual_sprite_collision_sources,
     live_playfield_collision_pixel, live_sprite_playfield_collision_bits_in_range,
     live_sprite_sprite_collision_bits, sprite_hstart_for_fmode, visible_start_vpos_for_diw,
-    BeamChipRamWrite, BeamRegisterWrite, BeamWriteSource, BitplaneBplcon0Delay, Bus,
-    CapturedBitplaneRow, CapturedSpriteLine, ChipBusOwner, CpuBusAccessKind, CpuWaitClass,
-    CpuWaitSample, DeviceClock, DisplaySpriteDmaState, DisplaySpriteLineData, FrameBusTrace,
-    LiveCollisionControl, LiveCollisionLineReplay, LiveSpriteCollisionSource, PortDevice,
-    RenderRegisterSnapshot, BLITTER_SLOWDOWN_CPU_MISS_LIMIT, BLTCON0_USE_A, BLTCON0_USE_C,
-    BLTCON0_USE_D, BLTCON1_DOFF, BLTCON1_LINE, BPLCON0_ECSENA, BPLCON3_BRDRBLNK, BPLCON3_BRDSPRT,
-    BPLCON3_SPRES_HIRES, BPLCON3_SPRES_SHRES, CPU_WAIT_PC_CAP, DENISE_HPOS_LAG_CCK, DMACON_BLTEN,
-    DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN, PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS,
-    RENDER_COPPER_WAIT_HPOS_FB0, RENDER_DIW_HSTART_FB0, RENDER_MIN_OVERSCAN_START_VPOS,
-    RENDER_VISIBLE_LINES, RENDER_VISIBLE_START_VPOS, SPRITE_DMA_SLOT1_HPOS,
-    SPRITE_OUTPUT_DELAY_LORES,
+    BeamChipRamWrite, BeamRegisterWrite, BeamWriteSource, BitplaneBplcon0Delay, Bus, BusSlotRecord,
+    CapturedBitplaneRow, CapturedSpriteLine, ChipBusOwner, CpuBusAccessKind, CpuTraceSlot,
+    CpuWaitClass, CpuWaitSample, DeviceClock, DisplaySpriteDmaState, DisplaySpriteLineData,
+    FrameBusTrace, LiveCollisionControl, LiveCollisionLineReplay, LiveSpriteCollisionSource,
+    PortDevice, RenderRegisterSnapshot, BLITTER_SLOWDOWN_CPU_MISS_LIMIT, BLTCON0_USE_A,
+    BLTCON0_USE_C, BLTCON0_USE_D, BLTCON1_DOFF, BLTCON1_LINE, BPLCON0_ECSENA, BPLCON3_BRDRBLNK,
+    BPLCON3_BRDSPRT, BPLCON3_SPRES_HIRES, BPLCON3_SPRES_SHRES, BUS_EVENT_BLIT_FINAL_D,
+    BUS_EVENT_CIAA_IRQ, BUS_EVENT_COPPER_WAKE, BUS_EVENT_DDFSTRT, BUS_EVENT_INTREQ, BUS_EVENT_LOF,
+    BUS_EVENT_LOL, BUS_EVENT_SPECIAL, BUS_EVENT_VB, BUS_EVENT_VDIW, BUS_EVENT_VS,
+    BUS_RECORD_BLITTER, BUS_RECORD_COPPER, BUS_RECORD_CPU, BUS_RECORD_DISK, BUS_RECORD_SPRITE,
+    CPU_WAIT_PC_CAP, DENISE_HPOS_LAG_CCK, DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN,
+    IRQ_SOURCE_BITS, PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS, RENDER_COPPER_WAIT_HPOS_FB0,
+    RENDER_DIW_HSTART_FB0, RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_LINES,
+    RENDER_VISIBLE_START_VPOS, SPRITE_DMA_SLOT1_HPOS, SPRITE_OUTPUT_DELAY_LORES,
 };
 use crate::audio::AudioSink;
 use crate::chipset::agnus::{
@@ -36,8 +39,8 @@ use crate::chipset::copper::{CopperWait, DMACON_COPEN};
 use crate::chipset::denise::BPLCON2_RDRAM;
 use crate::chipset::denise::{rgb12_to_rgba8, DeniseRevision, DiwHigh, COLOR_TRANSPARENCY_BIT};
 use crate::chipset::paula::{
-    Paula, DMACON_DMAEN, INT_AUD0, INT_BLIT, INT_COPER, INT_EXTER, INT_MASTER, INT_PORTS,
-    INT_VERTB, PAULA_CLOCK_HZ,
+    pending_ipl, Paula, DMACON_DMAEN, INT_AUD0, INT_BLIT, INT_COPER, INT_EXTER, INT_MASTER,
+    INT_PORTS, INT_VERTB, PAULA_CLOCK_HZ,
 };
 use crate::floppy::{FloppyController, ADF_SIZE};
 use crate::memory::Memory;
@@ -57,6 +60,775 @@ const STANDARD_VISIBLE_X0: usize = ((STANDARD_DIW_HSTART - RENDER_DIW_HSTART_FB0
 // writes that feed delayed shifter/control paths.
 const RENDER_COLOR_WRITE_HPOS_FB0: u32 = 0x35;
 static BUS_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn full_bus_record_is_exactly_24_bytes_and_owner_only_trace_stays_cheap() {
+    assert_eq!(
+        std::mem::size_of::<BusSlotRecord>(),
+        BusSlotRecord::BYTE_SIZE
+    );
+
+    let mut trace = FrameBusTrace::default();
+    trace.reset_for_frame(7, 0.140, 4, 16, 1, 2, false);
+    assert!(!trace.full());
+    assert!(trace.records().is_none());
+
+    trace.reset_for_frame_with_level(
+        8,
+        0.160,
+        4,
+        16,
+        1,
+        2,
+        false,
+        true,
+        super::FrameRegisterSnapshot::default(),
+    );
+    assert!(trace.full());
+    assert_eq!(trace.records().unwrap().len(), 4 * 16);
+
+    trace.reset_for_frame_with_level(
+        9,
+        0.180,
+        super::FRAME_ANALYZER_MAX_VPOS as u32,
+        1,
+        0,
+        1,
+        false,
+        true,
+        super::FrameRegisterSnapshot::default(),
+    );
+    assert_eq!(trace.rows, 2048);
+    assert!(trace.record_row(2047).is_some());
+
+    let record = BusSlotRecord {
+        reg: 0x1234,
+        kind: 2,
+        subtype: 3,
+        size: 8,
+        ipl: 5,
+        flags: 0x6789,
+        addr: 0xAABB_CCDD,
+        data: 0x0123_4567_89AB_CDEF,
+        events: 0x1020_3040,
+    };
+    let mut bytes = Vec::new();
+    record.write_to(&mut bytes).unwrap();
+    assert_eq!(bytes.len(), BusSlotRecord::BYTE_SIZE);
+    assert_eq!(&bytes[0..2], &0x1234u16.to_le_bytes());
+    assert_eq!(&bytes[2..6], &[2, 3, 8, 5]);
+    assert_eq!(&bytes[6..8], &0x6789u16.to_le_bytes());
+    assert_eq!(&bytes[8..12], &0xAABB_CCDDu32.to_le_bytes());
+    assert_eq!(&bytes[12..20], &0x0123_4567_89AB_CDEFu64.to_le_bytes());
+    assert_eq!(&bytes[20..24], &0x1020_3040u32.to_le_bytes());
+}
+
+#[test]
+fn full_bus_events_match_ddf_blitter_and_copper_probe_cadence() {
+    // The DDF sequencer comparator fires at DDFSTRT itself ($38), one
+    // colour clock before the standard low-resolution table's first fetch.
+    let mut ddf = empty_bus();
+    ddf.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+    ddf.denise.diwstrt = 0x2C81;
+    ddf.denise.diwstop = 0xF4C1;
+    ddf.denise.ddfstrt = 0x0038;
+    ddf.denise.ddfstop = 0x00D0;
+    ddf.denise.bplcon0 = 0x1200;
+    ddf.agnus.vpos = 0x50;
+    ddf.agnus.hpos = 0x38;
+    ddf.set_frame_analyzer_full(true);
+    ddf.advance_chipset(1);
+    assert_ne!(
+        ddf.frame_bus_trace()
+            .unwrap()
+            .record_at(0x50, 0x38)
+            .unwrap()
+            .events
+            & BUS_EVENT_DDFSTRT,
+        0
+    );
+
+    // A one-word D-only blit spends four lead-in clocks, the body/bubble
+    // clocks, then writes its queued word on terminal F at start + 7.
+    let mut blit = empty_bus();
+    blit.agnus.dmacon = DMACON_DMAEN | DMACON_BLTEN;
+    blit.agnus.hpos = 0x20;
+    blit.blitter.bltcon0 = BLTCON0_USE_D;
+    blit.blitter.bltdpt = 0x100;
+    blit.set_frame_analyzer_full(true);
+    assert!(!blit.custom_write(0x058, 2, (1 << 6) | 1));
+    blit.advance_chipset(8);
+    let final_d = blit.frame_bus_trace().unwrap().record_at(0, 0x27).unwrap();
+    assert_eq!(final_d.kind, BUS_RECORD_BLITTER);
+    assert_eq!(final_d.subtype & 0x0F, 3, "terminal write is channel D");
+    assert_ne!(final_d.events & BUS_EVENT_BLIT_FINAL_D, 0);
+
+    // WAIT $0033 compares against hpos + 2, so its fixed wake cycle is
+    // $30 and the following instruction fetch may land at the $32 target.
+    let mut copper = empty_bus();
+    copper.agnus.dmacon = DMACON_DMAEN | DMACON_COPEN;
+    copper.agnus.hpos = 0x30;
+    copper.copper.wait(CopperWait::new(0x0033, 0x80FE));
+    copper.set_frame_analyzer_full(true);
+    copper.advance_chipset(1);
+    assert_ne!(
+        copper
+            .frame_bus_trace()
+            .unwrap()
+            .record_at(0, 0x30)
+            .unwrap()
+            .events
+            & BUS_EVENT_COPPER_WAKE,
+        0
+    );
+}
+
+#[test]
+fn full_bus_line_markers_match_bartman_signal_state() {
+    let mut pal = empty_bus();
+    pal.denise.diwstrt = 0x2C81;
+    pal.denise.diwstop = 0xF4C1;
+
+    let top = pal.beam_trace_events_at(0, 1);
+    assert_ne!(top & BUS_EVENT_VB, 0);
+    assert_eq!(top & (BUS_EVENT_VS | BUS_EVENT_VDIW), 0);
+
+    let pal_sync = pal.beam_trace_events_at(3, 1);
+    assert_eq!(
+        pal_sync & (BUS_EVENT_VB | BUS_EVENT_VS),
+        BUS_EVENT_VB | BUS_EVENT_VS
+    );
+    assert_eq!(pal.beam_trace_events_at(25, 1) & BUS_EVENT_VB, 0);
+    assert_ne!(pal.beam_trace_events_at(PAL_LINES - 1, 1) & BUS_EVENT_VB, 0);
+
+    assert_ne!(pal.beam_trace_events_at(44, 1) & BUS_EVENT_VDIW, 0);
+    assert_ne!(pal.beam_trace_events_at(44, 3) & BUS_EVENT_LOF, 0);
+    pal.agnus.lol = true;
+    assert_ne!(pal.beam_trace_events_at(44, 3) & BUS_EVENT_LOL, 0);
+
+    let mut ntsc = empty_bus();
+    ntsc.set_video_standard(VideoStandard::Ntsc);
+    assert_ne!(ntsc.beam_trace_events_at(3, 1) & BUS_EVENT_VS, 0);
+    assert_eq!(ntsc.beam_trace_events_at(20, 1) & BUS_EVENT_VB, 0);
+    assert_ne!(
+        ntsc.beam_trace_events_at(ntsc.agnus.current_frame_lines() - 1, 1) & BUS_EVENT_VB,
+        0
+    );
+}
+
+#[test]
+fn full_bus_record_carries_cia_register_and_e_clock_phase() {
+    let mut bus = empty_bus();
+    bus.set_frame_analyzer_full(true);
+    bus.set_cpu_bus_arbitration_enabled(true);
+    bus.cpu_cia_access(1);
+    let (vpos, hpos) = bus.cia_trace_slot.unwrap();
+    let cia_a_offset = 1 + u64::from(REG_DDRA as u32) * 0x100;
+    let _ = bus.cia_a_write(cia_a_offset, 1, 0x5A);
+
+    let record = bus
+        .current_frame_bus_trace
+        .record_at(vpos as usize, hpos as usize)
+        .unwrap();
+    assert_eq!(record.addr, crate::cpu::CIA_A_BASE + cia_a_offset as u32);
+    assert_eq!(record.data, 0x5A);
+    assert_eq!(record.size, 1);
+    assert_ne!(record.flags & 1, 0, "CIA write flag");
+    assert_ne!(record.flags & (1 << 1), 0, "CIA access flag");
+    assert_eq!(record.flags & (1 << 2), 0, "CIA-A selector");
+    assert_eq!((record.flags >> 8) & 0x0F, REG_DDRA as u16);
+    assert_eq!((record.flags >> 12) & 7, 0, "initial E-clock phase");
+    assert_ne!(record.events & BUS_EVENT_SPECIAL, 0);
+
+    bus.cpu_cia_access(1);
+    let (vpos, hpos) = bus.cia_trace_slot.unwrap();
+    let cia_b_offset = u64::from(REG_DDRB as u32) * 0x100;
+    let _ = bus.cia_b_write(cia_b_offset, 1, 0xA5);
+    let record = bus
+        .current_frame_bus_trace
+        .record_at(vpos as usize, hpos as usize)
+        .unwrap();
+    assert_eq!(record.addr, crate::cpu::CIA_B_BASE + cia_b_offset as u32);
+    assert_ne!(record.flags & (1 << 2), 0, "CIA-B selector");
+
+    bus.cpu_cia_access(1);
+    let (vpos, hpos) = bus.cia_trace_slot.unwrap();
+    let _ = bus.cia_b_write(cia_b_offset, 2, 0xC300);
+    let record = bus
+        .current_frame_bus_trace
+        .record_at(vpos as usize, hpos as usize)
+        .unwrap();
+    assert_eq!(record.data, 0xC300, "CIA-B words occupy the high byte lane");
+    assert_eq!(record.size, 2);
+
+    bus.cpu_cia_access(1);
+    let (vpos, hpos) = bus.cia_trace_slot.unwrap();
+    assert_eq!(bus.cia_b_read(cia_b_offset, 2), 0xC300);
+    let record = bus
+        .current_frame_bus_trace
+        .record_at(vpos as usize, hpos as usize)
+        .unwrap();
+    assert_eq!(
+        record.data, 0xC300,
+        "CIA-B word reads retain the same byte lane"
+    );
+    assert_eq!(record.size, 2);
+}
+
+#[test]
+fn full_bus_records_intreq_edges_before_interrupt_enable() {
+    let mut bus = empty_bus();
+    bus.set_frame_analyzer_full(true);
+    let (vpos, hpos) = (bus.agnus.vpos, bus.agnus.hpos);
+
+    bus.paula.intreq |= INT_AUD0;
+    bus.arm_irq_recognition_latency();
+
+    let record = bus
+        .current_frame_bus_trace
+        .record_at(vpos as usize, hpos as usize)
+        .unwrap();
+    assert_ne!(record.events & BUS_EVENT_INTREQ, 0);
+    assert_eq!(record.ipl, 0, "disabled source does not yet raise CPU IPL");
+}
+
+#[test]
+fn copper_trace_carries_wait_subtype_and_fetched_word() {
+    let mut bus = empty_bus();
+    let list = 0x0100usize;
+    write_chip_word(&mut bus, list, 0x5021);
+    write_chip_word(&mut bus, list + 2, 0xFFFE);
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_COPEN;
+    bus.agnus.hpos = 0x20;
+    bus.copper.jump(list as u32);
+    bus.set_frame_analyzer_full(true);
+
+    bus.advance_chipset(3);
+
+    let trace = bus.frame_bus_trace().unwrap();
+    let first = trace.record_at(0, 0x20).unwrap();
+    assert_eq!(first.kind, BUS_RECORD_COPPER);
+    assert_eq!(first.subtype, 0);
+    assert_eq!(first.data, 0x5021);
+    let second = trace.record_at(0, 0x22).unwrap();
+    assert_eq!(second.kind, BUS_RECORD_COPPER);
+    assert_eq!(second.subtype, 1);
+    assert_eq!(second.data, 0xFFFE);
+}
+
+#[test]
+fn copper_trace_carries_skip_and_skipped_move_fetch_data() {
+    let mut bus = empty_bus();
+    let list = 0x0100usize;
+    write_chip_word(&mut bus, list, 0x0001);
+    write_chip_word(&mut bus, list + 2, 0xFFFF);
+    write_chip_word(&mut bus, list + 4, 0x0180);
+    write_chip_word(&mut bus, list + 6, 0xABCD);
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_COPEN;
+    bus.agnus.vpos = 0x50;
+    bus.agnus.hpos = 0x20;
+    bus.copper.jump(list as u32);
+    bus.set_frame_analyzer_full(true);
+
+    bus.advance_chipset(11);
+
+    let trace = bus.frame_bus_trace().unwrap();
+    let skip = trace.record_at(0x50, 0x22).unwrap();
+    assert_eq!(skip.kind, BUS_RECORD_COPPER);
+    assert_eq!(skip.subtype, 2);
+    assert_eq!(skip.data, 0xFFFF);
+    let skipped_move = trace.record_at(0x50, 0x2A).unwrap();
+    assert_eq!(skipped_move.kind, BUS_RECORD_COPPER);
+    assert_eq!(skipped_move.subtype, 2);
+    assert_eq!(skipped_move.reg, 0x0180);
+    assert_eq!(skipped_move.data, 0xABCD);
+    assert_eq!(skipped_move.size, 2);
+    assert_eq!(skipped_move.flags & 1, 0);
+}
+
+#[test]
+fn ocs_longword_cpu_trace_records_distinct_word_slots() {
+    let mut bus = empty_bus();
+    bus.agnus.hpos = 0x20;
+    bus.set_frame_analyzer_full(true);
+    bus.set_cpu_bus_arbitration_enabled(true);
+
+    bus.grant_cpu_bus_access_at(Some(0x0002_0000), 4, CpuBusAccessKind::Write);
+    bus.update_last_cpu_trace_data(0x1122_3344, 4);
+
+    let trace = &bus.current_frame_bus_trace;
+    let high = trace.record_at(0, 0x20).unwrap();
+    assert_eq!(high.kind, BUS_RECORD_CPU);
+    assert_eq!(high.reg, 0x1000);
+    assert_eq!(high.addr, 0x0002_0000);
+    assert_eq!(high.size, 2);
+    assert_eq!(high.data, 0x1122);
+    assert_ne!(high.flags & 1, 0);
+
+    let low = trace.record_at(0, 0x22).unwrap();
+    assert_eq!(low.kind, BUS_RECORD_CPU);
+    assert_eq!(low.reg, 0x1000);
+    assert_eq!(low.addr, 0x0002_0002);
+    assert_eq!(low.size, 2);
+    assert_eq!(low.data, 0x3344);
+    assert_ne!(low.flags & 1, 0);
+}
+
+#[test]
+fn cpu_read_trace_peeks_exactly_each_recorded_transfer_width() {
+    let mut bus = empty_bus();
+    bus.mem.overlay = false;
+    bus.mem.chip_ram[0x20000..0x20004].copy_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+    bus.agnus.hpos = 0x20;
+    bus.set_frame_analyzer_full(true);
+    bus.set_cpu_bus_arbitration_enabled(true);
+
+    bus.grant_cpu_bus_access_at(Some(0x0002_0000), 3, CpuBusAccessKind::Read);
+
+    let records = bus.current_frame_bus_trace.records().unwrap();
+    let high = records
+        .iter()
+        .find(|record| record.addr == 0x0002_0000 && record.size != 0)
+        .unwrap();
+    assert_eq!(high.size, 2);
+    assert_eq!(high.data, 0x1122);
+    let tail = records
+        .iter()
+        .find(|record| record.addr == 0x0002_0002 && record.size != 0)
+        .unwrap();
+    assert_eq!(tail.size, 1);
+    assert_eq!(tail.data, 0x33);
+    assert_eq!(bus.peek_cpu_trace_data(0x0002_0001, 3), 0x223344);
+}
+
+#[test]
+fn completed_cpu_access_updates_slots_on_both_sides_of_a_frame_boundary() {
+    let mut bus = empty_bus();
+    let mut previous = FrameBusTrace::default();
+    previous.reset_for_frame_with_level(
+        7,
+        0.140,
+        1,
+        2,
+        0,
+        1,
+        false,
+        true,
+        super::FrameRegisterSnapshot::default(),
+    );
+    previous.annotate_at(0, 1, |record| record.kind = BUS_RECORD_CPU);
+    bus.last_frame_bus_trace = Some(previous);
+    bus.current_frame_bus_trace.reset_for_frame_with_level(
+        8,
+        0.160,
+        1,
+        2,
+        0,
+        1,
+        false,
+        true,
+        super::FrameRegisterSnapshot::default(),
+    );
+    bus.current_frame_bus_trace
+        .annotate_at(0, 0, |record| record.kind = BUS_RECORD_CPU);
+    bus.cpu_trace_slots = vec![
+        CpuTraceSlot {
+            frame: 7,
+            vpos: 0,
+            hpos: 1,
+            value_offset: 0,
+            size: 2,
+        },
+        CpuTraceSlot {
+            frame: 8,
+            vpos: 0,
+            hpos: 0,
+            value_offset: 2,
+            size: 2,
+        },
+    ];
+
+    bus.update_last_cpu_trace_data(0x1122_3344, 4);
+
+    assert_eq!(
+        bus.last_frame_bus_trace
+            .as_ref()
+            .unwrap()
+            .record_at(0, 1)
+            .unwrap()
+            .data,
+        0x1122
+    );
+    assert_eq!(
+        bus.current_frame_bus_trace.record_at(0, 0).unwrap().data,
+        0x3344
+    );
+}
+
+#[test]
+fn cpu_trace_peek_follows_agnus_chip_ram_mirroring() {
+    let mut bus = empty_bus_with_chip_ram(512 * 1024);
+    bus.set_agnus_revision(AgnusRevision::Ocs);
+    bus.mem.chip_ram[0..2].copy_from_slice(&[0xCA, 0xFE]);
+
+    assert_eq!(bus.peek_word_any(0x0008_0000), 0xCAFE);
+    assert_eq!(bus.peek_cpu_trace_data(0x0008_0000, 2), 0xCAFE);
+}
+
+#[test]
+fn cia_irq_trace_uses_underflow_slot_during_batched_advance() {
+    let mut bus = empty_bus();
+    bus.cia_a.write(REG_TALO, 0);
+    bus.cia_a.write(REG_TAHI, 0);
+    bus.cia_a.write(REG_ICR, 0x80 | 0x01);
+    bus.cia_a.write(REG_CRA, 0x09); // start, one-shot
+    bus.set_frame_analyzer_full(true);
+
+    bus.advance_devices(20);
+
+    let trace = &bus.current_frame_bus_trace;
+    assert_ne!(
+        trace.record_at(0, 4).unwrap().events & BUS_EVENT_CIAA_IRQ,
+        0,
+        "the first CIA E-clock ends in the colour-clock slot starting at hpos 4"
+    );
+    assert_eq!(
+        trace.record_at(0, 20).unwrap().events & BUS_EVENT_CIAA_IRQ,
+        0,
+        "the event must not be stamped at the end of the 20-cck caller batch"
+    );
+}
+
+#[test]
+fn cia_irq_trace_rearms_after_an_icr_read_clears_the_pin() {
+    let mut bus = empty_bus();
+    bus.cia_a.write(REG_TALO, 0);
+    bus.cia_a.write(REG_TAHI, 0);
+    bus.cia_a.write(REG_ICR, 0x80 | 0x01);
+    bus.cia_a.write(REG_CRA, 0x09); // start, one-shot
+    bus.set_frame_analyzer_full(true);
+    bus.set_bus_event_observation_enabled(true);
+    bus.advance_devices(20);
+    assert!(bus.trace_cia_irq_pins.0);
+
+    let _ = bus.cia_a_read((REG_ICR as u64) << 8, 1);
+    assert!(!bus.trace_cia_irq_pins.0);
+    bus.cia_a.write(REG_TALO, 0);
+    bus.cia_a.write(REG_TAHI, 0);
+    bus.cia_a.write(REG_CRA, 0x09);
+    let cursor = bus.bus_event_cursor();
+
+    bus.advance_devices(20);
+
+    let (events, _, dropped) = bus.bus_events_since(cursor);
+    assert_eq!(dropped, 0);
+    assert!(events.iter().any(|event| event.name == "cia_a_irq"));
+}
+
+#[test]
+fn detailed_bus_tracing_keeps_timed_devices_on_instruction_boundary_batches() {
+    let mut ordinary = empty_bus();
+    let mut full_trace = empty_bus();
+    let mut event_trace = empty_bus();
+    for bus in [&mut ordinary, &mut full_trace, &mut event_trace] {
+        bus.cia_a.write(REG_TALO, 10);
+        bus.cia_a.write(REG_TAHI, 0);
+        bus.cia_a.write(REG_CRA, 0x01);
+    }
+    full_trace.set_frame_analyzer_full(true);
+    event_trace.set_bus_event_observation_enabled(true);
+
+    for bus in [&mut ordinary, &mut full_trace, &mut event_trace] {
+        for _ in 0..8 {
+            let (cck, tick) = bus.advance_one_chip_bus_quantum(None);
+            bus.record_slice_bus_advance(cck, tick);
+        }
+    }
+
+    assert_eq!(full_trace.cia_a.ta_count, ordinary.cia_a.ta_count);
+    assert_eq!(event_trace.cia_a.ta_count, ordinary.cia_a.ta_count);
+    for bus in [&mut ordinary, &mut full_trace, &mut event_trace] {
+        bus.flush_timed_devices();
+    }
+    assert_eq!(full_trace.cia_a.ta_count, ordinary.cia_a.ta_count);
+    assert_eq!(event_trace.cia_a.ta_count, ordinary.cia_a.ta_count);
+}
+
+#[test]
+fn demoting_full_trace_preserves_owner_samples_in_the_current_epoch() {
+    let mut bus = empty_bus();
+    bus.set_frame_analyzer_full(true);
+    bus.advance_chipset(4);
+    let before = bus.current_frame_bus_trace.owner_cck.iter().sum::<u64>();
+    assert_eq!(before, 4);
+    assert!(bus.current_frame_bus_trace.full());
+
+    bus.set_frame_analyzer_full(false);
+
+    assert_eq!(
+        bus.current_frame_bus_trace.owner_cck.iter().sum::<u64>(),
+        before
+    );
+    assert!(!bus.current_frame_bus_trace.full());
+    bus.advance_chipset(1);
+    assert_eq!(
+        bus.current_frame_bus_trace.owner_cck.iter().sum::<u64>(),
+        before + 1
+    );
+}
+
+#[test]
+fn recognized_irq_event_stream_uses_the_delivered_level() {
+    let mut bus = empty_bus();
+    bus.set_bus_event_observation_enabled(true);
+    bus.paula.intena = INT_MASTER | IRQ_SOURCE_BITS;
+    bus.paula.intreq = IRQ_SOURCE_BITS;
+
+    bus.note_cpu_irq_recognized(2);
+
+    let (events, _, dropped) = bus.bus_events_since(0);
+    assert_eq!(dropped, 0);
+    let event = events
+        .iter()
+        .find(|event| event.name == "cpu_irq_recognized")
+        .unwrap();
+    assert_eq!(event.ipl, 2);
+    assert_ne!(
+        pending_ipl(bus.paula.intena & bus.cpu_visible_intreq()),
+        event.ipl,
+        "the fixture must distinguish live pending IPL from the delivered level"
+    );
+}
+
+#[test]
+fn cpu_custom_trace_uses_cpu_bit_and_register_offset() {
+    let mut bus = empty_bus();
+    bus.agnus.hpos = 0x20;
+    bus.set_frame_analyzer_full(true);
+    bus.set_cpu_bus_arbitration_enabled(true);
+
+    bus.grant_cpu_bus_access_at(Some(0x00DF_F180), 2, CpuBusAccessKind::Custom);
+    bus.update_last_cpu_trace_data(0x0F00, 2);
+
+    let record = bus.current_frame_bus_trace.record_at(0, 0x20).unwrap();
+    assert_eq!(record.kind, BUS_RECORD_CPU);
+    assert_eq!(record.reg, 0x1180);
+    assert_eq!(record.size, 2);
+    assert_eq!(record.data, 0x0F00);
+}
+
+#[test]
+fn bus_event_observation_detects_blitter_final_d_without_full_trace() {
+    let mut bus = empty_bus();
+    bus.set_bus_event_observation_enabled(true);
+    assert!(!bus.frame_analyzer_full());
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BLTEN;
+    bus.agnus.hpos = 0x20;
+    bus.blitter.bltcon0 = BLTCON0_USE_D;
+    bus.blitter.bltdpt = 0x100;
+    assert!(!bus.custom_write(0x058, 2, (1 << 6) | 1));
+    let cursor = bus.bus_event_cursor();
+
+    bus.advance_chipset(8);
+
+    let (events, _, dropped) = bus.bus_events_since(cursor);
+    assert_eq!(dropped, 0);
+    assert!(events.iter().any(|event| event.name == "blitter_final_d"));
+}
+
+#[test]
+fn cpu_on_a_bus_free_blitter_phase_is_not_reported_as_a_conflict() {
+    for full_trace in [false, true] {
+        let mut bus = empty_bus();
+        bus.agnus.dmacon = DMACON_DMAEN | DMACON_BLTEN;
+        bus.agnus.hpos = 0x20;
+        bus.blitter.bltcon0 = BLTCON0_USE_D;
+        bus.blitter.bltdpt = 0x100;
+        bus.blitter.start_scheduled((1 << 6) | 1, &bus.mem.chip_ram);
+        assert!(bus.blitter.busy);
+        assert!(
+            !bus.blitter.current_slot_needs_bus(),
+            "the startup pipeline phase must leave the bus free"
+        );
+        bus.set_frame_analyzer_full(full_trace);
+        bus.set_bus_event_observation_enabled(true);
+        let cursor = bus.bus_event_cursor();
+
+        bus.advance_one_chip_bus_quantum(Some(ChipBusOwner::Cpu));
+
+        let (events, _, dropped) = bus.bus_events_since(cursor);
+        assert_eq!(dropped, 0);
+        assert!(
+            events
+                .iter()
+                .all(|event| event.name != "blitter_denied_by_cpu"),
+            "a bus-free pipeline phase is not a CPU/blitter conflict"
+        );
+    }
+}
+
+#[test]
+fn reserved_disk_slot_has_no_transfer_until_floppy_dma_moves_a_word() {
+    let mut bus = empty_bus();
+    bus.agnus.dmacon = DMACON_DMAEN | (1 << 4);
+    bus.floppy.write_prb(0xF7); // DF0 selected, motor off and no media.
+    assert!(!bus.floppy.write_dsklen(0x8001, 0));
+    assert!(!bus.floppy.write_dsklen(0x8001, 0));
+    bus.agnus.hpos = 0x07;
+    bus.set_frame_analyzer_full(true);
+
+    bus.advance_chipset(1);
+
+    let record = bus.current_frame_bus_trace.record_at(0, 0x07).unwrap();
+    assert_eq!(record.kind, BUS_RECORD_DISK, "the slot remains reserved");
+    assert_eq!(record.size, 0, "no floppy word was actually transferred");
+    assert_eq!(record.addr, 0);
+    assert_eq!(record.data, 0);
+}
+
+#[test]
+fn zero_time_dma_records_preserve_every_transfer_at_one_beam_position() {
+    let mut bus = empty_bus();
+    bus.agnus.hpos = 0x20;
+    bus.set_frame_analyzer_full(true);
+
+    for (addr, data) in [(0x100, 0x1111), (0x102, 0x2222), (0x104, 0x3333)] {
+        bus.record_instantaneous_bus_slot_at(None, BUS_RECORD_DISK, 0, 0x0008, addr, data, 2, 1);
+    }
+
+    let records = bus.current_frame_bus_trace.instantaneous_records();
+    assert_eq!(records.len(), 3);
+    assert!(records.iter().all(|entry| entry.hpos == 0x20));
+    assert_eq!(
+        records
+            .iter()
+            .map(|entry| (entry.record.addr, entry.record.data))
+            .collect::<Vec<_>>(),
+        [(0x100, 0x1111), (0x102, 0x2222), (0x104, 0x3333)]
+    );
+    assert_eq!(
+        bus.current_frame_bus_trace.record_at(0, 0x20).unwrap().kind,
+        0,
+        "zero-time transfers must not overwrite each other in the raster slot"
+    );
+}
+
+#[test]
+fn batched_advance_places_floppy_words_in_distinct_raster_slots() {
+    let path = temp_bus_adf();
+    std::fs::write(&path, vec![0u8; ADF_SIZE]).unwrap();
+    let mut bus = empty_bus();
+    bus.floppy.insert_disk_image(0, path.clone(), true).unwrap();
+    bus.floppy.write_prb(0x77); // DF0 selected, motor on.
+    {
+        let Bus { floppy, mem, .. } = &mut bus;
+        floppy.tick(PAULA_CLOCK_HZ / 4, 0, &mut mem.chip_ram);
+    }
+    bus.floppy.set_dskpt_high(0);
+    bus.floppy.set_dskpt_low(0x0100);
+    bus.agnus.dmacon = DMACON_DMAEN | (1 << 4);
+    assert!(!bus.floppy.write_dsklen(0x8002, 0));
+    assert!(!bus.floppy.write_dsklen(0x8002, 0));
+    bus.set_frame_analyzer_full(true);
+
+    bus.advance_devices(256);
+
+    let transfers: Vec<(usize, u32, u64)> = bus
+        .current_frame_bus_trace
+        .records()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .filter(|(_, record)| record.kind == BUS_RECORD_DISK && record.size == 2)
+        .map(|(slot, record)| (slot, record.addr, record.data))
+        .collect();
+    assert_eq!(transfers.len(), 2, "{transfers:?}");
+    assert_ne!(transfers[0].0, transfers[1].0, "one record per actual word");
+    assert_eq!(transfers[0].1, 0x0100);
+    assert_eq!(transfers[1].1, 0x0102);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn bus_event_subscription_and_cursor_survive_state_adoption() -> anyhow::Result<()> {
+    let mut live = empty_bus();
+    live.set_bus_event_observation_enabled(true);
+    live.note_cpu_stop(false);
+    let cursor = live.bus_event_cursor();
+
+    let mut restored = empty_bus();
+    restored.adopt_host_resources(&mut live)?;
+    restored.note_cpu_stop(true);
+
+    let (new_events, next, dropped) = restored.bus_events_since(cursor);
+    assert_eq!(dropped, 0);
+    assert_eq!(next, cursor + 1);
+    assert_eq!(new_events.len(), 1);
+    assert_eq!(new_events[0].sequence, cursor);
+    assert_eq!(new_events[0].name, "cpu_stop_ipl_wake");
+    let (all_events, _, _) = restored.bus_events_since(0);
+    assert_eq!(
+        all_events.len(),
+        2,
+        "the undrained pre-load event is retained"
+    );
+    Ok(())
+}
+
+#[test]
+fn sprite_trace_distinguishes_control_and_data_registers() {
+    let mut bus = empty_bus();
+    bus.set_frame_analyzer_full(true);
+    bus.display_dma_sprpt[0] = 0x100;
+    write_chip_word(&mut bus, 0x100, 0xAAAA);
+    write_chip_word(&mut bus, 0x102, 0x5555);
+    bus.display_dma_sprite_state[0].dma_enabled = true;
+    bus.display_dma_sprite_state[0].vstop = 0x60;
+
+    bus.sprite_slot1(0, 0x2C, true, false, true);
+    let _ = bus.sprite_slot2(0, 0x2C, true, false, true);
+    assert_eq!(
+        bus.current_frame_bus_trace
+            .record_at(0x2C, SPRITE_DMA_SLOT1_HPOS[0] as usize)
+            .unwrap()
+            .reg,
+        0x0144
+    );
+    assert_eq!(
+        bus.current_frame_bus_trace
+            .record_at(0x2C, (SPRITE_DMA_SLOT1_HPOS[0] + 2) as usize)
+            .unwrap()
+            .reg,
+        0x0146
+    );
+    assert_eq!(
+        bus.current_frame_bus_trace
+            .record_at(0x2C, SPRITE_DMA_SLOT1_HPOS[0] as usize)
+            .unwrap()
+            .kind,
+        BUS_RECORD_SPRITE
+    );
+
+    bus.display_dma_sprpt[0] = 0x100;
+    bus.display_dma_sprite_state[0].vstop = 0x2D;
+    bus.sprite_slot1(0, 0x2D, true, false, true);
+    let _ = bus.sprite_slot2(0, 0x2D, true, false, true);
+    assert_eq!(
+        bus.current_frame_bus_trace
+            .record_at(0x2D, SPRITE_DMA_SLOT1_HPOS[0] as usize)
+            .unwrap()
+            .reg,
+        0x0140
+    );
+    assert_eq!(
+        bus.current_frame_bus_trace
+            .record_at(0x2D, (SPRITE_DMA_SLOT1_HPOS[0] + 2) as usize)
+            .unwrap()
+            .reg,
+        0x0142
+    );
+}
 
 #[test]
 fn frame_analyzer_records_owner_spans_and_blitter_wait_cck() {

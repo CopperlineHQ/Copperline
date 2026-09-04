@@ -17,7 +17,7 @@ pub enum Which {
     B,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Cia {
     which: Which,
     regs: [u8; 16],
@@ -740,6 +740,15 @@ impl Cia {
         // Any ICR-read race window ends with the E-cycle covered here.
         self.icr_read_race = false;
         pin_edge
+    }
+
+    /// Return the one-based E-clock tick on which `/IRQ` first asserts during
+    /// a future batch, without changing the live CIA. Detailed bus tracing
+    /// uses this diagnostic probe to place the edge on the correct raster slot
+    /// while retaining the emulator's ordinary batched device update.
+    pub(crate) fn first_irq_edge_tick_within(&self, ticks: u32) -> Option<u32> {
+        let mut probe = self.clone();
+        (1..=ticks).find(|_| probe.tick(1))
     }
 
     #[cfg_attr(not(test), allow(dead_code))]

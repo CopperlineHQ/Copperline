@@ -177,6 +177,7 @@ impl Bus {
     }
 
     pub(crate) fn record_cpu_chip_ram_write(&mut self, offset: usize, size: usize, value: u32) {
+        self.update_last_cpu_trace_data(u64::from(value), size.min(4) as u8);
         self.current_frame_chip_ram_writes
             .push(BeamChipRamWrite::from_cpu_write(
                 self.agnus.vpos,
@@ -880,7 +881,13 @@ impl Bus {
     /// Fetch one sprite DMA word group (1/2/4 words by FMODE) from the
     /// channel's live pointer, advancing SPRxPT the way the chip does:
     /// only words actually fetched move the pointer.
-    fn fetch_sprite_words(&mut self, sprite: usize) -> Option<[u16; 4]> {
+    fn fetch_sprite_words(
+        &mut self,
+        sprite: usize,
+        vpos: u32,
+        hpos: u32,
+        register: u16,
+    ) -> Option<[u16; 4]> {
         if self.mem.chip_ram.is_empty() {
             return None;
         }
@@ -896,6 +903,21 @@ impl Bus {
             }
             *word = read_chip_word_wrapping(&self.mem.chip_ram, addr);
         }
+        let data = words
+            .iter()
+            .take(quantum as usize)
+            .fold(0u64, |data, word| (data << 16) | u64::from(*word));
+        self.annotate_bus_slot(
+            vpos,
+            hpos,
+            BUS_RECORD_SPRITE,
+            sprite as u8,
+            register + sprite as u16 * 8,
+            ptr,
+            data,
+            (quantum * 2) as u8,
+            0,
+        );
         self.display_dma_sprpt[sprite] = ptr.wrapping_add(2 * quantum) & self.chip_dma_mask & !1;
         Some(words)
     }
@@ -937,7 +959,9 @@ impl Bus {
         if beam_y == state.vstop {
             state.dma_enabled = false;
             if spren && !ddf_blocked {
-                if let Some(words) = self.fetch_sprite_words(sprite) {
+                if let Some(words) =
+                    self.fetch_sprite_words(sprite, vpos, SPRITE_DMA_SLOT1_HPOS[sprite], 0x0140)
+                {
                     state.poke_pos(words[0]);
                     state.reevaluate_comparators_at(beam_y);
                     if latch_write_through {
@@ -950,7 +974,9 @@ impl Bus {
             && !ddf_blocked
             && !self.sprite_scan_repeat_line(&state, beam_y)
         {
-            if let Some(words) = self.fetch_sprite_words(sprite) {
+            if let Some(words) =
+                self.fetch_sprite_words(sprite, vpos, SPRITE_DMA_SLOT1_HPOS[sprite], 0x0144)
+            {
                 state.pending_data = Some((words[0], [words[1], words[2], words[3]]));
                 state.pending_line_vpos = beam_y;
                 state.last_data_fetch_vpos = beam_y;
@@ -990,7 +1016,9 @@ impl Bus {
         if beam_y == state.vstop {
             state.dma_enabled = false;
             if spren && !ddf_blocked {
-                if let Some(words) = self.fetch_sprite_words(sprite) {
+                if let Some(words) =
+                    self.fetch_sprite_words(sprite, vpos, SPRITE_DMA_SLOT1_HPOS[sprite] + 2, 0x0142)
+                {
                     state.poke_ctl(words[0]);
                     state.reevaluate_comparators_at(beam_y);
                     // The CTL fetch is a SPRxCTL write: it disarms the live
@@ -1012,7 +1040,9 @@ impl Bus {
             && !ddf_blocked
             && !self.sprite_scan_repeat_line(&state, beam_y)
         {
-            if let Some(words) = self.fetch_sprite_words(sprite) {
+            if let Some(words) =
+                self.fetch_sprite_words(sprite, vpos, SPRITE_DMA_SLOT1_HPOS[sprite] + 2, 0x0146)
+            {
                 datb_fetched = Some((words[0], [words[1], words[2], words[3]]));
                 // The DATB fetch lands in SPRxDATB like a manual write.
                 if latch_write_through {
@@ -1267,6 +1297,8 @@ impl Bus {
                     }
                     let fetch_ptr = self.display_dma_bplpt[plane];
                     let fetch_words = quantum.min(words_per_row - word_base);
+                    let mut trace_data = 0u64;
+                    let mut trace_addr = 0u32;
                     for w in 0..fetch_words {
                         let word_idx = word_base + w;
                         let addr = wide_fetch_word_address(fetch_ptr, fmode, w) & addr_mask;
@@ -1278,6 +1310,10 @@ impl Bus {
                             );
                         }
                         let fetched = read_chip_word_wrapping(&self.mem.chip_ram, addr);
+                        if w == 0 {
+                            trace_addr = addr;
+                        }
+                        trace_data = (trace_data << 16) | u64::from(fetched);
                         self.data_bus = fetched;
                         if self.capture_bitplane_fetch_word(
                             fb_y,
@@ -1296,6 +1332,21 @@ impl Bus {
                             line_complete_plane_mask = plane_mask_for_count(block_dma_planes);
                         }
                     }
+                    self.annotate_bus_slot(
+                        vpos,
+                        hpos,
+                        BUS_RECORD_BITPLANE,
+                        plane as u8 + 1,
+                        0x0110 + plane as u16 * 2,
+                        trace_addr,
+                        trace_data,
+                        (fetch_words * 2) as u8,
+                        0,
+                    );
+                    self.current_frame_bus_trace
+                        .annotate_at(vpos, hpos, |record| {
+                            record.events |= BUS_EVENT_BPL_FETCH_UPDATE;
+                        });
                     self.display_dma_bplpt[plane] = self.display_dma_bplpt[plane]
                         .wrapping_add((2 * fetch_words) as u32)
                         & addr_mask;
@@ -1333,6 +1384,8 @@ impl Bus {
                     }
                     let fetch_ptr = self.display_dma_bplpt[plane];
                     let fetch_words = quantum.min(words_per_row - word_base);
+                    let mut trace_data = 0u64;
+                    let mut trace_addr = 0u32;
                     for w in 0..fetch_words {
                         let word_idx = word_base + w;
                         let addr = wide_fetch_word_address(fetch_ptr, fmode, w) & addr_mask;
@@ -1344,6 +1397,10 @@ impl Bus {
                             );
                         }
                         let fetched = read_chip_word_wrapping(&self.mem.chip_ram, addr);
+                        if w == 0 {
+                            trace_addr = addr;
+                        }
+                        trace_data = (trace_data << 16) | u64::from(fetched);
                         self.data_bus = fetched;
                         if self.capture_bitplane_fetch_word(
                             fb_y,
@@ -1362,6 +1419,21 @@ impl Bus {
                             line_complete_plane_mask = plane_mask_for_count(block_dma_planes);
                         }
                     }
+                    self.annotate_bus_slot(
+                        vpos,
+                        hpos,
+                        BUS_RECORD_BITPLANE,
+                        plane as u8 + 1,
+                        0x0110 + plane as u16 * 2,
+                        trace_addr,
+                        trace_data,
+                        (fetch_words * 2) as u8,
+                        0,
+                    );
+                    self.current_frame_bus_trace
+                        .annotate_at(vpos, hpos, |record| {
+                            record.events |= BUS_EVENT_BPL_FETCH_UPDATE;
+                        });
                     self.display_dma_bplpt[plane] = self.display_dma_bplpt[plane]
                         .wrapping_add((2 * fetch_words) as u32)
                         & addr_mask;

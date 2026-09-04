@@ -2372,7 +2372,7 @@ impl M68kMachine {
         self.reset_cpu();
     }
 
-    pub fn refresh_irq_line(&mut self) {
+    pub fn refresh_irq_line(&mut self) -> u8 {
         // Apply any timed-device color clocks the last instruction's bus
         // accesses deferred before sampling the interrupt line. This runs at the
         // top of `service_pending_irq_cycles`, i.e. before every instruction, so
@@ -2399,6 +2399,7 @@ impl M68kMachine {
         // hold so the next instruction's accesses latch normally.
         self.bus.ipl_sample_held = false;
         self.cpu.set_irq(level);
+        level
     }
 
     pub fn disable_overlay(&mut self) {
@@ -2618,6 +2619,7 @@ impl M68kMachine {
                 };
                 self.bus.diag_current_pc = dbg_pc_before;
                 self.bus.bus.cpu_pc = dbg_pc_before;
+                let cpu_was_stopped = self.cpu.is_stopped();
                 // The no-op handler declines every trap, so the CPU takes the
                 // real exception -- the plain step() would surface traps as
                 // StepResults instead of raising them.
@@ -2686,6 +2688,9 @@ impl M68kMachine {
                         }
                     }
                     StepResult::Stopped => {
+                        if !cpu_was_stopped {
+                            self.bus.bus.note_cpu_stop(false);
+                        }
                         stopped = true;
                         break;
                     }
@@ -2815,6 +2820,7 @@ impl M68kMachine {
             let budget = (count - instructions).min(JIT_BATCH_INSTRUCTIONS) as u32;
             self.bus.diag_current_pc = self.cpu.pc;
             self.bus.bus.cpu_pc = self.cpu.pc;
+            let cpu_was_stopped = self.cpu.is_stopped();
             let result = self.cpu.run_batch(&mut self.bus, budget, &[]);
             if self.bus.icache.is_some() || self.bus.dcache.is_some() {
                 // A CACR write inside the batch (MOVEC) must reach the
@@ -2890,6 +2896,9 @@ impl M68kMachine {
             }
 
             if exit_stopped {
+                if !cpu_was_stopped {
+                    self.bus.bus.note_cpu_stop(false);
+                }
                 stopped = true;
                 break;
             }
@@ -3042,13 +3051,19 @@ impl M68kMachine {
     }
 
     fn service_pending_irq_cycles(&mut self) -> Option<IrqDispatch> {
-        self.refresh_irq_line();
+        let level = self.refresh_irq_line();
         if !self.cpu.check_interrupts() {
             return None;
         }
+        let was_stopped = self.cpu.is_stopped();
+        // Recognition belongs to this instruction boundary. Exception stack
+        // writes and vector fetches advance the bus, so emitting afterwards
+        // incorrectly stamps the event at the end of dispatch.
+        self.bus.bus.note_cpu_irq_recognized(level);
+        if was_stopped {
+            self.bus.bus.note_cpu_stop(true);
+        }
         let cycles = self.cpu.execute(&mut self.bus, 0);
-        #[cfg(feature = "control")]
-        let level = ((self.cpu.get_sr() >> 8) & 7) as u8;
         #[cfg(feature = "control")]
         let vector = self
             .cpu
@@ -3973,6 +3988,8 @@ impl CpuBus {
                 // than running at uncontended external-memory speed.
                 self.bus
                     .grant_cpu_bus_access_at(Some(addr), size, CpuBusAccessKind::Write);
+                self.bus
+                    .update_last_cpu_trace_data(u64::from(value), size.min(4) as u8);
                 self.bus.ui_note_cpu_ram_write(addr, size);
                 write_be(&mut self.bus.mem.slow_ram, off, size, value);
                 self.dbg_note_memw(addr, size);
@@ -6902,6 +6919,40 @@ mod tests {
         assert_eq!(read_chip_word(machine.bus(), machine.a(7)), 0x2000);
         assert_eq!(read_chip_long(machine.bus(), machine.a(7) + 2), 0x0000_0104);
         assert_eq!(machine.bus().delivered_irq_pending & INT_PORTS, INT_PORTS);
+        Ok(())
+    }
+
+    #[test]
+    fn irq_bus_event_is_stamped_before_exception_bus_cycles() -> Result<()> {
+        let mut bus = test_bus_with_pc(0x0000_0100);
+        write_program(&mut bus, 0x0000_0200, &[0x4E71]);
+        set_autovector(&mut bus, 2, 0x0000_0200);
+        bus.paula.intena = INT_MASTER | INT_PORTS;
+        bus.paula.intreq = INT_PORTS;
+        bus.irq_latency_setting = 0;
+
+        let mut machine = M68kMachine::new(bus, CpuModel::M68000, false)?;
+        machine.cpu.set_sr(0x2000);
+        machine.bus_mut().agnus.hpos = 0x20;
+        machine.bus_mut().set_frame_analyzer_full(true);
+        machine.bus_mut().set_cpu_bus_arbitration_enabled(true);
+        let start = (machine.bus().agnus.vpos, machine.bus().agnus.hpos);
+
+        assert!(machine.service_pending_irq_cycles().is_some());
+
+        let record = machine
+            .bus()
+            .frame_bus_trace()
+            .unwrap()
+            .record_at(start.0 as usize, start.1 as usize)
+            .unwrap();
+        assert_ne!(record.events & crate::bus::BUS_EVENT_CPU_IRQ, 0);
+        assert_eq!(record.ipl, 2);
+        assert_ne!(
+            (machine.bus().agnus.vpos, machine.bus().agnus.hpos),
+            start,
+            "exception dispatch must consume bus cycles after recognition"
+        );
         Ok(())
     }
 

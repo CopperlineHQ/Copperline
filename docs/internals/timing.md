@@ -589,6 +589,19 @@ where a busy blitter keeps every access cycle. It is recorded on the cold
 bus-observer path, so arming it leaves the timeline untouched. Tests: `frame_analyzer_attributes_cpu_wait_to_nice_blitter`,
 `frame_analyzer_attributes_cpu_wait_to_bltpri_fence`.
 
+The analyzer has two recording levels. The cheap level keeps the one-byte
+owner and CPU-wait grids used by the live heatmap. The full level adds one
+24-byte record per raster colour clock and is armed only for an open Frame
+Analyzer or `profile.start {"slots": true}`. Producers annotate the arbitration
+slot where the signal already occurs: the DDF sequencer's comparator strobes,
+the blitter pipeline's current A/B/C/D access and terminal D write, Copper's
+fixed WAIT wake and SKIP result, the CPU's current fetch/data/custom access,
+CIA E-clock phase, DMA source pointers/data, beam flops, and interrupt/STOP
+edges. The recorders observe existing state and do not advance a device or
+perform a side-effecting memory read. Tests:
+`full_bus_record_is_exactly_24_bytes_and_owner_only_trace_stays_cheap`,
+`full_bus_events_match_ddf_blitter_and_copper_probe_cadence`.
+
 ### Area fill
 
 Area fill is applied only when BLTCON1.DESC is set (the HRM requires

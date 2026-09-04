@@ -218,6 +218,27 @@ fn disk_speed_div() -> Option<(u32, f64)> {
     None
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DiskDmaTransfer {
+    pub addr: u32,
+    pub data: u16,
+    /// Direction at the chip-RAM side of the DMA transfer.
+    pub memory_write: bool,
+    /// Zero-based colour-clock offset within the enclosing `tick` batch.
+    pub cck_offset: u32,
+    /// The transfer belongs to a turbo burst that consumes no emulated time.
+    /// Such transfers cannot share the ordinary one-record-per-clock grid and
+    /// are exported in order through the trace's instantaneous-record list.
+    pub instantaneous: bool,
+}
+
+fn dma_trace_cck_offset(total_data_cck: u32, remaining_data_cck: u32, scale: u32) -> u32 {
+    total_data_cck
+        .saturating_sub(remaining_data_cck)
+        .div_ceil(scale.max(1))
+        .saturating_sub(1)
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct FloppyController {
     /// Debugger: watched word addresses and the last disk-DMA write to
@@ -226,6 +247,13 @@ pub struct FloppyController {
     debug_watch_addrs: Vec<u32>,
     #[serde(skip)]
     debug_watched_write: Option<(u32, u16)>,
+    /// Actual words transferred by the most recent timed-device tick. This is
+    /// enabled only for full bus tracing so ordinary disk DMA stays allocation
+    /// free; the Bus drains it immediately after each tick.
+    #[serde(skip)]
+    trace_dma_enabled: bool,
+    #[serde(skip)]
+    dma_trace: Vec<DiskDmaTransfer>,
     drives: [FloppyDrive; 4],
     prb: u8,
     side: usize,
@@ -304,6 +332,8 @@ impl Default for FloppyController {
         Self {
             debug_watch_addrs: Vec::new(),
             debug_watched_write: None,
+            trace_dma_enabled: false,
+            dma_trace: Vec::new(),
             drives,
             prb: 0xFF,
             side: 0,
@@ -337,6 +367,17 @@ impl Default for FloppyController {
 }
 
 impl FloppyController {
+    pub(crate) fn set_dma_trace_enabled(&mut self, enabled: bool) {
+        self.trace_dma_enabled = enabled;
+        if !enabled {
+            self.dma_trace.clear();
+        }
+    }
+
+    pub(crate) fn take_dma_trace(&mut self) -> Vec<DiskDmaTransfer> {
+        std::mem::take(&mut self.dma_trace)
+    }
+
     /// Replace the debugger's watched-address mirror (word-aligned).
     pub fn set_debug_watch_addrs(&mut self, addrs: &[u32]) {
         self.debug_watch_addrs = addrs.to_vec();
@@ -1348,6 +1389,7 @@ impl FloppyController {
     }
 
     pub fn tick(&mut self, cck: u32, dmacon: u16, chip_ram: &mut [u8]) -> bool {
+        self.dma_trace.clear();
         self.idle_cache = self.is_idle();
         if self.idle_cache {
             return false;
@@ -1382,13 +1424,25 @@ impl FloppyController {
         // bit-identical to real speed. Mechanics (motor, seek, settle, index
         // pulse width) above tick at real time regardless. A bridged bay is
         // excluded: its data rate belongs to the real disk.
-        let data_cck = cck.saturating_mul(self.drive_speed_multiplier(idx));
+        let data_scale = self.drive_speed_multiplier(idx);
+        let data_cck = cck.saturating_mul(data_scale);
         let mut irq = match active_dma {
             Some((dma_idx, _, true)) if dma_idx == idx => {
-                self.tick_write_dma(idx, data_cck, is_selected, chip_ram)
+                self.tick_write_dma(idx, data_cck, data_scale, is_selected, chip_ram, false)
             }
-            _ => self.tick_read_and_rotate(idx, data_cck, dmacon, is_selected, chip_ram),
+            _ => self.tick_read_and_rotate(
+                idx,
+                data_cck,
+                data_scale,
+                dmacon,
+                is_selected,
+                chip_ram,
+                false,
+            ),
         };
+        // Turbo remains a zero-emulated-time operation while tracing. Its
+        // transfers are tagged below so the bus trace can retain all of them
+        // in a separate ordered list at the burst's beam position.
         if self.turbo() {
             irq |= self.turbo_burst(cck, dmacon, chip_ram);
         }
@@ -1456,9 +1510,9 @@ impl FloppyController {
             };
             let burst = burst.min(u64::from(u32::MAX)) as u32;
             irq |= if write {
-                self.tick_write_dma(idx, burst, is_selected, chip_ram)
+                self.tick_write_dma(idx, burst, 1, is_selected, chip_ram, true)
             } else {
-                self.tick_read_and_rotate(idx, burst, dmacon, is_selected, chip_ram)
+                self.tick_read_and_rotate(idx, burst, 1, dmacon, is_selected, chip_ram, true)
             };
             if irq {
                 break;
@@ -1478,9 +1532,11 @@ impl FloppyController {
         &mut self,
         idx: usize,
         cck: u32,
+        data_scale: u32,
         dmacon: u16,
         is_selected: bool,
         chip_ram: &mut [u8],
+        instantaneous: bool,
     ) -> bool {
         // A bridged bay retains a filler track while its physical drive is
         // empty. No media still means no cells reach Paula, regardless of
@@ -1584,7 +1640,21 @@ impl FloppyController {
                         if dma.remaining == 0 {
                             break;
                         }
-                        write_chip_word(chip_ram, self.dskpt, word);
+                        let addr = self.dskpt;
+                        write_chip_word(chip_ram, addr, word);
+                        if self.trace_dma_enabled {
+                            self.dma_trace.push(DiskDmaTransfer {
+                                addr,
+                                data: word,
+                                memory_write: true,
+                                cck_offset: dma_trace_cck_offset(
+                                    cck,
+                                    self.drives[idx].rotation_acc_cck,
+                                    data_scale,
+                                ),
+                                instantaneous,
+                            });
+                        }
                         if !self.debug_watch_addrs.is_empty()
                             && self.debug_watch_addrs.contains(&(self.dskpt & 0x00FF_FFFE))
                         {
@@ -1622,8 +1692,10 @@ impl FloppyController {
         &mut self,
         idx: usize,
         cck: u32,
+        data_scale: u32,
         is_selected: bool,
         chip_ram: &mut [u8],
+        instantaneous: bool,
     ) -> bool {
         // Match the read path: a bridge filler track must not make an empty
         // physical drive accept a write.
@@ -1654,7 +1726,21 @@ impl FloppyController {
                 dma.write_start_word = self.drives[idx].rotation_bit / 16;
                 dma.write_start_bit = (self.drives[idx].rotation_bit % 16) as u8;
             }
-            let word = read_chip_word(chip_ram, self.dskpt);
+            let addr = self.dskpt;
+            let word = read_chip_word(chip_ram, addr);
+            if self.trace_dma_enabled {
+                self.dma_trace.push(DiskDmaTransfer {
+                    addr,
+                    data: word,
+                    memory_write: false,
+                    cck_offset: dma_trace_cck_offset(
+                        cck,
+                        self.drives[idx].rotation_acc_cck,
+                        data_scale,
+                    ),
+                    instantaneous,
+                });
+            }
             dma.write_words.push(word);
             self.advance_dskpt();
             for _ in 0..16 {
