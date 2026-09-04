@@ -223,6 +223,7 @@ pub fn connect_from_args(args: &Value) -> Result<Bridge, String> {
 /// Numbers sessions, so messages from a replaced session's bridge
 /// threads are told apart from the current one's.
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+static NEXT_PROFILE: AtomicU64 = AtomicU64::new(1);
 
 pub struct Session {
     generation: u64,
@@ -231,6 +232,7 @@ pub struct Session {
     windowed: bool,
     program_name: Option<String>,
     program_path: Option<PathBuf>,
+    symbol_path: Option<PathBuf>,
     info: Option<DebugInfo>,
     stop_on_entry: bool,
     entry_point: Option<String>,
@@ -441,6 +443,7 @@ impl Session {
             windowed,
             program_name: None,
             program_path: None,
+            symbol_path: None,
             info: None,
             stop_on_entry: true,
             entry_point: None,
@@ -501,6 +504,7 @@ impl Session {
                 let sibling = PathBuf::from(sibling);
                 sibling.is_file().then_some(sibling)
             });
+        self.symbol_path = elf_path.clone();
         let elf = elf_path.as_ref().and_then(|p| std::fs::read(p).ok());
         match DebugInfo::load(&bytes, elf.as_deref()) {
             Ok(info) => self.info = Some(info),
@@ -1167,9 +1171,80 @@ impl Session {
             "loadedSources" => Ok(json!({"sources": self.loaded_sources()})),
             "exceptionInfo" => self.exception_info(),
             "source" => Err("source content is not available from the adapter".into()),
+            "copperline/profile" => self.profile(emit, args),
             other => Err(format!("{other}: not supported")),
         };
         result
+    }
+
+    /// Capture a bounded number of committed frames from the paused session,
+    /// then convert them to a source-mapped CPU profile for the editor.
+    fn profile(&mut self, emit: &mut Emit, args: &Value) -> Result<Value, String> {
+        self.require_paused()?;
+        let frames = args["frames"].as_u64().unwrap_or(1).clamp(1, 100_000);
+        let info = self
+            .info
+            .as_ref()
+            .filter(|info| info.relocated())
+            .ok_or("profiling needs a loaded program with relocated debug information")?;
+        let (base, unwind) = info.bartman_unwind_table()?;
+        let relocation_bases = info.bases().to_vec();
+        let code_ranges: Vec<Value> = info
+            .bases()
+            .iter()
+            .zip(&info.hunks)
+            .filter(|(_, hunk)| hunk.kind == crate::debuginfo::hunk::HunkKind::Code)
+            .map(|(&base, hunk)| json!({"base": base, "size": hunk.size}))
+            .collect();
+        let program = self
+            .program_path
+            .clone()
+            .ok_or("profiling needs the session's program path")?;
+        let capture = std::env::temp_dir().join(format!(
+            "copperline-profile-{}-{}-{}",
+            std::process::id(),
+            self.generation,
+            NEXT_PROFILE.fetch_add(1, Ordering::Relaxed),
+        ));
+        self.call(
+            "profile.start",
+            json!({
+                "path": capture.display().to_string(),
+                "frames": frames,
+                "samples": true,
+                "registers": true,
+                "unwind": {
+                    "base": base,
+                    "table": proto::encode_base64(&unwind),
+                },
+                "relocation_bases": relocation_bases,
+                "code_ranges": code_ranges,
+            }),
+        )?;
+        let stepped = self.call_stop("step_frame", json!({"n": frames}));
+        let stopped = self.call("profile.stop", json!({}));
+        let stepped = stepped?;
+        let stopped = stopped?;
+
+        let out = capture.join("profile.cpuprofile");
+        let generated = crate::profile::report::generate(&crate::profile::report::ReportOptions {
+            input_dir: capture.clone(),
+            program,
+            elf: self.symbol_path.clone(),
+            out: out.clone(),
+            format: crate::profile::report::ReportFormat::Chrome,
+            per_frame: false,
+            source_map: self.source_map.clone(),
+        })?;
+        self.vars.clear();
+        self.frames.clear();
+        self.finish_bounded(emit, &stepped, None);
+        Ok(json!({
+            "path": generated[0].display().to_string(),
+            "capturePath": capture.display().to_string(),
+            "framesCaptured": stopped["frames_written"],
+            "samples": stopped["samples_total"],
+        }))
     }
 
     // -----------------------------------------------------------------

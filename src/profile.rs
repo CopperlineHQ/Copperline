@@ -7,10 +7,10 @@
 //! emulated frame appends one JSON line to `profile.jsonl` in the capture
 //! directory -- chip-bus ownership totals and blit records from the frame
 //! analyzer's trace (armed for the whole session), the guest's uaelib idle
-//! markers, the retired-instruction delta, optionally one PC sample, the
-//! per-colour-clock owner grid (RLE over the vAmiga-compatible owner
-//! codes), and optionally a screenshot per frame through the same
-//! side-effect-free renderer `capture.screenshot` uses. `profile.stop`
+//! markers, the retired-instruction delta, optionally one PC sample, precise
+//! instruction/call-stack sidecars, the per-colour-clock owner grid (RLE over
+//! the vAmiga-compatible owner codes), and optionally a screenshot per frame
+//! through the same side-effect-free renderer `capture.screenshot` uses. `profile.stop`
 //! writes a `profile.json` summary (machine, options, owner names, the
 //! registered uaelib resources); the streamed `profile.jsonl` survives a
 //! crash without it.
@@ -26,6 +26,10 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
+
+#[cfg(feature = "dap")]
+pub mod report;
+pub mod samples;
 
 /// Bounds on `profile.start {"frames"}`: about ten seconds of PAL by
 /// default, and a hard cap so a typo cannot fill a disk.
@@ -89,6 +93,17 @@ pub struct ProfileOptions {
     /// Sample the PC once per frame (frame-boundary sample; no
     /// precise-loop cost, unlike a per-instruction histogram).
     pub pc_samples: bool,
+    /// Record every retired instruction in a Bartman/WinUAE-compatible
+    /// binary stream, split into one file per emulated frame.
+    pub samples: bool,
+    /// Append D0-D7, A0-A7 and SR to every precise sample.
+    pub registers: bool,
+    /// Optional program text base plus compact DWARF-derived unwind rows.
+    pub unwind: Option<samples::CompactUnwindTable>,
+    /// Runtime bases of every hunk, for offline source relocation.
+    pub relocation_bases: Vec<u32>,
+    /// Runtime ranges of executable hunks, for compact-unwind boundaries.
+    pub code_ranges: Vec<(u32, u32)>,
     /// Keep the capture armed but write nothing until this condition matches.
     pub trigger: Option<ProfileTrigger>,
 }
@@ -108,6 +123,10 @@ pub struct ProfileCapture {
     done: bool,
     triggered: bool,
     triggered_at: Option<u64>,
+    samples_total: u64,
+    irq_cck: u64,
+    sample_sequence: u64,
+    cck_per_cpu_cycle: f64,
 }
 
 impl ProfileCapture {
@@ -117,6 +136,7 @@ impl ProfileCapture {
         seconds: f64,
         retired: u64,
         armed_analyzer: bool,
+        cpu_clocks_per_cck: u32,
     ) -> io::Result<Self> {
         crate::paths::ensure_parent(&opts.path)?;
         std::fs::create_dir_all(&opts.path)?;
@@ -133,6 +153,10 @@ impl ProfileCapture {
             done: false,
             triggered,
             triggered_at: triggered.then_some(frame),
+            samples_total: 0,
+            irq_cck: 0,
+            sample_sequence: 0,
+            cck_per_cpu_cycle: 1.0 / f64::from(cpu_clocks_per_cck.max(1)),
         })
     }
 
@@ -228,10 +252,100 @@ impl ProfileCapture {
             "slots": self.opts.slots,
             "screenshots": self.opts.screenshots.name(),
             "pc_samples": self.opts.pc_samples,
+            "samples": self.opts.samples,
+            "registers": self.opts.registers,
             "trigger": self.opts.trigger.map(ProfileTrigger::value),
             "triggered": self.triggered,
             "triggered_at": self.triggered_at,
+            "samples_total": self.samples_total,
+            "irq_cck": self.irq_cck,
             "done": self.done,
+        })
+    }
+
+    /// Write one frame's WinUAE-compatible samples and Copperline's parallel
+    /// timing metadata. Long samples are split so `~0 - cck` remains in the
+    /// marker range Bartman's parser reserves for cycle counts.
+    pub fn write_samples(
+        &mut self,
+        frame: u64,
+        samples: &[samples::InstructionSample],
+    ) -> io::Result<SampleFrameStats> {
+        let sequence = self.sample_sequence;
+        self.sample_sequence = self.sample_sequence.saturating_add(1);
+        let samples_name = format!("samples-{sequence:06}-frame-{frame:06}.bin");
+        let metadata_name = format!("samples-{sequence:06}-frame-{frame:06}.meta");
+        let mut stream = BufWriter::new(File::create(self.opts.path.join(&samples_name))?);
+        let mut metadata = BufWriter::new(File::create(self.opts.path.join(&metadata_name))?);
+        metadata.write_all(b"CLSM")?;
+        metadata.write_all(&1u32.to_le_bytes())?;
+        metadata.write_all(&0u32.to_le_bytes())?; // patched count after encoding
+
+        let mut count = 0u32;
+        let mut irq_cck = 0u64;
+        for sample in samples {
+            let mut remaining = sample.total_cck.max(1);
+            let total = sample.total_cck.max(1);
+            let mut remaining_instruction = sample.instruction_cck;
+            while remaining != 0 {
+                let chunk = remaining.min(u16::MAX.into());
+                let instruction_cck = if remaining == chunk {
+                    remaining_instruction.min(chunk)
+                } else {
+                    ((u64::from(sample.instruction_cck) * u64::from(chunk)) / u64::from(total))
+                        as u32
+                };
+                let bus_wait_cck = chunk.saturating_sub(instruction_cck);
+                for pc in &sample.callstack[..sample.callstack_depth] {
+                    stream.write_all(&pc.to_le_bytes())?;
+                }
+                stream.write_all(&(u32::MAX - chunk).to_le_bytes())?;
+                if let Some(registers) = &sample.registers {
+                    for register in registers {
+                        stream.write_all(&register.to_le_bytes())?;
+                    }
+                }
+                metadata.write_all(&chunk.to_le_bytes())?;
+                metadata.write_all(&instruction_cck.to_le_bytes())?;
+                metadata.write_all(&bus_wait_cck.to_le_bytes())?;
+                metadata.write_all(
+                    &sample
+                        .irq
+                        .map_or(u32::MAX, |irq| u32::from(irq.level))
+                        .to_le_bytes(),
+                )?;
+                metadata.write_all(
+                    &sample
+                        .irq
+                        .map_or(u32::MAX, |irq| u32::from(irq.vector))
+                        .to_le_bytes(),
+                )?;
+                if sample.irq.is_some() {
+                    irq_cck = irq_cck.saturating_add(u64::from(chunk));
+                }
+                count = count.saturating_add(1);
+                remaining_instruction = remaining_instruction.saturating_sub(instruction_cck);
+                remaining -= chunk;
+            }
+        }
+        stream.flush()?;
+        metadata.flush()?;
+        drop(metadata);
+        let mut metadata = std::fs::OpenOptions::new()
+            .write(true)
+            .open(self.opts.path.join(&metadata_name))?;
+        use std::io::Seek;
+        metadata.seek(std::io::SeekFrom::Start(8))?;
+        metadata.write_all(&count.to_le_bytes())?;
+
+        self.samples_total = self.samples_total.saturating_add(u64::from(count));
+        self.irq_cck = self.irq_cck.saturating_add(irq_cck);
+        Ok(SampleFrameStats {
+            samples_name,
+            metadata_name,
+            count,
+            irq_cck,
+            samples_total: self.samples_total,
         })
     }
 
@@ -253,6 +367,8 @@ impl ProfileCapture {
                 "slots": self.opts.slots,
                 "screenshots": self.opts.screenshots.name(),
                 "pc_samples": self.opts.pc_samples,
+                "samples": self.opts.samples,
+                "registers": self.opts.registers,
                 "trigger": self.opts.trigger.map(ProfileTrigger::value),
             },
             "owners": crate::bus::CHIP_BUS_OWNER_NAMES,
@@ -260,6 +376,18 @@ impl ProfileCapture {
             "started": { "frame": self.started.0, "seconds": self.started.1 },
             "ended": { "frame": frame, "seconds": seconds },
             "frames_written": self.frames_written,
+            "samples_total": self.samples_total,
+            "irq_cck": self.irq_cck,
+            "sampling": self.opts.samples.then(|| json!({
+                "clock_unit": "cck",
+                "cck_per_cpu_cycle": self.cck_per_cpu_cycle,
+                "stream": "little-endian u32: callstack PCs, ~0-cck, optional D0-D7/A0-A7/SR",
+                "metadata": "CLSM v1: count, then total_cck/instruction_cck/bus_wait_cck/irq_level/vector as little-endian u32",
+                "unwind_base": self.opts.unwind.as_ref().map(samples::CompactUnwindTable::base),
+                "unwind_text_size": self.opts.unwind.as_ref().map(samples::CompactUnwindTable::text_size),
+                "relocation_bases": self.opts.relocation_bases,
+                "code_ranges": self.opts.code_ranges.iter().map(|(base, size)| json!({"base": base, "size": size})).collect::<Vec<_>>(),
+            })),
             "triggered_at": self.triggered_at,
             "resources": resources,
         });
@@ -271,6 +399,14 @@ impl ProfileCapture {
         status["summary"] = Value::from(self.opts.path.join("profile.json").display().to_string());
         Ok(status)
     }
+}
+
+pub struct SampleFrameStats {
+    pub samples_name: String,
+    pub metadata_name: String,
+    pub count: u32,
+    pub irq_cck: u64,
+    pub samples_total: u64,
 }
 
 /// One trace row's owner codes, run-length encoded as `<count><code>`
@@ -320,9 +456,14 @@ mod tests {
             slots: false,
             screenshots: ScreenshotMode::None,
             pc_samples: false,
+            samples: false,
+            registers: false,
+            unwind: None,
+            relocation_bases: Vec::new(),
+            code_ranges: Vec::new(),
             trigger: None,
         };
-        let mut capture = ProfileCapture::create(opts, 100, 2.0, 1000, true).unwrap();
+        let mut capture = ProfileCapture::create(opts, 100, 2.0, 1000, true, 2).unwrap();
         assert_eq!(capture.take_retired_delta(1500), 500);
         capture.record(101, &json!({"frame": 101})).unwrap();
         assert!(!capture.done());
@@ -358,15 +499,49 @@ mod tests {
             slots: false,
             screenshots: ScreenshotMode::None,
             pc_samples: false,
+            samples: false,
+            registers: false,
+            unwind: None,
+            relocation_bases: Vec::new(),
+            code_ranges: Vec::new(),
             trigger: Some(ProfileTrigger::BusyCckOver(100)),
         };
-        let mut capture = ProfileCapture::create(opts, 5, 0.1, 10, false).unwrap();
+        let mut capture = ProfileCapture::create(opts, 5, 0.1, 10, false, 2).unwrap();
         assert!(!capture.should_record(6, 100, 20));
         assert!(capture.should_record(7, 101, 30));
         assert_eq!(capture.take_retired_delta(30), 10);
         let status = capture.status_value(true);
         assert_eq!(status["triggered"], true);
         assert_eq!(status["triggered_at"], 7);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repeated_frame_samples_use_monotonic_sidecar_names() {
+        let dir =
+            std::env::temp_dir().join(format!("copperline-profile-repeat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let opts = ProfileOptions {
+            path: dir.clone(),
+            frames: 2,
+            slots: false,
+            screenshots: ScreenshotMode::None,
+            pc_samples: false,
+            samples: true,
+            registers: false,
+            unwind: None,
+            relocation_bases: Vec::new(),
+            code_ranges: Vec::new(),
+            trigger: None,
+        };
+        let mut capture = ProfileCapture::create(opts, 10, 0.1, 0, false, 2).unwrap();
+        let first = capture.write_samples(11, &[]).unwrap();
+        capture.note_reposition(10, 0).unwrap();
+        let second = capture.write_samples(11, &[]).unwrap();
+        assert_ne!(first.samples_name, second.samples_name);
+        assert_ne!(first.metadata_name, second.metadata_name);
+        assert!(dir.join(first.samples_name).is_file());
+        assert!(dir.join(second.samples_name).is_file());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

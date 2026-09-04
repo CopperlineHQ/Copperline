@@ -17,6 +17,44 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
 
+fn canonical_profile(profile: &Value) -> Value {
+    let mut weights = std::collections::BTreeMap::<u64, u64>::new();
+    for (sample, delta) in profile["samples"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(profile["timeDeltas"].as_array().unwrap())
+    {
+        *weights.entry(sample.as_u64().unwrap()).or_default() += delta.as_u64().unwrap();
+    }
+    let nodes: Vec<Value> = profile["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| {
+            json!({
+                "id": node["id"],
+                "callFrame": node["callFrame"],
+                "children": node["children"],
+            })
+        })
+        .collect();
+    json!({
+        "nodes": nodes,
+        "startTime": profile["startTime"],
+        "endTime": profile["endTime"],
+        "samples": weights.keys().collect::<Vec<_>>(),
+        "timeDeltas": weights.values().collect::<Vec<_>>(),
+        "$copperline": {
+            "version": profile["$copperline"]["version"],
+            "clockUnit": profile["$copperline"]["clockUnit"],
+            "clockHz": profile["$copperline"]["clockHz"],
+            "frameCount": profile["$copperline"]["frames"].as_array().unwrap().len(),
+            "contentionNode": profile["$copperline"]["contentionNode"],
+        },
+    })
+}
+
 struct Client {
     stdin: std::process::ChildStdin,
     rx: Receiver<Value>,
@@ -129,6 +167,18 @@ fn dap_over_stdio_debugs_the_hello_probe_by_source_line() {
     let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("guest/dap-test");
     let program = fixture_dir.join("hello");
     let source = fixture_dir.join("hello.c");
+    let fixture_debug =
+        copperline::debuginfo::DebugInfo::load(&std::fs::read(&program).unwrap(), None)
+            .expect("loading fixture debug information");
+    let recorded_dir = fixture_debug
+        .files
+        .iter()
+        .find(|file| file.path.ends_with("/guest/dap-test/hello.c"))
+        .and_then(|file| std::path::Path::new(&file.path).parent())
+        .and_then(std::path::Path::to_str)
+        .expect("fixture DWARF source directory");
+    let mut source_map = serde_json::Map::new();
+    source_map.insert(recorded_dir.into(), Value::from("guest/dap-test"));
     let source_text = std::fs::read_to_string(&source).unwrap();
     let line_of = |needle: &str| {
         source_text
@@ -174,6 +224,7 @@ fn dap_over_stdio_debugs_the_hello_probe_by_source_line() {
             "headless": true,
             "stopOnEntry": true,
             "entryPoint": "entry",
+            "sourceMap": source_map,
             "timeoutMs": 120000,
         }),
     );
@@ -349,6 +400,32 @@ fn dap_over_stdio_debugs_the_hello_probe_by_source_line() {
         json!({"source": {"path": source.display().to_string()}, "breakpoints": []}),
     );
     c.call("setFunctionBreakpoints", json!({"breakpoints": []}));
+    let profile = c.call("copperline/profile", json!({"frames": 1}));
+    assert_eq!(profile["framesCaptured"], 1, "{profile}");
+    assert!(profile["samples"].as_u64().unwrap() > 0, "{profile}");
+    let stop = c.stopped();
+    assert_eq!(stop["reason"], "step", "{stop}");
+    let profile_path = std::path::PathBuf::from(profile["path"].as_str().unwrap());
+    let cpu_profile: Value =
+        serde_json::from_slice(&std::fs::read(&profile_path).unwrap()).unwrap();
+    assert_eq!(
+        cpu_profile["$copperline"]["frames"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        cpu_profile["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|node| node["callFrame"]["functionName"] == "[Bus wait]"),
+        "{cpu_profile}"
+    );
+    let golden: Value =
+        serde_json::from_str(include_str!("golden/hello-one-frame.cpuprofile")).unwrap();
+    assert_eq!(canonical_profile(&cpu_profile), golden);
     c.call("continue", json!({"threadId": 1}));
     c.wait(
         "the guest's greeting",

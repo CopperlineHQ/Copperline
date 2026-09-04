@@ -576,15 +576,38 @@ impl Emulator {
         let frame = self.bus().emulated_frames();
         let seconds = self.bus().emulated_seconds();
         let retired = self.retired_instructions();
-        let capture =
-            crate::profile::ProfileCapture::create(opts, frame, seconds, retired, !already)?;
+        let clocks_per_cck = self.machine.cpu_clocks_per_cck();
+        let capture = match crate::profile::ProfileCapture::create(
+            opts,
+            frame,
+            seconds,
+            retired,
+            !already,
+            clocks_per_cck,
+        ) {
+            Ok(capture) => capture,
+            Err(error) => {
+                if !already {
+                    self.bus_mut().set_frame_analyzer_enabled(false);
+                }
+                return Err(error);
+            }
+        };
+        if capture.options().samples {
+            self.machine.start_profile_samples(
+                capture.options().unwind.clone(),
+                capture.options().code_ranges.clone(),
+                capture.options().registers,
+            );
+        }
         log::info!(
-            "profile: capturing up to {} frame(s) into {} (slots {}, screenshots {}, pc {})",
+            "profile: capturing up to {} frame(s) into {} (slots {}, screenshots {}, pc {}, samples {})",
             capture.options().frames,
             capture.dir().display(),
             capture.options().slots,
             capture.options().screenshots.name(),
             capture.options().pc_samples,
+            capture.options().samples,
         );
         self.profile = Some(capture);
         Ok(())
@@ -602,6 +625,7 @@ impl Emulator {
         let Some(mut capture) = self.profile.take() else {
             return Ok(serde_json::json!({ "active": false }));
         };
+        self.machine.stop_profile_samples();
         if matches!(
             capture.options().screenshots,
             crate::profile::ScreenshotMode::Last
@@ -645,6 +669,7 @@ impl Emulator {
             Some(last) if frame == last => return Ok(()),
             Some(last) if frame < last => {
                 let retired = self.retired_instructions();
+                self.machine.discard_profile_samples();
                 if let Some(profile) = self.profile.as_mut() {
                     profile
                         .note_reposition(frame, retired)
@@ -675,8 +700,15 @@ impl Emulator {
             .as_mut()
             .is_some_and(|profile| !profile.should_record(frame, busy_cck, retired_now))
         {
+            self.machine.discard_profile_samples();
             return Ok(());
         }
+
+        let instruction_samples = if opts.samples {
+            self.machine.take_profile_samples()
+        } else {
+            Vec::new()
+        };
 
         // Renders first: they borrow the whole emulator immutably.
         let (mut screenshot, mut digest) = (None, None);
@@ -807,9 +839,22 @@ impl Emulator {
 
         if let Some(profile) = self.profile.as_mut() {
             record["retired"] = Value::from(profile.take_retired_delta(retired_now));
+            if opts.samples {
+                let stats = profile
+                    .write_samples(frame, &instruction_samples)
+                    .map_err(|e| anyhow!("profile samples: {e}"))?;
+                record["samples"] = Value::from(stats.samples_name);
+                record["samples_meta"] = Value::from(stats.metadata_name);
+                record["sample_count"] = Value::from(stats.count);
+                record["samples_total"] = Value::from(stats.samples_total);
+                record["irq_cck"] = Value::from(stats.irq_cck);
+            }
             profile
                 .record(frame, &record)
                 .map_err(|e| anyhow!("profile record: {e}"))?;
+        }
+        if self.profile.as_ref().is_some_and(|profile| profile.done()) {
+            self.machine.stop_profile_samples();
         }
         Ok(())
     }

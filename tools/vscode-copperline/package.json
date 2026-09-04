@@ -25,7 +25,9 @@
   ],
   "main": "./extension.js",
   "activationEvents": [
-    "onDebugResolve:copperline"
+    "onDebugResolve:copperline",
+    "onCommand:copperline.profile",
+    "onCommand:copperline.profileMulti"
   ],
   "contributes": {
     "configuration": {
@@ -51,6 +53,32 @@
       { "language": "amiga-assembly" },
       { "language": "vasm" }
     ],
+    "commands": [
+      {
+        "command": "copperline.profile",
+        "title": "Copperline: Profile",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "copperline.profileMulti",
+        "title": "Copperline: Profile (Multi)",
+        "icon": "$(pulse)"
+      }
+    ],
+    "menus": {
+      "debug/toolBar": [
+        {
+          "command": "copperline.profile",
+          "when": "debugType == copperline",
+          "group": "navigation@50"
+        },
+        {
+          "command": "copperline.profileMulti",
+          "when": "debugType == copperline",
+          "group": "navigation@51"
+        }
+      ]
+    },
     "debuggers": [
       {
         "type": "copperline",

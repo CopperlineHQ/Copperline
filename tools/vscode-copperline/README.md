@@ -46,6 +46,14 @@ fills cold-start RAM with a diagnostic pattern, `"fpu": true` fits an FPU,
 write, and read/write access; fitted FPU registers appear in the Registers
 scope.
 
+When stopped in a loaded program, use the graph button (**Profile**) for one
+emulated frame or the pulse button (**Profile (Multi)**) to choose a frame
+count. Copperline records source-mapped instruction call stacks and opens the
+resulting `.cpuprofile` in VS Code. Profiles separate each function's CPU work
+from a `[Bus wait]` child showing chip-DMA contention; register snapshots and
+IRQ level/vector metadata remain in the capture directory returned by the
+adapter.
+
 To attach to an emulator you started yourself:
 
 ```sh

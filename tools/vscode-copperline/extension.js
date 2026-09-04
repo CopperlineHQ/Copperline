@@ -53,6 +53,47 @@ function activate(context) {
   context.subscriptions.push(
     vscode.debug.registerDebugConfigurationProvider("copperline", provider)
   );
+
+  async function captureProfile(frames) {
+    const session = vscode.debug.activeDebugSession;
+    if (!session || session.type !== "copperline") {
+      void vscode.window.showInformationMessage(
+        "Copperline: start or attach a debug session before profiling."
+      );
+      return;
+    }
+    try {
+      const result = await session.customRequest("copperline/profile", { frames });
+      if (result && result.path) {
+        await vscode.commands.executeCommand(
+          "vscode.open",
+          vscode.Uri.file(result.path)
+        );
+      }
+    } catch (error) {
+      void vscode.window.showErrorMessage(`Copperline profile failed: ${error}`);
+    }
+  }
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("copperline.profile", () => captureProfile(1)),
+    vscode.commands.registerCommand("copperline.profileMulti", async () => {
+      const value = await vscode.window.showInputBox({
+        title: "Copperline Profile (Multi)",
+        prompt: "Number of emulated frames to capture",
+        value: "60",
+        validateInput(text) {
+          const frames = Number(text);
+          return Number.isInteger(frames) && frames >= 1 && frames <= 100000
+            ? undefined
+            : "Enter an integer from 1 to 100000";
+        },
+      });
+      if (value !== undefined) {
+        await captureProfile(Number(value));
+      }
+    })
+  );
 }
 
 function deactivate() {}

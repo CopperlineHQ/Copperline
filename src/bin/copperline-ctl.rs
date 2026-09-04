@@ -52,7 +52,10 @@ fn usage() -> &'static str {
      [--repl | METHOD [JSON-PARAMS]]\n       \
      copperline-ctl --mcp [--info FILE | --connect ADDR --token TOKEN]\n       \
      copperline-ctl --dap [--info FILE | --connect ADDR --token TOKEN]\n       \
-     copperline-ctl --dap-listen ADDR [--info FILE | --connect ADDR --token TOKEN]"
+     copperline-ctl --dap-listen ADDR [--info FILE | --connect ADDR --token TOKEN]\n       \
+     copperline-ctl profile-report DIR --program PROG [--elf PROG.ELF] \
+       --out FILE [--format chrome|bartman] [--per-frame] \
+       [--source-map FROM=TO ...]"
 }
 
 fn parse_options() -> Result<Options, String> {
@@ -373,7 +376,77 @@ fn run_dap(options: &Options) -> ExitCode {
     }
 }
 
+fn run_profile_report() -> Result<Vec<std::path::PathBuf>, String> {
+    use copperline::profile::report::{ReportFormat, ReportOptions};
+
+    let mut args = std::env::args().skip(2);
+    let input_dir = std::path::PathBuf::from(args.next().ok_or("profile-report requires DIR")?);
+    let mut program = None;
+    let mut elf = None;
+    let mut out = None;
+    let mut format = ReportFormat::Chrome;
+    let mut per_frame = false;
+    let mut source_map = Vec::new();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--program" => {
+                program = Some(std::path::PathBuf::from(
+                    args.next().ok_or("--program requires a path")?,
+                ));
+            }
+            "--elf" => {
+                elf = Some(std::path::PathBuf::from(
+                    args.next().ok_or("--elf requires a path")?,
+                ));
+            }
+            "--out" => {
+                out = Some(std::path::PathBuf::from(
+                    args.next().ok_or("--out requires a path")?,
+                ));
+            }
+            "--format" => {
+                let value = args.next().ok_or("--format requires chrome|bartman")?;
+                format = ReportFormat::parse(&value)
+                    .ok_or_else(|| format!("bad --format {value:?}; expected chrome|bartman"))?;
+            }
+            "--per-frame" => per_frame = true,
+            "--source-map" => {
+                let value = args.next().ok_or("--source-map requires FROM=TO")?;
+                let (from, to) = value
+                    .split_once('=')
+                    .ok_or("--source-map requires FROM=TO")?;
+                source_map.push((from.to_string(), to.to_string()));
+            }
+            "-h" | "--help" => return Err(usage().to_string()),
+            other => return Err(format!("unexpected profile-report argument {other:?}")),
+        }
+    }
+    copperline::profile::report::generate(&ReportOptions {
+        input_dir,
+        program: program.ok_or("profile-report requires --program PROG")?,
+        elf,
+        out: out.ok_or("profile-report requires --out FILE")?,
+        format,
+        per_frame,
+        source_map,
+    })
+}
+
 fn main() -> ExitCode {
+    if std::env::args().nth(1).as_deref() == Some("profile-report") {
+        return match run_profile_report() {
+            Ok(paths) => {
+                for path in paths {
+                    println!("{}", path.display());
+                }
+                ExitCode::SUCCESS
+            }
+            Err(message) => {
+                eprintln!("copperline-ctl: profile-report: {message}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let options = match parse_options() {
         Ok(options) => options,
         Err(message) => {

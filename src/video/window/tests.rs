@@ -10078,6 +10078,11 @@ mod warp_control {
             slots: false,
             screenshots: crate::profile::ScreenshotMode::None,
             pc_samples: false,
+            samples: false,
+            registers: false,
+            unwind: None,
+            relocation_bases: Vec::new(),
+            code_ranges: Vec::new(),
             trigger: None,
         }
     }
