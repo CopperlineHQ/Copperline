@@ -786,16 +786,33 @@ impl Emulator {
                 .iter()
                 .map(|blit| {
                     json!({
+                        "id": blit.id,
                         "bltcon0": format!("{:#06X}", blit.bltcon0),
                         "bltcon1": format!("{:#06X}", blit.bltcon1),
                         "width_words": blit.width_words,
                         "height": blit.height,
+                        "descending": blit.descending,
+                        "line_mode": blit.line_mode,
+                        "fill_mode": blit.fill_mode,
+                        "channels": blit.channels,
                         "apt": format!("{:#010X}", blit.apt),
                         "bpt": format!("{:#010X}", blit.bpt),
                         "cpt": format!("{:#010X}", blit.cpt),
                         "dpt": format!("{:#010X}", blit.dpt),
+                        "modulos": blit.modulos,
+                        "shifts": blit.shifts,
+                        "masks": blit.masks.map(|value| format!("0x{value:04X}")),
+                        "minterm": format!("0x{:02X}", blit.minterm),
+                        "formula": crate::blitviz::minterm_formula(blit.minterm),
+                        "data": blit.data.map(|value| format!("0x{value:04X}")),
+                        "start_frame": blit.start_frame,
+                        "end_frame": blit.end_frame,
                         "start": [blit.start.0, blit.start.1],
                         "end": blit.end.map(|(v, h)| json!([v, h])),
+                        "cycles_used": blit.cycles_used,
+                        "cycles_stalled": blit.cycles_stalled,
+                        "captured_words": blit.channel_words.each_ref().map(Vec::len),
+                        "render_truncated": blit.render_truncated,
                     })
                 })
                 .collect();

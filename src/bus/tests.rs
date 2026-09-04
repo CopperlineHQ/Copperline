@@ -874,6 +874,42 @@ fn frame_analyzer_records_owner_spans_and_blitter_wait_cck() {
 }
 
 #[test]
+fn frame_analyzer_finalises_a_cross_frame_blit_in_both_traces() {
+    let mut bus = empty_bus();
+    bus.mem.overlay = false;
+    bus.set_frame_analyzer_full(true);
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BLTEN;
+    bus.agnus.vpos = PAL_LINES - 1;
+    bus.agnus.hpos = bus.agnus.current_line_cck() - 2;
+    bus.blitter.bltcon0 = BLTCON0_USE_D | 0x00F0;
+    bus.blitter.bltdpt = 0x400;
+    bus.blitter.start_scheduled((2 << 6) | 2, &bus.mem.chip_ram);
+    bus.record_frame_blit_start(2, 2);
+    let id = bus.active_frame_blit.expect("recorded blit id");
+
+    bus.advance_chipset(32);
+    assert!(!bus.blitter.busy);
+    let older = bus
+        .last_frame_bus_trace
+        .as_ref()
+        .and_then(|trace| trace.blits.iter().find(|blit| blit.id == id))
+        .expect("blit remains referenced from its starting frame");
+    let newer = bus
+        .current_frame_bus_trace
+        .blits
+        .iter()
+        .find(|blit| blit.id == id)
+        .expect("blit remains referenced from its ending frame");
+    assert_eq!(older.end, newer.end);
+    assert_eq!(older.end_frame, newer.end_frame);
+    assert!(older
+        .end_frame
+        .is_some_and(|frame| frame > older.start_frame));
+    assert!(older.cycles_used > 0);
+    assert!(!older.channel_addrs[3].is_empty());
+}
+
+#[test]
 fn frame_analyzer_records_cpu_wait_samples() {
     let mut trace = FrameBusTrace::default();
     trace.reset_for_frame(7, 0.140, 4, 16, 1, 2, false);

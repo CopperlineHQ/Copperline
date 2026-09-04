@@ -590,6 +590,19 @@ fn build() -> Vec<ToolDef> {
             json!({"row": 100}),
         ),
         entry(
+            "blit.render",
+            "Render one channel of a recorded Frame Analyzer blit as a PNG from its exact DMA word stream. Returns geometry, the registered-resource or BPLCON0 plane-count source, and a simplified minterm formula.",
+            object(
+                vec![
+                    ("index", uint("Zero-based index in the last frame's blit list", Some(0), Some((crate::bus::FRAME_BLIT_RECORD_CAP - 1) as u64))),
+                    ("channel", enumeration("Channel or computed output", &["A", "B", "C", "D", "result"])),
+                    ("path", string("Host path for the PNG (optional)")),
+                ],
+                &["index", "channel"],
+            ),
+            json!({"index": 0, "channel": "result"}),
+        ),
+        entry(
             "display.get",
             "Report the active display: video standard, canvas size and pixel format, \
              the display window and fetch registers as decoded, bitplane count, \
@@ -645,11 +658,14 @@ fn build() -> Vec<ToolDef> {
             "copper.list",
             "Disassemble up to `max` Copper instructions (default 32, at most 256) from \
              `addr` (default: the Copper's current program counter): MOVE, WAIT, SKIP, \
-             with register names and beam positions decoded.",
+             with register names and beam positions decoded. `trace` annotates instructions \
+             with the exact execution slot in the last full Frame Analyzer trace.",
             object(
                 vec![
                     ("addr", addr("Copper list address (default: current Copper PC)")),
+                    ("resource", string("Registered Copperlist resource name")),
                     ("max", uint("Instructions to list", Some(1), Some(256))),
+                    ("trace", boolean("Include last-frame execution positions")),
                 ],
                 &[],
             ),
@@ -1308,8 +1324,22 @@ fn build() -> Vec<ToolDef> {
             "Render the current frame as a PNG. Through this bridge the image is also \
              returned as an image content block so you can look at the screen; with no \
              `path` the file is temporary and deleted after it is read, with a `path` it \
-             is kept there. Returns the path, width and height.",
-            object(vec![("path", string("Host path for the PNG (optional)"))], &[]),
+             is kept there. `overlays` may contain `blits`, `overdraw`, and `sources` \
+             (playfield 1/2, sprite number, background, outside DIW); overdraw uses full \
+             chip-memory write records when registered bitmap geometry is available. Returns the path, \
+             width and height.",
+            object(
+                vec![
+                    ("path", string("Host path for the PNG (optional)")),
+                    ("overlays", json!({
+                        "description": "Diagnostic layers painted over the captured frame",
+                        "type": "array",
+                        "uniqueItems": true,
+                        "items": {"type": "string", "enum": ["blits", "overdraw", "sources"]}
+                    })),
+                ],
+                &[],
+            ),
             json!({}),
         ),
         entry(

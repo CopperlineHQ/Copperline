@@ -6458,6 +6458,7 @@ impl App {
             | UiControl::AnalyzerHeatPreset(_)
             | UiControl::AnalyzerResourceRow(_)
             | UiControl::AnalyzerResourceSave
+            | UiControl::AnalyzerBlitRow(_)
             | UiControl::AnalyzerCpuWait
             | UiControl::AnalyzerHeatPick { .. } => {
                 self.activate_tool_control(ToolPanelKind::FrameAnalyzer, control)

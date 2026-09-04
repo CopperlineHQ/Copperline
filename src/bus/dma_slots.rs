@@ -164,6 +164,36 @@ impl Bus {
                 self.blitter.current_slot_needs_bus()
             );
         }
+        // Decide once whether a bus-free/internal blitter cycle advances on
+        // this quantum. The same answer drives both the sequencer below and
+        // the per-blit used/stalled accounting, so the visualiser cannot
+        // drift from the hardware timeline.
+        let blitter_non_bus_advanced = !matches!(owner, ChipBusOwner::Blitter)
+            && self.blitter.busy
+            && self.blitter_dma_enabled()
+            && match self.blitter.current_slot_class() {
+                crate::chipset::blitter::BlitSlotClass::Bus => false,
+                crate::chipset::blitter::BlitSlotClass::Internal => true,
+                crate::chipset::blitter::BlitSlotClass::BusFree => match owner {
+                    ChipBusOwner::Idle => true,
+                    ChipBusOwner::Cpu => {
+                        !(matches!(forced_owner, Some(ChipBusOwner::Cpu))
+                            && self.blitter_yields_to_waiting_cpu())
+                    }
+                    _ => false,
+                },
+            };
+        if self.frame_analyzer_enabled && self.blitter.busy {
+            self.record_frame_blit_quantum(
+                cck,
+                matches!(owner, ChipBusOwner::Blitter) || blitter_non_bus_advanced,
+            );
+            if matches!(owner, ChipBusOwner::Blitter) {
+                if let Some(access) = self.blitter.current_bus_access(&self.mem.chip_ram) {
+                    self.record_frame_blit_access(access);
+                }
+            }
+        }
         self.last_chip_bus_owner = owner;
         if self.chip_bus_observers_on {
             self.observe_chip_bus_quantum(owner, cck, hpos);
@@ -277,37 +307,21 @@ impl Bus {
         if !matches!(owner, ChipBusOwner::Blitter)
             && self.blitter.busy
             && self.blitter_dma_enabled()
+            && blitter_non_bus_advanced
         {
-            let ticks = match self.blitter.current_slot_class() {
-                crate::chipset::blitter::BlitSlotClass::Bus => false,
-                crate::chipset::blitter::BlitSlotClass::Internal => true,
-                crate::chipset::blitter::BlitSlotClass::BusFree => match owner {
-                    ChipBusOwner::Idle => true,
-                    ChipBusOwner::Cpu => {
-                        // A starvation grant is the cck where BLS denies the
-                        // blitter; an ordinary CPU access on a free clock
-                        // does not stall the bus-free cycle.
-                        !(matches!(forced_owner, Some(ChipBusOwner::Cpu))
-                            && self.blitter_yields_to_waiting_cpu())
-                    }
-                    _ => false,
-                },
-            };
-            if ticks {
-                if diag_blt_slots() {
-                    eprintln!(
-                        "BLTP {} {} {} TICK {} bus=0 owner={owner:?}",
-                        self.emulated_frames,
-                        self.agnus.vpos,
-                        self.agnus.hpos,
-                        self.blitter.current_slot_label()
-                    );
-                }
-                if self.blitter.tick_scheduled_slot(&mut self.mem.chip_ram) {
-                    self.latch_blitter_completion("idle_pipeline");
-                }
-                self.note_blitter_slot_ticked();
+            if diag_blt_slots() {
+                eprintln!(
+                    "BLTP {} {} {} TICK {} bus=0 owner={owner:?}",
+                    self.emulated_frames,
+                    self.agnus.vpos,
+                    self.agnus.hpos,
+                    self.blitter.current_slot_label()
+                );
             }
+            if self.blitter.tick_scheduled_slot(&mut self.mem.chip_ram) {
+                self.latch_blitter_completion("idle_pipeline");
+            }
+            self.note_blitter_slot_ticked();
         }
         let tick = self.advance_beam(cck);
         self.audio_pending_cck = self.audio_pending_cck.saturating_add(cck);

@@ -250,14 +250,17 @@ impl Default for DebuggerPanel {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AnalyzerTab {
     Beam,
+    /// Recorded blits with exact source/result reconstruction.
+    Blits,
     Memory,
     /// The debug resources the guest registered through the uaelib trap
     /// (crate::uaelib): a table plus a decoded preview of the selection.
     Resources,
 }
 
-pub const ANALYZER_TABS: [AnalyzerTab; 3] = [
+pub const ANALYZER_TABS: [AnalyzerTab; 4] = [
     AnalyzerTab::Beam,
+    AnalyzerTab::Blits,
     AnalyzerTab::Memory,
     AnalyzerTab::Resources,
 ];
@@ -265,6 +268,7 @@ pub const ANALYZER_TABS: [AnalyzerTab; 3] = [
 fn analyzer_tab_label(tab: AnalyzerTab) -> &'static str {
     match tab {
         AnalyzerTab::Beam => "Beam",
+        AnalyzerTab::Blits => "Blits",
         AnalyzerTab::Memory => "Memory",
         AnalyzerTab::Resources => "Resources",
     }
@@ -307,6 +311,11 @@ pub struct FrameAnalyzerPanel {
     /// Resources tab: the first listed registry entry (cursor keys
     /// scroll), so a registry larger than the table stays reachable.
     pub resource_scroll: usize,
+    /// Blits tab selection, stable across the same cross-frame record.
+    pub blit_selected: Option<u64>,
+    /// Blits tab: first listed record, kept in step with the keyboard
+    /// selection so every captured blit remains reachable.
+    pub blit_scroll: usize,
 }
 
 impl FrameAnalyzerPanel {
@@ -322,6 +331,8 @@ impl FrameAnalyzerPanel {
             heat_selected: None,
             resource_selected: None,
             resource_scroll: 0,
+            blit_selected: None,
+            blit_scroll: 0,
         }
     }
 
@@ -652,6 +663,13 @@ pub fn panel_control_at(panel: &Panel, pos: (i32, i32)) -> Option<UiControl> {
                         return Some(UiControl::AnalyzerCpuWait);
                     }
                 }
+                AnalyzerTab::Blits => {
+                    for (control, row_rect) in analyzer_blit_row_rects(rect) {
+                        if row_rect.contains(pos) {
+                            return Some(control);
+                        }
+                    }
+                }
                 AnalyzerTab::Memory => {
                     for (control, button_rect) in analyzer_preset_rects(rect, &panel.heat_presets) {
                         if button_rect.contains(pos) {
@@ -826,6 +844,8 @@ pub enum UiControl {
     AnalyzerResourceRow(u8),
     /// Save the selected bitmap or palette resource as PNG.
     AnalyzerResourceSave,
+    /// A row of the Blits tab's recorded-transfer table.
+    AnalyzerBlitRow(u8),
     AnalyzerHeatPick {
         x: u8,
         y: u8,
@@ -1485,6 +1505,37 @@ fn analyzer_preset_rects(rect: Rect, presets: &[HeatPreset]) -> Vec<(UiControl, 
 /// Height of one Resources-tab table row, and how many the panel lists.
 const ANALYZER_RESOURCE_ROW_H: usize = 12;
 pub const ANALYZER_RESOURCE_ROWS_MAX: usize = 10;
+const ANALYZER_BLIT_ROW_H: usize = 14;
+pub const ANALYZER_BLIT_ROWS_MAX: usize = 8;
+
+fn analyzer_blit_row_rects(rect: Rect) -> Vec<(UiControl, Rect)> {
+    let top = analyzer_content_top(rect) + 16;
+    (0..ANALYZER_BLIT_ROWS_MAX)
+        .map(|index| {
+            (
+                UiControl::AnalyzerBlitRow(index as u8),
+                Rect {
+                    x: rect.x + 10,
+                    y: top + index * ANALYZER_BLIT_ROW_H,
+                    w: rect.w - 20,
+                    h: ANALYZER_BLIT_ROW_H,
+                },
+            )
+        })
+        .collect()
+}
+
+fn analyzer_blit_detail_rect(rect: Rect) -> Rect {
+    let top = analyzer_content_top(rect) + 16 + ANALYZER_BLIT_ROWS_MAX * ANALYZER_BLIT_ROW_H + 26;
+    Rect {
+        x: rect.x + 10,
+        y: top,
+        w: rect.w - 20,
+        h: (rect.y + rect.h)
+            .saturating_sub(DEBUG_BUTTON_H + 12)
+            .saturating_sub(top),
+    }
+}
 
 /// The Resources tab's table rows, top to bottom under the header line.
 fn analyzer_resource_row_rects(rect: Rect) -> Vec<(UiControl, Rect)> {
@@ -1561,6 +1612,7 @@ fn analyzer_tab_button_rects(rect: Rect, tab: AnalyzerTab) -> Vec<(UiControl, Re
     let all = analyzer_button_rects(rect);
     match tab {
         AnalyzerTab::Beam => all.to_vec(),
+        AnalyzerTab::Blits => all[..2].to_vec(),
         AnalyzerTab::Memory => all[..2].to_vec(),
         AnalyzerTab::Resources => vec![all[0], all[1], (UiControl::AnalyzerResourceSave, all[2].1)],
     }
@@ -1839,17 +1891,24 @@ pub struct AnalyzerMarker {
     /// Writer: "cpu", "irq" (CPU inside the Copper-triggered interrupt
     /// window), or "copper".
     pub source: &'static str,
+    /// MOVE instruction address for reciprocal slot/list navigation.
+    pub copper_addr: Option<u32>,
+    /// Register-class colour for Copper MOVE markers.
+    pub colour: u32,
 }
 
 impl AnalyzerMarker {
     fn label(&self) -> String {
         format!(
-            "{} {}=${:04X} v{} h{}",
+            "{} {}=${:04X} v{} h{}{}",
             self.source,
             crate::debugger::custom_reg_name(self.offset & 0x01FE),
             self.value,
             self.vpos,
             self.hpos,
+            self.copper_addr
+                .map(|addr| format!(" @${addr:06X}"))
+                .unwrap_or_default(),
         )
     }
 
@@ -2048,6 +2107,23 @@ pub struct AnalyzerResourcesView {
     pub exportable: bool,
 }
 
+/// The Blits tab's table plus the selected source/result pair.
+pub struct AnalyzerBlitsView {
+    pub rows: Vec<AnalyzerBlitRowView>,
+    pub hidden_above: usize,
+    pub hidden_below: usize,
+    pub source_label: &'static str,
+    pub source: Option<crate::video::resource_preview::BitmapPreview>,
+    pub destination: Option<crate::video::resource_preview::BitmapPreview>,
+    pub formula: String,
+    pub detail: String,
+}
+
+pub struct AnalyzerBlitRowView {
+    pub text: String,
+    pub selected: bool,
+}
+
 pub struct AnalyzerResourceRowView {
     pub text: String,
     pub selected: bool,
@@ -2071,6 +2147,8 @@ pub struct FrameAnalyzerView {
     pub heat: Option<AnalyzerHeatView>,
     /// The Resources tab's data; built only while that tab is up.
     pub resources: Option<AnalyzerResourcesView>,
+    /// The Blits tab's data; built only while that tab is up.
+    pub blits: Option<AnalyzerBlitsView>,
 }
 
 pub enum PanelViewData {
@@ -3908,7 +3986,7 @@ fn draw_owner_heatmap(
                 h: 1,
             },
             rect,
-            PANEL_TEXT_ACCENT,
+            marker.colour,
             scale,
         );
         fill_rect_clipped(
@@ -3920,7 +3998,7 @@ fn draw_owner_heatmap(
                 h: 3,
             },
             rect,
-            PANEL_TEXT_ACCENT,
+            marker.colour,
             scale,
         );
     }
@@ -4441,6 +4519,7 @@ fn draw_frame_analyzer(
     // show whether or not a beam trace has ever been captured.
     match panel.tab {
         AnalyzerTab::Beam => draw_analyzer_beam_tab(frame, rect, panel, view, hover, scale),
+        AnalyzerTab::Blits => draw_analyzer_blits_tab(frame, rect, view, hover, scale),
         AnalyzerTab::Memory => draw_analyzer_heat_tab(frame, rect, panel, view, hover, scale),
         AnalyzerTab::Resources => draw_analyzer_resources_tab(frame, rect, view, hover, scale),
     }
@@ -4638,8 +4717,18 @@ fn draw_analyzer_beam_tab(
     };
     let slot_detail_drawn = if let Some(record) = trace.record_at(probe_vpos, probe_hpos) {
         let event_names = crate::bus::bus_event_names(record.events).join("|");
+        let copper_instruction = if record.kind == crate::bus::BUS_RECORD_COPPER {
+            let addr = if record.flags & 1 != 0 || record.subtype != 0 {
+                record.addr.saturating_sub(2)
+            } else {
+                record.addr
+            };
+            format!(" copper=@${addr:06X}")
+        } else {
+            String::new()
+        };
         let detail = format!(
-            "reg=${:04X} addr=${:08X} data=${:016X}/{} kind={}:{} ipl={} events={}",
+            "reg=${:04X} addr=${:08X} data=${:016X}/{} kind={}:{} ipl={} events={}{}",
             record.reg,
             record.addr,
             record.data,
@@ -4652,6 +4741,7 @@ fn draw_analyzer_beam_tab(
             } else {
                 &event_names
             },
+            copper_instruction,
         );
         draw_panel_text(
             frame,
@@ -4796,6 +4886,125 @@ fn heat_resource_suffix(view: &AnalyzerHeatView, cell: usize) -> String {
     heat_resource_at(view, cell)
         .map(|resource| format!("  in '{}' ({})", resource.name, resource.kind))
         .unwrap_or_default()
+}
+
+fn draw_analyzer_blits_tab(
+    frame: &mut [u8],
+    rect: Rect,
+    view: &FrameAnalyzerView,
+    hover: Option<UiControl>,
+    scale: usize,
+) {
+    let content_top = analyzer_content_top(rect);
+    let Some(blits) = &view.blits else {
+        draw_panel_text(
+            frame,
+            rect.x + 10,
+            content_top,
+            "No blits captured in the current frame trace.",
+            PANEL_TEXT_DIM,
+            1,
+            scale,
+        );
+        return;
+    };
+    draw_panel_text(
+        frame,
+        rect.x + 10,
+        content_top,
+        "#  beam span        mode/channels    size       used/stall   destination",
+        PANEL_TEXT_DIM,
+        1,
+        scale,
+    );
+    for ((control, row_rect), row) in analyzer_blit_row_rects(rect).into_iter().zip(&blits.rows) {
+        if row.selected {
+            fill_rect(frame, scale_rect(row_rect, scale), ENTRY_BG, scale);
+        }
+        draw_panel_text(
+            frame,
+            row_rect.x,
+            row_rect.y + 3,
+            &row.text,
+            if row.selected {
+                PANEL_TEXT_HILIGHT
+            } else if hover == Some(control) {
+                PANEL_TEXT_ACCENT
+            } else {
+                PANEL_TEXT
+            },
+            1,
+            scale,
+        );
+    }
+    if blits.hidden_above > 0 || blits.hidden_below > 0 {
+        draw_panel_text(
+            frame,
+            rect.x + rect.w.saturating_sub(214),
+            content_top,
+            &format!(
+                "up/down: {} above, {} below",
+                blits.hidden_above, blits.hidden_below
+            ),
+            PANEL_TEXT_DIM,
+            1,
+            scale,
+        );
+    }
+    let detail = analyzer_blit_detail_rect(rect);
+    draw_panel_text(
+        frame,
+        detail.x,
+        detail.y - 20,
+        &format!("{}    {}", blits.detail, blits.formula),
+        PANEL_TEXT_ACCENT,
+        1,
+        scale,
+    );
+    let gap = 8;
+    let half = detail.w.saturating_sub(gap) / 2;
+    let source_rect = Rect {
+        x: detail.x,
+        y: detail.y,
+        w: half,
+        h: detail.h,
+    };
+    let dest_rect = Rect {
+        x: detail.x + half + gap,
+        y: detail.y,
+        w: half,
+        h: detail.h,
+    };
+    draw_panel_text(
+        frame,
+        source_rect.x,
+        source_rect.y,
+        blits.source_label,
+        PANEL_TEXT_DIM,
+        1,
+        scale,
+    );
+    draw_panel_text(
+        frame,
+        dest_rect.x,
+        dest_rect.y,
+        "result / D",
+        PANEL_TEXT_DIM,
+        1,
+        scale,
+    );
+    let inset = |area: Rect| Rect {
+        x: area.x,
+        y: area.y + 14,
+        w: area.w,
+        h: area.h.saturating_sub(14),
+    };
+    if let Some(preview) = &blits.source {
+        draw_resource_bitmap_preview(frame, inset(source_rect), preview, scale);
+    }
+    if let Some(preview) = &blits.destination {
+        draw_resource_bitmap_preview(frame, inset(dest_rect), preview, scale);
+    }
 }
 
 fn draw_analyzer_resources_tab(

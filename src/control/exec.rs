@@ -149,6 +149,15 @@ pub enum CoreOp {
         /// Start at a guest-registered Copperlist resource instead.
         resource: Option<String>,
         max: usize,
+        /// Annotate each instruction with where it executed in the last
+        /// full Frame Analyzer trace.
+        trace: bool,
+    },
+    /// Reconstruct one recorded blitter channel without reading live RAM.
+    BlitRender {
+        index: usize,
+        channel: crate::blitviz::BlitChannel,
+        path: Option<PathBuf>,
     },
     LastWriter {
         addr: u32,
@@ -199,6 +208,7 @@ pub enum CoreOp {
     },
     Screenshot {
         path: Option<PathBuf>,
+        overlays: Vec<CaptureOverlay>,
     },
     ReverseStep {
         n: u64,
@@ -253,6 +263,7 @@ impl CoreOp {
                 | CoreOp::DebugResources
                 | CoreOp::DebugIdle
                 | CoreOp::CopperList { .. }
+                | CoreOp::BlitRender { .. }
                 | CoreOp::PcHistory
                 | CoreOp::SegmentsList
                 | CoreOp::BreakList
@@ -265,6 +276,33 @@ impl CoreOp {
                 | CoreOp::RegionDigest { .. }
                 | CoreOp::Screenshot { .. }
         )
+    }
+}
+
+/// Optional diagnostic layers painted onto a side-effect-free screenshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureOverlay {
+    Blits,
+    Overdraw,
+    Sources,
+}
+
+impl CaptureOverlay {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "blits" => Some(Self::Blits),
+            "overdraw" => Some(Self::Overdraw),
+            "sources" => Some(Self::Sources),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Blits => "blits",
+            Self::Overdraw => "overdraw",
+            Self::Sources => "sources",
+        }
     }
 }
 
@@ -997,6 +1035,16 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
         "frame.slots" => core(CoreOp::FrameSlots {
             row: p.usize_or("row", 0)?,
         }),
+        "blit.render" => {
+            let channel = p.str_req("channel")?;
+            let channel = crate::blitviz::BlitChannel::parse(&channel)
+                .ok_or_else(|| CtlError::invalid_params("channel must be A|B|C|D|result"))?;
+            core(CoreOp::BlitRender {
+                index: p.usize_req("index")?,
+                channel,
+                path: p.str_opt("path")?.map(PathBuf::from),
+            })
+        }
         "display.get" => core(CoreOp::DisplayGet),
         "rtc.get" => core(CoreOp::RtcGet),
         "rtc.set" => {
@@ -1044,6 +1092,7 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
                 addr,
                 resource,
                 max: p.usize_or("max", 32)?.clamp(1, 256),
+                trace: p.bool_or("trace", false)?,
             })
         }
         "last_writer" => core(CoreOp::LastWriter {
@@ -1417,9 +1466,21 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
         "state.load" => host(HostOp::StateLoad {
             path: PathBuf::from(p.str_req("path")?),
         }),
-        "capture.screenshot" => core(CoreOp::Screenshot {
-            path: p.str_opt("path")?.map(PathBuf::from),
-        }),
+        "capture.screenshot" => {
+            let mut overlays = Vec::new();
+            for value in p.str_array("overlays")? {
+                let overlay = CaptureOverlay::parse(&value).ok_or_else(|| {
+                    CtlError::invalid_params("overlays entries must be blits|overdraw|sources")
+                })?;
+                if !overlays.contains(&overlay) {
+                    overlays.push(overlay);
+                }
+            }
+            core(CoreOp::Screenshot {
+                path: p.str_opt("path")?.map(PathBuf::from),
+                overlays,
+            })
+        }
         "capture.digest" => core(CoreOp::Digest),
         "capture.region_digest" => core(CoreOp::RegionDigest {
             rect: parse_frame_rect(&p)?,
@@ -1963,6 +2024,21 @@ impl<'a> ParamReader<'a> {
                 .ok_or_else(|| CtlError::invalid_params(format!("bad {key}"))),
         }
     }
+
+    fn str_array(&self, key: &str) -> Result<Vec<String>, CtlError> {
+        match self.get(key) {
+            None | Some(Value::Null) => Ok(Vec::new()),
+            Some(Value::Array(values)) => values
+                .iter()
+                .map(|value| {
+                    value.as_str().map(str::to_string).ok_or_else(|| {
+                        CtlError::invalid_params(format!("{key} must contain strings"))
+                    })
+                })
+                .collect(),
+            Some(_) => Err(CtlError::invalid_params(format!("{key} must be an array"))),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -2172,6 +2248,55 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
                 "instantaneous_records": instantaneous_records,
             }))
         }
+        CoreOp::BlitRender {
+            index,
+            channel,
+            path,
+        } => {
+            let bus = emu.bus();
+            let trace = bus.frame_bus_trace().ok_or_else(|| {
+                CtlError::invalid_state(
+                    "no frame trace is available; open the Frame Analyzer or start a profile",
+                )
+            })?;
+            let blit = trace.blits.get(*index).ok_or_else(|| {
+                CtlError::invalid_params(format!(
+                    "index must select a recorded blit (0..{})",
+                    trace.blits.len().saturating_sub(1)
+                ))
+            })?;
+            let (planes, plane_source) = crate::blitviz::plane_count_for_blit(
+                blit,
+                emu.uaelib_resources(),
+                bus.frame_render_base(),
+            );
+            let preview = crate::blitviz::render_blit(blit, *channel, planes)
+                .map_err(CtlError::invalid_state)?;
+            let path = path
+                .clone()
+                .unwrap_or_else(crate::screenshot::auto_filename);
+            crate::screenshot::save(
+                &path,
+                &preview.pixels,
+                preview.width as u32,
+                preview.height as u32,
+            )
+            .map_err(|e| CtlError::io(format!("saving blit render: {e:#}")))?;
+            Ok(json!({
+                "path": path.display().to_string(),
+                "frame": trace.frame,
+                "index": index,
+                "id": blit.id,
+                "channel": channel.name(),
+                "width": preview.width,
+                "height": preview.height,
+                "planes": planes,
+                "plane_source": plane_source,
+                "minterm": format!("0x{:02X}", blit.minterm),
+                "formula": crate::blitviz::minterm_formula(blit.minterm),
+                "note": preview.note,
+            }))
+        }
         CoreOp::DisplayGet => {
             let bus = emu.bus();
             Ok(json!({
@@ -2297,6 +2422,7 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             addr,
             resource,
             max,
+            trace,
         } => {
             let start = match (addr, resource) {
                 (Some(addr), _) => Some(*addr),
@@ -2314,19 +2440,46 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             let bus = emu.bus();
             let copper_pc = bus.copper.pc();
             let start = start.unwrap_or_else(|| copper_pc.saturating_sub(4 * 4));
-            let entries: Vec<Value> = crate::disasm::dump_copper_list(
-                |a| bus.peek_word_any(a),
-                start,
-                *max,
-            )
-            .into_iter()
-            .map(|(addr, text)| json!({"addr": addr, "text": text, "cursor": addr == copper_pc}))
-            .collect();
+            let traced = (*trace)
+                .then(|| {
+                    bus.frame_bus_trace().and_then(|frame| {
+                        frame
+                            .records()
+                            .map(|records| (frame.frame, frame.cols, records))
+                    })
+                })
+                .flatten();
+            let entries: Vec<Value> =
+                crate::disasm::dump_copper_list(|a| bus.peek_word_any(a), start, *max)
+                    .into_iter()
+                    .map(|(addr, text)| {
+                        let beam = traced.and_then(|(frame, cols, records)| {
+                            records.iter().enumerate().find_map(|(slot, record)| {
+                                (record.kind == crate::bus::BUS_RECORD_COPPER
+                                    && record.addr == addr.saturating_add(2))
+                                .then(|| {
+                                    json!({
+                                        "frame": frame,
+                                        "vpos": slot / cols,
+                                        "hpos": slot % cols,
+                                    })
+                                })
+                            })
+                        });
+                        json!({
+                            "addr": addr,
+                            "text": text,
+                            "cursor": addr == copper_pc,
+                            "trace": beam,
+                        })
+                    })
+                    .collect();
             Ok(json!({
                 "cop1lc": bus.agnus.cop1lc,
                 "cop2lc": bus.agnus.cop2lc,
                 "coppc": copper_pc,
                 "running": bus.copper.is_running(),
+                "trace_frame": traced.map(|(frame, _, _)| frame),
                 "entries": entries,
             }))
         }
@@ -2637,8 +2790,8 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
         }
         CoreOp::Digest => Ok(digest_value(emu)),
         CoreOp::RegionDigest { rect } => region_digest_value(emu, *rect),
-        CoreOp::Screenshot { path } => {
-            let (fb, lines, width) = render_frame(emu);
+        CoreOp::Screenshot { path, overlays } => {
+            let (fb, lines, width) = render_frame_with_overlays(emu, overlays);
             let path = path
                 .clone()
                 .unwrap_or_else(crate::screenshot::auto_filename);
@@ -2648,6 +2801,15 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
                 "path": path.display().to_string(),
                 "width": width,
                 "height": lines,
+                "overlays": overlays.iter().map(|overlay| overlay.name()).collect::<Vec<_>>(),
+                "source_legend": overlays.contains(&CaptureOverlay::Sources).then(|| json!({
+                    "outside_diw": crate::video::bitplane::PIXEL_SOURCE_OUTSIDE_DIW,
+                    "background": crate::video::bitplane::PIXEL_SOURCE_BACKGROUND,
+                    "playfield1": crate::video::bitplane::PIXEL_SOURCE_PLAYFIELD1,
+                    "playfield2": crate::video::bitplane::PIXEL_SOURCE_PLAYFIELD2,
+                    "sprite0": crate::video::bitplane::PIXEL_SOURCE_SPRITE0,
+                    "sprite7": crate::video::bitplane::PIXEL_SOURCE_SPRITE0 + 7,
+                })),
             }))
         }
         CoreOp::ReverseStep { n } => {
@@ -3120,6 +3282,262 @@ pub(crate) fn render_frame(emu: &Emulator) -> (Vec<u32>, usize, usize) {
     (fb, lines, width)
 }
 
+fn render_frame_with_overlays(
+    emu: &Emulator,
+    overlays: &[CaptureOverlay],
+) -> (Vec<u32>, usize, usize) {
+    if overlays.is_empty() {
+        return render_frame(emu);
+    }
+    // RTG has no Denise provenance, but recorded blitter writes can still be
+    // projected onto its presented image when the guest registered a bitmap.
+    let mut fb = Vec::new();
+    let mut scratch = Vec::new();
+    let (lines, width, sources) = if let Some((rows, _, _)) =
+        crate::video::present_common::compose_rtg_present(emu.bus(), &mut scratch, &mut fb)
+    {
+        (rows, FB_WIDTH, Vec::new())
+    } else {
+        fb = vec![0u32; MAX_CANVAS_PIXELS];
+        let sources = if overlays.contains(&CaptureOverlay::Sources) {
+            crate::video::bitplane::render_display_diagnostics(emu.bus(), &mut fb)
+        } else {
+            crate::video::bitplane::render_display_only(emu.bus(), &mut fb);
+            Vec::new()
+        };
+        (
+            emu.bus().frame_geometry().visible_lines,
+            FB_WIDTH * emu.bus().frame_canvas_scale(),
+            sources,
+        )
+    };
+    if overlays.contains(&CaptureOverlay::Sources) && sources.len() >= width * lines {
+        for (pixel, source) in fb[..width * lines].iter_mut().zip(sources) {
+            *pixel = overlay_blend(*pixel, source_colour(source), 142);
+        }
+    }
+    if overlays.contains(&CaptureOverlay::Overdraw) || overlays.contains(&CaptureOverlay::Blits) {
+        paint_blit_overlays(emu, &mut fb[..width * lines], width, lines, overlays);
+    }
+    (fb, lines, width)
+}
+
+fn source_colour(source: u8) -> u32 {
+    let rgb = match source {
+        crate::video::bitplane::PIXEL_SOURCE_OUTSIDE_DIW => [54, 58, 66],
+        crate::video::bitplane::PIXEL_SOURCE_BACKGROUND => [30, 38, 54],
+        crate::video::bitplane::PIXEL_SOURCE_PLAYFIELD1 => [36, 176, 238],
+        crate::video::bitplane::PIXEL_SOURCE_PLAYFIELD2 => [238, 166, 42],
+        sprite if sprite >= crate::video::bitplane::PIXEL_SOURCE_SPRITE0 => {
+            const SPRITE: [[u8; 3]; 8] = [
+                [244, 72, 90],
+                [222, 92, 238],
+                [156, 92, 244],
+                [92, 116, 244],
+                [72, 210, 190],
+                [104, 220, 92],
+                [222, 214, 72],
+                [244, 134, 72],
+            ];
+            SPRITE[usize::from(sprite - crate::video::bitplane::PIXEL_SOURCE_SPRITE0).min(7)]
+        }
+        _ => [255, 255, 255],
+    };
+    u32::from_le_bytes([rgb[0], rgb[1], rgb[2], 0xFF])
+}
+
+fn overlay_blend(base: u32, over: u32, alpha: u8) -> u32 {
+    let base = base.to_le_bytes();
+    let over = over.to_le_bytes();
+    let a = u16::from(alpha);
+    let mix =
+        |index| ((u16::from(base[index]) * (255 - a) + u16::from(over[index]) * a) / 255) as u8;
+    u32::from_le_bytes([mix(0), mix(1), mix(2), 0xFF])
+}
+
+fn blit_destination_pixel(
+    blit: &crate::bus::FrameBlitRecord,
+    sequence: usize,
+    address: u32,
+    resources: &[crate::uaelib::DebugResource],
+    planes: usize,
+    frame_width: usize,
+    frame_height: usize,
+) -> Option<(usize, usize, usize)> {
+    let (pixel, bitmap_width, bitmap_height) =
+        crate::blitviz::destination_word_pixel(address, resources).unwrap_or_else(|| {
+            let words = usize::try_from(blit.width_words).unwrap_or(1).max(1);
+            let transfer_rows = usize::try_from(blit.height).unwrap_or(1).max(1);
+            let transfer_row = sequence / words;
+            let transfer_col = sequence % words;
+            let row = if blit.descending {
+                transfer_rows - 1 - transfer_row.min(transfer_rows - 1)
+            } else {
+                transfer_row
+            } / planes.max(1);
+            let col = if blit.descending {
+                words - 1 - transfer_col
+            } else {
+                transfer_col
+            } * 16;
+            (
+                crate::blitviz::DestinationPixel { x: col, y: row },
+                words * 16,
+                usize::try_from(blit.height)
+                    .unwrap_or(1)
+                    .div_ceil(planes.max(1)),
+            )
+        });
+    project_destination_pixel(
+        pixel,
+        bitmap_width,
+        bitmap_height,
+        frame_width,
+        frame_height,
+    )
+}
+
+fn project_destination_pixel(
+    pixel: crate::blitviz::DestinationPixel,
+    bitmap_width: usize,
+    bitmap_height: usize,
+    frame_width: usize,
+    frame_height: usize,
+) -> Option<(usize, usize, usize)> {
+    let x_scale = if bitmap_width.saturating_mul(2) <= frame_width {
+        2
+    } else {
+        1
+    };
+    let scaled_width = bitmap_width.saturating_mul(x_scale);
+    let x0 = frame_width.saturating_sub(scaled_width) / 2;
+    let y0 = frame_height.saturating_sub(bitmap_height) / 2;
+    let x = x0.saturating_add(pixel.x.saturating_mul(x_scale));
+    let y = y0.saturating_add(pixel.y);
+    (x < frame_width && y < frame_height).then_some((x, y, x_scale))
+}
+
+fn increment_overdraw_word(overdraw: &mut [u16], width: usize, x: usize, y: usize, x_scale: usize) {
+    let stop = (x + 16 * x_scale).min(width);
+    for cell in &mut overdraw[y * width + x..y * width + stop] {
+        *cell = cell.saturating_add(1);
+    }
+}
+
+fn record_writes_chip_memory(record: &crate::bus::BusSlotRecord) -> bool {
+    if record.flags & 1 == 0 {
+        return false;
+    }
+    match record.kind {
+        crate::bus::BUS_RECORD_CPU => record.reg == 0x1000,
+        crate::bus::BUS_RECORD_BLITTER => record.subtype & 0x0F == 3,
+        crate::bus::BUS_RECORD_DISK => true,
+        _ => false,
+    }
+}
+
+fn paint_blit_overlays(
+    emu: &Emulator,
+    fb: &mut [u32],
+    width: usize,
+    height: usize,
+    overlays: &[CaptureOverlay],
+) {
+    let Some(trace) = emu.bus().frame_bus_trace() else {
+        return;
+    };
+    let resources = emu.uaelib_resources();
+    let mut overdraw = vec![0u16; width * height];
+    for (index, blit) in trace.blits.iter().enumerate() {
+        let (planes, _) =
+            crate::blitviz::plane_count_for_blit(blit, resources, emu.bus().frame_render_base());
+        let mut bounds: Option<(usize, usize, usize, usize)> = None;
+        for (sequence, &address) in blit.channel_addrs[3].iter().enumerate() {
+            let Some((x, y, x_scale)) =
+                blit_destination_pixel(blit, sequence, address, resources, planes, width, height)
+            else {
+                continue;
+            };
+            let stop = (x + 16 * x_scale).min(width);
+            bounds = Some(match bounds {
+                None => (x, y, stop, y + 1),
+                Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(stop), y1.max(y + 1)),
+            });
+        }
+        if overlays.contains(&CaptureOverlay::Blits) {
+            if let Some((x0, y0, x1, y1)) = bounds {
+                let colour =
+                    source_colour(crate::video::bitplane::PIXEL_SOURCE_SPRITE0 + (index % 8) as u8);
+                for x in x0..x1 {
+                    fb[y0 * width + x] = colour;
+                    fb[(y1 - 1) * width + x] = colour;
+                }
+                for y in y0..y1 {
+                    fb[y * width + x0] = colour;
+                    fb[y * width + x1 - 1] = colour;
+                }
+            }
+        }
+    }
+    if overlays.contains(&CaptureOverlay::Overdraw) {
+        // Phase 2's full write records are the authoritative overdraw
+        // source: this includes CPU and every DMA writer, not just blitter D.
+        // Without registered bitmap geometry, retain the useful geometric
+        // blit fallback used by a cheap (owner-only) analyzer trace.
+        let mut mapped_write = false;
+        if let Some(records) = trace.records() {
+            for record in records
+                .iter()
+                .filter(|record| record_writes_chip_memory(record))
+            {
+                let bytes = usize::from(record.size).max(2);
+                for offset in (0..bytes).step_by(2) {
+                    let address = record.addr.saturating_add(offset as u32);
+                    let Some((pixel, bitmap_width, bitmap_height)) =
+                        crate::blitviz::destination_word_pixel(address, resources)
+                    else {
+                        continue;
+                    };
+                    let Some((x, y, x_scale)) = project_destination_pixel(
+                        pixel,
+                        bitmap_width,
+                        bitmap_height,
+                        width,
+                        height,
+                    ) else {
+                        continue;
+                    };
+                    increment_overdraw_word(&mut overdraw, width, x, y, x_scale);
+                    mapped_write = true;
+                }
+            }
+        }
+        if !mapped_write {
+            for blit in &trace.blits {
+                let (planes, _) = crate::blitviz::plane_count_for_blit(
+                    blit,
+                    resources,
+                    emu.bus().frame_render_base(),
+                );
+                for (sequence, &address) in blit.channel_addrs[3].iter().enumerate() {
+                    if let Some((x, y, x_scale)) = blit_destination_pixel(
+                        blit, sequence, address, resources, planes, width, height,
+                    ) {
+                        increment_overdraw_word(&mut overdraw, width, x, y, x_scale);
+                    }
+                }
+            }
+        }
+        for (pixel, count) in fb.iter_mut().zip(overdraw) {
+            if count != 0 {
+                let strength = (48u16 + count.saturating_mul(42)).min(224) as u8;
+                let colour = u32::from_le_bytes([255, 48, 24, 0xFF]);
+                *pixel = overlay_blend(*pixel, colour, strength);
+            }
+        }
+    }
+}
+
 const FNV1A64_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 
 /// FNV-1a over the framebuffer words (little-endian byte order), for
@@ -3217,6 +3635,29 @@ mod tests {
             core("symbols.resolve", json!({"addr": "$F80010"})),
             CoreOp::SymbolsResolve { addr: 0xF80010 }
         );
+    }
+
+    #[test]
+    fn overdraw_accepts_memory_writes_but_not_custom_register_moves() {
+        let mut record = crate::bus::BusSlotRecord {
+            flags: 1,
+            size: 2,
+            ..crate::bus::BusSlotRecord::default()
+        };
+        record.kind = crate::bus::BUS_RECORD_COPPER;
+        record.reg = 0x0180;
+        assert!(!record_writes_chip_memory(&record));
+
+        record.kind = crate::bus::BUS_RECORD_CPU;
+        record.reg = 0x1000;
+        assert!(record_writes_chip_memory(&record));
+
+        record.kind = crate::bus::BUS_RECORD_BLITTER;
+        record.reg = 0x0054;
+        record.subtype = 0x23;
+        assert!(record_writes_chip_memory(&record));
+        record.subtype = 0x20;
+        assert!(!record_writes_chip_memory(&record));
     }
 
     #[test]
@@ -5032,6 +5473,7 @@ mod tests {
                 addr: None,
                 resource: Some("cop".into()),
                 max: 8,
+                trace: false,
             },
         )
         .unwrap();
@@ -5046,10 +5488,107 @@ mod tests {
                 addr: None,
                 resource: Some("nope".into()),
                 max: 8,
+                trace: false,
             },
         )
         .unwrap_err();
         assert_eq!(err.code, proto::NOT_FOUND);
+    }
+
+    #[test]
+    fn blit_render_and_capture_overlays_write_pngs_from_a_full_trace() {
+        let mut emu = test_emulator();
+        emu.bus_mut().set_frame_analyzer_full(true);
+        {
+            let bus = emu.bus_mut();
+            bus.mem.overlay = false;
+            bus.custom_write(0x096, 2, 0x8240); // DMAEN|BLTEN
+            bus.custom_write(0x040, 2, 0x01F0); // D, A truth table
+            bus.custom_write(0x042, 2, 0);
+            bus.custom_write(0x054, 4, 0x0006_0000);
+            bus.custom_write(0x058, 2, 0x0082); // 2 rows x 2 words
+        }
+        emu.step_frame().unwrap();
+        assert!(!emu.bus().frame_bus_trace().unwrap().blits.is_empty());
+        let mut diagnostic_fb = vec![0; crate::video::MAX_CANVAS_PIXELS];
+        let sources =
+            crate::video::bitplane::render_display_diagnostics(emu.bus(), &mut diagnostic_fb);
+        assert_eq!(
+            sources.len(),
+            emu.bus().frame_geometry().visible_lines
+                * crate::video::FB_WIDTH
+                * emu.bus().frame_canvas_scale()
+        );
+
+        let base = std::env::temp_dir().join(format!("copperline-blitviz-{}", std::process::id()));
+        let blit_path = base.with_extension("blit.png");
+        let shot_path = base.with_extension("overlay.png");
+        let mut ctx = SessionCtx::new();
+        let blit = exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::BlitRender {
+                index: 0,
+                channel: crate::blitviz::BlitChannel::Result,
+                path: Some(blit_path.clone()),
+            },
+        )
+        .unwrap();
+        assert_eq!(blit["formula"], "A");
+        assert_eq!(
+            &std::fs::read(&blit_path).unwrap()[..8],
+            b"\x89PNG\r\n\x1a\n"
+        );
+
+        let shot = exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::Screenshot {
+                path: Some(shot_path.clone()),
+                overlays: vec![
+                    CaptureOverlay::Blits,
+                    CaptureOverlay::Overdraw,
+                    CaptureOverlay::Sources,
+                ],
+            },
+        )
+        .unwrap();
+        assert_eq!(shot["overlays"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            &std::fs::read(&shot_path).unwrap()[..8],
+            b"\x89PNG\r\n\x1a\n"
+        );
+        let _ = std::fs::remove_file(blit_path);
+        let _ = std::fs::remove_file(shot_path);
+    }
+
+    #[test]
+    fn copper_list_trace_links_an_instruction_to_its_execution_slot() {
+        let mut emu = test_emulator();
+        emu.bus_mut().set_frame_analyzer_full(true);
+        {
+            let bus = emu.bus_mut();
+            bus.mem.chip_ram[0x100..0x108]
+                .copy_from_slice(&[0x01, 0x80, 0x0F, 0x00, 0xFF, 0xFF, 0xFF, 0xFE]);
+            bus.custom_write(0x096, 2, 0x8280); // DMAEN|COPEN
+            bus.custom_write(0x080, 2, 0);
+            bus.custom_write(0x082, 2, 0x0100);
+            bus.custom_write(0x088, 2, 0);
+            bus.advance_chipset(32);
+        }
+        let value = exec_core(
+            &mut emu,
+            &mut SessionCtx::new(),
+            &CoreOp::CopperList {
+                addr: Some(0x100),
+                resource: None,
+                max: 2,
+                trace: true,
+            },
+        )
+        .unwrap();
+        assert!(value["entries"][0]["trace"]["hpos"].is_u64(), "{value}");
+        assert_eq!(value["entries"][0]["trace"]["frame"], value["trace_frame"]);
     }
 
     #[test]
@@ -5065,12 +5604,41 @@ mod tests {
             CoreOp::CopperList {
                 addr: None,
                 resource: Some("cop".into()),
-                max: 32
+                max: 32,
+                trace: false,
             }
         );
         let err =
             parse_method("copper.list", &json!({"addr": 100, "resource": "cop"})).unwrap_err();
         assert_eq!(err.code, proto::INVALID_PARAMS);
+        assert_eq!(
+            core("blit.render", json!({"index": 2, "channel": "result"})),
+            CoreOp::BlitRender {
+                index: 2,
+                channel: crate::blitviz::BlitChannel::Result,
+                path: None,
+            }
+        );
+        assert_eq!(
+            core("copper.list", json!({"trace": true})),
+            CoreOp::CopperList {
+                addr: None,
+                resource: None,
+                max: 32,
+                trace: true,
+            }
+        );
+        assert!(parse_method("blit.render", &json!({"index": 0, "channel": "X"})).is_err());
+        assert_eq!(
+            core(
+                "capture.screenshot",
+                json!({"overlays": ["sources", "overdraw", "sources"]})
+            ),
+            CoreOp::Screenshot {
+                path: None,
+                overlays: vec![CaptureOverlay::Sources, CaptureOverlay::Overdraw],
+            }
+        );
     }
 
     #[test]

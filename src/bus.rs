@@ -9,7 +9,7 @@ use crate::chipset::agnus::{
     Agnus, AgnusRevision, AgnusTick, VideoStandard, BEAMCON0_DUAL, BEAMCON0_HARDDIS,
     COLORCLOCKS_PER_LINE, NTSC_LINES, NTSC_LONG_COLORCLOCKS_PER_LINE, PAL_LINES,
 };
-use crate::chipset::blitter::Blitter;
+use crate::chipset::blitter::{BlitBusAccess, Blitter};
 use crate::chipset::cia::{
     reg_from_addr, Cia, CiaSideEffect, Which, REG_DDRA, REG_DDRB, REG_PRA, REG_PRB, REG_TODLO,
 };
@@ -241,11 +241,14 @@ const DMACON_SPREN: u16 = 1 << 5;
 const DMACON_BLTEN: u16 = 1 << 6;
 const DMACON_BPLEN: u16 = 1 << 8;
 const DMACON_BLTPRI: u16 = 1 << 10;
-#[cfg(test)]
 const BLTCON0_USE_A: u16 = 1 << 11;
+const BLTCON0_USE_B: u16 = 1 << 10;
 const BLTCON0_USE_C: u16 = 1 << 9;
 const BLTCON0_USE_D: u16 = 1 << 8;
 const BLTCON1_LINE: u16 = 1 << 0;
+const BLTCON1_DESC: u16 = 1 << 1;
+const BLTCON1_IFE: u16 = 1 << 3;
+const BLTCON1_EFE: u16 = 1 << 4;
 const BLTCON1_DOFF: u16 = 1 << 7;
 // The Copper cannot take (or hold) a bus slot on the last-but-two color
 // clock of the line: $E0 on short lines, $E1 on NTSC long lines (vAmiga
@@ -1133,6 +1136,12 @@ pub struct Bus {
     current_frame_bus_trace: FrameBusTrace,
     #[serde(skip)]
     last_frame_bus_trace: Option<FrameBusTrace>,
+    /// Identity of the blit currently represented in the analyzer traces.
+    /// Host-only diagnostic state: the real pending blit lives in `blitter`.
+    #[serde(skip)]
+    active_frame_blit: Option<u64>,
+    #[serde(skip)]
+    next_frame_blit_id: u64,
     #[serde(skip)]
     bus_event_observers: u32,
     #[serde(skip)]
@@ -2073,21 +2082,49 @@ pub struct FrameRegisterSnapshot {
     pub chipset_flags: u32,
 }
 
-/// One blit started during the traced frame (Frame Analyzer / console
-/// BLITS). `end` stays None while the blit is still running (or when it
-/// finishes in a later frame).
+/// One blit referenced by the traced frame (Frame Analyzer / console BLITS).
+/// `end` stays None while the blit is still running; an in-flight record is
+/// carried across a frame boundary under the same stable id.
 #[derive(Clone, Debug)]
 pub struct FrameBlitRecord {
+    /// Stable across frame boundaries, so a blit present in two frame
+    /// records can be joined without guessing from its pointers.
+    pub id: u64,
     pub bltcon0: u16,
     pub bltcon1: u16,
     pub width_words: u32,
     pub height: u32,
+    pub descending: bool,
+    pub line_mode: bool,
+    pub fill_mode: bool,
+    pub channels: [bool; 4],
     pub apt: u32,
     pub bpt: u32,
     pub cpt: u32,
     pub dpt: u32,
+    pub modulos: [i16; 4],
+    /// A and B shifts, in bits.
+    pub shifts: [u8; 2],
+    /// First/last A word masks.
+    pub masks: [u16; 2],
+    pub minterm: u8,
+    /// BLTADAT, BLTBDAT and BLTCDAT as latched at the start. Disabled DMA
+    /// channels use these constant inputs.
+    pub data: [u16; 3],
+    pub start_frame: u64,
+    pub end_frame: Option<u64>,
     pub start: (u16, u16),
     pub end: Option<(u16, u16)>,
+    /// Colour clocks on which the blitter pipeline advanced, and clocks on
+    /// which a requested pipeline cycle was held by contention/DMA disable.
+    pub cycles_used: u64,
+    pub cycles_stalled: u64,
+    /// Exact DMA transfer stream per channel, retained only while the frame
+    /// analyzer is armed. It drives `blit.render` and remains bounded by the
+    /// number of colour clocks captured in the frame.
+    pub(crate) channel_words: [Vec<u16>; 4],
+    pub(crate) channel_addrs: [Vec<u32>; 4],
+    pub render_truncated: bool,
 }
 
 /// Per-frame chip-bus ownership trace for the interactive frame analyzer.
@@ -2110,7 +2147,8 @@ pub struct FrameBusTrace {
     pub blitter_busy_cck: u64,
     pub blitter_starve_cck: [u64; 9],
     pub partial: bool,
-    /// Blits started this frame (capped; see FRAME_BLIT_RECORD_CAP).
+    /// Blits referenced by this frame (capped; see FRAME_BLIT_RECORD_CAP).
+    /// An in-flight cross-frame record appears in both adjacent traces.
     pub blits: Vec<FrameBlitRecord>,
     owners: Vec<u8>,
     /// Full Bartman-style records. Absent at the cheap owner-only level.
@@ -2135,6 +2173,9 @@ pub struct FrameBusTrace {
 
 /// Blit records kept per traced frame.
 pub const FRAME_BLIT_RECORD_CAP: usize = 64;
+/// A malformed maximum-size ECS blit must not turn the diagnostic record
+/// into an unbounded allocation. A normal PAL frame cannot reach this cap.
+pub const FRAME_BLIT_RENDER_WORD_CAP: usize = 262_144;
 
 impl Default for FrameBusTrace {
     fn default() -> Self {
@@ -3444,6 +3485,8 @@ impl Bus {
             trace_intreq: 0,
             current_frame_bus_trace: FrameBusTrace::default(),
             last_frame_bus_trace: None,
+            active_frame_blit: None,
+            next_frame_blit_id: 0,
             bus_event_observers: 0,
             bus_events: std::collections::VecDeque::new(),
             bus_event_next_sequence: 0,
@@ -4570,6 +4613,8 @@ impl Bus {
         self.last_frame_sprite_dma_observed = false;
         self.current_frame_bus_trace.clear();
         self.last_frame_bus_trace = None;
+        self.active_frame_blit = None;
+        self.next_frame_blit_id = 0;
     }
 
     pub fn reset_for_keyboard_reset(&mut self) {
@@ -6498,19 +6543,38 @@ impl Bus {
     fn latch_blitter_completion(&mut self, source: &'static str) {
         self.note_bus_event_named(BUS_EVENT_BLIT_START_FINISH, Some("blitter_finish"));
         if self.frame_analyzer_enabled {
-            if let Some(record) = self
+            let end = (
+                self.agnus.vpos.min(u32::from(u16::MAX)) as u16,
+                self.agnus.hpos.min(u32::from(u16::MAX)) as u16,
+            );
+            let completed = self
                 .current_frame_bus_trace
                 .blits
                 .iter_mut()
                 .rev()
-                .find(|record| record.end.is_none())
+                .find(|record| Some(record.id) == self.active_frame_blit)
+                .map(|record| {
+                    record.end = Some(end);
+                    record.end_frame = Some(self.emulated_frames);
+                    record.clone()
+                });
+            // A blit crossing a frame boundary is visible from both the
+            // just-finished and current frame. Finalise the older reference
+            // too, with the same totals and transfer stream.
+            if let (Some(last), Some(completed)) =
+                (self.last_frame_bus_trace.as_mut(), completed.as_ref())
             {
-                record.end = Some((
-                    self.agnus.vpos.min(u32::from(u16::MAX)) as u16,
-                    self.agnus.hpos.min(u32::from(u16::MAX)) as u16,
-                ));
+                if let Some(record) = last
+                    .blits
+                    .iter_mut()
+                    .rev()
+                    .find(|record| record.id == completed.id)
+                {
+                    *record = completed.clone();
+                }
             }
         }
+        self.active_frame_blit = None;
         if diag_blt_slots() {
             eprintln!(
                 "BLTP {} {} {} END source={source}",
@@ -7490,6 +7554,7 @@ impl Bus {
         } else {
             self.current_frame_bus_trace.clear();
             self.last_frame_bus_trace = None;
+            self.active_frame_blit = None;
         }
     }
 
@@ -8662,21 +8727,110 @@ impl Bus {
         {
             return;
         }
+        let id = self.next_frame_blit_id;
+        self.next_frame_blit_id = self.next_frame_blit_id.saturating_add(1);
+        self.active_frame_blit = Some(id);
+        let con0 = self.blitter.bltcon0;
+        let con1 = self.blitter.bltcon1;
         self.current_frame_bus_trace.blits.push(FrameBlitRecord {
-            bltcon0: self.blitter.bltcon0,
-            bltcon1: self.blitter.bltcon1,
+            id,
+            bltcon0: con0,
+            bltcon1: con1,
             width_words,
             height,
+            descending: con1 & BLTCON1_DESC != 0,
+            line_mode: con1 & BLTCON1_LINE != 0,
+            fill_mode: con1 & (BLTCON1_IFE | BLTCON1_EFE) != 0,
+            channels: [
+                con0 & BLTCON0_USE_A != 0,
+                con0 & BLTCON0_USE_B != 0,
+                con0 & BLTCON0_USE_C != 0,
+                con0 & BLTCON0_USE_D != 0 && con1 & BLTCON1_DOFF == 0,
+            ],
             apt: self.blitter.bltapt,
             bpt: self.blitter.bltbpt,
             cpt: self.blitter.bltcpt,
             dpt: self.blitter.bltdpt,
+            modulos: [
+                self.blitter.bltamod,
+                self.blitter.bltbmod,
+                self.blitter.bltcmod,
+                self.blitter.bltdmod,
+            ],
+            shifts: [(con0 >> 12) as u8, (con1 >> 12) as u8],
+            masks: [self.blitter.bltafwm, self.blitter.bltalwm],
+            minterm: con0 as u8,
+            data: [
+                self.blitter.bltadat,
+                self.blitter.bltbdat,
+                self.blitter.bltcdat,
+            ],
+            start_frame: self.emulated_frames,
+            end_frame: None,
             start: (
                 self.agnus.vpos.min(u32::from(u16::MAX)) as u16,
                 self.agnus.hpos.min(u32::from(u16::MAX)) as u16,
             ),
             end: None,
+            cycles_used: 0,
+            cycles_stalled: 0,
+            channel_words: std::array::from_fn(|_| Vec::new()),
+            channel_addrs: std::array::from_fn(|_| Vec::new()),
+            render_truncated: false,
         });
+    }
+
+    /// Account one elapsed colour clock to the active blit. `advanced`
+    /// means the sequencer processed its pending bus/internal micro-cycle;
+    /// otherwise the clock extended the blit through contention or disabled
+    /// DMA. Called from the same arbitration decision that ticks the blitter.
+    pub(super) fn record_frame_blit_quantum(&mut self, cck: u32, advanced: bool) {
+        let Some(id) = self.active_frame_blit else {
+            return;
+        };
+        let Some(record) = self
+            .current_frame_bus_trace
+            .blits
+            .iter_mut()
+            .rev()
+            .find(|record| record.id == id)
+        else {
+            return;
+        };
+        let counter = if advanced {
+            &mut record.cycles_used
+        } else {
+            &mut record.cycles_stalled
+        };
+        *counter = counter.saturating_add(u64::from(cck));
+    }
+
+    /// Retain the exact word/address transferred by a blitter DMA slot for
+    /// the channel visualisers. Disabled channels need no entries: their
+    /// BLTxDAT constants are already in the record.
+    pub(super) fn record_frame_blit_access(&mut self, access: BlitBusAccess) {
+        let Some(id) = self.active_frame_blit else {
+            return;
+        };
+        let Some(record) = self
+            .current_frame_bus_trace
+            .blits
+            .iter_mut()
+            .rev()
+            .find(|record| record.id == id)
+        else {
+            return;
+        };
+        let channel = usize::from(access.channel);
+        if channel >= 4 {
+            return;
+        }
+        if record.channel_words[channel].len() >= FRAME_BLIT_RENDER_WORD_CAP {
+            record.render_truncated = true;
+            return;
+        }
+        record.channel_words[channel].push(access.data);
+        record.channel_addrs[channel].push(access.addr);
     }
 
     fn record_blit_accounting(&mut self) {
@@ -8966,6 +9120,17 @@ impl Bus {
         if !self.frame_analyzer_enabled {
             return;
         }
+        // Carry an in-flight blit into the next trace before reset. It keeps
+        // the same id/start position and accumulated transfers so the two
+        // frame records join losslessly.
+        let carried_blit = self.active_frame_blit.and_then(|id| {
+            self.current_frame_bus_trace
+                .blits
+                .iter()
+                .rev()
+                .find(|record| record.id == id)
+                .cloned()
+        });
         let registers = self.frame_register_snapshot();
         self.current_frame_bus_trace.reset_for_frame_with_level(
             self.emulated_frames,
@@ -8978,6 +9143,9 @@ impl Bus {
             self.frame_analyzer_full,
             registers,
         );
+        if let Some(blit) = carried_blit {
+            self.current_frame_bus_trace.blits.push(blit);
+        }
     }
 
     fn frame_register_snapshot(&self) -> FrameRegisterSnapshot {

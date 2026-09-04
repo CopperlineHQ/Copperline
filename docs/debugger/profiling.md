@@ -125,6 +125,15 @@ The same fields are available live from `frame.slots {"row": V}` and in the
 Frame Analyzer's selected/hovered-slot readout. On that JSON surface, `data`
 is a fixed-width hexadecimal string so all 64 bits remain exact.
 
+Each frame's `blits` array also carries a stable blit ID, start/end frame and
+beam positions, direction, fill/line mode, enabled channels, all four
+pointers/modulos, A/B shifts, A masks, minterm and formula, latched A/B/C data,
+captured-word counts, and clocks used versus stalled. An in-flight blit is
+referenced from both adjacent frame records and finalised in both when it
+ends. The full DMA words remain in the live trace for `blit.render`; the
+profile keeps their bounded counts while the slot sidecar is the lossless
+offline transfer stream.
+
 Floppy turbo DMA deliberately consumes no emulated time, so several transfers
 can occur at one beam position and cannot occupy the single raster record for
 that colour clock. Those transfers remain zero-time while tracing and are

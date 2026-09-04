@@ -648,9 +648,11 @@ fn screenshot(session: &mut Session, args: &Value, seq: u64) -> ToolResult {
         }
         Some(other) => (other.clone(), None),
     };
+    let mut params = args.as_object().cloned().unwrap_or_default();
+    params.insert("path".to_string(), param);
     let reply = session
         .bridge
-        .call("capture.screenshot", json!({"path": param}));
+        .call("capture.screenshot", Value::Object(params));
     let mut result = match reply {
         Ok(Reply::Ok(result)) => result,
         Ok(Reply::Err { code, message }) => return ToolResult::ccp_error(code, message),

@@ -4322,7 +4322,19 @@ pub struct RenderResult {
     /// Playfield content envelope of this field, or `None` for a
     /// border-only frame (see [`ContentRect`]).
     pub content_rect: Option<ContentRect>,
+    /// Final output-stage provenance at the presented pixel pitch. Present
+    /// only for [`render_display_diagnostics`], so ordinary rendering pays
+    /// neither the allocation nor the per-pixel bookkeeping cost.
+    pub pixel_sources: Option<Vec<u8>>,
 }
+
+/// Values in [`RenderResult::pixel_sources`]. Sprite sources are the base
+/// plus the hardware sprite number (0..7).
+pub const PIXEL_SOURCE_OUTSIDE_DIW: u8 = 0;
+pub const PIXEL_SOURCE_BACKGROUND: u8 = 1;
+pub const PIXEL_SOURCE_PLAYFIELD1: u8 = 2;
+pub const PIXEL_SOURCE_PLAYFIELD2: u8 = 3;
+pub const PIXEL_SOURCE_SPRITE0: u8 = 4;
 
 /// Large renderer work buffers retained per host thread. The browser calls
 /// the synchronous renderer on every presented frame; rebuilding the
@@ -4361,6 +4373,7 @@ struct RenderScratch {
 struct SpriteSubpixelState {
     playfield_masks: Vec<[u8; 2]>,
     pixels: Vec<[u32; 2]>,
+    sources: Vec<[u8; 2]>,
 }
 
 impl SpriteSubpixelState {
@@ -4375,6 +4388,13 @@ impl SpriteSubpixelState {
             } else {
                 [fb[out]; 2]
             };
+        }
+        if render_diagnostics_active() {
+            self.sources
+                .resize(logical_len, [PIXEL_SOURCE_OUTSIDE_DIW; 2]);
+            self.sources.fill([PIXEL_SOURCE_OUTSIDE_DIW; 2]);
+        } else {
+            self.sources.clear();
         }
     }
 
@@ -4392,6 +4412,14 @@ impl SpriteSubpixelState {
                     }
                 })
                 .collect(),
+            sources: Vec::new(),
+        }
+    }
+
+    #[inline]
+    fn set_source(&mut self, index: usize, pair: [u8; 2]) {
+        if let Some(source) = self.sources.get_mut(index) {
+            *source = pair;
         }
     }
 }
@@ -4512,6 +4540,24 @@ pub fn render_display_only(bus: &Bus, fb: &mut [u32]) {
     });
 }
 
+/// Side-effect-free display render with final Denise/Lisa output provenance.
+/// The normal render path remains unchanged; this diagnostic switch is
+/// thread-local and is consumed by the same painter used for screenshots.
+pub fn render_display_diagnostics(bus: &Bus, fb: &mut [u32]) -> Vec<u8> {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            ACTIVE_RENDER_DIAGNOSTICS.with(|active| active.set(false));
+        }
+    }
+    ACTIVE_RENDER_DIAGNOSTICS.with(|active| active.set(true));
+    let _reset = Reset;
+    let input = RenderInput::from_bus(bus);
+    render_from_input(&input, fb)
+        .pixel_sources
+        .unwrap_or_default()
+}
+
 thread_local! {
     /// The running render's debug layer masks (plane, sprite), captured
     /// from the [`RenderInput`] at [`render_from_input`]'s entry so the
@@ -4519,6 +4565,24 @@ thread_local! {
     /// another thread (the worker, a parallel test) sees only its own.
     static ACTIVE_DEBUG_MASKS: std::cell::Cell<(u8, u8)> =
         const { std::cell::Cell::new((0xFF, 0xFF)) };
+}
+
+thread_local! {
+    static ACTIVE_RENDER_DIAGNOSTICS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[inline]
+fn render_diagnostics_active() -> bool {
+    ACTIVE_RENDER_DIAGNOSTICS.with(std::cell::Cell::get)
+}
+
+#[inline]
+fn pixel_source_for_playfield(mask: u8) -> u8 {
+    match mask {
+        1 => PIXEL_SOURCE_PLAYFIELD1,
+        2 => PIXEL_SOURCE_PLAYFIELD2,
+        _ => PIXEL_SOURCE_BACKGROUND,
+    }
 }
 
 thread_local! {
@@ -5610,6 +5674,17 @@ fn render_from_input_with_scratch(
     );
     render_timing.total_nanos = render_timing_elapsed(render_started);
     let chip_ram_reads = ram.into_read_dependencies();
+    let pixel_sources = (!sprite_subpixels.sources.is_empty()).then(|| {
+        let mut sources = Vec::with_capacity(rows * out_w);
+        for pair in sprite_subpixels.sources.iter().take(rows * FB_WIDTH) {
+            if canvas_scale == 2 {
+                sources.extend_from_slice(pair);
+            } else {
+                sources.push(pair[0]);
+            }
+        }
+        sources
+    });
     scratch.base_palettes = base_palettes;
     scratch.palette_segments = palette_segments;
     scratch.base_controls = base_controls;
@@ -5646,6 +5721,7 @@ fn render_from_input_with_scratch(
         clxdat,
         chip_ram_reads,
         content_rect,
+        pixel_sources,
     }
 }
 
@@ -5985,6 +6061,7 @@ fn render_fast_playfield_run(
             fb[out_base + dx] = pixel;
             sprite_subpixels.playfield_masks[fb_idx + dx] = [pf; 2];
             sprite_subpixels.pixels[fb_idx + dx] = [pixel; 2];
+            sprite_subpixels.set_source(fb_idx + dx, [pixel_source_for_playfield(pf); 2]);
         }
     }
     *clxdat = clx;
@@ -6549,6 +6626,13 @@ fn render_planned_playfield_line_impl(
                         rgb24_to_rgba8_alpha(right_out.color, !right_transparent),
                     ];
                     sprite_subpixels.pixels[fb_idx] = pair;
+                    sprite_subpixels.set_source(
+                        fb_idx,
+                        [
+                            pixel_source_for_playfield(left_collision.playfield_mask()),
+                            pixel_source_for_playfield(right_collision.playfield_mask()),
+                        ],
+                    );
                     if canvas_scale == 2 {
                         // 35 ns canvas: each half of the SHRES pair is its
                         // own output pixel.
@@ -6563,6 +6647,7 @@ fn render_planned_playfield_line_impl(
                 let pixel = rgb24_to_rgba8_alpha(output.color, !transparent);
                 sprite_subpixels.playfield_masks[fb_idx] = [pf_mask; 2];
                 sprite_subpixels.pixels[fb_idx] = [pixel; 2];
+                sprite_subpixels.set_source(fb_idx, [pixel_source_for_playfield(pf_mask); 2]);
                 if canvas_scale == 1 {
                     fb[out_base] = pixel;
                 } else {
@@ -7148,6 +7233,13 @@ fn draw_manual_bpl_word(
                     rgb24_to_rgba8_alpha(right_out.color, !right_transparent),
                 ];
                 sprite_subpixels.pixels[fb_idx] = pair;
+                sprite_subpixels.set_source(
+                    fb_idx,
+                    [
+                        pixel_source_for_playfield(left_out.pf_mask),
+                        pixel_source_for_playfield(right_out.pf_mask),
+                    ],
+                );
                 if canvas_scale == 2 {
                     fb[out_base..out_base + 2].copy_from_slice(&pair);
                 } else {
@@ -7159,6 +7251,10 @@ fn draw_manual_bpl_word(
                 pixel_control.genlock_transparent(pixel_color_latch, Some(sample), false);
             let pixel = rgb24_to_rgba8_alpha(pixel_color, !transparent);
             sprite_subpixels.pixels[fb_idx] = [pixel; 2];
+            sprite_subpixels.set_source(
+                fb_idx,
+                [pixel_source_for_playfield(source_output.pf_mask); 2],
+            );
             fb[out_base..out_base + canvas_scale].fill(pixel);
         }
         x_cursor += pixel_repeat as i32;

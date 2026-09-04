@@ -850,7 +850,7 @@ impl App {
                 };
                 if trace.blits.is_empty() {
                     return ConsoleOutcome::one(format!(
-                        "no blits started in frame {}",
+                        "no blits referenced by frame {}",
                         trace.frame
                     ));
                 }
@@ -866,7 +866,9 @@ impl App {
                     };
                     let c1 = blit.bltcon1;
                     lines.push(format!(
-                        "#{i:<2} v{} h{} -> {end}  con0 {:04X} con1 {:04X}  {}x{}{}{}{}",
+                        "#{i:<2} id={} f{} v{} h{} -> {end}  con0 {:04X} con1 {:04X}  {}x{}{}{}{}  used/stall={}/{}",
+                        blit.id,
+                        blit.start_frame,
                         blit.start.0,
                         blit.start.1,
                         blit.bltcon0,
@@ -876,13 +878,24 @@ impl App {
                         if c1 & 0x0001 != 0 { "  LINE" } else { "" },
                         if c1 & 0x0008 != 0 { "  FILL" } else { "" },
                         if c1 & 0x0002 != 0 { "  DESC" } else { "" },
+                        blit.cycles_used,
+                        blit.cycles_stalled,
                     ));
                     lines.push(format!(
-                        "     A ${:06X}  B ${:06X}  C ${:06X}  D ${:06X}",
+                        "     A ${:06X}/{:+} B ${:06X}/{:+} C ${:06X}/{:+} D ${:06X}/{:+} shifts={:?} masks={:04X}/{:04X} minterm={:02X} ({})",
                         blit.apt & 0x00FF_FFFF,
+                        blit.modulos[0],
                         blit.bpt & 0x00FF_FFFF,
+                        blit.modulos[1],
                         blit.cpt & 0x00FF_FFFF,
+                        blit.modulos[2],
                         blit.dpt & 0x00FF_FFFF,
+                        blit.modulos[3],
+                        blit.shifts,
+                        blit.masks[0],
+                        blit.masks[1],
+                        blit.minterm,
+                        crate::blitviz::minterm_formula(blit.minterm),
                     ));
                 }
                 ConsoleOutcome::lines(lines)

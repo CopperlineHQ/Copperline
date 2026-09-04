@@ -61,6 +61,7 @@ fn repeated_frame_test_result(chip_ram_reads: Option<Vec<ChipRamReadDependency>>
         clxdat: 0x1234,
         chip_ram_reads,
         content_rect: None,
+        pixel_sources: None,
     }
 }
 

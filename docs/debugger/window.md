@@ -143,6 +143,11 @@ that colour clock cycle (CPU, Copper, Blitter, Bitplane, Sprite, Audio, Disk, Re
 Pointing at a cell shows its full slot record below the raster; clicking pins
 the same readout. It includes the custom register, address, transfer data and
 width, owner subtype, CPU-visible IPL, and decoded hardware events.
+Copper MOVE execution slots are cross-shaped markers coloured by destination
+register class (blitter, audio, display/bitplane, sprite, palette, or control).
+Their readout includes the Copper instruction address; the reciprocal
+`copper.list {"trace": true}` entry links that instruction back to this beam
+slot.
 
 - **Picture underlay (`U`):** Overlays the rendered video frame beneath the bus heatmap.
 - **Beam scrub (`B`):** Progressively displays the frame up to the selected raster position.
@@ -184,6 +189,21 @@ and a [profile capture](profiling) exports it per frame.
 Profile captures over the control protocol ([](profiling)) share bus tracing
 with the Frame Analyzer: closing the pane does not interrupt an active capture,
 and stopping a capture keeps an open pane recording.
+
+### Blits tab
+
+The Blits tab lists every recorded blit with its start/end frame and beam
+position, ascending/descending, fill or line mode, enabled channels, transfer
+geometry, BLTDPT, and colour clocks used versus stalled. A blit that crosses a
+frame boundary retains one stable identity and is finalised in both frame
+records.
+
+Selecting a row shows the first active source channel and the computed
+result/D channel side by side. These previews use the exact captured DMA words,
+including shifts, first/last-word masks, modulos, and latched BLTxDAT inputs;
+the detail line shows the simplified minterm expression and whether plane
+count came from the registered destination bitmap or BPLCON0. Cursor Up/Down
+changes the selected blit. The same renderer is available as `blit.render`.
 
 (frame-analyzer-memory-tab)=
 ### Memory heatmap tab
