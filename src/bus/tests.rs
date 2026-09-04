@@ -20,11 +20,11 @@ use super::{
     BPLCON3_SPRES_HIRES, BPLCON3_SPRES_SHRES, BUS_EVENT_BLIT_FINAL_D, BUS_EVENT_CIAA_IRQ,
     BUS_EVENT_COPPER_WAKE, BUS_EVENT_DDFSTRT, BUS_EVENT_INTREQ, BUS_EVENT_LOF, BUS_EVENT_LOL,
     BUS_EVENT_SPECIAL, BUS_EVENT_VB, BUS_EVENT_VDIW, BUS_EVENT_VS, BUS_RECORD_BLITTER,
-    BUS_RECORD_CPU, BUS_RECORD_DISK, BUS_RECORD_SPRITE, CPU_WAIT_PC_CAP, DENISE_HPOS_LAG_CCK,
-    DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN, PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS,
-    RENDER_COPPER_WAIT_HPOS_FB0, RENDER_DIW_HSTART_FB0, RENDER_MIN_OVERSCAN_START_VPOS,
-    RENDER_VISIBLE_LINES, RENDER_VISIBLE_START_VPOS, SPRITE_DMA_SLOT1_HPOS,
-    SPRITE_OUTPUT_DELAY_LORES,
+    BUS_RECORD_COPPER, BUS_RECORD_CPU, BUS_RECORD_DISK, BUS_RECORD_SPRITE, CPU_WAIT_PC_CAP,
+    DENISE_HPOS_LAG_CCK, DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN,
+    PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS, RENDER_COPPER_WAIT_HPOS_FB0, RENDER_DIW_HSTART_FB0,
+    RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_LINES, RENDER_VISIBLE_START_VPOS,
+    SPRITE_DMA_SLOT1_HPOS, SPRITE_OUTPUT_DELAY_LORES,
 };
 use crate::audio::AudioSink;
 use crate::chipset::agnus::{
@@ -254,6 +254,60 @@ fn full_bus_records_intreq_edges_before_interrupt_enable() {
         .unwrap();
     assert_ne!(record.events & BUS_EVENT_INTREQ, 0);
     assert_eq!(record.ipl, 0, "disabled source does not yet raise CPU IPL");
+}
+
+#[test]
+fn copper_trace_carries_wait_subtype_and_fetched_word() {
+    let mut bus = empty_bus();
+    let list = 0x0100usize;
+    write_chip_word(&mut bus, list, 0x5021);
+    write_chip_word(&mut bus, list + 2, 0xFFFE);
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_COPEN;
+    bus.agnus.hpos = 0x20;
+    bus.copper.jump(list as u32);
+    bus.set_frame_analyzer_full(true);
+
+    bus.advance_chipset(3);
+
+    let trace = bus.frame_bus_trace().unwrap();
+    let first = trace.record_at(0, 0x20).unwrap();
+    assert_eq!(first.kind, BUS_RECORD_COPPER);
+    assert_eq!(first.subtype, 0);
+    assert_eq!(first.data, 0x5021);
+    let second = trace.record_at(0, 0x22).unwrap();
+    assert_eq!(second.kind, BUS_RECORD_COPPER);
+    assert_eq!(second.subtype, 1);
+    assert_eq!(second.data, 0xFFFE);
+}
+
+#[test]
+fn copper_trace_carries_skip_and_skipped_move_fetch_data() {
+    let mut bus = empty_bus();
+    let list = 0x0100usize;
+    write_chip_word(&mut bus, list, 0x0001);
+    write_chip_word(&mut bus, list + 2, 0xFFFF);
+    write_chip_word(&mut bus, list + 4, 0x0180);
+    write_chip_word(&mut bus, list + 6, 0xABCD);
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_COPEN;
+    bus.agnus.vpos = 0x50;
+    bus.agnus.hpos = 0x20;
+    bus.copper.jump(list as u32);
+    bus.set_frame_analyzer_full(true);
+
+    bus.advance_chipset(11);
+
+    let trace = bus.frame_bus_trace().unwrap();
+    let skip = trace.record_at(0x50, 0x22).unwrap();
+    assert_eq!(skip.kind, BUS_RECORD_COPPER);
+    assert_eq!(skip.subtype, 2);
+    assert_eq!(skip.data, 0xFFFF);
+    let skipped_move = trace.record_at(0x50, 0x2A).unwrap();
+    assert_eq!(skipped_move.kind, BUS_RECORD_COPPER);
+    assert_eq!(skipped_move.subtype, 2);
+    assert_eq!(skipped_move.reg, 0x0180);
+    assert_eq!(skipped_move.data, 0xABCD);
+    assert_eq!(skipped_move.size, 2);
+    assert_eq!(skipped_move.flags & 1, 0);
 }
 
 #[test]

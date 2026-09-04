@@ -10103,6 +10103,10 @@ mod warp_control {
             app.emu.bus().frame_analyzer_enabled(),
             "the capture adopts the arming instead of losing its trace"
         );
+        assert!(
+            !app.emu.bus().frame_analyzer_full(),
+            "an owner-only capture releases the pane's full-record level"
+        );
         let status = app
             .emu
             .profile_stop(serde_json::Value::Null, serde_json::json!([]))

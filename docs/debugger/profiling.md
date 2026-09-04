@@ -88,7 +88,9 @@ classes (`cpu_wait_classes`), `started`/`ended` timeline points,
 `frames_written`, and a snapshot of registered uaelib resources (matching
 `debug.resources`) for address labeling. It also records `systemStackLower`,
 `systemStackUpper`, `stackLower`, and `stackUpper`, read from ExecBase and
-ThisTask when a valid AmigaOS task is running (otherwise null).
+ThisTask when a valid AmigaOS task is running. An unreadable ExecBase makes
+all four fields null; an unavailable or implausible ThisTask leaves the two
+system fields intact and reports zero for the two task fields.
 
 With `"memory": true`, `chip-ram.bin` and `slow-ram.bin` are written once,
 at capture start. Together with the per-slot write records these let an offline
@@ -97,16 +99,18 @@ emulator.
 
 ## Full chip-bus slot records
 
-`"slots": true` writes one `slots-NNNNNN.bin` per recorded frame. Records are
-in raster order (`VPOS * line_cck + HPOS`) and use this packed, little-endian
-24-byte layout:
+`"slots": true` writes one `slots-NNNNNN-frame-MMMMMM.bin` per recorded frame,
+where the first number is a monotonic capture sequence and the second is the
+emulated frame. The sequence keeps repeated frames distinct after rewind or
+state loading. Records are in raster order (`VPOS * line_cck + HPOS`) and use
+this packed, little-endian 24-byte layout:
 
 | Offset | Type | Field |
 |---:|---|---|
 | 0 | u16 | `reg`: custom-register offset; bit `0x1000` marks a CPU access (`0x1000` alone is ordinary CPU memory, while `0x1000 | offset` is a CPU custom-register access); `0xffff` when not applicable |
 | 2 | u8 | `kind`: refresh 1, CPU 2, Copper 3, audio 4, blitter 5, bitplane 6, sprite 7, disk 8, conflict 9 |
 | 3 | u8 | `subtype`: CPU code/data; Copper move/wait/skip; audio 0-3; bitplane 1-8; sprite 0-7; blitter A-D plus fill bit `0x10` and line bit `0x20` |
-| 4 | u8 | `size`: transferred bytes (2, 4, or 8; zero when no data transfer is attached) |
+| 4 | u8 | `size`: transferred bytes (1 through 4 for CPU/CIA, 2 for ordinary DMA, 4 or 8 for grouped AGA fetches; zero when no data transfer is attached) |
 | 5 | u8 | `ipl`: CPU-visible interrupt level at this slot |
 | 6 | u16 | `flags`: bit 0 write; bit 1 CIA access valid; bit 2 CIA-B; bits 8-11 CIA register; bits 12-14 E-clock phase |
 | 8 | u32 | `addr`: chip/CPU address |

@@ -174,7 +174,7 @@ impl Bus {
                             [0x0050, 0x004C, 0x0048, 0x0054][usize::from(access.channel)],
                             access.addr,
                             u64::from(access.data),
-                            2,
+                            access.size,
                             u16::from(access.write),
                         );
                         if access.final_d {
@@ -388,7 +388,6 @@ impl Bus {
         let trace_copper_events = trace_full || self.bus_event_observers != 0;
         let fetch_pc = (self.mem_watches_armed() || trace_full).then(|| self.copper.pc());
         let sleeping_before = trace_copper_events && self.copper.sleeping_wait().is_some();
-        let state_before = trace_full.then(|| self.copper.state_label());
         let mut copper = std::mem::take(&mut self.copper);
         let action = copper.step_eligible_slot(
             &self.mem.chip_ram,
@@ -421,13 +420,8 @@ impl Bus {
         }
         match action {
             CopperSlotAction::Idle => false,
-            CopperSlotAction::BusUsed => {
+            CopperSlotAction::BusUsed { subtype, word } => {
                 if let Some(pc) = fetch_pc {
-                    let subtype = match state_before {
-                        Some("wait") => 1,
-                        Some("skip") => 2,
-                        _ => 0,
-                    };
                     self.annotate_bus_slot(
                         vpos,
                         hpos,
@@ -435,7 +429,7 @@ impl Bus {
                         subtype,
                         0x008C,
                         pc,
-                        u64::from(read_chip_word_wrapping(&self.mem.chip_ram, pc)),
+                        u64::from(word),
                         2,
                         0,
                     );
@@ -467,7 +461,7 @@ impl Bus {
                 }
                 true
             }
-            CopperSlotAction::SkippedMove { register } => {
+            CopperSlotAction::SkippedMove { register, value } => {
                 self.annotate_bus_slot(
                     vpos,
                     hpos,
@@ -475,7 +469,7 @@ impl Bus {
                     2,
                     register,
                     fetch_pc.unwrap_or(0),
-                    0,
+                    u64::from(value),
                     2,
                     0,
                 );

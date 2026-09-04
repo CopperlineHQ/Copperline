@@ -543,8 +543,12 @@ impl Emulator {
     /// adopts the arming and disarms it at stop.
     #[cfg(feature = "control")]
     pub fn profile_adopt_frame_analyzer(&mut self) {
-        if let Some(profile) = self.profile.as_mut() {
-            profile.adopt_frame_analyzer();
+        let demote_full = self
+            .profile
+            .as_mut()
+            .is_some_and(crate::profile::ProfileCapture::adopt_frame_analyzer);
+        if demote_full {
+            self.bus_mut().set_frame_analyzer_full(false);
         }
     }
 

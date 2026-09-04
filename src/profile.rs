@@ -130,6 +130,7 @@ pub struct ProfileCapture {
     samples_total: u64,
     irq_cck: u64,
     sample_sequence: u64,
+    slot_sequence: u64,
     cck_per_cpu_cycle: f64,
     stack_bounds: Option<crate::amigaos::StackBounds>,
 }
@@ -163,6 +164,7 @@ impl ProfileCapture {
             samples_total: 0,
             irq_cck: 0,
             sample_sequence: 0,
+            slot_sequence: 0,
             cck_per_cpu_cycle: 1.0 / f64::from(cpu_clocks_per_cck.max(1)),
             stack_bounds: None,
         })
@@ -189,9 +191,11 @@ impl ProfileCapture {
     }
 
     /// The frame analyzer pane closed while this capture runs: its arming
-    /// is adopted, so the capture disarms it at stop.
-    pub fn adopt_frame_analyzer(&mut self) {
+    /// is adopted, so the capture disarms it at stop. Returns whether the
+    /// pane's full trace should be demoted to this capture's owner-only level.
+    pub fn adopt_frame_analyzer(&mut self) -> bool {
         self.armed_analyzer = true;
+        !self.opts.slots
     }
 
     pub fn set_stack_bounds(&mut self, bounds: Option<crate::amigaos::StackBounds>) {
@@ -368,11 +372,13 @@ impl ProfileCapture {
 
     /// Write the full 24-byte little-endian DMA records for one frame.
     pub fn write_slots(
-        &self,
+        &mut self,
         frame: u64,
         records: &[crate::bus::BusSlotRecord],
     ) -> io::Result<String> {
-        let name = format!("slots-{frame:06}.bin");
+        let sequence = self.slot_sequence;
+        self.slot_sequence = self.slot_sequence.saturating_add(1);
+        let name = format!("slots-{sequence:06}-frame-{frame:06}.bin");
         let mut out = BufWriter::new(File::create(self.opts.path.join(&name))?);
         for record in records {
             record.write_to(&mut out)?;
@@ -604,7 +610,7 @@ mod tests {
             code_ranges: Vec::new(),
             trigger: None,
         };
-        let capture = ProfileCapture::create(opts, 0, 0.0, 0, true, true, 2).unwrap();
+        let mut capture = ProfileCapture::create(opts, 0, 0.0, 0, true, true, 2).unwrap();
         let record = crate::bus::BusSlotRecord {
             reg: 0x0100,
             kind: crate::bus::BUS_RECORD_CPU,
@@ -616,9 +622,14 @@ mod tests {
             data: 0x89AB_CDEF,
             events: crate::bus::BUS_EVENT_CPU_IRQ,
         };
-        let name = capture.write_slots(42, &[record]).unwrap();
-        assert_eq!(name, "slots-000042.bin");
-        let bytes = std::fs::read(dir.join(name)).unwrap();
+        let first = capture.write_slots(42, &[record]).unwrap();
+        assert_eq!(first, "slots-000000-frame-000042.bin");
+        capture.note_reposition(41, 0).unwrap();
+        let second = capture.write_slots(42, &[record]).unwrap();
+        assert_eq!(second, "slots-000001-frame-000042.bin");
+        assert!(dir.join(&first).is_file());
+        assert!(dir.join(&second).is_file());
+        let bytes = std::fs::read(dir.join(first)).unwrap();
         assert_eq!(bytes.len(), crate::bus::BusSlotRecord::BYTE_SIZE);
         let mut expected = Vec::new();
         record.write_to(&mut expected).unwrap();
