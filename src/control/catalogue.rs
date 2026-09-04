@@ -591,7 +591,7 @@ fn build() -> Vec<ToolDef> {
         ),
         entry(
             "blit.render",
-            "Render one channel of a recorded Frame Analyzer blit as a PNG from its exact DMA word stream. Returns geometry, the registered-resource or BPLCON0 plane-count source, and a simplified minterm formula.",
+            "Render one channel of a recorded Frame Analyzer blit as a PNG from its exact DMA word stream. Returns geometry, the registered-resource or BPLCON0 plane-count source, safe render plane count, and a simplified minterm formula. Result rendering requires captured D writes.",
             object(
                 vec![
                     ("index", uint("Zero-based index in the last frame's blit list", Some(0), Some((crate::bus::FRAME_BLIT_RECORD_CAP - 1) as u64))),

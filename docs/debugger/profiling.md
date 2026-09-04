@@ -127,7 +127,8 @@ is a fixed-width hexadecimal string so all 64 bits remain exact.
 
 Each frame's `blits` array also carries a stable blit ID, start/end frame and
 beam positions, direction, fill/line mode, enabled channels, all four
-pointers/modulos, A/B shifts, A masks, minterm and formula, latched A/B/C data,
+pointers/modulos, A/B shifts, A masks, minterm and formula, effective A/B/C
+constant inputs (including BLTBDAT's write-time-shifted hold latch),
 captured-word counts, and clocks used versus stalled. An in-flight blit is
 referenced from both adjacent frame records and finalised in both when it
 ends. The full DMA words remain in the live trace for `blit.render`; the

@@ -31,6 +31,7 @@ use crate::chipset::agnus::{
     AgnusRevision, AgnusTick, VideoStandard, BEAMCON0_DUAL, BEAMCON0_HARDDIS, BEAMCON0_PAL,
     BEAMCON0_VARBEAMEN, COLORCLOCKS_PER_LINE, NTSC_LONG_COLORCLOCKS_PER_LINE, PAL_LINES,
 };
+use crate::chipset::blitter::BlitBusAccess;
 use crate::chipset::cia::{
     REG_CRA, REG_CRB, REG_DDRA, REG_DDRB, REG_ICR, REG_PRA, REG_PRB, REG_TAHI, REG_TALO, REG_TBHI,
     REG_TBLO, REG_TODHI, REG_TODLO, REG_TODMID,
@@ -907,6 +908,45 @@ fn frame_analyzer_finalises_a_cross_frame_blit_in_both_traces() {
         .is_some_and(|frame| frame > older.start_frame));
     assert!(older.cycles_used > 0);
     assert!(!older.channel_addrs[3].is_empty());
+}
+
+#[test]
+fn frame_blit_metadata_decodes_modes_constants_and_real_transfers() {
+    let mut bus = empty_bus();
+    bus.set_frame_analyzer_full(true);
+    bus.blitter.bltcon0 = BLTCON0_USE_D | 0x00CC;
+
+    // USEB-off consumes the hold latch shifted when BLTBDAT was written,
+    // even if BSH changes before the blit starts.
+    bus.blitter.write_bltcon1(4 << 12);
+    bus.blitter.write_bltbdat(0x000F);
+    bus.blitter.write_bltbdat(0x0000);
+    bus.blitter.write_bltcon1(0);
+    bus.record_frame_blit_start(1, 1);
+    assert_eq!(bus.current_frame_bus_trace.blits[0].data[1], 0xF000);
+
+    // The same bit positions mean SING/SUL/SUD in line mode, not the area
+    // DESC/fill flags exposed by the analyzer.
+    bus.blitter.write_bltcon1(BLTCON1_LINE | 0x001A);
+    bus.record_frame_blit_start(1, 1);
+    let line = &bus.current_frame_bus_trace.blits[1];
+    assert!(line.line_mode);
+    assert!(!line.descending);
+    assert!(!line.fill_mode);
+
+    // A SING-suppressed D cycle holds the bus but transfers no word.
+    bus.record_frame_blit_access(BlitBusAccess {
+        channel: 3,
+        addr: 0x400,
+        data: 0xFFFF,
+        size: 0,
+        write: false,
+        final_d: false,
+        line: true,
+        fill: false,
+    });
+    assert!(bus.current_frame_bus_trace.blits[1].channel_words[3].is_empty());
+    assert!(bus.current_frame_bus_trace.blits[1].channel_addrs[3].is_empty());
 }
 
 #[test]

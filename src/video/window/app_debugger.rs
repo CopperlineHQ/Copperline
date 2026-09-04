@@ -16,6 +16,33 @@ fn copper_register_colour(offset: u16) -> u32 {
     u32::from_le_bytes([rgb[0], rgb[1], rgb[2], 0xFF])
 }
 
+fn analyzer_blit_selection(
+    panel: &ui::FrameAnalyzerPanel,
+    trace: &crate::bus::FrameBusTrace,
+) -> Option<(u64, usize)> {
+    let selected_id = panel
+        .blit_selected
+        .filter(|id| trace.blits.iter().any(|blit| blit.id == *id))
+        .or_else(|| trace.blits.first().map(|blit| blit.id))?;
+    let selected_index = trace
+        .blits
+        .iter()
+        .position(|blit| blit.id == selected_id)
+        .unwrap_or(0);
+    let scroll = analyzer_blit_scroll(trace.blits.len(), selected_index, panel.blit_scroll);
+    Some((selected_id, scroll))
+}
+
+fn analyzer_blit_scroll(len: usize, selected: usize, requested: usize) -> usize {
+    let mut scroll = requested.min(len.saturating_sub(ui::ANALYZER_BLIT_ROWS_MAX));
+    if selected < scroll {
+        scroll = selected;
+    } else if selected >= scroll + ui::ANALYZER_BLIT_ROWS_MAX {
+        scroll = selected + 1 - ui::ANALYZER_BLIT_ROWS_MAX;
+    }
+    scroll
+}
+
 impl App {
     pub(super) fn ui_handle_debugger_key(&mut self, code: KeyCode) -> bool {
         let Some(panel) = self.debugger_panel.as_mut() else {
@@ -365,15 +392,19 @@ impl App {
     }
 
     pub(super) fn frame_analyzer_select_blit(&mut self, index: u8) {
-        let scroll = self
+        let Some(trace) = self.emu.bus().frame_bus_trace() else {
+            return;
+        };
+        let Some((_, scroll)) = self
             .frame_analyzer_panel
             .as_ref()
-            .map_or(0, |panel| panel.blit_scroll);
-        let Some(id) = self
-            .emu
-            .bus()
-            .frame_bus_trace()
-            .and_then(|trace| trace.blits.get(scroll + usize::from(index)))
+            .and_then(|panel| analyzer_blit_selection(panel, trace))
+        else {
+            return;
+        };
+        let Some(id) = trace
+            .blits
+            .get(scroll + usize::from(index))
             .map(|blit| blit.id)
         else {
             return;
@@ -417,22 +448,7 @@ impl App {
         panel: &ui::FrameAnalyzerPanel,
         trace: &crate::bus::FrameBusTrace,
     ) -> Option<ui::AnalyzerBlitsView> {
-        let selected_id = panel
-            .blit_selected
-            .filter(|id| trace.blits.iter().any(|blit| blit.id == *id))
-            .or_else(|| trace.blits.first().map(|blit| blit.id))?;
-        let selected_index = trace
-            .blits
-            .iter()
-            .position(|blit| blit.id == selected_id)
-            .unwrap_or(0);
-        let max_scroll = trace.blits.len().saturating_sub(ui::ANALYZER_BLIT_ROWS_MAX);
-        let mut scroll = panel.blit_scroll.min(max_scroll);
-        if selected_index < scroll {
-            scroll = selected_index;
-        } else if selected_index >= scroll + ui::ANALYZER_BLIT_ROWS_MAX {
-            scroll = selected_index + 1 - ui::ANALYZER_BLIT_ROWS_MAX;
-        }
+        let (selected_id, scroll) = analyzer_blit_selection(panel, trace)?;
         let rows = trace
             .blits
             .iter()
@@ -475,7 +491,7 @@ impl App {
             })
             .collect();
         let blit = trace.blits.iter().find(|blit| blit.id == selected_id)?;
-        let (planes, plane_source) = crate::blitviz::plane_count_for_blit(
+        let layout = crate::blitviz::plane_layout_for_blit(
             blit,
             self.emu.uaelib_resources(),
             self.emu.bus().frame_render_base(),
@@ -503,11 +519,11 @@ impl App {
                 .len()
                 .saturating_sub(scroll + ui::ANALYZER_BLIT_ROWS_MAX),
             source_label: source_channel.name(),
-            source: crate::blitviz::render_blit(blit, source_channel, planes).ok(),
+            source: crate::blitviz::render_blit(blit, source_channel, layout.render_planes).ok(),
             destination: crate::blitviz::render_blit(
                 blit,
                 crate::blitviz::BlitChannel::Result,
-                planes,
+                layout.render_planes,
             )
             .ok(),
             formula: format!(
@@ -516,8 +532,18 @@ impl App {
                 crate::blitviz::minterm_formula(blit.minterm)
             ),
             detail: format!(
-                "{} plane(s), {plane_source}; shifts A{} B{} masks ${:04X}/${:04X}",
-                planes, blit.shifts[0], blit.shifts[1], blit.masks[0], blit.masks[1]
+                "{} plane(s), {}; {}; shifts A{} B{} masks ${:04X}/${:04X}",
+                layout.planes,
+                layout.source,
+                if layout.interleaved {
+                    "interleaved preview"
+                } else {
+                    "single-plane preview"
+                },
+                blit.shifts[0],
+                blit.shifts[1],
+                blit.masks[0],
+                blit.masks[1]
             ),
         })
     }
@@ -2864,5 +2890,17 @@ impl App {
             video,
             audio,
         }
+    }
+}
+
+#[cfg(test)]
+mod analyzer_blit_tests {
+    use super::analyzer_blit_scroll;
+
+    #[test]
+    fn stale_scroll_is_clamped_to_the_rows_that_are_actually_drawn() {
+        assert_eq!(analyzer_blit_scroll(2, 0, 55), 0);
+        assert_eq!(analyzer_blit_scroll(20, 12, 0), 5);
+        assert_eq!(analyzer_blit_scroll(20, 3, 9), 3);
     }
 }

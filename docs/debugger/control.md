@@ -294,8 +294,13 @@ events.unsubscribe {"events":["serial"]}
   Reconstruct a recorded blit channel from the exact DMA word stream and write
   it as PNG. The reply includes the selected plane count and whether it came
   from a registered bitmap containing BLTDPT or the frame's BPLCON0, plus the
-  simplified Boolean minterm formula. Disabled A/B/C channels use their
-  latched BLTxDAT value. The path is optional.
+  safely decoded `render_planes`, interleaving status, and simplified Boolean
+  minterm formula. Non-interleaved resources and the BPLCON0 fallback render
+  one plane rather than guessing that consecutive blit rows are planes of one
+  image. Disabled A/B/C channels use their effective constant input (including
+  BLTBDAT's write-time-shifted hold latch). `result` uses captured D writes and
+  returns an error when no destination stream exists rather than approximating
+  the hardware shift/mask/fill pipeline. The path is optional.
 - `display.get`: Query active display parameters, viewport size, and pixel format.
 - `rtc.get` / `rtc.set {"unix": ..., "time": "...", "advance": ..., "frozen": ...}`: Inspect or move real-time clock.
 - `cartridge.get`: Query freezer cartridge state (`model`, memory `base`/`size`, monitor `version`, `entered` status, `nmi_pending`, and freeze count).

@@ -154,49 +154,59 @@ pub fn minterm_formula(minterm: u8) -> String {
         .join(" | ")
 }
 
-fn minterm_word(minterm: u8, a: u16, b: u16, c: u16) -> u16 {
-    let mut out = 0u16;
-    for abc in 0..8 {
-        if minterm & (1 << abc) == 0 {
-            continue;
-        }
-        let av = if abc & 4 != 0 { a } else { !a };
-        let bv = if abc & 2 != 0 { b } else { !b };
-        let cv = if abc & 1 != 0 { c } else { !c };
-        out |= av & bv & cv;
-    }
-    out
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlitPlaneLayout {
+    /// Plane count advertised by the matching resource or BPLCON0.
+    pub planes: usize,
+    /// Planes that can safely be combined in the preview. A non-interleaved
+    /// resource (or the BPLCON0 fallback) does not establish that successive
+    /// blit rows belong to successive planes, so it is decoded as one plane.
+    pub render_planes: usize,
+    pub source: &'static str,
+    pub interleaved: bool,
 }
 
-/// Plane count used by the visualiser: a registered bitmap containing the
-/// destination wins, otherwise the frame-start Denise BPU decode does.
-pub fn plane_count_for_blit(
+/// Plane layout used by the visualiser: a registered bitmap containing the
+/// destination wins, otherwise the frame-start Denise BPU decode supplies
+/// the reported count without guessing that the blit itself is interleaved.
+pub fn plane_layout_for_blit(
     blit: &FrameBlitRecord,
     resources: &[DebugResource],
     base: RenderRegisterSnapshot,
-) -> (usize, &'static str) {
-    if let Some(planes) = resources.iter().find_map(|resource| {
+) -> BlitPlaneLayout {
+    if let Some((planes, interleaved)) = resources.iter().find_map(|resource| {
         let end = resource.address.saturating_add(resource.size);
         if !(resource.address..end).contains(&blit.dpt) {
             return None;
         }
         match resource.kind {
-            ResourceKind::Bitmap { planes, .. } => Some(usize::from(planes).clamp(1, 8)),
+            ResourceKind::Bitmap { planes, .. } => Some((
+                usize::from(planes).clamp(1, 8),
+                resource.flags & RESOURCE_FLAG_INTERLEAVED != 0,
+            )),
             _ => None,
         }
     }) {
-        return (planes, "resource");
+        return BlitPlaneLayout {
+            planes,
+            render_planes: if interleaved { planes } else { 1 },
+            source: "resource",
+            interleaved,
+        };
     }
     let aga = matches!(
         base.agnus_revision,
         crate::chipset::agnus::AgnusRevision::AgaAlice
     );
-    (
-        BitplaneMode::from_bplcon0(base.bplcon0, aga)
-            .display_planes()
-            .max(1),
-        "BPLCON0",
-    )
+    let planes = BitplaneMode::from_bplcon0(base.bplcon0, aga)
+        .display_planes()
+        .max(1);
+    BlitPlaneLayout {
+        planes,
+        render_planes: 1,
+        source: "BPLCON0",
+        interleaved: false,
+    }
 }
 
 fn channel_words(blit: &FrameBlitRecord, channel: BlitChannel, count: usize) -> Vec<u16> {
@@ -209,26 +219,7 @@ fn channel_words(blit: &FrameBlitRecord, channel: BlitChannel, count: usize) -> 
         }
         return Vec::new();
     }
-    if !blit.channel_words[3].is_empty() {
-        return blit.channel_words[3].clone();
-    }
-    let inputs: [Vec<u16>; 3] = std::array::from_fn(|index| {
-        if blit.channels[index] {
-            blit.channel_words[index].clone()
-        } else {
-            vec![blit.data[index]; count]
-        }
-    });
-    (0..count)
-        .map(|index| {
-            minterm_word(
-                blit.minterm,
-                inputs[0].get(index).copied().unwrap_or(blit.data[0]),
-                inputs[1].get(index).copied().unwrap_or(blit.data[1]),
-                inputs[2].get(index).copied().unwrap_or(blit.data[2]),
-            )
-        })
-        .collect()
+    blit.channel_words[3].clone()
 }
 
 fn indexed_colour(index: usize, planes: usize) -> u32 {
@@ -253,6 +244,12 @@ pub fn render_blit(
     channel: BlitChannel,
     planes: usize,
 ) -> Result<BitmapPreview, String> {
+    if matches!(channel, BlitChannel::Result) && blit.channel_words[3].is_empty() {
+        return Err(
+            "result rendering requires captured D writes; reconstructing the hardware shifts, masks, fill state, or line pipeline from raw source words would be inaccurate"
+                .to_string(),
+        );
+    }
     if blit.line_mode
         && !matches!(
             channel,
@@ -449,6 +446,19 @@ mod tests {
     }
 
     #[test]
+    fn result_without_destination_writes_is_rejected_instead_of_guessed() {
+        let mut blit = recorded_blit();
+        blit.channels[3] = false;
+        blit.channel_words[3].clear();
+        blit.channel_addrs[3].clear();
+        let err = match render_blit(&blit, BlitChannel::Result, 1) {
+            Ok(_) => panic!("missing destination stream must not be guessed"),
+            Err(err) => err,
+        };
+        assert!(err.contains("captured D writes"), "{err}");
+    }
+
+    #[test]
     fn destination_addresses_map_through_registered_bitmap_layout() {
         let resource = DebugResource {
             address: 0x1000,
@@ -462,7 +472,28 @@ mod tests {
             name: "bitmap".to_string(),
             registered_frame: 0,
         };
-        let (pixel, width, height) = destination_word_pixel(0x1006, &[resource]).unwrap();
+        let (pixel, width, height) =
+            destination_word_pixel(0x1006, std::slice::from_ref(&resource)).unwrap();
         assert_eq!((pixel.x, pixel.y, width, height), (16, 1, 32, 10));
+
+        let plain = plane_layout_for_blit(
+            &recorded_blit(),
+            std::slice::from_ref(&resource),
+            RenderRegisterSnapshot::default(),
+        );
+        assert_eq!((plain.planes, plain.render_planes), (2, 1));
+        assert!(!plain.interleaved);
+
+        let interleaved_resource = DebugResource {
+            flags: RESOURCE_FLAG_INTERLEAVED,
+            ..resource
+        };
+        let interleaved = plane_layout_for_blit(
+            &recorded_blit(),
+            &[interleaved_resource],
+            RenderRegisterSnapshot::default(),
+        );
+        assert_eq!((interleaved.planes, interleaved.render_planes), (2, 2));
+        assert!(interleaved.interleaved);
     }
 }

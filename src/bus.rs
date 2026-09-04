@@ -2108,8 +2108,9 @@ pub struct FrameBlitRecord {
     /// First/last A word masks.
     pub masks: [u16; 2],
     pub minterm: u8,
-    /// BLTADAT, BLTBDAT and BLTCDAT as latched at the start. Disabled DMA
-    /// channels use these constant inputs.
+    /// Effective A, B and C constant inputs at the start. For USEB-off area
+    /// blits, B is BLTBDAT's write-time-shifted hold latch rather than the
+    /// raw register; disabled DMA channels use these values.
     pub data: [u16; 3],
     pub start_frame: u64,
     pub end_frame: Option<u64>,
@@ -8732,15 +8733,16 @@ impl Bus {
         self.active_frame_blit = Some(id);
         let con0 = self.blitter.bltcon0;
         let con1 = self.blitter.bltcon1;
+        let line_mode = con1 & BLTCON1_LINE != 0;
         self.current_frame_bus_trace.blits.push(FrameBlitRecord {
             id,
             bltcon0: con0,
             bltcon1: con1,
             width_words,
             height,
-            descending: con1 & BLTCON1_DESC != 0,
-            line_mode: con1 & BLTCON1_LINE != 0,
-            fill_mode: con1 & (BLTCON1_IFE | BLTCON1_EFE) != 0,
+            descending: !line_mode && con1 & BLTCON1_DESC != 0,
+            line_mode,
+            fill_mode: !line_mode && con1 & (BLTCON1_IFE | BLTCON1_EFE) != 0,
             channels: [
                 con0 & BLTCON0_USE_A != 0,
                 con0 & BLTCON0_USE_B != 0,
@@ -8762,7 +8764,11 @@ impl Bus {
             minterm: con0 as u8,
             data: [
                 self.blitter.bltadat,
-                self.blitter.bltbdat,
+                if con0 & BLTCON0_USE_B != 0 || line_mode {
+                    self.blitter.bltbdat
+                } else {
+                    self.blitter.b_hold_latch()
+                },
                 self.blitter.bltcdat,
             ],
             start_frame: self.emulated_frames,
@@ -8809,6 +8815,9 @@ impl Bus {
     /// the channel visualisers. Disabled channels need no entries: their
     /// BLTxDAT constants are already in the record.
     pub(super) fn record_frame_blit_access(&mut self, access: BlitBusAccess) {
+        if access.size == 0 {
+            return;
+        }
         let Some(id) = self.active_frame_blit else {
             return;
         };

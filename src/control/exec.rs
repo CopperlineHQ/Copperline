@@ -2265,12 +2265,12 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
                     trace.blits.len().saturating_sub(1)
                 ))
             })?;
-            let (planes, plane_source) = crate::blitviz::plane_count_for_blit(
+            let layout = crate::blitviz::plane_layout_for_blit(
                 blit,
                 emu.uaelib_resources(),
                 bus.frame_render_base(),
             );
-            let preview = crate::blitviz::render_blit(blit, *channel, planes)
+            let preview = crate::blitviz::render_blit(blit, *channel, layout.render_planes)
                 .map_err(CtlError::invalid_state)?;
             let path = path
                 .clone()
@@ -2290,8 +2290,10 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
                 "channel": channel.name(),
                 "width": preview.width,
                 "height": preview.height,
-                "planes": planes,
-                "plane_source": plane_source,
+                "planes": layout.planes,
+                "render_planes": layout.render_planes,
+                "plane_source": layout.source,
+                "interleaved": layout.interleaved,
                 "minterm": format!("0x{:02X}", blit.minterm),
                 "formula": crate::blitviz::minterm_formula(blit.minterm),
                 "note": preview.note,
@@ -3449,8 +3451,9 @@ fn paint_blit_overlays(
     let resources = emu.uaelib_resources();
     let mut overdraw = vec![0u16; width * height];
     for (index, blit) in trace.blits.iter().enumerate() {
-        let (planes, _) =
-            crate::blitviz::plane_count_for_blit(blit, resources, emu.bus().frame_render_base());
+        let planes =
+            crate::blitviz::plane_layout_for_blit(blit, resources, emu.bus().frame_render_base())
+                .render_planes;
         let mut bounds: Option<(usize, usize, usize, usize)> = None;
         for (sequence, &address) in blit.channel_addrs[3].iter().enumerate() {
             let Some((x, y, x_scale)) =
@@ -3488,6 +3491,12 @@ fn paint_blit_overlays(
         if let Some(records) = trace.records() {
             for record in records
                 .iter()
+                .chain(
+                    trace
+                        .instantaneous_records()
+                        .iter()
+                        .map(|entry| &entry.record),
+                )
                 .filter(|record| record_writes_chip_memory(record))
             {
                 let bytes = usize::from(record.size).max(2);
@@ -3514,11 +3523,12 @@ fn paint_blit_overlays(
         }
         if !mapped_write {
             for blit in &trace.blits {
-                let (planes, _) = crate::blitviz::plane_count_for_blit(
+                let planes = crate::blitviz::plane_layout_for_blit(
                     blit,
                     resources,
                     emu.bus().frame_render_base(),
-                );
+                )
+                .render_planes;
                 for (sequence, &address) in blit.channel_addrs[3].iter().enumerate() {
                     if let Some((x, y, x_scale)) = blit_destination_pixel(
                         blit, sequence, address, resources, planes, width, height,

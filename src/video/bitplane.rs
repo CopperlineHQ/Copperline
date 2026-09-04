@@ -6053,6 +6053,7 @@ fn render_fast_playfield_run(
         let fb_idx = row_fb + x;
         let out_base = row_out + x;
         let pf = collision.playfield_mask();
+        let source = pixel_source_for_playfield(output.pf_mask);
         for dx in 0..pixel_repeat {
             collision_pixels[fb_idx + dx] = collision;
             if pf != 0 {
@@ -6061,7 +6062,7 @@ fn render_fast_playfield_run(
             fb[out_base + dx] = pixel;
             sprite_subpixels.playfield_masks[fb_idx + dx] = [pf; 2];
             sprite_subpixels.pixels[fb_idx + dx] = [pixel; 2];
-            sprite_subpixels.set_source(fb_idx + dx, [pixel_source_for_playfield(pf); 2]);
+            sprite_subpixels.set_source(fb_idx + dx, [source; 2]);
         }
     }
     *clxdat = clx;
@@ -6629,8 +6630,8 @@ fn render_planned_playfield_line_impl(
                     sprite_subpixels.set_source(
                         fb_idx,
                         [
-                            pixel_source_for_playfield(left_collision.playfield_mask()),
-                            pixel_source_for_playfield(right_collision.playfield_mask()),
+                            pixel_source_for_playfield(left_out.pf_mask),
+                            pixel_source_for_playfield(right_out.pf_mask),
                         ],
                     );
                     if canvas_scale == 2 {
@@ -6647,7 +6648,8 @@ fn render_planned_playfield_line_impl(
                 let pixel = rgb24_to_rgba8_alpha(output.color, !transparent);
                 sprite_subpixels.playfield_masks[fb_idx] = [pf_mask; 2];
                 sprite_subpixels.pixels[fb_idx] = [pixel; 2];
-                sprite_subpixels.set_source(fb_idx, [pixel_source_for_playfield(pf_mask); 2]);
+                sprite_subpixels
+                    .set_source(fb_idx, [pixel_source_for_playfield(output.pf_mask); 2]);
                 if canvas_scale == 1 {
                     fb[out_base] = pixel;
                 } else {
