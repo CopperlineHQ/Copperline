@@ -1830,6 +1830,7 @@ struct CpuTraceAccess {
 
 #[derive(Clone, Copy, Debug)]
 struct CpuTraceSlot {
+    frame: u64,
     vpos: u32,
     hpos: u32,
     value_offset: u8,
@@ -7681,6 +7682,7 @@ impl Bus {
             u16::from(matches!(access.kind, CpuBusAccessKind::Write)),
         );
         self.cpu_trace_slots.push(CpuTraceSlot {
+            frame: self.emulated_frames,
             vpos,
             hpos,
             value_offset: access.value_offset,
@@ -7704,8 +7706,16 @@ impl Bus {
     pub(crate) fn update_last_cpu_trace_data(&mut self, data: u64, size: u8) {
         for slot in &self.cpu_trace_slots {
             let chunk = cpu_trace_data_chunk(data, size, slot.value_offset, slot.size);
-            self.current_frame_bus_trace
-                .annotate_at(slot.vpos, slot.hpos, |record| record.data = chunk);
+            let trace = if self.current_frame_bus_trace.frame == slot.frame {
+                Some(&mut self.current_frame_bus_trace)
+            } else {
+                self.last_frame_bus_trace
+                    .as_mut()
+                    .filter(|trace| trace.frame == slot.frame)
+            };
+            if let Some(trace) = trace {
+                trace.annotate_at(slot.vpos, slot.hpos, |record| record.data = chunk);
+            }
         }
         if let Some(access) = self.cpu_trace_access.as_mut() {
             access.data = Some(cpu_trace_data_chunk(
@@ -8568,7 +8578,7 @@ impl Bus {
     /// `addr` (chip, fast, slow, motherboard, accelerator, or ROM), for the
     /// debugger's memory dumps. Returns 0 for unmapped addresses.
     pub fn peek_word_any(&self, addr: u32) -> u16 {
-        use crate::memory::{ACCEL_RAM_BASE, CHIP_RAM_BASE, ROM_BASE, SLOW_RAM_BASE};
+        use crate::memory::{ACCEL_RAM_BASE, CHIP_WINDOW_SIZE, ROM_BASE, SLOW_RAM_BASE};
         if let Some((board, off)) = self.mem.zorro.region_at(addr, 2) {
             let ram = self.mem.zorro.board_ram(board);
             return ((ram[off] as u16) << 8) | ram[off + 1] as u16;
@@ -8582,9 +8592,20 @@ impl Bus {
             return crate::zorro_device::ZorroDevice::peek_word(&self.devices[dev], off)
                 .unwrap_or(0);
         }
+        // CPU accesses to the entire 2 MiB chip window are routed through
+        // Agnus. Smaller Agnus revisions ignore their unsupported high
+        // address bits, so the fitted image repeats inside that window.
+        if u64::from(addr) < CHIP_WINDOW_SIZE {
+            let off = (addr & self.agnus.revision().dma_addr_capability_mask()) as usize;
+            if off
+                .checked_add(1)
+                .is_some_and(|last| last < self.mem.chip_ram.len())
+            {
+                return ((self.mem.chip_ram[off] as u16) << 8) | self.mem.chip_ram[off + 1] as u16;
+            }
+        }
         let a = addr as usize;
-        let regions: [(usize, &[u8]); 6] = [
-            (CHIP_RAM_BASE as usize, &self.mem.chip_ram),
+        let regions: [(usize, &[u8]); 5] = [
             (SLOW_RAM_BASE as usize, &self.mem.slow_ram),
             (self.mem.mb_ram_base() as usize, &self.mem.mb_ram),
             (ACCEL_RAM_BASE as usize, &self.mem.accel_ram),

@@ -12,16 +12,16 @@ use super::{
     live_playfield_collision_pixel, live_sprite_playfield_collision_bits_in_range,
     live_sprite_sprite_collision_bits, sprite_hstart_for_fmode, visible_start_vpos_for_diw,
     BeamChipRamWrite, BeamRegisterWrite, BeamWriteSource, BitplaneBplcon0Delay, Bus, BusSlotRecord,
-    CapturedBitplaneRow, CapturedSpriteLine, ChipBusOwner, CpuBusAccessKind, CpuWaitClass,
-    CpuWaitSample, DeviceClock, DisplaySpriteDmaState, DisplaySpriteLineData, FrameBusTrace,
-    LiveCollisionControl, LiveCollisionLineReplay, LiveSpriteCollisionSource, PortDevice,
-    RenderRegisterSnapshot, BLITTER_SLOWDOWN_CPU_MISS_LIMIT, BLTCON0_USE_A, BLTCON0_USE_C,
-    BLTCON0_USE_D, BLTCON1_DOFF, BLTCON1_LINE, BPLCON0_ECSENA, BPLCON3_BRDRBLNK, BPLCON3_BRDSPRT,
-    BPLCON3_SPRES_HIRES, BPLCON3_SPRES_SHRES, BUS_EVENT_BLIT_FINAL_D, BUS_EVENT_CIAA_IRQ,
-    BUS_EVENT_COPPER_WAKE, BUS_EVENT_DDFSTRT, BUS_EVENT_INTREQ, BUS_EVENT_LOF, BUS_EVENT_LOL,
-    BUS_EVENT_SPECIAL, BUS_EVENT_VB, BUS_EVENT_VDIW, BUS_EVENT_VS, BUS_RECORD_BLITTER,
-    BUS_RECORD_COPPER, BUS_RECORD_CPU, BUS_RECORD_DISK, BUS_RECORD_SPRITE, CPU_WAIT_PC_CAP,
-    DENISE_HPOS_LAG_CCK, DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN,
+    CapturedBitplaneRow, CapturedSpriteLine, ChipBusOwner, CpuBusAccessKind, CpuTraceSlot,
+    CpuWaitClass, CpuWaitSample, DeviceClock, DisplaySpriteDmaState, DisplaySpriteLineData,
+    FrameBusTrace, LiveCollisionControl, LiveCollisionLineReplay, LiveSpriteCollisionSource,
+    PortDevice, RenderRegisterSnapshot, BLITTER_SLOWDOWN_CPU_MISS_LIMIT, BLTCON0_USE_A,
+    BLTCON0_USE_C, BLTCON0_USE_D, BLTCON1_DOFF, BLTCON1_LINE, BPLCON0_ECSENA, BPLCON3_BRDRBLNK,
+    BPLCON3_BRDSPRT, BPLCON3_SPRES_HIRES, BPLCON3_SPRES_SHRES, BUS_EVENT_BLIT_FINAL_D,
+    BUS_EVENT_CIAA_IRQ, BUS_EVENT_COPPER_WAKE, BUS_EVENT_DDFSTRT, BUS_EVENT_INTREQ, BUS_EVENT_LOF,
+    BUS_EVENT_LOL, BUS_EVENT_SPECIAL, BUS_EVENT_VB, BUS_EVENT_VDIW, BUS_EVENT_VS,
+    BUS_RECORD_BLITTER, BUS_RECORD_COPPER, BUS_RECORD_CPU, BUS_RECORD_DISK, BUS_RECORD_SPRITE,
+    CPU_WAIT_PC_CAP, DENISE_HPOS_LAG_CCK, DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN,
     PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS, RENDER_COPPER_WAIT_HPOS_FB0, RENDER_DIW_HSTART_FB0,
     RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_LINES, RENDER_VISIBLE_START_VPOS,
     SPRITE_DMA_SLOT1_HPOS, SPRITE_OUTPUT_DELAY_LORES,
@@ -363,6 +363,80 @@ fn cpu_read_trace_peeks_exactly_each_recorded_transfer_width() {
     assert_eq!(tail.size, 1);
     assert_eq!(tail.data, 0x33);
     assert_eq!(bus.peek_cpu_trace_data(0x0002_0001, 3), 0x223344);
+}
+
+#[test]
+fn completed_cpu_access_updates_slots_on_both_sides_of_a_frame_boundary() {
+    let mut bus = empty_bus();
+    let mut previous = FrameBusTrace::default();
+    previous.reset_for_frame_with_level(
+        7,
+        0.140,
+        1,
+        2,
+        0,
+        1,
+        false,
+        true,
+        super::FrameRegisterSnapshot::default(),
+    );
+    previous.annotate_at(0, 1, |record| record.kind = BUS_RECORD_CPU);
+    bus.last_frame_bus_trace = Some(previous);
+    bus.current_frame_bus_trace.reset_for_frame_with_level(
+        8,
+        0.160,
+        1,
+        2,
+        0,
+        1,
+        false,
+        true,
+        super::FrameRegisterSnapshot::default(),
+    );
+    bus.current_frame_bus_trace
+        .annotate_at(0, 0, |record| record.kind = BUS_RECORD_CPU);
+    bus.cpu_trace_slots = vec![
+        CpuTraceSlot {
+            frame: 7,
+            vpos: 0,
+            hpos: 1,
+            value_offset: 0,
+            size: 2,
+        },
+        CpuTraceSlot {
+            frame: 8,
+            vpos: 0,
+            hpos: 0,
+            value_offset: 2,
+            size: 2,
+        },
+    ];
+
+    bus.update_last_cpu_trace_data(0x1122_3344, 4);
+
+    assert_eq!(
+        bus.last_frame_bus_trace
+            .as_ref()
+            .unwrap()
+            .record_at(0, 1)
+            .unwrap()
+            .data,
+        0x1122
+    );
+    assert_eq!(
+        bus.current_frame_bus_trace.record_at(0, 0).unwrap().data,
+        0x3344
+    );
+}
+
+#[test]
+fn cpu_trace_peek_follows_agnus_chip_ram_mirroring() {
+    let mut bus = empty_bus_with_chip_ram(512 * 1024);
+    bus.set_agnus_revision(AgnusRevision::Ocs);
+    bus.mem.chip_ram[0..2].copy_from_slice(&[0xCA, 0xFE]);
+
+    assert_eq!(bus.peek_word_any(0x0008_0000), 0xCAFE);
+    assert_eq!(bus.peek_cpu_trace_data(0x0008_0000, 2), 0xCAFE);
 }
 
 #[test]

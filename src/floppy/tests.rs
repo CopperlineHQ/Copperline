@@ -2157,6 +2157,29 @@ fn floppy_turbo_bursts_read_dma_after_two_line_grace() -> Result<()> {
 }
 
 #[test]
+fn floppy_full_dma_trace_suppresses_zero_time_turbo_burst() -> Result<()> {
+    let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
+    let dmacon = DMACON_DMAEN | DMACON_DISK;
+    let (mut ctrl, path) = spun_up_speed_controller(&raw_words, SPEED_TURBO)?;
+    let mut chip_ram = vec![0u8; 8];
+    ctrl.set_dma_trace_enabled(true);
+    let len = DSKLEN_DMAEN | 3;
+    assert!(!ctrl.write_dsklen(len, 0));
+    assert!(!ctrl.write_dsklen(len, 0));
+
+    assert!(!ctrl.tick(TURBO_DMA_GRACE_CCK, dmacon, &mut chip_ram));
+    assert!(
+        ctrl.dma.is_some(),
+        "the zero-time burst must remain deferred"
+    );
+    assert!(ctrl.take_dma_trace().is_empty());
+    assert_eq!(read_chip_word(&chip_ram, 0), 0);
+
+    let _ = fs::remove_file(path);
+    Ok(())
+}
+
+#[test]
 fn floppy_turbo_sync_wait_matches_real_speed_data() -> Result<()> {
     // A sync-waiting read: the burst must first spin to the DSKSYNC
     // match, then drain the transfer, delivering exactly the words a

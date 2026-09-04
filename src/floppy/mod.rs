@@ -1418,7 +1418,11 @@ impl FloppyController {
             }
             _ => self.tick_read_and_rotate(idx, data_cck, dmacon, is_selected, chip_ram),
         };
-        if self.turbo() {
+        // A zero-time turbo burst can move many words at one beam position,
+        // which cannot be represented by the one-record-per-colour-clock bus
+        // trace. Keep DMA on the ordinary timed path while a full trace is
+        // armed so every transferred word gets a distinct replayable slot.
+        if self.turbo() && !self.trace_dma_enabled {
             irq |= self.turbo_burst(cck, dmacon, chip_ram);
         }
         irq

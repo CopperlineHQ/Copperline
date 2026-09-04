@@ -102,8 +102,10 @@ emulator.
 `"slots": true` writes one `slots-NNNNNN-frame-MMMMMM.bin` per recorded frame,
 where the first number is a monotonic capture sequence and the second is the
 emulated frame. The sequence keeps repeated frames distinct after rewind or
-state loading. Records are in raster order (`VPOS * line_cck + HPOS`) and use
-this packed, little-endian 24-byte layout:
+state loading. While a full slot trace is armed, floppy turbo bursts use the
+ordinary timed DMA path so that every transferred word has a distinct slot.
+Records are in raster order (`VPOS * line_cck + HPOS`) and use this packed,
+little-endian 24-byte layout:
 
 | Offset | Type | Field |
 |---:|---|---|
