@@ -77,4 +77,4 @@ in-flight hardware operations.
 The wire format and field ordering follow
 [WinUAE's savestate implementation](https://github.com/BartmanAbyss/WinUAE/blob/master/savestate.cpp)
 and its CPU/custom/CIA/audio chunk writers. See
-[import internals](../internals/savestate.md#winuae-interchange-ussrs).
+[import internals](../internals/savestate.md#winuae-interchange).
