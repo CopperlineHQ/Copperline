@@ -4408,6 +4408,83 @@ mod tests {
     }
 
     #[test]
+    fn failed_profile_start_preserves_an_existing_analyzer_trace() {
+        let mut emu = uaelib_emulator();
+        emu.bus_mut().set_frame_analyzer_full(true);
+        emu.bus_mut().advance_chipset(4);
+        let owner_cck_before = emu
+            .bus()
+            .frame_bus_trace()
+            .unwrap()
+            .owner_cck
+            .iter()
+            .sum::<u64>();
+        let options = |path| crate::profile::ProfileOptions {
+            path,
+            frames: 1,
+            slots: true,
+            memory: true,
+            screenshots: crate::profile::ScreenshotMode::None,
+            pc_samples: false,
+            samples: false,
+            registers: false,
+            unwind: None,
+            relocation_bases: Vec::new(),
+            code_ranges: Vec::new(),
+            trigger: None,
+        };
+
+        let blocked_parent = profile_scratch("failed-start");
+        std::fs::write(&blocked_parent, b"not a directory").unwrap();
+        let mut ctx = SessionCtx::new();
+        let err = exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::ProfileStart {
+                options: options(blocked_parent.join("profile")),
+            },
+        )
+        .expect_err("a profile beneath a regular file must fail");
+        assert_eq!(err.code, proto::IO_ERROR);
+        assert!(emu.bus().frame_analyzer_full());
+        assert_eq!(
+            emu.bus()
+                .frame_bus_trace()
+                .unwrap()
+                .owner_cck
+                .iter()
+                .sum::<u64>(),
+            owner_cck_before,
+            "failed setup must not reset the active analyzer epoch"
+        );
+        let _ = std::fs::remove_file(&blocked_parent);
+
+        let memory_failure = profile_scratch("failed-memory");
+        std::fs::create_dir_all(memory_failure.join("chip-ram.bin")).unwrap();
+        let err = exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::ProfileStart {
+                options: options(memory_failure.clone()),
+            },
+        )
+        .expect_err("a RAM snapshot cannot replace a directory");
+        assert_eq!(err.code, proto::IO_ERROR);
+        assert!(emu.bus().frame_analyzer_full());
+        assert_eq!(
+            emu.bus()
+                .frame_bus_trace()
+                .unwrap()
+                .owner_cck
+                .iter()
+                .sum::<u64>(),
+            owner_cck_before,
+            "failed RAM setup must not reset the active analyzer epoch"
+        );
+        let _ = std::fs::remove_dir_all(&memory_failure);
+    }
+
+    #[test]
     fn frame_slots_distinguishes_owner_only_state_from_a_bad_row() {
         let mut emu = uaelib_emulator();
         let mut ctx = SessionCtx::new();

@@ -584,16 +584,11 @@ impl Emulator {
         let requested_full = opts.slots;
         let already = self.bus().frame_analyzer_enabled();
         let already_full = self.bus().frame_analyzer_full();
-        self.bus_mut().set_frame_analyzer_enabled(true);
-        if requested_full {
-            self.bus_mut().set_frame_analyzer_full(true);
-        }
-        self.bus_mut().restart_frame_analyzer_trace();
         let frame = self.bus().emulated_frames();
         let seconds = self.bus().emulated_seconds();
         let retired = self.retired_instructions();
         let clocks_per_cck = self.machine.cpu_clocks_per_cck();
-        let capture = match crate::profile::ProfileCapture::create(
+        let capture = crate::profile::ProfileCapture::create(
             opts,
             frame,
             seconds,
@@ -601,32 +596,19 @@ impl Emulator {
             !already,
             requested_full && !already_full,
             clocks_per_cck,
-        ) {
-            Ok(capture) => capture,
-            Err(error) => {
-                if !already {
-                    self.bus_mut().set_frame_analyzer_enabled(false);
-                } else if requested_full && !already_full {
-                    self.bus_mut().set_frame_analyzer_full(false);
-                }
-                return Err(error);
-            }
-        };
+        )?;
         if capture.options().memory {
-            let memory_result = (|| {
-                std::fs::write(capture.dir().join("chip-ram.bin"), &self.bus().mem.chip_ram)?;
-                std::fs::write(capture.dir().join("slow-ram.bin"), &self.bus().mem.slow_ram)?;
-                Ok::<(), std::io::Error>(())
-            })();
-            if let Err(error) = memory_result {
-                if !already {
-                    self.bus_mut().set_frame_analyzer_enabled(false);
-                } else if requested_full && !already_full {
-                    self.bus_mut().set_frame_analyzer_full(false);
-                }
-                return Err(error);
-            }
+            std::fs::write(capture.dir().join("chip-ram.bin"), &self.bus().mem.chip_ram)?;
+            std::fs::write(capture.dir().join("slow-ram.bin"), &self.bus().mem.slow_ram)?;
         }
+        // Arm and restart only after every fallible output setup step. A
+        // refused capture must leave an already-open analyzer's current and
+        // completed traces intact.
+        self.bus_mut().set_frame_analyzer_enabled(true);
+        if requested_full {
+            self.bus_mut().set_frame_analyzer_full(true);
+        }
+        self.bus_mut().restart_frame_analyzer_trace();
         if capture.options().samples {
             self.machine.start_profile_samples(
                 capture.options().unwind.clone(),

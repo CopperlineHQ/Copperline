@@ -7961,7 +7961,11 @@ impl Bus {
             .annotate_at(vpos, hpos, |record| {
                 record.reg = 0x1000;
                 record.addr = cpu_addr;
-                record.data = u64::from(value);
+                record.data = if cia_b && size == 2 {
+                    u64::from(value) << 8
+                } else {
+                    u64::from(value)
+                };
                 record.size = size.min(2) as u8;
                 record.flags |= flags;
                 record.events |= BUS_EVENT_SPECIAL;

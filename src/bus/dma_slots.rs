@@ -205,10 +205,14 @@ impl Bus {
                         }
                     }
                 }
-                ChipBusOwner::Cpu if self.blitter.busy => self.note_bus_event_named(
-                    BUS_EVENT_CPU_BLITTER_STEAL,
-                    Some("blitter_denied_by_cpu"),
-                ),
+                ChipBusOwner::Cpu
+                    if self.blitter_dma_enabled() && self.blitter.current_slot_needs_bus() =>
+                {
+                    self.note_bus_event_named(
+                        BUS_EVENT_CPU_BLITTER_STEAL,
+                        Some("blitter_denied_by_cpu"),
+                    )
+                }
                 _ => {}
             }
             if self
@@ -232,10 +236,14 @@ impl Bus {
                         self.note_bus_event_named(BUS_EVENT_BLIT_FINAL_D, Some("blitter_final_d"));
                     }
                 }
-                ChipBusOwner::Cpu if self.blitter.busy => self.note_bus_event_named(
-                    BUS_EVENT_CPU_BLITTER_STEAL,
-                    Some("blitter_denied_by_cpu"),
-                ),
+                ChipBusOwner::Cpu
+                    if self.blitter_dma_enabled() && self.blitter.current_slot_needs_bus() =>
+                {
+                    self.note_bus_event_named(
+                        BUS_EVENT_CPU_BLITTER_STEAL,
+                        Some("blitter_denied_by_cpu"),
+                    )
+                }
                 _ => {}
             }
             if self

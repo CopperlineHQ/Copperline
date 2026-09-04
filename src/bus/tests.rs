@@ -250,6 +250,29 @@ fn full_bus_record_carries_cia_register_and_e_clock_phase() {
         .unwrap();
     assert_eq!(record.addr, crate::cpu::CIA_B_BASE + cia_b_offset as u32);
     assert_ne!(record.flags & (1 << 2), 0, "CIA-B selector");
+
+    bus.cpu_cia_access(1);
+    let (vpos, hpos) = bus.cia_trace_slot.unwrap();
+    let _ = bus.cia_b_write(cia_b_offset, 2, 0xC300);
+    let record = bus
+        .current_frame_bus_trace
+        .record_at(vpos as usize, hpos as usize)
+        .unwrap();
+    assert_eq!(record.data, 0xC300, "CIA-B words occupy the high byte lane");
+    assert_eq!(record.size, 2);
+
+    bus.cpu_cia_access(1);
+    let (vpos, hpos) = bus.cia_trace_slot.unwrap();
+    assert_eq!(bus.cia_b_read(cia_b_offset, 2), 0xC300);
+    let record = bus
+        .current_frame_bus_trace
+        .record_at(vpos as usize, hpos as usize)
+        .unwrap();
+    assert_eq!(
+        record.data, 0xC300,
+        "CIA-B word reads retain the same byte lane"
+    );
+    assert_eq!(record.size, 2);
 }
 
 #[test]
@@ -611,6 +634,37 @@ fn bus_event_observation_detects_blitter_final_d_without_full_trace() {
     let (events, _, dropped) = bus.bus_events_since(cursor);
     assert_eq!(dropped, 0);
     assert!(events.iter().any(|event| event.name == "blitter_final_d"));
+}
+
+#[test]
+fn cpu_on_a_bus_free_blitter_phase_is_not_reported_as_a_conflict() {
+    for full_trace in [false, true] {
+        let mut bus = empty_bus();
+        bus.agnus.dmacon = DMACON_DMAEN | DMACON_BLTEN;
+        bus.agnus.hpos = 0x20;
+        bus.blitter.bltcon0 = BLTCON0_USE_D;
+        bus.blitter.bltdpt = 0x100;
+        bus.blitter.start_scheduled((1 << 6) | 1, &bus.mem.chip_ram);
+        assert!(bus.blitter.busy);
+        assert!(
+            !bus.blitter.current_slot_needs_bus(),
+            "the startup pipeline phase must leave the bus free"
+        );
+        bus.set_frame_analyzer_full(full_trace);
+        bus.set_bus_event_observation_enabled(true);
+        let cursor = bus.bus_event_cursor();
+
+        bus.advance_one_chip_bus_quantum(Some(ChipBusOwner::Cpu));
+
+        let (events, _, dropped) = bus.bus_events_since(cursor);
+        assert_eq!(dropped, 0);
+        assert!(
+            events
+                .iter()
+                .all(|event| event.name != "blitter_denied_by_cpu"),
+            "a bus-free pipeline phase is not a CPU/blitter conflict"
+        );
+    }
 }
 
 #[test]
