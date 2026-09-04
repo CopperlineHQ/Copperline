@@ -10098,6 +10098,15 @@ mod warp_control {
             std::env::temp_dir().join(format!("copperline-profile-panel-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         app.emu.profile_start(profile_options(&dir)).unwrap();
+        app.emu.bus_mut().advance_chipset(4);
+        let owner_cck_before_close = app
+            .emu
+            .bus()
+            .frame_bus_trace()
+            .unwrap()
+            .owner_cck
+            .iter()
+            .sum::<u64>();
         app.close_tool_panel(super::super::ToolPanelKind::FrameAnalyzer);
         assert!(
             app.emu.bus().frame_analyzer_enabled(),
@@ -10106,6 +10115,17 @@ mod warp_control {
         assert!(
             !app.emu.bus().frame_analyzer_full(),
             "an owner-only capture releases the pane's full-record level"
+        );
+        assert_eq!(
+            app.emu
+                .bus()
+                .frame_bus_trace()
+                .unwrap()
+                .owner_cck
+                .iter()
+                .sum::<u64>(),
+            owner_cck_before_close,
+            "demotion must preserve the profile's current owner samples"
         );
         let status = app
             .emu

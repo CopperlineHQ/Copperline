@@ -2120,6 +2120,11 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
                     "no frame trace is available; open the Frame Analyzer or start a profile",
                 ));
             };
+            if !trace.full() {
+                return Err(CtlError::invalid_state(
+                    "the available frame trace is owner-only; enable full Frame Analyzer tracing or start a profile with slots=true",
+                ));
+            }
             let Some(records) = trace.record_row(*row) else {
                 return Err(CtlError::invalid_params(format!(
                     "row must address a full traced scanline (0..{})",
@@ -4400,6 +4405,30 @@ mod tests {
         exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStop).unwrap();
         assert!(emu.bus().frame_analyzer_full());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn frame_slots_distinguishes_owner_only_state_from_a_bad_row() {
+        let mut emu = uaelib_emulator();
+        let mut ctx = SessionCtx::new();
+        emu.bus_mut().set_frame_analyzer_enabled(true);
+        emu.bus_mut().advance_chipset(1);
+
+        let owner_only = exec_core(&mut emu, &mut ctx, &CoreOp::FrameSlots { row: 0 })
+            .expect_err("an owner-only trace has no detailed records");
+        assert_eq!(owner_only.code, proto::INVALID_STATE);
+
+        emu.bus_mut().set_frame_analyzer_full(true);
+        emu.bus_mut().advance_chipset(1);
+        let bad_row = exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::FrameSlots {
+                row: crate::bus::FRAME_ANALYZER_MAX_VPOS,
+            },
+        )
+        .expect_err("the row lies outside the traced frame");
+        assert_eq!(bad_row.code, proto::INVALID_PARAMS);
     }
 
     #[test]

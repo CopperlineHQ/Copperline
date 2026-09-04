@@ -2427,6 +2427,11 @@ impl FrameBusTrace {
         }
     }
 
+    fn demote_to_owner_only(&mut self) {
+        self.records = None;
+        self.instantaneous_records.clear();
+    }
+
     fn annotate_at(&mut self, vpos: u32, hpos: u32, f: impl FnOnce(&mut BusSlotRecord)) {
         let (v, h) = (vpos as usize, hpos as usize);
         if v >= self.rows || h >= self.cols {
@@ -7514,7 +7519,14 @@ impl Bus {
         }
         if changed || (!was_enabled && enabled) {
             self.refresh_chip_bus_observers();
+        }
+        if enabled && (changed || !was_enabled) {
             self.reset_current_frame_bus_trace(true);
+        } else if changed {
+            // A pane can hand an in-flight trace to an owner-only profile.
+            // Keep the cheap ownership and wait grids gathered so far; only
+            // discard the full records the new level no longer retains.
+            self.current_frame_bus_trace.demote_to_owner_only();
         }
     }
 
@@ -8117,6 +8129,36 @@ impl Bus {
     // CIA dispatch
     // -----------------------------------------------------------------
 
+    fn sync_cia_irq_trace_after_access(&mut self, cia_b: bool) {
+        let asserted = if cia_b {
+            self.cia_b.irq_line_asserted()
+        } else {
+            self.cia_a.irq_line_asserted()
+        };
+        let previous = if cia_b {
+            self.trace_cia_irq_pins.1
+        } else {
+            self.trace_cia_irq_pins.0
+        };
+        if asserted && !previous {
+            self.note_bus_event_named_at(
+                if cia_b {
+                    BUS_EVENT_CIAB_IRQ
+                } else {
+                    BUS_EVENT_CIAA_IRQ
+                },
+                Some(if cia_b { "cia_b_irq" } else { "cia_a_irq" }),
+                None,
+                None,
+            );
+        }
+        if cia_b {
+            self.trace_cia_irq_pins.1 = asserted;
+        } else {
+            self.trace_cia_irq_pins.0 = asserted;
+        }
+    }
+
     pub fn cia_a_read(&mut self, addr: u64, size: usize) -> u64 {
         self.sync_realtime_devices();
         let reg = reg_from_addr(addr);
@@ -8151,6 +8193,7 @@ impl Bus {
         self.poll_stats.tick_read("cia_a", reg);
         self.service_parallel_strobe();
         self.annotate_cia_access(false, reg, addr, v, size, false);
+        self.sync_cia_irq_trace_after_access(false);
         v as u64
     }
 
@@ -8167,6 +8210,7 @@ impl Bus {
         if self.cia_a.irq_line_asserted() {
             self.paula.intreq |= INT_PORTS;
         }
+        self.sync_cia_irq_trace_after_access(false);
         match eff.keyboard_handshake {
             Some(true) => self.keyboard.amiga_kdat_edge(true),
             Some(false) => {
@@ -8275,6 +8319,7 @@ impl Bus {
         trace!("cia_b R reg={:X} sz={} val={:02X}", reg, size, v);
         self.poll_stats.tick_read("cia_b", reg);
         self.annotate_cia_access(true, reg, addr, v, size, false);
+        self.sync_cia_irq_trace_after_access(true);
         if size == 2 {
             (v as u64) << 8
         } else {
@@ -8300,6 +8345,7 @@ impl Bus {
         if self.cia_b.irq_line_asserted() {
             self.paula.intreq |= INT_EXTER;
         }
+        self.sync_cia_irq_trace_after_access(true);
         if anchor_tod {
             self.cia_b.anchor_tod_to_frame(0);
         }

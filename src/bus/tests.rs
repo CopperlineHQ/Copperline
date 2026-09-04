@@ -477,6 +477,32 @@ fn cia_irq_trace_uses_underflow_slot_during_batched_advance() {
 }
 
 #[test]
+fn cia_irq_trace_rearms_after_an_icr_read_clears_the_pin() {
+    let mut bus = empty_bus();
+    bus.cia_a.write(REG_TALO, 0);
+    bus.cia_a.write(REG_TAHI, 0);
+    bus.cia_a.write(REG_ICR, 0x80 | 0x01);
+    bus.cia_a.write(REG_CRA, 0x09); // start, one-shot
+    bus.set_frame_analyzer_full(true);
+    bus.set_bus_event_observation_enabled(true);
+    bus.advance_devices(20);
+    assert!(bus.trace_cia_irq_pins.0);
+
+    let _ = bus.cia_a_read((REG_ICR as u64) << 8, 1);
+    assert!(!bus.trace_cia_irq_pins.0);
+    bus.cia_a.write(REG_TALO, 0);
+    bus.cia_a.write(REG_TAHI, 0);
+    bus.cia_a.write(REG_CRA, 0x09);
+    let cursor = bus.bus_event_cursor();
+
+    bus.advance_devices(20);
+
+    let (events, _, dropped) = bus.bus_events_since(cursor);
+    assert_eq!(dropped, 0);
+    assert!(events.iter().any(|event| event.name == "cia_a_irq"));
+}
+
+#[test]
 fn detailed_bus_tracing_keeps_timed_devices_on_instruction_boundary_batches() {
     let mut ordinary = empty_bus();
     let mut full_trace = empty_bus();
@@ -503,6 +529,29 @@ fn detailed_bus_tracing_keeps_timed_devices_on_instruction_boundary_batches() {
     }
     assert_eq!(full_trace.cia_a.ta_count, ordinary.cia_a.ta_count);
     assert_eq!(event_trace.cia_a.ta_count, ordinary.cia_a.ta_count);
+}
+
+#[test]
+fn demoting_full_trace_preserves_owner_samples_in_the_current_epoch() {
+    let mut bus = empty_bus();
+    bus.set_frame_analyzer_full(true);
+    bus.advance_chipset(4);
+    let before = bus.current_frame_bus_trace.owner_cck.iter().sum::<u64>();
+    assert_eq!(before, 4);
+    assert!(bus.current_frame_bus_trace.full());
+
+    bus.set_frame_analyzer_full(false);
+
+    assert_eq!(
+        bus.current_frame_bus_trace.owner_cck.iter().sum::<u64>(),
+        before
+    );
+    assert!(!bus.current_frame_bus_trace.full());
+    bus.advance_chipset(1);
+    assert_eq!(
+        bus.current_frame_bus_trace.owner_cck.iter().sum::<u64>(),
+        before + 1
+    );
 }
 
 #[test]
