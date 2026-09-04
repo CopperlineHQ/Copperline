@@ -1669,7 +1669,9 @@ pub const CHIP_BUS_OWNER_NAMES: [&str; 9] = [
     "refresh", "bitplane", "sprite", "disk", "audio", "copper", "blitter", "cpu", "idle",
 ];
 
-pub const FRAME_ANALYZER_MAX_VPOS: usize = MAX_VISIBLE_LINES;
+/// ECS programmable timing has an 11-bit VTOTAL, so a diagnostic trace must
+/// retain rows outside the renderer's deliberately smaller display aperture.
+pub const FRAME_ANALYZER_MAX_VPOS: usize = 2048;
 pub const FRAME_ANALYZER_MAX_HPOS: usize = 512;
 
 // Single-char codes for the COPPERLINE_DIAG_SLOTMAP per-color-clock owner map,
@@ -1965,6 +1967,14 @@ pub struct BusEvent {
     pub vpos: u32,
     pub hpos: u32,
     pub ipl: u8,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct BusTracePosition {
+    frame: u64,
+    cck: u64,
+    vpos: u32,
+    hpos: u32,
 }
 
 /// Fixed 24-byte sidecar record, one per Agnus colour clock. `reg` is a
@@ -6541,8 +6551,11 @@ impl Bus {
     /// deadline optimization to pay for itself.
     pub fn advance_cpu_idle_devices(&mut self, cck: u32) -> AgnusTick {
         self.flush_timed_devices();
+        let precise = self.precise_timed_device_trace();
         let tick = self.advance_chipset_cpu_idle(cck);
-        self.tick_timed_devices(cck, tick);
+        if !precise {
+            self.tick_timed_devices(cck, tick, None);
+        }
         tick
     }
 
@@ -6551,8 +6564,11 @@ impl Bus {
         // this (idle/stopped-CPU or test-driven) span, so device time stays
         // ordered, then tick this span directly.
         self.flush_timed_devices();
+        let precise = self.precise_timed_device_trace();
         let tick = self.advance_chipset(cck);
-        self.tick_timed_devices(cck, tick);
+        if !precise {
+            self.tick_timed_devices(cck, tick, None);
+        }
         tick
     }
 
@@ -6845,7 +6861,12 @@ impl Bus {
         Some(position_cck)
     }
 
-    fn tick_timed_devices(&mut self, cck: u32, agnus_tick: AgnusTick) {
+    fn tick_timed_devices(
+        &mut self,
+        cck: u32,
+        agnus_tick: AgnusTick,
+        trace_position: Option<BusTracePosition>,
+    ) {
         if agnus_tick.new_frames > 0 {
             self.pending_vbi = 1;
         }
@@ -6985,6 +7006,13 @@ impl Bus {
                 );
             }
         }
+        // Full slot traces and live bus-event observers advance timed devices
+        // one colour clock at a time. Stamp timer-driven CIA pin edges on that
+        // clock's slot, before line/frame TOD and device inputs below can add
+        // their own edges at the post-advance beam position.
+        if trace_position.is_some() {
+            self.refresh_cia_irq_lines_at(trace_position);
+        }
 
         for _ in 0..agnus_tick.new_frames {
             if self.cia_a.tick_tod() {
@@ -7061,9 +7089,8 @@ impl Bus {
             self.floppy.set_adkcon(self.paula.adkcon);
             let disk_irq = self.floppy.tick(cck, dmacon, &mut self.mem.chip_ram);
             for transfer in self.floppy.take_dma_trace() {
-                self.annotate_bus_slot(
-                    self.agnus.vpos,
-                    self.agnus.hpos,
+                self.annotate_bus_slot_at(
+                    trace_position,
                     BUS_RECORD_DISK,
                     0,
                     if transfer.memory_write {
@@ -7103,7 +7130,7 @@ impl Bus {
             }
             self.feed_drive_sounds();
         }
-        self.refresh_cia_irq_lines();
+        self.refresh_cia_irq_lines_at(None);
         self.flush_pending_vbi();
         self.arm_irq_recognition_latency();
     }
@@ -7128,16 +7155,16 @@ impl Bus {
         }
     }
 
-    fn refresh_cia_irq_lines(&mut self) {
+    fn refresh_cia_irq_lines_at(&mut self, trace_position: Option<BusTracePosition>) {
         let pins = (
             self.cia_a.irq_line_asserted(),
             self.cia_b.irq_line_asserted(),
         );
         if pins.0 && !self.trace_cia_irq_pins.0 {
-            self.note_bus_event_named(BUS_EVENT_CIAA_IRQ, Some("cia_a_irq"));
+            self.note_bus_event_named_at(BUS_EVENT_CIAA_IRQ, Some("cia_a_irq"), trace_position);
         }
         if pins.1 && !self.trace_cia_irq_pins.1 {
-            self.note_bus_event_named(BUS_EVENT_CIAB_IRQ, Some("cia_b_irq"));
+            self.note_bus_event_named_at(BUS_EVENT_CIAB_IRQ, Some("cia_b_irq"), trace_position);
         }
         self.trace_cia_irq_pins = pins;
         if pins.0 {
@@ -7346,6 +7373,9 @@ impl Bus {
     pub fn set_frame_analyzer_full(&mut self, enabled: bool) {
         let was_enabled = self.frame_analyzer_enabled;
         let changed = self.frame_analyzer_full != enabled;
+        if enabled && changed && !self.precise_timed_device_trace() {
+            self.flush_timed_devices();
+        }
         self.frame_analyzer_full = enabled;
         self.floppy.set_dma_trace_enabled(enabled);
         if enabled {
@@ -7387,11 +7417,57 @@ impl Bus {
         size: u8,
         flags: u16,
     ) {
+        self.annotate_bus_slot_at(
+            Some(BusTracePosition {
+                frame: self.emulated_frames,
+                cck: self.emulated_cck,
+                vpos,
+                hpos,
+            }),
+            kind,
+            subtype,
+            reg,
+            addr,
+            data,
+            size,
+            flags,
+        );
+    }
+
+    fn precise_timed_device_trace(&self) -> bool {
+        self.frame_analyzer_full || self.bus_event_observers != 0
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn annotate_bus_slot_at(
+        &mut self,
+        trace_position: Option<BusTracePosition>,
+        kind: u8,
+        subtype: u8,
+        reg: u16,
+        addr: u32,
+        data: u64,
+        size: u8,
+        flags: u16,
+    ) {
         if !self.frame_analyzer_full {
             return;
         }
-        self.current_frame_bus_trace
-            .annotate_at(vpos, hpos, |record| {
+        let position = trace_position.unwrap_or(BusTracePosition {
+            frame: self.emulated_frames,
+            cck: self.emulated_cck,
+            vpos: self.agnus.vpos,
+            hpos: self.agnus.hpos,
+        });
+        let trace = if self.current_frame_bus_trace.frame == position.frame {
+            Some(&mut self.current_frame_bus_trace)
+        } else {
+            self.last_frame_bus_trace
+                .as_mut()
+                .filter(|trace| trace.frame == position.frame)
+        };
+        if let Some(trace) = trace {
+            trace.annotate_at(position.vpos, position.hpos, |record| {
                 record.kind = kind;
                 record.subtype = subtype;
                 record.reg = reg;
@@ -7400,6 +7476,7 @@ impl Bus {
                 record.size = size;
                 record.flags = flags;
             });
+        }
     }
 
     pub fn note_bus_event(&mut self, events: u32) {
@@ -7407,11 +7484,34 @@ impl Bus {
     }
 
     fn note_bus_event_named(&mut self, events: u32, name: Option<&'static str>) {
+        self.note_bus_event_named_at(events, name, None);
+    }
+
+    fn note_bus_event_named_at(
+        &mut self,
+        events: u32,
+        name: Option<&'static str>,
+        trace_position: Option<BusTracePosition>,
+    ) {
+        let position = trace_position.unwrap_or(BusTracePosition {
+            frame: self.emulated_frames,
+            cck: self.emulated_cck,
+            vpos: self.agnus.vpos,
+            hpos: self.agnus.hpos,
+        });
         if self.frame_analyzer_full {
-            self.current_frame_bus_trace
-                .annotate_at(self.agnus.vpos, self.agnus.hpos, |record| {
+            let trace = if self.current_frame_bus_trace.frame == position.frame {
+                Some(&mut self.current_frame_bus_trace)
+            } else {
+                self.last_frame_bus_trace
+                    .as_mut()
+                    .filter(|trace| trace.frame == position.frame)
+            };
+            if let Some(trace) = trace {
+                trace.annotate_at(position.vpos, position.hpos, |record| {
                     record.events |= events
                 });
+            }
         }
         if self.bus_event_observers != 0 {
             if let Some(name) = name {
@@ -7424,10 +7524,10 @@ impl Bus {
                     sequence,
                     name,
                     events,
-                    frame: self.emulated_frames,
-                    cck: self.emulated_cck,
-                    vpos: self.agnus.vpos,
-                    hpos: self.agnus.hpos,
+                    frame: position.frame,
+                    cck: position.cck,
+                    vpos: position.vpos,
+                    hpos: position.hpos,
                     ipl: pending_ipl(self.paula.intena & self.cpu_visible_intreq()),
                 });
             }
@@ -7437,6 +7537,9 @@ impl Bus {
     pub fn set_bus_event_observation_enabled(&mut self, enabled: bool) {
         if enabled {
             if self.bus_event_observers == 0 {
+                if !self.frame_analyzer_full {
+                    self.flush_timed_devices();
+                }
                 self.bus_events.clear();
                 self.trace_cia_irq_pins = (
                     self.cia_a.irq_line_asserted(),
@@ -7563,13 +7666,9 @@ impl Bus {
         } else {
             0x1000
         };
-        let data = access.data.unwrap_or_else(|| match access.size {
-            4 => {
-                (u64::from(self.peek_word_any(access.addr)) << 16)
-                    | u64::from(self.peek_word_any(access.addr.wrapping_add(2)))
-            }
-            _ => u64::from(self.peek_word_any(access.addr)),
-        });
+        let data = access
+            .data
+            .unwrap_or_else(|| self.peek_cpu_trace_data(access.addr, access.size));
         self.annotate_bus_slot(
             vpos,
             hpos,
@@ -7587,6 +7686,19 @@ impl Bus {
             value_offset: access.value_offset,
             size: access.size,
         });
+    }
+
+    fn peek_cpu_trace_data(&self, addr: u32, size: u8) -> u64 {
+        (0..size).fold(0, |data, offset| {
+            let byte_addr = addr.wrapping_add(u32::from(offset));
+            let word = self.peek_word_any(byte_addr & !1);
+            let byte = if byte_addr & 1 == 0 {
+                (word >> 8) as u8
+            } else {
+                word as u8
+            };
+            (data << 8) | u64::from(byte)
+        })
     }
 
     pub(crate) fn update_last_cpu_trace_data(&mut self, data: u64, size: u8) {

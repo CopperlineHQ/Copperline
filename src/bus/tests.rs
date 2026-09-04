@@ -17,11 +17,11 @@ use super::{
     LiveCollisionControl, LiveCollisionLineReplay, LiveSpriteCollisionSource, PortDevice,
     RenderRegisterSnapshot, BLITTER_SLOWDOWN_CPU_MISS_LIMIT, BLTCON0_USE_A, BLTCON0_USE_C,
     BLTCON0_USE_D, BLTCON1_DOFF, BLTCON1_LINE, BPLCON0_ECSENA, BPLCON3_BRDRBLNK, BPLCON3_BRDSPRT,
-    BPLCON3_SPRES_HIRES, BPLCON3_SPRES_SHRES, BUS_EVENT_BLIT_FINAL_D, BUS_EVENT_COPPER_WAKE,
-    BUS_EVENT_DDFSTRT, BUS_EVENT_INTREQ, BUS_EVENT_LOF, BUS_EVENT_LOL, BUS_EVENT_SPECIAL,
-    BUS_EVENT_VB, BUS_EVENT_VDIW, BUS_EVENT_VS, BUS_RECORD_BLITTER, BUS_RECORD_CPU,
-    BUS_RECORD_DISK, BUS_RECORD_SPRITE, CPU_WAIT_PC_CAP, DENISE_HPOS_LAG_CCK, DMACON_BLTEN,
-    DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN, PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS,
+    BPLCON3_SPRES_HIRES, BPLCON3_SPRES_SHRES, BUS_EVENT_BLIT_FINAL_D, BUS_EVENT_CIAA_IRQ,
+    BUS_EVENT_COPPER_WAKE, BUS_EVENT_DDFSTRT, BUS_EVENT_INTREQ, BUS_EVENT_LOF, BUS_EVENT_LOL,
+    BUS_EVENT_SPECIAL, BUS_EVENT_VB, BUS_EVENT_VDIW, BUS_EVENT_VS, BUS_RECORD_BLITTER,
+    BUS_RECORD_CPU, BUS_RECORD_DISK, BUS_RECORD_SPRITE, CPU_WAIT_PC_CAP, DENISE_HPOS_LAG_CCK,
+    DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN, PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS,
     RENDER_COPPER_WAIT_HPOS_FB0, RENDER_DIW_HSTART_FB0, RENDER_MIN_OVERSCAN_START_VPOS,
     RENDER_VISIBLE_LINES, RENDER_VISIBLE_START_VPOS, SPRITE_DMA_SLOT1_HPOS,
     SPRITE_OUTPUT_DELAY_LORES,
@@ -86,6 +86,20 @@ fn full_bus_record_is_exactly_24_bytes_and_owner_only_trace_stays_cheap() {
     );
     assert!(trace.full());
     assert_eq!(trace.records().unwrap().len(), 4 * 16);
+
+    trace.reset_for_frame_with_level(
+        9,
+        0.180,
+        super::FRAME_ANALYZER_MAX_VPOS as u32,
+        1,
+        0,
+        1,
+        false,
+        true,
+        super::FrameRegisterSnapshot::default(),
+    );
+    assert_eq!(trace.rows, 2048);
+    assert!(trace.record_row(2047).is_some());
 
     let record = BusSlotRecord {
         reg: 0x1234,
@@ -271,6 +285,57 @@ fn ocs_longword_cpu_trace_records_distinct_word_slots() {
 }
 
 #[test]
+fn cpu_read_trace_peeks_exactly_each_recorded_transfer_width() {
+    let mut bus = empty_bus();
+    bus.mem.overlay = false;
+    bus.mem.chip_ram[0x20000..0x20004].copy_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+    bus.agnus.hpos = 0x20;
+    bus.set_frame_analyzer_full(true);
+    bus.set_cpu_bus_arbitration_enabled(true);
+
+    bus.grant_cpu_bus_access_at(Some(0x0002_0000), 3, CpuBusAccessKind::Read);
+
+    let records = bus.current_frame_bus_trace.records().unwrap();
+    let high = records
+        .iter()
+        .find(|record| record.addr == 0x0002_0000 && record.size != 0)
+        .unwrap();
+    assert_eq!(high.size, 2);
+    assert_eq!(high.data, 0x1122);
+    let tail = records
+        .iter()
+        .find(|record| record.addr == 0x0002_0002 && record.size != 0)
+        .unwrap();
+    assert_eq!(tail.size, 1);
+    assert_eq!(tail.data, 0x33);
+    assert_eq!(bus.peek_cpu_trace_data(0x0002_0001, 3), 0x223344);
+}
+
+#[test]
+fn cia_irq_trace_uses_underflow_slot_during_batched_advance() {
+    let mut bus = empty_bus();
+    bus.cia_a.write(REG_TALO, 0);
+    bus.cia_a.write(REG_TAHI, 0);
+    bus.cia_a.write(REG_ICR, 0x80 | 0x01);
+    bus.cia_a.write(REG_CRA, 0x09); // start, one-shot
+    bus.set_frame_analyzer_full(true);
+
+    bus.advance_devices(20);
+
+    let trace = &bus.current_frame_bus_trace;
+    assert_ne!(
+        trace.record_at(0, 4).unwrap().events & BUS_EVENT_CIAA_IRQ,
+        0,
+        "the first CIA E-clock ends in the colour-clock slot starting at hpos 4"
+    );
+    assert_eq!(
+        trace.record_at(0, 20).unwrap().events & BUS_EVENT_CIAA_IRQ,
+        0,
+        "the event must not be stamped at the end of the 20-cck caller batch"
+    );
+}
+
+#[test]
 fn cpu_custom_trace_uses_cpu_bit_and_register_offset() {
     let mut bus = empty_bus();
     bus.agnus.hpos = 0x20;
@@ -323,6 +388,43 @@ fn reserved_disk_slot_has_no_transfer_until_floppy_dma_moves_a_word() {
     assert_eq!(record.size, 0, "no floppy word was actually transferred");
     assert_eq!(record.addr, 0);
     assert_eq!(record.data, 0);
+}
+
+#[test]
+fn batched_advance_places_floppy_words_in_distinct_raster_slots() {
+    let path = temp_bus_adf();
+    std::fs::write(&path, vec![0u8; ADF_SIZE]).unwrap();
+    let mut bus = empty_bus();
+    bus.floppy.insert_disk_image(0, path.clone(), true).unwrap();
+    bus.floppy.write_prb(0x77); // DF0 selected, motor on.
+    {
+        let Bus { floppy, mem, .. } = &mut bus;
+        floppy.tick(PAULA_CLOCK_HZ / 4, 0, &mut mem.chip_ram);
+    }
+    bus.floppy.set_dskpt_high(0);
+    bus.floppy.set_dskpt_low(0x0100);
+    bus.agnus.dmacon = DMACON_DMAEN | (1 << 4);
+    assert!(!bus.floppy.write_dsklen(0x8002, 0));
+    assert!(!bus.floppy.write_dsklen(0x8002, 0));
+    bus.set_frame_analyzer_full(true);
+
+    bus.advance_devices(256);
+
+    let transfers: Vec<(usize, u32, u64)> = bus
+        .current_frame_bus_trace
+        .records()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .filter(|(_, record)| record.kind == BUS_RECORD_DISK && record.size == 2)
+        .map(|(slot, record)| (slot, record.addr, record.data))
+        .collect();
+    assert_eq!(transfers.len(), 2, "{transfers:?}");
+    assert_ne!(transfers[0].0, transfers[1].0, "one record per actual word");
+    assert_eq!(transfers[0].1, 0x0100);
+    assert_eq!(transfers[1].1, 0x0102);
+
+    let _ = std::fs::remove_file(path);
 }
 
 #[test]

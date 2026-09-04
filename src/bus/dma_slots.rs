@@ -46,6 +46,14 @@ impl Bus {
         copper_invariant_before_deadline: bool,
     ) -> (u32, AgnusTick) {
         let cck = self.next_chip_bus_quantum().min(max_cck).max(1);
+        let trace_position = self
+            .precise_timed_device_trace()
+            .then_some(BusTracePosition {
+                frame: self.emulated_frames,
+                cck: self.emulated_cck,
+                vpos: self.agnus.vpos,
+                hpos: self.agnus.hpos,
+            });
         self.flush_audio_before_audio_dma_slot();
 
         // Advance the Copper's two-cycle cadence on every Copper-eligible color
@@ -283,6 +291,9 @@ impl Bus {
             for _ in 0..tick.new_lines {
                 self.paula.transfer_audio_dma_requests();
             }
+        }
+        if trace_position.is_some() {
+            self.tick_timed_devices(cck, tick, trace_position);
         }
         (cck, tick)
     }
@@ -1586,14 +1597,17 @@ impl Bus {
         if self.device_clock.realtime_enabled {
             self.device_clock.note_realtime_device_advance(cck);
         }
-        // Defer the timed-device tick: accumulate these color clocks and apply
-        // them in one batch at the next device observation or instruction
-        // boundary (see `flush_timed_devices`). The chipset/beam advance above
-        // already happened per color clock; only the CIA/serial/pots/audio/
-        // floppy/Akiko devices, whose state the CPU can only observe through a
-        // register read or an interrupt, are batched.
-        self.pending_device_cck = self.pending_device_cck.saturating_add(cck);
-        add_agnus_tick(&mut self.pending_device_tick, tick);
+        // Ordinarily defer the timed-device tick: accumulate these color clocks
+        // and apply them in one batch at the next device observation or
+        // instruction boundary (see `flush_timed_devices`). Full slot tracing
+        // and bus-event observation instead tick them in the per-colour-clock
+        // quantum above, so asynchronous events retain their exact raster slot.
+        // The chipset/beam advance already happened per color clock; only the
+        // CIA/serial/pots/audio/floppy/Akiko devices are batched here.
+        if !self.precise_timed_device_trace() {
+            self.pending_device_cck = self.pending_device_cck.saturating_add(cck);
+            add_agnus_tick(&mut self.pending_device_tick, tick);
+        }
     }
 
     /// Apply any deferred timed-device color clocks (see `record_slice_bus_
@@ -1608,6 +1622,6 @@ impl Bus {
             return;
         }
         let tick = std::mem::take(&mut self.pending_device_tick);
-        self.tick_timed_devices(cck, tick);
+        self.tick_timed_devices(cck, tick, None);
     }
 }

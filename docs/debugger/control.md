@@ -274,6 +274,7 @@ events.unsubscribe {"events":["serial"]}
 - `cia.get {"cia": "a"|"b"}`: Query CIA-A or CIA-B timer, port, and interrupt states.
 - `beam.get`: Query raster beam coordinates (VPOS, HPOS, colour clock).
 - `frame.slots {"row": V}`: Return the bounded full records for one scanline
+  (row 0 through 2047, covering the ECS 11-bit programmable vertical range)
   of the latest full Frame Analyzer/profile trace. Each entry has HPOS,
   register, address, data/size, kind/subtype, flags, IPL, raw event bits, and
   decoded event names. Owner-only traces and out-of-range rows return errors.

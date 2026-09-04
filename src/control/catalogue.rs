@@ -559,7 +559,17 @@ fn build() -> Vec<ToolDef> {
             "frame.slots",
             "Return one bounded scanline of the last full Frame Analyzer trace, including \
              register, address, data, subtype, IPL and Bartman event bits for every colour clock.",
-            object(vec![("row", uint("Beam row", Some(0), Some(511)))], &["row"]),
+            object(
+                vec![(
+                    "row",
+                    uint(
+                        "Beam row",
+                        Some(0),
+                        Some((crate::bus::FRAME_ANALYZER_MAX_VPOS - 1) as u64),
+                    ),
+                )],
+                &["row"],
+            ),
             json!({"row": 100}),
         ),
         entry(
@@ -1450,6 +1460,12 @@ mod tests {
                 def.method
             );
         }
+    }
+
+    #[test]
+    fn frame_slots_schema_accepts_the_full_programmable_vertical_range() {
+        let def = find_method("frame.slots").expect("frame.slots catalogue entry");
+        assert_eq!(def.schema["properties"]["row"]["maximum"], 2047);
     }
 
     #[test]
