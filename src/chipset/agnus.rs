@@ -19,10 +19,10 @@ pub const NTSC_LONG_COLORCLOCKS_PER_LINE: u32 = 228;
 pub const DMACON_BPLEN: u16 = 1 << 8;
 pub const DMACON_DMAEN: u16 = 1 << 9;
 // BEAMCON0 ($DFF1DC) control bits (ECS Agnus). PAL, VARBEAMEN, LOLDIS,
-// HARDDIS, DUAL, LPENDIS, VARVBEN, and BLANKEN are interpreted; the
-// sync-shape bits (VARHSYEN/VARVSYEN/VARCSYEN/CSCBEN and the xSYTRUE
-// polarities) affect monitor sync pulses only, which the emulated display
-// always locks to, so they are decoded for completeness.
+// HARDDIS, DUAL, LPENDIS, VARVBEN, and BLANKEN are interpreted.
+// VARHSYEN/VARVSYEN select sync windows used by display presentation and
+// beam traces. Composite-sync routing (VARCSYEN/CSCBEN) and the xSYTRUE
+// pin polarities are latched without physical host output.
 #[allow(dead_code)]
 pub const BEAMCON0_BLANKEN: u16 = 1 << 3;
 pub const BEAMCON0_PAL: u16 = 1 << 5;
@@ -1285,8 +1285,8 @@ impl Agnus {
     // ECS programmable sync/blank latches and the UHRES sprite identifier.
     // Writes are gated on ECS Agnus. The blank windows are interpreted (see
     // programmable_vertical_blank / programmable_horizontal_blank); the sync
-    // position latches are stored for readback only. Horizontal positions
-    // are 9-bit (& 0x01FF, like HTOTAL); vertical line counts are 11-bit
+    // windows feed presentation and beam traces. HCENTER is only latched.
+    // Horizontal positions are 9-bit (& 0x01FF, like HTOTAL); line counts are 11-bit
     // (& 0x07FF). The getters back the byte-write reconstruction latch.
     pub fn hsstrt(&self) -> u16 {
         self.hsstrt

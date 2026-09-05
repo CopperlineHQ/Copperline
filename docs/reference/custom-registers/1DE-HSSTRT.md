@@ -10,4 +10,7 @@ Sets the programmable horizontal sync start.
 - Bits 8-0: Horizontal position in colour clocks.
 - Bits 15-9: Ignored.
 
-BEAMCON0 selects whether programmable timing is used.
+With BEAMCON0 VARBEAMEN and VARHSYEN set, Copperline uses the HSSTRT/HSSTOP
+window for display presentation and horizontal-sync trace events. The
+window must satisfy HSSTRT < HSSTOP <= HTOTAL. These latches do not set
+line length; HTOTAL does that.

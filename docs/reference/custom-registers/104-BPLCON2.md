@@ -13,7 +13,8 @@ Sets playfield/sprite priorities and extended colour controls.
 - Bit 7: SOGEN, genlock control.
 - Bit 8: RDRAM, AGA palette readback.
 - Bit 9: KILLEHB, disable extra-half-brite decoding.
-- Bits 10-11: ZDCTEN/ZDBPEN, genlock transparency enables.
+- Bit 10: ZDCTEN, genlock colour-transparency enable.
+- Bit 11: ZDBPEN, genlock bitplane-transparency enable.
 - Bits 14-12: ZDBPSEL, genlock bitplane selection.
 
 Extended controls depend on the fitted Denise/Lisa revision; bit 15 is unused.

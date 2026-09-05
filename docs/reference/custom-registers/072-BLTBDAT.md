@@ -9,4 +9,7 @@ Holds the source B word used by the blitter.
 
 - Bits 15-0: Source data.
 
-When the channel's DMA is disabled, software can supply its data through this latch.
+A write immediately runs the B barrel shifter using the current BLTCON1
+BSH and DESC values. Area blits with USEB clear consume this shifted hold
+word; changing BSH before starting the blit does not shift it again.
+Line mode uses BLTBDAT as its texture and applies the live BSH value.
