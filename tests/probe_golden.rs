@@ -507,6 +507,16 @@ probe_tests! {
     // capture as the vertical authority and read the tie as closed only
     // where nothing was fetched.
     golden_vdiwprobe_tieopen => probe("vdiwprobe-tieopen", "vdiwprobe-tieopen.bin", 16.0);
+    // A bitplane fetch whose last unit overruns the line end (hires DDFSTRT
+    // $3C with DDFSTOP $DC, one unit past the hard stop) is carried into
+    // the next line, and the vertical flop's reset on DIWSTOP.V must drop
+    // that carried run: the line after the last display line fetches
+    // nothing. A per-row bar makes the per-line word accounting of the
+    // carried unit visible; a standard $3C/$D4 band is the control.
+    // Copperline kept the carried run going on the closed line and painted
+    // the row from memory past the plane (the AROS boot-screen stray-line
+    // regression class). vAmiga-verified byte-for-byte, drift included.
+    golden_ddfprobe_vspill => probe("ddfprobe-vspill", "ddfprobe-vspill.bin", 16.0);
     // Dual-playfield sprite priority: a sprite pixel is tested against the
     // BPLCON2 code of the playfield that wins the PF1-vs-PF2 comparison
     // (opacity, then PF2PRI), so where both fields are opaque the losing

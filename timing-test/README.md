@@ -440,7 +440,7 @@ refreshed (or a count sitting on an 8-iteration display-bucket edge flips a
 whole bar word). Re-bless and review the diff after a ROM refresh.
 
 Each probe is its own `#[test]`, so the harness runs the emulator boots in
-parallel on the available cores (the full suite of 39 takes ~20 s on an
+parallel on the available cores (the full suite of 45 takes ~20 s on an
 8-core host vs ~90 s sequentially).
 
 ### vAmiga AGA cross-check (2026-08-27)
@@ -623,6 +623,20 @@ verified against vAmiga 5), and
 `vdiwprobe-tieopen` (`DIWSTRT.V == DIWSTOP.V` set mid-frame over an already-open
 window continues displaying scanlines until the beam reaches the shared
 comparator line; verified against vAmiga), and
+`ddfprobe-vspill` (a bitplane fetch whose last unit overruns the line end:
+hires DDFSTRT `$3C` with DDFSTOP `$DC`, one unit past the `$D8` hard stop,
+puts the last fetch unit at `$DC..$E3`, one clock past the 227-clock PAL
+line, so BPRUN is still set when the line ends and the run is carried into
+the next line. The vertical flop's reset on `DIWSTOP.V` drops that carried
+run, so the line after the last display line fetches nothing; a standard
+`$3C/$D4` band is the control, a solid bar in each row's first word makes
+the per-line word accounting visible (the overrunning band's bar walks one
+word per row: the carried unit consumes 41 of its 42 words per line, as
+vAmiga does), and each plane is followed by all-ones marker rows so that a
+surviving fetch has something to show on the line after the band. The AROS
+boot-screen stray-line class, where amigavideo programs exactly this window
+and Copperline lit that line (the probe caught it repeating the band's last
+row); verified against vAmiga byte-for-byte), and
 `dpfprobe-aga` (Lisa's eight-plane dual playfield: planes 7/8 extend each
 field's index to four bits -- the Zool AGA decode class, where a 3-bit
 decode flips the probe's red/blue columns to magenta/green -- PF2 reads
