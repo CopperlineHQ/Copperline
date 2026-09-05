@@ -7,6 +7,19 @@ This chapter is the map; the following chapters zoom into the
 
 ## Source layout
 
+The debug-information loader maps ELF allocatable sections onto hunks in
+elf2hunk's section order. For relocatable ELF (`ET_REL`), whose sections can
+all have address zero, it assigns distinct internal 32-bit addresses and
+materializes DWARF and call-frame sections with `R_68K_32` / `R_68K_PC32`
+relocations applied. Section symbols and ordinary symbols retain their
+section identity; references to debug sections remain section offsets.
+RELA uses its explicit signed addend, while REL uses the stored big-endian
+word. These internal addresses map back to hunk offsets and then to the
+runtime bases reported by LoadSeg; guest memory is untouched. Linked ELF
+keeps its linker addresses and already-relocated section bytes, including
+when `--emit-relocs` retains relocation records. Unsupported relocations
+or invalid relocation targets/offsets produce a section-specific diagnostic.
+
 ```
 src/
   main.rs           # thin CLI binary: config load, boot

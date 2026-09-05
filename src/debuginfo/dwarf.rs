@@ -26,6 +26,8 @@ use gimli::{
 };
 use std::collections::HashMap;
 
+mod elf;
+
 type Slice<'a> = EndianSlice<'a, BigEndian>;
 
 /// DIE nesting the tree walk follows before giving up on a subtree.
@@ -261,33 +263,17 @@ fn unbias_debug_frame(frame: &[u8], bias: usize) -> Vec<u8> {
 
 /// Read the DWARF of the ELF `elf2hunk` converted into a program whose
 /// hunk table is `hunks`. Each allocatable, non-empty section became one
-/// hunk in section order, so the link map follows from the section
-/// headers.
+/// hunk in section order. Relocatable ELF sections get distinct debug
+/// addresses before relocation; linked ELFs retain their linker addresses.
 pub fn load_elf(bytes: &[u8], hunks: &[HunkMeta]) -> Result<(Loaded, LinkMap), String> {
-    use object::{Object as _, ObjectSection as _};
+    use object::Object as _;
     let file = object::File::parse(bytes).map_err(|e| format!("not an ELF: {e}"))?;
-    if file.is_little_endian() {
-        return Err("little-endian ELF: not a 68k program".into());
+    if file.is_little_endian() || file.architecture() != object::Architecture::M68k {
+        return Err("not a big-endian 68k ELF".into());
     }
-    let mut link = LinkMap::default();
+    let sections = elf::Sections::new(&file)?;
+    let link = &sections.link;
     let mut notes = Vec::new();
-    for section in file.sections() {
-        let alloc = match section.flags() {
-            object::SectionFlags::Elf { sh_flags, .. } => {
-                (sh_flags & object::elf::SHF_ALLOC).0 != 0
-            }
-            _ => false,
-        };
-        if !alloc || section.size() == 0 {
-            continue;
-        }
-        let hunk = link.segments.len() as u32;
-        link.segments.push(LinkSegment {
-            addr: section.address(),
-            size: section.size(),
-            hunk,
-        });
-    }
     if link.segments.len() != hunks.len() {
         notes.push(format!(
             "ELF has {} allocatable sections but the executable has {} hunks; addresses may \
@@ -299,28 +285,20 @@ pub fn load_elf(bytes: &[u8], hunks: &[HunkMeta]) -> Result<(Loaded, LinkMap), S
     let owned: Vec<(&'static str, Vec<u8>)> = SECTION_NAMES
         .iter()
         .map(|&name| {
-            let data = file
-                .section_by_name(&format!(".debug_{name}"))
-                .and_then(|s| s.uncompressed_data().ok())
-                .map(|d| d.into_owned())
-                .unwrap_or_default();
-            (name, data)
+            sections
+                .load(&file, &format!(".debug_{name}"))
+                .map(|data| (name, data))
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     let dwarf = load_dwarf(&owned)?;
     let addr_map = |addr: u64| link.to_hunk(addr);
     let static_map = |_name: &str, addr: u64| link.to_hunk(addr);
     let mut loaded = read_dwarf(&dwarf, &addr_map, &static_map, 0)?;
-    let frame = file
-        .section_by_name(".debug_frame")
-        .and_then(|s| s.uncompressed_data().ok())
-        .map(|d| d.into_owned())
-        .unwrap_or_default();
-    let eh = file.section_by_name(".eh_frame").and_then(|s| {
-        s.uncompressed_data()
-            .ok()
-            .map(|d| (d.into_owned(), s.address()))
-    });
+    let frame = sections.load(&file, ".debug_frame")?;
+    let eh = sections
+        .address(&file, ".eh_frame")
+        .map(|addr| sections.load(&file, ".eh_frame").map(|data| (data, addr)))
+        .transpose()?;
     if !frame.is_empty() || eh.as_ref().is_some_and(|(d, _)| !d.is_empty()) {
         loaded.cfi = Some(Cfi {
             debug_frame: frame,
@@ -328,7 +306,7 @@ pub fn load_elf(bytes: &[u8], hunks: &[HunkMeta]) -> Result<(Loaded, LinkMap), S
         });
     }
     loaded.notes.extend(notes);
-    Ok((loaded, link))
+    Ok((loaded, sections.link))
 }
 
 const SECTION_NAMES: &[&str] = &[
