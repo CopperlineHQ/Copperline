@@ -53,6 +53,7 @@ fn usage() -> &'static str {
      copperline-ctl --mcp [--info FILE | --connect ADDR --token TOKEN]\n       \
      copperline-ctl --dap [--info FILE | --connect ADDR --token TOKEN]\n       \
      copperline-ctl --dap-listen ADDR [--info FILE | --connect ADDR --token TOKEN]\n       \
+     copperline-ctl profile STATE [--rom ROM] --out PATH [--frames N] [--format native|bartman]\n       \
      copperline-ctl profile-report DIR --program PROG [--elf PROG.ELF] \
        --out FILE [--format chrome|bartman] [--per-frame] \
        [--source-map FROM=TO ...]\n       \
@@ -378,6 +379,110 @@ fn run_dap(options: &Options) -> ExitCode {
     }
 }
 
+fn run_state_profile() -> anyhow::Result<std::path::PathBuf> {
+    use anyhow::{anyhow, bail};
+    use copperline::profile::{ProfileOptions, ScreenshotMode};
+    let mut args = std::env::args().skip(2);
+    let input = std::path::PathBuf::from(
+        args.next()
+            .ok_or_else(|| anyhow!("profile requires a USS or CLSTATE file"))?,
+    );
+    let mut rom = None;
+    let mut out = None;
+    let mut frames = 1;
+    let mut bartman = false;
+    while let Some(arg) = args.next() {
+        let value = args
+            .next()
+            .ok_or_else(|| anyhow!("{arg} requires a value"))?;
+        match arg.as_str() {
+            "--rom" => rom = Some(std::path::PathBuf::from(value)),
+            "--out" => out = Some(std::path::PathBuf::from(value)),
+            "--frames" => frames = value.parse::<u64>()?,
+            "--format" => match value.as_str() {
+                "native" => bartman = false,
+                "bartman" => bartman = true,
+                _ => bail!("format must be native or bartman"),
+            },
+            _ => bail!("unexpected profile argument {arg}"),
+        }
+    }
+    if !(1..=100).contains(&frames) {
+        bail!("profile requires 1..100 frames");
+    }
+    let out =
+        out.ok_or_else(|| anyhow!("profile requires --out DIR (native) or FILE (bartman)"))?;
+    let mut cfg = copperline::config::Config::default();
+    let uss = input
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("uss"));
+    let state = if uss {
+        Some(copperline::uss::UssFile::read(&input)?)
+    } else {
+        None
+    };
+    if let Some(state) = &state {
+        state.configure(&mut cfg)?;
+        cfg.rom_path = rom.ok_or_else(|| anyhow!("USS profiling requires --rom KICKSTART"))?;
+    }
+    let mut emu = copperline::emulator::build_machine(
+        &cfg,
+        Box::new(copperline::audio::NullSink),
+        false,
+        !uss,
+    )?;
+    if let Some(state) = state {
+        for warning in &state.warnings {
+            eprintln!("warning: {warning}");
+        }
+        state.load(&mut emu)?;
+    } else {
+        emu.load_state(&input)?;
+    }
+    if bartman {
+        copperline::profile::bartman::capture(
+            &mut emu,
+            &copperline::profile::bartman::Request {
+                frames: frames as u32,
+                unwind: None,
+                out: out.clone(),
+            },
+            |line| {
+                eprint!("{line}");
+                Ok(())
+            },
+        )?;
+    } else {
+        emu.profile_start(ProfileOptions {
+            path: out.clone(),
+            frames,
+            slots: true,
+            memory: true,
+            screenshots: ScreenshotMode::Every,
+            pc_samples: true,
+            samples: true,
+            registers: true,
+            unwind: None,
+            relocation_bases: Vec::new(),
+            code_ranges: Vec::new(),
+            trigger: None,
+        })?;
+        while emu.profile_status_value()["frames_written"]
+            .as_u64()
+            .unwrap_or(0)
+            < frames
+        {
+            emu.step_frame()?;
+            if emu.machine.cpu_double_faulted() {
+                bail!("CPU double fault during state profile");
+            }
+        }
+        let machine = serde_json::to_value(emu.machine_descriptor())?;
+        emu.profile_stop(machine, serde_json::json!([]))?;
+    }
+    Ok(out)
+}
+
 fn run_profile_report() -> Result<Vec<std::path::PathBuf>, String> {
     use copperline::profile::report::{ReportFormat, ReportOptions};
 
@@ -556,6 +661,18 @@ fn main() -> ExitCode {
             }
             Err(message) => {
                 eprintln!("copperline-ctl: exe2adf: {message}");
+                ExitCode::from(2)
+            }
+        };
+    }
+    if std::env::args().nth(1).as_deref() == Some("profile") {
+        return match run_state_profile() {
+            Ok(path) => {
+                println!("{}", path.display());
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("copperline-ctl: profile: {error:#}");
                 ExitCode::from(2)
             }
         };

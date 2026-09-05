@@ -95,3 +95,9 @@ code --install-extension copperline-debug-*.vsix
 ```
 
 For development, symlink this directory into `~/.vscode/extensions/`.
+
+
+The Bartman template includes its freestanding 68000 runtime operations
+(`runtime.c`) because the extension's bundled compiler does not include
+libc/libgcc archives. Its formatter entry point supports both ELF and hunk
+symbol naming conventions.

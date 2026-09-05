@@ -130,6 +130,7 @@ pub mod timestamp;
 pub mod timetravel;
 pub mod toccata;
 pub mod uaelib;
+pub mod uss;
 pub mod video;
 pub mod warpboot;
 pub mod wasm_manifest;

@@ -78,7 +78,7 @@ The target starts halted at reset. The stub supports:
 - Register reading and writing (`d0`-`d7`, `a0`-`a5`, `fp`, `sp`, `ps`, `pc`)
 - Memory read and write operations
 - Breakpoints plus write (`Z2`), read (`Z3`), and access (`Z4`) watchpoints
-- Single-stepping and continuation
+- Single-stepping and continuation; forced PC writes discard stale instruction prefetch
 - Ctrl-C interrupt handling
 - Reverse execution (`reverse-step`, `reverse-continue`)
 - Program relocation querying (`qOffsets`) and dynamic library tracking (`qXfer:libraries:read`)
@@ -154,3 +154,83 @@ The GDB stub integrates with Copperline's snapshot ring buffer:
 | `reverse-step` | Reconstructs and steps backward by one instruction |
 | `reverse-continue` | Executes backward until a preceding GDB breakpoint is reached |
 | `monitor last-writer ADDR` | Finds the last instruction that modified memory at `ADDR` |
+
+
+## Bartman extension backend
+
+The optional [Copperline backend patch](https://github.com/BartmanAbyss/vscode-amiga-debug/pull/307) for
+[Bartman's Amiga C/C++ extension](https://github.com/BartmanAbyss/vscode-amiga-debug)
+adds these VS Code settings:
+
+```json
+{
+  "amiga.emulator": "copperline",
+  "amiga.copperline-path": "/path/to/copperline"
+}
+```
+
+Use the extension's usual launch configuration (`program` is the ELF path
+without its extension, beside a matching `.exe` hunk executable). The backend
+keeps the extension's patched `m68k-amiga-elf-gdb`, maps its model and memory
+presets to Copperline CLI arguments, and seeds the guest RTC from the host
+clock. Use the bundled AROS ROM (omit `kickstart`) or Kickstart 2.0 or
+newer for `--run`. This requires the backend patch until it is available
+upstream.
+
+The equivalent manual command is:
+
+```sh
+copperline --factory --model A500 --chip 512K --slow 512K \
+  --run build/demo.exe --gdb-gui :2345 --gdb-dialect bartman
+```
+
+`--gdb-dialect bartman` works with `--gdb` and `--gdb-gui`. Standard is the
+default; the switch explicitly selects the patched GDB's wire contract:
+
+- `qOffsets` lists every hunk base separated by semicolons. With `--run`, the
+  initial stop query finishes loading the executable before replying, so
+  GDB caches registers and relocates symbols from the same machine state.
+- A software breakpoint at `$FFFFFFFF` is a one-shot return from ROM.
+- Stops use `S0A` for address error, `S04` for illegal instruction, and `S05`
+  otherwise. Exception catches are installed after the run target loads.
+  Signal-bearing continue/step requests resume the CPU after the exception;
+  they do not inject a second exception into the whole-machine target.
+- Registers are D0-D7, A0-A7, SR, PC, each represented by a 32-bit word.
+- `qAttached` returns `1`; `k` detaches; `monitor reset` restores the saved program-entry state after a `--run`
+  attachment, preserving symbol addresses; without an entry snapshot it resets
+  the machine.
+- Guest debug text and monitor messages have a `DBG: ` prefix.
+
+```gdb
+(gdb) monitor profile 2 "build/demo.unwind" "/tmp/demo.profile"
+```
+
+This runs a bounded capture of 1-100 frames, sends live `PRF: n/N` console
+packets, and writes the mixed-endian binary consumed by the extension's
+`ProfileFile` reader. Use an empty unwind path (`""`) for leaf-only sampling.
+The writer finishes the current partial frame before snapshotting replay
+memory, then captures complete frames. It publishes the output only on
+success and restores its instrumentation on failure. Both transports
+suspend their session-owned exception catches and memory watches during
+capture, restoring them and their watch baselines afterward.
+
+The legacy binary has a fixed PAL 227×313 DMA grid and carries chip and slow
+RAM only. NTSC and programmable geometry use Copperline's native
+[profile captures](profiling.md). The upstream `.uss` editor's UAE launch
+path is separate; use [USS import](../guide/winuae-state.md) for those states.
+
+
+To exercise attach ordering, exact `main` and ROM-exit stops, a two-frame
+capture, restart, and illegal-instruction/address-error signals using the
+real patched GDB:
+
+```sh
+python3 tools/check-bartman-gdb.py \
+  --gdb /path/to/vscode-amiga-debug/bin/darwin/opt/bin/m68k-amiga-elf-gdb \
+  --program build/demo.exe --elf build/demo.elf --out /tmp/gdb-check
+```
+
+An optional `--unwind FILE` uses the extension's compact table; `--gui`
+checks the windowed transport, including an exact breakpoint stop when
+automatic launch warp ends at the same boundary. The output directory contains emulator/GDB
+logs and the binary profile, suitable for `tools/check-bartman-profile.cjs`.

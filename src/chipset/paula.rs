@@ -563,6 +563,34 @@ pub struct Paula {
 }
 
 impl Paula {
+    /// Restore the public Paula DMA state in a validated USS AUDn chunk.
+    pub(crate) fn import_uss_audio(&mut self, index: usize, bytes: &[u8]) {
+        let ch = &mut self.chans[index];
+        ch.state = match bytes[0] {
+            1 | 2 | 3 | 5 => bytes[0],
+            _ => AUD_IDLE,
+        };
+        ch.vol = bytes[1].min(64);
+        ch.audvol = ch.vol;
+        ch.intreq2 = bytes[2] != 0;
+        ch.sm_dr = bytes[3] & 1 != 0;
+        ch.agnus_dr = ch.sm_dr;
+        ch.len = crate::uss::be16(bytes, 4);
+        ch.audlen = crate::uss::be16(bytes, 6);
+        ch.per = crate::uss::be16(bytes, 8);
+        ch.dat_latch = crate::uss::be16(bytes, 10);
+        ch.auddat = ch.dat_latch;
+        ch.buffer = ch.dat_latch;
+        ch.lc = crate::uss::be32(bytes, 12);
+        ch.ptr = crate::uss::be32(bytes, 16);
+        ch.percnt = (crate::uss::be32(bytes, 20) / 512).max(1);
+        ch.current = if ch.state == 3 {
+            ch.buffer as i8
+        } else {
+            (ch.buffer >> 8) as i8
+        };
+    }
+
     pub fn new(serial: Box<dyn SerialSink>, audio: Box<dyn AudioSink>) -> Self {
         Self {
             serper: 0,

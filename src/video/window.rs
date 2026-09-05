@@ -5033,9 +5033,14 @@ impl ApplicationHandler for App {
                         }
                     }
                 }
-                // The warp-launch gate ends its warp the frame the guest
-                // loads the target program.
-                if self.poll_warp_launch() {
+                // Surface a CPU stop before any host gate can end this
+                // burst. Otherwise a simultaneous warp transition defers the
+                // pending stop until the next pass, which retires one extra
+                // instruction before the debugger receives it.
+                let stopped = self.surface_debug_stop();
+                // Poll even when stopped so automatic warp ends at the same
+                // load boundary and stays coherent with the paused target.
+                if self.poll_warp_launch() || stopped {
                     burst_complete = false;
                     break;
                 }
@@ -5050,13 +5055,6 @@ impl ApplicationHandler for App {
                 // only: a flip on a speculative frame would abandon the
                 // run-ahead anchor mid-burst.
                 if !speculative && self.service_uaelib() {
-                    burst_complete = false;
-                    break;
-                }
-                // A breakpoint/watchpoint hit pauses the machine and brings
-                // the debugger window up with the reason; end the burst so the
-                // stop surfaces at the frame where it happened.
-                if self.surface_debug_stop() {
                     burst_complete = false;
                     break;
                 }

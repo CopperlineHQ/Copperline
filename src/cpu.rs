@@ -1597,13 +1597,36 @@ impl M68kMachine {
         })
     }
 
+    /// Restore the architectural CPU state from a WinUAE save state.
+    pub(crate) fn import_uss_cpu(&mut self, state: &crate::uss::CpuState) {
+        for (reg, &value) in state.registers.iter().enumerate() {
+            self.cpu.dar[reg] = value;
+        }
+        self.cpu.set_sr(state.sr);
+        self.cpu.write_control_register(0x800, state.usp);
+        self.cpu.write_control_register(0x804, state.isp);
+        self.cpu.write_control_register(0x803, state.msp);
+        self.cpu.dfc = state.dfc;
+        self.cpu.sfc = state.sfc;
+        self.cpu.vbr = state.vbr;
+        self.cpu.caar = state.caar;
+        self.cpu.cacr = state.cacr;
+        self.cpu.jump(state.pc);
+        self.cpu.invalidate_prefetch();
+        self.cpu.stopped = u32::from(state.stopped);
+        self.cpu_clock_carry = 0;
+    }
+
     /// Set one GDB-style core register: D0-D7, A0-A7, SR, PC.
     pub fn debug_set_register(&mut self, reg: usize, value: u32) -> bool {
         match reg {
             0..=7 => self.cpu.set_d(reg, value),
             8..=15 => self.cpu.set_a(reg - 8, value),
             16 => self.cpu.set_sr(value as u16),
-            17 => self.cpu.pc = value & self.bus.address_mask,
+            17 => {
+                self.cpu.pc = value & self.bus.address_mask;
+                self.cpu.invalidate_prefetch();
+            }
             _ => return false,
         }
         true
@@ -4906,6 +4929,22 @@ mod tests {
 
     fn machine_with_program(pc: u32, words: &[u16]) -> Result<M68kMachine> {
         machine_with_program_model(pc, words, CpuModel::M68000)
+    }
+
+    #[test]
+    fn debugger_pc_redirect_discards_the_old_instruction_prefetch() -> Result<()> {
+        let mut machine = machine_with_program(0x100, &[0x4e71, 0x7001, 0x4e71])?;
+        write_program(machine.bus_mut(), 0x200, &[0x7002, 0x4e71]);
+        machine.step_slice(1)?; // NOP prefetches MOVEQ #1 at the old PC.
+        assert!(machine.debug_set_register(17, 0x200));
+        machine.step_slice(1)?;
+        assert_eq!(
+            machine.d(0),
+            2,
+            "forced PC must fetch the new target opcode"
+        );
+        assert_eq!(machine.pc(), 0x202);
+        Ok(())
     }
 
     // Replicate the timing-test ROM's row 10/11/18 inner loop through the real

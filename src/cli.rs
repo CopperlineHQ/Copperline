@@ -50,6 +50,7 @@ pub struct CliArgs {
     /// `--load-state PATH`: restore a save state before entering the
     /// event loop, resuming from its emulated timeline.
     pub load_state: Option<PathBuf>,
+    pub load_uss: Option<PathBuf>,
     /// `--benchmark-until SECS`: run frames directly, without opening a
     /// window, until the absolute emulated-time target is reached.
     pub benchmark_until: Option<f32>,
@@ -63,6 +64,7 @@ pub struct CliArgs {
     /// normal windowed session instead of owning the machine, the way
     /// `--control-gui` attaches the control server.
     pub gdb_gui: Option<String>,
+    pub gdb_dialect: Option<String>,
     /// `--control ADDR`: run the headless Copperline Control Protocol
     /// server (JSON-RPC over loopback TCP), pausing at reset until a
     /// client resumes. `--control-token`/`--control-info` refine it.
@@ -352,9 +354,11 @@ where
     let mut screenshot_after: Vec<(f32, PathBuf)> = Vec::new();
     let mut save_state_after: Vec<(f32, PathBuf)> = Vec::new();
     let mut load_state: Option<PathBuf> = None;
+    let mut load_uss = None;
     let mut benchmark_until: Option<f32> = None;
     let mut gdb: Option<String> = None;
     let mut gdb_gui: Option<String> = None;
+    let mut gdb_dialect = None;
     let mut control_listen: Option<String> = None;
     let mut control_gui_listen: Option<String> = None;
     let mut control_token: Option<String> = None;
@@ -1022,6 +1026,12 @@ where
                 let path = args.next().ok_or_else(|| anyhow!(USAGE))?;
                 save_state_after.push((secs, PathBuf::from(path)));
             }
+            "--load-uss" => {
+                load_uss = Some(PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| anyhow!("--load-uss requires a path"))?,
+                ));
+            }
             "--load-state" => {
                 let v = args
                     .next()
@@ -1044,6 +1054,15 @@ where
                     .next()
                     .ok_or_else(|| anyhow!("--gdb requires ADDR, :PORT, or PORT"))?;
                 gdb = Some(listen);
+            }
+            "--gdb-dialect" => {
+                let dialect = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--gdb-dialect requires standard or bartman"))?;
+                if !matches!(dialect.as_str(), "standard" | "bartman") {
+                    return Err(anyhow!("--gdb-dialect requires standard or bartman"));
+                }
+                gdb_dialect = Some(dialect);
             }
             "--gdb-gui" => {
                 let listen = args
@@ -1302,9 +1321,11 @@ where
         screenshot_after,
         save_state_after,
         load_state,
+        load_uss,
         benchmark_until,
         gdb,
         gdb_gui,
+        gdb_dialect,
         control: control_listen,
         control_gui: control_gui_listen,
         control_token,
@@ -1459,12 +1480,14 @@ fn print_help() {
          --screenshot-after SECS PATH   save a PNG to PATH after SECS emulated seconds, then exit\n  \
          --save-state-after SECS PATH   write a save state to PATH after SECS emulated seconds,\n  \
          \x20                            then keep running\n  \
+         --load-uss PATH                import a WinUAE state; requires its matching Kickstart\n  \
          --load-state PATH              restore a save state before starting, resuming from\n  \
          \x20                            its emulated timeline\n  \
          --benchmark-until SECS         run frames with no window until absolute emulated\n  \
          \x20                            time SECS, report counters, then exit\n  \
          --gdb ADDR                     run a headless GDB remote server on ADDR,\n  \
          \x20                            :PORT, or PORT; port-only forms bind 127.0.0.1\n  \
+         --gdb-dialect DIALECT         standard (default) or bartman\n  \
          --gdb-gui ADDR                 attach the GDB remote server to the normal window\n  \
          --control ADDR                 run the headless JSON-RPC control server on ADDR\n  \
          \x20                            (port 0 picks a free port; see docs/debugger/control.md)\n  \

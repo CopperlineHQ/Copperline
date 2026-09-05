@@ -17,6 +17,7 @@ use std::net::{TcpListener, TcpStream};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub listen: String,
+    pub bartman: bool,
     pub reverse_budget_mb: usize,
     pub reverse_interval_frames: u64,
     /// `--run` + `--gdb`: stop (once) the moment the guest OS loads a
@@ -28,6 +29,7 @@ impl Config {
     pub fn new(listen: String) -> Self {
         Self {
             listen,
+            bartman: false,
             reverse_budget_mb: crate::envcfg::var("COPPERLINE_DBG_RR_BUDGET_MB")
                 .and_then(|s| s.trim().parse::<usize>().ok())
                 .unwrap_or(crate::debugger::RR_DEFAULT_BUDGET_MB),
@@ -48,7 +50,7 @@ pub fn run(mut emu: Emulator, config: Config) -> Result<()> {
     emu.enable_time_travel(config.reverse_budget_mb, config.reverse_interval_frames);
     emu.debug_ensure_time_travel_anchor()?;
 
-    serve(listener, emu, config.stop_on_load)
+    serve_dialect(listener, emu, config.stop_on_load, config.bartman)
 }
 
 /// Accept GDB connections one at a time against the same machine. A
@@ -56,7 +58,16 @@ pub fn run(mut emu: Emulator, config: Config) -> Result<()> {
 /// for the next client -- reattaching re-runs `qOffsets`, which is the
 /// documented way to pick up a program loaded mid-session -- while
 /// GDB's `kill` ends the server.
-fn serve(listener: TcpListener, mut emu: Emulator, stop_on_load: Option<String>) -> Result<()> {
+#[cfg(test)]
+fn serve(listener: TcpListener, emu: Emulator, stop_on_load: Option<String>) -> Result<()> {
+    serve_dialect(listener, emu, stop_on_load, false)
+}
+fn serve_dialect(
+    listener: TcpListener,
+    mut emu: Emulator,
+    stop_on_load: Option<String>,
+    bartman: bool,
+) -> Result<()> {
     loop {
         let (stream, peer) = listener.accept().context("accepting GDB connection")?;
         log::info!("gdb: connection from {peer}");
@@ -65,6 +76,7 @@ fn serve(listener: TcpListener, mut emu: Emulator, stop_on_load: Option<String>)
         // client wants the same break-at-entry, and the fresh tracker
         // absorbs an already-running program so nothing fires spuriously.
         let mut session = Session::new(emu, stream, stop_on_load.clone());
+        session.core.bartman = bartman;
         let end = session.run()?;
         session.clear_debug_hardware();
         emu = session.emu;
@@ -89,6 +101,7 @@ struct Session {
     no_ack: bool,
     core: GdbCore,
     watch_words: Vec<(u32, crate::debugger::WatchAccess)>,
+    catches: Vec<u16>,
 }
 
 impl Session {
@@ -100,6 +113,7 @@ impl Session {
             no_ack: false,
             core,
             watch_words: Vec::new(),
+            catches: Vec::new(),
         }
     }
 
@@ -113,7 +127,14 @@ impl Session {
                 self.no_ack = true;
                 continue;
             }
-            let action = self.core.handle_packet(&mut self.emu, &packet)?;
+            let action = match self.core.handle_packet(&mut self.emu, &packet) {
+                Ok(action) => action,
+                Err(error) => {
+                    self.send_console(&format!("DBG: {error:#}\n"))?;
+                    self.send_packet("E01")?;
+                    continue;
+                }
+            };
             self.sync_watchpoints();
             let reply = match action {
                 CoreReply::Packet(reply) => reply,
@@ -127,6 +148,13 @@ impl Session {
                     return Ok(SessionEnd::Detached);
                 }
                 CoreReply::Kill => return Ok(SessionEnd::Killed),
+                CoreReply::Profile(request) => match self.capture_profile(&request) {
+                    Ok(()) => "OK".into(),
+                    Err(error) => {
+                        self.send_console(&format!("DBG: {error:#}\n"))?;
+                        "E01".into()
+                    }
+                },
             };
             self.flush_console()?;
             self.send_packet(&reply)?;
@@ -143,10 +171,39 @@ impl Session {
         Ok(())
     }
 
+    fn capture_profile(&mut self, request: &crate::profile::bartman::Request) -> Result<()> {
+        // Like the GUI transport, suspend only this session's machine-side
+        // stops while the bounded capture owns execution. Restore them even
+        // if the writer or its progress connection fails.
+        self.remove_owned_points();
+        let stream = &mut self.stream;
+        let result = crate::profile::bartman::capture(&mut self.emu, request, |line| {
+            let payload = format!("O{}", hex_encode(line.as_bytes()));
+            write!(stream, "${payload}#{:02x}", checksum(payload.as_bytes()))?;
+            stream.flush()?;
+            Ok(())
+        });
+        self.core.refresh_watchpoints(&self.emu);
+        self.sync_watchpoints();
+        result
+    }
+
     /// Drop the bus-side debug state this session installed (register
     /// watches, beam traps, Copper breakpoints), so a stale hit cannot
     /// stop the next client's first continue.
     fn clear_debug_hardware(&mut self) {
+        self.remove_owned_points();
+        self.emu.bus_mut().set_ui_reg_watches(&[]);
+        self.emu.bus_mut().ui_clear_beam_traps();
+        self.emu.bus_mut().ui_clear_copper_breaks();
+    }
+
+    fn remove_owned_points(&mut self) {
+        for vector in self.catches.drain(..) {
+            if self.emu.machine.ui_breaks().catches.contains(&vector) {
+                self.emu.machine.ui_toggle_catch(vector);
+            }
+        }
         for (addr, _) in self.watch_words.drain(..) {
             if self
                 .emu
@@ -159,12 +216,17 @@ impl Session {
                 self.emu.machine.ui_toggle_watch(addr);
             }
         }
-        self.emu.bus_mut().set_ui_reg_watches(&[]);
-        self.emu.bus_mut().ui_clear_beam_traps();
-        self.emu.bus_mut().ui_clear_copper_breaks();
     }
 
     fn sync_watchpoints(&mut self) {
+        if self.core.bartman && self.core.run_stop.is_none() {
+            for vector in [3, 4, 39] {
+                if !self.emu.machine.ui_breaks().catches.contains(&vector) {
+                    self.emu.machine.ui_toggle_catch(vector);
+                    self.catches.push(vector);
+                }
+            }
+        }
         let mask = self.emu.machine.ui_addr_mask();
         let (desired, _) = self.core.machine_watch_words(mask);
         for (addr, access) in self.watch_words.clone() {
@@ -261,6 +323,14 @@ impl Session {
     fn continue_forward(&mut self) -> Result<String> {
         loop {
             self.core.step_once(&mut self.emu)?;
+            if self.core.bartman {
+                if let Some(uaelib) = self.emu.bus_mut().uaelib.as_mut() {
+                    let lines = uaelib.take_console_lines();
+                    for line in lines {
+                        self.send_console(&format!("DBG: {line}\n"))?;
+                    }
+                }
+            }
             if let Some(stop) = self.core.check_stop(&mut self.emu)? {
                 self.core.stop = stop;
                 return Ok(self.core.stop_reply());
@@ -298,6 +368,55 @@ mod tests {
     use super::*;
     use crate::debugger::parse_custom_reg;
     use crate::gdbstub::testkit::{emulator_with_loadseg_program, GdbClient};
+
+    #[test]
+    fn profile_suspends_owned_exception_and_memory_stops_then_restores_them() -> Result<()> {
+        let mut emu = emulator_with_loadseg_program();
+        // Repeated TRAP #7, handled by a RAM write and RTE. Both the exception
+        // catch and the write watch must be suspended throughout capture.
+        emu.machine
+            .debug_write_memory(0x100, &[0x4e, 0x47, 0x60, 0xfc]);
+        emu.machine
+            .debug_write_memory(39 * 4, &0x1100u32.to_be_bytes());
+        emu.machine
+            .debug_write_memory(0x1100, &[0x33, 0xfc, 0, 1, 0, 0, 0x20, 0, 0x4e, 0x73]);
+        emu.machine.debug_set_register(17, 0x100);
+        emu.machine.ui_toggle_catch(9); // independently owned; preserve it
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let _client = TcpStream::connect(listener.local_addr()?)?;
+        let (stream, _) = listener.accept()?;
+        let mut session = Session::new(emu, stream, None);
+        session.core.bartman = true;
+        session.core.handle_packet(&mut session.emu, "Z2,2000,2")?;
+        session.sync_watchpoints();
+        let dir = std::env::temp_dir().join(format!(
+            "copperline-bartman-session-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir(&dir)?;
+        let mut request = crate::profile::bartman::Request {
+            frames: 1,
+            unwind: None,
+            out: dir.join("capture.profile"),
+        };
+        session.capture_profile(&request)?;
+        assert!(request.out.is_file());
+        assert_eq!(session.emu.machine.debug_read_memory(0x2000, 2), [0, 1]);
+        for vector in [3, 4, 9, 39] {
+            assert!(session.emu.machine.ui_breaks().catches.contains(&vector));
+        }
+        assert_eq!(session.watch_words.len(), 1);
+        request.unwind = Some(dir.join("missing.unwind"));
+        assert!(session.capture_profile(&request).is_err());
+        for vector in [3, 4, 9, 39] {
+            assert!(session.emu.machine.ui_breaks().catches.contains(&vector));
+        }
+        assert_eq!(session.watch_words.len(), 1);
+        assert_eq!(session.continue_forward()?, "S05"); // restored write watch
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
 
     #[test]
     fn listen_addr_defaults_to_loopback_for_port_forms() -> Result<()> {

@@ -53,6 +53,7 @@ pub(crate) struct Watchpoint {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StopReason {
     Attached,
+    Exception(u16),
     Step,
     Breakpoint,
     Watchpoint(u32, crate::debugger::WatchAccess),
@@ -76,6 +77,9 @@ pub(crate) enum StopReason {
 /// drain. Console output (qRcmd results, loadseg notices) accumulates as
 /// data for the driver to deliver as `O` packets.
 pub(crate) struct GdbCore {
+    pub(crate) bartman: bool,
+    pub(crate) outside_rom: bool,
+    bartman_entry: Option<Vec<u8>>,
     pub(crate) breakpoints: Vec<u32>,
     pub(crate) watchpoints: Vec<Watchpoint>,
     pub(crate) reg_watches: Vec<u16>,
@@ -109,6 +113,7 @@ pub(crate) enum CoreReply {
     Disconnect,
     /// `k`.
     Kill,
+    Profile(crate::profile::bartman::Request),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -135,6 +140,9 @@ impl GdbCore {
             crate::amigaos::with_bus_memory(emu.bus(), |os| tracker.arm(os));
         }
         Self {
+            bartman: false,
+            outside_rom: false,
+            bartman_entry: None,
             breakpoints: Vec::new(),
             watchpoints: Vec::new(),
             reg_watches: Vec::new(),
@@ -151,7 +159,15 @@ impl GdbCore {
 
     /// The console lines queued since the last take, in emission order.
     pub(crate) fn take_console(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.console)
+        let lines = std::mem::take(&mut self.console);
+        if self.bartman {
+            lines
+                .into_iter()
+                .map(|text| text.lines().map(|line| format!("DBG: {line}\n")).collect())
+                .collect()
+        } else {
+            lines
+        }
     }
 
     /// One machine step on the driver's behalf (the continue loop, and
@@ -161,6 +177,16 @@ impl GdbCore {
     }
 
     pub(crate) fn handle_packet(&mut self, emu: &mut Emulator, packet: &str) -> Result<CoreReply> {
+        // GDB can read and cache registers before asking qOffsets. Complete
+        // the launch at the initial stop query so PC and relocation describe
+        // the same state. No asynchronous console packets accompany this query.
+        if self.bartman
+            && packet == "?"
+            && self.run_stop.is_some()
+            && self.query_offsets(emu) == "E01"
+        {
+            return Ok(CoreReply::Packet("E01".into()));
+        }
         let reply = match packet {
             "!" => "OK".to_string(),
             "?" => self.stop_reply(),
@@ -169,9 +195,13 @@ impl GdbCore {
             "qAttached" | "qAttached:1" => "1".to_string(),
             "qfThreadInfo" => "m1".to_string(),
             "qsThreadInfo" => "l".to_string(),
+            "vCont?" if self.bartman => "vCont;c;C;s;S".to_string(),
             "vCont?" => "vCont;c;s".to_string(),
             "D" | "D;1" => return Ok(CoreReply::Disconnect),
-            "k" => return Ok(CoreReply::Kill),
+            "k" => return Ok(if self.bartman { CoreReply::Disconnect } else { CoreReply::Kill }),
+            _ if packet.starts_with("qSupported") && self.bartman => {
+                "PacketSize=4000;QStartNoAckMode+;swbreak+;hwbreak+;vContSupported+".to_string()
+            }
             _ if packet.starts_with("qSupported") => {
                 "PacketSize=4000;QStartNoAckMode+;qXfer:features:read+;qXfer:libraries:read+;hwbreak+;ReverseStep+;ReverseContinue+".to_string()
             }
@@ -185,6 +215,9 @@ impl GdbCore {
             _ if packet.starts_with("qRcmd,") => {
                 let command = String::from_utf8(hex_decode(&packet[6..])?)
                     .context("decoding monitor command")?;
+                if self.bartman && command.split_whitespace().next() == Some("profile") {
+                    return Ok(CoreReply::Profile(crate::profile::bartman::Request::parse(&command)?));
+                }
                 let output = self.handle_monitor(emu, command.trim())?;
                 self.console.push(output);
                 "OK".to_string()
@@ -206,6 +239,30 @@ impl GdbCore {
             }
             _ if packet.starts_with("z2,") || packet.starts_with("z3,") || packet.starts_with("z4,") => {
                 self.remove_watchpoint(emu, packet)?
+            }
+            _ if self.bartman && (packet.starts_with('C') || packet.starts_with('S')) => {
+                let (signal, address) = packet[1..].split_once(';').map_or(
+                    (&packet[1..], None), |(signal, address)| (signal, Some(address)),
+                );
+                validate_resume_signal(signal)?;
+                if let Some(address) = address {
+                    emu.machine.debug_set_register(17, parse_hex_u32(address)?);
+                }
+                return Ok(CoreReply::Resume(if packet.starts_with('S') {
+                    ResumeRequest::Step
+                } else {
+                    ResumeRequest::Continue
+                }));
+            }
+            _ if self.bartman && (packet.starts_with("vCont;C") || packet.starts_with("vCont;S")) => {
+                let action = packet[6..].split(';').next().unwrap();
+                let signal = action[1..].split(':').next().unwrap();
+                validate_resume_signal(signal)?;
+                return Ok(CoreReply::Resume(if action.starts_with('S') {
+                    ResumeRequest::Step
+                } else {
+                    ResumeRequest::Continue
+                }));
             }
             _ if packet.starts_with('s') => {
                 if let Some(addr) = packet.strip_prefix('s').filter(|s| !s.is_empty()) {
@@ -235,6 +292,14 @@ impl GdbCore {
     }
 
     pub(crate) fn stop_reply(&self) -> String {
+        if self.bartman {
+            return match self.stop {
+                StopReason::Exception(3) => "S0A",
+                StopReason::Exception(4) => "S04",
+                _ => "S05",
+            }
+            .to_string();
+        }
         match &self.stop {
             StopReason::Watchpoint(addr, access) => {
                 let key = match access {
@@ -299,6 +364,20 @@ impl GdbCore {
         if len > MAX_PACKET_PAYLOAD_BYTES {
             return Ok("E01".to_string());
         }
+        if self.bartman && addr >= 0x00df_f000 && u64::from(addr) + len as u64 <= 0x00df_f200 {
+            let bytes: Vec<_> = (0..len)
+                .map(|i| {
+                    let offset = ((addr + i as u32) & 0x1ff) as u16;
+                    let word = emu.bus().debug_custom_word(offset & !1).unwrap_or(0);
+                    if offset & 1 == 0 {
+                        (word >> 8) as u8
+                    } else {
+                        word as u8
+                    }
+                })
+                .collect();
+            return Ok(hex_encode(&bytes));
+        }
         Ok(hex_encode(&emu.machine.debug_read_memory(addr, len)))
     }
 
@@ -336,13 +415,21 @@ impl GdbCore {
 
     fn add_breakpoint(&mut self, emu: &Emulator, packet: &str) -> Result<String> {
         let (addr, _) = parse_z_packet(packet)?;
-        self.add_breakpoint_addr(addr & emu.machine.ui_addr_mask());
+        if self.bartman && addr == u32::MAX {
+            self.outside_rom = true;
+        } else {
+            self.add_breakpoint_addr(addr & emu.machine.ui_addr_mask());
+        }
         Ok("OK".to_string())
     }
 
     fn remove_breakpoint(&mut self, emu: &Emulator, packet: &str) -> Result<String> {
         let (addr, _) = parse_z_packet(packet)?;
-        self.remove_breakpoint_addr(addr & emu.machine.ui_addr_mask());
+        if self.bartman && addr == u32::MAX {
+            self.outside_rom = false;
+        } else {
+            self.remove_breakpoint_addr(addr & emu.machine.ui_addr_mask());
+        }
         Ok("OK".to_string())
     }
 
@@ -413,14 +500,26 @@ impl GdbCore {
     }
 
     pub(crate) fn check_stop(&mut self, emu: &mut Emulator) -> Result<Option<StopReason>> {
-        if let Some(crate::debugger::DebugStop::Watch { addr, access, .. }) =
-            emu.machine.take_ui_debug_stop()
+        if let Some(stop) = emu.machine.take_ui_debug_stop() {
+            match stop {
+                crate::debugger::DebugStop::Watch { addr, access, .. } => {
+                    let access = self
+                        .watch_access_at(addr, emu.machine.ui_addr_mask())
+                        .unwrap_or(access);
+                    self.refresh_watchpoints(emu);
+                    return Ok(Some(StopReason::Watchpoint(addr, access)));
+                }
+                crate::debugger::DebugStop::Exception { vector, .. } => {
+                    return Ok(Some(StopReason::Exception(vector)))
+                }
+                _ => {}
+            }
+        }
+        if self.outside_rom
+            && !(crate::memory::ROM_BASE as u32..=0x00ff_ffff).contains(&emu.machine.pc())
         {
-            let access = self
-                .watch_access_at(addr, emu.machine.ui_addr_mask())
-                .unwrap_or(access);
-            self.refresh_watchpoints(emu);
-            return Ok(Some(StopReason::Watchpoint(addr, access)));
+            self.outside_rom = false;
+            return Ok(Some(StopReason::Breakpoint));
         }
         if emu.bus_mut().take_ui_reg_hit().is_some() {
             return Ok(Some(StopReason::RegisterWatch));
@@ -527,7 +626,7 @@ impl GdbCore {
             .find_map(|(word, access)| (word == addr).then_some(access))
     }
 
-    fn refresh_watchpoints(&mut self, emu: &Emulator) {
+    pub(crate) fn refresh_watchpoints(&mut self, emu: &Emulator) {
         for watch in &mut self.watchpoints {
             watch.last = emu.machine.debug_read_memory(watch.addr, watch.len);
         }
@@ -570,9 +669,47 @@ impl GdbCore {
     /// usual data hunk of an amiga-gcc build) becomes DataSeg. Empty
     /// reply (packet unsupported) when no process seglist is walkable,
     /// so plain ROM-level sessions are unaffected.
-    fn query_offsets(&self, emu: &Emulator) -> String {
+    fn query_offsets(&mut self, emu: &mut Emulator) -> String {
+        // Their patched GDB queries offsets during attach, before its first
+        // continue. Complete --run's load handshake before answering it.
+        if self.bartman && self.run_stop.is_some() {
+            let console_len = self.console.len();
+            let limit = emu.bus().emulated_frames().saturating_add(6000);
+            while self.run_stop.is_some() && emu.bus().emulated_frames() < limit {
+                if self.step_once(emu).is_err() || emu.machine.cpu_double_faulted() {
+                    return "E01".into();
+                }
+                match self.check_stop(emu) {
+                    Ok(Some(StopReason::LoadSeg)) => {
+                        // qOffsets is a plain query. Patched GDB interprets an
+                        // O packet here as the offsets and rejects its 'O'.
+                        self.console.truncate(console_len);
+                        break;
+                    }
+                    Ok(Some(StopReason::Exception(_))) | Err(_) => return "E01".into(),
+                    _ => {}
+                }
+            }
+            if self.run_stop.is_some() {
+                return "E01".into();
+            }
+            match emu.save_state_bytes() {
+                Ok(state) => self.bartman_entry = Some(state),
+                Err(error) => {
+                    log::warn!("gdb: could not save Bartman restart state: {error:#}");
+                    return "E01".into();
+                }
+            }
+        }
         match crate::amigaos::segments_on_bus(emu.bus()) {
             Ok(segs) if !segs.is_empty() => {
+                if self.bartman {
+                    return segs
+                        .iter()
+                        .map(|s| format!("{:08x}", s.start))
+                        .collect::<Vec<_>>()
+                        .join(";");
+                }
                 let mut reply = format!("TextSeg={:X}", segs[0].start);
                 if let Some(data) = segs.get(1) {
                     reply.push_str(&format!(";DataSeg={:X}", data.start));
@@ -653,6 +790,18 @@ impl GdbCore {
         };
         match cmd {
             "help" => Ok(monitor_help()),
+            "reset" => {
+                if let Some(state) = self.bartman_entry.as_ref().filter(|_| self.bartman) {
+                    emu.load_state_bytes(state)?;
+                } else {
+                    emu.keyboard_reset()?;
+                }
+                self.cpu_idle = false;
+                self.outside_rom = false;
+                self.stop = StopReason::Attached;
+                self.refresh_watchpoints(emu);
+                Ok("machine reset\n".into())
+            }
             "status" => Ok(self.monitor_status(emu)),
             "beam" => Ok(format!(
                 "beam vpos={} hpos={} frame={} cck={} pos={}\n",
@@ -1042,6 +1191,16 @@ pub(crate) fn parse_z_packet(packet: &str) -> Result<(u32, usize)> {
     Ok((parse_hex_u32(addr)?, parse_hex_usize(kind)?))
 }
 
+// RSP signals describe CPU exceptions already taken by the whole-machine
+// target. A resume acknowledges that stop; there is no host process signal
+// to inject into the guest a second time.
+fn validate_resume_signal(signal: &str) -> Result<()> {
+    if signal.len() != 2 || !signal.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(anyhow!("resume signal must be two hex digits"));
+    }
+    Ok(())
+}
+
 fn watch_access_from_packet(packet: &str) -> Result<crate::debugger::WatchAccess> {
     match packet.as_bytes().get(1) {
         Some(b'2') => Ok(crate::debugger::WatchAccess::Write),
@@ -1111,6 +1270,78 @@ pub(crate) fn checksum(bytes: &[u8]) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bartman_continues_and_steps_after_exception_signals() -> Result<()> {
+        let mut emu = super::super::testkit::emulator_with_loadseg_program();
+        let mut core = GdbCore::new(&emu, None);
+        core.bartman = true;
+        assert!(matches!(core.handle_packet(&mut emu, "vCont?")?,
+            CoreReply::Packet(s) if s == "vCont;c;C;s;S"));
+        for packet in ["C04", "C0a;14004", "vCont;C04:1;c"] {
+            assert!(matches!(
+                core.handle_packet(&mut emu, packet)?,
+                CoreReply::Resume(ResumeRequest::Continue)
+            ));
+        }
+        assert_eq!(emu.machine.pc(), 0x14004);
+        for packet in ["S04", "S0a;15004", "vCont;S04:1;c"] {
+            assert!(matches!(
+                core.handle_packet(&mut emu, packet)?,
+                CoreReply::Resume(ResumeRequest::Step)
+            ));
+        }
+        assert_eq!(emu.machine.pc(), 0x15004);
+        for packet in ["C", "S100", "Cxx", "vCont;C:1", "vCont;Sgg:1"] {
+            assert!(core.handle_packet(&mut emu, packet).is_err(), "{packet}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bartman_offsets_register_order_signals_and_rom_sentinel() -> Result<()> {
+        let mut emu = super::super::testkit::emulator_with_loadseg_program();
+        let mut core = GdbCore::new(&emu, Some("hello".into()));
+        core.bartman = true;
+        assert!(matches!(core.handle_packet(&mut emu, "?")?, CoreReply::Packet(s) if s == "S05"));
+        let attached_pc = emu.machine.pc();
+        assert!(
+            matches!(core.handle_packet(&mut emu, "qOffsets")?, CoreReply::Packet(s) if s == "00014004;00015004")
+        );
+        assert_eq!(
+            emu.machine.pc(),
+            attached_pc,
+            "offset query must not move the attached PC"
+        );
+        assert!(core.run_stop.is_none());
+        assert!(
+            core.take_console().is_empty(),
+            "qOffsets cannot carry O packets"
+        );
+        let entry_pc = emu.machine.pc();
+        emu.machine.debug_set_register(17, 0x9000);
+        core.handle_monitor(&mut emu, "reset")?;
+        assert_eq!(emu.machine.pc(), entry_pc);
+        emu.machine.debug_set_register(16, 0x2700);
+        emu.machine.debug_set_register(17, 0xf8001c);
+        let regs = core.read_all_registers(&emu);
+        assert_eq!(&regs[16 * 8..], "0000270000f8001c");
+        core.add_breakpoint(&emu, "Z0,ffffffff,2")?;
+        assert!(core.outside_rom);
+        assert!(core.breakpoints.is_empty());
+        emu.machine.debug_set_register(17, 0x100);
+        assert_eq!(core.check_stop(&mut emu)?, Some(StopReason::Breakpoint));
+        assert!(!core.outside_rom);
+        core.stop = StopReason::Exception(3);
+        assert_eq!(core.stop_reply(), "S0A");
+        core.stop = StopReason::Exception(4);
+        assert_eq!(core.stop_reply(), "S04");
+        assert!(matches!(
+            core.handle_packet(&mut emu, "k")?,
+            CoreReply::Disconnect
+        ));
+        Ok(())
+    }
 
     /// The transport-free core never writes monitor output anywhere: a
     /// qRcmd replies "OK" and the text accumulates as console data for

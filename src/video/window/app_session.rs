@@ -523,6 +523,8 @@ impl App {
         // already reached stdout, and opening the console is opening a new
         // terminal on the channel, not a scrollback of the old one.
         let lines = self.emu.take_uaelib_console_lines();
+        #[cfg(feature = "gdb")]
+        self.gdb_log_lines(&lines);
         if let Some(panel) = self.console_panel.as_mut() {
             for line in lines {
                 panel.push_output(format!("DBG: {line}"));

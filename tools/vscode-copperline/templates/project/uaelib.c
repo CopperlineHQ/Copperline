@@ -79,7 +79,7 @@ void debug_register_bitmap(const void *address, const char *name,
 }
 
 void debug_register_copperlist(const void *address, const char *name,
-                               ULONG size, UWORD flags)
+                               unsigned int size, UWORD flags)
 {
     struct DebugResource resource = {
         (ULONG)address, size, "", DEBUG_COPPERLIST, flags, 0, 0, 0
