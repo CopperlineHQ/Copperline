@@ -57,8 +57,9 @@ aros/
   aros-amiga-m68k-ext.bin
 ```
 
-If using your own ROM, direct executable launching requires Kickstart 2.0
-or newer. A stock A500 Kickstart 1.3 preset is unsuitable for `--run`; see
+If using your own ROM, normal direct executable launching supports Kickstart
+1.3 and newer, including the A500 KS1.3 preset. Keep `detach` disabled on
+1.3; detached launches require Kickstart 2.0+ or AROS. See
 [Direct executable launching](../guide/run.md).
 
 ## Install Copperline Amiga Debug

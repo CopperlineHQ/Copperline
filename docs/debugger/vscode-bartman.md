@@ -124,8 +124,8 @@ either suffix to this Bartman launch field. Keep the files together and
 rebuild both after changing code.
 
 Omitting `kickstart` boots AROS. If adapting an existing UAE launch, remove
-its Kickstart 1.3 selection and any `cpuboard` option; use AROS or a ROM you
-own from Kickstart 2.0 or newer. The launch above uses PAL A500 timing,
+any `cpuboard` option; normal launches support AROS or a ROM you own from
+Kickstart 1.3 onward. Keep detached launch disabled on 1.3. The launch above uses PAL A500 timing,
 1 MiB chip RAM, and 512 KiB slow RAM, matching the profiler walkthrough.
 
 ## Run to a source breakpoint
@@ -241,7 +241,7 @@ UAE state into Copperline uses [USS import](../guide/winuae-state.md).
 | The compiler or GDB will not run | Check host architecture, Rosetta on Apple Silicon, and that the complete VSIX was installed. The fork repairs executable permissions on its bundled tools during activation. |
 | Compilation uses another Amiga compiler on PATH | In the template task's `options.env.PATH`, place `${command:amiga.bin-path}/opt/bin` and `${command:amiga.bin-path}` before `${env:PATH}`; use backslash paths and semicolon separators in its Windows override. Clean and rebuild. |
 | Launch fails to find the program or symbols | Use the suffix-free base name in `program`, and check that matching `.elf` and `.exe` files exist. |
-| The guest boots but never reaches the first breakpoint | Check the Copperline build includes the startup fix above, use AROS or Kickstart 2.0+, and rebuild matching executable/symbol files. Inspect the Debug Console for launch errors. |
+| The guest boots but never reaches the first breakpoint | Use a current Copperline build, keep detached launch disabled on Kickstart 1.3, and rebuild matching executable/symbol files. Inspect the Debug Console for launch errors. |
 | Bitmap choices are empty or the capture is uninteresting | Continue to the initialized frame loop before profiling. Select a populated point in the frame, and choose a bitmap and palette in Resources. Named entries require guest resource registration. |
 
 For the wire protocol, manual GDB launch, and automated compatibility checks,

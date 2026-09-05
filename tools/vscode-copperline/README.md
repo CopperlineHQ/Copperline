@@ -51,11 +51,16 @@ its entry point, and the IDE shows its source. Add `"model"`, `"fast"`,
 `"config"` and friends to pick the machine. `"memoryFill": "0xDEAD"`
 fills cold-start RAM with a diagnostic pattern, `"fpu": true` fits an FPU,
 `"stack": 32768` sets the guest CLI stack, `"ntsc": true` selects NTSC,
-`"detach": true` closes the boot CLI after starting the program, and
+`"detach": true` closes the boot CLI after starting the program (Kickstart
+2.0+ or AROS), and
 `"emulatorLog": true` mirrors the emulator log into the Debug Console.
 `"headless": true` runs without a window. Data breakpoints support read,
 write, and read/write access; fitted FPU registers appear in the Registers
 scope.
+
+Normal launches also support bare Kickstart 1.3: Copperline supplies the
+missing startup commands, including the stack-size helper. Keep `detach`
+disabled on the A500 KS1.3 preset.
 
 When stopped in a loaded program, use the graph button (**Profile**) for one
 emulated frame or the pulse button (**Profile (Multi)**) to choose a frame

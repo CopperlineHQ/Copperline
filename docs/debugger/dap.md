@@ -100,9 +100,9 @@ configuration says. Arguments:
 | `model`, `chipset`, `cpu`, `chip`, `fast`, `slow` | The matching `copperline` flags. |
 | `memoryFill` | `--ram-init`: `zero`, `random[:SEED]`, `pattern:WORD`, or `0xWORD` for uninitialised-read testing. |
 | `fpu` | Fit or omit an FPU (`--fpu` / `--no-fpu`). |
-| `stack` | AmigaDOS CLI stack size before launch (`--run-stack`). |
+| `stack` | AmigaDOS CLI stack size in bytes before launch, 2048 through 2147483644 (`--run-stack`). |
 | `ntsc` | Select NTSC timing when true, PAL when false (`--video`). |
-| `detach` | Start the guest executable asynchronously and close the boot CLI (`--run-detach`). |
+| `detach` | Start the guest executable asynchronously and close the boot CLI (`--run-detach`; Kickstart 2.0+ or AROS). |
 | `emulatorLog` | Mirror the launched emulator's stdout/stderr log into the Debug Console. |
 | `rtcTime` | `--rtc-time`: the guest clock's seed. Default: the launch time, pinned, so reverse execution replays exactly (a guest reading the host clock would diverge; see [Reverse debugging](reverse.md)). |
 | `extraArgs` | Further emulator flags, as an array. |

@@ -1660,6 +1660,20 @@ mod tests {
         assert!(cli.run_detach);
         assert!(validate_run_args(&cli).is_ok());
 
+        for bytes in [2048, 2049, 2_147_483_644] {
+            let cli = parse(&["--run", "hello", "--run-stack", &bytes.to_string()]).unwrap();
+            assert_eq!(cli.run_stack, Some(bytes));
+        }
+        for bytes in [0u64, 4, 2047, 2_147_483_645, 4_294_967_295, 4_294_967_296] {
+            let err = parse(&["--run", "hello", "--run-stack", &bytes.to_string()])
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("stack must be between 2048 and 2147483644"),
+                "{err}"
+            );
+        }
+
         // --run-args without --run is a mistake worth catching.
         let orphan = parse(&["--run-args", "-level 2"]).unwrap();
         assert!(validate_run_args(&orphan)
