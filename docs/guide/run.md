@@ -26,14 +26,18 @@ host filesystem interface:
 1. **`RunBoot:`** (Boot priority 6) -- A dynamically generated boot volume containing
    an `S/Startup-Sequence` that sets the current directory, launches the specified
    executable, and records a completion marker when the program exits. This volume
-   is created in a per-process temporary staging directory.
+   is created in a per-process temporary staging directory. Bundled `C:FailAt`,
+   `C:CD`, `C:Stack`, and `C:Echo` executables supply the commands missing from
+   a bare Kickstart 1.3 ROM; `C:Execute` supplies the detached script handoff
+   on later ROMs. No Workbench command files are needed.
 2. **`RunProg:`** (Read/Write) -- The host directory containing the target executable.
    The guest loads the binary directly from this volume, and any output files written
    by the program are saved to the same host directory.
 
 Other machine settings are configured normally via configuration files or CLI flags.
 `--run-stack BYTES` emits an AmigaDOS `Stack` command before the executable;
-`--run-detach` launches it through `Run >NIL: <NIL:` and closes the boot CLI.
+`--run-detach` launches it through `Run >NIL: <NIL:` and closes the boot CLI
+(Kickstart 2.0+ or AROS).
 By default, the bundled AROS Kickstart replacement is used on the standard machine profile:
 
 ```sh
@@ -142,10 +146,15 @@ if (*(UWORD *)UaeConf == 0x4eb9 || *(UWORD *)UaeConf == 0xa00e) {
 
 ## Kickstart compatibility
 
-The generated `Startup-Sequence` relies on shell commands (`CD`, `FailAt`) present in
-Kickstart 2.0 and newer (including the bundled AROS ROM).
+Normal `--run` launches support bare Kickstart 1.3, later ROMs, and bundled
+AROS. The generated boot volume supplies small GPL-licensed 68000 versions of
+`FailAt`, `CD`, `Stack`, and `Echo` for the 1.x CLI. Working-directory changes,
+arguments, `--run-stack`, and the completion marker work without Workbench.
+The program itself must also use APIs available on the selected ROM.
 
-A bare Kickstart 1.3 boot does not provide those commands: `FailAt` can stop
-the startup script before the binary runs. Use Kickstart 2.0 or newer, or
-omit the ROM to use bundled AROS, for the generated `--run` volume. Kickstart 1.2 lacks filesystem autoconfig support and cannot boot host-directory
-volumes.
+`--run-detach` still requires Kickstart 2.0+ or AROS: the bundle does not
+replace the `Run` and `EndCLI` commands used by detached launches. The bundled
+`Execute` handles the generated child script without parameter substitution
+or nested scripts.
+Kickstart 1.2 lacks filesystem autoconfig support and cannot boot the
+host-directory volumes, even though the bundled commands use 1.x APIs.

@@ -242,7 +242,7 @@
               },
               "detach": {
                 "type": "boolean",
-                "description": "Launch the guest program asynchronously and close the boot CLI."
+                "description": "Launch the guest program asynchronously and close the boot CLI (Kickstart 2.0+ or AROS)."
               },
               "emulatorLog": {
                 "type": "boolean",

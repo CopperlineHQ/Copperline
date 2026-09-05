@@ -19,7 +19,7 @@ It boots out of the box with the bundled open-source AROS Kickstart replacement,
 - **Debugging**: CPU and chipset debugger, reverse stepping, live Kickstart/AROS symbols, frame and instruction profiling, VCD waveforms, and source debugging through GDB or DAP. Both the native VS Code extension and the [Copperline fork of Bartman's extension](docs/debugger/vscode-bartman.md) are supported.
 - **Automation and replay**: [Save states](docs/guide/ui.md#save-states), [WinUAE state import](docs/guide/winuae-state.md), headless input scripts and captures, and a JSON-RPC control protocol. `copperline-ctl` also provides DAP (`--dap`) and MCP (`--mcp`) servers.
 - **Freezer cartridge**: Action Replay-style cartridge support with bundled HRTMon (`--cartridge hrtmon`), allowing running software to be frozen into the monitor via the menu, a hotkey, headless `--freeze-after`, or the control protocol.
-- **Direct launching**: Boot directly into WHDLoad game packages (`--whdload`) or host-built Amiga executables (`--run`), with a WinUAE-compatible `uaelib` trap allowing guest code to control warp speed, log debug messages, and register debug resources.
+- **Direct launching**: Boot directly into WHDLoad game packages (`--whdload`) or host-built Amiga executables (`--run`, including bare Kickstart 1.3), with a WinUAE-compatible `uaelib` trap allowing guest code to control warp speed, log debug messages, and register debug resources.
 - **WebAssembly build**: Run directly in modern web browsers at [copperline.dev/try](https://copperline.dev/try/).
 
 ## Installation

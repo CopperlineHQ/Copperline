@@ -250,6 +250,26 @@ palette. The one deliberate exception is DENISEID (`$07C`) on OCS Denise,
 held at `$FFFF` so ECS-detection code (low byte `$FC`) cannot false-match
 a residue; see the TODO in `read_custom_word`.
 
+## Direct executable boot support
+
+`runprog.rs` stages `RunBoot:` and mounts the executable directory as
+`RunProg:`. The generated Startup-Sequence runs through the guest's normal
+CLI and LoadSeg path, which also supplies the debugger's hunk relocation
+and entry stop. It includes the relocatable 68000 commands built from
+`guest/run-tools/`: `FailAt`, `CD`, `Stack`, `Echo`, and `Execute`. Their checked-in
+executables are embedded in Copperline and written into the boot volume's
+`C` directory, so installations need no external command archive or compiler.
+
+The commands use Exec/DOS 1.x calls and public Process/CLI fields. They change
+the CLI failure threshold and default command stack, acquire the working
+directory lock, and write the completion marker through ordinary DOS I/O.
+No ROM identification, host-side state patch, or emulator trap is involved;
+newer shells resolve their internal commands normally. The optional detached
+path uses the ROM's `Run`/`EndCLI` commands and requires Kickstart 2.0+ or
+AROS. The bundled `Execute` hands the generated script to the child CLI;
+it rejects nested scripts and does not perform parameter substitution.
+See [direct launching](../guide/run.md).
+
 ## Determinism and the host boundary
 
 With fixed configuration, media, clock seeds, and timestamped inputs,

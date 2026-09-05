@@ -6,13 +6,12 @@
 //!
 //! The staging mirrors the WHDLoad direct boot (src/whdload.rs) at its
 //! smallest: two host directories mounted live through the services board
-//! (src/filesys.rs). The boot volume is nothing but a generated
-//! `S/Startup-Sequence`; `CD` and `FailAt` are internal shell commands from
-//! Kickstart 2.0 on (AROS included), and the program itself is named by an
-//! absolute AmigaDOS path, so no `C:` commands are staged at all:
+//! (src/filesys.rs). The boot volume contains a generated
+//! `S/Startup-Sequence` and small redistributable `C:` commands for the
+//! bare Kickstart 1.3 CLI. Later ROMs can use their internal commands.
 //!
 //! - `<config dir>/run/boot-<pid>/` (volume `RunBoot:`, boot priority 6):
-//!   the generated `S/Startup-Sequence`. Regenerated on every launch and
+//!   the generated `S/Startup-Sequence` and bundled commands. Regenerated on every launch and
 //!   per-process, so concurrent instances never rewrite each other's
 //!   live-mounted volume; stale siblings are swept by age.
 //! - the program's own directory (volume `RunProg:`, writable): mounted in
@@ -72,6 +71,16 @@ pub struct PreparedRun {
 pub const DONE_MARKER: &str = "done";
 const DETACHED_SCRIPT: &str = "Detached-Run";
 
+/// Normal relocatable 68000 hunk executables, rebuilt with
+/// `make -C guest/run-tools`; embedding keeps packaged launches self-contained.
+const BOOT_COMMANDS: &[(&str, &[u8])] = &[
+    ("FailAt", include_bytes!("../guest/run-tools/FailAt")),
+    ("CD", include_bytes!("../guest/run-tools/CD")),
+    ("Stack", include_bytes!("../guest/run-tools/Stack")),
+    ("Echo", include_bytes!("../guest/run-tools/Echo")),
+    ("Execute", include_bytes!("../guest/run-tools/Execute")),
+];
+
 /// Guest-shell options used by debugger launches.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RunOptions {
@@ -102,9 +111,8 @@ fn program_sequence(prog_name: &str, extra_args: Option<&str>, stack: Option<u32
 /// The generated `S/Startup-Sequence`: a foreground launch performs the work
 /// directly. A detached launch starts a child `Execute` script and closes only
 /// the parent CLI; the child owns both the program and completion marker.
-/// `Echo` is internal alongside `CD`/`FailAt` from Kickstart 2.0 on; on 1.3
-/// the marker line is skipped like the others and the warp gate falls back to
-/// its LoadSeg poll and deadline.
+/// Detached launches require the ROM-resident Run/EndCLI commands
+/// available on Kickstart 2.0+ and AROS.
 fn startup_sequence(prog_name: &str, extra_args: Option<&str>, options: RunOptions) -> String {
     if options.detach {
         format!(
@@ -192,6 +200,14 @@ pub fn prepare_with_options(
     }
     std::fs::create_dir_all(boot_dir.join("S"))
         .with_context(|| format!("creating {}", boot_dir.join("S").display()))?;
+    let commands_dir = boot_dir.join("C");
+    std::fs::create_dir_all(&commands_dir)
+        .with_context(|| format!("creating {}", commands_dir.display()))?;
+    for (name, bytes) in BOOT_COMMANDS {
+        let path = commands_dir.join(name);
+        std::fs::write(&path, bytes)
+            .with_context(|| format!("writing boot command {}", path.display()))?;
+    }
     std::fs::write(
         boot_dir.join("S").join("Startup-Sequence"),
         startup_sequence(&prog_name, extra_args, options),
@@ -451,12 +467,25 @@ mod tests {
             script,
             format!("FailAt 21\nCD \"RunProg:\"\n\"RunProg:hello\" -x\n{DONE_LINE}")
         );
+        for name in ["FailAt", "CD", "Stack", "Echo", "Execute"] {
+            let command = std::fs::read(prepared.boot_dir.join("C").join(name)).unwrap();
+            assert_eq!(
+                &command[..4],
+                &0x3f3u32.to_be_bytes(),
+                "{name}: HUNK_HEADER"
+            );
+        }
 
         // A second launch regenerates the boot volume from scratch: a file
         // left over from an earlier stage must not survive.
         std::fs::write(prepared.boot_dir.join("stale"), b"old").unwrap();
+        std::fs::write(prepared.boot_dir.join("C/FailAt"), b"stale command").unwrap();
         let prepared = prepare(&program, None, Some(&stage)).unwrap();
         assert!(!prepared.boot_dir.join("stale").exists());
+        assert_eq!(
+            std::fs::read(prepared.boot_dir.join("C/FailAt")).unwrap(),
+            include_bytes!("../guest/run-tools/FailAt")
+        );
         let script =
             std::fs::read_to_string(prepared.boot_dir.join("S").join("Startup-Sequence")).unwrap();
         assert_eq!(

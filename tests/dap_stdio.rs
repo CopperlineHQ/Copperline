@@ -164,22 +164,36 @@ fn read_messages(
 #[test]
 #[ignore]
 fn dap_binds_multi_unit_relocatable_dwarf4_after_loadseg() {
-    debug_elf_fixture("program-dwarf4");
+    debug_elf_fixture("program-dwarf4", None);
 }
 
 #[test]
 #[ignore]
 fn dap_binds_multi_unit_relocatable_dwarf5_after_loadseg() {
-    debug_elf_fixture("program-dwarf5");
+    debug_elf_fixture("program-dwarf5", None);
 }
 
 #[test]
 #[ignore]
 fn dap_binds_linked_elf_with_retained_relocations_after_loadseg() {
-    debug_elf_fixture("program-linked");
+    debug_elf_fixture("program-linked", None);
 }
 
-fn debug_elf_fixture(name: &str) {
+#[test]
+#[ignore = "boots local Kickstart 1.3"]
+fn dap_binds_source_breakpoints_on_kick13() {
+    let assets = std::env::var_os("COPPERLINE_TEST_ASSETS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test-assets"));
+    let rom = assets.join("KICK13.ROM");
+    if !rom.is_file() {
+        eprintln!("skipping: missing {}", rom.display());
+        return;
+    }
+    debug_elf_fixture("program-dwarf4", Some(&rom));
+}
+
+fn debug_elf_fixture(name: &str, rom: Option<&std::path::Path>) {
     // Reap the adapter even when an assertion fails.
     struct Adapter(std::process::Child);
     impl Drop for Adapter {
@@ -224,6 +238,9 @@ fn debug_elf_fixture(name: &str) {
             "copperline": env!("CARGO_BIN_EXE_copperline"),
             "factory": true,
             "headless": true,
+            "model": "A500",
+            "rom": rom,
+            "stack": 32768,
             "stopOnEntry": true,
             "entryPoint": "entry",
             "timeoutMs": 120000,

@@ -176,8 +176,8 @@ Use the extension's usual launch configuration (`program` is the ELF path
 without its extension, beside a matching `.exe` hunk executable). The backend
 keeps the extension's patched `m68k-amiga-elf-gdb`, maps its model and memory
 presets to Copperline CLI arguments, and seeds the guest RTC from the host
-clock. Use the bundled AROS ROM (omit `kickstart`) or Kickstart 2.0 or
-newer for `--run`. The standard Marketplace extension does not contain this
+clock. Use the bundled AROS ROM (omit `kickstart`) or Kickstart 1.3 or
+newer for `--run`; detached launches require 2.0+ or AROS. The standard Marketplace extension does not contain this
 backend; keep the fork installed as described in the setup guide.
 
 The equivalent manual command is:
