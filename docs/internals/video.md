@@ -754,6 +754,8 @@ hit-testing together in `configuration/rows.rs`, library artwork and entries in
 `configuration/dialogs.rs`. Its editable model remains in `launcher.rs`.
 `launcher/fields.rs` defines tabs, rows and choices; `launcher/values.rs` owns
 labels and edits, sharing a single mapping for ordinary boolean fields.
+Boot-priority arrows use the shared boot-field-to-drive mapping, so every
+listed drive follows the same stepping and Bootable rules.
 Hardware-dependent edits remain explicit. `launcher/setup_config.rs` handles
 loading and serialization, with `to_raw` delegating to machine, media, WHDLoad,
 presentation, I/O, audio and expansion sections.

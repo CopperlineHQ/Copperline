@@ -744,6 +744,8 @@ The layout is:
   column's **Bootable** box is ticked by default; clearing it greys that row's
   priority and writes the -128 "disabled" sentinel, so the volume mounts but
   never boots.
+  Priority arrows step each attached drive, including all seven Copperline HD
+  units; they leave the remembered priority unchanged while Bootable is cleared.
   Drives without media or configured as CD-ROMs are disabled ("No drive" /
   "CD-ROM"). SCSI, Lide, and Copperline HD units appear only when media is
   attached, ensuring the list reflects valid boot sources. Drives are

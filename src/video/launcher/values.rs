@@ -872,19 +872,7 @@ impl MachineSetup {
                     forward,
                 ) as u8
             }
-            F::IdeMasterBoot
-            | F::IdeSlaveBoot
-            | F::ScsiUnit0Boot
-            | F::ScsiUnit1Boot
-            | F::ScsiUnit2Boot
-            | F::ScsiUnit3Boot
-            | F::ScsiUnit4Boot
-            | F::ScsiUnit5Boot
-            | F::ScsiUnit6Boot
-            | F::LideDrive0Boot
-            | F::LideDrive1Boot
-            | F::LideDrive2Boot
-            | F::LideDrive3Boot => {
+            field if Self::boot_field_drive(field).is_some() => {
                 // The arrows only move a live priority; a drive whose Bootable
                 // box is cleared shows its number greyed and does not step.
                 if !self.drive_boot_off(field) {
