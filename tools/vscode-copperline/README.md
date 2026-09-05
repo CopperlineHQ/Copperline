@@ -8,11 +8,20 @@ stepping, and the Debug Console over the emulator's control protocol.
 The extension is a thin shell: it tells VS Code to run `copperline-ctl
 --dap`, the Debug Adapter Protocol server built into Copperline's control
 client. Everything else is in that adapter; see the Copperline
-documentation, *Debug Adapter Protocol* chapter (`docs/debugger/dap.md`).
+[illustrated VS Code guide](https://github.com/CopperlineHQ/Copperline/blob/main/docs/debugger/vscode.md)
+for setup and the
+[Debug Adapter Protocol reference](https://github.com/CopperlineHQ/Copperline/blob/main/docs/debugger/dap.md)
+for all launch options. The separate
+[Bartman integration guide](https://github.com/CopperlineHQ/Copperline/blob/main/docs/debugger/vscode-bartman.md)
+explains how to install its Copperline fork and explore graphics profiles
+without waiting for the upstream pull request.
 
 ## Requirements
 
-- Copperline 0.19 or later, with `copperline-ctl` on your PATH, or the
+- A recent Copperline build with the September 2026 debugger additions
+  (the guide was tested against commit `3d334a11`). Build from current source
+  until those changes are in your installed release. Put `copperline-ctl`
+  on your PATH, or use the
   `copperline.ctlExecutable` setting pointing at the executable file.
   `copperline.emulatorExecutable` names the `copperline` executable file
   to launch when it is not next to `copperline-ctl` (a source build's
@@ -31,6 +40,8 @@ Add a launch configuration (the *Copperline: launch a program* snippet):
   "request": "launch",
   "name": "Run hello in Copperline",
   "program": "${workspaceFolder}/hello",
+  "factory": true,
+  "entryPoint": "main",
   "stopOnEntry": true
 }
 ```
@@ -90,12 +101,12 @@ There is no build step. To package it:
 
 ```sh
 cd tools/vscode-copperline
-npx @vscode/vsce package
-code --install-extension copperline-debug-*.vsix
+npx --yes @vscode/vsce package --no-dependencies --out copperline-debug.vsix
+code --install-extension ./copperline-debug.vsix --force
 ```
 
-For development, symlink this directory into `~/.vscode/extensions/`.
-
+Alternatively run **Extensions: Install from VSIX...** in VS Code and select
+that file. Reload the window after replacing an already loaded extension.
 
 The Bartman template includes its freestanding 68000 runtime operations
 (`runtime.c`) because the extension's bundled compiler does not include

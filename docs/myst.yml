@@ -63,6 +63,8 @@ project:
         - file: debugger/reverse.md
         - file: debugger/waveform.md
         - file: debugger/profiling.md
+        - file: debugger/vscode.md
+        - file: debugger/vscode-bartman.md
         - file: debugger/gdb.md
         - file: debugger/dap.md
         - file: debugger/control.md
@@ -112,6 +114,8 @@ project:
         - debugger/reverse.md
         - debugger/waveform.md
         - debugger/profiling.md
+        - debugger/vscode.md
+        - debugger/vscode-bartman.md
         - debugger/gdb.md
         - debugger/dap.md
         - debugger/control.md

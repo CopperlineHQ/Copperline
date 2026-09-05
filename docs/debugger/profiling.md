@@ -1,5 +1,9 @@
 # Per-frame profiling
 
+For an illustrated IDE workflow, see [VS Code CPU profiling](vscode.md#capture-a-cpu-profile)
+and [Bartman frame profiling](vscode-bartman.md#capture-and-explore-a-frame),
+including installation of the Copperline fork independently of upstream.
+
 The `profile.start` method on the [control protocol](control.md) captures
 per-frame performance data for external profilers, analysis tools, and scripts.
 Only one profile capture can run at a time; call `profile.stop` on an active

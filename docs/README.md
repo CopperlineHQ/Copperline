@@ -54,7 +54,10 @@ The PDF export collects every chapter into a single document, as listed in
   deterministic headless runs (`--screenshot-after`), and UI panel images
   with `COPPERLINE_UI_PREVIEW=1 cargo test --release
   panels_render_into_their_rects` (output in `target/ui-preview-*.png`),
-  so they can be regenerated exactly.
+  so they can be regenerated exactly. The VS Code walkthroughs use real
+  desktop captures under `images/vscode/`; their provenance and recreation
+  notes are in `images/vscode/README.md`. These include IDE state and are
+  not deterministic framebuffer fixtures.
 - Keep the hardware-first rule in prose too: describe hardware behaviour,
   and name software titles only as regression examples.
 - Detailed timing rationale lives in `internals/timing.md` and

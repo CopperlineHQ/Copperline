@@ -22,11 +22,11 @@ copperline-ctl --dap --info /tmp/ccp.json   # launch/attach both use this sessio
 
 ## VS Code
 
-Install the extension in `tools/vscode-copperline` (no build step:
-`npx @vscode/vsce package` there and `code --install-extension` the
-`.vsix`, or symlink the directory into `~/.vscode/extensions/`). It
-contributes the `copperline` debug type and runs `copperline-ctl --dap`
-from your PATH. The settings `copperline.ctlExecutable` and
+For installation, executable paths, a complete launch configuration, and
+screenshots, start with the [VS Code guide](vscode.md). Package and install
+`tools/vscode-copperline` as a VSIX; it contributes the `copperline` debug
+type and runs `copperline-ctl --dap` from your PATH. The settings
+`copperline.ctlExecutable` and
 `copperline.emulatorExecutable` name the two executable files when they
 are elsewhere (a source build's `target/release/copperline-ctl` and
 `target/release/copperline`). A launch configuration:
