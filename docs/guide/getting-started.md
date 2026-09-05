@@ -6,16 +6,18 @@ system requirements, installation, building from source, and initial setup.
 
 ## System requirements
 
-- **Rust:** 1.95 or newer (tested with Rust 1.96).
+- **Rust (source builds only):** 1.95 or newer; CI uses the stable toolchain.
 - **Supported operating systems:** macOS, Linux, and Windows.
 - **Graphics backend:** Metal on macOS, Direct3D 12 on Windows, and Vulkan on Linux
   (see [](#vulkan-is-required-on-linux)).
-- **Linux build dependencies (Fedora):** `sudo dnf install alsa-lib-devel systemd-devel gcc`.
+- **Linux build dependencies:** `sudo dnf install alsa-lib-devel systemd-devel gcc`
+  on Fedora, or `sudo apt install libasound2-dev libsystemd-dev gcc` on Debian/Ubuntu.
 - **Boot ROM:** Copperline includes the open-source [AROS](http://www.aros.org/)
   Kickstart replacement and boots it by default. It also supports official
   Commodore Kickstart ROMs (1.3, 2.05, 3.1, plus CDTV and CD32 extended ROMs)
-  and [DiagROM](https://www.diagrom.com/). Standard Kickstart ROM images must
-  be 512 KiB.
+  and [DiagROM](https://www.diagrom.com/). Use a single-file 512 KiB image or
+  a 256 KiB Kickstart 1.x image; Copperline mirrors the latter across its
+  512 KiB ROM window. See [ROM formats](configuration.md#top-level).
 
 ## Installing on macOS (Homebrew)
 
@@ -77,6 +79,13 @@ For virtual machines or older hardware, install the software Vulkan driver (lava
 
 The Flatpak build bundles lavapipe by default.
 
+## Installing on Windows
+
+Download `Copperline-X.Y.Z-win-x64.zip` or `Copperline-X.Y.Z-win-arm64.zip`
+from the [releases page](https://github.com/CopperlineHQ/Copperline/releases),
+matching your Windows architecture. Extract the whole archive and run
+`copperline.exe`; keep the bundled ROMs and other assets alongside it.
+
 ## Building from source
 
 ```sh
@@ -84,8 +93,9 @@ cargo build --release
 ```
 
 ```{warning}
-Always run Copperline with `--release`. Unoptimized debug builds are not fast
-enough for real-time emulation.
+Use the binary in `target/release/` for emulation. `--release` is a Cargo
+build option, not a Copperline command-line flag. Unoptimized debug builds
+are too slow for real-time emulation.
 ```
 
 To run the test suite:
@@ -114,8 +124,11 @@ When started with no arguments and no `copperline.toml` in the current directory
 Copperline displays the interactive launcher screen where you can configure
 machine models, memory, storage, and peripherals.
 
-The default configuration is an Amiga 500 (Rev 6A) with an OCS/ECS chipset,
-512 KiB chip RAM, 512 KiB slow RAM, and the bundled AROS Kickstart replacement.
+With no saved default, the launcher starts with an Amiga 500 (Rev 6A): ECS
+8372A Agnus, OCS 8362 Denise, 512 KiB chip RAM, 512 KiB slow RAM, and the
+bundled AROS Kickstart replacement. **Save default** remembers your settings
+for later launches. `--factory` ignores that saved default; an explicit
+`--config` or a local `copperline.toml` still takes precedence.
 
 To boot directly into a specific Kickstart ROM or configuration file:
 

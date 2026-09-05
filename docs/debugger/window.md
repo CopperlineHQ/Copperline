@@ -6,8 +6,9 @@ Closing the window restores the previous execution state.
 
 The debugger, Frame Analyzer, and [Console](console) operate in separate host
 windows, allowing them to remain open simultaneously while inspecting CPU,
-custom chipset, and bus activity. Emulation and register queries are non-intrusive
-and do not alter hardware state.
+custom chipset, and bus activity. Inspection reads do not acknowledge hardware
+registers or consume emulated bus cycles. Stepping, register edits, and memory
+writes change the machine as requested.
 
 ```{figure} ../images/ui-preview-debugger.png
 :alt: The debugger window on the CPU tab

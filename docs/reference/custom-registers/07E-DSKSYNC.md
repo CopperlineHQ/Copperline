@@ -3,9 +3,10 @@ Offset: $07E
 Access: write
 Chipset: OCS/ECS/AGA
 
-Controls or reports the custom-chip DSKSYNC register.
+Sets the disk shifter's sync comparison word.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
+- Bits 15-0: Raw sync word, commonly $4489 for AmigaDOS tracks.
 
+Matches set the DSKSYNC interrupt request; ADKCON.WORDSYNC also uses the comparison to start read DMA.

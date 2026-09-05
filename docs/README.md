@@ -5,7 +5,7 @@ The documentation under this directory is written in
 
 ## Dependencies
 
-- [Node.js](https://nodejs.org/) and the MyST CLI:
+- [Node.js](https://nodejs.org/) (CI uses Node 24) and the MyST CLI:
 
   ```sh
   npm install -g mystmd
@@ -45,8 +45,24 @@ cd docs
 myst build --pdf         # writes docs/_build/exports/copperline.pdf
 ```
 
-The PDF export collects every chapter into a single document, as listed in
-`myst.yml` under `exports`.
+The PDF export collects the chapters listed in `myst.yml` under `exports`.
+The individual custom-register reference pages are available in the HTML manual
+and embedded debugger help; they are not included in the PDF.
+
+## Validation
+
+Run the same checks as CI before submitting documentation changes:
+
+```sh
+cd docs
+myst build --html --ci --strict --check-links
+myst build --pdf --ci --strict
+test -s _build/exports/copperline.pdf
+```
+
+The custom-register pages also feed generated Rust data. When editing them,
+run `cargo test --profile ci --locked --lib custom` from the repository root
+to check their format and control-protocol integration.
 
 ## Conventions
 

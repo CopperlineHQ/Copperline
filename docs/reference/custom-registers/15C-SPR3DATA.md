@@ -3,9 +3,10 @@ Offset: $15C
 Access: write
 Chipset: OCS/ECS/AGA
 
-Controls sprite 3's first data plane.
+Holds sprite 3's low pixel bitplane.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
+- Bits 15-0: Sixteen planar pixels, most-significant bit first.
 
+Matching DATA/DATB bits form a two-bit pixel; zero is transparent. A DATA write arms the sprite, while DATB updates its other plane.

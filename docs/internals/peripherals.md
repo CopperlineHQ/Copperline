@@ -767,8 +767,8 @@ skips gamepad polling for port-2 input; gamepad mode disables keyboard
 joystick capture so the mapped keys take the normal Amiga keyboard path.
 (The old auto-detect mode has been removed; `"auto"` in a config parses
 as a backward-compatibility alias for gamepad.) Both sources ultimately
-call the same `InputState::set_joystick_port2`
-and `set_cd32_buttons_port2` helpers, so JOY1DAT, /FIR1, POT1Y/POTGOR, and
+call the port-indexed `InputState::set_joystick`
+and `set_cd32_buttons` helpers, so JOY1DAT, /FIR1, POT1Y/POTGOR, and
 the CD32 serial bits remain hardware-derived.
 
 Keyboard joystick emulation is deliberately a host input source, not a

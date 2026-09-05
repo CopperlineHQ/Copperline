@@ -3,9 +3,11 @@ Offset: $02A
 Access: write
 Chipset: OCS/ECS/AGA
 
-Controls or reports the custom-chip VPOSW register.
+Writes the long-field flag and high bit of the vertical beam counter.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
+- Bit 15: LOF.
+- Bit 0: Vertical position bit 8.
 
+Copperline retains the current low vertical byte and clamps the result to the configured field length.

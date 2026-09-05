@@ -3,9 +3,10 @@ Offset: $1D8
 Access: write
 Chipset: ECS/AGA
 
-Controls or reports the custom-chip HHPOSW register.
+Writes the UHRES horizontal-position latch.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
+- Bits 8-0: Horizontal-position value.
 
+Copperline stores HHPOSW and returns it through HHPOSR; the UHRES counter does not advance.

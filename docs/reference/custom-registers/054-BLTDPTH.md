@@ -7,5 +7,8 @@ Sets the upper word of the BLTD pointer.
 
 ## Bitfields
 
-- Bits 15-0: Upper pointer word.
+- Bits 4-0: Chip-RAM address bits 20-16.
+- Bits 15-5: Ignored.
+
+The usable address range also depends on the fitted Agnus and chip RAM.
 

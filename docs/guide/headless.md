@@ -4,10 +4,11 @@ Copperline supports non-interactive, headless execution for continuous integrati
 automated regression testing, and scripted media capture. Headless runs execute
 unthrottled without creating a window or connecting to a display server.
 
-The exception to unthrottled, deterministic execution is when a physical floppy drive
-is attached via FluxBridge (see [Physical floppy drives](fluxbridge.md)): physical drives
-require real-time wall-clock pacing to match the mechanical drive spindle, and access
-external media that is not captured in emulator state.
+Physical floppy drives attached through [FluxBridge](fluxbridge.md) require
+wall-clock pacing. For repeatable captures, use image-backed media, a fixed
+RTC seed when a clock is fitted, and repeatable inputs. Live networking,
+serial or audio input, and changing host files also affect replay; see the
+[host boundary](../internals/architecture.md#determinism-and-the-host-boundary).
 
 ## Capturing screenshots
 
@@ -27,7 +28,10 @@ Multiple screenshots can be captured during a single execution by repeating the 
   --screenshot-after 60 /tmp/boss.png
 ```
 
-The process exits once the final requested screenshot has been saved.
+For a screenshot-only run, the process exits after the final screenshot.
+When combined with `--dump-frames`, the run exits as soon as either the frame
+dump or the screenshot schedule finishes. Use separate runs if both need
+to reach different end times.
 
 ## Dumping frame sequences
 
@@ -76,7 +80,7 @@ You can schedule keyboard, mouse, and joystick inputs at specific emulated times
 | `--pot-after SECS X Y [PORT]` | Set analogue paddle/pot position (0-255) (default port 2) |
 | `--insert-disk-after SECS DFN PATH` | Insert a disk image into `df0`..`df3` |
 | `--defer-disk-insert SECS DFN` | Delay insertion of configured disk until SECS |
-| `--insert-cd-after SECS PATH` | Swap CD image (`.cue`, `.iso`, `.chd`) in CD drive |
+| `--insert-cd-after SECS PATH` | Swap CD image (`.cue`, `.iso`, `.nrg`, `.chd`) in CD drive |
 | `--freeze-after SECS` | Trigger freezer cartridge button (`--cartridge hrtmon`): HRTMon takes over at SECS |
 | `--script FILE` | Execute script file containing input directives |
 | `--record-input PATH` | Record all inputs to script file on exit |
@@ -107,10 +111,12 @@ freeze-after 120.0
 Run with `--script`:
 
 ```sh
-./target/release/copperline --config myconfig.toml --script test.clscript --screenshot-after 100 /tmp/out.png
+./target/release/copperline --config myconfig.toml --noaudio --cartridge hrtmon \
+  --script test.clscript --screenshot-after 125 /tmp/out.png
 ```
 
 To record an interactive session to a script file:
+
 - Press `Cmd+Shift+R` (macOS) or `Alt+Shift+R` (Linux/Windows) in the emulator window.
 - Or launch with `--record-input /tmp/session.clscript`.
 
@@ -137,7 +143,9 @@ Use `--rtc-frozen` to hold the RTC at the initial seed without advancing.
   - `source`: Individual audio sources conditionally generated based on configured
     hardware: `DIR/paula.wav` and `DIR/drivesounds.wav` are always created, while
     `DIR/cdda.wav`, `DIR/mt32.wav`, `DIR/coppersynth.wav`, `DIR/toccata.wav`, and
-    `DIR/mhi.wav` are exported only when those sound devices are fitted.
+    `DIR/mhi.wav` depend on the configuration and compiled features. With
+    `--load-state`, additional source files are created because the restored
+    machine may have different hardware; unused sources produce silent files.
   - `channel`: Individual physical hardware channels (`DIR/paula-0.wav` through `DIR/paula-3.wav`).
 
 ## Benchmarking CPU performance
@@ -150,6 +158,9 @@ Measure host emulation throughput without rendering to a window:
 
 The emulator runs unthrottled for 30 emulated seconds, prints execution metrics
 (elapsed host time, emulated time, average FPS), and exits.
+
+`--benchmark-until` cannot be combined with scheduled screenshots, frame dumps,
+save-state writes, input events, floppy inserts, or input recording.
 
 ## Automated compatibility testing (vAmigaTS)
 
@@ -164,6 +175,7 @@ cargo test --release --test vamiga_ts -- --ignored --nocapture
 ```
 
 Test options:
+
 - `COPPERLINE_VAMIGATS_LIMIT=N`: Maximum tests to run.
 - `COPPERLINE_VAMIGATS_SECONDS=SECS`: Delay before screenshot (default: 9s).
 - `COPPERLINE_VAMIGATS_OUT=DIR`: Directory to save test screenshots.

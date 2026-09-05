@@ -94,8 +94,8 @@ configuration says. Arguments:
 | `program` | The hunk executable on the host (required). Its directory is mounted in the guest. |
 | `args` | Command-line arguments for the program (a string or an array). |
 | `copperline` | The emulator binary. Default: `COPPERLINE_BIN`, then a `copperline` next to `copperline-ctl`, then PATH. |
-| `config` | A TOML configuration file (`--config`). Default: the launcher's saved default. |
-| `rom` | A Kickstart ROM supplied as Copperline's positional ROM argument. Omit it to use the bundled AROS ROM. |
+| `config` | A TOML configuration file (`--config`). If omitted, Copperline checks `copperline.toml` in its working directory, then the launcher's saved default, then built-in settings. |
+| `rom` | A Kickstart ROM supplied as Copperline's positional ROM argument. If omitted, the selected configuration's ROM is used, falling back to bundled AROS. |
 | `factory` | Ignore the saved default configuration (`--factory`). |
 | `model`, `chipset`, `cpu`, `chip`, `fast`, `slow` | The matching `copperline` flags. |
 | `memoryFill` | `--ram-init`: `zero`, `random[:SEED]`, `pattern:WORD`, or `0xWORD` for uninitialised-read testing. |

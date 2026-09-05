@@ -3,9 +3,9 @@ Offset: $10A
 Access: write
 Chipset: OCS/ECS/AGA
 
-Controls or reports the custom-chip BPL2MOD register.
+Sets the row-end DMA pointer adjustment for the even-numbered bitplanes.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
-
+- Bits 15-1: Signed byte displacement added after a fetched row.
+- Bit 0: Ignored for word alignment.

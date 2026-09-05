@@ -178,8 +178,8 @@ The keyboard is the way to reach the keys a host keyboard has no
 equivalent of -- Help, both Amiga keys, and the `#`/`~` key beside Return --
 and the way to drive a session entirely with the mouse.
 
-- **Qualifiers latch.** A mouse has one button, so Ctrl, both Shifts, both
-  Alts and both Amiga keys stay down when you click them: click one and it
+- **Qualifiers latch.** To enter keyboard chords with sequential clicks,
+  Ctrl, both Shifts, both Alts and both Amiga keys stay down when clicked: click one and it
   is held for the next keystroke, then released with it. Click it twice in
   quick succession to lock it down until you click it again; click a locked
   one to let it go. Press and *hold* one instead, and it behaves like the
@@ -216,12 +216,13 @@ menu's font size (it follows *Menu Size*), refreshed twice a second:
 | `host 16%` | Share of host wall time spent emulating. In real-time mode this is the share of the frame budget (20.0 ms PAL, 16.7 ms NTSC) used per frame |
 | `audio 148 ms` | Live audio output lead -- the cushion that absorbs host scheduling hiccups (steady state is about 150 ms) |
 | `xrun 0` | Audio underrun frames per second: the audible symptom of the host falling behind |
-| `slip 0` | Times the pacer fell hopelessly behind real time (over ~100 ms, e.g. a host stall) and dropped emulated time instead of chasing it, since the last guest reset |
+| `slip 0` | Times the pacer reset its host-time target after exceeding the catch-up limit (for example, after a host stall), since the last guest reset |
 
 Copperline never skips frames to keep pace: when the host cannot sustain
 real time the machine slows down (fps and the speed factor fall below
-nominal while `host` sits near 100%), and only a stall beyond the pacer's
-catch-up limit drops emulated time, counted by `slip`. Under Warp Speed
+nominal while `host` sits near 100%). After a long stall, the pacer resets
+its host-time target and increments `slip`; guest execution continues from
+the same point. Under Warp Speed
 the presentation shows one frame per burst, but every emulated frame is
 still computed.
 
@@ -262,9 +263,9 @@ Disk images can be dropped anywhere on the emulator window:
   machine straight into the game through the [WHDLoad booter](whdload.md),
   keeping any explicit machine choices; dropped on the configuration
   screen they fill the **WHDLoad** page's game field instead.
-- **Hard disk images and Kickstart ROMs** cannot be swapped at runtime; a
-  notice points at the machine-configuration screen, which also refuses
-  such drops while it is open.
+- **Hard disk images and Kickstart ROMs** are not accepted as drops. Configure
+  hard disks in the machine-configuration screen. To replace a running
+  machine's ROM and cold-reset it, use **Load Kickstart ROM...** from the menu.
 
 The chooser opens after the drop rather than offering per-drive drop
 targets because the windowing layer reports file drops without a cursor
@@ -551,7 +552,7 @@ Shown only when something is on the port.
 ### Application controls
 
 - **Load Kickstart ROM...**: fit a different boot ROM. Pick a 512 KiB
-  Kickstart, then optionally a second file for the extended ROM (512 KiB at
+  Kickstart or a 256 KiB Kickstart 1.x image, then optionally a second file for the extended ROM (512 KiB at
   $E00000 or 256 KiB at $F00000; Cancel to skip and remove any fitted
   extended ROM). The machine then cold-resets, as if the chip had been
   swapped and the power cycled. The OSD names the image it fitted -- the

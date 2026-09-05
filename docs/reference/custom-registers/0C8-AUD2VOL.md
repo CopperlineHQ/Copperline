@@ -3,9 +3,12 @@ Offset: $0C8
 Access: write
 Chipset: OCS/ECS/AGA
 
-Controls audio channel 2's output volume.
+Sets audio channel 2's volume latch.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
+- Bits 5-0: Volume from 0 to 63.
+- Bit 6: Select maximum volume (64), regardless of bits 5-0.
+- Bits 15-7: Ignored.
 
+The live volume reloads at the next output-word boundary.

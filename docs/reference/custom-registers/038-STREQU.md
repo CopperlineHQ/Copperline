@@ -3,9 +3,8 @@ Offset: $038
 Access: write
 Chipset: OCS/ECS/AGA
 
-Controls or reports the custom-chip STREQU register.
+Equalization-period sync strobe.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
-
+No data bitfields: this is a strobe address. Copperline accepts writes without changing state; sync and blanking come from the beam model.

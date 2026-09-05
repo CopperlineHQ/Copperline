@@ -3,9 +3,9 @@ Offset: $05E
 Access: write
 Chipset: ECS/AGA
 
-Controls or reports the custom-chip BLTSIZH register.
+Starts an ECS/AGA blit using the height in BLTSIZV.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
-
+- Bits 10-0: Width in 16-bit words; zero means 2048.
+- Bits 15-11: Ignored.

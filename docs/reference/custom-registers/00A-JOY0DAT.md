@@ -3,9 +3,11 @@ Offset: $00A
 Access: read
 Chipset: OCS/ECS/AGA
 
-Controls or reports the custom-chip JOY0DAT register.
+Reads controller port 1's quadrature counters or digital joystick directions.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
+- Bits 15-8: Y counter.
+- Bits 7-0: X counter.
 
+Joystick direction switches feed the quadrature inputs. Fire buttons are read through CIA-A and POTGOR, not this word.

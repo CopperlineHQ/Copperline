@@ -3,9 +3,10 @@ Offset: $02E
 Access: write
 Chipset: OCS/ECS/AGA
 
-Controls or reports the custom-chip COPCON register.
+Controls the Copper's access to low custom-register addresses.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
+- Bit 1: CDANG, permit Copper writes to the blitter register range.
 
+On OCS, clearing CDANG restricts writes to $080 and above; setting it lowers the boundary to $040. ECS/AGA extend the permitted range when CDANG is set.

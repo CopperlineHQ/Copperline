@@ -3,9 +3,8 @@ Offset: $03A
 Access: write
 Chipset: OCS/ECS/AGA
 
-Controls or reports the custom-chip STRVBL register.
+Vertical-blank sync strobe.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
-
+No data bitfields: this is a strobe address. Copperline accepts writes without changing state; sync and blanking come from the beam model.

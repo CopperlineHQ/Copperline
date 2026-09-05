@@ -11,11 +11,12 @@ this reference.
 settings; `--config` and `./copperline.toml` always win over it anyway. With
 no default saved, the flag changes nothing.
 
-The configuration is validated up front and the emulator refuses to start
-with a clear error message rather than guessing (unknown CPU or chipset
-names, out-of-range sizes, missing disk images, and so on).
+Configuration parsing rejects unknown keys, invalid CPU or chipset names,
+and out-of-range sizes. Media are opened during startup; depending on the
+device, an unavailable image either stops startup or leaves the unit absent
+with a warning in the log.
 
-### Paths on Windows
+## Paths on Windows
 
 This applies to every path field below (`rom`, disk images, hard-drive
 files, the SCSI ROMs, and so on). In a TOML double-quoted string the
@@ -30,7 +31,8 @@ rom = "C:/Kickstarts/KICK31.ROM"    # forward slashes also work on Windows
 ```
 
 Single-quoted literal strings are the least error-prone. macOS and Linux paths
-use forward slashes and need none of this.
+use forward slashes and need none of this. TOML paths do not expand `~` or
+shell variables; use an absolute path or a path relative to the working directory.
 
 ## Command-line overrides
 
@@ -165,8 +167,8 @@ with CD32 Kickstart 3.1. The library identifies inserted Video CDs and parses th
 metadata. Under CD32 Kickstart, the bundled version 41 `cdstrap` autoboots Video CDs
 into a track menu: navigate with Up/Down, press Red to play, and press Blue to stop
 or exit. Standard CD32 game discs pass through to the default boot sequence. Bundled
-AROS includes the corresponding PR 1089 MPEG device and Copperline's
-chronological-CDXL fix (commit `ebfc7d9`), but bypasses cartridge diagnostics, so the
+AROS includes its own MPEG device and CDXL playback support, but bypasses
+cartridge diagnostics, so the
 cartridge library and player are currently Kickstart-specific. Neither path requires
 proprietary Commodore code or CL450 microcode, as Copperline models the CL450
 command interface at the host level.

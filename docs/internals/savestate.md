@@ -1,11 +1,9 @@
 # Save states (`savestate.rs`)
 
-A save state snapshots the whole emulated machine to a single file and
-restores it exactly. Because the core is deterministic
-([](architecture.md#determinism-and-the-host-boundary)), a restored run
-is byte-for-byte identical to one that was never interrupted -- the
-regression gate for the feature literally `cmp`s screenshots taken on
-either side of a save/restore cycle.
+A save state stores the emulated machine in a single file. With the same
+external media and repeatable inputs, restoring it reproduces the guest
+timeline. Host files, physical devices, and live services have separate
+[replay limits](#determinism-boundaries); they are not rolled back with RAM.
 
 User-facing behaviour (shortcuts, menu items, the `--save-state-after` /
 `--load-state` flags, and the operational caveats) is documented in the
@@ -15,10 +13,9 @@ This chapter is the implementation and format reference.
 
 ## Design
 
-The state is produced by `serde` derives on the live state structs
-themselves -- there is no hand-maintained parallel "snapshot" schema.
-`Bus` and everything it owns derive `Serialize`/`Deserialize`, as does
-the published `m68k` core with its `serde` feature enabled. `CpuCore`
+Most state uses `serde` derives on the live structs, including `Bus` and
+the published `m68k` core. Types with file handles, decoder internals, or
+feature-dependent board variants use custom serialization. `CpuCore`
 serializes architectural state, prefetch state, MMU state, and timing
 configuration; runtime-only decoded-op, FastMem, and trace-JIT caches are
 skipped and rebuilt after deserialization. New fields are picked up by the
@@ -31,13 +28,13 @@ What is captured:
 |---|---|
 | `CpuCore` | registers, SR flags, prefetch queue, pending interrupt/stop state, MMU/CACR state, cycle-timing configuration, `cpu_type` and address mask |
 | `MachineRuntimeState` | the `M68kMachine` fields outside the core: `last_cacr`, `sync_cck_on`, `cpu_clocks_per_cck`, `cpu_clock_carry` |
-| `icache` / `dcache` | the 020/030 cache models (`Option<Box<CpuCache>>`, `None` when the model has no such cache or it is opted out). A snapshot with `None` for a cache the running CPU has -- an older state, or one taken before the caches defaulted on -- re-establishes that cache cold on load (enable bits re-derived from the restored CACR) instead of dropping it |
+| `icache` / `dcache` | the CPU cache models (`Option<Box<CpuCache>>`, `None` when absent or opted out). If a compatible state lacks a cache that the restored CPU configuration requires, load creates it cold with enable bits derived from CACR |
 | `Bus` | chip/slow RAM, ROM and extended ROM, Zorro boards (including their RAM), both CIAs, RTC, Agnus/Copper/Denise/Paula/blitter state, floppy controller with in-memory disk images, Gayle IDE, A2091 SCSI, Akiko/CDTV with NVRAM, beam-event capture buffers, DMA pointers, interrupt latches, and the bus-arbitration counters |
 
 Deliberately excluded, with the mechanism in parentheses:
 
-- **Host sinks and taps**: Paula's `Box<dyn SerialSink>` /
-  `Box<dyn AudioSink>` and the bounded CCP serial-observation tap
+- **Host sinks and taps**: Paula's `Box<dyn SerialSink>`, `AudioMux`,
+  and the bounded CCP serial-observation tap
   (`#[serde(skip)]`; the sink defaults produce inert null devices). On load,
   `Bus::adopt_host_resources` moves the live sinks and tap from the old Bus
   onto the restored one, so output and an active subscription continue
@@ -68,11 +65,10 @@ is self-contained with respect to everything that was in memory, so
 loading one always rebuilds *its own* machine -- restoring the Bus and
 CPU restores the machine model along with them (the CPU bus adapter's
 address-mask copy is re-synced from the restored core's `address_mask`).
-A state loaded under a different config therefore does not corrupt
-emulation; it silently *becomes* the machine the state was taken on.
+A state loaded under a different config restores the saved machine model.
 
 To make that takeover visible and to keep host-side derived values in
-step, the header carries a `MachineDescriptor` (`config.rs`): the
+step, the header carries a `MachineDescriptor` (`config/mod.rs`): the
 machine "shape" -- CPU model, chip/fast/slow RAM sizes, chipset
 (OCS/ECS/AGA), video standard, and machine profile -- plus a fingerprint
 of the boot and extended ROM (`RomId` = byte length + CRC-32 via
@@ -106,25 +102,26 @@ images reopen by path and fail the load cleanly if absent (see below).
 
 ### File-backed images
 
-Two subsystems hold open `File` handles inside otherwise serializable
-state. Both get manual serde implementations through small shadow
-structs, and both **reopen the file during deserialization**, which
-turns a missing or moved image into a clean load-time error instead of a
-later I/O panic:
+Hard-drive and CD backends store enough metadata to reopen their backing
+files during deserialization. Missing or moved images cause a load-time error:
 
-- `HardDriveImage` (shared by Gayle IDE and A2091 SCSI) serializes as
+- `HardDriveImage` (shared by IDE, SCSI, and copperhf) serializes as
   `HardDriveImageState { path, memory, total_sectors, rdb_overlay,
-  overlay_write_warned, scsi_bus }`. A file-backed image stores
+  overlay_write_warned, scsi_bus, host_device }`. A file-backed image stores
   `memory: None` and reopens `path` read/write on load; an in-memory
   directory-built volume stores the whole image in `memory`, so its
   session-only writes survive the round trip. The synthesized-RDB
   overlay for bare hardfiles is embedded either way. Consequence: HDF
   *file contents* are not part of the state -- guest writes made after
   the snapshot are still visible after restoring.
-- `CdImage` serializes as `CdImageState { paths, tracks, extents,
-  total_sectors }` and reopens every image file read-only on load
-  (`CdImage` now keeps the per-file `paths` alongside its `files`
-  for exactly this purpose).
+- `CdImageState::Bin { sources, tracks, extents, total_sectors }` stores
+  the source descriptions needed to reopen BIN/WAVE/MP3, ISO, and NRG data.
+  `CdImageState::Chd { path }` stores the CHD path and rebuilds the CHD
+  backend on load. Both reopen media read-only.
+- A physical disk stores its identifier, fingerprint, and write-access
+  setting in `host_device`. Deserialization creates a pending device;
+  the host-disk reopen path then checks its identity and access rules.
+  It is never reopened as an ordinary file. Browser builds reject these states.
 
 Floppy images need no special handling: `FloppyImage` keeps its data
 in memory (`StandardAdf(Vec<u8>)` or per-track structures), so inserted
@@ -266,12 +263,9 @@ The regression checks cover serialization, failure recovery and replay:
 
 ## Reverse debugging (`timetravel.rs`)
 
-Reverse debugging is built directly on this determinism. Where `rr`
-records every nondeterministic syscall and signal to make replay
-reproducible, Copperline already has that for free, so going backwards is
-just *snapshot + replay*: keep a ring of recent machine states, and to
-reach an earlier point restore the nearest one at or before it and replay
-forward. The user-facing surfaces (headless `COPPERLINE_DBG_RWATCH`, the
+Reverse debugging keeps a ring of recent machine states. To reach an earlier
+point, it restores the nearest preceding snapshot and replays forward.
+The user-facing controls (headless `COPPERLINE_DBG_RWATCH`, the
 window's **&lt; Step** / **&lt; Run**) are documented in
 [](../debugger/reverse.md); this section is the model.
 
@@ -291,11 +285,9 @@ below one anchor.
 ### Position coordinate
 
 Reverse ops navigate by `Emulator::retired_instructions`, a monotonic
-count bumped per retired instruction in `execute_cpu_slice`. It lives
-**outside** the serialized state -- paired with each snapshot in the ring,
-not inside the blob -- so it costs nothing to capture and, importantly,
-**does not change the save-state shape**: reverse debugging needs no
-`STATE_VERSION` bump. A reverse step to position *P* restores the nearest
+count bumped per retired instruction in `execute_cpu_slice`. It is stored
+alongside each snapshot in the ring, outside the serialized machine blob.
+A reverse step to position *P* restores the nearest
 snapshot with `pos <= P` and single-steps to *P* through `run_one_step`,
 the exact per-instruction body the forward `step_real` loop uses (factored
 out so replay reproduces the forward run instruction-for-instruction,
@@ -313,18 +305,23 @@ logged actions as it reaches their positions. A floppy media change is
 logged as a marker that warns on replay rather than silently diverging (the
 inserted image is host-file state, not in the log).
 
+(determinism-boundaries)=
 ### Determinism boundaries
 
 The same host boundary as save states applies, plus the requirement that
 *time-dependent* inputs be pinned, since replay re-executes them:
 
-- The guest RTC (`rtc.rs`) reads host wall-clock time unless
-  `COPPERLINE_RTC_FIXED_SECS` is set; reverse mode warns when it is unset.
+- A fitted RTC reads host wall-clock time unless seeded with `--rtc-time`
+  or fixed with `COPPERLINE_RTC_FIXED_SECS`. The headless reverse-mode
+  warning checks only the environment override, so it can still appear
+  when `--rtc-time` already makes the clock deterministic.
 - Directory-backed (host-folder) filesystems stamp guest-visible host
   datestamps with no fixed-time override -- avoid for reverse replay.
 - HDF/CD images reopen by path and are externally mutable, so a guest disk
   write after a snapshot is not rolled back by restoring it; floppy
   contents are in-state and safe.
+- Physical media and live network, serial, MIDI, or sampler input cannot
+  be reproduced from the snapshot alone.
 
 ### Verification
 

@@ -3,8 +3,8 @@ Offset: $07A
 Access: write
 Chipset: ECS/AGA
 
-Controls or reports the custom-chip BPLHDAT register.
+UHRES bitplane identifier/data register.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
+Copperline does not implement this register. No written bits affect the emulated machine.

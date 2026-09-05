@@ -32,8 +32,10 @@ If the display exhibits raster splits at incorrect scanlines or corrupted palett
    or **To slot** in the Frame Analyzer). Execution halts when the raster beam reaches that line.
 4. **Single-step the Copper:** Switch to the **Copper** tab and use `CStep` (`C`) to execute
    Copper instructions sequentially across `WAIT` boundaries.
-5. **Trace memory modifications:** Use `WRITER ADDR` to scan execution history and identify
-   the last CPU or Blitter instruction that wrote to the Copper list address.
+5. **Find a memory change:** `WRITER ADDR` replays retained snapshots and moves back
+   to the last observed change of that word. Its PC identifies the CPU step
+   around the change; use `WATCH ADDR CPU` or `WATCH ADDR BLITTER` to distinguish
+   the writer on a forward run.
 
 ## Identifying memory corruption
 

@@ -3,9 +3,10 @@ Offset: $008
 Access: read
 Chipset: OCS/ECS/AGA
 
-Controls or reports the custom-chip DSKDATR register.
+Reads a raw disk data word from the selected ready track.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
+- Bits 15-0: Raw encoded track word.
 
+Copperline retains the last word when no ready track supplies a new value. DSKBYTR provides byte-ready and sync status.

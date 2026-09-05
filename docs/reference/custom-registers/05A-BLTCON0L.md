@@ -3,9 +3,9 @@ Offset: $05A
 Access: write
 Chipset: ECS/AGA
 
-Controls or reports the custom-chip BLTCON0L register.
+Updates the blitter minterm without changing source shift or channel enables.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
-
+- Bits 7-0: BLTCON0.LF Boolean truth table.
+- Bits 15-8: Ignored.

@@ -3,9 +3,8 @@ Offset: $000
 Access: read
 Chipset: OCS/ECS/AGA
 
-Controls or reports the custom-chip BLTDDAT register.
+Blitter destination-data read address. Copperline does not expose a destination latch through this address.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
-
+No destination bits are driven by the current model; a CPU read returns the custom-bus residue.

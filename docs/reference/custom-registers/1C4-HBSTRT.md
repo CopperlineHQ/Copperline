@@ -3,9 +3,11 @@ Offset: $1C4
 Access: write
 Chipset: ECS/AGA
 
-Controls or reports the custom-chip HBSTRT register.
+Sets the programmable horizontal blanking start.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
+- Bits 8-0: Horizontal position in colour clocks.
+- Bits 15-9: Ignored.
 
+BEAMCON0 selects whether programmable timing is used.

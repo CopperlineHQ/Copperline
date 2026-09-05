@@ -3,9 +3,11 @@ Offset: $1CA
 Access: write
 Chipset: ECS/AGA
 
-Controls or reports the custom-chip VSSTOP register.
+Sets the programmable vertical sync stop.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
+- Bits 10-0: Vertical line number.
+- Bits 15-11: Ignored.
 
+BEAMCON0 selects whether programmable timing is used.

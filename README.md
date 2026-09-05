@@ -13,10 +13,11 @@ It boots out of the box with the bundled open-source AROS Kickstart replacement,
 
 - **Chipset and machine models**: OCS, ECS, and AGA support with profiles from the A500 through the A4000, plus CDTV and CD32.
 - **Configurable CPU and memory**: Motorola 68000 through 68060, optional FPU and MMU support, and configurable Chip, Fast, and Slow RAM.
-- **Storage and media**: Floppy disk images (ADF, ADZ, DMS, IPF, SCP), physical floppy drives via Greaseweazle (FluxBridge), IDE (Gayle/A4000), SCSI (A2091, A3000, A4091), CD-ROM, and host directory filesystem mounting.
+- **Storage and media**: Floppy disk images (ADF, ADZ, DMS, IPF, SCP), physical floppy drives via Greaseweazle (FluxBridge), IDE (Gayle/A4000 and expansion boards), SCSI (A2091, A3000, A4091), virtual hard disks (`copperhf.device`), CD-ROM, and host directory mounts.
 - **Audio and video**: 4-channel Paula audio, RTG graphics cards (Picasso II/II+, Z3660), host MIDI in/out bridging, and built-in Roland MT-32 and General MIDI synthesis.
 - **Expansion and networking**: Zorro II/III autoconfig, A2065 Ethernet, host-backed bsdsocket.library, and sandboxed WebAssembly expansion plugins.
-- **Debugging and automation**: In-window interactive debugger with reverse stepping and live Kickstart/AROS symbol names, signal waveform export (VCD), GDB remote stub (including [Bartman extension compatibility](docs/debugger/gdb.md#bartman-extension-backend) with launches that wait for the debugger), a Debug Adapter Protocol server for VS Code and other IDEs (`copperline-ctl --dap`, source-level from the hunk executable's own debug information or a linked/relocatable ELF sibling), [deterministic save states](docs/guide/ui.md#save-states) with atomic file replacement, [WinUAE USS import for frame profiling](docs/guide/winuae-state.md), headless scripting, and a JSON-RPC control protocol (`copperline-ctl`, with an MCP server mode for AI coding agents via `copperline-ctl --mcp`).
+- **Debugging**: CPU and chipset debugger, reverse stepping, live Kickstart/AROS symbols, frame and instruction profiling, VCD waveforms, and source debugging through GDB or DAP. Both the native VS Code extension and the [Copperline fork of Bartman's extension](docs/debugger/vscode-bartman.md) are supported.
+- **Automation and replay**: [Save states](docs/guide/ui.md#save-states), [WinUAE state import](docs/guide/winuae-state.md), headless input scripts and captures, and a JSON-RPC control protocol. `copperline-ctl` also provides DAP (`--dap`) and MCP (`--mcp`) servers.
 - **Freezer cartridge**: Action Replay-style cartridge support with bundled HRTMon (`--cartridge hrtmon`), allowing running software to be frozen into the monitor via the menu, a hotkey, headless `--freeze-after`, or the control protocol.
 - **Direct launching**: Boot directly into WHDLoad game packages (`--whdload`) or host-built Amiga executables (`--run`), with a WinUAE-compatible `uaelib` trap allowing guest code to control warp speed, log debug messages, and register debug resources.
 - **WebAssembly build**: Run directly in modern web browsers at [copperline.dev/try](https://copperline.dev/try/).
@@ -55,9 +56,11 @@ Standalone AppImage binaries are also available on the [releases page](https://g
 cargo build --release
 ```
 
-Always run Copperline with `--release`, as unoptimized debug builds are too slow for real-time emulation.
+Run the resulting `target/release/copperline` binary. `--release` is a Cargo
+build option; unoptimized debug builds are too slow for real-time emulation.
 
 Dependencies:
+
 - Rust 1.95+ (tested on stable)
 - Fedora build dependencies: `sudo dnf install alsa-lib-devel systemd-devel gcc`
 - Debian/Ubuntu build dependencies: `sudo apt install libasound2-dev libsystemd-dev gcc`
@@ -116,7 +119,7 @@ See the [configuration guide](docs/guide/configuration.md) for the complete refe
 
 ## Documentation
 
-Comprehensive documentation is published at [copperline.dev](https://copperline.dev/) and available under `docs/`:
+The manual is published at [copperline.dev/docs](https://copperline.dev/docs/) and available under `docs/`:
 
 - [Getting Started](docs/guide/getting-started.md) - Installation and setup
 - [Configuration](docs/guide/configuration.md) - Configuration file reference and CLI options

@@ -16,7 +16,7 @@ The web version runs at [copperline.dev/try](https://copperline.dev/try/):
   is running reboots the machine with the selected profile. URL query parameter: `?machine=A1200`.
 - **Video standards:** Toggle between PAL (default) and NTSC. URL query parameter: `?video=NTSC`.
 - **Boot ROMs:** The open-source AROS Kickstart replacement is fetched automatically at load.
-  You can also load standard 512 KiB Kickstart ROM files via the **Kickstart ROM** picker or
+  You can also load 512 KiB or 256 KiB Kickstart ROM files via the **Kickstart ROM** picker or
   drag-and-drop.
 - **Floppy disk images:** Mount disk images in `DF0:` and `DF1:` (ADF, ADZ, DMS, IPF, SCP, or ZIP).
   By default, images mount read-only. Check **Open disks writable** to enable in-memory
@@ -59,7 +59,10 @@ The web version runs at [copperline.dev/try](https://copperline.dev/try/):
 
 The web build uses the same `.clstate` file format as the desktop version:
 
-- **Save state / Load state:** Download or upload state files (`.clstate`) for desktop interoperability.
+- **Save state / Load state:** Download or upload state files (`.clstate`). Transfers
+  between browser and desktop require the same save-state format version and devices
+  supported by both builds. Desktop states that depend on host files or native-only
+  devices are not portable to the browser.
 - **Quick save / Quick load:** Stores the current session in browser local storage (IndexedDB)
   for instant resumption across page reloads.
 - **Saved states panel:** Manage named state slots in browser storage.
@@ -89,14 +92,16 @@ are installed:
 
 ```sh
 rustup target add wasm32-unknown-unknown
-cargo install wasm-bindgen-cli --version 0.2.126 --locked
+# Run from the repository root; the CLI must match the crate exactly.
+bindgen_version=$(sed -n 's/^wasm-bindgen = "=\(.*\)"$/\1/p' crates/copperline-web/Cargo.toml)
+cargo install wasm-bindgen-cli --version "$bindgen_version" --locked
 ```
 
 ### Compilation
 
 ```sh
 cd crates/copperline-web
-cargo build --release --target wasm32-unknown-unknown
+cargo build --release --target wasm32-unknown-unknown --locked
 wasm-bindgen --target web --out-dir pkg \
   target/wasm32-unknown-unknown/release/copperline_web.wasm
 ```
@@ -106,7 +111,11 @@ The compiled JavaScript loader (`copperline_web.js`) and WebAssembly binary
 
 ## Embedding with the WebEmu API
 
-To embed Copperline in a custom web application:
+The example below assumes that the page has loaded the ROM and floppy bytes,
+created a 2D canvas context named `ctx`, and connected an `audioWorkletNode`
+whose processor accepts interleaved stereo samples. Resize the canvas to the
+presentation dimensions when they change. The complete page and audio processor
+are in `crates/copperline-web/www/`.
 
 ```js
 import init, { WebEmu } from './pkg/copperline_web.js';
@@ -226,9 +235,16 @@ The browser build can route Amiga serial communication to remote WebSocket serve
 (benchmarking-the-core-as-wasm)=
 ## Headless WebAssembly benchmarking
 
-To benchmark WebAssembly performance using Wasmtime:
+From the repository root, build the frontend-free WASI benchmark:
 
 ```sh
-cargo build --release --target wasm32-wasip1 --bin copperline-bench --features "bench-bin"
-wasmtime run --dir . target/wasm32-wasip1/release/copperline-bench.wasm -- --config test.toml --benchmark-until 30
+rustup target add wasm32-wasip1
+cargo build --release --locked --target wasm32-wasip1 \
+  --no-default-features --features bench-bin --bin copperline-bench
+wasmtime run --dir . target/wasm32-wasip1/release/copperline-bench.wasm \
+  --config test.toml --seconds 30
 ```
+
+Keep the config and its media under the directory exposed by `--dir`.
+`copperline-bench` uses `--seconds`; it has a separate parser from the desktop
+binary. Add `--render` to include framebuffer rendering and post-processing.

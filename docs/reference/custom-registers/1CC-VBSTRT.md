@@ -3,9 +3,11 @@ Offset: $1CC
 Access: write
 Chipset: ECS/AGA
 
-Controls or reports the custom-chip VBSTRT register.
+Sets the programmable vertical blanking start.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
+- Bits 10-0: Vertical line number.
+- Bits 15-11: Ignored.
 
+BEAMCON0 selects whether programmable timing is used.

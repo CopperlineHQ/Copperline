@@ -3,9 +3,11 @@ Offset: $05C
 Access: write
 Chipset: ECS/AGA
 
-Controls or reports the custom-chip BLTSIZV register.
+Latches the extended blitter height for a later BLTSIZH start.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
+- Bits 14-0: Height in rows; zero means 32768.
+- Bit 15: Ignored.
 
+Writing this register alone does not start a blit.

@@ -3,9 +3,8 @@ Offset: $08C
 Access: write
 Chipset: OCS/ECS/AGA
 
-Controls or reports the custom-chip COPINS register.
+Copper instruction register address.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
-
+Copperline does not implement this register. No written bits affect the emulated machine.

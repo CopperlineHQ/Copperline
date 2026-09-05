@@ -1,31 +1,19 @@
 # Architecture overview
 
-This chapter is the map; the following chapters zoom into the
+This chapter describes the source layout, frame loop, and host boundary.
+Related chapters cover the
 [timing model](timing.md), the [chipset modules](chipset.md), the
 [video pipeline](video.md), the [CPU integration](cpu.md), the
 [peripherals](peripherals.md), and the [save-state format](savestate.md).
 
 ## Source layout
 
-The debug-information loader maps ELF allocatable sections onto hunks in
-elf2hunk's section order. For relocatable ELF (`ET_REL`), whose sections can
-all have address zero, it assigns distinct internal 32-bit addresses and
-materializes DWARF and call-frame sections with `R_68K_32` / `R_68K_PC32`
-relocations applied. Section symbols and ordinary symbols retain their
-section identity; references to debug sections remain section offsets.
-RELA uses its explicit signed addend, while REL uses the stored big-endian
-word. These internal addresses map back to hunk offsets and then to the
-runtime bases reported by LoadSeg; guest memory is untouched. Linked ELF
-keeps its linker addresses and already-relocated section bytes, including
-when `--emit-relocs` retains relocation records. Unsupported relocations
-or invalid relocation targets/offsets produce a section-specific diagnostic.
-
 ```
 src/
-  main.rs           # thin CLI binary: config load, boot
+  main.rs           # native binary: config load, boot, execution-mode selection
   cli.rs            # binary-local command-line parser
   bin/bench.rs      # copperline-bench headless benchmark (native + wasm32-wasip1)
-  lib.rs            # the copperline library crate all of src/ lives in
+  lib.rs            # library entry point shared by native and browser frontends
   config/           # TOML config + validation + machine profiles
                     #   (mod.rs, raw.rs, validate.rs, resolve.rs, about.rs, tests.rs)
   envcfg.rs         # cached COPPERLINE_* environment-variable snapshot
@@ -66,6 +54,7 @@ src/
   a2091.rs          # A2091 SCSI controller board (DMAC + boot ROM)
   a4091.rs          # A4091 Zorro III SCSI-2 controller (NCR 53C710)
   scsi.rs           # WD33C93A SBIC + SCSI-2 disk targets
+  copperhf.rs       # virtual hardfile controller with ordered worker-thread I/O
   sdmac.rs          # A3000 Super DMAC fronting the WD33C93
   harddrive.rs      # shared hard-drive image backend (IDE + SCSI)
   dirfs.rs          # host directory -> in-memory FFS/OFS partition image
@@ -76,10 +65,10 @@ src/
   cdtv.rs           # CDTV DMAC + Matshita drive model
   akiko.rs          # CD32 Akiko (C2P, NVRAM, Chinon drive)
   cd32_fmv.rs       # CD32 FMV cartridge (CL450 video + L64111 MPEG audio)
-  rtc.rs            # MSM6242-compatible battery RTC
+  rtc.rs            # MSM6242 and RP5C01 battery RTCs
   serial.rs         # Paula serial sinks (stdout, TCP, pty)
   midi/             # host MIDI serial bridge (CoreMIDI / ALSA / WinMM)
-  audio.rs          # AudioSink trait + cpal/WAV/null outputs
+  audio/            # AudioSink outputs, source/stem mux, and resampler
   priority.rs       # opt-in realtime-like thread scheduling (pacer + audio)
   gamepad.rs        # gilrs input: database layout + calibration override
   screenshot.rs     # PNG export helpers
@@ -118,7 +107,7 @@ src/
     font.rs         # 8x8 overlay font
 crates/copperline-web/   # standalone wasm-bindgen browser frontend (WebEmu + page glue)
 crates/cputest-runner/   # WinUAE cputest instruction-suite runner for the m68k core
-tests/              # ignored integration tests (need local ROM assets)
+tests/              # self-contained integration tests and ignored local-asset tests
 timing-test/        # bootable cross-emulator timing-measurement disk
 ```
 
@@ -187,13 +176,12 @@ The flow of a frame:
    wall-clock; for headless captures it does not. The emulated result is
    identical either way -- pacing only schedules host work.
 
-So an interactive run uses three host threads: the **main thread** (event
-loop, core, and pacer), the **`copperline-render` worker**, and the
-**cpal audio callback** that cpal owns. Only the last two cross a thread
-boundary with the main thread, and both do so through an owned
-`RenderInput`/presentation-buffer envelope (with immutable shared frame
-snapshots) and a lock-free sample ring buffer rather than shared mutable
-state. The pacer and the audio callback are
+The main presentation path uses the **main thread** (event loop, core,
+and pacer), the **`copperline-render` worker**, and the **cpal audio
+callback**. Rendering passes owned buffers and immutable shared snapshots;
+audio passes samples through a lock-free ring buffer. Enabled devices and
+services can create additional workers, including copperhf file I/O and
+debugger socket handling. The pacer and the audio callback are
 latency-critical and can optionally be given above-normal scheduling priority
 (`[emulation] realtime_priority`, `src/priority.rs`); see
 [](timing) for what that does per platform.
@@ -210,13 +198,13 @@ The CPU-visible memory map:
 
 | Range | Contents |
 |---|---|
-| `$000000` - chip top | Chip RAM (512K-2M; ROM overlaid at `$0` after reset until CIA-A releases /OVL) |
+| `$000000` - chip top | Chip RAM (256K-2M; ROM overlaid at `$0` after reset until CIA-A releases /OVL) |
 | `$200000` - | Zorro II space (fast RAM autoconfig boards) |
 | `$A00000` / `$BFxxxx` | CIA-A (odd bytes, /LDS) and CIA-B (even bytes, /UDS) |
 | `$B80000` | Akiko (CD32 only) |
 | `$C00000` | Slow ("ranger") RAM, up to 512K |
 | `$DA0000` / `$DE1000` | Gayle IDE task file / Gayle ID and status (A600/A1200) |
-| `$DC0000` | Battery RTC (MSM6242 view) |
+| `$DC0000` | Battery RTC (MSM6242 or RP5C01, according to configuration) |
 | `$DFF000` | Custom-chip register window |
 | `$E80000` | Zorro autoconfig window (then CDTV DMAC first on CDTV) |
 | `$E00000` / `$F00000` | Extended ROM (CD32 / CDTV) |
@@ -264,20 +252,27 @@ a residue; see the TODO in `read_custom_word`.
 
 ## Determinism and the host boundary
 
-The core's only inputs are the config, the loaded images, and the
-timestamped input events (host keyboard/mouse/gamepad in windowed runs;
-`--press-after`-style scripted events in headless runs). Audio is rendered
-in emulated time and resampled at the host boundary; wall-clock affects
-scheduling only. This is what makes `--screenshot-after` runs exactly
-reproducible, lets the headless debugger replay a failure
-deterministically, and makes [save states](savestate) exact: a restored
-run is byte-identical to one that was never interrupted.
+With fixed configuration, media, clock seeds, and timestamped inputs,
+the core advances deterministically. Audio is generated in emulated time;
+window pacing and render-worker scheduling do not change the guest timeline.
+This supports repeatable headless captures and snapshot replay.
 
-The one host-clock value that reaches emulated state is the battery RTC: a
-guest that reads it (`$DC0000`) sees the host date and time, so RTC reads
-are not reproducible across wall-clock runs. `COPPERLINE_RTC_FIXED_SECS=`
-*unix-seconds* pins the clock to a fixed value, which is what makes
-differential traces against another emulator line up.
+Host services can supply additional inputs or retain effects outside a
+snapshot:
+
+- A fitted RTC reads the host's local time unless seeded with
+  `[machine] rtc_time` / `--rtc-time`. A seed advances in emulated time;
+  `--rtc-frozen` holds it constant. `COPPERLINE_RTC_FIXED_SECS` is the
+  older fixed-UTC override.
+- Live host-directory mounts expose file contents and timestamps. File-backed
+  hard disks and physical disks retain writes made after a snapshot.
+- Network, serial, MIDI, and sampler input can depend on external devices
+  or services. Physical floppy drives also require wall-clock pacing.
+
+Use fixed image files and scripted inputs for deterministic regression
+tests. See [save-state boundaries](savestate.md#determinism-boundaries) for
+what a restore can reproduce. Some audio decoders also have
+[platform-dependent floating-point rounding](mhi.md#copperline-implementation-notes).
 
 ### Input scripting and recording (`inputrec.rs`)
 
@@ -287,9 +282,10 @@ The input recorder (window shortcut / `--record-input`) produces those
 scripts from a live session by combining two capture styles: direct
 hooks where event identity matters (the keyboard choke point
 `handle_amiga_key_event`, floppy inserts) and a once-per-quantum diff of
-the live `InputState` for port-1 mouse buttons, mouse motion (wrapped
-quadrature-counter deltas become `mouse-after` directives), and the
-port-2 joystick/CD32 pad. Two details keep record-then-replay
+the live `InputState` for each port's configured device: mouse buttons and
+motion, joystick/CD32 controls, or analogue positions. Wrapped quadrature
+counter deltas become `mouse-after` directives. Port-device changes themselves
+are not recorded, so replay must use the same port configuration. Two details keep record-then-replay
 byte-identical: recorded timestamps are the emulated times the events
 were *applied* (frame boundaries, not the wall-clock moment the host
 delivered them), and times/holds are floored -- never rounded -- to
@@ -298,6 +294,23 @@ replayed event one frame late. The end-to-end gate is the same as for
 save states: record a scripted run, replay the recording, `cmp` the
 screenshots. User-facing usage is in
 [Input recording and scripts](../guide/headless.md#input-recording-and-script-files).
+
+## Guest debug information
+
+The debug-information loader maps ELF allocatable sections onto hunks in
+elf2hunk's section order. For relocatable ELF (`ET_REL`), whose sections can
+all have address zero, it assigns distinct internal 32-bit addresses and
+materializes DWARF and call-frame sections with `R_68K_32` / `R_68K_PC32`
+relocations applied. Section symbols and ordinary symbols retain their
+section identity; references to debug sections remain section offsets.
+RELA uses its explicit signed addend, while REL uses the stored big-endian
+word. These internal addresses map back to hunk offsets and then to the
+runtime bases reported by LoadSeg; guest memory is untouched. Linked ELF
+keeps its linker addresses and already-relocated section bytes, including
+when `--emit-relocs` retains relocation records. Unsupported relocations
+or invalid relocation targets/offsets produce a section-specific diagnostic.
+See the [DAP reference](../debugger/dap.md#debug-information) for supported
+toolchains and variable-location expressions.
 
 ## envcfg: environment variables are start-up settings
 

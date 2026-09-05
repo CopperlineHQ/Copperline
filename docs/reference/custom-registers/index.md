@@ -1,8 +1,15 @@
 # Custom chip registers
 
-These ASCII Markdown pages are the source used by Copperline's IO Map, debugger console, control protocol, DAP adapter, and VS Code register tree. Offsets are relative to `$DFF000`. Access descriptions refer to the CPU-visible register direction; Copperline can still show the internal latch behind write-only registers.
+These ASCII Markdown pages supply Copperline's IO Map, debugger console,
+control protocol, DAP adapter, and VS Code register tree. Offsets are relative
+to `$DFF000`. Access descriptions give the usual CPU-visible direction;
+individual pages describe exceptions such as AGA palette readback. Debugger
+inspection can also show internal latches behind write-only registers.
 
-The field names and chipset availability follow the Amiga Hardware Reference Manual terminology.
+Field names follow Amiga Hardware Reference Manual terminology. The pages
+also describe Copperline's implementation limits, including registers that
+are only latched or have no effect. They are a programming reference for
+the emulator, not a complete specification of external chip signals.
 
 | Offset | Register | Access | Chipset |
 |---:|---|---|---|

@@ -62,8 +62,11 @@ annotates the generated TOML file:
   limits, called out with the image's measured size where the file can be
   found), and FS-UAE hardfiles are flagged for manual placement on `[scsi]` or
   `[lide]`.
-- **Read-only hardfiles:** Copperline IDE hardfiles are read-write by default. To
-  enforce read-only access, adjust filesystem permissions on the host file.
+- **Read-only hardfiles:** Regular IDE/SCSI/`copperhf` hardfile images are opened
+  read-write; the converter cannot preserve UAE's read-only setting. Removing
+  host write permission makes the image fail to open. Use a disposable copy
+  when the original must be preserved. Live `[[filesys]]` directory mounts and
+  physical `[[host_disk]]` attachments have their own read-only settings.
 - **Relative paths:** Relative paths in UAE configurations are preserved as written.
   You may need to update paths to match your current working directory.
 - **Host-specific settings:** Display window dimensions, host vsync options, and host

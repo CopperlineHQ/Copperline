@@ -3,9 +3,10 @@ Offset: $0B6
 Access: write
 Chipset: OCS/ECS/AGA
 
-Controls audio channel 1's playback period.
+Sets audio channel 1's sample playback period.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
+- Bits 15-0: Period in Paula clocks per 8-bit sample.
 
+DMA supplies two samples per word; a shorter period increases playback rate.

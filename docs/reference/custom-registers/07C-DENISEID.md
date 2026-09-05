@@ -3,8 +3,10 @@ Offset: $07C
 Access: read
 Chipset: ECS/AGA
 
-Controls or reports the custom-chip DENISEID register.
+Identifies ECS Denise or AGA Lisa.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
+- ECS Denise reads $FFFC.
+- AGA Lisa reads $00F8.
+- OCS has no register here; Copperline returns $FFFF as a detection workaround instead of the floating-bus residue.
