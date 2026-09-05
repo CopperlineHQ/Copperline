@@ -748,6 +748,16 @@ panels_render_into_their_rects` renders every panel into
 from there -- and the `test_app()` fixture drives the debugger window
 against a real emulator instance in the unit tests.
 
+The configuration panel lives in `ui/configuration.rs`, with row drawing and
+hit-testing together in `configuration/rows.rs`, library artwork and entries in
+`configuration/library.rs`, and modal drawing and hit geometry in
+`configuration/dialogs.rs`. Its editable model remains in `launcher.rs`.
+`launcher/fields.rs` defines tabs, rows and choices; `launcher/values.rs` owns
+labels and edits, sharing a single mapping for ordinary boolean fields.
+Hardware-dependent edits remain explicit. `launcher/setup_config.rs` handles
+loading and serialization, with `to_raw` delegating to machine, media, WHDLoad,
+presentation, I/O, audio and expansion sections.
+
 ### CRT shader pass (`window/crt_shader.rs`)
 
 The optional tube emulation (`[display] shader`, off by default) is a second
