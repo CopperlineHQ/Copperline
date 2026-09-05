@@ -41,7 +41,11 @@ The native CI builders publish `cargo-timings-*` artifacts from `--timings`
 for seven days. To inspect build costs locally, add `--timings` and open
 `target/cargo-timings/cargo-timing.html`. CI and packaging use distinct
 cache keys because an explicit `--target` build cannot populate the native
-build's output directory.
+build's output directory. These Rust caches are saved only on `main` and
+restored by pull requests. This avoids filling the repository cache budget
+with copies scoped to individual PRs, which cannot be reused by other PRs.
+New dependency/profile combinations first populate the shared cache after
+merging; until then, a PR may need a cold build.
 
 The golden renders live under `timing-test/golden/`. A hardware-model change
 that intentionally alters them must be re-blessed with

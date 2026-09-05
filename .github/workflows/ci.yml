@@ -12,6 +12,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+# Only main saves Rust caches. PRs can restore main's caches, while caches
+# saved on a PR merge ref cannot serve other PRs and evict reusable entries
+# when several of these large build matrices run concurrently.
 jobs:
   build:
     # Keep the existing check name for branch-protection rules. The ci
@@ -33,6 +36,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           # The macOS packaging workflow also has a job called build, but
           # its explicit --target artifacts cannot warm this native build.
           key: ci-macos
@@ -83,6 +87,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Formatting
         run: cargo fmt --check
       - name: Clippy
@@ -112,6 +118,7 @@ jobs:
           cargo generate-lockfile
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: fuzz
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
@@ -138,6 +145,7 @@ jobs:
           rustup toolchain install "$msrv" --profile minimal
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: msrv
       - name: Build with MSRV
         run: cargo +"$MSRV" build --locked
@@ -254,6 +262,7 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: crates/hostsocket-plugin
       - name: Build (wasm32-unknown-unknown)
         working-directory: crates/hostsocket-plugin
@@ -283,6 +292,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: crates/zz9k-plugin
       - name: Formatting
         working-directory: crates/zz9k-plugin
@@ -391,6 +401,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: ci-linux
       - name: Install build dependencies
         # ALSA (cpal) + udev (gilrs) headers, plus iproute2 for the A2065
@@ -465,6 +476,8 @@ jobs:
           targets: wasm32-unknown-unknown
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Core without the desktop frontend
         run: cargo check --no-default-features --locked
       - name: Headless benchmark binary
@@ -494,6 +507,8 @@ jobs:
         with:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Frontend without the debug and library features
         run: cargo check --no-default-features --features frontend,cpu-jit --locked
       - name: Player crate (example manifest)
@@ -547,6 +562,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: RSP unit tests
         # The RSP tests live in the library; selecting it avoids compiling
         # every integration-test executable just to filter out its tests.

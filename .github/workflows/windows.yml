@@ -54,6 +54,8 @@ concurrency:
   group: windows-${{ github.ref }}
   cancel-in-progress: true
 
+# Seed each native build cache on main; PR copies cannot serve other PRs
+# and crowd out the shared entries when several matrices run together.
 jobs:
   build:
     name: Build Windows zip (${{ matrix.arch }})
@@ -96,6 +98,7 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: windows-zip-${{ matrix.target }}
       - name: Build release zip
         shell: pwsh
@@ -160,6 +163,7 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: windows-tests-${{ matrix.target }}
       - name: Compile test binaries
         shell: pwsh
