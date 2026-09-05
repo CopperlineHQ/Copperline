@@ -12,8 +12,13 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+# Only main saves Rust caches. PRs can restore main's caches, while caches
+# saved on a PR merge ref cannot serve other PRs and evict reusable entries
+# when several of these large build matrices run concurrently.
 jobs:
   build:
+    # Keep the existing check name for branch-protection rules. The ci
+    # profile inherits release semantics without shipping-only fat LTO.
     name: Build (release)
     # Copperline is developed on macOS, so the main fan-out runs there. The
     # other platforms have their own functional coverage: the linux-tests
@@ -30,19 +35,21 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build (release)
-        run: cargo build --release --locked
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # The macOS packaging workflow also has a job called build, but
+          # its explicit --target artifacts cannot warm this native build.
+          key: ci-macos
       - name: Compile test binaries
-        # cargo build does not compile #[test] targets. This is also the
-        # step that keeps the asset-gated integration tests under tests/
-        # compiling on a clean checkout (they are #[ignore]d at run time,
-        # not excluded from the build). The JSON build plan maps each test
-        # target to its hash-suffixed executable so the binaries can be
-        # staged under stable names for the fan-out jobs.
+        # cargo test also builds the ordinary binaries for integration tests,
+        # so a separate cargo build would duplicate work. Keep all asset-gated
+        # tests compiling (#[ignore] only affects execution). The JSON output
+        # maps each test target to its hash-suffixed executable so the binaries
+        # can be staged under stable names for the fan-out jobs.
         run: |
-          cargo test --release --locked --no-run --message-format=json > cargo-test-build.json
+          cargo test --profile ci --locked --no-run --timings --message-format=json > cargo-test-build.json
           mkdir -p ci-bins
-          cp target/release/copperline ci-bins/
+          cp target/ci/copperline ci-bins/
           jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .executable != null)
                    | [.target.kind[0], .target.name, .executable] | @tsv' cargo-test-build.json \
             | while IFS=$'\t' read -r kind name exe; do
@@ -60,6 +67,14 @@ jobs:
         with:
           name: ci-bins
           path: ci-bins/
+      - name: Upload build timings
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cargo-timings-macos
+          path: target/cargo-timings/
+          if-no-files-found: ignore
+          retention-days: 7
 
   lint:
     name: Rustfmt and clippy
@@ -72,6 +87,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Formatting
         run: cargo fmt --check
       - name: Clippy
@@ -101,6 +118,7 @@ jobs:
           cargo generate-lockfile
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: fuzz
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
@@ -127,6 +145,7 @@ jobs:
           rustup toolchain install "$msrv" --profile minimal
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: msrv
       - name: Build with MSRV
         run: cargo +"$MSRV" build --locked
@@ -209,11 +228,11 @@ jobs:
         # The test harness spawns the emulator through the compile-time
         # CARGO_BIN_EXE_copperline path, which on hosted runners is the
         # same absolute path in every job of this repo -- hence the copy
-        # into target/release before running.
+        # into target/ci before running.
         run: |
           chmod +x ci-bins/*
-          mkdir -p target/release
-          cp ci-bins/copperline target/release/copperline
+          mkdir -p target/ci
+          cp ci-bins/copperline target/ci/copperline
           ./ci-bins/probe_golden
       - name: Upload probe render diffs
         # On a golden mismatch the test writes the actual renders and diff
@@ -243,6 +262,7 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: crates/hostsocket-plugin
       - name: Build (wasm32-unknown-unknown)
         working-directory: crates/hostsocket-plugin
@@ -272,6 +292,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: crates/zz9k-plugin
       - name: Formatting
         working-directory: crates/zz9k-plugin
@@ -307,11 +328,11 @@ jobs:
         # The image-regression harness spawns the emulator through the
         # compile-time CARGO_BIN_EXE_copperline path, which on hosted
         # runners is the same absolute path in every job of this repo --
-        # hence the copy into target/release.
+        # hence the copy into target/ci.
         run: |
           chmod +x ci-bins/*
-          mkdir -p target/release
-          cp ci-bins/copperline target/release/copperline
+          mkdir -p target/ci
+          cp ci-bins/copperline target/ci/copperline
       - name: Restore cached DiagROM
         id: diagrom-cache
         uses: actions/cache@v6
@@ -343,7 +364,7 @@ jobs:
         # proves the ROM's boot code actually executed, which a non-empty
         # PNG alone does not (a black screen still writes one).
         run: |
-          ./target/release/copperline diagrom.rom --noaudio --screenshot-after 6 diag.png > serial.log
+          ./target/ci/copperline diagrom.rom --noaudio --screenshot-after 6 diag.png > serial.log
           grep -q "Amiga DiagROM" serial.log
           test -s diag.png
       - name: DiagROM menu image regression
@@ -364,6 +385,7 @@ jobs:
           if-no-files-found: ignore
 
   linux-tests:
+    # Preserve the required check name; the ci profile is release-derived.
     name: Linux tests (release)
     # Functional coverage on Linux: the inline unit suites and
     # tests/probe_golden.rs, whose pixel-exact golden comparisons prove the
@@ -378,6 +400,9 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: ci-linux
       - name: Install build dependencies
         # ALSA (cpal) + udev (gilrs) headers, plus iproute2 for the A2065
         # veth probe below. Winit needs no X headers at build time (it dlopens
@@ -386,13 +411,26 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends iproute2 libasound2-dev libudev-dev
       - name: Unit tests and probe golden renders
-        run: cargo test --release --locked
+        # Keep Cargo's artifact paths for the extra ignored tests below.
+        # Selecting another target with a second Cargo invocation can rerun
+        # build.rs and recompile the core even though its tests already exist.
+        # Explicit bash enables pipefail so tee cannot hide a test failure.
+        shell: bash
+        run: cargo test --profile ci --locked --timings --message-format=json | tee cargo-test-results.log
       - name: Audio stems determinism
         # tests/audio_stems_determinism.rs needs no external assets (the
         # bundled AROS ROM booting with an empty DF0 is enough), but like
         # every emulator-driving test it is #[ignore]d so ordinary cargo
         # test runs stay fast; it is invoked explicitly here instead.
-        run: cargo test --release --locked --test audio_stems_determinism -- --ignored
+        run: |
+          audio_test="$(
+            jq -Rr 'fromjson? | select(.reason == "compiler-artifact"
+              and .target.name == "audio_stems_determinism"
+              and .target.kind[0] == "test" and .profile.test == true
+              and .executable != null) | .executable' cargo-test-results.log
+          )"
+          test -x "$audio_test"
+          "$audio_test" --ignored
       - name: A2065 bridge round trip over a veth pair
         # The ordinary suite covers the platform-independent bridge worker
         # with an in-memory Ethernet adapter. This privileged Linux-only
@@ -409,11 +447,9 @@ jobs:
           sudo ip link set cl-a2065 up
           sudo ip link set cl-peer up
           libtest="$(
-            cargo test --release --locked --lib --no-run --message-format=json |
-              jq -r 'select(.reason == "compiler-artifact" and .target.name == "copperline"
+            jq -Rr 'fromjson? | select(.reason == "compiler-artifact" and .target.name == "copperline"
                 and .target.kind[0] == "lib" and .profile.test == true
-                and .executable != null) | .executable' |
-              tail -n1
+                and .executable != null) | .executable' cargo-test-results.log
           )"
           test -x "$libtest"
           sudo "$libtest" a2065_bridge_veth_round_trip_reaches_the_rx_ring \
@@ -427,6 +463,14 @@ jobs:
           name: probe-golden-diffs-linux
           path: target/probe-golden/
           if-no-files-found: ignore
+      - name: Upload build timings
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cargo-timings-linux
+          path: target/cargo-timings/
+          if-no-files-found: ignore
+          retention-days: 7
 
   wasm:
     name: Headless core and browser build
@@ -443,6 +487,8 @@ jobs:
           targets: wasm32-unknown-unknown
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Core without the desktop frontend
         run: cargo check --no-default-features --locked
       - name: Headless benchmark binary
@@ -472,6 +518,8 @@ jobs:
         with:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Frontend without the debug and library features
         run: cargo check --no-default-features --features frontend,cpu-jit --locked
       - name: Player crate (example manifest)
@@ -525,5 +573,9 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: RSP unit tests
-        run: cargo test --locked gdbstub
+        # The RSP tests live in the library; selecting it avoids compiling
+        # every integration-test executable just to filter out its tests.
+        run: cargo test --locked --lib gdbstub

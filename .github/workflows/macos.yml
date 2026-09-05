@@ -63,6 +63,12 @@ jobs:
           # Both Apple architectures so build-dmg.sh can lipo a universal binary.
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
+        with:
+          # PRs restore main's cache without uploading a competing copy.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # Separate explicit architecture builds from ci.yml's native
+          # test build, which otherwise shares this job's default key.
+          key: macos-dmg
       - name: Build dmg
         run: packaging/macos/build-dmg.sh
       - name: Locate artifact

@@ -28,6 +28,27 @@ cargo clippy --all-targets --all-features --locked -- -D warnings
 git diff --check
 ```
 
+CI uses `cargo test --profile ci --locked` for the native suites. This
+release-derived profile keeps optimization level 3 and disables debug
+assertions and overflow checks, but turns off LTO and uses 16 codegen units
+to avoid repeating expensive whole-program optimization for every test
+executable. It builds the emulator too, so no preceding `cargo build` is
+needed. Outputs live in `target/ci/` (or `target/<triple>/ci/` with
+`--target`). Packaged binaries and performance benchmarks still use
+`--release` and its fat LTO. Linux retains Cargo's artifact paths from the
+full suite and directly reuses those executables for the extra ignored
+audio and network checks, avoiding further build-script runs and recompiles.
+
+The native CI builders publish `cargo-timings-*` artifacts from `--timings`
+for seven days. To inspect build costs locally, add `--timings` and open
+`target/cargo-timings/cargo-timing.html`. CI and packaging use distinct
+cache keys because an explicit `--target` build cannot populate the native
+build's output directory. These Rust caches are saved only on `main` and
+restored by pull requests. This avoids filling the repository cache budget
+with copies scoped to individual PRs, which cannot be reused by other PRs.
+New dependency/profile combinations first populate the shared cache after
+merging; until then, a PR may need a cold build.
+
 The golden renders live under `timing-test/golden/`. A hardware-model change
 that intentionally alters them must be re-blessed with
 `COPPERLINE_BLESS_GOLDEN=1 cargo test --release --test probe_golden`, with the
