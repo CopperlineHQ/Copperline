@@ -35,7 +35,9 @@ to avoid repeating expensive whole-program optimization for every test
 executable. It builds the emulator too, so no preceding `cargo build` is
 needed. Outputs live in `target/ci/` (or `target/<triple>/ci/` with
 `--target`). Packaged binaries and performance benchmarks still use
-`--release` and its fat LTO.
+`--release` and its fat LTO. Linux retains Cargo's artifact paths from the
+full suite and directly reuses those executables for the extra ignored
+audio and network checks, avoiding further build-script runs and recompiles.
 
 The native CI builders publish `cargo-timings-*` artifacts from `--timings`
 for seven days. To inspect build costs locally, add `--timings` and open

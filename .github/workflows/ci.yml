@@ -411,13 +411,26 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends iproute2 libasound2-dev libudev-dev
       - name: Unit tests and probe golden renders
-        run: cargo test --profile ci --locked --timings
+        # Keep Cargo's artifact paths for the extra ignored tests below.
+        # Selecting another target with a second Cargo invocation can rerun
+        # build.rs and recompile the core even though its tests already exist.
+        # Explicit bash enables pipefail so tee cannot hide a test failure.
+        shell: bash
+        run: cargo test --profile ci --locked --timings --message-format=json | tee cargo-test-results.log
       - name: Audio stems determinism
         # tests/audio_stems_determinism.rs needs no external assets (the
         # bundled AROS ROM booting with an empty DF0 is enough), but like
         # every emulator-driving test it is #[ignore]d so ordinary cargo
         # test runs stay fast; it is invoked explicitly here instead.
-        run: cargo test --profile ci --locked --test audio_stems_determinism -- --ignored
+        run: |
+          audio_test="$(
+            jq -Rr 'fromjson? | select(.reason == "compiler-artifact"
+              and .target.name == "audio_stems_determinism"
+              and .target.kind[0] == "test" and .profile.test == true
+              and .executable != null) | .executable' cargo-test-results.log
+          )"
+          test -x "$audio_test"
+          "$audio_test" --ignored
       - name: A2065 bridge round trip over a veth pair
         # The ordinary suite covers the platform-independent bridge worker
         # with an in-memory Ethernet adapter. This privileged Linux-only
@@ -434,11 +447,9 @@ jobs:
           sudo ip link set cl-a2065 up
           sudo ip link set cl-peer up
           libtest="$(
-            cargo test --profile ci --locked --lib --no-run --message-format=json |
-              jq -r 'select(.reason == "compiler-artifact" and .target.name == "copperline"
+            jq -Rr 'fromjson? | select(.reason == "compiler-artifact" and .target.name == "copperline"
                 and .target.kind[0] == "lib" and .profile.test == true
-                and .executable != null) | .executable' |
-              tail -n1
+                and .executable != null) | .executable' cargo-test-results.log
           )"
           test -x "$libtest"
           sudo "$libtest" a2065_bridge_veth_round_trip_reaches_the_rx_ring \
