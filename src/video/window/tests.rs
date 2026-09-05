@@ -10427,6 +10427,56 @@ mod gdb_drain {
     }
 
     #[test]
+    fn bartman_run_waits_for_the_client_before_booting() {
+        for bartman in [false, true] {
+            for run in [false, true] {
+                let mut app = test_app();
+                app.paused = false;
+                let (handle, _, _) = GdbHandle::test_pair();
+                let mut config = crate::gdbstub::Config::new(":0".into());
+                config.bartman = bartman;
+                config.stop_on_load = run.then(|| "hello".into());
+                app.attach_gdb(handle, &config);
+                assert_eq!(app.paused, bartman && run);
+            }
+        }
+    }
+
+    #[test]
+    fn bartman_initial_stop_loads_the_waiting_guest_and_keeps_restart_state() {
+        let mut app = test_app();
+        app.emu = crate::gdbstub::testkit::emulator_with_loadseg_program();
+        app.paused = false;
+        let (handle, cmd_tx, frame_rx) = GdbHandle::test_pair();
+        let mut config = crate::gdbstub::Config::new(":0".into());
+        config.bartman = true;
+        config.stop_on_load = Some("hello".into());
+        app.attach_gdb(handle, &config);
+        assert!(app.paused);
+        let before = app.emu.machine.pc();
+        app.drain_gdb();
+        assert_eq!(app.emu.machine.pc(), before);
+
+        cmd_tx.send(GdbMsg::Connected).unwrap();
+        packet(&cmd_tx, "?");
+        packet(&cmd_tx, "qOffsets");
+        app.drain_gdb();
+        assert_eq!(
+            frames(&frame_rx),
+            vec![frame("S05"), frame("00014004;00015004")]
+        );
+        assert!(app.paused);
+        assert!(app.gdb.as_ref().unwrap().core.run_stop.is_none());
+        let entry = app.emu.machine.pc();
+        assert_ne!(entry, before);
+        assert!(app.emu.machine.debug_set_register(17, before));
+        monitor(&cmd_tx, "reset");
+        app.drain_gdb();
+        assert_eq!(frames(&frame_rx).last(), Some(&frame("OK")));
+        assert_eq!(app.emu.machine.pc(), entry);
+    }
+
+    #[test]
     fn attach_pauses_and_a_breakpoint_completes_a_deferred_continue() {
         let (mut app, cmd_tx, frame_rx) = attached_app();
         app.drain_gdb();

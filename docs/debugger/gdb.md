@@ -190,6 +190,10 @@ default; the switch explicitly selects the patched GDB's wire contract:
 - `qOffsets` lists every hunk base separated by semicolons. With `--run`, the
   initial stop query finishes loading the executable before replying, so
   GDB caches registers and relocates symbols from the same machine state.
+  Windowed Bartman launches wait paused for the first GDB connection, so
+  slow debugger startup cannot miss the executable's load event.
+  The protocol smoke test below accepts `--gui --attach-delay 5` to exercise
+  this delayed-attachment path.
 - A software breakpoint at `$FFFFFFFF` is a one-shot return from ROM.
 - Stops use `S0A` for address error, `S04` for illegal instruction, and `S05`
   otherwise. Exception catches are installed after the run target loads.

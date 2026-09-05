@@ -362,6 +362,13 @@ record fields explicitly, and embeds the real framebuffer. Its temporary
 file, progress transport and instrumentation are host state and never enter
 native snapshots.
 
+Windowed Bartman `--run` sessions start paused before the first GDB client
+connects. The initial stop query then drives the shared core's LoadSeg
+handshake and saves the program-entry state used by `monitor reset`.
+This keeps debugger startup latency from consuming the load event before
+the per-connection library tracker is armed. Other GUI GDB launches retain
+their normal run-until-attach behavior.
+
 
 An externally forced debugger PC write invalidates the instruction prefetch
 queue before execution resumes at the new address. Native snapshot restores

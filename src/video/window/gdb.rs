@@ -324,6 +324,13 @@ impl App {
     /// Adopt a bound GDB server; called from `main` between `App::new`
     /// and `run()`.
     pub fn attach_gdb(&mut self, handle: GdbHandle, config: &crate::gdbstub::Config) {
+        // Bartman's initial stop query drives the --run load handshake.
+        // Keep the guest at its initial state until the client connects:
+        // otherwise it can pass LoadSeg before the new tracker is armed.
+        if config.bartman && config.stop_on_load.is_some() {
+            self.paused = true;
+            self.sync_live_audio_suspension();
+        }
         let mut core = GdbCore::new(&self.emu, config.stop_on_load.clone());
         core.bartman = config.bartman;
         self.gdb = Some(GdbGuiState {
