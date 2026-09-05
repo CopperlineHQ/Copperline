@@ -1401,34 +1401,77 @@ mod tests {
     /// Method names the drivers answer before `parse_method` sees them.
     const DRIVER_METHODS: &[&str] = &["shutdown"];
 
-    /// The method names `parse_method` dispatches on, read from its
-    /// source: the string-literal arms at the match's own indentation
-    /// (nested matches on parameter values sit deeper).
-    fn parser_methods() -> Vec<String> {
-        let src = include_str!("exec.rs");
-        let start = src
-            .find("pub fn parse_method(")
-            .expect("parse_method in exec.rs");
-        let body = &src[start..];
-        let end = body.find("\n}\n").expect("end of parse_method");
-        let mut names = Vec::new();
-        for line in body[..end].lines() {
-            let Some(rest) = line.strip_prefix("        \"") else {
-                continue;
-            };
-            if line.starts_with("         ") {
-                continue;
+    /// Extract dispatch literals from Rust syntax, including aliases and
+    /// parenthesized/or patterns. Formatting and comments have no effect.
+    fn methods_in_source(source: &str) -> Vec<String> {
+        use syn::visit::{self, Visit};
+        struct Methods(Vec<String>);
+        impl Methods {
+            fn add_pattern(&mut self, pattern: &syn::Pat) {
+                match pattern {
+                    syn::Pat::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(literal),
+                        ..
+                    }) => self.0.push(literal.value()),
+                    syn::Pat::Or(pattern) => {
+                        for case in &pattern.cases {
+                            self.add_pattern(case);
+                        }
+                    }
+                    syn::Pat::Paren(pattern) => self.add_pattern(&pattern.pat),
+                    _ => {}
+                }
             }
-            let Some(close) = rest.find('"') else {
-                continue;
-            };
-            if !rest[close..].starts_with("\" =>") {
-                continue;
-            }
-            names.push(rest[..close].to_string());
         }
-        assert!(names.len() > 60, "found only {} arms", names.len());
-        names
+        impl<'ast> Visit<'ast> for Methods {
+            fn visit_expr_match(&mut self, expr: &'ast syn::ExprMatch) {
+                if matches!(expr.expr.as_ref(), syn::Expr::Path(path) if path.path.is_ident("method"))
+                {
+                    for arm in &expr.arms {
+                        self.add_pattern(&arm.pat);
+                    }
+                } else {
+                    visit::visit_expr_match(self, expr);
+                }
+            }
+        }
+        let source = syn::parse_file(source).expect("valid Rust source");
+        let function = source
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Fn(function) if function.sig.ident == "parse_method" => Some(function),
+                _ => None,
+            })
+            .expect("parse_method in exec.rs");
+        let mut methods = Methods(Vec::new());
+        methods.visit_block(&function.block);
+        assert!(
+            !methods.0.is_empty(),
+            "parse_method has no literal dispatch arms"
+        );
+        methods.0
+    }
+
+    fn parser_methods() -> Vec<String> {
+        methods_in_source(include_str!("exec.rs"))
+    }
+
+    #[test]
+    fn method_discovery_handles_aliases_formatting_and_nested_parameter_matches() {
+        let source = r#"
+            fn parse_method(method: &str, param: &str) {
+                let diagnostic = "not a method";
+                match method {
+                    "first" | ("alias") => {},
+                    // A split arm and a nested parameter match are both ordinary Rust.
+                    "second"
+                        => match param { "parameter-value" => {}, _ => {} },
+                    _ => {},
+                }
+            }
+        "#;
+        assert_eq!(methods_in_source(source), ["first", "alias", "second"]);
     }
 
     fn valid_tool_name(name: &str) -> bool {

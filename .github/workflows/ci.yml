@@ -491,6 +491,12 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Core without the desktop frontend
         run: cargo check --no-default-features --locked
+      - name: Save-state fixture across optional features
+        run: |
+          cargo test --locked --no-default-features --lib zorro_device::state::tests
+          cargo test --locked --no-default-features --features mhi --lib zorro_device::state::tests
+      - name: Shared ROM build helpers
+        run: python3 -m unittest discover -s tools/tests -v
       - name: Headless benchmark binary
         run: cargo check --no-default-features --features bench-bin --locked
       - name: Web crate (wasm32-unknown-unknown)

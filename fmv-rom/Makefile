@@ -10,7 +10,7 @@ CFLAGS := -Os -m68000 -noixemul -nostartfiles -std=c99 \
 
 all: $(ROM)
 
-$(ROM): build_rom.py hunk.py $(DRIVER)
+$(ROM): build_rom.py ../tools/amiga_hunk.py $(DRIVER)
 	$(PYTHON) build_rom.py --driver-hunk $(DRIVER) --output $@
 
 $(DRIVER): src/cd32mpeg.c src/decoder.c src/videocd.c src/player.c \

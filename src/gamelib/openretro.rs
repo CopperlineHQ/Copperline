@@ -331,29 +331,11 @@ fn form(fields: &[(&str, &str)]) -> Zeroizing<String> {
     out
 }
 
-/// `Authorization: Basic ...`, which is how the token authenticates a sync
-/// request. Base64 by hand rather than for a dependency's sake.
+/// HTTP Basic authentication for the sync token.
 fn basic_auth(user: &str, pass: &str) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let raw = format!("{user}:{pass}");
-    let bytes = raw.as_bytes();
-    let mut out = String::from("Basic ");
-    for chunk in bytes.chunks(3) {
-        let b = [
-            chunk[0],
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-        ];
-        let n = u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2]);
-        for i in 0..4 {
-            if i <= chunk.len() {
-                out.push(ALPHABET[(n >> (18 - 6 * i)) as usize & 0x3F] as char);
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
+    format!("Basic {encoded}")
 }
 
 /// What the service is told to list this token against.

@@ -744,6 +744,8 @@ The layout is:
   column's **Bootable** box is ticked by default; clearing it greys that row's
   priority and writes the -128 "disabled" sentinel, so the volume mounts but
   never boots.
+  Priority arrows step each attached drive, including all seven Copperline HD
+  units; they leave the remembered priority unchanged while Bootable is cleared.
   Drives without media or configured as CD-ROMs are disabled ("No drive" /
   "CD-ROM"). SCSI, Lide, and Copperline HD units appear only when media is
   attached, ensuring the list reflects valid boot sources. Drives are
@@ -940,7 +942,13 @@ never interrupted.
 
 States are taken at emulated-frame boundaries and are versioned: a file
 from an older, incompatible build is refused with a clear message rather
-than producing a corrupt machine.
+than producing a corrupt machine. Save-state format 79 uses stable expansion-board
+identifiers across feature selections; a build still needs support for every
+board present in the snapshot. Format 78 and older states must be recreated.
+
+Saving over an existing file replaces it only after the new snapshot has
+been completely written and flushed. A failed save leaves the previous
+file intact.
 
 A state is self-contained: it carries its own RAM, ROM, and chipset, so
 loading one always restores the machine it was taken on -- even if you

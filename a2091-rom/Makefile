@@ -68,10 +68,10 @@ $(BOOT): $(OBJ)/rom.o rom.ld
 	mkdir -p $(dir $@)
 	$(VLINK) -Trom.ld -brawbin1 -o $@ $<
 
-$(ROM): build_rom.py hunk.py $(BOOT) $(DRIVER)
+$(ROM): build_rom.py ../tools/amiga_hunk.py $(BOOT) $(DRIVER)
 	$(PYTHON) build_rom.py --boot $(BOOT) --driver $(DRIVER) --size 64 --output $@
 
-$(NODRIVER_ROM): build_rom.py hunk.py $(BOOT)
+$(NODRIVER_ROM): build_rom.py ../tools/amiga_hunk.py $(BOOT)
 	$(PYTHON) build_rom.py --boot $(BOOT) --size 64 --output $@
 
 scaffold-images: $(BOOT)

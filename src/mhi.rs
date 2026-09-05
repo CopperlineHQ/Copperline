@@ -1319,10 +1319,6 @@ impl ZorroDevice for Mhi {
         (self.intreq & self.intena) != 0
     }
 
-    fn is_idle(&self) -> bool {
-        self.status != Status::Playing
-    }
-
     fn reset(&mut self) {
         self.intreq = 0;
         self.intena = 0;

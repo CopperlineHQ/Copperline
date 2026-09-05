@@ -175,14 +175,6 @@ impl ZorroDevice for GraffityZ2 {
         self.chip.vblank_pending()
     }
 
-    fn is_idle(&self) -> bool {
-        self.chip.is_idle()
-    }
-
-    fn next_event_cck(&self) -> Option<u32> {
-        self.chip.next_event_cck()
-    }
-
     fn reset(&mut self) {
         self.chip.reset();
         self.show_rtg = false;
@@ -291,14 +283,6 @@ impl ZorroDevice for GraffityZ3 {
 
     fn int2_line(&self) -> bool {
         self.chip.vblank_pending()
-    }
-
-    fn is_idle(&self) -> bool {
-        self.chip.is_idle()
-    }
-
-    fn next_event_cck(&self) -> Option<u32> {
-        self.chip.next_event_cck()
     }
 
     fn reset(&mut self) {

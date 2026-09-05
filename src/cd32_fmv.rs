@@ -1413,10 +1413,6 @@ impl ZorroDevice for Cd32Fmv {
         self.cl450_irq() || self.l64111_irq()
     }
 
-    fn is_idle(&self) -> bool {
-        false
-    }
-
     fn reset(&mut self) {
         self.reset_all();
     }

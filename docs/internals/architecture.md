@@ -112,7 +112,9 @@ src/
                     #    app_session.rs, app_display.rs, app_panels.rs, app_media.rs,
                     #    statusbar.rs, present.rs, host_input.rs, console.rs, tests.rs)
     ui.rs           # pop-up menu, overlay panels, and debugger/analyzer panel drawing
-    launcher.rs     # machine-configuration (launcher) screen
+      configuration/ # configuration rows, library rendering and dialogs
+    launcher.rs     # machine-configuration (launcher) editable model
+    launcher/       # field metadata, value edits and config conversion
     font.rs         # 8x8 overlay font
 crates/copperline-web/   # standalone wasm-bindgen browser frontend (WebEmu + page glue)
 crates/cputest-runner/   # WinUAE cputest instruction-suite runner for the m68k core

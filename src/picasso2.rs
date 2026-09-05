@@ -168,14 +168,6 @@ impl ZorroDevice for Picasso2 {
         self.plus && self.interrupt_enabled && self.chip.vblank_pending()
     }
 
-    fn is_idle(&self) -> bool {
-        self.chip.is_idle()
-    }
-
-    fn next_event_cck(&self) -> Option<u32> {
-        self.chip.next_event_cck()
-    }
-
     fn reset(&mut self) {
         self.chip.reset();
         self.show_rtg = false;

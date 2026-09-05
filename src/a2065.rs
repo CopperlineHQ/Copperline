@@ -493,10 +493,6 @@ impl ZorroDevice for A2065 {
         self.int_line()
     }
 
-    fn is_idle(&self) -> bool {
-        false
-    }
-
     fn take_activity(&mut self) -> bool {
         std::mem::take(&mut self.activity)
     }

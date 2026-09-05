@@ -53,7 +53,7 @@ coppersynth = ["dep:coppersynth"]
 # Library page is absent, and `[whdload]` keys that only the library uses
 # are parsed and ignored so a configuration written by a full build still
 # loads. See src/gamelib/.
-game-library = ["dep:ureq", "dep:serde_json", "dep:zeroize"]
+game-library = ["dep:ureq", "dep:serde_json", "dep:zeroize", "dep:base64"]
 # The MHI virtual MPEG audio decoder board (src/mhi.rs, `[mhi]`): pulls in
 # Symphonia's pure-Rust MPEG audio decoder. Kept a default-on feature (not an
 # unconditional dependency) so builds that do not want the board -- the
@@ -125,7 +125,7 @@ bench-bin = []
 # over loopback TCP for driving the emulator from scripts and external tools
 # (`--control` headless, `--control-gui` windowed). Uses std::net + threads,
 # so browser builds (--no-default-features) compile it out.
-control = ["dep:serde_json"]
+control = ["dep:serde_json", "dep:base64"]
 # User-mode NAT backend for emulated NICs (`[a2065] net = "nat"`, src/net/nat/):
 # a slirp-style virtual gateway giving the guest outbound IPv4 with no host
 # privileges. Uses std::net + threads, so browser builds compile it out.
@@ -174,6 +174,8 @@ log = "0.4"
 env_logger = { version = "0.11", optional = true }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", optional = true }
+base64 = { version = "0.23", optional = true }
+sha2 = { version = "0.11", default-features = false }
 # DWARF and ELF readers for the DAP adapter's debug-info module
 # (src/debuginfo/): line tables, functions, variable locations, and CFI
 # unwinding. Both pure Rust (MIT OR Apache-2.0).
@@ -309,6 +311,7 @@ ureq = { version = "3", default-features = false, features = [
 # filesystem authority and do not compile this dependency.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 cap-std = "4.0"
+tempfile = { version = "3", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
@@ -373,6 +376,7 @@ path = "src/bin/copperline-net-helper.rs"
 required-features = ["net-bridge"]
 
 [dev-dependencies]
+syn = { version = "2", features = ["full", "visit"] }
 # Compile WAT to wasm bytes in the WASM-plugin-host tests, so golden test
 # plugins live as readable text in the tests rather than checked-in binaries.
 wat = "1"

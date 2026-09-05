@@ -291,22 +291,19 @@ impl<'a> DeviceHost<'a> {
 
     // These wrap the shared decode for boards that hold a `DeviceHost` rather
     // than a bare `&Memory`. The in-tree A2091/CDTV call the free functions
-    // directly; the WASM plugin host (Phase 2) routes its DMA imports here.
+    // directly; the WASM plugin host routes its DMA imports here.
     /// 24-bit DMA word read; `None` when the address is unmapped.
-    #[allow(dead_code)]
     pub fn dma_read_word(&self, addr: u32) -> Option<u16> {
         dma_read_word(self.mem, addr)
     }
 
     /// 24-bit DMA word write; `false` when the target is unmapped.
-    #[allow(dead_code)]
     pub fn dma_write_word(&mut self, addr: u32, w: u16) -> bool {
         self.touched_memory = true;
         dma_write_word(self.mem, addr, w)
     }
 
     /// 24-bit DMA byte read; `None` when the address is unmapped.
-    #[allow(dead_code)]
     pub fn dma_read_byte(&self, addr: u32) -> Option<u8> {
         dma_read_byte(self.mem, addr)
     }
@@ -314,7 +311,6 @@ impl<'a> DeviceHost<'a> {
     /// Bulk DMA read into `buf` starting at Amiga `addr` (byte-granular 24-bit
     /// decode; unmapped bytes read as 0xFF). The WASM plugin host's `dma_read`
     /// import routes here.
-    #[allow(dead_code)]
     pub fn dma_read(&self, addr: u32, buf: &mut [u8]) {
         for (i, b) in buf.iter_mut().enumerate() {
             *b = dma_read_byte(self.mem, addr.wrapping_add(i as u32)).unwrap_or(0xFF);
@@ -324,7 +320,6 @@ impl<'a> DeviceHost<'a> {
     /// Bulk DMA write of `buf` to Amiga `addr` (byte-granular 24-bit decode;
     /// unmapped bytes dropped). The WASM plugin host's `dma_write` import
     /// routes here.
-    #[allow(dead_code)]
     pub fn dma_write(&mut self, addr: u32, buf: &[u8]) {
         self.touched_memory = true;
         for (i, b) in buf.iter().enumerate() {
@@ -340,10 +335,6 @@ impl<'a> DeviceHost<'a> {
 /// expose level-sensitive interrupt lines the bus polls. DMA goes through the
 /// [`DeviceHost`]; the bus owns interrupt latching and recognition latency, so a
 /// device only reports its line state and never pulses INTREQ.
-//
-// Implemented in Phase 1 (A2091, CDTV) and Phase 2 (WASM); defined here so the
-// boundary and `DeviceHost` live together.
-#[allow(dead_code)]
 pub trait ZorroDevice {
     /// Read `size` bytes at window offset `off`.
     fn read(&mut self, off: u32, size: usize, host: &mut DeviceHost) -> u32;
@@ -359,7 +350,9 @@ pub trait ZorroDevice {
         None
     }
 
-    /// Advance the device by `cck` colour clocks.
+    /// Advance the device by the elapsed `cck` colour clocks. The bus calls
+    /// every installed board at each timed-device boundary, then samples its
+    /// interrupt lines. Boards own their internal idle fast paths.
     fn tick(&mut self, cck: u32, host: &mut DeviceHost);
 
     /// INT2 (PORTS) line state. Level-sensitive: held true while asserted.
@@ -370,17 +363,6 @@ pub trait ZorroDevice {
     /// INT6 (EXTER) line state. Level-sensitive: held true while asserted.
     fn int6_line(&self) -> bool {
         false
-    }
-
-    /// True while the device is quiescent so the bus can skip its tick.
-    fn is_idle(&self) -> bool {
-        true
-    }
-
-    /// Colour clocks until the device's next internal event, if known, so the
-    /// scheduler can wake it sparsely instead of polling every cck.
-    fn next_event_cck(&self) -> Option<u32> {
-        None
     }
 
     /// Drain and report board activity for the HDD/status LED.
@@ -395,40 +377,8 @@ pub trait ZorroDevice {
     fn kind(&self) -> &'static str;
 }
 
-/// A functional Zorro-chain board the bus owns and serializes inline.
-///
-/// Each variant is a concrete device implementing [`ZorroDevice`]. The enum
-/// (rather than `Box<dyn ZorroDevice>`) keeps the set serde-derivable -- a
-/// trait object is not -- so a board's whole state round-trips with the `Bus`
-/// like every other device, while still letting the bus hold heterogeneous
-/// boards in one `Vec` indexed by [`crate::zorro::BoardBacking::Device`].
-// The variants are intentionally different sizes (the A2091 carries its boot
-// ROM and SBIC state; a WASM board carries a wasmtime store handle). The bus
-// holds only a handful of boards, so the unused tail per element is immaterial;
-// boxing would just add an indirection on every register access.
-#[allow(clippy::large_enum_variant)]
-#[derive(serde::Serialize, serde::Deserialize)]
-pub enum BoardDevice {
-    A2091(crate::a2091::A2091),
-    A4091(crate::a4091::A4091),
-    A2065(crate::a2065::A2065),
-    #[cfg(feature = "wasm-boards")]
-    Wasm(crate::wasmboard::WasmBoard),
-    // Append-only: bincode encodes variants by index, so inserting a new
-    // board anywhere except the end would renumber saved variants.
-    Filesys(crate::filesys::FilesysBoard),
-    Z3660(crate::z3660::Z3660),
-    Picasso2(Box<crate::picasso2::Picasso2>),
-    IdeZorro(crate::ide_zorro::IdeZorro),
-    GraffityZ2(Box<crate::graffity::GraffityZ2>),
-    GraffityZ3(Box<crate::graffity::GraffityZ3>),
-    Toccata(Box<crate::toccata::Toccata>),
-    #[cfg(feature = "mhi")]
-    Mhi(Box<crate::mhi::Mhi>),
-    #[cfg(feature = "cd32-fmv")]
-    Cd32Fmv(Box<crate::cd32_fmv::Cd32Fmv>),
-    Copperhf(crate::copperhf::CopperhfBoard),
-}
+mod state;
+pub use state::BoardDevice;
 
 impl ZorroDevice for BoardDevice {
     fn read(&mut self, off: u32, size: usize, host: &mut DeviceHost) -> u32 {
@@ -560,50 +510,6 @@ impl ZorroDevice for BoardDevice {
             #[cfg(feature = "cd32-fmv")]
             BoardDevice::Cd32Fmv(d) => ZorroDevice::int6_line(d.as_ref()),
             BoardDevice::Copperhf(d) => ZorroDevice::int6_line(d),
-        }
-    }
-
-    fn is_idle(&self) -> bool {
-        match self {
-            BoardDevice::A2091(d) => ZorroDevice::is_idle(d),
-            BoardDevice::A4091(d) => ZorroDevice::is_idle(d),
-            BoardDevice::A2065(d) => ZorroDevice::is_idle(d),
-            #[cfg(feature = "wasm-boards")]
-            BoardDevice::Wasm(d) => ZorroDevice::is_idle(d),
-            BoardDevice::Filesys(d) => ZorroDevice::is_idle(d),
-            BoardDevice::Z3660(d) => ZorroDevice::is_idle(d),
-            BoardDevice::Picasso2(d) => ZorroDevice::is_idle(d.as_ref()),
-            BoardDevice::IdeZorro(d) => ZorroDevice::is_idle(d),
-            BoardDevice::GraffityZ2(d) => ZorroDevice::is_idle(d.as_ref()),
-            BoardDevice::GraffityZ3(d) => ZorroDevice::is_idle(d.as_ref()),
-            BoardDevice::Toccata(d) => ZorroDevice::is_idle(d.as_ref()),
-            #[cfg(feature = "mhi")]
-            BoardDevice::Mhi(d) => ZorroDevice::is_idle(d.as_ref()),
-            #[cfg(feature = "cd32-fmv")]
-            BoardDevice::Cd32Fmv(d) => ZorroDevice::is_idle(d.as_ref()),
-            BoardDevice::Copperhf(d) => ZorroDevice::is_idle(d),
-        }
-    }
-
-    fn next_event_cck(&self) -> Option<u32> {
-        match self {
-            BoardDevice::A2091(d) => ZorroDevice::next_event_cck(d),
-            BoardDevice::A4091(d) => ZorroDevice::next_event_cck(d),
-            BoardDevice::A2065(d) => ZorroDevice::next_event_cck(d),
-            #[cfg(feature = "wasm-boards")]
-            BoardDevice::Wasm(d) => ZorroDevice::next_event_cck(d),
-            BoardDevice::Filesys(d) => ZorroDevice::next_event_cck(d),
-            BoardDevice::Z3660(d) => ZorroDevice::next_event_cck(d),
-            BoardDevice::Picasso2(d) => ZorroDevice::next_event_cck(d.as_ref()),
-            BoardDevice::IdeZorro(d) => ZorroDevice::next_event_cck(d),
-            BoardDevice::GraffityZ2(d) => ZorroDevice::next_event_cck(d.as_ref()),
-            BoardDevice::GraffityZ3(d) => ZorroDevice::next_event_cck(d.as_ref()),
-            BoardDevice::Toccata(d) => ZorroDevice::next_event_cck(d.as_ref()),
-            #[cfg(feature = "mhi")]
-            BoardDevice::Mhi(d) => ZorroDevice::next_event_cck(d.as_ref()),
-            #[cfg(feature = "cd32-fmv")]
-            BoardDevice::Cd32Fmv(d) => ZorroDevice::next_event_cck(d.as_ref()),
-            BoardDevice::Copperhf(d) => ZorroDevice::next_event_cck(d),
         }
     }
 

@@ -648,12 +648,14 @@ In-tree functional boards implement the `ZorroDevice` trait
 
 1. Implement `ZorroDevice` for the board (register `read`/`write`, `tick`,
    `int2_line`/`int6_line`, `reset`); DMA goes through the `DeviceHost` passed
-   to each call. Add a `BoardDevice` variant wrapping it (`src/zorro_device.rs`)
-   -- **append it at the end of the enum**: bincode encodes variants by
-   index, so inserting one anywhere else renumbers every saved state. Extend
+   to each call. Add a `BoardDevice` variant wrapping it to the declaration in
+   `src/zorro_device/state.rs`, assigning a new, unused wire ID. Existing IDs
+   are permanent, including those belonging to disabled features. Extend
    all of `BoardDevice`'s forwarding `match` arms (`read`, `write`,
-   `peek_word`, `tick`, `int2_line`, `int6_line`, `is_idle`,
-   `next_event_cck`, `take_activity`, `reset`, `kind`) for the new variant.
+   `peek_word`, `tick`, `int2_line`, `int6_line`, `take_activity`, `reset`,
+   `kind`) for the new variant. `Bus` ticks every board at each timed-device
+   boundary, then samples its IRQ lines. A board may return early internally
+   when it has no work; the bus does not query board idle/deadline hooks.
 2. Provide a `BoardSpec` constructor with `backing: BoardBacking::Device(slot)`,
    mirroring the existing ones -- note the full field set (a stale example
    here previously omitted three of them):

@@ -3826,6 +3826,33 @@ fn boot_priority_round_trips_and_greys_empty_slots() {
 }
 
 #[test]
+fn boot_priority_arrows_update_every_listed_drive_and_survive_config_save() {
+    for row in BOOTPRI_ROWS {
+        let field = row.field;
+        let mut setup = MachineSetup::default();
+        setup.select_model(Some(MachineModel::A1200));
+        setup.scsi_controller = Some(ScsiController::A2091);
+        setup.lide_board = Some(LidePersonality::Ripple);
+        let drive = MachineSetup::boot_field_drive(field).expect("boot row has a drive");
+        setup.set_path(drive, PathBuf::from("disk.hdf"));
+        setup.set_drive_bootpri(field, Some(5));
+
+        setup.cycle(field, true);
+        assert_eq!(setup.value_label(field), "6", "{field:?}");
+        let saved = MachineSetup::from_raw(&setup.to_raw()).unwrap();
+        assert_eq!(saved.value_label(field), "6", "{field:?}");
+        setup.cycle(field, false);
+        assert_eq!(setup.value_label(field), "5", "{field:?}");
+
+        setup.toggle_drive_boot(field);
+        setup.cycle(field, true);
+        assert_eq!(setup.value_label(field), "-128", "{field:?}");
+        setup.toggle_drive_boot(field);
+        assert_eq!(setup.value_label(field), "5", "{field:?}");
+    }
+}
+
+#[test]
 fn boot_priority_loads_the_never_sentinel_as_a_cleared_box() {
     use LauncherField as F;
     let raw: RawConfig = toml::from_str(
