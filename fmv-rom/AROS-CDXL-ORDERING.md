@@ -1,8 +1,9 @@
 # AROS PR 1089 CDXL ordering fix
 
 Upstream commit:
-[`ebfc7d9`](https://github.com/aros-development-team/AROS/commit/ebfc7d9d9c263f1b7accf046957149927bc6dfb8)
-(`cd: preserve CDXL sector arrival order`).
+[`64eb7ed1`](https://github.com/aros-development-team/AROS/commit/64eb7ed1a8f77665da0f102a3950e46811cb085c)
+(`cd: preserve CDXL sector arrival order`, merged with PR 1089 on
+2026-09-01; it was draft commit `ebfc7d9` on the PR branch).
 
 ## Problem
 

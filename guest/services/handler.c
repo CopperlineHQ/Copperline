@@ -93,8 +93,14 @@
 // process bootstrap runs enough BCPL frames that a 2K stack overflows
 // before the handler's first instruction, crashing through a wild pointer.
 // 6000 is the WinUAE boot ROM's proven value for C-style handlers booting
-// under 1.3.
-#define HANDLER_STACK 6000
+// under 1.3, and it was enough under AROS only while AROS's dos.library
+// floored every process at 16 KB: once AROS (master from 2026-09-01,
+// upstream commit e9c4ecde99) started honouring the requested size, a
+// 6000-byte handler process overflowed during the staged --run boot (the
+// program never started, the boot process later warm-rebooted). AROS's
+// C dos.library needs far more per call than 1.3's BCPL frames, so ask for
+// 16 KB outright: the memory is per mount, from any RAM, and cheap.
+#define HANDLER_STACK 16384
 
 // AbsExecBase. A plain *(struct ExecBase **)4 works too (a constant address
 // needs no relocation) but trips GCC's array-bounds warning, which treats any

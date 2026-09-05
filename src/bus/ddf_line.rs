@@ -286,6 +286,14 @@ impl Bus {
         // comparators for later lines; they never re-open a window the old
         // DIWSTOP already closed this frame.
         state.bpv = self.diw_vertical_open_at(vpos);
+        // A closed vertical flop cancels a fetch carried across the line
+        // boundary: Agnus drops BPRUN with the flop, so a run that was still
+        // active at the end of the last display line never fetches on the
+        // first line outside the window (vAmiga clears bprun/cnt here too).
+        if !state.bpv {
+            state.bprun = false;
+            state.cnt = 0;
+        }
 
         let writes = self.ddf_seq_writes.borrow();
         // Runtime writes always land in the log, so when the log carries no
@@ -902,6 +910,60 @@ mod tests {
         // comparator-anchored origin: the renderer keeps the register view.
         assert!(table.first_fetch_cck.is_some());
         assert_eq!(table.run_origin_cck, None);
+    }
+
+    #[test]
+    fn closed_vertical_flop_cancels_a_run_carried_across_the_wrap() {
+        // Hires $3C/$DC: the stop request lands mid-unit at the $D8 hard
+        // stop, so the final unit sits at $DC..$E3 and overruns the
+        // 227-clock line with BPRUN still set. Inside the window the
+        // carried unit finishes on the next line before DDFSTRT can match;
+        // on the DIWSTOP.V line the flop's reset drops the run and nothing
+        // is fetched (the AROS boot-screen stray-line regression class,
+        // probe ddfprobe-vspill).
+        let mut bus = empty_bus();
+        bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+        bus.denise.diwstrt = 0x9081; // open at 144
+        bus.denise.diwstop = 0xC8C1; // close at 200
+        bus.denise.ddfstrt = 0x003C;
+        bus.denise.ddfstop = 0x00DC;
+        bus.denise.bplcon0 = 0x9200; // one plane, hires
+        bus.agnus.vpos = 198;
+        bus.ddf_seq_on_line_rollover(197);
+        {
+            let table = bus.ddf_seq_line_table();
+            assert_eq!(
+                table.words_per_plane[0], 41,
+                "41 words fit before the line ends"
+            );
+            assert!(
+                table.end_state.bprun,
+                "the final unit is still running at the line end"
+            );
+        }
+        bus.agnus.vpos = 199;
+        bus.ddf_seq_on_line_rollover(198);
+        {
+            let table = bus.ddf_seq_line_table();
+            let first = table
+                .first_fetch_cck
+                .expect("the carried unit fetches on the next line");
+            assert!(
+                first < 0x3C,
+                "carried unit finishes before DDFSTRT matches (first at {first:#x})"
+            );
+            assert!(table.end_state.bprun, "line 199 ends carried as well");
+        }
+        // Line 200 is DIWSTOP.V: the flop is closed when the line starts.
+        bus.agnus.vpos = 200;
+        bus.ddf_seq_on_line_rollover(199);
+        let table = bus.ddf_seq_line_table();
+        assert_eq!(
+            table.first_fetch_cck, None,
+            "a closed flop cancels the carried run"
+        );
+        assert_eq!(table.words_per_plane[0], 0);
+        assert!(!table.end_state.bprun);
     }
 
     #[test]
