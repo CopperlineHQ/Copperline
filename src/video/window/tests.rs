@@ -11377,6 +11377,41 @@ mod gdb_and_control {
     }
 
     #[test]
+    fn relocation_queries_only_require_pause_during_bartman_bootstrap() {
+        for bartman in [false, true] {
+            let mut d = attached(true);
+            d.app.emu = crate::gdbstub::testkit::emulator_with_loadseg_program();
+            d.app
+                .emu
+                .machine
+                .debug_write_memory(0x1303c, &0x5000u32.to_be_bytes());
+            d.app.gdb.as_mut().unwrap().core.bartman = bartman;
+            d.app.gdb.as_mut().unwrap().core.run_stop = Some("hello".into());
+            push(&d.ctl_tx, 1, "run_until", json!({"frame": 1000}));
+            d.app.drain_control();
+            let pc = d.app.emu.machine.pc();
+            packet(&d.gdb_tx, "qOffsets");
+            d.app.drain_gdb();
+            let sent = frames(&d.gdb_rx);
+            let offsets = if bartman {
+                "00014004;00015004"
+            } else {
+                "TextSeg=14004;DataSeg=15004"
+            };
+            assert_eq!(
+                sent.last(),
+                Some(&frame(if bartman { "E01" } else { offsets }))
+            );
+            d.app.gdb.as_mut().unwrap().core.run_stop = None;
+            packet(&d.gdb_tx, "qOffsets");
+            d.app.drain_gdb();
+            assert_eq!(frames(&d.gdb_rx).last(), Some(&frame(offsets)));
+            assert!(!d.app.paused);
+            assert_eq!(d.app.emu.machine.pc(), pc);
+        }
+    }
+
+    #[test]
     fn repositioning_is_refused_while_the_other_client_runs_the_machine() {
         let mut d = attached(true);
         packet(&d.gdb_tx, "c");

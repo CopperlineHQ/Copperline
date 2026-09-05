@@ -210,7 +210,9 @@ packets, and writes the mixed-endian binary consumed by the extension's
 `ProfileFile` reader. Use an empty unwind path (`""`) for leaf-only sampling.
 The writer finishes the current partial frame before snapshotting replay
 memory, then captures complete frames. It publishes the output only on
-success and restores its instrumentation on failure.
+success and restores its instrumentation on failure. Both transports
+suspend their session-owned exception catches and memory watches during
+capture, restoring them and their watch baselines afterward.
 
 The legacy binary has a fixed PAL 227×313 DMA grid and carries chip and slow
 RAM only. NTSC and programmable geometry use Copperline's native

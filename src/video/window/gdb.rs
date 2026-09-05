@@ -34,7 +34,7 @@ use crate::gdbstub::windowed::{GdbHandle, GdbMsg};
 /// Per-connection GDB state owned by the `App`.
 pub(super) struct GdbGuiState {
     pub(super) handle: GdbHandle,
-    core: GdbCore,
+    pub(super) core: GdbCore,
     breaks: GdbBreaks,
     /// A continue whose stop reply is deferred until the machine stops.
     pending: bool,
@@ -307,7 +307,6 @@ fn repositions_machine(packet: &str) -> bool {
         || packet == "bc"
         || (packet.len() > 1 && (packet.starts_with('s') || packet.starts_with('c')))
         || packet.starts_with("P11=")
-        || packet == "qOffsets"
         || ((packet.starts_with('C') || packet.starts_with('S')) && packet.contains(';'))
         || decode_qrcmd(packet).is_some_and(|command| {
             matches!(command.split_whitespace().next(), Some("profile" | "reset"))
@@ -460,7 +459,7 @@ impl App {
         // resume at an address, a PC write -- are refused while a control
         // client's resume is outstanding, as the control protocol refuses
         // its own repositioning verbs while a GDB continue runs.
-        let bootstraps_bartman = packet == "?"
+        let bootstraps_bartman = matches!(packet, "?" | "qOffsets")
             && self
                 .gdb
                 .as_ref()
@@ -574,6 +573,7 @@ impl App {
                             "E01"
                         }
                     };
+                g.core.refresh_watchpoints(&self.emu);
                 self.gdb = Some(g);
                 self.gdb_sync_machine_debug_state();
                 self.gdb_send_packet(reply);

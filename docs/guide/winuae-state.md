@@ -41,6 +41,7 @@ or an unfinished operation.
 | ASF framing, plain/zlib chunks | Length and aggregate limits checked; truncated data and duplicate mandatory chunks rejected. |
 | CPU | 68000-68060 registers, SR, USP/ISP/MSP, VBR and cache controls; 68EC020 address width retained. Active MMU, FPU chunks and halted CPUs rejected. Cache contents/prefetch are reconstructed. |
 | CHIP | Compact and full register layouts; custom latches, Copper lists, bitplane pointers, blitter configuration, interrupt/DMA controls and disk pointer/sync. Active blits and disk DMA rejected. |
+| CHPX | Validated boot-ROM overlay flags; other emulator-specific machine preferences are not restored. |
 | AGAC, SPR0-7, AUD0-3 | 24-bit palette, sprite pointers/position/data/arming, audio pointers/lengths/period/volume and current sample state. Shift pipelines are approximate. |
 | CIAA/B | Ports, timer counters/latches, control registers, interrupt state and TOD/alarm/latch; supports older 30-byte and extended chunks. |
 | CRAM, BRAM | Chip RAM and slow RAM. |
@@ -48,7 +49,7 @@ or an unfinished operation.
 | A3K1, A3K2 | Motherboard RAM below and CPU-slot RAM above `$08000000`, within Copperline's supported limits. |
 | ROM | One 256/512 KiB Kickstart, verified by size/CRC. Extension/board ROM states rejected. |
 | DSK/DSD, input, RTC | Drive position/backing media, keyboard/input and real-time-clock internals are not restored; omitted chunks are reported. |
-| CPUX/CPUT, CYCS, CHPX/CHPD/CHSL, BPLX, BLIT/BLTX | Emulator-specific pipelines/event timing are reconstructed rather than replayed. Programmable beam timing is not restored. |
+| CPUX/CPUT, CYCS, CHPD/CHSL, BPLX, BLIT/BLTX | Emulator-specific pipelines/event timing are reconstructed rather than replayed. Programmable beam timing is not restored. |
 | FSYS/FSYC/FSYP, BORO, PRAM/ZCRM, DMAC, CD32/CDTV, P96 | Unsupported mounted filesystems, board/RTG RAM, storage and CD hardware states are rejected. |
 
 A short resumed capture may succeed even when the next disk access would

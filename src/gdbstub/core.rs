@@ -626,7 +626,7 @@ impl GdbCore {
             .find_map(|(word, access)| (word == addr).then_some(access))
     }
 
-    fn refresh_watchpoints(&mut self, emu: &Emulator) {
+    pub(crate) fn refresh_watchpoints(&mut self, emu: &Emulator) {
         for watch in &mut self.watchpoints {
             watch.last = emu.machine.debug_read_memory(watch.addr, watch.len);
         }

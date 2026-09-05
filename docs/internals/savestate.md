@@ -343,6 +343,8 @@ start transfers absent from the snapshot. CIA counters use big-endian words
 while their saved latches and TOD bytes use little-endian ordering. ROM
 matching uses the declared CRC over the normalized 256/512 KiB image,
 accepting a mirrored 256 KiB ROM and naming a mismatch through `romdb`.
+The validated CHPX flag word restores the live boot-ROM overlay at address
+zero; absent CHPX data retains the older chip-RAM mapping convention.
 
 WinUAE's event queue, CPU prefetch/cache contents, Copper phase and shift
 register pipelines have no direct Copperline representation. Import starts

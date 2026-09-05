@@ -169,6 +169,9 @@ impl UssFile {
             len => bail!("unsupported USS CHIP length {len}"),
         }
         let chipset_flags = be32(chip, 0);
+        if chunks.iter().any(|chunk| chunk.name == *b"CHPX") && get(b"CHPX")?.len() < 4 {
+            bail!("truncated USS CHPX overlay flags");
+        }
         for name in [b"CIAA", b"CIAB"] {
             if get(name)?.len() < 30 {
                 bail!("truncated USS CIA state");
@@ -488,7 +491,11 @@ impl UssFile {
         bus.mem.zorro = zorro;
         bus.cia_a = ciaa;
         bus.cia_b = ciab;
-        bus.mem.overlay = false;
+        // CHPX bit 0 validates its flag word; bit 1 is the live ROM overlay.
+        // Older files without this extension use the normal chip RAM mapping.
+        bus.mem.overlay = self
+            .chunk(b"CHPX")
+            .is_some_and(|bytes| be32(bytes, 0) & 3 == 3);
         // Write only configuration latches: triggering BLTSIZE, COPJMP or
         // DSKLEN here would start a new transfer that was not in the state.
         for offset in (0x20..0x200u16).step_by(2) {
@@ -710,6 +717,38 @@ mod tests {
         let offset = bad.windows(4).position(|b| b == b"CHIP").unwrap();
         bad[offset + 12..offset + 16].copy_from_slice(&0xffffffffu32.to_be_bytes());
         assert!(UssFile::parse(&bad).is_err());
+    }
+
+    #[cfg(feature = "gdb")]
+    #[test]
+    fn custom_extra_overlay_is_validated_and_restored() {
+        let mut emu = crate::gdbstub::testkit::emulator_with_loadseg_program();
+        emu.bus_mut().mem.rom[..4].copy_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+        let original = fixture(&emu.bus().mem.rom, false);
+        for flags in [0u32, 1, 2, 3] {
+            let mut bytes = original[..original.len() - 8].to_vec();
+            chunk(&mut bytes, b"CHPX", &flags.to_be_bytes(), false);
+            bytes.extend_from_slice(b"END \0\0\0\x08");
+            let state = UssFile::parse(&bytes).unwrap();
+            state.apply(&mut emu).unwrap();
+            assert_eq!(emu.bus().mem.overlay, flags == 3);
+            let expected = if flags == 3 {
+                &emu.bus().mem.rom[..4]
+            } else {
+                &emu.bus().mem.chip_ram[..4]
+            };
+            assert_eq!(emu.machine.debug_read_memory(0, 4), expected);
+        }
+        let mut bytes = original[..original.len() - 8].to_vec();
+        chunk(&mut bytes, b"CHPX", &[1, 2, 3], false);
+        bytes.extend_from_slice(b"END \0\0\0\x08");
+        assert!(UssFile::parse(&bytes).is_err());
+        let mut bytes = original[..original.len() - 8].to_vec();
+        for _ in 0..2 {
+            chunk(&mut bytes, b"CHPX", &[0, 0, 0, 3], false);
+        }
+        bytes.extend_from_slice(b"END \0\0\0\x08");
+        assert!(UssFile::parse(&bytes).is_err());
     }
 
     #[cfg(feature = "gdb")]
