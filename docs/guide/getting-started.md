@@ -95,6 +95,13 @@ cargo test                          # Unit tests (no external assets required)
 cargo test --release -- --ignored   # Integration tests (requires local test media)
 ```
 
+For the optimized native CI suite, including the deterministic golden renders,
+use `cargo test --profile ci --locked`. The `ci` profile inherits release
+settings but disables LTO and uses parallel code generation to compile test
+executables faster. Its binaries are in `target/ci/`; normal builds and
+performance benchmarks continue to use `--release`. Add `--timings` to write
+a build report to `target/cargo-timings/cargo-timing.html`.
+
 ## First boot
 
 Run Copperline from the terminal:

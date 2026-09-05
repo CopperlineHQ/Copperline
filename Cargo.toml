@@ -400,3 +400,12 @@ opt-level = 3
 # rendering than thin LTO, and the resulting executable is smaller.
 lto = "fat"
 codegen-units = 1
+
+# CI needs optimized emulation, but linking every test executable with fat
+# LTO dominates build time. Keep release semantics (including disabled debug
+# assertions/overflow checks) while allowing parallel code generation. The
+# packaged release binaries continue to use the profile above.
+[profile.ci]
+inherits = "release"
+lto = "off"
+codegen-units = 16

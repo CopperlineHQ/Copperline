@@ -4,12 +4,12 @@ name: Windows
 # ARM64 on the windows-11-arm runner, each leg building natively for its own
 # architecture (no cross-compiling). Per architecture, two parallel builder
 # jobs produce the portable Windows zip and the prebuilt test executables
-# (both are full release compiles and roughly equally expensive, so
-# splitting them halves the critical path), then the checks fan out in
+# (the zip uses the shipping release profile; tests use the optimized ci
+# profile without fat LTO), then the checks fan out in
 # parallel against those artifacts, mirroring ci.yml: the packaged zip is
 # booted from a clean directory, and the unit suites plus the probe golden
 # renders (pixel-exact deterministic boots on the bundled AROS ROM) run
-# against the same release binaries. This is also the only Windows coverage
+# against the prebuilt test binaries. This is also the only Windows coverage
 # (the main CI runs on macOS and Linux), so the code-path triggers below run
 # the full release build on pull requests too. On a v* tag push (or a manual
 # run with release_tag) both zips are attached to the GitHub Release by the
@@ -95,6 +95,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-zip-${{ matrix.target }}
       - name: Build release zip
         shell: pwsh
         run: packaging/windows/build-zip.ps1 -Target ${{ matrix.target }}
@@ -124,9 +126,8 @@ jobs:
     # binary here too (the integration tests spawn it through the
     # compile-time CARGO_BIN_EXE_copperline path), so the staged
     # copperline.exe pairs with the probe_golden harness compiled alongside
-    # it and this job needs nothing from the zip build. Swatinem/rust-cache
-    # keys per job and per toolchain, so each builder keeps its own warm
-    # cache.
+    # it and this job needs nothing from the zip build. Separate cache keys
+    # keep the shipping and CI profiles warm independently.
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -158,6 +159,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-tests-${{ matrix.target }}
       - name: Compile test binaries
         shell: pwsh
         # The JSON build plan maps each test target to its hash-suffixed
@@ -167,10 +170,10 @@ jobs:
         # excluded from the build).
         run: |
           $ErrorActionPreference = "Stop"
-          cargo test --release --locked --target ${{ matrix.target }} --no-run --message-format=json > cargo-test-build.json
+          cargo test --profile ci --locked --target ${{ matrix.target }} --no-run --timings --message-format=json > cargo-test-build.json
           if ($LASTEXITCODE -ne 0) { throw "cargo test --no-run exited with $LASTEXITCODE" }
           New-Item -ItemType Directory -Force -Path ci-bins | Out-Null
-          Copy-Item target\${{ matrix.target }}\release\copperline.exe ci-bins\
+          Copy-Item target\${{ matrix.target }}\ci\copperline.exe ci-bins\
           Get-Content cargo-test-build.json | ForEach-Object {
             $msg = $_ | ConvertFrom-Json
             if ($msg.reason -eq "compiler-artifact" -and $msg.profile.test -and $msg.executable) {
@@ -188,6 +191,14 @@ jobs:
         with:
           name: windows-test-bins-${{ matrix.arch }}
           path: ci-bins/
+      - name: Upload build timings
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cargo-timings-windows-${{ matrix.arch }}
+          path: target/cargo-timings/
+          if-no-files-found: ignore
+          retention-days: 7
 
   zip-smoke:
     name: Packaged zip boot smoke (${{ matrix.arch }})
@@ -306,8 +317,8 @@ jobs:
         # --target build directory before running.
         run: |
           $ErrorActionPreference = "Stop"
-          New-Item -ItemType Directory -Force -Path target\${{ matrix.target }}\release | Out-Null
-          Copy-Item ci-bins\copperline.exe target\${{ matrix.target }}\release\copperline.exe
+          New-Item -ItemType Directory -Force -Path target\${{ matrix.target }}\ci | Out-Null
+          Copy-Item ci-bins\copperline.exe target\${{ matrix.target }}\ci\copperline.exe
           ./ci-bins/probe_golden.exe
           if ($LASTEXITCODE -ne 0) { throw "probe_golden exited with $LASTEXITCODE" }
       - name: Upload probe render diffs
