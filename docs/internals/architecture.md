@@ -263,6 +263,8 @@ executables are embedded in Copperline and written into the boot volume's
 The commands use Exec/DOS 1.x calls and public Process/CLI fields. They change
 the CLI failure threshold and default command stack, acquire the working
 directory lock, and write the completion marker through ordinary DOS I/O.
+CLI, DAP, and staging share stack-size validation matching the guest helper,
+so an unsupported size cannot be silently ignored by the startup script.
 No ROM identification, host-side state patch, or emulator trap is involved;
 newer shells resolve their internal commands normally. The optional detached
 path uses the ROM's `Run`/`EndCLI` commands and requires Kickstart 2.0+ or

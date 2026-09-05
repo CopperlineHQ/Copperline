@@ -35,7 +35,9 @@ host filesystem interface:
    by the program are saved to the same host directory.
 
 Other machine settings are configured normally via configuration files or CLI flags.
-`--run-stack BYTES` emits an AmigaDOS `Stack` command before the executable;
+`--run-stack BYTES` accepts 2048 through 2147483644 bytes and emits an
+AmigaDOS `Stack` command before the executable; invalid sizes are rejected
+before booting.
 `--run-detach` launches it through `Run >NIL: <NIL:` and closes the boot CLI
 (Kickstart 2.0+ or AROS).
 By default, the bundled AROS Kickstart replacement is used on the standard machine profile:

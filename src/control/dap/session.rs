@@ -126,10 +126,7 @@ fn parse_launch(args: &Value) -> Result<LaunchArgs, String> {
     let stack = match args.get("stack").filter(|v| !v.is_null()) {
         Some(value) => {
             let bytes = value.as_u64().ok_or("stack must be a positive integer")?;
-            if !(4..=u32::MAX as u64).contains(&bytes) {
-                return Err("stack must be between 4 and 4294967295".into());
-            }
-            Some(bytes as u32)
+            Some(crate::runprog::validate_stack_size(bytes).map_err(|e| e.to_string())?)
         }
         None => None,
     };
@@ -2567,6 +2564,17 @@ mod tests {
         assert_eq!(args.ntsc, Some(true));
         assert!(args.detach);
         assert!(args.emulator_log);
+        for bytes in [2048u64, 2049, 2_147_483_644] {
+            let args = parse_launch(&json!({"program": prog, "stack": bytes})).unwrap();
+            assert_eq!(args.stack.map(u64::from), Some(bytes));
+        }
+        for bytes in [0u64, 4, 2047, 2_147_483_645, 4_294_967_295, 4_294_967_296] {
+            let err = parse_launch(&json!({"program": prog, "stack": bytes})).unwrap_err();
+            assert!(
+                err.contains("stack must be between 2048 and 2147483644"),
+                "{err}"
+            );
+        }
         assert!(parse_launch(&json!({
             "program": prog.display().to_string(),
             "fpu": "yes"

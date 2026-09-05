@@ -499,15 +499,15 @@ where
                 run_args = Some(v);
             }
             "--run-stack" => {
-                let bytes: u32 = next_arg(
+                let bytes: u64 = next_arg(
                     &mut args,
                     "--run-stack requires BYTES",
                     "--run-stack BYTES must be an integer",
                 )?;
-                if bytes < 4 {
-                    bail!("--run-stack BYTES must be at least 4");
-                }
-                run_stack = Some(bytes);
+                run_stack = Some(
+                    copperline::runprog::validate_stack_size(bytes)
+                        .map_err(|e| anyhow!("--run-stack: {e}"))?,
+                );
             }
             "--run-detach" => run_detach = true,
             "--warp-boot" => {

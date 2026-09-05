@@ -233,8 +233,9 @@
               },
               "stack": {
                 "type": "integer",
-                "minimum": 4,
-                "description": "Set the AmigaDOS CLI stack before launching the program."
+                "minimum": 2048,
+                "maximum": 2147483644,
+                "description": "Set the AmigaDOS CLI stack in bytes before launching the program."
               },
               "ntsc": {
                 "type": "boolean",

@@ -90,6 +90,15 @@ pub struct RunOptions {
     pub detach: bool,
 }
 
+/// Keep host launch validation aligned with the bundled 1.x Stack command:
+/// at least 2 KiB, with room to round up within DOS's signed byte count.
+pub fn validate_stack_size(bytes: u64) -> Result<u32> {
+    if !(2048..=2_147_483_644).contains(&bytes) {
+        bail!("stack must be between 2048 and 2147483644 bytes");
+    }
+    Ok(bytes as u32)
+}
+
 /// The script that actually runs the program and drops the completion marker
 /// when it returns. Detached launches execute this in their child CLI, so
 /// closing the boot CLI cannot skip the marker.
@@ -158,6 +167,9 @@ pub fn prepare_with_options(
     options: RunOptions,
     stage_root: Option<&Path>,
 ) -> Result<PreparedRun> {
+    if let Some(stack) = options.stack {
+        validate_stack_size(u64::from(stack))?;
+    }
     let program =
         std::path::absolute(program).with_context(|| format!("resolving {}", program.display()))?;
     if !program.is_file() {
@@ -429,6 +441,34 @@ mod tests {
             child,
             format!("FailAt 21\nStack 32768\nCD \"RunProg:\"\n\"RunProg:hello\" -x\n{DONE_LINE}")
         );
+    }
+
+    #[test]
+    fn invalid_stack_preserves_the_existing_boot_volume() {
+        let dir = temp_dir("runprog-invalid-stack");
+        let program = dir.join("hello");
+        std::fs::write(&program, b"hunk").unwrap();
+        let stage = dir.join("stage");
+        let prepared = prepare(&program, None, Some(&stage)).unwrap();
+        let sentinel = prepared.boot_dir.join("existing");
+        std::fs::write(&sentinel, b"keep").unwrap();
+        for stack in [0, 4, 2047, 2_147_483_645, u32::MAX] {
+            let err = prepare_with_options(
+                &program,
+                None,
+                RunOptions {
+                    stack: Some(stack),
+                    detach: false,
+                },
+                Some(&stage),
+            )
+            .unwrap_err();
+            assert!(err
+                .to_string()
+                .contains("stack must be between 2048 and 2147483644"));
+            assert_eq!(std::fs::read(&sentinel).unwrap(), b"keep");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
