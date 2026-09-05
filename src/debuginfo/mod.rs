@@ -210,7 +210,8 @@ pub struct LinkSegment {
 
 /// The link-time address space: amiga-gcc's DWARF addresses every hunk
 /// from 0 (its sections have VMA 0), an ELF places them by its linker
-/// script. Code lookups (line rows, functions, CFI) go through here.
+/// script (or uses distinct internal addresses for relocatable ELF).
+/// Code lookups (line rows, functions, CFI) go through here.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LinkMap {
     pub segments: Vec<LinkSegment>,
@@ -992,6 +993,67 @@ mod fixture_tests {
 
     const HELLO: &[u8] = include_bytes!("../../guest/dap-test/hello");
     const LINES: &[u8] = include_bytes!("../../guest/dap-test/lines");
+
+    #[test]
+    fn elf_multi_unit_fixtures_resolve_lines_globals_and_cfi() {
+        let fixtures: &[(&[u8], &[u8])] = &[
+            (
+                include_bytes!("../../guest/dap-test/reloc/program-dwarf4"),
+                include_bytes!("../../guest/dap-test/reloc/program-dwarf4.elf"),
+            ),
+            (
+                include_bytes!("../../guest/dap-test/reloc/program-dwarf5"),
+                include_bytes!("../../guest/dap-test/reloc/program-dwarf5.elf"),
+            ),
+            (
+                include_bytes!("../../guest/dap-test/reloc/program-linked"),
+                include_bytes!("../../guest/dap-test/reloc/program-linked.elf"),
+            ),
+        ];
+        for &(program, elf) in fixtures {
+            let mut info = DebugInfo::load(program, Some(elf)).expect("ELF DWARF parses");
+            info.relocate(
+                (0..info.hunks.len())
+                    .map(|i| 0x10000 * (i as u32 + 1))
+                    .collect(),
+            );
+            assert_eq!(info.functions.len(), 2, "{:?}", info.notes);
+            for name in ["entry", "worker"] {
+                let function = info.functions.iter().find(|f| f.name == name).unwrap();
+                let symbol = info.symbols.iter().find(|s| s.name == name).unwrap();
+                assert_eq!(function.at, symbol.at, "{name}: DWARF agrees with hunk");
+                let pc = info.runtime(function.at).unwrap();
+                let line = info.line_for(pc).expect("source line at function entry");
+                let source = if name == "entry" {
+                    "main.c"
+                } else {
+                    "worker.c"
+                };
+                assert!(info.files[line.file as usize].path.ends_with(source));
+                let link_pc = info.link.to_link(function.at).unwrap();
+                let cfi = info.cfi.as_ref().unwrap().row_for(link_pc).unwrap();
+                assert_eq!((cfi.cfa_reg, cfi.cfa_offset), (15, 4), "{name}");
+                assert_eq!(cfi.ra_reg, 24);
+            }
+            for name in ["increment", "result"] {
+                let global = info.globals.iter().find(|g| g.name == name).unwrap();
+                let symbol = info.symbols.iter().find(|s| s.name == name).unwrap();
+                assert_eq!(global.location, Location::Static(symbol.at), "{name}");
+            }
+            let file = info.find_file("worker.c").unwrap();
+            let return_line = include_str!("../../guest/dap-test/reloc/worker.c")
+                .lines()
+                .position(|l| l.contains("return value + increment"))
+                .unwrap() as u32
+                + 1;
+            let (line, addresses) = info.resolve_line(file, return_line).unwrap();
+            assert_eq!(line, return_line);
+            assert!(!addresses.is_empty());
+            for pc in addresses {
+                assert_eq!(info.function_at(pc).unwrap().name, "worker");
+            }
+        }
+    }
 
     fn hello() -> DebugInfo {
         let mut info = DebugInfo::load(HELLO, None).expect("hello parses");

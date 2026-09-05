@@ -3,7 +3,7 @@
 //! End-to-end test of `copperline-ctl --dap`: the built ctl binary is
 //! driven over its stdio like an IDE would, and it in turn launches the
 //! built emulator headless with the bundled AROS ROM to run the
-//! `guest/dap-test/hello` probe, so no local assets are needed. Ignored
+//! `guest/dap-test` probes, so no local assets are needed. Ignored
 //! like the rest of this directory because it spawns two processes and
 //! boots the emulator; run it with
 //!
@@ -159,6 +159,122 @@ fn read_messages(
             return;
         }
     }
+}
+
+#[test]
+#[ignore]
+fn dap_binds_multi_unit_relocatable_dwarf4_after_loadseg() {
+    debug_elf_fixture("program-dwarf4");
+}
+
+#[test]
+#[ignore]
+fn dap_binds_multi_unit_relocatable_dwarf5_after_loadseg() {
+    debug_elf_fixture("program-dwarf5");
+}
+
+#[test]
+#[ignore]
+fn dap_binds_linked_elf_with_retained_relocations_after_loadseg() {
+    debug_elf_fixture("program-linked");
+}
+
+fn debug_elf_fixture(name: &str) {
+    // Reap the adapter even when an assertion fails.
+    struct Adapter(std::process::Child);
+    impl Drop for Adapter {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("guest/dap-test/reloc");
+    let program = dir.join(name);
+    let source = dir.join("worker.c");
+    let line = include_str!("../guest/dap-test/reloc/worker.c")
+        .lines()
+        .position(|l| l.contains("return value + increment"))
+        .unwrap() as u64
+        + 1;
+    let mut child = Adapter(
+        Command::new(env!("CARGO_BIN_EXE_copperline-ctl"))
+            .arg("--dap")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("starting adapter"),
+    );
+    let stdin = child.0.stdin.take().unwrap();
+    let stdout = BufReader::new(child.0.stdout.take().unwrap());
+    let (tx, rx) = channel();
+    std::thread::spawn(move || read_messages(stdout, tx));
+    let mut c = Client {
+        stdin,
+        rx,
+        seq: 0,
+        backlog: std::cell::RefCell::new(Vec::new()),
+    };
+    c.call("initialize", json!({"clientID": "test"}));
+    c.call(
+        "launch",
+        json!({
+            "program": program,
+            "symbolFile": dir.join(format!("{name}.elf")),
+            "copperline": env!("CARGO_BIN_EXE_copperline"),
+            "factory": true,
+            "headless": true,
+            "stopOnEntry": true,
+            "entryPoint": "entry",
+            "timeoutMs": 120000,
+        }),
+    );
+    c.event("initialized");
+    let bps = c.call(
+        "setBreakpoints",
+        json!({"source": {"path": source}, "breakpoints": [{"line": line}]}),
+    );
+    let bp = &bps["breakpoints"][0];
+    assert_eq!(bp["verified"], false, "{bps}");
+    let id = bp["id"].as_i64().unwrap();
+    c.call("configurationDone", json!({}));
+    c.event("module");
+    let bound = c.wait(
+        "source breakpoint binding after LoadSeg",
+        |m| {
+            m["type"] == "event"
+                && m["event"] == "breakpoint"
+                && m["body"]["breakpoint"]["id"] == id
+        },
+        Duration::from_secs(30),
+    );
+    assert_eq!(bound["body"]["reason"], "changed", "{bound}");
+    assert_eq!(bound["body"]["breakpoint"]["verified"], true, "{bound}");
+    let stop = c.stopped();
+    assert_eq!(stop["reason"], "entry", "{stop}");
+    let frames = c.call("stackTrace", json!({"threadId": 1}));
+    let top = &frames["stackFrames"][0];
+    assert_eq!(top["name"], "entry", "{frames}");
+    assert!(top["source"]["path"].as_str().unwrap().ends_with("main.c"));
+    assert!(top["line"].as_u64().unwrap() > 0);
+
+    c.call("continue", json!({"threadId": 1}));
+    let stop = c.stopped();
+    assert_eq!(stop["reason"], "breakpoint", "{stop}");
+    assert_eq!(stop["hitBreakpointIds"], json!([id]), "{stop}");
+    let frames = c.call("stackTrace", json!({"threadId": 1}));
+    let top = &frames["stackFrames"][0];
+    assert_eq!(top["name"], "worker", "{frames}");
+    assert!(top["source"]["path"]
+        .as_str()
+        .unwrap()
+        .ends_with("worker.c"));
+    assert_eq!(top["line"], line, "{frames}");
+    assert_eq!(frames["stackFrames"][1]["name"], "entry", "{frames}");
+
+    c.call("disconnect", json!({"terminateDebuggee": true}));
+    drop(c);
+    assert!(child.0.wait().expect("adapter exits").success());
 }
 
 #[test]

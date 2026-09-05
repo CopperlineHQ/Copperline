@@ -138,8 +138,28 @@ What each toolchain provides:
 | vasm `-Fhunkexe -linedebug` | Source lines from the `LINE` debug hunks, symbols from the symbol hunks. Breakpoints and stepping by assembly source line. |
 | bebbo amiga-gcc 6.5 (`m68k-amigaos-gcc -g -O0`) | DWARF from the trailing debug hunk: lines, functions, parameters and locals, globals, struct/array/pointer/enum types, call-frame information for the call stack. |
 | bebbo amiga-gcc 13/15/16 (`-g`) | These toolchains' linkers drop the DWARF sections from hunk output: symbols only (function breakpoints, symbolised disassembly, a scanned call stack). Build with the 6.5 toolchain for source-level debugging. |
-| Bartman's `m68k-amiga-elf` + elf2hunk | The hunk file's symbols plus the ELF's DWARF through `symbolFile` (or `program.elf`); ELF sections map onto hunks in section order, as elf2hunk allocates them. |
+| Bartman's `m68k-amiga-elf` + elf2hunk | The hunk file's symbols plus the ELF's DWARF through `symbolFile` (or `program.elf`), including multi-file DWARF 4/5 builds linked with `-r -nostdlib`; ELF sections map onto hunks in section order, as elf2hunk allocates them. |
 | Anything stripped | Disassembly, registers, memory, chipset. |
+
+Keep the ELF used by elf2hunk alongside the hunk executable, or name it
+explicitly with `symbolFile`. For example, a relocatable build can use:
+
+```sh
+m68k-amiga-elf-gcc -g -O0 -r -nostdlib main.c worker.c -o program.elf
+elf2hunk program.elf program
+```
+
+The adapter applies the ELF's debug-section relocations before reading
+DWARF, including references between compilation units' abbreviation and
+line tables. Source breakpoints set before LoadSeg are initially unverified;
+they bind and emit a `breakpoint` changed event when the program loads.
+Selecting DWARF 4 instead of 5 still requires applying these relocations.
+
+A fully linked ELF built with `-Wl,--emit-relocs` is also supported. That
+option retains relocation records for tools such as elf2hunk; its debug
+contents are already resolved by the linker. The adapter preserves those
+contents without applying the retained relocations again. `--emit-relocs`
+is not needed for `-r` output, which already carries pending relocations.
 
 Locals need `-O0`: the adapter evaluates the single-operation DWARF
 locations (`DW_OP_fbreg`, `DW_OP_breg`, `DW_OP_reg`, `DW_OP_addr`,
