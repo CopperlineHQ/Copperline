@@ -1920,12 +1920,6 @@ impl ZorroDevice for WasmBoard {
         self.call_flag(|e| e.int6.clone())
     }
 
-    // Ticked every slice (the plugin decides what to do); a sparse next_event
-    // model is a future optimization.
-    fn is_idle(&self) -> bool {
-        false
-    }
-
     fn reset(&mut self) {
         if let Err(e) = self.rt.get_mut().reset() {
             log::error!("wasm: plugin reset failed: {e}");

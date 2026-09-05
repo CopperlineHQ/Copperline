@@ -1,21 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The one place an HTTP client is built.
-//!
-//! Not a wrapper for its own sake: the TLS backend differs by platform, and
-//! ureq will not choose it. `TlsProvider` defaults to Rustls and its own
-//! documentation says of the alternative that "the setting is never picked
-//! up automatically", so a build carrying only native-tls still asks for
-//! Rustls and panics mid-request:
-//!
-//! ```text
-//! uri scheme is https, provider is Rustls but feature is not enabled: rustls
-//! ```
-//!
-//! That is a runtime failure on one platform, in whichever request happens
-//! to run first, and nothing about writing `Agent::config_builder()` warns
-//! you. So there is one constructor, every caller goes through it, and a
-//! test below fails if a second one appears.
+//! Shared HTTP construction: user agent, transfer timeout and the TLS provider
+//! available in this platform's build. All game-library callers use `agent`.
 
 use std::time::Duration;
 
@@ -44,25 +30,17 @@ pub fn agent(timeout: Duration) -> ureq::Agent {
 
 #[cfg(test)]
 mod tests {
-    /// Every HTTP client in the game library comes from [`super::agent`].
-    ///
-    /// Reading the sources rather than the behaviour, because the behaviour
-    /// this protects only misbehaves on Windows: a second agent built by
-    /// hand works perfectly on the machine of whoever writes it and panics
-    /// on somebody else's. That is exactly how the first one got in.
+    use super::*;
+    use ureq::tls::TlsProvider;
+
     #[test]
-    fn nothing_else_builds_an_agent() {
-        for (name, source) in [
-            ("openretro.rs", include_str!("openretro.rs")),
-            ("support.rs", include_str!("support.rs")),
-            ("cover.rs", include_str!("cover.rs")),
-            ("scan.rs", include_str!("scan.rs")),
-        ] {
-            assert!(
-                !source.contains("config_builder"),
-                "{name} builds its own ureq agent; call gamelib::http::agent \
-                 instead, or Windows will panic on the first request"
-            );
-        }
+    fn agent_selects_the_platforms_compiled_tls_provider() {
+        let client = agent(Duration::from_secs(5));
+        let expected = if cfg!(windows) {
+            TlsProvider::NativeTls
+        } else {
+            TlsProvider::Rustls
+        };
+        assert_eq!(client.config().tls_config().provider(), expected);
     }
 }

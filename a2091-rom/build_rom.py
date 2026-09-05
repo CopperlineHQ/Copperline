@@ -7,9 +7,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import struct
+import sys
 from pathlib import Path
 
-from hunk import read_hunks
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+from amiga_hunk import read_hunks
 
 
 ROM_SIZES = (16 * 1024, 32 * 1024, 64 * 1024)

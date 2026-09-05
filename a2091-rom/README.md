@@ -46,3 +46,9 @@ The ROM has been exercised headlessly against Copperline's A2091 model with
 Kickstart 3.1 and a real RDB Workbench installation. Real A2091/A590 EPROM
 testing remains a separate hardware acceptance step; verify board jumpers and
 EPROM type before programming the split outputs.
+
+The ROM builders share the HUNK reader and relocator in
+`../tools/amiga_hunk.py`; keep the repository layout when running them.
+Run its asset-free tests with `python3 -m unittest discover -s tools/tests -v`
+from the repository root. Each ROM Makefile also tracks this helper as a build
+dependency.

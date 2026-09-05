@@ -1799,18 +1799,6 @@ impl ZorroDevice for CopperhfBoard {
         self.irq_enable && self.irq_status() != 0
     }
 
-    fn is_idle(&self) -> bool {
-        self.completions.is_empty() && self.in_flight.is_empty()
-    }
-
-    fn next_event_cck(&self) -> Option<u32> {
-        // A request already dispatched to the worker is due at the very
-        // next tick (the module doc's determinism section), so schedule
-        // one immediately rather than let the sparse-wake scheduler skip
-        // ahead.
-        (!self.in_flight.is_empty()).then_some(0)
-    }
-
     fn take_activity(&mut self) -> bool {
         std::mem::take(&mut self.activity)
     }

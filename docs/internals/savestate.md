@@ -167,6 +167,13 @@ Encoding details, for anyone reading a state file from outside:
   `Option<T>` as a one-byte tag (0/1) followed by the value, enum
   variants as a `u32` index, and `Vec`/`String`/`PathBuf` as a `u64`
   length prefix followed by the elements/UTF-8 bytes.
+- `BoardDevice` is the exception to derived enum indices: its custom serde
+  implementation in `zorro_device/state.rs` writes an explicit `u32` kind
+  followed by the board payload. IDs remain reserved when their Cargo feature
+  is disabled, and loading an unsupported kind reports the missing board.
+  Existing IDs must never be reused or renumbered. Format 79 introduces this
+  encoding; format 78 is rejected even when a particular build happened to
+  use the same IDs.
 - Arrays larger than 32 elements go through `serde-big-array` (the
   AGA palette's two `[u16; 256]` nibble planes, autoconfig ROM images,
   CPU-cache line arrays); on the wire they are simply the elements in
@@ -193,6 +200,13 @@ confusing decode error (or worse, decoding into nonsense). There is no
 migration machinery; old states are simply invalidated.
 
 ## Snapshot point and atomicity
+
+File saves write through a buffered compressor into a unique sibling temporary
+file. After compression and flushing succeed, the file is synced and atomically
+renamed over the destination. Returned errors leave an existing save untouched
+and remove the temporary file. This guarantees complete-file replacement, not
+power-loss durability of the directory entry: the containing directory is not
+fsynced. The browser uses `save_to_writer` and manages publication itself.
 
 The app-level contract is that states are taken at presentation-quantum
 boundaries: the window event loop and the headless timers both act only
@@ -221,7 +235,7 @@ so the next presentation re-renders from the restored Bus.
 
 ## Verification
 
-The determinism gate lives at three levels:
+The regression checks cover serialization, failure recovery and replay:
 
 - `cpu::tests::save_state_round_trip_replays_identically`: runs a
   chip-RAM loop that also writes COLOR00 (so CPU, RAM, and beam-event
@@ -229,8 +243,12 @@ The determinism gate lives at three levels:
   the state again, rewinds to T1, replays the same step pattern, and
   asserts the trace matches **and the re-serialized T2 state file is
   byte-identical** to the original timeline's.
-- `savestate::tests` cover magic/version rejection, the
-  truncated-payload atomicity guarantee, the header descriptor round
+- `zorro_device::state::tests` read and reproduce the same checked-in board
+  fixture in default, core-only and MHI-only builds. Disabled kinds also have
+  explicit error coverage.
+- `savestate::tests` cover failed writes and failed publication preserving
+  existing destinations and cleaning up temporary files, magic/version
+  rejection, the truncated-payload atomicity guarantee, the header descriptor round
   trip (`round_trips_the_machine_descriptor`), and that a CD controller
   travels in the state so the bar's CD controls appear on load
   (`cd_controller_travels_in_the_state`);

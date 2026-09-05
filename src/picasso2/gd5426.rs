@@ -1044,23 +1044,6 @@ impl CirrusGd5426 {
         }
     }
 
-    pub fn is_idle(&self) -> bool {
-        self.blit_busy_cck == 0 && self.system_blit.is_none() && self.decode_mode().is_none()
-    }
-
-    pub fn next_event_cck(&self) -> Option<u32> {
-        let blit = (self.blit_busy_cck != 0).then_some(self.blit_busy_cck);
-        let video = self
-            .decode_mode()
-            .is_some()
-            .then(|| self.cck_until_retrace_start());
-        match (blit, video) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(event), None) | (None, Some(event)) => Some(event),
-            (None, None) => None,
-        }
-    }
-
     pub fn vblank_pending(&self) -> bool {
         self.vblank_pending
     }
@@ -1130,18 +1113,6 @@ impl CirrusGd5426 {
             next += frame;
         }
         next <= new
-    }
-
-    fn cck_until_retrace_start(&self) -> u32 {
-        let frame = self.frame_cck().max(1);
-        let phase = self.frame_phase_cck % frame;
-        let retrace = self.retrace_start_cck().min(frame - 1);
-        let distance = if phase < retrace {
-            retrace - phase
-        } else {
-            frame - phase + retrace
-        };
-        distance.max(1).min(u64::from(u32::MAX)) as u32
     }
 
     fn vertical_interrupt_enabled(&self) -> bool {
@@ -1517,7 +1488,6 @@ mod tests {
         assert_eq!(chip.io_read(0x3c2), 0x10);
 
         let line_cck = chip.frame_cck() / chip.vertical_total_lines();
-        assert_eq!(chip.next_event_cck(), Some((line_cck * 16) as u32));
         chip.tick((line_cck * 16) as u32);
         assert!(chip.vblank_pending());
         assert_eq!(chip.io_read(0x3c2), 0x90);

@@ -1015,17 +1015,6 @@ impl crate::zorro_device::ZorroDevice for A4091 {
         self.irq_line()
     }
 
-    // The 53C710 model completes its work within each SCRIPTS run, but a
-    // CD-ROM target with playback or a tray load in flight needs its tick.
-    fn is_idle(&self) -> bool {
-        !self
-            .targets
-            .iter()
-            .flatten()
-            .filter_map(ScsiTarget::cd_ref)
-            .any(crate::scsi::ScsiCdRom::needs_tick)
-    }
-
     fn reset(&mut self) {
         self.chip_reset();
     }

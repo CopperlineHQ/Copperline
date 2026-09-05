@@ -91,3 +91,9 @@ MPEG device.
 See [NOTES-api.md](NOTES-api.md) for the recovered request ABI and the root
 [FMV-ROM-REPLACEMENT-PLAN.md](../FMV-ROM-REPLACEMENT-PLAN.md) for the design
 and remaining compatibility work.
+
+The ROM builders share the HUNK reader and relocator in
+`../tools/amiga_hunk.py`; keep the repository layout when running them.
+Run its asset-free tests with `python3 -m unittest discover -s tools/tests -v`
+from the repository root. Each ROM Makefile also tracks this helper as a build
+dependency.

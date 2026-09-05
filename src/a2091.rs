@@ -412,13 +412,6 @@ impl crate::zorro_device::ZorroDevice for A2091 {
         Self::int2_line(self)
     }
 
-    // The A2091 delivers delayed WD33C93 interrupts and pumps queued DMA from
-    // its tick, so it is never treated as idle: the bus ticks it every slice
-    // (matching its pre-trait unconditional tick).
-    fn is_idle(&self) -> bool {
-        false
-    }
-
     fn take_activity(&mut self) -> bool {
         Self::take_activity(self)
     }

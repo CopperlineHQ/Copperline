@@ -205,10 +205,9 @@ construction, "the first `tick()` call after its own doorbell write" --
 `tick` always blocks on the worker until every request already in flight
 *when tick runs* has actually delivered its result, so a slow disk costs
 host wall-clock time inside that block, not a shift in which emulated tick
-the completion becomes visible at. `CopperhfBoard::next_event_cck` reports
-an in-flight request as due immediately (offset 0) rather than letting the
-sparse-wake scheduler skip ahead, which is what makes that blocking-tick
-guarantee actually reachable every time. All requests -- I/O and
+the completion becomes visible at. The bus calls each board at every
+timed-device boundary and samples its IRQ line after that call; Copperhf
+completion uses that tick boundary. All requests -- I/O and
 board-answered alike -- ride one FIFO pipeline end to end (one
 doorbell-ordered queue on the board, matched positionally against the
 worker's own strictly-ordered output), so completions surface in doorbell

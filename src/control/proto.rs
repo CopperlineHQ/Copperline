@@ -331,71 +331,22 @@ pub fn decode_hex(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-const BASE64_ALPHABET: &[u8; 64] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-/// Standard base64 with padding, for bulk memory payloads.
+/// Standard Base64 with padding, for bulk memory payloads.
 pub fn encode_base64(data: &[u8]) -> String {
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b = [
-            chunk[0],
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-        ];
-        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-        out.push(BASE64_ALPHABET[(n >> 18) as usize & 63] as char);
-        out.push(BASE64_ALPHABET[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 {
-            BASE64_ALPHABET[(n >> 6) as usize & 63] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            BASE64_ALPHABET[n as usize & 63] as char
-        } else {
-            '='
-        });
-    }
-    out
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(data)
 }
 
-/// Decode standard base64 (padding optional). `None` on any malformed
-/// input, including nonzero discarded padding bits.
+/// Decode standard Base64, accepting omitted padding and surrounding whitespace.
+/// Nonzero discarded padding bits and malformed symbols are rejected.
 pub fn decode_base64(s: &str) -> Option<Vec<u8>> {
-    fn val(b: u8) -> Option<u32> {
-        match b {
-            b'A'..=b'Z' => Some(u32::from(b - b'A')),
-            b'a'..=b'z' => Some(u32::from(b - b'a') + 26),
-            b'0'..=b'9' => Some(u32::from(b - b'0') + 52),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        }
-    }
-    let raw = s.trim().as_bytes();
-    let stripped = raw
-        .strip_suffix(b"==")
-        .or_else(|| raw.strip_suffix(b"="))
-        .unwrap_or(raw);
-    if stripped.len() % 4 == 1 {
-        return None;
-    }
-    let mut out = Vec::with_capacity(stripped.len() * 3 / 4);
-    let mut acc: u32 = 0;
-    let mut bits: u32 = 0;
-    for &b in stripped {
-        acc = (acc << 6) | val(b)?;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((acc >> bits) as u8);
-        }
-    }
-    if bits > 0 && (acc & ((1 << bits) - 1)) != 0 {
-        return None;
-    }
-    Some(out)
+    use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
+    use base64::Engine;
+    const ENGINE: GeneralPurpose = GeneralPurpose::new(
+        &base64::alphabet::STANDARD,
+        GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
+    );
+    ENGINE.decode(s.trim()).ok()
 }
 
 #[cfg(test)]

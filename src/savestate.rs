@@ -35,7 +35,9 @@ use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write};
+#[cfg(not(target_arch = "wasm32"))]
+use std::io::BufWriter;
+use std::io::{BufReader, Read, Write};
 use std::path::Path;
 
 use crate::config::MachineDescriptor;
@@ -375,7 +377,9 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      now drains the guest's command ring into it regardless of the
 //      drive's state, and the drive parses commands out of it only
 //      between dumps.
-pub const STATE_VERSION: u32 = 78;
+//  79: Expansion-board kind IDs are explicit and feature-independent. Builds
+//      without an optional board reject its kind without renumbering others.
+pub const STATE_VERSION: u32 = 79;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {
@@ -414,12 +418,41 @@ pub fn slot_path(slot: usize) -> Option<std::path::PathBuf> {
 /// (the shape of the machine that produced it). Call only between emulated
 /// frames.
 pub fn save(machine: &M68kMachine, descriptor: &MachineDescriptor, path: &Path) -> Result<()> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        replace_state_file(path, |file| {
+            save_to_writer(machine, descriptor, BufWriter::new(file))
+        })
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (machine, descriptor, path);
+        bail!("file-backed save states are unavailable on wasm32; use save_to_writer")
+    }
+}
+
+/// Publish only a complete state. The temporary file is on the destination
+/// filesystem so replacement is atomic; dropping it cleans up every failure.
+#[cfg(not(target_arch = "wasm32"))]
+fn replace_state_file(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Result<()> {
     crate::paths::ensure_parent(path)
         .with_context(|| format!("creating the directory for {}", path.display()))?;
-    let file =
-        File::create(path).with_context(|| format!("creating save state {}", path.display()))?;
-    save_to_writer(machine, descriptor, BufWriter::new(file))
-        .with_context(|| format!("writing save state {}", path.display()))
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut temp = tempfile::Builder::new()
+        .prefix(".copperline-state-")
+        .tempfile_in(parent)
+        .with_context(|| format!("creating temporary save state beside {}", path.display()))?;
+    write(temp.as_file_mut()).with_context(|| format!("writing save state {}", path.display()))?;
+    temp.as_file()
+        .sync_all()
+        .context("syncing completed save state")?;
+    temp.persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("replacing save state {}", path.display()))?;
+    Ok(())
 }
 
 /// `save` without a filesystem: write the same bytes a state file holds into
@@ -786,6 +819,48 @@ mod tests {
             "the restored timeline must resume where the save left off"
         );
         assert_eq!(restored.bus().mem.chip_ram, machine.bus().mem.chip_ram);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn failed_save_preserves_the_existing_state_and_removes_the_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("slot1.clstate");
+        let machine = test_machine();
+        save(&machine, &MachineDescriptor::default(), &path).unwrap();
+        let previous = std::fs::read(&path).unwrap();
+
+        let failure = replace_state_file(&path, |file| {
+            file.write_all(b"incomplete replacement")?;
+            bail!("injected write failure")
+        });
+        assert!(failure.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), previous);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        load(&mut test_machine(), &path).unwrap();
+
+        let mut changed = test_machine();
+        changed.bus_mut().mem.chip_ram[0x100] = 0x5a;
+        save(&changed, &MachineDescriptor::default(), &path).unwrap();
+        let mut restored = test_machine();
+        load(&mut restored, &path).unwrap();
+        assert_eq!(restored.bus().mem.chip_ram[0x100], 0x5a);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn failed_save_publication_removes_the_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("directory");
+        std::fs::create_dir(&destination).unwrap();
+        let failure = replace_state_file(&destination, |file| {
+            file.write_all(b"complete state")?;
+            Ok(())
+        });
+        assert!(failure.is_err());
+        assert!(destination.is_dir());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

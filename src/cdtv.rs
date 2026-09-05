@@ -1278,12 +1278,6 @@ impl crate::zorro_device::ZorroDevice for CdtvController {
         Self::int2_line(self)
     }
 
-    // Ticked every slice to advance CD audio and deliver the delayed
-    // DMA-completion interrupt (matches its pre-trait unconditional tick).
-    fn is_idle(&self) -> bool {
-        false
-    }
-
     fn reset(&mut self) {
         Self::reset(self)
     }
