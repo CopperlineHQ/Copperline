@@ -3,9 +3,11 @@ Offset: $036
 Access: write
 Chipset: OCS/ECS/AGA
 
-Controls or reports the custom-chip JOYTEST register.
+Loads both controller ports' quadrature counters for testing.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
+- Bits 15-8: Y counter value.
+- Bits 7-0: X counter value.
 
+Copperline loads both bytes into both ports, regardless of the attached device.

@@ -3,9 +3,11 @@ Offset: $004
 Access: read
 Chipset: OCS/ECS/AGA
 
-Controls or reports the custom-chip VPOSR register.
+Reads the vertical beam high bit, field flags, and Agnus identification.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
-
+- Bit 15: LOF, long-field flag.
+- Bits 14-8: Chipset identification.
+- Bit 7: LOL, long-line flag.
+- Bit 0: Vertical position bit 8; VHPOSR supplies bits 7-0.

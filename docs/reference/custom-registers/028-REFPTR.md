@@ -3,9 +3,8 @@ Offset: $028
 Access: write
 Chipset: OCS/ECS/AGA
 
-Controls or reports the custom-chip REFPTR register.
+Refresh pointer register.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
-
+Copperline does not implement this register. No written bits affect the emulated machine.

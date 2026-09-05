@@ -3,9 +3,11 @@ Offset: $10E
 Access: write
 Chipset: AGA
 
-Controls or reports the custom-chip CLXCON2 register.
+Extends AGA collision matching to bitplanes 7 and 8.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
+- Bits 7-6: Enable bitplanes 8 and 7.
+- Bits 1-0: Required match values for bitplanes 8 and 7.
 
+CLXCON writes reset this latch.

@@ -3,9 +3,8 @@ Offset: $1EC
 Access: write
 Chipset: AGA
 
-Sets the upper word of the BPLH pointer.
+UHRES bitplane pointer high word.
 
 ## Bitfields
 
-- Bits 15-0: Upper pointer word.
-
+Copperline does not implement this register. No written bits affect the emulated machine.

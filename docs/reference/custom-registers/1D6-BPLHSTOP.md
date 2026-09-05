@@ -3,9 +3,8 @@ Offset: $1D6
 Access: write
 Chipset: ECS/AGA
 
-Controls or reports the custom-chip BPLHSTOP register.
+UHRES bitplane horizontal stop register.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
-
+Copperline does not implement this register. No written bits affect the emulated machine.

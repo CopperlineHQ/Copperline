@@ -3,9 +3,11 @@ Offset: $1C8
 Access: write
 Chipset: ECS/AGA
 
-Controls or reports the custom-chip VTOTAL register.
+Sets the last vertical line number of a programmable field.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
+- Bits 10-0: Vertical line number.
+- Bits 15-11: Ignored.
 
+BEAMCON0 selects whether programmable timing is used.

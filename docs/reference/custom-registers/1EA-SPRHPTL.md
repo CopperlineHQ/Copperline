@@ -3,9 +3,8 @@ Offset: $1EA
 Access: write
 Chipset: AGA
 
-Sets the lower word of the SPRH pointer.
+UHRES sprite pointer low word.
 
 ## Bitfields
 
-- Bits 15-0: Lower pointer word; bit 0 is ignored for word-aligned DMA.
-
+Copperline does not implement this register. No written bits affect the emulated machine.

@@ -3,9 +3,9 @@ Offset: $02C
 Access: write
 Chipset: OCS/ECS/AGA
 
-Controls or reports the custom-chip VHPOSW register.
+Writes the low vertical byte and horizontal beam position.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
-
+- Bits 15-8: Vertical position bits 7-0.
+- Bits 7-0: Horizontal position in colour clocks.

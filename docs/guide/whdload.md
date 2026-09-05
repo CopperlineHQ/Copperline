@@ -43,7 +43,7 @@ with Copperline:
   secondary Kickstart image (typically 1.3) into memory during startup.
 
 Point `kickstarts` (or the launcher's **Kickstart ROMs** directory) to your ROM directory.
-Copperline identifies ROMs by cryptographic hash rather than filename, so filename
+Copperline identifies ROMs by their size and WHDLoad CRC-16 checksum, so filename
 conventions do not matter. Cloanto Amiga Forever ROM images (including encrypted `.rom`
 files with an accompanying `rom.key`) are supported.
 
@@ -72,8 +72,10 @@ args = "ButtonWait NoAutoVec"
 
 ## Machine selection
 
-By default (`machine_type = "auto"`), Copperline configures a standard A1200
-profile with 8 MiB fast RAM, which satisfies the vast majority of WHDLoad packages.
+With `machine_type = "auto"`, Copperline supplies an A1200 profile and 8 MiB
+fast RAM where the configuration has not already selected them. It checks
+the slave's requirements and warns if the declared expansion memory exceeds
+8 MiB. Larger packages may need more RAM.
 
 Explicit CLI overrides or configuration options take precedence:
 
@@ -82,6 +84,7 @@ copperline --whdload game.lha --model A4000
 ```
 
 In the launcher settings:
+
 - **Auto:** Automatically chooses machine parameters suitable for WHDLoad.
 - **Copperline:** Uses the specific machine model defined in your current configuration.
 

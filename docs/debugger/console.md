@@ -75,7 +75,7 @@ Commands are case-insensitive. Addresses and data values use hexadecimal notatio
 | `BLITS` | List all blits referenced by the traced frame, including stable ID, cross-frame beam span, direction/fill/line mode, channels, pointers/modulos, shifts/masks/minterm, and clocks used versus stalled (requires Frame Analyzer) |
 | `CPUWAIT` | Summarise the traced frame's CPU chip-bus waits: waited clocks by denier (bitplane, Copper, blitter with BLTPRI clear or set, ...) and by access kind, and the instructions that waited longest (requires Frame Analyzer; see [the CPU wait view](window.md#frame-analyzer-pane)) |
 | `FIND HEXBYTES [START]` | Search CPU-visible memory (RAM and ROM) for byte sequence |
-| `WRITER ADDR` | Query last instruction that modified memory at `ADDR` |
+| `WRITER ADDR` | Replay retained snapshots to the last observed change of the word at `ADDR`; moves execution back to that point |
 | `DBGRES` | List debug resources (bitmaps, palettes, copper lists) registered by guest code via the uaelib trap (distinct from `RESOURCES`, which lists Exec OS resource nodes) |
 | `OUTROM` | Run until PC leaves the default Kickstart ROM window (`$F80000-$FFFFFF`) |
 | `HISTORY [N]` (or `H`) | Display recent instruction history |
@@ -87,6 +87,12 @@ Commands are case-insensitive. Addresses and data values use hexadecimal notatio
 | `WAVE START [ARGS]` | Arm VCD logic analyzer capture (see [](waveform.md)) |
 | `WAVE STOP` | Stop VCD capture |
 | `HELP` (or `?`) | Display command summary |
+
+`WRITER` compares the word after each CPU step. It misses writes that leave
+the value unchanged, and its reported PC is the CPU instruction around the
+change; that alone does not establish whether the CPU or DMA wrote it.
+Use a source-filtered `WATCH` when that distinction matters. `RWATCH` watches
+custom-register writes; it is not a reverse memory query.
 
 ### Memory delta search (Trainer / Value hunter)
 

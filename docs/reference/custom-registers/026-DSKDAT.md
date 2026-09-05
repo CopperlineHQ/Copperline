@@ -3,9 +3,8 @@ Offset: $026
 Access: write
 Chipset: OCS/ECS/AGA
 
-Controls or reports the custom-chip DSKDAT register.
+Supplies a raw word to the disk write path.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
-
+- Bits 15-0: Encoded disk data; AmigaDOS sector encoding is the guest software's responsibility.

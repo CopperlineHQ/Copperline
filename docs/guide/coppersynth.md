@@ -116,5 +116,5 @@ To exclude Coppersynth when compiling from source:
 
 ```sh
 cargo build --release --no-default-features \
-  --features "midi,frontend,wasm-boards,control,ctl-bin,import-uae-bin,net-nat,net-bridge,fluxbridge,mt32,cpu-jit,profile-stats,game-library,mhi,cd-mp3,cd32-fmv,gdb"
+  --features "midi,frontend,wasm-boards,control,ctl-bin,import-uae-bin,net-nat,net-bridge,fluxbridge,mt32,cpu-jit,profile-stats,game-library,mhi,cd-mp3,cd32-fmv,gdb,dap"
 ```

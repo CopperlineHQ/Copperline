@@ -3,7 +3,7 @@ abstract: |
   Copperline is an Amiga emulator (OCS, ECS, and AGA) written in Rust.
   This documentation covers running and configuring the emulator, setting up
   machines from the A500 to the A4000 and CD32, using expansion boards,
-  running headless test sessions, and exploring internal architecture.
+  running headless test sessions, and understanding the emulator's architecture.
 ---
 
 # Copperline
@@ -38,6 +38,7 @@ Spaceballs' *State of the Art* (1992) running in Copperline.
 - [](guide/coppersynth) -- Built-in General MIDI SoundFont synthesizer.
 - [](guide/modem) -- Hayes-compatible AT modem emulation over TCP.
 - [](guide/import-uae) -- Converting WinUAE, Amiberry, and FS-UAE configurations.
+- [](guide/winuae-state) -- Importing supported WinUAE save states and profiling resumed frames.
 - [](guide/headless) -- Scripted, non-interactive execution for automated testing and CI.
 - [](guide/browser) -- WebAssembly build and web integration details.
 - [](guide/publishing) -- Bundling standalone player packages for specific games.
@@ -46,12 +47,14 @@ Spaceballs' *State of the Art* (1992) running in Copperline.
   command-line, headless, and GDB debugging tools.
 - [](debugger/vscode) and [](debugger/vscode-bartman) -- VS Code setup, source debugging, and illustrated CPU/DMA and graphics profiling using the installable Bartman fork.
 - [](debugger/control) -- JSON-RPC control protocol (`copperline-ctl`) for automation, with an MCP server mode for coding agents.
+- [](debugger/dap) -- DAP launch, attach, stepping, and debug-information reference.
 - [](internals/architecture) -- Emulator internals and subsystem architecture.
 
 ## Core design principles
 
 1. **Hardware-accurate modeling.** Behavior is implemented according to chip
    specifications rather than application-specific hacks or game title detection.
-2. **Determinism.** The emulation core executes deterministically with respect to
-   emulated clock cycles and input events. Given identical media and inputs,
-   headless runs and interactive sessions produce identical results.
+2. **Determinism.** Given the same configuration, media, clock seed, and timed
+   inputs, the core produces the same results in headless and interactive runs.
+   Live host services, such as networking and physical drives, have separate
+   [replay limits](internals/architecture.md#determinism-and-the-host-boundary).

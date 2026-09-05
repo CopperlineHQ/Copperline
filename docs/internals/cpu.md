@@ -503,169 +503,62 @@ once a machine is available. `timing-test/` remains the end-to-end regression
 for checking the combined CPU, cache, and chip-bus model rather than the
 source of the per-opcode constants.
 
-On the A1200 the 020 uses a 32-bit Alice chip-bus data path and a two-entry
-longword fetch latch. The 020's chip-bus cycle is modelled as 3
-CPU clocks, not the 68000's 4: after the granted colour-clock slot the access
-bills only the shorter remaining tail (one clock -- half a cck at the stock
-2-clock ratio, none at 14 MHz where the 3-clock cycle fits inside one slot).
-That is enough for a posted write. A chip-RAM read or custom-register read
-also waits one colour clock for the chipset's data-return phase, and a
-custom-register read waits one colour clock beyond that: chip RAM answers out of
-Agnus' DRAM controller with the row already open for the granted slot, while a
-register read has to cross to the addressed chip, be driven back onto the 16-bit
-chipset bus, and only then meet the CPU's data-return phase. A 68000 cannot see
-the difference -- its four-clock bus cycle is longer than either path -- but a
-14 MHz 020 samples early enough that the crossing costs a whole slot. This is
-what sets the rate of a VHPOSR/INTREQR polling loop, so it decides where
-chase-the-beam code lands relative to the copper: `timing-test` rows 16, 17 and
-21 fit 27% more iterations per frame without it. An AGA
-instruction-cache fill does the same for its first word; the second word from
-the already-latched 32-bit value is free. On OCS/ECS machines the 020 still
-talks to the 16-bit chip bus, so chip/slow/custom data reads likewise pay the
-return wait. The tail's fractional cck are carried so none are lost; the
-68000/010 keep the full 4-clock (2-cck) cycle
-(`Bus::cpu_short_bus_cycle`).
-
-This distinction is visible in SysInfo 4.4: treating Alice reads and cache
-fills like posted writes made the A1200 profile report 5.52x A600 chip speed
-and 1.61x A1200 CPU speed after the instruction-table update. Billing the
-data-return phase changes those figures to 3.55x and 1.10x respectively,
-without altering register-only timing-test rows.
-
-The real-A1200 column drove two further sub-cck mechanisms, both gated to the
-020+ short-cycle path (the 68000's four-clock cycle spans the whole port
-sequence, so it cannot see either).
-
-Chip writes are posted. The 020's bus unit runs decoupled from its execution
-unit: a chip write is accepted at the end of its 3-clock cycle and the
-transfer overlaps the following instructions, retiring into a later free chip
-slot. Copperline models this by crediting the transfer's clocks back against
-the instruction's charge (`take_cpu_bus_overlap_clocks`) and letting the
-pending write drain into the next free slot during subsequent beam
-advancement (`cpu_posted_write_debt`), at the port's 2-cck turnaround
-cadence. Only one bus cycle can be in flight, so a second chip access stalls
-until the pending write retires -- which is what paces a chip write+dbra loop
-to ~8 clocks per iteration on the real machine (`timing-test` rows 3, 10,
-12, 18) where a synchronous whole-slot bill gave 11-12. A DMA reader of the
-same address inside the drain window (at most two colour clocks) would see
-the write early; that race is unobservable in practice and accepted.
-
-Reads pay one further CPU clock synchronizing the returned data back into
-the CPU clock domain, accumulated into whole colour clocks
-(`bill_020_read_return_sync_clock`). The real chip-read loop measures 16.1
-clocks per iteration (row 2) where grant plus data-return bill 15; the old
-exact match on that row was the branch over-bill cancelling this missing
-clock. The same synchronizer clock on custom-register reads is what lands
-the copper-vs-CPU poll row (row 27) exactly on the real machine's beam
-position.
-
-The same column appeared to show 020 result forwarding -- the RAW-dependent
-MOVE pair of `timing-test` row 29 runs one clock per iteration faster than
-the independent pair of row 28 -- and m68k modelled it as such up to and
-including 0.5.0. **That model was wrong; it was removed upstream in m68k
-0.5.1, and remains absent from this tree's 0.12.1 dependency.** A second probe disk
-(`timing-test/fwdprobe.asm`) ran the same two
-loops at the opposite alignments on the same machine and reversed the
-ordering, which closes the 2x2: with the register dependency and the branch
-alignment separated, the dependency has no effect at all. What the pair rows
-actually measured is where the loop branch sits.
-
-Twenty-eight of the thirty cached loops across the two disks fit one rule to
-within a tick:
-
-```text
-clk/iter = 6 + 2 * (2-byte body instructions)
-             + 1 if the DBcc opcode word is longword-aligned
-```
-
-A cached taken `dbra` costs 7 clocks at `pc % 4 == 0` and 6 -- the manual's
-cache case -- at `pc % 4 == 2`. The loop *head* alignment varies freely
-within each refill class, so it is the branch's own alignment that decides
-and not the target's; the presumed cause is the longword granularity of 020
-instruction fetch, a branch straddling two longwords having already had the
-second fetched by the time it retires. Body instructions cost a flat two
-clocks whatever their shape (`.b`/`.w`/`.l` MOVE, MOVEA on either side,
-An-source MOVE, ADD, CMP, MOVEQ). Only `DBcc` was measured; `Bcc` and
-`BSR` are untested and should keep the flat refill until a probe covers them.
-
-The two loops that do not fit are `fwdprobe` rows 20/21, whose body carries a
-`NOP`: they measure 13.08 clocks where the rule says 13.01, while rows 22/23
-at the same body count and the same `dbra % 4 == 0` sit exactly on 13.01. A
-real `NOP` therefore costs nearer 2.07 clocks than 2 -- which is what a
-pipeline-synchronising instruction should look like. It is a 0.5% effect on
-one instruction measured on one couple, so it is recorded rather than
-modelled, and Copperline emits the rule value for both rows.
-
-Modelling the alignment rule reproduces 24 of the 26 `fwdprobe` rows exactly
-(the two `NOP` rows above being 0.5% low) and leaves the
-main disk's pure-CPU rows exact, but moves several of its chip-bus rows (the
-chip-read loop, the write-plus-poll composites, the copper-poll beam
-position) by a few percent: those loops' accesses re-phase against the
-chip-bus slot grid when the loop shortens by a clock, so their previous
-agreement was partly compensation for the branch over-bill.
-
 ### The chip-access phase
 
-`timing-test/rdprobe.asm` measured the chip side on the same machine, and its
-two no-access anchors reproduce the other disks exactly, so the column is
-trustworthy. It showed the CPU and the chip bus needed one clock timeline
-rather than two.
+On AGA machines, the 020+ CPU uses Alice's 32-bit chip-RAM path. One granted
+slot transfers a longword, and the two-entry fetch latch serves sequential
+opcode words from an already fetched longword without another bus access.
+OCS/ECS retain a 16-bit chip bus. The 68000/010 use their four-clock bus
+cycle; the 020+ path is selected by `Bus::cpu_short_bus_cycle`.
 
-**Every real loop containing a chip access runs a whole number of colour
-clocks** -- the chip-read loop 4.02, the chip-write loops 2.03 and 2.01, two
-reads 7.04, a read plus a posted write 5.05 -- while the two loops with no
-chip access sit on quarters (2.25, 2.00). An A1200 runs four CPU clocks per
-colour clock, so that is the CPU synchronising to the chip clock: a chip read
-cannot begin part way through a colour clock, and the wait absorbs whatever
-the rest of the loop left over. Reads carry the branch-alignment clock through
-into a whole extra colour clock (one read costs 4 cck at `dbra%4==2` and 5 at
-`%4==0`); posted writes do not, because the bus unit takes them behind the
-execution unit.
+For precise 020+ execution, the CPU's position is
+`emulated_cck * cpu_clocks_per_cck + Bus::cpu_chip_clock_phase`.
+Execution clocks accumulate in this shared phase and advance the beam when
+a whole colour clock is due (`Bus::charge_cpu_clocks_to_cck`). A chip-RAM
+read first waits out any partial colour clock
+(`Bus::sync_cpu_to_chip_clock`), then waits for a free bus slot. After the
+grant it pays one colour clock for data return and two further CPU clocks
+(`CPU_020_CHIP_READ_RETURN_CLOCKS`). Access time is credited against the
+instruction's own charge so it is not billed twice.
 
-Copperline used to model neither, and the second omission was the blocking
-one: two independent sub-colour-clock carries existed, the CPU's on
-`M68kMachine` where the bus could not see it at access time, and a dead one on
-`Bus`. Nothing made an access begin on a colour-clock boundary, so nothing
-quantised; and the per-instruction reconciliation
-`advance_cpu_internal_cycles(cpu_cck.saturating_sub(bus_cck))` could only add
-time, so an instruction whose accesses cost more colour clocks than its
-charged execution time -- routine for chip-bound 020 code -- had the surplus
-discarded. Together those turned a phase into a rate: the read loop had two
-stable orbits and returned 13.08 clocks per iteration on one disk and 17.04 on
-the other for identical code.
+The two-clock return cost comes from `timing-test/rdprobe.asm` on a stock
+A1200. The same chip-read loop measures 16 CPU clocks per iteration with a
+six-clock branch and 20 with a seven-clock branch. With four CPU clocks per
+colour clock, a read occupies ten clocks from the boundary it starts on;
+the next read's synchronization accounts for the difference between the two
+loop alignments. The probe and recorded hardware results live in
+`timing-test/`.
 
-The CPU's position is now `emulated_cck * cpu_clocks_per_cck +
-Bus::cpu_chip_clock_phase`. Execution clocks accumulate into that phase and
-turn into beam time a whole colour clock at a time
-(`Bus::charge_cpu_clocks_to_cck`); a chip read stalls out the remainder and
-resets the phase (`Bus::sync_cpu_to_chip_clock`); and every access the CPU
-waits for credits its own clocks back against the instruction charge, because
-the m68k timing table already allots the instruction the time for its memory
-reference. Nothing is reconciled afterwards and nothing is discarded. The
-per-iteration map on the phase is therefore the constant map for any loop
-containing a read, which is what makes the period independent of the phase the
-loop was entered with.
+Chip writes are posted. The bus unit accepts a write at the end of its
+three-clock cycle, credits those clocks against the instruction charge
+(`take_cpu_bus_overlap_clocks`), and retires the transfer into a later free
+slot (`cpu_posted_write_debt`). Only one transfer can be pending; the next
+chip access waits for it to retire. The port accepts transfers at a
+two-colour-clock cadence. Memory is currently updated before the deferred
+slot retires, so DMA can observe a posted write early; this is a modelling
+limitation.
 
-One derived constant remains: a chip read spends
-`CPU_020_CHIP_READ_RETURN_CLOCKS` = 2 CPU clocks returning data past the
-data-return colour clock. Rows 0 and 1 of the probe force it -- a read loop
-measures 16 clocks per iteration with a 6-clock branch and 20 with a 7-clock
-one, and since the period is a whole number of 4-clock colour clocks those
-pin the un-rounded cost at exactly 16, so a read occupies 10 clocks from the
-boundary it starts on.
+Custom-register reads use a separate return path: one colour clock for
+data return, another for crossing the chipset's 16-bit bus, and one CPU
+synchronizer clock. They are deliberately not aligned to the chip-RAM
+clock boundary. Hardware probes have not yet isolated this path as fully
+as chip RAM; the existing copper-poll beam-position test agrees with the
+current model, while chip-write-plus-poll composite rows remain about 9%
+low in the recorded comparison.
 
-This is gated to the 68020 and later (`cpu_short_bus_cycle`). The 68000 and
-68010 keep the two timelines and the reconciliation: their four-clock bus
-cycle is exactly two colour clocks and synchronous with the chip clock by
-construction, and their intra-instruction time is already placed correctly by
-the core's `sync` callback. The JIT batch path also keeps the older
-accounting, since it charges one lump per batch and would see a stale phase at
-every access after the first.
+The 68000/010 keep their existing instruction/bus reconciliation because
+their four-clock cycle spans two colour clocks at the stock rate. JIT
+batches also use the older accounting: a batch does not refresh the shared
+phase at every instruction, and is not the precise timing path.
 
-Still open: chip-write-plus-poll composite rows (16, 17, 21) read about 9%
-low, and custom-register accesses are deliberately left unsynchronised because
-the copper-poll beam row (27) is exact as they stand. Both want a probe that
-isolates custom-register timing the way `rdprobe` isolated chip RAM.
+The earlier result-forwarding interpretation of `timing-test` rows 28/29
+was removed from m68k. `fwdprobe.asm` reversed the apparent dependency
+advantage by moving the loop branches to the opposite alignments. The
+measured distinction is the taken `DBcc` opcode's alignment: seven clocks
+at `pc % 4 == 0`, six at `pc % 4 == 2`. Twenty-four of the 26 probe rows
+match this model exactly; the two rows containing `NOP` are about 0.5%
+low. These are measurements of particular loops on one stock A1200, not a
+claim that the full 020 pipeline is cycle-exact.
 
 ## MMU
 

@@ -3,9 +3,11 @@ Offset: $032
 Access: write
 Chipset: OCS/ECS/AGA
 
-Controls or reports the custom-chip SERPER register.
+Sets serial bit timing and word length.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
+- Bit 15: LONG, select 9 data bits instead of 8.
+- Bits 14-0: Bit period minus one, in Paula clocks.
 
+The bit rate is the Paula clock divided by the period plus one.

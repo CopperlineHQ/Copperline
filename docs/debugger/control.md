@@ -57,7 +57,6 @@ copperline-ctl --info /tmp/ccp.json continue
 copperline-ctl --info /tmp/ccp.json --repl
 ```
 
-(mcp-server)=
 ## Debug adapter
 
 `copperline-ctl --dap` serves the [Debug Adapter Protocol](dap.md) over the
@@ -65,6 +64,7 @@ same bridge: an IDE debugs a program in the emulator with source-level
 breakpoints, variables and reverse stepping, while the control protocol
 underneath stays available from the Debug Console (`!status`, `!beam.get`).
 
+(mcp-server)=
 ## MCP server
 
 `copperline-ctl --mcp` exposes the control protocol over standard I/O as a

@@ -3,9 +3,8 @@ Offset: $088
 Access: write
 Chipset: OCS/ECS/AGA
 
-Controls or reports the custom-chip COPJMP1 register.
+Restarts the Copper from COP1LC.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
-
+No data bitfields: accessing the address fires the strobe. Copperline handles CPU reads as well as writes; a read returns the undriven bus value.

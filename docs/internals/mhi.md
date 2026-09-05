@@ -1,18 +1,12 @@
 # The MHI decoder board: mailbox register protocol
 
-This page is the **contract**, not an implementation note: it specifies the
-register-level protocol of Copperline's virtual MHI (Music Hardware
-Interface) MPEG audio decoder board, precisely enough that the host board
-(`src/mhi.rs`) and the guest library (`guest/mhi/`) can be implemented
-independently against it and interoperate. Where this document and either
-implementation disagree, this document wins -- fix the implementation, not
-the spec, unless the spec itself is being deliberately revised (see
-[Versioning](#mhi-versioning)).
+This chapter specifies the mailbox protocol shared by the host board
+(`src/mhi.rs`) and `mhi_copperline.library` (`guest/mhi/`). Protocol changes
+must follow the [versioning rules](#mhi-versioning).
 
-The protocol is deliberately **bus-agnostic**: every offset below is
-relative to the start of the board's autoconfigured window, and nothing in
-the register semantics depends on being read by Copperline specifically. See
-[Porting to another emulator](#porting-to-another-emulator) at the end.
+Offsets are relative to the board's autoconfigured window. The protocol
+can be implemented on another bus or emulator without changing register
+semantics; see [porting](#porting-to-another-emulator).
 
 MHI itself -- `MHIAllocDecoder`/`MHIQueueBuffer`/`MHIGetStatus`/etc., the
 Amiga-side API AmigaAMP and other players call -- is not this board's wire
@@ -77,8 +71,8 @@ implements degrades safely on old fields rather than reading garbage. See
 | `0x20`-`0xFFFF` | *reserved* | -- | -- | `0x0000` | -- |
 
 The window is 64 KiB (the smallest legal Zorro II size) even though only
-32 bytes of it currently decode to anything; the rest is headroom for
-future protocol versions (M3's seek support, a wider param space, etc.)
+32 bytes contain registers. The remaining space is reserved for future
+protocol versions
 without moving the board to a bigger window, which would change its
 autoconfig identity.
 
@@ -86,10 +80,9 @@ autoconfig identity.
 ### Capability/version registers
 
 - **`VERSION`** (`0x00`, RO) -- the register-protocol version this board
-  implements, currently `2` (bumped from `1` by M4 -- see
-  [Versioning](#mhi-versioning)'s worked example). A guest library reads this once at
-  `FindConfigDev` time and refuses to drive a board whose major protocol
-  it does not understand (see [Versioning](#mhi-versioning)).
+  implements: `2`. The guest library accepts version 1 or newer when
+  finding the board and checks `CAPS` for optional behavior. See
+  [Versioning](#mhi-versioning).
 - **`CAPS`** (`0x02`, RO) -- a bitmask of the MPEG formats and bitrate
   modes this board's decoder accepts. Bit layout:
 
@@ -104,30 +97,11 @@ autoconfig identity.
   | 6 | Param latches are applied to decoded PCM (see [Param latches](#param-latches)) |
   | 7-15 | reserved, read as 0 |
 
-  M1-M2 sets bits 0-5 (MPEG-1/2/2.5, Layer III, CBR, VBR) and no others --
-  Layer I/II are not implemented, so bits for them do not exist in this
-  version; a future version that adds them would need a `CAPS` bit for
-  each, which is exactly the kind of change that bumps `VERSION`. Bit 5's
-  own meaning was tightened in M3 (VBR entry at an arbitrary byte offset
-  is now hardened, not just "VBR decodes"; see
-  [Seek-entry hardening](#seek-entry-hardening)) without moving its value
-  or bumping `VERSION`: M1-M2 already accepted VBR as input and never
-  claimed seek support as a *board* feature (seeking was always the
-  player's job, done via `MHIStop`/reposition/`MHIQueueBuffer` -- MHI has
-  no seek call of its own), so M3 only proves and documents a stronger
-  guarantee about behavior the board's registers never described a limit
-  on in the first place -- not a change to any offset, width, access
-  rule, or bit meaning `VERSION` exists to gate. **M4** adds bit 6
-  (`VERSION` 2 -- see [Versioning](#mhi-versioning)), a genuine behavior
-  change unlike bit 5's rewording. This register is what the guest
-  library's `MHIQuery` handler consults for
-  `MHIQ_MPEG1`/`MHIQ_MPEG2`/`MHIQ_MPEG25`/`MHIQ_LAYER3`/
-  `MHIQ_VARIABLE_BITRATE` -- it is genuine hardware-reported capability,
-  unlike decoder identity (below). Bit 6 is what lets a single guest
-  library binary answer correctly against both an M1-M3 board (latches
-  exist but are inert) and an M4 board (latches are audible): the library
-  reads this bit at `FindConfigDev` time rather than assuming its own
-  build date implies the board's behavior.
+  Version 2 sets bits 0-6. Layer I/II are not implemented. Version 1
+  sets bits 0-5 and stores parameter values without applying them to audio.
+  The guest library checks bit 6 before advertising volume, panning, tone,
+  prefactor, and crossmix controls through `MHIQuery`; it does not infer
+  these capabilities from its own build version.
 
   Decoder identity strings (`MHIQ_DECODER_NAME`, `MHIQ_DECODER_VERSION`,
   `MHIQ_AUTHOR`, `MHIQ_CAPABILITIES`'s MIME-type string,
@@ -285,7 +259,7 @@ records:
   `MHIGetEmpty` -- the same idiom other in-tree boards use for
   free-running hardware counters. `CONTROL=STOP` resets it to `0`
   alongside `QUEUE_COUNT`; a guest observing a `STOP` (its own or another
-  client's, if the board is ever shared -- it isn't in M1-M2's single
+  client's, if the board is ever shared -- it uses a single
   `MHIAllocDecoder` model) must resynchronize its local counter to `0`
   rather than compute a delta across the reset.
 
@@ -330,15 +304,11 @@ regardless of how many parameters the guest library ends up exposing.
   guest library's own bookkeeping the only source of truth, which this
   avoids).
 
-  **M1-M3 scope**: writes latch the value and it reads back correctly;
-  nothing about decoded audio changes. **M4** (`VERSION` 2, `CAPS` bit 6)
-  connects these latches to the actual PCM path -- this is why the
-  register shape was fixed from M1: M4 changes what a latch *does*, never
-  where it lives or how it's addressed, so no guest library rebuild is
-  needed to keep talking to the register file, only to answer `MHIQuery`
-  correctly (see `CAPS` bit 6 above).
+  In version 1, writes only store the value. Version 2 applies the latches
+  to PCM and advertises that behavior through `CAPS` bit 6.
 
-#### M4: the DSP chain
+(m4-the-dsp-chain)=
+#### DSP chain
 
 Every latch is applied, every produced sample, in one fixed order --
 order is audible, so it is as much a part of the contract as the latch
@@ -550,8 +520,7 @@ buffers starting at that new position. From the board's side, a seek is
 indistinguishable from any other `STOP` followed by fresh descriptors --
 there is no seek-specific register or command, and none is needed.
 
-Two things this puts on the board, both true since M1-M2 and exercised
-explicitly by M3's test suite:
+The board must handle both parts of a seek:
 
 - **`STOP` resets decoder state, not just the queue** (see the `CONTROL`
   table above) -- otherwise the discarded pre-seek stream's bit reservoir
@@ -583,12 +552,6 @@ explicitly by M3's test suite:
   `mid_frame_entry_resyncs_to_the_next_real_frame` and
   `seek_entry_past_an_id3v2_tag_resyncs_correctly` in `src/mhi.rs` cover
   these cases directly.
-
-Nothing above is a new register, command, or protocol surface -- it is a
-guarantee about existing behavior (`STOP`'s semantics, the resync path's
-robustness) that M3 proved and documented rather than a M3-only feature a
-pre-M3 board would lack. See [CAPS](#capability-version-registers) for why
-this did not need a `VERSION` bump.
 
 **An incomplete trailing frame** (the queued bytes end mid-frame -- too few
 bytes for the decoder to tell whether they are even a valid sync, let alone
@@ -639,8 +602,8 @@ protocol, and the split is intentional, not an oversight:
 | `MHIQ_IS_HARDWARE`/`_IS_68K`/`_IS_PPC` | Guest library -- static answers (this is a real register-mailbox device the library talks to over the Zorro bus, so `MHIQ_IS_HARDWARE` answers true; it runs no 68k/PPC code of its own, so both processor queries answer false) |
 | MPEG version/layer/bitrate-mode support (`MHIQ_MPEG1`/`_MPEG2`/`_MPEG25`, `MHIQ_LAYER3`, `MHIQ_VARIABLE_BITRATE`) | `CAPS` register (`0x02`) -- genuinely board-reported, since a future board revision's decoder could differ |
 | `MHIQ_JOINT_STEREO` | Guest library -- fixed `MHIF_SUPPORTED`; decoding joint-stereo Layer III is inherent to any conforming decoder, not a distinct board capability worth its own `CAPS` bit |
-| Tone/volume/output query flags (`MHIQ_VOLUME_CONTROL`, `MHIQ_PANNING_CONTROL`, `MHIQ_BASS_CONTROL`, `MHIQ_TREBLE_CONTROL`, `MHIQ_MID_CONTROL`, `MHIQ_PREFACTOR_CONTROL`, `MHIQ_CROSSMIXING`, `MHIQ_5_BAND_EQ`, `MHIQ_10_BAND_EQ`) | Guest library -- keyed off `CAPS` bit 6 for the seven params this board's [param latch](#param-latches) table defines (indices `0`-`6`: volume, panning, bass, mid, treble, crossmixing, prefactor): `MHIF_UNSUPPORTED` against an M1-M3 board (bit 6 clear -- the latches exist and round-trip, but nothing applies them to decoded PCM, so answering `MHIF_SUPPORTED` would tell a client its `MHISetParam` calls are audible when they are not), `MHIF_SUPPORTED` against an M4-or-later board (bit 6 set). One guest library binary answers correctly either way -- see `CAPS`'s own bit-6 note above. The 5/10-band EQ stays `MHIF_UNSUPPORTED` regardless of bit 6, until a later `VERSION` adds `MHIP_MIDBASS`/`MHIP_MIDHIGH`/`MHIP_BAND1`-`MHIP_BAND10` equivalents at reserved indices `7`+ |
-| Decoder handle, client task pointer, signal mask (`MHIAllocDecoder`/`MHIFreeDecoder`) | Guest library only -- entirely a host-side (Amiga-side) bookkeeping concept; the board has no notion of "a handle" and, in this M1-M2 scope, serves exactly one client at a time |
+| Tone/volume/output query flags (`MHIQ_VOLUME_CONTROL`, `MHIQ_PANNING_CONTROL`, `MHIQ_BASS_CONTROL`, `MHIQ_TREBLE_CONTROL`, `MHIQ_MID_CONTROL`, `MHIQ_PREFACTOR_CONTROL`, `MHIQ_CROSSMIXING`, `MHIQ_5_BAND_EQ`, `MHIQ_10_BAND_EQ`) | Guest library -- keyed off `CAPS` bit 6 for the seven params this board's [param latch](#param-latches) table defines (indices `0`-`6`: volume, panning, bass, mid, treble, crossmixing, prefactor): `MHIF_UNSUPPORTED` against a version-1 board (bit 6 clear -- the latches exist and round-trip, but nothing applies them to decoded PCM, so answering `MHIF_SUPPORTED` would tell a client its `MHISetParam` calls are audible when they are not), `MHIF_SUPPORTED` when bit 6 is set (bit 6 set). One guest library binary answers correctly either way -- see `CAPS`'s own bit-6 note above. The 5/10-band EQ stays `MHIF_UNSUPPORTED` regardless of bit 6, until a later `VERSION` adds `MHIP_MIDBASS`/`MHIP_MIDHIGH`/`MHIP_BAND1`-`MHIP_BAND10` equivalents at reserved indices `7`+ |
+| Decoder handle, client task pointer, signal mask (`MHIAllocDecoder`/`MHIFreeDecoder`) | Guest library only -- entirely a host-side (Amiga-side) bookkeeping concept; the board has no notion of "a handle" and serves exactly one client at a time |
 | Transport (`MHIPlay`/`MHIStop`/`MHIPause`), status (`MHIGetStatus`), queueing (`MHIQueueBuffer`/`MHIGetEmpty`), params (`MHISetParam`) | Guest library translates 1:1 to/from this board's `CONTROL`/`STATUS`/descriptor-queue/`PARAM_*` registers |
 
 Keeping MHI's own vocabulary entirely out of the wire protocol is what
@@ -654,36 +617,18 @@ possible without also porting MHI-specific glue.
 (mhi-versioning)=
 ## Versioning
 
-`VERSION` (`0x00`) is the register-protocol's own version number, starting
-at **1** for the M1-M2 surface this document describes. This document is
-the contract: a change to any offset, width, access rule, bit meaning, or
-semantic described above is a protocol change and must bump `VERSION`,
-whether or not it happens to be backward compatible. A guest library
-should treat an unrecognized (higher-than-known) `VERSION` as "features
-beyond what I implement may exist at reserved offsets," not as an error,
-since new fields land at previously-reserved offsets (which any
-conforming board -- old or new -- already defines as inert) rather than by
-repurposing an existing offset's meaning. Repurposing an offset's meaning
-between versions is not permitted by this spec's own conventions; a
-protocol revision that needs to do that must move to a new offset and
-leave the old one reading its previous semantics (or a fixed sentinel) for
-compatibility, exactly like any other stable ABI.
+`VERSION` (`0x00`) is the register-protocol version; the current value is
+**2**. Changes to offsets, widths, access rules, bit meanings, or documented
+semantics require a version bump. Preserve existing register meanings and
+use reserved offsets for additions.
 
-**Worked example: `VERSION` 1 -> 2 (M4).** M4 makes the param latches
-(indices `0`-`6`, already defined and already readable/writable since
-M1) actually audible. No offset moves, no access rule changes, and every
-field that existed at `VERSION` 1 keeps exactly its `VERSION` 1 meaning
--- but the *documented semantic* of writing `PARAM_VALUE` changes (from
-"latched, otherwise inert" to "affects the next produced sample"), which
-this document's own rule above ("any... semantic described above is a
-protocol change") requires a bump for, independent of whether a guest
-built against `VERSION` 1 would even notice (it would: its own decoded
-audio starts changing when it writes params it always assumed were
-no-ops). `CAPS` gains bit 6 at a previously-reserved position (`6-15
-reserved` at `VERSION` 1 already defined that range as inert, so an old
-board and a new board agree on what an old guest sees there) -- exactly
-the "new fields land at previously-reserved offsets" case this section
-describes as not needing special-casing beyond the bump itself.
+The guest library requires at least version 1. It accepts newer versions
+and checks `CAPS` for optional features. A newer board must therefore
+remain compatible with the register operations older drivers use.
+
+Version 2 applies parameter latches 0-6 to decoded PCM and sets `CAPS` bit 6.
+Version 1 stores and reads back the same values but leaves the audio unchanged.
+Register locations and widths are identical in both versions.
 
 (porting-to-another-emulator)=
 ## Porting to another emulator
@@ -726,10 +671,8 @@ content above.
 - **Decoder**:
   [Symphonia](https://github.com/pdeljanov/Symphonia)'s pure-Rust
   MPEG audio decoder (`MpaDecoder`, MPL-2.0), with only its Layer III
-  feature enabled to match `CAPS`. Pure Rust is the point: the previous
-  decoder (`minimp3-sys`) compiled a vendored C minimp3 whose SIMD
-  detection broke the default build on MSVC ARM64 hosts (issue #474), and
-  it was the last C compile in the default feature set. `MpaDecoder` is
+  feature enabled to match `CAPS`. It requires no C decoder build.
+  `MpaDecoder` is
   packet-based, so `src/mhi.rs` carries its own packetizer that cuts the
   doorbell-fed byte queue into whole frames using the same ISO 11172-3
   header/length arithmetic Symphonia's parser applies; junk bytes, fake
@@ -750,40 +693,22 @@ content above.
   `Resampler` (`src/audio/resample.rs`, per-rate cached) pulls from that
   FIFO to the mixer's fixed rate, so the resampler's lookahead can never
   reorder when a descriptor completes or an interrupt raises.
-- **Savestates**: Symphonia keeps its cross-frame decoder state (Layer III
-  bit reservoir, IMDCT overlap, synthesis delay line) private, so the
-  board's `DecoderSnapshot` serializes a warmup history instead: the raw
-  bytes of the most recently submitted frames (a few KiB, bounded), which
-  a restore re-decodes into a fresh decoder with the output discarded.
-  The replay is exact because each piece of that state is a function of
-  the trailing few frames alone -- the reservoir holds at most the
-  trailing 2048 bytes of main data, and the overlap/synthesis state is
-  rewritten by each frame -- see the "Savestates" section of
-  `src/mhi.rs`'s module doc comment for the full argument. The board also
-  retains every not-yet-decoded byte of every queued descriptor and the
-  in-flight frame's un-played sample tail, so a save/restore cycle
-  reproduces an uninterrupted run's decoded output exactly -- the
-  savestate approach is re-decode of retained bitstream, not a snapshot
-  of decoded PCM. This is proven bit-for-bit at the struct level
-  in-process (`savestate_round_trip_reproduces_an_uninterrupted_runs_output`
-  in `src/mhi.rs`'s own tests). `tests/mhi.rs`'s end-to-end equivalent
-  (`mhi_m2_savestate_resume_matches_the_uninterrupted_tail`, a real
-  save-to-disk and reload across separate `copperline` process
-  invocations) finds the same holds to an excellent approximation but not
-  quite bit-exactly when the save lands mid-decode: a small, constant
-  correspondence-point offset (inherent to estimating which captured
-  sample lines up with the save instant from wall-clock arithmetic, not a
-  bug) plus a tiny residual around the guest's periodic re-reads of its
-  MP3 input buffer, not yet root-caused to a specific missing field --
-  see that test's long comment for the investigation.
-- **Savestate layout**: adding the `mhi_audio` ring to `Paula` and the
-  `BoardDevice::Mhi` variant bumped `savestate::STATE_VERSION` to **57**;
-  the decoder-snapshot reshape for the Symphonia move (issue #474) bumped
-  it again to **58**; M4's `ToneFilterBank` (bass/mid/treble biquad
-  coefficients and filter memory -- genuine machine state, the same
-  reasoning as the decoder's own warmup history) bumped it once more to
-  **59**.
-- **M4 DSP chain implementation**: `Biquad` is Direct Form II transposed,
+- **Savestates**: Symphonia keeps its cross-frame decoder state private.
+  `DecoderSnapshot` therefore stores a bounded history of encoded frames;
+  restoring a board replays them into a fresh decoder and discards the
+  warmup output. Queued descriptor bytes and the unplayed sample tail
+  are saved too. The in-process unit test
+  `savestate_round_trip_reproduces_an_uninterrupted_runs_output` verifies
+  exact output after restoration. The separate-process integration test
+  `mhi_m2_savestate_resume_matches_the_uninterrupted_tail` in `tests/mhi.rs`
+  uses an alignment window and a small error tolerance. It records a
+  remaining difference around guest input-buffer refills when restoring
+  mid-decode; that case is not established as bit-exact.
+- **Save-state layout**: decoder warmup history, tone-filter coefficients,
+  and filter memory are serialized machine state. Changes to their layout
+  require a `savestate::STATE_VERSION` bump, independently of the board's
+  register-protocol version.
+- **DSP chain implementation**: `Biquad` is Direct Form II transposed,
   reusing `src/chipset/paula.rs`'s `AnalogLedFilter`/`BiquadLowPass`
   structure and `process` shape rather than a second filter convention in
   the same codebase (see "Tone filters: bass/mid/treble" above for the RBJ
@@ -831,7 +756,7 @@ content above.
   fetched `test-assets/`, so it catches decoder-dependency drift or
   resampler/pacing regressions immediately rather than only when a
   developer happens to have local assets staged. The same two fixtures
-  back the M3 seek-entry tests (`stop_resets_decoder_state_so_a_reseek_
+  back the seek-entry tests (`stop_resets_decoder_state_so_a_reseek_
   matches_a_fresh_decode`, `mid_frame_entry_resyncs_to_the_next_real_frame`,
   `seek_entry_into_vbr_content_decodes_cleanly_after_a_settle_window`) --
   real encoded streams carry genuine cross-frame reservoir state that a

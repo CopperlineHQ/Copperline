@@ -7,5 +7,4 @@ Accepts a write without changing custom-chip state.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
-
+No data bitfields. All written bits are ignored.

@@ -3,9 +3,10 @@ Offset: $060
 Access: write
 Chipset: OCS/ECS/AGA
 
-Controls or reports the custom-chip BLTCMOD register.
+Sets the signed row-end address adjustment for blitter channel C.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
+- Bits 15-1: Signed byte displacement; bit 0 is ignored for word alignment.
 
+Area mode adds the modulo after each row, or subtracts it in descending mode. Line mode uses the blitter modulos for its address/error updates.

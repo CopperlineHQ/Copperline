@@ -3,9 +3,10 @@ Offset: $070
 Access: write
 Chipset: OCS/ECS/AGA
 
-Controls or reports the custom-chip BLTCDAT register.
+Holds the source C word used by the blitter.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
+- Bits 15-0: Source data.
 
+When the channel's DMA is disabled, software can supply its data through this latch.

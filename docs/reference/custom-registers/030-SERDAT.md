@@ -3,9 +3,11 @@ Offset: $030
 Access: write
 Chipset: OCS/ECS/AGA
 
-Controls or reports the custom-chip SERDAT register.
+Queues a serial transmit word, including its stop bit.
 
 ## Bitfields
 
-- Bits 15-0: Register value; the summary identifies the field's role.
+- Bits 8-0: Data and first stop-bit position for the selected word length.
+- Bit 9: Stop bit for 9-bit mode.
 
+For 8-bit transmission, set bit 8 above the data byte. SERPER selects the bit period and 8/9-bit format.
