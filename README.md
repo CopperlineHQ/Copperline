@@ -126,7 +126,8 @@ Comprehensive documentation is published at [copperline.dev](https://copperline.
 - [Floppy Hardware Bridge](docs/guide/fluxbridge.md) - Real floppy drives via Greaseweazle
 - [Headless Mode](docs/guide/headless.md) - Scripted runs and screenshot/frame dumps
 - [Debugging](docs/debugger/window.md) - In-window, headless, and GDB debugging
-- [IDE Debugging](docs/debugger/dap.md) - Debug Adapter Protocol server for VS Code and nvim-dap (`copperline-ctl --dap`)
+- [VS Code](docs/debugger/vscode.md) - Setup and illustrated source debugging; [Bartman with Copperline](docs/debugger/vscode-bartman.md) covers fork installation and visual profiling
+- [Debug Adapter Protocol](docs/debugger/dap.md) - Launch, attach, and protocol reference for VS Code, nvim-dap, and other IDEs
 - [Control Protocol](docs/debugger/control.md) - JSON-RPC control interface (`copperline-ctl`)
 - [Internals](docs/internals/architecture.md) - Architecture, chipset, and timing models
 

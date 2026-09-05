@@ -158,9 +158,12 @@ The GDB stub integrates with Copperline's snapshot ring buffer:
 
 ## Bartman extension backend
 
-The optional [Copperline backend patch](https://github.com/BartmanAbyss/vscode-amiga-debug/pull/307) for
-[Bartman's Amiga C/C++ extension](https://github.com/BartmanAbyss/vscode-amiga-debug)
-adds these VS Code settings:
+Install the public Copperline fork of
+[Bartman's Amiga C/C++ extension](https://github.com/LinuxJedi/vscode-amiga-debug/tree/copperline-backend)
+using the pinned-revision VSIX instructions in
+[Bartman with Copperline](vscode-bartman.md). That guide includes a complete
+project setup and illustrated profiler walkthrough; it does not depend on
+an upstream merge or release. The fork adds these VS Code settings:
 
 ```json
 {
@@ -174,8 +177,8 @@ without its extension, beside a matching `.exe` hunk executable). The backend
 keeps the extension's patched `m68k-amiga-elf-gdb`, maps its model and memory
 presets to Copperline CLI arguments, and seeds the guest RTC from the host
 clock. Use the bundled AROS ROM (omit `kickstart`) or Kickstart 2.0 or
-newer for `--run`. This requires the backend patch until it is available
-upstream.
+newer for `--run`. The standard Marketplace extension does not contain this
+backend; keep the fork installed as described in the setup guide.
 
 The equivalent manual command is:
 
