@@ -20,12 +20,12 @@ The CD32 machine profile fits this ROM by default. An explicit `fmv_rom` path
 still wins; `fmv_rom = ""` leaves the module unfitted. The ROM is licensed
 under GNU GPL v3.0 or later, the same `LICENSE` shipped at Copperline's root.
 
-Compatibility validated on 2026-08-30:
+Compatibility validated on 2026-08-30 (Kickstart) and 2026-09-05 (AROS):
 
 - CD32 Kickstart 3.1 r40.60: Cannon Fodder streams its 352x288 MPEG intro
   through the resident device using the host `cd.device`'s standard Mode-2
   reads, with decoded video and non-silent stereo audio.
-- AROS PR 1089 through CDXL-ordering commit `ebfc7d9`: Cannon Fodder streams
+- AROS master with PR 1089 merged (CDXL-ordering commit `64eb7ed1`): Cannon Fodder streams
   through AROS's system-ROM device. PR 1089 intentionally skips the cartridge
   diagnostic to prevent the legacy Commodore ROM replacing AROS's
   `cd.device`.

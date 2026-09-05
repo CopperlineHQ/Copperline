@@ -2,8 +2,8 @@
 
 //! Asset-gated end-to-end regressions for the open CD32 FMV ROM.
 //!
-//! The AROS case exercises PR 1089 through chronological CDXL commit
-//! `ebfc7d9`. The
+//! The AROS case exercises the merged AROS PR 1089 code (its CDXL-ordering
+//! fix is upstream commit `64eb7ed1`), which the bundled ROM carries. The
 //! Kickstart case exercises the ROM's own resident `cd32mpeg.device` and its
 //! standard Mode-2 `CD_READ` streamer. Both run the real Cannon Fodder
 //! introduction far enough to prove sustained video and audio playback. See

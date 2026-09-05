@@ -1,0 +1,35 @@
+From: Copperline bundled-ROM refresh 2026-09-05
+Subject: [PATCH] m68k-amiga/dos: keep the 8 KiB process stack floor
+
+Commit e9c4ecde99 ("Reduce CD32 boot-time chip memory use") lowered the
+m68k DOS process stack minimum from AROS_STACKSIZE (16 KiB) to 4 KiB and
+pinned the Shell-seg, "Boot Mount" and lddemon processes at 4 KiB, sized
+from a CD32 disc boot that runs no Startup-Sequence. A boot that does run
+one -- a staged boot volume with a `Run`/`Execute` line and handler
+processes for host-directory and hardfile mounts -- overflows those stacks:
+the program never starts, the boot process later warm-reboots. Restoring
+an 8 KiB floor (the "conservative default for arbitrary applications" the
+same commit keeps as PROC_STACKSIZE) fixes it; raising the Shell-seg pin
+alone, the bootstrap stack alone, or the handler's own request alone does
+not.
+
+Applied on top of upstream master a3cfa659ed for the bundled ROM.
+
+--- a/arch/m68k-amiga/dos/dos_platform.h
++++ b/arch/m68k-amiga/dos/dos_platform.h
+@@ -1,10 +1,11 @@
+ #ifndef DOS_PLATFORM_H
+ #define DOS_PLATFORM_H
+ 
+-/* Amiga interrupts and exceptions use the supervisor stack.  Keep a
+- * conservative default for arbitrary applications while allowing measured
+- * system processes to request the classic 4 KiB process stack. */
++/* Amiga interrupts and exceptions use the supervisor stack.  Keep a
++ * conservative default for arbitrary applications and floor every process
++ * at it too: a Startup-Sequence boot with handler processes overflows the
++ * classic 4 KiB stack that a CD32 disc boot gets by with. */
+ #define PROC_STACKSIZE     8192
+-#define PROC_MINSTACKSIZE  4096
++#define PROC_MINSTACKSIZE  8192
+ 
+ #endif

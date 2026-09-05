@@ -590,7 +590,8 @@ use the cartridge's empty CL450 container. Starting
 `CPU_CONTROL` is the boundary at which Copperline marks its command-level
 CL450 model ready, so no proprietary microcode is copied or executed.
 
-The matching AROS PR includes Copperline's ordering fix as commit `ebfc7d9`.
+The matching AROS PR 1089, merged upstream on 2026-09-01, includes
+Copperline's ordering fix as commit `64eb7ed1`.
 Akiko allocates the highest armed PBX slot first; when a high slot is re-armed
 before an older low-slot sector is consumed, slot-number order is no longer
 arrival order. The driver sorts each CDXL snapshot by the raw sector MSF,

@@ -110,7 +110,8 @@ cargo test --release --test a2091_boot -- --ignored --nocapture
 ### Open CD32 FMV ROM
 
 `tests/cd32_fmv_aros.rs` contains two Cannon Fodder paths. The AROS case uses
-PR 1089 through CDXL-ordering commit `ebfc7d9`; the Kickstart case uses the
+an AROS ROM pair carrying the merged PR 1089 (CDXL-ordering commit `64eb7ed1`;
+the bundled `assets/aros` pair qualifies); the Kickstart case uses the
 replacement ROM's own `cd32mpeg.device` and standard Mode-2 reader. Both assert sustained
 MPEG decoding without malformed-stream recovery, full-colour 60-second
 output, and non-silent stereo. The media and proprietary Kickstart remain
@@ -365,7 +366,7 @@ baselines to maintain.
 | `reset_dsksync_boot_regression_reaches_boot_display` | `KICK13.ROM` |
 | `hostfs_boot_aros_runs_a_guest_binary_and_writes_to_the_host` | *(none)* |
 | `hostfs_boot_kick13_runs_a_guest_binary_and_writes_to_the_host` | `KICK13.ROM` |
-| `cannon_fodder_streams_cleanly_through_the_aros_open_rom` | PR 1089 through commit `ebfc7d9` AROS main/ext ROMs, generated `copperline-fmv.rom`, Cannon Fodder CUE and tracks |
+| `cannon_fodder_streams_cleanly_through_the_aros_open_rom` | AROS main/ext ROMs with PR 1089 merged (the bundled pair qualifies), generated `copperline-fmv.rom`, Cannon Fodder CUE and tracks |
 | `cannon_fodder_streams_cleanly_through_the_standalone_kickstart_rom` | CD32 Kickstart 3.1 main/ext ROMs, generated `copperline-fmv.rom`, Cannon Fodder CUE and tracks; supplied through the `COPPERLINE_FMV_*` variables above |
 | `ocs_bpu7_ham_captures_*` (incl. live-audio variant) | `kickstart205.rom`, `DESiRE-InsideTheMachine.adf` |
 | `dblpal_boot_presents_full_programmable_scan` | `KICK31.ROM`, `wb31-dblpal.adf` |
