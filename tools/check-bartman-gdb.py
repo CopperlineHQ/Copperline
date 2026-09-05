@@ -7,6 +7,7 @@ Bartman's bundled GDB and (optionally) its generated compact unwind table.
 Artifacts remain under --out. No ROM or executable is copied into the repo.
 """
 import argparse
+import math
 import os
 from pathlib import Path
 import socket
@@ -28,8 +29,12 @@ def main():
     parser.add_argument('--rom', type=Path)
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--gui', action='store_true')
+    parser.add_argument('--attach-delay', type=float, default=0,
+                        help='seconds to wait after the listener starts before launching GDB')
     parser.add_argument('--trace', action='store_true', help='log RSP packets')
     args = parser.parse_args()
+    if not math.isfinite(args.attach_delay) or args.attach_delay < 0:
+        parser.error('--attach-delay must be a finite non-negative number')
     args.out.mkdir(parents=True, exist_ok=True)
     capture = args.out.resolve() / 'capture.profile'
     if capture.exists():
@@ -54,6 +59,7 @@ def main():
                 if emulator.poll() is not None or time.monotonic() >= deadline:
                     raise RuntimeError('emulator did not start; see emulator.log')
                 time.sleep(0.05)
+            time.sleep(args.attach_delay)
             commands = (['set debug remote on'] if args.trace else []) + [
                 'set confirm off', 'set pagination off', 'set remotetimeout 60',
                 f'file {quoted(args.elf.resolve())}', f'target remote :{port}',
