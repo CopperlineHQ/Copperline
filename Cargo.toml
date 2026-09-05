@@ -376,7 +376,7 @@ path = "src/bin/copperline-net-helper.rs"
 required-features = ["net-bridge"]
 
 [dev-dependencies]
-syn = { version = "2", features = ["full", "visit"] }
+syn = { version = "3", features = ["full", "visit"] }
 # Compile WAT to wasm bytes in the WASM-plugin-host tests, so golden test
 # plugins live as readable text in the tests rather than checked-in binaries.
 wat = "1"
