@@ -5860,3 +5860,36 @@ fn temp_path(name: &str) -> PathBuf {
     let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!("copperline-floppy-test-{nanos}-{counter}-{name}"))
 }
+
+#[test]
+fn netplay_normalizes_all_floppy_paths_and_preserves_memory_backing() -> Result<()> {
+    let mut peers = [FloppyController::default(), FloppyController::default()];
+    for (peer, controller) in peers.iter_mut().enumerate() {
+        controller.set_connected_drives([true; 4]);
+        for drive in 0..4 {
+            controller.insert_disk_image_bytes(
+                drive,
+                vec![drive as u8; ADF_SIZE],
+                PathBuf::from(format!("peer{peer}/disk{drive}.adf")),
+                false,
+            )?;
+        }
+        controller.prepare_netplay_images();
+        assert_eq!(controller.runahead_block_reason(), None);
+        for drive in 0..4 {
+            assert_eq!(
+                controller.drives[drive].image.as_ref().unwrap().backing,
+                FloppyImageBacking::Memory
+            );
+            assert_eq!(
+                controller.export_disk_image(drive)?,
+                vec![drive as u8; ADF_SIZE]
+            );
+        }
+    }
+    let state = bincode::serialize(&peers[0])?;
+    assert_eq!(state, bincode::serialize(&peers[1])?);
+    let restored: FloppyController = bincode::deserialize(&state)?;
+    assert_eq!(restored.runahead_block_reason(), None);
+    Ok(())
+}

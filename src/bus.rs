@@ -704,6 +704,17 @@ fn empty_sprite_display_enable_x_by_y() -> [Option<usize>; MAX_VISIBLE_LINES] {
     [None; MAX_VISIBLE_LINES]
 }
 
+/// Runtime latches omitted by file save states but needed for exact, immediate
+/// rollback. This is an in-process snapshot prefix, not part of STATE_VERSION.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct RollbackState {
+    data_bus: u16,
+    render_blocked: bool,
+    frame_lines: [u32; 2],
+    h_windows: [Option<(i32, u32)>; 2],
+    v_windows: [Option<(i32, u32)>; 2],
+}
+
 // Save-state note: Bus and everything it owns derive serde so a snapshot can
 // be taken at an emulated-frame boundary (src/savestate.rs). Host-resource
 // fields (open files, audio/serial sinks, wall-clock anchors, memo caches)
@@ -5446,6 +5457,47 @@ impl Bus {
         }
         reservations.commit();
         Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn rollback_state(&self) -> RollbackState {
+        RollbackState {
+            data_bus: self.data_bus,
+            render_blocked: self.current_frame_render_blocked,
+            frame_lines: [
+                self.current_frame_geometry.frame_lines,
+                self.last_frame_geometry.frame_lines,
+            ],
+            h_windows: [
+                self.current_frame_presentation_h_window,
+                self.last_frame_presentation_h_window,
+            ],
+            v_windows: [
+                self.current_frame_presentation_v_window,
+                self.last_frame_presentation_v_window,
+            ],
+        }
+    }
+
+    pub(crate) fn restore_rollback_state(&mut self, state: RollbackState) {
+        self.data_bus = state.data_bus;
+        self.current_frame_render_blocked = state.render_blocked;
+        [
+            self.current_frame_geometry.frame_lines,
+            self.last_frame_geometry.frame_lines,
+        ] = state.frame_lines;
+        [
+            self.current_frame_presentation_h_window,
+            self.last_frame_presentation_h_window,
+        ] = state.h_windows;
+        [
+            self.current_frame_presentation_v_window,
+            self.last_frame_presentation_v_window,
+        ] = state.v_windows;
+        // These are derived acceleration caches. Rebuild through the dynamic
+        // path until the next line, preserving all captured events and latches.
+        self.wide_bitplane_hot_line.invalidate();
+        self.wide_bitplane_dynamic_vpos.set(Some(self.agnus.vpos));
     }
 
     pub(crate) fn reset_transient_video_after_state_load(&mut self) {

@@ -235,6 +235,9 @@ impl App {
         action: crate::video::menu::MenuAction,
         event_loop: Option<&ActiveEventLoop>,
     ) {
+        if self.netplay.is_some() {
+            return;
+        }
         use crate::video::menu::{AudioOutputChoice, MenuAction as A};
         match action {
             A::OpenMachineConfig => self.open_launcher(),

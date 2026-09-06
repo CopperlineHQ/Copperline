@@ -101,6 +101,8 @@ pub mod modem;
 #[cfg(feature = "mt32")]
 pub mod mt32;
 pub mod net;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod netplay;
 pub mod package;
 pub mod parallel;
 pub mod pathconf;

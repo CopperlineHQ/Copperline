@@ -1089,7 +1089,12 @@ impl App {
         } else {
             0
         };
-        let field_content = bitplane::render(self.emu.bus_mut(), &mut self.fb);
+        let field_content = if self.netplay.is_some() {
+            let input = bitplane::RenderInput::from_bus(self.emu.bus());
+            bitplane::render_from_input(&input, &mut self.fb).content_rect
+        } else {
+            bitplane::render(self.emu.bus_mut(), &mut self.fb)
+        };
         let geometry = self.emu.bus().frame_geometry();
         let canvas_scale = self.emu.bus().frame_canvas_scale();
         let placement = post_process_rendered_field(

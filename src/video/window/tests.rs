@@ -11606,3 +11606,49 @@ mod gdb_and_control {
         assert_eq!(warp_off["params"]["holders"], json!([]));
     }
 }
+
+#[test]
+fn netplay_routes_local_inputs_and_blocks_unilateral_menu_actions() -> anyhow::Result<()> {
+    let mut app = test_app();
+    app.emu.bus_mut().rtc.set_seed(Some(946684800), false);
+    app.emu
+        .bus_mut()
+        .input
+        .set_port_device(0, crate::bus::PortDevice::Joystick);
+    app.emu.bus_mut().paula.serial = Box::new(crate::serial::NullSerialSink);
+    let mut cfg = crate::config::Config::try_from(crate::config::RawConfig::default())?;
+    cfg.serial.mode = crate::config::SerialMode::Off;
+    let options = crate::netplay::Options {
+        bind: "127.0.0.1:0".parse()?,
+        peer: "127.0.0.1:19732".parse()?,
+        player: 0,
+        session: [7; 16],
+        input_delay: 0,
+        rollback_frames: 8,
+    };
+    let session = crate::netplay::Session::new(options, &mut app.emu, &cfg)?;
+    app.attach_netplay(session);
+    let before = app.emu.runahead_snapshot()?;
+    app.handle_amiga_key_event(0x40, true);
+    app.auto_joy_held[0].red = true;
+    app.apply_auto_joy_state(0);
+    assert_ne!(app.netplay_input.keys[8] & 1, 0);
+    assert_eq!(app.netplay_input.buttons, 1 << 4);
+    app.auto_joy_held[1].up = true;
+    app.apply_auto_joy_state(1);
+    assert_eq!(
+        app.netplay_input.buttons,
+        1 << 4,
+        "the remote port cannot replace local input"
+    );
+    app.run_menu_action(crate::video::menu::MenuAction::ToggleRewind, None);
+    assert!(!app.rewind_armed);
+    assert_eq!(
+        app.emu.runahead_snapshot()?,
+        before,
+        "only the netplay timeline may touch the machine"
+    );
+    app.handle_amiga_key_event(0x40, false);
+    assert_eq!(app.netplay_input.keys[8], 0);
+    Ok(())
+}

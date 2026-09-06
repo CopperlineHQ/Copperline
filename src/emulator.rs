@@ -1468,6 +1468,21 @@ impl Emulator {
         self.snapshot_blob()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn netplay_snapshot(&self) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        self.machine.write_rollback_state(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn netplay_restore(&mut self, blob: &[u8]) -> Result<()> {
+        self.machine
+            .apply_rollback_state(&mut std::io::Cursor::new(blob))?;
+        self.reset_realtime_quantum();
+        Ok(())
+    }
+
     /// Restore an anchor snapshot produced by [`Self::runahead_snapshot`].
     /// Unlike [`Self::restore_blob`] this deliberately does NOT reset the
     /// live audio stream or re-anchor real-time pacing: the audible
@@ -2304,6 +2319,41 @@ impl Emulator {
 
     pub fn step_frame(&mut self) -> Result<()> {
         self.step_frame_with_pc_outside(None).map(|_| ())
+    }
+
+    /// Advance to the next hardware video frame for netplay. The normal
+    /// frontend quantum is a CPU budget and can end within a raster frame;
+    /// network inputs need a boundary defined entirely by the guest hardware.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn step_netplay_frame(&mut self, replay: bool) -> Result<()> {
+        self.real_pacing_budget_mode = RealPacingBudgetMode::M68kCycles;
+        self.reset_realtime_quantum();
+        self.set_runahead_speculative(replay);
+        let started = Instant::now();
+        self.stats.started_at.get_or_insert(started);
+        let frame = self.bus().emulated_frames();
+        let mut idle = false;
+        let result = (|| {
+            while self.bus().emulated_frames() == frame {
+                self.run_one_precise_step(&mut idle, INSTRUCTIONS_PER_REALTIME_SLICE)?;
+                if self.machine.ui_debug_stop_pending() {
+                    bail!("debugger stopped the netplay machine");
+                }
+            }
+            Ok(())
+        })();
+        self.set_runahead_speculative(false);
+        result?;
+        let slept = if self.paced && !replay {
+            self.sleep_until_realtime_device_time()
+        } else {
+            Duration::ZERO
+        };
+        self.stats.busy += started.elapsed().saturating_sub(slept);
+        if !replay {
+            self.stats.frames += 1;
+        }
+        Ok(())
     }
 
     /// Execute one normal window quantum, but stop on the first instruction
