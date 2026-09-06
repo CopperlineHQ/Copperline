@@ -95,14 +95,19 @@ export default {
           const url = new URL(request.url);
           url.pathname = match ? `/${match[2] ?? ''}` : '/create';
           // The namespace ID stays server-side; the invitation is a random capability.
-          const inner = new Request(url, request);
+          // Consume the bounded body before forwarding. An early Durable Object
+          // response (for example, an expired invitation) must not leave a
+          // network-backed upload being read after this fetch has returned.
+          const body = request.method === 'POST' ? JSON.stringify(await readJson(request)) : undefined;
+          const inner = new Request(url, { method: request.method, headers: request.headers, body });
           inner.headers.set('X-Room-ID', id);
           response = await stub.fetch(inner);
         }
       } else response = json({ error: 'Not found' }, 404);
-    } catch {
+    } catch (error) {
       // Never echo API/provider errors, request bodies or secrets to clients/logs.
-      response = json({ error: 'The room service could not complete the request. Try again.' }, 503);
+      response = error instanceof RequestError ? json({ error: error.message }, 400)
+        : json({ error: 'The room service could not complete the request. Try again.' }, 503);
     }
     const headers = new Headers(response.headers);
     for (const [key, value] of Object.entries(cors)) headers.set(key, value);
