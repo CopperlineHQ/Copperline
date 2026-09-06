@@ -41,6 +41,17 @@ impl Input {
     }
 }
 
+/// Decode the shared game identifier used by both CLI and GUI setup.
+pub fn parse_session_id(code: &str) -> Result<[u8; 16]> {
+    ensure!(code.len() == 32 && code.bytes().all(|b| b.is_ascii_hexdigit()),
+        "Session code needs exactly 32 hexadecimal digits; create a new code or paste your peer's code");
+    let mut session = [0; 16];
+    for (i, byte) in session.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&code[i * 2..i * 2 + 2], 16)?;
+    }
+    Ok(session)
+}
+
 /// Both peers specify each other's reachable UDP address and the same session ID.
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -106,6 +117,16 @@ pub fn validate_config(cfg: &crate::config::Config) -> Result<()> {
         cfg.floppy.bridges.iter().all(Option::is_none),
         "netplay cannot use physical floppy drives"
     );
+    Ok(())
+}
+
+/// Apply the deterministic clock default before constructing a netplay machine.
+pub fn prepare_config(cfg: &mut crate::config::Config) -> Result<()> {
+    validate_config(cfg)?;
+    if cfg.rtc_present && cfg.rtc_seed_unix.is_none() {
+        cfg.rtc_seed_unix = Some(946684800);
+        log::info!("netplay: guest clock starts at 2000-01-01 00:00:00 UTC");
+    }
     Ok(())
 }
 
@@ -186,6 +207,10 @@ impl Session {
             last_checked: 0,
             failure: None,
         })
+    }
+
+    pub fn options(&self) -> &Options {
+        &self.options
     }
 
     pub fn player(&self) -> usize {

@@ -12,7 +12,42 @@ NAT traversal, spectator mode, reconnect, or browser support. Use the same
 Copperline build on both machines. Cross-platform peer combinations have not
 yet been qualified.
 
-## Start a session
+## Set up in the GUI
+
+Open **Machine Configuration → Netplay** (or start Copperline with no arguments).
+Choose the machine, ROM and floppy images on the existing configuration pages,
+then enable **Netplay** on both computers.
+
+![Netplay setup in the configuration screen](../images/ui-preview-launcher-netplay.png)
+
+1. Choose **Player 1** on one computer and **Player 2** on the other.
+2. Leave **Local address** at `0.0.0.0:19732` to listen on all local IPv4
+   interfaces. Set **Peer address** to the other computer's reachable IP and
+   port, for example `192.168.1.11:19732`. For IPv6, use bracketed addresses
+   such as `[::]:19732` and `[2001:db8::2]:19732` on both peers.
+3. One player clicks **New code**, then **Copy code**, and shares it with the
+   other player. The other player pastes that code into **Session code**.
+   Cmd+V on macOS or Ctrl+V elsewhere replaces the focused address/code box;
+   Return commits an edit and Escape cancels it.
+4. Use the same **Input delay** and **Rollback limit**, then click **Run** on
+   both computers. The windows wait for each other before emulation begins.
+
+Enabling netplay changes mouse/analogue/empty ports to joysticks, turns serial
+and JIT off, disables run-ahead and warp boot, and enables power on. Existing
+joystick/CD32 ports stay selected. These changes are visible on the other
+configuration pages; Run reapplies them after model or configuration changes.
+ROMs, media and storage selections remain yours to choose;
+Run explains any incompatible device or connection setting.
+
+**F11** disconnects and returns to the Netplay page with the connection details
+intact. A connection failure also returns there, showing its error. Correct the
+settings and press Run on both peers to start again from cold boot. The peer
+addresses, session code, player and delay/window settings are kept for the current
+app session; Save does not put them in machine configuration files.
+
+The GUI and CLI use the same protocol and can connect to each other.
+
+## Start from the command line
 
 Give both players the same ROM, floppy contents, and machine settings. A floppy
 can come from the configuration or `--insert-disk-after 0 df0 PATH`. Paths can
@@ -66,8 +101,8 @@ window focus releases local held controls on the next sampled frame.
 
 The host Quit and Fullscreen shortcuts remain available (Cmd+Q/Cmd+F on macOS,
 Alt+Q/Alt+F elsewhere). Menus, resets, pause, debugger access, mouse input, save
-states, and media changes are unavailable while connected. Close the window to
-end the session; the remaining peer stops after its timeout.
+states, and media changes are unavailable while connected. Press F11 to return to setup, or close the window to end the session;
+the remaining peer stops after its timeout.
 
 ## Delay and connection limits
 

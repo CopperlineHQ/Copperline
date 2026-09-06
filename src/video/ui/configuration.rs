@@ -216,11 +216,14 @@ pub(in crate::video::ui) fn launcher_text_rect(
     row_y: usize,
     field: LauncherField,
 ) -> Rect {
-    let _ = field;
     Rect {
         x: launcher_pane_x(rect) + LAUNCH_LABEL_W,
         y: row_y + (LAUNCH_ROW_H - LAUNCH_CONTROL_H) / 2,
-        w: LAUNCH_NAME_W,
+        w: if field.is_netplay() {
+            300
+        } else {
+            LAUNCH_NAME_W
+        },
         h: LAUNCH_CONTROL_H,
     }
 }
@@ -306,12 +309,30 @@ pub(in crate::video::ui) fn indefinite_article(size: &str) -> &'static str {
 /// so both the hit-test and the drawing ask here rather than each
 /// keeping its own copy of the rule.
 pub(in crate::video::ui) fn value_box_control(field: LauncherField) -> UiControl {
-    if field == LauncherField::RamPattern {
+    if field.is_netplay() {
+        UiControl::LauncherNetplayEdit(field)
+    } else if field == LauncherField::RamPattern {
         UiControl::LauncherRamPatternEdit
     } else {
         // The serial addresses draw their own pair of boxes and never come
         // through here.
         UiControl::LauncherNewImageEdit(field)
+    }
+}
+
+pub(in crate::video::ui) fn launcher_row_action(field: LauncherField) -> UiControl {
+    if field.is_netplay() {
+        UiControl::LauncherNetplayAction(field)
+    } else {
+        UiControl::LauncherNewImageCreate(field)
+    }
+}
+
+pub(in crate::video::ui) fn launcher_second_action(field: LauncherField) -> Option<LauncherField> {
+    match field {
+        LauncherField::NewGeomSave => Some(LauncherField::NewGeomAuto),
+        LauncherField::NetplayNewCode => Some(LauncherField::NetplayCopyCode),
+        _ => None,
     }
 }
 
@@ -1187,6 +1208,8 @@ pub(in crate::video::ui) fn control_field(control: UiControl) -> Option<Launcher
         | UiControl::LauncherDriveNameEdit(field)
         | UiControl::LauncherDriveFilesystemToggle(field)
         | UiControl::LauncherNewImageEdit(field)
+        | UiControl::LauncherNetplayEdit(field)
+        | UiControl::LauncherNetplayAction(field)
         | UiControl::LauncherSerialHostEdit(field)
         | UiControl::LauncherSerialPortEdit(field)
         | UiControl::LauncherNewImageCreate(field)
@@ -1242,6 +1265,9 @@ pub(in crate::video) fn control_live(ui: &UiState, control: UiControl) -> bool {
     // A workshop row greys on its own terms -- there is no machine
     // setting behind it to explain itself -- so it is asked directly,
     // as the drawing asks it.
+    if field.is_netplay() {
+        return state.row_applies(field);
+    }
     if LauncherState::is_workshop(field) {
         return state.workshop_applies(field);
     }
@@ -2896,6 +2922,28 @@ pub(in crate::video::ui) fn draw_launcher(
     }
     if state.tab == LauncherTab::HostDisk {
         draw_host_disk_page(frame, rect, state, hover, scale);
+    }
+    if state.tab == LauncherTab::Netplay {
+        let top = launcher_row_y(rect, 9) + row_offset;
+        for (i, line) in [
+            "Use the same machine, ROM and floppy contents.",
+            "Share one session code; choose opposite players.",
+            "Netplay sets digital ports, serial off and interpreter.",
+            "Run connects. F11 returns here. Settings last this session.",
+        ]
+        .iter()
+        .enumerate()
+        {
+            draw_panel_text(
+                frame,
+                launcher_pane_x(rect),
+                top + i * 14,
+                line,
+                PANEL_TEXT_DIM,
+                1,
+                scale,
+            );
+        }
     }
     // The Input tab spells out what the chosen wiring means: which host
     // input source ends up driving each port, live as the values cycle.

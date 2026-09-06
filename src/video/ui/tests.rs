@@ -2895,6 +2895,20 @@ fn panels_render_into_their_rects() {
     assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
     save(&frame, "launcher-storage");
 
+    let mut frame = vec![0u8; w * h * 4];
+    let mut state = LauncherState::new(launcher::MachineSetup::default());
+    state.toggle_netplay();
+    state.netplay.peer = "192.168.1.11:19732".into();
+    state.netplay.code = "8b21488dae9544f591adf03e291ce976".into();
+    state.tab = LauncherTab::Netplay;
+    let ui = UiState {
+        panel: Some(Panel::Launcher(Box::new(state))),
+        ..UiState::default()
+    };
+    draw(&mut frame, scale, &ui, None, None);
+    assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
+    save(&frame, "launcher-netplay");
+
     // Configuration screen: the Input tab, with the live routing
     // summary spelled out under the rows (two joysticks, so the
     // numpad stand-in line shows).
@@ -4161,4 +4175,107 @@ fn panels_render_into_their_rects() {
         draw(&mut frame, scale, &ui, None, None);
         save(&frame, "launcher-fluxbridge-page");
     }
+}
+#[test]
+fn netplay_controls_fit_and_are_reachable_by_mouse_and_navigation() {
+    use crate::video::nav::{map, NavTarget};
+    let mut state = LauncherState::new(launcher::MachineSetup::default());
+    state.toggle_netplay();
+    state.tab = LauncherTab::Netplay;
+    let panel = Panel::Launcher(Box::new(state));
+    let rect = panel_rect(&panel);
+    let Panel::Launcher(state) = &panel else {
+        unreachable!()
+    };
+    let rows = launcher::rows(
+        state.tab,
+        state.setup.parallel_device(),
+        state.setup.serial_mode(),
+        false,
+        false,
+    );
+    let mut controls = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        let y = launcher_row_y(rect, i);
+        let targets = match row.kind {
+            RowKind::Toggle => vec![(
+                launcher_toggle_rect(rect, y),
+                UiControl::LauncherToggle(row.field),
+            )],
+            RowKind::Cycle => {
+                let (prev, _, next) = launcher_cycle_rects(rect, y);
+                vec![
+                    (
+                        prev,
+                        UiControl::LauncherCycle {
+                            field: row.field,
+                            forward: false,
+                        },
+                    ),
+                    (
+                        next,
+                        UiControl::LauncherCycle {
+                            field: row.field,
+                            forward: true,
+                        },
+                    ),
+                ]
+            }
+            RowKind::Text => {
+                let at = launcher_text_rect(rect, y, row.field);
+                assert!(
+                    at.w >= 32 * font::GLYPH_W + 8,
+                    "a full session code must be visible"
+                );
+                vec![(at, UiControl::LauncherNetplayEdit(row.field))]
+            }
+            RowKind::Action => vec![
+                (
+                    launcher_action_rect(rect, y),
+                    UiControl::LauncherNetplayAction(LauncherField::NetplayNewCode),
+                ),
+                (
+                    launcher_action2_rect(rect, y),
+                    UiControl::LauncherNetplayAction(LauncherField::NetplayCopyCode),
+                ),
+            ],
+            _ => panic!("unexpected netplay widget"),
+        };
+        for (at, control) in targets {
+            assert!(at.x >= rect.x && at.x + at.w <= rect.x + rect.w);
+            assert!(at.y + at.h < launcher_status_y(rect));
+            let point = ((at.x + at.w / 2) as i32, (at.y + at.h / 2) as i32);
+            assert_eq!(panel_control_at(&panel, point), Some(control));
+            controls.push(control);
+        }
+    }
+    let mut ui = UiState {
+        panel: Some(panel),
+        ..UiState::default()
+    };
+    let items = map(
+        &ui,
+        super::super::window::texture_width(1),
+        super::super::window::texture_height(1),
+    );
+    for control in controls {
+        assert!(
+            items
+                .iter()
+                .any(|item| item.target == crate::video::nav::normalise(NavTarget::Ui(control))),
+            "missing {control:?}"
+        );
+    }
+    let Some(Panel::Launcher(state)) = ui.panel.as_mut() else {
+        unreachable!()
+    };
+    state.toggle_netplay();
+    assert!(!control_live(
+        &ui,
+        UiControl::LauncherNetplayEdit(LauncherField::NetplayCode)
+    ));
+    assert!(control_live(
+        &ui,
+        UiControl::LauncherToggle(LauncherField::NetplayEnabled)
+    ));
 }

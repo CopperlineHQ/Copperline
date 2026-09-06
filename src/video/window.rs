@@ -939,6 +939,9 @@ pub struct App {
     netplay: Option<crate::netplay::Session>,
     netplay_input: crate::netplay::Input,
     netplay_keyboard_controller: bool,
+    netplay_setup: Option<crate::video::launcher::NetplaySetup>,
+    // Linux serves clipboard selections from the owning instance.
+    host_clipboard: Option<arboard::Clipboard>,
     emu: Emulator,
     fb: Vec<u32>,
     /// Merges rendered fields into the double-height presentation
@@ -1816,7 +1819,6 @@ fn meta_field_max(field: crate::video::launcher::MetaField) -> usize {
 ///
 /// One line of it: what these boxes hold is a password or a title, not a
 /// document, and a newline in the middle of one is a paste that went wrong.
-#[cfg(feature = "game-library")]
 fn clipboard_line() -> String {
     match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
         Ok(text) => text.lines().next().unwrap_or_default().trim().to_string(),
@@ -2217,6 +2219,8 @@ impl App {
             netplay: None,
             netplay_input: Default::default(),
             netplay_keyboard_controller: true,
+            netplay_setup: None,
+            host_clipboard: None,
             run_ahead_frames,
             runahead_machine_block,
             ui: UiState::default(),
@@ -5048,9 +5052,13 @@ impl ApplicationHandler for App {
             if self.netplay.is_some() {
                 if let Err(error) = self.step_netplay() {
                     error!("netplay stopped: {error:#}");
-                    self.show_osd(format!("Netplay stopped: {error}"));
-                    self.cpu_halted = true;
-                    self.sync_live_audio_suspension();
+                    if self.netplay_setup.is_some() {
+                        self.leave_netplay(Some(error.to_string()));
+                    } else {
+                        self.show_osd(format!("Netplay stopped: {error}"));
+                        self.cpu_halted = true;
+                        self.sync_live_audio_suspension();
+                    }
                 }
             } else {
                 let (total_frames, runahead, time_budget) = self.burst_frames(headless_capture);
@@ -6000,7 +6008,9 @@ impl App {
                     // edited (the serial mode carries its address box).
                     state.edit_commit();
                     if state.editing().is_none() {
-                        if LauncherState::is_workshop(field) {
+                        if field.is_netplay() {
+                            state.netplay.cycle(field, forward);
+                        } else if LauncherState::is_workshop(field) {
                             state.workshop_cycle(field, forward);
                         } else {
                             state.setup.cycle(field, forward);
@@ -6017,7 +6027,9 @@ impl App {
                 if let Some(state) = self.launcher_state_mut() {
                     state.edit_commit();
                     if state.editing().is_none() {
-                        if LauncherState::is_workshop(field) {
+                        if field == LauncherField::NetplayEnabled {
+                            state.toggle_netplay();
+                        } else if LauncherState::is_workshop(field) {
                             state.workshop_toggle_flip(field);
                         } else {
                             state.setup.toggle(field);
@@ -6075,6 +6087,15 @@ impl App {
                     }
                 }
             }
+            UiControl::LauncherNetplayEdit(field) => {
+                if let Some(state) = self.launcher_state_mut() {
+                    state.edit_commit();
+                    if state.editing().is_none() {
+                        state.begin_edit_netplay(field);
+                    }
+                }
+            }
+            UiControl::LauncherNetplayAction(field) => self.launcher_netplay_action(field),
             UiControl::LauncherNewImageCreate(field) => self.launcher_create_image(field),
             #[cfg(feature = "game-library")]
             UiControl::LauncherWhdloadDownload(field) => self.whdload_download(field),

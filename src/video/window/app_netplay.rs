@@ -6,8 +6,72 @@ use super::*;
 
 impl App {
     pub fn attach_netplay(&mut self, session: crate::netplay::Session) {
+        self.netplay_setup = Some(crate::video::launcher::NetplaySetup::from(
+            session.options(),
+        ));
         self.netplay = Some(session);
-        self.show_osd("Netplay: waiting for peer".to_string());
+        self.netplay_input = Default::default();
+        self.netplay_keyboard_controller = true;
+        self.show_osd("Netplay: waiting for peer (F11 to cancel)".to_string());
+    }
+
+    pub(super) fn remember_netplay_setup(&mut self) {
+        if let Some(state) = self.launcher_state_mut() {
+            state.edit_commit();
+            self.netplay_setup = Some(state.netplay.clone());
+        }
+    }
+
+    pub(super) fn launcher_netplay_action(&mut self, field: LauncherField) {
+        let Some(state) = self.launcher_state_mut() else {
+            return;
+        };
+        state.edit_commit();
+        if !state.netplay.enabled || state.editing().is_some() {
+            return;
+        }
+        if field == LauncherField::NetplayNewCode {
+            state.netplay.new_code();
+            state.status = Some(StatusMessage::ok("Share this code with the other player"));
+        } else if field == LauncherField::NetplayCopyCode {
+            if let Err(error) = crate::netplay::parse_session_id(&state.netplay.code) {
+                state.status = Some(StatusMessage::err(error.to_string()));
+                return;
+            }
+            let code = state.netplay.code.clone();
+            match self.copy_netplay_code(code) {
+                Ok(()) => self.set_launcher_status(StatusMessage::ok("Session code copied")),
+                Err(error) => {
+                    self.set_launcher_status(StatusMessage::err(format!("Clipboard: {error}")))
+                }
+            }
+        }
+    }
+
+    fn copy_netplay_code(&mut self, code: String) -> std::result::Result<(), arboard::Error> {
+        // Keep the selection owner alive after this click on X11/Wayland.
+        if self.host_clipboard.is_none() {
+            self.host_clipboard = Some(arboard::Clipboard::new()?);
+        }
+        self.host_clipboard.as_mut().unwrap().set_text(code)
+    }
+
+    pub(super) fn leave_netplay(&mut self, error: Option<String>) {
+        self.netplay = None;
+        self.netplay_input = Default::default();
+        self.keyboard_joy_held = Default::default();
+        self.paused = true;
+        self.sync_live_audio_suspension();
+        self.open_launcher();
+        if let Some(state) = self.launcher_state_mut() {
+            state.tab = crate::video::launcher::LauncherTab::Netplay;
+            state.status = Some(error.map_or_else(
+                || StatusMessage::ok("Disconnected. Run starts a new session"),
+                |error| StatusMessage::err(format!("Netplay stopped: {error}")),
+            ));
+        }
+        self.nav.park(self.nav_home());
+        self.request_redraw();
     }
 
     pub(super) fn pump_netplay_input(&mut self) {
@@ -120,6 +184,12 @@ impl App {
                         KeyCode::KeyQ => event_loop.exit(),
                         KeyCode::KeyF => self.toggle_fullscreen(),
                         _ => {}
+                    }
+                    return true;
+                }
+                if *code == KeyCode::F11 {
+                    if pressed {
+                        self.leave_netplay(None);
                     }
                     return true;
                 }

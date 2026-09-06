@@ -103,15 +103,12 @@ pub(in crate::video::ui) fn launcher_row_control_at(
         }
         RowKind::Action => {
             if launcher_action_rect(rect, row_y).contains(pos) {
-                return Some(UiControl::LauncherNewImageCreate(r.field));
+                return Some(launcher_row_action(r.field));
             }
-            // The geometry editor's Auto sits beside its Save.
-            if r.field == LauncherField::NewGeomSave
-                && launcher_action2_rect(rect, row_y).contains(pos)
-            {
-                return Some(UiControl::LauncherNewImageCreate(
-                    LauncherField::NewGeomAuto,
-                ));
+            if let Some(second) = launcher_second_action(r.field) {
+                if launcher_action2_rect(rect, row_y).contains(pos) {
+                    return Some(launcher_row_action(second));
+                }
             }
         }
         RowKind::Cycle => {
@@ -400,7 +397,9 @@ pub(in crate::video::ui) fn draw_launcher_row(
     }
     // A workshop row greys on its own terms -- there is no machine setting
     // behind it to explain itself -- so it is asked directly.
-    let reason = if LauncherState::is_workshop(r.field) {
+    let reason = if r.field.is_netplay() {
+        (!state.row_applies(r.field)).then_some("")
+    } else if LauncherState::is_workshop(r.field) {
         (!state.workshop_applies(r.field)).then_some("")
     } else {
         setup.disabled_reason(r.field)
@@ -693,28 +692,31 @@ pub(in crate::video::ui) fn draw_launcher_row(
             }
         }
         RowKind::Action => {
-            let label = state.workshop_action_label(r.field);
+            let label = if r.field.is_netplay() {
+                state.netplay.value(r.field)
+            } else {
+                state.workshop_action_label(r.field)
+            };
             draw_text_button(
                 frame,
                 launcher_action_rect(rect, row_y),
                 &label,
                 !disabled,
-                lit(hover, UiControl::LauncherNewImageCreate(r.field)),
+                lit(hover, launcher_row_action(r.field)),
                 scale,
             );
-            // The geometry editor commits with Save, and fills itself in
-            // from the size with Auto beside it.
-            if r.field == LauncherField::NewGeomSave {
-                let auto = state.workshop_action_label(LauncherField::NewGeomAuto);
+            if let Some(second) = launcher_second_action(r.field) {
+                let label = if second.is_netplay() {
+                    state.netplay.value(second)
+                } else {
+                    state.workshop_action_label(second)
+                };
                 draw_text_button(
                     frame,
                     launcher_action2_rect(rect, row_y),
-                    &auto,
-                    true,
-                    lit(
-                        hover,
-                        UiControl::LauncherNewImageCreate(LauncherField::NewGeomAuto),
-                    ),
+                    &label,
+                    !disabled,
+                    lit(hover, launcher_row_action(second)),
                     scale,
                 );
             }

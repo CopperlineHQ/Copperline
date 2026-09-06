@@ -11652,3 +11652,116 @@ fn netplay_routes_local_inputs_and_blocks_unilateral_menu_actions() -> anyhow::R
     assert_eq!(app.netplay_input.keys[8], 0);
     Ok(())
 }
+#[test]
+fn netplay_gui_run_rejects_errors_and_preserves_the_current_machine() {
+    use crate::video::launcher::{LauncherField as F, StatusKind};
+    let mut app = test_app();
+    app.machine_config.audio.output_enabled = Some(false);
+    app.open_launcher();
+    let before = app.emu.netplay_snapshot().unwrap();
+    app.activate_ui_control(UiControl::LauncherToggle(F::NetplayEnabled));
+    app.activate_ui_control(UiControl::LauncherNetplayAction(F::NetplayNewCode));
+    assert_eq!(app.launcher_state().unwrap().netplay.code.len(), 32);
+    app.activate_ui_control(UiControl::LauncherNetplayEdit(F::NetplayPeer));
+    app.launcher_handle_edit_key(KeyCode::KeyX, Some("invalid"));
+    app.launcher_run();
+    let state = app
+        .launcher_state()
+        .expect("validation keeps the setup open");
+    assert_eq!(
+        state.netplay.peer, "invalid",
+        "Run commits the current edit"
+    );
+    assert_eq!(state.status.as_ref().unwrap().kind, StatusKind::Error);
+    assert!(state.status.as_ref().unwrap().text.contains("Peer address"));
+    assert!(app.netplay.is_none());
+    assert_eq!(before, app.emu.netplay_snapshot().unwrap());
+    app.close_panel();
+    app.open_launcher();
+    assert_eq!(app.launcher_state().unwrap().netplay.peer, "invalid");
+    assert!(app.launcher_state().unwrap().netplay.enabled);
+}
+
+#[test]
+fn netplay_gui_peers_connect_and_can_return_to_setup_and_retry() -> anyhow::Result<()> {
+    use crate::video::launcher::{LauncherField as F, LauncherTab};
+    use std::net::UdpSocket;
+    let reserved = [
+        UdpSocket::bind("127.0.0.1:0")?,
+        UdpSocket::bind("127.0.0.1:0")?,
+    ];
+    let addresses = [reserved[0].local_addr()?, reserved[1].local_addr()?];
+    drop(reserved);
+    let mut apps = [test_app(), test_app()];
+    for (player, app) in apps.iter_mut().enumerate() {
+        app.machine_config.audio.output_enabled = Some(false);
+        app.open_launcher();
+        app.activate_ui_control(UiControl::LauncherToggle(F::NetplayEnabled));
+        let state = app.launcher_state_mut().unwrap();
+        state.netplay.bind = addresses[player].to_string();
+        state.netplay.peer = addresses[1 - player].to_string();
+        state.netplay.player = player;
+        state.netplay.code = "0123456789abcdef0123456789abcdef".into();
+        app.launcher_run();
+        assert!(
+            app.netplay.is_some(),
+            "{:?}",
+            app.launcher_state().and_then(|s| s.status.as_ref())
+        );
+        assert!(app.ui.panel.is_none());
+        assert_eq!(app.emu.bus().emulated_cck(), 0);
+        app.emu.set_paced(false);
+        // The launcher must leave the same frame-zero state as a direct CLI build.
+        let mut cfg = crate::config::Config::try_from(app.machine_config.clone())?;
+        crate::netplay::prepare_config(&mut cfg)?;
+        crate::config::resolve_bundled_rom(&mut cfg)?;
+        let direct = crate::emulator::build_machine(&cfg, Box::new(NullSink), false, false)?;
+        assert_eq!(app.emu.netplay_snapshot()?, direct.netplay_snapshot()?);
+    }
+    for _ in 0..250 {
+        for app in &mut apps {
+            let session = app.netplay.as_mut().unwrap();
+            let advance = session.status().frame < 60;
+            session.step(&mut app.emu, Default::default(), advance)?;
+        }
+        if apps
+            .iter()
+            .all(|app| app.netplay.as_ref().unwrap().status().checked_frame == 60)
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    for app in &apps {
+        assert_eq!(app.netplay.as_ref().unwrap().status().checked_frame, 60);
+    }
+    assert_eq!(
+        apps[0].emu.netplay_snapshot()?,
+        apps[1].emu.netplay_snapshot()?
+    );
+    apps[0].leave_netplay(None);
+    let state = apps[0].launcher_state().unwrap();
+    assert_eq!(state.tab, LauncherTab::Netplay);
+    assert_eq!(state.netplay.peer, addresses[1].to_string());
+    assert!(apps[0].paused);
+    assert!(apps[0].netplay.is_none());
+    apps[1].leave_netplay(Some("peer timed out".into()));
+    assert!(apps[1]
+        .launcher_state()
+        .unwrap()
+        .status
+        .as_ref()
+        .unwrap()
+        .text
+        .contains("timed out"));
+    for app in &mut apps {
+        app.launcher_run();
+        assert!(
+            app.netplay.is_some(),
+            "retry must release and rebind the socket"
+        );
+        assert_eq!(app.emu.bus().emulated_cck(), 0);
+        assert!(!app.paused);
+    }
+    Ok(())
+}

@@ -96,6 +96,28 @@ impossible acknowledgements, and data beyond the bounded future horizon stop the
 session. Errors stay latched so callers cannot accidentally continue a failed
 session as local play.
 
+## Configuration screen
+
+`LauncherState::netplay` holds a `NetplaySetup` beside the machine setup. It uses
+normal launcher rows, editing, hit testing and keyboard/gamepad navigation, but
+never enters `RawConfig` or the machine serializer. Enabling it applies the
+required controller and execution settings to `MachineSetup`; the ordinary
+configuration pages show those changes.
+
+Run commits any focused field, parses the connection through the shared session
+ID/options validators, applies the deterministic RTC default and builds a cold
+machine. It creates the UDP session before replacing the live machine, so a
+validation or bind failure leaves that machine intact and reports the error in
+the launcher. The successful session then uses the same `attach_netplay` path as
+a CLI launch. Session code generation uses host randomness for a fresh identifier;
+it does not add peer authentication.
+
+F11 drops the session/socket, pauses the machine and restores the Netplay page
+with the last connection settings. Runtime failures take the same path with an
+error message. Run after that builds a new machine and rebinds the socket; it
+never resumes an abandoned network timeline. Headless errors still return to
+the caller normally.
+
 ## Validation
 
 The regression suite covers:
@@ -110,7 +132,9 @@ The regression suite covers:
   identical machine-state digests.
 - Packet truncation/size bounds, conflicting inputs, invalid acknowledgements,
   initial mismatch, desynchronization, and disconnect timeouts.
-- CLI combinations and frontend input/mutation routing.
+- CLI combinations, GUI field/edit/navigation coverage, and frontend input/mutation
+  routing. Two GUI-configured peers must connect, confirm matching states, return
+  to setup and successfully rebind for another cold boot.
 
 Run the focused tests with `cargo test --profile ci --locked netplay`; UDP tests
 need permission to bind loopback sockets. No external ROM or disk assets are

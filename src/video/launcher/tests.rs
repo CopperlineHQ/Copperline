@@ -5659,3 +5659,77 @@ fn a_long_boot_order_pages_and_a_short_one_does_not() {
         Some(LauncherTab::Storage)
     );
 }
+#[test]
+fn netplay_setup_edits_all_controls_without_persisting_connection_details() -> Result<()> {
+    let mut state = LauncherState::new(MachineSetup::default());
+    assert!(!state.row_toggle(F::NetplayEnabled));
+    assert!(!state.row_applies(F::NetplayPeer));
+    state.toggle_netplay();
+    assert!(state.row_toggle(F::NetplayEnabled));
+    assert_eq!(state.setup.port_devices, [PortDevice::Joystick; 2]);
+    assert_eq!(state.setup.serial_mode, SerialMode::Off);
+    for (field, value) in [
+        (F::NetplayBind, "[::]:19732"),
+        (F::NetplayPeer, "[::1]:19733"),
+        (F::NetplayCode, "0123456789ABCDEF0123456789abcdef"),
+    ] {
+        state.begin_edit_netplay(field);
+        state.clear_netplay_edit();
+        for c in value.chars() {
+            state.edit_push(c);
+        }
+        state.edit_commit();
+        assert_eq!(state.row_value(field), value);
+        assert!(state.row_applies(field));
+    }
+    for (field, count) in [
+        (F::NetplayPlayer, 2),
+        (F::NetplayDelay, 7),
+        (F::NetplayRollback, 12),
+    ] {
+        let initial = state.row_value(field);
+        let mut values = std::collections::BTreeSet::new();
+        for _ in 0..count {
+            values.insert(state.row_value(field));
+            state.netplay.cycle(field, true);
+        }
+        assert_eq!(values.len(), count);
+        assert_eq!(state.row_value(field), initial);
+        state.netplay.cycle(field, false);
+        state.netplay.cycle(field, true);
+        assert_eq!(state.row_value(field), initial);
+    }
+    let options = state.netplay.options()?.unwrap();
+    assert!(options.bind.is_ipv6());
+    assert!(options.peer.is_ipv6());
+    assert!(TABS.contains(&LauncherTab::Netplay));
+    assert!(tabs(true).contains(&LauncherTab::Netplay));
+    let raw = state.setup.to_raw();
+    let reloaded = LauncherState::from_raw(&raw);
+    assert!(!reloaded.netplay.enabled);
+    assert!(reloaded.netplay.code.is_empty());
+    assert!(reloaded.netplay.peer.is_empty());
+    Ok(())
+}
+
+#[test]
+fn netplay_setup_rejects_invalid_details_and_generates_fresh_codes() {
+    let mut setup = NetplaySetup {
+        enabled: true,
+        ..Default::default()
+    };
+    assert!(setup.options().is_err());
+    setup.peer = "127.0.0.1:19733".into();
+    setup.new_code();
+    let first = setup.code.clone();
+    assert!(setup.options().is_ok());
+    setup.new_code();
+    assert_ne!(setup.code, first);
+    assert!(setup.options().is_ok());
+    for invalid in ["", "xyz", "éééééééééééééééé"] {
+        setup.code = invalid.into();
+        assert!(setup.options().is_err());
+    }
+    setup.enabled = false;
+    assert!(setup.options().unwrap().is_none());
+}

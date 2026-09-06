@@ -890,11 +890,7 @@ fn main() -> Result<()> {
     }
     let mut disk_insert_after = resolve_disk_insert_after(&mut cfg, cli.disk_insert_after)?;
     if cli.netplay.is_some() {
-        copperline::netplay::validate_config(&cfg)?;
-        if cfg.rtc_present && cfg.rtc_seed_unix.is_none() {
-            cfg.rtc_seed_unix = Some(946684800);
-            info!("netplay: guest clock starts at 2000-01-01 00:00:00 UTC");
-        }
+        copperline::netplay::prepare_config(&mut cfg)?;
     }
 
     // Name the boot ROM in the banner: a Kickstart image is identified by

@@ -54,6 +54,7 @@ pub enum LauncherTab {
     IoNetworking,
     IoAudio,
     Input,
+    Netplay,
     Zorro,
     /// The "A/V & Emu" strip tab, whose default category is Audio (its rows are
     /// the audio settings). Video and Emulation are its sibling categories,
@@ -90,6 +91,7 @@ pub const TABS: &[LauncherTab] = &[
     // Cd, HostFs, and BootPriority are reached as sub-pages from the Storage
     // tab, so they are not top-level strip entries.
     LauncherTab::Input,
+    LauncherTab::Netplay,
     LauncherTab::IoPorts,
     LauncherTab::Zorro,
     LauncherTab::AvAudio,
@@ -106,6 +108,7 @@ pub(super) const WHDLOAD_TABS: &[LauncherTab] = &[
     LauncherTab::Floppy,
     LauncherTab::Storage,
     LauncherTab::Input,
+    LauncherTab::Netplay,
     LauncherTab::IoPorts,
     LauncherTab::Zorro,
     LauncherTab::WhdloadLibrary,
@@ -154,6 +157,7 @@ impl LauncherTab {
             LauncherTab::IoNetworking => "Networking",
             LauncherTab::IoAudio => "Audio",
             LauncherTab::Input => "Input",
+            LauncherTab::Netplay => "Netplay",
             LauncherTab::Zorro => "Zorro",
             LauncherTab::AvAudio => "A/V & Emu",
             LauncherTab::AvVideo => "Video",
@@ -363,6 +367,16 @@ pub enum LauncherField {
     NewGeomRevision,
     NewGeomSave,
     NewGeomAuto,
+    // Per-session connection settings.
+    NetplayEnabled,
+    NetplayBind,
+    NetplayPeer,
+    NetplayPlayer,
+    NetplayCode,
+    NetplayDelay,
+    NetplayRollback,
+    NetplayNewCode,
+    NetplayCopyCode,
     // System
     Chipset,
     Agnus,
@@ -1271,6 +1285,17 @@ pub(super) const NEW_GEOMETRY_ROWS: [Row; 10] = [
     row(F::NewGeomSave, "", RowKind::Action),
 ];
 
+pub(super) const NETPLAY_ROWS: [Row; 8] = [
+    row(F::NetplayEnabled, "Netplay", Toggle),
+    row(F::NetplayPlayer, "Local player", Cycle),
+    row(F::NetplayBind, "Local address", RowKind::Text),
+    row(F::NetplayPeer, "Peer address", RowKind::Text),
+    row(F::NetplayCode, "Session code", RowKind::Text),
+    row(F::NetplayDelay, "Input delay", Cycle),
+    row(F::NetplayRollback, "Rollback limit", Cycle),
+    row(F::NetplayNewCode, "", RowKind::Action),
+];
+
 pub(super) const INPUT_ROWS: [Row; 5] = [
     row(F::Port1Device, "Port 1", Cycle),
     row(F::Port2Device, "Port 2", Cycle),
@@ -1342,6 +1367,7 @@ pub fn rows(
         LauncherTab::IoNetworking => Cow::Owned(io_networking_rows()),
         LauncherTab::IoAudio => Cow::Owned(io_audio_rows()),
         LauncherTab::Input => Cow::Borrowed(&INPUT_ROWS),
+        LauncherTab::Netplay => Cow::Borrowed(&NETPLAY_ROWS),
         LauncherTab::Zorro => Cow::Borrowed(&[]),
         // A/V & Emu defaults to the Audio category; Video and Emulation are its
         // sibling categories, switched via the top nav row.

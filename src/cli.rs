@@ -1369,13 +1369,7 @@ where
             bail!("--netplay-player must be 1 or 2");
         }
         let code: String = netplay_session.ok_or_else(|| anyhow!(usage))?;
-        if code.len() != 32 || !code.bytes().all(|b| b.is_ascii_hexdigit()) {
-            bail!("--netplay-session requires exactly 32 hexadecimal digits");
-        }
-        let mut session = [0; 16];
-        for (i, byte) in session.iter_mut().enumerate() {
-            *byte = u8::from_str_radix(&code[i * 2..i * 2 + 2], 16)?;
-        }
+        let session = copperline::netplay::parse_session_id(&code)?;
         let options = copperline::netplay::Options {
             bind: netplay_bind.ok_or_else(|| anyhow!(usage))?,
             peer: netplay_peer.ok_or_else(|| anyhow!(usage))?,
