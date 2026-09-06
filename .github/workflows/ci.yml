@@ -477,8 +477,8 @@ jobs:
     # Guards the portability split behind the browser build (see
     # docs/guide/browser.md): the core must keep compiling without the
     # desktop frontend, and the web crate must keep compiling for
-    # wasm32-unknown-unknown. Cheap check-only job, so plain ubuntu is fine
-    # (no GPU or audio stack is reached without the `frontend` feature).
+    # wasm32-unknown-unknown, including paired rollback on a release bundle.
+    # No GPU or audio stack is reached without the `frontend` feature.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -489,6 +489,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          workspaces: |
+            . -> target
+            crates/copperline-web -> target
       - name: Core without the desktop frontend
         run: cargo check --no-default-features --locked
       - name: Save-state fixture across optional features
@@ -507,6 +510,15 @@ jobs:
         # step never reaches it.
         working-directory: crates/copperline-web
         run: cargo fmt --check
+      - name: Browser rollback netplay on the release WASM bundle
+        working-directory: crates/copperline-web
+        run: |
+          version="$(sed -n 's/^wasm-bindgen = "=\(.*\)"$/\1/p' Cargo.toml)"
+          test -n "$version"
+          cargo install wasm-bindgen-cli --version "$version" --locked
+          RUSTFLAGS="-C target-feature=+simd128" cargo build --release --target wasm32-unknown-unknown --locked
+          wasm-bindgen --target web --out-dir pkg target/wasm32-unknown-unknown/release/copperline_web.wasm
+          node ../../tools/check-web-netplay.mjs pkg
       - name: Browser page controller tests
         working-directory: crates/copperline-web/www
         run: npm test

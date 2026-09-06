@@ -9,7 +9,7 @@ name: Browser demo
 # The page shell (try/index.html) is hand-written in the website repository
 # and left alone. This workflow replaces the parts that must change together
 # with the emulator: the wasm-bindgen bundle (try/pkg), the JS glue that
-# drives the WebEmu API (try/try.js, try/render-stride.js,
+# drives the WebEmu API (try/try.js, try/netplay.js, try/render-stride.js,
 # try/serial-telnet.js, try/audio-worklet.js, sourced from
 # crates/copperline-web/www), and the AROS ROMs (try/aros).
 #
@@ -125,6 +125,7 @@ jobs:
           console.log('bundle loads:', emu.machine_summary());
           SMOKE
           node pkg-smoke.mjs
+          node ../../tools/check-web-netplay.mjs pkg
           rm pkg-smoke.mjs pkg-smoke-glue.mjs
       - name: Check out the website repository
         uses: actions/checkout@v7
@@ -143,6 +144,7 @@ jobs:
              crates/copperline-web/pkg/copperline_web_bg.wasm site/try/pkg/
           cp crates/copperline-web/www/try.js \
              crates/copperline-web/www/render-stride.js \
+             crates/copperline-web/www/netplay.js \
              crates/copperline-web/www/serial-telnet.js \
              crates/copperline-web/www/audio-worklet.js site/try/
           cp assets/aros/aros-amiga-m68k-rom.bin \

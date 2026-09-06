@@ -4519,6 +4519,11 @@ pub fn render_reusing_previous(
 /// re-render of the same frame (a layer-isolation toggle while paused)
 /// cannot perturb the machine.
 pub fn render_display_only(bus: &Bus, fb: &mut [u32]) {
+    let _ = render_display_only_with_content(bus, fb);
+}
+
+/// Presentation-only render with its active content envelope for browser cropping.
+pub fn render_display_only_with_content(bus: &Bus, fb: &mut [u32]) -> Option<ContentRect> {
     thread_local! {
         static RENDER_INPUT_SCRATCH: std::cell::RefCell<Option<RenderInput>> =
             const { std::cell::RefCell::new(None) };
@@ -4529,15 +4534,16 @@ pub fn render_display_only(bus: &Bus, fb: &mut [u32]) {
             Some(input) => input.refill_from_bus(bus),
             None => *scratch = Some(RenderInput::from_bus(bus)),
         }
-        {
+        let content = {
             let input = scratch.as_ref().expect("scratch render input present");
-            let _ = render_from_input(input, fb);
-        }
+            render_from_input(input, fb).content_rect
+        };
         scratch
             .as_mut()
             .expect("scratch render input present")
             .release_shared_frame_data();
-    });
+        content
+    })
 }
 
 /// Side-effect-free display render with final Denise/Lisa output provenance.

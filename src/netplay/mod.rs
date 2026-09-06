@@ -5,15 +5,20 @@
 mod rollback;
 #[cfg(test)]
 mod tests;
+mod transport;
 mod wire;
+#[cfg(not(target_arch = "wasm32"))]
+use transport::UdpTransport;
+pub use transport::{PacketQueue, Transport};
 
 use crate::emulator::Emulator;
+use crate::timebase::{Duration, Instant};
 use anyhow::{ensure, Context, Result};
 use rollback::{Machine, Rollback};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::net::{SocketAddr, UdpSocket};
-use std::time::{Duration, Instant};
+#[cfg(not(target_arch = "wasm32"))]
+use std::net::SocketAddr;
 
 /// A held digital controller and Amiga keyboard, sampled once per frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -52,7 +57,33 @@ pub fn parse_session_id(code: &str) -> Result<[u8; 16]> {
     Ok(session)
 }
 
+/// Negotiated timeline settings, shared by every transport.
+#[derive(Clone, Debug)]
+pub struct Settings {
+    /// Zero-based controller port owned by this peer.
+    pub player: usize,
+    pub session: [u8; 16],
+    pub input_delay: u8,
+    pub rollback_frames: u8,
+}
+
+impl Settings {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(self.player < 2, "netplay player must be 1 or 2");
+        ensure!(
+            self.input_delay <= 6,
+            "netplay input delay must be 0..6 frames"
+        );
+        ensure!(
+            (1..=12).contains(&self.rollback_frames),
+            "netplay rollback window must be 1..12 frames"
+        );
+        Ok(())
+    }
+}
+
 /// Both peers specify each other's reachable UDP address and the same session ID.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug)]
 pub struct Options {
     pub bind: SocketAddr,
@@ -64,17 +95,18 @@ pub struct Options {
     pub rollback_frames: u8,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Options {
+    fn settings(&self) -> Settings {
+        Settings {
+            player: self.player,
+            session: self.session,
+            input_delay: self.input_delay,
+            rollback_frames: self.rollback_frames,
+        }
+    }
     pub fn validate(&self) -> Result<()> {
-        ensure!(self.player < 2, "netplay player must be 1 or 2");
-        ensure!(
-            self.input_delay <= 6,
-            "netplay input delay must be 0..6 frames"
-        );
-        ensure!(
-            (1..=12).contains(&self.rollback_frames),
-            "netplay rollback window must be 1..12 frames"
-        );
+        self.settings().validate()?;
         ensure!(
             self.bind.is_ipv4() == self.peer.is_ipv4(),
             "netplay addresses must use the same IP family"
@@ -140,9 +172,12 @@ pub fn prepare_config(cfg: &mut crate::config::Config) -> Result<()> {
 }
 
 /// A session is serviced on the emulation thread; socket I/O never blocks it.
-pub struct Session {
-    socket: UdpSocket,
-    options: Options,
+#[cfg(not(target_arch = "wasm32"))]
+pub type Session = Connection<UdpTransport>;
+
+pub struct Connection<T: Transport> {
+    transport: T,
+    settings: Settings,
     identity: [u8; 32],
     rollback: Rollback,
     seen_peer: bool,
@@ -176,14 +211,33 @@ impl Status {
     }
 }
 
-impl Session {
+#[cfg(not(target_arch = "wasm32"))]
+impl Connection<UdpTransport> {
     pub fn new(options: Options, emu: &mut Emulator, cfg: &crate::config::Config) -> Result<Self> {
+        options.validate()?;
+        let settings = options.settings();
+        let transport = UdpTransport::new(options)?;
+        Self::with_transport(settings, transport, emu, cfg)
+    }
+
+    pub fn options(&self) -> &Options {
+        &self.transport.options
+    }
+}
+
+impl<T: Transport> Connection<T> {
+    pub fn with_transport(
+        settings: Settings,
+        transport: T,
+        emu: &mut Emulator,
+        cfg: &crate::config::Config,
+    ) -> Result<Self> {
         validate_config(cfg)?;
         ensure!(
             emu.bus().emulated_cck() == 0,
             "netplay must start before the machine runs"
         );
-        options.validate()?;
+        settings.validate()?;
         // Paths are host metadata; normalize only after adopting the complete
         // images into memory so replay cannot reopen or overwrite local files.
         emu.bus_mut().floppy.prepare_netplay_images();
@@ -204,18 +258,14 @@ impl Session {
         identity_hash.update(env!("COPPERLINE_DISPLAY_VERSION").as_bytes());
         identity_hash.update(emu.netplay_snapshot()?);
         let identity = identity_hash.finalize().into();
-        let socket = UdpSocket::bind(options.bind).context("binding netplay UDP socket")?;
-        socket.set_nonblocking(true)?;
-        log::info!(
-            "netplay: listening on {}, peer {}, player {}; waiting for matching machine",
-            socket.local_addr()?,
-            options.peer,
-            options.player + 1
+        let rollback = Rollback::new(
+            settings.player,
+            settings.input_delay,
+            settings.rollback_frames,
         );
-        let rollback = Rollback::new(options.player, options.input_delay, options.rollback_frames);
         Ok(Self {
-            socket,
-            options,
+            transport,
+            settings,
             identity,
             rollback,
             seen_peer: false,
@@ -229,12 +279,12 @@ impl Session {
         })
     }
 
-    pub fn options(&self) -> &Options {
-        &self.options
+    pub fn transport_mut(&mut self) -> &mut T {
+        &mut self.transport
     }
 
     pub fn player(&self) -> usize {
-        self.options.player
+        self.settings.player
     }
 
     pub fn status(&self) -> Status {
@@ -266,18 +316,15 @@ impl Session {
         // A finite receive budget keeps window input responsive under a burst.
         let mut buffer = [0; wire::MAX_PACKET + 1];
         for _ in 0..64 {
-            match self.socket.recv_from(&mut buffer) {
-                Ok((len, source)) => {
-                    if source != self.options.peer {
-                        continue;
-                    }
-                    let Some(packet) = wire::Packet::decode(&buffer[..len]) else {
+            match self.transport.receive(&mut buffer) {
+                Ok(Some(len)) => {
+                    let Some(packet) = buffer.get(..len).and_then(wire::Packet::decode) else {
                         continue;
                     };
-                    if packet.session != self.options.session {
+                    if packet.session != self.settings.session {
                         continue;
                     }
-                    ensure!(packet.player == 1 - self.options.player && packet.delay == self.options.input_delay && packet.window == self.options.rollback_frames,
+                    ensure!(packet.player == 1 - self.settings.player && packet.delay == self.settings.input_delay && packet.window == self.settings.rollback_frames,
                         "netplay settings differ: use opposite players and identical delay/rollback values");
                     ensure!(packet.identity == self.identity, "netplay initial machine mismatch: use the same build, ROM, disks and deterministic machine settings");
                     self.seen_peer = true;
@@ -297,7 +344,7 @@ impl Session {
                     if let Some((frame, hash)) = packet.checksum {
                         ensure!(
                             frame
-                                <= self.rollback.current + u64::from(self.options.input_delay) + 1,
+                                <= self.rollback.current + u64::from(self.settings.input_delay) + 1,
                             "netplay checksum is too far in the future"
                         );
                         if frame > self.last_checked {
@@ -305,7 +352,7 @@ impl Session {
                         }
                     }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Ok(None) => break,
                 Err(e) => return Err(e).context("receiving netplay input"),
             }
         }
@@ -358,12 +405,12 @@ impl Session {
                 .is_none_or(|last| now.duration_since(last) >= Duration::from_millis(10))
         {
             let packet = wire::Packet {
-                session: self.options.session,
+                session: self.settings.session,
                 identity: self.identity,
                 player: self.player(),
                 ready: self.seen_peer,
-                delay: self.options.input_delay,
-                window: self.options.rollback_frames,
+                delay: self.settings.input_delay,
+                window: self.settings.rollback_frames,
                 ack: self.rollback.received,
                 inputs: self
                     .rollback
@@ -374,17 +421,19 @@ impl Session {
                 checksum: self.rollback.hashes.last_key_value().map(|(&f, &h)| (f, h)),
             }
             .encode();
-            match self.socket.send_to(&packet, self.options.peer) {
-                Ok(_) => self.last_sent = Some(now),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(e) => return Err(e).context("sending netplay input"),
+            if self
+                .transport
+                .send(&packet)
+                .context("sending netplay input")?
+            {
+                self.last_sent = Some(now);
             }
         }
         Ok(())
     }
 }
 
-impl Drop for Session {
+impl<T: Transport> Drop for Connection<T> {
     fn drop(&mut self) {
         let status = self.status();
         log::info!(

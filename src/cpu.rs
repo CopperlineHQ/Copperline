@@ -1471,13 +1471,11 @@ impl M68kMachine {
         Ok(())
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn write_rollback_state<W: std::io::Write>(&self, w: &mut W) -> Result<()> {
         serialize_component(w, &self.bus.bus.rollback_state(), "rollback latches")?;
         self.write_state(w)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn apply_rollback_state<R: std::io::Read>(&mut self, r: &mut R) -> Result<()> {
         let runtime = deserialize_component(r, "rollback latches")?;
         self.apply_state_inner(r, Some(runtime))

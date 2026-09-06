@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use super::*;
+use std::net::UdpSocket;
 
 #[derive(Default)]
 struct ToyMachine {
@@ -147,6 +148,31 @@ fn invalid_input_and_ack_are_rejected() -> Result<()> {
     assert!(rb.receive(0, input(999, 1)).is_err());
     assert!(rb.receive(u64::MAX, Input::default()).is_err());
     assert!(rb.acknowledge(100).is_err());
+    Ok(())
+}
+
+#[test]
+fn browser_packet_queues_bound_bursts_and_preserve_recent_retransmissions() -> Result<()> {
+    let mut queue = PacketQueue::default();
+    for byte in 0..100 {
+        queue.push(&[byte])?;
+    }
+    let mut buffer = [0; wire::MAX_PACKET + 1];
+    for expected in 36..100 {
+        assert_eq!(queue.receive(&mut buffer)?, Some(1));
+        assert_eq!(buffer[0], expected);
+    }
+    assert_eq!(queue.receive(&mut buffer)?, None);
+    assert!(queue.push(&vec![0; wire::MAX_PACKET + 1]).is_err());
+    assert!(queue.send(&vec![0; wire::MAX_PACKET + 1]).is_err());
+    queue.push(&[1, 2])?;
+    assert!(queue.receive(&mut [0]).is_err());
+    for _ in 0..64 {
+        assert!(queue.send(&[1, 2])?);
+    }
+    assert!(!queue.send(&[3])?);
+    assert_eq!(queue.pop(), Some(vec![1, 2]));
+    assert!(queue.send(&[3])?);
     Ok(())
 }
 
@@ -313,8 +339,8 @@ fn udp_pair_with_delay(delay: u8, window: u8) -> Result<()> {
         Session::new(session_options(1)?, &mut machines[1], &safe_config()?)?,
     ];
     let destinations = [
-        sessions[0].socket.local_addr()?,
-        sessions[1].socket.local_addr()?,
+        sessions[0].transport.socket.local_addr()?,
+        sessions[1].transport.socket.local_addr()?,
     ];
     let mut queued = Vec::<(u64, usize, Vec<u8>)>::new();
     let mut packets = 0u64;
@@ -384,7 +410,7 @@ fn mismatch_desync_and_disconnect_stop_the_session() -> Result<()> {
         inputs: vec![],
         checksum: None,
     };
-    peer.send_to(&packet.encode(), session.socket.local_addr()?)?;
+    peer.send_to(&packet.encode(), session.transport.socket.local_addr()?)?;
     assert!(poll_error(&mut session, &mut emu)
         .to_string()
         .contains("mismatch"));
@@ -400,7 +426,7 @@ fn mismatch_desync_and_disconnect_stop_the_session() -> Result<()> {
     session.rollback.received = 60;
     session.rollback.hashes.insert(60, [1; 32]);
     packet.checksum = Some((60, [2; 32]));
-    peer.send_to(&packet.encode(), session.socket.local_addr()?)?;
+    peer.send_to(&packet.encode(), session.transport.socket.local_addr()?)?;
     assert!(poll_error(&mut session, &mut emu)
         .to_string()
         .contains("desynchronized"));
@@ -451,7 +477,7 @@ fn capture_waits_for_the_peer_to_acknowledge_retransmitted_local_input() -> Resu
     let mut emu = emulator()?;
     let mut session = Session::new(options(peer.local_addr()?, 0), &mut emu, &safe_config()?)?;
     let mut packet = wire::Packet {
-        session: session.options.session,
+        session: session.settings.session,
         identity: session.identity,
         player: 1,
         ready: true,
@@ -461,7 +487,7 @@ fn capture_waits_for_the_peer_to_acknowledge_retransmitted_local_input() -> Resu
         inputs: vec![(0, input(0, 1))],
         checksum: None,
     };
-    peer.send_to(&packet.encode(), session.socket.local_addr()?)?;
+    peer.send_to(&packet.encode(), session.transport.socket.local_addr()?)?;
     for _ in 0..100 {
         if session.step(&mut emu, input(0, 0), true)? {
             break;
@@ -492,7 +518,7 @@ fn capture_waits_for_the_peer_to_acknowledge_retransmitted_local_input() -> Resu
     );
     assert!(!session.status().ready_to_capture());
     packet.ack = 1;
-    peer.send_to(&packet.encode(), session.socket.local_addr()?)?;
+    peer.send_to(&packet.encode(), session.transport.socket.local_addr()?)?;
     for _ in 0..100 {
         session.step(&mut emu, Input::default(), false)?;
         if session.status().ready_to_capture() {

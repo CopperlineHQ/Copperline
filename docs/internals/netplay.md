@@ -1,6 +1,6 @@
-# Netplay implementation plan and architecture
+# Netplay architecture
 
-The implementation follows four steps:
+The implementation follows five steps:
 
 1. Establish a deterministic session boundary. Validate the machine's host
    dependencies, adopt floppy contents into memory, normalize disk path metadata,
@@ -14,10 +14,12 @@ The implementation follows four steps:
 4. Integrate both native frontend loops. Route all machine input through the
    timeline, prevent unilateral machine changes, discard stale rendered frames
    after rollback, and document supported workflows and limitations.
+5. Reuse that timeline and wire protocol in WASM. Separate packet transport from
+   the session, bridge bounded queues to WebRTC, and add browser Host/Join setup.
 
 These steps are implemented in `src/netplay/`, `Emulator::step_netplay_frame`,
 and `src/video/window/app_netplay.rs`. The feature uses native Rust and does not
-link the GGPO SDK. Matchmaking, relay/NAT traversal, spectators, reconnect, shared
+link the GGPO SDK. Matchmaking, relays, spectators, reconnect, shared
 media operations, and transactional host filesystems remain separate work.
 
 ## Frame ownership
@@ -82,8 +84,9 @@ The initial fingerprint hashes Copperline's display build version and the entire
 normalized initial machine snapshot, including ROM and in-memory floppy data.
 It does not fingerprint uncommitted source modifications: development peers must
 build the same source. No executable, ROM, disk image, or serialized guest state
-is received from a peer. An ID separates sessions; this protocol supplies neither
-cryptographic peer authentication nor encryption.
+is received from a peer. An ID separates sessions; the packet format supplies
+neither cryptographic peer authentication nor encryption. Browser WebRTC adds
+transport encryption; native UDP needs a VPN for that protection.
 
 Every datagram repeats the session fingerprint and settings. Peers announce
 whether they have seen a matching peer; emulation starts after receiving that
@@ -96,6 +99,47 @@ unrelated endpoints, and unrelated session IDs are discarded. Conflicting input,
 impossible acknowledgements, and data beyond the bounded future horizon stop the
 session. Errors stay latched so callers cannot accidentally continue a failed
 session as local play.
+
+## Browser transport and lifecycle
+
+`Connection<T: Transport>` owns the handshake, rollback and timeout logic.
+`Session` remains the native alias for `Connection<UdpTransport>`; `Options`
+contains its UDP endpoints. Transport-independent `Settings` contains the player,
+session ID, input delay and prediction limit. Timers use `timebase::Instant` on
+both targets. Neither target serializes transport or wall-clock state.
+
+The web wrapper owns `Connection<PacketQueue>`. Each direction holds at most
+64 packets of at most 943 bytes. Incoming bursts evict the oldest datagram, relying
+on subsequent retransmissions; a full outgoing queue reports backpressure.
+`netplay.js` also bounds its receive queue and stops draining Rust's send queue
+when the channel's buffered amount reaches 64 maximum-size packets.
+
+The page exchanges a versioned offer and answer by copy/paste, including the
+SDP and host-selected settings. It waits for ICE gathering to complete before
+creating either code; no signaling service or trickled candidates are needed.
+The optional STUN server supplies address discovery, with no TURN relay UI.
+The [WebRTC data channel](https://www.w3.org/TR/webrtc/) is unordered and uses
+zero SCTP retransmissions, since the shared Copperline protocol already repeats
+unacknowledged inputs. Browser and native transports have no interoperability
+adapter. Codes are bounded and checked before passing SDP to WebRTC.
+
+Host/Join freezes the chosen cold-boot media and frees any local emulator.
+On channel open, the wrapper builds a fresh machine, fixes the RTC seed,
+disables serial and sets both digital controllers before fingerprinting it.
+JS numeric settings enter Rust as `f64` and are checked for finiteness, integer
+values and range before narrowing. Setup operations carry their connection
+identity across awaits so cancellation cannot publish a late machine or code.
+Disconnect and runtime failures stop all session loops and free the emulator;
+the chosen pre-session media remains available for another cold boot.
+
+Netplay calls use the shared precise frame stepper, with browser pacing capped
+at eight frames per call. Zero-frame polls can reconcile and acknowledge input
+while painting is suspended. Corrections invalidate field history and cropping
+latches. Browser netplay renders through `render_display_only_with_content` so
+different paint cadences cannot write collision bits into checkpoint state.
+Paula's output gain is serialized in ordinary save states, so browser netplay
+fixes it at 100% and applies the page's volume when draining the host audio buffer.
+This avoids a save-state format change and keeps volume local across replay.
 
 ## Configuration screen
 
@@ -140,7 +184,23 @@ The regression suite covers:
 - CLI combinations, GUI field/edit/navigation coverage, and frontend input/mutation
   routing. Two GUI-configured peers must connect, confirm matching states, return
   to setup and successfully rebind for another cold boot.
+- Browser packet queue bounds, signaling validation, data-channel options,
+  cancellation and backpressure. The release WASM smoke runs paired A500/PAL and
+  A1200/NTSC machines through 120 confirmed/checksummed frames under loss,
+  duplication, reordering and asymmetric pauses. Different volume, overscan and
+  painting cadence must preserve checkpoints and produce identical final pixels.
 
 Run the focused tests with `cargo test --profile ci --locked netplay`; UDP tests
 need permission to bind loopback sockets. No external ROM or disk assets are
 required for the regression suite.
+
+After building the release web bundle, run `node tools/check-web-netplay.mjs` and
+`npm test --prefix crates/copperline-web/www`. CI runs both. The browser publishing
+workflow also checks the optimized bundle before copying `netplay.js` alongside
+the other page modules. For a served local page, the optional Playwright check
+`node tools/check-web-netplay-browser.mjs http://127.0.0.1:8000/` exercises actual
+Host/Join, cancellation, reconnect by cold boot, locked controls and mismatch
+rejection in two Chromium contexts. It also verifies that a device-keyboard tap
+appears as a held key and subsequent release in transmitted input frames.
+`CHROME_PATH` selects an installed Chrome;
+`PLAYWRIGHT_MODULE` can point to a local Playwright module.

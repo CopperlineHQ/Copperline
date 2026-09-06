@@ -29,6 +29,8 @@ use copperline::video::deinterlace::Deinterlacer;
 use copperline::video::{bitplane, present_common, FB_WIDTH, MAX_CANVAS_PIXELS};
 use wasm_bindgen::prelude::*;
 
+mod netplay;
+
 #[wasm_bindgen(start)]
 pub fn start() {
     console_error_panic_hook::set_once();
@@ -203,6 +205,13 @@ const MAX_CATCHUP_SECONDS: f64 = 0.1;
 
 #[wasm_bindgen]
 pub struct WebEmu {
+    netplay: Option<copperline::netplay::Connection<copperline::netplay::PacketQueue>>,
+    netplay_input: copperline::netplay::Input,
+    // Netplay keeps Paula's serialized output gain fixed; the browser applies
+    // this local preference when draining its host audio buffer instead.
+    netplay_volume: u8,
+    netplay_eligible: bool,
+    config: Config,
     emu: Emulator,
     audio: Rc<RefCell<Vec<f32>>>,
     fb: Vec<u32>,
@@ -348,6 +357,11 @@ impl WebEmu {
         let (serial_sink, serial) = ChannelSerialSink::pair();
         emu.bus_mut().paula.serial = Box::new(serial_sink);
         Ok(WebEmu {
+            netplay: None,
+            netplay_input: Default::default(),
+            netplay_volume: 100,
+            netplay_eligible: true,
+            config: cfg,
             emu,
             audio,
             fb: vec![0u32; MAX_CANVAS_PIXELS],
@@ -467,6 +481,7 @@ impl WebEmu {
     /// cold-reset, as if the chips had been swapped and the machine power
     /// cycled. 256 KiB Kickstart 1.x images are mirrored up automatically.
     pub fn load_rom(&mut self, rom: Vec<u8>, ext: Option<Vec<u8>>) -> Result<(), JsValue> {
+        self.require_local_session()?;
         self.emu.reload_rom(rom, ext).map_err(js_err)?;
         self.anchor = None;
         self.deferred_fields = 0;
@@ -494,6 +509,10 @@ impl WebEmu {
     }
 
     fn run_paced(&mut self, now_ms: f64, max_frames: u32, render: bool) -> Result<u32, JsValue> {
+        if self.netplay.is_some() {
+            return self.run_netplay(now_ms, max_frames, render);
+        }
+        self.netplay_eligible = false;
         self.last_run_core_ms = 0.0;
         self.last_run_render_ms = 0.0;
         let (anchor_wall, anchor_emu) = *self
@@ -547,7 +566,9 @@ impl WebEmu {
             return;
         }
         let visible_start_vpos = self.emu.bus().frame_visible_start_vpos();
-        let field_content = if self.deinterlacer.phosphor() == 0.0 {
+        let field_content = if self.netplay.is_some() {
+            bitplane::render_display_only_with_content(self.emu.bus(), &mut self.fb)
+        } else if self.deinterlacer.phosphor() == 0.0 {
             // A frame identical to the previous render needs no pipeline at
             // all: the present buffer already shows it, and the detector
             // carries the frame's CLXDAT so collisions still accumulate.
@@ -836,7 +857,14 @@ impl WebEmu {
     /// frame is 882 stereo frames. The page transfers the returned buffer to
     /// the AudioWorklet.
     pub fn take_audio(&mut self) -> Vec<f32> {
-        std::mem::take(&mut *self.audio.borrow_mut())
+        let mut audio = std::mem::take(&mut *self.audio.borrow_mut());
+        if self.netplay.is_some() && self.netplay_volume != 100 {
+            let gain = f32::from(self.netplay_volume) / 100.0;
+            for sample in &mut audio {
+                *sample *= gain;
+            }
+        }
+        audio
     }
 
     /// Queued audio frames not yet drained (diagnostics).
@@ -850,7 +878,7 @@ impl WebEmu {
     pub fn key_event(&mut self, code: &str, pressed: bool) -> bool {
         match w3c_code_to_amiga_rawkey(code) {
             Some(rawkey) => {
-                self.emu.bus_mut().enqueue_key_event(rawkey, pressed);
+                self.key_raw(rawkey, pressed);
                 true
             }
             None => false,
@@ -864,6 +892,10 @@ impl WebEmu {
     /// positional code a browser reports on every host layout, and the
     /// reverse table would have to be duplicated in the page glue.
     pub fn key_raw(&mut self, rawkey: u8, pressed: bool) {
+        if self.netplay.is_some() {
+            self.netplay_input.set_key(rawkey & 0x7f, pressed);
+            return;
+        }
         self.emu.bus_mut().enqueue_key_event(rawkey & 0x7F, pressed);
     }
 
@@ -878,6 +910,9 @@ impl WebEmu {
     /// Relative mouse motion in emulated hi-res pixels (pointer-lock
     /// movementX/Y, or scaled cursor deltas when unlocked).
     pub fn mouse_delta(&mut self, dx: f64, dy: f64) {
+        if self.netplay.is_some() {
+            return;
+        }
         if !dx.is_finite() || !dy.is_finite() {
             return;
         }
@@ -915,6 +950,9 @@ impl WebEmu {
 
     /// Mouse buttons: 0 = left, 1 = middle, 2 = right (MouseEvent.button).
     pub fn mouse_button(&mut self, button: u8, pressed: bool) {
+        if self.netplay.is_some() {
+            return;
+        }
         let input = &mut self.emu.bus_mut().input;
         match button {
             0 => input.set_mouse_button(0, 0, pressed),
@@ -941,6 +979,19 @@ impl WebEmu {
         fire: bool,
         button2: bool,
     ) {
+        if self.netplay.is_some() {
+            // The page's primary controller always arrives on port 2; the
+            // connection assigns it to this peer's negotiated Amiga port.
+            if port == 2 {
+                self.netplay_input.buttons = (self.netplay_input.buttons & !0x3f)
+                    | [up, down, left, right, fire, button2]
+                        .into_iter()
+                        .enumerate()
+                        .fold(0, |bits, (bit, on)| bits | (u16::from(on) << bit));
+            }
+            return;
+        }
+
         self.emu.bus_mut().input.set_joystick(
             port_index(port),
             up,
@@ -963,6 +1014,17 @@ impl WebEmu {
         green: bool,
         yellow: bool,
     ) {
+        if self.netplay.is_some() {
+            if port == 2 {
+                self.netplay_input.buttons = (self.netplay_input.buttons & 0x3f)
+                    | [play, rwd, ffw, green, yellow]
+                        .into_iter()
+                        .enumerate()
+                        .fold(0, |bits, (bit, on)| bits | (u16::from(on) << (bit + 6)));
+            }
+            return;
+        }
+
         self.emu
             .bus_mut()
             .input
@@ -975,6 +1037,9 @@ impl WebEmu {
     /// `set_port_device(1, "mouse")` rather than leaving a stuck stick.
     /// Unknown names are ignored.
     pub fn set_port_device(&mut self, port: u8, device: &str) {
+        if self.netplay.is_some() {
+            return;
+        }
         if let Some(device) = PortDevice::parse(device) {
             self.emu
                 .bus_mut()
@@ -1015,6 +1080,7 @@ impl WebEmu {
     /// recognised by signature rather than by name. Always write-protected;
     /// use `insert_floppy_writable` when the page will offer an export.
     pub fn insert_floppy(&mut self, drive: u8, bytes: Vec<u8>, name: &str) -> Result<(), JsValue> {
+        self.require_local_session()?;
         self.emu
             .bus_mut()
             .floppy
@@ -1033,6 +1099,7 @@ impl WebEmu {
         bytes: Vec<u8>,
         name: &str,
     ) -> Result<(), JsValue> {
+        self.require_local_session()?;
         self.emu
             .bus_mut()
             .floppy
@@ -1043,6 +1110,7 @@ impl WebEmu {
     /// Snapshot DFn's current image bytes. Standard disks export as ADF and
     /// track images as UAE extended ADF; compressed inputs export decoded.
     pub fn export_floppy(&self, drive: u8) -> Result<Vec<u8>, JsValue> {
+        self.require_local_session()?;
         self.emu
             .bus()
             .floppy
@@ -1051,6 +1119,7 @@ impl WebEmu {
     }
 
     pub fn eject_floppy(&mut self, drive: u8) -> Result<(), JsValue> {
+        self.require_local_session()?;
         self.emu
             .bus_mut()
             .floppy
@@ -1116,6 +1185,9 @@ impl WebEmu {
     /// at the emulated baud rate, so pace large transfers with
     /// `serial_input_backlog` instead of pushing megabytes at once.
     pub fn serial_send(&mut self, bytes: Vec<u8>) {
+        if self.netplay.is_some() {
+            return;
+        }
         self.serial.push_input(&bytes);
     }
 
@@ -1154,6 +1226,9 @@ impl WebEmu {
     /// with `true` when the socket opens and `false` when it closes; a page
     /// that never calls it leaves the guest seeing a modem with no call up.
     pub fn serial_set_carrier(&mut self, connected: bool) {
+        if self.netplay.is_some() {
+            return;
+        }
         self.serial.set_carrier(connected);
     }
 
@@ -1167,6 +1242,7 @@ impl WebEmu {
     // before serializing -- src/copperhf.rs's module doc -- so the core
     // emulator method takes &mut self as of M5.)
     pub fn save_state(&mut self) -> Result<Vec<u8>, JsValue> {
+        self.require_local_session()?;
         self.emu.save_state_bytes().map_err(js_err)
     }
 
@@ -1180,7 +1256,9 @@ impl WebEmu {
     /// the machine): a page that keeps its own volume, drive-sound or floppy
     /// speed choices should re-apply them after a load.
     pub fn load_state(&mut self, blob: &[u8]) -> Result<(), JsValue> {
+        self.require_local_session()?;
         self.emu.load_state_bytes(blob).map_err(js_err)?;
+        self.netplay_eligible = false;
         // A desktop state can name writable host files. The browser has no
         // such paths, so adopt every restored image into serialized memory
         // before the guest gets another chance to write it.
@@ -1211,6 +1289,7 @@ impl WebEmu {
 
     /// Cold reset (power cycle), keeping the fitted ROM and inserted disks.
     pub fn reset(&mut self) -> Result<(), JsValue> {
+        self.require_local_session()?;
         self.emu.power_on_reset().map_err(js_err)?;
         self.anchor = None;
         self.deferred_fields = 0;
@@ -1475,7 +1554,11 @@ impl WebEmu {
     }
 
     pub fn set_volume_percent(&mut self, percent: u8) {
-        self.emu.bus_mut().set_output_volume_percent(percent);
+        if self.netplay.is_some() {
+            self.netplay_volume = percent.min(100);
+        } else {
+            self.emu.bus_mut().set_output_volume_percent(percent);
+        }
     }
 
     /// Average the left and right channels into both outputs (the desktop's
@@ -1511,6 +1594,9 @@ impl WebEmu {
     /// DMA transfers complete almost instantly. Other values fall back to
     /// 100. Applies immediately; drive mechanics stay at real speed.
     pub fn set_floppy_speed(&mut self, percent: u16) {
+        if self.netplay.is_some() {
+            return;
+        }
         self.emu.bus_mut().floppy.set_speed_percent(percent);
     }
 

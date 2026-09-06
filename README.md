@@ -127,7 +127,7 @@ The manual is published at [copperline.dev/docs](https://copperline.dev/docs/) a
 - [WHDLoad Support](docs/guide/whdload.md) - Direct WHDLoad package loading
 - [Direct Executable Launching](docs/guide/run.md) - Running cross-compiled Amiga binaries
 - [Floppy Hardware Bridge](docs/guide/fluxbridge.md) - Real floppy drives via Greaseweazle
-- [Rollback Netplay](docs/guide/netplay.md) - GUI or CLI setup for direct two-player sessions with input prediction and rollback
+- [Rollback Netplay](docs/guide/netplay.md) - two-player sessions through desktop GUI/CLI or browser WebRTC, with input prediction and rollback
 - [Headless Mode](docs/guide/headless.md) - Scripted runs and screenshot/frame dumps
 - [Debugging](docs/debugger/window.md) - In-window, headless, and GDB debugging
 - [VS Code](docs/debugger/vscode.md) - Setup and illustrated source debugging; [Bartman with Copperline](docs/debugger/vscode-bartman.md) covers fork installation and visual profiling

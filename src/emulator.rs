@@ -1468,14 +1468,12 @@ impl Emulator {
         self.snapshot_blob()
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn netplay_snapshot(&self) -> Result<Vec<u8>> {
         let mut bytes = Vec::new();
         self.machine.write_rollback_state(&mut bytes)?;
         Ok(bytes)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn netplay_restore(&mut self, blob: &[u8]) -> Result<()> {
         self.machine
             .apply_rollback_state(&mut std::io::Cursor::new(blob))?;
@@ -2324,7 +2322,6 @@ impl Emulator {
     /// Advance to the next hardware video frame for netplay. The normal
     /// frontend quantum is a CPU budget and can end within a raster frame;
     /// network inputs need a boundary defined entirely by the guest hardware.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn step_netplay_frame(&mut self, replay: bool) -> Result<()> {
         self.real_pacing_budget_mode = RealPacingBudgetMode::M68kCycles;
         self.reset_realtime_quantum();
