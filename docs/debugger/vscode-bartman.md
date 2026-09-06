@@ -25,8 +25,9 @@ capture; they are not populated just by starting the debugger.
 ## Install the fork without waiting for upstream
 
 First [build Copperline](vscode.md#build-copperline), including its AROS ROM
-assets. Use a build containing commit `3d334a11` or later; it includes the
-fix that keeps a windowed Bartman launch paused until GDB connects.
+assets. Use Copperline 0.19.0 or later, or a source build containing commit
+`3d334a11`; both include the fix that keeps a windowed Bartman launch paused
+until GDB connects.
 
 You also need Git, Node.js/npm, and Visual Studio Code. The fork includes
 the compiler, GDB, elf2hunk, and SDK files; no separate Amiga SDK download is

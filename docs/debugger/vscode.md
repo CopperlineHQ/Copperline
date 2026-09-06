@@ -24,12 +24,12 @@ in **Run and Debug**, and stop one session before starting the other.
 
 ## Build Copperline
 
-The September 2026 debugging additions require a recent Copperline build.
-The setup in these chapters was checked against Copperline commit
+The debugging features in these chapters ship in Copperline 0.19.0 and
+later. The setup was checked against Copperline commit
 [`3d334a11`](https://github.com/CopperlineHQ/Copperline/commit/3d334a11),
-which includes the Bartman debugger startup fixes. Until those changes are in
-a release you use, build from source rather than assuming an older installed
-release contains them.
+which includes the Bartman debugger startup fixes. An older installed
+release does not contain them: install 0.19.0 or newer, or build from
+source as below.
 
 Install the platform prerequisites in [Getting started](../guide/getting-started.md),
 then build both programs from a current Copperline checkout:
