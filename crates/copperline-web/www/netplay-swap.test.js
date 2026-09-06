@@ -83,6 +83,20 @@ test('neither drive changes until both frames and the received disk are verified
   await idle(guest);
 });
 
+test('a connecting disk channel leaves the game running and can be retried once open', async t => {
+  const { host, guest, machines, wires } = pair(t);
+  wires[0].readyState = 'connecting';
+  await assert.rejects(host.swap(0, disk(7)), /not ready yet/);
+  assert.equal(host.closed, false);
+  assert.equal(host.busy, false);
+  assert.deepEqual(machines.map(machine => machine.events), [[], []]);
+  wires[0].readyState = 'open';
+  await host.swap(0, disk(7));
+  await idle(guest);
+  assert.deepEqual(machines[0].disks, machines[1].disks);
+  assert.ok(machines.every(machine => machine.events.includes('resume')));
+});
+
 test('invalid local files preserve the game; the guest cannot initiate a swap', async t => {
   const { host, guest, machines } = pair(t);
   await assert.rejects(host.swap(0, disk(255)), /Invalid disk image/);

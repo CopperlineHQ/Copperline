@@ -203,6 +203,57 @@ fn mfm_encode_decode_round_trip_sector_data() -> Result<()> {
 }
 
 #[test]
+fn gzip_floppy_limit_covers_the_whole_multi_member_stream() -> Result<()> {
+    // Small fixtures exercise the allocation boundary without large archives.
+    let first = [1; 64];
+    let mut packed = gzip_bytes(&first)?;
+    assert_eq!(decode_gzip_floppy_image(&packed, 64)?, first);
+    assert!(decode_gzip_floppy_image(&packed, 63)
+        .unwrap_err()
+        .to_string()
+        .contains("exceeds"));
+    packed.extend_from_slice(&gzip_bytes(&[2; 64])?);
+    assert_eq!(decode_gzip_floppy_image(&packed, 128)?.len(), 128);
+    assert!(decode_gzip_floppy_image(&packed, 127)
+        .unwrap_err()
+        .to_string()
+        .contains("exceeds"));
+    Ok(())
+}
+
+#[test]
+fn bounded_memory_insert_preserves_the_disk_when_expansion_is_rejected() -> Result<()> {
+    let mut ctrl = FloppyController::default();
+    ctrl.insert_memory_disk_image_bytes(0, vec![1; ADF_SIZE], "original.adf".into(), true)?;
+    let before = bincode::serialize(&ctrl)?;
+    let replacement = gzip_bytes(&vec![2; ADF_SIZE])?;
+    let err = ctrl
+        .insert_memory_disk_image_bytes_with_limit(
+            0,
+            replacement.clone(),
+            "replacement.adz".into(),
+            true,
+            ADF_SIZE - 1,
+        )
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("expanded floppy image exceeds"));
+    assert_eq!(bincode::serialize(&ctrl)?, before);
+    ctrl.insert_memory_disk_image_bytes_with_limit(
+        0,
+        replacement,
+        "replacement.adz".into(),
+        true,
+        ADF_SIZE,
+    )?;
+    let image = ctrl.drives[0].image.as_ref().unwrap();
+    assert!(image.write_protected);
+    assert!(
+        matches!(&image.data, FloppyImageData::StandardAdf(bytes) if bytes == &vec![2; ADF_SIZE])
+    );
+    Ok(())
+}
+
+#[test]
 fn multi_member_adz_decompresses_every_member() -> Result<()> {
     // Concatenated gzip members are one valid gzip stream (`cat a.gz
     // b.gz`), and only the whole of it is the ADF: a decoder that stopped
@@ -214,7 +265,7 @@ fn multi_member_adz_decompresses_every_member() -> Result<()> {
     let mut packed = gzip_bytes(first)?;
     packed.extend_from_slice(&gzip_bytes(second)?);
 
-    let decoded = decode_gzip_floppy_image(&packed)?;
+    let decoded = decode_gzip_floppy_image(&packed, GZIP_IMAGE_LIMIT)?;
     assert_eq!(decoded.len(), ADF_SIZE);
     assert_eq!(&decoded[ADF_SIZE - 4..], b"TAIL");
     Ok(())

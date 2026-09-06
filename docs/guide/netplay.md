@@ -68,7 +68,9 @@ This works with games that require all disks in DF0. **Eject selected drive**
 performs a synchronized removal if a game needs to see an empty drive first;
 choose the next disk when ready. The ordinary local disk controls remain locked.
 
-Replacement images are limited to 16 MiB and default to write-protected.
+Replacement images are limited to 16 MiB, including after gzip/zip expansion,
+and default to write-protected. The controls become available once the disk
+transfer channel is connected.
 **Allow writes to the replacement disk** supports uncompressed standard and UAE
 extended ADFs. Writable changes are held only in the mounted session image;
 replacing that disk or disconnecting discards them. Invalid local files leave

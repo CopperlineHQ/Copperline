@@ -22,6 +22,8 @@ The web version runs at [copperline.dev/try](https://copperline.dev/try/):
   By default, images mount read-only. Check **Open disks writable** to enable in-memory
   modifications. Use **Blank DF0/DF1** to create an empty formatted disk, and **Download DF0/DF1**
   to export modified disk images. URL query parameters: `?df0=<url>&df1=<url>`.
+  Gzip images may expand to at most 128 MiB; netplay replacements have a smaller
+  16 MiB limit on both the file and its expanded contents.
 - **Display options:**
   - **Monitor presentation:** Select CRT shader and bezel frames (**1084**, **Classic**,
     **CRT filter**, or **Plain**).

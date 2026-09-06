@@ -410,7 +410,8 @@ export function mountNetplayPanel(parent, { prepare, start, stop, getMedia, useM
     field('diagnostics').disabled = !lastLink;
     const swapEnabled = !!link?.host && link.settings?.swaps === SWAP_VERSION;
     field('disks').hidden = !swapEnabled;
-    const canSwap = swapEnabled && !!getMachine?.(link)?.netplay_status()[0] && !link.swaps?.busy && !readingDisk;
+    const canSwap = swapEnabled && link.swaps?.channel.readyState === 'open'
+      && !!getMachine?.(link)?.netplay_status()[0] && !link.swaps.busy && !readingDisk;
     for (const name of ['disk-drive', 'disk-file', 'disk-writable', 'disk-eject']) field(name).disabled = !canSwap;
     if (!active) field('accept').disabled = true;
   };

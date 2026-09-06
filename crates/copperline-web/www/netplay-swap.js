@@ -126,6 +126,7 @@ export class DiskSwaps {
 
   async swap(drive, disk) {
     if (!this.host || this.busy || this.closed) throw new Error('Only the host can start one disk change at a time');
+    if (this.channel.readyState !== 'open') throw new Error('The disk transfer channel is not ready yet');
     const bytes = disk?.bytes ?? new Uint8Array();
     if (!(bytes instanceof Uint8Array) || bytes.length > DISK_LIMIT || (disk && !bytes.length)) throw new Error('Select a disk image of up to 16 MiB');
     // Invalid local files leave the current game running.

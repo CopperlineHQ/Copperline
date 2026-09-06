@@ -181,7 +181,10 @@ inputs are retained, and wall-clock pacing is reanchored around the pause.
 The peers compare SHA-256 digests of the complete confirmed machine state,
 transfer at most 16 MiB in 16 KiB chunks with 256 KiB send-buffer backpressure,
 verify the image digest, and decode into a temporary controller before agreeing
-to apply. Both live drives change at the stopped boundary with canonical
+to apply. The core decoder enforces the same 16 MiB bound on gzip/zip expansion
+during validation and insertion; the ordinary gzip floppy loader has a 128 MiB
+expanded-size cap for larger flux captures. Host controls wait for the separate
+disk channel to open. Both live drives change at the stopped boundary with canonical
 `netplay-dfN` metadata and memory backing. A second full-state digest comparison
 precedes resume. Empty payloads perform an eject. Transaction IDs, message phases,
 metadata and chunk sizes are checked; overlapping requests are rejected. Thirty

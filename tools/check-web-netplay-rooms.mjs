@@ -157,7 +157,20 @@ try {
     phase = 'playing';
     return link;
   }
+  // Model a disk channel that opens later than input/setup. The game can
+  // run, but a disk action must remain unavailable until its channel opens.
+  await host.evaluate(() => {
+    const state = Object.getOwnPropertyDescriptor(RTCDataChannel.prototype, 'readyState');
+    Object.defineProperty(RTCDataChannel.prototype, 'readyState', { ...state, get() {
+      return this.label === 'copperline-disks-v1' ? 'connecting' : state.get.call(this);
+    } });
+    window.__openDiskChannel = () => Object.defineProperty(RTCDataChannel.prototype, 'readyState', state);
+  });
   const link = await connect();
+  assert.equal(await host.locator('#netplay-disk-file').isDisabled(), true);
+  assert.equal(await host.locator('#netplay-disk-eject').isDisabled(), true);
+  await host.evaluate(() => window.__openDiskChannel());
+  await host.locator('#netplay-disk-file:enabled').waitFor();
   for (const [i, page] of pages.entries()) {
     for (const id of ['boot', 'machine', 'video', 'reset', 'pause', 'df0', 'df1']) {
       assert.equal(await page.locator(`#${id}`).isDisabled(), true, `${id} must stay locked`);

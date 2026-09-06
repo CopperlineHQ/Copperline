@@ -225,11 +225,12 @@ impl WebEmu {
         if bytes.is_empty() {
             floppy.eject_disk_image(drive)
         } else {
-            floppy.insert_memory_disk_image_bytes(
+            floppy.insert_memory_disk_image_bytes_with_limit(
                 drive,
                 bytes,
                 format!("netplay-df{drive}").into(),
                 !writable,
+                16 * 1024 * 1024,
             )
         }
         .map_err(js_err)?;
@@ -271,12 +272,14 @@ impl WebEmu {
         );
         if !bytes.is_empty() {
             // Decode before the two-phase commit, without changing drive state.
-            copperline::floppy::FloppyController::default().insert_memory_disk_image_bytes(
-                0,
-                bytes,
-                "replacement".into(),
-                !writable,
-            )?;
+            copperline::floppy::FloppyController::default()
+                .insert_memory_disk_image_bytes_with_limit(
+                    0,
+                    bytes,
+                    "replacement".into(),
+                    !writable,
+                    16 * 1024 * 1024,
+                )?;
         }
         Ok(())
     }

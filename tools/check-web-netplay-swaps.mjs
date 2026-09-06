@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { gzipSync } from 'node:zlib';
 import { DiskSwaps } from '../crates/copperline-web/www/netplay-swap.js';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -19,7 +20,7 @@ class Wire extends EventTarget {
   readyState = 'open';
   bufferedAmount = 0;
   send(data) {
-    data = typeof data === 'string' ? data : data.slice().buffer;
+    data = typeof data === 'string' ? data : Uint8Array.from(data).buffer;
     setTimeout(() => this.peer.onmessage?.({ data }), 1);
   }
 }
@@ -80,7 +81,8 @@ for (const [model, video, delay, window] of [['A500', 'PAL', 0, 8], ['A500', 'PA
     for (const [drive, value, writable] of [[0, 7, false], [0, 8, true], [1, 9, false], [0, null, false], [0, 7, false]]) {
       let finished = false;
       const sending = swaps[0].swap(drive, value === null ? null : {
-        bytes: new Uint8Array(901120).fill(value), name: `Disk ${value}.adf`, writable,
+        bytes: value === 9 ? gzipSync(new Uint8Array(901120).fill(value)) : new Uint8Array(901120).fill(value),
+        name: `Disk ${value}.${value === 9 ? 'adz' : 'adf'}`, writable,
       }).then(() => { finished = true; });
       sending.catch(() => {});
       await pump(() => finished && !swaps[1].busy);
