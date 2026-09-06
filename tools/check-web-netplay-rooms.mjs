@@ -180,6 +180,37 @@ try {
     assert.ok(!JSON.stringify(report).includes(new URL(link).hash.slice(6)));
     console.log(`Player ${i + 1}: ${JSON.stringify({ status: await page.evaluate(() => [...window.__emu.netplay_status()]), route: report.stats.selectedPair })}`);
   }
+  // Record the real WASM commit boundary; each peer must apply once at the
+  // same frame, produce the same state digest, and keep checking future frames.
+  await Promise.all(pages.map(page => page.evaluate(() => {
+    window.__diskCommits = [];
+    const emu = window.__emu, apply = emu.netplay_apply_disk.bind(emu);
+    emu.netplay_apply_disk = () => {
+      apply();
+      window.__diskCommits.push({ frame: emu.netplay_status()[1], hash: [...emu.netplay_swap_digest()] });
+    };
+  })));
+  assert.equal(await guest.locator('#netplay-disks').isVisible(), false);
+  let commits = 0;
+  for (const [drive, value] of [[0, 3], [0, 4], [0, null], [0, 3], [1, 5]]) {
+    await host.locator('#netplay-disk-file:enabled').waitFor();
+    await host.locator('#netplay-disk-drive').selectOption(String(drive));
+    if (value === null) await host.locator('#netplay-disk-eject').click();
+    else await host.locator('#netplay-disk-file').setInputFiles({ name: `replacement-${value}.adf`,
+      mimeType: 'application/octet-stream', buffer: Buffer.alloc(901120, value) });
+    commits++;
+    await Promise.all(pages.map(page => page.waitForFunction(count => window.__diskCommits.length === count,
+      commits, { timeout: 30000 })));
+    const boundaries = await Promise.all(pages.map(page => page.evaluate(() => window.__diskCommits.at(-1))));
+    assert.deepEqual(boundaries[0], boundaries[1], 'swap must commit identical states at one frame');
+    const checked = (Math.ceil(boundaries[0].frame / 60) + 2) * 60;
+    await Promise.all(pages.map(page => page.waitForFunction(frame => window.__emu?.netplay_status()[6] >= frame,
+      checked, { timeout: 90000 })));
+    for (const page of pages) assert.equal(await page.evaluate(drive => window.__emu.disk_name(drive), drive),
+      value === null ? undefined : `netplay-df${drive}`);
+    console.log(`DF${drive} ${value === null ? 'ejection' : 'swap'} at frame ${boundaries[0].frame}; both checked ${checked}`);
+  }
+  await host.locator('#netplay-panel').screenshot({ path: `${output}/disk-swaps.png` });
   phase = 'disconnect';
   await host.locator('#netplay-disconnect').click();
   await Promise.all(pages.map(page => page.locator('#netplay-room-host:enabled').waitFor()));
@@ -189,10 +220,30 @@ try {
   await guest.waitForFunction(() => window.__copied?.startsWith('{'));
   assert.ok(JSON.parse(await guest.evaluate(() => window.__copied)).stats);
   await connect();
+  // Interrupt an actual replacement transfer while both cores are held.
+  await host.evaluate(() => {
+    const send = RTCDataChannel.prototype.send;
+    RTCDataChannel.prototype.send = function(data) {
+      if (this.label === 'copperline-disks-v1') {
+        if (typeof data !== 'string') return;
+        if (JSON.parse(data).type === 'end') { window.__heldDiskTransfer = true; return; }
+      }
+      return send.call(this, data);
+    };
+    window.__restoreDiskSend = () => { RTCDataChannel.prototype.send = send; };
+  });
+  await host.locator('#netplay-disk-file:enabled').waitFor();
+  await host.locator('#netplay-disk-file').setInputFiles({ name: 'interrupted.adf',
+    mimeType: 'application/octet-stream', buffer: Buffer.alloc(901120, 6) });
+  await host.waitForFunction(() => window.__heldDiskTransfer === true);
+  await Promise.all(pages.map(page => page.waitForFunction(() => window.__emu?.netplay_swap_ready())));
+  const heldFrames = await Promise.all(pages.map(page => page.evaluate(() => window.__emu.netplay_status()[1])));
+  assert.equal(heldFrames[0], heldFrames[1]);
   phase = 'disconnect';
   await guest.locator('#netplay-disconnect').click();
   await Promise.all(pages.map(page => page.locator('#netplay-room-host:enabled').waitFor()));
   await restored();
+  await host.evaluate(() => window.__restoreDiskSend());
   const remembered = await guest.evaluate(() => new Promise((resolve, reject) => {
     const request = indexedDB.open('copperline');
     request.onerror = () => reject(request.error);
@@ -210,5 +261,5 @@ try {
   await host.locator('#netplay-panel').screenshot({ path: `${output}/mobile.png` });
   assert.deepEqual(errors, []);
   if (shutdownNotices.length) console.log('WebKit native shutdown notices:', JSON.stringify(shutdownNotices));
-  console.log('Invitations, verified host ROM/disks/configuration, transfer cancellation, reconnect, guest restoration, diagnostics and responsive rendering passed');
+  console.log('Invitations, verified host setup, repeated synchronized swaps/ejections, transfer cancellation, reconnect, guest restoration, diagnostics and responsive rendering passed');
 } finally { await browser.close(); }

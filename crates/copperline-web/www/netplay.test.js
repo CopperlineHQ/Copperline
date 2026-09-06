@@ -32,20 +32,25 @@ test('connection codes round-trip only valid settings and the expected descripti
   assert.throws(() => validateSettings({ ...settings, controller: 'mouse' }));
   assert.throws(() => validateSettings({ ...settings, session: 'bad' }));
   assert.notEqual(newSettings(0, 1, 'cd32').session, newSettings(0, 1, 'cd32').session);
-  const shared = { ...settings, media: 'host-v1' };
+  const shared = { ...settings, media: 'host-v1', swaps: 'disk-v1' };
   assert.deepEqual(decodeCode(encodeCode(description('offer'), shared), 'offer').settings, shared);
   assert.throws(() => validateSettings({ ...settings, media: 'unknown' }));
+  assert.throws(() => validateSettings({ ...settings, swaps: 'unknown' }));
 });
 
 test('setup-enabled offers create a reliable channel and reject incompatible setup channels', async () => {
   const link = new RtcLink({ PeerConnection: Peer });
-  await link.offer({ ...settings, media: 'host-v1' });
+  await link.offer({ ...settings, media: 'host-v1', swaps: 'disk-v1' });
   assert.equal(link.media.channel.label, 'copperline-setup-v1');
   assert.equal(link.media.channel.ordered, true);
   assert.equal(link.media.channel.maxRetransmits, undefined);
+  assert.equal(link.swaps.channel.label, 'copperline-disks-v1');
+  assert.equal(link.swaps.channel.ordered, true);
+  assert.equal(link.swaps.channel.maxRetransmits, undefined);
   link.close();
   assert.equal(link.media, null);
   assert.equal(link.mediaReady, null);
+  assert.equal(link.swaps, null);
   const other = new RtcLink({ PeerConnection: Peer });
   other.attach(new Channel('copperline-setup-v1', { ordered: false, maxRetransmits: 0 }));
   assert.equal(other.closed, true);

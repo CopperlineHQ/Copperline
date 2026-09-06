@@ -286,6 +286,15 @@ struct MachineRuntimeState {
     cpu_clock_carry: u32,
 }
 
+/// Same-process rollback also needs the interrupt sample consumed at the next
+/// instruction boundary. File saves intentionally omit these adapter latches.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct MachineRollbackState {
+    bus: crate::bus::RollbackState,
+    sampled_irq_level: u8,
+    ipl_sample_held: bool,
+}
+
 /// Longest 68000-family instruction worth attributing to one PC when
 /// marking executed code: opcode plus full extension words. A larger
 /// jump between instruction boundaries is a branch or an exception, not
@@ -347,14 +356,15 @@ struct CpuBus {
     /// PREVIOUS instruction's last bus access -- a level that rises during an
     /// instruction's trailing internal cycles is not seen until one
     /// instruction later. Transient: re-sampled on every access, never
-    /// serialized (a loaded state re-samples within one instruction).
+    /// serialized in file saves (a loaded state re-samples within one instruction).
+    /// Exact rollback captures it in `MachineRollbackState`.
     sampled_irq_level: u8,
     /// Set by the core's `ipl_hold_sample` poll-point marker: the current
     /// `sampled_irq_level` is the instruction's microcode poll value and
     /// later accesses in the same instruction must not re-latch it (e.g.
     /// RMW instructions poll during the final prefetch, BEFORE their
     /// writeback). Cleared when the boundary decision consumes the sample.
-    /// Transient like `sampled_irq_level`; never serialized.
+    /// File-save transient like `sampled_irq_level`; captured for rollback.
     ipl_sample_held: bool,
     /// Start PC of the instruction currently inside the core, used only by
     /// `COPPERLINE_DIAG_CPU_SYNC` to filter internal-cycle trace lines.
@@ -1472,7 +1482,12 @@ impl M68kMachine {
     }
 
     pub(crate) fn write_rollback_state<W: std::io::Write>(&self, w: &mut W) -> Result<()> {
-        serialize_component(w, &self.bus.bus.rollback_state(), "rollback latches")?;
+        let runtime = MachineRollbackState {
+            bus: self.bus.bus.rollback_state(),
+            sampled_irq_level: self.bus.sampled_irq_level,
+            ipl_sample_held: self.bus.ipl_sample_held,
+        };
+        serialize_component(w, &runtime, "rollback latches")?;
         self.write_state(w)
     }
 
@@ -1493,7 +1508,7 @@ impl M68kMachine {
     fn apply_state_inner<R: std::io::Read>(
         &mut self,
         r: &mut R,
-        rollback: Option<crate::bus::RollbackState>,
+        rollback: Option<MachineRollbackState>,
     ) -> Result<()> {
         let cpu: CpuCore = deserialize_component(r, "CPU core")?;
         let runtime: MachineRuntimeState = deserialize_component(r, "machine runtime")?;
@@ -1504,7 +1519,9 @@ impl M68kMachine {
         bus.adopt_host_resources(&mut self.bus.bus)?;
         bus.adopt_ui_debug_state(&mut self.bus.bus);
         if let Some(runtime) = rollback {
-            bus.restore_rollback_state(runtime);
+            bus.restore_rollback_state(runtime.bus);
+            self.bus.sampled_irq_level = runtime.sampled_irq_level;
+            self.bus.ipl_sample_held = runtime.ipl_sample_held;
         } else {
             bus.reset_transient_video_after_state_load();
         }
@@ -7272,6 +7289,51 @@ mod tests {
         assert_eq!(machine.d(0), 0x11);
         assert_eq!(machine.pc(), 0x0000_0106);
         assert_eq!(machine.bus().delivered_irq_pending, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_preserves_the_previous_instruction_interrupt_sample() -> Result<()> {
+        for held in [false, true] {
+            let mut bus = test_bus_with_pc(0x100);
+            write_program(
+                &mut bus,
+                0x100,
+                &[0x46fc, 0x2000, 0x4e71, 0x4e71, 0x4e71, 0x60fe],
+            );
+            write_program(&mut bus, 0x200, &[0x7007, 0x60fe]);
+            set_autovector(&mut bus, 3, 0x200);
+            bus.paula.intena = INT_MASTER | INT_VERTB;
+            bus.irq_latency_setting = 5;
+            let mut machine = M68kMachine::new(bus, CpuModel::M68000, false)?;
+            machine.step_slice(1)?;
+            machine.bus_mut().paula.intreq = INT_VERTB;
+            machine.bus_mut().advance_devices(10);
+            assert_eq!(machine.bus.sampled_irq_level, 0);
+            machine.bus.ipl_sample_held = held;
+            let mut checkpoint = Vec::new();
+            machine.write_rollback_state(&mut checkpoint)?;
+            machine.step_slice(1)?;
+            assert_eq!(
+                machine.pc(),
+                0x106,
+                "the old sample delays interrupt recognition"
+            );
+            let mut expected = Vec::new();
+            machine.write_rollback_state(&mut expected)?;
+            machine.step_slice(5)?;
+            assert_eq!(machine.d(0), 7);
+            machine.apply_rollback_state(&mut std::io::Cursor::new(&checkpoint))?;
+            assert_eq!(machine.bus.sampled_irq_level, 0);
+            assert_eq!(machine.bus.ipl_sample_held, held);
+            machine.step_slice(1)?;
+            let mut actual = Vec::new();
+            machine.write_rollback_state(&mut actual)?;
+            assert_eq!(
+                actual, expected,
+                "replay must take the interrupt on the same instruction"
+            );
+        }
         Ok(())
     }
 

@@ -58,6 +58,23 @@ to 2 MiB each and floppy images to 16 MiB each. Starting from a running machine
 uses the current contents of writable disks; it still cold-boots rather than
 transferring a running save state.
 
+### Changing disks during browser play
+
+When a game asks for another disk, the host opens **Controls → Netplay**, selects
+**DF0** (or DF1) under **Drive**, and chooses the next image under **Swap disk**.
+Both machines pause, the guest receives and verifies the replacement, and both
+resume at the same emulated frame. The guest does not need to select a file.
+This works with games that require all disks in DF0. **Eject selected drive**
+performs a synchronized removal if a game needs to see an empty drive first;
+choose the next disk when ready. The ordinary local disk controls remain locked.
+
+Replacement images are limited to 16 MiB and default to write-protected.
+**Allow writes to the replacement disk** supports uncompressed standard and UAE
+extended ADFs. Writable changes are held only in the mounted session image;
+replacing that disk or disconnecting discards them. Invalid local files leave
+the game running. An interrupted transfer or a state mismatch ends the session
+rather than allowing the players to continue with different disks.
+
 If a connection ends, use **Copy diagnostics** on both devices. The report keeps
 ICE, peer, data-channel and DTLS states, candidate types and packet counters.
 It excludes network addresses, SDP, invitation/session tokens and credentials.
