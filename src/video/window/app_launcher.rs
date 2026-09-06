@@ -1347,6 +1347,19 @@ impl App {
         raw: RawConfig,
         options: Option<crate::netplay::Options>,
     ) -> Result<()> {
+        if options.is_some() {
+            // These endpoints belong to App and survive a machine replacement.
+            #[cfg(feature = "control")]
+            anyhow::ensure!(
+                self.control.is_none(),
+                "Netplay requires restarting Copperline without the control endpoint"
+            );
+            #[cfg(feature = "gdb")]
+            anyhow::ensure!(
+                self.gdb.is_none(),
+                "Netplay requires restarting Copperline without the GDB endpoint"
+            );
+        }
         let mut staged = raw.clone();
         let (game, opts) = crate::whdload::game_and_options(&staged);
         if let Some(game) = game {

@@ -11682,6 +11682,43 @@ fn netplay_gui_run_rejects_errors_and_preserves_the_current_machine() {
     assert!(app.launcher_state().unwrap().netplay.enabled);
 }
 
+#[cfg(any(feature = "control", feature = "gdb"))]
+fn assert_netplay_gui_rejects_endpoint(mut app: super::App, endpoint: &str) {
+    use crate::video::launcher::{LauncherField as F, StatusKind};
+    app.machine_config.audio.output_enabled = Some(false);
+    app.open_launcher();
+    app.activate_ui_control(UiControl::LauncherToggle(F::NetplayEnabled));
+    let state = app.launcher_state_mut().unwrap();
+    state.netplay.bind = "127.0.0.1:0".into();
+    state.netplay.peer = "127.0.0.1:19732".into();
+    state.netplay.code = "0123456789abcdef0123456789abcdef".into();
+    let before = app.emu.netplay_snapshot().unwrap();
+    app.launcher_run();
+    let status = app.launcher_state().unwrap().status.as_ref().unwrap();
+    assert_eq!(status.kind, StatusKind::Error);
+    assert!(status.text.contains(endpoint), "{}", status.text);
+    assert!(app.netplay.is_none());
+    assert_eq!(app.emu.netplay_snapshot().unwrap(), before);
+}
+
+#[cfg(feature = "control")]
+#[test]
+fn netplay_gui_rejects_an_existing_control_endpoint() {
+    let mut app = test_app();
+    let (handle, _commands, _replies) = crate::control::windowed::ControlHandle::test_pair();
+    app.attach_control(handle, &crate::control::Config::new(":0".into()));
+    assert_netplay_gui_rejects_endpoint(app, "control");
+}
+
+#[cfg(feature = "gdb")]
+#[test]
+fn netplay_gui_rejects_an_existing_gdb_endpoint() {
+    let mut app = test_app();
+    let (handle, _commands, _replies) = crate::gdbstub::windowed::GdbHandle::test_pair();
+    app.attach_gdb(handle, &crate::gdbstub::Config::new(":0".into()));
+    assert_netplay_gui_rejects_endpoint(app, "GDB");
+}
+
 #[test]
 fn netplay_gui_peers_connect_and_can_return_to_setup_and_retry() -> anyhow::Result<()> {
     use crate::video::launcher::{LauncherField as F, LauncherTab};

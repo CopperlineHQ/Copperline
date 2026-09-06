@@ -421,6 +421,91 @@ fn safe_config() -> Result<crate::config::Config> {
     Ok(cfg)
 }
 
+#[test]
+fn netplay_rejects_host_parallel_devices_and_noncanonical_toccata_state() -> Result<()> {
+    use crate::config::ParallelDevice;
+    let mut cfg = safe_config()?;
+    validate_config(&cfg)?;
+    for device in [ParallelDevice::Printer, ParallelDevice::Sampler] {
+        cfg.parallel.device = device;
+        assert!(prepare_config(&mut cfg)
+            .unwrap_err()
+            .to_string()
+            .contains("parallel"));
+    }
+    cfg.parallel.device = ParallelDevice::None;
+    cfg.toccata = true;
+    assert!(prepare_config(&mut cfg)
+        .unwrap_err()
+        .to_string()
+        .contains("Toccata"));
+    cfg.toccata = false;
+    prepare_config(&mut cfg)?;
+    Ok(())
+}
+
+#[test]
+fn capture_waits_for_the_peer_to_acknowledge_retransmitted_local_input() -> Result<()> {
+    let peer = UdpSocket::bind("127.0.0.1:0")?;
+    peer.set_read_timeout(Some(Duration::from_secs(1)))?;
+    let mut emu = emulator()?;
+    let mut session = Session::new(options(peer.local_addr()?, 0), &mut emu, &safe_config()?)?;
+    let mut packet = wire::Packet {
+        session: session.options.session,
+        identity: session.identity,
+        player: 1,
+        ready: true,
+        delay: 0,
+        window: 8,
+        ack: 0,
+        inputs: vec![(0, input(0, 1))],
+        checksum: None,
+    };
+    peer.send_to(&packet.encode(), session.socket.local_addr()?)?;
+    for _ in 0..100 {
+        if session.step(&mut emu, input(0, 0), true)? {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(session.status().frame, 1);
+    assert_eq!(session.status().confirmed_frame, 1);
+    assert_eq!(session.status().acknowledged_frame, 0);
+    assert!(!session.status().ready_to_capture());
+    // Discard the first local input datagram as an asymmetric packet loss.
+    let mut bytes = [0; wire::MAX_PACKET + 1];
+    let received_input = |bytes: &[u8]| {
+        wire::Packet::decode(bytes).is_some_and(|packet| packet.inputs.contains(&(0, input(0, 0))))
+    };
+    loop {
+        let len = peer.recv(&mut bytes)?;
+        if received_input(&bytes[..len]) {
+            break;
+        }
+    }
+    let captured_state = emu.netplay_snapshot()?;
+    session.step(&mut emu, Input::default(), false)?;
+    let len = peer.recv(&mut bytes)?;
+    assert!(
+        received_input(&bytes[..len]),
+        "capture polling retransmits input"
+    );
+    assert!(!session.status().ready_to_capture());
+    packet.ack = 1;
+    peer.send_to(&packet.encode(), session.socket.local_addr()?)?;
+    for _ in 0..100 {
+        session.step(&mut emu, Input::default(), false)?;
+        if session.status().ready_to_capture() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(session.status().ready_to_capture());
+    assert_eq!(session.status().acknowledged_frame, 1);
+    assert_eq!(emu.netplay_snapshot()?, captured_state);
+    Ok(())
+}
+
 fn poll_error(session: &mut Session, emu: &mut Emulator) -> anyhow::Error {
     for _ in 0..100 {
         if let Err(error) = session.step(emu, Input::default(), false) {

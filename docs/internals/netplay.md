@@ -59,7 +59,8 @@ suppresses live audio and speculative host output.
 It does not increment committed-frame statistics. The desktop renderer's
 generation is invalidated after a correction, so an asynchronous result from
 the old timeline cannot replace the corrected image. Scheduled headless captures
-wait for confirmation before rendering their target.
+wait for confirmation and local-input acknowledgement before rendering their
+target, so they keep retransmitting inputs still needed by the other peer.
 
 Only frames below the contiguous remote-input frontier are confirmed. A
 checkpoint hashes the snapshot *after* its frame, once all inputs affecting it
@@ -106,7 +107,11 @@ configuration pages show those changes.
 
 Run commits any focused field, parses the connection through the shared session
 ID/options validators, applies the deterministic RTC default and builds a cold
-machine. It creates the UDP session before replacing the live machine, so a
+machine. Existing App-level control/GDB endpoints block netplay startup because
+they survive machine replacement. Static validation rejects parallel host
+devices before construction, including the sampler attached later by the
+frontend, and rejects Toccata's noncanonical serialized resampler map.
+It creates the UDP session before replacing the live machine, so a
 validation or bind failure leaves that machine intact and reports the error in
 the launcher. The successful session then uses the same `attach_netplay` path as
 a CLI launch. Session code generation uses host randomness for a fresh identifier;

@@ -46,6 +46,8 @@ addresses, session code, player and delay/window settings are kept for the curre
 app session; Save does not put them in machine configuration files.
 
 The GUI and CLI use the same protocol and can connect to each other.
+An app started with a control or GDB endpoint must be restarted without that
+endpoint before enabling netplay in the GUI.
 
 ## Start from the command line
 
@@ -142,9 +144,13 @@ observers have state outside the rollback snapshots. A state file cannot be used
 to bypass these restrictions: this version does not accept `--load-state` or USS
 imports for netplay.
 
+The Toccata sound board is also excluded: its rate-specific resamplers do not
+yet produce a stable byte order for the checkpoint hashes.
+
 For headless verification, both commands can add `--noaudio` and a
 `--screenshot-after SECS PATH` with the same timestamp. Scheduled captures wait
-for actual remote input before rendering. `--press-after` and `--key-after`
+for actual remote input and acknowledgement of the local input before rendering
+and exiting. `--press-after` and `--key-after`
 feed the synchronized keyboard; `--joy-after ... PORT` must name that peer's
 own port. Input schedules belong to each peer and need not be identical.
 

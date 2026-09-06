@@ -98,6 +98,15 @@ pub fn validate_config(cfg: &crate::config::Config) -> Result<()> {
     if let Some(reason) = cfg.runahead_machine_block_reason() {
         anyhow::bail!("netplay cannot use {reason}");
     }
+    // The sampler attaches in the frontend after session construction; reject
+    // it here, before fingerprinting or opening any parallel host device.
+    ensure!(
+        cfg.parallel.device == crate::config::ParallelDevice::None,
+        "netplay requires the parallel port device to be none"
+    );
+    // Its rate-specific resamplers serialize from a randomized HashMap, so
+    // equivalent boards cannot yet guarantee byte-identical checkpoints.
+    ensure!(!cfg.toccata, "netplay cannot use the Toccata sound board");
     ensure!(
         !cfg.cpu_jit
             && cfg.emulation.power_on
@@ -151,9 +160,20 @@ pub struct Status {
     pub connected: bool,
     pub frame: u64,
     pub confirmed_frame: u64,
+    /// All local inputs below this frame have reached the peer.
+    pub acknowledged_frame: u64,
     pub rollbacks: u64,
     pub replayed_frames: u64,
     pub checked_frame: u64,
+}
+
+impl Status {
+    /// A capture may end this process, so both peers need its frame's inputs.
+    pub fn ready_to_capture(&self) -> bool {
+        self.connected
+            && self.frame == self.confirmed_frame
+            && self.frame <= self.acknowledged_frame
+    }
 }
 
 impl Session {
@@ -222,6 +242,7 @@ impl Session {
             connected: self.connected,
             frame: self.rollback.current,
             confirmed_frame: self.rollback.confirmed,
+            acknowledged_frame: self.rollback.acknowledged,
             rollbacks: self.rollback.rollbacks,
             replayed_frames: self.rollback.replayed_frames,
             checked_frame: self.last_checked,

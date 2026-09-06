@@ -147,7 +147,7 @@ impl App {
             if status.rollbacks != before {
                 self.reset_render_pipeline();
             }
-            if status.frame == status.confirmed_frame {
+            if status.ready_to_capture() {
                 return Ok(());
             }
             std::thread::sleep(std::time::Duration::from_millis(2));
