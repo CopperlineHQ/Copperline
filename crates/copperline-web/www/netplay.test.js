@@ -122,7 +122,7 @@ test('data-channel open runs once, remote close drains queued input before clean
   assert.equal(opens, 1);
   channel.onmessage({ data: new Uint8Array([7, 8]).buffer });
   channel.onclose();
-  assert.deepEqual(closed, { reason: 'Peer disconnected', received: [7, 8] });
+  assert.deepEqual(closed, { reason: 'Peer disconnected. Copy diagnostics for a connection report.', received: [7, 8] });
   assert.equal(link.closed, true);
   assert.equal(channel.onopen, null);
   assert.equal(link.pc.ondatachannel, null);
@@ -140,4 +140,45 @@ test('connection-state failure closes once and an open queued before cancellatio
   assert.equal(opens, 0);
   assert.equal(closes, 1);
   assert.equal(link.channel.readyState, 'closed');
+});
+
+
+test('relay-only configuration requires TURN and preserves the requested ICE policy', () => {
+  const link = new RtcLink({ PeerConnection: Peer });
+  let config;
+  link.pc.setConfiguration = value => { config = value; };
+  try {
+    assert.throws(() => link.configureIce([], true), /relay is not available/);
+    const servers = [{ urls: ['stun:example.test', 'turns:example.test:443'], username: 'temporary', credential: 'temporary' }];
+    link.configureIce(servers, true);
+    assert.deepEqual(config, { iceServers: servers, iceTransportPolicy: 'relay' });
+    link.configureIce(servers);
+    assert.equal(config.iceTransportPolicy, 'all');
+  } finally { link.close(); }
+});
+
+test('TURN query compatibility preserves UDP, TLS, credentials and relay-only policy', () => {
+  const link = new RtcLink({ PeerConnection: Peer });
+  const configurations = [];
+  link.pc.setConfiguration = value => {
+    configurations.push(value);
+    if (value.iceServers.some(server => [].concat(server.urls).some(url => url.includes('?')))) throw new DOMException('Invalid TURN URL query string', 'SyntaxError');
+  };
+  try {
+    const credentials = { username: 'temporary-user', credential: 'temporary-key' };
+    const servers = [{ urls: 'stun:example.test:3478' }, { ...credentials, urls: [
+      'turn:example.test:3478?transport=udp', 'turn:example.test:3478?transport=tcp',
+      'turns:example.test:443?transport=tcp', 'turns:example.test:5349',
+    ] }];
+    link.configureIce(servers, true);
+    assert.equal(configurations.length, 2);
+    assert.equal(configurations[0].iceServers, servers);
+    assert.deepEqual(configurations[1], { iceTransportPolicy: 'relay', iceServers: [
+      { urls: ['stun:example.test:3478'] },
+      { ...credentials, urls: ['turn:example.test:3478', 'turns:example.test:443', 'turns:example.test:5349'] },
+    ] });
+    assert.throws(() => link.configureIce([{ ...credentials, urls: 'turn:example.test:80?transport=tcp' }], true), { name: 'SyntaxError' });
+    link.pc.setConfiguration = () => { throw new DOMException('credentials invalid', 'InvalidAccessError'); };
+    assert.throws(() => link.configureIce(servers, true), { name: 'InvalidAccessError' });
+  } finally { link.close(); }
 });

@@ -1,0 +1,15 @@
+{
+  "name": "copperline-netplay-signaling",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --ip 127.0.0.1 --port 8787",
+    "deploy": "wrangler deploy --env=\"\"",
+    "test": "node --test *.test.js"
+  },
+  "devDependencies": {
+    "@zxing/library": "0.23.0",
+    "miniflare": "4.20260730.0",
+    "wrangler": "4.129.0"
+  }
+}

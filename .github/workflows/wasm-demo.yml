@@ -9,8 +9,8 @@ name: Browser demo
 # The page shell (try/index.html) is hand-written in the website repository
 # and left alone. This workflow replaces the parts that must change together
 # with the emulator: the wasm-bindgen bundle (try/pkg), the JS glue that
-# drives the WebEmu API (try/try.js, try/netplay.js, try/render-stride.js,
-# try/serial-telnet.js, try/audio-worklet.js, sourced from
+# drives the WebEmu API (try/try.js, the netplay modules and QR license,
+# try/render-stride.js, try/serial-telnet.js, try/audio-worklet.js, sourced from
 # crates/copperline-web/www), and the AROS ROMs (try/aros).
 #
 # Pushing to the website repository needs the SITE_DEPLOY_KEY secret: the
@@ -145,6 +145,10 @@ jobs:
           cp crates/copperline-web/www/try.js \
              crates/copperline-web/www/render-stride.js \
              crates/copperline-web/www/netplay.js \
+             crates/copperline-web/www/netplay-room.js \
+             crates/copperline-web/www/netplay-diagnostics.js \
+             crates/copperline-web/www/netplay-qr.js \
+             crates/copperline-web/www/netplay-qr.LICENSE \
              crates/copperline-web/www/serial-telnet.js \
              crates/copperline-web/www/audio-worklet.js site/try/
           cp assets/aros/aros-amiga-m68k-rom.bin \

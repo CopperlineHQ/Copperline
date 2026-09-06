@@ -526,6 +526,23 @@ jobs:
         working-directory: crates/copperline-web/www
         run: npm test
 
+  netplay-service:
+    name: Browser netplay room service
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: services/netplay/package-lock.json
+      - run: npm ci
+        working-directory: services/netplay
+      - run: npm test
+        working-directory: services/netplay
+      - run: npx wrangler deploy --env="" --dry-run
+        working-directory: services/netplay
+
   player:
     name: Publisher-kit player crate
     # Guards the feature combination the player builds against (frontend +

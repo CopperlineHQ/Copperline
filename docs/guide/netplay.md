@@ -8,8 +8,9 @@ This follows the approach described by [GGPO](https://github.com/pond3r/ggpo);
 it uses Copperline's own Rust implementation and wire protocol.
 
 Sessions connect directly to a known peer. Desktop builds use UDP; browsers use
-WebRTC with copy/paste connection codes and optional STUN address discovery.
-There is no lobby, relay, spectator mode or reconnect. Browser and desktop peers
+WebRTC with private room invitations and TURN relay fallback when the page has a
+room service configured. Manual connection codes remain available.
+There is no public lobby, spectator mode or automatic reconnect. Browser and desktop peers
 cannot connect to each other. Use the same Copperline build on both machines;
 mixed operating systems and browser engines have not yet been qualified.
 
@@ -21,15 +22,19 @@ and disks, and choose the same model, video standard, floppy speed, floppy sound
 disk setting on both pages. Setup starts a fresh machine, replacing any running
 local session.
 
-1. The host chooses **Input delay**, **Rollback limit** and **Controllers**, then
-   clicks **Host game**. Send **Your connection code** to the other player.
-2. The other player pastes it into **Code from the other player** and clicks
-   **Join offer**. Send the resulting answer code back to the host. The offer
-   supplies the controller and delay/window settings for both peers.
-3. The host pastes the answer into **Code from the other player** and clicks
-   **Connect answer**. Both pages cold-boot after checking that their initial
-   machines match. The panel reports confirmed frames, rollbacks and the latest
-   checked frame.
+1. The host clicks **Host game** and shares the invitation link using **Copy
+   invitation**, the device share sheet, or the QR code. **Advanced** contains
+   the controller type, input delay and rollback limit.
+2. The other player opens the link (or pastes it into the invitation field),
+   loads matching ROMs and disks, then clicks **Join game**. The offer and answer
+   are exchanged automatically. The host supplies the controller and delay settings.
+3. Both pages cold-boot after checking that their initial machines match. The
+   panel reports confirmed frames, rollbacks and the latest checked frame.
+
+Invitations allow one joining player and expire after 15 minutes. Expiry removes
+setup data from the service; it does not stop an established game. Share links
+privately: anyone with a live invitation can claim its remaining place. The link
+contains an opaque room ID, with no ROM URLs, connection codes or credentials.
 
 Host owns Amiga port 1; Join owns port 2. On each page, the usual first gamepad,
 keyboard joystick or touch controls drive that player's port. The keyboard
@@ -37,13 +42,25 @@ joystick mode is enabled on desktop browsers; touch devices start with touch
 controls. Cycle **Joystick** off to type ordinary Amiga keys. Both keyboards contribute to the shared keyboard. Mouse input is
 disabled. The desktop F11/F12 netplay shortcuts do not apply to the browser.
 
-The default STUN server helps WebRTC discover an internet route. Leave the field
-blank on both pages for LAN-only address discovery, or enter another `stun:` URL.
-Some NATs and firewalls still prevent a direct connection; use a shared LAN or
-VPN in that case. There is no TURN relay configuration in this panel.
-Connection codes contain WebRTC network addresses and session details; exchange
-them privately with the person you intend to play with. ROMs, disks and machine
-snapshots are not sent to the peer. WebRTC encrypts the data channel.
+Room setup uses a small signaling service. WebRTC tries direct routes and can
+fall back to a TURN relay. **Advanced → Use relay only** forces that route for
+troubleshooting. Relay credentials expire after 24 hours; start a new session
+for longer play. ROMs, disks and machine snapshots stay on each device. WebRTC
+encrypts the data channel, including traffic carried by a relay.
+
+If a connection ends, use **Copy diagnostics** on both devices. The report keeps
+ICE, peer, data-channel and DTLS states, candidate types and packet counters.
+It excludes network addresses, SDP, invitation/session tokens and credentials.
+A route that opens before DTLS fails needs different investigation from failed
+ICE discovery. Browser versions alone do not establish the cause.
+
+**Advanced → Manual connection codes** works without the room service. The host
+clicks **Host with manual codes**, sends its code to the guest, and the guest
+pastes it and clicks **Join offer**. The guest sends its answer back; the host
+pastes it and clicks **Connect answer**. The STUN field helps discover routes;
+leave it blank for LAN-only discovery. Manual setup has no relay fallback.
+Its large codes contain network addresses and session details, so exchange them
+privately. If the page has no room service configured, Advanced opens by default.
 
 Keep both pages open. A suspended tab can stall its peer and eventually time out;
 background execution depends on browser and device restrictions. Machine, media,
@@ -51,7 +68,7 @@ serial, floppy sound, pause and save-state controls are locked from setup until 
 Display and main output volume choices remain local. Floppy sound enablement
 and level are part of the machine fingerprint and must match. **Disconnect** cancels setup or stops
 play, discards session disk writes, and restores the selected cold-boot media.
-Either player can host or join again with new codes. The browser does not resume
+Either player can host or join again with a new invitation or new manual codes. The browser does not resume
 the abandoned network timeline as local play.
 
 ## Set up in the GUI
