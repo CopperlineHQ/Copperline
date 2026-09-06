@@ -123,7 +123,20 @@ _chf_int_handler:
 					| queue head (0 = empty)
 	tst.l	d0
 	beq.s	.Lcheck_changed
-	movea.l	d0,a1			| a1 = completed IORequest pointer
+	| DMA cache maintenance before the completion becomes visible: the
+	| host wrote io_Actual/io_Error (and, for reads, the data payload)
+	| straight into guest memory, so a copyback data cache (real 68040,
+	| or the emulator's `[cpu] dcache` model) still holds stale lines
+	| over them. chf_post_dma (device.c) CachePostDMA's the request and
+	| its buffers -- called with the same ordinary stack-argument
+	| convention as chf_drain_changes below (caller pushes, caller
+	| cleans up); the pop doubles as the cleanup and lands the pointer
+	| in a1 exactly where ReplyMsg wants it. The C call may trash
+	| d0/d1/a0/a1 (a5 = dev survives; a0 is re-derived after ReplyMsg
+	| anyway).
+	move.l	d0,-(sp)		| push ioreq: chf_post_dma's argument
+	bsr.w	_chf_post_dma		| chf_post_dma(ioreq)
+	movea.l	(sp)+,a1		| pop the argument: a1 = IORequest
 	move.l	4.w,a6
 	jsr	LVO_REPLYMSG(a6)	| ReplyMsg(a1=msg); trashes d0/d1/a0/a1
 					| (a5 = dev survives)

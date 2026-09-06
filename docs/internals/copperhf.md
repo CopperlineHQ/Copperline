@@ -152,6 +152,21 @@ The boot ROM contains an Exec device built from:
 32-bit write. The request completes through the INT2 handler after the
 host worker has finished and the board applies its result.
 
+The board is a busmaster, so the driver performs exec's DMA cache
+maintenance (V37+; skipped on Kickstart 1.3, which has neither the vectors
+nor the cached CPUs): `BeginIO` calls `CachePreDMA` over the request block
+and its data buffers before ringing the doorbell, and the INT2 drain calls
+`CachePostDMA` (device.c's `chf_post_dma`) on each completed request before
+`ReplyMsg`, invalidating the host-written `io_Actual`/`io_Error` fields and
+any read payload -- the request block first, so the fields the buffer pass
+reads are themselves fresh. The mounter's polled pre-interrupt path
+(`chf_do_io`) brackets its own I/O the same way. Without this a copyback
+data cache (a real 68040, or the emulator's `[cpu] dcache` model) serves
+stale lines over the DMA'd bytes; the emulator additionally drops its
+modelled data cache when any device tick writes guest memory (see
+[](cpu)'s Caches section), so either half alone covers emulated runs, and
+the driver half also keeps the device correct on genuinely cached silicon.
+
 (asynchronous-io-m5)=
 ## Asynchronous I/O
 

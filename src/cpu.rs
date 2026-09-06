@@ -2426,7 +2426,7 @@ impl M68kMachine {
         // a device interrupt that came due during the previous instruction is
         // recognized at the correct boundary even within a multi-instruction
         // core slice.
-        self.bus.bus.flush_timed_devices();
+        self.bus.flush_timed_devices_dcache_coherent();
         let mut level = self.pending_irq_level();
         // The boundary decision uses the IPL level latched at the previous
         // instruction's last bus access (CpuBus::sample_ipl), not the live
@@ -2799,7 +2799,7 @@ impl M68kMachine {
         // `refresh_irq_line`, so the last one would otherwise stay pending).
         // This keeps `pending_device_cck` zero at every slice boundary, where
         // save states are taken -- the accumulator is not serialized.
-        self.bus.bus.flush_timed_devices();
+        self.bus.flush_timed_devices_dcache_coherent();
         self.bus.bus.set_cpu_bus_arbitration_enabled(false);
         let (bus_advanced_cck, _bus_tick) = self.bus.bus.take_slice_bus_advance();
         if stopped {
@@ -2954,7 +2954,7 @@ impl M68kMachine {
             }
         }
 
-        self.bus.bus.flush_timed_devices();
+        self.bus.flush_timed_devices_dcache_coherent();
         self.bus.bus.set_cpu_bus_arbitration_enabled(false);
         let (bus_advanced_cck, _bus_tick) = self.bus.bus.take_slice_bus_advance();
         if stopped {
@@ -3213,6 +3213,26 @@ enum PlainMemRegion {
 impl CpuBus {
     fn mask(&self, address: u32) -> u32 {
         address & self.address_mask
+    }
+
+    /// Flush deferred timed-device colour clocks, then drop the data-cache
+    /// model if any device's tick DMA'd into guest memory (copperhf
+    /// draining a completed read into the caller's fast-RAM buffer, a
+    /// plugin board writing a buffer). This is the asynchronous
+    /// counterpart of the `clear_all` the synchronous device-access path
+    /// below already performs on `DeviceHost::touched_memory`: without it,
+    /// the DMA'd data reads back stale through the modelled 030/040/060
+    /// data cache (PFS3 on a 68040 read corrupted file data through
+    /// copperhf until this existed). Checked unconditionally -- the flag
+    /// can be pending from an idle-CPU device advance even when no colour
+    /// clocks are.
+    fn flush_timed_devices_dcache_coherent(&mut self) {
+        self.bus.flush_timed_devices();
+        if self.bus.take_devices_wrote_memory() {
+            if let Some(dcache) = self.dcache.as_deref_mut() {
+                dcache.clear_all();
+            }
+        }
     }
 
     fn classify_plain_memory(&self, addr: u32, size: usize) -> Option<PlainMemRegion> {
@@ -5734,6 +5754,111 @@ mod tests {
         assert_eq!(bus.read_long(0x3000), 0x1234_5678);
         let (second, _) = bus.bus.take_slice_bus_advance();
         assert!(first > 0 && second > 0, "chip RAM data reads stay uncached");
+    }
+
+    #[test]
+    fn device_tick_dma_invalidates_dcache_at_coherent_flush() {
+        // The copperhf board completes reads asynchronously: the payload is
+        // DMA'd into the caller's buffer by the board's tick(), not by the
+        // doorbell access itself, so the synchronous device-access path's
+        // dcache drop never sees it. This pins the tick-path counterpart:
+        // the drain sets Bus::devices_wrote_memory, and
+        // flush_timed_devices_dcache_coherent drops the modelled data cache
+        // so the DMA'd bytes read back fresh (the 68040+PFS3 corruption).
+        let mut dcache = crate::cache::CpuCache::default();
+        dcache.enabled = true;
+        let mut bus = CpuBus {
+            bus: test_bus(reset_rom(0, 0)),
+            address_mask: ADDRESS_MASK_24BIT,
+            dbg_memw_addr: None,
+            dbg_memw_hit: None,
+            icache: None,
+            dcache: Some(Box::new(dcache)),
+            dbg_irq_window: None,
+            unmapped_read_continues_word: false,
+            last_fetch_cache_hit: false,
+            instruction_fetches_cached: false,
+            sampled_irq_level: 0,
+            ipl_sample_held: false,
+            diag_current_pc: 0,
+            jit_enabled: false,
+        };
+        bus.bus.set_cpu_bus_arbitration_enabled(true);
+
+        // A tiny flat disk image (no DOS/RDSK signature, so every LBA is a
+        // direct file offset), filled with the i % 251 pattern.
+        let path =
+            std::env::temp_dir().join(format!("copperline-cpu-dcache-dma-{}", std::process::id()));
+        let bytes: Vec<u8> = (0..16 * 512).map(|i| (i % 251) as u8).collect();
+        std::io::Write::write_all(&mut std::fs::File::create(&path).unwrap(), &bytes).unwrap();
+        let image = crate::harddrive::HardDriveImage::open(
+            &path,
+            "CHF0",
+            "copperhf",
+            None,
+            0,
+            crate::diskimage::FileSystem::OFS,
+        )
+        .unwrap();
+        let mut board = crate::copperhf::CopperhfBoard::new();
+        board.attach_unit(0, image);
+        bus.bus
+            .devices
+            .push(crate::zorro_device::BoardDevice::Copperhf(board));
+
+        // CMD_READ of sector 0 into a fast-RAM buffer (dcache-cacheable).
+        // The IOStdReq itself lives in chip RAM like the copperhf tests'.
+        let req = 0x1000u32;
+        let buf = FAST_RAM_BASE as u32 + 0x400;
+        let hdr = &mut bus.bus.mem.chip_ram;
+        hdr[req as usize + 24..][..4].copy_from_slice(&0u32.to_be_bytes()); // io_Unit
+        hdr[req as usize + 28..][..2].copy_from_slice(&2u16.to_be_bytes()); // CMD_READ
+        hdr[req as usize + 36..][..4].copy_from_slice(&512u32.to_be_bytes()); // io_Length
+        hdr[req as usize + 40..][..4].copy_from_slice(&buf.to_be_bytes()); // io_Data
+        hdr[req as usize + 44..][..4].copy_from_slice(&0u32.to_be_bytes()); // io_Offset
+        {
+            let mut host = crate::zorro_device::DeviceHost::for_slot(&mut bus.bus.mem, 0);
+            crate::zorro_device::ZorroDevice::write(
+                &mut bus.bus.devices[0],
+                0x4020, // CHF_DOORBELL
+                4,
+                req,
+                &mut host,
+            );
+        }
+
+        // Prime the data cache over the buffer while the read is in flight:
+        // the buffer still holds zeros, and the fill makes the line stale
+        // the moment the drain lands.
+        assert_eq!(bus.read_long(buf), 0);
+
+        // Tick until the drain DMAs the sector in (peek bypasses the cache).
+        let expected = u32::from_be_bytes([0, 1, 2, 3]);
+        let mut drained = false;
+        for _ in 0..2000 {
+            bus.bus.advance_devices(16);
+            if bus.peek_long(buf) == expected {
+                drained = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(drained, "copperhf never drained the completed read");
+
+        // The stale line still serves hits -- exactly the corruption a
+        // 68040 guest saw -- until the coherent flush drops the cache.
+        assert_eq!(
+            bus.read_long(buf),
+            0,
+            "pre-flush read must still hit the stale cached line"
+        );
+        bus.flush_timed_devices_dcache_coherent();
+        assert_eq!(
+            bus.read_long(buf),
+            expected,
+            "coherent flush must drop the dcache so the DMA'd data is seen"
+        );
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

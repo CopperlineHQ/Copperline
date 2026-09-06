@@ -92,6 +92,12 @@ pub struct Sdmac {
     dma_active: bool,
     dma_warned: bool,
     activity: bool,
+    /// Set when `pump_dma` wrote guest memory this tick. Drained by the bus
+    /// tick loop into `Bus::devices_wrote_memory` so the CPU's modelled
+    /// data cache drops entries the DMA wrote behind it (fast-RAM SCSI
+    /// buffers on a 68030/040/060 with `[cpu] dcache`). Transient.
+    #[serde(skip)]
+    wrote_memory: bool,
 }
 
 impl Default for Sdmac {
@@ -112,6 +118,7 @@ impl Sdmac {
             dma_active: false,
             dma_warned: false,
             activity: false,
+            wrote_memory: false,
         }
     }
 
@@ -343,9 +350,16 @@ impl Sdmac {
     }
 
     fn dma_write_word(&mut self, mem: &mut Memory, addr: u32, w: u16) {
-        if !crate::zorro_device::dma_write_word(mem, addr, w) {
+        if crate::zorro_device::dma_write_word(mem, addr, w) {
+            self.wrote_memory = true;
+        } else {
             self.warn_dma_target(addr);
         }
+    }
+
+    /// Drain the "DMA wrote guest memory" latch (see the field's comment).
+    pub fn take_wrote_memory(&mut self) -> bool {
+        std::mem::take(&mut self.wrote_memory)
     }
 
     fn warn_dma_target(&mut self, addr: u32) {
