@@ -2,6 +2,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --check try.js && node --test render-stride.test.js"
+    "test": "node --check try.js && node --test *.test.js"
   }
 }

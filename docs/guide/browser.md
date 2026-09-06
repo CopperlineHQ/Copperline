@@ -67,6 +67,20 @@ The web build uses the same `.clstate` file format as the desktop version:
   for instant resumption across page reloads.
 - **Saved states panel:** Manage named state slots in browser storage.
 
+### Rollback netplay
+
+**Controls → Netplay** connects two browsers using WebRTC. The host sends an offer
+code, the joining player sends an answer, and the host connects that answer.
+Both pages start fresh machines with matching ROMs, disks and hardware settings.
+Each player controls one Amiga port; late input is predicted and corrected by
+rollback. See [browser netplay setup](netplay.md#browser-netplay) for the steps,
+controller mapping, STUN settings and restrictions.
+
+Netplay requires WebRTC data channels as well as WebAssembly. It works on a
+static site without a signaling server. A desktop UDP peer cannot join a browser
+session. Save states, media changes, serial connections and pause are unavailable
+until disconnect.
+
 ## Architecture
 
 The browser implementation consists of the following components:
@@ -82,6 +96,9 @@ The browser implementation consists of the following components:
   HTML5 `<canvas>` via `putImageData` or WebGL2 textures with custom CRT fragment shaders.
 - **Audio pipeline:** Stereo 44.1 kHz float samples are transferred directly to an
   `AudioWorklet` processor for low-latency playback.
+- **Netplay:** The Rust core owns the shared rollback timeline and bounded packet
+  queues. `www/netplay.js` handles connection codes and the WebRTC data channel;
+  `try.js` owns the session lifecycle and locks controls that change the machine.
 
 ## Building the WebAssembly package locally
 
@@ -108,6 +125,11 @@ wasm-bindgen --target web --out-dir pkg \
 
 The compiled JavaScript loader (`copperline_web.js`) and WebAssembly binary
 (`copperline_web_bg.wasm`) are output to the `pkg/` directory.
+
+From the repository root, `node tools/check-web-netplay.mjs` exercises this release
+bundle with two emulators, packet loss/reordering, input changes and different
+presentation settings. Run `npm test --prefix crates/copperline-web/www` for the
+page controller tests. These checks need no display, network or external ROMs.
 
 ## Embedding with the WebEmu API
 
@@ -183,6 +205,51 @@ requestAnimationFrame(renderLoop);
   containing the source sub-rect, destination rect, and integer scale multipliers (`0, 0` for
   smooth scaling). Returns an empty array until the first frame is presented. Used by `try.js`
   when integer scaling or autocrop is enabled without a monitor bezel.
+
+### Embedding netplay
+
+Create and load a fresh `WebEmu` for each connection. After WebRTC opens, call
+`start_netplay(player, session, delay, window, controller)` before the first
+`run` or `run_hidden` call. `player` is 1 or 2; `session` is a shared 32-digit hex
+ID; delay is an integer from 0 to 6, window from 1 to 12, and controller is
+`"joystick"` or `"cd32"`. Both ports use that controller. A machine that has run
+or loaded a save state is ineligible. A fitted RTC is seeded to 2000-01-01 UTC;
+this does not add a clock to models without one. Failed startup restores the
+machine and leaves it available for local use or another startup attempt.
+
+`RtcLink` in `www/netplay.js` provides `offer(settings)`, `answer(offerCode)` and
+`accept(answerCode)`. Its `onOpen` callback is the point to construct the machine
+and call `start_netplay`. Its `onClose` callback must stop the page's loops and
+free the machine. Immediately after startup, call `run_hidden(now, 0)` and
+`link.send(emu)` once to send the initial fingerprint. Then call `link.receive(emu)` before `run`/`run_hidden`, then
+`link.send(emu)` afterwards, including polls that advance zero frames. Polls with
+zero frames process handshakes, corrections and retransmissions. The ordinary
+render and audio-drain APIs still apply. On close, drain queued packets and
+poll once more before freeing the machine, to surface a pending mismatch error.
+
+For another transport, pass each complete received packet to
+`netplay_receive(Uint8Array)`, and drain `netplay_take_packet()` until it returns
+an empty array. Preserve packet boundaries; do not interpret packets as text.
+The supported browser transport uses an unordered data channel with
+`maxRetransmits: 0`; Copperline performs input retransmission itself.
+
+`netplay_status()` returns `[connected, frame, confirmed, acknowledged, rollbacks,
+replayed, checked]`, with `connected` represented by 0 or 1. It returns an empty
+array outside netplay. `netplay_release_input()` clears this peer's held input;
+call it when the page loses focus. Existing key methods collect local input.
+During netplay, the port-2 joystick/CD32 methods collect the local player's
+controller even when that player owns Amiga port 1; port-1 calls are ignored.
+This preserves the page's first-gamepad mapping.
+
+`WebEmu.netplay_packet_layout()` returns `[protocol, maxBytes, headerBytes,
+inputBytes]` for glue compatibility checks. Floppy sound enablement and level
+must match before startup; their setters fail during a session. Output volume
+and mono/stereo presentation remain local.
+
+Machine/media/state operations, including controller fitting and floppy speed,
+fail while a session exists; mouse and serial
+input are ignored. A protocol error stays latched. Free the instance and start
+fresh after any disconnect or error; there is no operation to resume it locally.
 
 ### HTML element hooks in `try.js`
 

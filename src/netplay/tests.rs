@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use super::*;
+use std::net::UdpSocket;
 
 #[derive(Default)]
 struct ToyMachine {
@@ -147,6 +148,31 @@ fn invalid_input_and_ack_are_rejected() -> Result<()> {
     assert!(rb.receive(0, input(999, 1)).is_err());
     assert!(rb.receive(u64::MAX, Input::default()).is_err());
     assert!(rb.acknowledge(100).is_err());
+    Ok(())
+}
+
+#[test]
+fn browser_packet_queues_bound_bursts_and_preserve_recent_retransmissions() -> Result<()> {
+    let mut queue = PacketQueue::default();
+    for byte in 0..100 {
+        queue.push(&[byte])?;
+    }
+    let mut buffer = [0; wire::MAX_PACKET + 1];
+    for expected in 36..100 {
+        assert_eq!(queue.receive(&mut buffer)?, Some(1));
+        assert_eq!(buffer[0], expected);
+    }
+    assert_eq!(queue.receive(&mut buffer)?, None);
+    assert!(queue.push(&vec![0; wire::MAX_PACKET + 1]).is_err());
+    assert!(queue.send(&vec![0; wire::MAX_PACKET + 1]).is_err());
+    queue.push(&[1, 2])?;
+    assert!(queue.receive(&mut [0]).is_err());
+    for _ in 0..64 {
+        assert!(queue.send(&[1, 2])?);
+    }
+    assert!(!queue.send(&[3])?);
+    assert_eq!(queue.pop(), Some(vec![1, 2]));
+    assert!(queue.send(&[3])?);
     Ok(())
 }
 
@@ -313,8 +339,8 @@ fn udp_pair_with_delay(delay: u8, window: u8) -> Result<()> {
         Session::new(session_options(1)?, &mut machines[1], &safe_config()?)?,
     ];
     let destinations = [
-        sessions[0].socket.local_addr()?,
-        sessions[1].socket.local_addr()?,
+        sessions[0].transport.socket.local_addr()?,
+        sessions[1].transport.socket.local_addr()?,
     ];
     let mut queued = Vec::<(u64, usize, Vec<u8>)>::new();
     let mut packets = 0u64;
@@ -384,7 +410,7 @@ fn mismatch_desync_and_disconnect_stop_the_session() -> Result<()> {
         inputs: vec![],
         checksum: None,
     };
-    peer.send_to(&packet.encode(), session.socket.local_addr()?)?;
+    peer.send_to(&packet.encode(), session.transport.socket.local_addr()?)?;
     assert!(poll_error(&mut session, &mut emu)
         .to_string()
         .contains("mismatch"));
@@ -400,7 +426,7 @@ fn mismatch_desync_and_disconnect_stop_the_session() -> Result<()> {
     session.rollback.received = 60;
     session.rollback.hashes.insert(60, [1; 32]);
     packet.checksum = Some((60, [2; 32]));
-    peer.send_to(&packet.encode(), session.socket.local_addr()?)?;
+    peer.send_to(&packet.encode(), session.transport.socket.local_addr()?)?;
     assert!(poll_error(&mut session, &mut emu)
         .to_string()
         .contains("desynchronized"));
@@ -451,7 +477,7 @@ fn capture_waits_for_the_peer_to_acknowledge_retransmitted_local_input() -> Resu
     let mut emu = emulator()?;
     let mut session = Session::new(options(peer.local_addr()?, 0), &mut emu, &safe_config()?)?;
     let mut packet = wire::Packet {
-        session: session.options.session,
+        session: session.settings.session,
         identity: session.identity,
         player: 1,
         ready: true,
@@ -461,7 +487,7 @@ fn capture_waits_for_the_peer_to_acknowledge_retransmitted_local_input() -> Resu
         inputs: vec![(0, input(0, 1))],
         checksum: None,
     };
-    peer.send_to(&packet.encode(), session.socket.local_addr()?)?;
+    peer.send_to(&packet.encode(), session.transport.socket.local_addr()?)?;
     for _ in 0..100 {
         if session.step(&mut emu, input(0, 0), true)? {
             break;
@@ -492,7 +518,7 @@ fn capture_waits_for_the_peer_to_acknowledge_retransmitted_local_input() -> Resu
     );
     assert!(!session.status().ready_to_capture());
     packet.ack = 1;
-    peer.send_to(&packet.encode(), session.socket.local_addr()?)?;
+    peer.send_to(&packet.encode(), session.transport.socket.local_addr()?)?;
     for _ in 0..100 {
         session.step(&mut emu, Input::default(), false)?;
         if session.status().ready_to_capture() {
@@ -523,5 +549,125 @@ fn netplay_snapshot_preserves_the_completed_frame_and_runtime_latches() -> Resul
     let before = emu.netplay_snapshot()?;
     emu.netplay_restore(&before)?;
     assert_eq!(emu.netplay_snapshot()?, before);
+    Ok(())
+}
+
+#[test]
+fn queued_peers_confirm_input_driven_machine_state() -> Result<()> {
+    let mut machines = [emulator()?, emulator()?];
+    let settings = |player| Settings {
+        player,
+        session: [42; 16],
+        input_delay: 0,
+        rollback_frames: 8,
+    };
+    let mut peers = [
+        Connection::with_transport(
+            settings(0),
+            PacketQueue::default(),
+            &mut machines[0],
+            &safe_config()?,
+        )?,
+        Connection::with_transport(
+            settings(1),
+            PacketQueue::default(),
+            &mut machines[1],
+            &safe_config()?,
+        )?,
+    ];
+    let inputs = [
+        Input {
+            buttons: 1 | 16,
+            ..Default::default()
+        },
+        Input {
+            buttons: 2 | 32,
+            ..Default::default()
+        },
+    ];
+    for _ in 0..200 {
+        for player in 0..2 {
+            let advance = peers[player].status().frame < 60;
+            peers[player].step(&mut machines[player], inputs[player], advance)?;
+            while let Some(packet) = peers[player].transport_mut().pop() {
+                peers[1 - player].transport_mut().push(&packet)?;
+            }
+        }
+        if peers.iter().all(|p| p.status().checked_frame == 60) {
+            break;
+        }
+    }
+    for peer in &peers {
+        assert_eq!(peer.status().checked_frame, 60);
+    }
+    // An independent uninterrupted machine proves that equal hashes did not
+    // result from both transport adapters silently dropping the same input.
+    let mut baseline = emulator()?;
+    for _ in 0..60 {
+        EmulatedMachine(&mut baseline).frame(inputs, [0; 16], false)?;
+    }
+    for machine in &machines {
+        assert_eq!(machine.netplay_snapshot()?, baseline.netplay_snapshot()?);
+        assert!(machine.bus().input.ports[0].up);
+        assert!(machine.bus().input.ports[0].fire);
+        assert!(machine.bus().input.ports[1].down);
+        assert!(machine.bus().input.ports[1].button2);
+    }
+    Ok(())
+}
+
+#[test]
+fn recognized_session_reports_incompatible_build_but_ignores_other_sessions() -> Result<()> {
+    for offset in [4, 6] {
+        let mut machine = emulator()?;
+        let mut peer = Connection::with_transport(
+            Settings {
+                player: 0,
+                session: [42; 16],
+                input_delay: 0,
+                rollback_frames: 8,
+            },
+            PacketQueue::default(),
+            &mut machine,
+            &safe_config()?,
+        )?;
+        peer.step(&mut machine, Input::default(), false)?;
+        let mut packet = peer.transport_mut().pop().unwrap();
+        packet[offset] ^= 1;
+        packet[10] ^= 1;
+        peer.transport_mut().push(&packet)?;
+        peer.step(&mut machine, Input::default(), false)?;
+        packet[10] ^= 1;
+        peer.transport_mut().push(&packet)?;
+        assert!(peer
+            .step(&mut machine, Input::default(), false)
+            .unwrap_err()
+            .to_string()
+            .contains("incompatible build"));
+    }
+    Ok(())
+}
+
+#[test]
+fn udp_transport_discards_foreign_source_and_keeps_expected_peer() -> Result<()> {
+    let expected = UdpSocket::bind("127.0.0.1:0")?;
+    let foreign = UdpSocket::bind("127.0.0.1:0")?;
+    let mut transport = UdpTransport::new(options(expected.local_addr()?, 0))?;
+    foreign.send_to(&[1], transport.socket.local_addr()?)?;
+    let mut bytes = [0; 8];
+    let receive = |transport: &mut UdpTransport, bytes: &mut [u8]| -> Result<Option<usize>> {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if let Some(len) = transport.receive(bytes)? {
+                return Ok(Some(len));
+            }
+            ensure!(Instant::now() < deadline, "loopback packet did not arrive");
+            std::thread::yield_now();
+        }
+    };
+    assert_eq!(receive(&mut transport, &mut bytes)?, Some(0));
+    expected.send_to(&[2, 3], transport.socket.local_addr()?)?;
+    assert_eq!(receive(&mut transport, &mut bytes)?, Some(2));
+    assert_eq!(&bytes[..2], &[2, 3]);
     Ok(())
 }

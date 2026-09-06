@@ -1,16 +1,58 @@
 # Rollback netplay
 
-Copperline can run a two-player floppy game across two native desktop instances.
+Copperline can run a two-player floppy game across two desktop instances or two browsers.
 Each peer emulates the whole Amiga and owns one controller port. Both players
 see their own input after a small configurable delay. Copperline predicts late
 remote input, then restores and replays frames when that prediction was wrong.
 This follows the approach described by [GGPO](https://github.com/pond3r/ggpo);
 it uses Copperline's own Rust implementation and wire protocol.
 
-This first version connects directly to a known peer. There is no lobby, relay,
-NAT traversal, spectator mode, reconnect, or browser support. Use the same
-Copperline build on both machines. Cross-platform peer combinations have not
-yet been qualified.
+Sessions connect directly to a known peer. Desktop builds use UDP; browsers use
+WebRTC with copy/paste connection codes and optional STUN address discovery.
+There is no lobby, relay, spectator mode or reconnect. Browser and desktop peers
+cannot connect to each other. Use the same Copperline build on both machines;
+mixed operating systems and browser engines have not yet been qualified.
+
+(browser-netplay)=
+## Set up in the browser
+
+On the [browser page](browser.md), open **Controls → Netplay**. Load the same ROM
+and disks, and choose the same model, video standard, floppy speed, floppy sounds and writable
+disk setting on both pages. Setup starts a fresh machine, replacing any running
+local session.
+
+1. The host chooses **Input delay**, **Rollback limit** and **Controllers**, then
+   clicks **Host game**. Send **Your connection code** to the other player.
+2. The other player pastes it into **Code from the other player** and clicks
+   **Join offer**. Send the resulting answer code back to the host. The offer
+   supplies the controller and delay/window settings for both peers.
+3. The host pastes the answer into **Code from the other player** and clicks
+   **Connect answer**. Both pages cold-boot after checking that their initial
+   machines match. The panel reports confirmed frames, rollbacks and the latest
+   checked frame.
+
+Host owns Amiga port 1; Join owns port 2. On each page, the usual first gamepad,
+keyboard joystick or touch controls drive that player's port. The keyboard
+joystick mode is enabled on desktop browsers; touch devices start with touch
+controls. Cycle **Joystick** off to type ordinary Amiga keys. Both keyboards contribute to the shared keyboard. Mouse input is
+disabled. The desktop F11/F12 netplay shortcuts do not apply to the browser.
+
+The default STUN server helps WebRTC discover an internet route. Leave the field
+blank on both pages for LAN-only address discovery, or enter another `stun:` URL.
+Some NATs and firewalls still prevent a direct connection; use a shared LAN or
+VPN in that case. There is no TURN relay configuration in this panel.
+Connection codes contain WebRTC network addresses and session details; exchange
+them privately with the person you intend to play with. ROMs, disks and machine
+snapshots are not sent to the peer. WebRTC encrypts the data channel.
+
+Keep both pages open. A suspended tab can stall its peer and eventually time out;
+background execution depends on browser and device restrictions. Machine, media,
+serial, floppy sound, pause and save-state controls are locked from setup until disconnect.
+Display and main output volume choices remain local. Floppy sound enablement
+and level are part of the machine fingerprint and must match. **Disconnect** cancels setup or stops
+play, discards session disk writes, and restores the selected cold-boot media.
+Either player can host or join again with new codes. The browser does not resume
+the abandoned network timeline as local play.
 
 ## Set up in the GUI
 
@@ -123,8 +165,10 @@ with a memory-budget error.
 Unacknowledged inputs are retransmitted, so loss, duplication, and reordering do
 not by themselves lose button transitions. Confirmed machine states are checked
 every 60 frames. A mismatch stops the session with the affected frame number.
-Connection setup times out after 60 seconds; an established connection stops
-after 10 seconds without a valid peer packet.
+The machine handshake times out after 60 seconds; an established connection stops
+after 10 seconds without a valid peer packet. Browser code exchange precedes the
+handshake: gathering addresses has a 15-second limit, and connecting an accepted
+answer has a 60-second limit. Waiting for a player to paste a code has no timer.
 
 Audio plays once on the initial execution of a frame. Replayed frames are silent.
 A sound already played from an incorrect prediction cannot be taken back, so

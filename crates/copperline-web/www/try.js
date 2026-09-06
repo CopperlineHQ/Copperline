@@ -6,7 +6,7 @@
 // (the click also unlocks the AudioContext), then runs one
 // requestAnimationFrame loop: step the core to the wall clock, blit the
 // presentation buffer to the canvas, and post the frame's audio to the
-// worklet. Everything is served from this site - no external requests.
+// worklet. Netplay optionally contacts the selected STUN server and its peer.
 
 import init, { WebEmu } from './pkg/copperline_web.js';
 import {
@@ -16,6 +16,7 @@ import {
   updateRenderStrideState,
 } from './render-stride.js';
 import { TelnetSession } from './serial-telnet.js';
+import { mountNetplayPanel } from './netplay.js';
 
 const $ = (id) => document.getElementById(id);
 let canvas = $('screen');
@@ -106,6 +107,57 @@ let queuedMs = 0;
 let lastAudioReportMs = 0;
 let running = false;
 let paused = false;
+let netplayPanel = null;
+let netplayPreparing = null;
+let netplayMachineReady = false;
+let netplayTimer = null;
+let machineGeneration = 0;
+const netplayBusy = () => !!netplayPanel?.link;
+const netplayDisabled = new Map();
+const NETPLAY_LOCKED_IDS = ['boot', 'machine', 'video', 'reset', 'pause', 'savestate',
+  'loadstate', 'quicksave', 'quickload', 'savedstates', 'kick', 'kickurl', 'kicklist',
+  'df0', 'df1', 'df0url', 'df0list', 'eject', 'eject1', 'blank-df0', 'blank-df1',
+  'download-df0', 'download-df1', 'writable-floppies', 'floppy-speed', 'floppy-sounds',
+  'serial-connect', 'serial-url', 'serial-raw'];
+
+function syncNetplayControls() {
+  for (const id of NETPLAY_LOCKED_IDS) {
+    const element = $(id);
+    if (!element) continue;
+    if (netplayBusy()) {
+      if (!netplayDisabled.has(element)) netplayDisabled.set(element, element.disabled);
+      element.disabled = true;
+    } else if (netplayDisabled.has(element)) {
+      element.disabled = netplayDisabled.get(element);
+      netplayDisabled.delete(element);
+    }
+  }
+}
+
+function requireLocalPage() {
+  if (netplayBusy()) throw new Error('Disconnect netplay before changing the machine or media');
+}
+
+function releaseNetplayInput() {
+  if (!netplayBusy()) return;
+  for (const key of Object.keys(joyHeld)) joyHeld[key] = false;
+  hostKeyQueue.length = 0;
+  resetTouchState();
+  emu?.netplay_release_input?.();
+}
+window.addEventListener('blur', releaseNetplayInput);
+for (const type of ['click', 'change', 'drop']) {
+  document.addEventListener(type, event => {
+    if (!netplayBusy()) return;
+    const locked = event.target.closest?.(NETPLAY_LOCKED_IDS.map(id => `#${id}`).join(','));
+    if (locked || type === 'drop') {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      netplayPanel.status('Disconnect before changing the machine or media.');
+    }
+  }, true);
+}
+
 let framesThisSecond = 0;
 // Diagnostic split of the fps figure. fps counts frames *stepped*; a blit
 // shows only the newest of them, so "shown" (blits that had a fresh
@@ -232,6 +284,7 @@ const diskNames = Array(4).fill(null); // page's view, for reports and captions
 const lastDisks = Array(4).fill(null); // last uploaded { bytes, name, writable }
 
 function refreshBootButton() {
+  if (netplayBusy()) { syncNetplayControls(); return; }
   bootBtn.disabled = !(wasm && bootRom);
   bootBtn.textContent = bootRom && bootRom.label !== 'AROS' ? 'Boot Kickstart' : 'Boot AROS';
   // The save-state controls follow the same milestones (the module is
@@ -254,6 +307,7 @@ let romChosenExplicitly = false;
 // A ROM that fits is remembered in the browser (IndexedDB), so the next
 // visit boots it without the picker; see the saved-states panel to forget.
 function fitRom(bytes, label) {
+  requireLocalPage();
   if (emu) emu.load_rom(bytes, undefined);
   bootRom = { rom: bytes, ext: null, label };
   romChosenExplicitly = true;
@@ -349,6 +403,7 @@ async function forgetStoredRom() {
 // Route disk bytes from any source (picker, URL, drop): insert into a
 // running machine, or stash them for the boot button to insert after boot.
 function insertDisk(bytes, name, drive = 0, writable = writableFloppyToggle.checked) {
+  requireLocalPage();
   if (drive < 0 || drive >= PAGE_FLOPPY_DRIVES) {
     throw new Error(`DF${drive} is not fitted`);
   }
@@ -787,7 +842,14 @@ async function buildAudioStack(suspendForPause) {
 
 // --- boot ----------------------------------------------------------------
 
-async function boot() {
+async function boot(request = null) {
+  // A DOM click passes its event; only the netplay controller supplies a link.
+  if (!request?.link) request = null;
+  if (netplayBusy() && !request) return;
+  if (request && request.link !== netplayPanel?.link) return;
+  const generation = ++machineGeneration;
+  const snapshot = request?.snapshot;
+  let freshMachine = null;
   bootBtn.disabled = true;
   try {
     // Fit the ROM into a fresh machine before anything else: a bad image
@@ -802,13 +864,20 @@ async function boot() {
     // video argument picks PAL/NTSC the same way; a bundle older than both
     // ignores the extra arguments.
     const machine = new WebEmu(
-      machineModel ?? undefined,
-      videoStandard ?? undefined,
+      (snapshot?.model ?? machineModel) ?? undefined,
+      (snapshot?.video ?? videoStandard) ?? undefined,
       PAGE_FLOPPY_DRIVES,
     );
-    if (bootRom) machine.load_rom(bootRom.rom, bootRom.ext ?? undefined);
+    freshMachine = machine;
+    const rom = snapshot?.rom ?? bootRom;
+    if (rom) machine.load_rom(rom.rom, rom.ext ?? undefined);
 
     await buildAudioStack(false);
+    if (generation !== machineGeneration) {
+      freshMachine.free();
+      freshMachine = null;
+      return false;
+    }
     presentDirty = false;
     lastPresentationRevision = null;
     coreMsThisSecond = 0;
@@ -820,14 +889,14 @@ async function boot() {
     // A fresh machine boots with empty drives: each holds its pending disk or
     // nothing, never a name left over from before the reboot.
     for (let drive = 0; drive < PAGE_FLOPPY_DRIVES; drive++) {
-      const disk = pendingDisks[drive];
+      const disk = (snapshot?.disks ?? pendingDisks)[drive];
       if (disk) {
         if (disk.writable) machine.insert_floppy_writable(drive, disk.bytes, disk.name);
         else machine.insert_floppy(drive, disk.bytes, disk.name);
       }
     }
     for (let drive = 0; drive < PAGE_FLOPPY_DRIVES; drive++) {
-      diskNames[drive] = pendingDisks[drive]?.name ?? null;
+      diskNames[drive] = (snapshot?.disks ?? pendingDisks)[drive]?.name ?? null;
     }
     pendingDisks.fill(null);
     machine.set_volume_percent(Number($('vol').value));
@@ -842,7 +911,13 @@ async function boot() {
     machine.set_autocrop?.(autocropOn);
     machine.set_deinterlace?.(deinterlaceEnabled);
     machine.set_phosphor?.(phosphorPersistence);
+    if (request) {
+      const settings = request.settings;
+      machine.start_netplay(request.player, settings.session, settings.delay, settings.window, settings.controller);
+    }
+    emu?.free();
     emu = machine;
+    freshMachine = null;
     window.__emu = emu; // for debugging/automation
     serialApplyCarrier(); // a socket opened before (or across) this boot
     lastFddTrack = null; // a new machine starts the track latch over
@@ -885,8 +960,13 @@ async function boot() {
     // is a machine to type into: raised at page load it would cover half
     // the boot overlay with nothing behind it to receive the keys.
     if (HAS_KEY_RAW && storedPref(KB_OPEN_STORAGE_KEY) === 'on') openKeyboard();
+    syncNetplayControls();
     requestAnimationFrame(tick);
+    return true;
   } catch (e) {
+    freshMachine?.free();
+    if (generation !== machineGeneration) return false;
+    if (request) throw e;
     setLoadStatus(`boot failed: ${e.message ?? e}`);
     bootBtn.disabled = false;
     showBugLink(true);
@@ -1090,8 +1170,10 @@ function stepMachine(nowMs, deferRender) {
   try {
     const max = maxFramesForQueue();
     const stepStart = performance.now();
+    if (netplayMachineReady) netplayPanel.link.receive(emu);
     const deferred = deferRender && typeof emu.run_hidden === 'function';
     const stepped = deferred ? emu.run_hidden(nowMs, max) : emu.run(nowMs, max);
+    if (netplayMachineReady) netplayPanel.link.send(emu);
     const stepElapsed = performance.now() - stepStart;
     updateRenderStrideController(nowMs, stepElapsed, stepped, !deferred);
     if (
@@ -1108,6 +1190,11 @@ function stepMachine(nowMs, deferRender) {
     framesThisSecond += stepped;
     if (stepped > 0) presentDirty = true;
   } catch (e) {
+    if (netplayBusy()) {
+      console.error('Netplay stopped', e);
+      netplayPanel.link.close(`Netplay stopped: ${e.message ?? e}`);
+      return false;
+    }
     running = false;
     setLoadStatus(`emulator error: ${e.message ?? e}`);
     overlay.style.display = '';
@@ -1269,6 +1356,7 @@ document.addEventListener('visibilitychange', () => {
   // it when a still-running machine comes back into view.
   syncWakeLock();
   if (document.hidden) {
+    releaseNetplayInput();
     // No stack, nothing to suspend. The show path takes no such guard:
     // recoverAudio must run for a running machine whose stack is gone
     // (a rebuild that failed mid-flight), or it could never come back.
@@ -1681,6 +1769,10 @@ function orPortState(a, b) {
 // switched away from the mouse.
 function applyJoystick() {
   if (!emu) return;
+  if (netplayBusy() && (document.hidden || !document.hasFocus())) {
+    emu.netplay_release_input?.();
+    return;
+  }
   const port2 = orPortState(orPortState(keyboardPortState(), touchPortState()), padPort[2]);
   emu.set_joystick_port(2, port2.up, port2.down, port2.left, port2.right, port2.fire, port2.button2);
   emu.set_cd32_buttons_port(2, port2.play, port2.rwd, port2.ffw, port2.green, port2.yellow);
@@ -1761,7 +1853,7 @@ const padAssignments = new Map(); // gamepad index -> Amiga port (2 first)
 // reads exactly like a two-button stick -- so any source that can produce
 // the extras (a gamepad, or the keyboard's cd32 mapping) fits one.
 function fitCd32Pad(port) {
-  emu?.set_port_device(port, 'cd32');
+  if (!netplayBusy()) emu?.set_port_device(port, 'cd32');
 }
 
 function padPressed(pad, index) {
@@ -1801,7 +1893,7 @@ function refreshPadAssignments(pads) {
       // a pad leaving it puts the mouse back; port 2 keeps the pad fitting
       // (idle, and indistinguishable from a joystick to anything that is
       // not driving the CD32 serial protocol).
-      if (port === 1 && emu) {
+      if (port === 1 && emu && !netplayBusy()) {
         emu.set_port_device(1, 'mouse');
         releasedPort1 = true;
       }
@@ -1839,6 +1931,10 @@ function pumpGamepads() {
 // The mouse is only worth mentioning when a pad actually vacated port 1,
 // which is the only case where the pointer was displaced.
 function updatePadStatus(releasedPort1) {
+  if (netplayBusy()) {
+    setLoadStatus('Netplay: your first gamepad drives your assigned player port');
+    return;
+  }
   const where = [...padAssignments.values()]
     .sort()
     .map((port) => `port ${port}`)
@@ -1950,7 +2046,7 @@ const cssToEmu = () => {
 canvas.addEventListener('mousedown', (e) => {
   if (!emu || !running) return;
   e.preventDefault();
-  if (document.pointerLockElement !== canvas && e.button === 0) {
+  if (!netplayBusy() && document.pointerLockElement !== canvas && e.button === 0) {
     canvas.requestPointerLock?.();
   }
   emu.mouse_button(e.button, true);
@@ -2353,6 +2449,7 @@ const downloadFloppyButtons = Array.from(
 );
 
 function updateFloppyImageControls() {
+  if (netplayBusy()) { syncNetplayControls(); return; }
   for (let drive = 0; drive < PAGE_FLOPPY_DRIVES; drive++) {
     const button = downloadFloppyButtons[drive];
     if (!button) continue;
@@ -3534,8 +3631,21 @@ function hostCharKey(ch) {
 // frame loop feeds them in at a rate a keyboard could plausibly send.
 const hostKeyQueue = [];
 const HOST_KEYS_PER_FRAME = 2;
+let netplayHostKeyFrame = 0;
 
 function pumpHostKeys() {
+  if (netplayMachineReady) {
+    const [connected, frame] = emu.netplay_status();
+    if (!connected || document.hidden || !document.hasFocus() || frame < netplayHostKeyFrame) return;
+    if (hostKeyQueue.length) {
+      const [raw, pressed] = hostKeyQueue.shift();
+      kbdSend(raw, pressed);
+      // A stalled frame may already have sampled its input. Hold through the
+      // next frame too so a queued tap cannot collapse to an all-released state.
+      netplayHostKeyFrame = frame + 2;
+    }
+    return;
+  }
   for (let i = 0; i < HOST_KEYS_PER_FRAME && hostKeyQueue.length; i++) {
     const [raw, pressed] = hostKeyQueue.shift();
     kbdSend(raw, pressed);
@@ -3817,6 +3927,7 @@ function setPauseLabel() {
 }
 
 function setPaused(next) {
+  if (netplayBusy()) return;
   if (!emu || !running || next === paused) return;
   paused = next;
   // Paused wall time must not count toward the controller's sustained
@@ -4054,6 +4165,7 @@ function describeState(info) {
 // needs a running machine, loading only needs the wasm module (it boots one
 // on demand), and quick load additionally needs something in the slot.
 function updateStateButtons() {
+  if (netplayBusy()) { syncNetplayControls(); return; }
   const live = Boolean(emu && running);
   if (saveStateBtn) saveStateBtn.disabled = !live;
   if (quickSaveBtn) quickSaveBtn.disabled = !live;
@@ -4075,13 +4187,14 @@ function updateStateButtons() {
 // then fails can put the page back rather than strand the visitor on a
 // machine they never asked to start.
 async function machineForStateLoad() {
+  if (netplayBusy()) return { ready: false, booted: false };
   if (emu && running) return { ready: true, booted: false };
   if (!wasm) {
     setLoadStatus('the emulator is still loading');
     return { ready: false, booted: false };
   }
-  await boot();
-  return { ready: Boolean(emu && running), booted: true };
+  const booted = Boolean(await boot());
+  return { ready: booted && !netplayBusy() && Boolean(emu && running), booted };
 }
 
 // Undo a boot that only happened to receive a state which then would not
@@ -4089,6 +4202,7 @@ async function machineForStateLoad() {
 // does nothing at all - so the page returns to its pre-boot screen with
 // the failure still on the status line.
 function unbootAfterFailedStateLoad() {
+  if (netplayBusy()) return;
   const failure = loadStatus.textContent;
   emu = null;
   window.__emu = null;
@@ -4106,6 +4220,7 @@ function unbootAfterFailedStateLoad() {
 // machine untouched when a blob does not parse, so a bad file costs the
 // visitor nothing but the message.
 function restoreState(bytes, source) {
+  if (netplayBusy()) return false;
   try {
     emu.load_state(bytes);
   } catch (e) {
@@ -7419,5 +7534,100 @@ async function startup() {
     await Promise.all([loaded, ...fetches]);
     if (!bootBtn.disabled && !emu) boot();
   }
+}
+if (typeof WebEmu.prototype.start_netplay === 'function') {
+  netplayPanel = mountNetplayPanel(
+    $('reset').closest('.try-side-section')?.parentElement ?? shell.parentElement,
+    {
+      prepare: async link => {
+        if (!wasm || !bootRom) throw new Error('Load a ROM before setting up netplay');
+        keepUploadedDisksForRebuild();
+        const disks = pendingDisks.slice();
+        for (let drive = 0; drive < PAGE_FLOPPY_DRIVES; drive++) {
+          if (diskNames[drive] && !disks[drive]) throw new Error(`Load the DF${drive} image again before netplay`);
+        }
+        netplayPreparing = { link, rom: bootRom, model: machineModel, video: videoStandard, disks };
+        machineGeneration++;
+        netplayHostKeyFrame = 0;
+        if (statesPanelOpen) toggleStatesPanel();
+        running = false;
+        paused = false;
+        netplayMachineReady = false;
+        document.exitPointerLock?.();
+        forgetVirtualKeys();
+        emu?.free();
+        emu = null;
+        window.__emu = null;
+        serialDisconnect('Serial disabled during netplay');
+        syncNetplayControls();
+        overlay.style.display = '';
+        setLoadStatus('Netplay setup: emulation starts when the peer connects');
+        await buildAudioStack(false);
+      },
+      start: async (link, settings, player) => {
+        const snapshot = netplayPreparing;
+        if (snapshot?.link !== link || netplayPanel.link !== link) return;
+        if (!await boot({ link, settings, player, snapshot })) return;
+        if (netplayPanel.link !== link) return;
+        netplayMachineReady = true;
+        // Send our initial fingerprint before consuming the peer's. Both
+        // machines can then report a mismatch even if one closes first.
+        emu.run_hidden(performance.now(), 0);
+        link.send(emu);
+        setJoyMode(hasTouch ? 'touch' : settings.controller === 'cd32' ? 'cd32' : 'keys');
+        let lastStatus = 0;
+        netplayTimer = setInterval(() => {
+          if (!netplayMachineReady || netplayPanel.link !== link || !emu) return;
+          try {
+            // Continue acknowledging packets while a hidden page stops painting.
+            link.receive(emu);
+            emu.run_hidden(performance.now(), 0);
+            link.send(emu);
+            if (performance.now() - lastStatus > 1000) {
+              const [connected, frame, confirmed, , rollbacks, , checked] = emu.netplay_status();
+              netplayPanel.status(connected
+                ? `Player ${player}: frame ${frame}, confirmed ${confirmed}, ${rollbacks} rollbacks, checked ${checked}`
+                : 'Waiting for a matching machine...');
+              lastStatus = performance.now();
+            }
+          } catch (error) { console.error('Netplay stopped', error); link.close(`Netplay stopped: ${error.message ?? error}`); }
+        }, 50);
+      },
+      stop: (reason, link) => {
+        if (netplayMachineReady && emu) {
+          try {
+            link.receive(emu);
+            emu.run_hidden(performance.now(), 0);
+          } catch (error) {
+            console.error('Netplay stopped', error);
+            reason = `Netplay stopped: ${error.message ?? error}`;
+          }
+        }
+        clearInterval(netplayTimer);
+        netplayTimer = null;
+        if (netplayPreparing) {
+          machineGeneration++;
+          running = false;
+          paused = false;
+          netplayMachineReady = false;
+          forgetVirtualKeys();
+          emu?.free();
+          emu = null;
+          window.__emu = null;
+          netplayPreparing.disks.forEach((disk, drive) => { pendingDisks[drive] = disk; });
+          netplayPreparing = null;
+          audioCtx?.suspend().catch(() => {});
+          overlay.style.display = '';
+        }
+        syncNetplayControls();
+        refreshBootButton();
+        updateFloppyImageControls();
+        setPauseLabel();
+        syncWakeLock();
+        setLoadStatus(reason);
+        return reason;
+      },
+    },
+  );
 }
 startup();

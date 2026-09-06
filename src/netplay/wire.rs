@@ -6,10 +6,11 @@
 use super::Input;
 
 const MAGIC: &[u8; 4] = b"CLNP";
-const VERSION: u16 = 1;
-const MAX_INPUTS: usize = 32;
-const HEADER: usize = 4 + 2 + 4 + 16 + 32 + 4 + 8 + 8 + 32 + 1;
-pub(super) const MAX_PACKET: usize = HEADER + MAX_INPUTS * 26;
+pub const VERSION: u16 = 1;
+pub const MAX_INPUTS: usize = 32;
+pub const HEADER: usize = 4 + 2 + 4 + 16 + 32 + 4 + 8 + 8 + 32 + 1;
+pub const INPUT_RECORD: usize = 8 + 2 + 16;
+pub const MAX_PACKET: usize = HEADER + MAX_INPUTS * INPUT_RECORD;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Packet {
@@ -53,6 +54,19 @@ impl Packet {
         out
     }
 
+    // The magic and session prefix are stable across protocol versions. Only
+    // diagnose a recognized session; unrelated datagrams remain ignorable.
+    pub fn check_version(bytes: &[u8], session: &[u8; 16]) -> anyhow::Result<()> {
+        if bytes.len() >= 26 && &bytes[..4] == MAGIC && &bytes[10..26] == session {
+            anyhow::ensure!(
+                bytes[4..6] == VERSION.to_le_bytes()
+                    && bytes[6..10] == crate::savestate::STATE_VERSION.to_le_bytes(),
+                "netplay incompatible build: protocol or save-state version differs; use the same Copperline build"
+            );
+        }
+        Ok(())
+    }
+
     pub fn decode(mut bytes: &[u8]) -> Option<Self> {
         if bytes.len() < HEADER || bytes.len() > MAX_PACKET {
             return None;
@@ -81,14 +95,16 @@ impl Packet {
             return None;
         }
         let [count] = take(&mut bytes)?;
-        if usize::from(count) > MAX_INPUTS || bytes.len() != usize::from(count) * 26 {
+        if usize::from(count) > MAX_INPUTS || bytes.len() != usize::from(count) * INPUT_RECORD {
             return None;
         }
         let mut inputs = Vec::with_capacity(usize::from(count));
         for _ in 0..count {
             let number = u64::from_le_bytes(take(&mut bytes)?);
             let buttons = u16::from_le_bytes(take(&mut bytes)?);
-            if buttons & !0x7ff != 0 || inputs.last().is_some_and(|(prev, _)| *prev >= number) {
+            if buttons & !Input::BUTTONS != 0
+                || inputs.last().is_some_and(|(prev, _)| *prev >= number)
+            {
                 return None;
             }
             inputs.push((

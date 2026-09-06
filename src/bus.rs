@@ -5473,7 +5473,6 @@ impl Bus {
         Ok(())
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn rollback_state(&self) -> RollbackState {
         RollbackState {
             data_bus: self.data_bus,
