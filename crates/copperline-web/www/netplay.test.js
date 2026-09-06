@@ -32,6 +32,23 @@ test('connection codes round-trip only valid settings and the expected descripti
   assert.throws(() => validateSettings({ ...settings, controller: 'mouse' }));
   assert.throws(() => validateSettings({ ...settings, session: 'bad' }));
   assert.notEqual(newSettings(0, 1, 'cd32').session, newSettings(0, 1, 'cd32').session);
+  const shared = { ...settings, media: 'host-v1' };
+  assert.deepEqual(decodeCode(encodeCode(description('offer'), shared), 'offer').settings, shared);
+  assert.throws(() => validateSettings({ ...settings, media: 'unknown' }));
+});
+
+test('setup-enabled offers create a reliable channel and reject incompatible setup channels', async () => {
+  const link = new RtcLink({ PeerConnection: Peer });
+  await link.offer({ ...settings, media: 'host-v1' });
+  assert.equal(link.media.channel.label, 'copperline-setup-v1');
+  assert.equal(link.media.channel.ordered, true);
+  assert.equal(link.media.channel.maxRetransmits, undefined);
+  link.close();
+  assert.equal(link.media, null);
+  assert.equal(link.mediaReady, null);
+  const other = new RtcLink({ PeerConnection: Peer });
+  other.attach(new Channel('copperline-setup-v1', { ordered: false, maxRetransmits: 0 }));
+  assert.equal(other.closed, true);
 });
 
 test('host accepts only its answer and negotiates an unordered channel without retransmission', async () => {
@@ -61,6 +78,24 @@ test('cancelling ICE gathering rejects the pending offer and closes only once', 
   await assert.rejects(offer, /cancelled/);
   assert.equal(closed, 1);
   assert.equal(link.pc.connectionState, 'closed');
+});
+
+test('the gathering deadline preserves collected routes but rejects an empty offer', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  for (const candidate of ['', 'a=candidate:1 1 udp 1 192.0.2.1 3478 typ relay\r\n']) {
+    const link = new RtcLink({ PeerConnection: Peer });
+    link.pc.iceGatheringState = 'gathering';
+    link.pc.createOffer = async () => ({ type: 'offer', sdp: 'v=0\r\n' + candidate });
+    const offer = link.offer(settings);
+    await new Promise(resolve => setImmediate(resolve));
+    t.mock.timers.tick(15000);
+    if (candidate) {
+      assert.ok(decodeCode(await offer, 'offer').description.sdp.includes(candidate));
+      assert.equal(link.closed, false);
+      assert.equal(link.diagnostics.events.at(-1).event, 'gathering-deadline');
+    } else await assert.rejects(offer, /without a usable route/);
+    link.close();
+  }
 });
 
 test('a delayed offer cannot resurrect a cancelled link', async () => {

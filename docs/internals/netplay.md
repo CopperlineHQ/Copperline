@@ -84,8 +84,9 @@ controller bitmap, and sixteen-byte key bitmap. The maximum packet is 943 bytes.
 The initial fingerprint hashes Copperline's display build version and the entire
 normalized initial machine snapshot, including ROM and in-memory floppy data.
 It does not fingerprint uncommitted source modifications: development peers must
-build the same source. No executable, ROM, disk image, or serialized guest state
-is received from a peer. An ID separates sessions; the packet format supplies
+build the same source. This input protocol carries no executable, ROM, disk image
+or serialized guest state. Browser setup transfers ROMs and disks over a separate
+reliable channel before the input handshake. An ID separates sessions; the packet format supplies
 neither cryptographic peer authentication nor encryption. Browser WebRTC adds
 transport encryption; native UDP needs a VPN for that protection.
 
@@ -116,7 +117,10 @@ on subsequent retransmissions; a full outgoing queue reports backpressure.
 when the channel's buffered amount reaches 64 maximum-size packets.
 
 The page exchanges a versioned offer and answer containing SDP and host-selected
-settings. It waits for ICE gathering to complete before creating either code.
+settings. It waits up to 15 seconds for ICE gathering before creating either
+code. At the deadline it uses collected candidates if any are available; a slow
+server cannot invalidate routes gathered from other servers. An empty candidate
+set still fails setup, and diagnostics record a gathering-deadline event.
 `netplay-room.js` sends these codes through the configured service; the host polls
 for an answer every 1.5 seconds until joined, cancelled or expired. Manual
 copy/paste remains available under Advanced and needs no signaling service.
@@ -145,19 +149,32 @@ and relay policy; plain TCP entries are omitted on that compatibility path.
 `netplay-diagnostics.js` records whitelisted states, candidate types and numeric
 counters before disposal. It never exports SDP, candidate addresses or tokens.
 The diagnostic sample survives a closed peer connection.
-The [WebRTC data channel](https://www.w3.org/TR/webrtc/) is unordered and uses
+The input [WebRTC data channel](https://www.w3.org/TR/webrtc/) is unordered and uses
 zero SCTP retransmissions, since the shared Copperline protocol already repeats
 unacknowledged inputs. Browser and native transports have no interoperability
 adapter. Codes are bounded and checked before passing SDP to WebRTC.
 
+`netplay-media.js` adds an ordered, reliable `copperline-setup-v1` channel when
+the offer's settings include `media: "host-v1"`. An 8 KiB bounded manifest
+describes the build, supported browser machine settings, ROM/extended ROM and
+DF0/DF1 images with SHA-256 digests. Each ROM is bounded to 2 MiB, each disk to
+16 MiB, and the total to 36 MiB. Binary messages contain at most 16 KiB; the
+sender waits for buffer drainage above 256 KiB. The receiver validates metadata
+before allocating, verifies every digest and acknowledges completion before
+the host boots. A 30-second inactivity timer and a three-minute overall deadline
+bound setup. Cancellation rejects pending operations and discards partial data.
+Media stays off the signaling service; a TURN relay carries encrypted peer traffic.
+
 Host/Join freezes the chosen cold-boot media and frees any local emulator.
-On channel open, the wrapper builds a fresh machine, fixes the RTC seed,
+After media verification, the wrapper builds a fresh machine, fixes the RTC seed,
 disables serial and sets both digital controllers before fingerprinting it.
 JS numeric settings enter Rust as `f64` and are checked for finiteness, integer
 values and range before narrowing. Setup operations carry their connection
 identity across awaits so cancellation cannot publish a late machine or code.
 Disconnect and runtime failures stop all session loops and free the emulator;
-the chosen pre-session media remains available for another cold boot.
+the chosen pre-session media remains available for another cold boot. The guest
+uses a separate received snapshot; it never overwrites `bootRom`, `lastDisks`
+or IndexedDB. Disconnect restores its original control values and disk names.
 
 Netplay calls use the shared precise frame stepper, with browser pacing capped
 at eight frames per call. Zero-frame polls can reconcile and acknowledge input

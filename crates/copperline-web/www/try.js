@@ -6,7 +6,7 @@
 // (the click also unlocks the AudioContext), then runs one
 // requestAnimationFrame loop: step the core to the wall clock, blit the
 // presentation buffer to the canvas, and post the frame's audio to the
-// worklet. Netplay optionally contacts the selected STUN server and its peer.
+// worklet. Netplay uses room signaling and transfers setup media to its peer.
 
 import init, { WebEmu } from './pkg/copperline_web.js';
 import {
@@ -117,7 +117,7 @@ const netplayDisabled = new Map();
 const NETPLAY_LOCKED_IDS = ['boot', 'machine', 'video', 'reset', 'pause', 'savestate',
   'loadstate', 'quicksave', 'quickload', 'savedstates', 'kick', 'kickurl', 'kicklist',
   'df0', 'df1', 'df0url', 'df0list', 'eject', 'eject1', 'blank-df0', 'blank-df1',
-  'download-df0', 'download-df1', 'writable-floppies', 'floppy-speed', 'floppy-sounds',
+  'download-df0', 'download-df1', 'writable-floppies', 'floppy-speed', 'floppy-sounds', 'mono-audio',
   'serial-connect', 'serial-url', 'serial-raw'];
 
 function syncNetplayControls() {
@@ -863,8 +863,9 @@ async function boot(request = null) {
     // shell, or the list not knowing better) builds the default A500. The
     // video argument picks PAL/NTSC the same way; a bundle older than both
     // ignores the extra arguments.
+    const model = snapshot?.model ?? machineModel;
     const machine = new WebEmu(
-      (snapshot?.model ?? machineModel) ?? undefined,
+      model ?? undefined,
       (snapshot?.video ?? videoStandard) ?? undefined,
       PAGE_FLOPPY_DRIVES,
     );
@@ -900,11 +901,9 @@ async function boot(request = null) {
     }
     pendingDisks.fill(null);
     machine.set_volume_percent(Number($('vol').value));
-    if (floppySoundsToggle) machine.set_floppy_sounds(floppySoundsToggle.checked);
-    else if (configFloppySounds !== null) machine.set_floppy_sounds(configFloppySounds);
-    if (monoAudioToggle) machine.set_mono_audio(monoAudioToggle.checked);
-    else if (configMonoAudio !== null) machine.set_mono_audio(configMonoAudio);
-    if (floppySpeed !== null) machine.set_floppy_speed(floppySpeed);
+    machine.set_floppy_sounds(snapshot?.floppySounds ?? floppySoundsToggle?.checked ?? configFloppySounds ?? true);
+    machine.set_mono_audio(snapshot?.monoAudio ?? monoAudioToggle?.checked ?? configMonoAudio ?? false);
+    machine.set_floppy_speed(snapshot?.floppySpeed ?? floppySpeed ?? 100);
     if (overscanMode !== null) machine.set_overscan?.(overscanMode);
     machine.set_monitor_bezel?.(monitorBezelOn());
     machine.set_scaling?.(scalingMode);
@@ -934,8 +933,8 @@ async function boot(request = null) {
     setLoadStatus(
       // A ROM-less boot is only ever a landing place for a state load,
       // which overwrites this line the moment it lands.
-      (bootRom
-        ? `booted ${bootRom.label}${machineModel ? ` on the ${machineModel}` : ''}`
+      (rom
+        ? `booted ${rom.label}${model ? ` on the ${model}` : ''}`
         : 'machine built, waiting for the state') +
         (inserted ? ` - ${inserted}` : ''),
     );
@@ -7539,14 +7538,17 @@ if (typeof WebEmu.prototype.start_netplay === 'function') {
   netplayPanel = mountNetplayPanel(
     $('reset').closest('.try-side-section')?.parentElement ?? shell.parentElement,
     {
-      prepare: async link => {
-        if (!wasm || !bootRom) throw new Error('Load a ROM before setting up netplay');
+      prepare: async (link, { receiveMedia }) => {
+        if (!wasm || (!receiveMedia && !bootRom)) throw new Error('Load a ROM before setting up netplay');
         keepUploadedDisksForRebuild();
         const disks = pendingDisks.slice();
         for (let drive = 0; drive < PAGE_FLOPPY_DRIVES; drive++) {
-          if (diskNames[drive] && !disks[drive]) throw new Error(`Load the DF${drive} image again before netplay`);
+          if (!receiveMedia && diskNames[drive] && !disks[drive]) throw new Error(`Load the DF${drive} image again before netplay`);
         }
-        netplayPreparing = { link, rom: bootRom, model: machineModel, video: videoStandard, disks };
+        netplayPreparing = { link, rom: bootRom, model: machineModel, video: videoStandard, disks,
+          names: diskNames.slice(), build: WebEmu.build_info(), floppySpeed: floppySpeed ?? 100,
+          floppySounds: floppySoundsToggle?.checked ?? configFloppySounds ?? true,
+          monoAudio: monoAudioToggle?.checked ?? configMonoAudio ?? false };
         machineGeneration++;
         netplayHostKeyFrame = 0;
         if (statesPanelOpen) toggleStatesPanel();
@@ -7561,8 +7563,23 @@ if (typeof WebEmu.prototype.start_netplay === 'function') {
         serialDisconnect('Serial disabled during netplay');
         syncNetplayControls();
         overlay.style.display = '';
-        setLoadStatus('Netplay setup: emulation starts when the peer connects');
+        setLoadStatus('Netplay setup: emulation starts after the host’s files are verified');
         await buildAudioStack(false);
+      },
+      getMedia: link => {
+        if (netplayPreparing?.link !== link) throw new Error('Game setup was cancelled');
+        return netplayPreparing;
+      },
+      useMedia: (link, snapshot) => {
+        if (netplayPreparing?.link !== link) throw new Error('Game setup was cancelled');
+        if (snapshot.build !== WebEmu.build_info()) throw new Error('The host is using a different emulator build. Refresh both pages.');
+        netplayPreparing = { ...snapshot, link, original: netplayPreparing };
+        // Display the active configuration without writing local preferences.
+        machineSel.value = snapshot.model;
+        videoSel.value = snapshot.video;
+        floppySpeedSel.value = String(snapshot.floppySpeed);
+        if (floppySoundsToggle) floppySoundsToggle.checked = snapshot.floppySounds;
+        if (monoAudioToggle) monoAudioToggle.checked = snapshot.monoAudio;
       },
       start: async (link, settings, player) => {
         const snapshot = netplayPreparing;
@@ -7614,7 +7631,14 @@ if (typeof WebEmu.prototype.start_netplay === 'function') {
           emu?.free();
           emu = null;
           window.__emu = null;
-          netplayPreparing.disks.forEach((disk, drive) => { pendingDisks[drive] = disk; });
+          const original = netplayPreparing.original ?? netplayPreparing;
+          original.disks.forEach((disk, drive) => { pendingDisks[drive] = disk; });
+          original.names.forEach((name, drive) => { diskNames[drive] = name; });
+          machineSel.value = original.model;
+          videoSel.value = original.video;
+          floppySpeedSel.value = String(original.floppySpeed);
+          if (floppySoundsToggle) floppySoundsToggle.checked = original.floppySounds;
+          if (monoAudioToggle) monoAudioToggle.checked = original.monoAudio;
           netplayPreparing = null;
           audioCtx?.suspend().catch(() => {});
           overlay.style.display = '';

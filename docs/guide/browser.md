@@ -72,7 +72,10 @@ The web build uses the same `.clstate` file format as the desktop version:
 **Controls → Netplay** connects two browsers using WebRTC. The host shares an
 invitation link or QR code; the other player opens it and clicks Join game.
 Advanced retains manual offer/answer codes for pages without a room service.
-Both pages start fresh machines with matching ROMs, disks and hardware settings.
+The host sends ROMs, floppy images and machine settings over the encrypted peer
+connection. The guest verifies them before startup and uses them only for the
+session; its remembered ROM and local choices are preserved. Both pages start
+fresh machines with matching ROMs, disks and hardware settings.
 Each player controls one Amiga port; late input is predicted and corrected by
 rollback. See [browser netplay setup](netplay.md#browser-netplay) for the steps,
 controller mapping, relay troubleshooting and restrictions.
@@ -99,7 +102,8 @@ The browser implementation consists of the following components:
 - **Audio pipeline:** Stereo 44.1 kHz float samples are transferred directly to an
   `AudioWorklet` processor for low-latency playback.
 - **Netplay:** The Rust core owns the shared rollback timeline and bounded packet
-  queues. `www/netplay.js` handles room invitations, manual codes and the WebRTC data channel;
+  queues. `www/netplay.js` handles room invitations, manual codes and WebRTC;
+  `www/netplay-media.js` transfers and verifies the host setup on a reliable channel.
   `try.js` owns the session lifecycle and locks controls that change the machine.
 
 ## Building the WebAssembly package locally
@@ -223,7 +227,11 @@ machine and leaves it available for local use or another startup attempt.
 `accept(answerCode)`, with `configureIce(iceServers, relayOnly)` for temporary
 TURN credentials obtained from a trusted service. `report()` returns sanitized
 connection diagnostics. Its `onOpen` callback is the point to construct the machine
-and call `start_netplay`. Its `onClose` callback must stop the page's loops and
+and call `start_netplay`. The page sets `settings.media = "host-v1"` to add a
+reliable setup channel; its `onOpen` awaits `transferMedia(hostSnapshot, progress)`
+on the host, or `transferMedia(null, progress)` on the guest, which returns the
+verified host snapshot. Embedders that omit this setting must supply matching
+media themselves. Its `onClose` callback must stop the page's loops and
 free the machine. Immediately after startup, call `run_hidden(now, 0)` and
 `link.send(emu)` once to send the initial fingerprint. Then call `link.receive(emu)` before `run`/`run_hidden`, then
 `link.send(emu)` afterwards, including polls that advance zero frames. Polls with

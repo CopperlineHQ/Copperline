@@ -61,7 +61,7 @@ export class NetplayDiagnostics {
     };
     // Call sites supply fixed event names. Do not accept arbitrary reason strings.
     const kinds = ['created', 'peer-state', 'ice-state', 'gathering-state', 'signaling-state',
-      'data-open', 'data-close', 'data-error', 'ice-error', 'stopped', 'copy'];
+      'data-open', 'data-close', 'data-error', 'ice-error', 'gathering-deadline', 'stopped', 'copy'];
     if (kinds.includes(event)) this.events.push({ event, elapsedMs: Math.round(performance.now() - this.started),
       peer: this.connection.peer, ice: this.connection.ice });
     if (this.events.length > 40) this.events.shift();
