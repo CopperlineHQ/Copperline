@@ -3582,6 +3582,20 @@ impl CpuBus {
                 .note_heat(addr, size as u32, crate::heatmap::Toucher::CpuRead);
         }
         if self.icache.is_some() || self.dcache.is_some() {
+            // Consume the tick-path DMA latch before any data-cache lookup:
+            // under the JIT batch path a slow MMIO access mid-batch flushes
+            // timed devices (whose tick can DMA into guest memory) without
+            // passing the instruction-boundary coherent flush, so a driver
+            // polling a completion register could otherwise hit a stale
+            // line over the freshly DMA'd bytes later in the same batch.
+            if kind == CpuBusAccessKind::Read
+                && self.dcache.is_some()
+                && self.bus.take_devices_wrote_memory()
+            {
+                if let Some(dcache) = self.dcache.as_deref_mut() {
+                    dcache.clear_all();
+                }
+            }
             // 68020/030 cache models: a hit costs no bus cycle at all; a
             // miss goes through the normal (billed) path and then fills
             // the line from backing memory.
@@ -5845,18 +5859,58 @@ mod tests {
         }
         assert!(drained, "copperhf never drained the completed read");
 
-        // The stale line still serves hits -- exactly the corruption a
-        // 68040 guest saw -- until the coherent flush drops the cache.
-        assert_eq!(
-            bus.read_long(buf),
-            0,
-            "pre-flush read must still hit the stale cached line"
-        );
+        // Instruction-boundary path: the coherent flush consumes the latch
+        // and drops the cache, so the boundary's first read is fresh --
+        // exactly what a 68040 guest waiting on the INT2 reply needs (the
+        // corruption this fixes was PFS3 reading stale file data here).
         bus.flush_timed_devices_dcache_coherent();
         assert_eq!(
             bus.read_long(buf),
             expected,
             "coherent flush must drop the dcache so the DMA'd data is seen"
+        );
+
+        // Read-hit path: a second read (sector 1) drains while the buffer's
+        // line sits freshly cached, and NO boundary flush runs -- the read
+        // itself must consume the latch (the JIT batch path can flush timed
+        // devices mid-batch, so a polling driver reads without ever passing
+        // an instruction boundary).
+        let hdr = &mut bus.bus.mem.chip_ram;
+        hdr[req as usize + 44..][..4].copy_from_slice(&512u32.to_be_bytes()); // io_Offset
+        {
+            let mut host = crate::zorro_device::DeviceHost::for_slot(&mut bus.bus.mem, 0);
+            crate::zorro_device::ZorroDevice::write(
+                &mut bus.bus.devices[0],
+                0x4020, // CHF_DOORBELL
+                4,
+                req,
+                &mut host,
+            );
+        }
+        let expected2 = u32::from_be_bytes([10, 11, 12, 13]); // 512..515 % 251
+        let mut drained = false;
+        for _ in 0..2000 {
+            bus.bus.advance_devices(16);
+            if bus.peek_long(buf) == expected2 {
+                drained = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(drained, "copperhf never drained the second read");
+        assert_eq!(
+            bus.read_long(buf),
+            expected2,
+            "a data read must consume the DMA latch itself (JIT mid-batch case)"
+        );
+
+        // Precision: idle ticks (no DMA in flight) must not latch a write --
+        // a board merely borrowing memory on its tick would otherwise clear
+        // the data cache every tick and disable it in practice.
+        bus.bus.advance_devices(64);
+        assert!(
+            !bus.bus.take_devices_wrote_memory(),
+            "idle device ticks must not latch a DMA write"
         );
         std::fs::remove_file(&path).ok();
     }

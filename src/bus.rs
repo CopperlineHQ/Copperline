@@ -1277,10 +1277,12 @@ pub struct Bus {
     pending_device_cck: u32,
     #[serde(skip)]
     pending_device_tick: AgnusTick,
-    /// Set when a device's `tick` DMA'd into guest memory
-    /// (`DeviceHost::touched_memory`) -- e.g. copperhf's worker draining a
-    /// completed read into the caller's buffer. The CPU run loop consumes
-    /// this at the next instruction boundary and drops its data-cache
+    /// Set when a device's `tick` actually DMA'd into guest memory
+    /// (`DeviceHost::wrote_memory`, or the SDMAC/A2091 write latches) --
+    /// e.g. copperhf's worker draining a completed read into the caller's
+    /// buffer. The CPU run loop consumes this at the next instruction
+    /// boundary AND before serving any data-cache read hit (the JIT batch
+    /// path can flush timed devices mid-batch) and drops its data-cache
     /// model, mirroring the `clear_all` the synchronous device-access path
     /// already performs (cpu.rs): without it, DMA'd fast-RAM data reads
     /// back stale through the modelled 030/040/060 data cache. Transient
@@ -7156,7 +7158,7 @@ impl Bus {
                     self.paula.cd_audio_mut(),
                 );
                 crate::zorro_device::ZorroDevice::tick(cdtv, cck, &mut host);
-                if host.touched_memory() {
+                if host.wrote_memory() {
                     self.devices_wrote_memory = true;
                 }
             }
@@ -7189,8 +7191,12 @@ impl Bus {
                 // A tick that DMA'd into guest memory (copperhf draining a
                 // completed read, a plugin board writing a buffer) wrote
                 // behind the CPU's modelled data cache; flag it so the run
-                // loop drops the cache at the next instruction boundary.
-                if host.touched_memory() {
+                // loop drops the cache. Keyed on actual DMA WRITES
+                // (`wrote_memory`), not `touched_memory`: boards like the
+                // A2091 tick `memory_mut` unconditionally, and latching on
+                // mere access would clear the data cache every tick --
+                // disabling it in practice.
+                if host.wrote_memory() {
                     *devices_wrote_memory = true;
                 }
                 if crate::zorro_device::ZorroDevice::int2_line(dev) {

@@ -265,8 +265,12 @@ model (the services board answering a DosPacket, copperhf draining a
 completed disk read, the A3000 SDMAC pumping SCSI data), so both paths that
 let a device touch guest memory report it and the data cache is dropped: the
 synchronous device-access path clears it inside the access, and device
-`tick`-path DMA latches `Bus::devices_wrote_memory`, consumed at the next
-instruction-boundary flush (`flush_timed_devices_dcache_coherent`). Without
+`tick`-path DMA latches `Bus::devices_wrote_memory` -- keyed on actual DMA
+writes (`DeviceHost::wrote_memory` and the SDMAC/A2091 write latches), not
+on mere memory access, so a board that only borrows memory on its tick does
+not disable the cache -- consumed at the next instruction-boundary flush
+(`flush_timed_devices_dcache_coherent`) and, because the JIT batch path can
+flush timed devices mid-batch, before any data-cache read hit. Without
 the tick half, PFS3 on a 68040 read corrupted file data through copperhf's
 asynchronous completions. The 040 also redefines CACR (only the IE/DE
 enable bits, no freeze or clear strobes) and moves invalidation to the

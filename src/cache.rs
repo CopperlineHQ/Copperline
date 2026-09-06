@@ -13,9 +13,11 @@
 //! chipset DMA cannot reach, so write-back versus write-through is
 //! unobservable. (Virtual boards CAN host-DMA into expansion RAM behind this
 //! cache -- the services board answering a packet, copperhf draining a
-//! completed read -- and both the synchronous device-access path and the
-//! timed-device flush drop the data cache when `DeviceHost::touched_memory`
-//! reports such a write; see cpu.rs.) We do not model burst timing (IBE/DBE
+//! completed read -- and the data cache is dropped when a device reports
+//! such a write: the synchronous device-access path via
+//! `DeviceHost::touched_memory`, and tick-path DMA via
+//! `DeviceHost::wrote_memory`/`Bus::devices_wrote_memory`, consumed at
+//! instruction boundaries and before any data-cache read hit; see cpu.rs.) We do not model burst timing (IBE/DBE
 //! are stored but inert on the 030).
 //!
 //! A hit serves the access with no bus cycle, which is the real effect that
