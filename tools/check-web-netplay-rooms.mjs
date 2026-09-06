@@ -62,7 +62,14 @@ try {
   const [host, guest] = pages;
   const invitation = async () => {
     await host.locator('#netplay-room-host').click();
-    await host.waitForFunction(() => document.querySelector('#netplay-invite').value.includes('#room='), null, { timeout: 30000 });
+    await host.waitForFunction(() => document.querySelector('#netplay-invite').value.includes('#room='), null, { timeout: 30000 })
+      .catch(async error => {
+        console.error('Host setup:', await host.locator('#netplay-status').textContent());
+        await host.locator('#netplay-diagnostics').click();
+        await host.waitForFunction(() => window.__copied?.startsWith('{'));
+        console.error('Host diagnostics:', await host.evaluate(() => window.__copied));
+        throw error;
+      });
     return host.locator('#netplay-invite').inputValue();
   };
   const cancelled = await invitation();

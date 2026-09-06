@@ -137,6 +137,11 @@ credentials independently for each player; retries reuse the guest credentials
 within the room lifetime. Room creation fails when a production relay service
 is unavailable. Local development explicitly disables TURN requests. WebRTC
 selects direct or relay routes, or relay-only when requested in Advanced.
+The service filters alternate port 53 URLs from Cloudflare's response because
+browser port blocking can delay gathering even after usable candidates arrive.
+If a browser rejects TURN transport queries with a syntax error, the client
+retries with query-free UDP and TLS URLs. This preserves the ports, credentials
+and relay policy; plain TCP entries are omitted on that compatibility path.
 `netplay-diagnostics.js` records whitelisted states, candidate types and numeric
 counters before disposal. It never exports SDP, candidate addresses or tokens.
 The diagnostic sample survives a closed peer connection.

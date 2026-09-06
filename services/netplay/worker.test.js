@@ -81,7 +81,13 @@ test('TURN credentials stay scoped to players and provider failures are redacted
       assert.equal(request.headers.get('Authorization'), 'Bearer private-api-token');
       assert.deepEqual(await request.json(), { ttl: 86400 });
       if (requests > 1) return new Response('private-api-token provider failure', { status: 500 });
-      return Response.json({ iceServers: [{ urls: ['turn:relay.test:3478'], username: 'temporary-user', credential: 'temporary-credential' }] });
+      return Response.json({ iceServers: [
+        { urls: 'stun:relay.test:53' },
+        { urls: ['stun:relay.test:3478', 'stun:relay.test:53'] },
+        { urls: ['turn:relay.test:3478?transport=udp', 'turn:relay.test:53?transport=udp',
+          'turns:relay.test:5349?transport=tcp', 'turns:relay.test:443?transport=tcp'],
+          username: 'temporary-user', credential: 'temporary-credential' },
+      ] });
     },
   });
   t.after(() => mf.dispose());
@@ -89,6 +95,11 @@ test('TURN credentials stay scoped to players and provider failures are redacted
   const created = await call('/rooms', 'POST', {});
   assert.equal(created.status, 201);
   assert.equal(created.body.relay, true);
+  assert.deepEqual(created.body.iceServers, [
+    { urls: ['stun:relay.test:3478'] },
+    { urls: ['turn:relay.test:3478?transport=udp', 'turns:relay.test:5349?transport=tcp',
+      'turns:relay.test:443?transport=tcp'], username: 'temporary-user', credential: 'temporary-credential' },
+  ]);
   assert.ok(!JSON.stringify(created.body).includes('private-'));
   const failed = await call('/rooms', 'POST', {});
   assert.equal(failed.status, 503);

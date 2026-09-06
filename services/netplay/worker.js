@@ -57,9 +57,14 @@ async function iceServers(env) {
   });
   if (!response.ok) throw new Error('Relay credentials are unavailable');
   const value = await response.json();
-  if (!Array.isArray(value.iceServers) || !value.iceServers.some(server =>
-    [].concat(server.urls ?? []).some(url => /^turns?:/.test(url)))) throw new Error('Invalid relay response');
-  return { iceServers: value.iceServers, relay: true };
+  if (!Array.isArray(value.iceServers)) throw new Error('Invalid relay response');
+  // Browsers block alternate port 53, delaying non-trickle ICE gathering.
+  // https://developers.cloudflare.com/realtime/turn/generate-credentials/
+  const servers = value.iceServers.map(server => ({ ...server,
+    urls: [].concat(server.urls ?? []).filter(url => typeof url === 'string' && !/:53(?:\?|$)/.test(url)),
+  })).filter(server => server.urls.length);
+  if (!servers.some(server => server.urls.some(url => /^turns?:/.test(url)))) throw new Error('Invalid relay response');
+  return { iceServers: servers, relay: true };
 }
 
 export default {

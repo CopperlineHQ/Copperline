@@ -30,6 +30,11 @@ are issued for each player and last 24 hours. They are not refreshed; longer
 games need a new session. Keep `REQUIRE_TURN` enabled in production: if TURN
 credential issuance fails, room creation reports an error rather than presenting
 a connection with no relay fallback.
+The service removes Cloudflare's alternate port 53 URLs, which browsers can
+block and leave address discovery waiting until it times out. Other relay
+ports, including TLS on port 443, remain available.
+Browsers that reject TURN transport queries retry with default UDP and TLS URLs;
+plain TCP entries are omitted only for those browsers.
 
 The WASM publishing workflow copies all netplay modules and the QR license to
 the site. It leaves the site's HTML, service URL and service worker intact.

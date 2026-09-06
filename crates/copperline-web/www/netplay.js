@@ -144,7 +144,7 @@ export class RtcLink {
         };
         this.cancelGather = () => finish(new Error('Connection cancelled'));
         this.pc.addEventListener('icegatheringstatechange', changed);
-        timer = setTimeout(() => finish(new Error('Network address discovery timed out; check the STUN server')), 15000);
+        timer = setTimeout(() => finish(new Error('Network address discovery timed out. Copy diagnostics, then try a new session.')), 15000);
         changed();
       });
     }
@@ -157,7 +157,24 @@ export class RtcLink {
     if (relayOnly && !iceServers.some(server => [].concat(server.urls ?? []).some(url => /^turns?:/.test(url)))) {
       throw new Error('A relay is not available for this session');
     }
-    this.pc.setConfiguration({ iceServers, iceTransportPolicy: relayOnly ? 'relay' : 'all' });
+    const iceTransportPolicy = relayOnly ? 'relay' : 'all';
+    try { this.pc.setConfiguration({ iceServers, iceTransportPolicy }); }
+    catch (error) {
+      if (error.name !== 'SyntaxError') throw error;
+      // Some WebKit builds reject valid TURN transport queries. Retry using
+      // default UDP for turn: and TLS/TCP for turns:, retaining ports and keys.
+      // Plain TCP needs its query, so omit it only on this compatibility path.
+      const compatible = iceServers.map(server => ({ ...server,
+        urls: [].concat(server.urls ?? []).flatMap(url => {
+          if (/^turn:[^?]+\?transport=udp$/i.test(url) || /^turns:[^?]+\?transport=tcp$/i.test(url)) return [url.split('?')[0]];
+          if (/^turn:[^?]+\?transport=tcp$/i.test(url)) return [];
+          return [url];
+        }),
+      })).filter(server => server.urls.length);
+      if (JSON.stringify(compatible) === JSON.stringify(iceServers) ||
+          !compatible.some(server => server.urls.some(url => /^turns?:/.test(url)))) throw error;
+      this.pc.setConfiguration({ iceServers: compatible, iceTransportPolicy });
+    }
   }
 
   report() { return this.diagnostics.report(this.pc, this.channel); }
