@@ -211,6 +211,7 @@ pub struct WebEmu {
     // this local preference when draining its host audio buffer instead.
     netplay_volume: u8,
     netplay_eligible: bool,
+    netplay_swap: Option<netplay::DiskSwap>,
     config: Config,
     emu: Emulator,
     audio: Rc<RefCell<Vec<f32>>>,
@@ -361,6 +362,7 @@ impl WebEmu {
             netplay_input: Default::default(),
             netplay_volume: 100,
             netplay_eligible: true,
+            netplay_swap: None,
             config: cfg,
             emu,
             audio,

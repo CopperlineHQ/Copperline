@@ -11,7 +11,9 @@ use crate::chipset::paula::PAULA_CLOCK_HZ;
 use crate::config::{FloppyConfig, FloppyDriveConfig};
 use crate::gzip;
 use anyhow::{bail, ensure, Context, Result};
-use formats::{FloppyImage, FloppyImageBacking, FloppyImageData, FloppyTrackImage};
+use formats::{
+    FloppyImage, FloppyImageBacking, FloppyImageData, FloppyTrackImage, GZIP_IMAGE_LIMIT,
+};
 use log::{debug, warn};
 // The bridge's retry path traces, and its media reporting is worth an info
 // line; both are compiled out with the feature.
@@ -737,6 +739,26 @@ impl FloppyController {
         label: PathBuf,
         write_protected: bool,
     ) -> Result<()> {
+        self.insert_memory_disk_image_bytes_with_limit(
+            drive_idx,
+            bytes,
+            label,
+            write_protected,
+            GZIP_IMAGE_LIMIT,
+        )
+    }
+
+    /// Insert memory-backed media with a byte limit on both the supplied file
+    /// and its expanded gzip/zip payload. A rejected image leaves the drive
+    /// unchanged, including when decompression reaches the limit.
+    pub fn insert_memory_disk_image_bytes_with_limit(
+        &mut self,
+        drive_idx: usize,
+        bytes: Vec<u8>,
+        label: PathBuf,
+        write_protected: bool,
+        limit: usize,
+    ) -> Result<()> {
         ensure!(
             drive_idx < self.drives.len(),
             "invalid floppy drive df{}",
@@ -752,7 +774,8 @@ impl FloppyController {
             "floppy.df{drive_idx} is a physical drive; take the drive off the bay before \
              using a disk image in it"
         );
-        let image = FloppyImage::from_memory_bytes(bytes, label, write_protected)
+        ensure!(bytes.len() <= limit, "floppy image exceeds {limit} bytes");
+        let image = FloppyImage::from_memory_bytes(bytes, label, write_protected, limit)
             .with_context(|| format!("loading floppy.df{} image", drive_idx))?;
         ensure!(
             write_protected || !image.write_protected,

@@ -5,6 +5,12 @@
 use super::*;
 use copperline::netplay::{Connection, PacketQueue, Settings};
 
+pub(super) struct DiskSwap {
+    stop: u64,
+    disk: Option<(usize, Vec<u8>, bool)>,
+    applied: bool,
+}
+
 fn integer(value: f64, min: u8, max: u8, name: &str) -> Result<u8, JsValue> {
     if !value.is_finite()
         || value.fract() != 0.0
@@ -102,9 +108,181 @@ impl WebEmu {
     pub fn netplay_release_input(&mut self) {
         self.netplay_input = Default::default();
     }
+
+    /// Freeze at the current frame while the reliable channel negotiates a
+    /// common boundary. Input packets continue to reconcile and acknowledge.
+    pub fn netplay_hold(&mut self) -> Result<f64, JsValue> {
+        let peer = self
+            .netplay
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("No netplay session"))?;
+        if !peer.status().connected || self.netplay_swap.is_some() {
+            return Err(JsValue::from_str(
+                "A connected, idle netplay session is required",
+            ));
+        }
+        let stop = peer.status().frame;
+        self.netplay_swap = Some(DiskSwap {
+            stop,
+            disk: None,
+            applied: false,
+        });
+        self.anchor = None;
+        Ok(stop as f64)
+    }
+
+    /// Both stopped peers catch up to the greater of their two frame numbers.
+    pub fn netplay_stop_at(&mut self, frame: f64) -> Result<(), JsValue> {
+        let current = self
+            .netplay
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("No netplay session"))?
+            .status()
+            .frame;
+        let swap = self
+            .netplay_swap
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("No disk swap in progress"))?;
+        if !frame.is_finite()
+            || frame.fract() != 0.0
+            || frame < current as f64
+            || frame > (current + 32) as f64
+            || swap.disk.is_some()
+            || swap.applied
+        {
+            return Err(JsValue::from_str("Invalid disk swap frame"));
+        }
+        swap.stop = frame as u64;
+        self.anchor = None;
+        Ok(())
+    }
+
+    pub fn netplay_swap_ready(&self) -> bool {
+        self.netplay_swap.as_ref().is_some_and(|swap| {
+            self.netplay.as_ref().is_some_and(|peer| {
+                peer.status().frame == swap.stop && peer.status().ready_to_capture()
+            })
+        })
+    }
+
+    /// Digests before and after the change are compared over the reliable
+    /// channel; neither peer resumes on a mismatch.
+    pub fn netplay_swap_digest(&self) -> Result<Vec<u8>, JsValue> {
+        if !self.netplay_swap_ready() {
+            return Err(JsValue::from_str("Disk swap is not at a confirmed frame"));
+        }
+        self.netplay
+            .as_ref()
+            .unwrap()
+            .confirmed_state_digest(&self.emu)
+            .map(|hash| hash.to_vec())
+            .map_err(js_err)
+    }
+
+    /// Validate an image without touching the live drive. Empty bytes mean eject.
+    pub fn netplay_validate_disk(
+        &self,
+        drive: f64,
+        bytes: Vec<u8>,
+        writable: bool,
+    ) -> Result<(), JsValue> {
+        let drive = usize::from(integer(drive, 0, 1, "drive")?);
+        self.validate_netplay_disk(drive, bytes, writable)
+            .map_err(js_err)
+    }
+
+    pub fn netplay_stage_disk(
+        &mut self,
+        drive: f64,
+        bytes: Vec<u8>,
+        writable: bool,
+    ) -> Result<(), JsValue> {
+        let drive = usize::from(integer(drive, 0, 1, "drive")?);
+        if !self.netplay_swap_ready()
+            || self
+                .netplay_swap
+                .as_ref()
+                .is_none_or(|s| s.applied || s.disk.is_some())
+        {
+            return Err(JsValue::from_str("Disk swap is not ready for an image"));
+        }
+        self.validate_netplay_disk(drive, bytes.clone(), writable)
+            .map_err(js_err)?;
+        self.netplay_swap.as_mut().unwrap().disk = Some((drive, bytes, writable));
+        Ok(())
+    }
+
+    pub fn netplay_apply_disk(&mut self) -> Result<(), JsValue> {
+        if !self.netplay_swap_ready() {
+            return Err(JsValue::from_str("Disk swap is not at a confirmed frame"));
+        }
+        let swap = self.netplay_swap.as_mut().unwrap();
+        let (drive, bytes, writable) = swap
+            .disk
+            .take()
+            .ok_or_else(|| JsValue::from_str("No verified replacement disk"))?;
+        let floppy = &mut self.emu.bus_mut().floppy;
+        if bytes.is_empty() {
+            floppy.eject_disk_image(drive)
+        } else {
+            floppy.insert_memory_disk_image_bytes_with_limit(
+                drive,
+                bytes,
+                format!("netplay-df{drive}").into(),
+                !writable,
+                16 * 1024 * 1024,
+            )
+        }
+        .map_err(js_err)?;
+        swap.applied = true;
+        self.anchor = None;
+        Ok(())
+    }
+
+    pub fn netplay_resume(&mut self) -> Result<(), JsValue> {
+        if !self.netplay_swap_ready() || !self.netplay_swap.as_ref().is_some_and(|s| s.applied) {
+            return Err(JsValue::from_str("Disk swap has not been applied"));
+        }
+        self.netplay_swap = None;
+        self.anchor = None;
+        Ok(())
+    }
 }
 
 impl WebEmu {
+    fn validate_netplay_disk(
+        &self,
+        drive: usize,
+        bytes: Vec<u8>,
+        writable: bool,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.netplay
+                .as_ref()
+                .is_some_and(|peer| peer.status().connected),
+            "No connected netplay session"
+        );
+        anyhow::ensure!(
+            self.emu.bus().floppy.drive_connected(drive),
+            "Floppy drive is not connected"
+        );
+        anyhow::ensure!(
+            bytes.len() <= 16 * 1024 * 1024,
+            "Replacement disk exceeds 16 MiB"
+        );
+        if !bytes.is_empty() {
+            // Decode before the two-phase commit, without changing drive state.
+            copperline::floppy::FloppyController::default()
+                .insert_memory_disk_image_bytes_with_limit(
+                    0,
+                    bytes,
+                    "replacement".into(),
+                    !writable,
+                    16 * 1024 * 1024,
+                )?;
+        }
+        Ok(())
+    }
     fn start_netplay_inner(
         &mut self,
         settings: Settings,
@@ -181,6 +359,14 @@ impl WebEmu {
         let target = emulated + (now_ms - wall) / 1000.0;
         let mut stepped = 0;
         while self.emu.bus().emulated_seconds() < target && stepped < max_frames.min(8) {
+            if self
+                .netplay_swap
+                .as_ref()
+                .is_some_and(|swap| peer.status().frame >= swap.stop)
+            {
+                self.anchor = Some((now_ms, self.emu.bus().emulated_seconds()));
+                break;
+            }
             if !peer
                 .step(&mut self.emu, self.netplay_input, true)
                 .map_err(js_err)?

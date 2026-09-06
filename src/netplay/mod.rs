@@ -321,6 +321,17 @@ impl<T: Transport> Connection<T> {
         }
     }
 
+    /// A transport-coordinated media change may only touch a fully confirmed
+    /// boundary. No retained prediction can subsequently restore older media.
+    pub fn confirmed_state_digest(&self, emu: &Emulator) -> Result<[u8; 32]> {
+        ensure!(self.failure.is_none(), "netplay session has failed");
+        ensure!(
+            self.status().ready_to_capture(),
+            "netplay frame is not confirmed"
+        );
+        Ok(digest(&emu.netplay_snapshot()?))
+    }
+
     /// Poll, repair late input, and optionally advance a frame. `false` is a
     /// normal wait for handshake/input. Continue polling while waiting.
     pub fn step(&mut self, emu: &mut Emulator, input: Input, advance: bool) -> Result<bool> {

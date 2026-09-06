@@ -4,6 +4,7 @@ import { NetplayDiagnostics, connectionFailure } from './netplay-diagnostics.js'
 import { RoomClient, inviteUrl, roomFromInvite } from './netplay-room.js';
 import qrcode from './netplay-qr.js';
 import { MEDIA_CHANNEL, MEDIA_VERSION, MediaTransfer } from './netplay-media.js';
+import { SWAP_CHANNEL, SWAP_VERSION, DISK_LIMIT, DiskSwaps } from './netplay-swap.js';
 
 // Signaling uses expiring room invitations or manual copy/paste codes.
 // Only bounded input packets use the data channel.
@@ -17,12 +18,13 @@ export function validateSettings(value) {
       !Number.isInteger(value.delay) || value.delay < 0 || value.delay > 6 ||
       !Number.isInteger(value.window) || value.window < 1 || value.window > 12 ||
       !['joystick', 'cd32'].includes(value.controller) ||
-      (value.media !== undefined && value.media !== MEDIA_VERSION)) {
+      (value.media !== undefined && value.media !== MEDIA_VERSION) ||
+      (value.swaps !== undefined && value.swaps !== SWAP_VERSION)) {
     throw new Error('Invalid netplay settings in connection code');
   }
   return { session: value.session.toLowerCase(), delay: value.delay,
     window: value.window, controller: value.controller,
-    ...(value.media ? { media: value.media } : {}) };
+    ...(value.media ? { media: value.media } : {}), ...(value.swaps ? { swaps: value.swaps } : {}) };
 }
 
 export function encodeCode(description, settings) {
@@ -55,6 +57,7 @@ export function newSettings(delay, window, controller) {
 
 export class RtcLink {
   constructor({ iceServers = [], onOpen = () => {}, onClose = () => {},
+    swapCallbacks = {},
     PeerConnection = globalThis.RTCPeerConnection } = {}) {
     if (!PeerConnection) throw new Error('This browser does not support WebRTC data channels');
     this.pc = new PeerConnection({ iceServers });
@@ -68,6 +71,8 @@ export class RtcLink {
     this.timer = null;
     this.cancelGather = null;
     this.media = null;
+    this.swaps = null;
+    this.swapCallbacks = swapCallbacks;
     this.mediaReady = new Promise((resolve, reject) => { this.mediaAttached = resolve; this.mediaFailed = reject; });
     this.mediaReady.catch(() => {});
     this.diagnostics = new NetplayDiagnostics();
@@ -93,6 +98,17 @@ export class RtcLink {
   }
 
   attach(channel) {
+    if (channel.label === SWAP_CHANNEL) {
+      if (this.closed || this.swaps || this.settings?.swaps !== SWAP_VERSION ||
+          channel.ordered !== true || channel.maxRetransmits != null || channel.maxPacketLifeTime != null) {
+        channel.close();
+        this.close('Unexpected disk swap channel. Refresh both pages.');
+        return;
+      }
+      this.swaps = new DiskSwaps(channel, { ...this.swapCallbacks, host: this.host,
+        fail: error => this.close(error.message) });
+      return;
+    }
     if (channel.label === MEDIA_CHANNEL) {
       if (this.closed || this.media || this.settings?.media !== MEDIA_VERSION ||
           channel.ordered !== true || channel.maxRetransmits != null || channel.maxPacketLifeTime != null) {
@@ -209,6 +225,7 @@ export class RtcLink {
     this.host = true;
     this.attach(this.pc.createDataChannel(CHANNEL, { ordered: false, maxRetransmits: 0 }));
     if (this.settings.media === MEDIA_VERSION) this.attach(this.pc.createDataChannel(MEDIA_CHANNEL, { ordered: true }));
+    if (this.settings.swaps === SWAP_VERSION) this.attach(this.pc.createDataChannel(SWAP_CHANNEL, { ordered: true }));
     return this.gather(await this.pc.createOffer());
   }
 
@@ -273,6 +290,13 @@ export class RtcLink {
   }
 
   dispose() {
+    if (this.swaps) {
+      const channel = this.swaps.channel;
+      channel.onmessage = channel.onclose = channel.onerror = null;
+      this.swaps.stop();
+      channel.close();
+      this.swaps = null;
+    }
     if (this.media) {
       const channel = this.media.channel;
       channel.onopen = channel.onmessage = channel.onclose = channel.onerror = null;
@@ -294,7 +318,7 @@ export class RtcLink {
 }
 
 // The panel inserts itself into old static page shells, as the other controls do.
-export function mountNetplayPanel(parent, { prepare, start, stop, getMedia, useMedia }) {
+export function mountNetplayPanel(parent, { prepare, start, stop, getMedia, useMedia, getMachine, diskChanged }) {
   const style = document.createElement('style');
   style.textContent = `
     #netplay-panel { font-size: .88rem; line-height: 1.4; color: var(--ink-mute, #bbc0ca); }
@@ -341,6 +365,14 @@ export function mountNetplayPanel(parent, { prepare, start, stop, getMedia, useM
     </div>
     <button id="netplay-disconnect" type="button" disabled>Disconnect</button>
     <p id="netplay-status" role="status" aria-live="polite">Host a game or open an invitation to join.</p>
+    <div id="netplay-disks" hidden>
+      <p>The host can change disks here. Both players pause during the transfer and resume together.</p>
+      <label>Drive <select id="netplay-disk-drive"><option value="0">DF0</option><option value="1">DF1</option></select></label>
+      <label>Swap disk <input id="netplay-disk-file" type="file" accept=".adf,.adz,.dms,.ipf,.scp,.gz,.zip"></label>
+      <label><input id="netplay-disk-writable" type="checkbox"> Allow writes to the replacement disk</label>
+      <button id="netplay-disk-eject" type="button">Eject selected drive</button>
+      <p>Writable changes stay in this session and are discarded when a disk is replaced or the session ends.</p>
+    </div>
     <button id="netplay-diagnostics" type="button" disabled>Copy diagnostics</button>
     <textarea id="netplay-report" rows="5" readonly hidden aria-label="Connection diagnostics"></textarea>
     <details id="netplay-advanced"><summary>Advanced</summary>
@@ -367,6 +399,7 @@ export function mountNetplayPanel(parent, { prepare, start, stop, getMedia, useM
   const service = document.querySelector('meta[name="copperline-netplay-service"]')?.content?.trim();
   let link = null;
   let lastLink = null;
+  let readingDisk = false;
   const status = text => { field('status').textContent = text; };
   const controls = () => {
     const active = !!link;
@@ -375,6 +408,11 @@ export function mountNetplayPanel(parent, { prepare, start, stop, getMedia, useM
     field('disconnect').disabled = !active;
     field('copy').disabled = !field('local').value;
     field('diagnostics').disabled = !lastLink;
+    const swapEnabled = !!link?.host && link.settings?.swaps === SWAP_VERSION;
+    field('disks').hidden = !swapEnabled;
+    const canSwap = swapEnabled && link.swaps?.channel.readyState === 'open'
+      && !!getMachine?.(link)?.netplay_status()[0] && !link.swaps.busy && !readingDisk;
+    for (const name of ['disk-drive', 'disk-file', 'disk-writable', 'disk-eject']) field(name).disabled = !canSwap;
     if (!active) field('accept').disabled = true;
   };
   field('service-status').textContent = service
@@ -406,11 +444,15 @@ export function mountNetplayPanel(parent, { prepare, start, stop, getMedia, useM
       const roomId = roomFromInvite(field('room-code').value);
       if (roomMode && !service) throw new Error('Room invitations are not configured on this page');
       if (roomMode && !host && !roomId) throw new Error('Paste an invitation link or room code');
-      settings = host ? { ...newSettings(Number(field('delay').value), Number(field('window').value), field('controller').value), media: MEDIA_VERSION }
+      settings = host ? { ...newSettings(Number(field('delay').value), Number(field('window').value), field('controller').value), media: MEDIA_VERSION, swaps: SWAP_VERSION }
         : roomMode ? null : decodeCode(remote, 'offer').settings;
       const stun = field('stun').value.trim();
       if (!roomMode && stun && !/^stuns?:[^\s]+$/i.test(stun)) throw new Error('STUN server must start with stun: or stuns:');
       current = new RtcLink({ iceServers: !roomMode && stun ? [{ urls: stun }] : [],
+        swapCallbacks: {
+          machine: () => getMachine(current), status,
+          changed: disk => { if (link === current) { if (disk) diskChanged(current, disk); controls(); } },
+        },
         onOpen: async peer => {
           if (link !== peer) return;
           if (settings.media === MEDIA_VERSION) {
@@ -492,6 +534,28 @@ export function mountNetplayPanel(parent, { prepare, start, stop, getMedia, useM
   field('join').addEventListener('click', () => begin('manual-join'));
   field('room-host').addEventListener('click', () => begin('room-host'));
   field('room-join').addEventListener('click', () => begin('room-join'));
+  field('disk-file').addEventListener('change', async () => {
+    const current = link;
+    const file = field('disk-file').files?.[0];
+    if (!file || !current?.host || !current.swaps || readingDisk) return;
+    const drive = Number(field('disk-drive').value);
+    const writable = field('disk-writable').checked;
+    readingDisk = true;
+    controls();
+    try {
+      if (!file.size || file.size > DISK_LIMIT) throw new Error('Select a disk image of up to 16 MiB');
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      if (link !== current) return;
+      await current.swaps.swap(drive, { bytes, name: file.name, writable });
+    } catch (error) { if (link === current) status(String(error.message ?? error)); }
+    finally { readingDisk = false; field('disk-file').value = ''; controls(); }
+  });
+  field('disk-eject').addEventListener('click', async () => {
+    const current = link;
+    if (!current?.host || !current.swaps || readingDisk) return;
+    try { await current.swaps.swap(Number(field('disk-drive').value), null); }
+    catch (error) { if (link === current) status(String(error.message ?? error)); }
+  });
   field('accept').addEventListener('click', async () => {
     const current = link;
     if (!current) return;
@@ -525,5 +589,5 @@ export function mountNetplayPanel(parent, { prepare, start, stop, getMedia, useM
   field('disconnect').addEventListener('click', () => link?.close());
   window.addEventListener('pagehide', () => link?.close());
   controls();
-  return { get link() { return link; }, status, root };
+  return { get link() { return link; }, status: text => { controls(); if (!link?.swaps?.busy) status(text); }, root };
 }

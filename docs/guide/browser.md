@@ -22,6 +22,8 @@ The web version runs at [copperline.dev/try](https://copperline.dev/try/):
   By default, images mount read-only. Check **Open disks writable** to enable in-memory
   modifications. Use **Blank DF0/DF1** to create an empty formatted disk, and **Download DF0/DF1**
   to export modified disk images. URL query parameters: `?df0=<url>&df1=<url>`.
+  Gzip images may expand to at most 128 MiB; netplay replacements have a smaller
+  16 MiB limit on both the file and its expanded contents.
 - **Display options:**
   - **Monitor presentation:** Select CRT shader and bezel frames (**1084**, **Classic**,
     **CRT filter**, or **Plain**).
@@ -76,6 +78,9 @@ The host sends ROMs, floppy images and machine settings over the encrypted peer
 connection. The guest verifies them before startup and uses them only for the
 session; its remembered ROM and local choices are preserved. Both pages start
 fresh machines with matching ROMs, disks and hardware settings.
+During play the host can use **Netplay → Swap disk** or **Eject selected drive**;
+both peers pause and apply the disk change together. The guest receives each
+replacement automatically, including repeated swaps in DF0.
 Each player controls one Amiga port; late input is predicted and corrected by
 rollback. See [browser netplay setup](netplay.md#browser-netplay) for the steps,
 controller mapping, relay troubleshooting and restrictions.
@@ -104,6 +109,7 @@ The browser implementation consists of the following components:
 - **Netplay:** The Rust core owns the shared rollback timeline and bounded packet
   queues. `www/netplay.js` handles room invitations, manual codes and WebRTC;
   `www/netplay-media.js` transfers and verifies the host setup on a reliable channel.
+  `www/netplay-swap.js` coordinates host disk changes on confirmed frame boundaries.
   `try.js` owns the session lifecycle and locks controls that change the machine.
 
 ## Building the WebAssembly package locally
@@ -244,6 +250,15 @@ For another transport, pass each complete received packet to
 an empty array. Preserve packet boundaries; do not interpret packets as text.
 The supported browser transport uses an unordered data channel with
 `maxRetransmits: 0`; Copperline performs input retransmission itself.
+
+Set `settings.swaps = "disk-v1"` and supply `swapCallbacks.machine` (returning
+the current `WebEmu`) to enable the separate reliable disk channel. Optional
+`status` and `changed` callbacks update the page. The host calls
+`link.swaps.swap(drive, {bytes, name, writable})`, or passes `null` to eject.
+Keep polling and running the emulator during this operation: Rust stops forward
+execution at the negotiated boundary but must still process input and acknowledgements.
+Do not call the underlying hold/stage/apply/resume methods independently; both
+peers must complete the coordination protocol before either resumes.
 
 `netplay_status()` returns `[connected, frame, confirmed, acknowledged, rollbacks,
 replayed, checked]`, with `connected` represented by 0 or 1. It returns an empty

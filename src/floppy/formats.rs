@@ -13,6 +13,10 @@ use log::debug;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
+// Allow large multi-revolution flux captures while bounding gzip expansion.
+// Network callers impose their smaller transfer limit on the expanded image.
+pub(super) const GZIP_IMAGE_LIMIT: usize = 128 * 1024 * 1024;
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct FloppyImage {
     pub(super) path: PathBuf,
@@ -67,6 +71,7 @@ impl FloppyImage {
             config.path.clone(),
             config.write_protected,
             FloppyImageBacking::File,
+            GZIP_IMAGE_LIMIT,
         )
     }
 
@@ -78,15 +83,28 @@ impl FloppyImage {
         path: PathBuf,
         write_protected: bool,
     ) -> Result<Self> {
-        Self::from_bytes_with_backing(packed, path, write_protected, FloppyImageBacking::File)
+        Self::from_bytes_with_backing(
+            packed,
+            path,
+            write_protected,
+            FloppyImageBacking::File,
+            GZIP_IMAGE_LIMIT,
+        )
     }
 
     pub(super) fn from_memory_bytes(
         packed: Vec<u8>,
         path: PathBuf,
         write_protected: bool,
+        expanded_limit: usize,
     ) -> Result<Self> {
-        Self::from_bytes_with_backing(packed, path, write_protected, FloppyImageBacking::Memory)
+        Self::from_bytes_with_backing(
+            packed,
+            path,
+            write_protected,
+            FloppyImageBacking::Memory,
+            expanded_limit,
+        )
     }
 
     fn from_bytes_with_backing(
@@ -94,11 +112,16 @@ impl FloppyImage {
         path: PathBuf,
         write_protected: bool,
         backing: FloppyImageBacking,
+        expanded_limit: usize,
     ) -> Result<Self> {
         let (data, write_protected, legacy_extended_adf) = if packed.starts_with(GZIP_SIGNATURE) {
-            let unpacked = decode_gzip_floppy_image(&packed)?;
+            let unpacked = decode_gzip_floppy_image(&packed, expanded_limit)?;
             decode_floppy_payload(unpacked, true, &path)?
         } else if packed.starts_with(ZIP_SIGNATURE) {
+            ensure!(
+                ADF_SIZE <= expanded_limit,
+                "expanded floppy image exceeds {expanded_limit} bytes"
+            );
             let unpacked = decode_zip_floppy_image(&packed)?;
             decode_floppy_payload(unpacked, true, &path)?
         } else {
@@ -244,12 +267,18 @@ pub(super) fn decode_floppy_payload(
     Ok((data, write_protected, legacy_extended_adf))
 }
 
-pub(super) fn decode_gzip_floppy_image(data: &[u8]) -> Result<Vec<u8>> {
+pub(super) fn decode_gzip_floppy_image(data: &[u8], limit: usize) -> Result<Vec<u8>> {
     ensure!(data.starts_with(GZIP_SIGNATURE), "missing gzip signature");
     // Every member, not just the first: a concatenated ADZ would otherwise
     // decode to a fraction of the disk, which the format dispatch could only
     // report as an unknown format rather than as the half-read image it is.
-    gzip::inflate_members(data, None).context("decompressing gzip-compressed floppy image")
+    let unpacked = gzip::inflate_members(data, Some(limit as u64))
+        .context("decompressing gzip-compressed floppy image")?;
+    ensure!(
+        unpacked.len() <= limit,
+        "expanded floppy image exceeds {limit} bytes"
+    );
+    Ok(unpacked)
 }
 
 pub(super) fn decode_zip_floppy_image(data: &[u8]) -> Result<Vec<u8>> {

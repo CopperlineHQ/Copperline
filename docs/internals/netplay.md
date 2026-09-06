@@ -105,6 +105,10 @@ session as local play.
 ## Browser transport and lifecycle
 
 `Connection<T: Transport>` owns the handshake, rollback and timeout logic.
+Same-process checkpoints include the CPU adapter's sampled interrupt level and
+microcode poll hold. Restoring the chipset without these latches can recognize
+an interrupt one instruction early after replay. They remain outside file save
+states; the rollback prefix and initial fingerprint change with the build.
 `Session` remains the native alias for `Connection<UdpTransport>`; `Options`
 contains its UDP endpoints. Transport-independent `Settings` contains the player,
 session ID, input delay and prediction limit. Timers use `timebase::Instant` on
@@ -164,6 +168,29 @@ before allocating, verifies every digest and acknowledges completion before
 the host boots. A 30-second inactivity timer and a three-minute overall deadline
 bound setup. Cancellation rejects pending operations and discards partial data.
 Media stays off the signaling service; a TURN relay carries encrypted peer traffic.
+
+`netplay-swap.js` negotiates `swaps: "disk-v1"` and an ordered, reliable
+`copperline-disks-v1` channel. Only the host initiates transactions. Each peer
+first holds its current frame; they then advance to the greater of those two
+frames, bounded to a 32-frame difference. `WebEmu::run_netplay` enforces this
+ceiling while continuing input polling and reconciliation. Both peers wait for
+the stop frame to be confirmed and acknowledged, so no prediction history can
+restore media from before the change. Input delay and already sampled future
+inputs are retained, and wall-clock pacing is reanchored around the pause.
+
+The peers compare SHA-256 digests of the complete confirmed machine state,
+transfer at most 16 MiB in 16 KiB chunks with 256 KiB send-buffer backpressure,
+verify the image digest, and decode into a temporary controller before agreeing
+to apply. The core decoder enforces the same 16 MiB bound on gzip/zip expansion
+during validation and insertion; the ordinary gzip floppy loader has a 128 MiB
+expanded-size cap for larger flux captures. Host controls wait for the separate
+disk channel to open. Both live drives change at the stopped boundary with canonical
+`netplay-dfN` metadata and memory backing. A second full-state digest comparison
+precedes resume. Empty payloads perform an eject. Transaction IDs, message phases,
+metadata and chunk sizes are checked; overlapping requests are rejected. Thirty
+seconds without control/transfer progress or three minutes total ends the session.
+Cancellation discards buffered bytes and frees the machine through the normal
+disconnect path. No save-state or input-packet format changes are required.
 
 Host/Join freezes the chosen cold-boot media and frees any local emulator.
 After media verification, the wrapper builds a fresh machine, fixes the RTC seed,
@@ -247,7 +274,10 @@ required for the regression suite.
 
 After building the release web bundle, run `node tools/check-web-netplay.mjs` and
 `npm test --prefix crates/copperline-web/www`. CI also runs the native web wrapper
-unit tests, including failed startup, input routing and audio gain checks. The
+unit tests, including failed startup, input routing and audio gain checks.
+`node tools/check-web-netplay-swaps.mjs` exercises repeated replacements and
+ejections on real release WASM with packet loss, reordering and asymmetric pacing,
+then checks continued state agreement after each change. The
 browser publishing workflow also checks the optimized bundle before copying all netplay modules and the vendored QR license alongside
 the other page modules. For a served local page, the optional Playwright check
 `node tools/check-web-netplay-browser.mjs http://127.0.0.1:8000/` exercises actual

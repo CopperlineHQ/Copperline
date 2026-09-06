@@ -7538,6 +7538,14 @@ if (typeof WebEmu.prototype.start_netplay === 'function') {
   netplayPanel = mountNetplayPanel(
     $('reset').closest('.try-side-section')?.parentElement ?? shell.parentElement,
     {
+      getMachine: link => netplayPanel?.link === link && netplayMachineReady ? emu : null,
+      diskChanged: (link, disk) => {
+        if (netplayPanel?.link !== link) return;
+        diskNames[disk.drive] = disk.size ? disk.name : null;
+        lastFddTrack = null;
+        updateStatusDisks();
+        updateFloppyImageControls();
+      },
       prepare: async (link, { receiveMedia }) => {
         if (!wasm || (!receiveMedia && !bootRom)) throw new Error('Load a ROM before setting up netplay');
         keepUploadedDisksForRebuild();
