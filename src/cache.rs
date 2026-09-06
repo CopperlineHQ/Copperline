@@ -9,10 +9,16 @@
 //! entries: the larger capacity is what matters here (a chip-RAM loop bigger
 //! than 256 bytes stays resident on a 040 where it would thrash a 020). The
 //! 040's 4-way set-associative, 16-byte-line, copyback organisation is not
-//! modelled, and need not be: copyback is invisible because the data cache only
-//! covers expansion RAM, which is not DMA-visible, so write-back versus
-//! write-through is unobservable. We do not model burst timing (IBE/DBE are
-//! stored but inert on the 030).
+//! modelled, and need not be: the data cache only covers expansion RAM, which
+//! chipset DMA cannot reach, so write-back versus write-through is
+//! unobservable. (Virtual boards CAN host-DMA into expansion RAM behind this
+//! cache -- the services board answering a packet, copperhf draining a
+//! completed read -- and the data cache is dropped when a device reports
+//! such a write: the synchronous device-access path via
+//! `DeviceHost::touched_memory`, and tick-path DMA via
+//! `DeviceHost::wrote_memory`/`Bus::devices_wrote_memory`, consumed at
+//! instruction boundaries and before any data-cache read hit; see cpu.rs.) We do not model burst timing (IBE/DBE
+//! are stored but inert on the 030).
 //!
 //! A hit serves the access with no bus cycle, which is the real effect that
 //! matters on an Amiga: cached fetches stop competing with DMA for the chip

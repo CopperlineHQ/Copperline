@@ -62,6 +62,13 @@ pub struct A2091 {
     dma_active: bool,
     dma_warned: bool,
     activity: bool,
+    /// Set when `pump_dma` wrote guest memory this tick; the ZorroDevice
+    /// tick wrapper forwards it to `DeviceHost::note_wrote_memory` so the
+    /// CPU's modelled data cache drops entries the DMA wrote behind it.
+    /// (`memory_mut` alone must not be the signal: this board ticks it
+    /// unconditionally, reads included.) Transient.
+    #[serde(skip, default)]
+    wrote_memory: bool,
 }
 
 impl A2091 {
@@ -87,6 +94,7 @@ impl A2091 {
             dma_active: false,
             dma_warned: false,
             activity: false,
+            wrote_memory: false,
         })
     }
 
@@ -361,7 +369,9 @@ impl A2091 {
     }
 
     fn dma_write_word(&mut self, mem: &mut Memory, addr: u32, w: u16) {
-        if !crate::zorro_device::dma_write_word(mem, addr, w) {
+        if crate::zorro_device::dma_write_word(mem, addr, w) {
+            self.wrote_memory = true;
+        } else {
             self.warn_dma_target(addr);
         }
     }
@@ -401,6 +411,9 @@ impl crate::zorro_device::ZorroDevice for A2091 {
 
     fn tick(&mut self, cck: u32, host: &mut crate::zorro_device::DeviceHost) {
         Self::tick(self, cck, host.memory_mut());
+        if std::mem::take(&mut self.wrote_memory) {
+            host.note_wrote_memory();
+        }
         // A CD-ROM target streams its CD-DA playback into the host mixer
         // ring, which the bus tick loop provides.
         if let Some(cd_audio) = host.cd_audio_opt() {

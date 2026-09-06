@@ -258,9 +258,21 @@ instruction-cache geometry -- and 1024 (4 KB) on the 68040. The larger 040
 capacity is the part that matters here: a chip-RAM loop bigger than 256 bytes
 stays resident on a 040 where it would thrash a 020. The 040's 4-way
 set-associative, 16-byte-line, copyback organisation is deliberately not
-modelled, and need not be -- copyback is unobservable because the data cache
-only covers expansion RAM, which is not DMA-visible, so write-back versus
-write-through cannot be told apart. The 040 also redefines CACR (only the IE/DE
+modelled, and need not be -- the data cache only covers expansion RAM, which
+chipset DMA cannot reach, so write-back versus write-through cannot be told
+apart. Virtual boards, however, CAN host-DMA into expansion RAM behind the
+model (the services board answering a DosPacket, copperhf draining a
+completed disk read, the A3000 SDMAC pumping SCSI data), so both paths that
+let a device touch guest memory report it and the data cache is dropped: the
+synchronous device-access path clears it inside the access, and device
+`tick`-path DMA latches `Bus::devices_wrote_memory` -- keyed on actual DMA
+writes (`DeviceHost::wrote_memory` and the SDMAC/A2091 write latches), not
+on mere memory access, so a board that only borrows memory on its tick does
+not disable the cache -- consumed at the next instruction-boundary flush
+(`flush_timed_devices_dcache_coherent`) and, because the JIT batch path can
+flush timed devices mid-batch, before any data-cache read hit. Without
+the tick half, PFS3 on a 68040 read corrupted file data through copperhf's
+asynchronous completions. The 040 also redefines CACR (only the IE/DE
 enable bits, no freeze or clear strobes) and moves invalidation to the
 CINV/CPUSH instructions; the model maps a CINV/CPUSH to a whole-cache clear of
 the indicated cache(s) -- over-clearing line/page scopes, which is always

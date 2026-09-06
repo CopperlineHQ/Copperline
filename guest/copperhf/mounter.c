@@ -79,12 +79,64 @@ extern char device_name[];
 
 #define CHF_IOB_LONGS 12 /* 12*4 = 48 bytes: covers every field up to +44 */
 
+/* AbsExecBase -- device.c's sysbase() idiom; needed here because
+ * chf_do_io's callers don't all carry _sysbase and the cache calls below
+ * want it. */
+static struct ExecBase *chf_sysbase(void)
+{
+    struct ExecBase *base;
+    __asm("move.l 4.w,%0" : "=r"(base));
+    return base;
+}
+
+/* DMA cache maintenance around the polled path, mirroring device.c's
+ * chf_pre_dma/chf_post_dma (see the full rationale there): the host reads
+ * the request block at doorbell time and writes io_Actual/io_Error (plus
+ * the CMD_READ payload) back behind the CPU's data cache. The mounter
+ * only ever rings CMD_READ, so these cover just the request block and its
+ * read buffer. V33/V34 (Kickstart 1.3) has no cache vectors -- and no
+ * cached CPUs -- so both helpers no-op there. */
+static void chf_cache_pre_io(ULONG *iob)
+{
+    struct ExecBase *_sysbase = chf_sysbase();
+    UBYTE *b = (UBYTE *)iob;
+    ULONG len;
+
+    if (_sysbase->LibNode.lib_Version < 37)
+        return;
+    len = CHF_IOB_LONGS * 4;
+    CachePreDMA((APTR)iob, (LONG *)&len, 0);
+    if (*(volatile UWORD *)(b + CHF_IO_COMMAND) == CHF_CMD_READ) {
+        len = *(volatile ULONG *)(b + CHF_IO_LENGTH);
+        CachePreDMA((APTR)*(volatile ULONG *)(b + CHF_IO_DATA), (LONG *)&len, 0);
+    }
+}
+
+static void chf_cache_post_io(ULONG *iob)
+{
+    struct ExecBase *_sysbase = chf_sysbase();
+    UBYTE *b = (UBYTE *)iob;
+    ULONG len;
+
+    if (_sysbase->LibNode.lib_Version < 37)
+        return;
+    /* The request block first: io_Error (read by chf_do_io's caller
+     * contract below) and io_Actual are host-written. */
+    len = CHF_IOB_LONGS * 4;
+    CachePostDMA((APTR)iob, (LONG *)&len, 0);
+    if (*(volatile UWORD *)(b + CHF_IO_COMMAND) == CHF_CMD_READ) {
+        len = *(volatile ULONG *)(b + CHF_IO_LENGTH);
+        CachePostDMA((APTR)*(volatile ULONG *)(b + CHF_IO_DATA), (LONG *)&len, 0);
+    }
+}
+
 static BOOL chf_do_io(UBYTE *board, ULONG *iob)
 {
     UBYTE *b = (UBYTE *)iob;
     ULONG req = (ULONG)iob;
     ULONG spins;
 
+    chf_cache_pre_io(iob);
     *(volatile ULONG *)(board + CHF_DOORBELL) = req;
 
     /* The board executes synchronously today (M1/M5 protocol comment in
@@ -96,6 +148,9 @@ static BOOL chf_do_io(UBYTE *board, ULONG *iob)
         ULONG done = *(volatile ULONG *)(board + CHF_COMPLETE_GET);
         if (done == req) {
             *(volatile UWORD *)(board + CHF_COMPLETE_ACK) = 0;
+            /* Before io_Error (host-written) is believed, drop any stale
+             * cached lines over the request block and the read buffer. */
+            chf_cache_post_io(iob);
             return *(volatile BYTE *)(b + CHF_IO_ERROR) == 0;
         }
         if (done != 0) {

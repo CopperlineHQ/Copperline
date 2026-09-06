@@ -395,6 +395,179 @@ static void chf_do_remchangeint(struct IOStdReq *ioreq, struct CopperhfDevice *d
     chf_complete(ioreq, _sysbase);
 }
 
+/* -------------------------------------------------------------------
+ * DMA cache maintenance (exec V37+). The board is a busmaster: the host
+ * reads the request header (and write payloads) out of guest memory at
+ * doorbell time and writes completion fields (io_Actual/io_Error) and
+ * read payloads back at INT2-drain time, all behind the CPU's back --
+ * exactly the situation exec.doc's CachePreDMA/CachePostDMA contract for
+ * DMA device drivers exists for. Without these calls a 68040's copyback
+ * data cache (real silicon, or Copperline's own `[cpu] dcache` model)
+ * serves stale lines over the DMA'd bytes: the confirmed failure was
+ * PFS3 on a 68040 reading corrupted file data through this device while
+ * the same image worked on an (uncached) 68EC020.
+ *
+ * V37 guard: exec V33/V34 (Kickstart 1.3) has no CachePreDMA/CachePostDMA
+ * vectors. It also predates every cached CPU this matters on, so skipping
+ * the calls there is correct, not merely tolerated.
+ *
+ * HD_SCSICMD's struct SCSICmd is addressed by byte offsets (matching
+ * devices/scsidisk.h's real m68k layout: scsi_Data +0, scsi_Length +4,
+ * scsi_Command +12, scsi_CmdLength +16, scsi_SenseData +22,
+ * scsi_SenseLength +26 -- note +22, the struct is 2-byte-packed, see the
+ * host's own hard-won comment in src/copperhf.rs) rather than through the
+ * NDK struct, the same idiom the rest of this ROM uses for shared
+ * guest/host layouts.
+ *
+ * CachePreDMA can legally shorten the returned length (MMU page
+ * chunking); ignored here on purpose: the board protocol hands the host
+ * virtual addresses, so any system remapping memory behind an MMU could
+ * not use this device anyway, and on the flat setups it supports the
+ * full range is always contiguous. */
+
+#define CHF_DRIVEGEOMETRY_SIZE 32 /* sizeof(struct DriveGeometry) */
+#define CHF_SCSICMD_SIZE 30      /* sizeof(struct SCSICmd), 2-byte-packed */
+
+static void chf_pre_dma_scsi(struct ExecBase *_sysbase, UBYTE *sc)
+{
+    ULONG len;
+    APTR data = (APTR)*(ULONG *)(sc + 0);
+    ULONG dlen = *(ULONG *)(sc + 4);
+    APTR cdb = (APTR)*(ULONG *)(sc + 12);
+    UWORD clen = *(UWORD *)(sc + 16);
+    APTR sense = (APTR)*(ULONG *)(sc + 22);
+    UWORD slen = *(UWORD *)(sc + 26);
+
+    len = CHF_SCSICMD_SIZE;
+    CachePreDMA((APTR)sc, (LONG *)&len, 0);
+    if (data != NULL && dlen != 0) {
+        len = dlen;
+        CachePreDMA(data, (LONG *)&len, 0); /* direction unknown here: 0 is
+                                             * the safe both-ways choice */
+    }
+    if (cdb != NULL && clen != 0) {
+        len = clen;
+        CachePreDMA(cdb, (LONG *)&len, DMA_ReadFromRAM);
+    }
+    if (sense != NULL && slen != 0) {
+        len = slen;
+        CachePreDMA(sense, (LONG *)&len, 0);
+    }
+}
+
+static void chf_post_dma_scsi(struct ExecBase *_sysbase, UBYTE *sc)
+{
+    ULONG len;
+    APTR data, sense;
+    ULONG dlen;
+    UWORD slen;
+
+    /* The struct itself first: the host wrote scsi_Actual/scsi_CmdActual/
+     * scsi_Status/scsi_SenseActual, and the pointer/length fields read
+     * below must come from memory, not from stale cached lines. */
+    len = CHF_SCSICMD_SIZE;
+    CachePostDMA((APTR)sc, (LONG *)&len, 0);
+    data = (APTR)*(ULONG *)(sc + 0);
+    dlen = *(ULONG *)(sc + 4);
+    sense = (APTR)*(ULONG *)(sc + 22);
+    slen = *(UWORD *)(sc + 26);
+    if (data != NULL && dlen != 0) {
+        len = dlen;
+        CachePostDMA(data, (LONG *)&len, 0);
+    }
+    if (sense != NULL && slen != 0) {
+        len = slen;
+        CachePostDMA(sense, (LONG *)&len, 0);
+    }
+}
+
+/* Caller-context half, from dev_beginio before the doorbell rings: push
+ * dirty copyback lines out (so the host's synchronous header/payload read
+ * sees them) and pre-invalidate the ranges the host will write. */
+static void chf_pre_dma(struct ExecBase *_sysbase, struct IOStdReq *ioreq)
+{
+    ULONG len;
+
+    if (_sysbase->LibNode.lib_Version < 37)
+        return;
+
+    len = sizeof(struct IOStdReq);
+    CachePreDMA((APTR)ioreq, (LONG *)&len, 0);
+    switch (ioreq->io_Command) {
+    case CHF_CMD_READ:
+    case CHF_CMD_TD_READ64:
+    case CHF_NSCMD_TD_READ64:
+        len = ioreq->io_Length;
+        CachePreDMA(ioreq->io_Data, (LONG *)&len, 0);
+        break;
+    case CHF_CMD_WRITE:
+    case CHF_CMD_TD_FORMAT:
+    case CHF_CMD_TD_WRITE64:
+    case CHF_CMD_TD_FORMAT64:
+    case CHF_NSCMD_TD_WRITE64:
+    case CHF_NSCMD_TD_FORMAT64:
+        len = ioreq->io_Length;
+        CachePreDMA(ioreq->io_Data, (LONG *)&len, DMA_ReadFromRAM);
+        break;
+    case CHF_CMD_TD_GETGEOMETRY:
+        len = CHF_DRIVEGEOMETRY_SIZE;
+        CachePreDMA(ioreq->io_Data, (LONG *)&len, 0);
+        break;
+    case CHF_CMD_HD_SCSICMD:
+        chf_pre_dma_scsi(_sysbase, (UBYTE *)ioreq->io_Data);
+        break;
+    default:
+        break;
+    }
+}
+
+/* Completion half, called from int_handler.s just before each ReplyMsg
+ * (as an ordinary stack-argument C call, the chf_drain_changes
+ * convention) and from mounter.c's polled path. Runs in interrupt context
+ * from the INT2 server: CachePreDMA/CachePostDMA are the documented
+ * busmaster-driver completion calls and exec implements them with
+ * Disable + CACR/CINV, the same place real DMA drivers (the A3000's own
+ * scsi.device) invoke them from. */
+void chf_post_dma(struct IOStdReq *ioreq)
+{
+    struct ExecBase *_sysbase = sysbase();
+    ULONG len;
+
+    if (_sysbase->LibNode.lib_Version < 37)
+        return;
+
+    /* The request block FIRST: io_Actual/io_Error were host-written, and
+     * io_Command/io_Data/io_Length are read below through the same lines. */
+    len = sizeof(struct IOStdReq);
+    CachePostDMA((APTR)ioreq, (LONG *)&len, 0);
+    switch (ioreq->io_Command) {
+    case CHF_CMD_READ:
+    case CHF_CMD_TD_READ64:
+    case CHF_NSCMD_TD_READ64:
+        len = ioreq->io_Length;
+        CachePostDMA(ioreq->io_Data, (LONG *)&len, 0);
+        break;
+    case CHF_CMD_WRITE:
+    case CHF_CMD_TD_FORMAT:
+    case CHF_CMD_TD_WRITE64:
+    case CHF_CMD_TD_FORMAT64:
+    case CHF_NSCMD_TD_WRITE64:
+    case CHF_NSCMD_TD_FORMAT64:
+        len = ioreq->io_Length;
+        CachePostDMA(ioreq->io_Data, (LONG *)&len, DMA_ReadFromRAM);
+        break;
+    case CHF_CMD_TD_GETGEOMETRY:
+        len = CHF_DRIVEGEOMETRY_SIZE;
+        CachePostDMA(ioreq->io_Data, (LONG *)&len, 0);
+        break;
+    case CHF_CMD_HD_SCSICMD:
+        chf_post_dma_scsi(_sysbase, (UBYTE *)ioreq->io_Data);
+        break;
+    default:
+        break;
+    }
+}
+
 /* BeginIO(dev, ioreq) -- A6=devbase, A1=ioreq. Three commands are answered
  * entirely from the guest stub (copperhf_board.h: "the guest-side ones
  * never reach the doorbell at all") because they need guest pointers (the
@@ -427,6 +600,7 @@ void dev_beginio(struct IOStdReq *ioreq __asm("a1"), struct CopperhfDevice *dev 
 
     ioreq->io_Flags &= ~IOF_QUICK;
     ioreq->io_Error = 0;
+    chf_pre_dma(sysbase(), ioreq);
     *(volatile ULONG *)((UBYTE *)dev->dev_BoardBase + CHF_DOORBELL) = (ULONG)ioreq;
 }
 

@@ -170,6 +170,16 @@ pub struct DeviceHost<'a> {
     /// cache: host-side writes land behind the CPU's cache model, so a
     /// cached line over DMA'd RAM would otherwise read back stale.
     touched_memory: bool,
+    /// Whether the device actually WROTE guest memory through this host's
+    /// DMA write helpers (`dma_write_word`/`dma_write`, or a board's own
+    /// free-function write path reported via `note_wrote_memory`). Unlike
+    /// `touched_memory` -- which `memory_mut` sets on ANY access, reads
+    /// included -- this only latches on real writes, so the bus tick loop
+    /// can drop the CPU's data-cache model exactly when DMA landed instead
+    /// of on every tick of a board that merely borrows memory (the A2091
+    /// ticks `memory_mut` unconditionally; latching on that would disable
+    /// the data cache outright on such machines).
+    wrote_memory: bool,
 }
 
 impl<'a> DeviceHost<'a> {
@@ -181,6 +191,7 @@ impl<'a> DeviceHost<'a> {
             mhi_audio: None,
             self_slot: None,
             touched_memory: false,
+            wrote_memory: false,
         }
     }
 
@@ -193,6 +204,7 @@ impl<'a> DeviceHost<'a> {
             mhi_audio: None,
             self_slot: Some(slot),
             touched_memory: false,
+            wrote_memory: false,
         }
     }
 
@@ -217,6 +229,7 @@ impl<'a> DeviceHost<'a> {
             mhi_audio: None,
             self_slot: None,
             touched_memory: false,
+            wrote_memory: false,
         }
     }
 
@@ -240,6 +253,7 @@ impl<'a> DeviceHost<'a> {
             mhi_audio: Some(mhi_audio),
             self_slot: Some(slot),
             touched_memory: false,
+            wrote_memory: false,
         }
     }
 
@@ -254,6 +268,21 @@ impl<'a> DeviceHost<'a> {
     /// its data cache must be invalidated.
     pub fn touched_memory(&self) -> bool {
         self.touched_memory
+    }
+
+    /// Whether the device actually wrote guest memory through this host
+    /// (see `wrote_memory`). The bus tick loop drains this into
+    /// `Bus::devices_wrote_memory` so tick-path DMA drops the CPU's
+    /// modelled data cache.
+    pub fn wrote_memory(&self) -> bool {
+        self.wrote_memory
+    }
+
+    /// Report a guest-memory write performed outside this host's own DMA
+    /// helpers (a board pumping DMA through the free `dma_write_*`
+    /// functions against `memory_mut`, like the A2091/CDTV).
+    pub fn note_wrote_memory(&mut self) {
+        self.wrote_memory = true;
     }
 
     /// Paula's CD-audio ring. Only present on a host built via
@@ -300,6 +329,7 @@ impl<'a> DeviceHost<'a> {
     /// 24-bit DMA word write; `false` when the target is unmapped.
     pub fn dma_write_word(&mut self, addr: u32, w: u16) -> bool {
         self.touched_memory = true;
+        self.wrote_memory = true;
         dma_write_word(self.mem, addr, w)
     }
 
@@ -322,6 +352,7 @@ impl<'a> DeviceHost<'a> {
     /// routes here.
     pub fn dma_write(&mut self, addr: u32, buf: &[u8]) {
         self.touched_memory = true;
+        self.wrote_memory = true;
         for (i, b) in buf.iter().enumerate() {
             dma_write_byte(self.mem, addr.wrapping_add(i as u32), *b);
         }
