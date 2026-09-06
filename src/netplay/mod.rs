@@ -10,6 +10,10 @@ mod wire;
 #[cfg(not(target_arch = "wasm32"))]
 use transport::UdpTransport;
 pub use transport::{PacketQueue, Transport};
+/// Fixed wire layout, also exposed to browser glue for compatibility checks.
+pub use wire::{HEADER as PACKET_HEADER, INPUT_RECORD, MAX_PACKET, VERSION as PROTOCOL_VERSION};
+/// Default seed for a fitted clock in deterministic netplay sessions.
+pub const RTC_SEED: u64 = 946684800;
 
 use crate::emulator::Emulator;
 use crate::timebase::{Duration, Instant};
@@ -29,6 +33,24 @@ pub struct Input {
 }
 
 impl Input {
+    pub const BUTTONS: u16 = 0x7ff;
+
+    /// Direction switches, red/fire and blue/second button, in wire order.
+    pub fn set_joystick(&mut self, held: [bool; 6]) {
+        self.buttons = (self.buttons & !0x3f) | Self::pack_buttons(held);
+    }
+
+    /// Play, rewind, forward, green and yellow, in wire order.
+    pub fn set_cd32_buttons(&mut self, held: [bool; 5]) {
+        self.buttons = (self.buttons & 0x3f) | (Self::pack_buttons(held) << 6);
+    }
+
+    fn pack_buttons<const N: usize>(held: [bool; N]) -> u16 {
+        held.into_iter()
+            .enumerate()
+            .fold(0, |bits, (bit, on)| bits | (u16::from(on) << bit))
+    }
+
     pub fn set_key(&mut self, key: u8, pressed: bool) {
         if key >= 128 {
             return;
@@ -165,7 +187,7 @@ pub fn validate_config(cfg: &crate::config::Config) -> Result<()> {
 pub fn prepare_config(cfg: &mut crate::config::Config) -> Result<()> {
     validate_config(cfg)?;
     if cfg.rtc_present && cfg.rtc_seed_unix.is_none() {
-        cfg.rtc_seed_unix = Some(946684800);
+        cfg.rtc_seed_unix = Some(RTC_SEED);
         log::info!("netplay: guest clock starts at 2000-01-01 00:00:00 UTC");
     }
     Ok(())
@@ -318,7 +340,11 @@ impl<T: Transport> Connection<T> {
         for _ in 0..64 {
             match self.transport.receive(&mut buffer) {
                 Ok(Some(len)) => {
-                    let Some(packet) = buffer.get(..len).and_then(wire::Packet::decode) else {
+                    let Some(bytes) = buffer.get(..len) else {
+                        continue;
+                    };
+                    wire::Packet::check_version(bytes, &self.settings.session)?;
+                    let Some(packet) = wire::Packet::decode(bytes) else {
                         continue;
                     };
                     if packet.session != self.settings.session {
@@ -326,7 +352,7 @@ impl<T: Transport> Connection<T> {
                     }
                     ensure!(packet.player == 1 - self.settings.player && packet.delay == self.settings.input_delay && packet.window == self.settings.rollback_frames,
                         "netplay settings differ: use opposite players and identical delay/rollback values");
-                    ensure!(packet.identity == self.identity, "netplay initial machine mismatch: use the same build, ROM, disks and deterministic machine settings");
+                    ensure!(packet.identity == self.identity, "netplay initial machine mismatch: use the same build, ROM, disks, floppy sounds and deterministic machine settings");
                     self.seen_peer = true;
                     if packet.ready && !self.connected {
                         self.connected = true;
@@ -357,7 +383,7 @@ impl<T: Transport> Connection<T> {
             }
         }
         ensure!(
-            input.buttons & !0x7ff == 0,
+            input.buttons & !Input::BUTTONS == 0,
             "invalid local netplay controller input"
         );
         let now = Instant::now();

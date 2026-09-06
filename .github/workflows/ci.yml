@@ -505,6 +505,9 @@ jobs:
       - name: Web crate (wasm32-unknown-unknown)
         working-directory: crates/copperline-web
         run: cargo check --target wasm32-unknown-unknown --locked
+      - name: Web wrapper unit tests
+        working-directory: crates/copperline-web
+        run: cargo test --locked
       - name: Web crate formatting
         # The web crate is a standalone workspace, so the root Formatting
         # step never reaches it.

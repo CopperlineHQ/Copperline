@@ -8,7 +8,8 @@ use std::collections::VecDeque;
 
 pub trait Transport {
     /// Read one complete packet without blocking. None means the queue is empty;
-    /// a returned length must fit the supplied buffer.
+    /// a returned length must fit the supplied buffer. Some(0) means a packet
+    /// was consumed and discarded (for example, a foreign UDP source).
     fn receive(&mut self, buffer: &mut [u8]) -> Result<Option<usize>>;
     /// False means the transport is temporarily unable to accept this packet.
     fn send(&mut self, packet: &[u8]) -> Result<bool>;

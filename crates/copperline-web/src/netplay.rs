@@ -32,7 +32,7 @@ impl WebEmu {
         self.require_local_session()?;
         if !self.netplay_eligible || self.emu.bus().emulated_cck() != 0 {
             return Err(JsValue::from_str(
-                "Netplay needs a fresh machine; load ROM and disks before starting",
+                "Netplay needs a fresh machine; create a new WebEmu and load ROM and disks before starting",
             ));
         }
         let settings = Settings {
@@ -50,25 +50,18 @@ impl WebEmu {
                 ))
             }
         };
-        let mut cfg = self.config.clone();
-        cfg.serial.mode = copperline::config::SerialMode::Off;
-        copperline::netplay::prepare_config(&mut cfg).map_err(js_err)?;
-        self.netplay_volume = self.emu.bus().output_volume_percent();
-        self.emu.bus_mut().set_output_volume_percent(100);
-        self.emu.bus_mut().rtc.set_seed(Some(946684800), false);
-        self.emu.bus_mut().paula.serial = Box::new(copperline::serial::NullSerialSink);
-        for port in 0..2 {
-            self.emu.bus_mut().input.set_port_device(port, device);
-        }
-        self.mouse_pending = (0, 0);
-        self.mouse_remainder = (0.0, 0.0);
-        self.netplay_input = Default::default();
-        self.netplay = Some(
-            Connection::with_transport(settings, PacketQueue::default(), &mut self.emu, &cfg)
-                .map_err(js_err)?,
-        );
-        self.anchor = None;
-        Ok(())
+        self.start_netplay_inner(settings, device).map_err(js_err)
+    }
+
+    /// [protocol version, maximum packet bytes, header bytes, input record bytes].
+    pub fn netplay_packet_layout() -> Vec<u32> {
+        use copperline::netplay::{INPUT_RECORD, MAX_PACKET, PACKET_HEADER, PROTOCOL_VERSION};
+        vec![
+            u32::from(PROTOCOL_VERSION),
+            MAX_PACKET as u32,
+            PACKET_HEADER as u32,
+            INPUT_RECORD as u32,
+        ]
     }
 
     pub fn netplay_receive(&mut self, packet: &[u8]) -> Result<(), JsValue> {
@@ -112,10 +105,51 @@ impl WebEmu {
 }
 
 impl WebEmu {
+    fn start_netplay_inner(
+        &mut self,
+        settings: Settings,
+        device: PortDevice,
+    ) -> anyhow::Result<()> {
+        let mut cfg = self.config.clone();
+        cfg.serial.mode = copperline::config::SerialMode::Off;
+        copperline::netplay::prepare_config(&mut cfg)?;
+        let checkpoint = self.emu.netplay_snapshot()?;
+        let volume = self.emu.bus().output_volume_percent();
+        let serial = std::mem::replace(
+            &mut self.emu.bus_mut().paula.serial,
+            Box::new(copperline::serial::NullSerialSink),
+        );
+        self.emu.bus_mut().set_output_volume_percent(100);
+        self.emu
+            .bus_mut()
+            .rtc
+            .set_seed(Some(copperline::netplay::RTC_SEED), false);
+        for port in 0..2 {
+            self.emu.bus_mut().input.set_port_device(port, device);
+        }
+        let connection =
+            Connection::with_transport(settings, PacketQueue::default(), &mut self.emu, &cfg);
+        match connection {
+            Ok(connection) => self.netplay = Some(connection),
+            Err(error) => {
+                let restored = self.emu.netplay_restore(&checkpoint);
+                self.emu.bus_mut().paula.serial = serial;
+                restored?;
+                return Err(error);
+            }
+        }
+        self.netplay_volume = volume;
+        self.mouse_pending = (0, 0);
+        self.mouse_remainder = (0.0, 0.0);
+        self.netplay_input = Default::default();
+        self.anchor = None;
+        Ok(())
+    }
+
     pub(super) fn require_local_session(&self) -> Result<(), JsValue> {
         if self.netplay.is_some() {
             Err(JsValue::from_str(
-                "Unavailable during netplay; disconnect first",
+                "Unavailable during netplay; free this instance and create a new WebEmu",
             ))
         } else {
             Ok(())
@@ -180,5 +214,86 @@ impl WebEmu {
                 .max(u32::from(corrected));
         }
         Ok(stepped)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settings(player: usize) -> Settings {
+        Settings {
+            player,
+            session: [42; 16],
+            input_delay: 0,
+            rollback_frames: 8,
+        }
+    }
+
+    #[test]
+    fn failed_startup_restores_machine_and_host_state() -> anyhow::Result<()> {
+        let mut web = WebEmu::new(Some("A500".into()), Some("PAL".into()), Some(1.0)).unwrap();
+        web.insert_floppy(0, vec![0; 901_120], "original.adf")
+            .unwrap();
+        web.set_volume_percent(37);
+        web.serial_set_carrier(true);
+        web.mouse_delta(12.5, -3.25);
+        web.anchor = Some((123.0, 0.0));
+        // This is a runtime rejection after preparation, not argument validation.
+        web.emu.enable_time_travel(8, 1);
+        let before = web.emu.netplay_snapshot()?;
+        let lines = web.emu.bus().paula.serial.control_lines();
+        assert!(web
+            .start_netplay_inner(settings(0), PortDevice::Cd32Pad)
+            .unwrap_err()
+            .to_string()
+            .contains("reverse history"));
+        assert!(
+            web.emu.netplay_snapshot()? == before,
+            "startup changed the machine"
+        );
+        assert_eq!(web.emu.bus().paula.serial.control_lines(), lines);
+        assert_eq!(web.mouse_pending, (12, -3));
+        assert_eq!(web.mouse_remainder, (0.5, -0.25));
+        assert_eq!(web.anchor, Some((123.0, 0.0)));
+        assert!(web.netplay.is_none());
+        web.emu.disable_time_travel();
+        web.start_netplay_inner(settings(0), PortDevice::Cd32Pad)?;
+        Ok(())
+    }
+
+    #[test]
+    fn netplay_routes_each_controller_button_and_keyboard_and_scales_local_audio(
+    ) -> anyhow::Result<()> {
+        for player in 0..2 {
+            let mut web = WebEmu::new(None, None, Some(0.0)).unwrap();
+            web.start_netplay_inner(settings(player), PortDevice::Cd32Pad)?;
+            for bit in 0..11 {
+                let on = |i| i == bit;
+                web.set_joystick_port2(on(0), on(1), on(2), on(3), on(4), on(5));
+                web.set_cd32_buttons_port2(on(6), on(7), on(8), on(9), on(10));
+                assert_eq!(web.netplay_input.buttons, 1 << bit);
+                // The secondary page controller cannot overwrite the primary.
+                web.set_joystick_port(1, false, false, false, false, false, false);
+                web.set_cd32_buttons_port(1, false, false, false, false, false);
+                assert_eq!(web.netplay_input.buttons, 1 << bit);
+            }
+            assert!(web.key_event("Space", true));
+            web.key_raw(0x20, true);
+            assert_eq!(web.netplay_input.keys[8], 1);
+            assert_eq!(web.netplay_input.keys[4], 1);
+            web.key_raw(0x20, false);
+            assert_eq!(web.netplay_input.keys[4], 0);
+            web.netplay_release_input();
+            assert_eq!(web.netplay_input, Default::default());
+            for volume in [0, 35, 100] {
+                web.set_volume_percent(volume);
+                web.audio.borrow_mut().extend([1.0, -0.5]);
+                let gain = f32::from(volume) / 100.0;
+                assert_eq!(web.take_audio(), vec![gain, -0.5 * gain]);
+                assert_eq!(web.emu.bus().output_volume_percent(), 100);
+            }
+        }
+        Ok(())
     }
 }

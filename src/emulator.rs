@@ -1468,13 +1468,17 @@ impl Emulator {
         self.snapshot_blob()
     }
 
-    pub(crate) fn netplay_snapshot(&self) -> Result<Vec<u8>> {
+    /// Capture a same-process rollback checkpoint, including CPU pipeline state.
+    /// Valid only for this build; never accept checkpoints from a remote peer.
+    pub fn netplay_snapshot(&self) -> Result<Vec<u8>> {
         let mut bytes = Vec::new();
         self.machine.write_rollback_state(&mut bytes)?;
         Ok(bytes)
     }
 
-    pub(crate) fn netplay_restore(&mut self, blob: &[u8]) -> Result<()> {
+    /// Restore a local checkpoint from [`Self::netplay_snapshot`], preserving
+    /// live host resources and resetting the real-time stepping quantum.
+    pub fn netplay_restore(&mut self, blob: &[u8]) -> Result<()> {
         self.machine
             .apply_rollback_state(&mut std::io::Cursor::new(blob))?;
         self.reset_realtime_quantum();

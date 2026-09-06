@@ -885,7 +885,8 @@ impl WebEmu {
         }
     }
 
-    /// Forward an Amiga raw key transition straight to the keyboard MCU.
+    /// Forward an Amiga raw key transition to the keyboard MCU, or update the
+    /// held keys sampled by the rollback timeline during netplay.
     /// The page's on-screen keyboard draws Amiga keys, so its keys already
     /// are rawkeys and a `KeyboardEvent.code` round trip would be a lossy
     /// detour: $2B, the key beside Return on an ISO Amiga keyboard, has no
@@ -983,11 +984,8 @@ impl WebEmu {
             // The page's primary controller always arrives on port 2; the
             // connection assigns it to this peer's negotiated Amiga port.
             if port == 2 {
-                self.netplay_input.buttons = (self.netplay_input.buttons & !0x3f)
-                    | [up, down, left, right, fire, button2]
-                        .into_iter()
-                        .enumerate()
-                        .fold(0, |bits, (bit, on)| bits | (u16::from(on) << bit));
+                self.netplay_input
+                    .set_joystick([up, down, left, right, fire, button2]);
             }
             return;
         }
@@ -1016,11 +1014,8 @@ impl WebEmu {
     ) {
         if self.netplay.is_some() {
             if port == 2 {
-                self.netplay_input.buttons = (self.netplay_input.buttons & 0x3f)
-                    | [play, rwd, ffw, green, yellow]
-                        .into_iter()
-                        .enumerate()
-                        .fold(0, |bits, (bit, on)| bits | (u16::from(on) << (bit + 6)));
+                self.netplay_input
+                    .set_cd32_buttons([play, rwd, ffw, green, yellow]);
             }
             return;
         }
@@ -1036,16 +1031,15 @@ impl WebEmu {
     /// page whose gamepad goes away restores the mouse on port 1 with
     /// `set_port_device(1, "mouse")` rather than leaving a stuck stick.
     /// Unknown names are ignored.
-    pub fn set_port_device(&mut self, port: u8, device: &str) {
-        if self.netplay.is_some() {
-            return;
-        }
+    pub fn set_port_device(&mut self, port: u8, device: &str) -> Result<(), JsValue> {
+        self.require_local_session()?;
         if let Some(device) = PortDevice::parse(device) {
             self.emu
                 .bus_mut()
                 .input
                 .set_port_device(port_index(port), device);
         }
+        Ok(())
     }
 
     /// Port-2 joystick state. Superseded by `set_joystick_port`, kept
@@ -1571,33 +1565,36 @@ impl WebEmu {
     /// Enable or mute the synthesized floppy drive sounds (motor hum,
     /// head-step clicks, read hiss). On by default, like the desktop's
     /// `[audio] floppy_sounds` knob.
-    pub fn set_floppy_sounds(&mut self, enabled: bool) {
+    pub fn set_floppy_sounds(&mut self, enabled: bool) -> Result<(), JsValue> {
+        self.require_local_session()?;
         self.emu
             .bus_mut()
             .paula
             .drive_sounds_mut()
             .set_enabled(enabled);
+        Ok(())
     }
 
     /// Drive-sound level, 0-100, relative to Paula's output (the desktop's
     /// `[audio] floppy_sounds_volume`).
-    pub fn set_floppy_sounds_volume(&mut self, percent: u8) {
+    pub fn set_floppy_sounds_volume(&mut self, percent: u8) -> Result<(), JsValue> {
+        self.require_local_session()?;
         self.emu
             .bus_mut()
             .paula
             .drive_sounds_mut()
             .set_volume_percent(percent);
+        Ok(())
     }
 
     /// Emulated floppy drive speed (the desktop's `[floppy] speed`): a
     /// data-rate percentage of 100/200/400/800, or 0 for turbo, where disk
     /// DMA transfers complete almost instantly. Other values fall back to
     /// 100. Applies immediately; drive mechanics stay at real speed.
-    pub fn set_floppy_speed(&mut self, percent: u16) {
-        if self.netplay.is_some() {
-            return;
-        }
+    pub fn set_floppy_speed(&mut self, percent: u16) -> Result<(), JsValue> {
+        self.require_local_session()?;
         self.emu.bus_mut().floppy.set_speed_percent(percent);
+        Ok(())
     }
 
     /// Current floppy drive speed value (percentage, or 0 for turbo).

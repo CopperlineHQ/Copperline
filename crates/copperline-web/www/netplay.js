@@ -2,7 +2,7 @@
 
 // Signaling is copy/paste; only bounded input packets use the data channel.
 const CODE_LIMIT = 96 * 1024;
-const PACKET_LIMIT = 943;
+export const PACKET_LIMIT = 943;
 const QUEUE_LIMIT = 64;
 const CHANNEL = 'copperline-netplay-v1';
 
@@ -71,7 +71,7 @@ export class RtcLink {
     if (this.closed || this.channel || channel.label !== CHANNEL ||
         channel.ordered || channel.maxRetransmits !== 0) {
       channel.close();
-      this.close('Unexpected netplay data channel');
+      this.close(`Unexpected netplay data channel: label=${channel.label}, ordered=${channel.ordered}, maxRetransmits=${channel.maxRetransmits}`);
       return;
     }
     this.channel = channel;
@@ -83,7 +83,7 @@ export class RtcLink {
         return;
       }
       // Browser timer throttling can batch valid retransmissions. Keep the
-      // newest packets, which repeat every unacknowledged input, as UDP does.
+      // newest packets, which repeat every unacknowledged input.
       if (this.incoming.length === QUEUE_LIMIT) this.incoming.shift();
       this.incoming.push(new Uint8Array(event.data));
     };
@@ -92,10 +92,13 @@ export class RtcLink {
       this.opened = true;
       clearTimeout(this.timer);
       Promise.resolve().then(() => this.closed ? undefined : this.onOpen(this))
-        .catch(error => this.close(String(error.message ?? error)));
+        .catch(error => { console.error('Netplay startup failed', error); this.close(String(error.message ?? error)); });
     };
     channel.onclose = () => this.close('Peer disconnected');
-    channel.onerror = () => this.close('Netplay data channel failed');
+    channel.onerror = event => {
+      console.error('Netplay data channel failed', event.error ?? event);
+      this.close(`Netplay data channel failed${event.error?.message ? ': ' + event.error.message : ''}`);
+    };
   }
 
   async gather(description) {
@@ -169,6 +172,13 @@ export class RtcLink {
     this.closed = true;
     clearTimeout(this.timer);
     this.cancelGather?.();
+    // Let the owner poll final queued packets for the core's failure reason
+    // before freeing the machine. A remote close can follow its hello packet.
+    try { this.onClose(reason, this); }
+    finally { this.dispose(); }
+  }
+
+  dispose() {
     this.incoming.length = 0;
     this.pc.ondatachannel = this.pc.onconnectionstatechange = null;
     if (this.channel) {
@@ -176,7 +186,6 @@ export class RtcLink {
       this.channel.close();
     }
     this.pc.close();
-    this.onClose(reason, this);
   }
 }
 
@@ -243,7 +252,7 @@ export function mountNetplayPanel(parent, { prepare, start, stop }) {
       current = new RtcLink({ iceServers: stun ? [{ urls: stun }] : [],
         onOpen: async peer => {
           if (link !== peer) return;
-          status('Connected. Checking the initial machines…');
+          status('Connected. Checking the initial machines...');
           await start(peer, settings, host ? 1 : 2);
         },
         onClose: (reason, peer) => {
@@ -251,14 +260,13 @@ export function mountNetplayPanel(parent, { prepare, start, stop }) {
           link = null;
           field('local').value = '';
           controls();
-          stop(reason);
-          status(reason);
+          status(stop(reason, peer) ?? reason);
         },
       });
       link = current;
       field('local').value = '';
       controls();
-      status('Preparing a fresh session and gathering network addresses…');
+      status('Preparing a fresh session and gathering network addresses...');
       await prepare(current);
       if (link !== current) return;
       const code = host ? await current.offer(settings) : await current.answer(remote);
@@ -266,7 +274,7 @@ export function mountNetplayPanel(parent, { prepare, start, stop }) {
       field('local').value = code;
       field('copy').disabled = false;
       field('accept').disabled = !host;
-      status(host ? 'Send your offer code. Paste the reply and click Connect answer.' : 'Send your answer code back to the host. Keep this page open.');
+      status(host ? 'Send your offer code. Paste the reply and click Connect answer.' : 'Send your answer code back to the host. Keep this page open, or Disconnect to cancel.');
     } catch (error) {
       if (current && link === current) current.close(String(error.message ?? error));
       else if (!current) status(String(error.message ?? error));
@@ -282,7 +290,7 @@ export function mountNetplayPanel(parent, { prepare, start, stop }) {
       await current.accept(field('remote').value);
       if (link !== current) return;
       field('accept').disabled = true;
-      if (!current.opened) status('Connecting to the other player…');
+      if (!current.opened) status('Connecting to the other player...');
     } catch (error) {
       if (link !== current) return;
       field('accept').disabled = current.opened;

@@ -17,7 +17,7 @@ mixed operating systems and browser engines have not yet been qualified.
 ## Set up in the browser
 
 On the [browser page](browser.md), open **Controls → Netplay**. Load the same ROM
-and disks, and choose the same model, video standard, floppy speed and writable
+and disks, and choose the same model, video standard, floppy speed, floppy sounds and writable
 disk setting on both pages. Setup starts a fresh machine, replacing any running
 local session.
 
@@ -33,8 +33,8 @@ local session.
 
 Host owns Amiga port 1; Join owns port 2. On each page, the usual first gamepad,
 keyboard joystick or touch controls drive that player's port. The keyboard
-joystick mode is enabled on connection; cycle **Joystick** off to type ordinary
-Amiga keys. Both keyboards contribute to the shared keyboard. Mouse input is
+joystick mode is enabled on desktop browsers; touch devices start with touch
+controls. Cycle **Joystick** off to type ordinary Amiga keys. Both keyboards contribute to the shared keyboard. Mouse input is
 disabled. The desktop F11/F12 netplay shortcuts do not apply to the browser.
 
 The default STUN server helps WebRTC discover an internet route. Leave the field
@@ -47,8 +47,9 @@ snapshots are not sent to the peer. WebRTC encrypts the data channel.
 
 Keep both pages open. A suspended tab can stall its peer and eventually time out;
 background execution depends on browser and device restrictions. Machine, media,
-serial, pause and save-state controls are locked from setup until disconnect.
-Display and volume choices remain local. **Disconnect** cancels setup or stops
+serial, floppy sound, pause and save-state controls are locked from setup until disconnect.
+Display and main output volume choices remain local. Floppy sound enablement
+and level are part of the machine fingerprint and must match. **Disconnect** cancels setup or stops
 play, discards session disk writes, and restores the selected cold-boot media.
 Either player can host or join again with new codes. The browser does not resume
 the abandoned network timeline as local play.

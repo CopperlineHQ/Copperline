@@ -18,7 +18,8 @@ The implementation follows five steps:
    the session, bridge bounded queues to WebRTC, and add browser Host/Join setup.
 
 These steps are implemented in `src/netplay/`, `Emulator::step_netplay_frame`,
-and `src/video/window/app_netplay.rs`. The feature uses native Rust and does not
+`src/video/window/app_netplay.rs`, `crates/copperline-web/src/netplay.rs` and
+`crates/copperline-web/www/netplay.js`. The feature uses native Rust and does not
 link the GGPO SDK. Matchmaking, relays, spectators, reconnect, shared
 media operations, and transactional host filesystems remain separate work.
 
@@ -141,6 +142,13 @@ Paula's output gain is serialized in ordinary save states, so browser netplay
 fixes it at 100% and applies the page's volume when draining the host audio buffer.
 This avoids a save-state format change and keeps volume local across replay.
 
+Browser startup keeps a local rollback checkpoint and the original serial sink
+until connection construction succeeds. Failure restores both before returning
+an error. Floppy sound settings remain serialized because they also control the
+sound generator timeline; browser setters and UI controls lock them during a
+session. The wire decoder reports incompatible protocol/save-state versions for
+the recognized session immediately, while unrelated traffic remains ignored.
+
 ## Configuration screen
 
 `LauncherState::netplay` holds a `NetplaySetup` beside the machine setup. It uses
@@ -195,8 +203,9 @@ need permission to bind loopback sockets. No external ROM or disk assets are
 required for the regression suite.
 
 After building the release web bundle, run `node tools/check-web-netplay.mjs` and
-`npm test --prefix crates/copperline-web/www`. CI runs both. The browser publishing
-workflow also checks the optimized bundle before copying `netplay.js` alongside
+`npm test --prefix crates/copperline-web/www`. CI also runs the native web wrapper
+unit tests, including failed startup, input routing and audio gain checks. The
+browser publishing workflow also checks the optimized bundle before copying `netplay.js` alongside
 the other page modules. For a served local page, the optional Playwright check
 `node tools/check-web-netplay-browser.mjs http://127.0.0.1:8000/` exercises actual
 Host/Join, cancellation, reconnect by cold boot, locked controls and mismatch

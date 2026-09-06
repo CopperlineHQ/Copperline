@@ -83,13 +83,15 @@ try {
   await host.evaluate(() => {
     const emu = window.__emu;
     const take = emu.netplay_take_packet.bind(emu);
+    const [protocol, , headerBytes, inputBytes] = emu.constructor.netplay_packet_layout();
+    if (protocol !== 1 || headerBytes !== 111 || inputBytes !== 26) throw new Error('Packet decoder layout changed');
     window.__testKeyFrames = [];
     emu.netplay_take_packet = () => {
       const packet = take();
       // Protocol v1: 111-byte header, then 26-byte input records. Check the
       // emitted held-key states, not merely the UI's keydown/up callbacks.
       const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength);
-      for (let offset = 111; offset + 26 <= packet.length; offset += 26) {
+      for (let offset = headerBytes; offset + inputBytes <= packet.length; offset += inputBytes) {
         window.__testKeyFrames.push([Number(view.getBigUint64(offset, true)),
           !!(packet[offset + 10 + (0x20 >> 3)] & (1 << (0x20 & 7)))]);
       }
@@ -111,7 +113,7 @@ try {
   });
   await host.locator('#devkeyboard').click();
   for (const [player, page] of pages.entries()) {
-    for (const id of ['boot', 'machine', 'video', 'reset', 'pause', 'df0', 'df1', 'floppy-speed']) {
+    for (const id of ['boot', 'machine', 'video', 'reset', 'pause', 'df0', 'df1', 'floppy-speed', 'floppy-sounds']) {
       assert.equal(await page.locator(`#${id}`).isDisabled(), true, `${id} must stay locked`);
     }
     const status = await page.evaluate(() => [...window.__emu.netplay_status()]);
@@ -133,7 +135,7 @@ try {
   null, { timeout: 30000 })));
   const messages = await Promise.all(pages.map(page => page.locator('#netplay-status').textContent()));
   console.log(`Mismatched machines: ${messages.join('; ')}`);
-  assert.ok(messages.some(message => /mismatch|different/i.test(message)), messages.join('; '));
+  assert.ok(messages.every(message => /mismatch|different/i.test(message)), messages.join('; '));
   await host.setViewportSize({ width: 390, height: 844 });
   await host.locator('#sidebar-toggle').click();
   await host.locator('#netplay-panel').screenshot({ path: `${output}/netplay-mobile.png` });

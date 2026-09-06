@@ -104,3 +104,40 @@ test('duplicate or incompatible channels close without running the emulator', ()
   assert.equal(link.closed, true);
   assert.equal(opened, 0);
 });
+
+test('data-channel open runs once, remote close drains queued input before cleanup', async () => {
+  let opens = 0;
+  let closed;
+  const link = new RtcLink({ PeerConnection: Peer, onOpen: () => opens++,
+    onClose: (reason, peer) => {
+      const received = [];
+      peer.receive({ netplay_receive: packet => received.push(...packet) });
+      closed = { reason, received };
+    } });
+  const channel = new Channel('copperline-netplay-v1', { ordered: false, maxRetransmits: 0 });
+  link.pc.ondatachannel({ channel });
+  channel.onopen();
+  channel.onopen();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(opens, 1);
+  channel.onmessage({ data: new Uint8Array([7, 8]).buffer });
+  channel.onclose();
+  assert.deepEqual(closed, { reason: 'Peer disconnected', received: [7, 8] });
+  assert.equal(link.closed, true);
+  assert.equal(channel.onopen, null);
+  assert.equal(link.pc.ondatachannel, null);
+  assert.equal(link.incoming.length, 0);
+});
+
+test('connection-state failure closes once and an open queued before cancellation stays cancelled', async () => {
+  let opens = 0, closes = 0;
+  const link = new RtcLink({ PeerConnection: Peer, onOpen: () => opens++, onClose: () => closes++ });
+  await link.offer(settings);
+  link.channel.onopen();
+  link.pc.connectionState = 'failed';
+  link.pc.onconnectionstatechange();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(opens, 0);
+  assert.equal(closes, 1);
+  assert.equal(link.channel.readyState, 'closed');
+});

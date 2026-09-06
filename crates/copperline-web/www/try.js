@@ -117,7 +117,7 @@ const netplayDisabled = new Map();
 const NETPLAY_LOCKED_IDS = ['boot', 'machine', 'video', 'reset', 'pause', 'savestate',
   'loadstate', 'quicksave', 'quickload', 'savedstates', 'kick', 'kickurl', 'kicklist',
   'df0', 'df1', 'df0url', 'df0list', 'eject', 'eject1', 'blank-df0', 'blank-df1',
-  'download-df0', 'download-df1', 'writable-floppies', 'floppy-speed',
+  'download-df0', 'download-df1', 'writable-floppies', 'floppy-speed', 'floppy-sounds',
   'serial-connect', 'serial-url', 'serial-raw'];
 
 function syncNetplayControls() {
@@ -1191,6 +1191,7 @@ function stepMachine(nowMs, deferRender) {
     if (stepped > 0) presentDirty = true;
   } catch (e) {
     if (netplayBusy()) {
+      console.error('Netplay stopped', e);
       netplayPanel.link.close(`Netplay stopped: ${e.message ?? e}`);
       return false;
     }
@@ -1852,7 +1853,7 @@ const padAssignments = new Map(); // gamepad index -> Amiga port (2 first)
 // reads exactly like a two-button stick -- so any source that can produce
 // the extras (a gamepad, or the keyboard's cd32 mapping) fits one.
 function fitCd32Pad(port) {
-  emu?.set_port_device(port, 'cd32');
+  if (!netplayBusy()) emu?.set_port_device(port, 'cd32');
 }
 
 function padPressed(pad, index) {
@@ -1892,7 +1893,7 @@ function refreshPadAssignments(pads) {
       // a pad leaving it puts the mouse back; port 2 keeps the pad fitting
       // (idle, and indistinguishable from a joystick to anything that is
       // not driving the CD32 serial protocol).
-      if (port === 1 && emu) {
+      if (port === 1 && emu && !netplayBusy()) {
         emu.set_port_device(1, 'mouse');
         releasedPort1 = true;
       }
@@ -7569,6 +7570,10 @@ if (typeof WebEmu.prototype.start_netplay === 'function') {
         if (!await boot({ link, settings, player, snapshot })) return;
         if (netplayPanel.link !== link) return;
         netplayMachineReady = true;
+        // Send our initial fingerprint before consuming the peer's. Both
+        // machines can then report a mismatch even if one closes first.
+        emu.run_hidden(performance.now(), 0);
+        link.send(emu);
         setJoyMode(hasTouch ? 'touch' : settings.controller === 'cd32' ? 'cd32' : 'keys');
         let lastStatus = 0;
         netplayTimer = setInterval(() => {
@@ -7582,13 +7587,22 @@ if (typeof WebEmu.prototype.start_netplay === 'function') {
               const [connected, frame, confirmed, , rollbacks, , checked] = emu.netplay_status();
               netplayPanel.status(connected
                 ? `Player ${player}: frame ${frame}, confirmed ${confirmed}, ${rollbacks} rollbacks, checked ${checked}`
-                : 'Waiting for a matching machine…');
+                : 'Waiting for a matching machine...');
               lastStatus = performance.now();
             }
-          } catch (error) { link.close(`Netplay stopped: ${error.message ?? error}`); }
+          } catch (error) { console.error('Netplay stopped', error); link.close(`Netplay stopped: ${error.message ?? error}`); }
         }, 50);
       },
-      stop: reason => {
+      stop: (reason, link) => {
+        if (netplayMachineReady && emu) {
+          try {
+            link.receive(emu);
+            emu.run_hidden(performance.now(), 0);
+          } catch (error) {
+            console.error('Netplay stopped', error);
+            reason = `Netplay stopped: ${error.message ?? error}`;
+          }
+        }
         clearInterval(netplayTimer);
         netplayTimer = null;
         if (netplayPreparing) {
@@ -7611,6 +7625,7 @@ if (typeof WebEmu.prototype.start_netplay === 'function') {
         setPauseLabel();
         syncWakeLock();
         setLoadStatus(reason);
+        return reason;
       },
     },
   );
