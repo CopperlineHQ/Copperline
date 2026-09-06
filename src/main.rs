@@ -888,7 +888,10 @@ fn main() -> Result<()> {
     } else {
         config::resolve_bundled_rom(&mut cfg)?;
     }
-    let disk_insert_after = resolve_disk_insert_after(&mut cfg, cli.disk_insert_after)?;
+    let mut disk_insert_after = resolve_disk_insert_after(&mut cfg, cli.disk_insert_after)?;
+    if cli.netplay.is_some() {
+        copperline::netplay::prepare_config(&mut cfg)?;
+    }
 
     // Name the boot ROM in the banner: a Kickstart image is identified by
     // checksum (src/romdb.rs), so the log says which Kickstart is booting
@@ -1107,7 +1110,18 @@ fn main() -> Result<()> {
             warp_until,
         )
     };
-    #[cfg_attr(not(feature = "control"), allow(unused_mut))]
+    let netplay = if let Some(options) = cli.netplay {
+        for disk in disk_insert_after.drain(..) {
+            emu.bus_mut().floppy.insert_disk_image(
+                disk.drive_idx,
+                disk.path,
+                disk.write_protected,
+            )?;
+        }
+        Some(copperline::netplay::Session::new(options, &mut emu, &cfg)?)
+    } else {
+        None
+    };
     let mut app = App::new(
         emu,
         cfg.emulation.power_on,
@@ -1154,6 +1168,9 @@ fn main() -> Result<()> {
         live_audio,
         copperline::sampler::SamplerRequest::from_config(&cfg.parallel),
     );
+    if let Some(session) = netplay {
+        app.attach_netplay(session);
+    }
     #[cfg(feature = "control")]
     if let Some(listen) = cli.control_gui {
         // Bind (and announce) before the window opens so scripts can
@@ -1326,7 +1343,8 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
 /// opposite of helpful. A saved default does not suppress the launcher
 /// either -- it says what the launcher opens showing, not what to run.
 fn launcher_requested(cli: &CliArgs) -> bool {
-    cli.config_path.is_none()
+    cli.netplay.is_none()
+        && cli.config_path.is_none()
         && cli.rom_path.is_none()
         && cli.whdload.is_none()
         && cli.run.is_none()
@@ -2459,5 +2477,85 @@ mod tests {
     fn cpu_clock_rejects_non_numeric() {
         let err = parse(&["--cpu-clock", "fast"]).unwrap_err();
         assert!(err.to_string().contains("--cpu-clock"), "{err:#}");
+    }
+}
+
+#[cfg(test)]
+mod netplay_cli_tests {
+    use super::*;
+
+    fn args(extra: &[&str]) -> Result<CliArgs> {
+        let mut args = vec![
+            "--netplay-bind",
+            "127.0.0.1:19732",
+            "--netplay-peer",
+            "127.0.0.1:19733",
+            "--netplay-player",
+            "1",
+            "--netplay-session",
+            "0123456789abcdef0123456789abcdef",
+        ];
+        args.extend_from_slice(extra);
+        parse_args_from(args.into_iter().map(str::to_string))
+    }
+
+    #[test]
+    fn netplay_defaults_and_headless_local_inputs() -> Result<()> {
+        let cli = args(&[
+            "--noaudio",
+            "--screenshot-after",
+            "2",
+            "/tmp/netplay.png",
+            "--joy-after",
+            "1",
+            "red",
+            "100",
+            "1",
+            "--press-after",
+            "0",
+            "space",
+            "--insert-disk-after",
+            "0",
+            "df0",
+            "game.adf",
+        ])?;
+        let options = cli.netplay.as_ref().unwrap();
+        assert_eq!(options.player, 0);
+        assert_eq!(options.input_delay, 2);
+        assert_eq!(options.rollback_frames, 8);
+        assert!(!launcher_requested(&cli));
+        assert_eq!(
+            args(&["--netplay-delay", "0", "--netplay-rollback", "12"])?
+                .netplay
+                .unwrap()
+                .input_delay,
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn netplay_rejects_incomplete_invalid_and_unilateral_operations() {
+        assert!(parse_args_from(["--netplay-delay".to_string(), "2".to_string()]).is_err());
+        for extra in [
+            vec!["--netplay-player", "0"],
+            vec!["--netplay-player", "3"],
+            vec!["--netplay-delay", "7"],
+            vec!["--netplay-rollback", "0"],
+            vec!["--netplay-rollback", "13"],
+            vec!["--netplay-session", "bad"],
+            vec!["--netplay-peer", "0.0.0.0:19732"],
+            vec!["--load-state", "saved.clstate"],
+            vec!["--run", "program"],
+            vec!["--whdload", "game.lha"],
+            vec!["--warp-boot"],
+            vec!["--control", ":1234"],
+            vec!["--audio-wav", "/tmp/netplay.wav"],
+            vec!["--insert-disk-after", "1", "df0", "disk.adf"],
+            vec!["--joy-after", "1", "red", "100", "2"],
+            vec!["--mouse-after", "1", "3", "4"],
+        ] {
+            assert!(args(&extra).is_err(), "accepted {extra:?}");
+        }
     }
 }

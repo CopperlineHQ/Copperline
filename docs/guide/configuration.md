@@ -2501,3 +2501,13 @@ its only execution is not reported; every repeating pattern is caught on
 the pass after the first. Read it with `smc.report` over the control
 protocol, which can also arm and disarm the detector live. Off by
 default; it costs a 1 MiB execution map while armed.
+
+## Rollback netplay
+
+The `--netplay-bind`, `--netplay-peer`, `--netplay-player`, and
+`--netplay-session` flags start a direct two-player session. Input delay and
+prediction limits use `--netplay-delay` and `--netplay-rollback`.
+The configuration screen also has a **Netplay** page. Connection details are
+kept for the app session and are not written to machine configuration files.
+See [Rollback netplay](netplay.md) for
+commands, controls, and supported machine configurations.

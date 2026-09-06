@@ -14,6 +14,7 @@ use copperline::video::HOST_SHORTCUT_MODIFIER_LABEL;
 
 #[derive(Debug)]
 pub struct CliArgs {
+    pub netplay: Option<copperline::netplay::Options>,
     pub config_path: Option<PathBuf>,
     pub rom_path: Option<PathBuf>,
     /// `--whdload GAME`: stage a WHDLoad package (.lha archive or
@@ -342,6 +343,12 @@ where
     I: IntoIterator<Item = String>,
 {
     let args = expand_script_files(args.into_iter().collect())?;
+    let mut netplay_bind = None;
+    let mut netplay_peer = None;
+    let mut netplay_player = None;
+    let mut netplay_session = None;
+    let mut netplay_delay = None;
+    let mut netplay_rollback = None;
     let mut config_path: Option<PathBuf> = None;
     let mut rom_path: Option<PathBuf> = None;
     let mut whdload: Option<PathBuf> = None;
@@ -752,6 +759,47 @@ where
                         .parse::<u8>()
                         .map_err(|_| anyhow!("--autofire rate must be a whole number of Hz"))?,
                 );
+            }
+            "--netplay-bind" => {
+                netplay_bind = Some(next_arg(
+                    &mut args,
+                    "--netplay-bind requires IP:PORT",
+                    "invalid netplay bind address",
+                )?)
+            }
+            "--netplay-peer" => {
+                netplay_peer = Some(next_arg(
+                    &mut args,
+                    "--netplay-peer requires IP:PORT",
+                    "invalid netplay peer address",
+                )?)
+            }
+            "--netplay-player" => {
+                netplay_player = Some(next_arg::<u8>(
+                    &mut args,
+                    "--netplay-player requires 1 or 2",
+                    "invalid netplay player",
+                )?)
+            }
+            "--netplay-delay" => {
+                netplay_delay = Some(next_arg::<u8>(
+                    &mut args,
+                    "--netplay-delay requires 0..6 frames",
+                    "invalid netplay delay",
+                )?)
+            }
+            "--netplay-rollback" => {
+                netplay_rollback = Some(next_arg::<u8>(
+                    &mut args,
+                    "--netplay-rollback requires 1..12 frames",
+                    "invalid netplay rollback window",
+                )?)
+            }
+            "--netplay-session" => {
+                netplay_session =
+                    Some(args.next().ok_or_else(|| {
+                        anyhow!("--netplay-session requires 32 hexadecimal digits")
+                    })?)
             }
             "--run-ahead" => {
                 let value = args
@@ -1308,7 +1356,65 @@ where
             "--hostsocket-interface conflicts with an explicit non-bridge --hostsocket-net"
         ));
     }
+    let netplay = if netplay_bind.is_some()
+        || netplay_peer.is_some()
+        || netplay_player.is_some()
+        || netplay_session.is_some()
+        || netplay_delay.is_some()
+        || netplay_rollback.is_some()
+    {
+        let usage = "netplay requires --netplay-bind IP:PORT, --netplay-peer IP:PORT, --netplay-player 1|2 and --netplay-session HEX";
+        let player = netplay_player.ok_or_else(|| anyhow!(usage))?;
+        if !(1..=2).contains(&player) {
+            bail!("--netplay-player must be 1 or 2");
+        }
+        let code: String = netplay_session.ok_or_else(|| anyhow!(usage))?;
+        let session = copperline::netplay::parse_session_id(&code)?;
+        let options = copperline::netplay::Options {
+            bind: netplay_bind.ok_or_else(|| anyhow!(usage))?,
+            peer: netplay_peer.ok_or_else(|| anyhow!(usage))?,
+            player: usize::from(player - 1),
+            session,
+            input_delay: netplay_delay.unwrap_or(2),
+            rollback_frames: netplay_rollback.unwrap_or(8),
+        };
+        options.validate()?;
+        if run.is_some()
+            || whdload.is_some()
+            || load_state.is_some()
+            || load_uss.is_some()
+            || benchmark_until.is_some()
+            || gdb.is_some()
+            || gdb_gui.is_some()
+            || control_listen.is_some()
+            || control_gui_listen.is_some()
+            || waveform.is_some()
+            || record_input.is_some()
+            || audio_wav.is_some()
+            || audio_stems.is_some()
+            || warp_boot
+            || warp_until.is_some()
+            || !save_state_after.is_empty()
+            || !cd_insert_after.is_empty()
+            || !freeze_after.is_empty()
+            || !click_after.is_empty()
+            || !mouse_after.is_empty()
+            || !mouse_to_after.is_empty()
+            || !pot_after.is_empty()
+            || disk_insert_after.iter().any(|d| match d {
+                CliDiskInsert::Explicit(s) => s.secs != 0.0,
+                CliDiskInsert::Configured { secs, .. } => *secs != 0.0,
+            })
+            || joy_after.iter().any(|j| usize::from(j.3) != options.player)
+        {
+            bail!("netplay supports cold boot, disks inserted at time 0, local-port --joy-after and keyboard input; state loads, media changes, mouse/analogue input, debugging, warp and recording are unavailable");
+        }
+        Some(options)
+    } else {
+        None
+    };
     Ok(CliArgs {
+        netplay,
         config_path,
         rom_path,
         whdload,
@@ -1474,6 +1580,12 @@ fn print_help() {
          --port2 DEVICE                 controller in port 2 (default: joystick;\n  \
          \x20                            cd32 on the CD32 profile)\n  \
          --autofire HZ                  pulse a held fire button at HZ (0 = off, the default)\n  \
+         --netplay-bind IP:PORT         local UDP endpoint for two-player rollback netplay\n  \
+         --netplay-peer IP:PORT         remote player's UDP endpoint\n  \
+         --netplay-player 1|2           controller port owned by this player\n  \
+         --netplay-session HEX          shared 32-digit hexadecimal session ID\n  \
+         --netplay-delay FRAMES         local input delay, 0..6 (default 2)\n  \
+         --netplay-rollback FRAMES      prediction limit, 1..12 (default 8)\n  \
          --run-ahead FRAMES             run-ahead input-latency reduction, 0..4 frames\n  \
          \x20                            (0 = off, the default; windowed sessions only)\n  \
          \x20                            (--model/--cpu/etc. override the config file or defaults)\n  \

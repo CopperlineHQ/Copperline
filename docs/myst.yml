@@ -44,6 +44,7 @@ project:
         - file: guide/modem.md
         - file: guide/import-uae.md
         - file: guide/winuae-state.md
+        - file: guide/netplay.md
         - file: guide/headless.md
         - file: guide/browser.md
         - file: guide/publishing.md
@@ -84,6 +85,7 @@ project:
         - file: internals/zz9k.md
         - file: internals/picasso2.md
         - file: internals/graffity.md
+        - file: internals/netplay.md
         - file: internals/savestate.md
         - file: internals/reference-docs.md
   exports:
@@ -104,6 +106,7 @@ project:
         - guide/modem.md
         - guide/import-uae.md
         - guide/winuae-state.md
+        - guide/netplay.md
         - guide/headless.md
         - guide/browser.md
         - guide/publishing.md
@@ -133,6 +136,7 @@ project:
         - internals/zz9k.md
         - internals/picasso2.md
         - internals/graffity.md
+        - internals/netplay.md
         - internals/savestate.md
         - internals/reference-docs.md
 site:

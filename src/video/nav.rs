@@ -688,6 +688,7 @@ mod tests {
             LauncherTab::Floppy,
             LauncherTab::Storage,
             LauncherTab::Input,
+            LauncherTab::Netplay,
             LauncherTab::IoPorts,
             LauncherTab::Zorro,
             LauncherTab::WhdloadLibrary,

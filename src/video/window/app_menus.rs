@@ -235,6 +235,9 @@ impl App {
         action: crate::video::menu::MenuAction,
         event_loop: Option<&ActiveEventLoop>,
     ) {
+        if self.netplay.is_some() {
+            return;
+        }
         use crate::video::menu::{AudioOutputChoice, MenuAction as A};
         match action {
             A::OpenMachineConfig => self.open_launcher(),
@@ -1050,7 +1053,29 @@ impl App {
     /// Feed a key to a focused plugin-option text field. Returns false (so the
     /// key falls through) when no field is being edited.
     pub(super) fn launcher_handle_edit_key(&mut self, code: KeyCode, text: Option<&str>) -> bool {
-        use crate::video::launcher::CaretMove;
+        use crate::video::launcher::{CaretMove, EditTarget};
+        if self
+            .launcher_state()
+            .is_some_and(|s| matches!(s.editing(), Some(EditTarget::Netplay(_))))
+            && (host_shortcut_modifier_pressed(self.modifiers) || self.modifiers.control_key())
+        {
+            match code {
+                KeyCode::KeyV => {
+                    let line = clipboard_line();
+                    if !line.is_empty() {
+                        if let Some(state) = self.launcher_state_mut() {
+                            state.clear_netplay_edit();
+                            for c in line.chars() {
+                                state.edit_push(c);
+                            }
+                        }
+                    }
+                }
+                _ => return true,
+            }
+            self.request_redraw();
+            return true;
+        }
         let handled = {
             let Some(state) = self.launcher_state_mut() else {
                 return false;
@@ -1136,6 +1161,7 @@ impl App {
 
     /// Close the open main-window overlay panel.
     pub(super) fn close_panel(&mut self) {
+        self.remember_netplay_setup();
         self.analyzer_dragging = false;
         self.ui.panel = None;
         // The surface the focus was walking has gone with it, and so has

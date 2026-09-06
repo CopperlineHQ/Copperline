@@ -10,6 +10,9 @@ impl App {
     pub fn open_launcher(&mut self) {
         self.ui.menu_open = false;
         let mut state = LauncherState::from_raw(&self.machine_config);
+        if let Some(setup) = &self.netplay_setup {
+            state.netplay = setup.clone();
+        }
         // A machine set up with a real disk names it on the Storage page, and
         // naming it properly means knowing what is on it. Looking is otherwise
         // put off until the Host Disk page opens, so a launcher that never
@@ -1305,11 +1308,23 @@ impl App {
         // about to start.
         #[cfg(feature = "game-library")]
         self.stop_library_scan();
+        if let Some(state) = self.launcher_state_mut() {
+            state.prepare_netplay_machine();
+        }
+        self.remember_netplay_setup();
         let raw = match self.launcher_state().map(|s| s.setup.to_raw()) {
             Some(raw) => raw,
             None => return,
         };
-        if let Err(e) = self.stage_and_run(raw) {
+        let options = match self.launcher_state().unwrap().netplay.options() {
+            Ok(options) => options,
+            Err(error) => {
+                self.set_launcher_status(StatusMessage::err(short_status_error(&error)));
+                self.request_redraw();
+                return;
+            }
+        };
+        if let Err(e) = self.stage_and_run_with_netplay(raw, options) {
             // The status line is one shortened sentence; the log keeps the
             // whole chain (which names the underlying cause).
             warn!("run failed: {e:#}");
@@ -1324,9 +1339,34 @@ impl App {
     /// a copy, so it is rebuilt fresh on every boot and a later Save writes
     /// the setup, not the derivation.
     pub(super) fn stage_and_run(&mut self, raw: RawConfig) -> Result<()> {
+        self.stage_and_run_with_netplay(raw, None)
+    }
+
+    fn stage_and_run_with_netplay(
+        &mut self,
+        raw: RawConfig,
+        options: Option<crate::netplay::Options>,
+    ) -> Result<()> {
+        if options.is_some() {
+            // These endpoints belong to App and survive a machine replacement.
+            #[cfg(feature = "control")]
+            anyhow::ensure!(
+                self.control.is_none(),
+                "Netplay requires restarting Copperline without the control endpoint"
+            );
+            #[cfg(feature = "gdb")]
+            anyhow::ensure!(
+                self.gdb.is_none(),
+                "Netplay requires restarting Copperline without the GDB endpoint"
+            );
+        }
         let mut staged = raw.clone();
         let (game, opts) = crate::whdload::game_and_options(&staged);
         if let Some(game) = game {
+            anyhow::ensure!(
+                options.is_none(),
+                "Netplay needs a floppy session; clear the WHDLoad game first"
+            );
             let prepared = crate::whdload::prepare(&game, &opts)?;
             crate::whdload::apply_to_raw(&mut staged, &prepared);
             info!(
@@ -1341,8 +1381,11 @@ impl App {
         // config pipeline (MachineSetup::build_config is exactly this over
         // its own to_raw()).
         let mut cfg = Config::try_from(staged)?;
+        if options.is_some() {
+            crate::netplay::prepare_config(&mut cfg)?;
+        }
         crate::config::resolve_bundled_rom(&mut cfg)?;
-        self.build_and_run_machine(&cfg, raw)
+        self.build_and_run_machine(&cfg, raw, options)
     }
 
     /// Build a machine for `cfg` and swap it in (shared by the configuration
@@ -1350,7 +1393,12 @@ impl App {
     /// sink, real-drive handover, then [`Self::run_machine`]. On failure the
     /// running machine stays as it was; the caller reports the error in its
     /// own place (panel status line or OSD).
-    pub(super) fn build_and_run_machine(&mut self, cfg: &Config, raw: RawConfig) -> Result<()> {
+    fn build_and_run_machine(
+        &mut self,
+        cfg: &Config,
+        raw: RawConfig,
+        options: Option<crate::netplay::Options>,
+    ) -> Result<()> {
         // Remember the session's realtime request so later live sink rebuilds
         // (device switch, disconnect recovery) reuse it.
         self.realtime_priority = cfg.emulation.realtime_priority;
@@ -1373,9 +1421,18 @@ impl App {
         self.emu.bus_mut().floppy.release_bridges();
         // This path boots a fresh machine, never a save state, so a real
         // ROM is required here.
-        match crate::emulator::build_machine(cfg, audio, true, false) {
-            Ok(emu) => {
+        let built = crate::emulator::build_machine(cfg, audio, true, false).and_then(|mut emu| {
+            let session = options
+                .map(|options| crate::netplay::Session::new(options, &mut emu, cfg))
+                .transpose()?;
+            Ok((emu, session))
+        });
+        match built {
+            Ok((emu, session)) => {
                 self.run_machine(emu, cfg, raw);
+                if let Some(session) = session {
+                    self.attach_netplay(session);
+                }
                 Ok(())
             }
             Err(e) => {
@@ -1399,6 +1456,8 @@ impl App {
         // machine is still here: the new one would otherwise come up with
         // caps drawn latched that its keyboard MCU never heard of.
         self.release_keyboard_panel_holds();
+        self.netplay = None;
+        self.netplay_input = Default::default();
         self.emu = emu;
         // Any heat map the analyzer pane armed went with the machine that
         // was just replaced, so the pane owns nothing on this one until it

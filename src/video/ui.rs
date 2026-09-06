@@ -1046,6 +1046,8 @@ pub enum UiControl {
     LauncherDefaults,
     /// Configuration screen: build and run the configured machine.
     LauncherRun,
+    LauncherNetplayEdit(LauncherField),
+    LauncherNetplayAction(LauncherField),
     /// Drop chooser: insert the dropped disk(s) into this drive.
     DropDrive(usize),
 }

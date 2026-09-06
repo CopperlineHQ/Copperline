@@ -936,6 +936,12 @@ fn analyzer_default_heat_window(bus: &crate::bus::Bus) -> (u32, u32) {
 }
 
 pub struct App {
+    netplay: Option<crate::netplay::Session>,
+    netplay_input: crate::netplay::Input,
+    netplay_keyboard_controller: bool,
+    netplay_setup: Option<crate::video::launcher::NetplaySetup>,
+    // Linux serves clipboard selections from the owning instance.
+    host_clipboard: Option<arboard::Clipboard>,
     emu: Emulator,
     fb: Vec<u32>,
     /// Merges rendered fields into the double-height presentation
@@ -1813,7 +1819,6 @@ fn meta_field_max(field: crate::video::launcher::MetaField) -> usize {
 ///
 /// One line of it: what these boxes hold is a password or a title, not a
 /// document, and a newline in the middle of one is a paste that went wrong.
-#[cfg(feature = "game-library")]
 fn clipboard_line() -> String {
     match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
         Ok(text) => text.lines().next().unwrap_or_default().trim().to_string(),
@@ -2211,6 +2216,11 @@ impl App {
             keyboard_joy_held: [keymap::HeldKeys::default(); keymap::MAPPING_COUNT],
             keymap: keymap::KeyMap::load(),
             autofire_hz,
+            netplay: None,
+            netplay_input: Default::default(),
+            netplay_keyboard_controller: true,
+            netplay_setup: None,
+            host_clipboard: None,
             run_ahead_frames,
             runahead_machine_block,
             ui: UiState::default(),
@@ -2389,6 +2399,10 @@ impl App {
     /// host source drives; a present physical pad beats the scripted
     /// state on its port, as it always has.
     fn pump_joystick_input(&mut self) {
+        if self.netplay.is_some() {
+            self.pump_netplay_input();
+            return;
+        }
         let r = self.host_routing();
         // Poll the pad whether or not it drives a port: the Quit hotkey
         // and Menu button are host controls and work regardless of routing.
@@ -2901,6 +2915,27 @@ impl App {
     /// held-control set.
     fn apply_auto_joy_state(&mut self, port: usize) {
         let held = self.auto_joy_held[port];
+        if let Some(session) = &self.netplay {
+            if port == session.player() {
+                self.netplay_input.buttons = [
+                    held.up,
+                    held.down,
+                    held.left,
+                    held.right,
+                    held.red,
+                    held.blue,
+                    held.play,
+                    held.rwd,
+                    held.ffw,
+                    held.green,
+                    held.yellow,
+                ]
+                .into_iter()
+                .enumerate()
+                .fold(0, |bits, (bit, on)| bits | (u16::from(on) << bit));
+            }
+            return;
+        }
         let input = &mut self.emu.bus_mut().input;
         input.set_joystick(
             port, held.up, held.down, held.left, held.right, held.red, held.blue,
@@ -2978,11 +3013,20 @@ impl App {
             // The windowed loop parks a halted machine so the user can
             // inspect it; with no window the captures can never fire, so
             // surface the halt as the run's failure.
-            if let Err(e) = self.emu.step_frame() {
+            let step = if self.netplay.is_some() {
+                match self.step_netplay() {
+                    Ok(false) => continue,
+                    result => result.map(|_| ()),
+                }
+            } else {
+                self.emu.step_frame()
+            };
+            if let Err(e) = step {
                 return Err(anyhow!(
                     "emulator halted before the scheduled captures completed: {e:#}"
                 ));
             }
+            self.confirm_netplay_capture()?;
             // Audio may be live (--screenshot-after without --noaudio):
             // recover a lost output device exactly as the windowed loop does.
             self.recover_audio_if_device_lost();
@@ -3582,6 +3626,9 @@ impl ApplicationHandler for App {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        if self.netplay_window_event(event_loop, &event) {
+            return;
+        }
         if let Some(kind) = self.tool_window_kind(window_id) {
             self.handle_tool_window_event(event_loop, kind, event);
             return;
@@ -4771,6 +4818,9 @@ impl ApplicationHandler for App {
         _device_id: DeviceId,
         event: DeviceEvent,
     ) {
+        if self.netplay.is_some() {
+            return;
+        }
         match event {
             DeviceEvent::MouseMotion { delta } => {
                 if self.mouse_captured {
@@ -4799,7 +4849,9 @@ impl ApplicationHandler for App {
         self.drain_gdb();
         // Frames retired outside the burst (a control step, a debugger
         // step) may have carried a guest warp request.
-        self.service_uaelib();
+        if self.netplay.is_none() {
+            self.service_uaelib();
+        }
         if self.render.is_none() {
             return;
         }
@@ -4958,7 +5010,9 @@ impl ApplicationHandler for App {
         } else {
             self.pump_joystick_input();
         }
-        self.drive_interface_with_pad(event_loop);
+        if self.netplay.is_none() {
+            self.drive_interface_with_pad(event_loop);
+        }
         if self.quit_requested {
             event_loop.exit();
             return;
@@ -4995,110 +5049,123 @@ impl ApplicationHandler for App {
             // screen. The committed anchor supplies audio and host output;
             // later frames are silent speculation, with only the last image
             // presented before the anchor snapshot restores machine state.
-            let (total_frames, runahead, time_budget) = self.burst_frames(headless_capture);
-            let burst_start = Instant::now();
-            let mut frames_done = 0usize;
-            let mut anchor_end_seconds: Option<f64> = None;
-            let mut anchor_snapshot: Option<Vec<u8>> = None;
-            let mut burst_complete = true;
-            self.emu.set_runahead_phase(runahead > 0);
-            loop {
-                let speculative = runahead > 0 && frames_done > 0;
-                self.emu.set_runahead_speculative(speculative);
-                #[cfg(feature = "control")]
-                let step = self.control_step_frame();
-                #[cfg(not(feature = "control"))]
-                let step = self.emu.step_frame();
-                if let Err(e) = step {
-                    error!("emulator step halted: {e:?}");
-                    self.cpu_halted = true;
-                    self.sync_live_audio_suspension();
-                    burst_complete = false;
-                    break;
+            if self.netplay.is_some() {
+                if let Err(error) = self.step_netplay() {
+                    error!("netplay stopped: {error:#}");
+                    if self.netplay_setup.is_some() {
+                        self.leave_netplay(Some(error.to_string()));
+                    } else {
+                        self.show_osd(format!("Netplay stopped: {error}"));
+                        self.cpu_halted = true;
+                        self.sync_live_audio_suspension();
+                    }
                 }
-                #[cfg(feature = "control")]
-                if !speculative {
-                    self.control_emit_events();
-                }
-                frames_done += 1;
-                if runahead > 0 && frames_done == 1 {
-                    anchor_end_seconds = Some(self.emu.bus().emulated_seconds());
-                    match self.emu.runahead_snapshot() {
-                        Ok(blob) => anchor_snapshot = Some(blob),
-                        Err(e) => {
-                            warn!("run-ahead disabled: anchor snapshot failed: {e:?}");
-                            self.run_ahead_frames = 0;
+            } else {
+                let (total_frames, runahead, time_budget) = self.burst_frames(headless_capture);
+                let burst_start = Instant::now();
+                let mut frames_done = 0usize;
+                let mut anchor_end_seconds: Option<f64> = None;
+                let mut anchor_snapshot: Option<Vec<u8>> = None;
+                let mut burst_complete = true;
+                self.emu.set_runahead_phase(runahead > 0);
+                loop {
+                    let speculative = runahead > 0 && frames_done > 0;
+                    self.emu.set_runahead_speculative(speculative);
+                    #[cfg(feature = "control")]
+                    let step = self.control_step_frame();
+                    #[cfg(not(feature = "control"))]
+                    let step = self.emu.step_frame();
+                    if let Err(e) = step {
+                        error!("emulator step halted: {e:?}");
+                        self.cpu_halted = true;
+                        self.sync_live_audio_suspension();
+                        burst_complete = false;
+                        break;
+                    }
+                    #[cfg(feature = "control")]
+                    if !speculative {
+                        self.control_emit_events();
+                    }
+                    frames_done += 1;
+                    if runahead > 0 && frames_done == 1 {
+                        anchor_end_seconds = Some(self.emu.bus().emulated_seconds());
+                        match self.emu.runahead_snapshot() {
+                            Ok(blob) => anchor_snapshot = Some(blob),
+                            Err(e) => {
+                                warn!("run-ahead disabled: anchor snapshot failed: {e:?}");
+                                self.run_ahead_frames = 0;
+                                burst_complete = false;
+                                break;
+                            }
+                        }
+                    }
+                    // Surface a CPU stop before any host gate can end this
+                    // burst. Otherwise a simultaneous warp transition defers the
+                    // pending stop until the next pass, which retires one extra
+                    // instruction before the debugger receives it.
+                    let stopped = self.surface_debug_stop();
+                    // Poll even when stopped so automatic warp ends at the same
+                    // load boundary and stays coherent with the paused target.
+                    if self.poll_warp_launch() || stopped {
+                        burst_complete = false;
+                        break;
+                    }
+                    // The warp-boot gate ends its warp the frame its
+                    // timestamp or storage-idle condition holds.
+                    if self.poll_warp_boot() {
+                        burst_complete = false;
+                        break;
+                    }
+                    // The guest's warpmode() through the uaelib trap starts or
+                    // ends its warp at the frame it was made. Committed frames
+                    // only: a flip on a speculative frame would abandon the
+                    // run-ahead anchor mid-burst.
+                    if !speculative && self.service_uaelib() {
+                        burst_complete = false;
+                        break;
+                    }
+                    // A remote run_until frame/cck target completes the
+                    // pending resume and pauses at its boundary.
+                    #[cfg(feature = "control")]
+                    if self.control_run_target_reached() {
+                        burst_complete = false;
+                        break;
+                    }
+                    if frames_done >= total_frames {
+                        break;
+                    }
+                    if let Some(budget) = time_budget {
+                        if burst_start.elapsed() >= budget {
                             burst_complete = false;
                             break;
                         }
                     }
                 }
-                // Surface a CPU stop before any host gate can end this
-                // burst. Otherwise a simultaneous warp transition defers the
-                // pending stop until the next pass, which retires one extra
-                // instruction before the debugger receives it.
-                let stopped = self.surface_debug_stop();
-                // Poll even when stopped so automatic warp ends at the same
-                // load boundary and stays coherent with the paused target.
-                if self.poll_warp_launch() || stopped {
-                    burst_complete = false;
-                    break;
-                }
-                // The warp-boot gate ends its warp the frame its
-                // timestamp or storage-idle condition holds.
-                if self.poll_warp_boot() {
-                    burst_complete = false;
-                    break;
-                }
-                // The guest's warpmode() through the uaelib trap starts or
-                // ends its warp at the frame it was made. Committed frames
-                // only: a flip on a speculative frame would abandon the
-                // run-ahead anchor mid-burst.
-                if !speculative && self.service_uaelib() {
-                    burst_complete = false;
-                    break;
-                }
-                // A remote run_until frame/cck target completes the
-                // pending resume and pauses at its boundary.
-                #[cfg(feature = "control")]
-                if self.control_run_target_reached() {
-                    burst_complete = false;
-                    break;
-                }
-                if frames_done >= total_frames {
-                    break;
-                }
-                if let Some(budget) = time_budget {
-                    if burst_start.elapsed() >= budget {
-                        burst_complete = false;
-                        break;
+                self.emu.set_runahead_phase(false);
+                self.emu.set_runahead_speculative(false);
+                if runahead > 0 {
+                    let speculated = frames_done > 1;
+                    if burst_complete && speculated {
+                        // Rendering must finish while the future Bus is still
+                        // live. The worker otherwise races the restore and the
+                        // generic renderer below can present the anchor instead.
+                        runahead_presented = self.finish_render_for_current_frame();
+                        if !runahead_presented {
+                            error!("run-ahead disabled: speculative frame was not renderable");
+                            self.run_ahead_frames = 0;
+                            burst_complete = false;
+                        }
                     }
-                }
-            }
-            self.emu.set_runahead_phase(false);
-            self.emu.set_runahead_speculative(false);
-            if runahead > 0 {
-                let speculated = frames_done > 1;
-                if burst_complete && speculated {
-                    // Rendering must finish while the future Bus is still
-                    // live. The worker otherwise races the restore and the
-                    // generic renderer below can present the anchor instead.
-                    runahead_presented = self.finish_render_for_current_frame();
-                    if !runahead_presented {
-                        error!("run-ahead disabled: speculative frame was not renderable");
-                        self.run_ahead_frames = 0;
-                        burst_complete = false;
+                    self.restore_runahead_anchor(
+                        anchor_snapshot.as_deref(),
+                        burst_complete,
+                        speculated,
+                    );
+                    // Include snapshot, render, and restore cost in the same
+                    // display-period budget by pacing last against the anchor.
+                    if let Some(anchor_end) = anchor_end_seconds {
+                        self.emu.pace_runahead_burst(anchor_end);
                     }
-                }
-                self.restore_runahead_anchor(
-                    anchor_snapshot.as_deref(),
-                    burst_complete,
-                    speculated,
-                );
-                // Include snapshot, render, and restore cost in the same
-                // display-period budget by pacing last against the anchor.
-                if let Some(anchor_end) = anchor_end_seconds {
-                    self.emu.pace_runahead_burst(anchor_end);
                 }
             }
             self.refresh_tool_windows_paced(event_loop);
@@ -5941,7 +6008,9 @@ impl App {
                     // edited (the serial mode carries its address box).
                     state.edit_commit();
                     if state.editing().is_none() {
-                        if LauncherState::is_workshop(field) {
+                        if field.is_netplay() {
+                            state.netplay.cycle(field, forward);
+                        } else if LauncherState::is_workshop(field) {
                             state.workshop_cycle(field, forward);
                         } else {
                             state.setup.cycle(field, forward);
@@ -5958,7 +6027,9 @@ impl App {
                 if let Some(state) = self.launcher_state_mut() {
                     state.edit_commit();
                     if state.editing().is_none() {
-                        if LauncherState::is_workshop(field) {
+                        if field == LauncherField::NetplayEnabled {
+                            state.toggle_netplay();
+                        } else if LauncherState::is_workshop(field) {
                             state.workshop_toggle_flip(field);
                         } else {
                             state.setup.toggle(field);
@@ -6016,6 +6087,15 @@ impl App {
                     }
                 }
             }
+            UiControl::LauncherNetplayEdit(field) => {
+                if let Some(state) = self.launcher_state_mut() {
+                    state.edit_commit();
+                    if state.editing().is_none() {
+                        state.begin_edit_netplay(field);
+                    }
+                }
+            }
+            UiControl::LauncherNetplayAction(field) => self.launcher_netplay_action(field),
             UiControl::LauncherNewImageCreate(field) => self.launcher_create_image(field),
             #[cfg(feature = "game-library")]
             UiControl::LauncherWhdloadDownload(field) => self.whdload_download(field),
@@ -6517,6 +6597,7 @@ mod app_launcher;
 mod app_media;
 mod app_menus;
 mod app_nav;
+mod app_netplay;
 use app_nav::{cycle_hold_delay, PadNav};
 mod app_panels;
 mod app_session;

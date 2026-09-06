@@ -618,6 +618,17 @@ impl FloppyController {
         }
     }
 
+    /// Adopt disk contents for rollback and remove host-specific path metadata.
+    /// Memory backing prevents guest writes from escaping a netplay session.
+    pub fn prepare_netplay_images(&mut self) {
+        for (index, drive) in self.drives.iter_mut().enumerate() {
+            if let Some(image) = drive.image.as_mut() {
+                image.backing = FloppyImageBacking::Memory;
+                image.path = format!("netplay-df{index}").into();
+            }
+        }
+    }
+
     /// A host without a writable filesystem adopts every restored image into
     /// memory. This is intentionally called after browser save-state loads:
     /// desktop states may name writable host files which do not exist there.

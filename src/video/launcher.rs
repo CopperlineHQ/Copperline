@@ -40,6 +40,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 mod fields;
+mod netplay;
+pub use netplay::NetplaySetup;
 mod setup_config;
 mod values;
 pub use fields::*;
@@ -3225,6 +3227,8 @@ pub enum EditTarget {
     SerialPort(LauncherField),
     /// The fixed 16-bit RAM power-on word on the Memory page.
     RamPattern,
+    /// A session endpoint or shared game code.
+    Netplay(LauncherField),
 }
 
 /// Where typing goes in a text field, as a character index into it.
@@ -3881,6 +3885,7 @@ pub struct LauncherState {
     /// What the Create Image pages will make. Not machine configuration, so
     /// it sits beside the setup rather than inside it.
     pub workshop: ImageWorkshop,
+    pub netplay: NetplaySetup,
     pub tab: LauncherTab,
     pub status: Option<StatusMessage>,
     /// The Kickstart / extended ROM identifications shown on the ROM tab,
@@ -4783,6 +4788,7 @@ impl LauncherState {
             self.editing,
             Some(
                 EditTarget::NewImageText(f)
+                | EditTarget::Netplay(f)
                 | EditTarget::SerialHost(f)
                 | EditTarget::SerialPort(f)
             ) if f == field
@@ -4906,6 +4912,9 @@ impl LauncherState {
 
     /// A row's displayed value, from wherever that row's state lives.
     pub fn row_value(&self, field: LauncherField) -> String {
+        if field.is_netplay() {
+            return self.netplay.value(field);
+        }
         if Self::is_workshop(field) {
             self.workshop_value(field)
         } else {
@@ -4915,6 +4924,9 @@ impl LauncherState {
 
     /// Whether a row's tick box is on, from wherever it lives.
     pub fn row_toggle(&self, field: LauncherField) -> bool {
+        if field == F::NetplayEnabled {
+            return self.netplay.enabled;
+        }
         if Self::is_workshop(field) {
             self.workshop_toggle(field)
         } else {
@@ -4924,6 +4936,9 @@ impl LauncherState {
 
     /// Whether a row can be used at all, from wherever it lives.
     pub fn row_applies(&self, field: LauncherField) -> bool {
+        if field.is_netplay() {
+            return field == F::NetplayEnabled || self.netplay.enabled;
+        }
         if Self::is_workshop(field) {
             self.workshop_applies(field)
         } else {
@@ -5149,6 +5164,7 @@ impl LauncherState {
             meta: None,
             setup,
             workshop: ImageWorkshop::default(),
+            netplay: NetplaySetup::default(),
             tab: LauncherTab::System,
             status: None,
             rom_notes: Default::default(),
@@ -5329,6 +5345,13 @@ impl LauncherState {
 
     pub fn edit_push(&mut self, c: char) {
         let Some(target) = self.editing else { return };
+        if let EditTarget::Netplay(field) = target {
+            let limit = if field == F::NetplayCode { 32 } else { 64 };
+            if c.is_ascii() && !c.is_control() && self.edit_buffer.len() < limit {
+                self.edit_caret.insert(&mut self.edit_buffer, c);
+            }
+            return;
+        }
         // The size is a whole number of MB or GB: digits only, and no more
         // than the box accepts.
         if let EditTarget::NewImageText(field) = target {
@@ -5429,6 +5452,10 @@ impl LauncherState {
     pub fn edit_commit(&mut self) {
         let Some(target) = self.editing else { return };
         match target {
+            EditTarget::Netplay(field) => {
+                self.commit_netplay_edit(field);
+                return;
+            }
             EditTarget::DriveName(_) => {
                 let name = self.edit_buffer.trim();
                 let invalid = (!name.is_empty())
@@ -5624,7 +5651,8 @@ impl LauncherState {
             }
             EditTarget::DriveName(field) => self.setup.set_drive_name(field, value),
             // These commit above and return, so nothing is left to do here.
-            EditTarget::DriveBootpri(_)
+            EditTarget::Netplay(_)
+            | EditTarget::DriveBootpri(_)
             | EditTarget::NewImageText(_)
             | EditTarget::SerialHost(_)
             | EditTarget::SerialPort(_)

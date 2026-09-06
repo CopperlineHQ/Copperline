@@ -1471,12 +1471,32 @@ impl M68kMachine {
         Ok(())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn write_rollback_state<W: std::io::Write>(&self, w: &mut W) -> Result<()> {
+        serialize_component(w, &self.bus.bus.rollback_state(), "rollback latches")?;
+        self.write_state(w)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn apply_rollback_state<R: std::io::Read>(&mut self, r: &mut R) -> Result<()> {
+        let runtime = deserialize_component(r, "rollback latches")?;
+        self.apply_state_inner(r, Some(runtime))
+    }
+
     /// Counterpart of `write_state`: parse every component from `r`, then
     /// swap the machine onto the restored state. The live machine is left
     /// untouched if any component fails to parse. Host resources (audio and
     /// serial sinks, blitter trace file) move across to the restored Bus;
     /// debugger state and breakpoints stay live.
     pub(crate) fn apply_state<R: std::io::Read>(&mut self, r: &mut R) -> Result<()> {
+        self.apply_state_inner(r, None)
+    }
+
+    fn apply_state_inner<R: std::io::Read>(
+        &mut self,
+        r: &mut R,
+        rollback: Option<crate::bus::RollbackState>,
+    ) -> Result<()> {
         let cpu: CpuCore = deserialize_component(r, "CPU core")?;
         let runtime: MachineRuntimeState = deserialize_component(r, "machine runtime")?;
         let icache: Option<Box<crate::cache::CpuCache>> = deserialize_component(r, "icache")?;
@@ -1485,7 +1505,11 @@ impl M68kMachine {
 
         bus.adopt_host_resources(&mut self.bus.bus)?;
         bus.adopt_ui_debug_state(&mut self.bus.bus);
-        bus.reset_transient_video_after_state_load();
+        if let Some(runtime) = rollback {
+            bus.restore_rollback_state(runtime);
+        } else {
+            bus.reset_transient_video_after_state_load();
+        }
         bus.reset_transient_diagnostics_after_state_load();
         // The CPU model travels with the state (cpu_type, timing tables, and
         // address_mask all live in CpuCore); keep the bus adapter's mask copy

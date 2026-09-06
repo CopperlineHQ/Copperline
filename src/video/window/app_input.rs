@@ -501,6 +501,10 @@ impl App {
 
     /// A transition from the host keyboard.
     pub(super) fn handle_amiga_key_event(&mut self, rawkey: u8, pressed: bool) {
+        if self.netplay.is_some() {
+            self.netplay_input.set_key(rawkey, pressed);
+            return;
+        }
         self.handle_amiga_key_event_from(KeySource::Host, rawkey, pressed);
     }
 
