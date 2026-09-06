@@ -162,7 +162,14 @@ export class RtcLink {
         };
         this.cancelGather = () => finish(new Error('Connection cancelled'));
         this.pc.addEventListener('icegatheringstatechange', changed);
-        timer = setTimeout(() => finish(new Error('Network address discovery timed out. Copy diagnostics, then try a new session.')), 15000);
+        timer = setTimeout(() => {
+          // One slow/unreachable ICE server must not discard usable routes
+          // from the others. Later candidates may be omitted from this offer.
+          if (/^a=candidate:/m.test(this.pc.localDescription?.sdp ?? '')) {
+            this.diagnostics.record('gathering-deadline', this.pc);
+            finish();
+          } else finish(new Error('Network address discovery timed out without a usable route. Copy diagnostics, then try a new session.'));
+        }, 15000);
         changed();
       });
     }

@@ -80,6 +80,24 @@ test('cancelling ICE gathering rejects the pending offer and closes only once', 
   assert.equal(link.pc.connectionState, 'closed');
 });
 
+test('the gathering deadline preserves collected routes but rejects an empty offer', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  for (const candidate of ['', 'a=candidate:1 1 udp 1 192.0.2.1 3478 typ relay\r\n']) {
+    const link = new RtcLink({ PeerConnection: Peer });
+    link.pc.iceGatheringState = 'gathering';
+    link.pc.createOffer = async () => ({ type: 'offer', sdp: 'v=0\r\n' + candidate });
+    const offer = link.offer(settings);
+    await new Promise(resolve => setImmediate(resolve));
+    t.mock.timers.tick(15000);
+    if (candidate) {
+      assert.ok(decodeCode(await offer, 'offer').description.sdp.includes(candidate));
+      assert.equal(link.closed, false);
+      assert.equal(link.diagnostics.events.at(-1).event, 'gathering-deadline');
+    } else await assert.rejects(offer, /without a usable route/);
+    link.close();
+  }
+});
+
 test('a delayed offer cannot resurrect a cancelled link', async () => {
   const link = new RtcLink({ PeerConnection: Peer });
   let finish;

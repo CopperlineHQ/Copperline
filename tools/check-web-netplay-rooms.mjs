@@ -9,6 +9,7 @@ import { pathToFileURL } from 'node:url';
 const url = new URL(process.argv[2] ?? 'http://127.0.0.1:8765/try/');
 const service = new URL(process.env.NETPLAY_SERVICE ?? 'http://127.0.0.1:8787');
 const relayOnly = process.env.NETPLAY_RELAY_ONLY === '1';
+const exerciseGatherDeadline = process.env.NETPLAY_GATHER_DEADLINE_TEST === '1';
 const output = resolve(process.argv[3] ?? '/tmp/copperline-netplay-rooms-browser');
 await mkdir(output, { recursive: true });
 const module = process.env.PLAYWRIGHT_MODULE;
@@ -33,14 +34,21 @@ try {
       }
       return [url.origin, service.origin].includes(target.origin) ? route.continue() : route.abort();
     });
-    await context.addInitScript(base => {
+    await context.addInitScript(({ base, exerciseGatherDeadline }) => {
       // Use a test endpoint without changing the deployable page configuration.
       new MutationObserver(() => {
         const meta = document.querySelector('meta[name="copperline-netplay-service"]');
         if (meta && meta.content !== base) meta.content = base;
       }).observe(document, { childList: true, subtree: true });
       Object.defineProperty(navigator, 'clipboard', { value: { writeText: async text => { window.__copied = text; } } });
-    }, service.origin);
+      if (exerciseGatherDeadline) {
+        // Keep real ICE candidates and connectivity, but make the wrapper use
+        // its deadline path even when the browser finishes gathering quickly.
+        const Peer = RTCPeerConnection, schedule = setTimeout;
+        window.RTCPeerConnection = class extends Peer { get iceGatheringState() { return 'gathering'; } };
+        window.setTimeout = (callback, delay, ...args) => schedule(callback, delay === 15000 ? 2000 : delay, ...args);
+      }
+    }, { base: service.origin, exerciseGatherDeadline });
     const page = await context.newPage();
     page.on('pageerror', error => {
       // WebKit logs a native console error when its send queue meets a remote
@@ -160,6 +168,7 @@ try {
     const report = JSON.parse(await page.evaluate(() => window.__copied));
     assert.equal(report.connection.peer, 'connected');
     assert.equal(report.stats.dtls, 'connected');
+    if (exerciseGatherDeadline) assert.ok(report.events.some(event => event.event === 'gathering-deadline'));
     assert.deepEqual(await page.evaluate(() => ({ model: window.__emu.machine_model(), video: window.__emu.video_standard(), speed: window.__emu.floppy_speed() })),
       { model: 'A1200', video: 'NTSC', speed: 400 });
     assert.deepEqual(await page.evaluate(() => [0, 1].map(drive => ({ name: window.__emu.disk_name(drive),

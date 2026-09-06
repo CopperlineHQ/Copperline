@@ -117,7 +117,10 @@ on subsequent retransmissions; a full outgoing queue reports backpressure.
 when the channel's buffered amount reaches 64 maximum-size packets.
 
 The page exchanges a versioned offer and answer containing SDP and host-selected
-settings. It waits for ICE gathering to complete before creating either code.
+settings. It waits up to 15 seconds for ICE gathering before creating either
+code. At the deadline it uses collected candidates if any are available; a slow
+server cannot invalidate routes gathered from other servers. An empty candidate
+set still fails setup, and diagnostics record a gathering-deadline event.
 `netplay-room.js` sends these codes through the configured service; the host polls
 for an answer every 1.5 seconds until joined, cancelled or expired. Manual
 copy/paste remains available under Advanced and needs no signaling service.

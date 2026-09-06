@@ -36,6 +36,8 @@ block and leave address discovery waiting until it times out. Other relay
 ports, including TLS on port 443, remain available.
 Browsers that reject TURN transport queries retry with default UDP and TLS URLs;
 plain TCP entries are omitted only for those browsers.
+If discovery reaches its 15-second deadline with usable candidates, the browser
+proceeds with those routes instead of waiting for every configured server.
 
 The WASM publishing workflow copies all netplay modules and the QR license to
 the site. It leaves the site's HTML, service URL and service worker intact.
@@ -83,6 +85,8 @@ requests. Serve the site there, then run `node tools/check-web-netplay-rooms.mjs
 from the repository root. The tool supplies the local service URL without editing
 the deployable page. Its `NETPLAY_SERVICE` and `NETPLAY_RELAY_ONLY=1` options test
 an explicitly selected deployed service and require a selected relay candidate.
+`NETPLAY_GATHER_DEADLINE_TEST=1` exercises the discovery deadline with real
+candidates and connectivity while holding the exposed gathering state open.
 
 The Node tests run the Worker and Durable Objects in Miniflare, checking role
 boundaries, guest reservation, cleanup, request limits and TURN failure handling.
