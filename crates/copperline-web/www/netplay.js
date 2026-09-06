@@ -3,6 +3,7 @@
 import { NetplayDiagnostics, connectionFailure } from './netplay-diagnostics.js';
 import { RoomClient, inviteUrl, roomFromInvite } from './netplay-room.js';
 import qrcode from './netplay-qr.js';
+import { MEDIA_CHANNEL, MEDIA_VERSION, MediaTransfer } from './netplay-media.js';
 
 // Signaling uses expiring room invitations or manual copy/paste codes.
 // Only bounded input packets use the data channel.
@@ -15,11 +16,13 @@ export function validateSettings(value) {
   if (!value || !/^[0-9a-f]{32}$/i.test(value.session ?? '') ||
       !Number.isInteger(value.delay) || value.delay < 0 || value.delay > 6 ||
       !Number.isInteger(value.window) || value.window < 1 || value.window > 12 ||
-      !['joystick', 'cd32'].includes(value.controller)) {
+      !['joystick', 'cd32'].includes(value.controller) ||
+      (value.media !== undefined && value.media !== MEDIA_VERSION)) {
     throw new Error('Invalid netplay settings in connection code');
   }
   return { session: value.session.toLowerCase(), delay: value.delay,
-    window: value.window, controller: value.controller };
+    window: value.window, controller: value.controller,
+    ...(value.media ? { media: value.media } : {}) };
 }
 
 export function encodeCode(description, settings) {
@@ -64,6 +67,9 @@ export class RtcLink {
     this.onClose = onClose;
     this.timer = null;
     this.cancelGather = null;
+    this.media = null;
+    this.mediaReady = new Promise((resolve, reject) => { this.mediaAttached = resolve; this.mediaFailed = reject; });
+    this.mediaReady.catch(() => {});
     this.diagnostics = new NetplayDiagnostics();
     this.diagnostics.record('created', this.pc);
     this.pc.ondatachannel = event => this.attach(event.channel);
@@ -87,6 +93,18 @@ export class RtcLink {
   }
 
   attach(channel) {
+    if (channel.label === MEDIA_CHANNEL) {
+      if (this.closed || this.media || this.settings?.media !== MEDIA_VERSION ||
+          channel.ordered !== true || channel.maxRetransmits != null || channel.maxPacketLifeTime != null) {
+        channel.close();
+        this.close('Unexpected game setup channel. Refresh both pages and start a new session.');
+        return;
+      }
+      this.media = new MediaTransfer(channel, { host: this.host,
+        fail: error => this.close(error.message) });
+      this.mediaAttached(this.media);
+      return;
+    }
     if (this.closed || this.channel || channel.label !== CHANNEL ||
         channel.ordered || channel.maxRetransmits !== 0) {
       channel.close();
@@ -181,13 +199,16 @@ export class RtcLink {
 
   async offer(settings) {
     this.settings = validateSettings(settings);
+    this.host = true;
     this.attach(this.pc.createDataChannel(CHANNEL, { ordered: false, maxRetransmits: 0 }));
+    if (this.settings.media === MEDIA_VERSION) this.attach(this.pc.createDataChannel(MEDIA_CHANNEL, { ordered: true }));
     return this.gather(await this.pc.createOffer());
   }
 
   async answer(code) {
     const { description, settings } = decodeCode(code, 'offer');
     this.settings = settings;
+    this.host = false;
     await this.pc.setRemoteDescription(description);
     if (this.closed) throw new Error('Connection cancelled');
     return this.gather(await this.pc.createAnswer());
@@ -196,7 +217,7 @@ export class RtcLink {
   async accept(code) {
     const { description, settings } = decodeCode(code, 'answer');
     if (JSON.stringify(settings) !== JSON.stringify(this.settings)) {
-      throw new Error('Answer belongs to a different netplay session');
+      throw new Error('Answer belongs to a different netplay session or version. Refresh both pages and try again.');
     }
     await this.pc.setRemoteDescription(description);
     if (this.closed) throw new Error('Connection cancelled');
@@ -204,6 +225,17 @@ export class RtcLink {
       clearTimeout(this.timer);
       this.timer = setTimeout(() => this.close('Peer connection timed out. Copy diagnostics, then start a new session.'), 60000);
     }
+  }
+
+  async transferMedia(snapshot, progress) {
+    if (this.closed) throw new Error('Game setup transfer cancelled');
+    this.timer = setTimeout(() => this.close('Game setup transfer timed out. Start a new session.'), 180000);
+    try {
+      const transfer = await this.mediaReady;
+      transfer.progress = progress;
+      if (this.host) await transfer.send(snapshot);
+      else return await transfer.receive();
+    } finally { clearTimeout(this.timer); }
   }
 
   receive(emu) {
@@ -226,6 +258,7 @@ export class RtcLink {
     this.diagnostics.capture(this.pc);
     clearTimeout(this.timer);
     this.cancelGather?.();
+    this.mediaFailed(new Error('Game setup transfer cancelled'));
     // Let the owner poll final queued packets for the core's failure reason
     // before freeing the machine. A remote close can follow its hello packet.
     try { this.onClose(reason, this); }
@@ -233,6 +266,14 @@ export class RtcLink {
   }
 
   dispose() {
+    if (this.media) {
+      const channel = this.media.channel;
+      channel.onopen = channel.onmessage = channel.onclose = channel.onerror = null;
+      this.media.stop();
+      channel.close();
+      this.media = null;
+    }
+    this.mediaReady = this.mediaAttached = this.mediaFailed = null;
     this.incoming.length = 0;
     this.pc.ondatachannel = this.pc.onconnectionstatechange = null;
     this.pc.oniceconnectionstatechange = this.pc.onicegatheringstatechange = null;
@@ -246,7 +287,7 @@ export class RtcLink {
 }
 
 // The panel inserts itself into old static page shells, as the other controls do.
-export function mountNetplayPanel(parent, { prepare, start, stop }) {
+export function mountNetplayPanel(parent, { prepare, start, stop, getMedia, useMedia }) {
   const style = document.createElement('style');
   style.textContent = `
     #netplay-panel { font-size: .88rem; line-height: 1.4; color: var(--ink-mute, #bbc0ca); }
@@ -277,7 +318,7 @@ export function mountNetplayPanel(parent, { prepare, start, stop }) {
   root.id = 'netplay-panel';
   root.className = 'try-side-section';
   root.innerHTML = `<summary>Netplay</summary>
-    <p>Load matching ROMs and disks on both devices. Starting a session replaces your running game.</p>
+    <p>The host shares their ROMs, disks and machine settings with player 2. Starting a session replaces your running game.</p>
     <div id="netplay-rooms">
       <button id="netplay-room-host" type="button">Host game</button>
       <label>Invitation link or room code <input id="netplay-room-code" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
@@ -330,7 +371,7 @@ export function mountNetplayPanel(parent, { prepare, start, stop }) {
     if (!active) field('accept').disabled = true;
   };
   field('service-status').textContent = service
-    ? 'Host is player 1; Join is player 2. Your game files stay on your device.'
+    ? 'Host is player 1; Join is player 2. Received files are used only for this session.'
     : 'Room invitations are not configured on this page. Manual setup is available under Advanced.';
   field('advanced').open = !service;
   field('share').hidden = typeof navigator.share !== 'function';
@@ -342,7 +383,7 @@ export function mountNetplayPanel(parent, { prepare, start, stop }) {
     if (!roomFromInvite(room)) { root.open = true; status('This invitation is incomplete or damaged.'); return; }
     field('room-code').value = room;
     root.open = true;
-    status('Invitation ready. Load the host’s ROMs and disks, match the machine settings, then click Join game.');
+    status('Invitation ready. Click Join game to receive the host’s files and machine settings.');
   }
   readInvitation();
   window.addEventListener('hashchange', readInvitation);
@@ -358,13 +399,21 @@ export function mountNetplayPanel(parent, { prepare, start, stop }) {
       const roomId = roomFromInvite(field('room-code').value);
       if (roomMode && !service) throw new Error('Room invitations are not configured on this page');
       if (roomMode && !host && !roomId) throw new Error('Paste an invitation link or room code');
-      settings = host ? newSettings(Number(field('delay').value), Number(field('window').value), field('controller').value)
+      settings = host ? { ...newSettings(Number(field('delay').value), Number(field('window').value), field('controller').value), media: MEDIA_VERSION }
         : roomMode ? null : decodeCode(remote, 'offer').settings;
       const stun = field('stun').value.trim();
       if (!roomMode && stun && !/^stuns?:[^\s]+$/i.test(stun)) throw new Error('STUN server must start with stun: or stuns:');
       current = new RtcLink({ iceServers: !roomMode && stun ? [{ urls: stun }] : [],
         onOpen: async peer => {
           if (link !== peer) return;
+          if (settings.media === MEDIA_VERSION) {
+            status(host ? 'Sending game setup...' : 'Receiving the host’s game setup...');
+            const received = await peer.transferMedia(host ? getMedia(peer) : null, (action, bytes, total) => {
+              if (link === peer) status(`${action} game setup: ${Math.floor(bytes * 100 / total)}%`);
+            });
+            if (link !== peer) return;
+            if (!host) useMedia(peer, received);
+          }
           status('Connected. Checking the initial machines...');
           await start(peer, settings, host ? 1 : 2);
         },
@@ -387,7 +436,7 @@ export function mountNetplayPanel(parent, { prepare, start, stop }) {
       field('report').hidden = true;
       controls();
       status('Preparing a fresh session...');
-      await prepare(current);
+      await prepare(current, { host, receiveMedia: !host && (roomMode || settings?.media === MEDIA_VERSION) });
       if (link !== current) return;
       if (roomMode) {
         current.room = new RoomClient(service, current.abort.signal);

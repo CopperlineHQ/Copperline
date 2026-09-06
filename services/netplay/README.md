@@ -2,8 +2,9 @@
 
 This Cloudflare Worker exchanges WebRTC connection descriptions between two
 players. Each SQLite Durable Object holds one invitation for at most 15 minutes.
-Game inputs use WebRTC directly or through TURN; ROMs, disks and snapshots never
-pass through this service. The static site remains on GitHub Pages.
+Game inputs and host-to-guest setup files use encrypted WebRTC directly or
+through TURN. ROMs and disks never pass through this signaling Worker; running
+snapshots are not transferred. The static site remains on GitHub Pages.
 
 ## Deploy
 

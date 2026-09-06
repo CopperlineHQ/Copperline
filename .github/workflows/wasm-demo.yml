@@ -146,6 +146,7 @@ jobs:
              crates/copperline-web/www/render-stride.js \
              crates/copperline-web/www/netplay.js \
              crates/copperline-web/www/netplay-room.js \
+             crates/copperline-web/www/netplay-media.js \
              crates/copperline-web/www/netplay-diagnostics.js \
              crates/copperline-web/www/netplay-qr.js \
              crates/copperline-web/www/netplay-qr.LICENSE \

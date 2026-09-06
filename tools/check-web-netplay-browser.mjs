@@ -129,18 +129,18 @@ try {
     null, { timeout: 60000 })));
   await guest.locator('#netplay-disconnect').click();
   await Promise.all(pages.map(page => page.locator('#netplay-host:enabled').waitFor()));
-  // A different hardware setup must stop both sides instead of running locally.
+  // Manual signaling also transfers the host setup over the peer connection.
   await guest.locator('#video').selectOption('NTSC');
   await connect();
-  await Promise.all(pages.map(page => page.waitForFunction(() =>
-    !window.__emu && !document.querySelector('#netplay-host').disabled,
-  null, { timeout: 30000 })));
-  const messages = await Promise.all(pages.map(page => page.locator('#netplay-status').textContent()));
-  console.log(`Mismatched machines: ${messages.join('; ')}`);
-  assert.ok(messages.every(message => /mismatch|different/i.test(message)), messages.join('; '));
+  await Promise.all(pages.map(page => page.waitForFunction(() => window.__emu?.netplay_status()[6] >= 60,
+    null, { timeout: 60000 })));
+  assert.equal(await guest.locator('#video').inputValue(), 'PAL');
+  await guest.locator('#netplay-disconnect').click();
+  await Promise.all(pages.map(page => page.locator('#netplay-host:enabled').waitFor()));
+  assert.equal(await guest.locator('#video').inputValue(), 'NTSC');
   await host.setViewportSize({ width: 390, height: 844 });
   await host.locator('#sidebar-toggle').click();
   await host.locator('#netplay-panel').screenshot({ path: `${output}/netplay-mobile.png` });
   assert.deepEqual(errors, []);
-  console.log('Host/Join, cancellation, restart, control locking, mismatch rejection and browser rendering passed');
+  console.log('Host/Join, cancellation, restart, control locking, host setup transfer and browser rendering passed');
 } finally { await browser.close(); }

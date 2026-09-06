@@ -17,18 +17,19 @@ mixed operating systems and browser engines have not yet been qualified.
 (browser-netplay)=
 ## Set up in the browser
 
-On the [browser page](browser.md), open **Controls → Netplay**. Load the same ROM
-and disks, and choose the same model, video standard, floppy speed, floppy sounds and writable
-disk setting on both pages. Setup starts a fresh machine, replacing any running
-local session.
+On the [browser page](browser.md), open **Controls → Netplay**. The host loads
+the ROM and disks and chooses the machine settings. The guest receives that
+setup automatically over the encrypted peer connection. Both pages need the
+same emulator build. Setup starts a fresh machine, replacing any running local session.
 
 1. The host clicks **Host game** and shares the invitation link using **Copy
    invitation**, the device share sheet, or the QR code. **Advanced** contains
    the controller type, input delay and rollback limit.
 2. The other player opens the link (or pastes it into the invitation field),
-   loads matching ROMs and disks, then clicks **Join game**. The offer and answer
-   are exchanged automatically. The host supplies the controller and delay settings.
-3. Both pages cold-boot after checking that their initial machines match. The
+   then clicks **Join game**. The offer and answer are exchanged automatically.
+   A progress message tracks the transfer of ROMs, both inserted floppy images
+   and machine settings. The host also supplies the controller and delay settings.
+3. The guest verifies every file before both pages cold-boot and check their initial machines. The
    panel reports confirmed frames, rollbacks and the latest checked frame.
 
 Invitations allow one joining player and expire after 15 minutes. Expiry removes
@@ -45,8 +46,17 @@ disabled. The desktop F11/F12 netplay shortcuts do not apply to the browser.
 Room setup uses a small signaling service. WebRTC tries direct routes and can
 fall back to a TURN relay. **Advanced → Use relay only** forces that route for
 troubleshooting. Relay credentials expire after 24 hours; start a new session
-for longer play. ROMs, disks and machine snapshots stay on each device. WebRTC
-encrypts the data channel, including traffic carried by a relay.
+for longer play. WebRTC encrypts game files and input packets, including traffic
+carried by a relay. The signaling service receives no ROM or disk bytes.
+
+Received files are held only for the session and are not saved into the guest's
+remembered-ROM storage. Disconnect restores the guest's previous media choices
+and settings. The host shares the main and extended ROMs, DF0/DF1 images and their
+write-protection flags, model, video standard, floppy speed, drive sounds and
+mono/stereo setting. Display preferences and volume stay local. ROMs are limited
+to 2 MiB each and floppy images to 16 MiB each. Starting from a running machine
+uses the current contents of writable disks; it still cold-boots rather than
+transferring a running save state.
 
 If a connection ends, use **Copy diagnostics** on both devices. The report keeps
 ICE, peer, data-channel and DTLS states, candidate types and packet counters.
@@ -59,6 +69,7 @@ clicks **Host with manual codes**, sends its code to the guest, and the guest
 pastes it and clicks **Join offer**. The guest sends its answer back; the host
 pastes it and clicks **Connect answer**. The STUN field helps discover routes;
 leave it blank for LAN-only discovery. Manual setup has no relay fallback.
+Current pages transfer host files and settings after manual signaling too.
 Its large codes contain network addresses and session details, so exchange them
 privately. If the page has no room service configured, Advanced opens by default.
 
