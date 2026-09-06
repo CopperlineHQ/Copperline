@@ -122,7 +122,7 @@ test('data-channel open runs once, remote close drains queued input before clean
   assert.equal(opens, 1);
   channel.onmessage({ data: new Uint8Array([7, 8]).buffer });
   channel.onclose();
-  assert.deepEqual(closed, { reason: 'Peer disconnected', received: [7, 8] });
+  assert.deepEqual(closed, { reason: 'Peer disconnected. Copy diagnostics for a connection report.', received: [7, 8] });
   assert.equal(link.closed, true);
   assert.equal(channel.onopen, null);
   assert.equal(link.pc.ondatachannel, null);
@@ -140,4 +140,19 @@ test('connection-state failure closes once and an open queued before cancellatio
   assert.equal(opens, 0);
   assert.equal(closes, 1);
   assert.equal(link.channel.readyState, 'closed');
+});
+
+
+test('relay-only configuration requires TURN and preserves the requested ICE policy', () => {
+  const link = new RtcLink({ PeerConnection: Peer });
+  let config;
+  link.pc.setConfiguration = value => { config = value; };
+  try {
+    assert.throws(() => link.configureIce([], true), /relay is not available/);
+    const servers = [{ urls: ['stun:example.test', 'turns:example.test:443'], username: 'temporary', credential: 'temporary' }];
+    link.configureIce(servers, true);
+    assert.deepEqual(config, { iceServers: servers, iceTransportPolicy: 'relay' });
+    link.configureIce(servers);
+    assert.equal(config.iceTransportPolicy, 'all');
+  } finally { link.close(); }
 });

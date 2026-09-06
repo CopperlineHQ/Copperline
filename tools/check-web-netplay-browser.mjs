@@ -31,7 +31,9 @@ try {
     page.on('pageerror', error => errors.push(error.message));
     await page.goto(url.href);
     await page.locator('#boot:enabled').waitFor({ timeout: 30000 });
-    await page.locator('#netplay-panel summary').click();
+    if (await page.locator('#netplay-open').count()) await page.locator('#netplay-open').click();
+    else await page.locator('#netplay-panel > summary').click();
+    await page.locator('#netplay-advanced').evaluate(panel => { panel.open = true; });
     await page.locator('#netplay-stun').fill('');
     pages.push(page);
   }

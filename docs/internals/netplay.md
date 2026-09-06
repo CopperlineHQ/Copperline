@@ -115,10 +115,31 @@ on subsequent retransmissions; a full outgoing queue reports backpressure.
 `netplay.js` also bounds its receive queue and stops draining Rust's send queue
 when the channel's buffered amount reaches 64 maximum-size packets.
 
-The page exchanges a versioned offer and answer by copy/paste, including the
-SDP and host-selected settings. It waits for ICE gathering to complete before
-creating either code; no signaling service or trickled candidates are needed.
-The optional STUN server supplies address discovery, with no TURN relay UI.
+The page exchanges a versioned offer and answer containing SDP and host-selected
+settings. It waits for ICE gathering to complete before creating either code.
+`netplay-room.js` sends these codes through the configured service; the host polls
+for an answer every 1.5 seconds until joined, cancelled or expired. Manual
+copy/paste remains available under Advanced and needs no signaling service.
+Neither path trickles candidates.
+
+`services/netplay` implements the Cloudflare Worker and SQLite Durable Object
+used for each invitation. Room IDs and separate owner/guest tokens each contain
+128 random bits. A serialized guest reservation admits one guest; role checks
+restrict offer publication, answer publication and answer retrieval. Records
+expire after 15 minutes via an alarm. DELETE ends setup early; cancellation also
+aborts pending browser requests. The service carries no emulator packets.
+Requests and responses are bounded, origins are allowlisted, and per-IP rate
+limits bound creation separately from polling. An origin header is a browser
+boundary, not authentication against arbitrary clients.
+
+TURN API keys stay in Worker secrets. The service issues temporary, 24-hour ICE
+credentials independently for each player; retries reuse the guest credentials
+within the room lifetime. Room creation fails when a production relay service
+is unavailable. Local development explicitly disables TURN requests. WebRTC
+selects direct or relay routes, or relay-only when requested in Advanced.
+`netplay-diagnostics.js` records whitelisted states, candidate types and numeric
+counters before disposal. It never exports SDP, candidate addresses or tokens.
+The diagnostic sample survives a closed peer connection.
 The [WebRTC data channel](https://www.w3.org/TR/webrtc/) is unordered and uses
 zero SCTP retransmissions, since the shared Copperline protocol already repeats
 unacknowledged inputs. Browser and native transports have no interoperability
@@ -205,7 +226,7 @@ required for the regression suite.
 After building the release web bundle, run `node tools/check-web-netplay.mjs` and
 `npm test --prefix crates/copperline-web/www`. CI also runs the native web wrapper
 unit tests, including failed startup, input routing and audio gain checks. The
-browser publishing workflow also checks the optimized bundle before copying `netplay.js` alongside
+browser publishing workflow also checks the optimized bundle before copying all netplay modules and the vendored QR license alongside
 the other page modules. For a served local page, the optional Playwright check
 `node tools/check-web-netplay-browser.mjs http://127.0.0.1:8000/` exercises actual
 Host/Join, cancellation, reconnect by cold boot, locked controls and mismatch
@@ -213,3 +234,13 @@ rejection in two Chromium contexts. It also verifies that a device-keyboard tap
 appears as a held key and subsequent release in transmitted input frames.
 `CHROME_PATH` selects an installed Chrome;
 `PLAYWRIGHT_MODULE` can point to a local Playwright module.
+
+Run `npm ci && npm test` in `services/netplay` for real local Worker lifecycle,
+role, quota and TURN-provider tests. With that service running on port 8787 and
+the site on 8765, `node tools/check-web-netplay-rooms.mjs` checks the invitation
+flow with the release WASM bundle. `NETPLAY_SERVICE` selects a deployed endpoint;
+`NETPLAY_RELAY_ONLY=1` requires an actual selected relay candidate and checked
+emulation frames. `NETPLAY_BROWSER=webkit` selects an installed Playwright WebKit.
+Desktop WebKit and mobile viewport tests do not qualify iOS hardware or beta Safari.
+The QR encoder is the unmodified `qrcode-generator` 2.0.4 ES module, distributed
+with its MIT license; no external image or QR service receives invitations.

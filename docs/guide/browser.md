@@ -69,15 +69,17 @@ The web build uses the same `.clstate` file format as the desktop version:
 
 ### Rollback netplay
 
-**Controls → Netplay** connects two browsers using WebRTC. The host sends an offer
-code, the joining player sends an answer, and the host connects that answer.
+**Controls → Netplay** connects two browsers using WebRTC. The host shares an
+invitation link or QR code; the other player opens it and clicks Join game.
+Advanced retains manual offer/answer codes for pages without a room service.
 Both pages start fresh machines with matching ROMs, disks and hardware settings.
 Each player controls one Amiga port; late input is predicted and corrected by
 rollback. See [browser netplay setup](netplay.md#browser-netplay) for the steps,
-controller mapping, STUN settings and restrictions.
+controller mapping, relay troubleshooting and restrictions.
 
 Netplay requires WebRTC data channels as well as WebAssembly. It works on a
-static site without a signaling server. A desktop UDP peer cannot join a browser
+static site; room invitations use a separate signaling service, while manual
+codes need no server. A desktop UDP peer cannot join a browser
 session. Save states, media changes, serial connections and pause are unavailable
 until disconnect.
 
@@ -97,7 +99,7 @@ The browser implementation consists of the following components:
 - **Audio pipeline:** Stereo 44.1 kHz float samples are transferred directly to an
   `AudioWorklet` processor for low-latency playback.
 - **Netplay:** The Rust core owns the shared rollback timeline and bounded packet
-  queues. `www/netplay.js` handles connection codes and the WebRTC data channel;
+  queues. `www/netplay.js` handles room invitations, manual codes and the WebRTC data channel;
   `try.js` owns the session lifecycle and locks controls that change the machine.
 
 ## Building the WebAssembly package locally
@@ -218,7 +220,9 @@ this does not add a clock to models without one. Failed startup restores the
 machine and leaves it available for local use or another startup attempt.
 
 `RtcLink` in `www/netplay.js` provides `offer(settings)`, `answer(offerCode)` and
-`accept(answerCode)`. Its `onOpen` callback is the point to construct the machine
+`accept(answerCode)`, with `configureIce(iceServers, relayOnly)` for temporary
+TURN credentials obtained from a trusted service. `report()` returns sanitized
+connection diagnostics. Its `onOpen` callback is the point to construct the machine
 and call `start_netplay`. Its `onClose` callback must stop the page's loops and
 free the machine. Immediately after startup, call `run_hidden(now, 0)` and
 `link.send(emu)` once to send the initial fingerprint. Then call `link.receive(emu)` before `run`/`run_hidden`, then
