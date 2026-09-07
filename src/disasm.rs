@@ -195,6 +195,8 @@ struct Stream<'a> {
     /// format (base/outer displacements, memory indirection). The 68000
     /// and 68010 ignore that bit and always use the brief format.
     full_ext: bool,
+    /// MOVE from CCR exists from the 68010 upward (illegal on 68000).
+    move_from_ccr: bool,
 }
 
 impl Stream<'_> {
@@ -404,6 +406,7 @@ pub fn disassemble(read: impl Fn(u32) -> u16, pc: u32, cpu_type: CpuType) -> (St
         base: pc,
         words: 0,
         full_ext: !matches!(cpu_type, CpuType::M68000 | CpuType::M68010),
+        move_from_ccr: !matches!(cpu_type, CpuType::M68000),
     };
     let op = s.next_word();
     let text = decode(op, &mut s);
@@ -455,6 +458,10 @@ fn decode_move(op: u16, size: u8, s: &mut Stream) -> Option<String> {
     let dst_reg = ((op >> 9) & 7) as u8;
     // MOVE.B <ea>,An is illegal (no MOVEA.B).
     if dst_mode == 1 && size == 0 {
+        return None;
+    }
+    // Destinations PC-relative / immediate are illegal for MOVE.
+    if dst_mode == 7 && dst_reg > 1 {
         return None;
     }
     let src = effective_address(src_mode, src_reg, size, s);
@@ -578,7 +585,10 @@ fn decode_5(op: u16, s: &mut Stream) -> Option<String> {
         let ea = effective_address(mode, reg, 0, s);
         return Some(format!("S{} {ea}", CC[cc]));
     }
-    // ADDQ/SUBQ #data,<ea>
+    // ADDQ/SUBQ #data,<ea> (byte to An is illegal).
+    if size == 0 && mode == 1 {
+        return None;
+    }
     let mut data = ((op >> 9) & 7) as u32;
     if data == 0 {
         data = 8;
@@ -634,6 +644,14 @@ fn decode_4(op: u16, s: &mut Stream) -> Option<String> {
         0x4E58 => return Some(format!("UNLK {}", AN[reg as usize])),
         0x4E60 => return Some(format!("MOVE {},USP", AN[reg as usize])),
         0x4E68 => return Some(format!("MOVE USP,{}", AN[reg as usize])),
+        0x4808 => {
+            // LINK.L An,#d32 — 68020+; on 68000/010 the encoding is illegal.
+            if !s.full_ext {
+                return None;
+            }
+            let d = s.next_long() as i32;
+            return Some(format!("LINK.L {},#{}", AN[reg as usize], signed_hex(d)));
+        }
         0x4840 => return Some(format!("SWAP {}", DN[reg as usize])),
         0x4848 => return Some(format!("BKPT #{}", op & 7)),
         0x4880 => return Some(format!("EXT.W {}", DN[reg as usize])),
@@ -669,8 +687,11 @@ fn decode_4(op: u16, s: &mut Stream) -> Option<String> {
         }
         _ => {}
     }
-    // NBCD <ea> (byte)
+    // NBCD <ea> (byte). An direct overlaps LINK.L and is illegal for NBCD.
     if op & 0xFFC0 == 0x4800 {
+        if mode == 1 {
+            return None;
+        }
         let ea = effective_address(mode, reg, 0, s);
         return Some(format!("NBCD {ea}"));
     }
@@ -681,6 +702,10 @@ fn decode_4(op: u16, s: &mut Stream) -> Option<String> {
     }
     // MOVE to/from CCR/SR
     match op & 0xFFC0 {
+        0x42C0 if s.move_from_ccr => {
+            let ea = effective_address(mode, reg, 1, s);
+            return Some(format!("MOVE CCR,{ea}"));
+        }
         0x44C0 => {
             let ea = effective_address(mode, reg, 1, s);
             return Some(format!("MOVE {ea},CCR"));
@@ -877,7 +902,10 @@ fn decode_shift(op: u16, s: &mut Stream) -> Option<String> {
     let size = ((op >> 6) & 3) as u8;
     let names = ["AS", "LS", "ROX", "RO"];
     if size == 3 {
-        // Memory shift by one: <ea>
+        // Memory shift by one: <ea> (Dn/An/immediate/PC-relative illegal).
+        if mode < 2 || (mode == 7 && reg > 1) {
+            return None;
+        }
         let kind = ((op >> 9) & 3) as usize;
         let dir = if op & 0x0100 != 0 { "L" } else { "R" };
         let ea = effective_address(mode, reg, 1, s);
@@ -1043,6 +1071,19 @@ mod tests {
             },
             pc,
             CpuType::M68EC020,
+        )
+    }
+
+    /// Disassemble as a 68010 (MOVE from CCR, no full-format EA / LINK.L).
+    fn dis010(words: &[u16], pc: u32) -> (String, u32) {
+        let mem = words.to_vec();
+        disassemble(
+            move |addr| {
+                let idx = (addr.wrapping_sub(pc) / 2) as usize;
+                mem.get(idx).copied().unwrap_or(0)
+            },
+            pc,
+            CpuType::M68010,
         )
     }
 
@@ -1229,6 +1270,36 @@ mod tests {
         assert!(list[0].1.starts_with("MOVE"), "{}", list[0].1);
         // $FFFF,$FFFF has IR2 bit0 set, so it disassembles as SKIP, not WAIT.
         assert!(list[1].1.starts_with("SKIP"), "{}", list[1].1);
+    }
+
+    #[test]
+    fn link_l_not_nbcd_on_020() {
+        // LINK.L A0,#$12345678 — three words on 68020+.
+        let (t, n) = dis020(&[0x4808, 0x1234, 0x5678], 0);
+        assert_eq!(t, "LINK.L A0,#$12345678");
+        assert_eq!(n, 6);
+        // Same encoding is illegal on 68000 (not NBCD A0).
+        assert_eq!(dis(&[0x4808, 0x1234, 0x5678], 0), ("DC.W $4808".into(), 2));
+        // Real NBCD (A0) still works.
+        assert_eq!(dis020(&[0x4810], 0), ("NBCD (A0)".into(), 2));
+    }
+
+    #[test]
+    fn move_from_ccr_from_68010() {
+        assert_eq!(dis010(&[0x42C0], 0), ("MOVE CCR,D0".into(), 2));
+        assert_eq!(dis010(&[0x42D0], 0), ("MOVE CCR,(A0)".into(), 2));
+        // Illegal on 68000.
+        assert_eq!(dis(&[0x42C0], 0), ("DC.W $42C0".into(), 2));
+    }
+
+    #[test]
+    fn illegal_forms_are_dc_word() {
+        // Memory shift targeting Dn.
+        assert_eq!(dis(&[0xE0C0], 0), ("DC.W $E0C0".into(), 2));
+        // ADDQ.B #1,A0
+        assert_eq!(dis(&[0x5208], 0), ("DC.W $5208".into(), 2));
+        // MOVE.W D0,(d16,PC) — destination PC-relative.
+        assert_eq!(dis(&[0x35C0, 0x0004], 0), ("DC.W $35C0".into(), 2));
     }
 
     #[test]
