@@ -260,14 +260,15 @@ fn signed_hex(v: i32) -> String {
 }
 
 /// Decode a brief-format extension word index register, e.g. `D3.W*2`.
-fn brief_index(ext: u16) -> String {
+/// Scale factors are 68020+ only; on 68000/010 the scale bits are ignored.
+fn brief_index(ext: u16, show_scale: bool) -> String {
     let reg = ((ext >> 12) & 7) as usize;
     let is_addr = ext & 0x8000 != 0;
     let long = ext & 0x0800 != 0;
-    let scale = (ext >> 9) & 3; // 020+; 0 (==*1) on 68000
+    let scale = (ext >> 9) & 3;
     let name = if is_addr { AN[reg] } else { DN[reg] };
     let size = if long { "L" } else { "W" };
-    if scale == 0 {
+    if !show_scale || scale == 0 {
         format!("{name}.{size}")
     } else {
         format!("{name}.{size}*{}", 1 << scale)
@@ -281,7 +282,12 @@ fn brief_index(ext: u16) -> String {
 fn indexed_ea(base: &str, ext: u16, s: &mut Stream) -> String {
     if ext & 0x0100 == 0 || !s.full_ext {
         let d = ext as i8 as i32;
-        return format!("({},{},{})", signed_hex(d), base, brief_index(ext));
+        return format!(
+            "({},{},{})",
+            signed_hex(d),
+            base,
+            brief_index(ext, s.full_ext)
+        );
     }
     // Full extension word format. Word order after it: base displacement,
     // then outer displacement (matching the execution model in the CPU
@@ -303,7 +309,7 @@ fn indexed_ea(base: &str, ext: u16, s: &mut Stream) -> String {
     } else {
         None
     };
-    let index = (!index_suppress).then(|| brief_index(ext));
+    let index = (!index_suppress).then(|| brief_index(ext, true));
     let mut inner: Vec<String> = Vec::new();
     if let Some(bd) = bd {
         inner.push(signed_hex(bd));
@@ -364,7 +370,7 @@ fn effective_address(mode: u8, reg: u8, size: u8, s: &mut Stream) -> String {
         7 => match reg {
             0 => {
                 let a = s.next_word() as i16 as i32;
-                format!("(${:X}).W", a as u32 & 0xFFFF)
+                format!("(${:X}).W", a as u32)
             }
             1 => {
                 let a = s.next_long();
@@ -400,7 +406,7 @@ pub fn disassemble(read: impl Fn(u32) -> u16, pc: u32, cpu_type: CpuType) -> (St
         full_ext: !matches!(cpu_type, CpuType::M68000 | CpuType::M68010),
     };
     let op = s.next_word();
-    let text = decode(op, &mut s, cpu_type);
+    let text = decode(op, &mut s);
     let text = text.unwrap_or_else(|| {
         // Reset to a single-word DC.W for anything unrecognised.
         format!("DC.W ${op:04X}")
@@ -415,7 +421,7 @@ pub fn disassemble(read: impl Fn(u32) -> u16, pc: u32, cpu_type: CpuType) -> (St
     (text, words * 2)
 }
 
-fn decode(op: u16, s: &mut Stream, _cpu_type: CpuType) -> Option<String> {
+fn decode(op: u16, s: &mut Stream) -> Option<String> {
     match op >> 12 {
         0x0 => decode_0(op, s),
         0x1 => decode_move(op, 0, s),
@@ -447,6 +453,10 @@ fn decode_move(op: u16, size: u8, s: &mut Stream) -> Option<String> {
     let src_reg = (op & 7) as u8;
     let dst_mode = ((op >> 6) & 7) as u8;
     let dst_reg = ((op >> 9) & 7) as u8;
+    // MOVE.B <ea>,An is illegal (no MOVEA.B).
+    if dst_mode == 1 && size == 0 {
+        return None;
+    }
     let src = effective_address(src_mode, src_reg, size, s);
     let dst = effective_address(dst_mode, dst_reg, size, s);
     let mnem = if dst_mode == 1 { "MOVEA" } else { "MOVE" };
@@ -471,8 +481,12 @@ fn decode_0(op: u16, s: &mut Stream) -> Option<String> {
     if op & 0x0100 == 0 {
         if let Some(mnem) = imm_mnem {
             if size != 3 {
-                // ANDI/ORI/EORI #imm,CCR or ,SR
+                // ANDI/ORI/EORI #imm,CCR or ,SR. SUBI/ADDI/CMPI with the
+                // same mode/reg encoding are illegal — emit DC.W.
                 if (op & 0x00FF) == 0x003C || (op & 0x00FF) == 0x007C {
+                    if !matches!(mnem, "ORI" | "ANDI" | "EORI") {
+                        return None;
+                    }
                     let to_sr = (op & 0x0040) != 0;
                     let imm = s.next_word();
                     let dst = if to_sr { "SR" } else { "CCR" };
@@ -523,9 +537,11 @@ fn decode_branch(op: u16, s: &mut Stream) -> String {
     let cc = ((op >> 8) & 0xF) as usize;
     let at = pc_after_opcode(s);
     let disp8 = (op & 0xFF) as i8 as i32;
+    // Low-byte $00 = .W on all CPUs. Low-byte $FF is .L only from 68020;
+    // on 68000/010 it is a valid 8-bit displacement of -1.
     let (disp, suffix) = if (op & 0xFF) == 0x00 {
         (s.next_word() as i16 as i32, ".W")
-    } else if (op & 0xFF) == 0xFF {
+    } else if (op & 0xFF) == 0xFF && s.full_ext {
         (s.next_long() as i32, ".L")
     } else {
         (disp8, ".B")
@@ -586,6 +602,10 @@ fn decode_4(op: u16, s: &mut Stream) -> Option<String> {
             return Some(format!("STOP #${imm:X}"));
         }
         0x4E73 => return Some("RTE".into()),
+        0x4E74 => {
+            let d = s.next_word() as i16 as i32;
+            return Some(format!("RTD #{}", signed_hex(d)));
+        }
         0x4E75 => return Some("RTS".into()),
         0x4E76 => return Some("TRAPV".into()),
         0x4E77 => return Some("RTR".into()),
@@ -615,8 +635,10 @@ fn decode_4(op: u16, s: &mut Stream) -> Option<String> {
         0x4E60 => return Some(format!("MOVE {},USP", AN[reg as usize])),
         0x4E68 => return Some(format!("MOVE USP,{}", AN[reg as usize])),
         0x4840 => return Some(format!("SWAP {}", DN[reg as usize])),
+        0x4848 => return Some(format!("BKPT #{}", op & 7)),
         0x4880 => return Some(format!("EXT.W {}", DN[reg as usize])),
         0x48C0 => return Some(format!("EXT.L {}", DN[reg as usize])),
+        0x49C0 => return Some(format!("EXTB.L {}", DN[reg as usize])),
         _ => {}
     }
     if op & 0xFFF0 == 0x4E40 {
@@ -646,6 +668,16 @@ fn decode_4(op: u16, s: &mut Stream) -> Option<String> {
             return Some(format!("TST{} {ea}", size_suffix(size)));
         }
         _ => {}
+    }
+    // NBCD <ea> (byte)
+    if op & 0xFFC0 == 0x4800 {
+        let ea = effective_address(mode, reg, 0, s);
+        return Some(format!("NBCD {ea}"));
+    }
+    // TAS <ea> (byte)
+    if op & 0xFFC0 == 0x4AC0 {
+        let ea = effective_address(mode, reg, 0, s);
+        return Some(format!("TAS {ea}"));
     }
     // MOVE to/from CCR/SR
     match op & 0xFFC0 {
@@ -908,7 +940,8 @@ pub fn disassemble_copper(ir1: u16, ir2: u16) -> String {
 
 /// Disassemble a Copper list starting at `start`, reading words via `read`,
 /// up to `max` instructions. Stops early at the end-of-list WAIT
-/// ($FFFF,$FFFE). Returns `(address, text)` per instruction.
+/// ($FFFF,$FFFE) or the demoscene end marker ($FFFF,$FFFF).
+/// Returns `(address, text)` per instruction.
 pub fn dump_copper_list(read: impl Fn(u32) -> u16, start: u32, max: usize) -> Vec<(u32, String)> {
     let mut out = Vec::new();
     let mut addr = start & !1;
@@ -917,7 +950,7 @@ pub fn dump_copper_list(read: impl Fn(u32) -> u16, start: u32, max: usize) -> Ve
         let ir2 = read(addr.wrapping_add(2));
         out.push((addr, disassemble_copper(ir1, ir2)));
         addr = addr.wrapping_add(4);
-        if ir1 == 0xFFFF && ir2 == 0xFFFE {
+        if ir1 == 0xFFFF && (ir2 == 0xFFFE || ir2 == 0xFFFF) {
             break;
         }
     }
@@ -1129,6 +1162,73 @@ mod tests {
     #[test]
     fn unknown_is_dc_word() {
         assert_eq!(dis(&[0xA123], 0), ("DC.W $A123".into(), 2));
+    }
+
+    #[test]
+    fn branch_ff_is_byte_on_68000_long_on_020() {
+        // On 68000, low-byte $FF is displacement -1 (BRA to the opcode itself).
+        let (t, n) = dis(&[0x60FF], 0x1000);
+        assert_eq!(t, "BRA.B $1001");
+        assert_eq!(n, 2);
+        // On 68020+, $FF introduces a 32-bit displacement.
+        let (t, n) = dis020(&[0x60FF, 0x0000, 0x0010], 0x1000);
+        assert_eq!(t, "BRA.L $1012");
+        assert_eq!(n, 6);
+    }
+
+    #[test]
+    fn bkpt_not_pea() {
+        assert_eq!(dis(&[0x4848], 0), ("BKPT #0".into(), 2));
+        assert_eq!(dis(&[0x484F], 0), ("BKPT #7".into(), 2));
+        // PEA (A0) still works just past the BKPT range.
+        assert_eq!(dis(&[0x4850], 0), ("PEA (A0)".into(), 2));
+    }
+
+    #[test]
+    fn extb_not_lea() {
+        assert_eq!(dis(&[0x49C0], 0), ("EXTB.L D0".into(), 2));
+        assert_eq!(dis(&[0x49C7], 0), ("EXTB.L D7".into(), 2));
+    }
+
+    #[test]
+    fn imm_to_ccr_sr_only_for_ori_andi_eori() {
+        assert_eq!(dis(&[0x003C, 0x0001], 0), ("ORI #$1,CCR".into(), 4));
+        assert_eq!(dis(&[0x027C, 0x2000], 0), ("ANDI #$2000,SR".into(), 4));
+        assert_eq!(dis(&[0x0A3C, 0x00FF], 0), ("EORI #$FF,CCR".into(), 4));
+        // SUBI/ADDI/CMPI with the CCR/SR encoding are illegal.
+        assert_eq!(dis(&[0x043C, 0x0001], 0), ("DC.W $043C".into(), 2));
+        assert_eq!(dis(&[0x063C, 0x0001], 0), ("DC.W $063C".into(), 2));
+        assert_eq!(dis(&[0x0C3C, 0x0001], 0), ("DC.W $0C3C".into(), 2));
+    }
+
+    #[test]
+    fn movea_byte_is_illegal() {
+        // MOVE.B D0,A0
+        assert_eq!(dis(&[0x1040], 0), ("DC.W $1040".into(), 2));
+    }
+
+    #[test]
+    fn rtd_tas_nbcd() {
+        assert_eq!(dis(&[0x4E74, 0x0008], 0), ("RTD #$8".into(), 4));
+        assert_eq!(dis(&[0x4E74, 0xFFFC], 0), ("RTD #-$4".into(), 4));
+        assert_eq!(dis(&[0x4AC0], 0), ("TAS D0".into(), 2));
+        assert_eq!(dis(&[0x4AD0], 0), ("TAS (A0)".into(), 2));
+        assert_eq!(dis(&[0x4800], 0), ("NBCD D0".into(), 2));
+        assert_eq!(dis(&[0x4810], 0), ("NBCD (A0)".into(), 2));
+    }
+
+    #[test]
+    fn dump_copper_stops_on_ffff_ffff() {
+        let words = [0x0180u16, 0x0123, 0xFFFF, 0xFFFF, 0x0182, 0x0000];
+        let list = dump_copper_list(
+            |addr| words[(addr / 2) as usize],
+            0,
+            10,
+        );
+        assert_eq!(list.len(), 2);
+        assert!(list[0].1.starts_with("MOVE"), "{}", list[0].1);
+        // $FFFF,$FFFF has IR2 bit0 set, so it disassembles as SKIP, not WAIT.
+        assert!(list[1].1.starts_with("SKIP"), "{}", list[1].1);
     }
 
     #[test]
