@@ -114,6 +114,12 @@ separate different disks with the same filename. The original ADFs remain
 unchanged. CDs are read-only. CD32 EEPROM saves are kept in
 `copperline/cd32.nvram` on normal close. Loading the same content picks up these saved copies.
 
+At load time, the core copies every CD source file into a private temporary
+directory and hashes the copies. This requires temporary disk space equal to
+the source files, including every disc in a playlist. Emulation, reinsertion
+and rollback use these copies even if the originals change or are removed.
+The copies are deleted when content is closed.
+
 If the frontend supplies no save directory, the content's directory is used;
 for a no-content session the system directory is used instead. A save error
 is reported; a failed eject leaves the disk inserted so saving can be retried.

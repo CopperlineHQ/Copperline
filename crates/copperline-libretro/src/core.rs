@@ -353,7 +353,7 @@ impl Core {
             if let Some(cd) = &disk.cd {
                 self.emu
                     .bus_mut()
-                    .cd_insert_disc(copperline::cdrom::CdImage::load(&cd.path)?, &cd.path);
+                    .cd_insert_disc(cd.open_image()?, &cd.path);
             } else {
                 self.emu.bus_mut().floppy.insert_memory_disk_image_bytes(
                     0,

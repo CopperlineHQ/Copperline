@@ -95,7 +95,8 @@ audio_driver = "null"
 audio_enable = "false"
 video_vsync = "false"
 audio_sync = "false"
-video_windowed_scale = "1"
+video_scale = "1"
+suspend_screensaver_enable = "false"
 pause_nonactive = "false"
 config_save_on_exit = "false"
 global_core_options = "true"
@@ -151,7 +152,7 @@ savestate_directory = "{directory}"
         for log in logs:
             assert not re.search(r"CRCs mismatch|savestate loading failed|Copperline:|Failed to initialize netplay", log), "netplay error; see logs"
         assert min(transferred) > 1000, "insufficient peer traffic"
-        print(json.dumps({"frames": args.frames, "delay_ms_each_way": args.delay_ms, "input_events": events, "peer_bytes": transferred, "result": "passed"}))
+        print(json.dumps({"frames": args.frames, "delay_ms_each_way": args.delay_ms, "elapsed_seconds": round(time.monotonic() - start, 1), "input_events": events, "peer_bytes": transferred, "result": "passed"}))
     finally:
         proxy_server.close()
         await proxy_server.wait_closed()
@@ -176,7 +177,8 @@ def main():
     parser.add_argument("--retroarch", default="retroarch")
     parser.add_argument("--frames", type=int, default=1200)
     parser.add_argument("--delay-ms", type=int, default=20)
-    parser.add_argument("--timeout", type=int, default=240)
+    # Per-frame state CRCs and replay are expensive on shared CI runners.
+    parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--port", type=int, default=55435)
     parser.add_argument("--display", type=int, default=110)
     parser.add_argument("--output", type=Path)

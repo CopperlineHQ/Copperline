@@ -86,6 +86,20 @@ pub fn playlist(path: &Path) -> Result<Vec<PathBuf>> {
 pub struct Cd {
     pub path: PathBuf,
     pub sources: Vec<(PathBuf, PathBuf)>,
+    image: Vec<u8>,
+    _temporary: tempfile::TempDir,
+}
+
+impl Cd {
+    pub fn open_image(&self) -> Result<copperline::cdrom::CdImage> {
+        let mut paths = copperline::cdrom::StatePaths::default();
+        for (local, portable) in &self.sources {
+            paths.insert(local.clone(), portable.clone())?;
+        }
+        // This metadata was generated locally at load time. Only its source
+        // references are reopened; the private copies live for this session.
+        Ok(paths.scope(|| bincode::deserialize(&self.image))?)
+    }
 }
 
 pub struct Disk {
@@ -104,8 +118,11 @@ impl Disk {
             let image = copperline::cdrom::CdImage::load(&path)?;
             let mut paths = copperline::cdrom::StatePaths::default();
             let mut sources = Vec::new();
-            for source in image.source_paths() {
+            let temporary = tempfile::tempdir()?;
+            for (index, source) in image.source_paths().into_iter().enumerate() {
                 let mut file = std::fs::File::open(&source)?;
+                let private = temporary.path().join(index.to_string());
+                let mut copy = std::fs::File::create(&private)?;
                 let mut hash = Sha256::new();
                 let mut buffer = [0; 64 * 1024];
                 loop {
@@ -113,6 +130,7 @@ impl Disk {
                     if n == 0 {
                         break;
                     }
+                    copy.write_all(&buffer[..n])?;
                     hash.update(&buffer[..n]);
                 }
                 let alias = PathBuf::from(format!(
@@ -122,13 +140,19 @@ impl Disk {
                         .map(|b| format!("{b:02x}"))
                         .collect::<String>()
                 ));
-                paths.insert(source.clone(), alias.clone())?;
-                sources.push((source, alias));
+                paths.insert(source, alias.clone())?;
+                sources.push((private, alias));
             }
-            let source_hash = Sha256::digest(paths.scope(|| bincode::serialize(&image))?).into();
+            let image = paths.scope(|| bincode::serialize(&image))?;
+            let source_hash = Sha256::digest(&image).into();
             return Ok(Self {
                 label: path.file_name().unwrap_or_default().into(),
-                cd: Some(Cd { path, sources }),
+                cd: Some(Cd {
+                    path,
+                    sources,
+                    image,
+                    _temporary: temporary,
+                }),
                 bytes: Vec::new(),
                 source_hash,
                 save_path: PathBuf::new(),

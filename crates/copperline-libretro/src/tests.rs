@@ -627,6 +627,43 @@ fn core_lifecycle_fits_a_one_megabyte_frontend_stack() {
 }
 
 #[test]
+fn cd_sources_remain_fixed_after_same_length_changes_and_removal() {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data.bin");
+    let audio = root.path().join("audio.bin");
+    let cue = root.path().join("game.cue");
+    std::fs::write(&data, vec![0x55; 2048 * 4]).unwrap();
+    std::fs::write(&audio, vec![0x77; 2352 * 4]).unwrap();
+    std::fs::write(&cue, "FILE \"data.bin\" BINARY\n TRACK 01 MODE1/2048\n INDEX 01 00:00:00\nFILE \"audio.bin\" BINARY\n TRACK 02 AUDIO\n INDEX 01 00:00:00\n").unwrap();
+    let disk = media::Disk::open(&cue, root.path()).unwrap();
+    let cd = disk.cd.as_ref().unwrap();
+    let mut active = cd.open_image().unwrap();
+    std::fs::write(&data, vec![0x22; 2048 * 4]).unwrap();
+    std::fs::write(&audio, vec![0x33; 2352 * 4]).unwrap();
+    let check = |image: &mut copperline::cdrom::CdImage| {
+        let mut sector = [0; 2048];
+        image.read_data_sector(0, &mut sector).unwrap();
+        assert_eq!(sector, [0x55; 2048]);
+        let mut raw = [0; 2352];
+        image.read_raw_sector(4, &mut raw).unwrap();
+        assert_eq!(raw, [0x77; 2352]);
+    };
+    check(&mut active);
+    check(&mut cd.open_image().unwrap());
+    for path in [data, audio, cue] {
+        std::fs::remove_file(path).unwrap();
+    }
+    check(&mut cd.open_image().unwrap());
+    let private = cd.sources[0].0.clone();
+    drop(active);
+    drop(disk);
+    assert!(
+        !private.exists(),
+        "closing content must remove its private copies"
+    );
+}
+
+#[test]
 fn cd32_states_resolve_media_on_the_receiving_host() {
     let host = tempfile::tempdir().unwrap();
     let peer = tempfile::tempdir().unwrap();
@@ -668,6 +705,7 @@ fn cd32_states_resolve_media_on_the_receiving_host() {
     // Once loaded, the receiver needs only its own copy of the immutable files.
     std::fs::remove_file(host.path().join("data.bin")).unwrap();
     std::fs::remove_file(host.path().join("audio.bin")).unwrap();
+    a.unserialize(&state).unwrap();
     b.unserialize(&state).unwrap();
     let mut other = vec![0; b.state_capacity];
     b.serialize(&mut other).unwrap();

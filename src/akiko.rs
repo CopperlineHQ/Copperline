@@ -683,9 +683,6 @@ impl Akiko {
         self.nvram = Nvram::new(Some(path));
     }
 
-    /// Whether the CD32 EEPROM is backed by a host file. Its I2C STOP
-    /// condition flushes dirty bytes immediately, which cannot be undone by
-    /// restoring a speculative machine snapshot.
     /// EEPROM contents for frontends that persist saves outside emulation.
     pub fn nvram_bytes(&self) -> &[u8] {
         &self.nvram.memory
@@ -698,6 +695,9 @@ impl Akiko {
         Ok(())
     }
 
+    /// Whether the CD32 EEPROM is backed by a host file. Its I2C STOP
+    /// condition flushes dirty bytes immediately, which cannot be undone by
+    /// restoring a speculative machine snapshot.
     pub fn persistent_nvram(&self) -> bool {
         self.nvram.path.is_some()
     }
