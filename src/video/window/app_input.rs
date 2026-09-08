@@ -188,7 +188,11 @@ impl App {
             self.mouse_delta_remainder = (0.0, 0.0);
             self.release_mouse_buttons();
             window.set_cursor_visible(true);
-            window.set_title(window_title());
+            window.set_title(if self.debug_layout_active {
+                "Copperline · Debug"
+            } else {
+                window_title()
+            });
             info!("mouse released");
         }
     }
@@ -436,6 +440,9 @@ impl App {
     }
 
     pub(super) fn handle_raw_device_key_event(&mut self, event: RawKeyEvent) {
+        if self.debug_layout_active && !self.debug_guest_input {
+            return;
+        }
         let PhysicalKey::Code(code) = event.physical_key else {
             return;
         };

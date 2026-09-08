@@ -84,33 +84,6 @@ impl App {
         self.apply_surface_size(size);
     }
 
-    /// Tool-window counterpart of `resync_surface_size`, for the same reason:
-    /// these windows are freely resizable too.
-    pub(super) fn resync_tool_surface_size(&mut self, kind: ToolPanelKind) {
-        let Some(tool) = self.tool_window(kind) else {
-            return;
-        };
-        let Some(size) = surface_resize_for_draw(tool.surface_size, tool.window.inner_size())
-        else {
-            return;
-        };
-        self.apply_tool_surface_size(kind, size);
-    }
-
-    /// Tool-window counterpart of `apply_surface_size`, shared by that window's
-    /// Resized event and the synchronous `request_inner_size` path.
-    pub(super) fn apply_tool_surface_size(&mut self, kind: ToolPanelKind, size: PhysicalSize<u32>) {
-        if let Some(tool) = self.tool_window_mut(kind) {
-            // Same minimized-present deadlock guard as the main window.
-            tool.minimized = size.width == 0 || size.height == 0;
-            if tool.minimized {
-                return;
-            }
-            let _ = tool.resize_surface(size);
-        }
-        self.request_redraw();
-    }
-
     /// Size the window to the presentation canvas, unless it is fullscreen: the
     /// request resizes nothing there and instead shrinks the drawable into a
     /// corner (macOS and Windows; Linux window managers ignore it), so leave the
@@ -160,6 +133,11 @@ impl App {
     ///   the canvas a different shape inside an unchanged window, and the
     ///   picture letterboxes on whichever axis has come up short.
     pub(super) fn follow_canvas_change(&mut self, was_canvas_sized: bool, canvas_before: usize) {
+        // Debug owns its pane layout; canvas changes only affect the picture
+        // fitted into that pane, never the size of the inspector workspace.
+        if self.debug_layout_active {
+            return;
+        }
         if was_canvas_sized {
             self.snap_window_to_canvas();
             return;
@@ -218,6 +196,9 @@ impl App {
     /// not read as a drag or the window stops following the canvas for the
     /// rest of the run. A drag onto the canvas size hands it back.
     pub(super) fn note_window_resize(&mut self, size: PhysicalSize<u32>) {
+        if self.debug_layout_active || self.restore_play_geometry() {
+            return;
+        }
         // Read what is needed and let the borrow go: a drag delivers these
         // continuously, so this takes nothing it has to hold on to.
         let Some((fullscreen, scale)) = self
@@ -738,14 +719,8 @@ impl App {
     }
 
     pub(super) fn request_redraw(&self) {
+        self.debug_snapshot_dirty.set(true);
         self.request_main_redraw();
-        for kind in ToolPanelKind::ALL {
-            if let Some(tool) = self.tool_window(kind) {
-                if !tool.minimized {
-                    tool.window.request_redraw();
-                }
-            }
-        }
     }
 
     pub(super) fn refresh_present_from_deinterlacer(&mut self) {

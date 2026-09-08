@@ -60,12 +60,15 @@ cargo build --release
 Run the resulting `target/release/copperline` binary. `--release` is a Cargo
 build option; unoptimized debug builds are too slow for real-time emulation.
 
-The [shared inspector window](docs/debugger/window.md) combines the debugger,
-Frame Analyzer, and Console, with linked address inspection, selectable text,
-resizable panes, and a saved window layout. It is included in every desktop
-build; open it with `Cmd+B` on macOS or `Alt+B` on Linux/Windows.
-The Audio tab keeps each channel's details and scope together in a stable row
-as DMA and interrupt events change.
+The [Debug workspace](docs/debugger/window.md) puts the Amiga display beside
+its debugger, Frame Analyzer, and Console in one desktop window. Open
+**Debugger...** in the menu or press
+`Cmd+B` on macOS or `Alt+B` on Linux/Windows. Drag the display divider to resize
+the panes; **Return to Play** restores the display layout while keeping the
+inspectors and their state. Click the display to send input to the Amiga, and
+use `Cmd+G` / `Alt+G` to return input to the debugger. Monospace readouts use
+Hack with a slashed zero. Audio scopes stay beside fixed-height channel
+details as DMA and interrupt events change.
 
 Dependencies:
 

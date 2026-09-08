@@ -455,10 +455,6 @@ pub(in crate::video) struct Rect {
     pub(in crate::video) h: usize,
 }
 
-pub(super) fn texture_scale_for_window(window: &Window) -> usize {
-    texture_scale_for_factor(window.scale_factor())
-}
-
 /// Integer supersample factor for the backing texture at a given host DPI
 /// scale factor. The texture is rendered at this multiple of the logical
 /// FB_WIDTH x window-height size so a 2x display stays crisp.
@@ -660,6 +656,9 @@ pub(super) fn aperture_canvas_rect(tv_aperture_rows: usize) -> (usize, usize, us
 /// or `None` for the classic whole-canvas letterbox (both modes off or
 /// suspended).
 pub(super) fn main_present_layout(r: &Render, src: Option<DisplaySrc>) -> PresentLayout {
+    if let Some(viewport) = r.debug_viewport {
+        return debug_present_layout(viewport, integer_scaling_requested(), src);
+    }
     let surface = (r.surface_size.0.max(1), r.surface_size.1.max(1));
     let Some(src) = src.filter(|src| src.rect.2 > 0 && src.rect.3 > 0) else {
         let plan = main_present_plan(r);
@@ -690,6 +689,26 @@ pub(super) fn main_present_layout(r: &Render, src: Option<DisplaySrc>) -> Presen
     // multiple of the crop (a 700-wide window around a 640-wide game),
     // and display_src_layout takes its own fit against the rect.
     display_src_layout(surface, integer_scaling_requested(), src, chrome_dst)
+}
+
+/// The debug display uses the same scaler and input transform, within its
+/// egui pane. The source contains only the picture; host chrome is outside it.
+pub(super) fn debug_present_layout(
+    viewport: (u32, u32, u32, u32),
+    integer: bool,
+    src: Option<DisplaySrc>,
+) -> PresentLayout {
+    let (x, y, width, height) = viewport;
+    let src = src
+        .filter(|src| src.rect.2 > 0 && src.rect.3 > 0)
+        .unwrap_or(DisplaySrc {
+            rect: (0, 0, FB_WIDTH, present_height()),
+            par: (1, 1),
+        });
+    let mut layout = display_src_layout((width.max(1), height.max(1)), integer, src, None);
+    layout.display_dst.0 += x;
+    layout.display_dst.1 += y;
+    layout
 }
 
 /// The sub-rect layout, pure of the live globals: `src` (canvas pixels

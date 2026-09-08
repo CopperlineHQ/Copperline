@@ -1,20 +1,22 @@
 # Debugger console
 
 The debugger console provides an interactive command line in the
-[shared inspector window](window.md#shared-inspector-window). Open it with
-`Cmd+K` on macOS, `Alt+K` on Linux/Windows, or through the status bar menu.
+[Debug workspace](window.md#shared-inspector-window). Open it with
+`Cmd+K` on macOS, `Alt+K` on Linux/Windows, or select **Console** in the workspace.
 
 Opening the first inspector pauses emulation (`RUN` resumes execution).
 Switching inspectors preserves command text, output, history, and the current
 run/pause state. Closing one leaves the remaining inspectors open; closing the
 last restores the previous execution state. Explicit Run/Pause choices apply
-to the shared session.
+to the shared session. **Return to Play** hides the inspectors without closing
+them or changing the current run/pause state. Their command text and history
+remain available when you return.
 
 ```{figure} ../images/ui-preview-console-egui.png
 :alt: Console with selectable output and an editable command field
 :width: 100%
 
-The Console in the shared inspector window.
+Inspector-only preview of the Console.
 ```
 
 Guest debug output sent via the
@@ -31,7 +33,7 @@ Input navigation:
 - `PageUp` / `PageDown`, scrollbars, or mouse wheel: scroll the output buffer.
 - `Cmd+V` (macOS) or `Ctrl+V` (Linux/Windows): paste clipboard contents.
   Pasted commands remain editable until submitted.
-- `Esc`: leave the command field; outside a text field, close all inspectors.
+- `Esc`: leave the command field; outside a text field, return to Play while retaining the inspectors.
 
 Commands are case-insensitive. Addresses and data values use hexadecimal notation
 (optional `$` or `0x` prefix). Raster beam coordinates (VPOS, HPOS) use decimal notation.

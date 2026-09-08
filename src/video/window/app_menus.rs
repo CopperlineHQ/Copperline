@@ -241,9 +241,7 @@ impl App {
         use crate::video::menu::{AudioOutputChoice, MenuAction as A};
         match action {
             A::OpenMachineConfig => self.open_launcher(),
-            A::OpenFrameAnalyzer => self.open_frame_analyzer(),
             A::OpenDebugger => self.open_debugger(),
-            A::OpenConsole => self.open_console(),
             A::FreezeCartridge => self.freeze_cartridge(),
             A::OpenInputMapping => self.open_input_mapping(),
             A::OpenCalibration => {

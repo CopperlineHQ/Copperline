@@ -1,7 +1,7 @@
 Fonts embedded by the Copperline desktop frontend
 =================================================
 
-The fonts are supplied unmodified by epaint_default_fonts 0.35.0, part of egui.
+The fonts are supplied by epaint_default_fonts 0.35.0, part of egui.
 Source: https://crates.io/crates/epaint_default_fonts/0.35.0
 Upstream: https://github.com/emilk/egui/tree/0.35.0/crates/epaint_default_fonts
 
@@ -10,6 +10,18 @@ code remains licensed under GPL-3.0-or-later.
 
 Hack Regular
 ------------
+
+Copperline's inspector uses a derivative named Hack Slash Regular, bundled as
+hack-slash/HackSlash-Regular.ttf. Only U+0030 (zero) is replaced, using the
+unmodified forward-slash glyph source from Source Foundry's alt-hack library:
+https://github.com/source-foundry/alt-hack
+Revision: 9fab7328cfc208046cb7f3d713ec97a724d8219a
+File: glyphs/u0030-forwardslash/regular/zero.glif
+
+The alternate glyph has the same Source Foundry copyright and MIT licence
+below. The source, licence, checksums, and rebuild script are included in
+assets/egui/hack-slash/ in Copperline's source tree. All other glyphs and their
+spacing are unchanged. Other bundled fonts remain unmodified.
 
 The work in the Hack project is Copyright 2018 Source Foundry Authors and licensed under the MIT License
 

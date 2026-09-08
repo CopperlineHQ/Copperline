@@ -322,8 +322,8 @@ events.unsubscribe {"events":["serial"]}
 ### Windowed UI
 
 - `ui.show {"window": "debugger"|"console"|"analyzer"}`: Open or focus one of
-  Copperline's native tool windows. This is available only from a windowed
-  `--control-gui` session; a headless server returns an unsupported error.
+  the inspectors in the main window's Debug layout. This is available only from
+  a windowed `--control-gui` session; a headless server returns an unsupported error.
 
 ### Diagnostics and profiling
 - `chipset.validate {"enabled": ..., "clear": ...}` / `chipset.report`: Arm or query custom register access validator.

@@ -924,14 +924,6 @@ impl App {
         self.request_redraw();
     }
 
-    pub(super) fn tool_window_title(kind: ToolPanelKind) -> &'static str {
-        match kind {
-            ToolPanelKind::Debugger => "Copperline Debugger",
-            ToolPanelKind::FrameAnalyzer => "Copperline Frame Analyzer",
-            ToolPanelKind::Console => "Copperline Console",
-        }
-    }
-
     pub(super) fn tool_panel_is_open(&self, kind: ToolPanelKind) -> bool {
         match kind {
             ToolPanelKind::Debugger => self.debugger_panel.is_some(),
@@ -940,114 +932,17 @@ impl App {
         }
     }
 
-    pub(super) fn tool_window_is_needed(&self, kind: ToolPanelKind) -> bool {
-        match kind {
-            ToolPanelKind::Debugger => self.egui_workspace_open(),
-            ToolPanelKind::FrameAnalyzer | ToolPanelKind::Console => false,
-        }
-    }
-
-    pub(super) fn ensure_tool_windows_for_open_panels(&mut self, event_loop: &ActiveEventLoop) {
-        for kind in ToolPanelKind::ALL {
-            self.ensure_tool_window_for_kind(event_loop, kind, true);
-        }
-    }
-
-    /// Frame-loop variant of ensure_tool_windows_for_open_panels: still
-    /// creates/destroys windows to match the open panels every call, but
-    /// paces the repaint of existing windows to TOOL_REDRAW_INTERVAL.
-    pub(super) fn refresh_tool_windows_paced(&mut self, event_loop: &ActiveEventLoop) {
-        let due = self.last_tool_redraw.elapsed() >= TOOL_REDRAW_INTERVAL;
-        if due {
-            self.last_tool_redraw = Instant::now();
-        }
-        for kind in ToolPanelKind::ALL {
-            self.ensure_tool_window_for_kind(event_loop, kind, due);
-        }
-    }
-
-    pub(super) fn ensure_tool_window_for_kind(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        kind: ToolPanelKind,
-        redraw: bool,
-    ) {
-        if !self.tool_window_is_needed(kind) {
-            *self.tool_window_slot(kind) = None;
-            return;
-        }
-        let title = Self::tool_window_title(kind);
-        if let Some(tool) = self.tool_window(kind) {
-            tool.window.set_title(title);
-            let redraw = redraw || tool.egui.repaint_due();
-            if redraw && !tool.minimized {
-                tool.window.request_redraw();
-            }
-            return;
-        }
-
-        let attrs = WindowAttributes::default()
-            .with_title(title)
-            .with_window_icon(copperline_window_icon())
-            .with_inner_size(LogicalSize::new(1100.0, 760.0))
-            .with_min_inner_size(LogicalSize::new(600.0, 480.0));
-        let attrs = self
-            .egui_layout_preferences()
-            .window_attributes(attrs, event_loop);
-        let window = match event_loop.create_window(attrs) {
-            Ok(w) => Arc::new(w),
-            Err(e) => {
-                warn!("create tool window failed: {e}");
-                return;
-            }
-        };
-        let texture_scale = texture_scale_for_window(&window);
-        // No vsync for tool windows: pixels.render() runs on the emulation
-        // thread, which already paces against the emulator window's vsynced
-        // present. A second vsync gate per frame can push the loop past its
-        // frame budget and underrun the audio ring.
-        //
-        // A tool window shows panel text, not the emulated picture, so it
-        // always takes the aspect-preserving fit -- integer scaling is a
-        // setting for the machine's display.
-        let pixels = match build_pixels_for_window(window.clone(), texture_scale, false) {
-            Ok(p) => p,
-            Err(e) => {
-                warn!("tool window pixels init failed: {e}");
-                return;
-            }
-        };
-        let mut pixels = pixels;
-        let egui = match egui_debugger::DebuggerUi::new(
-            &window,
-            &mut pixels,
-            self.egui_layout_preferences().clone(),
-        ) {
-            Ok(ui) => ui,
-            Err(error) => {
-                warn!("inspector UI init failed: {error}");
-                return;
-            }
-        };
-        info!("tool window ready: {title}");
-        // Paint it now rather than waiting for something to happen: a
-        // tool window opened and left alone showed an unpainted surface
-        // until the next mouse move or key press asked for a frame.
-        window.request_redraw();
-        // Newly opened is newly in front, until another is touched.
-        self.tool_window_front = Some(kind);
-        if kind == ToolPanelKind::Debugger {
-            self.tool_window_front = Some(self.egui_selected_tool);
-        }
-        let inner = window.inner_size();
-        *self.tool_window_slot(kind) = Some(ToolWindow {
-            window,
-            pixels,
-            minimized: false,
-            surface_size: (inner.width.max(1), inner.height.max(1)),
-            egui,
-        });
+    pub(super) fn ensure_tool_windows_for_open_panels(&mut self, _event_loop: &ActiveEventLoop) {
+        self.ensure_debug_workspace();
         self.request_redraw();
+    }
+
+    pub(super) fn refresh_tool_windows_paced(&mut self, _event_loop: &ActiveEventLoop) {
+        self.ensure_debug_workspace();
+        if self.debug_layout_active && self.last_tool_redraw.elapsed() >= TOOL_REDRAW_INTERVAL {
+            self.last_tool_redraw = Instant::now();
+            self.request_redraw();
+        }
     }
 
     /// The open tool panel a "close this" means: the one in front, which
@@ -1055,6 +950,9 @@ impl App {
     /// -- none has been touched since it opened -- the last in order, so
     /// a stack of them still comes down one at a time.
     pub(super) fn topmost_tool_panel(&self) -> Option<ToolPanelKind> {
+        if !self.debug_layout_active {
+            return None;
+        }
         self.tool_window_front
             .filter(|&kind| self.tool_panel_is_open(kind))
             .or_else(|| {
@@ -1083,7 +981,6 @@ impl App {
                     self.sync_live_audio_suspension();
                 }
                 self.console_panel = None;
-                self.console_tool_window = None;
             }
             ToolPanelKind::FrameAnalyzer => {
                 if self.frame_analyzer_panel.is_some() {
@@ -1104,7 +1001,6 @@ impl App {
                 }
                 self.analyzer_dragging = false;
                 self.frame_analyzer_panel = None;
-                self.frame_analyzer_tool_window = None;
                 // Release the heat map only if this pane armed it. A map
                 // armed over the control protocol belongs to that session
                 // and keeps recording after the pane closes.
@@ -1123,7 +1019,7 @@ impl App {
         {
             if self.egui_workspace_open() {
                 // Closing one inspector does not change the other one's run
-                // state or destroy their shared native window.
+                // state or leave the shared Debug layout.
                 self.paused = shared_paused;
                 if self.egui_selected_tool == kind {
                     self.egui_selected_tool = if self.debugger_panel.is_some() {
@@ -1136,7 +1032,7 @@ impl App {
                     self.tool_window_front = Some(self.egui_selected_tool);
                 }
             } else {
-                self.debugger_tool_window = None;
+                self.leave_debug_workspace();
             }
             self.sync_live_audio_suspension();
         }

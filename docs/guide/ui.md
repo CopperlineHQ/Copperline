@@ -21,9 +21,9 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 | `Cmd+Shift+1`..`Cmd+Shift+0` | `Alt+Shift+1`..`Alt+Shift+0` | Quick-load from that slot |
 | `Cmd+D` | `Alt+D` | Swap to the next disk in a drive's configured playlist |
 | `Cmd+G` | `Alt+G` | Capture / release the host mouse (clicking the display also captures) |
-| `Cmd+B` | `Alt+B` | Open the [debugger window](../debugger/window) |
+| `Cmd+B` | `Alt+B` | Toggle the [Debug layout](../debugger/window) |
 | `Cmd+Shift+B` | `Alt+Shift+B` | Press the freezer cartridge's button: enter the HRTMon monitor (`[cartridge] model`, see [Configuration](configuration.md#freezer-cartridge)) |
-| `Cmd+K` | `Alt+K` | Open the [debugger console](../debugger/console) |
+| `Cmd+K` | `Alt+K` | Toggle the [Console](../debugger/console) in Debug layout |
 | `Cmd+J` | `Alt+J` | Toggle joystick input mode: gamepad / keyboard (also the status-bar icon) |
 | `Cmd+M` | `Alt+M` | Turn the monitor bezel off, or back on to the chosen front (*Video Settings > Monitor Bezel* picks it; `[display] bezel` sets the start-up value) |
 | `Cmd+Shift+A` | `Alt+Shift+A` | Cycle the audio output: Default, each host device, then Disabled (also *Audio Settings > Audio Output*) |
@@ -36,7 +36,7 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 | `Cmd+W` | `Alt+W` | Toggle Warp Speed (turbo) on / off; one press also ends every warp a control client, a GDB client, the guest, or a boot phase engaged |
 | `Cmd+Shift+W` | `Alt+Shift+W` | Cycle the Warp Speed limit: 2x, 4x, 8x, 16x, Max |
 | `Cmd+Z` | `Alt+Z` | Rewind the machine one step (needs `[emulation] rewind` or *Emulation Settings > Rewind*) |
-| `Esc` | `Esc` | Close an open menu or overlay panel (in a tool window, that window); otherwise passed through to the Amiga |
+| `Esc` | `Esc` | Close an open menu or overlay panel (in Debug controls, return to Play); otherwise passed through to the Amiga |
 | `Ctrl+Amiga+Amiga` | `Ctrl+Amiga+Amiga` | Keyboard reset (warm reboot) |
 
 Host modifiers that are passed through to the emulated keyboard map onto
@@ -310,30 +310,27 @@ Opening the menu also releases a captured mouse.
 start-up size is `[display] menu_scale`, `--menu-scale`, or *Menu size* on
 the launcher's A/V & Emu page (Display category).
 
-The debugger, Frame Analyzer, and Console share a native inspector window,
-leaving the emulated display visible. Switch inspectors using the selectors
-at the top; their selections, captures, and command history are retained.
-The main window keeps driving the Amiga while inspectors are open: resume the
-machine and you can play while watching it. Overlay panels are drawn over the
-display and are modal: their keys and clicks stay in the UI. In the inspector
-window, `Esc` leaves a text field first, then closes all inspectors. In the
-main window it closes the menu or overlay panel, and otherwise belongs to the
-Amiga.
+The [Debug workspace](../debugger/window.md) puts the Amiga display beside the
+debugger, Frame Analyzer, and Console in the main window. Switch inspectors with
+the selectors at the top, and resize the display using the divider. **Return to
+Play** restores the display layout and keeps the inspectors' selections, captures,
+and command history. Switching layouts preserves the current run/pause state.
+
+Click the display to send keyboard and mouse input to the Amiga; `Cmd+G` / `Alt+G`
+returns input to the debugger. In the inspector controls, `Esc` leaves a text
+field first, then returns to Play. When the Amiga owns input, `Esc` belongs to
+the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
 
 ### Tools
 
 - **Machine Configuration...**: opens the configuration screen
   ([below](#machine-configuration-screen)) to reconfigure the machine and
   relaunch it. The same screen opens automatically on a no-machine start.
-- **Frame Analyzer...**: opens the analyzer's four tabs: **Beam** shows chip-bus
-  ownership and CPU waits across the captured frame; **Blits** shows blitter
-  operations and previews; **Memory** shows which bus master last touched each
-  part of memory; **Resources** previews structures the guest registered through
-  the uaelib trap. See [](../debugger/window.md#frame-analyzer-pane).
-- **Debugger...** (also `Cmd+B` / `Alt+B`): opens the tabbed debugger in the
-  shared inspector window; see [](../debugger/window).
-- **Console...** (also `Cmd+K` / `Alt+K`): opens the debugger command line in
-  the shared window; see [](../debugger/console).
+- **Debugger...** (also `Cmd+B` / `Alt+B`): opens the [Debug workspace](../debugger/window),
+  with the debugger, Frame Analyzer, and Console available from its selectors.
+  The analyzer inspects captured chip-bus activity and registered resources;
+  the [Console](../debugger/console) provides the command line (`Cmd+K` / `Alt+K`
+  opens it directly).
 - **Freeze (HRTMon)** (also `Cmd+Shift+B` / `Alt+Shift+B`): presses the
   freezer cartridge's button, so the machine runs on into the HRTMon
   monitor on its own screen; the monitor's `x` command returns to the
