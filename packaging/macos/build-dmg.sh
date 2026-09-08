@@ -6,7 +6,10 @@
 # What it does:
 #   1. Builds the release binary for both Apple architectures with the pinned
 #      dependency graph and lipo-joins them into one universal binary, so a
-#      single download runs natively on Apple Silicon and Intel.
+#      single download runs natively on Apple Silicon and Intel. With
+#      PREBUILT_DIR set the cargo step is skipped and the per-architecture
+#      binaries are taken from that directory instead (the macOS workflow
+#      compiles each slice on its own runner and packages them here).
 #   2. Stages a Copperline.app bundle: the universal binary in Contents/MacOS,
 #      the icon and AROS ROM in Contents/Resources. romsearch.rs probes a
 #      bundle's Contents/Resources/aros first, so the bundled AROS ROM is found
@@ -25,6 +28,8 @@
 #
 # Override knobs (env):
 #   MACOS_UNIVERSAL=0   build only the host architecture (faster local builds)
+#   PREBUILT_DIR=<dir>  skip the cargo build and lipo <dir>/<target>/copperline
+#                       for each target instead
 #   OUTPUT=<path>       final .dmg file name
 set -euo pipefail
 
@@ -49,14 +54,41 @@ else
   targets=(aarch64-apple-darwin x86_64-apple-darwin)
 fi
 
-echo "==> Building release binary (${targets[*]})"
-for target in "${targets[@]}"; do
-  # Idempotent; ensures hand-builds on a fresh checkout have the cross target.
-  if command -v rustup >/dev/null 2>&1; then
-    rustup target add "$target" >/dev/null
-  fi
-  cargo build --release --locked --target "$target"
-done
+# Per-target binaries to join: either built here or supplied prebuilt.
+bins=()
+if [ -n "${PREBUILT_DIR:-}" ]; then
+  echo "==> Using prebuilt binaries from $PREBUILT_DIR (${targets[*]})"
+  for target in "${targets[@]}"; do
+    bin="$PREBUILT_DIR/$target/copperline"
+    if [ ! -f "$bin" ]; then
+      echo "error: no prebuilt binary at $bin" >&2
+      exit 1
+    fi
+    # Catch a slice staged under the wrong target name before lipo would
+    # happily join two copies of the same architecture.
+    case "$target" in
+      aarch64-apple-darwin) want=arm64 ;;
+      x86_64-apple-darwin) want=x86_64 ;;
+      *) want="" ;;
+    esac
+    got="$(lipo -archs "$bin")"
+    if [ -n "$want" ] && [ "$got" != "$want" ]; then
+      echo "error: $bin is $got, expected $want for $target" >&2
+      exit 1
+    fi
+    bins+=("$bin")
+  done
+else
+  echo "==> Building release binary (${targets[*]})"
+  for target in "${targets[@]}"; do
+    # Idempotent; ensures hand-builds on a fresh checkout have the cross target.
+    if command -v rustup >/dev/null 2>&1; then
+      rustup target add "$target" >/dev/null
+    fi
+    cargo build --release --locked --target "$target"
+    bins+=("target/$target/release/copperline")
+  done
+fi
 
 echo "==> Staging $app_name"
 rm -rf "$stage"
@@ -64,11 +96,7 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/aros" \
   "$app/Contents/Resources/a2091" "$app/Contents/Resources/a4091" \
   "$app/Contents/Resources/lide"
 
-# Universal binary from the per-arch builds (a single-arch lipo is a no-op copy).
-bins=()
-for target in "${targets[@]}"; do
-  bins+=("target/$target/release/copperline")
-done
+# Universal binary from the per-arch slices (a single-arch lipo is a no-op copy).
 lipo -create -output "$app/Contents/MacOS/copperline" "${bins[@]}"
 
 # Info.plist with the version substituted in; plutil -lint catches a botched

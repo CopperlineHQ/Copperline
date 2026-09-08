@@ -8,6 +8,18 @@ name: macOS
 # under Rosetta, which no other job executes), so it is scoped to the code and
 # packaging surface that affects the bundle.
 #
+# Two stages: a build matrix compiles the release binary for each Apple
+# architecture on its own runner, then the package job lipo-joins the two
+# slices, stages and signs the bundle, lays out the dmg, and smoke-tests it.
+# The shipping profile is fat LTO with one codegen unit, so each slice is a
+# mostly single-threaded compile of roughly twelve minutes on a hosted
+# 3-core runner, and building the two back to back on one runner simply
+# doubled that. One multi-target cargo invocation on one runner is not an
+# option either: the copperline crate alone peaks near 5 GB of resident
+# memory per target, so two concurrent compiles overrun the 7 GB hosted
+# runner and swap. One runner per slice halves the wall time for the same
+# total runner minutes.
+#
 # The image is intentionally unsigned (no Developer ID, no notarization), so it
 # trips Gatekeeper on first launch; the bundled README.txt documents the
 # right-click-Open workaround.
@@ -51,26 +63,63 @@ concurrency:
 
 jobs:
   build:
+    name: Build slice (${{ matrix.arch }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # PRs restore main's cache without uploading a competing copy.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # One entry per slice: an explicit --target build cannot warm
+          # ci.yml's native test build (or the other way round), and the
+          # two architectures share nothing below the registry.
+          key: macos-dmg-${{ matrix.target }}
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Upload slice for the package job
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-slice-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release/copperline
+          if-no-files-found: error
+
+  package:
     name: Build macOS dmg
+    needs: build
     runs-on: macos-latest
     # Needed only by the release-attach step on v* tags.
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v8
         with:
-          # Both Apple architectures so build-dmg.sh can lipo a universal binary.
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@v2
+          name: macos-slice-arm64
+          path: prebuilt/aarch64-apple-darwin
+      - uses: actions/download-artifact@v8
         with:
-          # PRs restore main's cache without uploading a competing copy.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          # Separate explicit architecture builds from ci.yml's native
-          # test build, which otherwise shares this job's default key.
-          key: macos-dmg
+          name: macos-slice-x86_64
+          path: prebuilt/x86_64-apple-darwin
       - name: Build dmg
-        run: packaging/macos/build-dmg.sh
+        # No Rust toolchain here: PREBUILT_DIR makes build-dmg.sh skip its
+        # cargo step and lipo the downloaded slices (it checks each one is
+        # the architecture its directory claims). Artifact zips do not
+        # preserve the executable bit, hence the chmod.
+        run: |
+          chmod +x prebuilt/*/copperline
+          PREBUILT_DIR=prebuilt packaging/macos/build-dmg.sh
       - name: Locate artifact
         id: artifact
         run: echo "path=$(ls Copperline-*-macos-universal.dmg | head -n1)" >> "$GITHUB_OUTPUT"

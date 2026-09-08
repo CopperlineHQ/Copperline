@@ -15,6 +15,13 @@ env:
 # Only main saves Rust caches. PRs can restore main's caches, while caches
 # saved on a PR merge ref cannot serve other PRs and evict reusable entries
 # when several of these large build matrices run concurrently.
+#
+# The pool is capped at 10 GB per repository and GitHub evicts the least
+# recently used entries once it is full, so every job that caches a target
+# directory (about 1 GB each for a release-profile build of this crate)
+# competes with the release builds whose cold rebuilds cost the most. Jobs
+# whose cold build is cheap cache only the registry, and platform-neutral
+# checks share one Linux job and one entry rather than one macOS entry each.
 jobs:
   build:
     # Keep the existing check name for branch-protection rules. The ci
@@ -76,25 +83,53 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  lint:
-    name: Rustfmt and clippy
-    # Style and lints need no release build, so this runs alongside the
-    # build job instead of gating it.
-    runs-on: macos-latest
+  checks:
+    name: Rustfmt, clippy, and feature checks
+    # Style, lints, and the check-only feature combinations need no release
+    # build, so this runs alongside the build job instead of gating it. It
+    # is platform-neutral, so it runs on Linux: hosted macOS runners are
+    # limited to five concurrent jobs per organisation and the macOS build,
+    # test, and packaging jobs already queue for them (see the pool note
+    # above for why the check-mode artifacts share one cache entry).
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Install native build dependencies
+        # ALSA (cpal) + udev (gilrs) headers; --all-features pulls in no
+        # further native libraries on Linux.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          workspaces: |
+            . -> target
+            crates/copperline-player -> target
       - name: Formatting
         run: cargo fmt --check
       - name: Clippy
         # Hold the binary, tests, examples, and diagnostic feature gates to
         # the same warning-clean standard used for release checks.
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - name: Frontend without the debug and library features
+        # The feature combination the publisher-kit player builds against
+        # (frontend + cpu-jit; no control, gdb, or game-library).
+        run: cargo check --no-default-features --features frontend,cpu-jit --locked
+      - name: Player crate (example manifest)
+        # Guards the game-manifest baking in crates/copperline-player.
+        # Check-only: the full bundle build belongs to a publisher's own CI
+        # (docs/guide/publishing.md).
+        working-directory: crates/copperline-player
+        run: cargo check --locked
+      - name: Player crate formatting
+        # A standalone workspace, so the root Formatting step never
+        # reaches it.
+        working-directory: crates/copperline-player
+        run: cargo fmt --check
 
   fuzz-build:
     name: Fuzz harnesses build
@@ -147,6 +182,10 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           key: msrv
+          # A cold dev-profile build here finishes well inside the macOS
+          # fan-out's wall time, so its 1 GB target directory is not worth
+          # an entry in the shared cache pool; keep only the registry.
+          cache-targets: false
       - name: Build with MSRV
         run: cargo +"$MSRV" build --locked
       - name: Compile unit tests with MSRV
@@ -196,8 +235,9 @@ jobs:
         # The inline #[cfg(test)] suites in the lib and binaries, prebuilt
         # by the build job (this is everything a root `cargo test` runs
         # besides tests/probe_golden.rs, which has its own job below; the
-        # crate has no doctests). Artifact zips do not preserve the
-        # executable bit, hence the chmod.
+        # crate has no doctests). The GDB remote-protocol suite in
+        # src/gdbstub is part of unit-lib: gdb is a default feature.
+        # Artifact zips do not preserve the executable bit, hence the chmod.
         run: |
           chmod +x ci-bins/*
           ./ci-bins/unit-lib
@@ -546,37 +586,13 @@ jobs:
       - run: npx wrangler deploy --env="" --dry-run
         working-directory: services/netplay
 
-  player:
-    name: Publisher-kit player crate
-    # Guards the feature combination the player builds against (frontend +
-    # cpu-jit; no control, gdb, or game-library) and the game-manifest
-    # baking in crates/copperline-player. Check-only: the full bundle build
-    # belongs to a publisher's own CI (docs/guide/publishing.md).
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Frontend without the debug and library features
-        run: cargo check --no-default-features --features frontend,cpu-jit --locked
-      - name: Player crate (example manifest)
-        working-directory: crates/copperline-player
-        run: cargo check --locked
-      - name: Player crate formatting
-        # A standalone workspace, so the root Formatting step never
-        # reaches it.
-        working-directory: crates/copperline-player
-        run: cargo fmt --check
-
   docs:
     name: Docs build (HTML + PDF)
     # Independent of the Rust build: catches MyST/cross-reference breakage
     # (e.g. duplicate labels that only collide in the single-document PDF).
-    runs-on: macos-latest
+    # Nothing here is platform-specific, so it stays off the macOS runner
+    # quota (see the checks job).
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -585,8 +601,9 @@ jobs:
       - name: Install MyST CLI
         run: npm install -g mystmd
       - name: Install Typst (PDF renderer)
-        # MyST shells out to Typst for PDF export; brew matches docs/README.md.
-        run: brew install typst
+        # MyST shells out to Typst for PDF export. Latest release, like the
+        # brew install documented in docs/README.md.
+        uses: typst-community/setup-typst@v5
       - name: Build HTML
         working-directory: docs
         run: myst build --html --ci --strict --check-links
@@ -606,17 +623,3 @@ jobs:
           name: copperline-docs-pdf
           path: docs/_build/exports/copperline.pdf
           if-no-files-found: ignore
-
-  gdb-remote:
-    name: GDB remote protocol tests
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: RSP unit tests
-        # The RSP tests live in the library; selecting it avoids compiling
-        # every integration-test executable just to filter out its tests.
-        run: cargo test --locked --lib gdbstub

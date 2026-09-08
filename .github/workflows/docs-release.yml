@@ -23,9 +23,9 @@ concurrency:
 jobs:
   pdf:
     name: Build and attach PDF
-    # macos-latest matches the docs job in ci.yml: MyST shells out to Typst,
-    # installed here via brew, exactly as documented in docs/README.md.
-    runs-on: macos-latest
+    # Matches the docs job in ci.yml: MyST shells out to Typst, installed
+    # through setup-typst; the build itself is platform-neutral.
+    runs-on: ubuntu-latest
     # Needed only by the release-attach steps.
     permissions:
       contents: write
@@ -37,7 +37,7 @@ jobs:
       - name: Install MyST CLI
         run: npm install -g mystmd
       - name: Install Typst (PDF renderer)
-        run: brew install typst
+        uses: typst-community/setup-typst@v5
       - name: Build PDF
         working-directory: docs
         # The PDF export merges every chapter into one document; --strict fails

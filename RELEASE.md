@@ -180,7 +180,7 @@ attaches `Copperline-X.Y.Z-win-x64.zip` and
 `Copperline-X.Y.Z-win-arm64.zip` to the GitHub Release automatically. The
 same workflow runs the full release build on pull requests that touch the
 code, so it doubles as the Windows build check for both architectures (the
-main CI runs on macOS only).
+main CI runs on macOS and Linux).
 
 The zips are self-contained: the MSVC C runtime is linked statically (see
 `.cargo/config.toml`) so they need no Visual C++ Redistributable, and the
@@ -198,7 +198,8 @@ packaging/windows/build-zip.ps1
 
 The prebuilt macOS download is a disk image (`packaging/macos/`): a
 drag-to-Applications `Copperline.app` wrapped in a `.dmg`. The `macOS` workflow
-builds it on `macos-latest` and, on a `v*` tag, attaches
+builds each architecture's binary on its own `macos-latest` runner, joins them
+into the bundle in a package job, and, on a `v*` tag, attaches
 `Copperline-X.Y.Z-macos-universal.dmg` to the GitHub Release automatically.
 Homebrew (above) remains the build-from-source channel; the disk image is the
 no-compiler alternative.
