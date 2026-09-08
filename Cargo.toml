@@ -97,7 +97,7 @@ internal-diagnostics = []
 # get a stub. See src/midi/.
 midi = []
 # The interactive desktop frontend: the winit/pixels window and launcher,
-# host audio output, gamepads, file dialogs, and the debugger console's
+# shared egui inspectors, host audio output, gamepads, file dialogs, and
 # clipboard paste. Off, the crate is the portable headless core (the surface
 # a wasm32 browser frontend builds against); the `copperline` binary
 # requires it.
@@ -109,10 +109,10 @@ frontend = [
     "dep:rfd",
     "dep:arboard",
     "dep:env_logger",
+    "dep:egui",
+    "dep:egui-winit",
+    "dep:egui-wgpu",
 ]
-# Experimental shared GPU-rendered debugger, Frame Analyzer, and Console.
-# The main display keeps its existing presentation.
-egui-debugger = ["frontend", "dep:egui", "dep:egui-winit", "dep:egui-wgpu"]
 # The wasmtime host for functional Zorro boards (src/wasmboard.rs). Separate
 # from `frontend` because it is a core-machine feature, but Cranelift cannot
 # be compiled FOR wasm32, so browser builds turn it off.

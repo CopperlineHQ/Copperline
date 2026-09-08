@@ -310,33 +310,30 @@ Opening the menu also releases a captured mouse.
 start-up size is `[display] menu_scale`, `--menu-scale`, or *Menu size* on
 the launcher's A/V & Emu page (Display category).
 
-Tool windows are separate native windows so the emulated display remains visible;
-the debugger and frame analyzer can be open at the same time. They take their
-keys and clicks through their own windows, and the main window keeps driving
-the Amiga while they are open -- resume the machine from the debugger and you
-can play on while watching it. Overlay panels are drawn over the display and
-*are* modal: while one is open, key presses and display clicks stay in the UI
-instead of reaching the Amiga. `Esc` in a tool window closes that window;
-`Esc` in the main window closes the menu or overlay panel, and otherwise
-belongs to the Amiga.
+The debugger, Frame Analyzer, and Console share a native inspector window,
+leaving the emulated display visible. Switch inspectors using the selectors
+at the top; their selections, captures, and command history are retained.
+The main window keeps driving the Amiga while inspectors are open: resume the
+machine and you can play while watching it. Overlay panels are drawn over the
+display and are modal: their keys and clicks stay in the UI. In the inspector
+window, `Esc` leaves a text field first, then closes all inspectors. In the
+main window it closes the menu or overlay panel, and otherwise belongs to the
+Amiga.
 
 ### Tools
 
 - **Machine Configuration...**: opens the configuration screen
   ([below](#machine-configuration-screen)) to reconfigure the machine and
   relaunch it. The same screen opens automatically on a no-machine start.
-- **Frame Analyzer...**: pauses the machine and opens a separate diagnostic
-  window with three tabs: which chip-bus owner had each Agnus colour clock
-  across the captured frame, including overscan and blanking, with a CPU
-  wait view that attributes every clock the CPU was denied to the DMA
-  channel that held it and names the stalled instructions; a memory
-  heat map of what last touched each part of the address space; and the
-  debug resources the guest registered through the uaelib trap, with
-  decoded previews; see [](../debugger/window.md#frame-analyzer-pane).
-- **Debugger...** (also `Cmd+B` / `Alt+B`): pauses the machine and opens the
-  tabbed debugger in a tool window; see [](../debugger/window).
-- **Console...** (also `Cmd+K` / `Alt+K`): a GDB-flavoured debugger
-  command line in its own tool window; see [](../debugger/console).
+- **Frame Analyzer...**: opens the analyzer's four tabs: **Beam** shows chip-bus
+  ownership and CPU waits across the captured frame; **Blits** shows blitter
+  operations and previews; **Memory** shows which bus master last touched each
+  part of memory; **Resources** previews structures the guest registered through
+  the uaelib trap. See [](../debugger/window.md#frame-analyzer-pane).
+- **Debugger...** (also `Cmd+B` / `Alt+B`): opens the tabbed debugger in the
+  shared inspector window; see [](../debugger/window).
+- **Console...** (also `Cmd+K` / `Alt+K`): opens the debugger command line in
+  the shared window; see [](../debugger/console).
 - **Freeze (HRTMon)** (also `Cmd+Shift+B` / `Alt+Shift+B`): presses the
   freezer cartridge's button, so the machine runs on into the HRTMon
   monitor on its own screen; the monitor's `x` command returns to the

@@ -1854,13 +1854,11 @@ pub struct DebuggerView {
     /// oscilloscopes. Some only when the Audio tab is active; the plain text
     /// is also mirrored into `lines` for headless/text use.
     pub audio: Option<AudioScopeView>,
-    #[cfg(feature = "egui-debugger")]
     pub cpu: Option<CpuView>,
 }
 
 /// Structured CPU snapshot for the resizable debugger panes. Inspection is
 /// side-effect-free; widget actions are applied after the UI finishes a frame.
-#[cfg(feature = "egui-debugger")]
 pub struct CpuView {
     pub d: [u32; 8],
     pub a: [u32; 8],

@@ -4,39 +4,27 @@ Press `Cmd+B` on macOS or `Alt+B` on Linux/Windows (or select **Debugger** from
 the status bar menu) to pause emulation and open the debugger tool window.
 Closing the window restores the previous execution state.
 
-The regular build puts the debugger, Frame Analyzer, and [Console](console) in
-separate host windows. The optional egui frontend below combines the debugger,
-Frame Analyzer, and Console in one window. Inspection reads do not acknowledge
+The debugger, Frame Analyzer, and [Console](console) share one native inspector
+window, separate from the emulated display. Select an inspector at the top;
+each retains its state while another is visible. Opening another inspector
+preserves the current run/pause state. Inspection reads do not acknowledge
 hardware registers or consume emulated bus cycles. Stepping, register edits,
 and memory writes change the machine as requested.
 
-```{figure} ../images/ui-preview-debugger.png
-:alt: The debugger window on the CPU tab
-:width: 90%
+(shared-inspector-window)=
+## Shared inspector window
 
-Debugger window: register file, live disassembly, and transport controls.
-```
-
-(egui-debugger-prototype)=
-## Optional egui frontend
-
-The `egui-debugger` Cargo feature provides a shared, GPU-rendered window for the
-debugger, Frame Analyzer, and Console. Build and launch it with:
-
-```sh
-cargo run --release --locked --features egui-debugger -- --factory
-```
+The GPU-rendered inspector UI is included in every desktop build.
 
 ```{figure} ../images/ui-preview-debugger-egui.png
-:alt: Egui debugger prototype with separate register, disassembly, and memory panes
+:alt: Debugger with resizable register, disassembly, and memory panes
 :width: 100%
 
 The CPU tab, rendered from the deterministic debugger test machine.
 ```
 
-Open the debugger with `Cmd+B` / `Alt+B` as usual. Its nine tabs use the same
-machine inspection and command handlers as the regular debugger. On the CPU
-tab, drag the dividers to resize the register, disassembly, and memory panes.
+On the CPU tab, drag the dividers to resize the register, disassembly, and memory
+panes.
 Text can be selected and copied, and the address/command field supports normal
 text editing and paste. Register **Edit** buttons prepare a command in that
 field; **Set Reg** applies it. Enter in the field pins the disassembly address
@@ -58,8 +46,8 @@ Select **Frame Analyzer** above the debugger tabs to inspect its **Beam**,
 status bar menu selects it in this same window. **Capture frame** records a
 frame, and **Run** collects live frames. Switching between the debugger and
 analyzer preserves their selections, capture data, and current run/pause state.
-The analyzer stays armed while its view is hidden; closing it releases captures
-using the same ownership rules as the regular frontend.
+The analyzer stays armed while its view is hidden. Closing it releases captures
+it owns; captures started through the control protocol continue independently.
 
 ```{figure} ../images/ui-preview-analyzer-egui.png
 :alt: Frame Analyzer in the shared egui window with beam raster and bus counters
@@ -96,12 +84,8 @@ monitor is discarded. Preferences live in `inspector-layout.toml` in the
 not command text, captures, or machine state. Opening a specific inspector
 always selects the one requested.
 
-This experiment changes the three desktop inspectors. The emulator display,
-launcher, and browser frontend use their existing renderers. Rebuild without
-`--features egui-debugger` to compare the regular UI.
-Live machine-data refreshes retain the existing 20 Hz limit; input and stepping
-redraw immediately. This is an interface prototype, with no promised emulation
-speedup.
+Live machine-data refreshes are limited to 20 Hz; input and stepping redraw
+immediately.
 
 ## Tabs
 
@@ -160,7 +144,7 @@ Selecting a register decodes its individual bitfields (e.g. `DMACON`, `INTENA`,
 ### Break
 Manages active breakpoints, memory watchpoints, and custom register write traps.
 
-```{figure} ../images/ui-preview-debugger-break.png
+```{figure} ../images/ui-preview-debugger-break-egui.png
 :alt: The Break tab
 :width: 90%
 
@@ -219,14 +203,14 @@ Examples:
 ## Frame Analyzer
 
 Open the Frame Analyzer via the status bar menu to inspect chip-bus slot allocations
-and memory access patterns. With `egui-debugger`, it shares the debugger window;
-the **Frame Analyzer** selector at the top opens the same inspector.
+and memory access patterns. The **Frame Analyzer** selector at the top of the
+shared window opens the same inspector.
 
-```{figure} ../images/ui-preview-frame-analyzer.png
+```{figure} ../images/ui-preview-analyzer-egui.png
 :alt: The Frame Analyzer
 :width: 90%
 
-Frame Analyzer: chip-bus owner heatmap overlaid on rendered frame.
+Frame Analyzer: chip-bus ownership and per-slot inspection.
 ```
 
 ### Beam tab
@@ -268,14 +252,6 @@ slot.
   the CPU spent waiting, in the colour of the line's dominant denier -- a
   profile of where the frame chokes the CPU.
 
-```{figure} ../images/ui-preview-frame-analyzer-cpu-wait.png
-:alt: The Frame Analyzer's CPU wait view
-:width: 90%
-
-Frame Analyzer Beam tab in the CPU wait view: denied slots lit by denier, the
-stall gutter, and the wait breakdown with the top stalled PCs.
-```
-
 The console's `CPUWAIT` command prints the same summary for the traced frame,
 and a [profile capture](profiling) exports it per frame.
 
@@ -301,7 +277,7 @@ changes the selected blit. The same renderer is available as `blit.render`.
 (frame-analyzer-memory-tab)=
 ### Memory heatmap tab
 
-```{figure} ../images/ui-preview-frame-analyzer-memory.png
+```{figure} ../images/ui-preview-analyzer-memory-egui.png
 :alt: The Frame Analyzer Memory tab
 :width: 90%
 
@@ -320,7 +296,7 @@ resource mapped at that address.
 
 ### Resources tab
 
-```{figure} ../images/ui-preview-frame-analyzer-resources.png
+```{figure} ../images/ui-preview-analyzer-resources-egui.png
 :alt: The Frame Analyzer Resources tab
 :width: 90%
 

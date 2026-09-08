@@ -170,6 +170,7 @@ echo "==> Ad-hoc signing $app_name"
 # identity (no Developer ID needed). This is what lets the universal binary
 # launch on Apple Silicon; it does not satisfy notarization, so downloads are
 # still Gatekeeper-quarantined (see README.txt).
+cp assets/egui/THIRD_PARTY_FONTS.txt "$app/Contents/Resources/THIRD_PARTY_FONTS.txt"
 codesign --force --deep --sign - "$app"
 
 echo "==> Laying out disk image contents"

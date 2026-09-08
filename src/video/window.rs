@@ -995,9 +995,7 @@ pub struct App {
     rtg_present_dims: Option<(u32, u32)>,
     render: Option<Render>,
     debugger_tool_window: Option<ToolWindow>,
-    #[cfg(feature = "egui-debugger")]
     egui_selected_tool: ToolPanelKind,
-    #[cfg(feature = "egui-debugger")]
     egui_preferences: Option<egui_debugger::preferences::Preferences>,
     frame_analyzer_tool_window: Option<ToolWindow>,
     console_tool_window: Option<ToolWindow>,
@@ -1587,30 +1585,14 @@ impl Render {
 struct ToolWindow {
     window: Arc<Window>,
     pixels: Pixels<'static>,
-    texture_scale: usize,
-    cursor_pos: Option<(i32, i32)>,
     /// Same Windows minimized-present deadlock hazard as Render::minimized.
     minimized: bool,
     /// Same configured-surface-size record as Render::surface_size.
     surface_size: (u32, u32),
-    #[cfg(feature = "egui-debugger")]
-    egui: Option<egui_debugger::DebuggerUi>,
+    egui: egui_debugger::DebuggerUi,
 }
 
 impl ToolWindow {
-    /// Canvas changes resize software panels. The egui debugger draws in
-    /// surface coordinates and keeps its unused backing texture at 1x1.
-    fn resize_canvas_buffer(&mut self) -> Result<(), pixels::TextureError> {
-        #[cfg(feature = "egui-debugger")]
-        if self.egui.is_some() {
-            return Ok(());
-        }
-        self.pixels.resize_buffer(
-            texture_width(self.texture_scale) as u32,
-            texture_height(self.texture_scale) as u32,
-        )
-    }
-
     /// Tool-window counterpart of `Render::resize_surface`.
     fn resize_surface(&mut self, size: PhysicalSize<u32>) -> Result<(), pixels::TextureError> {
         let (width, height) = (size.width.max(1), size.height.max(1));
@@ -1620,9 +1602,8 @@ impl ToolWindow {
     }
 }
 
-/// Frame-loop repaints of the tool windows (debugger, frame analyzer) are
-/// paced to this wall-clock interval (20 Hz). Each repaint costs a full
-/// panel raster plus a whole-texture GPU upload on the emulation thread, so
+/// Live inspector snapshots are paced to this wall-clock interval (20 Hz).
+/// Inspection and GPU submission run on the emulation thread, so
 /// repainting at the 50 Hz emulated frame rate can push the loop past its
 /// frame budget and underrun the audio ring. Interactive updates (hover,
 /// clicks, stepping, debug stops) request immediate redraws and are not
@@ -2083,9 +2064,7 @@ impl App {
             present_programmable: false,
             render: None,
             debugger_tool_window: None,
-            #[cfg(feature = "egui-debugger")]
             egui_selected_tool: ToolPanelKind::Debugger,
-            #[cfg(feature = "egui-debugger")]
             egui_preferences: None,
             frame_analyzer_tool_window: None,
             console_tool_window: None,
@@ -3493,7 +3472,6 @@ impl Drop for App {
     /// recording toggle writes its file when stopped, so by the time the app
     /// drops there is nothing left for it here.
     fn drop(&mut self) {
-        #[cfg(feature = "egui-debugger")]
         self.save_egui_preferences();
         let (Some(rec), Some(path)) = (self.input_recorder.take(), self.record_input_path.take())
         else {
@@ -3667,8 +3645,8 @@ impl ApplicationHandler for App {
         if self.netplay_window_event(event_loop, &event) {
             return;
         }
-        if let Some(kind) = self.tool_window_kind(window_id) {
-            self.handle_tool_window_event(event_loop, kind, event);
+        if self.tool_window_kind(window_id).is_some() {
+            self.handle_egui_debugger_event(event_loop, event);
             return;
         }
         if self
@@ -5000,7 +4978,6 @@ impl ApplicationHandler for App {
                 ControlFlow::Wait
             },
         );
-        #[cfg(feature = "egui-debugger")]
         self.schedule_egui_debugger_repaint(event_loop);
         if writing_image && !running {
             // Nothing else paces the loop while the machine is off; check
@@ -5801,39 +5778,6 @@ impl App {
         }
     }
 
-    fn tool_panel_for_kind(&self, kind: ToolPanelKind) -> Option<Panel> {
-        match kind {
-            ToolPanelKind::Debugger => self
-                .debugger_panel
-                .as_ref()
-                .map(|panel| Panel::Debugger(panel.clone())),
-            ToolPanelKind::FrameAnalyzer => self
-                .frame_analyzer_panel
-                .as_ref()
-                .map(|panel| Panel::FrameAnalyzer(panel.clone())),
-            ToolPanelKind::Console => self
-                .console_panel
-                .as_ref()
-                .map(|panel| Panel::Console(panel.clone())),
-        }
-    }
-
-    fn tool_panel_control_at(&self, kind: ToolPanelKind, pos: (i32, i32)) -> Option<UiControl> {
-        self.tool_panel_for_kind(kind)
-            .as_ref()
-            .and_then(|panel| ui::panel_control_at(panel, pos))
-    }
-
-    fn tool_hover_changed(
-        &self,
-        kind: ToolPanelKind,
-        previous: Option<(i32, i32)>,
-        current: Option<(i32, i32)>,
-    ) -> bool {
-        previous.and_then(|pos| self.tool_panel_control_at(kind, pos))
-            != current.and_then(|pos| self.tool_panel_control_at(kind, pos))
-    }
-
     fn tool_window_kind(&self, window_id: WindowId) -> Option<ToolPanelKind> {
         ToolPanelKind::ALL.into_iter().find(|&kind| {
             self.tool_window(kind)
@@ -6597,42 +6541,6 @@ impl App {
         }
         self.request_redraw();
     }
-
-    /// Console keyboard input: printable characters append to the command
-    /// line; editing, history, and scrollback keys do the rest.
-    fn ui_handle_console_key(&mut self, code: KeyCode) -> bool {
-        if self.console_panel.is_none() {
-            return false;
-        }
-        if matches!(code, KeyCode::Enter | KeyCode::NumpadEnter) {
-            self.console_submit();
-            self.request_redraw();
-            return true;
-        }
-        let Some(panel) = self.console_panel.as_mut() else {
-            return false;
-        };
-        if let Some(ch) = entry_char_for_key(code) {
-            panel.push_input_char(ch);
-            self.request_redraw();
-            return true;
-        }
-        match code {
-            KeyCode::Backspace => {
-                panel.input.pop();
-                panel.history_pos = None;
-            }
-            KeyCode::ArrowUp => panel.history_step(-1),
-            KeyCode::ArrowDown => panel.history_step(1),
-            KeyCode::PageUp => {
-                panel.scroll = (panel.scroll + 10).min(ui::CONSOLE_SCROLLBACK_LINES);
-            }
-            KeyCode::PageDown => panel.scroll = panel.scroll.saturating_sub(10),
-            _ => return false,
-        }
-        self.request_redraw();
-        true
-    }
 }
 
 mod app_debugger;
@@ -6653,7 +6561,6 @@ mod control;
 mod crt_shader;
 #[cfg(feature = "coppersynth")]
 mod csynthpanel;
-#[cfg(feature = "egui-debugger")]
 mod egui_debugger;
 #[cfg(feature = "gdb")]
 mod gdb;

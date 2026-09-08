@@ -2133,7 +2133,6 @@ fn panels_render_into_their_rects() {
         bitmap: None,
         video: None,
         audio: None,
-        #[cfg(feature = "egui-debugger")]
         cpu: None,
     }));
     let mut panel = DebuggerPanel::new();
@@ -2176,7 +2175,6 @@ fn panels_render_into_their_rects() {
         bitmap: None,
         video: None,
         audio: None,
-        #[cfg(feature = "egui-debugger")]
         cpu: None,
     }));
     let mut panel = DebuggerPanel::new();
@@ -2220,7 +2218,6 @@ fn panels_render_into_their_rects() {
         bitmap: None,
         video: None,
         audio: None,
-        #[cfg(feature = "egui-debugger")]
         cpu: None,
     }));
     let mut panel = DebuggerPanel::new();
@@ -2358,7 +2355,6 @@ fn panels_render_into_their_rects() {
         bitmap: None,
         video: None,
         audio: Some(audio),
-        #[cfg(feature = "egui-debugger")]
         cpu: None,
     }));
     let mut panel = DebuggerPanel::new();
@@ -2415,7 +2411,6 @@ fn panels_render_into_their_rects() {
         bitmap: None,
         video: None,
         audio: None,
-        #[cfg(feature = "egui-debugger")]
         cpu: None,
     }));
     let mut panel = DebuggerPanel::new();
@@ -2477,7 +2472,6 @@ fn panels_render_into_their_rects() {
             palette,
         }),
         audio: None,
-        #[cfg(feature = "egui-debugger")]
         cpu: None,
     }));
     let mut panel = DebuggerPanel::new();

@@ -82,6 +82,8 @@ modules:
         -t ${FLATPAK_DEST}/share/copperline/aros/
       - install -Dm644 assets/aros/LICENSE
         ${FLATPAK_DEST}/share/copperline/aros/LICENSE
+      - install -Dm644 assets/egui/THIRD_PARTY_FONTS.txt
+        ${FLATPAK_DEST}/share/copperline/THIRD_PARTY_FONTS.txt
       # Bundled open CD32 FMV cartridge ROM (the CD32 profile default).
       - install -Dm644 assets/fmv/copperline-fmv.rom
         -t ${FLATPAK_DEST}/share/copperline/fmv/

@@ -140,9 +140,7 @@ impl App {
         let Some(tool) = &self.debugger_tool_window else {
             return;
         };
-        let Some(egui) = &tool.egui else {
-            return;
-        };
+        let egui = &tool.egui;
         let mut preferences = egui.layout.preferences.clone();
         preferences.maximized = tool.window.is_maximized();
         if !tool.minimized && !preferences.maximized {
@@ -165,8 +163,6 @@ impl App {
             .as_mut()
             .unwrap()
             .egui
-            .as_mut()
-            .unwrap()
             .layout
             .preferences = preferences.clone();
         if let Some(path) = preference_path() {

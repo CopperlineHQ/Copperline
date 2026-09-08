@@ -261,66 +261,6 @@ impl App {
         }
     }
 
-    /// Host text input for the console window: the paste shortcut
-    /// (Cmd+V on macOS, Ctrl+V anywhere) and layout-aware typed text.
-    /// Returns false for everything else so editing and command keys
-    /// reach the keycode handler.
-    pub(super) fn console_handle_text_input(&mut self, code: KeyCode, text: Option<&str>) -> bool {
-        if code == KeyCode::KeyV
-            && (host_shortcut_modifier_pressed(self.modifiers) || self.modifiers.control_key())
-        {
-            self.console_paste();
-            return true;
-        }
-        // Text typed with a command modifier held is a shortcut, not input.
-        if host_shortcut_modifier_pressed(self.modifiers) || self.modifiers.control_key() {
-            return false;
-        }
-        let Some(text) = text else {
-            return false;
-        };
-        let printable: String = text.chars().filter(|c| (' '..='~').contains(c)).collect();
-        if printable.is_empty() {
-            return false;
-        }
-        self.console_insert_text(&printable);
-        true
-    }
-
-    /// Insert text into the console prompt, executing the line for every
-    /// newline: a multi-line paste runs as a script, and the trailing
-    /// fragment stays in the prompt for editing.
-    pub(super) fn console_insert_text(&mut self, text: &str) {
-        for ch in text.chars() {
-            if ch == '\n' {
-                self.console_submit();
-                continue;
-            }
-            if let Some(panel) = self.console_panel.as_mut() {
-                panel.push_input_char(ch);
-            }
-        }
-        self.request_redraw();
-    }
-
-    /// Paste the host clipboard into the prompt.
-    fn console_paste(&mut self) {
-        match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
-            Ok(text) => {
-                // Normalize CRLF so a Windows-clipboard script does not
-                // submit a blank line per line.
-                let text = text.replace("\r\n", "\n").replace('\r', "\n");
-                self.console_insert_text(&text);
-            }
-            Err(e) => {
-                if let Some(panel) = self.console_panel.as_mut() {
-                    panel.push_output(format!("!clipboard unavailable: {e}"));
-                }
-                self.request_redraw();
-            }
-        }
-    }
-
     /// Dispatch one command line. Never touches `console_panel`; the
     /// caller applies the outcome so borrows stay simple. Arguments keep
     /// their case (file paths); every parser is case-insensitive.
@@ -348,7 +288,6 @@ impl App {
             "RUN" | "GO" | "CONTINUE" | "C" => {
                 self.paused = false;
                 self.paused_before_console = false;
-                #[cfg(feature = "egui-debugger")]
                 self.egui_remember_run_state();
                 self.sync_live_audio_suspension();
                 ConsoleOutcome::one("running (PAUSE stops; breakpoints report here or on stop)")
@@ -356,7 +295,6 @@ impl App {
             "PAUSE" => {
                 self.paused = true;
                 self.paused_before_console = true;
-                #[cfg(feature = "egui-debugger")]
                 self.egui_remember_run_state();
                 self.sync_live_audio_suspension();
                 let mut lines = vec!["paused".to_string()];
@@ -428,7 +366,6 @@ impl App {
                 use crate::timetravel::ReverseOutcome;
                 self.paused = true;
                 self.paused_before_console = true;
-                #[cfg(feature = "egui-debugger")]
                 self.egui_remember_run_state();
                 self.sync_live_audio_suspension();
                 self.last_debug_stop = None;
@@ -1285,7 +1222,6 @@ impl App {
     ) -> ConsoleOutcome {
         self.paused = true;
         self.paused_before_console = true;
-        #[cfg(feature = "egui-debugger")]
         self.egui_remember_run_state();
         self.sync_live_audio_suspension();
         self.last_debug_stop = None;
@@ -1329,7 +1265,6 @@ impl App {
         use crate::timetravel::ReverseOutcome;
         self.paused = true;
         self.paused_before_console = true;
-        #[cfg(feature = "egui-debugger")]
         self.egui_remember_run_state();
         self.sync_live_audio_suspension();
         self.last_debug_stop = None;

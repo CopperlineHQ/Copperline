@@ -22,16 +22,6 @@ impl App {
                 return false;
             }
         }
-        // Tool windows draw through the same canvas height, so their buffers
-        // follow too. Buffer only: their own window sizes are their business.
-        for kind in ToolPanelKind::ALL {
-            if let Some(tool) = self.tool_window_mut(kind) {
-                if let Err(e) = tool.resize_canvas_buffer() {
-                    warn!("resize tool texture buffer for a canvas-height change failed: {e}");
-                }
-                tool.window.request_redraw();
-            }
-        }
         true
     }
 
@@ -133,7 +123,7 @@ impl App {
     /// `request_inner_size` is only asynchronous when it returns `None`. Wayland
     /// applies the resize client-side and returns the new size with no `Resized`
     /// event to follow, so the surface must be resized here or the stale extent
-    /// misplaces every click through `cursor_texture_position`.
+    /// misplaces every click through `main_cursor_position`.
     pub(super) fn snap_window_to_canvas(&mut self) {
         let Some(window) = self.render.as_ref().map(|r| r.window.clone()) else {
             return;
@@ -453,8 +443,8 @@ impl App {
 
     /// Switch the presentation pixel aspect live: the canvas height (and
     /// with it the backing texture and the window) changes between the
-    /// 4:3 and the square-pixel size, so the texture must be rebuilt like
-    /// a DPI change (see resync_render_scale) and the window re-sized.
+    /// 4:3 and the square-pixel size, so the texture must be rebuilt and the
+    /// window resized. Inspector geometry is independent of the display.
     pub(super) fn apply_pixel_aspect(&mut self, aspect: PixelAspect) {
         if aspect == crate::video::pixel_aspect() {
             return;
@@ -488,11 +478,8 @@ impl App {
     /// setting -- the pixel aspect, integer scaling under the tv aspect,
     /// the bezel (`video::present_height`): re-plan the main texture for
     /// the new canvas (the integer fit and its supersample factor are
-    /// re-decided for it, and the texture resized like a DPI change, see
-    /// `resync_render_scale`), put the tool windows -- whose texture
-    /// layout is the canvas's, panel centring reading the live height --
-    /// on the new size too, and move the window with it
-    /// (`follow_canvas_change`).
+    /// re-decided for it), and move the main window with it
+    /// (`follow_canvas_change`). Inspector geometry stays independent.
     ///
     /// False when the main texture could not be resized for the new
     /// canvas, and then nothing else is touched. The draw helpers slice
@@ -511,26 +498,6 @@ impl App {
             if let Err(e) = sync_main_present_scaling(r, (surface.width, surface.height)) {
                 warn!("resize texture buffer for the canvas change failed: {e}");
                 return false;
-            }
-        }
-        let size = LogicalSize::new(FB_WIDTH as f64, window_present_height() as f64);
-        for kind in ToolPanelKind::ALL {
-            let mut applied = None;
-            if let Some(tool) = self.tool_window_mut(kind) {
-                #[cfg(feature = "egui-debugger")]
-                if tool.egui.is_some() {
-                    // Its layout and window size are independent of the
-                    // emulated display's pixel aspect and canvas dimensions.
-                    continue;
-                }
-                if let Err(e) = tool.resize_canvas_buffer() {
-                    warn!("resize tool texture buffer for the canvas change failed: {e}");
-                }
-                applied = tool.window.request_inner_size(size);
-            }
-            // Synchronous on Wayland, with no Resized event to follow.
-            if let Some(applied) = applied {
-                self.apply_tool_surface_size(kind, applied);
             }
         }
         self.follow_canvas_change(was_canvas_sized, canvas_before);
@@ -747,20 +714,6 @@ impl App {
                 // materialised; re-plan for the one the flag went back to.
                 let _ = sync_main_present_scaling(r, (surface.width, surface.height));
                 return;
-            }
-        }
-        // Software tool windows draw through
-        // draw_panel_layer, which indexes its buffer by the same canvas height
-        // (window_present_height), so resize all their buffers to match too, or
-        // a later tool draw could index past a now-too-small buffer. Buffer
-        // only: unlike a pixel-aspect switch, leave a tool window's own size
-        // alone.
-        for kind in ToolPanelKind::ALL {
-            if let Some(tool) = self.tool_window_mut(kind) {
-                if let Err(e) = tool.resize_canvas_buffer() {
-                    warn!("resize tool texture buffer for status bar toggle failed: {e}");
-                }
-                tool.window.request_redraw();
             }
         }
         // An unresized window goes on the new canvas size; a resized one

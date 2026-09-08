@@ -1,25 +1,17 @@
 # Debugger console
 
-The debugger console provides an interactive command line interface in a
-dedicated tool window (`Cmd+K` on macOS, `Alt+K` on Linux/Windows, or via
-the status bar menu).
+The debugger console provides an interactive command line in the
+[shared inspector window](window.md#shared-inspector-window). Open it with
+`Cmd+K` on macOS, `Alt+K` on Linux/Windows, or through the status bar menu.
 
-```{figure} ../images/ui-preview-console.png
-:alt: The debugger console
-:width: 90%
-
-Debugger console interface with active breakpoint output.
-```
-
-Opening the console pauses emulation (`RUN` resumes execution). Closing the
-console restores the previous execution state. With the optional
-[`egui-debugger` frontend](window.md#egui-debugger-prototype), the Console shares
-the debugger and Frame Analyzer window. Switching inspectors preserves the
-command text, output, history, and current run/pause state. Closing one leaves
-the remaining inspectors open; Run/Pause choices apply to the shared session.
+Opening the first inspector pauses emulation (`RUN` resumes execution).
+Switching inspectors preserves command text, output, history, and the current
+run/pause state. Closing one leaves the remaining inspectors open; closing the
+last restores the previous execution state. Explicit Run/Pause choices apply
+to the shared session.
 
 ```{figure} ../images/ui-preview-console-egui.png
-:alt: The egui Console sharing the debugger window, with selectable output and an editable command field
+:alt: Console with selectable output and an editable command field
 :width: 100%
 
 The Console in the shared inspector window.
@@ -31,16 +23,15 @@ console as `DBG:` lines while the pane is open (and is always mirrored to the
 host terminal). Lines emitted while the console is closed are not buffered.
 
 Input navigation:
-- `Enter`: Execute command.
-- `Up` / `Down`: Navigate command history.
-- `PageUp` / `PageDown` or mouse wheel: Scroll console output buffer.
-- `Cmd+V` (macOS) or `Ctrl+V` (Linux/Windows): Paste clipboard contents. Multi-line
-  pastes execute each complete line sequentially in the regular frontend.
-  In the egui frontend, pasted commands stay in the editable field until Enter
-  or **Execute** submits them; Shift+Enter adds another line. A `CLOSE` command
-  ends the submitted batch. Scroll the egui output with PageUp/PageDown, its
-  scrollbars, or the mouse wheel; Up/Down browse history while the command field
-  has focus.
+
+- `Enter` or **Execute**: run the entered commands in order. A `CLOSE` command
+  ends the submitted batch.
+- `Shift+Enter`: add a line to the command field.
+- `Up` / `Down`: browse command history while the command field has focus.
+- `PageUp` / `PageDown`, scrollbars, or mouse wheel: scroll the output buffer.
+- `Cmd+V` (macOS) or `Ctrl+V` (Linux/Windows): paste clipboard contents.
+  Pasted commands remain editable until submitted.
+- `Esc`: leave the command field; outside a text field, close all inspectors.
 
 Commands are case-insensitive. Addresses and data values use hexadecimal notation
 (optional `$` or `0x` prefix). Raster beam coordinates (VPOS, HPOS) use decimal notation.

@@ -1114,18 +1114,6 @@ impl App {
         handled
     }
 
-    pub(super) fn ui_handle_tool_key(&mut self, kind: ToolPanelKind, code: KeyCode) -> bool {
-        if code == KeyCode::Escape {
-            self.close_tool_panel(kind);
-            return true;
-        }
-        match kind {
-            ToolPanelKind::Debugger => self.ui_handle_debugger_key(code),
-            ToolPanelKind::FrameAnalyzer => self.ui_handle_frame_analyzer_key(code),
-            ToolPanelKind::Console => self.ui_handle_console_key(code),
-        }
-    }
-
     /// Open or close the pop-up menu, from the hamburger button or the
     /// keyboard.
     ///

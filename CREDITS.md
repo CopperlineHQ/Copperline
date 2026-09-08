@@ -31,6 +31,10 @@ Thank you to:
 
 ## Bundled third-party code
 
+- **[egui](https://github.com/emilk/egui)** provides the shared desktop
+  inspector UI. Its bundled Hack, Noto Emoji, Ubuntu Light, and emoji-icon-font
+  typefaces retain their original licenses; the font notices and license texts
+  are in `assets/egui/THIRD_PARTY_FONTS.txt` and accompany desktop packages.
 - **[AROS](https://github.com/aros-development-team/AROS)** public module
   configuration files provide the library/device LVO names used by the live
   ROM symbol resolver. The compact generated ABI table records its exact

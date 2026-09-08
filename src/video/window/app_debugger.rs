@@ -238,7 +238,6 @@ impl App {
     /// Open the debugger window (pausing the machine), or close it again
     /// if it is already open (the host shortcut toggle).
     pub(super) fn toggle_debugger(&mut self) {
-        #[cfg(feature = "egui-debugger")]
         if self.egui_workspace_open() && self.egui_selected_tool != ToolPanelKind::Debugger {
             self.open_debugger();
             return;
@@ -253,7 +252,6 @@ impl App {
     }
 
     pub(super) fn open_debugger(&mut self) {
-        #[cfg(feature = "egui-debugger")]
         let shared_pause = self.egui_other_tool_pause(ToolPanelKind::Debugger);
         if self.debugger_panel.is_none() {
             // The debugger shortcut can arrive while the mouse is captured;
@@ -265,10 +263,7 @@ impl App {
             self.paused = true;
             self.sync_live_audio_suspension();
             let mut panel = ui::DebuggerPanel::new();
-            #[cfg(feature = "egui-debugger")]
-            {
-                panel.tab = self.egui_layout_preferences().debugger_tab();
-            }
+            panel.tab = self.egui_layout_preferences().debugger_tab();
             // Start the memory view at the current program counter's
             // neighbourhood; it is usually what you came to look at.
             panel.mem_addr = self.emu.machine.pc() & self.emu.machine.ui_addr_mask() & !0xF;
@@ -285,14 +280,12 @@ impl App {
                 );
             }
         }
-        #[cfg(feature = "egui-debugger")]
         self.egui_did_open_tool(ToolPanelKind::Debugger, shared_pause);
     }
 
     /// Open the console window (pausing the machine), or close it again
     /// if it is already open (the host shortcut toggle).
     pub(super) fn toggle_console(&mut self) {
-        #[cfg(feature = "egui-debugger")]
         if self.egui_workspace_open() && self.egui_selected_tool != ToolPanelKind::Console {
             self.open_console();
             return;
@@ -307,7 +300,6 @@ impl App {
     }
 
     pub(super) fn open_console(&mut self) {
-        #[cfg(feature = "egui-debugger")]
         let shared_pause = self.egui_other_tool_pause(ToolPanelKind::Console);
         if self.console_panel.is_none() {
             self.suspend_mouse_capture_for_ui();
@@ -328,12 +320,10 @@ impl App {
                 );
             }
         }
-        #[cfg(feature = "egui-debugger")]
         self.egui_did_open_tool(ToolPanelKind::Console, shared_pause);
     }
 
     pub(super) fn open_frame_analyzer(&mut self) {
-        #[cfg(feature = "egui-debugger")]
         let shared_pause = self.egui_other_tool_pause(ToolPanelKind::FrameAnalyzer);
         if self.frame_analyzer_panel.is_none() {
             self.suspend_mouse_capture_for_ui();
@@ -343,7 +333,6 @@ impl App {
             self.sync_live_audio_suspension();
             self.emu.bus_mut().set_frame_analyzer_full(true);
             self.frame_analyzer_panel = Some(ui::FrameAnalyzerPanel::new());
-            #[cfg(feature = "egui-debugger")]
             {
                 let tab = self.egui_layout_preferences().analyzer_tab();
                 self.activate_tool_control(
@@ -352,17 +341,13 @@ impl App {
                 );
             }
         }
-        #[cfg(feature = "egui-debugger")]
         self.egui_did_open_tool(ToolPanelKind::FrameAnalyzer, shared_pause);
     }
 
     pub(super) fn frame_analyzer_toggle_run(&mut self) {
         self.paused = !self.paused;
         self.paused_before_analyzer = self.paused;
-        #[cfg(feature = "egui-debugger")]
-        {
-            self.egui_remember_run_state();
-        }
+        self.egui_remember_run_state();
         self.sync_live_audio_suspension();
         if !self.paused {
             self.emu.bus_mut().set_frame_analyzer_full(true);
@@ -1015,10 +1000,7 @@ impl App {
         // Run/Pause inside the debugger is an explicit choice; closing the
         // window must not revert it.
         self.paused_before_debugger = self.paused;
-        #[cfg(feature = "egui-debugger")]
-        {
-            self.egui_remember_run_state();
-        }
+        self.egui_remember_run_state();
         self.sync_live_audio_suspension();
     }
 
@@ -1478,10 +1460,7 @@ impl App {
         self.sync_live_audio_suspension();
         if !consumed {
             self.paused_before_debugger = true;
-            #[cfg(feature = "egui-debugger")]
-            {
-                self.egui_remember_run_state();
-            }
+            self.egui_remember_run_state();
             self.open_debugger();
         }
         self.last_debug_stop = Some(message.clone());
@@ -1810,22 +1789,6 @@ impl App {
             Panel::Console(_) => None,
             Panel::Launcher(_) => None,
             Panel::DropChooser(_) => None,
-        }
-    }
-
-    pub(super) fn build_tool_panel_view_data(
-        &self,
-        kind: ToolPanelKind,
-    ) -> Option<ui::PanelViewData> {
-        match kind {
-            ToolPanelKind::Debugger => self.debugger_panel.as_ref().map(|panel| {
-                ui::PanelViewData::Debugger(Box::new(self.build_debugger_view(panel)))
-            }),
-            ToolPanelKind::FrameAnalyzer => self.frame_analyzer_panel.as_ref().map(|panel| {
-                ui::PanelViewData::FrameAnalyzer(Box::new(self.build_frame_analyzer_view(panel)))
-            }),
-            // The console panel carries everything it renders.
-            ToolPanelKind::Console => None,
         }
     }
 
@@ -2181,7 +2144,6 @@ impl App {
         let mut bitmap: Option<ui::MemBitmapView> = None;
         let mut video: Option<ui::VideoView> = None;
         let mut audio: Option<ui::AudioScopeView> = None;
-        #[cfg(feature = "egui-debugger")]
         let mut cpu = None;
         match panel.tab {
             ui::DebugTab::Cpu => {
@@ -2231,7 +2193,6 @@ impl App {
                     )));
                 }
                 let breaks = machine.ui_breaks();
-                #[cfg(feature = "egui-debugger")]
                 let disassembly_start = lines.len();
                 let mut addr = panel.disasm_addr.unwrap_or(pc) & !1;
                 for _ in 0..24 {
@@ -2246,7 +2207,6 @@ impl App {
                     });
                     addr = addr.wrapping_add(len);
                 }
-                #[cfg(feature = "egui-debugger")]
                 if !clip_lines {
                     let base = panel.mem_addr & machine.ui_addr_mask() & !0xF;
                     let bytes = machine.debug_read_memory(base, ui::MEM_PAGE_BYTES as usize);
@@ -2992,7 +2952,6 @@ impl App {
             bitmap,
             video,
             audio,
-            #[cfg(feature = "egui-debugger")]
             cpu,
         }
     }

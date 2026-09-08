@@ -103,6 +103,7 @@ def write_licenses(dest: Path, title: str) -> None:
     and a README telling the publisher's users where the source lives."""
     dest.mkdir(parents=True, exist_ok=True)
     shutil.copy2(REPO / "LICENSE", dest / "LICENSE.Copperline.txt")
+    shutil.copy2(REPO / "assets/egui/THIRD_PARTY_FONTS.txt", dest / "THIRD_PARTY_FONTS.txt")
     version = copperline_version()
     (dest / "README.txt").write_text(
         f"{title} runs on the Copperline player, built from Copperline "

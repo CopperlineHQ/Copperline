@@ -944,9 +944,7 @@ impl App {
         if tool.minimized {
             return;
         }
-        let Some(egui) = &mut tool.egui else {
-            return;
-        };
+        let egui = &mut tool.egui;
         let Some(at) = egui.repaint_at else {
             return;
         };
@@ -973,9 +971,7 @@ impl App {
             self.tool_window_front = Some(self.egui_selected_tool);
         }
         if let Some(tool) = &mut self.debugger_tool_window {
-            if let Some(egui) = &mut tool.egui {
-                egui.on_event(&tool.window, &event);
-            }
+            tool.egui.on_event(&tool.window, &event);
         }
         match event {
             WindowEvent::CloseRequested => self.close_egui_workspace(),
@@ -1014,9 +1010,7 @@ impl App {
             };
             let view = self.build_frame_analyzer_view(&panel);
             let tool = self.debugger_tool_window.as_mut().unwrap();
-            let Some(egui) = &mut tool.egui else {
-                return;
-            };
+            let egui = &mut tool.egui;
             let result = egui.draw(
                 &tool.window,
                 &tool.pixels,
@@ -1030,9 +1024,7 @@ impl App {
             };
             let status = if self.paused { "Paused" } else { "Running" };
             let tool = self.debugger_tool_window.as_mut().unwrap();
-            let Some(egui) = &mut tool.egui else {
-                return;
-            };
+            let egui = &mut tool.egui;
             let result = egui.draw(
                 &tool.window,
                 &tool.pixels,
@@ -1046,9 +1038,7 @@ impl App {
             };
             let view = self.build_debugger_view_with_clipping(&panel, false);
             let tool = self.debugger_tool_window.as_mut().unwrap();
-            let Some(egui) = &mut tool.egui else {
-                return;
-            };
+            let egui = &mut tool.egui;
             let result = egui.draw(
                 &tool.window,
                 &tool.pixels,
@@ -1083,7 +1073,7 @@ impl App {
                 if let Some(egui) = self
                     .debugger_tool_window
                     .as_mut()
-                    .and_then(|tool| tool.egui.as_mut())
+                    .map(|tool| &mut tool.egui)
                 {
                     egui.layout.navigation = Some(tab);
                     egui.context.memory_mut(|memory| {

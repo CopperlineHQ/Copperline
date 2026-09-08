@@ -426,6 +426,25 @@ fn analyzer_navigation_pins_addresses_without_changing_the_capture_or_machine() 
 }
 
 #[test]
+fn console_batches_preserve_case_and_ignore_blank_lines() {
+    let mut app = test_app();
+    app.open_console();
+    app.apply_egui_debugger_action(Action::ConsoleSubmit("b $c01000".into()));
+    assert!(app.emu.machine.ui_breaks().is_breakpoint(0x00C0_1000));
+    assert!(app.console_panel.as_ref().unwrap().input.is_empty());
+    app.apply_egui_debugger_action(Action::ConsoleSubmit(
+        "btrap 100 40\n\nsetreg d2 77\nm 0".into(),
+    ));
+    assert_eq!(app.emu.bus().ui_beam_traps().len(), 1);
+    assert_eq!(app.emu.machine.d(2), 0x77);
+    assert_eq!(
+        app.console_panel.as_ref().unwrap().history,
+        ["b $c01000", "btrap 100 40", "setreg d2 77", "m 0"]
+    );
+    assert!(app.console_panel.as_ref().unwrap().input.is_empty());
+}
+
+#[test]
 fn console_paste_history_and_execution_are_separate_from_layout() {
     let mut app = test_app();
     app.open_console();

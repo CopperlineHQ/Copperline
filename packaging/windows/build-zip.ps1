@@ -50,6 +50,7 @@ $arosDir = Join-Path $stage "aros"
 New-Item -ItemType Directory -Force -Path $arosDir | Out-Null
 
 Copy-Item "target\$target\release\copperline.exe" (Join-Path $stage "copperline.exe")
+Copy-Item "assets\egui\THIRD_PARTY_FONTS.txt" (Join-Path $stage "THIRD_PARTY_FONTS.txt")
 
 # Bundled AROS open-source Kickstart replacement (the default boot ROM).
 # romsearch.rs probes a sibling aros\ next to the executable first. Ship the
