@@ -5300,6 +5300,25 @@ fn debugger_and_frame_analyzer_can_stay_open_together() {
 }
 
 #[test]
+fn cpu_memory_pane_wraps_row_labels_at_the_machine_address_limit() {
+    for cpu in [
+        crate::config::CpuModel::M68000,
+        crate::config::CpuModel::M68020,
+    ] {
+        let app = test_app_with_audio_and_cpu(Box::new(NullSink), cpu);
+        let mask = app.emu.machine.ui_addr_mask();
+        let mut panel = super::ui::DebuggerPanel::new();
+        panel.mem_addr = mask & !0xf;
+        let view = app.build_debugger_view_with_clipping(&panel, false);
+        let memory = &view.cpu.unwrap().memory;
+        assert_eq!(memory.len(), 16);
+        assert!(memory[0].text.starts_with(&format!("{:06X}:", mask & !0xf)));
+        assert!(memory[1].text.starts_with("000000:"));
+        assert!(memory[15].text.starts_with("0000E0:"));
+    }
+}
+
+#[test]
 fn debugger_views_reflect_machine_state() {
     let mut app = test_app();
     app.open_debugger();

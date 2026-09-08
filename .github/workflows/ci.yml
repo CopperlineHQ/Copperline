@@ -235,11 +235,12 @@ jobs:
         # Reuse the ordinary desktop build. Fail if its inspector suite is
         # missing: a test-name filter otherwise succeeds with zero tests.
         # These tests exercise egui input/layout without a GPU or window.
+        shell: bash
         run: |
+          set -euo pipefail
           chmod +x ci-bins/*
-          ./ci-bins/unit-lib video::window::egui_debugger:: --list > inspector-tests.txt
-          grep -q ': test$' inspector-tests.txt
-          ./ci-bins/unit-lib video::window::egui_debugger::
+          ./ci-bins/unit-lib video::window::egui_debugger:: | tee inspector-tests.txt
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed;' inspector-tests.txt
       - name: Unit tests
         # The inline #[cfg(test)] suites in the lib and binaries, prebuilt
         # by the build job (this is everything a root `cargo test` runs

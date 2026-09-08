@@ -58,6 +58,131 @@ fn all_tabs_and_bitmap_inspection_leave_the_machine_byte_identical() {
 }
 
 #[test]
+fn audio_rows_and_mute_targets_stay_fixed_as_status_lines_change() {
+    let mut app = test_app();
+    let before = app.emu.save_state_bytes().unwrap();
+    let mut panel = ui::DebuggerPanel::new();
+    panel.tab = ui::DebugTab::Audio;
+    let mut view = app.build_debugger_view_with_clipping(&panel, false);
+    for (kind, label) in [
+        (ui::AudioExtraKind::Synth, "MIDI"),
+        (ui::AudioExtraKind::Toccata, "Toccata"),
+        (ui::AudioExtraKind::Mhi, "MHI"),
+    ] {
+        view.audio.as_mut().unwrap().extras.push(ui::AudioExtraRow {
+            kind,
+            row: ui::AudioRowView {
+                text: vec![ui::DbgLine::plain(label), ui::DbgLine::plain("idle")],
+                muted: false,
+                scope: vec![0; 128],
+            },
+        });
+    }
+    for width in [600.0, 1100.0, 1600.0] {
+        let context = egui::Context::default();
+        configure_style(&context);
+        let mut layout = Layout::default();
+        let size = [width, 1200.0];
+        let mut baseline = None;
+        let mut mute_positions = Vec::new();
+        for pending in [false, true, false, true] {
+            let audio = view.audio.as_mut().unwrap();
+            audio.header = if pending {
+                "DMACON 820F  DMAEN on  AUDEN 1 1 1 1  ADKCON 00FF  USE0V1 USE1V2 USE2V3 USE3VN USE0P1 USE1P2 USE2P3 USE3PN"
+            } else {
+                "DMACON 0000  DMAEN off  AUDEN . . . .  ADKCON 0000"
+            }.into();
+            for row in &mut audio.channels {
+                row.text.truncate(3);
+                if pending {
+                    row.text.push(ui::DbgLine::plain(
+                        "  pending: intreq2 dma-req dma-req-latched",
+                    ));
+                }
+                row.scope = if pending {
+                    vec![-120, 100, -20, 60]
+                } else {
+                    vec![0; 128]
+                };
+            }
+            audio.extras[0].row.text[0] = ui::DbgLine::hilit(if pending {
+                "CD-DA playing track 12 position 100000/200000"
+            } else {
+                "CD-DA idle"
+            });
+            // Let scrolling/tessellation settle, then compare actual paint
+            // geometry rather than a duplicate of the row-size calculation.
+            for pass in 0..3 {
+                let (output, actions) = run_frame(
+                    &context,
+                    &mut layout,
+                    input(size, vec![]),
+                    &mut panel,
+                    &view,
+                );
+                assert!(actions.is_empty());
+                let mut scopes = Vec::new();
+                mute_positions.clear();
+                for shape in output.shapes {
+                    match shape.shape {
+                        egui::Shape::Rect(rect) if rect.fill == Color32::from_gray(25) => {
+                            scopes.push(rect.rect);
+                        }
+                        egui::Shape::Text(text) if text.galley.job.text == "Mute" => {
+                            mute_positions.push(text.pos + text.galley.size() * 0.5);
+                        }
+                        _ => {}
+                    }
+                }
+                if pass == 2 {
+                    assert_eq!(scopes.len(), 8);
+                    assert_eq!(mute_positions.len(), 8);
+                    for (scope, mute) in scopes.iter().zip(&mute_positions) {
+                        assert!(scope.right() <= width, "scope escaped the viewport");
+                        assert!(scope.top() <= mute.y && mute.y < scope.bottom());
+                    }
+                    let geometry = (scopes, mute_positions.clone());
+                    if let Some(baseline) = &baseline {
+                        assert_eq!(
+                            &geometry, baseline,
+                            "status moved audio rows at width {width}"
+                        );
+                    } else {
+                        baseline = Some(geometry);
+                    }
+                }
+            }
+        }
+        for (index, pos) in mute_positions.into_iter().enumerate() {
+            let mut clicked = Vec::new();
+            for pressed in [true, false] {
+                let (_, actions) = run_frame(
+                    &context,
+                    &mut layout,
+                    input(
+                        size,
+                        vec![
+                            egui::Event::PointerMoved(pos),
+                            egui::Event::PointerButton {
+                                pos,
+                                button: egui::PointerButton::Primary,
+                                pressed,
+                                modifiers: egui::Modifiers::NONE,
+                            },
+                        ],
+                    ),
+                    &mut panel,
+                    &view,
+                );
+                clicked.extend(actions);
+            }
+            assert_eq!(clicked, [Action::Control(UiControl::DebugAudioMute(index))]);
+        }
+    }
+    assert_eq!(before, app.emu.save_state_bytes().unwrap());
+}
+
+#[test]
 fn text_editing_and_clipboard_shortcuts_do_not_step_the_machine() {
     let app = test_app();
     let context = egui::Context::default();
@@ -423,6 +548,47 @@ fn analyzer_navigation_pins_addresses_without_changing_the_capture_or_machine() 
         assert_eq!(before, app.emu.save_state_bytes().unwrap());
     }
     assert_eq!(app.console_panel.as_ref().unwrap().input, "status");
+}
+
+#[test]
+fn console_submission_survives_a_failed_presentation_without_repeating() {
+    let mut app = test_app();
+    app.open_console();
+    let context = egui::Context::default();
+    let mut layout = Layout::default();
+    let mut panel = app.console_panel.clone().unwrap();
+    panel.input = "step".into();
+    let _ = run_content_frame(
+        &context,
+        &mut layout,
+        input([1100.0, 760.0], vec![]),
+        Content::Console(&mut panel, "Paused"),
+    );
+    let (_, actions) = run_content_frame(
+        &context,
+        &mut layout,
+        input(
+            [1100.0, 760.0],
+            vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
+        ),
+        Content::Console(&mut panel, "Paused"),
+    );
+    app.console_panel = Some(panel);
+    let before = app.emu.retired_instructions();
+    app.dispatch_egui_frame(actions, Err(pixels::Error::Validation));
+    assert_eq!(app.emu.retired_instructions(), before + 1);
+    assert_eq!(app.console_panel.as_ref().unwrap().history, ["step"]);
+    let mut panel = app.console_panel.clone().unwrap();
+    let (_, actions) = run_content_frame(
+        &context,
+        &mut layout,
+        input([1100.0, 760.0], vec![]),
+        Content::Console(&mut panel, "Paused"),
+    );
+    assert!(actions.is_empty());
+    app.console_panel = Some(panel);
+    app.dispatch_egui_frame(actions, Ok(()));
+    assert_eq!(app.emu.retired_instructions(), before + 1);
 }
 
 #[test]

@@ -775,9 +775,16 @@ registers, disassembly, and memory. Software rendering helpers use fixed-width
 text clipping; egui receives complete lines and scrolls them. UI commands are
 collected during layout and applied through the existing debugger handlers
 after the final egui pass, so a repeated sizing pass cannot execute a command
-twice. UI state and GPU resources belong to the host window and never enter
-save states. Repaint deadlines wake a paused event loop for caret blinking and
-interaction without advancing the machine; minimized windows skip presentation.
+twice. Commands still dispatch if presentation fails, because their input has
+already been consumed. UI state and GPU resources belong to the host window
+and never enter save states. Repaint deadlines wake a paused event loop for
+caret blinking and interaction without advancing the machine; minimized windows
+skip presentation.
+
+Audio rows reserve four detail lines and place each scope beside the text.
+Their geometry depends on the viewport and font metrics, so transient pending
+flags and changing status text do not move later rows or mute controls. Detail
+text scrolls horizontally within its column; the tab header does not wrap.
 
 The debugger's native window slot hosts all three inspectors. Logical panels stay
 independent: selecting an inspector opens it lazily, keeps the other panel's

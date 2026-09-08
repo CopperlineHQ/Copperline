@@ -120,7 +120,16 @@ sprite layer isolation toggles:
 Decodes Paula audio channels (0-3) and expansion sound devices (CD-DA, MT-32,
 Coppersynth, Toccata, MHI). Displays channel DMA state machine status, period,
 volume, active buffer pointers, and real-time audio waveform scopes. Channels
-can be muted individually.
+can be muted individually. Each source has a fixed-height row with its scope
+beside its details, so pending DMA and interrupt flags cannot move other
+channels. Long detail lines scroll horizontally inside their row.
+
+```{figure} ../images/ui-preview-debugger-audio-egui.png
+:alt: Audio inspector with fixed channel rows and waveform scopes beside the channel details.
+:width: 100%
+
+Audio scopes remain aligned as channel status changes.
+```
 
 ### Memory
 Hexadecimal and ASCII memory dump viewer (256 bytes per page).

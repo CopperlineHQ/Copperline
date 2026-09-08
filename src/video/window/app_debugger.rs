@@ -2223,7 +2223,7 @@ impl App {
                             .enumerate()
                             .map(|(i, bytes)| {
                                 ui::DbgLine::plain(ui::hex_dump_row(
-                                    base.wrapping_add(i as u32 * 16),
+                                    base.wrapping_add(i as u32 * 16) & machine.ui_addr_mask(),
                                     bytes,
                                 ))
                             })

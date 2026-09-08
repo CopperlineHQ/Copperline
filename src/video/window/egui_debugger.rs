@@ -119,7 +119,7 @@ impl DebuggerUi {
         window: &Window,
         pixels: &pixels::Pixels<'_>,
         content: Content<'_>,
-    ) -> Result<Vec<Action>, pixels::Error> {
+    ) -> (Vec<Action>, Result<(), pixels::Error>) {
         let input = self.input.take_egui_input(window);
         let (output, actions) = run_content_frame(&self.context, &mut self.layout, input, content);
         self.input
@@ -155,7 +155,7 @@ impl DebuggerUi {
         for id in &output.textures_delta.free {
             self.renderer.free_texture(id);
         }
-        result.map(|()| actions)
+        (actions, result)
     }
 }
 
@@ -438,7 +438,7 @@ impl Layout {
             if self.navigation == Some(panel.tab) {
                 scroll = scroll.scroll_offset(egui::Vec2::ZERO);
             }
-            scroll.show(ui, |ui| match panel.tab {
+            scroll.show_viewport(ui, |ui, viewport| match panel.tab {
                 ui::DebugTab::Video => {
                     if let Some(video) = &view.video {
                         self.video(ui, video, actions);
@@ -446,7 +446,7 @@ impl Layout {
                 }
                 ui::DebugTab::Audio => {
                     if let Some(audio) = &view.audio {
-                        self.audio(ui, audio, actions);
+                        self.audio(ui, audio, viewport.width(), actions);
                     }
                 }
                 _ => {
@@ -775,8 +775,26 @@ impl Layout {
         });
     }
 
-    fn audio(&self, ui: &mut egui::Ui, audio: &ui::AudioScopeView, actions: &mut Vec<Action>) {
-        ui.monospace(&audio.header);
+    fn audio(
+        &self,
+        ui: &mut egui::Ui,
+        audio: &ui::AudioScopeView,
+        viewport_width: f32,
+        actions: &mut Vec<Action>,
+    ) {
+        ui.add(
+            egui::Label::new(RichText::new(&audio.header).monospace())
+                .selectable(true)
+                .wrap_mode(egui::TextWrapMode::Extend),
+        );
+        // Paula has three permanent lines and an optional pending-flags line.
+        // Reserve all four even while idle. Size columns from the viewport,
+        // not changing text extents, so the scopes and following rows stay put.
+        let row_height =
+            (ui.text_style_height(&egui::TextStyle::Monospace) + ui.spacing().item_spacing.y) * 4.0
+                + ui.spacing().scroll.bar_width;
+        let row_width = viewport_width.max(560.0);
+        let scope_width = (row_width * 0.28).clamp(220.0, 420.0);
         for (i, row) in audio
             .channels
             .iter()
@@ -784,20 +802,43 @@ impl Layout {
             .enumerate()
         {
             ui.separator();
-            ui.horizontal(|ui| {
-                let mut muted = row.muted;
-                if ui.checkbox(&mut muted, "Mute").changed() {
-                    actions.push(Action::Control(UiControl::DebugAudioMute(i)));
-                }
-                ui.vertical(|ui| {
-                    lines(ui, &row.text);
-                });
-            });
-            let (rect, _) = ui.allocate_exact_size(
-                egui::vec2(ui.available_width().clamp(200.0, 1200.0), 70.0),
-                egui::Sense::hover(),
+            let (row_rect, _) =
+                ui.allocate_exact_size(egui::vec2(row_width, row_height), egui::Sense::hover());
+            let rect = egui::Rect::from_min_max(
+                egui::pos2(row_rect.right() - scope_width, row_rect.top()),
+                row_rect.max,
             );
+            let mute_rect = egui::Rect::from_min_size(row_rect.min, egui::vec2(64.0, row_height));
+            let mut controls = ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt(("audio_mute", i))
+                    .max_rect(mute_rect)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            let mut muted = row.muted;
+            if controls.checkbox(&mut muted, "Mute").changed() {
+                actions.push(Action::Control(UiControl::DebugAudioMute(i)));
+            }
+            let text_rect = egui::Rect::from_min_max(
+                egui::pos2(mute_rect.right(), row_rect.top()),
+                egui::pos2(rect.left() - ui.spacing().item_spacing.x, row_rect.bottom()),
+            );
+            let mut details = ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt(("audio_details", i))
+                    .max_rect(text_rect)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            details.set_clip_rect(text_rect.intersect(ui.clip_rect()));
+            ScrollArea::horizontal()
+                .id_salt("text")
+                .auto_shrink([false, false])
+                .show(&mut details, |ui| lines(ui, &row.text));
             ui.painter().rect_filled(rect, 0.0, Color32::from_gray(25));
+            ui.painter().line_segment(
+                [rect.left_center(), rect.right_center()],
+                Stroke::new(1.0, Color32::from_gray(55)),
+            );
             if row.scope.len() >= 2 {
                 let points = row
                     .scope
@@ -1003,7 +1044,7 @@ impl App {
         {
             return;
         }
-        let result = if self.egui_selected_tool == ToolPanelKind::FrameAnalyzer {
+        let (actions, result) = if self.egui_selected_tool == ToolPanelKind::FrameAnalyzer {
             self.ensure_analyzer_underlay();
             let Some(mut panel) = self.frame_analyzer_panel.clone() else {
                 return;
@@ -1047,13 +1088,18 @@ impl App {
             self.debugger_panel = Some(panel);
             result
         };
-        match result {
-            Ok(actions) => {
-                for action in actions {
-                    self.apply_egui_debugger_action(action);
-                }
-            }
-            Err(error) => log::error!("debugger render: {error}"),
+        self.dispatch_egui_frame(actions, result);
+    }
+
+    fn dispatch_egui_frame(&mut self, actions: Vec<Action>, result: Result<(), pixels::Error>) {
+        if let Err(error) = result {
+            log::error!("debugger render: {error}");
+        }
+        // Input has already been consumed and the edited panels stored. A
+        // presentation failure must not discard submitted commands or require
+        // the user to repeat an action whose input is no longer in the queue.
+        for action in actions {
+            self.apply_egui_debugger_action(action);
         }
     }
 
