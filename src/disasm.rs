@@ -1261,11 +1261,7 @@ mod tests {
     #[test]
     fn dump_copper_stops_on_ffff_ffff() {
         let words = [0x0180u16, 0x0123, 0xFFFF, 0xFFFF, 0x0182, 0x0000];
-        let list = dump_copper_list(
-            |addr| words[(addr / 2) as usize],
-            0,
-            10,
-        );
+        let list = dump_copper_list(|addr| words[(addr / 2) as usize], 0, 10);
         assert_eq!(list.len(), 2);
         assert!(list[0].1.starts_with("MOVE"), "{}", list[0].1);
         // $FFFF,$FFFF has IR2 bit0 set, so it disassembles as SKIP, not WAIT.
