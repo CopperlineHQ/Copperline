@@ -20,6 +20,16 @@ impl App {
         ) {
             self.tool_window_front = Some(kind);
         }
+        #[cfg(feature = "egui-debugger")]
+        if kind == ToolPanelKind::Debugger
+            && self
+                .debugger_tool_window
+                .as_ref()
+                .is_some_and(|tool| tool.egui.is_some())
+        {
+            self.handle_egui_debugger_event(event_loop, event);
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => self.close_tool_panel(kind),
             WindowEvent::KeyboardInput {
@@ -153,6 +163,16 @@ impl App {
     }
 
     pub(super) fn draw_tool_window(&mut self, kind: ToolPanelKind) {
+        #[cfg(feature = "egui-debugger")]
+        if kind == ToolPanelKind::Debugger
+            && self
+                .debugger_tool_window
+                .as_ref()
+                .is_some_and(|tool| tool.egui.is_some())
+        {
+            self.draw_egui_debugger();
+            return;
+        }
         let Some(panel) = self.tool_panel_for_kind(kind) else {
             *self.tool_window_slot(kind) = None;
             return;
@@ -1114,6 +1134,16 @@ impl App {
         }
     }
 
+    pub(super) fn tool_window_is_needed(&self, kind: ToolPanelKind) -> bool {
+        #[cfg(feature = "egui-debugger")]
+        match kind {
+            ToolPanelKind::Debugger => return self.egui_workspace_open(),
+            ToolPanelKind::FrameAnalyzer => return false,
+            ToolPanelKind::Console => {}
+        }
+        self.tool_panel_is_open(kind)
+    }
+
     pub(super) fn ensure_tool_windows_for_open_panels(&mut self, event_loop: &ActiveEventLoop) {
         for kind in ToolPanelKind::ALL {
             self.ensure_tool_window_for_kind(event_loop, kind, true);
@@ -1139,28 +1169,36 @@ impl App {
         kind: ToolPanelKind,
         redraw: bool,
     ) {
-        if !self.tool_panel_is_open(kind) {
+        if !self.tool_window_is_needed(kind) {
             *self.tool_window_slot(kind) = None;
             return;
         }
         let title = Self::tool_window_title(kind);
         if let Some(tool) = self.tool_window(kind) {
             tool.window.set_title(title);
+            #[cfg(feature = "egui-debugger")]
+            let redraw = redraw || tool.egui.as_ref().is_some_and(|egui| egui.repaint_due());
             if redraw && !tool.minimized {
                 tool.window.request_redraw();
             }
             return;
         }
 
-        let size = LogicalSize::new(FB_WIDTH as f64, window_present_height() as f64);
+        let size = if cfg!(feature = "egui-debugger") && kind == ToolPanelKind::Debugger {
+            LogicalSize::new(1100.0, 760.0)
+        } else {
+            LogicalSize::new(FB_WIDTH as f64, window_present_height() as f64)
+        };
+        let min_size = if cfg!(feature = "egui-debugger") && kind == ToolPanelKind::Debugger {
+            LogicalSize::new(600.0, 480.0)
+        } else {
+            LogicalSize::new(FB_WIDTH as f64 / 2.0, window_present_height() as f64 / 2.0)
+        };
         let attrs = WindowAttributes::default()
             .with_title(title)
             .with_window_icon(copperline_window_icon())
             .with_inner_size(size)
-            .with_min_inner_size(LogicalSize::new(
-                FB_WIDTH as f64 / 2.0,
-                window_present_height() as f64 / 2.0,
-            ));
+            .with_min_inner_size(min_size);
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -1184,6 +1222,22 @@ impl App {
                 return;
             }
         };
+        #[cfg(feature = "egui-debugger")]
+        let (pixels, egui) = {
+            let mut pixels = pixels;
+            let egui = if kind == ToolPanelKind::Debugger {
+                match egui_debugger::DebuggerUi::new(&window, &mut pixels) {
+                    Ok(ui) => Some(ui),
+                    Err(error) => {
+                        warn!("egui debugger init failed: {error}");
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+            (pixels, egui)
+        };
         info!(
             "tool window ready: {title} (texture {}x{})",
             texture_width(texture_scale),
@@ -1203,6 +1257,8 @@ impl App {
             cursor_pos: None,
             minimized: false,
             surface_size: (inner.width.max(1), inner.height.max(1)),
+            #[cfg(feature = "egui-debugger")]
+            egui,
         });
         self.request_redraw();
     }
@@ -1223,6 +1279,8 @@ impl App {
     }
 
     pub(super) fn close_tool_panel(&mut self, kind: ToolPanelKind) {
+        #[cfg(feature = "egui-debugger")]
+        let shared_paused = self.paused;
         match kind {
             ToolPanelKind::Debugger => {
                 if self.debugger_panel.is_some() {
@@ -1231,7 +1289,9 @@ impl App {
                     self.sync_live_audio_suspension();
                 }
                 self.debugger_panel = None;
-                self.debugger_tool_window = None;
+                if !cfg!(feature = "egui-debugger") || self.frame_analyzer_panel.is_none() {
+                    self.debugger_tool_window = None;
+                }
             }
             ToolPanelKind::Console => {
                 if self.console_panel.is_some() {
@@ -1275,6 +1335,25 @@ impl App {
                 self.analyzer_underlay_frame = None;
                 self.analyzer_underlay_input = None;
             }
+        }
+        #[cfg(feature = "egui-debugger")]
+        if matches!(kind, ToolPanelKind::Debugger | ToolPanelKind::FrameAnalyzer) {
+            if self.egui_workspace_open() {
+                // Closing one inspector does not change the other one's run
+                // state or destroy their shared native window.
+                self.paused = shared_paused;
+                if self.egui_selected_tool == kind {
+                    self.egui_selected_tool = if self.debugger_panel.is_some() {
+                        ToolPanelKind::Debugger
+                    } else {
+                        ToolPanelKind::FrameAnalyzer
+                    };
+                    self.tool_window_front = Some(self.egui_selected_tool);
+                }
+            } else {
+                self.debugger_tool_window = None;
+            }
+            self.sync_live_audio_suspension();
         }
         if self.debugger_panel.is_none() && self.console_panel.is_none() {
             self.emu.machine.ui_set_pc_history_enabled(false);

@@ -2133,6 +2133,8 @@ fn panels_render_into_their_rects() {
         bitmap: None,
         video: None,
         audio: None,
+        #[cfg(feature = "egui-debugger")]
+        cpu: None,
     }));
     let mut panel = DebuggerPanel::new();
     panel.entry = "C00000".to_string();
@@ -2174,6 +2176,8 @@ fn panels_render_into_their_rects() {
         bitmap: None,
         video: None,
         audio: None,
+        #[cfg(feature = "egui-debugger")]
+        cpu: None,
     }));
     let mut panel = DebuggerPanel::new();
     panel.tab = DebugTab::Break;
@@ -2216,6 +2220,8 @@ fn panels_render_into_their_rects() {
         bitmap: None,
         video: None,
         audio: None,
+        #[cfg(feature = "egui-debugger")]
+        cpu: None,
     }));
     let mut panel = DebuggerPanel::new();
     panel.tab = DebugTab::Waveform;
@@ -2352,6 +2358,8 @@ fn panels_render_into_their_rects() {
         bitmap: None,
         video: None,
         audio: Some(audio),
+        #[cfg(feature = "egui-debugger")]
+        cpu: None,
     }));
     let mut panel = DebuggerPanel::new();
     panel.tab = DebugTab::Audio;
@@ -2407,6 +2415,8 @@ fn panels_render_into_their_rects() {
         bitmap: None,
         video: None,
         audio: None,
+        #[cfg(feature = "egui-debugger")]
+        cpu: None,
     }));
     let mut panel = DebuggerPanel::new();
     panel.tab = DebugTab::IoMap;
@@ -2467,6 +2477,8 @@ fn panels_render_into_their_rects() {
             palette,
         }),
         audio: None,
+        #[cfg(feature = "egui-debugger")]
+        cpu: None,
     }));
     let mut panel = DebuggerPanel::new();
     panel.tab = DebugTab::Video;

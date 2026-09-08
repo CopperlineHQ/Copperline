@@ -4,9 +4,9 @@ Press `Cmd+B` on macOS or `Alt+B` on Linux/Windows (or select **Debugger** from
 the status bar menu) to pause emulation and open the debugger tool window.
 Closing the window restores the previous execution state.
 
-The debugger, Frame Analyzer, and [Console](console) operate in separate host
-windows, allowing them to remain open simultaneously while inspecting CPU,
-custom chipset, and bus activity. Inspection reads do not acknowledge hardware
+The regular build puts the debugger, Frame Analyzer, and [Console](console) in
+separate host windows. The optional egui frontend below combines the debugger
+and Frame Analyzer in one window. Inspection reads do not acknowledge hardware
 registers or consume emulated bus cycles. Stepping, register edits, and memory
 writes change the machine as requested.
 
@@ -16,6 +16,69 @@ writes change the machine as requested.
 
 Debugger window: register file, live disassembly, and transport controls.
 ```
+
+(egui-debugger-prototype)=
+## Optional egui frontend
+
+The `egui-debugger` Cargo feature provides a shared, GPU-rendered debugger and
+Frame Analyzer window. Build and launch it with:
+
+```sh
+cargo run --release --locked --features egui-debugger -- --factory
+```
+
+```{figure} ../images/ui-preview-debugger-egui.png
+:alt: Egui debugger prototype with separate register, disassembly, and memory panes
+:width: 100%
+
+The CPU tab, rendered from the deterministic debugger test machine.
+```
+
+Open the debugger with `Cmd+B` / `Alt+B` as usual. Its nine tabs use the same
+machine inspection and command handlers as the regular debugger. On the CPU
+tab, drag the dividers to resize the register, disassembly, and memory panes.
+Text can be selected and copied, and the address/command field supports normal
+text editing and paste. Register **Edit** buttons prepare a command in that
+field; **Set Reg** applies it. Enter in the field pins the disassembly address
+(an empty field follows PC), jumps to a memory address, or selects an IO register,
+according to the active tab.
+
+The CPU memory pane has its own address and page controls. The Memory tab
+retains Find, Save, Writer, Bits, and Poke; the other tabs retain their layer
+toggles, audio mutes, breakpoints, and waveform controls. Scrollbars expose
+content that does not fit the window. Transport keyboard shortcuts work while
+not editing text. **Close inspector** and the controller's back button close
+the selected inspector; the other remains available in the shared window.
+`Esc` leaves a text field first. Outside a text field it closes both inspectors,
+as does closing the native window.
+
+Select **Frame Analyzer** above the debugger tabs to inspect its **Beam**,
+**Blits**, **Memory**, and **Resources** views. Opening the analyzer from the
+status bar menu selects it in this same window. **Capture frame** records a
+frame, and **Run** collects live frames. Switching between the debugger and
+analyzer preserves their selections, capture data, and current run/pause state.
+The analyzer stays armed while its view is hidden; closing it releases captures
+using the same ownership rules as the regular frontend.
+
+```{figure} ../images/ui-preview-analyzer-egui.png
+:alt: Frame Analyzer in the shared egui window with beam raster and bus counters
+:width: 100%
+
+The Beam view in the shared window, rendered from the analyzer test machine.
+```
+
+Click or drag the beam raster or scanline strip to select a slot. Picture,
+beam scrub, CPU waits, and run-to-beam retain their normal controls and
+shortcuts. The Memory view offers address presets and cell picking; Blits
+shows source/result previews with previous/next selection; Resources offers
+paging, previews, and **Save resource**. Text readouts can be selected and copied.
+
+This experiment changes the two desktop inspectors. The emulator display,
+Console, launcher, and browser frontend use their existing
+renderers. Rebuild without `--features egui-debugger` to compare the regular UI.
+Live machine-data refreshes retain the existing 20 Hz limit; input and stepping
+redraw immediately. This is an interface prototype, with no promised emulation
+speedup.
 
 ## Tabs
 
@@ -133,7 +196,8 @@ Examples:
 ## Frame Analyzer
 
 Open the Frame Analyzer via the status bar menu to inspect chip-bus slot allocations
-and memory access patterns.
+and memory access patterns. With `egui-debugger`, it shares the debugger window;
+the **Frame Analyzer** selector at the top opens the same inspector.
 
 ```{figure} ../images/ui-preview-frame-analyzer.png
 :alt: The Frame Analyzer

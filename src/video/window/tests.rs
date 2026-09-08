@@ -925,12 +925,24 @@ fn the_game_page_walks_from_the_button_that_opens_it() {
         LauncherTab::WhdloadLibrary,
     ))));
     fn walk(app: &mut super::App, dir: Dir) -> Option<NavTarget> {
+        // These are individual presses, not one held scroll. Keep the
+        // wall-clock accelerator out of the navigation assertions.
+        app.launcher_state_mut()
+            .unwrap()
+            .library
+            .scroll_rate
+            .reset();
         app.nav_move(dir, None);
         app.nav.focus()
     }
     // Up and down inside a list are the list's own, so they go in by
     // the same door a key does rather than straight to the focus.
     fn press(app: &mut super::App, code: winit::keyboard::KeyCode) {
+        app.launcher_state_mut()
+            .unwrap()
+            .library
+            .scroll_rate
+            .reset();
         app.ui_handle_key(code, None, None);
     }
     let at = |control| Some(NavTarget::Ui(control));
@@ -4056,7 +4068,7 @@ fn pixel(frame: &[u8], x: usize, y: usize, scale: usize) -> [u8; 4] {
 /// reset vectors pointing into it, no audio, unpaced. Lets the
 /// debugger window's actions and view builders run against the real
 /// emulator without a host window.
-fn test_app() -> super::App {
+pub(super) fn test_app() -> super::App {
     let mut app = test_app_with_audio(Box::new(NullSink));
     // The stock wiring the config layer applies on a real machine: mouse
     // in port 1, joystick in port 2.
@@ -10693,12 +10705,12 @@ mod gdb_drain {
 
 /// Part-1 insight-pane tests: guest-registered uaelib resources feeding
 /// the heat presets, the heat view, and the console's DBGRES command.
-mod uaelib_insights {
+pub(super) mod uaelib_insights {
     use super::test_app;
 
     type App = super::super::App;
 
-    fn fit_uaelib(app: &mut App) {
+    pub(in crate::video::window) fn fit_uaelib(app: &mut App) {
         let mut lib = crate::uaelib::UaeLib::new();
         lib.mute_stdout();
         let bus = app.emu.bus_mut();
@@ -10709,7 +10721,7 @@ mod uaelib_insights {
     }
 
     /// The template's 50-byte `struct debug_resource`, big-endian.
-    fn resource_bytes(
+    pub(in crate::video::window) fn resource_bytes(
         address: u32,
         size: u32,
         name: &str,
@@ -10731,7 +10743,7 @@ mod uaelib_insights {
         bytes
     }
 
-    fn register(app: &mut App, staging: u32, bytes: &[u8]) {
+    pub(in crate::video::window) fn register(app: &mut App, staging: u32, bytes: &[u8]) {
         let mask = app.emu.machine.ui_addr_mask();
         let bus = app.emu.bus_mut();
         bus.mem.chip_ram[staging as usize..staging as usize + bytes.len()].copy_from_slice(bytes);

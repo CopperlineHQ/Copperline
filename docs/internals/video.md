@@ -761,6 +761,55 @@ panels_render_into_their_rects` renders every panel into
 from there -- and the `test_app()` fixture drives the debugger window
 against a real emulator instance in the unit tests.
 
+With the optional `egui-debugger` feature, `window/egui_debugger.rs` owns the
+shared debugger/Frame Analyzer window's layout, text input, and GPU drawing.
+`egui_debugger/analyzer.rs` supplies the four analyzer views. It shares the window's
+`pixels`/wgpu device and surface, but shrinks the unused software backing
+texture to 1x1. Egui uploads glyphs and meshes and draws directly to the physical
+surface, independently of the Amiga presentation canvas and its texture scale.
+The egui versions in Cargo.toml share pixels' wgpu major version; upgrading
+them requires keeping those device and encoder types compatible.
+
+The view builder supplies side-effect-free snapshots, including structured CPU
+registers, disassembly, and memory. The regular renderer retains its fixed-width
+text clipping; egui receives complete lines and scrolls them. UI commands are
+collected during layout and applied through the existing debugger handlers
+after the final egui pass, so a repeated sizing pass cannot execute a command
+twice. UI state and GPU resources belong to the host window and never enter
+save states. Repaint deadlines wake a paused event loop for caret blinking and
+interaction without advancing the machine; minimized windows skip presentation.
+
+The debugger's native window slot hosts either inspector. Logical panels stay
+independent: selecting an inspector opens it lazily, keeps the other panel's
+capture and selection, and does not alter an already-open inspector's run state.
+Only the visible inspector builds a view snapshot. A native close releases both
+panels through their existing cleanup paths, including profile/heat-map capture
+ownership; closing a single logical panel keeps the shared surface alive.
+Explicit Run/Pause choices apply to both inspectors' restore state.
+
+The beam image uses the same pure `AnalyzerTraceView::raster_pixel` sampler as
+the software renderer for owner colours, CPU waits, picture blending, and beam
+scrub. Egui draws the display/DIW/DDF bounds, markers, and selections above that
+texture. Image picks map through the existing 0..1023 beam coordinates and
+256x256 memory grid. Diagram sizes come from the visible scroll viewport so
+window resizing keeps input and imagery aligned.
+
+The prototype's unit tests exercise all tabs and compare serialized machine
+state before and after inspection. For visual review on a host with a GPU:
+
+```sh
+cargo test --release --locked --features egui-debugger --lib render_debugger_previews -- --ignored --nocapture
+cargo test --release --locked --features egui-debugger --lib render_analyzer_previews -- --ignored --nocapture
+```
+
+These write the nine debugger and four analyzer tab images to
+`target/egui-debugger/`. The similarly invoked
+`benchmark_debugger_repaint` test measures alternating, warmed CPU-tab repaints:
+legacy software drawing plus texture upload against egui layout, tessellation,
+and GPU submission. It excludes machine-data collection, GPU completion waits,
+window presentation/vsync, and emulation; its timings describe repaint CPU
+cost, not overall emulator performance.
+
 The configuration panel lives in `ui/configuration.rs`, with row drawing and
 hit-testing together in `configuration/rows.rs`, library artwork and entries in
 `configuration/library.rs`, and modal drawing and hit geometry in

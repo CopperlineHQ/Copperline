@@ -995,6 +995,8 @@ pub struct App {
     rtg_present_dims: Option<(u32, u32)>,
     render: Option<Render>,
     debugger_tool_window: Option<ToolWindow>,
+    #[cfg(feature = "egui-debugger")]
+    egui_selected_tool: ToolPanelKind,
     frame_analyzer_tool_window: Option<ToolWindow>,
     console_tool_window: Option<ToolWindow>,
     /// When the frame loop last requested a paced tool window repaint
@@ -1589,9 +1591,24 @@ struct ToolWindow {
     minimized: bool,
     /// Same configured-surface-size record as Render::surface_size.
     surface_size: (u32, u32),
+    #[cfg(feature = "egui-debugger")]
+    egui: Option<egui_debugger::DebuggerUi>,
 }
 
 impl ToolWindow {
+    /// Canvas changes resize software panels. The egui debugger draws in
+    /// surface coordinates and keeps its unused backing texture at 1x1.
+    fn resize_canvas_buffer(&mut self) -> Result<(), pixels::TextureError> {
+        #[cfg(feature = "egui-debugger")]
+        if self.egui.is_some() {
+            return Ok(());
+        }
+        self.pixels.resize_buffer(
+            texture_width(self.texture_scale) as u32,
+            texture_height(self.texture_scale) as u32,
+        )
+    }
+
     /// Tool-window counterpart of `Render::resize_surface`.
     fn resize_surface(&mut self, size: PhysicalSize<u32>) -> Result<(), pixels::TextureError> {
         let (width, height) = (size.width.max(1), size.height.max(1));
@@ -2064,6 +2081,8 @@ impl App {
             present_programmable: false,
             render: None,
             debugger_tool_window: None,
+            #[cfg(feature = "egui-debugger")]
+            egui_selected_tool: ToolPanelKind::Debugger,
             frame_analyzer_tool_window: None,
             console_tool_window: None,
             last_tool_redraw: Instant::now(),
@@ -4975,6 +4994,8 @@ impl ApplicationHandler for App {
                 ControlFlow::Wait
             },
         );
+        #[cfg(feature = "egui-debugger")]
+        self.schedule_egui_debugger_repaint(event_loop);
         if writing_image && !running {
             // Nothing else paces the loop while the machine is off; check
             // back at a human rate rather than spinning a core on it.
@@ -6626,6 +6647,8 @@ mod control;
 mod crt_shader;
 #[cfg(feature = "coppersynth")]
 mod csynthpanel;
+#[cfg(feature = "egui-debugger")]
+mod egui_debugger;
 #[cfg(feature = "gdb")]
 mod gdb;
 mod host_input;

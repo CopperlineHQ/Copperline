@@ -26,10 +26,7 @@ impl App {
         // follow too. Buffer only: their own window sizes are their business.
         for kind in ToolPanelKind::ALL {
             if let Some(tool) = self.tool_window_mut(kind) {
-                if let Err(e) = tool.pixels.resize_buffer(
-                    texture_width(tool.texture_scale) as u32,
-                    texture_height(tool.texture_scale) as u32,
-                ) {
+                if let Err(e) = tool.resize_canvas_buffer() {
                     warn!("resize tool texture buffer for a canvas-height change failed: {e}");
                 }
                 tool.window.request_redraw();
@@ -520,10 +517,13 @@ impl App {
         for kind in ToolPanelKind::ALL {
             let mut applied = None;
             if let Some(tool) = self.tool_window_mut(kind) {
-                if let Err(e) = tool.pixels.resize_buffer(
-                    texture_width(tool.texture_scale) as u32,
-                    texture_height(tool.texture_scale) as u32,
-                ) {
+                #[cfg(feature = "egui-debugger")]
+                if tool.egui.is_some() {
+                    // Its layout and window size are independent of the
+                    // emulated display's pixel aspect and canvas dimensions.
+                    continue;
+                }
+                if let Err(e) = tool.resize_canvas_buffer() {
                     warn!("resize tool texture buffer for the canvas change failed: {e}");
                 }
                 applied = tool.window.request_inner_size(size);
@@ -749,7 +749,7 @@ impl App {
                 return;
             }
         }
-        // Every tool window (Debugger, Frame Analyzer, Console) draws through
+        // Software tool windows draw through
         // draw_panel_layer, which indexes its buffer by the same canvas height
         // (window_present_height), so resize all their buffers to match too, or
         // a later tool draw could index past a now-too-small buffer. Buffer
@@ -757,10 +757,7 @@ impl App {
         // alone.
         for kind in ToolPanelKind::ALL {
             if let Some(tool) = self.tool_window_mut(kind) {
-                if let Err(e) = tool.pixels.resize_buffer(
-                    texture_width(tool.texture_scale) as u32,
-                    texture_height(tool.texture_scale) as u32,
-                ) {
+                if let Err(e) = tool.resize_canvas_buffer() {
                     warn!("resize tool texture buffer for status bar toggle failed: {e}");
                 }
                 tool.window.request_redraw();

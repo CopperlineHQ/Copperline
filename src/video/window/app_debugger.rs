@@ -238,6 +238,11 @@ impl App {
     /// Open the debugger window (pausing the machine), or close it again
     /// if it is already open (the host shortcut toggle).
     pub(super) fn toggle_debugger(&mut self) {
+        #[cfg(feature = "egui-debugger")]
+        if self.egui_workspace_open() && self.egui_selected_tool != ToolPanelKind::Debugger {
+            self.open_debugger();
+            return;
+        }
         if self.debugger_panel.is_some() {
             self.close_tool_panel(ToolPanelKind::Debugger);
         } else {
@@ -248,6 +253,8 @@ impl App {
     }
 
     pub(super) fn open_debugger(&mut self) {
+        #[cfg(feature = "egui-debugger")]
+        let shared_pause = self.egui_other_tool_pause(ToolPanelKind::Debugger);
         if self.debugger_panel.is_none() {
             // The debugger shortcut can arrive while the mouse is captured;
             // release it so the window's controls are reachable, and note
@@ -274,6 +281,8 @@ impl App {
                 );
             }
         }
+        #[cfg(feature = "egui-debugger")]
+        self.egui_did_open_tool(ToolPanelKind::Debugger, shared_pause);
     }
 
     /// Open the console window (pausing the machine), or close it again
@@ -311,6 +320,8 @@ impl App {
     }
 
     pub(super) fn open_frame_analyzer(&mut self) {
+        #[cfg(feature = "egui-debugger")]
+        let shared_pause = self.egui_other_tool_pause(ToolPanelKind::FrameAnalyzer);
         if self.frame_analyzer_panel.is_none() {
             self.suspend_mouse_capture_for_ui();
             self.ui.panel = None;
@@ -320,11 +331,17 @@ impl App {
             self.emu.bus_mut().set_frame_analyzer_full(true);
             self.frame_analyzer_panel = Some(ui::FrameAnalyzerPanel::new());
         }
+        #[cfg(feature = "egui-debugger")]
+        self.egui_did_open_tool(ToolPanelKind::FrameAnalyzer, shared_pause);
     }
 
     pub(super) fn frame_analyzer_toggle_run(&mut self) {
         self.paused = !self.paused;
         self.paused_before_analyzer = self.paused;
+        #[cfg(feature = "egui-debugger")]
+        {
+            self.paused_before_debugger = self.paused;
+        }
         self.sync_live_audio_suspension();
         if !self.paused {
             self.emu.bus_mut().set_frame_analyzer_full(true);
@@ -977,6 +994,10 @@ impl App {
         // Run/Pause inside the debugger is an explicit choice; closing the
         // window must not revert it.
         self.paused_before_debugger = self.paused;
+        #[cfg(feature = "egui-debugger")]
+        {
+            self.paused_before_analyzer = self.paused;
+        }
         self.sync_live_audio_suspension();
     }
 
@@ -1436,6 +1457,10 @@ impl App {
         self.sync_live_audio_suspension();
         if !consumed {
             self.paused_before_debugger = true;
+            #[cfg(feature = "egui-debugger")]
+            {
+                self.paused_before_analyzer = true;
+            }
             self.open_debugger();
         }
         self.last_debug_stop = Some(message.clone());
@@ -2103,6 +2128,14 @@ impl App {
     /// Everything reads through side-effect-free peeks, so inspecting
     /// state never perturbs the emulation.
     pub(super) fn build_debugger_view(&self, panel: &ui::DebuggerPanel) -> ui::DebuggerView {
+        self.build_debugger_view_with_clipping(panel, true)
+    }
+
+    pub(super) fn build_debugger_view_with_clipping(
+        &self,
+        panel: &ui::DebuggerPanel,
+        clip_lines: bool,
+    ) -> ui::DebuggerView {
         let machine = &self.emu.machine;
         let bus = self.emu.bus();
         let mut status = format!(
@@ -2127,6 +2160,8 @@ impl App {
         let mut bitmap: Option<ui::MemBitmapView> = None;
         let mut video: Option<ui::VideoView> = None;
         let mut audio: Option<ui::AudioScopeView> = None;
+        #[cfg(feature = "egui-debugger")]
+        let mut cpu = None;
         match panel.tab {
             ui::DebugTab::Cpu => {
                 let pc = machine.pc();
@@ -2175,6 +2210,8 @@ impl App {
                     )));
                 }
                 let breaks = machine.ui_breaks();
+                #[cfg(feature = "egui-debugger")]
+                let disassembly_start = lines.len();
                 let mut addr = panel.disasm_addr.unwrap_or(pc) & !1;
                 for _ in 0..24 {
                     let (text, len) = crate::disasm::disassemble(read, addr, machine.cpu_type());
@@ -2187,6 +2224,30 @@ impl App {
                         ui::DbgLine::plain(line)
                     });
                     addr = addr.wrapping_add(len);
+                }
+                #[cfg(feature = "egui-debugger")]
+                if !clip_lines {
+                    let base = panel.mem_addr & machine.ui_addr_mask() & !0xF;
+                    let bytes = machine.debug_read_memory(base, ui::MEM_PAGE_BYTES as usize);
+                    cpu = Some(ui::CpuView {
+                        d: std::array::from_fn(|i| machine.d(i)),
+                        a: std::array::from_fn(|i| machine.a(i)),
+                        pc,
+                        sr,
+                        stopped: machine.stopped(),
+                        history: history.iter().rev().take(8).rev().copied().collect(),
+                        disassembly: lines[disassembly_start..].to_vec(),
+                        memory: bytes
+                            .chunks(16)
+                            .enumerate()
+                            .map(|(i, bytes)| {
+                                ui::DbgLine::plain(ui::hex_dump_row(
+                                    base.wrapping_add(i as u32 * 16),
+                                    bytes,
+                                ))
+                            })
+                            .collect(),
+                    });
                 }
             }
             ui::DebugTab::Chipset => {
@@ -2656,9 +2717,14 @@ impl App {
                 let sel = usize::from(panel.iomap_sel & 0x1FE) / 2;
                 let page = sel / PER_PAGE;
                 lines.push(ui::DbgLine::plain(format!(
-                    "custom registers $DFF000-$DFF1FE  (page {}/{}; arrows/wheel move, $ box jumps)",
+                    "custom registers $DFF000-$DFF1FE  (page {}/{}; {}, $ box jumps)",
                     page + 1,
-                    256usize.div_ceil(PER_PAGE)
+                    256usize.div_ceil(PER_PAGE),
+                    if clip_lines {
+                        "arrows/wheel move"
+                    } else {
+                        "arrows select, scroll to read"
+                    },
                 )));
                 lines.push(ui::DbgLine::plain(""));
                 for row in 0..ROWS {
@@ -2882,9 +2948,12 @@ impl App {
         }
         // Keep lines inside the panel; the blitter clips at the texture
         // edge, not the panel edge.
-        for line in &mut lines {
-            if line.text.len() > 82 {
-                line.text.truncate(82);
+        if clip_lines {
+            for line in &mut lines {
+                if line.text.len() > 82 {
+                    let end = line.text.floor_char_boundary(82);
+                    line.text.truncate(end);
+                }
             }
         }
         ui::DebuggerView {
@@ -2895,6 +2964,8 @@ impl App {
             bitmap,
             video,
             audio,
+            #[cfg(feature = "egui-debugger")]
+            cpu,
         }
     }
 }
