@@ -265,6 +265,10 @@ impl App {
             self.paused = true;
             self.sync_live_audio_suspension();
             let mut panel = ui::DebuggerPanel::new();
+            #[cfg(feature = "egui-debugger")]
+            {
+                panel.tab = self.egui_layout_preferences().debugger_tab();
+            }
             // Start the memory view at the current program counter's
             // neighbourhood; it is usually what you came to look at.
             panel.mem_addr = self.emu.machine.pc() & self.emu.machine.ui_addr_mask() & !0xF;
@@ -288,6 +292,11 @@ impl App {
     /// Open the console window (pausing the machine), or close it again
     /// if it is already open (the host shortcut toggle).
     pub(super) fn toggle_console(&mut self) {
+        #[cfg(feature = "egui-debugger")]
+        if self.egui_workspace_open() && self.egui_selected_tool != ToolPanelKind::Console {
+            self.open_console();
+            return;
+        }
         if self.console_panel.is_some() {
             self.close_tool_panel(ToolPanelKind::Console);
         } else {
@@ -298,6 +307,8 @@ impl App {
     }
 
     pub(super) fn open_console(&mut self) {
+        #[cfg(feature = "egui-debugger")]
+        let shared_pause = self.egui_other_tool_pause(ToolPanelKind::Console);
         if self.console_panel.is_none() {
             self.suspend_mouse_capture_for_ui();
             self.ui.panel = None;
@@ -317,6 +328,8 @@ impl App {
                 );
             }
         }
+        #[cfg(feature = "egui-debugger")]
+        self.egui_did_open_tool(ToolPanelKind::Console, shared_pause);
     }
 
     pub(super) fn open_frame_analyzer(&mut self) {
@@ -330,6 +343,14 @@ impl App {
             self.sync_live_audio_suspension();
             self.emu.bus_mut().set_frame_analyzer_full(true);
             self.frame_analyzer_panel = Some(ui::FrameAnalyzerPanel::new());
+            #[cfg(feature = "egui-debugger")]
+            {
+                let tab = self.egui_layout_preferences().analyzer_tab();
+                self.activate_tool_control(
+                    ToolPanelKind::FrameAnalyzer,
+                    UiControl::AnalyzerTab(tab),
+                );
+            }
         }
         #[cfg(feature = "egui-debugger")]
         self.egui_did_open_tool(ToolPanelKind::FrameAnalyzer, shared_pause);
@@ -340,7 +361,7 @@ impl App {
         self.paused_before_analyzer = self.paused;
         #[cfg(feature = "egui-debugger")]
         {
-            self.paused_before_debugger = self.paused;
+            self.egui_remember_run_state();
         }
         self.sync_live_audio_suspension();
         if !self.paused {
@@ -996,7 +1017,7 @@ impl App {
         self.paused_before_debugger = self.paused;
         #[cfg(feature = "egui-debugger")]
         {
-            self.paused_before_analyzer = self.paused;
+            self.egui_remember_run_state();
         }
         self.sync_live_audio_suspension();
     }
@@ -1459,7 +1480,7 @@ impl App {
             self.paused_before_debugger = true;
             #[cfg(feature = "egui-debugger")]
             {
-                self.paused_before_analyzer = true;
+                self.egui_remember_run_state();
             }
             self.open_debugger();
         }
@@ -2452,11 +2473,18 @@ impl App {
                 // shows the head of the COP1 list instead). Breakpointed
                 // addresses are marked with `*`.
                 let stopped = !bus.copper.is_running() && bus.copper.waiting().is_none();
-                let start = if stopped {
-                    agnus.cop1lc
-                } else {
-                    anchor.saturating_sub(5 * 4)
-                };
+                let start = panel.copper_addr.unwrap_or_else(|| {
+                    if stopped {
+                        agnus.cop1lc
+                    } else {
+                        anchor.saturating_sub(5 * 4)
+                    }
+                });
+                if let Some(address) = panel.copper_addr {
+                    lines.push(ui::DbgLine::plain(format!(
+                        "Pinned Copper list at ${address:06X}"
+                    )));
+                }
                 let cbreaks = bus.ui_copper_breaks();
                 for (addr, text) in crate::disasm::dump_copper_list(read, start, 30) {
                     let marker = if cbreaks.contains(&addr) { "*" } else { " " };

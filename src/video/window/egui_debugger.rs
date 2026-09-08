@@ -24,6 +24,9 @@ pub(super) enum Action {
     BlitScroll(isize),
     SelectTool(ToolPanelKind),
     CloseWorkspace,
+    CloseTool(ToolPanelKind),
+    Navigate(ui::DebugTab, u32),
+    ConsoleSubmit(String),
     SubmitEntry,
     MemoryScroll(i32),
     IoMapScroll(i32),
@@ -32,6 +35,7 @@ pub(super) enum Action {
 enum Content<'a> {
     Debugger(&'a mut ui::DebuggerPanel, &'a ui::DebuggerView),
     Analyzer(&'a mut ui::FrameAnalyzerPanel, &'a ui::FrameAnalyzerView),
+    Console(&'a mut ui::ConsolePanel, &'a str),
 }
 
 pub(super) struct DebuggerUi {
@@ -45,12 +49,17 @@ pub(super) struct DebuggerUi {
 #[derive(Default)]
 struct Layout {
     images: HashMap<String, (egui::ColorImage, egui::TextureHandle)>,
+    preferences: preferences::Preferences,
+    last_tool: Option<ToolPanelKind>,
+    console_to_end: bool,
+    navigation: Option<ui::DebugTab>,
 }
 
 impl DebuggerUi {
     pub(super) fn new(
         window: &Window,
         pixels: &mut pixels::Pixels<'_>,
+        preferences: preferences::Preferences,
     ) -> Result<Self, pixels::TextureError> {
         pixels.resize_buffer(1, 1)?;
         let context = egui::Context::default();
@@ -75,12 +84,27 @@ impl DebuggerUi {
             context,
             input,
             renderer,
-            layout: Layout::default(),
+            layout: Layout {
+                preferences,
+                ..Default::default()
+            },
             repaint_at: None,
         })
     }
 
     pub(super) fn on_event(&mut self, window: &Window, event: &WindowEvent) {
+        if !window.is_maximized() {
+            match event {
+                WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
+                    let size = size.to_logical::<f64>(window.scale_factor());
+                    self.layout.preferences.window_size = [size.width, size.height];
+                }
+                WindowEvent::Moved(position) => {
+                    self.layout.preferences.position = Some([position.x, position.y])
+                }
+                _ => {}
+            }
+        }
         if self.input.on_window_event(window, event).repaint {
             window.request_redraw();
         }
@@ -155,8 +179,9 @@ fn run_content_frame(
     let mut actions = Vec::new();
     let output = context.run_ui(input, |root| {
         let (selected, status) = match &content {
-            Content::Debugger(_, view) => (ToolPanelKind::Debugger, &view.status),
-            Content::Analyzer(_, view) => (ToolPanelKind::FrameAnalyzer, &view.status),
+            Content::Debugger(_, view) => (ToolPanelKind::Debugger, view.status.as_str()),
+            Content::Analyzer(_, view) => (ToolPanelKind::FrameAnalyzer, view.status.as_str()),
+            Content::Console(_, status) => (ToolPanelKind::Console, *status),
         };
         egui::Panel::top("workspace_title")
             .frame(egui::Frame::new().fill(BLUE).inner_margin(8))
@@ -175,6 +200,7 @@ fn run_content_frame(
                 for (label, kind) in [
                     ("Debugger", ToolPanelKind::Debugger),
                     ("Frame Analyzer", ToolPanelKind::FrameAnalyzer),
+                    ("Console", ToolPanelKind::Console),
                 ] {
                     if ui
                         .selectable_label(
@@ -192,11 +218,7 @@ fn run_content_frame(
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("Close inspector").clicked() {
-                        actions.push(if selected == ToolPanelKind::FrameAnalyzer {
-                            Action::Analyzer(UiControl::PanelClose)
-                        } else {
-                            Action::Control(UiControl::PanelClose)
-                        });
+                        actions.push(Action::CloseTool(selected));
                     }
                 });
             });
@@ -204,8 +226,19 @@ fn run_content_frame(
         match &mut content {
             Content::Debugger(panel, view) => layout.show(root, panel, view, &mut actions),
             Content::Analyzer(panel, view) => layout.analyzer(root, panel, view, &mut actions),
+            Content::Console(panel, _) => layout.console(root, panel, &mut actions),
         }
+        layout.last_tool = Some(selected);
     });
+    for (id, dimension) in [("debugger_registers", 0), ("debugger_cpu_memory", 1)] {
+        if let Some(state) = egui::containers::panel::PanelState::load(context, egui::Id::new(id)) {
+            if dimension == 0 {
+                layout.preferences.register_width = state.size().x;
+            } else {
+                layout.preferences.memory_height = state.size().y;
+            }
+        }
+    }
     // Input can be consumed on the first of several layout passes. Keep its
     // edits and commands, but dispatch each command only once per UI frame.
     let mut unique = Vec::new();
@@ -214,6 +247,7 @@ fn run_content_frame(
             unique.push(action);
         }
     }
+    layout.navigation = None;
     (output, unique)
 }
 
@@ -398,41 +432,44 @@ impl Layout {
         egui::CentralPanel::default().show(root, |ui| {
             self.tab_controls(ui, panel, view, actions);
             ui.separator();
-            ScrollArea::both()
+            let mut scroll = ScrollArea::both()
                 .id_salt(format!("debugger_{:?}", panel.tab))
-                .auto_shrink([false, false])
-                .show(ui, |ui| match panel.tab {
-                    ui::DebugTab::Video => {
-                        if let Some(video) = &view.video {
-                            self.video(ui, video, actions);
-                        }
+                .auto_shrink([false, false]);
+            if self.navigation == Some(panel.tab) {
+                scroll = scroll.scroll_offset(egui::Vec2::ZERO);
+            }
+            scroll.show(ui, |ui| match panel.tab {
+                ui::DebugTab::Video => {
+                    if let Some(video) = &view.video {
+                        self.video(ui, video, actions);
                     }
-                    ui::DebugTab::Audio => {
-                        if let Some(audio) = &view.audio {
-                            self.audio(ui, audio, actions);
-                        }
+                }
+                ui::DebugTab::Audio => {
+                    if let Some(audio) = &view.audio {
+                        self.audio(ui, audio, actions);
                     }
-                    _ => {
-                        lines(ui, &view.lines);
-                        if let Some(bitmap) = &view.bitmap {
-                            let size = [bitmap.stride * 8, bitmap.rows];
-                            let colors = bitmap
-                                .data
-                                .iter()
-                                .flat_map(|byte| {
-                                    (0..8).map(move |bit| {
-                                        if byte & (0x80 >> bit) == 0 {
-                                            Color32::from_gray(20)
-                                        } else {
-                                            PAPER
-                                        }
-                                    })
+                }
+                _ => {
+                    lines(ui, &view.lines);
+                    if let Some(bitmap) = &view.bitmap {
+                        let size = [bitmap.stride * 8, bitmap.rows];
+                        let colors = bitmap
+                            .data
+                            .iter()
+                            .flat_map(|byte| {
+                                (0..8).map(move |bit| {
+                                    if byte & (0x80 >> bit) == 0 {
+                                        Color32::from_gray(20)
+                                    } else {
+                                        PAPER
+                                    }
                                 })
-                                .collect();
-                            self.image(ui, "memory_bits".into(), size, colors, 2.0);
-                        }
+                            })
+                            .collect();
+                        self.image(ui, "memory_bits".into(), size, colors, 2.0);
                     }
-                });
+                }
+            });
         });
     }
 
@@ -445,7 +482,7 @@ impl Layout {
     ) {
         egui::Panel::left("debugger_registers")
             .resizable(true)
-            .default_size(235.0)
+            .default_size(self.preferences.register_width)
             .size_range(180.0..=480.0)
             .show(root, |ui| {
                 ScrollArea::both()
@@ -494,7 +531,7 @@ impl Layout {
             });
         egui::Panel::bottom("debugger_cpu_memory")
             .resizable(true)
-            .default_size(190.0)
+            .default_size(self.preferences.memory_height)
             .size_range(100.0..=480.0)
             .show(root, |ui| {
                 ui.horizontal_wrapped(|ui| {
@@ -525,19 +562,22 @@ impl Layout {
                     panel.disasm_addr = None;
                 }
             });
-            ScrollArea::both()
+            let mut scroll = ScrollArea::both()
                 .id_salt("cpu_disassembly_scroll")
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    lines(ui, &cpu.disassembly);
-                });
+                .auto_shrink([false, false]);
+            if self.navigation == Some(ui::DebugTab::Cpu) {
+                scroll = scroll.scroll_offset(egui::Vec2::ZERO);
+            }
+            scroll.show(ui, |ui| {
+                lines(ui, &cpu.disassembly);
+            });
         });
     }
 
     fn tab_controls(
         &self,
         ui: &mut egui::Ui,
-        panel: &ui::DebuggerPanel,
+        panel: &mut ui::DebuggerPanel,
         view: &ui::DebuggerView,
         actions: &mut Vec<Action>,
     ) {
@@ -583,6 +623,9 @@ impl Layout {
                     panel.entry_addr().is_some(),
                 );
                 button(ui, actions, "CStep (C)", UiControl::DebugCopperStep, true);
+                if panel.copper_addr.is_some() && ui.button("Follow Copper").clicked() {
+                    panel.copper_addr = None;
+                }
             }
             ui::DebugTab::Memory => {
                 for (label, control, enabled) in [
@@ -840,19 +883,29 @@ fn shortcuts(ui: &mut egui::Ui, panel: &ui::DebuggerPanel, actions: &mut Vec<Act
 
 impl App {
     pub(super) fn egui_workspace_open(&self) -> bool {
-        self.debugger_panel.is_some() || self.frame_analyzer_panel.is_some()
+        self.debugger_panel.is_some()
+            || self.frame_analyzer_panel.is_some()
+            || self.console_panel.is_some()
     }
 
     pub(super) fn egui_other_tool_pause(&self, kind: ToolPanelKind) -> Option<(bool, bool)> {
-        match kind {
-            ToolPanelKind::Debugger if self.frame_analyzer_panel.is_some() => {
-                Some((self.paused, self.paused_before_analyzer))
+        ToolPanelKind::ALL.into_iter().find_map(|other| {
+            if other == kind || !self.tool_panel_is_open(other) {
+                return None;
             }
-            ToolPanelKind::FrameAnalyzer if self.debugger_panel.is_some() => {
-                Some((self.paused, self.paused_before_debugger))
-            }
-            _ => None,
-        }
+            let restore = match other {
+                ToolPanelKind::Debugger => self.paused_before_debugger,
+                ToolPanelKind::FrameAnalyzer => self.paused_before_analyzer,
+                ToolPanelKind::Console => self.paused_before_console,
+            };
+            Some((self.paused, restore))
+        })
+    }
+
+    pub(super) fn egui_remember_run_state(&mut self) {
+        self.paused_before_debugger = self.paused;
+        self.paused_before_analyzer = self.paused;
+        self.paused_before_console = self.paused;
     }
 
     pub(super) fn egui_did_open_tool(
@@ -864,6 +917,7 @@ impl App {
             self.paused = paused;
             self.paused_before_debugger = resume_paused;
             self.paused_before_analyzer = resume_paused;
+            self.paused_before_console = resume_paused;
             self.sync_live_audio_suspension();
         }
         self.egui_selected_tool = kind;
@@ -875,6 +929,7 @@ impl App {
     }
 
     fn close_egui_workspace(&mut self) {
+        self.close_tool_panel(ToolPanelKind::Console);
         self.close_tool_panel(ToolPanelKind::FrameAnalyzer);
         self.close_tool_panel(ToolPanelKind::Debugger);
     }
@@ -969,6 +1024,22 @@ impl App {
             );
             self.frame_analyzer_panel = Some(panel);
             result
+        } else if self.egui_selected_tool == ToolPanelKind::Console {
+            let Some(mut panel) = self.console_panel.clone() else {
+                return;
+            };
+            let status = if self.paused { "Paused" } else { "Running" };
+            let tool = self.debugger_tool_window.as_mut().unwrap();
+            let Some(egui) = &mut tool.egui else {
+                return;
+            };
+            let result = egui.draw(
+                &tool.window,
+                &tool.pixels,
+                Content::Console(&mut panel, status),
+            );
+            self.console_panel = Some(panel);
+            result
         } else {
             let Some(mut panel) = self.debugger_panel.clone() else {
                 return;
@@ -1000,7 +1071,47 @@ impl App {
         match action {
             Action::SelectTool(ToolPanelKind::Debugger) => self.open_debugger(),
             Action::SelectTool(ToolPanelKind::FrameAnalyzer) => self.open_frame_analyzer(),
-            Action::SelectTool(ToolPanelKind::Console) => {}
+            Action::SelectTool(ToolPanelKind::Console) => self.open_console(),
+            Action::CloseTool(kind) => self.close_tool_panel(kind),
+            Action::Navigate(tab, address) => {
+                self.open_debugger();
+                let address = address & self.emu.machine.ui_addr_mask();
+                let panel = self.debugger_panel.as_mut().unwrap();
+                panel.tab = tab;
+                panel.entry = format!("{address:08X}");
+                panel.entry_active = false;
+                if let Some(egui) = self
+                    .debugger_tool_window
+                    .as_mut()
+                    .and_then(|tool| tool.egui.as_mut())
+                {
+                    egui.layout.navigation = Some(tab);
+                    egui.context.memory_mut(|memory| {
+                        if let Some(id) = memory.focused() {
+                            memory.surrender_focus(id);
+                        }
+                    });
+                }
+                match tab {
+                    ui::DebugTab::Cpu => panel.disasm_addr = Some(address & !1),
+                    ui::DebugTab::Memory => {
+                        panel.mem_addr = address & !0xF;
+                        panel.mem_view_bits = false;
+                        panel.mem_last_find = None;
+                    }
+                    ui::DebugTab::Copper => panel.copper_addr = Some(address & !1),
+                    _ => {}
+                }
+            }
+            Action::ConsoleSubmit(text) => {
+                for line in text.replace("\r\n", "\n").replace('\r', "\n").lines() {
+                    let Some(panel) = &mut self.console_panel else {
+                        break;
+                    };
+                    panel.input = line.to_owned();
+                    self.console_submit();
+                }
+            }
             Action::CloseWorkspace => self.close_egui_workspace(),
             Action::Analyzer(control) => {
                 self.activate_tool_control(ToolPanelKind::FrameAnalyzer, control)
@@ -1043,6 +1154,8 @@ impl App {
 }
 
 mod analyzer;
+mod console;
+pub(super) mod preferences;
 
 #[cfg(test)]
 mod tests;

@@ -262,7 +262,7 @@ impl Layout {
                 }
             });
             ui.vertical(|ui| {
-                beam_counters(ui, trace, panel.show_cpu_wait);
+                beam_counters(ui, trace, panel.show_cpu_wait, actions);
             });
         });
         ui.separator();
@@ -281,7 +281,8 @@ impl Layout {
                     .unwrap_or_default()
             ),
         );
-        beam_detail(ui, trace, probe.0, probe.1);
+        selectable(ui, format!("Pointer v={:03} h={:03}", probe.0, probe.1));
+        beam_detail(ui, trace, trace.selected_vpos, trace.selected_hpos, actions);
     }
 
     fn analyzer_memory(
@@ -400,6 +401,16 @@ impl Layout {
             ui.label("Click a cell to inspect its address and last access.");
         }
         if let Some(selected) = &heat.selected {
+            let address = heat
+                .base
+                .wrapping_add(selected.cell as u32 * heat.bytes_per_cell);
+            address_link(
+                ui,
+                actions,
+                ui::DebugTab::Memory,
+                address,
+                format!("Inspect memory at ${address:08X}"),
+            );
             selectable(
                 ui,
                 format!(
@@ -591,7 +602,12 @@ fn swatch(ui: &mut egui::Ui, colour: Color32) {
     ui.painter().rect_filled(rect, 0.0, colour);
 }
 
-fn beam_counters(ui: &mut egui::Ui, trace: &ui::AnalyzerTraceView, waits: bool) {
+fn beam_counters(
+    ui: &mut egui::Ui,
+    trace: &ui::AnalyzerTraceView,
+    waits: bool,
+    actions: &mut Vec<Action>,
+) {
     ui.strong(if waits { "CPU waits" } else { "Bus ownership" });
     let total = trace.owner_cck.iter().sum::<u64>().max(1);
     let names = if waits {
@@ -645,7 +661,13 @@ fn beam_counters(ui: &mut egui::Ui, trace: &ui::AnalyzerTraceView, waits: bool) 
         }
         ui.strong("Most stalled PCs");
         for (pc, count, symbol) in &trace.top_stalled_pcs {
-            selectable(ui, format!("${pc:08X}  {count} cck"));
+            address_link(
+                ui,
+                actions,
+                ui::DebugTab::Cpu,
+                *pc,
+                format!("${pc:08X}  {count} cck"),
+            );
             if let Some(symbol) = symbol {
                 ui.label(symbol);
             }
@@ -754,7 +776,13 @@ fn beam_overlays(ui: &egui::Ui, rect: egui::Rect, trace: &ui::AnalyzerTraceView)
     }
 }
 
-fn beam_detail(ui: &mut egui::Ui, trace: &ui::AnalyzerTraceView, v: usize, h: usize) {
+fn beam_detail(
+    ui: &mut egui::Ui,
+    trace: &ui::AnalyzerTraceView,
+    v: usize,
+    h: usize,
+    actions: &mut Vec<Action>,
+) {
     selectable(
         ui,
         format!(
@@ -763,6 +791,15 @@ fn beam_detail(ui: &mut egui::Ui, trace: &ui::AnalyzerTraceView, v: usize, h: us
         ),
     );
     if let Some(record) = trace.record_at(v, h) {
+        if record.size > 0 {
+            address_link(
+                ui,
+                actions,
+                ui::DebugTab::Memory,
+                record.addr,
+                format!("Inspect memory at ${:08X}", record.addr),
+            );
+        }
         selectable(
             ui,
             format!(
@@ -783,7 +820,13 @@ fn beam_detail(ui: &mut egui::Ui, trace: &ui::AnalyzerTraceView, v: usize, h: us
             } else {
                 record.addr
             };
-            selectable(ui, format!("Copper instruction @${address:06X}"));
+            address_link(
+                ui,
+                actions,
+                ui::DebugTab::Copper,
+                address,
+                format!("Copper instruction @${address:06X}"),
+            );
         }
     }
     for marker in trace
@@ -830,4 +873,24 @@ fn analyzer_shortcuts(ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         );
         if ui.input(|i| i.events.iter().any(|event| matches!(event, egui::Event::Key { key: k, pressed: true, repeat, .. } if *k == key && (navigation || !repeat)))) { actions.push(Action::AnalyzerKey(code)); }
     }
+}
+
+/// Address navigation never runs the guest or alters a captured frame.
+fn address_link(
+    ui: &mut egui::Ui,
+    actions: &mut Vec<Action>,
+    tab: ui::DebugTab,
+    address: u32,
+    label: String,
+) {
+    let destination = match tab {
+        ui::DebugTab::Cpu => "CPU disassembly",
+        ui::DebugTab::Copper => "Copper list",
+        _ => "memory",
+    };
+    ui.push_id(("analyzer_address", destination, address), |ui| {
+        if ui.link(RichText::new(label).monospace().color(BLUE)).on_hover_text(format!("Open {destination} at this address in the current machine; the captured frame stays selected")).clicked() {
+            actions.push(Action::Navigate(tab, address));
+        }
+    });
 }

@@ -997,6 +997,8 @@ pub struct App {
     debugger_tool_window: Option<ToolWindow>,
     #[cfg(feature = "egui-debugger")]
     egui_selected_tool: ToolPanelKind,
+    #[cfg(feature = "egui-debugger")]
+    egui_preferences: Option<egui_debugger::preferences::Preferences>,
     frame_analyzer_tool_window: Option<ToolWindow>,
     console_tool_window: Option<ToolWindow>,
     /// When the frame loop last requested a paced tool window repaint
@@ -2083,6 +2085,8 @@ impl App {
             debugger_tool_window: None,
             #[cfg(feature = "egui-debugger")]
             egui_selected_tool: ToolPanelKind::Debugger,
+            #[cfg(feature = "egui-debugger")]
+            egui_preferences: None,
             frame_analyzer_tool_window: None,
             console_tool_window: None,
             last_tool_redraw: Instant::now(),
@@ -3489,6 +3493,8 @@ impl Drop for App {
     /// recording toggle writes its file when stopped, so by the time the app
     /// drops there is nothing left for it here.
     fn drop(&mut self) {
+        #[cfg(feature = "egui-debugger")]
+        self.save_egui_preferences();
         let (Some(rec), Some(path)) = (self.input_recorder.take(), self.record_input_path.take())
         else {
             return;

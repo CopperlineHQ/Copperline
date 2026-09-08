@@ -1137,10 +1137,10 @@ impl App {
     pub(super) fn tool_window_is_needed(&self, kind: ToolPanelKind) -> bool {
         #[cfg(feature = "egui-debugger")]
         match kind {
-            ToolPanelKind::Debugger => return self.egui_workspace_open(),
-            ToolPanelKind::FrameAnalyzer => return false,
-            ToolPanelKind::Console => {}
+            ToolPanelKind::Debugger => self.egui_workspace_open(),
+            ToolPanelKind::FrameAnalyzer | ToolPanelKind::Console => false,
         }
+        #[cfg(not(feature = "egui-debugger"))]
         self.tool_panel_is_open(kind)
     }
 
@@ -1199,6 +1199,13 @@ impl App {
             .with_window_icon(copperline_window_icon())
             .with_inner_size(size)
             .with_min_inner_size(min_size);
+        #[cfg(feature = "egui-debugger")]
+        let attrs = if kind == ToolPanelKind::Debugger {
+            self.egui_layout_preferences()
+                .window_attributes(attrs, event_loop)
+        } else {
+            attrs
+        };
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -1226,7 +1233,11 @@ impl App {
         let (pixels, egui) = {
             let mut pixels = pixels;
             let egui = if kind == ToolPanelKind::Debugger {
-                match egui_debugger::DebuggerUi::new(&window, &mut pixels) {
+                match egui_debugger::DebuggerUi::new(
+                    &window,
+                    &mut pixels,
+                    self.egui_layout_preferences().clone(),
+                ) {
                     Ok(ui) => Some(ui),
                     Err(error) => {
                         warn!("egui debugger init failed: {error}");
@@ -1249,6 +1260,10 @@ impl App {
         window.request_redraw();
         // Newly opened is newly in front, until another is touched.
         self.tool_window_front = Some(kind);
+        #[cfg(feature = "egui-debugger")]
+        if kind == ToolPanelKind::Debugger {
+            self.tool_window_front = Some(self.egui_selected_tool);
+        }
         let inner = window.inner_size();
         *self.tool_window_slot(kind) = Some(ToolWindow {
             window,
@@ -1281,6 +1296,8 @@ impl App {
     pub(super) fn close_tool_panel(&mut self, kind: ToolPanelKind) {
         #[cfg(feature = "egui-debugger")]
         let shared_paused = self.paused;
+        #[cfg(feature = "egui-debugger")]
+        self.save_egui_preferences();
         match kind {
             ToolPanelKind::Debugger => {
                 if self.debugger_panel.is_some() {
@@ -1289,7 +1306,7 @@ impl App {
                     self.sync_live_audio_suspension();
                 }
                 self.debugger_panel = None;
-                if !cfg!(feature = "egui-debugger") || self.frame_analyzer_panel.is_none() {
+                if !cfg!(feature = "egui-debugger") {
                     self.debugger_tool_window = None;
                 }
             }
@@ -1337,7 +1354,7 @@ impl App {
             }
         }
         #[cfg(feature = "egui-debugger")]
-        if matches!(kind, ToolPanelKind::Debugger | ToolPanelKind::FrameAnalyzer) {
+        {
             if self.egui_workspace_open() {
                 // Closing one inspector does not change the other one's run
                 // state or destroy their shared native window.
@@ -1345,8 +1362,10 @@ impl App {
                 if self.egui_selected_tool == kind {
                     self.egui_selected_tool = if self.debugger_panel.is_some() {
                         ToolPanelKind::Debugger
-                    } else {
+                    } else if self.frame_analyzer_panel.is_some() {
                         ToolPanelKind::FrameAnalyzer
+                    } else {
+                        ToolPanelKind::Console
                     };
                     self.tool_window_front = Some(self.egui_selected_tool);
                 }

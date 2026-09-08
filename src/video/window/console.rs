@@ -348,12 +348,16 @@ impl App {
             "RUN" | "GO" | "CONTINUE" | "C" => {
                 self.paused = false;
                 self.paused_before_console = false;
+                #[cfg(feature = "egui-debugger")]
+                self.egui_remember_run_state();
                 self.sync_live_audio_suspension();
                 ConsoleOutcome::one("running (PAUSE stops; breakpoints report here or on stop)")
             }
             "PAUSE" => {
                 self.paused = true;
                 self.paused_before_console = true;
+                #[cfg(feature = "egui-debugger")]
+                self.egui_remember_run_state();
                 self.sync_live_audio_suspension();
                 let mut lines = vec!["paused".to_string()];
                 lines.extend(self.console_status_lines());
@@ -424,6 +428,8 @@ impl App {
                 use crate::timetravel::ReverseOutcome;
                 self.paused = true;
                 self.paused_before_console = true;
+                #[cfg(feature = "egui-debugger")]
+                self.egui_remember_run_state();
                 self.sync_live_audio_suspension();
                 self.last_debug_stop = None;
                 let mut lines = Vec::new();
@@ -1279,6 +1285,8 @@ impl App {
     ) -> ConsoleOutcome {
         self.paused = true;
         self.paused_before_console = true;
+        #[cfg(feature = "egui-debugger")]
+        self.egui_remember_run_state();
         self.sync_live_audio_suspension();
         self.last_debug_stop = None;
         let note = match op(self) {
@@ -1321,6 +1329,8 @@ impl App {
         use crate::timetravel::ReverseOutcome;
         self.paused = true;
         self.paused_before_console = true;
+        #[cfg(feature = "egui-debugger")]
+        self.egui_remember_run_state();
         self.sync_live_audio_suspension();
         self.last_debug_stop = None;
         let outcome = match op(self) {

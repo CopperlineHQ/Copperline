@@ -110,8 +110,8 @@ frontend = [
     "dep:arboard",
     "dep:env_logger",
 ]
-# Experimental shared GPU-rendered debugger and Frame Analyzer window.
-# The main display and Console keep their existing presentation.
+# Experimental shared GPU-rendered debugger, Frame Analyzer, and Console.
+# The main display keeps its existing presentation.
 egui-debugger = ["frontend", "dep:egui", "dep:egui-winit", "dep:egui-wgpu"]
 # The wasmtime host for functional Zorro boards (src/wasmboard.rs). Separate
 # from `frontend` because it is a core-machine feature, but Cranelift cannot

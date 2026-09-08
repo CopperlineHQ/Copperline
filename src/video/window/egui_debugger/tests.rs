@@ -335,6 +335,314 @@ fn both_inspectors_share_one_window_and_restore_the_same_run_state() {
 }
 
 #[test]
+fn console_shares_the_workspace_in_every_open_and_close_order() {
+    for first in ToolPanelKind::ALL {
+        for second in ToolPanelKind::ALL {
+            if first == second {
+                continue;
+            }
+            let third = ToolPanelKind::ALL
+                .into_iter()
+                .find(|k| *k != first && *k != second)
+                .unwrap();
+            for initially_paused in [false, true] {
+                for close_first in ToolPanelKind::ALL {
+                    let mut app = test_app();
+                    app.paused = initially_paused;
+                    for kind in [first, second, third] {
+                        app.apply_egui_debugger_action(Action::SelectTool(kind));
+                        assert!(app.paused);
+                        assert_eq!(app.topmost_tool_panel(), Some(kind));
+                    }
+                    assert!(app.tool_window_is_needed(ToolPanelKind::Debugger));
+                    assert!(!app.tool_window_is_needed(ToolPanelKind::FrameAnalyzer));
+                    assert!(!app.tool_window_is_needed(ToolPanelKind::Console));
+                    app.close_tool_panel(close_first);
+                    assert!(app.paused);
+                    assert!(app.tool_panel_is_open(app.egui_selected_tool));
+                    app.close_egui_workspace();
+                    assert_eq!(app.paused, initially_paused);
+                    assert!(!app.egui_workspace_open());
+                }
+            }
+        }
+    }
+    let mut app = analyzer_app();
+    app.open_console();
+    app.apply_egui_debugger_action(Action::ConsoleSubmit("RUN".into()));
+    app.open_debugger();
+    assert!(!app.paused);
+    app.close_tool_panel(ToolPanelKind::Console);
+    assert!(!app.paused);
+    app.open_console();
+    app.apply_egui_debugger_action(Action::ConsoleSubmit("PAUSE\nCLOSE\nRUN".into()));
+    assert!(
+        app.console_panel.is_none(),
+        "CLOSE ends the submitted batch"
+    );
+    app.close_egui_workspace();
+    assert!(
+        app.paused,
+        "the last explicit pause survives closing every inspector"
+    );
+}
+
+#[test]
+fn analyzer_navigation_pins_addresses_without_changing_the_capture_or_machine() {
+    let mut app = analyzer_app();
+    app.open_console();
+    app.console_panel.as_mut().unwrap().input = "status".into();
+    let capture = app.emu.bus().frame_bus_trace().unwrap().frame;
+    let selection = app.frame_analyzer_panel.as_ref().unwrap().selected_hpos;
+    let before = app.emu.save_state_bytes().unwrap();
+    for (tab, address) in [
+        (ui::DebugTab::Cpu, 0x121),
+        (ui::DebugTab::Memory, 0x135),
+        (ui::DebugTab::Copper, 0x200),
+    ] {
+        app.apply_egui_debugger_action(Action::Navigate(tab, address));
+        assert_eq!(app.egui_selected_tool, ToolPanelKind::Debugger);
+        let panel = app.debugger_panel.as_ref().unwrap();
+        assert_eq!(panel.tab, tab);
+        match tab {
+            ui::DebugTab::Cpu => assert_eq!(panel.disasm_addr, Some(0x120)),
+            ui::DebugTab::Memory => assert_eq!(panel.mem_addr, 0x130),
+            ui::DebugTab::Copper => {
+                assert_eq!(panel.copper_addr, Some(0x200));
+                let view = app.build_debugger_view_with_clipping(panel, false);
+                assert!(view.lines.iter().any(|line| line.text.contains("000200")));
+            }
+            _ => unreachable!(),
+        }
+        app.open_frame_analyzer();
+        assert_eq!(
+            app.frame_analyzer_panel.as_ref().unwrap().selected_hpos,
+            selection
+        );
+        assert_eq!(app.emu.bus().frame_bus_trace().unwrap().frame, capture);
+        assert_eq!(before, app.emu.save_state_bytes().unwrap());
+    }
+    assert_eq!(app.console_panel.as_ref().unwrap().input, "status");
+}
+
+#[test]
+fn console_paste_history_and_execution_are_separate_from_layout() {
+    let mut app = test_app();
+    app.open_console();
+    let context = egui::Context::default();
+    let mut layout = Layout::default();
+    let mut panel = app.console_panel.clone().unwrap();
+    let before = app.emu.save_state_bytes().unwrap();
+    for size in [[600.0, 480.0], [1100.0, 760.0]] {
+        let (_, actions) = run_content_frame(
+            &context,
+            &mut layout,
+            input(size, vec![]),
+            Content::Console(&mut panel, "Paused"),
+        );
+        assert!(actions.is_empty());
+    }
+    let (_, actions) = run_content_frame(
+        &context,
+        &mut layout,
+        input(
+            [1100.0, 760.0],
+            vec![egui::Event::Paste("status\nstep".into())],
+        ),
+        Content::Console(&mut panel, "Paused"),
+    );
+    assert!(actions.is_empty());
+    assert_eq!(panel.input, "status\nstep");
+    assert_eq!(before, app.emu.save_state_bytes().unwrap());
+    let (_, actions) = run_content_frame(
+        &context,
+        &mut layout,
+        input(
+            [1100.0, 760.0],
+            vec![key(egui::Key::Enter, egui::Modifiers::SHIFT)],
+        ),
+        Content::Console(&mut panel, "Paused"),
+    );
+    assert!(actions.is_empty(), "Shift+Enter belongs to the editor");
+    assert_eq!(panel.input, "status\nstep\n");
+    let mut released = key(egui::Key::Enter, egui::Modifiers::SHIFT);
+    if let egui::Event::Key { pressed, .. } = &mut released {
+        *pressed = false;
+    }
+    let _ = run_content_frame(
+        &context,
+        &mut layout,
+        input([1100.0, 760.0], vec![released]),
+        Content::Console(&mut panel, "Paused"),
+    );
+    // Exercise egui's repeated sizing pass as well as ordinary command input.
+    context.options_mut(|options| options.max_passes = 2.try_into().unwrap());
+    let (_, actions) = run_content_frame(
+        &context,
+        &mut layout,
+        input(
+            [1100.0, 760.0],
+            vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
+        ),
+        Content::Console(&mut panel, "Paused"),
+    );
+    assert_eq!(actions, [Action::ConsoleSubmit("status\nstep\n".into())]);
+    assert!(panel.input.is_empty());
+    assert_eq!(
+        before,
+        app.emu.save_state_bytes().unwrap(),
+        "layout cannot execute commands"
+    );
+    app.console_panel = Some(panel);
+    let retired = app.emu.retired_instructions();
+    for action in actions {
+        app.apply_egui_debugger_action(action);
+    }
+    assert_eq!(app.emu.retired_instructions(), retired + 1);
+    let mut panel = app.console_panel.clone().unwrap();
+    assert_eq!(panel.history, ["status", "step"]);
+    for (key_name, expected) in [
+        (egui::Key::ArrowUp, "step"),
+        (egui::Key::ArrowUp, "status"),
+        (egui::Key::ArrowDown, "step"),
+    ] {
+        let (_, actions) = run_content_frame(
+            &context,
+            &mut layout,
+            input([1100.0, 760.0], vec![key(key_name, egui::Modifiers::NONE)]),
+            Content::Console(&mut panel, "Paused"),
+        );
+        assert!(actions.is_empty());
+        assert_eq!(panel.input, expected);
+    }
+}
+
+#[test]
+fn saved_cpu_pane_sizes_restore_in_a_fresh_egui_context() {
+    let app = test_app();
+    let mut panel = ui::DebuggerPanel::new();
+    let view = app.build_debugger_view_with_clipping(&panel, false);
+    let mut layout = Layout::default();
+    layout.preferences.register_width = 310.0;
+    layout.preferences.memory_height = 245.0;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("layout.toml");
+    layout.preferences.save(&path).unwrap();
+    let mut restored = Layout {
+        preferences: preferences::Preferences::load(&path),
+        ..Default::default()
+    };
+    let context = egui::Context::default();
+    for _ in 0..3 {
+        let _ = run_frame(
+            &context,
+            &mut restored,
+            input([1250.0, 820.0], vec![]),
+            &mut panel,
+            &view,
+        );
+    }
+    assert!((restored.preferences.register_width - 310.0).abs() < 1.0);
+    assert!((restored.preferences.memory_height - 245.0).abs() < 1.0);
+    for (id, expected, axis) in [
+        ("debugger_registers", 310.0, 0),
+        ("debugger_cpu_memory", 245.0, 1),
+    ] {
+        let size = egui::containers::panel::PanelState::load(&context, egui::Id::new(id))
+            .unwrap()
+            .size();
+        assert!((size[axis] - expected).abs() < 1.0, "{id}: {size:?}");
+    }
+}
+
+#[test]
+fn clicking_analyzer_addresses_dispatches_the_matching_destination() {
+    let app = analyzer_app();
+    let mut panel = app.frame_analyzer_panel.clone().unwrap();
+    panel.show_cpu_wait = true;
+    let mut view = app.build_frame_analyzer_view(&panel);
+    view.trace.as_mut().unwrap().top_stalled_pcs = vec![(0x120, 17, None)];
+    let context = egui::Context::default();
+    let mut layout = Layout::default();
+    let mut point = None;
+    for _ in 0..3 {
+        let (output, _) = run_content_frame(
+            &context,
+            &mut layout,
+            input([1100.0, 1000.0], vec![]),
+            Content::Analyzer(&mut panel, &view),
+        );
+        for shape in output.shapes {
+            if let egui::Shape::Text(text) = shape.shape {
+                if text.galley.job.text == "$00000120  17 cck" {
+                    point = Some(text.pos + text.galley.size() * 0.5);
+                }
+            }
+        }
+    }
+    let point = point.expect("stalled PC link is rendered");
+    let mut actions = Vec::new();
+    for events in [
+        vec![egui::Event::PointerMoved(point)],
+        vec![egui::Event::PointerButton {
+            pos: point,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        }],
+        vec![egui::Event::PointerButton {
+            pos: point,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+    ] {
+        actions.extend(
+            run_content_frame(
+                &context,
+                &mut layout,
+                input([1100.0, 1000.0], events),
+                Content::Analyzer(&mut panel, &view),
+            )
+            .1,
+        );
+    }
+    assert_eq!(actions, [Action::Navigate(ui::DebugTab::Cpu, 0x120)]);
+}
+
+#[test]
+#[ignore = "writes GPU-rendered Console preview for visual review"]
+fn render_console_preview() {
+    let gpu =
+        super::super::crt_shader::test_gpu("egui_console_preview").expect("hardware GPU required");
+    let mut app = analyzer_app();
+    app.open_console();
+    app.apply_egui_debugger_action(Action::ConsoleSubmit("STATUS\nREGS\nCPUWAIT".into()));
+    let mut panel = app.console_panel.clone().unwrap();
+    panel.input = "dis 100 8".into();
+    let context = egui::Context::default();
+    configure_style(&context);
+    context.set_pixels_per_point(2.0);
+    let mut layout = Layout::default();
+    let mut offscreen = Offscreen::new(gpu.device(), 2200, 1520, 2.0);
+    for _ in 0..3 {
+        let (output, actions) = run_content_frame(
+            &context,
+            &mut layout,
+            input([1100.0, 760.0], vec![]),
+            Content::Console(&mut panel, "Paused"),
+        );
+        assert!(actions.is_empty());
+        offscreen.draw(&context, output, gpu.device(), gpu.queue());
+    }
+    offscreen.save(
+        gpu.device(),
+        gpu.queue(),
+        std::path::Path::new("target/egui-debugger/Console.png"),
+    );
+}
+
+#[test]
 fn switching_inspectors_preserves_capture_selection_and_explicit_run_pause() {
     let mut app = analyzer_app();
     app.frame_analyzer_panel.as_mut().unwrap().selected_hpos = 90;

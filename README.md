@@ -61,8 +61,8 @@ Run the resulting `target/release/copperline` binary. `--release` is a Cargo
 build option; unoptimized debug builds are too slow for real-time emulation.
 
 An optional [egui debugger prototype](docs/debugger/window.md#egui-debugger-prototype)
-combines the debugger and Frame Analyzer in one window, with resizable CPU panes
-and selectable text. Build with
+combines the debugger, Frame Analyzer, and Console in one window, with linked
+address inspection, selectable text, and a saved window layout. Build with
 `cargo build --release --features egui-debugger`, then open the debugger normally.
 The regular build keeps the existing debugger UI.
 

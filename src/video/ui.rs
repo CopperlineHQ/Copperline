@@ -142,6 +142,8 @@ pub struct DebuggerPanel {
     pub mem_addr: u32,
     /// Pinned disassembly origin for the CPU tab; None follows the PC.
     pub disasm_addr: Option<u32>,
+    /// Pinned Copper-list origin; None follows the live Copper.
+    pub copper_addr: Option<u32>,
     /// The hex address being typed into the entry box.
     pub entry: String,
     /// Whether the entry box has keyboard focus.
@@ -164,6 +166,7 @@ impl DebuggerPanel {
             tab: DebugTab::Cpu,
             mem_addr: 0,
             disasm_addr: None,
+            copper_addr: None,
             entry: String::new(),
             entry_active: false,
             mem_last_find: None,

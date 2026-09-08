@@ -12,7 +12,18 @@ Debugger console interface with active breakpoint output.
 ```
 
 Opening the console pauses emulation (`RUN` resumes execution). Closing the
-console restores the previous execution state.
+console restores the previous execution state. With the optional
+[`egui-debugger` frontend](window.md#egui-debugger-prototype), the Console shares
+the debugger and Frame Analyzer window. Switching inspectors preserves the
+command text, output, history, and current run/pause state. Closing one leaves
+the remaining inspectors open; Run/Pause choices apply to the shared session.
+
+```{figure} ../images/ui-preview-console-egui.png
+:alt: The egui Console sharing the debugger window, with selectable output and an editable command field
+:width: 100%
+
+The Console in the shared inspector window.
+```
 
 Guest debug output sent via the
 [uaelib trap](../guide/run.md#uaelib-trap) `KPrintF` helper appears in the
@@ -24,7 +35,12 @@ Input navigation:
 - `Up` / `Down`: Navigate command history.
 - `PageUp` / `PageDown` or mouse wheel: Scroll console output buffer.
 - `Cmd+V` (macOS) or `Ctrl+V` (Linux/Windows): Paste clipboard contents. Multi-line
-  pastes execute each complete line sequentially.
+  pastes execute each complete line sequentially in the regular frontend.
+  In the egui frontend, pasted commands stay in the editable field until Enter
+  or **Execute** submits them; Shift+Enter adds another line. A `CLOSE` command
+  ends the submitted batch. Scroll the egui output with PageUp/PageDown, its
+  scrollbars, or the mouse wheel; Up/Down browse history while the command field
+  has focus.
 
 Commands are case-insensitive. Addresses and data values use hexadecimal notation
 (optional `$` or `0x` prefix). Raster beam coordinates (VPOS, HPOS) use decimal notation.

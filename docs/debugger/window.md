@@ -5,10 +5,10 @@ the status bar menu) to pause emulation and open the debugger tool window.
 Closing the window restores the previous execution state.
 
 The regular build puts the debugger, Frame Analyzer, and [Console](console) in
-separate host windows. The optional egui frontend below combines the debugger
-and Frame Analyzer in one window. Inspection reads do not acknowledge hardware
-registers or consume emulated bus cycles. Stepping, register edits, and memory
-writes change the machine as requested.
+separate host windows. The optional egui frontend below combines the debugger,
+Frame Analyzer, and Console in one window. Inspection reads do not acknowledge
+hardware registers or consume emulated bus cycles. Stepping, register edits,
+and memory writes change the machine as requested.
 
 ```{figure} ../images/ui-preview-debugger.png
 :alt: The debugger window on the CPU tab
@@ -20,8 +20,8 @@ Debugger window: register file, live disassembly, and transport controls.
 (egui-debugger-prototype)=
 ## Optional egui frontend
 
-The `egui-debugger` Cargo feature provides a shared, GPU-rendered debugger and
-Frame Analyzer window. Build and launch it with:
+The `egui-debugger` Cargo feature provides a shared, GPU-rendered window for the
+debugger, Frame Analyzer, and Console. Build and launch it with:
 
 ```sh
 cargo run --release --locked --features egui-debugger -- --factory
@@ -48,8 +48,9 @@ retains Find, Save, Writer, Bits, and Poke; the other tabs retain their layer
 toggles, audio mutes, breakpoints, and waveform controls. Scrollbars expose
 content that does not fit the window. Transport keyboard shortcuts work while
 not editing text. **Close inspector** and the controller's back button close
-the selected inspector; the other remains available in the shared window.
-`Esc` leaves a text field first. Outside a text field it closes both inspectors,
+the selected inspector; the remaining inspectors stay available in the shared
+window.
+`Esc` leaves a text field first. Outside a text field it closes all inspectors,
 as does closing the native window.
 
 Select **Frame Analyzer** above the debugger tabs to inspect its **Beam**,
@@ -72,10 +73,32 @@ beam scrub, CPU waits, and run-to-beam retain their normal controls and
 shortcuts. The Memory view offers address presets and cell picking; Blits
 shows source/result previews with previous/next selection; Resources offers
 paging, previews, and **Save resource**. Text readouts can be selected and copied.
+Click a PC in **Most stalled PCs** to open CPU disassembly there.
+Below the selected beam slot, **Inspect memory**
+opens the Memory tab; a **Copper instruction** link pins the Copper listing at
+that instruction. The heat map's pinned cell also links to memory. **Follow
+Copper** returns the listing to the live Copper. These links inspect the current
+machine at the recorded address; they do not restore historical memory or run
+the guest, and the analyzer's capture and selection remain available.
 
-This experiment changes the two desktop inspectors. The emulator display,
-Console, launcher, and browser frontend use their existing
-renderers. Rebuild without `--features egui-debugger` to compare the regular UI.
+Select **Console** at the top, or use `Cmd+K` / `Alt+K`, for the same
+[command interpreter](console) and history in this window. Output is selectable;
+the command field supports editing and clipboard paste. Enter or **Execute**
+runs the entered commands. Shift+Enter adds a line, and pasted commands remain
+editable until submitted. Up/Down browse history. Console output continues to
+arrive while another inspector is selected.
+
+The window's size, position, maximized state, CPU pane sizes, and the debugger
+and analyzer tabs are saved when an inspector closes or Copperline exits.
+They are restored on reopening or relaunching; a position on a disconnected
+monitor is discarded. Preferences live in `inspector-layout.toml` in the
+[host data directory](../guide/ui.md#where-files-go). They contain layout choices only,
+not command text, captures, or machine state. Opening a specific inspector
+always selects the one requested.
+
+This experiment changes the three desktop inspectors. The emulator display,
+launcher, and browser frontend use their existing renderers. Rebuild without
+`--features egui-debugger` to compare the regular UI.
 Live machine-data refreshes retain the existing 20 Hz limit; input and stepping
 redraw immediately. This is an interface prototype, with no promised emulation
 speedup.
