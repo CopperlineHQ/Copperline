@@ -527,3 +527,20 @@ An externally forced debugger PC write invalidates the instruction prefetch
 queue before execution resumes at the new address. Native snapshot restores
 retain their saved queue for exact replay; USS imports start with a cold
 queue at the imported PC.
+
+## Libretro checkpoints
+
+Libretro uses the same descriptor, subsystem chunks, MessagePack codec and
+transactional component adoption as file states. Its `CLFRONT1` envelope
+contains the schema fingerprint, `DESC`, a versioned `FLAT` chunk holding
+CPU interrupt-sampling and Bus rollback latches, then the ordinary machine
+chunks and end marker. The machine chunks are uncompressed because RetroArch
+captures them every field and handles transport/storage compression itself.
+The ordinary desktop `.clstate` format is unchanged by this frontend.
+
+The libretro adapter adds its content identity, checksum, playlist writes,
+pending input and presentation state around that checkpoint. A scoped CD
+path resolver maps verified immutable sources to content-derived names;
+WHDLoad disks reference deterministic session bases and carry their sector
+writes. Loading parses all chunks before adopting either the machine or its
+rollback latches. Netplay excludes host audio backlog and persistent writes.

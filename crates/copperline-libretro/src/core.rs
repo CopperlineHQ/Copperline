@@ -24,7 +24,7 @@ use std::rc::Rc;
 /// envelope bounds media to sixteen standard ADFs and machine state to the
 /// remainder. Unused bytes are zeroed and compress well in frontend files.
 pub const STATE_CAPACITY: usize = 64 * 1024 * 1024;
-const MAGIC: &[u8; 8] = b"CLRETRO1";
+const MAGIC: &[u8; 8] = b"CLRETRO2";
 
 pub struct BufferedAudio(pub Rc<RefCell<Vec<i16>>>);
 impl AudioSink for BufferedAudio {
@@ -41,6 +41,12 @@ impl AudioSink for BufferedAudio {
 
 pub struct Core {
     pub emu: Emulator,
+    pub netplay: bool,
+    pub state_capacity: usize,
+    pub cd_mode: bool,
+    cd_paths: copperline::cdrom::StatePaths,
+    whdload: Option<crate::whdload::Prepared>,
+    nvram_save: Option<PathBuf>,
     pub audio: Rc<RefCell<Vec<i16>>>,
     pub controls: Controls,
     pub disks: Vec<Option<Disk>>,
@@ -59,14 +65,15 @@ pub struct Core {
 
 pub fn configuration(model: &str, video: &str, kickstart: bool, system: &Path) -> Result<Config> {
     ensure!(
-        matches!(model, "A500" | "A1200"),
+        matches!(model, "A500" | "A1200" | "CD32"),
         "unsupported machine model"
     );
     let mut config = machine_profile_defaults(parse_machine_model(model)?);
     config.video_standard = parse_video_standard(video)?;
     config.rtc_seed_unix = Some(946_684_800);
     config.rtc_present = true;
-    config.floppy_connected = [true, false, false, false];
+    config.floppy_connected = [model != "CD32", false, false, false];
+    config.cd32_nvram_path = None;
     if kickstart {
         let named = system.join(format!("kickstart-{}.rom", model.to_ascii_lowercase()));
         config.rom_path = if named.is_file() {
@@ -74,20 +81,70 @@ pub fn configuration(model: &str, video: &str, kickstart: bool, system: &Path) -
         } else {
             system.join("kickstart.rom")
         };
+        if model == "CD32" {
+            let ext = system.join("kickstart-cd32-ext.rom");
+            ensure!(
+                ext.is_file(),
+                "CD32 needs kickstart-cd32-ext.rom in the system directory"
+            );
+            config.extended_rom_path = Some(ext);
+        }
     }
     Ok(config)
 }
 
 impl Core {
+    #[cfg(test)]
     pub fn load(
         config: &Config,
         content: Option<&Path>,
         save_dir: PathBuf,
         write_protected: bool,
     ) -> Result<Self> {
+        Self::load_with_system(
+            config,
+            content,
+            save_dir,
+            write_protected,
+            Path::new("."),
+            false,
+        )
+    }
+
+    pub fn load_with_system(
+        config: &Config,
+        content: Option<&Path>,
+        save_dir: PathBuf,
+        write_protected: bool,
+        system: &Path,
+        netplay: bool,
+    ) -> Result<Self> {
+        let mut config = config.clone();
+        let whdload = content
+            .filter(|p| media::is_whdload(p))
+            .map(|p| crate::whdload::prepare(&mut config, p, system, &save_dir))
+            .transpose()?;
+        let disks = match content.filter(|_| whdload.is_none()) {
+            Some(path) => media::playlist(path)?
+                .iter()
+                .map(|path| Disk::open(path, &save_dir).map(Some))
+                .collect::<Result<Vec<_>>>()?,
+            None => Vec::new(),
+        };
+        let cd_mode = config.akiko; // CD32 profile owns the optical drive.
+        ensure!(
+            disks.iter().flatten().all(|d| d.cd.is_some() == cd_mode),
+            "CD images require the CD32 machine; ADFs require an Amiga with DF0"
+        );
+        let mut cd_paths = copperline::cdrom::StatePaths::default();
+        for cd in disks.iter().flatten().filter_map(|d| d.cd.as_ref()) {
+            for (local, portable) in &cd.sources {
+                cd_paths.insert(local.clone(), portable.clone())?;
+            }
+        }
         let audio = Rc::new(RefCell::new(Vec::new()));
         let aros = config.rom_path == Path::new(copperline::config::BUNDLED_AROS_ROM);
-        let mut emu = build_machine(config, Box::new(BufferedAudio(audio.clone())), false, aros)?;
+        let mut emu = build_machine(&config, Box::new(BufferedAudio(audio.clone())), false, aros)?;
         emu.bus_mut().paula.serial = Box::new(NullSerialSink);
         if aros {
             emu.reload_rom(
@@ -97,14 +154,15 @@ impl Core {
         }
         let machine_identity =
             Sha256::digest(format!("{:?}", emu.machine_descriptor()).as_bytes()).into();
-        let disks = match content {
-            Some(path) => media::playlist(path)?
-                .iter()
-                .map(|path| Disk::open(path, &save_dir).map(Some))
-                .collect::<Result<Vec<_>>>()?,
-            None => Vec::new(),
-        };
+        let state_capacity = STATE_CAPACITY + whdload.as_ref().map_or(0, |w| w.capacity);
+        let nvram_save = cd_mode.then(|| save_dir.join("copperline").join("cd32.nvram"));
         let mut core = Self {
+            netplay,
+            state_capacity,
+            cd_mode,
+            cd_paths,
+            whdload,
+            nvram_save,
             emu,
             audio,
             controls: Controls::default(),
@@ -121,6 +179,32 @@ impl Core {
             machine_identity,
             presentation: present::PresentationLatch::default(),
         };
+        core.controls.cd32 = cd_mode;
+        core.controls.netplay = netplay;
+        if let Some(path) = &core.nvram_save {
+            if path.exists() {
+                core.emu
+                    .bus_mut()
+                    .akiko
+                    .as_mut()
+                    .context("missing Akiko")?
+                    .load_nvram_bytes(&media::read_bounded(path, 1024)?)?;
+            }
+        }
+        if let Some(whdload) = &core.whdload {
+            for (slot, path) in whdload.saves.iter().enumerate() {
+                if path.exists() {
+                    core.emu
+                        .bus_mut()
+                        .gayle
+                        .as_mut()
+                        .context("missing IDE controller")?
+                        .hard_disk_mut(slot)
+                        .context("missing WHDLoad disk")?
+                        .restore_session_overlay(&media::read_bounded(path, whdload.capacity)?)?;
+                }
+            }
+        }
         if !core.disks.is_empty() {
             core.set_ejected(false)?;
         }
@@ -207,7 +291,7 @@ impl Core {
     }
 
     pub fn capture_disk(&mut self) -> Result<()> {
-        if !self.ejected {
+        if !self.ejected && !self.cd_mode {
             if let Some(Some(disk)) = self.disks.get_mut(self.selected) {
                 disk.bytes = self.emu.bus().floppy.export_disk_image(0)?;
             }
@@ -216,6 +300,35 @@ impl Core {
     }
 
     pub fn persist(&mut self) -> Result<()> {
+        // A speculative or remote player's timeline must never reach disk.
+        if self.netplay {
+            return Ok(());
+        }
+        if let Some(path) = &self.nvram_save {
+            media::write_save(
+                path,
+                self.emu
+                    .bus()
+                    .akiko
+                    .as_ref()
+                    .context("missing Akiko")?
+                    .nvram_bytes(),
+            )?;
+        }
+        if let Some(whdload) = &self.whdload {
+            for (slot, path) in whdload.saves.iter().enumerate() {
+                let bytes = self
+                    .emu
+                    .bus_mut()
+                    .gayle
+                    .as_mut()
+                    .context("missing IDE controller")?
+                    .hard_disk_mut(slot)
+                    .context("missing WHDLoad disk")?
+                    .session_overlay()?;
+                media::write_save(path, &bytes)?;
+            }
+        }
         self.capture_disk()?;
         if !self.write_protected {
             for disk in self.disks.iter_mut().flatten() {
@@ -231,14 +344,24 @@ impl Core {
         }
         if ejected {
             self.persist()?;
-            self.emu.bus_mut().floppy.eject_disk_image(0)?;
+            if self.cd_mode {
+                self.emu.bus_mut().cd_eject_disc();
+            } else {
+                self.emu.bus_mut().floppy.eject_disk_image(0)?;
+            }
         } else if let Some(Some(disk)) = self.disks.get(self.selected) {
-            self.emu.bus_mut().floppy.insert_memory_disk_image_bytes(
-                0,
-                disk.bytes.clone(),
-                disk.label.clone(),
-                self.write_protected,
-            )?;
+            if let Some(cd) = &disk.cd {
+                self.emu
+                    .bus_mut()
+                    .cd_insert_disc(copperline::cdrom::CdImage::load(&cd.path)?, &cd.path);
+            } else {
+                self.emu.bus_mut().floppy.insert_memory_disk_image_bytes(
+                    0,
+                    disk.bytes.clone(),
+                    disk.label.clone(),
+                    self.write_protected,
+                )?;
+            }
         }
         self.ejected = ejected;
         Ok(())
@@ -259,6 +382,25 @@ impl Core {
             "eject the disk before replacing an image"
         );
         let replacement = path.map(|p| Disk::open(p, &self.save_dir)).transpose()?;
+        if let Some(disk) = &replacement {
+            ensure!(
+                disk.cd.is_some() == self.cd_mode,
+                "replacement media type differs"
+            );
+        }
+        let mut paths = copperline::cdrom::StatePaths::default();
+        for (slot, disk) in self.disks.iter().enumerate() {
+            let candidate = if slot == index {
+                replacement.as_ref()
+            } else {
+                disk.as_ref()
+            };
+            if let Some(cd) = candidate.and_then(|disk| disk.cd.as_ref()) {
+                for (local, portable) in &cd.sources {
+                    paths.insert(local.clone(), portable.clone())?;
+                }
+            }
+        }
         self.persist()?;
         if let Some(disk) = replacement {
             self.disks[index] = Some(disk);
@@ -268,6 +410,7 @@ impl Core {
                 self.selected -= 1;
             }
         }
+        self.cd_paths = paths;
         Ok(())
     }
 
@@ -283,6 +426,10 @@ impl Core {
     fn identity(&self) -> [u8; 32] {
         let mut hash = Sha256::new();
         hash.update(self.machine_identity);
+        hash.update([u8::from(self.netplay)]);
+        if let Some(whdload) = &self.whdload {
+            hash.update(whdload.identity);
+        }
         hash.update([u8::from(self.write_protected)]);
         for disk in &self.disks {
             hash.update([u8::from(disk.is_some())]);
@@ -295,7 +442,7 @@ impl Core {
 
     pub fn serialize(&mut self, out: &mut [u8]) -> Result<()> {
         ensure!(
-            out.len() >= STATE_CAPACITY,
+            out.len() >= self.state_capacity,
             "save-state buffer is too small"
         );
         self.capture_disk()?;
@@ -315,8 +462,13 @@ impl Core {
             audio.len() <= 2 * MIX_SAMPLE_RATE as usize,
             "pending audio exceeds one second"
         );
-        body.extend((audio.len() as u32).to_le_bytes());
-        for sample in audio.iter() {
+        let audio_samples = if self.netplay {
+            &[][..]
+        } else {
+            audio.as_slice()
+        };
+        body.extend((audio_samples.len() as u32).to_le_bytes());
+        for sample in audio_samples {
             body.extend(sample.to_le_bytes());
         }
         drop(audio);
@@ -326,13 +478,18 @@ impl Core {
         for disk in &self.disks {
             put_bytes(&mut body, disk.as_ref().map_or(&[], |disk| &disk.bytes));
         }
-        put_bytes(&mut body, &self.emu.save_state_bytes()?);
+        put_bytes(
+            &mut body,
+            &self
+                .cd_paths
+                .scope(|| self.emu.save_frontend_state_bytes())?,
+        );
         let length = 8 + 32 + 4 + 32 + body.len();
         ensure!(
-            length <= STATE_CAPACITY,
-            "machine state exceeds this core's 64 MiB state capacity"
+            length <= self.state_capacity,
+            "machine state exceeds this session's state capacity"
         );
-        out[..STATE_CAPACITY].fill(0);
+        out[..self.state_capacity].fill(0);
         out[..8].copy_from_slice(MAGIC);
         out[8..40].copy_from_slice(&self.identity());
         out[40..44].copy_from_slice(&(body.len() as u32).to_le_bytes());
@@ -351,7 +508,7 @@ impl Core {
             "state requires the same machine, ROM, playlist and write-protect option"
         );
         let length = u32::from_le_bytes(data[40..44].try_into()?) as usize;
-        ensure!(length <= STATE_CAPACITY - 76, "state exceeds capacity");
+        ensure!(length <= self.state_capacity - 76, "state exceeds capacity");
         let body = data.get(76..76 + length).context("incomplete state")?;
         ensure!(
             Sha256::digest(body)[..] == data[44..76],
@@ -372,6 +529,7 @@ impl Core {
             ensure!(
                 [
                     crate::abi::AUTO,
+                    crate::abi::CD32_PAD,
                     crate::abi::NONE,
                     crate::abi::JOYPAD,
                     crate::abi::MOUSE
@@ -403,7 +561,9 @@ impl Core {
         for disk in &self.disks {
             let bytes = reader.bytes()?;
             if let Some(disk) = disk {
-                media::validate_adf(bytes)?;
+                if disk.cd.is_none() {
+                    media::validate_adf(bytes)?;
+                }
                 ensure!(
                     bytes.len() == disk.bytes.len(),
                     "state disk geometry differs"
@@ -415,12 +575,8 @@ impl Core {
         }
         let machine = reader.bytes()?;
         ensure!(reader.0.is_empty(), "unexpected state data");
-        let description = copperline::savestate::read_descriptor(machine)?;
-        ensure!(
-            &description == self.emu.machine_descriptor(),
-            "state machine differs"
-        );
-        self.emu.load_state_bytes(machine)?;
+        self.cd_paths
+            .scope(|| self.emu.load_frontend_state_bytes(machine))?;
         self.emu.bus_mut().floppy.make_disk_images_memory_backed();
         *self.audio.borrow_mut() = audio;
         self.presentation.resolve_tv_aperture(if standard_aperture {

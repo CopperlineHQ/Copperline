@@ -290,7 +290,7 @@ struct MachineRuntimeState {
 /// Same-process rollback also needs the interrupt sample consumed at the next
 /// instruction boundary. File saves intentionally omit these adapter latches.
 #[derive(serde::Serialize, serde::Deserialize)]
-struct MachineRollbackState {
+pub(crate) struct MachineRollbackState {
     bus: crate::bus::RollbackState,
     sampled_irq_level: u8,
     ipl_sample_held: bool,
@@ -1564,6 +1564,15 @@ impl M68kMachine {
         stream: R,
         migrations: &[chunk::Migration],
     ) -> Result<()> {
+        self.apply_chunks_with_rollback(stream, migrations, None)
+    }
+
+    pub(crate) fn apply_chunks_with_rollback<R: std::io::Read>(
+        &mut self,
+        stream: R,
+        migrations: &[chunk::Migration],
+        rollback: Option<MachineRollbackState>,
+    ) -> Result<()> {
         let mut components = Components::default();
         let mut joiner = split::BusJoiner::new(stream, migrations, &mut components);
         let restored: std::result::Result<Bus, _> = serde::Deserialize::deserialize(&mut joiner);
@@ -1616,17 +1625,20 @@ impl M68kMachine {
                 dcache,
                 bus,
             },
-            None,
+            rollback,
         )
     }
 
-    pub(crate) fn write_rollback_state<W: std::io::Write>(&self, w: &mut W) -> Result<()> {
-        let runtime = MachineRollbackState {
+    pub(crate) fn rollback_latches(&self) -> MachineRollbackState {
+        MachineRollbackState {
             bus: self.bus.bus.rollback_state(),
             sampled_irq_level: self.bus.sampled_irq_level,
             ipl_sample_held: self.bus.ipl_sample_held,
-        };
-        serialize_component(w, &runtime, "rollback latches")?;
+        }
+    }
+
+    pub(crate) fn write_rollback_state<W: std::io::Write>(&self, w: &mut W) -> Result<()> {
+        serialize_component(w, &self.rollback_latches(), "rollback latches")?;
         self.write_state(w)
     }
 

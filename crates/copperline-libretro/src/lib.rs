@@ -9,10 +9,11 @@ pub mod abi;
 mod core;
 mod input;
 mod media;
+mod whdload;
 
 use abi::*;
 use anyhow::{ensure, Context, Result};
-use core::{Core, STATE_CAPACITY};
+use core::Core;
 use std::cell::{Cell, RefCell};
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
@@ -106,10 +107,10 @@ fn directory(command: u32) -> Option<PathBuf> {
     None
 }
 
-static OPTIONS: [Variable; 5] = [
+static OPTIONS: [Variable; 6] = [
     Variable {
         key: c"copperline_model".as_ptr(),
-        value: c"Machine (restart required); A500|A1200".as_ptr(),
+        value: c"Machine (restart required); Auto|A500|A1200|CD32".as_ptr(),
     },
     Variable {
         key: c"copperline_video".as_ptr(),
@@ -124,22 +125,31 @@ static OPTIONS: [Variable; 5] = [
         value: c"Floppy write protection (restart required); disabled|enabled".as_ptr(),
     },
     Variable {
+        key: c"copperline_netplay".as_ptr(),
+        value: c"Netplay mode (restart required, pads only, saves temporary); disabled|enabled"
+            .as_ptr(),
+    },
+    Variable {
         key: std::ptr::null(),
         value: std::ptr::null(),
     },
 ];
-static DEVICES: [ControllerDescription; 4] = [
+static DEVICES: [ControllerDescription; 5] = [
     ControllerDescription {
         desc: c"Automatic (mouse / joystick)".as_ptr(),
         id: AUTO,
     },
     ControllerDescription {
-        desc: c"Amiga joystick".as_ptr(),
+        desc: c"Amiga joystick / CD32 pad".as_ptr(),
         id: JOYPAD,
     },
     ControllerDescription {
         desc: c"Amiga mouse".as_ptr(),
         id: MOUSE,
+    },
+    ControllerDescription {
+        desc: c"CD32 gamepad".as_ptr(),
+        id: CD32_PAD,
     },
     ControllerDescription {
         desc: c"Disconnected".as_ptr(),
@@ -149,11 +159,11 @@ static DEVICES: [ControllerDescription; 4] = [
 static PORTS: [ControllerInfo; 3] = [
     ControllerInfo {
         types: DEVICES.as_ptr(),
-        num_types: 4,
+        num_types: 5,
     },
     ControllerInfo {
         types: DEVICES.as_ptr(),
-        num_types: 4,
+        num_types: 5,
     },
     ControllerInfo {
         types: std::ptr::null(),
@@ -161,7 +171,7 @@ static PORTS: [ControllerInfo; 3] = [
     },
 ];
 
-const fn input_descriptors() -> [InputDescriptor; 13] {
+const fn input_descriptors() -> [InputDescriptor; 23] {
     let mut descriptors = [const {
         InputDescriptor {
             port: 0,
@@ -170,23 +180,35 @@ const fn input_descriptors() -> [InputDescriptor; 13] {
             id: 0,
             description: std::ptr::null(),
         }
-    }; 13];
-    let names = [c"Up", c"Down", c"Left", c"Right", c"Fire", c"Second fire"];
-    let ids = [4, 5, 6, 7, 0, 8];
+    }; 23];
+    let names = [
+        c"Up",
+        c"Down",
+        c"Left",
+        c"Right",
+        c"Red / Fire",
+        c"Blue / Second fire",
+        c"Green",
+        c"Yellow",
+        c"Play",
+        c"Rewind",
+        c"Forward",
+    ];
+    let ids = [4, 5, 6, 7, 0, 8, 1, 9, 3, 10, 11];
     let mut index = 0;
-    while index < 12 {
+    while index < 22 {
         descriptors[index] = InputDescriptor {
-            port: (index / 6) as u32,
+            port: (index / 11) as u32,
             device: JOYPAD,
             index: 0,
-            id: ids[index % 6],
-            description: names[index % 6].as_ptr(),
+            id: ids[index % 11],
+            description: names[index % 11].as_ptr(),
         };
         index += 1;
     }
     descriptors
 }
-static INPUTS: [InputDescriptor; 13] = input_descriptors();
+static INPUTS: [InputDescriptor; 23] = input_descriptors();
 
 fn register_environment() {
     if let Some(callback) = CALLBACKS.get().environment {
@@ -269,10 +291,10 @@ pub unsafe extern "C" fn retro_get_system_info(info: *mut SystemInfo) {
     if let Some(info) = unsafe { info.as_mut() } {
         *info = SystemInfo {
             library_name: c"Copperline".as_ptr(),
-            library_version: c"0.1.0".as_ptr(),
-            valid_extensions: c"adf|m3u".as_ptr(),
+            library_version: c"0.2.0".as_ptr(),
+            valid_extensions: c"adf|m3u|cue|iso|chd|nrg|lha|lzh|zip".as_ptr(),
             need_fullpath: true,
-            block_extract: false,
+            block_extract: true,
         };
     }
 }
@@ -313,13 +335,33 @@ pub unsafe extern "C" fn retro_load_game(info: *const GameInfo) -> bool {
                     .and_then(|path| path.parent().map(Path::to_path_buf))
             })
             .unwrap_or_else(|| system.clone());
-        let model = variable(c"copperline_model", "A500");
+        let model = variable(c"copperline_model", "Auto");
+        let whdload = path.as_deref().is_some_and(media::is_whdload);
+        let inferred = if whdload {
+            "A1200"
+        } else if path
+            .as_deref()
+            .map(media::playlist)
+            .transpose()?
+            .is_some_and(|p| copperline::config::is_cd_image_path(&p[0]))
+        {
+            "CD32"
+        } else {
+            "A500"
+        };
+        let model = if model == "Auto" { inferred } else { &model };
+        ensure!(
+            !whdload || model == "A1200",
+            "WHDLoad requires the A1200 machine (or Auto)"
+        );
+        let netplay = variable(c"copperline_netplay", "disabled") == "enabled";
         let video = variable(c"copperline_video", "PAL");
         let rom = variable(c"copperline_rom", "AROS");
         let protected = variable(c"copperline_write_protect", "disabled") == "enabled";
-        let config = core::configuration(&model, &video, rom == "Kickstart", &system)?;
+        let config = core::configuration(model, &video, rom == "Kickstart", &system)?;
         ensure!(env(10, &mut 1u32), "frontend must support XRGB8888 video");
-        let mut core = Core::load(&config, path.as_deref(), save, protected)?;
+        let mut core =
+            Core::load_with_system(&config, path.as_deref(), save, protected, &system, netplay)?;
         RUNTIME.with(|runtime| -> Result<()> {
             let mut runtime = runtime.try_borrow_mut().context("core is busy")?;
             ensure!(
@@ -328,6 +370,10 @@ pub unsafe extern "C" fn retro_load_game(info: *const GameInfo) -> bool {
             );
             for (port, device) in runtime.devices.iter().enumerate() {
                 if let Some(device) = device {
+                    ensure!(
+                        !netplay || *device != MOUSE,
+                        "netplay mode requires gamepads"
+                    );
                     core.controls.devices[port] = *device;
                 }
             }
@@ -343,6 +389,8 @@ pub unsafe extern "C" fn retro_load_game(info: *const GameInfo) -> bool {
 pub extern "C" fn retro_run() {
     boundary(|| {
         let callbacks = CALLBACKS.get();
+        let mut av_enable = 3u32;
+        env(47 | 0x10000, &mut av_enable);
         if let Some(poll) = callbacks.poll {
             unsafe {
                 poll();
@@ -352,7 +400,7 @@ pub extern "C" fn retro_run() {
         // may query disk state from a callback without aliasing the emulator.
         let mut keyboard = [0i16; 323];
         let mut mice = [[0i16; 7]; 2];
-        let mut pads = [[0i16; 9]; 2];
+        let mut pads = [[0i16; 16]; 2];
         if let Some(input) = callbacks.input {
             for (key, held) in keyboard.iter_mut().enumerate() {
                 *held = unsafe { input(0, KEYBOARD, 0, key as u32) };
@@ -386,7 +434,7 @@ pub extern "C" fn retro_run() {
         } else if previous.is_some_and(|previous| previous.geometry != av.geometry) {
             env(37, &mut { av.geometry });
         }
-        if let Some(video) = callbacks.video {
+        if let Some(video) = callbacks.video.filter(|_| av_enable & 1 != 0) {
             if !pixels.is_empty() {
                 unsafe {
                     video(
@@ -399,11 +447,11 @@ pub extern "C" fn retro_run() {
             }
         }
         let mut consumed = audio.len() / 2;
-        if let Some(batch) = callbacks.batch {
+        if let Some(batch) = callbacks.batch.filter(|_| av_enable & 2 != 0) {
             if !audio.is_empty() {
                 consumed = unsafe { batch(audio.as_ptr(), audio.len() / 2) }.min(consumed);
             }
-        } else if let Some(sample) = callbacks.audio {
+        } else if let Some(sample) = callbacks.audio.filter(|_| av_enable & 2 != 0) {
             for pair in audio.as_chunks::<2>().0 {
                 unsafe {
                     sample(pair[0], pair[1]);
@@ -446,12 +494,21 @@ pub extern "C" fn retro_reset() {
 #[no_mangle]
 pub extern "C" fn retro_set_controller_port_device(port: u32, device: u32) {
     boundary(|| {
+        // RetroArch clears all of its controller slots when a peer joins,
+        // including ports beyond the two connectors exposed by this core.
+        if port >= 2 {
+            return Ok(());
+        }
         ensure!(
-            port < 2 && [AUTO, NONE, JOYPAD, MOUSE].contains(&device),
+            port < 2 && [AUTO, NONE, JOYPAD, CD32_PAD, MOUSE].contains(&device),
             "unsupported controller"
         );
         RUNTIME.with(|runtime| -> Result<()> {
             let mut runtime = runtime.try_borrow_mut().context("core is busy")?;
+            ensure!(
+                !runtime.core.as_ref().is_some_and(|c| c.netplay) || device != MOUSE,
+                "netplay mode requires gamepads"
+            );
             runtime.devices[port as usize] = Some(device);
             if let Some(core) = runtime.core.as_mut() {
                 core.controls.devices[port as usize] = device;
@@ -469,7 +526,7 @@ pub extern "C" fn retro_serialize_size() -> usize {
             .try_borrow()
             .ok()
             .filter(|r| r.core.is_some())
-            .map_or(0, |_| STATE_CAPACITY)
+            .map_or(0, |r| r.core.as_ref().unwrap().state_capacity)
     })
 }
 
@@ -479,11 +536,17 @@ pub extern "C" fn retro_serialize_size() -> usize {
 pub unsafe extern "C" fn retro_serialize(data: *mut c_void, size: usize) -> bool {
     boundary(|| {
         ensure!(
-            !data.is_null() && size >= STATE_CAPACITY,
+            !data.is_null() && size >= retro_serialize_size(),
             "save-state buffer is too small"
         );
+        let mut context = 0u32;
+        env(72 | 0x10000, &mut context);
         with_core(|core| {
-            core.serialize(unsafe { std::slice::from_raw_parts_mut(data.cast(), STATE_CAPACITY) })
+            ensure!(
+                context != 3 || core.netplay,
+                "enable Netplay mode and reload content before connecting"
+            );
+            core.serialize(unsafe { std::slice::from_raw_parts_mut(data.cast(), size) })
         })?;
         Ok(true)
     })
@@ -495,7 +558,7 @@ pub unsafe extern "C" fn retro_serialize(data: *mut c_void, size: usize) -> bool
 pub unsafe extern "C" fn retro_unserialize(data: *const c_void, size: usize) -> bool {
     boundary(|| {
         ensure!(
-            !data.is_null() && size <= STATE_CAPACITY,
+            !data.is_null() && size <= retro_serialize_size(),
             "invalid save-state buffer"
         );
         with_core(|core| {
@@ -540,7 +603,10 @@ pub extern "C" fn retro_load_game_special(
 
 unsafe extern "C" fn set_eject(ejected: bool) -> bool {
     boundary(|| {
-        with_core(|core| core.set_ejected(ejected))?;
+        with_core(|core| {
+            ensure!(!core.netplay, "disk changes are disabled during netplay");
+            core.set_ejected(ejected)
+        })?;
         Ok(true)
     })
 }
@@ -552,7 +618,10 @@ unsafe extern "C" fn get_index() -> u32 {
 }
 unsafe extern "C" fn set_index(index: u32) -> bool {
     boundary(|| {
-        with_core(|core| core.select(index as usize))?;
+        with_core(|core| {
+            ensure!(!core.netplay, "disk changes are disabled during netplay");
+            core.select(index as usize)
+        })?;
         Ok(true)
     })
 }
@@ -562,13 +631,19 @@ unsafe extern "C" fn get_count() -> u32 {
 unsafe extern "C" fn replace_disk(index: u32, info: *const GameInfo) -> bool {
     boundary(|| {
         let path = unsafe { content_path(info) }?;
-        with_core(|core| core.replace(index as usize, path.as_deref()))?;
+        with_core(|core| {
+            ensure!(!core.netplay, "disk changes are disabled during netplay");
+            core.replace(index as usize, path.as_deref())
+        })?;
         Ok(true)
     })
 }
 unsafe extern "C" fn add_disk() -> bool {
     boundary(|| {
-        with_core(Core::add)?;
+        with_core(|core| {
+            ensure!(!core.netplay, "disk changes are disabled during netplay");
+            core.add()
+        })?;
         Ok(true)
     })
 }

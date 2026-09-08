@@ -184,12 +184,12 @@ impl Source {
         }
     }
 
-    fn spec(&self) -> SourceSpec {
-        SourceSpec {
-            path: self.path.clone(),
+    fn spec(&self) -> Result<SourceSpec> {
+        Ok(SourceSpec {
+            path: state_path(&self.path, false)?,
             format: self.format,
             byte_len: self.byte_len,
-        }
+        })
     }
 }
 
@@ -206,7 +206,7 @@ struct SourceSpec {
 
 impl SourceSpec {
     fn reopen(&self) -> Result<Source> {
-        let source = Source::open(&self.path, self.format)?;
+        let source = Source::open(&state_path(&self.path, true)?, self.format)?;
         if source.byte_len != self.byte_len {
             bail!(
                 "{} changed since the state was saved ({} bytes of sector data, was {})",
@@ -239,13 +239,18 @@ impl serde::Serialize for CdImage {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match &self.backend {
             Backend::Bin(bin) => CdImageState::Bin {
-                sources: bin.sources.iter().map(Source::spec).collect(),
+                sources: bin
+                    .sources
+                    .iter()
+                    .map(Source::spec)
+                    .collect::<Result<_>>()
+                    .map_err(serde::ser::Error::custom)?,
                 tracks: self.tracks.clone(),
                 extents: bin.extents.clone(),
                 total_sectors: self.total_sectors,
             },
             Backend::Chd(chd) => CdImageState::Chd {
-                path: chd.path().to_path_buf(),
+                path: state_path(chd.path(), false).map_err(serde::ser::Error::custom)?,
             },
         }
         .serialize(serializer)
@@ -278,9 +283,14 @@ impl<'de> serde::Deserialize<'de> for CdImage {
                     backend: Backend::Bin(BinBackend { sources, extents }),
                 })
             }
-            CdImageState::Chd { path } => Self::load_chd(&path).map_err(|e| {
-                serde::de::Error::custom(format!("reopening CD image {}: {e:#}", path.display()))
-            }),
+            CdImageState::Chd { path } => state_path(&path, true)
+                .and_then(|p| Self::load_chd(&p))
+                .map_err(|e| {
+                    serde::de::Error::custom(format!(
+                        "reopening CD image {}: {e:#}",
+                        path.display()
+                    ))
+                }),
         }
     }
 }
@@ -935,6 +945,66 @@ fn parse_msf(s: &str) -> Result<u32> {
         .and_then(|s| s.checked_mul(SECTORS_PER_SECOND))
         .and_then(|s| s.checked_add(ff))
         .context("MSF time too large")
+}
+
+/// Files backing a disc are immutable. A frontend may assign portable names
+/// while serializing, then resolve those names to its own verified media.
+/// Ordinary desktop saves continue to record the original paths.
+#[derive(Clone, Default)]
+pub struct StatePaths(Vec<(PathBuf, PathBuf)>);
+
+thread_local! {
+    static STATE_PATHS: std::cell::RefCell<Option<StatePaths>> = const { std::cell::RefCell::new(None) };
+}
+
+impl StatePaths {
+    pub fn insert(&mut self, local: PathBuf, portable: PathBuf) -> Result<()> {
+        if let Some((_, old)) = self.0.iter().find(|(a, _)| a == &local) {
+            anyhow::ensure!(old == &portable, "conflicting CD source mapping");
+            return Ok(());
+        }
+        self.0.push((local, portable));
+        Ok(())
+    }
+
+    /// The mapping is confined to this thread and restored even on panic.
+    pub fn scope<T>(&self, operation: impl FnOnce() -> T) -> T {
+        struct Restore(Option<StatePaths>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                STATE_PATHS.with(|slot| *slot.borrow_mut() = self.0.take());
+            }
+        }
+        let _restore = Restore(STATE_PATHS.with(|slot| slot.replace(Some(self.clone()))));
+        operation()
+    }
+}
+
+fn state_path(path: &Path, reading: bool) -> Result<PathBuf> {
+    STATE_PATHS.with(|slot| match slot.borrow().as_ref() {
+        None => Ok(path.to_path_buf()),
+        Some(paths) => paths
+            .0
+            .iter()
+            .find_map(|(local, portable)| {
+                let (source, destination) = if reading {
+                    (portable, local)
+                } else {
+                    (local, portable)
+                };
+                (source == path).then(|| destination.clone())
+            })
+            .with_context(|| format!("CD source is not registered: {}", path.display())),
+    })
+}
+
+impl CdImage {
+    pub fn source_paths(&self) -> Vec<PathBuf> {
+        match &self.backend {
+            Backend::Bin(bin) => bin.sources.iter().map(|s| s.path.clone()).collect(),
+            Backend::Chd(chd) => vec![chd.path().to_path_buf()],
+        }
+    }
 }
 
 #[cfg(test)]

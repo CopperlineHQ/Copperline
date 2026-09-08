@@ -686,6 +686,18 @@ impl Akiko {
     /// Whether the CD32 EEPROM is backed by a host file. Its I2C STOP
     /// condition flushes dirty bytes immediately, which cannot be undone by
     /// restoring a speculative machine snapshot.
+    /// EEPROM contents for frontends that persist saves outside emulation.
+    pub fn nvram_bytes(&self) -> &[u8] {
+        &self.nvram.memory
+    }
+
+    /// Seed the EEPROM before boot without installing a host write path.
+    pub fn load_nvram_bytes(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+        anyhow::ensure!(bytes.len() == Nvram::SIZE, "CD32 EEPROM must be 1024 bytes");
+        self.nvram.memory.copy_from_slice(bytes);
+        Ok(())
+    }
+
     pub fn persistent_nvram(&self) -> bool {
         self.nvram.path.is_some()
     }

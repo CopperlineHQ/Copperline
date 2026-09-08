@@ -464,6 +464,14 @@ impl AtaBus {
     /// The first ATAPI CD-ROM drive on this cable, if either slot holds one;
     /// the runtime disc-swap target (`--insert-cd-after`, the status bar's CD
     /// buttons, the control protocol).
+    /// The hard disk in a numbered ATA slot, for frontend save persistence.
+    pub fn hard_disk_mut(&mut self, slot: usize) -> Option<&mut HardDriveImage> {
+        match self.drives.get_mut(slot)?.as_mut()? {
+            AtaDevice::Disk(drive) => Some(&mut drive.disk),
+            AtaDevice::Atapi(_) => None,
+        }
+    }
+
     pub fn first_atapi_ref(&self) -> Option<&crate::scsi::ScsiCdRom> {
         self.drives.iter().flatten().find_map(|d| match d {
             AtaDevice::Atapi(drive) => Some(&drive.cdrom),

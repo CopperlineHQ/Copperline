@@ -16,6 +16,7 @@ pub const NONE: u32 = 0;
 pub const JOYPAD: u32 = 1;
 pub const MOUSE: u32 = 2;
 pub const KEYBOARD: u32 = 3;
+pub const CD32_PAD: u32 = JOYPAD | (2 << 8);
 pub const AUTO: u32 = JOYPAD | (1 << 8);
 
 #[repr(C)]

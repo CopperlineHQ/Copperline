@@ -2,7 +2,7 @@
 
 //! Session disks share immutable sectors; rollback records only writes.
 //! The base identifier resolves only within this process. These references
-//! are for local rollback checkpoints, never a network media format.
+//! require the matching base to be loaded first; they do not transfer media.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -68,6 +68,25 @@ impl<'de> Deserialize<'de> for SessionImage {
 }
 
 impl SessionImage {
+    pub(super) fn overlay(&self) -> anyhow::Result<Vec<u8>> {
+        let mut bytes = b"CLSECT01".to_vec();
+        crate::savestate::chunk::encode(self, &mut bytes)?;
+        Ok(bytes)
+    }
+    pub(super) fn restore_overlay(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            bytes.starts_with(b"CLSECT01"),
+            "unsupported session overlay"
+        );
+        let restored: Self = crate::savestate::chunk::decode(&bytes[8..])?;
+        anyhow::ensure!(
+            restored.id == self.id && restored.read_only == self.read_only,
+            "session overlay belongs to another disk"
+        );
+        *self = restored;
+        Ok(())
+    }
+
     pub(super) fn read_only(&self) -> bool {
         self.read_only
     }
@@ -133,6 +152,21 @@ impl SessionImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persistent_overlays_check_the_base_and_complete_payload() {
+        let mut source = SessionImage::new(vec![0; 1024], false);
+        source.write(1, &[7; 512]).unwrap();
+        let bytes = source.overlay().unwrap();
+        let mut other = SessionImage::new(vec![1; 1024], false);
+        assert!(other.restore_overlay(&bytes).is_err());
+        assert!(source.restore_overlay(&bytes[..bytes.len() - 1]).is_err());
+        let mut restored = SessionImage::new(vec![0; 1024], false);
+        restored.restore_overlay(&bytes).unwrap();
+        let mut sector = [0; 512];
+        restored.read(1, &mut sector).unwrap();
+        assert_eq!(sector, [7; 512]);
+    }
 
     #[test]
     fn checkpoint_restores_writes_without_copying_the_disk() {

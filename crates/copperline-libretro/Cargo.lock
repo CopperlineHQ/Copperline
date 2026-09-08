@@ -225,9 +225,10 @@ dependencies = [
 
 [[package]]
 name = "copperline-libretro"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
+ "bincode",
  "copperline",
  "sha2",
  "tempfile",

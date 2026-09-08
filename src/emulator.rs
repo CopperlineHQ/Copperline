@@ -1214,6 +1214,26 @@ impl Emulator {
         Ok(blob)
     }
 
+    /// Portable checkpoint for synchronous frontends. Unlike a desktop state,
+    /// this includes the CPU interrupt sampling and frame-boundary latches.
+    /// The frontend must configure deterministic, private storage and wrap the
+    /// result with its own content identity and size/integrity checks.
+    pub fn save_frontend_state_bytes(&self) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        crate::savestate::save_frontend(&self.machine, &self.descriptor, &mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// Load a frontend checkpoint only into the matching configured machine.
+    /// Components use the bounded save-state reader and are parsed before the
+    /// live machine changes. Immutable media must already be available locally.
+    pub fn load_frontend_state_bytes(&mut self, bytes: &[u8]) -> Result<()> {
+        crate::savestate::load_frontend(&mut self.machine, &self.descriptor, bytes)?;
+        self.reset_realtime_quantum();
+        self.reset_live_audio_after_timeline_jump();
+        Ok(())
+    }
+
     /// Restore a save state from `path`. The state carries its own machine
     /// (RAM, ROM, chip revisions, CPU), so a load fully rebuilds it; when that
     /// machine differs from the one running, the host is reconfigured to match

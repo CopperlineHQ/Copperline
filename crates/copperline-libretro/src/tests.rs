@@ -625,3 +625,235 @@ fn core_lifecycle_fits_a_one_megabyte_frontend_stack() {
         .join()
         .unwrap();
 }
+
+#[test]
+fn cd32_states_resolve_media_on_the_receiving_host() {
+    let host = tempfile::tempdir().unwrap();
+    let peer = tempfile::tempdir().unwrap();
+    // Include both a data file and a CD-DA source with a stored pregap.
+    for root in [host.path(), peer.path()] {
+        std::fs::write(root.join("data.bin"), vec![0x55; 2048 * 4]).unwrap();
+        std::fs::write(root.join("audio.bin"), vec![0x77; 2352 * 4]).unwrap();
+        std::fs::write(root.join("game.cue"), "FILE \"data.bin\" BINARY\n TRACK 01 MODE1/2048\n INDEX 01 00:00:00\nFILE \"audio.bin\" BINARY\n TRACK 02 AUDIO\n INDEX 00 00:00:00\n INDEX 01 00:00:01\n").unwrap();
+    }
+    let make = |root: &Path| {
+        let cfg = core::configuration("CD32", "PAL", false, root).unwrap();
+        Core::load_with_system(
+            &cfg,
+            Some(&root.join("game.cue")),
+            root.join("saves"),
+            false,
+            root,
+            true,
+        )
+        .unwrap()
+    };
+    let mut a = make(host.path());
+    let mut b = make(peer.path());
+    let mut state = vec![0; a.state_capacity];
+    // The pending insertion also needs portable references, before tray close.
+    a.serialize(&mut state).unwrap();
+    assert!(!state
+        .windows(host.path().as_os_str().len())
+        .any(|w| w == host.path().to_str().unwrap().as_bytes()));
+    b.unserialize(&state).unwrap();
+    for c in [&mut a, &mut b] {
+        for _ in 0..65 {
+            c.advance().unwrap();
+            c.audio.borrow_mut().clear();
+        }
+        assert!(c.emu.bus().cd_disc_inserted());
+    }
+    a.serialize(&mut state).unwrap();
+    // Once loaded, the receiver needs only its own copy of the immutable files.
+    std::fs::remove_file(host.path().join("data.bin")).unwrap();
+    std::fs::remove_file(host.path().join("audio.bin")).unwrap();
+    b.unserialize(&state).unwrap();
+    let mut other = vec![0; b.state_capacity];
+    b.serialize(&mut other).unwrap();
+    assert_eq!(Sha256::digest(&state), Sha256::digest(&other));
+    b.emu
+        .bus_mut()
+        .akiko
+        .as_mut()
+        .unwrap()
+        .load_nvram_bytes(&[42; 1024])
+        .unwrap();
+    b.persist().unwrap();
+    assert!(
+        !peer.path().join("saves").exists(),
+        "netplay must not persist EEPROM writes"
+    );
+    b.netplay = false;
+    b.persist().unwrap();
+    assert_eq!(
+        std::fs::read(peer.path().join("saves/copperline/cd32.nvram")).unwrap(),
+        [42; 1024]
+    );
+}
+
+#[test]
+fn cd32_pad_maps_every_button_and_netplay_ignores_host_devices() {
+    let root = tempfile::tempdir().unwrap();
+    let cfg = core::configuration("CD32", "PAL", false, root.path()).unwrap();
+    let mut core =
+        Core::load_with_system(&cfg, None, root.path().into(), false, root.path(), true).unwrap();
+    for port in 0..2 {
+        for id in [4, 5, 6, 7, 0, 8, 3, 10, 11, 1, 9] {
+            core.controls.poll(&mut core.emu, |p, d, i| {
+                i16::from(d != JOYPAD || (p == port && i == id))
+            });
+            assert!(!core.controls.keys.iter().any(|k| *k));
+            assert_eq!(core.controls.pending, [[0; 2]; 2]);
+            let input = &core.emu.bus().input.ports[1 - port as usize];
+            assert_eq!(input.device, PortDevice::Cd32Pad);
+            let values = [
+                input.up,
+                input.down,
+                input.left,
+                input.right,
+                input.fire,
+                input.button2,
+                input.cd32_play,
+                input.cd32_rwd,
+                input.cd32_ffw,
+                input.cd32_green,
+                input.cd32_yellow,
+            ];
+            assert_eq!(values, [4, 5, 6, 7, 0, 8, 3, 10, 11, 1, 9].map(|v| v == id));
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires tools/fetch-whdload.sh; optionally COPPERLINE_LIBRETRO_TEST_SYSTEM for Kickstart"]
+fn whdload_stages_identical_disks_and_restores_guest_writes() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let system = std::env::var_os("COPPERLINE_LIBRETRO_TEST_SYSTEM")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo.join("assets"));
+    let root = tempfile::tempdir().unwrap();
+    let game = repo.join("tests/assets/whdload/TestGame.lha");
+    let kickstart = system.join("kickstart-a1200.rom").is_file();
+    let cfg = core::configuration("A1200", "PAL", kickstart, &system).unwrap();
+    let make = |netplay| {
+        Core::load_with_system(
+            &cfg,
+            Some(&game),
+            root.path().into(),
+            false,
+            &system,
+            netplay,
+        )
+        .unwrap()
+    };
+    let mut a = make(false);
+    let mut b = make(false);
+    let mut state = vec![0; a.state_capacity];
+    a.serialize(&mut state).unwrap();
+    b.unserialize(&state).unwrap();
+    let mut other = vec![0; b.state_capacity];
+    b.serialize(&mut other).unwrap();
+    assert_eq!(Sha256::digest(&state), Sha256::digest(&other));
+    let drive = |c: &mut Core| {
+        c.emu
+            .bus_mut()
+            .gayle
+            .as_mut()
+            .unwrap()
+            .hard_disk_mut(1)
+            .unwrap()
+            .total_sectors()
+            - 1
+    };
+    let sector = drive(&mut a);
+    a.emu
+        .bus_mut()
+        .gayle
+        .as_mut()
+        .unwrap()
+        .hard_disk_mut(1)
+        .unwrap()
+        .write_sector(sector, &[73; 512])
+        .unwrap();
+    a.serialize(&mut state).unwrap();
+    b.unserialize(&state).unwrap();
+    b.persist().unwrap();
+    let mut c = make(false);
+    let mut bytes = [0; 512];
+    c.emu
+        .bus_mut()
+        .gayle
+        .as_mut()
+        .unwrap()
+        .hard_disk_mut(1)
+        .unwrap()
+        .read_sector(sector, &mut bytes)
+        .unwrap();
+    assert_eq!(bytes, [73; 512]);
+}
+
+#[test]
+#[ignore = "requires COPPERLINE_LIBRETRO_TEST_SYSTEM with Kickstart 3.1 and WHDLoad support archives"]
+fn whdload_boots_the_test_slave() {
+    let system = PathBuf::from(
+        std::env::var_os("COPPERLINE_LIBRETRO_TEST_SYSTEM")
+            .expect("set COPPERLINE_LIBRETRO_TEST_SYSTEM"),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let game =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/assets/whdload/TestGame.lha");
+    let cfg = core::configuration("A1200", "PAL", true, &system).unwrap();
+    let mut c =
+        Core::load_with_system(&cfg, Some(&game), root.path().into(), false, &system, false)
+            .unwrap();
+    // Exercise real WHDLoad handing over to the committed project-owned slave.
+    for _ in 0..1500 {
+        c.advance().unwrap();
+        c.audio.borrow_mut().clear();
+    }
+    let teal = c.pixels.iter().filter(|p| **p == 0x00bb44).count();
+    assert!(
+        teal * 10 >= c.pixels.len() * 9,
+        "WHDLoad did not reach the test slave ({teal} pixels)"
+    );
+}
+
+#[test]
+fn netplay_checkpoints_ignore_audio_backpressure_and_replay_inputs() {
+    let root = tempfile::tempdir().unwrap();
+    let cfg = core::configuration("A500", "PAL", false, root.path()).unwrap();
+    let make = || {
+        Core::load_with_system(&cfg, None, root.path().into(), false, root.path(), true).unwrap()
+    };
+    let mut a = make();
+    let mut b = make();
+    let mut state = vec![0; a.state_capacity];
+    let mut other = vec![0; b.state_capacity];
+    let advance = |c: &mut Core, frame: u32| {
+        c.controls.poll(&mut c.emu, |p, d, id| {
+            i16::from(d == JOYPAD && (frame + p + id).is_multiple_of(3))
+        });
+        c.advance().unwrap();
+    };
+    for frame in 0..20 {
+        advance(&mut a, frame);
+        advance(&mut b, frame);
+        b.audio.borrow_mut().clear();
+    }
+    a.serialize(&mut state).unwrap();
+    b.serialize(&mut other).unwrap();
+    assert_eq!(Sha256::digest(&state), Sha256::digest(&other));
+    for frame in 20..35 {
+        advance(&mut a, frame);
+        advance(&mut b, frame + 1);
+    }
+    b.unserialize(&state).unwrap();
+    for frame in 20..35 {
+        advance(&mut b, frame);
+    }
+    a.serialize(&mut state).unwrap();
+    b.serialize(&mut other).unwrap();
+    assert_eq!(Sha256::digest(&state), Sha256::digest(&other));
+    assert_eq!(a.pixels, b.pixels);
+}

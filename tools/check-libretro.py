@@ -107,9 +107,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("library", type=Path)
     parser.add_argument("--frames", type=int, default=1200)
-    parser.add_argument("--model", choices=["A500", "A1200"], default="A500")
+    parser.add_argument("--model", choices=["Auto", "A500", "A1200", "CD32"], default="Auto")
     parser.add_argument("--video", choices=["PAL", "NTSC"], default="PAL")
     parser.add_argument("--screenshot", type=Path)
+    parser.add_argument("--content", type=Path)
+    parser.add_argument("--system", type=Path)
+    parser.add_argument("--rom", choices=["AROS", "Kickstart"], default="AROS")
+    parser.add_argument("--netplay", action="store_true")
+    parser.add_argument("--expect-colour", type=lambda s: int(s, 16))
     args = parser.parse_args()
     lib = c.CDLL(str(args.library.resolve()))
 
@@ -132,22 +137,24 @@ def main():
     assert lib.retro_api_version() == 1
     system = System()
     lib.retro_get_system_info(c.byref(system))
-    assert system.name == b"Copperline" and system.extensions == b"adf|m3u"
+    assert system.name == b"Copperline" and b"adf" in system.extensions.split(b"|") and b"chd" in system.extensions.split(b"|")
     assert system.fullpath
 
     with tempfile.TemporaryDirectory(prefix="copperline-libretro-") as temporary:
         root = Path(temporary)
         directory = c.create_string_buffer(str(root).encode())
+        system_directory = c.create_string_buffer(str(args.system.resolve() if args.system else root).encode())
         options = {key: c.create_string_buffer(value.encode()) for key, value in {
             b"copperline_model": args.model, b"copperline_video": args.video,
-            b"copperline_rom": "AROS", b"copperline_write_protect": "disabled",
+            b"copperline_rom": args.rom, b"copperline_write_protect": "disabled",
+            b"copperline_netplay": "enabled" if args.netplay else "disabled",
         }.items()}
         host = {"frame": 0, "video": b"", "audio": bytearray(), "errors": [], "disks": None}
 
         @ENV
         def environment(command, data):
             if command in (9, 31):
-                c.cast(data, c.POINTER(c.c_void_p))[0] = c.addressof(directory)
+                c.cast(data, c.POINTER(c.c_void_p))[0] = c.addressof(system_directory if command == 9 else directory)
             elif command == 10:
                 return c.cast(data, c.POINTER(c.c_uint))[0] == 1
             elif command == 15:
@@ -202,13 +209,14 @@ def main():
             (root / "two.adf").write_bytes(bytes([1]) * 901120)
             playlist = root / "game.m3u"
             playlist.write_text("one.adf\ntwo.adf\n")
-            game = Game(str(playlist).encode(), None, 0, None)
+            game = Game(str(args.content.resolve() if args.content else playlist).encode(), None, 0, None)
             assert lib.retro_load_game(c.byref(game)), host["errors"]
             disks = host["disks"]
-            assert disks.count() == 2 and not disks.is_ejected()
-            assert disks.eject(True) and disks.select(1) and disks.eject(False)
-            assert disks.index() == 1
-            assert disks.eject(True) and disks.select(0) and disks.eject(False)
+            if not args.content and not args.netplay:
+                assert disks.count() == 2 and not disks.is_ejected()
+                assert disks.eject(True) and disks.select(1) and disks.eject(False)
+                assert disks.index() == 1
+                assert disks.eject(True) and disks.select(0) and disks.eject(False)
             av = AV()
             lib.retro_get_system_av_info(c.byref(av))
             assert 40 < av.timing.fps < 65 and av.timing.sample_rate == 44100
@@ -216,9 +224,13 @@ def main():
             for _ in range(args.frames):
                 lib.retro_run()
             assert host["frame"] == args.frames and host["video"] and host["audio"]
-            assert any(host["audio"]), "probe did not produce audio; allow enough frames to boot"
-            assert len(set(c.c_uint32.from_buffer_copy(host["video"], i).value
-                           for i in range(0, len(host["video"]), 4))) > 256, "probe raster did not start"
+            if not args.content:
+                assert any(host["audio"]), "probe did not produce audio; allow enough frames to boot"
+            colours = [c.c_uint32.from_buffer_copy(host["video"], i).value for i in range(0, len(host["video"]), 4)]
+            if not args.content:
+                assert len(set(colours)) > 256, "probe raster did not start"
+            if args.expect_colour is not None:
+                assert colours.count(args.expect_colour) * 10 >= len(colours) * 9, "expected solid test-slave colour"
             if args.screenshot:
                 png(args.screenshot, host["video"], host["width"], host["height"])
             capacity = lib.retro_serialize_size()
@@ -243,9 +255,10 @@ def main():
             lib.retro_run()
             lib.retro_unload_game()
             assert lib.retro_serialize_size() == 0
-            assert lib.retro_load_game(None), host["errors"]
-            lib.retro_run()
-            lib.retro_unload_game()
+            if not args.content:
+                assert lib.retro_load_game(None), host["errors"]
+                lib.retro_run()
+                lib.retro_unload_game()
             assert not host["errors"], host["errors"]
             print(json.dumps({"model": args.model, "video": args.video, "frames": args.frames,
                               "fps": av.timing.fps, "state_payload_bytes": payload_bytes,

@@ -6,6 +6,8 @@ use copperline::emulator::Emulator;
 
 #[derive(Clone)]
 pub struct Controls {
+    pub cd32: bool,
+    pub netplay: bool,
     pub keys: [bool; 128],
     pub pending: [[i32; 2]; 2],
     pub devices: [u32; 2],
@@ -14,6 +16,8 @@ pub struct Controls {
 impl Default for Controls {
     fn default() -> Self {
         Self {
+            cd32: false,
+            netplay: false,
             keys: [false; 128],
             pending: [[0; 2]; 2],
             devices: [abi::AUTO; 2],
@@ -24,7 +28,7 @@ impl Default for Controls {
 impl Controls {
     pub fn poll(&mut self, emu: &mut Emulator, input: impl Fn(u32, u32, u32) -> i16) {
         let mut keys = [false; 128];
-        for key in 0..=322 {
+        for key in (0..=322).filter(|_| !self.netplay) {
             if let Some(raw) = raw_key(key) {
                 keys[raw as usize] |= input(0, abi::KEYBOARD, key) != 0;
             }
@@ -37,7 +41,8 @@ impl Controls {
         self.keys = keys;
         for port in 0..2 {
             let device = match self.devices[port] {
-                abi::AUTO if port == 0 => abi::JOYPAD,
+                abi::AUTO | abi::JOYPAD if self.cd32 => abi::CD32_PAD,
+                abi::AUTO if port == 0 || self.netplay => abi::JOYPAD,
                 abi::AUTO => abi::MOUSE,
                 device => device,
             };
@@ -69,7 +74,18 @@ impl Controls {
                         );
                     }
                 }
-                abi::JOYPAD => {
+                abi::JOYPAD | abi::CD32_PAD => {
+                    state.set_port_device(
+                        amiga_port,
+                        if device == abi::CD32_PAD {
+                            PortDevice::Cd32Pad
+                        } else {
+                            PortDevice::Joystick
+                        },
+                    );
+                    let [play, rwd, ffw, green, yellow] =
+                        [3, 10, 11, 1, 9].map(|id| input(port as u32, abi::JOYPAD, id) != 0);
+                    state.set_cd32_buttons(amiga_port, play, rwd, ffw, green, yellow);
                     let held =
                         [4, 5, 6, 7, 0, 8].map(|id| input(port as u32, abi::JOYPAD, id) != 0);
                     state.set_joystick(

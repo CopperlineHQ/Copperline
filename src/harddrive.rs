@@ -763,6 +763,22 @@ impl HardDriveImage {
         })
     }
 
+    /// Export writes to a session disk without including its immutable base.
+    pub fn session_overlay(&self) -> anyhow::Result<Vec<u8>> {
+        match &self.backing {
+            Backing::Session(image) => image.overlay(),
+            _ => anyhow::bail!("not a session disk"),
+        }
+    }
+
+    /// Restore writes after opening the identical session base.
+    pub fn restore_session_overlay(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+        match &mut self.backing {
+            Backing::Session(image) => image.restore_overlay(bytes),
+            _ => anyhow::bail!("not a session disk"),
+        }
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
