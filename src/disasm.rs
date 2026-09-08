@@ -195,8 +195,8 @@ struct Stream<'a> {
     /// format (base/outer displacements, memory indirection). The 68000
     /// and 68010 ignore that bit and always use the brief format.
     full_ext: bool,
-    /// MOVE from CCR exists from the 68010 upward (illegal on 68000).
-    move_from_ccr: bool,
+    /// Instructions introduced on the 68010 (MOVE from CCR, RTD, BKPT).
+    isa_010: bool,
 }
 
 impl Stream<'_> {
@@ -371,8 +371,8 @@ fn effective_address(mode: u8, reg: u8, size: u8, s: &mut Stream) -> String {
         }
         7 => match reg {
             0 => {
-                let a = s.next_word() as i16 as i32;
-                format!("(${:X}).W", a as u32)
+                let a = s.next_word();
+                format!("(${a:X}).W")
             }
             1 => {
                 let a = s.next_long();
@@ -406,7 +406,7 @@ pub fn disassemble(read: impl Fn(u32) -> u16, pc: u32, cpu_type: CpuType) -> (St
         base: pc,
         words: 0,
         full_ext: !matches!(cpu_type, CpuType::M68000 | CpuType::M68010),
-        move_from_ccr: !matches!(cpu_type, CpuType::M68000),
+        isa_010: !matches!(cpu_type, CpuType::M68000),
     };
     let op = s.next_word();
     let text = decode(op, &mut s);
@@ -613,6 +613,10 @@ fn decode_4(op: u16, s: &mut Stream) -> Option<String> {
         }
         0x4E73 => return Some("RTE".into()),
         0x4E74 => {
+            // RTD is 68010+; on 68000 the encoding is illegal.
+            if !s.isa_010 {
+                return None;
+            }
             let d = s.next_word() as i16 as i32;
             return Some(format!("RTD #{}", signed_hex(d)));
         }
@@ -653,10 +657,22 @@ fn decode_4(op: u16, s: &mut Stream) -> Option<String> {
             return Some(format!("LINK.L {},#{}", AN[reg as usize], signed_hex(d)));
         }
         0x4840 => return Some(format!("SWAP {}", DN[reg as usize])),
-        0x4848 => return Some(format!("BKPT #{}", op & 7)),
+        0x4848 => {
+            // BKPT is 68010+; on 68000 fall through to DC.W (not PEA).
+            if !s.isa_010 {
+                return None;
+            }
+            return Some(format!("BKPT #{}", op & 7));
+        }
         0x4880 => return Some(format!("EXT.W {}", DN[reg as usize])),
         0x48C0 => return Some(format!("EXT.L {}", DN[reg as usize])),
-        0x49C0 => return Some(format!("EXTB.L {}", DN[reg as usize])),
+        0x49C0 => {
+            // EXTB.L is 68020+; on 68000/010 fall through to DC.W (not LEA).
+            if !s.full_ext {
+                return None;
+            }
+            return Some(format!("EXTB.L {}", DN[reg as usize]));
+        }
         _ => {}
     }
     if op & 0xFFF0 == 0x4E40 {
@@ -702,7 +718,7 @@ fn decode_4(op: u16, s: &mut Stream) -> Option<String> {
     }
     // MOVE to/from CCR/SR
     match op & 0xFFC0 {
-        0x42C0 if s.move_from_ccr => {
+        0x42C0 if s.isa_010 => {
             let ea = effective_address(mode, reg, 1, s);
             return Some(format!("MOVE CCR,{ea}"));
         }
@@ -1219,16 +1235,23 @@ mod tests {
 
     #[test]
     fn bkpt_not_pea() {
-        assert_eq!(dis(&[0x4848], 0), ("BKPT #0".into(), 2));
-        assert_eq!(dis(&[0x484F], 0), ("BKPT #7".into(), 2));
+        assert_eq!(dis010(&[0x4848], 0), ("BKPT #0".into(), 2));
+        assert_eq!(dis010(&[0x484F], 0), ("BKPT #7".into(), 2));
+        // Illegal on 68000 (must not decode as PEA).
+        assert_eq!(dis(&[0x4848], 0), ("DC.W $4848".into(), 2));
+        assert_eq!(dis(&[0x484F], 0), ("DC.W $484F".into(), 2));
         // PEA (A0) still works just past the BKPT range.
         assert_eq!(dis(&[0x4850], 0), ("PEA (A0)".into(), 2));
+        assert_eq!(dis010(&[0x4850], 0), ("PEA (A0)".into(), 2));
     }
 
     #[test]
     fn extb_not_lea() {
-        assert_eq!(dis(&[0x49C0], 0), ("EXTB.L D0".into(), 2));
-        assert_eq!(dis(&[0x49C7], 0), ("EXTB.L D7".into(), 2));
+        assert_eq!(dis020(&[0x49C0], 0), ("EXTB.L D0".into(), 2));
+        assert_eq!(dis020(&[0x49C7], 0), ("EXTB.L D7".into(), 2));
+        // Illegal on 68000 (must not decode as LEA).
+        assert_eq!(dis(&[0x49C0], 0), ("DC.W $49C0".into(), 2));
+        assert_eq!(dis(&[0x49C7], 0), ("DC.W $49C7".into(), 2));
     }
 
     #[test]
@@ -1250,8 +1273,10 @@ mod tests {
 
     #[test]
     fn rtd_tas_nbcd() {
-        assert_eq!(dis(&[0x4E74, 0x0008], 0), ("RTD #$8".into(), 4));
-        assert_eq!(dis(&[0x4E74, 0xFFFC], 0), ("RTD #-$4".into(), 4));
+        assert_eq!(dis010(&[0x4E74, 0x0008], 0), ("RTD #$8".into(), 4));
+        assert_eq!(dis010(&[0x4E74, 0xFFFC], 0), ("RTD #-$4".into(), 4));
+        // Illegal on 68000 (single-word DC.W; do not consume the displacement).
+        assert_eq!(dis(&[0x4E74, 0x0008], 0), ("DC.W $4E74".into(), 2));
         assert_eq!(dis(&[0x4AC0], 0), ("TAS D0".into(), 2));
         assert_eq!(dis(&[0x4AD0], 0), ("TAS (A0)".into(), 2));
         assert_eq!(dis(&[0x4800], 0), ("NBCD D0".into(), 2));
