@@ -6,14 +6,12 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 use std::{io::Write, path::Path};
-use winit::dpi::{LogicalSize, PhysicalPosition};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub(in crate::video::window) struct Preferences {
-    pub window_size: [f64; 2],
-    pub position: Option<[i32; 2]>,
-    pub maximized: bool,
+    pub workspace_size: [f64; 2],
+    pub display_width: f32,
     pub register_width: f32,
     pub memory_height: f32,
     debugger_tab: String,
@@ -23,9 +21,8 @@ pub(in crate::video::window) struct Preferences {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
-            window_size: [1100.0, 760.0],
-            position: None,
-            maximized: false,
+            workspace_size: [1440.0, 900.0],
+            display_width: 560.0,
             register_width: 235.0,
             memory_height: 190.0,
             debugger_tab: "CPU".into(),
@@ -43,8 +40,9 @@ impl Preferences {
                 default
             }
         }
-        self.window_size[0] = bounded(self.window_size[0], 600.0, 4096.0, 1100.0);
-        self.window_size[1] = bounded(self.window_size[1], 480.0, 2160.0, 760.0);
+        self.workspace_size[0] = bounded(self.workspace_size[0], 900.0, 4096.0, 1440.0);
+        self.workspace_size[1] = bounded(self.workspace_size[1], 600.0, 2160.0, 900.0);
+        self.display_width = bounded(self.display_width as f64, 240.0, 2400.0, 560.0) as f32;
         self.register_width = bounded(self.register_width as f64, 180.0, 480.0, 235.0) as f32;
         self.memory_height = bounded(self.memory_height as f64, 100.0, 480.0, 190.0) as f32;
         self
@@ -84,38 +82,6 @@ impl Preferences {
             .find(|tab| ui::analyzer_tab_label(*tab) == self.analyzer_tab)
             .unwrap_or(ui::AnalyzerTab::Beam)
     }
-
-    pub(in crate::video::window) fn window_attributes(
-        &self,
-        mut attrs: winit::window::WindowAttributes,
-        event_loop: &winit::event_loop::ActiveEventLoop,
-    ) -> winit::window::WindowAttributes {
-        attrs = attrs
-            .with_inner_size(LogicalSize::new(self.window_size[0], self.window_size[1]))
-            .with_maximized(self.maximized);
-        if let Some([x, y]) = self.position {
-            // Restore only when the title bar remains reachable. On Wayland
-            // outer_position is unavailable and position stays None.
-            let visible = event_loop.available_monitors().any(|monitor| {
-                let pos = monitor.position();
-                let size = monitor.size();
-                title_bar_visible([x, y], [pos.x, pos.y], [size.width, size.height])
-            });
-            if visible {
-                attrs = attrs.with_position(PhysicalPosition::new(x, y));
-            }
-        }
-        attrs
-    }
-}
-
-fn title_bar_visible(position: [i32; 2], monitor: [i32; 2], size: [u32; 2]) -> bool {
-    let [x, y] = position.map(i64::from);
-    let [left, top] = monitor.map(i64::from);
-    x >= left
-        && x + 160 <= left + i64::from(size[0])
-        && y >= top
-        && y + 64 <= top + i64::from(size[1])
 }
 
 fn preference_path() -> Option<std::path::PathBuf> {
@@ -137,19 +103,20 @@ impl App {
     }
 
     pub(in crate::video::window) fn save_egui_preferences(&mut self) {
-        let Some(tool) = &self.debugger_tool_window else {
+        let Some(ui) = &mut self.debugger_ui else {
             return;
         };
-        let egui = &tool.egui;
-        let mut preferences = egui.layout.preferences.clone();
-        preferences.maximized = tool.window.is_maximized();
-        if !tool.minimized && !preferences.maximized {
-            let size = tool
-                .window
-                .inner_size()
-                .to_logical::<f64>(tool.window.scale_factor());
-            preferences.window_size = [size.width, size.height];
-            preferences.position = tool.window.outer_position().ok().map(|p| [p.x, p.y]);
+        let mut preferences = ui.layout.preferences.clone();
+        if self.debug_layout_active {
+            if let Some(r) = &self.render {
+                if !r.minimized && !r.window.is_maximized() && r.window.fullscreen().is_none() {
+                    let size = r
+                        .window
+                        .inner_size()
+                        .to_logical::<f64>(r.window.scale_factor());
+                    preferences.workspace_size = [size.width, size.height];
+                }
+            }
         }
         if let Some(panel) = &self.debugger_panel {
             preferences.debugger_tab = ui::debug_tab_label(panel.tab).to_owned();
@@ -158,13 +125,7 @@ impl App {
             preferences.analyzer_tab = ui::analyzer_tab_label(panel.tab).to_owned();
         }
         self.egui_preferences = Some(preferences.clone());
-        // Keep tab preferences when another logical inspector closes later.
-        self.debugger_tool_window
-            .as_mut()
-            .unwrap()
-            .egui
-            .layout
-            .preferences = preferences.clone();
+        ui.layout.preferences = preferences.clone();
         if let Some(path) = preference_path() {
             if let Err(error) = preferences.save(&path) {
                 log::warn!(
@@ -181,17 +142,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn layout_round_trip_recovers_from_invalid_files_and_removed_monitors() {
+    fn layout_round_trip_recovers_from_invalid_and_legacy_files() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("layout.toml");
         let prefs = Preferences {
-            window_size: [1250.0, 820.0],
+            workspace_size: [1450.0, 820.0],
+            display_width: 620.0,
             register_width: 310.0,
             memory_height: 240.0,
             debugger_tab: "Video".into(),
             analyzer_tab: "Memory".into(),
-            position: Some([-1400, 60]),
-            ..Default::default()
         };
         prefs.save(&path).unwrap();
         assert_eq!(Preferences::load(&path), prefs);
@@ -199,15 +159,21 @@ mod tests {
         assert_eq!(Preferences::load(&path), Preferences::default());
         std::fs::write(
             &path,
-            "window_size = [nan, -42.0]\nregister_width = inf\nanalyzer_tab = 'Unknown'",
+            "workspace_size = [nan, -42.0]\ndisplay_width = inf\nregister_width = inf\nanalyzer_tab = 'Unknown'",
         )
         .unwrap();
         let recovered = Preferences::load(&path);
-        assert_eq!(recovered.window_size, [1100.0, 480.0]);
+        assert_eq!(recovered.workspace_size, [1440.0, 600.0]);
+        assert_eq!(recovered.display_width, 560.0);
         assert_eq!(recovered.register_width, 235.0);
         assert_eq!(recovered.analyzer_tab(), ui::AnalyzerTab::Beam);
-        assert!(title_bar_visible([-1400, 60], [-1920, 0], [1920, 1080]));
-        assert!(!title_bar_visible([-1400, 60], [0, 0], [1920, 1080]));
-        assert!(!title_bar_visible([1900, 1060], [0, 0], [1920, 1080]));
+        std::fs::write(
+            &path,
+            "window_size = [1100.0, 760.0]\nposition = [-1400, 60]\nregister_width = 310.0",
+        )
+        .unwrap();
+        let legacy = Preferences::load(&path);
+        assert_eq!(legacy.workspace_size, Preferences::default().workspace_size);
+        assert_eq!(legacy.register_width, 310.0);
     }
 }

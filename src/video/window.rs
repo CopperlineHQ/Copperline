@@ -994,11 +994,13 @@ pub struct App {
     /// The draw path uploads `rtg_fb` to the RTG texture when set.
     rtg_present_dims: Option<(u32, u32)>,
     render: Option<Render>,
-    debugger_tool_window: Option<ToolWindow>,
+    debugger_ui: Option<egui_debugger::DebuggerUi>,
+    debug_layout_active: bool,
+    debug_guest_input: bool,
+    debug_snapshot_dirty: std::cell::Cell<bool>,
+    debug_play_geometry: Option<egui_debugger::workspace::PlayGeometry>,
     egui_selected_tool: ToolPanelKind,
     egui_preferences: Option<egui_debugger::preferences::Preferences>,
-    frame_analyzer_tool_window: Option<ToolWindow>,
-    console_tool_window: Option<ToolWindow>,
     /// When the frame loop last requested a paced tool window repaint
     /// (see TOOL_REDRAW_INTERVAL).
     last_tool_redraw: Instant,
@@ -1531,6 +1533,7 @@ struct Render {
     window: Arc<Window>,
     pixels: Pixels<'static>,
     texture_scale: usize,
+    debug_viewport: Option<(u32, u32, u32, u32)>,
     /// The pass that puts the composited buffer on the surface (see
     /// [`scaler`]): the emulator window's replacement for the `pixels`
     /// built-in scaling renderer, so the displayed integer multiple is
@@ -1574,26 +1577,6 @@ impl Render {
     /// `pixels` reconfigures its swapchain from its own copy of this size and
     /// nothing else can correct it, so the record must never lag behind what
     /// `pixels` holds.
-    fn resize_surface(&mut self, size: PhysicalSize<u32>) -> Result<(), pixels::TextureError> {
-        let (width, height) = (size.width.max(1), size.height.max(1));
-        self.pixels.resize_surface(width, height)?;
-        self.surface_size = (width, height);
-        Ok(())
-    }
-}
-
-struct ToolWindow {
-    window: Arc<Window>,
-    pixels: Pixels<'static>,
-    /// Same Windows minimized-present deadlock hazard as Render::minimized.
-    minimized: bool,
-    /// Same configured-surface-size record as Render::surface_size.
-    surface_size: (u32, u32),
-    egui: egui_debugger::DebuggerUi,
-}
-
-impl ToolWindow {
-    /// Tool-window counterpart of `Render::resize_surface`.
     fn resize_surface(&mut self, size: PhysicalSize<u32>) -> Result<(), pixels::TextureError> {
         let (width, height) = (size.width.max(1), size.height.max(1));
         self.pixels.resize_surface(width, height)?;
@@ -2063,11 +2046,13 @@ impl App {
             autocrop_latch: AutocropLatch::default(),
             present_programmable: false,
             render: None,
-            debugger_tool_window: None,
+            debugger_ui: None,
+            debug_layout_active: false,
+            debug_guest_input: false,
+            debug_snapshot_dirty: std::cell::Cell::new(true),
+            debug_play_geometry: None,
             egui_selected_tool: ToolPanelKind::Debugger,
             egui_preferences: None,
-            frame_analyzer_tool_window: None,
-            console_tool_window: None,
             last_tool_redraw: Instant::now(),
             debugger_panel: None,
             frame_analyzer_panel: None,
@@ -3608,6 +3593,7 @@ impl ApplicationHandler for App {
             crt_shader,
             bezel_shader,
             sticker_pass,
+            debug_viewport: None,
             minimized: false,
             surface_size: (inner.width.max(1), inner.height.max(1)),
         });
@@ -3645,15 +3631,14 @@ impl ApplicationHandler for App {
         if self.netplay_window_event(event_loop, &event) {
             return;
         }
-        if self.tool_window_kind(window_id).is_some() {
-            self.handle_egui_debugger_event(event_loop, event);
-            return;
-        }
         if self
             .render
             .as_ref()
             .is_some_and(|render| render.window.id() != window_id)
         {
+            return;
+        }
+        if self.route_debug_workspace_event(&event) {
             return;
         }
         match event {
@@ -3960,7 +3945,9 @@ impl ApplicationHandler for App {
                     // While a menu/panel is open, the host cursor is
                     // operating the UI; don't feed its motion to the
                     // emulated mouse underneath.
-                    if self.modal_ui_active() {
+                    if self.modal_ui_active()
+                        || (self.debug_layout_active && !self.debug_guest_input)
+                    {
                         self.last_display_cursor_pos = None;
                     } else {
                         self.track_uncaptured_cursor_motion(pos);
@@ -4051,6 +4038,9 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Focused(focused) => {
                 self.main_window_focused = focused;
+                if !focused && self.debug_layout_active {
+                    self.release_debug_guest_input();
+                }
                 if focused {
                     // A capture a panel borrowed can only be repaid to a
                     // focused window, so a panel that closed while the focus
@@ -4319,6 +4309,8 @@ impl ApplicationHandler for App {
                 if self.render.as_ref().is_some_and(|r| r.minimized) {
                     return;
                 }
+                let inspector_actions = self.prepare_debug_workspace();
+                let debug_layout = self.debug_layout_active && !self.ui.active();
                 // The presentation layout can change under a stationary
                 // pointer -- the autocrop latch adopting a new crop, a menu
                 // suspending it, a toggle -- and every such change requests
@@ -4386,6 +4378,7 @@ impl ApplicationHandler for App {
                 // every frame rather than mirrored from the clicks.
                 let kbd_panel = super::keyboard_panel_shown().then(|| self.keyboard_panel_view());
                 let ui_data = self.build_panel_view_data();
+                let inspector_ui = self.debugger_ui.as_mut().filter(|_| debug_layout);
                 if let Some(r) = self.render.as_mut() {
                     // RTG with a working GPU pipeline presents the native frame
                     // through its own texture in the GPU render pass below.
@@ -4660,8 +4653,11 @@ impl ApplicationHandler for App {
                                 &present_draws,
                             );
                             let (cx, cy, cw, ch) = present_clip;
-                            let disp_h = ch as f32 * present_height() as f32
-                                / window_present_height() as f32;
+                            let disp_h = if debug_layout {
+                                ch as f32
+                            } else {
+                                ch as f32 * present_height() as f32 / window_present_height() as f32
+                            };
                             rtg.render(
                                 &ctx.queue,
                                 encoder,
@@ -4669,6 +4665,9 @@ impl ApplicationHandler for App {
                                 (cx as f32, cy as f32, cw as f32, disp_h),
                                 integer_scaling,
                             );
+                            if let Some(ui) = inspector_ui {
+                                ui.paint_prepared(&ctx.device, &ctx.queue, encoder, target);
+                            }
                             Ok(())
                         })
                     } else if crt_active || bezel_active {
@@ -4712,7 +4711,7 @@ impl ApplicationHandler for App {
                         // beam-line count scaled to the rows the rect shows.
                         // The bezel suspends the sub-rect modes, so this is
                         // never the bezel case.
-                        let crt_crop = display_src.map(|_| {
+                        let crt_crop = (display_src.is_some() || debug_layout).then(|| {
                             (
                                 layout.display_dst,
                                 layout.src_canvas,
@@ -4804,6 +4803,9 @@ impl ApplicationHandler for App {
                                     uniforms,
                                 );
                             }
+                            if let Some(ui) = inspector_ui {
+                                ui.paint_prepared(&ctx.device, &ctx.queue, encoder, target);
+                            }
                             Ok(())
                         })
                     } else {
@@ -4816,6 +4818,9 @@ impl ApplicationHandler for App {
                                 target,
                                 &present_draws,
                             );
+                            if let Some(ui) = inspector_ui {
+                                ui.paint_prepared(&ctx.device, &ctx.queue, encoder, target);
+                            }
                             Ok(())
                         })
                     };
@@ -4823,6 +4828,7 @@ impl ApplicationHandler for App {
                         error!("pixels.render: {e}");
                     }
                 }
+                self.dispatch_egui_frame(inspector_actions, Ok(()));
             }
             _ => {}
         }
@@ -5659,10 +5665,8 @@ impl App {
     }
 
     /// Whether main-window UI is claiming the keyboard and pointer: the
-    /// menu, or an overlay panel drawn over the display. The debugger,
-    /// frame analyzer, and console are separate tool windows with their
-    /// own event routing, so they are deliberately not modal here -- while
-    /// one is open (even mid-run), the main window keeps driving the Amiga.
+    /// menu, or an overlay panel drawn over the display. The Debug layout
+    /// routes its own events according to explicit guest/UI input ownership.
     fn modal_ui_active(&self) -> bool {
         self.ui.active()
     }
@@ -5741,48 +5745,10 @@ impl App {
         }
     }
 
-    /// Whether any UI surface has a claim on the host cursor: main-window
-    /// UI, or an open tool window. Tool windows are not modal over the
-    /// main window's input, but an automatic grab taken while one is open
-    /// would trap the cursor its controls need, so the auto-capture paths
-    /// wait until the last of them closes. An explicit capture (a display
-    /// click or the shortcut) is always honoured.
+    /// Automatic capture waits while the Debug layout or a modal UI is visible.
+    /// Explicit display clicks can still transfer input to the Amiga.
     fn ui_wants_cursor(&self) -> bool {
-        self.ui.active()
-            || ToolPanelKind::ALL
-                .into_iter()
-                .any(|kind| self.tool_panel_is_open(kind))
-    }
-
-    fn tool_window(&self, kind: ToolPanelKind) -> Option<&ToolWindow> {
-        match kind {
-            ToolPanelKind::Debugger => self.debugger_tool_window.as_ref(),
-            ToolPanelKind::FrameAnalyzer => self.frame_analyzer_tool_window.as_ref(),
-            ToolPanelKind::Console => self.console_tool_window.as_ref(),
-        }
-    }
-
-    fn tool_window_mut(&mut self, kind: ToolPanelKind) -> Option<&mut ToolWindow> {
-        match kind {
-            ToolPanelKind::Debugger => self.debugger_tool_window.as_mut(),
-            ToolPanelKind::FrameAnalyzer => self.frame_analyzer_tool_window.as_mut(),
-            ToolPanelKind::Console => self.console_tool_window.as_mut(),
-        }
-    }
-
-    fn tool_window_slot(&mut self, kind: ToolPanelKind) -> &mut Option<ToolWindow> {
-        match kind {
-            ToolPanelKind::Debugger => &mut self.debugger_tool_window,
-            ToolPanelKind::FrameAnalyzer => &mut self.frame_analyzer_tool_window,
-            ToolPanelKind::Console => &mut self.console_tool_window,
-        }
-    }
-
-    fn tool_window_kind(&self, window_id: WindowId) -> Option<ToolPanelKind> {
-        ToolPanelKind::ALL.into_iter().find(|&kind| {
-            self.tool_window(kind)
-                .is_some_and(|tool| tool.window.id() == window_id)
-        })
+        self.ui.active() || self.debug_layout_active
     }
 
     fn ui_key_accepts_repeat(&self, kind: Option<ToolPanelKind>, code: KeyCode) -> bool {

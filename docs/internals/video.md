@@ -759,14 +759,22 @@ comparisons. `COPPERLINE_UI_PREVIEW=1 cargo test panels_render_into_their_rects`
 renders the software panels into `target/ui-preview-*.png`.
 
 The desktop `frontend` feature includes egui. `window/egui_debugger.rs` owns the
-shared debugger/Frame Analyzer/Console window's layout, text input, and GPU drawing.
-There is no separate inspector feature or native software fallback; headless,
-browser, and libretro builds omit the desktop frontend and its egui dependencies.
+shared debugger/Frame Analyzer/Console layout, text input, and GPU drawing.
+`egui_debugger/workspace.rs` integrates it into the main window: a transparent
+display pane supplies the destination rectangle to `debug_present_layout`,
+and the ordinary scaler, RTG, CRT, and bezel passes render there. Egui loads
+that same surface afterwards and adds the surrounding controls. The display
+never makes a GPU readback or an extra CPU image copy to enter the workspace.
+The same `PresentLayout` maps the picture and host cursor, including crop,
+integer scaling, and physical-pixel offsets.
+
+The main window retains its device, surface, vsync, and minimized-window guards.
+Live inspector snapshots, layout, and tessellation are cached at 20 Hz; input,
+stepping, and repaint deadlines invalidate the cache immediately. The display
+continues at its usual cadence, composing the cached UI between inspector updates.
+Headless, browser, and libretro builds omit the desktop frontend and egui.
 `egui_debugger/analyzer.rs` supplies the four analyzer views, and
 `egui_debugger/console.rs` supplies the command field and selectable output.
-The frontend shares the window's `pixels`/wgpu device and surface, but shrinks the unused software backing
-texture to 1x1. Egui uploads glyphs and meshes and draws directly to the physical
-surface, independently of the Amiga presentation canvas and its texture scale.
 The egui versions in Cargo.toml share pixels' wgpu major version; upgrading
 them requires keeping those device and encoder types compatible.
 
@@ -786,13 +794,18 @@ Their geometry depends on the viewport and font metrics, so transient pending
 flags and changing status text do not move later rows or mute controls. Detail
 text scrolls horizontally within its column; the tab header does not wrap.
 
-The debugger's native window slot hosts all three inspectors. Logical panels stay
-independent: selecting an inspector opens it lazily, keeps the other panel's
-capture and selection, and does not alter an already-open inspector's run state.
-Only the visible inspector builds a view snapshot. A native close releases all three
-panels through their existing cleanup paths, including profile/heat-map capture
-ownership; closing a single logical panel keeps the shared surface alive.
-Explicit Run/Pause choices apply to every inspector's restore state.
+Logical panels stay independent of the visible Play/Debug layout. Selecting an
+inspector opens it lazily and preserves the other panels. Returning to Play
+retains those panels and the current run/pause state; explicitly closing a panel
+runs its existing cleanup, including profile/heat-map capture ownership. The
+last panel closing returns to Play. A native close exits the application.
+
+The workspace starts with input owned by the debugger. A display click transfers
+ownership to the guest; the capture shortcut releases it. While the debugger
+owns input, text events and raw device qualifiers are kept out of the Amiga.
+Transferring input back releases held host keys and buttons, so a swallowed
+key-up cannot leave an Amiga qualifier held. Physical gamepads keep their
+existing routing. Modal main-window overlays temporarily cover the workspace.
 
 Analyzer address links dispatch host navigation actions: they open the debugger,
 select CPU/Memory/Copper, pin the address, and reset the destination scroll.
@@ -803,12 +816,14 @@ command batch, so paste and repeated sizing passes cannot execute commands.
 A `CLOSE` stops that batch. Hidden Console panels still receive guest output.
 
 `egui_debugger/preferences.rs` stores a small TOML file in the host data directory:
-window geometry, maximized state, CPU divider sizes, and tab names. It is loaded
-lazily, saved atomically when an inspector closes and on application exit, and
-retained across window recreation. Invalid files fall back to defaults, sizes
-are bounded, and off-screen positions are discarded. This file contains no
-egui internals or guest state. Tests round-trip it in temporary directories;
-ordinary unit-test App instances never read or write the user's preferences.
+Debug layout size, display divider, CPU divider sizes, and tab names. It is loaded
+lazily and saved atomically on returning to Play, closing an inspector, or exiting.
+The Play window size and position are kept in host memory while Debug is visible;
+position restoration checks that the title bar remains on a connected monitor.
+Invalid preferences fall back to defaults and sizes are bounded. Legacy inspector
+files retain their pane/tab settings. No egui internals or guest state are stored.
+Tests use temporary files; ordinary test App instances never read or write the
+user's preferences.
 
 The beam image uses the same pure `AnalyzerTraceView::raster_pixel` sampler as
 the software renderer for owner colours, CPU waits, picture blending, and beam

@@ -5174,7 +5174,7 @@ fn recording_captures_emulated_frames_with_audio() {
 }
 
 #[test]
-fn debugger_window_pauses_steps_and_restores_run_state() {
+fn debug_layout_pauses_on_first_open_and_preserves_state_in_play() {
     let mut app = test_app();
     assert!(!app.paused);
 
@@ -5206,10 +5206,11 @@ fn debugger_window_pauses_steps_and_restores_run_state() {
     app.debugger_step_frame();
     assert!(app.emu.bus().emulated_frames() > frame_before);
 
-    // Closing restores the pre-debugger (running) state.
+    // Returning to Play retains the inspector and its current pause state.
     app.toggle_debugger();
-    assert!(app.debugger_panel.is_none());
-    assert!(!app.paused);
+    assert!(app.debugger_panel.is_some());
+    assert!(!app.debug_layout_active);
+    assert!(app.paused);
 
     // Run pressed inside the debugger survives closing it.
     app.toggle_debugger();

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Debugger and frame-analyzer tool windows: transport, breakpoints, memory editing, view data.
+//! Debugger and Frame Analyzer: transport, breakpoints, memory editing, view data.
 
 use super::*;
 
@@ -235,19 +235,13 @@ impl App {
         false
     }
 
-    /// Open the debugger window (pausing the machine), or close it again
-    /// if it is already open (the host shortcut toggle).
+    /// Switch between Play and Debug while retaining the inspectors.
     pub(super) fn toggle_debugger(&mut self) {
-        if self.egui_workspace_open() && self.egui_selected_tool != ToolPanelKind::Debugger {
-            self.open_debugger();
-            return;
-        }
-        if self.debugger_panel.is_some() {
-            self.close_tool_panel(ToolPanelKind::Debugger);
+        if self.debug_layout_active && self.egui_selected_tool == ToolPanelKind::Debugger {
+            self.leave_debug_workspace();
         } else {
             self.ui.menu_open = false;
             self.open_debugger();
-            self.request_redraw();
         }
     }
 
@@ -283,19 +277,12 @@ impl App {
         self.egui_did_open_tool(ToolPanelKind::Debugger, shared_pause);
     }
 
-    /// Open the console window (pausing the machine), or close it again
-    /// if it is already open (the host shortcut toggle).
     pub(super) fn toggle_console(&mut self) {
-        if self.egui_workspace_open() && self.egui_selected_tool != ToolPanelKind::Console {
-            self.open_console();
-            return;
-        }
-        if self.console_panel.is_some() {
-            self.close_tool_panel(ToolPanelKind::Console);
+        if self.debug_layout_active && self.egui_selected_tool == ToolPanelKind::Console {
+            self.leave_debug_workspace();
         } else {
             self.ui.menu_open = false;
             self.open_console();
-            self.request_redraw();
         }
     }
 

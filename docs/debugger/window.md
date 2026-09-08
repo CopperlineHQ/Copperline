@@ -1,18 +1,29 @@
-# The debugger window
+# The Debug workspace
 
 Press `Cmd+B` on macOS or `Alt+B` on Linux/Windows (or select **Debugger** from
-the status bar menu) to pause emulation and open the debugger tool window.
-Closing the window restores the previous execution state.
+the status bar menu) to enter Debug layout in the main window. Opening the
+first inspector pauses emulation; **Run** resumes it.
 
-The debugger, Frame Analyzer, and [Console](console) share one native inspector
-window, separate from the emulated display. Select an inspector at the top;
-each retains its state while another is visible. Opening another inspector
-preserves the current run/pause state. Inspection reads do not acknowledge
-hardware registers or consume emulated bus cycles. Stepping, register edits,
-and memory writes change the machine as requested.
+The Amiga display sits beside the debugger, Frame Analyzer, and [Console](console).
+Drag the divider to give either side more space. The display retains its scaling,
+CRT effects, and RTG support. Select an inspector above its tabs; each retains
+its state while another is visible. Opening another inspector preserves the
+current run/pause state. Inspection reads do not acknowledge hardware registers
+or consume emulated bus cycles. Stepping, register edits, and memory writes
+change the machine as requested.
+
+**Return to Play** hides the inspectors and restores the previous window size.
+Their selections, captures, and command history remain available when you
+return to Debug. Switching layouts keeps the current run/pause state. Closing
+the main window exits Copperline.
+
+Click the display to give the Amiga keyboard and mouse input. `Cmd+G` / `Alt+G`
+returns input to the debugger. While the debugger owns input, typing and
+clipboard shortcuts operate its fields and never reach the Amiga. While the
+Amiga owns input, ordinary keys, including `Esc`, go to the guest.
 
 (shared-inspector-window)=
-## Shared inspector window
+## Inspectors
 
 The GPU-rendered inspector UI is included in every desktop build.
 
@@ -20,7 +31,7 @@ The GPU-rendered inspector UI is included in every desktop build.
 :alt: Debugger with resizable register, disassembly, and memory panes
 :width: 100%
 
-The CPU tab, rendered from the deterministic debugger test machine.
+Inspector-only preview of the CPU tab, rendered from the deterministic test machine.
 ```
 
 On the CPU tab, drag the dividers to resize the register, disassembly, and memory
@@ -37,9 +48,10 @@ toggles, audio mutes, breakpoints, and waveform controls. Scrollbars expose
 content that does not fit the window. Transport keyboard shortcuts work while
 not editing text. **Close inspector** and the controller's back button close
 the selected inspector; the remaining inspectors stay available in the shared
-window.
-`Esc` leaves a text field first. Outside a text field it closes all inspectors,
-as does closing the native window.
+workspace. Closing the last inspector returns to Play and restores its saved
+execution state; an explicit Run/Pause choice takes precedence.
+`Esc` leaves a text field first. Outside a text field it returns to Play,
+retaining the inspectors.
 
 Select **Frame Analyzer** above the debugger tabs to inspect its **Beam**,
 **Blits**, **Memory**, and **Resources** views. Opening the analyzer from the
@@ -53,7 +65,7 @@ it owns; captures started through the control protocol continue independently.
 :alt: Frame Analyzer in the shared egui window with beam raster and bus counters
 :width: 100%
 
-The Beam view in the shared window, rendered from the analyzer test machine.
+Inspector-only preview of the Beam view, rendered from the analyzer test machine.
 ```
 
 Click or drag the beam raster or scanline strip to select a slot. Picture,
@@ -76,16 +88,18 @@ runs the entered commands. Shift+Enter adds a line, and pasted commands remain
 editable until submitted. Up/Down browse history. Console output continues to
 arrive while another inspector is selected.
 
-The window's size, position, maximized state, CPU pane sizes, and the debugger
-and analyzer tabs are saved when an inspector closes or Copperline exits.
-They are restored on reopening or relaunching; a position on a disconnected
-monitor is discarded. Preferences live in `inspector-layout.toml` in the
-[host data directory](../guide/ui.md#where-files-go). They contain layout choices only,
-not command text, captures, or machine state. Opening a specific inspector
+The Debug window size, display divider, CPU pane sizes, and debugger and analyzer
+tabs are saved when returning to Play, closing an inspector, or exiting Copperline.
+They are restored on reopening or relaunching. Debug keeps the expanded window
+on its monitor. Returning to Play restores its previous position when that monitor
+is available; switching layouts preserves fullscreen. Preferences live in `inspector-layout.toml` in the
+[host data directory](../guide/ui.md#where-files-go). They contain layout choices
+only, not command text, captures, or machine state. Opening a specific inspector
 always selects the one requested.
 
-Live machine-data refreshes are limited to 20 Hz; input and stepping redraw
-immediately.
+Live inspector snapshots and layout updates are limited to 20 Hz; input and
+stepping update immediately. The Amiga display retains its normal presentation
+cadence while the inspectors reuse their last layout between updates.
 
 ## Tabs
 
