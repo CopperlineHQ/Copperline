@@ -2,7 +2,7 @@
 
 The debugger console provides an interactive command line in the
 [Debug workspace](window.md#shared-inspector-window). Open it with
-`Cmd+K` on macOS, `Alt+K` on Linux/Windows, or through the status bar menu.
+`Cmd+K` on macOS, `Alt+K` on Linux/Windows, or select **Console** in the workspace.
 
 Opening the first inspector pauses emulation (`RUN` resumes execution).
 Switching inspectors preserves command text, output, history, and the current

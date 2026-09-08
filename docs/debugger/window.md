@@ -25,7 +25,11 @@ Amiga owns input, ordinary keys, including `Esc`, go to the guest.
 (shared-inspector-window)=
 ## Inspectors
 
-The GPU-rendered inspector UI is included in every desktop build.
+The GPU-rendered inspector UI is included in every desktop build. Registers,
+disassembly, memory, and other monospace text use **Topaz a600a1200a4000** from
+[amigafonts](https://github.com/rewtnull/amigafonts). The font is bundled, so no
+system installation is needed; fallback fonts cover characters outside Topaz's
+repertoire.
 
 ```{figure} ../images/ui-preview-debugger-egui.png
 :alt: Debugger with resizable register, disassembly, and memory panes
@@ -54,8 +58,7 @@ execution state; an explicit Run/Pause choice takes precedence.
 retaining the inspectors.
 
 Select **Frame Analyzer** above the debugger tabs to inspect its **Beam**,
-**Blits**, **Memory**, and **Resources** views. Opening the analyzer from the
-status bar menu selects it in this same window. **Capture frame** records a
+**Blits**, **Memory**, and **Resources** views. **Capture frame** records a
 frame, and **Run** collects live frames. Switching between the debugger and
 analyzer preserves their selections, capture data, and current run/pause state.
 The analyzer stays armed while its view is hidden. Closing it releases captures
@@ -225,9 +228,8 @@ Examples:
 (frame-analyzer-pane)=
 ## Frame Analyzer
 
-Open the Frame Analyzer via the status bar menu to inspect chip-bus slot allocations
-and memory access patterns. The **Frame Analyzer** selector at the top of the
-shared window opens the same inspector.
+Select **Frame Analyzer** in the Debug workspace to inspect chip-bus slot allocations
+and memory access patterns.
 
 ```{figure} ../images/ui-preview-analyzer-egui.png
 :alt: The Frame Analyzer

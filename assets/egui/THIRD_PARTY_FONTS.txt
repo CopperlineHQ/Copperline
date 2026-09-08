@@ -1,12 +1,43 @@
 Fonts embedded by the Copperline desktop frontend
 =================================================
 
-The fonts are supplied unmodified by epaint_default_fonts 0.35.0, part of egui.
+The fallback fonts are supplied unmodified by epaint_default_fonts 0.35.0, part of egui.
 Source: https://crates.io/crates/epaint_default_fonts/0.35.0
 Upstream: https://github.com/emilk/egui/tree/0.35.0/crates/epaint_default_fonts
 
 The font licenses below apply to the fonts themselves. Copperline's application
 code remains licensed under GPL-3.0-or-later.
+
+Topaz a600a1200a4000
+-------------------
+
+File: amigafonts/ttf/Topaz_a1200_v1.0.ttf (unmodified)
+Source: https://github.com/rewtnull/amigafonts
+Revision: d42987535d94ebbfb51e64fee76f9974c6ae145a
+SHA-256: da95bfdd6d16ac3602f64ae01699808efede94665fa2a7ac5f33e61641a67e14
+
+Topaz is Copyright © AmigaInc. Truetype version is Copyright © 2009 by dMG of
+Trueschool and Divine Stylers.
+
+The upstream README releases these fonts under the GNU General Public License
+with the font exception (GPL-FE):
+https://www.gnu.org/licenses/gpl-faq.html#FontException
+
+Font exception:
+As a special exception, if you create a document which uses this font, and embed
+this font or unaltered portions of this font into the document, this font does
+not by itself cause the resulting document to be covered by the GNU General
+Public License. This exception does not however invalidate any other reasons
+why the document might be covered by the GNU General Public License. If you
+modify this font, you may extend this exception to your version of the font,
+but you are not obligated to do so. If you do not wish to do so, delete this
+exception statement from your version.
+
+The TTF's embedded Creative Commons licence URL predates the upstream licence
+change. Commit d42987535d94ebbfb51e64fee76f9974c6ae145a, dated 2020-01-17,
+explicitly drops that licence in favour of GPL-FE. The upstream
+README is included at assets/egui/amigafonts/README in Copperline's source tree.
+The GPL text is included with Copperline as LICENSE / LICENSE.Copperline.txt.
 
 Hack Regular
 ------------

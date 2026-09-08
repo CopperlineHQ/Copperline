@@ -326,15 +326,11 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
 - **Machine Configuration...**: opens the configuration screen
   ([below](#machine-configuration-screen)) to reconfigure the machine and
   relaunch it. The same screen opens automatically on a no-machine start.
-- **Frame Analyzer...**: opens the analyzer's four tabs: **Beam** shows chip-bus
-  ownership and CPU waits across the captured frame; **Blits** shows blitter
-  operations and previews; **Memory** shows which bus master last touched each
-  part of memory; **Resources** previews structures the guest registered through
-  the uaelib trap. See [](../debugger/window.md#frame-analyzer-pane).
-- **Debugger...** (also `Cmd+B` / `Alt+B`): opens the tabbed debugger in the
-  Debug workspace; see [](../debugger/window).
-- **Console...** (also `Cmd+K` / `Alt+K`): opens the debugger command line in
-  the Debug workspace; see [](../debugger/console).
+- **Debugger...** (also `Cmd+B` / `Alt+B`): opens the [Debug workspace](../debugger/window),
+  with the debugger, Frame Analyzer, and Console available from its selectors.
+  The analyzer inspects captured chip-bus activity and registered resources;
+  the [Console](../debugger/console) provides the command line (`Cmd+K` / `Alt+K`
+  opens it directly).
 - **Freeze (HRTMon)** (also `Cmd+Shift+B` / `Alt+Shift+B`): presses the
   freezer cartridge's button, so the machine runs on into the HRTMon
   monitor on its own screen; the monitor's `x` command returns to the

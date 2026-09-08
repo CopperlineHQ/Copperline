@@ -26,9 +26,7 @@ use crate::config::{
 pub enum MenuAction {
     // Tools.
     OpenMachineConfig,
-    OpenFrameAnalyzer,
     OpenDebugger,
-    OpenConsole,
     /// Press the freezer cartridge's button (`[cartridge] model`).
     FreezeCartridge,
     OpenInputMapping,
@@ -123,9 +121,7 @@ impl MenuAction {
         matches!(
             self,
             MenuAction::OpenMachineConfig
-                | MenuAction::OpenFrameAnalyzer
                 | MenuAction::OpenDebugger
-                | MenuAction::OpenConsole
                 | MenuAction::OpenInputMapping
                 | MenuAction::OpenCalibration
                 | MenuAction::OpenShortcuts
@@ -581,9 +577,7 @@ pub fn build(s: &MenuState) -> Vec<MenuRow> {
     }
     let mut rows = vec![
         MenuRow::action("Machine Configuration...", MenuAction::OpenMachineConfig),
-        MenuRow::action("Frame Analyzer...", MenuAction::OpenFrameAnalyzer),
         MenuRow::action("Debugger...", MenuAction::OpenDebugger),
-        MenuRow::action("Console...", MenuAction::OpenConsole),
         MenuRow::action(
             &format!("Freeze ({})", s.cartridge.unwrap_or("HRTMon")),
             MenuAction::FreezeCartridge,
