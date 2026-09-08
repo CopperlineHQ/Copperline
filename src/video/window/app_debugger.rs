@@ -238,6 +238,10 @@ impl App {
     /// Open the debugger window (pausing the machine), or close it again
     /// if it is already open (the host shortcut toggle).
     pub(super) fn toggle_debugger(&mut self) {
+        if self.egui_workspace_open() && self.egui_selected_tool != ToolPanelKind::Debugger {
+            self.open_debugger();
+            return;
+        }
         if self.debugger_panel.is_some() {
             self.close_tool_panel(ToolPanelKind::Debugger);
         } else {
@@ -248,6 +252,7 @@ impl App {
     }
 
     pub(super) fn open_debugger(&mut self) {
+        let shared_pause = self.egui_other_tool_pause(ToolPanelKind::Debugger);
         if self.debugger_panel.is_none() {
             // The debugger shortcut can arrive while the mouse is captured;
             // release it so the window's controls are reachable, and note
@@ -258,6 +263,7 @@ impl App {
             self.paused = true;
             self.sync_live_audio_suspension();
             let mut panel = ui::DebuggerPanel::new();
+            panel.tab = self.egui_layout_preferences().debugger_tab();
             // Start the memory view at the current program counter's
             // neighbourhood; it is usually what you came to look at.
             panel.mem_addr = self.emu.machine.pc() & self.emu.machine.ui_addr_mask() & !0xF;
@@ -274,11 +280,16 @@ impl App {
                 );
             }
         }
+        self.egui_did_open_tool(ToolPanelKind::Debugger, shared_pause);
     }
 
     /// Open the console window (pausing the machine), or close it again
     /// if it is already open (the host shortcut toggle).
     pub(super) fn toggle_console(&mut self) {
+        if self.egui_workspace_open() && self.egui_selected_tool != ToolPanelKind::Console {
+            self.open_console();
+            return;
+        }
         if self.console_panel.is_some() {
             self.close_tool_panel(ToolPanelKind::Console);
         } else {
@@ -289,6 +300,7 @@ impl App {
     }
 
     pub(super) fn open_console(&mut self) {
+        let shared_pause = self.egui_other_tool_pause(ToolPanelKind::Console);
         if self.console_panel.is_none() {
             self.suspend_mouse_capture_for_ui();
             self.ui.panel = None;
@@ -308,9 +320,11 @@ impl App {
                 );
             }
         }
+        self.egui_did_open_tool(ToolPanelKind::Console, shared_pause);
     }
 
     pub(super) fn open_frame_analyzer(&mut self) {
+        let shared_pause = self.egui_other_tool_pause(ToolPanelKind::FrameAnalyzer);
         if self.frame_analyzer_panel.is_none() {
             self.suspend_mouse_capture_for_ui();
             self.ui.panel = None;
@@ -319,12 +333,21 @@ impl App {
             self.sync_live_audio_suspension();
             self.emu.bus_mut().set_frame_analyzer_full(true);
             self.frame_analyzer_panel = Some(ui::FrameAnalyzerPanel::new());
+            {
+                let tab = self.egui_layout_preferences().analyzer_tab();
+                self.activate_tool_control(
+                    ToolPanelKind::FrameAnalyzer,
+                    UiControl::AnalyzerTab(tab),
+                );
+            }
         }
+        self.egui_did_open_tool(ToolPanelKind::FrameAnalyzer, shared_pause);
     }
 
     pub(super) fn frame_analyzer_toggle_run(&mut self) {
         self.paused = !self.paused;
         self.paused_before_analyzer = self.paused;
+        self.egui_remember_run_state();
         self.sync_live_audio_suspension();
         if !self.paused {
             self.emu.bus_mut().set_frame_analyzer_full(true);
@@ -977,6 +1000,7 @@ impl App {
         // Run/Pause inside the debugger is an explicit choice; closing the
         // window must not revert it.
         self.paused_before_debugger = self.paused;
+        self.egui_remember_run_state();
         self.sync_live_audio_suspension();
     }
 
@@ -1436,6 +1460,7 @@ impl App {
         self.sync_live_audio_suspension();
         if !consumed {
             self.paused_before_debugger = true;
+            self.egui_remember_run_state();
             self.open_debugger();
         }
         self.last_debug_stop = Some(message.clone());
@@ -1767,22 +1792,6 @@ impl App {
         }
     }
 
-    pub(super) fn build_tool_panel_view_data(
-        &self,
-        kind: ToolPanelKind,
-    ) -> Option<ui::PanelViewData> {
-        match kind {
-            ToolPanelKind::Debugger => self.debugger_panel.as_ref().map(|panel| {
-                ui::PanelViewData::Debugger(Box::new(self.build_debugger_view(panel)))
-            }),
-            ToolPanelKind::FrameAnalyzer => self.frame_analyzer_panel.as_ref().map(|panel| {
-                ui::PanelViewData::FrameAnalyzer(Box::new(self.build_frame_analyzer_view(panel)))
-            }),
-            // The console panel carries everything it renders.
-            ToolPanelKind::Console => None,
-        }
-    }
-
     pub(super) fn build_frame_analyzer_view(
         &self,
         panel: &ui::FrameAnalyzerPanel,
@@ -2103,6 +2112,14 @@ impl App {
     /// Everything reads through side-effect-free peeks, so inspecting
     /// state never perturbs the emulation.
     pub(super) fn build_debugger_view(&self, panel: &ui::DebuggerPanel) -> ui::DebuggerView {
+        self.build_debugger_view_with_clipping(panel, true)
+    }
+
+    pub(super) fn build_debugger_view_with_clipping(
+        &self,
+        panel: &ui::DebuggerPanel,
+        clip_lines: bool,
+    ) -> ui::DebuggerView {
         let machine = &self.emu.machine;
         let bus = self.emu.bus();
         let mut status = format!(
@@ -2127,6 +2144,7 @@ impl App {
         let mut bitmap: Option<ui::MemBitmapView> = None;
         let mut video: Option<ui::VideoView> = None;
         let mut audio: Option<ui::AudioScopeView> = None;
+        let mut cpu = None;
         match panel.tab {
             ui::DebugTab::Cpu => {
                 let pc = machine.pc();
@@ -2175,6 +2193,7 @@ impl App {
                     )));
                 }
                 let breaks = machine.ui_breaks();
+                let disassembly_start = lines.len();
                 let mut addr = panel.disasm_addr.unwrap_or(pc) & !1;
                 for _ in 0..24 {
                     let (text, len) = crate::disasm::disassemble(read, addr, machine.cpu_type());
@@ -2187,6 +2206,29 @@ impl App {
                         ui::DbgLine::plain(line)
                     });
                     addr = addr.wrapping_add(len);
+                }
+                if !clip_lines {
+                    let base = panel.mem_addr & machine.ui_addr_mask() & !0xF;
+                    let bytes = machine.debug_read_memory(base, ui::MEM_PAGE_BYTES as usize);
+                    cpu = Some(ui::CpuView {
+                        d: std::array::from_fn(|i| machine.d(i)),
+                        a: std::array::from_fn(|i| machine.a(i)),
+                        pc,
+                        sr,
+                        stopped: machine.stopped(),
+                        history: history.iter().rev().take(8).rev().copied().collect(),
+                        disassembly: lines[disassembly_start..].to_vec(),
+                        memory: bytes
+                            .chunks(16)
+                            .enumerate()
+                            .map(|(i, bytes)| {
+                                ui::DbgLine::plain(ui::hex_dump_row(
+                                    base.wrapping_add(i as u32 * 16) & machine.ui_addr_mask(),
+                                    bytes,
+                                ))
+                            })
+                            .collect(),
+                    });
                 }
             }
             ui::DebugTab::Chipset => {
@@ -2391,11 +2433,18 @@ impl App {
                 // shows the head of the COP1 list instead). Breakpointed
                 // addresses are marked with `*`.
                 let stopped = !bus.copper.is_running() && bus.copper.waiting().is_none();
-                let start = if stopped {
-                    agnus.cop1lc
-                } else {
-                    anchor.saturating_sub(5 * 4)
-                };
+                let start = panel.copper_addr.unwrap_or_else(|| {
+                    if stopped {
+                        agnus.cop1lc
+                    } else {
+                        anchor.saturating_sub(5 * 4)
+                    }
+                });
+                if let Some(address) = panel.copper_addr {
+                    lines.push(ui::DbgLine::plain(format!(
+                        "Pinned Copper list at ${address:06X}"
+                    )));
+                }
                 let cbreaks = bus.ui_copper_breaks();
                 for (addr, text) in crate::disasm::dump_copper_list(read, start, 30) {
                     let marker = if cbreaks.contains(&addr) { "*" } else { " " };
@@ -2656,9 +2705,14 @@ impl App {
                 let sel = usize::from(panel.iomap_sel & 0x1FE) / 2;
                 let page = sel / PER_PAGE;
                 lines.push(ui::DbgLine::plain(format!(
-                    "custom registers $DFF000-$DFF1FE  (page {}/{}; arrows/wheel move, $ box jumps)",
+                    "custom registers $DFF000-$DFF1FE  (page {}/{}; {}, $ box jumps)",
                     page + 1,
-                    256usize.div_ceil(PER_PAGE)
+                    256usize.div_ceil(PER_PAGE),
+                    if clip_lines {
+                        "arrows/wheel move"
+                    } else {
+                        "arrows select, scroll to read"
+                    },
                 )));
                 lines.push(ui::DbgLine::plain(""));
                 for row in 0..ROWS {
@@ -2882,9 +2936,12 @@ impl App {
         }
         // Keep lines inside the panel; the blitter clips at the texture
         // edge, not the panel edge.
-        for line in &mut lines {
-            if line.text.len() > 82 {
-                line.text.truncate(82);
+        if clip_lines {
+            for line in &mut lines {
+                if line.text.len() > 82 {
+                    let end = line.text.floor_char_boundary(82);
+                    line.text.truncate(end);
+                }
             }
         }
         ui::DebuggerView {
@@ -2895,6 +2952,7 @@ impl App {
             bitmap,
             video,
             audio,
+            cpu,
         }
     }
 }

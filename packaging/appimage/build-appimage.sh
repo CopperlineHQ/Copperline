@@ -59,6 +59,8 @@ install -Dm644 assets/aros/aros-amiga-m68k-ext.bin \
   "$appdir/usr/share/copperline/aros/aros-amiga-m68k-ext.bin"
 install -Dm644 assets/aros/LICENSE \
   "$appdir/usr/share/copperline/aros/LICENSE"
+install -Dm644 assets/egui/THIRD_PARTY_FONTS.txt \
+  "$appdir/usr/share/copperline/THIRD_PARTY_FONTS.txt"
 
 # Bundled open CD32 FMV cartridge ROM (the CD32 profile default).
 install -Dm644 assets/fmv/copperline-fmv.rom \

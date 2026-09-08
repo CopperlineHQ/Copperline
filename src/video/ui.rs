@@ -120,7 +120,7 @@ pub const DEBUG_TABS: [DebugTab; 9] = [
     DebugTab::Waveform,
 ];
 
-fn debug_tab_label(tab: DebugTab) -> &'static str {
+pub(in crate::video) fn debug_tab_label(tab: DebugTab) -> &'static str {
     match tab {
         DebugTab::Cpu => "CPU",
         DebugTab::Chipset => "Chipset",
@@ -142,6 +142,8 @@ pub struct DebuggerPanel {
     pub mem_addr: u32,
     /// Pinned disassembly origin for the CPU tab; None follows the PC.
     pub disasm_addr: Option<u32>,
+    /// Pinned Copper-list origin; None follows the live Copper.
+    pub copper_addr: Option<u32>,
     /// The hex address being typed into the entry box.
     pub entry: String,
     /// Whether the entry box has keyboard focus.
@@ -164,6 +166,7 @@ impl DebuggerPanel {
             tab: DebugTab::Cpu,
             mem_addr: 0,
             disasm_addr: None,
+            copper_addr: None,
             entry: String::new(),
             entry_active: false,
             mem_last_find: None,
@@ -201,7 +204,7 @@ impl DebuggerPanel {
     /// pairs ("C0 FFEE" and "C0FFEE" both match the bytes C0 FF EE).
     pub fn find_pattern(&self) -> Option<Vec<u8>> {
         let joined: String = self.entry.split_whitespace().collect();
-        if joined.is_empty() || !joined.len().is_multiple_of(2) {
+        if joined.is_empty() || !joined.is_ascii() || !joined.len().is_multiple_of(2) {
             return None;
         }
         (0..joined.len())
@@ -274,7 +277,7 @@ pub const ANALYZER_TABS: [AnalyzerTab; 4] = [
     AnalyzerTab::Resources,
 ];
 
-fn analyzer_tab_label(tab: AnalyzerTab) -> &'static str {
+pub(in crate::video) fn analyzer_tab_label(tab: AnalyzerTab) -> &'static str {
     match tab {
         AnalyzerTab::Beam => "Beam",
         AnalyzerTab::Blits => "Blits",
@@ -1851,6 +1854,20 @@ pub struct DebuggerView {
     /// oscilloscopes. Some only when the Audio tab is active; the plain text
     /// is also mirrored into `lines` for headless/text use.
     pub audio: Option<AudioScopeView>,
+    pub cpu: Option<CpuView>,
+}
+
+/// Structured CPU snapshot for the resizable debugger panes. Inspection is
+/// side-effect-free; widget actions are applied after the UI finishes a frame.
+pub struct CpuView {
+    pub d: [u32; 8],
+    pub a: [u32; 8],
+    pub pc: u32,
+    pub sr: u16,
+    pub stopped: bool,
+    pub history: Vec<u32>,
+    pub disassembly: Vec<DbgLine>,
+    pub memory: Vec<DbgLine>,
 }
 
 /// Per-channel and line-mixed-source state for the debugger Audio tab.
@@ -1909,7 +1926,7 @@ pub struct AnalyzerMarker {
 }
 
 impl AnalyzerMarker {
-    fn label(&self) -> String {
+    pub(in crate::video) fn label(&self) -> String {
         format!(
             "{} {}=${:04X} v{} h{}{}",
             self.source,
@@ -1926,7 +1943,7 @@ impl AnalyzerMarker {
     /// Whether this marker sits close enough to beam slot
     /// (`vpos`, `hpos`) to be reported for it: within a line vertically
     /// and two colour clocks horizontally, roughly one heatmap pixel.
-    fn near(&self, vpos: usize, hpos: usize) -> bool {
+    pub(in crate::video) fn near(&self, vpos: usize, hpos: usize) -> bool {
         (i64::from(self.vpos) - vpos as i64).abs() <= 1
             && (i64::from(self.hpos) - hpos as i64).abs() <= 2
     }
@@ -1981,7 +1998,7 @@ pub struct AnalyzerTraceView {
 }
 
 impl AnalyzerTraceView {
-    fn owner_code_at(&self, vpos: usize, hpos: usize) -> u8 {
+    pub(in crate::video) fn owner_code_at(&self, vpos: usize, hpos: usize) -> u8 {
         if vpos >= self.rows || hpos >= self.cols {
             return b'.';
         }
@@ -1996,7 +2013,7 @@ impl AnalyzerTraceView {
         Some(&self.owners[start..start + self.cols])
     }
 
-    fn cpu_wait_code_at(&self, vpos: usize, hpos: usize) -> u8 {
+    pub(in crate::video) fn cpu_wait_code_at(&self, vpos: usize, hpos: usize) -> u8 {
         if vpos >= self.rows || hpos >= self.cols {
             return b'.';
         }
@@ -2006,14 +2023,18 @@ impl AnalyzerTraceView {
             .unwrap_or(b'.')
     }
 
-    fn record_at(&self, vpos: usize, hpos: usize) -> Option<&crate::bus::BusSlotRecord> {
+    pub(in crate::video) fn record_at(
+        &self,
+        vpos: usize,
+        hpos: usize,
+    ) -> Option<&crate::bus::BusSlotRecord> {
         if vpos >= self.rows || hpos >= self.cols {
             return None;
         }
         self.records.as_ref()?.get(vpos * self.cols + hpos)
     }
 
-    fn cpu_wait_row(&self, vpos: usize) -> Option<&[u8]> {
+    pub(in crate::video) fn cpu_wait_row(&self, vpos: usize) -> Option<&[u8]> {
         if vpos >= self.rows || self.cols == 0 {
             return None;
         }
@@ -2023,7 +2044,7 @@ impl AnalyzerTraceView {
 
     /// The share of `total` (the CPU's granted plus waited clocks) it
     /// spent waiting, as a percentage.
-    fn cpu_wait_percent(&self) -> f64 {
+    pub(in crate::video) fn cpu_wait_percent(&self) -> f64 {
         let granted = self.owner_cck[7];
         let total = granted.saturating_add(self.cpu_wait_cck);
         if total == 0 {
@@ -3614,7 +3635,7 @@ fn draw_audio_scope(
     }
 }
 
-fn owner_color(code: u8) -> u32 {
+pub(in crate::video) fn owner_color(code: u8) -> u32 {
     match code {
         b'R' => rgba(68, 180, 190),
         b'B' => rgba(64, 118, 230),
@@ -3628,7 +3649,7 @@ fn owner_color(code: u8) -> u32 {
     }
 }
 
-fn owner_name_for_code(code: u8) -> &'static str {
+pub(in crate::video) fn owner_name_for_code(code: u8) -> &'static str {
     match code {
         b'R' => "refresh",
         b'B' => "bitplane",
@@ -3645,7 +3666,7 @@ fn owner_name_for_code(code: u8) -> &'static str {
 /// Colour of a CPU wait code (`crate::bus::cpu_wait_class_code`): the
 /// denier's owner colour, a hotter red for the BLTPRI-set blitter, grey for
 /// the 020+ port turnaround.
-fn cpu_wait_color(code: u8) -> u32 {
+pub(in crate::video) fn cpu_wait_color(code: u8) -> u32 {
     match code {
         b'N' => rgba(255, 40, 40),
         b'p' => rgba(150, 150, 150),
@@ -3655,7 +3676,7 @@ fn cpu_wait_color(code: u8) -> u32 {
 }
 
 /// Legend name of a CPU wait code, short enough for the legend row.
-fn cpu_wait_name_for_code(code: u8) -> &'static str {
+pub(in crate::video) fn cpu_wait_name_for_code(code: u8) -> &'static str {
     match code {
         b'N' => "bltpri",
         b'p' => "port",
@@ -3855,6 +3876,67 @@ fn underlay_sample(
         .copied()
 }
 
+impl AnalyzerTraceView {
+    /// Shared beam-raster sampling; UI layout and selection overlays stay in
+    /// their renderer, while underlay, scrub and CPU-wait colours agree.
+    pub(in crate::video) fn raster_pixel(
+        &self,
+        underlay: Option<&AnalyzerUnderlayView>,
+        scrub: bool,
+        cpu_wait: bool,
+        size: [usize; 2],
+        point: [usize; 2],
+    ) -> u32 {
+        let vpos = point[1] * self.rows / size[1].max(1);
+        let hpos = point[0] * self.cols / size[0].max(1);
+        let owner_code = self.owner_code_at(vpos, hpos);
+        // The CPU wait view keeps the owner grid faintly visible under
+        // the slots the CPU was denied, so a stall reads against the
+        // DMA pattern that caused it.
+        let (code, mut color) = if cpu_wait {
+            let wait_code = self.cpu_wait_code_at(vpos, hpos);
+            if wait_code != b'.' {
+                (wait_code, cpu_wait_color(wait_code))
+            } else {
+                (owner_code, quarter_rgba(owner_color(owner_code)))
+            }
+        } else {
+            (owner_code, owner_color(owner_code))
+        };
+        if let Some(pix) = underlay.and_then(|under| {
+            underlay_sample(
+                under,
+                self,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: size[0],
+                    h: size[1],
+                },
+                point[0],
+                vpos,
+            )
+        }) {
+            // Picture shows through idle slots; owned slots blend the
+            // owner colour over the dimmed picture so both read. While
+            // scrubbing, beam positions the CRT has not reached yet
+            // ghost at an eighth brightness.
+            let drawn = !scrub || (vpos, hpos) <= (self.selected_vpos, self.selected_hpos);
+            let under_pix = if drawn {
+                dim_rgba(pix)
+            } else {
+                ghost_rgba(pix)
+            };
+            color = if code == b'.' {
+                under_pix
+            } else {
+                super::blend_rgba(under_pix, color, 176)
+            };
+        }
+        color
+    }
+}
+
 fn draw_owner_heatmap(
     frame: &mut [u8],
     rect: Rect,
@@ -3866,42 +3948,8 @@ fn draw_owner_heatmap(
 ) {
     fill_rect(frame, scale_rect(rect, scale), rgba(10, 12, 14), scale);
     for y in 0..rect.h {
-        let vpos = y * trace.rows / rect.h.max(1);
         for x in 0..rect.w {
-            let hpos = x * trace.cols / rect.w.max(1);
-            let owner_code = trace.owner_code_at(vpos, hpos);
-            // The CPU wait view keeps the owner grid faintly visible under
-            // the slots the CPU was denied, so a stall reads against the
-            // DMA pattern that caused it.
-            let (code, mut color) = if cpu_wait {
-                let wait_code = trace.cpu_wait_code_at(vpos, hpos);
-                if wait_code != b'.' {
-                    (wait_code, cpu_wait_color(wait_code))
-                } else {
-                    (owner_code, quarter_rgba(owner_color(owner_code)))
-                }
-            } else {
-                (owner_code, owner_color(owner_code))
-            };
-            if let Some(pix) =
-                underlay.and_then(|under| underlay_sample(under, trace, rect, x, vpos))
-            {
-                // Picture shows through idle slots; owned slots blend the
-                // owner colour over the dimmed picture so both read. While
-                // scrubbing, beam positions the CRT has not reached yet
-                // ghost at an eighth brightness.
-                let drawn = !scrub || (vpos, hpos) <= (trace.selected_vpos, trace.selected_hpos);
-                let under_pix = if drawn {
-                    dim_rgba(pix)
-                } else {
-                    ghost_rgba(pix)
-                };
-                color = if code == b'.' {
-                    under_pix
-                } else {
-                    super::blend_rgba(under_pix, color, 176)
-                };
-            }
+            let color = trace.raster_pixel(underlay, scrub, cpu_wait, [rect.w, rect.h], [x, y]);
             fill_rect(
                 frame,
                 scale_rect(
@@ -4875,7 +4923,7 @@ fn heat_rgba(argb: u32) -> u32 {
 }
 
 /// The address range one grid cell covers, as "$XXXXXX-$YYYYYY".
-fn heat_cell_range(base: u32, bytes_per_cell: u32, cell: usize) -> String {
+pub(in crate::video) fn heat_cell_range(base: u32, bytes_per_cell: u32, cell: usize) -> String {
     let start = base.saturating_add((cell as u32).saturating_mul(bytes_per_cell));
     let end = start.saturating_add(bytes_per_cell.saturating_sub(1));
     format!("${start:06X}-${end:06X}")
@@ -4893,7 +4941,7 @@ fn heat_resource_at(view: &AnalyzerHeatView, cell: usize) -> Option<&AnalyzerHea
 }
 
 /// `  in 'name' (kind)` when a registered resource covers the cell.
-fn heat_resource_suffix(view: &AnalyzerHeatView, cell: usize) -> String {
+pub(in crate::video) fn heat_resource_suffix(view: &AnalyzerHeatView, cell: usize) -> String {
     heat_resource_at(view, cell)
         .map(|resource| format!("  in '{}' ({})", resource.name, resource.kind))
         .unwrap_or_default()

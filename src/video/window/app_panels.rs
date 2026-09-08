@@ -5,180 +5,6 @@
 use super::*;
 
 impl App {
-    pub(super) fn handle_tool_window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        kind: ToolPanelKind,
-        event: WindowEvent,
-    ) {
-        // Whichever tool window the host last gave the keyboard to is
-        // the one in front, and so the one a "close this" means. Opening
-        // one focuses it, so it starts out true of the newest.
-        if matches!(
-            event,
-            WindowEvent::Focused(true) | WindowEvent::KeyboardInput { .. }
-        ) {
-            self.tool_window_front = Some(kind);
-        }
-        match event {
-            WindowEvent::CloseRequested => self.close_tool_panel(kind),
-            WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        state,
-                        physical_key: PhysicalKey::Code(code),
-                        repeat,
-                        text,
-                        ..
-                    },
-                ..
-            } => {
-                if state != ElementState::Pressed
-                    || (repeat && !self.ui_key_accepts_repeat(Some(kind), code))
-                {
-                    return;
-                }
-                if code == KeyCode::KeyQ && host_shortcut_modifier_pressed(self.modifiers) {
-                    event_loop.exit();
-                } else if kind == ToolPanelKind::Console
-                    && self.console_handle_text_input(code, text.as_deref())
-                {
-                    // Paste or layout-aware typed text; editing and command
-                    // keys fall through to the keycode handler below.
-                } else if !self.ui_handle_tool_key(kind, code) {
-                    self.request_redraw();
-                }
-            }
-            WindowEvent::ModifiersChanged(modifiers) => {
-                self.update_host_modifiers(modifiers.state());
-            }
-            WindowEvent::CursorMoved { position, .. } => {
-                let previous = self.tool_window(kind).and_then(|tool| tool.cursor_pos);
-                let pos = self.tool_window(kind).and_then(|tool| {
-                    cursor_texture_position(&tool.pixels, position, tool.texture_scale)
-                });
-                if let Some(tool) = self.tool_window_mut(kind) {
-                    tool.cursor_pos = pos;
-                }
-                if kind == ToolPanelKind::FrameAnalyzer && self.analyzer_dragging {
-                    if let Some(pos) = pos {
-                        self.activate_analyzer_pick_at(kind, pos);
-                    }
-                }
-                if self.tool_hover_changed(kind, previous, pos) {
-                    self.request_redraw();
-                }
-            }
-            WindowEvent::CursorLeft { .. } => {
-                let previous = self.tool_window(kind).and_then(|tool| tool.cursor_pos);
-                if let Some(tool) = self.tool_window_mut(kind) {
-                    tool.cursor_pos = None;
-                }
-                if kind == ToolPanelKind::FrameAnalyzer {
-                    self.analyzer_dragging = false;
-                }
-                if self.tool_hover_changed(kind, previous, None) {
-                    self.request_redraw();
-                }
-            }
-            WindowEvent::MouseInput { state, button, .. } => {
-                if button != MouseButton::Left {
-                    return;
-                }
-                if state != ElementState::Pressed {
-                    if kind == ToolPanelKind::FrameAnalyzer {
-                        self.analyzer_dragging = false;
-                    }
-                    return;
-                }
-                if kind == ToolPanelKind::FrameAnalyzer {
-                    self.analyzer_dragging = false;
-                }
-                let control = self
-                    .tool_window(kind)
-                    .and_then(|tool| tool.cursor_pos)
-                    .and_then(|pos| self.tool_panel_control_at(kind, pos));
-                if let Some(control) = control {
-                    if kind == ToolPanelKind::FrameAnalyzer {
-                        self.analyzer_dragging = matches!(control, UiControl::AnalyzerPick { .. });
-                    }
-                    self.activate_tool_control(kind, control);
-                    self.ensure_tool_windows_for_open_panels(event_loop);
-                }
-            }
-            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                // Same stale-texture hazard as the main window (see the main
-                // window's ScaleFactorChanged handler): rebuild the tool
-                // window's texture for the new scale so its own hit-testing
-                // stays aligned after a DPI change or monitor move.
-                if let Some(tool) = self.tool_window_mut(kind) {
-                    resync_render_scale(&mut tool.pixels, &mut tool.texture_scale, scale_factor);
-                }
-                self.request_redraw();
-            }
-            WindowEvent::Resized(size) => {
-                self.apply_tool_surface_size(kind, size);
-            }
-            WindowEvent::MouseWheel { delta, .. } => {
-                let rows = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => -y as i32,
-                    MouseScrollDelta::PixelDelta(pos) => -(pos.y / 12.0) as i32,
-                };
-                // Scroll the Memory tab's hex/bitmap view or the console's
-                // scrollback: one display row per wheel notch, a chunk for
-                // pixel-precise trackpads.
-                if kind == ToolPanelKind::Debugger {
-                    if self
-                        .debugger_panel
-                        .as_ref()
-                        .is_some_and(|panel| panel.tab == ui::DebugTab::IoMap)
-                    {
-                        self.debugger_iomap_move(rows);
-                    } else {
-                        self.debugger_mem_scroll(rows);
-                    }
-                } else if kind == ToolPanelKind::Console {
-                    if let Some(panel) = self.console_panel.as_mut() {
-                        panel.scroll = panel
-                            .scroll
-                            .saturating_add_signed(-(rows as isize))
-                            .min(ui::CONSOLE_SCROLLBACK_LINES);
-                        self.request_redraw();
-                    }
-                }
-            }
-            WindowEvent::RedrawRequested => self.draw_tool_window(kind),
-            _ => {}
-        }
-    }
-
-    pub(super) fn draw_tool_window(&mut self, kind: ToolPanelKind) {
-        let Some(panel) = self.tool_panel_for_kind(kind) else {
-            *self.tool_window_slot(kind) = None;
-            return;
-        };
-        self.resync_tool_surface_size(kind);
-        if kind == ToolPanelKind::FrameAnalyzer {
-            self.ensure_analyzer_underlay();
-        }
-        let ui_data = self.build_tool_panel_view_data(kind);
-        let hover = self
-            .tool_window(kind)
-            .and_then(|tool| tool.cursor_pos)
-            .and_then(|pos| ui::panel_control_at(&panel, pos));
-        if let Some(tool) = self.tool_window_mut(kind) {
-            if tool.minimized {
-                return;
-            }
-            let frame = tool.pixels.frame_mut();
-            frame.fill(0);
-            ui::draw_panel_layer(frame, tool.texture_scale, &panel, hover, ui_data.as_ref());
-            if let Err(e) = tool.pixels.render() {
-                error!("tool pixels.render: {e}");
-            }
-        }
-    }
-
     /// Show or hide the MT-32's panel, resizing the presentation to match.
     ///
     /// The panel takes height from the canvas, and the draw helpers size
@@ -1114,6 +940,13 @@ impl App {
         }
     }
 
+    pub(super) fn tool_window_is_needed(&self, kind: ToolPanelKind) -> bool {
+        match kind {
+            ToolPanelKind::Debugger => self.egui_workspace_open(),
+            ToolPanelKind::FrameAnalyzer | ToolPanelKind::Console => false,
+        }
+    }
+
     pub(super) fn ensure_tool_windows_for_open_panels(&mut self, event_loop: &ActiveEventLoop) {
         for kind in ToolPanelKind::ALL {
             self.ensure_tool_window_for_kind(event_loop, kind, true);
@@ -1139,28 +972,28 @@ impl App {
         kind: ToolPanelKind,
         redraw: bool,
     ) {
-        if !self.tool_panel_is_open(kind) {
+        if !self.tool_window_is_needed(kind) {
             *self.tool_window_slot(kind) = None;
             return;
         }
         let title = Self::tool_window_title(kind);
         if let Some(tool) = self.tool_window(kind) {
             tool.window.set_title(title);
+            let redraw = redraw || tool.egui.repaint_due();
             if redraw && !tool.minimized {
                 tool.window.request_redraw();
             }
             return;
         }
 
-        let size = LogicalSize::new(FB_WIDTH as f64, window_present_height() as f64);
         let attrs = WindowAttributes::default()
             .with_title(title)
             .with_window_icon(copperline_window_icon())
-            .with_inner_size(size)
-            .with_min_inner_size(LogicalSize::new(
-                FB_WIDTH as f64 / 2.0,
-                window_present_height() as f64 / 2.0,
-            ));
+            .with_inner_size(LogicalSize::new(1100.0, 760.0))
+            .with_min_inner_size(LogicalSize::new(600.0, 480.0));
+        let attrs = self
+            .egui_layout_preferences()
+            .window_attributes(attrs, event_loop);
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -1184,25 +1017,35 @@ impl App {
                 return;
             }
         };
-        info!(
-            "tool window ready: {title} (texture {}x{})",
-            texture_width(texture_scale),
-            texture_height(texture_scale)
-        );
+        let mut pixels = pixels;
+        let egui = match egui_debugger::DebuggerUi::new(
+            &window,
+            &mut pixels,
+            self.egui_layout_preferences().clone(),
+        ) {
+            Ok(ui) => ui,
+            Err(error) => {
+                warn!("inspector UI init failed: {error}");
+                return;
+            }
+        };
+        info!("tool window ready: {title}");
         // Paint it now rather than waiting for something to happen: a
         // tool window opened and left alone showed an unpainted surface
         // until the next mouse move or key press asked for a frame.
         window.request_redraw();
         // Newly opened is newly in front, until another is touched.
         self.tool_window_front = Some(kind);
+        if kind == ToolPanelKind::Debugger {
+            self.tool_window_front = Some(self.egui_selected_tool);
+        }
         let inner = window.inner_size();
         *self.tool_window_slot(kind) = Some(ToolWindow {
             window,
             pixels,
-            texture_scale,
-            cursor_pos: None,
             minimized: false,
             surface_size: (inner.width.max(1), inner.height.max(1)),
+            egui,
         });
         self.request_redraw();
     }
@@ -1223,6 +1066,8 @@ impl App {
     }
 
     pub(super) fn close_tool_panel(&mut self, kind: ToolPanelKind) {
+        let shared_paused = self.paused;
+        self.save_egui_preferences();
         match kind {
             ToolPanelKind::Debugger => {
                 if self.debugger_panel.is_some() {
@@ -1231,7 +1076,6 @@ impl App {
                     self.sync_live_audio_suspension();
                 }
                 self.debugger_panel = None;
-                self.debugger_tool_window = None;
             }
             ToolPanelKind::Console => {
                 if self.console_panel.is_some() {
@@ -1275,6 +1119,26 @@ impl App {
                 self.analyzer_underlay_frame = None;
                 self.analyzer_underlay_input = None;
             }
+        }
+        {
+            if self.egui_workspace_open() {
+                // Closing one inspector does not change the other one's run
+                // state or destroy their shared native window.
+                self.paused = shared_paused;
+                if self.egui_selected_tool == kind {
+                    self.egui_selected_tool = if self.debugger_panel.is_some() {
+                        ToolPanelKind::Debugger
+                    } else if self.frame_analyzer_panel.is_some() {
+                        ToolPanelKind::FrameAnalyzer
+                    } else {
+                        ToolPanelKind::Console
+                    };
+                    self.tool_window_front = Some(self.egui_selected_tool);
+                }
+            } else {
+                self.debugger_tool_window = None;
+            }
+            self.sync_live_audio_suspension();
         }
         if self.debugger_panel.is_none() && self.console_panel.is_none() {
             self.emu.machine.ui_set_pc_history_enabled(false);

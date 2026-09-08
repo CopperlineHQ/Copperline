@@ -4,18 +4,88 @@ Press `Cmd+B` on macOS or `Alt+B` on Linux/Windows (or select **Debugger** from
 the status bar menu) to pause emulation and open the debugger tool window.
 Closing the window restores the previous execution state.
 
-The debugger, Frame Analyzer, and [Console](console) operate in separate host
-windows, allowing them to remain open simultaneously while inspecting CPU,
-custom chipset, and bus activity. Inspection reads do not acknowledge hardware
-registers or consume emulated bus cycles. Stepping, register edits, and memory
-writes change the machine as requested.
+The debugger, Frame Analyzer, and [Console](console) share one native inspector
+window, separate from the emulated display. Select an inspector at the top;
+each retains its state while another is visible. Opening another inspector
+preserves the current run/pause state. Inspection reads do not acknowledge
+hardware registers or consume emulated bus cycles. Stepping, register edits,
+and memory writes change the machine as requested.
 
-```{figure} ../images/ui-preview-debugger.png
-:alt: The debugger window on the CPU tab
-:width: 90%
+(shared-inspector-window)=
+## Shared inspector window
 
-Debugger window: register file, live disassembly, and transport controls.
+The GPU-rendered inspector UI is included in every desktop build.
+
+```{figure} ../images/ui-preview-debugger-egui.png
+:alt: Debugger with resizable register, disassembly, and memory panes
+:width: 100%
+
+The CPU tab, rendered from the deterministic debugger test machine.
 ```
+
+On the CPU tab, drag the dividers to resize the register, disassembly, and memory
+panes.
+Text can be selected and copied, and the address/command field supports normal
+text editing and paste. Register **Edit** buttons prepare a command in that
+field; **Set Reg** applies it. Enter in the field pins the disassembly address
+(an empty field follows PC), jumps to a memory address, or selects an IO register,
+according to the active tab.
+
+The CPU memory pane has its own address and page controls. The Memory tab
+retains Find, Save, Writer, Bits, and Poke; the other tabs retain their layer
+toggles, audio mutes, breakpoints, and waveform controls. Scrollbars expose
+content that does not fit the window. Transport keyboard shortcuts work while
+not editing text. **Close inspector** and the controller's back button close
+the selected inspector; the remaining inspectors stay available in the shared
+window.
+`Esc` leaves a text field first. Outside a text field it closes all inspectors,
+as does closing the native window.
+
+Select **Frame Analyzer** above the debugger tabs to inspect its **Beam**,
+**Blits**, **Memory**, and **Resources** views. Opening the analyzer from the
+status bar menu selects it in this same window. **Capture frame** records a
+frame, and **Run** collects live frames. Switching between the debugger and
+analyzer preserves their selections, capture data, and current run/pause state.
+The analyzer stays armed while its view is hidden. Closing it releases captures
+it owns; captures started through the control protocol continue independently.
+
+```{figure} ../images/ui-preview-analyzer-egui.png
+:alt: Frame Analyzer in the shared egui window with beam raster and bus counters
+:width: 100%
+
+The Beam view in the shared window, rendered from the analyzer test machine.
+```
+
+Click or drag the beam raster or scanline strip to select a slot. Picture,
+beam scrub, CPU waits, and run-to-beam retain their normal controls and
+shortcuts. The Memory view offers address presets and cell picking; Blits
+shows source/result previews with previous/next selection; Resources offers
+paging, previews, and **Save resource**. Text readouts can be selected and copied.
+Click a PC in **Most stalled PCs** to open CPU disassembly there.
+Below the selected beam slot, **Inspect memory**
+opens the Memory tab; a **Copper instruction** link pins the Copper listing at
+that instruction. The heat map's pinned cell also links to memory. **Follow
+Copper** returns the listing to the live Copper. These links inspect the current
+machine at the recorded address; they do not restore historical memory or run
+the guest, and the analyzer's capture and selection remain available.
+
+Select **Console** at the top, or use `Cmd+K` / `Alt+K`, for the same
+[command interpreter](console) and history in this window. Output is selectable;
+the command field supports editing and clipboard paste. Enter or **Execute**
+runs the entered commands. Shift+Enter adds a line, and pasted commands remain
+editable until submitted. Up/Down browse history. Console output continues to
+arrive while another inspector is selected.
+
+The window's size, position, maximized state, CPU pane sizes, and the debugger
+and analyzer tabs are saved when an inspector closes or Copperline exits.
+They are restored on reopening or relaunching; a position on a disconnected
+monitor is discarded. Preferences live in `inspector-layout.toml` in the
+[host data directory](../guide/ui.md#where-files-go). They contain layout choices only,
+not command text, captures, or machine state. Opening a specific inspector
+always selects the one requested.
+
+Live machine-data refreshes are limited to 20 Hz; input and stepping redraw
+immediately.
 
 ## Tabs
 
@@ -50,7 +120,16 @@ sprite layer isolation toggles:
 Decodes Paula audio channels (0-3) and expansion sound devices (CD-DA, MT-32,
 Coppersynth, Toccata, MHI). Displays channel DMA state machine status, period,
 volume, active buffer pointers, and real-time audio waveform scopes. Channels
-can be muted individually.
+can be muted individually. Each source has a fixed-height row with its scope
+beside its details, so pending DMA and interrupt flags cannot move other
+channels. Long detail lines scroll horizontally inside their row.
+
+```{figure} ../images/ui-preview-debugger-audio-egui.png
+:alt: Audio inspector with fixed channel rows and waveform scopes beside the channel details.
+:width: 100%
+
+Audio scopes remain aligned as channel status changes.
+```
 
 ### Memory
 Hexadecimal and ASCII memory dump viewer (256 bytes per page).
@@ -74,7 +153,7 @@ Selecting a register decodes its individual bitfields (e.g. `DMACON`, `INTENA`,
 ### Break
 Manages active breakpoints, memory watchpoints, and custom register write traps.
 
-```{figure} ../images/ui-preview-debugger-break.png
+```{figure} ../images/ui-preview-debugger-break-egui.png
 :alt: The Break tab
 :width: 90%
 
@@ -133,13 +212,14 @@ Examples:
 ## Frame Analyzer
 
 Open the Frame Analyzer via the status bar menu to inspect chip-bus slot allocations
-and memory access patterns.
+and memory access patterns. The **Frame Analyzer** selector at the top of the
+shared window opens the same inspector.
 
-```{figure} ../images/ui-preview-frame-analyzer.png
+```{figure} ../images/ui-preview-analyzer-egui.png
 :alt: The Frame Analyzer
 :width: 90%
 
-Frame Analyzer: chip-bus owner heatmap overlaid on rendered frame.
+Frame Analyzer: chip-bus ownership and per-slot inspection.
 ```
 
 ### Beam tab
@@ -181,14 +261,6 @@ slot.
   the CPU spent waiting, in the colour of the line's dominant denier -- a
   profile of where the frame chokes the CPU.
 
-```{figure} ../images/ui-preview-frame-analyzer-cpu-wait.png
-:alt: The Frame Analyzer's CPU wait view
-:width: 90%
-
-Frame Analyzer Beam tab in the CPU wait view: denied slots lit by denier, the
-stall gutter, and the wait breakdown with the top stalled PCs.
-```
-
 The console's `CPUWAIT` command prints the same summary for the traced frame,
 and a [profile capture](profiling) exports it per frame.
 
@@ -214,7 +286,7 @@ changes the selected blit. The same renderer is available as `blit.render`.
 (frame-analyzer-memory-tab)=
 ### Memory heatmap tab
 
-```{figure} ../images/ui-preview-frame-analyzer-memory.png
+```{figure} ../images/ui-preview-analyzer-memory-egui.png
 :alt: The Frame Analyzer Memory tab
 :width: 90%
 
@@ -233,7 +305,7 @@ resource mapped at that address.
 
 ### Resources tab
 
-```{figure} ../images/ui-preview-frame-analyzer-resources.png
+```{figure} ../images/ui-preview-analyzer-resources-egui.png
 :alt: The Frame Analyzer Resources tab
 :width: 90%
 

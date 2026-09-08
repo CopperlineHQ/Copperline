@@ -97,7 +97,7 @@ internal-diagnostics = []
 # get a stub. See src/midi/.
 midi = []
 # The interactive desktop frontend: the winit/pixels window and launcher,
-# host audio output, gamepads, file dialogs, and the debugger console's
+# shared egui inspectors, host audio output, gamepads, file dialogs, and
 # clipboard paste. Off, the crate is the portable headless core (the surface
 # a wasm32 browser frontend builds against); the `copperline` binary
 # requires it.
@@ -109,6 +109,9 @@ frontend = [
     "dep:rfd",
     "dep:arboard",
     "dep:env_logger",
+    "dep:egui",
+    "dep:egui-winit",
+    "dep:egui-wgpu",
 ]
 # The wasmtime host for functional Zorro boards (src/wasmboard.rs). Separate
 # from `frontend` because it is a core-machine feature, but Cranelift cannot
@@ -172,6 +175,10 @@ mt32-rs = { git = "https://github.com/CopperlineHQ/mt32-rs", rev = "ac00f818629a
 coppersynth = { git = "https://github.com/CopperlineHQ/Coppersynth", rev = "38873e283aa9f2e6d2574d6c71e9a2cf9d0b42a2", optional = true }
 pixels = { version = "0.17", optional = true }
 winit = { version = "0.30", optional = true }
+# egui 0.35 shares pixels' wgpu 29 device and command encoder.
+egui = { version = "0.35", optional = true }
+egui-winit = { version = "0.35", optional = true, default-features = false, features = ["clipboard", "wayland", "x11"] }
+egui-wgpu = { version = "0.35", optional = true, default-features = false }
 anyhow = "1"
 log = "0.4"
 env_logger = { version = "0.11", optional = true }

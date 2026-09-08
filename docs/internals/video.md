@@ -600,8 +600,8 @@ is fed from `present_fb`, the post-processed presentation buffer produced by
 either the render worker or the synchronous fallback.
 
 The emulator window is drawn onto the surface by its own scaling pass
-(`window/scaler.rs`), not the `pixels` crate default renderer (tool windows
-retain the built-in Fill renderer). The custom scaler pass accepts destination
+(`window/scaler.rs`), while the inspectors draw directly with egui. The custom
+scaler pass accepts destination
 rectangles and filter modes directly, allowing integer scaling multipliers beyond
 4x on high-resolution displays. Point sampling remains exact because the present
 copy replicates each canvas pixel into a uniform texel block. Smooth filtering
@@ -752,14 +752,92 @@ sequencer and a plausible CRTC mode whose visible rows fit in VRAM. During
 driver mode changes this makes presentation fall back to the native chipset
 frame instead of exposing stale or out-of-bounds VRAM.
 
-`ui.rs` implements the status bar widgets, the pop-up menu, the smaller
-overlay panels (About, Shortcuts, Calibration), and the shared debugger/tool
-panel drawing used by the native debugger and frame-analyzer windows. The UI
-uses the 8x8 `font.rs` glyphs. `COPPERLINE_UI_PREVIEW=1 cargo test
-panels_render_into_their_rects` renders every panel into
-`target/ui-preview-*.png` -- the screenshots in this documentation come
-from there -- and the `test_app()` fixture drives the debugger window
-against a real emulator instance in the unit tests.
+`ui.rs` implements the status bar widgets, pop-up menu, and smaller overlay
+panels (About, Shortcuts, Calibration), using the 8x8 `font.rs` glyphs. Its
+software inspector drawing helpers remain available for tests and rendering
+comparisons. `COPPERLINE_UI_PREVIEW=1 cargo test panels_render_into_their_rects`
+renders the software panels into `target/ui-preview-*.png`.
+
+The desktop `frontend` feature includes egui. `window/egui_debugger.rs` owns the
+shared debugger/Frame Analyzer/Console window's layout, text input, and GPU drawing.
+There is no separate inspector feature or native software fallback; headless,
+browser, and libretro builds omit the desktop frontend and its egui dependencies.
+`egui_debugger/analyzer.rs` supplies the four analyzer views, and
+`egui_debugger/console.rs` supplies the command field and selectable output.
+The frontend shares the window's `pixels`/wgpu device and surface, but shrinks the unused software backing
+texture to 1x1. Egui uploads glyphs and meshes and draws directly to the physical
+surface, independently of the Amiga presentation canvas and its texture scale.
+The egui versions in Cargo.toml share pixels' wgpu major version; upgrading
+them requires keeping those device and encoder types compatible.
+
+The view builder supplies side-effect-free snapshots, including structured CPU
+registers, disassembly, and memory. Software rendering helpers use fixed-width
+text clipping; egui receives complete lines and scrolls them. UI commands are
+collected during layout and applied through the existing debugger handlers
+after the final egui pass, so a repeated sizing pass cannot execute a command
+twice. Commands still dispatch if presentation fails, because their input has
+already been consumed. UI state and GPU resources belong to the host window
+and never enter save states. Repaint deadlines wake a paused event loop for
+caret blinking and interaction without advancing the machine; minimized windows
+skip presentation.
+
+Audio rows reserve four detail lines and place each scope beside the text.
+Their geometry depends on the viewport and font metrics, so transient pending
+flags and changing status text do not move later rows or mute controls. Detail
+text scrolls horizontally within its column; the tab header does not wrap.
+
+The debugger's native window slot hosts all three inspectors. Logical panels stay
+independent: selecting an inspector opens it lazily, keeps the other panel's
+capture and selection, and does not alter an already-open inspector's run state.
+Only the visible inspector builds a view snapshot. A native close releases all three
+panels through their existing cleanup paths, including profile/heat-map capture
+ownership; closing a single logical panel keeps the shared surface alive.
+Explicit Run/Pause choices apply to every inspector's restore state.
+
+Analyzer address links dispatch host navigation actions: they open the debugger,
+select CPU/Memory/Copper, pin the address, and reset the destination scroll.
+The captured frame is retained; the destination reads the current machine.
+The Console stores its input, output, and history in the existing panel model.
+Text edits stay in the panel, and submission becomes a single post-layout
+command batch, so paste and repeated sizing passes cannot execute commands.
+A `CLOSE` stops that batch. Hidden Console panels still receive guest output.
+
+`egui_debugger/preferences.rs` stores a small TOML file in the host data directory:
+window geometry, maximized state, CPU divider sizes, and tab names. It is loaded
+lazily, saved atomically when an inspector closes and on application exit, and
+retained across window recreation. Invalid files fall back to defaults, sizes
+are bounded, and off-screen positions are discarded. This file contains no
+egui internals or guest state. Tests round-trip it in temporary directories;
+ordinary unit-test App instances never read or write the user's preferences.
+
+The beam image uses the same pure `AnalyzerTraceView::raster_pixel` sampler as
+the software renderer for owner colours, CPU waits, picture blending, and beam
+scrub. Egui draws the display/DIW/DDF bounds, markers, and selections above that
+texture. Image picks map through the existing 0..1023 beam coordinates and
+256x256 memory grid. Diagram sizes come from the visible scroll viewport so
+window resizing keeps input and imagery aligned.
+
+The inspector tests run with the ordinary desktop unit suite on macOS, Linux,
+and Windows. The macOS **Inspector UI tests** step reuses the default build's
+library test binary and fails if the suite is missing. These tests exercise all
+tabs, input, navigation, shared lifecycle, and saved layouts without a GPU or
+native window, and compare serialized machine state before and after inspection.
+The `test_app()` fixture supplies a real emulator instance. For visual review
+on a host with a GPU:
+
+```sh
+cargo test --release --locked --lib render_debugger_previews -- --ignored --nocapture
+cargo test --release --locked --lib render_analyzer_previews -- --ignored --nocapture
+cargo test --release --locked --lib render_console_preview -- --ignored --nocapture
+```
+
+These write the nine debugger, four analyzer, and Console images to
+`target/egui-debugger/`. The similarly invoked
+`benchmark_debugger_repaint` test measures alternating, warmed CPU-tab repaints:
+legacy software drawing plus texture upload against egui layout, tessellation,
+and GPU submission. It excludes machine-data collection, GPU completion waits,
+window presentation/vsync, and emulation; its timings describe repaint CPU
+cost, not overall emulator performance.
 
 The configuration panel lives in `ui/configuration.rs`, with row drawing and
 hit-testing together in `configuration/rows.rs`, library artwork and entries in

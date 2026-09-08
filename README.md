@@ -60,6 +60,13 @@ cargo build --release
 Run the resulting `target/release/copperline` binary. `--release` is a Cargo
 build option; unoptimized debug builds are too slow for real-time emulation.
 
+The [shared inspector window](docs/debugger/window.md) combines the debugger,
+Frame Analyzer, and Console, with linked address inspection, selectable text,
+resizable panes, and a saved window layout. It is included in every desktop
+build; open it with `Cmd+B` on macOS or `Alt+B` on Linux/Windows.
+The Audio tab keeps each channel's details and scope together in a stable row
+as DMA and interrupt events change.
+
 Dependencies:
 
 - Rust 1.95+ (tested on stable)

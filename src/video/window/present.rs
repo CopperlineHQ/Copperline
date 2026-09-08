@@ -832,38 +832,6 @@ pub(super) fn sync_main_present_scaling(
     Ok(())
 }
 
-/// React to a host DPI scale-factor change for a *tool* window's pixel
-/// surface (the emulator window re-plans through
-/// `sync_main_present_scaling`, whose supersample factor is not the DPI's
-/// under integer scaling).
-///
-/// `cursor_texture_position` maps a host click into texture space using
-/// both the surface size (which the following Resized event updates) and the
-/// texture extent (which nothing updated before this). When the supersample
-/// factor changes -- e.g. dragging between a 1x and a 2x monitor -- the texture
-/// must be rebuilt to the new size, otherwise the two halves of the mapping
-/// disagree and clicks land in the wrong region. The rebuild reallocates a GPU
-/// texture, so it is skipped when the rounded factor is unchanged (a slow drag
-/// across a fractional-scale monitor seam can emit many events); the surface
-/// itself is re-synced by the Resized event that always follows.
-pub(super) fn resync_render_scale(
-    pixels: &mut Pixels<'static>,
-    texture_scale: &mut usize,
-    scale_factor: f64,
-) {
-    let new_scale = texture_scale_for_factor(scale_factor);
-    if new_scale == *texture_scale {
-        return;
-    }
-    match pixels.resize_buffer(
-        texture_width(new_scale) as u32,
-        texture_height(new_scale) as u32,
-    ) {
-        Ok(()) => *texture_scale = new_scale,
-        Err(e) => warn!("resize texture buffer for scale {scale_factor} failed: {e}"),
-    }
-}
-
 /// The size a redraw has to apply to the presentation surface before it draws,
 /// or `None` when the surface already matches the host window and the frame can
 /// go out as it stands.
@@ -929,35 +897,6 @@ pub(in crate::video) fn scale_rect(rect: Rect, scale: usize) -> Rect {
     }
 }
 
-/// Map a host cursor position (surface physical pixels) into a *tool*
-/// window's logical canvas position, or None outside the presented
-/// picture.
-///
-/// Deliberately not pixels' `window_pos_to_pixel`: that helper re-centres
-/// through `min(texture, surface) / 2`, which is only correct while the
-/// texture fits inside the surface. The supersampled texture is *larger* than
-/// the surface whenever the rounded texture scale exceeds a fractional host
-/// scale factor (a 2x texture over a 1.5x surface on a 150% desktop), and the
-/// shifted mapping it produces there lands every status-bar click in the
-/// display region, where it takes the mouse capture instead of the control.
-/// Mapping through the scaling renderer's clip rect -- the surface rect the
-/// Fill pass draws the picture into -- holds on both sides of that boundary,
-/// and agrees with the render by construction: the rect derives from the same
-/// surface and texture extents the render pass scissors with.
-pub(super) fn cursor_texture_position(
-    pixels: &Pixels<'_>,
-    position: winit::dpi::PhysicalPosition<f64>,
-    texture_scale: usize,
-) -> Option<(i32, i32)> {
-    let context = pixels.context();
-    let (x, y) = cursor_position_in_texture(
-        (position.x, position.y),
-        context.scaling_renderer.clip_rect(),
-        (context.texture_extent.width, context.texture_extent.height),
-    )?;
-    Some(((x / texture_scale) as i32, (y / texture_scale) as i32))
-}
-
 /// The emulator window's cursor mapping: host surface position to logical
 /// canvas position, or None outside the presented picture. The emulator
 /// window is drawn by the scaler pass, not the built-in renderer, so the
@@ -973,8 +912,7 @@ pub(super) fn main_cursor_position(
     main_present_layout(r, src).cursor_position(position)
 }
 
-/// The pure half of [`cursor_texture_position`]: position and clip rect in
-/// surface physical pixels to supersampled-texture pixels.
+/// Map a position and clip rect in surface physical pixels to texture pixels.
 pub(super) fn cursor_position_in_texture(
     position: (f64, f64),
     clip: (u32, u32, u32, u32),

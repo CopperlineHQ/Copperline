@@ -39,6 +39,18 @@ needed. Outputs live in `target/ci/` (or `target/<triple>/ci/` with
 full suite and directly reuses those executables for the extra ignored
 audio and network checks, avoiding further build-script runs and recompiles.
 
+The standard desktop suite includes the shared inspector's egui tests; no extra
+feature flag, GPU, or display is needed. The macOS **Inspector UI tests** step
+runs them from the prebuilt library test executable and checks that the suite
+is present. Run just those tests locally with:
+
+```sh
+cargo test --locked --lib video::window::egui_debugger::
+```
+
+GPU preview renders remain ignored; see the
+[video internals](../docs/internals/video.md) for their commands.
+
 The native CI builders publish `cargo-timings-*` artifacts from `--timings`
 for seven days. To inspect build costs locally, add `--timings` and open
 `target/cargo-timings/cargo-timing.html`. CI and packaging use distinct

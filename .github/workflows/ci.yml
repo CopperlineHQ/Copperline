@@ -231,16 +231,25 @@ jobs:
         with:
           name: ci-bins
           path: ci-bins
+      - name: Inspector UI tests
+        # Reuse the ordinary desktop build. Fail if its inspector suite is
+        # missing: a test-name filter otherwise succeeds with zero tests.
+        # These tests exercise egui input/layout without a GPU or window.
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x ci-bins/*
+          ./ci-bins/unit-lib video::window::egui_debugger:: | tee inspector-tests.txt
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed;' inspector-tests.txt
       - name: Unit tests
         # The inline #[cfg(test)] suites in the lib and binaries, prebuilt
         # by the build job (this is everything a root `cargo test` runs
         # besides tests/probe_golden.rs, which has its own job below; the
         # crate has no doctests). The GDB remote-protocol suite in
         # src/gdbstub is part of unit-lib: gdb is a default feature.
-        # Artifact zips do not preserve the executable bit, hence the chmod.
+        # Inspector tests ran in the preceding step.
         run: |
-          chmod +x ci-bins/*
-          ./ci-bins/unit-lib
+          ./ci-bins/unit-lib --skip video::window::egui_debugger::
           ./ci-bins/unit-bin-copperline
           ./ci-bins/unit-bin-copperline-ctl
 

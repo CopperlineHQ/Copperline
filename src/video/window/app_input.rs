@@ -454,23 +454,6 @@ impl App {
         self.handle_amiga_key_event(rawkey, pressed);
     }
 
-    pub(super) fn activate_analyzer_pick_at(
-        &mut self,
-        kind: ToolPanelKind,
-        pos: (i32, i32),
-    ) -> bool {
-        if kind != ToolPanelKind::FrameAnalyzer {
-            return false;
-        }
-        let control = self.tool_panel_control_at(kind, pos);
-        let Some(UiControl::AnalyzerPick { x, y, scanline }) = control else {
-            return false;
-        };
-        self.frame_analyzer_select(x, y, scanline);
-        self.request_redraw();
-        true
-    }
-
     pub(super) fn update_host_modifiers(&mut self, modifiers: ModifiersState) {
         self.modifiers = modifiers;
         if !modifiers.shift_key()

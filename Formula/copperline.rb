@@ -47,6 +47,11 @@ class Copperline < Formula
     # uses the pinned dependency graph.
     system "cargo", "install", *std_cargo_args
 
+    # Older stable source archives predate the shared inspector UI.
+    if (buildpath/"assets/egui/THIRD_PARTY_FONTS.txt").exist?
+      pkgshare.install "assets/egui/THIRD_PARTY_FONTS.txt"
+    end
+
     # Install the bundled AROS open-source Kickstart replacement (the default
     # boot ROM) where the binary looks for it: <prefix>/share/copperline/aros.
     # AROS is APL-licensed and freely redistributable, unlike a real Kickstart.

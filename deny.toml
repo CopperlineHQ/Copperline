@@ -61,6 +61,13 @@ allow = [
 # check and needs an explicit, reviewed exception here.
 confidence-threshold = 0.93
 
+# Egui embeds these unmodified fonts alongside the application code. Their
+# notices accompany desktop packages in THIRD_PARTY_FONTS.txt.
+[[licenses.exceptions]]
+name = "epaint_default_fonts"
+version = "0.35.0"
+allow = ["OFL-1.1", "Ubuntu-font-1.0"]
+
 [bans]
 multiple-versions = "warn"
 # Git dependencies have no Cargo version requirement, so cargo-deny reports

@@ -1,18 +1,21 @@
 # Debugger console
 
-The debugger console provides an interactive command line interface in a
-dedicated tool window (`Cmd+K` on macOS, `Alt+K` on Linux/Windows, or via
-the status bar menu).
+The debugger console provides an interactive command line in the
+[shared inspector window](window.md#shared-inspector-window). Open it with
+`Cmd+K` on macOS, `Alt+K` on Linux/Windows, or through the status bar menu.
 
-```{figure} ../images/ui-preview-console.png
-:alt: The debugger console
-:width: 90%
+Opening the first inspector pauses emulation (`RUN` resumes execution).
+Switching inspectors preserves command text, output, history, and the current
+run/pause state. Closing one leaves the remaining inspectors open; closing the
+last restores the previous execution state. Explicit Run/Pause choices apply
+to the shared session.
 
-Debugger console interface with active breakpoint output.
+```{figure} ../images/ui-preview-console-egui.png
+:alt: Console with selectable output and an editable command field
+:width: 100%
+
+The Console in the shared inspector window.
 ```
-
-Opening the console pauses emulation (`RUN` resumes execution). Closing the
-console restores the previous execution state.
 
 Guest debug output sent via the
 [uaelib trap](../guide/run.md#uaelib-trap) `KPrintF` helper appears in the
@@ -20,11 +23,15 @@ console as `DBG:` lines while the pane is open (and is always mirrored to the
 host terminal). Lines emitted while the console is closed are not buffered.
 
 Input navigation:
-- `Enter`: Execute command.
-- `Up` / `Down`: Navigate command history.
-- `PageUp` / `PageDown` or mouse wheel: Scroll console output buffer.
-- `Cmd+V` (macOS) or `Ctrl+V` (Linux/Windows): Paste clipboard contents. Multi-line
-  pastes execute each complete line sequentially.
+
+- `Enter` or **Execute**: run the entered commands in order. A `CLOSE` command
+  ends the submitted batch.
+- `Shift+Enter`: add a line to the command field.
+- `Up` / `Down`: browse command history while the command field has focus.
+- `PageUp` / `PageDown`, scrollbars, or mouse wheel: scroll the output buffer.
+- `Cmd+V` (macOS) or `Ctrl+V` (Linux/Windows): paste clipboard contents.
+  Pasted commands remain editable until submitted.
+- `Esc`: leave the command field; outside a text field, close all inspectors.
 
 Commands are case-insensitive. Addresses and data values use hexadecimal notation
 (optional `$` or `0x` prefix). Raster beam coordinates (VPOS, HPOS) use decimal notation.
