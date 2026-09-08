@@ -337,20 +337,14 @@ fn paint(
 
 fn configure_style(context: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
+    // Replace only the default Hack face; keep egui's Unicode fallbacks.
     fonts.font_data.insert(
-        "Topaz a600a1200a4000".into(),
+        "Hack".into(),
         egui::FontData::from_static(include_bytes!(
-            "../../../assets/egui/amigafonts/ttf/Topaz_a1200_v1.0.ttf"
+            "../../../assets/egui/hack-slash/HackSlash-Regular.ttf"
         ))
         .into(),
     );
-    // Keep egui's Unicode fallbacks after the Amiga face. Topaz has the
-    // original character repertoire, while paths and guest text can exceed it.
-    fonts
-        .families
-        .entry(egui::FontFamily::Monospace)
-        .or_default()
-        .insert(0, "Topaz a600a1200a4000".into());
     context.set_fonts(fonts);
     let mut style = egui::Style {
         visuals: egui::Visuals::light(),
@@ -374,7 +368,7 @@ fn configure_style(context: &egui::Context) {
     style.spacing.button_padding = egui::vec2(9.0, 5.0);
     style
         .text_styles
-        .insert(egui::TextStyle::Monospace, FontId::monospace(16.0));
+        .insert(egui::TextStyle::Monospace, FontId::monospace(13.0));
     context.set_theme(egui::Theme::Light);
     context.set_style_of(egui::Theme::Light, style);
 }

@@ -775,12 +775,13 @@ continues at its usual cadence, composing the cached UI between inspector update
 Headless, browser, and libretro builds omit the desktop frontend and egui.
 `egui_debugger/analyzer.rs` supplies the four analyzer views, and
 `egui_debugger/console.rs` supplies the command field and selectable output.
-The inspector context prepends the bundled, unmodified
-`assets/egui/amigafonts/ttf/Topaz_a1200_v1.0.ttf` to egui's monospace font family,
-at 16 logical pixels for its 8-by-16 design. Egui's default fonts remain as
-Unicode fallbacks, and proportional labels keep their existing font. The
-upstream README and `assets/egui/THIRD_PARTY_FONTS.txt` preserve provenance,
-credits, and the GPL font exception; the latter ships in packaged builds.
+The inspector context replaces egui's Hack face with the bundled
+`assets/egui/hack-slash/HackSlash-Regular.ttf`. Only the zero outline changes,
+using Source Foundry's forward-slash alternate; character advances, line
+metrics, and the 13-point monospace style remain unchanged. Egui's Unicode
+fallbacks and proportional labels retain their default fonts. The asset's
+README and build script record how to reproduce it; `THIRD_PARTY_FONTS.txt`
+preserves its credits and licences in packaged builds.
 
 The egui versions in Cargo.toml share pixels' wgpu major version; upgrading
 them requires keeping those device and encoder types compatible.

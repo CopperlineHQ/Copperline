@@ -25,11 +25,9 @@ Amiga owns input, ordinary keys, including `Esc`, go to the guest.
 (shared-inspector-window)=
 ## Inspectors
 
-The GPU-rendered inspector UI is included in every desktop build. Registers,
-disassembly, memory, and other monospace text use **Topaz a600a1200a4000** from
-[amigafonts](https://github.com/rewtnull/amigafonts). The font is bundled, so no
-system installation is needed; fallback fonts cover characters outside Topaz's
-repertoire.
+The GPU-rendered inspector UI is included in every desktop build. Monospace
+readouts use Hack with a slashed zero to distinguish `0` from `O`. The font
+is bundled; no system installation is needed.
 
 ```{figure} ../images/ui-preview-debugger-egui.png
 :alt: Debugger with resizable register, disassembly, and memory panes
@@ -272,7 +270,7 @@ slot.
   after AmigaOS has initialised the relevant Exec lists. The
   selected-slot line names the denier whenever the selected slot was a CPU
   wait, in either view.
-- **Stall gutter:** the narrow strip right of the heatmap is drawn in both
+- **Stall gutter:** the narrow strip left of the heatmap is drawn in both
   views: one bar per line, as long as the share of that line's colour clocks
   the CPU spent waiting, in the colour of the line's dominant denier -- a
   profile of where the frame chokes the CPU.
