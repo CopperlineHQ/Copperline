@@ -17,6 +17,8 @@ The documentation under this directory is written in
   ```sh
   brew install typst        # macOS
   # or: cargo install typst-cli
+  # or a release binary from https://github.com/typst/typst/releases
+  # (CI installs it with typst-community/setup-typst)
   ```
 
   The first PDF build also downloads the MyST Typst template, so it needs
