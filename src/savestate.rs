@@ -533,9 +533,19 @@ pub(crate) fn load_with_migrations<R: Read>(
     migrations: &[chunk::Migration],
 ) -> Result<MachineDescriptor> {
     read_header(&mut reader)?;
-    let descriptor = read_descriptor(&mut reader, migrations)?;
+    let descriptor = read_descriptor_chunk(&mut reader, migrations)?;
     machine.apply_chunks(ZlibDecoder::new(reader), migrations)?;
     Ok(descriptor)
+}
+
+/// Read and validate a state's header without restoring its machine.
+/// Frontends with a fixed configuration can reject a different machine
+/// before loading it. The reader is left at the compressed machine
+/// payload; this checks the container version and the descriptor chunk,
+/// not the chunks that follow.
+pub fn read_descriptor<R: Read>(mut reader: R) -> Result<MachineDescriptor> {
+    read_header(&mut reader)?;
+    read_descriptor_chunk(&mut reader, chunk::MIGRATIONS)
 }
 
 /// Check the magic and container version, returning the version.
@@ -566,7 +576,7 @@ fn read_header<R: Read>(reader: &mut R) -> Result<u32> {
 }
 
 /// Read the uncompressed `DESC` chunk that follows the header.
-fn read_descriptor<R: Read>(
+fn read_descriptor_chunk<R: Read>(
     reader: &mut R,
     migrations: &[chunk::Migration],
 ) -> Result<MachineDescriptor> {
@@ -612,7 +622,7 @@ pub struct StateSummary {
 /// decoding.
 pub fn inspect<R: Read>(mut reader: R) -> Result<StateSummary> {
     let version = read_header(&mut reader)?;
-    let descriptor = read_descriptor(&mut reader, chunk::MIGRATIONS)?;
+    let descriptor = read_descriptor_chunk(&mut reader, chunk::MIGRATIONS)?;
     let mut decoder = ZlibDecoder::new(reader);
     let mut chunks = Vec::new();
     loop {
@@ -1106,6 +1116,33 @@ mod tests {
         load(&mut machine, &save_path).unwrap();
         let _ = std::fs::remove_file(&save_path);
         let _ = std::fs::remove_file(&truncated_path);
+    }
+
+    #[test]
+    fn descriptor_read_stops_before_payload_and_checks_header() {
+        let descriptor = MachineDescriptor {
+            cpu: CpuModel::M68EC020,
+            ..MachineDescriptor::default()
+        };
+        let mut bytes = STATE_MAGIC.to_vec();
+        bytes.extend(STATE_VERSION.to_le_bytes());
+        chunk::ChunkWriter::new(&mut bytes)
+            .value(&chunk::DESC, &descriptor)
+            .unwrap();
+        let header_len = bytes.len();
+        // This is deliberately not a valid compressed machine.
+        bytes.extend(b"unread payload");
+        let mut reader = bytes.as_slice();
+        assert_eq!(read_descriptor(&mut reader).unwrap(), descriptor);
+        assert_eq!(reader, b"unread payload");
+        for end in 0..header_len {
+            assert!(read_descriptor(&bytes[..end]).is_err(), "cut at {end}");
+        }
+        bytes[0] ^= 1;
+        assert!(read_descriptor(bytes.as_slice()).is_err());
+        bytes[0] ^= 1;
+        bytes[8..12].copy_from_slice(&(STATE_VERSION + 1).to_le_bytes());
+        assert!(read_descriptor(bytes.as_slice()).is_err());
     }
 
     #[test]
