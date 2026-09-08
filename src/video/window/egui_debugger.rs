@@ -137,28 +137,25 @@ impl DebuggerUi {
             output.platform_output.cursor_image = None;
         }
         self.input
-            .handle_platform_output(window, output.platform_output);
+            .handle_platform_output(window, std::mem::take(&mut output.platform_output));
         self.repaint_at = output
             .viewport_output
             .get(&egui::ViewportId::ROOT)
             .and_then(|viewport| Instant::now().checked_add(viewport.repaint_delay));
-        for (id, delta) in &output.textures_delta.set {
-            self.renderer
-                .update_texture(pixels.device(), pixels.queue(), *id, delta);
-        }
-        for id in &output.textures_delta.free {
-            self.renderer.free_texture(id);
-        }
         let size = window.inner_size();
-        self.prepared = Some(PreparedFrame {
-            jobs: self
-                .context
-                .tessellate(output.shapes, output.pixels_per_point),
-            screen: egui_wgpu::ScreenDescriptor {
-                size_in_pixels: [size.width.max(1), size.height.max(1)],
-                pixels_per_point: output.pixels_per_point,
-            },
-        });
+        let screen = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [size.width.max(1), size.height.max(1)],
+            pixels_per_point: output.pixels_per_point,
+        };
+        PreparedFrame::replace(
+            &mut self.prepared,
+            &mut self.renderer,
+            pixels.device(),
+            pixels.queue(),
+            &self.context,
+            output,
+            screen,
+        );
         self.input_dirty = false;
         actions
     }
@@ -1153,6 +1150,36 @@ mod tests;
 struct PreparedFrame {
     jobs: Vec<egui::ClippedPrimitive>,
     screen: egui_wgpu::ScreenDescriptor,
+    free_after_replacement: Vec<egui::TextureId>,
+}
+
+impl PreparedFrame {
+    fn replace(
+        slot: &mut Option<Self>,
+        renderer: &mut egui_wgpu::Renderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        context: &egui::Context,
+        output: egui::FullOutput,
+        screen: egui_wgpu::ScreenDescriptor,
+    ) {
+        // A texture retired by egui can still appear in that frame's meshes.
+        // Keep it for every cached redraw, until those meshes are replaced.
+        // Retire old IDs before uploading new data that might reuse an ID.
+        if let Some(previous) = slot.take() {
+            for id in previous.free_after_replacement {
+                renderer.free_texture(&id);
+            }
+        }
+        for (id, delta) in &output.textures_delta.set {
+            renderer.update_texture(device, queue, *id, delta);
+        }
+        *slot = Some(Self {
+            jobs: context.tessellate(output.shapes, output.pixels_per_point),
+            screen,
+            free_after_replacement: output.textures_delta.free,
+        });
+    }
 }
 
 enum Snapshot {

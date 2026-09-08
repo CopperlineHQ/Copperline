@@ -57,15 +57,20 @@ impl App {
         if entering {
             let size = self.egui_layout_preferences().workspace_size;
             if let Some(r) = &self.render {
-                r.window.set_title("Copperline · Debug");
-                r.window
-                    .set_min_inner_size(Some(LogicalSize::new(900.0, 600.0)));
-                if r.window.fullscreen().is_none() && !r.window.is_maximized() {
+                let windowed = r.window.fullscreen().is_none() && !r.window.is_maximized();
+                // Some window managers enforce a new minimum immediately.
+                // Save Play's geometry before any operation can resize it.
+                if windowed {
                     self.debug_play_geometry
                         .get_or_insert_with(|| PlayGeometry {
                             size: r.window.inner_size(),
                             position: r.window.outer_position().ok(),
                         });
+                }
+                r.window.set_title("Copperline · Debug");
+                r.window
+                    .set_min_inner_size(Some(LogicalSize::new(900.0, 600.0)));
+                if windowed {
                     let available = r
                         .window
                         .current_monitor()
@@ -245,19 +250,14 @@ impl App {
                     }
                     return true;
                 }
-                // Clipboard and text-edit shortcuts stay with egui; the main
-                // window keeps its explicit window/inspector shortcuts.
-                if matches!(
-                    key.physical_key,
-                    PhysicalKey::Code(
-                        KeyCode::KeyQ
-                            | KeyCode::KeyB
-                            | KeyCode::KeyK
-                            | KeyCode::KeyF
-                            | KeyCode::KeyE
-                    )
-                ) {
-                    return false;
+                if let PhysicalKey::Code(code) = key.physical_key {
+                    let editing = self
+                        .debugger_ui
+                        .as_ref()
+                        .is_some_and(|ui| ui.context.text_edit_focused());
+                    if host_shortcut_reaches_main(code, self.modifiers, editing) {
+                        return false;
+                    }
                 }
             }
         }
@@ -429,6 +429,43 @@ impl App {
         self.debugger_ui = Some(ui);
         actions
     }
+}
+
+pub(super) fn host_shortcut_reaches_main(
+    code: KeyCode,
+    modifiers: winit::keyboard::ModifiersState,
+    editing: bool,
+) -> bool {
+    if !host_shortcut_modifier_pressed(modifiers) {
+        return false;
+    }
+    // On macOS the app's Command+A/Z overlap Select All and Undo/Redo.
+    // Linux/Windows use Alt for app shortcuts, leaving Ctrl edits to egui.
+    if editing && cfg!(target_os = "macos") && matches!(code, KeyCode::KeyA | KeyCode::KeyZ) {
+        return false;
+    }
+    matches!(
+        code,
+        KeyCode::KeyA
+            | KeyCode::KeyB
+            | KeyCode::KeyD
+            | KeyCode::KeyE
+            | KeyCode::KeyF
+            | KeyCode::KeyJ
+            | KeyCode::KeyK
+            | KeyCode::KeyM
+            | KeyCode::KeyP
+            | KeyCode::KeyQ
+            | KeyCode::KeyR
+            | KeyCode::KeyS
+            | KeyCode::KeyW
+            | KeyCode::KeyZ
+    ) || super::super::save_slot_for_key(code).is_some()
+        || (modifiers.shift_key()
+            && matches!(
+                code,
+                KeyCode::KeyL | KeyCode::Equal | KeyCode::Minus | KeyCode::Period | KeyCode::Comma
+            ))
 }
 
 pub(super) fn title_bar_visible(position: [i32; 2], monitor: [i32; 2], size: [u32; 2]) -> bool {

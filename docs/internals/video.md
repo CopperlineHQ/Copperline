@@ -772,6 +772,9 @@ The main window retains its device, surface, vsync, and minimized-window guards.
 Live inspector snapshots, layout, and tessellation are cached at 20 Hz; input,
 stepping, and repaint deadlines invalidate the cache immediately. The display
 continues at its usual cadence, composing the cached UI between inspector updates.
+Textures retired by egui remain alive while the cached frame can still use
+them. They are released when that frame is replaced, before uploading the
+next frame's texture updates.
 Headless, browser, and libretro builds omit the desktop frontend and egui.
 `egui_debugger/analyzer.rs` supplies the four analyzer views, and
 `egui_debugger/console.rs` supplies the command field and selectable output.

@@ -367,6 +367,7 @@ struct Offscreen {
     renderer: egui_wgpu::Renderer,
     target: wgpu::Texture,
     screen: egui_wgpu::ScreenDescriptor,
+    prepared: Option<PreparedFrame>,
 }
 
 fn analyzer_app() -> App {
@@ -1033,6 +1034,7 @@ impl Offscreen {
         Self {
             renderer,
             target,
+            prepared: None,
             screen: egui_wgpu::ScreenDescriptor {
                 size_in_pixels: [width, height],
                 pixels_per_point: scale,
@@ -1047,10 +1049,23 @@ impl Offscreen {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) {
-        for (id, delta) in &output.textures_delta.set {
-            self.renderer.update_texture(device, queue, *id, delta);
-        }
-        let jobs = context.tessellate(output.shapes, output.pixels_per_point);
+        PreparedFrame::replace(
+            &mut self.prepared,
+            &mut self.renderer,
+            device,
+            queue,
+            context,
+            output,
+            egui_wgpu::ScreenDescriptor {
+                size_in_pixels: self.screen.size_in_pixels,
+                pixels_per_point: self.screen.pixels_per_point,
+            },
+        );
+        self.redraw(device, queue);
+    }
+
+    fn redraw(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let frame = self.prepared.as_ref().unwrap();
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         paint(
             &mut self.renderer,
@@ -1058,17 +1073,19 @@ impl Offscreen {
             queue,
             &mut encoder,
             &self.target.create_view(&Default::default()),
-            &jobs,
-            &self.screen,
+            &frame.jobs,
+            &frame.screen,
             true,
         );
         queue.submit([encoder.finish()]);
-        for id in &output.textures_delta.free {
-            self.renderer.free_texture(id);
-        }
     }
 
     fn save(&self, device: &wgpu::Device, queue: &wgpu::Queue, path: &std::path::Path) {
+        let [width, height] = self.screen.size_in_pixels;
+        crate::screenshot::save(path, &self.pixels(device, queue), width, height).unwrap();
+    }
+
+    fn pixels(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Vec<u32> {
         let [width, height] = self.screen.size_in_pixels;
         let padded = (width * 4).div_ceil(256) * 256;
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1100,16 +1117,58 @@ impl Offscreen {
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         rx.recv().unwrap().unwrap();
         let bytes = buffer.slice(..).get_mapped_range();
-        let pixels: Vec<u32> = bytes
+        bytes
             .chunks_exact(padded as usize)
             .flat_map(|row| {
                 row[..width as usize * 4]
                     .chunks_exact(4)
                     .map(|p| u32::from_le_bytes(p.try_into().unwrap()))
             })
-            .collect();
-        crate::screenshot::save(path, &pixels, width, height).unwrap();
+            .collect()
     }
+}
+
+/// Texture retirement must preserve both the first draw and cached redraws.
+#[test]
+#[ignore = "requires a hardware GPU to verify cached texture lifetime"]
+fn retired_textures_survive_cached_redraws_until_replacement() {
+    let gpu =
+        super::super::crt_shader::test_gpu("egui_cached_texture").expect("hardware GPU required");
+    let context = egui::Context::default();
+    let texture = context.load_texture(
+        "retired_image",
+        egui::ColorImage::filled([1, 1], Color32::RED),
+        egui::TextureOptions::NEAREST,
+    );
+    let id = texture.id();
+    let mut handle = Some(texture);
+    let output = context.run_ui(input([128.0, 128.0], vec![]), |ui| {
+        ui.painter().image(
+            id,
+            egui::Rect::from_min_size(egui::pos2(32.0, 32.0), egui::vec2(32.0, 32.0)),
+            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+        drop(handle.take());
+    });
+    assert!(output.textures_delta.free.contains(&id));
+    let mut offscreen = Offscreen::new(gpu.device(), 128, 128, 1.0);
+    offscreen.draw(&context, output, gpu.device(), gpu.queue());
+    for _ in 0..3 {
+        assert!(offscreen.renderer.texture(&id).is_some());
+        offscreen.redraw(gpu.device(), gpu.queue());
+        assert_eq!(
+            offscreen.pixels(gpu.device(), gpu.queue())[48 * 128 + 48],
+            0xff00_00ff
+        );
+    }
+    let output = context.run_ui(input([128.0, 128.0], vec![]), |_| {});
+    offscreen.draw(&context, output, gpu.device(), gpu.queue());
+    assert!(offscreen.renderer.texture(&id).is_none());
+    assert_ne!(
+        offscreen.pixels(gpu.device(), gpu.queue())[48 * 128 + 48],
+        0xff00_00ff
+    );
 }
 
 /// Reproducible review artifacts, without opening a host window. Requires a
@@ -1327,6 +1386,72 @@ fn debug_input_focus_blocks_guest_qualifiers_and_releases_held_input() {
     assert!(app.raw_device_held_rawkeys.iter().all(|held| !held));
     app.handle_raw_device_key_event(shift());
     assert!(!app.amiga_rawkey_held(0x60));
+}
+
+#[test]
+fn host_shortcuts_remain_available_without_stealing_text_edits() {
+    use winit::keyboard::ModifiersState;
+    let host = if cfg!(target_os = "macos") {
+        ModifiersState::SUPER
+    } else {
+        ModifiersState::ALT
+    };
+    let routes = workspace::host_shortcut_reaches_main;
+    for code in [
+        KeyCode::KeyA,
+        KeyCode::KeyB,
+        KeyCode::KeyD,
+        KeyCode::KeyE,
+        KeyCode::KeyF,
+        KeyCode::KeyJ,
+        KeyCode::KeyK,
+        KeyCode::KeyM,
+        KeyCode::KeyP,
+        KeyCode::KeyQ,
+        KeyCode::KeyR,
+        KeyCode::KeyS,
+        KeyCode::KeyW,
+        KeyCode::KeyZ,
+        KeyCode::Digit0,
+        KeyCode::Digit1,
+        KeyCode::Digit2,
+        KeyCode::Digit3,
+        KeyCode::Digit4,
+        KeyCode::Digit5,
+        KeyCode::Digit6,
+        KeyCode::Digit7,
+        KeyCode::Digit8,
+        KeyCode::Digit9,
+    ] {
+        for shift in [ModifiersState::empty(), ModifiersState::SHIFT] {
+            assert!(routes(code, host | shift, false), "{code:?}");
+            let text_edit =
+                cfg!(target_os = "macos") && matches!(code, KeyCode::KeyA | KeyCode::KeyZ);
+            assert_eq!(routes(code, host | shift, true), !text_edit, "{code:?}");
+        }
+        assert!(!routes(code, ModifiersState::empty(), false));
+    }
+    for code in [
+        KeyCode::KeyL,
+        KeyCode::Equal,
+        KeyCode::Minus,
+        KeyCode::Period,
+        KeyCode::Comma,
+    ] {
+        assert!(routes(code, host | ModifiersState::SHIFT, false));
+        assert!(!routes(code, host, false));
+    }
+    for code in [
+        KeyCode::KeyC,
+        KeyCode::KeyV,
+        KeyCode::KeyX,
+        KeyCode::KeyY,
+        KeyCode::ArrowLeft,
+    ] {
+        for editing in [true, false] {
+            assert!(!routes(code, host, editing), "{code:?}");
+        }
+    }
 }
 
 #[test]

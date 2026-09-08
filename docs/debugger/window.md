@@ -22,6 +22,9 @@ returns input to the debugger. While the debugger owns input, typing and
 clipboard shortcuts operate its fields and never reach the Amiga. While the
 Amiga owns input, ordinary keys, including `Esc`, go to the guest.
 
+Host shortcuts also work while the debugger owns input. In a text field,
+macOS `Cmd+A` and `Cmd+Z` retain their Select All and Undo/Redo behaviour.
+
 (shared-inspector-window)=
 ## Inspectors
 
