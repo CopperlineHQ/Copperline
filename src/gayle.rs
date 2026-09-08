@@ -61,8 +61,12 @@ impl Gayle {
         self.ata.attach_drive(slot, drive);
     }
 
-    /// The ATAPI CD-ROM drive behind this port, if either slot holds one;
-    /// the runtime disc-swap target.
+    /// A numbered hard disk for frontend save persistence.
+    pub fn hard_disk_mut(&mut self, slot: usize) -> Option<&mut crate::harddrive::HardDriveImage> {
+        self.ata.hard_disk_mut(slot)
+    }
+
+    /// The ATAPI CD-ROM drive behind this port, if either slot holds one.
     pub fn first_atapi_ref(&self) -> Option<&crate::scsi::ScsiCdRom> {
         self.ata.first_atapi_ref()
     }

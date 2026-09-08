@@ -47,17 +47,34 @@ jobs:
         run: |
           cargo fmt --manifest-path crates/copperline-libretro/Cargo.toml --check
           cargo clippy --manifest-path crates/copperline-libretro/Cargo.toml --all-targets --locked -- -D warnings
+      - name: Fetch WHDLoad support archives
+        run: tools/fetch-whdload.sh
       - name: Deterministic frontend tests
-        run: cargo test --manifest-path crates/copperline-libretro/Cargo.toml --profile ci --locked
+        run: |
+          cargo test --manifest-path crates/copperline-libretro/Cargo.toml --profile ci --locked
+          cargo test --manifest-path crates/copperline-libretro/Cargo.toml --profile ci --locked whdload_stages -- --ignored
       - name: Build release core
         run: cargo build --manifest-path crates/copperline-libretro/Cargo.toml --release --locked
       - name: Shared-library ABI and replay
         run: |
           python tools/check-libretro.py "crates/copperline-libretro/target/release/${{ matrix.library }}" --screenshot libretro.png
           python tools/check-libretro.py "crates/copperline-libretro/target/release/${{ matrix.library }}" --model A1200 --video NTSC
+      - name: RetroArch rollback netplay
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y retroarch xvfb libxtst6
+          python tools/check-libretro-netplay.py "crates/copperline-libretro/target/release/${{ matrix.library }}" --output netplay-test
+      - name: Netplay logs
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: libretro-netplay-logs
+          path: netplay-test/*/*.log
       - name: Package core
         run: |
-          mkdir -p libretro-package/aros
+          mkdir -p libretro-package/aros libretro-package/system/whdboot
+          cp assets/whdboot/*.lha libretro-package/system/whdboot/
           cp "crates/copperline-libretro/target/release/${{ matrix.library }}" "libretro-package/${{ matrix.installed }}"
           cp crates/copperline-libretro/copperline_libretro.info libretro-package/
           cp LICENSE libretro-package/

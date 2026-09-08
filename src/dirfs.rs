@@ -75,6 +75,29 @@ pub(crate) fn build_image_limited(
     filesystem: crate::diskimage::FileSystem,
     limit: u64,
 ) -> anyhow::Result<Vec<u8>> {
+    build_image_with_time(dir, volume_name, filesystem, limit, None)
+}
+
+/// Build a bounded volume with a fixed timestamp for every entry and the
+/// root. Portable frontends use this to make the same package produce the
+/// same disk on different hosts, regardless of extraction times.
+pub fn build_image_at(
+    dir: &Path,
+    volume_name: &str,
+    filesystem: crate::diskimage::FileSystem,
+    limit: u64,
+    timestamp: SystemTime,
+) -> anyhow::Result<Vec<u8>> {
+    build_image_with_time(dir, volume_name, filesystem, limit, Some(timestamp))
+}
+
+fn build_image_with_time(
+    dir: &Path,
+    volume_name: &str,
+    filesystem: crate::diskimage::FileSystem,
+    limit: u64,
+    timestamp: Option<SystemTime>,
+) -> anyhow::Result<Vec<u8>> {
     // Only `ffs`/plain-vs-not matters here: Kickstart 1.3 (the reason OFS
     // exists as an option at all) has no intl/dircache/longname support
     // either, so callers are only ever expected to pass FileSystem::OFS or
@@ -83,7 +106,16 @@ pub(crate) fn build_image_limited(
         filesystem.variant == crate::diskimage::Variant::Plain,
         "dirfs only builds plain OFS/FFS volumes"
     );
-    let entries = scan_tree(dir)?;
+    let mut entries = scan_tree(dir)?;
+    if let Some(timestamp) = timestamp {
+        fn stamp(entries: &mut [EntryPlan], time: (u32, u32, u32)) {
+            for entry in entries {
+                entry.mtime = time;
+                stamp(&mut entry.children, time);
+            }
+        }
+        stamp(&mut entries, amiga_datestamp(timestamp));
+    }
     let content_blocks: u64 = 3 + entries
         .iter()
         .map(|e| e.blocks_needed(filesystem))
@@ -110,7 +142,12 @@ pub(crate) fn build_image_limited(
         );
     }
 
-    let mut b = Builder::new(total as usize, volume_name, filesystem);
+    let mut b = Builder::new_at(
+        total as usize,
+        volume_name,
+        filesystem,
+        timestamp.unwrap_or_else(SystemTime::now),
+    );
     b.write_tree(dir, &entries, b.root_key)?;
     Ok(b.finish())
 }
@@ -290,6 +327,7 @@ fn scan_tree(dir: &Path) -> anyhow::Result<Vec<EntryPlan>> {
 }
 
 struct Builder {
+    root_time: SystemTime,
     image: Vec<u8>,
     total_blocks: usize,
     /// Block-in-use map mirrored into the on-disk bitmap at finish.
@@ -312,7 +350,17 @@ impl Builder {
         volume_name: &str,
         filesystem: crate::diskimage::FileSystem,
     ) -> Self {
+        Self::new_at(total_blocks, volume_name, filesystem, SystemTime::now())
+    }
+
+    fn new_at(
+        total_blocks: usize,
+        volume_name: &str,
+        filesystem: crate::diskimage::FileSystem,
+        root_time: SystemTime,
+    ) -> Self {
         let mut b = Builder {
+            root_time,
             image: vec![0u8; total_blocks * BSIZE],
             total_blocks,
             used: vec![false; total_blocks],
@@ -388,7 +436,7 @@ impl Builder {
     }
 
     fn write_root(&mut self, volume_name: &str) {
-        let now = amiga_datestamp(SystemTime::now());
+        let now = amiga_datestamp(self.root_time);
         let root = self.root_key;
         self.put32(root, 0, T_HEADER);
         self.put32(root, 12, HT_SIZE as u32);
@@ -614,6 +662,35 @@ fn bitmap_overhead(total: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixed_timestamps_ignore_host_file_times() {
+        let dir = temp_tree();
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let file = dir.join("sub/data");
+        std::fs::write(&file, b"same content").unwrap();
+        let stamp = UNIX_EPOCH + std::time::Duration::from_secs(946_684_800);
+        for fs in [
+            crate::diskimage::FileSystem::FFS,
+            crate::diskimage::FileSystem::OFS,
+        ] {
+            let a = build_image_at(&dir, "Game", fs, 1024 * 1024, stamp).unwrap();
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&file)
+                .unwrap()
+                .set_modified(stamp + std::time::Duration::from_secs(86400))
+                .unwrap();
+            let b = build_image_at(&dir, "Game", fs, 1024 * 1024, stamp).unwrap();
+            assert_eq!(a, b);
+            let reader = Reader {
+                image: &b,
+                filesystem: fs,
+            };
+            assert!(reader.checksum_ok(reader.root_key(), 20));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     /// Minimal FFS/OFS reader used to verify built images.
     struct Reader<'a> {

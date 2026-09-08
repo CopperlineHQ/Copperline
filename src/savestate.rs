@@ -500,6 +500,58 @@ pub fn save_to_writer<W: Write>(
     Ok(())
 }
 
+/// Frontend checkpoints use the shared chunk codec without zlib: rollback
+/// takes a checkpoint every field, and the frontend handles transport/storage
+/// compression. A separate envelope includes adapter latches omitted by files.
+const FRONTEND_MAGIC: &[u8; 8] = b"CLFRONT1";
+const FRONTEND_LATCHES: chunk::ChunkSpec = chunk::ChunkSpec {
+    tag: *b"FLAT",
+    version: 1,
+    name: "frontend rollback latches",
+    payload: chunk::Payload::Value,
+    required: true,
+};
+
+pub(crate) fn save_frontend<W: Write>(
+    machine: &M68kMachine,
+    descriptor: &MachineDescriptor,
+    mut writer: W,
+) -> Result<()> {
+    writer.write_all(FRONTEND_MAGIC)?;
+    writer.write_all(&SCHEMA_FINGERPRINT.to_le_bytes())?;
+    let mut chunks = chunk::ChunkWriter::new(writer);
+    chunks.value(&chunk::DESC, descriptor)?;
+    chunks.value(&FRONTEND_LATCHES, &machine.rollback_latches())?;
+    machine.write_chunks(chunks)?.finish()?;
+    Ok(())
+}
+
+pub(crate) fn load_frontend<R: Read>(
+    machine: &mut M68kMachine,
+    expected: &MachineDescriptor,
+    mut reader: R,
+) -> Result<()> {
+    let mut header = [0; 12];
+    reader.read_exact(&mut header)?;
+    anyhow::ensure!(
+        &header[..8] == FRONTEND_MAGIC && header[8..] == SCHEMA_FINGERPRINT.to_le_bytes(),
+        "frontend checkpoint schema differs; use the same Copperline build"
+    );
+    let descriptor = read_descriptor_chunk(&mut reader, chunk::MIGRATIONS)?;
+    anyhow::ensure!(
+        &descriptor == expected,
+        "frontend checkpoint machine differs"
+    );
+    let header = chunk::read_header(&mut reader)?;
+    anyhow::ensure!(
+        header.tag == FRONTEND_LATCHES.tag && header.version == FRONTEND_LATCHES.version,
+        "unsupported frontend rollback latches"
+    );
+    let (payload, _) = chunk::Body::open(&header, &mut reader).read_to_vec()?;
+    let rollback = chunk::decode(&payload)?;
+    machine.apply_chunks_with_rollback(reader, chunk::MIGRATIONS, Some(rollback))
+}
+
 /// Restore the machine from a state written by `save`, returning the machine
 /// descriptor the state was stamped with so the caller can compare it against
 /// the running machine and reconfigure the host. The live machine is left
@@ -660,6 +712,28 @@ mod tests {
     use crate::memory::{Memory, RamInit, CHIP_RAM_BASE, ROM_SIZE};
     use crate::serial::NullSerialSink;
     use crate::zorro::ZorroChain;
+
+    #[test]
+    fn frontend_chunks_restore_exact_latches_and_reject_partial_streams() {
+        let mut machine = test_machine();
+        let descriptor = MachineDescriptor::default();
+        let mut state = Vec::new();
+        save_frontend(&machine, &descriptor, &mut state).unwrap();
+        let mut expected = Vec::new();
+        machine.write_rollback_state(&mut expected).unwrap();
+        for cut in [0, 8, 12, state.len() / 2, state.len() - 1] {
+            assert!(load_frontend(&mut machine, &descriptor, &state[..cut]).is_err());
+            let mut after = Vec::new();
+            machine.write_rollback_state(&mut after).unwrap();
+            assert_eq!(after, expected);
+        }
+        load_frontend(&mut machine, &descriptor, state.as_slice()).unwrap();
+        let mut after = Vec::new();
+        machine.write_rollback_state(&mut after).unwrap();
+        assert_eq!(after, expected);
+        state[8] ^= 1;
+        assert!(load_frontend(&mut machine, &descriptor, state.as_slice()).is_err());
+    }
 
     /// Minimal machine: reset vectors into ROM, where a `bra.s` spins.
     fn test_machine() -> M68kMachine {

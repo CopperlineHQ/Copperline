@@ -144,9 +144,13 @@ end a CPU-budget quantum within a field. `Agnus::nominal_frame_cck` supplies
 the mean field length, including alternating interlace fields and NTSC lines,
 for frontend refresh reporting. The adapter uses the shared renderer and TV
 presentation helpers, keeps floppy writes in memory until eject/unload, and
-wraps ordinary machine state bytes with playlist and pending-input state.
-`savestate::read_descriptor` lets it check the stored machine configuration
-before restoring the payload, without changing the save-state format.
+wraps the shared chunked machine representation with media and pending-input
+state. Frontend checkpoints include a separate CPU/Bus rollback-latch chunk
+and omit zlib compression, since RetroArch takes a checkpoint every field.
+The loader checks the schema and machine before adopting any components.
+CD paths are resolved through a thread-scoped mapping of verified immutable
+sources. WHDLoad uses fixed-timestamp OFS images with session sector overlays,
+so rollback neither accesses a live directory mount nor persists guest writes.
 
 The flow of a frame:
 
