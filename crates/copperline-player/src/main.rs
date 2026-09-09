@@ -132,6 +132,9 @@ fn main() -> Result<()> {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        // No scripted light-pen positions: a bundle plays with the
+        // devices its configuration fits, not with a script.
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         // No scripted freeze: a bundle fits no freezer cartridge.

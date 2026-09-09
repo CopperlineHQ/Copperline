@@ -3189,10 +3189,10 @@ fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>>
 /// that slot empty, as it would if the drive had been unplugged. Only a disk
 /// that is present is opened, so a missing one never raises the host's
 /// permission prompt.
-#[cfg(not(target_arch = "wasm32"))]
 /// The card `[pcmcia]` (or a `[[host_disk]]` on the slot) puts in the
 /// socket at power-on. A missing real disk is reported and skipped, as
 /// the IDE ports do; a missing image is an error, as `[ide]`'s is.
+#[cfg(not(target_arch = "wasm32"))]
 fn open_pcmcia_card(cfg: &Config) -> Result<Option<crate::pcmcia::PcmciaCard>> {
     use crate::config::PcmciaCardConfig;
     use crate::pcmcia::{CfCard, PcmciaCard, SramCard};
@@ -3241,6 +3241,7 @@ fn open_pcmcia_card(cfg: &Config) -> Result<Option<crate::pcmcia::PcmciaCard>> {
     Ok(None)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn attach_ide_host_disks(cfg: &Config, mut attach: impl FnMut(usize, crate::ata::IdeDrive)) {
     for disk in &cfg.host_disks {
         // SCSI units, lide positions, and the PCMCIA slot are attached
@@ -4114,7 +4115,10 @@ fn build_machine_inner(
         let shadowed = cfg.pcmcia_slot_shadowed();
         gayle.set_slot_shadowed(shadowed);
         bus.attach_gayle(gayle);
+        #[cfg(not(target_arch = "wasm32"))]
         let card = open_pcmcia_card(cfg)?;
+        #[cfg(target_arch = "wasm32")]
+        let card: Option<crate::pcmcia::PcmciaCard> = None;
         if shadowed {
             if card.is_some() || cfg.host_disks.iter().any(|d| d.attach.is_pcmcia()) {
                 warn!(
