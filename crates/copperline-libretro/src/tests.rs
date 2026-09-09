@@ -16,6 +16,7 @@ struct Host {
     geometry: Option<(u32, u32, usize)>,
     messages: Vec<String>,
     av_changes: usize,
+    maps: Vec<Vec<MemoryDescriptor>>,
 }
 thread_local! { static HOST: RefCell<Host> = RefCell::new(Host::default()); }
 
@@ -54,6 +55,16 @@ unsafe extern "C" fn environment(command: u32, data: *mut c_void) -> bool {
             }
             32 | 37 => {
                 host.av_changes += 1;
+                true
+            }
+            36 => {
+                let map = unsafe { &*data.cast::<MemoryMap>() };
+                host.maps.push(
+                    unsafe {
+                        std::slice::from_raw_parts(map.descriptors, map.num_descriptors as usize)
+                    }
+                    .to_vec(),
+                );
                 true
             }
             11 | 13 | 16 | 18 | 35 => true,
@@ -894,4 +905,254 @@ fn netplay_checkpoints_ignore_audio_backpressure_and_replay_inputs() {
     b.serialize(&mut other).unwrap();
     assert_eq!(Sha256::digest(&state), Sha256::digest(&other));
     assert_eq!(a.pixels, b.pixels);
+}
+
+/// (address space, start, len, flags) of each descriptor, in map order.
+fn windows(map: &[MemoryDescriptor]) -> Vec<(&str, usize, usize, u64)> {
+    map.iter()
+        .map(|d| (memory::addrspace(d), d.start, d.len, d.flags))
+        .collect()
+}
+
+#[test]
+fn memory_map_describes_a500_banks_and_a1200_fast_ram_blocks() {
+    use copperline::memory::AUTOCONFIG_BASE;
+    let root = tempfile::tempdir().unwrap();
+    let ram = MEMDESC_BIGENDIAN;
+    let rom = MEMDESC_BIGENDIAN | MEMDESC_CONST;
+    let config = core::configuration("A500", "PAL", false, root.path()).unwrap();
+    let mut a500 = Core::load(&config, None, root.path().into(), true).unwrap();
+    let map = memory::descriptors(a500.emu.bus_mut());
+    assert_eq!(
+        windows(&map),
+        [
+            ("chip", 0, 0x8_0000, ram | MEMDESC_SYSTEM_RAM),
+            ("slow", 0xC0_0000, 0x8_0000, ram),
+            ("rom", 0xE0_0000, 0x8_0000, rom), // AROS's extended image
+            ("rom", 0xF8_0000, 0x8_0000, rom),
+        ]
+    );
+    // A 24-bit map: the select mask keeps every address bit above the
+    // block's own offset bits, so each window matches only itself.
+    assert!(map.iter().all(|d| d.select == 0xFF_FFFF & !(d.len - 1)));
+    assert!(map.iter().all(|d| d.disconnect == 0 && d.offset == 0));
+    let bus = a500.emu.bus_mut();
+    assert_eq!(map[0].ptr, bus.mem.chip_ram.as_mut_ptr().cast());
+    assert_eq!(map[1].ptr, bus.mem.slow_ram.as_mut_ptr().cast());
+    assert_eq!(map[2].ptr, bus.mem.extended_rom.as_mut_ptr().cast());
+    assert_eq!(map[3].ptr, bus.mem.rom.as_mut_ptr().cast());
+
+    let mut config = core::configuration("A1200", "PAL", false, root.path()).unwrap();
+    config.fast_ram_bytes = 8 * 1024 * 1024;
+    let mut a1200 = Core::load(&config, None, root.path().into(), true).unwrap();
+    let before = memory::descriptors(a1200.emu.bus_mut());
+    assert_eq!(
+        windows(&before),
+        [
+            ("chip", 0, 0x20_0000, ram | MEMDESC_SYSTEM_RAM),
+            ("rom", 0xE0_0000, 0x8_0000, rom),
+            ("rom", 0xF8_0000, 0x8_0000, rom),
+        ],
+        "fast RAM has no window until the guest autoconfigures it"
+    );
+    // The boot ROM's autoconfig places the Zorro II board at $200000 by
+    // writing the base high byte to ec_BaseAddress.
+    let zorro = &mut a1200.emu.bus_mut().mem.zorro;
+    zorro.config_write(AUTOCONFIG_BASE + 0x48, 1, 0x20);
+    let map = memory::descriptors(a1200.emu.bus_mut());
+    assert_eq!(
+        windows(&map),
+        [
+            ("chip", 0, 0x20_0000, ram | MEMDESC_SYSTEM_RAM),
+            ("fast", 0x20_0000, 0x20_0000, ram),
+            ("fast", 0x40_0000, 0x40_0000, ram),
+            ("fast", 0x80_0000, 0x20_0000, ram),
+            ("rom", 0xE0_0000, 0x8_0000, rom),
+            ("rom", 0xF8_0000, 0x8_0000, rom),
+        ]
+    );
+    let board = a1200.emu.bus_mut().mem.zorro.board_ram_mut(0).as_mut_ptr();
+    assert_eq!(map[1].ptr, board.cast());
+    assert_eq!(map[2].ptr, board.wrapping_add(0x20_0000).cast());
+    assert_eq!(map[3].ptr, board.wrapping_add(0x60_0000).cast());
+    assert_eq!(map[2].select, 0xFF_FFFF & !0x3F_FFFF);
+    assert!(map.iter().all(|d| d.start & !d.select == 0));
+}
+
+#[test]
+fn chip_ram_pointer_and_map_survive_states_and_reset() {
+    let root = tempfile::tempdir().unwrap();
+    setup(root.path(), false, false);
+    assert_eq!(retro_get_memory_size(MEMORY_SYSTEM_RAM), 0);
+    assert!(retro_get_memory_data(MEMORY_SYSTEM_RAM).is_null());
+    assert!(load(None));
+    let chip = retro_get_memory_data(MEMORY_SYSTEM_RAM).cast::<u8>();
+    assert!(!chip.is_null());
+    assert_eq!(retro_get_memory_size(MEMORY_SYSTEM_RAM), 512 * 1024);
+    assert!(retro_get_memory_data(MEMORY_SAVE_RAM).is_null());
+    assert_eq!(retro_get_memory_size(MEMORY_SAVE_RAM), 0);
+    assert!(retro_get_memory_data(3).is_null());
+    let announced = HOST.with(|host| host.borrow().maps.len());
+    assert_eq!(announced, 1, "the map is announced once content loads");
+    let chip_window = |map: &[MemoryDescriptor]| {
+        map.iter()
+            .find(|d| d.flags & MEMDESC_SYSTEM_RAM != 0)
+            .map(|d| (d.ptr, d.start, d.len))
+    };
+    HOST.with(|host| {
+        assert_eq!(
+            chip_window(&host.borrow().maps[0]),
+            Some((chip.cast(), 0, 512 * 1024))
+        );
+    });
+    let cell = 0x180usize;
+    unsafe { chip.add(cell).write(0x5a) };
+    let saved = state();
+    for _ in 0..3 {
+        retro_run();
+    }
+    unsafe { chip.add(cell).write(0x77) };
+    assert_eq!(retro_get_memory_data(MEMORY_SYSTEM_RAM).cast::<u8>(), chip);
+    assert!(unsafe { retro_unserialize(saved.as_ptr().cast(), saved.len()) });
+    assert_eq!(
+        retro_get_memory_data(MEMORY_SYSTEM_RAM).cast::<u8>(),
+        chip,
+        "a state load keeps chip RAM at the same host address"
+    );
+    assert_eq!(
+        unsafe { chip.add(cell).read() },
+        0x5a,
+        "the restored contents land in the original allocation"
+    );
+    retro_reset();
+    assert_eq!(retro_get_memory_data(MEMORY_SYSTEM_RAM).cast::<u8>(), chip);
+    retro_run();
+    assert_eq!(retro_get_memory_data(MEMORY_SYSTEM_RAM).cast::<u8>(), chip);
+    HOST.with(|host| {
+        let host = host.borrow();
+        assert!(host.messages.is_empty(), "{:?}", host.messages);
+        for map in &host.maps {
+            assert_eq!(chip_window(map), Some((chip.cast(), 0, 512 * 1024)));
+        }
+    });
+    retro_deinit();
+    assert!(retro_get_memory_data(MEMORY_SYSTEM_RAM).is_null());
+}
+
+#[test]
+fn cd32_exposes_its_eeprom_as_save_ram_outside_netplay() {
+    let root = tempfile::tempdir().unwrap();
+    let cfg = core::configuration("CD32", "PAL", false, root.path()).unwrap();
+    let make = |netplay| {
+        Core::load_with_system(&cfg, None, root.path().into(), false, root.path(), netplay).unwrap()
+    };
+    assert!(make(true).memory_region(MEMORY_SAVE_RAM).is_none());
+    let mut core = make(false);
+    let nvram = core.memory_region(MEMORY_SAVE_RAM).unwrap();
+    assert_eq!(nvram.len(), 1024);
+    let ptr = nvram.as_mut_ptr();
+    nvram.fill(42);
+    let mut state = vec![0; core.state_capacity];
+    core.serialize(&mut state).unwrap();
+    core.memory_region(MEMORY_SAVE_RAM).unwrap().fill(7);
+    core.unserialize(&state).unwrap();
+    let nvram = core.memory_region(MEMORY_SAVE_RAM).unwrap();
+    assert_eq!(nvram.as_mut_ptr(), ptr);
+    assert!(nvram.iter().all(|byte| *byte == 42));
+    assert_eq!(
+        core.memory_region(MEMORY_SYSTEM_RAM).unwrap().len(),
+        2 * 1024 * 1024
+    );
+}
+
+#[test]
+fn cheats_parse_common_amiga_formats_and_reject_malformed_codes() {
+    let poke = |addr, value, size| memory::Poke { addr, value, size };
+    assert_eq!(
+        memory::parse("0A1234:05").unwrap(),
+        [poke(0x0A1234, 0x05, 1)]
+    );
+    assert_eq!(
+        memory::parse("0a1234:1234").unwrap(),
+        [poke(0x0A1234, 0x1234, 2)]
+    );
+    assert_eq!(
+        memory::parse("C00000:12345678").unwrap(),
+        [poke(0xC00000, 0x12345678, 4)]
+    );
+    assert_eq!(
+        memory::parse(" 000100:AB + 40000000:CDEF +000104:01234567 ").unwrap(),
+        [
+            poke(0x100, 0xAB, 1),
+            poke(0x4000_0000, 0xCDEF, 2),
+            poke(0x104, 0x01234567, 4),
+        ]
+    );
+    for code in [
+        "",
+        "000100",
+        "000100:",
+        "000100:1",
+        "000100:123",
+        "000100:12345",
+        "000100:123456789",
+        "000100:GG",
+        "1000000000:12",
+        "-00100:12",
+        "000100:12+",
+        "000100:12++000104:34",
+    ] {
+        assert!(memory::parse(code).is_err(), "{code:?} should be rejected");
+    }
+}
+
+#[test]
+fn enabled_cheats_poke_ram_after_each_frame_and_reset_clears_them() {
+    let root = tempfile::tempdir().unwrap();
+    setup(root.path(), false, false);
+    LOGGED.with(|logged| logged.borrow_mut().clear());
+    assert!(load(None));
+    let set = |index, enabled, code: &str| {
+        let code = CString::new(code).unwrap();
+        unsafe { retro_cheat_set(index, enabled, code.as_ptr()) };
+    };
+    let chip = |range: std::ops::Range<usize>| {
+        with_core(|core| Ok(core.emu.bus().mem.chip_ram[range].to_vec())).unwrap()
+    };
+    set(0, true, "000180:AB+000182:CDEF+000184:01234567");
+    set(1, true, "C00010:42");
+    set(2, true, "DFF180:0F00"); // custom register: no RAM decodes it
+    set(3, true, "not a cheat");
+    set(5, true, "000190:11");
+    set(5, false, "000190:11");
+    assert_eq!(chip(0x180..0x188), [0; 8], "cheats wait for the next frame");
+    retro_run();
+    assert_eq!(
+        chip(0x180..0x188),
+        [0xAB, 0x00, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67]
+    );
+    assert_eq!(chip(0x190..0x191), [0]);
+    with_core(|core| {
+        assert_eq!(core.emu.bus().mem.slow_ram[0x10], 0x42);
+        core.emu.bus_mut().mem.chip_ram[0x180] = 0;
+        Ok(())
+    })
+    .unwrap();
+    retro_run();
+    assert_eq!(chip(0x180..0x181), [0xAB], "pokes repeat every frame");
+    LOGGED.with(|logged| {
+        let logged = logged.borrow();
+        assert_eq!(logged.len(), 1, "{logged:?}");
+        assert!(logged[0].contains("ignoring cheat 3"), "{logged:?}");
+    });
+    assert!(HOST.with(|host| host.borrow().messages.is_empty()));
+    retro_cheat_reset();
+    with_core(|core| {
+        core.emu.bus_mut().mem.chip_ram[0x180] = 0;
+        Ok(())
+    })
+    .unwrap();
+    retro_run();
+    assert_eq!(chip(0x180..0x181), [0]);
+    retro_deinit();
 }

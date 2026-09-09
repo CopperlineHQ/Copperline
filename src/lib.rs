@@ -31,6 +31,7 @@ pub mod cd32_fmv;
 pub mod cdrom;
 pub mod cdtv;
 pub mod chipset;
+pub mod clipboard;
 pub mod config;
 #[cfg(feature = "control")]
 pub mod control;
@@ -69,6 +70,7 @@ pub mod gamepad;
 pub mod gary;
 pub mod gayle;
 pub mod pcmcia;
+pub mod gifclip;
 // The remote GDB stub (`--gdb`). Gated so player builds -- shipped games
 // with no debugging surface -- can compile it out; everything else keeps it
 // through the default features.

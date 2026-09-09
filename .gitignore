@@ -82,6 +82,7 @@ copperline-screenshot-*.png
 copperline-video-*.avi
 *.clstate
 !fuzz/corpus/savestate/current.clstate
+!tests/fixtures/*.clstate
 *.clscript
 *.nvram
 .DS_Store

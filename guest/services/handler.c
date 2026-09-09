@@ -55,14 +55,37 @@
 //    completes. Each unit has its own register bank, so handler processes
 //    never synchronize with each other.
 //
+//  - clipboard_main(): the host <-> guest clipboard bridge, run by the
+//    handler process of the mount-table entry of kind MOUNT_KIND_CLIPBOARD
+//    (the HOSTCLIP DOS device, which exists only to have DOS start this
+//    process at mount time). It opens clipboard.device unit 0, registers a
+//    CBD_CHANGEHOOK hook (V36+; polled by clip ID on V34) to learn of
+//    guest clips and pushes their raw IFF stream to the host through the
+//    G2H window, and installs an INTB_PORTS server so the board's doorbell
+//    interrupt can wake it when the host stages new text, which it writes
+//    into clipboard.device as an IFF FTXT stream straight out of the H2G
+//    window. Generation counters and clip IDs keep the two directions from
+//    echoing each other. clipboard.device is disk-based on Kickstart 1.3
+//    (and 3.1), so the open is retried on a backing-off timer; if it never
+//    appears the process idles harmlessly on its (unused) packet port.
+//
 // The ROM must stay position-independent (compiled with -mpcrel) and free
 // of data/bss sections; the Makefile fails the build if the linked
 // executable contains relocations or data/bss hunks.
 
 #include <exec/execbase.h>
+#include <exec/interrupts.h>
+#include <exec/io.h>
 #include <exec/memory.h>
 #include <exec/ports.h>
 #include <exec/types.h>
+
+#include <devices/clipboard.h>
+#include <devices/timer.h>
+
+#include <hardware/intbits.h>
+
+#include <utility/hooks.h>
 
 #include <dos/dos.h>
 #include <dos/dosextens.h>
@@ -129,6 +152,80 @@ struct HostRegs {
 _Static_assert(sizeof(struct HostRegs) == REG_BANK_SIZE,
                "HostRegs must cover exactly one register bank");
 
+// The clipboard unit's bank: the pump registers, then the bridge's own.
+struct ClipRegs {
+    struct HostRegs pump;    // +0x00 .. +0x3F
+    volatile ULONG ctrl;     // +0x40 write: CLIP_CTRL_* verb
+    ULONG pad4[3];
+    volatile ULONG offset;   // +0x50 write: FETCH/PUSH byte offset
+    ULONG pad5[3];
+    volatile ULONG len;      // +0x60 FETCH: read chunk length; PUSH: write
+    ULONG pad6[3];
+    volatile ULONG total;    // +0x70 read: staged host text length
+    ULONG pad7[3];
+    volatile ULONG status;   // +0x80 read: CLIP_ST_* bits
+    ULONG pad8[3];
+    volatile ULONG hostgen;  // +0x90 read: newest host text generation
+    ULONG pad9[3];
+    volatile ULONG guestgen; // +0xA0 write: generation written to the clip
+    ULONG padA[3];
+    volatile ULONG stagedgen; // +0xB0 read: generation staged by FETCH 0
+    ULONG padB[3];
+};
+_Static_assert(__builtin_offsetof(struct ClipRegs, ctrl) == CLIP_REG_CTRL &&
+                   __builtin_offsetof(struct ClipRegs, offset) == CLIP_REG_OFFSET &&
+                   __builtin_offsetof(struct ClipRegs, len) == CLIP_REG_LEN &&
+                   __builtin_offsetof(struct ClipRegs, total) == CLIP_REG_TOTAL &&
+                   __builtin_offsetof(struct ClipRegs, status) == CLIP_REG_STATUS &&
+                   __builtin_offsetof(struct ClipRegs, hostgen) == CLIP_REG_HOSTGEN &&
+                   __builtin_offsetof(struct ClipRegs, guestgen) == CLIP_REG_GUESTGEN &&
+                   __builtin_offsetof(struct ClipRegs, stagedgen) == CLIP_REG_STAGEDGEN,
+               "ClipRegs must match the CLIP_REG_* layout");
+
+// Shared with the assembly callbacks in entry.s (their offsets are fixed
+// there): the INT2 server and the clipboard hook only ever touch this.
+struct ClipShared {
+    struct ClipRegs *regs;  // +0
+    struct Task *task;      // +4
+    ULONG irq_sigmask;      // +8
+    ULONG hook_sigmask;     // +12
+    LONG hook_clip_id;      // +16: chm_ClipID of the newest change
+};
+_Static_assert(__builtin_offsetof(struct ClipShared, hook_clip_id) == 16,
+               "entry.s reads ClipShared at fixed offsets");
+
+// entry.s callbacks, reached through PC-relative code references only.
+extern void clip_int_server(void);
+extern void clip_hook(void);
+
+// The bridge's whole state, in one MEMF_PUBLIC allocation: the ROM has no
+// data section, and the hook and interrupt server read it from foreign
+// contexts.
+struct ClipState {
+    struct ClipShared shared;
+    struct Hook hook;
+    struct Interrupt server;
+    struct MsgPort cport; // clipboard.device replies
+    struct MsgPort tport; // timer.device replies
+    struct IOClipReq creq;
+    struct timerequest treq;
+    UBYTE cb_open;    // clipboard.device is open
+    UBYTE has_hook;   // CBD_CHANGEHOOK installed (else poll by clip ID)
+    UBYTE open_tries; // OpenDevice attempts so far
+    UBYTE pad;
+    LONG own_id;    // io_ClipID of the bridge's own last write
+    LONG seen_id;   // newest clip ID pushed to the host
+    ULONG seen_gen; // newest host generation written into the clip
+};
+
+#define IFF_ID(a, b, c, d) \
+    (((ULONG)(a) << 24) | ((ULONG)(b) << 16) | ((ULONG)(c) << 8) | (ULONG)(d))
+
+// Give up opening clipboard.device after this many attempts (2, 4, 8, ...
+// 64 s apart): on a disk-based Kickstart each attempt walks DEVS: on the
+// boot volume, which on a floppy system is a drive access.
+#define CLIP_OPEN_TRIES 8
+
 // The 1.3 DosList: dos.library V34 has no AddDosEntry/RemDosEntry, and its
 // list has no semaphore -- the convention is Forbid() around a splice of
 // the BPTR-linked di_DevInfo chain hanging off the RootNode.
@@ -165,6 +262,28 @@ static void rem_dos_entry_v34(struct ExecBase *_sysbase,
     Permit();
 }
 
+// Ring `pkt` in through `regs`' doorbell and reply it unless the host
+// keeps it; returns the RES_* verb, with the verb's node in `*vol`.
+static ULONG pump_packet(struct ExecBase *_sysbase, struct HostRegs *regs,
+                         struct MsgPort *port, struct DosPacket *pkt,
+                         struct DosList **vol)
+{
+    // The doorbell: the host handles the packet within the write,
+    // filling dp_Res1/dp_Res2 and latching result/arg.
+    regs->dospkt = (ULONG)pkt;
+    ULONG res = regs->result;
+    *vol = (struct DosList *)regs->arg;
+    if (res != RES_NOREPLY) {
+        struct MsgPort *reply = pkt->dp_Port;
+        pkt->dp_Port = port;
+        PutMsg(reply, pkt->dp_Link);
+    }
+    return res;
+}
+
+static void clipboard_main(struct ExecBase *_sysbase, UBYTE *board,
+                           struct ClipRegs *regs, struct MsgPort *port);
+
 void handler_main(void)
 {
     struct ExecBase *_sysbase = sysbase();
@@ -175,6 +294,8 @@ void handler_main(void)
     struct Process *me = (struct Process *)FindTask(NULL);
     struct MsgPort *port = &me->pr_MsgPort;
     struct HostRegs *regs = NULL;
+    UBYTE *board = NULL;
+    UBYTE kind = MOUNT_KIND_FILESYS;
 
     for (;;) {
         WaitPort(port);
@@ -198,7 +319,6 @@ void handler_main(void)
             if (regs == NULL) {
                 struct DeviceNode *dn = BADDR(pkt->dp_Arg3);
                 struct FileSysStartupMsg *fssm;
-                UBYTE *board;
                 if (dn != NULL) {
                     fssm = BADDR(dn->dn_Startup);
                     board = (UBYTE *)BADDR(dn->dn_SegList) - 4;
@@ -207,19 +327,27 @@ void handler_main(void)
                     board = (UBYTE *)fssm - FSSM_OFFSET -
                             fssm->fssm_Unit * FSSM_SLOT_SIZE;
                 }
-                regs = (struct HostRegs *)(board + REGS_OFFSET) +
-                       fssm->fssm_Unit;
+                // The mount table entry's kind byte says which bank this
+                // unit talks to: a HOSTFS mount owns the bank of its unit
+                // number; the clipboard entry has a bank of its own.
+                kind = board[MOUNTS_OFFSET + 2 +
+                             fssm->fssm_Unit * MOUNT_ENTRY_SIZE +
+                             MOUNT_KIND_OFFSET];
+                if (kind == MOUNT_KIND_CLIPBOARD)
+                    regs = (struct HostRegs *)(board + CLIP_REGS_OFFSET);
+                else
+                    regs = (struct HostRegs *)(board + REGS_OFFSET) +
+                           fssm->fssm_Unit;
                 regs->msgport = (ULONG)port;
             }
-            // The doorbell: the host handles the packet within the write,
-            // filling dp_Res1/dp_Res2 and latching result/arg.
-            regs->dospkt = (ULONG)pkt;
-            ULONG res = regs->result;
-            struct DosList *vol = (struct DosList *)regs->arg;
-            if (res != RES_NOREPLY) {
-                struct MsgPort *reply = pkt->dp_Port;
-                pkt->dp_Port = port;
-                PutMsg(reply, pkt->dp_Link);
+            struct DosList *vol;
+            ULONG res = pump_packet(_sysbase, regs, port, pkt, &vol);
+            if (kind == MOUNT_KIND_CLIPBOARD) {
+                // The startup packet is answered; the rest of this
+                // process's life is the clipboard bridge (never returns).
+                if (_dosbase != NULL)
+                    CloseLibrary(_dosbase);
+                clipboard_main(_sysbase, board, (struct ClipRegs *)regs, port);
             }
             // After replying, so DOS is not blocked on us while we take
             // the DosList semaphore (V36+) or Forbid (V34).
@@ -248,6 +376,261 @@ void handler_main(void)
                     CloseLibrary(_dosbase);
                 return;
             }
+        }
+    }
+}
+
+// ---- Clipboard bridge -------------------------------------------------
+
+// A MsgPort by hand: CreateMsgPort() is V36+, and the ROM links no
+// amiga.lib for CreatePort().
+static void init_port(struct MsgPort *port, struct Task *task, BYTE sigbit)
+{
+    port->mp_Node.ln_Type = NT_MSGPORT;
+    port->mp_Flags = PA_SIGNAL;
+    port->mp_SigBit = sigbit;
+    port->mp_SigTask = task;
+    port->mp_MsgList.lh_Head = (struct Node *)&port->mp_MsgList.lh_Tail;
+    port->mp_MsgList.lh_Tail = NULL;
+    port->mp_MsgList.lh_TailPred = (struct Node *)&port->mp_MsgList.lh_Head;
+}
+
+static void start_timer(struct ExecBase *_sysbase, struct ClipState *st,
+                        ULONG secs)
+{
+    st->treq.tr_node.io_Command = TR_ADDREQUEST;
+    st->treq.tr_time.tv_secs = secs;
+    st->treq.tr_time.tv_micro = 0;
+    SendIO((struct IORequest *)&st->treq);
+}
+
+static BYTE clip_write(struct ExecBase *_sysbase, struct ClipState *st,
+                       APTR data, ULONG len)
+{
+    st->creq.io_Command = CMD_WRITE;
+    st->creq.io_Data = data;
+    st->creq.io_Length = len;
+    return DoIO((struct IORequest *)&st->creq);
+}
+
+// Host -> guest: for every host generation not yet written, pull the
+// staged text through the H2G window and write it into clipboard.device
+// as FORM FTXT { CHRS }, chunk by chunk (the device advances io_Offset by
+// io_Actual after each CMD_WRITE, and the window itself is honest memory,
+// so io_Data points straight into it). The write's own clip ID is
+// remembered so the resulting change hook is not echoed back to the host.
+static void fetch_host_text(struct ExecBase *_sysbase, struct ClipState *st,
+                            UBYTE *board)
+{
+    struct ClipRegs *regs = st->shared.regs;
+    struct IOClipReq *req = &st->creq;
+    if (!st->cb_open)
+        return;
+    while (regs->hostgen != st->seen_gen) {
+        regs->offset = 0;
+        regs->ctrl = CLIP_CTRL_FETCH;
+        ULONG gen = regs->stagedgen;
+        ULONG total = regs->total;
+        ULONG len = regs->len;
+        // Marked seen up front so a failing device cannot spin this loop.
+        st->seen_gen = gen;
+        if (total == 0 || len == 0) {
+            regs->guestgen = gen;
+            continue;
+        }
+        ULONG hdr[5];
+        hdr[0] = IFF_ID('F', 'O', 'R', 'M');
+        hdr[1] = 4 + 8 + total + (total & 1);
+        hdr[2] = IFF_ID('F', 'T', 'X', 'T');
+        hdr[3] = IFF_ID('C', 'H', 'R', 'S');
+        hdr[4] = total;
+        req->io_Offset = 0;
+        req->io_ClipID = 0;
+        req->io_Error = 0;
+        if (clip_write(_sysbase, st, hdr, sizeof(hdr)) != 0)
+            continue;
+        st->own_id = req->io_ClipID;
+        ULONG off = 0;
+        BOOL ok = TRUE;
+        for (;;) {
+            if (clip_write(_sysbase, st, board + CLIP_H2G_OFFSET, len) != 0) {
+                ok = FALSE;
+                break;
+            }
+            off += len;
+            if (off >= total)
+                break;
+            regs->offset = off;
+            regs->ctrl = CLIP_CTRL_FETCH;
+            len = regs->len;
+            if (len == 0)
+                break;
+        }
+        if (ok && (total & 1)) {
+            UBYTE padbyte = 0;
+            clip_write(_sysbase, st, &padbyte, 1);
+        }
+        req->io_Command = CMD_UPDATE;
+        DoIO((struct IORequest *)req);
+        st->own_id = req->io_ClipID;
+        regs->guestgen = gen;
+    }
+}
+
+// Guest -> host: read the current clip in window-sized chunks straight
+// into the G2H window and PUSH each to the host; the read cycle ends
+// (releasing the clip) when a read returns io_Actual == 0, and only then
+// is the stream COMMITted -- the host parses the IFF and ignores anything
+// that is not FTXT. The first read reveals the clip's ID: one already
+// pushed, or the bridge's own write, is drained without pushing (a read
+// cycle once begun must be completed, or writers block on the clip). A
+// push abandoned mid-way is simply overwritten by the next one, which
+// restarts at offset 0.
+static void push_guest_clip(struct ExecBase *_sysbase, struct ClipState *st,
+                            UBYTE *board)
+{
+    struct ClipRegs *regs = st->shared.regs;
+    struct IOClipReq *req = &st->creq;
+    req->io_Offset = 0;
+    req->io_ClipID = 0;
+    req->io_Error = 0;
+    ULONG off = 0;
+    BOOL skip = FALSE;
+    for (;;) {
+        req->io_Command = CMD_READ;
+        req->io_Data = (STRPTR)(board + CLIP_G2H_OFFSET);
+        req->io_Length = CLIP_CHUNK_SIZE;
+        if (DoIO((struct IORequest *)req) != 0)
+            return;
+        if (off == 0) {
+            LONG id = req->io_ClipID;
+            skip = id == 0 || id == st->seen_id || id == st->own_id;
+        }
+        ULONG n = req->io_Actual;
+        if (n == 0)
+            break;
+        if (!skip) {
+            regs->offset = off;
+            regs->len = n;
+            regs->ctrl = CLIP_CTRL_PUSH;
+        }
+        off += n;
+    }
+    if (skip)
+        return;
+    st->seen_id = req->io_ClipID;
+    if (off != 0)
+        regs->ctrl = CLIP_CTRL_COMMIT;
+}
+
+static void try_open_clipboard(struct ExecBase *_sysbase, struct ClipState *st,
+                               UBYTE *board)
+{
+    st->open_tries++;
+    if (OpenDevice((STRPTR) "clipboard.device", PRIMARY_CLIP,
+                   (struct IORequest *)&st->creq, 0) != 0)
+        return;
+    st->cb_open = 1;
+    if (st->creq.io_Device->dd_Library.lib_Version >= 36) {
+        st->hook.h_Entry = (ULONG(*)())clip_hook;
+        st->hook.h_Data = &st->shared;
+        st->creq.io_Command = CBD_CHANGEHOOK;
+        st->creq.io_Data = (STRPTR)&st->hook;
+        st->creq.io_Length = 1; // install
+        if (DoIO((struct IORequest *)&st->creq) == 0)
+            st->has_hook = 1;
+    }
+    st->server.is_Node.ln_Type = NT_INTERRUPT;
+    st->server.is_Node.ln_Pri = 0;
+    st->server.is_Node.ln_Name = (char *)"Copperline clipboard";
+    st->server.is_Data = &st->shared;
+    st->server.is_Code = clip_int_server;
+    AddIntServer(INTB_PORTS, &st->server);
+    st->shared.regs->ctrl = CLIP_CTRL_ENABLE;
+    // Text the host staged before the device came up is still waiting,
+    // and so may be a clip the guest posted before the hook existed.
+    fetch_host_text(_sysbase, st, board);
+    push_guest_clip(_sysbase, st, board);
+}
+
+// The clipboard bridge process: see the header comment. Runs forever
+// (the HOSTCLIP device is never ACTION_DIEd), pumping any DosPacket that
+// does reach it so a stray reference to HOSTCLIP: gets an error rather
+// than a hang.
+static void clipboard_main(struct ExecBase *_sysbase, UBYTE *board,
+                           struct ClipRegs *regs, struct MsgPort *port)
+{
+    struct Process *me = (struct Process *)FindTask(NULL);
+    // No "please insert volume" requester if DEVS: points somewhere
+    // unmounted while clipboard.device is looked for.
+    me->pr_WindowPtr = (APTR)-1;
+
+    struct ClipState *st = AllocMem(sizeof(*st), MEMF_PUBLIC | MEMF_CLEAR);
+    ULONG timer_mask = 0, bridge_mask = 0;
+    if (st != NULL) {
+        st->shared.regs = regs;
+        st->shared.task = &me->pr_Task;
+        BYTE irq_sig = AllocSignal(-1);
+        BYTE hook_sig = AllocSignal(-1);
+        BYTE c_sig = AllocSignal(-1);
+        BYTE t_sig = AllocSignal(-1);
+        if (irq_sig >= 0 && hook_sig >= 0 && c_sig >= 0 && t_sig >= 0) {
+            st->shared.irq_sigmask = 1UL << irq_sig;
+            st->shared.hook_sigmask = 1UL << hook_sig;
+            init_port(&st->cport, &me->pr_Task, c_sig);
+            init_port(&st->tport, &me->pr_Task, t_sig);
+            st->creq.io_Message.mn_ReplyPort = &st->cport;
+            st->creq.io_Message.mn_Length = sizeof(st->creq);
+            st->treq.tr_node.io_Message.mn_ReplyPort = &st->tport;
+            st->treq.tr_node.io_Message.mn_Length = sizeof(st->treq);
+            if (OpenDevice((STRPTR) "timer.device", UNIT_VBLANK,
+                           (struct IORequest *)&st->treq, 0) == 0) {
+                timer_mask = 1UL << t_sig;
+                bridge_mask = st->shared.irq_sigmask | st->shared.hook_sigmask;
+                start_timer(_sysbase, st, 2);
+            }
+        }
+    }
+
+    ULONG port_mask = 1UL << port->mp_SigBit;
+    for (;;) {
+        ULONG sigs = Wait(port_mask | timer_mask | bridge_mask);
+        if (sigs & port_mask) {
+            struct Message *msg;
+            while ((msg = GetMsg(port)) != NULL) {
+                struct DosList *vol;
+                pump_packet(_sysbase, &regs->pump, port,
+                            (struct DosPacket *)msg->mn_Node.ln_Name, &vol);
+            }
+        }
+        if (sigs & timer_mask) {
+            while (GetMsg(&st->tport) != NULL)
+                ;
+            if (st->cb_open) {
+                // V34 (no change hook): look for a new clip by reading it
+                // -- a full read cycle, which push_guest_clip drains
+                // without pushing when the clip is one it has seen. With
+                // a hook installed the timer has nothing left to do.
+                if (!st->has_hook) {
+                    push_guest_clip(_sysbase, st, board);
+                    start_timer(_sysbase, st, 2);
+                }
+            } else if (st->open_tries < CLIP_OPEN_TRIES) {
+                try_open_clipboard(_sysbase, st, board);
+                if (st->cb_open)
+                    start_timer(_sysbase, st, 1);
+                else
+                    start_timer(_sysbase, st,
+                                st->open_tries < 6 ? 2UL << st->open_tries
+                                                   : 64);
+            }
+        }
+        if (sigs & bridge_mask) {
+            if (sigs & st->shared.irq_sigmask)
+                fetch_host_text(_sysbase, st, board);
+            if ((sigs & st->shared.hook_sigmask) &&
+                st->shared.hook_clip_id != st->own_id)
+                push_guest_clip(_sysbase, st, board);
         }
     }
 }

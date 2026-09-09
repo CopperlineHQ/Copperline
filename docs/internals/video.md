@@ -993,3 +993,42 @@ so a nominal "50 fps" label never drifts against PAL's true field rate and
 warp-speed captures play back at normal speed. The REC badge, status bar, OSD,
 and menus are drawn into the presentation texture after capture, so they never
 appear in the file.
+
+## GIF clips (`gifclip.rs`)
+
+The window's Save Clip as GIF and the headless `--gif-after` capture share
+one module. Presented frames are offered with their emulated timestamp at
+the same point the video recorder taps (after the presentation buffer is
+applied, before the status bar, OSD and menus are drawn) and pass through
+`present_capture_frame`, the picture builder `save_present_frame` uses for
+screenshots and frame dumps, so a clip has the same crop, TV aperture,
+centring and aspect as a screenshot of the same moment (an RTG frame is
+taken at its own row count, as the screenshot path does).
+
+A `FrameSelector` thins the field rate to `[recording] clip_fps` on the
+emulated timeline: a frame is taken once its timestamp reaches the next
+clip slot, and slots a gap skipped (a warp burst that presented nothing)
+are dropped rather than back-filled. Frames are stored as `ClipFrame`s:
+an exact first-seen-order palette plus 8-bit indices when the picture
+has 256 colours or fewer, the RGBA pixels otherwise. The interactive
+`ClipRing` keeps the last `clip_seconds` of those, stores a picture once
+however long it stays on screen (the next stored frame ends it), keeps
+the frame that was showing when the window opens with its time clamped to
+the window's start, and evicts the oldest frames past a 256 MiB byte
+budget; a timestamp that moves backwards (state load, reset) restarts it.
+
+`GifWriter` streams frames through the `gif` crate as a looping GIF89a
+with a local colour table per frame; a frame kept as RGBA is reduced with
+`color_quant`'s NeuQuant (trained on the frame, mapped through a colour
+cache) only when it is written. Delays are centiseconds computed as the
+difference of the cumulative rounded timestamps from the clip's origin,
+so 3.33 cs frames at 30 fps come out as 3, 4, 3 and the clip's length
+stays within half a centisecond of the emulated interval; the last frame
+runs to the clip's end (the ring's newest frame plus one period, or the
+`--gif-after` window's end). The interactive save clones the ring and
+encodes on a background thread, flashing the file name on the OSD when
+the write lands; the headless capture writes frames as they are taken,
+waiting for the renderer's exact frame like a frame dump, and finishes
+when emulated time passes its window. Every step is a pure function of
+the frames and their timestamps, so the same run yields a byte-identical
+file.

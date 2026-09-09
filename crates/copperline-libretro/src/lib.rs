@@ -9,6 +9,7 @@ pub mod abi;
 mod core;
 mod input;
 mod media;
+mod memory;
 mod whdload;
 
 use abi::*;
@@ -26,6 +27,7 @@ struct Callbacks {
     batch: Option<AudioBatch>,
     poll: Option<Poll>,
     input: Option<Input>,
+    log: Option<LogPrintf>,
 }
 
 #[derive(Default)]
@@ -33,6 +35,11 @@ struct Runtime {
     core: Option<Core>,
     devices: [Option<u32>; 2],
     av: Option<AvInfo>,
+    /// Cheats by frontend index; parsed once, poked after every frame.
+    cheats: Vec<Option<memory::Cheat>>,
+    /// The memory map last announced to the frontend, which reads it
+    /// through the pointer handed to `RETRO_ENVIRONMENT_SET_MEMORY_MAPS`.
+    memory_map: Vec<MemoryDescriptor>,
 }
 
 thread_local! {
@@ -59,6 +66,71 @@ fn report(error: impl std::fmt::Display) {
             },
         );
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What `log` emitted: the test host cannot define a C-variadic logger.
+    static LOGGED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Log through the frontend's logger when it offers one, else to stderr.
+fn log(level: u32, text: &str) {
+    let text = format!("Copperline: {text}");
+    #[cfg(test)]
+    LOGGED.with(|logged| logged.borrow_mut().push(text.clone()));
+    match (CALLBACKS.get().log, CString::new(text.as_str())) {
+        (Some(log), Ok(text)) => unsafe { log(level, c"%s\n".as_ptr(), text.as_ptr()) },
+        _ => eprintln!("{text}"),
+    }
+}
+
+/// Hand the frontend the current guest address map when it differs from
+/// the one it holds (or always, with `force`): after content loads, once
+/// the guest autoconfigures its expansion boards, and after a reset or
+/// state load moved a window. Host addresses stay put across those, so a
+/// re-announcement normally only adds or removes Zorro windows.
+fn announce_memory_map(force: bool) -> Result<()> {
+    let map = RUNTIME.with(
+        |runtime| -> Result<Option<(*const MemoryDescriptor, u32)>> {
+            let mut runtime = runtime.try_borrow_mut().context("core is busy")?;
+            let Runtime {
+                core, memory_map, ..
+            } = &mut *runtime;
+            let core = core.as_mut().context("no content is loaded")?;
+            let current = memory::descriptors(core.emu.bus_mut());
+            if !force && current == *memory_map {
+                return Ok(None);
+            }
+            *memory_map = current;
+            Ok(Some((memory_map.as_ptr(), memory_map.len() as u32)))
+        },
+    )?;
+    if let Some((descriptors, num_descriptors)) = map {
+        env(
+            36,
+            &mut MemoryMap {
+                descriptors,
+                num_descriptors,
+            },
+        );
+    }
+    Ok(())
+}
+
+/// Poke every enabled cheat into RAM, as a trainer would between frames.
+fn apply_cheats() -> Result<()> {
+    RUNTIME.with(|runtime| {
+        let mut runtime = runtime.try_borrow_mut().context("core is busy")?;
+        let Runtime { core, cheats, .. } = &mut *runtime;
+        let core = core.as_mut().context("no content is loaded")?;
+        for cheat in cheats.iter().flatten().filter(|cheat| cheat.enabled) {
+            for poke in &cheat.pokes {
+                memory::poke(core.emu.bus_mut(), *poke);
+            }
+        }
+        Ok(())
+    })
 }
 
 fn boundary<T: Default>(action: impl FnOnce() -> Result<T>) -> T {
@@ -221,6 +293,12 @@ fn register_environment() {
             callback(13, std::ptr::from_ref(&DISKS).cast_mut().cast());
         }
         env(18, &mut true);
+        let mut logger = LogCallback { log: None };
+        if env(27, &mut logger) {
+            let mut callbacks = CALLBACKS.get();
+            callbacks.log = logger.log;
+            CALLBACKS.set(callbacks);
+        }
     }
 }
 
@@ -381,6 +459,7 @@ pub unsafe extern "C" fn retro_load_game(info: *const GameInfo) -> bool {
             runtime.core = Some(core);
             Ok(())
         })?;
+        announce_memory_map(true)?;
         Ok(true)
     })
 }
@@ -472,7 +551,9 @@ pub extern "C" fn retro_run() {
                 .extend_from_slice(&pending[pending.len() - keep..]);
             Ok(())
         })?;
-        Ok(())
+        apply_cheats()?;
+        // Autoconfig lands Zorro windows a few frames into the boot.
+        announce_memory_map(false)
     });
 }
 
@@ -487,7 +568,9 @@ pub extern "C" fn retro_reset() {
             core.presentation.reset();
             core.pixels.clear();
             Ok(())
-        })
+        })?;
+        // A cold reset returns the expansion boards to unconfigured.
+        announce_memory_map(false)
     });
 }
 
@@ -564,6 +647,9 @@ pub unsafe extern "C" fn retro_unserialize(data: *const c_void, size: usize) -> 
         with_core(|core| {
             core.unserialize(unsafe { std::slice::from_raw_parts(data.cast(), size) })
         })?;
+        // RAM keeps its host addresses across a load; the state's autoconfig
+        // placement may still differ from the map the frontend holds.
+        announce_memory_map(false)?;
         Ok(true)
     })
 }
@@ -581,17 +667,80 @@ pub extern "C" fn retro_get_region() -> u32 {
 }
 
 #[no_mangle]
-pub extern "C" fn retro_get_memory_data(_id: u32) -> *mut c_void {
-    std::ptr::null_mut()
+pub extern "C" fn retro_get_memory_data(id: u32) -> *mut c_void {
+    RUNTIME.with(|runtime| {
+        runtime
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut runtime| {
+                runtime
+                    .core
+                    .as_mut()
+                    .and_then(|core| core.memory_region(id).map(|region| region.as_mut_ptr()))
+            })
+            .map_or(std::ptr::null_mut(), |ptr| ptr.cast())
+    })
 }
 #[no_mangle]
-pub extern "C" fn retro_get_memory_size(_id: u32) -> usize {
-    0
+pub extern "C" fn retro_get_memory_size(id: u32) -> usize {
+    RUNTIME.with(|runtime| {
+        runtime
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut runtime| {
+                runtime
+                    .core
+                    .as_mut()
+                    .and_then(|core| core.memory_region(id).map(|region| region.len()))
+            })
+            .unwrap_or(0)
+    })
 }
 #[no_mangle]
-pub extern "C" fn retro_cheat_reset() {}
+pub extern "C" fn retro_cheat_reset() {
+    boundary(|| {
+        RUNTIME.with(|runtime| {
+            runtime
+                .try_borrow_mut()
+                .context("core is busy")?
+                .cheats
+                .clear();
+            Ok(())
+        })
+    });
+}
+/// # Safety
+/// `code` is NULL or a NUL-terminated string owned by the frontend for the
+/// duration of the call.
 #[no_mangle]
-pub extern "C" fn retro_cheat_set(_index: u32, _enabled: bool, _code: *const c_char) {}
+pub unsafe extern "C" fn retro_cheat_set(index: u32, enabled: bool, code: *const c_char) {
+    boundary(|| {
+        let Some(code) = (unsafe { code.as_ref() }) else {
+            return Ok(());
+        };
+        let code = unsafe { CStr::from_ptr(code) }.to_string_lossy();
+        let cheat = match memory::parse(&code) {
+            Ok(pokes) => Some(memory::Cheat { enabled, pokes }),
+            Err(error) => {
+                log(
+                    LOG_WARN,
+                    &format!("ignoring cheat {index} {code:?}: {error:#}"),
+                );
+                None
+            }
+        };
+        RUNTIME.with(|runtime| {
+            let mut runtime = runtime.try_borrow_mut().context("core is busy")?;
+            let slot = index as usize;
+            ensure!(slot < 4096, "cheat index {index} is out of range");
+            if runtime.cheats.len() <= slot {
+                runtime.cheats.resize(slot + 1, None);
+            }
+            runtime.cheats[slot] = cheat;
+            Ok(())
+        })
+    });
+}
 #[no_mangle]
 pub extern "C" fn retro_load_game_special(
     _kind: u32,

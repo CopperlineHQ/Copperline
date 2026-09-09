@@ -77,7 +77,17 @@ Full reference: `docs/guide/headless.md`.
 # Dump 120 consecutive rendered frames starting at 24s.
 ./target/release/copperline --config my.toml --noaudio \
   --dump-frames /tmp/frames --dump-start 24 --dump-count 120
+
+# Write 5s of the display from 24s as an animated GIF (25 fps PAL /
+# 30 fps NTSC, same crop and aspect as a screenshot), exit.
+./target/release/copperline --config my.toml --noaudio \
+  --gif-after 24 /tmp/clip.gif --gif-seconds 5
 ```
+
+`--gif-after` repeats like `--screenshot-after`; `--gif-seconds` defaults
+to `[recording] clip_seconds` (10). The window's Cmd+Shift+G /
+Alt+Shift+G saves the same kind of clip from a rolling ring of the last
+`clip_seconds` of the display.
 
 Audio: `--noaudio` runs silent; `--audio-wav PATH` captures the mixed output
 as a WAV in emulated time instead of playing it.

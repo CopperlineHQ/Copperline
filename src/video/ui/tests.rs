@@ -2093,6 +2093,134 @@ fn panels_render_into_their_rects() {
     }
     save(&frame, "drop-chooser");
 
+    // The Load State browser: slots and named states with thumbnails,
+    // one flagged as another machine's, one empty, one unreadable.
+    let mut frame = vec![0u8; w * h * 4];
+    let thumbnail = |seed: u32| {
+        let (tw, th) = (
+            crate::savestate::THUMBNAIL_WIDTH,
+            crate::savestate::THUMBNAIL_HEIGHT,
+        );
+        let pixels = (0..tw * th)
+            .map(|i| {
+                let (x, y) = ((i % tw) as u32, (i / tw) as u32);
+                let band = if (y / 12 + seed).is_multiple_of(3) {
+                    96
+                } else {
+                    24
+                };
+                rgba(x * 255 / tw as u32, band, 255 - y * 255 / th as u32)
+            })
+            .collect();
+        Some(StateThumbnail {
+            pixels,
+            width: tw,
+            height: th,
+        })
+    };
+    let state_entry = |label: &str, slot: Option<usize>, seed: u32| StateEntry {
+        path: std::path::PathBuf::from(format!("/states/{label}.clstate")),
+        label: label.to_string(),
+        slot,
+        empty: false,
+        saved_at_unix: Some(1_699_956_800 + u64::from(seed) * 3600),
+        emulated_seconds: Some(83.4 + f64::from(seed) * 40.0),
+        machine: "A1200 / M68EC020 / Aga / Pal / chip 2048K fast 8192K".to_string(),
+        media: "DF0: workbench.adf, DF1: -, HD: work.hdf".to_string(),
+        thumbnail: thumbnail(seed),
+        mismatch: None,
+        error: None,
+    };
+    let mut entries = vec![
+        state_entry("Slot 1", Some(1), 0),
+        StateEntry {
+            empty: true,
+            thumbnail: None,
+            ..state_entry("Slot 2", Some(2), 0)
+        },
+        state_entry("copperline-state-20260908213011.clstate", None, 1),
+        StateEntry {
+            mismatch: Some("machine A500 -> A1200, chipset Ocs -> Aga".to_string()),
+            ..state_entry("before-the-boss.clstate", None, 2)
+        },
+        StateEntry {
+            error: Some("not a Copperline save state".to_string()),
+            thumbnail: None,
+            ..state_entry("stray.clstate", None, 0)
+        },
+    ];
+    entries.push(state_entry("older.clstate", None, 1));
+    let ui = UiState {
+        menu_open: false,
+        menu_rows: Vec::new(),
+        menu_nav: menu::MenuNav::default(),
+        panel: Some(Panel::States(Box::new(StatesPanel {
+            dir: std::path::PathBuf::from("/Users/amiga/Documents/Copperline/states"),
+            entries,
+            selected: 2,
+            scroll: 0,
+            focus: StatesFocus::List,
+            confirm_delete: false,
+            status: None,
+        }))),
+    };
+    draw(&mut frame, scale, &ui, Some(UiControl::StateRow(3)), None);
+    assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
+    let panel = ui.panel.as_ref().unwrap();
+    if let Panel::States(state) = panel {
+        let rect = panel_rect(panel);
+        let rows = states_row_rects(rect, state);
+        assert_eq!(rows.len(), states_visible_rows().min(6));
+        assert_eq!(rows[0].0, UiControl::StateRow(0));
+        // The first row's thumbnail lands inside its row: a pixel from the
+        // synthetic picture's bright band, not the panel ground.
+        let row = rows[0].1;
+        let probe = ((row.y + 4 + 2) * w + row.x + 4 + 2) * 4;
+        assert_ne!(&frame[probe..probe + 4], &PANEL_BG.to_le_bytes());
+        assert_ne!(&frame[probe..probe + 4], &ENTRY_BG.to_le_bytes());
+        // The buttons sit under the list, inside the panel.
+        let buttons = states_button_rects(rect, state);
+        assert_eq!(buttons.len(), 3);
+        for (_, b) in &buttons {
+            assert!(b.y + b.h <= rect.y + rect.h);
+        }
+    } else {
+        unreachable!();
+    }
+    save(&frame, "load-state");
+    // With the delete question up, the footer asks it.
+    if let Some(Panel::States(state)) = &mut { ui }.panel {
+        let mut state = std::mem::replace(
+            state,
+            Box::new(StatesPanel {
+                dir: std::path::PathBuf::new(),
+                entries: Vec::new(),
+                selected: 0,
+                scroll: 0,
+                focus: StatesFocus::List,
+                confirm_delete: false,
+                status: None,
+            }),
+        );
+        state.ask_delete();
+        assert!(state.confirm_delete);
+        let ui = UiState {
+            menu_open: false,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
+            panel: Some(Panel::States(state)),
+        };
+        let mut frame = vec![0u8; w * h * 4];
+        draw(&mut frame, scale, &ui, None, None);
+        let panel = ui.panel.as_ref().unwrap();
+        if let Panel::States(state) = panel {
+            let buttons = states_button_rects(panel_rect(panel), state);
+            assert_eq!(buttons.len(), 2);
+            assert_eq!(buttons[1].0, UiControl::StateCancelDelete);
+        }
+        save(&frame, "load-state-confirm");
+    }
+
     // The pre-drop hover hint dims the display without opening a panel.
     let mut frame = vec![0xFFu8; w * h * 4];
     draw_drop_hint(&mut frame, scale);
@@ -3477,6 +3605,8 @@ fn panels_render_into_their_rects() {
         recording: false,
         input_recording: false,
         autofire_hz: 0,
+        clipboard_share: false,
+        clipboard_available: false,
         run_ahead_frames: 0,
         joystick_input_mode: JoystickInputMode::Gamepad,
         keyboard_panel: false,

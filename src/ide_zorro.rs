@@ -276,6 +276,12 @@ impl IdeZorro {
         self.ata.iter().find_map(AtaBus::first_atapi_ref)
     }
 
+    /// The hard-disk images across the board's channels, in channel and
+    /// slot order.
+    pub fn hard_disk_images(&self) -> impl Iterator<Item = &crate::harddrive::HardDriveImage> {
+        self.ata.iter().flat_map(AtaBus::hard_disk_images)
+    }
+
     /// Mutable counterpart of [`Self::first_atapi_ref`].
     pub fn first_atapi_mut(&mut self) -> Option<&mut crate::scsi::ScsiCdRom> {
         self.ata.iter_mut().find_map(AtaBus::first_atapi_mut)

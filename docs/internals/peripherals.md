@@ -513,6 +513,57 @@ guest could construct on its own (`..`, embedded separators) are
 blocked. A `readonly`
 mount refuses writes with the standard write-protection error.
 
+### Clipboard service (`clipboard.rs`)
+
+`[clipboard] share` fits the clipboard unit on the same services board: a
+mount-table entry of its own kind (the entry's last byte) whose DOS device,
+`HOSTCLIP:`, exists only so DOS starts its handler process at mount time --
+the same DiagPoint/Romtag/`AddBootNode` path as a mount, on Kickstart 1.3
+as on 2.0+. That process (`clipboard_main` in `guest/services/handler.c`)
+answers its startup packet through a pump bank of its own
+(`CLIP_REGS_OFFSET`, away from the eight mount banks so a full set of
+mounts and the clipboard coexist) and refuses any other packet with
+`ERROR_ACTION_NOT_KNOWN`, then becomes the bridge. It opens
+`clipboard.device` unit 0 on a backing-off timer (the device is disk-based
+on 1.3 and 3.1, so `DEVS:` must exist first; eight failed attempts and it
+idles for good), installs a `CBD_CHANGEHOOK` hook on a V36+ device (a V34
+device has no hooks: the clip is re-read every two seconds instead and
+pushed only when its ID is new), and adds an `INTB_PORTS` server. Both
+callbacks are assembly in `entry.s`: each runs in a foreign context (the
+interrupt chain, the device's task) and only records a clip ID or
+acknowledges the interrupt, then `Signal()`s the process.
+
+Host -> guest: the host converts its text to Latin-1 with LF line ends,
+bumps `CLIP_REG_HOSTGEN`, and holds the board's INT2 line
+(`ZorroDevice::int2_line`, sampled by the bus like any expansion board's)
+until the guest's server writes `CLIP_CTRL_IRQACK`; the line is only ever
+asserted after the guest reported its server with `CLIP_CTRL_ENABLE`. The
+process then pulls the text through the 4K H2G window (`CLIP_CTRL_FETCH`
+with `CLIP_REG_OFFSET`; `CLIP_REG_LEN`/`CLIP_REG_TOTAL` answer) and writes
+it into `clipboard.device` as `FORM FTXT { CHRS }` straight out of the
+window (`io_Data` points into the board; the device advances `io_Offset`),
+then reports the generation in `CLIP_REG_GUESTGEN`. Newer host text
+arriving mid-transfer is promoted only at the next `FETCH` at offset 0
+(`CLIP_REG_STAGEDGEN` names the text in flight), and the process loops
+while `HOSTGEN` is ahead of what it wrote. Guest -> host: for a change hook
+whose clip ID is not the bridge's own last write, the process `CMD_READ`s
+the raw IFF stream into the G2H window chunk by chunk (`CLIP_CTRL_PUSH`),
+reading until `io_Actual == 0` releases the clip, then `CLIP_CTRL_COMMIT`s;
+the host parses the `FORM FTXT`, concatenates its `CHRS` chunks, and drops
+anything else. The window loop (`service_clipboard`) polls the host
+clipboard a few times a second while the window is focused, staging a
+change by hash, and puts committed guest text on the host clipboard,
+recording its hash so the poll does not stage it back. All the bridge's
+registers are `move.l` stores from the guest, so they fire on the write
+that completes the longword exactly as the pump doorbells do.
+
+Determinism: the host clipboard only reaches the machine through that
+windowed poll or a control-protocol `clipboard.set`, never from the board
+itself, so a headless run with the unit fitted (`--clipboard`) executes
+the same timeline as one without host traffic. The service's guest-visible
+state (staged text, generations, the pending doorbell) is part of the
+board's save state; what the host clipboard held is not.
+
 ## uaelib trap (`uaelib.rs`)
 
 WinUAE's boot ROM ("rtarea") provides a service trap at `rtarea_base + 0xFF60`

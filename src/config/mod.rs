@@ -283,10 +283,22 @@ pub struct Config {
     /// joins the mixer as the `toccata` audio source. No other options
     /// exist yet (see docs/internals/toccata.md).
     pub toccata: bool,
+    /// Host <-> guest clipboard sharing (`[clipboard] share`,
+    /// `--clipboard`/`--no-clipboard`; `crate::clipboard`). `None` leaves
+    /// the choice to the session: a windowed session shares, a headless one
+    /// does not (the host clipboard is live host state a replay cannot
+    /// reproduce). `Some(true)` fits the clipboard unit of the services
+    /// board; headless it is then reachable only through the control
+    /// protocol.
+    pub clipboard_share: Option<bool>,
     /// Freezer cartridge (`[cartridge]`, `crate::cartridge`): a system
     /// monitor in its own bank at $A10000, entered by a level-7 interrupt
     /// on a freeze.
     pub cartridge: CartridgeConfig,
+    /// GIF clip ring (`[recording]`, `crate::gifclip`): how much of the
+    /// presented picture the window keeps for Save Clip as GIF, and the
+    /// rate clips (interactive and `--gif-after`) are written at.
+    pub recording: RecordingConfig,
     /// The MHI virtual MPEG audio decoder board (`[mhi] enabled = true`):
     /// when true, an MHI board autoconfigs on the Zorro chain and its
     /// decoded-MP3 output joins the mixer as the `mhi` audio source. No
@@ -1369,6 +1381,37 @@ pub struct LideConfig {
     pub drives: [Option<DriveImage>; 4],
 }
 
+/// `[recording]`: the GIF clip ring behind the window's Save Clip as GIF
+/// and the rate of every GIF clip written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordingConfig {
+    /// Emulated seconds of presented frames the window keeps (default
+    /// 10, at most `gifclip::MAX_CLIP_SECONDS`); 0 disables the ring and
+    /// the menu item.
+    pub clip_seconds: u32,
+    /// Clip frame rate, 1 to `gifclip::MAX_CLIP_FPS`; 0 (the default)
+    /// picks 25 on PAL and 30 on NTSC.
+    pub clip_fps: u32,
+}
+
+impl Default for RecordingConfig {
+    fn default() -> Self {
+        Self {
+            clip_seconds: crate::gifclip::DEFAULT_CLIP_SECONDS,
+            clip_fps: 0,
+        }
+    }
+}
+
+impl RecordingConfig {
+    pub fn clip_settings(&self) -> crate::gifclip::ClipSettings {
+        crate::gifclip::ClipSettings {
+            seconds: self.clip_seconds,
+            fps: self.clip_fps,
+        }
+    }
+}
+
 /// `[cartridge]`: which freezer cartridge is fitted, and the image it
 /// carries.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2342,6 +2385,32 @@ impl MachineDescriptor {
         )
     }
 
+    /// The summary a state browser has room for: model, CPU, chipset, video
+    /// standard, and the memory that is fitted, e.g.
+    /// "A1200 / 68EC020 / AGA / PAL / chip 2048K fast 8192K". RAM banks
+    /// that are empty are left out, and so is the ROM fingerprint.
+    pub fn short_summary(&self) -> String {
+        let profile = match self.machine {
+            Some(m) => format!("{m:?}"),
+            None => "custom".to_string(),
+        };
+        let mut memory = format!("chip {}K", self.chip_ram_bytes / 1024);
+        for (name, bytes) in [
+            ("fast", self.fast_ram_bytes),
+            ("slow", self.slow_ram_bytes),
+            ("mb", self.mb_ram_bytes),
+            ("accel", self.accel_ram_bytes),
+        ] {
+            if bytes > 0 {
+                memory.push_str(&format!(" {name} {}K", bytes / 1024));
+            }
+        }
+        format!(
+            "{profile} / {:?} / {:?} / {:?} / {memory}",
+            self.cpu, self.chipset, self.video_standard
+        )
+    }
+
     /// Human-readable, field-by-field differences between the running machine
     /// (`self`) and a state's machine (`other`), for the load-time log when
     /// they do not match. Empty when the shapes and ROMs are identical.
@@ -2559,7 +2628,9 @@ impl Default for Config {
             lide: LideConfig::default(),
             a2065_net: None,
             toccata: false,
+            clipboard_share: None,
             cartridge: CartridgeConfig::default(),
+            recording: RecordingConfig::default(),
             mhi: false,
             hostsocket_net: None,
             hostsocket_transport: None,
@@ -2758,6 +2829,9 @@ pub struct ConfigOverrides {
     /// Fast CPU execution via the batch/trace-JIT path (`--jit`/`--no-jit`).
     /// Same semantics as `[cpu] jit`.
     pub cpu_jit: Option<bool>,
+    /// Host clipboard sharing (`--clipboard`/`--no-clipboard`). Same
+    /// semantics as `[clipboard] share`.
+    pub clipboard: Option<bool>,
     pub chip: Option<String>,
     pub fast: Option<String>,
     pub slow: Option<String>,
@@ -2973,6 +3047,7 @@ impl ConfigOverrides {
             && self.mt32_pcm_rom.is_none()
             && self.mt32_panel.is_none()
             && self.cartridge.is_none()
+            && self.clipboard.is_none()
     }
 
     /// Inject the set overrides into the raw config, replacing the values
@@ -2998,6 +3073,9 @@ impl ConfigOverrides {
         }
         if let Some(jit) = self.cpu_jit {
             raw.cpu.jit = Some(jit);
+        }
+        if let Some(share) = self.clipboard {
+            raw.clipboard.share = Some(share);
         }
         if let Some(chip) = &self.chip {
             raw.memory.chip = Some(chip.clone());

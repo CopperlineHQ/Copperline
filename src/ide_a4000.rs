@@ -49,6 +49,11 @@ impl IdeA4000 {
         self.ata.first_atapi_ref()
     }
 
+    /// The hard-disk images on the interface, in slot order.
+    pub fn hard_disk_images(&self) -> impl Iterator<Item = &crate::harddrive::HardDriveImage> {
+        self.ata.hard_disk_images()
+    }
+
     /// Mutable counterpart of [`Self::first_atapi_ref`].
     pub fn first_atapi_mut(&mut self) -> Option<&mut crate::scsi::ScsiCdRom> {
         self.ata.first_atapi_mut()

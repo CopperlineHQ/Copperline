@@ -96,6 +96,8 @@ pub enum MenuAction {
     // Emulation.
     SetFloppySpeed(u16),
     ToggleRewind,
+    /// Host <-> guest clipboard sharing (`crate::clipboard`).
+    ToggleClipboard,
 
     // Warp.
     ToggleWarp,
@@ -104,6 +106,7 @@ pub enum MenuAction {
     // Recording.
     ToggleRecord,
     ToggleRecordInput,
+    SaveClip,
 
     // Save states.
     SaveState,
@@ -476,6 +479,11 @@ pub struct MenuState<'a> {
     pub autofire_hz: u8,
     pub run_ahead_frames: u8,
     pub joystick_input_mode: JoystickInputMode,
+    /// Host clipboard sharing is on (`[clipboard] share`).
+    pub clipboard_share: bool,
+    /// The clipboard unit is fitted, so the toggle can act: the guest
+    /// bridge exists only when the machine was built with it.
+    pub clipboard_available: bool,
     /// Whether the on-screen Amiga keyboard is up.
     pub keyboard_panel: bool,
     pub port_devices: [PortDevice; 2],
@@ -915,6 +923,15 @@ fn input_rows(s: &MenuState) -> Vec<MenuRow> {
         // The clipboard typed into the machine, key by key, for text a
         // guest has no other way to receive.
         MenuRow::action("Paste as Keystrokes", MenuAction::PasteKeystrokes),
+        // Host <-> guest clipboard text, both ways. Greyed when the machine
+        // was built without the clipboard unit: the guest-side bridge is
+        // part of the services board's boot, not something to add later.
+        MenuRow::toggle(
+            "Share Clipboard",
+            MenuAction::ToggleClipboard,
+            s.clipboard_share,
+        )
+        .available(s.clipboard_available),
         MenuRow::action("Calibrate Gamepad...", MenuAction::OpenCalibration),
         MenuRow::action("Input Mapping...", MenuAction::OpenInputMapping),
     ]
@@ -1168,6 +1185,7 @@ fn recording_rows(s: &MenuState) -> Vec<MenuRow> {
             },
             MenuAction::ToggleRecordInput,
         ),
+        MenuRow::action("Save Clip as GIF", MenuAction::SaveClip),
     ]
 }
 
@@ -1373,6 +1391,8 @@ mod tests {
             recording: false,
             input_recording: false,
             autofire_hz: 0,
+            clipboard_share: false,
+            clipboard_available: false,
             run_ahead_frames: 0,
             joystick_input_mode: JoystickInputMode::Gamepad,
             keyboard_panel: false,
@@ -1741,8 +1761,10 @@ mod tests {
 
         let save = find(&rows, "Save State").expect("save state");
         let save = save.children().expect("children");
-        // Both of these put a file dialogue up; a quick slot does not.
+        // Save State writes a file and Load State opens the browser panel:
+        // both take the eye elsewhere; a quick slot does not.
         assert!(find(save, "Save State...").expect("save").closes_menu());
+        assert!(find(save, "Load State...").expect("load").closes_menu());
         let quick = find(save, "Quick Save").expect("quick save");
         assert!(!quick.children().expect("slots")[0].closes_menu());
     }

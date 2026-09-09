@@ -759,6 +759,11 @@ impl App {
     }
 
     pub(super) fn reset_render_pipeline(&mut self) {
+        // Every caller is a timeline discontinuity (cold reset, ROM or
+        // state load, a new machine): the GIF clip ring cannot span one,
+        // and a new machine may pick another clip rate, so it is rebuilt
+        // on the next presented frame.
+        self.clip_ring = None;
         self.render_generation = self.render_generation.wrapping_add(1);
         self.last_rendered_emulated_frame = None;
         self.last_submitted_render_frame = None;

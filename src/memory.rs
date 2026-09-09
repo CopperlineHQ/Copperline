@@ -397,11 +397,58 @@ impl Memory {
         self.zorro
             .power_on_reset_with(|idx, ram| init.fill(ram, 0x5A00_0000_0000_0000 | idx as u64));
     }
+
+    /// Keep every bank at the host address `live` already uses. A restored
+    /// state arrives as freshly allocated buffers; a bank whose size matches
+    /// the live machine's copies its restored contents into the live
+    /// allocation and takes that allocation over, so pointers a frontend
+    /// handed out (libretro memory maps, save-RAM buffers) stay valid across
+    /// a state load. Banks whose size differs keep their new buffers.
+    pub(crate) fn adopt_allocations_from(&mut self, live: &mut Memory) {
+        reuse_allocation(&mut self.chip_ram, &mut live.chip_ram);
+        reuse_allocation(&mut self.slow_ram, &mut live.slow_ram);
+        reuse_allocation(&mut self.mb_ram, &mut live.mb_ram);
+        reuse_allocation(&mut self.accel_ram, &mut live.accel_ram);
+        reuse_allocation(&mut self.rom, &mut live.rom);
+        reuse_allocation(&mut self.extended_rom, &mut live.extended_rom);
+        reuse_allocation(&mut self.wcs, &mut live.wcs);
+        self.zorro.adopt_allocations_from(&mut live.zorro);
+    }
+}
+
+/// Move `fresh`'s contents into `live`'s allocation and hand that allocation
+/// to `fresh`, when both are the same size. Afterwards `fresh` holds its own
+/// bytes at `live`'s old host address and `live` holds the discarded buffer.
+pub(crate) fn reuse_allocation(fresh: &mut Vec<u8>, live: &mut Vec<u8>) {
+    if fresh.len() == live.len() && !fresh.is_empty() {
+        live.copy_from_slice(fresh);
+        std::mem::swap(fresh, live);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adopted_allocations_keep_the_live_host_address_and_restored_bytes() {
+        let mut live = Memory::placeholder(1024, 512, ZorroChain::default());
+        live.chip_ram[7] = 0x11;
+        let chip = live.chip_ram.as_ptr();
+        let slow = live.slow_ram.as_ptr();
+        let mut fresh = Memory::placeholder(1024, 256, ZorroChain::default());
+        fresh.chip_ram[7] = 0x22;
+        let fresh_slow = fresh.slow_ram.as_ptr();
+        fresh.adopt_allocations_from(&mut live);
+        // Same size: the restored bytes now sit in the live allocation.
+        assert_eq!(fresh.chip_ram.as_ptr(), chip);
+        assert_eq!(fresh.chip_ram[7], 0x22);
+        assert_ne!(live.chip_ram.as_ptr(), chip);
+        // Different size: the restored bank keeps its own buffer.
+        assert_eq!(fresh.slow_ram.as_ptr(), fresh_slow);
+        assert_eq!(live.slow_ram.as_ptr(), slow);
+        assert_eq!(live.slow_ram.len(), 512);
+    }
 
     #[test]
     fn boot_rom_512k_is_taken_as_is() {

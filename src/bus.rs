@@ -4857,6 +4857,22 @@ impl Bus {
         self.devices = devices;
     }
 
+    /// The Copperline services board, if fitted (host filesystem mounts and
+    /// the clipboard unit).
+    pub fn filesys_board(&self) -> Option<&crate::filesys::FilesysBoard> {
+        self.devices.iter().find_map(|d| match d {
+            crate::zorro_device::BoardDevice::Filesys(b) => Some(b),
+            _ => None,
+        })
+    }
+
+    pub fn filesys_board_mut(&mut self) -> Option<&mut crate::filesys::FilesysBoard> {
+        self.devices.iter_mut().find_map(|d| match d {
+            crate::zorro_device::BoardDevice::Filesys(b) => Some(b),
+            _ => None,
+        })
+    }
+
     pub fn attach_cdtv(&mut self, cdtv: crate::cdtv::CdtvController) {
         self.cdtv = Some(cdtv);
     }
@@ -5730,6 +5746,72 @@ impl Bus {
             .unwrap_or(false)
     }
 
+    /// The names of the media in the machine's drives: every connected
+    /// floppy drive with its inserted image, every hard-disk image on every
+    /// controller, and the CD in the drive. For a save state's metadata and
+    /// the state browser; names only, never paths to reopen.
+    pub fn media_names(&self) -> crate::savestate::MediaNames {
+        use crate::savestate::meta::file_name;
+        let floppies = (0..4)
+            .filter(|&drive| self.floppy.drive_connected(drive))
+            .map(|drive| crate::savestate::FloppyMedia {
+                drive: drive as u8,
+                name: self.floppy.inserted_disk_name(drive),
+            })
+            .collect();
+        fn names<'a>(
+            images: impl Iterator<Item = &'a crate::harddrive::HardDriveImage>,
+        ) -> Vec<String> {
+            images
+                .filter_map(|image| crate::savestate::meta::file_name(image.path()))
+                .collect()
+        }
+        let mut hard_disks = Vec::new();
+        if let Some(gayle) = &self.gayle {
+            hard_disks.extend(names(gayle.hard_disk_images()));
+        }
+        if let Some(ide) = &self.ide_a4000 {
+            hard_disks.extend(names(ide.hard_disk_images()));
+        }
+        if let Some(sdmac) = &self.sdmac {
+            hard_disks.extend(names(sdmac.disk_images()));
+        }
+        for device in &self.devices {
+            match device {
+                crate::zorro_device::BoardDevice::A2091(board) => {
+                    hard_disks.extend(names(board.disk_images()))
+                }
+                crate::zorro_device::BoardDevice::A4091(board) => {
+                    hard_disks.extend(names(board.disk_images()))
+                }
+                crate::zorro_device::BoardDevice::IdeZorro(board) => {
+                    hard_disks.extend(names(board.hard_disk_images()))
+                }
+                crate::zorro_device::BoardDevice::Copperhf(board) => {
+                    hard_disks.extend(board.unit_image_names())
+                }
+                _ => {}
+            }
+        }
+        let cd = self
+            .cdtv
+            .as_ref()
+            .and_then(crate::cdtv::CdtvController::disc_ref)
+            .or_else(|| self.akiko.as_ref().and_then(crate::akiko::Akiko::disc_ref))
+            .and_then(|disc| disc.source_paths().into_iter().next())
+            .and_then(|path| file_name(&path))
+            .or_else(|| {
+                self.scsi_cd_ref()
+                    .filter(|cd| cd.has_disc())
+                    .and_then(|cd| file_name(cd.path()))
+            });
+        crate::savestate::MediaNames {
+            floppies,
+            hard_disks,
+            cd,
+        }
+    }
+
     /// Runtime disc insert with media-change notification. On CDTV the
     /// disc lands after a short tray delay (the same media-change STCH
     /// path as `[cd] insert_delay`); Akiko mounts immediately and
@@ -5824,6 +5906,13 @@ impl Bus {
         // Drive speed is host configuration, not machine state: a loaded
         // state keeps the running session's setting.
         self.floppy.set_speed_percent(live.floppy.speed_percent());
+        // Host addresses of the RAM banks and the CD32 EEPROM are host
+        // resources too: a frontend that mapped them (libretro memory maps,
+        // save RAM) keeps valid pointers across the restore.
+        self.mem.adopt_allocations_from(&mut live.mem);
+        if let (Some(akiko), Some(live)) = (self.akiko.as_mut(), live.akiko.as_mut()) {
+            akiko.adopt_allocations_from(live);
+        }
         Ok(())
     }
 

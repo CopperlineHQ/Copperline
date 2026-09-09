@@ -145,6 +145,10 @@ pub enum CoreOp {
     DisplayGet,
     InputPortsGet,
     RtcGet,
+    ClipboardGet,
+    ClipboardSet {
+        text: String,
+    },
     RtcSet {
         unix: Option<u64>,
         advance: Option<i64>,
@@ -214,6 +218,12 @@ pub enum CoreOp {
     StateSave {
         path: PathBuf,
     },
+    /// Read a state file's header and metadata (`savestate::peek`)
+    /// without loading it; `thumbnail` names a file to write its PNG to.
+    StateInfo {
+        path: PathBuf,
+        thumbnail: Option<PathBuf>,
+    },
     Digest,
     RegionDigest {
         rect: FrameRect,
@@ -272,6 +282,7 @@ impl CoreOp {
                 | CoreOp::DisplayGet
                 | CoreOp::InputPortsGet
                 | CoreOp::RtcGet
+                | CoreOp::ClipboardGet
                 | CoreOp::CartridgeGet
                 | CoreOp::DebugResources
                 | CoreOp::DebugIdle
@@ -289,6 +300,7 @@ impl CoreOp {
                 | CoreOp::Digest
                 | CoreOp::RegionDigest { .. }
                 | CoreOp::Screenshot { .. }
+                | CoreOp::StateInfo { .. }
         )
     }
 }
@@ -1275,6 +1287,10 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
                 frozen,
             })
         }
+        "clipboard.get" => core(CoreOp::ClipboardGet),
+        "clipboard.set" => core(CoreOp::ClipboardSet {
+            text: p.str_req("text")?,
+        }),
         "cartridge.get" => core(CoreOp::CartridgeGet),
         "cartridge.freeze" => core(CoreOp::CartridgeFreeze),
         "copper.list" => {
@@ -1731,6 +1747,10 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
         "profile.status" => core(CoreOp::ProfileStatus),
         "state.save" => core(CoreOp::StateSave {
             path: PathBuf::from(p.str_req("path")?),
+        }),
+        "state.info" => core(CoreOp::StateInfo {
+            path: PathBuf::from(p.str_req("path")?),
+            thumbnail: p.str_opt("thumbnail")?.map(PathBuf::from),
         }),
         "state.load" => host(HostOp::StateLoad {
             path: PathBuf::from(p.str_req("path")?),
@@ -2674,6 +2694,47 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
                 "time": bus.rtc.current_display(secs),
             }))
         }
+        CoreOp::ClipboardGet => {
+            let board = emu.bus().filesys_board();
+            let unit = board
+                .filter(|b| b.clipboard_fitted())
+                .map(|b| b.clipboard());
+            Ok(json!({
+                "fitted": unit.is_some(),
+                "sharing": board.is_some_and(|b| b.clipboard_sharing()),
+                "guest_ready": unit.is_some_and(|c| c.guest_ready()),
+                "host_gen": unit.map_or(0, |c| c.host_gen()),
+                "guest_gen": unit.map_or(0, |c| c.guest_gen()),
+                "text": unit.and_then(|c| c.guest_text()),
+            }))
+        }
+        CoreOp::ClipboardSet { text } => {
+            let Some(board) = emu
+                .bus_mut()
+                .filesys_board_mut()
+                .filter(|b| b.clipboard_fitted())
+            else {
+                return Err(CtlError::not_found(
+                    "no clipboard unit fitted ([clipboard] share = true or --clipboard)",
+                ));
+            };
+            if !board.clipboard_sharing() {
+                return Err(CtlError::invalid_state("clipboard sharing is off"));
+            }
+            // Recorded as seen so a windowed poll does not restage it.
+            board.clipboard_host_text_changed(text);
+            let gen = board.stage_host_clipboard(text);
+            let mut result = json!({
+                "staged": gen.is_some(),
+                "host_gen": gen.unwrap_or_else(|| board.clipboard().host_gen()),
+            });
+            if emu.time_travel_enabled() {
+                // Like mem.write, host text is not part of the replay
+                // journal, so a reverse replay across it can diverge.
+                result["replay_unsafe"] = Value::Bool(true);
+            }
+            Ok(result)
+        }
         CoreOp::RtcSet {
             unix,
             advance,
@@ -2916,6 +2977,22 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             emu.save_state(path)
                 .map_err(|e| CtlError::io(format!("saving state: {e:#}")))?;
             Ok(json!({"path": path.display().to_string()}))
+        }
+        CoreOp::StateInfo { path, thumbnail } => {
+            let peeked = crate::savestate::peek_path(path)
+                .map_err(|e| CtlError::io(format!("reading state: {e:#}")))?;
+            let mut reply = state_info_value(path, &peeked);
+            if let (Some(thumbnail), Some(meta)) = (thumbnail, &peeked.meta) {
+                if !meta.thumbnail_png.is_empty() {
+                    crate::paths::ensure_parent(thumbnail)
+                        .and_then(|()| std::fs::write(thumbnail, &meta.thumbnail_png))
+                        .map_err(|e| {
+                            CtlError::io(format!("writing thumbnail {}: {e}", thumbnail.display()))
+                        })?;
+                    reply["thumbnail_path"] = json!(thumbnail.display().to_string());
+                }
+            }
+            Ok(reply)
         }
         CoreOp::CustomWriter { off } => {
             if !emu.bus().chipset_validation_armed() {
@@ -3566,25 +3643,39 @@ fn wave_status_value(status: &crate::waveform::WaveStatus) -> Value {
     })
 }
 
+/// The `state.info` reply (also what `copperline-ctl state-info` prints):
+/// the container version, the machine the state was taken on, and the
+/// metadata chunk when the state has one.
+pub fn state_info_value(path: &std::path::Path, peeked: &crate::savestate::StatePeek) -> Value {
+    let descriptor = &peeked.descriptor;
+    json!({
+        "path": path.display().to_string(),
+        "version": peeked.version,
+        "machine": {
+            "summary": descriptor.summary(),
+            "short": descriptor.short_summary(),
+            "model": descriptor.machine.map(|m| format!("{m:?}")),
+            "cpu": format!("{:?}", descriptor.cpu),
+            "chipset": format!("{:?}", descriptor.chipset),
+            "video_standard": format!("{:?}", descriptor.video_standard),
+            "chip_ram_bytes": descriptor.chip_ram_bytes,
+            "fast_ram_bytes": descriptor.fast_ram_bytes,
+            "slow_ram_bytes": descriptor.slow_ram_bytes,
+            "mb_ram_bytes": descriptor.mb_ram_bytes,
+            "accel_ram_bytes": descriptor.accel_ram_bytes,
+            "rom": descriptor.rom.label(),
+            "extended_rom": descriptor.extended_rom.as_ref().map(|id| id.label()),
+        },
+        "meta": peeked.meta.as_ref().map(|meta| meta.to_json()),
+    })
+}
+
 /// Render the current frame into a fresh buffer via the side-effect-free
 /// display path, returning the buffer and its visible line count. Both
 /// `capture.digest` and `capture.screenshot` use this in BOTH server
 /// modes, so captures are mode-identical and comparable.
 pub(crate) fn render_frame(emu: &Emulator) -> (Vec<u32>, usize, usize) {
-    // An RTG board driving the display supersedes the chipset output,
-    // exactly as the window presentation does.
-    let mut fb = Vec::new();
-    let mut scratch = Vec::new();
-    if let Some((rows, _, _)) =
-        crate::video::present_common::compose_rtg_present(emu.bus(), &mut scratch, &mut fb)
-    {
-        return (fb, rows, FB_WIDTH);
-    }
-    fb = vec![0u32; MAX_CANVAS_PIXELS];
-    crate::video::bitplane::render_display_only(emu.bus(), &mut fb);
-    let lines = emu.bus().frame_geometry().visible_lines;
-    let width = FB_WIDTH * emu.bus().frame_canvas_scale();
-    (fb, lines, width)
+    crate::video::render_capture_frame(emu.bus())
 }
 
 fn render_frame_with_overlays(

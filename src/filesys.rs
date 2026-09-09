@@ -21,6 +21,11 @@
 //! Guest-visible objects the handler must hand out (FileLocks) are allocated
 //! from a pool inside the board window, so the host never has to call
 //! AllocMem in the guest.
+//!
+//! The same board carries the clipboard unit (`[clipboard] share`): a
+//! mount-table entry of its own kind whose handler process runs the guest
+//! clipboard bridge instead of a packet pump, against the register bank and
+//! transfer windows in [`crate::clipboard`].
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -29,6 +34,7 @@ use std::path::{Path, PathBuf};
 use m68k::AddressBus;
 
 use crate::amigaos::dos::*;
+use crate::clipboard::{self, ClipboardService};
 use crate::memory::Memory;
 use crate::zorro_device::{DeviceHost, ZorroDevice};
 
@@ -40,9 +46,11 @@ pub const FILESYS_HANDLER: &[u8] = include_bytes!("../assets/services/services_r
 /// Handler code offset; the two longwords before it are a fake seglist header
 /// (length, next = 0) so `dn_SegList = (base + 4) >> 2`.
 pub const ROM_OFFSET: usize = 0x0008;
-/// Mount table: u16 count, then fixed-size NUL-terminated device names.
+/// Mount table: u16 count, then fixed-size NUL-terminated device names,
+/// each entry's last byte its kind (`clipboard::MOUNT_KIND_*`).
 pub const MOUNTS_OFFSET: usize = 0x3800;
 pub const MOUNT_ENTRY_SIZE: usize = 32;
+const MOUNT_KIND_OFFSET: usize = MOUNT_ENTRY_SIZE - 1;
 /// Maximum host mounts (units), and the divisor for each unit's fixed
 /// board-window lock-pool slice.
 pub const MOUNT_MAX_COUNT: usize = 8;
@@ -147,8 +155,9 @@ pub fn device_name(unit: usize) -> String {
 }
 
 /// Build the 64K board window: fake seglist header, the handler ROM (which
-/// embeds the DiagArea), and the mount table.
-pub fn board_image(mounts: &[MountSpec]) -> Vec<u8> {
+/// embeds the DiagArea), and the mount table -- the HOSTFS mounts and, with
+/// `clipboard`, the clipboard unit's HOSTCLIP entry after them.
+pub fn board_image(mounts: &[MountSpec], clipboard: bool) -> Vec<u8> {
     assert!(ROM_OFFSET + FILESYS_HANDLER.len() <= MOUNTS_OFFSET);
     assert!(mounts.len() <= MOUNT_MAX_COUNT);
     let mut img = vec![0u8; 0x1_0000];
@@ -160,16 +169,34 @@ pub fn board_image(mounts: &[MountSpec]) -> Vec<u8> {
     img[ROM_OFFSET..ROM_OFFSET + FILESYS_HANDLER.len()].copy_from_slice(FILESYS_HANDLER);
 
     // Mount table: u16 count, then MOUNT_ENTRY_SIZE-byte NUL-terminated
-    // device names.
+    // device names with the kind byte last.
     let m = MOUNTS_OFFSET;
-    img[m..m + 2].copy_from_slice(&(mounts.len() as u16).to_be_bytes());
-    for (i, _) in mounts.iter().enumerate() {
-        let name = device_name(i);
+    let mut entries: Vec<(String, u8)> = (0..mounts.len())
+        .map(|i| (device_name(i), clipboard::MOUNT_KIND_FILESYS))
+        .collect();
+    if clipboard {
+        entries.push((
+            clipboard::DEVICE_NAME.to_string(),
+            clipboard::MOUNT_KIND_CLIPBOARD,
+        ));
+    }
+    img[m..m + 2].copy_from_slice(&(entries.len() as u16).to_be_bytes());
+    for (i, (name, kind)) in entries.iter().enumerate() {
         let at = m + 2 + i * MOUNT_ENTRY_SIZE;
         img[at..at + name.len()].copy_from_slice(name.as_bytes());
+        img[at + MOUNT_KIND_OFFSET] = *kind;
     }
 
     img
+}
+
+/// Which register bank a window offset addresses.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Bank {
+    /// A HOSTFS mount unit's bank.
+    Unit(usize),
+    /// The clipboard unit's bank (`clipboard::CLIP_REGS_OFFSET`).
+    Clipboard,
 }
 
 /// DosList surgery the guest handler performs after replying a packet
@@ -446,6 +473,17 @@ pub struct FilesysBoard {
     /// list exists and the driver has not run yet; see [`crate::romtags`].
     /// Survives the per-boot reset below -- it is configuration, not state.
     cull_rom_scsi_device: bool,
+    /// The clipboard unit is in the mount table (`[clipboard] share`
+    /// configured at build time): its HOSTCLIP handler process runs the
+    /// guest bridge. Configuration, like `cull_rom_scsi_device`.
+    #[serde(default)]
+    clipboard_fitted: bool,
+    /// The host side of the clipboard unit (`crate::clipboard`).
+    #[serde(default)]
+    clipboard: ClipboardService,
+    /// The clipboard unit's handler process has rung its startup packet.
+    #[serde(default)]
+    clipboard_started: bool,
     /// The 64K window contents (see [`board_image`]). Registers live here
     /// too: writes latch into the image (with side effects for the
     /// doorbells), so the read side is plain memory at any size/alignment.
@@ -460,12 +498,80 @@ impl FilesysBoard {
     /// A services board serving `mounts`, its window pre-seeded with the
     /// handler ROM and mount table.
     pub fn new(mounts: Vec<MountSpec>) -> Self {
+        Self::new_with_clipboard(mounts, false)
+    }
+
+    /// A services board serving `mounts` and, with `clipboard`, the
+    /// clipboard unit (host sharing starts enabled).
+    pub fn new_with_clipboard(mounts: Vec<MountSpec>, clipboard: bool) -> Self {
         let mut board = Self {
-            image: board_image(&mounts),
+            image: board_image(&mounts, clipboard),
+            clipboard_fitted: clipboard,
             ..Self::default()
         };
         board.set_mounts(mounts);
+        if clipboard {
+            board.clipboard.set_enabled(true, &mut board.image);
+        }
         board
+    }
+
+    /// Rebuild to power-on state keeping only configuration: the mounts,
+    /// the scsi.device cull, the clipboard unit and its host-side sharing
+    /// switch (and what the host last saw on its clipboard).
+    fn rebuild_from_config(&mut self) {
+        let mounts: Vec<MountSpec> = std::mem::take(&mut self.units)
+            .into_iter()
+            .map(|u| u.mount)
+            .collect();
+        let cull = self.cull_rom_scsi_device;
+        let mut clipboard = std::mem::take(&mut self.clipboard);
+        *self = FilesysBoard::new_with_clipboard(mounts, self.clipboard_fitted);
+        self.cull_rom_scsi_device = cull;
+        clipboard.reset(&mut self.image);
+        self.clipboard = clipboard;
+    }
+
+    /// Whether the clipboard unit is in the mount table (the guest bridge
+    /// exists at all).
+    pub fn clipboard_fitted(&self) -> bool {
+        self.clipboard_fitted
+    }
+
+    /// The host side of the clipboard unit.
+    pub fn clipboard(&self) -> &ClipboardService {
+        &self.clipboard
+    }
+
+    /// Host clipboard sharing on or off at runtime (the menu toggle).
+    pub fn set_clipboard_sharing(&mut self, on: bool) {
+        self.clipboard.set_enabled(on, &mut self.image);
+    }
+
+    /// Whether host sharing is on: the unit is fitted and enabled.
+    pub fn clipboard_sharing(&self) -> bool {
+        self.clipboard_fitted && self.clipboard.enabled()
+    }
+
+    /// Record the host clipboard's current text; true if it changed since
+    /// this side last saw or set it (see
+    /// [`ClipboardService::host_text_changed`]).
+    pub fn clipboard_host_text_changed(&mut self, text: &str) -> bool {
+        self.clipboard.host_text_changed(text)
+    }
+
+    /// Stage host clipboard text for the guest; returns the generation
+    /// staged (see [`ClipboardService::stage_host_text`]).
+    pub fn stage_host_clipboard(&mut self, text: &str) -> Option<u32> {
+        if !self.clipboard_fitted {
+            return None;
+        }
+        self.clipboard.stage_host_text(text, &mut self.image)
+    }
+
+    /// Text the guest copied since the last call, for the host clipboard.
+    pub fn take_guest_clipboard(&mut self) -> Option<String> {
+        self.clipboard.take_guest_text()
     }
 
     /// Whether the board serves at least one mount, which is what gives the
@@ -713,8 +819,14 @@ impl FilesysBoard {
     /// to AddBootNode.
     fn write_startup_msgs(&self, bus: &mut dyn AddressBus, base: u32) {
         write_bytes(bus, base + FSSM_DEVNAME_OFFSET, &bcpl::<32>(b"hostfs"));
-        for (unit, u) in self.units.iter().enumerate() {
-            let mount = &u.mount;
+        // The clipboard unit's entry follows the mounts and never boots.
+        let clipboard_pri = self.clipboard_fitted.then_some(-128i8);
+        let boot_pris = self
+            .units
+            .iter()
+            .map(|u| u.mount.boot_pri)
+            .chain(clipboard_pri);
+        for (unit, boot_pri) in boot_pris.enumerate() {
             let unit = unit as u32;
             // Fake-but-sane geometry and a stock de_DosType, mirroring the
             // envec WinUAE's directory harddrives boot Kickstart 1.3 with:
@@ -740,7 +852,7 @@ impl FilesysBoard {
                 buf_mem_type: long(1), // MEMF_PUBLIC
                 max_transfer: long(0x7FFF_FFFF),
                 mask: long(0xFFFF_FFFE),
-                boot_pri: long(mount.boot_pri as i32 as u32),
+                boot_pri: long(boot_pri as i32 as u32),
                 dos_type: long(0x444F_5300), // 'DOS\0'
             };
             let envec_at = base + FSSM_ENVEC_OFFSET + unit * ENVEC_SLOT_SIZE;
@@ -1706,11 +1818,48 @@ impl AddressBus for GuestBus<'_> {
 }
 
 impl FilesysBoard {
-    /// The (unit, register) a window offset falls in, if it is a register.
-    fn reg_at(off: u32) -> Option<(usize, u32)> {
+    /// The (bank, register) a window offset falls in, if it is a register.
+    fn reg_at(off: u32) -> Option<(Bank, u32)> {
+        if let Some(bank) = off.checked_sub(clipboard::CLIP_REGS_OFFSET) {
+            if bank < clipboard::CLIP_BANK_SIZE {
+                return Some((Bank::Clipboard, bank));
+            }
+        }
         let bank = off.checked_sub(REGS_OFFSET)?;
         let unit = (bank / REG_BANK_SIZE) as usize;
-        (unit < MOUNT_MAX_COUNT).then_some((unit, bank % REG_BANK_SIZE))
+        (unit < MOUNT_MAX_COUNT).then_some((Bank::Unit(unit), bank % REG_BANK_SIZE))
+    }
+
+    /// REG_DOSPKT of the clipboard unit: its HOSTCLIP device takes the
+    /// startup packet (wiring dn_Task so DOS does not restart the process)
+    /// and answers anything else with ERROR_ACTION_NOT_KNOWN -- it is not a
+    /// filesystem, and a stray `HOSTCLIP:` reference must fail, not hang.
+    fn ring_clipboard_doorbell(&mut self, pkt: u32, host: &mut DeviceHost) {
+        let Some(base) = self.board_base else {
+            log::warn!("clipboard: doorbell before expansion init");
+            return;
+        };
+        let port = self.image_long(clipboard::CLIP_REGS_OFFSET + REG_MSGPORT);
+        // The first packet is the startup packet, whatever its shape (V36
+        // ACTION_STARTUP with the DeviceNode in dp_Arg3, or Kickstart 1.3's
+        // boot-path BCPL parameters with dp_Arg3 NULL; see FilesysUnit).
+        let first = !std::mem::replace(&mut self.clipboard_started, true);
+        self.with_guest_bus(host, base, |_, bus| {
+            let (res1, res2) = if first {
+                let dn = bus.read_long(pkt + 20 + 8) << 2; // dp_Arg3
+                if dn != 0 {
+                    bus.write_long(dn + DEVICENODE_TASK, port);
+                }
+                log::info!("clipboard: guest bridge process started");
+                (DOSTRUE, 0)
+            } else {
+                (DOSFALSE, ERROR_ACTION_NOT_KNOWN)
+            };
+            bus.write_long(pkt + 12, res1); // dp_Res1
+            bus.write_long(pkt + 16, res2); // dp_Res2
+        });
+        self.latch(clipboard::CLIP_REGS_OFFSET + REG_RESULT, RES_REPLY);
+        self.latch(clipboard::CLIP_REGS_OFFSET + REG_ARG, 0);
     }
 
     /// Run `f` against the guest-memory view. The window image is moved into
@@ -1738,16 +1887,10 @@ impl FilesysBoard {
     /// open files are stale, and exec tends to reallocate the new handler
     /// ports at the same addresses, which would misroute the startup packets
     /// of the new boot. Rebuild from a fresh default, keeping only the
-    /// configured mounts, so a newly added per-boot field can never be left
+    /// configuration, so a newly added per-boot field can never be left
     /// un-reset (this is how next_file_key came to be missed).
     fn diag_entry(&mut self, base: u32, host: &mut DeviceHost) {
-        let mounts: Vec<MountSpec> = std::mem::take(&mut self.units)
-            .into_iter()
-            .map(|u| u.mount)
-            .collect();
-        let cull_rom_scsi_device = self.cull_rom_scsi_device;
-        *self = FilesysBoard::new(mounts);
-        self.cull_rom_scsi_device = cull_rom_scsi_device;
+        self.rebuild_from_config();
         self.board_base = Some(base);
         log::info!(
             "filesys: expansion init at board {base:#010X}, {} mount(s)",
@@ -1847,7 +1990,7 @@ impl ZorroDevice for FilesysBoard {
         }
         if Self::completes_long_reg(off, size, DIAG_DOORBELL) {
             self.diag_entry(self.image_long(DIAG_DOORBELL), host);
-        } else if let Some((unit, reg)) = Self::reg_at(off) {
+        } else if let Some((Bank::Unit(unit), reg)) = Self::reg_at(off) {
             let reg_off = REGS_OFFSET + unit as u32 * REG_BANK_SIZE;
             if Self::completes_long_reg(reg, size, REG_DOSPKT) {
                 let pkt = self.image_long(reg_off + REG_DOSPKT);
@@ -1861,6 +2004,18 @@ impl ZorroDevice for FilesysBoard {
                     }
                 }
             }
+        } else if let Some((Bank::Clipboard, reg)) = Self::reg_at(off) {
+            let bank = clipboard::CLIP_REGS_OFFSET;
+            if Self::completes_long_reg(reg, size, REG_DOSPKT) {
+                let pkt = self.image_long(bank + REG_DOSPKT);
+                self.ring_clipboard_doorbell(pkt, host);
+            } else if Self::completes_long_reg(reg, size, clipboard::CLIP_REG_CTRL) {
+                let verb = self.image_long(bank + clipboard::CLIP_REG_CTRL);
+                self.clipboard.control(verb, &mut self.image);
+            } else if Self::completes_long_reg(reg, size, clipboard::CLIP_REG_GUESTGEN) {
+                let gen = self.image_long(bank + clipboard::CLIP_REG_GUESTGEN);
+                self.clipboard.note_guest_gen(gen);
+            }
         }
     }
 
@@ -1872,20 +2027,20 @@ impl ZorroDevice for FilesysBoard {
 
     fn tick(&mut self, _cck: u32, _host: &mut DeviceHost) {}
 
+    /// The clipboard unit's doorbell: held while host text is waiting and
+    /// the guest bridge has a server to answer it.
+    fn int2_line(&self) -> bool {
+        self.clipboard.int2_line()
+    }
+
     fn take_activity(&mut self) -> bool {
         std::mem::take(&mut self.activity)
     }
 
     fn reset(&mut self) {
-        // Power-on state: per-boot structures dropped, mounts kept. The next
-        // DIAG_DOORBELL rebuilds the rest.
-        let mounts: Vec<MountSpec> = std::mem::take(&mut self.units)
-            .into_iter()
-            .map(|u| u.mount)
-            .collect();
-        let cull = self.cull_rom_scsi_device;
-        *self = FilesysBoard::new(mounts);
-        self.cull_rom_scsi_device = cull;
+        // Power-on state: per-boot structures dropped, configuration kept.
+        // The next DIAG_DOORBELL rebuilds the rest.
+        self.rebuild_from_config();
     }
 
     fn kind(&self) -> &'static str {
@@ -2916,7 +3071,7 @@ mod tests {
 
     #[test]
     fn board_image_lays_out_rom_mounts_and_diagarea() {
-        let img = board_image(&test_mounts());
+        let img = board_image(&test_mounts(), false);
         assert_eq!(img.len(), 0x1_0000);
         // Fake seglist header: next pointer zero, ROM code at ROM_OFFSET.
         assert_eq!(&img[4..8], &[0, 0, 0, 0]);
@@ -3712,5 +3867,287 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // ---- Clipboard unit ------------------------------------------------
+
+    fn test_mem() -> Memory {
+        Memory {
+            chip_ram: vec![0u8; 0x1_0000],
+            slow_ram: Vec::new(),
+            mb_ram: Vec::new(),
+            accel_ram: Vec::new(),
+            rom: Vec::new(),
+            overlay: false,
+            zorro: crate::zorro::ZorroChain::default(),
+            extended_rom: Vec::new(),
+            extended_rom_base: 0,
+            wcs: Vec::new(),
+            wcs_write_protected: false,
+        }
+    }
+
+    /// The clipboard unit's window layout: its own bank and transfer
+    /// windows in the gap between the mount table and the volume nodes,
+    /// none of it overlapping the ROM or the mount units' structures.
+    #[test]
+    fn clipboard_unit_is_in_the_mount_table_with_its_own_bank() {
+        use crate::clipboard::*;
+        const {
+            assert!(
+                MOUNTS_OFFSET + 2 + (MOUNT_MAX_COUNT + 1) * MOUNT_ENTRY_SIZE
+                    <= CLIP_REGS_OFFSET as usize
+            );
+            assert!(CLIP_REGS_OFFSET + CLIP_BANK_SIZE <= CLIP_H2G_OFFSET);
+            assert!(CLIP_H2G_OFFSET + CLIP_CHUNK_SIZE <= CLIP_G2H_OFFSET);
+            assert!(CLIP_G2H_OFFSET + CLIP_CHUNK_SIZE <= VOLUMES_OFFSET);
+            // The clipboard entry takes FSSM/DosEnvec slot MOUNT_MAX_COUNT.
+            assert!(
+                FSSM_OFFSET + (MOUNT_MAX_COUNT as u32 + 1) * FSSM_SLOT_SIZE <= FSSM_DEVNAME_OFFSET
+            );
+            assert!(
+                FSSM_ENVEC_OFFSET + (MOUNT_MAX_COUNT as u32 + 1) * ENVEC_SLOT_SIZE <= REGS_OFFSET
+            );
+        }
+        assert!(ROM_OFFSET + FILESYS_HANDLER.len() <= MOUNTS_OFFSET);
+
+        let img = board_image(&test_mounts(), true);
+        let m = MOUNTS_OFFSET;
+        assert_eq!(u16::from_be_bytes([img[m], img[m + 1]]), 2);
+        assert_eq!(&img[m + 2..m + 9], b"HOSTFS0");
+        assert_eq!(img[m + 2 + MOUNT_KIND_OFFSET], MOUNT_KIND_FILESYS);
+        let e = m + 2 + MOUNT_ENTRY_SIZE;
+        assert_eq!(&img[e..e + 9], b"HOSTCLIP\0");
+        assert_eq!(img[e + MOUNT_KIND_OFFSET], MOUNT_KIND_CLIPBOARD);
+        // Without the unit the table is as before.
+        let img = board_image(&test_mounts(), false);
+        assert_eq!(u16::from_be_bytes([img[m], img[m + 1]]), 1);
+        assert_eq!(img[e + MOUNT_KIND_OFFSET], 0);
+    }
+
+    /// Expansion init writes the clipboard entry's FileSysStartupMsg and
+    /// DosEnvec (never a boot candidate) after the mounts', and the unit's
+    /// packet pump answers its startup packet -- wiring dn_Task -- and
+    /// refuses everything else, since HOSTCLIP: is no filesystem.
+    #[test]
+    fn clipboard_unit_answers_its_startup_packet_and_refuses_the_rest() {
+        use crate::clipboard::*;
+        let mut board = FilesysBoard::new_with_clipboard(test_mounts(), true);
+        assert!(board.clipboard_fitted());
+        assert!(board.clipboard_sharing());
+        let mut mem = test_mem();
+        let base = 0x00E9_0000u32;
+        split_write(&mut board, DIAG_DOORBELL, base, &mut mem);
+        assert_eq!(board.board_base, Some(base));
+        // FSSM slot 1 (the clipboard entry) points at DosEnvec slot 1 with
+        // de_BootPri = -128.
+        let mut host = DeviceHost::new(&mut mem);
+        let fssm = FSSM_OFFSET + FSSM_SLOT_SIZE;
+        assert_eq!(board.read(fssm, 4, &mut host), 1, "fssm_Unit");
+        let envec = board.read(fssm + 8, 4, &mut host) << 2;
+        assert_eq!(envec, base + FSSM_ENVEC_OFFSET + ENVEC_SLOT_SIZE);
+        let pri_at = envec - base + 15 * 4;
+        assert_eq!(board.read(pri_at, 4, &mut host), (-128i32) as u32);
+
+        // Startup: DeviceNode at 0x1000, packet at 0x2000, port 0x3000.
+        let (dn, pkt, port) = (0x1000u32, 0x2000u32, 0x3000u32);
+        mem.chip_ram[(pkt + 20 + 8) as usize..(pkt + 20 + 12) as usize]
+            .copy_from_slice(&(dn >> 2).to_be_bytes());
+        split_write(&mut board, CLIP_REGS_OFFSET + REG_MSGPORT, port, &mut mem);
+        split_write(&mut board, CLIP_REGS_OFFSET + REG_DOSPKT, pkt, &mut mem);
+        let mut host = DeviceHost::new(&mut mem);
+        assert_eq!(
+            board.read(CLIP_REGS_OFFSET + REG_RESULT, 4, &mut host),
+            RES_REPLY
+        );
+        assert_eq!(board.read(CLIP_REGS_OFFSET + REG_ARG, 4, &mut host), 0);
+        assert_eq!(
+            &mem.chip_ram[(pkt + 12) as usize..(pkt + 16) as usize],
+            &DOSTRUE.to_be_bytes()
+        );
+        assert_eq!(
+            &mem.chip_ram[(dn + DEVICENODE_TASK) as usize..(dn + DEVICENODE_TASK + 4) as usize],
+            &port.to_be_bytes()
+        );
+        // A mount unit's structures are untouched: unit 0 has no port.
+        assert_eq!(board.units[0].port, None);
+
+        // Anything after the startup packet is not a filesystem action.
+        let pkt2 = 0x2100u32;
+        mem.chip_ram[(pkt2 + 8) as usize..(pkt2 + 12) as usize]
+            .copy_from_slice(&(ACTION_LOCATE_OBJECT as u32).to_be_bytes());
+        split_write(&mut board, CLIP_REGS_OFFSET + REG_DOSPKT, pkt2, &mut mem);
+        assert_eq!(
+            &mem.chip_ram[(pkt2 + 12) as usize..(pkt2 + 16) as usize],
+            &DOSFALSE.to_be_bytes()
+        );
+        assert_eq!(
+            &mem.chip_ram[(pkt2 + 16) as usize..(pkt2 + 20) as usize],
+            &ERROR_ACTION_NOT_KNOWN.to_be_bytes()
+        );
+    }
+
+    /// The bridge registers through the MMIO path a 68000 guest takes
+    /// (split-word writes): host text staged, the doorbell held on INT2
+    /// until the guest's server acknowledges it, the text fetched through
+    /// the H2G window, the guest's acknowledgement recorded, and a guest
+    /// clip pushed back through the G2H window.
+    #[test]
+    fn clipboard_registers_carry_text_both_ways_through_the_device() {
+        use crate::clipboard::*;
+        let mut board = FilesysBoard::new_with_clipboard(Vec::new(), true);
+        let mut mem = test_mem();
+        let base = 0x00E9_0000u32;
+        split_write(&mut board, DIAG_DOORBELL, base, &mut mem);
+        let bank = CLIP_REGS_OFFSET;
+        let mut host = DeviceHost::new(&mut mem);
+        assert_eq!(
+            board.read(bank + CLIP_REG_STATUS, 4, &mut host),
+            CLIP_ST_PRESENT
+        );
+        assert!(!board.int2_line());
+
+        // Host text staged before the guest bridge is up waits silently.
+        assert!(board.clipboard_host_text_changed("Hi\r\nthere"));
+        assert_eq!(board.stage_host_clipboard("Hi\r\nthere"), Some(1));
+        assert!(!board.int2_line());
+        split_write(&mut board, bank + CLIP_REG_CTRL, CLIP_CTRL_ENABLE, &mut mem);
+        assert!(board.int2_line(), "doorbell rings once the server exists");
+        let mut host = DeviceHost::new(&mut mem);
+        assert_eq!(
+            board.read(bank + CLIP_REG_STATUS, 4, &mut host),
+            CLIP_ST_PRESENT | CLIP_ST_IRQ
+        );
+        assert_eq!(board.read(bank + CLIP_REG_HOSTGEN, 4, &mut host), 1);
+        split_write(&mut board, bank + CLIP_REG_CTRL, CLIP_CTRL_IRQACK, &mut mem);
+        assert!(!board.int2_line());
+
+        // FETCH offset 0: the whole (short) text in one chunk.
+        split_write(&mut board, bank + CLIP_REG_OFFSET, 0, &mut mem);
+        split_write(&mut board, bank + CLIP_REG_CTRL, CLIP_CTRL_FETCH, &mut mem);
+        let mut host = DeviceHost::new(&mut mem);
+        assert_eq!(board.read(bank + CLIP_REG_LEN, 4, &mut host), 8);
+        assert_eq!(board.read(bank + CLIP_REG_TOTAL, 4, &mut host), 8);
+        assert_eq!(board.read(bank + CLIP_REG_STAGEDGEN, 4, &mut host), 1);
+        let h2g = CLIP_H2G_OFFSET as usize;
+        assert_eq!(&board.image[h2g..h2g + 8], b"Hi\nthere");
+        split_write(&mut board, bank + CLIP_REG_GUESTGEN, 1, &mut mem);
+        assert_eq!(board.clipboard().guest_gen(), 1);
+
+        // The guest copies: its IFF stream lands byte-wise in the G2H
+        // window (word writes here), then PUSH + COMMIT.
+        let iff = ftxt_build(b"from the guest");
+        let g2h = CLIP_G2H_OFFSET;
+        for (i, pair) in iff.chunks(2).enumerate() {
+            let w = (u32::from(pair[0]) << 8) | u32::from(*pair.get(1).unwrap_or(&0));
+            board.write(g2h + 2 * i as u32, 2, w, &mut DeviceHost::new(&mut mem));
+        }
+        split_write(&mut board, bank + CLIP_REG_OFFSET, 0, &mut mem);
+        split_write(&mut board, bank + CLIP_REG_LEN, iff.len() as u32, &mut mem);
+        split_write(&mut board, bank + CLIP_REG_CTRL, CLIP_CTRL_PUSH, &mut mem);
+        split_write(&mut board, bank + CLIP_REG_CTRL, CLIP_CTRL_COMMIT, &mut mem);
+        assert_eq!(
+            board.take_guest_clipboard().as_deref(),
+            Some("from the guest")
+        );
+        assert_eq!(board.clipboard().guest_text(), Some("from the guest"));
+
+        // Sharing switched off: the service reads absent, host text is not
+        // staged, and a guest clip is discarded (but still reported).
+        board.set_clipboard_sharing(false);
+        assert!(!board.clipboard_sharing());
+        let mut host = DeviceHost::new(&mut mem);
+        assert_eq!(board.read(bank + CLIP_REG_STATUS, 4, &mut host), 0);
+        assert_eq!(board.stage_host_clipboard("more"), None);
+        split_write(&mut board, bank + CLIP_REG_CTRL, CLIP_CTRL_PUSH, &mut mem);
+        split_write(&mut board, bank + CLIP_REG_CTRL, CLIP_CTRL_COMMIT, &mut mem);
+        assert!(board.take_guest_clipboard().is_none());
+        board.set_clipboard_sharing(true);
+        assert_eq!(board.stage_host_clipboard("more"), Some(2));
+    }
+
+    /// A save state taken mid-transfer resumes it: the staged text, the
+    /// generations and the doorbell are in the board's serialized state;
+    /// what the host clipboard last held is not (it is host state).
+    #[test]
+    fn clipboard_transfer_survives_a_state_round_trip() {
+        use crate::clipboard::*;
+        let mut board = FilesysBoard::new_with_clipboard(Vec::new(), true);
+        let mut mem = test_mem();
+        let base = 0x00E9_0000u32;
+        split_write(&mut board, DIAG_DOORBELL, base, &mut mem);
+        let bank = CLIP_REGS_OFFSET;
+        split_write(&mut board, bank + CLIP_REG_CTRL, CLIP_CTRL_ENABLE, &mut mem);
+        assert!(board.clipboard_host_text_changed("a"));
+        board.stage_host_clipboard(&"a".repeat(5000));
+        split_write(&mut board, bank + CLIP_REG_OFFSET, 0, &mut mem);
+        split_write(&mut board, bank + CLIP_REG_CTRL, CLIP_CTRL_FETCH, &mut mem);
+        assert!(board.int2_line());
+
+        let bytes = bincode::serialize(&board).unwrap();
+        let mut restored: FilesysBoard = bincode::deserialize(&bytes).unwrap();
+        assert!(restored.clipboard_fitted());
+        assert!(restored.clipboard_sharing());
+        assert!(restored.int2_line());
+        assert_eq!(restored.clipboard().host_gen(), 1);
+        split_write(&mut restored, bank + CLIP_REG_OFFSET, 4096, &mut mem);
+        split_write(
+            &mut restored,
+            bank + CLIP_REG_CTRL,
+            CLIP_CTRL_FETCH,
+            &mut mem,
+        );
+        let mut host = DeviceHost::new(&mut mem);
+        assert_eq!(
+            restored.read(bank + CLIP_REG_LEN, 4, &mut host),
+            5000 - 4096
+        );
+        assert_eq!(restored.read(bank + CLIP_REG_STAGEDGEN, 4, &mut host), 1);
+        // The host-side hash is transient, so the next poll restages.
+        assert!(restored.clipboard_host_text_changed("a"));
+
+        // A board saved without the unit (an older state) loads with it
+        // absent and sharing off.
+        let old = FilesysBoard::new(test_mounts());
+        let bytes = bincode::serialize(&old).unwrap();
+        let restored: FilesysBoard = bincode::deserialize(&bytes).unwrap();
+        assert!(!restored.clipboard_fitted());
+        assert!(!restored.clipboard_sharing());
+    }
+
+    /// A reset (and the next boot's expansion init) drops the guest bridge
+    /// and everything in flight but keeps the unit and its sharing switch,
+    /// and forgets the host hash so the rebooted guest gets the text again.
+    #[test]
+    fn clipboard_reset_keeps_the_configuration_and_drops_the_bridge() {
+        use crate::clipboard::*;
+        let mut board = FilesysBoard::new_with_clipboard(test_mounts(), true);
+        let mut mem = test_mem();
+        let base = 0x00E9_0000u32;
+        split_write(&mut board, DIAG_DOORBELL, base, &mut mem);
+        let bank = CLIP_REGS_OFFSET;
+        split_write(&mut board, bank + CLIP_REG_CTRL, CLIP_CTRL_ENABLE, &mut mem);
+        assert!(board.clipboard_host_text_changed("x"));
+        board.stage_host_clipboard("x");
+        assert!(board.int2_line());
+        board.set_clipboard_sharing(false);
+
+        board.reset();
+        assert!(board.clipboard_fitted());
+        assert!(!board.clipboard_sharing(), "the switch is configuration");
+        assert!(!board.int2_line());
+        assert!(!board.clipboard().guest_ready());
+        assert_eq!(board.clipboard().host_gen(), 0);
+        let m = MOUNTS_OFFSET;
+        assert_eq!(u16::from_be_bytes([board.image[m], board.image[m + 1]]), 2);
+        board.set_clipboard_sharing(true);
+        assert!(board.clipboard_host_text_changed("x"));
+
+        // The next boot's expansion init likewise.
+        board.stage_host_clipboard("x");
+        split_write(&mut board, DIAG_DOORBELL, base, &mut mem);
+        assert!(board.clipboard_sharing());
+        assert_eq!(board.clipboard().host_gen(), 0);
+        assert!(!board.int2_line());
     }
 }

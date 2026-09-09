@@ -1826,6 +1826,7 @@ impl App {
             Panel::Console(_) => None,
             Panel::Launcher(_) => None,
             Panel::DropChooser(_) => None,
+            Panel::States(_) => None,
         }
     }
 

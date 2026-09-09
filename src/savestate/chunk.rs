@@ -81,6 +81,9 @@ pub(crate) struct ChunkSpec {
 //   all chunks v1: the chunked format (container version 81).
 //   PCMC v1: the PCMCIA card chunk, added beside GAYL (additive: a state
 //     without it loads with an empty socket).
+//   META v1: added (in the clear, after DESC) with the thumbnail, emulated
+//     and wall-clock times, machine summary, and media names. Older
+//     states simply lack it.
 
 const fn value(tag: &[u8; 4], version: u32, name: &'static str) -> ChunkSpec {
     ChunkSpec {
@@ -110,6 +113,16 @@ const fn bus(
 
 /// The `MachineDescriptor` header chunk, uncompressed ahead of the rest.
 pub(crate) const DESC: ChunkSpec = value(b"DESC", 1, "machine descriptor");
+/// The `StateMeta` chunk (thumbnail, times, machine summary, media names),
+/// also in the clear, between `DESC` and the zlib stream. Not machine
+/// state: a load never needs it, so a state may lack it.
+pub(crate) const META: ChunkSpec = ChunkSpec {
+    tag: *b"META",
+    version: 1,
+    name: "state metadata",
+    payload: Payload::Value,
+    required: false,
+};
 pub(crate) const CPU: ChunkSpec = value(b"CPU ", 1, "CPU core");
 pub(crate) const MACH: ChunkSpec = value(b"MACH", 1, "machine runtime");
 pub(crate) const ICAC: ChunkSpec = value(b"ICAC", 1, "instruction cache");
@@ -153,12 +166,18 @@ pub(crate) const BUS: ChunkSpec = ChunkSpec {
     required: true,
 };
 
-/// Every chunk this build writes, in file order: the `Bus` chunks follow
-/// the order of their fields in `Bus`, which is what lets them stream.
+/// Every chunk this build writes, in file order: the two clear-text header
+/// chunks, then the body, whose `Bus` chunks follow the order of their
+/// fields in `Bus`, which is what lets them stream.
 pub(crate) const CHUNKS: &[ChunkSpec] = &[
-    DESC, CPU, MACH, ICAC, DCAC, MEM, CIAA, CIAB, PAUL, AGNS, COPR, DENI, BLIT, FLOP, RTC, GAYL,
-    PCMC, MOBO, UAEL, CART, AKIK, CDTV, ZORR, KEYB, INPT, BUS,
+    DESC, META, CPU, MACH, ICAC, DCAC, MEM, CIAA, CIAB, PAUL, AGNS, COPR, DENI, BLIT, FLOP, RTC,
+    GAYL, PCMC, MOBO, UAEL, CART, AKIK, CDTV, ZORR, KEYB, INPT, BUS,
 ];
+
+/// The chunks written in the clear ahead of the zlib stream, in file
+/// order: the descriptor first, then the optional metadata.
+#[cfg(test)]
+pub(crate) const CLEAR_CHUNKS: &[ChunkSpec] = &[DESC, META];
 
 pub(crate) fn spec_for(tag: Tag) -> Option<&'static ChunkSpec> {
     CHUNKS.iter().find(|spec| spec.tag == tag)

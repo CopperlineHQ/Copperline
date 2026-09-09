@@ -55,6 +55,9 @@ copperline-ctl --info /tmp/ccp.json continue
 
 # Interactive REPL session
 copperline-ctl --info /tmp/ccp.json --repl
+
+# Describe a save state (no session needed) and write out its thumbnail
+copperline-ctl state-info /tmp/at120.clstate --thumbnail /tmp/at120.png
 ```
 
 ## A/B divergence finder
@@ -327,6 +330,15 @@ events.unsubscribe {"events":["serial"]}
   the hardware shift/mask/fill pipeline. The path is optional.
 - `display.get`: Query active display parameters, viewport size, and pixel format.
 - `rtc.get` / `rtc.set {"unix": ..., "time": "...", "advance": ..., "frozen": ...}`: Inspect or move real-time clock.
+- `clipboard.get` / `clipboard.set {"text": "..."}`: The host <-> guest
+  clipboard bridge (`[clipboard] share`, `--clipboard`; see
+  [Configuration](../guide/configuration.md#clipboard)). `get` reports
+  whether the unit is fitted and sharing, whether the guest bridge is up,
+  the host and guest text generations, and the newest text the guest
+  copied. `set` stages text for the guest exactly as a windowed session's
+  host clipboard poll would, so a headless run (which never reads the host
+  clipboard itself) can hand the guest text to paste; `replay_unsafe` is
+  set when reverse execution is armed, as for `mem.write`.
 - `cartridge.get`: Query freezer cartridge state (`model`, memory `base`/`size`, monitor `version`, `entered` status, `nmi_pending`, and freeze count).
 - `cartridge.freeze`: Trigger the freezer cartridge NMI (level 7), transferring execution to the monitor.
 - `copper.list {"addr": ..., "resource": ..., "max": ..., "trace": true}`:
@@ -387,8 +399,26 @@ events.unsubscribe {"events":["serial"]}
 - `copperhf.eject {"unit": 0}`: Hot-eject/detach a `copperhf.device` unit's media. The unit stays present (`CHF_UNIT_PRESENT`); only its media bit (`CHF_UNIT_MEDIA`) clears. Bumps the change counter and sets `CHF_CHANGED_MASK`, the same as the guest's own `TD_EJECT`.
 
 ### State snapshot files
-- `state.save {"path": "..."}`: Snapshot machine state to file.
+- `state.save {"path": "..."}`: Snapshot machine state to file. The file
+  carries a metadata chunk (thumbnail of the current frame from the same
+  renderer as `capture.screenshot`, emulated and wall-clock save times,
+  machine summary, media names) ahead of the machine.
 - `state.load {"path": "..."}`: Restore machine state from file.
+- `state.info {"path": "...", "thumbnail": "..."}`: Describe a state file
+  without loading it -- its container `version`, the `machine` it was
+  taken on (summary, model, CPU, chipset, video standard, RAM sizes, ROM
+  fingerprint), and its `meta` (`emulated_seconds`, `emulated_frames`,
+  `saved_at_unix` and readable `saved_at`, `machine` summary, `media`
+  with `floppies` per connected drive, `hard_disks`, and `cd`, and the
+  `thumbnail` size in pixels and bytes), or `meta: null` for a state
+  written before the chunk existed. With `thumbnail`, the PNG is written
+  to that host path and `thumbnail_path` names it. Reads only the file's
+  header; the running session is untouched, so it is allowed while the
+  machine runs.
+
+The same card is printed without a session by
+`copperline-ctl state-info STATE.clstate [--thumbnail FILE.png]`, as
+pretty-printed JSON with the same fields.
 
 ### Framebuffer capture
 - `capture.screenshot {"path": "...", "overlays": ["blits", "overdraw", "sources"]}`:

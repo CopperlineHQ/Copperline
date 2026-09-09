@@ -19,8 +19,11 @@
 //!
 //! File format: an 8-byte magic, a little-endian u32 container version, an
 //! uncompressed `DESC` chunk holding the `MachineDescriptor` that names the
-//! machine the state was produced on, then a zlib stream of tagged chunks
-//! (`chunk` module): one per component and one per `Bus` subsystem, each
+//! machine the state was produced on, an optional uncompressed `META`
+//! chunk (`meta` module: thumbnail, times, machine summary, media names,
+//! read by [`peek`] without touching the rest), then a zlib stream of
+//! tagged chunks (`chunk` module): one per component and one per `Bus`
+//! subsystem, each
 //! with its own version, ending in an `END ` marker. Chunk payloads are
 //! self-describing MessagePack, so a struct can gain or lose fields between
 //! releases and old states still load; a chunk's version moves only for a
@@ -40,9 +43,11 @@
 //! browser build keeps its states in a download or IndexedDB).
 
 pub(crate) mod chunk;
+pub mod meta;
 pub(crate) mod split;
 
 pub use chunk::SCHEMA_FINGERPRINT;
+pub use meta::{FloppyMedia, MediaNames, StateMeta, THUMBNAIL_HEIGHT, THUMBNAIL_WIDTH};
 
 use anyhow::{bail, Context, Result};
 use flate2::read::ZlibDecoder;
@@ -51,7 +56,7 @@ use flate2::Compression;
 use std::fs::File;
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::BufWriter;
-use std::io::{BufReader, Read, Write};
+use std::io::{BufReader, Cursor, Read, Write};
 use std::path::Path;
 
 use crate::config::MachineDescriptor;
@@ -438,18 +443,24 @@ pub fn slot_path(slot: usize) -> Option<std::path::PathBuf> {
 }
 
 /// Write the machine's emulated state to `path`, stamped with `descriptor`
-/// (the shape of the machine that produced it). Call only between emulated
-/// frames.
-pub fn save(machine: &M68kMachine, descriptor: &MachineDescriptor, path: &Path) -> Result<()> {
+/// (the shape of the machine that produced it) and, when given, `meta`
+/// (the thumbnail and the rest of what a state browser shows; see
+/// [`StateMeta`]). Call only between emulated frames.
+pub fn save(
+    machine: &M68kMachine,
+    descriptor: &MachineDescriptor,
+    meta: Option<&StateMeta>,
+    path: &Path,
+) -> Result<()> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         replace_state_file(path, |file| {
-            save_to_writer(machine, descriptor, BufWriter::new(file))
+            save_to_writer(machine, descriptor, meta, BufWriter::new(file))
         })
     }
     #[cfg(target_arch = "wasm32")]
     {
-        let _ = (machine, descriptor, path);
+        let _ = (machine, descriptor, meta, path);
         bail!("file-backed save states are unavailable on wasm32; use save_to_writer")
     }
 }
@@ -486,13 +497,19 @@ fn replace_state_file(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) 
 pub fn save_to_writer<W: Write>(
     machine: &M68kMachine,
     descriptor: &MachineDescriptor,
+    meta: Option<&StateMeta>,
     mut writer: W,
 ) -> Result<()> {
     writer.write_all(STATE_MAGIC)?;
     writer.write_all(&STATE_VERSION.to_le_bytes())?;
-    // The descriptor sits uncompressed ahead of the zlib stream so it can be
-    // read (and a mismatch detected) without decompressing the whole machine.
-    chunk::ChunkWriter::new(&mut writer).value(&chunk::DESC, descriptor)?;
+    // The descriptor and the metadata sit uncompressed ahead of the zlib
+    // stream so they can be read (a mismatch detected, a thumbnail shown)
+    // without decompressing the whole machine.
+    let mut clear = chunk::ChunkWriter::new(&mut writer);
+    clear.value(&chunk::DESC, descriptor)?;
+    if let Some(meta) = meta {
+        clear.value(&chunk::META, meta)?;
+    }
     let body = chunk::ChunkWriter::new(ZlibEncoder::new(writer, Compression::fast()));
     let body = machine.write_chunks(body)?;
     let encoder = body.finish()?;
@@ -586,18 +603,127 @@ pub(crate) fn load_with_migrations<R: Read>(
 ) -> Result<MachineDescriptor> {
     read_header(&mut reader)?;
     let descriptor = read_descriptor_chunk(&mut reader, migrations)?;
-    machine.apply_chunks(ZlibDecoder::new(reader), migrations)?;
+    // The metadata is not machine state: a state whose META chunk this
+    // build cannot read (damaged, or from a newer build) still restores
+    // its machine, with a warning rather than a refusal.
+    let (meta, body) = read_meta_chunk(reader, migrations)?;
+    if let Err(e) = meta {
+        log::warn!("save state: ignoring unreadable META chunk: {e:#}");
+    }
+    machine.apply_chunks(ZlibDecoder::new(body), migrations)?;
     Ok(descriptor)
 }
 
 /// Read and validate a state's header without restoring its machine.
 /// Frontends with a fixed configuration can reject a different machine
-/// before loading it. The reader is left at the compressed machine
-/// payload; this checks the container version and the descriptor chunk,
-/// not the chunks that follow.
+/// before loading it. This checks the container version and the
+/// descriptor chunk, not the chunks that follow; the reader is consumed
+/// up to (and, for the four-byte probe that finds the metadata chunk,
+/// slightly past) the descriptor, so it is not positioned for further
+/// reading -- use `load_from_reader` or [`peek`] for that.
 pub fn read_descriptor<R: Read>(mut reader: R) -> Result<MachineDescriptor> {
     read_header(&mut reader)?;
     read_descriptor_chunk(&mut reader, chunk::MIGRATIONS)
+}
+
+/// What [`peek`] reports: the header and the two clear-text chunks, and
+/// nothing from the compressed body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StatePeek {
+    pub version: u32,
+    pub descriptor: MachineDescriptor,
+    /// The metadata chunk, `None` for a state written without one (every
+    /// state written before the chunk existed).
+    pub meta: Option<StateMeta>,
+}
+
+/// Read a state's header, descriptor, and metadata without inflating or
+/// decoding its machine: the cheap read a state browser makes for every
+/// file in a folder. A damaged or unreadable metadata chunk is an error
+/// here (a browser shows the entry without it), where a load merely warns.
+pub fn peek<R: Read>(mut reader: R) -> Result<StatePeek> {
+    let version = read_header(&mut reader)?;
+    let descriptor = read_descriptor_chunk(&mut reader, chunk::MIGRATIONS)?;
+    let (meta, _) = read_meta_chunk(reader, chunk::MIGRATIONS)?;
+    Ok(StatePeek {
+        version,
+        descriptor,
+        meta: meta?,
+    })
+}
+
+/// [`peek`] on a file.
+pub fn peek_path(path: &Path) -> Result<StatePeek> {
+    let file =
+        File::open(path).with_context(|| format!("opening save state {}", path.display()))?;
+    peek(BufReader::new(file)).with_context(|| format!("reading save state {}", path.display()))
+}
+
+/// The stream after the clear-text chunks: whatever the four-byte probe
+/// took from `R` while looking for the metadata chunk, then `R` itself.
+type BodyStream<R> = std::io::Chain<Cursor<Vec<u8>>, R>;
+
+/// Read the optional `META` chunk that may follow the descriptor. The
+/// chunk is recognised by its tag; anything else (the zlib stream of an
+/// older state, or a truncated file) is handed back untouched as the body
+/// stream. The metadata itself is returned as a `Result` so callers can
+/// choose between refusing and warning on a chunk that does not decode;
+/// a truncated chunk is a hard error either way, since the body is then
+/// gone with it.
+fn read_meta_chunk<R: Read>(
+    mut reader: R,
+    migrations: &[chunk::Migration],
+) -> Result<(Result<Option<StateMeta>>, BodyStream<R>)> {
+    let mut probe = [0u8; 4];
+    let mut got = 0;
+    while got < probe.len() {
+        match reader.read(&mut probe[got..]) {
+            Ok(0) => break,
+            Ok(n) => got += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e).context("reading save state chunks"),
+        }
+    }
+    if got < probe.len() || probe != chunk::META.tag {
+        let body = Cursor::new(probe[..got].to_vec()).chain(reader);
+        return Ok((Ok(None), body));
+    }
+    let mut rest = [0u8; 12];
+    reader
+        .read_exact(&mut rest)
+        .context("reading state metadata")?;
+    let header = chunk::ChunkHeader {
+        tag: chunk::META.tag,
+        version: u32::from_le_bytes(rest[0..4].try_into().expect("four version bytes")),
+        len: u64::from_le_bytes(rest[4..12].try_into().expect("eight length bytes")),
+    };
+    let (payload, reader) = chunk::Body::open(&header, reader)
+        .read_to_vec()
+        .context("reading state metadata")?;
+    let meta = chunk::upgrade(&chunk::META, header.version, payload, migrations)
+        .and_then(|payload| chunk::decode(&payload).context("reading state metadata"))
+        .map(Some);
+    Ok((meta, Cursor::new(Vec::new()).chain(reader)))
+}
+
+/// Where the compressed machine body starts in the bytes of a state file:
+/// past the header and the clear-text chunks. Two states of the same
+/// machine taken at the same instant are byte-identical from here on
+/// whatever their metadata (which carries the wall clock) says; the
+/// determinism tests compare from this offset.
+pub fn machine_body_offset(bytes: &[u8]) -> Result<usize> {
+    let mut cursor = bytes;
+    read_header(&mut cursor)?;
+    read_descriptor_chunk(&mut cursor, chunk::MIGRATIONS)?;
+    let after_descriptor = bytes.len() - cursor.len();
+    if cursor.len() < 16 || cursor[..4] != chunk::META.tag {
+        return Ok(after_descriptor);
+    }
+    let header = chunk::read_header(&mut cursor)?;
+    let (_, rest) = chunk::Body::open(&header, cursor)
+        .skip()
+        .context("reading state metadata")?;
+    Ok(bytes.len() - rest.len())
 }
 
 /// Check the magic and container version, returning the version.
@@ -660,10 +786,12 @@ pub struct ChunkSummary {
 }
 
 /// What `inspect` reports about a state file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StateSummary {
     pub version: u32,
     pub descriptor: MachineDescriptor,
+    /// The metadata chunk, when the state has one.
+    pub meta: Option<StateMeta>,
     /// The compressed body's chunks in file order, excluding the end marker.
     pub chunks: Vec<ChunkSummary>,
 }
@@ -675,7 +803,9 @@ pub struct StateSummary {
 pub fn inspect<R: Read>(mut reader: R) -> Result<StateSummary> {
     let version = read_header(&mut reader)?;
     let descriptor = read_descriptor_chunk(&mut reader, chunk::MIGRATIONS)?;
-    let mut decoder = ZlibDecoder::new(reader);
+    let (meta, body) = read_meta_chunk(reader, chunk::MIGRATIONS)?;
+    let meta = meta?;
+    let mut decoder = ZlibDecoder::new(body);
     let mut chunks = Vec::new();
     loop {
         let header = chunk::read_header(&mut decoder).context("reading save state chunks")?;
@@ -697,6 +827,7 @@ pub fn inspect<R: Read>(mut reader: R) -> Result<StateSummary> {
     Ok(StateSummary {
         version,
         descriptor,
+        meta,
         chunks,
     })
 }
@@ -997,12 +1128,12 @@ mod tests {
         let descriptor = MachineDescriptor::default();
 
         let mut blob = Vec::new();
-        save_to_writer(&machine, &descriptor, &mut blob).unwrap();
+        save_to_writer(&machine, &descriptor, None, &mut blob).unwrap();
 
         // A file written by `save` is byte-identical to the blob, so states
         // move between the desktop and the browser in either direction.
         let path = temp_state("writer-parity");
-        save(&machine, &descriptor, &path).unwrap();
+        save(&machine, &descriptor, None, &path).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), blob);
         let _ = std::fs::remove_file(&path);
 
@@ -1024,7 +1155,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("slot1.clstate");
         let machine = test_machine();
-        save(&machine, &MachineDescriptor::default(), &path).unwrap();
+        save(&machine, &MachineDescriptor::default(), None, &path).unwrap();
         let previous = std::fs::read(&path).unwrap();
 
         let failure = replace_state_file(&path, |file| {
@@ -1038,7 +1169,7 @@ mod tests {
 
         let mut changed = test_machine();
         changed.bus_mut().mem.chip_ram[0x100] = 0x5a;
-        save(&changed, &MachineDescriptor::default(), &path).unwrap();
+        save(&changed, &MachineDescriptor::default(), None, &path).unwrap();
         let mut restored = test_machine();
         load(&mut restored, &path).unwrap();
         assert_eq!(restored.bus().mem.chip_ram[0x100], 0x5a);
@@ -1067,7 +1198,7 @@ mod tests {
         machine.bus_mut().set_ram_init(init);
         let descriptor = MachineDescriptor::default();
         let mut blob = Vec::new();
-        save_to_writer(&machine, &descriptor, &mut blob).unwrap();
+        save_to_writer(&machine, &descriptor, None, &mut blob).unwrap();
 
         let mut restored = test_machine();
         load_from_reader(&mut restored, blob.as_slice()).unwrap();
@@ -1175,7 +1306,7 @@ mod tests {
         let truncated_path = temp_state("truncated");
         let mut machine = test_machine();
         machine.step_slice(500).unwrap();
-        save(&machine, &MachineDescriptor::default(), &save_path).unwrap();
+        save(&machine, &MachineDescriptor::default(), None, &save_path).unwrap();
         let bytes = std::fs::read(&save_path).unwrap();
         std::fs::write(&truncated_path, &bytes[..bytes.len() / 2]).unwrap();
 
@@ -1236,7 +1367,7 @@ mod tests {
             extended_rom: Some(crate::config::RomId::of(b"a fake extended rom")),
         };
         let mut machine = test_machine();
-        save(&machine, &descriptor, &path).unwrap();
+        save(&machine, &descriptor, None, &path).unwrap();
         // The descriptor the load reports is the one the state was stamped
         // with, not the (default) shape of the machine being loaded into.
         let loaded = load(&mut machine, &path).unwrap();
@@ -1258,7 +1389,7 @@ mod tests {
             .bus_mut()
             .attach_akiko(crate::akiko::Akiko::new());
         assert!(cd_machine.bus().cd_drive_present());
-        save(&cd_machine, &MachineDescriptor::default(), &path).unwrap();
+        save(&cd_machine, &MachineDescriptor::default(), None, &path).unwrap();
 
         // A fresh machine with no CD controller gains one from the load.
         let mut plain_machine = test_machine();
@@ -1283,7 +1414,7 @@ mod tests {
         cartridge.note_custom_write(0x180, 0x0F00);
         machine.bus_mut().attach_cartridge(cartridge);
         machine.bus_mut().cartridge_freeze(0).unwrap();
-        save(&machine, &MachineDescriptor::default(), &path).unwrap();
+        save(&machine, &MachineDescriptor::default(), None, &path).unwrap();
 
         let mut plain_machine = test_machine();
         assert!(plain_machine.bus().cartridge.is_none());
@@ -1329,6 +1460,13 @@ mod tests {
             .read_to_vec()
             .unwrap();
         cursor = rest;
+        // The metadata chunk, when present, is in the clear too and stays
+        // in the prefix.
+        if cursor.len() >= 4 && cursor[..4] == chunk::META.tag {
+            let meta = chunk::read_header(&mut cursor).unwrap();
+            let (_, rest) = chunk::Body::open(&meta, cursor).read_to_vec().unwrap();
+            cursor = rest;
+        }
         let prefix = blob[..blob.len() - cursor.len()].to_vec();
         let mut decoder = ZlibDecoder::new(cursor);
         let mut chunks = Vec::new();
@@ -1407,7 +1545,7 @@ mod tests {
 
     fn saved_blob(machine: &M68kMachine) -> Vec<u8> {
         let mut blob = Vec::new();
-        save_to_writer(machine, &MachineDescriptor::default(), &mut blob).unwrap();
+        save_to_writer(machine, &MachineDescriptor::default(), None, &mut blob).unwrap();
         blob
     }
 
@@ -1425,32 +1563,236 @@ mod tests {
 
     #[test]
     fn state_file_is_a_directory_of_versioned_subsystem_chunks() {
-        let blob = saved_blob(&test_machine());
-        // Header, then the descriptor chunk in the clear.
+        let machine = test_machine();
+        let meta = test_meta(&machine);
+        let mut blob = Vec::new();
+        save_to_writer(
+            &machine,
+            &MachineDescriptor::default(),
+            Some(&meta),
+            &mut blob,
+        )
+        .unwrap();
+        // Header, then the descriptor and metadata chunks in the clear.
         assert_eq!(&blob[..8], STATE_MAGIC);
         assert_eq!(&blob[8..12], &STATE_VERSION.to_le_bytes());
         assert_eq!(&blob[12..16], b"DESC");
+        let body = machine_body_offset(&blob).unwrap();
+        // The 12-byte file header, then the DESC chunk header (tag, u32
+        // version, u64 length) and payload; META follows.
+        let desc_len = u64::from_le_bytes(blob[20..28].try_into().unwrap()) as usize;
+        assert_eq!(&blob[28 + desc_len..32 + desc_len], b"META");
+        assert!(body > 28 + desc_len + 16);
 
         let summary = inspect(blob.as_slice()).unwrap();
         assert_eq!(summary.version, STATE_VERSION);
         assert_eq!(summary.descriptor, MachineDescriptor::default());
+        assert_eq!(summary.meta.as_ref(), Some(&meta));
         // The body's chunks come in the table's order, which for the bus
         // chunks is the order of their fields in `Bus`.
         let tags: Vec<&str> = summary.chunks.iter().map(|c| c.tag.as_str()).collect();
+        let clear = chunk::CLEAR_CHUNKS.len();
         let expected: Vec<String> = chunk::CHUNKS
             .iter()
-            .skip(1)
+            .skip(clear)
             .map(|spec| chunk::tag_name(spec.tag))
             .collect();
         assert_eq!(tags, expected);
         assert!(summary.chunks.iter().all(|c| c.known));
-        for (summary, spec) in summary.chunks.iter().zip(chunk::CHUNKS.iter().skip(1)) {
+        for (summary, spec) in summary.chunks.iter().zip(chunk::CHUNKS.iter().skip(clear)) {
             assert_eq!(summary.version, spec.version, "{}", summary.tag);
             assert!(summary.len > 0, "{} chunk is empty", summary.tag);
         }
         // Bus chunks stream as blocks; value chunks carry their length.
-        let (_, chunks) = unpack(&blob);
+        let (prefix, chunks) = unpack(&blob);
+        assert_eq!(prefix.len(), body);
         assert_eq!(chunks.len(), summary.chunks.len());
+
+        // Without metadata the directory is the same, minus the META chunk.
+        let plain = saved_blob(&machine);
+        let summary = inspect(plain.as_slice()).unwrap();
+        assert_eq!(summary.meta, None);
+        assert_eq!(summary.chunks.len(), chunks.len());
+        assert_eq!(machine_body_offset(&plain).unwrap(), 28 + desc_len);
+    }
+
+    /// Deterministic metadata for a test machine: a thumbnail of a flat
+    /// frame, a fixed wall clock, and named media.
+    fn test_meta(machine: &M68kMachine) -> StateMeta {
+        let (width, lines) = (crate::video::FB_WIDTH, 64);
+        let fb = vec![0xFF20_4060u32; width * lines];
+        let (thumbnail_png, thumbnail_width, thumbnail_height) =
+            meta::encode_thumbnail(&fb, width, lines, true).unwrap();
+        StateMeta {
+            thumbnail_png,
+            thumbnail_width,
+            thumbnail_height,
+            emulated_seconds: machine.bus().emulated_seconds(),
+            emulated_frames: machine.bus().emulated_frames(),
+            saved_at_unix: 1_699_956_800,
+            machine: "fixture / M68000 / Ocs / Pal / chip 512K".to_string(),
+            media: MediaNames {
+                floppies: vec![FloppyMedia {
+                    drive: 0,
+                    name: Some("fixture.adf".to_string()),
+                }],
+                hard_disks: vec!["fixture.hdf".to_string()],
+                cd: None,
+            },
+        }
+    }
+
+    const FIXTURE_WITHOUT_META: &str = "tests/fixtures/state-v81-no-meta.clstate";
+    const FIXTURE_WITH_META: &str = "tests/fixtures/state-v81-meta.clstate";
+
+    /// The checked-in fixtures are states of the test machine, one written
+    /// before the META chunk existed (the layout every older state has) and
+    /// one with it. `COPPERLINE_BLESS_STATE_FIXTURES=1` rewrites them from
+    /// the current build.
+    #[test]
+    fn fixture_states_with_and_without_metadata_load_and_peek() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let without = root.join(FIXTURE_WITHOUT_META);
+        let with = root.join(FIXTURE_WITH_META);
+        if crate::envcfg::flag("COPPERLINE_BLESS_STATE_FIXTURES") {
+            let machine = test_machine();
+            save(&machine, &MachineDescriptor::default(), None, &without).unwrap();
+            save(
+                &machine,
+                &MachineDescriptor::default(),
+                Some(&test_meta(&machine)),
+                &with,
+            )
+            .unwrap();
+        }
+        let expected_meta = test_meta(&test_machine());
+
+        let peeked = peek_path(&without).unwrap();
+        assert_eq!(peeked.version, STATE_VERSION);
+        assert_eq!(peeked.descriptor, MachineDescriptor::default());
+        assert_eq!(peeked.meta, None);
+        let mut machine = test_machine();
+        machine.bus_mut().mem.chip_ram[0x100] = 0x5A;
+        assert_eq!(
+            load(&mut machine, &without).unwrap(),
+            MachineDescriptor::default()
+        );
+        assert_eq!(machine.bus_mut().mem.chip_ram[0x100], 0);
+
+        let peeked = peek_path(&with).unwrap();
+        assert_eq!(peeked.descriptor, MachineDescriptor::default());
+        let meta = peeked.meta.expect("the fixture carries metadata");
+        assert_eq!(meta, expected_meta);
+        let (pixels, w, h) = meta.thumbnail_pixels().unwrap().unwrap();
+        assert_eq!((w, h), (THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT));
+        assert!(pixels.iter().all(|&px| px == 0xFF20_4060));
+        assert_eq!(meta.media.summary(), "DF0: fixture.adf, HD: fixture.hdf");
+        let mut machine = test_machine();
+        machine.bus_mut().mem.chip_ram[0x100] = 0x5A;
+        assert_eq!(
+            load(&mut machine, &with).unwrap(),
+            MachineDescriptor::default()
+        );
+        assert_eq!(machine.bus_mut().mem.chip_ram[0x100], 0);
+    }
+
+    #[test]
+    fn peek_reads_the_metadata_from_the_clear_chunks_alone() {
+        let machine = test_machine();
+        let meta = test_meta(&machine);
+        let mut blob = Vec::new();
+        save_to_writer(
+            &machine,
+            &MachineDescriptor::default(),
+            Some(&meta),
+            &mut blob,
+        )
+        .unwrap();
+        let body = machine_body_offset(&blob).unwrap();
+        // Everything past the clear chunks can be missing: peek does not
+        // look at the machine.
+        let peeked = peek(&blob[..body]).unwrap();
+        assert_eq!(peeked.meta.as_ref(), Some(&meta));
+        assert_eq!(peeked.descriptor, MachineDescriptor::default());
+        // And a state cut off inside the metadata is an error, not a
+        // silently metadata-less state.
+        assert!(peek(&blob[..body - 1]).is_err());
+        // A state without the chunk peeks as `None` from its clear part
+        // alone, too.
+        let plain = saved_blob(&machine);
+        let plain_body = machine_body_offset(&plain).unwrap();
+        assert_eq!(peek(&plain[..plain_body]).unwrap().meta, None);
+        assert_eq!(peek(&plain[..plain_body + 2]).unwrap().meta, None);
+    }
+
+    #[test]
+    fn metadata_is_outside_the_byte_identity_of_the_machine_body() {
+        let machine = test_machine();
+        let mut early = test_meta(&machine);
+        let mut late = early.clone();
+        late.saved_at_unix += 3600;
+        early.media.cd = Some("disc.cue".to_string());
+        let mut a = Vec::new();
+        save_to_writer(
+            &machine,
+            &MachineDescriptor::default(),
+            Some(&early),
+            &mut a,
+        )
+        .unwrap();
+        let mut b = Vec::new();
+        save_to_writer(&machine, &MachineDescriptor::default(), Some(&late), &mut b).unwrap();
+        assert_ne!(a, b);
+        let (oa, ob) = (
+            machine_body_offset(&a).unwrap(),
+            machine_body_offset(&b).unwrap(),
+        );
+        assert_eq!(a[oa..], b[ob..]);
+        // The same body as a state written without metadata at all.
+        let plain = saved_blob(&machine);
+        let op = machine_body_offset(&plain).unwrap();
+        assert_eq!(plain[op..], a[oa..]);
+    }
+
+    #[test]
+    fn unreadable_metadata_warns_on_load_but_fails_peek() {
+        let machine = test_machine();
+        let meta = test_meta(&machine);
+        let mut blob = Vec::new();
+        save_to_writer(
+            &machine,
+            &MachineDescriptor::default(),
+            Some(&meta),
+            &mut blob,
+        )
+        .unwrap();
+        let desc_len = u64::from_le_bytes(blob[20..28].try_into().unwrap()) as usize;
+        let meta_header = 28 + desc_len;
+        assert_eq!(&blob[meta_header..meta_header + 4], b"META");
+
+        // A META chunk from a newer build (version bumped) is not machine
+        // state: the load goes ahead, peek reports it.
+        let mut newer = blob.clone();
+        newer[meta_header + 4..meta_header + 8]
+            .copy_from_slice(&(chunk::META.version + 1).to_le_bytes());
+        let mut restored = test_machine();
+        assert_eq!(
+            load_from_reader(&mut restored, newer.as_slice()).unwrap(),
+            MachineDescriptor::default()
+        );
+        let err = peek(newer.as_slice()).unwrap_err().to_string();
+        assert!(err.contains("META"), "{err}");
+        assert!(inspect(newer.as_slice()).is_err());
+
+        // A damaged payload likewise.
+        let mut damaged = blob.clone();
+        let payload = meta_header + 16;
+        for byte in &mut damaged[payload..payload + 8] {
+            *byte = 0xC1; // never valid MessagePack
+        }
+        let mut restored = test_machine();
+        assert!(load_from_reader(&mut restored, damaged.as_slice()).is_ok());
+        assert!(peek(damaged.as_slice()).is_err());
     }
 
     #[test]

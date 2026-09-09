@@ -14506,3 +14506,86 @@ fn light_pen_switch_reads_on_the_third_button_line_not_fire() {
     assert!(!bus.input.ports[1].pot_x_released());
     assert!(!bus.input.ports[1].up, "a pen has no directions");
 }
+
+/// The clipboard unit's doorbell reaches Paula as a level-2 (PORTS)
+/// interrupt the way any expansion board's INT2 does: sampled at the
+/// device tick while the board holds the line, and gone once the guest's
+/// server acknowledges it through the register bank. Host text staged
+/// through the bus-level accessor the window and control protocol use.
+#[test]
+fn clipboard_doorbell_raises_int2_until_the_guest_acknowledges() {
+    use crate::clipboard::*;
+    use crate::zorro_device::{DeviceHost, ZorroDevice};
+    let mut bus = empty_bus();
+    let base = 0x00E9_0000u32;
+    bus.mem
+        .zorro
+        .add_board_configured_at(crate::zorro::BoardSpec::copperline_services(0), base)
+        .expect("services board");
+    bus.attach_devices(vec![crate::zorro_device::BoardDevice::Filesys(
+        crate::filesys::FilesysBoard::new_with_clipboard(Vec::new(), true),
+    )]);
+    // The CPU's path to a device window: the board's slot and the offset
+    // within its window, then the device's own write.
+    let write = |bus: &mut Bus, addr: u32, value: u32| {
+        let (backing, off) = bus
+            .mem
+            .zorro
+            .device_region_at(addr, 4)
+            .expect("in the window");
+        let crate::zorro::BoardBacking::Device(slot) = backing else {
+            panic!("not a device window");
+        };
+        let mut host = DeviceHost::for_slot(&mut bus.mem, slot);
+        ZorroDevice::write(&mut bus.devices[slot], off, 4, value, &mut host);
+    };
+    write(&mut bus, base + 0x7E00, base); // DIAG_DOORBELL
+    let bank = base + CLIP_REGS_OFFSET;
+
+    bus.paula.intreq = 0;
+    let board = bus.filesys_board_mut().expect("fitted");
+    assert!(board.clipboard_sharing());
+    assert_eq!(board.stage_host_clipboard("paste me"), Some(1));
+    bus.advance_devices(4);
+    assert_eq!(bus.paula.intreq & INT_PORTS, 0, "no bridge, no interrupt");
+
+    write(&mut bus, bank + CLIP_REG_CTRL, CLIP_CTRL_ENABLE);
+    bus.advance_devices(4);
+    assert_ne!(bus.paula.intreq & INT_PORTS, 0, "doorbell rung");
+    bus.paula.intreq = 0;
+    bus.advance_devices(4);
+    assert_ne!(bus.paula.intreq & INT_PORTS, 0, "level-sensitive: held");
+
+    write(&mut bus, bank + CLIP_REG_CTRL, CLIP_CTRL_IRQACK);
+    bus.paula.intreq = 0;
+    bus.advance_devices(4);
+    assert_eq!(bus.paula.intreq & INT_PORTS, 0, "acknowledged");
+
+    // The text is where the guest reads it, through the window base.
+    write(&mut bus, bank + CLIP_REG_OFFSET, 0);
+    write(&mut bus, bank + CLIP_REG_CTRL, CLIP_CTRL_FETCH);
+    assert_eq!(
+        bus.peek_word_any(base + CLIP_H2G_OFFSET),
+        u16::from_be_bytes(*b"pa")
+    );
+    assert_eq!(bus.peek_word_any(bank + CLIP_REG_LEN + 2), 8);
+
+    // A second text while the bridge is up rings again; sharing off
+    // silences the line entirely.
+    let board = bus.filesys_board_mut().unwrap();
+    assert_eq!(board.stage_host_clipboard("again"), Some(2));
+    bus.advance_devices(4);
+    assert_ne!(bus.paula.intreq & INT_PORTS, 0);
+    bus.filesys_board_mut()
+        .unwrap()
+        .set_clipboard_sharing(false);
+    write(&mut bus, bank + CLIP_REG_CTRL, CLIP_CTRL_IRQACK);
+    bus.paula.intreq = 0;
+    bus.filesys_board_mut().unwrap().set_clipboard_sharing(true);
+    assert_eq!(
+        bus.filesys_board_mut().unwrap().stage_host_clipboard("x"),
+        Some(3)
+    );
+    bus.advance_devices(4);
+    assert_ne!(bus.paula.intreq & INT_PORTS, 0);
+}

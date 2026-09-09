@@ -477,6 +477,18 @@ impl AtaBus {
         }
     }
 
+    /// The hard-disk images on this cable in slot order, for naming the
+    /// machine's media (a save state's metadata, the state browser).
+    pub fn hard_disk_images(&self) -> impl Iterator<Item = &HardDriveImage> {
+        self.drives
+            .iter()
+            .flatten()
+            .filter_map(|device| match device {
+                AtaDevice::Disk(drive) => Some(&drive.disk),
+                AtaDevice::Atapi(_) => None,
+            })
+    }
+
     /// The hard disk in a numbered ATA slot, for frontend save persistence.
     pub fn hard_disk_mut(&mut self, slot: usize) -> Option<&mut HardDriveImage> {
         match self.drives.get_mut(slot)?.as_mut()? {

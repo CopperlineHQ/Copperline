@@ -423,6 +423,14 @@ pub fn recording_file() -> PathBuf {
     )
 }
 
+/// Default name for a GIF clip saved from the window.
+pub fn clip_file() -> PathBuf {
+    output(
+        |p, h| p.recordings_dir(h),
+        format!("copperline-clip-{}.gif", crate::timestamp::compact_now()),
+    )
+}
+
 /// Default name for a recorded input script.
 pub fn input_recording_file() -> PathBuf {
     output(

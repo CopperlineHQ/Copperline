@@ -914,6 +914,30 @@ impl ZorroChain {
         &self.boards[idx].ram
     }
 
+    /// Configured expansion RAM the guest links into its free memory list
+    /// (ERTF_MEMLIST), i.e. the fast RAM boards, as (base, len, board
+    /// index); the RAM-backed identification board is not fast RAM. For
+    /// frontends that map board RAM into a host-visible address map and
+    /// reach the buffer through [`ZorroChain::board_ram_mut`]. Empty until
+    /// the guest has autoconfigured the boards.
+    pub fn fast_ram_windows(&self) -> impl Iterator<Item = (u32, u32, usize)> + '_ {
+        self.regions
+            .iter()
+            .copied()
+            .filter(|(_, _, idx)| self.boards[*idx].spec.memlist)
+    }
+
+    /// Keep each board's RAM at the host address `live` already uses (see
+    /// `Memory::adopt_allocations_from`). Boards pair up by chain position;
+    /// a restored chain with a different board layout keeps its own buffers.
+    pub(crate) fn adopt_allocations_from(&mut self, live: &mut ZorroChain) {
+        for (board, live) in self.boards.iter_mut().zip(live.boards.iter_mut()) {
+            if board.spec == live.spec {
+                crate::memory::reuse_allocation(&mut board.ram, &mut live.ram);
+            }
+        }
+    }
+
     pub fn board_ram_mut(&mut self, idx: usize) -> &mut [u8] {
         &mut self.boards[idx].ram
     }

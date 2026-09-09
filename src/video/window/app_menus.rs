@@ -118,6 +118,16 @@ impl App {
             autofire_hz: self.autofire_hz,
             run_ahead_frames: self.run_ahead_frames,
             joystick_input_mode: self.joystick_input_mode,
+            clipboard_share: self
+                .emu
+                .bus()
+                .filesys_board()
+                .is_some_and(|b| b.clipboard_sharing()),
+            clipboard_available: self
+                .emu
+                .bus()
+                .filesys_board()
+                .is_some_and(|b| b.clipboard_fitted()),
             port_devices: [
                 self.emu.bus().input.device(0),
                 self.emu.bus().input.device(1),
@@ -514,6 +524,7 @@ impl App {
                 self.request_redraw();
             }
             A::ToggleRewind => self.toggle_rewind(),
+            A::ToggleClipboard => self.toggle_clipboard_sharing(),
 
             A::ToggleWarp => self.toggle_warp(),
             A::SetWarpLimit(limit) => {
@@ -530,9 +541,10 @@ impl App {
 
             A::ToggleRecord => self.toggle_recording(),
             A::ToggleRecordInput => self.toggle_input_recording(),
+            A::SaveClip => self.save_clip_gif(),
 
             A::SaveState => self.save_state_interactive(),
-            A::LoadState => self.load_state_from_dialog(event_loop),
+            A::LoadState => self.open_states_browser(),
             A::QuickSave(slot) => self.quick_save_state(slot + 1),
             A::QuickLoad(slot) => self.quick_load_state(slot + 1, event_loop),
             A::StepShaderStrength(dir) => {
@@ -763,6 +775,11 @@ impl App {
             // answered while it is up, Escape included.
             #[cfg(feature = "game-library")]
             if self.login_handle_key(code, text) || self.meta_handle_key(code, text) {
+                return true;
+            }
+            // The Load State browser walks its own list: its keys are
+            // answered here, and Escape first withdraws its delete question.
+            if self.states_handle_key(code, event_loop) {
                 return true;
             }
             if code == KeyCode::Escape {

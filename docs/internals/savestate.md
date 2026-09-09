@@ -64,6 +64,25 @@ Deliberately excluded, with the mechanism in parentheses:
   uninterrupted runs produce byte-identical save states
   (verified by `tests/savestate_roundtrip.rs`).
 
+Alongside the descriptor, a state carries a `StateMeta` (`savestate/meta.rs`)
+in its own clear-text `META` chunk: a PNG thumbnail of the display at the
+save (240 pixels wide; 180 rows for a chipset frame, whose presentation
+is always the 4:3 glass, or the board's own shape for an RTG frame),
+rendered by the same side-effect-free display path `capture.screenshot`
+uses (`control::exec::render_frame`) and area-averaged down, so a
+headless and a windowed save of the same frame produce the same bytes;
+the emulated time (seconds and frames); the host wall-clock time of the
+save (0, "unknown", in the browser build, whose wasm32 target has no
+std clock); the descriptor's `short_summary()`; and `MediaNames` -- the file
+names (never paths) of the inserted floppies per connected drive, every
+hard-drive image on every controller (`Bus::media_names` walks Gayle, the
+A4000 IDE port, the A3000 SDMAC bus, and the A2091/A4091/IDE-Zorro/copperhf
+boards), and the disc in the CD drive. It is host metadata, not machine
+state: `Emulator::state_meta` builds it at save time, nothing reads it on
+load, and the wall clock in it is the one thing two saves of the same
+machine at the same instant are expected to differ in (see
+[Verification](#verification)).
+
 The ROM bytes are embedded in the state, not loaded from a path: a state
 is self-contained with respect to everything that was in memory, so
 loading one always rebuilds *its own* machine -- restoring the Bus and
@@ -148,6 +167,7 @@ offset  size  contents
 0       8     magic, ASCII "CLSSTATE"
 8       4     container version, u32 little-endian (STATE_VERSION, 81)
 12      ...   DESC chunk: the MachineDescriptor, uncompressed
+...     ...   META chunk: the StateMeta, uncompressed (optional)
 ...     ...   zlib stream (RFC 1950) of chunks, ending in an END chunk
 ```
 
@@ -172,8 +192,28 @@ accepts either form for any chunk.
 The `DESC` chunk sits uncompressed ahead of the zlib stream so a load can
 read it (and detect a machine mismatch) without inflating the whole
 machine; `savestate::load` returns the descriptor to `Emulator::load_state`
-for the comparison. `savestate::inspect` reads the header, the descriptor,
-and the chunk directory of a file without restoring anything.
+for the comparison. The `META` chunk follows it in the clear for the same
+reason: `savestate::peek` (and `peek_path`) reads the header, the
+descriptor, and the metadata and stops, so a state browser can read every
+file in a folder for the cost of a few kilobytes each; it never inflates
+the machine. A reader tells the chunk from the zlib stream by the
+four-byte probe after the descriptor: the `META` tag means a metadata
+chunk, anything else (including the `0x78` a zlib stream starts with, and
+the end of a truncated file) is handed on as the body. A state written
+without the chunk therefore reads exactly as it did before the chunk
+existed. The clear-text layout is part of the container framing: a
+reader must know every tag it may meet ahead of the stream, so `META` is
+the only clear-text chunk besides `DESC`, and adding another there (as
+opposed to inside the stream, where unknown chunks are skipped) is a
+`STATE_VERSION` change. A load that meets a `META` chunk it cannot decode
+(damaged, or written at a version this build has no migration for) logs
+a warning and restores the machine anyway, since the machine does not
+depend on it; `peek` reports the same condition as an error, and the
+browser lists the file without a picture. `savestate::inspect` reads the header, the descriptor, the
+metadata, and the chunk directory of a file without restoring anything.
+`savestate::machine_body_offset` gives the offset of the zlib stream in a
+file's bytes, for comparing the machine of two files regardless of their
+metadata.
 
 The zlib stream holds the chunks `M68kMachine::write_chunks` produces, in
 this order (the `Bus` chunks follow the order of their fields in `Bus`,
@@ -186,6 +226,8 @@ before it arrived complete.
 
 | Tag | Payload | Contents |
 |---|---|---|
+| `DESC` | value, in the clear | `MachineDescriptor` |
+| `META` | value, in the clear, optional | `StateMeta`: thumbnail PNG, emulated and wall-clock save times, machine summary, media names |
 | `CPU ` | value | `CpuCore` |
 | `MACH` | value | `MachineRuntimeState` |
 | `ICAC`, `DCAC` | value | `Option<Box<CpuCache>>`, `nil` when absent |
@@ -339,8 +381,20 @@ migrations and newer-chunk refusal
 the table naming real `Bus` fields
 (`every_bus_chunk_holds_exactly_the_fields_it_claims`), the end marker and
 trailer checks (`the_end_marker_and_the_compressed_trailer_are_verified`),
-and hostile lengths and nesting
-(`hostile_chunk_lengths_and_nesting_fail_instead_of_exhausting_memory`).
+hostile lengths and nesting
+(`hostile_chunk_lengths_and_nesting_fail_instead_of_exhausting_memory`),
+and the metadata chunk: two checked-in fixtures of the test machine,
+`tests/fixtures/state-v81-no-meta.clstate` (the layout of every state
+written before the chunk existed) and `state-v81-meta.clstate`, both of
+which must keep loading and peeking as expected
+(`fixture_states_with_and_without_metadata_load_and_peek`;
+`COPPERLINE_BLESS_STATE_FIXTURES=1` rewrites them from the current
+build), peek stopping at the clear chunks
+(`peek_reads_the_metadata_from_the_clear_chunks_alone`), the body's
+independence from the metadata
+(`metadata_is_outside_the_byte_identity_of_the_machine_body`), and the
+warn-on-load / fail-on-peek split for unreadable metadata
+(`unreadable_metadata_warns_on_load_but_fails_peek`).
 
 ## Snapshot point and atomicity
 
@@ -406,6 +460,20 @@ The regression checks cover serialization, failure recovery and replay:
   host-pacing re-derivation a mismatched load performs; `harddrive::tests`
   and `cdrom::tests` cover the reopen-by-path round trips and the
   missing-file error paths.
+- `tests/savestate_roundtrip.rs` compares the resumed and uninterrupted
+  runs' final state files from `machine_body_offset` on -- the `META`
+  chunk ahead of it carries the wall clock of the save -- and separately
+  requires the two files' metadata to agree on everything that is a
+  function of the machine (emulated time, thumbnail bytes, media names).
+- In-process byte-identity checks (the debugger views that must not
+  disturb the machine, the USS import determinism test) compare
+  `Emulator::machine_state_bytes`, the file's machine body without the
+  `META` chunk, for the same reason.
+- The window's browser is driven against a real machine by
+  `window::tests::state_browser_lists_loads_flags_and_deletes_states`
+  (a quick save's card, keyboard and pad navigation, load, the delete
+  question, and the other-machine flag); the panel's own list logic and
+  layout are covered in `ui::states::tests`.
 - End-to-end: save mid-run plus `--screenshot-after T`, then
   `--load-state` plus `--screenshot-after T` in a fresh process, and
   `cmp` the PNGs. Verified byte-identical on Kickstart 2.05, State of
@@ -473,6 +541,11 @@ The same host boundary as save states applies, plus the requirement that
   contents are in-state and safe.
 - Physical media and live network, serial, MIDI, or sampler input cannot
   be reproduced from the snapshot alone.
+- Host clipboard sharing (`[clipboard] share`) injects host text when a
+  windowed session's poll or a control client stages it. The staged text
+  and the bridge's generations are in the services board's state, so a
+  transfer in flight resumes, but the text is not replayed by reverse
+  execution; headless runs never read the host clipboard.
 
 ### Verification
 

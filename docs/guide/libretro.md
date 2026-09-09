@@ -185,6 +185,64 @@ Netplay therefore currently suits games that run from one inserted image or
 WHDLoad package. Rewind and run-ahead are separate frontend features and have
 not been validated alongside netplay.
 
+## Memory map, cheats and save RAM
+
+The core describes the guest address map through the libretro memory-map
+interface, so RetroArch's cheat search and memory viewer, and any
+achievement or memory-inspection feature built on it, can address Amiga
+memory directly. The map names each window by address space:
+
+| Address space | Window | Notes |
+|---|---|---|
+| `chip` | Chip RAM at `$000000` | Also `RETRO_MEMORY_SYSTEM_RAM` |
+| `slow` | Trapdoor slow RAM at `$C00000` | A500 profile only |
+| `fast` | Zorro II/III and motherboard fast RAM banks | At their autoconfig bases |
+| `rom` | Kickstart or AROS at `$F80000`; an extended ROM at `$E00000` (AROS's second image, or the CD32 extended ROM) | Read-only |
+
+Every window is big-endian, as the 68000 sees it. A bank that is not
+naturally aligned is split into aligned power-of-two blocks: the 8 MiB fast
+RAM of the WHDLoad machine appears as blocks at `$200000`, `$400000` and
+`$800000`. Fast RAM windows are only known once the guest's boot ROM has
+autoconfigured the boards, so the map is announced when content loads and
+again when a bank appears or moves: a few frames into the boot, after a
+Reset (which returns the boards to unconfigured), and after a state load.
+The host addresses behind the windows do not change during a session,
+including across state loads and resets, so pointers taken from the map or
+from `retro_get_memory_data` stay valid until the content is closed.
+Mirror images of small chip RAM banks inside the 2 MiB chip window are not
+described; only the fitted bank is.
+
+`retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM)` returns chip RAM. On the
+CD32 machine `RETRO_MEMORY_SAVE_RAM` returns the 1 KiB EEPROM, so the
+frontend also keeps it as an ordinary `.srm` file next to the content.
+The core still writes `copperline/cd32.nvram` on close; RetroArch loads its
+`.srm` after the core loads that file, so when both exist and differ the
+`.srm` wins, and on a normal close both hold the same bytes. Save RAM is
+not exposed in netplay mode, where saves stay temporary. Video RAM is not
+exposed separately: Amiga display memory is chip RAM.
+
+Cheats use the plain Amiga trainer format: a hexadecimal address, a colon,
+and a hexadecimal value whose length selects the width.
+
+```text
+0A1234:05              byte
+0A1234:1234            word
+0A1234:12345678        long
+0A1234:05+0A1240:FFFF  several pokes in one cheat
+```
+
+Addresses take up to eight hexadecimal digits and can name any RAM bank,
+including fast RAM once it is configured. An enabled cheat is written into
+RAM once after every emulated frame, like a resident trainer poke, so a
+game that rewrites the location each frame sees the cheat value between
+frames. Disabling a cheat stops the pokes but does not restore the earlier
+value. Writes to addresses outside fitted RAM (custom registers, ROM,
+unconfigured boards) do nothing. A code that does not parse is reported
+through the frontend's log and ignored; the remaining cheats still apply.
+Cheats are not part of save states; the frontend re-applies its own list.
+They are local pokes, so netplay peers must enable identical cheats or
+their machines diverge.
+
 ## Save states and presentation
 
 Frontend save states include the machine, writable floppy and hard-disk data, the

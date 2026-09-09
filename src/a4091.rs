@@ -285,6 +285,14 @@ impl A4091 {
         self.targets.iter().flatten().find_map(ScsiTarget::cd_ref)
     }
 
+    /// The disk images on the board's bus, in ID order.
+    pub fn disk_images(&self) -> impl Iterator<Item = &crate::harddrive::HardDriveImage> {
+        self.targets
+            .iter()
+            .flatten()
+            .filter_map(ScsiTarget::disk_ref)
+    }
+
     /// Mutable view of the lowest-ID CD-ROM drive on the board's bus.
     pub fn first_cd_mut(&mut self) -> Option<&mut crate::scsi::ScsiCdRom> {
         self.targets

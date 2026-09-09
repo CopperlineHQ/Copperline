@@ -28,7 +28,7 @@ fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
 #[test]
 fn all_tabs_and_bitmap_inspection_leave_the_machine_byte_identical() {
     let mut app = test_app();
-    let before = app.emu.save_state_bytes().unwrap();
+    let before = app.emu.machine_state_bytes().unwrap();
     let context = egui::Context::default();
     configure_style(&context);
     let mut layout = Layout::default();
@@ -54,13 +54,13 @@ fn all_tabs_and_bitmap_inspection_leave_the_machine_byte_identical() {
                 .is_empty());
         }
     }
-    assert_eq!(before, app.emu.save_state_bytes().unwrap());
+    assert_eq!(before, app.emu.machine_state_bytes().unwrap());
 }
 
 #[test]
 fn audio_rows_and_mute_targets_stay_fixed_as_status_lines_change() {
     let mut app = test_app();
-    let before = app.emu.save_state_bytes().unwrap();
+    let before = app.emu.machine_state_bytes().unwrap();
     let mut panel = ui::DebuggerPanel::new();
     panel.tab = ui::DebugTab::Audio;
     let mut view = app.build_debugger_view_with_clipping(&panel, false);
@@ -179,7 +179,7 @@ fn audio_rows_and_mute_targets_stay_fixed_as_status_lines_change() {
             assert_eq!(clicked, [Action::Control(UiControl::DebugAudioMute(index))]);
         }
     }
-    assert_eq!(before, app.emu.save_state_bytes().unwrap());
+    assert_eq!(before, app.emu.machine_state_bytes().unwrap());
 }
 
 #[test]
@@ -274,7 +274,7 @@ fn address_submission_register_edits_and_cpu_memory_paging_reuse_machine_actions
         Some(0xF80020)
     );
     let pinned = app.build_debugger_view_with_clipping(app.debugger_panel.as_ref().unwrap(), false);
-    let machine = app.emu.save_state_bytes().unwrap();
+    let machine = app.emu.machine_state_bytes().unwrap();
     app.debug_snapshot_dirty.set(false);
     app.apply_egui_debugger_action(Action::FollowPc);
     let followed =
@@ -287,7 +287,7 @@ fn address_submission_register_edits_and_cpu_memory_paging_reuse_machine_actions
         app.debug_snapshot_dirty.get(),
         "paused views must refresh immediately"
     );
-    assert_eq!(app.emu.save_state_bytes().unwrap(), machine);
+    assert_eq!(app.emu.machine_state_bytes().unwrap(), machine);
     app.debugger_panel.as_mut().unwrap().mem_view_bits = true;
     app.debugger_panel.as_mut().unwrap().mem_addr = 0;
     app.apply_egui_debugger_action(Action::MemoryScroll(16));
@@ -986,7 +986,7 @@ fn analyzer_navigation_pins_addresses_without_changing_the_capture_or_machine() 
     app.console_panel.as_mut().unwrap().input = "status".into();
     let capture = app.emu.bus().frame_bus_trace().unwrap().frame;
     let selection = app.frame_analyzer_panel.as_ref().unwrap().selected_hpos;
-    let before = app.emu.save_state_bytes().unwrap();
+    let before = app.emu.machine_state_bytes().unwrap();
     for (tab, address) in [
         (ui::DebugTab::Cpu, 0x121),
         (ui::DebugTab::Memory, 0x135),
@@ -1012,7 +1012,7 @@ fn analyzer_navigation_pins_addresses_without_changing_the_capture_or_machine() 
             selection
         );
         assert_eq!(app.emu.bus().frame_bus_trace().unwrap().frame, capture);
-        assert_eq!(before, app.emu.save_state_bytes().unwrap());
+        assert_eq!(before, app.emu.machine_state_bytes().unwrap());
     }
     assert_eq!(app.console_panel.as_ref().unwrap().input, "status");
 }
@@ -1084,7 +1084,7 @@ fn console_paste_history_and_execution_are_separate_from_layout() {
     let context = egui::Context::default();
     let mut layout = Layout::default();
     let mut panel = app.console_panel.clone().unwrap();
-    let before = app.emu.save_state_bytes().unwrap();
+    let before = app.emu.machine_state_bytes().unwrap();
     for size in [[600.0, 480.0], [1100.0, 760.0]] {
         let (_, actions) = run_content_frame(
             &context,
@@ -1105,7 +1105,7 @@ fn console_paste_history_and_execution_are_separate_from_layout() {
     );
     assert!(actions.is_empty());
     assert_eq!(panel.input, "status\nstep");
-    assert_eq!(before, app.emu.save_state_bytes().unwrap());
+    assert_eq!(before, app.emu.machine_state_bytes().unwrap());
     let (_, actions) = run_content_frame(
         &context,
         &mut layout,
@@ -1142,7 +1142,7 @@ fn console_paste_history_and_execution_are_separate_from_layout() {
     assert!(panel.input.is_empty());
     assert_eq!(
         before,
-        app.emu.save_state_bytes().unwrap(),
+        app.emu.machine_state_bytes().unwrap(),
         "layout cannot execute commands"
     );
     app.console_panel = Some(panel);
@@ -1335,7 +1335,7 @@ fn analyzer_tabs_and_resource_previews_leave_machine_state_unchanged() {
         app.frame_analyzer_set_tab(tab);
         app.frame_analyzer_select_resource(resource);
         let mut panel = app.frame_analyzer_panel.clone().unwrap();
-        let before = app.emu.save_state_bytes().unwrap();
+        let before = app.emu.machine_state_bytes().unwrap();
         let view = app.build_frame_analyzer_view(&panel);
         if tab == ui::AnalyzerTab::Blits {
             assert!(view.blits.is_some());
@@ -1355,7 +1355,7 @@ fn analyzer_tabs_and_resource_previews_leave_machine_state_unchanged() {
                 .tessellate(output.shapes, output.pixels_per_point)
                 .is_empty());
         }
-        assert_eq!(before, app.emu.save_state_bytes().unwrap(), "{tab:?}");
+        assert_eq!(before, app.emu.machine_state_bytes().unwrap(), "{tab:?}");
     }
 }
 
@@ -1788,7 +1788,7 @@ fn play_and_debug_preserve_panels_capture_and_explicit_run_state() {
     let capture = app.emu.bus().frame_bus_trace().unwrap().frame;
     for paused in [true, false] {
         app.paused = paused;
-        let before = app.emu.save_state_bytes().unwrap();
+        let before = app.emu.machine_state_bytes().unwrap();
         for _ in 0..3 {
             app.apply_egui_debugger_action(Action::CloseWorkspace);
             assert!(!app.debug_layout_active);
@@ -1804,7 +1804,7 @@ fn play_and_debug_preserve_panels_capture_and_explicit_run_state() {
             assert_eq!(app.console_panel.as_ref().unwrap().input, "status");
             assert_eq!(app.frame_analyzer_panel.as_ref().unwrap().selected_hpos, 96);
             assert_eq!(app.emu.bus().frame_bus_trace().unwrap().frame, capture);
-            assert_eq!(app.emu.save_state_bytes().unwrap(), before);
+            assert_eq!(app.emu.machine_state_bytes().unwrap(), before);
         }
     }
 }
@@ -1822,10 +1822,10 @@ fn debug_input_focus_blocks_guest_qualifiers_and_releases_held_input() {
         physical_key: PhysicalKey::Code(KeyCode::ShiftLeft),
         state: ElementState::Pressed,
     };
-    let before = app.emu.save_state_bytes().unwrap();
+    let before = app.emu.machine_state_bytes().unwrap();
     app.handle_raw_device_key_event(shift());
     assert!(!app.amiga_rawkey_held(0x60));
-    assert_eq!(app.emu.save_state_bytes().unwrap(), before);
+    assert_eq!(app.emu.machine_state_bytes().unwrap(), before);
     app.capture_debug_guest_input();
     assert!(app.debug_guest_input);
     app.handle_raw_device_key_event(shift());
@@ -1907,7 +1907,7 @@ fn host_shortcuts_remain_available_without_stealing_text_edits() {
 #[test]
 fn debug_display_stays_clear_of_inspectors_and_clicks_only_transfer_input() {
     let mut app = test_app();
-    let before = app.emu.save_state_bytes().unwrap();
+    let before = app.emu.machine_state_bytes().unwrap();
     for width in [900.0, 1440.0, 1920.0] {
         let context = egui::Context::default();
         configure_style(&context);
@@ -1986,7 +1986,7 @@ fn debug_display_stays_clear_of_inspectors_and_clicks_only_transfer_input() {
         }
         assert_eq!(clicked, [Action::CaptureDisplay]);
     }
-    assert_eq!(app.emu.save_state_bytes().unwrap(), before);
+    assert_eq!(app.emu.machine_state_bytes().unwrap(), before);
 }
 
 #[test]
