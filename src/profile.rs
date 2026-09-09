@@ -28,7 +28,11 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 pub mod bartman;
-pub mod coverage;
+/// Guest code coverage. The collector itself lives outside this module so
+/// the CPU can count instructions in builds without the `control` feature
+/// (the libretro core, the standalone player, the browser build); this
+/// keeps the `profile::coverage` path its callers already use.
+pub use crate::coverage;
 #[cfg(feature = "dap")]
 pub mod lcov;
 #[cfg(feature = "dap")]

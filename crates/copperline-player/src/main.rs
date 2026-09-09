@@ -165,11 +165,16 @@ fn main() -> Result<()> {
         live_audio,
         copperline::sampler::SamplerRequest::default(),
     );
-    if capture {
+    // The run reports its own status (a failed screenshot expectation, a
+    // guest return code) rather than exiting itself, so the bundle passes
+    // it on the way the emulator's own front end does.
+    let status = if capture {
         log::info!("bundle verification: running without a window");
-        return app.run_headless();
-    }
-    app.run()
+        app.run_headless()?
+    } else {
+        app.run()?
+    };
+    std::process::exit(status)
 }
 
 struct CliArgs {

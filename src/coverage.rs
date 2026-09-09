@@ -353,6 +353,9 @@ mod tests {
     /// four-instruction ROM loop at $F80010, so a frame of execution counts
     /// every one of those words and nothing else.
     #[cfg(feature = "control")]
+    // Needs a whole emulator, which only the control feature's test
+    // helper builds; the counters themselves are tested above without one.
+    #[cfg(feature = "control")]
     #[test]
     fn retired_instructions_are_counted_by_the_precise_loop() {
         let mut emu = crate::control::test_emulator();

@@ -88,6 +88,7 @@ pub mod ipf;
 // codes and produces the same `JoystickState` the gamepad reader does), so it
 // rides the same feature gate as `gamepad`. The autofire policy that pairs
 // with it lives in `config`, which every build has.
+pub mod coverage;
 #[cfg(feature = "coppersynth")]
 pub mod csynth;
 #[cfg(feature = "frontend")]

@@ -165,7 +165,7 @@ pub struct M68kMachine {
     /// Host-side coverage counter (`profile.start {"coverage": true}` and
     /// `--run PROG --coverage FILE`): one hit per retired instruction PC.
     /// Never serialized; forces the precise loop while armed.
-    coverage: Option<crate::profile::coverage::CoverageCollector>,
+    coverage: Option<crate::coverage::CoverageCollector>,
     /// A `--coverage` run waiting for its program: checked before every
     /// instruction (like the loadseg catch) so counting starts at the
     /// program's first instruction, not at the next frame boundary.
@@ -2006,13 +2006,13 @@ impl M68kMachine {
         if self.coverage.is_some() {
             return false;
         }
-        self.coverage = Some(crate::profile::coverage::CoverageCollector::new(ranges));
+        self.coverage = Some(crate::coverage::CoverageCollector::new(ranges));
         self.note_jit_debug_fallback();
         true
     }
 
     /// Disarm and hand back the counters.
-    pub fn stop_coverage(&mut self) -> Option<crate::profile::coverage::CoverageCollector> {
+    pub fn stop_coverage(&mut self) -> Option<crate::coverage::CoverageCollector> {
         self.coverage.take()
     }
 
@@ -2021,10 +2021,10 @@ impl M68kMachine {
     }
 
     /// The counters so far, while armed.
-    pub fn coverage_snapshot(&self) -> Option<crate::profile::coverage::CoverageData> {
+    pub fn coverage_snapshot(&self) -> Option<crate::coverage::CoverageData> {
         self.coverage
             .as_ref()
-            .map(crate::profile::coverage::CoverageCollector::snapshot)
+            .map(crate::coverage::CoverageCollector::snapshot)
     }
 
     #[cfg(test)]
@@ -2095,7 +2095,7 @@ impl M68kMachine {
         if ranges.is_empty() {
             ranges = segments.clone();
         }
-        self.coverage = Some(crate::profile::coverage::CoverageCollector::new(&ranges));
+        self.coverage = Some(crate::coverage::CoverageCollector::new(&ranges));
         self.coverage_loaded = Some(segments);
         self.coverage_arm = None;
     }
