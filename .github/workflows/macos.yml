@@ -89,10 +89,17 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Upload slice for the package job
+        # The emulator plus its two command-line companions (copperline-ctl
+        # and copperline-import-uae are default-feature binaries, so the
+        # build above already produced them); build-dmg.sh lipo-joins each
+        # one into the bundle's Contents/MacOS.
         uses: actions/upload-artifact@v7
         with:
           name: macos-slice-${{ matrix.arch }}
-          path: target/${{ matrix.target }}/release/copperline
+          path: |
+            target/${{ matrix.target }}/release/copperline
+            target/${{ matrix.target }}/release/copperline-ctl
+            target/${{ matrix.target }}/release/copperline-import-uae
           if-no-files-found: error
 
   package:
@@ -118,7 +125,7 @@ jobs:
         # the architecture its directory claims). Artifact zips do not
         # preserve the executable bit, hence the chmod.
         run: |
-          chmod +x prebuilt/*/copperline
+          chmod +x prebuilt/*/copperline prebuilt/*/copperline-ctl prebuilt/*/copperline-import-uae
           PREBUILT_DIR=prebuilt packaging/macos/build-dmg.sh
       - name: Locate artifact
         id: artifact
@@ -160,6 +167,17 @@ jobs:
           sudo softwareupdate --install-rosetta --agree-to-license
           arch -x86_64 "$bin" --noaudio --screenshot-after 10 smoke-x86_64.png
           test -s smoke-x86_64.png
+          # The command-line companions ship beside the emulator inside the
+          # bundle (copperline-ctl launches the copperline next to it), are
+          # universal like it, and start on both architectures.
+          for tool in copperline-ctl copperline-import-uae; do
+            t="$app/Contents/MacOS/$tool"
+            test -x "$t"
+            lipo -archs "$t" | grep -q arm64
+            lipo -archs "$t" | grep -q x86_64
+            "$t" --help >/dev/null
+            arch -x86_64 "$t" --help >/dev/null
+          done
           trap - EXIT
           hdiutil detach "$mnt"
       - name: Upload smoke screenshots

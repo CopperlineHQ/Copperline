@@ -641,6 +641,12 @@ fn run_size_report() -> Result<std::path::PathBuf, String> {
 }
 
 fn main() -> ExitCode {
+    // A help request is not a usage error: the packaging smoke tests (and
+    // anyone probing a fresh install) check the exit status.
+    if matches!(std::env::args().nth(1).as_deref(), Some("-h" | "--help")) {
+        println!("{}", usage());
+        return ExitCode::SUCCESS;
+    }
     if std::env::args().nth(1).as_deref() == Some("size-report") {
         return match run_size_report() {
             Ok(path) => {

@@ -43,6 +43,24 @@ own Kickstart ROM and disk/hard-disk images, and launch from a terminal with:
 
 Run that binary with --help for the full command-line surface.
 
+Command-line tools
+------------------
+Two companion programs sit next to the emulator inside the bundle, in
+Copperline.app/Contents/MacOS:
+
+  copperline-ctl         Client for the control protocol (scripting and AI
+                         agents), the MCP server mode (--mcp) and the Debug
+                         Adapter Protocol adapter (--dap) used by the VS Code
+                         extension. It launches the copperline beside it.
+                         Add that directory to PATH, or point the VS Code
+                         setting copperline.ctlExecutable at
+                         /Applications/Copperline.app/Contents/MacOS/copperline-ctl
+  copperline-import-uae  Converts a WinUAE, Amiberry or FS-UAE config file
+                         into a Copperline TOML config:
+                         copperline-import-uae --from winuae --in game.uae --out game.toml
+
+Homebrew installs (brew install copperline) put the same two tools on PATH.
+
 Bridged Ethernet
 ----------------
 User-mode NAT needs no setup. Direct bridged Ethernet uses macOS's system

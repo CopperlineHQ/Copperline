@@ -7,7 +7,8 @@ name: Windows
 # (the zip uses the shipping release profile; tests use the optimized ci
 # profile without fat LTO), then the checks fan out in
 # parallel against those artifacts, mirroring ci.yml: the packaged zip is
-# booted from a clean directory, and the unit suites plus the probe golden
+# booted from a clean directory (and its copperline-ctl / import-uae
+# companions started), and the unit suites plus the probe golden
 # renders (pixel-exact deterministic boots on the bundled AROS ROM) run
 # against the prebuilt test binaries. This is also the only Windows coverage
 # (the main CI runs on macOS and Linux), so the code-path triggers below run
@@ -243,6 +244,15 @@ jobs:
           & $exe.FullName --noaudio --screenshot-after 10 smoke.png
           if ($LASTEXITCODE -ne 0) { throw "packaged emulator exited with $LASTEXITCODE" }
           if ((Get-Item smoke.png).Length -eq 0) { throw "screenshot is empty" }
+          # The command-line companions must ship beside the emulator (the
+          # VS Code extension and MCP clients run copperline-ctl, which
+          # launches the copperline.exe next to it) and must start.
+          foreach ($tool in @("copperline-ctl.exe", "copperline-import-uae.exe")) {
+            $path = Join-Path $exe.DirectoryName $tool
+            if (-not (Test-Path $path)) { throw "$tool missing from the zip" }
+            & $path --help | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "$tool --help exited with $LASTEXITCODE" }
+          }
 
   unit-tests:
     name: Unit tests (${{ matrix.arch }})

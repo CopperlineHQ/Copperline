@@ -29,7 +29,9 @@ type and runs `copperline-ctl --dap` from your PATH. The settings
 `copperline.ctlExecutable` and
 `copperline.emulatorExecutable` name the two executable files when they
 are elsewhere (a source build's `target/release/copperline-ctl` and
-`target/release/copperline`). A launch configuration:
+`target/release/copperline`, or the copies every release package ships;
+see [Command-line tools](../guide/getting-started.md#command-line-tools)
+for where each package puts them). A launch configuration:
 
 ```json
 {

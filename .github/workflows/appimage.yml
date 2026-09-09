@@ -56,6 +56,7 @@ jobs:
         run: |
           echo "path=$(ls Copperline-*.AppImage | head -n1)" >> "$GITHUB_OUTPUT"
           echo "helper=$(ls Copperline-*-net-helper.tar.gz | head -n1)" >> "$GITHUB_OUTPUT"
+          echo "tools=$(ls Copperline-*-tools.tar.gz | head -n1)" >> "$GITHUB_OUTPUT"
       - name: Smoke test the AppImage
         # Boot the finished AppImage from an empty directory: the run must
         # find the bundled AROS ROM through the AppDir's
@@ -74,6 +75,12 @@ jobs:
           cd "$smoke"
           "$appimage" --noaudio --screenshot-after 10 smoke.png
           test -s smoke.png
+          # The command-line tools tarball is a release asset of its own;
+          # both tools must be in it and must start.
+          tar -xzf "$GITHUB_WORKSPACE/${{ steps.artifact.outputs.tools }}"
+          tools="$(ls -d Copperline-*-tools)"
+          "$tools/copperline-ctl" --help >/dev/null
+          "$tools/copperline-import-uae" --help >/dev/null
       - uses: actions/upload-artifact@v7
         with:
           name: copperline-appimage
@@ -84,6 +91,11 @@ jobs:
           name: copperline-linux-net-helper
           path: ${{ steps.artifact.outputs.helper }}
           if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: copperline-linux-tools
+          path: ${{ steps.artifact.outputs.tools }}
+          if-no-files-found: error
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v3
@@ -91,3 +103,4 @@ jobs:
           files: |
             ${{ steps.artifact.outputs.path }}
             ${{ steps.artifact.outputs.helper }}
+            ${{ steps.artifact.outputs.tools }}
