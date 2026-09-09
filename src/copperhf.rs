@@ -199,6 +199,10 @@ const IOERR_BADADDRESS: i8 = -5;
 // TDERR_DiskChanged is a plain positive io_Error value, not part of the
 // IOERR_* family above.
 const TDERR_DISK_CHANGED: i8 = 29;
+/// `TDERR_WriteProt`: the medium refuses writes, which is what a
+/// write-protected image (a CHD with no write overlay, a read-only host
+/// disk) comes back with.
+const TDERR_WRITE_PROT: i8 = 28;
 // devices/scsidisk.h: HD_SCSICMD's io_Error when the target returned a
 // non-GOOD scsi_Status (the request itself was delivered and answered).
 const HFERR_BAD_STATUS: i8 = 45;
@@ -317,6 +321,9 @@ enum WorkerResult {
         read_data: Option<Vec<u8>>,
     },
     RwFailed,
+    /// The unit's image refused the write as write-protected: reported to
+    /// the guest as `TDERR_WriteProt`, distinct from a plain I/O failure.
+    WriteProtected,
     UpdateOk,
     /// The unit's `flush()` returned an error: distinct from `UpdateOk` so
     /// the guest is told CMD_UPDATE failed rather than being lied to about
@@ -534,6 +541,9 @@ fn execute_job(units: &UnitsShared, job: WorkerJob) -> WorkerResult {
                     };
                     if let Err(e) = disk.disk.write_sector(start_lba + i, chunk) {
                         log::warn!("copperhf: unit {unit}: write_sector failed: {e}");
+                        if e.kind() == std::io::ErrorKind::PermissionDenied {
+                            return WorkerResult::WriteProtected;
+                        }
                         return WorkerResult::RwFailed;
                     }
                 }
@@ -623,6 +633,11 @@ pub struct CopperhfBoard {
     /// unit-table lock. Updated at attach/eject time (both only reachable
     /// while quiesced) and at drain time for a guest `TD_EJECT`.
     media: [bool; NUM_UNITS],
+    /// Board-cached "the unit's image refuses writes" per unit, from
+    /// [`HardDriveImage::write_protected`] at attach time, so
+    /// `CHF_UNIT_RDONLY`/`TD_PROTSTATUS` answer without taking the
+    /// unit-table lock. Cleared with `media` at eject.
+    rdonly: [bool; NUM_UNITS],
     /// Board-cached `total_sectors` per unit, valid while `media[unit]` (and
     /// left stale-but-harmless after an eject -- range checks against a
     /// media-absent unit are answered by the worker's own authoritative
@@ -672,6 +687,7 @@ impl CopperhfBoard {
             units,
             present: [false; NUM_UNITS],
             media: [false; NUM_UNITS],
+            rdonly: [false; NUM_UNITS],
             unit_sectors: [0; NUM_UNITS],
             change_count: [0; NUM_UNITS],
             changed_mask: 0,
@@ -717,6 +733,7 @@ impl CopperhfBoard {
             "copperhf: attach_unit called with requests in flight -- quiesce first"
         );
         let total_sectors = image.total_sectors();
+        self.rdonly[unit] = image.write_protected();
         self.units.lock().unwrap()[unit] = Some(ScsiDisk::from_disk(image));
         self.present[unit] = true;
         self.media[unit] = true;
@@ -760,6 +777,7 @@ impl CopperhfBoard {
         );
         let image = self.units.lock().unwrap()[unit].take();
         self.media[unit] = false;
+        self.rdonly[unit] = false;
         self.change_count[unit] = self.change_count[unit].wrapping_add(1);
         self.changed_mask |= 1 << unit;
         image.map(|d| d.disk)
@@ -797,17 +815,17 @@ impl CopperhfBoard {
         mask
     }
 
-    /// Always reports every attached unit as writable, through M4/M5.
-    ///
-    /// Deviation from the milestone note: there is no per-image read-only
-    /// flag anywhere in the shared `HardDriveImage` layer today (see
-    /// COPPERHF-DEVICE-PLAN.md's "Deferred" section) -- not even for a host
-    /// disk, which exposes `is_host_disk()` but no writability query. Wiring
-    /// `CHF_UNIT_RDONLY`/`TD_PROTSTATUS` up to something real is therefore a
-    /// shared-layer follow-up, not something this board can honestly report
-    /// on its own.
+    /// `CHF_UNIT_RDONLY`: bit *n* set = unit *n*'s image refuses writes
+    /// (`HardDriveImage::write_protected`: a CHD with no write overlay, a
+    /// read-only host disk). An ordinary image file is always writable, so
+    /// this reads 0 for every unit a typical configuration attaches.
     fn rdonly_bitmask(&self) -> u16 {
-        0
+        self.rdonly
+            .iter()
+            .enumerate()
+            .filter(|(_, &rdonly)| rdonly)
+            .map(|(unit, _)| 1u16 << unit)
+            .sum()
     }
 
     fn selected_unit(&self) -> Option<usize> {
@@ -1208,9 +1226,6 @@ impl CopperhfBoard {
                 None => (IOERR_OPENFAIL, 0),
             },
             TD_PROTSTATUS => match self.valid_unit(header.unit) {
-                // rdonly_bitmask() is always 0 today (see its own doc
-                // comment); mirrored here rather than hard-coded so the two
-                // stay in lockstep if that ever changes.
                 Some(unit) => (0, u32::from(self.rdonly_bitmask() & (1 << unit) != 0)),
                 None => (IOERR_OPENFAIL, 0),
             },
@@ -1323,6 +1338,7 @@ impl CopperhfBoard {
                 match self.worker.recv() {
                     Some(WorkerResult::Ejected) => {
                         self.media[unit] = false;
+                        self.rdonly[unit] = false;
                         self.change_count[unit] = self.change_count[unit].wrapping_add(1);
                         self.changed_mask |= 1 << unit;
                         self.complete(ptr, flags, 0, 0, host);
@@ -1365,6 +1381,7 @@ impl CopperhfBoard {
                 (0, header.length)
             }
             (IoDrainKind::Rw { .. }, WorkerResult::RwFailed) => (IOERR_BADADDRESS, 0),
+            (IoDrainKind::Rw { .. }, WorkerResult::WriteProtected) => (TDERR_WRITE_PROT, 0),
             (IoDrainKind::Update, WorkerResult::UpdateOk) => (0, 0),
             (IoDrainKind::Update, WorkerResult::UpdateFailed) => (IOERR_BADADDRESS, 0),
             (
@@ -1453,6 +1470,7 @@ impl CopperhfBoard {
                 PendingRequest::Eject { unit, .. } => {
                     if matches!(self.worker.recv(), Some(WorkerResult::Ejected)) {
                         self.media[unit] = false;
+                        self.rdonly[unit] = false;
                         self.change_count[unit] = self.change_count[unit].wrapping_add(1);
                         self.changed_mask |= 1 << unit;
                     }
@@ -1545,12 +1563,18 @@ impl<'de> serde::Deserialize<'de> for CopperhfBoard {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let state = CopperhfBoardState::deserialize(deserializer)?;
         let media = std::array::from_fn(|i| state.units[i].is_some());
+        let rdonly = std::array::from_fn(|i| {
+            state.units[i]
+                .as_ref()
+                .is_some_and(|disk| disk.disk.write_protected())
+        });
         let units: UnitsShared = Arc::new(Mutex::new(state.units));
         let worker = Worker::spawn(Arc::clone(&units));
         Ok(Self {
             units,
             present: state.present,
             media,
+            rdonly,
             unit_sectors: state.unit_sectors,
             change_count: state.change_count,
             changed_mask: state.changed_mask,
@@ -2659,6 +2683,61 @@ mod tests {
         ring_doorbell_long(&mut board, &mut host, ptr3);
         assert_eq!(io_error(&mem, ptr3), 0);
         assert_eq!(io_actual(&mem, ptr3), 0, "writable");
+    }
+
+    #[test]
+    fn write_protected_unit_reports_rdonly_and_fails_writes_with_writeprot() {
+        let (image, path) = crate::harddrive::chd::tests::write_protected_image("chf-wp", 16);
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, open_image("chf-rw", 16));
+        board.attach_unit(1, image);
+        let mut mem = memory();
+        let mut host = DeviceHost::new(&mut mem);
+        assert_eq!(
+            board.read(CHF_UNIT_RDONLY, 2, &mut host),
+            0b10,
+            "only the write-protected unit is flagged"
+        );
+
+        // TD_PROTSTATUS answers per unit from the same cache.
+        let ptr = 0x1000u32;
+        write_request(&mut mem, ptr, 1, TD_PROTSTATUS, 0, 0, 0, 0);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+        assert_eq!(io_error(&mem, ptr), 0);
+        assert_eq!(io_actual(&mem, ptr), 1, "write-protected");
+        let ptr = 0x1100u32;
+        write_request(&mut mem, ptr, 0, TD_PROTSTATUS, 0, 0, 0, 0);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+        assert_eq!(io_actual(&mem, ptr), 0, "the ordinary image is writable");
+
+        // A write is refused as TDERR_WriteProt, the trackdisk error a
+        // filesystem turns into its own write-protect requester.
+        let ptr = 0x1200u32;
+        let data_addr = 0x2000u32;
+        write_request(&mut mem, ptr, 1, CMD_WRITE, 0, 512, data_addr, 512);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+        assert_eq!(io_error(&mem, ptr), TDERR_WRITE_PROT);
+
+        // Reads are unaffected: sector 3 of the fixture carries its LBA.
+        let ptr = 0x1300u32;
+        let readback = 0x3000u32;
+        write_request(&mut mem, ptr, 1, CMD_READ, 0, 512, readback, 3 * 512);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+        assert_eq!(io_error(&mem, ptr), 0);
+        assert_eq!(
+            &mem.chip_ram[readback as usize..readback as usize + 4],
+            &3u32.to_be_bytes()
+        );
+
+        // Ejecting clears the flag with the media.
+        board.eject_unit(1);
+        let mut host = DeviceHost::new(&mut mem);
+        assert_eq!(board.read(CHF_UNIT_RDONLY, 2, &mut host), 0);
+        crate::harddrive::chd::tests::remove_write_protected_image(&path);
     }
 
     #[test]

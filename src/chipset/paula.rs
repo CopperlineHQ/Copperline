@@ -1038,6 +1038,16 @@ impl Paula {
         self.serial.baud_changed(PAULA_CLOCK_HZ / divisor);
     }
 
+    /// Tell the sink the line rate the current SERPER works out to, as
+    /// [`write_serper`](Self::write_serper) does on a write. For a sink
+    /// that has just been moved onto a restored machine (save-state load,
+    /// rewind), whose SERPER it never saw written: a host port follows the
+    /// rate, and must follow the restored one.
+    pub fn republish_serial_line_rate(&mut self) {
+        let divisor = self.serial_bit_cck();
+        self.serial.baud_changed(PAULA_CLOCK_HZ / divisor);
+    }
+
     /// INTENA writes use SET/CLR semantics on bit 15.
     pub fn write_intena(&mut self, val: u16) {
         let bits = val & 0x7FFF;

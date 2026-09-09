@@ -76,6 +76,8 @@ pub struct RawConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) ide: RawIde,
     #[serde(default, skip_serializing_if = "is_default")]
+    pub(crate) pcmcia: RawPcmcia,
+    #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) scsi: RawScsi,
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) copperhf: RawCopperhf,
@@ -272,6 +274,8 @@ impl RawConfig {
         take(&mut self.display.full_screen, &overlay.display.full_screen);
         take(&mut self.input.port1, &overlay.input.port1);
         take(&mut self.input.port2, &overlay.input.port2);
+        take(&mut self.input.port3, &overlay.input.port3);
+        take(&mut self.input.port4, &overlay.input.port4);
         take(&mut self.input.joystick, &overlay.input.joystick);
         take(&mut self.input.autofire_hz, &overlay.input.autofire_hz);
         take(&mut self.audio.output_device, &overlay.audio.output_device);
@@ -533,6 +537,15 @@ pub(crate) struct RawInput {
     /// ("cd32" on the CD32 profile).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) port2: Option<String>,
+    /// Joystick in the parallel-port four-player adapter's first socket:
+    /// "joystick" or "none". Naming one fits the adapter
+    /// (`[parallel] device = "joystick-adapter"`); an adapter named there
+    /// fills every socket these keys leave unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) port3: Option<String>,
+    /// Joystick in the adapter's second socket: same values.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) port4: Option<String>,
     /// Host mouse sensitivity, 0-100 (default 50).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) mouse_sensitivity: Option<u16>,
@@ -549,7 +562,8 @@ pub(crate) struct RawInput {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawSerial {
-    /// "stdout" (default), "off", "midi", "tcp", "tcp-connect", or "pty".
+    /// "stdout" (default), "off", "midi", "tcp", "tcp-connect", "pty",
+    /// "modem", or "device".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) mode: Option<String>,
     /// Host MIDI output endpoint name (substring match); MIDI mode only.
@@ -588,6 +602,10 @@ pub(crate) struct RawSerial {
     /// Remote host:port to dial; tcp-connect mode only, and required there.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) connect: Option<String>,
+    /// Host serial port path (or Windows COM name); device mode only, and
+    /// required there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) device: Option<String>,
     /// AT*T1/AT*T0 default at power-on: telnet NVT translation (the
     /// WiModem extra) on by default. Modem mode only. Defaults to false.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -767,6 +785,26 @@ pub(crate) struct RawIde {
     pub(crate) master: Option<RawDrive>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) slave: Option<RawDrive>,
+}
+
+/// `[pcmcia]`: the card in the A600/A1200 credit-card slot.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawPcmcia {
+    /// "none" (the default), "cf" (a CompactFlash/ATA card over a hard-disk
+    /// image), or "sram" (a static-RAM memory card).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) card: Option<String>,
+    /// CF: the image (anything `[ide]` accepts). SRAM: an optional file the
+    /// card's contents are read from and written back to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) path: Option<String>,
+    /// SRAM: the card's size, up to 4M.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) size: Option<String>,
+    /// SRAM: the card's write-protect switch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) read_only: Option<bool>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]

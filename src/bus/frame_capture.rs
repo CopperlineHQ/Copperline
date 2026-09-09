@@ -35,6 +35,9 @@ impl Bus {
             self.last_frame_render_events.clear();
             self.current_frame_render_events.clear();
         }
+        // The light pen sees this frame's beam through the geometry the
+        // frame just promoted: aim it now, before the first line scans.
+        self.arm_light_pen_for_frame();
         self.current_frame_collision_events.clear();
         self.current_frame_collision_control_events.clear();
         self.current_frame_collision_bpldat_events.clear();

@@ -306,7 +306,12 @@ snapshot:
 - Live host-directory mounts expose file contents and timestamps. File-backed
   hard disks and physical disks retain writes made after a snapshot.
 - Network, serial, MIDI, and sampler input can depend on external devices
-  or services. Physical floppy drives also require wall-clock pacing.
+  or services. A real host serial port (`[serial] mode = "device"`) is
+  live I/O like networking: its bytes and handshake lines arrive on the
+  host's clock, the port is never part of a save state (a load reopens
+  it and pushes the restored machine's DTR/RTS and line rate onto it),
+  and an adapter pulled mid-run reads as an unplugged cable. Physical
+  floppy drives also require wall-clock pacing.
 
 Use fixed image files and scripted inputs for deterministic regression
 tests. See [save-state boundaries](savestate.md#determinism-boundaries) for

@@ -1,42 +1,111 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Gayle gate array (A600/A1200): the ID register at $DE1000, the IDE
-//! interface at $DA0000, the Gayle status/interrupt/config registers at
-//! $DA8000-$DAA000, and empty-slot PCMCIA status.
+//! interface at $DA0000, and the PCMCIA status/change/enable/config
+//! registers at $DA8000-$DAB000.
 //!
 //! Decode and register layout follow the Commodore schematics as captured by
-//! the Linux `gayle.c` IDE driver and the ROM scsi.device: the IDE task
-//! file lives at $DA2000 with a 4-byte stride (byte registers on the odd
-//! word half, offset base+4*reg+2), and the control block register at
-//! base+$101A. None of this is on the chip bus; the CPU reaches it through
+//! the Linux `gayle.c` IDE driver, the `amigayle.h` header (disassembled
+//! from card.resource), and WinUAE's `gayle.cpp`: the IDE task file lives at
+//! $DA2000 with a 4-byte stride (byte registers on the odd word half, offset
+//! base+4*reg+2), and the control block register at base+$101A. None of
+//! this is on the chip bus; the CPU reaches it through
 //! `cpu_external_access`.
+//!
+//! The PCMCIA side: Gayle samples the slot's CD, BVD1, BVD2, WP, and
+//! READY/IREQ pins into the status register at $DA8000, latches every
+//! change of them into $DA9000 (write-to-clear, AND semantics), and drives
+//! INT2 or INT6 for the latched sources the $DAA000 enable register admits
+//! -- card detect always on INT6, write-enable and IDE on INT2, battery and
+//! busy/interrupt on whichever of the two the enable register's level bits
+//! pick. $DAB000 holds the programming-voltage and access-speed
+//! configuration. The slot's address windows ($600000 common memory,
+//! $A00000 attribute, $A20000/$A30000 I/O, $A40000 reset) are decoded by
+//! the bus with the card in [`crate::pcmcia`]; Gayle only says whether the
+//! slot is enabled.
 //!
 //! The drives, the task file, and the command engine are the shared ATA core
 //! in [`crate::ata`]; Gayle is the front-end that decodes for it and adds its
 //! own ID, interrupt, and PCMCIA registers.
 
 use crate::ata::{task_file_reg, AtaBus, AtaDevice, IdeReg};
+use crate::pcmcia::{PIN_BSY_IRQ, PIN_BVD1, PIN_BVD2, PIN_CCDET, PIN_WR};
 
 pub use crate::ata::{AtapiDrive, IdeDrive, MAX_MULTIPLE, SECTOR_SIZE};
 
 // Gayle interrupt/status bit layout (shared by the status, interrupt
 // change, and interrupt enable registers).
 pub const GAYLE_IRQ_IDE: u8 = 0x80;
-// PCMCIA bits (CCDET/BVD1/BVD2/WR/BSY) stay clear: no card inserted.
+/// Card detect changed ($DA9000) / card-detect interrupt enable ($DAA000).
+pub const GAYLE_IRQ_CCDET: u8 = PIN_CCDET;
+/// Battery voltage 1 / status change.
+pub const GAYLE_IRQ_BVD1: u8 = PIN_BVD1;
+/// Battery voltage 2 / digital audio.
+pub const GAYLE_IRQ_BVD2: u8 = PIN_BVD2;
+/// Write enable changed.
+pub const GAYLE_IRQ_WR: u8 = PIN_WR;
+/// Busy / card interrupt request.
+pub const GAYLE_IRQ_BSY: u8 = PIN_BSY_IRQ;
+/// The pin-change latches: every status bit that is a slot pin.
+pub const GAYLE_PIN_MASK: u8 = PIN_CCDET | PIN_BVD1 | PIN_BVD2 | PIN_WR | PIN_BSY_IRQ;
+/// $DA9000 bit 1: reset the machine when card detect changes (preliminary
+/// Gayle datasheet; WinUAE `GAYLE_IRQ_RESET`).
+pub const GAYLE_IRQ_RESET: u8 = 0x02;
+/// $DA9000 bit 0: bus-error the access when card detect changes (WinUAE
+/// `GAYLE_IRQ_BERR`). Both bits written together reset the card's
+/// configuration instead.
+pub const GAYLE_IRQ_BERR: u8 = 0x01;
+/// $DAA000 bit 1: battery-voltage interrupts on INT6 instead of INT2.
+pub const GAYLE_INT_BVD_LEV: u8 = 0x02;
+/// $DAA000 bit 0: busy/IRQ interrupts on INT6 instead of INT2.
+pub const GAYLE_INT_BSY_LEV: u8 = 0x01;
+/// $DA8000 write bit 1: enable the card's digital-audio output.
+pub const GAYLE_CS_DAEN: u8 = 0x02;
+/// $DA8000 write bit 0: disable the slot (windows unmapped, pins read as an
+/// empty socket).
+pub const GAYLE_CS_DIS: u8 = 0x01;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Gayle {
     /// $DE1000 ID shifted out MSB-first on D7: $D0 (A600) / $D1 (A1200).
     id: u8,
     id_bit: u8,
-    /// $DA9000 latched interrupt-change bits (write-to-clear with AND).
+    /// $DA9000 latched interrupt-change bits (write-to-clear with AND),
+    /// plus the RESET/BERR control bits in 1:0.
     intreq: u8,
-    /// $DA9800 interrupt enable.
+    /// $DAA000 interrupt enable, plus the BVD/BSY level-select bits in 1:0.
     intena: u8,
-    /// $DAA000 config (PCMCIA voltage/resistor config; stored only).
+    /// $DAB000 config (PCMCIA programming voltage, access speed).
     config: u8,
     /// The IDE cable behind the gate array.
     ata: AtaBus,
+    /// The slot pins as the card drives them, in status-register layout
+    /// (zero for an empty socket). The bus refreshes this whenever the card
+    /// changes or is accessed.
+    #[serde(default)]
+    raw_pins: u8,
+    /// The pins as the status register last showed them: `raw_pins` while
+    /// the slot is enabled, an empty socket otherwise. The change latches
+    /// are the difference between successive values.
+    #[serde(default)]
+    pins: u8,
+    /// $DA8000 as written: bits 1:0 are the DAEN/DIS controls, bits 7:2 read
+    /// back OR-ed into the status (card.resource's CardMiscControl writes
+    /// the write-protect-override bit there).
+    #[serde(default)]
+    status_control: u8,
+    /// The slot windows overlap Zorro II space: with more than 4 MiB of
+    /// fast RAM configured there, Gayle's PCMCIA decode gives way and the
+    /// slot behaves as empty.
+    #[serde(default)]
+    slot_shadowed: bool,
+    /// A write to $DA9000 with RESET and BERR both set asks for the card's
+    /// configuration to be reset; the bus drains this to reach the card.
+    #[serde(default)]
+    card_reset_request: bool,
+    /// Card detect changed with $DA9000's RESET bit set: reset the machine.
+    #[serde(default)]
+    machine_reset_request: bool,
 }
 
 impl Gayle {
@@ -48,6 +117,12 @@ impl Gayle {
             intena: 0,
             config: 0,
             ata: AtaBus::new(),
+            raw_pins: 0,
+            pins: 0,
+            status_control: 0,
+            slot_shadowed: false,
+            card_reset_request: false,
+            machine_reset_request: false,
         }
     }
 
@@ -97,21 +172,137 @@ impl Gayle {
     }
 
     /// System reset: clear the register file and any in-flight transfer but
-    /// keep the mounted drives.
+    /// keep the mounted drives. The card stays in its socket: its pins are
+    /// sampled afresh with no change latched, as on a real power-on.
     pub fn reset(&mut self) {
         self.id_bit = 0;
         self.intreq = 0;
         self.intena = 0;
         self.config = 0;
+        self.status_control = 0;
+        self.card_reset_request = false;
+        self.machine_reset_request = false;
+        self.pins = self.effective_pins();
         self.ata.reset();
     }
 
-    /// The INT2 line into Paula (PORTS): the latched interrupt-change bits
-    /// gated by the $DAA000 enable register (the ROM writes $EC there:
-    /// IDE plus the PCMCIA detect/change sources). Paula's INTREQ latch is
-    /// level-fed, so the bus re-asserts INTREQ.PORTS while this stays true.
+    // ----- PCMCIA slot state -----------------------------------------------
+
+    /// Whether the slot's address windows are decoded: not shadowed by
+    /// Zorro II RAM, and not disabled through the status register.
+    pub fn slot_enabled(&self) -> bool {
+        !self.slot_shadowed && self.status_control & GAYLE_CS_DIS == 0
+    }
+
+    pub fn slot_shadowed(&self) -> bool {
+        self.slot_shadowed
+    }
+
+    /// Decide the fast-RAM conflict rule at machine build: with more than
+    /// 4 MiB of Zorro II fast RAM the common window is RAM and the whole
+    /// slot goes dark.
+    pub fn set_slot_shadowed(&mut self, shadowed: bool) {
+        self.slot_shadowed = shadowed;
+        self.sync_pins();
+    }
+
+    /// The card's pins as the bus last sampled them.
+    pub fn card_pins(&self) -> u8 {
+        self.raw_pins
+    }
+
+    /// Report the pins the card in the socket drives (zero for an empty
+    /// socket). Any bit that differs from what the status register showed
+    /// is latched into $DA9000; a high busy/IRQ pin is latched for as long
+    /// as it stays high (it is a level, as the IDE bit is).
+    pub fn set_card_pins(&mut self, raw: u8) {
+        self.raw_pins = raw & GAYLE_PIN_MASK;
+        self.sync_pins();
+    }
+
+    fn effective_pins(&self) -> u8 {
+        if self.slot_enabled() {
+            self.raw_pins
+        } else {
+            0
+        }
+    }
+
+    fn sync_pins(&mut self) {
+        let now = self.effective_pins();
+        let changed = now ^ self.pins;
+        self.pins = now;
+        self.intreq |= changed;
+        if now & PIN_BSY_IRQ != 0 {
+            self.intreq |= GAYLE_IRQ_BSY;
+        }
+        if changed & PIN_CCDET != 0 {
+            // The preliminary datasheet's card-change actions, as WinUAE
+            // reads them: RESET alone reboots the machine, BERR alone would
+            // bus-error the access (TODO: not modelled; it needs a
+            // deferred bus-error injection into the running instruction),
+            // both together mean neither.
+            match self.intreq & (GAYLE_IRQ_RESET | GAYLE_IRQ_BERR) {
+                GAYLE_IRQ_RESET => self.machine_reset_request = true,
+                GAYLE_IRQ_BERR => {
+                    log::warn!("gayle: card-detect change with BERR armed is not modelled")
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Drain the request a $DA9000 RESET+BERR write made to reset the
+    /// card's configuration.
+    pub fn take_card_reset_request(&mut self) -> bool {
+        std::mem::take(&mut self.card_reset_request)
+    }
+
+    /// Drain the request a card-detect change made to reset the machine.
+    pub fn take_machine_reset_request(&mut self) -> bool {
+        std::mem::take(&mut self.machine_reset_request)
+    }
+
+    /// The bits of $DA9000 currently latched.
+    pub fn change_latches(&self) -> u8 {
+        self.intreq
+    }
+
+    // ----- interrupt lines ------------------------------------------------
+
+    /// The latched sources the enable register admits.
+    fn enabled_sources(&self) -> u8 {
+        self.intreq & self.intena & (GAYLE_IRQ_IDE | GAYLE_PIN_MASK)
+    }
+
+    /// The INT2 line into Paula (PORTS): IDE and write-enable changes, plus
+    /// battery and busy/IRQ changes unless their level bits send them to
+    /// INT6. Paula's INTREQ latch is level-fed, so the bus re-asserts
+    /// INTREQ.PORTS while this stays true.
     pub fn int2_line(&self) -> bool {
-        self.intreq & self.intena != 0
+        let sources = self.enabled_sources();
+        let mut mask = GAYLE_IRQ_IDE | GAYLE_IRQ_WR;
+        if self.intena & GAYLE_INT_BVD_LEV == 0 {
+            mask |= GAYLE_IRQ_BVD1 | GAYLE_IRQ_BVD2;
+        }
+        if self.intena & GAYLE_INT_BSY_LEV == 0 {
+            mask |= GAYLE_IRQ_BSY;
+        }
+        sources & mask != 0
+    }
+
+    /// The INT6 line into Paula (EXTER): card detect always, battery and
+    /// busy/IRQ when their level bits say so.
+    pub fn int6_line(&self) -> bool {
+        let sources = self.enabled_sources();
+        let mut mask = GAYLE_IRQ_CCDET;
+        if self.intena & GAYLE_INT_BVD_LEV != 0 {
+            mask |= GAYLE_IRQ_BVD1 | GAYLE_IRQ_BVD2;
+        }
+        if self.intena & GAYLE_INT_BSY_LEV != 0 {
+            mask |= GAYLE_IRQ_BSY;
+        }
+        sources & mask != 0
     }
 
     /// Latch an IDE interrupt the cable raised during this access. Unlike the
@@ -213,21 +404,18 @@ impl Gayle {
     fn register_read(&mut self, addr: u32) -> u8 {
         match addr & 0xFFFF_F000 {
             0x00DA_8000 => {
-                // Status: live IDE INTRQ on bit 7. The PCMCIA pins are
-                // active-low and pulled up, so an EMPTY slot reads with the
-                // card-detect/battery/write/busy bits SET (0x7C); all-zero
-                // would tell card.resource a card is inserted and wedge boot
-                // waiting for it to become ready.
-                let pcmcia_empty = 0x7C;
+                // Status: the slot pins (all clear for an empty socket, so
+                // card.resource sees no card), the control bits as written,
+                // and live IDE INTRQ on bit 7.
+                let mut v = self.pins | self.status_control;
                 if self.ata.irq_level() {
-                    GAYLE_IRQ_IDE | pcmcia_empty
-                } else {
-                    pcmcia_empty
+                    v |= GAYLE_IRQ_IDE;
                 }
+                v
             }
             0x00DA_9000 => self.intreq,
             0x00DA_A000 => self.intena,
-            0x00DA_B000 => self.config,
+            0x00DA_B000 => self.config & 0x0F,
             _ => 0,
         }
     }
@@ -235,13 +423,26 @@ impl Gayle {
     fn register_write(&mut self, addr: u32, value: u8) {
         match addr & 0xFFFF_F000 {
             0x00DA_8000 => {
-                // Status register writes only touch the PCMCIA control bits;
-                // nothing modeled behind them with an empty slot.
+                let was_disabled = self.status_control & GAYLE_CS_DIS;
+                self.status_control = value;
+                if was_disabled != value & GAYLE_CS_DIS {
+                    // Disabling the slot pulls the pins to the empty-socket
+                    // state and enabling it samples the card again, so both
+                    // edges latch a card-detect change.
+                    self.sync_pins();
+                }
             }
             0x00DA_9000 => {
                 // Interrupt change: write-to-clear. Bits written as 1 are
-                // kept, bits written as 0 are cleared.
-                self.intreq &= value;
+                // kept, bits written as 0 are cleared; the two control bits
+                // are set by writing them, and both together reset the
+                // card's configuration.
+                self.intreq = (self.intreq & value) | (value & (GAYLE_IRQ_RESET | GAYLE_IRQ_BERR));
+                if self.intreq & (GAYLE_IRQ_RESET | GAYLE_IRQ_BERR)
+                    == GAYLE_IRQ_RESET | GAYLE_IRQ_BERR
+                {
+                    self.card_reset_request = true;
+                }
             }
             0x00DA_A000 => self.intena = value,
             0x00DA_B000 => self.config = value,
@@ -267,6 +468,7 @@ mod tests {
     use super::*;
     use crate::ata::{DH_LBA, ERR_ABRT, ST_DRDY, ST_DRQ, ST_DSC, ST_ERR};
     use crate::harddrive::{CYL_SECTORS, RDB_HEADS, RDB_SPT};
+    use crate::pcmcia::{PIN_BSY_IRQ, PIN_BVD1, PIN_BVD2, PIN_CCDET, PIN_WR};
     use std::path::PathBuf;
 
     fn temp_image(sectors: u64) -> PathBuf {
@@ -622,6 +824,181 @@ mod tests {
             "no phantom IDENTIFY: status stays at the pair-present pattern"
         );
         std::fs::remove_file(path).ok();
+    }
+
+    const GAYLE_CONFIG_REG: u32 = 0x00DA_B000;
+    const CARD_PINS: u8 = PIN_CCDET | PIN_BVD1 | PIN_BVD2 | PIN_WR;
+
+    /// An empty socket reads with every pin bit clear (card.resource sees
+    /// no card); inserting a card raises the pins it drives and latches
+    /// each as a change, and card detect goes out on INT6 once enabled.
+    #[test]
+    fn card_insert_sets_status_pins_latches_changes_and_raises_int6() {
+        let mut g = Gayle::new(0xD1);
+        assert_eq!(g.read(GAYLE_STATUS_REG, 1) as u8 & GAYLE_PIN_MASK, 0);
+        assert_eq!(g.read(GAYLE_INTREQ, 1) as u8 & GAYLE_PIN_MASK, 0);
+
+        g.set_card_pins(CARD_PINS);
+        assert_eq!(
+            g.read(GAYLE_STATUS_REG, 1) as u8 & GAYLE_PIN_MASK,
+            CARD_PINS
+        );
+        assert_eq!(g.read(GAYLE_INTREQ, 1) as u8 & GAYLE_PIN_MASK, CARD_PINS);
+        // Nothing enabled: nothing on either line.
+        assert!(!g.int2_line());
+        assert!(!g.int6_line());
+
+        // card.resource's enable word: IDE plus every card source.
+        g.write(GAYLE_INTENA, 1, 0xEC);
+        assert!(g.int6_line(), "card detect is an INT6 source");
+        assert!(g.int2_line(), "WR change is an INT2 source");
+
+        // Write-to-clear: dropping the detect and write-enable latches
+        // while keeping the rest.
+        g.write(
+            GAYLE_INTREQ,
+            1,
+            u32::from(!(GAYLE_IRQ_CCDET | GAYLE_IRQ_WR)),
+        );
+        assert_eq!(
+            g.read(GAYLE_INTREQ, 1) as u8 & GAYLE_PIN_MASK,
+            PIN_BVD1 | PIN_BVD2
+        );
+        assert!(!g.int6_line());
+        // BVD changes default to INT2 (level bit clear).
+        assert!(g.int2_line());
+        g.write(GAYLE_INTREQ, 1, 0);
+        assert!(!g.int2_line());
+
+        // Removing the card latches every pin again.
+        g.set_card_pins(0);
+        assert_eq!(g.read(GAYLE_STATUS_REG, 1) as u8 & GAYLE_PIN_MASK, 0);
+        assert_eq!(g.read(GAYLE_INTREQ, 1) as u8 & GAYLE_PIN_MASK, CARD_PINS);
+        assert!(g.int6_line());
+    }
+
+    /// The $DAA000 level bits steer the battery and busy/IRQ sources
+    /// between INT2 and INT6; card detect stays on INT6 regardless.
+    #[test]
+    fn enable_register_level_bits_route_bvd_and_bsy_between_int2_and_int6() {
+        let mut g = Gayle::new(0xD1);
+        g.set_card_pins(CARD_PINS);
+        g.write(GAYLE_INTREQ, 1, 0); // drop the insertion latches
+        g.write(GAYLE_INTENA, 1, u32::from(GAYLE_IRQ_BVD1 | GAYLE_IRQ_BSY));
+
+        // Battery pin drops: INT2 by default, INT6 with BVD_LEV.
+        g.set_card_pins(CARD_PINS & !PIN_BVD1);
+        assert!(g.int2_line());
+        assert!(!g.int6_line());
+        g.write(
+            GAYLE_INTENA,
+            1,
+            u32::from(GAYLE_IRQ_BVD1 | GAYLE_IRQ_BSY | GAYLE_INT_BVD_LEV),
+        );
+        assert!(!g.int2_line());
+        assert!(g.int6_line());
+        g.write(GAYLE_INTREQ, 1, u32::from(!GAYLE_IRQ_BVD1));
+
+        // A card interrupt (IREQ#) is a level: it stays latched while the
+        // pin is high even after a clear, and follows BSY_LEV.
+        g.set_card_pins(CARD_PINS & !PIN_BVD1 | PIN_BSY_IRQ);
+        assert!(g.int2_line(), "BSY_LEV clear: INT2");
+        g.write(GAYLE_INTREQ, 1, u32::from(!GAYLE_IRQ_BSY));
+        assert_eq!(g.read(GAYLE_INTREQ, 1) as u8 & GAYLE_IRQ_BSY, 0);
+        g.set_card_pins(CARD_PINS & !PIN_BVD1 | PIN_BSY_IRQ);
+        assert_ne!(
+            g.read(GAYLE_INTREQ, 1) as u8 & GAYLE_IRQ_BSY,
+            0,
+            "a high IRQ pin re-latches on the next sample"
+        );
+        g.write(
+            GAYLE_INTENA,
+            1,
+            u32::from(GAYLE_IRQ_BVD1 | GAYLE_IRQ_BSY | GAYLE_INT_BSY_LEV),
+        );
+        assert!(!g.int2_line());
+        assert!(g.int6_line(), "BSY_LEV set: INT6");
+        // Card detect always rides INT6, whatever the level bits say.
+        g.write(GAYLE_INTENA, 1, u32::from(GAYLE_IRQ_CCDET));
+        g.set_card_pins(0);
+        assert!(g.int6_line());
+        assert!(!g.int2_line());
+    }
+
+    /// $DA8000 writes: DIS pulls the socket to empty (latching the detect
+    /// change) and re-enabling samples the card again; the other written
+    /// bits read back OR-ed into the status (CardMiscControl's
+    /// write-protect override); $DAB000 keeps only its four config bits.
+    #[test]
+    fn status_control_bits_disable_the_slot_and_read_back() {
+        let mut g = Gayle::new(0xD1);
+        g.set_card_pins(CARD_PINS & !PIN_WR); // write-protected card
+        g.write(GAYLE_INTREQ, 1, 0);
+        assert!(g.slot_enabled());
+
+        g.write(GAYLE_STATUS_REG, 1, u32::from(GAYLE_CS_DIS));
+        assert!(!g.slot_enabled());
+        assert_eq!(g.read(GAYLE_STATUS_REG, 1) as u8 & GAYLE_PIN_MASK, 0);
+        assert_ne!(g.read(GAYLE_INTREQ, 1) as u8 & GAYLE_IRQ_CCDET, 0);
+        assert_ne!(g.read(GAYLE_STATUS_REG, 1) as u8 & GAYLE_CS_DIS, 0);
+        g.write(GAYLE_INTREQ, 1, 0);
+
+        // Write-protect override: bit 3 written reads back set.
+        g.write(GAYLE_STATUS_REG, 1, u32::from(PIN_WR | GAYLE_CS_DAEN));
+        assert!(g.slot_enabled());
+        assert_eq!(
+            g.read(GAYLE_STATUS_REG, 1) as u8 & (GAYLE_PIN_MASK | GAYLE_CS_DAEN),
+            CARD_PINS | GAYLE_CS_DAEN
+        );
+        assert_ne!(g.read(GAYLE_INTREQ, 1) as u8 & GAYLE_IRQ_CCDET, 0);
+
+        g.write(GAYLE_CONFIG_REG, 1, 0xF9);
+        assert_eq!(g.read(GAYLE_CONFIG_REG, 1), 0x09, "voltage/speed bits only");
+        // A word write lands on the even byte.
+        g.write(GAYLE_CONFIG_REG, 2, 0x0500);
+        assert_eq!(g.read(GAYLE_CONFIG_REG, 2), 0x0500);
+    }
+
+    /// $DA9000 bits 1:0 are set by writing them: both together ask for a
+    /// card configuration reset, RESET alone reboots the machine on the
+    /// next card-detect change.
+    #[test]
+    fn change_register_control_bits_request_card_and_machine_resets() {
+        let mut g = Gayle::new(0xD1);
+        g.write(GAYLE_INTREQ, 1, u32::from(GAYLE_IRQ_RESET | GAYLE_IRQ_BERR));
+        assert_eq!(
+            g.read(GAYLE_INTREQ, 1) as u8 & 3,
+            GAYLE_IRQ_RESET | GAYLE_IRQ_BERR
+        );
+        assert!(g.take_card_reset_request());
+        assert!(!g.take_card_reset_request(), "drained");
+        assert!(!g.take_machine_reset_request());
+
+        g.write(GAYLE_INTREQ, 1, u32::from(GAYLE_IRQ_RESET));
+        assert!(!g.take_card_reset_request());
+        g.set_card_pins(CARD_PINS);
+        assert!(g.take_machine_reset_request());
+        // A system reset clears every latch and control bit but keeps the
+        // card visible, with no change pending.
+        g.reset();
+        assert_eq!(g.read(GAYLE_INTREQ, 1), 0);
+        assert_eq!(
+            g.read(GAYLE_STATUS_REG, 1) as u8 & GAYLE_PIN_MASK,
+            CARD_PINS
+        );
+    }
+
+    /// More than 4 MiB of Zorro II fast RAM covers the slot's window: the
+    /// socket reads empty whatever is in it, and nothing is latched.
+    #[test]
+    fn fast_ram_shadowing_makes_the_slot_read_empty() {
+        let mut g = Gayle::new(0xD1);
+        g.set_slot_shadowed(true);
+        g.set_card_pins(CARD_PINS);
+        assert!(!g.slot_enabled());
+        assert_eq!(g.read(GAYLE_STATUS_REG, 1) as u8 & GAYLE_PIN_MASK, 0);
+        assert_eq!(g.read(GAYLE_INTREQ, 1), 0);
+        assert!(g.card_pins() == CARD_PINS, "the card is still there");
     }
 
     /// A `.iso` path attaches as an ATAPI drive rather than being rejected:

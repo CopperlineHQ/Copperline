@@ -31,7 +31,7 @@ What is captured:
 | `CpuCore` | registers, SR flags, prefetch queue, pending interrupt/stop state, MMU/CACR state, cycle-timing configuration, `cpu_type` and address mask |
 | `MachineRuntimeState` | the `M68kMachine` fields outside the core: `last_cacr`, `sync_cck_on`, `cpu_clocks_per_cck`, `cpu_clock_carry` |
 | `icache` / `dcache` | the CPU cache models (`Option<Box<CpuCache>>`, `None` when absent or opted out). If a compatible state lacks a cache that the restored CPU configuration requires, load creates it cold with enable bits derived from CACR |
-| `Bus` | chip/slow RAM, ROM and extended ROM, Zorro boards (including their RAM), both CIAs, RTC, Agnus/Copper/Denise/Paula/blitter state, floppy controller with in-memory disk images, Gayle IDE, A2091 SCSI, Akiko/CDTV with NVRAM, beam-event capture buffers, DMA pointers, interrupt latches, and the bus-arbitration counters |
+| `Bus` | chip/slow RAM, ROM and extended ROM, Zorro boards (including their RAM), both CIAs, RTC, Agnus/Copper/Denise/Paula/blitter state, floppy controller with in-memory disk images, Gayle IDE and its PCMCIA card (an SRAM card's contents included), A2091 SCSI, Akiko/CDTV with NVRAM, beam-event capture buffers, DMA pointers, interrupt latches, and the bus-arbitration counters |
 
 Deliberately excluded, with the mechanism in parentheses:
 
@@ -40,7 +40,9 @@ Deliberately excluded, with the mechanism in parentheses:
   (`#[serde(skip)]`; the sink defaults produce inert null devices). On load,
   `Bus::adopt_host_resources` moves the live sinks and tap from the old Bus
   onto the restored one, so output and an active subscription continue
-  uninterrupted.
+  uninterrupted; a sink with a live connection (a host serial port) is
+  told of the timeline jump, drops what it had queued from the abandoned
+  one, and is handed the restored CIA-B `/DTR`/`/RTS` and SERPER rate.
 - **Diagnostic host state**: the `COPPERLINE_TRACE_BLITTER` file handle
   (skipped, moved across like the sinks), the debugger and its
   breakpoints/watchpoints (never serialized; they stay armed across a
@@ -109,13 +111,23 @@ files during deserialization. Missing or moved images cause a load-time error:
 
 - `HardDriveImage` (shared by IDE, SCSI, and copperhf) serializes as
   `HardDriveImageState { path, memory, total_sectors, rdb_overlay,
-  overlay_write_warned, scsi_bus, host_device }`. A file-backed image stores
-  `memory: None` and reopens `path` read/write on load; an in-memory
-  directory-built volume stores the whole image in `memory`, so its
-  session-only writes survive the round trip. The synthesized-RDB
-  overlay for bare hardfiles is embedded either way. Consequence: HDF
-  *file contents* are not part of the state -- guest writes made after
-  the snapshot are still visible after restoring.
+  overlay_write_warned, scsi_bus, host_device, session, chd_overlay }`. A
+  file-backed image stores `memory: None` and reopens `path` read/write on
+  load; an in-memory directory-built volume stores the whole image in
+  `memory`, so its session-only writes survive the round trip. The
+  synthesized-RDB overlay for bare hardfiles is embedded either way.
+  Consequence: HDF *file contents* are not part of the state -- guest
+  writes made after the snapshot are still visible after restoring.
+- A CHD hard-disk image (`harddrive/chd.rs`) is the exception: it reopens
+  by `path` like an HDF (sniffed by its magic), but the guest's writes live
+  in its `.wov` overlay sidecar rather than in the image, and every
+  overlaid sector travels in `chd_overlay` (`#[serde(default)]`, so states
+  from before the field load with `None` and leave the sidecar as found).
+  Loading rewrites the sidecar to exactly the saved set, so a resumed run
+  sees the disk as it was when the state was taken; the field is `None`
+  for every other backing and for a CHD attached write-protected (no
+  overlay), and a saved set that cannot be put back because the overlay
+  cannot be opened fails the load rather than resuming on the wrong disk.
 - `CdImageState::Bin { sources, tracks, extents, total_sectors }` stores
   the source descriptions needed to reopen BIN/WAVE/MP3, ISO, and NRG data.
   `CdImageState::Chd { path }` stores the CHD path and rebuilds the CHD
@@ -187,6 +199,7 @@ before it arrived complete.
 | `FLOP` | bus fields | `floppy` (controller, drives, in-memory disk images) |
 | `RTC ` | bus fields | `rtc`, `rtc_present` |
 | `GAYL` | bus fields | `gayle` |
+| `PCMC` | bus fields | `pcmcia` (the card in Gayle's slot: a CF card's ATA state and configuration registers, or an SRAM card's RAM and backing path); optional, absent from states written before the slot existed, which load with an empty socket |
 | `MOBO` | bus fields | `ramsey`, `gary`, `sdmac`, `ide_a4000` |
 | `UAEL` | bus fields | `uaelib` |
 | `CART` | bus fields | `cartridge` |

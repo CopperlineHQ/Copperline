@@ -122,6 +122,12 @@ impl App {
                 self.emu.bus().input.device(0),
                 self.emu.bus().input.device(1),
             ],
+            pcmcia_slot: self.emu.bus().pcmcia_slot_present(),
+            pcmcia_card: self
+                .emu
+                .bus()
+                .pcmcia_card()
+                .map(crate::pcmcia::PcmciaCard::describe),
             pixel_aspect: crate::video::pixel_aspect(),
             scaling: crate::video::display_scaling(),
             autocrop: crate::video::autocrop(),
@@ -254,6 +260,10 @@ impl App {
                 self.ui.panel = Some(Panel::About);
             }
             A::LoadRom => self.load_rom_from_dialog(),
+            A::InsertPcmciaCard => self.insert_pcmcia_card_from_dialog(),
+            A::EjectPcmciaCard => {
+                self.eject_pcmcia_card();
+            }
 
             A::SetAudioOutput(choice) => {
                 let want = match choice {

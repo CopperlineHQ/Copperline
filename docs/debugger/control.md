@@ -368,10 +368,11 @@ events.unsubscribe {"events":["serial"]}
 - `input.type {"text": ..., "at_seconds": ...}`: Type `text` on the US Amiga keyboard as raw key press/release pairs (Shift where needed, newline as Return, tab as Tab, escape as Esc), one key every 100 ms of emulated time from `at_seconds` (default now). Text with characters the US keymap cannot type is rejected. The same conversion backs `--type-after` and the window's Paste as Keystrokes.
 - `input.mouse {"dx": ..., "dy": ..., "left": ..., "right": ..., "middle": ..., "port": 1|2, "at_seconds": ...}`: Inject mouse motion/buttons.
 - `input.mouse_to {"x": ..., "y": ..., "port": 1|2, "tolerance": ..., "max_frames": ...}`: Steer pointer to screen pixel coordinates via sprite 0.
-- `input.joy {"up": ..., "down": ..., "left": ..., "right": ..., "red": ..., "blue": ..., "green": ..., "yellow": ..., "play": ..., "rwd": ..., "ffw": ..., "port": 1|2, "at_seconds": ...}`: Inject joystick / CD32 button state.
+- `input.joy {"up": ..., "down": ..., "left": ..., "right": ..., "red": ..., "blue": ..., "green": ..., "yellow": ..., "play": ..., "rwd": ..., "ffw": ..., "port": 1|2|3|4, "at_seconds": ...}`: Inject joystick / CD32 button state. Ports 3 and 4 are the parallel-port four-player adapter's sockets (driving one fits the adapter); on a light pen `red` is the tip switch / trigger.
 - `input.analogue {"x": ..., "y": ..., "port": 1|2, "at_seconds": ...}`: Set analogue paddle/pot position (0-255).
-- `input.set_port {"port": 1|2, "device": "mouse"|"gamepad-mouse"|"joystick"|"cd32"|"analogue"|"none"}`: Change port device.
-- `input.get_ports`: Query active controller port device assignments.
+- `input.pen {"x": ..., "y": ..., "at_seconds": ...}`: Hold the light pen over presented pixel (x, y) (the `input.mouse_to` coordinates); omit or negate to lift it off the glass.
+- `input.set_port {"port": 1|2|3|4, "device": "mouse"|"gamepad-mouse"|"joystick"|"cd32"|"analogue"|"lightpen"|"none"}`: Change port device (ports 3 and 4 take `joystick` or `none`).
+- `input.get_ports`: Query active controller port device assignments (`port1`-`port4`, `parallel_adapter`, and the light pen's `port`, whether it is `wired` to Agnus LP, and its position).
 
 ### Media management
 - `media.floppy.insert {"drive": 0, "path": "...", "write_protected": true}`: Insert floppy disk image.
@@ -379,6 +380,9 @@ events.unsubscribe {"events":["serial"]}
 - `media.floppy.query`: Query connected floppy drives, mounted disk images, and write-protection status.
 - `media.cd.insert {"path": "..."}`: Insert CD image.
 - `media.cd.eject`: Eject CD image.
+- `pcmcia.insert {"card": "cf"|"sram", "path": "...", "size": "2M", "read_only": false}`: Push a card into the A600/A1200 PCMCIA slot -- a CompactFlash card over the hard-disk image at `path` (the default kind), or an SRAM card of `size` bytes optionally mirrored to `path`. Any card already in the slot is ejected first; Gayle latches the card-detect change, so the guest sees a real insertion (INT6 once card.resource has enabled it). Fails on a machine without the slot.
+- `pcmcia.eject`: Pull the card out of the slot (latches the card-detect change the same way).
+- `pcmcia.query`: Report the slot: `slot` (the machine has one), `enabled` (not disabled by the guest or shadowed by Zorro II fast RAM), `shadowed_by_fast_ram`, `inserted`, `card` (`cf`/`sram`), `description`, `path`, Gayle's sampled `pins`, and its pending `change_latches`. The `media` event stream also reports `{"kind": "pcmcia", "action": "inserted"|"ejected", "name": ...}`.
 - `copperhf.attach {"unit": 0, "path": "...", "volume_name": "...", "boot_pri": 0}`: Hot-attach a `copperhf.device` unit's media (opens `path` exactly like a boot-time `[copperhf]` unit, `volume_name`/`boot_pri` optional). Bumps the unit's change counter and sets its `CHF_CHANGED_MASK` bit. Fails if no `[copperhf]` controller is configured.
 - `copperhf.eject {"unit": 0}`: Hot-eject/detach a `copperhf.device` unit's media. The unit stays present (`CHF_UNIT_PRESENT`); only its media bit (`CHF_UNIT_MEDIA`) clears. Bumps the change counter and sets `CHF_CHANGED_MASK`, the same as the guest's own `TD_EJECT`.
 

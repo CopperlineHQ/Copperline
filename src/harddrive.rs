@@ -4,17 +4,22 @@
 //! IDE drives and the A2091 SCSI targets.
 //!
 //! A unit opens from a raw HDF image file, from a gzip-compressed one (the
-//! `.hdz` convention), or from a host directory (built into an in-memory
-//! FFS or OFS volume at open time, caller's choice; see `dirfs.rs`). Bare
-//! partition hardfiles (a filesystem boot block at sector 0, no RDSK) get a
+//! `.hdz` convention), from a MAME CHD hard-disk image (`chd.rs`, read
+//! through the `chd` crate with guest writes kept in a copy-on-write
+//! sidecar), or from a host directory (built into an in-memory FFS or OFS
+//! volume at open time, caller's choice; see `dirfs.rs`). Bare partition
+//! hardfiles (a filesystem boot block at sector 0, no RDSK) get a
 //! synthesized RDB cylinder prepended so the ROM boot driver can mount them
 //! without pre-conversion.
 
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+pub mod chd;
 mod session;
+use chd::ChdHardDisk;
 use session::SessionImage;
 
 pub const SECTOR_SIZE: usize = 512;
@@ -45,6 +50,9 @@ enum Backing {
     File(File),
     Memory(Vec<u8>),
     Session(SessionImage),
+    /// A CHD hard-disk image: sectors decompressed on demand, writes in
+    /// the overlay sidecar beside it (or refused, when there is none).
+    Chd(Box<ChdHardDisk>),
     /// A real disk attached to the host. Presents 512-byte sectors like the
     /// others; the block size the media actually uses, and the privilege the
     /// open needed, are the device's own business.
@@ -98,6 +106,14 @@ struct HardDriveImageState<P = PathBuf, B = Vec<u8>, S = SessionImage> {
     /// would come back writable.
     host_device: Option<HostDiskState>,
     session: Option<S>,
+    /// Every sector a CHD image's write overlay holds, when the image is
+    /// one and writable. The CHD itself reopens by `path` like an HDF, but
+    /// the overlay is where the guest's writes live, so it travels with
+    /// the state and is put back on load: a resumed machine sees the disk
+    /// exactly as it was when the state was taken. `None` for every other
+    /// backing, and for a write-protected CHD.
+    #[serde(default)]
+    chd_overlay: Option<BTreeMap<u64, Vec<u8>>>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -138,6 +154,15 @@ impl serde::Serialize for HardDriveImage {
                 Backing::Session(image) => Some(image),
                 _ => None,
             },
+            chd_overlay: match &self.backing {
+                Backing::Chd(disk) => disk.overlay_contents().map_err(|e| {
+                    serde::ser::Error::custom(format!(
+                        "reading the write overlay of {}: {e}",
+                        self.path.display()
+                    ))
+                })?,
+                _ => None,
+            },
         }
         .serialize(serializer)
     }
@@ -171,18 +196,35 @@ impl<'de> serde::Deserialize<'de> for HardDriveImage {
                 return Err(serde::de::Error::custom("conflicting disk backings"))
             }
             (None, Some(image)) => Backing::Memory(image),
-            (None, None) => Backing::File(
-                OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(&state.path)
-                    .map_err(|e| {
-                        serde::de::Error::custom(format!(
-                            "reopening hard-drive image {}: {e}",
-                            state.path.display()
-                        ))
-                    })?,
-            ),
+            (None, None) => {
+                let reopen_error = |e: &dyn std::fmt::Display| {
+                    serde::de::Error::custom(format!(
+                        "reopening hard-drive image {}: {e}",
+                        state.path.display()
+                    ))
+                };
+                if is_chd_file(&state.path).map_err(|e| reopen_error(&e))? {
+                    let mut disk = ChdHardDisk::open(&state.path, bus_name, true)
+                        .map_err(|e| reopen_error(&format!("{e:#}")))?;
+                    if let Some(overlay) = &state.chd_overlay {
+                        disk.restore_overlay(overlay).map_err(|e| {
+                            serde::de::Error::custom(format!(
+                                "restoring the write overlay of {}: {e}",
+                                state.path.display()
+                            ))
+                        })?;
+                    }
+                    Backing::Chd(Box::new(disk))
+                } else {
+                    Backing::File(
+                        OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .open(&state.path)
+                            .map_err(|e| reopen_error(&e))?,
+                    )
+                }
+            }
         };
         Ok(Self {
             path: state.path,
@@ -418,6 +460,19 @@ fn read_gzip_hardfile(path: &Path, bus_name: &str, limit: u64) -> anyhow::Result
     Ok(Some(image))
 }
 
+/// Whether the file at `path` opens with the CHD magic. Like the gzip
+/// sniff, this goes by content: a CHD called `.hdf` is still a CHD. A file
+/// too short to hold the magic is simply not one.
+fn is_chd_file(path: &Path) -> std::io::Result<bool> {
+    let mut file = File::open(path)?;
+    let mut head = [0u8; 8];
+    match file.read_exact(&mut head) {
+        Ok(()) => Ok(chd::is_chd(&head)),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 impl HardDriveImage {
     /// Whether the image carries its own Rigid Disk Block, rather than
     /// being a bare single-partition hardfile this had to synthesize one
@@ -622,6 +677,14 @@ impl HardDriveImage {
                     );
                     Backing::Memory(image)
                 }
+                None if is_chd_file(path).map_err(|e| {
+                    anyhow::anyhow!("reading {bus_name} image {}: {e}", path.display())
+                })? =>
+                {
+                    // A session copy is decompressed whole below; only a
+                    // persistent drive gets (or creates) the overlay sidecar.
+                    Backing::Chd(Box::new(ChdHardDisk::open(path, bus_name, !session)?))
+                }
                 None => Backing::File(
                     OpenOptions::new()
                         .read(true)
@@ -639,6 +702,7 @@ impl HardDriveImage {
                 .map_err(|e| anyhow::anyhow!("stat {bus_name} image {}: {e}", path.display()))?
                 .len(),
             Backing::Memory(image) => image.len() as u64,
+            Backing::Chd(disk) => disk.total_sectors() * SECTOR_SIZE as u64,
             Backing::Session(_) => unreachable!("session backing is installed after validation"),
             #[cfg(not(target_arch = "wasm32"))]
             Backing::Device(device) => device.total_sectors() * SECTOR_SIZE as u64,
@@ -671,6 +735,13 @@ impl HardDriveImage {
                 .read_exact(&mut head)
                 .map_err(|e| anyhow::anyhow!("reading {bus_name} image {}: {e}", path.display()))?,
             Backing::Memory(image) => head.copy_from_slice(&image[..sniff_len]),
+            Backing::Chd(disk) => {
+                for (lba, sector) in head.chunks_mut(SECTOR_SIZE).enumerate() {
+                    disk.read_sector(lba as u64, sector).map_err(|e| {
+                        anyhow::anyhow!("reading {bus_name} image {}: {e}", path.display())
+                    })?;
+                }
+            }
             Backing::Session(_) => unreachable!("session backing is installed after validation"),
             #[cfg(not(target_arch = "wasm32"))]
             Backing::Device(device) => {
@@ -745,6 +816,17 @@ impl HardDriveImage {
                     file.read_exact(&mut bytes)?;
                     bytes
                 }
+                // Decompressed whole: the session copy takes its writes in
+                // memory, and the CHD is never opened for a sidecar.
+                Backing::Chd(mut disk) => {
+                    let mut bytes = vec![0; len as usize];
+                    for (lba, sector) in bytes.chunks_mut(SECTOR_SIZE).enumerate() {
+                        disk.read_sector(lba as u64, sector).map_err(|e| {
+                            anyhow::anyhow!("reading {bus_name} image {}: {e}", path.display())
+                        })?;
+                    }
+                    bytes
+                }
                 _ => unreachable!("only image files and directories are session sources"),
             };
             backing = Backing::Session(SessionImage::new(bytes, false));
@@ -809,6 +891,22 @@ impl HardDriveImage {
         self.total_sectors
     }
 
+    /// Whether the guest's writes are refused: a CHD with no write overlay,
+    /// a read-only session copy, or a physical disk attached read-only.
+    /// Writes to such a drive fail with `PermissionDenied`, which the
+    /// controllers report to the guest as a write-protected medium.
+    pub fn write_protected(&self) -> bool {
+        match &self.backing {
+            Backing::Chd(disk) => disk.write_protected(),
+            Backing::Session(image) => image.read_only(),
+            #[cfg(not(target_arch = "wasm32"))]
+            Backing::Device(device) => !device.writable(),
+            #[cfg(not(target_arch = "wasm32"))]
+            Backing::PendingDevice(saved) => !saved.writable,
+            Backing::File(_) | Backing::Memory(_) => false,
+        }
+    }
+
     /// Sectors served from the synthesized RDB overlay; file LBAs shift down
     /// by this much.
     fn overlay_sectors(&self) -> u64 {
@@ -837,6 +935,7 @@ impl HardDriveImage {
                 Ok(())
             }
             Backing::Session(image) => image.read(file_lba, buf),
+            Backing::Chd(disk) => disk.read_sector(file_lba, buf),
             #[cfg(not(target_arch = "wasm32"))]
             Backing::Device(device) => device.read_sector(file_lba, buf),
             #[cfg(not(target_arch = "wasm32"))]
@@ -881,6 +980,7 @@ impl HardDriveImage {
                 Ok(())
             }
             Backing::Session(image) => image.write(file_lba, buf),
+            Backing::Chd(disk) => disk.write_sector(file_lba, buf),
             #[cfg(not(target_arch = "wasm32"))]
             Backing::Device(device) => device.write_sector(file_lba, buf),
             #[cfg(not(target_arch = "wasm32"))]
@@ -897,10 +997,11 @@ impl HardDriveImage {
         if let Backing::Device(device) = &mut self.backing {
             return device.flush();
         }
-        if let Backing::File(file) = &mut self.backing {
-            return file.flush();
+        match &mut self.backing {
+            Backing::File(file) => file.flush(),
+            Backing::Chd(disk) => disk.flush(),
+            _ => Ok(()),
         }
-        Ok(())
     }
 }
 
@@ -1042,6 +1143,7 @@ mod tests {
                 Backing::Session(image) => Some(image.clone()),
                 _ => unreachable!(),
             },
+            chd_overlay: None,
         };
         assert_eq!(encoded, bincode::serialize(&owned).unwrap());
         original.write_sector(lba, &[0x5A; SECTOR_SIZE]).unwrap();
@@ -1256,6 +1358,7 @@ mod tests {
                 fingerprint: "v1-saved".to_string(),
                 writable: false,
             }),
+            chd_overlay: None,
         };
         let bytes = bincode::serialize(&state).unwrap();
         let image: HardDriveImage = bincode::deserialize(&bytes).unwrap();

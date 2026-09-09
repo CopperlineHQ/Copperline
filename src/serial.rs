@@ -6,6 +6,11 @@ use crate::timebase::Instant;
 use std::collections::VecDeque;
 use std::io::{self, Write};
 
+/// A real host serial port (`mode = "device"`). Threads and tty ioctls,
+/// so not for the browser build.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod device;
+
 /// Maximum number of completed Paula transmissions retained for a host-side
 /// observer. The tap evicts the oldest word once full; it must never let a
 /// debugger client apply unbounded back-pressure to the emulated UART.

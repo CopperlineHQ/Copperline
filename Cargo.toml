@@ -36,6 +36,7 @@ default = [
     "gdb",
     "dap",
     "netplay-internet",
+    "host-serial",
 ]
 # Native NAT traversal and encrypted relay fallback. The portable/WASM core
 # keeps using its frontend-provided transport.
@@ -166,6 +167,12 @@ dap = ["control", "dep:gimli", "dep:object"]
 # in the build. Off, none of it is built, which is what browser builds
 # (--no-default-features) want.
 fluxbridge = ["dep:fluxbridge"]
+# A real host serial port on Paula's UART (`[serial] mode = "device"`,
+# src/serial/device.rs): the same pure-Rust `serialport` crate FluxBridge
+# talks to a Greaseweazle through. Native-only by construction (threads and
+# tty ioctls), so browser builds (--no-default-features) compile it out and
+# the mode reports itself as unavailable there.
+host-serial = ["dep:serialport"]
 
 [dependencies]
 m68k = { version = "0.12", features = ["serde"] }
@@ -290,6 +297,11 @@ zerocopy = { version = "0.8", features = ["derive"] }
 # line: adding a driver Copperline supports means adding its feature, nothing
 # else.
 fluxbridge = { git = "https://github.com/CopperlineHQ/FluxBridge", branch = "main", default-features = false, features = ["greaseweazle"], optional = true }
+# Host serial ports for `[serial] mode = "device"`. The version FluxBridge
+# already pins, with the same `default-features = false`: the default
+# `libudev` feature would link a C library on Linux for richer USB port
+# descriptions, and the sysfs fallback lists the same ports without it.
+serialport = { version = "4.9", default-features = false, optional = true }
 # CHD (MAME "Compressed Hunks of Data") CD images (src/cdrom/chd.rs). Pure
 # Rust, so it builds for wasm32 browser targets like the rest of the core.
 chd = "0.3"

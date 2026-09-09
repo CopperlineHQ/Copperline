@@ -461,6 +461,22 @@ impl AtaBus {
         self.drives.iter().any(Option::is_some)
     }
 
+    /// The host path behind a slot's hard disk, if the slot holds one.
+    pub fn drive_path(&self, slot: usize) -> Option<&Path> {
+        match self.drives.get(slot)? {
+            Some(AtaDevice::Disk(drive)) => Some(drive.disk.path()),
+            _ => None,
+        }
+    }
+
+    /// A slot's hard-disk capacity in sectors, if the slot holds one.
+    pub fn drive_total_sectors(&self, slot: usize) -> Option<u64> {
+        match self.drives.get(slot)? {
+            Some(AtaDevice::Disk(drive)) => Some(drive.disk.total_sectors()),
+            _ => None,
+        }
+    }
+
     /// The hard disk in a numbered ATA slot, for frontend save persistence.
     pub fn hard_disk_mut(&mut self, slot: usize) -> Option<&mut HardDriveImage> {
         match self.drives.get_mut(slot)?.as_mut()? {

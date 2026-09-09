@@ -374,6 +374,40 @@ impl FieldPlacement {
         let y1 = (row_scale * y1).clamp(y0, present_rows);
         (x1 > x0 && y1 > y0).then_some(bitplane::ContentRect { x0, x1, y0, y1 })
     }
+
+    /// The field-space pixel (`x` in the field's canvas pitch, `y` in
+    /// rendered field rows) that placed buffer pixel (`x`, `y`) shows --
+    /// [`Self::content_rect`] run backwards for one point, so a host
+    /// pointer over the presented picture can be turned back into the
+    /// rendered pixel under it (what a light pen sees). `None` for a
+    /// buffer pixel that shows no field pixel: the centring bands, a
+    /// programmable scan's blanked porches, or off the buffer.
+    pub fn field_point(&self, x: usize, y: usize, present_rows: usize) -> Option<(i32, i32)> {
+        let width = FB_WIDTH * self.canvas_scale;
+        if x >= width || y >= present_rows {
+            return None;
+        }
+        let row_scale = if present_rows >= 2 * self.rows { 2 } else { 1 };
+        let placed_y = y / row_scale;
+        if placed_y >= self.rows {
+            return None;
+        }
+        match self.map {
+            PlacementMap::Standard { y_offset, h_shift } => {
+                let fx = x + h_shift;
+                let fy = placed_y.checked_sub(y_offset)?;
+                (fx < width).then_some((fx as i32, fy as i32))
+            }
+            PlacementMap::Programmable { columns, rows } => {
+                let (src_x, _) = columns.source(x, width);
+                let fy = placed_y.checked_sub(rows.pad_top)?;
+                if fy >= rows.content_rows {
+                    return None;
+                }
+                Some((src_x.min(width - 1) as i32, (fy + rows.skip_top) as i32))
+            }
+        }
+    }
 }
 
 /// Where [`apply_presentation_v_window`] puts the captured rows of a

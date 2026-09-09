@@ -216,6 +216,17 @@ impl MachineSetup {
                 SerialMode::TcpConnect => "TCP connect".to_string(),
                 SerialMode::Pty => "PTY".to_string(),
                 SerialMode::Modem => "Modem".to_string(),
+                SerialMode::Device => "Host port".to_string(),
+            },
+            // The port is shown by the path the config spells it with; a
+            // path the host does not list right now (an adapter not
+            // plugged in yet) is kept, and marked.
+            #[cfg(feature = "midi")]
+            F::SerialDevice => match self.serial_device.as_deref() {
+                Some(path) if self.serial_devices.iter().any(|p| p == path) => path.to_string(),
+                Some(path) => format!("{path} (not found)"),
+                None if self.serial_devices.is_empty() => "(no serial ports found)".to_string(),
+                None => "(pick a port)".to_string(),
             },
             // The dial-out address has no default -- there is no host to
             // guess -- so an empty box says what it wants instead.
@@ -268,6 +279,7 @@ impl MachineSetup {
                 ParallelDevice::None => "None".to_string(),
                 ParallelDevice::Printer => "Printer".to_string(),
                 ParallelDevice::Sampler => "Sampler".to_string(),
+                ParallelDevice::JoystickAdapter => "Joystick Adapter".to_string(),
             },
             F::SamplerInput => self
                 .sampler_input
@@ -685,6 +697,17 @@ impl MachineSetup {
                 self.serial_mode = cycle_slice(&SERIAL_MODES, self.serial_mode, forward)
             }
             #[cfg(feature = "midi")]
+            F::SerialDevice => {
+                // Re-read on each step so an adapter plugged in since the
+                // screen opened appears; on-demand only, no polling.
+                self.refresh_serial_devices();
+                self.serial_device = crate::midi::next_endpoint(
+                    self.serial_device.as_deref(),
+                    &self.serial_devices,
+                    forward,
+                );
+            }
+            #[cfg(feature = "midi")]
             F::MidiOut => {
                 // The built-in synths ride at the end of the output
                 // list: always there to be chosen, whatever the host
@@ -747,13 +770,15 @@ impl MachineSetup {
                 self.csynth_mt32_mode = next.map(str::to_string);
             }
             F::ParallelDevice => {
-                // None -> Printer -> Sampler. Selecting Printer reveals its
-                // Output file row (with a Browse button); until a file is set
-                // the printer is not persisted or attached (see to_raw).
-                const DEVICES: [ParallelDevice; 3] = [
+                // None -> Printer -> Sampler -> Joystick Adapter. Selecting
+                // Printer reveals its Output file row (with a Browse button);
+                // until a file is set the printer is not persisted or
+                // attached (see to_raw).
+                const DEVICES: [ParallelDevice; 4] = [
                     ParallelDevice::None,
                     ParallelDevice::Printer,
                     ParallelDevice::Sampler,
+                    ParallelDevice::JoystickAdapter,
                 ];
                 self.parallel_device = cycle_slice(&DEVICES, self.parallel_device, forward);
             }

@@ -100,10 +100,11 @@ repeat.
 | `--key-after SECS KEY MS` | Hold a key for exactly MS milliseconds |
 | `--type-after SECS TEXT` | Type TEXT on the US Amiga keyboard from SECS, one key per 100 ms (`\n` Return, `\t` Tab, `\e` Esc) |
 | `--click-after SECS BUTTON MS [PORT]` | Mouse button (`left`/`right`/`middle`) for MS ms (default port 1) |
-| `--joy-after SECS BUTTON MS [PORT]` | Joystick / CD32-pad control (`up`/`down`/`left`/`right`/`red`/`blue`/...) (default port 2) |
+| `--joy-after SECS BUTTON MS [PORT]` | Joystick / CD32-pad control (`up`/`down`/`left`/`right`/`red`/`blue`/...) on port 1-4 (default port 2; 3/4 = parallel-port adapter) |
 | `--mouse-after SECS DX DY [PORT]` | Relative mouse motion (default port 1) |
 | `--mouse-to-after SECS X Y [PORT]` | Steer the pointer to screen pixel (X, Y) via sprite 0 (default port 1) |
 | `--pot-after SECS X Y [PORT]` | Analogue stick/paddle position, 0-255 per axis (default port 2) |
+| `--pen-after SECS X Y [PORT]` | Hold the light pen over screen pixel (X, Y) (`--mouse-to-after` coordinates; negative lifts it off); `--joy-after ... red` is its switch |
 | `--insert-disk-after SECS DFN PATH` | Insert a disk image into `df0`..`df3` |
 | `--insert-cd-after SECS PATH` | Swap the CD image in the machine's CD drive (CDTV/CD32/SCSI CD-ROM) |
 | `--expect-screenshot SECS PATH [TOL]` | Compare the frame at SECS with the PNG at PATH (TOL = fraction or pixel count); mismatch writes `<stem>.actual.png` + `<stem>.diff.png`, exit status 3 at run end |
@@ -115,7 +116,11 @@ digits). A session played by hand under `--record-input` (or Cmd+Shift+R /
 Alt+Shift+R in the window) replays deterministically via `--script`.
 
 Either controller port takes any device -- `[input] port1/port2` in the
-TOML, or `--port1`/`--port2` (`mouse`/`joystick`/`cd32`/`analogue`/`none`;
+TOML, or `--port1`/`--port2` (`mouse`/`joystick`/`cd32`/`analogue`/
+`lightpen`/`none`; a pen only reaches Agnus from port 2 on post-A1000
+boards). `[parallel] device = "joystick-adapter"` (`--parallel
+joystick-adapter`) adds the four-player adapter's ports 3 and 4
+(`--port3`/`--port4`, `joystick`/`none`;
 default mouse + joystick, CD32 pad on the CD32 profile). The scripted-input
 flags' optional trailing `PORT` token (`1` or `2`) aims an event at either
 port; omitted, each flag keeps its traditional port, so existing scripts

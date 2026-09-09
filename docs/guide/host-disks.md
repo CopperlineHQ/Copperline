@@ -67,6 +67,39 @@ read_only = true               # Default is true for data safety
 | `lide1-master` | `[lide]` expansion board Channel 1 Master (RIPPLE only) |
 | `lide1-slave` | `[lide]` expansion board Channel 1 Slave |
 | `scsi0` .. `scsi6` | SCSI Controller Unit 0 through 6 |
+| `pcmcia` | The A600/A1200 PCMCIA slot, as a CompactFlash card |
+
+### A CompactFlash card from a real Amiga
+
+A CF card that lives in an A600's or A1200's PCMCIA slot carries the
+partitions the Amiga's own CF driver wrote (`compactflash.device`,
+`cfd.device`, or a patched `scsi.device`), and those drivers expect the
+card in the slot, not on the IDE cable. Put the reader's device on the slot
+and the same driver in the guest finds the same card:
+
+```sh
+copperline --model A1200 KICK31.ROM --host-disk-read-only disk4 pcmcia
+```
+
+```toml
+[machine]
+profile = "A1200"
+
+[[host_disk]]
+device = "disk4"
+attach = "pcmcia"
+read_only = true
+```
+
+The card is presented through Gayle's slot windows with the CF register
+layout a real card has (memory-mapped, contiguous I/O, or PC-style I/O,
+whichever the driver configures), so the guest sees a card, not an IDE
+drive; Kickstart's `card.resource` reports the insertion but does not mount
+it by itself. The slot holds one card, so `attach = "pcmcia"` cannot be
+combined with a `[pcmcia]` image, and more than 4M of Zorro II fast RAM
+disables the slot (see [`[pcmcia]`](configuration.md#pcmcia----the-a600a1200-credit-card-slot)).
+A card reader is removable media, so read-write access must be selected
+afresh each session, as for any other removable disk below.
 
 ## Device fingerprints and renaming
 

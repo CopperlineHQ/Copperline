@@ -99,23 +99,46 @@ pub(crate) struct HostRouting {
 /// launcher's Input-tab summary, so what the GUI promises is exactly what
 /// the pump does. The rules are documented on [`App::host_routing`].
 pub(crate) fn host_routing_for(devices: [PortDevice; 2], mode: JoystickInputMode) -> HostRouting {
+    host_routing_for_ports(devices, [PortDevice::None; 2], mode)
+}
+
+/// [`host_routing_for`] with the parallel-port adapter's sockets (ports 3
+/// and 4) in the picture. They are plain joystick ports that come after
+/// the game ports in the queue for the host sources: the pad and the
+/// keyboard mappings take the game ports first, and a socket gets a
+/// source only when the game ports have none left for it -- so a
+/// four-joystick wiring drives ports 1 and 2 from the pad and the
+/// cursor-key mapping, with the numpad mapping standing in where no pad
+/// is present, exactly as a two-joystick wiring does.
+pub(crate) fn host_routing_for_ports(
+    devices: [PortDevice; 2],
+    parallel: [PortDevice; 2],
+    mode: JoystickInputMode,
+) -> HostRouting {
     let mouse = devices.iter().position(|&d| d.is_mouse());
-    let mut remaining = (0..2).filter(|&p| {
-        Some(p) != mouse
-            && matches!(
-                devices[p],
-                PortDevice::Mouse
-                    | PortDevice::GamepadMouse
-                    | PortDevice::Joystick
-                    | PortDevice::Cd32Pad
-            )
-    });
+    let mut remaining = (0..2)
+        .filter(|&p| {
+            Some(p) != mouse
+                && matches!(
+                    devices[p],
+                    PortDevice::Mouse
+                        | PortDevice::GamepadMouse
+                        | PortDevice::Joystick
+                        | PortDevice::Cd32Pad
+                )
+        })
+        .chain(
+            (0..2)
+                .filter(|&s| parallel[s] == PortDevice::Joystick)
+                .map(|s| s + crate::bus::PARALLEL_PORT_FIRST),
+        );
     let first = remaining.next();
     let second = remaining.next();
+    let is_mouse = |p: usize| p < 2 && devices[p].is_mouse();
     let (gamepad, keyboard, keyboard2) = match (first, second, mode) {
         (None, _, _) => (None, None, None),
         (Some(p), None, JoystickInputMode::Gamepad) => {
-            if devices[p].is_mouse() {
+            if is_mouse(p) {
                 (None, None, None)
             } else {
                 (Some(p), None, None)
@@ -975,6 +998,10 @@ pub struct App {
     /// shows, in woven presentation-buffer space (see [`AutocropLatch`]);
     /// `None` until a standard frame has painted playfield.
     present_content_rect: Option<bitplane::ContentRect>,
+    /// How the last rendered field was placed on the presentation
+    /// buffer, so a canvas pixel can be traced back to the rendered pixel
+    /// it shows (see `canvas_to_field_pixel`).
+    present_placement: Option<crate::video::present_common::FieldPlacement>,
     /// The last layout the COPPERLINE_DIAG_AUTOCROP trace logged, so the
     /// trace reports changes rather than every redraw. Unused while the
     /// flag is off.
@@ -1083,8 +1110,12 @@ pub struct App {
     /// release.
     auto_joys: Vec<ScheduledJoy>,
     pending_auto_joys: Vec<(f32, JoyButtonKind, u32, u8)>,
-    auto_joy_held: [AutoJoyHeld; 2],
-    auto_joy_engaged: [bool; 2],
+    auto_joy_held: [AutoJoyHeld; crate::bus::PORT_COUNT],
+    auto_joy_engaged: [bool; crate::bus::PORT_COUNT],
+    /// Scheduled light-pen positions from --pen-after (one-shot each):
+    /// (at_emulated_secs, x, y, port or None for the pen's port).
+    auto_pens: Vec<(f64, i32, i32, Option<u8>)>,
+    pending_auto_pens: Vec<(f32, i32, i32, Option<u8>)>,
     /// The windowed control-protocol server (`--control-gui`), attached
     /// after construction via [`App::attach_control`]; its commands are
     /// drained at the top of `about_to_wait` (see window/control.rs).
@@ -1938,6 +1969,7 @@ impl App {
         mouse_after: Vec<(f32, i32, i32, u8)>,
         mouse_to_after: Vec<(f32, i32, i32, u8)>,
         pot_after: Vec<(f32, u8, u8, u8)>,
+        pen_after: Vec<(f32, i32, i32, Option<u8>)>,
         disk_insert_after: Vec<DiskInsertSpec>,
         cd_insert_after: Vec<(f32, PathBuf)>,
         freeze_after: Vec<f32>,
@@ -2054,6 +2086,7 @@ impl App {
             present_tv_aperture_rows: Some(TV_PAL_PRESENT_HEIGHT),
             presentation_latch: PresentationLatch::default(),
             present_content_rect: None,
+            present_placement: None,
             last_diag_layout: None,
             autocrop_latch: AutocropLatch::default(),
             present_programmable: false,
@@ -2099,8 +2132,10 @@ impl App {
             pending_auto_clicks: click_after,
             auto_joys: Vec::new(),
             pending_auto_joys: joy_after,
-            auto_joy_held: [AutoJoyHeld::default(); 2],
-            auto_joy_engaged: [false; 2],
+            auto_joy_held: [AutoJoyHeld::default(); crate::bus::PORT_COUNT],
+            auto_joy_engaged: [false; crate::bus::PORT_COUNT],
+            auto_pens: Vec::new(),
+            pending_auto_pens: pen_after,
             #[cfg(feature = "control")]
             control: None,
             #[cfg(feature = "gdb")]
@@ -2400,8 +2435,9 @@ impl App {
     /// mouse.
     fn host_routing(&self) -> HostRouting {
         let input = &self.emu.bus().input;
-        host_routing_for(
+        host_routing_for_ports(
             [input.ports[0].device, input.ports[1].device],
+            [input.device(2), input.device(3)],
             self.joystick_input_mode,
         )
     }
@@ -2468,11 +2504,51 @@ impl App {
         }
         // Scripted joy state on ports no host source drives asserts
         // independently.
-        for port in 0..2 {
+        for port in 0..crate::bus::PORT_COUNT {
             if Some(port) != r.gamepad && Some(port) != r.keyboard && self.auto_joy_engaged[port] {
                 self.apply_auto_joy_state(port);
             }
         }
+    }
+
+    /// The rendered-field pixel (the `--mouse-to-after` coordinates) that
+    /// logical canvas pixel (`x`, `y`) shows: back through the display
+    /// copy to the presentation buffer, then back through the field
+    /// placement. `None` over chrome, pads, or before a frame has been
+    /// presented.
+    fn canvas_to_field_pixel(&self, x: usize, y: usize) -> Option<(i32, i32)> {
+        let placement = self.present_placement?;
+        let (sx, sy) = canvas_source_point(
+            x,
+            y,
+            self.present_rows,
+            self.present_width,
+            self.overscan,
+            self.tv_centre,
+            self.present_tv_aperture_rows,
+            present_height(),
+        )?;
+        placement.field_point(sx, sy, self.present_rows)
+    }
+
+    /// Hold the light pen where the host pointer is over the display, or
+    /// lift it off when the pointer leaves. `pos` is a logical canvas
+    /// pixel; the pen wants the rendered field's coordinates, so it goes
+    /// back through the presentation the way the pixels came.
+    fn track_light_pen_pointer(&mut self, pos: Option<(i32, i32)>) {
+        if self.emu.bus().input.light_pen_port().is_none() {
+            return;
+        }
+        let field = pos
+            .filter(|p| cursor_in_display(*p))
+            .and_then(|(x, y)| self.canvas_to_field_pixel(x as usize, y as usize));
+        if self.emu.bus().input.light_pen.position == field {
+            return;
+        }
+        self.emu.bus_mut().input.set_light_pen_position(field);
+        // Reverse-debug: note the move so replay can reproduce it.
+        self.emu
+            .tt_note_input(crate::inputsched::ReplayAction::Pen { position: field });
     }
 
     /// Whether the pad has been handed the calibration panel's buttons,
@@ -2924,6 +3000,38 @@ impl App {
         true
     }
 
+    /// Hold the light pen over presented pixel (`x`, `y`) -- or lift it
+    /// off the glass with a negative coordinate -- from `--pen-after` or
+    /// the control protocol. `port` names the port the pen must be in;
+    /// `None` takes whichever port has one.
+    fn apply_scripted_pen_position(&mut self, x: i32, y: i32, port: Option<u8>) {
+        let input = &mut self.emu.bus_mut().input;
+        let pen_port = input.light_pen_port();
+        match (port, pen_port) {
+            (Some(p), Some(pen)) if p as usize != pen => {
+                warn!(
+                    "pen: port {} named but the light pen is in port {}; ignored",
+                    p + 1,
+                    pen + 1
+                );
+                return;
+            }
+            (_, None) => {
+                warn!("pen: no light pen fitted ([input] port1/port2 = \"lightpen\"); ignored");
+                return;
+            }
+            _ => {}
+        }
+        let position = (x >= 0 && y >= 0).then_some((x, y));
+        info!(
+            "auto-pen: {position:?} on port {}",
+            pen_port.unwrap_or(0) + 1
+        );
+        input.set_light_pen_position(position);
+        self.emu
+            .tt_note_input(crate::inputsched::ReplayAction::Pen { position });
+    }
+
     /// Drive a port's emulated joystick/CD32 pad from the --joy-after
     /// held-control set.
     fn apply_auto_joy_state(&mut self, port: usize) {
@@ -3248,6 +3356,15 @@ impl App {
         for (secs, x, y, port) in self.pending_auto_pots.drain(..) {
             self.auto_pots.push((secs.max(0.0) as f64, x, y, port));
         }
+        for (secs, x, y, port) in self.pending_auto_pens.drain(..) {
+            self.auto_pens.push((secs.max(0.0) as f64, x, y, port));
+        }
+        if !self.auto_pens.is_empty() {
+            info!(
+                "auto-pen armed: {} scheduled positions",
+                self.auto_pens.len()
+            );
+        }
         if !self.auto_pots.is_empty() {
             info!(
                 "auto-pot armed: {} scheduled positions",
@@ -3347,10 +3464,10 @@ impl App {
         // Fire any scheduled --joy-after events into the named port's
         // joystick/CD32-pad state, then assert the held sets (input polling
         // re-applies them every quantum while scripting is engaged).
-        let mut joy_changed = [false; 2];
+        let mut joy_changed = [false; crate::bus::PORT_COUNT];
         let held = &mut self.auto_joy_held;
         self.auto_joys.retain_mut(|j| {
-            let port = usize::from(j.port != 0);
+            let port = (j.port as usize).min(crate::bus::PORT_COUNT - 1);
             if !j.pressed && emu_secs >= j.press_at_emulated_secs {
                 info!("auto-joy pressing: {:?} (port {})", j.button, port + 1);
                 held[port].set(j.button, true);
@@ -3365,7 +3482,7 @@ impl App {
             }
             true
         });
-        for port in 0..2 {
+        for port in 0..crate::bus::PORT_COUNT {
             if joy_changed[port] {
                 self.auto_joy_engaged[port] = true;
                 self.apply_auto_joy_state(port);
@@ -3422,6 +3539,20 @@ impl App {
             self.emu.bus_mut().input.set_analogue(port as usize, x, y);
             self.emu
                 .tt_note_input(crate::inputsched::ReplayAction::Pot { port, x, y });
+        }
+        // Fire any scheduled --pen-after light-pen positions (one-shot
+        // each).
+        let mut pen_sets = Vec::new();
+        self.auto_pens.retain(|&(at, x, y, port)| {
+            if emu_secs >= at {
+                pen_sets.push((x, y, port));
+                false
+            } else {
+                true
+            }
+        });
+        for (x, y, port) in pen_sets {
+            self.apply_scripted_pen_position(x, y, port);
         }
         let mut disk_inserts = Vec::new();
         let mut disk_change_available = self.netplay.as_ref().is_none_or(|s| s.can_change_disk());
@@ -4077,6 +4208,7 @@ impl ApplicationHandler for App {
                         self.last_display_cursor_pos = None;
                     } else {
                         self.track_uncaptured_cursor_motion(pos);
+                        self.track_light_pen_pointer(pos);
                     }
                     // A hand actually moving the mouse takes over from
                     // the keyboard: the marker goes away, though where it
@@ -4135,6 +4267,8 @@ impl ApplicationHandler for App {
                 self.cursor_pos = None;
                 self.last_cursor_phys = None;
                 self.last_display_cursor_pos = None;
+                // The hand holding the pen has left the glass with it.
+                self.track_light_pen_pointer(None);
                 self.volume_dragging = false;
                 self.analyzer_dragging = false;
                 self.menu_hover_arm = None;
@@ -4389,6 +4523,15 @@ impl ApplicationHandler for App {
                         MouseButton::Right => input.set_mouse_button(port, 1, pressed),
                         MouseButton::Middle => input.set_mouse_button(port, 2, pressed),
                         _ => {}
+                    }
+                }
+                // The host pointer is the light pen as well as the mouse:
+                // a left click over the display presses the pen's tip
+                // switch / pulls the gun's trigger.
+                if button == MouseButton::Left && self.netplay.is_none() {
+                    let input = &mut self.emu.bus_mut().input;
+                    if let Some(port) = input.light_pen_port() {
+                        input.set_mouse_button(port, 0, pressed);
                     }
                 }
             }
@@ -5439,14 +5582,17 @@ fn display_file_name(path: &std::path::Path) -> String {
 
 /// What a file dropped on the window should be treated as. Extension-based:
 /// only floppies get content-sniffed (by the insert path itself), and cue
-/// sheets/hard disks/ROMs have no shared magic worth probing here.
+/// sheets/hard disks/ROMs have no shared magic worth probing here. The one
+/// exception is `.chd`, which holds either a CD or a hard disk and says
+/// which in its metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DroppedMediaKind {
     /// Anything the floppy loader may accept (floppy::IMAGE_EXTENSIONS and
     /// unknown extensions): FloppyImage::from_bytes sniffs the content and
     /// rejects what it cannot read, surfacing a clean OSD failure.
     Floppy,
-    /// A CD image (cue sheet, bare ISO, Nero NRG, or CHD) for the CD drive.
+    /// A CD image (cue sheet, bare ISO, Nero NRG, or CD-ROM CHD) for the
+    /// CD drive.
     Cd,
     /// Hard disk images cannot be hot-attached; point at the config screen.
     HardDisk,
@@ -5462,6 +5608,7 @@ fn classify_dropped_media(path: &std::path::Path) -> DroppedMediaKind {
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase());
     match ext.as_deref() {
+        Some("chd") if crate::harddrive::chd::is_hard_disk_chd(path) => DroppedMediaKind::HardDisk,
         Some("cue") | Some("iso") | Some("nrg") | Some("chd") => DroppedMediaKind::Cd,
         Some("hdf") | Some("hdz") | Some("img") => DroppedMediaKind::HardDisk,
         Some("rom") => DroppedMediaKind::Rom,

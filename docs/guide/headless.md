@@ -144,10 +144,11 @@ You can schedule keyboard, mouse, and joystick inputs at specific emulated times
 | `--key-after SECS KEY MS` | Hold a key for specified duration in milliseconds |
 | `--type-after SECS TEXT` | Type TEXT on the US Amiga keyboard from SECS, one key every 100 ms (below) |
 | `--click-after SECS BTN MS [PORT]` | Click mouse button (`left`, `right`, `middle`) for MS (default port 1) |
-| `--joy-after SECS BTN MS [PORT]` | Trigger joystick/CD32 button (`up`, `down`, `left`, `right`, `red`, `blue`, etc.) (default port 2) |
+| `--joy-after SECS BTN MS [PORT]` | Trigger joystick/CD32 button (`up`, `down`, `left`, `right`, `red`, `blue`, etc.) on port 1-4 (default port 2; 3 and 4 are the parallel-port adapter's sockets) |
 | `--mouse-after SECS DX DY [PORT]` | Move mouse by relative delta (DX, DY) (default port 1) |
 | `--mouse-to-after SECS X Y [PORT]` | Steer sprite 0 pointer to pixel coordinates (X, Y) (default port 1) |
 | `--pot-after SECS X Y [PORT]` | Set analogue paddle/pot position (0-255) (default port 2) |
+| `--pen-after SECS X Y [PORT]` | Hold the light pen over pixel (X, Y), the `--mouse-to-after` coordinates; a negative coordinate lifts it off (default: the port with the pen) |
 | `--insert-disk-after SECS DFN PATH` | Insert a disk image into `df0`..`df3` |
 | `--defer-disk-insert SECS DFN` | Delay insertion of configured disk until SECS |
 | `--insert-cd-after SECS PATH` | Swap CD image (`.cue`, `.iso`, `.nrg`, `.chd`) in CD drive |
@@ -186,6 +187,15 @@ keeps its absolute timestamps under `--load-state`, and is available in
 same typing queue serves the control protocol's `input.type` and the
 window's *Paste as Keystrokes* action (`Cmd+Shift+V` / `Alt+Shift+V`, see
 [](ui.md)).
+
+A light pen (`[input] port1`/`port2 = "lightpen"`) is positioned with
+`--pen-after` and its tip switch / trigger is the port's `red` button in
+`--joy-after` (or `left` in `--click-after`): `--pen-after 5 320 128
+--joy-after 5.5 red 200 2` holds the pen over pixel (320, 128) and presses it
+half a second later. The pulse only reaches Agnus from the port the board
+wires to `LP` (port 2 on every Amiga after the A1000). Joysticks in the
+parallel-port four-player adapter (`--parallel joystick-adapter`) are ports
+`3` and `4` in `--joy-after`'s trailing PORT token.
 
 `--freeze-after` requires an enabled cartridge (`--cartridge hrtmon` or
 `[cartridge] model`, see [Configuration](configuration.md#freezer-cartridge)).

@@ -183,6 +183,8 @@ pub enum CoreOp {
     BreakList,
     BreakClear,
     FloppyQuery,
+    /// What is in the PCMCIA slot, and whether the machine has one.
+    PcmciaQuery,
     EventsSubscribe {
         events: Vec<EventKind>,
         frame_interval: Option<u64>,
@@ -279,6 +281,7 @@ impl CoreOp {
                 | CoreOp::SegmentsList
                 | CoreOp::BreakList
                 | CoreOp::FloppyQuery
+                | CoreOp::PcmciaQuery
                 | CoreOp::EventsList
                 | CoreOp::TraceStatus
                 | CoreOp::WaveformStatus
@@ -300,6 +303,52 @@ pub enum MemDigestScope {
     All,
     /// One address span through the CPU's memory map.
     Range { addr: u32, len: usize },
+}
+
+/// The `pcmcia.query` reply: whether the machine has a slot, whether it is
+/// enabled (not shadowed by Zorro II RAM or disabled by the guest), and
+/// the card in it.
+pub fn pcmcia_query(emu: &Emulator) -> Value {
+    let bus = emu.bus();
+    let gayle = bus.gayle.as_ref();
+    json!({
+        "slot": gayle.is_some(),
+        "enabled": gayle.is_some_and(crate::gayle::Gayle::slot_enabled),
+        "shadowed_by_fast_ram": gayle.is_some_and(crate::gayle::Gayle::slot_shadowed),
+        "inserted": bus.pcmcia_card().is_some(),
+        "card": bus.pcmcia_card().map(|c| c.kind().token()),
+        "description": bus.pcmcia_card().map(crate::pcmcia::PcmciaCard::describe),
+        "path": bus.pcmcia_card().and_then(|c| c.path().map(|p| p.display().to_string())),
+        "pins": gayle.map(crate::gayle::Gayle::card_pins),
+        "change_latches": gayle.map(crate::gayle::Gayle::change_latches),
+    })
+}
+
+/// Build the card a `pcmcia.insert` request describes and push it into the
+/// slot. Shared by the headless and windowed control servers.
+pub fn pcmcia_insert(
+    emu: &mut Emulator,
+    kind: crate::pcmcia::CardKind,
+    path: Option<&std::path::Path>,
+    size: usize,
+    read_only: bool,
+) -> Result<String, CtlError> {
+    use crate::pcmcia::{CardKind, CfCard, PcmciaCard, SramCard};
+    if !emu.bus().pcmcia_slot_present() {
+        return Err(CtlError::unsupported("no PCMCIA slot on this machine"));
+    }
+    let card = match kind {
+        CardKind::Cf => {
+            let path = path.ok_or_else(|| CtlError::invalid_params("a CF card needs a path"))?;
+            PcmciaCard::cf(CfCard::open(path).map_err(|e| CtlError::io(format!("{e:#}")))?)
+        }
+        CardKind::Sram => PcmciaCard::Sram(
+            SramCard::new(size, path, read_only).map_err(|e| CtlError::io(format!("{e:#}")))?,
+        ),
+    };
+    let description = card.describe();
+    emu.bus_mut().pcmcia_insert(card);
+    Ok(description)
 }
 
 /// Optional diagnostic layers painted onto a side-effect-free screenshot.
@@ -615,6 +664,18 @@ pub enum HostOp {
         path: PathBuf,
     },
     CdEject,
+    /// Push a card into the A600/A1200 PCMCIA slot: a CF card over a
+    /// hard-disk image, or an SRAM card of `size` bytes (optionally backed
+    /// by `path`). Gayle latches the card-detect change, so a listening
+    /// card.resource sees a real insertion.
+    PcmciaInsert {
+        kind: crate::pcmcia::CardKind,
+        path: Option<PathBuf>,
+        size: usize,
+        read_only: bool,
+    },
+    /// Pull the card out of the slot.
+    PcmciaEject,
     /// Hot-attach a copperhf.device unit's media at runtime (`[copperhf]`'s
     /// own boot-time attach path, driven from a live session): opens
     /// `path` exactly like a configured `[copperhf]` unit and replaces
@@ -762,6 +823,11 @@ pub enum InputCmd {
         y: u8,
         at_seconds: Option<f64>,
     },
+    /// Light-pen position (`None` lifts the pen off the glass).
+    Pen {
+        position: Option<(i32, i32)>,
+        at_seconds: Option<f64>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -888,6 +954,12 @@ impl InputCmd {
                     );
                 }
             }
+}
+
+            InputCmd::Pen {
+                position,
+                at_seconds,
+            } => emit(at_seconds, InputAction::Pen { position }),
         }
         (now, later)
     }
@@ -917,11 +989,25 @@ fn parse_port_param(p: &ParamReader, default: u32) -> Result<u8, CtlError> {
     Ok((port - 1) as u8)
 }
 
-/// Parse a required 1-based `port` param into the 0-based port index.
+/// Parse the optional 1-based `port` param of a joystick method, which
+/// may also name the parallel-port adapter's sockets (3 and 4).
+fn parse_joystick_port_param(p: &ParamReader, default: u32) -> Result<u8, CtlError> {
+    let port = p.u32_or("port", default)?;
+    if !(1..=crate::bus::PORT_COUNT as u32).contains(&port) {
+        return Err(CtlError::invalid_params(
+            "port must be 1-4 (3 and 4 are the parallel-port adapter's sockets)",
+        ));
+    }
+    Ok((port - 1) as u8)
+}
+
+/// Parse a required 1-based `port` param (1-4) into the 0-based port index.
 fn parse_port_req(p: &ParamReader) -> Result<u8, CtlError> {
     let port = p.u32_req("port")?;
-    if !(1..=2).contains(&port) {
-        return Err(CtlError::invalid_params("port must be 1 or 2"));
+    if !(1..=crate::bus::PORT_COUNT as u32).contains(&port) {
+        return Err(CtlError::invalid_params(
+            "port must be 1-4 (3 and 4 are the parallel-port adapter's sockets)",
+        ));
     }
     Ok((port - 1) as u8)
 }
@@ -1278,7 +1364,7 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
                 .clamp(1, crate::pointer::FRAME_LIMIT),
         }),
         "input.joy" => host(HostOp::Input(InputCmd::Joy {
-            port: parse_port_param(&p, 2)?,
+            port: parse_joystick_port_param(&p, 2)?,
             state: JoyState {
                 up: p.bool_or("up", false)?,
                 down: p.bool_or("down", false)?,
@@ -1306,11 +1392,19 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
                 at_seconds: parse_at_seconds(&p)?,
             }))
         }
+        "input.pen" => {
+            let (x, y) = (p.i32_or("x", -1)?, p.i32_or("y", -1)?);
+            host(HostOp::Input(InputCmd::Pen {
+                position: (x >= 0 && y >= 0).then_some((x, y)),
+                at_seconds: parse_at_seconds(&p)?,
+            }))
+        }
         "input.set_port" => {
             let device = p.str_req("device")?;
             let device = crate::bus::PortDevice::parse(&device).ok_or_else(|| {
                 CtlError::invalid_params(format!(
-                    "device must be mouse|gamepad-mouse|joystick|cd32|analogue|none, got {device}"
+                    "device must be mouse|gamepad-mouse|joystick|cd32|analogue|lightpen|none, \
+                     got {device}"
                 ))
             })?;
             let port = parse_port_req(&p)?;
@@ -1321,6 +1415,12 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
             if device == crate::bus::PortDevice::GamepadMouse && port != 0 {
                 return Err(CtlError::invalid_params(
                     "gamepad-mouse is port 1 only".to_string(),
+                ));
+            }
+            // The adapter sockets are passive wiring for switch joysticks.
+            if port as usize >= crate::bus::PARALLEL_PORT_FIRST && !device.fits_parallel_port() {
+                return Err(CtlError::invalid_params(
+                    "ports 3 and 4 (the parallel-port adapter) take joystick or none".to_string(),
                 ));
             }
             host(HostOp::SetPortDevice { port, device })
@@ -1339,6 +1439,45 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
             path: PathBuf::from(p.str_req("path")?),
         }),
         "media.cd.eject" => host(HostOp::CdEject),
+        "pcmcia.insert" => {
+            let kind = match p
+                .str_opt("card")?
+                .unwrap_or_else(|| "cf".to_string())
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "cf" => crate::pcmcia::CardKind::Cf,
+                "sram" => crate::pcmcia::CardKind::Sram,
+                other => {
+                    return Err(CtlError::invalid_params(format!(
+                        "card must be \"cf\" or \"sram\", not {other:?}"
+                    )))
+                }
+            };
+            let path = p.str_opt("path")?.map(PathBuf::from);
+            let size = match p.str_opt("size")? {
+                Some(size) => crate::config::parse_size(&size, "PCMCIA SRAM card")
+                    .map_err(|e| CtlError::invalid_params(format!("{e:#}")))?,
+                None => 0,
+            };
+            match kind {
+                crate::pcmcia::CardKind::Cf if path.is_none() => {
+                    return Err(CtlError::invalid_params("a CF card needs a path"))
+                }
+                crate::pcmcia::CardKind::Sram if size == 0 => {
+                    return Err(CtlError::invalid_params("an SRAM card needs a size"))
+                }
+                _ => {}
+            }
+            host(HostOp::PcmciaInsert {
+                kind,
+                path,
+                size,
+                read_only: p.bool_or("read_only", false)?,
+            })
+        }
+        "pcmcia.eject" => host(HostOp::PcmciaEject),
+        "pcmcia.query" => core(CoreOp::PcmciaQuery),
         "copperhf.attach" => {
             let unit = p.usize_req("unit")?;
             if unit >= crate::copperhf::NUM_UNITS {
@@ -2461,9 +2600,21 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
         }
         CoreOp::InputPortsGet => {
             let input = &emu.bus().input;
+            let light_pen = input.light_pen_port().map(|port| {
+                json!({
+                    "port": port + 1,
+                    "wired": port == emu.bus().light_pen_wired_port(),
+                    "x": input.light_pen.position.map(|p| p.0),
+                    "y": input.light_pen.position.map(|p| p.1),
+                })
+            });
             Ok(json!({
                 "port1": input.ports[0].device.label(),
                 "port2": input.ports[1].device.label(),
+                "port3": input.device(2).label(),
+                "port4": input.device(3).label(),
+                "parallel_adapter": input.parallel_adapter,
+                "light_pen": light_pen,
             }))
         }
         CoreOp::DebugResources => {
@@ -2708,6 +2859,7 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
                 .collect();
             Ok(json!({"drives": drives}))
         }
+        CoreOp::PcmciaQuery => Ok(pcmcia_query(emu)),
         CoreOp::EventsSubscribe {
             events,
             frame_interval,

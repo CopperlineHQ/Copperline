@@ -50,6 +50,8 @@ pub enum ReplayAction {
     Joy { port: u8, state: JoyState },
     /// Analogue pot positions on a port.
     Pot { port: u8, x: u8, y: u8 },
+    /// The light pen's position on the glass (`None` = lifted off).
+    Pen { position: Option<(i32, i32)> },
     /// A floppy media change occurred. Replaying across a media change cannot
     /// be reconstructed from the log (the inserted image is host-file state),
     /// so the engine warns rather than silently diverging.
@@ -87,6 +89,7 @@ impl ReplayAction {
                     .set_cd32_buttons(port, j.play, j.rwd, j.ffw, j.green, j.yellow);
             }
             ReplayAction::Pot { port, x, y } => bus.input.set_analogue(port as usize, x, y),
+            ReplayAction::Pen { position } => bus.input.set_light_pen_position(position),
             ReplayAction::DiskChange => {
                 log::warn!(
                     "reverse-debug replay crossed a floppy media change; \

@@ -479,22 +479,24 @@ const MOUSE_CAPTURES: [MouseCapture; 3] = [
     MouseCapture::Manual,
 ];
 // Controller devices a game port accepts, in stepper order.
-const PORT_DEVICES: [PortDevice; 5] = [
+const PORT_DEVICES: [PortDevice; 6] = [
     PortDevice::Mouse,
     PortDevice::Joystick,
     PortDevice::Cd32Pad,
     PortDevice::Analogue,
+    PortDevice::LightPen,
     PortDevice::None,
 ];
 // Port 1 offers one more: a mouse a gamepad can move as well as the
 // hand on the desk. Only port 1, because only port 1 is where a mouse
 // belongs -- Workbench and nearly every game read it there.
-const PORT1_DEVICES: [PortDevice; 6] = [
+const PORT1_DEVICES: [PortDevice; 7] = [
     PortDevice::Mouse,
     PortDevice::GamepadMouse,
     PortDevice::Joystick,
     PortDevice::Cd32Pad,
     PortDevice::Analogue,
+    PortDevice::LightPen,
     PortDevice::None,
 ];
 // `None` = no SCSI board fitted; the two boards are mutually exclusive here even
@@ -514,7 +516,7 @@ const LIDE_BOARDS: [Option<LidePersonality>; 4] = [
     Some(LidePersonality::AtBus2008),
 ];
 #[cfg(feature = "midi")]
-const SERIAL_MODES: [SerialMode; 7] = [
+const SERIAL_MODES: [SerialMode; 8] = [
     SerialMode::Off,
     SerialMode::Stdout,
     SerialMode::Midi,
@@ -522,6 +524,7 @@ const SERIAL_MODES: [SerialMode; 7] = [
     SerialMode::TcpConnect,
     SerialMode::Pty,
     SerialMode::Modem,
+    SerialMode::Device,
 ];
 /// Stereo-separation presets the picker steps through (percent), ascending so
 /// the right arrow steps up (wrapping 100 -> 0) and the left arrow steps down.
@@ -781,6 +784,14 @@ pub struct MachineSetup {
     /// `AT*T1`/`AT*T0` default at power-on for `mode = "modem"`, toggled by
     /// the Telnet row that mode shows.
     serial_telnet: bool,
+    /// The host serial port for `mode = "device"`, picked in the Port row
+    /// that mode shows. `None` has nothing to open, and the run says so
+    /// rather than the launcher refusing the mode.
+    serial_device: Option<String>,
+    /// The host's serial ports for that picker: filled when the screen
+    /// opens and re-read each time the row is cycled, so a just-plugged
+    /// adapter appears.
+    serial_devices: Vec<String>,
     /// The Centronics parallel-port device (None/Printer/Sampler), edited in the
     /// I/O Ports tab's Parallel section.
     parallel_device: crate::config::ParallelDevice,
@@ -952,6 +963,15 @@ impl MachineSetup {
         self.midi_endpoints = crate::midi::enumerate();
     }
 
+    /// Re-read the host serial ports for the Serial section's Port picker.
+    #[cfg(feature = "midi")]
+    pub fn refresh_serial_devices(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.serial_devices = crate::serial::device::available_host_ports();
+        }
+    }
+
     /// Re-read the host audio output devices for the "Audio output" picker.
     pub fn refresh_audio_devices(&mut self) {
         self.audio_devices = crate::audio::picker_output_devices();
@@ -1064,6 +1084,8 @@ impl MachineSetup {
     pub fn refresh_host_devices(&mut self) {
         #[cfg(feature = "midi")]
         self.refresh_midi_endpoints();
+        #[cfg(feature = "midi")]
+        self.refresh_serial_devices();
         self.refresh_audio_devices();
         self.refresh_sampler_inputs();
         self.refresh_bridge_interfaces();
@@ -1995,6 +2017,9 @@ impl MachineSetup {
                     PortDevice::Analogue => {
                         "--pot-after scripting or the control protocol".to_string()
                     }
+                    PortDevice::LightPen => {
+                        "the host pointer over the display (click = pen switch)".to_string()
+                    }
                     PortDevice::None => "nothing (empty port)".to_string(),
                 }
             };
@@ -2741,6 +2766,7 @@ impl MachineSetup {
             A::LideMaster(ch) | A::LideSlave(ch) => self
                 .lide_board
                 .is_some_and(|b| usize::from(ch) < b.channels()),
+            A::Pcmcia => self.has_gayle(),
         }
     }
 
@@ -2962,6 +2988,9 @@ impl MachineSetup {
                     *name = None;
                 }
             }
+            // The launcher has no image row for the slot; `[pcmcia]` is
+            // written by hand, and validation refuses both at once.
+            crate::config::HostDiskAttach::Pcmcia => {}
         }
     }
 
@@ -5735,6 +5764,7 @@ fn rows_contains_kind(field: LauncherField, kind: RowKind) -> bool {
         &SERIAL_ROWS_TCP_CONNECT,
         &SERIAL_ROWS_TCP_LISTEN,
         &SERIAL_ROWS_MODEM,
+        &SERIAL_ROWS_DEVICE,
     ];
     #[cfg(all(feature = "midi", feature = "mt32", not(feature = "coppersynth")))]
     let serial: &[&[Row]] = &[
@@ -5743,6 +5773,7 @@ fn rows_contains_kind(field: LauncherField, kind: RowKind) -> bool {
         &SERIAL_ROWS_TCP_CONNECT,
         &SERIAL_ROWS_TCP_LISTEN,
         &SERIAL_ROWS_MODEM,
+        &SERIAL_ROWS_DEVICE,
     ];
     #[cfg(all(feature = "midi", not(feature = "mt32"), feature = "coppersynth"))]
     let serial: &[&[Row]] = &[
@@ -5751,6 +5782,7 @@ fn rows_contains_kind(field: LauncherField, kind: RowKind) -> bool {
         &SERIAL_ROWS_TCP_CONNECT,
         &SERIAL_ROWS_TCP_LISTEN,
         &SERIAL_ROWS_MODEM,
+        &SERIAL_ROWS_DEVICE,
     ];
     #[cfg(all(feature = "midi", not(feature = "mt32"), not(feature = "coppersynth")))]
     let serial: &[&[Row]] = &[
@@ -5758,6 +5790,7 @@ fn rows_contains_kind(field: LauncherField, kind: RowKind) -> bool {
         &SERIAL_ROWS_TCP_CONNECT,
         &SERIAL_ROWS_TCP_LISTEN,
         &SERIAL_ROWS_MODEM,
+        &SERIAL_ROWS_DEVICE,
     ];
     #[cfg(not(feature = "midi"))]
     let serial: &[&[Row]] = &[];

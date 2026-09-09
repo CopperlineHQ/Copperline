@@ -339,6 +339,8 @@ fn every_launcher_tab_row_fits_inside_the_panel() {
         SerialMode::Tcp,
         SerialMode::TcpConnect,
         SerialMode::Pty,
+        SerialMode::Modem,
+        SerialMode::Device,
     ];
     // The strip tabs, plus the sub-pages and A/V categories reached from a
     // nav row rather than the strip.
@@ -3482,6 +3484,8 @@ fn panels_render_into_their_rects() {
             crate::bus::PortDevice::Mouse,
             crate::bus::PortDevice::Joystick,
         ],
+        pcmcia_slot: false,
+        pcmcia_card: None,
         pixel_aspect: PixelAspect::Tv,
         scaling: crate::config::DisplayScaling::Smooth,
         autocrop: false,

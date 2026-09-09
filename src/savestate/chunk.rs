@@ -79,6 +79,8 @@ pub(crate) struct ChunkSpec {
 // none is possible.
 //
 //   all chunks v1: the chunked format (container version 81).
+//   PCMC v1: the PCMCIA card chunk, added beside GAYL (additive: a state
+//     without it loads with an empty socket).
 
 const fn value(tag: &[u8; 4], version: u32, name: &'static str) -> ChunkSpec {
     ChunkSpec {
@@ -123,6 +125,9 @@ pub(crate) const BLIT: ChunkSpec = bus(b"BLIT", 1, "blitter", &["blitter"], true
 pub(crate) const FLOP: ChunkSpec = bus(b"FLOP", 1, "floppy controller", &["floppy"], true);
 pub(crate) const RTC: ChunkSpec = bus(b"RTC ", 1, "real-time clock", &["rtc", "rtc_present"], true);
 pub(crate) const GAYL: ChunkSpec = bus(b"GAYL", 1, "Gayle", &["gayle"], false);
+/// The card in Gayle's PCMCIA slot. Absent from states written before the
+/// slot existed, which load with an empty socket.
+pub(crate) const PCMC: ChunkSpec = bus(b"PCMC", 1, "PCMCIA card", &["pcmcia"], false);
 pub(crate) const MOBO: ChunkSpec = bus(
     b"MOBO",
     1,
@@ -152,7 +157,7 @@ pub(crate) const BUS: ChunkSpec = ChunkSpec {
 /// the order of their fields in `Bus`, which is what lets them stream.
 pub(crate) const CHUNKS: &[ChunkSpec] = &[
     DESC, CPU, MACH, ICAC, DCAC, MEM, CIAA, CIAB, PAUL, AGNS, COPR, DENI, BLIT, FLOP, RTC, GAYL,
-    MOBO, UAEL, CART, AKIK, CDTV, ZORR, KEYB, INPT, BUS,
+    PCMC, MOBO, UAEL, CART, AKIK, CDTV, ZORR, KEYB, INPT, BUS,
 ];
 
 pub(crate) fn spec_for(tag: Tag) -> Option<&'static ChunkSpec> {

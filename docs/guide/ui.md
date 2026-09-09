@@ -260,6 +260,8 @@ Disk images can be dropped anywhere on the emulator window:
   multi-selection in the disk dialog.
 - **CD images** (`.cue`/`.iso`/`.nrg`/`.chd`) mount in the machine's CD drive
   (CDTV, CD32, or a SCSI CD-ROM unit), with the media-change notification.
+  A `.chd` is read to see what it holds: one made with chdman's `createhd`
+  is a hard-disk image and is treated as such below.
 - **WHDLoad packages** (`.lha`, `.zip`, or a bare `.slave`) reboot the
   machine straight into the game through the [WHDLoad booter](whdload.md),
   keeping any explicit machine choices; dropped on the configuration
@@ -484,6 +486,21 @@ Shown only when something is on the port.
   *Decrease* rows step (also `Cmd/Alt+Shift +/-`). Both change live. See the
   `[parallel]` section of [Configuration](configuration.md).
 
+### PCMCIA Card
+
+Offered only on an A600 or A1200, whose Gayle carries the credit-card
+slot; the category row shows what is in the slot (or *Empty*).
+
+- **Insert CF Card Image...**: pick a hard-disk image (anything `[ide]`
+  accepts) and push it into the slot as a CompactFlash card, ejecting
+  whatever was there. Gayle latches the card-detect change, so a
+  `card.resource` client sees a real insertion.
+- **Eject Card**: pull the card (greyed with an empty slot). An SRAM
+  card's backing file is written back on the way out.
+
+See the `[pcmcia]` section of [Configuration](configuration.md) for
+boot-time cards, SRAM cards, real card readers, and the fast-RAM rule.
+
 ### Emulation Settings
 
 - **Floppy Speed**: the emulated drive speed -- 100% (real speed), 200%,
@@ -686,7 +703,11 @@ The layout is:
   port fields. Leaving a field blank uses the default (host `127.0.0.1` for
   Listen, port `1234`; Connect requires a host/IP). Valid ports are 1-65535;
   on macOS and Linux, binding a Listen port below 1024 requires root
-  privileges (outbound connections have no port restrictions); the
+  privileges (outbound connections have no port restrictions). The
+  **Host port** mode (`device`) shows a **Port** picker instead, stepping
+  through the serial ports the host has at that moment (re-read on every
+  step, so a freshly plugged adapter appears; a saved path the host does
+  not list is kept and marked "not found"); the
   parallel device -- None, Printer, or Sampler -- with, for the printer, its
   capture output file, or for the sampler, its host audio input and input gain;
   and the A2065 Ethernet and HostSocket bsdsocket.library boards, each --
@@ -1045,8 +1066,8 @@ either direction.
 
 An Amiga has two game ports, and either accepts any controller. Copperline
 models that: each port carries a device -- `mouse`, `joystick`, `cd32` pad,
-`analogue` paddles, or `none`, and port 1 additionally `gamepad-mouse` --
-set with `[input] port1`/`port2` in the
+`analogue` paddles, `lightpen`, or `none`, and port 1 additionally
+`gamepad-mouse` -- set with `[input] port1`/`port2` in the
 config (or `--port1`/`--port2`, or the launcher's *Input* tab). The default
 is the stock wiring, a mouse in port 1 and a joystick in port 2 (a CD32 pad
 on the CD32 profile). The runtime menu's **Port 1 Device** / **Port 2
@@ -1092,6 +1113,30 @@ protocol instead, including the red/blue/green/yellow and transport
 buttons, on either port. An `analogue` device presents pot resistances on
 the POTxX/POTxY pins; no live host device maps to it yet -- drive it with
 `--pot-after` scripting or the control protocol's `input.analogue`.
+
+A `lightpen` device (alias `lightgun`) follows the host pointer over the
+display: wherever the pointer is, the pen's photodetector is held against
+that pixel, and Agnus latches the beam position as it sweeps past (readable
+through `VPOSR`/`VHPOSR` while the guest sets `BPLCON0` `LPEN`). A left
+click over the display presses the pen's tip switch -- a light gun's
+trigger -- which the pen puts on the port's third-button line (`POTxX`),
+since pin 6 is the pulse line itself. Leave the mouse uncaptured: a
+captured pointer has no position to follow. The pen only reaches Agnus from
+the port the board wires to its `LP` input, port 1 on the A1000 and port 2
+on every later Amiga; a pen in the other port is logged at start-up. See
+[Port devices](configuration.md#port-devices) for the headless and
+control-protocol forms.
+
+Ports 3 and 4 are the sockets of the passive parallel-port four-player
+adapter (`[parallel] device = "joystick-adapter"`, or simply `[input]
+port3`/`port4 = "joystick"`, or `--port3`/`--port4`), the one Kick Off 2,
+Sensible Soccer, Dyna Blaster and Gauntlet II read. They carry plain switch
+joysticks and join the queue for the host sources behind the game ports:
+the pad and the keyboard mappings fill ports 1 and 2 first and a socket is
+driven only when the game ports have no joystick left for it. One physical
+pad is read; scripted `--joy-after ... 3`/`4` input and the control
+protocol's `input.joy` drive the sockets directly. Netplay and the libretro
+core stay two-player.
 
 A `gamepad-mouse` device is a mouse a gamepad moves as well as the host's
 own; the machine still sees one mouse. The d-pad moves the pointer,
