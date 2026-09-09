@@ -97,7 +97,7 @@ whichever the driver configures), so the guest sees a card, not an IDE
 drive; Kickstart's `card.resource` reports the insertion but does not mount
 it by itself. The slot holds one card, so `attach = "pcmcia"` cannot be
 combined with a `[pcmcia]` image, and more than 4M of Zorro II fast RAM
-disables the slot (see [`[pcmcia]`](configuration.md#pcmcia----the-a600a1200-credit-card-slot)).
+disables the slot (see [`[pcmcia]`](configuration.md#pcmcia-config)).
 A card reader is removable media, so read-write access must be selected
 afresh each session, as for any other removable disk below.
 

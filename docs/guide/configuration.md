@@ -621,7 +621,7 @@ For a one-off developer run:
   it must be a legal Zorro II board size: 64K, 128K, 256K, 512K, 1M, 2M,
   4M, or 8M. On the A600/A1200 more than 4M reaches the PCMCIA slot's
   common-memory window at `$600000` and disables the slot (see
-  [`[pcmcia]`](#pcmcia----the-a600a1200-credit-card-slot)).
+  [`[pcmcia]`](#pcmcia-config)).
 - **Slow RAM** ($C00000 "ranger" RAM) is arbitrated on the chip bus through
   Agnus exactly like chip RAM -- it is slow in the authentic way.
 - **Motherboard RAM** is the 32-bit local memory Ramsey drives on the
@@ -1805,6 +1805,7 @@ use (see below), reached over the ATA task file instead of a WD33C93 SCSI
 bus. It mounts and swaps discs, plays CD audio, and answers `scsi.device`
 filesystems the same way a `[scsi]` CD-ROM unit does.
 
+(pcmcia-config)=
 ## `[pcmcia]` -- the A600/A1200 credit-card slot
 
 ```toml
