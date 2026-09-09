@@ -189,10 +189,14 @@ echo "==> Ad-hoc signing $app_name"
 # launch on Apple Silicon; it does not satisfy notarization, so downloads are
 # still Gatekeeper-quarantined (see README.txt).
 cp assets/egui/THIRD_PARTY_FONTS.txt "$app/Contents/Resources/THIRD_PARTY_FONTS.txt"
-# --deep covers the bundle's main executable and nested bundles, but not
-# reliably the extra Mach-O tools beside it in Contents/MacOS, and an
-# unsigned arm64 copperline-ctl would be killed on launch: sign each one.
+# The companion tools first: signing the bundle (or its main executable,
+# which codesign treats as the bundle) verifies every nested code object,
+# and lipo has stripped the per-slice signatures, so an unsigned tool in
+# Contents/MacOS fails that pass. An unsigned arm64 copperline-ctl would
+# also be killed on launch. The bundle-level --deep sign then covers the
+# main executable.
 for name in "${binaries[@]}"; do
+  [ "$name" = copperline ] && continue
   codesign --force --sign - "$app/Contents/MacOS/$name"
 done
 codesign --force --deep --sign - "$app"
