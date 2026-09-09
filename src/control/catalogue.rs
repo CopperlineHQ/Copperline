@@ -480,6 +480,35 @@ fn build() -> Vec<ToolDef> {
             json!({"addr": "0x400", "len": 16}),
         ),
         entry(
+            "mem.digest",
+            "Hash RAM server-side with FNV-1a, for change detection and lockstep \
+             comparison of two sessions without moving the bytes. `region` \
+             \"chip\" (default) digests the chip RAM bank, \"all\" every writable RAM \
+             bank (chip, slow, motherboard, accelerator, Zorro boards) one by one; \
+             alternatively `addr` and `len` digest one span through the CPU map. \
+             Returns `digest` over the whole and `regions` with each bank's base, \
+             length and digest.",
+            object(
+                vec![
+                    (
+                        "region",
+                        enumeration("Which banks to digest (default chip)", &["chip", "all"]),
+                    ),
+                    ("addr", addr("Start of one span to digest instead of a region")),
+                    (
+                        "len",
+                        uint(
+                            "Length of that span in bytes",
+                            Some(1),
+                            Some(256 * 1024 * 1024),
+                        ),
+                    ),
+                ],
+                &[],
+            ),
+            json!({"region": "all"}),
+        ),
+        entry(
             "mem.write",
             "Write bytes at `addr`: `data` is hex (default) or base64 (`encoding`), 1 to \
              1048576 bytes. Lands at a deterministic timeline boundary and is journaled \
@@ -1076,6 +1105,23 @@ fn build() -> Vec<ToolDef> {
                 &["rawkey"],
             ),
             json!({"rawkey": "0x45"}),
+        ),
+        entry(
+            "input.type",
+            "Type `text` on the US Amiga keyboard: letters, digits and punctuation \
+             as raw key press/release pairs with Shift where needed, a newline as \
+             Return, a tab as Tab, escape as Esc. Keys are paced 100 ms apart in \
+             emulated time so the keyboard MCU and the guest's input driver see \
+             each one. `at_seconds` schedules the first key; the rest follow it. \
+             Input is journaled, so a rewind replays it.",
+            object(
+                vec![
+                    ("text", string("The text to type (US keymap characters only)")),
+                    ("at_seconds", at_seconds()),
+                ],
+                &["text"],
+            ),
+            json!({"text": "dir df0:\n"}),
         ),
         entry(
             "input.mouse",

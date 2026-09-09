@@ -85,6 +85,16 @@ fn validate_benchmark_args(cli: &CliArgs) -> Result<()> {
             "--benchmark-until cannot be combined with --screenshot-after"
         ));
     }
+    if !cli.expect_screenshot.is_empty() {
+        return Err(anyhow!(
+            "--benchmark-until cannot be combined with --expect-screenshot"
+        ));
+    }
+    if cli.exit_on_return {
+        return Err(anyhow!(
+            "--benchmark-until cannot be combined with --exit-on-return"
+        ));
+    }
     if !cli.save_state_after.is_empty() {
         return Err(anyhow!(
             "--benchmark-until cannot be combined with --save-state-after"
@@ -137,6 +147,24 @@ fn validate_run_args(cli: &CliArgs) -> Result<()> {
             "--run and --whdload are mutually exclusive: each stages its own boot volume"
         ));
     }
+    if (cli.coverage.is_some() || !cli.coverage_source_map.is_empty()) && cli.run.is_none() {
+        return Err(anyhow!(
+            "--coverage and --coverage-source-map need --run: coverage is counted from \
+             the program's LoadSeg to its exit"
+        ));
+    }
+    if cli.coverage.is_none() && !cli.coverage_source_map.is_empty() {
+        return Err(anyhow!("--coverage-source-map needs --coverage FILE"));
+    }
+    #[cfg(not(feature = "dap"))]
+    if cli.coverage.is_some() {
+        return Err(anyhow!(
+            "--coverage needs the debug-information reader; this build has no `dap` feature"
+        ));
+    }
+    if cli.coverage.is_some() && cli.netplay.is_some() {
+        return Err(anyhow!("--coverage cannot combine with netplay"));
+    }
     Ok(())
 }
 
@@ -168,6 +196,9 @@ fn validate_gdb_args(cli: &CliArgs) -> Result<()> {
     }
     if !cli.screenshot_after.is_empty() {
         return Err(anyhow!("--gdb cannot be combined with --screenshot-after"));
+    }
+    if !cli.expect_screenshot.is_empty() {
+        return Err(anyhow!("--gdb cannot be combined with --expect-screenshot"));
     }
     if !cli.save_state_after.is_empty() {
         return Err(anyhow!("--gdb cannot be combined with --save-state-after"));
@@ -868,6 +899,19 @@ fn main() -> Result<()> {
     // configuration and CLI flags say.
     let mut run_prog_name: Option<String> = None;
     let mut run_warp: Option<copperline::runprog::WarpLaunch> = None;
+    // --exit-on-return watches the same completion marker the warp gate
+    // does, for the whole run rather than the launch phase.
+    let mut run_done_marker: Option<std::path::PathBuf> = None;
+    if cli.exit_on_return && cli.run.is_none() {
+        return Err(anyhow!(
+            "--exit-on-return needs a --run program whose return code to report"
+        ));
+    }
+    // --run PROG --coverage FILE: the run's debug information is read
+    // before the machine boots, so a missing or unreadable executable
+    // fails here rather than after a full boot.
+    #[cfg(feature = "dap")]
+    let mut coverage_run: Option<copperline::profile::lcov::CoverageRun> = None;
     if let Some(program) = cli.run.as_ref().filter(|_| !netplay_guest) {
         let prepared = copperline::runprog::prepare_with_options(
             program,
@@ -887,10 +931,26 @@ fn main() -> Result<()> {
             prepared.prog_dir.display(),
             copperline::runprog::PROG_VOLUME
         );
+        let done_marker = prepared.boot_dir.join(copperline::runprog::DONE_MARKER);
         run_warp = Some(copperline::runprog::WarpLaunch::new(
             prepared.prog_name.clone(),
-            Some(prepared.boot_dir.join(copperline::runprog::DONE_MARKER)),
+            Some(done_marker.clone()),
         ));
+        run_done_marker = cli.exit_on_return.then_some(done_marker);
+        #[cfg(feature = "dap")]
+        if let Some(out) = cli.coverage.as_ref() {
+            coverage_run = Some(
+                copperline::profile::lcov::CoverageRun::prepare(
+                    program,
+                    None,
+                    prepared.prog_name.clone(),
+                    prepared.boot_dir.join(copperline::runprog::DONE_MARKER),
+                    out.clone(),
+                    cli.coverage_source_map.clone(),
+                )
+                .map_err(|e| anyhow!("--coverage: {e}"))?,
+            );
+        }
         run_prog_name = Some(prepared.prog_name);
     }
     // Only the gdb and control dispatches read the program name; without
@@ -1010,11 +1070,18 @@ fn main() -> Result<()> {
     // Headless capture runs (screenshot / frame dump) advance the
     // deterministic core unthrottled; the interactive window paces to
     // wall-clock time. The emulated result is identical either way.
+    // A --coverage run without an interactive server attached is a capture
+    // run too: it ends by itself when the program exits. With
+    // --control-gui/--gdb-gui it rides along the windowed session instead.
+    let coverage_capture =
+        cli.coverage.is_some() && cli.control_gui.is_none() && cli.gdb_gui.is_none();
     let headless_capture = !cli.screenshot_after.is_empty()
+        || !cli.expect_screenshot.is_empty()
         || cli.frame_dump.is_some()
         || cli.benchmark_until.is_some()
         || cli.gdb.is_some()
-        || cli.control.is_some();
+        || cli.control.is_some()
+        || coverage_capture;
     // A real drive on a bridge is the exception: its platter turns in
     // wall-clock time and cannot be hurried. Left unthrottled, the emulated
     // machine outruns it -- spinning the motor up and down faster than it can
@@ -1035,6 +1102,10 @@ fn main() -> Result<()> {
     )?;
     if let Some(uss) = &uss {
         uss.load(&mut emu)?;
+    }
+    #[cfg(feature = "dap")]
+    if let Some(run) = coverage_run.take() {
+        emu.arm_coverage_run(run);
     }
     if let Some(path) = &cli.load_state {
         let outcome = emu.load_state(path)?;
@@ -1142,7 +1213,10 @@ fn main() -> Result<()> {
     // window-server access), and a capture run must work anywhere.
     // --control-gui keeps the windowed path: it explicitly asks for an
     // interactive session.
-    let windowless_capture = (!cli.screenshot_after.is_empty() || cli.frame_dump.is_some())
+    let windowless_capture = (!cli.screenshot_after.is_empty()
+        || !cli.expect_screenshot.is_empty()
+        || cli.frame_dump.is_some()
+        || coverage_capture)
         && cli.control_gui.is_none()
         && cli.gdb_gui.is_none();
     // The warp-launch gate belongs to interactive sessions only: a capture
@@ -1246,6 +1320,10 @@ fn main() -> Result<()> {
         live_audio,
         copperline::sampler::SamplerRequest::from_config(&cfg.parallel),
     );
+    app.set_expect_screenshots(cli.expect_screenshot);
+    if let Some(marker) = run_done_marker {
+        app.set_exit_on_return(marker);
+    }
     if let Some(session) = netplay {
         app.attach_netplay(session);
     }
@@ -1285,12 +1363,24 @@ fn main() -> Result<()> {
     }
     if windowless_capture {
         info!("headless capture: running without a window (no display connection)");
-        return app.run_headless();
+        return finish_with(app.run_headless()?);
     }
     info!(
         "entering event loop. {HOST_SHORTCUT_MODIFIER_LABEL}+Q to quit, {HOST_SHORTCUT_MODIFIER_LABEL}+S to screenshot, {HOST_SHORTCUT_MODIFIER_LABEL}+G to capture/release mouse."
     );
-    app.run()
+    finish_with(app.run()?)
+}
+
+/// End the process with the session's verdict (src/verdict.rs): a plain
+/// return for the usual 0, otherwise the status the run concluded on. The
+/// App has already been dropped by then (its recording flushed), so the
+/// immediate exit loses nothing.
+fn finish_with(status: i32) -> Result<()> {
+    if status != 0 {
+        info!("exiting with status {status}");
+        std::process::exit(status);
+    }
+    Ok(())
 }
 
 /// Build the minimal placeholder machine that hosts the configuration screen
@@ -1407,7 +1497,7 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
     // `[emulation] auto_launch` in the configuration the launcher opened
     // showing: straight to the machine, no configuration screen first.
     app.auto_launch_if_asked();
-    app.run()
+    finish_with(app.run()?)
 }
 
 /// Whether to show the configuration screen instead of booting: only on a bare
@@ -1429,6 +1519,8 @@ fn launcher_requested(cli: &CliArgs) -> bool {
         && cli.overrides.is_empty()
         && !Path::new("copperline.toml").exists()
         && cli.screenshot_after.is_empty()
+        && cli.expect_screenshot.is_empty()
+        && !cli.exit_on_return
         && cli.save_state_after.is_empty()
         && cli.frame_dump.is_none()
         && cli.benchmark_until.is_none()
@@ -1777,6 +1869,35 @@ mod tests {
             .to_string()
             .contains("--run"));
 
+        // --coverage counts the --run program, so it needs one; its
+        // source map needs the file.
+        let covered = parse(&[
+            "--run",
+            "hello",
+            "--coverage",
+            "out/cov.info",
+            "--coverage-source-map",
+            "/build=/src",
+        ])
+        .unwrap();
+        assert_eq!(covered.coverage.as_deref(), Some(Path::new("out/cov.info")));
+        assert_eq!(
+            covered.coverage_source_map,
+            vec![("/build".to_string(), "/src".to_string())]
+        );
+        assert!(validate_run_args(&covered).is_ok());
+        let orphan = parse(&["--coverage", "out/cov.info"]).unwrap();
+        assert!(validate_run_args(&orphan)
+            .unwrap_err()
+            .to_string()
+            .contains("--run"));
+        let mapless = parse(&["--run", "hello", "--coverage-source-map", "a=b"]).unwrap();
+        assert!(validate_run_args(&mapless)
+            .unwrap_err()
+            .to_string()
+            .contains("--coverage FILE"));
+        assert!(parse(&["--run", "hello", "--coverage-source-map", "nope"]).is_err());
+
         // --run and --whdload each stage their own boot volume.
         let both = parse(&["--run", "hello", "--whdload", "game.lha"]).unwrap();
         assert!(validate_run_args(&both)
@@ -1963,6 +2084,130 @@ mod tests {
             })]
         );
         let _ = std::fs::remove_file(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn type_after_expands_to_spaced_key_presses() -> Result<()> {
+        use copperline::typing::{
+            RAWKEY_LSHIFT, TYPE_KEY_HOLD_MS, TYPE_KEY_PITCH_MS, TYPE_SHIFT_HOLD_MS,
+            TYPE_SHIFT_LEAD_MS,
+        };
+        let args = parse(&["--type-after", "5", "Di\\n"])?;
+        let keys: Vec<(f32, u8, u32)> = args
+            .press_after
+            .iter()
+            .map(|k| (k.secs, k.rawkey, k.hold_ms))
+            .collect();
+        let pitch = TYPE_KEY_PITCH_MS as f32 / 1000.0;
+        let lead = TYPE_SHIFT_LEAD_MS as f32 / 1000.0;
+        assert_eq!(
+            keys,
+            vec![
+                (5.0, RAWKEY_LSHIFT, TYPE_SHIFT_HOLD_MS),
+                (5.0 + lead, 0x22, TYPE_KEY_HOLD_MS),
+                (5.0 + pitch, 0x17, TYPE_KEY_HOLD_MS),
+                (5.0 + 2.0 * pitch, 0x44, TYPE_KEY_HOLD_MS),
+            ]
+        );
+        // Typed text and explicit presses share one queue, in flag order.
+        let args = parse(&["--press-after", "1", "esc", "--type-after", "2", "a"])?;
+        assert_eq!(args.press_after.len(), 2);
+        assert_eq!(args.press_after[0].rawkey, 0x45);
+        assert_eq!(args.press_after[1].rawkey, 0x20);
+        // Untypable text is an error naming the characters, not silence.
+        let err = parse(&["--type-after", "1", "caf\u{e9}"]).unwrap_err();
+        assert!(err.to_string().contains("\u{e9}"), "{err}");
+        assert!(parse(&["--type-after", "1"]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn script_type_directive_is_type_after() -> Result<()> {
+        let path = temp_script("type", "type 3.5 \"dir df0:\\n\"\ntype-after 4 x\n");
+        let args = parse(&["--script", path.to_str().unwrap()])?;
+        // "dir df0:" + Return: 9 keys plus one Shift (for the colon), then x.
+        assert_eq!(args.press_after.len(), 11);
+        assert_eq!(args.press_after[0].secs, 3.5);
+        assert_eq!(args.press_after[0].rawkey, 0x22);
+        assert_eq!(args.press_after[10].secs, 4.0);
+        assert_eq!(args.press_after[10].rawkey, 0x32);
+        let _ = std::fs::remove_file(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn expect_screenshot_takes_an_optional_tolerance() -> Result<()> {
+        use copperline::expect::Tolerance;
+        let args = parse(&[
+            "--expect-screenshot",
+            "10",
+            "a.png",
+            "--expect-screenshot",
+            "20",
+            "b.png",
+            "0.001",
+            "--expect-screenshot",
+            "30",
+            "c.png",
+            "250",
+            "KICK13.ROM",
+        ])?;
+        let got: Vec<_> = args
+            .expect_screenshot
+            .iter()
+            .map(|e| (e.secs, e.path.to_string_lossy().into_owned(), e.tolerance))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (10.0, "a.png".to_owned(), Tolerance::Exact),
+                (20.0, "b.png".to_owned(), Tolerance::Fraction(0.001)),
+                (30.0, "c.png".to_owned(), Tolerance::Pixels(250)),
+            ]
+        );
+        // A positional ROM path after the flag is not mistaken for a tolerance.
+        assert_eq!(args.rom_path.as_deref(), Some(Path::new("KICK13.ROM")));
+        let args = parse(&["--expect-screenshot", "1", "x.png", "--noaudio"])?;
+        assert_eq!(args.expect_screenshot[0].tolerance, Tolerance::Exact);
+        assert!(!args.audio_live);
+        assert!(parse(&["--expect-screenshot", "1"]).is_err());
+
+        // The script directive spells the same flag.
+        let path = temp_script("expect", "expect-screenshot 2 \"/tmp/a b.png\" 3\n");
+        let args = parse(&["--script", path.to_str().unwrap()])?;
+        assert_eq!(
+            args.expect_screenshot[0].path,
+            PathBuf::from("/tmp/a b.png")
+        );
+        assert_eq!(args.expect_screenshot[0].tolerance, Tolerance::Pixels(3));
+        let _ = std::fs::remove_file(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn exit_on_return_is_a_flag_and_excluded_from_benchmarks() -> Result<()> {
+        assert!(!parse(&[])?.exit_on_return);
+        let args = parse(&["--run", "prog", "--exit-on-return"])?;
+        assert!(args.exit_on_return);
+        let err = validate_benchmark_args(&parse(&[
+            "--benchmark-until",
+            "5",
+            "--run",
+            "prog",
+            "--exit-on-return",
+        ])?)
+        .unwrap_err();
+        assert!(err.to_string().contains("--exit-on-return"), "{err}");
+        let err = validate_benchmark_args(&parse(&[
+            "--benchmark-until",
+            "5",
+            "--expect-screenshot",
+            "1",
+            "x.png",
+        ])?)
+        .unwrap_err();
+        assert!(err.to_string().contains("--expect-screenshot"), "{err}");
         Ok(())
     }
 

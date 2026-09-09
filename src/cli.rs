@@ -7,6 +7,7 @@ use anyhow::{anyhow, bail, Result};
 use std::path::PathBuf;
 
 use copperline::config::ConfigOverrides;
+use copperline::expect::{ExpectShotSpec, Tolerance};
 use copperline::video::window::{
     parse_amiga_key, DiskInsertSpec, FrameDumpSpec, KeyPressSpec, DEFAULT_KEY_HOLD_MS,
 };
@@ -32,6 +33,18 @@ pub struct CliArgs {
     pub run_stack: Option<u32>,
     /// `--run-detach`: start the run program asynchronously and close its CLI.
     pub run_detach: bool,
+    /// `--exit-on-return`: end the session when the `--run` program
+    /// returns and exit with its AmigaDOS return code (clamped to 0-255),
+    /// or with status 4 if the run ends before it returns.
+    pub exit_on_return: bool,
+    /// `--coverage FILE`: count every instruction the `--run` program
+    /// retires from its `LoadSeg()` on and write lcov line/function
+    /// coverage to FILE when it exits or the run ends
+    /// (src/profile/lcov.rs).
+    pub coverage: Option<PathBuf>,
+    /// `--coverage-source-map FROM=TO`: prefix rewrites applied to the
+    /// source paths the coverage file names. Repeatable.
+    pub coverage_source_map: Vec<(String, String)>,
     /// `--warp-boot`: warp boot -- run unpaced from power-on until the
     /// boot storage has been idle for `[emulation] warp_boot_idle`
     /// emulated seconds, then resume real-time pacing (src/warpboot.rs).
@@ -44,6 +57,11 @@ pub struct CliArgs {
     /// occurrence is captured, and the run ends once the last one has
     /// fired.
     pub screenshot_after: Vec<(f32, PathBuf)>,
+    /// `--expect-screenshot SECS PATH [TOLERANCE]`: capture the frame at
+    /// SECS exactly as `--screenshot-after` would and compare it with the
+    /// PNG at PATH (src/expect.rs). Repeatable; a failed comparison makes
+    /// the process exit with status 3 once the run finishes.
+    pub expect_screenshot: Vec<ExpectShotSpec>,
     /// `--save-state-after SECS PATH`: write a save state of the whole
     /// machine after SECS emulated seconds, then keep running (combine
     /// with --screenshot-after/--dump-frames to bound the run).
@@ -89,7 +107,9 @@ pub struct CliArgs {
     /// signals for GTKWave (see docs/debugger/waveform.md).
     pub waveform: Option<copperline::waveform::WaveOptions>,
     /// Scripted key presses to inject after the window opens. Useful
-    /// for headless testing of menus and modifier chords.
+    /// for headless testing of menus and modifier chords. `--type-after
+    /// SECS TEXT` expands into these too, one press/release per typed
+    /// key (src/typing.rs), so typed text rides the same scheduler.
     pub press_after: Vec<KeyPressSpec>,
     /// `--click-after SECS BUTTON DURATION_MS [PORT]`: at SECS seconds
     /// after the window opens, press the named mouse button
@@ -209,9 +229,12 @@ pub fn parse_args() -> Result<CliArgs> {
 /// the flag names (without the leading dashes) whose effects accumulate;
 /// anything else in a script is an error so a typo cannot silently change
 /// emulator configuration.
-const SCRIPT_DIRECTIVES: [&str; 12] = [
+const SCRIPT_DIRECTIVES: [&str; 15] = [
     "press-after",
     "key-after",
+    "type",
+    "type-after",
+    "expect-screenshot",
     "hold-key-after",
     "click-after",
     "joy-after",
@@ -293,7 +316,14 @@ fn expand_script_files(args: Vec<String>) -> Result<Vec<String>> {
                     SCRIPT_DIRECTIVES.join(", ")
                 ));
             }
-            out.push(format!("--{directive}"));
+            // `type SECS TEXT` is the natural spelling in a script; the
+            // flag it stands for is --type-after.
+            let flag = if directive == "type" {
+                "type-after"
+            } else {
+                directive.as_str()
+            };
+            out.push(format!("--{flag}"));
             out.extend(rest.iter().cloned());
         }
     }
@@ -363,7 +393,11 @@ where
     let mut run_args: Option<String> = None;
     let mut run_stack: Option<u32> = None;
     let mut run_detach = false;
+    let mut exit_on_return = false;
+    let mut coverage: Option<PathBuf> = None;
+    let mut coverage_source_map: Vec<(String, String)> = Vec::new();
     let mut screenshot_after: Vec<(f32, PathBuf)> = Vec::new();
+    let mut expect_screenshot: Vec<ExpectShotSpec> = Vec::new();
     let mut save_state_after: Vec<(f32, PathBuf)> = Vec::new();
     let mut load_state: Option<PathBuf> = None;
     let mut load_uss = None;
@@ -522,6 +556,22 @@ where
                 );
             }
             "--run-detach" => run_detach = true,
+            "--exit-on-return" => exit_on_return = true,
+            "--coverage" => {
+                let v = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--coverage requires the lcov output path"))?;
+                coverage = Some(PathBuf::from(v));
+            }
+            "--coverage-source-map" => {
+                let v = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--coverage-source-map requires FROM=TO"))?;
+                let (from, to) = v
+                    .split_once('=')
+                    .ok_or_else(|| anyhow!("--coverage-source-map requires FROM=TO"))?;
+                coverage_source_map.push((from.to_string(), to.to_string()));
+            }
             "--warp-boot" => {
                 warp_boot = true;
             }
@@ -1073,6 +1123,24 @@ where
                     hold_ms: DEFAULT_KEY_HOLD_MS,
                 });
             }
+            "--type-after" => {
+                const USAGE: &str = "--type-after requires SECS TEXT";
+                let secs: f32 = next_arg(&mut args, USAGE, "--type-after SECS must be a number")?;
+                let text = args.next().ok_or_else(|| anyhow!(USAGE))?;
+                let (keys, untypable) =
+                    copperline::typing::keystrokes_for_text(&copperline::typing::unescape(&text));
+                if !untypable.is_empty() {
+                    return Err(anyhow!(
+                        "--type-after TEXT: no key on the Amiga keyboard for {:?}",
+                        untypable.into_iter().collect::<String>()
+                    ));
+                }
+                press_after.extend(keys.into_iter().map(|k| KeyPressSpec {
+                    secs: secs + k.offset_ms as f32 / 1000.0,
+                    rawkey: k.rawkey,
+                    hold_ms: k.hold_ms,
+                }));
+            }
             "--key-after" | "--hold-key-after" => {
                 const USAGE: &str = "--key-after requires SECS KEY DURATION_MS";
                 let secs: f32 = next_arg(&mut args, USAGE, "--key-after SECS must be a number")?;
@@ -1093,6 +1161,29 @@ where
                     next_arg(&mut args, USAGE, "--screenshot-after SECS must be a number")?;
                 let path = args.next().ok_or_else(|| anyhow!(USAGE))?;
                 screenshot_after.push((secs, PathBuf::from(path)));
+            }
+            "--expect-screenshot" => {
+                const USAGE: &str = "--expect-screenshot requires SECS PATH [TOLERANCE]";
+                let secs: f32 = next_arg(
+                    &mut args,
+                    USAGE,
+                    "--expect-screenshot SECS must be a number",
+                )?;
+                let path = args.next().ok_or_else(|| anyhow!(USAGE))?;
+                // The tolerance is optional and numeric; anything else is
+                // the next flag or a positional path and stays put.
+                let tolerance = match args.peek().and_then(|t| Tolerance::parse(t)) {
+                    Some(tolerance) => {
+                        args.next();
+                        tolerance
+                    }
+                    None => Tolerance::Exact,
+                };
+                expect_screenshot.push(ExpectShotSpec {
+                    secs,
+                    path: PathBuf::from(path),
+                    tolerance,
+                });
             }
             "--save-state-after" => {
                 const USAGE: &str = "--save-state-after requires SECS PATH";
@@ -1490,7 +1581,11 @@ where
         run_args,
         run_stack,
         run_detach,
+        exit_on_return,
+        coverage,
+        coverage_source_map,
         screenshot_after,
+        expect_screenshot,
         save_state_after,
         load_state,
         load_uss,
@@ -1602,6 +1697,13 @@ fn print_help() {
          --run-args STRING              extra guest command-line arguments for --run\n  \
          --run-stack BYTES              issue AmigaDOS Stack BYTES before --run\n  \
          --run-detach                   start --run asynchronously and close the boot CLI\n  \
+         --exit-on-return               exit when the --run program returns, with its AmigaDOS\n  \
+         \x20                            return code (0-255) as the status; 4 if the run ends\n  \
+         \x20                            before it returns\n  \
+         --coverage FILE                write lcov line/function coverage of the --run program\n  \
+         \x20                            to FILE when it exits or the run ends (headless unless\n  \
+         \x20                            --control-gui/--gdb-gui; see docs/debugger/profiling.md)\n  \
+         --coverage-source-map FROM=TO  rewrite a source path prefix in the coverage file\n  \
          --warp-boot                    warp the boot: unthrottled until the boot storage has\n  \
          \x20                            been idle for [emulation] warp_boot_idle seconds\n  \
          --warp-until SECS              warp the boot until an absolute emulated time\n  \
@@ -1660,6 +1762,12 @@ fn print_help() {
          \x20                            (0 = off, the default; windowed sessions only)\n  \
          \x20                            (--model/--cpu/etc. override the config file or defaults)\n  \
          --screenshot-after SECS PATH   save a PNG to PATH after SECS emulated seconds, then exit\n  \
+         --expect-screenshot SECS PATH [TOLERANCE]\n  \
+         \x20                            capture the frame at SECS like --screenshot-after and\n  \
+         \x20                            compare it with the PNG at PATH; TOLERANCE is a fraction\n  \
+         \x20                            (0.001) or a pixel count (250) of allowed differences,\n  \
+         \x20                            default exact; a mismatch writes <stem>.actual.png and\n  \
+         \x20                            <stem>.diff.png and exits with status 3 at the end\n  \
          --save-state-after SECS PATH   write a save state to PATH after SECS emulated seconds,\n  \
          \x20                            then keep running\n  \
          --load-uss PATH                import a WinUAE state; requires its matching Kickstart\n  \
@@ -1692,6 +1800,8 @@ fn print_help() {
          \x20                            decimal, 0x.., or a name like ctrl/lalt/lami/f1\n  \
          --key-after SECS KEY MS        press KEY after SECS, hold for MS milliseconds,\n  \
          \x20                            then release; may be passed multiple times\n  \
+         --type-after SECS TEXT         type TEXT on the US Amiga keyboard from SECS, one key\n  \
+         \x20                            every 100 ms; \\n Return, \\t Tab, \\e Esc, \\b Backspace\n  \
          --click-after SECS BTN MS [PORT]\n  \
          \x20                            press mouse BTN (left/right/middle) at SECS,\n  \
          \x20                            release MS ms later, on PORT (default 1)\n  \

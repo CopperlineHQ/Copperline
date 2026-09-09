@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Run the staged boot commands on real ROMs and AROS. The probe records
-//! CLI state through a relative file and returns 20; Echo must still run.
+//! CLI state through a relative file and returns 20; Done must still run
+//! and record that code, and --exit-on-return must report it.
 //! cargo test --release --test run_boot -- --ignored
 
 use copperline::runprog::{prepare_with_options, RunOptions};
@@ -99,7 +100,7 @@ fn boot(tag: &str, rom: Option<&str>, model: &str, detach: bool) {
         )
     });
     let word = |i: usize| u32::from_be_bytes(data[i * 4..i * 4 + 4].try_into().unwrap());
-    assert_eq!(word(0), 21, "FailAt");
+    assert_eq!(word(0), copperline::runprog::FAIL_AT, "FailAt");
     assert_eq!(word(1), 32768, "Stack CLI setting");
     // Some shells reserve space for their launch frame before publishing
     // the usable byte count at entry (AROS reserves 96 bytes).
@@ -111,8 +112,8 @@ fn boot(tag: &str, rom: Option<&str>, model: &str, detach: bool) {
     assert_eq!(&data[20..], b"\"quoted value\" 123\n", "CLI arguments");
     assert_eq!(
         std::fs::read(prepared.boot_dir.join("done")).unwrap(),
-        b"done\n",
-        "Echo must run even after the probe returns 20"
+        b"20\n",
+        "Done must record the probe's return code"
     );
     if !detach {
         for i in 0..8 {
@@ -129,6 +130,65 @@ fn boot(tag: &str, rom: Option<&str>, model: &str, detach: bool) {
         );
     }
     std::fs::remove_dir_all(scratch).unwrap();
+}
+
+/// `--run PROG --exit-on-return`: the process exits with the guest's
+/// return code, through the production staging path (no explicit mounts).
+fn exit_on_return(tag: &str, rom: Option<&str>, model: &str, arg: &str, expect: i32) {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let rom = rom.map(|name| {
+        std::env::var_os("COPPERLINE_TEST_ASSETS")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| repo.join("test-assets"))
+            .join(name)
+    });
+    if rom.as_ref().is_some_and(|path| !path.is_file()) {
+        eprintln!("skipping {tag}: missing {}", rom.unwrap().display());
+        return;
+    }
+    let scratch = std::env::temp_dir().join(format!("copperline-rc-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch).unwrap();
+    let program = scratch.join("retcode");
+    std::fs::copy(repo.join("guest/run-tools/retcode"), &program).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_copperline"));
+    command
+        .args([
+            "--factory",
+            "--model",
+            model,
+            "--noaudio",
+            "--exit-on-return",
+        ])
+        .arg("--run")
+        .arg(&program)
+        .args(["--run-args", arg])
+        // Bounds a run whose guest never returns (status 4 then).
+        .args(["--screenshot-after", "60"])
+        .arg(scratch.join("screen.png"));
+    if let Some(rom) = rom {
+        command.arg(rom);
+    }
+    let output = command.output().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(expect),
+        "{tag}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::remove_dir_all(scratch).unwrap();
+}
+
+#[test]
+#[ignore = "boots local Kickstart 1.3"]
+fn kick13_exit_on_return() {
+    exit_on_return("kick13-rc", Some("KICK13.ROM"), "A500", "7", 7);
+}
+
+#[test]
+#[ignore = "boots the bundled AROS ROM"]
+fn aros_exit_on_return() {
+    exit_on_return("aros-rc", None, "A1200", "0", 0);
+    exit_on_return("aros-rc-fail", None, "A1200", "no number", 20);
 }
 
 #[test]

@@ -50,6 +50,7 @@ pub mod dms;
 pub mod drive_sounds;
 pub mod emulator;
 pub mod envcfg;
+pub mod expect;
 pub mod filesys;
 pub mod floppy;
 // Physical floppy drives over a Greaseweazle, through the pure-Rust
@@ -130,8 +131,10 @@ pub mod timebase;
 pub mod timestamp;
 pub mod timetravel;
 pub mod toccata;
+pub mod typing;
 pub mod uaelib;
 pub mod uss;
+pub mod verdict;
 pub mod video;
 pub mod warpboot;
 pub mod wasm_manifest;

@@ -158,6 +158,42 @@ pub struct DebuggerPanel {
     pub mem_bitmap_stride: u32,
     /// IO Map tab: the selected custom-register word offset ($000-$1FE).
     pub iomap_sel: u16,
+    /// Memory tab: the in-place edit cursor, when a byte is selected.
+    pub mem_cursor: Option<MemCursor>,
+    /// Memory tab: bytes typed but not yet committed, as (address, value)
+    /// in the order they were first edited. Enter or a click outside the
+    /// dump writes them; Esc drops them.
+    pub mem_pending: Vec<(u32, u8)>,
+    /// Memory tab: the outcome of the last edit or poke, shown beside the
+    /// tab's controls until the next one.
+    pub mem_status: Option<String>,
+}
+
+/// Which column of the Memory tab's dump the edit cursor sits in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MemColumn {
+    Hex,
+    Ascii,
+}
+
+/// The Memory tab's in-place edit cursor: one byte, in one column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MemCursor {
+    pub addr: u32,
+    pub column: MemColumn,
+    /// Hex column: the next typed digit is the high nibble. False once one
+    /// digit of the byte has been typed.
+    pub high_nibble: bool,
+}
+
+impl MemCursor {
+    pub fn new(addr: u32, column: MemColumn) -> Self {
+        Self {
+            addr,
+            column,
+            high_nibble: true,
+        }
+    }
 }
 
 impl DebuggerPanel {
@@ -173,6 +209,86 @@ impl DebuggerPanel {
             mem_view_bits: false,
             mem_bitmap_stride: 40,
             iomap_sel: 0x096,
+            mem_cursor: None,
+            mem_pending: Vec::new(),
+            mem_status: None,
+        }
+    }
+
+    /// The staged value of a byte, if it has been edited but not committed.
+    pub fn mem_pending_value(&self, addr: u32) -> Option<u8> {
+        self.mem_pending
+            .iter()
+            .find(|(a, _)| *a == addr)
+            .map(|(_, v)| *v)
+    }
+
+    /// Stage a byte edit, replacing an earlier edit of the same address.
+    pub fn mem_stage(&mut self, addr: u32, value: u8) {
+        match self.mem_pending.iter_mut().find(|(a, _)| *a == addr) {
+            Some(slot) => slot.1 = value,
+            None => self.mem_pending.push((addr, value)),
+        }
+    }
+
+    /// Drop the cursor and every staged edit (Esc).
+    pub fn mem_edit_cancel(&mut self) {
+        self.mem_cursor = None;
+        self.mem_pending.clear();
+    }
+
+    /// Take the staged edits for committing and drop the cursor.
+    pub fn mem_edit_take(&mut self) -> Vec<(u32, u8)> {
+        self.mem_cursor = None;
+        std::mem::take(&mut self.mem_pending)
+    }
+
+    /// Move the edit cursor by `delta` bytes within `mask`, resetting the
+    /// nibble phase. Returns the new address, or None with no cursor.
+    pub fn mem_cursor_move(&mut self, delta: i32, mask: u32) -> Option<u32> {
+        let cursor = self.mem_cursor.as_mut()?;
+        cursor.addr = cursor.addr.wrapping_add_signed(delta) & mask;
+        cursor.high_nibble = true;
+        Some(cursor.addr)
+    }
+
+    /// Type one character at the cursor. In the hex column a hex digit
+    /// fills the next nibble of the byte (`current` is its value before
+    /// this edit); in the ASCII column a printable character replaces the
+    /// byte. Returns true when the byte is complete and the cursor should
+    /// advance; characters that do not fit the column are ignored.
+    pub fn mem_type_char(&mut self, ch: char, current: u8) -> bool {
+        let Some(cursor) = self.mem_cursor else {
+            return false;
+        };
+        match cursor.column {
+            MemColumn::Hex => {
+                let Some(digit) = ch.to_digit(16) else {
+                    return false;
+                };
+                let digit = digit as u8;
+                let staged = self.mem_pending_value(cursor.addr).unwrap_or(current);
+                if cursor.high_nibble {
+                    self.mem_stage(cursor.addr, (digit << 4) | (staged & 0x0F));
+                    if let Some(cursor) = self.mem_cursor.as_mut() {
+                        cursor.high_nibble = false;
+                    }
+                    false
+                } else {
+                    self.mem_stage(cursor.addr, (staged & 0xF0) | digit);
+                    if let Some(cursor) = self.mem_cursor.as_mut() {
+                        cursor.high_nibble = true;
+                    }
+                    true
+                }
+            }
+            MemColumn::Ascii => {
+                if !(' '..='~').contains(&ch) {
+                    return false;
+                }
+                self.mem_stage(cursor.addr, ch as u8);
+                true
+            }
         }
     }
 
@@ -1789,6 +1905,17 @@ impl DbgLine {
     }
 }
 
+/// The Memory tab's hex page as structured data, for the interactive dump:
+/// the bytes behind the text rows plus, per byte, whether the debugger
+/// could write it back (RAM: yes; ROM, overlay ROM, and device windows: no).
+pub struct MemoryPageView {
+    pub base: u32,
+    pub bytes: Vec<u8>,
+    pub writable: Vec<bool>,
+    /// The CPU's address width, for wrapping the edit cursor.
+    pub addr_mask: u32,
+}
+
 /// The Memory tab's 1-bpp bitplane view: `stride` bytes per row of plane
 /// data starting at `base`, drawn as pixels (set bit = light) so bitmap
 /// graphics in RAM can be eyeballed directly.
@@ -1848,6 +1975,8 @@ pub struct DebuggerView {
     pub lines: Vec<DbgLine>,
     /// The Memory tab's bitplane view, when its Bits mode is active.
     pub bitmap: Option<MemBitmapView>,
+    /// The Memory tab's hex page as bytes, when its hex mode is active.
+    pub memory: Option<MemoryPageView>,
     /// The Video tab's layer/palette view. Some only when it is active.
     pub video: Option<VideoView>,
     /// Structured data for the Audio tab's per-channel mute buttons and
@@ -2629,7 +2758,7 @@ pub fn draw_drop_hint(frame: &mut [u8], texture_scale: usize) {
 
 /// Vertical pitch of a shortcut row. The panel is sized from this and the
 /// row count, and must stay inside `present_height()`.
-const SHORTCUT_ROW_H: usize = 18;
+const SHORTCUT_ROW_H: usize = 17;
 /// Trailing note lines under the shortcut table, and their pitch.
 const SHORTCUT_NOTES: [&str; 3] = [
     "Shortcuts: Cmd on macOS, Alt on Linux/Windows",
@@ -2653,12 +2782,13 @@ fn shortcuts_panel_height() -> usize {
         + 8
 }
 
-const SHORTCUT_ROWS: [(&str, &str, bool); 25] = [
+const SHORTCUT_ROWS: [(&str, &str, bool); 26] = [
     ("Q", "Quit", true),
     ("E", "Open the menu", true),
     ("S", "Save screenshot", true),
     ("R", "Record video on/off", true),
     ("Shift+R", "Record input on/off", true),
+    ("Shift+V", "Paste as keystrokes", true),
     ("Shift+S", "Save state", true),
     ("Shift+L", "Load state", true),
     ("1-0", "Quick-save to a slot", true),

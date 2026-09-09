@@ -11,7 +11,7 @@
   },
   "homepage": "https://copperline.dev",
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.88.0"
   },
   "categories": [
     "Debuggers",
@@ -38,6 +38,7 @@
     "onCommand:copperline.initProject",
     "onCommand:copperline.exe2adf",
     "onCommand:copperline.sizeReport",
+    "onCommand:copperline.showCoverage",
     "onView:copperline.customRegisters"
   ],
   "contributes": {
@@ -106,6 +107,10 @@
       {
         "command": "copperline.sizeReport",
         "title": "Copperline: Profile File Size"
+      },
+      {
+        "command": "copperline.showCoverage",
+        "title": "Copperline: Show Coverage"
       }
     ],
     "views": {
@@ -291,6 +296,11 @@
                 "additionalProperties": {
                   "type": "string"
                 }
+              },
+              "coverage": {
+                "type": "string",
+                "description": "Write lcov line/function coverage of the program to this file when it exits or the session stops (the emulator's --coverage run; sourceMap is applied). View it with Copperline: Show Coverage or the Coverage Gutters extension.",
+                "default": "${workspaceFolder}/lcov.info"
               },
               "cwd": {
                 "type": "string",

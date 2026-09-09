@@ -77,6 +77,14 @@ named from the running guest's live library/device vectors (for example,
 `[exec] AllocMem+$12` and `[Kick]exec/AllocMem`); no matching ROM ELF is
 required.
 
+A launch configuration with `"coverage": "${workspaceFolder}/lcov.info"` has
+the emulator count every instruction the program retires from its first
+instruction to its exit and write lcov line/function coverage to that file
+when it exits or the session stops. **Copperline: Show Coverage** loads such a
+file into VS Code's built-in Test Coverage view and editor decorations (it is
+also the *Copperline Coverage* item's "Run with Coverage" in the Test
+Explorer); the Coverage Gutters extension reads the same file.
+
 The debug toolbar also opens Copperline's native Debugger, Console, and Frame
 Analyzer windows. The Debug sidebar has a DAP-fed **Custom Registers** tree
 whose tooltips come from Copperline's register documentation. From the command

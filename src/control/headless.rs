@@ -90,6 +90,9 @@ pub fn run(mut emu: Emulator, config: Config) -> Result<()> {
             SessionEnd::Killed => break,
         }
     }
+    // A --coverage run ends with the server: write what was counted.
+    #[cfg(feature = "dap")]
+    emu.finish_coverage_run();
     if let (Some(rec), Some(path)) = (input.recorder, config.record_input.as_ref()) {
         let events = rec.events_recorded();
         std::fs::write(path, rec.finish())

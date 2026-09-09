@@ -217,7 +217,8 @@ const CONSOLE_HELP: &[&str] = &[
     "os:         tasks  task [ADDR|NAME]  execbase  memlist  segments",
     "            libs  devs  resources  ports  who ADDR  guru [CODE]",
     "hunt:       hunt start [B|W]  hunt eq/ne/lt/gt VAL  hunt same|diff  hunt list",
-    "modify:     poke ADDR VAL   setreg REG VAL   trace start [PATH]|stop",
+    "modify:     poke[.b|.w|.l] ADDR VAL [VAL ...]   setreg REG VAL",
+    "            trace start [PATH]|stop",
     "waveform:   wave start [PATH] [TRIGGER] [DURATION] [SIGNALS]   wave stop   wave",
     "            TRIGGER: now  pc=ADDR  beam=V[:H]  reg=OFF  time=SECS",
     "console:    help  clear  close",
@@ -938,22 +939,78 @@ impl App {
                 }
                 ConsoleOutcome::lines(lines)
             }
-            "POKE" => {
-                let (Some(addr), Some(value)) = (
-                    args.first().and_then(|t| hex32(t)),
-                    args.get(1).and_then(|t| hex32(t)),
-                ) else {
-                    return ConsoleOutcome::error("usage: POKE ADDR VALUE (hex word)");
+            "POKE" | "POKE.B" | "POKE.W" | "POKE.L" => {
+                const USAGE: &str =
+                    "usage: POKE[.B|.W|.L] ADDR VAL [VAL ...] (hex; POKE ADDR VAL is a word, \
+                     POKE ADDR VAL VAL ... is a byte sequence)";
+                let width = match cmd.as_str() {
+                    "POKE.B" => Some(1usize),
+                    "POKE.W" => Some(2),
+                    "POKE.L" => Some(4),
+                    _ => None,
                 };
-                let addr = addr & !1;
-                let written = self
-                    .emu
-                    .machine
-                    .debug_write_memory(addr, &(value as u16).to_be_bytes());
-                if written == 2 {
-                    ConsoleOutcome::one(format!("poked ${:04X} -> ${addr:06X}", value as u16))
-                } else {
+                let (Some(addr), Some(values)) =
+                    (args.first().and_then(|t| hex32(t)), args.get(1..))
+                else {
+                    return ConsoleOutcome::error(USAGE);
+                };
+                if values.is_empty() {
+                    return ConsoleOutcome::error(USAGE);
+                }
+                let (addr, bytes) =
+                    match width {
+                        // The original form: one word at an even address.
+                        None if values.len() == 1 => {
+                            let token = values[0].trim_start_matches('$');
+                            match hex32(token) {
+                                Some(value) if token.len() <= 4 => {
+                                    (addr & !1, (value as u16).to_be_bytes().to_vec())
+                                }
+                                _ => {
+                                    return ConsoleOutcome::error(format!(
+                                        "{} is not a hex word; use POKE.L or byte pairs",
+                                        values[0]
+                                    ))
+                                }
+                            }
+                        }
+                        // Several values without a suffix: hex byte pairs, as FIND takes.
+                        None => match parse_hex_pattern(values) {
+                            Some(bytes) => (addr, bytes),
+                            None => return ConsoleOutcome::error(
+                                "a byte sequence takes hex byte pairs (e.g. POKE 60000 12 34 56)",
+                            ),
+                        },
+                        Some(width) => {
+                            let mut bytes = Vec::with_capacity(values.len() * width);
+                            for token in values {
+                                let digits = token.trim_start_matches('$');
+                                match hex32(digits) {
+                                    Some(value) if digits.len() <= width * 2 => {
+                                        bytes.extend_from_slice(&value.to_be_bytes()[4 - width..]);
+                                    }
+                                    _ => {
+                                        return ConsoleOutcome::error(format!(
+                                            "{token} does not fit {}",
+                                            ["a byte", "a word", "", "a long"][width - 1]
+                                        ))
+                                    }
+                                }
+                            }
+                            (if width == 1 { addr } else { addr & !1 }, bytes)
+                        }
+                    };
+                let written = self.debug_poke_bytes(addr, &bytes);
+                let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02X}")).collect();
+                if written == bytes.len() {
+                    ConsoleOutcome::one(format!("poked {} -> ${addr:06X}", hex.join(" ")))
+                } else if written == 0 {
                     ConsoleOutcome::error(format!("${addr:06X} is not writable RAM"))
+                } else {
+                    ConsoleOutcome::error(format!(
+                        "wrote {written} of {} bytes from ${addr:06X}; the rest is not writable RAM",
+                        bytes.len()
+                    ))
                 }
             }
             "SETREG" => {

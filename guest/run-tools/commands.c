@@ -116,6 +116,40 @@ LONG entry(const char *args, ULONG length)
     BPTR output = Output();
     if (Write(output, arg, count) == count && Write(output, (APTR)"\n", 1) == 1)
         rc = RETURN_OK;
+#elif COMMAND == 6
+    // Done: report the previous command's return code, which the CLI keeps
+    // in cli_ReturnCode after every command it runs (the 2.0+ shell's $RC
+    // is read from the same field; the 1.3 CLI has no variables). Written
+    // as decimal and a newline to Output(), so shell redirection makes it
+    // the completion marker the host reads back for --exit-on-return.
+    if (count) goto done;
+    {
+        // Decimal by repeated subtraction of powers of ten: freestanding
+        // 68000 code has no 32-bit divide (no libgcc __udivsi3).
+        static const ULONG powers[] = {
+            1000000000UL, 100000000UL, 10000000UL, 1000000UL, 100000UL,
+            10000UL, 1000UL, 100UL, 10UL, 1UL
+        };
+        LONG code = cli->cli_ReturnCode;
+        ULONG magnitude = code < 0 ? (ULONG)-(code + 1) + 1 : (ULONG)code;
+        char text[13];
+        int n = 0, started = 0;
+        unsigned p;
+        if (code < 0) text[n++] = '-';
+        for (p = 0; p < sizeof(powers) / sizeof(powers[0]); ++p) {
+            char digit = '0';
+            while (magnitude >= powers[p]) {
+                magnitude -= powers[p];
+                ++digit;
+            }
+            if (digit != '0' || started || powers[p] == 1) {
+                text[n++] = digit;
+                started = 1;
+            }
+        }
+        text[n++] = '\n';
+        if (Write(Output(), text, n) == n) rc = RETURN_OK;
+    }
 #elif COMMAND == 5
     // Run's child CLI has no enclosing script. Hand it the generated
     // Detached-Run file; the CLI owns and closes the handle at EOF.

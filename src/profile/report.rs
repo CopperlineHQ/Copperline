@@ -15,6 +15,9 @@ use super::samples::{IRQ_MARKER, REGISTER_COUNT};
 pub enum ReportFormat {
     Chrome,
     Bartman,
+    /// lcov `.info` line/function coverage from `coverage.bin` (or, failing
+    /// that, from the precise sample sidecars' leaf PCs).
+    Lcov,
 }
 
 impl ReportFormat {
@@ -22,6 +25,7 @@ impl ReportFormat {
         match value {
             "chrome" => Some(Self::Chrome),
             "bartman" => Some(Self::Bartman),
+            "lcov" => Some(Self::Lcov),
             _ => None,
         }
     }
@@ -434,6 +438,12 @@ pub fn generate(options: &ReportOptions) -> Result<Vec<PathBuf>, String> {
     if !relocation_bases.is_empty() {
         debug.relocate(relocation_bases);
     }
+    if options.format == ReportFormat::Lcov {
+        if options.per_frame {
+            return Err("--per-frame does not apply to --format lcov".into());
+        }
+        return generate_lcov(options, &debug, base, registers).map(|path| vec![path]);
+    }
     let frames = load_frames(&options.input_dir, registers)?;
     if frames.is_empty() {
         return Err("profile contains no precise sample frames".into());
@@ -475,6 +485,97 @@ pub fn generate(options: &ReportOptions) -> Result<Vec<PathBuf>, String> {
         write_json(&options.out, &value)?;
         Ok(vec![options.out.clone()])
     }
+}
+
+/// The lcov report: the capture's `coverage.bin` histogram when the capture
+/// counted coverage, else one hit per precise sample's leaf PC. Prints the
+/// accounting summary to stderr so unmapped instructions are never silent.
+fn generate_lcov(
+    options: &ReportOptions,
+    debug: &crate::debuginfo::DebugInfo,
+    base: Option<u32>,
+    registers: bool,
+) -> Result<PathBuf, String> {
+    let coverage_path = options.input_dir.join(super::COVERAGE_FILE);
+    let mut notes = Vec::new();
+    let (hits, outside, total) = if coverage_path.is_file() {
+        let data = super::coverage::CoverageData::parse(
+            &fs::read(&coverage_path).map_err(|e| format!("{}: {e}", coverage_path.display()))?,
+        )
+        .map_err(|e| format!("{}: {e}", coverage_path.display()))?;
+        notes.push(format!("source: {}", super::COVERAGE_FILE));
+        (
+            super::lcov::hits_of(&data),
+            data.outside_hits,
+            data.total_hits,
+        )
+    } else {
+        let frames = load_frames(&options.input_dir, registers)?;
+        if frames.is_empty() {
+            return Err(
+                "profile has neither coverage.bin nor precise sample frames (start it with \
+                 \"coverage\": true or \"samples\": true)"
+                    .into(),
+            );
+        }
+        notes.push(format!(
+            "source: leaf PCs of {} precise sample frame(s); samples longer than 65535 CCK are \
+             split and count more than once",
+            frames.len()
+        ));
+        let hunk0_size = debug.hunks.first().map_or(0, |hunk| hunk.size);
+        let mut counts = HashMap::<u32, u32>::new();
+        let (mut outside, mut total) = (0u64, 0u64);
+        for frame in &frames {
+            for sample in &frame.samples {
+                total += 1;
+                let Some(&stored) = sample.pcs.first() else {
+                    outside += 1;
+                    continue;
+                };
+                if stored == IRQ_MARKER {
+                    outside += 1;
+                    continue;
+                }
+                // Hunk-0 samples are stored relative to the unwind base.
+                let pc = if debug.locate(stored).is_some() {
+                    stored
+                } else if stored < hunk0_size {
+                    base.map_or(stored, |base| base.wrapping_add(stored))
+                } else {
+                    stored
+                };
+                if debug.locate(pc).is_none() {
+                    outside += 1;
+                }
+                let slot = counts.entry(pc).or_default();
+                *slot = slot.saturating_add(1);
+            }
+        }
+        let mut hits: Vec<(u32, u32)> = counts.into_iter().collect();
+        hits.sort_unstable();
+        (hits, outside, total)
+    };
+    let name = options
+        .program
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "program".into());
+    let (text, summary) = super::lcov::render(
+        debug,
+        &name,
+        &hits,
+        outside,
+        total,
+        &options.source_map,
+        &notes,
+    );
+    crate::paths::ensure_parent(&options.out).map_err(|e| e.to_string())?;
+    fs::write(&options.out, text).map_err(|e| format!("{}: {e}", options.out.display()))?;
+    for line in summary.lines() {
+        eprintln!("coverage: {line}");
+    }
+    Ok(options.out.clone())
 }
 
 fn write_json(path: &Path, value: &Value) -> Result<(), String> {

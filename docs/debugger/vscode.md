@@ -190,6 +190,46 @@ use the separate [Bartman profiling walkthrough](vscode-bartman.md#capture-and-e
 See [Instruction profiling](profiling.md) for capture formats and automation,
 and [the DAP reference](dap.md) for all launch and attach options.
 
+(view-guest-coverage)=
+## View guest coverage
+
+Add `coverage` to the launch configuration to have the emulator collect
+line and function coverage of the program from its first instruction to its
+exit, written as an lcov `.info` file (the emulator's
+[`--coverage`](profiling.md#guest-coverage) run):
+
+```json
+{
+  "type": "copperline",
+  "request": "launch",
+  "name": "Copperline: coverage",
+  "program": "${workspaceFolder}/demo",
+  "coverage": "${workspaceFolder}/lcov.info",
+  "sourceMap": { "/build/src": "${workspaceFolder}" },
+  "stopOnEntry": false,
+  "noAudio": true
+}
+```
+
+The file is written when the program exits or when the session is stopped,
+with `sourceMap` applied to its paths. Two ways to see it:
+
+- **Coverage Gutters** (`ryanluker.vscode-coverage-gutters`) watches
+  `lcov.info` in the workspace by default (`coverage-gutters.coverageFileNames`
+  adds other names); **Coverage Gutters: Display Coverage** paints the
+  gutters and **Watch** keeps them current across runs.
+- VS Code's built-in coverage view: run **Copperline: Show Coverage** from
+  the command palette (or **Run Tests with Coverage** on the *Copperline
+  Coverage* item in the Test Explorer). The command asks for the `.info`
+  file, then VS Code's Test Coverage panel lists each source file with its
+  line and function percentages and the editor shows per-line hit counts
+  and uncovered lines.
+
+For a static report, `genhtml lcov.info -o coverage-html` from the lcov
+package renders the same file. The file's leading `#` lines account for
+instructions the program retired outside any known source line, such as an
+assembly startup stub, and for the Kickstart's own instructions.
+
 ## Troubleshooting
 
 | Symptom | Check |

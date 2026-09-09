@@ -1730,15 +1730,16 @@ impl App {
         };
         match action {
             Poke::Mem(addr, value) => {
-                let written = self
-                    .emu
-                    .machine
-                    .debug_write_memory(addr, &value.to_be_bytes());
-                if written == 2 {
-                    self.show_osd(format!("Poked ${value:04X} -> ${addr:06X}"));
+                let written = self.debug_poke_bytes(addr, &value.to_be_bytes());
+                let message = if written == 2 {
+                    format!("Poked ${value:04X} -> ${addr:06X}")
                 } else {
-                    self.show_osd(format!("${addr:06X} is not writable RAM"));
+                    format!("${addr:06X} is not writable RAM")
+                };
+                if let Some(panel) = self.debugger_panel.as_mut() {
+                    panel.mem_status = Some(message.clone());
                 }
+                self.show_osd(message);
             }
             Poke::Reg(reg, value) => {
                 self.emu.machine.debug_set_register(reg, value);
@@ -1748,6 +1749,55 @@ impl App {
             Poke::RegHelp => self.show_osd("Set Reg: type \"REG VALUE\" e.g. D0 1234"),
             Poke::None => {}
         }
+    }
+
+    /// The one debugger write path for memory: the console's POKE, the
+    /// Memory tab's Poke button and in-place editor, and the control
+    /// protocol's `mem.write` all land here or do the same. A plain
+    /// CPU-visible RAM write (ROM, overlay ROM, and device windows are
+    /// skipped and not counted), then the word watchpoints are rebaselined
+    /// so the poke itself does not stop the machine. No bus cycles are
+    /// charged and no interrupt or DMA state changes. Returns the bytes
+    /// actually written.
+    pub(super) fn debug_poke_bytes(&mut self, addr: u32, bytes: &[u8]) -> usize {
+        let written = self.emu.machine.debug_write_memory(addr, bytes);
+        self.emu.machine.ui_rebaseline_watches();
+        self.request_redraw();
+        written
+    }
+
+    /// Commit the Memory tab's staged byte edits and report the outcome
+    /// beside the tab's controls.
+    pub(super) fn debugger_mem_commit(&mut self, edits: Vec<(u32, u8)>) {
+        if edits.is_empty() {
+            return;
+        }
+        let mask = self.emu.machine.ui_addr_mask();
+        let mut written = 0usize;
+        let mut refused = None;
+        for (addr, value) in &edits {
+            let addr = *addr & mask;
+            if self.debug_poke_bytes(addr, &[*value]) == 1 {
+                written += 1;
+            } else if refused.is_none() {
+                refused = Some(addr);
+            }
+        }
+        let message = match refused {
+            None => format!(
+                "Wrote {written} byte{} at ${:06X}",
+                if written == 1 { "" } else { "s" },
+                edits[0].0 & mask
+            ),
+            Some(addr) => format!(
+                "Wrote {written} of {} bytes; ${addr:06X} is not writable RAM",
+                edits.len()
+            ),
+        };
+        if let Some(panel) = self.debugger_panel.as_mut() {
+            panel.mem_status = Some(message.clone());
+        }
+        self.show_osd(message);
     }
 
     /// Build the per-redraw view data for the open panel, if any.
@@ -2129,6 +2179,7 @@ impl App {
         let read = |addr: u32| bus.peek_word_any(addr);
         let mut lines: Vec<ui::DbgLine> = Vec::new();
         let mut bitmap: Option<ui::MemBitmapView> = None;
+        let mut memory: Option<ui::MemoryPageView> = None;
         let mut video: Option<ui::VideoView> = None;
         let mut audio: Option<ui::AudioScopeView> = None;
         let mut cpu = None;
@@ -2673,6 +2724,8 @@ impl App {
                     ));
                     lines.push(ui::DbgLine::plain(""));
                     let base = panel.mem_addr & machine.ui_addr_mask() & !0xF;
+                    let mut page = Vec::with_capacity(ui::MEM_PAGE_BYTES as usize);
+                    let mut writable = Vec::with_capacity(ui::MEM_PAGE_BYTES as usize);
                     for row in 0..16u32 {
                         let addr = base.wrapping_add(row * 16) & machine.ui_addr_mask();
                         let mut bytes = [0u8; 16];
@@ -2682,7 +2735,17 @@ impl App {
                             bytes[word as usize * 2 + 1] = value as u8;
                         }
                         lines.push(ui::DbgLine::plain(ui::hex_dump_row(addr, &bytes)));
+                        page.extend_from_slice(&bytes);
+                        writable.extend(
+                            (0..16u32).map(|i| machine.debug_memory_writable(addr.wrapping_add(i))),
+                        );
                     }
+                    memory = Some(ui::MemoryPageView {
+                        base,
+                        bytes: page,
+                        writable,
+                        addr_mask: machine.ui_addr_mask(),
+                    });
                 }
             }
             ui::DebugTab::IoMap => {
@@ -2937,6 +3000,7 @@ impl App {
             status,
             lines,
             bitmap,
+            memory,
             video,
             audio,
             cpu,

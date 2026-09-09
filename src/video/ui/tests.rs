@@ -1276,6 +1276,44 @@ fn parse_hex_entry() {
 }
 
 #[test]
+fn memory_edit_cursor_types_nibbles_and_ascii() {
+    let mut panel = DebuggerPanel::new();
+    assert!(!panel.mem_type_char('A', 0x00), "no cursor, nothing typed");
+    panel.mem_cursor = Some(MemCursor::new(0x1000, MemColumn::Hex));
+    // Non-hex characters are ignored in the hex column.
+    assert!(!panel.mem_type_char('g', 0x12));
+    assert!(panel.mem_pending.is_empty());
+    // The first digit replaces the high nibble and keeps the low one; the
+    // second completes the byte.
+    assert!(!panel.mem_type_char('a', 0x12));
+    assert_eq!(panel.mem_pending_value(0x1000), Some(0xA2));
+    assert!(!panel.mem_cursor.unwrap().high_nibble);
+    assert!(panel.mem_type_char('B', 0x12));
+    assert_eq!(panel.mem_pending, vec![(0x1000, 0xAB)]);
+    assert!(panel.mem_cursor.unwrap().high_nibble);
+    // Re-editing the same byte replaces the staged value in place.
+    assert!(!panel.mem_type_char('0', 0x12));
+    assert_eq!(panel.mem_pending, vec![(0x1000, 0x0B)]);
+    // Moving wraps within the address mask and resets the nibble phase.
+    assert_eq!(panel.mem_cursor_move(-0x1001, 0xFF_FFFF), Some(0xFF_FFFF));
+    assert!(panel.mem_cursor.unwrap().high_nibble);
+    // ASCII: printable characters only, one per byte.
+    panel.mem_cursor = Some(MemCursor::new(0x2000, MemColumn::Ascii));
+    assert!(!panel.mem_type_char('\u{e9}', 0x00));
+    assert!(!panel.mem_type_char('\n', 0x00));
+    assert!(panel.mem_type_char('Z', 0x00));
+    assert_eq!(panel.mem_pending_value(0x2000), Some(0x5A));
+    let edits = panel.mem_edit_take();
+    assert_eq!(edits, vec![(0x1000, 0x0B), (0x2000, 0x5A)]);
+    assert!(panel.mem_cursor.is_none());
+    assert!(panel.mem_pending.is_empty());
+    panel.mem_cursor = Some(MemCursor::new(0x3000, MemColumn::Hex));
+    panel.mem_stage(0x3000, 1);
+    panel.mem_edit_cancel();
+    assert!(panel.mem_cursor.is_none() && panel.mem_pending.is_empty());
+}
+
+#[test]
 fn entry_box_parses_address_and_poke_tokens() {
     let mut panel = DebuggerPanel::new();
     // The entry only accepts hex, space, and the P/S/R register letters.
@@ -2131,6 +2169,7 @@ fn panels_render_into_their_rects() {
         status: "paused frame 1234 24.68s".to_string(),
         lines,
         bitmap: None,
+        memory: None,
         video: None,
         audio: None,
         cpu: None,
@@ -2173,6 +2212,7 @@ fn panels_render_into_their_rects() {
         status: "paused frame 1234 24.68s".to_string(),
         lines,
         bitmap: None,
+        memory: None,
         video: None,
         audio: None,
         cpu: None,
@@ -2216,6 +2256,7 @@ fn panels_render_into_their_rects() {
         status: "running frame 1234 24.68s".to_string(),
         lines,
         bitmap: None,
+        memory: None,
         video: None,
         audio: None,
         cpu: None,
@@ -2353,6 +2394,7 @@ fn panels_render_into_their_rects() {
         status: "paused frame 1234 24.68s".to_string(),
         lines: Vec::new(),
         bitmap: None,
+        memory: None,
         video: None,
         audio: Some(audio),
         cpu: None,
@@ -2409,6 +2451,7 @@ fn panels_render_into_their_rects() {
         status: "paused frame 1234 24.68s".to_string(),
         lines,
         bitmap: None,
+        memory: None,
         video: None,
         audio: None,
         cpu: None,
@@ -2463,6 +2506,7 @@ fn panels_render_into_their_rects() {
         status: "paused frame 1234 24.68s".to_string(),
         lines: Vec::new(),
         bitmap: None,
+        memory: None,
         video: Some(VideoView {
             header: "BPLCON0 5200: 5 planes lores  HAM   DMACON: BPLEN on SPREN on".to_string(),
             plane_mask: 0xFD,

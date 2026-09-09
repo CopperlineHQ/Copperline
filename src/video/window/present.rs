@@ -1532,6 +1532,17 @@ pub(super) fn take_integral_mouse_delta(value: &mut f64) -> i32 {
     }
 }
 
+/// A frame as a screenshot would save it: the pixels in the framebuffer's
+/// RGBA8 format and the saved image's dimensions. Borrowed when the
+/// presentation buffer is saved as is, owned when it was resampled.
+pub(super) struct PresentImage<'a> {
+    pub pixels: std::borrow::Cow<'a, [u32]>,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Save the presented frame as `--screenshot-after` and the host
+/// screenshot shortcut do: [`render_present_frame`] encoded as a PNG.
 pub(super) fn save_present_frame(
     path: &std::path::Path,
     present_fb: &[u32],
@@ -1541,13 +1552,36 @@ pub(super) fn save_present_frame(
     tv_centre: TvCentre,
     tv_aperture_rows: Option<usize>,
 ) -> anyhow::Result<()> {
+    let image = render_present_frame(
+        present_fb,
+        src_rows,
+        src_width,
+        overscan,
+        tv_centre,
+        tv_aperture_rows,
+    );
+    screenshot::save(path, &image.pixels, image.width, image.height)
+}
+
+/// The presented frame exactly as a screenshot saves it, before PNG
+/// encoding: the one capture path behind `--screenshot-after`, the
+/// screenshot shortcut, and `--expect-screenshot`, so an expectation
+/// compares against precisely what a screenshot of the same frame holds.
+pub(super) fn render_present_frame(
+    present_fb: &[u32],
+    src_rows: usize,
+    src_width: usize,
+    overscan: Overscan,
+    tv_centre: TvCentre,
+    tv_aperture_rows: Option<usize>,
+) -> PresentImage<'_> {
+    use std::borrow::Cow;
     if crate::envcfg::flag("COPPERLINE_SHOT_RAW") {
-        return screenshot::save(
-            path,
-            &present_fb[..src_rows * src_width],
-            src_width as u32,
-            src_rows as u32,
-        );
+        return PresentImage {
+            pixels: Cow::Borrowed(&present_fb[..src_rows * src_width]),
+            width: src_width as u32,
+            height: src_rows as u32,
+        };
     }
 
     if let Some(aperture_rows) = tv_aperture_rows {
@@ -1579,7 +1613,11 @@ pub(super) fn save_present_frame(
                     *px = tv_glass_sample(row, out_x, source_x_offset);
                 }
             }
-            return screenshot::save(path, &glass, FB_WIDTH as u32, TV_GLASS_PRESENT_ROWS as u32);
+            return PresentImage {
+                pixels: Cow::Owned(glass),
+                width: FB_WIDTH as u32,
+                height: TV_GLASS_PRESENT_ROWS as u32,
+            };
         }
     }
 
@@ -1588,11 +1626,17 @@ pub(super) fn save_present_frame(
     // the window's: a saved picture keeps the aspect's shape whatever
     // the window is drawing.
     let out_rows = crate::video::capture_height() * src_width / FB_WIDTH;
-    screenshot::save_scaled_y(
-        path,
-        present_fb,
-        src_width as u32,
-        src_rows as u32,
-        out_rows as u32,
-    )
+    let active = &present_fb[..src_rows * src_width];
+    let pixels = if out_rows == src_rows {
+        Cow::Borrowed(active)
+    } else {
+        let mut scaled = Vec::new();
+        screenshot::scale_y_into(active, src_width, src_rows, out_rows, &mut scaled);
+        Cow::Owned(scaled)
+    };
+    PresentImage {
+        pixels,
+        width: src_width as u32,
+        height: out_rows as u32,
+    }
 }

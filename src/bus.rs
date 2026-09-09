@@ -9051,6 +9051,34 @@ impl Bus {
         regions
     }
 
+    /// The backing bytes of `addr..addr+len` when the whole span lies in
+    /// one writable RAM bank (chip, slow, motherboard, accelerator, or a
+    /// Zorro RAM board), so a digest can hash the bank in place instead of
+    /// peeking it a byte at a time through the CPU map. `None` when the
+    /// span crosses a bank edge or touches anything that is not RAM.
+    pub fn ram_slice(&self, addr: u32, len: usize) -> Option<&[u8]> {
+        let inside = |base: u64, bank: &[u8]| -> Option<usize> {
+            let off = u64::from(addr).checked_sub(base)?;
+            (off + len as u64 <= bank.len() as u64).then_some(off as usize)
+        };
+        let mem = &self.mem;
+        if let Some(off) = inside(crate::memory::CHIP_RAM_BASE, &mem.chip_ram) {
+            return Some(&mem.chip_ram[off..off + len]);
+        }
+        if let Some(off) = inside(crate::memory::SLOW_RAM_BASE, &mem.slow_ram) {
+            return Some(&mem.slow_ram[off..off + len]);
+        }
+        if let Some(off) = inside(mem.mb_ram_base(), &mem.mb_ram) {
+            return Some(&mem.mb_ram[off..off + len]);
+        }
+        if let Some(off) = inside(crate::memory::ACCEL_RAM_BASE, &mem.accel_ram) {
+            return Some(&mem.accel_ram[off..off + len]);
+        }
+        let (board, off) = mem.zorro.region_at(addr, len)?;
+        let ram = mem.zorro.board_ram(board);
+        (off + len <= ram.len()).then(|| &ram[off..off + len])
+    }
+
     /// The regions a debugger pattern search should sweep: every writable
     /// RAM bank plus the Kickstart and extended-ROM windows, in ascending
     /// address order. Sweeping the decoded map rather than a fixed

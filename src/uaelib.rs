@@ -22,6 +22,9 @@
 //!   control protocol; overlay drawing is presented by the window. File
 //!   load/save is disabled unless `[emulation] uaelib_files = true`, and is
 //!   then confined to the `--run` program directory.
+//! - **13** WinUAE's `ExitEmu`: the guest asks the emulator to stop. The
+//!   request is latched for the frontend, which ends the session cleanly
+//!   (exit status 0, or 3 if a screenshot expectation had failed).
 //! - everything else returns 0 with no side effects (Copperline does not
 //!   impersonate WinUAE's version through function 0).
 //!
@@ -144,6 +147,11 @@ impl FileAuthority {
 }
 
 pub const FN_GET_VERSION: u32 = 0;
+/// WinUAE `uaelib_ExitEmu` (`emulib_ExitEmu` in uaelib.cpp, case 13 of
+/// `uaelib_demux_common`): `uae_quit()`, no arguments. The guest asks the
+/// emulator to stop; WinUAE returns 1 to a caller that is never going to
+/// see it.
+pub const FN_EXIT_EMU: u32 = 13;
 pub const FN_CFG_READ: u32 = 81;
 pub const FN_CFG_MODIFY: u32 = 82;
 pub const FN_DEBUG_LOG: u32 = 86;
@@ -368,6 +376,11 @@ pub struct UaeLib {
     /// The latest guest warp request not yet taken by the frontend (the
     /// last one wins within a frame).
     pending_warp: Option<bool>,
+    /// The guest asked the emulator to stop (function 13, `ExitEmu`) and
+    /// the frontend has not yet taken the request. Not restored from a
+    /// save state: a state written mid-request has already ended its run.
+    #[serde(skip)]
+    pending_exit: bool,
     /// Function-86 lines and registry changes awaiting a control-protocol
     /// subscriber; bounded, oldest dropped.
     debug_events: VecDeque<DebugEvent>,
@@ -415,6 +428,7 @@ impl UaeLib {
         Self {
             image: IMAGE,
             pending_warp: None,
+            pending_exit: false,
             debug_events: VecDeque::new(),
             debug_dropped: 0,
             resources: Vec::new(),
@@ -443,6 +457,7 @@ impl UaeLib {
     pub fn reset(&mut self) {
         self.image = IMAGE;
         self.pending_warp = None;
+        self.pending_exit = false;
         self.clear_registry();
         self.idle = IdleAccounting::default();
         self.overlay.clear();
@@ -592,6 +607,11 @@ impl UaeLib {
             FN_CFG_MODIFY => self.cfg_modify(args, mem, address_mask),
             FN_DEBUG_LOG => self.debug_log(args[0], mem, address_mask),
             FN_DEBUG_CMD => self.debug_cmd(args, mem, address_mask, cck, frame),
+            FN_EXIT_EMU => {
+                log::info!("uaelib: guest requested emulator exit (ExitEmu)");
+                self.pending_exit = true;
+                (1, false)
+            }
             other => {
                 log::trace!("uaelib: function {other} is not provided; returning 0");
                 (0, false)
@@ -988,6 +1008,12 @@ impl UaeLib {
         self.pending_warp.take()
     }
 
+    /// Whether the guest asked the emulator to stop (`ExitEmu`) since the
+    /// last take.
+    pub fn take_exit_request(&mut self) -> bool {
+        std::mem::take(&mut self.pending_exit)
+    }
+
     /// Queued debug events and the number dropped since the last take.
     pub fn take_debug_events(&mut self) -> (Vec<DebugEvent>, u64) {
         let events = self.debug_events.drain(..).collect();
@@ -1041,6 +1067,12 @@ impl UaeLib {
     /// Test hook: latch a warp request as function 82 would.
     pub fn request_warp(&mut self, on: bool) {
         self.pending_warp = Some(on);
+    }
+
+    /// Test hook: latch an exit request as function 13 would.
+    #[cfg(test)]
+    pub fn request_exit(&mut self) {
+        self.pending_exit = true;
     }
 
     /// Test hook: queue a debug line as function 86 would (no echo).
@@ -1311,6 +1343,34 @@ mod tests {
         assert_eq!(lib.peek_word(0x1F), None);
         assert_eq!(lib.peek_byte(0x1F), Some(0));
         assert_eq!(lib.peek_byte(0x20), None);
+    }
+
+    #[test]
+    fn function_13_latches_an_exit_request_until_taken() {
+        let mut lib = UaeLib::new();
+        let mut mem = memory();
+        assert!(!lib.take_exit_request(), "nothing pending at start");
+        // Rung through the doorbell like every other call: D0 is WinUAE's
+        // 1, and the request waits for the frontend to take it.
+        frame(&mut mem, 0x1000, FN_EXIT_EMU, &[]);
+        ring_split(&mut lib, &mut mem, 0x1000);
+        assert_eq!(result(&lib), 1);
+        assert!(lib.take_exit_request());
+        assert!(!lib.take_exit_request(), "taking clears it");
+        // A reset drops a request the guest that made it no longer exists
+        // to be honoured for.
+        assert_eq!(
+            lib.call(FN_EXIT_EMU, [0; 5], &mut mem, MASK24, 0, 0),
+            (1, false)
+        );
+        lib.reset();
+        assert!(!lib.take_exit_request());
+        // The request is host-side: it is not carried by a save state.
+        lib.call(FN_EXIT_EMU, [0; 5], &mut mem, MASK24, 0, 0);
+        let json = serde_json::to_string(&lib).unwrap();
+        let restored: UaeLib = serde_json::from_str(&json).unwrap();
+        let mut restored = restored;
+        assert!(!restored.take_exit_request());
     }
 
     #[test]

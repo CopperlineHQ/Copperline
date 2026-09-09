@@ -86,6 +86,8 @@ struct LaunchArgs {
     extra: Vec<String>,
     cwd: Option<PathBuf>,
     timeout: Duration,
+    /// `coverage`: the lcov file the emulator's `--coverage` run writes.
+    coverage: Option<PathBuf>,
 }
 
 fn opt_string(args: &Value, key: &str) -> Option<String> {
@@ -179,6 +181,7 @@ fn parse_launch(args: &Value) -> Result<LaunchArgs, String> {
         extra,
         cwd: opt_string(args, "cwd").map(PathBuf::from),
         timeout: Duration::from_millis(args["timeoutMs"].as_u64().unwrap_or(60_000)),
+        coverage: opt_string(args, "coverage").map(PathBuf::from),
     })
 }
 
@@ -306,6 +309,21 @@ impl Session {
         if let Some(ntsc) = launch.ntsc {
             spec.args.push("--video".into());
             spec.args.push(if ntsc { "NTSC" } else { "PAL" }.into());
+        }
+        // Coverage is the emulator's own --coverage run (it watches the
+        // program's load and exit itself), with this launch's sourceMap
+        // applied to the file's paths.
+        if let Some(coverage) = &launch.coverage {
+            spec.args.push("--coverage".into());
+            spec.args.push(coverage.display().to_string());
+            if let Some(map) = args.get("sourceMap").and_then(Value::as_object) {
+                for (from, to) in map {
+                    if let Some(to) = to.as_str() {
+                        spec.args.push("--coverage-source-map".into());
+                        spec.args.push(format!("{from}={to}"));
+                    }
+                }
+            }
         }
         spec.args.extend(launch.extra.iter().cloned());
         // A guest that reads the host clock makes reverse replay diverge
@@ -2542,9 +2560,11 @@ mod tests {
             "emulatorLog": true,
             "headless": true,
             "extraArgs": ["--noaudio"],
+            "coverage": "/tmp/cov.info",
         }))
         .unwrap();
         assert_eq!(args.run_args.as_deref(), Some("a b"));
+        assert_eq!(args.coverage.as_deref(), Some(Path::new("/tmp/cov.info")));
         assert_eq!(args.rom.as_deref(), Some(prog.as_path()));
         assert_eq!(
             args.extra,

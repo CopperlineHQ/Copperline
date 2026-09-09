@@ -58,7 +58,11 @@ directory live, so a freshly built binary runs directly
 (`docs/guide/run.md`). Windowed sessions warp-boot until the guest loads
 it; with `--gdb` the session stops at the program's first instruction,
 and CCP scripts can wait on `break.add {"kind": "loadseg", "name": ...}`.
-It composes with every headless flag below.
+It composes with every headless flag below. `--exit-on-return` makes the
+process exit with the program's AmigaDOS return code (0-255; 4 if the run
+ended before it returned), and a guest calling uaelib `ExitEmu` (function
+13) stops the run with status 0. Exit statuses: 0 ok, 1 Copperline error,
+3 screenshot expectation failed, 4 no guest return code.
 
 ## Headless verification
 
@@ -94,6 +98,7 @@ repeat.
 |---|---|
 | `--press-after SECS KEY` | Press and release an Amiga key (~100 ms hold) |
 | `--key-after SECS KEY MS` | Hold a key for exactly MS milliseconds |
+| `--type-after SECS TEXT` | Type TEXT on the US Amiga keyboard from SECS, one key per 100 ms (`\n` Return, `\t` Tab, `\e` Esc) |
 | `--click-after SECS BUTTON MS [PORT]` | Mouse button (`left`/`right`/`middle`) for MS ms (default port 1) |
 | `--joy-after SECS BUTTON MS [PORT]` | Joystick / CD32-pad control (`up`/`down`/`left`/`right`/`red`/`blue`/...) (default port 2) |
 | `--mouse-after SECS DX DY [PORT]` | Relative mouse motion (default port 1) |
@@ -101,7 +106,8 @@ repeat.
 | `--pot-after SECS X Y [PORT]` | Analogue stick/paddle position, 0-255 per axis (default port 2) |
 | `--insert-disk-after SECS DFN PATH` | Insert a disk image into `df0`..`df3` |
 | `--insert-cd-after SECS PATH` | Swap the CD image in the machine's CD drive (CDTV/CD32/SCSI CD-ROM) |
-| `--script FILE` | Same directives from a file, one per line, no leading dashes |
+| `--expect-screenshot SECS PATH [TOL]` | Compare the frame at SECS with the PNG at PATH (TOL = fraction or pixel count); mismatch writes `<stem>.actual.png` + `<stem>.diff.png`, exit status 3 at run end |
+| `--script FILE` | Same directives from a file, one per line, no leading dashes (`type SECS TEXT`, `expect-screenshot ...` included) |
 | `--record-input PATH` | Record all machine-bound input as a replayable script |
 
 `KEY` is a raw key code (`0x45`) or a name (`ctrl`, `f1`, `esc`, letters,

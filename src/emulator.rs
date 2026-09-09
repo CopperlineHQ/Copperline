@@ -108,6 +108,11 @@ pub struct Emulator {
     /// host-side only, never serialized.
     #[cfg(feature = "control")]
     profile: Option<crate::profile::ProfileCapture>,
+    /// A `--run PROG --coverage FILE` run: waits for the program's load,
+    /// counts its instructions, writes the lcov file at its exit or the
+    /// run's end. Host-side only, never serialized.
+    #[cfg(feature = "dap")]
+    coverage_run: Option<crate::profile::lcov::CoverageRun>,
 }
 
 /// What a save-state load did, for the caller to surface. A `.clstate` always
@@ -475,6 +480,8 @@ impl Emulator {
             descriptor: crate::config::MachineDescriptor::default(),
             #[cfg(feature = "control")]
             profile: None,
+            #[cfg(feature = "dap")]
+            coverage_run: None,
         })
     }
 
@@ -581,6 +588,12 @@ impl Emulator {
                 "memory snapshots cannot be combined with a deferred trigger",
             ));
         }
+        if opts.coverage && self.machine.coverage_active() {
+            return Err(std::io::Error::other(
+                "coverage is already being collected by --coverage; \
+                 it cannot be shared with a profile capture",
+            ));
+        }
         let requested_full = opts.slots;
         let already = self.bus().frame_analyzer_enabled();
         let already_full = self.bus().frame_analyzer_full();
@@ -616,14 +629,18 @@ impl Emulator {
                 capture.options().registers,
             );
         }
+        if capture.options().coverage {
+            self.machine.start_coverage(&capture.options().code_ranges);
+        }
         log::info!(
-            "profile: capturing up to {} frame(s) into {} (slots {}, screenshots {}, pc {}, samples {})",
+            "profile: capturing up to {} frame(s) into {} (slots {}, screenshots {}, pc {}, samples {}, coverage {})",
             capture.options().frames,
             capture.dir().display(),
             capture.options().slots,
             capture.options().screenshots.name(),
             capture.options().pc_samples,
             capture.options().samples,
+            capture.options().coverage,
         );
         self.profile = Some(capture);
         Ok(())
@@ -643,6 +660,11 @@ impl Emulator {
         };
         capture.set_stack_bounds(crate::amigaos::stack_bounds_on_bus(self.bus()));
         self.machine.stop_profile_samples();
+        if capture.options().coverage {
+            if let Some(collector) = self.machine.stop_coverage() {
+                capture.set_coverage(collector.into_data());
+            }
+        }
         if matches!(
             capture.options().screenshots,
             crate::profile::ScreenshotMode::Last
@@ -933,8 +955,91 @@ impl Emulator {
         }
         if self.profile.as_ref().is_some_and(|profile| profile.done()) {
             self.machine.stop_profile_samples();
+            if opts.coverage {
+                if let Some(collector) = self.machine.stop_coverage() {
+                    if let Some(profile) = self.profile.as_mut() {
+                        profile.set_coverage(collector.into_data());
+                    }
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Arm a `--run PROG --coverage FILE` run: polled on every committed
+    /// frame from here on.
+    #[cfg(feature = "dap")]
+    pub fn arm_coverage_run(&mut self, run: crate::profile::lcov::CoverageRun) {
+        log::info!(
+            "coverage: waiting for the program to load; lcov file {}",
+            run.out().display()
+        );
+        self.coverage_run = Some(run);
+    }
+
+    #[cfg(feature = "dap")]
+    pub fn coverage_run_armed(&self) -> bool {
+        self.coverage_run.is_some()
+    }
+
+    /// Whether the run wrote its final file (the program exited, or it
+    /// never loaded in time).
+    #[cfg(feature = "dap")]
+    pub fn coverage_run_written(&self) -> bool {
+        self.coverage_run
+            .as_ref()
+            .is_some_and(crate::profile::lcov::CoverageRun::written)
+    }
+
+    /// Why run-ahead is unavailable while a coverage run is pending: its
+    /// speculative frames would be counted twice.
+    #[cfg(feature = "dap")]
+    pub fn coverage_run_block_reason(&self) -> Option<&'static str> {
+        self.coverage_run
+            .as_ref()
+            .and_then(crate::profile::lcov::CoverageRun::runahead_block_reason)
+    }
+
+    #[cfg(feature = "dap")]
+    fn coverage_poll(&mut self) -> Result<()> {
+        let Some(run) = self.coverage_run.as_mut() else {
+            return Ok(());
+        };
+        let frame = self.machine.bus().emulated_frames();
+        match run
+            .poll(&mut self.machine, frame)
+            .map_err(|e| anyhow!("coverage: {e}"))?
+        {
+            crate::profile::lcov::CoveragePoll::Idle => {}
+            crate::profile::lcov::CoveragePoll::Loaded => {
+                log::info!("coverage: program loaded; counting retired instructions");
+            }
+            crate::profile::lcov::CoveragePoll::Written => {
+                log::info!("coverage: program exited; wrote {}", run.out().display());
+            }
+            crate::profile::lcov::CoveragePoll::TimedOut => {
+                log::warn!(
+                    "coverage: the program was not loaded within {:.0} emulated seconds; wrote an empty {}",
+                    crate::runprog::WARP_LAUNCH_TIMEOUT_SECS,
+                    run.out().display()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The run is ending: write the coverage file if the program is still
+    /// running (or never loaded). Safe to call on every exit path.
+    #[cfg(feature = "dap")]
+    pub fn finish_coverage_run(&mut self) {
+        let Some(run) = self.coverage_run.as_mut() else {
+            return;
+        };
+        match run.finish(&mut self.machine) {
+            Ok(true) => log::info!("coverage: run ended; wrote {}", run.out().display()),
+            Ok(false) => {}
+            Err(e) => log::warn!("coverage: writing {} failed: {e}", run.out().display()),
+        }
     }
 
     /// Whether the WinUAE-compatible uaelib trap is fitted
@@ -979,6 +1084,15 @@ impl Emulator {
             .uaelib
             .as_mut()
             .and_then(|u| u.take_warp_request())
+    }
+
+    /// Whether the guest asked the emulator to stop through the uaelib
+    /// trap (WinUAE `ExitEmu`, function 13) since the last take.
+    pub fn take_uaelib_exit_request(&mut self) -> bool {
+        self.bus_mut()
+            .uaelib
+            .as_mut()
+            .is_some_and(|u| u.take_exit_request())
     }
 
     /// Queued guest debug events (uaelib functions 86 and 88) and the
@@ -2422,6 +2536,10 @@ impl Emulator {
         #[cfg(feature = "control")]
         if !self.runahead_speculative {
             self.profile_poll()?;
+        }
+        #[cfg(feature = "dap")]
+        if !self.runahead_speculative {
+            self.coverage_poll()?;
         }
         if !self.runahead_speculative
             && crate::envcfg::flag("COPPERLINE_DIAG_PCSAMPLE")

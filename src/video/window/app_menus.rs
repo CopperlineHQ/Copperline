@@ -244,6 +244,7 @@ impl App {
             A::OpenDebugger => self.open_debugger(),
             A::FreezeCartridge => self.freeze_cartridge(),
             A::OpenInputMapping => self.open_input_mapping(),
+            A::PasteKeystrokes => self.paste_as_keystrokes(),
             A::OpenCalibration => {
                 self.ui.panel = Some(Panel::Calibration(crate::gamepad::CalibrationSession::new()));
             }

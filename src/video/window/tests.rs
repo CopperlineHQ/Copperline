@@ -6947,6 +6947,52 @@ fn console_inspection_and_stop_commands() {
 }
 
 #[test]
+fn console_poke_takes_size_suffixes_and_byte_sequences() {
+    let mut app = test_app();
+    app.open_console();
+    app.emu.bus_mut().mem.overlay = false;
+
+    // The original word form, unchanged; an odd address is rounded down.
+    let out = console_run(&mut app, "POKE 60001 BEEF");
+    assert_eq!(out, ["poked BE EF -> $060000"]);
+    assert_eq!(app.emu.bus().peek_word_any(0x60000), 0xBEEF);
+    // Several values without a suffix are a byte sequence, at any address.
+    let out = console_run(&mut app, "POKE 60011 12 34 56");
+    assert_eq!(out, ["poked 12 34 56 -> $060011"]);
+    assert_eq!(
+        app.emu.machine.debug_read_memory(0x60010, 5),
+        [0x00, 0x12, 0x34, 0x56, 0x00]
+    );
+    console_run(&mut app, "POKE.B 60021 $AB");
+    assert_eq!(app.emu.machine.debug_read_memory(0x60021, 1), [0xAB]);
+    console_run(&mut app, "poke.w 60030 1 CAFE");
+    assert_eq!(app.emu.bus().peek_word_any(0x60030), 0x0001);
+    assert_eq!(app.emu.bus().peek_word_any(0x60032), 0xCAFE);
+    console_run(&mut app, "POKE.L 60041 DEADBEEF");
+    assert_eq!(app.emu.bus().peek_word_any(0x60040), 0xDEAD);
+    assert_eq!(app.emu.bus().peek_word_any(0x60042), 0xBEEF);
+
+    // Values wider than the size, and ROM, are refused rather than truncated.
+    let out = console_run(&mut app, "POKE 60050 123456");
+    assert!(out[0].starts_with('!'), "{out:?}");
+    assert_eq!(app.emu.bus().peek_word_any(0x60050), 0);
+    let out = console_run(&mut app, "POKE.B 60050 123");
+    assert!(out[0].starts_with('!'), "{out:?}");
+    let out = console_run(&mut app, "POKE 60050 1 2 3G");
+    assert!(out[0].starts_with('!'), "{out:?}");
+    let out = console_run(&mut app, "POKE F80000 4E71");
+    assert_eq!(out, ["!$F80000 is not writable RAM"]);
+    let out = console_run(&mut app, "POKE");
+    assert!(out[0].starts_with("!usage: POKE[.B|.W|.L]"), "{out:?}");
+
+    // Like the control protocol's mem.write, a poke rebaselines the word
+    // watches so it does not stop the machine itself.
+    app.emu.machine.ui_toggle_watch(0x60060);
+    console_run(&mut app, "POKE.B 60060 7F");
+    assert_eq!(app.emu.machine.ui_breaks().watches[0].last, 0x7F00);
+}
+
+#[test]
 fn console_modify_search_and_transport_commands() {
     let mut app = test_app();
     app.open_console();
@@ -8224,6 +8270,138 @@ fn windowless_run_fires_scheduled_input_and_flushes_recording() {
 fn windowless_run_without_captures_errors_instead_of_spinning() {
     let app = test_app();
     assert!(app.run_headless().is_err());
+}
+
+#[test]
+fn windowless_run_checks_expectations_through_the_screenshot_path() {
+    use crate::expect::{actual_path, diff_path, ExpectShotSpec, Tolerance};
+    // One App per run, built and dropped inside the helper: several live
+    // at once would not fit the test thread's stack.
+    let run = |shots: Vec<(f32, PathBuf)>, expects: Vec<(f32, &PathBuf)>| -> i32 {
+        let mut app = test_app();
+        app.pending_auto_shot = shots;
+        app.set_expect_screenshots(
+            expects
+                .into_iter()
+                .map(|(secs, path)| ExpectShotSpec {
+                    secs,
+                    path: path.clone(),
+                    tolerance: Tolerance::Exact,
+                })
+                .collect(),
+        );
+        app.run_headless().unwrap()
+    };
+    let shot = temp_capture_path("expect-shot.png");
+    // A screenshot of the frame at 0.2s ...
+    assert_eq!(run(vec![(0.2, shot.clone())], vec![]), 0);
+    assert!(shot.is_file());
+
+    // ... is exactly what an expectation of the same frame captures: the
+    // deterministic core and the shared capture path make them identical.
+    assert_eq!(run(vec![], vec![(0.2, &shot)]), 0);
+    assert!(!actual_path(&shot).exists(), "a pass writes nothing");
+
+    // A missing expectation fails the run with status 3 once the later
+    // screenshot has also fired, and leaves the actual frame to bless.
+    let missing = temp_capture_path("expect-missing.png");
+    let late = temp_capture_path("expect-late.png");
+    assert_eq!(
+        run(vec![(0.3, late.clone())], vec![(0.2, &missing)]),
+        crate::expect::EXIT_STATUS_MISMATCH
+    );
+    assert!(
+        late.is_file(),
+        "the failed expectation did not cut the run short"
+    );
+    assert!(actual_path(&missing).is_file());
+    assert!(!diff_path(&missing).exists());
+
+    // Blessed by renaming, the expectation passes on the next run.
+    std::fs::rename(actual_path(&missing), &missing).unwrap();
+    assert_eq!(run(vec![], vec![(0.2, &missing)]), 0);
+
+    // A frame that differs (the 0.2s one, against the 0.3s image) fails
+    // and writes the diff mask too; identical frames would pass instead.
+    let status = run(vec![], vec![(0.2, &late)]);
+    if status == crate::expect::EXIT_STATUS_MISMATCH {
+        assert!(actual_path(&late).is_file());
+        assert!(diff_path(&late).is_file());
+    } else {
+        assert_eq!(status, 0);
+    }
+    for path in [&shot, &missing, &late] {
+        std::fs::remove_file(path).ok();
+        std::fs::remove_file(actual_path(path)).ok();
+        std::fs::remove_file(diff_path(path)).ok();
+    }
+}
+
+#[test]
+fn windowless_run_ends_with_the_guest_return_code() {
+    let marker = temp_capture_path("done");
+    // The marker already holds a return code: the run ends on its first
+    // frame with that status, no capture needed to bound it.
+    std::fs::write(&marker, b"7\n").unwrap();
+    let mut app = test_app();
+    app.set_exit_on_return(marker.clone());
+    assert_eq!(app.run_headless().unwrap(), 7);
+    std::fs::remove_file(&marker).ok();
+
+    // No return before the last capture: status 4.
+    let shot = temp_capture_path("no-return.png");
+    let mut app = test_app();
+    app.pending_auto_shot = vec![(0.1, shot.clone())];
+    app.set_exit_on_return(marker.clone());
+    assert_eq!(
+        app.run_headless().unwrap(),
+        crate::runprog::EXIT_STATUS_NO_RETURN
+    );
+    std::fs::remove_file(&shot).ok();
+}
+
+#[test]
+fn windowless_run_ends_cleanly_on_guest_exit_emu() {
+    let shot = temp_capture_path("exit-emu.png");
+    let mut app = test_app();
+    let mut lib = crate::uaelib::UaeLib::new();
+    lib.mute_stdout();
+    app.emu.bus_mut().attach_uaelib(lib);
+    app.pending_auto_shot = vec![(30.0, shot.clone())];
+    app.emu.bus_mut().uaelib.as_mut().unwrap().request_exit();
+    let started = std::time::Instant::now();
+    assert_eq!(app.run_headless().unwrap(), 0);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "the exit request ended the run, not the 30s capture"
+    );
+    assert!(!shot.exists());
+}
+
+#[test]
+fn typed_text_rides_the_scheduled_key_queue_and_records_in_order() {
+    let shot = temp_capture_path("typed-shot.png");
+    let script = temp_capture_path("typed.clscript");
+    let mut app = test_app();
+    app.pending_auto_shot = vec![(0.5, shot.clone())];
+    app.input_recorder = Some(crate::inputrec::InputRecorder::new(0.0));
+    app.record_input_path = Some(script.clone());
+    let (count, untypable) = app.type_text("A\n", 40);
+    assert_eq!((count, untypable), (3, Vec::new()));
+    app.run_headless().unwrap();
+    let text = std::fs::read_to_string(&script).unwrap();
+    let keys: Vec<&str> = text
+        .lines()
+        .filter(|l| l.starts_with("key-after"))
+        .collect();
+    // Shift, then the key it qualifies, then Return: the recording keeps
+    // the order a replay needs.
+    assert_eq!(keys.len(), 3, "{text}");
+    assert!(keys[0].contains("0x60"), "{text}");
+    assert!(keys[1].contains("0x20"), "{text}");
+    assert!(keys[2].contains("0x44"), "{text}");
+    std::fs::remove_file(&shot).ok();
+    std::fs::remove_file(&script).ok();
 }
 
 // ---------------------------------------------------------------------------
@@ -10090,6 +10268,7 @@ mod warp_control {
             unwind: None,
             relocation_bases: Vec::new(),
             code_ranges: Vec::new(),
+            coverage: false,
             trigger: None,
         }
     }

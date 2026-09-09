@@ -73,6 +73,8 @@ range checks as the equivalent TOML fields:
 | `--port2 DEVICE` | `[input] port2` | same devices; default `joystick` (`cd32` on the CD32 profile) |
 | `--autofire HZ` | `[input] autofire_hz` | `0` (off, the default) to `30` |
 | `--run-ahead FRAMES` | `[emulation] run_ahead_frames` | run-ahead latency reduction: `0` (off) to `4` |
+| `--coverage FILE` | (none; needs `--run`) | write lcov line/function coverage of the `--run` program to FILE when it exits or the run ends ([coverage](../debugger/profiling.md#guest-coverage)) |
+| `--coverage-source-map FROM=TO` | (none; needs `--coverage`) | rewrite a source path prefix in the coverage file; repeatable |
 | `--full-screen` / `--windowed` | `[display] full_screen` | open fullscreen or windowed at start (default windowed) |
 | `--show-status-bar` / `--hide-status-bar` | `[display] status_bar` | status bar at start (default shown) |
 | `--perf-overlay` | `[display] perf_overlay` | show performance overlay at start |
@@ -92,6 +94,9 @@ range checks as the equivalent TOML fields:
 | `--hostsocket-interface NAME` | `[hostsocket] interface` | bridge adapter name (implies `--hostsocket-net bridge`) |
 | `--host-disk DEVICE [ATTACH]` | `[[host_disk]]` | attach host storage device read-write |
 | `--host-disk-read-only DEVICE [ATTACH]` | `[[host_disk]]` | attach host storage device read-only (default) |
+| `--type-after SECS TEXT` | (no config key) | type TEXT on the US Amiga keyboard from SECS ([Headless](headless.md#typing-text)) |
+| `--expect-screenshot SECS PATH [TOLERANCE]` | (no config key) | compare the frame at SECS with a PNG; exit status 3 on mismatch ([Headless](headless.md#screenshot-expectations)) |
+| `--exit-on-return` | (no config key) | with `--run`: exit with the program's AmigaDOS return code ([Run](run.md#exit-on-return)) |
 
 For example, to boot a stock A1200 profile but with 8 MB of fast RAM and a
 faster CPU, with no config file at all:
