@@ -3798,6 +3798,53 @@ fn build_machine_inner(
         info!("copperhf: virtual hardfile controller on the Zorro chain (slot {slot})");
         devices.push(crate::zorro_device::BoardDevice::Copperhf(board));
     }
+    // SF2000 accelerator Zorro II SD card controller (`[sf2000sd]`): a
+    // single SPI-mode SD card, hard disks only like `[copperhf]` (no
+    // ATAPI/SCSI-CDROM command set behind it).
+    if cfg.sf2000sd.enabled() {
+        let slot = devices.len();
+        let has_rom = cfg.sf2000sd.rom.is_some();
+        let mut rom = Vec::new();
+        if let Some(rom_path) = &cfg.sf2000sd.rom {
+            // Same --load-state placeholder handling as lide/A4091: the
+            // flash is serialized into save states, so a ROM temporarily
+            // unavailable while resuming is fine -- the state replaces it.
+            if rom_optional && !rom_path.is_file() {
+                info!(
+                    "--load-state: sf2000sd ROM {} is unavailable; building with \
+                     a placeholder the save state will replace",
+                    rom_path.display()
+                );
+            } else {
+                rom = crate::sf2000sd::Sf2000Sd::load_rom(rom_path)?;
+            }
+        }
+        let card = match &cfg.sf2000sd.card {
+            Some(drive) => {
+                let disk = open_disk(
+                    &drive.path,
+                    "DH0",
+                    "sf2000sd",
+                    drive.volume_name.as_deref(),
+                    drive.boot_pri,
+                    drive.filesystem,
+                )?;
+                Some(crate::sdcard::SdCard::new(disk))
+            }
+            None => None,
+        };
+        let board = crate::sf2000sd::Sf2000Sd::new(rom, card)?;
+        zorro.add_board(crate::zorro::BoardSpec::sf2000sd(slot, has_rom))?;
+        info!(
+            "sf2000sd: SD card controller on the Zorro chain (slot {slot}){}",
+            cfg.sf2000sd
+                .rom
+                .as_ref()
+                .map(|p| format!(", ROM {}", p.display()))
+                .unwrap_or_default()
+        );
+        devices.push(crate::zorro_device::BoardDevice::Sf2000Sd(board));
+    }
     // WASM plugin boards: assign each a device slot, put its autoconfig
     // identity on the chain, and instantiate the module.
     #[cfg(feature = "wasm-boards")]

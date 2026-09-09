@@ -84,6 +84,8 @@ pub struct RawConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) lide: RawLide,
     #[serde(default, skip_serializing_if = "is_default")]
+    pub(crate) sf2000sd: RawSf2000Sd,
+    #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) a2065: RawA2065,
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) toccata: RawToccata,
@@ -931,6 +933,26 @@ impl RawLide {
             self.drive3.clone(),
         ]
     }
+}
+
+/// `[sf2000sd]` SF2000 accelerator Zorro II SD card controller.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawSf2000Sd {
+    /// The SD card image: same bare-path/table drive form as
+    /// `[copperhf]`'s units -- hard disks only, no ATAPI/CD command set
+    /// behind this controller. The board is fitted (added to the Zorro
+    /// chain) when this or `rom` is set; there is no "socket present but
+    /// empty" mode yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) card: Option<RawDrive>,
+    /// Boot ROM image (a 32K byte-wide flash dump). Absent (or `""`) is
+    /// hardware-only mode: no autoboot, the card still works under a
+    /// disk-loaded driver. Unlike `[lide]`'s `rom`, there is no bundled
+    /// default -- this ROM is the SF2000 firmware author's, not
+    /// Copperline's to ship.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rom: Option<String>,
 }
 
 /// `[a2065]` Ethernet board. Fitting the board enables host networking, which

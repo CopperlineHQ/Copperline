@@ -2061,6 +2061,35 @@ except on `"atbus2008"`, which has no ROM banking and is never offered one;
 still be pointed at a `rom`/`rom_bank2` release download of your own, which
 always wins over the bundled default.
 
+## `[sf2000sd]` -- the SF2000 accelerator's Zorro II SD card controller
+
+```toml
+[sf2000sd]
+card = "workbench.hdf"
+# rom = "sf2000sd.rom"   # omit for hardware-only mode (no autoboot)
+```
+
+The SF2000 accelerator's built-in Zorro II SD card controller: a 64K I/O
+window over an SPI-mode SD card, autoconfigs on the chain like `[lide]`'s
+boards. `card` takes the same bare-path/table drive form as `[copperhf]`'s
+units (RDB images, bare partition hardfiles, `.hdz`, host directories, and
+the `{ path = "...", name = "...", bootpri = N, filesystem = "..." }` table)
+-- **hard disks only**: unlike `[lide]`, a CD image path is rejected, since
+the controller speaks the SD card command set, not ATAPI/SCSI-CDROM.
+
+Unlike `[lide]`'s `rom`, there is no Copperline-bundled default: the boot
+ROM is the SF2000 firmware author's own, not Copperline's to ship. `rom`
+absent (or `""`) is **hardware-only mode** -- registers are live from
+power-on, no autoboot, but the card still works once a disk-loaded driver
+finds it. Point `rom` at a dump of your own board's flash to get autoboot.
+
+The full SD-over-SPI command set -- including multi-block transfers -- is
+implemented and verified against a real Amiga driver's source
+(`docs/internals/peripherals.md`). `[[host_disk]]` passthrough for a real
+host SD reader and a launcher UI entry are not supported yet -- see
+[](../internals/peripherals) for the register protocol and its current
+limits.
+
 ## `[[host_disk]]` -- a real disk of the host's
 
 Give the machine a real disk of this computer's instead of an image -- a card

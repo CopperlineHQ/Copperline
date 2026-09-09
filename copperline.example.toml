@@ -528,6 +528,18 @@ slow = "512K"
 # unit0 = "workbench.hdf"
 # unit1 = { path = "data.hdf", bootpri = 6 }   # table form, as for [ide]
 
+# The SF2000 accelerator's built-in Zorro II SD card controller: a 64K I/O
+# window over an SPI-mode SD card. card takes the same bare-path/table drive
+# form as [copperhf]'s units -- hard disks only, a CD image path is rejected
+# (the controller speaks the SD card command set, not ATAPI/SCSI-CDROM).
+# Unlike [lide]'s rom, there is no bundled default: the boot ROM is the
+# SF2000 firmware author's own, not Copperline's to ship. rom absent (or "")
+# is hardware-only mode -- registers are live from power-on, no autoboot,
+# but the card still works once a disk-loaded driver finds it.
+# [sf2000sd]
+# card = "workbench.hdf"
+# rom = "sf2000sd.rom"
+
 
 [chipset]
 
