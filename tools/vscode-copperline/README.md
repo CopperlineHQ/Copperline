@@ -23,7 +23,8 @@ without waiting for the upstream pull request.
   until those changes are in your installed release. Every release
   package ships `copperline-ctl` next to the emulator (Homebrew on PATH,
   `Copperline.app/Contents/MacOS` on macOS, the Windows zip folder, the
-  AppImage's companion tools tarball). Put `copperline-ctl`
+  AppImage's companion tools tarball, `/app/bin` inside the Flatpak
+  sandbox). Put `copperline-ctl`
   on your PATH, or use the
   `copperline.ctlExecutable` setting pointing at the executable file.
   `copperline.emulatorExecutable` names the `copperline` executable file

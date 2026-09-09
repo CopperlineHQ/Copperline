@@ -102,7 +102,6 @@ fn parse_options() -> Result<Options, String> {
             "--dap-listen" => {
                 dap_listen = Some(args.next().ok_or("--dap-listen requires ADDR")?);
             }
-            "-h" | "--help" => return Err(usage().to_string()),
             _ if method.is_none() && !arg.starts_with('-') => method = Some(arg),
             _ if method.is_some() && params.is_null() => {
                 params =
@@ -524,7 +523,6 @@ fn run_profile_report() -> Result<Vec<std::path::PathBuf>, String> {
                     .ok_or("--source-map requires FROM=TO")?;
                 source_map.push((from.to_string(), to.to_string()));
             }
-            "-h" | "--help" => return Err(usage().to_string()),
             other => return Err(format!("unexpected profile-report argument {other:?}")),
         }
     }
@@ -641,9 +639,14 @@ fn run_size_report() -> Result<std::path::PathBuf, String> {
 }
 
 fn main() -> ExitCode {
-    // A help request is not a usage error: the packaging smoke tests (and
-    // anyone probing a fresh install) check the exit status.
-    if matches!(std::env::args().nth(1).as_deref(), Some("-h" | "--help")) {
+    // A help request anywhere on the command line is not a usage error:
+    // the packaging smoke tests (and anyone probing a fresh install) check
+    // the exit status. No mode or subcommand takes "-h"/"--help" as a
+    // value, so the position does not matter.
+    if std::env::args()
+        .skip(1)
+        .any(|arg| arg == "-h" || arg == "--help")
+    {
         println!("{}", usage());
         return ExitCode::SUCCESS;
     }

@@ -231,9 +231,14 @@ const USAGE: &str =
     "usage: copperline-import-uae --from winuae|amiberry|fsuae --in FILE --out FILE";
 
 fn main() -> ExitCode {
-    // A help request is not a usage error: the packaging smoke tests (and
-    // anyone probing a fresh install) check the exit status.
-    if matches!(std::env::args().nth(1).as_deref(), Some("-h" | "--help")) {
+    // A help request anywhere on the command line is not a usage error:
+    // the packaging smoke tests (and anyone probing a fresh install) check
+    // the exit status. No option takes "-h"/"--help" as a value, so the
+    // position does not matter.
+    if std::env::args()
+        .skip(1)
+        .any(|arg| arg == "-h" || arg == "--help")
+    {
         println!("{USAGE}");
         return ExitCode::SUCCESS;
     }

@@ -182,6 +182,7 @@ install -m755 target/release/copperline-ctl "$tools_stage/copperline-ctl"
 install -m755 target/release/copperline-import-uae \
   "$tools_stage/copperline-import-uae"
 install -m644 LICENSE "$tools_stage/LICENSE"
+install -m644 packaging/linux/copperline-tools-README.txt "$tools_stage/README.txt"
 tar -C "$repo_root/target" -czf "$repo_root/$tools_bundle.tar.gz" "$tools_bundle"
 
 echo "==> Built $OUTPUT, $helper_bundle.tar.gz and $tools_bundle.tar.gz"
