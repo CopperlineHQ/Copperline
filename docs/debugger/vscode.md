@@ -44,6 +44,13 @@ Keep the checkout in place and point VS Code at the executables in
 `target/release`. On Windows they have an `.exe` suffix. Use a release build;
 debug builds are too slow for this workflow.
 
+A release package works instead of a source build once it carries the
+features you need: every package ships `copperline-ctl` next to the
+emulator (Homebrew on PATH, the macOS bundle's `Contents/MacOS`, the Windows
+zip folder, the AppImage's companion tools tarball, or the Flatpak's
+`/app/bin`); [Command-line tools](../guide/getting-started.md#command-line-tools)
+lists the paths to put in the settings below.
+
 The examples boot the bundled open-source AROS ROM, so no Kickstart download
 is needed. If you move the executables out of the checkout, copy
 `assets/aros/` alongside them, preserving the directory name `aros` and its

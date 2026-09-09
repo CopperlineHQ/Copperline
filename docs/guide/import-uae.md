@@ -72,10 +72,12 @@ annotates the generated TOML file:
 - **Host-specific settings:** Display window dimensions, host vsync options, and host
   keybindings are not imported.
 
-## Building the converter
+## Getting the converter
 
-The import utility is built by default during standard Cargo builds. To build the
-binary standalone:
+Every release package includes `copperline-import-uae` beside the emulator;
+[Command-line tools](getting-started.md#command-line-tools) lists the path
+for each package. The utility is also built by default during standard
+Cargo builds. To build the binary standalone:
 
 ```sh
 cargo build --release --bin copperline-import-uae

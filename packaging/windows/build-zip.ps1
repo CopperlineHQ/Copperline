@@ -8,10 +8,12 @@
 #      default, ARM64 with -Target aarch64-pc-windows-msvc) with the pinned
 #      dependency graph. The CRT is statically linked (see .cargo/config.toml),
 #      so the bundle needs no Visual C++ Redistributable.
-#   2. Stages a folder holding copperline.exe with a sibling aros\ directory,
-#      which is the first location romsearch.rs probes, so the bundled AROS
-#      ROM is found with no configuration; the other bundled ROM assets
-#      (fmv\, a4091\, a2091\, lide\, hrtmon\) sit beside it the same way.
+#   2. Stages a folder holding copperline.exe, the copperline-ctl.exe
+#      control/debug-adapter client and the copperline-import-uae.exe config
+#      converter, with a sibling aros\ directory, which is the first location
+#      romsearch.rs probes, so the bundled AROS ROM is found with no
+#      configuration; the other bundled ROM assets (fmv\, a4091\, a2091\,
+#      lide\, hrtmon\) sit beside it the same way.
 #   3. Zips the folder into Copperline-<version>-win-<x64|arm64>.zip,
 #      mirroring the AppImage/Homebrew version naming so release assets are
 #      self-describing.
@@ -50,6 +52,14 @@ $arosDir = Join-Path $stage "aros"
 New-Item -ItemType Directory -Force -Path $arosDir | Out-Null
 
 Copy-Item "target\$target\release\copperline.exe" (Join-Path $stage "copperline.exe")
+# Command-line companions built by the same cargo invocation (both are
+# default-feature binaries): the control-protocol / MCP / DAP client that the
+# VS Code extension and coding agents run, and the WinUAE/Amiberry/FS-UAE
+# config converter. copperline-ctl finds the emulator next to itself, so the
+# three must stay siblings.
+foreach ($tool in @("copperline-ctl.exe", "copperline-import-uae.exe")) {
+    Copy-Item "target\$target\release\$tool" (Join-Path $stage $tool)
+}
 Copy-Item "assets\egui\THIRD_PARTY_FONTS.txt" (Join-Path $stage "THIRD_PARTY_FONTS.txt")
 
 # Bundled AROS open-source Kickstart replacement (the default boot ROM).

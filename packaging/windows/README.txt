@@ -34,6 +34,24 @@ own Kickstart ROM and disk/hard-disk images, and launch with:
 
 Run "copperline.exe --help" for the full command-line surface.
 
+Command-line tools
+------------------
+Two companion programs sit next to copperline.exe:
+
+  copperline-ctl.exe         Client for the control protocol (scripting and
+                             AI agents), the MCP server mode (--mcp) and the
+                             Debug Adapter Protocol adapter (--dap) used by
+                             the VS Code extension. It launches the
+                             copperline.exe beside it, so keep them together
+                             or point the copperline.emulatorExecutable
+                             setting at the emulator. Add this folder to
+                             PATH, or set copperline.ctlExecutable to the
+                             full path of copperline-ctl.exe.
+  copperline-import-uae.exe  Converts a WinUAE, Amiberry or FS-UAE config
+                             file into a Copperline TOML config:
+                             copperline-import-uae.exe --from winuae
+                                 --in game.uae --out game.toml
+
 Portable data
 -------------
 By default, quick-save slots and host preferences are kept under

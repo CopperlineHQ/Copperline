@@ -71,6 +71,14 @@ modules:
       # --locked + --offline reproduce the pinned graph.
       - cargo --offline build --release --locked
       - install -Dm755 target/release/copperline -t ${FLATPAK_DEST}/bin/
+      # Command-line companions (default-feature binaries of the same
+      # build): the control-protocol / MCP / DAP client and the UAE config
+      # converter. Reached with
+      #   flatpak run --command=copperline-ctl dev.copperline.Copperline ...
+      # copperline-ctl launches the copperline beside it in /app/bin, and
+      # --share=network above covers the loopback control socket.
+      - install -Dm755 target/release/copperline-ctl -t ${FLATPAK_DEST}/bin/
+      - install -Dm755 target/release/copperline-import-uae -t ${FLATPAK_DEST}/bin/
       # Bundled AROS open-source Kickstart replacement (the default boot ROM).
       # romsearch.rs resolves it relative to the binary via
       # <prefix>/share/copperline/aros, i.e. /app/share/copperline/aros here.

@@ -9,6 +9,10 @@
 #      the bundled AROS ROM via <bindir>/../share/copperline/aros.
 #   3. Uses linuxdeploy to pull in the direct shared-library dependencies
 #      (ALSA, udev, X11/Wayland, etc.) and wrap the AppDir into an AppImage.
+#   4. Tars the companions that cannot live inside a single-entry-point
+#      AppImage: the net helper (with its setup/unit files) and the
+#      command-line tools (copperline-ctl, copperline-import-uae), each as
+#      its own release asset.
 #
 # Notes:
 #   - The GPU stack (Mesa/Vulkan/libGL) is deliberately NOT bundled; the
@@ -165,4 +169,20 @@ install -m644 packaging/linux/copperline-net-helper.socket \
   "$helper_stage/copperline-net-helper.socket"
 tar -C "$repo_root/target" -czf "$repo_root/$helper_bundle.tar.gz" "$helper_bundle"
 
-echo "==> Built $OUTPUT and $helper_bundle.tar.gz"
+# Command-line companions: the control-protocol / MCP / DAP client that the
+# VS Code extension and coding agents run, and the WinUAE/Amiberry/FS-UAE
+# config converter. An AppImage has one entry point, so they ship as a
+# separate tarball; copperline-ctl finds the emulator through COPPERLINE_BIN
+# (the AppImage path) or PATH when there is no copperline next to it.
+tools_bundle="Copperline-$VERSION-$arch-tools"
+tools_stage="$repo_root/target/$tools_bundle"
+rm -rf "$tools_stage"
+mkdir -p "$tools_stage"
+install -m755 target/release/copperline-ctl "$tools_stage/copperline-ctl"
+install -m755 target/release/copperline-import-uae \
+  "$tools_stage/copperline-import-uae"
+install -m644 LICENSE "$tools_stage/LICENSE"
+install -m644 packaging/linux/copperline-tools-README.txt "$tools_stage/README.txt"
+tar -C "$repo_root/target" -czf "$repo_root/$tools_bundle.tar.gz" "$tools_bundle"
+
+echo "==> Built $OUTPUT, $helper_bundle.tar.gz and $tools_bundle.tar.gz"

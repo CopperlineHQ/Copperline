@@ -53,11 +53,7 @@ fn parse_args() -> Result<Args, String> {
 }
 
 fn run() -> Result<(), String> {
-    let args = parse_args().map_err(|e| {
-        format!(
-            "{e}\n\nusage: copperline-import-uae --from winuae|amiberry|fsuae --in FILE --out FILE"
-        )
-    })?;
+    let args = parse_args().map_err(|e| format!("{e}\n\n{USAGE}"))?;
 
     let text = std::fs::read_to_string(&args.input)
         .map_err(|e| format!("reading {}: {e}", args.input.display()))?;
@@ -231,7 +227,21 @@ fn absent_media(doc: &toml_edit::DocumentMut, source: &std::path::Path) -> Vec<S
         .collect()
 }
 
+const USAGE: &str =
+    "usage: copperline-import-uae --from winuae|amiberry|fsuae --in FILE --out FILE";
+
 fn main() -> ExitCode {
+    // A help request anywhere on the command line is not a usage error:
+    // the packaging smoke tests (and anyone probing a fresh install) check
+    // the exit status. No option takes "-h"/"--help" as a value, so the
+    // position does not matter.
+    if std::env::args()
+        .skip(1)
+        .any(|arg| arg == "-h" || arg == "--help")
+    {
+        println!("{USAGE}");
+        return ExitCode::SUCCESS;
+    }
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
