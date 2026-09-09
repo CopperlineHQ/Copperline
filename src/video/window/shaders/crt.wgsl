@@ -139,6 +139,11 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     // the strength-0 no-op.
     let wuv = mix(uv, warp(uv, u.params.w, aspect), strength);
     let base = sample_display(uv);
+    // Face AA softens the rectangle edge even when the bow is flat; skip
+    // the rest of the look so strength 0 stays a true sample no-op.
+    if (strength <= 0.0) {
+        return vec4<f32>(base.rgb, 1.0);
+    }
 
     // Scanlines follow the raster, which is straight.
     let lines = max(u.params.y, 1.0);
