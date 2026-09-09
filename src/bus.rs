@@ -729,6 +729,13 @@ pub(crate) struct RollbackState {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Bus {
     pub mem: Memory,
+    /// Whether a state load must leave the RAM banks at the host addresses
+    /// the live machine used. Only a frontend that has handed those raw
+    /// addresses to something else needs it (the libretro core's memory
+    /// map), and it costs a copy of every bank per load, so it is off
+    /// unless that frontend asks. Host policy, never part of a state.
+    #[serde(skip)]
+    keep_ram_addresses: bool,
     /// Cold-power-on RAM policy. This is machine state rather than a host-side
     /// presentation preference: a save-state restored and then power-cycled
     /// must use the same deterministic pattern as the machine that saved it.
@@ -3633,6 +3640,7 @@ impl Bus {
 
         let mut bus = Self {
             mem,
+            keep_ram_addresses: false,
             ram_init: RamInit::Zero,
             cia_a: Cia::new(Which::A),
             cia_b: Cia::new(Which::B),
@@ -5909,11 +5917,24 @@ impl Bus {
         // Host addresses of the RAM banks and the CD32 EEPROM are host
         // resources too: a frontend that mapped them (libretro memory maps,
         // save RAM) keeps valid pointers across the restore.
-        self.mem.adopt_allocations_from(&mut live.mem);
-        if let (Some(akiko), Some(live)) = (self.akiko.as_mut(), live.akiko.as_mut()) {
-            akiko.adopt_allocations_from(live);
+        // The policy itself belongs to the running session, not to the
+        // state that was just deserialized over it.
+        self.keep_ram_addresses = live.keep_ram_addresses;
+        if self.keep_ram_addresses {
+            self.mem.adopt_allocations_from(&mut live.mem);
+            if let (Some(akiko), Some(live)) = (self.akiko.as_mut(), live.akiko.as_mut()) {
+                akiko.adopt_allocations_from(live);
+            }
         }
         Ok(())
+    }
+
+    /// Ask for RAM banks to keep their host addresses across a state load.
+    /// The libretro core sets this because it publishes those addresses to
+    /// the frontend as a memory map; every other frontend leaves it off and
+    /// a load simply takes the deserialized buffers.
+    pub fn set_keep_ram_addresses(&mut self, keep: bool) {
+        self.keep_ram_addresses = keep;
     }
 
     /// Why the live machine cannot safely execute frames that are then

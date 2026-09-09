@@ -15,6 +15,34 @@ const SLOW: &CStr = c"slow";
 const FAST: &CStr = c"fast";
 const ROM: &CStr = c"rom";
 
+/// A cheap stand-in for the descriptor list, hashed from everything
+/// [`descriptors`] reads: the banks' host addresses and sizes, and the
+/// autoconfigured Zorro windows. Building the descriptors allocates, and
+/// the two hottest entry points (a frame, a rollback restore) would
+/// otherwise pay that just to discover the map has not moved.
+pub fn fingerprint(bus: &Bus) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mem = &bus.mem;
+    for bank in [
+        &mem.chip_ram,
+        &mem.slow_ram,
+        &mem.mb_ram,
+        &mem.accel_ram,
+        &mem.rom,
+        &mem.extended_rom,
+    ] {
+        (bank.as_ptr() as usize, bank.len()).hash(&mut hasher);
+    }
+    (mem.mb_ram_base(), mem.extended_rom_base).hash(&mut hasher);
+    for window in mem.zorro.fast_ram_windows() {
+        window.hash(&mut hasher);
+        let ram = mem.zorro.board_ram(window.2);
+        (ram.as_ptr() as usize, ram.len()).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 /// Every RAM bank and ROM window the machine decodes, in ascending address
 /// order. A bank is split into naturally aligned power-of-two blocks so
 /// each descriptor's `select` mask identifies exactly its own window: a

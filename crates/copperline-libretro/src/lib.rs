@@ -40,6 +40,10 @@ struct Runtime {
     /// The memory map last announced to the frontend, which reads it
     /// through the pointer handed to `RETRO_ENVIRONMENT_SET_MEMORY_MAPS`.
     memory_map: Vec<MemoryDescriptor>,
+    /// What the machine's address map hashed to when that was announced.
+    /// Comparing this costs no allocation, which matters because a frame
+    /// and a netplay rollback both pass through here.
+    memory_map_fingerprint: u64,
 }
 
 thread_local! {
@@ -95,14 +99,28 @@ fn announce_memory_map(force: bool) -> Result<()> {
         |runtime| -> Result<Option<(*const MemoryDescriptor, u32)>> {
             let mut runtime = runtime.try_borrow_mut().context("core is busy")?;
             let Runtime {
-                core, memory_map, ..
+                core,
+                memory_map,
+                memory_map_fingerprint: fingerprint,
+                ..
             } = &mut *runtime;
             let core = core.as_mut().context("no content is loaded")?;
-            let current = memory::descriptors(core.emu.bus_mut());
-            if !force && current == *memory_map {
+            // Netplay rolls back constantly, and RetroArch offers neither
+            // cheats nor the memory viewer during a session, so publish no
+            // map: nothing then holds a host address across a rollback.
+            if core.netplay {
                 return Ok(None);
             }
-            *memory_map = current;
+            let current = memory::fingerprint(core.emu.bus());
+            if !force && current == *fingerprint && !memory_map.is_empty() {
+                return Ok(None);
+            }
+            *fingerprint = current;
+            let descriptors = memory::descriptors(core.emu.bus_mut());
+            if !force && descriptors == *memory_map {
+                return Ok(None);
+            }
+            *memory_map = descriptors;
             Ok(Some((memory_map.as_ptr(), memory_map.len() as u32)))
         },
     )?;
@@ -647,9 +665,10 @@ pub unsafe extern "C" fn retro_unserialize(data: *const c_void, size: usize) -> 
         with_core(|core| {
             core.unserialize(unsafe { std::slice::from_raw_parts(data.cast(), size) })
         })?;
-        // RAM keeps its host addresses across a load; the state's autoconfig
-        // placement may still differ from the map the frontend holds.
-        announce_memory_map(false)?;
+        // RAM keeps its host addresses across a load, so the map the
+        // frontend holds stays valid. Netplay rollback lands here many
+        // times a frame, so leave the map to the next frame's check
+        // rather than testing it on every restore.
         Ok(true)
     })
 }

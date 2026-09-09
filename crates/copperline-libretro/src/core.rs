@@ -181,6 +181,11 @@ impl Core {
         };
         core.controls.cd32 = cd_mode;
         core.controls.netplay = netplay;
+        // Outside netplay the frontend is handed the RAM banks' host
+        // addresses in a memory map, so a state load has to keep them. A
+        // netplay session publishes no map and rolls back constantly, so it
+        // takes the deserialized buffers and skips the copy.
+        core.emu.bus_mut().set_keep_ram_addresses(!netplay);
         if let Some(path) = &core.nvram_save {
             if path.exists() {
                 core.emu
