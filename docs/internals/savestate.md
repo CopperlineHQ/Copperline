@@ -81,7 +81,7 @@ boards), and the disc in the CD drive. It is host metadata, not machine
 state: `Emulator::state_meta` builds it at save time, nothing reads it on
 load, and the wall clock in it is the one thing two saves of the same
 machine at the same instant are expected to differ in (see
-[Verification](#verification)).
+[Verification](#state-verification)).
 
 The ROM bytes are embedded in the state, not loaded from a path: a state
 is self-contained with respect to everything that was in memory, so
@@ -430,6 +430,7 @@ the same data-stream rule as a live run. On success the window forces power
 on, clears any CPU halt latch, and invalidates `last_rendered_emulated_frame`
 so the next presentation re-renders from the restored Bus.
 
+(state-verification)=
 ## Verification
 
 The regression checks cover serialization, failure recovery and replay:

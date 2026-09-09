@@ -971,7 +971,7 @@ held frame rather than a burst. A clip has no sound; use
 
 `[recording] clip_seconds` sets the ring's length (up to 120 seconds; 0
 switches the ring and the menu item off) -- see
-[Configuration](configuration.md#recording). The ring holds pictures in
+[Configuration](configuration.md#recording-config). The ring holds pictures in
 their palette-indexed form and stores a picture once however long it
 stays on screen, so a ten-second ring costs well under 100 MB of host
 memory in practice; it is bounded at 256 MB regardless. Loading a save

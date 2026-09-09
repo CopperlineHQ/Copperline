@@ -405,6 +405,15 @@ fn skip_if_debug(test_name: &str) -> bool {
 /// (or running it under `--test-threads=1` repeatedly) increases confidence
 /// but cannot prove determinism outright; that is why the final screenshot
 /// is checked too, as an independent, coarser cross-check.
+/// A state file's machine body: the bytes past the header and the
+/// clear-text metadata chunk, which two runs of the same scenario must
+/// agree on byte for byte.
+fn machine_body(tag: &str, bytes: &[u8]) -> Vec<u8> {
+    let offset = copperline::savestate::machine_body_offset(bytes)
+        .unwrap_or_else(|e| panic!("[{tag}] savestate has no readable machine body: {e:#}"));
+    bytes[offset..].to_vec()
+}
+
 #[test]
 fn determinism_across_repeated_boots() {
     if skip_if_debug("determinism_across_repeated_boots") {
@@ -454,6 +463,11 @@ fn determinism_across_repeated_boots() {
             panic!("[{tag}] failed to read screenshot {screenshot_path:?}: {e}")
         });
 
+        // A state file carries metadata written in the clear ahead of the
+        // machine (a thumbnail and the wall clock at which it was saved),
+        // and the wall clock is deliberately not a function of emulated
+        // time. Determinism is the machine body, so compare from there.
+        let state = machine_body(&tag, &state);
         if run == 0 {
             state_bytes = state;
             screenshot_bytes = screenshot;

@@ -1182,7 +1182,7 @@ Windows select each device directly.
 repeated on every invocation -- the CLI flag still wins when both are given.
 It has no effect without `--audio-stems DIR` on the command line.
 
-(recording)=
+(recording-config)=
 ## `[recording]`
 
 ```toml
