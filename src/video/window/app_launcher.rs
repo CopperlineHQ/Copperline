@@ -1560,6 +1560,9 @@ impl App {
         } else if !self.debugger_wants_time_travel() {
             self.emu.disable_time_travel();
         }
+        // Inspectors left open belong to the host, not to the machine that
+        // was just dropped: re-arm what they capture with on this one.
+        self.rearm_tool_panels();
         self.keyboard_joy_held = [keymap::HeldKeys::default(); keymap::MAPPING_COUNT];
         self.about_machine_lines = crate::config::about_machine_lines(cfg);
         // The threaded path picks the new settings up from the next render

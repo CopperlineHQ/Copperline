@@ -1883,6 +1883,52 @@ fn the_drawn_latch_matches_what_the_machine_holds() {
     );
 }
 
+/// The inspectors are host state and outlive the machine they were opened
+/// on, but everything they capture with is armed on the bus and the CPU. A
+/// machine built by the launcher's Run comes up with none of it, so the swap
+/// has to re-arm whatever is still open. Otherwise the Frame Analyzer sits
+/// dead on the new machine until its own Run happens to re-arm it (a pause
+/// and run, which looks like the pane rather than the machine having
+/// stopped), and Recent PCs, the reverse controls and the heat map stay dead
+/// with it.
+#[test]
+fn running_a_new_machine_rearms_the_open_inspectors() {
+    let mut app = test_app();
+    app.open_frame_analyzer();
+    app.frame_analyzer_set_tab(AnalyzerTab::Memory);
+    app.open_debugger();
+    assert!(app.emu.bus().frame_analyzer_full());
+    assert!(app.emu.bus().heat_map().is_some());
+    assert!(app.emu.time_travel_enabled());
+
+    let raw = crate::config::RawConfig::default();
+    let cfg = crate::config::Config::try_from(raw.clone()).expect("default config");
+    let emu = test_emulator(Box::new(NullSink), crate::config::CpuModel::M68000, &[]);
+    app.run_machine(emu, &cfg, raw);
+
+    // The panes are still open, so they must still be capturing.
+    assert!(app.frame_analyzer_panel.is_some());
+    assert!(app.debugger_panel.is_some());
+    assert!(
+        app.emu.bus().frame_analyzer_full(),
+        "the analyzer captures the new machine without needing a pause and run"
+    );
+    assert!(
+        app.emu.bus().heat_map().is_some(),
+        "the Memory tab's map records the new machine"
+    );
+    assert!(
+        app.emu.time_travel_enabled(),
+        "the reverse controls work on the new machine"
+    );
+    app.debugger_step();
+    app.debugger_step();
+    assert!(
+        !app.emu.machine.ui_pc_history().is_empty(),
+        "Recent PCs records the new machine"
+    );
+}
+
 /// Running a new machine (the launcher's Run) lets go of the strip's
 /// holds against the machine being replaced, so neither it nor the new one
 /// is left with a key down that nothing will lift.
