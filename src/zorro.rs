@@ -522,6 +522,32 @@ impl BoardSpec {
         }
     }
 
+    /// The SF2000 accelerator's Zorro II SD card controller
+    /// (`crate::sf2000sd`): LIV2/OAHR (manufacturer 0x144A -- the same ID
+    /// `lide` uses, per the SF2000-FW-SD RTL's `autoconfig_zii.v`), product
+    /// 11, a 64K I/O window. `diag_vec` (`0x0001`) is only set when a boot
+    /// ROM is configured (hardware-only mode never autoboots) -- see
+    /// `crate::sf2000sd` for the whole-window overlay this points into.
+    /// `slot` is the index of the matching [`crate::sf2000sd::Sf2000Sd`]
+    /// device in `Bus::devices`.
+    pub fn sf2000sd(slot: usize, has_rom: bool) -> Self {
+        Self {
+            name: "SF2000 SD card controller".into(),
+            version: ZorroVersion::II,
+            manufacturer: 0x144A,
+            product: 11,
+            serial: 0,
+            size_bytes: 0x1_0000,
+            backing: BoardBacking::Device(slot),
+            memlist: false,
+            memory_space: false,
+            chained: false,
+            no_shutup: false,
+            window: 0,
+            diag_vec: has_rom.then_some(0x0001),
+        }
+    }
+
     /// The Z3660 accelerator's FPGA RTG core: one 128 MB Zorro III window
     /// (manufacturer 0x144B, product 1) holding the register file, the P96
     /// VRAM, and the GFXData mailbox; no autoboot ROM (the Z3660.card
@@ -2127,6 +2153,30 @@ mod tests {
         assert_eq!(chain.config_read(AUTOCONFIG_BASE + 0x2A, 1), 0xF0);
         assert_eq!(chain.config_read(AUTOCONFIG_BASE + 0x2C, 1), 0xF0);
         assert_eq!(chain.config_read(AUTOCONFIG_BASE + 0x2E, 1), 0x70);
+    }
+
+    #[test]
+    fn sf2000sd_autoconfig_identity_matches_the_reference() {
+        let chain = chain_with(vec![BoardSpec::sf2000sd(0, false)]);
+        // Zorro II | 64K size code 1, no MEMLIST/chained/DIAGVALID: 0xC0|1 = 0xC1.
+        assert_eq!(chain.config_logical_byte(0, 0), Some(0xC1));
+        assert_eq!(chain.config_logical_byte(0, 1), Some(11)); // product 11
+        assert_eq!(chain.config_logical_byte(0, 2), Some(0)); // not memory-space
+                                                              // Manufacturer 0x144A (LIV2/OAHR -- the same ID `lide` uses), big-endian.
+        assert_eq!(chain.config_logical_byte(0, 4), Some(0x14));
+        assert_eq!(chain.config_logical_byte(0, 5), Some(0x4A));
+        // Hardware-only mode: InitDiagVec stays zero, and no DIAGVALID bit
+        // above (0xC1 has no 0x10 set).
+        assert_eq!(chain.config_logical_byte(0, 10), Some(0));
+        assert_eq!(chain.config_logical_byte(0, 11), Some(0));
+
+        // With a ROM configured: DIAGVALID set, InitDiagVec = 0x0001.
+        let with_rom = BoardSpec::sf2000sd(0, true);
+        assert_eq!(with_rom.diag_vec, Some(0x0001));
+        let chain = chain_with(vec![with_rom]);
+        assert_eq!(chain.config_logical_byte(0, 0), Some(0xD1)); // 0xC1 | DIAGVALID(0x10)
+        assert_eq!(chain.config_logical_byte(0, 10), Some(0));
+        assert_eq!(chain.config_logical_byte(0, 11), Some(1));
     }
 
     #[test]

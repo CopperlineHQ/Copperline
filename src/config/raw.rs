@@ -84,6 +84,8 @@ pub struct RawConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) lide: RawLide,
     #[serde(default, skip_serializing_if = "is_default")]
+    pub(crate) sf2000sd: RawSf2000Sd,
+    #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) a2065: RawA2065,
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) toccata: RawToccata,
@@ -937,6 +939,26 @@ impl RawLide {
     }
 }
 
+/// `[sf2000sd]` SF2000 accelerator Zorro II SD card controller.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawSf2000Sd {
+    /// The SD card image: same bare-path/table drive form as
+    /// `[copperhf]`'s units -- hard disks only, no ATAPI/CD command set
+    /// behind this controller. The board is fitted (added to the Zorro
+    /// chain) when this or `rom` is set; there is no "socket present but
+    /// empty" mode yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) card: Option<RawDrive>,
+    /// Boot ROM image (a 32K byte-wide flash dump). Absent (or `""`) is
+    /// hardware-only mode: no autoboot, the card still works under a
+    /// disk-loaded driver. Unlike `[lide]`'s `rom`, there is no bundled
+    /// default -- this ROM is the SF2000 firmware author's, not
+    /// Copperline's to ship.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rom: Option<String>,
+}
+
 /// `[a2065]` Ethernet board. Fitting the board enables host networking, which
 /// is non-deterministic.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -1511,18 +1533,39 @@ pub(super) fn drive_image(raw: RawDrive) -> Result<DriveImage> {
     })
 }
 
-/// Convert a parsed `[copperhf]` unit entry into a `DriveImage`, on top of
-/// [`drive_image`]'s validation: `[copperhf]` serves hard disks only, so a
-/// path recognised as a CD image is rejected rather than silently attaching
-/// a unit with no working command set behind it.
-pub(super) fn copperhf_drive_image(raw: RawDrive) -> Result<DriveImage> {
+/// Convert a parsed drive entry for a hard-disk-only controller into a
+/// `DriveImage`, on top of [`drive_image`]'s validation: a path recognised
+/// as a CD image is rejected rather than silently attaching a unit with no
+/// working command set behind it. `section` is the config section the entry
+/// came from and `controller` what would have had to serve the disc, so the
+/// error names what the user actually wrote rather than some other section
+/// that happens to share this rule.
+fn hard_disk_only_drive_image(
+    raw: RawDrive,
+    section: &str,
+    controller: &str,
+) -> Result<DriveImage> {
     let path = PathBuf::from(&raw.path);
     if crate::config::is_cd_image_path(&path) {
         bail!(
-            "[copperhf] {}: copperhf.device serves hard disks only, not CD images \
+            "[{section}] {}: {controller} serves hard disks only, not CD images \
              (attach this to [scsi] or [ide]/[lide] instead)",
             path.display()
         );
     }
     drive_image(raw)
+}
+
+/// Convert a parsed `[copperhf]` unit entry into a `DriveImage`:
+/// copperhf.device serves hard disks only, no ATAPI/SCSI-CDROM command set
+/// behind it.
+pub(super) fn copperhf_drive_image(raw: RawDrive) -> Result<DriveImage> {
+    hard_disk_only_drive_image(raw, "copperhf", "copperhf.device")
+}
+
+/// Convert the parsed `[sf2000sd] card` entry into a `DriveImage`: the same
+/// hard-disks-only rule, since an SD card has no ATAPI/SCSI-CDROM command
+/// set behind it either.
+pub(super) fn sf2000sd_drive_image(raw: RawDrive) -> Result<DriveImage> {
+    hard_disk_only_drive_image(raw, "sf2000sd", "the SF2000 SD card controller")
 }

@@ -44,6 +44,10 @@ pub enum LauncherTab {
     /// copperhf.device): seven units, no board/ROM to choose -- the board
     /// is always there. Reached from the Storage tab, like Lide.
     Copperhf,
+    /// The SF2000 accelerator's Zorro II SD card controller (`[sf2000sd]`):
+    /// one card slot and an optional boot ROM. Reached from the Storage
+    /// tab, like Lide and Copperhf.
+    Sf2000Sd,
     /// The "I/O Ports" strip tab, whose default category is the serial
     /// port. Parallel, networking and audio are its sibling categories,
     /// switched between via the top nav row, with no Back button --
@@ -152,6 +156,7 @@ impl LauncherTab {
             LauncherTab::Cd => "CD",
             LauncherTab::Lide => "Lide",
             LauncherTab::Copperhf => "Copperline HD",
+            LauncherTab::Sf2000Sd => "SF2000 SD",
             LauncherTab::IoPorts => "I/O Ports",
             LauncherTab::IoParallel => "Parallel Port",
             LauncherTab::IoNetworking => "Networking",
@@ -188,6 +193,7 @@ impl LauncherTab {
             | LauncherTab::BootPriorityMore(_)
             | LauncherTab::Lide
             | LauncherTab::Copperhf
+            | LauncherTab::Sf2000Sd
             | LauncherTab::CreateFloppy
             | LauncherTab::CreateHard
             | LauncherTab::CreateGeometry => LauncherTab::Storage,
@@ -220,6 +226,7 @@ impl LauncherTab {
             | LauncherTab::BootPriority
             | LauncherTab::Lide
             | LauncherTab::Copperhf
+            | LauncherTab::Sf2000Sd
             | LauncherTab::CreateFloppy
             | LauncherTab::CreateHard => Some(LauncherTab::Storage),
             // Back goes to the page that sent you here, not to Storage.
@@ -269,10 +276,12 @@ pub(super) const STORAGE_NAV: &[(&str, LauncherTab)] = &[
     ("Host Folder", LauncherTab::HostFs),
     ("Host Disk", LauncherTab::HostDisk),
     ("Lide", LauncherTab::Lide),
+    // Four to a row, so Copperline HD and SF2000 SD wrap onto the second
+    // alongside what is done with the hardware above: the boot order
+    // across everything, and the one entry that makes something rather
+    // than attaching something.
     ("Copperline HD", LauncherTab::Copperhf),
-    // Four to a row, so copperhf wraps onto the second alongside what is
-    // done with the hardware above: the boot order across everything, and
-    // the one entry that makes something rather than attaching something.
+    ("SF2000 SD", LauncherTab::Sf2000Sd),
     ("Boot Priority", LauncherTab::BootPriority),
     ("Create Image...", LauncherTab::CreateFloppy),
 ];
@@ -471,6 +480,11 @@ pub enum LauncherField {
     CopperhfUnit4,
     CopperhfUnit5,
     CopperhfUnit6,
+    // The `[sf2000sd]` SF2000 accelerator SD card controller: one card slot
+    // and an optional boot ROM, on its own Storage sub-page like Lide and
+    // Copperhf.
+    Sf2000SdCard,
+    Sf2000SdRom,
     // Boot priority sub-page: the synthesized-RDB de_BootPri for each hard-disk
     // drive above, edited on its own page so it does not crowd the Storage tab.
     IdeMasterBoot,
@@ -493,6 +507,7 @@ pub enum LauncherField {
     CopperhfUnit4Boot,
     CopperhfUnit5Boot,
     CopperhfUnit6Boot,
+    Sf2000SdCardBoot,
     // Host FS mounts (the GUI edits the first FILESYS_GUI_SLOTS entries)
     Filesys0Dir,
     Filesys0Boot,
@@ -981,7 +996,7 @@ pub(super) const HOSTFS_ROWS: [Row; 12] = [
 // ground greyed when empty; a SCSI unit or Lide slot is listed only once it
 // carries a disk (`row_hidden`). More rows than one page holds run onto a
 // second page -- see `MachineSetup::boot_page_of`.
-pub(super) const BOOTPRI_ROWS: [Row; 20] = [
+pub(super) const BOOTPRI_ROWS: [Row; 21] = [
     row(F::IdeMasterBoot, "IDE master", Bootpri),
     row(F::IdeSlaveBoot, "IDE slave", Bootpri),
     row(F::ScsiUnit0Boot, "SCSI unit 0", Bootpri),
@@ -999,6 +1014,9 @@ pub(super) const BOOTPRI_ROWS: [Row; 20] = [
     row(F::LideDrive1Boot, "Lide drive 1", Bootpri),
     row(F::LideDrive2Boot, "Lide drive 2", Bootpri),
     row(F::LideDrive3Boot, "Lide drive 3", Bootpri),
+    // The SF2000 accelerator's SD card is real hardware too, ranked
+    // alongside the other boards above rather than with copperhf below.
+    row(F::Sf2000SdCardBoot, "SF2000 SD card", Bootpri),
     // copperhf.device's units sit last: a Copperline-only board with no
     // real-hardware counterpart, ranked after every board with one.
     row(F::CopperhfUnit0Boot, "copperhf unit 0", Bootpri),
@@ -1041,6 +1059,15 @@ pub(super) const COPPERHF_ROWS: [Row; 7] = [
     row(F::CopperhfUnit4, "Unit 4", Drive),
     row(F::CopperhfUnit5, "Unit 5", Drive),
     row(F::CopperhfUnit6, "Unit 6", Drive),
+];
+// The `[sf2000sd]` Storage sub-page: the SF2000 accelerator's SD card
+// controller. No personality to pick (there is only one identity) and no
+// bundled boot ROM default (unlike Lide's) -- see `crate::sf2000sd`. The
+// card's boot priority lives on the shared Boot Priority page with every
+// other drive's, in `BOOTPRI_ROWS`.
+pub(super) const SF2000SD_ROWS: [Row; 2] = [
+    row(F::Sf2000SdRom, "Boot ROM", PathRow),
+    row(F::Sf2000SdCard, "Card", Drive),
 ];
 // The WHDLoad Settings page: the game to launch, then what staging
 // draws on (src/whdload.rs). Drive rows like the Host FS mounts so the
@@ -1385,6 +1412,7 @@ pub fn rows(
         LauncherTab::Cd => Cow::Borrowed(&CD_ROWS),
         LauncherTab::Lide => Cow::Borrowed(&LIDE_ROWS),
         LauncherTab::Copperhf => Cow::Borrowed(&COPPERHF_ROWS),
+        LauncherTab::Sf2000Sd => Cow::Borrowed(&SF2000SD_ROWS),
         LauncherTab::IoPorts => Cow::Owned(io_serial_rows(
             serial_mode,
             midi_out_is_mt32,

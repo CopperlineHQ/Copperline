@@ -199,6 +199,24 @@ impl MachineSetup {
             lide_drive_boot_off: std::array::from_fn(|i| {
                 boot_is_off(lide_raw_slots[i].as_ref().and_then(|d| d.bootpri))
             }),
+            sf2000sd_card: cfg.sf2000sd.card.as_ref().map(|d| d.path.clone()),
+            sf2000sd_card_name: cfg
+                .sf2000sd
+                .card
+                .as_ref()
+                .and_then(|d| d.volume_name.clone()),
+            sf2000sd_card_fs: cfg
+                .sf2000sd
+                .card
+                .as_ref()
+                .map(|d| d.filesystem)
+                .unwrap_or(crate::diskimage::FileSystem::FFS),
+            sf2000sd_card_is_dir: cfg.sf2000sd.card.as_ref().is_some_and(|d| d.path.is_dir()),
+            sf2000sd_card_bootpri: boot_priority_of(
+                raw.sf2000sd.card.as_ref().and_then(|d| d.bootpri),
+            ),
+            sf2000sd_card_boot_off: boot_is_off(raw.sf2000sd.card.as_ref().and_then(|d| d.bootpri)),
+            sf2000sd_rom: raw.sf2000sd.rom.as_deref().map(PathBuf::from),
             filesys_dirs: std::array::from_fn(|i| {
                 raw.filesys.get(i).map(|m| PathBuf::from(&m.path))
             }),
@@ -673,6 +691,15 @@ impl MachineSetup {
             raw.lide.drive2 = slot_raw(2);
             raw.lide.drive3 = slot_raw(3);
         }
+        // `[sf2000sd]` has no controller/personality to gate on -- like
+        // `[copperhf]` above, the card and ROM are always emitted when set.
+        raw.sf2000sd.card = drive_raw(
+            self.sf2000sd_card.as_deref(),
+            self.sf2000sd_card_name.as_deref(),
+            self.effective_bootpri(F::Sf2000SdCardBoot),
+            self.sf2000sd_card_fs,
+        );
+        raw.sf2000sd.rom = self.sf2000sd_rom.as_ref().map(|p| path_string(p));
         // Host FS mounts: the edited slots (empty ones drop out), then any
         // hand-written extras beyond what the GUI shows.
         raw.filesys = (0..FILESYS_GUI_SLOTS)

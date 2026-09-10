@@ -109,6 +109,7 @@ impl App {
                 | LauncherField::CopperhfUnit4
                 | LauncherField::CopperhfUnit5
                 | LauncherField::CopperhfUnit6
+                | LauncherField::Sf2000SdCard
         );
         let title = if hard_drive_slot && cfg!(target_os = "macos") {
             "Select file or folder"
@@ -124,6 +125,7 @@ impl App {
             | LauncherField::ScsiRomOdd
             | LauncherField::LideRom
             | LauncherField::LideRomBank2
+            | LauncherField::Sf2000SdRom
             | LauncherField::Mt32ControlRom
             | LauncherField::Mt32PcmRom => {
                 // Both cases spelled out: ROM dumps are as often shouted as
@@ -185,6 +187,12 @@ impl App {
             | LauncherField::CopperhfUnit4
             | LauncherField::CopperhfUnit5
             | LauncherField::CopperhfUnit6 => {
+                dialog.add_filter("Hard disk images", &["hdf", "hdz", "img", "bin", "chd"])
+            }
+            // The SF2000 SD card controller is hard disks only too --
+            // it speaks the SD card command set, not ATAPI/SCSI-CDROM
+            // (see `copperhf_drive_image`, reused for `[sf2000sd] card`).
+            LauncherField::Sf2000SdCard => {
                 dialog.add_filter("Hard disk images", &["hdf", "hdz", "img", "bin", "chd"])
             }
             _ => dialog.add_filter("Hard disk images", &["hdf", "hdz", "img", "bin", "chd"]),
@@ -253,7 +261,8 @@ impl App {
             | LauncherField::CopperhfUnit3
             | LauncherField::CopperhfUnit4
             | LauncherField::CopperhfUnit5
-            | LauncherField::CopperhfUnit6 => crate::paths::harddrives_dir(),
+            | LauncherField::CopperhfUnit6
+            | LauncherField::Sf2000SdCard => crate::paths::harddrives_dir(),
             // The WHDLoad game folder and the NVRAM image have homes of their
             // own that the launcher already knows; nothing to add here.
             LauncherField::WhdloadGame | LauncherField::Cd32Nvram => None,

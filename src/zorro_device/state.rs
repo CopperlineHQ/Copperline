@@ -84,6 +84,7 @@ board_types! {
     #[cfg(feature = "cd32-fmv")]
     Cd32Fmv(Box<crate::cd32_fmv::Cd32Fmv>) = 12,
     Copperhf(crate::copperhf::CopperhfBoard) = 13,
+    Sf2000Sd(crate::sf2000sd::Sf2000Sd) = 14,
 }
 
 #[cfg(test)]

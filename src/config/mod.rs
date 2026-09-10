@@ -274,6 +274,11 @@ pub struct Config {
     /// defaults to the bundled one for its personality (`rom = ""` opts
     /// out into hardware-only mode).
     pub lide: LideConfig,
+    /// SF2000 accelerator Zorro II SD card controller (`[sf2000sd]`): an
+    /// SPI-mode SD card behind a register-compatible 64K I/O window,
+    /// autoconfigs on the chain like the SCSI/lide boards. See
+    /// `crate::sf2000sd` for the register protocol.
+    pub sf2000sd: Sf2000SdConfig,
     /// A2065 Ethernet board (`[a2065]`): when set, an A2065 NIC autoconfigs on
     /// the Zorro chain using the named host network backend. Networking is
     /// non-deterministic, so a fitted A2065 breaks byte-identical replay.
@@ -1349,6 +1354,27 @@ impl CopperhfConfig {
     /// Whether a `[copperhf]` section configured any unit at all.
     pub fn enabled(&self) -> bool {
         self.units.iter().any(Option::is_some)
+    }
+}
+
+/// `[sf2000sd]`: the SF2000 accelerator's Zorro II SD card controller
+/// (`crate::sf2000sd`), an SPI-mode SD card behind a register-compatible
+/// 64K I/O window. See `crate::sf2000sd` for the register protocol. A
+/// fitted board with no `rom` named stays in hardware-only mode: no
+/// bundled default the way `[lide]`'s is, since this ROM is the SF2000
+/// firmware author's, not Copperline's to ship.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Sf2000SdConfig {
+    /// The attached card image, if any.
+    pub card: Option<DriveImage>,
+    /// Boot ROM image, if configured.
+    pub rom: Option<PathBuf>,
+}
+
+impl Sf2000SdConfig {
+    /// Whether a `[sf2000sd]` section asked for a board at all.
+    pub fn enabled(&self) -> bool {
+        self.card.is_some() || self.rom.is_some()
     }
 }
 
@@ -2626,6 +2652,7 @@ impl Default for Config {
             scsi: ScsiConfig::default(),
             copperhf: CopperhfConfig::default(),
             lide: LideConfig::default(),
+            sf2000sd: Sf2000SdConfig::default(),
             a2065_net: None,
             toccata: false,
             clipboard_share: None,
@@ -2685,6 +2712,7 @@ impl Config {
             || self.scsi.units.iter().any(Option::is_some)
             || self.copperhf.units.iter().any(Option::is_some)
             || self.lide.drives.iter().any(Option::is_some)
+            || self.sf2000sd.card.is_some()
         {
             return Some("hard-drive or ATAPI image");
         }

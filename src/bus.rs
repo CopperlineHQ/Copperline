@@ -5703,6 +5703,7 @@ impl Bus {
                     crate::zorro_device::BoardDevice::A2091(_)
                         | crate::zorro_device::BoardDevice::A4091(_)
                         | crate::zorro_device::BoardDevice::IdeZorro(_)
+                        | crate::zorro_device::BoardDevice::Sf2000Sd(_)
                 )
             })
     }

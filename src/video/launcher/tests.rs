@@ -3567,6 +3567,7 @@ fn sub_pages_of_hdd_cd() {
             LauncherTab::HostDisk,
             LauncherTab::Lide,
             LauncherTab::Copperhf,
+            LauncherTab::Sf2000Sd,
             LauncherTab::BootPriority,
             LauncherTab::CreateFloppy,
         ]
@@ -4155,6 +4156,72 @@ fn copperhf_units_round_trip_with_boot_priority() {
     );
     assert_eq!(back.path(F::CopperhfUnit1), Some(Path::new("data.hdf")));
     assert_eq!(back.value_label(F::CopperhfUnit0Boot), "5");
+}
+
+/// The `[sf2000sd]` Storage sub-page carries just the ROM and card rows, no
+/// personality picker (there is only one identity) -- and, like copperhf,
+/// neither row is ever greyed: there is no board/controller to lack.
+#[test]
+fn sf2000sd_rows_are_always_visible_and_never_greyed() {
+    use LauncherField as F;
+    let s = MachineSetup::default();
+    for f in [F::Sf2000SdRom, F::Sf2000SdCard] {
+        assert!(!s.row_hidden(f), "{f:?} hidden with nothing configured");
+        assert_eq!(
+            s.disabled_reason(f),
+            None,
+            "{f:?} greyed with no board to lack"
+        );
+    }
+    let page_rows = rows(
+        LauncherTab::Sf2000Sd,
+        Default::default(),
+        Default::default(),
+        false,
+        false,
+    );
+    assert_eq!(page_rows.len(), 2);
+    assert_eq!(page_rows[0].kind, RowKind::Path);
+    assert_eq!(page_rows[1].kind, RowKind::Drive);
+}
+
+/// `[sf2000sd]`'s card and boot ROM round-trip through the config screen:
+/// the card like any other drive slot (path, volume name, boot priority),
+/// and the ROM with no bundled default or `""` sentinel to track, unlike
+/// `[lide]`'s.
+#[test]
+fn sf2000sd_card_and_rom_round_trip_with_boot_priority() {
+    use LauncherField as F;
+    let mut s = MachineSetup::default();
+    s.set_path(F::Sf2000SdCard, PathBuf::from("workbench.hdf"));
+    s.set_drive_name(F::Sf2000SdCard, "Boot".to_string());
+    s.set_drive_bootpri(F::Sf2000SdCardBoot, Some(5));
+    s.set_path(F::Sf2000SdRom, PathBuf::from("sf2000sd.rom"));
+
+    assert!(s.has_boot_priority_rows());
+    assert_eq!(s.value_label(F::Sf2000SdCardBoot), "5");
+    assert_eq!(s.disabled_reason(F::Sf2000SdCardBoot), None);
+
+    let raw = s.to_raw();
+    let card = raw.sf2000sd.card.as_ref().unwrap();
+    assert_eq!(card.path, "workbench.hdf");
+    assert_eq!(card.name.as_deref(), Some("Boot"));
+    assert_eq!(card.bootpri, Some(5));
+    assert_eq!(raw.sf2000sd.rom.as_deref(), Some("sf2000sd.rom"));
+
+    let back = MachineSetup::from_raw(&raw).unwrap();
+    assert_eq!(back.path(F::Sf2000SdCard), Some(Path::new("workbench.hdf")));
+    assert_eq!(back.drive_name(F::Sf2000SdCard), Some("Boot"));
+    assert_eq!(back.value_label(F::Sf2000SdCardBoot), "5");
+    assert_eq!(back.path(F::Sf2000SdRom), Some(Path::new("sf2000sd.rom")));
+
+    // Clearing the card drops its boot priority and name -- the same
+    // "meaningless once the image is gone" rule every drive family follows.
+    s.clear_path(F::Sf2000SdCard);
+    assert!(s.row_hidden(F::Sf2000SdCardBoot));
+    assert_eq!(s.to_raw().sf2000sd.card, None);
+    // The ROM is untouched: it is not part of the card slot.
+    assert_eq!(s.path(F::Sf2000SdRom), Some(Path::new("sf2000sd.rom")));
 }
 
 /// The Boot Priority page ranks drives with no real-hardware counterpart
@@ -5598,7 +5665,9 @@ fn a_long_boot_order_pages_and_a_short_one_does_not() {
     ] {
         s.set_path(f, PathBuf::from("copperhf.hdf"));
     }
-    assert_eq!(s.boot_priority_row_count(), 20);
+    // ...and the SF2000 SD card, one more row on the third page.
+    s.set_path(F::Sf2000SdCard, PathBuf::from("sf2000sd.img"));
+    assert_eq!(s.boot_priority_row_count(), 21);
     assert_eq!(s.boot_priority_page_count(), 3);
 
     // With every slot filled, each page draws exactly its share -- the same
@@ -5618,7 +5687,7 @@ fn a_long_boot_order_pages_and_a_short_one_does_not() {
                 .count()
         })
         .collect();
-    assert_eq!(per_page, vec![BOOTPRI_PAGE_ROWS, BOOTPRI_PAGE_ROWS, 2]);
+    assert_eq!(per_page, vec![BOOTPRI_PAGE_ROWS, BOOTPRI_PAGE_ROWS, 3]);
     for row in BOOTPRI_ROWS.iter() {
         let on = pages
             .iter()

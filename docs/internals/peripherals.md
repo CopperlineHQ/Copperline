@@ -448,6 +448,102 @@ RIDE were unaffected, since their ROM sits on the even lane, clear of any
 register. Fixed by checking the ROM lane ahead of the register-block
 dispatch in `IdeZorro::read()` (see `ide_zorro.rs`'s tests).
 
+## SF2000 accelerator Zorro II SD card controller (`sf2000sd.rs`, `sdcard.rs`)
+
+`[sf2000sd]` attaches the SF2000 accelerator's SD card controller: mfg
+`0x144A`/product 11 (the same manufacturer ID `lide` uses), a 64K Zorro II
+I/O window over an SPI-mode SD card, register-compatible with the upstream
+RTL (`sdcard.v`/`shifter.v`/`fifo.v`/`tx_cpu_buf.v`/`rx_cpu_buf.v`). Split
+across two files the way `ide_zorro.rs`/`ata.rs` are: `sf2000sd.rs` is the
+Zorro board (register file, ROM overlay, `ZorroDevice` impl), `sdcard.rs` is
+the SD-over-SPI protocol engine, wrapping the same `HardDriveImage` sector
+backend `ata.rs`/`a2091.rs` use -- an SD card image is handled exactly like
+a `[lide]`/`[copperhf]` hardfile (RDB images, bare partition hardfiles with
+a synthesized RDB, gzip-compressed images).
+
+**Register decode.** The whole 64K window mirrors one 32-byte register block
+(`off & 0x1F`), word-addressed: `$00` CLKDIV, `$02` SLAVE_SEL, `$04`
+CARD_DET, `$06` STATUS, `$08` SHIFT_CTRL (mode + receive length), `$0A`
+INTREQ, `$0C` INTENA, `$0E` INTACT, `$10`-`$1E` the TX/RX data port (byte
+access: upper lane only, matching `ide_zorro.rs`'s task-file convention).
+Full bit layout is in `sf2000sd.rs`'s module documentation.
+
+**No cycle-accurate SPI timing.** `CLKDIV` paces real SCLK bit timing on
+hardware; a polled register protocol has no need for that to behave
+correctly (`ide_zorro.rs`'s task-file registers are likewise instant rather
+than ATA-bus-timed), so it is stored/read back faithfully but never used to
+delay anything -- every SPI byte-time (`SdCard::clock_byte`) resolves
+synchronously. What *is* modelled faithfully is the FIFO backpressure
+contract driver code loops on: the RX queue is capacity-34 (32-entry FIFO +
+2-stage CPU buffer, matching the RTL); a `SHIFT_CTRL` receive request tops
+it up to capacity immediately and tracks the remainder, refilling one byte
+per drained read until exhausted, so STATUS's busy bit stays observably set
+across any request bigger than 34 bytes.
+
+**The `clock_byte` model.** Every SPI byte-time is bidirectional on the real
+bus even though `sdcard.v`'s TX/RX/BOTH shifter "mode" is a local FPGA
+buffering convenience, not a bus-level distinction: in TX mode the shifter
+still receives a byte from the card each byte-time, it just discards it
+instead of pushing it to the RX FIFO; in RX mode it still drives real clock
+edges, it just always sends `0xFF` filler. `SdCard::clock_byte` models the
+one true primitive -- advance the card's command/response state machine by
+one byte, in both directions at once -- and `Sf2000Sd` calls it once per
+byte-time regardless of which RTL mode is active, discarding the reply on a
+TX-only byte exactly as the real shifter does.
+
+**SD-over-SPI protocol.** `sdcard.rs` implements the command set verified
+against Mike Stirling's `sd.c` (`k1208-drivers`, also used by the `spisd2`
+Amiga driver): CMD0/CMD8/CMD55+ACMD41/CMD58 (the init handshake), CMD9/CMD10
+(CSD/CID -- CMD9 in particular is load-bearing: without it a driver has no
+way to learn capacity, and its bit layout was checked field-for-field
+against `sd_parse_csd`), CMD13 (status), CMD16 (accepted no-op, block length
+is always 512), CMD17/CMD24 (single-block read/write), CMD18/CMD25/CMD12
+(multi-block read/write/stop -- not an edge case: any trackdisk-style
+request wider than one sector takes this path, since `device.c` passes
+`io_Length >> 9` straight through as the sector count), ACMD23 (its result
+is never checked by the driver, so it falls through to the catch-all
+"unknown command" response harmlessly), CMD59 (accepted no-op -- CRC
+checking is never enforced, including on CMD0/CMD8's normally-mandatory
+fixed CRC bytes, a deliberately permissive choice: friendlier for driver
+bring-up than a strict card). `[[host_disk]]` passthrough is not implemented
+yet. Presented throughout as a block-addressed (SDHC-style) card via
+CMD8/ACMD41's HCS bit and CMD58's OCR CCS bit, so a real driver always
+addresses it by block number -- matching `HardDriveImage`'s own `u64` LBA
+unit directly.
+
+CMD18's block stream and CMD25's block-accepting loop are each modelled as
+their own `Activity` state in `sdcard.rs` (`StreamingRead`/`AwaitWriteToken`
+with a `multi` flag) rather than as one-shot replies: the driver interleaves
+these with an unknown number of per-block round trips before finally
+stopping (CMD12 for a read, the `0xFD` STOP_TRAN token for a write), so the
+card has to keep responding correctly for as long as the driver keeps going,
+including recognizing a CMD12 frame arriving in place of the next block's
+start token.
+
+**ROM overlay.** The RTL available for this board is a development build
+with no boot ROM wired up, so the mapping comes from the real firmware
+instead: `spisd2`'s `bootrom/bootldr.S` and `bootrom/mungerom.py` place the
+flash image on the *odd* byte lane at stride 2 -- `window[2k+1] = rom[k]`,
+the even lane floats (`0xFF`) -- exactly like `ide_zorro.rs`'s AT-Bus 2008
+personality, with a 32K image spanning the whole 64K window and no banking.
+`bootldr.S`'s relocation code confirms the stride: it computes the driver
+payload's window offset as the flash offset "times 4 (nibble-wise
+DiagArea)", one factor of 2 being `mungerom.py`'s nibble-doubling of the
+DiagArea/bootstrap portion (baked into the ROM file itself, reassembled by
+Kickstart in software) and the other this lane stride. `er_InitDiagVec` is
+`0x0001`, i.e. window offset 1 = `rom[0]`. A word read combines the two
+lanes (`0xFFxx`, ROM byte low), as AT-Bus 2008 does, so word-wide copies of
+the DiagArea see the real bytes; `peek_word` serves the same overlay to the
+debugger without side effects. Gated the same way `ide_zorro.rs`'s
+RIPPLE/RIDE personalities are: before the first write anywhere in the
+window, the odd lane reads ROM and the even lane floats; that first write
+latches the interface live, and from then on the whole window is the
+register file, with no ROM visible anywhere (unlike RIPPLE, which keeps ROM
+in part of its post-latch window). `rom` absent (or `""`) is hardware-only
+mode: registers are live immediately, no autoboot. Unlike `[lide]`'s `rom`,
+there is no bundled default -- this ROM is the SF2000 firmware author's, not
+Copperline's to ship.
+
 ## Host filesystem service (`filesys.rs`)
 
 `[[filesys]]` mounts export host directories as live AmigaDOS volumes

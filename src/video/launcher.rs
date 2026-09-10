@@ -728,6 +728,21 @@ pub struct MachineSetup {
     lide_drive_is_dir: [bool; 4],
     lide_drive_bootpri: [Option<i8>; 4],
     lide_drive_boot_off: [bool; 4],
+    /// `[sf2000sd]`: the SF2000 accelerator's Zorro II SD card controller.
+    /// One card slot -- unlike Lide/Copperhf's arrays, so these are scalar
+    /// fields shaped like `ide_master`/`ide_slave` above.
+    sf2000sd_card: Option<PathBuf>,
+    sf2000sd_card_name: Option<String>,
+    sf2000sd_card_fs: crate::diskimage::FileSystem,
+    /// Paralleling `ide_master_is_dir`.
+    sf2000sd_card_is_dir: bool,
+    sf2000sd_card_bootpri: Option<i8>,
+    sf2000sd_card_boot_off: bool,
+    /// No bundled default and no `""` opt-out sentinel to track (unlike
+    /// `lide_rom`/`lide_rom_disabled`): the SF2000's boot ROM is the
+    /// firmware author's own, not Copperline's to ship, so `None` here
+    /// means exactly "hardware-only mode", nothing more to carry.
+    sf2000sd_rom: Option<PathBuf>,
     // Host FS mounts. The GUI edits the first FILESYS_GUI_SLOTS entries
     // (directory + optional volume name + boot priority, -128 = never boot);
     // any further hand-written [[filesys]] entries are carried in
@@ -1316,7 +1331,11 @@ impl MachineSetup {
             | F::CopperhfUnit3Boot
             | F::CopperhfUnit4Boot
             | F::CopperhfUnit5Boot
-            | F::CopperhfUnit6Boot => Self::boot_field_drive(field)
+            | F::CopperhfUnit6Boot
+            // The SF2000 SD card controller is likewise always fitted once
+            // configured (no board/personality to pick), so its boot row
+            // hides only when the card slot is empty, the same terms.
+            | F::Sf2000SdCardBoot => Self::boot_field_drive(field)
                 .and_then(|drive| self.drive_holds(drive))
                 .is_none(),
             // Nothing to configure without a board fitted.
@@ -1440,7 +1459,8 @@ impl MachineSetup {
             | F::CopperhfUnit3Boot
             | F::CopperhfUnit4Boot
             | F::CopperhfUnit5Boot
-            | F::CopperhfUnit6Boot => {
+            | F::CopperhfUnit6Boot
+            | F::Sf2000SdCardBoot => {
                 let drive = Self::boot_field_drive(field).expect("boot field");
                 match self.drive_holds(drive) {
                     None => Some("No drive"),
@@ -1589,6 +1609,8 @@ impl MachineSetup {
             F::LideDrive1 => self.lide_drives[1].as_deref(),
             F::LideDrive2 => self.lide_drives[2].as_deref(),
             F::LideDrive3 => self.lide_drives[3].as_deref(),
+            F::Sf2000SdRom => self.sf2000sd_rom.as_deref(),
+            F::Sf2000SdCard => self.sf2000sd_card.as_deref(),
             F::Filesys0Dir => self.filesys_dirs[0].as_deref(),
             F::Filesys1Dir => self.filesys_dirs[1].as_deref(),
             F::Filesys2Dir => self.filesys_dirs[2].as_deref(),
@@ -1775,6 +1797,7 @@ impl MachineSetup {
                 | F::LideDrive1
                 | F::LideDrive2
                 | F::LideDrive3
+                | F::Sf2000SdCard
                 | F::Filesys0Dir
                 | F::Filesys1Dir
                 | F::Filesys2Dir
@@ -1805,6 +1828,7 @@ impl MachineSetup {
             F::LideDrive1 => &self.lide_drive_names[1],
             F::LideDrive2 => &self.lide_drive_names[2],
             F::LideDrive3 => &self.lide_drive_names[3],
+            F::Sf2000SdCard => &self.sf2000sd_card_name,
             F::Filesys0Dir => &self.filesys_names[0],
             F::Filesys1Dir => &self.filesys_names[1],
             F::Filesys2Dir => &self.filesys_names[2],
@@ -1840,6 +1864,7 @@ impl MachineSetup {
             F::LideDrive1 => self.lide_drive_fs[1],
             F::LideDrive2 => self.lide_drive_fs[2],
             F::LideDrive3 => self.lide_drive_fs[3],
+            F::Sf2000SdCard => self.sf2000sd_card_fs,
             _ => crate::diskimage::FileSystem::FFS,
         }
     }
@@ -1871,6 +1896,7 @@ impl MachineSetup {
             F::LideDrive1 => self.lide_drive_is_dir[1],
             F::LideDrive2 => self.lide_drive_is_dir[2],
             F::LideDrive3 => self.lide_drive_is_dir[3],
+            F::Sf2000SdCard => self.sf2000sd_card_is_dir,
             _ => false,
         }
     }
@@ -1902,6 +1928,7 @@ impl MachineSetup {
             F::LideDrive1 => &mut self.lide_drive_is_dir[1],
             F::LideDrive2 => &mut self.lide_drive_is_dir[2],
             F::LideDrive3 => &mut self.lide_drive_is_dir[3],
+            F::Sf2000SdCard => &mut self.sf2000sd_card_is_dir,
             _ => return,
         };
         *slot = is_dir;
@@ -1930,6 +1957,7 @@ impl MachineSetup {
             F::LideDrive1 => &mut self.lide_drive_fs[1],
             F::LideDrive2 => &mut self.lide_drive_fs[2],
             F::LideDrive3 => &mut self.lide_drive_fs[3],
+            F::Sf2000SdCard => &mut self.sf2000sd_card_fs,
             _ => return,
         };
         *slot = fs;
@@ -1975,6 +2003,7 @@ impl MachineSetup {
             F::LideDrive1 => &mut self.lide_drive_names[1],
             F::LideDrive2 => &mut self.lide_drive_names[2],
             F::LideDrive3 => &mut self.lide_drive_names[3],
+            F::Sf2000SdCard => &mut self.sf2000sd_card_name,
             F::Filesys0Dir => &mut self.filesys_names[0],
             F::Filesys1Dir => &mut self.filesys_names[1],
             F::Filesys2Dir => &mut self.filesys_names[2],
@@ -2109,6 +2138,8 @@ impl MachineSetup {
             F::LideDrive1 => self.lide_drives[1] = Some(path),
             F::LideDrive2 => self.lide_drives[2] = Some(path),
             F::LideDrive3 => self.lide_drives[3] = Some(path),
+            F::Sf2000SdRom => self.sf2000sd_rom = Some(path),
+            F::Sf2000SdCard => self.sf2000sd_card = Some(path),
             F::CdImage => self.cd_image = Some(path),
             F::Cd32Nvram => self.cd32_nvram = Some(path),
             F::ParallelOutput => self.parallel_output = Some(path),
@@ -2195,6 +2226,8 @@ impl MachineSetup {
             F::LideDrive1 => self.lide_drives[1] = None,
             F::LideDrive2 => self.lide_drives[2] = None,
             F::LideDrive3 => self.lide_drives[3] = None,
+            F::Sf2000SdRom => self.sf2000sd_rom = None,
+            F::Sf2000SdCard => self.sf2000sd_card = None,
             F::CdImage => self.cd_image = None,
             F::Cd32Nvram => self.cd32_nvram = None,
             F::ParallelOutput => self.parallel_output = None,
@@ -2238,6 +2271,10 @@ impl MachineSetup {
             F::IdeSlave | F::IdeSlaveBoot => {
                 self.ide_slave_bootpri = None;
                 self.ide_slave_boot_off = false;
+            }
+            F::Sf2000SdCard | F::Sf2000SdCardBoot => {
+                self.sf2000sd_card_bootpri = None;
+                self.sf2000sd_card_boot_off = false;
             }
             _ => {
                 if let Some(i) = scsi_boot_index(field) {
@@ -2289,6 +2326,7 @@ impl MachineSetup {
             F::CopperhfUnit4Boot => F::CopperhfUnit4,
             F::CopperhfUnit5Boot => F::CopperhfUnit5,
             F::CopperhfUnit6Boot => F::CopperhfUnit6,
+            F::Sf2000SdCardBoot => F::Sf2000SdCard,
             _ => return None,
         })
     }
@@ -2308,6 +2346,7 @@ impl MachineSetup {
             F::ScsiUnit4Boot => self.scsi_unit_bootpri[4],
             F::ScsiUnit5Boot => self.scsi_unit_bootpri[5],
             F::ScsiUnit6Boot => self.scsi_unit_bootpri[6],
+            F::Sf2000SdCardBoot => self.sf2000sd_card_bootpri,
             _ => {
                 if let Some(i) = lide_drive_index(field) {
                     self.lide_drive_bootpri[i]
@@ -2331,6 +2370,7 @@ impl MachineSetup {
             F::ScsiUnit4Boot => self.scsi_unit_bootpri[4] = value,
             F::ScsiUnit5Boot => self.scsi_unit_bootpri[5] = value,
             F::ScsiUnit6Boot => self.scsi_unit_bootpri[6] = value,
+            F::Sf2000SdCardBoot => self.sf2000sd_card_bootpri = value,
             _ => {
                 if let Some(i) = lide_drive_index(field) {
                     self.lide_drive_bootpri[i] = value;
@@ -2457,6 +2497,7 @@ impl MachineSetup {
         match field {
             F::IdeMasterBoot => self.ide_master_boot_off,
             F::IdeSlaveBoot => self.ide_slave_boot_off,
+            F::Sf2000SdCardBoot => self.sf2000sd_card_boot_off,
             _ => {
                 scsi_boot_index(field).is_some_and(|i| self.scsi_unit_boot_off[i])
                     || lide_drive_index(field).is_some_and(|i| self.lide_drive_boot_off[i])
@@ -2489,6 +2530,7 @@ impl MachineSetup {
         match field {
             F::IdeMasterBoot => self.ide_master_boot_off = off,
             F::IdeSlaveBoot => self.ide_slave_boot_off = off,
+            F::Sf2000SdCardBoot => self.sf2000sd_card_boot_off = off,
             _ => {
                 if let Some(i) = scsi_boot_index(field) {
                     self.scsi_unit_boot_off[i] = off;
@@ -5806,6 +5848,7 @@ fn rows_contains_kind(field: LauncherField, kind: RowKind) -> bool {
         &CD_ROWS,
         &LIDE_ROWS,
         &COPPERHF_ROWS,
+        &SF2000SD_ROWS,
         &INPUT_ROWS,
         &VIDEO_ROWS,
         &AUDIO_ROWS,
@@ -5988,6 +6031,7 @@ fn drive_boot_field(drive: LauncherField) -> Option<LauncherField> {
         F::CopperhfUnit4 => F::CopperhfUnit4Boot,
         F::CopperhfUnit5 => F::CopperhfUnit5Boot,
         F::CopperhfUnit6 => F::CopperhfUnit6Boot,
+        F::Sf2000SdCard => F::Sf2000SdCardBoot,
         _ => return None,
     })
 }

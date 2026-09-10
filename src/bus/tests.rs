@@ -12411,6 +12411,25 @@ fn front_panel_hdd_led_present_for_zorro_ide() {
 }
 
 #[test]
+fn front_panel_hdd_led_present_for_sf2000sd() {
+    let mut bus = empty_bus();
+    assert_eq!(bus.front_panel_status().hdd_led, None);
+
+    // The SF2000 SD card controller is a hard-disk controller too, so its
+    // presence alone gives the machine an HDD LED -- even hardware-only
+    // (no boot ROM, no card) like the Zorro IDE board above.
+    let board = crate::sf2000sd::Sf2000Sd::new(Vec::new(), None).unwrap();
+    bus.attach_devices(vec![crate::zorro_device::BoardDevice::Sf2000Sd(board)]);
+    assert_eq!(bus.front_panel_status().hdd_led, Some(false));
+
+    bus.note_hdd_activity();
+    assert_eq!(bus.front_panel_status().hdd_led, Some(true));
+
+    bus.emulated_cck += u64::from(PAULA_CLOCK_HZ);
+    assert_eq!(bus.front_panel_status().hdd_led, Some(false));
+}
+
+#[test]
 fn front_panel_reports_host_output_volume() {
     let mut bus = empty_bus();
 

@@ -356,7 +356,8 @@ impl MachineSetup {
             | F::CopperhfUnit3Boot
             | F::CopperhfUnit4Boot
             | F::CopperhfUnit5Boot
-            | F::CopperhfUnit6Boot => drive_bootpri_label(self.effective_bootpri(field)),
+            | F::CopperhfUnit6Boot
+            | F::Sf2000SdCardBoot => drive_bootpri_label(self.effective_bootpri(field)),
             F::Filesys0ReadOnly
             | F::Filesys1ReadOnly
             | F::Filesys2ReadOnly
