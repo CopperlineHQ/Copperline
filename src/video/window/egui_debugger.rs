@@ -4,7 +4,7 @@
 //! commands leave as actions, after egui's (potentially repeated) layout pass.
 //! The Amiga display and egui share the main window and its GPU surface.
 
-use super::{ui, App, KeyCode, ToolPanelKind, UiControl};
+use super::{analyzer_field_rows, ui, App, KeyCode, ToolPanelKind, UiControl};
 use egui::{Color32, FontId, RichText, ScrollArea, Stroke};
 use pixels::wgpu;
 use std::collections::HashMap;
@@ -14,6 +14,13 @@ use winit::{event::WindowEvent, window::Window};
 const BLUE: Color32 = Color32::from_rgb(35, 75, 164);
 const INK: Color32 = Color32::from_rgb(28, 32, 40);
 const PAPER: Color32 = Color32::from_rgb(238, 240, 242);
+/// An inspector that is not open: available to click, holding nothing.
+const MUTED: Color32 = Color32::from_rgb(139, 146, 158);
+/// An inspector that is open but not the one on screen.
+const TAB_OPEN: Color32 = Color32::from_rgb(214, 219, 228);
+/// Live capture, on paper and on the selected tab's blue.
+const LIVE_ON_PAPER: Color32 = Color32::from_rgb(24, 138, 72);
+const LIVE_ON_BLUE: Color32 = Color32::from_rgb(126, 224, 160);
 
 #[derive(Debug, PartialEq)]
 pub(super) enum Action {
@@ -35,6 +42,18 @@ pub(super) enum Action {
     /// Write the Memory tab's staged byte edits, (address, value) each.
     MemoryCommit(Vec<(u32, u8)>),
     IoMapScroll(i32),
+}
+
+/// What an inspector tab has to say about itself. `open` is the state that
+/// was invisible before: an inspector open behind the current one still
+/// holds its scrollback, its selections and its capture, and drawing it the
+/// same as one that was never opened is what made closing look like a no-op.
+/// `capturing` reports whether that capture is actually armed on the machine
+/// in front of you.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub(super) struct ToolTabState {
+    pub(super) open: bool,
+    pub(super) capturing: bool,
 }
 
 enum Content<'a> {
@@ -64,6 +83,8 @@ struct Layout {
     workspace: bool,
     guest_input: bool,
     display_rect: Option<egui::Rect>,
+    /// Per-inspector tab state, indexed by `ToolPanelKind`.
+    tools: [ToolTabState; 3],
 }
 
 impl DebuggerUi {
@@ -213,15 +234,10 @@ fn run_content_frame(
                 .frame(egui::Frame::new().fill(BLUE).inner_margin(8))
                 .show(root, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("Copperline · Debug")
-                                .strong()
-                                .color(Color32::WHITE),
-                        );
+                        ui.label(RichText::new("Copperline").strong().color(Color32::WHITE));
+                        ui.add_space(6.0);
+                        mode_switch(ui, &mut actions);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("Return to Play").clicked() {
-                                actions.push(Action::CloseWorkspace);
-                            }
                             ui.add(
                                 egui::Label::new(RichText::new(status).color(Color32::WHITE))
                                     .truncate(),
@@ -248,30 +264,21 @@ fn run_content_frame(
         }
         egui::Panel::top("workspace_tools").show(root, |ui| {
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
                 for (label, kind) in [
                     ("Debugger", ToolPanelKind::Debugger),
                     ("Frame Analyzer", ToolPanelKind::FrameAnalyzer),
                     ("Console", ToolPanelKind::Console),
                 ] {
-                    if ui
-                        .selectable_label(
-                            selected == kind,
-                            RichText::new(label).strong().color(if selected == kind {
-                                Color32::WHITE
-                            } else {
-                                INK
-                            }),
-                        )
-                        .clicked()
-                    {
-                        actions.push(Action::SelectTool(kind));
-                    }
+                    tool_tab(
+                        ui,
+                        label,
+                        kind,
+                        layout.tools[kind as usize],
+                        selected == kind,
+                        &mut actions,
+                    );
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("Close inspector").clicked() {
-                        actions.push(Action::CloseTool(selected));
-                    }
-                });
             });
         });
         match &mut content {
@@ -372,6 +379,192 @@ fn configure_style(context: &egui::Context) {
     context.set_style_of(egui::Theme::Light, style);
 }
 
+/// The Play/Debug switch. A segmented control rather than a button that
+/// says "Return to Play": leaving Debug is a change of view, not a
+/// dismissal -- the inspectors stay open and keep capturing -- and a
+/// two-state switch is the shape people already read that way.
+fn mode_switch(ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+    egui::Frame::new()
+        .stroke(Stroke::new(1.0, Color32::from_rgb(120, 150, 210)))
+        .inner_margin(2)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                let play = mode_segment(ui, "Play", false).on_hover_text(
+                    "Full-size display. The inspectors stay open and keep capturing.",
+                );
+                if play.clicked() {
+                    actions.push(Action::CloseWorkspace);
+                }
+                mode_segment(ui, "Debug", true);
+            });
+        });
+}
+
+/// One half of the mode switch: the active side is filled, the other reads
+/// as the place you can go.
+fn mode_segment(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response {
+    let text = RichText::new(label)
+        .strong()
+        .color(if active { BLUE } else { Color32::WHITE });
+    let galley = ui.painter().layout_no_wrap(
+        label.to_string(),
+        egui::TextStyle::Button.resolve(ui.style()),
+        Color32::WHITE,
+    );
+    let size = galley.size() + egui::vec2(20.0, 8.0);
+    let rect = ui.allocate_space(size).1;
+    let response = ui.interact(
+        rect,
+        egui::Id::new(("mode_segment", label)),
+        egui::Sense::click(),
+    );
+    if active {
+        ui.painter().rect_filled(rect, 0, Color32::WHITE);
+    } else if response.hovered() {
+        ui.painter()
+            .rect_filled(rect, 0, Color32::from_rgb(58, 98, 186));
+    }
+    ui.put(rect, egui::Label::new(text).selectable(false));
+    response
+}
+
+/// One inspector tab, drawn in whichever of its three states it is in: not
+/// open (dim, no close box, click to open), open behind the inspector on
+/// screen (its state and its capture are still there), or open and shown.
+/// The close box lives on the tab because that is where every other tabbed
+/// application puts it, and because a close control at the far end of the
+/// strip never says which inspector it means.
+fn tool_tab(
+    ui: &mut egui::Ui,
+    label: &str,
+    kind: ToolPanelKind,
+    state: ToolTabState,
+    selected: bool,
+    actions: &mut Vec<Action>,
+) {
+    // The inspector on screen is open by definition, whatever was pushed.
+    let open = state.open || selected;
+    let (fill, ink) = if selected {
+        (BLUE, Color32::WHITE)
+    } else if open {
+        (TAB_OPEN, INK)
+    } else {
+        (Color32::TRANSPARENT, MUTED)
+    };
+    let tab = egui::Frame::new()
+        .fill(fill)
+        .inner_margin(egui::Margin::symmetric(9, 5))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if open {
+                capture_dot(ui, state.capturing, selected, ink);
+            }
+            ui.label(RichText::new(label).strong().color(ink));
+            // The close box is laid out here but interacted with after the
+            // tab body, so the smaller target wins where they overlap.
+            open.then(|| ui.allocate_space(egui::vec2(14.0, 14.0)).1)
+        });
+    let body = ui.interact(tab.response.rect, tool_tab_id(kind), egui::Sense::click());
+    let close = tab
+        .inner
+        .map(|rect| close_box(ui, rect, ink, tool_tab_close_id(kind)));
+    if close.is_some_and(|close| close.clicked()) {
+        actions.push(Action::CloseTool(kind));
+    } else if body.clicked() {
+        actions.push(Action::SelectTool(kind));
+    }
+    if !open {
+        body.on_hover_text("Not open. Click to open it.");
+    }
+}
+
+/// Stable ids for the tab and its close box, so both are addressable.
+fn tool_tab_id(kind: ToolPanelKind) -> egui::Id {
+    egui::Id::new(("tool_tab", kind as usize))
+}
+
+fn tool_tab_close_id(kind: ToolPanelKind) -> egui::Id {
+    egui::Id::new(("tool_tab_close", kind as usize))
+}
+
+/// Whether an open inspector's capture is armed on the machine in front of
+/// you: filled while it is recording, hollow while it is merely open. It is
+/// the only thing that reports the cost an open inspector is still paying
+/// once you are back in Play.
+fn capture_dot(ui: &mut egui::Ui, live: bool, selected: bool, ink: Color32) {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(9.0, 9.0), egui::Sense::hover());
+    let centre = rect.center();
+    if live {
+        let colour = if selected {
+            LIVE_ON_BLUE
+        } else {
+            LIVE_ON_PAPER
+        };
+        ui.painter().circle_filled(centre, 3.5, colour);
+    } else {
+        ui.painter()
+            .circle_stroke(centre, 3.0, Stroke::new(1.2, ink));
+    }
+    response.on_hover_text(if live {
+        "Capturing this machine"
+    } else {
+        "Open, not capturing"
+    });
+}
+
+/// One tab within an inspector. Underlined rather than filled, so the two
+/// levels of the header cannot be mistaken for each other: the strip above
+/// holds inspectors, which open and close and hold state of their own, while
+/// these only change what the open inspector is showing.
+fn sub_tab(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
+    let galley = ui.painter().layout_no_wrap(
+        label.to_string(),
+        egui::TextStyle::Button.resolve(ui.style()),
+        INK,
+    );
+    let size = galley.size() + egui::vec2(14.0, 8.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if response.hovered() && !selected {
+        ui.painter().rect_filled(rect, 0, TAB_OPEN);
+    }
+    let text = RichText::new(label).color(INK);
+    ui.put(
+        rect,
+        egui::Label::new(if selected { text.strong() } else { text }).selectable(false),
+    );
+    if selected {
+        let y = rect.bottom() - 2.0;
+        ui.painter().line_segment(
+            [
+                egui::pos2(rect.left() + 4.0, y),
+                egui::pos2(rect.right() - 4.0, y),
+            ],
+            Stroke::new(2.0, BLUE),
+        );
+    }
+    response
+}
+
+/// The tab's close box. Drawn rather than typed: the cross is two strokes,
+/// which keeps the source ASCII and scales with the tab. It is registered
+/// after the tab body so a click on the cross closes the inspector rather
+/// than merely selecting it.
+fn close_box(ui: &mut egui::Ui, rect: egui::Rect, ink: Color32, id: egui::Id) -> egui::Response {
+    let response = ui.interact(rect, id, egui::Sense::click());
+    if response.hovered() {
+        ui.painter()
+            .rect_filled(rect, 0, Color32::from_rgba_unmultiplied(128, 128, 128, 64));
+    }
+    let cross = rect.shrink(4.0);
+    let stroke = Stroke::new(1.4, ink);
+    ui.painter()
+        .line_segment([cross.left_top(), cross.right_bottom()], stroke);
+    ui.painter()
+        .line_segment([cross.right_top(), cross.left_bottom()], stroke);
+    response.on_hover_text("Close this inspector. The machine keeps running.")
+}
+
 fn button(
     ui: &mut egui::Ui,
     actions: &mut Vec<Action>,
@@ -411,18 +604,9 @@ impl Layout {
         }
         egui::Panel::top("debugger_tabs").show(root, |ui| {
             ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
                 for tab in ui::DEBUG_TABS {
-                    if ui
-                        .selectable_label(
-                            panel.tab == tab,
-                            RichText::new(ui::debug_tab_label(tab)).color(if panel.tab == tab {
-                                Color32::WHITE
-                            } else {
-                                INK
-                            }),
-                        )
-                        .clicked()
-                    {
+                    if sub_tab(ui, ui::debug_tab_label(tab), panel.tab == tab).clicked() {
                         actions.push(Action::Control(UiControl::DebugTab(tab)));
                     }
                 }
@@ -1240,6 +1424,26 @@ fn shortcuts(
 }
 
 impl App {
+    /// What each inspector tab has to draw. Everything an open inspector
+    /// captures with is armed on the machine, not on the panel, so the
+    /// capture flag is read from the machine in front of the user rather
+    /// than assumed from the panel being open.
+    pub(super) fn egui_tool_tab_states(&self) -> [ToolTabState; 3] {
+        let mut states = [ToolTabState::default(); 3];
+        for kind in ToolPanelKind::ALL {
+            states[kind as usize] = ToolTabState {
+                open: self.tool_panel_is_open(kind),
+                capturing: match kind {
+                    ToolPanelKind::FrameAnalyzer => self.emu.bus().frame_analyzer_full(),
+                    ToolPanelKind::Debugger | ToolPanelKind::Console => {
+                        self.emu.machine.ui_pc_history_enabled()
+                    }
+                },
+            };
+        }
+        states
+    }
+
     pub(super) fn egui_workspace_open(&self) -> bool {
         self.debugger_panel.is_some()
             || self.frame_analyzer_panel.is_some()

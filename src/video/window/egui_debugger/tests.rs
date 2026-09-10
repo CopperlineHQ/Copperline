@@ -1277,7 +1277,10 @@ fn render_console_preview() {
     let context = egui::Context::default();
     configure_style(&context);
     context.set_pixels_per_point(2.0);
-    let mut layout = Layout::default();
+    let mut layout = Layout {
+        tools: app.egui_tool_tab_states(),
+        ..Default::default()
+    };
     let mut offscreen = Offscreen::new(gpu.device(), 2200, 1520, 2.0);
     for _ in 0..3 {
         let (output, actions) = run_content_frame(
@@ -1632,7 +1635,10 @@ fn render_debugger_previews() {
     app.open_debugger();
     let context = egui::Context::default();
     configure_style(&context);
-    let mut layout = Layout::default();
+    let mut layout = Layout {
+        tools: app.egui_tool_tab_states(),
+        ..Default::default()
+    };
     let mut panel = ui::DebuggerPanel::new();
     let mut offscreen = Offscreen::new(gpu.device(), 2200, 1520, 2.0);
     context.set_pixels_per_point(2.0);
@@ -1665,7 +1671,10 @@ fn render_analyzer_previews() {
     let context = egui::Context::default();
     configure_style(&context);
     context.set_pixels_per_point(2.0);
-    let mut layout = Layout::default();
+    let mut layout = Layout {
+        tools: app.egui_tool_tab_states(),
+        ..Default::default()
+    };
     let mut offscreen = Offscreen::new(gpu.device(), 2200, 1520, 2.0);
     for tab in ui::ANALYZER_TABS {
         app.frame_analyzer_set_tab(tab);
@@ -1769,6 +1778,187 @@ fn benchmark_debugger_repaint() {
     egui_times.sort_by(f64::total_cmp);
     eprintln!("CPU repaint host submission, 200 alternating pairs, 2x DPI: classic median {:.3} ms, p95 {:.3} ms; egui median {:.3} ms, p95 {:.3} ms",
         classic_times[100], classic_times[190], egui_times[100], egui_times[190]);
+}
+
+/// The tab strip has to tell three states apart, because two of them were
+/// drawn alike before: an inspector open behind the one on screen still
+/// holds its state and its capture, and looked exactly like one that had
+/// never been opened. `capturing` is read from the machine, not assumed
+/// from the panel, so an inspector that is open but no longer recording
+/// (its machine was replaced under it) says so.
+#[test]
+fn the_tab_strip_reports_open_and_capturing_per_inspector() {
+    let mut app = test_app();
+    let closed = app.egui_tool_tab_states();
+    assert!(
+        closed.iter().all(|state| !state.open && !state.capturing),
+        "nothing is open on a fresh machine"
+    );
+
+    app.open_frame_analyzer();
+    app.open_debugger();
+    let states = app.egui_tool_tab_states();
+    assert!(states[ToolPanelKind::Debugger as usize].open);
+    assert!(states[ToolPanelKind::Debugger as usize].capturing);
+    assert!(states[ToolPanelKind::FrameAnalyzer as usize].open);
+    assert!(states[ToolPanelKind::FrameAnalyzer as usize].capturing);
+    assert!(
+        !states[ToolPanelKind::Console as usize].open,
+        "the console was never opened"
+    );
+
+    // Open but not recording: the state the dot exists to report.
+    app.emu.bus_mut().set_frame_analyzer_enabled(false);
+    let states = app.egui_tool_tab_states();
+    assert!(states[ToolPanelKind::FrameAnalyzer as usize].open);
+    assert!(!states[ToolPanelKind::FrameAnalyzer as usize].capturing);
+}
+
+/// The close box sits on the tab, so it closes the inspector it is drawn
+/// on -- including one open behind the inspector on screen, which the old
+/// strip-level button could not reach at all: it only ever closed the
+/// selected one.
+#[test]
+fn a_background_tabs_close_box_closes_that_inspector() {
+    let mut app = test_app();
+    app.open_console();
+    app.open_debugger();
+    let size = [1100.0, 760.0];
+    let context = egui::Context::default();
+    configure_style(&context);
+    let mut layout = Layout {
+        workspace: true,
+        tools: app.egui_tool_tab_states(),
+        ..Default::default()
+    };
+    let mut panel = app.debugger_panel.clone().unwrap();
+    let view = app.build_debugger_view_with_clipping(&panel, false);
+    let _ = run_frame(
+        &context,
+        &mut layout,
+        input(size, vec![]),
+        &mut panel,
+        &view,
+    );
+
+    let actions = click_widget(
+        &context,
+        &mut layout,
+        &mut panel,
+        &view,
+        size,
+        tool_tab_close_id(ToolPanelKind::Console),
+    );
+    assert_eq!(
+        actions,
+        vec![Action::CloseTool(ToolPanelKind::Console)],
+        "the cross closes its own tab, not the selected one, and does not \
+         also select it"
+    );
+
+    // The body of the same tab selects it instead.
+    let actions = click_widget(
+        &context,
+        &mut layout,
+        &mut panel,
+        &view,
+        size,
+        tool_tab_id(ToolPanelKind::Console),
+    );
+    assert_eq!(actions, vec![Action::SelectTool(ToolPanelKind::Console)]);
+}
+
+/// A closed inspector has no close box -- there is nothing to close -- and
+/// its tab opens it.
+#[test]
+fn a_closed_tab_has_no_close_box_and_opens_on_click() {
+    let mut app = test_app();
+    app.open_debugger();
+    let size = [1100.0, 760.0];
+    let context = egui::Context::default();
+    configure_style(&context);
+    let mut layout = Layout {
+        workspace: true,
+        tools: app.egui_tool_tab_states(),
+        ..Default::default()
+    };
+    let mut panel = app.debugger_panel.clone().unwrap();
+    let view = app.build_debugger_view_with_clipping(&panel, false);
+    let _ = run_frame(
+        &context,
+        &mut layout,
+        input(size, vec![]),
+        &mut panel,
+        &view,
+    );
+
+    assert!(
+        context
+            .read_response(tool_tab_close_id(ToolPanelKind::FrameAnalyzer))
+            .is_none(),
+        "a closed inspector draws no close box"
+    );
+    let actions = click_widget(
+        &context,
+        &mut layout,
+        &mut panel,
+        &view,
+        size,
+        tool_tab_id(ToolPanelKind::FrameAnalyzer),
+    );
+    assert_eq!(
+        actions,
+        vec![Action::SelectTool(ToolPanelKind::FrameAnalyzer)]
+    );
+}
+
+/// The Play half of the mode switch leaves the Debug layout, which is what
+/// the "Return to Play" button did. Presenting it as a two-state switch is
+/// the whole point: it changes the view and keeps the inspectors, and a
+/// switch reads that way where a button did not.
+#[test]
+fn the_mode_switch_returns_to_play_without_closing_anything() {
+    let mut app = test_app();
+    app.open_debugger();
+    let size = [1100.0, 760.0];
+    let context = egui::Context::default();
+    configure_style(&context);
+    let mut layout = Layout {
+        workspace: true,
+        tools: app.egui_tool_tab_states(),
+        ..Default::default()
+    };
+    let mut panel = app.debugger_panel.clone().unwrap();
+    let view = app.build_debugger_view_with_clipping(&panel, false);
+    let _ = run_frame(
+        &context,
+        &mut layout,
+        input(size, vec![]),
+        &mut panel,
+        &view,
+    );
+
+    let actions = click_widget(
+        &context,
+        &mut layout,
+        &mut panel,
+        &view,
+        size,
+        egui::Id::new(("mode_segment", "Play")),
+    );
+    assert_eq!(actions, vec![Action::CloseWorkspace]);
+    for action in actions {
+        app.apply_egui_debugger_action(action);
+    }
+    assert!(!app.debug_layout_active, "the layout went back to Play");
+    assert!(
+        app.debugger_panel.is_some(),
+        "the inspector is still open behind it"
+    );
+    assert!(
+        app.emu.machine.ui_pc_history_enabled(),
+        "and still capturing"
+    );
 }
 
 fn close_all_inspectors(app: &mut App) {
@@ -2027,4 +2217,58 @@ fn debug_viewport_uses_the_same_pixel_rect_for_picture_and_input() {
                 .is_none());
         }
     }
+}
+
+/// An interlaced signal alternates a long field and a short field one line
+/// shorter (PAL 313/312). The captured trace reports the field it actually
+/// took, so laying the beam diagram out against it resized the pane on every
+/// frame -- the diagram grew and shrank, and everything below it moved with
+/// it -- and moved the row a held pointer read. Presentation goes against the
+/// long field instead, and only the row is clamped to the field captured.
+#[test]
+fn alternating_interlace_fields_do_not_resize_the_beam_diagram() {
+    assert_eq!(
+        analyzer_field_rows(312),
+        analyzer_field_rows(313),
+        "both fields are laid out against the long one"
+    );
+
+    let mut app = analyzer_app();
+    app.frame_analyzer_set_tab(ui::AnalyzerTab::Beam);
+    let context = egui::Context::default();
+    configure_style(&context);
+    let mut layout = Layout {
+        workspace: true,
+        tools: app.egui_tool_tab_states(),
+        ..Default::default()
+    };
+    let base = app.frame_analyzer_panel.clone().unwrap();
+    // A window width that leaves the diagram's height off its clamps, which
+    // is where following the field length showed.
+    let size = [1400.0, 760.0];
+    let mut sizes = Vec::new();
+    for rows in [313usize, 312, 313] {
+        let mut panel = base.clone();
+        let mut view = app.build_frame_analyzer_view(&panel);
+        view.trace.as_mut().expect("a captured frame").rows = rows;
+        for _ in 0..3 {
+            let _ = run_content_frame(
+                &context,
+                &mut layout,
+                input(size, vec![]),
+                Content::Analyzer(&mut panel, &view),
+            );
+        }
+        sizes.push(
+            context
+                .read_response(egui::Id::new("analyzer_beam_pick"))
+                .expect("the beam diagram is laid out")
+                .rect
+                .size(),
+        );
+    }
+    assert!(
+        sizes.iter().all(|size| *size == sizes[0]),
+        "the diagram keeps its size as the fields alternate, got {sizes:?}"
+    );
 }

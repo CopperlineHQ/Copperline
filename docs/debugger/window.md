@@ -6,16 +6,18 @@ first inspector pauses emulation; **Run** resumes it.
 
 The Amiga display sits beside the debugger, Frame Analyzer, and [Console](console).
 Drag the divider to give either side more space. The display retains its scaling,
-CRT effects, and RTG support. Select an inspector above its tabs; each retains
+CRT effects, and RTG support. Select an inspector from the tab strip; each retains
 its state while another is visible. Opening another inspector preserves the
 current run/pause state. Inspection reads do not acknowledge hardware registers
 or consume emulated bus cycles. Stepping, register edits, and memory writes
 change the machine as requested.
 
-**Return to Play** hides the inspectors and restores the previous window size.
-Their selections, captures, and command history remain available when you
-return to Debug. Switching layouts keeps the current run/pause state. Closing
-the main window exits Copperline.
+The **Play / Debug** switch in the title bar changes which layout the window
+shows. **Play** restores the previous window size and hides the inspectors
+without closing them: their selections, captures, and command history remain
+available when you return to Debug, and anything they are capturing keeps
+recording meanwhile. Switching layouts keeps the current run/pause state.
+Closing the main window exits Copperline.
 
 Click the display to give the Amiga keyboard and mouse input. `Cmd+G` / `Alt+G`
 returns input to the debugger. While the debugger owns input, typing and
@@ -52,12 +54,31 @@ has a Goto address box, Find, Save, Writer, Bits, Poke, and in-place editing
 of the dump; the other tabs retain their layer toggles, audio mutes,
 breakpoints, and waveform controls. Scrollbars expose
 content that does not fit the window. Transport keyboard shortcuts work while
-not editing text. **Close inspector** and the controller's back button close
-the selected inspector; the remaining inspectors stay available in the shared
-workspace. Closing the last inspector returns to Play and restores its saved
-execution state; an explicit Run/Pause choice takes precedence.
-`Esc` leaves a text field first. Outside a text field it returns to Play,
-retaining the inspectors.
+not editing text.
+
+Each inspector's tab reports what it is doing, so an inspector working in the
+background can be told from one that was never opened:
+
+| Tab | Meaning |
+|---|---|
+| Dimmed, no dot | Not open. Click it to open that inspector. |
+| Filled, with a dot and a close box | Open. Its state and its capture are there whether or not it is the inspector on screen. |
+| Blue | Open and on screen. |
+
+The dot is filled while that inspector's capture is armed on the machine in
+front of you, and hollow while it is merely open: showing the state it last
+collected rather than collecting more. An inspector goes hollow when something
+else takes its capture away, such as a profile run over the
+[control protocol](control.md) finishing with the arming it adopted from the
+pane.
+
+The close box on a tab closes that inspector, as does the controller's back
+button for the selected one; the remaining inspectors stay available in the
+shared workspace, and the machine keeps running. Closing an inspector releases
+what it was capturing and restores the execution state from before it was
+opened; an explicit Run/Pause choice takes precedence. Closing the last one
+returns to Play. `Esc` leaves a text field first. Outside a text field it
+returns to Play, retaining the inspectors.
 
 Select **Frame Analyzer** above the debugger tabs to inspect its **Beam**,
 **Blits**, **Memory**, and **Resources** views. **Capture frame** records a
@@ -279,7 +300,11 @@ Displays a 2D heatmap indexed by raster beam coordinates (`X` = colour clock HPO
 `Y` = scanline VPOS). Each cell indicates which subsystem owned the chip bus during
 that colour clock cycle (CPU, Copper, Blitter, Bitplane, Sprite, Audio, Disk, Refresh, Idle).
 Pointing at a cell shows its full slot record below the raster; clicking pins
-the same readout. It includes the custom register, address, transfer data and
+the same readout. An interlaced display alternates a long field and a short
+field one line shorter, so the raster is laid out against the long field: the
+diagram keeps its size and the cell under the pointer stays put as the fields
+alternate. A short field has no last line, and a position over it reads the
+line before. It includes the custom register, address, transfer data and
 width, owner subtype, CPU-visible IPL, and decoded hardware events.
 Copper MOVE execution slots are cross-shaped markers coloured by destination
 register class (blitter, audio, display/bitplane, sprite, palette, or control).

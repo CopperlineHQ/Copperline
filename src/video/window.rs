@@ -955,6 +955,19 @@ fn analyzer_heat_presets(bus: &crate::bus::Bus) -> Vec<ui::HeatPreset> {
     presets
 }
 
+/// The line count to lay the beam diagram out against, and to map screen
+/// positions through.
+///
+/// An interlaced signal alternates a long field and a short field one line
+/// shorter (PAL 313/312, NTSC 263/262; the long field is the odd one). The
+/// captured trace reports the field it actually took, so following it would
+/// resize the pane and move the row under the pointer on every frame, twice
+/// a frame apart. Presentation uses the long field for both, and callers
+/// clamp the resulting row to the field actually captured.
+fn analyzer_field_rows(rows: usize) -> usize {
+    rows | 1
+}
+
 /// The window the Memory tab arms when nothing has armed the map yet: the
 /// chip RAM bank. It is the bank every chip-bus engine works out of and
 /// usually the smallest fitted one, so its cells cover the fewest bytes
