@@ -183,7 +183,8 @@ impl Layout {
             ui.vertical(|ui| {
                 let display = egui::vec2(
                     width,
-                    (width * analyzer_field_rows(trace.rows) as f32 / (trace.cols * 2) as f32)
+                    (width * analyzer_layout_rows(trace.nominal_rows, trace.rows) as f32
+                        / (trace.cols * 2) as f32)
                         .clamp(220.0, 420.0),
                 );
                 let response =
@@ -200,7 +201,8 @@ impl Layout {
                 {
                     let [x, y] = beam_fraction(response.rect, point);
                     probe = (
-                        (usize::from(y) * analyzer_field_rows(trace.rows) / 1024)
+                        (usize::from(y) * analyzer_layout_rows(trace.nominal_rows, trace.rows)
+                            / 1024)
                             .min(trace.rows.saturating_sub(1)),
                         usize::from(x) * trace.cols / 1024,
                     );
@@ -687,7 +689,7 @@ fn beam_overlays(ui: &egui::Ui, rect: egui::Rect, trace: &ui::AnalyzerTraceView)
     // The diagram is laid out against the long field, so the overlays have
     // to be placed against it too or they would drift by a line as the
     // fields alternate.
-    let field_rows = analyzer_field_rows(trace.rows);
+    let field_rows = analyzer_layout_rows(trace.nominal_rows, trace.rows);
     let pos = |h: usize, v: usize| {
         rect.min
             + egui::vec2(

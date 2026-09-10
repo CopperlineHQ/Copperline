@@ -951,7 +951,7 @@ impl App {
                 .map(|panel| panel.selected_vpos as usize)
                 .unwrap_or(trace.visible_start_vpos as usize)
         } else {
-            (usize::from(y) * analyzer_field_rows(trace.rows) / 1024)
+            (usize::from(y) * analyzer_layout_rows(trace.nominal_rows, trace.rows) / 1024)
                 .min(trace.rows.saturating_sub(1))
         };
         if let Some(panel) = self.frame_analyzer_panel.as_mut() {
@@ -1990,6 +1990,7 @@ impl App {
                 frame: trace.frame,
                 seconds: trace.seconds,
                 rows: trace.rows,
+                nominal_rows: trace.nominal_rows,
                 cols: trace.cols,
                 line_cck: trace.line_cck,
                 visible_start_vpos: trace.visible_start_vpos,

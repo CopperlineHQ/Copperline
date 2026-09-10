@@ -2228,9 +2228,14 @@ fn debug_viewport_uses_the_same_pixel_rect_for_picture_and_input() {
 #[test]
 fn alternating_interlace_fields_do_not_resize_the_beam_diagram() {
     assert_eq!(
-        analyzer_field_rows(312),
-        analyzer_field_rows(313),
-        "both fields are laid out against the long one"
+        analyzer_layout_rows(313, 312),
+        analyzer_layout_rows(313, 313),
+        "both fields of one interlaced frame lay out against the long one"
+    );
+    assert_eq!(
+        analyzer_layout_rows(200, 200),
+        200,
+        "a programmable total is laid out as it stands, not rounded to a field"
     );
 
     let mut app = analyzer_app();
@@ -2250,7 +2255,9 @@ fn alternating_interlace_fields_do_not_resize_the_beam_diagram() {
     for rows in [313usize, 312, 313] {
         let mut panel = base.clone();
         let mut view = app.build_frame_analyzer_view(&panel);
-        view.trace.as_mut().expect("a captured frame").rows = rows;
+        let trace = view.trace.as_mut().expect("a captured frame");
+        trace.rows = rows;
+        trace.nominal_rows = 313;
         for _ in 0..3 {
             let _ = run_content_frame(
                 &context,

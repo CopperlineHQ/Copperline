@@ -4,7 +4,7 @@
 //! commands leave as actions, after egui's (potentially repeated) layout pass.
 //! The Amiga display and egui share the main window and its GPU surface.
 
-use super::{analyzer_field_rows, ui, App, KeyCode, ToolPanelKind, UiControl};
+use super::{analyzer_layout_rows, ui, App, KeyCode, ToolPanelKind, UiControl};
 use egui::{Color32, FontId, RichText, ScrollArea, Stroke};
 use pixels::wgpu;
 use std::collections::HashMap;
@@ -14,8 +14,10 @@ use winit::{event::WindowEvent, window::Window};
 const BLUE: Color32 = Color32::from_rgb(35, 75, 164);
 const INK: Color32 = Color32::from_rgb(28, 32, 40);
 const PAPER: Color32 = Color32::from_rgb(238, 240, 242);
-/// An inspector that is not open: available to click, holding nothing.
-const MUTED: Color32 = Color32::from_rgb(139, 146, 158);
+/// An inspector that is not open: available to click, holding nothing. Dim
+/// enough to read as inactive, dark enough to clear 4.5:1 against PAPER --
+/// it is still a control, and its label still has to be legible.
+const MUTED: Color32 = Color32::from_rgb(98, 105, 117);
 /// An inspector that is open but not the one on screen.
 const TAB_OPEN: Color32 = Color32::from_rgb(214, 219, 228);
 /// Live capture, on paper and on the selected tab's blue.
@@ -426,6 +428,9 @@ fn mode_segment(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response 
             .rect_filled(rect, 0, Color32::from_rgb(58, 98, 186));
     }
     ui.put(rect, egui::Label::new(text).selectable(false));
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, active, label)
+    });
     response
 }
 
@@ -466,9 +471,12 @@ fn tool_tab(
             open.then(|| ui.allocate_space(egui::vec2(14.0, 14.0)).1)
         });
     let body = ui.interact(tab.response.rect, tool_tab_id(kind), egui::Sense::click());
+    body.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, label)
+    });
     let close = tab
         .inner
-        .map(|rect| close_box(ui, rect, ink, tool_tab_close_id(kind)));
+        .map(|rect| close_box(ui, rect, ink, tool_tab_close_id(kind), label));
     if close.is_some_and(|close| close.clicked()) {
         actions.push(Action::CloseTool(kind));
     } else if body.clicked() {
@@ -533,6 +541,9 @@ fn sub_tab(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
         rect,
         egui::Label::new(if selected { text.strong() } else { text }).selectable(false),
     );
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, label)
+    });
     if selected {
         let y = rect.bottom() - 2.0;
         ui.painter().line_segment(
@@ -550,8 +561,19 @@ fn sub_tab(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
 /// which keeps the source ASCII and scales with the tab. It is registered
 /// after the tab body so a click on the cross closes the inspector rather
 /// than merely selecting it.
-fn close_box(ui: &mut egui::Ui, rect: egui::Rect, ink: Color32, id: egui::Id) -> egui::Response {
+fn close_box(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    ink: Color32,
+    id: egui::Id,
+    inspector: &str,
+) -> egui::Response {
     let response = ui.interact(rect, id, egui::Sense::click());
+    // The cross is painted, not typed, so it carries no text of its own:
+    // name the inspector it closes for anything reading the controls.
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Close {inspector}"))
+    });
     if response.hovered() {
         ui.painter()
             .rect_filled(rect, 0, Color32::from_rgba_unmultiplied(128, 128, 128, 64));

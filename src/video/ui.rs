@@ -2104,6 +2104,9 @@ pub struct AnalyzerTraceView {
     pub frame: u64,
     pub seconds: f64,
     pub rows: usize,
+    /// The frame height to lay out and pick against: see
+    /// `FrameBusTrace::nominal_rows`.
+    pub nominal_rows: usize,
     pub cols: usize,
     pub line_cck: u32,
     pub visible_start_vpos: u32,

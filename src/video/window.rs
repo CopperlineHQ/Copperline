@@ -959,13 +959,14 @@ fn analyzer_heat_presets(bus: &crate::bus::Bus) -> Vec<ui::HeatPreset> {
 /// positions through.
 ///
 /// An interlaced signal alternates a long field and a short field one line
-/// shorter (PAL 313/312, NTSC 263/262; the long field is the odd one). The
-/// captured trace reports the field it actually took, so following it would
-/// resize the pane and move the row under the pointer on every frame, twice
-/// a frame apart. Presentation uses the long field for both, and callers
-/// clamp the resulting row to the field actually captured.
-fn analyzer_field_rows(rows: usize) -> usize {
-    rows | 1
+/// shorter, so following the captured field would resize the pane and move
+/// the row under the pointer on every frame. Agnus reckons the frame height
+/// this capture belongs to -- the long field, or a programmable VARBEAMEN
+/// total used as it stands -- and that is what presentation uses; callers
+/// clamp the row to the field actually captured. A trace from before the
+/// height was recorded falls back to the captured field.
+fn analyzer_layout_rows(nominal_rows: usize, rows: usize) -> usize {
+    nominal_rows.max(rows)
 }
 
 /// The window the Memory tab arms when nothing has armed the map yet: the
