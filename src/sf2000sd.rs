@@ -342,10 +342,22 @@ impl Sf2000Sd {
         }
     }
 
-    /// The ROM byte on the odd lane at window offset `off` (stride 2: `off
-    /// == 2k+1` maps to `rom[k]`), or `0xFF` past the image's end or with
-    /// none fitted. Only meaningful for odd `off`; callers gate on that.
-    fn read_rom(&self, off: u32) -> u32 {
+    /// What the pre-latch window drives at offset `off`. The image sits on
+    /// the odd byte lane at stride 2 (`window[2k+1] == rom[k]`), so an even
+    /// offset is the floating even lane and an odd one past the image's end
+    /// (or with no ROM fitted at all) floats too. A word read combines the
+    /// two lanes exactly as `ide_zorro.rs`'s AT-Bus 2008 personality does
+    /// (`0xFFxx`, the ROM byte on the low lane), so word-wide inspection or
+    /// copying of the DiagArea sees the real bytes rather than pure float.
+    fn read_rom(&self, off: u32, size: usize) -> u32 {
+        if size == 2 {
+            let hi = self.read_rom(off, 1);
+            let lo = self.read_rom(off.wrapping_add(1), 1);
+            return (hi << 8) | lo;
+        }
+        if off & 1 == 0 {
+            return 0xFF; // even lane: nothing drives it
+        }
         let k = (off >> 1) as usize;
         u32::from(self.rom.get(k).copied().unwrap_or(0xFF))
     }
@@ -357,18 +369,9 @@ impl Sf2000Sd {
             return (hi << 16) | lo;
         }
         let value = if !self.enabled {
-            // Odd lane, byte access: the boot ROM (or float with none
-            // fitted). Even lane floats too -- nothing drives it before the
-            // latch -- and a word access (always even-based, by CPU
-            // alignment) never exposes ROM even where it exists, matching
-            // AT-Bus 2008's own odd-lane precedent.
-            if size == 1 && off & 1 != 0 {
-                self.read_rom(off)
-            } else if size == 1 {
-                0xFF
-            } else {
-                0xFFFF
-            }
+            // The boot ROM on the odd lane, the floating even lane, or both
+            // combined for a word -- see [`Self::read_rom`].
+            self.read_rom(off, size)
         } else {
             let local = off & 0x1F;
             if local & 0x10 != 0 {
@@ -430,6 +433,15 @@ impl crate::zorro_device::ZorroDevice for Sf2000Sd {
         // Register access alone drives the SPI/card state machine; there is
         // no time-driven work (no hot-swap, no debounce -- see the module
         // documentation).
+    }
+
+    /// Side-effect-free reads for the debugger/GDB/control memory views, as
+    /// `ide_zorro.rs` does for its own visible ROM: the boot overlay while
+    /// it is still mapped, nothing once the first write has latched the
+    /// register file live (a data-port read there drains the RX queue, and
+    /// peeking must never move the SPI stream on).
+    fn peek_word(&self, off: u32) -> Option<u16> {
+        (!self.enabled).then(|| self.read_rom(off & !1, 2) as u16)
     }
 
     fn int2_line(&self) -> bool {
@@ -512,9 +524,17 @@ mod tests {
         // The even lane floats throughout -- nothing drives it pre-latch.
         assert_eq!(board.read(0x0000, 1), 0xFF, "even lane floats, not ROM");
         assert_eq!(board.read(0x0002, 1), 0xFF, "even lane floats, not ROM");
-        // A word access never exposes ROM, even where it exists on the odd
-        // lane -- matching AT-Bus 2008's own precedent.
-        assert_eq!(board.read(0x0000, 2), 0xFFFF);
+        // A word access combines the floating even lane with the ROM byte
+        // on the odd one -- matching AT-Bus 2008's own precedent -- so a
+        // word-wide copy of the DiagArea sees the real bytes.
+        assert_eq!(board.read(0x0000, 2), 0xFF42);
+        assert_eq!(board.read(0xFFFE, 2), 0xFF99);
+        // The debugger/GDB/control memory views see the same thing without
+        // touching the board.
+        assert_eq!(
+            crate::zorro_device::ZorroDevice::peek_word(&board, 0x0000),
+            Some(0xFF42)
+        );
 
         // Any write anywhere latches the interface live, and that same
         // write also lands as a genuine register write.
@@ -525,6 +545,11 @@ mod tests {
             board.read(0xFFFF, 1),
             0xFF,
             "no ROM left once registers are mapped (odd lane floats post-latch too)"
+        );
+        assert_eq!(
+            crate::zorro_device::ZorroDevice::peek_word(&board, 0x0000),
+            None,
+            "peeking must not drain the RX queue once the register file is live"
         );
 
         // Hardware-only mode (no ROM configured): registers are live from

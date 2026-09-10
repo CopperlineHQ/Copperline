@@ -2478,6 +2478,24 @@ fn copperhf_rejects_cd_image_paths() {
 }
 
 #[test]
+fn sf2000sd_rejects_cd_image_paths_and_names_its_own_section() {
+    // The SD card controller shares copperhf's hard-disks-only validation,
+    // but the error must name `[sf2000sd]`, not `[copperhf]` -- a card path
+    // rejected here has nothing to do with the copperhf section.
+    let err = parse_config(
+        r#"
+            [sf2000sd]
+            card = "game.cue"
+            "#,
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("hard disks only"), "{err:#}");
+    assert!(msg.contains("[sf2000sd]"), "{err:#}");
+    assert!(!msg.contains("copperhf"), "{err:#}");
+}
+
+#[test]
 fn copperhf_rejects_filesystem_key_on_a_file_path() {
     // `filesystem` only means something for a host-directory mount, same
     // rule as [ide]/[scsi]/[lide].

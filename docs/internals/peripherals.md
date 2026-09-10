@@ -505,11 +505,11 @@ is never checked by the driver, so it falls through to the catch-all
 "unknown command" response harmlessly), CMD59 (accepted no-op -- CRC
 checking is never enforced, including on CMD0/CMD8's normally-mandatory
 fixed CRC bytes, a deliberately permissive choice: friendlier for driver
-bring-up than a strict card). `[[host_disk]]` passthrough and a launcher UI
-entry are not implemented yet. Presented throughout as a block-addressed
-(SDHC-style) card via CMD8/ACMD41's HCS bit and CMD58's OCR CCS bit, so a
-real driver always addresses it by block number -- matching
-`HardDriveImage`'s own `u64` LBA unit directly.
+bring-up than a strict card). `[[host_disk]]` passthrough is not implemented
+yet. Presented throughout as a block-addressed (SDHC-style) card via
+CMD8/ACMD41's HCS bit and CMD58's OCR CCS bit, so a real driver always
+addresses it by block number -- matching `HardDriveImage`'s own `u64` LBA
+unit directly.
 
 CMD18's block stream and CMD25's block-accepting loop are each modelled as
 their own `Activity` state in `sdcard.rs` (`StreamingRead`/`AwaitWriteToken`
@@ -520,18 +520,29 @@ card has to keep responding correctly for as long as the driver keeps going,
 including recognizing a CMD12 frame arriving in place of the next block's
 start token.
 
-**ROM overlay.** Gated the same way `ide_zorro.rs`'s RIPPLE/RIDE personalities
-are: before the first write anywhere in the window, the whole 64K reads as a
-flat ROM image (no odd/even lane split, no banking -- simpler than lide's
-boards, since the RTL available here is a development build with no boot
-ROM wired up at all, so there is no real register/lane interplay to match);
-that first write latches the interface live, and from then on the whole
-window is the register file, with no ROM visible anywhere (unlike RIPPLE,
-which keeps ROM in part of its post-latch window). `er_InitDiagVec` is
-`0x0001`. `rom` absent (or `""`) is hardware-only mode: registers are live
-immediately, no autoboot. Unlike `[lide]`'s `rom`, there is no bundled
-default -- this ROM is the SF2000 firmware author's, not Copperline's to
-ship.
+**ROM overlay.** The RTL available for this board is a development build
+with no boot ROM wired up, so the mapping comes from the real firmware
+instead: `spisd2`'s `bootrom/bootldr.S` and `bootrom/mungerom.py` place the
+flash image on the *odd* byte lane at stride 2 -- `window[2k+1] = rom[k]`,
+the even lane floats (`0xFF`) -- exactly like `ide_zorro.rs`'s AT-Bus 2008
+personality, with a 32K image spanning the whole 64K window and no banking.
+`bootldr.S`'s relocation code confirms the stride: it computes the driver
+payload's window offset as the flash offset "times 4 (nibble-wise
+DiagArea)", one factor of 2 being `mungerom.py`'s nibble-doubling of the
+DiagArea/bootstrap portion (baked into the ROM file itself, reassembled by
+Kickstart in software) and the other this lane stride. `er_InitDiagVec` is
+`0x0001`, i.e. window offset 1 = `rom[0]`. A word read combines the two
+lanes (`0xFFxx`, ROM byte low), as AT-Bus 2008 does, so word-wide copies of
+the DiagArea see the real bytes; `peek_word` serves the same overlay to the
+debugger without side effects. Gated the same way `ide_zorro.rs`'s
+RIPPLE/RIDE personalities are: before the first write anywhere in the
+window, the odd lane reads ROM and the even lane floats; that first write
+latches the interface live, and from then on the whole window is the
+register file, with no ROM visible anywhere (unlike RIPPLE, which keeps ROM
+in part of its post-latch window). `rom` absent (or `""`) is hardware-only
+mode: registers are live immediately, no autoboot. Unlike `[lide]`'s `rom`,
+there is no bundled default -- this ROM is the SF2000 firmware author's, not
+Copperline's to ship.
 
 ## Host filesystem service (`filesys.rs`)
 

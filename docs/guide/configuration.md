@@ -2085,10 +2085,11 @@ finds it. Point `rom` at a dump of your own board's flash to get autoboot.
 
 The full SD-over-SPI command set -- including multi-block transfers -- is
 implemented and verified against a real Amiga driver's source
-(`docs/internals/peripherals.md`). `[[host_disk]]` passthrough for a real
-host SD reader and a launcher UI entry are not supported yet -- see
-[](../internals/peripherals) for the register protocol and its current
-limits.
+(`docs/internals/peripherals.md`). The launcher's Storage page has a card
+slot and a boot-ROM picker for the board like every other controller;
+`[[host_disk]]` passthrough for a real host SD reader is the one thing not
+supported yet -- see [](../internals/peripherals) for the register protocol
+and its current limits.
 
 ## `[[host_disk]]` -- a real disk of the host's
 

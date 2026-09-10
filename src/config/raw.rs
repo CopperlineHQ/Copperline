@@ -1506,18 +1506,39 @@ pub(super) fn drive_image(raw: RawDrive) -> Result<DriveImage> {
     })
 }
 
-/// Convert a parsed `[copperhf]` unit entry into a `DriveImage`, on top of
-/// [`drive_image`]'s validation: `[copperhf]` serves hard disks only, so a
-/// path recognised as a CD image is rejected rather than silently attaching
-/// a unit with no working command set behind it.
-pub(super) fn copperhf_drive_image(raw: RawDrive) -> Result<DriveImage> {
+/// Convert a parsed drive entry for a hard-disk-only controller into a
+/// `DriveImage`, on top of [`drive_image`]'s validation: a path recognised
+/// as a CD image is rejected rather than silently attaching a unit with no
+/// working command set behind it. `section` is the config section the entry
+/// came from and `controller` what would have had to serve the disc, so the
+/// error names what the user actually wrote rather than some other section
+/// that happens to share this rule.
+fn hard_disk_only_drive_image(
+    raw: RawDrive,
+    section: &str,
+    controller: &str,
+) -> Result<DriveImage> {
     let path = PathBuf::from(&raw.path);
     if crate::config::is_cd_image_path(&path) {
         bail!(
-            "[copperhf] {}: copperhf.device serves hard disks only, not CD images \
+            "[{section}] {}: {controller} serves hard disks only, not CD images \
              (attach this to [scsi] or [ide]/[lide] instead)",
             path.display()
         );
     }
     drive_image(raw)
+}
+
+/// Convert a parsed `[copperhf]` unit entry into a `DriveImage`:
+/// copperhf.device serves hard disks only, no ATAPI/SCSI-CDROM command set
+/// behind it.
+pub(super) fn copperhf_drive_image(raw: RawDrive) -> Result<DriveImage> {
+    hard_disk_only_drive_image(raw, "copperhf", "copperhf.device")
+}
+
+/// Convert the parsed `[sf2000sd] card` entry into a `DriveImage`: the same
+/// hard-disks-only rule, since an SD card has no ATAPI/SCSI-CDROM command
+/// set behind it either.
+pub(super) fn sf2000sd_drive_image(raw: RawDrive) -> Result<DriveImage> {
+    hard_disk_only_drive_image(raw, "sf2000sd", "the SF2000 SD card controller")
 }

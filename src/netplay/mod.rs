@@ -268,6 +268,15 @@ pub fn validate_config(cfg: &crate::config::Config) -> Result<()> {
     // Its rate-specific resamplers serialize from a randomized HashMap, so
     // equivalent boards cannot yet guarantee byte-identical checkpoints.
     ensure!(!cfg.toccata, "netplay cannot use the Toccata sound board");
+    // A card image is already a "hard-drive image" above, but a ROM-only
+    // board still autoconfigs on the chain, and the `Hardware` manifest
+    // records neither the board nor its ROM (which is the SF2000 firmware
+    // author's, not ours to bundle) -- the peer would build a machine
+    // without it and diverge from the first frame.
+    ensure!(
+        !cfg.sf2000sd.enabled(),
+        "netplay cannot use the SF2000 SD card controller"
+    );
     ensure!(
         !cfg.cpu_jit
             && cfg.emulation.power_on

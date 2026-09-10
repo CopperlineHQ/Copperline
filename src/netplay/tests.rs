@@ -520,6 +520,21 @@ fn netplay_rejects_host_parallel_devices_and_noncanonical_toccata_state() -> Res
 }
 
 #[test]
+fn netplay_rejects_sf2000sd() -> Result<()> {
+    // A ROM-only board still autoconfigs on the chain, and the `Hardware`
+    // manifest bundles neither the board nor its ROM (the SF2000 firmware
+    // author's own, not ours to ship) -- reject it outright rather than let
+    // the peers build different machines.
+    let mut cfg = safe_config()?;
+    cfg.sf2000sd.rom = Some(std::path::PathBuf::from("nonexistent.rom"));
+    assert!(validate_config(&cfg)
+        .unwrap_err()
+        .to_string()
+        .contains("SF2000"));
+    Ok(())
+}
+
+#[test]
 fn capture_waits_for_the_peer_to_acknowledge_retransmitted_local_input() -> Result<()> {
     let peer = UdpSocket::bind("127.0.0.1:0")?;
     peer.set_read_timeout(Some(Duration::from_secs(1)))?;

@@ -79,7 +79,7 @@ const CID: [u8; 16] = [
 ];
 
 /// What happens once the current [`Activity::Replying`] queue drains.
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 enum AfterReply {
     #[default]
     Idle,
@@ -94,7 +94,7 @@ enum AfterReply {
 
 /// The card's current byte-stream role. `clock_byte` both feeds and drains
 /// this each call, since drive/response are simultaneous each byte-time.
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 enum Activity {
     /// Ready for the next command frame's first byte (or the write data
     /// token once `after_reply` handed us here after CMD24/CMD25's R1).
@@ -132,14 +132,13 @@ pub struct SdCard {
     app_cmd: bool,
     cmd_buf: [u8; 6],
     cmd_len: u8,
-    // Transient protocol state (mid-command-frame, mid-reply, mid-write) is
-    // not worth round-tripping through a save state: the guest driver always
-    // restarts a command from CS deassertion, and no real command sequence
-    // spans a save/load boundary. Skipped fields reset to idle on load,
-    // matching a freshly reselected card.
-    #[serde(skip, default)]
+    // In-flight protocol state (a draining reply, a half-received 512-byte
+    // write block, a CMD18/CMD25 stream) round-trips through save states
+    // like everything else: the board's own `rx_queue`/`rx_remaining` are
+    // serialized, and a save can land anywhere inside a bulk transfer, so
+    // resuming the card at idle would leave the remaining bytes diverging
+    // from a run that was never interrupted -- or drop a write outright.
     activity: Activity,
-    #[serde(skip, default)]
     after_reply: AfterReply,
 }
 
@@ -813,6 +812,76 @@ mod tests {
         }
         card.clock_byte(0xFF); // stuff byte
         assert_eq!(card.clock_byte(0xFF), 0x00, "R1 after STOP_TRANSMISSION");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A save state can land anywhere in a bulk transfer -- the guest is
+    /// mid-block, not politely between commands -- so the card's in-flight
+    /// protocol state has to round-trip with the rest of the machine. The
+    /// board's own `rx_queue`/`rx_remaining` are serialized either way, so a
+    /// card that resumed idle would answer the driver's remaining reads with
+    /// filler instead of the block it was streaming, and would drop a
+    /// half-received write outright.
+    #[test]
+    fn in_flight_transfers_survive_a_save_state_round_trip() {
+        let (mut card, path) = card(2048);
+        send_cmd(&mut card, 0, 0, 0x95, 1);
+        send_cmd(&mut card, 55, 0, 0, 1);
+        send_cmd(&mut card, 41, 1 << 30, 0, 1);
+
+        // Seed two consecutive sectors, the second one through a write that
+        // is itself interrupted by a snapshot half way through its data
+        // block.
+        let pattern = |i: usize, j: usize| ((i * 61 + j * 7) % 251) as u8;
+        for lba in 20..22u32 {
+            let i = lba as usize;
+            assert_eq!(send_cmd(&mut card, 24, lba, 0, 1), [0x00]);
+            card.clock_byte(0xFE);
+            for j in 0..512 {
+                if lba == 21 && j == 200 {
+                    let encoded = bincode::serialize(&card).unwrap();
+                    card = bincode::deserialize(&encoded).unwrap();
+                }
+                card.clock_byte(pattern(i, j));
+            }
+            card.clock_byte(0x00);
+            card.clock_byte(0x00);
+            assert_eq!(
+                card.clock_byte(0xFF) & 0x1F,
+                0x05,
+                "the interrupted write still lands"
+            );
+            while card.clock_byte(0xFF) != 0xFF {}
+        }
+
+        // Start a CMD18 stream and drain part of the first block, then fork
+        // the card: an uninterrupted run and a resumed one must produce the
+        // identical remaining byte stream.
+        assert_eq!(send_cmd(&mut card, 18, 20, 0, 1), [0x00]);
+        assert_eq!(card.clock_byte(0xFF), 0xFE, "start token");
+        for j in 0..100 {
+            assert_eq!(card.clock_byte(0xFF), pattern(20, j));
+        }
+        let encoded = bincode::serialize(&card).unwrap();
+        let mut resumed: SdCard = bincode::deserialize(&encoded).unwrap();
+
+        // The rest of block 20, its CRC, then all of block 21 and its CRC.
+        let tail = |c: &mut SdCard| -> Vec<u8> {
+            (0..(512 - 100) + 2 + 1 + 512 + 2)
+                .map(|_| c.clock_byte(0xFF))
+                .collect()
+        };
+        let uninterrupted = tail(&mut card);
+        assert_eq!(tail(&mut resumed), uninterrupted, "resumed byte stream");
+        assert_eq!(
+            &uninterrupted[..412],
+            &(100..512).map(|j| pattern(20, j)).collect::<Vec<_>>()[..]
+        );
+        assert_eq!(uninterrupted[414], 0xFE, "second block's start token");
+        assert_eq!(
+            &uninterrupted[415..927],
+            &(0..512).map(|j| pattern(21, j)).collect::<Vec<_>>()[..]
+        );
         std::fs::remove_file(&path).ok();
     }
 

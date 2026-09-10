@@ -746,11 +746,12 @@ impl TryFrom<RawConfig> for Config {
         // `[sf2000sd]`: the SF2000 accelerator's Zorro II SD card
         // controller. One card slot, same hard-disks-only rule as
         // `[copperhf]` -- an SD card has no ATAPI/SCSI-CDROM command set
-        // behind it either. Unlike `[lide]`'s `rom`, there is no bundled
+        // behind it either, so it shares that validation through its own
+        // wrapper (which names `[sf2000sd]` in the error, not `[copperhf]`). Unlike `[lide]`'s `rom`, there is no bundled
         // default and no `""` opt-out distinction to track: absent simply
         // means hardware-only.
         let sf2000sd = Sf2000SdConfig {
-            card: raw.sf2000sd.card.map(copperhf_drive_image).transpose()?,
+            card: raw.sf2000sd.card.map(sf2000sd_drive_image).transpose()?,
             rom: raw
                 .sf2000sd
                 .rom
