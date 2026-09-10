@@ -3270,7 +3270,7 @@ impl App {
                 return Ok(self.exit_status());
             }
             if self.fire_gif_captures() {
-                return Ok(());
+                return Ok(self.exit_status());
             }
             self.fire_scheduled_events();
             self.fire_auto_save_state();
@@ -3288,6 +3288,7 @@ impl App {
                 && self.auto_shot.is_empty()
                 && self.auto_expect.is_empty()
                 && self.frame_dump.is_none()
+                && self.gif_captures.is_empty()
             {
                 return Ok(self.exit_status());
             }

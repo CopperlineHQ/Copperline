@@ -211,18 +211,34 @@ fn box_downscale_rgb(src: &[u32], sw: usize, sh: usize, dw: usize, dh: usize) ->
     out
 }
 
+/// The largest thumbnail edge a state may claim. Far above the size
+/// [`encode_thumbnail`] writes, and small enough that the decode buffer a
+/// header asks for cannot be a denial of service.
+const MAX_THUMBNAIL_EDGE: usize = 4096;
+
 /// Decode a PNG into packed RGBA pixels. Accepts what `encode_thumbnail`
 /// writes (8-bit RGB) and 8-bit RGBA, which is what an edited thumbnail
 /// or a different encoder would most likely produce.
 fn decode_png_rgba(bytes: &[u8]) -> Result<(Vec<u32>, usize, usize)> {
     let decoder = png::Decoder::new(Cursor::new(bytes));
     let mut reader = decoder.read_info().context("reading thumbnail PNG")?;
+    {
+        // The output buffer is sized from the header, so the header's
+        // dimensions have to be believable before anything is allocated:
+        // a crafted state would otherwise ask for gigabytes just by
+        // opening the browser on the folder it sits in.
+        let info = reader.info();
+        let (w, h) = (info.width as usize, info.height as usize);
+        if w == 0 || h == 0 || w > MAX_THUMBNAIL_EDGE || h > MAX_THUMBNAIL_EDGE {
+            bail!("thumbnail has an unreasonable size ({w}x{h})");
+        }
+    }
     let mut buf = vec![0u8; reader.output_buffer_size().unwrap_or(0)];
     let info = reader
         .next_frame(&mut buf)
         .context("decoding thumbnail PNG")?;
     let (w, h) = (info.width as usize, info.height as usize);
-    if w == 0 || h == 0 || w > 4096 || h > 4096 {
+    if w == 0 || h == 0 || w > MAX_THUMBNAIL_EDGE || h > MAX_THUMBNAIL_EDGE {
         bail!("thumbnail has an unreasonable size ({w}x{h})");
     }
     let data = &buf[..info.buffer_size()];
@@ -371,5 +387,62 @@ mod tests {
             media: MediaNames::default(),
         };
         assert!(meta.thumbnail_pixels().is_err());
+    }
+
+    /// A PNG header may claim any size at all, and the decode buffer is
+    /// sized from it. A state browser opens every file in a folder, so an
+    /// enormous claim must be refused by the header check rather than
+    /// answered with an allocation.
+    #[test]
+    fn an_enormous_thumbnail_header_is_refused_before_it_is_allocated_for() {
+        // A PNG whose header claims 65535x65535 RGBA, which would size the
+        // decode buffer at about 17 GB. The image data is nonsense, and
+        // never reached: the header is what the buffer comes from.
+        let chunk = |kind: &[u8; 4], body: &[u8]| {
+            let mut out = (body.len() as u32).to_be_bytes().to_vec();
+            let mut tagged = kind.to_vec();
+            tagged.extend_from_slice(body);
+            out.extend_from_slice(&tagged);
+            out.extend_from_slice(&crc32(&tagged).to_be_bytes());
+            out
+        };
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&65535u32.to_be_bytes());
+        ihdr.extend_from_slice(&65535u32.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // 8-bit RGBA
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend_from_slice(&chunk(b"IHDR", &ihdr));
+        png.extend_from_slice(&chunk(b"IDAT", &[0x78, 0x9C, 0x00]));
+        png.extend_from_slice(&chunk(b"IEND", &[]));
+
+        let meta = StateMeta {
+            thumbnail_png: png,
+            thumbnail_width: 65535,
+            thumbnail_height: 65535,
+            emulated_seconds: 0.0,
+            emulated_frames: 0,
+            saved_at_unix: 0,
+            machine: String::new(),
+            media: MediaNames::default(),
+        };
+        let err = meta.thumbnail_pixels().unwrap_err();
+        assert!(
+            format!("{err:#}").contains("unreasonable size"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    /// The PNG chunk CRC, so the fixture above is a well-formed header
+    /// rather than something the decoder rejects for the wrong reason.
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &byte in bytes {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                let mask = (crc & 1).wrapping_neg();
+                crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+            }
+        }
+        !crc
     }
 }

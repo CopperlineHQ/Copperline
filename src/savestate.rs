@@ -403,11 +403,23 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      tagged chunks per component and Bus subsystem, each versioned on
 //      its own, with self-describing MessagePack payloads and an END
 //      marker. Struct changes are versioned per chunk from here on.
-pub const STATE_VERSION: u32 = 81;
+//  82: A `META` chunk (thumbnail, times, machine summary, media names) in
+//      the clear between `DESC` and the zlib stream. The chunks
+//      themselves are unchanged, but where the compressed body starts is
+//      not, so the container version moves: a version-81 reader expects
+//      the zlib stream right after `DESC` and must not be handed a file
+//      that says 81 and does not have one there.
+pub const STATE_VERSION: u32 = 82;
 
 /// The first container version laid out as chunks. Anything older is the
 /// flat bincode format, which no longer has a reader.
 const FIRST_CHUNKED_VERSION: u32 = 81;
+
+/// The chunked container before the `META` chunk existed: the same chunks
+/// in the same order, with the zlib stream starting directly after `DESC`.
+/// Still read, since the metadata is not machine state and its absence is
+/// what the reader's probe already handles.
+const VERSION_WITHOUT_META: u32 = 81;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {
@@ -747,7 +759,7 @@ fn read_header<R: Read>(reader: &mut R) -> Result<u32> {
              cannot load it, so the state must be saved again from a current build"
         );
     }
-    if version != STATE_VERSION {
+    if version != STATE_VERSION && version != VERSION_WITHOUT_META {
         bail!("save state is format version {version}; this build reads version {STATE_VERSION}");
     }
     Ok(version)
@@ -1642,21 +1654,24 @@ mod tests {
         }
     }
 
-    const FIXTURE_WITHOUT_META: &str = "tests/fixtures/state-v81-no-meta.clstate";
-    const FIXTURE_WITH_META: &str = "tests/fixtures/state-v81-meta.clstate";
+    /// A real version-81 state of the test machine, written before the
+    /// META chunk existed. It is a historical file, never re-blessed: it
+    /// is the proof that the container this build writes did not orphan
+    /// the one before it.
+    const FIXTURE_V81: &str = "tests/fixtures/state-v81-no-meta.clstate";
+    const FIXTURE_WITH_META: &str = "tests/fixtures/state-v82-meta.clstate";
 
-    /// The checked-in fixtures are states of the test machine, one written
-    /// before the META chunk existed (the layout every older state has) and
-    /// one with it. `COPPERLINE_BLESS_STATE_FIXTURES=1` rewrites them from
-    /// the current build.
+    /// Both containers load and peek: the version-81 layout, whose zlib
+    /// stream starts right after `DESC`, and the current one with the
+    /// metadata chunk in between. `COPPERLINE_BLESS_STATE_FIXTURES=1`
+    /// rewrites the current-version fixture from this build.
     #[test]
     fn fixture_states_with_and_without_metadata_load_and_peek() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let without = root.join(FIXTURE_WITHOUT_META);
+        let without = root.join(FIXTURE_V81);
         let with = root.join(FIXTURE_WITH_META);
         if crate::envcfg::flag("COPPERLINE_BLESS_STATE_FIXTURES") {
             let machine = test_machine();
-            save(&machine, &MachineDescriptor::default(), None, &without).unwrap();
             save(
                 &machine,
                 &MachineDescriptor::default(),
@@ -1668,7 +1683,10 @@ mod tests {
         let expected_meta = test_meta(&test_machine());
 
         let peeked = peek_path(&without).unwrap();
-        assert_eq!(peeked.version, STATE_VERSION);
+        assert_eq!(
+            peeked.version, VERSION_WITHOUT_META,
+            "the fixture must stay a version-81 file"
+        );
         assert_eq!(peeked.descriptor, MachineDescriptor::default());
         assert_eq!(peeked.meta, None);
         let mut machine = test_machine();
@@ -1680,6 +1698,7 @@ mod tests {
         assert_eq!(machine.bus_mut().mem.chip_ram[0x100], 0);
 
         let peeked = peek_path(&with).unwrap();
+        assert_eq!(peeked.version, STATE_VERSION);
         assert_eq!(peeked.descriptor, MachineDescriptor::default());
         let meta = peeked.meta.expect("the fixture carries metadata");
         assert_eq!(meta, expected_meta);

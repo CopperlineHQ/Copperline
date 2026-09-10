@@ -1422,11 +1422,12 @@ impl App {
     }
 
     /// Scheduled capture work other than the caller's own kind: screenshots
-    /// still armed, a frame dump still running, or a clip still recording.
-    /// A capture kind that has emptied its own list ends the run only when
-    /// this is false.
+    /// or expectations still armed, a frame dump still running, or a clip
+    /// still recording. A capture kind that has emptied its own list ends
+    /// the run only when this is false.
     pub(super) fn other_capture_work_pending(&self) -> bool {
         !self.auto_shot.is_empty()
+            || !self.auto_expect.is_empty()
             || self.frame_dump.is_some()
             || self.gif_captures.iter().any(|capture| !capture.finished)
     }

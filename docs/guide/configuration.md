@@ -2223,7 +2223,10 @@ never through the host clipboard itself, and the run stays
 deterministic. That is also how a recording made in a windowed session
 replays headless with the same machine: pass `--clipboard`. `share =
 false` (or `--no-clipboard`) leaves the bridge out entirely. Netplay
-peers never share (every peer must run the same machine). *Input
+peers never share, on either side of the session and even with an explicit
+`--clipboard`: every peer must build the same machine, and the bridge is
+part of the services board's layout, so a session where one side fitted it
+could not agree on a machine at all. *Input
 Settings > Share Clipboard* toggles the host side at runtime; it is
 greyed out when the machine was started without the bridge, which is
 part of the board's boot and cannot be added later.

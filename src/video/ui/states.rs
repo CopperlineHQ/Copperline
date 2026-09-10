@@ -132,6 +132,16 @@ pub struct StatesPanel {
     pub status: Option<String>,
 }
 
+/// When a state was saved: the time in its metadata, or the file's own
+/// modification time. Zero there is the metadata's "unknown" (a browser
+/// build has no clock to stamp with), not midnight in 1970, so it falls
+/// back rather than dating the state to the epoch and sorting it there.
+fn saved_at(meta: Option<&StateMeta>, modified: Option<u64>) -> Option<u64> {
+    meta.map(|m| m.saved_at_unix)
+        .filter(|&at| at != 0)
+        .or(modified)
+}
+
 impl StatesPanel {
     /// Snapshot `dir`: the ten quick-save slots first, then every other
     /// `.clstate` in the folder, newest first. `running` is the machine
@@ -428,7 +438,7 @@ fn read_entry(path: &Path, running: &crate::config::MachineDescriptor) -> StateE
                 label,
                 slot: None,
                 empty: false,
-                saved_at_unix: meta_fields.map(|m| m.saved_at_unix).or(modified),
+                saved_at_unix: saved_at(meta_fields, modified),
                 emulated_seconds: meta_fields.map(|m| m.emulated_seconds),
                 machine: meta_fields
                     .map(|m| m.machine.clone())
@@ -1087,6 +1097,26 @@ mod tests {
         // Same second, so the tie falls to the name.
         assert_eq!(named, ["newer.CLSTATE", "older.clstate"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unknown_save_time_falls_back_to_the_file() {
+        let mut meta = StateMeta {
+            thumbnail_png: Vec::new(),
+            thumbnail_width: 0,
+            thumbnail_height: 0,
+            emulated_seconds: 0.0,
+            emulated_frames: 0,
+            saved_at_unix: 1_699_956_800,
+            machine: String::new(),
+            media: Default::default(),
+        };
+        assert_eq!(saved_at(Some(&meta), Some(42)), Some(1_699_956_800));
+        // Zero means the host had no clock, not the epoch.
+        meta.saved_at_unix = 0;
+        assert_eq!(saved_at(Some(&meta), Some(42)), Some(42));
+        assert_eq!(saved_at(Some(&meta), None), None);
+        assert_eq!(saved_at(None, Some(42)), Some(42));
     }
 
     #[test]

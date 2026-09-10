@@ -2780,7 +2780,7 @@ pub fn draw_drop_hint(frame: &mut [u8], texture_scale: usize) {
 
 /// Vertical pitch of a shortcut row. The panel is sized from this and the
 /// row count, and must stay inside `present_height()`.
-const SHORTCUT_ROW_H: usize = 17;
+const SHORTCUT_ROW_H: usize = 16;
 /// Trailing note lines under the shortcut table, and their pitch.
 const SHORTCUT_NOTES: [&str; 3] = [
     "Shortcuts: Cmd on macOS, Alt on Linux/Windows",
@@ -2793,7 +2793,7 @@ const SHORTCUT_NOTES_GAP: usize = 6;
 
 /// Panel height that exactly holds the table plus the notes, so adding a row
 /// does not silently push the last one off the bottom. The gap above the
-/// notes and the bottom margin are what a 26-row table leaves within the
+/// notes and the bottom margin are what a 27-row table leaves within the
 /// display.
 fn shortcuts_panel_height() -> usize {
     TITLE_H
@@ -2804,7 +2804,7 @@ fn shortcuts_panel_height() -> usize {
         + 8
 }
 
-const SHORTCUT_ROWS: [(&str, &str, bool); 26] = [
+const SHORTCUT_ROWS: [(&str, &str, bool); 27] = [
     ("Q", "Quit", true),
     ("E", "Open the menu", true),
     ("S", "Save screenshot", true),

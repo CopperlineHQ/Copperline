@@ -165,9 +165,9 @@ disks travel inside the state, unsaved track writes included.
 ```
 offset  size  contents
 0       8     magic, ASCII "CLSSTATE"
-8       4     container version, u32 little-endian (STATE_VERSION, 81)
+8       4     container version, u32 little-endian (STATE_VERSION, 82)
 12      ...   DESC chunk: the MachineDescriptor, uncompressed
-...     ...   META chunk: the StateMeta, uncompressed (optional)
+...     ...   META chunk: the StateMeta, uncompressed (absent in version 81)
 ...     ...   zlib stream (RFC 1950) of chunks, ending in an END chunk
 ```
 
@@ -201,11 +201,17 @@ four-byte probe after the descriptor: the `META` tag means a metadata
 chunk, anything else (including the `0x78` a zlib stream starts with, and
 the end of a truncated file) is handed on as the body. A state written
 without the chunk therefore reads exactly as it did before the chunk
-existed. The clear-text layout is part of the container framing: a
-reader must know every tag it may meet ahead of the stream, so `META` is
-the only clear-text chunk besides `DESC`, and adding another there (as
-opposed to inside the stream, where unknown chunks are skipped) is a
-`STATE_VERSION` change. A load that meets a `META` chunk it cannot decode
+existed, which is how version 81 is still read.
+
+The clear-text layout is part of the container framing: a reader must know
+every tag it may meet ahead of the stream, so `META` is the only
+clear-text chunk besides `DESC`, and adding another there (as opposed to
+inside the stream, where unknown chunks are skipped) is a `STATE_VERSION`
+change. `META` itself moved the version to 82 for exactly that reason:
+the chunks either side of it are unchanged, but a version-81 reader
+expects the zlib stream directly after `DESC`, and a file that claims 81
+without one there would be a version number describing two incompatible
+layouts. A load that meets a `META` chunk it cannot decode
 (damaged, or written at a version this build has no migration for) logs
 a warning and restores the machine anyway, since the machine does not
 depend on it; `peek` reports the same condition as an error, and the
@@ -384,12 +390,13 @@ trailer checks (`the_end_marker_and_the_compressed_trailer_are_verified`),
 hostile lengths and nesting
 (`hostile_chunk_lengths_and_nesting_fail_instead_of_exhausting_memory`),
 and the metadata chunk: two checked-in fixtures of the test machine,
-`tests/fixtures/state-v81-no-meta.clstate` (the layout of every state
-written before the chunk existed) and `state-v81-meta.clstate`, both of
-which must keep loading and peeking as expected
+`tests/fixtures/state-v81-no-meta.clstate` (a real version-81 state, never
+re-blessed, so the container this build writes is proven not to have
+orphaned the one before it) and `state-v82-meta.clstate`, both of which
+must keep loading and peeking as expected
 (`fixture_states_with_and_without_metadata_load_and_peek`;
-`COPPERLINE_BLESS_STATE_FIXTURES=1` rewrites them from the current
-build), peek stopping at the clear chunks
+`COPPERLINE_BLESS_STATE_FIXTURES=1` rewrites the current-version one from
+this build), peek stopping at the clear chunks
 (`peek_reads_the_metadata_from_the_clear_chunks_alone`), the body's
 independence from the metadata
 (`metadata_is_outside_the_byte_identity_of_the_machine_body`), and the
