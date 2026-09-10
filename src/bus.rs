@@ -5848,6 +5848,12 @@ impl Bus {
         {
             return Some("persistent CD32 NVRAM");
         }
+        if self.pcmcia.is_some() {
+            // A card inserted from the menu after start-up never passed
+            // through the configuration's check, and its image or backing
+            // file takes writes the same way.
+            return Some("PCMCIA card in the slot");
+        }
         if self.rtc_present && !self.rtc.runahead_safe() {
             return Some("live or persistent real-time clock");
         }

@@ -172,7 +172,7 @@ impl App {
         self.suspend_live_audio_for_host_io();
         let picked = rfd::FileDialog::new()
             .set_title("Insert PCMCIA CF card image")
-            .add_filter("Hard-disk images", &["hdf", "hdz", "img"])
+            .add_filter("Hard-disk images", &["hdf", "hdz", "img", "chd"])
             .pick_file();
         if let Some(path) = picked {
             match crate::pcmcia::CfCard::open(&path) {

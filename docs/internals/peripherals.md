@@ -336,15 +336,18 @@ offset  size  field
 48      ...   records: u64 LE LBA, then the sector's 512 bytes, repeated
 ```
 
-Records are a log: the first write to a sector appends one, later writes
-to the same sector overwrite it in place, so the file grows only with the
-number of distinct sectors written (a Workbench boot costs a few hundred
-KB) and the index from LBA to record is rebuilt by scanning the log at
-open. Every write reaches the file as it happens (the `File` is
-unbuffered), which is the eject/exit flush; a record cut short by a crash
-is dropped at the next open, and that is the only recovery the format
-needs, since a sector's latest bytes are either in its complete record or
-still in the CHD. An overlay that names another image (SHA-1, sector
+Records are an append-only log: every write adds one, and the scan at open
+rebuilds the LBA-to-record index so that the last record for a sector
+wins. Nothing is ever overwritten in place, which is what makes the
+recovery rule hold: a record cut short by a crash is dropped at the next
+open, leaving the sector's previous record (or the CHD itself) in force,
+whereas overwriting a record would leave a full-length one holding half of
+each version that a scan could not tell from a sound one. Rewriting the
+same sector therefore leaves superseded records behind, so an open whose
+live records account for less than half the file rewrites it compacted,
+through the same temporary-file-and-rename the state restore uses. Every
+write reaches the file as it happens (the `File` is unbuffered), which is
+the eject/exit flush. An overlay that names another image (SHA-1, sector
 count) or is not one at all is left alone and the disk attaches
 write-protected, as it does when the sidecar cannot be created; deleting
 the `.wov` returns the disk to the pristine image. A netplay session copy
@@ -353,8 +356,10 @@ sidecar, like the gzip form.
 
 The overlay is machine state: `HardDriveImageState` carries every
 overlaid sector (`chd_overlay`), and loading a state rewrites the sidecar
-to exactly that set, so a resumed run sees the disk as it was when the
-state was taken -- unlike an HDF, whose file contents are deliberately not
+to exactly that set by building a sibling file and renaming it over the
+old one, so a restore that fails partway leaves the previous sidecar
+intact rather than a half-written disk. A resumed run sees the disk as it
+was when the state was taken -- unlike an HDF, whose file contents are deliberately not
 part of the state (`docs/internals/savestate.md`).
 
 The drive controllers latch read/write activity, which the bus drains to

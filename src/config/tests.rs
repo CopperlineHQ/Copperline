@@ -5562,6 +5562,21 @@ fn runahead_machine_gate_rejects_host_coupled_storage() -> Result<()> {
         cfg.runahead_machine_block_reason(),
         Some("hard-drive or ATAPI image")
     );
+
+    // A card in the PCMCIA slot is host-coupled storage too: a CF card is
+    // a hard-disk image, and an SRAM card with a backing file persists.
+    for body in [
+        "[pcmcia]\ncard = \"cf\"\npath = \"card.hdf\"",
+        "[pcmcia]\ncard = \"sram\"\nsize = \"1M\"\npath = \"sram.bin\"",
+        "[pcmcia]\ncard = \"sram\"\nsize = \"1M\"",
+    ] {
+        let cfg = parse_config(&format!("[machine]\nprofile = \"A1200\"\n{body}\n"))?;
+        assert_eq!(
+            cfg.runahead_machine_block_reason(),
+            Some("PCMCIA card"),
+            "for {body}"
+        );
+    }
     Ok(())
 }
 

@@ -2617,6 +2617,12 @@ impl Config {
         {
             return Some("hard-drive or ATAPI image");
         }
+        if !matches!(self.pcmcia.card, crate::config::PcmciaCardConfig::None) {
+            // A CF card is a hard-disk image by another name, and an SRAM
+            // card with a backing file persists too: speculative writes
+            // that are then rolled back would still reach the host.
+            return Some("PCMCIA card");
+        }
         if self.a2065_net.is_some() {
             return Some("A2065 network board");
         }

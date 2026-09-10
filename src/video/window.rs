@@ -4327,6 +4327,21 @@ impl ApplicationHandler for App {
                 if pressed {
                     self.log_cursor_diag(button);
                 }
+                // The host pointer is the light pen as well as the mouse.
+                // This runs before the UI's early returns below: a press
+                // over the display that ends over the status bar or a
+                // panel must still release the pen's tip switch, or the
+                // guest sees it held for good. A press only counts where
+                // the pen is actually pointing, over the display.
+                if button == MouseButton::Left && self.netplay.is_none() {
+                    let over_display = self.cursor_pos.is_some_and(cursor_in_display);
+                    if !pressed || over_display {
+                        let input = &mut self.emu.bus_mut().input;
+                        if let Some(port) = input.light_pen_port() {
+                            input.set_mouse_button(port, 0, pressed);
+                        }
+                    }
+                }
                 if button == MouseButton::Left {
                     if pressed {
                         self.analyzer_dragging = false;
@@ -4523,15 +4538,6 @@ impl ApplicationHandler for App {
                         MouseButton::Right => input.set_mouse_button(port, 1, pressed),
                         MouseButton::Middle => input.set_mouse_button(port, 2, pressed),
                         _ => {}
-                    }
-                }
-                // The host pointer is the light pen as well as the mouse:
-                // a left click over the display presses the pen's tip
-                // switch / pulls the gun's trigger.
-                if button == MouseButton::Left && self.netplay.is_none() {
-                    let input = &mut self.emu.bus_mut().input;
-                    if let Some(port) = input.light_pen_port() {
-                        input.set_mouse_button(port, 0, pressed);
                     }
                 }
             }

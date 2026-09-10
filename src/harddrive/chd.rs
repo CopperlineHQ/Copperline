@@ -580,6 +580,8 @@ struct Overlay {
     index: BTreeMap<u64, u64>,
     /// Length of the file as this handle knows it; the next record goes here.
     len: u64,
+    /// The CHD's SHA-1, as the header records it, for rewriting the file.
+    sha1: [u8; 20],
 }
 
 /// The sidecar path for `image`.
@@ -608,6 +610,7 @@ impl Overlay {
             path,
             index: BTreeMap::new(),
             len,
+            sha1,
         };
         if len == 0 {
             overlay.write_header(total_sectors, sha1)?;
@@ -664,6 +667,7 @@ impl Overlay {
             pos += RECORD_BYTES;
         }
         drop(reader);
+        let live_records = overlay.index.len() as u64;
         if pos < len {
             log::warn!(
                 "overlay {}: dropping {} trailing bytes of an incomplete record",
@@ -672,6 +676,29 @@ impl Overlay {
             );
             overlay.file.set_len(pos)?;
             overlay.len = pos;
+        }
+        // Records are appended, never overwritten, so a volume that keeps
+        // rewriting the same sectors leaves superseded copies behind. Fold
+        // them away when they have come to outweigh the live ones, which
+        // is a whole-file rewrite and so belongs here rather than in the
+        // middle of a session.
+        let live_bytes = OVERLAY_HEADER_BYTES + live_records * RECORD_BYTES;
+        if live_records > 0 && overlay.len > 2 * live_bytes {
+            let sectors = overlay.contents()?;
+            let sha1 = overlay.sha1;
+            match overlay.rewrite_atomically(&sectors, total_sectors, sha1) {
+                Ok(()) => log::info!(
+                    "overlay {}: compacted {} superseded record(s)",
+                    overlay.path.display(),
+                    (len - live_bytes) / RECORD_BYTES
+                ),
+                // A compaction that cannot be written changes nothing: the
+                // log it failed to replace is still complete and correct.
+                Err(e) => log::warn!(
+                    "overlay {}: leaving it uncompacted: {e}",
+                    overlay.path.display()
+                ),
+            }
         }
         Ok(overlay)
     }
@@ -701,22 +728,24 @@ impl Overlay {
         Ok(true)
     }
 
+    /// Append the sector's new contents as a fresh record.
+    ///
+    /// Rewriting the sector's existing record in place would be smaller,
+    /// but a write torn by a crash or a full disk would leave a
+    /// full-length record holding a mix of old and new bytes, and a scan
+    /// cannot tell that from a record that was written whole. A new record
+    /// at the end is either complete or dropped as a torn tail, leaving the
+    /// previous contents in force. The scan takes the last record for an
+    /// LBA, so the newest one wins; [`Overlay::open`] compacts the file
+    /// when the superseded records come to outweigh the live ones.
     fn write(&mut self, lba: u64, buf: &[u8]) -> std::io::Result<()> {
-        match self.index.get(&lba) {
-            Some(&offset) => {
-                self.file.seek(SeekFrom::Start(offset))?;
-                self.file.write_all(&buf[..SECTOR_SIZE])
-            }
-            None => {
-                let record = self.len;
-                self.file.seek(SeekFrom::Start(record))?;
-                self.file.write_all(&lba.to_le_bytes())?;
-                self.file.write_all(&buf[..SECTOR_SIZE])?;
-                self.index.insert(lba, record + 8);
-                self.len = record + RECORD_BYTES;
-                Ok(())
-            }
-        }
+        let record = self.len;
+        self.file.seek(SeekFrom::Start(record))?;
+        self.file.write_all(&lba.to_le_bytes())?;
+        self.file.write_all(&buf[..SECTOR_SIZE])?;
+        self.index.insert(lba, record + 8);
+        self.len = record + RECORD_BYTES;
+        Ok(())
     }
 
     fn contents(&self) -> std::io::Result<BTreeMap<u64, Vec<u8>>> {
@@ -746,12 +775,63 @@ impl Overlay {
                 format!("state carries an invalid overlay record for sector {lba}"),
             ));
         }
-        self.file.set_len(OVERLAY_HEADER_BYTES)?;
-        self.len = OVERLAY_HEADER_BYTES;
-        self.index.clear();
-        for (&lba, data) in sectors {
-            self.write(lba, data)?;
+        // Build the replacement beside the sidecar and swap it in once it
+        // is whole: truncating first would destroy the overlay a failed
+        // restore has to leave intact.
+        let sha1 = self.sha1;
+        self.rewrite_atomically(sectors, total_sectors, sha1)
+    }
+
+    /// Replace the sidecar's contents with `sectors`, one record each, by
+    /// writing a sibling file and renaming it over the old one. On any
+    /// failure the old sidecar is untouched and the temporary is removed.
+    fn rewrite_atomically(
+        &mut self,
+        sectors: &BTreeMap<u64, Vec<u8>>,
+        total_sectors: u64,
+        sha1: [u8; 20],
+    ) -> std::io::Result<()> {
+        let mut temp_name = self.path.as_os_str().to_owned();
+        temp_name.push(".new");
+        let temp_path = PathBuf::from(temp_name);
+        let outcome = (|| -> std::io::Result<(File, BTreeMap<u64, u64>, u64)> {
+            let mut temp = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&temp_path)?;
+            let mut header = [0u8; OVERLAY_HEADER_BYTES as usize];
+            header[..8].copy_from_slice(OVERLAY_MAGIC);
+            header[8..12].copy_from_slice(&(SECTOR_SIZE as u32).to_le_bytes());
+            header[12..20].copy_from_slice(&total_sectors.to_le_bytes());
+            header[20..40].copy_from_slice(&sha1);
+            temp.write_all(&header)?;
+            let mut index = BTreeMap::new();
+            let mut len = OVERLAY_HEADER_BYTES;
+            for (&lba, data) in sectors {
+                temp.write_all(&lba.to_le_bytes())?;
+                temp.write_all(&data[..SECTOR_SIZE])?;
+                index.insert(lba, len + 8);
+                len += RECORD_BYTES;
+            }
+            temp.sync_all()?;
+            Ok((temp, index, len))
+        })();
+        let (temp, index, len) = match outcome {
+            Ok(built) => built,
+            Err(e) => {
+                let _ = std::fs::remove_file(&temp_path);
+                return Err(e);
+            }
+        };
+        if let Err(e) = std::fs::rename(&temp_path, &self.path) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(e);
         }
+        self.file = temp;
+        self.index = index;
+        self.len = len;
         Ok(())
     }
 }
@@ -1029,7 +1109,7 @@ pub(crate) mod tests {
             let sector = vec![0xA5; SECTOR_SIZE];
             drive.write_sector(3, &sector).unwrap();
             drive.write_sector(8, &sector).unwrap();
-            // A second write to the same sector overwrites its record.
+            // A second write to the same sector appends a new record.
             let again = vec![0x5A; SECTOR_SIZE];
             drive.write_sector(3, &again).unwrap();
             drive.flush().unwrap();
@@ -1045,7 +1125,7 @@ pub(crate) mod tests {
             "the CHD is untouched"
         );
         let overlay = std::fs::metadata(overlay_path(&path)).unwrap().len();
-        assert_eq!(overlay, OVERLAY_HEADER_BYTES + 2 * RECORD_BYTES);
+        assert_eq!(overlay, OVERLAY_HEADER_BYTES + 3 * RECORD_BYTES);
 
         let mut drive = open(&path);
         let mut back = vec![0u8; SECTOR_SIZE];
@@ -1055,6 +1135,81 @@ pub(crate) mod tests {
         assert!(back.iter().all(|&b| b == 0xA5));
         drive.read_sector(2, &mut back).unwrap();
         assert_eq!(&back[..], &data[2 * SECTOR_SIZE..3 * SECTOR_SIZE]);
+        cleanup(&path);
+    }
+
+    /// A rewrite that is cut short leaves the sector's previous contents
+    /// in force. Records are appended rather than overwritten precisely so
+    /// that a torn write cannot produce a full-length record holding half
+    /// of each version, which a scan would accept as sound.
+    #[test]
+    fn a_torn_rewrite_keeps_the_sectors_previous_contents() {
+        let path = temp_path("torn-rewrite.chd");
+        write_hard_disk(&path, 9, [7; 20]);
+        {
+            let mut drive = open(&path);
+            drive.write_sector(3, &vec![0xA5; SECTOR_SIZE]).unwrap();
+            drive.write_sector(3, &vec![0x5A; SECTOR_SIZE]).unwrap();
+            drive.flush().unwrap();
+        }
+        // Cut the second record short, as a crash mid-append would.
+        let overlay = overlay_path(&path);
+        let len = std::fs::metadata(&overlay).unwrap().len();
+        let file = OpenOptions::new().write(true).open(&overlay).unwrap();
+        file.set_len(len - 8).unwrap();
+        drop(file);
+
+        let mut drive = open(&path);
+        let mut back = vec![0u8; SECTOR_SIZE];
+        drive.read_sector(3, &mut back).unwrap();
+        assert!(
+            back.iter().all(|&b| b == 0xA5),
+            "the completed write must survive the torn one"
+        );
+        cleanup(&path);
+    }
+
+    /// Superseded records are folded away when reopening the sidecar, so a
+    /// volume that rewrites the same sectors does not grow the file without
+    /// bound.
+    #[test]
+    fn reopening_compacts_superseded_records() {
+        let path = temp_path("compact.chd");
+        write_hard_disk(&path, 9, [7; 20]);
+        {
+            let mut drive = open(&path);
+            for fill in 0..6u8 {
+                drive
+                    .write_sector(3, &vec![0x10 + fill; SECTOR_SIZE])
+                    .unwrap();
+            }
+            drive.flush().unwrap();
+        }
+        let overlay = overlay_path(&path);
+        assert_eq!(
+            std::fs::metadata(&overlay).unwrap().len(),
+            OVERLAY_HEADER_BYTES + 6 * RECORD_BYTES
+        );
+
+        let mut drive = open(&path);
+        assert_eq!(
+            std::fs::metadata(&overlay).unwrap().len(),
+            OVERLAY_HEADER_BYTES + RECORD_BYTES,
+            "one live record should remain"
+        );
+        let mut back = vec![0u8; SECTOR_SIZE];
+        drive.read_sector(3, &mut back).unwrap();
+        assert!(
+            back.iter().all(|&b| b == 0x15),
+            "compaction must keep the newest contents"
+        );
+        // And the compacted file is still a working overlay.
+        drive.write_sector(4, &vec![0x99; SECTOR_SIZE]).unwrap();
+        drive.flush().unwrap();
+        drop(drive);
+        let mut drive = open(&path);
+        drive.read_sector(4, &mut back).unwrap();
+        assert!(back.iter().all(|&b| b == 0x99));
         cleanup(&path);
     }
 

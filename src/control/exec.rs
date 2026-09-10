@@ -954,8 +954,6 @@ impl InputCmd {
                     );
                 }
             }
-}
-
             InputCmd::Pen {
                 position,
                 at_seconds,

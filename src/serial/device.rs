@@ -45,7 +45,7 @@
 
 use super::{SerialControlLines, SerialSink};
 use std::io;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -187,6 +187,11 @@ struct Shared {
     attached: AtomicBool,
     /// Set when the sink is dropped, so the reader stops reopening.
     shutdown: AtomicBool,
+    /// Bumped when the emulated timeline jumps (a state load, a rewind).
+    /// Bytes are stamped with the generation they were read or queued in,
+    /// so the ones belonging to the abandoned timeline are dropped instead
+    /// of reaching either endpoint late.
+    generation: AtomicU64,
     /// Host bytes staged for the guest, mirrored for the idle fast path.
     buffered: AtomicIsize,
     opener: HostPortOpener,
@@ -274,10 +279,11 @@ fn apply_settings(port: &mut dyn HostSerialPort, settings: &HostLineSettings, na
 /// docs for the model.
 pub struct DeviceSerialSink {
     shared: Arc<Shared>,
-    /// Host -> guest bytes from the reader thread.
-    rx: mpsc::Receiver<u8>,
-    /// Guest -> host bytes for the writer thread.
-    tx: mpsc::SyncSender<u8>,
+    /// Host -> guest bytes from the reader thread, with the generation
+    /// they were read in.
+    rx: mpsc::Receiver<(u64, u8)>,
+    /// Guest -> host bytes for the writer thread, likewise stamped.
+    tx: mpsc::SyncSender<(u64, u8)>,
     /// Whether the 9-bit word warning has been given.
     warned_nine_bit: bool,
     /// The guest rate SERPER last set, so a repeat write is not re-applied.
@@ -319,6 +325,7 @@ impl DeviceSerialSink {
             ring: AtomicBool::new(false),
             attached: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
+            generation: AtomicU64::new(0),
             buffered: AtomicIsize::new(0),
             opener,
             name: name.to_string(),
@@ -401,13 +408,18 @@ impl Drop for DeviceSerialSink {
     }
 }
 
-fn reader_loop(shared: Arc<Shared>, mut port: Box<dyn HostSerialPort>, tx: mpsc::Sender<u8>) {
+fn reader_loop(
+    shared: Arc<Shared>,
+    mut port: Box<dyn HostSerialPort>,
+    tx: mpsc::Sender<(u64, u8)>,
+) {
     let mut buf = [0u8; 512];
     while !shared.shutdown.load(Ordering::Acquire) {
         match port.read(&mut buf) {
             Ok(n) => {
+                let generation = shared.generation.load(Ordering::Acquire);
                 for &b in &buf[..n] {
-                    if tx.send(b).is_err() {
+                    if tx.send((generation, b)).is_err() {
                         return;
                     }
                     shared.buffered.fetch_add(1, Ordering::Release);
@@ -439,16 +451,26 @@ fn reader_loop(shared: Arc<Shared>, mut port: Box<dyn HostSerialPort>, tx: mpsc:
     }
 }
 
-fn writer_loop(shared: Arc<Shared>, rx: mpsc::Receiver<u8>) {
+fn writer_loop(shared: Arc<Shared>, rx: mpsc::Receiver<(u64, u8)>) {
     let mut batch = Vec::with_capacity(OUTPUT_QUEUE_CAPACITY);
-    while let Ok(first) = rx.recv() {
+    while let Ok((generation, first)) = rx.recv() {
         batch.clear();
-        batch.push(first);
-        while let Ok(b) = rx.try_recv() {
+        // A byte the guest queued before the timeline jumped belongs to a
+        // run that no longer happened; it must not reach the wire.
+        if generation == shared.generation.load(Ordering::Acquire) {
+            batch.push(first);
+        }
+        while let Ok((generation, b)) = rx.try_recv() {
+            if generation != shared.generation.load(Ordering::Acquire) {
+                continue;
+            }
             batch.push(b);
             if batch.len() == OUTPUT_QUEUE_CAPACITY {
                 break;
             }
+        }
+        if batch.is_empty() {
+            continue;
         }
         // Retry a full kernel buffer (the far end is slow, or has dropped
         // CTS and the driver honours it); anything else is the port gone.
@@ -457,6 +479,13 @@ fn writer_loop(shared: Arc<Shared>, rx: mpsc::Receiver<u8>) {
                 return;
             }
             let mut guard = shared.port.lock().unwrap();
+            // Under the port lock, so a jump cannot land between the test
+            // and the write: the timeline moving on while this batch waited
+            // for a slow far end makes it a batch from a run that no longer
+            // happened.
+            if generation != shared.generation.load(Ordering::Acquire) {
+                break;
+            }
             let Some(port) = guard.as_mut() else {
                 // Detached: an unplugged cable drops what is sent down it.
                 break;
@@ -487,7 +516,8 @@ impl SerialSink for DeviceSerialSink {
         // wire (an unthrottled run): the wire paces the machine, as it
         // would a real one. A closed queue means the writer thread is
         // gone, which only happens at teardown.
-        let _ = self.tx.send(b);
+        let generation = self.shared.generation.load(Ordering::Acquire);
+        let _ = self.tx.send((generation, b));
     }
 
     fn write_word(&mut self, word: u16, long: bool, at_cck: u64) {
@@ -513,11 +543,16 @@ impl SerialSink for DeviceSerialSink {
     }
 
     fn read_byte(&mut self) -> Option<u8> {
-        let b = self.rx.try_recv().ok();
-        if b.is_some() {
+        // Bytes the reader had already taken off the wire when the
+        // timeline jumped carry the old generation and are dropped here,
+        // which closes the window between the drain and the reader thread.
+        loop {
+            let (generation, b) = self.rx.try_recv().ok()?;
             self.shared.buffered.fetch_sub(1, Ordering::Release);
+            if generation == self.shared.generation.load(Ordering::Acquire) {
+                return Some(b);
+            }
         }
-        b
     }
 
     fn has_pending_input(&self) -> bool {
@@ -584,10 +619,18 @@ impl SerialSink for DeviceSerialSink {
     /// and whatever the OS holds, and stay attached. The bus republishes
     /// the restored machine's DTR/RTS and SERPER rate right after this.
     fn reset_after_timeline_jump(&mut self) {
-        while self.read_byte().is_some() {}
-        if let Some(port) = self.shared.port.lock().unwrap().as_mut() {
-            let _ = port.discard_buffers();
+        {
+            // Hold the port while the generation moves, so the writer
+            // cannot be between its check and its write: everything queued
+            // in either direction, and anything the reader thread is
+            // mid-read on, is stamped with the generation left behind.
+            let mut port = self.shared.port.lock().unwrap();
+            self.shared.generation.fetch_add(1, Ordering::AcqRel);
+            if let Some(port) = port.as_mut() {
+                let _ = port.discard_buffers();
+            }
         }
+        while self.read_byte().is_some() {}
     }
 
     fn flush(&mut self) {}
@@ -755,6 +798,11 @@ struct FakePortState {
     dead: bool,
     /// Baud rates the fake refuses, to model a driver that cannot do them.
     refused_bauds: Vec<u32>,
+    /// While set, writes report a full kernel buffer, so the writer thread
+    /// holds what it has instead of putting it on the wire.
+    blocked: bool,
+    /// Write attempts, blocked or not: proof the writer has a batch.
+    write_attempts: u32,
 }
 
 #[cfg(test)]
@@ -783,6 +831,12 @@ impl FakeHostPort {
         let mut s = self.inner.0.lock().unwrap();
         s.to_guest.extend(bytes.iter().copied());
         self.inner.1.notify_all();
+    }
+
+    /// Hold (or release) the far end, so a test can leave bytes in the
+    /// writer's hands across a timeline jump.
+    fn block_writes(&self, blocked: bool) {
+        self.inner.0.lock().unwrap().blocked = blocked;
     }
 
     fn take_from_guest(&self) -> Vec<u8> {
@@ -850,6 +904,10 @@ impl HostSerialPort for FakeHostPort {
         let mut s = self.inner.0.lock().unwrap();
         if s.dead {
             return Err(gone());
+        }
+        s.write_attempts += 1;
+        if s.blocked {
+            return Err(io::Error::from(io::ErrorKind::TimedOut));
         }
         s.from_guest.extend_from_slice(bytes);
         Ok(())
@@ -1148,6 +1206,37 @@ mod tests {
         fake.push_to_guest(b"z");
         wait_until("fresh input", || sink.has_pending_input());
         assert_eq!(sink.read_byte(), Some(b'z'));
+    }
+
+    /// The other direction: bytes the guest wrote before the jump belong
+    /// to a run that no longer happened, so the wire must never see them,
+    /// even when the writer is already holding them against a far end that
+    /// has not taken them yet.
+    #[test]
+    fn timeline_jump_drops_guest_bytes_still_queued_for_the_wire() {
+        let (mut sink, fake) = open_fake();
+        // A far end that will not take anything: the writer keeps the
+        // bytes rather than putting them on the wire.
+        fake.block_writes(true);
+        sink.write_byte(b'a', 0);
+        sink.write_byte(b'b', 0);
+        wait_until("the writer holds the batch", || {
+            fake.state(|s| s.write_attempts > 0)
+        });
+
+        sink.reset_after_timeline_jump();
+        fake.block_writes(false);
+        // Whatever the writer does from here, those two bytes are gone: a
+        // fresh byte written after the jump is the only thing that lands.
+        sink.write_byte(b'c', 0);
+        wait_until("the fresh byte reaches the wire", || {
+            fake.state(|s| s.from_guest.contains(&b'c'))
+        });
+        assert_eq!(
+            fake.state(|s| s.from_guest.clone()),
+            vec![b'c'],
+            "bytes from the abandoned timeline reached the wire"
+        );
     }
 
     #[test]
