@@ -5749,15 +5749,24 @@ fn state_browser_lists_loads_flags_and_deletes_states() {
     assert!(slot.mismatch.is_none());
     assert!(slot.media.starts_with("DF0: "));
     assert!(panel.entries[0].empty);
-    let named = &panel.entries[crate::savestate::SLOT_COUNT];
-    assert_eq!(named.label, "copperline-state-20260101000000.clstate");
+    // The two named files sort by save time, which the fixture writes
+    // within a second of each other, so find them by name rather than
+    // betting on which side of a second boundary each one landed.
+    let entry = |label: &str| {
+        panel
+            .entries
+            .iter()
+            .find(|e| e.label == label)
+            .unwrap_or_else(|| panic!("{label} is missing from the browser"))
+    };
+    let named = entry("copperline-state-20260101000000.clstate");
     assert!(named.thumbnail.is_some());
     let flag = named
         .mismatch
         .as_deref()
         .expect("flagged as another machine");
     assert!(flag.contains("Aga"), "{flag}");
-    let stray = &panel.entries[crate::savestate::SLOT_COUNT + 1];
+    let stray = entry("stray.clstate");
     assert!(stray.error.is_some());
     assert!(!stray.loadable() && stray.deletable());
 

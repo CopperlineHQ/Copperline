@@ -554,7 +554,7 @@ fn memory_tab_edits_bytes_in_place_through_the_bus() {
     assert!(actions.is_empty(), "Esc while editing must not leave Debug");
     assert!(panel.mem_cursor.is_none());
     assert!(panel.mem_pending.is_empty());
-    let before = app.emu.save_state_bytes().unwrap();
+    let before = app.emu.machine_state_bytes().unwrap();
     let _ = run_frame(
         &context,
         &mut layout,
@@ -562,7 +562,7 @@ fn memory_tab_edits_bytes_in_place_through_the_bus() {
         &mut panel,
         &view,
     );
-    assert_eq!(app.emu.save_state_bytes().unwrap(), before);
+    assert_eq!(app.emu.machine_state_bytes().unwrap(), before);
 }
 
 #[test]
@@ -703,8 +703,8 @@ fn memory_tab_commit_matches_the_control_protocol_write() {
     ccp.emu.bus_mut().mem.overlay = false;
     ccp.emu.machine.ui_toggle_watch(0x60010);
     assert_eq!(
-        gui.emu.save_state_bytes().unwrap(),
-        ccp.emu.save_state_bytes().unwrap()
+        gui.emu.machine_state_bytes().unwrap(),
+        ccp.emu.machine_state_bytes().unwrap()
     );
 
     gui.apply_egui_debugger_action(Action::MemoryCommit(vec![
@@ -741,8 +741,8 @@ fn memory_tab_commit_matches_the_control_protocol_write() {
         "the poke itself must not trip the watch"
     );
     assert_eq!(
-        gui.emu.save_state_bytes().unwrap(),
-        ccp.emu.save_state_bytes().unwrap()
+        gui.emu.machine_state_bytes().unwrap(),
+        ccp.emu.machine_state_bytes().unwrap()
     );
     assert_eq!(
         gui.debugger_panel.as_ref().unwrap().mem_status.as_deref(),

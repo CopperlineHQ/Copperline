@@ -69,8 +69,8 @@ pub mod gamelib;
 pub mod gamepad;
 pub mod gary;
 pub mod gayle;
-pub mod pcmcia;
 pub mod gifclip;
+pub mod pcmcia;
 // The remote GDB stub (`--gdb`). Gated so player builds -- shipped games
 // with no debugging surface -- can compile it out; everything else keeps it
 // through the default features.
