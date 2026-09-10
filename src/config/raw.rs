@@ -88,7 +88,11 @@ pub struct RawConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) toccata: RawToccata,
     #[serde(default, skip_serializing_if = "is_default")]
+    pub(crate) clipboard: RawClipboard,
+    #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) cartridge: RawCartridge,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub(crate) recording: RawRecording,
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) mhi: RawMhi,
     #[serde(default, skip_serializing_if = "is_default")]
@@ -956,6 +960,16 @@ pub(crate) struct RawToccata {
     pub(crate) enabled: Option<bool>,
 }
 
+/// `[clipboard]` host <-> guest clipboard sharing (`crate::clipboard`).
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawClipboard {
+    /// Share the host clipboard with the guest's clipboard.device. Absent
+    /// means the session decides: on windowed, off headless.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) share: Option<bool>,
+}
+
 /// `[cartridge]` freezer cartridge (`crate::cartridge`).
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -966,6 +980,19 @@ pub(crate) struct RawCartridge {
     /// A cartridge image of the user's own instead of the bundled one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) rom: Option<String>,
+}
+
+/// `[recording]` GIF clip ring (`crate::gifclip`).
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawRecording {
+    /// Emulated seconds the window keeps for Save Clip as GIF (default
+    /// 10; 0 disables the ring).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) clip_seconds: Option<u32>,
+    /// Clip frame rate (default 0 = 25 on PAL, 30 on NTSC).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) clip_fps: Option<u32>,
 }
 
 /// `[mhi]` MHI virtual MPEG audio decoder board.

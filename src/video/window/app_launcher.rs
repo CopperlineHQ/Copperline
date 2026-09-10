@@ -1395,6 +1395,12 @@ impl App {
         if options.is_some() {
             crate::netplay::prepare_config(&mut cfg)?;
         }
+        // A launcher-started machine is a windowed session: share the host
+        // clipboard unless the config says otherwise -- except under
+        // netplay, where every peer must run the same machine.
+        if cfg.clipboard_share.is_none() {
+            cfg.clipboard_share = Some(options.is_none() && !guest);
+        }
         if guest {
             let _ = crate::config::resolve_bundled_rom(&mut cfg);
         } else {
@@ -1504,6 +1510,10 @@ impl App {
         self.disk_playlist_index = [0; 4];
         self.overscan = crate::config::resolve_overscan(cfg.overscan);
         self.tv_centre = cfg.tv_centre;
+        // The clip ring belongs to the machine being replaced: its frames
+        // and its automatic rate (the video standard) are that machine's.
+        self.clip_settings = cfg.recording.clip_settings();
+        self.clip_ring = None;
         self.apply_pixel_aspect(crate::config::resolve_pixel_aspect(cfg.pixel_aspect));
         // The bezel before the scaling: the canvas rule reads both, and
         // adopting them in this order moves the canvas at most once.

@@ -599,6 +599,11 @@ impl Akiko {
         self.disc.is_some() || self.pending_disc.is_some()
     }
 
+    /// The disc that is mounted or waiting in the tray, for naming it.
+    pub fn disc_ref(&self) -> Option<&CdImage> {
+        self.disc.as_ref().or(self.pending_disc.as_ref())
+    }
+
     /// Whether the drive is actively working: streaming CD audio, a TOC
     /// dump in progress, or a data read with the host still feeding PBX
     /// buffer slots (the same gate as run_sector_read). Feeds the
@@ -686,6 +691,19 @@ impl Akiko {
     /// EEPROM contents for frontends that persist saves outside emulation.
     pub fn nvram_bytes(&self) -> &[u8] {
         &self.nvram.memory
+    }
+
+    /// The EEPROM as a writable buffer, for frontends that own the save
+    /// RAM directly (libretro `RETRO_MEMORY_SAVE_RAM`). Its host address is
+    /// stable across state loads (see `Akiko::adopt_allocations_from`).
+    pub fn nvram_bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.nvram.memory
+    }
+
+    /// Keep the EEPROM buffer at the host address `live` already uses (see
+    /// `Memory::adopt_allocations_from`).
+    pub(crate) fn adopt_allocations_from(&mut self, live: &mut Akiko) {
+        crate::memory::reuse_allocation(&mut self.nvram.memory, &mut live.nvram.memory);
     }
 
     /// Seed the EEPROM before boot without installing a host write path.

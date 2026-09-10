@@ -54,6 +54,28 @@ pub const MAX_FB_PIXELS: usize = FB_WIDTH * MAX_VISIBLE_LINES;
 /// sized for this so any frame's canvas fits.
 pub const MAX_CANVAS_PIXELS: usize = 2 * MAX_FB_PIXELS;
 
+/// Render the machine's current frame into a fresh buffer through the
+/// side-effect-free display path, returning the buffer, its visible line
+/// count and its width. An RTG board driving the display supersedes the
+/// chipset output, exactly as the window presentation does.
+///
+/// This lives here rather than beside its control-protocol callers because
+/// save-state thumbnails need it in builds without the `control` feature
+/// (the libretro core and the standalone player), and every caller must
+/// produce the identical picture for captures to stay comparable.
+pub(crate) fn render_capture_frame(bus: &crate::bus::Bus) -> (Vec<u32>, usize, usize) {
+    let mut fb = Vec::new();
+    let mut scratch = Vec::new();
+    if let Some((rows, _, _)) = present_common::compose_rtg_present(bus, &mut scratch, &mut fb) {
+        return (fb, rows, FB_WIDTH);
+    }
+    fb = vec![0u32; MAX_CANVAS_PIXELS];
+    bitplane::render_display_only(bus, &mut fb);
+    let lines = bus.frame_geometry().visible_lines;
+    let width = FB_WIDTH * bus.frame_canvas_scale();
+    (fb, lines, width)
+}
+
 /// Per-frame display geometry, latched at the frame wrap (like the
 /// interlace long-field flag). Standard PAL/NTSC frames report exactly
 /// the fixed-canvas values (FB_HEIGHT rows, 227-cck lines) so the

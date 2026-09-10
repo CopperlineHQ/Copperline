@@ -683,6 +683,26 @@ fn build() -> Vec<ToolDef> {
             json!({"time": "2005-03-18 01:58:29"}),
         ),
         entry(
+            "clipboard.get",
+            "Report the host <-> guest clipboard bridge: whether the unit is fitted \
+             and sharing, whether the guest bridge is up, the host/guest text \
+             generations, and the newest text the guest copied (`text`, null if none).",
+            no_params(),
+            json!({}),
+        ),
+        entry(
+            "clipboard.set",
+            "Stage `text` for the guest as if it were the host clipboard: the guest \
+             bridge writes it into clipboard.device unit 0 as an IFF FTXT clip. Needs \
+             the clipboard unit fitted and sharing on (`[clipboard] share` / \
+             `--clipboard`).",
+            object(
+                vec![("text", string("The text to hand the guest"))],
+                &["text"],
+            ),
+            json!({"text": "Hello from the host\n"}),
+        ),
+        entry(
             "cartridge.get",
             "Describe the fitted freezer cartridge (`[cartridge] model`): model, the base \
              and size of its bank, the monitor's version, whether the monitor is entered, \
@@ -1443,6 +1463,25 @@ fn build() -> Vec<ToolDef> {
             "Restore the machine from the save-state file at `path`. The machine must be \
              paused; scheduled input and the reverse-execution history are dropped.",
             object(vec![("path", string("Host path of the .clstate file"))], &["path"]),
+            json!({"path": "/tmp/at120.clstate"}),
+        ),
+        entry(
+            "state.info",
+            "Describe the save-state file at `path` without loading it: container version, \
+             the machine it was taken on, and its metadata (emulated and wall-clock save \
+             times, machine summary, media names, thumbnail size). With `thumbnail`, the \
+             state's thumbnail PNG is also written to that path. Reads only the file's \
+             header, never the machine; does not touch the running session.",
+            object(
+                vec![
+                    ("path", string("Host path of the .clstate file")),
+                    (
+                        "thumbnail",
+                        string("Host path to write the thumbnail PNG to (optional)"),
+                    ),
+                ],
+                &["path"],
+            ),
             json!({"path": "/tmp/at120.clstate"}),
         ),
         // Capture

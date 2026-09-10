@@ -181,6 +181,11 @@ impl Core {
         };
         core.controls.cd32 = cd_mode;
         core.controls.netplay = netplay;
+        // Outside netplay the frontend is handed the RAM banks' host
+        // addresses in a memory map, so a state load has to keep them. A
+        // netplay session publishes no map and rolls back constantly, so it
+        // takes the deserialized buffers and skips the copy.
+        core.emu.bus_mut().set_keep_ram_addresses(!netplay);
         if let Some(path) = &core.nvram_save {
             if path.exists() {
                 core.emu
@@ -209,6 +214,22 @@ impl Core {
             core.set_ejected(false)?;
         }
         Ok(core)
+    }
+
+    /// The buffer behind a `retro_get_memory_data` region: chip RAM for
+    /// `RETRO_MEMORY_SYSTEM_RAM`, and the CD32 EEPROM for
+    /// `RETRO_MEMORY_SAVE_RAM` outside netplay, where saves stay temporary.
+    /// Both keep their host address for the whole session, including across
+    /// state loads and resets.
+    pub fn memory_region(&mut self, id: u32) -> Option<&mut [u8]> {
+        let bus = self.emu.bus_mut();
+        match id {
+            crate::abi::MEMORY_SYSTEM_RAM => Some(&mut bus.mem.chip_ram),
+            crate::abi::MEMORY_SAVE_RAM if self.cd_mode && !self.netplay => {
+                bus.akiko.as_mut().map(|akiko| akiko.nvram_bytes_mut())
+            }
+            _ => None,
+        }
     }
 
     pub fn av_info(&self) -> AvInfo {

@@ -132,6 +132,11 @@ impl A2091 {
         self.wd.first_cd()
     }
 
+    /// The disk images on the board's bus, in ID order.
+    pub fn disk_images(&self) -> impl Iterator<Item = &crate::harddrive::HardDriveImage> {
+        self.wd.disk_images()
+    }
+
     /// Mutable view of the lowest-ID CD-ROM drive on the board's bus.
     pub fn first_cd_mut(&mut self) -> Option<&mut crate::scsi::ScsiCdRom> {
         self.wd.first_cd_mut()

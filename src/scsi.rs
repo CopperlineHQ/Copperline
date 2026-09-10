@@ -718,6 +718,14 @@ impl ScsiTarget {
         }
     }
 
+    /// The disk image behind this target, when it is a disk.
+    pub fn disk_ref(&self) -> Option<&HardDriveImage> {
+        match self {
+            ScsiTarget::Disk(disk) => Some(&disk.disk),
+            ScsiTarget::CdRom(_) => None,
+        }
+    }
+
     /// Mutable view of the CD-ROM drive behind this target, when it is one.
     pub fn cd_mut(&mut self) -> Option<&mut ScsiCdRom> {
         match self {
@@ -886,6 +894,15 @@ impl Wd33c93 {
     /// The lowest-ID CD-ROM drive on the bus, when one is attached.
     pub fn first_cd(&self) -> Option<&ScsiCdRom> {
         self.targets.iter().flatten().find_map(ScsiTarget::cd_ref)
+    }
+
+    /// The disk targets on the bus in ID order, for naming the machine's
+    /// media.
+    pub fn disk_images(&self) -> impl Iterator<Item = &HardDriveImage> {
+        self.targets
+            .iter()
+            .flatten()
+            .filter_map(ScsiTarget::disk_ref)
     }
 
     /// Mutable view of the lowest-ID CD-ROM drive on the bus.

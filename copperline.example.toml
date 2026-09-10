@@ -23,7 +23,7 @@ rom = "kickstart.rom"
 # base = "/somewhere/else"    # move the whole tree in one line
 # states = "states"           # save states, incl. the quick-save slots
 # screenshots = "screenshots"
-# recordings = "recordings"   # video captures and recorded input scripts
+# recordings = "recordings"   # video captures, GIF clips and recorded input scripts
 # nvram = "nvram"             # battery-backed RAMs, incl. CD32 game saves
 # traces = "traces"           # debugger traces and waveform captures
 # configs = "configs"         # configurations saved from the launcher
@@ -653,6 +653,20 @@ video = "PAL"
 # readonly = true
 
 
+# Host <-> guest clipboard sharing: text copied in the guest (an FTXT clip
+# in clipboard.device unit 0) lands on the host clipboard, and host text is
+# available to paste in the guest, with Latin-1 and line-end conversion.
+# The guest side rides the services board's ROM (Kickstart 1.3 and later,
+# no guest configuration). Unset, the session decides: on in a windowed
+# session, off headless -- the host clipboard is live host state a replay
+# cannot reproduce. share = true fits the bridge even headless (reachable
+# through the control protocol's clipboard.get/set); share = false leaves
+# it out. Also --clipboard / --no-clipboard, and Input Settings > Share
+# Clipboard at runtime.
+# [clipboard]
+# share = true
+
+
 # Presentation options. overscan: "tv" (default; mask deep horizontal
 # overscan like a CRT bezel) or "full".
 # tv_h_centre / tv_v_centre: centre the TV picture on the glass, like a
@@ -740,6 +754,15 @@ video = "PAL"
 # menu_scale = "1x"
 # full_screen = false
 # status_bar = true
+
+# [recording] -- the GIF clip ring behind Save Clip as GIF (Cmd/Alt+Shift+G)
+# and the rate of every GIF clip, including headless --gif-after captures.
+# clip_seconds: emulated seconds of the presented picture the window keeps
+# (default 10, up to 120); 0 switches the ring and the menu item off.
+# clip_fps: GIF frame rate, 1 to 60 (default 0 = 25 on PAL, 30 on NTSC).
+# [recording]
+# clip_seconds = 10
+# clip_fps = 0
 
 
 [audio]

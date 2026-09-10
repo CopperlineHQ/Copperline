@@ -1629,7 +1629,36 @@ pub(super) fn render_present_frame(
             height: src_rows as u32,
         };
     }
+    let mut picture = Vec::new();
+    let (width, height) = present_capture_frame(
+        present_fb,
+        src_rows,
+        src_width,
+        overscan,
+        tv_centre,
+        tv_aperture_rows,
+        &mut picture,
+    );
+    PresentImage {
+        pixels: Cow::Owned(picture),
+        width: width as u32,
+        height: height as u32,
+    }
+}
 
+/// The picture a capture shows -- the presentation buffer through the
+/// same crop, aperture and aspect geometry as the live window -- built
+/// into `out` (cleared and resized). Returns its width and height. Shared
+/// by screenshots, frame dumps and GIF clips so they all show one shape.
+pub(super) fn present_capture_frame(
+    present_fb: &[u32],
+    src_rows: usize,
+    src_width: usize,
+    overscan: Overscan,
+    tv_centre: TvCentre,
+    tv_aperture_rows: Option<usize>,
+    out: &mut Vec<u32>,
+) -> (usize, usize) {
     if let Some(aperture_rows) = tv_aperture_rows {
         if overscan == Overscan::Tv && src_width == FB_WIDTH {
             // Both standards' apertures fill the same 4:3 glass, so the
@@ -1642,13 +1671,14 @@ pub(super) fn render_present_frame(
             // as the window shows it.
             let (source_x_offset, source_y_offset) = tv_centre_source_offset(tv_centre);
             let black = rgba(0, 0, 0);
-            let mut glass = vec![0u32; FB_WIDTH * TV_GLASS_PRESENT_ROWS];
+            out.clear();
+            out.resize(FB_WIDTH * TV_GLASS_PRESENT_ROWS, 0);
             for out_y in 0..TV_GLASS_PRESENT_ROWS {
                 let crop_y =
                     screenshot::scaled_source_row(out_y, aperture_rows, TV_GLASS_PRESENT_ROWS);
                 let src_y = (TV_PRESENT_SOURCE_Y + crop_y).min(src_rows.saturating_sub(1)) as i32
                     + source_y_offset;
-                let dst = &mut glass[out_y * FB_WIDTH..(out_y + 1) * FB_WIDTH];
+                let dst = &mut out[out_y * FB_WIDTH..(out_y + 1) * FB_WIDTH];
                 if !(0..src_rows as i32).contains(&src_y) {
                     dst.fill(black);
                     continue;
@@ -1659,11 +1689,7 @@ pub(super) fn render_present_frame(
                     *px = tv_glass_sample(row, out_x, source_x_offset);
                 }
             }
-            return PresentImage {
-                pixels: Cow::Owned(glass),
-                width: FB_WIDTH as u32,
-                height: TV_GLASS_PRESENT_ROWS as u32,
-            };
+            return (FB_WIDTH, TV_GLASS_PRESENT_ROWS);
         }
     }
 
@@ -1672,17 +1698,12 @@ pub(super) fn render_present_frame(
     // the window's: a saved picture keeps the aspect's shape whatever
     // the window is drawing.
     let out_rows = crate::video::capture_height() * src_width / FB_WIDTH;
-    let active = &present_fb[..src_rows * src_width];
-    let pixels = if out_rows == src_rows {
-        Cow::Borrowed(active)
-    } else {
-        let mut scaled = Vec::new();
-        screenshot::scale_y_into(active, src_width, src_rows, out_rows, &mut scaled);
-        Cow::Owned(scaled)
-    };
-    PresentImage {
-        pixels,
-        width: src_width as u32,
-        height: out_rows as u32,
-    }
+    screenshot::scale_y_into(
+        &present_fb[..src_rows * src_width],
+        src_width,
+        src_rows,
+        out_rows,
+        out,
+    );
+    (src_width, out_rows)
 }

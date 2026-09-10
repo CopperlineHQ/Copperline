@@ -876,6 +876,7 @@ impl TryFrom<RawConfig> for Config {
         };
 
         let toccata = raw.toccata.enabled.unwrap_or(defaults.toccata);
+        let clipboard_share = raw.clipboard.share.or(defaults.clipboard_share);
 
         // `[cartridge]`: a model with no image of its own gets the bundled
         // one (resolved to a path by config::resolve); an image with no
@@ -903,6 +904,37 @@ impl TryFrom<RawConfig> for Config {
             }
         };
         let mhi = raw.mhi.enabled.unwrap_or(defaults.mhi);
+
+        // `[recording]`: the clip ring is bounded in time (and by a byte
+        // budget in gifclip.rs); the rate caps at the field rate.
+        let recording = {
+            let clip_seconds = match raw.recording.clip_seconds {
+                None => defaults.recording.clip_seconds,
+                Some(secs) if secs <= crate::gifclip::MAX_CLIP_SECONDS => secs,
+                Some(secs) => {
+                    errors.push(anyhow!(
+                        "[recording] clip_seconds must be between 0 and {}, got {secs}",
+                        crate::gifclip::MAX_CLIP_SECONDS
+                    ));
+                    defaults.recording.clip_seconds
+                }
+            };
+            let clip_fps = match raw.recording.clip_fps {
+                None => defaults.recording.clip_fps,
+                Some(fps) if fps <= crate::gifclip::MAX_CLIP_FPS => fps,
+                Some(fps) => {
+                    errors.push(anyhow!(
+                        "[recording] clip_fps must be between 0 (automatic) and {}, got {fps}",
+                        crate::gifclip::MAX_CLIP_FPS
+                    ));
+                    defaults.recording.clip_fps
+                }
+            };
+            RecordingConfig {
+                clip_seconds,
+                clip_fps,
+            }
+        };
 
         // `[hostsocket]` expands to the bundled WASM plugin board (see
         // crate::hostsocket), appended after any [[zorro]] metadata boards.
@@ -1368,7 +1400,9 @@ impl TryFrom<RawConfig> for Config {
             lide,
             a2065_net,
             toccata,
+            clipboard_share,
             cartridge,
+            recording,
             mhi,
             hostsocket_net,
             hostsocket_transport,

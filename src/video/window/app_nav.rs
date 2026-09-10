@@ -190,6 +190,11 @@ impl App {
         event_loop: Option<&ActiveEventLoop>,
     ) -> bool {
         use crate::video::nav::{Dir, NavTarget};
+        // The Load State browser keeps its own selection and focus, like
+        // the menu: a list walked by the arrows, then a row of buttons.
+        if self.states_nav_move(dir) {
+            return true;
+        }
         // The menu keeps its own cursor -- it is a tree, not a page --
         // so while it is open the focus is that cursor, whichever hand
         // is moving it.
@@ -331,6 +336,9 @@ impl App {
     /// else is pressed. The first press only shows the focus, so the
     /// interface never acts on a control nobody could see was chosen.
     pub(super) fn nav_press(&mut self, event_loop: Option<&ActiveEventLoop>) -> bool {
+        if self.states_nav_press(event_loop) {
+            return true;
+        }
         if self.ui.menu_open {
             self.activate_menu_row(event_loop);
             if let Some(event_loop) = event_loop {
@@ -428,6 +436,11 @@ impl App {
         if self.nav.open() {
             self.nav.close();
             self.request_redraw();
+            return;
+        }
+        // The browser's delete question steps back out before the browser
+        // itself does.
+        if self.states_nav_back() {
             return;
         }
         if self.ui.menu_open {

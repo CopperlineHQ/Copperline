@@ -132,6 +132,11 @@ impl Sdmac {
         self.wd.first_cd()
     }
 
+    /// The disk images on the bus, in ID order.
+    pub fn disk_images(&self) -> impl Iterator<Item = &crate::harddrive::HardDriveImage> {
+        self.wd.disk_images()
+    }
+
     /// Mutable view of the lowest-ID CD-ROM drive on the bus.
     pub fn first_cd_mut(&mut self) -> Option<&mut crate::scsi::ScsiCdRom> {
         self.wd.first_cd_mut()

@@ -251,6 +251,11 @@ impl CdtvController {
         self.disc.is_some() || self.pending_disc.is_some()
     }
 
+    /// The disc that is mounted or waiting in the tray, for naming it.
+    pub fn disc_ref(&self) -> Option<&CdImage> {
+        self.disc.as_ref().or(self.pending_disc.as_ref())
+    }
+
     /// Whether the drive is actively working: streaming CD audio, or a
     /// data read in flight (sectors still owed, DMA running, or the
     /// completion interrupt pending). Feeds the status-bar CD LED.

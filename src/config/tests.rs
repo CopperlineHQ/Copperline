@@ -3746,10 +3746,64 @@ fn emulation_uaelib_files_is_an_explicit_opt_in() -> Result<()> {
 }
 
 #[test]
+fn clipboard_share_is_unset_by_default_and_follows_the_key_or_flag() -> Result<()> {
+    assert_eq!(parse_config("")?.clipboard_share, None);
+    assert_eq!(
+        parse_config("[clipboard]\nshare = true\n")?.clipboard_share,
+        Some(true)
+    );
+    assert_eq!(
+        parse_config("[clipboard]\nshare = false\n")?.clipboard_share,
+        Some(false)
+    );
+    let overrides = ConfigOverrides {
+        clipboard: Some(true),
+        ..Default::default()
+    };
+    assert!(!overrides.is_empty());
+    assert_eq!(load_overrides(&overrides)?.clipboard_share, Some(true));
+    Ok(())
+}
+
+#[test]
 fn toccata_is_absent_by_default_and_fits_when_enabled() -> Result<()> {
     assert!(!parse_config("")?.toccata);
     let cfg = parse_config("[toccata]\nenabled = true\n")?;
     assert!(cfg.toccata);
+    Ok(())
+}
+
+#[test]
+fn recording_clip_settings_default_and_validate() -> Result<()> {
+    let cfg = parse_config("")?;
+    assert_eq!(
+        cfg.recording,
+        RecordingConfig {
+            clip_seconds: crate::gifclip::DEFAULT_CLIP_SECONDS,
+            clip_fps: 0,
+        }
+    );
+    let cfg = parse_config("[recording]\nclip_seconds = 30\nclip_fps = 15\n")?;
+    assert_eq!(
+        cfg.recording.clip_settings(),
+        crate::gifclip::ClipSettings {
+            seconds: 30,
+            fps: 15
+        }
+    );
+    // 0 switches the ring off; the rate's 0 means automatic.
+    let cfg = parse_config("[recording]\nclip_seconds = 0\nclip_fps = 0\n")?;
+    assert_eq!(cfg.recording.clip_seconds, 0);
+    assert_eq!(cfg.recording.clip_fps, 0);
+
+    let err = parse_config("[recording]\nclip_seconds = 500\n").unwrap_err();
+    assert!(format!("{err:#}").contains("clip_seconds"), "{err:#}");
+    let err = parse_config("[recording]\nclip_fps = 120\n").unwrap_err();
+    assert!(format!("{err:#}").contains("clip_fps"), "{err:#}");
+    assert!(
+        parse_config("[recording]\nclip_len = 3\n").is_err(),
+        "unknown [recording] keys are rejected"
+    );
     Ok(())
 }
 

@@ -83,6 +83,22 @@ into it (the committed guest probe from `guest/hostfs-test/`), and assert
 the file the probe creates arrives on the host side -- autoboot, handler
 startup, LoadSeg off the volume, and a write back through it, end to end.
 
+### Clipboard sharing
+
+`clipboard_text_crosses_both_ways_under_aros` (`tests/clipboard.rs`) boots
+the bundled AROS ROM but needs one asset: a guest `clipboard.device`,
+which is disk-based on AROS as on Kickstart (the ROM carries none). Point
+`COPPERLINE_CLIPBOARD_DEVICE` at one, or put it in the asset directory as
+`clipboard.device` or `Devs/clipboard.device` (the `Devs` drawer of any
+Workbench 2.0+ or AROS distribution has it); the test skips otherwise. It
+`--run`s the committed `guest/clipboard-test/` probe with `--clipboard`
+and a headless control server; the probe installs the device into
+`DEVS:`, posts an FTXT clip, which the services ROM's bridge pushes and
+the test reads back through `clipboard.get`, then the test stages a reply
+with `clipboard.set` and asserts the probe wrote the text it found in
+`clipboard.device` into its host directory -- the whole register protocol
+against the real guest ROM code, both ways.
+
 ### ATAPI CD-ROM firmware compatibility
 
 `tests/atapi_cd.rs` boots a `[lide]` Zorro II IDE board with LIV2's real
@@ -378,6 +394,7 @@ baselines to maintain.
 | `reset_dsksync_boot_regression_reaches_boot_display` | `KICK13.ROM` |
 | `hostfs_boot_aros_runs_a_guest_binary_and_writes_to_the_host` | *(none)* |
 | `hostfs_boot_kick13_runs_a_guest_binary_and_writes_to_the_host` | `KICK13.ROM` |
+| `clipboard_text_crosses_both_ways_under_aros` | `clipboard.device` (or `Devs/clipboard.device`; `COPPERLINE_CLIPBOARD_DEVICE` overrides) |
 | `cannon_fodder_streams_cleanly_through_the_aros_open_rom` | AROS main/ext ROMs with PR 1089 merged (the bundled pair qualifies), generated `copperline-fmv.rom`, Cannon Fodder CUE and tracks |
 | `cannon_fodder_streams_cleanly_through_the_standalone_kickstart_rom` | CD32 Kickstart 3.1 main/ext ROMs, generated `copperline-fmv.rom`, Cannon Fodder CUE and tracks; supplied through the `COPPERLINE_FMV_*` variables above |
 | `ocs_bpu7_ham_captures_*` (incl. live-audio variant) | `kickstart205.rom`, `DESiRE-InsideTheMachine.adf` |

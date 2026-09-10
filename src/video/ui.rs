@@ -20,6 +20,7 @@ use crate::debugger::{BreakCond, CondOp, CondOperand};
 use crate::heatmap;
 
 mod configuration;
+mod states;
 pub(crate) use configuration::HOST_DISK_VISIBLE_ROWS;
 use configuration::*;
 pub(in crate::video) use configuration::{clip_path_to_chars, control_live, SAVE_ACTIONS};
@@ -27,6 +28,8 @@ pub(in crate::video) use configuration::{clip_path_to_chars, control_live, SAVE_
 pub(in crate::video) use configuration::{
     library_favourite_rows, library_version_max, library_visible_rows,
 };
+use states::*;
+pub(in crate::video) use states::{states_visible_rows, StatesAction, StatesFocus, StatesPanel};
 
 // ---------------------------------------------------------------------------
 // Palette
@@ -621,6 +624,9 @@ pub enum Panel {
     /// with no cursor position, so with several connected drives the drop
     /// lands anywhere on the window and the target is picked here.
     DropChooser(DropChooserState),
+    /// The Load State browser: the states folder and the quick-save slots
+    /// with their thumbnails. Boxed: it holds a decoded picture per row.
+    States(Box<StatesPanel>),
 }
 
 /// Menu/panel state owned by the window.
@@ -835,6 +841,11 @@ pub fn panel_control_at(panel: &Panel, pos: (i32, i32)) -> Option<UiControl> {
                 if button_rect.contains(pos) {
                     return Some(control);
                 }
+            }
+        }
+        Panel::States(panel) => {
+            if let Some(control) = states_control_at(rect, panel, pos) {
+                return Some(control);
             }
         }
         Panel::About | Panel::Shortcuts => {}
@@ -1169,6 +1180,15 @@ pub enum UiControl {
     LauncherNetplayAction(LauncherField),
     /// Drop chooser: insert the dropped disk(s) into this drive.
     DropDrive(usize),
+    /// A row of the Load State browser, by entry index.
+    StateRow(usize),
+    /// The browser's footer buttons.
+    StateLoad,
+    StateDelete,
+    StateBrowse,
+    /// The two answers of the browser's delete question.
+    StateConfirmDelete,
+    StateCancelDelete,
 }
 
 fn panel_dims(panel: &Panel) -> (usize, usize) {
@@ -1193,6 +1213,7 @@ fn panel_dims(panel: &Panel) -> (usize, usize) {
                 + state.drives.len() * (DROP_BUTTON_H + DROP_BUTTON_GAP)
                 + DROP_FOOTER_H,
         ),
+        Panel::States(_) => states_panel_dims(),
     }
 }
 
@@ -1207,6 +1228,7 @@ fn panel_title(panel: &Panel) -> &'static str {
         Panel::Console(_) => "Console",
         Panel::Launcher(_) => "Machine Configuration",
         Panel::DropChooser(_) => "Insert Disk",
+        Panel::States(_) => "Load State",
     }
 }
 
@@ -2758,7 +2780,7 @@ pub fn draw_drop_hint(frame: &mut [u8], texture_scale: usize) {
 
 /// Vertical pitch of a shortcut row. The panel is sized from this and the
 /// row count, and must stay inside `present_height()`.
-const SHORTCUT_ROW_H: usize = 17;
+const SHORTCUT_ROW_H: usize = 16;
 /// Trailing note lines under the shortcut table, and their pitch.
 const SHORTCUT_NOTES: [&str; 3] = [
     "Shortcuts: Cmd on macOS, Alt on Linux/Windows",
@@ -2771,7 +2793,7 @@ const SHORTCUT_NOTES_GAP: usize = 6;
 
 /// Panel height that exactly holds the table plus the notes, so adding a row
 /// does not silently push the last one off the bottom. The gap above the
-/// notes and the bottom margin are what a 25-row table leaves within the
+/// notes and the bottom margin are what a 27-row table leaves within the
 /// display.
 fn shortcuts_panel_height() -> usize {
     TITLE_H
@@ -2782,13 +2804,14 @@ fn shortcuts_panel_height() -> usize {
         + 8
 }
 
-const SHORTCUT_ROWS: [(&str, &str, bool); 26] = [
+const SHORTCUT_ROWS: [(&str, &str, bool); 27] = [
     ("Q", "Quit", true),
     ("E", "Open the menu", true),
     ("S", "Save screenshot", true),
     ("R", "Record video on/off", true),
     ("Shift+R", "Record input on/off", true),
     ("Shift+V", "Paste as keystrokes", true),
+    ("Shift+G", "Save clip as GIF", true),
     ("Shift+S", "Save state", true),
     ("Shift+L", "Load state", true),
     ("1-0", "Quick-save to a slot", true),
@@ -5687,6 +5710,7 @@ pub fn draw_panel_layer(
         (Panel::DropChooser(state), _) => {
             draw_drop_chooser(frame, rect, state, hover, texture_scale)
         }
+        (Panel::States(panel), _) => draw_states_panel(frame, rect, panel, hover, texture_scale),
         _ => {}
     }
 }

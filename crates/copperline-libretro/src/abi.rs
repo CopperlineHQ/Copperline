@@ -19,6 +19,50 @@ pub const KEYBOARD: u32 = 3;
 pub const CD32_PAD: u32 = JOYPAD | (2 << 8);
 pub const AUTO: u32 = JOYPAD | (1 << 8);
 
+/// `retro_get_memory_data` / `retro_get_memory_size` region ids.
+pub const MEMORY_SAVE_RAM: u32 = 0;
+pub const MEMORY_SYSTEM_RAM: u32 = 2;
+
+/// `retro_memory_descriptor` flags.
+pub const MEMDESC_CONST: u64 = 1 << 0;
+pub const MEMDESC_BIGENDIAN: u64 = 1 << 1;
+pub const MEMDESC_SYSTEM_RAM: u64 = 1 << 2;
+pub const MEMDESC_SAVE_RAM: u64 = 1 << 3;
+
+/// `retro_log_level` values.
+pub const LOG_WARN: u32 = 2;
+
+/// The variadic printf-style logger from `RETRO_ENVIRONMENT_GET_LOG_INTERFACE`.
+pub type LogPrintf = unsafe extern "C" fn(u32, *const c_char, ...);
+
+#[repr(C)]
+pub struct LogCallback {
+    pub log: Option<LogPrintf>,
+}
+
+/// One entry of `RETRO_ENVIRONMENT_SET_MEMORY_MAPS`: the guest address
+/// window `start..start+len` backed by host memory at `ptr`, in the named
+/// address space. `select` masks the address bits that identify the window
+/// and `disconnect` the bits the decoder ignores (none here).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MemoryDescriptor {
+    pub flags: u64,
+    pub ptr: *mut c_void,
+    pub offset: usize,
+    pub start: usize,
+    pub select: usize,
+    pub disconnect: usize,
+    pub len: usize,
+    pub addrspace: *const c_char,
+}
+
+#[repr(C)]
+pub struct MemoryMap {
+    pub descriptors: *const MemoryDescriptor,
+    pub num_descriptors: u32,
+}
+
 #[repr(C)]
 pub struct GameInfo {
     pub path: *const c_char,

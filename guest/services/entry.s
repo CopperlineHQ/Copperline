@@ -135,3 +135,50 @@ _diag_name:
 	.asciz	"Copperline"
 	.balign	2
 _diag_area_end:
+
+	| Clipboard bridge callbacks (see clipboard_main in handler.c). Both
+	| are handed a struct ClipShared through their data pointer:
+	|   +0  regs        APTR, the clipboard register bank in the window
+	|   +4  task        APTR, the bridge process
+	|   +8  irq_sigmask ULONG, signalled by the INT2 server
+	|   +12 hook_sigmask ULONG, signalled by the clipboard hook
+	|   +16 hook_clip_id LONG, chm_ClipID of the newest hook message
+	| Assembly rather than C: each runs in a foreign context (an interrupt
+	| server, clipboard.device's own task) with its own register contract,
+	| which the C ABI cannot express. Both only touch D0/D1/A0/A1 (plus a
+	| saved A6), so they preserve everything either contract demands.
+	.globl	_clip_int_server
+	.globl	_clip_hook
+
+	| INTB_PORTS server: A1 = is_Data (ClipShared), A6 = ExecBase. If the
+	| board is holding INT2 for us (CLIP_ST_IRQ), acknowledge it -- which
+	| drops the line -- and Signal() the bridge process, which reads the
+	| registers from a proper task context. Returns Z set so the shared
+	| level-2 chain carries on to the other PORTS servers.
+_clip_int_server:
+	move.l	(a1),a0			| regs
+	move.l	0x80(a0),d0		| CLIP_REG_STATUS
+	btst	#0,d0			| CLIP_ST_IRQ
+	beq.s	1f
+	move.l	#3,0x40(a0)		| CLIP_REG_CTRL = CLIP_CTRL_IRQACK
+	move.l	8(a1),d0		| irq_sigmask
+	move.l	4(a1),a1		| task
+	jsr	-324(a6)		| Signal()
+1:	moveq	#0,d0
+	rts
+
+	| CBD_CHANGEHOOK hook: A0 = struct Hook (h_Data at +16 = ClipShared),
+	| A1 = struct ClipHookMsg (chm_ClipID at +8), A2 = the clipboard unit.
+	| Runs in clipboard.device's context: record the clip ID of the change
+	| and Signal() the bridge, which decides whether it was its own write.
+_clip_hook:
+	move.l	16(a0),a0		| h_Data: ClipShared
+	move.l	8(a1),16(a0)		| hook_clip_id = chm_ClipID
+	move.l	a6,-(sp)
+	move.l	4.w,a6
+	move.l	12(a0),d0		| hook_sigmask
+	move.l	4(a0),a1		| task
+	jsr	-324(a6)		| Signal()
+	move.l	(sp)+,a6
+	moveq	#0,d0
+	rts

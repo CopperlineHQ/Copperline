@@ -774,8 +774,8 @@ mod tests {
         }
         assert_eq!(emu.machine.pc(), 0x100);
         assert_eq!(
-            emu.save_state_bytes().unwrap(),
-            second.save_state_bytes().unwrap()
+            emu.machine_state_bytes().unwrap(),
+            second.machine_state_bytes().unwrap()
         );
         let before = emu.machine.pc();
         let mut mismatch = UssFile::parse(&bytes).unwrap();

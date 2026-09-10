@@ -1315,7 +1315,8 @@ impl Emulator {
     /// `src/copperhf.rs`'s module doc).
     pub fn save_state(&mut self, path: &std::path::Path) -> Result<()> {
         self.bus_mut().copperhf_quiesce();
-        crate::savestate::save(&self.machine, &self.descriptor, path)
+        let meta = self.state_meta();
+        crate::savestate::save(&self.machine, &self.descriptor, Some(&meta), path)
     }
 
     /// `save_state` into memory instead of a file, for hosts with no
@@ -1323,9 +1324,62 @@ impl Emulator {
     /// download or IndexedDB). Same bytes, same format version.
     pub fn save_state_bytes(&mut self) -> Result<Vec<u8>> {
         self.bus_mut().copperhf_quiesce();
+        let meta = self.state_meta();
         let mut blob = Vec::new();
-        crate::savestate::save_to_writer(&self.machine, &self.descriptor, &mut blob)?;
+        crate::savestate::save_to_writer(&self.machine, &self.descriptor, Some(&meta), &mut blob)?;
         Ok(blob)
+    }
+
+    /// The machine alone, as `save_state_bytes` writes it but without the
+    /// `META` chunk: the bytes two snapshots of the same machine at the
+    /// same instant agree on, whatever the wall clock says. For
+    /// byte-identity checks (a debugger view that must not disturb the
+    /// machine, an import that must run deterministically), not for files.
+    pub fn machine_state_bytes(&mut self) -> Result<Vec<u8>> {
+        self.bus_mut().copperhf_quiesce();
+        let mut blob = Vec::new();
+        crate::savestate::save_to_writer(&self.machine, &self.descriptor, None, &mut blob)?;
+        Ok(blob)
+    }
+
+    /// What a state written now carries in its `META` chunk: a thumbnail
+    /// of the current frame from the side-effect-free display renderer
+    /// (the same picture `capture.screenshot` saves, so headless and
+    /// windowed saves agree byte for byte), the emulated and wall-clock
+    /// times, the machine summary, and the media names. A frame that
+    /// cannot be rendered leaves the thumbnail empty rather than failing
+    /// the save.
+    pub fn state_meta(&self) -> crate::savestate::StateMeta {
+        let (fb, lines, width) = crate::video::render_capture_frame(self.bus());
+        let chipset_glass = !self.bus().rtg_active();
+        let (thumbnail_png, thumbnail_width, thumbnail_height) =
+            match crate::savestate::meta::encode_thumbnail(&fb, width, lines, chipset_glass) {
+                Ok(thumbnail) => thumbnail,
+                Err(e) => {
+                    log::warn!("save state: no thumbnail: {e:#}");
+                    (Vec::new(), 0, 0)
+                }
+            };
+        // wasm32-unknown-unknown has no std clock (`SystemTime::now`
+        // panics there), and the browser frontend has no folder to browse
+        // anyway: its states carry 0, "unknown", for the wall clock.
+        #[cfg(not(target_arch = "wasm32"))]
+        let saved_at_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        #[cfg(target_arch = "wasm32")]
+        let saved_at_unix = 0;
+        crate::savestate::StateMeta {
+            thumbnail_png,
+            thumbnail_width,
+            thumbnail_height,
+            emulated_seconds: self.bus().emulated_seconds(),
+            emulated_frames: self.bus().emulated_frames(),
+            saved_at_unix,
+            machine: self.descriptor.short_summary(),
+            media: self.bus().media_names(),
+        }
     }
 
     /// Portable checkpoint for synchronous frontends. Unlike a desktop state,
@@ -3824,17 +3878,24 @@ fn build_machine_inner(
     // mount table, and per-unit host register banks in one 64K window; see
     // crate::filesys. The scsi.device cull rides the same DiagPoint, so the
     // board is also fitted (with no mounts) when only that is wanted.
-    if !cfg.filesys.is_empty() || cfg.rom_scsi_device_disable {
+    // The clipboard unit (`[clipboard] share`) rides the same board; the
+    // host clipboard only ever reaches the guest through a windowed
+    // session's poll or a control-protocol client, so a headless run with
+    // the unit fitted stays deterministic (see docs/internals/architecture.md).
+    let clipboard = cfg.clipboard_share == Some(true);
+    if !cfg.filesys.is_empty() || cfg.rom_scsi_device_disable || clipboard {
         let slot = devices.len();
         zorro.add_board(crate::zorro::BoardSpec::copperline_services(slot))?;
-        let mut board = crate::filesys::FilesysBoard::new(cfg.filesys.clone());
+        let mut board =
+            crate::filesys::FilesysBoard::new_with_clipboard(cfg.filesys.clone(), clipboard);
         if cfg.rom_scsi_device_disable {
             info!("romtags: the ROM's scsi.device will not be initialised");
             board.set_cull_rom_scsi_device(true);
         }
         info!(
-            "filesys: services board on the Zorro chain (slot {slot}), {} mount(s)",
-            cfg.filesys.len()
+            "filesys: services board on the Zorro chain (slot {slot}), {} mount(s), clipboard {}",
+            cfg.filesys.len(),
+            if clipboard { "shared" } else { "off" }
         );
         devices.push(crate::zorro_device::BoardDevice::Filesys(board));
     }

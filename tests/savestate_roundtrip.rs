@@ -228,9 +228,42 @@ fn uninterrupted_run(final_state: &Path) -> anyhow::Result<(Fingerprint, Vec<Fin
 /// serialized machine along the way. A single differing byte is a field
 /// that belongs out of the layout (host diagnostics) or a field the loader
 /// fails to carry across.
+///
+/// The comparison starts at the machine body: the clear-text `META` chunk
+/// ahead of it carries the host wall clock of the save, which is the one
+/// thing about two runs that is meant to differ. Its emulated-time fields
+/// and thumbnail, which are functions of the machine, must still agree.
 fn assert_final_states_identical(label: &str, expected: &Path, actual: &Path) {
     let want = std::fs::read(expected).expect("read the uninterrupted run's final state");
     let got = std::fs::read(actual).expect("read the resumed run's final state");
+    let want_peek = copperline::savestate::peek(want.as_slice()).expect("peek expected");
+    let got_peek = copperline::savestate::peek(got.as_slice()).expect("peek actual");
+    assert_eq!(
+        want_peek.descriptor, got_peek.descriptor,
+        "{label}: descriptor"
+    );
+    let (want_meta, got_meta) = (
+        want_peek.meta.expect("expected state carries metadata"),
+        got_peek.meta.expect("actual state carries metadata"),
+    );
+    assert_eq!(
+        (
+            want_meta.emulated_frames,
+            want_meta.emulated_seconds.to_bits()
+        ),
+        (
+            got_meta.emulated_frames,
+            got_meta.emulated_seconds.to_bits()
+        ),
+        "{label}: emulated time in the metadata"
+    );
+    assert_eq!(
+        want_meta.thumbnail_png, got_meta.thumbnail_png,
+        "{label}: the thumbnail is a function of the machine"
+    );
+    assert_eq!(want_meta.media, got_meta.media, "{label}: media names");
+    let want = &want[copperline::savestate::machine_body_offset(&want).expect("body offset")..];
+    let got = &got[copperline::savestate::machine_body_offset(&got).expect("body offset")..];
     if want == got {
         return;
     }

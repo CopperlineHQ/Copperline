@@ -50,6 +50,7 @@ range checks as the equivalent TOML fields:
 | `--cpu-clock MHZ` | `[cpu] clock_mhz` | a number of MHz |
 | `--fpu` / `--no-fpu` | `[cpu] fpu` | fit / omit a 68881/68882 |
 | `--jit` / `--no-jit` | `[cpu] jit` | experimental fast batch/trace-JIT CPU execution (68020+; not cycle-exact) |
+| `--clipboard` / `--no-clipboard` | `[clipboard] share` | share the host clipboard with the guest's `clipboard.device` (default: on windowed, off headless) |
 | `--cartridge MODEL` | `[cartridge] model` | `none` (default) or `hrtmon`, the bundled HRTMon freezer cartridge |
 | `--chip SIZE` | `[memory] chip` | `512K`, `1M`, `2M`, ... |
 | `--fast SIZE` | `[memory] fast` | `0`, `1M`, `4M`, `8M`, ... |
@@ -101,6 +102,8 @@ range checks as the equivalent TOML fields:
 | `--exit-on-return` | (no config key) | with `--run`: exit with the program's AmigaDOS return code ([Run](run.md#exit-on-return)) |
 | `--pcmcia-cf PATH` | `[pcmcia] card = "cf"`, `path` | a CompactFlash card over a hard-disk image in the A600/A1200 slot |
 | `--pcmcia-sram SIZE` | `[pcmcia] card = "sram"`, `size` | a session-only SRAM card in the slot, `64K` to `4M` |
+| `--gif-after SECS PATH` | (none) | write an animated GIF clip of the display from SECS emulated seconds, then exit (see [](headless.md#capturing-gif-clips)) |
+| `--gif-seconds N` | `[recording] clip_seconds` | length of each `--gif-after` clip in emulated seconds |
 
 For example, to boot a stock A1200 profile but with 8 MB of fast RAM and a
 faster CPU, with no config file at all:
@@ -204,7 +207,7 @@ simply goes unnamed and boots as usual.
 # base = "/somewhere/else"   # move the whole tree; the rest are under it
 # states = "states"          # save states, incl. the quick-save slots
 # screenshots = "screenshots"
-# recordings = "recordings"  # video captures and recorded input scripts
+# recordings = "recordings"  # video captures, GIF clips and recorded input scripts
 # nvram = "nvram"            # battery-backed RAMs, incl. CD32 game saves
 # traces = "traces"          # debugger traces and waveform captures
 # configs = "configs"        # configurations saved from the launcher
@@ -1178,6 +1181,23 @@ Windows select each device directly.
 (headless-only; see [](headless.md)) so it doesn't need `--audio-stems-mode`
 repeated on every invocation -- the CLI flag still wins when both are given.
 It has no effect without `--audio-stems DIR` on the command line.
+
+(recording-config)=
+## `[recording]`
+
+```toml
+[recording]
+clip_seconds = 10   # emulated seconds kept for Save Clip as GIF; 0 = off
+clip_fps = 0        # GIF frame rate; 0 = 25 on PAL, 30 on NTSC
+```
+
+The window keeps a rolling ring of the last `clip_seconds` (up to 120) of
+the presented picture for [Save Clip as GIF](ui.md#saving-a-gif-clip);
+`0` switches the ring and the menu item off. `clip_fps` (1 to 60) is the
+rate every GIF clip is written at, the interactive one and headless
+`--gif-after` captures alike; the default `0` picks half the field rate,
+25 fps on PAL and 30 on NTSC. Clips land in the `[paths] recordings`
+folder.
 
 ## `[input]`
 
@@ -2159,6 +2179,57 @@ directory as `SYS:` under 1.3 exactly as under 3.1 (the service speaks
 both the V36 boot-node protocol and V34's own autoboot and handler
 startup conventions). Kickstart 1.2 and older lack the expansion-ROM
 hook entirely and never see the mounts.
+
+(clipboard)=
+
+## `[clipboard]` -- host clipboard sharing
+
+```toml
+[clipboard]
+share = true    # default: on in a windowed session, off headless
+```
+
+Text copied in the guest -- anything an application posts to
+`clipboard.device` unit 0 as an IFF `FTXT` clip -- lands on the host
+clipboard, and text on the host clipboard is available to paste in the
+guest, the way WinUAE shares its clipboard. The guest side is a small
+resident bridge in the Copperline services board's ROM (the same board
+that serves `[[filesys]]` mounts), so it needs no guest configuration and
+no software installed: under Kickstart 2.0 and later it hooks
+`clipboard.device` for change notifications; under Kickstart 1.3, whose
+`clipboard.device` has no hooks, it re-reads the clip every two seconds and
+pushes it only when its ID is new. The
+device is disk-based on 1.3 and 3.1 (`DEVS:clipboard.device`), so the
+bridge waits for the boot volume to provide it, backing off and giving up
+quietly on a system without one -- a game booting from its own bootblock
+never sees any of this. The bridge's DOS device, `HOSTCLIP:`, is not a
+filesystem and refuses everything but its own startup.
+
+Host text reaches the guest as Latin-1 with LF line ends (characters the
+Amiga cannot show become `?`, CRLF folds to LF); guest text reaches the
+host as UTF-8 with the platform's line ends. Only text is shared; a
+picture on either clipboard is left alone. The host clipboard is read a
+few times a second while the emulator window has the focus, and only
+when its text changed. Up to 1 MiB of text crosses in either direction.
+
+`share` is unset by default, which means the session decides: a windowed
+session shares (the launcher's machines too), a headless run does not,
+since the host clipboard is live host state a replay cannot reproduce
+(see [Determinism and the host boundary](../internals/architecture.md#determinism-and-the-host-boundary)).
+Setting `share = true` (or `--clipboard`) fits the bridge regardless: in a
+headless run it is then reachable through the control protocol's
+`clipboard.get`/`clipboard.set` (see [Control](../debugger/control.md)),
+never through the host clipboard itself, and the run stays
+deterministic. That is also how a recording made in a windowed session
+replays headless with the same machine: pass `--clipboard`. `share =
+false` (or `--no-clipboard`) leaves the bridge out entirely. Netplay
+peers never share, on either side of the session and even with an explicit
+`--clipboard`: every peer must build the same machine, and the bridge is
+part of the services board's layout, so a session where one side fitted it
+could not agree on a machine at all. *Input
+Settings > Share Clipboard* toggles the host side at runtime; it is
+greyed out when the machine was started without the bridge, which is
+part of the board's boot and cannot be added later.
 
 ## `[whdload]` -- direct WHDLoad boot
 

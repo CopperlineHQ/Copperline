@@ -136,6 +136,11 @@ impl Gayle {
         self.ata.attach_drive(slot, drive);
     }
 
+    /// The hard-disk images on the port, in slot order.
+    pub fn hard_disk_images(&self) -> impl Iterator<Item = &crate::harddrive::HardDriveImage> {
+        self.ata.hard_disk_images()
+    }
+
     /// A numbered hard disk for frontend save persistence.
     pub fn hard_disk_mut(&mut self, slot: usize) -> Option<&mut crate::harddrive::HardDriveImage> {
         self.ata.hard_disk_mut(slot)

@@ -4167,6 +4167,8 @@ fn test_app_with_audio_cpu_and_program(
         Vec::new(),
         None,
         Vec::new(),
+        crate::gifclip::ClipSettings::default(),
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -4244,6 +4246,8 @@ fn test_app_with_copperhf_units(units: &[(usize, PathBuf)]) -> super::App {
         Vec::new(),
         Vec::new(),
         None,
+        Vec::new(),
+        crate::gifclip::ClipSettings::default(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -5667,6 +5671,177 @@ fn quick_save_slots_round_trip_and_report_empty_slots() {
     app.quick_load_state_at(7, Some(path), None);
     assert_eq!(app.emu.bus().emulated_frames(), saved_frame);
     assert_eq!(app.emu.machine.pc(), saved_pc);
+}
+
+/// The Load State browser against a real machine: a quick save lands in
+/// the list with its thumbnail and media, the keyboard walks to it and
+/// loads it, Delete asks and then removes it, and a state taken on another
+/// machine is flagged.
+#[test]
+fn state_browser_lists_loads_flags_and_deletes_states() {
+    use winit::keyboard::KeyCode;
+    let root = std::env::temp_dir().join(format!(
+        "copperline-state-browser-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).expect("create isolated states root");
+    let slot7 = crate::savestate::slot_path_in(&root, 7).expect("valid slot");
+
+    let mut app = test_app();
+    for _ in 0..6 {
+        app.emu.step_frame().expect("frame");
+    }
+    let saved_frame = app.emu.bus().emulated_frames();
+    app.quick_save_state_at(7, Some(slot7.clone()));
+    assert!(slot7.exists());
+    // A named state from a different machine: the same bytes with a
+    // different descriptor stamped on, which is what a load compares.
+    let other = root.join("copperline-state-20260101000000.clstate");
+    {
+        let mut descriptor = app.emu.machine_descriptor().clone();
+        descriptor.chipset = crate::config::Chipset::Aga;
+        descriptor.machine = Some(crate::config::MachineModel::A1200);
+        let meta = app.emu.state_meta();
+        crate::savestate::save(&app.emu.machine, &descriptor, Some(&meta), &other).unwrap();
+    }
+    std::fs::write(root.join("stray.clstate"), b"not a state").unwrap();
+
+    // The saved metadata describes the machine as the window sees it.
+    let peeked = crate::savestate::peek_path(&slot7).unwrap();
+    let meta = peeked.meta.expect("the window's save carries metadata");
+    assert_eq!(meta.emulated_frames, saved_frame);
+    assert_eq!(
+        (meta.thumbnail_width, meta.thumbnail_height),
+        (
+            crate::savestate::THUMBNAIL_WIDTH as u32,
+            crate::savestate::THUMBNAIL_HEIGHT as u32
+        )
+    );
+    assert!(meta.thumbnail_pixels().unwrap().is_some());
+    assert_eq!(meta.machine, app.emu.machine_descriptor().short_summary());
+    assert_eq!(meta.media.floppies.len(), 1, "the fixture has one drive");
+    assert_eq!(meta.media.floppies[0].drive, 0);
+
+    for _ in 0..6 {
+        app.emu.step_frame().expect("frame");
+    }
+    assert!(app.emu.bus().emulated_frames() > saved_frame);
+
+    app.open_states_browser_at(&root);
+    let panel = match app.ui.panel.as_ref() {
+        Some(Panel::States(panel)) => panel,
+        other => panic!("expected the states browser, got {}", other.is_some()),
+    };
+    assert_eq!(
+        panel.entries.len(),
+        crate::savestate::SLOT_COUNT + 2,
+        "ten slots plus two named files"
+    );
+    let slot = &panel.entries[6];
+    assert_eq!(slot.label, "Slot 7");
+    assert!(!slot.empty && slot.loadable());
+    assert!(slot.thumbnail.is_some());
+    assert_eq!(slot.emulated_seconds, Some(meta.emulated_seconds));
+    assert!(slot.mismatch.is_none());
+    assert!(slot.media.starts_with("DF0: "));
+    assert!(panel.entries[0].empty);
+    // The two named files sort by save time, which the fixture writes
+    // within a second of each other, so find them by name rather than
+    // betting on which side of a second boundary each one landed.
+    let entry = |label: &str| {
+        panel
+            .entries
+            .iter()
+            .find(|e| e.label == label)
+            .unwrap_or_else(|| panic!("{label} is missing from the browser"))
+    };
+    let named = entry("copperline-state-20260101000000.clstate");
+    assert!(named.thumbnail.is_some());
+    let flag = named
+        .mismatch
+        .as_deref()
+        .expect("flagged as another machine");
+    assert!(flag.contains("Aga"), "{flag}");
+    let stray = entry("stray.clstate");
+    assert!(stray.error.is_some());
+    assert!(!stray.loadable() && stray.deletable());
+
+    // Walk down to slot 7 and load it: the machine returns to the saved
+    // frame and the browser closes.
+    for _ in 0..6 {
+        assert!(app.ui_handle_key(KeyCode::ArrowDown, None, None));
+    }
+    if let Some(Panel::States(panel)) = app.ui.panel.as_ref() {
+        assert_eq!(panel.selected, 6);
+    }
+    assert!(app.ui_handle_key(KeyCode::Enter, None, None));
+    assert!(app.ui.panel.is_none(), "a load closes the browser");
+    assert_eq!(app.emu.bus().emulated_frames(), saved_frame);
+
+    // Delete asks, Escape keeps, a second Delete removes; the slot then
+    // shows as empty and the file is gone.
+    app.open_states_browser_at(&root);
+    for _ in 0..6 {
+        app.ui_handle_key(KeyCode::ArrowDown, None, None);
+    }
+    assert!(app.ui_handle_key(KeyCode::Delete, None, None));
+    if let Some(Panel::States(panel)) = app.ui.panel.as_ref() {
+        assert!(panel.confirm_delete);
+    }
+    assert!(app.ui_handle_key(KeyCode::Escape, None, None));
+    assert!(
+        matches!(app.ui.panel.as_ref(), Some(Panel::States(panel)) if !panel.confirm_delete),
+        "Escape withdraws the question, not the browser"
+    );
+    assert!(slot7.exists());
+    app.ui_handle_key(KeyCode::Delete, None, None);
+    assert!(app.ui_handle_key(KeyCode::Delete, None, None));
+    assert!(!slot7.exists(), "slot 7 removed");
+    if let Some(Panel::States(panel)) = app.ui.panel.as_ref() {
+        assert!(panel.entries[6].empty);
+        assert_eq!(panel.status.as_deref(), Some("Deleted Slot 7"));
+    } else {
+        panic!("the browser stays open after a deletion");
+    }
+    // Escape with no question up closes the browser.
+    assert!(app.ui_handle_key(KeyCode::Escape, None, None));
+    assert!(app.ui.panel.is_none());
+
+    // The pad walks the same list: down onto the button row, along it,
+    // and its second button steps out.
+    app.open_states_browser_at(&root);
+    use crate::video::nav::Dir;
+    for _ in 0..(crate::savestate::SLOT_COUNT + 2) {
+        assert!(app.nav_move(Dir::Down, None));
+    }
+    if let Some(Panel::States(panel)) = app.ui.panel.as_ref() {
+        assert_eq!(panel.focus, crate::video::ui::StatesFocus::Button(0));
+    }
+    assert!(app.nav_move(Dir::Right, None));
+    if let Some(Panel::States(panel)) = app.ui.panel.as_ref() {
+        assert_eq!(panel.focus, crate::video::ui::StatesFocus::Button(1));
+    }
+    app.nav_back();
+    assert!(app.ui.panel.is_none());
+
+    // Loading the other machine's state reconfigures, as any load does,
+    // and the OSD names what was loaded.
+    app.open_states_browser_at(&root);
+    app.activate_ui_control_with_event_loop(
+        UiControl::StateRow(crate::savestate::SLOT_COUNT),
+        None,
+    );
+    assert!(app.ui.panel.is_none());
+    assert_eq!(
+        app.emu.machine_descriptor().chipset,
+        crate::config::Chipset::Aga
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -8273,6 +8448,144 @@ fn windowless_run_fires_scheduled_input_and_flushes_recording() {
     );
     std::fs::remove_file(&shot).ok();
     std::fs::remove_file(&script).ok();
+}
+
+/// The clip ring through the app: presented frames enter at the clip
+/// rate through the screenshot geometry, and Save Clip as GIF writes a
+/// file the gif decoder reads back with the ring's frames at the
+/// capture's shape.
+#[test]
+fn clip_ring_captures_presented_frames_and_saves_a_gif() {
+    let mut app = test_app();
+    let path = temp_capture_path("clip.gif");
+    let mut rendered_frames = 0;
+    let mut quanta = 0;
+    while rendered_frames < 6 {
+        app.emu.step_frame().expect("step frame");
+        let rendered = if app.render_worker.is_some() {
+            app.finish_render_for_current_frame()
+        } else {
+            app.render_emulated_frame_if_needed()
+        };
+        app.capture_clip_frame(rendered);
+        if rendered {
+            rendered_frames += 1;
+        }
+        quanta += 1;
+        assert!(
+            quanta <= 24,
+            "fixture should keep producing renderable frames"
+        );
+    }
+    let ring = app
+        .clip_ring
+        .as_ref()
+        .expect("ring built on the first frame");
+    let expected_fps = crate::gifclip::default_clip_fps(app.emu.bus().agnus.video_standard());
+    assert_eq!(
+        ring.fps(),
+        expected_fps,
+        "automatic rate follows the standard"
+    );
+    // Thinned to the clip rate and stored once per distinct picture.
+    assert!(
+        ring.frame_count() >= 1 && ring.frame_count() <= rendered_frames / 2 + 1,
+        "{} frames from {rendered_frames} presented",
+        ring.frame_count()
+    );
+    assert!(ring.bytes() > 0);
+
+    let written = app.save_clip_gif_to(&path).expect("clip written");
+    assert_eq!(written as usize, ring.frame_count());
+    let bytes = std::fs::read(&path).expect("clip file exists");
+    std::fs::remove_file(&path).ok();
+    assert_eq!(&bytes[..6], b"GIF89a");
+    let mut decoder = gif::DecodeOptions::new()
+        .read_info(&bytes[..])
+        .expect("clip parses");
+    let frame = decoder
+        .read_next_frame()
+        .expect("clip frame parses")
+        .expect("clip has a frame");
+    // The fixture presents its Full-overscan canvas: the clip has the
+    // same shape a screenshot of it would.
+    assert_eq!(usize::from(frame.width), crate::video::FB_WIDTH);
+    assert_eq!(usize::from(frame.height), crate::video::capture_height());
+    assert!(frame.palette.is_some(), "frames carry their own palette");
+
+    // Without a ring there is nothing to save.
+    let bare = test_app();
+    assert!(bare.save_clip_gif_to(&path).is_err());
+}
+
+/// `--gif-after` through the windowless loop: the clip covers exactly its
+/// window on the emulated timeline, and two runs of the same machine
+/// produce byte-identical files.
+#[test]
+fn windowless_run_writes_a_gif_clip_deterministically() {
+    let run = |name: &str| -> Vec<u8> {
+        let path = temp_capture_path(name);
+        let mut app = test_app();
+        app.pending_gif_captures = vec![super::GifCaptureSpec {
+            start_secs: 0.05,
+            seconds: 0.2,
+            path: path.clone(),
+        }];
+        app.run_headless().expect("windowless gif capture run");
+        let bytes = std::fs::read(&path).expect("clip written");
+        std::fs::remove_file(&path).ok();
+        bytes
+    };
+    let first = run("clip-a.gif");
+    let second = run("clip-b.gif");
+    assert_eq!(
+        first, second,
+        "the same run must produce a byte-identical clip"
+    );
+
+    let mut decoder = gif::DecodeOptions::new()
+        .read_info(&first[..])
+        .expect("clip parses");
+    let mut frames = 0u32;
+    let mut total_delay = 0u32;
+    while let Some(frame) = decoder.read_next_frame().expect("clip frame parses") {
+        frames += 1;
+        total_delay += u32::from(frame.delay);
+    }
+    // 0.2 s at the automatic rate (25 fps PAL, 30 fps NTSC) is five or
+    // six frames whose delays add up to the window: 20 cs.
+    assert!((5..=7).contains(&frames), "{frames} frames");
+    assert!((19..=21).contains(&total_delay), "{total_delay} cs");
+}
+
+/// Scheduled captures of different kinds share one run: a clip that
+/// finishes early must not end the run before a later screenshot fires,
+/// and a screenshot must not end it while a clip is still recording.
+/// Each kind used to end the run the moment its own list emptied, which
+/// silently dropped whatever the other kind still had pending.
+#[test]
+fn a_finished_clip_does_not_cut_a_later_screenshot_short() {
+    let clip = temp_capture_path("mixed-clip.gif");
+    let early = temp_capture_path("mixed-early.png");
+    let late = temp_capture_path("mixed-late.png");
+    let mut app = test_app();
+    // The screenshot before the clip, and one after it: the run must reach
+    // both, whichever capture kind happens to finish first.
+    app.pending_auto_shot = vec![(0.05, early.clone()), (0.4, late.clone())];
+    app.pending_gif_captures = vec![super::GifCaptureSpec {
+        start_secs: 0.1,
+        seconds: 0.1,
+        path: clip.clone(),
+    }];
+    app.run_headless().expect("mixed capture run");
+    for path in [&clip, &early, &late] {
+        assert!(
+            path.exists(),
+            "{} was never written: a capture ended the run early",
+            path.display()
+        );
+        std::fs::remove_file(path).ok();
+    }
 }
 
 #[test]

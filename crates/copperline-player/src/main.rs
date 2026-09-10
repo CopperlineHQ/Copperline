@@ -127,6 +127,8 @@ fn main() -> Result<()> {
         Vec::new(),
         None,
         Vec::new(),
+        cfg.recording.clip_settings(),
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),

@@ -27,7 +27,7 @@ use copperline::emulator::Emulator;
 use copperline::floppy::FloppyController;
 use copperline::memory::Memory;
 use copperline::serial::StdoutSink;
-use copperline::video::window::{App, DiskInsertSpec};
+use copperline::video::window::{App, DiskInsertSpec, GifCaptureSpec};
 use copperline::video::HOST_SHORTCUT_MODIFIER_LABEL;
 
 mod cli;
@@ -103,6 +103,11 @@ fn validate_benchmark_args(cli: &CliArgs) -> Result<()> {
     if cli.frame_dump.is_some() {
         return Err(anyhow!(
             "--benchmark-until cannot be combined with --dump-frames"
+        ));
+    }
+    if !cli.gif_after.is_empty() {
+        return Err(anyhow!(
+            "--benchmark-until cannot be combined with --gif-after"
         ));
     }
     if cli.live_audio_profile_secs.is_some() {
@@ -207,6 +212,9 @@ fn validate_gdb_args(cli: &CliArgs) -> Result<()> {
     if cli.frame_dump.is_some() {
         return Err(anyhow!("--gdb cannot be combined with --dump-frames"));
     }
+    if !cli.gif_after.is_empty() {
+        return Err(anyhow!("--gdb cannot be combined with --gif-after"));
+    }
     if cli.live_audio_profile_secs.is_some() {
         return Err(anyhow!(
             "--gdb cannot be combined with --profile-live-audio"
@@ -276,6 +284,9 @@ fn validate_control_args(cli: &CliArgs) -> Result<()> {
     }
     if cli.frame_dump.is_some() {
         return Err(anyhow!("--control cannot be combined with --dump-frames"));
+    }
+    if !cli.gif_after.is_empty() {
+        return Err(anyhow!("--control cannot be combined with --gif-after"));
     }
     if cli.live_audio_profile_secs.is_some() {
         return Err(anyhow!(
@@ -1104,6 +1115,7 @@ fn main() -> Result<()> {
     let headless_capture = !cli.screenshot_after.is_empty()
         || !cli.expect_screenshot.is_empty()
         || cli.frame_dump.is_some()
+        || !cli.gif_after.is_empty()
         || cli.benchmark_until.is_some()
         || cli.gdb.is_some()
         || cli.control.is_some()
@@ -1120,6 +1132,18 @@ fn main() -> Result<()> {
         info!("emulation timing: paced to wall-clock because a physical floppy drive is attached");
     }
     info!("emulation timing: deterministic core, paced={paced}");
+    // Host clipboard sharing defaults on for a windowed session and off
+    // headless: the host clipboard is live host state a replay cannot
+    // reproduce (see docs/internals/architecture.md). Netplay peers must
+    // build identical machines, and the unit is part of the services
+    // board's layout, so a session never shares on either side -- not the
+    // guest, not the host, and not on an explicit --clipboard, which would
+    // otherwise leave a host-coupled input live across rollbacks.
+    if cli.netplay.is_some() || netplay_guest {
+        cfg.clipboard_share = Some(false);
+    } else if cfg.clipboard_share.is_none() {
+        cfg.clipboard_share = Some(!headless_capture);
+    }
     let mut emu = emulator::build_machine(
         &cfg,
         audio,
@@ -1242,6 +1266,7 @@ fn main() -> Result<()> {
     let windowless_capture = (!cli.screenshot_after.is_empty()
         || !cli.expect_screenshot.is_empty()
         || cli.frame_dump.is_some()
+        || !cli.gif_after.is_empty()
         || coverage_capture)
         && cli.control_gui.is_none()
         && cli.gdb_gui.is_none();
@@ -1300,12 +1325,35 @@ fn main() -> Result<()> {
     } else {
         None
     };
+    // Each --gif-after clip covers --gif-seconds, defaulting to the
+    // configured ring length; a ring switched off has no length to lend.
+    let gif_seconds = match cli.gif_seconds {
+        Some(secs) => secs,
+        None if cli.gif_after.is_empty() => 0.0,
+        None if cfg.recording.clip_seconds > 0 => cfg.recording.clip_seconds as f32,
+        None => {
+            return Err(anyhow!(
+                "--gif-after needs --gif-seconds N: [recording] clip_seconds is 0"
+            ))
+        }
+    };
+    let gif_after: Vec<GifCaptureSpec> = cli
+        .gif_after
+        .into_iter()
+        .map(|(start_secs, path)| GifCaptureSpec {
+            start_secs,
+            seconds: gif_seconds,
+            path,
+        })
+        .collect();
     let mut app = App::new(
         emu,
         cfg.emulation.power_on,
         cli.screenshot_after,
         cli.save_state_after,
         cli.frame_dump,
+        gif_after,
+        cfg.recording.clip_settings(),
         cli.press_after,
         cli.click_after,
         cli.joy_after,
@@ -1480,6 +1528,8 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         Vec::new(),
         None,
         Vec::new(),
+        copperline::gifclip::ClipSettings::default(),
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -1551,6 +1601,7 @@ fn launcher_requested(cli: &CliArgs) -> bool {
         && !cli.exit_on_return
         && cli.save_state_after.is_empty()
         && cli.frame_dump.is_none()
+        && cli.gif_after.is_empty()
         && cli.benchmark_until.is_none()
         && cli.gdb.is_none()
         && cli.gdb_gui.is_none()
@@ -1933,6 +1984,50 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn gif_flags_parse_and_validate() {
+        let args = parse(&[
+            "--gif-after",
+            "24",
+            "intro.gif",
+            "--gif-after",
+            "40",
+            "boss.gif",
+            "--gif-seconds",
+            "5",
+        ])
+        .unwrap();
+        let clips: Vec<_> = args
+            .gif_after
+            .iter()
+            .map(|(secs, path)| (*secs, path.to_string_lossy().into_owned()))
+            .collect();
+        assert_eq!(
+            clips,
+            vec![
+                (24.0, "intro.gif".to_owned()),
+                (40.0, "boss.gif".to_owned())
+            ]
+        );
+        assert_eq!(args.gif_seconds, Some(5.0));
+        // The length defaults to [recording] clip_seconds when omitted.
+        let args = parse(&["--gif-after", "24", "intro.gif"]).unwrap();
+        assert_eq!(args.gif_seconds, None);
+
+        let err = parse(&["--gif-seconds", "5"]).unwrap_err();
+        assert!(err.to_string().contains("--gif-after"), "{err:#}");
+        assert!(parse(&["--gif-after", "1"]).is_err());
+        assert!(parse(&["--gif-after", "soon", "x.gif"]).is_err());
+        assert!(parse(&["--gif-after", "1", "x.gif", "--gif-seconds", "0"]).is_err());
+        assert!(parse(&["--gif-after", "1", "x.gif", "--gif-seconds", "500"]).is_err());
+
+        // Like every capture flag, it cannot share the machine with the
+        // benchmark runner.
+        let args = parse(&["--gif-after", "1", "x.gif", "--benchmark-until", "5"]).unwrap();
+        let err = validate_benchmark_args(&args).unwrap_err();
+        assert!(err.to_string().contains("--gif-after"), "{err:#}");
     }
 
     #[test]

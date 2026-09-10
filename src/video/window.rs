@@ -754,6 +754,15 @@ pub struct FrameDumpSpec {
     pub count: u32,
 }
 
+/// A scheduled `--gif-after SECS PATH` clip: `seconds` of presented frames
+/// from `start_secs`, written to `path` at the configured clip rate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GifCaptureSpec {
+    pub start_secs: f32,
+    pub seconds: f32,
+    pub path: PathBuf,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiskInsertSpec {
     pub secs: f32,
@@ -966,6 +975,9 @@ pub struct App {
     netplay_disk_picker: Option<(usize, app_netplay::DiskPicker)>,
     // Linux serves clipboard selections from the owning instance.
     host_clipboard: Option<arboard::Clipboard>,
+    /// When the host clipboard is next polled for the guest
+    /// (`service_clipboard`).
+    clipboard_next_poll: Option<Instant>,
     emu: Emulator,
     fb: Vec<u32>,
     /// Merges rendered fields into the double-height presentation
@@ -1525,6 +1537,23 @@ pub struct App {
     /// Scratch for narrowing a 35 ns-canvas presentation to the recorder's
     /// fixed FB_WIDTH frame.
     record_scratch_fb: Vec<u32>,
+    /// `[recording]` clip settings. The ring itself is built on the first
+    /// presented frame, once the machine's video standard (which picks the
+    /// automatic clip rate) is known.
+    clip_settings: crate::gifclip::ClipSettings,
+    /// The rolling last-N-seconds ring behind Save Clip as GIF; None
+    /// until the first frame, or for good when `clip_seconds` is 0.
+    clip_ring: Option<crate::gifclip::ClipRing>,
+    /// A clip being written on a background thread: its outcome flashes
+    /// on the OSD when it lands.
+    clip_save: Option<std::sync::mpsc::Receiver<Result<(PathBuf, u32, f64)>>>,
+    /// Scratch presentation picture for the clip ring and the headless
+    /// GIF captures (same geometry as a screenshot).
+    clip_fb: Vec<u32>,
+    /// Live `--gif-after` captures, armed from `pending_gif_captures` with
+    /// the other scheduled flags.
+    gif_captures: Vec<GifCaptureState>,
+    pending_gif_captures: Vec<GifCaptureSpec>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1570,6 +1599,68 @@ struct FrameDumpState {
     count: u32,
     dumped: u32,
     last_saved_emulated_frame: Option<u64>,
+}
+
+/// A live `--gif-after` capture. The writer opens on the first frame
+/// inside the window and closes once emulated time passes its end.
+struct GifCaptureState {
+    spec: GifCaptureSpec,
+    writer: Option<crate::gifclip::GifWriter<std::io::BufWriter<std::fs::File>>>,
+    selector: crate::gifclip::FrameSelector,
+    last_captured_emulated_frame: Option<u64>,
+    finished: bool,
+}
+
+impl GifCaptureState {
+    fn new(spec: GifCaptureSpec, fps: u32) -> Self {
+        Self {
+            spec,
+            writer: None,
+            selector: crate::gifclip::FrameSelector::new(fps),
+            last_captured_emulated_frame: None,
+            finished: false,
+        }
+    }
+
+    fn end_secs(&self) -> f64 {
+        f64::from(self.spec.start_secs) + f64::from(self.spec.seconds)
+    }
+
+    /// Write the last frame and the trailer. `end` is the emulated time
+    /// the clip stops at (None on an early exit: the final frame then
+    /// gets one nominal period).
+    fn finish(&mut self, end: Option<f64>) -> Result<u32> {
+        self.finished = true;
+        match self.writer.take() {
+            Some(writer) => {
+                let (mut out, frames) = writer.finish(end)?;
+                std::io::Write::flush(&mut out)?;
+                Ok(frames)
+            }
+            None => Ok(0),
+        }
+    }
+}
+
+impl Drop for GifCaptureState {
+    /// Best-effort finalize so a run that ends early (another capture's
+    /// schedule finished first, the window closed) still leaves a playable
+    /// file of what was captured.
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        match self.finish(None) {
+            Ok(frames) => info!(
+                "gif capture: {} closed early with {frames} frames",
+                self.spec.path.display()
+            ),
+            Err(e) => warn!(
+                "gif capture: finalizing {} on exit failed: {e:#}",
+                self.spec.path.display()
+            ),
+        }
+    }
 }
 
 struct Render {
@@ -1963,6 +2054,8 @@ impl App {
         screenshot_after: Vec<(f32, PathBuf)>,
         save_state_after: Vec<(f32, PathBuf)>,
         frame_dump: Option<FrameDumpSpec>,
+        gif_after: Vec<GifCaptureSpec>,
+        clip: crate::gifclip::ClipSettings,
         press_after: Vec<KeyPressSpec>,
         click_after: Vec<(f32, MouseButtonKind, u32, u8)>,
         joy_after: Vec<(f32, JoyButtonKind, u32, u8)>,
@@ -2014,7 +2107,8 @@ impl App {
         let powered_on = power_on
             || !screenshot_after.is_empty()
             || !save_state_after.is_empty()
-            || frame_dump.is_some();
+            || frame_dump.is_some()
+            || !gif_after.is_empty();
         let render_worker = threaded_render_enabled().then(|| {
             info!("threaded render pipeline enabled");
             RenderWorker::new()
@@ -2167,6 +2261,7 @@ impl App {
             panel_held_rawkeys: [false; 128],
             raw_device_held_rawkeys: [false; 128],
             main_window_focused: false,
+            clipboard_next_poll: None,
             window_manually_sized: false,
             snap_request_deadline: None,
             pending_canvas_follow: None,
@@ -2279,6 +2374,12 @@ impl App {
             recorder: None,
             record_fb: Vec::new(),
             record_scratch_fb: Vec::new(),
+            clip_settings: clip,
+            clip_ring: None,
+            clip_save: None,
+            clip_fb: Vec::new(),
+            gif_captures: Vec::new(),
+            pending_gif_captures: gif_after,
         };
         // Attach the sampler now for a directly-booted machine; the config-screen
         // placeholder passes a disabled request and attaches on Run instead.
@@ -3134,12 +3235,13 @@ impl App {
         if self.auto_shot.is_empty()
             && self.auto_expect.is_empty()
             && self.frame_dump.is_none()
+            && self.gif_captures.is_empty()
             && self.run_return_marker.is_none()
             && !coverage_run
         {
             return Err(anyhow!(
                 "windowless capture run needs --screenshot-after, --expect-screenshot, \
-                 --dump-frames, --coverage, or --exit-on-return"
+                 --dump-frames, --gif-after, --coverage, or --exit-on-return"
             ));
         }
         loop {
@@ -3167,6 +3269,9 @@ impl App {
             if self.dump_frame_if_due() {
                 return Ok(self.exit_status());
             }
+            if self.fire_gif_captures() {
+                return Ok(self.exit_status());
+            }
             self.fire_scheduled_events();
             self.fire_auto_save_state();
             if self.fire_auto_shot() {
@@ -3183,6 +3288,7 @@ impl App {
                 && self.auto_shot.is_empty()
                 && self.auto_expect.is_empty()
                 && self.frame_dump.is_none()
+                && self.gif_captures.is_empty()
             {
                 return Ok(self.exit_status());
             }
@@ -3280,6 +3386,20 @@ impl App {
         }
         self.auto_save_state
             .sort_by(|(a, _), (b, _)| a.total_cmp(b));
+        if !self.pending_gif_captures.is_empty() {
+            let fps = self
+                .clip_settings
+                .effective_fps(self.emu.bus().agnus.video_standard());
+            for spec in std::mem::take(&mut self.pending_gif_captures) {
+                info!(
+                    "gif capture armed: will write {} from {:.1}s for {:.1}s at {fps} fps",
+                    spec.path.display(),
+                    spec.start_secs,
+                    spec.seconds
+                );
+                self.gif_captures.push(GifCaptureState::new(spec, fps));
+            }
+        }
         if let Some(spec) = self.pending_frame_dump.take() {
             info!(
                 "frame dump armed: will save {} frames to {} after {:.1}s emulated time",
@@ -3687,6 +3807,12 @@ impl App {
         if !self.auto_shot.is_empty() || !self.auto_expect.is_empty() {
             return false;
         }
+        // A clip still recording (or a frame dump still running) is
+        // scheduled work of its own: the run ends with the last capture of
+        // any kind, not with the last screenshot.
+        if self.other_capture_work_pending() {
+            return false;
+        }
         self.emu.report_stats();
         self.emu.bus().poll_stats.dump_top("at screenshot");
         // Evaluate an untargeted reverse watchpoint at run end.
@@ -3950,6 +4076,12 @@ impl ApplicationHandler for App {
                         if host_shortcut_modifier_pressed(self.modifiers) =>
                     {
                         self.cycle_disk()
+                    }
+                    (KeyCode::KeyG, ElementState::Pressed)
+                        if host_shortcut_modifier_pressed(self.modifiers)
+                            && self.modifiers.shift_key() =>
+                    {
+                        self.save_clip_gif()
                     }
                     (KeyCode::KeyG, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers) =>
@@ -5160,6 +5292,7 @@ impl ApplicationHandler for App {
             event_loop.exit();
             return;
         }
+        self.service_clipboard();
         if self.render.is_none() {
             return;
         }
@@ -5538,6 +5671,8 @@ impl ApplicationHandler for App {
             rendered |= self.finish_render_for_current_frame();
         }
         self.capture_recorder_output(rendered);
+        self.capture_clip_frame(rendered);
+        self.poll_clip_save();
         // Skipping request_redraw for headless capture avoids the vsync gate so
         // the run advances as fast as the host allows; emulated state is
         // identical either way. (`headless_capture` was resolved above, before
@@ -5566,6 +5701,10 @@ impl ApplicationHandler for App {
         }
 
         if self.dump_frame_if_due() {
+            event_loop.exit();
+            return;
+        }
+        if self.fire_gif_captures() {
             event_loop.exit();
             return;
         }
@@ -6772,6 +6911,12 @@ impl App {
             }
             UiControl::LauncherRun => self.launcher_run(),
             UiControl::DropDrive(drive_idx) => self.drop_chooser_route(drive_idx),
+            UiControl::StateRow(_)
+            | UiControl::StateLoad
+            | UiControl::StateDelete
+            | UiControl::StateBrowse
+            | UiControl::StateConfirmDelete
+            | UiControl::StateCancelDelete => self.states_activate(control, event_loop),
             UiControl::AnalyzerTab(_)
             | UiControl::AnalyzerHeatPreset(_)
             | UiControl::AnalyzerResourceRow(_)
@@ -6802,6 +6947,7 @@ mod app_media;
 mod app_menus;
 mod app_nav;
 mod app_netplay;
+mod app_states;
 use app_nav::{cycle_hold_delay, PadNav};
 mod app_panels;
 mod app_session;

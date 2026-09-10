@@ -1,12 +1,27 @@
-# Guest-side filesys handler
+# Guest-side services handler
 
 `services_rom.bin` is the m68k code Copperline maps into its services board
 (Zorro II, manufacturer 0x1448 "dec0de Consulting", product 5) to provide
-host-directory mounts (`HOSTFS0:`, `HOSTFS1:`, ...). It is deliberately tiny:
-all filesystem semantics live in the emulator (`src/filesys.rs`); the handler
-only mounts the DOS devices and pumps DosPackets to the host through its
-unit's doorbell register in the board window (each mount unit has its own
-register bank, so handler processes never synchronize with each other).
+host-directory mounts (`HOSTFS0:`, `HOSTFS1:`, ...) and the host clipboard
+bridge. It is deliberately tiny: all filesystem semantics live in the
+emulator (`src/filesys.rs`); the handler only mounts the DOS devices and
+pumps DosPackets to the host through its unit's doorbell register in the
+board window (each mount unit has its own register bank, so handler
+processes never synchronize with each other).
+
+The clipboard bridge (`clipboard_main`, `src/clipboard.rs` on the host)
+is the handler process of the mount-table entry of kind
+`MOUNT_KIND_CLIPBOARD` -- the `HOSTCLIP:` DOS device, which exists only so
+DOS starts the process. It opens `clipboard.device` unit 0 (retrying on a
+backing-off timer, since the device is disk-based on Kickstart 1.3 and
+3.1), registers a `CBD_CHANGEHOOK` hook on V36+ (polls the clip ID on
+V34) to push guest clips to the host, and an `INTB_PORTS` server so the
+board's doorbell interrupt can hand it host text, which it writes into
+the device as an IFF `FTXT` stream. The hook and the interrupt server are
+assembly in `entry.s` (foreign register contracts); the layout of the
+bridge's register bank and 4K transfer windows is in
+`copperline_board.h`. `guest/clipboard-test/` holds the probe the
+`tests/clipboard.rs` integration test runs against it.
 
 Two entry points (see `entry.s` and `copperline_board.h`):
 

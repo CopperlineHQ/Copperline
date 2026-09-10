@@ -65,6 +65,7 @@ fn usage() -> &'static str {
        [--source-map FROM=TO ...]\n       \
      copperline-ctl exe2adf PROG [--boot] [--out FILE]\n       \
      copperline-ctl size-report PROG [--elf PROG.ELF] [--out FILE]\n       \
+     copperline-ctl state-info STATE.clstate [--thumbnail FILE.png]\n       \
      copperline-ctl diverge [--a BIN] [--b BIN] [--config-a FILE] [--config-b FILE] \
        [--arg-a ARG ...] [--arg-b ARG ...] (--until SECS | --frames N) [--stride N] \
        [--memory none|chip|all] [--step-block N] [--max-steps N] \
@@ -958,6 +959,44 @@ fn run_diverge() -> ExitCode {
     }
 }
 
+/// `copperline-ctl state-info STATE [--thumbnail FILE]`: print a save
+/// state's header and metadata as JSON (the `state.info` reply) without a
+/// session, and optionally write its thumbnail PNG out.
+fn run_state_info() -> anyhow::Result<()> {
+    use anyhow::{anyhow, bail};
+    let mut args = std::env::args().skip(2);
+    let path = std::path::PathBuf::from(
+        args.next()
+            .ok_or_else(|| anyhow!("state-info requires a .clstate file"))?,
+    );
+    let mut thumbnail = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--thumbnail" => {
+                thumbnail =
+                    Some(std::path::PathBuf::from(args.next().ok_or_else(|| {
+                        anyhow!("--thumbnail requires a file path")
+                    })?));
+            }
+            other => bail!("unexpected state-info argument {other:?}"),
+        }
+    }
+    let peeked = copperline::savestate::peek_path(&path)?;
+    let mut info = copperline::control::exec::state_info_value(&path, &peeked);
+    if let Some(thumbnail) = thumbnail {
+        match &peeked.meta {
+            Some(meta) if !meta.thumbnail_png.is_empty() => {
+                std::fs::write(&thumbnail, &meta.thumbnail_png)
+                    .map_err(|e| anyhow!("writing thumbnail {}: {e}", thumbnail.display()))?;
+                info["thumbnail_path"] = json!(thumbnail.display().to_string());
+            }
+            _ => bail!("{} carries no thumbnail", path.display()),
+        }
+    }
+    println!("{}", serde_json::to_string_pretty(&info)?);
+    Ok(())
+}
+
 fn main() -> ExitCode {
     // A help request anywhere on the command line is not a usage error:
     // the packaging smoke tests (and anyone probing a fresh install) check
@@ -972,6 +1011,15 @@ fn main() -> ExitCode {
     }
     if std::env::args().nth(1).as_deref() == Some("diverge") {
         return run_diverge();
+    }
+    if std::env::args().nth(1).as_deref() == Some("state-info") {
+        return match run_state_info() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("copperline-ctl: state-info: {error:#}");
+                ExitCode::from(2)
+            }
+        };
     }
     if std::env::args().nth(1).as_deref() == Some("size-report") {
         return match run_size_report() {

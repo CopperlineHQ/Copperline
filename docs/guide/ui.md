@@ -16,8 +16,9 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 | `Cmd+R` | `Alt+R` | Start / stop a video-with-audio recording (below) |
 | `Cmd+Shift+R` | `Alt+Shift+R` | Start / stop an input recording (below) |
 | `Cmd+Shift+V` | `Alt+Shift+V` | Paste as keystrokes: type the host clipboard's text on the emulated keyboard (also *Input Settings > Paste as Keystrokes*) |
+| `Cmd+Shift+G` | `Alt+Shift+G` | Save the last few seconds of the display as an animated GIF (`copperline-clip-<YYYYMMDDHHmmSS>.gif` in the [recordings folder](#where-files-go); see [Saving a GIF clip](#saving-a-gif-clip)) |
 | `Cmd+Shift+S` | `Alt+Shift+S` | Save a state (`copperline-state-<YYYYMMDDHHmmSS>.clstate` in the [states folder](#where-files-go)) |
-| `Cmd+Shift+L` | `Alt+Shift+L` | Load a save state from a file dialog |
+| `Cmd+Shift+L` | `Alt+Shift+L` | Open the [Load State browser](#load-state-browser) |
 | `Cmd+1`..`Cmd+9`, `Cmd+0` | `Alt+1`..`Alt+9`, `Alt+0` | Quick-save to numbered slot 1-10 |
 | `Cmd+Shift+1`..`Cmd+Shift+0` | `Alt+Shift+1`..`Alt+Shift+0` | Quick-load from that slot |
 | `Cmd+D` | `Alt+D` | Swap to the next disk in a drive's configured playlist |
@@ -468,6 +469,12 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   the shortcut so its own Shift is up before the first typed Shift goes
   down. The typed keys go through the scheduled-input queue, so an input
   recording captures them as individual key events.
+- **Share Clipboard**: host <-> guest clipboard text, both ways (text the
+  guest copies lands on the host clipboard; host text is available to paste
+  in the guest). On by default in a windowed session; greyed out when the
+  machine was started with `[clipboard] share = false` / `--no-clipboard`,
+  since the guest side is part of the services board's boot. See the
+  `[clipboard]` section of [Configuration](configuration.md#clipboard).
 - **Calibrate Gamepad...**: the guided calibration flow, described below.
 - **Input Mapping...**: edits which host keys drive the controller controls,
   for both keyboard mappings; see [](#input-mapping).
@@ -556,6 +563,9 @@ boot-time cards, SRAM cards, real card readers, and the fast-RAM rule.
 - **Record Input** (also `Cmd+Shift+R` / `Alt+Shift+R`): records every
   input event that reaches the emulated machine; stopping writes a script
   file that `--script` replays deterministically. See below.
+- **Save Clip as GIF** (also `Cmd+Shift+G` / `Alt+Shift+G`): writes the
+  last `[recording] clip_seconds` (ten by default) of the display as an
+  animated GIF. See [Saving a GIF clip](#saving-a-gif-clip).
 
 ### Save State
 
@@ -564,10 +574,14 @@ boot-time cards, SRAM cards, real card readers, and the fast-RAM rule.
   visible before it is chosen. No dialog, and no file to name. The hotkeys
   reach the same slots -- `Cmd/Alt+<digit>` saves and
   `Cmd/Alt+Shift+<digit>` loads, with `0` as the tenth. See below.
-- **Save State...** (also `Cmd+Shift+S` / `Alt+Shift+S`) and
-  **Load State...** (also `Cmd+Shift+L` / `Alt+Shift+L`): snapshot the whole
-  emulated machine to a file of your choosing, or restore one and continue
-  from exactly that point. See below.
+- **Save State...** (also `Cmd+Shift+S` / `Alt+Shift+S`): snapshot the
+  whole emulated machine to a timestamped file in the states folder. See
+  below.
+- **Load State...** (also `Cmd+Shift+L` / `Alt+Shift+L`): opens the
+  [Load State browser](#load-state-browser) -- the states folder and the
+  quick-save slots as a list of thumbnails, newest first -- to restore one
+  and continue from exactly that point. Its **Browse...** button is the
+  file dialog, for a state kept somewhere else.
 
 (and-last)=
 ### Application controls
@@ -931,6 +945,40 @@ keep full level regardless of the live output volume. Pausing (or
 powering off) suspends the capture; recording resumes when emulation
 continues.
 
+(saving-a-gif-clip)=
+## Saving a GIF clip
+
+The window keeps a rolling ring of the last ten emulated seconds of the
+picture it presents, so a moment worth sharing can be saved *after* it
+happened: `Cmd+Shift+G` on macOS or `Alt+Shift+G` on Linux/Windows (or the
+menu's "Save Clip as GIF") writes the ring as
+`copperline-clip-<YYYYMMDDHHmmSS>.gif` in the
+[recordings folder](#where-files-go) and confirms the file name on screen
+when it is done. The clip is written on a background thread, so emulation
+never pauses; a second save waits for the first to finish.
+
+The GIF shows exactly what a screenshot would: the presentation's crop,
+TV aperture, H/V centre and pixel aspect, with the status bar, menus and
+the on-screen message left out. Frames are thinned to 25 per second on
+PAL and 30 on NTSC (`[recording] clip_fps` sets another rate) and each
+carries its own palette, so the usual Amiga picture is stored losslessly;
+a frame with more than 256 colours (HAM, AGA truecolour-ish output) is
+reduced to 256 with NeuQuant when the file is written. Frame delays
+follow the emulated timeline, so a clip made under Warp Speed plays at
+normal speed, and a stretch where Warp presented no frames plays as one
+held frame rather than a burst. A clip has no sound; use
+[Record Video](#recording-video) for that.
+
+`[recording] clip_seconds` sets the ring's length (up to 120 seconds; 0
+switches the ring and the menu item off) -- see
+[Configuration](configuration.md#recording-config). The ring holds pictures in
+their palette-indexed form and stores a picture once however long it
+stays on screen, so a ten-second ring costs well under 100 MB of host
+memory in practice; it is bounded at 256 MB regardless. Loading a save
+state, resetting or running a different machine starts the ring over.
+The headless `--gif-after` flag writes the same kind of clip from a
+scheduled emulated time (see [](headless.md#capturing-gif-clips)).
+
 ## Recording input
 
 `Cmd+Shift+R` on macOS or `Alt+Shift+R` on Linux/Windows (or the menu's
@@ -961,10 +1009,22 @@ headless `--record-input` variant are described in
 `copperline-state-<YYYYMMDDHHmmSS>.clstate` in the [states folder](#where-files-go): CPU,
 chip/slow/fast RAM, ROM, the full chipset and CIA state, floppy images
 (including unsaved in-memory changes), expansion boards, and CD/NVRAM
-state. `Cmd+Shift+L` / `Alt+Shift+L` (or "Load State...") restores one; the
-machine continues from exactly the saved point, byte-for-byte -- the core
-is deterministic, so a resumed run is indistinguishable from one that was
-never interrupted.
+state. `Cmd+Shift+L` / `Alt+Shift+L` (or "Load State...") opens the
+[browser below](#load-state-browser) to restore one; the machine continues
+from exactly the saved point, byte-for-byte -- the core is deterministic,
+so a resumed run is indistinguishable from one that was never interrupted.
+
+Every state also carries a small card about itself, written ahead of the
+machine so it can be read without loading anything: a thumbnail of the
+display at the moment of the save (240 pixels wide, the same picture a
+screenshot would take), the emulated time and the wall-clock time of the
+save, a one-line machine summary, and the names of the media in the
+drives (floppies, hard-drive images, CD). The browser shows it, and
+`copperline-ctl state-info FILE.clstate` prints it as JSON (with
+`--thumbnail FILE.png` to write the picture out; see the
+[control protocol reference](../debugger/control.md#state-snapshot-files)).
+States written before this card existed load exactly as before and show
+in the browser without a picture.
 
 States are taken at emulated-frame boundaries and are versioned per
 subsystem: the file is a set of tagged chunks (CPU, memory, Paula, Agnus,
@@ -999,6 +1059,48 @@ not silently mixed in. Two caveats:
 - CD images are likewise reopened by path; keep the cue sheet and its
   files (or the CHD) where they were.
 
+(load-state-browser)=
+### Load State browser
+
+```{figure} ../images/ui-preview-load-state.png
+:alt: The Load State browser listing quick-save slots and named states with thumbnails
+:width: 75%
+
+The Load State browser: the ten slots, then the folder's states newest
+first. One state was taken on a different machine and is flagged; one
+file is not a state at all and says so.
+```
+
+**Load State...** (or `Cmd+Shift+L` / `Alt+Shift+L`) lists the
+[states folder](#where-files-go): the ten [quick-save slots](#quick-save-slots)
+first, empty ones included, then every other `.clstate` in the folder,
+newest first. Each row shows the state's thumbnail, when it was saved,
+how far into the emulated run it was taken, the machine it was taken on,
+and what was in the drives. A state taken on a different machine than
+the one running -- another model, chipset, memory size, or Kickstart --
+is shown in amber with the difference named; it still loads (a state
+carries its own machine, and the load reconfigures to match it, as
+described above), the flag just says that it will. A file the build
+cannot read is listed with the reason, so a stray or damaged file can
+still be found and deleted from here.
+
+Clicking a row loads it and closes the browser. With the keyboard, up
+and down move the selection (Page Up/Down and Home/End move faster),
+Return loads the selected state, and Delete asks before removing its
+file -- the question comes up with **Cancel** under the focus, so a
+second Return keeps the file and Delete again (or left, then Return)
+removes it. Down off the foot of the list reaches the button row, where
+left and right pick **Load**, **Delete**, or **Browse...**; Esc closes
+the browser (or withdraws the question first). A controller walks the
+same list with its d-pad, fire, and second button, as
+[everywhere else](#keyboard-and-controller-navigation). **Browse...**
+opens the file dialog for a state kept outside the folder.
+
+A deleted slot shows as empty again; a deleted named state leaves the
+list. Loading reports "Loaded Slot 3" or the file's name on the OSD, and
+a state that fails to load puts the browser back up with the reason on
+its status line.
+
 (quick-save-slots)=
 ### Quick-save slots
 
@@ -1012,10 +1114,14 @@ as empty.
 A quick save overwrites its slot without asking -- that is the point of it --
 and loading a slot that has never been written reports "Slot N is empty"
 rather than failing. Slots are ordinary `.clstate` files, identical in format
-to a named save, kept in the states folder below. And because they are per
-user and not per machine, a slot may hold a state from a different Amiga
-than the one running. That is safe: as above, the state carries its own
-machine and the load reconfigures to match it and says so.
+to a named save, kept in the states folder below, and the
+[Load State browser](#load-state-browser) lists them first, each with its
+thumbnail, so a slot can be told from another by what it shows rather
+than by its number. And because they are per user and not per machine, a
+slot may hold a state from a different Amiga than the one running. That is
+safe: as above, the state carries its own machine and the load
+reconfigures to match it and says so, and the browser flags such a slot
+before it is picked.
 
 The headless flags `--save-state-after SECS PATH` and `--load-state PATH`
 script the same feature for [debugging workflows](headless.md): snapshot a
@@ -1038,8 +1144,8 @@ directory is:
 | Windows | `%USERPROFILE%\Documents\Copperline\` |
 
 with a folder inside it for each kind of file: `screenshots/`, `states/`
-(named saves and the quick-save slots), `recordings/` (video captures and
-recorded input scripts), `nvram/` (battery-backed clock RAM and CD32 game
+(named saves and the quick-save slots), `recordings/` (video captures, GIF
+clips and recorded input scripts), `nvram/` (battery-backed clock RAM and CD32 game
 saves), `traces/` (debugger traces and waveform captures), and `configs/`
 (configurations saved from the configuration screen). Each folder is created
 on first use, and each can be moved with the `[paths]` section of the

@@ -7950,7 +7950,7 @@ mod tests {
         let state_t2_replay = state_path("t2-replay");
         let descriptor = crate::config::MachineDescriptor::default();
 
-        crate::savestate::save(&machine, &descriptor, &state_t1)?;
+        crate::savestate::save(&machine, &descriptor, None, &state_t1)?;
         let run_trace = |machine: &mut M68kMachine| -> Result<Vec<(u32, u16, u64, u16)>> {
             let mut trace = Vec::new();
             for _ in 0..10 {
@@ -7965,14 +7965,14 @@ mod tests {
             Ok(trace)
         };
         let original = run_trace(&mut machine)?;
-        crate::savestate::save(&machine, &descriptor, &state_t2)?;
+        crate::savestate::save(&machine, &descriptor, None, &state_t2)?;
         // The loop actually ran: the counter advanced and frames elapsed.
         assert!(original.last().unwrap().3 > original.first().unwrap().3);
 
         // Rewind the same machine back to T1 and replay the same steps.
         crate::savestate::load(&mut machine, &state_t1)?;
         let replay = run_trace(&mut machine)?;
-        crate::savestate::save(&machine, &descriptor, &state_t2_replay)?;
+        crate::savestate::save(&machine, &descriptor, None, &state_t2_replay)?;
 
         assert_eq!(original, replay);
         // Byte-identical re-serialization is the strong check: every

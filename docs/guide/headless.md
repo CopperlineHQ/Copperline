@@ -97,6 +97,38 @@ To capture consecutive frames (useful for debugging animation or beam synchroniz
 Frames are saved as zero-padded PNG files (`000000.png`, `000001.png`, etc.) in the
 specified output directory.
 
+(capturing-gif-clips)=
+## Capturing GIF clips
+
+To write a stretch of the display as an animated GIF -- the same clip the
+window's [Save Clip as GIF](ui.md#saving-a-gif-clip) produces, from a
+scheduled emulated time instead of the last few seconds:
+
+```sh
+./target/release/copperline --config copperline.example.toml --noaudio \
+  --gif-after 24 /tmp/intro.gif --gif-seconds 5
+```
+
+`--gif-after SECS PATH` starts the clip at SECS emulated seconds;
+`--gif-seconds N` sets its length and defaults to `[recording]
+clip_seconds` (ten seconds). Frames are thinned to `[recording] clip_fps`
+(25 per second on PAL, 30 on NTSC by default), presented through the same
+crop and aspect as a screenshot, and given delays from the emulated
+timeline, so the file plays back at real speed however fast the run went.
+The flag repeats to bracket several moments in one run; each clip is its
+own file. A run ends when every scheduled capture has finished, whichever
+kind comes last: a clip that completes early keeps running for a later
+`--screenshot-after`, and a finished screenshot schedule waits for a clip
+that is still recording. A clip has no audio track;
+`--audio-wav` captures the sound of the same interval.
+
+Timestamps are absolute like every other scheduled flag, so the capture
+composes with `--load-state`, `--script` and the scheduled-input flags:
+resuming a 120 s state, `--gif-after 125 clip.gif` starts five seconds
+in. Because frames are taken on the emulated timeline, the same run
+produces a byte-identical GIF every time. `--gif-after` cannot be combined
+with `--benchmark-until`, `--gdb` or `--control`.
+
 (save-states-headless)=
 ## Save states in headless runs
 
@@ -114,8 +146,21 @@ Save states allow fast iteration by skipping lengthy boot and loading sequences:
   --screenshot-after 125 /tmp/scene.png
 ```
 
-When resuming with `--load-state`, all scheduled-input and screenshot timestamps
-remain referenced to the original emulated timeline.
+When resuming with `--load-state`, all scheduled-input, screenshot and GIF clip
+timestamps remain referenced to the original emulated timeline.
+
+A state written by `--save-state-after` carries the same metadata card as
+one saved from the window: a thumbnail of the display at the save
+(rendered by the display path `capture.screenshot` uses, so it matches a
+screenshot of the same frame), the emulated and wall-clock save times, a
+machine summary, and the media names. Read it without a session:
+
+```sh
+copperline-ctl state-info /tmp/snapshot-120s.clstate --thumbnail /tmp/at120.png
+```
+
+prints the card as JSON and writes the thumbnail PNG (see the
+[control protocol reference](../debugger/control.md#state-snapshot-files)).
 
 ## Guest code coverage
 
@@ -228,6 +273,13 @@ Run with `--script`:
 ./target/release/copperline --config myconfig.toml --noaudio --cartridge hrtmon \
   --script test.clscript --screenshot-after 125 /tmp/out.png
 ```
+
+A windowed session shares the host clipboard by default and a headless
+one does not (see `[clipboard]` in [Configuration](configuration.md#clipboard)),
+which puts a different services board in the machine: replay a recording
+made in the window with `--clipboard` so the headless machine matches
+(headless, the bridge never reads the host clipboard, so the replay stays
+deterministic).
 
 To record an interactive session to a script file:
 

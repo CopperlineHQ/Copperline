@@ -67,6 +67,14 @@ pub struct CliArgs {
     /// with --screenshot-after/--dump-frames to bound the run).
     /// Repeatable, like `--screenshot-after`.
     pub save_state_after: Vec<(f32, PathBuf)>,
+    /// `--gif-after SECS PATH`: write an animated GIF of the presented
+    /// frames from SECS emulated seconds for `--gif-seconds` (default
+    /// `[recording] clip_seconds`). Repeatable; the run ends once every
+    /// clip is complete.
+    pub gif_after: Vec<(f32, PathBuf)>,
+    /// `--gif-seconds N`: how many emulated seconds each `--gif-after`
+    /// clip covers.
+    pub gif_seconds: Option<f32>,
     /// `--load-state PATH`: restore a save state before entering the
     /// event loop, resuming from its emulated timeline.
     pub load_state: Option<PathBuf>,
@@ -418,6 +426,8 @@ where
     let mut screenshot_after: Vec<(f32, PathBuf)> = Vec::new();
     let mut expect_screenshot: Vec<ExpectShotSpec> = Vec::new();
     let mut save_state_after: Vec<(f32, PathBuf)> = Vec::new();
+    let mut gif_after: Vec<(f32, PathBuf)> = Vec::new();
+    let mut gif_seconds: Option<f32> = None;
     let mut load_state: Option<PathBuf> = None;
     let mut load_uss = None;
     let mut benchmark_until: Option<f32> = None;
@@ -700,6 +710,12 @@ where
             }
             "--no-jit" => {
                 overrides.cpu_jit = Some(false);
+            }
+            "--clipboard" => {
+                overrides.clipboard = Some(true);
+            }
+            "--no-clipboard" => {
+                overrides.clipboard = Some(false);
             }
             "--chip" => {
                 overrides.chip = Some(
@@ -1258,6 +1274,23 @@ where
                 let path = args.next().ok_or_else(|| anyhow!(USAGE))?;
                 save_state_after.push((secs, PathBuf::from(path)));
             }
+            "--gif-after" => {
+                const USAGE: &str = "--gif-after requires SECS PATH";
+                let secs: f32 = next_arg(&mut args, USAGE, "--gif-after SECS must be a number")?;
+                let path = args.next().ok_or_else(|| anyhow!(USAGE))?;
+                gif_after.push((secs, PathBuf::from(path)));
+            }
+            "--gif-seconds" => {
+                const USAGE: &str = "--gif-seconds requires a number of emulated seconds";
+                let secs: f32 = next_arg(&mut args, USAGE, "--gif-seconds N must be a number")?;
+                if !(secs > 0.0 && secs <= copperline::gifclip::MAX_CLIP_SECONDS as f32) {
+                    return Err(anyhow!(
+                        "--gif-seconds must be between 0 and {} seconds, got {secs}",
+                        copperline::gifclip::MAX_CLIP_SECONDS
+                    ));
+                }
+                gif_seconds = Some(secs);
+            }
             "--load-uss" => {
                 load_uss = Some(PathBuf::from(
                     args.next()
@@ -1486,6 +1519,9 @@ where
             None
         }
     };
+    if gif_seconds.is_some() && gif_after.is_empty() {
+        return Err(anyhow!("--gif-seconds requires --gif-after SECS PATH"));
+    }
     let waveform = match wave_path {
         Some(path) => {
             let mut opts = copperline::waveform::WaveOptions::new(path);
@@ -1618,6 +1654,7 @@ where
             || warp_boot
             || warp_until.is_some()
             || !save_state_after.is_empty()
+            || !gif_after.is_empty()
             || !cd_insert_after.is_empty()
             || !freeze_after.is_empty()
             || !click_after.is_empty()
@@ -1653,6 +1690,8 @@ where
         screenshot_after,
         expect_screenshot,
         save_state_after,
+        gif_after,
+        gif_seconds,
         load_state,
         load_uss,
         benchmark_until,
@@ -1784,6 +1823,8 @@ fn print_help() {
          --fpu / --no-fpu               fit / omit a 68881/68882 (68040/68060 on-die)\n  \
          --jit / --no-jit               fast batch/trace-JIT CPU execution (not cycle-exact,\n  \
          \x20                            like an accelerator card; default: off)\n  \
+         --clipboard / --no-clipboard   share the host clipboard with the guest's\n  \
+         \x20                            clipboard.device (default: on windowed, off headless)\n  \
          --cartridge MODEL              freezer cartridge: none (default) or hrtmon (the\n  \
          \x20                            bundled HRTMon monitor, entered with --freeze-after,\n  \
          \x20                            the Freeze menu item, or cartridge.freeze)\n  \
@@ -1846,6 +1887,10 @@ fn print_help() {
          \x20                            <stem>.diff.png and exits with status 3 at the end\n  \
          --save-state-after SECS PATH   write a save state to PATH after SECS emulated seconds,\n  \
          \x20                            then keep running\n  \
+         --gif-after SECS PATH          write an animated GIF of the display starting at SECS\n  \
+         \x20                            emulated seconds to PATH, then exit\n  \
+         --gif-seconds N                emulated seconds each --gif-after clip covers\n  \
+         \x20                            (default: [recording] clip_seconds, 10)\n  \
          --load-uss PATH                import a WinUAE state; requires its matching Kickstart\n  \
          --load-state PATH              restore a save state before starting, resuming from\n  \
          \x20                            its emulated timeline\n  \
