@@ -433,7 +433,7 @@ impl CoverageRun {
                     return Ok(CoveragePoll::Loaded);
                 }
                 let target = &self.target;
-                if self.done_marker.exists() {
+                if crate::runprog::completion_recorded(&self.done_marker) {
                     // The program loaded, ran and exited between two polls:
                     // nothing was counted, and nothing more will run.
                     self.notes.push(format!(
@@ -458,7 +458,7 @@ impl CoverageRun {
                 Ok(CoveragePoll::Idle)
             }
             Phase::Collecting => {
-                if self.done_marker.exists() {
+                if crate::runprog::completion_recorded(&self.done_marker) {
                     self.notes
                         .push(format!("{} exited; final counts", self.target));
                     let data = machine
@@ -815,8 +815,13 @@ mod tests {
         // Nothing loaded, no marker: idle.
         assert_eq!(run.poll(&mut emu.machine, 1).unwrap(), CoveragePoll::Idle);
         assert!(!out.exists());
+        // The script's redirection creates the marker before the guest's
+        // Done command writes its line: an empty one is not a finished run.
+        std::fs::write(&marker, b"").unwrap();
+        assert_eq!(run.poll(&mut emu.machine, 2).unwrap(), CoveragePoll::Idle);
+        assert!(!out.exists(), "an empty marker must not finalize coverage");
         // The marker without an observed load: written empty.
-        std::fs::write(&marker, b"done\n").unwrap();
+        std::fs::write(&marker, b"0\n").unwrap();
         assert_eq!(
             run.poll(&mut emu.machine, 2).unwrap(),
             CoveragePoll::Written

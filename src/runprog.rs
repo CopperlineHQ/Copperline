@@ -137,6 +137,14 @@ fn program_sequence(prog_name: &str, extra_args: Option<&str>, stack: Option<u32
 /// `Done` runs, so an empty file is "not yet"), and for a marker that
 /// holds anything but a number (a `Done` that could not run leaves its
 /// error text there instead).
+/// Whether the launch marker holds a finished record of the program's exit.
+/// The generated script's redirection creates the file before the `Done`
+/// command writes its line, so an existing marker is not yet a completed
+/// run; only a whole line is.
+pub fn completion_recorded(marker: &Path) -> bool {
+    read_return_code(marker).is_some()
+}
+
 pub fn read_return_code(marker: &Path) -> Option<i32> {
     let text = std::fs::read_to_string(marker).ok()?;
     let line = text.split_once('\n')?.0;

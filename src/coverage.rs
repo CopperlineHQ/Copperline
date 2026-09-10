@@ -176,6 +176,13 @@ impl CoverageData {
             if words != (size as usize).div_ceil(2) {
                 return Err(bad("coverage range word count does not match its size"));
             }
+            // Both the size and the count come out of the file, so they
+            // agree with each other in a crafted one too. What they cannot
+            // outrun is the file: reject a range that claims more counters
+            // than there are bytes left, rather than reserving room for it.
+            if words > bytes.len().saturating_sub(cursor) / 4 {
+                return Err(bad("coverage range extends past the end of the file"));
+            }
             let mut counts = Vec::with_capacity(words);
             for _ in 0..words {
                 counts.push(u32_at(&mut cursor)?);
@@ -341,6 +348,21 @@ mod tests {
         assert_eq!(CoverageData::parse(&bytes).unwrap(), data);
         assert!(CoverageData::parse(&bytes[..bytes.len() - 1]).is_err());
         assert!(CoverageData::parse(b"nope").is_err());
+        // A range header agreeing with itself but not with the file: the
+        // parser must reject it rather than reserve room for the counters
+        // it claims (a truncated capture would otherwise ask for gigabytes).
+        let mut crafted = Vec::new();
+        crafted.extend_from_slice(MAGIC);
+        crafted.extend_from_slice(&VERSION.to_le_bytes());
+        crafted.extend_from_slice(&1u32.to_le_bytes()); // one range
+        crafted.extend_from_slice(&0u32.to_le_bytes()); // base
+        crafted.extend_from_slice(&0xFFFF_FFFEu32.to_le_bytes()); // size
+        crafted.extend_from_slice(&0x7FFF_FFFFu32.to_le_bytes()); // words
+        let err = CoverageData::parse(&crafted).expect_err("must be rejected");
+        assert!(
+            err.to_string().contains("past the end"),
+            "unexpected error: {err}"
+        );
         let mut sparse = CoverageCollector::new(&[]);
         sparse.hit(0x10);
         let sparse = sparse.into_data();
@@ -352,7 +374,6 @@ mod tests {
     /// The precise loop's retire hook: the control test machine spins in a
     /// four-instruction ROM loop at $F80010, so a frame of execution counts
     /// every one of those words and nothing else.
-    #[cfg(feature = "control")]
     // Needs a whole emulator, which only the control feature's test
     // helper builds; the counters themselves are tested above without one.
     #[cfg(feature = "control")]
