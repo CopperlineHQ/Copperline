@@ -28,11 +28,21 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 pub mod bartman;
+/// Guest code coverage. The collector itself lives outside this module so
+/// the CPU can count instructions in builds without the `control` feature
+/// (the libretro core, the standalone player, the browser build); this
+/// keeps the `profile::coverage` path its callers already use.
+pub use crate::coverage;
+#[cfg(feature = "dap")]
+pub mod lcov;
 #[cfg(feature = "dap")]
 pub mod report;
 pub mod samples;
 #[cfg(feature = "dap")]
 pub mod size;
+
+/// The coverage histogram sidecar a `"coverage": true` capture writes.
+pub const COVERAGE_FILE: &str = "coverage.bin";
 
 /// Bounds on `profile.start {"frames"}`: about ten seconds of PAL by
 /// default, and a hard cap so a typo cannot fill a disk.
@@ -107,8 +117,13 @@ pub struct ProfileOptions {
     pub unwind: Option<samples::CompactUnwindTable>,
     /// Runtime bases of every hunk, for offline source relocation.
     pub relocation_bases: Vec<u32>,
-    /// Runtime ranges of executable hunks, for compact-unwind boundaries.
+    /// Runtime ranges of executable hunks, for compact-unwind boundaries
+    /// and as the extent of the coverage counters.
     pub code_ranges: Vec<(u32, u32)>,
+    /// Count every retired instruction's PC over `code_ranges` (every
+    /// address, bounded, when none are given) and write the histogram as
+    /// `coverage.bin` at stop. No call stacks, no per-frame files.
+    pub coverage: bool,
     /// Keep the capture armed but write nothing until this condition matches.
     pub trigger: Option<ProfileTrigger>,
 }
@@ -136,6 +151,9 @@ pub struct ProfileCapture {
     slot_sequence: u64,
     cck_per_cpu_cycle: f64,
     stack_bounds: Option<crate::amigaos::StackBounds>,
+    /// The coverage histogram handed over when counting stopped (the
+    /// frame cap or `profile.stop`), written by `finish`.
+    coverage: Option<coverage::CoverageData>,
 }
 
 impl ProfileCapture {
@@ -170,7 +188,17 @@ impl ProfileCapture {
             slot_sequence: 0,
             cck_per_cpu_cycle: 1.0 / f64::from(cpu_clocks_per_cck.max(1)),
             stack_bounds: None,
+            coverage: None,
         })
+    }
+
+    /// Counting stopped: keep the histogram for `finish`. A second hand-over
+    /// (the frame cap, then `profile.stop`) folds into the first.
+    pub fn set_coverage(&mut self, data: coverage::CoverageData) {
+        match self.coverage.as_mut() {
+            Some(existing) => existing.merge(&data),
+            None => self.coverage = Some(data),
+        }
     }
 
     pub fn options(&self) -> &ProfileOptions {
@@ -278,6 +306,7 @@ impl ProfileCapture {
             "pc_samples": self.opts.pc_samples,
             "samples": self.opts.samples,
             "registers": self.opts.registers,
+            "coverage": self.opts.coverage,
             "trigger": self.opts.trigger.map(ProfileTrigger::value),
             "triggered": self.triggered,
             "triggered_at": self.triggered_at,
@@ -401,6 +430,24 @@ impl ProfileCapture {
         seconds: f64,
     ) -> io::Result<Value> {
         self.jsonl.flush()?;
+        let coverage = match self.coverage.as_ref() {
+            Some(data) => {
+                let file = File::create(self.opts.path.join(COVERAGE_FILE))?;
+                let mut out = BufWriter::new(file);
+                data.write_to(&mut out)?;
+                out.flush()?;
+                Some(json!({
+                    "file": COVERAGE_FILE,
+                    "format": "CLCV v1: per-range little-endian u32 hit counters, one per instruction word",
+                    "instructions": data.total_hits,
+                    "program_instructions": data.program_hits(),
+                    "outside_instructions": data.outside_hits,
+                    "ranges": data.ranges.iter().map(|range| json!({"base": range.base, "size": range.size})).collect::<Vec<_>>(),
+                    "sparse_addresses": data.sparse.len(),
+                }))
+            }
+            None => None,
+        };
         let summary = json!({
             "version": 1,
             "machine": machine,
@@ -412,8 +459,10 @@ impl ProfileCapture {
                 "pc_samples": self.opts.pc_samples,
                 "samples": self.opts.samples,
                 "registers": self.opts.registers,
+                "coverage": self.opts.coverage,
                 "trigger": self.opts.trigger.map(ProfileTrigger::value),
             },
+            "coverage": coverage,
             "owners": crate::bus::CHIP_BUS_OWNER_NAMES,
             "cpu_wait_classes": crate::bus::CPU_WAIT_CLASS_NAMES,
             "started": { "frame": self.started.0, "seconds": self.started.1 },
@@ -421,7 +470,7 @@ impl ProfileCapture {
             "frames_written": self.frames_written,
             "samples_total": self.samples_total,
             "irq_cck": self.irq_cck,
-            "sampling": self.opts.samples.then(|| json!({
+            "sampling": (self.opts.samples || self.opts.coverage).then(|| json!({
                 "clock_unit": "cck",
                 "cck_per_cpu_cycle": self.cck_per_cpu_cycle,
                 "stream": "little-endian u32: callstack PCs, ~0-cck, optional D0-D7/A0-A7/SR",
@@ -510,6 +559,7 @@ mod tests {
             unwind: None,
             relocation_bases: Vec::new(),
             code_ranges: Vec::new(),
+            coverage: false,
             trigger: None,
         };
         let mut capture = ProfileCapture::create(opts, 100, 2.0, 1000, true, false, 2).unwrap();
@@ -563,6 +613,7 @@ mod tests {
             unwind: None,
             relocation_bases: Vec::new(),
             code_ranges: Vec::new(),
+            coverage: false,
             trigger: Some(ProfileTrigger::BusyCckOver(100)),
         };
         let mut capture = ProfileCapture::create(opts, 5, 0.1, 10, false, false, 2).unwrap();
@@ -592,6 +643,7 @@ mod tests {
             unwind: None,
             relocation_bases: Vec::new(),
             code_ranges: Vec::new(),
+            coverage: false,
             trigger: None,
         };
         let mut capture = ProfileCapture::create(opts, 10, 0.1, 0, false, false, 2).unwrap();
@@ -622,6 +674,7 @@ mod tests {
             unwind: None,
             relocation_bases: Vec::new(),
             code_ranges: Vec::new(),
+            coverage: false,
             trigger: None,
         };
         let mut capture = ProfileCapture::create(opts, 0, 0.0, 0, true, true, 2).unwrap();

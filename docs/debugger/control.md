@@ -57,6 +57,14 @@ copperline-ctl --info /tmp/ccp.json continue
 copperline-ctl --info /tmp/ccp.json --repl
 ```
 
+## A/B divergence finder
+
+`copperline-ctl diverge` launches two headless sessions (two builds, or one
+build under two configs) and drives them in lockstep over this protocol,
+comparing the frame digest, the CPU registers and a server-side RAM digest
+at every frame, then narrowing the first mismatch to the instruction and,
+for memory, to the byte. See [A/B divergence finder](diverge.md).
+
 ## Debug adapter
 
 `copperline-ctl --dap` serves the [Debug Adapter Protocol](dap.md) over the
@@ -267,6 +275,16 @@ events.unsubscribe {"events":["serial"]}
 ### State inspection and modification
 - `regs.get` / `regs.set {"reg": "...", "value": ...}`: Read or modify 68k registers. `regs.get` includes exact raw FP0-FP7 plus FPCR/FPSR/FPIAR when an FPU is fitted.
 - `mem.read {"addr": ..., "len": ..., "encoding": "hex"|"base64"}` / `mem.write {"addr": ..., "data": "...", "encoding": "hex"|"base64"}`: Read or modify memory.
+- `mem.digest {"region": "chip"|"all"}` or `mem.digest {"addr": ..., "len": ...}`:
+  FNV-1a digest of RAM computed inside the emulator, for change detection
+  and for comparing two sessions without moving the bytes. `chip` (the
+  default) digests the fitted chip RAM bank, `all` every writable RAM bank
+  (chip, slow, motherboard, accelerator, Zorro boards) one by one; `addr`
+  and `len` digest one span through the CPU map instead (a span that lies
+  inside one bank is hashed in place, anything else is peeked byte by
+  byte, at most 256 MB). The reply carries `digest` over the whole and
+  `regions`, each bank's `base`, `len` and `digest`. Allowed in a resume
+  verb's `collect` list.
 - `disasm {"addr": ..., "count": ...}`: Disassemble instructions at address (default: PC).
   Every line includes `cycles_min` and `cycles_max`, evaluated through the
   selected 68000-family core's generation-specific timing path. These are
@@ -337,7 +355,7 @@ events.unsubscribe {"events":["serial"]}
 - `debug.idle`: Query guest idle time statistics reported via uaelib idle markers.
 - `trace.start {"path": "...", "max_lines": ...}` / `trace.stop` / `trace.status`: Control instruction execution trace logging.
 - `waveform.start {"path": "...", "trigger": "...", "duration": "...", "signals": "..."}` / `waveform.stop` / `waveform.status`: Control VCD logic analyzer waveform capture.
-- `profile.start {"path": "...", "frames": ..., "slots": ..., "memory": ..., "screenshots": "none"|"every"|"last", "pc_samples": ..., "samples": ..., "registers": ..., "unwind": {"base": ADDR, "table": BASE64}, "relocation_bases": [ADDR, ...], "code_ranges": [{"base": ADDR, "size": N}, ...], "trigger": {"frame": F}|{"busy_cck_over": N}}` / `profile.stop` / `profile.status`: Export per-frame profiling data (DMA ownership, full slot/event records, frame-start custom registers and palette, blit records, CPU chip-bus wait attribution, guest idle time, retired instructions, and stack bounds). `memory` snapshots chip and slow RAM once; because that baseline must align with the first recorded frame, it cannot be combined with a deferred `trigger`. `slots` writes a raw 24-byte-record sidecar per frame. `samples` adds a WinUAE/Bartman-compatible per-instruction binary sidecar; `registers` adds D0-D7/A0-A7/SR, the optional compact unwind table supplies live call stacks, `relocation_bases` preserves every program hunk's runtime base for offline source mapping, and `code_ranges` identifies executable hunks outside the compact hunk-0 table. Data streams to `profile.jsonl` with a `profile.json` summary upon stop; see [](profiling). Arms Frame Analyzer tracing immediately and begins recording only when an optional trigger matches.
+- `profile.start {"path": "...", "frames": ..., "slots": ..., "memory": ..., "screenshots": "none"|"every"|"last", "pc_samples": ..., "samples": ..., "registers": ..., "unwind": {"base": ADDR, "table": BASE64}, "relocation_bases": [ADDR, ...], "code_ranges": [{"base": ADDR, "size": N}, ...], "coverage": ..., "trigger": {"frame": F}|{"busy_cck_over": N}}` / `profile.stop` / `profile.status`: Export per-frame profiling data (DMA ownership, full slot/event records, frame-start custom registers and palette, blit records, CPU chip-bus wait attribution, guest idle time, retired instructions, and stack bounds). `memory` snapshots chip and slow RAM once; because that baseline must align with the first recorded frame, it cannot be combined with a deferred `trigger`. `slots` writes a raw 24-byte-record sidecar per frame. `samples` adds a WinUAE/Bartman-compatible per-instruction binary sidecar; `registers` adds D0-D7/A0-A7/SR, the optional compact unwind table supplies live call stacks, `relocation_bases` preserves every program hunk's runtime base for offline source mapping, and `code_ranges` identifies executable hunks outside the compact hunk-0 table. `coverage` counts every retired instruction over `code_ranges` (every address, bounded, without them) and writes the histogram as `coverage.bin` at stop for `copperline-ctl profile-report --format lcov`; it takes `relocation_bases`/`code_ranges` without `samples` and is refused while a `--coverage` run holds the counters. Data streams to `profile.jsonl` with a `profile.json` summary upon stop; see [](profiling). Arms Frame Analyzer tracing immediately and begins recording only when an optional trigger matches.
 
 ### Breakpoints and traps
 - `break.add`: Add breakpoint (`pc`, `watch`, `reg_watch`, `beam`, `copper`, `catch`, `loadseg`). A memory watch accepts `"access": "write"|"read"|"access"` (default `write`).
@@ -347,6 +365,7 @@ events.unsubscribe {"events":["serial"]}
 
 ### Input injection
 - `input.key {"rawkey": ..., "action": "press"|"release"|"tap", "hold_ms": ..., "at_seconds": ...}`: Inject keyboard events.
+- `input.type {"text": ..., "at_seconds": ...}`: Type `text` on the US Amiga keyboard as raw key press/release pairs (Shift where needed, newline as Return, tab as Tab, escape as Esc), one key every 100 ms of emulated time from `at_seconds` (default now). Text with characters the US keymap cannot type is rejected. The same conversion backs `--type-after` and the window's Paste as Keystrokes.
 - `input.mouse {"dx": ..., "dy": ..., "left": ..., "right": ..., "middle": ..., "port": 1|2, "at_seconds": ...}`: Inject mouse motion/buttons.
 - `input.mouse_to {"x": ..., "y": ..., "port": 1|2, "tolerance": ..., "max_frames": ...}`: Steer pointer to screen pixel coordinates via sprite 0.
 - `input.joy {"up": ..., "down": ..., "left": ..., "right": ..., "red": ..., "blue": ..., "green": ..., "yellow": ..., "play": ..., "rwd": ..., "ffw": ..., "port": 1|2, "at_seconds": ...}`: Inject joystick / CD32 button state.

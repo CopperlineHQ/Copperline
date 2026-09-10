@@ -96,6 +96,14 @@ struct UiTrace {
     cap: u64,
 }
 
+/// A pending `--coverage` arm: the program to catch and which of its
+/// hunks are code.
+struct CoverageArm {
+    name: String,
+    code_hunks: Vec<bool>,
+    tracker: crate::amigaos::LibraryTracker,
+}
+
 pub struct M68kMachine {
     cpu: CpuCore,
     bus: CpuBus,
@@ -154,6 +162,16 @@ pub struct M68kMachine {
     /// instruction loop while armed.
     #[cfg(feature = "control")]
     profile_samples: Option<crate::profile::samples::InstructionSampler>,
+    /// Host-side coverage counter (`profile.start {"coverage": true}` and
+    /// `--run PROG --coverage FILE`): one hit per retired instruction PC.
+    /// Never serialized; forces the precise loop while armed.
+    coverage: Option<crate::coverage::CoverageCollector>,
+    /// A `--coverage` run waiting for its program: checked before every
+    /// instruction (like the loadseg catch) so counting starts at the
+    /// program's first instruction, not at the next frame boundary.
+    coverage_arm: Option<CoverageArm>,
+    /// The segments the arm observed, for the owner to relocate by.
+    coverage_loaded: Option<Vec<(u32, u32)>>,
     // COPPERLINE_DBG_SPREN: previous DMACON, to detect the instruction that
     // clears the sprite-DMA-enable bit.
     dbg_prev_dmacon: u16,
@@ -510,6 +528,9 @@ impl M68kMachine {
             ui_stop: None,
             ui_last_this_task: None,
             ui_loadseg_tracker: crate::amigaos::LibraryTracker::default(),
+            coverage: None,
+            coverage_arm: None,
+            coverage_loaded: None,
             ui_pc_history: [0; UI_PC_HISTORY_CAP],
             ui_pc_history_next: 0,
             ui_pc_history_len: 0,
@@ -1867,6 +1888,14 @@ impl M68kMachine {
         written
     }
 
+    /// Whether `debug_write_memory` would change the byte at `addr`: true
+    /// for the RAM banks and the freezer cartridge's bank, false for ROM,
+    /// overlay ROM, WCS, and device windows. Lets an editor refuse a
+    /// read-only byte before anything is typed into it.
+    pub fn debug_memory_writable(&self, addr: u32) -> bool {
+        self.bus.debug_memory_writable(addr)
+    }
+
     pub fn cpu_type(&self) -> CpuType {
         self.cpu.cpu_type
     }
@@ -1966,6 +1995,116 @@ impl M68kMachine {
     pub fn discard_profile_samples(&mut self) {
         if let Some(sampler) = self.profile_samples.as_mut() {
             sampler.clear();
+        }
+    }
+
+    /// Arm the coverage counter over `ranges` (`(base, size)` runtime
+    /// extents; empty counts every address, bounded). Returns false, and
+    /// leaves the running collector alone, when one is already armed: the
+    /// CLI run and a `profile.start` capture cannot share the counters.
+    pub fn start_coverage(&mut self, ranges: &[(u32, u32)]) -> bool {
+        if self.coverage.is_some() {
+            return false;
+        }
+        self.coverage = Some(crate::coverage::CoverageCollector::new(ranges));
+        self.note_jit_debug_fallback();
+        true
+    }
+
+    /// Disarm and hand back the counters.
+    pub fn stop_coverage(&mut self) -> Option<crate::coverage::CoverageCollector> {
+        self.coverage.take()
+    }
+
+    pub fn coverage_active(&self) -> bool {
+        self.coverage.is_some()
+    }
+
+    /// The counters so far, while armed.
+    pub fn coverage_snapshot(&self) -> Option<crate::coverage::CoverageData> {
+        self.coverage
+            .as_ref()
+            .map(crate::coverage::CoverageCollector::snapshot)
+    }
+
+    #[cfg(test)]
+    pub fn coverage_hit_for_test(&mut self, pc: u32) {
+        if let Some(coverage) = self.coverage.as_mut() {
+            coverage.hit(pc);
+        }
+    }
+
+    /// Start counting the moment the guest loads program `name`
+    /// (case-insensitive command name): the collector is created over the
+    /// segments whose hunk index `code_hunks` marks as code (every segment
+    /// when none is). Returns false when the counters are busy.
+    pub fn arm_coverage_on_load(&mut self, name: String, code_hunks: Vec<bool>) -> bool {
+        if self.coverage.is_some() || self.coverage_arm.is_some() {
+            return false;
+        }
+        let mut tracker = crate::amigaos::LibraryTracker::default();
+        crate::amigaos::with_bus_memory(&self.bus.bus, |os| tracker.arm(os));
+        self.coverage_arm = Some(CoverageArm {
+            name,
+            code_hunks,
+            tracker,
+        });
+        self.coverage_loaded = None;
+        self.note_jit_debug_fallback();
+        true
+    }
+
+    pub fn cancel_coverage_arm(&mut self) {
+        self.coverage_arm = None;
+    }
+
+    /// The segments of the program an arm just caught, once.
+    pub fn take_coverage_loaded(&mut self) -> Option<Vec<(u32, u32)>> {
+        self.coverage_loaded.take()
+    }
+
+    /// Before an instruction: did the guest just load the awaited program?
+    /// Side-effect-free peeks, paid only while an arm is pending.
+    fn coverage_check_load(&mut self) {
+        let Some(arm) = self.coverage_arm.as_mut() else {
+            return;
+        };
+        let tracker = &mut arm.tracker;
+        let name = &arm.name;
+        let segments = crate::amigaos::with_bus_memory(&self.bus.bus, |os| {
+            tracker
+                .observe(os)
+                .filter(|module| module.name.eq_ignore_ascii_case(name))
+                .map(|module| {
+                    module
+                        .segments
+                        .iter()
+                        .map(|seg| (seg.start, seg.size))
+                        .collect::<Vec<(u32, u32)>>()
+                })
+        });
+        let Some(segments) = segments else {
+            return;
+        };
+        let mut ranges: Vec<(u32, u32)> = segments
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| arm.code_hunks.get(*index).copied().unwrap_or(true))
+            .map(|(_, range)| *range)
+            .collect();
+        if ranges.is_empty() {
+            ranges = segments.clone();
+        }
+        self.coverage = Some(crate::coverage::CoverageCollector::new(&ranges));
+        self.coverage_loaded = Some(segments);
+        self.coverage_arm = None;
+    }
+
+    /// One retired instruction at `pc` for an armed coverage counter.
+    #[inline]
+    fn coverage_retire(&mut self, pc: u32) {
+        if let Some(coverage) = self.coverage.as_mut() {
+            coverage.hit(pc & self.cpu.address_mask);
         }
     }
 
@@ -2449,6 +2588,11 @@ impl M68kMachine {
         if self.ui_pc_history_enabled {
             return Some("debugger PC history active");
         }
+        if self.coverage.is_some() || self.coverage_arm.is_some() {
+            // Re-emulated speculative frames would count every instruction
+            // twice.
+            return Some("coverage collection armed");
+        }
         None
     }
 
@@ -2716,6 +2860,8 @@ impl M68kMachine {
                     false
                 }
             }
+            || self.coverage.is_some()
+            || self.coverage_arm.is_some()
             || self.bus.bus.wave_pc_trigger
             || self.bus.bus.smc.is_some()
     }
@@ -2748,6 +2894,8 @@ impl M68kMachine {
                     false
                 }
             }
+            || self.coverage.is_some()
+            || self.coverage_arm.is_some()
             || self.bus.bus.wave_pc_trigger
             || self.bus.bus.smc.is_some()
             || diag_cpu_sync_on()
@@ -2816,7 +2964,14 @@ impl M68kMachine {
             #[cfg(feature = "control")]
             let profile_start =
                 self.profile_sample_start(self.cpu.pc, self.bus.bus.cpu_wait_cck_total());
+            let coverage_pc = self.cpu.pc;
+            if DEBUG_HOOKS && self.coverage_arm.is_some() {
+                self.coverage_check_load();
+            }
             if self.force_fpu_line_f_if_needed() {
+                if DEBUG_HOOKS {
+                    self.coverage_retire(coverage_pc);
+                }
                 instructions = instructions.saturating_add(1);
                 cpu_cycles = cpu_cycles.saturating_add(34);
                 // The forced exception performs the same stack writes as an
@@ -2889,6 +3044,7 @@ impl M68kMachine {
                             self.profile_finish_instruction_sample(start, instruction_cck);
                         }
                         if DEBUG_HOOKS {
+                            self.coverage_retire(dbg_pc_before);
                             if let Some(snapshot) = dbg_watch_snapshot {
                                 self.debug_after_step(snapshot);
                             }
@@ -3626,6 +3782,21 @@ impl CpuBus {
                 0xFF
             }
         }
+    }
+
+    /// The regions `debug_write_byte` mutates; keep the two in step.
+    fn debug_memory_writable(&self, address: u32) -> bool {
+        matches!(
+            self.classify_plain_memory(self.mask(address), 1),
+            Some(
+                PlainMemRegion::ChipRam(_)
+                    | PlainMemRegion::ZorroRam(..)
+                    | PlainMemRegion::SlowRam(_)
+                    | PlainMemRegion::MbRam(_)
+                    | PlainMemRegion::AccelRam(_)
+                    | PlainMemRegion::Cartridge(_)
+            )
+        )
     }
 
     fn debug_write_byte(&mut self, address: u32, value: u8) -> bool {

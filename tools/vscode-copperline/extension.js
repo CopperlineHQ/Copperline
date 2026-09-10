@@ -33,6 +33,94 @@ async function chooseProgram(title) {
   return selected && selected[0];
 }
 
+/// Parse an lcov `.info` file into one record per SF block: the subset the
+/// emulator writes (`#` comments, TN, SF, FN, FNDA, DA, totals, end_of_record).
+function parseLcov(text) {
+  const files = [];
+  let current = null;
+  const splitOnce = (value) => {
+    const comma = value.indexOf(",");
+    return comma < 0 ? [value, ""] : [value.slice(0, comma), value.slice(comma + 1)];
+  };
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const colon = line.indexOf(":");
+    const key = colon < 0 ? line : line.slice(0, colon);
+    const value = colon < 0 ? "" : line.slice(colon + 1);
+    if (key === "SF") current = { path: value, functions: new Map(), lines: new Map() };
+    else if (key === "FN" && current) {
+      const [line, name] = splitOnce(value);
+      current.functions.set(name, { line: Number(line), count: 0 });
+    } else if (key === "FNDA" && current) {
+      const [count, name] = splitOnce(value);
+      const fn = current.functions.get(name);
+      if (fn) fn.count = Number(count);
+    } else if (key === "DA" && current) {
+      const [line, count] = splitOnce(value);
+      current.lines.set(Number(line), Number(count));
+    } else if (key === "end_of_record" && current) {
+      files.push(current);
+      current = null;
+    }
+  }
+  return files;
+}
+
+/// The "Copperline Coverage" test controller: one item whose coverage run
+/// profile publishes an lcov file (the emulator's --coverage output) into
+/// VS Code's built-in Test Coverage view and editor decorations.
+function coverageController(context) {
+  const controller = vscode.tests.createTestController("copperlineCoverage", "Copperline Coverage");
+  const item = controller.createTestItem("guest", "Guest coverage (lcov)");
+  controller.items.add(item);
+  const details = new WeakMap();
+  let remembered;
+  context.subscriptions.push(vscode.debug.onDidStartDebugSession((session) => {
+    if (session.type === "copperline" && session.configuration.coverage) remembered = session.configuration.coverage;
+  }));
+  async function chooseFile() {
+    if (remembered && await fileExists(vscode.Uri.file(remembered))) {
+      const pick = await vscode.window.showQuickPick(
+        [{ label: remembered, description: "from the last launch configuration" }, { label: "Choose another file..." }],
+        { title: "Copperline coverage file" });
+      if (!pick) return undefined;
+      if (pick.label === remembered) return remembered;
+    }
+    const selected = await vscode.window.showOpenDialog({
+      title: "Select an lcov coverage file", canSelectFiles: true, canSelectFolders: false, canSelectMany: false,
+      filters: { "lcov coverage": ["info", "lcov"] },
+    });
+    return selected && selected[0] && selected[0].fsPath;
+  }
+  async function publish(run, file) {
+    const text = Buffer.from(await vscode.workspace.fs.readFile(vscode.Uri.file(file))).toString("utf8");
+    for (const record of parseLcov(text)) {
+      const statements = [...record.lines].map(([line, count]) =>
+        new vscode.StatementCoverage(count, new vscode.Position(Math.max(line - 1, 0), 0)));
+      const declarations = [...record.functions].map(([name, fn]) =>
+        new vscode.DeclarationCoverage(name, fn.count, new vscode.Position(Math.max(fn.line - 1, 0), 0)));
+      const all = [...statements, ...declarations];
+      const coverage = vscode.FileCoverage.fromDetails(vscode.Uri.file(record.path), all);
+      details.set(coverage, all);
+      run.addCoverage(coverage);
+    }
+    remembered = file;
+  }
+  const profile = controller.createRunProfile("Guest coverage", vscode.TestRunProfileKind.Coverage, async (request) => {
+    const run = controller.createTestRun(request);
+    run.started(item);
+    try {
+      const file = await chooseFile();
+      if (file) { await publish(run, file); run.passed(item); } else run.skipped(item);
+    } catch (error) { run.failed(item, new vscode.TestMessage(String(error))); }
+    run.end();
+  }, true);
+  profile.loadDetailedCoverage = async (_run, coverage) => details.get(coverage) || [];
+  context.subscriptions.push(controller);
+  return () => profile.runHandler(new vscode.TestRunRequest([item], undefined, profile), new vscode.CancellationTokenSource().token);
+}
+
 class CustomRegisterProvider {
   constructor() {
     this.items = [];
@@ -191,6 +279,7 @@ function activate(context) {
   } };
   context.subscriptions.push(vscode.debug.registerDebugConfigurationProvider("copperline", provider));
 
+  const showCoverage = coverageController(context);
   const registers = new CustomRegisterProvider();
   context.subscriptions.push(
     vscode.window.registerTreeDataProvider("copperline.customRegisters", registers), registers.changed,
@@ -271,7 +360,8 @@ function activate(context) {
     vscode.commands.registerCommand("copperline.refreshCustomRegisters", () => registers.refresh()),
     vscode.commands.registerCommand("copperline.initProject", () => initProject(context)),
     vscode.commands.registerCommand("copperline.exe2adf", exe2adf),
-    vscode.commands.registerCommand("copperline.sizeReport", sizeReport)
+    vscode.commands.registerCommand("copperline.sizeReport", sizeReport),
+    vscode.commands.registerCommand("copperline.showCoverage", () => showCoverage())
   );
   void registers.refresh();
 }

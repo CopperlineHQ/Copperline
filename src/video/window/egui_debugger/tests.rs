@@ -300,6 +300,456 @@ fn address_submission_register_edits_and_cpu_memory_paging_reuse_machine_actions
     assert!(panel.mem_view_bits);
 }
 
+/// Click the widget with `id`: pointer move, press, and release, each as
+/// its own frame, as a real click arrives. Returns the release frame's
+/// actions.
+fn click_widget(
+    context: &egui::Context,
+    layout: &mut Layout,
+    panel: &mut ui::DebuggerPanel,
+    view: &ui::DebuggerView,
+    size: [f32; 2],
+    id: egui::Id,
+) -> Vec<Action> {
+    let pos = context
+        .read_response(id)
+        .unwrap_or_else(|| panic!("{id:?} is not laid out"))
+        .rect
+        .center();
+    click_at(context, layout, panel, view, size, pos)
+}
+
+fn click_at(
+    context: &egui::Context,
+    layout: &mut Layout,
+    panel: &mut ui::DebuggerPanel,
+    view: &ui::DebuggerView,
+    size: [f32; 2],
+    pos: egui::Pos2,
+) -> Vec<Action> {
+    let mut last = Vec::new();
+    for events in [
+        vec![egui::Event::PointerMoved(pos)],
+        vec![egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        }],
+        vec![egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+    ] {
+        let (_, actions) = run_frame(context, layout, input(size, events), panel, view);
+        last = actions;
+    }
+    last
+}
+
+fn text(text: &str) -> egui::Event {
+    egui::Event::Text(text.into())
+}
+
+#[test]
+fn memory_tab_edits_bytes_in_place_through_the_bus() {
+    let mut app = test_app();
+    app.open_debugger();
+    // Drop the boot overlay so low chip RAM is CPU-visible.
+    app.emu.bus_mut().mem.overlay = false;
+    {
+        let panel = app.debugger_panel.as_mut().unwrap();
+        panel.tab = ui::DebugTab::Memory;
+        panel.mem_addr = 0x60000;
+    }
+    let size = [1100.0, 760.0];
+    let context = egui::Context::default();
+    configure_style(&context);
+    let mut layout = Layout::default();
+    let mut panel = app.debugger_panel.clone().unwrap();
+    let view = app.build_debugger_view_with_clipping(&panel, false);
+    let memory = view.memory.as_ref().expect("hex mode carries the page");
+    assert_eq!(memory.base, 0x60000);
+    assert_eq!(memory.bytes.len(), 256);
+    assert!(memory.writable.iter().all(|w| *w), "chip RAM is editable");
+    let original = memory.bytes[3];
+    let retired = app.emu.retired_instructions();
+    let _ = run_frame(
+        &context,
+        &mut layout,
+        input(size, vec![]),
+        &mut panel,
+        &view,
+    );
+
+    // Hex column: click, then type two digits. C and F are also the
+    // Copper-step and Frame shortcuts; while a byte is selected they are
+    // data, and nothing steps the machine.
+    let actions = click_widget(
+        &context,
+        &mut layout,
+        &mut panel,
+        &view,
+        size,
+        memory_cell_id(0x60003, ui::MemColumn::Hex),
+    );
+    assert!(actions.is_empty());
+    assert_eq!(
+        panel.mem_cursor,
+        Some(ui::MemCursor::new(0x60003, ui::MemColumn::Hex))
+    );
+    let (_, actions) = run_frame(
+        &context,
+        &mut layout,
+        input(
+            size,
+            vec![key(egui::Key::C, egui::Modifiers::NONE), text("c")],
+        ),
+        &mut panel,
+        &view,
+    );
+    assert!(actions.is_empty(), "{actions:?}");
+    assert_eq!(
+        panel.mem_pending_value(0x60003),
+        Some(0xC0 | (original & 0x0F))
+    );
+    assert!(!panel.mem_cursor.unwrap().high_nibble);
+    let (_, actions) = run_frame(
+        &context,
+        &mut layout,
+        input(
+            size,
+            vec![key(egui::Key::F, egui::Modifiers::NONE), text("F")],
+        ),
+        &mut panel,
+        &view,
+    );
+    assert!(actions.is_empty(), "{actions:?}");
+    assert_eq!(panel.mem_pending, vec![(0x60003, 0xCF)]);
+    assert_eq!(
+        panel.mem_cursor,
+        Some(ui::MemCursor::new(0x60004, ui::MemColumn::Hex)),
+        "a completed byte advances the cursor"
+    );
+    assert_eq!(
+        app.emu.machine.debug_read_memory(0x60003, 1),
+        vec![original],
+        "staged edits do not touch memory"
+    );
+    // Enter commits through the App, and the bus reads the byte back.
+    let (_, actions) = run_frame(
+        &context,
+        &mut layout,
+        input(size, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]),
+        &mut panel,
+        &view,
+    );
+    assert_eq!(actions, vec![Action::MemoryCommit(vec![(0x60003, 0xCF)])]);
+    assert!(panel.mem_cursor.is_none());
+    assert!(panel.mem_pending.is_empty());
+    for action in actions {
+        app.apply_egui_debugger_action(action);
+    }
+    assert_eq!(app.emu.bus().peek_word_any(0x60002) & 0xFF, 0xCF);
+    assert_eq!(app.emu.machine.debug_read_memory(0x60003, 1), vec![0xCF]);
+    assert_eq!(
+        app.emu.retired_instructions(),
+        retired,
+        "no timeline side effects"
+    );
+    assert!(app.paused);
+    let status = app.debugger_panel.as_ref().unwrap().mem_status.clone();
+    assert_eq!(status.as_deref(), Some("Wrote 1 byte at $060003"));
+
+    // ASCII column: one typed character replaces the byte, and clicking
+    // anywhere outside the dump commits, as leaving a field does.
+    let view = app.build_debugger_view_with_clipping(&panel, false);
+    let _ = run_frame(
+        &context,
+        &mut layout,
+        input(size, vec![]),
+        &mut panel,
+        &view,
+    );
+    let actions = click_widget(
+        &context,
+        &mut layout,
+        &mut panel,
+        &view,
+        size,
+        memory_cell_id(0x60005, ui::MemColumn::Ascii),
+    );
+    assert!(actions.is_empty());
+    let (_, actions) = run_frame(
+        &context,
+        &mut layout,
+        input(
+            size,
+            vec![key(egui::Key::Z, egui::Modifiers::SHIFT), text("Z")],
+        ),
+        &mut panel,
+        &view,
+    );
+    assert!(actions.is_empty(), "{actions:?}");
+    assert_eq!(panel.mem_pending, vec![(0x60005, b'Z')]);
+    assert_eq!(
+        panel.mem_cursor,
+        Some(ui::MemCursor::new(0x60006, ui::MemColumn::Ascii))
+    );
+    let first_cell = context
+        .read_response(memory_cell_id(0x60000, ui::MemColumn::Hex))
+        .unwrap()
+        .rect;
+    let address_label = first_cell.left_center() - egui::vec2(40.0, 0.0);
+    let actions = click_at(
+        &context,
+        &mut layout,
+        &mut panel,
+        &view,
+        size,
+        address_label,
+    );
+    assert_eq!(actions, vec![Action::MemoryCommit(vec![(0x60005, b'Z')])]);
+    assert!(panel.mem_cursor.is_none());
+    for action in actions {
+        app.apply_egui_debugger_action(action);
+    }
+    assert_eq!(app.emu.machine.debug_read_memory(0x60005, 1), vec![b'Z']);
+
+    // Esc drops the staged edit without closing the workspace.
+    let view = app.build_debugger_view_with_clipping(&panel, false);
+    let _ = run_frame(
+        &context,
+        &mut layout,
+        input(size, vec![]),
+        &mut panel,
+        &view,
+    );
+    click_widget(
+        &context,
+        &mut layout,
+        &mut panel,
+        &view,
+        size,
+        memory_cell_id(0x60008, ui::MemColumn::Hex),
+    );
+    let (_, actions) = run_frame(
+        &context,
+        &mut layout,
+        input(size, vec![text("1")]),
+        &mut panel,
+        &view,
+    );
+    assert!(actions.is_empty());
+    assert_eq!(panel.mem_pending.len(), 1);
+    let (_, actions) = run_frame(
+        &context,
+        &mut layout,
+        input(size, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]),
+        &mut panel,
+        &view,
+    );
+    assert!(actions.is_empty(), "Esc while editing must not leave Debug");
+    assert!(panel.mem_cursor.is_none());
+    assert!(panel.mem_pending.is_empty());
+    let before = app.emu.save_state_bytes().unwrap();
+    let _ = run_frame(
+        &context,
+        &mut layout,
+        input(size, vec![]),
+        &mut panel,
+        &view,
+    );
+    assert_eq!(app.emu.save_state_bytes().unwrap(), before);
+}
+
+#[test]
+fn memory_edit_cursor_keys_follow_the_page_and_refuse_rom() {
+    let mut app = test_app();
+    app.open_debugger();
+    app.emu.bus_mut().mem.overlay = false;
+    {
+        let panel = app.debugger_panel.as_mut().unwrap();
+        panel.tab = ui::DebugTab::Memory;
+        panel.mem_addr = 0x60000;
+    }
+    let size = [1100.0, 760.0];
+    let context = egui::Context::default();
+    configure_style(&context);
+    let mut layout = Layout::default();
+    let mut panel = app.debugger_panel.clone().unwrap();
+    let view = app.build_debugger_view_with_clipping(&panel, false);
+    let _ = run_frame(
+        &context,
+        &mut layout,
+        input(size, vec![]),
+        &mut panel,
+        &view,
+    );
+
+    // Up from the first row: the cursor moves to the row above and the
+    // page scrolls to keep it visible.
+    click_widget(
+        &context,
+        &mut layout,
+        &mut panel,
+        &view,
+        size,
+        memory_cell_id(0x60000, ui::MemColumn::Hex),
+    );
+    let (_, actions) = run_frame(
+        &context,
+        &mut layout,
+        input(size, vec![key(egui::Key::ArrowUp, egui::Modifiers::NONE)]),
+        &mut panel,
+        &view,
+    );
+    assert_eq!(actions, vec![Action::MemoryScroll(-1)]);
+    assert_eq!(panel.mem_cursor.unwrap().addr, 0x5FFF0);
+    // Within the page the arrows only move the cursor.
+    panel.mem_cursor = Some(ui::MemCursor::new(0x60010, ui::MemColumn::Hex));
+    let (_, actions) = run_frame(
+        &context,
+        &mut layout,
+        input(
+            size,
+            vec![
+                key(egui::Key::ArrowRight, egui::Modifiers::NONE),
+                key(egui::Key::ArrowDown, egui::Modifiers::NONE),
+            ],
+        ),
+        &mut panel,
+        &view,
+    );
+    assert!(actions.is_empty());
+    assert_eq!(panel.mem_cursor.unwrap().addr, 0x60021);
+    // Right past the last byte scrolls one row; Page Down a whole page.
+    panel.mem_cursor = Some(ui::MemCursor::new(0x600FF, ui::MemColumn::Ascii));
+    let (_, actions) = run_frame(
+        &context,
+        &mut layout,
+        input(
+            size,
+            vec![key(egui::Key::ArrowRight, egui::Modifiers::NONE)],
+        ),
+        &mut panel,
+        &view,
+    );
+    assert_eq!(actions, vec![Action::MemoryScroll(1)]);
+    assert_eq!(panel.mem_cursor.unwrap().addr, 0x60100);
+    panel.mem_cursor = Some(ui::MemCursor::new(0x60040, ui::MemColumn::Hex));
+    let (_, actions) = run_frame(
+        &context,
+        &mut layout,
+        input(size, vec![key(egui::Key::PageDown, egui::Modifiers::NONE)]),
+        &mut panel,
+        &view,
+    );
+    assert_eq!(actions, vec![Action::MemoryScroll(16)]);
+    assert_eq!(panel.mem_cursor.unwrap().addr, 0x60140);
+    // The page scroll goes through the same App action as the buttons.
+    for action in actions {
+        app.apply_egui_debugger_action(action);
+    }
+    assert_eq!(app.debugger_panel.as_ref().unwrap().mem_addr, 0x60100);
+
+    // ROM is shown but refused: a click there selects nothing and says why.
+    panel.mem_edit_cancel();
+    panel.mem_addr = crate::memory::ROM_BASE as u32;
+    let view = app.build_debugger_view_with_clipping(&panel, false);
+    let memory = view.memory.as_ref().unwrap();
+    assert!(memory.writable.iter().all(|w| !*w));
+    let _ = run_frame(
+        &context,
+        &mut layout,
+        input(size, vec![]),
+        &mut panel,
+        &view,
+    );
+    let rom_cell = memory_cell_id(crate::memory::ROM_BASE as u32 + 4, ui::MemColumn::Hex);
+    let actions = click_widget(&context, &mut layout, &mut panel, &view, size, rom_cell);
+    assert!(actions.is_empty());
+    assert!(panel.mem_cursor.is_none());
+    assert_eq!(
+        panel.mem_status.as_deref(),
+        Some("$F80004 is read-only (ROM or a device window); not editable")
+    );
+    // With no cursor the ordinary shortcuts are back.
+    let (_, actions) = run_frame(
+        &context,
+        &mut layout,
+        input(size, vec![key(egui::Key::PageDown, egui::Modifiers::NONE)]),
+        &mut panel,
+        &view,
+    );
+    assert_eq!(actions, vec![Action::MemoryScroll(16)]);
+}
+
+#[test]
+fn memory_tab_commit_matches_the_control_protocol_write() {
+    use crate::control::exec::{exec_core, CoreOp};
+    use crate::control::session::SessionCtx;
+
+    // The same edits through the tab and through mem.write leave two
+    // fresh machines byte-identical, watch baselines included.
+    let mut gui = test_app();
+    gui.open_debugger();
+    gui.emu.bus_mut().mem.overlay = false;
+    gui.emu.machine.ui_toggle_watch(0x60010);
+    let mut ccp = test_app();
+    ccp.open_debugger();
+    ccp.emu.bus_mut().mem.overlay = false;
+    ccp.emu.machine.ui_toggle_watch(0x60010);
+    assert_eq!(
+        gui.emu.save_state_bytes().unwrap(),
+        ccp.emu.save_state_bytes().unwrap()
+    );
+
+    gui.apply_egui_debugger_action(Action::MemoryCommit(vec![
+        (0x60010, 0x42),
+        (0x60011, 0x43),
+        (crate::memory::ROM_BASE as u32, 0xFF),
+    ]));
+    let mut ctx = SessionCtx::new();
+    let written = exec_core(
+        &mut ccp.emu,
+        &mut ctx,
+        &CoreOp::MemWrite {
+            addr: 0x60010,
+            data: vec![0x42, 0x43],
+        },
+    )
+    .unwrap();
+    assert_eq!(written["written"], 2);
+    let refused = exec_core(
+        &mut ccp.emu,
+        &mut ctx,
+        &CoreOp::MemWrite {
+            addr: crate::memory::ROM_BASE as u32,
+            data: vec![0xFF],
+        },
+    )
+    .unwrap();
+    assert_eq!(refused["written"], 0);
+
+    assert_eq!(gui.emu.bus().peek_word_any(0x60010), 0x4243);
+    let watch = &gui.emu.machine.ui_breaks().watches[0];
+    assert_eq!(
+        watch.last, 0x4243,
+        "the poke itself must not trip the watch"
+    );
+    assert_eq!(
+        gui.emu.save_state_bytes().unwrap(),
+        ccp.emu.save_state_bytes().unwrap()
+    );
+    assert_eq!(
+        gui.debugger_panel.as_ref().unwrap().mem_status.as_deref(),
+        Some("Wrote 2 of 3 bytes; $F80000 is not writable RAM")
+    );
+}
+
 #[test]
 fn dragging_workspace_and_cpu_dividers_preserves_the_new_pane_sizes() {
     let app = test_app();

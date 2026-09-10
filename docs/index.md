@@ -48,6 +48,7 @@ Spaceballs' *State of the Art* (1992) running in Copperline.
 - [](debugger/vscode) and [](debugger/vscode-bartman) -- VS Code setup, source debugging, and illustrated CPU/DMA and graphics profiling using the installable Bartman fork.
 - [](debugger/control) -- JSON-RPC control protocol (`copperline-ctl`) for automation, with an MCP server mode for coding agents.
 - [](debugger/dap) -- DAP launch, attach, stepping, and debug-information reference.
+- [](debugger/diverge) -- A/B divergence finder: two builds or two configs in lockstep, narrowed to the first differing frame and instruction.
 - [](internals/architecture) -- Emulator internals and subsystem architecture.
 
 ## Core design principles

@@ -25,10 +25,12 @@ host filesystem interface:
 
 1. **`RunBoot:`** (Boot priority 6) -- A dynamically generated boot volume containing
    an `S/Startup-Sequence` that sets the current directory, launches the specified
-   executable, and records a completion marker when the program exits. This volume
+   executable, and records a completion marker holding the program's AmigaDOS
+   return code when it exits. This volume
    is created in a per-process temporary staging directory. Bundled `C:FailAt`,
-   `C:CD`, `C:Stack`, and `C:Echo` executables supply the commands missing from
-   a bare Kickstart 1.3 ROM; `C:Execute` supplies the detached script handoff
+   `C:CD`, `C:Stack`, `C:Echo`, and `C:Done` executables supply the commands
+   missing from a bare Kickstart 1.3 ROM (`Done` writes the return code the CLI
+   keeps in `cli_ReturnCode`); `C:Execute` supplies the detached script handoff
    on later ROMs. No Workbench command files are needed.
 2. **`RunProg:`** (Read/Write) -- The host directory containing the target executable.
    The guest loads the binary directly from this volume, and any output files written
@@ -46,6 +48,29 @@ By default, the bundled AROS Kickstart replacement is used on the standard machi
 copperline --model A1200 --fast 8M KICK31.ROM --run build/demo
 ```
 
+(exit-on-return)=
+## Guest exit status (`--exit-on-return`)
+
+With `--exit-on-return`, the session ends the moment the program's return
+code lands in the completion marker, and Copperline's own exit status is that
+code (clamped to 0-255). Windowed sessions close their window; headless runs
+need no capture flag to bound them:
+
+```sh
+copperline --run build/tests --exit-on-return --noaudio; echo $?
+```
+
+If the run ends for another reason first (the last `--screenshot-after`
+fired, the window was closed) before the program returned, the status is 4.
+A program that never returns therefore needs a bounding flag such as
+`--screenshot-after 60 /tmp/end.png` to turn into a 4 rather than an
+endless run. The generated script sets `FailAt 2147483647` so no return code
+aborts it before the marker is written; a non-zero code takes precedence
+over a failed `--expect-screenshot` (status 3), a zero one does not hide it.
+The full status table is in [Headless](headless.md#exit-statuses).
+`guest/run-tools/retcode` returns the number given as its argument, for
+checking the plumbing end to end.
+
 ## Fast-forward boot (Warp mode)
 
 In interactive windowed sessions, `--run` automatically enables warp mode during boot.
@@ -57,8 +82,8 @@ emulation and audio immediately return to normal real-time playback.
 
 Additional operational notes:
 
-- **Early termination:** If the program completes execution quickly, the `Startup-Sequence`
-  detects exit and disables warp mode.
+- **Early termination:** If the program completes execution quickly, the completion
+  marker the `Startup-Sequence` writes disables warp mode.
 - **Boot timeouts:** If the program fails to load within 60 emulated seconds (for example,
   due to a crash during OS initialization), warp mode disengages so the system state can
   be inspected.
@@ -104,6 +129,10 @@ this by itself: a VS Code (or nvim-dap) launch configuration naming the program
 starts Copperline, stops at the entry point, and debugs by source line from the
 executable's own debug information.
 
+`--coverage FILE` turns the same load-to-exit window into lcov line and
+function coverage of the program, written when it exits or the run ends; see
+[Guest code coverage](../debugger/profiling.md#guest-coverage).
+
 (uaelib-trap)=
 ### WinUAE-compatible `uaelib` trap
 
@@ -128,6 +157,7 @@ if (*(UWORD *)UaeConf == 0x4eb9 || *(UWORD *)UaeConf == 0xa00e) {
 
 | Function | WinUAE meaning | Copperline |
 |---|---|---|
+| 13 | `ExitEmu`: quit the emulator | Ends the session cleanly at the next frame boundary: the window closes, a headless run stops, and the process exits with status 0 (or 3 if a screenshot expectation had failed). No arguments; returns 1. `guest/uaelib-test/exitemu` calls it. |
 | 82 | `uae-configuration`-style `"key value"` line | `warp true` / `warp false` (also `yes` / `no`) toggles warp mode. Parameters like `cpu_speed` and `*_cycle_exact` are accepted as no-ops. Returns 0. |
 | 86 | Debug log string | Printed to the host console as `DBG: <text>` (shared with serial output), streamed to control-protocol `debug` subscribers as `event.debug`, and mirrored into the debugger console. Returns 1. |
 | 88 | `debug_cmd` multiplexer | `debug_register_bitmap` / `_palette` / `_copperlist` and `debug_unregister` register guest assets, viewable in the Frame Analyzer (Resources and Memory tabs), exportable as PNG there or with `debug.resource.export`, searchable via `palette.dump` / `copper.list`, and listed with the console `DBGRES` command; `debug_start_idle` / `debug_stop_idle` report guest idle time in `debug.idle` and `event.frame.guest_idle_cck`. Overlay drawing (`debug_clear` / `debug_rect` / `debug_filled_rect` / `debug_text` on a 768x576 virtual canvas) renders on screen in the window (excluded from captures and recordings). `debug_load` / `debug_save` are disabled by default; see below. |
@@ -150,8 +180,9 @@ if (*(UWORD *)UaeConf == 0x4eb9 || *(UWORD *)UaeConf == 0xa00e) {
 
 Normal `--run` launches support bare Kickstart 1.3, later ROMs, and bundled
 AROS. The generated boot volume supplies small GPL-licensed 68000 versions of
-`FailAt`, `CD`, `Stack`, and `Echo` for the 1.x CLI. Working-directory changes,
-arguments, `--run-stack`, and the completion marker work without Workbench.
+`FailAt`, `CD`, `Stack`, `Echo`, and `Done` for the 1.x CLI. Working-directory
+changes, arguments, `--run-stack`, and the completion marker with its return
+code work without Workbench.
 The program itself must also use APIs available on the selected ROM.
 
 `--run-detach` still requires Kickstart 2.0+ or AROS: the bundle does not

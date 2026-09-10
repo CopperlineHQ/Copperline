@@ -69,6 +69,7 @@ project:
         - file: debugger/vscode-bartman.md
         - file: debugger/gdb.md
         - file: debugger/dap.md
+        - file: debugger/diverge.md
         - file: debugger/control.md
         - file: debugger/workflows.md
     - title: Internals
@@ -123,6 +124,7 @@ project:
         - debugger/vscode-bartman.md
         - debugger/gdb.md
         - debugger/dap.md
+        - debugger/diverge.md
         - debugger/control.md
         - debugger/workflows.md
         - internals/architecture.md

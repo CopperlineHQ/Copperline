@@ -32,6 +32,8 @@ pub(super) enum Action {
     FollowPc,
     FollowCopper,
     MemoryScroll(i32),
+    /// Write the Memory tab's staged byte edits, (address, value) each.
+    MemoryCommit(Vec<(u32, u8)>),
     IoMapScroll(i32),
 }
 
@@ -405,7 +407,7 @@ impl Layout {
         actions: &mut Vec<Action>,
     ) {
         if root.ctx().current_pass_index() == 0 {
-            shortcuts(root, panel, actions);
+            shortcuts(root, panel, view, actions);
         }
         egui::Panel::top("debugger_tabs").show(root, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -493,6 +495,7 @@ impl Layout {
                 return;
             }
         }
+        let mut cell_clicked = false;
         egui::CentralPanel::default().show(root, |ui| {
             self.tab_controls(ui, panel, view, actions);
             ui.separator();
@@ -512,6 +515,17 @@ impl Layout {
                     if let Some(audio) = &view.audio {
                         self.audio(ui, audio, viewport.width(), actions);
                     }
+                }
+                ui::DebugTab::Memory if view.memory.is_some() => {
+                    let memory = view.memory.as_ref().unwrap();
+                    // The text rows carry the tab's hint line ahead of the
+                    // dump; the dump itself is drawn as clickable cells.
+                    if let Some(hint) = view.lines.get(ui::MEM_TAB_HEADER_LINES) {
+                        ui.monospace(&hint.text);
+                    }
+                    ui.monospace(MEMORY_EDIT_HINT);
+                    ui.add_space(4.0);
+                    cell_clicked = memory_grid(ui, panel, memory);
                 }
                 _ => {
                     lines(ui, &view.lines);
@@ -535,6 +549,18 @@ impl Layout {
                 }
             });
         });
+        // Leaving the dump commits: a click anywhere but a byte cell (a
+        // button, another tab, the address box) or focus moving into a
+        // text field writes what was typed, like Enter does.
+        if panel.tab == ui::DebugTab::Memory && panel.mem_cursor.is_some() {
+            let clicked_elsewhere = !cell_clicked && root.input(|i| i.pointer.any_click());
+            if clicked_elsewhere || root.ctx().text_edit_focused() {
+                let edits = panel.mem_edit_take();
+                if !edits.is_empty() {
+                    actions.push(Action::MemoryCommit(edits));
+                }
+            }
+        }
     }
 
     fn cpu(
@@ -692,6 +718,16 @@ impl Layout {
                 }
             }
             ui::DebugTab::Memory => {
+                ui.label("Goto");
+                ui.add(
+                    egui::DragValue::new(&mut panel.mem_addr)
+                        .hexadecimal(8, false, true)
+                        .speed(16.0),
+                )
+                .on_hover_text("Page base address; drag, or click and type hex");
+                if !panel.mem_view_bits {
+                    panel.mem_addr &= !0xF;
+                }
                 for (label, control, enabled) in [
                     (
                         "Find",
@@ -717,6 +753,9 @@ impl Layout {
                     ("Next page", UiControl::DebugMemNext, true),
                 ] {
                     button(ui, actions, label, control, enabled);
+                }
+                if let Some(status) = &panel.mem_status {
+                    ui.colored_label(BLUE, status);
                 }
             }
             ui::DebugTab::IoMap => {
@@ -929,7 +968,221 @@ fn color(rgba: u32) -> Color32 {
     Color32::from_rgba_unmultiplied(r, g, b, a)
 }
 
-fn shortcuts(ui: &mut egui::Ui, panel: &ui::DebuggerPanel, actions: &mut Vec<Action>) {
+/// Widget id of one Memory tab byte cell, so tests can click it.
+pub(super) fn memory_cell_id(addr: u32, column: ui::MemColumn) -> egui::Id {
+    egui::Id::new(("debugger_memory_cell", addr, column))
+}
+
+const MEMORY_EDIT_HINT: &str =
+    "click a byte to edit: hex digits or ASCII text overwrite it, arrows move, Enter commits, Esc cancels";
+
+/// The Memory tab's dump as clickable byte cells: hex and ASCII columns,
+/// the selected byte inverted, staged edits in blue, read-only bytes grey.
+/// Returns whether a cell took this frame's click.
+fn memory_grid(
+    ui: &mut egui::Ui,
+    panel: &mut ui::DebuggerPanel,
+    memory: &ui::MemoryPageView,
+) -> bool {
+    const STAGED_FILL: Color32 = Color32::from_rgb(214, 226, 250);
+    let font = FontId::monospace(13.0);
+    let mut clicked = false;
+    let mut select = None;
+    let mut refuse = None;
+    for row in 0..16usize {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            let row_addr = memory.base.wrapping_add(row as u32 * 16) & memory.addr_mask;
+            ui.label(RichText::new(format!("{row_addr:06X}: ")).monospace());
+            for column in [ui::MemColumn::Hex, ui::MemColumn::Ascii] {
+                for i in 0..16usize {
+                    let idx = row * 16 + i;
+                    let addr = row_addr.wrapping_add(i as u32) & memory.addr_mask;
+                    let actual = memory.bytes.get(idx).copied().unwrap_or(0);
+                    let staged = panel.mem_pending_value(addr);
+                    let value = staged.unwrap_or(actual);
+                    let writable = memory.writable.get(idx).copied().unwrap_or(false);
+                    let text = match column {
+                        ui::MemColumn::Hex => format!("{value:02X}"),
+                        ui::MemColumn::Ascii => {
+                            if (0x20..0x7F).contains(&value) {
+                                (value as char).to_string()
+                            } else {
+                                ".".to_string()
+                            }
+                        }
+                    };
+                    let selected = panel
+                        .mem_cursor
+                        .is_some_and(|c| c.addr == addr && c.column == column);
+                    let color = if selected {
+                        Color32::WHITE
+                    } else if staged.is_some() {
+                        BLUE
+                    } else if !writable {
+                        Color32::from_gray(130)
+                    } else {
+                        INK
+                    };
+                    let galley = ui.painter().layout_no_wrap(text, font.clone(), color);
+                    let gap = if column == ui::MemColumn::Hex {
+                        7.0
+                    } else {
+                        0.0
+                    };
+                    let (_, rect) = ui.allocate_space(galley.size() + egui::vec2(gap, 0.0));
+                    let response =
+                        ui.interact(rect, memory_cell_id(addr, column), egui::Sense::click());
+                    let glyphs = egui::Rect::from_min_size(rect.min, galley.size()).expand(1.0);
+                    if selected {
+                        ui.painter().rect_filled(glyphs, 0.0, BLUE);
+                    } else if staged.is_some() {
+                        ui.painter().rect_filled(glyphs, 0.0, STAGED_FILL);
+                    }
+                    ui.painter().galley(rect.min, galley, color);
+                    if response.clicked() {
+                        clicked = true;
+                        if writable {
+                            select = Some((addr, column));
+                        } else {
+                            refuse = Some(addr);
+                        }
+                    }
+                }
+                if column == ui::MemColumn::Hex {
+                    ui.label(RichText::new(" ").monospace());
+                }
+            }
+        });
+    }
+    if let Some((addr, column)) = select {
+        panel.mem_cursor = Some(ui::MemCursor::new(addr, column));
+    }
+    if let Some(addr) = refuse {
+        panel.mem_status = Some(format!(
+            "${addr:06X} is read-only (ROM or a device window); not editable"
+        ));
+    }
+    clicked
+}
+
+/// Keys while a Memory tab byte is selected. Typed characters edit the
+/// byte, the cursor keys move (scrolling the page to follow), Enter
+/// commits, Esc cancels; nothing reaches the transport shortcuts.
+fn memory_edit_keys(
+    ui: &mut egui::Ui,
+    panel: &mut ui::DebuggerPanel,
+    memory: &ui::MemoryPageView,
+    actions: &mut Vec<Action>,
+) {
+    let mask = memory.addr_mask;
+    let byte_at = |addr: u32| {
+        let idx = addr.wrapping_sub(memory.base) & mask;
+        memory.bytes.get(idx as usize).copied().unwrap_or(0)
+    };
+    // Rows the page must scroll for the cursor to stay visible; applied
+    // once at the end so the (deduplicated) action carries the total.
+    let mut base = memory.base;
+    let mut scroll_rows = 0i32;
+    let follow = |addr: u32, base: &mut u32, scroll_rows: &mut i32| {
+        let off = addr.wrapping_sub(*base) & mask;
+        if off >= ui::MEM_PAGE_BYTES {
+            let above = base.wrapping_sub(addr) & mask;
+            let below = off - ui::MEM_PAGE_BYTES;
+            let rows = if above <= below {
+                -((above as i32 + 15) / 16)
+            } else {
+                below as i32 / 16 + 1
+            };
+            *scroll_rows += rows;
+            *base = base.wrapping_add_signed(rows * 16) & mask;
+        }
+    };
+    let events = ui.input(|i| i.events.clone());
+    for event in events {
+        match event {
+            egui::Event::Key {
+                key, pressed: true, ..
+            } => {
+                let delta = match key {
+                    egui::Key::Escape => {
+                        panel.mem_edit_cancel();
+                        return;
+                    }
+                    egui::Key::Enter => {
+                        let edits = panel.mem_edit_take();
+                        if !edits.is_empty() {
+                            actions.push(Action::MemoryCommit(edits));
+                        }
+                        break;
+                    }
+                    egui::Key::ArrowLeft => -1,
+                    egui::Key::ArrowRight => 1,
+                    egui::Key::ArrowUp => -16,
+                    egui::Key::ArrowDown => 16,
+                    egui::Key::PageUp => -(ui::MEM_PAGE_BYTES as i32),
+                    egui::Key::PageDown => ui::MEM_PAGE_BYTES as i32,
+                    egui::Key::Backspace => {
+                        // Mid-byte: forget the half-typed digit. Otherwise
+                        // step back to the previous byte.
+                        match panel.mem_cursor {
+                            Some(cursor) if !cursor.high_nibble => {
+                                panel.mem_pending.retain(|(a, _)| *a != cursor.addr);
+                                if let Some(cursor) = panel.mem_cursor.as_mut() {
+                                    cursor.high_nibble = true;
+                                }
+                                continue;
+                            }
+                            _ => -1,
+                        }
+                    }
+                    _ => continue,
+                };
+                if let Some(addr) = panel.mem_cursor_move(delta, mask) {
+                    if delta.unsigned_abs() == ui::MEM_PAGE_BYTES {
+                        // Page keys page the view; the cursor keeps its place.
+                        scroll_rows += delta / 16;
+                        base = base.wrapping_add_signed(delta) & mask;
+                    } else {
+                        follow(addr, &mut base, &mut scroll_rows);
+                    }
+                }
+            }
+            egui::Event::Text(text) => {
+                for ch in text.chars() {
+                    let Some(cursor) = panel.mem_cursor else {
+                        break;
+                    };
+                    if panel.mem_type_char(ch, byte_at(cursor.addr)) {
+                        if let Some(addr) = panel.mem_cursor_move(1, mask) {
+                            follow(addr, &mut base, &mut scroll_rows);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if scroll_rows != 0 {
+        actions.push(Action::MemoryScroll(scroll_rows));
+    }
+}
+
+fn shortcuts(
+    ui: &mut egui::Ui,
+    panel: &mut ui::DebuggerPanel,
+    view: &ui::DebuggerView,
+    actions: &mut Vec<Action>,
+) {
+    if panel.tab == ui::DebugTab::Memory
+        && panel.mem_cursor.is_some()
+        && !ui.ctx().text_edit_focused()
+    {
+        if let Some(memory) = &view.memory {
+            memory_edit_keys(ui, panel, memory, actions);
+            return;
+        }
+    }
     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         if let Some(id) = ui
             .memory(|m| m.focused())
@@ -1134,6 +1387,7 @@ impl App {
                     }
                 }
             }
+            Action::MemoryCommit(edits) => self.debugger_mem_commit(edits),
             Action::IoMapScroll(rows) => self.debugger_iomap_move(rows),
         }
         self.request_redraw();

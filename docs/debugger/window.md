@@ -48,8 +48,9 @@ field; **Set Reg** applies it. Enter in the field pins the disassembly address
 according to the active tab.
 
 The CPU memory pane has its own address and page controls. The Memory tab
-retains Find, Save, Writer, Bits, and Poke; the other tabs retain their layer
-toggles, audio mutes, breakpoints, and waveform controls. Scrollbars expose
+has a Goto address box, Find, Save, Writer, Bits, Poke, and in-place editing
+of the dump; the other tabs retain their layer toggles, audio mutes,
+breakpoints, and waveform controls. Scrollbars expose
 content that does not fit the window. Transport keyboard shortcuts work while
 not editing text. **Close inspector** and the controller's back button close
 the selected inspector; the remaining inspectors stay available in the shared
@@ -151,12 +152,46 @@ Audio scopes remain aligned as channel status changes.
 
 ### Memory
 Hexadecimal and ASCII memory dump viewer (256 bytes per page).
+- **Goto:** The page's base address. Drag the value, or click it and type a
+  hex address. The address/command field also jumps: type an address there
+  and press Enter. **Previous page** / **Next page**, `PageUp` / `PageDown`,
+  and the cursor keys (one row) move through memory.
 - **Find:** Searches memory for specified byte sequences.
 - **Save...:** Dumps address ranges to a file.
 - **Writer?:** Queries the reverse execution snapshot ring to identify the instruction
   that last wrote to the specified address.
 - **Bits:** Displays raw 1-bit-per-pixel bitplane visualizations with configurable
   stride.
+- **Poke:** Writes the word in the address/command field (`ADDR VALUE`).
+
+#### Editing memory in place
+
+Click a byte in the hex column to select it, then type hex digits: the
+first digit replaces the high nibble, the second completes the byte and
+moves the selection to the next one. In the ASCII column a typed printable
+character replaces the byte. Edited bytes are shown in blue until they are
+written. While a byte is selected:
+
+- Arrow keys move the selection; at the edge of the page the view scrolls
+  to follow it. `PageUp` / `PageDown` page the view with the selection.
+- `Backspace` forgets a half-typed digit, or steps back one byte.
+- `Enter` writes every edited byte. So does leaving the dump: clicking a
+  button, another tab, or the address box, or focusing any text field.
+- `Esc` discards the edits and clears the selection (it does not leave
+  Debug while a byte is selected).
+
+Typed characters never reach the transport shortcuts, so `C`, `F`, `R`,
+and `S` are hex digits or text while editing. The outcome (bytes written,
+or the address that refused) appears beside the tab's controls. Bytes in
+ROM, the overlay ROM, and device windows are drawn grey and cannot be
+selected; the message names the address.
+
+Edits are plain CPU-visible RAM writes with the semantics of the console's
+`POKE` and the control protocol's `mem.write`: the data changes, no bus
+cycles are charged, no interrupt or DMA state moves, and the Break tab's
+memory watchpoints are rebaselined so the edit itself does not stop the
+machine. As with `mem.write`, a write is not part of the reverse-execution
+journal, so replaying backwards across it can diverge.
 
 ### IO Map
 

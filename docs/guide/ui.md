@@ -15,6 +15,7 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 | `Cmd+S` | `Alt+S` | Save a screenshot (`copperline-screenshot-<YYYYMMDDHHmmSS>.png` in the [screenshots folder](#where-files-go); the on-screen confirmation overlay is not part of the saved image) |
 | `Cmd+R` | `Alt+R` | Start / stop a video-with-audio recording (below) |
 | `Cmd+Shift+R` | `Alt+Shift+R` | Start / stop an input recording (below) |
+| `Cmd+Shift+V` | `Alt+Shift+V` | Paste as keystrokes: type the host clipboard's text on the emulated keyboard (also *Input Settings > Paste as Keystrokes*) |
 | `Cmd+Shift+S` | `Alt+Shift+S` | Save a state (`copperline-state-<YYYYMMDDHHmmSS>.clstate` in the [states folder](#where-files-go)) |
 | `Cmd+Shift+L` | `Alt+Shift+L` | Load a save state from a file dialog |
 | `Cmd+1`..`Cmd+9`, `Cmd+0` | `Alt+1`..`Alt+9`, `Alt+0` | Quick-save to numbered slot 1-10 |
@@ -456,6 +457,15 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   [Configuration](configuration.md).
 - **On-Screen Keyboard** (also the status-bar keyboard icon): draws an
   Amiga keyboard under the display; see [](#on-screen-keyboard).
+- **Paste as Keystrokes** (also `Cmd+Shift+V` / `Alt+Shift+V`): types the
+  host clipboard's text on the emulated keyboard, key by key, the way
+  `--type-after` does from the command line: US keymap, Shift held for upper
+  case and shifted symbols, a newline as Return, a tab as Tab, one key every
+  100 ms of emulated time. Characters the Amiga keyboard has no key for are
+  skipped (the on-screen confirmation says so). Typing starts a moment after
+  the shortcut so its own Shift is up before the first typed Shift goes
+  down. The typed keys go through the scheduled-input queue, so an input
+  recording captures them as individual key events.
 - **Calibrate Gamepad...**: the guided calibration flow, described below.
 - **Input Mapping...**: edits which host keys drive the controller controls,
   for both keyboard mappings; see [](#input-mapping).

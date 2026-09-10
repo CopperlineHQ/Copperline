@@ -65,6 +65,8 @@ pub enum MenuAction {
     SetRunAhead(u8),
     /// Show or hide the on-screen Amiga keyboard.
     ToggleKeyboardPanel,
+    /// Type the host clipboard's text on the emulated keyboard.
+    PasteKeystrokes,
 
     // Serial / parallel, present only when something is on the port.
     /// `None` unplugs the cable: a MIDI interface with nothing connected.
@@ -886,6 +888,9 @@ fn input_rows(s: &MenuState) -> Vec<MenuRow> {
             MenuAction::ToggleKeyboardPanel,
             s.keyboard_panel,
         ),
+        // The clipboard typed into the machine, key by key, for text a
+        // guest has no other way to receive.
+        MenuRow::action("Paste as Keystrokes", MenuAction::PasteKeystrokes),
         MenuRow::action("Calibrate Gamepad...", MenuAction::OpenCalibration),
         MenuRow::action("Input Mapping...", MenuAction::OpenInputMapping),
     ]

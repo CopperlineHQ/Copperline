@@ -13,10 +13,16 @@ CFLAGS  = -Os -m68000 -fomit-frame-pointer -Wall -Wextra \
 
 # start.s first: the CLI enters at the start of the first hunk, and the
 # compiler may place rodata ahead of the C entry function.
+all: uaelibtest exitemu
+
 uaelibtest: start.s support.s uaelibtest.c
 	$(CC) $(CFLAGS) start.s support.s uaelibtest.c -o $@
 
-clean:
-	rm -f uaelibtest
+# The ExitEmu (function 13) probe: calls it and returns 20.
+exitemu: start.s exitemu.c
+	$(CC) $(CFLAGS) start.s exitemu.c -o $@
 
-.PHONY: clean
+clean:
+	rm -f uaelibtest exitemu
+
+.PHONY: all clean

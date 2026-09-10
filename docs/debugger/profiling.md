@@ -29,6 +29,10 @@ profile.start {"path": "out/profile", "frames": 60, "samples": true,
                "unwind": {"base": "0x123400", "table": "<base64>"},
                "relocation_bases": ["0x123400", "0x20a000"],
                "code_ranges": [{"base": "0x123400", "size": "0x6000"}]}
+# Guest code coverage (no call stacks, no per-frame sidecars):
+profile.start {"path": "out/coverage", "frames": 100000, "coverage": true,
+               "relocation_bases": ["0x123400", "0x20a000"],
+               "code_ranges": [{"base": "0x123400", "size": "0x6000"}]}
 profile.stop
 profile.status
 ```
@@ -245,6 +249,109 @@ profile flame-chart extension adds the graphical flame view. ROM samples use
 the captured live names, for example `[Kick]exec/AllocMem`; older captures
 without `rom_symbols` retain the generic `[Kickstart]` label.
 
+(guest-coverage)=
+## Guest code coverage (lcov)
+
+Line and function coverage of a guest program is written in lcov's `.info`
+format, so `genhtml`, VS Code's coverage extensions and CI coverage services
+consume it directly. See [VS Code](vscode.md#view-guest-coverage) for the
+editor workflow.
+
+### Collecting
+
+Coverage is the lightweight sibling of precise sampling. `"coverage": true`
+on `profile.start` keeps one saturating hit counter per instruction word
+inside the capture's `code_ranges` (the program's code hunks) and a single
+total for everything retired outside them: Kickstart, libraries, other
+tasks. Nothing is written per frame; the histogram is written once as
+`coverage.bin` when the capture stops (or reaches its frame budget), and
+`profile.json` summarises it under `coverage`. `relocation_bases` is
+recorded as for samples, so the offline converter can relocate the
+program's debug information. Without `code_ranges` every address is counted
+in a bounded sparse map (1M distinct addresses), which is enough for a small
+program launched by hand. `"coverage": true` and `"samples": true` combine
+freely; a coverage-only capture needs no unwind table.
+
+Like the sampler, the counter observes retired instructions and feeds
+nothing back: the emulated timeline is identical with and without it. It
+forces the precise per-instruction loop while armed (a `[cpu] jit` machine
+logs its fallback once) and blocks run-ahead, whose speculative frames
+would be counted twice. Reverse steps and state loads are not undone: an
+instruction re-executed after a rewind counts again.
+
+`coverage.bin` starts with `CLCV` and a little-endian u32 version (1), then
+a u32 range count and, per range, base, byte size, word count and that many
+u32 counters; then a u32 sparse-entry count and `(address, count)` pairs;
+then u64 outside and total instruction counts.
+
+### Converting
+
+```sh
+copperline-ctl profile-report out/coverage --program hello \
+  --elf hello.elf --format lcov --out hello.info \
+  --source-map /build/src=/home/me/src
+genhtml hello.info -o coverage-html
+```
+
+`--format lcov` reads `coverage.bin`; a capture made with `"samples": true`
+but without coverage is converted from its precise samples' leaf PCs
+instead. Executed addresses map through the program's own debug information
+(vasm `LINE` hunks, amiga-gcc DWARF, an ELF sibling; see
+[Debug information](dap.md#debug-information)) to one record block per
+source file: `FN`/`FNDA` for functions (DWARF subprograms, or the code
+hunks' symbols when there is no DWARF), `DA` for every line that has code,
+including lines never executed, and the `LF`/`LH`/`FNF`/`FNH` totals.
+`--source-map FROM=TO` rewrites the recorded paths. `TN` names the program.
+
+A line's count is gcov-like: over each contiguous run of line-table rows for
+the line, the highest hit count of any instruction in the run, summed across
+the runs, so a `for` header split into an initialisation run and a test run
+counts each pass once. A function's count is the hit count of its entry
+instruction (or of its most executed instruction when control only entered
+mid-body).
+
+Instructions that map to no source line are never dropped silently. The
+file starts with `#` comment lines, which every lcov reader ignores, that
+account for every retired instruction, and the converter prints the same
+summary:
+
+```text
+# Copperline guest coverage: hello
+# 1234567 instruction(s) retired: 4321 on 26 source line(s) in 1 file(s)
+# 12 instruction(s) at 3 program address(es) without line information
+# 1230234 instruction(s) outside the program (Kickstart, libraries, other tasks)
+# lines 24/26 hit, functions 3/3 hit
+```
+
+"Without line information" covers a startup stub assembled without
+`-linedebug`, code in a hunk the debug information does not describe, and
+data hunks executed by mistake. A program built without any line
+information yields only these totals.
+
+### `--run PROG --coverage FILE`
+
+The whole loop in one flag:
+
+```sh
+copperline --factory --noaudio --run build/hello --coverage build/lcov.info
+```
+
+Copperline boots, watches the guest's `LoadSeg()` results for the program,
+relocates its debug information by the segments the loader reports (a
+`PROG.elf` beside the executable is used automatically), counts from the
+program's first instruction, and writes the lcov file when the boot script's
+completion marker shows the program exited. On its own the flag is a headless
+capture run like `--screenshot-after`: unpaced, windowless, ending with the
+program (or after 60 emulated seconds if it never loads, leaving an
+all-zero file that still lists every line and function). Combine it with
+`--screenshot-after` and friends to bound a program that does not exit; the
+file is then written when the run ends, or, with `--control-gui`/`--gdb-gui`,
+when the windowed session closes. While the program runs the file is
+rewritten every five emulated seconds, so an interrupted run leaves a
+current one behind. `--coverage-source-map FROM=TO` (repeatable) rewrites
+source paths as `--source-map` does. The [DAP adapter](dap.md#launch-and-attach)'s
+`coverage` launch argument passes the same flag.
+
 ## Storage overhead
 
 Enabling `slots` keeps one 24-byte record per colour clock live (about 1.7 MiB
@@ -252,7 +359,8 @@ for a 313x227 PAL frame) and writes about the same amount per frame, plus the
 roughly 2-20 KB run-length encoded grids. Setting `"memory": true` adds one
 copy each of chip and slow RAM. Setting `"screenshots": "every"` produces 50 PNG images per emulated
 second in PAL. Precise sampling is larger: without registers each sample is
-the call stack plus one word; registers add 68 bytes per sample. All three
+the call stack plus one word; registers add 68 bytes per sample. Coverage keeps four bytes per instruction
+word of the code ranges in memory and writes them once. All four
 options are disabled by default. Captures up to 100,000 frames are accepted.
 
 

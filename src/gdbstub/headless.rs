@@ -84,7 +84,13 @@ fn serve_dialect(
             SessionEnd::Detached => {
                 log::info!("gdb: client detached; machine paused, listening for reconnection");
             }
-            SessionEnd::Killed => return Ok(()),
+            SessionEnd::Killed => {
+                // A --coverage run ends with the server: write what was
+                // counted.
+                #[cfg(feature = "dap")]
+                emu.finish_coverage_run();
+                return Ok(());
+            }
         }
     }
 }

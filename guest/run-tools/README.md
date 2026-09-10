@@ -13,6 +13,7 @@ Newer shells can use their internal commands with the same names.
 | `Stack` | One decimal byte count, at least 2048; rounded up to longwords |
 | `Echo` | One optionally quoted string (or an empty line); writes to `Output()` |
 | `Execute` | One script path on a CLI without an enclosing script, as created by `Run` |
+| `Done` | No argument; writes the previous command's return code (`cli_ReturnCode`, decimal, one line) to `Output()` |
 
 These are launcher helpers, not complete replacements for the Workbench
 utilities. The parser accepts AmigaDOS `*` escapes and rejects malformed,
@@ -20,8 +21,12 @@ oversized, or extra arguments with return code 10. Decimal overflow is
 rejected. `CD` rejects files and failed locks without changing directory;
 it updates the CLI's display name only when the new name fits the existing
 BSTR length, whose allocation capacity is not exposed by the public ABI.
-Shell redirection supplies Echo's output file. No ROM identification or
-emulator trap is involved.
+Shell redirection supplies Echo's and Done's output file. No ROM
+identification or emulator trap is involved. `Done` is how the generated
+script records the program's AmigaDOS return code in the `RunBoot:done`
+completion marker, which `--exit-on-return` reads back as the process exit
+status; the script sets `FailAt 2147483647` first so no return code aborts
+it before the marker is written.
 
 `Execute` hands the file to the guest CLI, which executes and closes it.
 It rejects nested scripts and does not implement parameter substitution;
@@ -43,6 +48,8 @@ cargo test --release --test dap_stdio dap_binds_source_breakpoints_on_kick13 -- 
 Keep each executable with its source when committing a rebuild. The `probe`
 fixture records the CLI failure threshold, default and actual command stack,
 background/console state, and raw arguments in a relative `FROM-GUEST` file.
-It deliberately returns 20: successful completion-marker output demonstrates
-that `FailAt` changed the real CLI state. Local ROMs are read from
+It deliberately returns 20: a completion marker holding `20` demonstrates
+that `FailAt` changed the real CLI state and that `Done` read the code back.
+`retcode` returns the decimal number given as its argument (20 for anything
+else), the fixture for `--exit-on-return`. Local ROMs are read from
 `test-assets/` or `COPPERLINE_TEST_ASSETS` and never distributed with the tools.

@@ -1051,6 +1051,18 @@ pub struct App {
     /// ends once the last of them has been saved.
     auto_shot: Vec<(f32, PathBuf)>,
     pending_auto_shot: Vec<(f32, PathBuf)>,
+    /// `--expect-screenshot` checks, armed like `auto_shot` (deadline
+    /// order) and captured through the same frame path.
+    auto_expect: Vec<crate::expect::ExpectShotSpec>,
+    pending_auto_expect: Vec<crate::expect::ExpectShotSpec>,
+    /// What the run has concluded so far; the process exit status.
+    verdict: crate::verdict::RunVerdict,
+    /// `--exit-on-return`: the `--run` completion marker to poll for the
+    /// guest program's return code, which ends the run.
+    run_return_marker: Option<PathBuf>,
+    /// The guest stopped the emulator through uaelib `ExitEmu`; the event
+    /// loop exits on its next pass.
+    guest_exit_requested: bool,
     /// Scheduled --save-state-after captures, earliest deadline first:
     /// write a save state once emulated time reaches each deadline, then
     /// keep running. Repeats like --screenshot-after.
@@ -2072,6 +2084,11 @@ impl App {
             paused: false,
             auto_shot: Vec::new(),
             pending_auto_shot: screenshot_after,
+            auto_expect: Vec::new(),
+            pending_auto_expect: Vec::new(),
+            verdict: crate::verdict::RunVerdict::default(),
+            run_return_marker: None,
+            guest_exit_requested: false,
             auto_save_state: Vec::new(),
             pending_auto_save_state: save_state_after,
             frame_dump: None,
@@ -2957,7 +2974,9 @@ impl App {
             });
     }
 
-    pub fn run(self) -> Result<()> {
+    /// Run the windowed session to its end; the value is the process exit
+    /// status the session concluded on (src/verdict.rs).
+    pub fn run(self) -> Result<i32> {
         let event_loop = EventLoop::new().map_err(|e| anyhow!("EventLoop::new: {e}"))?;
         event_loop.set_control_flow(ControlFlow::Poll);
         let mut app = self;
@@ -2982,7 +3001,7 @@ impl App {
         event_loop
             .run_app(&mut app)
             .map_err(|e| anyhow!("event loop: {e}"))?;
-        Ok(())
+        Ok(app.exit_status())
     }
 }
 
@@ -2998,11 +3017,21 @@ impl App {
     /// windowed exit. Never touching winit means no display-server
     /// connection is made, so capture runs work over SSH and in sandboxes
     /// without window-server access.
-    pub fn run_headless(mut self) -> Result<()> {
+    pub fn run_headless(mut self) -> Result<i32> {
         self.arm_scheduled_events();
-        if self.auto_shot.is_empty() && self.frame_dump.is_none() {
+        #[cfg(feature = "dap")]
+        let coverage_run = self.emu.coverage_run_armed();
+        #[cfg(not(feature = "dap"))]
+        let coverage_run = false;
+        if self.auto_shot.is_empty()
+            && self.auto_expect.is_empty()
+            && self.frame_dump.is_none()
+            && self.run_return_marker.is_none()
+            && !coverage_run
+        {
             return Err(anyhow!(
-                "windowless capture run needs --screenshot-after or --dump-frames"
+                "windowless capture run needs --screenshot-after, --expect-screenshot, \
+                 --dump-frames, --coverage, or --exit-on-return"
             ));
         }
         loop {
@@ -3028,14 +3057,79 @@ impl App {
             self.recover_audio_if_device_lost();
             self.render_emulated_frame_if_needed();
             if self.dump_frame_if_due() {
-                return Ok(());
+                return Ok(self.exit_status());
             }
             self.fire_scheduled_events();
             self.fire_auto_save_state();
             if self.fire_auto_shot() {
-                return Ok(());
+                return Ok(self.exit_status());
+            }
+            if self.poll_run_return() || self.note_guest_exit_request() {
+                return Ok(self.exit_status());
+            }
+            // A coverage-only run ends with the program: once its file is
+            // written and no capture is still scheduled, there is nothing
+            // left to wait for.
+            #[cfg(feature = "dap")]
+            if self.emu.coverage_run_written()
+                && self.auto_shot.is_empty()
+                && self.auto_expect.is_empty()
+                && self.frame_dump.is_none()
+            {
+                return Ok(self.exit_status());
             }
         }
+    }
+
+    /// `--expect-screenshot` checks to arm alongside the screenshots.
+    pub fn set_expect_screenshots(&mut self, specs: Vec<crate::expect::ExpectShotSpec>) {
+        self.pending_auto_expect = specs;
+    }
+
+    /// `--exit-on-return`: end the run when the `--run` program's return
+    /// code appears in `marker`, and exit with that code.
+    pub fn set_exit_on_return(&mut self, marker: PathBuf) {
+        self.run_return_marker = Some(marker);
+        self.verdict.exit_on_return = true;
+    }
+
+    /// The process exit status the session has concluded on so far.
+    pub fn exit_status(&self) -> i32 {
+        self.verdict.exit_status()
+    }
+
+    /// Poll the `--run` completion marker for the guest's return code.
+    /// Returns true once it is recorded: the run is over. One host `stat`
+    /// per frame, like the warp-launch gate's own marker probe.
+    fn poll_run_return(&mut self) -> bool {
+        let Some(marker) = self.run_return_marker.as_deref() else {
+            return false;
+        };
+        let Some(code) = crate::runprog::read_return_code(marker) else {
+            return false;
+        };
+        info!(
+            "run: program returned {code} at {:.3}s emulated time",
+            self.emu.bus().emulated_seconds()
+        );
+        self.verdict.guest_return = Some(code);
+        self.run_return_marker = None;
+        true
+    }
+
+    /// Take a guest `ExitEmu` request (uaelib function 13). Returns true
+    /// when one was pending: the session ends cleanly.
+    fn note_guest_exit_request(&mut self) -> bool {
+        if !self.emu.take_uaelib_exit_request() {
+            return false;
+        }
+        info!(
+            "uaelib: guest stopped the emulator (ExitEmu) at {:.3}s emulated time",
+            self.emu.bus().emulated_seconds()
+        );
+        self.verdict.guest_exit = true;
+        self.guest_exit_requested = true;
+        true
     }
 
     /// Arm every scheduled capture and input flag: pending (parse-time)
@@ -3057,6 +3151,17 @@ impl App {
         // latest capture however the flags were written. The sort is
         // stable, so captures sharing a deadline keep their given order.
         self.auto_shot.sort_by(|(a, _), (b, _)| a.total_cmp(b));
+        for mut spec in std::mem::take(&mut self.pending_auto_expect) {
+            info!(
+                "screenshot expectation armed: will compare with {} after {:.1}s emulated time (tolerance {})",
+                spec.path.display(),
+                spec.secs,
+                spec.tolerance
+            );
+            spec.secs = spec.secs.max(0.0);
+            self.auto_expect.push(spec);
+        }
+        self.auto_expect.sort_by(|a, b| a.secs.total_cmp(&b.secs));
         for (secs, path) in std::mem::take(&mut self.pending_auto_save_state) {
             info!(
                 "auto-save-state armed: will save {} after {:.1}s emulated time",
@@ -3414,7 +3519,7 @@ impl App {
     /// while the target frame is still being rendered, and a run with more
     /// captures still pending keeps going.
     fn fire_auto_shot(&mut self) -> bool {
-        if self.auto_shot.is_empty() {
+        if self.auto_shot.is_empty() && self.auto_expect.is_empty() {
             return false;
         }
         let now = self.emu.bus().emulated_seconds();
@@ -3425,7 +3530,12 @@ impl App {
             .iter()
             .take_while(|(secs, _)| now >= *secs as f64)
             .count();
-        if due == 0 {
+        let due_expect = self
+            .auto_expect
+            .iter()
+            .take_while(|spec| now >= spec.secs as f64)
+            .count();
+        if due == 0 && due_expect == 0 {
             return false;
         }
         let emulated_frame = self.emu.bus().emulated_frames();
@@ -3438,7 +3548,12 @@ impl App {
         for (_, path) in self.auto_shot.drain(..due).collect::<Vec<_>>() {
             self.save_screenshot(&path);
         }
-        if !self.auto_shot.is_empty() {
+        // Expectations read the same frame through the same capture path,
+        // so an image saved by --screenshot-after compares pixel for pixel.
+        for spec in self.auto_expect.drain(..due_expect).collect::<Vec<_>>() {
+            self.check_screenshot_expectation(&spec);
+        }
+        if !self.auto_shot.is_empty() || !self.auto_expect.is_empty() {
             return false;
         }
         self.emu.report_stats();
@@ -3458,6 +3573,10 @@ impl Drop for App {
     /// drops there is nothing left for it here.
     fn drop(&mut self) {
         self.save_egui_preferences();
+        // Same rule for a --coverage run: whatever ends the session writes
+        // the counts collected so far.
+        #[cfg(feature = "dap")]
+        self.emu.finish_coverage_run();
         let (Some(rec), Some(path)) = (self.input_recorder.take(), self.record_input_path.take())
         else {
             return;
@@ -3487,8 +3606,9 @@ impl ApplicationHandler for App {
         // create the window hidden: it avoids flashing an empty window on
         // screen and removes the vsync present gate, letting the run
         // advance as fast as the host allows. Emulated state is identical.
-        let headless_capture =
-            !self.pending_auto_shot.is_empty() || self.pending_frame_dump.is_some();
+        let headless_capture = !self.pending_auto_shot.is_empty()
+            || !self.pending_auto_expect.is_empty()
+            || self.pending_frame_dump.is_some();
         // Start fullscreen only for an interactive window ([display] full_screen
         // / --full-screen); a headless capture window stays hidden and windowed.
         let fullscreen =
@@ -3793,6 +3913,12 @@ impl ApplicationHandler for App {
                         if host_shortcut_modifier_pressed(self.modifiers) =>
                     {
                         self.toggle_recording()
+                    }
+                    (KeyCode::KeyV, ElementState::Pressed)
+                        if host_shortcut_modifier_pressed(self.modifiers)
+                            && self.modifiers.shift_key() =>
+                    {
+                        self.paste_as_keystrokes()
                     }
                     (KeyCode::KeyW, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers)
@@ -4878,6 +5004,12 @@ impl ApplicationHandler for App {
         // step) may have carried a guest warp request.
         if self.netplay.is_none() {
             self.service_uaelib();
+        }
+        // The guest's own ExitEmu, and the --exit-on-return program
+        // return: both end the session on this pass, verdict recorded.
+        if self.guest_exit_requested || self.note_guest_exit_request() || self.poll_run_return() {
+            event_loop.exit();
+            return;
         }
         if self.render.is_none() {
             return;

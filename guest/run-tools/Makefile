@@ -3,9 +3,9 @@ include ../toolchain.mk
 
 CFLAGS = -Os -m68000 -Wall -Wextra -Werror -nostdlib -nostartfiles \
          -ffreestanding -fno-tree-loop-distribute-patterns
-TOOLS = FailAt CD Stack Echo Execute
+TOOLS = FailAt CD Stack Echo Execute Done
 
-all: $(TOOLS) probe
+all: $(TOOLS) probe retcode
 
 $(TOOLS): start.s commands.c
 
@@ -19,11 +19,16 @@ Echo:
 	$(CC) $(CFLAGS) -DCOMMAND=4 start.s commands.c -o $@
 Execute:
 	$(CC) $(CFLAGS) -DCOMMAND=5 start.s commands.c -o $@
+Done:
+	$(CC) $(CFLAGS) -DCOMMAND=6 start.s commands.c -o $@
 
 probe: start.s probe.c
 	$(CC) $(CFLAGS) start.s probe.c -o $@
 
+retcode: start.s retcode.c
+	$(CC) $(CFLAGS) start.s retcode.c -o $@
+
 clean:
-	rm -f $(TOOLS) probe
+	rm -f $(TOOLS) probe retcode
 
 .PHONY: all clean

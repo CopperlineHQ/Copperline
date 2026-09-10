@@ -557,6 +557,61 @@ impl App {
             .tt_note_input(crate::inputsched::ReplayAction::Key { rawkey, pressed });
     }
 
+    /// Type `text` on the emulated keyboard, the first key `delay_ms`
+    /// from now, through the same scheduled-key queue `--type-after` and
+    /// `--press-after` use (so it is recorded, journaled, and paced on
+    /// emulated time like any scripted key). Returns how many keys were
+    /// queued and the characters the US keymap could not type.
+    pub(super) fn type_text(&mut self, text: &str, delay_ms: u32) -> (usize, Vec<char>) {
+        let (keys, untypable) = crate::typing::keystrokes_for_text(text);
+        let base = self.emu.bus().emulated_seconds() + f64::from(delay_ms) / 1000.0;
+        for key in &keys {
+            let press_at = base + f64::from(key.offset_ms) / 1000.0;
+            self.auto_keys.push(super::ScheduledKey {
+                press_at_emulated_secs: press_at,
+                release_at_emulated_secs: press_at + f64::from(key.hold_ms) / 1000.0,
+                rawkey: key.rawkey,
+                pressed: false,
+            });
+        }
+        (keys.len(), untypable)
+    }
+
+    /// Paste as Keystrokes (menu / host shortcut modifier + Shift+V): type
+    /// the host clipboard's text into the machine. The typing starts a
+    /// moment after the shortcut so the chord's own Shift is up again
+    /// before the first typed Shift goes down; a held host key and a
+    /// scheduled press of the same key would otherwise merge.
+    pub(super) fn paste_as_keystrokes(&mut self) {
+        const START_DELAY_MS: u32 = 300;
+        let text = match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+            Ok(text) => text,
+            Err(e) => {
+                warn!("paste as keystrokes: clipboard unavailable: {e}");
+                self.show_osd("Clipboard unavailable");
+                return;
+            }
+        };
+        if text.is_empty() {
+            self.show_osd("Clipboard is empty");
+            return;
+        }
+        let (count, untypable) = self.type_text(&text, START_DELAY_MS);
+        if count == 0 {
+            self.show_osd("Nothing in the clipboard can be typed");
+            return;
+        }
+        let mut message = format!("Typing {count} keys");
+        if !untypable.is_empty() {
+            let skipped: String = untypable.into_iter().collect();
+            info!("paste as keystrokes: no Amiga key for {skipped:?}; skipped");
+            message.push_str(" (some characters skipped)");
+        }
+        info!("paste as keystrokes: {count} keys queued");
+        self.show_osd(message);
+        self.request_redraw();
+    }
+
     /// Start or stop the input recording (shortcut / menu item). On
     /// stop, the recorded session is written as a scripted-input file
     /// that `--script FILE` replays.

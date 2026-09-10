@@ -33,6 +33,58 @@ When combined with `--dump-frames`, the run exits as soon as either the frame
 dump or the screenshot schedule finishes. Use separate runs if both need
 to reach different end times.
 
+(screenshot-expectations)=
+## Checking screenshots against expected images
+
+`--expect-screenshot SECS PATH [TOLERANCE]` captures the frame at SECS
+exactly as `--screenshot-after` would (the same capture path, so an image
+saved by `--screenshot-after` compares pixel for pixel) and compares it with
+the PNG at PATH. Repeat the flag for several checks; they schedule alongside
+`--screenshot-after` and the run ends after the last capture of either kind:
+
+```sh
+./target/release/copperline --config copperline.example.toml --noaudio \
+  --expect-screenshot 10 expected/menu.png \
+  --expect-screenshot 30 expected/level.png 0.001
+```
+
+`TOLERANCE` is optional: a number with a decimal point is the largest
+fraction of pixels allowed to differ (`0.001` is 0.1 percent of the frame),
+a plain integer is an absolute pixel count (`250`). Without it the images
+must match exactly. Only the colour channels are compared.
+
+A failed check prints one line naming the expected image, how many pixels
+differ (or the size mismatch) and the bounding box of the differences:
+
+```text
+expect-screenshot: expected/level.png: MISMATCH 1204 of 421056 pixels differ (0.286%), bounding box (96,112)-(311,201), tolerance exact; wrote expected/level.actual.png; wrote expected/level.diff.png
+```
+
+The captured frame is written next to the expected image as
+`<stem>.actual.png`, and for a same-sized mismatch a red-on-black mask of
+the differing pixels as `<stem>.diff.png`. A missing expected image fails the
+same way but still writes the `.actual.png`, so a new expectation is blessed
+by renaming that file into place. A failed check does not cut the run
+short: every other scheduled screenshot, state save and input still fires,
+and the process exits with status 3 once the run finishes (see
+[](#exit-statuses)).
+
+(exit-statuses)=
+## Exit statuses
+
+| Status | Meaning |
+|---|---|
+| 0 | The run completed and every screenshot expectation held |
+| 1 | Copperline itself failed: configuration, assets, host errors |
+| 3 | At least one `--expect-screenshot` check failed |
+| 4 | `--exit-on-return` was given but the guest program had not returned when the run ended |
+| 0-255 | The guest program's AmigaDOS return code, with `--exit-on-return` (see [](run.md#exit-on-return)) |
+
+A non-zero guest return code takes precedence over a failed expectation; a
+zero one does not hide it (the run still exits 3). A guest that stops the
+emulator through the [uaelib trap's](run.md#uaelib-trap) `ExitEmu` ends the
+run with status 0, or 3 if an expectation had failed.
+
 ## Dumping frame sequences
 
 To capture consecutive frames (useful for debugging animation or beam synchronization):
@@ -65,6 +117,23 @@ Save states allow fast iteration by skipping lengthy boot and loading sequences:
 When resuming with `--load-state`, all scheduled-input and screenshot timestamps
 remain referenced to the original emulated timeline.
 
+## Guest code coverage
+
+`--run PROG --coverage FILE` counts every instruction the program retires
+from its first instruction to its exit and writes lcov line/function
+coverage to FILE. On its own it is a capture run that ends with the program;
+with `--screenshot-after` it ends with the last screenshot instead:
+
+```sh
+./target/release/copperline --factory --noaudio \
+  --run build/hello --coverage build/lcov.info \
+  --coverage-source-map /build/src=$PWD/src
+```
+
+The program's own debug information (`-g`, or vasm `-linedebug`; a
+`PROG.elf` beside it is picked up) supplies the source lines. See
+[Guest code coverage](../debugger/profiling.md#guest-coverage).
+
 ## Scripted input events
 
 You can schedule keyboard, mouse, and joystick inputs at specific emulated timestamps:
@@ -73,6 +142,7 @@ You can schedule keyboard, mouse, and joystick inputs at specific emulated times
 |---|---|
 | `--press-after SECS KEY` | Press and release a key (~100 ms hold) |
 | `--key-after SECS KEY MS` | Hold a key for specified duration in milliseconds |
+| `--type-after SECS TEXT` | Type TEXT on the US Amiga keyboard from SECS, one key every 100 ms (below) |
 | `--click-after SECS BTN MS [PORT]` | Click mouse button (`left`, `right`, `middle`) for MS (default port 1) |
 | `--joy-after SECS BTN MS [PORT]` | Trigger joystick/CD32 button (`up`, `down`, `left`, `right`, `red`, `blue`, etc.) (default port 2) |
 | `--mouse-after SECS DX DY [PORT]` | Move mouse by relative delta (DX, DY) (default port 1) |
@@ -82,11 +152,40 @@ You can schedule keyboard, mouse, and joystick inputs at specific emulated times
 | `--defer-disk-insert SECS DFN` | Delay insertion of configured disk until SECS |
 | `--insert-cd-after SECS PATH` | Swap CD image (`.cue`, `.iso`, `.nrg`, `.chd`) in CD drive |
 | `--freeze-after SECS` | Trigger freezer cartridge button (`--cartridge hrtmon`): HRTMon takes over at SECS |
+| `--expect-screenshot SECS PATH [TOLERANCE]` | Compare the frame at SECS with a PNG ([above](#screenshot-expectations)) |
 | `--script FILE` | Execute script file containing input directives |
 | `--record-input PATH` | Record all inputs to script file on exit |
+| `--coverage FILE` | Write lcov line/function coverage of the `--run` program to FILE when it exits or the run ends |
+| `--coverage-source-map FROM=TO` | Rewrite a source path prefix in the coverage file (repeatable) |
 
 Key identifiers can be raw key codes (`0x45`) or standard names (`ctrl`, `lalt`,
 `lami`, `f1`, `esc`, alphanumeric characters).
+
+(typing-text)=
+### Typing text
+
+`--type-after SECS TEXT` turns a host string into the key presses a person
+would make on a US Amiga keyboard: letters, digits and the punctuation on
+the key caps, with Shift held for upper case and shifted symbols. `\n` is
+Return, `\t` Tab, `\e` Esc, `\b` Backspace, and `\\` a literal backslash;
+characters the US keymap has no key for are an error. Keys are paced in
+emulated time (each held 50 ms, one key every 100 ms, Shift a frame ahead of
+the key it qualifies), which the keyboard MCU's ten-event type-ahead buffer
+and the guest's keyboard driver take in their stride:
+
+```sh
+./target/release/copperline --config workbench.toml --noaudio \
+  --type-after 40 "dir df0:\n" \
+  --screenshot-after 45 /tmp/listing.png
+```
+
+The text expands into ordinary scheduled key events, so it composes with
+`--press-after`, is recorded by `--record-input` as the individual keys,
+keeps its absolute timestamps under `--load-state`, and is available in
+[script files](#input-recording-and-script-files) as `type SECS TEXT`. The
+same typing queue serves the control protocol's `input.type` and the
+window's *Paste as Keystrokes* action (`Cmd+Shift+V` / `Alt+Shift+V`, see
+[](ui.md)).
 
 `--freeze-after` requires an enabled cartridge (`--cartridge hrtmon` or
 `[cartridge] model`, see [Configuration](configuration.md#freezer-cartridge)).
@@ -103,10 +202,15 @@ Input sequences can be stored in text files (one command per line without leadin
 # Automated test script
 joy-after 60.0 red 300
 key-after 75.0 f1 200
+type 80.0 "dir df1:\n"
 insert-disk-after 90.0 df1 "disk2.adf"
 joy-after 95.0 red 300 1
+expect-screenshot 100.0 "expected/level.png" 0.001
 freeze-after 120.0
 ```
+
+`type` (also spelled `type-after`) and `expect-screenshot` take the same
+arguments as their flags.
 
 Run with `--script`:
 

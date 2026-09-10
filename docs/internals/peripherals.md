@@ -362,10 +362,14 @@ provides a compatible ABI at `$F0FF60` (see
   result for the subsequent read. The region is cache-inhibited.
 - **Memory hierarchy**: `classify_plain_memory` decodes RAM and ROM with higher
   priority, so CDTV extended ROM at `$F00000` naturally covers this region.
-- **Function dispatch**: Function 82 parses `"key value"` pairs and handles
+- **Function dispatch**: Function 13 (WinUAE `ExitEmu`, `uae_quit()`) latches
+  an exit request the frontend takes at the next frame boundary and ends the
+  session on (exit status 0, or 3 after a failed screenshot expectation; see
+  `verdict.rs`); function 82 parses `"key value"` pairs and handles
   `warp`; function 86 prints log strings to stdout and queues `event.debug`
   events; function 88 manages the resource registry, idle time accounting, and
-  the 768x576 debug overlay. Unhandled functions return 0.
+  the 768x576 debug overlay. Unhandled functions return 0. The exit latch is
+  host-side and, like the warp latch, is not carried by a save state.
 - **State serialization**: Trap state, resource registries, and overlay lists
   are serialized as part of `Bus` state (save-state version 76).
 

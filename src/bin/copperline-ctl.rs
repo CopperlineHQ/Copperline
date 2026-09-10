@@ -16,6 +16,12 @@
 //! attaches a session through the session_* tools:
 //!   copperline-ctl --mcp [--info FILE | --connect ADDR --token TOKEN]
 //!
+//! A/B divergence finder (docs/debugger/diverge.md): two headless
+//! sessions in lockstep, reporting the first frame and instruction at
+//! which their emulated state differs:
+//!   copperline-ctl diverge --a ./old/copperline --b ./new/copperline \
+//!       --until 30 -- --factory --model A500
+//!
 //! Debug Adapter Protocol server (docs/debugger/dap.md) for VS Code,
 //! nvim-dap and other DAP clients, on stdio or a TCP listener; with a
 //! connection given, the client's launch or attach uses that session:
@@ -55,10 +61,14 @@ fn usage() -> &'static str {
      copperline-ctl --dap-listen ADDR [--info FILE | --connect ADDR --token TOKEN]\n       \
      copperline-ctl profile STATE [--rom ROM] --out PATH [--frames N] [--format native|bartman]\n       \
      copperline-ctl profile-report DIR --program PROG [--elf PROG.ELF] \
-       --out FILE [--format chrome|bartman] [--per-frame] \
+       --out FILE [--format chrome|bartman|lcov] [--per-frame] \
        [--source-map FROM=TO ...]\n       \
-     copperline-ctl exe2adf PROG [--boot] [--out FILE]\n\
-     copperline-ctl size-report PROG [--elf PROG.ELF] [--out FILE]"
+     copperline-ctl exe2adf PROG [--boot] [--out FILE]\n       \
+     copperline-ctl size-report PROG [--elf PROG.ELF] [--out FILE]\n       \
+     copperline-ctl diverge [--a BIN] [--b BIN] [--config-a FILE] [--config-b FILE] \
+       [--arg-a ARG ...] [--arg-b ARG ...] (--until SECS | --frames N) [--stride N] \
+       [--memory none|chip|all] [--step-block N] [--max-steps N] \
+       [--screenshots DIR] [--launch-timeout-ms MS] [--json] [-- COMMON-ARGS...]"
 }
 
 fn parse_options() -> Result<Options, String> {
@@ -464,6 +474,7 @@ fn run_state_profile() -> anyhow::Result<std::path::PathBuf> {
             unwind: None,
             relocation_bases: Vec::new(),
             code_ranges: Vec::new(),
+            coverage: false,
             trigger: None,
         })?;
         while emu.profile_status_value()["frames_written"]
@@ -511,9 +522,10 @@ fn run_profile_report() -> Result<Vec<std::path::PathBuf>, String> {
                 ));
             }
             "--format" => {
-                let value = args.next().ok_or("--format requires chrome|bartman")?;
-                format = ReportFormat::parse(&value)
-                    .ok_or_else(|| format!("bad --format {value:?}; expected chrome|bartman"))?;
+                let value = args.next().ok_or("--format requires chrome|bartman|lcov")?;
+                format = ReportFormat::parse(&value).ok_or_else(|| {
+                    format!("bad --format {value:?}; expected chrome|bartman|lcov")
+                })?;
             }
             "--per-frame" => per_frame = true,
             "--source-map" => {
@@ -638,6 +650,314 @@ fn run_size_report() -> Result<std::path::PathBuf, String> {
     copperline::profile::size::generate(&program, elf.as_deref(), &out)
 }
 
+// ---------------------------------------------------------------------
+// diverge
+
+/// Set by the SIGINT/SIGTERM handler; polled between requests so a long
+/// resume ends promptly and the launcher's cleanup still runs.
+static DIVERGE_CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn diverge_cancelled() -> bool {
+    DIVERGE_CANCEL.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(unix)]
+extern "C" fn diverge_on_signal(_signal: libc::c_int) {
+    DIVERGE_CANCEL.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(unix)]
+fn diverge_install_signal_handlers() {
+    let handler = diverge_on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
+    unsafe {
+        libc::signal(libc::SIGINT, handler);
+        libc::signal(libc::SIGTERM, handler);
+    }
+}
+
+#[cfg(not(unix))]
+fn diverge_install_signal_handlers() {}
+
+struct DivergeArgs {
+    binary_a: Option<std::path::PathBuf>,
+    binary_b: Option<std::path::PathBuf>,
+    config_a: Option<String>,
+    config_b: Option<String>,
+    args_a: Vec<String>,
+    args_b: Vec<String>,
+    common: Vec<String>,
+    json: bool,
+    launch_timeout: std::time::Duration,
+    options: copperline::control::diverge::Options,
+}
+
+fn parse_diverge_args(work_dir: std::path::PathBuf) -> Result<DivergeArgs, String> {
+    use copperline::control::diverge::{MemoryScope, Options};
+    let mut parsed = DivergeArgs {
+        binary_a: None,
+        binary_b: None,
+        config_a: None,
+        config_b: None,
+        args_a: Vec::new(),
+        args_b: Vec::new(),
+        common: Vec::new(),
+        json: false,
+        launch_timeout: std::time::Duration::from_secs(60),
+        options: Options::new(work_dir),
+    };
+    let mut args = std::env::args().skip(2);
+    while let Some(arg) = args.next() {
+        let mut value = |what: &str| -> Result<String, String> {
+            args.next().ok_or_else(|| format!("{arg} requires {what}"))
+        };
+        match arg.as_str() {
+            "--" => {
+                parsed.common.extend(args.by_ref());
+                break;
+            }
+            "--a" => parsed.binary_a = Some(value("a binary path")?.into()),
+            "--b" => parsed.binary_b = Some(value("a binary path")?.into()),
+            "--config-a" => parsed.config_a = Some(value("a config path")?),
+            "--config-b" => parsed.config_b = Some(value("a config path")?),
+            "--arg-a" => parsed.args_a.push(value("an argument")?),
+            "--arg-b" => parsed.args_b.push(value("an argument")?),
+            "--until" => {
+                let text = value("SECS")?;
+                let secs: f64 = text.parse().map_err(|e| format!("--until {text:?}: {e}"))?;
+                if !secs.is_finite() || secs < 0.0 {
+                    return Err("--until must be a non-negative number of seconds".into());
+                }
+                parsed.options.until_seconds = Some(secs);
+            }
+            "--frames" => {
+                let text = value("N")?;
+                parsed.options.frames = Some(
+                    text.parse::<u64>()
+                        .ok()
+                        .filter(|n| *n > 0)
+                        .ok_or_else(|| format!("--frames {text:?}: expected a positive count"))?,
+                );
+            }
+            "--stride" => {
+                let text = value("N")?;
+                parsed.options.stride = text
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| format!("--stride {text:?}: expected a positive count"))?;
+            }
+            "--memory" => {
+                let text = value("none|chip|all")?;
+                parsed.options.memory = MemoryScope::parse(&text)
+                    .ok_or_else(|| format!("--memory {text:?}: expected none|chip|all"))?;
+            }
+            "--step-block" => {
+                let text = value("N")?;
+                parsed.options.step_block =
+                    text.parse::<u64>().ok().filter(|n| *n > 0).ok_or_else(|| {
+                        format!("--step-block {text:?}: expected a positive count")
+                    })?;
+            }
+            "--max-steps" => {
+                let text = value("N")?;
+                parsed.options.max_steps =
+                    text.parse::<u64>().ok().filter(|n| *n > 0).ok_or_else(|| {
+                        format!("--max-steps {text:?}: expected a positive count")
+                    })?;
+            }
+            "--screenshots" => parsed.options.screenshots = Some(value("a directory")?.into()),
+            "--launch-timeout-ms" => {
+                let text = value("MS")?;
+                parsed.launch_timeout = std::time::Duration::from_millis(
+                    text.parse::<u64>()
+                        .map_err(|e| format!("--launch-timeout-ms {text:?}: {e}"))?,
+                );
+            }
+            "--json" => parsed.json = true,
+            other => {
+                return Err(format!(
+                    "unexpected diverge argument {other:?} (emulator arguments go after --)\n{}",
+                    usage()
+                ))
+            }
+        }
+    }
+    if parsed.options.until_seconds.is_none() && parsed.options.frames.is_none() {
+        return Err(format!(
+            "diverge needs --until SECS or --frames N\n{}",
+            usage()
+        ));
+    }
+    Ok(parsed)
+}
+
+/// One side's launch recipe.
+struct DivergePlan {
+    binary: std::path::PathBuf,
+    args: Vec<String>,
+}
+
+/// Launches the two emulators and owns their processes and logs, so
+/// every exit path (report, error, interrupt) kills what it started.
+struct ProcessLauncher {
+    plans: [DivergePlan; 2],
+    timeout: std::time::Duration,
+    launched: Vec<copperline::control::bridge::Launched>,
+    /// Keep the emulator logs for an error report instead of deleting
+    /// them with the processes.
+    keep_logs: bool,
+}
+
+impl copperline::control::diverge::Launcher for ProcessLauncher {
+    fn launch(
+        &mut self,
+        side: copperline::control::diverge::Side,
+    ) -> Result<copperline::control::diverge::LaunchedSide, String> {
+        use copperline::control::bridge::{launch, LaunchSpec};
+        use copperline::control::diverge::{BridgeSession, LaunchedSide, Side};
+        let plan = &self.plans[usize::from(side == Side::B)];
+        let spec = LaunchSpec {
+            binary: Some(plan.binary.clone()),
+            args: plan.args.clone(),
+            cwd: None,
+            timeout: self.timeout,
+            windowed: false,
+            noaudio: !plan.args.iter().any(|a| a == "--noaudio"),
+        };
+        let (bridge, launched) = launch(&spec)?;
+        let command = launched.command.clone();
+        self.launched.push(launched);
+        Ok(LaunchedSide {
+            session: Box::new(BridgeSession::new(bridge, diverge_cancelled)),
+            command,
+        })
+    }
+}
+
+impl Drop for ProcessLauncher {
+    fn drop(&mut self) {
+        for launched in &mut self.launched {
+            launched.finish(std::time::Duration::from_secs(2));
+            if !self.keep_logs {
+                let _ = std::fs::remove_file(&launched.log_path);
+            }
+        }
+    }
+}
+
+/// The scratch directory for snapshot files, removed on drop.
+struct DivergeWorkDir(std::path::PathBuf);
+
+impl Drop for DivergeWorkDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn run_diverge() -> ExitCode {
+    use copperline::control::bridge::resolve_binary;
+    use copperline::control::diverge::{run, Outcome};
+
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let work_dir = std::env::temp_dir().join(format!(
+        "copperline-diverge-{}-{millis}",
+        std::process::id()
+    ));
+    let parsed = match parse_diverge_args(work_dir.clone()) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            eprintln!("copperline-ctl: diverge: {message}");
+            return ExitCode::from(2);
+        }
+    };
+    if let Err(e) = std::fs::create_dir_all(&work_dir) {
+        eprintln!(
+            "copperline-ctl: diverge: creating {}: {e}",
+            work_dir.display()
+        );
+        return ExitCode::from(2);
+    }
+    let _work_dir = DivergeWorkDir(work_dir);
+
+    let binary_a = resolve_binary(parsed.binary_a.as_deref());
+    let binary_b = parsed.binary_b.clone().unwrap_or_else(|| binary_a.clone());
+    let plan = |config: &Option<String>, own: &[String]| -> DivergePlan {
+        let mut args = Vec::new();
+        if let Some(config) = config {
+            args.push("--config".to_string());
+            args.push(config.clone());
+        }
+        args.extend(own.iter().cloned());
+        args.extend(parsed.common.iter().cloned());
+        DivergePlan {
+            binary: std::path::PathBuf::new(),
+            args,
+        }
+    };
+    let mut plan_a = plan(&parsed.config_a, &parsed.args_a);
+    plan_a.binary = binary_a;
+    let mut plan_b = plan(&parsed.config_b, &parsed.args_b);
+    plan_b.binary = binary_b;
+    let mut launcher = ProcessLauncher {
+        plans: [plan_a, plan_b],
+        timeout: parsed.launch_timeout,
+        launched: Vec::new(),
+        keep_logs: false,
+    };
+
+    diverge_install_signal_handlers();
+    let mut options = parsed.options.clone();
+    options.cancel = diverge_cancelled;
+    let result = run(&mut launcher, &options);
+    match result {
+        Ok(report) => {
+            if parsed.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report.to_json()).unwrap_or_default()
+                );
+            } else {
+                print!("{}", report.render_text());
+            }
+            if report.outcome == Outcome::Identical {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
+        Err(message) => {
+            launcher.keep_logs = !diverge_cancelled();
+            if diverge_cancelled() {
+                eprintln!("copperline-ctl: diverge: interrupted");
+            } else {
+                let logs: Vec<String> = launcher
+                    .launched
+                    .iter()
+                    .map(|l| l.log_path.display().to_string())
+                    .collect();
+                eprintln!("copperline-ctl: diverge: {message}");
+                if !logs.is_empty() {
+                    eprintln!(
+                        "copperline-ctl: diverge: emulator logs kept: {}",
+                        logs.join(" ")
+                    );
+                }
+            }
+            if parsed.json {
+                println!(
+                    "{}",
+                    json!({"outcome": "error", "error": message, "interrupted": diverge_cancelled()})
+                );
+            }
+            ExitCode::from(2)
+        }
+    }
+}
+
 fn main() -> ExitCode {
     // A help request anywhere on the command line is not a usage error:
     // the packaging smoke tests (and anyone probing a fresh install) check
@@ -649,6 +969,9 @@ fn main() -> ExitCode {
     {
         println!("{}", usage());
         return ExitCode::SUCCESS;
+    }
+    if std::env::args().nth(1).as_deref() == Some("diverge") {
+        return run_diverge();
     }
     if std::env::args().nth(1).as_deref() == Some("size-report") {
         return match run_size_report() {

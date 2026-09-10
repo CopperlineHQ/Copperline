@@ -2,7 +2,7 @@
 
 This chapter illustrates common debugging workflows combining the [debugger window](window),
 [console](console), Frame Analyzer, [reverse execution](reverse), [headless options](headless),
-and [GDB remote stub](gdb).
+[GDB remote stub](gdb), and the [A/B divergence finder](diverge).
 
 ## Diagnosing sprite rendering issues
 
@@ -79,3 +79,40 @@ WAVE START glitch.vcd beam=100 2f
 This arms a capture triggering at scanline 100 and records two frames of chip-bus
 activity. The resulting `.vcd` file can be opened in GTKWave to inspect exact
 cycle-by-cycle interleaving between CPU, Copper, Blitter, and DMA channels.
+
+## Bisecting an emulator regression between two builds
+
+When a title that worked in one build misbehaves in another, find the first
+emulated state that differs before reading any code:
+
+1. **Pin the scene:** Save a state just before the problem with the build
+   that still works (`--save-state-after SECS before.clstate`) and record
+   the input that reaches it (`--record-input inputs.clscript`), so both
+   sides start from the same snapshot and see the same input.
+2. **Run both builds in lockstep:**
+
+   ```sh
+   copperline-ctl diverge --a ./good/copperline --b ./bad/copperline \
+       --until 130 --memory all --screenshots /tmp/shots -- \
+       --factory --config game.toml --noaudio \
+       --load-state before.clstate --script inputs.clscript
+   ```
+
+   The report names the first differing frame, then the first instruction
+   inside it at which the registers, the colour clock or RAM differ, with
+   the beam position and, for memory, the first differing byte. A
+   **DMA-only** verdict (the picture differs while the CPU state never
+   does) points at the chipset's fetch, Copper, blitter or output path
+   rather than the CPU core; a **timing** verdict (same instruction,
+   different colour clock) points at bus arbitration or instruction
+   timing.
+3. **Inspect the point on either side:** Open the same state in the
+   [debugger window](window) or over the [control protocol](control),
+   `run_until {"frame": F}` to the reported frame, then `step` to the
+   reported instruction and use `custom.writer`, `frame.slots` or the
+   Frame Analyzer to see what the two builds did differently there.
+4. **Bisect the change:** Repeat with intermediate builds (`git bisect
+   run` around the command; exit status 1 means diverged) until the
+   commit that introduced the difference is found. The same command with
+   `--config-a`/`--config-b` instead of two binaries checks whether a
+   configuration knob changes behaviour it should not.

@@ -114,6 +114,7 @@ configuration says. Arguments:
 | `entryPoint` | The symbol to stop at instead of the first instruction of the first hunk: `main` or `entry` for C programs whose first hunk begins with a startup stub. |
 | `symbolFile` | An ELF with DWARF the program was converted from (elf2hunk); `program.elf` is tried automatically. |
 | `sourceMap` | `{"/build/prefix": "/host/prefix"}` for sources recorded under another path. |
+| `coverage` | An lcov `.info` path: the emulator counts every instruction the program retires from its first instruction to its exit and writes line/function coverage there when it exits or the session stops (`--coverage`, with `sourceMap` applied; see [Guest code coverage](profiling.md#guest-coverage)). Launch only. |
 | `cwd`, `timeoutMs` | The emulator's working directory, and how long to wait for its control endpoint (default 60 s). |
 
 `attach` connects to a running emulator through `controlInfo` (the
@@ -195,6 +196,7 @@ global(s), call-frame info`.
 | Jump to cursor | `regs.set {"reg": "pc"}`. |
 | Debug Console output | Serial output (which is where `KPrintF` goes) as `stdout`; uaelib function 86 (`debug_log`), optional `emulatorLog`, and the adapter's own notes as `console`. |
 | CPU profiling | Custom `copperline/profile {"frames": N}` -> precise `profile.start`, bounded frame step, `profile.stop`, and a merged `.cpuprofile` path. |
+| Coverage | The `coverage` launch argument -> the emulator's `--coverage` run; the lcov file appears beside the program when it exits or the session ends. |
 | Modules / loaded sources | The program with its first hunk's address, and the source files its debug information names. |
 
 A stop from a breakpoint the debugger window set, or from a `catch`, `reg

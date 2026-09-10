@@ -89,13 +89,20 @@ Commands are case-insensitive. Addresses and data values use hexadecimal notatio
 | `OUTROM` | Run until PC leaves the default Kickstart ROM window (`$F80000-$FFFFFF`) |
 | `HISTORY [N]` (or `H`) | Display recent instruction history |
 | `STACK` (or `BT`) | Heuristic stack trace of recent return addresses |
-| `POKE ADDR VAL` | Write word value to memory |
+| `POKE ADDR VAL` | Write a word to memory (`ADDR` rounded down to even) |
+| `POKE ADDR VAL VAL ...` | Write a byte sequence from `ADDR`: hex byte pairs, as `FIND` takes them (`POKE 60000 12 34 56`) |
+| `POKE.B \| POKE.W \| POKE.L ADDR VAL [VAL ...]` | Write one or more bytes, words, or longs consecutively from `ADDR` (`.W`/`.L` round it down to even). A value wider than the size is refused, not truncated |
 | `SETREG REG VAL` | Set CPU register value (e.g. `SETREG D0 1234`) |
 | `TRACE START [PATH]` | Begin continuous instruction disassembly logging |
 | `TRACE STOP` | Stop instruction trace logging |
 | `WAVE START [ARGS]` | Arm VCD logic analyzer capture (see [](waveform.md)) |
 | `WAVE STOP` | Stop VCD capture |
 | `HELP` (or `?`) | Display command summary |
+
+Every `POKE` form is a plain CPU-visible RAM write with the semantics of the
+control protocol's `mem.write` and the Memory tab's editor: ROM, overlay
+ROM, and device windows are refused and reported, and memory watchpoints
+are rebaselined so the poke itself does not stop the machine.
 
 `WRITER` compares the word after each CPU step. It misses writes that leave
 the value unchanged, and its reported PC is the CPU instruction around the

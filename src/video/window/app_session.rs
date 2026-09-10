@@ -578,6 +578,10 @@ impl App {
         if let Some(reason) = self.emu.machine.runahead_debug_block_reason() {
             return Some(reason);
         }
+        #[cfg(feature = "dap")]
+        if let Some(reason) = self.emu.coverage_run_block_reason() {
+            return Some(reason);
+        }
         self.runahead_machine_block
             .or_else(|| self.emu.bus().runahead_host_block_reason())
     }
@@ -1159,36 +1163,54 @@ impl App {
         self.emu.set_live_audio_suspended(suspended);
     }
 
-    pub(super) fn save_screenshot(&self, path: &std::path::Path) {
-        // COPPERLINE_SHOT_RAW saves the raw woven framebuffer (716x570
-        // for standard fields, the native scan height for programmable
-        // modes): the presentation resampler blends adjacent lines, so
-        // per-scanline forensics need the unscaled field.
+    /// The presented frame as a screenshot captures it, before encoding:
+    /// the single path behind saved screenshots and `--expect-screenshot`.
+    ///
+    /// COPPERLINE_SHOT_RAW captures the raw woven framebuffer (716x570
+    /// for standard fields, the native scan height for programmable
+    /// modes): the presentation resampler blends adjacent lines, so
+    /// per-scanline forensics need the unscaled field.
+    pub(super) fn capture_present_image(&self) -> super::present::PresentImage<'_> {
         let src_rows = self.present_rows;
-        let result = if self.rtg_present_dims.is_some() {
+        if self.rtg_present_dims.is_some() {
             // An RTG board's frame already has one presentation row per
-            // board row: save it at that height, matching the control
+            // board row: capture it at that height, matching the control
             // protocol's capture, instead of scaling to the chipset glass.
-            screenshot::save(
-                path,
-                &self.present_fb[..src_rows * self.present_width],
-                self.present_width as u32,
-                src_rows as u32,
-            )
-        } else {
-            save_present_frame(
-                path,
-                &self.present_fb,
-                src_rows,
-                self.present_width,
-                self.overscan,
-                self.tv_centre,
-                self.present_tv_aperture_rows,
-            )
-        };
-        match result {
+            return super::present::PresentImage {
+                pixels: std::borrow::Cow::Borrowed(
+                    &self.present_fb[..src_rows * self.present_width],
+                ),
+                width: self.present_width as u32,
+                height: src_rows as u32,
+            };
+        }
+        super::present::render_present_frame(
+            &self.present_fb,
+            src_rows,
+            self.present_width,
+            self.overscan,
+            self.tv_centre,
+            self.present_tv_aperture_rows,
+        )
+    }
+
+    pub(super) fn save_screenshot(&self, path: &std::path::Path) {
+        let image = self.capture_present_image();
+        match screenshot::save(path, &image.pixels, image.width, image.height) {
             Ok(()) => info!("screenshot saved: {}", path.display()),
             Err(e) => warn!("screenshot save failed ({}): {e:#}", path.display()),
+        }
+    }
+
+    /// Check one `--expect-screenshot` against the frame just rendered,
+    /// recording a failure in the run's verdict.
+    pub(super) fn check_screenshot_expectation(&mut self, spec: &crate::expect::ExpectShotSpec) {
+        let outcome = {
+            let image = self.capture_present_image();
+            crate::expect::check(spec, &image.pixels, image.width, image.height)
+        };
+        if !outcome.passed {
+            self.verdict.expect_failures += 1;
         }
     }
 

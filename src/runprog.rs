@@ -63,12 +63,25 @@ pub struct PreparedRun {
     pub prog_name: String,
 }
 
-/// Name of the completion marker the Startup-Sequence echoes into the
+/// Name of the completion marker the Startup-Sequence writes into the
 /// boot volume after the program returns. The warp gate polls the LoadSeg
 /// tracker once per emulated frame, which can miss a program that loads,
 /// runs, and exits inside a single frame; the marker is host-visible the
 /// moment the guest writes it, so even the fastest program ends the warp.
+///
+/// The bundled `Done` command writes the program's AmigaDOS return code
+/// (`cli_ReturnCode`, decimal, one line) into it, which
+/// [`read_return_code`] reads back for `--exit-on-return`.
 pub const DONE_MARKER: &str = "done";
+/// Process exit status for `--exit-on-return` when the run ended (the last
+/// scheduled capture fired, the window closed) before the guest program's
+/// return code was recorded.
+pub const EXIT_STATUS_NO_RETURN: i32 = 4;
+/// The `FailAt` threshold the generated script sets: high enough that no
+/// return code aborts the script before `Done` records it. (An abort
+/// would leave the marker unwritten, reporting a program that returned
+/// 20 as one that never returned.)
+pub const FAIL_AT: u32 = 2_147_483_647;
 const DETACHED_SCRIPT: &str = "Detached-Run";
 
 /// Normal relocatable 68000 hunk executables, rebuilt with
@@ -79,6 +92,7 @@ const BOOT_COMMANDS: &[(&str, &[u8])] = &[
     ("Stack", include_bytes!("../guest/run-tools/Stack")),
     ("Echo", include_bytes!("../guest/run-tools/Echo")),
     ("Execute", include_bytes!("../guest/run-tools/Execute")),
+    ("Done", include_bytes!("../guest/run-tools/Done")),
 ];
 
 /// Guest-shell options used by debugger launches.
@@ -113,8 +127,28 @@ fn program_sequence(prog_name: &str, extra_args: Option<&str>, stack: Option<u32
     }
     let stack = stack.map_or_else(String::new, |n| format!("Stack {n}\n"));
     format!(
-        "FailAt 21\n{stack}CD \"{PROG_VOLUME}:\"\n{run}\nEcho >\"{BOOT_VOLUME}:{DONE_MARKER}\" \"done\"\n"
+        "FailAt {FAIL_AT}\n{stack}CD \"{PROG_VOLUME}:\"\n{run}\nDone >\"{BOOT_VOLUME}:{DONE_MARKER}\"\n"
     )
+}
+
+/// The guest program's return code from the completion marker, once the
+/// guest has written the whole line. `None` while the marker is absent
+/// or still being written (shell redirection creates the file before
+/// `Done` runs, so an empty file is "not yet"), and for a marker that
+/// holds anything but a number (a `Done` that could not run leaves its
+/// error text there instead).
+/// Whether the launch marker holds a finished record of the program's exit.
+/// The generated script's redirection creates the file before the `Done`
+/// command writes its line, so an existing marker is not yet a completed
+/// run; only a whole line is.
+pub fn completion_recorded(marker: &Path) -> bool {
+    read_return_code(marker).is_some()
+}
+
+pub fn read_return_code(marker: &Path) -> Option<i32> {
+    let text = std::fs::read_to_string(marker).ok()?;
+    let line = text.split_once('\n')?.0;
+    line.trim().parse().ok()
 }
 
 /// The generated `S/Startup-Sequence`: a foreground launch performs the work
@@ -125,7 +159,7 @@ fn program_sequence(prog_name: &str, extra_args: Option<&str>, stack: Option<u32
 fn startup_sequence(prog_name: &str, extra_args: Option<&str>, options: RunOptions) -> String {
     if options.detach {
         format!(
-            "FailAt 21\nRun >NIL: <NIL: Execute \"{BOOT_VOLUME}:S/{DETACHED_SCRIPT}\"\nEndCLI\n"
+            "FailAt {FAIL_AT}\nRun >NIL: <NIL: Execute \"{BOOT_VOLUME}:S/{DETACHED_SCRIPT}\"\nEndCLI\n"
         )
     } else {
         program_sequence(prog_name, extra_args, options.stack)
@@ -382,22 +416,23 @@ mod tests {
     use super::*;
     use crate::lha::tests::temp_dir;
 
-    const DONE_LINE: &str = "Echo >\"RunBoot:done\" \"done\"\n";
+    const DONE_LINE: &str = "Done >\"RunBoot:done\"\n";
+    const FAIL_LINE: &str = "FailAt 2147483647\n";
 
     #[test]
     fn startup_sequence_quotes_the_program_and_cds_to_the_volume() {
         assert_eq!(
             startup_sequence("hello", None, RunOptions::default()),
-            format!("FailAt 21\nCD \"RunProg:\"\n\"RunProg:hello\"\n{DONE_LINE}")
+            format!("{FAIL_LINE}CD \"RunProg:\"\n\"RunProg:hello\"\n{DONE_LINE}")
         );
         assert_eq!(
             startup_sequence("my game", Some("  -level 2  "), RunOptions::default()),
-            format!("FailAt 21\nCD \"RunProg:\"\n\"RunProg:my game\" -level 2\n{DONE_LINE}")
+            format!("{FAIL_LINE}CD \"RunProg:\"\n\"RunProg:my game\" -level 2\n{DONE_LINE}")
         );
         // Whitespace-only args collapse to none.
         assert_eq!(
             startup_sequence("hello", Some("   "), RunOptions::default()),
-            format!("FailAt 21\nCD \"RunProg:\"\n\"RunProg:hello\"\n{DONE_LINE}")
+            format!("{FAIL_LINE}CD \"RunProg:\"\n\"RunProg:hello\"\n{DONE_LINE}")
         );
     }
 
@@ -412,11 +447,11 @@ mod tests {
                     detach: true,
                 },
             ),
-            "FailAt 21\nRun >NIL: <NIL: Execute \"RunBoot:S/Detached-Run\"\nEndCLI\n"
+            format!("{FAIL_LINE}Run >NIL: <NIL: Execute \"RunBoot:S/Detached-Run\"\nEndCLI\n")
         );
         assert_eq!(
             program_sequence("hello", Some("-x"), Some(32_768)),
-            format!("FailAt 21\nStack 32768\nCD \"RunProg:\"\n\"RunProg:hello\" -x\n{DONE_LINE}")
+            format!("{FAIL_LINE}Stack 32768\nCD \"RunProg:\"\n\"RunProg:hello\" -x\n{DONE_LINE}")
         );
     }
 
@@ -439,7 +474,7 @@ mod tests {
             std::fs::read_to_string(prepared.boot_dir.join("S").join(DETACHED_SCRIPT)).unwrap();
         assert_eq!(
             child,
-            format!("FailAt 21\nStack 32768\nCD \"RunProg:\"\n\"RunProg:hello\" -x\n{DONE_LINE}")
+            format!("{FAIL_LINE}Stack 32768\nCD \"RunProg:\"\n\"RunProg:hello\" -x\n{DONE_LINE}")
         );
     }
 
@@ -505,9 +540,9 @@ mod tests {
             std::fs::read_to_string(prepared.boot_dir.join("S").join("Startup-Sequence")).unwrap();
         assert_eq!(
             script,
-            format!("FailAt 21\nCD \"RunProg:\"\n\"RunProg:hello\" -x\n{DONE_LINE}")
+            format!("{FAIL_LINE}CD \"RunProg:\"\n\"RunProg:hello\" -x\n{DONE_LINE}")
         );
-        for name in ["FailAt", "CD", "Stack", "Echo", "Execute"] {
+        for name in ["FailAt", "CD", "Stack", "Echo", "Execute", "Done"] {
             let command = std::fs::read(prepared.boot_dir.join("C").join(name)).unwrap();
             assert_eq!(
                 &command[..4],
@@ -530,7 +565,7 @@ mod tests {
             std::fs::read_to_string(prepared.boot_dir.join("S").join("Startup-Sequence")).unwrap();
         assert_eq!(
             script,
-            format!("FailAt 21\nCD \"RunProg:\"\n\"RunProg:hello\"\n{DONE_LINE}")
+            format!("{FAIL_LINE}CD \"RunProg:\"\n\"RunProg:hello\"\n{DONE_LINE}")
         );
 
         // The stale-sibling sweep leaves fresh directories (like another
@@ -584,6 +619,27 @@ mod tests {
         // Neither mount is read-only: the boot volume is disposable and the
         // program writes output next to itself.
         assert!(raw.filesys.iter().all(|m| m.readonly.is_none()));
+    }
+
+    #[test]
+    fn read_return_code_waits_for_a_complete_numeric_line() {
+        let dir = temp_dir("runprog-rc");
+        let marker = dir.join(DONE_MARKER);
+        assert_eq!(read_return_code(&marker), None, "absent");
+        // Redirection creates the file before Done writes into it.
+        std::fs::write(&marker, b"").unwrap();
+        assert_eq!(read_return_code(&marker), None, "empty");
+        std::fs::write(&marker, b"2").unwrap();
+        assert_eq!(read_return_code(&marker), None, "line still being written");
+        std::fs::write(&marker, b"20\n").unwrap();
+        assert_eq!(read_return_code(&marker), Some(20));
+        std::fs::write(&marker, b"0\n").unwrap();
+        assert_eq!(read_return_code(&marker), Some(0));
+        std::fs::write(&marker, b"-1\n").unwrap();
+        assert_eq!(read_return_code(&marker), Some(-1));
+        std::fs::write(&marker, b"Copperline boot command failed\n").unwrap();
+        assert_eq!(read_return_code(&marker), None, "Done itself failed");
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
