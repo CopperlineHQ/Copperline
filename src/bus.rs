@@ -2179,6 +2179,12 @@ pub struct FrameBusTrace {
     pub frame: u64,
     pub seconds: f64,
     pub rows: usize,
+    /// The frame height this capture belongs to, as Agnus reckons it: the
+    /// long field of an interlaced signal, or a programmable VARBEAMEN total
+    /// used as it stands. `rows` is the field actually captured, one line
+    /// less on an interlaced short field, so presentation that must not move
+    /// between fields lays out against this instead.
+    pub nominal_rows: usize,
     pub cols: usize,
     pub line_cck: u32,
     pub visible_start_vpos: u32,
@@ -2225,6 +2231,7 @@ impl Default for FrameBusTrace {
             frame: 0,
             seconds: 0.0,
             rows: 0,
+            nominal_rows: 0,
             cols: 0,
             line_cck: COLORCLOCKS_PER_LINE,
             visible_start_vpos: RENDER_VISIBLE_START_VPOS,
@@ -2256,6 +2263,7 @@ impl FrameBusTrace {
         frame: u64,
         seconds: f64,
         frame_lines: u32,
+        nominal_frame_lines: u32,
         line_cck: u32,
         visible_start_vpos: u32,
         visible_lines: usize,
@@ -2266,6 +2274,8 @@ impl FrameBusTrace {
         self.frame = frame;
         self.seconds = seconds;
         self.rows = (frame_lines as usize).clamp(1, FRAME_ANALYZER_MAX_VPOS);
+        self.nominal_rows =
+            (nominal_frame_lines as usize).clamp(self.rows, FRAME_ANALYZER_MAX_VPOS);
         self.cols = (line_cck as usize).clamp(1, FRAME_ANALYZER_MAX_HPOS);
         self.line_cck = line_cck;
         self.visible_start_vpos = visible_start_vpos;
@@ -2304,6 +2314,7 @@ impl FrameBusTrace {
         self.reset_for_frame_with_level(
             frame,
             seconds,
+            frame_lines,
             frame_lines,
             line_cck,
             visible_start_vpos,
@@ -9935,6 +9946,7 @@ impl Bus {
             self.emulated_frames,
             self.emulated_seconds(),
             self.agnus.current_frame_lines(),
+            self.agnus.nominal_frame_lines(),
             self.agnus.current_line_cck(),
             self.current_frame_visible_start_vpos,
             self.current_frame_geometry.visible_lines,

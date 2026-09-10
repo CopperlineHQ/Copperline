@@ -78,6 +78,7 @@ fn full_bus_record_is_exactly_24_bytes_and_owner_only_trace_stays_cheap() {
         8,
         0.160,
         4,
+        4,
         16,
         1,
         2,
@@ -91,6 +92,7 @@ fn full_bus_record_is_exactly_24_bytes_and_owner_only_trace_stays_cheap() {
     trace.reset_for_frame_with_level(
         9,
         0.180,
+        super::FRAME_ANALYZER_MAX_VPOS as u32,
         super::FRAME_ANALYZER_MAX_VPOS as u32,
         1,
         0,
@@ -410,6 +412,7 @@ fn completed_cpu_access_updates_slots_on_both_sides_of_a_frame_boundary() {
         7,
         0.140,
         1,
+        1,
         2,
         0,
         1,
@@ -422,6 +425,7 @@ fn completed_cpu_access_updates_slots_on_both_sides_of_a_frame_boundary() {
     bus.current_frame_bus_trace.reset_for_frame_with_level(
         8,
         0.160,
+        1,
         1,
         2,
         0,

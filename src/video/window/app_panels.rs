@@ -963,6 +963,49 @@ impl App {
             })
     }
 
+    /// Re-arm the open inspectors against a freshly built machine.
+    ///
+    /// The panels are host state and outlive the machine they were opened
+    /// on, but everything they capture with -- the analyzer's slot trace,
+    /// its heat map, the PC history behind Recent PCs, the reverse-debug
+    /// ring -- is armed on the bus and the CPU, and a new machine comes up
+    /// with none of it. Without this an inspector left open across a
+    /// configuration change sits dead on the new machine until something
+    /// else happens to re-arm it (the analyzer's Run, or re-entering the
+    /// Memory tab), which looks like the pane rather than the machine
+    /// having stopped.
+    pub(super) fn rearm_tool_panels(&mut self) {
+        if self.frame_analyzer_panel.is_some() {
+            self.emu.bus_mut().set_frame_analyzer_full(true);
+            // Only the Memory tab arms a map, and only when nothing else
+            // owns one -- the same ownership rule `frame_analyzer_set_tab`
+            // applies, so the pane does not claim a map on the new machine
+            // that it would not have armed on the old one.
+            let wants_heat_map = self
+                .frame_analyzer_panel
+                .as_ref()
+                .is_some_and(|panel| panel.tab == ui::AnalyzerTab::Memory);
+            if wants_heat_map && self.emu.bus().heat_map().is_none() {
+                let window = analyzer_default_heat_window(self.emu.bus());
+                self.emu.bus_mut().set_heat_map(Some(window));
+                self.heatmap_armed_by_panel = true;
+                let presets = analyzer_heat_presets(self.emu.bus());
+                if let Some(panel) = self.frame_analyzer_panel.as_mut() {
+                    panel.heat_presets = presets;
+                }
+            }
+        }
+        if self.debugger_panel.is_some() || self.console_panel.is_some() {
+            self.emu.machine.ui_set_pc_history_enabled(true);
+            if !self.emu.time_travel_enabled() {
+                self.emu.enable_time_travel(
+                    crate::debugger::RR_DEFAULT_BUDGET_MB,
+                    DEBUGGER_REVERSE_INTERVAL_FRAMES,
+                );
+            }
+        }
+    }
+
     pub(super) fn close_tool_panel(&mut self, kind: ToolPanelKind) {
         let shared_paused = self.paused;
         self.save_egui_preferences();

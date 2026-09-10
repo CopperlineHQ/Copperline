@@ -1883,6 +1883,107 @@ fn the_drawn_latch_matches_what_the_machine_holds() {
     );
 }
 
+/// The inspectors are host state and outlive the machine they were opened
+/// on, but everything they capture with is armed on the bus and the CPU. A
+/// machine built by the launcher's Run comes up with none of it, so the swap
+/// has to re-arm whatever is still open. Otherwise the Frame Analyzer sits
+/// dead on the new machine until its own Run happens to re-arm it (a pause
+/// and run, which looks like the pane rather than the machine having
+/// stopped), and Recent PCs, the reverse controls and the heat map stay dead
+/// with it.
+#[test]
+fn running_a_new_machine_rearms_the_open_inspectors() {
+    let mut app = test_app();
+    app.open_frame_analyzer();
+    app.frame_analyzer_set_tab(AnalyzerTab::Memory);
+    app.open_debugger();
+    assert!(app.emu.bus().frame_analyzer_full());
+    assert!(app.emu.bus().heat_map().is_some());
+    assert!(app.emu.time_travel_enabled());
+
+    let raw = crate::config::RawConfig::default();
+    let cfg = crate::config::Config::try_from(raw.clone()).expect("default config");
+    let emu = test_emulator(Box::new(NullSink), crate::config::CpuModel::M68000, &[]);
+    app.run_machine(emu, &cfg, raw);
+
+    // The panes are still open, so they must still be capturing.
+    assert!(app.frame_analyzer_panel.is_some());
+    assert!(app.debugger_panel.is_some());
+    assert!(
+        app.emu.bus().frame_analyzer_full(),
+        "the analyzer captures the new machine without needing a pause and run"
+    );
+    assert!(
+        app.emu.bus().heat_map().is_some(),
+        "the Memory tab's map records the new machine"
+    );
+    assert!(
+        app.emu.time_travel_enabled(),
+        "the reverse controls work on the new machine"
+    );
+    app.debugger_step();
+    app.debugger_step();
+    assert!(
+        !app.emu.machine.ui_pc_history().is_empty(),
+        "Recent PCs records the new machine"
+    );
+}
+
+/// What the beam diagram is laid out against has to come from Agnus, not
+/// from the parity of the captured field.
+///
+/// An interlaced signal alternates a long field and a short field one line
+/// shorter, so the capture's own line count moves every frame. Agnus reckons
+/// the frame height that capture belongs to, and a programmable VARBEAMEN
+/// total -- which overrides interlace and can be any value, odd or even --
+/// is that height as it stands. Reading "short field" out of an even line
+/// count would lay a 200-line programmable frame out as 201.
+#[test]
+fn the_capture_carries_the_frame_height_agnus_reckons() {
+    let mut app = test_app();
+    app.open_frame_analyzer();
+    app.emu.bus_mut().custom_write(0x100, 2, 0x0004); // BPLCON0 LACE
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..6 {
+        app.emu.step_frame().expect("frame");
+        let trace = app.emu.bus().frame_bus_trace().expect("an armed capture");
+        seen.insert((trace.rows, trace.nominal_rows));
+    }
+    let nominals: std::collections::BTreeSet<_> = seen.iter().map(|(_, n)| *n).collect();
+    assert_eq!(
+        nominals.len(),
+        1,
+        "the frame height holds still while the fields alternate, got {seen:?}"
+    );
+    let long = *nominals.iter().next().unwrap();
+    assert!(
+        seen.iter().all(|(rows, _)| *rows <= long),
+        "a field is never longer than the frame it belongs to, got {seen:?}"
+    );
+
+    // A programmable total drives the beam entirely and overrides interlace,
+    // so it is the layout height whether it is odd or even. VTOTAL and
+    // BEAMCON0 are ECS registers, so this half needs an ECS Agnus.
+    let mut raw = crate::config::RawConfig::default();
+    raw.chipset.revision = Some("ECS".into());
+    let cfg = crate::config::Config::try_from(raw.clone()).expect("ECS config");
+    let emu = crate::emulator::build_machine(&cfg, Box::new(NullSink), false, true)
+        .expect("bundled boot ROM");
+    app.run_machine(emu, &cfg, raw);
+    app.open_frame_analyzer();
+    let bus = app.emu.bus_mut();
+    bus.custom_write(0x1C8, 2, 199); // VTOTAL: last line 199 -> 200 lines
+    bus.custom_write(0x1DC, 2, 1 << 5 | 1 << 7); // BEAMCON0 PAL | VARBEAMEN
+    app.emu.step_frame().expect("frame");
+    app.emu.step_frame().expect("frame");
+    let trace = app.emu.bus().frame_bus_trace().expect("an armed capture");
+    assert_eq!(
+        (trace.rows, trace.nominal_rows),
+        (200, 200),
+        "a programmable total is the layout height as it stands"
+    );
+}
+
 /// Running a new machine (the launcher's Run) lets go of the strip's
 /// holds against the machine being replaced, so neither it nor the new one
 /// is left with a key down that nothing will lift.

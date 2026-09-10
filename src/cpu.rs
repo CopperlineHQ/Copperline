@@ -2125,6 +2125,13 @@ impl M68kMachine {
         self.ui_pc_history_enabled = enabled;
     }
 
+    /// Whether the recent-PC ring is recording. The debug workspace reports
+    /// it per inspector: the ring is armed on the machine, so a machine
+    /// built after the inspector opened comes up without it.
+    pub fn ui_pc_history_enabled(&self) -> bool {
+        self.ui_pc_history_enabled
+    }
+
     /// The recent-PC ring, oldest first.
     pub fn ui_pc_history(&self) -> Vec<u32> {
         let mut out = Vec::with_capacity(self.ui_pc_history_len);

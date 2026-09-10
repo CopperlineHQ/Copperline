@@ -8,9 +8,9 @@ Opening the first inspector pauses emulation (`RUN` resumes execution).
 Switching inspectors preserves command text, output, history, and the current
 run/pause state. Closing one leaves the remaining inspectors open; closing the
 last restores the previous execution state. Explicit Run/Pause choices apply
-to the shared session. **Return to Play** hides the inspectors without closing
-them or changing the current run/pause state. Their command text and history
-remain available when you return.
+to the shared session. The title bar's **Play** switch hides the inspectors
+without closing them or changing the current run/pause state. Their command
+text and history remain available when you return.
 
 ```{figure} ../images/ui-preview-console-egui.png
 :alt: Console with selectable output and an editable command field

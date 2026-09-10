@@ -51,18 +51,9 @@ impl Layout {
         }
         egui::Panel::top("analyzer_tabs").show(root, |ui| {
             ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
                 for tab in ui::ANALYZER_TABS {
-                    if ui
-                        .selectable_label(
-                            panel.tab == tab,
-                            RichText::new(ui::analyzer_tab_label(tab)).color(if panel.tab == tab {
-                                Color32::WHITE
-                            } else {
-                                INK
-                            }),
-                        )
-                        .clicked()
-                    {
+                    if sub_tab(ui, ui::analyzer_tab_label(tab), panel.tab == tab).clicked() {
                         actions.push(Action::Analyzer(UiControl::AnalyzerTab(tab)));
                     }
                 }
@@ -192,7 +183,9 @@ impl Layout {
             ui.vertical(|ui| {
                 let display = egui::vec2(
                     width,
-                    (width * trace.rows as f32 / (trace.cols * 2) as f32).clamp(220.0, 420.0),
+                    (width * analyzer_layout_rows(trace.nominal_rows, trace.rows) as f32
+                        / (trace.cols * 2) as f32)
+                        .clamp(220.0, 420.0),
                 );
                 let response =
                     ui.add(egui::Image::new((texture, display)).sense(egui::Sense::hover()));
@@ -208,7 +201,9 @@ impl Layout {
                 {
                     let [x, y] = beam_fraction(response.rect, point);
                     probe = (
-                        usize::from(y) * trace.rows / 1024,
+                        (usize::from(y) * analyzer_layout_rows(trace.nominal_rows, trace.rows)
+                            / 1024)
+                            .min(trace.rows.saturating_sub(1)),
                         usize::from(x) * trace.cols / 1024,
                     );
                     if response.clicked() || response.dragged() {
@@ -691,11 +686,15 @@ fn beam_counters(
 
 fn beam_overlays(ui: &egui::Ui, rect: egui::Rect, trace: &ui::AnalyzerTraceView) {
     let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+    // The diagram is laid out against the long field, so the overlays have
+    // to be placed against it too or they would drift by a line as the
+    // fields alternate.
+    let field_rows = analyzer_layout_rows(trace.nominal_rows, trace.rows);
     let pos = |h: usize, v: usize| {
         rect.min
             + egui::vec2(
                 h.min(trace.cols) as f32 / trace.cols as f32 * rect.width(),
-                v.min(trace.rows) as f32 / trace.rows as f32 * rect.height(),
+                v.min(field_rows) as f32 / field_rows as f32 * rect.height(),
             )
     };
     let outline = |a, b, colour| {

@@ -316,9 +316,11 @@ the launcher's A/V & Emu page (Display category).
 
 The [Debug workspace](../debugger/window.md) puts the Amiga display beside the
 debugger, Frame Analyzer, and Console in the main window. Switch inspectors with
-the selectors at the top, and resize the display using the divider. **Return to
-Play** restores the display layout and keeps the inspectors' selections, captures,
-and command history. Switching layouts preserves the current run/pause state.
+the tabs at the top, close one with the close box on its own tab, and resize the
+display using the divider. The title bar's **Play / Debug** switch changes
+layout: **Play** restores the display layout and keeps the inspectors open, with
+their selections, captures, and command history. Switching layouts preserves the
+current run/pause state.
 
 Click the display to send keyboard and mouse input to the Amiga; `Cmd+G` / `Alt+G`
 returns input to the debugger. In the inspector controls, `Esc` leaves a text

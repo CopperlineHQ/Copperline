@@ -955,6 +955,20 @@ fn analyzer_heat_presets(bus: &crate::bus::Bus) -> Vec<ui::HeatPreset> {
     presets
 }
 
+/// The line count to lay the beam diagram out against, and to map screen
+/// positions through.
+///
+/// An interlaced signal alternates a long field and a short field one line
+/// shorter, so following the captured field would resize the pane and move
+/// the row under the pointer on every frame. Agnus reckons the frame height
+/// this capture belongs to -- the long field, or a programmable VARBEAMEN
+/// total used as it stands -- and that is what presentation uses; callers
+/// clamp the row to the field actually captured. A trace from before the
+/// height was recorded falls back to the captured field.
+fn analyzer_layout_rows(nominal_rows: usize, rows: usize) -> usize {
+    nominal_rows.max(rows)
+}
+
 /// The window the Memory tab arms when nothing has armed the map yet: the
 /// chip RAM bank. It is the bank every chip-bus engine works out of and
 /// usually the smallest fitted one, so its cells cover the fewest bytes

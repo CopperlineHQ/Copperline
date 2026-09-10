@@ -372,6 +372,7 @@ impl App {
             };
         }
         ui.layout.guest_input = self.debug_guest_input;
+        ui.layout.tools = self.egui_tool_tab_states();
         let snapshot = ui.snapshot.take();
         let actions = if let Some(r) = &self.render {
             match &snapshot {
