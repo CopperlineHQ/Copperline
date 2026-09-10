@@ -197,6 +197,52 @@ pub(super) fn render_job_to_presentation(
 /// rather than deriving closed forms: a few hundred iterations, run only
 /// when autocrop is presenting, and immune to drifting out of agreement
 /// with the copy it mirrors.
+/// The presentation-buffer pixel logical canvas pixel (`x`, `y`) shows:
+/// the display copy's forward maps ([`canvas_content_rect`] scans the
+/// same ones) evaluated for one point. `None` for a canvas pixel that
+/// shows no buffer pixel -- the tv canvas's side pads and bezel bands, or
+/// a source row the centre nudge pushes off the buffer.
+pub(super) fn canvas_source_point(
+    x: usize,
+    y: usize,
+    src_rows: usize,
+    src_width: usize,
+    overscan: Overscan,
+    tv_centre: TvCentre,
+    tv_aperture_rows: Option<usize>,
+    canvas_rows: usize,
+) -> Option<(usize, usize)> {
+    if x >= FB_WIDTH || y >= canvas_rows || src_rows == 0 || src_width == 0 {
+        return None;
+    }
+    match tv_aperture_rows {
+        Some(aperture_rows) if overscan == Overscan::Tv => {
+            let (x_off, y_off) = tv_centre_source_offset(tv_centre);
+            let src_y = tv_aperture_source_row(y, canvas_rows, 1, aperture_rows)
+                .map(|crop_y| (TV_PRESENT_SOURCE_Y + crop_y) as i32 + y_off)?;
+            let square = canvas_rows == crate::video::PRESENT_HEIGHT_SQUARE;
+            let src_x = if square {
+                (TV_LIVE_PAD_X..TV_LIVE_PAD_X + TV_CAPTURED_WIDTH)
+                    .contains(&x)
+                    .then(|| TV_CAPTURED_SOURCE_X as i32 + x_off + (x - TV_LIVE_PAD_X) as i32)?
+            } else {
+                let s = (TV_CAPTURED_SOURCE_X as i64 + x_off as i64) * 256
+                    + ((2 * x as i64 + 1) * (TV_CAPTURED_WIDTH as i64) * 256)
+                        / (2 * FB_WIDTH as i64)
+                    - 128;
+                (s >> 8) as i32
+            };
+            ((0..src_width as i32).contains(&src_x) && (0..src_rows as i32).contains(&src_y))
+                .then_some((src_x as usize, src_y as usize))
+        }
+        _ => {
+            let src_y = screenshot::scaled_source_row(y, src_rows, canvas_rows);
+            let src_x = (x * src_width / FB_WIDTH).min(src_width - 1);
+            Some((src_x, src_y))
+        }
+    }
+}
+
 pub(super) fn canvas_content_rect(
     content: bitplane::ContentRect,
     src_rows: usize,

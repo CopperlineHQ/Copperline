@@ -91,6 +91,8 @@ struct InterruptState {
 struct MediaState {
     floppy: [Option<String>; 4],
     cd_inserted: bool,
+    /// The PCMCIA card's description, when one is in the slot.
+    pcmcia: Option<String>,
 }
 
 /// Subscription and sampling state for one authenticated connection.
@@ -320,6 +322,18 @@ impl Observer {
                         }),
                     ));
                 }
+                if previous.pcmcia != current.pcmcia {
+                    events.push(proto::event_line(
+                        "event.media",
+                        json!({
+                            "position": position(emu),
+                            "kind": "pcmcia",
+                            "action": if current.pcmcia.is_some() { "inserted" } else { "ejected" },
+                            "name": current.pcmcia.clone(),
+                            "dropped_notifications": self.dropped_notifications,
+                        }),
+                    ));
+                }
             }
             self.last_media = Some(current);
         }
@@ -406,6 +420,7 @@ fn media_state(emu: &Emulator) -> MediaState {
     MediaState {
         floppy: std::array::from_fn(|drive| bus.floppy.inserted_disk_name(drive)),
         cd_inserted: bus.cd_disc_inserted(),
+        pcmcia: bus.pcmcia_card().map(crate::pcmcia::PcmciaCard::describe),
     }
 }
 

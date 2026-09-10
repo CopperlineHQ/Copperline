@@ -1032,6 +1032,9 @@ impl App {
             h_shift,
             self.overscan,
         );
+        // Kept so a host pointer over the picture can be traced back to
+        // the rendered pixel under it (the light pen's position).
+        self.present_placement = Some(placement);
         let base = self.emu.bus().frame_render_base();
         // Standard 15 kHz fields line-double / weave to 2x rows; a
         // programmable progressive scan already carries every line.

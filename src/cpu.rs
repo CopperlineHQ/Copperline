@@ -4177,6 +4177,19 @@ impl CpuBus {
                 return value;
             }
         }
+        // Gayle's PCMCIA slot windows. Zorro II RAM configured over the
+        // common window has already been claimed above (`classify_plain_
+        // memory`), so the card never answers an address a board owns; an
+        // empty or disabled socket leaves the address unmapped.
+        if self.bus.gayle.is_some() && crate::pcmcia::decodes(addr) {
+            if let Some(value) = self.bus.pcmcia_read(addr, size) {
+                self.bus.cpu_slow_external_access(Self::access_words(size));
+                if self.bus.take_pcmcia_activity() {
+                    self.bus.note_hdd_activity();
+                }
+                return value;
+            }
+        }
         if self.bus.uaelib.is_some() && crate::uaelib::UaeLib::decodes(addr) {
             // The uaelib trap stub (crate::uaelib): ROM-like memory (WinUAE's
             // rtarea is a plain ROM bank) the CPU also fetches instructions
@@ -4525,6 +4538,16 @@ impl CpuBus {
                 if gayle.take_activity() {
                     self.bus.note_hdd_activity();
                 }
+            }
+            return;
+        }
+        if self.bus.gayle.is_some()
+            && crate::pcmcia::decodes(addr)
+            && self.bus.pcmcia_write(addr, size, value)
+        {
+            self.bus.cpu_slow_external_access(Self::access_words(size));
+            if self.bus.take_pcmcia_activity() {
+                self.bus.note_hdd_activity();
             }
             return;
         }

@@ -394,7 +394,7 @@ fn a_place_exists_only_while_the_disk_is_ticked() {
 
     let mut setup = MachineSetup::default();
     setup.select_model(Some(MachineModel::A1200));
-    setup.set_host_disks_for_test(disks(3));
+    setup.set_host_disks_for_test(disks(4));
 
     // Blank until ticked, and stepping a blank cell is not a request.
     assert_eq!(setup.host_disks()[0].attach, None);
@@ -420,11 +420,16 @@ fn a_place_exists_only_while_the_disk_is_ticked() {
         "the freed place is picked up by the next tick"
     );
 
-    // Nothing left on a machine with no SCSI: the third tick is refused,
-    // stays unticked, and the next tick clears the warning.
+    // An A1200 has one more place after the IDE cable: its PCMCIA slot,
+    // where the third disk goes in as a CF card.
     setup.select_host_disk(2);
-    assert!(!setup.host_disk_is_selected("disk2"));
-    assert_eq!(setup.host_disks()[2].attach, None);
+    assert_eq!(setup.host_disks()[2].attach, Some(A::Pcmcia));
+
+    // Nothing left on a machine with no SCSI: the fourth tick is refused,
+    // stays unticked, and the next tick clears the warning.
+    setup.select_host_disk(3);
+    assert!(!setup.host_disk_is_selected("disk3"));
+    assert_eq!(setup.host_disks()[3].attach, None);
     assert_eq!(
         setup.host_disk_warning(),
         Some("Every attachment point is already in use")
@@ -4754,13 +4759,15 @@ fn midi_rows_appear_only_in_midi_mode() {
 }
 
 #[test]
-fn parallel_device_cycles_none_printer_sampler() {
+fn parallel_device_cycles_none_printer_sampler_adapter() {
     let mut s = MachineSetup::default();
     assert_eq!(s.parallel_device, ParallelDevice::None);
     s.cycle(LauncherField::ParallelDevice, true);
     assert_eq!(s.parallel_device, ParallelDevice::Printer);
     s.cycle(LauncherField::ParallelDevice, true);
     assert_eq!(s.parallel_device, ParallelDevice::Sampler);
+    s.cycle(LauncherField::ParallelDevice, true);
+    assert_eq!(s.parallel_device, ParallelDevice::JoystickAdapter);
     s.cycle(LauncherField::ParallelDevice, true);
     assert_eq!(s.parallel_device, ParallelDevice::None);
 }
@@ -5810,4 +5817,96 @@ fn internet_netplay_launcher_shares_invitation_and_adopts_host_timing() -> Resul
     host.netplay.generate_code()?;
     assert!(host.netplay.connection_options().is_ok());
     Ok(())
+}
+
+#[cfg(feature = "midi")]
+#[test]
+fn device_mode_rows_are_the_port_picker_only() {
+    let has = |mode, field| {
+        rows(
+            LauncherTab::IoPorts,
+            ParallelDevice::None,
+            mode,
+            false,
+            false,
+        )
+        .iter()
+        .any(|r| r.field == field)
+    };
+    // A real port has a path to pick and nothing to dial or bind.
+    assert!(has(SerialMode::Device, LauncherField::SerialDevice));
+    assert!(!has(SerialMode::Device, LauncherField::SerialConnect));
+    assert!(!has(SerialMode::Device, LauncherField::SerialListen));
+    assert!(!has(SerialMode::Device, LauncherField::SerialTelnet));
+    // And the picker shows for no other mode.
+    for mode in SERIAL_MODES {
+        if mode != SerialMode::Device {
+            assert!(!has(mode, LauncherField::SerialDevice), "{mode:?}");
+        }
+    }
+    // It is a picker, not a typed box, so the address widget stays out.
+    let r = rows(
+        LauncherTab::IoPorts,
+        ParallelDevice::None,
+        SerialMode::Device,
+        false,
+        false,
+    );
+    let found = r
+        .iter()
+        .find(|r| r.field == LauncherField::SerialDevice)
+        .unwrap();
+    assert_eq!(found.kind, RowKind::Cycle);
+    assert!(!LauncherState::is_serial_addr(LauncherField::SerialDevice));
+}
+
+#[cfg(feature = "midi")]
+#[test]
+fn serial_device_round_trips_through_raw() {
+    // The port path is carried whole, whether or not the host lists it.
+    let mut raw = RawConfig::default();
+    raw.serial.mode = Some("device".into());
+    raw.serial.device = Some("/dev/tty.usbserial-1420".into());
+    let setup = MachineSetup::from_raw(&raw).unwrap();
+    assert_eq!(setup.serial_mode, SerialMode::Device);
+    assert_eq!(
+        setup.serial_device.as_deref(),
+        Some("/dev/tty.usbserial-1420")
+    );
+    let back = setup.to_raw();
+    assert_eq!(back.serial.mode.as_deref(), Some("device"));
+    assert_eq!(
+        back.serial.device.as_deref(),
+        Some("/dev/tty.usbserial-1420")
+    );
+}
+
+#[cfg(feature = "midi")]
+#[test]
+fn serial_device_picker_walks_the_host_ports_and_keeps_an_unlisted_path() {
+    let mut setup = MachineSetup {
+        serial_mode: SerialMode::Device,
+        serial_device: Some("/dev/ttyUSB9".into()),
+        ..Default::default()
+    };
+    // A path the host does not list is shown as such, not dropped.
+    assert_eq!(
+        setup.value_label(LauncherField::SerialDevice),
+        "/dev/ttyUSB9 (not found)"
+    );
+    setup.serial_device = None;
+    setup.serial_devices = vec!["/dev/ttyUSB0".into(), "/dev/ttyUSB1".into()];
+    assert_eq!(
+        setup.value_label(LauncherField::SerialDevice),
+        "(pick a port)"
+    );
+    // Cycling walks the listed ports (re-read from the host on each step,
+    // which on a test host may find none: then the step lands back on
+    // unset and the label says so).
+    setup.cycle(LauncherField::SerialDevice, true);
+    let label = setup.value_label(LauncherField::SerialDevice);
+    match setup.serial_device.as_deref() {
+        Some(path) => assert!(setup.serial_devices.iter().any(|p| p == path), "{label}"),
+        None => assert!(label.starts_with("(no serial ports found)") || label == "(pick a port)"),
+    }
 }

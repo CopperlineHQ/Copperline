@@ -455,6 +455,22 @@ impl TryFrom<RawConfig> for Config {
                 Some(s) => parse_port_device(s, "port2")?,
             },
         ];
+        let adapter_named = raw.parallel.device.is_some();
+        let parallel = resolve_parallel(raw.parallel, &raw.input)?;
+        let parallel_joysticks = [
+            parse_parallel_socket(
+                raw.input.port3.as_deref(),
+                "port3",
+                parallel.device,
+                adapter_named,
+            )?,
+            parse_parallel_socket(
+                raw.input.port4.as_deref(),
+                "port4",
+                parallel.device,
+                adapter_named,
+            )?,
+        ];
         let serial = SerialConfig {
             mode: match raw.serial.mode.as_deref() {
                 None => defaults.serial.mode,
@@ -477,6 +493,13 @@ impl TryFrom<RawConfig> for Config {
                 .unwrap_or(defaults.serial.coppersynth_panel),
             listen: raw.serial.listen.clone(),
             connect: raw.serial.connect.clone(),
+            device: raw
+                .serial
+                .device
+                .as_deref()
+                .map(str::trim)
+                .filter(|d| !d.is_empty())
+                .map(str::to_string),
             telnet: raw.serial.telnet.or(defaults.serial.telnet),
             phonebook: raw
                 .serial
@@ -576,6 +599,15 @@ impl TryFrom<RawConfig> for Config {
                  (or A1200, or A4000)"
             ));
         }
+        // Only the Gayle machines have the credit-card slot.
+        let has_pcmcia_slot = defaults.gate_array.gayle_id().is_some();
+        let pcmcia = match parse_pcmcia(&raw.pcmcia, has_pcmcia_slot) {
+            Ok(pcmcia) => pcmcia,
+            Err(e) => {
+                errors.push(e);
+                PcmciaConfig::default()
+            }
+        };
         let scsi_controller_named = raw.scsi.controller.is_some();
         let scsi_controller = match raw.scsi.controller.as_deref() {
             // A machine with a Super DMAC already has a SCSI bus, so drives go
@@ -1222,18 +1254,23 @@ impl TryFrom<RawConfig> for Config {
             || (defaults.sdmac && scsi.controller == ScsiController::A3000);
         let host_disks =
             parse_host_disks(&raw.host_disk, &ide, &scsi, &lide, has_ide_port, has_scsi)?;
+        check_pcmcia_host_disks(&host_disks, &pcmcia, has_pcmcia_slot)?;
         // A real host disk is a drive on the port just as an image is, and
         // the ROM's driver is what finds it and mounts what its RDB
         // describes. Counting only images would cull that driver out from
         // under a machine whose only drive is a real one -- which opens
-        // perfectly and is then never looked at.
-        let host_disk_on_ide = host_disks.iter().any(|disk| !disk.attach.is_scsi());
+        // perfectly and is then never looked at. A card in the PCMCIA slot
+        // is not scsi.device's to find: the Aminet CF drivers do that.
+        let host_disk_on_ide = host_disks
+            .iter()
+            .any(|disk| !disk.attach.is_scsi() && !disk.attach.is_pcmcia());
         let host_disk_on_scsi = host_disks.iter().any(|disk| disk.attach.is_scsi());
         if raw.fmv_rom.is_some() && !defaults.akiko {
             anyhow::bail!("fmv_rom is only valid for a CD32 machine profile");
         }
         Ok(Config {
             host_disks,
+            pcmcia,
             rom_path: raw.rom.map(PathBuf::from).unwrap_or(defaults.rom_path),
             netplay_storage: false,
             netplay_read_only: Vec::new(),
@@ -1361,8 +1398,9 @@ impl TryFrom<RawConfig> for Config {
             mouse_capture,
             autofire_hz,
             port_devices,
+            parallel_joysticks,
             serial,
-            parallel: resolve_parallel(raw.parallel)?,
+            parallel,
             paths: raw.paths,
         })
     }
@@ -1370,13 +1408,19 @@ impl TryFrom<RawConfig> for Config {
 
 /// Resolve `[parallel]` into a [`ParallelConfig`]. An explicit `device` selects
 /// the peripheral; with none set, a bare `output` path implies a printer
-/// (back-compat with the original `[parallel] output = "..."`) and otherwise the
-/// port is empty. Rejects a printer with no capture path and an out-of-range
-/// sampler gain.
-fn resolve_parallel(raw: RawParallel) -> Result<ParallelConfig> {
+/// (back-compat with the original `[parallel] output = "..."`), a joystick
+/// named in `[input] port3`/`port4` implies the four-player adapter, and
+/// otherwise the port is empty. Rejects a printer with no capture path and
+/// an out-of-range sampler gain.
+fn resolve_parallel(raw: RawParallel, input: &RawInput) -> Result<ParallelConfig> {
+    let socket_named = [input.port3.as_deref(), input.port4.as_deref()]
+        .into_iter()
+        .flatten()
+        .any(|s| PortDevice::parse(s) == Some(PortDevice::Joystick));
     let device = match raw.device.as_deref() {
         Some(s) => parse_parallel_device(s)?,
         None if raw.output.is_some() => ParallelDevice::Printer,
+        None if socket_named => ParallelDevice::JoystickAdapter,
         None => ParallelDevice::None,
     };
     if device == ParallelDevice::Printer && raw.output.is_none() {
@@ -1406,10 +1450,50 @@ pub(crate) fn parse_parallel_device(s: &str) -> Result<ParallelDevice> {
         "none" | "off" => Ok(ParallelDevice::None),
         "printer" => Ok(ParallelDevice::Printer),
         "sampler" => Ok(ParallelDevice::Sampler),
+        "joystick-adapter" | "joystick_adapter" | "joysticks" | "four-player" | "4-player" => {
+            Ok(ParallelDevice::JoystickAdapter)
+        }
         other => bail!(
-            "[parallel] device must be \"none\", \"printer\", or \"sampler\", got \"{other}\""
+            "[parallel] device must be \"none\", \"printer\", \"sampler\", or \
+             \"joystick-adapter\", got \"{other}\""
         ),
     }
+}
+
+/// Resolve one of the four-player adapter's sockets (`[input] port3` /
+/// `port4`): a joystick or nothing. An adapter named in `[parallel]`
+/// (`adapter_named`) fills every socket the config does not mention -- an
+/// adapter with nothing in it is not worth naming -- while an adapter only
+/// implied by the other socket's joystick leaves an unset socket empty. A
+/// joystick named while another peripheral owns the connector is a wiring
+/// conflict, reported rather than guessed at.
+fn parse_parallel_socket(
+    raw: Option<&str>,
+    key: &str,
+    device: ParallelDevice,
+    adapter_named: bool,
+) -> Result<bool> {
+    let adapter = device == ParallelDevice::JoystickAdapter;
+    let Some(s) = raw else {
+        return Ok(adapter && adapter_named);
+    };
+    let socket = PortDevice::parse(s)
+        .filter(|d| d.fits_parallel_port())
+        .ok_or_else(|| {
+            anyhow!(
+                "[input] {key} must be \"joystick\" or \"none\" (the parallel-port adapter \
+                 carries switch joysticks only), got {s:?}"
+            )
+        })?;
+    let fitted = socket == PortDevice::Joystick;
+    if fitted && !adapter {
+        bail!(
+            "[input] {key} = \"joystick\" needs the four-player adapter on the parallel port, \
+             but [parallel] device is \"{}\"",
+            device.label()
+        );
+    }
+    Ok(fitted)
 }
 
 pub(crate) fn parse_overscan(s: &str) -> Result<Overscan> {
@@ -1500,7 +1584,7 @@ pub(crate) fn parse_port_device(s: &str, key: &str) -> Result<PortDevice> {
     let device = PortDevice::parse(s).ok_or_else(|| {
         anyhow!(
             "[input] {key} must be \"mouse\", \"gamepad-mouse\", \"joystick\", \
-             \"cd32\", \"analogue\", or \"none\", got {s:?}"
+             \"cd32\", \"analogue\", \"lightpen\", or \"none\", got {s:?}"
         )
     })?;
     // A mouse belongs in port 1, and a gamepad driving one is still a
@@ -1561,9 +1645,10 @@ pub(crate) fn parse_serial_mode(s: &str) -> Result<SerialMode> {
         "tcp-connect" => Ok(SerialMode::TcpConnect),
         "pty" => Ok(SerialMode::Pty),
         "modem" => Ok(SerialMode::Modem),
+        "device" => Ok(SerialMode::Device),
         _ => Err(anyhow!(
             "unknown [serial] mode {:?}: expected \"off\", \"stdout\", \"midi\", \"tcp\", \
-             \"tcp-connect\", \"pty\", or \"modem\"",
+             \"tcp-connect\", \"pty\", \"modem\", or \"device\"",
             s
         )),
     }
@@ -2505,6 +2590,9 @@ pub(super) fn parse_host_disks(
         let fitted = match attach {
             HostDiskAttach::IdeMaster | HostDiskAttach::IdeSlave => has_ide_port,
             HostDiskAttach::Scsi(_) => has_scsi,
+            // The slot is checked against `[pcmcia]` and the machine by
+            // `check_pcmcia_host_disks`, once the card section is parsed.
+            HostDiskAttach::Pcmcia => true,
             HostDiskAttach::LideMaster(ch) | HostDiskAttach::LideSlave(ch) => {
                 lide.enabled() && usize::from(ch) < lide.board.channels()
             }
@@ -2547,6 +2635,8 @@ pub(super) fn parse_host_disks(
                 .is_some_and(Option::is_some),
             HostDiskAttach::LideMaster(ch) => lide.drives[usize::from(ch) * 2].is_some(),
             HostDiskAttach::LideSlave(ch) => lide.drives[usize::from(ch) * 2 + 1].is_some(),
+            // Checked against `[pcmcia]` by `check_pcmcia_host_disks`.
+            HostDiskAttach::Pcmcia => false,
         };
         if taken {
             bail!(
@@ -2564,6 +2654,101 @@ pub(super) fn parse_host_disks(
         });
     }
     Ok(disks)
+}
+
+/// A host disk on the PCMCIA slot needs the slot to exist and to be free:
+/// `[pcmcia]` and `[[host_disk]] attach = "pcmcia"` fill the same socket.
+/// Separate from `parse_host_disks` because the slot is not a drive port:
+/// what sits in it is a card, configured by its own section.
+fn check_pcmcia_host_disks(
+    disks: &[HostDiskConfig],
+    pcmcia: &PcmciaConfig,
+    has_slot: bool,
+) -> Result<()> {
+    for (index, disk) in disks.iter().enumerate() {
+        if !disk.attach.is_pcmcia() {
+            continue;
+        }
+        if !has_slot {
+            bail!("host_disk[{index}]: {}", disk.attach.requirement());
+        }
+        if pcmcia.is_present() {
+            bail!(
+                "host_disk[{index}] is attached to the PCMCIA slot, which [pcmcia] already \
+                 fills; the slot holds one card"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Parse `[pcmcia]`: which card sits in the A600/A1200 slot.
+pub(super) fn parse_pcmcia(raw: &RawPcmcia, has_slot: bool) -> Result<PcmciaConfig> {
+    let kind = raw.card.as_deref().map(|c| c.trim().to_ascii_lowercase());
+    let card = match kind.as_deref() {
+        None | Some("none") | Some("") => {
+            if raw.path.is_some() || raw.size.is_some() || raw.read_only.is_some() {
+                bail!("[pcmcia] describes a card but names no card type: set card = \"cf\" or \"sram\"");
+            }
+            PcmciaCardConfig::None
+        }
+        Some("cf") => {
+            let Some(path) = raw.path.as_deref().filter(|p| !p.trim().is_empty()) else {
+                bail!("[pcmcia] card = \"cf\" needs path = the card's hard-disk image");
+            };
+            if raw.size.is_some() {
+                bail!("[pcmcia] size applies to an SRAM card; a CF card takes its size from the image");
+            }
+            if raw.read_only.is_some() {
+                bail!(
+                    "[pcmcia] read_only is an SRAM card's write-protect switch; a CF card has none \
+                     (a real card reader's access is set on its [[host_disk]] entry)"
+                );
+            }
+            PcmciaCardConfig::Cf {
+                path: PathBuf::from(path),
+            }
+        }
+        Some("sram") => {
+            let Some(size) = raw.size.as_deref() else {
+                bail!("[pcmcia] card = \"sram\" needs size = the card's capacity (up to 4M)");
+            };
+            let size = parse_size(size, "[pcmcia] SRAM card")?;
+            if size == 0 || size > crate::pcmcia::MAX_SRAM_BYTES {
+                bail!(
+                    "[pcmcia] SRAM card size {} bytes must be between 64K and 4M (the common \
+                     memory window)",
+                    size
+                );
+            }
+            if crate::pcmcia::sram_device_size_byte(size).is_none() {
+                bail!(
+                    "[pcmcia] SRAM card size {} bytes cannot be described by the card's CIS: use a \
+                     multiple of 64K up to 1M, or of 128K up to 4M",
+                    size
+                );
+            }
+            PcmciaCardConfig::Sram {
+                size,
+                path: raw
+                    .path
+                    .as_deref()
+                    .filter(|p| !p.trim().is_empty())
+                    .map(PathBuf::from),
+                read_only: raw.read_only.unwrap_or(false),
+            }
+        }
+        Some(other) => {
+            bail!("[pcmcia] card = {other:?} is not known (expected \"none\", \"cf\", or \"sram\")")
+        }
+    };
+    if card != PcmciaCardConfig::None && !has_slot {
+        bail!(
+            "[pcmcia] needs a machine with a PCMCIA slot: set [machine] profile = \"A600\" or \
+             \"A1200\""
+        );
+    }
+    Ok(PcmciaConfig { card })
 }
 
 fn validate_floppy_image_path(idx: usize, path: &Path) -> Result<()> {

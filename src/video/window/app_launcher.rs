@@ -172,7 +172,7 @@ impl App {
             | LauncherField::LideDrive1
             | LauncherField::LideDrive2
             | LauncherField::LideDrive3 => dialog
-                .add_filter("Hard disk images", &["hdf", "hdz", "img", "bin"])
+                .add_filter("Hard disk images", &["hdf", "hdz", "img", "bin", "chd"])
                 .add_filter("CD images", &["cue", "iso", "nrg", "chd"]),
             // copperhf.device serves hard disks only -- no ATAPI/SCSI-CDROM
             // emulation behind it (`copperhf_drive_image` rejects a CD
@@ -185,9 +185,9 @@ impl App {
             | LauncherField::CopperhfUnit4
             | LauncherField::CopperhfUnit5
             | LauncherField::CopperhfUnit6 => {
-                dialog.add_filter("Hard disk images", &["hdf", "hdz", "img", "bin"])
+                dialog.add_filter("Hard disk images", &["hdf", "hdz", "img", "bin", "chd"])
             }
-            _ => dialog.add_filter("Hard disk images", &["hdf", "hdz", "img", "bin"]),
+            _ => dialog.add_filter("Hard disk images", &["hdf", "hdz", "img", "bin", "chd"]),
         };
         if let Some(dir) = start_dir {
             dialog = dialog.set_directory(dir);
@@ -919,7 +919,7 @@ impl App {
         } else {
             // The same bytes either way: .hdf is what emulators look for,
             // .img what a card writer expects, so both are offered.
-            ("Amiga hard disk image", vec!["hdf", "img"])
+            ("Amiga hard disk image", vec!["hdf", "img", "chd"])
         };
         let picked = rfd::FileDialog::new()
             .set_title("Create disk image")

@@ -449,8 +449,13 @@ pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
                     "joystick",
                     Some("CDTV joystick has no dedicated Copperline device; approximated as joystick"),
                 ),
+                "lightpen" => (
+                    "lightpen",
+                    Some("the pen only reaches Agnus from the port the board wires to LP \
+                          (port 1 on the A1000, port 2 on later Amigas)"),
+                ),
                 _ => {
-                    report.unsupported(&e.key, &e.value, "unrecognized or unsupported port device (e.g. lightpen)");
+                    report.unsupported(&e.key, &e.value, "unrecognized or unsupported port device");
                     ("", None)
                 }
             };
@@ -461,6 +466,42 @@ pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
                 }
             }
         }
+    }
+
+    // --- Parallel-port joysticks --------------------------------------
+    // WinUAE's joyport2/joyport3 are the passive four-player adapter's
+    // sockets; any host device bound there means the adapter is fitted
+    // with a joystick in that socket. The binding itself (which host pad
+    // or keyboard layout) is host configuration Copperline keeps in its
+    // own routing, so only the socket's presence carries over.
+    let mut adapter = false;
+    for (uae_key, port) in [("joyport2", "port3"), ("joyport3", "port4")] {
+        if let Some(e) = by_key(uae_key) {
+            seen.insert(&e.key, ());
+            let bound = !matches!(e.value.trim(), "" | "none");
+            set_str(
+                &mut doc,
+                &["input"],
+                port,
+                if bound { "joystick" } else { "none" },
+            );
+            adapter |= bound;
+        }
+    }
+    for uae_key in ["joyport2mode", "joyport3mode"] {
+        if let Some(e) = by_key(uae_key) {
+            seen.insert(&e.key, ());
+            if !matches!(e.value.trim(), "" | "djoy" | "gamepad") {
+                report.unsupported(
+                    &e.key,
+                    &e.value,
+                    "the parallel-port adapter carries switch joysticks only",
+                );
+            }
+        }
+    }
+    if adapter {
+        set_str(&mut doc, &["parallel"], "device", "joystick-adapter");
     }
 
     // --- Autofire -----------------------------------------------------
@@ -636,11 +677,13 @@ pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
     }
 
     // --- Serial port ---------------------------------------------------
-    // Amiberry's serial_port is a free-form target string; only the
-    // TCP://host:port form has a clean Copperline equivalent ([serial]
-    // mode = "tcp", listen = the host:port). Real hardware device paths
-    // (e.g. "/dev/ttyUSB0", "COM1") and other schemes have no translation
-    // and are left to the generic unrecognized-key fallback below.
+    // serial_port is a free-form target string. Two forms have a clean
+    // Copperline equivalent: TCP://host:port ([serial] mode = "tcp",
+    // listen = the host:port) and a real host port -- a device path
+    // (Amiberry's "/dev/ttyUSB0") or a Windows COM name (WinUAE's "COM1")
+    // -- which is [serial] mode = "device" with the same spelling. Other
+    // schemes (WinUAE's "TCP:" without a slash pair, "midi", a named
+    // pipe) are left to the generic unrecognized-key fallback below.
     if let Some(e) = by_key("serial_port") {
         let value = e.value.trim();
         if let Some(addr) = value
@@ -650,6 +693,10 @@ pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
             seen.insert(&e.key, ());
             set_str(&mut doc, &["serial"], "mode", "tcp");
             set_str(&mut doc, &["serial"], "listen", addr);
+        } else if is_host_serial_port(value) {
+            seen.insert(&e.key, ());
+            set_str(&mut doc, &["serial"], "mode", "device");
+            set_str(&mut doc, &["serial"], "device", value);
         }
     }
 
@@ -1347,9 +1394,47 @@ fn parse_filesystem2(value: &str) -> Option<FilesysMount> {
     })
 }
 
+/// Whether a `serial_port` value names a real host serial port: a device
+/// node under /dev, or a COM port (`COM1`, `com12`, `\\.\COM12`).
+fn is_host_serial_port(value: &str) -> bool {
+    if value.starts_with("/dev/") {
+        return true;
+    }
+    let name = value.strip_prefix("\\\\.\\").unwrap_or(value);
+    let Some(digits) = name
+        .get(..3)
+        .filter(|p| p.eq_ignore_ascii_case("com"))
+        .map(|_| &name[3..])
+    else {
+        return false;
+    };
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serial_port_device_paths_and_com_names_become_device_mode() {
+        let out = convert("serial_port=/dev/ttyUSB0\n");
+        assert!(out.contains(r#"mode = "device""#), "{out}");
+        assert!(out.contains(r#"device = "/dev/ttyUSB0""#), "{out}");
+        let out = convert("serial_port=COM3\n");
+        assert!(out.contains(r#"mode = "device""#), "{out}");
+        assert!(out.contains(r#"device = "COM3""#), "{out}");
+        // The TCP form keeps its own mapping.
+        let out = convert("serial_port=TCP://127.0.0.1:1234\n");
+        assert!(out.contains(r#"mode = "tcp""#), "{out}");
+        assert!(!out.contains("device ="), "{out}");
+        // Anything else is not a port and is reported, not guessed at.
+        let out = convert("serial_port=midi\n");
+        assert!(!out.contains(r#"mode = "device""#), "{out}");
+        assert!(is_host_serial_port("com12"));
+        assert!(is_host_serial_port("\\\\.\\COM12"));
+        assert!(!is_host_serial_port("COM"));
+        assert!(!is_host_serial_port("COMx"));
+    }
 
     fn convert(text: &str) -> String {
         let entries = crate::parse::parse(text);
@@ -1384,6 +1469,18 @@ mod tests {
         // "n blocks": -1 is 128K and 0 is 256K, neither of them "none".
         assert!(convert("chipmem_size=-1\n").contains(r#"chip = "128K""#));
         assert!(convert("chipmem_size=0\n").contains(r#"chip = "256K""#));
+    }
+
+    #[test]
+    fn light_pen_and_parallel_port_joysticks_map_to_copperline_ports() {
+        let out = convert("joyport1mode=lightpen\njoyport2=joy0\njoyport3=none\n");
+        assert!(out.contains(r#"port2 = "lightpen""#), "{out}");
+        assert!(out.contains(r#"port3 = "joystick""#), "{out}");
+        assert!(out.contains(r#"port4 = "none""#), "{out}");
+        assert!(out.contains(r#"device = "joystick-adapter""#), "{out}");
+        // No socket bound: no adapter.
+        let out = convert("joyport2=none\n");
+        assert!(!out.contains("joystick-adapter"), "{out}");
     }
 
     #[test]

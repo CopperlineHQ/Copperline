@@ -256,6 +256,8 @@ pub struct Config {
     /// Gayle IDE drive images (raw flat HDF, RDB inside), opened
     /// read/write. Only valid on machines with a Gayle gate array.
     pub ide: IdeConfig,
+    /// `[pcmcia]`: the card in the Gayle machines' credit-card slot.
+    pub pcmcia: PcmciaConfig,
     /// SCSI controller (`[scsi]`): the `controller` selects an A2091 (Zorro II),
     /// an A4091 (Zorro III), or the A3000's motherboard SCSI, plus up to seven
     /// drive images on SCSI IDs 0-6. The Zorro boards autoconfig on the chain
@@ -426,6 +428,12 @@ pub struct Config {
     /// `input.set_port`) changes the live machine without affecting this
     /// start-up value.
     pub port_devices: [PortDevice; 2],
+    /// Whether a joystick sits in each socket of the parallel-port
+    /// four-player adapter (`[input] port3` / `port4`, `--port3` /
+    /// `--port4`); index 0 = port 3. Only meaningful with
+    /// `[parallel] device = "joystick-adapter"`, which naming a joystick
+    /// here implies.
+    pub parallel_joysticks: [bool; 2],
     /// Host wiring for Paula's serial port (`[serial]` / `--serial`).
     /// Defaults to [`SerialMode::Stdout`], preserving the historical
     /// terminal-diagnostics behaviour.
@@ -896,6 +904,12 @@ pub enum SerialMode {
     /// [`Tcp`]: SerialMode::Tcp
     /// [`TcpConnect`]: SerialMode::TcpConnect
     Modem,
+    /// Serial in/out is wired to a real host serial port (the path in
+    /// [`SerialConfig::device`]): a USB adapter on a null-modem cable to
+    /// a real Amiga or PC. The host port follows the guest's SERPER rate
+    /// and stop bits, DTR/RTS drive the port's pins, and CTS/DSR/DCD come
+    /// back on CIA-B. Needs a build with the `host-serial` feature.
+    Device,
 }
 
 impl SerialMode {
@@ -909,6 +923,7 @@ impl SerialMode {
             Self::TcpConnect => "tcp-connect",
             Self::Pty => "pty",
             Self::Modem => "modem",
+            Self::Device => "device",
         }
     }
 }
@@ -946,6 +961,11 @@ pub struct SerialConfig {
     /// Remote `host:port` for [`SerialMode::TcpConnect`]. Required in that
     /// mode (there is no sensible default host to dial).
     pub connect: Option<String>,
+    /// Host serial port for [`SerialMode::Device`]: a device path
+    /// (`/dev/tty.usbserial-XXXX`, `/dev/ttyUSB0`) or a Windows COM name
+    /// (`COM3`). Required in that mode; carried through the others so the
+    /// configuration screen round-trips it.
+    pub device: Option<String>,
     /// `AT*T1`/`AT*T0` default at power-on: telnet NVT translation on by
     /// default. [`SerialMode::Modem`] only. Tri-state on purpose: `None` is
     /// "the config never said", which defers to a stored `AT&W` profile's
@@ -1074,6 +1094,10 @@ pub enum ParallelDevice {
     /// An 8-bit audio sampler (digitizer) on the data lines, fed from a host
     /// capture device. Needs a build with the `frontend` feature (cpal).
     Sampler,
+    /// The passive four-player joystick adapter (ports 3 and 4): switch
+    /// joysticks on the data lines and the Centronics status lines, as
+    /// Kick Off 2, Sensible Soccer, Dyna Blaster and the like read them.
+    JoystickAdapter,
 }
 
 impl ParallelDevice {
@@ -1083,6 +1107,7 @@ impl ParallelDevice {
             Self::None => "none",
             Self::Printer => "printer",
             Self::Sampler => "sampler",
+            Self::JoystickAdapter => "joystick-adapter",
         }
     }
 }
@@ -1156,22 +1181,71 @@ pub const HARDFILE_DEFAULT_BOOT_PRI: i8 = 0;
 pub const BOOT_PRI_NEVER: i8 = -128;
 
 /// Whether a drive-image path names a CD image (a cue sheet, a bare ISO,
-/// a Nero NRG, or a CHD). On the SCSI bus such an entry attaches a CD-ROM drive
-/// instead of a hard disk; the file extension is the format signal,
-/// exactly as it is for the hard-drive back ends (HDF vs. directory).
+/// a Nero NRG, or a CD-ROM CHD). On the SCSI bus such an entry attaches a
+/// CD-ROM drive instead of a hard disk; the file extension is the format
+/// signal, exactly as it is for the hard-drive back ends (HDF vs.
+/// directory) -- except for `.chd`, which chdman writes for hard disks
+/// (`createhd`) as well as CDs (`createcd`). A `.chd` is read to see which
+/// it holds; one that cannot be read (not there yet, say) keeps counting
+/// as a CD, so the open that follows reports the real problem.
 pub fn is_cd_image_path(path: &std::path::Path) -> bool {
-    path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
-        e.eq_ignore_ascii_case("cue")
-            || e.eq_ignore_ascii_case("iso")
-            || e.eq_ignore_ascii_case("nrg")
-            || e.eq_ignore_ascii_case("chd")
-    })
+    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    if ext.eq_ignore_ascii_case("chd") {
+        return !crate::harddrive::chd::is_hard_disk_chd(path);
+    }
+    ext.eq_ignore_ascii_case("cue")
+        || ext.eq_ignore_ascii_case("iso")
+        || ext.eq_ignore_ascii_case("nrg")
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IdeConfig {
     pub master: Option<DriveImage>,
     pub slave: Option<DriveImage>,
+}
+
+/// The card `[pcmcia]` puts in the A600/A1200 slot.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum PcmciaCardConfig {
+    /// An empty socket.
+    #[default]
+    None,
+    /// A CompactFlash (PCMCIA ATA) card over a hard-disk image: anything
+    /// the `[ide]` drive backend opens.
+    Cf { path: PathBuf },
+    /// An SRAM memory card of `size` bytes, optionally mirrored to a host
+    /// file, with its write-protect switch set by `read_only`.
+    Sram {
+        size: usize,
+        path: Option<PathBuf>,
+        read_only: bool,
+    },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PcmciaConfig {
+    pub card: PcmciaCardConfig,
+}
+
+impl PcmciaConfig {
+    /// Whether a card is configured at all.
+    pub fn is_present(&self) -> bool {
+        self.card != PcmciaCardConfig::None
+    }
+
+    /// One line for logs.
+    pub fn describe(&self) -> String {
+        match &self.card {
+            PcmciaCardConfig::None => "empty".to_string(),
+            PcmciaCardConfig::Cf { path } => format!("CF card {}", path.display()),
+            PcmciaCardConfig::Sram { size, path, .. } => match path {
+                Some(p) => format!("SRAM card {} KiB ({})", size / 1024, p.display()),
+                None => format!("SRAM card {} KiB", size / 1024),
+            },
+        }
+    }
 }
 
 /// Which RTG graphics card the `[rtg]` section fits. A machine has at most
@@ -1698,6 +1772,9 @@ pub enum HostDiskAttach {
     LideSlave(u8),
     /// A unit on whichever SCSI controller the machine has fitted.
     Scsi(u8),
+    /// The A600/A1200 PCMCIA slot, as a CompactFlash card: the card a real
+    /// Amiga's owner carries in a reader goes straight in.
+    Pcmcia,
 }
 
 /// SCSI units a controller addresses. Unit 7 is the controller itself.
@@ -1712,6 +1789,7 @@ impl HostDiskAttach {
             Self::LideMaster(ch) => format!("lide{ch}-master"),
             Self::LideSlave(ch) => format!("lide{ch}-slave"),
             Self::Scsi(unit) => format!("scsi{unit}"),
+            Self::Pcmcia => "pcmcia".to_string(),
         }
     }
 
@@ -1723,7 +1801,13 @@ impl HostDiskAttach {
             Self::LideMaster(ch) => format!("Lide {ch} Master"),
             Self::LideSlave(ch) => format!("Lide {ch} Slave"),
             Self::Scsi(unit) => format!("SCSI Unit {unit}"),
+            Self::Pcmcia => "PCMCIA Slot".to_string(),
         }
+    }
+
+    /// Whether this is the PCMCIA slot.
+    pub fn is_pcmcia(self) -> bool {
+        self == Self::Pcmcia
     }
 
     /// What a machine with no way to attach a host disk at all is missing.
@@ -1740,6 +1824,7 @@ impl HostDiskAttach {
             Self::IdeMaster | Self::IdeSlave => "Attach to IDE requires an A600, A1200 or A4000",
             Self::LideMaster(_) | Self::LideSlave(_) => "Attach to Lide requires a [lide] board",
             Self::Scsi(_) => "Attach to SCSI requires a SCSI controller",
+            Self::Pcmcia => "Attach to PCMCIA requires an A600 or A1200",
         }
     }
 
@@ -1759,6 +1844,7 @@ impl HostDiskAttach {
             Self::LideSlave(1),
         ];
         all.extend((0..SCSI_UNITS).map(Self::Scsi));
+        all.push(Self::Pcmcia);
         all
     }
 
@@ -2467,6 +2553,7 @@ impl Default for Config {
             video_standard: VideoStandard::Pal,
             audio: AudioConfig::default(),
             ide: IdeConfig::default(),
+            pcmcia: PcmciaConfig::default(),
             scsi: ScsiConfig::default(),
             copperhf: CopperhfConfig::default(),
             lide: LideConfig::default(),
@@ -2502,6 +2589,7 @@ impl Default for Config {
             mouse_capture: MouseCapture::Click,
             autofire_hz: 0,
             port_devices: [PortDevice::Mouse, PortDevice::Joystick],
+            parallel_joysticks: [false; 2],
             serial: SerialConfig::default(),
             parallel: ParallelConfig::default(),
             paths: crate::pathconf::Paths::default(),
@@ -2528,6 +2616,12 @@ impl Config {
             || self.lide.drives.iter().any(Option::is_some)
         {
             return Some("hard-drive or ATAPI image");
+        }
+        if !matches!(self.pcmcia.card, crate::config::PcmciaCardConfig::None) {
+            // A CF card is a hard-disk image by another name, and an SRAM
+            // card with a backing file persists too: speculative writes
+            // that are then rolled back would still reach the host.
+            return Some("PCMCIA card");
         }
         if self.a2065_net.is_some() {
             return Some("A2065 network board");
@@ -2591,6 +2685,16 @@ impl Config {
             rom: RomId::default(),
             extended_rom: None,
         }
+    }
+
+    /// Whether Zorro II fast RAM shadows the PCMCIA slot: the slot's common
+    /// memory window is `$600000`-`$9FFFFF`, and fast RAM configures upward
+    /// from `$200000`, so more than 4 MiB of it reaches into the window and
+    /// Gayle's PCMCIA decode gives way to the RAM board. Only meaningful on
+    /// a machine with a slot.
+    pub fn pcmcia_slot_shadowed(&self) -> bool {
+        self.gate_array.gayle_id().is_some()
+            && self.fast_ram_bytes > crate::pcmcia::MAX_FAST_RAM_WITH_SLOT
     }
 
     /// Build the Zorro autoconfig chain this config asks for: the built-in
@@ -2657,6 +2761,12 @@ pub struct ConfigOverrides {
     pub chip: Option<String>,
     pub fast: Option<String>,
     pub slow: Option<String>,
+    /// A CompactFlash card in the PCMCIA slot (`--pcmcia-cf PATH`): sets
+    /// `[pcmcia] card = "cf"` with that image.
+    pub pcmcia_cf: Option<String>,
+    /// An SRAM card in the PCMCIA slot (`--pcmcia-sram SIZE`): sets
+    /// `[pcmcia] card = "sram"` with that size, session-only.
+    pub pcmcia_sram: Option<String>,
     /// RAM power-on policy (`--ram-init`). Same syntax as `[memory] init`.
     pub ram_init: Option<String>,
     /// Ramsey motherboard fast RAM size (`--motherboard`). Same parser as
@@ -2684,6 +2794,11 @@ pub struct ConfigOverrides {
     pub port1: Option<String>,
     /// Device in game port 2 (`--port2`). Same parser as `[input] port2`.
     pub port2: Option<String>,
+    /// Joystick in the parallel-port adapter's sockets (`--port3` /
+    /// `--port4`): "joystick" or "none". Same parser as `[input] port3` /
+    /// `port4`.
+    pub port3: Option<String>,
+    pub port4: Option<String>,
     /// Autofire rate in Hz (`--autofire`), 0 for off. Same validation as
     /// `[input] autofire_hz`.
     pub autofire_hz: Option<u8>,
@@ -2691,13 +2806,16 @@ pub struct ConfigOverrides {
     /// `[emulation] run_ahead_frames`.
     pub run_ahead_frames: Option<u8>,
     /// Serial port wiring (`--serial`): "off", "stdout", "midi", "tcp",
-    /// "tcp-connect", or "pty" ("none" and "terminal" parse as
-    /// compatibility aliases of the first two). Same parser as
+    /// "tcp-connect", "pty", "modem", or "device" ("none" and "terminal"
+    /// parse as compatibility aliases of the first two). Same parser as
     /// `[serial] mode`.
     pub serial: Option<String>,
     /// Remote host:port the serial port dials (`--serial-connect`),
     /// implying `--serial tcp-connect`.
     pub serial_connect: Option<String>,
+    /// Host serial port to wire the serial port to (`--serial-device`),
+    /// implying `--serial device`. Same as `[serial] device`.
+    pub serial_device: Option<String>,
     /// A scripted session file to replay (`--serial-session`), implying
     /// `--serial modem`. Same as `[serial] session`.
     pub serial_session: Option<String>,
@@ -2825,6 +2943,8 @@ impl ConfigOverrides {
             && self.mouse_capture.is_none()
             && self.port1.is_none()
             && self.port2.is_none()
+            && self.port3.is_none()
+            && self.port4.is_none()
             && self.autofire_hz.is_none()
             && self.run_ahead_frames.is_none()
             && self.serial.is_none()
@@ -2902,6 +3022,20 @@ impl ConfigOverrides {
         }
         if let Some(speed) = self.floppy_speed {
             raw.floppy.speed = Some(speed);
+        }
+        if let Some(path) = &self.pcmcia_cf {
+            raw.pcmcia = RawPcmcia {
+                card: Some("cf".to_string()),
+                path: Some(path.clone()),
+                ..RawPcmcia::default()
+            };
+        }
+        if let Some(size) = &self.pcmcia_sram {
+            raw.pcmcia = RawPcmcia {
+                card: Some("sram".to_string()),
+                size: Some(size.clone()),
+                ..RawPcmcia::default()
+            };
         }
         // Real host disks named on the command line are added to whatever the
         // file already asked for; the parser is what refuses two disks, or a
@@ -2984,6 +3118,12 @@ impl ConfigOverrides {
         if let Some(port2) = &self.port2 {
             raw.input.port2 = Some(port2.clone());
         }
+        if let Some(port3) = &self.port3 {
+            raw.input.port3 = Some(port3.clone());
+        }
+        if let Some(port4) = &self.port4 {
+            raw.input.port4 = Some(port4.clone());
+        }
         if let Some(hz) = self.autofire_hz {
             raw.input.autofire_hz = Some(hz);
         }
@@ -2998,6 +3138,9 @@ impl ConfigOverrides {
         }
         if let Some(path) = &self.serial_session {
             raw.serial.session = Some(path.clone());
+        }
+        if let Some(device) = &self.serial_device {
+            raw.serial.device = Some(device.clone());
         }
         if let Some(out) = &self.midi_out {
             raw.serial.midi_out = Some(out.clone());
@@ -3024,6 +3167,15 @@ impl ConfigOverrides {
             && self.serial_session.is_some()
         {
             raw.serial.mode = Some(SerialMode::Modem.label().to_string());
+        }
+        if self.serial.is_none()
+            && self.midi_out.is_none()
+            && self.midi_in.is_none()
+            && self.serial_connect.is_none()
+            && self.serial_session.is_none()
+            && self.serial_device.is_some()
+        {
+            raw.serial.mode = Some(SerialMode::Device.label().to_string());
         }
         if let Some(device) = &self.parallel {
             raw.parallel.device = Some(device.clone());

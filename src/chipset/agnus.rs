@@ -224,6 +224,11 @@ pub struct Agnus {
     /// Whether a pen pulse latched during the current field; re-armed at
     /// every field wrap.
     lpen_triggered_this_field: bool,
+    /// Beam position a fitted light pen sees the beam at (see
+    /// [`Self::set_light_pen_target`]); the pulse fires as the counters
+    /// sweep past it.
+    #[serde(default)]
+    lpen_target: Option<(u32, u32)>,
     /// HHPOSW latch (ECS). The UHRES dual-mode horizontal counter itself is
     /// not emulated (BEAMCON0.DUAL logs a one-time warning), so HHPOSR reads
     /// back the last written value.
@@ -731,6 +736,7 @@ impl Agnus {
             lpen_enabled: false,
             lpen_latch: None,
             lpen_triggered_this_field: false,
+            lpen_target: None,
             hhpos: 0,
             fmode: 0,
         }
@@ -1069,6 +1075,7 @@ impl Agnus {
             let line_cck = self.current_line_cck();
             let remaining_line = line_cck.saturating_sub(self.hpos).max(1);
             if cck < remaining_line {
+                self.light_pen_sweep(self.hpos, self.hpos + cck);
                 self.hpos += cck;
                 if self.hpos >= 2 {
                     self.vpos_read_delay = None;
@@ -1077,11 +1084,17 @@ impl Agnus {
             }
 
             cck -= remaining_line;
+            self.light_pen_sweep(self.hpos, line_cck);
             self.hpos = 0;
             let previous_vpos = self.vpos;
             self.vpos += 1;
             self.advance_long_line_state();
             self.pending_tick.new_lines += 1;
+            // The pen sitting at the very start of the new line: the
+            // sweeps above cover (from, to], never colour clock 0.
+            if self.lpen_target == Some((self.vpos, 0)) {
+                self.trigger_light_pen_at(self.vpos, 0);
+            }
             if self.vpos >= self.current_frame_lines() {
                 self.vpos = 0;
                 self.pending_tick.new_frames += 1;
@@ -1233,13 +1246,43 @@ impl Agnus {
     /// A light-pen pulse at the current beam position. The first pulse of a
     /// field wins; later pulses in the same field are ignored, matching the
     /// latch staying frozen until it is re-armed at the field wrap.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn trigger_light_pen(&mut self) {
+        self.trigger_light_pen_at(self.vpos, self.hpos);
+    }
+
+    /// The LP pin's falling edge at beam position (`vpos`, `hpos`): latch
+    /// it unless the pen is disabled, ECS LPENDIS holds the latch off, or
+    /// this field already latched a pulse.
+    fn trigger_light_pen_at(&mut self, vpos: u32, hpos: u32) {
         if !self.lpen_enabled || self.lpen_latch_disabled() || self.lpen_triggered_this_field {
             return;
         }
-        self.lpen_latch = Some((self.vpos, self.hpos));
+        self.lpen_latch = Some((vpos, hpos));
         self.lpen_triggered_this_field = true;
+    }
+
+    /// Where a light pen's photodetector is held against the glass, as the
+    /// beam position (`vpos`, `hpos`) whose light it sees, or `None` for a
+    /// pen off the glass. The pen pulls the LP pin low as the beam sweeps
+    /// past it, so the latch fires the moment the beam counters reach the
+    /// position, once per field. The bus sets this from the fitted pen
+    /// device at every frame start; the position is external stimulus,
+    /// not chip state, and the chip only ever sees the pulse.
+    pub fn set_light_pen_target(&mut self, target: Option<(u32, u32)>) {
+        self.lpen_target = target;
+    }
+
+    /// The beam advancing from `from` to `to` (exclusive of `from`,
+    /// inclusive of `to`) on the current line: fire the pen's pulse if its
+    /// position lies in the sweep. The latch takes the pen's own colour
+    /// clock, not the end of the advance, so the value software reads is
+    /// independent of how the emulation chunks the line.
+    fn light_pen_sweep(&mut self, from: u32, to: u32) {
+        if let Some((vpos, hpos)) = self.lpen_target {
+            if vpos == self.vpos && from < hpos && hpos <= to {
+                self.trigger_light_pen_at(vpos, hpos);
+            }
+        }
     }
 
     pub fn hhpos(&self) -> u16 {
@@ -2414,5 +2457,45 @@ mod tests {
             Agnus::with_video_standard_and_revision(VideoStandard::Pal, AgnusRevision::Ecs8372Rev4);
         ecs.write_hhposw(0x3123);
         assert_eq!(ecs.hhpos(), 0x0123, "9-bit horizontal latch");
+    }
+
+    #[test]
+    fn light_pen_target_latches_at_the_pen_colour_clock_whatever_the_advance_chunk() {
+        let mut agnus = Agnus::with_video_standard(VideoStandard::Pal);
+        agnus.set_lpen(true);
+        agnus.set_light_pen_target(Some((50, 0x60)));
+        // Awkward chunks across the target line: the latch takes the pen's
+        // own colour clock, not the end of whichever chunk crossed it.
+        while agnus.vpos < 52 {
+            agnus.advance_by_cck(37);
+        }
+        assert_eq!(agnus.read_vhposr(), (50 << 8) | 0x60);
+        // One latch per field: moving the pen later in the same field does
+        // not re-latch until the next field sweeps past it.
+        agnus.set_light_pen_target(Some((60, 0x10)));
+        while agnus.vpos < 62 {
+            agnus.advance_by_cck(37);
+        }
+        assert_eq!(agnus.read_vhposr(), (50 << 8) | 0x60);
+        agnus.advance_by_cck(PAL_LINES * COLORCLOCKS_PER_LINE);
+        assert_eq!(agnus.read_vhposr(), (60 << 8) | 0x10);
+        // Lifting the pen: the field it latched in keeps its latch, and the
+        // first field with no pulse ends with the end-of-field default.
+        agnus.set_light_pen_target(None);
+        agnus.advance_by_cck(PAL_LINES * COLORCLOCKS_PER_LINE);
+        assert_eq!(agnus.read_vhposr(), (60 << 8) | 0x10);
+        agnus.advance_by_cck(PAL_LINES * COLORCLOCKS_PER_LINE);
+        let expect_v = ((PAL_LINES - 1) & 0xFF) as u16;
+        let expect_h = (COLORCLOCKS_PER_LINE - 1) as u16 & 0xFF;
+        assert_eq!(agnus.read_vhposr(), (expect_v << 8) | expect_h);
+    }
+
+    #[test]
+    fn light_pen_target_at_the_start_of_a_line_latches_colour_clock_zero() {
+        let mut agnus = Agnus::with_video_standard(VideoStandard::Pal);
+        agnus.set_lpen(true);
+        agnus.set_light_pen_target(Some((20, 0)));
+        agnus.advance_by_cck(25 * COLORCLOCKS_PER_LINE + 3);
+        assert_eq!(agnus.read_vhposr(), 20 << 8);
     }
 }

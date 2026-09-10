@@ -66,9 +66,101 @@ complete synchronously within the access. One hardware subtlety worth
 knowing: Gayle byte-swaps the IDE bus, so IDENTIFY data words are
 low-byte-first while sector data passes through untouched -- Kickstart
 3.1 expects exactly this. The absent-slave behaviour follows the
-WinUAE-verified model so device scans terminate correctly. PCMCIA reports
-an empty slot (the status/config registers exist so card.resource
-behaves); credit-card device emulation is a non-goal.
+WinUAE-verified model so device scans terminate correctly.
+
+### Gayle PCMCIA slot (`gayle.rs`, `pcmcia.rs`)
+
+Gayle's PCMCIA side is modelled from the Commodore register map as
+captured by Linux's `amigayle.h` (disassembled from card.resource) and
+WinUAE's `gayle.cpp`; nothing in it is keyed to a driver.
+
+Registers, all on the even byte of their A12 page:
+
+| Address | Register | Model |
+|---|---|---|
+| `$DA8000` | card status | read: the slot pins -- CCDET (bit 6), BVD1/SC (5), BVD2/DA (4), WR (3), BSY/IRQ (2) -- OR-ed with the bits last written, plus live IDE INTRQ on bit 7. An empty socket reads with every pin bit clear. Write: bit 0 DIS disables the slot (the windows unmap and the pins read as an empty socket; both edges latch a card-detect change), bit 1 DAEN, and bits 7-2 read back as written (card.resource's `CardMiscControl` write-protect override lands on bit 3) |
+| `$DA9000` | interrupt change | a latch per pin, set whenever the sampled pin differs from the last value shown (an insertion or removal latches every pin that moved); the IDE bit is the INTRQ edge; BSY/IRQ is also re-latched while the pin stays high, since IREQ# is a level. Write-to-clear with AND semantics, except bits 1:0 (RESET, BERR from the preliminary datasheet) which are set by writing them: both together reset the card's configuration, RESET alone reboots the machine on the next card-detect change (BERR alone is logged, not modelled) |
+| `$DAA000` | interrupt enable | bits 7-2 admit the matching latches; bit 1 BVD_LEV and bit 0 BSY_LEV pick INT6 over INT2 for the battery and busy/IRQ sources |
+| `$DAB000` | config | programming voltage (bits 1-0) and access speed (bits 3-2), stored, four bits readable |
+
+Routing: IDE and WR changes drive INT2 (PORTS); card detect always drives
+INT6 (EXTER); BVD1/BVD2 and BSY/IRQ follow their level bits. Both lines are
+levels into Paula, re-asserted each tick while a latched, enabled source
+stands. The bus re-samples the pins after every insert, eject, and card
+access (`Bus::pcmcia_sync_pins`), which is how a CF card's IREQ# reaches the
+status register.
+
+Address windows, decoded by the CPU after the plain-memory regions so an
+autoconfigured Zorro II RAM board always wins the address:
+
+| Window | Cycle |
+|---|---|
+| `$600000`-`$9FFFFF` | common memory (4 MiB) |
+| `$A00000`-`$A1FFFF` | attribute memory: the CIS on even bytes (odd bytes mirror), a CF card's configuration registers at `$200`-`$206` |
+| `$A20000`-`$A2FFFF` | I/O, 16-bit and even 8-bit registers |
+| `$A30000`-`$A3FFFF` | I/O, odd 8-bit registers (A0 forced high: `$A30000+2n` is register `2n+1`) |
+| `$A40000`-`$A7FFFF` | card reset: a write asserts RESET (a CF card drops its configuration and resets its ATA function), a read releases it |
+
+Gayle cross-wires the byte lanes, so a byte at card address N is the byte at
+CPU address N and a 16-bit register reads with its bytes exchanged -- the
+same convention as the Gayle IDE data port, which is why the CF card drives
+the shared `ata.rs` engine unchanged (IDENTIFY words arrive swapped, sector
+data in natural order).
+
+**The fast-RAM rule.** The common window is Zorro II space. Fast RAM
+autoconfigures from `$200000`, so more than 4 MiB reaches `$600000`;
+`Config::pcmcia_slot_shadowed` decides this at machine build, the emulator
+warns, and `Gayle::set_slot_shadowed` makes the slot read as empty and
+decode nothing, as on a real A1200 with an 8 MiB Zorro II expansion. Other
+Zorro II RAM that lands in the window shadows it at the decode level by
+construction (autoconfig RAM is classified before the slot).
+
+**CompactFlash card** (`pcmcia::CfCard`): one `AtaBus` with the drive in
+slot 0 behind the CF register layout. The Configuration Option Register
+(attribute `$200`) selects it: index 0 (power-on) memory-mapped, with the
+16-byte task-file block at the start of every 2 KiB of common memory and
+`$400`-`$7FF` a window on the data register; index 1 contiguous I/O (A3-A0
+decoded); index 2/3 PC primary/secondary I/O (`$1F0`/`$3F6`, `$170`/`$376`).
+Block offsets 8/9 repeat the data register, `$D` error/feature, `$E`
+alternate status/device control. In an I/O configuration the registers
+leave common memory, and INTRQ (masked by nIEN) drives the BSY/IRQ pin.
+COR bit 7 is a soft reset. The CIS is the CF specification's example
+layout (device, JEDEC, VERS_1, FUNCID fixed disk, FUNCE ATA, CONFIG at
+`$200` with last index 3, one CFTABLE_ENTRY per index). Pins: CCDET, BVD1,
+BVD2 (STSCHG#/SPKR inactive), WR (CF cards are never write-protected).
+
+**SRAM card** (`pcmcia::SramCard`): up to 4 MiB of RAM in the common window
+(undecoded beyond its size), a CIS built the way WinUAE established
+card.resource needs -- CISTPL_DEVICE (DTYPE_SRAM, 100 ns, WPS from the
+switch, the size in the tuple's unit-count/unit-size encoding, hence the
+size rule in the configuration guide), DEVICEGEO, VERS_1, FUNCID memory,
+MANFID -- and pins CCDET, BVD1, BVD2 (battery good), WR from the switch.
+Kickstart adds a card present at boot as credit-card RAM. A backing file
+is written back about once an emulated second when dirty, on eject, and
+on drop; the RAM itself travels inside save states.
+
+The card lives in `Bus::pcmcia` (its own `PCMC` state chunk); Gayle holds
+only the register file, the sampled pins, and the slot flags. Runtime
+insert and eject (`Bus::pcmcia_insert`/`pcmcia_eject`, the window's PCMCIA
+Card menu, the `pcmcia.*` control-protocol methods) go through the same
+pin sampling as a boot-time card, so the guest sees a real card-detect
+change.
+
+Observed on Kickstart 3.1 (40.068, A1200) through the control protocol:
+with a 2 MiB SRAM card present at boot, exec's MemList gains a header at
+`$600200` (card.resource adds the card as credit-card RAM, keeping the
+first `$200` bytes for the card's own header) and card.resource writes
+`$DA9000` with the RESET bit set -- which is why a real A600/A1200 reboots
+when a memory card is pulled, and why `pcmcia.eject` on that machine
+resets it. A CF card hot-inserted afterwards has its four latched changes
+(CCDET/BVD1/BVD2/WR) acknowledged by the ROM's INT6 handler within a
+second, and an empty socket reading all-zero pins boots cleanly. Register
+semantics and CIS layouts were cross-checked against WinUAE's model; tests
+in `gayle.rs` (status/change/enable/config bits,
+INT2/INT6 routing, DIS, RESET/BERR, shadowing), `pcmcia.rs` (window
+decode, CIS, SRAM size encoding, backing file), and `bus/tests.rs` (CF
+task-file mapping per configuration, IREQ# to INT2, reset register,
+eject to INT6, SRAM window, shadowing).
 
 Either drive slot may instead be an ATAPI CD-ROM (a `.cue`/`.iso`/`.nrg`/`.chd`
 image): `ata.rs`'s task-file engine drives the PACKET (0xA0) command,
@@ -176,12 +268,13 @@ no boot ROM to configure.
 
 ### Shared drive backend
 
-All IDE and SCSI drives share the `harddrive.rs` sector backend: raw
-HDF images, bare partition hardfiles wrapped in a synthesized RDB
+All IDE, SCSI, and copperhf drives share the `harddrive.rs` sector backend:
+raw HDF images, bare partition hardfiles wrapped in a synthesized RDB
 (bootable `DHn` named after the unit), gzip-compressed hardfiles (`.hdz`,
 sniffed by gzip magic and unpacked by `gzip.rs` into memory at open time
 because deflate has no random access, which is what makes their writes
-session-only), and host directories built into in-memory FFS or OFS volumes by
+session-only), CHD hard-disk images (below), and host directories built
+into in-memory FFS or OFS volumes by
 `dirfs.rs` (FFS by default; `filesystem = "ofs"` on the drive picks OFS,
 the one every Kickstart from 1.2 onward can read with no guest-side
 setup -- FFS needs a handler loaded from disk or an RDB `FileSystemHeader`
@@ -191,6 +284,83 @@ SCSI-2 target layer in
 `scsi.rs` answers INQUIRY, MODE SENSE pages 3/4, READ CAPACITY,
 READ/WRITE(6)/(10), REQUEST SENSE, and the no-op housekeeping commands,
 with sense state kept per target.
+
+`HardDriveImage::write_protected` says whether the backing refuses writes
+(a CHD with no overlay, a read-only netplay session copy, a host disk
+attached read-only); a refused write comes back `PermissionDenied`, which
+the SCSI target reports as DATA PROTECT / WRITE PROTECTED (and shows as
+the WP bit in the MODE SENSE header), copperhf as `TDERR_WriteProt` with
+`CHF_UNIT_RDONLY`/`TD_PROTSTATUS` set, and the ATA core as an aborted
+command (ATA has no write-protect status). The filesystem turns those into
+its own write-protect error instead of a disk fault.
+
+#### CHD hard-disk images (`harddrive/chd.rs`)
+
+A hard-disk CHD -- MAME's compressed container as `chdman createhd` writes
+it from an HDF: compressed hunks of whole 512-byte sectors and one `GDDD`
+metadata entry, `CYLS:401,HEADS:16,SECS:32,BPS:512.` -- is read through
+the same `chd` crate as the CD backend in `cdrom/chd.rs`, with the same
+raw-header pre-validation (the crate sizes its hunk map and codec buffers
+straight from the header's words with no v5 bounds checks, so a hostile
+124-byte header is refused before it reaches the allocator) and the same
+single-hunk decompression cache; the sector arithmetic is LBA to
+hunk/offset with no track layout. The header's logical size fixes the
+sector count; `GDDD` is parsed only to insist on 512-byte sectors, and CD
+track tags make the open fail with "attach it as a CD image". The
+`MComprHD` magic is sniffed by content like the gzip one, so the file's
+name is irrelevant to the open. Delta CHDs (a parent SHA-1 in the header)
+are refused: nothing about the convert-your-own-HDF use case needs them.
+
+`harddrive::chd::media_kind` classifies a `.chd` for the configuration
+(`config::is_cd_image_path`), the launcher, and the window's drop handler
+by walking only the header and the metadata chain -- never the hunk map --
+so the launcher can ask about a path on every redraw; `is_hard_disk_chd`
+caches the verdict against the file's size and mtime. A `.chd` that cannot
+be read keeps its traditional reading as a CD image, so the open that
+follows reports the real problem.
+
+The `chd` crate is read-only and nothing rewrites compressed hunks in
+place (MAME writes only uncompressed CHDs, which forfeit the compression
+that is the point), so guest writes go to a **copy-on-write overlay
+sidecar**, `<image>.wov`, created beside the image on first attach. A read
+checks the overlay index before decompressing; a write lands in the
+overlay only, and the CHD is never opened for writing. The format:
+
+```text
+offset  size  field
+0       8     magic "CLWOV001"
+8       4     sector size, u32 little-endian (512)
+12      8     image sectors, u64 little-endian (the CHD's logical size / 512)
+20      20    the CHD header's SHA-1, so an overlay is refused on any other image
+40      8     reserved, zero
+48      ...   records: u64 LE LBA, then the sector's 512 bytes, repeated
+```
+
+Records are an append-only log: every write adds one, and the scan at open
+rebuilds the LBA-to-record index so that the last record for a sector
+wins. Nothing is ever overwritten in place, which is what makes the
+recovery rule hold: a record cut short by a crash is dropped at the next
+open, leaving the sector's previous record (or the CHD itself) in force,
+whereas overwriting a record would leave a full-length one holding half of
+each version that a scan could not tell from a sound one. Rewriting the
+same sector therefore leaves superseded records behind, so an open whose
+live records account for less than half the file rewrites it compacted,
+through the same temporary-file-and-rename the state restore uses. Every
+write reaches the file as it happens (the `File` is unbuffered), which is
+the eject/exit flush. An overlay that names another image (SHA-1, sector
+count) or is not one at all is left alone and the disk attaches
+write-protected, as it does when the sidecar cannot be created; deleting
+the `.wov` returns the disk to the pristine image. A netplay session copy
+decompresses the whole image into memory instead and never touches a
+sidecar, like the gzip form.
+
+The overlay is machine state: `HardDriveImageState` carries every
+overlaid sector (`chd_overlay`), and loading a state rewrites the sidecar
+to exactly that set by building a sibling file and renaming it over the
+old one, so a restore that fails partway leaves the previous sidecar
+intact rather than a half-written disk. A resumed run sees the disk as it
+was when the state was taken -- unlike an HDF, whose file contents are deliberately not
+part of the state (`docs/internals/savestate.md`).
 
 The drive controllers latch read/write activity, which the bus drains to
 light the status-bar HDD LED; the LED holds for a short minimum period so
@@ -211,7 +381,7 @@ whole clone family). All three reuse the front-end-agnostic ATA core in
 drive backend above; the new work is entirely in the board's own address
 decode, since none of the three personalities resemble Gayle's 4-byte task
 file. Drive slots may be ATA hard disks or, since `ata.rs` gained ATAPI
-PACKET support, `.cue`/`.iso`/`.nrg`/`.chd` CD-ROM images.
+PACKET support, `.cue`/`.iso`/`.nrg` (or CD-holding `.chd`) CD-ROM images.
 
 **Register decode.** Each ATA channel occupies a 4K block of the board
 window, with register index `(offset >> 9) & 7` -- ATA A0-A2 are wired to
@@ -776,6 +946,45 @@ call the port-indexed `InputState::set_joystick`
 and `set_cd32_buttons` helpers, so JOY1DAT, /FIR1, POT1Y/POTGOR, and
 the CD32 serial bits remain hardware-derived.
 
+The two game ports are joined by the parallel-port four-player adapter's
+sockets (ports 3 and 4, `InputState::parallel_joysticks`) when
+`[parallel] device = "joystick-adapter"` fits it. The adapter is wiring,
+not a peripheral: each direction switch shorts one CIA-A port-B data pin to
+ground (D0-D3 port 3, D4-D7 port 4), port 3's fire shorts the Centronics
+SEL line (CIA-B PA2), port 4's fire shorts BUSY (PA0) and either second
+button shorts POUT (PA1) -- the assignment WinUAE's
+`handle_parport_joystick` models, which the four-player titles were
+written against. The bus overlays the pull-downs on the CIA reads only
+for pins the guest has left as inputs (DDR bit clear), so a printer driver
+driving the port as outputs is unaffected. The host routing
+(`host_routing_for_ports`) queues the sockets behind the game ports for
+the pad and keyboard mappings; the recorder, `--joy-after`'s PORT token
+and the control protocol address them as ports 3 and 4.
+
+A `lightpen` port device models the pen/gun's two signals. The
+photodetector pulls the port's pin 6 (/FIRx) low as the beam sweeps past
+it, and on the board that pin is Agnus's LP input -- port 1's on the A1000
+(detected by the WCS at $FC0000), port 2's on the A500 and every later
+Amiga -- so `Bus::light_pen_wired_port` decides whether a fitted pen
+reaches the chip at all. The pen's glass position is kept in rendered-field
+coordinates (the space `sprite_framebuffer_origin`, `--mouse-to-after` and
+`input.mouse_to` share); at every frame start the bus maps it back
+through the renderer's comparator origin
+(`bitplane::framebuffer_beam_position`) to the beam line and colour clock
+that paints that pixel and hands Agnus the target, and Agnus fires the
+latch as its counters sweep past that exact clock (`light_pen_sweep`),
+once per field, honouring BPLCON0 LPEN and ECS BEAMCON0 LPENDIS as
+before. The Denise output-pipeline delay is not subtracted -- a real pen
+reads late by the same clocks, and pen software calibrates it away. The
+tip switch / trigger is the port's third-button line (POTxX, read through
+POTGOR), because /FIRx is the pulse line and cannot also hold a switch;
+`set_mouse_button` index 0 and `set_joystick`'s fire both close it on a
+pen port. In the window the pen follows the uncaptured host pointer, traced
+back from the canvas pixel through the display copy
+(`canvas_source_point`) and the field placement
+(`FieldPlacement::field_point`); headless, `--pen-after` and the control
+protocol's `input.pen` set the position directly.
+
 Keyboard joystick emulation is deliberately a host input source, not a
 guest-keyboard behaviour. When active, the winit key handler consumes the
 mapped host keys before rawkey translation: cursor keys drive directions,
@@ -841,6 +1050,39 @@ bidirectional, so an `AUX:` shell on the Amiga side gives a remote
 AmigaDOS console. The browser build swaps in a channel-backed sink that
 the page bridges to a WebSocket.
 
+`DeviceSerialSink` (`serial/device.rs`, `mode = "device"`, behind the
+`host-serial` feature) is a real host serial port on the same trait: the
+`serialport` crate FluxBridge already uses, opened 8N1 with OS flow
+control off, so the guest owns the handshake exactly as on a real machine.
+The sink is written against its own small `HostSerialPort` trait (read
+with a bounded timeout, write, the four line settings, the four modem
+inputs, discard, clone), which the crate backend implements and an
+in-memory fake stands in for under test, so the whole sink -- threads,
+unplug, reopen -- is unit-tested with no hardware. Two background threads
+own the host I/O: a reader blocking on the port with a 20 ms timeout, which
+samples CTS/DSR/DCD/RI after every return (so a line change is seen within
+one timeout) and publishes them as `SerialControlLines` bits in an atomic
+the bus reads on each CIA-B PRA read; and a writer draining a 256-byte
+bounded queue, which the emulation thread blocks on only when it outruns
+the wire (an unthrottled run is paced by the port, as a real machine would
+be). The guest's settings follow it onto the port: `baud_changed` maps
+the SERPER-derived rate onto the nearest standard rate within 3%
+(`host_baud_for`; an off-grid rate is passed through for the driver to
+judge), `write_word` infers one or two stop bits from the SERDAT word's
+bits above the data (Paula has no stop-bit register; the guest writes
+them), and `set_control_outputs` mirrors `/DTR` and `/RTS` onto the pins.
+A 9-bit word loses its ninth bit (host UARTs carry eight); a received
+byte comes back with bit 8 clear. RI is read but has no CIA pin to land
+on, so it is only logged. A read or write error is treated as the adapter
+gone: the sink detaches (lines float high like an unplugged cable, output
+is dropped) and the reader retries the same path every second, reapplying
+the settings and DTR/RTS when it reopens. The sink is a live host boundary
+(see [architecture](architecture.md#determinism-and-the-host-boundary)):
+`reset_after_timeline_jump` drops the host bytes queued on the abandoned
+timeline and keeps the port, and `Bus::adopt_host_resources` then pushes
+the restored CIA-B outputs and, through `Paula::republish_serial_line_rate`,
+the restored SERPER rate onto it.
+
 A `SerialSink` that can *produce* input must override
 `has_pending_input` alongside `read_byte`/`read_word`:
 Paula's per-tick UART step takes an idle fast path that skips the receiver
@@ -863,7 +1105,8 @@ acceptor/reader thread maintains, so the PRA read never touches the
 writer lock); `PtySerialSink` is a null-modem peer with its port open;
 `ChannelSerialSink` starts ready-without-carrier and lets the frontend set
 the lines (`ChannelSerialHandle::set_carrier`, exported to the browser as
-`serial_set_carrier`). The lines are host-side state like the bytes
+`serial_set_carrier`); `DeviceSerialSink` reports the real wire. The lines
+are host-side state like the bytes
 themselves -- never serialized, never part of the deterministic timeline.
 Paula has no framing-error or parity hardware: a received word always
 carries its stop bit(s) set, and `serial.device` computes parity in
@@ -944,6 +1187,12 @@ are CIA-B port A pins 0-2, peripheral-driven inputs with motherboard
 pull-ups. The default null peripheral is an unplugged cable: it neither
 acknowledges nor drives any pin, and the pulled-up status lines read all
 high.
+
+`[parallel] device = "joystick-adapter"` is not a `ParallelPort` peripheral
+at all: the four-player adapter's switches live in the deterministic
+`InputState` (see the Input section above) and the bus overlays them on
+the CIA reads, so save states and reverse replay carry them like any
+other controller.
 
 `[parallel] device = "printer"` captures strobed bytes to the configured
 output file (`FileParallelPort`), holding the status lines at

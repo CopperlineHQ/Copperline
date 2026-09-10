@@ -111,7 +111,9 @@ pub(crate) const SK_NOT_READY: u8 = 0x02;
 pub(crate) const SK_HARDWARE_ERROR: u8 = 0x04;
 pub(crate) const SK_ILLEGAL_REQUEST: u8 = 0x05;
 pub(crate) const SK_UNIT_ATTENTION: u8 = 0x06;
+pub(crate) const SK_DATA_PROTECT: u8 = 0x07;
 pub(crate) const ASC_INVALID_OPCODE: u8 = 0x20;
+pub(crate) const ASC_WRITE_PROTECTED: u8 = 0x27;
 pub(crate) const ASC_LBA_OUT_OF_RANGE: u8 = 0x21;
 pub(crate) const ASC_INVALID_FIELD_IN_CDB: u8 = 0x24;
 pub(crate) const ASC_LUN_NOT_SUPPORTED: u8 = 0x25;
@@ -426,7 +428,11 @@ impl ScsiDisk {
                     return self.check(SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD_IN_CDB);
                 };
                 let mut data = Vec::new();
-                data.extend_from_slice(&[0, 0, 0, if dbd { 0 } else { 8 }]);
+                // Device-specific parameter: WP (bit 7) on a medium the
+                // guest cannot write, exactly what a drive with its
+                // write-protect jumper set reports.
+                let wp = if self.disk.write_protected() { 0x80 } else { 0 };
+                data.extend_from_slice(&[0, 0, wp, if dbd { 0 } else { 8 }]);
                 if !dbd {
                     // Block descriptor: density 0, all blocks, 512-byte blocks.
                     let blocks = total.min(0x00FF_FFFF) as u32;
@@ -451,6 +457,9 @@ impl ScsiDisk {
                     return self.check(SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD_IN_CDB);
                 };
                 let mut data = vec![0u8; 8];
+                if self.disk.write_protected() {
+                    data[3] = 0x80; // device-specific parameter: WP
+                }
                 if !dbd {
                     data[7] = 8; // block descriptor length
                     let blocks = total.min(u64::from(u32::MAX)) as u32;
@@ -626,7 +635,15 @@ impl ScsiDisk {
                             self.disk.path().display(),
                             lba + i as u64
                         );
-                        self.set_sense(SK_HARDWARE_ERROR, 0x00);
+                        // A refused write on a write-protected medium is
+                        // DATA PROTECT / WRITE PROTECTED, which the guest's
+                        // filesystem turns into its own write-protect
+                        // error rather than a disk fault.
+                        if e.kind() == std::io::ErrorKind::PermissionDenied {
+                            self.set_sense(SK_DATA_PROTECT, ASC_WRITE_PROTECTED);
+                        } else {
+                            self.set_sense(SK_HARDWARE_ERROR, 0x00);
+                        }
                         return CHECK_CONDITION;
                     }
                 }
@@ -1809,6 +1826,63 @@ mod tests {
         assert_eq!(status, GOOD);
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn write_protected_disk_reports_wp_and_refuses_writes_as_data_protect() {
+        let (image, path) = crate::harddrive::chd::tests::write_protected_image("scsi-wp", 64);
+        let mut disk = ScsiDisk::from_disk(image);
+
+        // MODE SENSE(6) and (10): the WP bit of the device-specific
+        // parameter is what a drive with its write-protect jumper set shows.
+        let (exec, status) = disk.execute(&[0x1A, 0, 0x03, 0, 254, 0], 0);
+        assert_eq!(status, GOOD);
+        let ScsiExec::DataIn(data) = exec else {
+            panic!("MODE SENSE(6) returns data");
+        };
+        assert_eq!(data[2] & 0x80, 0x80, "WP in the mode parameter header");
+        let (exec, status) = disk.execute(&[0x5A, 0, 0x03, 0, 0, 0, 0, 0, 254, 0], 0);
+        assert_eq!(status, GOOD);
+        let ScsiExec::DataIn(data) = exec else {
+            panic!("MODE SENSE(10) returns data");
+        };
+        assert_eq!(data[3] & 0x80, 0x80, "WP in the 10-byte header");
+
+        // WRITE(10) is accepted as a command, then refused once the data is
+        // in: DATA PROTECT / WRITE PROTECTED, not a hardware error.
+        let cdb = [0x2A, 0, 0, 0, 0, 5, 0, 0, 1, 0];
+        let (exec, status) = disk.execute(&cdb, 0);
+        assert!(matches!(exec, ScsiExec::DataOut(n) if n == SECTOR_SIZE));
+        assert_eq!(status, GOOD);
+        assert_eq!(
+            disk.complete_out(&cdb, &[0xAAu8; SECTOR_SIZE]),
+            CHECK_CONDITION
+        );
+        let sense = disk.sense_bytes();
+        assert_eq!(sense[2] & 0x0F, SK_DATA_PROTECT);
+        assert_eq!(sense[12], ASC_WRITE_PROTECTED);
+
+        // Reads still work, and the refused write left nothing behind.
+        let (exec, status) = disk.execute(&[0x28, 0, 0, 0, 0, 5, 0, 0, 1, 0], 0);
+        assert_eq!(status, GOOD);
+        let ScsiExec::DataIn(data) = exec else {
+            panic!("READ(10) returns data");
+        };
+        assert_eq!(&data[..4], &5u32.to_be_bytes());
+
+        // A writable image reports neither.
+        let path_rw = temp_image(64);
+        let mut rw =
+            ScsiDisk::open(&path_rw, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap();
+        let (exec, _) = rw.execute(&[0x1A, 0, 0x03, 0, 254, 0], 0);
+        let ScsiExec::DataIn(data) = exec else {
+            panic!("MODE SENSE(6) returns data");
+        };
+        assert_eq!(data[2] & 0x80, 0);
+        assert_eq!(rw.complete_out(&cdb, &[0xAAu8; SECTOR_SIZE]), GOOD);
+
+        crate::harddrive::chd::tests::remove_write_protected_image(&path);
+        std::fs::remove_file(&path_rw).ok();
     }
 
     #[test]

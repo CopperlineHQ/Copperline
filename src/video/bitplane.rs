@@ -4699,6 +4699,39 @@ pub fn sprite_framebuffer_origin(bus: &Bus, sprite: usize) -> Option<(i32, i32)>
     Some((x * scale, top.beam_y - geometry.visible_start_vpos as i32))
 }
 
+/// The beam position (`vpos`, `hpos` in colour clocks) at which the
+/// display paints presented pixel (`x`, `y`) -- the inverse of the
+/// column map [`sprite_framebuffer_origin`] reports the pointer through,
+/// in the same coordinates. This is what a light pen held over that
+/// pixel sees: the row is the beam line, and the column maps back
+/// through the comparator origin to Denise's lo-res pixel counter, two
+/// of which make one Agnus colour clock. `None` when the pixel is off
+/// the scan (a pen aimed at the bezel sees no beam).
+///
+/// The pipeline delay between a fetch position and the pixel leaving
+/// Denise is not subtracted: real pens read a few clocks late for the
+/// same reason, and light-pen software calibrates the offset away.
+pub fn framebuffer_beam_position(bus: &Bus, x: i32, y: i32) -> Option<(u32, u32)> {
+    let geometry = bus.frame_geometry();
+    let scale = bus.frame_canvas_scale() as i32;
+    let shift = if geometry.programmable {
+        H_COUNTER_LINE_ORIGIN
+    } else {
+        0
+    };
+    if x < 0 || y < 0 {
+        return None;
+    }
+    let lores = x / (2 * scale.max(1)) + DIW_HSTART_FB0 - shift;
+    let hpos = lores / 2;
+    let vpos = geometry.visible_start_vpos as i32 + y;
+    let frame_lines = bus.frame_lines() as i32;
+    if hpos < 0 || hpos >= geometry.line_cck as i32 || vpos < 0 || vpos >= frame_lines {
+        return None;
+    }
+    Some((vpos as u32, hpos as u32))
+}
+
 pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
     render_from_input_impl(input, fb, false)
 }

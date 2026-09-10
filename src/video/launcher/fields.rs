@@ -532,6 +532,10 @@ pub enum LauncherField {
     /// Serial section's Listen box.
     #[cfg(feature = "midi")]
     SerialListen,
+    /// The host serial port `device` mode wires to, picked from the ports
+    /// the host has in the Serial section's Device row.
+    #[cfg(feature = "midi")]
+    SerialDevice,
     /// `AT*T1`/`AT*T0`'s default at power-on, edited in the Serial
     /// section's Telnet row (modem mode only).
     #[cfg(feature = "midi")]
@@ -1105,6 +1109,13 @@ pub(super) const SERIAL_ROWS_MODEM: [Row; 3] = [
     row(F::SerialListen, "  Listen", RowKind::Text),
     row(F::SerialTelnet, "  Telnet", Cycle),
 ];
+// A real host port: the path is picked from what the host enumerates,
+// the way the MIDI and audio pickers work, rather than typed.
+#[cfg(feature = "midi")]
+pub(super) const SERIAL_ROWS_DEVICE: [Row; 2] = [
+    row(F::SerialMode, "  Device / Mode", Cycle),
+    row(F::SerialDevice, "  Port", Cycle),
+];
 #[cfg(feature = "midi")]
 pub(super) const SERIAL_ROWS_MIDI: [Row; 3] = [
     row(F::SerialMode, "  Device / Mode", Cycle),
@@ -1445,6 +1456,7 @@ pub(super) fn serial_rows(
                 SerialMode::TcpConnect => &SERIAL_ROWS_TCP_CONNECT,
                 SerialMode::Tcp => &SERIAL_ROWS_TCP_LISTEN,
                 SerialMode::Modem => &SERIAL_ROWS_MODEM,
+                SerialMode::Device => &SERIAL_ROWS_DEVICE,
                 _ => &SERIAL_ROWS_BASE,
             };
         }
@@ -1472,7 +1484,9 @@ pub(super) fn parallel_rows(parallel_device: ParallelDevice) -> &'static [Row] {
     match parallel_device {
         ParallelDevice::Sampler => &PARALLEL_ROWS_SAMPLER,
         ParallelDevice::Printer => &PARALLEL_ROWS_PRINTER,
-        ParallelDevice::None => &PARALLEL_ROWS_BASE,
+        // The adapter's sockets are [input] port3/port4 in the config; the
+        // launcher offers the adapter itself, with both sockets filled.
+        ParallelDevice::None | ParallelDevice::JoystickAdapter => &PARALLEL_ROWS_BASE,
     }
 }
 

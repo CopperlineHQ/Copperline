@@ -457,6 +457,13 @@ impl Cia {
         self.regs[REG_DDRA]
     }
 
+    /// Port-B data direction register (1 = output), for board wiring that
+    /// overlays external pull-downs on the input pins only (the
+    /// parallel-port joystick adapter's switches on CIA-A PB0-7).
+    pub fn port_b_ddr(&self) -> u8 {
+        self.regs[REG_DDRB]
+    }
+
     /// Port-A pin levels as contributed by the CIA itself: outputs at their
     /// programmed level, inputs released (open-drain, pulled high). External
     /// peripherals are not overlaid here, so a pin an attached device drives

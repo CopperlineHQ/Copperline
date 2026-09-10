@@ -4175,6 +4175,7 @@ fn test_app_with_audio_cpu_and_program(
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
         None,
         None,
         None,
@@ -4243,6 +4244,7 @@ fn test_app_with_copperhf_units(units: &[(usize, PathBuf)]) -> super::App {
         Vec::new(),
         Vec::new(),
         None,
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -7472,6 +7474,13 @@ fn dropped_media_classifies_by_extension() {
     assert_eq!(kind("game.CUE"), DroppedMediaKind::Cd);
     assert_eq!(kind("game.iso"), DroppedMediaKind::Cd);
     assert_eq!(kind("game.NRG"), DroppedMediaKind::Cd);
+    // A .chd that cannot be read is a CD, as it always was; one whose
+    // metadata says hard disk goes where hard disks go.
+    assert_eq!(kind("game.chd"), DroppedMediaKind::Cd);
+    let chd = crate::harddrive::chd::tests::temp_path("drop.chd");
+    crate::harddrive::chd::tests::write_hard_disk(&chd, 4, [3; 20]);
+    assert_eq!(classify_dropped_media(&chd), DroppedMediaKind::HardDisk);
+    let _ = std::fs::remove_file(&chd);
     assert_eq!(kind("disk.hdf"), DroppedMediaKind::HardDisk);
     assert_eq!(kind("disk.HDZ"), DroppedMediaKind::HardDisk);
     assert_eq!(kind("disk.img"), DroppedMediaKind::HardDisk);
@@ -12176,4 +12185,64 @@ fn netplay_host_mouse_owns_only_the_local_mouse_port() -> anyhow::Result<()> {
         })?
         .join()
         .unwrap()
+}
+
+#[test]
+fn adapter_sockets_queue_behind_the_game_ports_for_host_sources() {
+    use super::{host_routing_for_ports, JoystickInputMode as M};
+    use crate::bus::PortDevice as D;
+    // Stock wiring plus two socket joysticks: the pad keeps port 2, the
+    // cursor-key mapping takes port 3, the numpad stands in on port 2.
+    let r = host_routing_for_ports(
+        [D::Mouse, D::Joystick],
+        [D::Joystick, D::Joystick],
+        M::Gamepad,
+    );
+    assert_eq!(
+        (r.mouse, r.gamepad, r.keyboard, r.keyboard2),
+        (Some(0), Some(1), Some(2), Some(1))
+    );
+    // Four joysticks in keyboard mode: the game ports still come first.
+    let r = host_routing_for_ports(
+        [D::Joystick, D::Joystick],
+        [D::Joystick, D::None],
+        M::Keyboard,
+    );
+    assert_eq!(
+        (r.gamepad, r.keyboard, r.keyboard2),
+        (Some(1), Some(0), Some(1))
+    );
+    // A lone socket joystick gets the pad.
+    let r = host_routing_for_ports([D::Mouse, D::None], [D::None, D::Joystick], M::Gamepad);
+    assert_eq!((r.gamepad, r.keyboard), (Some(3), None));
+    // Empty sockets are not in the queue at all.
+    let r = host_routing_for_ports([D::Mouse, D::Joystick], [D::None, D::None], M::Gamepad);
+    assert_eq!(
+        r,
+        super::host_routing_for([D::Mouse, D::Joystick], M::Gamepad)
+    );
+}
+
+#[test]
+fn field_point_inverts_the_field_placement() {
+    use crate::video::bitplane::ContentRect;
+    use crate::video::present_common::FieldPlacement;
+    let rect = ContentRect {
+        x0: 100,
+        x1: 200,
+        y0: 20,
+        y1: 40,
+    };
+    let placement = FieldPlacement::standard(crate::video::FB_HEIGHT, 0x2C, 10);
+    let placed = placement.content_rect(rect, 570).unwrap();
+    assert_eq!(
+        placement.field_point(placed.x0, placed.y0, 570),
+        Some((100, 20))
+    );
+    assert_eq!(
+        placement.field_point(placed.x1 - 1, placed.y1 - 1, 570),
+        Some((199, 39))
+    );
+    // The centring band above the field shows no field pixel.
+    assert_eq!(placement.field_point(0, 0, 570), None);
 }

@@ -241,6 +241,8 @@ impl MachineSetup {
             serial_listen: cfg.serial.listen.clone(),
             serial_connect: cfg.serial.connect.clone(),
             serial_telnet: cfg.serial.telnet.unwrap_or(false),
+            serial_device: cfg.serial.device.clone(),
+            serial_devices: Vec::new(),
             parallel_device: cfg.parallel.device,
             parallel_output: cfg.parallel.printer_output.clone(),
             sampler_input: cfg.parallel.sampler_input.clone(),
@@ -878,6 +880,7 @@ impl MachineSetup {
         // was typed so emptying a box reverts it.
         raw.serial.listen = self.serial_listen.as_deref().map(complete_listen);
         raw.serial.connect = self.serial_connect.as_deref().map(complete_connect);
+        raw.serial.device = self.serial_device.clone();
         // Compared against the resolved value, not the raw tri-state: the
         // toggle is a plain on/off, so "unset" and "explicitly off" look
         // the same to it and must not produce a spurious `telnet = false`
@@ -911,6 +914,9 @@ impl MachineSetup {
                 .is_some()
                 .then(|| ParallelDevice::Printer.label().to_string()),
             ParallelDevice::Sampler => Some(ParallelDevice::Sampler.label().to_string()),
+            ParallelDevice::JoystickAdapter => {
+                Some(ParallelDevice::JoystickAdapter.label().to_string())
+            }
         };
         // Ethernet: no profile fits an A2065 by default, so the board is
         // emitted whenever it is on (absent key = not fitted).

@@ -57,6 +57,13 @@ pub enum MenuAction {
     ToggleStatusBar,
     TogglePerfOverlay,
 
+    // Media.
+    /// Pick a hard-disk image and push it into the PCMCIA slot as a CF
+    /// card (ejecting whatever is there).
+    InsertPcmciaCard,
+    /// Pull the card out of the PCMCIA slot.
+    EjectPcmciaCard,
+
     // Input.
     SetPortDevice(usize, PortDevice),
     SetJoystickInput(JoystickInputMode),
@@ -129,6 +136,8 @@ impl MenuAction {
                 | MenuAction::OpenShortcuts
                 | MenuAction::OpenAbout
                 | MenuAction::LoadRom
+                | MenuAction::InsertPcmciaCard
+                | MenuAction::EjectPcmciaCard
                 | MenuAction::SaveState
                 | MenuAction::LoadState
                 | MenuAction::ResetMachine
@@ -470,6 +479,10 @@ pub struct MenuState<'a> {
     /// Whether the on-screen Amiga keyboard is up.
     pub keyboard_panel: bool,
     pub port_devices: [PortDevice; 2],
+    /// Whether the machine has a PCMCIA slot (A600/A1200), and what is
+    /// in it: the category is only offered on a machine with the slot.
+    pub pcmcia_slot: bool,
+    pub pcmcia_card: Option<String>,
     pub pixel_aspect: PixelAspect,
     pub scaling: DisplayScaling,
     /// Whether the window presentation crops to the programmed display
@@ -602,6 +615,16 @@ pub fn build(s: &MenuState) -> Vec<MenuRow> {
     }
     if !s.sampler_inputs.is_empty() {
         rows.push(MenuRow::submenu("Parallel Port", parallel_rows(s)));
+    }
+
+    // Only a machine with the slot has anything to put in it. The floppy
+    // and CD controls live on the status bar; the slot has no bar icon,
+    // so its insert/eject sit here.
+    if s.pcmcia_slot {
+        rows.push(
+            MenuRow::submenu("PCMCIA Card", pcmcia_rows(s))
+                .with_value(s.pcmcia_card.clone().unwrap_or_else(|| "Empty".to_string())),
+        );
     }
 
     rows.extend([
@@ -830,7 +853,7 @@ fn player_video_rows(s: &MenuState) -> Vec<MenuRow> {
 }
 
 fn input_rows(s: &MenuState) -> Vec<MenuRow> {
-    const DEVICES: [PortDevice; 6] = [
+    const DEVICES: [PortDevice; 7] = [
         PortDevice::Mouse,
         // A mouse a gamepad can move as well as the hand on the desk,
         // offered on port 1 alone: that is where a mouse belongs.
@@ -838,6 +861,7 @@ fn input_rows(s: &MenuState) -> Vec<MenuRow> {
         PortDevice::Joystick,
         PortDevice::Cd32Pad,
         PortDevice::Analogue,
+        PortDevice::LightPen,
         PortDevice::None,
     ];
     let port = |n: usize| -> Vec<MenuRow> {
@@ -1063,6 +1087,14 @@ fn parallel_rows(s: &MenuState) -> Vec<MenuRow> {
             ],
         )
         .with_value(gain_label(s.sampler_gain)),
+    ]
+}
+
+fn pcmcia_rows(s: &MenuState) -> Vec<MenuRow> {
+    vec![
+        MenuRow::action("Insert CF Card Image...", MenuAction::InsertPcmciaCard),
+        MenuRow::action("Eject Card", MenuAction::EjectPcmciaCard)
+            .available(s.pcmcia_card.is_some()),
     ]
 }
 
@@ -1345,6 +1377,8 @@ mod tests {
             joystick_input_mode: JoystickInputMode::Gamepad,
             keyboard_panel: false,
             port_devices: [PortDevice::Mouse, PortDevice::Joystick],
+            pcmcia_slot: false,
+            pcmcia_card: None,
             pixel_aspect: PixelAspect::Tv,
             scaling: DisplayScaling::Smooth,
             autocrop: false,

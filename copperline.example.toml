@@ -445,7 +445,9 @@ slow = "512K"
 # autoboots on Kickstart 1.3+, so it does not depend on the Kickstart IDE
 # driver (which only probes the master on stock 3.1). Drive paths accept the
 # same images as [ide]: RDB HDFs, bare partition hardfiles, gzip-compressed
-# hardfiles (.hdz), or host directories. A path ending in .cue, .iso, .nrg, or .chd
+# hardfiles (.hdz), CHD hard-disk images (.chd), or host directories. A path
+# ending in .cue, .iso, .nrg, or a .chd holding a CD (chdman createcd; a
+# createhd one is a hard disk -- the CHD's metadata decides, not its name)
 # attaches a SCSI CD-ROM drive at that ID instead (read-only; mount it in the
 # guest with a CD filesystem pointed at the controller's scsi.device and that
 # unit number). CD audio tracks play through the machine's audio output, and
@@ -499,8 +501,10 @@ slow = "512K"
 # One drive key per slot, in (channel, master/slave) order: drive0/drive1 are
 # channel 0's master/slave, drive2/drive3 are channel 1's (ripple only). Each
 # is independent, so a slot can be left empty without ending the list -- the
-# same shape as [ide]'s master/slave and [scsi]'s unit0..unit6. The older
-# positional `drives = [...]` array is still read for existing configs.
+# same shape as [ide]'s master/slave and [scsi]'s unit0..unit6, taking the
+# same image forms (RDB HDFs, bare partition hardfiles, .hdz, .chd, host
+# directories, CD images). The older positional `drives = [...]` array is
+# still read for existing configs.
 # [lide]
 # board = "ripple"
 # rom = "lide.rom"
@@ -512,10 +516,11 @@ slow = "512K"
 # equivalent of WinUAE's uaehf.device), for a high-performance hard disk with
 # none of a real chip's register timing to model. Up to seven units, same
 # bare-path/table drive form as [ide]/[scsi]/[lide]: RDB HDFs, bare partition
-# hardfiles, gzip-compressed hardfiles (.hdz), and host directories all work
-# the same way, RDB and RDB-less images handled identically to the other
-# controllers. Hard disks only -- a CD image path (.cue/.iso/.nrg/.chd) is
-# rejected; attach CD images to [scsi] or [ide]/[lide] instead. No rom key:
+# hardfiles, gzip-compressed hardfiles (.hdz), CHD hard-disk images (.chd),
+# and host directories all work the same way, RDB and RDB-less images
+# handled identically to the other controllers. Hard disks only -- a CD image
+# path (.cue/.iso/.nrg, or a .chd holding a CD) is rejected; attach CD images
+# to [scsi] or [ide]/[lide] instead. No rom key:
 # the board's boot ROM and device driver are built into Copperline itself
 # (an autoboot DiagArea ROM and RDB mounter -- see COPPERHF-DEVICE-PLAN.md
 # and docs/internals/copperhf.md), not a loadable image.
@@ -553,7 +558,12 @@ video = "PAL"
 # of 256 KiB) work - the latter get a synthesized RDB on the fly. A gzip-
 # compressed hardfile (.hdz, or a gzipped .hdf: it is the content that decides,
 # not the name) is unpacked into memory at open time, so the guest may write to
-# it but nothing goes back to the compressed file. A path may also name a host
+# it but nothing goes back to the compressed file. A CHD hard-disk image (as
+# `chdman createhd -i disk.hdf -o disk.chd` writes, recognised by content too)
+# is decompressed a sector at a time and never written: guest writes go to a
+# copy-on-write overlay beside it, disk.chd.wov, which persists across
+# sessions (delete it to return to the pristine image). If the overlay cannot
+# be created the disk attaches write-protected. A path may also name a host
 # directory, mounted as an in-memory FFS or OFS volume (guest writes are
 # likewise not synced back to the host).
 #
@@ -570,14 +580,31 @@ video = "PAL"
 # own RDB, which keeps its label, priorities, and filesystem recorded inside
 # it.
 #
-# A path ending in .cue, .iso, .nrg, or .chd attaches an ATAPI CD-ROM drive at
-# that slot instead of a hard disk (see [scsi], above, for the read-only
-# SCSI-2 command engine both share).
+# A path ending in .cue, .iso, .nrg, or a .chd holding a CD attaches an ATAPI
+# CD-ROM drive at that slot instead of a hard disk (see [scsi], above, for the
+# read-only SCSI-2 command engine both share).
 # [ide]
 # master = "workbench.hdf"
 # slave = "data.hdf"
 # master = { path = "workbench.hdf", bootpri = 6 }
 # master = { path = "/host/Games", filesystem = "ofs" }
+
+
+# The A600/A1200 PCMCIA (credit-card) slot, wired through Gayle. One card:
+# a CompactFlash card over any image [ide] accepts (the Aminet CF drivers
+# -- compactflash.device, cfd.device, the scsi.device PCMCIA patches --
+# talk to it through the CF register layout; Kickstart's card.resource
+# only detects it), or an SRAM memory card that Kickstart adds as
+# credit-card RAM when present at boot. A real card in a reader goes in
+# with [[host_disk]] attach = "pcmcia" instead. More than 4M of [memory]
+# fast covers the slot's $600000-$9FFFFF window and disables the slot, as
+# on a real A1200 with an 8M Zorro II expansion. --pcmcia-cf PATH and
+# --pcmcia-sram SIZE are the command-line forms.
+# [pcmcia]
+# card = "cf"                # "none" (default), "cf", or "sram"
+# path = "card.hdf"          # cf: the image; sram: optional backing file
+# size = "2M"                # sram only: 64K..1M in 64K steps, or 128K..4M in 128K steps
+# read_only = false          # sram only: the write-protect switch
 
 
 # Direct WHDLoad boot (docs/guide/whdload.md): boot straight into a
@@ -774,12 +801,26 @@ floppy_sounds_volume = 100
 #   "analogue" analogue paddles / proportional stick on the POT pins,
 #              driven by --pot-after scripting or the CCP input.analogue
 #              method (no live host device maps to it yet)
+#   "lightpen" light pen / light gun (alias "lightgun"): follows the host
+#              pointer over the display, a left click is the pen switch /
+#              trigger (POTxX); --pen-after X Y positions it headless. Its
+#              pulses only reach Agnus from the port the board wires to LP:
+#              port 1 on the A1000, port 2 on every later Amiga
 #   "none"     empty port
 # Defaults: port1 = "mouse", port2 = "joystick" ("cd32" on the CD32
 # profile). Also --port1 DEVICE / --port2 DEVICE per run; the runtime menu
 # and the CCP input.set_port method hot-plug a device live.
 # port1 = "mouse"
 # port2 = "joystick"
+#
+# Ports 3 and 4 are the passive parallel-port four-player adapter's sockets
+# (Kick Off 2, Sensible Soccer, Dyna Blaster...): "joystick" or "none".
+# Naming a joystick fits the adapter ([parallel] device =
+# "joystick-adapter"); an adapter named there fills every socket left
+# unset. Also --port3 /
+# --port4, --joy-after ... 3|4, and the CCP input.joy with port 3 or 4.
+# port3 = "joystick"
+# port4 = "joystick"
 
 # Initial host source for the joystick/CD32-pad port:
 #   "gamepad"  (default) only a physical pad drives the port; the keyboard
@@ -849,6 +890,19 @@ floppy_sounds_volume = 100
 #   "pty"     serial in/out is bridged to a host pseudo-terminal (Unix only).
 #             The slave path (/dev/pts/N) is logged at startup; attach a
 #             terminal with e.g. `minicom -D`, `screen`, or `cu -l`.
+#   "device"  serial in/out is wired to a real host serial port, named by
+#             device: a USB adapter's path (/dev/tty.usbserial-1420 on
+#             macOS, /dev/ttyUSB0 on Linux) or a COM name (COM3) on
+#             Windows; --list-serial-ports names them. The guest's DTR/RTS
+#             drive the port's pins and its CTS/DSR/DCD come back on
+#             CIA-B, so a null-modem link to a real Amiga or PC (Amiga
+#             Explorer, ZMODEM) handshakes as it would on real hardware.
+#             The port follows the guest's SERPER rate (nearest standard
+#             rate) and stop bits; host bytes still arrive at the emulated
+#             rate. A pulled adapter reads as an unplugged cable until it
+#             is back. Host-clocked, so outside byte-identical replay, and
+#             reopened rather than restored by a save state. Needs the
+#             host-serial feature (default on).
 #   "modem"   a Hayes/AT-command modem: the guest dials out with
 #             "ATD host:port" rather than the port being wired to a peer at
 #             startup, so there is no connect key here. listen means
@@ -869,10 +923,12 @@ floppy_sounds_volume = 100
 # See docs/guide/modem.md for the full command set and a BBS quick-start.
 # With an AUX: shell on the Amiga side, "tcp"/"pty" give a remote AmigaDOS
 # console. --serial MODE overrides this per run; --serial-connect HOST:PORT
-# implies "tcp-connect"; --serial-session FILE implies "modem"; --midi-out/
-# --midi-in NAME imply "midi".
+# implies "tcp-connect"; --serial-session FILE implies "modem";
+# --serial-device PATH implies "device"; --midi-out/--midi-in NAME imply
+# "midi".
 # mode = "stdout"
 # connect = "bbs.example.com:1337"
+# device = "/dev/tty.usbserial-1420"  # device mode: host serial port (COM3 on Windows)
 # midi_out = "USB MIDI Interface"
 # midi_in = "USB MIDI Interface"
 # listen = "127.0.0.1:1234"
@@ -924,8 +980,15 @@ floppy_sounds_volume = 100
 #              prints; omitted = system default). `sampler_gain` is the preamp
 #              gain in decibels (0 dB = unity; ~ -24 to +24 dB). Needs a build
 #              with the `frontend` feature (it uses cpal, like live audio output).
+#   "joystick-adapter"
+#              the passive four-player joystick adapter: port 3's
+#              directions on D0-D3 (CIA-A PB0-3) and fire on SEL (CIA-B
+#              PA2), port 4's on D4-D7 and BUSY (PA0), second buttons on
+#              POUT (PA1), all switches to ground on pins the guest has
+#              set as inputs. Sockets are [input] port3 / port4.
 # --parallel DEVICE overrides this per run; --sampler-audio-input /
-# --sampler-input-gain imply "sampler".
+# --sampler-input-gain imply "sampler", and [input] port3/port4 =
+# "joystick" implies "joystick-adapter".
 
 [parallel]
 # device = "printer"
@@ -933,6 +996,7 @@ floppy_sounds_volume = 100
 # device = "sampler"
 # sampler_input = "MacBook Air Microphone"
 # sampler_gain = 6.0   # dB
+# device = "joystick-adapter"
 
 
 # Optional floppy drives. Set [floppy] drives to wire 0-4 mechanisms. CDTV

@@ -116,6 +116,12 @@ fn port(desc: &str) -> Value {
     json!({"type": "integer", "enum": [1, 2], "description": desc})
 }
 
+/// A joystick port: the two game ports or the parallel-port four-player
+/// adapter's sockets (3 and 4).
+fn joystick_port(desc: &str) -> Value {
+    json!({"type": "integer", "enum": [1, 2, 3, 4], "description": desc})
+}
+
 fn at_seconds() -> Value {
     number(
         "Emulated time (absolute seconds) at which to apply the input; absent or in the past \
@@ -1164,11 +1170,13 @@ fn build() -> Vec<ToolDef> {
         ),
         entry(
             "input.joy",
-            "Set the joystick or CD32 pad state on `port` (default 2): each of `up`, \
-             `down`, `left`, `right`, `red` (fire), `blue`, `green`, `yellow`, `play`, \
-             `rwd`, `ffw` is true for held, absent or false for released. The state \
-             persists until the next input.joy, so send a second call with the buttons \
-             cleared to release them.",
+            "Set the joystick or CD32 pad state on `port` (default 2; 3 and 4 are the \
+             parallel-port four-player adapter's sockets, fitted on first use): each of \
+             `up`, `down`, `left`, `right`, `red` (fire), `blue`, `green`, `yellow`, \
+             `play`, `rwd`, `ffw` is true for held, absent or false for released. The \
+             state persists until the next input.joy, so send a second call with the \
+             buttons cleared to release them. On a light pen `red` is the tip switch / \
+             trigger.",
             object(
                 vec![
                     ("up", boolean("Direction up held")),
@@ -1182,12 +1190,29 @@ fn build() -> Vec<ToolDef> {
                     ("play", boolean("CD32 play/pause held")),
                     ("rwd", boolean("CD32 reverse shoulder held")),
                     ("ffw", boolean("CD32 forward shoulder held")),
-                    ("port", port("Controller port (default 2)")),
+                    ("port", joystick_port("Controller port 1-4 (default 2)")),
                     ("at_seconds", at_seconds()),
                 ],
                 &[],
             ),
             json!({"red": true}),
+        ),
+        entry(
+            "input.pen",
+            "Hold the light pen (`[input] port1/port2 = \"lightpen\"`) over presented pixel \
+             (`x`, `y`) -- the coordinates of input.mouse_to and capture.screenshot -- so \
+             Agnus latches the beam there while BPLCON0 LPEN is set. Omit both (or pass a \
+             negative value) to lift the pen off the glass. The pen's switch / trigger is \
+             `red` in input.joy or `left` in input.mouse on the pen's port.",
+            object(
+                vec![
+                    ("x", int("Column, or absent/negative to lift the pen", None, None)),
+                    ("y", int("Row, or absent/negative to lift the pen", None, None)),
+                    ("at_seconds", at_seconds()),
+                ],
+                &[],
+            ),
+            json!({"x": 160, "y": 100}),
         ),
         entry(
             "input.analogue",
@@ -1207,16 +1232,26 @@ fn build() -> Vec<ToolDef> {
         entry(
             "input.set_port",
             "Hot-plug a controller device into `port` 1 or 2: mouse, gamepad-mouse (port \
-             1 only), joystick, cd32, analogue, or none. Releases every line the previous \
-             device drove.",
+             1 only), joystick, cd32, analogue, lightpen, or none; ports 3 and 4 are the \
+             parallel-port four-player adapter's sockets and take joystick or none (a \
+             joystick there fits the adapter). Releases every line the previous device \
+             drove.",
             object(
                 vec![
-                    ("port", port("Controller port")),
+                    ("port", joystick_port("Controller port 1-4")),
                     (
                         "device",
                         enumeration(
                             "Device to fit",
-                            &["mouse", "gamepad-mouse", "joystick", "cd32", "analogue", "none"],
+                            &[
+                                "mouse",
+                                "gamepad-mouse",
+                                "joystick",
+                                "cd32",
+                                "analogue",
+                                "lightpen",
+                                "none",
+                            ],
                         ),
                     ),
                 ],
@@ -1226,7 +1261,8 @@ fn build() -> Vec<ToolDef> {
         ),
         entry(
             "input.get_ports",
-            "Report which device is fitted to each controller port.",
+            "Report which device is fitted to each controller port (1-4), whether the \
+             parallel-port adapter is fitted, and the light pen's port and position.",
             no_params(),
             json!({}),
         ),
@@ -1269,6 +1305,38 @@ fn build() -> Vec<ToolDef> {
         entry(
             "media.cd.eject",
             "Eject the CD image from the machine's CD drive.",
+            no_params(),
+            json!({}),
+        ),
+        entry(
+            "pcmcia.insert",
+            "Push a card into the A600/A1200 PCMCIA slot: `card` \"cf\" (default) wraps the \
+             hard-disk image at `path` as a CompactFlash/ATA card; \"sram\" makes an SRAM \
+             memory card of `size` bytes (64K..4M), optionally mirrored to `path`, with \
+             `read_only` as its write-protect switch. A card already in the slot is ejected \
+             first. Gayle latches the card-detect change, so the guest sees a real insertion.",
+            object(
+                vec![
+                    ("card", string("\"cf\" or \"sram\" (default \"cf\")")),
+                    ("path", string("CF: the image; SRAM: optional backing file")),
+                    ("size", string("SRAM card size, e.g. \"2M\"")),
+                    ("read_only", boolean("SRAM write-protect switch (default false)")),
+                ],
+                &[],
+            ),
+            json!({"card": "cf", "path": "/path/to/card.hdf"}),
+        ),
+        entry(
+            "pcmcia.eject",
+            "Pull the card out of the PCMCIA slot (Gayle latches the card-detect change).",
+            no_params(),
+            json!({}),
+        ),
+        entry(
+            "pcmcia.query",
+            "Report the PCMCIA slot: whether the machine has one, whether it is enabled or \
+             shadowed by Zorro II fast RAM, the card in it, Gayle's sampled card pins, and \
+             its pending change latches.",
             no_params(),
             json!({}),
         ),

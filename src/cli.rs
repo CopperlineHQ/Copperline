@@ -141,6 +141,12 @@ pub struct CliArgs {
     /// analogue controller's stick/paddle position (each axis 0-255, the
     /// count POTxDAT latches). PORT defaults to 2 (carried 0-based).
     pub pot_after: Vec<(f32, u8, u8, u8)>,
+    /// `--pen-after SECS X Y [PORT]`: at SECS emulated seconds, hold the
+    /// light pen over presented pixel (X, Y) -- the `--mouse-to-after`
+    /// coordinates -- or lift it off the glass with a negative
+    /// coordinate. PORT (carried 0-based) names the port the pen must be
+    /// in; `None` means whichever port has the pen.
+    pub pen_after: Vec<(f32, i32, i32, Option<u8>)>,
     /// `--record-input PATH`: record every input event that reaches the
     /// emulated machine for the whole run and write the scripted-input
     /// file to PATH on exit (the windowed toggle is the host shortcut
@@ -183,6 +189,8 @@ pub struct CliArgs {
     pub calibrate_gamepad: bool,
     /// `--list-midi`: print the host MIDI endpoints and exit.
     pub list_midi: bool,
+    /// `--list-serial-ports`: print the host serial ports and exit.
+    pub list_serial_ports: bool,
     /// `--list-audio-devices`: print the host audio output devices and exit.
     pub list_audio_devices: bool,
     /// `--list-net-interfaces`: print adapters usable for bridging and exit.
@@ -229,7 +237,7 @@ pub fn parse_args() -> Result<CliArgs> {
 /// the flag names (without the leading dashes) whose effects accumulate;
 /// anything else in a script is an error so a typo cannot silently change
 /// emulator configuration.
-const SCRIPT_DIRECTIVES: [&str; 15] = [
+const SCRIPT_DIRECTIVES: [&str; 16] = [
     "press-after",
     "key-after",
     "type",
@@ -241,6 +249,7 @@ const SCRIPT_DIRECTIVES: [&str; 15] = [
     "mouse-after",
     "mouse-to-after",
     "pot-after",
+    "pen-after",
     "insert-disk-after",
     "defer-disk-insert",
     "insert-cd-after",
@@ -356,17 +365,27 @@ fn take_port_token(
     args: &mut std::iter::Peekable<impl Iterator<Item = String>>,
     default_port: u8,
 ) -> u8 {
-    match args.peek().map(String::as_str) {
-        Some("1") => {
-            args.next();
-            0
-        }
-        Some("2") => {
-            args.next();
-            1
-        }
-        _ => default_port - 1,
-    }
+    take_port_token_upto(args, 2).unwrap_or(default_port - 1)
+}
+
+/// Consume an optional trailing PORT token naming one of the first
+/// `max_port` ports (1-based on the command line, returned 0-based), or
+/// leave the argument stream alone when the next token is not one. The
+/// game ports are 1 and 2; the parallel-port adapter's sockets are 3 and 4,
+/// which only the joystick directive can address.
+fn take_port_token_upto(
+    args: &mut std::iter::Peekable<impl Iterator<Item = String>>,
+    max_port: u8,
+) -> Option<u8> {
+    let port = match args.peek().map(String::as_str) {
+        Some("1") => 0,
+        Some("2") => 1,
+        Some("3") if max_port >= 3 => 2,
+        Some("4") if max_port >= 4 => 3,
+        _ => return None,
+    };
+    args.next();
+    Some(port)
 }
 
 pub fn parse_args_from<I>(args: I) -> Result<CliArgs>
@@ -418,6 +437,7 @@ where
     let mut mouse_after: Vec<(f32, i32, i32, u8)> = Vec::new();
     let mut mouse_to_after: Vec<(f32, i32, i32, u8)> = Vec::new();
     let mut pot_after: Vec<(f32, u8, u8, u8)> = Vec::new();
+    let mut pen_after: Vec<(f32, i32, i32, Option<u8>)> = Vec::new();
     let mut record_input: Option<PathBuf> = None;
     let mut wave_path: Option<PathBuf> = None;
     let mut wave_trigger: Option<copperline::waveform::Trigger> = None;
@@ -436,6 +456,7 @@ where
     let mut live_audio_profile_secs: Option<f32> = None;
     let mut calibrate_gamepad = false;
     let mut list_midi = false;
+    let mut list_serial_ports = false;
     let mut list_audio_devices = false;
     let mut list_net_interfaces = false;
     let mut list_disks = false;
@@ -451,6 +472,9 @@ where
         match a.as_str() {
             "--calibrate-gamepad" => {
                 calibrate_gamepad = true;
+            }
+            "--list-serial-ports" => {
+                list_serial_ports = true;
             }
             "--list-midi" => {
                 list_midi = true;
@@ -479,6 +503,18 @@ where
                     ));
                 }
                 host_disk_broker = Some(rest);
+            }
+            "--pcmcia-cf" => {
+                let path = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--pcmcia-cf requires PATH (a hard-disk image)"))?;
+                overrides.pcmcia_cf = Some(path);
+            }
+            "--pcmcia-sram" => {
+                let size = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--pcmcia-sram requires SIZE (64K..4M)"))?;
+                overrides.pcmcia_sram = Some(size);
             }
             "--host-disk" | "--host-disk-read-only" => {
                 let read_only = a == "--host-disk-read-only";
@@ -802,8 +838,22 @@ where
             }
             "--port2" => {
                 overrides.port2 = Some(args.next().ok_or_else(|| {
-                    anyhow!("--port2 requires a device (mouse/joystick/cd32/analogue/none)")
+                    anyhow!(
+                        "--port2 requires a device (mouse/joystick/cd32/analogue/lightpen/none)"
+                    )
                 })?);
+            }
+            "--port3" => {
+                overrides.port3 = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow!("--port3 requires a device (joystick/none)"))?,
+                );
+            }
+            "--port4" => {
+                overrides.port4 = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow!("--port4 requires a device (joystick/none)"))?,
+                );
             }
             "--autofire" => {
                 let value = args
@@ -889,7 +939,15 @@ where
             }
             "--serial" => {
                 overrides.serial = Some(args.next().ok_or_else(|| {
-                    anyhow!("--serial requires a mode (off/stdout/midi/tcp/tcp-connect/pty/modem)")
+                    anyhow!(
+                        "--serial requires a mode \
+                         (off/stdout/midi/tcp/tcp-connect/pty/modem/device)"
+                    )
+                })?);
+            }
+            "--serial-device" => {
+                overrides.serial_device = Some(args.next().ok_or_else(|| {
+                    anyhow!("--serial-device requires a host serial port (/dev/tty... or COMn)")
                 })?);
             }
             "--serial-connect" => {
@@ -940,7 +998,7 @@ where
             }
             "--parallel" => {
                 overrides.parallel = Some(args.next().ok_or_else(|| {
-                    anyhow!("--parallel requires a device (none/printer/sampler)")
+                    anyhow!("--parallel requires a device (none/printer/sampler/joystick-adapter)")
                 })?);
             }
             "--sampler-audio-input" => {
@@ -1028,8 +1086,16 @@ where
                 })?;
                 let dur_ms: u32 =
                     next_arg(&mut args, USAGE, "--joy-after DURATION_MS must be a number")?;
-                let port = take_port_token(&mut args, 2);
+                let port = take_port_token_upto(&mut args, 4).unwrap_or(1);
                 joy_after.push((secs, button, dur_ms, port));
+            }
+            "--pen-after" => {
+                const USAGE: &str = "--pen-after requires SECS X Y";
+                let secs: f32 = next_arg(&mut args, USAGE, "--pen-after SECS must be a number")?;
+                let x: i32 = next_arg(&mut args, USAGE, "--pen-after X must be an integer")?;
+                let y: i32 = next_arg(&mut args, USAGE, "--pen-after Y must be an integer")?;
+                let port = take_port_token_upto(&mut args, 2);
+                pen_after.push((secs, x, y, port));
             }
             "--mouse-to-after" => {
                 const USAGE: &str = "--mouse-to-after requires SECS X Y";
@@ -1605,6 +1671,7 @@ where
         mouse_after,
         mouse_to_after,
         pot_after,
+        pen_after,
         record_input,
         disk_insert_after,
         cd_insert_after,
@@ -1617,6 +1684,7 @@ where
         live_audio_profile_secs,
         calibrate_gamepad,
         list_midi,
+        list_serial_ports,
         list_audio_devices,
         list_net_interfaces,
         list_disks,
@@ -1732,9 +1800,13 @@ fn print_help() {
          --floppy-speed PERCENT         drive speed: 100, 200, 400, 800, or 0 (turbo)\n  \
          {floppy_bridge}--host-disk DEVICE [ATTACH]    give the machine one of the host's own disks\n  \
          \x20                            (--list-disks names them); ATTACH is ide-master\n  \
-         \x20                            (default), ide-slave, or scsi0..scsi6\n  \
+         \x20                            (default), ide-slave, scsi0..scsi6, or pcmcia\n  \
          --host-disk-read-only DEVICE [ATTACH]\n  \
          \x20                            the same, but the guest cannot write to the disk\n  \
+         --pcmcia-cf PATH               a CompactFlash card in the A600/A1200 PCMCIA slot,\n  \
+         \x20                            over a hard-disk image ([pcmcia] card = \"cf\")\n  \
+         --pcmcia-sram SIZE             an SRAM card in the PCMCIA slot, 64K..4M, session-only\n  \
+         \x20                            ([pcmcia] card = \"sram\")\n  \
          --rtc-time TIME                seed the battery clock (implies fitting one) with\n  \
          \x20                            Unix seconds or \"YYYY-MM-DD HH:MM[:SS]\"; it then\n  \
          \x20                            ticks in emulated time, so runs are deterministic\n  \
@@ -1744,9 +1816,13 @@ fn print_help() {
          --mouse-sensitivity N          host mouse sensitivity 0-100 (50 default = 1:1)\n  \
          --mouse-capture MODE           when to grab the host mouse: click (default), auto, manual\n  \
          --port1 DEVICE                 controller in port 1: mouse (default), joystick,\n  \
-         \x20                            cd32, analogue, or none\n  \
+         \x20                            cd32, analogue, lightpen, or none\n  \
          --port2 DEVICE                 controller in port 2 (default: joystick;\n  \
          \x20                            cd32 on the CD32 profile)\n  \
+         --port3 DEVICE                 joystick or none in the parallel-port four-player\n  \
+         \x20                            adapter's first socket (implies --parallel\n  \
+         \x20                            joystick-adapter)\n  \
+         --port4 DEVICE                 joystick or none in the adapter's second socket\n  \
          --autofire HZ                  pulse a held fire button at HZ (0 = off, the default)\n  \
          --netplay-host PATH            host Internet netplay; write invitation to PATH\n  \
          --netplay-join CODE            join a desktop Internet invitation\n  \
@@ -1807,7 +1883,11 @@ fn print_help() {
          \x20                            release MS ms later, on PORT (default 1)\n  \
          --joy-after SECS BTN MS [PORT] press joystick/CD32-pad BTN (up/down/left/right/\n  \
          \x20                            red|fire/blue/green/yellow/play/rwd/ffw) at SECS,\n  \
-         \x20                            release MS ms later, on PORT (default 2)\n  \
+         \x20                            release MS ms later, on PORT 1-4 (default 2;\n  \
+         \x20                            3 and 4 are the parallel-port adapter's sockets)\n  \
+         --pen-after SECS X Y [PORT]    hold the light pen over screen pixel (X, Y) from\n  \
+         \x20                            SECS (the --mouse-to-after coordinates; -1 -1\n  \
+         \x20                            lifts it off), on PORT (default: the pen's port)\n  \
          --mouse-after SECS DX DY [PORT]\n  \
          \x20                            apply a relative mouse motion at SECS on PORT\n  \
          \x20                            (default 1)\n  \
@@ -1862,9 +1942,13 @@ fn print_help() {
          --mt32-pcm-rom PATH            MT-32 PCM ROM\n  \
          --mt32-panel                   show the MT-32 front panel\n  \
          --serial MODE                  Paula serial port: off, stdout, midi, tcp,\n  \
-         \x20                            tcp-connect, pty, or modem\n  \
+         \x20                            tcp-connect, pty, modem, or device\n  \
          --serial-connect HOST:PORT     dial a remote TCP service (a telnet BBS) with the\n  \
          \x20                            serial port (implies --serial tcp-connect)\n  \
+         --serial-device PATH           wire the serial port to a real host serial port\n  \
+         \x20                            (/dev/tty.usbserial-XXXX, /dev/ttyUSB0, COM3;\n  \
+         \x20                            implies --serial device)\n  \
+         --list-serial-ports            list host serial ports and exit\n  \
          --serial-session FILE          modem mode: replay a scripted session from FILE\n  \
          \x20                            instead of dialing out over TCP (implies\n  \
          \x20                            --serial modem); see docs/guide/modem.md\n  \
@@ -1876,7 +1960,8 @@ fn print_help() {
          \x20                            to real host OS sockets, bypassing the emulated\n  \
          \x20                            stack entirely)\n  \
          --hostsocket-interface NAME    bridge adapter; implies --hostsocket-net bridge\n  \
-         --parallel DEVICE              parallel port: none, printer, or sampler\n  \
+         --parallel DEVICE              parallel port: none, printer, sampler, or\n  \
+         \x20                            joystick-adapter (four-player ports 3 and 4)\n  \
          --sampler-audio-input NAME     sampler host capture device (implies --parallel sampler)\n  \
          --sampler-input-gain DB        sampler input gain in dB (implies --parallel sampler)\n  \
          --sampler-list-audio-inputs    list host audio input devices and exit\n  \

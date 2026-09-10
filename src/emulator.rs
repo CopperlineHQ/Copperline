@@ -3147,6 +3147,24 @@ fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>>
         SerialMode::Pty => Err(anyhow!(
             "[serial] mode = \"pty\" is only available on Unix hosts"
         )),
+        #[cfg(feature = "host-serial")]
+        SerialMode::Device => {
+            let path = cfg.serial.device.as_deref().ok_or_else(|| {
+                anyhow!(
+                    "[serial] mode = \"device\" needs a host serial port: set [serial] \
+                     device = \"/dev/tty...\" (or \"COMn\"), pass --serial-device, or pick \
+                     one in the launcher's I/O Ports > Serial > Port row \
+                     (--list-serial-ports names them)"
+                )
+            })?;
+            Ok(Box::new(crate::serial::device::DeviceSerialSink::open(
+                path,
+            )?))
+        }
+        #[cfg(not(feature = "host-serial"))]
+        SerialMode::Device => Err(anyhow!(
+            "[serial] mode = \"device\" needs a build with --features host-serial"
+        )),
         SerialMode::Modem => {
             let options = crate::modem::ModemOptions {
                 listen: cfg.serial.listen.clone(),
@@ -3171,16 +3189,70 @@ fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>>
 /// that slot empty, as it would if the drive had been unplugged. Only a disk
 /// that is present is opened, so a missing one never raises the host's
 /// permission prompt.
+/// The card `[pcmcia]` (or a `[[host_disk]]` on the slot) puts in the
+/// socket at power-on. A missing real disk is reported and skipped, as
+/// the IDE ports do; a missing image is an error, as `[ide]`'s is.
+#[cfg(not(target_arch = "wasm32"))]
+fn open_pcmcia_card(cfg: &Config) -> Result<Option<crate::pcmcia::PcmciaCard>> {
+    use crate::config::PcmciaCardConfig;
+    use crate::pcmcia::{CfCard, PcmciaCard, SramCard};
+    match &cfg.pcmcia.card {
+        PcmciaCardConfig::Cf { path } => {
+            let card = CfCard::open(path)
+                .with_context(|| format!("[pcmcia] CF card image {}", path.display()))?;
+            return Ok(Some(PcmciaCard::cf(card)));
+        }
+        PcmciaCardConfig::Sram {
+            size,
+            path,
+            read_only,
+        } => {
+            let card = SramCard::new(*size, path.as_deref(), *read_only)?;
+            return Ok(Some(PcmciaCard::Sram(card)));
+        }
+        PcmciaCardConfig::None => {}
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(disk) = cfg.host_disks.iter().find(|d| d.attach.is_pcmcia()) {
+        match crate::ata::IdeDrive::open_host_disk(
+            &disk.device,
+            disk.fingerprint.as_deref(),
+            disk.identity_confirmed,
+            disk.writable,
+        ) {
+            Ok(drive) => {
+                info!(
+                    "pcmcia: CF card is host disk {}{}",
+                    disk.device,
+                    if disk.writable {
+                        " (WRITABLE)"
+                    } else {
+                        " (read-only)"
+                    }
+                );
+                return Ok(Some(PcmciaCard::cf(CfCard::new(drive))));
+            }
+            Err(error) => warn!(
+                "pcmcia: asked for host disk {}, which is not available: {error}",
+                disk.device
+            ),
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn attach_ide_host_disks(cfg: &Config, mut attach: impl FnMut(usize, crate::ata::IdeDrive)) {
     for disk in &cfg.host_disks {
-        // SCSI units and lide positions are attached elsewhere.
+        // SCSI units, lide positions, and the PCMCIA slot are attached
+        // elsewhere.
         let slot = match disk.attach {
             crate::config::HostDiskAttach::IdeMaster => 0,
             crate::config::HostDiskAttach::IdeSlave => 1,
             crate::config::HostDiskAttach::LideMaster(_)
             | crate::config::HostDiskAttach::LideSlave(_)
-            | crate::config::HostDiskAttach::Scsi(_) => continue,
+            | crate::config::HostDiskAttach::Scsi(_)
+            | crate::config::HostDiskAttach::Pcmcia => continue,
         };
         match crate::ata::IdeDrive::open_host_disk(
             &disk.device,
@@ -4036,7 +4108,37 @@ fn build_machine_inner(
         // refused by configuration validation rather than silently replaced.
         #[cfg(not(target_arch = "wasm32"))]
         attach_ide_host_disks(cfg, |slot, drive| gayle.attach_drive(slot, drive));
+        // The PCMCIA common-memory window ($600000-$9FFFFF) is Zorro II
+        // space: with more than 4 MiB of fast RAM configured there Gayle's
+        // slot decode gives way to the RAM board, as on a real A1200 where
+        // an 8 MiB Zorro II expansion kills the slot.
+        let shadowed = cfg.pcmcia_slot_shadowed();
+        gayle.set_slot_shadowed(shadowed);
         bus.attach_gayle(gayle);
+        #[cfg(not(target_arch = "wasm32"))]
+        let card = open_pcmcia_card(cfg)?;
+        #[cfg(target_arch = "wasm32")]
+        let card: Option<crate::pcmcia::PcmciaCard> = None;
+        if shadowed {
+            if card.is_some() || cfg.host_disks.iter().any(|d| d.attach.is_pcmcia()) {
+                warn!(
+                    "pcmcia: {} of Zorro II fast RAM covers the slot's common memory window \
+                     ($600000-$9FFFFF); the PCMCIA slot is disabled and the card ({}) will not \
+                     be seen. Use fast = \"4M\" or less to keep the slot",
+                    crate::config::format_size(cfg.fast_ram_bytes),
+                    cfg.pcmcia.describe()
+                );
+            } else {
+                info!(
+                    "pcmcia: slot disabled ({} of Zorro II fast RAM covers its window)",
+                    crate::config::format_size(cfg.fast_ram_bytes)
+                );
+            }
+        }
+        if let Some(card) = card {
+            info!("pcmcia: {}", card.describe());
+            bus.pcmcia_insert(card);
+        }
     }
     if cfg.ide_a4000 {
         let mut ide = crate::ide_a4000::IdeA4000::new();
@@ -4168,6 +4270,32 @@ fn build_machine_inner(
         cfg.port_devices[0].label(),
         cfg.port_devices[1].label()
     );
+    // The four-player adapter is wiring on the Centronics connector, not a
+    // host peripheral: it lives in the deterministic input state.
+    let adapter = cfg.parallel.device == crate::config::ParallelDevice::JoystickAdapter;
+    bus.input
+        .set_parallel_adapter(adapter, cfg.parallel_joysticks);
+    if adapter {
+        info!(
+            "parallel: four-player joystick adapter, port 3 = {}, port 4 = {}",
+            bus.input.device(2).label(),
+            bus.input.device(3).label()
+        );
+    }
+    if let Some(port) = bus.input.light_pen_port() {
+        let wired = bus.light_pen_wired_port();
+        if port == wired {
+            info!("input: light pen in port {} drives Agnus LP", port + 1);
+        } else {
+            warn!(
+                "input: light pen in port {} but this board wires Agnus LP to port {}'s pin 6 \
+                 (port 1 on the A1000, port 2 on later Amigas); the pen's switch works, its \
+                 pulses reach nothing",
+                port + 1,
+                wired + 1
+            );
+        }
+    }
     if cfg.akiko {
         let mut akiko = crate::akiko::Akiko::new();
         if let Some(path) = &cfg.cd32_nvram_path {

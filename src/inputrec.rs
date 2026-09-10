@@ -82,12 +82,29 @@ fn mouse_port_suffix(port: usize) -> &'static str {
     }
 }
 
-/// Trailing port token for a joystick/pot directive (default port 2).
+/// Trailing port token for a joystick/pot directive (default port 2;
+/// 3 and 4 are the parallel-port adapter's sockets).
 fn joy_port_suffix(port: usize) -> &'static str {
-    if port == 0 {
-        " 1"
-    } else {
-        ""
+    match port {
+        0 => " 1",
+        2 => " 3",
+        3 => " 4",
+        _ => "",
+    }
+}
+
+/// The light pen's tip switch / trigger by `click-after` name: the pen
+/// puts it on POTxX, and `set_mouse_button` index 0 (left) closes it on a
+/// pen port, so the replay directive is the left click.
+const PEN_BUTTONS: [(&str, ControlRead); 1] = [("left", |p| p.button3)];
+
+/// A port's controls as one `ControllerPort` view, whichever connector it
+/// is on: the game ports as they are, the adapter's sockets through
+/// [`ParallelJoystick::as_controller_port`].
+fn port_view(input: &InputState, port: usize) -> ControllerPort {
+    match port {
+        0 | 1 => input.ports[port],
+        _ => input.parallel_joysticks[port - crate::bus::PARALLEL_PORT_FIRST].as_controller_port(),
     }
 }
 
@@ -113,11 +130,12 @@ pub struct InputRecorder {
     lines: Vec<(f64, String)>,
     /// Open key presses: rawkey -> press time.
     open_keys: HashMap<u8, f64>,
-    /// Open mouse-button presses per port, indexed like MOUSE_BUTTONS.
+    /// Open mouse-button presses per game port, indexed like MOUSE_BUTTONS
+    /// (a light pen's switch uses slot 0, like PEN_BUTTONS).
     open_clicks: [[Option<f64>; 3]; 2],
-    /// Open joystick/pad control presses per port, indexed like
-    /// JOY_CONTROLS.
-    open_joys: [[Option<f64>; 11]; 2],
+    /// Open joystick/pad control presses per port (game ports and the
+    /// adapter's sockets), indexed like JOY_CONTROLS.
+    open_joys: [[Option<f64>; 11]; crate::bus::PORT_COUNT],
     /// Input state at the previous `observe`, the diff baseline. Controls
     /// already held when recording starts are not recorded.
     prev: Option<InputState>,
@@ -145,7 +163,7 @@ impl InputRecorder {
             lines: Vec::new(),
             open_keys: HashMap::new(),
             open_clicks: [[None; 3]; 2],
-            open_joys: [[None; 11]; 2],
+            open_joys: [[None; 11]; crate::bus::PORT_COUNT],
             prev: None,
             first_devices: None,
         }
@@ -222,9 +240,11 @@ impl InputRecorder {
 
     /// Close every hold a port's device left open, at `secs`.
     fn close_port_holds(&mut self, port: usize, secs: f64) {
-        for idx in 0..MOUSE_BUTTONS.len() {
-            if let Some(press) = self.open_clicks[port][idx].take() {
-                self.emit_click(port, MOUSE_BUTTONS[idx].0, press, secs);
+        if port < 2 {
+            for idx in 0..MOUSE_BUTTONS.len() {
+                if let Some(press) = self.open_clicks[port][idx].take() {
+                    self.emit_click(port, MOUSE_BUTTONS[idx].0, press, secs);
+                }
             }
         }
         for idx in 0..JOY_CONTROLS.len() {
@@ -243,9 +263,18 @@ impl InputRecorder {
             return;
         };
 
-        for port in 0..2 {
-            let old = &prev.ports[port];
-            let cur = &input.ports[port];
+        if input.light_pen != prev.light_pen {
+            if let Some(port) = input.light_pen_port() {
+                let (x, y) = input.light_pen.position.unwrap_or((-1, -1));
+                self.lines.push((
+                    secs,
+                    format!("pen-after {} {x} {y} {}", fmt_secs(secs), port + 1),
+                ));
+            }
+        }
+        for port in 0..crate::bus::PORT_COUNT {
+            let old = &port_view(&prev, port);
+            let cur = &port_view(input, port);
             if old.device != cur.device {
                 // Hot-plug: close what the old device held; the device
                 // change itself has no script directive.
@@ -304,6 +333,19 @@ impl InputRecorder {
                         }
                     }
                 }
+                PortDevice::LightPen => {
+                    for (idx, (name, read)) in PEN_BUTTONS.iter().enumerate() {
+                        match (read(old), read(cur)) {
+                            (false, true) => self.open_clicks[port][idx] = Some(secs),
+                            (true, false) => {
+                                if let Some(press) = self.open_clicks[port][idx].take() {
+                                    self.emit_click(port, name, press, secs);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 PortDevice::None => {}
             }
         }
@@ -324,7 +366,7 @@ impl InputRecorder {
                 ),
             ));
         }
-        for port in 0..2 {
+        for port in 0..crate::bus::PORT_COUNT {
             self.close_port_holds(port, end);
         }
         self.lines
@@ -538,5 +580,26 @@ mod tests {
         let mouse_pos = script.find("mouse-after").unwrap();
         let key_pos = script.find("key-after").unwrap();
         assert!(mouse_pos < key_pos, "{script}");
+    }
+
+    #[test]
+    fn adapter_sockets_and_the_pen_record_with_their_own_directives() {
+        let mut rec = InputRecorder::new(0.0);
+        let mut input = base_input();
+        input.set_parallel_adapter(true, [true, true]);
+        input.set_port_device(0, PortDevice::LightPen);
+        rec.observe(&input, 1.0);
+        input.set_joystick(3, false, false, true, false, true, false);
+        input.set_light_pen_position(Some((300, 120)));
+        input.set_mouse_button(0, 0, true);
+        rec.observe(&input, 1.5);
+        input.set_joystick(3, false, false, false, false, false, false);
+        input.set_mouse_button(0, 0, false);
+        rec.observe(&input, 2.0);
+        let script = rec.finish();
+        assert!(script.contains("joy-after 1.500 left 500 4"), "{script}");
+        assert!(script.contains("joy-after 1.500 red 500 4"), "{script}");
+        assert!(script.contains("pen-after 1.500 300 120 1"), "{script}");
+        assert!(script.contains("click-after 1.500 left 500\n"), "{script}");
     }
 }

@@ -2158,6 +2158,35 @@ fn serper_write_pushes_baud_to_serial_sink() {
 }
 
 #[test]
+fn state_adoption_republishes_serper_rate_to_the_serial_sink() {
+    // A host sink moved onto a restored machine never saw that machine's
+    // SERPER written; a sink that keeps a real port at the guest's rate
+    // (mode = "device") needs the restored rate pushed, the way the
+    // restored /DTR and /RTS are.
+    struct RecordBaud(Arc<Mutex<Vec<u32>>>);
+    impl SerialSink for RecordBaud {
+        fn write_byte(&mut self, _b: u8, _at_cck: u64) {}
+        fn flush(&mut self) {}
+        fn baud_changed(&mut self, bps: u32) {
+            self.0.lock().unwrap().push(bps);
+        }
+    }
+    let mut live = empty_bus();
+    let rates = Arc::new(Mutex::new(Vec::new()));
+    live.paula.serial = Box::new(RecordBaud(Arc::clone(&rates)));
+    // The live machine was at 9600; the restored one had programmed
+    // 19200 (divisor 184).
+    let _ = live.write_custom_word_from(0x032, 372, BeamWriteSource::Cpu);
+    let mut restored = empty_bus();
+    restored.paula.serper = 184;
+    restored.adopt_host_resources(&mut live).unwrap();
+    assert_eq!(
+        *rates.lock().unwrap(),
+        vec![PAULA_CLOCK_HZ / 373, PAULA_CLOCK_HZ / 185]
+    );
+}
+
+#[test]
 fn serial_device_drives_cia_b_handshake_inputs() {
     use crate::serial::{SerialControlLines, CIAB_PA_CD, CIAB_PA_CTS, CIAB_PA_DSR};
 
@@ -13228,6 +13257,206 @@ fn hhposr_reads_hhposw_latch_on_ecs_agnus_only() {
     assert_eq!(ecs.custom_read(0x1DA, 2), 0x0155);
 }
 
+fn pcmcia_test_image(sectors: usize) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let image = std::env::temp_dir().join(format!(
+        "copperline-bus-pcmcia-{}-{}.hdf",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&image, vec![0u8; 512 * sectors]).unwrap();
+    image
+}
+
+/// A CF card in the slot: the CIS reads from attribute memory at even
+/// addresses, the power-on memory-mapped layout puts the task file at the
+/// start of common memory, a Configuration Option Register write moves it
+/// to the I/O windows (with the odd-byte window reaching the odd
+/// registers), and the reset register drops the configuration again.
+#[test]
+fn pcmcia_cf_card_maps_the_ata_task_file_by_configuration() {
+    use crate::ata::{ST_DRDY, ST_DRQ, ST_DSC};
+    use crate::gayle::Gayle;
+    use crate::pcmcia::{CfCard, PcmciaCard, PIN_CCDET, PIN_WR};
+
+    let image = pcmcia_test_image(64);
+    let mut bus = empty_bus();
+    // No slot yet: the window is unmapped.
+    assert_eq!(bus.pcmcia_read(0x00A0_0000, 1), None);
+    bus.attach_gayle(Gayle::new(0xD1));
+    // Empty socket: the reset register answers, nothing else does.
+    assert_eq!(bus.pcmcia_read(0x00A0_0000, 1), None);
+    assert_eq!(bus.pcmcia_read(0x0060_0000, 2), None);
+    assert!(bus.pcmcia_write(0x00A4_0000, 1, 0));
+
+    bus.pcmcia_insert(PcmciaCard::cf(CfCard::open(&image).unwrap()));
+    let g = bus.gayle.as_ref().unwrap();
+    assert_eq!(g.card_pins() & (PIN_CCDET | PIN_WR), PIN_CCDET | PIN_WR);
+
+    // Attribute memory: CISTPL_DEVICE at $A00000, one CIS byte per even
+    // address, odd bytes mirroring; a word read pairs them.
+    assert_eq!(bus.pcmcia_read(0x00A0_0000, 1), Some(0x01));
+    assert_eq!(bus.pcmcia_read(0x00A0_0002, 1), Some(0x04));
+    assert_eq!(bus.pcmcia_read(0x00A0_0001, 1), Some(0x01));
+    assert_eq!(bus.pcmcia_read(0x00A0_0000, 2), Some(0x0101));
+    assert_eq!(bus.pcmcia_read(0x00A0_0000, 4), Some(0x0101_0404));
+    // COR reads zero at power-on: memory-mapped configuration.
+    assert_eq!(bus.pcmcia_read(0x00A0_0200, 1), Some(0));
+
+    // Memory-mapped: status at common +7, alternate status at +$E; the
+    // I/O windows do not answer.
+    assert_eq!(
+        bus.pcmcia_read(0x0060_0007, 1).map(|v| v as u8),
+        Some(ST_DRDY | ST_DSC)
+    );
+    assert_eq!(
+        bus.pcmcia_read(0x0060_000E, 1).map(|v| v as u8),
+        Some(ST_DRDY | ST_DSC)
+    );
+    assert_eq!(bus.pcmcia_read(0x00A2_0007, 1), None);
+    // The block repeats every 2 KiB (A10-A0 decode).
+    assert_eq!(
+        bus.pcmcia_read(0x0060_0807, 1).map(|v| v as u8),
+        Some(ST_DRDY | ST_DSC)
+    );
+    // IDENTIFY through the memory-mapped block: drive/head at +6,
+    // command at +7, data words through the $400 window.
+    bus.pcmcia_write(0x0060_0006, 1, 0xA0);
+    bus.pcmcia_write(0x0060_0007, 1, 0xEC);
+    assert_eq!(
+        bus.pcmcia_read(0x0060_000E, 1).map(|v| v as u8),
+        Some(ST_DRDY | ST_DSC | ST_DRQ)
+    );
+    let word0 = bus.pcmcia_read(0x0060_0400, 2).unwrap() as u16;
+    assert_eq!(word0.swap_bytes(), 0x045A, "IDENTIFY word 0, lane-swapped");
+    for _ in 1..256 {
+        bus.pcmcia_read(0x0060_0400, 2);
+    }
+    assert_eq!(
+        bus.pcmcia_read(0x0060_0007, 1).map(|v| v as u8),
+        Some(ST_DRDY | ST_DSC)
+    );
+
+    // Configure contiguous I/O (index 1) through the COR at attribute $200.
+    bus.pcmcia_write(0x00A0_0200, 1, 0x01);
+    assert_eq!(bus.pcmcia_read(0x00A0_0200, 1), Some(0x01));
+    assert_eq!(
+        bus.pcmcia_read(0x0060_0007, 1),
+        Some(0),
+        "registers left common memory"
+    );
+    assert_eq!(
+        bus.pcmcia_read(0x00A2_0007, 1).map(|v| v as u8),
+        Some(ST_DRDY | ST_DSC)
+    );
+    // The odd-byte window: $A30006 is I/O register 7 (status).
+    assert_eq!(
+        bus.pcmcia_read(0x00A3_0006, 1).map(|v| v as u8),
+        Some(ST_DRDY | ST_DSC)
+    );
+    // A word read of registers 6/7 lands drive/head high, status low.
+    assert_eq!(
+        bus.pcmcia_read(0x00A2_0006, 2).map(|v| v as u16),
+        Some(0xA000 | u16::from(ST_DRDY | ST_DSC))
+    );
+    // Read a sector through the I/O data port and check the interrupt
+    // reaches Gayle's busy/IRQ pin as a level, on INT2 by default.
+    bus.gayle.as_mut().unwrap().write(0x00DA_A000, 1, 0xEC);
+    bus.gayle.as_mut().unwrap().write(0x00DA_9000, 1, 0);
+    bus.pcmcia_write(0x00A2_0006, 1, 0x40); // LBA, drive 0
+    bus.pcmcia_write(0x00A2_0003, 1, 0);
+    bus.pcmcia_write(0x00A2_0004, 1, 0);
+    bus.pcmcia_write(0x00A2_0005, 1, 0);
+    bus.pcmcia_write(0x00A2_0002, 1, 1);
+    bus.pcmcia_write(0x00A2_0007, 1, 0x20); // READ SECTORS
+    assert!(bus.gayle.as_ref().unwrap().int2_line(), "IREQ# on INT2");
+    bus.advance_devices(4);
+    assert_ne!(bus.paula.intreq & INT_PORTS, 0);
+    for _ in 0..256 {
+        bus.pcmcia_read(0x00A2_0000, 2);
+    }
+    // The status read dropped INTRQ; acknowledging at Gayle clears the line.
+    bus.pcmcia_read(0x00A2_0007, 1);
+    bus.gayle.as_mut().unwrap().write(0x00DA_9000, 1, 0);
+    assert!(!bus.gayle.as_ref().unwrap().int2_line());
+
+    // PC-style primary I/O (index 2): $1F7 and $3F6.
+    bus.pcmcia_write(0x00A0_0200, 1, 0x02);
+    assert_eq!(bus.pcmcia_read(0x00A2_0007, 1), Some(0));
+    assert_eq!(
+        bus.pcmcia_read(0x00A2_01F7, 1).map(|v| v as u8),
+        Some(ST_DRDY | ST_DSC)
+    );
+    assert_eq!(
+        bus.pcmcia_read(0x00A2_03F6, 1).map(|v| v as u8),
+        Some(ST_DRDY | ST_DSC)
+    );
+    // Card reset: a write to $A40000 drops the COR back to memory mode.
+    assert!(bus.pcmcia_write(0x00A4_0000, 1, 0));
+    assert_eq!(bus.pcmcia_read(0x00A0_0200, 1), Some(0));
+    assert_eq!(
+        bus.pcmcia_read(0x0060_0007, 1).map(|v| v as u8),
+        Some(ST_DRDY | ST_DSC)
+    );
+    assert_eq!(bus.pcmcia_read(0x00A4_0000, 1), Some(0), "reset release");
+
+    // Ejecting latches the detect change on INT6 and empties the window.
+    bus.gayle.as_mut().unwrap().write(0x00DA_9000, 1, 0);
+    assert!(bus.pcmcia_eject().is_some());
+    assert!(bus.gayle.as_ref().unwrap().int6_line());
+    bus.advance_devices(4);
+    assert_ne!(bus.paula.intreq & INT_EXTER, 0);
+    assert_eq!(bus.pcmcia_read(0x00A0_0000, 1), None);
+    std::fs::remove_file(image).ok();
+}
+
+/// An SRAM card: its CIS in attribute memory, its RAM through the common
+/// window (reads past its size undecoded), the write-protect switch on
+/// the WR pin, and the slot going dark when fast RAM shadows it.
+#[test]
+fn pcmcia_sram_card_common_memory_and_fast_ram_shadowing() {
+    use crate::gayle::Gayle;
+    use crate::pcmcia::{PcmciaCard, SramCard, PIN_CCDET, PIN_WR};
+
+    let mut bus = empty_bus();
+    bus.attach_gayle(Gayle::new(0xD0));
+    bus.pcmcia_insert(PcmciaCard::Sram(
+        SramCard::new(512 * 1024, None, false).unwrap(),
+    ));
+    // CISTPL_DEVICE: SRAM, 100 ns; 512 KiB is one 512 KiB unit (code 5).
+    assert_eq!(bus.pcmcia_read(0x00A0_0004, 1), Some(0x64));
+    assert_eq!(bus.pcmcia_read(0x00A0_0006, 1), Some(0x05));
+    assert!(bus.pcmcia_write(0x0060_1000, 2, 0xCAFE));
+    assert!(bus.pcmcia_write(0x0060_1002, 4, 0x1234_5678));
+    assert_eq!(bus.pcmcia_read(0x0060_1000, 4), Some(0xCAFE_1234));
+    assert_eq!(bus.pcmcia_read(0x0060_1004, 2), Some(0x5678));
+    assert_eq!(bus.pcmcia_read(0x0060_1001, 1), Some(0xFE));
+    assert_eq!(bus.pcmcia_read(0x0068_0000, 2), Some(0), "past the card");
+    // An I/O cycle to a memory card floats.
+    assert_eq!(bus.pcmcia_read(0x00A2_0000, 2), None);
+    let g = bus.gayle.as_ref().unwrap();
+    assert_eq!(g.card_pins() & (PIN_CCDET | PIN_WR), PIN_CCDET | PIN_WR);
+
+    // Guest-disabled slot ($DA8000 DIS): the window goes away, the card
+    // stays in the socket, and re-enabling brings it back untouched.
+    bus.gayle.as_mut().unwrap().write(0x00DA_8000, 1, 0x01);
+    assert_eq!(bus.pcmcia_read(0x0060_1000, 2), None);
+    bus.gayle.as_mut().unwrap().write(0x00DA_8000, 1, 0x00);
+    assert_eq!(bus.pcmcia_read(0x0060_1000, 2), Some(0xCAFE));
+
+    // The fast-RAM rule: with the slot shadowed nothing decodes and Gayle
+    // reports an empty socket.
+    bus.gayle.as_mut().unwrap().set_slot_shadowed(true);
+    assert_eq!(bus.pcmcia_read(0x0060_1000, 2), None);
+    assert_eq!(bus.pcmcia_read(0x00A0_0000, 1), None);
+    assert_eq!(
+        bus.gayle.as_mut().unwrap().read(0x00DA_8000, 1) as u8 & PIN_CCDET,
+        0
+    );
+    assert!(bus.pcmcia_card().is_some(), "the card is still inserted");
+}
+
 #[test]
 fn gayle_int2_level_keeps_setting_paula_ports_intreq() {
     use crate::gayle::{Gayle, IdeDrive};
@@ -14165,4 +14394,115 @@ fn cartridge_shadows_follow_custom_and_cia_writes_into_the_bank_on_a_freeze() {
     assert_eq!(bank[HRTMON_CIAA_SHADOW + 0x02 * 0x100 + 1], 0x03);
     assert_eq!(bank[HRTMON_CIAB_SHADOW + 0x100], 0x7F);
     assert_eq!(&bus.mem.chip_ram[0x7C..0x80], &0x00A1_000Cu32.to_be_bytes());
+}
+
+#[test]
+fn parallel_joystick_adapter_grounds_input_pins_by_socket() {
+    const CIA_A_PRB: u64 = 0x00BF_E101;
+    const CIA_A_DDRB: u64 = 0x00BF_E301;
+    const CIA_B_PRA: u64 = 0x00BF_D000;
+    let mut bus = empty_bus();
+    bus.input.set_parallel_adapter(true, [true, true]);
+    // The four-player titles read the port as inputs (DDRB = 0): the
+    // pull-ups read every data pin high with the sticks centred, and the
+    // Centronics status lines all high with nothing pressed.
+    assert_eq!(bus.cia_a_read(CIA_A_PRB, 1), 0xFF);
+    assert_eq!(bus.cia_b_read(CIA_B_PRA, 1) as u8 & 0x07, 0x07);
+
+    // Port 3 up + left + fire, port 4 down + right + button 2: D0/D2 and
+    // D5/D7 grounded; SEL (PA2) low for port 3's fire, POUT (PA1) low for
+    // the second button, BUSY (PA0) still high.
+    bus.input
+        .set_joystick(2, true, false, true, false, true, false);
+    bus.input
+        .set_joystick(3, false, true, false, true, false, true);
+    assert_eq!(
+        bus.cia_a_read(CIA_A_PRB, 1),
+        0xFF & !(0x01 | 0x04 | 0x20 | 0x80)
+    );
+    assert_eq!(bus.cia_b_read(CIA_B_PRA, 1) as u8 & 0x07, 0x01);
+    // Port 4 fire is BUSY (PA0); its second button released frees POUT.
+    bus.input
+        .set_joystick(3, false, false, false, false, true, false);
+    assert_eq!(bus.cia_b_read(CIA_B_PRA, 1) as u8 & 0x07, 0x02);
+
+    // Pins the guest drives as outputs are the CIA's, whatever the switches
+    // do: with D0-D3 switched to outputs and written high, port 3's held
+    // directions vanish while port 4's still ground D5/D7.
+    let _ = bus.cia_a_write(CIA_A_PRB, 1, 0xFF);
+    let _ = bus.cia_a_write(CIA_A_DDRB, 1, 0x0F);
+    bus.input
+        .set_joystick(3, false, true, false, true, false, false);
+    assert_eq!(bus.cia_a_read(CIA_A_PRB, 1), 0x5F);
+
+    // Pulling the adapter releases every switch.
+    bus.input.set_parallel_adapter(false, [false, false]);
+    assert_eq!(bus.cia_a_read(CIA_A_PRB, 1), 0xFF);
+    assert_eq!(bus.cia_b_read(CIA_B_PRA, 1) as u8 & 0x07, 0x07);
+}
+
+#[test]
+fn light_pen_device_latches_the_beam_where_the_pen_is_held() {
+    let mut bus = empty_bus();
+    // An A500-class board (no WCS): Agnus LP is port 2's pin 6.
+    assert_eq!(bus.light_pen_wired_port(), 1);
+    bus.input.set_port_device(1, PortDevice::LightPen);
+    bus.input.set_light_pen_position(Some((320, 100)));
+    assert!(!bus.custom_write(0x100, 2, 0x0008)); // BPLCON0 LPEN
+    let (target_v, target_h) = bus.light_pen_beam_target().expect("pen on the glass");
+    assert_eq!(target_v, bus.frame_geometry().visible_start_vpos + 100);
+    assert!(target_h < 227, "beam column {target_h}");
+
+    // The pen is aimed at each frame start and latches as the beam sweeps
+    // past it; read the latch back on the field after, from line 0.
+    let field = bus.frame_lines() * 227;
+    bus.advance_chipset(2 * field + 10);
+    let expect = (((target_v & 0xFF) << 8) | (target_h & 0xFF)) as u64;
+    assert_eq!(bus.custom_read(0x006, 2), expect, "VHPOSR");
+    assert_eq!(
+        bus.custom_read(0x004, 2) & 0x0001,
+        ((target_v >> 8) & 1) as u64,
+        "VPOSR V8"
+    );
+
+    // Lifted off the glass the pen sees no beam: the field ends with the
+    // end-of-field default in the latch instead.
+    bus.input.set_light_pen_position(None);
+    bus.advance_chipset(2 * field);
+    assert_ne!(bus.custom_read(0x006, 2), expect);
+
+    // A pen in the port the board does not wire to LP never reaches Agnus.
+    bus.input.set_port_device(1, PortDevice::Joystick);
+    bus.input.set_port_device(0, PortDevice::LightPen);
+    bus.input.set_light_pen_position(Some((320, 100)));
+    assert_eq!(bus.light_pen_beam_target(), None);
+    bus.advance_chipset(2 * field);
+    assert_ne!(bus.custom_read(0x006, 2), expect);
+
+    // The A1000 (identified by its WCS) wires port 1 instead.
+    let mut a1000 = empty_bus();
+    a1000.mem.wcs = vec![0u8; crate::memory::WCS_SIZE];
+    assert_eq!(a1000.light_pen_wired_port(), 0);
+    a1000.input.set_port_device(0, PortDevice::LightPen);
+    a1000.input.set_light_pen_position(Some((320, 100)));
+    assert!(a1000.light_pen_beam_target().is_some());
+}
+
+#[test]
+fn light_pen_switch_reads_on_the_third_button_line_not_fire() {
+    let mut bus = empty_bus();
+    bus.input.set_port_device(1, PortDevice::LightPen);
+    // The left "click" is the pen's tip switch: POT1X grounded, /FIR1
+    // untouched (that pin is the pulse line).
+    bus.input.set_mouse_button(1, 0, true);
+    assert!(!bus.input.ports[1].fir_asserted());
+    assert!(!bus.input.ports[1].pot_x_released());
+    // A joystick-style fire on the pen port is the same switch, and the
+    // pen keeps its device rather than turning into a joystick.
+    bus.input.set_mouse_button(1, 0, false);
+    bus.input
+        .set_joystick(1, true, false, false, false, true, false);
+    assert_eq!(bus.input.device(1), PortDevice::LightPen);
+    assert!(!bus.input.ports[1].pot_x_released());
+    assert!(!bus.input.ports[1].up, "a pen has no directions");
 }

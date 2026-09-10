@@ -79,6 +79,10 @@ pub enum InputAction {
         x: u8,
         y: u8,
     },
+    /// The light pen's position on the glass (`None` lifts it off).
+    Pen {
+        position: Option<(i32, i32)>,
+    },
 }
 
 /// An input action deferred to an emulated-time boundary (`at_seconds`
@@ -496,6 +500,11 @@ pub fn inject_input(
         InputAction::Pot { port, x, y } => {
             emu.bus_mut().input.set_analogue(port as usize, x, y);
             emu.tt_note_input(ReplayAction::Pot { port, x, y });
+            observe_recorder(emu, recorder, secs);
+        }
+        InputAction::Pen { position } => {
+            emu.bus_mut().input.set_light_pen_position(position);
+            emu.tt_note_input(ReplayAction::Pen { position });
             observe_recorder(emu, recorder, secs);
         }
     }

@@ -116,6 +116,7 @@ fn validate_benchmark_args(cli: &CliArgs) -> Result<()> {
         || !cli.mouse_after.is_empty()
         || !cli.mouse_to_after.is_empty()
         || !cli.pot_after.is_empty()
+        || !cli.pen_after.is_empty()
         || !cli.freeze_after.is_empty()
     {
         return Err(anyhow!(
@@ -217,6 +218,7 @@ fn validate_gdb_args(cli: &CliArgs) -> Result<()> {
         || !cli.mouse_after.is_empty()
         || !cli.mouse_to_after.is_empty()
         || !cli.pot_after.is_empty()
+        || !cli.pen_after.is_empty()
         || !cli.freeze_after.is_empty()
     {
         return Err(anyhow!(
@@ -286,6 +288,7 @@ fn validate_control_args(cli: &CliArgs) -> Result<()> {
         || !cli.mouse_after.is_empty()
         || !cli.mouse_to_after.is_empty()
         || !cli.pot_after.is_empty()
+        || !cli.pen_after.is_empty()
         || !cli.freeze_after.is_empty()
     {
         return Err(anyhow!(
@@ -695,6 +698,26 @@ fn list_midi_endpoints() -> Result<()> {
     Ok(())
 }
 
+/// `--list-serial-ports`: the host serial ports `[serial] device` /
+/// `--serial-device` take, as the paths to spell them by.
+fn list_serial_ports() -> Result<()> {
+    if !cfg!(feature = "host-serial") {
+        println!(
+            "This build has no host serial port support; rebuild with --features host-serial."
+        );
+        return Ok(());
+    }
+    let ports = copperline::serial::device::available_host_ports();
+    println!("Serial ports (for --serial-device):");
+    if ports.is_empty() {
+        println!("  (none)");
+    }
+    for port in &ports {
+        println!("  {port}");
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let mut log_builder =
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
@@ -749,6 +772,9 @@ fn main() -> Result<()> {
     }
     if cli.list_midi {
         return list_midi_endpoints();
+    }
+    if cli.list_serial_ports {
+        return list_serial_ports();
     }
     if cli.list_audio_devices {
         return print_audio_output_devices();
@@ -1286,6 +1312,7 @@ fn main() -> Result<()> {
         cli.mouse_after,
         cli.mouse_to_after,
         cli.pot_after,
+        cli.pen_after,
         disk_insert_after,
         cli.cd_insert_after,
         cli.freeze_after,
@@ -1461,6 +1488,7 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
         None,
         None,
         None,
@@ -1536,6 +1564,7 @@ fn launcher_requested(cli: &CliArgs) -> bool {
         && cli.mouse_after.is_empty()
         && cli.mouse_to_after.is_empty()
         && cli.pot_after.is_empty()
+        && cli.pen_after.is_empty()
         && cli.freeze_after.is_empty()
         && cli.disk_insert_after.is_empty()
         && cli.record_input.is_none()
@@ -2028,6 +2057,51 @@ mod tests {
         assert_eq!(args.click_after, vec![(5.0, MouseButtonKind::Left, 100, 1)]);
         assert_eq!(args.joy_after, vec![(60.0, JoyButtonKind::Red, 300, 0)]);
         assert_eq!(args.pot_after, vec![(12.0, 50, 200, 0)]);
+        Ok(())
+    }
+
+    #[test]
+    fn joy_after_reaches_the_adapter_sockets_and_pen_after_positions_the_pen() -> Result<()> {
+        let args = parse(&[
+            "--joy-after",
+            "4",
+            "red",
+            "100",
+            "3",
+            "--joy-after",
+            "5",
+            "up",
+            "100",
+            "4",
+            "--pen-after",
+            "3",
+            "320",
+            "128",
+            "--pen-after",
+            "6",
+            "-1",
+            "-1",
+            "2",
+            "--noaudio",
+        ])?;
+        assert_eq!(
+            args.joy_after,
+            vec![
+                (4.0, JoyButtonKind::Red, 100, 2),
+                (5.0, JoyButtonKind::Up, 100, 3)
+            ]
+        );
+        assert_eq!(
+            args.pen_after,
+            vec![(3.0, 320, 128, None), (6.0, -1, -1, Some(1))]
+        );
+        assert!(!args.audio_live);
+        // The same directives inside a script.
+        let path = temp_script("pen", "pen-after 4.5 100 40 1\njoy-after 1 fire 50 4\n");
+        let args = parse(&["--script", &path.display().to_string()])?;
+        assert_eq!(args.pen_after, vec![(4.5, 100, 40, Some(0))]);
+        assert_eq!(args.joy_after, vec![(1.0, JoyButtonKind::Red, 50, 3)]);
+        std::fs::remove_file(&path).ok();
         Ok(())
     }
 
