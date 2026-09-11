@@ -989,6 +989,12 @@ pub struct App {
     netplay_disk_picker: Option<(usize, app_netplay::DiskPicker)>,
     // Linux serves clipboard selections from the owning instance.
     host_clipboard: Option<arboard::Clipboard>,
+    /// Set once opening the host clipboard has failed. Whether a session
+    /// has one at all is fixed when it starts -- a Wayland compositor
+    /// without a data-control protocol and no X11 display to fall back on
+    /// has none -- so the 300 ms poll must not keep reopening it: every
+    /// attempt walks the protocols again and logs from inside `arboard`.
+    host_clipboard_unavailable: bool,
     /// When the host clipboard is next polled for the guest
     /// (`service_clipboard`).
     clipboard_next_poll: Option<Instant>,
@@ -2371,6 +2377,7 @@ impl App {
             netplay_setup: None,
             netplay_disk_picker: None,
             host_clipboard: None,
+            host_clipboard_unavailable: false,
             run_ahead_frames,
             runahead_machine_block,
             ui: UiState::default(),

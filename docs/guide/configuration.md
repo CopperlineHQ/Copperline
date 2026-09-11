@@ -2241,6 +2241,11 @@ host as UTF-8 with the platform's line ends. Only text is shared; a
 picture on either clipboard is left alone. The host clipboard is read a
 few times a second while the emulator window has the focus, and only
 when its text changed. Up to 1 MiB of text crosses in either direction.
+A host with no clipboard to read -- a Wayland compositor that offers no
+data-control protocol, with no X11 display behind it -- is reported once
+in the log and then left alone rather than reopened on every poll; the
+guest side of the bridge still runs, so `clipboard.get`/`clipboard.set`
+over the control protocol keep working.
 
 `share` is unset by default, which means the session decides: a windowed
 session shares (the launcher's machines too), a headless run does not,
