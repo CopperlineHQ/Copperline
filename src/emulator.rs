@@ -2303,10 +2303,88 @@ impl Emulator {
     /// Execute exactly `count` CPU instructions (interactive debugger
     /// single-step). The cycle-exact core advances the chipset in lockstep,
     /// so device state stays consistent; no wall-clock pacing is applied.
+    ///
+    /// A CPU halted in STOP retires nothing under a single-instruction
+    /// slice: the 68000 is waiting for an interrupt, and only device time
+    /// can bring one. Such a step falls back to the real-time loop's idle
+    /// fast-forward, exactly as the run-to / step-over / step-out helpers
+    /// do, until one instruction has run -- the first of the interrupt
+    /// handler, which is where control actually goes next.
     pub fn debug_step_instructions(&mut self, count: usize) -> Result<()> {
         for _ in 0..count {
+            let retired = self.retired_instructions();
             self.execute_cpu_slice(1)?;
             self.machine.refresh_irq_line();
+            if self.retired_instructions() == retired && self.machine.stopped() {
+                self.debug_step_stopped_to_wakeup(retired)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Advance a CPU sitting in STOP until one instruction retires: the
+    /// interrupt arrives, the exception is taken, and the step ends on the
+    /// handler's first instruction having run.
+    ///
+    /// The retired instruction, not the exit from STOP, is what ends this:
+    /// an idle fast-forward slice can carry the wake-up and the first
+    /// handler instruction together, while a single-instruction slice
+    /// takes the exception on its own, and a step means the same thing
+    /// either way.
+    ///
+    /// Bounded in emulated time: a CPU stopped with its interrupts masked
+    /// (or with nothing enabled in INTENA) never wakes, and a step must
+    /// still return. The bound is two video frames -- a VBlank, the wake-up
+    /// nearly every STOP waits for, comes once a frame -- after which the
+    /// machine is left stopped where it is, which is what the hardware is
+    /// doing.
+    fn debug_step_stopped_to_wakeup(&mut self, retired_before: u64) -> Result<()> {
+        const STOP_WAKEUP_FRAMES: u64 = 2;
+        let deadline = self
+            .bus()
+            .emulated_frames()
+            .saturating_add(STOP_WAKEUP_FRAMES);
+        while self.retired_instructions() == retired_before {
+            if self.bus().emulated_frames() >= deadline {
+                break;
+            }
+            self.debug_step_one_with_idle()?;
+            // A breakpoint or watchpoint that the wake-up handler trips
+            // ends the step where it hit, as it does on any other run.
+            if self.machine.ui_debug_stop_pending() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// A debugger's "step one instruction" over the control protocol:
+    /// [`Self::debug_step_realtime`], and, when the CPU is parked in STOP
+    /// and the slice therefore retired nothing, the bounded run on to the
+    /// interrupt that wakes it that [`Self::debug_step_instructions`]
+    /// makes. The window's Step and this one then land in the same place.
+    pub fn debug_step_realtime_past_stop(&mut self) -> Result<()> {
+        let retired = self.retired_instructions();
+        self.debug_step_realtime()?;
+        if self.retired_instructions() == retired && self.machine.stopped() {
+            self.debug_step_stopped_to_wakeup(retired)?;
+        }
+        Ok(())
+    }
+
+    /// The same for GDB's `stepi`. Only a step asks for this: `continue`
+    /// runs the machine through STOP by itself, and a caller advancing a
+    /// whole frame one slice at a time (the profiler, a state warm-up)
+    /// would overshoot it, so both keep [`Self::debug_step_for_gdb`].
+    pub fn debug_step_for_gdb_past_stop(&mut self, cpu_idle: &mut bool) -> Result<()> {
+        let retired = self.retired_instructions();
+        self.debug_step_for_gdb(cpu_idle)?;
+        if self.retired_instructions() == retired && self.machine.stopped() {
+            self.debug_step_stopped_to_wakeup(retired)?;
+            // The hunt ran slices of its own, so the caller's idle flag
+            // now describes the CPU it is handed back: idle only if it is
+            // still stopped.
+            *cpu_idle = self.machine.stopped();
         }
         Ok(())
     }
@@ -5177,6 +5255,145 @@ mod tests {
             false,
         )
         .unwrap()
+    }
+
+    /// A program that enables the vertical-blank interrupt and then parks
+    /// the CPU in STOP, the way an idle Amiga waits for work:
+    ///
+    /// ```text
+    /// F80010  MOVE.W #$C020,($DFF09A).L  ; INTENA: master + VERTB
+    /// F80018  STOP   #imm                ; wait for an interrupt
+    /// F8001C  MOVEQ  #1,D0
+    /// F8001E  BRA.S  *
+    /// F80040  MOVE.W #$0020,($DFF09C).L  ; handler: clear INTREQ VERTB
+    /// F80048  RTE
+    /// ```
+    ///
+    /// `stop_sr` is the word STOP loads into SR: `$2000` leaves the
+    /// interrupt mask at 0 so VERTB (level 3) wakes the CPU, `$2700`
+    /// masks every interrupt so nothing ever does.
+    fn emulator_stopped_waiting_for_vblank(stop_sr: u16) -> super::Emulator {
+        let mut rom = vec![0u8; crate::memory::ROM_SIZE];
+        let put = |mem: &mut [u8], off: usize, word: u16| {
+            mem[off..off + 2].copy_from_slice(&word.to_be_bytes());
+        };
+        put(&mut rom, 0x10, 0x33FC); // MOVE.W #imm,(abs).L
+        put(&mut rom, 0x12, 0xC020); // SET | INTEN | VERTB
+        put(&mut rom, 0x14, 0x00DF);
+        put(&mut rom, 0x16, 0xF09A); // INTENA
+        put(&mut rom, 0x18, 0x4E72); // STOP #imm
+        put(&mut rom, 0x1A, stop_sr);
+        put(&mut rom, 0x1C, 0x7001); // MOVEQ #1,D0
+        put(&mut rom, 0x1E, 0x60FE); // BRA.S *
+        put(&mut rom, 0x40, 0x33FC); // handler: MOVE.W #imm,(abs).L
+        put(&mut rom, 0x42, 0x0020); // VERTB
+        put(&mut rom, 0x44, 0x00DF);
+        put(&mut rom, 0x46, 0xF09C); // INTREQ
+        put(&mut rom, 0x48, 0x4E73); // RTE
+
+        let mut chip_ram = vec![0u8; 512 * 1024];
+        chip_ram[0..4].copy_from_slice(&0x0000_4000u32.to_be_bytes()); // reset SSP
+        chip_ram[4..8].copy_from_slice(&0x00F8_0010u32.to_be_bytes()); // reset PC
+        let vertb_vector = 27 * 4; // autovector 27: level 3, where VERTB arrives
+        chip_ram[vertb_vector..vertb_vector + 4].copy_from_slice(&0x00F8_0040u32.to_be_bytes());
+
+        let bus = crate::bus::Bus::new(
+            crate::memory::Memory {
+                chip_ram,
+                slow_ram: Vec::new(),
+                mb_ram: Vec::new(),
+                accel_ram: Vec::new(),
+                rom,
+                overlay: false,
+                zorro: crate::zorro::ZorroChain::default(),
+                extended_rom: Vec::new(),
+                extended_rom_base: 0,
+                wcs: Vec::new(),
+                wcs_write_protected: false,
+            },
+            crate::chipset::paula::Paula::new(
+                Box::new(crate::serial::NullSerialSink),
+                Box::new(crate::audio::NullSink),
+            ),
+            crate::floppy::FloppyController::default(),
+        );
+        let mut emu = super::Emulator::new(
+            bus,
+            crate::config::CpuModel::M68000,
+            false,
+            Default::default(),
+            crate::config::PacingBudget::Cycles,
+            2,
+            false,
+        )
+        .unwrap();
+        // Run the INTENA write and the STOP, leaving the CPU parked.
+        emu.debug_step_instructions(2).unwrap();
+        assert!(emu.machine.stopped(), "the program should be in STOP");
+        emu
+    }
+
+    #[test]
+    fn a_single_step_carries_a_stopped_cpu_to_its_wake_up_interrupt() {
+        let mut emu = emulator_stopped_waiting_for_vblank(0x2000);
+        let retired = emu.retired_instructions();
+
+        emu.debug_step_instructions(1).unwrap();
+
+        // The step ran the VERTB interrupt's arrival, its exception, and
+        // the handler's first instruction -- exactly one instruction, in
+        // the place control went -- rather than standing still on a CPU
+        // that executes nothing.
+        assert!(!emu.machine.stopped(), "the interrupt should have woken it");
+        assert_eq!(emu.retired_instructions(), retired + 1);
+        assert_eq!(emu.machine.pc(), 0x00F8_0048); // the handler's RTE
+    }
+
+    #[test]
+    fn the_control_and_gdb_steps_carry_a_stopped_cpu_the_same_way() {
+        // Every debugger surface agrees on where a step from STOP lands,
+        // so a session driven over the control protocol or by GDB reads
+        // the same as the window's Step button.
+        let mut emu = emulator_stopped_waiting_for_vblank(0x2000);
+        let retired = emu.retired_instructions();
+        emu.debug_step_realtime_past_stop().unwrap();
+        assert!(!emu.machine.stopped());
+        assert_eq!(emu.retired_instructions(), retired + 1);
+        assert_eq!(emu.machine.pc(), 0x00F8_0048);
+
+        let mut emu = emulator_stopped_waiting_for_vblank(0x2000);
+        let retired = emu.retired_instructions();
+        let mut cpu_idle = false;
+        emu.debug_step_for_gdb_past_stop(&mut cpu_idle).unwrap();
+        assert!(!emu.machine.stopped());
+        assert_eq!(emu.retired_instructions(), retired + 1);
+        assert_eq!(emu.machine.pc(), 0x00F8_0048);
+        // The caller's idle flag describes the running CPU it got back,
+        // so its next step does not fast-forward as if still parked.
+        assert!(!cpu_idle);
+    }
+
+    #[test]
+    fn stepping_a_stopped_cpu_that_never_wakes_still_returns() {
+        // Interrupts masked in SR: no interrupt can reach the CPU, so the
+        // step gives up at its bound and leaves the machine stopped where
+        // the hardware itself is stuck.
+        let mut emu = emulator_stopped_waiting_for_vblank(0x2700);
+        let retired = emu.retired_instructions();
+        let frames = emu.bus().emulated_frames();
+
+        emu.debug_step_instructions(1).unwrap();
+
+        assert!(emu.machine.stopped(), "nothing can wake a masked CPU");
+        assert_eq!(emu.retired_instructions(), retired);
+        // Bounded: the step advanced device time looking for a wake-up,
+        // but only as far as the two-frame budget allows.
+        assert!(
+            emu.bus().emulated_frames() <= frames + 2,
+            "step ran past its bound: {} -> {}",
+            frames,
+            emu.bus().emulated_frames()
+        );
     }
 
     #[test]

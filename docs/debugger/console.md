@@ -58,6 +58,12 @@ Commands are case-insensitive. Addresses and data values use hexadecimal notatio
 | `RFRAME` | Step one video frame backward |
 | `RRUN` (or `RC`) | Run backward to previous breakpoint or watchpoint |
 
+`STEP`, `OVER`, `OUT` and `RUNTO` carry a CPU parked in `STOP` to the
+interrupt that wakes it -- a stopped 68000 retires nothing until one
+arrives -- so a single `STEP` there retires the handler's first
+instruction. A CPU no interrupt can reach (SR mask 7, or nothing enabled
+in `INTENA`) stays stopped after two video frames of waiting.
+
 ### Breakpoints and watchpoints
 
 | Command | Description |

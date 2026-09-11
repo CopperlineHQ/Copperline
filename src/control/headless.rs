@@ -706,7 +706,7 @@ impl Session {
         match kind {
             ResumeKind::Step { n } => {
                 for _ in 0..*n {
-                    self.emu.debug_step_realtime()?;
+                    self.emu.debug_step_realtime_past_stop()?;
                     self.input.apply_due_scheduled(&mut self.emu);
                     self.emit_events()?;
                     if let Some((reason, detail)) = self.take_stop() {

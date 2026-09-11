@@ -255,7 +255,12 @@ events.unsubscribe {"events":["serial"]}
 
 ### Execution control
 - `continue`: Resume execution.
-- `step {"n": 1}`: Single-step CPU instructions.
+- `step {"n": 1}`: Single-step CPU instructions. A CPU parked in `STOP` retires
+  nothing until an interrupt arrives, so a step there carries it to the one that
+  wakes it and retires the handler's first instruction; when no interrupt can
+  reach it (SR mask 7, or nothing enabled in `INTENA`) the step gives up after
+  two video frames and the stop event reports the unchanged
+  `retired_instructions`.
 - `step_over`: Step over subroutine call.
 - `step_out`: Step out of current subroutine.
 - `step_copper`: Step single Copper instruction.

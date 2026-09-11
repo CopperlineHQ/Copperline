@@ -79,6 +79,10 @@ The target starts halted at reset. The stub supports:
 - Memory read and write operations
 - Breakpoints plus write (`Z2`), read (`Z3`), and access (`Z4`) watchpoints
 - Single-stepping and continuation; forced PC writes discard stale instruction prefetch
+- `stepi` on a CPU parked in `STOP` carries it to the interrupt that wakes it
+  and retires the handler's first instruction, rather than reporting a stop at
+  the PC it was asked to step from; a CPU no interrupt can reach (SR mask 7, or
+  nothing enabled in `INTENA`) stays stopped after two video frames of waiting
 - Ctrl-C interrupt handling
 - Reverse execution (`reverse-step`, `reverse-continue`)
 - Program relocation querying (`qOffsets`) and dynamic library tracking (`qXfer:libraries:read`)
