@@ -79,7 +79,6 @@ jobs:
           cp crates/copperline-libretro/copperline_libretro.info libretro-package/
           cp LICENSE libretro-package/
           cp assets/aros/LICENSE assets/aros/ACKNOWLEDGEMENTS assets/aros/README.md libretro-package/aros/
-          cp -R assets/aros/patches libretro-package/aros/
           cp docs/guide/libretro.md libretro-package/README.md
       - uses: actions/upload-artifact@v7
         with:

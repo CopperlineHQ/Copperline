@@ -17,33 +17,129 @@ The two halves are consumed exactly as WinUAE and FS-UAE take them.
 
 ## Provenance
 
-Built from source on 2026-09-05 from AROS upstream master
-(https://github.com/aros-development-team/AROS) at commit `a3cfa659ed`,
-plus one local patch, `patches/0001-m68k-amiga-dos-keep-the-8-KiB-process-stack-floor.patch`:
+Built from source on 2026-09-11 from AROS upstream master
+(https://github.com/aros-development-team/AROS) at commit `311afcc057`
+merged with pull request 1179
+(https://github.com/aros-development-team/AROS/pull/1179, head
+`2776346929`, open at the time of the build). No local patch is carried
+any more: upstream commit `765871daef` now defines `PROC_MINSTACKSIZE` as
+`PROC_STACKSIZE` (8 KiB) in arch/m68k-amiga/dos/dos_platform.h, which is
+exactly the floor the previous refresh carried as
+`patches/0001-m68k-amiga-dos-keep-the-8-KiB-process-stack-floor.patch`, so
+that patch and the `patches/` directory are gone. The 4 KiB floor of
+`e9c4ecde99` was what broke every `--run` and copperhf autoboot: a boot
+that runs a Startup-Sequence with handler processes overflows a 4 KiB
+process stack, the staged program never starts and the boot process
+warm-reboots a minute later.
 
-- arch/m68k-amiga/dos/dos_platform.h keeps `PROC_MINSTACKSIZE` at 8 KiB.
-  Upstream commit `e9c4ecde99` (pull request 1109) lowered the m68k DOS
-  process stack floor from 16 KiB to 4 KiB and pinned the Shell-seg,
-  "Boot Mount" and lddemon processes at 4 KiB, sized from a CD32 disc
-  boot, which runs no Startup-Sequence. A boot that does run one -- the
-  `--run` staging volume with its `Run`/`Execute` line, plus the
-  host-directory and copperhf handler processes -- overflows those stacks:
-  the program never starts and the boot process warm-reboots a minute
-  later (every copperhf autoboot integration test failed). Restoring the
-  8 KiB floor fixes all of them. Two stacks overflow independently:
-  AROS's own Shell-seg pin (raising Copperline's handler request while
-  leaving the pin at 4 KiB still fails) and the 6000-byte stack
-  Copperline's host-directory handler used to request (raising every AROS
-  pin to 8 KiB while leaving that request still fails; the same
-  refresh raises it to 16 KiB in `guest/services/handler.c`). Drop the
-  patch once upstream carries an equivalent floor or unpins the shell.
+The ROM banks are close to full at this size: the build links `.rom` at
+513,184 bytes and `.ext` at 523,606 bytes of the 524,288-byte banks, so
+the ext bank has 682 bytes spare. A future refresh that overflows a bank
+has to drop modules from the ROM's module list rather than grow the file.
 
-Plain machine boots (the "Waiting for bootable media" screen), CD32 game
-boots and the Cannon Fodder FMV regression pass with and without the patch;
-only Startup-Sequence boots with handler processes need it.
+Pull request 1179 ("m68k: memory footprint reduction", Nicolas Ramz) is
+why this refresh exists. It trims the resident OS's own allocations,
+which is memory a game or demo gets back:
 
-Upstream changes since the previous refresh (master `6b5933dc` plus the
-then-draft pull request 1089):
+- m68k CPU context allocations are sized to the processor actually
+  detected (a full bootstrap context is still kept until detection runs),
+  every ETask drops the scheduler bookkeeping m68k does not use and reuses
+  the saved CPU context for stopped-task alert details instead of keeping
+  a second one, and the exception-handler table becomes one sparse list
+  instead of 256 preallocated empty ones.
+- Exec pools: a pool handle block, which holds no allocatable payload,
+  no longer carries allocator search state, and a pool's first data puddle
+  starts at the requested size and grows toward the configured puddle size
+  as the pool expands. Pools that retain a handful of objects no longer
+  commit a full puddle each -- the single largest saving in the series.
+- The gameport event buffer, the CDVDFS SCSI command buffer (sized for
+  the largest supported TOC response; the 32 KiB CD data cache is
+  unchanged) and the CDVDFS volume-name buffer are right-sized, and only
+  the ISO primary volume descriptor fields used after mount are retained.
+- OOP root objects are allocated at their known size and freed with
+  FreeMem, so no allocation header sits in front of every object, and each
+  HIDD class coallocates its method and interface tables with 16-bit
+  method metadata.
+- Intuition creates a BOOPSI class pool when the class is first
+  instantiated, starts the menu handler at first menu use, and starts the
+  screen-notify reply task only for the asynchronous port notifications
+  that need it.
+- The Shell sizes each execution buffer from the bounded path and parsed
+  argument lengths instead of holding a fixed 4 KiB temporary, grows its
+  parsing buffers in 128-byte rather than 512-byte steps, and allocates
+  the `.key`/`.def` argument tables only while a script directive needs
+  them.
+- RunCommand's temporary stacks are taken from the high end of free
+  memory on m68k, which keeps the largest low-address block contiguous for
+  legacy software.
+
+Measured under Copperline with a guest probe that calls `AvailMem` at the
+moment a `--run` staged program starts on a `--factory` machine. Total
+free memory (chip plus slow, in bytes):
+
+| Machine                        | before      | after      | gain    |
+|--------------------------------|-------------|------------|---------|
+| A500, 512K chip + 512K slow    |     646,768 |    741,832 | +95,064 |
+| A500, 1 MB chip, no slow/fast  |     646,872 |    741,936 | +95,064 |
+| A1200, 2 MB chip, no fast      |   1,680,816 |  1,777,232 | +96,416 |
+
+The largest contiguous chip block gains slightly more than the total,
+because the freed allocations were scattered: 630,864 -> 735,632 bytes on
+the 1 MB A500 and 1,664,768 -> 1,770,928 on the A1200. The pull request
+reports 96,600 bytes saved at Startup-Sequence entry and 117,928 after
+reaching a Workbench 1.3 desktop, so Copperline sees the same figure at
+the point its boot volume hands over.
+
+Upstream changes since the previous refresh (master `a3cfa659ed` plus the
+local stack-floor patch) that reach this ROM:
+
+- `765871daef` fixes m68k stack alignment and restores the 8 KiB process
+  floor described above.
+- `00d74535c5` (cd.device, CD32 startup memory and audio playback): the
+  unit task registers the boot node at normal priority and is raised to
+  the Commodore driver's priority afterwards, so early boot is not starved
+  and does not fragment chip RAM; CDVDFS reads ahead in a single 32 KiB
+  chunk, which keeps the contiguous chip block a demanding title needs on
+  a stock 2 MB CD32; the CD audio path is unmuted once the unit is added;
+  and a PLAY request lives until the drive reports the audio finished,
+  with the unit task still answering pause, status and abort.
+- `e35256ca74` (delayed CD32 media insertion): cd.device starts at its
+  final priority without filesystem polling, a media change that arrives
+  late is tracked and the boot retried only after the no-media screen is
+  released, and cached planar wrappers are detached with their allocation
+  size preserved so closing that screen restores a contiguous chip layout.
+- `93c01c8c78` reverts the m68k CIA timer one-shot "kickstart"
+  (`d771e49b4c`, part of the pull request 1109 series this README
+  described at the previous refresh): CheckTimer already forces the
+  microhz interrupt through SetICR, which reprograms a stopped one-shot,
+  so the extra 1-tick timer fired a second interrupt while the real
+  deadline was still counting, timer.device requests completed early and
+  the boot hung in device init (AROS issue 1118).
+- a Shell hardening series (`b638d1316f`, `c988aa538d`, `c740f4f7aa`,
+  `0bc387a50b`, `4ad38eaa15`, `864361c553`, `ed4f8d8631`, `e179264d53`,
+  `b8dda1cdf9`, `71f46f3b11`, `d781171526`, `6b7570c523`, `2aece1d9c7`,
+  `63ba39ea0f`, `8593679171`, `278b8cb90f`): buffer-growth failures are
+  propagated instead of silently truncating a line, embedded interpreter
+  state is finalised and its ReadArgs ownership fixed, a failed append
+  redirection is cleaned up, backtick temporary files are deleted and the
+  backtick state inherits the CLI number, and dot-argument names must
+  match in full.
+- `1d19150234` (Run): the child's output and error handles are duplicated
+  through a checked helper, because the parent Shell closes its
+  redirections when the command returns, and a seekable stream keeps its
+  position so `>>` no longer overwrites what it should append to.
+- console.device and console.handler bounds and lifetime fixes
+  (`92ed0dc1b0`, `b687e5051b`, `46d6c94554`, `2bec5a669e`, `b4451d4ab7`,
+  `9345da6d0a`, `ce632624c2`, `82b41642bc`, `474db96eae`, `c83001d91f`),
+  and `ccabe7136e`, which preserves the classic ACTION_DISK_INFO data a
+  con-handler returns.
+- `1059af68fb` and `da6ef05b95` (ata.device): ATAPI interrupt handling
+  stops once a command completes, and queued I/O requests abort properly.
+- `e37a98368a` and `f7e31afa34`: graphics/diskfont arbitrates the font
+  list with a semaphore, shared by name rather than by LVO.
+
+The previous refresh (master `a3cfa659ed`) picked these up since master
+`6b5933dc` plus the then-draft pull request 1089:
 
 - pull request 1089 (https://github.com/aros-development-team/AROS/pull/1089,
   merged 2026-09-01) is now in master: the open `cd32mpeg.device`, Mode-2
@@ -66,8 +162,9 @@ then-draft pull request 1089):
   1,562,168 bytes, which lets the game's CDXL arena avoid its
   producer/consumer wrap deadlock on a stock 2 MB CD32. The same series
   honours zero-length CDXL transfer terminators, fixes Microcosm's CDXL
-  startup, and restarts the CIA timer after an aborted timer.device
-  request.
+  startup, and restarted the CIA timer after an aborted timer.device
+  request (that last one is reverted in this refresh, see `93c01c8c78`
+  above).
 - the CDXL presentation series of pull request 1125
   (https://github.com/aros-development-team/AROS/pull/1125, merged
   2026-09-04): PBX sector copying moves to the cd.device task with
@@ -277,6 +374,21 @@ cleanly on macOS):
     ../AROS/configure --target=amiga-m68k    # needs python3-mako and python3-yaml
     make kernel-link-amiga-m68k
     # ROMs land in bin/amiga-m68k/gen/boot/aros-amiga-m68k-{rom,ext}.bin
+
+A build that carries an unmerged pull request merges its head into master
+in the source tree first, so the provenance above is a commit pair anyone
+can reproduce:
+
+    git fetch https://github.com/<author>/AROS.git <branch>
+    git merge FETCH_HEAD                     # from upstream master
+
+Reconfiguring a fresh build directory against an existing crosstools tree
+avoids rebuilding the cross compiler and avoids the stale generated
+headers an incremental build across commits leaves behind:
+
+    ../AROS/configure --target=amiga-m68k --with-aros-toolchain=yes \
+        --with-aros-toolchain-install=<old build>/bin/linux-<arch>/tools/crosstools
+    cp -a <old build>/bin/Sources/. bin/Sources/   # skip the source downloads
 
 Refreshing from the official nightly is a simpler alternative:
 download `AROS-<date>-amiga-m68k-boot-iso.zip` from
