@@ -10611,7 +10611,9 @@ fn power_off_releases_a_programmatic_hold() {
 #[cfg(feature = "control")]
 mod warp_control {
     use super::super::app_session::WarpSource;
-    use super::{test_app, test_app_with_audio, SuspensionSink};
+    use super::{
+        test_app, test_app_with_audio, test_app_with_audio_cpu_and_program, SuspensionSink,
+    };
     use crate::control::exec::parse_method;
     use crate::control::windowed::{ControlHandle, CtlMsg};
     use serde_json::{json, Value};
@@ -10823,6 +10825,40 @@ mod warp_control {
         assert!(app.emu.paced());
     }
 
+    /// A machine parked in STOP with every interrupt masked in SR: no
+    /// interrupt can reach the CPU, so a step that hunts for its wake-up
+    /// shows up as the emulated frames it gives the machine, where the
+    /// single slice this used to take stood still. Paused, because the
+    /// control protocol's bounded step verbs refuse a running machine.
+    fn stopped_app() -> App {
+        let mut app = test_app_with_audio_cpu_and_program(
+            Box::new(crate::audio::NullSink),
+            crate::config::CpuModel::M68000,
+            &[0x4E72, 0x2700], // STOP #$2700
+        );
+        app.powered_on = true;
+        app.paused = true;
+        app
+    }
+
+    #[test]
+    fn a_windowed_control_step_carries_a_cpu_parked_in_stop() {
+        let mut app = stopped_app();
+        let (tx, rx) = attach(&mut app);
+        call(&mut app, &tx, &rx, 1, "step", json!({"n": 1}));
+        assert!(app.emu.machine.stopped(), "the program parks the CPU");
+
+        let before = app.emu.bus().emulated_frames();
+        call(&mut app, &tx, &rx, 2, "step", json!({"n": 1}));
+        let advanced = app.emu.bus().emulated_frames() - before;
+        assert!(
+            (1..=crate::emulator::DEBUG_STOP_WAKEUP_FRAMES).contains(&advanced),
+            "a windowed control step should hunt for the wake-up, bounded: \
+             advanced {advanced} frame(s)"
+        );
+        assert!(app.emu.machine.stopped(), "nothing can wake a masked CPU");
+    }
+
     #[test]
     fn control_warp_hold_outlives_a_finishing_boot_gate() {
         let (mut app, states) = audio_app();
@@ -10976,7 +11012,7 @@ mod warp_control {
 
 #[cfg(feature = "gdb")]
 mod gdb_drain {
-    use super::test_app;
+    use super::{test_app, test_app_with_audio_cpu_and_program};
     use crate::gdbstub::core::{checksum, hex_encode};
     use crate::gdbstub::windowed::{GdbHandle, GdbMsg};
     use std::sync::mpsc::{Receiver, Sender};
@@ -11008,6 +11044,39 @@ mod gdb_drain {
             out.push(f);
         }
         out
+    }
+
+    #[test]
+    fn a_windowed_stepi_carries_a_cpu_parked_in_stop() {
+        // STOP #$2700 masks every interrupt, so nothing wakes this CPU:
+        // the hunt for its wake-up is visible as the emulated frames the
+        // `s` packet gives the machine, where a single slice stood still.
+        let mut app = test_app_with_audio_cpu_and_program(
+            Box::new(crate::audio::NullSink),
+            crate::config::CpuModel::M68000,
+            &[0x4E72, 0x2700],
+        );
+        app.powered_on = true;
+        let (handle, cmd_tx, frame_rx) = GdbHandle::test_pair();
+        app.attach_gdb(handle, &crate::gdbstub::Config::new(":0".into()));
+        cmd_tx.send(GdbMsg::Connected).unwrap();
+
+        packet(&cmd_tx, "s");
+        app.drain_gdb();
+        assert!(app.emu.machine.stopped(), "the program parks the CPU");
+        let before = app.emu.bus().emulated_frames();
+
+        packet(&cmd_tx, "s");
+        app.drain_gdb();
+        let advanced = app.emu.bus().emulated_frames() - before;
+        assert!(
+            (1..=crate::emulator::DEBUG_STOP_WAKEUP_FRAMES).contains(&advanced),
+            "stepi should hunt for the wake-up, bounded: advanced {advanced} frame(s)"
+        );
+        assert!(
+            !frames(&frame_rx).is_empty(),
+            "each step replies with a stop"
+        );
     }
 
     #[test]

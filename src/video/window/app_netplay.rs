@@ -63,7 +63,19 @@ impl App {
     fn copy_netplay_code(&mut self, code: String) -> std::result::Result<(), arboard::Error> {
         // Keep the selection owner alive after this click on X11/Wayland.
         if self.host_clipboard.is_none() {
-            self.host_clipboard = Some(arboard::Clipboard::new()?);
+            match arboard::Clipboard::new() {
+                Ok(clip) => self.host_clipboard = Some(clip),
+                Err(error) => {
+                    // A host with no clipboard has none for the guest
+                    // poll either: latch it here too, or the poll would
+                    // start reopening (and re-logging) what this click
+                    // has just found missing. The click still reports the
+                    // error it got, and a later click may try again --
+                    // it is a deliberate action, not a 300 ms timer.
+                    self.host_clipboard_unavailable = true;
+                    return Err(error);
+                }
+            }
         }
         self.host_clipboard.as_mut().unwrap().set_text(code)
     }

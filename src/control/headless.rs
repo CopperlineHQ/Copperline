@@ -706,11 +706,39 @@ impl Session {
         match kind {
             ResumeKind::Step { n } => {
                 for _ in 0..*n {
-                    self.emu.debug_step_realtime_past_stop()?;
-                    self.input.apply_due_scheduled(&mut self.emu);
-                    self.emit_events()?;
-                    if let Some((reason, detail)) = self.take_stop() {
-                        return stop(reason, detail);
+                    // A CPU parked in STOP retires nothing until an
+                    // interrupt reaches it, so the hunt for its wake-up
+                    // runs here rather than inside the emulator: this
+                    // loop owns the scheduled input, and a key or pad
+                    // press due during those frames is what wakes some
+                    // guests. Applied slice by slice, it still lands at
+                    // the emulated time it was scheduled for.
+                    let retired = self.emu.retired_instructions();
+                    let deadline = self
+                        .emu
+                        .bus()
+                        .emulated_frames()
+                        .saturating_add(crate::emulator::DEBUG_STOP_WAKEUP_FRAMES);
+                    loop {
+                        self.emu.debug_step_realtime()?;
+                        self.input.apply_due_scheduled(&mut self.emu);
+                        self.emit_events()?;
+                        if let Some((reason, detail)) = self.take_stop() {
+                            return stop(reason, detail);
+                        }
+                        if self.emu.retired_instructions() != retired {
+                            // The step's instruction ran.
+                            break;
+                        }
+                        if !self.emu.machine.stopped() {
+                            // Retired nothing and is not parked either:
+                            // a halted CPU has nothing to hunt for.
+                            break;
+                        }
+                        if self.emu.bus().emulated_frames() >= deadline {
+                            // Bounded: no interrupt can reach this CPU.
+                            break;
+                        }
                     }
                 }
                 return stop("step", format!("{n} instruction(s)"));

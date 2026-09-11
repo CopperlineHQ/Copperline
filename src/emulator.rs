@@ -29,6 +29,12 @@ const SERIAL_LIVE_IDLE_CAP_CCK: u32 = 256;
 /// (e.g. a permanently halted CPU) cannot spin forever. Far larger than the
 /// instruction distance between two snapshots at any sane capture interval.
 const TT_REPLAY_STEP_CAP: u64 = 100_000_000;
+/// How far a debugger step hunts for the interrupt that wakes a CPU parked
+/// in STOP. A VBlank -- what nearly every STOP waits for -- comes once a
+/// frame, and a CPU whose interrupts are masked never wakes at all, so the
+/// step gives up here and leaves the machine stopped. Shared with the
+/// control session, which runs the same hunt around its scheduled input.
+pub const DEBUG_STOP_WAKEUP_FRAMES: u64 = 2;
 /// Approximate CPU cycles per emulated M68000 instruction for converting
 /// frame-sized instruction budgets and real-mode device cadence. The
 /// instruction-paced backend is not cycle-exact, so use the 68000's
@@ -2332,18 +2338,15 @@ impl Emulator {
     /// takes the exception on its own, and a step means the same thing
     /// either way.
     ///
-    /// Bounded in emulated time: a CPU stopped with its interrupts masked
-    /// (or with nothing enabled in INTENA) never wakes, and a step must
-    /// still return. The bound is two video frames -- a VBlank, the wake-up
-    /// nearly every STOP waits for, comes once a frame -- after which the
-    /// machine is left stopped where it is, which is what the hardware is
-    /// doing.
+    /// Bounded in emulated time by [`DEBUG_STOP_WAKEUP_FRAMES`]: a CPU
+    /// stopped with its interrupts masked (or with nothing enabled in
+    /// INTENA) never wakes, and a step must still return, so the machine
+    /// is left stopped where it is -- which is what the hardware is doing.
     fn debug_step_stopped_to_wakeup(&mut self, retired_before: u64) -> Result<()> {
-        const STOP_WAKEUP_FRAMES: u64 = 2;
         let deadline = self
             .bus()
             .emulated_frames()
-            .saturating_add(STOP_WAKEUP_FRAMES);
+            .saturating_add(DEBUG_STOP_WAKEUP_FRAMES);
         while self.retired_instructions() == retired_before {
             if self.bus().emulated_frames() >= deadline {
                 break;

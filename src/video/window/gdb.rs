@@ -611,7 +611,9 @@ impl App {
             self.sync_live_audio_suspension();
             self.complete_remote_resumes("pause", "paused for a gdb step");
         }
-        let reply = match self.emu.debug_step_realtime() {
+        // `stepi` carries a CPU parked in STOP to the interrupt that wakes
+        // it, as it does on the headless stub and in the workspace.
+        let reply = match self.emu.debug_step_realtime_past_stop() {
             Err(e) => {
                 error!("gdb: step halted the machine: {e:?}");
                 self.cpu_halted = true;
