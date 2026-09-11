@@ -4,6 +4,7 @@
 //! and four-channel audio DMA + mixer.
 
 use crate::audio::mux::AudioMux;
+use crate::audio::resample::Decimator;
 use crate::audio::{AudioRuntimeStatus, AudioSink, MIX_SAMPLE_RATE};
 use crate::drive_sounds::DriveSounds;
 use crate::serial::SerialSink;
@@ -54,6 +55,50 @@ const ADKCON_UARTBRK: u16 = 1 << 11;
 /// DMACON.DMAEN master enable. Stored on agnus.dmacon; Paula audio
 /// gating ANDs this with the per-channel AUDxEN bits 0..3.
 pub const DMACON_DMAEN: u16 = 1 << 9;
+/// How many times the mixer's rate Paula's own channels are summed at
+/// before being filtered down onto it.
+///
+/// Paula's DAC output is a staircase that steps on the colour-clock grid,
+/// at up to ~28.6 kHz per channel. Landing that directly on a 44.1 kHz
+/// grid folds everything above the mixer's Nyquist back into the audible
+/// band: a 10 kHz square's third harmonic at 30 kHz arrives as a 14 kHz
+/// whistle, its fifth as 6 kHz, and so on -- inharmonic, so it is heard as
+/// ringing rather than brightness. Integrating the staircase exactly over
+/// each oversample interval and then filtering 4:1 with a windowed sinc
+/// puts the worst surviving image about 47 dB under the tone. Four is
+/// where the two stages balance: the box average needs the oversample rate
+/// well above Paula's own, and the sinc's transition band needs it low
+/// enough to stay clear of the top of the audio band. See
+/// `docs/internals/audio.md`.
+const PAULA_OVERSAMPLE: u32 = 4;
+
+/// Peak headroom the mix leaves for reconstruction overshoot.
+///
+/// Band-limiting takes the staircase's harmonics away, and what is left
+/// overshoots the steps it came from: a full-scale square at 10 kHz keeps
+/// only its fundamental, whose peak is 4/PI of the square's, and a
+/// full-scale 25% pulse train does slightly better still. How much better
+/// depends on how fast the staircase is allowed to move, and nothing here
+/// bounds that -- AUDxPER has no floor in the hardware or in
+/// `aud_percntrld`, and a CPU feeding AUDxDAT in IRQ mode is not held to
+/// the period audio DMA can sustain -- so the headroom is taken from the
+/// decimation kernel instead: the sum of its absolute taps is the most it
+/// can produce from input bounded by full scale, whatever the input is.
+/// `the_mix_headroom_covers_the_decimation_kernel` holds this to the
+/// kernel it is claimed for. A real Amiga's analogue reconstruction filter
+/// overshoots its own DAC the same way, so this is simply where a line
+/// input would have to be set; folding it in here is what keeps everything
+/// Paula can play inside the host's range instead of clipping on the way
+/// out.
+const PAULA_RECONSTRUCTION_HEADROOM: f32 = 1.58;
+
+/// What one channel's DAC level (sample * volume, -8192..8128) is worth in
+/// the host mix. Two channels reach each side, and the band-limited
+/// waveform overshoots them by up to
+/// [`PAULA_RECONSTRUCTION_HEADROOM`], so this is the divisor that puts the
+/// loudest thing Paula can play at exactly full scale.
+pub(crate) const PAULA_MIX_SCALE: f32 = 1.0 / (128.0 * 64.0 * 2.0 * PAULA_RECONSTRUCTION_HEADROOM);
+
 const LED_FILTER_CUTOFF_HZ: f32 = 4_000.0;
 
 /// HRM audio state-machine states (Paula's three per-channel state bits).
@@ -427,6 +472,12 @@ fn default_true() -> bool {
     true
 }
 
+/// One band-limiting decimator per Paula channel. Also the `serde` default,
+/// so a state written before Paula had them resumes with silent histories.
+fn channel_decimators() -> [Decimator; 4] {
+    std::array::from_fn(|_| Decimator::new(PAULA_OVERSAMPLE))
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Paula {
     pub serper: u16,
@@ -471,8 +522,28 @@ pub struct Paula {
 
     // Mixer host-sample accumulator in units of
     // color-clocks * MIX_SAMPLE_RATE. One output frame is due each
-    // time this reaches PAULA_CLOCK_HZ.
+    // time this reaches PAULA_CLOCK_HZ, and one oversample frame each
+    // time it crosses a PAULA_OVERSAMPLE'th of the way there.
     host_sample_acc: u64,
+    /// Exact integral of each channel's mixed output (DAC sample * volume)
+    /// over the colour clocks since the last oversample instant, and the
+    /// width of that box. Paula's output only steps at period expiries, so
+    /// accumulating `sample * clocks` as the counters run integrates the
+    /// staircase exactly -- the oversample frame is a true average over its
+    /// interval, not whichever step the instant landed on.
+    #[serde(default)]
+    channel_area: [i64; 4],
+    #[serde(default)]
+    area_cck: u32,
+    /// Band-limits each channel's oversampled staircase onto the mixer
+    /// grid. Holds tap history only: the phase of the mixer grid lives in
+    /// `host_sample_acc` alone, so nothing here can contradict it.
+    /// Per channel rather than per side because decimation is linear:
+    /// filtering each channel and summing is the same signal as filtering
+    /// the sum, and it leaves the per-channel stem taps exactly consistent
+    /// with the mix they add up to.
+    #[serde(default = "channel_decimators")]
+    channel_decimator: [Decimator; 4],
 
     /// Effective filter state (what the mix actually applies), resolved from
     /// the mode and the guest's /LED line.
@@ -625,6 +696,9 @@ impl Paula {
             #[cfg(test)]
             test_line_cck: 0,
             host_sample_acc: 0,
+            channel_area: [0; 4],
+            area_cck: 0,
+            channel_decimator: channel_decimators(),
             led_filter_enabled: true,
             led_filter_mode: crate::config::AudioFilterMode::Auto,
             led_filter_guest_on: true,
@@ -860,6 +934,9 @@ impl Paula {
         self.pot_active = [false; 4];
         self.pot_discharge_lines = 0;
         self.host_sample_acc = 0;
+        self.channel_area = [0; 4];
+        self.area_cck = 0;
+        self.channel_decimator = channel_decimators();
         // A reset releases the guest's /LED line; the filter override is a host
         // preference and stays put.
         self.led_filter_guest_on = true;
@@ -1623,18 +1700,59 @@ impl Paula {
         let mut irq_bits = 0;
         let mut remaining = cck;
         while remaining > 0 {
-            let step = remaining.min(self.cck_until_next_output_frame());
+            // Bounded so the mixed output cannot change inside the step:
+            // no oversample instant and no channel period expiry falls
+            // strictly within it, which is what makes the integration
+            // below exact rather than a sample of one step of the
+            // staircase.
+            let step = remaining.min(self.cck_until_mix_input_changes());
+            for ch_idx in 0..4 {
+                self.channel_area[ch_idx] +=
+                    i64::from(self.channel_mixed_sample(ch_idx)) * i64::from(step);
+            }
+            self.area_cck += step;
+
             irq_bits |= self.advance_audio_channels(step, dmacon);
+
+            let before = self.oversample_index();
             self.host_sample_acc += step as u64 * MIX_SAMPLE_RATE as u64;
             remaining -= step;
-
-            while self.host_sample_acc >= PAULA_CLOCK_HZ as u64 {
+            for _ in before..self.oversample_index() {
+                self.push_oversample_frame();
+            }
+            // The last slice of the frame is the frame: the accumulator is
+            // the only thing that says when a mixer frame is due, so a
+            // state restored mid-frame stays in phase without the
+            // decimators having to agree about where they were.
+            if self.host_sample_acc >= PAULA_CLOCK_HZ as u64 {
                 self.host_sample_acc -= PAULA_CLOCK_HZ as u64;
-                self.push_mixed_frame();
+                let mixed = std::array::from_fn(|i| self.channel_decimator[i].output());
+                self.push_mixed_frame(mixed);
             }
         }
 
         irq_bits
+    }
+
+    /// Which of the [`PAULA_OVERSAMPLE`] slices of the current mixer frame
+    /// the accumulator sits in, 0..=PAULA_OVERSAMPLE. Reaching the last one
+    /// is the mixer frame itself, so the same counter drives both grids and
+    /// keeps its meaning (and its range) across a save state.
+    fn oversample_index(&self) -> u64 {
+        self.host_sample_acc * u64::from(PAULA_OVERSAMPLE) / PAULA_CLOCK_HZ as u64
+    }
+
+    /// Close one oversample interval: each channel's exact box average over
+    /// it, into the band-limiting decimators. Whether this interval was
+    /// also a mixer frame is `advance_audio`'s business.
+    fn push_oversample_frame(&mut self) {
+        let width = self.area_cck.max(1) as f32;
+        for ch_idx in 0..4 {
+            let average = self.channel_area[ch_idx] as f32 / width;
+            self.channel_decimator[ch_idx].push(average);
+        }
+        self.channel_area = [0; 4];
+        self.area_cck = 0;
     }
 
     // ---- HRM state-machine terms (the appendix's signal names) ----
@@ -1946,9 +2064,28 @@ impl Paula {
         irq_bits
     }
 
-    fn cck_until_next_output_frame(&self) -> u32 {
-        let needed = (PAULA_CLOCK_HZ as u64).saturating_sub(self.host_sample_acc);
-        needed.div_ceil(MIX_SAMPLE_RATE as u64).max(1) as u32
+    /// Colour clocks until the mixed output can next change: the next
+    /// oversample instant, or the next channel period expiry, whichever
+    /// comes first. `advance_audio` integrates across exactly this span, so
+    /// the sample must hold constant for all of it. An outputting channel's
+    /// `percnt` is always at least 1 (`aud_percntrld` reloads a zero
+    /// AUDxPER as 65536), so this never returns zero and never stalls.
+    fn cck_until_mix_input_changes(&self) -> u32 {
+        let mut cck = self.cck_until_next_oversample_frame();
+        for ch in &self.chans {
+            if ch.outputting() {
+                cck = cck.min(ch.percnt);
+            }
+        }
+        cck.max(1)
+    }
+
+    fn cck_until_next_oversample_frame(&self) -> u32 {
+        let edge = (self.oversample_index() + 1) * PAULA_CLOCK_HZ as u64;
+        let needed = edge.saturating_sub(self.host_sample_acc * u64::from(PAULA_OVERSAMPLE));
+        needed
+            .div_ceil(MIX_SAMPLE_RATE as u64 * u64::from(PAULA_OVERSAMPLE))
+            .max(1) as u32
     }
 
     /// The chip-RAM address the channel's next DMA slot will fetch, when a
@@ -2021,7 +2158,22 @@ impl Paula {
         irq_bits
     }
 
-    fn push_mixed_frame(&mut self) {
+    /// Mix one frame straight from the channels' present levels, for tests
+    /// that exercise the stages after the decimation (routing, LED filter,
+    /// volume, stereo width) rather than the decimation itself. The
+    /// decimators are unity at DC, so a held sample reaches the mixer
+    /// unchanged: this is the settled value of driving `advance_audio` with
+    /// the same state.
+    #[cfg(test)]
+    fn push_mixed_frame_from_channels(&mut self) {
+        let mixed = std::array::from_fn(|i| self.channel_mixed_sample(i) as f32);
+        self.push_mixed_frame(mixed);
+    }
+
+    /// Mix one frame onto the host grid from the four band-limited channel
+    /// levels `push_oversample_frame` produced, in DAC units (sample *
+    /// volume).
+    fn push_mixed_frame(&mut self, mixed: [f32; 4]) {
         let observe_host = !self.speculative_host_quiet;
         // Mix and push host-rate stereo frames into the sink. Paula
         // stereo routing follows the common A500/A600/A1200 and
@@ -2033,11 +2185,14 @@ impl Paula {
         // host PCM path linear until modelling the alternate PWM/filter
         // path as an explicit analog output mode.
         // Volume range is 0..64; each channel sample is signed 8-bit
-        // (-128..127). Scale into [-1.0, 1.0] approximately by
-        // dividing by (128.0 * 64.0). We sum two channels per side
-        // unclipped: worst case is +/-2.0 if both channels saturate
-        // with full volume in opposite phase, which is essentially
-        // never the case for real music.
+        // (-128..127). Two channels reach each side, so full scale is what
+        // both of them saturated at full volume produce, plus the headroom
+        // the band-limited waveform needs to overshoot them: dividing by
+        // (128 * 64 * 2 * PAULA_RECONSTRUCTION_HEADROOM) leaves nothing
+        // Paula can play able to run off the end of the host's range.
+        // Paula is the loudest thing in the mix, so everything line-mixed
+        // alongside it below keeps its level relative to a Paula channel
+        // unchanged.
         // Tap each channel's output level (DAC sample * volume, -128..127)
         // for the debugger oscilloscopes. This is pre-mute so a muted
         // channel's trace still shows its activity (drawn greyed).
@@ -2048,11 +2203,10 @@ impl Paula {
                 scope_push(&mut self.channel_scope[i], level as i8);
             }
         }
-        let l_raw = self.channel_mixed_sample(0) + self.channel_mixed_sample(3);
-        let r_raw = self.channel_mixed_sample(1) + self.channel_mixed_sample(2);
-        let scale = 1.0 / (128.0 * 64.0);
-        let mut left = l_raw as f32 * scale;
-        let mut right = r_raw as f32 * scale;
+        let scale = PAULA_MIX_SCALE;
+        let ch_scaled: [f32; 4] = std::array::from_fn(|i| mixed[i] * scale);
+        let mut left = ch_scaled[0] + ch_scaled[3];
+        let mut right = ch_scaled[1] + ch_scaled[2];
         let filtered = self.led_filter.process(left, right);
         if self.led_filter_enabled {
             (left, right) = filtered;
@@ -2061,8 +2215,6 @@ impl Paula {
         // hardware's LED filter sits after the channel mixer's summation, so
         // the per-channel taps below are deliberately *not* filtered.
         self.audio.push_source("paula", left, right);
-        let ch_scaled: [f32; 4] =
-            std::array::from_fn(|i| self.channel_mixed_sample(i) as f32 * scale);
         self.audio.push_source_channel("paula", "0", ch_scaled[0]);
         self.audio.push_source_channel("paula", "1", ch_scaled[1]);
         self.audio.push_source_channel("paula", "2", ch_scaled[2]);
@@ -2429,6 +2581,44 @@ mod tests {
     }
 
     type SharedFrames = Rc<RefCell<Vec<(f32, f32)>>>;
+
+    /// One channel holding DAC sample 64 at full volume, as it lands on its
+    /// side of the mix. The routing, volume and stereo-width tests below are
+    /// about what happens to a level, not what the level is, so they state
+    /// theirs relative to this instead of repeating the mix scale.
+    const CHANNEL_64_LEVEL: f32 = 64.0 * 64.0 * PAULA_MIX_SCALE;
+
+    /// Correlate a run of mixed frames against one frequency, giving that
+    /// tone's amplitude. A plain rectangular-window DFT bin: the tones these
+    /// tests separate sit thousands of bins apart, so the window's leakage
+    /// lands far below anything they assert on.
+    fn tone_amplitude(samples: &[f32], freq_hz: f64) -> f64 {
+        let (mut re, mut im) = (0.0f64, 0.0f64);
+        for (i, &sample) in samples.iter().enumerate() {
+            let phase = std::f64::consts::TAU * freq_hz * i as f64 / f64::from(MIX_SAMPLE_RATE);
+            re += f64::from(sample) * phase.cos();
+            im += f64::from(sample) * phase.sin();
+        }
+        2.0 * re.hypot(im) / samples.len() as f64
+    }
+
+    /// Loop `pattern` (a chip-RAM image, one sample per byte) on all four
+    /// channels at `per` and full volume, and run `seconds` of emulated
+    /// time through the test DMA pump.
+    fn play_all_channels(paula: &mut Paula, pattern: &[u8], per: u16, seconds: f64) {
+        let mut dmacon = DMACON_DMAEN;
+        for ch in 0..4u16 {
+            let base = ch * 0x10;
+            paula.write_audio_reg(base, 0, 0);
+            paula.write_audio_reg(base + 0x02, 0, 0);
+            paula.write_audio_reg(base + 0x04, (pattern.len() / 2) as u16, 0);
+            paula.write_audio_reg(base + 0x06, per, 0);
+            paula.write_audio_reg(base + 0x08, 64, 0);
+            dmacon |= 1 << ch;
+        }
+        let cck = (f64::from(PAULA_CLOCK_HZ) * seconds) as u32;
+        paula.tick_audio(cck, dmacon, pattern);
+    }
 
     fn paula_with_collect_sink() -> (Paula, SharedFrames) {
         let frames = Rc::new(RefCell::new(Vec::new()));
@@ -3418,10 +3608,14 @@ mod tests {
         let lefts: Vec<f32> = samples.chunks_exact(2).map(|frame| frame[0]).collect();
         let rights: Vec<f32> = samples.chunks_exact(2).map(|frame| frame[1]).collect();
         // Silent lead-in while the start-up fetches run, then the sample
-        // alternates +-0.5 at the period cadence. Left channel only.
+        // alternates at the period cadence, left channel only. The mix is
+        // band-limited on its way to the host grid, so the recorded swing
+        // is the reconstructed waveform rather than the raw step: it
+        // reaches the step's level but is not pinned to it.
+        let level = 64.0 * 64.0 * PAULA_MIX_SCALE;
         assert_eq!(lefts[0], 0.0);
-        assert!(lefts.iter().any(|&l| (l - 0.5).abs() < f32::EPSILON));
-        assert!(lefts.iter().any(|&l| (l + 0.5).abs() < f32::EPSILON));
+        assert!(lefts.iter().any(|&l| l > level * 0.9));
+        assert!(lefts.iter().any(|&l| l < -level * 0.9));
         assert!(rights.iter().all(|&r| r == 0.0));
 
         let _ = std::fs::remove_file(&path);
@@ -3443,7 +3637,7 @@ mod tests {
             for ch_idx in 0..4 {
                 paula.chans[ch_idx].current = 64;
                 paula.chans[ch_idx].audvol = 64;
-                paula.push_mixed_frame();
+                paula.push_mixed_frame_from_channels();
                 paula.chans[ch_idx].current = 0;
             }
         }
@@ -3464,7 +3658,15 @@ mod tests {
             .map(|frame| (frame[0], frame[1]))
             .collect::<Vec<_>>();
 
-        assert_eq!(frames, &[(0.5, 0.0), (0.0, 0.5), (0.0, 0.5), (0.5, 0.0)]);
+        assert_eq!(
+            frames,
+            &[
+                (CHANNEL_64_LEVEL, 0.0),
+                (0.0, CHANNEL_64_LEVEL),
+                (0.0, CHANNEL_64_LEVEL),
+                (CHANNEL_64_LEVEL, 0.0),
+            ]
+        );
 
         let _ = std::fs::remove_file(&path);
     }
@@ -3854,12 +4056,157 @@ mod tests {
         paula.chans[1].audvol = 64;
 
         paula.write_adkcon(0x8000 | 0x0001);
-        paula.advance_audio(PAULA_CLOCK_HZ.div_ceil(MIX_SAMPLE_RATE), 0);
+        // Long enough for the band-limiting decimators to fill their tap
+        // histories: the mix only reaches a held sample's DC level once
+        // they have, so the first frame out is not the settled one.
+        paula.advance_audio(PAULA_CLOCK_HZ / 100, 0);
 
         let frames = frames.borrow();
-        let (left, right) = frames[0];
+        let (left, right) = *frames.last().expect("mixed frames");
         assert_eq!(left, 0.0);
-        assert!(right > 0.9, "target channel should remain audible: {right}");
+        let audible = 127.0 * 64.0 * PAULA_MIX_SCALE;
+        assert!(
+            (right - audible).abs() < 1e-4,
+            "target channel should remain audible at its DC level: {right}"
+        );
+    }
+
+    /// Paula's output is a staircase that steps on the colour-clock grid,
+    /// so the 10 kHz square Amiga Test Kit's audio page plays -- two samples
+    /// at AUDxPER 177, full volume on all four channels -- carries harmonics
+    /// at 30, 50 and 70 kHz. Reading that staircase once per host frame
+    /// folds them back into the audible band at 14.0, 6.0 and 18.1 kHz,
+    /// where they were only 10 dB under the tone and, being inharmonic, were
+    /// heard as ringing. The band-limited decimation has to leave the tone
+    /// itself untouched and put those nowhere near it.
+    #[test]
+    fn a_full_scale_square_arrives_without_its_harmonics_folded_back() {
+        let (mut paula, frames) = paula_with_collect_sink();
+        paula.set_led_filter_guest(false);
+        // One word looping, +127 then -128: a full-scale square at
+        // PAULA_CLOCK_HZ / (2 * 177).
+        play_all_channels(&mut paula, &[0x7F, 0x80], 177, 0.5);
+
+        let frames = frames.borrow();
+        // Past the decimators' tap histories, so only settled output is read.
+        let settled: Vec<f32> = frames[512..].iter().map(|(left, _)| *left).collect();
+        let tone = f64::from(PAULA_CLOCK_HZ) / (2.0 * 177.0);
+        let level = tone_amplitude(&settled, tone);
+        assert!(level > 0.5, "the tone itself should survive: {level}");
+
+        let rate = f64::from(MIX_SAMPLE_RATE);
+        for harmonic in [3.0, 5.0, 7.0, 9.0] {
+            let image = harmonic * tone;
+            let folded = (image - (image / rate).round() * rate).abs();
+            let dbc = 20.0 * (tone_amplitude(&settled, folded) / level).log10();
+            assert!(
+                dbc < -40.0,
+                "harmonic {harmonic} folds to {folded:.0} Hz at {dbc:.1} dBc"
+            );
+        }
+    }
+
+    /// The headroom the mix leaves has to cover the kernel it is claimed
+    /// for: the sum of the absolute taps is the most that kernel can make
+    /// of input bounded by full scale, so a mix scaled by it cannot leave
+    /// the host's range whatever the guest plays. Bounding this by how fast
+    /// AUDxPER lets the staircase move would not do -- nothing enforces a
+    /// minimum period, and a CPU feeding AUDxDAT in IRQ mode is not held to
+    /// the one audio DMA can sustain.
+    #[test]
+    fn the_mix_headroom_covers_the_decimation_kernel() {
+        let peak = Decimator::new(PAULA_OVERSAMPLE).peak_gain();
+        assert!(
+            peak <= PAULA_RECONSTRUCTION_HEADROOM,
+            "kernel can reach {peak} but the mix only leaves              {PAULA_RECONSTRUCTION_HEADROOM}"
+        );
+    }
+
+    /// A state written before the decimators existed restores them empty,
+    /// but carries `host_sample_acc` meaning exactly what it always meant.
+    /// The mixer cadence is read off that accumulator alone, so such a
+    /// resume is in phase from its first frame instead of being left
+    /// however far into a mixer frame it was saved, forever.
+    #[test]
+    fn the_mixer_cadence_follows_the_accumulator_not_the_decimators() {
+        for slice in 0..u64::from(PAULA_OVERSAMPLE) {
+            let (mut paula, frames) = paula_with_collect_sink();
+            // What an older state restores: an accumulator already part way
+            // into a mixer frame, and decimators that have never seen a
+            // sample.
+            paula.host_sample_acc = slice * PAULA_CLOCK_HZ as u64 / u64::from(PAULA_OVERSAMPLE) + 1;
+
+            // Exactly the colour clocks left in the frame it was saved in.
+            let left_in_frame = (PAULA_CLOCK_HZ as u64 - paula.host_sample_acc)
+                .div_ceil(MIX_SAMPLE_RATE as u64) as u32;
+            paula.advance_audio(left_in_frame, 0);
+
+            // That frame, and no more: a decimator counting its own way to
+            // four would still be waiting on the slices already behind it.
+            assert_eq!(
+                frames.borrow().len(),
+                1,
+                "resuming at oversample slice {slice} did not finish its mixer frame"
+            );
+        }
+    }
+
+    /// Full scale is two channels saturated at full volume, plus the
+    /// headroom the band-limited waveform needs to overshoot the steps it
+    /// came from. Amiga Test Kit plays exactly that -- one sample on all
+    /// four channels at volume 64 -- and nothing downstream of the mix
+    /// clips, so the mix itself has to stay inside the host's range. Swept
+    /// over duty cycles because the worst overshoot is not the square (a
+    /// 25% pulse train asks for more), and down past the period audio DMA
+    /// can sustain, since nothing stops a guest asking for one.
+    #[test]
+    fn nothing_paula_can_play_leaves_the_host_range() {
+        for pattern in [
+            [0x7Fu8, 0x80, 0x7F, 0x80],
+            [0x7F, 0x7F, 0x80, 0x80],
+            [0x7F, 0x7F, 0x7F, 0x80],
+            [0x7F, 0x80, 0x80, 0x80],
+        ] {
+            for per in [
+                8u16, 20, 41, 80, 113, 123, 124, 143, 161, 177, 181, 203, 254, 320, 404,
+            ] {
+                let (mut paula, frames) = paula_with_collect_sink();
+                paula.set_led_filter_guest(false);
+                play_all_channels(&mut paula, &pattern, per, 0.05);
+
+                let peak = frames
+                    .borrow()
+                    .iter()
+                    .flat_map(|&(left, right)| [left.abs(), right.abs()])
+                    .fold(0.0f32, f32::max);
+                assert!(
+                    peak <= 1.0,
+                    "pattern {pattern:?} at AUDxPER {per} peaks at {peak}"
+                );
+            }
+        }
+    }
+
+    /// The decimation kernels are unity at DC, so a channel holding a sample
+    /// reaches the mixer at exactly the share of full scale the mix scale
+    /// gives it -- band-limiting changes what a staircase sounds like, not
+    /// what a held level is worth.
+    #[test]
+    fn a_held_sample_reaches_the_mixer_at_its_dc_level() {
+        let (mut paula, frames) = paula_with_collect_sink();
+        paula.set_led_filter_guest(false);
+        // Both bytes the same, so the channels hold +127 instead of
+        // stepping.
+        play_all_channels(&mut paula, &[0x7F, 0x7F], 177, 0.05);
+
+        let frames = frames.borrow();
+        let settled = frames.last().expect("mixed frames").0;
+        // Channels 0 and 3 both reach the left side.
+        let expected = 2.0 * 127.0 * 64.0 * PAULA_MIX_SCALE;
+        assert!(
+            (settled - expected).abs() < 1e-4,
+            "held sample settled at {settled}, expected {expected}"
+        );
     }
 
     #[test]
@@ -3870,7 +4217,7 @@ mod tests {
             paula.chans[0].audvol = 64;
             for i in 0..256 {
                 paula.chans[0].current = if i & 1 == 0 { 127 } else { -127 };
-                paula.push_mixed_frame();
+                paula.push_mixed_frame_from_channels();
             }
             let frames = frames.borrow();
             let settled = &frames[64..];
@@ -3938,7 +4285,7 @@ mod tests {
                 paula.chans[0].audvol = 64;
                 for i in 0..256 {
                     paula.chans[0].current = if i & 1 == 0 { 127 } else { -127 };
-                    paula.push_mixed_frame();
+                    paula.push_mixed_frame_from_channels();
                 }
             }
 
@@ -3974,12 +4321,12 @@ mod tests {
         paula.chans[0].current = 64;
         paula.chans[0].audvol = 64;
 
-        paula.push_mixed_frame();
+        paula.push_mixed_frame_from_channels();
 
         let frames = frames.borrow();
         assert_eq!(paula.output_volume_percent(), 50);
         assert_eq!(paula.chans[0].audvol, 64);
-        assert!((frames[0].0 - 0.25).abs() < f32::EPSILON);
+        assert!((frames[0].0 - CHANNEL_64_LEVEL * 0.5).abs() < 1e-6);
         assert_eq!(frames[0].1, 0.0);
     }
 
@@ -3993,37 +4340,37 @@ mod tests {
         paula.chans[0].current = 64;
         paula.chans[0].audvol = 64;
 
-        paula.push_mixed_frame();
+        paula.push_mixed_frame_from_channels();
 
         let frames = frames.borrow();
         assert_eq!(frames[0].0, frames[0].1, "mono means identical channels");
-        assert!((frames[0].0 - 0.25).abs() < f32::EPSILON);
+        assert!((frames[0].0 - CHANNEL_64_LEVEL * 0.5).abs() < 1e-6);
     }
 
     #[test]
     fn stereo_separation_narrows_from_hardware_panning_toward_mono() {
-        // Drive left channel only: hardware panning gives (0.5, 0.0).
+        // Drive left channel only: hardware panning puts the whole level left.
         let out = |sep: f32| {
             let (mut paula, frames) = paula_with_collect_sink();
             paula.set_led_filter_guest(false);
             paula.set_stereo_separation(sep);
             paula.chans[0].current = 64;
             paula.chans[0].audvol = 64;
-            paula.push_mixed_frame();
+            paula.push_mixed_frame_from_channels();
             let frame = frames.borrow()[0];
             frame
         };
         // 100%: untouched.
         let full = out(1.0);
-        assert!((full.0 - 0.5).abs() < f32::EPSILON && full.1 == 0.0);
-        // 0%: mono (both = the 0.25 average).
+        assert!((full.0 - CHANNEL_64_LEVEL).abs() < 1e-6 && full.1 == 0.0);
+        // 0%: mono, both sides the average of the two.
         let mono = out(0.0);
         assert_eq!(mono.0, mono.1);
-        assert!((mono.0 - 0.25).abs() < f32::EPSILON);
-        // 50%: mid 0.25 +/- side (0.25 * 0.5) -> (0.375, 0.125).
+        assert!((mono.0 - CHANNEL_64_LEVEL * 0.5).abs() < 1e-6);
+        // 50%: mid +/- half the side, so three quarters left, one quarter right.
         let half = out(0.5);
-        assert!((half.0 - 0.375).abs() < f32::EPSILON);
-        assert!((half.1 - 0.125).abs() < f32::EPSILON);
+        assert!((half.0 - CHANNEL_64_LEVEL * 0.75).abs() < 1e-6);
+        assert!((half.1 - CHANNEL_64_LEVEL * 0.25).abs() < 1e-6);
     }
 
     #[test]

@@ -6,6 +6,91 @@ routes the master mix and individual sources to playback or WAV capture.
 Mixing, LED filtering, volume, and stereo width are applied in
 `Paula::push_mixed_frame` (`src/chipset/paula.rs`).
 
+## Getting Paula onto the host grid
+
+Paula's four channels are a staircase: each holds its 8-bit sample for
+`AUDxPER` colour clocks, so a channel steps at up to ~28.6 kHz and the
+summed output only ever changes on the 3.546895 MHz colour-clock grid.
+Landing that on the mixer's 44.1 kHz grid is a decimation by ~80.4, and
+doing it by reading the staircase at each output instant would fold
+everything above the mixer's Nyquist straight back into the audible band.
+The staircase is rich up there: a full-scale 10 kHz square (two samples at
+`AUDxPER` 177, what Amiga Test Kit's audio page plays) carries harmonics at
+30, 50 and 70 kHz, which point sampling turns into tones at 14.0, 6.0 and
+18.1 kHz -- inharmonic, so heard as ringing rather than brightness, and
+loud, the worst of them only 10 dB under the tone itself.
+
+So the mix runs in two stages, both in `Paula::advance_audio`:
+
+1. **Exact integration to an oversample grid.** `PAULA_OVERSAMPLE` (4) times
+   the mixer rate, so 176.4 kHz. `advance_audio` splits its span so that no
+   oversample instant and no channel period expiry falls strictly inside a
+   step (`cck_until_mix_input_changes`), which means each channel's
+   contribution is constant across the step and `channel_area` can
+   accumulate `sample * volume * clocks` exactly. Dividing by the interval
+   width at each oversample instant is then a true box average of the
+   staircase, not a sample of whichever step the instant landed on.
+2. **Windowed-sinc decimation to the mixer grid.** One
+   `audio::resample::Decimator` per channel, 4:1, sharing the 64-tap
+   Blackman-windowed kernel `Resampler` uses. Per channel rather than per
+   side because decimation is linear -- filtering each channel and summing
+   is the same signal as filtering the sum -- which keeps the per-channel
+   stem taps exactly consistent with the mix they add up to.
+
+Neither stage touches the emulated timeline: `advance_audio` runs the same
+channel state machine over the same colour clocks either way, and the extra
+splitting only changes how often it is re-entered. The box stage needs the
+oversample rate well above Paula's own; the sinc stage needs it low enough
+that the kernel's transition band stays clear of the top of the audio band.
+Four satisfies both, and puts the worst surviving image about 47 dB under
+the tone. Raising the oversample rate or lengthening the kernel does not
+measurably improve on it.
+
+The genuine zero-order-hold images of Paula's own sample rate are *not*
+filtered out, because they are real output: the 500 Hz sine test at
+`AUDxPER` 177 keeps its images at 19.5 and 20.5 kHz, exactly as the
+hardware produces them ahead of its analogue filter.
+
+### Level
+
+One channel's DAC level is `sample * volume`, -8192..8128. Two channels
+reach each side, so full scale is both of them saturated at full volume --
+and then the band-limited waveform overshoots the steps it came from, since
+taking the harmonics away leaves something taller than the square that
+carried them. A full-scale 10 kHz square keeps only its fundamental, at
+4/PI of the square's peak; a 25% pulse train does better still.
+
+How much better depends on how fast the staircase is allowed to move, and
+nothing bounds that. `AUDxPER` has no floor in the hardware or in
+`aud_percntrld`, `PAL_AUDIO_MIN_PERIOD_CCK` and `NTSC_AUDIO_MIN_PERIOD_CCK`
+describe what audio DMA can sustain rather than what a channel will accept,
+and a CPU feeding `AUDxDAT` in IRQ mode is not held to either. So the
+headroom comes from the decimation kernel instead: the sum of its absolute
+taps, 1.5792, is the most it can make of input bounded by full scale,
+whatever that input is. `PAULA_RECONSTRUCTION_HEADROOM` rounds that up to
+1.58 and `PAULA_MIX_SCALE` divides it out, so nothing Paula can play leaves
+[-1.0, 1.0] and nothing downstream has to clip it. The bound is held to the
+kernel it is claimed for by
+`the_mix_headroom_covers_the_decimation_kernel`. A real Amiga's analogue
+reconstruction filter overshoots its own DAC the same way; this is just
+where a line input would have to be set.
+
+Everything line-mixed alongside Paula (drive sounds, CD-DA, an in-process
+synth, Toccata, MHI) is added after this scaling and keeps its level
+relative to a Paula channel. Their sum with Paula is not separately limited,
+so a CD32 playing a full-scale CD track under a full-scale module can still
+ask for more than full scale.
+
+### The LED filter sits after all of this
+
+`StereoLedFilter` runs at the mixer rate, on the decimated sum, which is
+where hardware puts it -- after the channel mixer's summation. That only
+works because the decimation above is band-limited. Filtering a
+point-sampled mix instead would attenuate the real tone while leaving
+untouched the aliases that had already folded below the cutoff: with the
+filter engaged, the 10 kHz test used to come out as a 2 kHz buzz nearly 6 dB
+*louder* than the tone it was supposed to be attenuating.
+
 (why-a-mux-exists)=
 ## Mixing and capture
 
@@ -81,6 +166,24 @@ runs. Reproducibility still depends on repeatable source input; see the
 `Bus::adopt_host_resources` moves the live mux, including open stem writers,
 onto the restored Bus. A capture therefore continues in the same files
 across a save-state load.
+
+The decimation state does ride the state: `channel_area`/`area_cck` carry
+the partly integrated oversample interval, and each `Decimator` carries its
+tap history (but not its kernel, which `Deserialize` rebuilds from the
+factor, as `Resampler` does). `host_sample_acc` keeps the meaning and range
+it always had -- colour clocks times the mixer rate, rolling at
+`PAULA_CLOCK_HZ` -- with both the oversample grid and the mixer frame read
+off it as thresholds, so the `PAUL` chunk needed no version bump. All three
+fields are `#[serde(default)]`: a state written before the decimation
+existed resumes with silent tap histories, which is a millisecond of filter
+warm-up and no click.
+
+Nothing else tracks where in a mixer frame the machine is. A `Decimator`
+holds tap history and nothing more -- it is `advance_audio` that says when
+an output is due, from the accumulator. Had the decimators counted their
+own way to each frame, a state restored with the accumulator part way
+through one would have set them counting from zero, and the mix would have
+come out a slice or three late from then on, permanently.
 
 ## Web build
 

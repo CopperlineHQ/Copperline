@@ -2321,14 +2321,17 @@ fn audio_time_flushes_before_audio_register_write() {
     bus.paula.write_audio_reg(0x08, 64, 0);
     assert!(!bus.custom_write(0xDFF096, 2, (0x8000 | DMACON_DMAEN | 0x0001) as u64));
 
-    // Two scanlines for the two start-up fetches, then some output time.
-    bus.advance_chipset(800);
+    // Two scanlines for the two start-up fetches, then enough output time
+    // for the band-limiting decimators to settle on the held sample -- the
+    // mix reaches its DC level only once their tap histories have filled.
+    bus.advance_chipset(6000);
     frames.borrow_mut().clear();
 
     let _ = bus.custom_write(0xDFF0A8, 2, 0);
     let frames = frames.borrow();
+    let audible = 0.5 * 127.0 * 64.0 * crate::chipset::paula::PAULA_MIX_SCALE;
     assert!(
-        frames.iter().any(|(left, _)| left.abs() > 0.5),
+        frames.iter().any(|(left, _)| left.abs() > audible),
         "pending audio should be mixed with the old volume before AUD0VOL is changed: {frames:?}"
     );
 }
