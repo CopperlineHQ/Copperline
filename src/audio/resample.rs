@@ -156,6 +156,89 @@ impl<'de> serde::Deserialize<'de> for Resampler {
     }
 }
 
+/// Fixed integer-ratio decimation of a source already produced on a whole
+/// multiple of the mixer's grid -- Paula's oversampled channel stream.
+///
+/// [`Resampler`] pulls from a source running on its own clock at an
+/// arbitrary rational ratio; this is the other shape. The emulated chipset
+/// pushes samples as colour clocks go by and already knows when each
+/// output frame is due, so the conversion is one fixed windowed-sinc
+/// kernel (the `l == 1` case of [`build_kernels`]) and a counter: push
+/// `factor` input samples, get one band-limited output sample back.
+/// Mono, because the caller band-limits each Paula channel separately and
+/// sums the results -- decimation is linear, so that is the same signal as
+/// filtering the sum, and it keeps the per-channel stem taps exactly
+/// consistent with the mix.
+pub struct Decimator {
+    /// Input samples per output sample.
+    factor: u32,
+    /// The single windowed-sinc kernel, cutting just inside the output's
+    /// Nyquist. A pure function of `factor`, so `Deserialize` rebuilds it
+    /// rather than carrying it in the savestate, as [`Resampler`] does.
+    taps: Vec<f32>,
+    /// The last [`TAPS`] input samples, written twice [`TAPS`] apart so the
+    /// window starting at `head` is always one contiguous slice.
+    history: Vec<f32>,
+    head: usize,
+    /// Input samples taken since the last output sample.
+    count: u32,
+}
+
+impl Decimator {
+    pub fn new(factor: u32) -> Decimator {
+        let factor = factor.max(1);
+        Decimator {
+            factor,
+            taps: build_kernels(1, factor),
+            history: vec![0.0; 2 * TAPS],
+            head: 0,
+            count: 0,
+        }
+    }
+
+    /// One input sample in; the band-limited output sample once `factor` of
+    /// them have arrived. Starting from a zeroed history means a fresh
+    /// decimator (or one restored from a state written before Paula had
+    /// one) opens on silence rather than a click.
+    pub fn push(&mut self, sample: f32) -> Option<f32> {
+        self.history[self.head] = sample;
+        self.history[self.head + TAPS] = sample;
+        self.head += 1;
+        if self.head == TAPS {
+            self.head = 0;
+        }
+        self.count += 1;
+        if self.count < self.factor {
+            return None;
+        }
+        self.count = 0;
+        let window = &self.history[self.head..self.head + TAPS];
+        Some(window.iter().zip(&self.taps).map(|(&s, &t)| s * t).sum())
+    }
+}
+
+/// `factor`/`history`/`head`/`count` -- everything except the derived
+/// `taps`, rebuilt from `factor` by [`build_kernels`], exactly as
+/// [`Resampler`] treats its kernel bank.
+impl serde::Serialize for Decimator {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        (self.factor, &self.history, self.head, self.count).serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Decimator {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let (factor, history, head, count) = serde::Deserialize::deserialize(deserializer)?;
+        Ok(Decimator {
+            factor,
+            taps: build_kernels(1, factor),
+            history,
+            head,
+            count,
+        })
+    }
+}
+
 fn gcd(a: u32, b: u32) -> u32 {
     if b == 0 {
         a
@@ -213,6 +296,50 @@ mod tests {
         // The first TAPS frames prime the history; every 441 outputs
         // after that pull exactly 320 more.
         assert_eq!(pulled, TAPS as u64 + 320 * 100);
+    }
+
+    /// A constant comes out the same constant: the decimation kernel is
+    /// unity at DC, like the resampler's.
+    #[test]
+    fn decimation_preserves_dc() {
+        let mut decimator = Decimator::new(4);
+        let mut worst = 0.0f32;
+        for i in 0..4_000 {
+            if let Some(out) = decimator.push(0.25) {
+                // Skip the tap history filling with the opening zeros.
+                if i > TAPS {
+                    worst = worst.max((out - 0.25).abs());
+                }
+            }
+        }
+        assert!(worst < 1e-6, "DC shifted by {worst}");
+    }
+
+    /// One output sample per `factor` inputs, exactly, from the first one on.
+    #[test]
+    fn decimation_yields_one_sample_per_factor_inputs() {
+        let mut decimator = Decimator::new(4);
+        let yielded = (0..400).filter(|_| decimator.push(0.0).is_some()).count();
+        assert_eq!(yielded, 100);
+    }
+
+    /// Content above the output's Nyquist is suppressed, not folded back
+    /// down the band: 30 kHz decimated to 44.1 kHz would otherwise arrive as
+    /// a 14.1 kHz tone at full level.
+    #[test]
+    fn decimation_suppresses_content_above_the_output_nyquist() {
+        let mut decimator = Decimator::new(4);
+        let rate = 44_100.0 * 4.0;
+        let mut peak = 0.0f32;
+        for i in 0..8_192 {
+            let input = (std::f64::consts::TAU * 30_000.0 * f64::from(i) / rate).sin() as f32;
+            if let Some(out) = decimator.push(input) {
+                if i > TAPS as i32 {
+                    peak = peak.max(out.abs());
+                }
+            }
+        }
+        assert!(peak < 0.001, "30 kHz survived decimation at {peak}");
     }
 
     /// A tone under the source's Nyquist keeps its level; imaging above
