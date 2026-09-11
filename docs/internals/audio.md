@@ -57,14 +57,23 @@ One channel's DAC level is `sample * volume`, -8192..8128. Two channels
 reach each side, so full scale is both of them saturated at full volume --
 and then the band-limited waveform overshoots the steps it came from, since
 taking the harmonics away leaves something taller than the square that
-carried them. The most any Paula channel can overshoot is set by its
-shortest legal period: `AUDxPER` 124 holds a sample for a little over six
-oversample intervals, and the most a run that long can draw out of the
-kernel is 1.3241x the staircase. `PAULA_RECONSTRUCTION_HEADROOM` rounds
-that to 1.33, and `PAULA_MIX_SCALE` divides it out, so nothing Paula can
-play leaves [-1.0, 1.0] and nothing downstream has to clip it. A real
-Amiga's analogue reconstruction filter overshoots its own DAC the same way;
-this is just where a line input would have to be set.
+carried them. A full-scale 10 kHz square keeps only its fundamental, at
+4/PI of the square's peak; a 25% pulse train does better still.
+
+How much better depends on how fast the staircase is allowed to move, and
+nothing bounds that. `AUDxPER` has no floor in the hardware or in
+`aud_percntrld`, `PAL_AUDIO_MIN_PERIOD_CCK` and `NTSC_AUDIO_MIN_PERIOD_CCK`
+describe what audio DMA can sustain rather than what a channel will accept,
+and a CPU feeding `AUDxDAT` in IRQ mode is not held to either. So the
+headroom comes from the decimation kernel instead: the sum of its absolute
+taps, 1.5792, is the most it can make of input bounded by full scale,
+whatever that input is. `PAULA_RECONSTRUCTION_HEADROOM` rounds that up to
+1.58 and `PAULA_MIX_SCALE` divides it out, so nothing Paula can play leaves
+[-1.0, 1.0] and nothing downstream has to clip it. The bound is held to the
+kernel it is claimed for by
+`the_mix_headroom_covers_the_decimation_kernel`. A real Amiga's analogue
+reconstruction filter overshoots its own DAC the same way; this is just
+where a line input would have to be set.
 
 Everything line-mixed alongside Paula (drive sounds, CD-DA, an in-process
 synth, Toccata, MHI) is added after this scaling and keeps its level
@@ -163,11 +172,18 @@ the partly integrated oversample interval, and each `Decimator` carries its
 tap history (but not its kernel, which `Deserialize` rebuilds from the
 factor, as `Resampler` does). `host_sample_acc` keeps the meaning and range
 it always had -- colour clocks times the mixer rate, rolling at
-`PAULA_CLOCK_HZ` -- with the oversample grid read off it as a finer
-threshold, so the `PAUL` chunk needed no version bump. All three fields are
-`#[serde(default)]`: a state written before the decimation existed resumes
-with silent tap histories, which is a millisecond of filter warm-up and no
-click.
+`PAULA_CLOCK_HZ` -- with both the oversample grid and the mixer frame read
+off it as thresholds, so the `PAUL` chunk needed no version bump. All three
+fields are `#[serde(default)]`: a state written before the decimation
+existed resumes with silent tap histories, which is a millisecond of filter
+warm-up and no click.
+
+Nothing else tracks where in a mixer frame the machine is. A `Decimator`
+holds tap history and nothing more -- it is `advance_audio` that says when
+an output is due, from the accumulator. Had the decimators counted their
+own way to each frame, a state restored with the accumulator part way
+through one would have set them counting from zero, and the mix would have
+come out a slice or three late from then on, permanently.
 
 ## Web build
 

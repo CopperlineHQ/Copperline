@@ -170,7 +170,9 @@ impl<'de> serde::Deserialize<'de> for Resampler {
 /// filtering the sum, and it keeps the per-channel stem taps exactly
 /// consistent with the mix.
 pub struct Decimator {
-    /// Input samples per output sample.
+    /// Input samples per output sample. Kept only to rebuild `taps` on
+    /// deserialization; the caller owns the grid and says when it wants an
+    /// output, so this type does no counting of its own.
     factor: u32,
     /// The single windowed-sinc kernel, cutting just inside the output's
     /// Nyquist. A pure function of `factor`, so `Deserialize` rebuilds it
@@ -180,8 +182,6 @@ pub struct Decimator {
     /// window starting at `head` is always one contiguous slice.
     history: Vec<f32>,
     head: usize,
-    /// Input samples taken since the last output sample.
-    count: u32,
 }
 
 impl Decimator {
@@ -192,49 +192,58 @@ impl Decimator {
             taps: build_kernels(1, factor),
             history: vec![0.0; 2 * TAPS],
             head: 0,
-            count: 0,
         }
     }
 
-    /// One input sample in; the band-limited output sample once `factor` of
-    /// them have arrived. Starting from a zeroed history means a fresh
-    /// decimator (or one restored from a state written before Paula had
-    /// one) opens on silence rather than a click.
-    pub fn push(&mut self, sample: f32) -> Option<f32> {
+    /// One input sample into the history. Starting from a zeroed history
+    /// means a fresh decimator (or one restored from a state written before
+    /// Paula had one) opens on silence rather than a click.
+    pub fn push(&mut self, sample: f32) {
         self.history[self.head] = sample;
         self.history[self.head + TAPS] = sample;
         self.head += 1;
         if self.head == TAPS {
             self.head = 0;
         }
-        self.count += 1;
-        if self.count < self.factor {
-            return None;
-        }
-        self.count = 0;
+    }
+
+    /// The band-limited value at the current instant. Meaningful once
+    /// `factor` samples have been pushed since the last one was taken --
+    /// which is the caller's business, not this type's, so that the phase
+    /// of the output grid lives in exactly one place instead of being
+    /// mirrored in a counter here that a restored state could contradict.
+    pub fn output(&self) -> f32 {
         let window = &self.history[self.head..self.head + TAPS];
-        Some(window.iter().zip(&self.taps).map(|(&s, &t)| s * t).sum())
+        window.iter().zip(&self.taps).map(|(&s, &t)| s * t).sum()
+    }
+
+    /// The largest output magnitude the kernel can produce from input
+    /// bounded by 1.0, the sum of the absolute taps. Unlike any bound
+    /// argued from how fast the source can change, this holds for every
+    /// input, so it is what a caller sizes its headroom against.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn peak_gain(&self) -> f32 {
+        self.taps.iter().map(|tap| tap.abs()).sum()
     }
 }
 
-/// `factor`/`history`/`head`/`count` -- everything except the derived
-/// `taps`, rebuilt from `factor` by [`build_kernels`], exactly as
-/// [`Resampler`] treats its kernel bank.
+/// `factor`/`history`/`head` -- everything except the derived `taps`,
+/// rebuilt from `factor` by [`build_kernels`], exactly as [`Resampler`]
+/// treats its kernel bank.
 impl serde::Serialize for Decimator {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        (self.factor, &self.history, self.head, self.count).serialize(serializer)
+        (self.factor, &self.history, self.head).serialize(serializer)
     }
 }
 
 impl<'de> serde::Deserialize<'de> for Decimator {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let (factor, history, head, count) = serde::Deserialize::deserialize(deserializer)?;
+        let (factor, history, head) = serde::Deserialize::deserialize(deserializer)?;
         Ok(Decimator {
             factor,
             taps: build_kernels(1, factor),
             history,
             head,
-            count,
         })
     }
 }
@@ -305,22 +314,30 @@ mod tests {
         let mut decimator = Decimator::new(4);
         let mut worst = 0.0f32;
         for i in 0..4_000 {
-            if let Some(out) = decimator.push(0.25) {
-                // Skip the tap history filling with the opening zeros.
-                if i > TAPS {
-                    worst = worst.max((out - 0.25).abs());
-                }
+            decimator.push(0.25);
+            // Skip the tap history filling with the opening zeros.
+            if i > TAPS && i % 4 == 0 {
+                worst = worst.max((decimator.output() - 0.25).abs());
             }
         }
         assert!(worst < 1e-6, "DC shifted by {worst}");
     }
 
-    /// One output sample per `factor` inputs, exactly, from the first one on.
+    /// The peak gain bound is the sum of the absolute taps, and it really
+    /// does bound the output: the worst input is one that matches the sign
+    /// of every tap.
     #[test]
-    fn decimation_yields_one_sample_per_factor_inputs() {
-        let mut decimator = Decimator::new(4);
-        let yielded = (0..400).filter(|_| decimator.push(0.0).is_some()).count();
-        assert_eq!(yielded, 100);
+    fn peak_gain_bounds_the_worst_case_input() {
+        let decimator = Decimator::new(4);
+        let bound = decimator.peak_gain();
+        assert!(bound > 1.0, "a band-limiting kernel overshoots: {bound}");
+
+        let mut worst = Decimator::new(4);
+        let signs: Vec<f32> = worst.taps.iter().map(|&t| t.signum()).collect();
+        for sign in &signs {
+            worst.push(*sign);
+        }
+        assert!((worst.output() - bound).abs() < 1e-5);
     }
 
     /// Content above the output's Nyquist is suppressed, not folded back
@@ -333,10 +350,9 @@ mod tests {
         let mut peak = 0.0f32;
         for i in 0..8_192 {
             let input = (std::f64::consts::TAU * 30_000.0 * f64::from(i) / rate).sin() as f32;
-            if let Some(out) = decimator.push(input) {
-                if i > TAPS as i32 {
-                    peak = peak.max(out.abs());
-                }
+            decimator.push(input);
+            if i > TAPS as i32 && i % 4 == 0 {
+                peak = peak.max(decimator.output().abs());
             }
         }
         assert!(peak < 0.001, "30 kHz survived decimation at {peak}");

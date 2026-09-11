@@ -77,16 +77,20 @@ const PAULA_OVERSAMPLE: u32 = 4;
 /// Band-limiting takes the staircase's harmonics away, and what is left
 /// overshoots the steps it came from: a full-scale square at 10 kHz keeps
 /// only its fundamental, whose peak is 4/PI of the square's, and a
-/// full-scale 25% pulse train does slightly better still. The worst any
-/// Paula channel can reach is set by its shortest legal period: AUDxPER
-/// 124 holds each sample for a little over six oversample intervals, and
-/// the most a run that long can pull out of the decimation kernel is
-/// 1.3241 times the staircase it came from. A real Amiga's analogue
-/// reconstruction filter overshoots its own DAC the same way, so this is
-/// simply where a line input would have to be set; folding it in here is
-/// what keeps the loudest thing Paula can play inside the host's range
-/// instead of clipping on the way out.
-const PAULA_RECONSTRUCTION_HEADROOM: f32 = 1.33;
+/// full-scale 25% pulse train does slightly better still. How much better
+/// depends on how fast the staircase is allowed to move, and nothing here
+/// bounds that -- AUDxPER has no floor in the hardware or in
+/// `aud_percntrld`, and a CPU feeding AUDxDAT in IRQ mode is not held to
+/// the period audio DMA can sustain -- so the headroom is taken from the
+/// decimation kernel instead: the sum of its absolute taps is the most it
+/// can produce from input bounded by full scale, whatever the input is.
+/// `the_mix_headroom_covers_the_decimation_kernel` holds this to the
+/// kernel it is claimed for. A real Amiga's analogue reconstruction filter
+/// overshoots its own DAC the same way, so this is simply where a line
+/// input would have to be set; folding it in here is what keeps everything
+/// Paula can play inside the host's range instead of clipping on the way
+/// out.
+const PAULA_RECONSTRUCTION_HEADROOM: f32 = 1.58;
 
 /// What one channel's DAC level (sample * volume, -8192..8128) is worth in
 /// the host mix. Two channels reach each side, and the band-limited
@@ -532,7 +536,9 @@ pub struct Paula {
     #[serde(default)]
     area_cck: u32,
     /// Band-limits each channel's oversampled staircase onto the mixer
-    /// grid. Per channel rather than per side because decimation is linear:
+    /// grid. Holds tap history only: the phase of the mixer grid lives in
+    /// `host_sample_acc` alone, so nothing here can contradict it.
+    /// Per channel rather than per side because decimation is linear:
     /// filtering each channel and summing is the same signal as filtering
     /// the sum, and it leaves the per-channel stem taps exactly consistent
     /// with the mix they add up to.
@@ -1714,8 +1720,14 @@ impl Paula {
             for _ in before..self.oversample_index() {
                 self.push_oversample_frame();
             }
+            // The last slice of the frame is the frame: the accumulator is
+            // the only thing that says when a mixer frame is due, so a
+            // state restored mid-frame stays in phase without the
+            // decimators having to agree about where they were.
             if self.host_sample_acc >= PAULA_CLOCK_HZ as u64 {
                 self.host_sample_acc -= PAULA_CLOCK_HZ as u64;
+                let mixed = std::array::from_fn(|i| self.channel_decimator[i].output());
+                self.push_mixed_frame(mixed);
             }
         }
 
@@ -1730,27 +1742,17 @@ impl Paula {
         self.host_sample_acc * u64::from(PAULA_OVERSAMPLE) / PAULA_CLOCK_HZ as u64
     }
 
-    /// Close one oversample interval: the exact box average of each
-    /// channel over it, band-limited towards the mixer grid, and a mixer
-    /// frame whenever the decimators yield one.
+    /// Close one oversample interval: each channel's exact box average over
+    /// it, into the band-limiting decimators. Whether this interval was
+    /// also a mixer frame is `advance_audio`'s business.
     fn push_oversample_frame(&mut self) {
         let width = self.area_cck.max(1) as f32;
-        // The four decimators run in lockstep -- same factor, pushed
-        // together -- so either all of them yield on this sample or none do.
-        let mut mixed = [0.0f32; 4];
-        let mut due = false;
         for ch_idx in 0..4 {
             let average = self.channel_area[ch_idx] as f32 / width;
-            if let Some(out) = self.channel_decimator[ch_idx].push(average) {
-                mixed[ch_idx] = out;
-                due = true;
-            }
+            self.channel_decimator[ch_idx].push(average);
         }
         self.channel_area = [0; 4];
         self.area_cck = 0;
-        if due {
-            self.push_mixed_frame(mixed);
-        }
     }
 
     // ---- HRM state-machine terms (the appendix's signal names) ----
@@ -4104,14 +4106,59 @@ mod tests {
         }
     }
 
+    /// The headroom the mix leaves has to cover the kernel it is claimed
+    /// for: the sum of the absolute taps is the most that kernel can make
+    /// of input bounded by full scale, so a mix scaled by it cannot leave
+    /// the host's range whatever the guest plays. Bounding this by how fast
+    /// AUDxPER lets the staircase move would not do -- nothing enforces a
+    /// minimum period, and a CPU feeding AUDxDAT in IRQ mode is not held to
+    /// the one audio DMA can sustain.
+    #[test]
+    fn the_mix_headroom_covers_the_decimation_kernel() {
+        let peak = Decimator::new(PAULA_OVERSAMPLE).peak_gain();
+        assert!(
+            peak <= PAULA_RECONSTRUCTION_HEADROOM,
+            "kernel can reach {peak} but the mix only leaves              {PAULA_RECONSTRUCTION_HEADROOM}"
+        );
+    }
+
+    /// A state written before the decimators existed restores them empty,
+    /// but carries `host_sample_acc` meaning exactly what it always meant.
+    /// The mixer cadence is read off that accumulator alone, so such a
+    /// resume is in phase from its first frame instead of being left
+    /// however far into a mixer frame it was saved, forever.
+    #[test]
+    fn the_mixer_cadence_follows_the_accumulator_not_the_decimators() {
+        for slice in 0..u64::from(PAULA_OVERSAMPLE) {
+            let (mut paula, frames) = paula_with_collect_sink();
+            // What an older state restores: an accumulator already part way
+            // into a mixer frame, and decimators that have never seen a
+            // sample.
+            paula.host_sample_acc = slice * PAULA_CLOCK_HZ as u64 / u64::from(PAULA_OVERSAMPLE) + 1;
+
+            // Exactly the colour clocks left in the frame it was saved in.
+            let left_in_frame = (PAULA_CLOCK_HZ as u64 - paula.host_sample_acc)
+                .div_ceil(MIX_SAMPLE_RATE as u64) as u32;
+            paula.advance_audio(left_in_frame, 0);
+
+            // That frame, and no more: a decimator counting its own way to
+            // four would still be waiting on the slices already behind it.
+            assert_eq!(
+                frames.borrow().len(),
+                1,
+                "resuming at oversample slice {slice} did not finish its mixer frame"
+            );
+        }
+    }
+
     /// Full scale is two channels saturated at full volume, plus the
     /// headroom the band-limited waveform needs to overshoot the steps it
     /// came from. Amiga Test Kit plays exactly that -- one sample on all
     /// four channels at volume 64 -- and nothing downstream of the mix
     /// clips, so the mix itself has to stay inside the host's range. Swept
-    /// over periods and duty cycles because the worst overshoot is not the
-    /// square: a 25% pulse train near 4.9 kHz asks for the most, and the
-    /// shortest legal period is what bounds it.
+    /// over duty cycles because the worst overshoot is not the square (a
+    /// 25% pulse train asks for more), and down past the period audio DMA
+    /// can sustain, since nothing stops a guest asking for one.
     #[test]
     fn nothing_paula_can_play_leaves_the_host_range() {
         for pattern in [
@@ -4120,7 +4167,9 @@ mod tests {
             [0x7F, 0x7F, 0x7F, 0x80],
             [0x7F, 0x80, 0x80, 0x80],
         ] {
-            for per in [124u16, 143, 161, 177, 181, 203, 254, 320, 404] {
+            for per in [
+                8u16, 20, 41, 80, 113, 123, 124, 143, 161, 177, 181, 203, 254, 320, 404,
+            ] {
                 let (mut paula, frames) = paula_with_collect_sink();
                 paula.set_led_filter_guest(false);
                 play_all_channels(&mut paula, &pattern, per, 0.05);
