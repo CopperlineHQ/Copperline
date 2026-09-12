@@ -992,7 +992,10 @@ impl App {
         self.sync_live_audio_suspension();
     }
 
-    /// Execute a single instruction while paused in the debugger.
+    /// Execute a single instruction while paused in the debugger. A CPU in
+    /// STOP runs on to the interrupt that wakes it; one that no interrupt
+    /// can reach stays where it is, and says so rather than looking like a
+    /// step that did nothing.
     pub(super) fn debugger_step(&mut self) {
         self.paused = true;
         self.sync_live_audio_suspension();
@@ -1001,6 +1004,9 @@ impl App {
             error!("debugger step halted: {e:?}");
             self.cpu_halted = true;
             self.sync_live_audio_suspension();
+        }
+        if self.emu.machine.stopped() {
+            self.show_osd("CPU is stopped: no interrupt is enabled to wake it");
         }
         self.surface_debug_stop();
     }

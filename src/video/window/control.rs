@@ -716,7 +716,10 @@ impl App {
                 ResumeKind::Step { n } => {
                     label = "instruction step";
                     for _ in 0..n {
-                        self.emu.debug_step_realtime()?;
+                        // Past a STOP, like the headless server and the
+                        // workspace's own Step: a parked CPU retires
+                        // nothing until an interrupt reaches it.
+                        self.emu.debug_step_realtime_past_stop()?;
                         if self.emu.machine.ui_debug_stop_pending() {
                             break;
                         }

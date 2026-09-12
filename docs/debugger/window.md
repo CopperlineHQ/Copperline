@@ -282,6 +282,18 @@ Examples:
 | **`< Step`** | -- | Step backward one instruction (see [](reverse.md)) |
 | **`< Run`** | -- | Run backward to preceding breakpoint |
 
+A CPU parked in `STOP` (an idle Workbench waiting for a disk, a program
+waiting for its interrupt) executes nothing until an interrupt arrives, so
+**Step**, **Step Over**, **Step Out** and **Run to** carry it to the
+interrupt that wakes it. A single **Step** there runs the machine on to
+that interrupt and retires one instruction -- the first of its handler,
+where control actually goes -- so the PC lands inside the handler instead
+of standing still. The CPU tab shows *CPU stopped* while it is parked.
+When no interrupt can reach the CPU -- the SR mask is 7, or nothing is
+enabled in `INTENA` -- a step gives up after two video frames and leaves
+the machine stopped where the hardware itself is stuck, and says so on the
+display.
+
 (frame-analyzer-pane)=
 ## Frame Analyzer
 

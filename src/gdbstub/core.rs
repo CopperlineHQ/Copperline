@@ -468,7 +468,10 @@ impl GdbCore {
 
     pub(crate) fn step_forward(&mut self, emu: &mut Emulator) -> Result<String> {
         self.stop = StopReason::Step;
-        emu.debug_step_for_gdb(&mut self.cpu_idle)?;
+        // `stepi` on a CPU parked in STOP carries it to the interrupt that
+        // wakes it, rather than reporting a stop at the same PC the user
+        // stepped from.
+        emu.debug_step_for_gdb_past_stop(&mut self.cpu_idle)?;
         if let Some(stop) = self.check_stop(emu)? {
             self.stop = stop;
         }

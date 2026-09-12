@@ -608,11 +608,20 @@ impl App {
     /// The host clipboard, opened on first use and kept open: on X11 and
     /// Wayland the owning instance serves the selection, so the handle
     /// must outlive the copy.
+    ///
+    /// A failure is remembered rather than retried. Nothing about the
+    /// session changes to make a second attempt succeed, and the poll runs
+    /// three times a second: retrying would walk the clipboard protocols
+    /// (and log a warning from inside `arboard`) that often, for the whole
+    /// run. Said once, it tells the user why sharing is doing nothing.
     fn host_clipboard(&mut self) -> Option<&mut arboard::Clipboard> {
-        if self.host_clipboard.is_none() {
+        if self.host_clipboard.is_none() && !self.host_clipboard_unavailable {
             match arboard::Clipboard::new() {
                 Ok(clip) => self.host_clipboard = Some(clip),
-                Err(e) => log::debug!("clipboard: host clipboard unavailable: {e}"),
+                Err(e) => {
+                    self.host_clipboard_unavailable = true;
+                    warn!("clipboard: no host clipboard ({e}); sharing is off this session");
+                }
             }
         }
         self.host_clipboard.as_mut()
