@@ -1688,6 +1688,7 @@ impl Drop for GifCaptureState {
 struct Render {
     window: Arc<Window>,
     pixels: Pixels<'static>,
+    presenter: presenter::Presenter,
     texture_scale: usize,
     debug_viewport: Option<(u32, u32, u32, u32)>,
     /// The pass that puts the composited buffer on the surface (see
@@ -3989,6 +3990,7 @@ impl ApplicationHandler for App {
         self.render = Some(Render {
             window,
             pixels,
+            presenter: presenter::Presenter::new(),
             texture_scale,
             scaler,
             rtg_texture,
@@ -5075,33 +5077,39 @@ impl ApplicationHandler for App {
                         // pixels rather than through the canvas texture the
                         // scaler pass letterboxed above.
                         let integer_scaling = integer_scaling_requested();
-                        r.pixels.render_with(|encoder, target, ctx| {
-                            scaler.render(
-                                &ctx.device,
-                                &ctx.queue,
-                                &ctx.texture,
-                                encoder,
-                                target,
-                                &present_draws,
-                            );
-                            let (cx, cy, cw, ch) = present_clip;
-                            let disp_h = if debug_layout {
-                                ch as f32
-                            } else {
-                                ch as f32 * present_height() as f32 / window_present_height() as f32
-                            };
-                            rtg.render(
-                                &ctx.queue,
-                                encoder,
-                                target,
-                                (cx as f32, cy as f32, cw as f32, disp_h),
-                                integer_scaling,
-                            );
-                            if let Some(ui) = inspector_ui {
-                                ui.paint_prepared(&ctx.device, &ctx.queue, encoder, target);
-                            }
-                            Ok(())
-                        })
+                        r.presenter.render(
+                            &r.pixels,
+                            &r.window,
+                            self.last_rendered_emulated_frame,
+                            |encoder, target, ctx| {
+                                scaler.render(
+                                    &ctx.device,
+                                    &ctx.queue,
+                                    &ctx.texture,
+                                    encoder,
+                                    target,
+                                    &present_draws,
+                                );
+                                let (cx, cy, cw, ch) = present_clip;
+                                let disp_h = if debug_layout {
+                                    ch as f32
+                                } else {
+                                    ch as f32 * present_height() as f32
+                                        / window_present_height() as f32
+                                };
+                                rtg.render(
+                                    &ctx.queue,
+                                    encoder,
+                                    target,
+                                    (cx as f32, cy as f32, cw as f32, disp_h),
+                                    integer_scaling,
+                                );
+                                if let Some(ui) = inspector_ui {
+                                    ui.paint_prepared(&ctx.device, &ctx.queue, encoder, target);
+                                }
+                                Ok(())
+                            },
+                        )
                     } else if crt_active || bezel_active {
                         // Draw the composited buffer, then re-draw the display
                         // rect. Bezel alone: one pass draws the frame with the
@@ -5157,104 +5165,118 @@ impl ApplicationHandler for App {
                         let crt = &mut r.crt_shader;
                         let bezel_shader = &mut r.bezel_shader;
                         let sticker_pass = &mut r.sticker_pass;
-                        r.pixels.render_with(|encoder, target, ctx| {
-                            scaler.render(
-                                &ctx.device,
-                                &ctx.queue,
-                                &ctx.texture,
-                                encoder,
-                                target,
-                                &present_draws,
-                            );
-                            let texture_extent =
-                                (ctx.texture_extent.width, ctx.texture_extent.height);
-                            let (uniforms, viewport) = match crt_crop {
-                                Some((dst, src, crop_scanlines)) => crt_shader::uniforms_for_rect(
-                                    kind,
-                                    strength,
-                                    dst,
-                                    src,
-                                    (FB_WIDTH, window_present_height()),
-                                    texture_extent,
-                                    crop_scanlines,
-                                ),
-                                None => crt_shader::uniforms_for(
-                                    kind,
-                                    strength,
-                                    present_clip,
-                                    present_height(),
-                                    window_present_height(),
-                                    texture_extent,
-                                    scanlines,
-                                ),
-                            };
-                            if bezel_active {
-                                let opening = bezel::opening_rect(bezel_style, viewport);
-                                if crt_active {
+                        r.presenter.render(
+                            &r.pixels,
+                            &r.window,
+                            self.last_rendered_emulated_frame,
+                            |encoder, target, ctx| {
+                                scaler.render(
+                                    &ctx.device,
+                                    &ctx.queue,
+                                    &ctx.texture,
+                                    encoder,
+                                    target,
+                                    &present_draws,
+                                );
+                                let texture_extent =
+                                    (ctx.texture_extent.width, ctx.texture_extent.height);
+                                let (uniforms, viewport) = match crt_crop {
+                                    Some((dst, src, crop_scanlines)) => {
+                                        crt_shader::uniforms_for_rect(
+                                            kind,
+                                            strength,
+                                            dst,
+                                            src,
+                                            (FB_WIDTH, window_present_height()),
+                                            texture_extent,
+                                            crop_scanlines,
+                                        )
+                                    }
+                                    None => crt_shader::uniforms_for(
+                                        kind,
+                                        strength,
+                                        present_clip,
+                                        present_height(),
+                                        window_present_height(),
+                                        texture_extent,
+                                        scanlines,
+                                    ),
+                                };
+                                if bezel_active {
+                                    let opening = bezel::opening_rect(bezel_style, viewport);
+                                    if crt_active {
+                                        crt.render(
+                                            &ctx.device,
+                                            &ctx.queue,
+                                            &ctx.texture,
+                                            encoder,
+                                            target,
+                                            opening,
+                                            kind,
+                                            uniforms.with_viewport(opening),
+                                        );
+                                    }
+                                    bezel_shader.render(
+                                        &ctx.device,
+                                        &ctx.queue,
+                                        &ctx.texture,
+                                        encoder,
+                                        target,
+                                        viewport,
+                                        bezel_style,
+                                        bezel::uniforms_from(
+                                            &uniforms, viewport, opening, crt_active,
+                                        ),
+                                    );
+                                    // Decals stick to the plastic, so they ride
+                                    // the bezel pass: suspended with it, never
+                                    // drawn over a bare picture.
+                                    sticker_pass.render(
+                                        &ctx.device,
+                                        &ctx.queue,
+                                        encoder,
+                                        target,
+                                        viewport,
+                                        opening,
+                                    );
+                                } else {
                                     crt.render(
                                         &ctx.device,
                                         &ctx.queue,
                                         &ctx.texture,
                                         encoder,
                                         target,
-                                        opening,
+                                        viewport,
                                         kind,
-                                        uniforms.with_viewport(opening),
+                                        uniforms,
                                     );
                                 }
-                                bezel_shader.render(
-                                    &ctx.device,
-                                    &ctx.queue,
-                                    &ctx.texture,
-                                    encoder,
-                                    target,
-                                    viewport,
-                                    bezel_style,
-                                    bezel::uniforms_from(&uniforms, viewport, opening, crt_active),
-                                );
-                                // Decals stick to the plastic, so they ride
-                                // the bezel pass: suspended with it, never
-                                // drawn over a bare picture.
-                                sticker_pass.render(
-                                    &ctx.device,
-                                    &ctx.queue,
-                                    encoder,
-                                    target,
-                                    viewport,
-                                    opening,
-                                );
-                            } else {
-                                crt.render(
-                                    &ctx.device,
-                                    &ctx.queue,
-                                    &ctx.texture,
-                                    encoder,
-                                    target,
-                                    viewport,
-                                    kind,
-                                    uniforms,
-                                );
-                            }
-                            if let Some(ui) = inspector_ui {
-                                ui.paint_prepared(&ctx.device, &ctx.queue, encoder, target);
-                            }
-                            Ok(())
-                        })
+                                if let Some(ui) = inspector_ui {
+                                    ui.paint_prepared(&ctx.device, &ctx.queue, encoder, target);
+                                }
+                                Ok(())
+                            },
+                        )
                     } else {
-                        r.pixels.render_with(|encoder, target, ctx| {
-                            scaler.render(
-                                &ctx.device,
-                                &ctx.queue,
-                                &ctx.texture,
-                                encoder,
-                                target,
-                                &present_draws,
-                            );
-                            if let Some(ui) = inspector_ui {
-                                ui.paint_prepared(&ctx.device, &ctx.queue, encoder, target);
-                            }
-                            Ok(())
-                        })
+                        r.presenter.render(
+                            &r.pixels,
+                            &r.window,
+                            self.last_rendered_emulated_frame,
+                            |encoder, target, ctx| {
+                                scaler.render(
+                                    &ctx.device,
+                                    &ctx.queue,
+                                    &ctx.texture,
+                                    encoder,
+                                    target,
+                                    &present_draws,
+                                );
+                                if let Some(ui) = inspector_ui {
+                                    ui.paint_prepared(&ctx.device, &ctx.queue, encoder, target);
+                                }
+                                Ok(())
+                            },
+                        )
                     };
                     if let Err(e) = render_result {
                         error!("pixels.render: {e}");
@@ -7003,6 +7025,7 @@ mod kbdpanel;
 #[cfg(feature = "mt32")]
 mod mt32panel;
 mod present;
+mod presenter;
 mod rtg_texture;
 mod scaler;
 pub(in crate::video) mod statusbar;

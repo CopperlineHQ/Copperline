@@ -8,6 +8,7 @@
 
 use super::*;
 use crate::config::{Tint, TvCentre};
+use pixels::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 // The pure post-render helpers live in `video/present_common.rs` so headless
 // consumers can present frames without the winit frontend; re-exported here so
@@ -936,7 +937,7 @@ pub(super) fn build_pixels_for_window(
         texture_width(texture_scale) as u32,
         texture_height(texture_scale) as u32,
     );
-    let surface_texture = SurfaceTexture::new(surface.0, surface.1, window);
+    let surface_texture = SurfaceTexture::new(surface.0, surface.1, Arc::clone(&window));
     let builder = PixelsBuilder::new(texture.0, texture.1, surface_texture)
         .present_mode(window_present_mode(vsync));
     let builder = if cfg!(target_os = "linux") {
@@ -947,10 +948,23 @@ pub(super) fn build_pixels_for_window(
         builder
     };
     let mut pixels = builder.build()?;
+    let adapter = pixels.adapter().get_info();
+    let window_system = match window.window_handle().map(|handle| handle.as_raw()) {
+        Ok(RawWindowHandle::Wayland(_)) => "Wayland",
+        Ok(RawWindowHandle::Xlib(_) | RawWindowHandle::Xcb(_)) => "X11",
+        Ok(RawWindowHandle::AppKit(_)) => "AppKit",
+        Ok(RawWindowHandle::Win32(_)) => "Win32",
+        _ => "other",
+    };
     info!(
-        "window presentation: mode={:?}, supported={:?}",
+        "window presentation: mode={:?}, supported={:?}, window_system={}, backend={:?}, adapter={:?}, driver={:?}, driver_info={:?}",
         pixels.present_mode(),
-        pixels.context().surface_capabilities.present_modes
+        pixels.context().surface_capabilities.present_modes,
+        window_system,
+        adapter.backend,
+        adapter.name,
+        adapter.driver,
+        adapter.driver_info,
     );
     // The tool windows draw through the built-in Fill renderer (the
     // emulator window's own scaler pass ignores the mode). The scaling

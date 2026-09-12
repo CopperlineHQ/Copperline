@@ -193,6 +193,16 @@ The flow of a frame:
    wall-clock; for headless captures it does not. The emulated result is
    identical either way -- pacing only schedules host work.
 
+Window presentation goes through `window/presenter.rs`. After a successful
+draw callback, it calls winit's `pre_present_notify` before pixels submits
+and presents the buffer. Native Wayland uses that notification to request
+a compositor frame callback for subsequent redraws. A surface acquisition
+that times out or reports occlusion does not arm a callback, because no
+buffer will be committed. This schedules host redraws independently of the
+emulated clock. `COPPERLINE_PRESENT_PROFILE=1` enables per-attempt CPU
+timings for acquisition/upload, draw-command recording, and submission;
+these do not measure GPU completion or display scanout.
+
 The main presentation path uses the **main thread** (event loop, core,
 and pacer), the **`copperline-render` worker**, and the **cpal audio
 callback**. Rendering passes owned buffers and immutable shared snapshots;
