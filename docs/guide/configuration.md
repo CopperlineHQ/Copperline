@@ -50,7 +50,7 @@ range checks as the equivalent TOML fields:
 | `--cpu-clock MHZ` | `[cpu] clock_mhz` | a number of MHz |
 | `--fpu` / `--no-fpu` | `[cpu] fpu` | fit / omit a 68881/68882 |
 | `--jit` / `--no-jit` | `[cpu] jit` | experimental fast batch/trace-JIT CPU execution (68020+; not cycle-exact) |
-| `--clipboard` / `--no-clipboard` | `[clipboard] share` | share the host clipboard with the guest's `clipboard.device` (default: on windowed, off headless) |
+| `--clipboard` / `--no-clipboard` | `[clipboard] share` | share the host clipboard with the guest's `clipboard.device`; fits an extra autoconfig board, so it is opt-in (default: off) |
 | `--cartridge MODEL` | `[cartridge] model` | `none` (default) or `hrtmon`, the bundled HRTMon freezer cartridge |
 | `--chip SIZE` | `[memory] chip` | `512K`, `1M`, `2M`, ... |
 | `--fast SIZE` | `[memory] fast` | `0`, `1M`, `4M`, `8M`, ... |
@@ -2216,7 +2216,7 @@ hook entirely and never see the mounts.
 
 ```toml
 [clipboard]
-share = true    # default: on in a windowed session, off headless
+share = true    # default: false -- sharing is opt-in
 ```
 
 Text copied in the guest -- anything an application posts to
@@ -2247,18 +2247,33 @@ in the log and then left alone rather than reopened on every poll; the
 guest side of the bridge still runs, so `clipboard.get`/`clipboard.set`
 over the control protocol keep working.
 
-`share` is unset by default, which means the session decides: a windowed
-session shares (the launcher's machines too), a headless run does not,
-since the host clipboard is live host state a replay cannot reproduce
-(see [Determinism and the host boundary](../internals/architecture.md#determinism-and-the-host-boundary)).
-Setting `share = true` (or `--clipboard`) fits the bridge regardless: in a
-headless run it is then reachable through the control protocol's
-`clipboard.get`/`clipboard.set` (see [Control](../debugger/control.md)),
-never through the host clipboard itself, and the run stays
-deterministic. That is also how a recording made in a windowed session
-replays headless with the same machine: pass `--clipboard`. `share =
-false` (or `--no-clipboard`) leaves the bridge out entirely. Netplay
-peers never share, on either side of the session and even with an explicit
+`share` is **off by default**, windowed and headless alike, and the bridge
+is fitted only where it is asked for: `share = true` or `--clipboard`.
+That is because the bridge is a unit of the Copperline services board, so
+sharing puts an autoconfig board on the Zorro chain that the machine you
+configured does not otherwise have. Kickstart binds the board at boot and
+every Exec allocation after it lands somewhere else. That is a different
+machine, and some software can tell: a program that points `COP1LC` at a
+buffer before it has written the list there has the Copper read whatever
+the buffer holds, and where the buffer sits decides what that is. Lotus
+Esprit Turbo Challenge hangs on one layout where the data decodes as a
+`MOVE` to `INTENA` that clears the master interrupt enable. A host
+convenience must not cost the guest its memory map without being asked,
+so it does not.
+
+Up to and including 0.20.0 `share` defaulted on for windowed sessions
+(the launcher's machines too), which is what made that Lotus hang look
+like an emulation bug. It is off everywhere now; turn it back on with
+`share = true` or `--clipboard`.
+
+Headless, `share = true` is still safe for determinism: the bridge is then
+reachable only through the control protocol's `clipboard.get`/`clipboard.set`
+(see [Control](../debugger/control.md)), never through the host clipboard
+itself, since the host clipboard is live host state a replay cannot
+reproduce (see [Determinism and the host boundary](../internals/architecture.md#determinism-and-the-host-boundary)).
+That is also how a recording made in a windowed session with sharing on
+replays headless on the same machine: pass `--clipboard`. Netplay peers
+never share, on either side of the session and even with an explicit
 `--clipboard`: every peer must build the same machine, and the bridge is
 part of the services board's layout, so a session where one side fitted it
 could not agree on a machine at all. *Input

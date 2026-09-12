@@ -986,8 +986,11 @@ pub(crate) struct RawToccata {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawClipboard {
-    /// Share the host clipboard with the guest's clipboard.device. Absent
-    /// means the session decides: on windowed, off headless.
+    /// Share the host clipboard with the guest's clipboard.device.
+    /// Absent means off, in every session: sharing fits a unit of the
+    /// services board, and an autoconfig board the configuration did not
+    /// ask for moves the guest's memory map (see
+    /// `Config::resolve_clipboard_share`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) share: Option<bool>,
 }

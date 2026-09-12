@@ -4010,6 +4010,10 @@ fn build_machine_inner(
     // host clipboard only ever reaches the guest through a windowed
     // session's poll or a control-protocol client, so a headless run with
     // the unit fitted stays deterministic (see docs/internals/architecture.md).
+    // Every one of these is an explicit request: the board is an autoconfig
+    // board a real Amiga does not have, and binding it at boot moves every
+    // Exec allocation behind it, so nothing fits it on the guest's behalf
+    // (`Config::resolve_clipboard_share`).
     let clipboard = cfg.clipboard_share == Some(true);
     if !cfg.filesys.is_empty() || cfg.rom_scsi_device_disable || clipboard {
         let slot = devices.len();

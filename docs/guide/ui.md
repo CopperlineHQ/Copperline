@@ -473,10 +473,11 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   recording captures them as individual key events.
 - **Share Clipboard**: host <-> guest clipboard text, both ways (text the
   guest copies lands on the host clipboard; host text is available to paste
-  in the guest). On by default in a windowed session; greyed out when the
-  machine was started with `[clipboard] share = false` / `--no-clipboard`,
-  since the guest side is part of the services board's boot. See the
-  `[clipboard]` section of [Configuration](configuration.md#clipboard).
+  in the guest). Off unless the machine was started with `[clipboard] share
+  = true` / `--clipboard`, and greyed out otherwise: the guest side is part
+  of the services board's boot, and that board is not fitted unless it was
+  asked for, because it moves the guest's memory map. See the `[clipboard]`
+  section of [Configuration](configuration.md#clipboard).
 - **Calibrate Gamepad...**: the guided calibration flow, described below.
 - **Input Mapping...**: edits which host keys drive the controller controls,
   for both keyboard mappings; see [](#input-mapping).

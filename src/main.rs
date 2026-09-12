@@ -1132,18 +1132,9 @@ fn main() -> Result<()> {
         info!("emulation timing: paced to wall-clock because a physical floppy drive is attached");
     }
     info!("emulation timing: deterministic core, paced={paced}");
-    // Host clipboard sharing defaults on for a windowed session and off
-    // headless: the host clipboard is live host state a replay cannot
-    // reproduce (see docs/internals/architecture.md). Netplay peers must
-    // build identical machines, and the unit is part of the services
-    // board's layout, so a session never shares on either side -- not the
-    // guest, not the host, and not on an explicit --clipboard, which would
-    // otherwise leave a host-coupled input live across rollbacks.
-    if cli.netplay.is_some() || netplay_guest {
-        cfg.clipboard_share = Some(false);
-    } else if cfg.clipboard_share.is_none() {
-        cfg.clipboard_share = Some(!headless_capture);
-    }
+    // Host clipboard sharing is off unless the configuration asked for it,
+    // windowed or headless, and off under netplay either way.
+    cfg.resolve_clipboard_share(cli.netplay.is_some() || netplay_guest);
     let mut emu = emulator::build_machine(
         &cfg,
         audio,

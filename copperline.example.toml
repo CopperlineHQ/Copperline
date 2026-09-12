@@ -669,12 +669,14 @@ video = "PAL"
 # in clipboard.device unit 0) lands on the host clipboard, and host text is
 # available to paste in the guest, with Latin-1 and line-end conversion.
 # The guest side rides the services board's ROM (Kickstart 1.3 and later,
-# no guest configuration). Unset, the session decides: on in a windowed
-# session, off headless -- the host clipboard is live host state a replay
-# cannot reproduce. share = true fits the bridge even headless (reachable
-# through the control protocol's clipboard.get/set); share = false leaves
-# it out. Also --clipboard / --no-clipboard, and Input Settings > Share
-# Clipboard at runtime.
+# no guest configuration). Off by default in every session, because fitting
+# the bridge puts an autoconfig board on the Zorro chain that the machine
+# you configured does not have, and every Exec allocation behind it moves;
+# software that reads memory it has not written yet can tell. share = true
+# fits it, windowed or headless (headless it is reachable through the
+# control protocol's clipboard.get/set, not the host clipboard, so the run
+# stays deterministic). Also --clipboard / --no-clipboard, and Input
+# Settings > Share Clipboard at runtime.
 # [clipboard]
 # share = true
 
