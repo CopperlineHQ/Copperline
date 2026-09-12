@@ -34,8 +34,7 @@ def wait_for_file(path, process, timeout=45):
 
 
 class Control:
-    def __init__(self, info):
-        endpoint = json.loads(info.read_text())
+    def __init__(self, endpoint):
         host, port = endpoint["listen"].rsplit(":", 1)
         self.connection = socket.create_connection((host, int(port)), timeout=15)
         self.stream = self.connection.makefile("rwb")
@@ -67,6 +66,22 @@ class Control:
                 if "error" in reply:
                     raise RuntimeError(reply["error"])
                 return reply.get("result")
+
+
+def wait_for_control_info(path, process, timeout=45):
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return json.loads(path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            # The server creates the file before writing its JSON. Existence
+            # alone is not readiness, particularly on a busy CI runner.
+            pass
+        if process.poll() is not None:
+            raise RuntimeError(f"process exited with {process.returncode} before control info")
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"waiting for complete JSON in {path.name}")
+        time.sleep(0.1)
 
 
 def submitted_frames(log):
@@ -140,10 +155,9 @@ def main():
                     ],
                     env=env, stdout=emulator_log, stderr=subprocess.STDOUT,
                 )
-                wait_for_file(info, emulator)
                 # Keep one connection: reconnecting repeatedly would keep
                 # showing the attachment OSD and prevent a truly idle window.
-                control = Control(info)
+                control = Control(wait_for_control_info(info, emulator))
                 control.rpc("hello", {"token": control.token})
                 before = control.rpc("status")
                 log_path = output / "copperline.log"
