@@ -2216,7 +2216,7 @@ hook entirely and never see the mounts.
 
 ```toml
 [clipboard]
-share = true    # default: on in a windowed session, off headless
+share = true    # default: false -- sharing is opt-in
 ```
 
 Text copied in the guest -- anything an application posts to
