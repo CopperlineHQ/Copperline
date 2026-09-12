@@ -12,7 +12,11 @@ are not accepted by this frontend.
 
 ## Build and install
 
-From the repository root:
+Prebuilt core ZIPs are available on the
+[GitHub release page](https://github.com/CopperlineHQ/Copperline/releases/latest)
+for Linux x86-64, macOS Apple Silicon, and Windows x86-64. Extract the ZIP
+and install the files as described below. For other targets, or to build
+from the repository root:
 
 ```sh
 cargo build --manifest-path crates/copperline-libretro/Cargo.toml --release --locked
@@ -36,8 +40,8 @@ The repository's Libretro workflow builds packages for Linux, macOS and
 Windows. Each package includes the core, its info file, the Copperline license,
 AROS licensing and acknowledgement files, and the unmodified WHDLoad support
 archives under `system/whdboot/`. Copy that directory into the frontend's system
-directory to use WHDLoad. These are workflow artifacts;
-installation through RetroArch's Online Updater is not configured.
+directory to use WHDLoad. Development builds are also available as workflow
+artifacts. Installation through RetroArch's Online Updater is not configured.
 
 ## Machine and ROM options
 

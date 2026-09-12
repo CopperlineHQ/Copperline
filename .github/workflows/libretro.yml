@@ -88,3 +88,41 @@ jobs:
         with:
           name: libretro-capture-${{ runner.os }}
           path: libretro.png
+
+  release:
+    name: Attach cores to release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: core
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: copperline-libretro-*
+          path: cores
+      - name: Archive each platform
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import shutil
+
+          version = os.environ["RELEASE_TAG"].removeprefix("v")
+          packages = sorted(Path("cores").glob("copperline-libretro-*"))
+          if len(packages) != 3:
+              raise SystemExit(f"Expected three core packages, found {len(packages)}")
+          Path("release-assets").mkdir()
+          for package in packages:
+              platform = package.name.removeprefix("copperline-libretro-")
+              shutil.make_archive(
+                  f"release-assets/Copperline-{version}-libretro-{platform}",
+                  "zip", package,
+              )
+          PY
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: release-assets/*.zip
+          fail_on_unmatched_files: true
