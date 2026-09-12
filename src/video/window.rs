@@ -1375,6 +1375,8 @@ pub struct App {
     /// a live emulation-performance readout in the top-right of the
     /// display. Presentation only, like the OSD: captures never include it.
     perf_overlay: bool,
+    /// Live desktop vsync preference, also used when recreating the surface.
+    vsync: bool,
     /// The overlay's formatted lines and sampling baseline.
     perf: PerfOverlay,
     /// Screen tint in effect ([display] tint). Presentation only, applied
@@ -1457,7 +1459,7 @@ pub struct App {
     sampler_stream: Option<cpal::Stream>,
     /// Output frame-skip level for warp/turbo mode: how many emulated frames
     /// are retired per presented frame while warp is engaged. Presentation is
-    /// vsync-gated, so this is what decouples warp speed from the host monitor
+    /// normally vsync-gated, so this decouples warp speed from the host monitor
     /// refresh rate. Adjustable from the Emulator menu and the keyboard.
     warp_speed: WarpSpeed,
     /// Rewind capture settings from `[emulation]`, kept so the Rewind menu
@@ -2100,6 +2102,7 @@ impl App {
         bezel: BezelStyle,
         bezel_stickers: Option<PathBuf>,
         perf_overlay: bool,
+        vsync: bool,
         tint: crate::config::Tint,
         start_fullscreen: bool,
         hide_status_bar: bool,
@@ -2333,6 +2336,7 @@ impl App {
             bezel_last: last_bezel_style(bezel),
             bezel_stickers_path: bezel_stickers,
             perf_overlay,
+            vsync,
             perf: PerfOverlay::default(),
             tint,
             tint_lut: tint_lut(tint),
@@ -3933,7 +3937,7 @@ impl ApplicationHandler for App {
         // Other platforms keep wgpu's default backend set (Metal on macOS,
         // DX12/Vulkan on Windows). cfg!() (not #[cfg]) keeps the Linux branch
         // type-checked on every host.
-        let pixels = match build_pixels_for_window(window.clone(), texture_scale, true) {
+        let pixels = match build_pixels_for_window(window.clone(), texture_scale, self.vsync) {
             Ok(p) => p,
             Err(e) => {
                 error!("pixels init failed: {e}");
@@ -5317,6 +5321,7 @@ impl ApplicationHandler for App {
         if self.render.is_none() {
             return;
         }
+        let host_poll_started = Instant::now();
         // Act on a completed drop before the OSD/control-flow computation
         // below, so a drop-raised OSD keeps the loop awake for its fade.
         if !self.pending_dropped_files.is_empty() {
@@ -5498,7 +5503,7 @@ impl ApplicationHandler for App {
             // If the live output device vanished (unplugged), reopen on the
             // current default so sound continues.
             self.recover_audio_if_device_lost();
-            // Presentation is vsync-gated, so emulating exactly one frame per
+            // With vsync enabled, emulating exactly one frame per
             // presented frame would cap warp at the host monitor refresh rate
             // (about 1.2x for 50 Hz PAL on a 60 Hz display). In warp, retire
             // several frames per presented frame (output frame skip): only the
@@ -5734,6 +5739,16 @@ impl ApplicationHandler for App {
         self.fire_auto_save_state();
         if self.fire_auto_shot() {
             event_loop.exit();
+        }
+        // Paused/off animations have no emulation-clock sleep. With vsync
+        // disabled they also lose the swapchain wait, so bound their polling
+        // to a UI frame. Credit any sleeps/work already done above.
+        if !self.vsync && !running && event_loop.control_flow() == ControlFlow::Poll {
+            let wait =
+                std::time::Duration::from_millis(16).saturating_sub(host_poll_started.elapsed());
+            if !wait.is_zero() {
+                std::thread::sleep(wait);
+            }
         }
     }
 }
@@ -6142,6 +6157,7 @@ impl App {
             return;
         };
         let mut raw = crate::config::RawConfig::default();
+        raw.display.vsync = Some(self.vsync);
         raw.display.pixel_aspect =
             Some(super::launcher::pixel_aspect_name(crate::video::pixel_aspect()).to_string());
         raw.display.scaling = Some(

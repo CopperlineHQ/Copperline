@@ -913,6 +913,18 @@ pub(super) fn surface_resize_for_draw(
     ((inner.width, inner.height) != configured).then_some(inner)
 }
 
+pub(super) fn window_present_mode(vsync: bool) -> pixels::wgpu::PresentMode {
+    // pixels' enable_vsync(true) selects AutoVsync, which prefers
+    // FifoRelaxed where supported (including Vulkan on X11). That permits tearing
+    // whenever a frame arrives after vblank, including normal PAL output on
+    // a faster host display. FIFO keeps every swap on a vblank instead.
+    if vsync {
+        pixels::wgpu::PresentMode::Fifo
+    } else {
+        pixels::wgpu::PresentMode::AutoNoVsync
+    }
+}
+
 pub(super) fn build_pixels_for_window(
     window: Arc<Window>,
     texture_scale: usize,
@@ -925,7 +937,8 @@ pub(super) fn build_pixels_for_window(
         texture_height(texture_scale) as u32,
     );
     let surface_texture = SurfaceTexture::new(surface.0, surface.1, window);
-    let builder = PixelsBuilder::new(texture.0, texture.1, surface_texture).enable_vsync(vsync);
+    let builder = PixelsBuilder::new(texture.0, texture.1, surface_texture)
+        .present_mode(window_present_mode(vsync));
     let builder = if cfg!(target_os = "linux") {
         builder.wgpu_backend(
             pixels::wgpu::Backends::from_env().unwrap_or(pixels::wgpu::Backends::VULKAN),
@@ -934,6 +947,11 @@ pub(super) fn build_pixels_for_window(
         builder
     };
     let mut pixels = builder.build()?;
+    info!(
+        "window presentation: mode={:?}, supported={:?}",
+        pixels.present_mode(),
+        pixels.context().surface_capabilities.present_modes
+    );
     // The tool windows draw through the built-in Fill renderer (the
     // emulator window's own scaler pass ignores the mode). The scaling
     // matrix and clip rect stay the builder's defaults until a resize

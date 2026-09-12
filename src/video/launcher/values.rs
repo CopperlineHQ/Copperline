@@ -40,6 +40,7 @@ boolean_settings! {
     Autocrop => autocrop,
     Deinterlace => deinterlace,
     PerfOverlay => perf_overlay,
+    Vsync => vsync,
     Mt32Panel => mt32_panel,
     #[cfg(feature = "midi")]
     SerialTelnet => serial_telnet,

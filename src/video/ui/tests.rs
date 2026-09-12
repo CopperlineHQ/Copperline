@@ -3605,6 +3605,7 @@ fn panels_render_into_their_rects() {
         status_bar_hidden: false,
         bezel: crate::config::BezelStyle::None,
         perf_overlay: false,
+        vsync: true,
         warp: false,
         warp_speed: WarpSpeed::Max,
         rewind: false,

@@ -314,6 +314,7 @@ impl MachineSetup {
             bezel: cfg.bezel,
             bezel_stickers: cfg.bezel_stickers.clone(),
             perf_overlay: cfg.perf_overlay,
+            vsync: cfg.vsync,
             mt32_control_rom: cfg.serial.mt32_control_rom.clone(),
             mt32_pcm_rom: cfg.serial.mt32_pcm_rom.clone(),
             mt32_panel: cfg.serial.mt32_panel,
@@ -798,6 +799,9 @@ impl MachineSetup {
         }
         if self.perf_overlay != base.perf_overlay {
             raw.display.perf_overlay = Some(self.perf_overlay);
+        }
+        if self.vsync != base.vsync {
+            raw.display.vsync = Some(self.vsync);
         }
         if self.tint != base.tint {
             raw.display.tint = Some(tint_name(self.tint).to_string());

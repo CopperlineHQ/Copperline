@@ -1528,6 +1528,7 @@ impl App {
         // adopting them in this order moves the canvas at most once.
         self.apply_bezel_style(crate::config::resolve_bezel(cfg.bezel));
         self.apply_display_scaling(cfg.scaling);
+        self.apply_vsync(cfg.vsync);
         self.apply_autocrop(cfg.autocrop);
         // Apply the configured start-up window state; the runtime toggles
         // (Cmd+F, Cmd+Shift+F) take over from here. Reuse the toggles so the

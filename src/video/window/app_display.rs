@@ -455,6 +455,24 @@ impl App {
         self.request_redraw();
     }
 
+    /// Change the host swapchain without restarting or changing guest pacing.
+    /// Keep the configuration screen in sync so Save retains the live choice.
+    pub(super) fn apply_vsync(&mut self, enabled: bool) {
+        if self.vsync == enabled {
+            return;
+        }
+        self.vsync = enabled;
+        self.machine_config.display.vsync = Some(enabled);
+        if let Some(render) = self.render.as_mut() {
+            render.pixels.set_present_mode(window_present_mode(enabled));
+            info!(
+                "window presentation: mode={:?}",
+                render.pixels.present_mode()
+            );
+        }
+        self.request_redraw();
+    }
+
     /// Follow a change of the canvas height that came from a presentation
     /// setting -- the pixel aspect, integer scaling under the tv aspect,
     /// the bezel (`video::present_height`): re-plan the main texture for

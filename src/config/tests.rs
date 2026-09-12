@@ -18,7 +18,7 @@ fn player_settings_overlay_field_by_field() -> Result<()> {
     base.set_display_defaults(Some("crt"), Some("1084"), Some(true));
 
     let overlay = RawConfig::parse(
-        "[display]\nshader = \"scanlines\"\nfull_screen = false\n\
+        "[display]\nshader = \"scanlines\"\nfull_screen = false\nvsync = false\n\
              [input]\nport2 = \"cd32\"\n",
     )?;
     base.merge_player_settings(&overlay);
@@ -26,6 +26,7 @@ fn player_settings_overlay_field_by_field() -> Result<()> {
     let cfg: Config = base.try_into()?;
     assert_eq!(cfg.shader, ShaderMode::Scanlines, "overlay wins");
     assert!(!cfg.full_screen, "overlay wins");
+    assert!(!cfg.vsync, "overlay wins");
     assert_eq!(cfg.bezel, BezelStyle::Model1084, "omitted keeps the base");
     assert_eq!(cfg.port_devices[1], crate::bus::PortDevice::Cd32Pad);
     assert_eq!(cfg.machine, Some(MachineModel::Cd32));
@@ -1279,6 +1280,20 @@ fn display_perf_overlay_parses_and_defaults_to_off() -> Result<()> {
     }
     .apply_to(&mut raw);
     assert_eq!(raw.display.perf_overlay, Some(true));
+    Ok(())
+}
+
+#[test]
+fn display_vsync_defaults_on_and_round_trips_both_choices() -> Result<()> {
+    assert!(parse_config("")?.vsync);
+    for enabled in [false, true] {
+        let mut raw = RawConfig::parse(&format!("[display]\nvsync = {enabled}\n"))?;
+        // An unrelated player preference must retain this display choice.
+        raw.merge_player_settings(&RawConfig::default());
+        let saved = raw.to_toml_string()?;
+        assert_eq!(parse_config(&saved)?.vsync, enabled);
+    }
+    assert!(parse_config("[display]\nvsync = \"off\"\n").is_err());
     Ok(())
 }
 
