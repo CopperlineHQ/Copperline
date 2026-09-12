@@ -110,6 +110,7 @@ impl App {
             status_bar_hidden: crate::video::status_bar_hidden(),
             bezel: self.bezel,
             perf_overlay: self.perf_overlay,
+            vsync: self.vsync,
             warp: !self.emu.paced(),
             warp_speed: self.warp_speed,
             rewind: self.rewind_armed,
@@ -314,6 +315,14 @@ impl App {
             A::SetPixelAspect(aspect) => self.apply_pixel_aspect(aspect),
             A::SetDisplayScaling(scaling) => self.apply_display_scaling(scaling),
             A::ToggleAutocrop => self.apply_autocrop(!crate::video::autocrop()),
+            A::ToggleVsync => {
+                self.apply_vsync(!self.vsync);
+                self.show_osd(if self.vsync {
+                    "VSync: on"
+                } else {
+                    "VSync: off"
+                });
+            }
             A::StepTvCentre(dh, dv) => self.step_tv_centre(dh, dv),
             A::ResetTvCentre => {
                 self.tv_centre = crate::config::TvCentre::default();

@@ -1369,6 +1369,7 @@ fn main() -> Result<()> {
         config::resolve_bezel(cfg.bezel),
         config::resolve_bezel_stickers(cfg.bezel_stickers.clone()),
         config::resolve_perf_overlay(cfg.perf_overlay),
+        cfg.vsync,
         config::resolve_tint(cfg.tint),
         cfg.full_screen,
         !cfg.status_bar,
@@ -1544,6 +1545,7 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         config::resolve_bezel(config::BezelStyle::None),
         config::resolve_bezel_stickers(None),
         config::resolve_perf_overlay(false),
+        true,
         config::resolve_tint(config::Tint::None),
         // The config-screen placeholder is always a normal windowed UI.
         false,

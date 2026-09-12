@@ -266,6 +266,7 @@ impl RawConfig {
             &overlay.display.pixel_aspect,
         );
         take(&mut self.display.scaling, &overlay.display.scaling);
+        take(&mut self.display.vsync, &overlay.display.vsync);
         take(&mut self.display.autocrop, &overlay.display.autocrop);
         take(&mut self.display.menu_scale, &overlay.display.menu_scale);
         take(&mut self.display.shader, &overlay.display.shader);
@@ -366,6 +367,9 @@ pub(crate) struct RawDisplay {
     /// Performance overlay in the top-right of the display (default false).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) perf_overlay: Option<bool>,
+    /// Synchronise desktop presentation to vblank (default true).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) vsync: Option<bool>,
     /// Screen tint: "none" (default), "bw", "green", "amber", or "sepia".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) tint: Option<String>,

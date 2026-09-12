@@ -4,6 +4,15 @@ Copperline opens a single window: the emulated display presented at a
 TV-like 4:3 aspect ratio, above a status bar with the machine's controls.
 The window scales continuously when resized.
 
+The display defaults to buffered, synchronised presentation (strict FIFO
+vsync) on all desktop platforms. **Video Settings > VSync** changes this
+immediately; it is also in the configuration screen's A/V & Emu > Display
+category and saved as `[display] vsync`. PAL output is roughly 50 Hz, so
+motion can still have an uneven cadence on a fixed 60 Hz
+or 120 Hz display as some Amiga frames stay on screen for an extra refresh.
+Vsync prevents tearing but does not make those refresh rates match or change
+the emulated machine's speed.
+
 ## Keyboard shortcuts
 
 The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
@@ -427,6 +436,14 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   bars as needed, exactly as when resizing the window.
 - **Status Bar** (also `Cmd+Shift+F` / `Alt+Shift+F`): show or hide the
   status bar. Handy alongside fullscreen for a clean, chrome-free picture.
+- **VSync**: synchronise presentation to the monitor's vertical blank
+  (on by default). Turning it off requests presentation without waiting for
+  vblank where the graphics backend supports it; this may reduce latency
+  but can tear. It takes effect immediately and keeps normal emulation
+  speed unchanged. The choice carries into **Machine Configuration...**
+  when saving a config, as `[display] vsync`. VSync prevents tearing but
+  cannot remove the uneven cadence of PAL output on a mismatched monitor
+  refresh rate.
 - **Monitor Bezel**: which monitor front the picture sits inside instead
   of filling the window -- **Disabled**, **1084** (a two-tone cabinet with
   the tube sunk into its moulding, and the model badge, the Copperline name
@@ -550,13 +567,14 @@ boot-time cards, SRAM cards, real card readers, and the fast-RAM rule.
   independently and releases only its own, such a warp mutes live audio, the
   OSD names who asked, and one press of the shortcut ends them all.
 - **Warp Limit** (also `Cmd+Shift+W` / `Alt+Shift+W`): how fast warp runs.
-  Because the window presents with vsync, emulating one frame per presented
+  With VSync enabled, emulating one frame per presented
   frame would cap warp at the host monitor's refresh rate (about 1.2x for
   50 Hz PAL on a 60 Hz display). The limit sets an output frame skip -- 2x,
   4x, 8x, 16x, or **Max** -- so warp retires that many emulated frames per
   presented frame, making the effective speed roughly the limit times the
   refresh rate (host CPU permitting). `Max` runs flat out and still presents
-  at vsync. The default is set by `[emulation] warp_speed` (see
+  at vsync when enabled. With VSync off, the host's throughput determines
+  presentation frequency. The default is set by `[emulation] warp_speed` (see
   [Configuration](configuration.md)).
 
 ### Recording

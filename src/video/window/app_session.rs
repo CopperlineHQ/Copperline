@@ -746,7 +746,7 @@ impl App {
     /// an optional wall-clock budget that bounds that burst. Warp's output frame
     /// skip applies only while warp is engaged and not doing headless capture;
     /// real-time pacing and headless capture both run one frame per presented
-    /// frame. The `Max` level returns a budget so the burst presents at vsync
+    /// frame. The `Max` level returns a budget so the burst presents regularly
     /// rather than spinning to its frame cap.
     pub(super) fn warp_burst_plan(
         &self,

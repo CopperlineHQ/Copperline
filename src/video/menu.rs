@@ -56,6 +56,7 @@ pub enum MenuAction {
     ToggleFullscreen,
     ToggleStatusBar,
     TogglePerfOverlay,
+    ToggleVsync,
 
     // Media.
     /// Pick a hard-disk image and push it into the PCMCIA slot as a CF
@@ -471,6 +472,7 @@ pub struct MenuState<'a> {
     /// Which monitor front the bezel pass is drawing, if any.
     pub bezel: BezelStyle,
     pub perf_overlay: bool,
+    pub vsync: bool,
     pub warp: bool,
     pub warp_speed: WarpSpeed,
     pub rewind: bool,
@@ -839,6 +841,7 @@ fn video_rows(s: &MenuState) -> Vec<MenuRow> {
         // category to fit the longest style name.
         MenuRow::submenu("Monitor Bezel", bezel_rows(s)),
         MenuRow::toggle("Performance", MenuAction::TogglePerfOverlay, s.perf_overlay),
+        MenuRow::toggle("VSync", MenuAction::ToggleVsync, s.vsync),
     ]
 }
 
@@ -856,6 +859,7 @@ fn player_video_rows(s: &MenuState) -> Vec<MenuRow> {
         shader_strength_row(s),
         MenuRow::submenu("Screen Tint", tint_rows(s)),
         MenuRow::toggle("Fullscreen", MenuAction::ToggleFullscreen, s.fullscreen),
+        MenuRow::toggle("VSync", MenuAction::ToggleVsync, s.vsync),
         MenuRow::submenu("Monitor Bezel", bezel_rows(s)),
     ]
 }
@@ -1385,6 +1389,7 @@ mod tests {
             status_bar_hidden: false,
             bezel: BezelStyle::None,
             perf_overlay: false,
+            vsync: true,
             warp: false,
             warp_speed: WarpSpeed::Max,
             rewind: false,
@@ -1735,7 +1740,7 @@ mod tests {
         assert!(!find(video, "Fullscreen").expect("fullscreen").closes_menu());
         // Every window toggle with a keyboard shortcut is reachable from
         // the menu too: the shortcut is the shortcut, not the only way.
-        for label in ["Status Bar", "Performance"] {
+        for label in ["Status Bar", "Performance", "VSync"] {
             let row = find(video, label).unwrap_or_else(|| panic!("{label} missing"));
             assert!(row.marks_state(), "{label} is not a toggle");
             assert!(!row.closes_menu(), "picking {label} closed the menu");
@@ -1876,6 +1881,7 @@ mod tests {
             "Shader Strength",
             "Monitor Bezel",
             "Fullscreen",
+            "VSync",
         ] {
             assert!(find(video, kept).is_some(), "missing {kept}");
         }

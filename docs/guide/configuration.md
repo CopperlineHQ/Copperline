@@ -438,13 +438,14 @@ carried no information.)
   `COPPERLINE_REALTIME_PRIORITY` overrides this for one run; set it to
   `0`/`false`/`off` to force it off, or to any other value (or leave it empty)
   to force it on.
-- `warp_speed` sets the default speed of Warp Speed (turbo) mode. The window
-  presents with vsync, so emulating one frame per presented frame would pin
+- `warp_speed` sets the default speed of Warp Speed (turbo) mode. With VSync
+  enabled (the default), emulating one frame per presented frame would pin
   warp to the host monitor's refresh rate. This option is an output frame
   skip -- `"2x"`, `"4x"`, `"8x"`, `"16x"`, or `"max"` (default) -- so warp
   retires that many emulated frames per presented frame, making warp roughly
   the limit times the refresh rate (host CPU permitting). `"max"` runs flat
-  out and still presents at vsync. Adjust it live from the **Warp Limit**
+  out and still presents at vsync when enabled. With VSync off, presentation
+  frequency depends on host throughput. Adjust it live from the **Warp Limit**
   menu item or `Cmd+Shift+W` / `Alt+Shift+W` (see [The window and its
   controls](ui.md)).
 - `warp_boot = true` accelerates boot sequences: from power-on, the machine
@@ -692,7 +693,17 @@ tint = "none"         # "none" (default), "bw", "green", "amber", or "sepia"
 menu_scale = "1x"     # size of the pop-up menu: "1x" (default) or "2x"
 full_screen = false   # open fullscreen at start (default false)
 status_bar = true     # show the status bar at start (default true)
+vsync = true          # synchronise desktop presentation to vblank (default true)
 ```
+
+`vsync` controls desktop presentation. On uses strict FIFO vsync to prevent
+tearing. Off requests unsynchronised presentation where the graphics backend
+supports it; it may reduce latency but can tear. **Video Settings > VSync**
+changes it live without restarting or changing normal emulation speed. The
+choice carries into the configuration screen when saving a config. Headless
+captures and the browser frontend are unaffected. Roughly 50 Hz PAL output
+can still show an uneven cadence on fixed 60 Hz or 120 Hz displays: VSync
+does not make those refresh rates match.
 
 The emulated framebuffer always carries the full overscan field Denise
 produces. `"tv"` presents what the monitor's glass shows: the captured

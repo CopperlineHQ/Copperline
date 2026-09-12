@@ -2384,6 +2384,23 @@ fn display_scaling_round_trips_through_raw() {
 }
 
 #[test]
+fn vsync_launcher_toggle_survives_save_and_reload() {
+    let mut setup = MachineSetup::default();
+    assert!(setup.toggle_value(LauncherField::Vsync));
+    assert!(setup.to_raw().display.vsync.is_none());
+
+    setup.cycle(LauncherField::Vsync, true);
+    assert!(!setup.build_config().unwrap().vsync);
+    let raw = setup.to_raw();
+    assert_eq!(raw.display.vsync, Some(false));
+    let mut reloaded = MachineSetup::from_raw(&raw).unwrap();
+    assert!(!reloaded.toggle_value(LauncherField::Vsync));
+    reloaded.cycle(LauncherField::Vsync, true);
+    assert!(reloaded.build_config().unwrap().vsync);
+    assert!(reloaded.to_raw().display.vsync.is_none());
+}
+
+#[test]
 fn cycling_chip_ram_walks_the_presets() {
     let mut s = MachineSetup::default();
     assert_eq!(s.chip_ram, 512 * 1024);

@@ -405,6 +405,9 @@ pub struct Config {
     /// top-right of the display. The `Cmd+P` / `Alt+P` toggle flips it live
     /// without affecting this start-up value.
     pub perf_overlay: bool,
+    /// Synchronise desktop presentation to vblank (`[display] vsync`).
+    /// Enabled by default; independent of the emulator's real-time pacing.
+    pub vsync: bool,
     /// Screen tint applied to the window image: the phosphor colour of a
     /// monochrome monitor, or a sepia treatment. See [`Tint`].
     pub tint: Tint,
@@ -1634,20 +1637,21 @@ pub const WARP_MAX_FRAME_CAP: usize = 1024;
 
 /// Wall-clock budget (milliseconds) for one presented frame in `WarpSpeed::Max`.
 /// The event loop emulates frames back-to-back until this much host time has
-/// elapsed, then presents one frame at vsync. Kept under a 60 Hz refresh
-/// interval (16.6 ms) so input is still polled and a frame still presented every
-/// host refresh while the core runs flat out.
+/// elapsed, then presents one frame (at vsync when enabled). Kept under a
+/// 60 Hz refresh interval (16.6 ms) so input is still polled and a frame still
+/// presented every host refresh while the core runs flat out.
 pub const WARP_MAX_BUDGET_MS: u64 = 12;
 
 /// How fast the UI "Warp Speed" (turbo) mode runs when engaged.
 ///
-/// Presentation is gated to the host monitor's refresh rate (the wgpu surface
-/// presents with vsync), so emulating exactly one frame per presented frame
+/// With vsync enabled, presentation is gated to the host monitor's refresh
+/// rate, so emulating exactly one frame per presented frame
 /// caps warp at the monitor rate -- about 1.2x for a 50 Hz PAL machine on a
 /// 60 Hz display. To decouple emulation speed from the monitor, warp emulates
 /// several frames per *presented* frame (output frame skip): the intermediate
 /// frames are computed but never rendered or presented, so the effective speed
-/// is the level times the refresh rate, host CPU permitting.
+/// is the level times the refresh rate, host CPU permitting. Without vsync,
+/// presentation frequency depends on host throughput instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WarpSpeed {
     /// Two emulated frames per presented frame.
@@ -1659,7 +1663,7 @@ pub enum WarpSpeed {
     /// Sixteen emulated frames per presented frame.
     X16,
     /// As many frames as fit in `WARP_MAX_BUDGET_MS` of host time per presented
-    /// frame (bounded by `WARP_MAX_FRAME_CAP`): run flat out, present at vsync.
+    /// frame (bounded by `WARP_MAX_FRAME_CAP`): run flat out, periodically present.
     #[default]
     Max,
 }
@@ -2680,6 +2684,7 @@ impl Default for Config {
             bezel: BezelStyle::None,
             bezel_stickers: None,
             perf_overlay: false,
+            vsync: true,
             tint: Tint::None,
             menu_scale: MenuScale::Normal,
             full_screen: false,

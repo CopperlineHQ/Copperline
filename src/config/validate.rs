@@ -403,6 +403,7 @@ impl TryFrom<RawConfig> for Config {
             Some(p) => Some(PathBuf::from(p)),
         };
         let perf_overlay = raw.display.perf_overlay.unwrap_or(defaults.perf_overlay);
+        let vsync = raw.display.vsync.unwrap_or(defaults.vsync);
         let tint = match raw.display.tint.as_deref() {
             None => defaults.tint,
             Some(s) => parse_tint(s)?,
@@ -1441,6 +1442,7 @@ impl TryFrom<RawConfig> for Config {
             bezel,
             bezel_stickers,
             perf_overlay,
+            vsync,
             tint,
             menu_scale,
             full_screen,

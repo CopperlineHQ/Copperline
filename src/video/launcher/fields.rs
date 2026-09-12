@@ -616,6 +616,7 @@ pub enum LauncherField {
     ShaderStrength,
     Bezel,
     PerfOverlay,
+    Vsync,
     MenuScale,
     StartFullscreen,
     ShowStatusBar,
@@ -1221,10 +1222,11 @@ pub(super) const VIDEO_ROWS: [Row; 10] = [
 ];
 
 // The host window and its furniture, as distinct from the picture inside it.
-pub(super) const DISPLAY_ROWS: [Row; 4] = [
+pub(super) const DISPLAY_ROWS: [Row; 5] = [
     row(F::StartFullscreen, "Start fullscreen", Cycle),
     row(F::ShowStatusBar, "Status bar", Cycle),
     row(F::PerfOverlay, "Perf overlay", Cycle),
+    row(F::Vsync, "VSync", Cycle),
     row(F::MenuScale, "Menu size", Cycle),
 ];
 pub(super) const AUDIO_ROWS: [Row; 6] = [

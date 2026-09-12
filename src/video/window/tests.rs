@@ -4293,6 +4293,7 @@ fn test_app_with_audio_cpu_and_program(
         crate::config::BezelStyle::None,
         None,
         false,
+        true,
         crate::config::Tint::None,
         false,
         false,
@@ -4319,6 +4320,42 @@ fn copperhf_temp_hardfile(name: &str) -> PathBuf {
     ));
     std::fs::write(&path, vec![0u8; 256 * 1024]).unwrap();
     path
+}
+
+#[test]
+fn vsync_menu_toggle_preserves_guest_pacing_and_configuration_choice() {
+    use crate::video::menu::MenuAction;
+    use pixels::wgpu::PresentMode;
+
+    let mut app = test_app();
+    app.emu.set_paced(true);
+    let frame = app.emu.bus().emulated_frames();
+    let pc = app.emu.machine.pc();
+    assert!(app.vsync);
+    assert_eq!(super::window_present_mode(app.vsync), PresentMode::Fifo);
+
+    app.run_menu_action(MenuAction::ToggleVsync, None);
+    assert!(!app.vsync);
+    assert_eq!(
+        super::window_present_mode(app.vsync),
+        PresentMode::AutoNoVsync
+    );
+    assert!(app.emu.paced());
+    assert_eq!(app.emu.bus().emulated_frames(), frame);
+    assert_eq!(app.emu.machine.pc(), pc);
+    app.open_launcher();
+    let saved = app.launcher_state().unwrap().setup.to_raw();
+    assert!(!crate::config::Config::try_from(saved).unwrap().vsync);
+
+    // Re-enabling while in warp must not turn normal emulation pacing on.
+    app.emu.set_paced(false);
+    app.run_menu_action(MenuAction::ToggleVsync, None);
+    assert!(app.vsync);
+    assert_eq!(super::window_present_mode(app.vsync), PresentMode::Fifo);
+    assert!(!app.emu.paced());
+    app.open_launcher();
+    let saved = app.launcher_state().unwrap().setup.to_raw();
+    assert!(crate::config::Config::try_from(saved).unwrap().vsync);
 }
 
 /// An interactive App around a real machine with one or more `[copperhf]`
@@ -4373,6 +4410,7 @@ fn test_app_with_copperhf_units(units: &[(usize, PathBuf)]) -> super::App {
         crate::config::BezelStyle::None,
         None,
         false,
+        true,
         crate::config::Tint::None,
         false,
         false,

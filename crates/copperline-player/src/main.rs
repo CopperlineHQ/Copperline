@@ -157,6 +157,7 @@ fn main() -> Result<()> {
         config::resolve_bezel(cfg.bezel),
         None,
         false,
+        cfg.vsync,
         config::resolve_tint(cfg.tint),
         cfg.full_screen,
         true,
