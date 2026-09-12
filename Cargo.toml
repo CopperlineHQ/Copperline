@@ -182,7 +182,9 @@ mt32-rs = { git = "https://github.com/CopperlineHQ/mt32-rs", rev = "ac00f818629a
 coppersynth = { git = "https://github.com/CopperlineHQ/Coppersynth", rev = "38873e283aa9f2e6d2574d6c71e9a2cf9d0b42a2", optional = true }
 pixels = { version = "0.17", optional = true }
 winit = { version = "0.30", optional = true }
-# egui 0.35 shares pixels' wgpu 29 device and command encoder.
+# egui 0.35 shares pixels 0.17's wgpu 29 device and command encoder.
+# Upgrade pixels and all egui adapters together: egui 0.36 uses wgpu 30.
+# Dependabot keeps this stack on compatible patch updates until that migration.
 egui = { version = "0.35", optional = true }
 egui-winit = { version = "0.35", optional = true, default-features = false, features = ["clipboard", "wayland", "x11"] }
 egui-wgpu = { version = "0.35", optional = true, default-features = false }

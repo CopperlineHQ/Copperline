@@ -4,7 +4,8 @@ updates:
   # depend on the root package by path, so updating a shared dependency in
   # only one lockfile leaves the others unable to build with --locked.
   # group-by makes one PR per non-patch dependency across every affected
-  # directory; patch releases stay in one consolidated PR. The fuzz lockfile
+  # directory; patch releases stay in one consolidated PR, except for the
+  # coupled desktop renderer crates below. The fuzz lockfile
   # is derived in CI because its path dependency mirrors the entire root graph.
   - package-ecosystem: cargo
     directories:
@@ -19,11 +20,40 @@ updates:
     schedule:
       interval: weekly
     groups:
+      # The debugger passes egui types between its winit and wgpu adapters,
+      # and shares pixels' wgpu device. Update this stack together, including
+      # patches, before the catch-all groups can split it into separate PRs.
+      desktop-renderer:
+        patterns:
+          - pixels
+          - winit
+          - egui
+          - egui-*
       patch-updates:
         update-types: ["patch"]
       shared-dependency-updates:
         group-by: dependency-name
     ignore:
+      # pixels 0.17 uses wgpu 29; egui-wgpu 0.36 requires wgpu 30.
+      # Renderer series changes need a coordinated migration, including the
+      # versioned epaint_default_fonts license exception in deny.toml and
+      # the packaged font notices. Keep compatible patch updates enabled.
+      - dependency-name: pixels
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+      - dependency-name: winit
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+      - dependency-name: egui
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+      - dependency-name: egui-*
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
       # Save states deliberately remain on bincode 1.x; see Cargo.toml.
       - dependency-name: bincode
       # Wasmtime is part of the save-state contract and is intentionally pinned
