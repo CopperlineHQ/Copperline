@@ -4085,7 +4085,7 @@ impl ApplicationHandler for App {
                             && self.modifiers.shift_key() =>
                     {
                         if self.save_states_allowed() {
-                            self.load_state_from_dialog(Some(event_loop))
+                            self.open_states_browser()
                         }
                     }
                     (KeyCode::KeyS, ElementState::Pressed)
