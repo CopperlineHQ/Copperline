@@ -3784,6 +3784,38 @@ fn clipboard_share_is_unset_by_default_and_follows_the_key_or_flag() -> Result<(
 }
 
 #[test]
+fn resolve_clipboard_share_needs_an_explicit_request() -> Result<()> {
+    // Unset settles off, windowed or headless: the clipboard unit is part
+    // of a services board a real Amiga does not have, and binding it at
+    // boot moves every Exec allocation behind it.
+    let mut cfg = parse_config("")?;
+    cfg.resolve_clipboard_share(false);
+    assert_eq!(cfg.clipboard_share, Some(false));
+
+    let mut cfg = parse_config("[clipboard]\nshare = false\n")?;
+    cfg.resolve_clipboard_share(false);
+    assert_eq!(cfg.clipboard_share, Some(false));
+
+    let mut cfg = parse_config("[clipboard]\nshare = true\n")?;
+    cfg.resolve_clipboard_share(false);
+    assert_eq!(cfg.clipboard_share, Some(true));
+    Ok(())
+}
+
+#[test]
+fn resolve_clipboard_share_refuses_netplay_even_when_asked() -> Result<()> {
+    // Peers must build the same machine, and the unit is part of the
+    // board's layout: a session where one side fitted it could not agree
+    // on a machine at all.
+    for toml in ["", "[clipboard]\nshare = true\n"] {
+        let mut cfg = parse_config(toml)?;
+        cfg.resolve_clipboard_share(true);
+        assert_eq!(cfg.clipboard_share, Some(false), "config: {toml:?}");
+    }
+    Ok(())
+}
+
+#[test]
 fn toccata_is_absent_by_default_and_fits_when_enabled() -> Result<()> {
     assert!(!parse_config("")?.toccata);
     let cfg = parse_config("[toccata]\nenabled = true\n")?;

@@ -1824,7 +1824,8 @@ fn print_help() {
          --jit / --no-jit               fast batch/trace-JIT CPU execution (not cycle-exact,\n  \
          \x20                            like an accelerator card; default: off)\n  \
          --clipboard / --no-clipboard   share the host clipboard with the guest's\n  \
-         \x20                            clipboard.device (default: on windowed, off headless)\n  \
+         \x20                            clipboard.device; fits an extra autoconfig board,\n  \
+         \x20                            so it is off unless asked for (default: off)\n  \
          --cartridge MODEL              freezer cartridge: none (default) or hrtmon (the\n  \
          \x20                            bundled HRTMon monitor, entered with --freeze-after,\n  \
          \x20                            the Freeze menu item, or cartridge.freeze)\n  \

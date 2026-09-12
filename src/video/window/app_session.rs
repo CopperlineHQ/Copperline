@@ -635,7 +635,10 @@ impl App {
             .filesys_board_mut()
             .filter(|b| b.clipboard_fitted())
         else {
-            self.show_osd("Clipboard sharing is not fitted ([clipboard] share)");
+            // Off unless asked for: the bridge is part of the services
+            // board's boot, and that board changes the guest's memory map,
+            // so it is a start-time choice and not one to add mid-session.
+            self.show_osd("Clipboard sharing not fitted: start with --clipboard");
             return;
         };
         let on = !board.clipboard_sharing();

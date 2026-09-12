@@ -274,10 +274,10 @@ Run with `--script`:
   --script test.clscript --screenshot-after 125 /tmp/out.png
 ```
 
-A windowed session shares the host clipboard by default and a headless
-one does not (see `[clipboard]` in [Configuration](configuration.md#clipboard)),
-which puts a different services board in the machine: replay a recording
-made in the window with `--clipboard` so the headless machine matches
+Host clipboard sharing is off unless asked for, windowed or headless (see
+`[clipboard]` in [Configuration](configuration.md#clipboard)). It fits a
+services board, so it is part of the machine: replay a recording made in a
+window that had it on with `--clipboard` so the headless machine matches
 (headless, the bridge never reads the host clipboard, so the replay stays
 deterministic).
 

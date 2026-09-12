@@ -1404,12 +1404,10 @@ impl App {
         if options.is_some() {
             crate::netplay::prepare_config(&mut cfg)?;
         }
-        // A launcher-started machine is a windowed session: share the host
-        // clipboard unless the config says otherwise -- except under
-        // netplay, where every peer must run the same machine.
-        if cfg.clipboard_share.is_none() {
-            cfg.clipboard_share = Some(options.is_none() && !guest);
-        }
+        // A launcher-started machine settles the host clipboard the same
+        // way a command line does: only where the configuration asked for
+        // it, and never under netplay.
+        cfg.resolve_clipboard_share(options.is_some() || guest);
         if guest {
             let _ = crate::config::resolve_bundled_rom(&mut cfg);
         } else {

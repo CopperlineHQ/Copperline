@@ -289,12 +289,14 @@ pub struct Config {
     /// exist yet (see docs/internals/toccata.md).
     pub toccata: bool,
     /// Host <-> guest clipboard sharing (`[clipboard] share`,
-    /// `--clipboard`/`--no-clipboard`; `crate::clipboard`). `None` leaves
-    /// the choice to the session: a windowed session shares, a headless one
-    /// does not (the host clipboard is live host state a replay cannot
-    /// reproduce). `Some(true)` fits the clipboard unit of the services
-    /// board; headless it is then reachable only through the control
-    /// protocol.
+    /// `--clipboard`/`--no-clipboard`; `crate::clipboard`). `Some(true)`
+    /// fits the clipboard unit of the services board, windowed or headless
+    /// (headless it is reachable only through the control protocol, so the
+    /// run stays deterministic). Unset means off: the unit is an
+    /// autoconfig board the emulated Amiga does not have, and fitting it
+    /// moves the guest's memory map -- see
+    /// [`Config::resolve_clipboard_share`], which every session calls
+    /// before building a machine.
     pub clipboard_share: Option<bool>,
     /// Freezer cartridge (`[cartridge]`, `crate::cartridge`): a system
     /// monitor in its own bank at $A10000, entered by a level-7 interrupt
@@ -2696,6 +2698,27 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Settle host clipboard sharing for a session about to build a
+    /// machine: on only where the configuration asked for it, off
+    /// everywhere else, and off under netplay even when asked.
+    ///
+    /// The bridge is a unit of the Copperline services board, so fitting it
+    /// puts an autoconfig board on the chain that the emulated Amiga does
+    /// not have. Kickstart binds the board at boot and every Exec
+    /// allocation after that lands somewhere else, which is a different
+    /// machine from the one the configuration describes -- enough to move
+    /// where a program's buffers sit, and so what the Copper reads from a
+    /// list the program has pointed at but not yet written. A host
+    /// convenience cannot cost the guest its memory map by default, so it
+    /// is opt-in: `[clipboard] share = true` or `--clipboard`.
+    ///
+    /// Netplay refuses it on either side of the session, and even on an
+    /// explicit request: peers must build the same machine, and a session
+    /// where one side fitted the unit could not agree on one at all.
+    pub fn resolve_clipboard_share(&mut self, netplay: bool) {
+        self.clipboard_share = Some(!netplay && self.clipboard_share == Some(true));
+    }
+
     /// Why this resolved machine shape cannot use per-refresh run-ahead
     /// snapshots. These devices retain or mutate host state outside the
     /// serialized core. Dynamic media and observers are checked on the live

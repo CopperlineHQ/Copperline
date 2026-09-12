@@ -4396,6 +4396,42 @@ fn copperhf_test_fixture_builds_a_machine_with_the_configured_unit() {
     let _ = std::fs::remove_file(&image);
 }
 
+/// A windowed session builds the machine its configuration describes: the
+/// services board carrying the clipboard unit goes on the Zorro chain only
+/// where it was asked for. Binding a board a real Amiga does not have moves
+/// every Exec allocation behind it, which moves a program's buffers, and a
+/// program that lets the Copper run over a list it has not written yet
+/// reads a different word (Lotus Esprit Turbo Challenge hangs on one that
+/// decodes as a MOVE to INTENA).
+#[test]
+fn clipboard_unit_is_fitted_only_where_the_configuration_asked_for_it() {
+    fn board_fitted(toml: &str) -> bool {
+        std::env::set_var(
+            "COPPERLINE_AROS_DIR",
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/aros"),
+        );
+        let raw: crate::config::RawConfig = toml::from_str(toml).expect("test config");
+        let mut cfg = crate::config::Config::try_from(raw).expect("config validates");
+        cfg.resolve_clipboard_share(false);
+        crate::config::resolve_bundled_rom(&mut cfg).expect("bundled AROS ROM resolves");
+        crate::emulator::build_machine(&cfg, Box::new(NullSink), false, false)
+            .expect("machine builds")
+            .bus()
+            .filesys_board()
+            .is_some()
+    }
+
+    assert!(!board_fitted(""), "an unset config fits no services board");
+    assert!(
+        !board_fitted("[clipboard]\nshare = false\n"),
+        "share = false fits no services board"
+    );
+    assert!(
+        board_fitted("[clipboard]\nshare = true\n"),
+        "share = true fits the board carrying the clipboard unit"
+    );
+}
+
 // ---------------------------------------------------------------------
 // A test machine that draws a hardware pointer.
 //
