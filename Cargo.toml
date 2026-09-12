@@ -184,7 +184,7 @@ pixels = { version = "0.17", optional = true }
 winit = { version = "0.30", optional = true }
 # egui 0.35 shares pixels' wgpu 29 device and command encoder.
 egui = { version = "0.35", optional = true }
-egui-winit = { version = "0.35", optional = true, default-features = false, features = ["clipboard", "wayland", "x11"] }
+egui-winit = { version = "0.36", optional = true, default-features = false, features = ["clipboard", "wayland", "x11"] }
 egui-wgpu = { version = "0.35", optional = true, default-features = false }
 anyhow = "1"
 log = "0.4"
