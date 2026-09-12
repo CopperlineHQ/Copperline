@@ -13,6 +13,21 @@ or 120 Hz display as some Amiga frames stay on screen for an extra refresh.
 Vsync prevents tearing but does not make those refresh rates match or change
 the emulated machine's speed.
 
+On native Wayland, redraws also follow compositor frame callbacks. This
+allows the compositor to throttle a hidden window and schedule visible
+updates, including when VSync is off.
+
+For display diagnostics, launch with `RUST_LOG=info` to log the selected
+presentation mode, supported modes, GPU, graphics backend, and window
+system. The window-system field distinguishes native Wayland from an X11
+window running through XWayland. Add `COPPERLINE_PRESENT_PROFILE=1` to log
+each presentation attempt: its emulated frame number, interval since the
+previous attempt, time acquiring/uploading the surface, time recording draw
+commands, and time submitting/presenting. `submitted=false` means no frame
+was submitted; `-1` marks a stage that was not reached. These are host CPU
+timings, not GPU execution or physical display timestamps. They complement
+the performance overlay, whose FPS measures emulated frames.
+
 ## Keyboard shortcuts
 
 The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
@@ -573,9 +588,9 @@ boot-time cards, SRAM cards, real card readers, and the fast-RAM rule.
   4x, 8x, 16x, or **Max** -- so warp retires that many emulated frames per
   presented frame, making the effective speed roughly the limit times the
   refresh rate (host CPU permitting). `Max` runs flat out and still presents
-  at vsync when enabled. With VSync off, the host's throughput determines
-  presentation frequency. The default is set by `[emulation] warp_speed` (see
-  [Configuration](configuration.md)).
+  at vsync when enabled. With VSync off, presentation frequency depends on
+  host throughput and compositor redraw scheduling. The default is set by
+  `[emulation] warp_speed` (see [Configuration](configuration.md)).
 
 ### Recording
 

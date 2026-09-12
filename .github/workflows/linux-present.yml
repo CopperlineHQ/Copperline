@@ -1,8 +1,9 @@
 name: Linux present
 
 # Verifies Copperline's presentation path initializes and renders frames on
-# Linux using software Vulkan (Mesa lavapipe) under a headless X server. Guards
-# the "Vulkan required on Linux" policy in src/video/window.rs: wgpu's GL
+# Linux using software Vulkan (Mesa lavapipe) under Xvfb and a headless Wayland
+# compositor. Guards the "Vulkan required on Linux" policy in
+# src/video/window.rs: wgpu's GL
 # fallback drops to an unusable surfaceless EGL platform, so a Vulkan adapter
 # (hardware or lavapipe) must be reachable for the window surface to come up.
 # GitHub runners have no GPU, so this exercises the lavapipe path -- the same
@@ -23,6 +24,7 @@ on:
       - "Cargo.lock"
       - "Cargo.toml"
       - ".github/workflows/linux-present.yml"
+      - "tools/check-wayland-present.py"
   pull_request:
     paths:
       - "src/video/**"
@@ -30,6 +32,7 @@ on:
       - "Cargo.lock"
       - "Cargo.toml"
       - ".github/workflows/linux-present.yml"
+      - "tools/check-wayland-present.py"
 
 concurrency:
   group: linux-present-${{ github.ref }}
@@ -49,15 +52,16 @@ jobs:
         # Build: ALSA (cpal) + udev (gilrs). Runtime: software Vulkan (Mesa
         # lavapipe) + a virtual X server, plus the X11/xkb client libraries
         # winit dlopens at startup (libxkbcommon-x11 in particular, which the
-        # runner image does not ship). CI runners have no GPU, so lavapipe is
-        # the only ICD present. Keep this list in sync with
+        # runner image does not ship). Weston supplies the isolated Wayland
+        # compositor. CI runners have no GPU, so lavapipe is
+        # the only ICD present. The X11 dependencies are also used by
         # packaging/test-linux-vulkan/Dockerfile.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libasound2-dev libudev-dev \
             mesa-vulkan-drivers vulkan-tools \
-            xvfb xauth \
+            xvfb xauth weston \
             libxkbcommon0 libxkbcommon-x11-0 \
             libx11-6 libx11-xcb1 libxcb1 \
             libxcursor1 libxi6 libxrandr2 libxrender1 \
@@ -99,10 +103,17 @@ jobs:
             trap - EXIT
           '
           echo "present path OK ($(stat -c %s /tmp/present.png) bytes)"
+      - name: Native Wayland present smoke
+        run: |
+          python3 tools/check-wayland-present.py ./target/release/copperline \
+            --output-dir /tmp/wayland-present
       - name: Upload present screenshot
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: linux-present-screenshot
-          path: /tmp/present.png
+          path: |
+            /tmp/present.png
+            /tmp/wayland-present/*.png
+            /tmp/wayland-present/*.log
           if-no-files-found: ignore
