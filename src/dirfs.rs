@@ -792,14 +792,11 @@ mod tests {
     }
 
     fn temp_tree() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "copperline-dirfs-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = tempfile::Builder::new()
+            .prefix("copperline-dirfs-test-")
+            .tempdir()
+            .unwrap()
+            .keep();
         std::fs::create_dir_all(dir.join("Sub/Deeper")).unwrap();
         std::fs::write(dir.join("ReadMe.txt"), b"hello amiga\n").unwrap();
         std::fs::write(dir.join("Sub/data.bin"), vec![0xA7u8; 100_000]).unwrap();
