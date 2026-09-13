@@ -601,9 +601,10 @@ either the render worker or the synchronous fallback.
 
 Window creation selects its graphics backend before constructing the scaler,
 CRT passes, or egui renderer. On Windows, an automatically selected CPU adapter
-triggers a second `pixels` build restricted to OpenGL. The original renderer
-stays alive until a non-CPU replacement has been built successfully; a failed
-or software-only GL attempt leaves it usable. `WGPU_BACKEND` and
+triggers a second `pixels` build restricted to OpenGL. Each renderer is dropped
+before creating another surface for the same native window. A failed or
+software-only GL attempt rebuilds the original backend; an error rebuilding
+it propagates to the window creator. `WGPU_BACKEND` and
 `WGPU_ADAPTER_NAME` opt out of this retry. Other platforms keep their existing
 selection policy, including Linux's Vulkan default.
 

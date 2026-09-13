@@ -32,7 +32,8 @@ On Windows, if the default graphics backend selects a CPU software renderer,
 Copperline tries OpenGL and uses it when its adapter is not reported as a CPU
 renderer. This avoids a slow software DirectX path on systems with accelerated
 OpenGL, including some virtual machines. If OpenGL cannot initialise or also
-selects a CPU renderer, Copperline keeps the original working renderer.
+selects a CPU renderer, Copperline rebuilds the renderer using the original
+backend. If that also fails to initialise, it reports the startup error.
 Setting `WGPU_BACKEND` or `WGPU_ADAPTER_NAME` disables this automatic fallback
 so explicit selections still apply. The startup log records any switch.
 

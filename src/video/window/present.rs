@@ -960,8 +960,8 @@ pub(super) fn build_pixels_for_window(
         pixels,
         automatic_fallback,
         |pixels| pixels.adapter().get_info(),
-        || build(Some(pixels::wgpu::Backends::GL)),
-    );
+        |backend| build(Some(backend.into())),
+    )?;
     let adapter = pixels.adapter().get_info();
     let window_system = match window.window_handle().map(|handle| handle.as_raw()) {
         Ok(RawWindowHandle::Wayland(_)) => "Wayland",
