@@ -346,6 +346,136 @@ jobs:
           path: target/probe-golden/
           if-no-files-found: ignore
 
+  msix:
+    name: Microsoft Store package
+    # Wraps the already-built payloads into the .msixbundle that goes to
+    # Partner Center. It needs no compiler and no ARM64 runner: the bundle is
+    # just the two architectures' zip payloads plus a manifest and the Store
+    # logos, so the bytes shipped through the Store are exactly the bytes the
+    # zip-smoke job booted.
+    #
+    # The bundle is a workflow artifact, never a release asset. It is
+    # deliberately unsigned -- the Store re-signs it during certification --
+    # so a copy downloaded from a GitHub release would install nowhere.
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - name: Force LF checkout
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+      - name: Check package identity
+        id: identity
+        shell: pwsh
+        # Until the Partner Center values are filled into identity.psd1 there
+        # is nothing valid to build, and a hard failure here would redden
+        # every push. Skip instead, and start packaging by itself once the
+        # identity lands.
+        run: |
+          $identity = Import-PowerShellDataFile packaging/windows/msix/identity.psd1
+          $configured = $identity.Name -notlike "REPLACE-*"
+          "configured=$($configured.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          if (-not $configured) {
+            Write-Host "::notice::Package identity is unset in packaging/windows/msix/identity.psd1; skipping the Store package."
+          }
+      - uses: actions/download-artifact@v8
+        if: steps.identity.outputs.configured == 'true'
+        with:
+          pattern: copperline-windows-*
+          merge-multiple: true
+          path: zips
+      - name: Expand the release payloads
+        id: payloads
+        if: steps.identity.outputs.configured == 'true'
+        shell: pwsh
+        # Each zip holds one top-level Copperline-<version>-win-<arch>
+        # directory, which is the staged payload build-msix.ps1 packs.
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+          foreach ($arch in @("x64", "arm64")) {
+            $zip = Get-ChildItem zips -Filter "Copperline-*-win-$arch.zip" | Select-Object -First 1
+            if (-not $zip) { throw "no zip for $arch" }
+            $dest = Join-Path $env:RUNNER_TEMP "payload-$arch"
+            Expand-Archive -Path $zip.FullName -DestinationPath $dest
+            $staged = Get-ChildItem $dest -Directory | Select-Object -First 1
+            "$arch=$($staged.FullName)" >> $env:GITHUB_OUTPUT
+          }
+      - name: Build the msixbundle
+        if: steps.identity.outputs.configured == 'true'
+        shell: pwsh
+        run: |
+          packaging/windows/msix/build-msix.ps1 `
+            -Payload "x64=${{ steps.payloads.outputs.x64 }}", "arm64=${{ steps.payloads.outputs.arm64 }}" `
+            -OutDir "$env:RUNNER_TEMP/msix"
+      - name: Verify the bundle
+        if: steps.identity.outputs.configured == 'true'
+        shell: pwsh
+        # Unpack what was just built and check it end to end: both
+        # architectures present, the identity Partner Center will match on,
+        # and the emulator itself inside each package. A manifest mistake
+        # fails here rather than in a Store certification run hours later.
+        #
+        # The identity is compared against identity.psd1, not merely printed:
+        # a wrong-but-well-formed Name or Publisher packs perfectly and is
+        # then refused at upload, which is the slowest possible place to find
+        # out. The version is compared against the one in the bundle's own
+        # file name, so every package in the bundle agrees with the bundle.
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+          $bundle = Get-ChildItem "$env:RUNNER_TEMP/msix" -Filter *.msixbundle | Select-Object -First 1
+          if (-not $bundle) { throw "no msixbundle was produced" }
+          $identity = Import-PowerShellDataFile packaging/windows/msix/identity.psd1
+          if ($bundle.BaseName -notmatch '^Copperline-(\d+\.\d+\.\d+\.0)$') {
+            throw "unexpected bundle name $($bundle.Name)"
+          }
+          $expectedVersion = $Matches[1]
+          $sdk = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Directory |
+            Sort-Object Name -Descending
+          $makeappx = $sdk | ForEach-Object { Join-Path $_.FullName "x64\makeappx.exe" } |
+            Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $makeappx) { throw "makeappx.exe not found on the runner" }
+          $unpacked = Join-Path $env:RUNNER_TEMP "unbundled"
+          & $makeappx unbundle /o /p $bundle.FullName /d $unpacked
+          if ($LASTEXITCODE -ne 0) { throw "makeappx unbundle failed" }
+          foreach ($arch in @("x64", "arm64")) {
+            $msix = Get-ChildItem $unpacked -Filter "Copperline-$arch.msix" | Select-Object -First 1
+            if (-not $msix) { throw "the bundle has no $arch package" }
+            $dir = Join-Path $env:RUNNER_TEMP "unpacked-$arch"
+            & $makeappx unpack /o /p $msix.FullName /d $dir
+            if ($LASTEXITCODE -ne 0) { throw "makeappx unpack failed for $arch" }
+            if (-not (Test-Path (Join-Path $dir "copperline.exe"))) {
+              throw "the $arch package has no copperline.exe"
+            }
+            if (-not (Test-Path (Join-Path $dir "aros\aros-amiga-m68k-rom.bin"))) {
+              throw "the $arch package has no bundled AROS ROM"
+            }
+            $manifest = [xml](Get-Content (Join-Path $dir "AppxManifest.xml"))
+            $declared = $manifest.Package.Identity
+            foreach ($check in @(
+              @{ Field = "ProcessorArchitecture"; Got = $declared.ProcessorArchitecture; Want = $arch },
+              @{ Field = "Name"; Got = $declared.Name; Want = $identity.Name },
+              @{ Field = "Publisher"; Got = $declared.Publisher; Want = $identity.Publisher },
+              @{ Field = "Version"; Got = $declared.Version; Want = $expectedVersion }
+            )) {
+              if ($check.Got -cne $check.Want) {
+                throw "the $arch package declares $($check.Field) '$($check.Got)', expected '$($check.Want)'"
+              }
+            }
+            $shown = $manifest.Package.Properties.PublisherDisplayName
+            if ($shown -cne $identity.PublisherDisplayName) {
+              throw "the $arch package declares PublisherDisplayName '$shown', expected '$($identity.PublisherDisplayName)'"
+            }
+            Write-Host "$arch : $($declared.Name) $($declared.Version) $($declared.Publisher)"
+          }
+      - name: Upload the Store package
+        if: steps.identity.outputs.configured == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: copperline-msixbundle
+          path: ${{ runner.temp }}/msix/*.msixbundle
+          if-no-files-found: error
+
   release:
     name: Attach zips to release
     # Runs only once every Windows check on both architectures has passed,

@@ -35,6 +35,9 @@ crates.io library, so the root package remains marked `publish = false`.
      `assets/hostsocket/hostsocket_plugin.wasm`, the bundled HostSocket board
      artifacts built from `guest/hostsocket/` and `crates/hostsocket-plugin/`
    - `docs/images/*.png`; review provenance before release when these change
+   - `packaging/windows/msix/assets/*.png`, the Microsoft Store tile and icon
+     logos, generated from `assets/brand/` by
+     `packaging/windows/msix/generate-logos.py`
    - `timing-test/*.bin` probe programs: `boot.bin`, `test.bin`,
      `audprobe-*`, `bfprobe`, `bltprobe-*`, `bplprobe-*`, `clxprobe`,
      `dblpal-*`, `ddfprobe-*`, `fwdprobe`, `hamprobe-*`, `probesrv`,
@@ -198,6 +201,36 @@ Windows host (add
 ```pwsh
 packaging/windows/build-zip.ps1
 ```
+
+### Microsoft Store
+
+The same workflow's `Microsoft Store package` job packs the two zip payloads
+into `Copperline-<store version>.msixbundle` and uploads it as the
+`copperline-msixbundle` workflow artifact. It is never attached to a GitHub
+Release: the bundle is unsigned by design (Partner Center re-signs it during
+certification), so a copy taken from a release would install nowhere.
+
+Per release, after the tag's Windows workflow is green:
+
+1. Download the `copperline-msixbundle` artifact from that run.
+2. In Partner Center, create a submission for
+   [Copperline](https://partner.microsoft.com/dashboard) (Store ID
+   `9MW1L1PVNXSG`) and upload the bundle. The listing text lives in
+   `packaging/windows/msix/store-listing.md`; refresh its "What's new in
+   this version" section to match the release, and update any feature
+   claims the release changes.
+3. Submit for certification. It is normally reviewed within a day or two.
+4. On the first publication only, add the listing link
+   (`https://apps.microsoft.com/detail/9MW1L1PVNXSG`) to the Microsoft Store
+   section of `docs/guide/getting-started.md` and to the download page on
+   the website. It is left out until then because the docs build checks
+   links, and an unpublished listing answers 410.
+
+The Store package version is not the crate version: the Store reserves the
+fourth component and forbids a leading `0`, so `build-msix.ps1` shifts the
+major up by one (`0.20.0` ships as `1.20.0.0`). See
+`packaging/windows/msix/README.md` for the identity values, the version rule,
+and what a Store install cannot do.
 
 ## macOS disk image
 
