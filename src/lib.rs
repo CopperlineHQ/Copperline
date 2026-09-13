@@ -148,6 +148,7 @@ pub mod wasm_manifest;
 pub mod wasmboard;
 pub mod waveform;
 pub mod whdload;
+pub mod winconsole;
 pub mod z3660;
 pub mod zorro;
 pub mod zorro_device;
