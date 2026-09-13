@@ -658,10 +658,12 @@ pub unsafe extern "C" fn retro_serialize(data: *mut c_void, size: usize) -> bool
 #[no_mangle]
 pub unsafe extern "C" fn retro_unserialize(data: *const c_void, size: usize) -> bool {
     boundary(|| {
-        ensure!(
-            !data.is_null() && size <= retro_serialize_size(),
-            "invalid save-state buffer"
-        );
+        // Not `size <= retro_serialize_size()`: a state file written when the
+        // envelope was a flat 64 MiB is mostly trailing zeros, and its own
+        // length header says how much of the buffer is the state. What has to
+        // fit this session's envelope is that payload, which `unserialize`
+        // checks after the machine identity.
+        ensure!(!data.is_null() && size >= 76, "invalid save-state buffer");
         with_core(|core| {
             core.unserialize(unsafe { std::slice::from_raw_parts(data.cast(), size) })
         })?;

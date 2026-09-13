@@ -1156,3 +1156,123 @@ fn enabled_cheats_poke_ram_after_each_frame_and_reset_clears_them() {
     assert_eq!(chip(0x180..0x181), [0]);
     retro_deinit();
 }
+
+/// `retro_serialize_size` is a per-session bound, not one flat worst case:
+/// the frontend allocates it per state slot and, under netplay with per-frame
+/// checks, checksums a whole buffer every frame, so a session must not be
+/// charged for memory, media or expansion its machine cannot hold.
+#[test]
+fn the_state_envelope_is_sized_from_the_machine_that_was_built() {
+    const FLAT_ENVELOPE: usize = 64 * 1024 * 1024;
+    for (model, disks, ceiling) in [
+        ("A500", 0, 13 * 1024 * 1024),
+        ("A500", 1, 15 * 1024 * 1024),
+        ("A500", 4, 20 * 1024 * 1024),
+        ("A1200", 1, 19 * 1024 * 1024),
+        ("CD32", 0, 12 * 1024 * 1024),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let config = core::configuration(model, "PAL", false, root.path()).unwrap();
+        let content = (disks > 0).then(|| {
+            let playlist = root.path().join("game.m3u");
+            let mut names = String::new();
+            for index in 0..disks {
+                std::fs::write(root.path().join(format!("d{index}.adf")), probe_adf()).unwrap();
+                names.push_str(&format!("d{index}.adf\n"));
+            }
+            std::fs::write(&playlist, names).unwrap();
+            playlist
+        });
+        let mut core = Core::load(&config, content.as_deref(), root.path().into(), false).unwrap();
+        assert!(
+            core.state_capacity < ceiling,
+            "{model} with {disks} disks reserves {} bytes",
+            core.state_capacity
+        );
+        assert!(core.state_capacity < FLAT_ENVELOPE / 3);
+        // Every state the session can write has to fit what it reserved, with
+        // the drive loaded and the machine well past its boot.
+        core.set_ejected(false).unwrap();
+        let mut state = vec![0; core.state_capacity];
+        for frame in 0..600 {
+            core.advance().unwrap();
+            core.audio.borrow_mut().clear();
+            if frame % 100 == 0 {
+                core.serialize(&mut state).unwrap();
+            }
+        }
+        core.serialize(&mut state).unwrap();
+        let used = 76 + u32::from_le_bytes(state[40..44].try_into().unwrap()) as usize;
+        assert!(used <= core.state_capacity);
+        core.unserialize(&state).unwrap();
+    }
+}
+
+/// The envelope pays for every disk slot in every state, so a floppy session
+/// reserves its playlist and a couple of spares while a CD session, whose
+/// slots hold only a reference, keeps all of them.
+#[test]
+fn disk_slots_are_reserved_per_session_and_the_limit_is_enforced() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("one.adf"), probe_adf()).unwrap();
+    let config = core::configuration("A500", "PAL", false, root.path()).unwrap();
+    let one = root.path().join("one.adf");
+    let mut core = Core::load(&config, Some(&one), root.path().into(), false).unwrap();
+    let single = core.state_capacity;
+    // The frontend's "load new disc" flow: eject, append a slot, fill it.
+    core.set_ejected(true).unwrap();
+    for _ in 0..2 {
+        core.add().unwrap();
+    }
+    let full = core.add().unwrap_err().to_string();
+    assert!(
+        full.contains("this session holds at most 3 disks"),
+        "{full}"
+    );
+    // Filling the spare slots must not push a state past what was reserved.
+    core.replace(1, Some(&one)).unwrap();
+    core.replace(2, Some(&one)).unwrap();
+    let mut state = vec![0; core.state_capacity];
+    core.serialize(&mut state).unwrap();
+    assert_eq!(core.state_capacity, single);
+
+    let cfg = core::configuration("CD32", "PAL", false, root.path()).unwrap();
+    let mut cd =
+        Core::load_with_system(&cfg, None, root.path().into(), false, root.path(), false).unwrap();
+    for _ in 0..media::MAX_DISKS {
+        cd.add().unwrap();
+    }
+    assert!(cd.add().is_err());
+}
+
+/// A state written against the flat 64 MiB envelope is mostly trailing zeros.
+/// The buffer is far bigger than this session reserves, but the payload length
+/// in its own header is what has to fit, so the smaller envelope is not what
+/// turns it away. (Whether such a state is readable at all is the schema
+/// fingerprint's business, which is unchanged.)
+#[test]
+fn an_oversized_state_buffer_is_read_by_its_own_payload_length() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("probe.adf");
+    std::fs::write(&path, probe_adf()).unwrap();
+    setup(root.path(), false, false);
+    assert!(load(Some(&path)));
+    let capacity = retro_serialize_size();
+    assert!(capacity < 64 * 1024 * 1024);
+    let mut saved = vec![0u8; capacity];
+    assert!(unsafe { retro_serialize(saved.as_mut_ptr().cast(), saved.len()) });
+    for _ in 0..20 {
+        retro_run();
+    }
+    let expected = HOST.with(|host| host.borrow().video.clone());
+    // What an older build handed the frontend: the same state in a 64 MiB
+    // buffer padded with zeros.
+    saved.resize(64 * 1024 * 1024, 0);
+    assert!(unsafe { retro_unserialize(saved.as_ptr().cast(), saved.len()) });
+    for _ in 0..20 {
+        retro_run();
+    }
+    assert_eq!(HOST.with(|host| host.borrow().video.clone()), expected);
+    retro_unload_game();
+    retro_deinit();
+}

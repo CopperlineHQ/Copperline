@@ -20,11 +20,23 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-/// Fixed for the entire content session, including disk replacement. The
-/// envelope bounds media to sixteen standard ADFs and machine state to the
-/// remainder. Unused bytes are zeroed and compress well in frontend files.
-pub const STATE_CAPACITY: usize = 64 * 1024 * 1024;
 const MAGIC: &[u8; 8] = b"CLRETRO2";
+
+/// The envelope around the machine: the header, the control latches, and up
+/// to the second of pending audio a state may carry.
+const ENVELOPE_BYTES: usize = 1024 + 4 * MIX_SAMPLE_RATE as usize;
+
+/// What a machine checkpoint holds beyond its memory, its ROM images and the
+/// drive's disk image: the chip registers, the Copper and blitter engines,
+/// and the per-line beam events the renderer replays. Over long runs of nine
+/// OCS and AGA titles this stayed under a megabyte; the margin is for a
+/// program that writes far more registers per line than any of them.
+const CHIPSET_SCRATCH_BYTES: usize = 4 * 1024 * 1024;
+
+/// Disk slots a session keeps free for images the frontend adds later, on
+/// top of the playlist it was given. Every slot is paid for in every state,
+/// so a floppy session buys a few rather than all [`MAX_DISKS`].
+const SPARE_DISK_SLOTS: usize = 2;
 
 pub struct BufferedAudio(pub Rc<RefCell<Vec<i16>>>);
 impl AudioSink for BufferedAudio {
@@ -43,6 +55,8 @@ pub struct Core {
     pub emu: Emulator,
     pub netplay: bool,
     pub state_capacity: usize,
+    /// Disk slots this session's state envelope was sized for.
+    disk_slots: usize,
     pub cd_mode: bool,
     cd_paths: copperline::cdrom::StatePaths,
     whdload: Option<crate::whdload::Prepared>,
@@ -61,6 +75,40 @@ pub struct Core {
     deinterlacer: Deinterlacer,
     machine_identity: [u8; 32],
     pub(crate) presentation: present::PresentationLatch,
+}
+
+/// Every byte a state of this session can occupy, which is what
+/// `retro_serialize_size` reports. A frontend allocates that much per state
+/// slot and, under netplay with per-frame checks, checksums a whole buffer
+/// every frame, so the bound is computed from the machine that was actually
+/// built rather than being one flat worst case over every machine.
+///
+/// The terms: the envelope; this core's own copy of every disk slot; and the
+/// machine checkpoint, which holds each RAM bank and ROM image once, chip RAM
+/// twice more for the frame capture the renderer keeps, the drive's disk
+/// image, and the chipset scratch. WHDLoad adds the room its hard-disk
+/// overlays need on top.
+fn state_capacity(
+    memory: &copperline::memory::Memory,
+    fast_ram_bytes: usize,
+    slots: usize,
+    image_bytes: usize,
+    whdload: usize,
+) -> usize {
+    let ram = memory.chip_ram.len()
+        + memory.slow_ram.len()
+        + memory.mb_ram.len()
+        + memory.accel_ram.len()
+        + fast_ram_bytes;
+    let rom = memory.rom.len() + memory.extended_rom.len() + memory.wcs.len();
+    ENVELOPE_BYTES
+        + slots * (4 + image_bytes)
+        + ram
+        + rom
+        + 2 * memory.chip_ram.len()
+        + image_bytes
+        + CHIPSET_SCRATCH_BYTES
+        + whdload
 }
 
 pub fn configuration(model: &str, video: &str, kickstart: bool, system: &Path) -> Result<Config> {
@@ -154,11 +202,27 @@ impl Core {
         }
         let machine_identity =
             Sha256::digest(format!("{:?}", emu.machine_descriptor()).as_bytes()).into();
-        let state_capacity = STATE_CAPACITY + whdload.as_ref().map_or(0, |w| w.capacity);
+        // A CD session's slots cost only their length prefix, so it keeps
+        // every slot the disk-control interface allows; a floppy session pays
+        // a whole image per slot and buys a few spares instead.
+        let image_bytes = if cd_mode { 0 } else { media::MAX_ADF };
+        let disk_slots = if cd_mode {
+            MAX_DISKS
+        } else {
+            (disks.len() + SPARE_DISK_SLOTS).min(MAX_DISKS)
+        };
+        let state_capacity = state_capacity(
+            &emu.bus().mem,
+            emu.machine_descriptor().fast_ram_bytes,
+            disk_slots,
+            image_bytes,
+            whdload.as_ref().map_or(0, |w| w.capacity),
+        );
         let nvram_save = cd_mode.then(|| save_dir.join("copperline").join("cd32.nvram"));
         let mut core = Self {
             netplay,
             state_capacity,
+            disk_slots,
             cd_mode,
             cd_paths,
             whdload,
@@ -437,8 +501,9 @@ impl Core {
 
     pub fn add(&mut self) -> Result<()> {
         ensure!(
-            self.ejected && self.disks.len() < MAX_DISKS,
-            "eject the disk first; at most {MAX_DISKS} slots are supported"
+            self.ejected && self.disks.len() < self.disk_slots,
+            "eject the disk first; this session holds at most {} disks",
+            self.disk_slots
         );
         self.disks.push(None);
         Ok(())

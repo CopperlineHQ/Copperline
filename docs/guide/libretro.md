@@ -268,11 +268,26 @@ chunked machine format, including CPU rollback latches. States from the first
 libretro version must be recreated. They cannot be opened directly as desktop
 `.clstate` files.
 
-The frontend receives a fixed capacity for each loaded session: 64 MiB plus
-space for every sector of a WHDLoad volume to change. Unused bytes are zeroed
-and compress well in frontend files. RetroArch keeps several checkpoints for
-rollback, so memory usage can be significant, particularly for large WHDLoad
-packages. CD contents are referenced, not copied into each checkpoint.
+The frontend receives a fixed capacity for each loaded session, sized from the
+machine that was built: its memory and ROM images, chip RAM again for the frame
+capture the renderer keeps, an image for every disk slot, room for the chipset,
+and space for every sector of a WHDLoad volume to change. A stock A500 with one
+floppy reserves about 14 MiB and an A1200 about 18 MiB, where every machine used
+to reserve 64 MiB. Unused bytes are zeroed and compress well in frontend files.
+RetroArch keeps several checkpoints for rollback and, in netplay, checksums a
+whole buffer every frame, so the capacity drives both its memory use and its
+per-frame cost, particularly for large WHDLoad packages. CD contents are
+referenced, not copied into each checkpoint.
+
+A floppy session reserves its playlist plus two spare slots, because every slot
+costs an image in every checkpoint; adding more discs than that is refused with
+the session's limit. A CD session, whose slots hold only a reference, keeps all
+sixteen. A state that arrives in a buffer larger than the session reserves, as
+one written against the 64 MiB envelope does, is read on the strength of the
+payload length in its own header, so the smaller envelope is not what turns it
+away. What a state must still match is the build: every frontend payload is
+stamped with a schema fingerprint covering the release version and every chunk,
+and one that differs is refused.
 
 The frontend owns pacing, video output and audio output. Each `retro_run`
 advances one hardware video field. Refresh information follows Agnus's actual
