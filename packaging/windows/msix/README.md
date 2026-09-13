@@ -89,6 +89,12 @@ python3 packaging/windows/msix/generate-logos.py
   elevates by re-launching the executable (`src/blockdev/windows.rs`), and a
   packaged app cannot be launched elevated from its install directory. Disk
   images and directory-as-hard-disk are unaffected.
+- **The command-line companions are not on PATH.** They ship inside the
+  package, but aliasing them needs one `Application` element each, and
+  hiding those with `AppListEntry="none"` is what Partner Center calls a
+  headless app: it is refused without a `HeadlessAppBypass` waiver. Listing
+  them visibly would put two console tools in the Start menu instead. The
+  portable zip remains the way to get the command-line tooling.
 - **Portable mode cannot apply.** A package installs read-only, so the
   `portable.txt` marker beside the executable is never writable. Host data
   goes to `Documents\Copperline` as it does for any non-portable install.
