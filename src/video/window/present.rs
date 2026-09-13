@@ -951,9 +951,11 @@ pub(super) fn build_pixels_for_window(
     let backends = cfg!(target_os = "linux")
         .then(|| pixels::wgpu::Backends::from_env().unwrap_or(pixels::wgpu::Backends::VULKAN));
     let pixels = build(backends)?;
+    // Match wgpu's environment lookup, including case-insensitive variable
+    // names on Windows. This runs only while creating the window.
     let automatic_fallback = cfg!(target_os = "windows")
-        && !crate::envcfg::flag("WGPU_BACKEND")
-        && !crate::envcfg::flag("WGPU_ADAPTER_NAME");
+        && std::env::var_os("WGPU_BACKEND").is_none()
+        && std::env::var_os("WGPU_ADAPTER_NAME").is_none();
     let mut pixels = super::adapter::prefer_hardware_renderer(
         pixels,
         automatic_fallback,
