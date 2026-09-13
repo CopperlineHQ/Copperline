@@ -64,12 +64,9 @@
       </uap:VisualElements>
 
       <!--
-        Execution aliases, so an installed package still answers to
-        "copperline" at a prompt. A packaged app installs under
-        WindowsApps, which is not a directory anybody puts on PATH by
-        hand, and the control client and config converter are only useful
-        from a command line: without these, the VS Code extension and the
-        MCP server would have nothing to launch.
+        An execution alias, so an installed package still answers to
+        "copperline" at a prompt: a packaged app installs under
+        WindowsApps, which is not a directory anybody puts on PATH by hand.
       -->
       <Extensions>
         <uap3:Extension Category="windows.appExecutionAlias" Executable="copperline.exe" EntryPoint="Windows.FullTrustApplication">
@@ -77,11 +74,44 @@
             <desktop:ExecutionAlias Alias="copperline.exe" />
           </uap3:AppExecutionAlias>
         </uap3:Extension>
+      </Extensions>
+    </Application>
+
+    <!--
+      The command-line companions, one Application element each: a single
+      Application may declare windows.appExecutionAlias only once, so an
+      alias per executable means an entry per executable. AppListEntry
+      "none" keeps them out of the Start menu and the app list, where a
+      control client and a config converter would be noise; they exist here
+      only to put the names on PATH, which is what the VS Code extension and
+      the MCP server need in order to launch anything.
+    -->
+    <Application Id="CopperlineCtl" Executable="copperline-ctl.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        AppListEntry="none"
+        DisplayName="Copperline Control"
+        Description="Control-protocol, MCP and debug-adapter client for Copperline."
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png" />
+      <Extensions>
         <uap3:Extension Category="windows.appExecutionAlias" Executable="copperline-ctl.exe" EntryPoint="Windows.FullTrustApplication">
           <uap3:AppExecutionAlias>
             <desktop:ExecutionAlias Alias="copperline-ctl.exe" />
           </uap3:AppExecutionAlias>
         </uap3:Extension>
+      </Extensions>
+    </Application>
+
+    <Application Id="CopperlineImportUae" Executable="copperline-import-uae.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        AppListEntry="none"
+        DisplayName="Copperline Config Converter"
+        Description="Converts WinUAE, Amiberry and FS-UAE configurations for Copperline."
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png" />
+      <Extensions>
         <uap3:Extension Category="windows.appExecutionAlias" Executable="copperline-import-uae.exe" EntryPoint="Windows.FullTrustApplication">
           <uap3:AppExecutionAlias>
             <desktop:ExecutionAlias Alias="copperline-import-uae.exe" />
