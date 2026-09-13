@@ -310,7 +310,7 @@ chd = "0.3"
 delharc = "0.8"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 gif = "0.14"
-color_quant = "1.1"
+color_quant = "2.0"
 
 # macOS dock icon: winit's with_window_icon is a no-op on macOS, so the dock
 # icon must be set at runtime via NSApplication. These objc2 versions match the
