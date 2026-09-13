@@ -215,8 +215,10 @@ Per release, after the tag's Windows workflow is green:
 1. Download the `copperline-msixbundle` artifact from that run.
 2. In Partner Center, create a submission for
    [Copperline](https://partner.microsoft.com/dashboard) (Store ID
-   `9MW1L1PVNXSG`), upload the bundle, and update the listing notes to
-   match the release.
+   `9MW1L1PVNXSG`) and upload the bundle. The listing text lives in
+   `packaging/windows/msix/store-listing.md`; refresh its "What's new in
+   this version" section to match the release, and update any feature
+   claims the release changes.
 3. Submit for certification. It is normally reviewed within a day or two.
 
 The Store package version is not the crate version: the Store reserves the

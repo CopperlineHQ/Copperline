@@ -60,6 +60,15 @@ Run the [Windows App Certification
 Kit](https://learn.microsoft.com/en-us/windows/uwp/debug-test-perf/windows-app-certification-kit)
 against the bundle before the first submission of a release.
 
+## The listing
+
+`store-listing.md` holds the Store listing text -- description, feature
+bullets, licence terms, search terms, and the screenshot and age-rating
+notes -- so it is versioned with the package rather than living only in
+Partner Center. Two constraints shape it: the listing must never suggest
+that copyrighted ROMs or software come with the emulator, and it must not
+imply a relationship with the Amiga trademark.
+
 ## Version numbers
 
 The Store constrains package versions in two ways that the crate version does

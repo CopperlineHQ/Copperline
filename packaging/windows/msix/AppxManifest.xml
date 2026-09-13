@@ -35,7 +35,7 @@
     <DisplayName>Copperline</DisplayName>
     <PublisherDisplayName>@PUBLISHER_DISPLAY_NAME@</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
-    <Description>A cycle-accurate Amiga emulator for OCS, ECS and AGA machines.</Description>
+    <Description>A cycle-driven Commodore Amiga emulator: OCS, ECS and AGA, from the A1000 to the A4000, CDTV and CD32.</Description>
   </Properties>
 
   <Dependencies>
@@ -53,7 +53,7 @@
     <Application Id="Copperline" Executable="copperline.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
         DisplayName="Copperline"
-        Description="A cycle-accurate Amiga emulator for OCS, ECS and AGA machines."
+        Description="A cycle-driven Commodore Amiga emulator: OCS, ECS and AGA, from the A1000 to the A4000, CDTV and CD32."
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"
         Square44x44Logo="Assets\Square44x44Logo.png">
