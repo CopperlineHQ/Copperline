@@ -369,9 +369,20 @@ libloading = { version = "0.9", optional = true }
 # Win32_System_IO is DeviceIoControl, which src/diskimage.rs uses to ask
 # NTFS for a sparse file: setting a file's length commits the space there,
 # where on Unix it leaves a hole.
+# Win32_Foundation/Graphics_Gdi/UI_WindowsAndMessaging drive the message pump
+# that keeps the window serviced while a native file picker runs on a thread of
+# its own (src/video/window/native_dialog.rs), and Storage_FileSystem/Security/
+# System_Console put away the console window a desktop launch is given
+# (src/winconsole.rs).
 windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
     "Win32_System_IO",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 # Optional realtime-priority feature: cross-platform thread scheduling control.
@@ -387,6 +398,13 @@ thread-priority = "3.1"
 # See src/timebase.rs -- native targets re-export std::time unchanged.
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 web-time = "1"
+
+# Links the emulator's own icon into copperline.exe, so it carries it in
+# Explorer, the taskbar and the Start menu rather than the generic default.
+# Only ever called for a Windows *target* (see build.rs), but kept off the
+# host-specific table so a cross-compiled Windows build gets the icon too.
+[build-dependencies]
+embed-resource = "3.0"
 
 [[bin]]
 name = "copperline"

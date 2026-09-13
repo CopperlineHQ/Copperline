@@ -730,6 +730,10 @@ fn list_serial_ports() -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    // Before the logger, which is the first thing that would write to a
+    // console this is about to take away (see winconsole).
+    copperline::winconsole::detach_desktop_console();
+
     let mut log_builder =
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
     // Copperline resolves gamepads through gilrs's bundled SDL controller

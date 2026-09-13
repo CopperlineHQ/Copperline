@@ -103,6 +103,18 @@ from the [releases page](https://github.com/CopperlineHQ/Copperline/releases),
 matching your Windows architecture. Extract the whole archive and run
 `copperline.exe`; keep the bundled ROMs and other assets alongside it.
 
+### The console window
+
+`copperline.exe` is one program doing two jobs, and it is built for the
+command line: run it from a prompt and it behaves like any other tool there.
+The shell waits for it, and `--help`, the log and every
+[headless flag](headless.md)'s output go to that terminal.
+
+Started from Explorer, the Start menu or the Store, there is no prompt to
+write to, so Copperline closes the console window Windows opens for it and
+leaves only the emulator. The window may still flash briefly: Windows puts it
+on screen before Copperline gets to run.
+
 (command-line-tools)=
 ## Command-line tools
 

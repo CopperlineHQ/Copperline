@@ -33,6 +33,32 @@ fn main() {
 
     generate_custom_register_docs();
     set_windows_main_thread_stack();
+    embed_windows_icon();
+}
+
+/// Link the application icon into `copperline.exe` as a Win32 resource, which
+/// is where Explorer, the taskbar, the Start menu and the Store package look
+/// for it -- winit's `with_window_icon` dresses the window at runtime but says
+/// nothing about the file on disk.
+///
+/// Scoped to the one binary that is the app: the command-line tools shipped
+/// beside it are not Copperline and should not wear its icon.
+fn embed_windows_icon() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    println!("cargo:rerun-if-changed=assets/brand/copperline.rc");
+    println!("cargo:rerun-if-changed=assets/brand/copperline.ico");
+    // Never fatal: a toolchain without a resource compiler should still build
+    // a working emulator, just one with the default executable icon.
+    let result = embed_resource::compile_for(
+        "assets/brand/copperline.rc",
+        ["copperline"],
+        embed_resource::ParamsIncludeDirs(["assets/brand"]),
+    );
+    if let Err(error) = result.manifest_optional() {
+        println!("cargo:warning=executable icon not embedded: {error}");
+    }
 }
 
 /// Compile the checked-in, human-readable register pages into the one table
