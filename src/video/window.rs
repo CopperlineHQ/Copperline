@@ -7024,6 +7024,7 @@ mod host_input;
 mod kbdpanel;
 #[cfg(feature = "mt32")]
 mod mt32panel;
+mod native_dialog;
 mod present;
 mod presenter;
 mod rtg_texture;

@@ -884,10 +884,12 @@ impl App {
     /// the restored Bus. On failure the running machine is untouched.
     pub(super) fn load_state_from_dialog(&mut self, event_loop: Option<&ActiveEventLoop>) {
         self.suspend_live_audio_for_host_io();
-        let picked = rfd::FileDialog::new()
-            .set_title("Load save state")
-            .add_filter("Copperline save states", &["clstate"])
-            .pick_file();
+        let picked = super::native_dialog::pick(|| {
+            rfd::FileDialog::new()
+                .set_title("Load save state")
+                .add_filter("Copperline save states", &["clstate"])
+                .pick_file()
+        });
 
         // Re-baseline pacing after the modal dialog, as for floppies; a
         // successful load re-anchors again to the restored timeline inside
@@ -975,17 +977,21 @@ impl App {
     /// On any error the running machine keeps its current ROM.
     pub(super) fn load_rom_from_dialog(&mut self) {
         self.suspend_live_audio_for_host_io();
-        let picked = rfd::FileDialog::new()
-            .set_title("Load Kickstart ROM (512 or 256 KiB)")
-            .add_filter("Amiga ROM images", &["rom", "bin"])
-            .pick_file();
+        let picked = super::native_dialog::pick(|| {
+            rfd::FileDialog::new()
+                .set_title("Load Kickstart ROM (512 or 256 KiB)")
+                .add_filter("Amiga ROM images", &["rom", "bin"])
+                .pick_file()
+        });
         if let Some(main_path) = picked {
             // Offer an optional extended ROM (AROS/CDTV/CD32). Cancelling skips it
             // and removes any extended ROM currently fitted.
-            let ext_path = rfd::FileDialog::new()
-                .set_title("Load extended ROM (optional; Cancel to skip)")
-                .add_filter("Amiga ROM images", &["rom", "bin"])
-                .pick_file();
+            let ext_path = super::native_dialog::pick(|| {
+                rfd::FileDialog::new()
+                    .set_title("Load extended ROM (optional; Cancel to skip)")
+                    .add_filter("Amiga ROM images", &["rom", "bin"])
+                    .pick_file()
+            });
 
             // The identification comes off the bytes already in hand (the
             // image is handed to the machine straight after), so the OSD and

@@ -742,14 +742,14 @@ impl App {
             })
             .collect();
         self.suspend_live_audio_for_host_io();
-        let picked = rfd::FileDialog::new()
-            .set_title("Save debug resource")
-            .set_file_name(format!(
-                "{}.png",
-                if name.is_empty() { "resource" } else { &name }
-            ))
-            .add_filter("PNG image", &["png"])
-            .save_file();
+        let file_name = format!("{}.png", if name.is_empty() { "resource" } else { &name });
+        let picked = super::native_dialog::pick(move || {
+            rfd::FileDialog::new()
+                .set_title("Save debug resource")
+                .set_file_name(file_name)
+                .add_filter("PNG image", &["png"])
+                .save_file()
+        });
         if let Some(path) = picked {
             match self.emu.export_uaelib_resource(resource.address, &path) {
                 Ok(_) => self.show_osd(format!("Saved {}", display_file_name(&path))),
@@ -1621,10 +1621,13 @@ impl App {
         // above the 24-bit space passes through untouched on 020+.
         let addr = addr & self.emu.machine.ui_addr_mask();
         self.suspend_live_audio_for_host_io();
-        let picked = rfd::FileDialog::new()
-            .set_title("Save memory region")
-            .set_file_name(format!("mem-{addr:06X}-{len:X}.bin"))
-            .save_file();
+        let file_name = format!("mem-{addr:06X}-{len:X}.bin");
+        let picked = super::native_dialog::pick(move || {
+            rfd::FileDialog::new()
+                .set_title("Save memory region")
+                .set_file_name(file_name)
+                .save_file()
+        });
         if let Some(path) = picked {
             let bytes = self.emu.machine.debug_read_memory(addr, len as usize);
             match std::fs::write(&path, &bytes) {

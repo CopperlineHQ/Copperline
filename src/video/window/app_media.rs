@@ -27,10 +27,12 @@ impl App {
             return;
         }
         self.suspend_live_audio_for_host_io();
-        let picked = rfd::FileDialog::new()
-            .set_title(format!("Load DF{drive_idx} disk image(s)"))
-            .add_filter("Amiga disk images", crate::floppy::IMAGE_EXTENSIONS)
-            .pick_files();
+        let picked = super::native_dialog::pick(move || {
+            rfd::FileDialog::new()
+                .set_title(format!("Load DF{drive_idx} disk image(s)"))
+                .add_filter("Amiga disk images", crate::floppy::IMAGE_EXTENSIONS)
+                .pick_files()
+        });
 
         // The modal file dialog blocks this (the main/emulation) thread, so
         // wall-clock time advanced while emulated time stood still. Re-baseline
@@ -131,10 +133,12 @@ impl App {
     /// ejecting any current disc first.
     pub(super) fn load_cd_from_dialog(&mut self) {
         self.suspend_live_audio_for_host_io();
-        let picked = rfd::FileDialog::new()
-            .set_title("Load CD image")
-            .add_filter("CD images", &["cue", "iso", "nrg", "chd"])
-            .pick_file();
+        let picked = super::native_dialog::pick(|| {
+            rfd::FileDialog::new()
+                .set_title("Load CD image")
+                .add_filter("CD images", &["cue", "iso", "nrg", "chd"])
+                .pick_file()
+        });
 
         // Re-baseline pacing after the modal dialog, as for floppies.
         if let Some(path) = picked {
@@ -170,10 +174,12 @@ impl App {
             return;
         }
         self.suspend_live_audio_for_host_io();
-        let picked = rfd::FileDialog::new()
-            .set_title("Insert PCMCIA CF card image")
-            .add_filter("Hard-disk images", &["hdf", "hdz", "img", "chd"])
-            .pick_file();
+        let picked = super::native_dialog::pick(|| {
+            rfd::FileDialog::new()
+                .set_title("Insert PCMCIA CF card image")
+                .add_filter("Hard-disk images", &["hdf", "hdz", "img", "chd"])
+                .pick_file()
+        });
         if let Some(path) = picked {
             match crate::pcmcia::CfCard::open(&path) {
                 Ok(card) => {

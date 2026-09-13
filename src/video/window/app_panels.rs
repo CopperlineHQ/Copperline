@@ -413,10 +413,12 @@ impl App {
     /// the menu alike: pick a file, refit the synth around it.
     #[cfg(feature = "coppersynth")]
     pub(super) fn load_csynth_soundfont(&mut self) {
-        let picked = rfd::FileDialog::new()
-            .set_title("Choose a SoundFont")
-            .add_filter("SoundFonts", &["sf2", "SF2", "zip", "ZIP"])
-            .pick_file();
+        let picked = super::native_dialog::pick(|| {
+            rfd::FileDialog::new()
+                .set_title("Choose a SoundFont")
+                .add_filter("SoundFonts", &["sf2", "SF2", "zip", "ZIP"])
+                .pick_file()
+        });
         let Some(path) = picked else {
             return;
         };
@@ -451,10 +453,12 @@ impl App {
         } else {
             "Choose an MT-32 PCM ROM"
         };
-        let picked = rfd::FileDialog::new()
-            .set_title(title)
-            .add_filter("ROM images", &["rom", "ROM", "bin", "BIN"])
-            .pick_file();
+        let picked = super::native_dialog::pick(|| {
+            rfd::FileDialog::new()
+                .set_title(title)
+                .add_filter("ROM images", &["rom", "ROM", "bin", "BIN"])
+                .pick_file()
+        });
         let Some(path) = picked else {
             return;
         };
