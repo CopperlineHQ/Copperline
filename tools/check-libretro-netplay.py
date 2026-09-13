@@ -20,21 +20,48 @@ import tempfile
 import time
 
 
-async def wait_for_client(host, client, update_input, timeout):
-    """Supervise the host until the client completes the frame-limited workload."""
+# RetroArch prints this once the frame-limited run is over, and derives the
+# duration from the frame count and the core's frame rate, so it also states
+# how many frames were emulated.
+COMPLETED = re.compile(r"Content ran for a total of: (\d+) hours, (\d+) minutes, (\d+) seconds")
+REPORTED_FPS = re.compile(r"Geometry: .*FPS: ([0-9.]+)")
+
+
+def completed_seconds(log):
+    """Emulated seconds the peer reports having run, or None while it still runs."""
+    found = COMPLETED.search(log)
+    return found and sum(int(f) * m for f, m in zip(found.groups(), (3600, 60, 1)))
+
+
+async def wait_for_workload(host, client, log, update_input, timeout):
+    """Supervise the host until the client's log reports the workload finished.
+
+    The verdict is the client's own completion marker rather than its exit,
+    because RetroArch 1.18 can wedge in driver teardown once netplay has
+    disconnected: every peer that reached the marker had already emulated
+    every frame, exchanged every per-frame CRC and agreed on all of them.
+    """
     start = time.monotonic()
-    while client.poll() is None:
+    while (seconds := completed_seconds(log.read_text(errors="replace"))) is None:
         if host.poll() is not None:
             raise RuntimeError("host exited before the client completed")
+        if client.poll() is not None:
+            # The marker is written before the process leaves; re-read for it.
+            seconds = completed_seconds(log.read_text(errors="replace"))
+            if seconds is None:
+                raise RuntimeError(f"client exited before the workload finished: {client.returncode}")
+            break
         elapsed = time.monotonic() - start
         if elapsed > timeout:
-            raise RuntimeError("netplay test timed out")
+            raise RuntimeError(f"netplay test timed out after {round(elapsed)}s")
         update_input(elapsed)
         await asyncio.sleep(0.02)
-    if client.returncode != 0:
-        raise RuntimeError(f"client exited unsuccessfully: {client.returncode}")
+    # The marker can be there on the first read, before the loop has polled
+    # anything, so the host is checked once more: it has to have stayed up
+    # through the whole workload, not merely until the client finished.
     if host.poll() is not None:
         raise RuntimeError("host exited before the client completed")
+    return seconds
 
 
 async def check(args, root):
@@ -110,6 +137,8 @@ async def check(args, root):
 input_driver = "x"
 audio_driver = "null"
 audio_enable = "false"
+microphone_enable = "false"
+midi_driver = "null"
 video_vsync = "false"
 audio_sync = "false"
 video_scale = "1"
@@ -161,18 +190,38 @@ savestate_directory = "{directory}"
                         xtst.XTestFakeKeyEvent(display, code, int(pressed), 0)
                         events += 1
                     x11.XFlush(display)
-        # RetroArch 1.18 can stop responding after its client disconnects,
-        # including to quit requests. The client owns the frame limit; the
-        # host must stay alive throughout and is stopped in the finally block
-        # once the workload and log checks finish, like the Xvfb servers.
-        await wait_for_client(peers[0], peers[1], update_input, args.timeout)
+        # The client owns the frame limit; the host must stay alive throughout
+        # and is stopped in the finally block once the workload and log checks
+        # finish, like the Xvfb servers.
+        try:
+            emulated = await wait_for_workload(peers[0], peers[1], root / "client" / "retroarch.log", update_input, args.timeout)
+        except RuntimeError as error:
+            for role in ("host", "client"):
+                print(f"--- {role} log tail ---")
+                print("".join((root / role / "retroarch.log").read_text(errors="replace").splitlines(True)[-15:]))
+            raise error
+        workload = time.monotonic() - start
         logs = [(root / role / "retroarch.log").read_text() for role in ("host", "client")]
         assert "client has joined as player 2" in logs[0], "host did not admit client"
         assert "You have joined as player 2" in logs[1], "client did not join"
         for log in logs:
             assert not re.search(r"CRCs mismatch|savestate loading failed|Copperline:|Failed to initialize netplay", log), "netplay error; see logs"
+        # The client's marker is its frame count divided by the core's frame
+        # rate, so it also proves every requested frame was emulated. It is
+        # printed whole seconds, hence the tolerance.
+        fps = float(REPORTED_FPS.search(logs[1]).group(1))
+        assert abs(emulated - args.frames / fps) <= 1, f"client ran {emulated}s, not {args.frames} frames at {fps} fps"
         assert min(transferred) > 1000, "insufficient peer traffic"
-        print(json.dumps({"frames": args.frames, "delay_ms_each_way": args.delay_ms, "elapsed_seconds": round(time.monotonic() - start, 1), "input_events": events, "peer_bytes": transferred, "result": "passed"}))
+        # The workload is what this test measures; RetroArch's own shutdown is
+        # not, so the client is given a short grace period and then stopped.
+        for _ in range(int(args.exit_grace / 0.05)):
+            if peers[1].poll() is not None:
+                break
+            await asyncio.sleep(0.05)
+        assert peers[1].returncode in (None, 0), f"client exited unsuccessfully: {peers[1].returncode}"
+        print(json.dumps({"frames": args.frames, "delay_ms_each_way": args.delay_ms, "workload_seconds": round(workload, 1),
+                          "elapsed_seconds": round(time.monotonic() - start, 1), "input_events": events, "peer_bytes": transferred,
+                          "client_exited": peers[1].returncode is not None, "result": "passed"}))
     finally:
         proxy_server.close()
         await proxy_server.wait_closed()
@@ -199,6 +248,8 @@ def main():
     parser.add_argument("--delay-ms", type=int, default=20)
     # Per-frame state CRCs and replay are expensive on shared CI runners.
     parser.add_argument("--timeout", type=int, default=600)
+    parser.add_argument("--exit-grace", type=float, default=20.0,
+                        help="seconds to let RetroArch shut down after the workload before stopping it")
     parser.add_argument("--port", type=int, default=55435)
     parser.add_argument("--display", type=int, default=110)
     parser.add_argument("--output", type=Path)

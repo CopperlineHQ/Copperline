@@ -315,7 +315,10 @@ On Linux, `tools/check-libretro-netplay.py /path/to/copperline_libretro.so`
 runs two real RetroArch peers with separate content directories and X displays,
 independent controller inputs and delayed loopback traffic. It checks every
 frame for desynchronization. Install `retroarch`, `xvfb` and `libxtst6` first.
-The client must exit successfully after `--frames` frames (1,200 by default),
-with the host still running. The script then stops the host during cleanup,
-so it does not depend on RetroArch advancing after its peer disconnects.
-An early host exit, a client failure, a timeout or a CRC mismatch fails the check.
+The check passes when the client's own log reports the whole `--frames`
+workload (1,200 frames by default) with the host still running. RetroArch 1.18
+can wedge in driver teardown once netplay has disconnected, so its shutdown is
+not part of the verdict: both peers are stopped during cleanup, after a
+`--exit-grace` wait (20 seconds) for the client to leave by itself. An early
+exit by either peer, a short run, a timeout or a CRC mismatch fails the check,
+and a failure prints the tail of both peer logs.
