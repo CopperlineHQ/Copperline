@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// Win32 resources linked into copperline.exe by build.rs (embed-resource).
+//
+// Resource id 1 is the application icon: the lowest icon id in a binary is the
+// one Explorer, the taskbar and the Start menu draw for it. This is the same
+// multi-size .ico the window itself loads at runtime, so the file on disk and
+// the window it opens agree. It sits beside this script, which is where the
+// resource compiler looks first (build.rs names the directory as an include
+// path as well, for the toolchains that do not).
+
+1 ICON "copperline.ico"

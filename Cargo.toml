@@ -394,6 +394,13 @@ thread-priority = "3.1"
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 web-time = "1"
 
+# Links the emulator's own icon into copperline.exe, so it carries it in
+# Explorer, the taskbar and the Start menu rather than the generic default.
+# Only ever called for a Windows *target* (see build.rs), but kept off the
+# host-specific table so a cross-compiled Windows build gets the icon too.
+[build-dependencies]
+embed-resource = "3.0"
+
 [[bin]]
 name = "copperline"
 path = "src/main.rs"
