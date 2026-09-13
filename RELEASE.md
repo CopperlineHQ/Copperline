@@ -220,6 +220,11 @@ Per release, after the tag's Windows workflow is green:
    this version" section to match the release, and update any feature
    claims the release changes.
 3. Submit for certification. It is normally reviewed within a day or two.
+4. On the first publication only, add the listing link
+   (`https://apps.microsoft.com/detail/9MW1L1PVNXSG`) to the Microsoft Store
+   section of `docs/guide/getting-started.md` and to the download page on
+   the website. It is left out until then because the docs build checks
+   links, and an unpublished listing answers 410.
 
 The Store package version is not the crate version: the Store reserves the
 fourth component and forbids a leading `0`, so `build-msix.ps1` shifts the

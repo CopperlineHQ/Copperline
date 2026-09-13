@@ -414,11 +414,22 @@ jobs:
         # architectures present, the identity Partner Center will match on,
         # and the emulator itself inside each package. A manifest mistake
         # fails here rather than in a Store certification run hours later.
+        #
+        # The identity is compared against identity.psd1, not merely printed:
+        # a wrong-but-well-formed Name or Publisher packs perfectly and is
+        # then refused at upload, which is the slowest possible place to find
+        # out. The version is compared against the one in the bundle's own
+        # file name, so every package in the bundle agrees with the bundle.
         run: |
           $ErrorActionPreference = "Stop"
           Set-StrictMode -Version Latest
           $bundle = Get-ChildItem "$env:RUNNER_TEMP/msix" -Filter *.msixbundle | Select-Object -First 1
           if (-not $bundle) { throw "no msixbundle was produced" }
+          $identity = Import-PowerShellDataFile packaging/windows/msix/identity.psd1
+          if ($bundle.BaseName -notmatch '^Copperline-(\d+\.\d+\.\d+\.0)$') {
+            throw "unexpected bundle name $($bundle.Name)"
+          }
+          $expectedVersion = $Matches[1]
           $sdk = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Directory |
             Sort-Object Name -Descending
           $makeappx = $sdk | ForEach-Object { Join-Path $_.FullName "x64\makeappx.exe" } |
@@ -440,11 +451,22 @@ jobs:
               throw "the $arch package has no bundled AROS ROM"
             }
             $manifest = [xml](Get-Content (Join-Path $dir "AppxManifest.xml"))
-            $declared = $manifest.Package.Identity.ProcessorArchitecture
-            if ($declared -ne $arch) {
-              throw "the $arch package declares ProcessorArchitecture '$declared'"
+            $declared = $manifest.Package.Identity
+            foreach ($check in @(
+              @{ Field = "ProcessorArchitecture"; Got = $declared.ProcessorArchitecture; Want = $arch },
+              @{ Field = "Name"; Got = $declared.Name; Want = $identity.Name },
+              @{ Field = "Publisher"; Got = $declared.Publisher; Want = $identity.Publisher },
+              @{ Field = "Version"; Got = $declared.Version; Want = $expectedVersion }
+            )) {
+              if ($check.Got -cne $check.Want) {
+                throw "the $arch package declares $($check.Field) '$($check.Got)', expected '$($check.Want)'"
+              }
             }
-            Write-Host "$arch : $($manifest.Package.Identity.Name) $($manifest.Package.Identity.Version)"
+            $shown = $manifest.Package.Properties.PublisherDisplayName
+            if ($shown -cne $identity.PublisherDisplayName) {
+              throw "the $arch package declares PublisherDisplayName '$shown', expected '$($identity.PublisherDisplayName)'"
+            }
+            Write-Host "$arch : $($declared.Name) $($declared.Version) $($declared.Publisher)"
           }
       - name: Upload the Store package
         if: steps.identity.outputs.configured == 'true'

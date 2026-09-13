@@ -83,10 +83,9 @@ The Flatpak build bundles lavapipe by default.
 
 ### Microsoft Store
 
-Copperline is in the [Microsoft
-Store](https://apps.microsoft.com/detail/9MW1L1PVNXSG), which installs the
-build matching your machine (x64 or ARM64) and keeps it updated.
-`copperline` works from any prompt.
+Copperline is on the Microsoft Store, which installs the build matching
+your machine (x64 or ARM64) and keeps it updated. `copperline` works from
+any prompt.
 
 Three things the portable build does are unavailable in a Store install: the
 `copperline-ctl` and `copperline-import-uae` command-line tools are not on
@@ -117,7 +116,7 @@ converter](import-uae.md). Where they land depends on the package:
 |---|---|
 | Homebrew | On PATH, next to `copperline`. |
 | macOS dmg | Inside the bundle, `Copperline.app/Contents/MacOS/`. Add that directory to PATH or name the files in the VS Code settings. |
-| Microsoft Store | Not available; a packaged app can put only its main executable on PATH. Use the portable zip for these. |
+| Microsoft Store | Not included. Putting them on PATH needs an extra hidden entry per tool, which the Store refuses without a waiver; use the portable zip for these. |
 | Windows zip | Next to `copperline.exe` in the extracted folder. Add the folder to PATH or name the `.exe` files in the VS Code settings. |
 | AppImage | The separate `Copperline-X.Y.Z-<arch>-tools.tar.gz` release asset. Unpack it anywhere; set `COPPERLINE_BIN` to the AppImage path so `copperline-ctl` can launch the emulator. |
 | Flatpak | In the sandbox: `flatpak run --command=copperline-ctl dev.copperline.Copperline ...` (and likewise `copperline-import-uae`). |

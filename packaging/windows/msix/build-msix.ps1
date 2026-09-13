@@ -144,10 +144,15 @@ foreach ($arch in $payloads.Keys) {
     $payloadDir = $payloads[$arch]
     Write-Host "==> Packing $arch from $payloadDir"
 
+    # The identity values are free text from Partner Center, so they are
+    # escaped on the way into the XML: a publisher display name containing an
+    # ampersand is ordinary, and pasted in raw it would produce a manifest
+    # that is not well-formed. Version and architecture are checked against
+    # patterns above and carry nothing to escape.
     $manifest = $template
-    $manifest = $manifest.Replace("@IDENTITY_NAME@", $IdentityName)
-    $manifest = $manifest.Replace("@PUBLISHER@", $Publisher)
-    $manifest = $manifest.Replace("@PUBLISHER_DISPLAY_NAME@", $PublisherDisplayName)
+    $manifest = $manifest.Replace("@IDENTITY_NAME@", [System.Security.SecurityElement]::Escape($IdentityName))
+    $manifest = $manifest.Replace("@PUBLISHER@", [System.Security.SecurityElement]::Escape($Publisher))
+    $manifest = $manifest.Replace("@PUBLISHER_DISPLAY_NAME@", [System.Security.SecurityElement]::Escape($PublisherDisplayName))
     $manifest = $manifest.Replace("@VERSION@", $Version)
     $manifest = $manifest.Replace("@ARCHITECTURE@", $arch)
     # UTF-8 without a BOM: makeappx rejects a manifest that starts with one.
