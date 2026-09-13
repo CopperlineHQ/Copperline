@@ -12,6 +12,7 @@ updates:
       - /
       - /crates/copperline-web
       - /crates/copperline-player
+      - /crates/copperline-libretro
       - /crates/cputest-runner
       - /crates/hostsocket-plugin
       - /crates/zz9k-plugin
