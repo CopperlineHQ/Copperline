@@ -7008,6 +7008,7 @@ mod app_nav;
 mod app_netplay;
 mod app_states;
 use app_nav::{cycle_hold_delay, PadNav};
+mod adapter;
 mod app_panels;
 mod app_session;
 mod bezel;

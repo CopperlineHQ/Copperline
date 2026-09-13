@@ -937,17 +937,31 @@ pub(super) fn build_pixels_for_window(
         texture_width(texture_scale) as u32,
         texture_height(texture_scale) as u32,
     );
-    let surface_texture = SurfaceTexture::new(surface.0, surface.1, Arc::clone(&window));
-    let builder = PixelsBuilder::new(texture.0, texture.1, surface_texture)
-        .present_mode(window_present_mode(vsync));
-    let builder = if cfg!(target_os = "linux") {
-        builder.wgpu_backend(
-            pixels::wgpu::Backends::from_env().unwrap_or(pixels::wgpu::Backends::VULKAN),
-        )
-    } else {
-        builder
+    let build = |backends| {
+        let surface_texture = SurfaceTexture::new(surface.0, surface.1, Arc::clone(&window));
+        let builder = PixelsBuilder::new(texture.0, texture.1, surface_texture)
+            .present_mode(window_present_mode(vsync));
+        let builder = if let Some(backends) = backends {
+            builder.wgpu_backend(backends)
+        } else {
+            builder
+        };
+        builder.build()
     };
-    let mut pixels = builder.build()?;
+    let backends = cfg!(target_os = "linux")
+        .then(|| pixels::wgpu::Backends::from_env().unwrap_or(pixels::wgpu::Backends::VULKAN));
+    let pixels = build(backends)?;
+    // Match wgpu's environment lookup, including case-insensitive variable
+    // names on Windows. This runs only while creating the window.
+    let automatic_fallback = cfg!(target_os = "windows")
+        && std::env::var_os("WGPU_BACKEND").is_none()
+        && std::env::var_os("WGPU_ADAPTER_NAME").is_none();
+    let mut pixels = super::adapter::prefer_hardware_renderer(
+        pixels,
+        automatic_fallback,
+        |pixels| pixels.adapter().get_info(),
+        |backend| build(Some(backend.into())),
+    )?;
     let adapter = pixels.adapter().get_info();
     let window_system = match window.window_handle().map(|handle| handle.as_raw()) {
         Ok(RawWindowHandle::Wayland(_)) => "Wayland",
@@ -957,12 +971,13 @@ pub(super) fn build_pixels_for_window(
         _ => "other",
     };
     info!(
-        "window presentation: mode={:?}, supported={:?}, window_system={}, backend={:?}, adapter={:?}, driver={:?}, driver_info={:?}",
+        "window presentation: mode={:?}, supported={:?}, window_system={}, backend={:?}, adapter={:?}, device_type={:?}, driver={:?}, driver_info={:?}",
         pixels.present_mode(),
         pixels.context().surface_capabilities.present_modes,
         window_system,
         adapter.backend,
         adapter.name,
+        adapter.device_type,
         adapter.driver,
         adapter.driver_info,
     );

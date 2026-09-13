@@ -599,6 +599,15 @@ surface: the field is presented at a TV-like 4:3 aspect plus the
 is fed from `present_fb`, the post-processed presentation buffer produced by
 either the render worker or the synchronous fallback.
 
+Window creation selects its graphics backend before constructing the scaler,
+CRT passes, or egui renderer. On Windows, an automatically selected CPU adapter
+triggers a second `pixels` build restricted to OpenGL. Each renderer is dropped
+before creating another surface for the same native window. A failed or
+software-only GL attempt rebuilds the original backend; an error rebuilding
+it propagates to the window creator. `WGPU_BACKEND` and
+`WGPU_ADAPTER_NAME` opt out of this retry. Other platforms keep their existing
+selection policy, including Linux's Vulkan default.
+
 The emulator window is drawn onto the surface by its own scaling pass
 (`window/scaler.rs`), while the inspectors draw directly with egui. The custom
 scaler pass accepts destination
