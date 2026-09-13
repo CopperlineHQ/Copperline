@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Package manifest template for the Microsoft Store build of Copperline.
+  build-msix.ps1 substitutes the @TOKEN@ placeholders and writes one copy of
+  this per architecture; the identity values come from identity.psd1 and must
+  match Partner Center exactly.
+
+  Copperline is an ordinary Win32 program, not a UWP app: EntryPoint
+  "Windows.FullTrustApplication" plus the runFullTrust capability is what
+  packages a desktop binary as MSIX, and it runs with the user's own token,
+  with no filesystem or networking restrictions beyond a normal program's.
+  runFullTrust is a restricted capability in name only here; the Store grants
+  it to packaged desktop applications as a matter of course.
+
+  No file type associations are declared. The emulator parses a bare command
+  line path as a Kickstart ROM (src/cli.rs), so associating .adf and friends
+  would make a double-clicked disk image fail rather than boot. Declare them
+  once a positional path is dispatched by what the file actually is.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap uap3 desktop rescap">
+
+  <Identity
+    Name="@IDENTITY_NAME@"
+    Publisher="@PUBLISHER@"
+    Version="@VERSION@"
+    ProcessorArchitecture="@ARCHITECTURE@" />
+
+  <Properties>
+    <DisplayName>Copperline</DisplayName>
+    <PublisherDisplayName>@PUBLISHER_DISPLAY_NAME@</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <Description>A cycle-accurate Amiga emulator for OCS, ECS and AGA machines.</Description>
+  </Properties>
+
+  <Dependencies>
+    <!-- 10.0.17763 (Windows 10 1809) is the floor for the MSIX features used
+         here; MaxVersionTested names the newest Windows this build has been
+         run against. -->
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <Application Id="Copperline" Executable="copperline.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="Copperline"
+        Description="A cycle-accurate Amiga emulator for OCS, ECS and AGA machines."
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile
+          Wide310x150Logo="Assets\Wide310x150Logo.png"
+          Square71x71Logo="Assets\Square71x71Logo.png"
+          Square310x310Logo="Assets\Square310x310Logo.png" />
+      </uap:VisualElements>
+
+      <!--
+        Execution aliases, so an installed package still answers to
+        "copperline" at a prompt. A packaged app installs under
+        WindowsApps, which is not a directory anybody puts on PATH by
+        hand, and the control client and config converter are only useful
+        from a command line: without these, the VS Code extension and the
+        MCP server would have nothing to launch.
+      -->
+      <Extensions>
+        <uap3:Extension Category="windows.appExecutionAlias" Executable="copperline.exe" EntryPoint="Windows.FullTrustApplication">
+          <uap3:AppExecutionAlias>
+            <desktop:ExecutionAlias Alias="copperline.exe" />
+          </uap3:AppExecutionAlias>
+        </uap3:Extension>
+        <uap3:Extension Category="windows.appExecutionAlias" Executable="copperline-ctl.exe" EntryPoint="Windows.FullTrustApplication">
+          <uap3:AppExecutionAlias>
+            <desktop:ExecutionAlias Alias="copperline-ctl.exe" />
+          </uap3:AppExecutionAlias>
+        </uap3:Extension>
+        <uap3:Extension Category="windows.appExecutionAlias" Executable="copperline-import-uae.exe" EntryPoint="Windows.FullTrustApplication">
+          <uap3:AppExecutionAlias>
+            <desktop:ExecutionAlias Alias="copperline-import-uae.exe" />
+          </uap3:AppExecutionAlias>
+        </uap3:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>
