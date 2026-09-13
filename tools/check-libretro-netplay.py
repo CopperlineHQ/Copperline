@@ -20,6 +20,23 @@ import tempfile
 import time
 
 
+async def wait_for_client(host, client, update_input, timeout):
+    """Supervise the host until the client completes the frame-limited workload."""
+    start = time.monotonic()
+    while client.poll() is None:
+        if host.poll() is not None:
+            raise RuntimeError("host exited before the client completed")
+        elapsed = time.monotonic() - start
+        if elapsed > timeout:
+            raise RuntimeError("netplay test timed out")
+        update_input(elapsed)
+        await asyncio.sleep(0.02)
+    if client.returncode != 0:
+        raise RuntimeError(f"client exited unsuccessfully: {client.returncode}")
+    if host.poll() is not None:
+        raise RuntimeError("host exited before the client completed")
+
+
 async def check(args, root):
     spec = importlib.util.spec_from_file_location("abi", Path(__file__).with_name("check-libretro.py"))
     abi = importlib.util.module_from_spec(spec)
@@ -113,8 +130,8 @@ savestate_directory = "{directory}"
 ''')
             log = (directory / "retroarch.log").open("w")
             files.append(log)
-            extra = ["--host", "--port", str(args.port)] if index == 0 else ["--connect", "127.0.0.1", "--port", str(args.port + 1)]
-            peers.append(subprocess.Popen([args.retroarch, "-v", "-c", str(config), "-L", str(library), "--nick", role, "--check-frames", "1", "--max-frames", str(args.frames), *extra, str(content)],
+            extra = ["--host", "--port", str(args.port)] if index == 0 else ["--connect", "127.0.0.1", "--port", str(args.port + 1), "--max-frames", str(args.frames)]
+            peers.append(subprocess.Popen([args.retroarch, "-v", "-c", str(config), "-L", str(library), "--nick", role, "--check-frames", "1", *extra, str(content)],
                 env={**os.environ, "DISPLAY": display, "SDL_VIDEODRIVER": "x11", "SDL_RENDER_DRIVER": "software"}, stdout=log, stderr=log))
             if index == 0:
                 # Wait for the host to create its listening socket.
@@ -129,12 +146,12 @@ savestate_directory = "{directory}"
         start = time.monotonic()
         events = 0
         previous = None
-        while any(p.poll() is None for p in peers):
-            if time.monotonic() - start > args.timeout:
-                raise RuntimeError("netplay test timed out")
+
+        def update_input(elapsed):
+            nonlocal previous, events
             # Distinct changing RetroPad inputs: z is B, x is A, arrow keys
             # are directions. These appear in the serialized input-port state.
-            phase = int((time.monotonic() - start) * 4)
+            phase = int(elapsed * 4)
             if phase != previous:
                 previous = phase
                 for index, display in enumerate(displays):
@@ -144,9 +161,12 @@ savestate_directory = "{directory}"
                         xtst.XTestFakeKeyEvent(display, code, int(pressed), 0)
                         events += 1
                     x11.XFlush(display)
-            await asyncio.sleep(0.02)
+        # RetroArch 1.18 can stop responding after its client disconnects,
+        # including to quit requests. The client owns the frame limit; the
+        # host must stay alive throughout and is stopped in the finally block
+        # once the workload and log checks finish, like the Xvfb servers.
+        await wait_for_client(peers[0], peers[1], update_input, args.timeout)
         logs = [(root / role / "retroarch.log").read_text() for role in ("host", "client")]
-        assert all(p.returncode == 0 for p in peers), "RetroArch exited unsuccessfully"
         assert "client has joined as player 2" in logs[0], "host did not admit client"
         assert "You have joined as player 2" in logs[1], "client did not join"
         for log in logs:
