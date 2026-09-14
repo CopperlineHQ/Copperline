@@ -15,6 +15,7 @@ export const POLL_MS = 2000;
 const STATUS_MS = 1000;
 const KIND_VERIFIED = 5;
 const KIND_STATUS = 6;
+const HUB_ENDED = 'The spectator invitation has ended. Host a new game to admit spectators.';
 
 // A feed message: kind, little-endian length, payload.
 export function feedMessage(kind, payload) {
@@ -322,11 +323,15 @@ export class SpectatorHub {
     this.polling = false;
   }
 
-  get invitation() { return this.room.id ?? null; }
+  // An ended room has no invitation worth showing and admits nobody.
+  get invitation() { return this.closed ? null : this.room.id ?? null; }
 
   // Changes take effect in the order asked, one request at a time; a
-  // change that fails leaves `slots` at what the room really admits.
+  // change that fails leaves `slots` at what the room really admits, and
+  // a room that has ended (expired, or closed with the game) refuses every
+  // change rather than reporting one it never made.
   setSlots(slots) {
+    if (this.closed) return Promise.reject(new Error(HUB_ENDED));
     this.wanted = slots;
     this.applying ??= this.apply().finally(() => { this.applying = null; });
     return this.applying;
@@ -344,6 +349,7 @@ export class SpectatorHub {
       this.slots = slots;
       this.changed();
     }
+    if (this.closed && this.wanted !== this.slots) throw new Error(HUB_ENDED);
   }
 
   // Hash the host media once, on the first spectator, not per spectator.
@@ -413,6 +419,7 @@ export class SpectatorHub {
   close(dropPeers = true) {
     if (this.closed) return;
     this.closed = true;
+    this.slots = 0;
     clearTimeout(this.timer);
     this.timer = null;
     if (dropPeers) for (const peer of [...this.peers.values()]) peer.close('The host ended the game');

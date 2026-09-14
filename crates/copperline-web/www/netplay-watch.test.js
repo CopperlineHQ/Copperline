@@ -282,6 +282,14 @@ test('the hub opens its room on the first request for places, resizes it in orde
   assert.equal(hub.applying, null, 'a failed change does not wedge later ones');
   await hub.setSlots(4);
   assert.deepEqual(room.sizes, [1, 0, 4]);
-  hub.close();
+  // A room that ends while a change is in flight fails that change, and an
+  // ended hub refuses later ones outright: neither reports a resize it did
+  // not make, and the dead invitation is withdrawn.
+  room.setSlots = async slots => { room.sizes.push(slots); hub.close(false); return { slots }; };
+  await assert.rejects(hub.setSlots(6), /invitation has ended/);
+  assert.deepEqual([hub.closed, hub.slots, hub.invitation, hub.applying], [true, 0, null, null]);
+  assert.equal(hub.peers.size, 1, 'an expired room keeps the spectators it admitted');
+  await assert.rejects(hub.setSlots(1), /invitation has ended/);
+  assert.deepEqual(room.sizes, [1, 0, 4, 6], 'no request reaches an ended room');
   assert.equal(room.ended, true);
 });
