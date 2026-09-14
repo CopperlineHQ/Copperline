@@ -389,6 +389,8 @@ pub enum LauncherField {
     NetplayRollback,
     NetplayNewCode,
     NetplayCopyCode,
+    NetplaySpectators,
+    NetplayCopySpectatorCode,
     // System
     Chipset,
     Agnus,
@@ -1328,7 +1330,7 @@ pub(super) const NEW_GEOMETRY_ROWS: [Row; 10] = [
     row(F::NewGeomSave, "", RowKind::Action),
 ];
 
-pub(super) const NETPLAY_ROWS: [Row; 9] = [
+pub(super) const NETPLAY_ROWS: [Row; 10] = [
     row(F::NetplayEnabled, "Netplay", Toggle),
     row(F::NetplayMode, "Connection", Cycle),
     row(F::NetplayPlayer, "Local player", Cycle),
@@ -1337,10 +1339,11 @@ pub(super) const NETPLAY_ROWS: [Row; 9] = [
     row(F::NetplayCode, "Session code", RowKind::Text),
     row(F::NetplayDelay, "Input delay", Cycle),
     row(F::NetplayRollback, "Rollback limit", Cycle),
+    row(F::NetplaySpectators, "Spectators", Cycle),
     row(F::NetplayNewCode, "", RowKind::Action),
 ];
 
-pub(super) const INTERNET_NETPLAY_ROWS: [Row; 9] = [
+pub(super) const INTERNET_NETPLAY_ROWS: [Row; 11] = [
     row(F::NetplayEnabled, "Netplay", Toggle),
     row(F::NetplayMode, "Connection", Cycle),
     row(F::NetplayPlayer, "Local player", Cycle),
@@ -1349,7 +1352,9 @@ pub(super) const INTERNET_NETPLAY_ROWS: [Row; 9] = [
     row(F::NetplayRelayOnly, "Route", Cycle),
     row(F::NetplayDelay, "Input delay", Cycle),
     row(F::NetplayRollback, "Rollback limit", Cycle),
+    row(F::NetplaySpectators, "Spectators", Cycle),
     row(F::NetplayNewCode, "", RowKind::Action),
+    row(F::NetplayCopySpectatorCode, "", RowKind::Action),
 ];
 
 pub(super) const INPUT_ROWS: [Row; 5] = [

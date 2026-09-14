@@ -14,6 +14,8 @@ mod rollback;
 mod setup;
 #[cfg(not(target_arch = "wasm32"))]
 pub use setup::guest_config;
+pub mod spectate;
+pub use spectate::{Feed, FeedCursor, Spectator, SwapRecord};
 #[cfg(test)]
 mod tests;
 mod transport;
@@ -128,6 +130,11 @@ impl From<Input> for LocalInput {
     }
 }
 
+/// Whether a pasted code is an Internet spectator invitation.
+pub fn is_spectator_code(code: &str) -> bool {
+    code.trim().starts_with("CLNS1.")
+}
+
 /// Decode the shared game identifier used by both CLI and GUI setup.
 pub fn parse_session_id(code: &str) -> Result<[u8; 16]> {
     ensure!(code.len() == 32 && code.bytes().all(|b| b.is_ascii_hexdigit()),
@@ -137,6 +144,15 @@ pub fn parse_session_id(code: &str) -> Result<[u8; 16]> {
         *byte = u8::from_str_radix(&code[i * 2..i * 2 + 2], 16)?;
     }
     Ok(session)
+}
+
+/// What a participant contributes to the session. Players own a controller
+/// port; the host also serves any spectators, who own nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    Host,
+    Guest,
+    Spectator,
 }
 
 /// Negotiated timeline settings, shared by every transport.
@@ -175,6 +191,37 @@ pub struct Options {
     pub session: [u8; 16],
     pub input_delay: u8,
     pub rollback_frames: u8,
+    /// Spectators the host admits on the same socket (0 = none).
+    pub spectators: u8,
+}
+
+/// A spectator of a direct UDP session addresses the host directly.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug)]
+pub struct WatchOptions {
+    pub bind: SocketAddr,
+    pub host: SocketAddr,
+    pub session: [u8; 16],
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl WatchOptions {
+    pub fn validate(&self) -> Result<()> {
+        validate_peer(self.bind, self.host)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_peer(bind: SocketAddr, peer: SocketAddr) -> Result<()> {
+    ensure!(
+        bind.is_ipv4() == peer.is_ipv4(),
+        "netplay addresses must use the same IP family"
+    );
+    ensure!(
+        peer.port() != 0 && !peer.ip().is_unspecified() && !peer.ip().is_multicast(),
+        "netplay peer must be a unicast address with a nonzero port"
+    );
+    Ok(())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -183,6 +230,9 @@ pub enum ConnectionOptions {
     Direct(Options),
     #[cfg(feature = "netplay-internet")]
     Internet(Box<internet::Options>),
+    Watch(WatchOptions),
+    #[cfg(feature = "netplay-internet")]
+    WatchInternet(Box<internet::SpectatorOptions>),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -193,12 +243,57 @@ impl From<Options> for ConnectionOptions {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+impl From<WatchOptions> for ConnectionOptions {
+    fn from(options: WatchOptions) -> Self {
+        Self::Watch(options)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 impl ConnectionOptions {
-    pub fn settings(&self) -> Settings {
+    /// Timeline settings of a player; spectators negotiate none.
+    pub fn settings(&self) -> Option<Settings> {
         match self {
-            Self::Direct(options) => options.settings(),
+            Self::Direct(options) => Some(options.settings()),
             #[cfg(feature = "netplay-internet")]
-            Self::Internet(options) => options.settings(),
+            Self::Internet(options) => Some(options.settings()),
+            Self::Watch(_) => None,
+            #[cfg(feature = "netplay-internet")]
+            Self::WatchInternet(_) => None,
+        }
+    }
+
+    pub fn role(&self) -> Role {
+        match self {
+            Self::Direct(options) => options.role(),
+            #[cfg(feature = "netplay-internet")]
+            Self::Internet(options) => options.role(),
+            Self::Watch(_) => Role::Spectator,
+            #[cfg(feature = "netplay-internet")]
+            Self::WatchInternet(_) => Role::Spectator,
+        }
+    }
+
+    /// Spectators a hosting player admits.
+    pub fn spectators(&self) -> usize {
+        match self {
+            Self::Direct(options) if options.player == 0 => usize::from(options.spectators),
+            #[cfg(feature = "netplay-internet")]
+            Self::Internet(options) if options.host_key.is_some() => {
+                usize::from(options.spectators)
+            }
+            _ => 0,
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::Direct(options) => options.validate(),
+            #[cfg(feature = "netplay-internet")]
+            Self::Internet(options) => options.validate(),
+            Self::Watch(options) => options.validate(),
+            #[cfg(feature = "netplay-internet")]
+            Self::WatchInternet(options) => options.validate(),
         }
     }
 }
@@ -213,19 +308,22 @@ impl Options {
             rollback_frames: self.rollback_frames,
         }
     }
+    pub fn role(&self) -> Role {
+        if self.player == 0 {
+            Role::Host
+        } else {
+            Role::Guest
+        }
+    }
     pub fn validate(&self) -> Result<()> {
         self.settings().validate()?;
         ensure!(
-            self.bind.is_ipv4() == self.peer.is_ipv4(),
-            "netplay addresses must use the same IP family"
+            usize::from(self.spectators) <= spectate::MAX_SPECTATORS
+                && (self.spectators == 0 || self.player == 0),
+            "netplay spectators are served by player 1, up to {}",
+            spectate::MAX_SPECTATORS
         );
-        ensure!(
-            self.peer.port() != 0
-                && !self.peer.ip().is_unspecified()
-                && !self.peer.ip().is_multicast(),
-            "netplay peer must be a unicast address with a nonzero port"
-        );
-        Ok(())
+        validate_peer(self.bind, self.peer)
     }
 }
 
@@ -328,6 +426,7 @@ pub struct Connection<T: Transport> {
     peer_hashes: BTreeMap<u64, [u8; 32]>,
     last_checked: u64,
     failure: Option<String>,
+    feed: Option<Feed>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -340,6 +439,8 @@ pub struct Status {
     pub rollbacks: u64,
     pub replayed_frames: u64,
     pub checked_frame: u64,
+    /// Confirmed host frames a spectator has yet to execute.
+    pub behind: u64,
 }
 
 impl Status {
@@ -371,18 +472,19 @@ impl Connection<NativeTransport> {
                 options.settings(),
                 NativeTransport::Internet(Box::new(internet::InternetTransport::new(*options)?)),
             ),
+            ConnectionOptions::Watch(_) => {
+                anyhow::bail!("spectators follow the host's timeline instead of running one")
+            }
+            #[cfg(feature = "netplay-internet")]
+            ConnectionOptions::WatchInternet(_) => {
+                anyhow::bail!("spectators follow the host's timeline instead of running one")
+            }
         };
         Self::with_transport(settings, transport, emu, cfg)
     }
 
     pub fn options(&self) -> ConnectionOptions {
-        match &self.transport {
-            NativeTransport::Udp(t) => ConnectionOptions::Direct(t.options.clone()),
-            #[cfg(feature = "netplay-internet")]
-            NativeTransport::Internet(t) => {
-                ConnectionOptions::Internet(Box::new(t.options.clone()))
-            }
-        }
+        self.transport.options()
     }
 }
 
@@ -391,12 +493,18 @@ fn initial_identity(
     emu: &mut Emulator,
     cfg: &crate::config::Config,
 ) -> Result<[u8; 32]> {
+    settings.validate()?;
+    machine_identity(emu, cfg)
+}
+
+/// Fingerprint a cold machine every participant must reproduce exactly:
+/// the build plus the complete normalized initial snapshot.
+pub fn machine_identity(emu: &mut Emulator, cfg: &crate::config::Config) -> Result<[u8; 32]> {
     validate_config(cfg)?;
     ensure!(
         emu.bus().emulated_cck() == 0,
         "netplay must start before the machine runs"
     );
-    settings.validate()?;
     // Paths are host metadata; normalize only after adopting the complete
     // images into memory so replay cannot reopen or overwrite local files.
     emu.bus_mut().floppy.prepare_netplay_images();
@@ -455,6 +563,7 @@ impl<T: Transport> Connection<T> {
             peer_hashes: BTreeMap::new(),
             last_checked: 0,
             failure: None,
+            feed: None,
         })
     }
 
@@ -466,6 +575,47 @@ impl<T: Transport> Connection<T> {
         self.settings.player
     }
 
+    pub fn identity(&self) -> [u8; 32] {
+        self.identity
+    }
+
+    /// Retain the confirmed history for spectators. Must precede the first
+    /// frame so late joiners can replay from cold boot.
+    pub fn enable_feed(&mut self, limit: usize) -> Result<()> {
+        ensure!(
+            self.rollback.current == 0 && self.rollback.confirmed == 0,
+            "spectator history must start at frame zero"
+        );
+        self.rollback.log = Some(Default::default());
+        self.feed = Some(Feed::new(limit));
+        Ok(())
+    }
+
+    pub fn feed(&self) -> Option<&Feed> {
+        self.feed.as_ref()
+    }
+
+    /// Record a media change applied at the current confirmed boundary.
+    pub fn feed_swap(&mut self, swap: SwapRecord) -> Result<()> {
+        self.drain_feed()?;
+        match &mut self.feed {
+            Some(feed) => feed.record_swap(swap),
+            None => Ok(()),
+        }
+    }
+
+    fn drain_feed(&mut self) -> Result<()> {
+        if let (Some(log), Some(feed)) = (&mut self.rollback.log, &mut self.feed) {
+            for (frame, inputs) in log.inputs.drain(..) {
+                feed.record_frame(frame, inputs)?;
+            }
+            for (frame, hash) in log.hashes.drain(..) {
+                feed.record_checkpoint(frame, hash)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn status(&self) -> Status {
         Status {
             connected: self.connected,
@@ -475,6 +625,7 @@ impl<T: Transport> Connection<T> {
             rollbacks: self.rollback.rollbacks,
             replayed_frames: self.rollback.replayed_frames,
             checked_frame: self.last_checked,
+            behind: 0,
         }
     }
 
@@ -600,6 +751,7 @@ impl<T: Transport> Connection<T> {
             if advance {
                 stepped = self.rollback.advance(&mut machine, sampled)?;
             }
+            self.drain_feed()?;
             for (&frame, expected) in &self.peer_hashes {
                 if let Some(actual) = self.rollback.hashes.get(&frame) {
                     ensure!(
@@ -665,7 +817,7 @@ impl<T: Transport> Drop for Connection<T> {
     }
 }
 
-struct EmulatedMachine<'a>(&'a mut Emulator);
+pub(super) struct EmulatedMachine<'a>(pub(super) &'a mut Emulator);
 impl Machine for EmulatedMachine<'_> {
     fn save(&self) -> Result<Vec<u8>> {
         self.0.netplay_snapshot()

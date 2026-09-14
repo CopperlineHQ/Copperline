@@ -17,6 +17,7 @@ use copperline::video::HOST_SHORTCUT_MODIFIER_LABEL;
 pub struct CliArgs {
     pub netplay: Option<copperline::netplay::ConnectionOptions>,
     pub netplay_invitation_out: Option<PathBuf>,
+    pub netplay_spectator_invitation_out: Option<PathBuf>,
     pub config_path: Option<PathBuf>,
     pub rom_path: Option<PathBuf>,
     /// `--whdload GAME`: stage a WHDLoad package (.lha archive or
@@ -411,6 +412,9 @@ where
     let mut netplay_session = None;
     let mut netplay_delay = None;
     let mut netplay_rollback = None;
+    let mut netplay_spectators: Option<u8> = None;
+    let mut netplay_spectator_invite = None::<PathBuf>;
+    let mut netplay_watch = None::<String>;
     let mut config_path: Option<PathBuf> = None;
     let mut rom_path: Option<PathBuf> = None;
     let mut whdload: Option<PathBuf> = None;
@@ -943,6 +947,27 @@ where
                     Some(args.next().ok_or_else(|| {
                         anyhow!("--netplay-session requires 32 hexadecimal digits")
                     })?)
+            }
+            "--netplay-spectators" => {
+                netplay_spectators = Some(next_arg::<u8>(
+                    &mut args,
+                    "--netplay-spectators requires a count, 1..8",
+                    "invalid netplay spectator count",
+                )?)
+            }
+            "--netplay-spectator-invite" => {
+                netplay_spectator_invite = Some(
+                    args.next()
+                        .ok_or_else(|| {
+                            anyhow!("--netplay-spectator-invite requires an output path")
+                        })?
+                        .into(),
+                );
+            }
+            "--netplay-watch" => {
+                let usage =
+                    "--netplay-watch requires a spectator invitation code or the host's IP:PORT";
+                netplay_watch = Some(args.next().ok_or_else(|| anyhow!(usage))?);
             }
             "--run-ahead" => {
                 let value = args
@@ -1576,10 +1601,17 @@ where
             "--hostsocket-interface conflicts with an explicit non-bridge --hostsocket-net"
         ));
     }
+    // A spectator code addresses the Internet transport; anything else given
+    // to --netplay-watch is the direct UDP host address.
+    let watch_code = netplay_watch
+        .as_deref()
+        .filter(|value| copperline::netplay::is_spectator_code(value))
+        .map(str::to_string);
     let internet_requested = netplay_host.is_some()
         || netplay_join.is_some()
         || netplay_relay.is_some()
-        || netplay_relay_only;
+        || netplay_relay_only
+        || watch_code.is_some();
     let netplay = if internet_requested
         || netplay_bind.is_some()
         || netplay_peer.is_some()
@@ -1587,12 +1619,21 @@ where
         || netplay_session.is_some()
         || netplay_delay.is_some()
         || netplay_rollback.is_some()
+        || netplay_watch.is_some()
+        || netplay_spectators.is_some()
+        || netplay_spectator_invite.is_some()
     {
+        use copperline::netplay::{ConnectionOptions, Role};
+        let spectators = netplay_spectators.unwrap_or(0);
+        if netplay_spectators.is_some() && !(1..=8).contains(&spectators) {
+            bail!("--netplay-spectators must be 1..8");
+        }
         let options = if internet_requested {
             if netplay_bind.is_some()
                 || netplay_peer.is_some()
                 || netplay_player.is_some()
                 || netplay_session.is_some()
+                || (netplay_watch.is_some() && watch_code.is_none())
             {
                 bail!("Internet netplay cannot be combined with direct IP/session/player flags");
             }
@@ -1600,32 +1641,85 @@ where
             bail!("This build does not include Internet netplay");
             #[cfg(feature = "netplay-internet")]
             {
-                use copperline::netplay::{internet, ConnectionOptions};
-                let options = match (&netplay_host, &netplay_join) {
-                    (Some(_), None) => internet::Options::host(
-                        netplay_delay.unwrap_or(2),
-                        netplay_rollback.unwrap_or(8),
-                        netplay_relay.as_deref().unwrap_or(""),
-                        netplay_relay_only,
-                    )?,
-                    (None, Some(code)) => {
+                use copperline::netplay::internet;
+                match (&netplay_host, &netplay_join, &watch_code) {
+                    (Some(_), None, None) => {
+                        if spectators > 0 && netplay_spectator_invite.is_none() {
+                            bail!("Internet spectators need --netplay-spectator-invite PATH to write their code");
+                        }
+                        ConnectionOptions::Internet(Box::new(internet::Options::host(
+                            netplay_delay.unwrap_or(2),
+                            netplay_rollback.unwrap_or(8),
+                            netplay_relay.as_deref().unwrap_or(""),
+                            netplay_relay_only,
+                            spectators,
+                        )?))
+                    }
+                    (None, Some(code), None) => {
                         if netplay_delay.is_some()
                             || netplay_rollback.is_some()
                             || netplay_relay.is_some()
                         {
                             bail!("The Internet invitation supplies the host's timing and relay settings");
                         }
-                        internet::Options::join(code, netplay_relay_only)?
+                        if netplay_spectators.is_some() {
+                            bail!("Only the host admits spectators");
+                        }
+                        ConnectionOptions::Internet(Box::new(internet::Options::join(
+                            code,
+                            netplay_relay_only,
+                        )?))
                     }
-                    _ => bail!("Choose --netplay-host PATH or --netplay-join CODE"),
-                };
-                ConnectionOptions::Internet(Box::new(options))
+                    (None, None, Some(code)) => {
+                        if netplay_delay.is_some()
+                            || netplay_rollback.is_some()
+                            || netplay_relay.is_some()
+                            || netplay_spectators.is_some()
+                        {
+                            bail!("A spectator follows the host's settings; only --netplay-relay-only applies");
+                        }
+                        ConnectionOptions::WatchInternet(Box::new(
+                            internet::SpectatorOptions::watch(code, netplay_relay_only)?,
+                        ))
+                    }
+                    _ => bail!(
+                        "Choose --netplay-host PATH, --netplay-join CODE or --netplay-watch CODE"
+                    ),
+                }
             }
+        } else if let Some(host) = netplay_watch {
+            let usage = "spectating requires --netplay-watch IP:PORT and --netplay-session HEX";
+            if netplay_player.is_some()
+                || netplay_peer.is_some()
+                || netplay_delay.is_some()
+                || netplay_rollback.is_some()
+                || netplay_spectators.is_some()
+            {
+                bail!("A spectator takes no player, peer, timing or spectator flags");
+            }
+            let host: std::net::SocketAddr = host.parse().map_err(|_| {
+                anyhow!("--netplay-watch needs a spectator invitation code or IP:PORT")
+            })?;
+            let code: String = netplay_session.ok_or_else(|| anyhow!(usage))?;
+            let options = copperline::netplay::WatchOptions {
+                bind: netplay_bind.unwrap_or(if host.is_ipv6() {
+                    "[::]:0".parse().unwrap()
+                } else {
+                    "0.0.0.0:0".parse().unwrap()
+                }),
+                host,
+                session: copperline::netplay::parse_session_id(&code)?,
+            };
+            options.validate()?;
+            ConnectionOptions::Watch(options)
         } else {
             let usage = "netplay requires --netplay-bind IP:PORT, --netplay-peer IP:PORT, --netplay-player 1|2 and --netplay-session HEX";
             let player = netplay_player.ok_or_else(|| anyhow!(usage))?;
             if !(1..=2).contains(&player) {
                 bail!("--netplay-player must be 1 or 2");
+            }
+            if player == 2 && netplay_spectators.is_some() {
+                bail!("Only player 1 admits spectators");
             }
             let code: String = netplay_session.ok_or_else(|| anyhow!(usage))?;
             let session = copperline::netplay::parse_session_id(&code)?;
@@ -1636,10 +1730,18 @@ where
                 session,
                 input_delay: netplay_delay.unwrap_or(2),
                 rollback_frames: netplay_rollback.unwrap_or(8),
+                spectators,
             };
             options.validate()?;
-            copperline::netplay::ConnectionOptions::Direct(options)
+            ConnectionOptions::Direct(options)
         };
+        let role = options.role();
+        if netplay_spectator_invite.is_some()
+            && !(role == Role::Host && matches!(options, ConnectionOptions::Internet(_)))
+        {
+            bail!("--netplay-spectator-invite applies to an Internet netplay host");
+        }
+        let local_port = options.settings().map(|settings| settings.player);
         if load_state.is_some()
             || load_uss.is_some()
             || benchmark_until.is_some()
@@ -1661,12 +1763,15 @@ where
             || !mouse_after.is_empty()
             || !mouse_to_after.is_empty()
             || !pot_after.is_empty()
-            || (options.settings().player == 1 && !disk_insert_after.is_empty())
+            || (role != Role::Host && !disk_insert_after.is_empty())
             || joy_after
                 .iter()
-                .any(|j| usize::from(j.3) != options.settings().player)
+                .any(|j| Some(usize::from(j.3)) != local_port)
         {
             bail!("netplay supports cold boot, host floppy changes, local-port --joy-after and keyboard input; state loads, guest media changes, scripted mouse/analogue input, debugging, warp and recording are unavailable");
+        }
+        if role == Role::Spectator && !press_after.is_empty() {
+            bail!("a spectator sends no input: scripted keys, controllers and media changes are unavailable");
         }
         Some(options)
     } else {
@@ -1675,6 +1780,7 @@ where
     Ok(CliArgs {
         netplay,
         netplay_invitation_out: netplay_host,
+        netplay_spectator_invitation_out: netplay_spectator_invite,
         config_path,
         rom_path,
         whdload,
@@ -1876,6 +1982,11 @@ fn print_help() {
          --netplay-session HEX          shared 32-digit hexadecimal session ID\n  \
          --netplay-delay FRAMES         local input delay, 0..6 (default 2)\n  \
          --netplay-rollback FRAMES      prediction limit, 1..12 (default 8)\n  \
+         --netplay-spectators N         host: admit up to N spectators, 1..8\n  \
+         --netplay-spectator-invite PATH\n  \
+         \x20                            Internet host: write the spectator code to PATH\n  \
+         --netplay-watch CODE|IP:PORT   spectate: a CLNS1. spectator code, or the direct\n  \
+         \x20                            IP host with --netplay-session\n  \
          --run-ahead FRAMES             run-ahead input-latency reduction, 0..4 frames\n  \
          \x20                            (0 = off, the default; windowed sessions only)\n  \
          \x20                            (--model/--cpu/etc. override the config file or defaults)\n  \

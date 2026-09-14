@@ -12357,6 +12357,7 @@ fn netplay_routes_local_inputs_and_blocks_unilateral_menu_actions() -> anyhow::R
                 session: [7; 16],
                 input_delay: 0,
                 rollback_frames: 8,
+                spectators: 0,
             };
             let session = crate::netplay::Session::new(options, &mut app.emu, &cfg)?;
             app.attach_netplay(session);
@@ -12597,6 +12598,7 @@ fn netplay_continuous_mouse_corrections_present_every_frame() -> anyhow::Result<
                         session: [32; 16],
                         input_delay: 2,
                         rollback_frames: 8,
+                        spectators: 0,
                     },
                     &mut app.emu,
                     &cfg,
@@ -12712,6 +12714,7 @@ fn netplay_host_mouse_owns_only_the_local_mouse_port() -> anyhow::Result<()> {
                         session: [31; 16],
                         input_delay: 0,
                         rollback_frames: 8,
+                        spectators: 0,
                     },
                     &mut app.emu,
                     &cfg,
@@ -12802,4 +12805,141 @@ fn field_point_inverts_the_field_placement() {
     );
     // The centring band above the field shows no field pixel.
     assert_eq!(placement.field_point(0, 0, 570), None);
+}
+
+#[test]
+fn netplay_gui_spectator_follows_the_players_without_input_or_disk_controls() -> anyhow::Result<()>
+{
+    // Three complete machines plus cold setup exceed the default test stack.
+    std::thread::Builder::new()
+        .stack_size(48 * 1024 * 1024)
+        .spawn(|| -> anyhow::Result<()> {
+            use crate::netplay::Role;
+            use crate::video::launcher::{LauncherField as F, LauncherTab};
+            use std::net::UdpSocket;
+            let reserved: Vec<_> = (0..3)
+                .map(|_| UdpSocket::bind("127.0.0.1:0"))
+                .collect::<std::io::Result<_>>()?;
+            let addresses: Vec<_> = reserved
+                .iter()
+                .map(|s| s.local_addr())
+                .collect::<std::io::Result<_>>()?;
+            drop(reserved);
+            let mut apps = [test_app(), test_app(), test_app()];
+            for (player, app) in apps.iter_mut().take(2).enumerate() {
+                app.machine_config.audio.output_enabled = Some(false);
+                app.open_launcher();
+                app.activate_ui_control(UiControl::LauncherToggle(F::NetplayEnabled));
+                let state = app.launcher_state_mut().unwrap();
+                state.netplay.bind = addresses[player].to_string();
+                state.netplay.peer = addresses[1 - player].to_string();
+                state.netplay.player = player;
+                state.netplay.spectators = if player == 0 { 1 } else { 0 };
+                state.netplay.code = "0123456789abcdef0123456789abcdef".into();
+                app.launcher_run();
+                assert!(
+                    app.netplay.is_some(),
+                    "{:?}",
+                    app.launcher_state().and_then(|s| s.status.as_ref())
+                );
+                app.emu.set_paced(false);
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+            let hold_players = |apps: &mut [super::App], frame: u64| -> anyhow::Result<bool> {
+                let mut settled = true;
+                for app in apps.iter_mut().take(2) {
+                    let session = app.netplay.as_mut().unwrap();
+                    let advance = session.status().frame < frame;
+                    session.step(&mut app.emu, Default::default(), advance)?;
+                    let status = session.status();
+                    settled &=
+                        status.connected && status.frame == frame && session.ready_to_capture();
+                }
+                Ok(settled)
+            };
+            while !hold_players(&mut apps, 90)? {
+                anyhow::ensure!(
+                    std::time::Instant::now() < deadline,
+                    "players did not reach frame 90"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            // The spectator joins a game already in progress through the
+            // launcher's Watch role.
+            {
+                let app = &mut apps[2];
+                app.machine_config.audio.output_enabled = Some(false);
+                app.open_launcher();
+                app.activate_ui_control(UiControl::LauncherToggle(F::NetplayEnabled));
+                let state = app.launcher_state_mut().unwrap();
+                state.netplay.spectator = true;
+                state.netplay.bind = addresses[2].to_string();
+                state.netplay.peer = addresses[0].to_string();
+                state.netplay.code = "0123456789abcdef0123456789abcdef".into();
+                app.launcher_run();
+                assert!(
+                    app.netplay.is_some(),
+                    "{:?}",
+                    app.launcher_state().and_then(|s| s.status.as_ref())
+                );
+                assert_eq!(app.netplay.as_ref().unwrap().role(), Role::Spectator);
+                assert!(app.mouse_port().is_none());
+                assert!(!app.netplay_keyboard_controller);
+                app.emu.set_paced(false);
+                // Whatever the spectator holds stays on its own side.
+                app.handle_amiga_key_event(0x40, true);
+                app.auto_joy_held[0].red = true;
+                app.apply_auto_joy_state(0);
+            }
+            let mut caught_up = false;
+            loop {
+                hold_players(&mut apps, 90)?;
+                let app = &mut apps[2];
+                app.step_netplay()?;
+                let session = app.netplay.as_ref().unwrap();
+                if session.catching_up() {
+                    caught_up = true;
+                    assert!(!app.emu.paced(), "catch-up runs unpaced");
+                }
+                if session.status().connected && session.status().frame == 90 {
+                    break;
+                }
+                anyhow::ensure!(
+                    std::time::Instant::now() < deadline,
+                    "spectator did not catch up"
+                );
+            }
+            assert!(caught_up, "a late joiner replays its backlog");
+            let spectator = apps[2].netplay.as_ref().unwrap();
+            assert_eq!(spectator.status().checked_frame, 60);
+            assert!(!spectator.catching_up() && apps[2].emu.paced());
+            assert!(!spectator.can_change_disk());
+            assert_eq!(apps[0].netplay.as_ref().unwrap().spectator_count(), 1);
+            assert_eq!(
+                apps[2].emu.netplay_snapshot()?,
+                apps[0].emu.netplay_snapshot()?,
+                "the spectator's machine is the host's, untouched by local input"
+            );
+            // F11 returns to the launcher with the Watch role remembered;
+            // the players carry on without their spectator.
+            apps[2].leave_netplay(None);
+            let state = apps[2].launcher_state().unwrap();
+            assert_eq!(state.tab, LauncherTab::Netplay);
+            assert!(state.netplay.spectator);
+            assert_eq!(state.netplay.peer, addresses[0].to_string());
+            while !hold_players(&mut apps, 100)? {
+                anyhow::ensure!(
+                    std::time::Instant::now() < deadline,
+                    "players did not reach frame 100"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert_eq!(
+                apps[0].emu.netplay_snapshot()?,
+                apps[1].emu.netplay_snapshot()?
+            );
+            Ok(())
+        })?
+        .join()
+        .unwrap()
 }

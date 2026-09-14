@@ -7,12 +7,31 @@ use super::{Transport, MAX_PACKET};
 use crate::timebase::{Duration, Instant};
 use anyhow::{ensure, Result};
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 
 const MAGIC: &[u8; 4] = b"CLNC";
 const HEADER: usize = 4 + 1 + 16 + 1 + 8 + 8 + 4 + 1;
 const CHUNK: usize = MAX_PACKET - HEADER;
 const WINDOW: u64 = 32;
 const RESEND: Duration = Duration::from_millis(200);
+/// Complete messages held for the session before further chunks wait in the
+/// receive window; queued messages awaiting transmission are bounded alike.
+const QUEUE: usize = 4;
+
+/// Role bytes carried by every control packet.
+pub(super) const ROLE_HOST: u8 = 0;
+pub(super) const ROLE_GUEST: u8 = 1;
+pub(super) const ROLE_SPECTATOR: u8 = 2;
+
+/// Whether a datagram is a control packet of `session` sent by `role`.
+pub(super) fn is_control_packet(bytes: &[u8], session: &[u8; 16], role: u8) -> bool {
+    bytes.len() >= HEADER
+        && bytes.len() <= MAX_PACKET
+        && bytes.starts_with(MAGIC)
+        && bytes[4] == 1
+        && bytes[5..21] == *session
+        && bytes[21] == role
+}
 
 struct Outgoing {
     bytes: Vec<u8>,
@@ -22,10 +41,11 @@ struct Outgoing {
 pub(super) struct Control<T> {
     pub inner: T,
     session: [u8; 16],
-    player: usize,
+    role: u8,
+    peer_role: u8,
     next_send: u64,
     next_receive: u64,
-    sending: VecDeque<VecDeque<Vec<u8>>>,
+    sending: VecDeque<VecDeque<Arc<Vec<u8>>>>,
     send_offset: usize,
     outgoing: BTreeMap<u64, Outgoing>,
     incoming: BTreeMap<u64, Vec<u8>>,
@@ -37,11 +57,14 @@ pub(super) struct Control<T> {
 }
 
 impl<T: Transport> Control<T> {
-    pub fn new(inner: T, session: [u8; 16], player: usize) -> Self {
+    /// A player's control link addresses the opposite player; the host also
+    /// opens one link per spectator, and a spectator one link to the host.
+    pub fn new(inner: T, session: [u8; 16], role: u8, peer_role: u8) -> Self {
         Self {
             inner,
             session,
-            player,
+            role,
+            peer_role,
             next_send: 0,
             next_receive: 0,
             sending: VecDeque::new(),
@@ -57,23 +80,44 @@ impl<T: Transport> Control<T> {
     }
 
     pub fn send_message(&mut self, bytes: Vec<u8>) -> Result<()> {
-        self.send_parts(vec![bytes])
+        self.send_parts(vec![Arc::new(bytes)])
     }
 
-    /// Take ownership of each media buffer, copying only packet-sized chunks.
-    pub fn send_parts(&mut self, parts: Vec<Vec<u8>>) -> Result<()> {
+    /// Queue shared media buffers, copying only packet-sized chunks. The same
+    /// buffers can be queued on several links without duplicating them.
+    pub fn send_parts(&mut self, parts: Vec<Arc<Vec<u8>>>) -> Result<()> {
         let len = parts
             .iter()
             .try_fold(0usize, |len, part| len.checked_add(part.len()))
             .context("netplay control message length overflow")?;
         ensure!(
-            len > 0 && len <= super::setup::MAX_BUNDLE + 1 && self.sending.len() < 4,
+            len > 0 && len <= super::setup::MAX_BUNDLE + 1 && self.can_send(),
             "netplay control send queue is full"
         );
-        let mut framed = VecDeque::from([(len as u32).to_le_bytes().to_vec()]);
-        framed.extend(parts.into_iter().filter(|part| !part.is_empty()));
+        // Parts are chunked separately, so a small leading part shares its
+        // packet with the length prefix instead of costing one of its own:
+        // a feed message or setup reply then travels as a single packet.
+        let mut parts: VecDeque<_> = parts.into_iter().filter(|part| !part.is_empty()).collect();
+        let prefix = (len as u32).to_le_bytes();
+        let mut framed = VecDeque::new();
+        match parts.front() {
+            Some(first) if first.len() + prefix.len() <= CHUNK => {
+                let mut merged = Vec::with_capacity(prefix.len() + first.len());
+                merged.extend_from_slice(&prefix);
+                merged.extend_from_slice(first);
+                parts.pop_front();
+                framed.push_back(Arc::new(merged));
+            }
+            _ => framed.push_back(Arc::new(prefix.to_vec())),
+        }
+        framed.extend(parts);
         self.sending.push_back(framed);
         Ok(())
+    }
+
+    /// Whether another message may be queued without an error.
+    pub fn can_send(&self) -> bool {
+        self.sending.len() < QUEUE
     }
 
     pub fn take_message(&mut self) -> Option<Vec<u8>> {
@@ -122,8 +166,8 @@ impl<T: Transport> Control<T> {
                 "incompatible desktop setup protocol; use the same build"
             );
             ensure!(
-                usize::from(bytes[21]) == 1 - self.player,
-                "netplay peers must use opposite player roles"
+                bytes[21] == self.peer_role,
+                "netplay peers must use matching roles"
             );
             let seq = u64::from_le_bytes(bytes[22..30].try_into()?);
             let ack = u64::from_le_bytes(bytes[30..38].try_into()?);
@@ -155,13 +199,20 @@ impl<T: Transport> Control<T> {
             } else {
                 self.incoming.insert(seq, bytes[HEADER..].to_vec());
             }
-            while let Some(chunk) = self.incoming.remove(&self.next_receive) {
-                self.next_receive = self
-                    .next_receive
-                    .checked_add(1)
-                    .context("setup sequence exhausted")?;
-                self.assemble(&chunk)?;
-            }
+        }
+        // Chunks past a full message queue stay in the receive window,
+        // selectively acknowledged, until the session drains messages and
+        // a later poll assembles them.
+        while self.messages.len() < QUEUE {
+            let Some(chunk) = self.incoming.remove(&self.next_receive) else {
+                break;
+            };
+            self.next_receive = self
+                .next_receive
+                .checked_add(1)
+                .context("setup sequence exhausted")?;
+            self.assemble(&chunk)?;
+            self.ack_pending = true;
         }
         if self.ack_pending && self.inner.send(&self.packet(0, &[]))? {
             self.ack_pending = false;
@@ -224,7 +275,7 @@ impl<T: Transport> Control<T> {
         bytes.extend(MAGIC);
         bytes.push(1);
         bytes.extend(self.session);
-        bytes.push(self.player as u8);
+        bytes.push(self.role);
         bytes.extend(sequence.to_le_bytes());
         bytes.extend(self.next_receive.to_le_bytes());
         let mask = self
@@ -267,10 +318,8 @@ impl<T: Transport> Control<T> {
                 self.assembling.clear();
                 self.expected = Some(len);
             } else {
-                ensure!(
-                    self.messages.len() < 4,
-                    "netplay control receive queue is full"
-                );
+                // One chunk may complete several small messages; the window
+                // guard in `poll_at` bounds how far past QUEUE this can go.
                 self.messages
                     .push_back(std::mem::take(&mut self.assembling));
                 self.expected = None;
@@ -315,13 +364,13 @@ mod tests {
 
     #[test]
     fn receive_allocation_grows_with_data_and_stays_within_message_length() -> Result<()> {
-        let mut control = Control::new(PacketQueue::default(), [3; 16], 0);
+        let mut control = Control::new(PacketQueue::default(), [3; 16], ROLE_HOST, ROLE_GUEST);
         let limit = (super::super::setup::MAX_BUNDLE + 1) as u32;
         control.assemble(&limit.to_le_bytes())?;
         control.assemble(&[1])?;
         assert!(control.assembling.capacity() <= 2 * CHUNK);
 
-        let mut control = Control::new(PacketQueue::default(), [3; 16], 0);
+        let mut control = Control::new(PacketQueue::default(), [3; 16], ROLE_HOST, ROLE_GUEST);
         let len = CHUNK * 3 + 1;
         control.assemble(&(len as u32).to_le_bytes())?;
         for chunk in vec![7; len].chunks(CHUNK) {
@@ -336,13 +385,13 @@ mod tests {
 
     #[test]
     fn transfer_survives_loss_reordering_duplicates_and_backpressure() -> Result<()> {
-        let mut a = Control::new(PacketQueue::default(), [3; 16], 0);
-        let mut b = Control::new(PacketQueue::default(), [3; 16], 1);
+        let mut a = Control::new(PacketQueue::default(), [3; 16], ROLE_HOST, ROLE_GUEST);
+        let mut b = Control::new(PacketQueue::default(), [3; 16], ROLE_GUEST, ROLE_HOST);
         let payload: Vec<_> = (0..120_000).map(|n| (n % 251) as u8).collect();
         a.send_parts(vec![
-            payload[..123].to_vec(),
-            vec![],
-            payload[123..].to_vec(),
+            Arc::new(payload[..123].to_vec()),
+            Arc::new(vec![]),
+            Arc::new(payload[123..].to_vec()),
         ])?;
         b.send_message(b"reply".to_vec())?;
         let mut now = Instant::now();
@@ -386,6 +435,67 @@ mod tests {
         assert_eq!(received, Some(payload));
         assert_eq!(reply, Some(b"reply".to_vec()));
         assert!(!a.sending() && !b.sending());
+        Ok(())
+    }
+
+    #[test]
+    fn links_check_role_pairs_and_hold_chunks_while_messages_wait() -> Result<()> {
+        let session = [3; 16];
+        let mut host = Control::new(PacketQueue::default(), session, ROLE_HOST, ROLE_SPECTATOR);
+        let mut spectator =
+            Control::new(PacketQueue::default(), session, ROLE_SPECTATOR, ROLE_HOST);
+        let mut guest = Control::new(PacketQueue::default(), session, ROLE_GUEST, ROLE_HOST);
+        host.send_message(b"feed".to_vec())?;
+        host.poll()?;
+        let packet = host.inner.pop().unwrap();
+        assert!(host.inner.pop().is_none(), "a small message is one packet");
+        assert!(is_control_packet(&packet, &session, ROLE_HOST));
+        assert!(!is_control_packet(&packet, &session, ROLE_SPECTATOR));
+        assert!(!is_control_packet(&packet, &[4; 16], ROLE_HOST));
+        assert!(!is_control_packet(
+            &packet[..HEADER - 1],
+            &session,
+            ROLE_HOST
+        ));
+        spectator.inner.push(&packet)?;
+        spectator.poll()?;
+        assert_eq!(spectator.take_message(), Some(b"feed".to_vec()));
+        // A guest's packet on a spectator link is a role mismatch.
+        guest.send_message(b"hello".to_vec())?;
+        guest.poll()?;
+        let wrong = guest.inner.pop().unwrap();
+        spectator.inner.push(&wrong)?;
+        assert!(spectator.poll().is_err());
+        // Eight small messages: the receiver keeps QUEUE complete and
+        // leaves the rest in its window until the session drains them.
+        let mut host = Control::new(PacketQueue::default(), session, ROLE_HOST, ROLE_SPECTATOR);
+        let mut spectator =
+            Control::new(PacketQueue::default(), session, ROLE_SPECTATOR, ROLE_HOST);
+        let mut sent = 0u8;
+        for round in 0..2 {
+            while host.can_send() {
+                host.send_message(vec![sent; 3])?;
+                sent += 1;
+            }
+            assert!(host.send_message(vec![0]).is_err(), "queue bound holds");
+            host.poll()?;
+            while let Some(packet) = host.inner.pop() {
+                spectator.inner.push(&packet)?;
+            }
+            spectator.poll()?;
+            assert_eq!(spectator.messages.len(), QUEUE, "round {round}");
+            assert_eq!(spectator.incoming.len(), round * QUEUE, "round {round}");
+        }
+        assert_eq!(sent, 8);
+        for expected in 0..8u8 {
+            let message = spectator.take_message().unwrap();
+            assert_eq!(message, vec![expected; 3]);
+            if expected == 3 {
+                spectator.poll()?;
+                assert!(spectator.incoming.is_empty());
+            }
+        }
+        assert!(spectator.take_message().is_none());
         Ok(())
     }
 }

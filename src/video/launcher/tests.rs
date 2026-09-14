@@ -5779,9 +5779,10 @@ fn netplay_setup_edits_all_controls_without_persisting_connection_details() -> R
         assert!(state.row_applies(field));
     }
     for (field, count) in [
-        (F::NetplayPlayer, 2),
+        (F::NetplayPlayer, 3),
         (F::NetplayDelay, 7),
         (F::NetplayRollback, 12),
+        (F::NetplaySpectators, 9),
     ] {
         let initial = state.row_value(field);
         let mut values = std::collections::BTreeSet::new();
@@ -5831,6 +5832,110 @@ fn netplay_setup_rejects_invalid_details_and_generates_fresh_codes() {
 }
 
 #[test]
+fn netplay_spectator_role_watches_the_host_and_only_hosts_admit_spectators() -> Result<()> {
+    use crate::netplay::{ConnectionOptions, Role};
+    let mut state = LauncherState::new(MachineSetup::default());
+    state.toggle_netplay();
+    assert!(state.row_applies(F::NetplaySpectators));
+    assert_eq!(state.row_value(F::NetplaySpectators), "Off");
+    state.netplay.cycle(F::NetplaySpectators, true);
+    assert_eq!(state.row_value(F::NetplaySpectators), "Up to 1");
+    state.netplay.cycle(F::NetplaySpectators, false);
+    state.netplay.cycle(F::NetplaySpectators, false);
+    assert_eq!(state.row_value(F::NetplaySpectators), "Up to 8");
+    state.netplay.peer = "127.0.0.1:19733".into();
+    state.netplay.new_code();
+    let options = state.netplay.connection_options()?.unwrap();
+    assert_eq!((options.role(), options.spectators()), (Role::Host, 8));
+    // Player 2 admits nobody, and the row says so.
+    state.netplay.cycle(F::NetplayPlayer, true);
+    assert_eq!(state.netplay.role(), Role::Guest);
+    assert!(!state.row_applies(F::NetplaySpectators));
+    assert_eq!(state.netplay.connection_options()?.unwrap().spectators(), 0);
+    // A spectator addresses the host with the session code and negotiates
+    // no timing of its own.
+    state.netplay.cycle(F::NetplayPlayer, true);
+    assert_eq!(state.row_value(F::NetplayPlayer), "Spectator");
+    assert!(!state.row_applies(F::NetplayDelay));
+    assert!(!state.row_applies(F::NetplayRollback));
+    assert!(!state.row_applies(F::NetplayNewCode));
+    assert!(!state.row_applies(F::NetplaySpectators));
+    assert!(state.row_applies(F::NetplayPeer) && state.row_applies(F::NetplayCode));
+    assert!(state.netplay.options()?.is_none());
+    let options = state.netplay.connection_options()?.unwrap();
+    assert_eq!(options.role(), Role::Spectator);
+    let ConnectionOptions::Watch(watch) = options else {
+        panic!("expected direct watch options");
+    };
+    assert_eq!(watch.host.port(), 19733);
+    let remembered = NetplaySetup::from(&ConnectionOptions::Watch(watch));
+    assert!(remembered.enabled && remembered.spectator);
+    assert_eq!(remembered.peer, "127.0.0.1:19733");
+    assert_eq!(remembered.role(), Role::Spectator);
+    state.netplay.cycle(F::NetplayPlayer, true);
+    assert_eq!(state.netplay.role(), Role::Host);
+    state.netplay.cycle(F::NetplayPlayer, false);
+    assert_eq!(state.netplay.role(), Role::Spectator);
+    Ok(())
+}
+
+#[cfg(feature = "netplay-internet")]
+#[test]
+fn internet_host_shares_a_separate_spectator_code() -> Result<()> {
+    use crate::netplay::Role;
+    let mut host = LauncherState::new(MachineSetup::default());
+    host.toggle_netplay();
+    host.tab = LauncherTab::Netplay;
+    host.netplay.cycle(F::NetplayMode, true);
+    assert!(!host.row_applies(F::NetplayCopySpectatorCode));
+    host.netplay.generate_code()?;
+    assert!(host.netplay.spectator_code.is_empty());
+    host.netplay.cycle(F::NetplaySpectators, true);
+    assert!(
+        host.netplay.connection_options().is_err(),
+        "the invitation predates the spectator setting"
+    );
+    host.netplay.generate_code()?;
+    assert!(host.row_applies(F::NetplayCopySpectatorCode));
+    assert!(crate::netplay::is_spectator_code(
+        &host.netplay.spectator_code
+    ));
+    assert!(!crate::netplay::is_spectator_code(&host.netplay.code));
+    assert_eq!(host.netplay.connection_options()?.unwrap().spectators(), 1);
+    assert!(host
+        .rows()
+        .iter()
+        .any(|row| row.field == F::NetplayCopySpectatorCode));
+    let mut watcher = LauncherState::new(MachineSetup::default());
+    watcher.toggle_netplay();
+    watcher.netplay.cycle(F::NetplayMode, true);
+    watcher.netplay.cycle(F::NetplayPlayer, false);
+    assert_eq!(watcher.row_value(F::NetplayPlayer), "Watch");
+    assert!(!watcher.row_applies(F::NetplayNewCode));
+    watcher.begin_edit_netplay(F::NetplayCode);
+    for c in host.netplay.spectator_code.chars() {
+        watcher.edit_push(c);
+    }
+    watcher.edit_commit();
+    let options = watcher.netplay.connection_options()?.unwrap();
+    assert_eq!(options.role(), Role::Spectator);
+    assert!(options.settings().is_none());
+    let remembered = NetplaySetup::from(&options);
+    assert!(remembered.internet && remembered.spectator);
+    assert_eq!(remembered.code, host.netplay.spectator_code);
+    // Neither code opens the other role.
+    watcher.netplay.code = host.netplay.code.clone();
+    assert!(watcher.netplay.connection_options().is_err());
+    let mut guest = LauncherState::new(MachineSetup::default());
+    guest.toggle_netplay();
+    guest.netplay.cycle(F::NetplayMode, true);
+    guest.netplay.cycle(F::NetplayPlayer, true);
+    guest.netplay.code = host.netplay.spectator_code.clone();
+    assert!(guest.netplay.connection_options().is_err());
+    Ok(())
+}
+
+#[test]
 fn netplay_preserves_each_supported_port_device() {
     let mut state = LauncherState::new(MachineSetup::default());
     state.netplay.enabled = true;
@@ -5877,9 +5982,9 @@ fn internet_netplay_launcher_shares_invitation_and_adopts_host_timing() -> Resul
     assert_eq!(guest.netplay.delay, 6);
     assert_eq!(guest.netplay.rollback, 12);
     let options = guest.netplay.connection_options()?.unwrap();
-    assert_eq!(options.settings().player, 1);
-    assert_eq!(options.settings().input_delay, 6);
-    assert_eq!(options.settings().rollback_frames, 12);
+    assert_eq!(options.settings().unwrap().player, 1);
+    assert_eq!(options.settings().unwrap().input_delay, 6);
+    assert_eq!(options.settings().unwrap().rollback_frames, 12);
     assert!(!guest.row_applies(F::NetplayDelay));
     assert!(!guest.row_applies(F::NetplayRelay));
     assert!(!guest.row_applies(F::NetplayNewCode));
