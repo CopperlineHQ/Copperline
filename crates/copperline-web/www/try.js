@@ -7662,7 +7662,7 @@ if (typeof WebEmu.prototype.start_netplay === 'function') {
               }
             } else if (performance.now() - lastStatus > 1000) {
               const [connected, frame, confirmed, , rollbacks, , checked] = emu.netplay_status();
-              const spectators = link.hub?.slots || link.hub?.watching ? `, ${link.hub.watching} watching` : '';
+              const spectators = link.hub ? `, ${link.hub.watching} watching` : '';
               netplayPanel.status(connected
                 ? `Player ${player}: frame ${frame}, confirmed ${confirmed}, ${rollbacks} rollbacks, checked ${checked}${spectators}`
                 : 'Waiting for a matching machine...');

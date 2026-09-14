@@ -239,57 +239,30 @@ test('the hub answers offers up to its places, refuses the rest, hashes media on
   assert.equal(hub.timer, null);
 });
 
-test('the hub opens its room on the first request for places, resizes it in order, and keeps it through None', async t => {
+test('an expired room withdraws its invitation but keeps the spectators it admitted', async t => {
   const offer = encodeCode(description('offer'), offered);
-  const room = { id: null, created: [], sizes: [], polled: 0, answers: [], ended: false,
-    create: async ({ slots }) => { room.created.push(slots); room.id = 'w'.repeat(22); return { id: room.id, owner: 'o'.repeat(22), iceServers: [{ urls: ['turn:relay.test'] }] }; },
-    setSlots: async slots => { if (slots === 5) throw new Error('Too many requests'); room.sizes.push(slots); return { slots }; },
-    pollWatchOffers: async () => { room.polled++; return { offers: [{ spectator: 'a'.repeat(22), code: offer }] }; },
-    answerWatch: async spectator => { room.answers.push(spectator); },
+  const room = { id: 'w'.repeat(22), polls: 0, ended: false,
+    pollWatchOffers: async () => {
+      if (++room.polls > 1) throw new Error('This invitation has expired or ended. Ask the host for a new link.');
+      return { offers: [{ spectator: 'a'.repeat(22), code: offer }] };
+    },
+    answerWatch: async () => {},
     refuseWatch: async () => {},
     end: () => { room.ended = true; } };
-  let changes = 0;
+  const notices = [];
+  const seen = [];
   const machine = { netplay_identity: () => identity };
   const hub = new SpectatorHub({ room, slots: 3, build: 'build-1', controller: 'joystick', media: () => ({}),
-    machine: () => machine, changed: () => { changes++; }, PeerConnection: Peer });
+    machine: () => machine, status: text => notices.push(text), changed: () => seen.push(hub.invitation), PeerConnection: Peer });
   t.after(() => hub.close());
-  assert.equal(hub.slots, 0, 'no places until the room exists, whatever the constructor was told');
-  assert.equal(hub.invitation, null);
+  assert.equal(hub.invitation, room.id);
   hub.start();
   clearTimeout(hub.timer);
   await hub.poll();
-  assert.equal(room.polled, 0, 'nothing to poll before the room is opened');
-  await hub.setSlots(0);
-  assert.deepEqual(room.created, [], 'None opens no room');
-  // Two changes back to back apply in order over one room creation.
-  const first = hub.setSlots(2);
-  const second = hub.setSlots(1);
-  assert.equal(first, second, 'changes share one application');
-  await second;
-  assert.deepEqual([room.created, room.sizes, hub.slots, changes], [[2], [1], 1, 2]);
-  assert.equal(hub.invitation, room.id);
-  assert.deepEqual(hub.iceServers, [{ urls: ['turn:relay.test'] }], 'the host answers with the room\'s relay');
-  clearTimeout(hub.timer);
+  assert.equal(hub.peers.size, 1);
   await hub.poll();
-  assert.equal(room.polled, 1);
-  assert.deepEqual(room.answers, ['a'.repeat(22)]);
-  await hub.setSlots(0);
-  assert.equal(hub.slots, 0);
-  assert.equal(hub.peers.size, 1, 'None keeps everyone already admitted');
-  assert.equal(hub.invitation, room.id, 'the room and its invitation survive None');
-  await assert.rejects(hub.setSlots(5), /Too many requests/);
-  assert.equal(hub.slots, 0, 'a failed change leaves the count the room really has');
-  assert.equal(hub.applying, null, 'a failed change does not wedge later ones');
-  await hub.setSlots(4);
-  assert.deepEqual(room.sizes, [1, 0, 4]);
-  // A room that ends while a change is in flight fails that change, and an
-  // ended hub refuses later ones outright: neither reports a resize it did
-  // not make, and the dead invitation is withdrawn.
-  room.setSlots = async slots => { room.sizes.push(slots); hub.close(false); return { slots }; };
-  await assert.rejects(hub.setSlots(6), /invitation has ended/);
-  assert.deepEqual([hub.closed, hub.slots, hub.invitation, hub.applying], [true, 0, null, null]);
-  assert.equal(hub.peers.size, 1, 'an expired room keeps the spectators it admitted');
-  await assert.rejects(hub.setSlots(1), /invitation has ended/);
-  assert.deepEqual(room.sizes, [1, 0, 4, 6], 'no request reaches an ended room');
-  assert.equal(room.ended, true);
+  assert.deepEqual([hub.closed, hub.invitation, hub.peers.size, room.ended], [true, null, 1, true]);
+  assert.match(notices.at(-1), /invitation ended/);
+  assert.equal(seen.at(-1), null, 'the panel is told once the invitation is dead');
+  assert.ok([...hub.peers.values()].every(peer => !peer.closed), 'admitted spectators keep watching');
 });

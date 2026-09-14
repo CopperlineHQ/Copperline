@@ -208,8 +208,8 @@ export function mountNetplayPanel(parent, { prepare, check = () => {}, start, st
     #netplay-panel [hidden] { display: none !important; }
     #netplay-panel #netplay-status { overflow-wrap: anywhere; color: var(--ink, #eee); }
     #netplay-advanced { margin-top: .8rem; border-top: 1px solid var(--line, #454b57); padding-top: .6rem; }
-    #netplay-qr { margin: .8rem auto; max-width: 260px; background: white; padding: .25rem; }
-    #netplay-qr svg { display: block; width: 100%; height: auto; }
+    #netplay-qr, #netplay-watch-qr { margin: .8rem auto; max-width: 260px; background: white; padding: .25rem; }
+    #netplay-qr svg, #netplay-watch-qr svg { display: block; width: 100%; height: auto; }
     #netplay-watch-invitation { margin-top: .8rem; border-top: 1px solid var(--line, #454b57); padding-top: .4rem; }
     #netplay-panel label:has(input[type=checkbox]) { display: flex; align-items: center; gap: .5rem; }
     #netplay-panel input[type=checkbox] { width: auto; margin: 0; }
@@ -236,12 +236,13 @@ export function mountNetplayPanel(parent, { prepare, check = () => {}, start, st
       <button id="netplay-share" type="button" hidden>Share invitation</button>
       <div id="netplay-qr" role="img" aria-label="Scan this QR code with the other device’s camera to join"></div>
       <p>Scan with the other device’s camera, or share the link. Invitations expire after 15 minutes.</p>
-      <div id="netplay-watch-invitation" hidden>
-        <label>Spectator invitation <input id="netplay-watch-invite" readonly spellcheck="false"></label>
-        <button id="netplay-copy-watch" type="button">Copy spectator invitation</button>
-        <button id="netplay-share-watch" type="button" hidden>Share spectator invitation</button>
-        <p>Spectators receive your game files and watch without playing. They can join at any time while the game lasts.</p>
-      </div>
+    </div>
+    <div id="netplay-watch-invitation" hidden>
+      <label>Spectator invitation <input id="netplay-watch-invite" readonly spellcheck="false"></label>
+      <button id="netplay-copy-watch" type="button">Copy spectator invitation</button>
+      <button id="netplay-share-watch" type="button" hidden>Share spectator invitation</button>
+      <div id="netplay-watch-qr" role="img" aria-label="Scan this QR code with a spectator&rsquo;s camera to watch"></div>
+      <p>Up to ${SPECTATOR_SLOTS} spectators can open this at any time while the game lasts. They receive your game files, replay the game from its start to catch up, and never send input.</p>
     </div>
     <button id="netplay-disconnect" type="button" disabled>Disconnect</button>
     <p id="netplay-status" role="status" aria-live="polite">Host a game or open an invitation to join.</p>
@@ -258,8 +259,6 @@ export function mountNetplayPanel(parent, { prepare, check = () => {}, start, st
     <details id="netplay-advanced"><summary>Advanced</summary>
       <label>Controllers <select id="netplay-controller"><option value="joystick">Joystick</option><option value="cd32">CD32 pad</option><option value="mouse">Two mice</option></select></label>
       <p>For two-mouse games, choose Two mice before hosting. Each player’s mouse or touch trackpad controls their own Amiga port.</p>
-      <label>Spectators <select id="netplay-spectators">${Array.from({length: SPECTATOR_SLOTS + 1}, (_, n) => `<option value="${n}">${n === 0 ? 'None' : n}</option>`).join('')}</select></label>
-      <p>Spectators get a separate invitation, replay the game from its start to catch up, and never send input. The host can change this while hosting; None admits nobody new but keeps everyone watching.</p>
       <label>Input delay <select id="netplay-delay">${[0,1,2,3,4,5,6].map(n => `<option ${n === 2 ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
       <label>Rollback limit <select id="netplay-window">${Array.from({length:12}, (_, i) => `<option ${i === 7 ? 'selected' : ''}>${i + 1}</option>`).join('')}</select></label>
       <label><input id="netplay-relay-only" type="checkbox"> Use relay only for room connections</label>
@@ -292,15 +291,13 @@ export function mountNetplayPanel(parent, { prepare, check = () => {}, start, st
     const active = !!link;
     for (const name of ['host', 'join', 'delay', 'window', 'controller', 'stun', 'relay-only', 'room-code']) field(name).disabled = active;
     for (const name of ['room-host', 'room-join', 'room-watch']) field(name).disabled = active || !service;
-    // A room host changes its spectator places at any time; everyone else
-    // sets them before hosting.
-    field('spectators').disabled = active && !link.hub;
     field('disconnect').disabled = !active;
     field('copy').disabled = !field('local').value;
     field('diagnostics').disabled = !lastLink;
-    const watchInvite = link?.hub?.invitation ? watchInviteUrl(link.hub.invitation) : '';
-    if (field('watch-invite').value !== watchInvite) field('watch-invite').value = watchInvite;
-    field('watch-invitation').hidden = !link?.hub?.invitation || !link.hub.slots;
+    // The player invitation is spent once player 2 is on the line; from
+    // then on only the spectator invitation is worth showing.
+    field('invitation').hidden = !field('invite').value || !!link?.opened;
+    field('watch-invitation').hidden = !link?.hub?.invitation;
     const swapEnabled = !!link?.host && link.settings?.swaps === SWAP_VERSION;
     field('disks').hidden = !swapEnabled;
     const canSwap = swapEnabled && link.swaps?.channel.readyState === 'open'
@@ -324,20 +321,25 @@ export function mountNetplayPanel(parent, { prepare, check = () => {}, start, st
     if (watch) {
       if (!watchFromInvite(watch)) { status('This spectator invitation is incomplete or damaged.'); return; }
       field('room-code').value = location.href;
-      field('room-watch').hidden = false;
+      offerButtons();
       status('Spectator invitation ready. Click Watch game to receive the host’s files and follow the game.');
       return;
     }
     if (!roomFromInvite(room)) { status('This invitation is incomplete or damaged.'); return; }
     field('room-code').value = room;
-    field('room-watch').hidden = true;
+    offerButtons();
     status('Invitation ready. Click Join game to receive the host’s files and machine settings.');
+  }
+  // A spectator link can only be watched and a player invitation only
+  // joined, so the code field offers the one button that fits it.
+  function offerButtons() {
+    const watching = /[#&?]watch=/.test(field('room-code').value);
+    field('room-watch').hidden = !watching;
+    field('room-join').hidden = watching;
   }
   readInvitation();
   window.addEventListener('hashchange', readInvitation);
-  field('room-code').addEventListener('input', () => {
-    field('room-watch').hidden = !/[#&?]watch=/.test(field('room-code').value);
-  });
+  field('room-code').addEventListener('input', offerButtons);
 
   async function begin(mode) {
     if (link) return;
@@ -351,7 +353,6 @@ export function mountNetplayPanel(parent, { prepare, check = () => {}, start, st
       const roomId = watch ? watchFromInvite(field('room-code').value) : roomFromInvite(field('room-code').value);
       if (roomMode && !service) throw new Error('Room invitations are not configured on this page');
       if (roomMode && !host && !roomId) throw new Error(watch ? 'Paste a spectator invitation link' : 'Paste an invitation link or room code');
-      const slots = host && roomMode ? Number(field('spectators').value) : 0;
       settings = host ? { ...newSettings(Number(field('delay').value), Number(field('window').value), field('controller').value), media: MEDIA_VERSION, swaps: SWAP_VERSION }
         : roomMode ? null : decodeCode(remote, 'offer').settings;
       const stun = field('stun').value.trim();
@@ -359,6 +360,7 @@ export function mountNetplayPanel(parent, { prepare, check = () => {}, start, st
       const callbacks = {
         onOpen: async peer => {
           if (link !== peer) return;
+          controls();
           if (host) {
             // The host's page stayed live while it waited; its media and
             // settings are captured now that player 2 is on the line.
@@ -398,7 +400,7 @@ export function mountNetplayPanel(parent, { prepare, check = () => {}, start, st
           field('invite').value = '';
           field('watch-invite').value = '';
           field('qr').replaceChildren();
-          field('invitation').hidden = true;
+          field('watch-qr').replaceChildren();
           controls();
           status(stop(reason, peer) ?? reason);
         },
@@ -447,12 +449,14 @@ export function mountNetplayPanel(parent, { prepare, check = () => {}, start, st
         if (!host) settings = decodeCode(network.offer, 'offer').settings;
         if (host) {
           // A separate room, with its own capability, admits spectators for
-          // as long as the host keeps polling it. The hub opens that room
-          // once the host asks for places, before or during the game, and
-          // the machine keeps its history from frame zero either way.
+          // as long as the host keeps polling it. Every hosted game offers
+          // the full number of places; the machine keeps its history from
+          // frame zero so a spectator can arrive at any time.
           current.watch = new RoomClient(service, current.abort.signal, '/watch');
-          current.hub = new SpectatorHub({ room: current.watch,
-            relayOnly: field('relay-only').checked, build: build(), controller: settings.controller,
+          const watchRoom = await current.watch.create({ slots: SPECTATOR_SLOTS });
+          if (link !== current) { current.watch.end(); current.room.end(); return; }
+          current.hub = new SpectatorHub({ room: current.watch, iceServers: watchRoom.iceServers,
+            relayOnly: field('relay-only').checked, slots: SPECTATOR_SLOTS, build: build(), controller: settings.controller,
             media: () => getMedia(current), machine: () => getMachine(current),
             status: text => { if (link === current) notice(text); }, changed: controls });
         }
@@ -465,18 +469,12 @@ export function mountNetplayPanel(parent, { prepare, check = () => {}, start, st
         if (host) {
           const invitation = inviteUrl(current.room.id);
           field('invite').value = invitation;
-          const qr = qrcode(0, 'M');
-          qr.addData(invitation);
-          qr.make();
-          field('qr').innerHTML = qr.createSvgTag({ cellSize: 4, margin: 16, scalable: true });
-          field('invitation').hidden = false;
+          field('qr').innerHTML = qrSvg(invitation);
+          const watchInvitation = watchInviteUrl(current.watch.id);
+          field('watch-invite').value = watchInvitation;
+          field('watch-qr').innerHTML = qrSvg(watchInvitation);
           controls();
           status('Waiting for player 2. Share the invitation or scan the QR code.');
-          if (slots > 0) {
-            const problem = await admitSpectators(current, slots);
-            if (link !== current) return;
-            if (problem) status(`Waiting for player 2. Spectators are unavailable: ${problem}`);
-          }
           const answer = await current.room.waitForAnswer(network.expiresAt);
           if (link !== current) return;
           await current.accept(answer);
@@ -498,26 +496,12 @@ export function mountNetplayPanel(parent, { prepare, check = () => {}, start, st
       else if (!current) status(String(error.message ?? error));
     }
   }
-  // Applies the Spectators choice to the host's watch room. A failure keeps
-  // the game hosted and puts the select back to what the room admits.
-  async function admitSpectators(current, slots) {
-    try { await current.hub.setSlots(slots); return null; }
-    catch (error) {
-      if (link === current) field('spectators').value = String(current.hub.slots);
-      return String(error.message ?? error);
-    }
+  function qrSvg(text) {
+    const qr = qrcode(0, 'M');
+    qr.addData(text);
+    qr.make();
+    return qr.createSvgTag({ cellSize: 4, margin: 16, scalable: true });
   }
-  field('spectators').addEventListener('change', async () => {
-    const current = link;
-    const slots = Number(field('spectators').value);
-    if (!current?.hub) return;
-    const problem = await admitSpectators(current, slots);
-    if (link !== current) return;
-    controls();
-    notice(problem ? `Spectators are unavailable: ${problem}`
-      : slots ? `Admitting up to ${slots} spectator${slots === 1 ? '' : 's'}. Share the spectator invitation.`
-        : 'No more spectators can join. Everyone already watching stays.');
-  });
   field('host').addEventListener('click', () => begin('manual-host'));
   field('join').addEventListener('click', () => begin('manual-join'));
   field('room-host').addEventListener('click', () => begin('room-host'));

@@ -412,14 +412,22 @@ captures keep one frame per pass so a burst cannot overshoot a scheduled
 screenshot. Window input is swallowed, `App::mouse_port` is `None`, disk
 controls are unavailable, and F11 leaves.
 
-Browser: the host page creates a separate watch room (`POST /watch`, its own
-22-character capability, `#watch=` links) sized by the Advanced spectator
-count. Signaling runs the other way round: each spectator reserves a place
+Browser: a room host creates a separate watch room next to its player room
+(`POST /watch` with all eight places, its own 22-character capability,
+`#watch=` links) and enables the confirmed-history feed at frame zero, so
+spectators can arrive at any time; manual-code sessions have no room
+service and no spectators. The panel shows the spectator invitation with its
+own QR beside the player one until player 2 connects, then alone. Signaling
+runs the other way round: each spectator reserves a place
 (`/join`, which also issues its TURN credentials), offers over
 `copperline-watch-v1` (ordered, reliable) plus the existing setup channel,
 and polls for its answer with 429 backoff; the host polls `/offers` every two
 seconds while its machine runs, which also extends the room's expiry, and
-answers each offer; a fetched answer frees the place. `SpectatorHub` keeps one
+answers each offer up to the places it holds, refusing the rest (`/refuse`),
+since the service counts only places still in signaling; a fetched answer
+frees the place, and an expired room closes the hub, which withdraws the
+invitation from the panel while the spectators already admitted keep
+watching. `SpectatorHub` keeps one
 `RtcWatchPeer` per spectator, describes the host media once, serves it with
 `MediaTransfer`, requires a `Verified` fingerprint equal to
 `WebEmu::netplay_identity`, then opens a feed cursor
