@@ -156,21 +156,18 @@ test('watch rooms admit spectators by their own capability, relay offers to the 
   assert.equal((await call(path + '/answer', 'GET', undefined, spectators[0])).body.answer, code('answer'), 'a lost response can be retried');
   assert.equal((await call(path + '/join', 'POST', { spectator: spectators[2] })).status, 200, 'a fetched answer frees the place');
   assert.equal((await call(path + '/join', 'POST', { spectator: 'v'.repeat(22) })).status, 409);
-  // The owner resizes the room while it runs: zero shuts the door without
-  // ending the room, and a larger count reopens it on the same invitation.
-  for (const slots of [-1, 9, 1.5, '2']) assert.equal((await call(path + '/slots', 'POST', { slots }, owner)).status, 400);
-  assert.equal((await call(path + '/slots', 'POST', { slots: 1, extra: true }, owner)).status, 400);
-  assert.equal((await call(path + '/slots', 'POST', { slots: 0 }, spectators[1])).status, 403, 'only the owner resizes');
-  const resized = await call(path + '/slots', 'POST', { slots: 0 }, owner);
-  assert.equal(resized.status, 200);
-  assert.equal(resized.body.slots, 0);
-  assert.ok(resized.body.expiresAt >= offers.body.expiresAt, 'a resize keeps the room alive');
-  assert.equal((await call(path + '/join', 'POST', { spectator: 'v'.repeat(22) })).status, 409, 'no places while closed');
-  assert.equal((await call(path + '/join', 'POST', { spectator: spectators[2] })).status, 200, 'a joined spectator keeps its place');
-  assert.equal((await call(path + '/slots', 'POST', { slots: 4 }, owner)).body.slots, 4);
-  assert.equal((await call(path + '/join', 'POST', { spectator: 'v'.repeat(22) })).status, 200, 'the same invitation admits again');
+  assert.equal((await call(path + '/slots', 'POST', { slots: 4 }, owner)).status, 404, 'rooms are not resized');
   // A full host turns an offer away: the spectator reads the refusal on its
   // next poll, its place is freed, and the offer leaves the owner's list.
+  // Spectator 2 (answered, fetched) and the third one (waiting) hold the
+  // two places, so the refused one joined while a place was free.
+  assert.equal((await call(path + '/join', 'POST', { spectator: spectators[2] })).status, 200, 'a joined spectator keeps its place');
+  assert.equal((await call(path + '/answer', 'GET', undefined, spectators[1])).body.answer, null);
+  assert.equal((await call(path + '/answer', 'POST', { spectator: spectators[1], code: code('answer') }, owner)).status, 404, 'still no offer from the second');
+  assert.equal((await call(path + '/offer', 'POST', { code: code('offer') }, spectators[1])).status, 200);
+  assert.equal((await call(path + '/answer', 'POST', { spectator: spectators[1], code: code('answer') }, owner)).status, 200);
+  assert.equal((await call(path + '/answer', 'GET', undefined, spectators[1])).body.answer, code('answer'));
+  assert.equal((await call(path + '/join', 'POST', { spectator: 'v'.repeat(22) })).status, 200, 'a fetched answer frees its place');
   assert.equal((await call(path + '/offer', 'POST', { code: code('offer') }, 'v'.repeat(22))).status, 200);
   assert.equal((await call(path + '/refuse', 'POST', { spectator: 'v'.repeat(22) }, 'v'.repeat(22))).status, 403);
   assert.equal((await call(path + '/refuse', 'POST', { spectator: 'bad' }, owner)).status, 400);
@@ -183,9 +180,8 @@ test('watch rooms admit spectators by their own capability, relay offers to the 
   assert.equal(refused.status, 200);
   assert.deepEqual([refused.body.answer, refused.body.refused], [null, true]);
   assert.equal((await call(path + '/answer', 'GET', undefined, spectators[2])).body.refused, false);
-  assert.equal((await call(path + '/slots', 'POST', { slots: 3 }, owner)).status, 200);
   assert.equal((await call(path + '/join', 'POST', { spectator: 'w'.repeat(22) })).status, 200, 'a refusal frees its place');
-  assert.equal((await call(path + '/join', 'POST', { spectator: 'x'.repeat(22) })).status, 409, 'the two unanswered joins and the newcomer fill three places');
+  assert.equal((await call(path + '/join', 'POST', { spectator: 'x'.repeat(22) })).status, 409, 'the waiting third spectator and the newcomer fill both places');
   // Only the owner ends the room.
   assert.equal((await call(path, 'DELETE', undefined, spectators[1])).status, 403);
   assert.equal((await call(path, 'DELETE', undefined, owner)).status, 200);

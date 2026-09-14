@@ -93,7 +93,7 @@ export default {
       const path = new URL(request.url).pathname;
       // Player rooms and spectator watch rooms are separate capabilities:
       // a watch link never reaches a player room, and vice versa.
-      const match = /^\/(rooms|watch)\/([A-Za-z0-9_-]{22})(?:\/(offer|join|answer|offers|slots|refuse))?$/.exec(path);
+      const match = /^\/(rooms|watch)\/([A-Za-z0-9_-]{22})(?:\/(offer|join|answer|offers|refuse))?$/.exec(path);
       const creating = (path === '/rooms' || path === '/watch') && request.method === 'POST';
       if (path === '/health' && request.method === 'GET') {
         response = json({ service: 'copperline-netplay', version: 2,
@@ -264,7 +264,7 @@ export class NetplayRoom extends DurableObject {
     }
     const key = bearer && !owner ? `spectator:${bearer}` : null;
     const entry = key ? await this.ctx.storage.get(key) : null;
-    const ownerOnly = ['/offers', '/', '/slots', '/refuse'].includes(path) || (path === '/answer' && request.method === 'POST');
+    const ownerOnly = ['/offers', '/', '/refuse'].includes(path) || (path === '/answer' && request.method === 'POST');
     if (ownerOnly ? !owner : !entry) return json({ error: 'Room access denied' }, 403);
     if (path === '/' && request.method === 'DELETE') {
       await this.ctx.storage.deleteAll();
@@ -278,21 +278,6 @@ export class NetplayRoom extends DurableObject {
       entry.offer = body.code;
       await this.ctx.storage.put(key, entry);
       return json({ ready: true });
-    }
-    if (path === '/slots' && request.method === 'POST' && owner) {
-      // The host changes its mind while the game runs: fewer places admit
-      // fewer newcomers and zero closes the door, but the room and its
-      // invitation live on so the count can go back up.
-      const body = await readJson(request);
-      const slots = body.slots;
-      if (Object.keys(body).length !== 1 || !Number.isInteger(slots) || slots < 0 || slots > SLOTS_MAX) {
-        return json({ error: `Spectator places must be 0 to ${SLOTS_MAX}` }, 400);
-      }
-      room.slots = slots;
-      room.expiresAt = now + ROOM_TTL;
-      await this.ctx.storage.put('room', room);
-      await this.ctx.storage.setAlarm(room.expiresAt);
-      return json({ slots, expiresAt: room.expiresAt });
     }
     if (path === '/refuse' && request.method === 'POST' && owner) {
       // The host has no place left for this offer: the spectator learns so

@@ -142,11 +142,8 @@ export class RoomClient {
 
   answerWatch(spectator, code) { return this.request(`${this.prefix}/${this.id}/answer`, 'POST', { spectator, code }); }
 
-  // Owner only: turn a spectator away without answering, or change how
-  // many places the room offers (0 keeps the room but admits nobody new).
+  // Owner only: turn a spectator away without answering it.
   refuseWatch(spectator) { return this.request(`${this.prefix}/${this.id}/refuse`, 'POST', { spectator }); }
-
-  setSlots(slots) { return this.request(`${this.prefix}/${this.id}/slots`, 'POST', { slots }); }
 
   end() {
     if (!this.id || !this.auth) return Promise.resolve();

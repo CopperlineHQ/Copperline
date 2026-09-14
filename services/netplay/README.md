@@ -97,8 +97,9 @@ in `crates/copperline-web/www`; run `npm test` there too.
 
 ## Watch rooms
 
-A host that admits spectators creates a second room with `POST /watch`
-(`{ "slots": 1..8 }`), keyed by its own 22-character token: a spectator link
+A host creates a second room for spectators with `POST /watch`
+(`{ "slots": 1..8 }`; the page always asks for 8), keyed by its own
+22-character token: a spectator link
 (`#watch=`) never reaches `/rooms/{id}/join`, and a player room id opens no
 watch room. Signaling runs the other way round from player rooms:
 
@@ -110,14 +111,12 @@ watch room. Signaling runs the other way round from player rooms:
 | `GET /watch/{id}/offers` | owner | unanswered offers; extends the room by 15 minutes and prunes stale entries |
 | `POST /watch/{id}/answer` `{ spectator, code }` | owner | stores the answer |
 | `POST /watch/{id}/refuse` `{ spectator }` | owner | turns an offered spectator away: its next `GET .../answer` says `refused` and its place is freed |
-| `POST /watch/{id}/slots` `{ slots: 0..8 }` | owner | changes the places on offer; 0 admits nobody new while the room, its invitation and connected spectators continue |
 | `GET /watch/{id}/answer` | spectator token | the answer once available; the first fetch frees the place, and the answer stays readable for a minute so a lost response can be retried |
 | `DELETE /watch/{id}` | owner | ends the room |
 
-The host page opens the watch room the first time it asks for places, which
-may be during the game, and resizes it whenever the host changes the count.
-The service counts only places still in signaling, so a host whose places
-are all watching refuses further offers itself.
+The host page opens the watch room together with its player room. The
+service counts only places still in signaling, so a host whose places are
+all watching refuses further offers itself.
 
 Entries are stored per spectator, never as one growing record. An unanswered
 offer expires after 10 minutes, an unfetched answer after 2, and a fetched

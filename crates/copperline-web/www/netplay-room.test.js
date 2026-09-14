@@ -67,9 +67,6 @@ test('spectator invitations carry a separate capability and the watch client rou
   const answered = calls.at(-1);
   assert.equal(answered.url, `https://service.test/watch/${id}/answer`);
   assert.deepEqual(JSON.parse(answered.options.body), { spectator: 'c'.repeat(22), code: 'the-answer' });
-  await host.setSlots(0);
-  assert.equal(calls.at(-1).url, `https://service.test/watch/${id}/slots`);
-  assert.deepEqual(JSON.parse(calls.at(-1).options.body), { slots: 0 });
   await host.refuseWatch('d'.repeat(22));
   assert.equal(calls.at(-1).url, `https://service.test/watch/${id}/refuse`);
   assert.deepEqual(JSON.parse(calls.at(-1).options.body), { spectator: 'd'.repeat(22) });

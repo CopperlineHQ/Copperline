@@ -92,15 +92,15 @@ rather than allowing the players to continue with different disks.
 
 ### Watching a browser game
 
-The host chooses **Advanced → Spectators** (1 to 8) at any time: before
-clicking **Host game**, while waiting for player 2, or during play. Besides the
-player invitation, the panel then shows a **Spectator invitation** with its own
-copy and share buttons. It is a different link: it cannot claim the player 2
-place, and the player invitation cannot be used to watch. Lowering the count
-admits fewer newcomers and **None** admits nobody new, but neither drops anyone
-already watching, and the invitation stays the same when the count goes back
-up. A spectator who finds every place taken is told so instead of waiting.
-Spectators open the link and click **Watch game**. They receive the
+Every hosted game admits up to eight spectators. Besides the player
+invitation, the panel shows a **Spectator invitation** with its own copy and
+share buttons and QR code; once player 2 has joined, the spent player
+invitation gives way and only the spectator invitation stays on show. It is a
+different link: it cannot claim the player 2 place, and the player invitation
+cannot be used to watch, so the page offers **Watch game** for a spectator
+link and **Join game** for a player invitation, never both. A spectator who
+finds every place taken is told so instead of waiting. Spectators open the
+link and click **Watch game**. They receive the
 host's ROMs, disks and machine settings exactly like player 2, cold-boot the
 same machine, and then replay the game from its first frame until they are
 level with the players, so a spectator can join at any point while the game
