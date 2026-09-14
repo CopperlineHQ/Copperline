@@ -326,6 +326,17 @@ impl UdpTransport {
     }
 }
 
+/// Windows reports an ICMP port-unreachable for an earlier `send_to` as
+/// `WSAECONNRESET` on the socket's next receive or send. On a UDP socket that
+/// is not a failed connection but a destination that has gone away (a peer
+/// that quit, a spectator that left); the protocol's own timeouts decide when
+/// a link is dead, and a departed spectator must never fail the players'
+/// link, which shares the host's socket.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_reset(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::ConnectionReset
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 impl Transport for UdpTransport {
     fn receive(&mut self, buffer: &mut [u8]) -> Result<Option<usize>> {
@@ -349,6 +360,7 @@ impl Transport for UdpTransport {
                 Ok(Some(0))
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+            Err(e) if is_reset(&e) => Ok(Some(0)),
             Err(e) => Err(e.into()),
         }
     }
@@ -357,6 +369,7 @@ impl Transport for UdpTransport {
         match self.socket.send_to(packet, self.peer) {
             Ok(_) => Ok(true),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(false),
+            Err(e) if is_reset(&e) => Ok(true),
             Err(e) => Err(e.into()),
         }
     }
@@ -398,6 +411,8 @@ impl Transport for UdpSpectator {
         match self.socket.send_to(packet, self.peer) {
             Ok(_) => Ok(true),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(false),
+            // A spectator that went away is dropped by the status timeout.
+            Err(e) if is_reset(&e) => Ok(true),
             Err(e) => Err(e.into()),
         }
     }
