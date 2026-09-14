@@ -4,10 +4,12 @@ import { DurableObject } from 'cloudflare:workers';
 const ROOM_TTL = 15 * 60 * 1000;
 const BODY_LIMIT = 100 * 1024;
 const TOKEN = /^[A-Za-z0-9_-]{22}$/;
-// Spectator signaling: how long an unanswered offer, and an answer the
-// spectator has not fetched, stay in a watch room.
+// Spectator signaling: how long an unanswered offer, an answer the spectator
+// has not fetched, and a fetched answer (kept so a lost response can be
+// retried) stay in a watch room.
 const OFFER_TTL = 10 * 60 * 1000;
 const ANSWER_TTL = 2 * 60 * 1000;
+const FETCHED_TTL = 60 * 1000;
 const SLOTS_MAX = 8;
 const turnUrl = id => `https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(id)}/credentials/generate-ice-servers`;
 const json = (body, status = 200) => Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
@@ -227,10 +229,17 @@ export class NetplayRoom extends DurableObject {
 
   async pruneSpectators(now) {
     for (const [key, entry] of await this.spectators()) {
-      if ((entry.answer && entry.answeredAt + ANSWER_TTL <= now) || (!entry.answer && entry.createdAt + OFFER_TTL <= now)) {
-        await this.ctx.storage.delete(key);
-      }
+      const stale = entry.fetchedAt ? entry.fetchedAt + FETCHED_TTL <= now
+        : entry.answer ? entry.answeredAt + ANSWER_TTL <= now
+          : entry.createdAt + OFFER_TTL <= now;
+      if (stale) await this.ctx.storage.delete(key);
     }
+  }
+
+  // Places are taken by spectators still waiting for their answer; one that
+  // has fetched it keeps its record for retries but no longer needs a place.
+  async placesTaken() {
+    return (await this.spectators()).filter(([, entry]) => !entry.fetchedAt).length;
   }
 
   async handleWatch(request, room, path) {
@@ -244,7 +253,7 @@ export class NetplayRoom extends DurableObject {
       let entry = await this.ctx.storage.get(key);
       if (!entry) {
         await this.pruneSpectators(now);
-        if ((await this.spectators()).length >= room.slots) return json({ error: 'This game has no free spectator places.' }, 409);
+        if (await this.placesTaken() >= room.slots) return json({ error: 'This game has no free spectator places.' }, 409);
         let ice;
         try { ice = await iceServers(this.env); }
         catch { return json({ error: 'Relay service is unavailable. Please try again later.' }, 503); }
@@ -293,8 +302,12 @@ export class NetplayRoom extends DurableObject {
       return json({ ready: true });
     }
     if (path === '/answer' && request.method === 'GET' && entry) {
-      // A fetched answer frees the place for the next spectator.
-      if (entry.answer) await this.ctx.storage.delete(key);
+      // A fetched answer frees the place for the next spectator but stays
+      // readable for a while: a response lost in transit must be retryable.
+      if (entry.answer && !entry.fetchedAt) {
+        entry.fetchedAt = now;
+        await this.ctx.storage.put(key, entry);
+      }
       return json({ answer: entry.answer, expiresAt: room.expiresAt });
     }
     return json({ error: 'Not found' }, 404);

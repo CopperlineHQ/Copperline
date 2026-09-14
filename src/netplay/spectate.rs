@@ -524,9 +524,11 @@ impl Spectator {
     /// Compare the host's digest for the current frame if one is due; see
     /// [`Self::verify`]. Called after every service pass so a checkpoint
     /// that arrives once the spectator is level with the host is still
-    /// checked without executing another frame.
-    pub fn verify_frame(&mut self, emu: &mut Emulator) -> Result<()> {
-        self.verify(&super::EmulatedMachine(emu)).map(|_| ())
+    /// checked without executing another frame. `false` means a checkpoint
+    /// is due but its digest has not arrived: nothing may change the machine
+    /// at this boundary yet, a disk change included.
+    pub fn verify_frame(&mut self, emu: &mut Emulator) -> Result<bool> {
+        self.verify(&super::EmulatedMachine(emu))
     }
 
     /// At a checkpoint frame, wait for the host's digest and compare it
@@ -883,15 +885,16 @@ mod tests {
             if (frame + 1).is_multiple_of(60) {
                 feed.record_checkpoint(frame + 1, digest(&baseline.save()?))?;
             }
-            if frame + 1 == 130 {
-                feed.record_swap(swap(130, vec![0; 4]))?;
+            // One change on a checkpoint boundary, one between boundaries.
+            if frame + 1 == 120 || frame + 1 == 130 {
+                feed.record_swap(swap(frame + 1, vec![0; 4]))?;
             }
         }
         let mut spectator = Spectator::new([0; 32]);
         let mut toy = Toy::default();
         let mut cursor = FeedCursor::default();
         let mut steps = 0;
-        let mut waited = false;
+        let mut waited = Vec::new();
         loop {
             let (bytes, next) = feed.encode_from(cursor, 500);
             cursor = next;
@@ -899,11 +902,18 @@ mod tests {
                 spectator.push(piece)?;
             }
             loop {
-                if let Some(due) = spectator.due_swap() {
-                    assert_eq!((due.frame, spectator.executed()), (130, 130));
+                if let Some(due) = spectator.due_swap().map(|swap| swap.frame) {
+                    assert_eq!(due, spectator.executed());
                     assert!(!spectator.step(&mut toy)?, "a due change blocks the frame");
+                    // On a boundary the host's digest was compared first,
+                    // against the machine before the change.
+                    assert!(
+                        spectator.verify(&toy)?,
+                        "the boundary is settled before the change"
+                    );
+                    assert_eq!(spectator.checked(), spectator.executed() / 60 * 60);
                     spectator.swap_applied();
-                    waited = true;
+                    waited.push(due);
                 }
                 if !spectator.step(&mut toy)? {
                     break;
@@ -915,10 +925,10 @@ mod tests {
             }
         }
         assert_eq!(steps, 200);
-        assert!(waited);
+        assert_eq!(waited, [120, 130]);
         assert_eq!(toy.state, baseline.state);
         assert_eq!(spectator.checked(), 180);
-        assert_eq!(spectator.swaps_applied(), 1);
+        assert_eq!(spectator.swaps_applied(), 2);
         assert_eq!((spectator.head(), spectator.behind()), (200, 0));
 
         // A checkpoint that disagrees stops the replay at its frame.

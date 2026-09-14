@@ -151,9 +151,11 @@ test('watch rooms admit spectators by their own capability, relay offers to the 
   assert.equal((await call(path + '/answer', 'POST', { spectator: spectators[0], code: code('answer') }, owner)).status, 200);
   assert.deepEqual((await call(path + '/offers', 'GET', undefined, owner)).body.offers, []);
   assert.equal((await call(path + '/answer', 'GET', undefined, spectators[1])).body.answer, null);
+  assert.equal((await call(path + '/join', 'POST', { spectator: spectators[2] })).status, 409, 'an unfetched answer still holds its place');
   assert.equal((await call(path + '/answer', 'GET', undefined, spectators[0])).body.answer, code('answer'));
-  assert.equal((await call(path + '/answer', 'GET', undefined, spectators[0])).status, 403, 'a fetched answer frees the place');
-  assert.equal((await call(path + '/join', 'POST', { spectator: spectators[2] })).status, 200);
+  assert.equal((await call(path + '/answer', 'GET', undefined, spectators[0])).body.answer, code('answer'), 'a lost response can be retried');
+  assert.equal((await call(path + '/join', 'POST', { spectator: spectators[2] })).status, 200, 'a fetched answer frees the place');
+  assert.equal((await call(path + '/join', 'POST', { spectator: 'v'.repeat(22) })).status, 409);
   // Only the owner ends the room.
   assert.equal((await call(path, 'DELETE', undefined, spectators[1])).status, 403);
   assert.equal((await call(path, 'DELETE', undefined, owner)).status, 200);

@@ -158,7 +158,7 @@ mod tests {
 
     /// Run the players until `frames` frames are confirmed on both, servicing
     /// any spectators, then hold everyone on that frame.
-    fn run_until(
+    pub(super) fn run_until(
         peers: &mut [Session],
         machines: &mut [Emulator],
         frames: u64,
@@ -1249,18 +1249,28 @@ impl Session {
             return;
         }
         let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            self.service_spectators();
-            let end = self.connection().feed().map_or(0, Feed::frames);
-            let delivered = self.spectators.iter().all(|link| {
-                link.phase != WatchPhase::Streaming
-                    || (link.cursor.frame >= end && !link.control.sending())
-            });
-            if delivered {
-                break;
-            }
+        while !self.spectators_delivered() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    /// One flush pass: read the host socket (direct-UDP spectators share it,
+    /// so their acknowledgements only reach their slots when it is polled),
+    /// advance every link, and report whether each connected spectator has
+    /// received and acknowledged the whole feed.
+    pub fn spectators_delivered(&mut self) -> bool {
+        if self.role != Role::Host {
+            return true;
+        }
+        // The players' link may already be gone; that is not this pass's
+        // concern.
+        let _ = self.control_mut().poll();
+        self.service_spectators();
+        let end = self.connection().feed().map_or(0, Feed::frames);
+        self.spectators.iter().all(|link| {
+            link.phase != WatchPhase::Streaming
+                || (link.cursor.frame >= end && !link.control.sending())
+        })
     }
 
     /// Admit newly connected spectators and advance every link. A spectator's
@@ -1409,7 +1419,9 @@ impl Session {
             .spectator
             .as_mut()
             .context("spectator timeline is not ready")?;
-        spectator.verify_frame(emu)?;
+        // A checkpoint due at this frame is compared before a disk change
+        // at the same frame changes the machine, as the host did.
+        let settled = spectator.verify_frame(emu)?;
         if now.duration_since(watcher.last_status) >= KEEPALIVE && watcher.control.can_send() {
             send_feed(
                 &mut watcher.control,
@@ -1419,7 +1431,7 @@ impl Session {
             )?;
             watcher.last_status = now;
         }
-        if let Some(swap) = spectator.due_swap() {
+        if let Some(swap) = spectator.due_swap().filter(|_| settled) {
             let (drive, ejected) = (swap.drive, swap.bytes.is_empty());
             spectate::apply_swap(emu, swap)?;
             spectator.swap_applied();
@@ -1433,5 +1445,95 @@ impl Session {
             stepped = spectator.step(&mut EmulatedMachine(emu))?;
         }
         Ok(stepped)
+    }
+}
+
+#[cfg(test)]
+mod flush_tests {
+    use super::*;
+
+    /// A host that ends its run keeps the feed flowing to a direct-UDP
+    /// spectator, whose acknowledgements arrive on the host's own socket and
+    /// so depend on the flush polling it.
+    #[test]
+    fn host_flush_delivers_the_feed_to_a_udp_spectator() -> Result<()> {
+        std::thread::Builder::new()
+            .stack_size(48 * 1024 * 1024)
+            .spawn(|| -> Result<()> {
+                let reserve: Vec<_> = (0..3)
+                    .map(|_| std::net::UdpSocket::bind("127.0.0.1:0"))
+                    .collect::<std::io::Result<_>>()?;
+                let addresses: Vec<_> = reserve
+                    .iter()
+                    .map(|s| s.local_addr())
+                    .collect::<std::io::Result<_>>()?;
+                drop(reserve);
+                let mut machines = vec![
+                    super::super::tests::emulator()?,
+                    super::super::tests::emulator()?,
+                    super::super::tests::emulator()?,
+                ];
+                let mut cfg = super::super::tests::safe_config()?;
+                prepare_config(&mut cfg)?;
+                let options = |player: usize| Options {
+                    bind: addresses[player],
+                    peer: addresses[1 - player],
+                    player,
+                    session: [29; 16],
+                    input_delay: 2,
+                    rollback_frames: 8,
+                    spectators: if player == 0 { 1 } else { 0 },
+                };
+                let mut sessions = vec![
+                    Session::new(options(0), &mut machines[0], &cfg)?,
+                    Session::new(options(1), &mut machines[1], &cfg)?,
+                ];
+                let deadline = Instant::now() + Duration::from_secs(120);
+                super::tests::run_until(&mut sessions, &mut machines, 90, deadline)?;
+                sessions.push(Session::new(
+                    WatchOptions {
+                        bind: addresses[2],
+                        host: addresses[0],
+                        session: [29; 16],
+                    },
+                    &mut machines[2],
+                    &cfg,
+                )?);
+                // Admit the spectator and let it finish setup while the
+                // players hold their frame.
+                while !sessions[2].status().connected {
+                    for n in 0..3 {
+                        sessions[n].step(&mut machines[n], Input::default(), n == 2)?;
+                    }
+                    ensure!(Instant::now() < deadline, "the spectator did not connect");
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                assert_eq!(sessions[0].spectator_count(), 1);
+                // The players' run is over: only the flush passes service
+                // the host from here on, while the spectator keeps polling.
+                let mut delivered = false;
+                while !delivered {
+                    delivered = sessions[0].spectators_delivered();
+                    sessions[2].step(&mut machines[2], Input::default(), true)?;
+                    ensure!(
+                        Instant::now() < deadline,
+                        "the flush never delivered the feed"
+                    );
+                }
+                assert_eq!(sessions[0].spectator_count(), 1);
+                while sessions[2].status().behind > 0 {
+                    sessions[2].step(&mut machines[2], Input::default(), true)?;
+                    ensure!(Instant::now() < deadline, "the spectator did not finish");
+                }
+                assert_eq!(sessions[2].status().frame, 90);
+                assert_eq!(sessions[2].status().checked_frame, 60);
+                assert_eq!(
+                    machines[2].netplay_snapshot()?,
+                    machines[0].netplay_snapshot()?
+                );
+                Ok(())
+            })?
+            .join()
+            .unwrap()
     }
 }

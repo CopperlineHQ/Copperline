@@ -554,7 +554,10 @@ impl WebEmu {
         self.last_run_render_ms = 0.0;
         let started = Instant::now();
         let spectator = self.spectator.as_mut().unwrap();
-        if let Some(swap) = spectator.due_swap().cloned() {
+        // A checkpoint due at this frame is compared before a disk change
+        // at the same frame changes the machine, as the host did.
+        let settled = spectator.verify_frame(&mut self.emu).map_err(js_err)?;
+        if let Some(swap) = spectator.due_swap().filter(|_| settled).cloned() {
             spectate::apply_swap(&mut self.emu, &swap).map_err(js_err)?;
             spectator.swap_applied();
             self.anchor = None;
@@ -755,8 +758,8 @@ mod tests {
 
     #[test]
     fn spectators_replay_the_host_feed_from_frame_zero_and_take_no_input() -> anyhow::Result<()> {
-        let mut host = WebEmu::new(None, None, Some(0.0)).unwrap();
-        let mut guest = WebEmu::new(None, None, Some(0.0)).unwrap();
+        let mut host = WebEmu::new(None, None, Some(1.0)).unwrap();
+        let mut guest = WebEmu::new(None, None, Some(1.0)).unwrap();
         host.start_netplay_inner(settings(0), PortDevice::Cd32Pad)?;
         guest.start_netplay_inner(settings(1), PortDevice::Cd32Pad)?;
         host.netplay_enable_spectators().unwrap();
@@ -777,24 +780,64 @@ mod tests {
             }
         };
         let mut tick = 0u32;
-        while host.netplay_status()[2] < 130.0 || guest.netplay_status()[2] < 130.0 {
+        let play = |host: &mut WebEmu,
+                    guest: &mut WebEmu,
+                    tick: &mut u32,
+                    until: f64|
+         -> anyhow::Result<()> {
+            while host.netplay_status()[2] < until || guest.netplay_status()[2] < until {
+                *tick += 1;
+                for (emu, player) in [(&mut *host, 0u32), (&mut *guest, 1u32)] {
+                    let frame = emu.netplay_status()[1];
+                    let step = u32::from(frame < until);
+                    let frame = frame as u32;
+                    emu.set_joystick_port(
+                        2,
+                        frame % 9 < 3,
+                        false,
+                        false,
+                        false,
+                        frame % 7 < 3,
+                        false,
+                    );
+                    emu.key_event("Space", (frame + player) % 13 < 4);
+                    emu.run_hidden(f64::from(*tick) * 20.0, step).unwrap();
+                }
+                exchange(host, guest)?;
+                anyhow::ensure!(*tick < 100_000, "players did not confirm {until} frames");
+            }
+            Ok(())
+        };
+        // A disk change exactly on the 120-frame checkpoint boundary: the
+        // host hashes the boundary first, then changes the machine, and a
+        // spectator must reproduce that order.
+        play(&mut host, &mut guest, &mut tick, 120.0)?;
+        for emu in [&mut host, &mut guest] {
+            assert_eq!(emu.netplay_hold().unwrap(), 120.0);
+            emu.netplay_stop_at(120.0).unwrap();
+        }
+        while !(host.netplay_swap_ready() && guest.netplay_swap_ready()) {
             tick += 1;
-            for (emu, player) in [(&mut host, 0u32), (&mut guest, 1u32)] {
-                let frame = emu.netplay_status()[1] as u32;
-                emu.set_joystick_port(2, frame % 9 < 3, false, false, false, frame % 7 < 3, false);
-                emu.key_event("Space", (frame + player) % 13 < 4);
-                emu.run_hidden(f64::from(tick) * 20.0, if frame < 130 { 1 } else { 0 })
-                    .unwrap();
+            for emu in [&mut host, &mut guest] {
+                emu.run_hidden(f64::from(tick) * 20.0, 0).unwrap();
             }
             exchange(&mut host, &mut guest)?;
-            anyhow::ensure!(tick < 100_000, "players did not confirm 130 frames");
+            anyhow::ensure!(tick < 100_000, "players did not settle on the boundary");
         }
+        for emu in [&mut host, &mut guest] {
+            emu.netplay_stage_disk(0.0, vec![3; 901_120], false)
+                .unwrap();
+            emu.netplay_apply_disk().unwrap();
+            emu.netplay_resume().unwrap();
+        }
+        play(&mut host, &mut guest, &mut tick, 130.0)?;
         assert_eq!(host.spectator_feed_frames(), 130.0);
+        assert_eq!(host.disk_name(0).as_deref(), Some("netplay-df0"));
 
         // A spectator built from the same cold media follows the host's
         // history from frame zero, verifies every checkpoint, and reaches
         // the host's machine state regardless of what it holds locally.
-        let mut spectator = WebEmu::new(None, None, Some(0.0)).unwrap();
+        let mut spectator = WebEmu::new(None, None, Some(1.0)).unwrap();
         spectator.start_spectating_inner(PortDevice::Cd32Pad)?;
         assert!(spectator.session_active());
         assert_eq!(spectator.spectate_identity(), host.netplay_identity());
@@ -830,7 +873,8 @@ mod tests {
             anyhow::ensure!(runs < 10_000, "spectator did not drain the feed");
         }
         let status = spectator.spectate_status();
-        assert_eq!(status, vec![1.0, 130.0, 0.0, 120.0, 0.0]);
+        assert_eq!(status, vec![1.0, 130.0, 0.0, 120.0, 1.0]);
+        assert_eq!(spectator.disk_name(0).as_deref(), Some("netplay-df0"));
         assert!(!spectator.spectate_catchup, "level with the host again");
         assert_eq!(
             spectator.emu.netplay_snapshot()?,
@@ -840,7 +884,7 @@ mod tests {
         assert!(host.feed_take_inner(cursor, 4096).is_err());
         assert!(host.feed_take_inner(99, 4096).is_err());
         // Corrupt feed bytes fail closed rather than running a different game.
-        let mut broken = WebEmu::new(None, None, Some(0.0)).unwrap();
+        let mut broken = WebEmu::new(None, None, Some(1.0)).unwrap();
         broken.start_spectating_inner(PortDevice::Cd32Pad)?;
         let cursor = host.feed_open_inner()?;
         let mut bytes = host.feed_take_inner(cursor, 4096)?;

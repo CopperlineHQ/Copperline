@@ -179,6 +179,8 @@ export class RtcWatchPeer extends RtcCommon {
     this.state = 'signaling';
     this.transfer = null;
     this.cursor = null;
+    this.pending = null;
+    this.offset = 0;
     this.lastDrain = 0;
     this.sent = 0;
     this.frame = 0;
@@ -247,9 +249,11 @@ export class RtcWatchPeer extends RtcCommon {
     throw new Error('Invalid spectator message');
   }
 
-  // Send whatever the cursor still needs while the channel drains; a
-  // spectator whose buffer never drains is dropped rather than throttling
-  // the host.
+  // Send whatever the cursor still needs while the channel drains. A taken
+  // buffer (a whole disk image, at most) is kept on the peer and sent one
+  // chunk at a time across pumps, so no more than FEED_BUFFER plus one
+  // chunk is ever queued; a spectator whose buffer never drains is dropped
+  // rather than throttling the host.
   pump(emu, at = now()) {
     if (this.state !== 'streaming' || this.closed || this.channel?.readyState !== 'open') return;
     if (this.channel.bufferedAmount > FEED_BUFFER) {
@@ -257,11 +261,20 @@ export class RtcWatchPeer extends RtcCommon {
       return;
     }
     this.lastDrain = at;
-    const out = emu.spectator_feed_take(this.cursor, FEED_TAKE);
-    for (let offset = 0; offset < out.length; offset += FEED_CHUNK) {
-      this.channel.send(out.subarray(offset, offset + FEED_CHUNK));
+    // A channel that never reports its buffer still gets a bounded pump.
+    for (let chunks = 0; chunks < FEED_BUFFER / FEED_CHUNK && this.channel.bufferedAmount <= FEED_BUFFER; chunks++) {
+      if (!this.pending) {
+        const out = emu.spectator_feed_take(this.cursor, FEED_TAKE);
+        if (!out.length) return;
+        this.pending = out;
+        this.offset = 0;
+      }
+      const end = Math.min(this.offset + FEED_CHUNK, this.pending.length);
+      this.channel.send(this.pending.subarray(this.offset, end));
+      this.sent += end - this.offset;
+      this.offset = end;
+      if (this.offset >= this.pending.length) this.pending = null;
     }
-    this.sent += out.length;
   }
 
   close(reason = 'Spectator disconnected') {

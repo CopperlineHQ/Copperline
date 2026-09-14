@@ -83,13 +83,13 @@ test('a spectator offers two reliable channels, verifies once, reports frames an
   await assert.rejects(player.answer(encodeCode(description('offer'), offered)), /spectator/);
 });
 
-function hostPeer(overrides = {}) {
+function hostPeer(overrides = {}, feed = [new Uint8Array(FEED_CHUNK * 2 + 5).fill(1)]) {
   const events = { opened: 0, closed: null, cursors: [], taken: [] };
   const emu = {
     netplay_identity: () => identity,
     spectator_feed_open: () => { events.opened++; return 4; },
     spectator_feed_close: id => events.cursors.push(id),
-    spectator_feed_take: (id, max) => { events.taken.push([id, max]); return new Uint8Array(FEED_CHUNK * 2 + 5).fill(1); },
+    spectator_feed_take: (id, max) => { events.taken.push([id, max]); return feed.shift() ?? new Uint8Array(); },
   };
   const peer = new RtcWatchPeer({ token: 'spectator', PeerConnection: Peer, build: 'build-1', controller: 'joystick',
     media: () => ({ manifest: { type: 'host-v1', config: {}, files: [] }, media: [] }), machine: () => emu,
@@ -119,10 +119,11 @@ test('the host peer answers matching builds, streams after verification with bou
   assert.equal(peer.state, 'streaming');
   assert.equal(events.opened, 1);
   peer.pump(emu, 1000);
-  assert.deepEqual(events.taken, [[4, FEED_TAKE]]);
+  assert.deepEqual(events.taken, [[4, FEED_TAKE], [4, FEED_TAKE]]);
   assert.equal(watch.sent.length, 3);
   assert.equal(watch.sent[0].length, FEED_CHUNK);
   assert.equal(watch.sent[2].length, 5);
+  assert.equal(peer.pending, null);
   const status = new Uint8Array(13);
   status[0] = 6; new DataView(status.buffer).setUint32(1, 8, true); new DataView(status.buffer).setBigUint64(5, 123n, true);
   watch.onmessage({ data: status.buffer });
@@ -151,6 +152,49 @@ test('the host peer answers matching builds, streams after verification with bou
   const unordered = hostPeer();
   unordered.peer.pc.ondatachannel({ channel: new Channel('copperline-watch-v1', { ordered: false, maxRetransmits: 0 }) });
   assert.equal(unordered.peer.closed, true);
+});
+
+test('a whole disk image is sent chunk by chunk across pumps, never past the buffer bound', async () => {
+  // Two buffers: 40 chunks (a disk change returned whole), then 2 more.
+  const image = new Uint8Array(FEED_CHUNK * 40).fill(7);
+  const tail = new Uint8Array(FEED_CHUNK * 2).fill(8);
+  const { peer, emu } = hostPeer({}, [image, tail]);
+  await peer.answer(encodeCode(description('offer'), offered));
+  const watch = new Channel('copperline-watch-v1', { ordered: true });
+  watch.readyState = 'open';
+  watch.send = packet => { watch.sent.push(packet); watch.bufferedAmount += packet.length; };
+  peer.pc.ondatachannel({ channel: watch });
+  peer.state = 'verifying';
+  watch.onmessage({ data: feedMessage(5, identity).buffer });
+  const perPump = FEED_BUFFER / FEED_CHUNK;
+  peer.pump(emu, 1000);
+  assert.equal(watch.sent.length, perPump, 'stops once the buffer bound is reached');
+  assert.equal(watch.bufferedAmount, FEED_BUFFER);
+  assert.equal(peer.offset, perPump * FEED_CHUNK);
+  assert.ok(peer.pending === image);
+  watch.bufferedAmount = FEED_BUFFER + 1;
+  peer.pump(emu, 1001);
+  assert.equal(watch.sent.length, perPump, 'a full buffer sends nothing more');
+  watch.bufferedAmount = 0;
+  peer.pump(emu, 1002);
+  assert.equal(watch.sent.length, 2 * perPump);
+  watch.bufferedAmount = 0;
+  peer.pump(emu, 1003);
+  assert.equal(watch.sent.length, 40 + 2, 'the rest of the image, then the next buffer');
+  assert.equal(peer.pending, null);
+  assert.equal(peer.sent, image.length + tail.length);
+  assert.ok(watch.sent.every(packet => packet.length <= FEED_CHUNK));
+  assert.deepEqual(Buffer.concat(watch.sent.map(packet => Buffer.from(packet))), Buffer.concat([Buffer.from(image), Buffer.from(tail)]));
+  // A channel that never reports its buffer still gets a bounded pump.
+  const silent = hostPeer({}, [new Uint8Array(FEED_CHUNK * 100)]);
+  await silent.peer.answer(encodeCode(description('offer'), offered));
+  const quiet = new Channel('copperline-watch-v1', { ordered: true });
+  quiet.readyState = 'open';
+  silent.peer.pc.ondatachannel({ channel: quiet });
+  silent.peer.state = 'verifying';
+  quiet.onmessage({ data: feedMessage(5, identity).buffer });
+  silent.peer.pump(silent.emu, 1000);
+  assert.equal(quiet.sent.length, FEED_BUFFER / FEED_CHUNK);
 });
 
 test('the hub answers offers up to its places, hashes media once, and closes every peer with the room', async t => {

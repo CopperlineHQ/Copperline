@@ -109,11 +109,12 @@ watch room. Signaling runs the other way round from player rooms:
 | `POST /watch/{id}/offer` `{ code }` | spectator token | stores the spectator's offer |
 | `GET /watch/{id}/offers` | owner | unanswered offers; extends the room by 15 minutes and prunes stale entries |
 | `POST /watch/{id}/answer` `{ spectator, code }` | owner | stores the answer |
-| `GET /watch/{id}/answer` | spectator token | the answer once available; fetching it frees the place |
+| `GET /watch/{id}/answer` | spectator token | the answer once available; the first fetch frees the place, and the answer stays readable for a minute so a lost response can be retried |
 | `DELETE /watch/{id}` | owner | ends the room |
 
 Entries are stored per spectator, never as one growing record. An unanswered
-offer expires after 10 minutes and an unfetched answer after 2. The host
+offer expires after 10 minutes, an unfetched answer after 2, and a fetched
+answer after 1. The host
 page polls every 2 seconds only while its machine runs, and spectators poll
 every 2.5 seconds with a 5-second backoff on 429, so several spectators
 behind one address share the request quota without failing. The room's TTL
