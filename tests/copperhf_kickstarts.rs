@@ -1062,3 +1062,115 @@ fn aros_pfs3_over_4gib_lseg_attach_boots_without_crashing() {
         KICK3X_MACHINE,
     );
 }
+
+// --- FFS-from-LSEG on Kickstart 1.3 ----------------------------------------
+//
+// KNOWN FAILING as of 2026-09-14 -- see tests/README.md's copperhf section
+// and the investigation notes there. Left `#[ignore]`d for the ROM-asset
+// reason like every other test in this file, but it will also FAIL (not
+// skip) once KICK13.ROM and the FastFileSystem binary are present, until
+// the underlying bug is fixed.
+//
+// Unlike Kickstart 3.1 (where DOS\1 FFS is ROM-resident and the
+// FFS-from-LSEG matrix case above has to use DOS\3 to force the mounter's
+// FSHD/LSEG loader), Kickstart 1.3 has NO ROM-resident FFS at all -- a real
+// 1.3 FFS hard disk always loaded its handler off the RDB, exactly the
+// mounter's FSHD/LSEG path. That combination (1.3 x FFS-from-LSEG) was
+// never in the M6 matrix, because the marker trick the other
+// FFS-from-LSEG cases use needs ROM-resident `Echo` (Kickstart 2.0+),
+// which 1.3 does not have either -- so this uses the empty-Startup-Sequence
+// + guru-screen detector the 1.3 OFS case's golden screenshot would
+// otherwise cover (no golden asset was ever blessed for this case).
+//
+// What actually happens (reproduced locally, not just theorized): the
+// guest reliably takes a "Software Failure" Guru Meditation partway
+// through mounting DH0, alert code varying with available RAM (address
+// error / illegal instruction) but always at the same underlying fault:
+// exec.library's own jump table (just behind SysBase, e.g. the Permit()
+// LVO slot) gets overwritten with unrelated data around the time the
+// FSHD/LSEG loader is running, and the next call through the clobbered
+// vector crashes. It reproduces with both 68000 and 68020 `[cpu] model`,
+// and with 0 or 8M configured `[memory] fast`, so it is not simply
+// running out of memory in the abstract -- more fast RAM doesn't help,
+// consistent with the mount happening before the fast-RAM Zorro board has
+// finished autoconfiguring, leaving only the fixed 512K `[chipset]`
+// trapdoor "slow" RAM (`SLOW_RAM_BASE` in `src/memory.rs`, where SysBase
+// itself also ends up on this tiny-memory profile) for the mounter's
+// AllocMem calls to work with. Root cause not yet isolated further:
+// either a genuine guest-side (`guest/copperhf/mounter.c`) bug specific to
+// V34 (no ROM-seeded FileSystem.resource; see `chf_get_or_create_fsr`'s
+// own comment) exec/dos semantics, or a host-side accounting bug in how
+// much of that 512K trapdoor region is actually safe to allocate from
+// this early in boot. Needs a dedicated debugging session (instruction
+// trace + `COPPERLINE_DBG_WATCH` on the corrupted jump-table region,
+// `docs/debugger/headless.md`) to pin down further.
+fn assert_not_guru(tag: &str, screenshot_path: &Path) {
+    let decoder = png::Decoder::new(std::io::BufReader::new(
+        std::fs::File::open(screenshot_path).unwrap(),
+    ));
+    let mut reader = decoder.read_info().unwrap();
+    let size = reader.output_buffer_size().unwrap();
+    let mut buf = vec![0u8; size];
+    let info = reader.next_frame(&mut buf).unwrap();
+    let rgba = &buf[..info.buffer_size()];
+    // The Guru Meditation screen's alert text and border are drawn in one
+    // very distinctive, saturated red (sampled from a real reproduction:
+    // RGB (255, 34, 0)); ordinary AmigaDOS CLI/Workbench screens never use
+    // it. A handful of stray matching pixels is noise; hundreds means the
+    // screen actually is a Guru.
+    let guru_red_pixels = rgba
+        .chunks_exact(4)
+        .filter(|p| p[0] == 255 && p[1] == 34 && p[2] == 0)
+        .count();
+    assert!(
+        guru_red_pixels < 50,
+        "[{tag}] screenshot {} looks like a Guru Meditation ({guru_red_pixels} \
+         guru-red pixels found) -- the guest crashed",
+        screenshot_path.display(),
+    );
+}
+
+#[test]
+#[ignore = "runs the emulator and requires a local Kickstart 1.3 ROM plus \
+            test-assets/copperhf/FastFileSystem"]
+fn kick13_ffs_from_lseg_boots_without_crashing() {
+    let tag = "kick13_ffs_from_lseg_boots_without_crashing";
+    if skip_if_debug(tag) {
+        return;
+    }
+    let Some(assets) = skip_if_missing(tag, &["KICK13.ROM", "copperhf/FastFileSystem"]) else {
+        return;
+    };
+    let fs_binary = std::fs::read(&assets[1]).unwrap();
+
+    let scratch = scratch_dir(tag);
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&scratch).unwrap();
+
+    let ffs = FileSystem {
+        ffs: true,
+        variant: Variant::Plain,
+    };
+    let dostype = ffs.dos_type(); // DOS\1, not ROM-resident on 1.3
+    let payload = build_empty_startup_payload("COPPERHFFS", ffs);
+    let image = build_rdb_image(payload, ffs, true, Some((&fs_binary, dostype)));
+
+    let image_path = scratch.join("unit0.hdf");
+    std::fs::File::create(&image_path)
+        .unwrap()
+        .write_all(&image.bytes)
+        .unwrap();
+
+    let screenshot = scratch.join("shot.png");
+    let output = run_boot(
+        tag,
+        KICK13_MACHINE,
+        "rom = \"KICK13.ROM\"",
+        &image_path,
+        25,
+        &screenshot,
+    );
+    assert_ran_ok(tag, &output);
+    assert_not_guru(tag, &screenshot);
+    std::fs::remove_dir_all(&scratch).ok();
+}

@@ -271,6 +271,35 @@ files, alongside the earlier `tests/copperhf_device.rs` (M2),
     build_image` already supports building it directly via
     `FileSystem { ffs: true, variant: Variant::Intl }` -- no bespoke FFS
     emitter was needed. Verified the same bootmark way as the OFS axis.
+  - **FFS-from-LSEG on Kickstart 1.3** (`kick13_ffs_from_lseg_boots_without_crashing`,
+    needs `KICK13.ROM` plus `test-assets/copperhf/FastFileSystem`) --
+    **KNOWN FAILING as of 2026-09-14**. Unlike 3.1, Kickstart 1.3 has no
+    ROM-resident FFS at all (not even DOS\1), so a real 1.3 FFS hard disk
+    always loaded its handler off the RDB -- exactly this path, tagged
+    plain DOS\1 (no DOS\3 trick needed, since nothing on 1.3 short-circuits
+    it). Verified by `assert_not_guru` (a screenshot pixel-color check for
+    the Guru Meditation screen's distinctive red, since 1.3 has no
+    ROM-resident `Echo` for the bootmark trick and no golden was ever
+    blessed for this case) rather than `assert_golden`/bootmark. Reproduced
+    locally: the guest takes a real Guru Meditation partway through
+    mounting DH0. Root cause traced (not yet fixed) to exec.library's own
+    jump table (the region just behind SysBase, e.g. the `Permit()` LVO
+    slot) getting overwritten with unrelated data while the FSHD/LSEG
+    loader runs, then crashing on the next call through the clobbered
+    vector; reproduces with both 68000 and 68020 `[cpu] model` and with 0
+    or 8M `[memory] fast`, so it is not simply "ran out of memory" in the
+    abstract -- consistent with the mount happening before the fast-RAM
+    Zorro board finishes autoconfiguring, leaving only the fixed 512K
+    trapdoor "slow" RAM (where SysBase itself also lands on this profile)
+    for the mounter's `AllocMem` calls. Not yet isolated to a specific
+    line: could be a genuine `guest/copperhf/mounter.c` bug specific to
+    V34's no-ROM-seeded-`FileSystem.resource` path (see
+    `chf_get_or_create_fsr`'s own comment), or a host-side accounting bug
+    in how much of that 512K region is actually safe to allocate from this
+    early in boot. Next step: `COPPERLINE_DBG_WATCH` on the clobbered
+    jump-table region plus an instruction trace bracketing the write
+    (`docs/debugger/headless.md`) to find exactly which guest code (or
+    host DMA completion) performs it.
   - **PFS3-DS beyond 4 GiB**, Kickstart 3.1 plus a bundled-AROS variant
     (`aros_pfs3_...`, `#[ignore]`d for the pfs3aio asset only). Needs
     `test-assets/copperhf/pfs3aio`, the real PFS3 "all-in-one" binary.
