@@ -38,3 +38,49 @@ test('waiting stops on cancellation and expired invitations', async t => {
   setTimeout(() => abort.abort(), 10);
   await assert.rejects(waiting, { name: 'AbortError' });
 });
+test('spectator invitations carry a separate capability and the watch client routes under /watch with polling backoff', async t => {
+  const { watchInviteUrl, watchFromInvite } = await import('./netplay-room.js');
+  const url = watchInviteUrl(id, 'https://copperline.dev/try/?rom=private#room=old');
+  assert.equal(url, `https://copperline.dev/try/#watch=${id}`);
+  assert.equal(watchFromInvite(url), id);
+  assert.equal(watchFromInvite(id), id);
+  assert.equal(roomFromInvite(url), null, 'a spectator link opens no player room');
+  assert.equal(watchFromInvite(inviteUrl(id, 'https://copperline.dev/try/')), null);
+  assert.throws(() => watchInviteUrl('bad'));
+  const abort = new AbortController();
+  const calls = [];
+  const answers = [];
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    calls.push({ url, options });
+    if (url.endsWith('/answer') && options.method === 'GET') return answers.shift();
+    return Response.json({ id, owner: 'b'.repeat(22), expiresAt: Date.now() + 60000, iceServers: [], offers: [] });
+  });
+  const host = new RoomClient('https://service.test', abort.signal, '/watch');
+  await host.create({ slots: 2 });
+  assert.equal(calls[0].url, 'https://service.test/watch');
+  assert.deepEqual(JSON.parse(calls[0].options.body), { slots: 2 });
+  assert.deepEqual((await host.pollWatchOffers()).offers, []);
+  const poll = calls.find(call => call.url.endsWith('/offers'));
+  assert.equal(poll.url, `https://service.test/watch/${id}/offers`);
+  assert.equal(poll.options.headers.Authorization, 'Bearer ' + 'b'.repeat(22));
+  await host.answerWatch('c'.repeat(22), 'the-answer');
+  const answered = calls.at(-1);
+  assert.equal(answered.url, `https://service.test/watch/${id}/answer`);
+  assert.deepEqual(JSON.parse(answered.options.body), { spectator: 'c'.repeat(22), code: 'the-answer' });
+  const spectator = new RoomClient('https://service.test', abort.signal, '/watch');
+  await assert.rejects(spectator.join('bad'), /spectator invitation/);
+  await spectator.join(id);
+  assert.deepEqual(JSON.parse(calls.at(-1).options.body), { spectator: spectator.auth });
+  assert.equal(calls.at(-1).url, `https://service.test/watch/${id}/join`);
+  // A throttled poll backs off and retries instead of failing the join.
+  spectator.wait = async () => {};
+  answers.push(Response.json({ error: 'Too many requests' }, { status: 429 }),
+    Response.json({ answer: null }), Response.json({ answer: 'the-answer' }));
+  assert.equal(await spectator.waitForAnswer(Date.now() + 60000), 'the-answer');
+  assert.equal(calls.filter(call => call.url.endsWith('/answer') && call.options.method === 'GET').length, 3);
+  answers.push(Response.json({ error: 'gone' }, { status: 410 }));
+  await assert.rejects(spectator.waitForAnswer(Date.now() + 60000), /gone/);
+  await host.end();
+  assert.equal(calls.at(-1).url, `https://service.test/watch/${id}`);
+  assert.equal(calls.at(-1).options.method, 'DELETE');
+});

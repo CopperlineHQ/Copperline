@@ -11,8 +11,10 @@ Desktop builds offer direct UDP connections by IP address or encrypted Internet
 connections with automatic NAT traversal and relay fallback. Browsers use WebRTC
 with private room invitations and TURN relay fallback when the page has a room
 service configured. Browser manual connection codes remain available.
-There is no public lobby, spectator mode or automatic reconnect. Browser and desktop peers
-cannot connect to each other. Use the same Copperline build on both machines;
+The host can admit up to eight spectators, who watch the game without playing
+and may join while it is in progress (see [Spectators](#netplay-spectators)).
+There is no public lobby or automatic reconnect. Browser and desktop peers
+cannot connect to each other. Use the same Copperline build on every machine;
 mixed operating systems and browser engines have not yet been qualified.
 
 (browser-netplay)=
@@ -84,6 +86,30 @@ extended ADFs. Writable changes are held only in the mounted session image;
 replacing that disk or disconnecting discards them. Invalid local files leave
 the game running. An interrupted transfer or a state mismatch ends the session
 rather than allowing the players to continue with different disks.
+
+### Watching a browser game
+
+The host chooses **Advanced → Spectators** (1 to 8) before clicking **Host
+game**. Besides the player invitation, the panel then shows a **Spectator
+invitation** with its own copy and share buttons. It is a different link: it
+cannot claim the player 2 place, and the player invitation cannot be used to
+watch. Spectators open the link and click **Watch game**. They receive the
+host's ROMs, disks and machine settings exactly like player 2, cold-boot the
+same machine, and then replay the game from its first frame until they are
+level with the players, so a spectator can join at any point while the game
+lasts. Catching up runs unpaced and silent; a long game takes a while to
+replay. The panel reports the spectator's frame, how far behind it is and the
+last checked frame; the host's status line counts who is watching.
+
+Spectators send no input and cannot change disks: their machine follows the
+host's confirmed timeline only, a few frames behind the players, and every
+checkpoint the players verify is verified again on the spectator. When the
+host changes a disk, spectators receive the same image and apply it at the
+same frame. A spectator's page has the same locked controls as a guest;
+**Disconnect** stops watching without affecting the players, and a spectator
+that stalls or diverges is dropped by the host on its own. The spectator
+invitation stays valid while the host is playing and expires 15 minutes after
+the host stops.
 
 If a connection ends, use **Copy diagnostics** on both devices. The report keeps
 ICE, peer, data-channel and DTLS states, candidate types and packet counters.
@@ -200,6 +226,33 @@ The GUI and CLI can connect to each other when both select the same transport.
 An app started with a control or GDB endpoint must be restarted without that
 endpoint before enabling netplay in the GUI.
 
+(netplay-spectators)=
+### Spectators
+
+The host's **Spectators** row admits up to eight spectators (Off by default).
+A spectator chooses **Local player → Watch** (Internet) or **Spectator**
+(Direct IP). In Internet mode the host clicks **New invitation** after setting
+the spectator count; **Copy spectator code** then copies a separate `CLNS1.`
+code, which the spectator pastes into **Invitation**. A player invitation does
+not admit a spectator and a spectator code does not admit a player. In Direct
+IP mode the spectator enters the host's address as the peer address, pastes
+the players' session code, and connects to the host's existing UDP port; no
+extra port is opened.
+
+Spectators can join before the game starts or while it is running. They
+receive the host's machine setup and media like a guest, cold-boot the same
+machine, and replay the host's confirmed input history from frame zero,
+unpaced and silent, until they are within a few frames of the players; the
+OSD reports the catch-up. From then on the spectator follows a few frames
+behind the players, verifying the same checkpoints and applying the host's
+floppy changes at the same frames. Spectators own no controller port: keys,
+mice and gamepads never reach the shared machine, the disk controls are
+disabled, and only the Quit, Fullscreen and **F11** shortcuts apply. A
+spectator leaving or failing never interrupts the players; the host drops a
+spectator that stops responding for ten seconds. A game that has been running
+for a long time takes correspondingly long to replay, and the host stops
+admitting new spectators once it retains more than 256 MiB of history.
+
 ## Start from the command line
 
 Give the host the ROM, game files and machine settings. A floppy can come from
@@ -227,6 +280,26 @@ relay. Either peer may add `--netplay-relay-only`. The host chooses
 `--netplay-delay` and `--netplay-rollback`; the guest inherits them. Internet
 flags cannot be combined with direct IP, player or session-ID flags.
 
+To admit spectators, the host adds `--netplay-spectators N` (1 to 8) and, in
+Internet mode, `--netplay-spectator-invite PATH` to write the separate
+spectator code:
+
+```sh
+copperline --factory --model A500 --serial off --port1 joystick --port2 joystick \
+  --netplay-host invitation.txt --netplay-spectators 4 \
+  --netplay-spectator-invite spectators.txt --insert-disk-after 0 df0 game.adf KICK13.ROM
+```
+
+A spectator supplies that code, and nothing else, with `--netplay-watch`:
+
+```sh
+copperline --netplay-watch 'CLNS1.PASTE_THE_SPECTATOR_CODE_HERE'
+```
+
+`--netplay-relay-only` applies to spectators too. Scripted input, media
+changes and the timing flags are rejected for a spectator; scheduled
+screenshots work as they do for players.
+
 For direct IP play on a LAN where the players are `192.168.1.10` and `192.168.1.11`:
 
 ```sh
@@ -241,6 +314,22 @@ copperline \
   --netplay-bind 0.0.0.0:19732 --netplay-peer 192.168.1.10:19732 \
   --netplay-player 2 --netplay-session 8b21488dae9544f591adf03e291ce976
 ```
+
+A direct IP spectator names the host's endpoint and the players' session ID;
+the host adds `--netplay-spectators N`, and spectators share its UDP port:
+
+```sh
+# Player 1 admits two spectators on its existing port:
+copperline ... --netplay-player 1 --netplay-session 8b21488dae9544f591adf03e291ce976 \
+  --netplay-spectators 2 ...
+
+# A spectator, anywhere that can reach player 1:
+copperline --netplay-watch 192.168.1.10:19732 \
+  --netplay-session 8b21488dae9544f591adf03e291ce976
+```
+
+`--netplay-bind` picks the spectator's local endpoint; it defaults to any
+address and an ephemeral port.
 
 Use a fresh 32-digit hexadecimal session ID for each game, shared with your
 peer; `openssl rand -hex 16` generates one. The example ID is illustrative.
@@ -315,6 +404,7 @@ netplay.
 | --- | --- | --- | --- |
 | `--netplay-delay` | 2 | 0–6 frames | Delays local input to reduce corrections |
 | `--netplay-rollback` | 8 | 1–12 frames | Caps prediction while waiting for input |
+| `--netplay-spectators` | 0 | 0–8 | Spectators the host admits |
 
 Desktop guests inherit these values from the host. At PAL's nominal 50 Hz, two frames are
 about 40 ms. Zero delay gives immediate local input but can produce more visible
@@ -384,13 +474,20 @@ feed the synchronized keyboard; `--joy-after ... PORT` must name that peer's
 own port. Input schedules belong to each peer and need not be identical.
 
 The local smoke check starts both peers, schedules a button press on each, and
-compares confirmed PNGs and checkpoint logs:
+compares confirmed PNGs and checkpoint logs. `--spectators N` adds spectators
+that join a second after the players connect (`--spectate-after SECS` changes
+the delay), replay the history, and must produce the same PNG as the players.
+A headless host keeps serving connected spectators for up to five seconds
+after its own capture so their replay is complete:
 
 ```sh
 python3 tools/check-netplay.py --binary target/release/copperline
 # Add the host's machine options after --, for example:
 python3 tools/check-netplay.py --seconds 10 -- --config game.toml
+python3 tools/check-netplay.py --seconds 20 --spectators 2
 ```
+
+A spectator's log ends with `netplay: spectating finished frames=... checked=...`.
 
 The implementation and regression-test plan are described in
 [Netplay internals](../internals/netplay.md).

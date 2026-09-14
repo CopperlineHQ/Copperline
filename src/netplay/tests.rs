@@ -344,6 +344,7 @@ fn options(peer: SocketAddr, player: usize) -> Options {
         session: [42; 16],
         input_delay: 0,
         rollback_frames: 8,
+        spectators: 0,
     }
 }
 
@@ -905,7 +906,7 @@ fn internet_netplay_relay_only_confirms_machine_states() -> Result<()> {
 
 #[cfg(feature = "netplay-internet")]
 fn internet_pair(relay_only: bool) -> Result<()> {
-    let host = internet::Options::host(2, 8, "", relay_only)?;
+    let host = internet::Options::host(2, 8, "", relay_only, 0)?;
     let guest = internet::Options::join(&host.invitation.encode()?, relay_only)?;
     let mut machines = [emulator()?, emulator()?];
     let cfg = safe_config()?;
@@ -990,4 +991,224 @@ fn pending_transport_holds_cold_boot_and_input_until_setup_finishes() -> Result<
     assert_eq!(peer.status().frame, 0);
     assert_eq!(before, emu.netplay_snapshot()?);
     Ok(())
+}
+
+#[test]
+fn confirmed_log_matches_the_baseline_and_drives_a_spectator() -> Result<()> {
+    use super::spectate::{Feed, FeedCursor, Spectator};
+    for delay in [0, 2, 6] {
+        let mut baseline = ToyMachine::default();
+        let mut predicted = ToyMachine::default();
+        let mut rb = Rollback::new(0, delay, 8);
+        rb.log = Some(Default::default());
+        let mut feed = Feed::new(1 << 20);
+        let drain = |rb: &mut Rollback, feed: &mut Feed| -> Result<()> {
+            let log = rb.log.as_mut().unwrap();
+            for (frame, inputs) in log.inputs.drain(..) {
+                feed.record_frame(frame, inputs)?;
+            }
+            for (frame, hash) in log.hashes.drain(..) {
+                feed.record_checkpoint(frame, hash)?;
+            }
+            Ok(())
+        };
+        let mut previous = [0; 16];
+        for f in 0..240 {
+            if f >= 5 && f % 6 == 5 {
+                for remote in (f - 5..=f).rev() {
+                    let value = if remote < u64::from(delay) {
+                        Input::default()
+                    } else {
+                        input(remote - u64::from(delay), 1)
+                    };
+                    rb.receive(remote, value)?;
+                }
+            }
+            rb.acknowledged = f + u64::from(delay);
+            rb.reconcile(&mut predicted)?;
+            assert!(rb.advance(&mut predicted, input(f, 0))?);
+            drain(&mut rb, &mut feed)?;
+            let pair = if f < u64::from(delay) {
+                [Input::default(); 2]
+            } else {
+                [
+                    input(f - u64::from(delay), 0),
+                    input(f - u64::from(delay), 1),
+                ]
+            };
+            baseline.frame(pair, previous, false)?;
+            previous = Input::merged_keys(pair);
+        }
+        for f in 235..240 {
+            rb.receive(f, input(f - u64::from(delay), 1))?;
+        }
+        rb.reconcile(&mut predicted)?;
+        drain(&mut rb, &mut feed)?;
+        assert_eq!(feed.frames(), 240, "delay {delay}");
+        assert_eq!(predicted.state, baseline.state);
+        // Only confirmed frames are logged, each exactly once, so a
+        // spectator fed from the log reaches the baseline and passes
+        // every checkpoint the host computed.
+        let mut spectator = Spectator::new([0; 32]);
+        let mut watched = ToyMachine::default();
+        let mut cursor = FeedCursor::default();
+        while let Some((message, next)) = feed.next_message(cursor, 7) {
+            spectator.receive(message)?;
+            cursor = next;
+            while spectator.step(&mut watched)? {}
+        }
+        assert_eq!(watched.state, baseline.state, "delay {delay}");
+        assert_eq!(spectator.executed(), 240);
+        assert_eq!(spectator.checked(), 240);
+    }
+    Ok(())
+}
+
+#[test]
+fn udp_host_demultiplexes_spectator_control_packets_by_source() -> Result<()> {
+    use super::control::{Control, ROLE_HOST, ROLE_SPECTATOR};
+    let player = UdpSocket::bind("127.0.0.1:0")?;
+    let spectators = [
+        UdpSocket::bind("127.0.0.1:0")?,
+        UdpSocket::bind("127.0.0.1:0")?,
+    ];
+    let mut options = options(player.local_addr()?, 0);
+    options.spectators = 1;
+    let mut transport = UdpTransport::new(options.clone())?;
+    let host = transport.socket.local_addr()?;
+    let hello = |session: [u8; 16], role: u8| -> Result<Vec<u8>> {
+        let mut control = Control::new(PacketQueue::default(), session, role, ROLE_HOST);
+        control.send_message(vec![1, 2, 3])?;
+        control.poll()?;
+        Ok(control.inner.pop().unwrap())
+    };
+    let receive = |transport: &mut UdpTransport| -> Result<Option<usize>> {
+        let mut bytes = [0; MAX_PACKET];
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if let Some(len) = transport.receive(&mut bytes)? {
+                return Ok(Some(len));
+            }
+            ensure!(Instant::now() < deadline, "loopback packet did not arrive");
+            std::thread::yield_now();
+        }
+    };
+    // Foreign datagrams that are not spectator control packets are still
+    // discarded: a bare byte, a player-role packet, a wrong session.
+    spectators[0].send_to(&[1], host)?;
+    assert_eq!(receive(&mut transport)?, Some(0));
+    spectators[0].send_to(&hello(options.session, 1)?, host)?;
+    assert_eq!(receive(&mut transport)?, Some(0));
+    let mut wrong = options.session;
+    wrong[0] ^= 1;
+    spectators[0].send_to(&hello(wrong, ROLE_SPECTATOR)?, host)?;
+    assert_eq!(receive(&mut transport)?, Some(0));
+    assert!(transport.take_spectators().is_empty());
+    // A spectator hello claims the one place; a second source is refused
+    // while it is taken.
+    let packet = hello(options.session, ROLE_SPECTATOR)?;
+    spectators[0].send_to(&packet, host)?;
+    assert_eq!(receive(&mut transport)?, Some(0));
+    let mut links = transport.take_spectators();
+    assert_eq!(links.len(), 1);
+    spectators[1].send_to(&packet, host)?;
+    assert_eq!(receive(&mut transport)?, Some(0));
+    assert!(transport.take_spectators().is_empty());
+    // The link reads what its source sent and answers that source; the
+    // player's packets keep arriving on the main transport.
+    let mut bytes = [0; MAX_PACKET];
+    assert_eq!(links[0].receive(&mut bytes)?, Some(packet.len()));
+    assert_eq!(&bytes[..packet.len()], &packet[..]);
+    assert_eq!(links[0].receive(&mut bytes)?, None);
+    assert!(links[0].send(&[9, 9])?);
+    let (len, from) = spectators[0].recv_from(&mut bytes)?;
+    assert_eq!((&bytes[..len], from), (&[9u8, 9][..], host));
+    player.send_to(&[2, 3], host)?;
+    assert_eq!(receive(&mut transport)?, Some(2));
+    // Dropping the link frees its place for another spectator.
+    drop(links);
+    spectators[1].send_to(&packet, host)?;
+    assert_eq!(receive(&mut transport)?, Some(0));
+    assert_eq!(transport.take_spectators().len(), 1);
+    Ok(())
+}
+
+#[cfg(feature = "netplay-internet")]
+#[test]
+#[ignore = "uses public Internet relays; run explicitly with network access"]
+fn internet_netplay_admits_a_late_spectator() -> Result<()> {
+    std::thread::Builder::new()
+        .stack_size(48 * 1024 * 1024)
+        .spawn(|| -> Result<()> {
+            let host = internet::Options::host(2, 8, "", false, 1)?;
+            let guest = internet::Options::join(&host.invitation.encode()?, false)?;
+            let watch = internet::SpectatorOptions::watch(
+                &host.spectator_invitation().unwrap().encode()?,
+                false,
+            )?;
+            let mut machines = vec![emulator()?, emulator()?];
+            let mut cfg = safe_config()?;
+            prepare_config(&mut cfg)?;
+            let mut sessions = vec![
+                Session::new(
+                    ConnectionOptions::Internet(Box::new(host)),
+                    &mut machines[0],
+                    &cfg,
+                )?,
+                Session::new(
+                    ConnectionOptions::Internet(Box::new(guest)),
+                    &mut machines[1],
+                    &cfg,
+                )?,
+            ];
+            let deadline = std::time::Instant::now() + Duration::from_secs(180);
+            let run_until = |sessions: &mut Vec<Session>,
+                             machines: &mut Vec<Emulator>,
+                             frame: u64|
+             -> Result<()> {
+                loop {
+                    let mut done = true;
+                    for n in 0..sessions.len() {
+                        let advance = sessions[n].status().frame < frame;
+                        sessions[n].step(&mut machines[n], Input::default(), advance)?;
+                        let status = sessions[n].status();
+                        done &= status.connected
+                            && status.frame == frame
+                            && sessions[n].ready_to_capture();
+                    }
+                    if done {
+                        return Ok(());
+                    }
+                    anyhow::ensure!(
+                        std::time::Instant::now() < deadline,
+                        "peers did not reach frame {frame}"
+                    );
+                    std::thread::sleep(Duration::from_millis(4));
+                }
+            };
+            run_until(&mut sessions, &mut machines, 90)?;
+            machines.push(emulator()?);
+            sessions.push(Session::new(
+                ConnectionOptions::WatchInternet(Box::new(watch)),
+                &mut machines[2],
+                &cfg,
+            )?);
+            run_until(&mut sessions, &mut machines, 150)?;
+            assert_eq!(sessions[2].role(), Role::Spectator);
+            assert_eq!(
+                machines[2].netplay_snapshot()?,
+                machines[0].netplay_snapshot()?
+            );
+            assert_eq!(sessions[2].status().checked_frame, 120);
+            assert_eq!(sessions[0].spectator_count(), 1);
+            eprintln!(
+                "Internet netplay: spectator replayed 150 frames; routes: {}, {}, {}",
+                sessions[0].route(),
+                sessions[1].route(),
+                sessions[2].route()
+            );
+            Ok(())
+        })?
+        .join()
+        .unwrap()
 }

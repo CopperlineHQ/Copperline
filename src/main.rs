@@ -860,10 +860,12 @@ fn main() -> Result<()> {
         )?);
     }
 
+    // Guests and spectators receive the host's machine; their own
+    // configuration is only a placeholder with local preferences.
     let netplay_guest = cli
         .netplay
         .as_ref()
-        .is_some_and(|options| options.settings().player == 1);
+        .is_some_and(|options| options.role() != copperline::netplay::Role::Host);
     let (cfg, mut raw_cfg) = if netplay_guest {
         let raw = load_raw_config(cli.config_path.as_deref(), &cli.overrides, cli.factory)?;
         (copperline::netplay::guest_config(&raw)?, raw)
@@ -1298,24 +1300,42 @@ fn main() -> Result<()> {
         }
         let session = copperline::netplay::Session::new(options, &mut emu, &cfg)?;
         #[cfg(feature = "netplay-internet")]
-        if let Some(path) = &cli.netplay_invitation_out {
-            if let copperline::netplay::ConnectionOptions::Internet(options) = session.options() {
+        if let copperline::netplay::ConnectionOptions::Internet(options) = session.options() {
+            fn write_invitation(path: &std::path::Path, code: &str) -> Result<()> {
                 let parent = path
                     .parent()
                     .filter(|p| !p.as_os_str().is_empty())
                     .unwrap_or_else(|| std::path::Path::new("."));
                 let mut file = tempfile::NamedTempFile::new_in(parent)?;
-                std::io::Write::write_all(&mut file, options.invitation.encode()?.as_bytes())?;
+                std::io::Write::write_all(&mut file, code.as_bytes())?;
                 file.persist(path)
                     .map_err(|error| anyhow!("Writing netplay invitation: {}", error.error))?;
+                Ok(())
+            }
+            if let Some(path) = &cli.netplay_invitation_out {
+                write_invitation(path, &options.invitation.encode()?)?;
                 log::info!(
                     "netplay: invitation written to {}; waiting for guest",
                     path.display()
                 );
             }
+            if let (Some(path), Some(invitation)) = (
+                &cli.netplay_spectator_invitation_out,
+                options.spectator_invitation(),
+            ) {
+                write_invitation(path, &invitation.encode()?)?;
+                log::info!(
+                    "netplay: spectator invitation written to {}; up to {} may watch",
+                    path.display(),
+                    options.spectators
+                );
+            }
         }
         #[cfg(not(feature = "netplay-internet"))]
-        let _ = &cli.netplay_invitation_out;
+        let _ = (
+            &cli.netplay_invitation_out,
+            &cli.netplay_spectator_invitation_out,
+        );
         Some(session)
     } else {
         None
@@ -3008,7 +3028,7 @@ mod netplay_cli_tests {
             "df0",
             "game.adf",
         ])?;
-        let options = cli.netplay.as_ref().unwrap().settings();
+        let options = cli.netplay.as_ref().unwrap().settings().unwrap();
         assert_eq!(options.player, 0);
         assert_eq!(options.input_delay, 2);
         assert_eq!(options.rollback_frames, 8);
@@ -3018,6 +3038,7 @@ mod netplay_cli_tests {
                 .netplay
                 .unwrap()
                 .settings()
+                .unwrap()
                 .input_delay,
             0
         );
@@ -3096,8 +3117,16 @@ mod internet_netplay_cli_tests {
         assert_eq!(options.settings().player, 0);
         let code = options.invitation.encode()?;
         let join = parse(&["--netplay-join", &code])?;
-        assert_eq!(join.netplay.as_ref().unwrap().settings().player, 1);
-        assert_eq!(join.netplay.as_ref().unwrap().settings().input_delay, 4);
+        assert_eq!(join.netplay.as_ref().unwrap().settings().unwrap().player, 1);
+        assert_eq!(
+            join.netplay
+                .as_ref()
+                .unwrap()
+                .settings()
+                .unwrap()
+                .input_delay,
+            4
+        );
         for args in [
             vec![
                 "--netplay-host",
@@ -3125,6 +3154,167 @@ mod internet_netplay_cli_tests {
         ] {
             assert!(parse(&args).is_err(), "accepted {args:?}");
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod spectator_cli_tests {
+    use super::*;
+    use copperline::netplay::{ConnectionOptions, Role};
+
+    const SESSION: &str = "0123456789abcdef0123456789abcdef";
+
+    fn parse(args: &[&str]) -> Result<CliArgs> {
+        parse_args_from(args.iter().map(|arg| arg.to_string()))
+    }
+
+    #[test]
+    fn direct_hosts_admit_spectators_and_watchers_take_no_input() -> Result<()> {
+        let host = [
+            "--netplay-bind",
+            "0.0.0.0:19732",
+            "--netplay-peer",
+            "192.168.1.11:19732",
+            "--netplay-player",
+            "1",
+            "--netplay-session",
+            SESSION,
+        ];
+        let mut with_spectators = host.to_vec();
+        with_spectators.extend(["--netplay-spectators", "3"]);
+        let options = parse(&with_spectators)?.netplay.unwrap();
+        assert_eq!(options.role(), Role::Host);
+        assert_eq!(options.spectators(), 3);
+        assert_eq!(parse(&host)?.netplay.unwrap().spectators(), 0);
+        let mut guest = host.to_vec();
+        guest[5] = "2";
+        guest.extend(["--netplay-spectators", "1"]);
+        assert!(parse(&guest).is_err(), "only player 1 admits spectators");
+        let mut too_many = host.to_vec();
+        too_many.extend(["--netplay-spectators", "9"]);
+        assert!(parse(&too_many).is_err());
+        let mut invite = host.to_vec();
+        invite.extend(["--netplay-spectator-invite", "/tmp/s.txt"]);
+        assert!(
+            parse(&invite).is_err(),
+            "invitation files are an Internet host's"
+        );
+
+        let watch = [
+            "--netplay-watch",
+            "192.168.1.10:19732",
+            "--netplay-session",
+            SESSION,
+        ];
+        let options = parse(&watch)?.netplay.unwrap();
+        assert_eq!(options.role(), Role::Spectator);
+        assert!(options.settings().is_none());
+        let ConnectionOptions::Watch(direct) = options else {
+            panic!("expected direct watch options");
+        };
+        assert_eq!(direct.host.port(), 19732);
+        assert!(direct.bind.ip().is_unspecified() && direct.bind.port() == 0);
+        let ConnectionOptions::Watch(v6) = parse(&[
+            "--netplay-watch",
+            "[2001:db8::2]:19732",
+            "--netplay-session",
+            SESSION,
+        ])?
+        .netplay
+        .unwrap() else {
+            panic!("expected direct watch options");
+        };
+        assert!(v6.bind.is_ipv6());
+        assert!(parse(&watch[..2]).is_err(), "the session code is required");
+        for extra in [
+            &["--netplay-player", "1"][..],
+            &["--netplay-peer", "192.168.1.11:19732"],
+            &["--netplay-delay", "1"],
+            &["--netplay-spectators", "1"],
+            &["--joy-after", "1", "red", "100", "1"],
+            &["--press-after", "1", "f1"],
+            &["--type-after", "1", "hello"],
+            &["--insert-disk-after", "1", "df0", "x.adf"],
+        ] {
+            let mut args = watch.to_vec();
+            args.extend(extra);
+            assert!(parse(&args).is_err(), "{extra:?}");
+        }
+        let mut capture = watch.to_vec();
+        capture.extend(["--screenshot-after", "10", "/tmp/x.png", "--noaudio"]);
+        assert!(parse(&capture).is_ok());
+        Ok(())
+    }
+
+    #[cfg(feature = "netplay-internet")]
+    #[test]
+    fn internet_hosts_write_a_separate_spectator_code_that_only_watches() -> Result<()> {
+        assert!(
+            parse(&["--netplay-host", "/tmp/i.txt", "--netplay-spectators", "2"]).is_err(),
+            "spectators need somewhere to write their code"
+        );
+        let host = parse(&[
+            "--netplay-host",
+            "/tmp/i.txt",
+            "--netplay-spectators",
+            "2",
+            "--netplay-spectator-invite",
+            "/tmp/s.txt",
+        ])?;
+        assert_eq!(
+            host.netplay_spectator_invitation_out.as_deref(),
+            Some(std::path::Path::new("/tmp/s.txt"))
+        );
+        let ConnectionOptions::Internet(options) = host.netplay.unwrap() else {
+            panic!("expected Internet options");
+        };
+        assert_eq!(options.spectators, 2);
+        let code = options.spectator_invitation().unwrap().encode()?;
+        let player = options.invitation.encode()?;
+        let watch = parse(&["--netplay-watch", &code, "--netplay-relay-only"])?;
+        let ConnectionOptions::WatchInternet(watching) = watch.netplay.unwrap() else {
+            panic!("expected Internet watch options");
+        };
+        assert!(watching.relay_only);
+        assert_eq!(
+            watching.invitation.capability,
+            options.spectator_capability.unwrap()
+        );
+        assert!(parse(&["--netplay-watch", &code, "--netplay-delay", "1"]).is_err());
+        assert!(parse(&["--netplay-watch", &code, "--netplay-session", SESSION]).is_err());
+        assert!(parse(&[
+            "--netplay-watch",
+            &code,
+            "--joy-after",
+            "1",
+            "red",
+            "100",
+            "1"
+        ])
+        .is_err());
+        assert!(
+            parse(&["--netplay-join", &code]).is_err(),
+            "a spectator code admits no player"
+        );
+        assert!(
+            parse(&["--netplay-watch", &player]).is_err(),
+            "a player invitation admits no spectator"
+        );
+        assert!(parse(&["--netplay-join", &player, "--netplay-spectators", "1"]).is_err());
+        assert!(parse(&[
+            "--netplay-join",
+            &player,
+            "--netplay-spectator-invite",
+            "/tmp/s.txt"
+        ])
+        .is_err());
+        let plain = parse(&["--netplay-host", "/tmp/i.txt"])?;
+        assert!(plain.netplay_spectator_invitation_out.is_none());
+        let ConnectionOptions::Internet(options) = plain.netplay.unwrap() else {
+            panic!("expected Internet options");
+        };
+        assert!(options.spectator_invitation().is_none());
         Ok(())
     }
 }

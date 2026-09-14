@@ -4,6 +4,13 @@ import { DurableObject } from 'cloudflare:workers';
 const ROOM_TTL = 15 * 60 * 1000;
 const BODY_LIMIT = 100 * 1024;
 const TOKEN = /^[A-Za-z0-9_-]{22}$/;
+// Spectator signaling: how long an unanswered offer, an answer the spectator
+// has not fetched, and a fetched answer (kept so a lost response can be
+// retried) stay in a watch room.
+const OFFER_TTL = 10 * 60 * 1000;
+const ANSWER_TTL = 2 * 60 * 1000;
+const FETCHED_TTL = 60 * 1000;
+const SLOTS_MAX = 8;
 const turnUrl = id => `https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(id)}/credentials/generate-ice-servers`;
 const json = (body, status = 200) => Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
 const token = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))))
@@ -84,21 +91,25 @@ export default {
     let response;
     try {
       const path = new URL(request.url).pathname;
-      const match = /^\/rooms\/([A-Za-z0-9_-]{22})(?:\/(offer|join|answer))?$/.exec(path);
+      // Player rooms and spectator watch rooms are separate capabilities:
+      // a watch link never reaches a player room, and vice versa.
+      const match = /^\/(rooms|watch)\/([A-Za-z0-9_-]{22})(?:\/(offer|join|answer|offers))?$/.exec(path);
+      const creating = (path === '/rooms' || path === '/watch') && request.method === 'POST';
       if (path === '/health' && request.method === 'GET') {
-        response = json({ service: 'copperline-netplay', version: 1,
+        response = json({ service: 'copperline-netplay', version: 2,
           relay: !!(env.TURN_KEY_ID && env.TURN_KEY_API_TOKEN) });
-      } else if ((path === '/rooms' && request.method === 'POST') || match) {
+      } else if (creating || match) {
         // Bound both creation and room traffic. Keys are never persisted or logged.
         const key = request.headers.get('CF-Connecting-IP') ?? 'local';
         if (!env.ROOM_RATE_LIMIT || !(await env.ROOM_RATE_LIMIT.limit({ key })).success ||
             (!match && (!env.ROOM_CREATE_LIMIT || !(await env.ROOM_CREATE_LIMIT.limit({ key })).success))) {
           response = json({ error: 'Too many requests. Wait a minute and try again.' }, 429);
         } else {
-          const id = match?.[1] ?? token();
-          const stub = env.ROOMS.get(env.ROOMS.idFromName(id));
+          const kind = match ? match[1] : path.slice(1);
+          const id = match?.[2] ?? token();
+          const stub = env.ROOMS.get(env.ROOMS.idFromName(kind === 'watch' ? `watch/${id}` : id));
           const url = new URL(request.url);
-          url.pathname = match ? `/${match[2] ?? ''}` : '/create';
+          url.pathname = match ? `/${match[3] ?? ''}` : '/create';
           // The namespace ID stays server-side; the invitation is a random capability.
           // Consume the bounded body before forwarding. An early Durable Object
           // response (for example, an expired invitation) must not leave a
@@ -106,6 +117,7 @@ export default {
           const body = request.method === 'POST' ? JSON.stringify(await readJson(request)) : undefined;
           const inner = new Request(url, { method: request.method, headers: request.headers, body });
           inner.headers.set('X-Room-ID', id);
+          inner.headers.set('X-Room-Kind', kind);
           response = await stub.fetch(inner);
         }
       } else response = json({ error: 'Not found' }, 404);
@@ -122,7 +134,7 @@ export default {
 
 export class NetplayRoom extends DurableObject {
   async fetch(request) {
-    // Serialize the two-player reservation across awaits, including TURN issuance.
+    // Serialize reservations across awaits, including TURN issuance.
     return this.ctx.blockConcurrencyWhile(async () => {
       try { return await this.handle(request); }
       catch (error) {
@@ -134,24 +146,36 @@ export class NetplayRoom extends DurableObject {
 
   async handle(request) {
     const path = new URL(request.url).pathname;
+    const kind = request.headers.get('X-Room-Kind') ?? 'rooms';
     const room = await this.ctx.storage.get('room');
     if (path === '/create' && request.method === 'POST') {
       if (room) return json({ error: 'Room already exists' }, 409);
       const body = await readJson(request);
-      if (Object.keys(body).length) return json({ error: 'Invalid room request' }, 400);
+      let record;
+      if (kind === 'watch') {
+        const slots = body.slots;
+        if (Object.keys(body).length !== 1 || !Number.isInteger(slots) || slots < 1 || slots > SLOTS_MAX) {
+          return json({ error: 'Invalid spectator room request' }, 400);
+        }
+        record = { kind, slots };
+      } else {
+        if (Object.keys(body).length) return json({ error: 'Invalid room request' }, 400);
+        record = { kind, offer: null, guest: null, answer: null };
+      }
       let ice;
       try { ice = await iceServers(this.env); }
       catch { return json({ error: 'Relay service is unavailable. Please try again later.' }, 503); }
       const owner = token();
       const expiresAt = Date.now() + ROOM_TTL;
-      await this.ctx.storage.put('room', { owner, expiresAt, offer: null, guest: null, answer: null });
+      await this.ctx.storage.put('room', { ...record, owner, expiresAt });
       await this.ctx.storage.setAlarm(expiresAt);
       return json({ id: request.headers.get('X-Room-ID'), owner, expiresAt, ...ice }, 201);
     }
-    if (!room || room.expiresAt <= Date.now()) {
-      if (room) await this.ctx.storage.deleteAll();
+    if (!room || room.expiresAt <= Date.now() || (room.kind ?? 'rooms') !== kind) {
+      if (room && room.expiresAt <= Date.now()) await this.ctx.storage.deleteAll();
       return json({ error: 'This invitation has expired or ended. Ask the host for a new link.' }, 410);
     }
+    if (kind === 'watch') return this.handleWatch(request, room, path);
     const bearer = /^Bearer ([A-Za-z0-9_-]{22})$/.exec(request.headers.get('Authorization') ?? '')?.[1];
     if (path === '/join' && request.method === 'POST') {
       const body = await readJson(request);
@@ -193,6 +217,99 @@ export class NetplayRoom extends DurableObject {
       return json({ ready: true });
     }
     if (path === '/answer' && request.method === 'GET' && owner) return json({ answer: room.answer });
+    return json({ error: 'Not found' }, 404);
+  }
+
+  // Spectator signaling runs the other way round: each spectator reserves
+  // a place and offers; the host polls for offers and answers them. Owner
+  // polls keep the room alive for the whole game.
+  async spectators() {
+    return [...await this.ctx.storage.list({ prefix: 'spectator:' })];
+  }
+
+  async pruneSpectators(now) {
+    for (const [key, entry] of await this.spectators()) {
+      const stale = entry.fetchedAt ? entry.fetchedAt + FETCHED_TTL <= now
+        : entry.answer ? entry.answeredAt + ANSWER_TTL <= now
+          : entry.createdAt + OFFER_TTL <= now;
+      if (stale) await this.ctx.storage.delete(key);
+    }
+  }
+
+  // Places are taken by spectators still waiting for their answer; one that
+  // has fetched it keeps its record for retries but no longer needs a place.
+  async placesTaken() {
+    return (await this.spectators()).filter(([, entry]) => !entry.fetchedAt).length;
+  }
+
+  async handleWatch(request, room, path) {
+    const now = Date.now();
+    const bearer = /^Bearer ([A-Za-z0-9_-]{22})$/.exec(request.headers.get('Authorization') ?? '')?.[1];
+    const owner = bearer === room.owner;
+    if (path === '/join' && request.method === 'POST') {
+      const body = await readJson(request);
+      if (!TOKEN.test(body.spectator ?? '')) return json({ error: 'Invalid spectator request' }, 400);
+      const key = `spectator:${body.spectator}`;
+      let entry = await this.ctx.storage.get(key);
+      if (!entry) {
+        await this.pruneSpectators(now);
+        if (await this.placesTaken() >= room.slots) return json({ error: 'This game has no free spectator places.' }, 409);
+        let ice;
+        try { ice = await iceServers(this.env); }
+        catch { return json({ error: 'Relay service is unavailable. Please try again later.' }, 503); }
+        entry = { offer: null, answer: null, ice, createdAt: now, answeredAt: null };
+        await this.ctx.storage.put(key, entry);
+      }
+      return json({ expiresAt: room.expiresAt, ...entry.ice });
+    }
+    const key = bearer && !owner ? `spectator:${bearer}` : null;
+    const entry = key ? await this.ctx.storage.get(key) : null;
+    const ownerOnly = path === '/offers' || path === '/' || (path === '/answer' && request.method === 'POST');
+    if (ownerOnly ? !owner : !entry) return json({ error: 'Room access denied' }, 403);
+    if (path === '/' && request.method === 'DELETE') {
+      await this.ctx.storage.deleteAll();
+      await this.ctx.storage.deleteAlarm();
+      return json({ ended: true });
+    }
+    if (path === '/offer' && request.method === 'POST' && entry) {
+      const body = await readJson(request);
+      if (!connectionCode(body.code, 'offer')) return json({ error: 'Invalid offer' }, 400);
+      if (entry.offer && entry.offer !== body.code) return json({ error: 'Join again to change the offer' }, 409);
+      entry.offer = body.code;
+      await this.ctx.storage.put(key, entry);
+      return json({ ready: true });
+    }
+    if (path === '/offers' && request.method === 'GET' && owner) {
+      room.expiresAt = now + ROOM_TTL;
+      await this.ctx.storage.put('room', room);
+      await this.ctx.storage.setAlarm(room.expiresAt);
+      await this.pruneSpectators(now);
+      const offers = (await this.spectators())
+        .filter(([, value]) => value.offer && !value.answer)
+        .map(([name, value]) => ({ spectator: name.slice('spectator:'.length), code: value.offer }));
+      return json({ offers, expiresAt: room.expiresAt });
+    }
+    if (path === '/answer' && request.method === 'POST' && owner) {
+      const body = await readJson(request);
+      if (!TOKEN.test(body.spectator ?? '') || !connectionCode(body.code, 'answer')) return json({ error: 'Invalid answer' }, 400);
+      const target = `spectator:${body.spectator}`;
+      const pending = await this.ctx.storage.get(target);
+      if (!pending?.offer) return json({ error: 'Unknown spectator' }, 404);
+      if (pending.answer && pending.answer !== body.code) return json({ error: 'The spectator already has an answer' }, 409);
+      pending.answer = body.code;
+      pending.answeredAt = now;
+      await this.ctx.storage.put(target, pending);
+      return json({ ready: true });
+    }
+    if (path === '/answer' && request.method === 'GET' && entry) {
+      // A fetched answer frees the place for the next spectator but stays
+      // readable for a while: a response lost in transit must be retryable.
+      if (entry.answer && !entry.fetchedAt) {
+        entry.fetchedAt = now;
+        await this.ctx.storage.put(key, entry);
+      }
+      return json({ answer: entry.answer, expiresAt: room.expiresAt });
+    }
     return json({ error: 'Not found' }, 404);
   }
 

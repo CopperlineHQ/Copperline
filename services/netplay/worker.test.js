@@ -105,3 +105,88 @@ test('TURN credentials stay scoped to players and provider failures are redacted
   assert.equal(failed.status, 503);
   assert.ok(!JSON.stringify(failed.body).includes('private-'));
 });
+
+test('watch rooms admit spectators by their own capability, relay offers to the owner and free places once answered', async t => {
+  const mf = new Miniflare(options); t.after(() => mf.dispose());
+  const call = client(mf);
+  assert.equal((await call('/watch', 'POST', {})).status, 400);
+  assert.equal((await call('/watch', 'POST', { slots: 9 })).status, 400);
+  assert.equal((await call('/watch', 'POST', { slots: 1, extra: true })).status, 400);
+  const created = await call('/watch', 'POST', { slots: 2 });
+  assert.equal(created.status, 201);
+  const { id, owner, expiresAt } = created.body;
+  assert.match(id, /^[A-Za-z0-9_-]{22}$/);
+  assert.notEqual(id, owner);
+  const path = `/watch/${id}`;
+  // The watch capability opens no player room, and a player room's id no
+  // watch room: each kind has its own namespace and record.
+  assert.equal((await call(`/rooms/${id}/join`, 'POST', { guest })).status, 410);
+  const room = await call('/rooms', 'POST', {});
+  assert.equal((await call(`/watch/${room.body.id}/join`, 'POST', { spectator: guest })).status, 410);
+  assert.equal((await call(`/rooms/${room.body.id}/offer`, 'POST', { code: code('offer') }, room.body.owner)).status, 200);
+  // Two places: a third spectator waits until one place is answered and fetched.
+  const spectators = ['s'.repeat(22), 't'.repeat(22), 'u'.repeat(22)];
+  assert.equal((await call(path + '/join', 'POST', { spectator: 'bad' })).status, 400);
+  assert.equal((await call(path + '/join', 'POST', { spectator: spectators[0] })).status, 200);
+  assert.equal((await call(path + '/join', 'POST', { spectator: spectators[1] })).status, 200);
+  assert.equal((await call(path + '/join', 'POST', { spectator: spectators[2] })).status, 409);
+  assert.equal((await call(path + '/join', 'POST', { spectator: spectators[0] })).status, 200, 'rejoining is idempotent');
+  // Offers need the spectator's own token; the owner sees offered, unanswered entries.
+  assert.equal((await call(path + '/offer', 'POST', { code: code('offer') })).status, 403);
+  assert.equal((await call(path + '/offer', 'POST', { code: code('offer') }, owner)).status, 403, 'the owner offers nothing');
+  assert.equal((await call(path + '/offer', 'POST', { code: code('answer') }, spectators[0])).status, 400);
+  assert.equal((await call(path + '/offer', 'POST', { code: code('offer') }, spectators[0])).status, 200);
+  assert.equal((await call(path + '/offers', 'GET', undefined, spectators[0])).status, 403);
+  await new Promise(resolve => setTimeout(resolve, 5));
+  const offers = await call(path + '/offers', 'GET', undefined, owner);
+  assert.equal(offers.status, 200);
+  assert.deepEqual(offers.body.offers, [{ spectator: spectators[0], code: code('offer') }]);
+  assert.ok(offers.body.expiresAt > expiresAt, 'an owner poll extends the room');
+  // Answers: unknown spectators and wrong code types are refused; the
+  // spectator fetches its answer exactly once.
+  assert.equal((await call(path + '/answer', 'POST', { spectator: spectators[2], code: code('answer') }, owner)).status, 404);
+  assert.equal((await call(path + '/answer', 'POST', { spectator: spectators[1], code: code('answer') }, owner)).status, 404, 'no offer yet');
+  assert.equal((await call(path + '/answer', 'POST', { spectator: spectators[0], code: code('offer') }, owner)).status, 400);
+  assert.equal((await call(path + '/answer', 'POST', { spectator: spectators[0], code: code('answer') }, spectators[0])).status, 403);
+  assert.equal((await call(path + '/answer', 'POST', { spectator: spectators[0], code: code('answer') }, owner)).status, 200);
+  assert.deepEqual((await call(path + '/offers', 'GET', undefined, owner)).body.offers, []);
+  assert.equal((await call(path + '/answer', 'GET', undefined, spectators[1])).body.answer, null);
+  assert.equal((await call(path + '/join', 'POST', { spectator: spectators[2] })).status, 409, 'an unfetched answer still holds its place');
+  assert.equal((await call(path + '/answer', 'GET', undefined, spectators[0])).body.answer, code('answer'));
+  assert.equal((await call(path + '/answer', 'GET', undefined, spectators[0])).body.answer, code('answer'), 'a lost response can be retried');
+  assert.equal((await call(path + '/join', 'POST', { spectator: spectators[2] })).status, 200, 'a fetched answer frees the place');
+  assert.equal((await call(path + '/join', 'POST', { spectator: 'v'.repeat(22) })).status, 409);
+  // Only the owner ends the room.
+  assert.equal((await call(path, 'DELETE', undefined, spectators[1])).status, 403);
+  assert.equal((await call(path, 'DELETE', undefined, owner)).status, 200);
+  assert.equal((await call(path + '/join', 'POST', { spectator: spectators[1] })).status, 410);
+  assert.equal((await call('/health')).body.version, 2);
+});
+
+test('TURN credentials are issued once per spectator place', async t => {
+  let requests = 0;
+  const mf = new Miniflare({ ...options,
+    bindings: { ...options.bindings, REQUIRE_TURN: 'true', TURN_KEY_ID: 'private-key-id', TURN_KEY_API_TOKEN: 'private-api-token' },
+    outboundService: async () => {
+      requests++;
+      return Response.json({ iceServers: [{ urls: ['turn:relay.test:3478?transport=udp'], username: 'u', credential: 'c' }] });
+    },
+  });
+  t.after(() => mf.dispose());
+  const call = client(mf);
+  const created = await call('/watch', 'POST', { slots: 3 });
+  assert.equal(created.status, 201);
+  assert.equal(created.body.relay, true);
+  assert.equal(requests, 1);
+  const path = `/watch/${created.body.id}`;
+  const joined = await call(path + '/join', 'POST', { spectator: guest });
+  assert.equal(joined.status, 200);
+  assert.equal(joined.body.relay, true);
+  assert.equal(joined.body.iceServers[0].username, 'u');
+  assert.equal(requests, 2);
+  assert.equal((await call(path + '/join', 'POST', { spectator: guest })).status, 200);
+  assert.equal(requests, 2, 'rejoining reuses the place and its credentials');
+  assert.equal((await call(path + '/join', 'POST', { spectator: 'h'.repeat(22) })).status, 200);
+  assert.equal(requests, 3);
+  assert.ok(!JSON.stringify(joined.body).includes('private-'));
+});

@@ -3,21 +3,51 @@
 //! Netplay owns every machine input; the surrounding window still presents it.
 
 use super::*;
+use crate::netplay::Role;
 
 pub(super) type DiskPicker =
     std::pin::Pin<Box<dyn std::future::Future<Output = Option<Vec<rfd::FileHandle>>>>>;
+
+/// A spectator this far behind the host's confirmed frontier replays
+/// unpaced until it is within `CATCHUP_END` frames again.
+const CATCHUP_START: u64 = 25;
+const CATCHUP_END: u64 = 5;
+/// Frames a catch-up burst executes per window-loop pass.
+const CATCHUP_BURST: u64 = 64;
 
 impl App {
     pub fn attach_netplay(&mut self, session: crate::netplay::Session) {
         self.netplay_setup = Some(crate::video::launcher::NetplaySetup::from(
             &session.options(),
         ));
+        let spectator = session.role() == Role::Spectator;
         self.netplay = Some(session);
         self.netplay_input = Default::default();
-        self.netplay_keyboard_controller = self.mouse_port().is_none();
+        self.netplay_keyboard_controller = !spectator && self.mouse_port().is_none();
+        self.netplay_catchup_notice = None;
         self.mouse_delta_remainder = (0.0, 0.0);
         self.last_display_cursor_pos = None;
-        self.show_osd("Netplay: waiting for peer (F11 to cancel)".to_string());
+        self.show_osd(
+            if spectator {
+                "Netplay: connecting to the host (F11 to cancel)"
+            } else {
+                "Netplay: waiting for peer (F11 to cancel)"
+            }
+            .to_string(),
+        );
+    }
+
+    fn netplay_role(&self) -> Option<Role> {
+        self.netplay.as_ref().map(|session| session.role())
+    }
+
+    /// A headless host ends its run only after connected spectators have
+    /// the whole feed: a scheduled capture must not cut their replay short.
+    pub(super) fn headless_exit_status(&mut self) -> i32 {
+        if let Some(session) = &mut self.netplay {
+            session.flush_spectators(std::time::Duration::from_secs(5));
+        }
+        self.exit_status()
     }
 
     pub(super) fn remember_netplay_setup(&mut self) {
@@ -57,6 +87,24 @@ impl App {
                     self.set_launcher_status(StatusMessage::err(format!("Clipboard: {error}")))
                 }
             }
+        } else if field == LauncherField::NetplayCopySpectatorCode {
+            if state.netplay.spectator_code.is_empty()
+                || state.netplay.connection_options().is_err()
+            {
+                state.status = Some(StatusMessage::err(
+                    "Create a new invitation with spectators enabled first".to_string(),
+                ));
+                return;
+            }
+            let code = state.netplay.spectator_code.clone();
+            match self.copy_netplay_code(code) {
+                Ok(()) => self.set_launcher_status(StatusMessage::ok(
+                    "Spectator code copied; share it with the people who will watch",
+                )),
+                Err(error) => {
+                    self.set_launcher_status(StatusMessage::err(format!("Clipboard: {error}")))
+                }
+            }
         }
     }
 
@@ -83,6 +131,11 @@ impl App {
     pub(super) fn leave_netplay(&mut self, error: Option<String>) {
         self.netplay_disk_picker = None;
         self.set_mouse_captured(false);
+        // A spectator interrupted mid catch-up leaves the machine paced for
+        // whatever runs next.
+        if self.netplay.as_ref().is_some_and(|s| s.catching_up()) {
+            self.emu.set_paced(true);
+        }
         self.netplay = None;
         self.netplay_input = Default::default();
         self.keyboard_joy_held = Default::default();
@@ -104,8 +157,11 @@ impl App {
         if self.mouse_port().is_some() {
             return;
         }
+        // Spectators own no port: nothing they hold reaches the timeline.
+        let Some(port) = self.netplay.as_ref().unwrap().port() else {
+            return;
+        };
         let pad = self.gamepad.poll();
-        let port = self.netplay.as_ref().unwrap().player();
         if pad.is_none() && self.auto_joy_engaged[port] {
             self.apply_auto_joy_state(port);
             return;
@@ -148,6 +204,9 @@ impl App {
                 }
             }
         }
+        if self.netplay_role() == Some(Role::Spectator) {
+            return self.step_spectator();
+        }
         let session = self.netplay.as_mut().unwrap();
         let before = session.status();
         let connected = before.connected;
@@ -156,7 +215,7 @@ impl App {
         let route = session.route();
         let config = session.take_config();
         let progress = session.take_progress();
-        let guest = session.player() == 1;
+        let guest = session.role() == Role::Guest;
         if let Some(cfg) = config {
             self.netplay_input = Default::default();
             self.netplay_keyboard_controller = self.mouse_port().is_none();
@@ -195,6 +254,87 @@ impl App {
                 "Netplay connected: arrows + right Ctrl, or gamepad"
             };
             self.show_osd(format!("{controls} ({route})"));
+        }
+        if !stepped {
+            self.emu.reanchor_realtime_clock();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        Ok(stepped)
+    }
+
+    /// A spectator executes the host's confirmed frames: paced while it is
+    /// close behind the players, in silent unpaced bursts while it replays
+    /// a backlog. Headless captures keep one frame per pass so a burst can
+    /// never overshoot a scheduled screenshot.
+    fn step_spectator(&mut self) -> Result<bool> {
+        let headless = self.headless_capture_active();
+        let (before, behind, catching_up) = {
+            let session = self.netplay.as_ref().unwrap();
+            (session.status(), session.behind(), session.catching_up())
+        };
+        let burst = if headless {
+            1
+        } else if catching_up || behind > CATCHUP_START {
+            behind.clamp(1, CATCHUP_BURST)
+        } else {
+            1
+        };
+        if !headless && !catching_up && burst > 1 {
+            self.netplay.as_mut().unwrap().set_catching_up(true);
+            self.emu.set_paced(false);
+            self.sync_live_audio_suspension();
+            self.netplay_catchup_notice = None;
+        }
+        let mut stepped = false;
+        for _ in 0..burst {
+            let session = self.netplay.as_mut().unwrap();
+            match session.step_local(&mut self.emu, &mut self.netplay_input, true)? {
+                true => stepped = true,
+                false => break,
+            }
+        }
+        let session = self.netplay.as_mut().unwrap();
+        let after = session.status();
+        let config = session.take_config();
+        let progress = session.take_progress();
+        let behind = session.behind();
+        let catching_up = session.catching_up();
+        if catching_up && behind <= CATCHUP_END {
+            self.netplay.as_mut().unwrap().set_catching_up(false);
+            self.emu.set_paced(true);
+            self.emu.reanchor_realtime_clock();
+            self.sync_live_audio_suspension();
+            self.show_osd("Spectating: caught up with the players".to_string());
+        } else if catching_up
+            && self
+                .netplay_catchup_notice
+                .is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(1))
+        {
+            self.netplay_catchup_notice = Some(Instant::now());
+            self.show_osd(format!("Spectating: {behind} frames behind, catching up"));
+        }
+        if let Some(cfg) = config {
+            self.netplay_input = Default::default();
+            self.netplay_keyboard_controller = false;
+            self.keyboard_joy_held = Default::default();
+            self.about_machine_lines = crate::config::about_machine_lines(&cfg);
+            self.disk_write_protected = std::array::from_fn(|drive| {
+                self.emu
+                    .bus()
+                    .floppy
+                    .disk_image_write_protected(drive)
+                    .unwrap_or(true)
+            });
+            self.disk_playlists = Default::default();
+            self.disk_playlist_index = [0; 4];
+            self.reset_render_pipeline();
+        }
+        if let Some(progress) = progress {
+            log::debug!(target: "copperline::netplay", "netplay: {progress}");
+            self.show_osd(progress);
+        }
+        if !before.connected && after.connected {
+            self.reset_render_pipeline();
         }
         if !stepped {
             self.emu.reanchor_realtime_clock();
@@ -244,9 +384,10 @@ impl App {
         event_loop: &ActiveEventLoop,
         event: &WindowEvent,
     ) -> bool {
-        if self.netplay.is_none() {
+        let Some(role) = self.netplay_role() else {
             return false;
-        }
+        };
+        let spectator = role == Role::Spectator;
         match event {
             WindowEvent::KeyboardInput {
                 event:
@@ -266,9 +407,7 @@ impl App {
                     match code {
                         KeyCode::KeyQ => event_loop.exit(),
                         KeyCode::KeyF => self.toggle_fullscreen(),
-                        KeyCode::KeyD if self.netplay.as_ref().is_some_and(|s| s.player() == 0) => {
-                            self.cycle_disk()
-                        }
+                        KeyCode::KeyD if role == Role::Host => self.cycle_disk(),
                         KeyCode::KeyG if self.mouse_port().is_some() => {
                             self.set_mouse_captured(!self.mouse_captured)
                         }
@@ -280,6 +419,10 @@ impl App {
                     if pressed {
                         self.leave_netplay(None);
                     }
+                    return true;
+                }
+                if spectator {
+                    // Nothing a spectator types reaches the shared machine.
                     return true;
                 }
                 if *code == KeyCode::F12 {

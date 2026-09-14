@@ -124,10 +124,12 @@ export class MediaTransfer {
     this.touch();
   }
 
-  async send(snapshot) {
+  // `prepared` is a `describeMedia` result computed once by a host that
+  // serves the same media to several spectators.
+  async send(snapshot, prepared = null) {
     if (!this.host || this.sending) throw new Error('Unexpected game setup transfer');
     this.sending = true;
-    const { manifest, media } = await describeMedia(snapshot);
+    const { manifest, media } = prepared ?? await describeMedia(snapshot);
     await this.ready;
     const text = JSON.stringify(manifest);
     if (text.length > MANIFEST_LIMIT) throw new Error('Host media description is too large');

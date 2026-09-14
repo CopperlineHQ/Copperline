@@ -1398,7 +1398,7 @@ impl App {
         }
         let guest = options
             .as_ref()
-            .is_some_and(|options| options.settings().player == 1);
+            .is_some_and(|options| options.role() != crate::netplay::Role::Host);
         let mut staged = if guest {
             RawConfig::default()
         } else {
@@ -1478,7 +1478,7 @@ impl App {
         // ROM is required here.
         let guest = options
             .as_ref()
-            .is_some_and(|options| options.settings().player == 1);
+            .is_some_and(|options| options.role() != crate::netplay::Role::Host);
         let built = crate::emulator::build_machine(cfg, audio, true, guest).and_then(|mut emu| {
             let session = options
                 .map(|options| crate::netplay::Session::new(options, &mut emu, cfg))

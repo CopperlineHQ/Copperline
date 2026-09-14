@@ -149,6 +149,104 @@ for (const [model, video, delay, window, controller] of [
 }
 console.log('WASM netplay numeric boundaries, session guards, packet loss/reordering and presentation isolation passed');
 
+// A spectator joins a game in progress: it replays the host's history from
+// frame zero in arbitrary slices, catches up, then follows live with every
+// checkpoint verified and the same picture as the players.
+{
+  const peers = [fresh(), fresh()];
+  const spectators = [];
+  try {
+    peers.forEach((emu, player) => {
+      emu.insert_floppy(0, new Uint8Array(901120), 'disk.adf');
+      emu.start_netplay(player + 1, code, 2, 8, 'cd32');
+    });
+    peers[0].netplay_enable_spectators();
+    assert.throws(() => peers[1].spectator_feed_open(), /not enabled/, 'only the host keeps history');
+    const feeds = [];
+    let queued = [];
+    let packets = 0;
+    let seed = 11;
+    const random = () => { seed = (seed * 48271) % 2147483647; return seed; };
+    for (let tick = 0; tick < 6000; tick++) {
+      for (let player = 0; player < 2; player++) {
+        const emu = peers[player];
+        const frame = emu.netplay_status()[1];
+        emu.set_joystick_port(2, frame % 9 < 3, false, false, false, frame % 7 < 3, false);
+        emu.key_event('Space', (frame + player) % 13 < 4);
+        emu.run_hidden(tick * 20, frame < 300 ? 1 : 0);
+        emu.take_audio();
+        for (;;) {
+          const bytes = emu.netplay_take_packet();
+          if (!bytes.length) break;
+          packets++;
+          if (packets % 7 === 0) continue;
+          queued.push({ due: tick + packets % 5, target: 1 - player, bytes });
+        }
+      }
+      const ready = queued.filter(packet => packet.due <= tick);
+      queued = queued.filter(packet => packet.due > tick);
+      for (const packet of ready) peers[packet.target].netplay_receive(packet.bytes);
+      // One spectator joins at frame 60 and another at 200, each from frame zero.
+      for (const at of [60, 200]) {
+        if (feeds.length === [60, 200].indexOf(at) && peers[0].netplay_status()[2] >= at) {
+          const spectator = fresh();
+          spectator.insert_floppy(0, new Uint8Array(901120), 'anything/else.adf');
+          spectator.start_spectating('cd32');
+          assert.deepEqual([...spectator.spectate_identity()], [...peers[0].netplay_identity()]);
+          assert.throws(() => spectator.start_netplay(1, code, 2, 8, 'cd32'), /Unavailable/);
+          assert.throws(() => spectator.reset(), /Unavailable/);
+          assert.throws(() => spectator.insert_floppy(0, new Uint8Array(901120), 'x.adf'), /Unavailable/);
+          spectators.push(spectator);
+          feeds.push(peers[0].spectator_feed_open());
+        }
+      }
+      spectators.forEach((spectator, i) => {
+        const bytes = peers[0].spectator_feed_take(feeds[i], 64 * 1024);
+        for (let offset = 0; offset < bytes.length;) {
+          const len = Math.min(1 + random() % 5000, bytes.length - offset);
+          spectator.spectate_receive(bytes.subarray(offset, offset + len));
+          offset += len;
+        }
+        // Local input never reaches a spectator's machine.
+        spectator.set_joystick_port(2, true, true, true, true, true, true);
+        spectator.key_event('Space', true);
+        spectator.mouse_delta(5, 5);
+        spectator.run_hidden(tick * 20, 8);
+        spectator.take_audio();
+      });
+      const done = peers.every(emu => { const s = emu.netplay_status(); return s[1] === 300 && s[2] === 300 && s[6] === 300; })
+        && spectators.length === 2 && spectators.every(s => s.spectate_status()[1] === 300);
+      if (done) break;
+    }
+    for (const spectator of spectators) {
+      const status = spectator.spectate_status();
+      assert.deepEqual([...status], [1, 300, 0, 300, 0], `spectator status ${[...status]}`);
+    }
+    assert.equal(peers[0].spectator_feed_frames(), 300);
+    assert.throws(() => peers[0].spectator_feed_take(feeds[0], 10), /budget/);
+    peers[0].spectator_feed_close(feeds[0]);
+    assert.throws(() => peers[0].spectator_feed_take(feeds[0], 4096), /Unknown/);
+    for (const emu of [...peers, ...spectators]) {
+      emu.set_overscan('tv');
+      emu.run(40000, 0);
+    }
+    const pixels = [...peers, ...spectators].map(emu => Buffer.from(new Uint8Array(wasm.memory.buffer,
+      emu.present_ptr(), emu.present_width() * emu.present_rows() * 4)));
+    assert.deepEqual(pixels[2], pixels[0], 'the early spectator shows the host picture');
+    assert.deepEqual(pixels[3], pixels[0], 'the late spectator shows the host picture');
+    // Corrupt feed bytes fail closed rather than showing a different game.
+    const broken = fresh();
+    broken.insert_floppy(0, new Uint8Array(901120), 'disk.adf');
+    broken.start_spectating('cd32');
+    const cursor = peers[0].spectator_feed_open();
+    const bytes = peers[0].spectator_feed_take(cursor, 4096);
+    bytes[5] ^= 0x80;
+    assert.throws(() => { broken.spectate_receive(bytes); broken.run_hidden(0, 8); });
+    broken.free();
+    console.log('Spectators joined at frames 60 and 200, replayed the host history and matched its picture at frame 300');
+  } finally { [...peers, ...spectators].forEach(emu => emu.free()); }
+}
+
 for (const configure of [emu => emu.set_floppy_sounds(false), emu => emu.set_floppy_sounds_volume(12)]) {
   const peers = [fresh(), fresh()];
   try {

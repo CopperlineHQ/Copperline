@@ -987,6 +987,8 @@ pub struct App {
     netplay_keyboard_controller: bool,
     netplay_setup: Option<crate::video::launcher::NetplaySetup>,
     netplay_disk_picker: Option<(usize, app_netplay::DiskPicker)>,
+    /// When a spectator's catch-up progress was last announced.
+    netplay_catchup_notice: Option<Instant>,
     // Linux serves clipboard selections from the owning instance.
     host_clipboard: Option<arboard::Clipboard>,
     /// Set once opening the host clipboard has failed. Whether a session
@@ -2381,6 +2383,7 @@ impl App {
             netplay_keyboard_controller: true,
             netplay_setup: None,
             netplay_disk_picker: None,
+            netplay_catchup_notice: None,
             host_clipboard: None,
             host_clipboard_unavailable: false,
             run_ahead_frames,
@@ -2529,7 +2532,7 @@ impl App {
     /// holds a mouse. Otherwise live mouse input is dropped.
     fn mouse_port(&self) -> Option<usize> {
         if let Some(peer) = &self.netplay {
-            let port = peer.player();
+            let port = peer.port()?;
             return self.emu.bus().input.ports[port]
                 .device
                 .is_mouse()
@@ -3164,7 +3167,7 @@ impl App {
     fn apply_auto_joy_state(&mut self, port: usize) {
         let held = self.auto_joy_held[port];
         if let Some(session) = &self.netplay {
-            if port == session.player() {
+            if session.port() == Some(port) {
                 self.netplay_input.held.buttons = [
                     held.up,
                     held.down,
@@ -3293,18 +3296,18 @@ impl App {
             self.recover_audio_if_device_lost();
             self.render_emulated_frame_if_needed();
             if self.dump_frame_if_due() {
-                return Ok(self.exit_status());
+                return Ok(self.headless_exit_status());
             }
             if self.fire_gif_captures() {
-                return Ok(self.exit_status());
+                return Ok(self.headless_exit_status());
             }
             self.fire_scheduled_events();
             self.fire_auto_save_state();
             if self.fire_auto_shot() {
-                return Ok(self.exit_status());
+                return Ok(self.headless_exit_status());
             }
             if self.poll_run_return() || self.note_guest_exit_request() {
-                return Ok(self.exit_status());
+                return Ok(self.headless_exit_status());
             }
             // A coverage-only run ends with the program: once its file is
             // written and no capture is still scheduled, there is nothing
@@ -3316,7 +3319,7 @@ impl App {
                 && self.frame_dump.is_none()
                 && self.gif_captures.is_empty()
             {
-                return Ok(self.exit_status());
+                return Ok(self.headless_exit_status());
             }
         }
     }

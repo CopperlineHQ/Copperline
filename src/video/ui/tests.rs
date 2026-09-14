@@ -4446,23 +4446,26 @@ fn check_netplay_controls(internet: bool, player: usize) {
                 );
                 vec![(at, UiControl::LauncherNetplayEdit(row.field))]
             }
-            RowKind::Action => vec![
-                (
+            RowKind::Action => {
+                let mut targets = vec![(
                     launcher_action_rect(rect, y),
-                    UiControl::LauncherNetplayAction(LauncherField::NetplayNewCode),
-                ),
-                (
-                    launcher_action2_rect(rect, y),
-                    UiControl::LauncherNetplayAction(LauncherField::NetplayCopyCode),
-                ),
-            ],
+                    UiControl::LauncherNetplayAction(row.field),
+                )];
+                if let Some(second) = launcher_second_action(row.field) {
+                    targets.push((
+                        launcher_action2_rect(rect, y),
+                        UiControl::LauncherNetplayAction(second),
+                    ));
+                }
+                targets
+            }
             _ => panic!("unexpected netplay widget"),
         };
         for (at, control) in targets {
-            if control == UiControl::LauncherNetplayAction(LauncherField::NetplayNewCode)
-                && !state.row_applies(LauncherField::NetplayNewCode)
-            {
-                continue;
+            if let UiControl::LauncherNetplayAction(field) = control {
+                if !state.row_applies(field) {
+                    continue;
+                }
             }
             assert!(at.x >= rect.x && at.x + at.w <= rect.x + rect.w);
             assert!(at.y + at.h < launcher_status_y(rect));

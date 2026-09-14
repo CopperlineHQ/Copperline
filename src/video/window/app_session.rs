@@ -1534,9 +1534,11 @@ impl App {
         // the moment the launch finishes (or is cancelled).
         // A warp a control client or the guest engaged is silent the same
         // way; the manual toggle is not.
+        // A spectator replaying its backlog is fast-forward noise as well.
         let warp_muted = self.warp_launch.as_ref().is_some_and(|l| l.engaged)
             || self.warp_boot.as_ref().is_some_and(|g| g.engaged)
-            || !self.warp_holds.is_empty();
+            || !self.warp_holds.is_empty()
+            || self.netplay.as_ref().is_some_and(|s| s.catching_up());
         let suspended = !self.powered_on || self.cpu_halted || self.paused || warp_muted;
         self.emu.set_live_audio_suspended(suspended);
     }

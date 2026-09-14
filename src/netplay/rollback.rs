@@ -22,6 +22,14 @@ struct Frame {
     previous_keys: [u8; 16],
 }
 
+/// Confirmed frames and checkpoint digests, retained for a spectator feed
+/// once both inputs of a frame are final.
+#[derive(Default)]
+pub(super) struct ConfirmedLog {
+    pub inputs: VecDeque<(u64, [Input; 2])>,
+    pub hashes: VecDeque<(u64, [u8; 32])>,
+}
+
 pub(super) struct Rollback {
     pub current: u64,
     pub confirmed: u64,
@@ -39,6 +47,7 @@ pub(super) struct Rollback {
     pub hashes: BTreeMap<u64, [u8; 32]>,
     pub rollbacks: u64,
     pub replayed_frames: u64,
+    pub log: Option<ConfirmedLog>,
 }
 
 impl Rollback {
@@ -63,6 +72,7 @@ impl Rollback {
             hashes: BTreeMap::new(),
             rollbacks: 0,
             replayed_frames: 0,
+            log: None,
         }
     }
 
@@ -179,7 +189,28 @@ impl Rollback {
                 super::digest(state)
             };
             self.hashes.insert(checkpoint, digest);
+            if let Some(log) = &mut self.log {
+                log.hashes.push_back((checkpoint, digest));
+            }
             checkpoint += HASH_INTERVAL;
+        }
+        // Both inputs of every frame below `end` are final: the peer cannot
+        // change a received input and nothing below `confirmed` is replayed.
+        // Record them before the prunes below release them.
+        if let Some(log) = &mut self.log {
+            for frame in self.confirmed..end {
+                let remote = *self
+                    .remote
+                    .get(&frame)
+                    .expect("confirmed remote input retained");
+                let local = *self
+                    .local
+                    .get(&frame)
+                    .expect("confirmed local input retained");
+                let mut inputs = [remote; 2];
+                inputs[self.player] = local;
+                log.inputs.push_back((frame, inputs));
+            }
         }
         self.confirmed = end;
         while self.history.front().is_some_and(|f| f.number < end) {

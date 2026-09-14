@@ -2916,11 +2916,13 @@ pub(in crate::video::ui) fn draw_launcher(
         draw_host_disk_page(frame, rect, state, hover, scale);
     }
     if state.tab == LauncherTab::Netplay {
-        let top = launcher_row_y(rect, 10) + row_offset;
+        // One blank row below the page's rows, whichever layout is shown.
+        let top = launcher_row_y(rect, state.rows().len() + 1) + row_offset;
         for (i, line) in if state.netplay.internet {
             [
                 "Use the same build, machine, ROM and floppy contents.",
                 "Host: new invitation, copy code, then Run. Join: paste, Run.",
+                "Watch: paste the host's spectator code, then Run.",
                 "Blank relay uses n0's public service; custom URL optional.",
                 "Run connects. F11 disconnects. Guest uses host timing.",
             ]
@@ -2928,6 +2930,7 @@ pub(in crate::video::ui) fn draw_launcher(
             [
                 "Use the same machine, ROM and floppy contents.",
                 "Share one session code; choose opposite players.",
+                "Spectator: peer address is the host's, same code.",
                 "Netplay sets digital ports, serial off and interpreter.",
                 "Run connects. F11 returns here. Settings last this session.",
             ]

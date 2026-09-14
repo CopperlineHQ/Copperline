@@ -20,8 +20,9 @@ The implementation follows five steps:
 These steps are implemented in `src/netplay/`, `Emulator::step_netplay_frame`,
 `src/video/window/app_netplay.rs`, `crates/copperline-web/src/netplay.rs` and
 `crates/copperline-web/www/netplay.js`. The feature uses native Rust and does not
-link the GGPO SDK. Public matchmaking, spectators, reconnect and persistent
-host filesystem writes remain separate work.
+link the GGPO SDK. Spectators follow the host through a separate confirmed-only
+feed (see [Spectators](#netplay-spectator-design)). Public matchmaking, reconnect and
+persistent host filesystem writes remain separate work.
 
 ## Native Internet transport
 
@@ -42,7 +43,8 @@ modules or host-device authority. Only generated filenames inside a private
 temporary directory reach the guest's machine builder. Both peers rebuild the
 same cold setup, validate their initial fingerprints, then begin the input
 handshake. Guest launcher settings remain local. No remote emulator checkpoint
-is accepted or deserialized.
+is accepted or deserialized, by spectators either: a late joiner rebuilds the
+game from the same cold bundle and the confirmed input history.
 
 Desktop setup uses the versioned `CLFLOP01` media container. Standard ADF
 payloads stay byte-for-byte intact. Track images retain metadata that UAE
@@ -340,6 +342,95 @@ session. The wire decoder reports an incompatible protocol version or state
 schema for the recognized session immediately, while unrelated traffic remains
 ignored.
 
+(netplay-spectator-design)=
+## Spectators
+
+A spectator is a third kind of participant: it owns no controller port, sends
+no input, and never enters the players' rollback timeline. Only the host serves
+spectators (star topology), so the guest and the `CLNP` input protocol are
+unchanged; `Role::{Host, Guest, Spectator}` on `ConnectionOptions` and
+`Session` replaces the old "opposite player" assumptions, and `Settings` stays
+the two-player structure the browser build shares.
+
+The host's `Rollback` records a `ConfirmedLog` inside `confirm()`: for every
+frame that becomes confirmed it stores both ports' inputs (its own submitted
+input and the peer's received one, which can no longer change) and every
+checkpoint digest at insertion, before the prune that releases them.
+`Connection::enable_feed` (host only, at frame zero) drains that log into a
+`spectate::Feed`: the complete confirmed history (46 bytes per frame), the
+checkpoint digests, and every disk change as a `SwapRecord` with the drive,
+write flag, image bytes and the full-state digests the host measured before
+and after applying it. The feed is capped (256 MiB native, 64 MiB browser);
+past the cap the host refuses new spectators while existing streams continue.
+
+`Feed::next_message` walks a `FeedCursor` in replay order: a `Checkpoint`
+due at the cursor's frame, then a `Swap` due there, then a `Frames` batch of
+at most 1024 records that never crosses the next checkpoint boundary or disk
+change. The host therefore hashes checkpoint N and only then applies a change
+stopped at N, and a spectator sees the messages in that order. Messages use
+`[kind u8][len u32 LE][payload]` framing with the datagram input layout;
+`FeedDecoder` validates each header before buffering its payload, so a hostile
+length never allocates, and reassembles across arbitrary chunk boundaries.
+Reverse messages are `Verified` (the spectator's initial fingerprint) and
+`Status` (its executed frame, once a second, as a liveness report).
+
+`Spectator` is the confirmed-only timeline: it executes `[Input; 2]` per
+frame through the same `Machine` adapter as rollback, with no prediction and
+no snapshot history. At every multiple of 60 frames it waits for the host's
+checkpoint, compares `digest(netplay_snapshot())`, and fails closed on a
+mismatch before executing further. A due `SwapRecord` blocks the frame until
+the frontend applies it with `spectate::apply_swap`, which checks the
+host's digests on both sides of the change. Feed messages must be
+contiguous and in order; a swap below the buffered frontier, a late
+checkpoint, or more than a million buffered frames is rejected.
+
+Desktop: `Session` holds either a player `Connection` or a `Watcher`
+(`Control<NativeTransport>` plus a `Spectator`). A spectator's control link
+uses role byte 2; `Control` now checks a `(local, peer)` role pair, holds
+chunks in its receive window instead of failing once four messages are
+queued, and shares `Arc` parts so one bundle serves the guest and every
+spectator without copies. Kind byte 4 carries feed bytes beside the JSON
+setup messages (`Watch`, `Verified`, `Start`, `Refused`) and the bundle. A
+spectator's setup is the guest's: bundle in, `machine_identity` compared by
+the host, then the feed streams from frame zero. Direct UDP demultiplexes
+spectator control packets by source address on the host's existing socket
+(`SlotTable`, one slot per admitted spectator, freed when its link drops);
+Internet mode keeps the host's iroh endpoint accepting after the player and
+classifies each connection by its capability: the invitation's session admits
+the one player, a separate random capability in the `CLNS1.` code admits
+spectators, and neither opens the other role. Each connection is pumped by
+its own task, so a spectator's failure lands only in its own queues. The host
+services every link after its own step: at most four feed messages in flight
+per link, a `Head` keepalive after a second of silence, a 10-second silence
+timeout, and any error drops that link alone. Nothing a spectator does can
+stall or fail the players.
+
+The frontend runs a spectator paced while it is within 25 frames of the
+host's confirmed frontier and in unpaced bursts of up to 64 frames per loop
+pass while further behind, with live audio muted like a warp gate; headless
+captures keep one frame per pass so a burst cannot overshoot a scheduled
+screenshot. Window input is swallowed, `App::mouse_port` is `None`, disk
+controls are unavailable, and F11 leaves.
+
+Browser: the host page creates a separate watch room (`POST /watch`, its own
+22-character capability, `#watch=` links) sized by the Advanced spectator
+count. Signaling runs the other way round: each spectator reserves a place
+(`/join`, which also issues its TURN credentials), offers over
+`copperline-watch-v1` (ordered, reliable) plus the existing setup channel,
+and polls for its answer with 429 backoff; the host polls `/offers` every two
+seconds while its machine runs, which also extends the room's expiry, and
+answers each offer; a fetched answer frees the place. `SpectatorHub` keeps one
+`RtcWatchPeer` per spectator, describes the host media once, serves it with
+`MediaTransfer`, requires a `Verified` fingerprint equal to
+`WebEmu::netplay_identity`, then opens a feed cursor
+(`spectator_feed_open`) and pumps `spectator_feed_take` in 16 KiB messages
+under 256 KiB of buffered backpressure; a peer whose buffer never drains for
+30 seconds is dropped. The spectator page boots the received media with
+`start_spectating`, feeds bytes to `spectate_receive`, and `run_spectate`
+paces it like a player or replays a backlog in bounded bursts (64 frames or
+12 ms per call) with its audio discarded. Every mutation and input entry
+point checks `session_active`, which covers spectating.
+
 ## Configuration screen
 
 `LauncherState::netplay` holds a `NetplaySetup` beside the machine setup. It uses
@@ -389,6 +480,18 @@ The regression suite covers:
 - CLI combinations, GUI field/edit/navigation coverage, and frontend input/mutation
   routing. Two GUI-configured peers must connect, confirm matching states, return
   to setup and successfully rebind for another cold boot.
+- Spectators: the feed codec round-trips across arbitrary chunk boundaries and
+  rejects bad headers, counts, drives and controller bits; the confirmed log of
+  a rollback run with late, reordered and duplicate input drives a spectator to
+  the baseline at every delay; three desktop sessions where a spectator joins
+  after 130 frames and a disk change, replays the backlog, follows further
+  changes, matches the host's snapshot and leaves without disturbing the
+  players; UDP demultiplexing by source with a place cap; control-link role
+  pairs and receive-window backpressure; iroh admission by capability; the
+  launcher's Watch role and spectator code; the CLI flags; and a GUI spectator
+  that joins late through the launcher, catches up unpaced and re-paces.
+  `tools/check-netplay.py --spectators N` runs late-joining spectator
+  processes against the two players and requires identical PNGs.
 - Browser packet queue bounds, signaling validation, data-channel options,
   cancellation and backpressure. The release WASM smoke runs paired A500/PAL and
   A1200/NTSC machines through 120 confirmed/checksummed frames under loss,
@@ -400,7 +503,11 @@ need permission to bind loopback sockets. No external ROM or disk assets are
 required for the regression suite.
 
 After building the release web bundle, run `node tools/check-web-netplay.mjs` and
-`npm test --prefix crates/copperline-web/www`. CI also runs the native web wrapper
+`npm test --prefix crates/copperline-web/www`. The WASM check also runs two
+spectators that join at frames 60 and 200, replay the host feed in random
+slices, ignore local input and match the host's picture at frame 300; the
+swap check keeps a spectator following every change and replays them all
+from frame zero on a late joiner. CI also runs the native web wrapper
 unit tests, including failed startup, input routing and audio gain checks.
 `node tools/check-web-netplay-swaps.mjs` exercises repeated replacements and
 ejections on real release WASM with packet loss, reordering and asymmetric pacing,

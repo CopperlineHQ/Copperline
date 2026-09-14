@@ -146,6 +146,8 @@ jobs:
           cp crates/copperline-web/www/try.js \
              crates/copperline-web/www/render-stride.js \
              crates/copperline-web/www/netplay.js \
+             crates/copperline-web/www/netplay-rtc.js \
+             crates/copperline-web/www/netplay-watch.js \
              crates/copperline-web/www/netplay-room.js \
              crates/copperline-web/www/netplay-media.js \
              crates/copperline-web/www/netplay-swap.js \
