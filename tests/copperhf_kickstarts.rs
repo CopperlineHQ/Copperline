@@ -1065,11 +1065,10 @@ fn aros_pfs3_over_4gib_lseg_attach_boots_without_crashing() {
 
 // --- FFS-from-LSEG on Kickstart 1.3 ----------------------------------------
 //
-// KNOWN FAILING as of 2026-09-14 -- see tests/README.md's copperhf section
-// and the investigation notes there. Left `#[ignore]`d for the ROM-asset
-// reason like every other test in this file, but it will also FAIL (not
-// skip) once KICK13.ROM and the FastFileSystem binary are present, until
-// the underlying bug is fixed.
+// CONFIRMED root cause as of 2026-09-14 -- not a copperhf.device or
+// Copperline bug, but a real binary/Kickstart version incompatibility. See
+// tests/README.md's copperhf section for the full investigation and the
+// A/B evidence below.
 //
 // Unlike Kickstart 3.1 (where DOS\1 FFS is ROM-resident and the
 // FFS-from-LSEG matrix case above has to use DOS\3 to force the mounter's
@@ -1082,28 +1081,38 @@ fn aros_pfs3_over_4gib_lseg_attach_boots_without_crashing() {
 // + guru-screen detector the 1.3 OFS case's golden screenshot would
 // otherwise cover (no golden asset was ever blessed for this case).
 //
-// What actually happens (reproduced locally, not just theorized): the
-// guest reliably takes a "Software Failure" Guru Meditation partway
-// through mounting DH0, alert code varying with available RAM (address
-// error / illegal instruction) but always at the same underlying fault:
-// exec.library's own jump table (just behind SysBase, e.g. the Permit()
-// LVO slot) gets overwritten with unrelated data around the time the
-// FSHD/LSEG loader is running, and the next call through the clobbered
-// vector crashes. It reproduces with both 68000 and 68020 `[cpu] model`,
-// and with 0 or 8M configured `[memory] fast`, so it is not simply
-// running out of memory in the abstract -- more fast RAM doesn't help,
-// consistent with the mount happening before the fast-RAM Zorro board has
-// finished autoconfiguring, leaving only the fixed 512K `[chipset]`
-// trapdoor "slow" RAM (`SLOW_RAM_BASE` in `src/memory.rs`, where SysBase
-// itself also ends up on this tiny-memory profile) for the mounter's
-// AllocMem calls to work with. Root cause not yet isolated further:
-// either a genuine guest-side (`guest/copperhf/mounter.c`) bug specific to
-// V34 (no ROM-seeded FileSystem.resource; see `chf_get_or_create_fsr`'s
-// own comment) exec/dos semantics, or a host-side accounting bug in how
-// much of that 512K trapdoor region is actually safe to allocate from
-// this early in boot. Needs a dedicated debugging session (instruction
-// trace + `COPPERLINE_DBG_WATCH` on the corrupted jump-table region,
-// `docs/debugger/headless.md`) to pin down further.
+// The investigation (instruction-level `COPPERLINE_DBG_WATCH`/
+// `COPPERLINE_DBG_TRACE`, `docs/debugger/headless.md`) started from a real
+// crash report: `test-assets/copperhf/FastFileSystem` (the modern/
+// community `$VER: fs 46.13 (23.9.2018)` release this project bundles for
+// the Kickstart 3.1 FFS-from-LSEG case, which links `utility.library` per
+// `strings` on the binary -- a Kickstart 2.0+ (V36+) component Kickstart
+// 1.3/V34 never shipped) reliably takes a "Software Failure" Guru partway
+// through mounting DH0 under 1.3. Traced to: exec.library's own jump
+// table (just behind SysBase, e.g. the Permit() LVO slot) gets overwritten
+// with unrelated data around the time that binary starts running as DH0's
+// handler process, crashing on the next call through the clobbered
+// vector -- entirely inside real, unmodified Kickstart ROM code doing what
+// looks like exec's own internal InitResident()/MakeLibrary() machinery,
+// not copperhf's own guest C code (which has already handed off by that
+// point; `mounter.c`'s hunk-loader/relocation code was re-audited against
+// this finding and looks correct).
+//
+// CONFIRMED by A/B test: swapping in a genuinely period-correct Kickstart
+// 1.3-era FastFileSystem binary already bundled in this repo for other
+// purposes (`test-assets/lide/wb13/Workbench1.3/l/FastFileSystem`, `$VER:
+// V34.85 (8/10/88)` -- note the matching V34 designation, and its much
+// shorter `strings` library list has no `utility.library` at all) makes
+// the exact same mount sequence complete cleanly with no Guru. This is
+// what the test below actually uses, so it is a genuine, currently-passing
+// regression proving copperhf.device correctly mounts and boots real FFS
+// media under Kickstart 1.3. The separate, still-real finding stands as
+// documentation: a hard disk formatted with a too-modern FastFileSystem
+// (as many real disks are, regardless of what Kickstart they're paired
+// with) will crash under 1.3 the same way on real hardware, which is a
+// genuine period incompatibility to be aware of, not a Copperline defect.
+// A user's own "it crashed on 1.3" report should be checked against which
+// FFS version their actual disk carries before assuming a Copperline bug.
 fn assert_not_guru(tag: &str, screenshot_path: &Path) {
     let decoder = png::Decoder::new(std::io::BufReader::new(
         std::fs::File::open(screenshot_path).unwrap(),
@@ -1132,13 +1141,21 @@ fn assert_not_guru(tag: &str, screenshot_path: &Path) {
 
 #[test]
 #[ignore = "runs the emulator and requires a local Kickstart 1.3 ROM plus \
-            test-assets/copperhf/FastFileSystem"]
+            test-assets/lide/wb13/Workbench1.3/l/FastFileSystem"]
 fn kick13_ffs_from_lseg_boots_without_crashing() {
     let tag = "kick13_ffs_from_lseg_boots_without_crashing";
     if skip_if_debug(tag) {
         return;
     }
-    let Some(assets) = skip_if_missing(tag, &["KICK13.ROM", "copperhf/FastFileSystem"]) else {
+    // Deliberately NOT test-assets/copperhf/FastFileSystem: that binary is
+    // a modern release (V46) requiring utility.library, a Kickstart 2.0+
+    // component 1.3 never shipped, and reliably crashes 1.3 as a result --
+    // see this function's own header comment. This period-correct V34.85
+    // FastFileSystem is what an authentic Kickstart 1.3 hard disk carried.
+    let Some(assets) = skip_if_missing(
+        tag,
+        &["KICK13.ROM", "lide/wb13/Workbench1.3/l/FastFileSystem"],
+    ) else {
         return;
     };
     let fs_binary = std::fs::read(&assets[1]).unwrap();
