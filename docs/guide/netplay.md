@@ -12,7 +12,7 @@ connections with automatic NAT traversal and relay fallback. Browsers use WebRTC
 with private room invitations and TURN relay fallback when the page has a room
 service configured. Browser manual connection codes remain available.
 The host can admit up to eight spectators, who watch the game without playing
-and may join while it is in progress (see [Spectators](#spectators)).
+and may join while it is in progress (see [Spectators](#netplay-spectators)).
 There is no public lobby or automatic reconnect. Browser and desktop peers
 cannot connect to each other. Use the same Copperline build on every machine;
 mixed operating systems and browser engines have not yet been qualified.
@@ -226,7 +226,7 @@ The GUI and CLI can connect to each other when both select the same transport.
 An app started with a control or GDB endpoint must be restarted without that
 endpoint before enabling netplay in the GUI.
 
-(spectators)=
+(netplay-spectators)=
 ### Spectators
 
 The host's **Spectators** row admits up to eight spectators (Off by default).

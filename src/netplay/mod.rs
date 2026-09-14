@@ -274,6 +274,16 @@ impl ConnectionOptions {
         }
     }
 
+    /// Whether these options host an Internet session, the only kind that
+    /// writes a spectator invitation file.
+    pub fn hosts_internet(&self) -> bool {
+        match self {
+            #[cfg(feature = "netplay-internet")]
+            Self::Internet(options) => options.host_key.is_some(),
+            _ => false,
+        }
+    }
+
     /// Spectators a hosting player admits.
     pub fn spectators(&self) -> usize {
         match self {

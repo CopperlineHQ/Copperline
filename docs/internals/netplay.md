@@ -21,7 +21,7 @@ These steps are implemented in `src/netplay/`, `Emulator::step_netplay_frame`,
 `src/video/window/app_netplay.rs`, `crates/copperline-web/src/netplay.rs` and
 `crates/copperline-web/www/netplay.js`. The feature uses native Rust and does not
 link the GGPO SDK. Spectators follow the host through a separate confirmed-only
-feed (see [Spectators](#spectators)). Public matchmaking, reconnect and
+feed (see [Spectators](#netplay-spectator-design)). Public matchmaking, reconnect and
 persistent host filesystem writes remain separate work.
 
 ## Native Internet transport
@@ -342,6 +342,7 @@ session. The wire decoder reports an incompatible protocol version or state
 schema for the recognized session immediately, while unrelated traffic remains
 ignored.
 
+(netplay-spectator-design)=
 ## Spectators
 
 A spectator is a third kind of participant: it owns no controller port, sends

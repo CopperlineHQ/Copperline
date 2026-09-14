@@ -1736,9 +1736,7 @@ where
             ConnectionOptions::Direct(options)
         };
         let role = options.role();
-        if netplay_spectator_invite.is_some()
-            && !(role == Role::Host && matches!(options, ConnectionOptions::Internet(_)))
-        {
+        if netplay_spectator_invite.is_some() && !options.hosts_internet() {
             bail!("--netplay-spectator-invite applies to an Internet netplay host");
         }
         let local_port = options.settings().map(|settings| settings.player);

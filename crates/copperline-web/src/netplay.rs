@@ -758,6 +758,15 @@ mod tests {
 
     #[test]
     fn spectators_replay_the_host_feed_from_frame_zero_and_take_no_input() -> anyhow::Result<()> {
+        // Four machines at once exceed the default test stack in debug builds.
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(spectators_replay_the_host_feed)?
+            .join()
+            .unwrap()
+    }
+
+    fn spectators_replay_the_host_feed() -> anyhow::Result<()> {
         let mut host = WebEmu::new(None, None, Some(1.0)).unwrap();
         let mut guest = WebEmu::new(None, None, Some(1.0)).unwrap();
         host.start_netplay_inner(settings(0), PortDevice::Cd32Pad)?;
