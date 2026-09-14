@@ -121,13 +121,14 @@ export class RoomClient {
   // backs off instead of failing the join.
   async waitForAnswer(expiresAt) {
     while (!this.signal.aborted && Date.now() < expiresAt) {
-      let answer;
-      try { ({ answer } = await this.request(`${this.prefix}/${this.id}/answer`)); }
+      let answer, refused;
+      try { ({ answer, refused } = await this.request(`${this.prefix}/${this.id}/answer`)); }
       catch (error) {
         if (error.status !== 429) throw error;
         await this.wait(5000);
         continue;
       }
+      if (refused === true) throw new Error('This game has no free spectator places. Ask the host to admit more.');
       if (typeof answer === 'string') return answer;
       await this.wait(this.watch ? 2500 : 1500);
     }
@@ -140,6 +141,12 @@ export class RoomClient {
   pollWatchOffers() { return this.request(`${this.prefix}/${this.id}/offers`); }
 
   answerWatch(spectator, code) { return this.request(`${this.prefix}/${this.id}/answer`, 'POST', { spectator, code }); }
+
+  // Owner only: turn a spectator away without answering, or change how
+  // many places the room offers (0 keeps the room but admits nobody new).
+  refuseWatch(spectator) { return this.request(`${this.prefix}/${this.id}/refuse`, 'POST', { spectator }); }
+
+  setSlots(slots) { return this.request(`${this.prefix}/${this.id}/slots`, 'POST', { slots }); }
 
   end() {
     if (!this.id || !this.auth) return Promise.resolve();

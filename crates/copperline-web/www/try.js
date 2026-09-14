@@ -112,7 +112,9 @@ let netplayPreparing = null;
 let netplayMachineReady = false;
 let netplayTimer = null;
 let machineGeneration = 0;
-const netplayBusy = () => !!netplayPanel?.link;
+// A session owns the page from the moment its media is captured (prepare)
+// until stop; a host still waiting for player 2 keeps its page to itself.
+const netplayBusy = () => !!netplayPanel?.link && !!netplayPreparing;
 // A spectator's mouse never drives the machine, whatever the players use.
 const netplayMouse = () => netplayBusy() && !netplayPanel.link.spectate && netplayPanel.link.settings?.controller === 'mouse';
 const netplayDisabled = new Map();
@@ -7559,6 +7561,16 @@ if (typeof WebEmu.prototype.start_netplay === 'function') {
         updateStatusDisks();
         updateFloppyImageControls();
       },
+      // What a host needs before it can share: a ROM, and every inserted
+      // disk still on hand. Checked when hosting starts and again when the
+      // media is captured for the connection.
+      check: () => {
+        if (!wasm || !bootRom) throw new Error('Load a ROM before setting up netplay');
+        keepUploadedDisksForRebuild();
+        for (let drive = 0; drive < PAGE_FLOPPY_DRIVES; drive++) {
+          if (diskNames[drive] && !pendingDisks[drive]) throw new Error(`Load the DF${drive} image again before netplay`);
+        }
+      },
       prepare: async (link, { receiveMedia }) => {
         if (!wasm || (!receiveMedia && !bootRom)) throw new Error('Load a ROM before setting up netplay');
         keepUploadedDisksForRebuild();
@@ -7650,7 +7662,7 @@ if (typeof WebEmu.prototype.start_netplay === 'function') {
               }
             } else if (performance.now() - lastStatus > 1000) {
               const [connected, frame, confirmed, , rollbacks, , checked] = emu.netplay_status();
-              const spectators = link.hub ? `, ${link.hub.watching} watching` : '';
+              const spectators = link.hub?.slots || link.hub?.watching ? `, ${link.hub.watching} watching` : '';
               netplayPanel.status(connected
                 ? `Player ${player}: frame ${frame}, confirmed ${confirmed}, ${rollbacks} rollbacks, checked ${checked}${spectators}`
                 : 'Waiting for a matching machine...');

@@ -15,6 +15,7 @@ export const POLL_MS = 2000;
 const STATUS_MS = 1000;
 const KIND_VERIFIED = 5;
 const KIND_STATUS = 6;
+const HUB_ENDED = 'The spectator invitation has ended. Host a new game to admit spectators.';
 
 // A feed message: kind, little-endian length, payload.
 export function feedMessage(kind, payload) {
@@ -303,17 +304,52 @@ export class RtcWatchPeer extends RtcCommon {
   }
 }
 
-// Admits spectators from the watch room while the host machine runs.
+// Admits spectators from the watch room while the host machine runs. The
+// room is opened on the service the first time the host asks for places
+// and then follows the host's count: setSlots(0) admits nobody new but
+// keeps the room, its invitation and everyone already watching.
 export class SpectatorHub {
-  constructor({ room, iceServers = [], relayOnly = false, slots, build, controller, media, machine,
+  constructor({ room, iceServers = [], relayOnly = false, slots = 0, build, controller, media, machine,
     status = () => {}, changed = () => {}, PeerConnection }) {
-    Object.assign(this, { room, iceServers, relayOnly, slots, build, controller, machine, status, changed, PeerConnection });
+    Object.assign(this, { room, iceServers, relayOnly, build, controller, machine, status, changed, PeerConnection });
+    this.slots = room.id ? slots : 0;
+    this.wanted = this.slots;
+    this.applying = null;
     this.snapshot = media;
     this.prepared = null;
     this.peers = new Map();
     this.closed = false;
     this.timer = null;
     this.polling = false;
+  }
+
+  // An ended room has no invitation worth showing and admits nobody.
+  get invitation() { return this.closed ? null : this.room.id ?? null; }
+
+  // Changes take effect in the order asked, one request at a time; a
+  // change that fails leaves `slots` at what the room really admits, and
+  // a room that has ended (expired, or closed with the game) refuses every
+  // change rather than reporting one it never made.
+  setSlots(slots) {
+    if (this.closed) return Promise.reject(new Error(HUB_ENDED));
+    this.wanted = slots;
+    this.applying ??= this.apply().finally(() => { this.applying = null; });
+    return this.applying;
+  }
+
+  async apply() {
+    while (!this.closed && this.wanted !== this.slots) {
+      const slots = this.wanted;
+      if (!this.room.id) {
+        if (!slots) break;
+        const created = await this.room.create({ slots });
+        this.iceServers = Array.isArray(created.iceServers) ? created.iceServers : [];
+      } else await this.room.setSlots(slots);
+      if (this.closed) break;
+      this.slots = slots;
+      this.changed();
+    }
+    if (this.closed && this.wanted !== this.slots) throw new Error(HUB_ENDED);
   }
 
   // Hash the host media once, on the first spectator, not per spectator.
@@ -335,10 +371,17 @@ export class SpectatorHub {
   async poll() {
     if (this.closed) return;
     try {
-      if (this.machine()) {
+      if (this.machine() && this.room.id) {
         const { offers } = await this.room.pollWatchOffers();
         for (const { spectator, code } of Array.isArray(offers) ? offers : []) {
-          if (this.closed || this.peers.has(spectator) || this.peers.size >= this.slots) continue;
+          if (this.closed || this.peers.has(spectator)) continue;
+          if (this.peers.size >= this.slots) {
+            // The service only counts places still in signaling, so a
+            // full house is told here rather than left waiting.
+            try { await this.room.refuseWatch(spectator); }
+            catch (error) { console.error('Spectator refusal failed', error); }
+            continue;
+          }
           const peer = new RtcWatchPeer({ token: spectator, iceServers: this.iceServers, PeerConnection: this.PeerConnection,
             build: this.build, controller: this.controller, media: () => this.media(), machine: this.machine,
             onClose: reason => {
@@ -376,6 +419,7 @@ export class SpectatorHub {
   close(dropPeers = true) {
     if (this.closed) return;
     this.closed = true;
+    this.slots = 0;
     clearTimeout(this.timer);
     this.timer = null;
     if (dropPeers) for (const peer of [...this.peers.values()]) peer.close('The host ended the game');

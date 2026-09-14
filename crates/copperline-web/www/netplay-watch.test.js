@@ -197,11 +197,12 @@ test('a whole disk image is sent chunk by chunk across pumps, never past the buf
   assert.equal(quiet.sent.length, FEED_BUFFER / FEED_CHUNK);
 });
 
-test('the hub answers offers up to its places, hashes media once, and closes every peer with the room', async t => {
+test('the hub answers offers up to its places, refuses the rest, hashes media once, and closes every peer with the room', async t => {
   const offer = encodeCode(description('offer'), offered);
-  const room = { polled: 0, answers: [], ended: false,
+  const room = { id: 'r'.repeat(22), polled: 0, answers: [], refused: [], ended: false,
     pollWatchOffers: async () => { room.polled++; return { offers: ['a', 'b', 'c'].map(letter => ({ spectator: letter.repeat(22), code: offer })) }; },
     answerWatch: async spectator => { room.answers.push(spectator); },
+    refuseWatch: async spectator => { room.refused.push(spectator); },
     end: () => { room.ended = true; } };
   const snapshot = { model: 'A500', video: 'PAL', floppySpeed: 100, floppySounds: true, monoAudio: false, build: 'build-1',
     rom: { rom: new Uint8Array(64).fill(1), ext: null, label: 'rom' }, disks: [null, null, null, null] };
@@ -218,11 +219,14 @@ test('the hub answers offers up to its places, hashes media once, and closes eve
   await hub.poll();
   assert.equal(room.polled, 1);
   assert.deepEqual(room.answers, ['a'.repeat(22), 'b'.repeat(22)]);
+  assert.deepEqual(room.refused, ['c'.repeat(22)], 'a full house turns the surplus offer away');
   assert.equal(hub.peers.size, 2);
   assert.equal(hub.watching, 0);
+  assert.equal(hub.invitation, room.id);
   assert.deepEqual([...hub.peers.values()][0].pc.configuration, { iceServers: [], iceTransportPolicy: 'all' });
   await hub.poll();
-  assert.equal(room.answers.length, 2, 'known and surplus offers are not answered again');
+  assert.equal(room.answers.length, 2, 'known offers are not answered again');
+  assert.equal(room.refused.length, 2, 'a still-listed surplus offer is refused again, never answered');
   const prepared = await hub.media();
   assert.equal(prepared.manifest.files[0].kind, 'rom');
   assert.equal(await hub.media(), prepared, 'media is described once for every spectator');
@@ -233,4 +237,59 @@ test('the hub answers offers up to its places, hashes media once, and closes eve
   assert.equal(hub.peers.size, 0);
   assert.ok(peers.every(peer => peer.closed));
   assert.equal(hub.timer, null);
+});
+
+test('the hub opens its room on the first request for places, resizes it in order, and keeps it through None', async t => {
+  const offer = encodeCode(description('offer'), offered);
+  const room = { id: null, created: [], sizes: [], polled: 0, answers: [], ended: false,
+    create: async ({ slots }) => { room.created.push(slots); room.id = 'w'.repeat(22); return { id: room.id, owner: 'o'.repeat(22), iceServers: [{ urls: ['turn:relay.test'] }] }; },
+    setSlots: async slots => { if (slots === 5) throw new Error('Too many requests'); room.sizes.push(slots); return { slots }; },
+    pollWatchOffers: async () => { room.polled++; return { offers: [{ spectator: 'a'.repeat(22), code: offer }] }; },
+    answerWatch: async spectator => { room.answers.push(spectator); },
+    refuseWatch: async () => {},
+    end: () => { room.ended = true; } };
+  let changes = 0;
+  const machine = { netplay_identity: () => identity };
+  const hub = new SpectatorHub({ room, slots: 3, build: 'build-1', controller: 'joystick', media: () => ({}),
+    machine: () => machine, changed: () => { changes++; }, PeerConnection: Peer });
+  t.after(() => hub.close());
+  assert.equal(hub.slots, 0, 'no places until the room exists, whatever the constructor was told');
+  assert.equal(hub.invitation, null);
+  hub.start();
+  clearTimeout(hub.timer);
+  await hub.poll();
+  assert.equal(room.polled, 0, 'nothing to poll before the room is opened');
+  await hub.setSlots(0);
+  assert.deepEqual(room.created, [], 'None opens no room');
+  // Two changes back to back apply in order over one room creation.
+  const first = hub.setSlots(2);
+  const second = hub.setSlots(1);
+  assert.equal(first, second, 'changes share one application');
+  await second;
+  assert.deepEqual([room.created, room.sizes, hub.slots, changes], [[2], [1], 1, 2]);
+  assert.equal(hub.invitation, room.id);
+  assert.deepEqual(hub.iceServers, [{ urls: ['turn:relay.test'] }], 'the host answers with the room\'s relay');
+  clearTimeout(hub.timer);
+  await hub.poll();
+  assert.equal(room.polled, 1);
+  assert.deepEqual(room.answers, ['a'.repeat(22)]);
+  await hub.setSlots(0);
+  assert.equal(hub.slots, 0);
+  assert.equal(hub.peers.size, 1, 'None keeps everyone already admitted');
+  assert.equal(hub.invitation, room.id, 'the room and its invitation survive None');
+  await assert.rejects(hub.setSlots(5), /Too many requests/);
+  assert.equal(hub.slots, 0, 'a failed change leaves the count the room really has');
+  assert.equal(hub.applying, null, 'a failed change does not wedge later ones');
+  await hub.setSlots(4);
+  assert.deepEqual(room.sizes, [1, 0, 4]);
+  // A room that ends while a change is in flight fails that change, and an
+  // ended hub refuses later ones outright: neither reports a resize it did
+  // not make, and the dead invitation is withdrawn.
+  room.setSlots = async slots => { room.sizes.push(slots); hub.close(false); return { slots }; };
+  await assert.rejects(hub.setSlots(6), /invitation has ended/);
+  assert.deepEqual([hub.closed, hub.slots, hub.invitation, hub.applying], [true, 0, null, null]);
+  assert.equal(hub.peers.size, 1, 'an expired room keeps the spectators it admitted');
+  await assert.rejects(hub.setSlots(1), /invitation has ended/);
+  assert.deepEqual(room.sizes, [1, 0, 4, 6], 'no request reaches an ended room');
+  assert.equal(room.ended, true);
 });

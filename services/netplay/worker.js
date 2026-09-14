@@ -93,7 +93,7 @@ export default {
       const path = new URL(request.url).pathname;
       // Player rooms and spectator watch rooms are separate capabilities:
       // a watch link never reaches a player room, and vice versa.
-      const match = /^\/(rooms|watch)\/([A-Za-z0-9_-]{22})(?:\/(offer|join|answer|offers))?$/.exec(path);
+      const match = /^\/(rooms|watch)\/([A-Za-z0-9_-]{22})(?:\/(offer|join|answer|offers|slots|refuse))?$/.exec(path);
       const creating = (path === '/rooms' || path === '/watch') && request.method === 'POST';
       if (path === '/health' && request.method === 'GET') {
         response = json({ service: 'copperline-netplay', version: 2,
@@ -264,7 +264,7 @@ export class NetplayRoom extends DurableObject {
     }
     const key = bearer && !owner ? `spectator:${bearer}` : null;
     const entry = key ? await this.ctx.storage.get(key) : null;
-    const ownerOnly = path === '/offers' || path === '/' || (path === '/answer' && request.method === 'POST');
+    const ownerOnly = ['/offers', '/', '/slots', '/refuse'].includes(path) || (path === '/answer' && request.method === 'POST');
     if (ownerOnly ? !owner : !entry) return json({ error: 'Room access denied' }, 403);
     if (path === '/' && request.method === 'DELETE') {
       await this.ctx.storage.deleteAll();
@@ -279,13 +279,42 @@ export class NetplayRoom extends DurableObject {
       await this.ctx.storage.put(key, entry);
       return json({ ready: true });
     }
+    if (path === '/slots' && request.method === 'POST' && owner) {
+      // The host changes its mind while the game runs: fewer places admit
+      // fewer newcomers and zero closes the door, but the room and its
+      // invitation live on so the count can go back up.
+      const body = await readJson(request);
+      const slots = body.slots;
+      if (Object.keys(body).length !== 1 || !Number.isInteger(slots) || slots < 0 || slots > SLOTS_MAX) {
+        return json({ error: `Spectator places must be 0 to ${SLOTS_MAX}` }, 400);
+      }
+      room.slots = slots;
+      room.expiresAt = now + ROOM_TTL;
+      await this.ctx.storage.put('room', room);
+      await this.ctx.storage.setAlarm(room.expiresAt);
+      return json({ slots, expiresAt: room.expiresAt });
+    }
+    if (path === '/refuse' && request.method === 'POST' && owner) {
+      // The host has no place left for this offer: the spectator learns so
+      // on its next poll instead of waiting for the offer to expire.
+      const body = await readJson(request);
+      if (!TOKEN.test(body.spectator ?? '')) return json({ error: 'Invalid spectator request' }, 400);
+      const target = `spectator:${body.spectator}`;
+      const pending = await this.ctx.storage.get(target);
+      if (!pending?.offer) return json({ error: 'Unknown spectator' }, 404);
+      if (pending.answer) return json({ error: 'The spectator already has an answer' }, 409);
+      pending.refused = true;
+      pending.fetchedAt = now;
+      await this.ctx.storage.put(target, pending);
+      return json({ refused: true });
+    }
     if (path === '/offers' && request.method === 'GET' && owner) {
       room.expiresAt = now + ROOM_TTL;
       await this.ctx.storage.put('room', room);
       await this.ctx.storage.setAlarm(room.expiresAt);
       await this.pruneSpectators(now);
       const offers = (await this.spectators())
-        .filter(([, value]) => value.offer && !value.answer)
+        .filter(([, value]) => value.offer && !value.answer && !value.refused)
         .map(([name, value]) => ({ spectator: name.slice('spectator:'.length), code: value.offer }));
       return json({ offers, expiresAt: room.expiresAt });
     }
@@ -308,7 +337,7 @@ export class NetplayRoom extends DurableObject {
         entry.fetchedAt = now;
         await this.ctx.storage.put(key, entry);
       }
-      return json({ answer: entry.answer, expiresAt: room.expiresAt });
+      return json({ answer: entry.answer, refused: !!entry.refused, expiresAt: room.expiresAt });
     }
     return json({ error: 'Not found' }, 404);
   }

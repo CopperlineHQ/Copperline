@@ -23,7 +23,10 @@ mixed operating systems and browser engines have not yet been qualified.
 On the [browser page](browser.md), open **Controls → Netplay**. The host loads
 the ROM and disks and chooses the machine settings. The guest receives that
 setup automatically over the encrypted peer connection. Both pages need the
-same emulator build. Setup starts a fresh machine, replacing any running local session.
+same emulator build. Connecting starts a fresh machine, replacing any running
+local session: the guest's page is locked from **Join game** on, while the
+host keeps playing, changing disks or adjusting the machine until player 2
+arrives, and shares whatever it holds at that moment.
 
 1. The host clicks **Host game** and shares the invitation link using **Copy
    invitation**, the device share sheet, or the QR code. **Advanced** contains
@@ -89,11 +92,15 @@ rather than allowing the players to continue with different disks.
 
 ### Watching a browser game
 
-The host chooses **Advanced → Spectators** (1 to 8) before clicking **Host
-game**. Besides the player invitation, the panel then shows a **Spectator
-invitation** with its own copy and share buttons. It is a different link: it
-cannot claim the player 2 place, and the player invitation cannot be used to
-watch. Spectators open the link and click **Watch game**. They receive the
+The host chooses **Advanced → Spectators** (1 to 8) at any time: before
+clicking **Host game**, while waiting for player 2, or during play. Besides the
+player invitation, the panel then shows a **Spectator invitation** with its own
+copy and share buttons. It is a different link: it cannot claim the player 2
+place, and the player invitation cannot be used to watch. Lowering the count
+admits fewer newcomers and **None** admits nobody new, but neither drops anyone
+already watching, and the invitation stays the same when the count goes back
+up. A spectator who finds every place taken is told so instead of waiting.
+Spectators open the link and click **Watch game**. They receive the
 host's ROMs, disks and machine settings exactly like player 2, cold-boot the
 same machine, and then replay the game from its first frame until they are
 level with the players, so a spectator can join at any point while the game
@@ -128,7 +135,9 @@ privately. If the page has no room service configured, Advanced opens by default
 
 Keep both pages open. A suspended tab can stall its peer and eventually time out;
 background execution depends on browser and device restrictions. Machine, media,
-serial, floppy sound, pause and save-state controls are locked from setup until disconnect.
+serial, floppy sound, pause and save-state controls are locked from the moment
+the page captures its media (**Join game** or **Watch game** for a guest or
+spectator, player 2's arrival for the host) until disconnect.
 Display and main output volume choices remain local. Floppy sound enablement
 and level are part of the machine fingerprint and must match. **Disconnect** cancels setup or stops
 play, discards session disk writes, and restores the selected cold-boot media.
