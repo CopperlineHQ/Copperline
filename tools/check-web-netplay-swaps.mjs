@@ -33,6 +33,27 @@ for (const [model, video, delay, window] of [['A500', 'PAL', 0, 8], ['A500', 'PA
     emu.start_netplay(player + 1, '0123456789abcdef0123456789abcdef', delay, window, 'joystick');
     return emu;
   });
+  // A spectator follows the whole session, disk changes included; a
+  // second one joins at the end and replays every change from frame zero.
+  peers[0].netplay_enable_spectators();
+  const spectate = () => {
+    const emu = new WebEmu(model, video, 2);
+    emu.load_rom(rom, ext);
+    emu.insert_floppy(0, new Uint8Array(901120), 'original.adf');
+    emu.start_spectating('joystick');
+    return { emu, cursor: peers[0].spectator_feed_open(), largest: 0 };
+  };
+  const spectators = [spectate()];
+  const follow = watcher => {
+    for (;;) {
+      const bytes = peers[0].spectator_feed_take(watcher.cursor, 65536);
+      if (!bytes.length) break;
+      watcher.largest = Math.max(watcher.largest, bytes.length);
+      watcher.emu.spectate_receive(bytes);
+    }
+    watcher.emu.run_hidden(tick * 20, 8);
+    watcher.emu.take_audio();
+  };
   const wires = [new Wire(), new Wire()];
   wires[0].peer = wires[1]; wires[1].peer = wires[0];
   const swaps = [];
@@ -61,6 +82,7 @@ for (const [model, video, delay, window] of [['A500', 'PAL', 0, 8], ['A500', 'PA
       const ready = queued.filter(item => item.due <= tick);
       queued = queued.filter(item => item.due > tick);
       for (const item of ready.reverse()) peers[item.target].netplay_receive(item.packet);
+      spectators.forEach(follow);
       tick++;
       await new Promise(resolve => setTimeout(resolve, 1));
     }
@@ -93,7 +115,23 @@ for (const [model, video, delay, window] of [['A500', 'PAL', 0, 8], ['A500', 'PA
       }
       const next = (Math.ceil(Math.max(...peers.map(emu => emu.netplay_status()[1])) / 60) + 2) * 60;
       await pump(() => peers.every(emu => emu.netplay_status()[6] >= next), next);
-      console.log(`${model}/${video} delay=${delay} window=${window}: DF${drive} ${value === null ? 'ejected' : 'replaced'}, checked frame ${next}`);
+      await pump(() => spectators[0].emu.spectate_status()[2] === 0 && spectators[0].emu.spectate_status()[1] === peers[0].netplay_status()[2], next);
+      const seen = spectators[0].emu.spectate_status();
+      assert.equal(seen[3], next, 'the spectator verified the checkpoint after the change');
+      assert.equal(spectators[0].emu.disk_name(drive), value === null ? undefined : `netplay-df${drive}`);
+      assert.equal(spectators[0].emu.floppy_write_protected(drive), value === null ? undefined : !writable);
+      console.log(`${model}/${video} delay=${delay} window=${window}: DF${drive} ${value === null ? 'ejected' : 'replaced'}, checked frame ${next}; spectator at ${seen[1]} with ${seen[4]} changes`);
+    }
+    // A late spectator replays every change from frame zero; replacement
+    // images travel whole rather than in the usual small batches.
+    spectators.push(spectate());
+    await pump(() => spectators[1].emu.spectate_status()[2] === 0 && spectators[1].emu.spectate_status()[1] === peers[0].netplay_status()[2]);
+    assert.deepEqual([...spectators[1].emu.spectate_status()], [...spectators[0].emu.spectate_status()]);
+    assert.equal(spectators[1].emu.spectate_status()[4], 5);
+    assert.ok(spectators[1].largest > 65536, 'a disk change is returned whole');
+    for (const drive of [0, 1]) {
+      assert.equal(spectators[1].emu.disk_name(drive), peers[0].disk_name(drive));
+      assert.equal(spectators[1].emu.floppy_write_protected(drive), peers[0].floppy_write_protected(drive));
     }
     peers.forEach(emu => emu.netplay_hold());
     for (const invalid of [-1, 1.5, NaN, Infinity, peers[0].netplay_status()[1] - 1, peers[0].netplay_status()[1] + 33]) {
@@ -104,6 +142,7 @@ for (const [model, video, delay, window] of [['A500', 'PAL', 0, 8], ['A500', 'PA
     swaps.forEach(swap => swap.stop());
     wires.forEach(wire => { wire.onmessage = null; });
     peers.forEach(emu => emu.free());
+    spectators.forEach(watcher => watcher.emu.free());
   }
 }
-console.log('Release WASM synchronized swaps, ejections, numeric boundaries and post-swap rollback passed');
+console.log('Release WASM synchronized swaps, ejections, numeric boundaries, post-swap rollback and spectator replay passed');

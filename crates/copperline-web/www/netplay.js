@@ -1,100 +1,37 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import { NetplayDiagnostics, connectionFailure } from './netplay-diagnostics.js';
-import { RoomClient, inviteUrl, roomFromInvite } from './netplay-room.js';
+import { RoomClient, inviteUrl, roomFromInvite, watchInviteUrl, watchFromInvite } from './netplay-room.js';
 import qrcode from './netplay-qr.js';
-import { MEDIA_CHANNEL, MEDIA_VERSION, MediaTransfer } from './netplay-media.js';
+import { MEDIA_CHANNEL, MEDIA_VERSION } from './netplay-media.js';
 import { SWAP_CHANNEL, SWAP_VERSION, DISK_LIMIT, DiskSwaps } from './netplay-swap.js';
+import { MediaTransfer } from './netplay-media.js';
+import { RtcCommon, WATCH_VERSION, decodeCode, encodeCode, newSettings, validateSettings, validateWatchSettings } from './netplay-rtc.js';
+import { RtcWatch, SpectatorHub } from './netplay-watch.js';
+
+export { decodeCode, encodeCode, newSettings, validateSettings, validateWatchSettings };
 
 // Signaling uses expiring room invitations or manual copy/paste codes.
 // Only bounded input packets use the data channel.
-const CODE_LIMIT = 96 * 1024;
 export const PACKET_LIMIT = 1103;
 const QUEUE_LIMIT = 64;
 const CHANNEL = 'copperline-netplay-v1';
+const SPECTATOR_SLOTS = 8;
 
-export function validateSettings(value) {
-  if (!value || !/^[0-9a-f]{32}$/i.test(value.session ?? '') ||
-      !Number.isInteger(value.delay) || value.delay < 0 || value.delay > 6 ||
-      !Number.isInteger(value.window) || value.window < 1 || value.window > 12 ||
-      !['joystick', 'cd32', 'mouse'].includes(value.controller) ||
-      (value.media !== undefined && value.media !== MEDIA_VERSION) ||
-      (value.swaps !== undefined && value.swaps !== SWAP_VERSION)) {
-    throw new Error('Invalid netplay settings in connection code');
-  }
-  return { session: value.session.toLowerCase(), delay: value.delay,
-    window: value.window, controller: value.controller,
-    ...(value.media ? { media: value.media } : {}), ...(value.swaps ? { swaps: value.swaps } : {}) };
-}
-
-export function encodeCode(description, settings) {
-  const code = 'CLNP1.' + btoa(JSON.stringify({ description, settings: validateSettings(settings) }));
-  if (code.length > CODE_LIMIT) throw new Error('Connection code is too large');
-  return code;
-}
-
-export function decodeCode(code, type) {
-  code = code.trim();
-  if (code.length > CODE_LIMIT || !code.startsWith('CLNP1.')) {
-    throw new Error('Paste a Copperline connection code');
-  }
-  let value;
-  try { value = JSON.parse(atob(code.slice(6))); }
-  catch { throw new Error('Connection code is incomplete or damaged'); }
-  const description = value?.description;
-  if (description?.type !== type || typeof description.sdp !== 'string' ||
-      !description.sdp.startsWith('v=0\r\n') || description.sdp.length > CODE_LIMIT) {
-    throw new Error(`Expected an ${type} connection code`);
-  }
-  return { description: { type, sdp: description.sdp }, settings: validateSettings(value.settings) };
-}
-
-export function newSettings(delay, window, controller) {
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  return validateSettings({ session: [...bytes].map(b => b.toString(16).padStart(2, '0')).join(''),
-    delay, window, controller });
-}
-
-export class RtcLink {
+export class RtcLink extends RtcCommon {
   constructor({ iceServers = [], onOpen = () => {}, onClose = () => {},
     swapCallbacks = {},
     PeerConnection = globalThis.RTCPeerConnection } = {}) {
-    if (!PeerConnection) throw new Error('This browser does not support WebRTC data channels');
-    this.pc = new PeerConnection({ iceServers });
-    this.channel = null;
-    this.settings = null;
+    super({ iceServers, PeerConnection });
     this.incoming = [];
-    this.closed = false;
     this.opened = false;
     this.onOpen = onOpen;
     this.onClose = onClose;
-    this.timer = null;
-    this.cancelGather = null;
     this.media = null;
     this.swaps = null;
     this.swapCallbacks = swapCallbacks;
     this.mediaReady = new Promise((resolve, reject) => { this.mediaAttached = resolve; this.mediaFailed = reject; });
     this.mediaReady.catch(() => {});
-    this.diagnostics = new NetplayDiagnostics();
-    this.diagnostics.record('created', this.pc);
     this.pc.ondatachannel = event => this.attach(event.channel);
-    this.pc.onconnectionstatechange = () => {
-      this.diagnostics.record('peer-state', this.pc);
-      this.diagnostics.capture(this.pc);
-      if (['failed', 'closed'].includes(this.pc.connectionState)) {
-        this.close(connectionFailure(this.pc));
-      }
-    };
-    this.pc.oniceconnectionstatechange = () => {
-      this.diagnostics.record('ice-state', this.pc);
-      this.diagnostics.capture(this.pc);
-    };
-    this.pc.onicegatheringstatechange = () => this.diagnostics.record('gathering-state', this.pc);
-    this.pc.onsignalingstatechange = () => this.diagnostics.record('signaling-state', this.pc);
-    this.pc.onicecandidateerror = event => {
-      this.diagnostics.iceError(event.errorCode);
-      this.diagnostics.record('ice-error', this.pc);
-    };
   }
 
   attach(channel) {
@@ -160,66 +97,6 @@ export class RtcLink {
     };
   }
 
-  async gather(description) {
-    if (this.closed) throw new Error('Connection cancelled');
-    await this.pc.setLocalDescription(description);
-    if (this.closed) throw new Error('Connection cancelled');
-    if (this.pc.iceGatheringState !== 'complete') {
-      await new Promise((resolve, reject) => {
-        let timer;
-        const finish = error => {
-          clearTimeout(timer);
-          this.pc.removeEventListener('icegatheringstatechange', changed);
-          this.cancelGather = null;
-          error ? reject(error) : resolve();
-        };
-        const changed = () => {
-          if (this.pc.iceGatheringState === 'complete') finish();
-        };
-        this.cancelGather = () => finish(new Error('Connection cancelled'));
-        this.pc.addEventListener('icegatheringstatechange', changed);
-        timer = setTimeout(() => {
-          // One slow/unreachable ICE server must not discard usable routes
-          // from the others. Later candidates may be omitted from this offer.
-          if (/^a=candidate:/m.test(this.pc.localDescription?.sdp ?? '')) {
-            this.diagnostics.record('gathering-deadline', this.pc);
-            finish();
-          } else finish(new Error('Network address discovery timed out without a usable route. Copy diagnostics, then try a new session.'));
-        }, 15000);
-        changed();
-      });
-    }
-    if (this.closed) throw new Error('Connection cancelled');
-    return encodeCode(this.pc.localDescription, this.settings);
-  }
-
-  configureIce(iceServers, relayOnly = false) {
-    if (!Array.isArray(iceServers) || iceServers.length > 8) throw new Error('Invalid network configuration');
-    if (relayOnly && !iceServers.some(server => [].concat(server.urls ?? []).some(url => /^turns?:/.test(url)))) {
-      throw new Error('A relay is not available for this session');
-    }
-    const iceTransportPolicy = relayOnly ? 'relay' : 'all';
-    try { this.pc.setConfiguration({ iceServers, iceTransportPolicy }); }
-    catch (error) {
-      if (error.name !== 'SyntaxError') throw error;
-      // Some WebKit builds reject valid TURN transport queries. Retry using
-      // default UDP for turn: and TLS/TCP for turns:, retaining ports and keys.
-      // Plain TCP needs its query, so omit it only on this compatibility path.
-      const compatible = iceServers.map(server => ({ ...server,
-        urls: [].concat(server.urls ?? []).flatMap(url => {
-          if (/^turn:[^?]+\?transport=udp$/i.test(url) || /^turns:[^?]+\?transport=tcp$/i.test(url)) return [url.split('?')[0]];
-          if (/^turn:[^?]+\?transport=tcp$/i.test(url)) return [];
-          return [url];
-        }),
-      })).filter(server => server.urls.length);
-      if (JSON.stringify(compatible) === JSON.stringify(iceServers) ||
-          !compatible.some(server => server.urls.some(url => /^turns?:/.test(url)))) throw error;
-      this.pc.setConfiguration({ iceServers: compatible, iceTransportPolicy });
-    }
-  }
-
-  report() { return this.diagnostics.report(this.pc, this.channel); }
-
   async offer(settings) {
     this.settings = validateSettings(settings);
     this.host = true;
@@ -231,6 +108,7 @@ export class RtcLink {
 
   async answer(code) {
     const { description, settings } = decodeCode(code, 'offer');
+    if (settings.role) throw new Error('Expected a player offer, not a spectator code');
     this.settings = settings;
     this.host = false;
     await this.pc.setRemoteDescription(description);
@@ -306,19 +184,12 @@ export class RtcLink {
     }
     this.mediaReady = this.mediaAttached = this.mediaFailed = null;
     this.incoming.length = 0;
-    this.pc.ondatachannel = this.pc.onconnectionstatechange = null;
-    this.pc.oniceconnectionstatechange = this.pc.onicegatheringstatechange = null;
-    this.pc.onsignalingstatechange = this.pc.onicecandidateerror = null;
-    if (this.channel) {
-      this.channel.onopen = this.channel.onmessage = this.channel.onclose = this.channel.onerror = null;
-      this.channel.close();
-    }
-    this.pc.close();
+    this.disposePeer();
   }
 }
 
 // The panel inserts itself into old static page shells, as the other controls do.
-export function mountNetplayPanel(parent, { prepare, start, stop, getMedia, useMedia, getMachine, diskChanged }) {
+export function mountNetplayPanel(parent, { prepare, start, stop, getMedia, useMedia, getMachine, diskChanged, build = () => '' }) {
   const style = document.createElement('style');
   style.textContent = `
     #netplay-panel { font-size: .88rem; line-height: 1.4; color: var(--ink-mute, #bbc0ca); }
@@ -338,6 +209,7 @@ export function mountNetplayPanel(parent, { prepare, start, stop, getMedia, useM
     #netplay-advanced { margin-top: .8rem; border-top: 1px solid var(--line, #454b57); padding-top: .6rem; }
     #netplay-qr { margin: .8rem auto; max-width: 260px; background: white; padding: .25rem; }
     #netplay-qr svg { display: block; width: 100%; height: auto; }
+    #netplay-watch-invitation { margin-top: .8rem; border-top: 1px solid var(--line, #454b57); padding-top: .4rem; }
     #netplay-panel label:has(input[type=checkbox]) { display: flex; align-items: center; gap: .5rem; }
     #netplay-panel input[type=checkbox] { width: auto; margin: 0; }
     @media (pointer: coarse) {
@@ -349,11 +221,12 @@ export function mountNetplayPanel(parent, { prepare, start, stop, getMedia, useM
   root.id = 'netplay-panel';
   root.className = 'try-side-section';
   root.innerHTML = `<summary>Netplay</summary>
-    <p>The host shares their ROMs, disks and machine settings with player 2. Starting a session replaces your running game.</p>
+    <p>The host shares their ROMs, disks and machine settings with player 2 and any spectators. Starting a session replaces your running game.</p>
     <div id="netplay-rooms">
       <button id="netplay-room-host" type="button">Host game</button>
       <label>Invitation link or room code <input id="netplay-room-code" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
       <button id="netplay-room-join" type="button">Join game</button>
+      <button id="netplay-room-watch" type="button" hidden>Watch game</button>
       <p id="netplay-service-status"></p>
     </div>
     <div id="netplay-invitation" hidden>
@@ -362,6 +235,12 @@ export function mountNetplayPanel(parent, { prepare, start, stop, getMedia, useM
       <button id="netplay-share" type="button" hidden>Share invitation</button>
       <div id="netplay-qr" role="img" aria-label="Scan this QR code with the other device’s camera to join"></div>
       <p>Scan with the other device’s camera, or share the link. Invitations expire after 15 minutes.</p>
+      <div id="netplay-watch-invitation" hidden>
+        <label>Spectator invitation <input id="netplay-watch-invite" readonly spellcheck="false"></label>
+        <button id="netplay-copy-watch" type="button">Copy spectator invitation</button>
+        <button id="netplay-share-watch" type="button" hidden>Share spectator invitation</button>
+        <p>Spectators receive your game files and watch without playing. They can join at any time while the game lasts.</p>
+      </div>
     </div>
     <button id="netplay-disconnect" type="button" disabled>Disconnect</button>
     <p id="netplay-status" role="status" aria-live="polite">Host a game or open an invitation to join.</p>
@@ -378,6 +257,8 @@ export function mountNetplayPanel(parent, { prepare, start, stop, getMedia, useM
     <details id="netplay-advanced"><summary>Advanced</summary>
       <label>Controllers <select id="netplay-controller"><option value="joystick">Joystick</option><option value="cd32">CD32 pad</option><option value="mouse">Two mice</option></select></label>
       <p>For two-mouse games, choose Two mice before hosting. Each player’s mouse or touch trackpad controls their own Amiga port.</p>
+      <label>Spectators <select id="netplay-spectators">${Array.from({length: SPECTATOR_SLOTS + 1}, (_, n) => `<option value="${n}">${n === 0 ? 'None' : n}</option>`).join('')}</select></label>
+      <p>Spectators get a separate invitation, replay the game from its start to catch up, and never send input.</p>
       <label>Input delay <select id="netplay-delay">${[0,1,2,3,4,5,6].map(n => `<option ${n === 2 ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
       <label>Rollback limit <select id="netplay-window">${Array.from({length:12}, (_, i) => `<option ${i === 7 ? 'selected' : ''}>${i + 1}</option>`).join('')}</select></label>
       <label><input id="netplay-relay-only" type="checkbox"> Use relay only for room connections</label>
@@ -404,11 +285,12 @@ export function mountNetplayPanel(parent, { prepare, start, stop, getMedia, useM
   const status = text => { field('status').textContent = text; };
   const controls = () => {
     const active = !!link;
-    for (const name of ['host', 'join', 'delay', 'window', 'controller', 'stun', 'relay-only', 'room-code']) field(name).disabled = active;
-    for (const name of ['room-host', 'room-join']) field(name).disabled = active || !service;
+    for (const name of ['host', 'join', 'delay', 'window', 'controller', 'spectators', 'stun', 'relay-only', 'room-code']) field(name).disabled = active;
+    for (const name of ['room-host', 'room-join', 'room-watch']) field(name).disabled = active || !service;
     field('disconnect').disabled = !active;
     field('copy').disabled = !field('local').value;
     field('diagnostics').disabled = !lastLink;
+    field('watch-invitation').hidden = !link?.hub;
     const swapEnabled = !!link?.host && link.settings?.swaps === SWAP_VERSION;
     field('disks').hidden = !swapEnabled;
     const canSwap = swapEnabled && link.swaps?.channel.readyState === 'open'
@@ -417,45 +299,67 @@ export function mountNetplayPanel(parent, { prepare, start, stop, getMedia, useM
     if (!active) field('accept').disabled = true;
   };
   field('service-status').textContent = service
-    ? 'Host is player 1; Join is player 2. Received files are used only for this session.'
+    ? 'Host is player 1; Join is player 2; Watch follows a game as a spectator. Received files are used only for this session.'
     : 'Room invitations are not configured on this page. Manual setup is available under Advanced.';
   field('advanced').open = !service;
-  field('share').hidden = typeof navigator.share !== 'function';
+  field('share').hidden = field('share-watch').hidden = typeof navigator.share !== 'function';
 
   function readInvitation() {
     if (link) return;
-    const room = new URLSearchParams(location.hash.slice(1)).get('room');
-    if (!room) return;
-    if (!roomFromInvite(room)) { root.open = true; status('This invitation is incomplete or damaged.'); return; }
-    field('room-code').value = room;
+    const params = new URLSearchParams(location.hash.slice(1));
+    const room = params.get('room');
+    const watch = params.get('watch');
+    if (!room && !watch) return;
     root.open = true;
+    if (watch) {
+      if (!watchFromInvite(watch)) { status('This spectator invitation is incomplete or damaged.'); return; }
+      field('room-code').value = location.href;
+      field('room-watch').hidden = false;
+      status('Spectator invitation ready. Click Watch game to receive the host’s files and follow the game.');
+      return;
+    }
+    if (!roomFromInvite(room)) { status('This invitation is incomplete or damaged.'); return; }
+    field('room-code').value = room;
+    field('room-watch').hidden = true;
     status('Invitation ready. Click Join game to receive the host’s files and machine settings.');
   }
   readInvitation();
   window.addEventListener('hashchange', readInvitation);
+  field('room-code').addEventListener('input', () => {
+    field('room-watch').hidden = !/[#&?]watch=/.test(field('room-code').value);
+  });
 
   async function begin(mode) {
     if (link) return;
     const host = mode.endsWith('host');
     const roomMode = mode.startsWith('room-');
+    const watch = mode === 'room-watch';
     let current;
     let settings;
     try {
       const remote = field('remote').value;
-      const roomId = roomFromInvite(field('room-code').value);
+      const roomId = watch ? watchFromInvite(field('room-code').value) : roomFromInvite(field('room-code').value);
       if (roomMode && !service) throw new Error('Room invitations are not configured on this page');
-      if (roomMode && !host && !roomId) throw new Error('Paste an invitation link or room code');
+      if (roomMode && !host && !roomId) throw new Error(watch ? 'Paste a spectator invitation link' : 'Paste an invitation link or room code');
+      const slots = host && roomMode ? Number(field('spectators').value) : 0;
       settings = host ? { ...newSettings(Number(field('delay').value), Number(field('window').value), field('controller').value), media: MEDIA_VERSION, swaps: SWAP_VERSION }
         : roomMode ? null : decodeCode(remote, 'offer').settings;
       const stun = field('stun').value.trim();
       if (!roomMode && stun && !/^stuns?:[^\s]+$/i.test(stun)) throw new Error('STUN server must start with stun: or stuns:');
-      current = new RtcLink({ iceServers: !roomMode && stun ? [{ urls: stun }] : [],
-        swapCallbacks: {
-          machine: () => getMachine(current), status,
-          changed: disk => { if (link === current) { if (disk) diskChanged(current, disk); controls(); } },
-        },
+      const callbacks = {
         onOpen: async peer => {
           if (link !== peer) return;
+          if (watch) {
+            status('Receiving the host’s game setup...');
+            const received = await peer.transferMedia(null, (action, bytes, total) => {
+              if (link === peer) status(`${action} game setup: ${Math.floor(bytes * 100 / total)}%`);
+            });
+            if (link !== peer) return;
+            useMedia(peer, received);
+            status('Connected. Checking the initial machine...');
+            await start(peer, peer.settings, 'watch');
+            return;
+          }
           if (settings.media === MEDIA_VERSION) {
             status(host ? 'Sending game setup...' : 'Receiving the host’s game setup...');
             const received = await peer.transferMedia(host ? getMedia(peer) : null, (action, bytes, total) => {
@@ -470,31 +374,70 @@ export function mountNetplayPanel(parent, { prepare, start, stop, getMedia, useM
         onClose: (reason, peer) => {
           if (link !== peer) return;
           peer.abort.abort();
+          peer.hub?.close();
+          peer.watch?.end();
           peer.room?.end();
           link = null;
           field('local').value = '';
           field('invite').value = '';
+          field('watch-invite').value = '';
           field('qr').replaceChildren();
           field('invitation').hidden = true;
           controls();
           status(stop(reason, peer) ?? reason);
         },
+      };
+      current = watch ? new RtcWatch(callbacks) : new RtcLink({ iceServers: !roomMode && stun ? [{ urls: stun }] : [],
+        swapCallbacks: {
+          machine: () => getMachine(current), status,
+          changed: disk => { if (link === current) { if (disk) diskChanged(current, disk); controls(); } },
+        },
+        ...callbacks,
       });
       current.abort = new AbortController();
       link = lastLink = current;
       field('local').value = '';
       field('report').hidden = true;
       controls();
-      status('Preparing a fresh session...');
+      status(watch ? 'Preparing to watch...' : 'Preparing a fresh session...');
       await prepare(current, { host, receiveMedia: !host && (roomMode || settings?.media === MEDIA_VERSION) });
       if (link !== current) return;
-      if (roomMode) {
+      if (watch) {
+        current.room = new RoomClient(service, current.abort.signal, '/watch');
+        status('Joining as a spectator...');
+        const network = await current.room.join(roomId);
+        if (link !== current) { current.room.end(); return; }
+        if (!Number.isFinite(network.expiresAt) || network.expiresAt <= Date.now()) throw new Error('The spectator invitation has expired');
+        current.configureIce(network.iceServers, field('relay-only').checked);
+        status('Finding a connection route...');
+        const code = await current.offer({ role: 'watch', build: build(), media: MEDIA_VERSION, watch: WATCH_VERSION });
+        if (link !== current) return;
+        await current.room.publish('offer', code);
+        if (link !== current) return;
+        status('Waiting for the host to admit you...');
+        const answer = await current.room.waitForAnswer(network.expiresAt);
+        if (link !== current) return;
+        await current.accept(answer);
+        if (link === current && !current.opened) status('Connecting to the host...');
+      } else if (roomMode) {
         current.room = new RoomClient(service, current.abort.signal);
         status(host ? 'Creating your invitation...' : 'Joining the room...');
         const network = host ? await current.room.create() : await current.room.join(roomId);
         if (link !== current) { current.room.end(); return; }
         if (!Number.isFinite(network.expiresAt) || network.expiresAt <= Date.now()) throw new Error('The invitation has expired');
         if (!host) settings = decodeCode(network.offer, 'offer').settings;
+        if (host && slots > 0) {
+          // A separate room, with its own capability, admits spectators for
+          // as long as the host keeps polling it.
+          current.watch = new RoomClient(service, current.abort.signal, '/watch');
+          const watchRoom = await current.watch.create({ slots });
+          if (link !== current) { current.watch.end(); current.room.end(); return; }
+          current.hub = new SpectatorHub({ room: current.watch, iceServers: watchRoom.iceServers,
+            relayOnly: field('relay-only').checked, slots, build: build(), controller: settings.controller,
+            media: () => getMedia(current), machine: () => getMachine(current),
+            status: text => { if (link === current) status(text); }, changed: controls });
+          field('watch-invite').value = watchInviteUrl(current.watch.id);
+        }
         current.configureIce(network.iceServers, field('relay-only').checked);
         status('Finding a connection route...');
         const code = host ? await current.offer(settings) : await current.answer(network.offer);
@@ -509,6 +452,7 @@ export function mountNetplayPanel(parent, { prepare, start, stop, getMedia, useM
           qr.make();
           field('qr').innerHTML = qr.createSvgTag({ cellSize: 4, margin: 16, scalable: true });
           field('invitation').hidden = false;
+          controls();
           status('Waiting for player 2. Share the invitation or scan the QR code.');
           const answer = await current.room.waitForAnswer(network.expiresAt);
           if (link !== current) return;
@@ -535,6 +479,7 @@ export function mountNetplayPanel(parent, { prepare, start, stop, getMedia, useM
   field('join').addEventListener('click', () => begin('manual-join'));
   field('room-host').addEventListener('click', () => begin('room-host'));
   field('room-join').addEventListener('click', () => begin('room-join'));
+  field('room-watch').addEventListener('click', () => begin('room-watch'));
   field('disk-file').addEventListener('change', async () => {
     const current = link;
     const file = field('disk-file').files?.[0];
@@ -577,9 +522,14 @@ export function mountNetplayPanel(parent, { prepare, start, stop, getMedia, useM
   }
   field('copy').addEventListener('click', () => copy('local', 'Connection code copied'));
   field('copy-invite').addEventListener('click', () => copy('invite', 'Invitation copied'));
+  field('copy-watch').addEventListener('click', () => copy('watch-invite', 'Spectator invitation copied'));
   field('share').addEventListener('click', async () => {
     try { await navigator.share({ title: 'Join my Copperline game', url: field('invite').value }); }
     catch (error) { if (error.name !== 'AbortError') copy('invite', 'Invitation copied'); }
+  });
+  field('share-watch').addEventListener('click', async () => {
+    try { await navigator.share({ title: 'Watch my Copperline game', url: field('watch-invite').value }); }
+    catch (error) { if (error.name !== 'AbortError') copy('watch-invite', 'Spectator invitation copied'); }
   });
   field('diagnostics').addEventListener('click', async () => {
     const peer = lastLink;

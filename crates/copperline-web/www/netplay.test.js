@@ -229,3 +229,12 @@ test('two-mouse controller settings survive signaling', () => {
   const description = { type: 'offer', sdp: 'v=0\r\n' };
   assert.deepEqual(decodeCode(encodeCode(description, mice), 'offer').settings, mice);
 });
+
+test('a player link refuses a spectator offer code', async () => {
+  const { RtcLink: Link } = await import('./netplay.js');
+  const link = new Link({ PeerConnection: Peer });
+  const watch = { role: 'watch', build: 'b', media: 'host-v1', watch: 'watch-v1' };
+  await assert.rejects(link.answer(encodeCode(description('offer'), watch)), /spectator/);
+  assert.equal(link.closed, false);
+  link.close();
+});

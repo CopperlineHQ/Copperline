@@ -212,6 +212,12 @@ pub struct WebEmu {
     netplay_volume: u8,
     netplay_eligible: bool,
     netplay_swap: Option<netplay::DiskSwap>,
+    /// A spectator's confirmed-only timeline, exclusive with `netplay`.
+    spectator: Option<copperline::netplay::Spectator>,
+    /// Replaying a backlog unpaced; its audio is discarded.
+    spectate_catchup: bool,
+    /// One feed cursor per spectator the host page serves.
+    feed_cursors: std::collections::BTreeMap<u32, copperline::netplay::FeedCursor>,
     config: Config,
     emu: Emulator,
     audio: Rc<RefCell<Vec<f32>>>,
@@ -363,6 +369,9 @@ impl WebEmu {
             netplay_volume: 100,
             netplay_eligible: true,
             netplay_swap: None,
+            spectator: None,
+            spectate_catchup: false,
+            feed_cursors: Default::default(),
             config: cfg,
             emu,
             audio,
@@ -514,6 +523,9 @@ impl WebEmu {
         if self.netplay.is_some() {
             return self.run_netplay(now_ms, max_frames, render);
         }
+        if self.spectator.is_some() {
+            return self.run_spectate(now_ms, max_frames, render);
+        }
         self.netplay_eligible = false;
         self.last_run_core_ms = 0.0;
         self.last_run_render_ms = 0.0;
@@ -568,7 +580,7 @@ impl WebEmu {
             return;
         }
         let visible_start_vpos = self.emu.bus().frame_visible_start_vpos();
-        let field_content = if self.netplay.is_some() {
+        let field_content = if self.session_active() {
             bitplane::render_display_only_with_content(self.emu.bus(), &mut self.fb)
         } else if self.deinterlacer.phosphor() == 0.0 {
             // A frame identical to the previous render needs no pipeline at
@@ -860,7 +872,11 @@ impl WebEmu {
     /// the AudioWorklet.
     pub fn take_audio(&mut self) -> Vec<f32> {
         let mut audio = std::mem::take(&mut *self.audio.borrow_mut());
-        if self.netplay.is_some() && self.netplay_volume != 100 {
+        if self.spectate_catchup {
+            // Fast-forward through a backlog is noise, not sound.
+            audio.clear();
+        }
+        if self.session_active() && self.netplay_volume != 100 {
             let gain = f32::from(self.netplay_volume) / 100.0;
             for sample in &mut audio {
                 *sample *= gain;
@@ -895,6 +911,9 @@ impl WebEmu {
     /// positional code a browser reports on every host layout, and the
     /// reverse table would have to be duplicated in the page glue.
     pub fn key_raw(&mut self, rawkey: u8, pressed: bool) {
+        if self.spectator.is_some() {
+            return;
+        }
         if self.netplay.is_some() {
             self.netplay_input.held.set_key(rawkey & 0x7f, pressed);
             return;
@@ -913,7 +932,7 @@ impl WebEmu {
     /// Relative mouse motion in emulated hi-res pixels (pointer-lock
     /// movementX/Y, or scaled cursor deltas when unlocked).
     pub fn mouse_delta(&mut self, dx: f64, dy: f64) {
-        if self.netplay.is_some() && !self.netplay_mouse() {
+        if self.spectator.is_some() || (self.netplay.is_some() && !self.netplay_mouse()) {
             return;
         }
         if !dx.is_finite() || !dy.is_finite() {
@@ -957,6 +976,9 @@ impl WebEmu {
 
     /// Mouse buttons: 0 = left, 1 = middle, 2 = right (MouseEvent.button).
     pub fn mouse_button(&mut self, button: u8, pressed: bool) {
+        if self.spectator.is_some() {
+            return;
+        }
         if self.netplay.is_some() {
             if self.netplay_mouse() {
                 if let Some(index) = [0, 2, 1].get(usize::from(button)) {
@@ -991,6 +1013,9 @@ impl WebEmu {
         fire: bool,
         button2: bool,
     ) {
+        if self.spectator.is_some() {
+            return;
+        }
         if self.netplay.is_some() {
             // The page's primary controller always arrives on port 2; the
             // connection assigns it to this peer's negotiated Amiga port.
@@ -1024,6 +1049,9 @@ impl WebEmu {
         green: bool,
         yellow: bool,
     ) {
+        if self.spectator.is_some() {
+            return;
+        }
         if self.netplay.is_some() {
             if port == 2 && !self.netplay_mouse() {
                 self.netplay_input
@@ -1192,7 +1220,7 @@ impl WebEmu {
     /// at the emulated baud rate, so pace large transfers with
     /// `serial_input_backlog` instead of pushing megabytes at once.
     pub fn serial_send(&mut self, bytes: Vec<u8>) {
-        if self.netplay.is_some() {
+        if self.session_active() {
             return;
         }
         self.serial.push_input(&bytes);
@@ -1233,7 +1261,7 @@ impl WebEmu {
     /// with `true` when the socket opens and `false` when it closes; a page
     /// that never calls it leaves the guest seeing a modem with no call up.
     pub fn serial_set_carrier(&mut self, connected: bool) {
-        if self.netplay.is_some() {
+        if self.session_active() {
             return;
         }
         self.serial.set_carrier(connected);
@@ -1561,7 +1589,7 @@ impl WebEmu {
     }
 
     pub fn set_volume_percent(&mut self, percent: u8) {
-        if self.netplay.is_some() {
+        if self.session_active() {
             self.netplay_volume = percent.min(100);
         } else {
             self.emu.bus_mut().set_output_volume_percent(percent);

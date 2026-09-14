@@ -1,7 +1,9 @@
 # Browser netplay rooms
 
 This Cloudflare Worker exchanges WebRTC connection descriptions between two
-players. Each SQLite Durable Object holds one invitation for at most 15 minutes.
+players, and between a host and its spectators. Each SQLite Durable Object
+holds one invitation for at most 15 minutes; a spectator "watch room" stays
+alive while the host keeps polling it.
 Game inputs and host-to-guest setup files use encrypted WebRTC directly or
 through TURN. ROMs and disks never pass through this signaling Worker; running
 snapshots are not transferred. The static site remains on GitHub Pages.
@@ -92,3 +94,28 @@ The Node tests run the Worker and Durable Objects in Miniflare, checking role
 boundaries, guest reservation, cleanup, request limits and TURN failure handling.
 An independent decoder checks the vendored QR encoder. Browser helper tests live
 in `crates/copperline-web/www`; run `npm test` there too.
+
+## Watch rooms
+
+A host that admits spectators creates a second room with `POST /watch`
+(`{ "slots": 1..8 }`), keyed by its own 22-character token: a spectator link
+(`#watch=`) never reaches `/rooms/{id}/join`, and a player room id opens no
+watch room. Signaling runs the other way round from player rooms:
+
+| Route | Who | Effect |
+| --- | --- | --- |
+| `POST /watch` | anyone (creation quota) | `{ id, owner, expiresAt, iceServers }` |
+| `POST /watch/{id}/join` `{ spectator }` | anyone with the link | reserves one of `slots` places and issues that spectator's TURN credentials; 409 when full |
+| `POST /watch/{id}/offer` `{ code }` | spectator token | stores the spectator's offer |
+| `GET /watch/{id}/offers` | owner | unanswered offers; extends the room by 15 minutes and prunes stale entries |
+| `POST /watch/{id}/answer` `{ spectator, code }` | owner | stores the answer |
+| `GET /watch/{id}/answer` | spectator token | the answer once available; fetching it frees the place |
+| `DELETE /watch/{id}` | owner | ends the room |
+
+Entries are stored per spectator, never as one growing record. An unanswered
+offer expires after 10 minutes and an unfetched answer after 2. The host
+page polls every 2 seconds only while its machine runs, and spectators poll
+every 2.5 seconds with a 5-second backoff on 429, so several spectators
+behind one address share the request quota without failing. The room's TTL
+is extended by every owner poll and it expires 15 minutes after the host
+stops polling.

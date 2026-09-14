@@ -113,7 +113,8 @@ let netplayMachineReady = false;
 let netplayTimer = null;
 let machineGeneration = 0;
 const netplayBusy = () => !!netplayPanel?.link;
-const netplayMouse = () => netplayBusy() && netplayPanel.link.settings?.controller === 'mouse';
+// A spectator's mouse never drives the machine, whatever the players use.
+const netplayMouse = () => netplayBusy() && !netplayPanel.link.spectate && netplayPanel.link.settings?.controller === 'mouse';
 const netplayDisabled = new Map();
 const NETPLAY_LOCKED_IDS = ['boot', 'machine', 'video', 'reset', 'pause', 'savestate',
   'loadstate', 'quicksave', 'quickload', 'savedstates', 'kick', 'kickurl', 'kicklist',
@@ -913,7 +914,12 @@ async function boot(request = null) {
     machine.set_phosphor?.(phosphorPersistence);
     if (request) {
       const settings = request.settings;
-      machine.start_netplay(request.player, settings.session, settings.delay, settings.window, settings.controller);
+      if (request.player === 'watch') machine.start_spectating(settings.controller);
+      else {
+        machine.start_netplay(request.player, settings.session, settings.delay, settings.window, settings.controller);
+        // The host keeps its confirmed history so spectators can join late.
+        if (request.spectators) machine.netplay_enable_spectators();
+      }
     }
     emu?.free();
     emu = machine;
@@ -1173,7 +1179,7 @@ function stepMachine(nowMs, deferRender) {
     if (netplayMachineReady) netplayPanel.link.receive(emu);
     const deferred = deferRender && typeof emu.run_hidden === 'function';
     const stepped = deferred ? emu.run_hidden(nowMs, max) : emu.run(nowMs, max);
-    if (netplayMachineReady) netplayPanel.link.send(emu);
+    if (netplayMachineReady) { netplayPanel.link.send(emu); netplayPanel.link.hub?.pump(emu); }
     const stepElapsed = performance.now() - stepStart;
     updateRenderStrideController(nowMs, stepElapsed, stepped, !deferred);
     if (
@@ -3638,6 +3644,8 @@ let netplayHostKeyFrame = 0;
 
 function pumpHostKeys() {
   if (netplayMachineReady) {
+    // Spectators type nothing into the shared machine.
+    if (netplayPanel.link.spectate) return;
     const [connected, frame] = emu.netplay_status();
     if (!connected || document.hidden || !document.hasFocus() || frame < netplayHostKeyFrame) return;
     if (hostKeyQueue.length) {
@@ -7543,6 +7551,7 @@ if (typeof WebEmu.prototype.start_netplay === 'function') {
     $('reset').closest('.try-side-section')?.parentElement ?? shell.parentElement,
     {
       getMachine: link => netplayPanel?.link === link && netplayMachineReady ? emu : null,
+      build: () => WebEmu.build_info(),
       diskChanged: (link, disk) => {
         if (netplayPanel?.link !== link) return;
         diskNames[disk.drive] = disk.size ? disk.name : null;
@@ -7596,15 +7605,25 @@ if (typeof WebEmu.prototype.start_netplay === 'function') {
       start: async (link, settings, player) => {
         const snapshot = netplayPreparing;
         if (snapshot?.link !== link || netplayPanel.link !== link) return;
-        if (!await boot({ link, settings, player, snapshot })) return;
+        const watching = player === 'watch';
+        if (!await boot({ link, settings, player, snapshot, spectators: !!link.hub })) return;
         if (netplayPanel.link !== link) return;
         netplayMachineReady = true;
-        // Send our initial fingerprint before consuming the peer's. Both
-        // machines can then report a mismatch even if one closes first.
-        emu.run_hidden(performance.now(), 0);
-        link.send(emu);
-        setJoyMode(settings.controller === 'mouse' ? 'off' : hasTouch ? 'touch' : settings.controller === 'cd32' ? 'cd32' : 'keys');
+        if (watching) {
+          // A spectator only reports its fingerprint; the host streams the
+          // game once it matches. Keyboard joystick mode stays off: there
+          // is no port to drive.
+          setJoyMode('off');
+        } else {
+          // Send our initial fingerprint before consuming the peer's. Both
+          // machines can then report a mismatch even if one closes first.
+          emu.run_hidden(performance.now(), 0);
+          link.send(emu);
+          setJoyMode(settings.controller === 'mouse' ? 'off' : hasTouch ? 'touch' : settings.controller === 'cd32' ? 'cd32' : 'keys');
+          link.hub?.start();
+        }
         let lastStatus = 0;
+        let lastSwaps = 0;
         netplayTimer = setInterval(() => {
           if (!netplayMachineReady || netplayPanel.link !== link || !emu) return;
           try {
@@ -7612,10 +7631,28 @@ if (typeof WebEmu.prototype.start_netplay === 'function') {
             link.receive(emu);
             emu.run_hidden(performance.now(), 0);
             link.send(emu);
-            if (performance.now() - lastStatus > 1000) {
+            link.hub?.pump(emu);
+            if (watching) {
+              const [, frame, behind, checked, swaps] = emu.spectate_status();
+              if (swaps !== lastSwaps) {
+                // The host changed a disk at this frame; show what it holds.
+                lastSwaps = swaps;
+                for (let drive = 0; drive < PAGE_FLOPPY_DRIVES; drive++) diskNames[drive] = emu.disk_name(drive) ?? null;
+                lastFddTrack = null;
+                updateStatusDisks();
+                updateFloppyImageControls();
+              }
+              if (performance.now() - lastStatus > 1000) {
+                netplayPanel.status(behind > 25
+                  ? `Watching: frame ${frame}, catching up (${behind} frames behind), checked ${checked}`
+                  : `Watching: frame ${frame}, ${behind} behind, checked ${checked}`);
+                lastStatus = performance.now();
+              }
+            } else if (performance.now() - lastStatus > 1000) {
               const [connected, frame, confirmed, , rollbacks, , checked] = emu.netplay_status();
+              const spectators = link.hub ? `, ${link.hub.watching} watching` : '';
               netplayPanel.status(connected
-                ? `Player ${player}: frame ${frame}, confirmed ${confirmed}, ${rollbacks} rollbacks, checked ${checked}`
+                ? `Player ${player}: frame ${frame}, confirmed ${confirmed}, ${rollbacks} rollbacks, checked ${checked}${spectators}`
                 : 'Waiting for a matching machine...');
               lastStatus = performance.now();
             }
