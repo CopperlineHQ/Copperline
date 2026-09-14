@@ -392,5 +392,7 @@ export class SpectatorHub {
     this.timer = null;
     if (dropPeers) for (const peer of [...this.peers.values()]) peer.close('The host ended the game');
     this.room.end();
+    // The invitation just went dead: the panel must stop showing it.
+    this.changed();
   }
 }

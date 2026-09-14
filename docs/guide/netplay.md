@@ -92,10 +92,11 @@ rather than allowing the players to continue with different disks.
 
 ### Watching a browser game
 
-Every hosted game admits up to eight spectators. Besides the player
-invitation, the panel shows a **Spectator invitation** with its own copy and
-share buttons and QR code; once player 2 has joined, the spent player
-invitation gives way and only the spectator invitation stays on show. It is a
+Every game hosted through **Host game** admits up to eight spectators;
+manual connection codes have no room service and so no spectators. Besides
+the player invitation, the panel shows a **Spectator invitation** with its own
+copy and share buttons and QR code; once player 2 has joined, the spent
+player invitation gives way and only the spectator invitation stays on show. It is a
 different link: it cannot claim the player 2 place, and the player invitation
 cannot be used to watch, so the page offers **Watch game** for a spectator
 link and **Join game** for a player invitation, never both. A spectator who

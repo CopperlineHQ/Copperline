@@ -250,9 +250,10 @@ test('an expired room withdraws its invitation but keeps the spectators it admit
     refuseWatch: async () => {},
     end: () => { room.ended = true; } };
   const notices = [];
+  const seen = [];
   const machine = { netplay_identity: () => identity };
   const hub = new SpectatorHub({ room, slots: 3, build: 'build-1', controller: 'joystick', media: () => ({}),
-    machine: () => machine, status: text => notices.push(text), PeerConnection: Peer });
+    machine: () => machine, status: text => notices.push(text), changed: () => seen.push(hub.invitation), PeerConnection: Peer });
   t.after(() => hub.close());
   assert.equal(hub.invitation, room.id);
   hub.start();
@@ -262,5 +263,6 @@ test('an expired room withdraws its invitation but keeps the spectators it admit
   await hub.poll();
   assert.deepEqual([hub.closed, hub.invitation, hub.peers.size, room.ended], [true, null, 1, true]);
   assert.match(notices.at(-1), /invitation ended/);
+  assert.equal(seen.at(-1), null, 'the panel is told once the invitation is dead');
   assert.ok([...hub.peers.values()].every(peer => !peer.closed), 'admitted spectators keep watching');
 });
