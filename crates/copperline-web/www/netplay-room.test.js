@@ -67,6 +67,13 @@ test('spectator invitations carry a separate capability and the watch client rou
   const answered = calls.at(-1);
   assert.equal(answered.url, `https://service.test/watch/${id}/answer`);
   assert.deepEqual(JSON.parse(answered.options.body), { spectator: 'c'.repeat(22), code: 'the-answer' });
+  await host.setSlots(0);
+  assert.equal(calls.at(-1).url, `https://service.test/watch/${id}/slots`);
+  assert.deepEqual(JSON.parse(calls.at(-1).options.body), { slots: 0 });
+  await host.refuseWatch('d'.repeat(22));
+  assert.equal(calls.at(-1).url, `https://service.test/watch/${id}/refuse`);
+  assert.deepEqual(JSON.parse(calls.at(-1).options.body), { spectator: 'd'.repeat(22) });
+  assert.equal(calls.at(-1).options.headers.Authorization, 'Bearer ' + 'b'.repeat(22));
   const spectator = new RoomClient('https://service.test', abort.signal, '/watch');
   await assert.rejects(spectator.join('bad'), /spectator invitation/);
   await spectator.join(id);
@@ -78,6 +85,9 @@ test('spectator invitations carry a separate capability and the watch client rou
     Response.json({ answer: null }), Response.json({ answer: 'the-answer' }));
   assert.equal(await spectator.waitForAnswer(Date.now() + 60000), 'the-answer');
   assert.equal(calls.filter(call => call.url.endsWith('/answer') && call.options.method === 'GET').length, 3);
+  // A refusal ends the wait at once with the host's reason.
+  answers.push(Response.json({ answer: null, refused: true }));
+  await assert.rejects(spectator.waitForAnswer(Date.now() + 60000), /no free spectator places/);
   answers.push(Response.json({ error: 'gone' }, { status: 410 }));
   await assert.rejects(spectator.waitForAnswer(Date.now() + 60000), /gone/);
   await host.end();
