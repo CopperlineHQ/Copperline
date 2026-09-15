@@ -82,6 +82,8 @@ pub(crate) struct HostRouting {
     pub(crate) mouse: Option<usize>,
     /// Port the physical gamepad drives (joystick/CD32 devices only).
     pub(crate) gamepad: Option<usize>,
+    /// Ports driven by physical controllers 2 through 4.
+    pub(crate) additional_gamepads: [Option<usize>; 3],
     /// Port the gamepad drives as a mouse, in Gamepad Mouse mode: the
     /// same port the host mouse has, since the machine is given one
     /// mouse and two hands on it rather than two mice.
@@ -102,14 +104,9 @@ pub(crate) fn host_routing_for(devices: [PortDevice; 2], mode: JoystickInputMode
     host_routing_for_ports(devices, [PortDevice::None; 2], mode)
 }
 
-/// [`host_routing_for`] with the parallel-port adapter's sockets (ports 3
-/// and 4) in the picture. They are plain joystick ports that come after
-/// the game ports in the queue for the host sources: the pad and the
-/// keyboard mappings take the game ports first, and a socket gets a
-/// source only when the game ports have none left for it -- so a
-/// four-joystick wiring drives ports 1 and 2 from the pad and the
-/// cursor-key mapping, with the numpad mapping standing in where no pad
-/// is present, exactly as a two-joystick wiring does.
+/// The primary gamepad and keyboard assignment, including parallel sockets.
+/// The runtime extends this with the other connected gamepads in
+/// [`host_routing_for_gamepads`].
 pub(crate) fn host_routing_for_ports(
     devices: [PortDevice; 2],
     parallel: [PortDevice; 2],
@@ -164,10 +161,61 @@ pub(crate) fn host_routing_for_ports(
     HostRouting {
         mouse,
         gamepad,
+        additional_gamepads: [None; 3],
         gamepad_mouse: pad_mouse,
         keyboard,
         keyboard2,
     }
+}
+
+/// Extend the familiar one-pad routing with stable slots for three more
+/// controllers. Keyboards fill vacancies, while Keyboard mode reserves the
+/// cursor-key player's port even when every physical controller is present.
+fn host_routing_for_gamepads(
+    devices: [PortDevice; 2],
+    parallel: [PortDevice; 2],
+    mode: JoystickInputMode,
+    available: [bool; 4],
+) -> HostRouting {
+    let mut r = host_routing_for_ports(devices, parallel, mode);
+    let all = [devices[0], devices[1], parallel[0], parallel[1]];
+    let eligible = |p: usize| matches!(all[p], PortDevice::Joystick | PortDevice::Cd32Pad);
+    let reserved_keyboard = (mode == JoystickInputMode::Keyboard)
+        .then_some(r.keyboard)
+        .flatten();
+    let mut extra =
+        (0..4).filter(|&p| eligible(p) && Some(p) != r.gamepad && Some(p) != reserved_keyboard);
+    for port in &mut r.additional_gamepads {
+        *port = extra.next();
+    }
+    let pad_ports = [
+        r.gamepad,
+        r.additional_gamepads[0],
+        r.additional_gamepads[1],
+        r.additional_gamepads[2],
+    ];
+    let occupied = |p: usize| {
+        pad_ports
+            .iter()
+            .zip(available)
+            .any(|(&port, present)| present && port == Some(p))
+    };
+    if r.keyboard.is_some_and(occupied) {
+        r.keyboard = (0..4).find(|&p| eligible(p) && Some(p) != r.gamepad && !occupied(p));
+    }
+    // Keep the two-keyboard fallback order: cursor keys on their usual
+    // player, numpad on the absent primary pad, then any spare socket.
+    if r.keyboard2.is_some()
+        || (r.keyboard.is_some()
+            && all
+                .iter()
+                .filter(|&&d| d == PortDevice::Joystick || d == PortDevice::Cd32Pad)
+                .count()
+                > 1)
+    {
+        r.keyboard2 = (0..4).find(|&p| eligible(p) && Some(p) != r.keyboard && !occupied(p));
+    }
+    r
 }
 
 /// How the pad moves the mouse in Gamepad Mouse mode, in quadrature
@@ -1397,6 +1445,7 @@ pub struct App {
     /// input backend is available (e.g. headless CI) or the pad is not yet
     /// calibrated.
     gamepad: crate::gamepad::GamepadReader,
+    gamepad_available: [bool; 4],
     /// When the pad's Quit hotkey started being held, if it is down right
     /// now. Cleared by a release before the hold completes.
     gamepad_quit_hold: Option<Instant>,
@@ -2345,6 +2394,7 @@ impl App {
             tint_lut: tint_lut(tint),
             start_fullscreen,
             gamepad: crate::gamepad::GamepadReader::new(),
+            gamepad_available: [false; 4],
             gamepad_quit_hold: None,
             tool_window_front: None,
             cal_pad_drives: false,
@@ -2546,97 +2596,68 @@ impl App {
             .position(|p| p.device.is_mouse())
     }
 
-    /// Which port each host input source drives this quantum. The host
-    /// mouse claims the lowest-numbered mouse port; the ports left over
-    /// that a host source can drive (joysticks, CD32 pads, and a second
-    /// mouse) are assigned by count:
-    ///
-    /// - One port: the [`JoystickInputMode`] picks its source. `Gamepad`
-    ///   leaves the keyboard passing through to the Amiga -- and cannot
-    ///   drive a second mouse, which is then undriven until the mode is
-    ///   flipped to `Keyboard`.
-    /// - Two ports (a two-controller setup): the gamepad -- backed by the
-    ///   numpad keyboard mapping whenever no physical pad is present --
-    ///   and the cursor-key mapping drive one each, the mode picking
-    ///   which source pair gets the lower-numbered port.
-    ///
-    /// The cursor-key mapping drives whatever device its port carries:
-    /// direction lines on a joystick/pad, pointer motion and buttons on a
-    /// mouse.
+    /// Assign physical controllers to stable player slots, then use the
+    /// cursor and numpad mappings for remaining players. Keyboard mode
+    /// reserves the first player's port for cursor keys. A single joystick
+    /// in Gamepad mode keeps all keyboard keys passing through to the guest.
     fn host_routing(&self) -> HostRouting {
         let input = &self.emu.bus().input;
-        host_routing_for_ports(
+        host_routing_for_gamepads(
             [input.ports[0].device, input.ports[1].device],
             [input.device(2), input.device(3)],
             self.joystick_input_mode,
+            self.gamepad_available,
         )
     }
 
-    /// Poll the host input sources and drive the emulated port(s). Called
-    /// once per scheduler quantum. Scripted --joy-after state beats the
-    /// keyboard mapping on a shared port and asserts alone on ports no
-    /// host source drives; a present physical pad beats the scripted
-    /// state on its port, as it always has.
+    /// Poll every physical controller once per quantum. The first controller
+    /// also operates the host interface; each player keeps independent input.
     fn pump_joystick_input(&mut self) {
         if self.netplay.is_some() {
             self.pump_netplay_input();
             return;
         }
+        let pads = self.gamepad.poll_all();
+        self.track_gamepad_quit_hold(pads[0].is_some_and(|state| state.quit));
+        self.pad_last = pads[0];
+        self.apply_host_gamepads(pads);
+    }
+
+    fn apply_host_gamepads(&mut self, pads: [Option<crate::gamepad::PadState>; 4]) {
+        self.gamepad_available = pads.map(|p| p.is_some());
         let r = self.host_routing();
-        // Poll the pad whether or not it drives a port: the Quit hotkey
-        // and Menu button are host controls and work regardless of routing.
-        let pad = self.gamepad.poll();
-        self.track_gamepad_quit_hold(pad.is_some_and(|state| state.quit));
-        // Published for the menu bridge, which runs at the about_to_wait
-        // boundary where the event loop is at hand.
-        self.pad_last = pad;
-        // While the menu or an overlay panel is up, the pad walks the UI
-        // rather than the game -- the same arbitration the keyboard gets
-        // from the modal overlay -- so the port lines are released rather
-        // than held mid-move.
+        let pad_ports = [
+            r.gamepad,
+            r.additional_gamepads[0],
+            r.additional_gamepads[1],
+            r.additional_gamepads[2],
+        ];
         let ui_owns_pad = self.modal_ui_active();
-        if let Some(port) = r.gamepad {
-            match pad {
-                Some(state) if !ui_owns_pad => self.apply_joystick_state(port, state.joystick),
-                Some(_) => self.release_joystick_lines(port),
-                // No physical pad but --joy-after scripting has fired: keep
-                // asserting the scripted state so it survives this release
-                // path and drives the upcoming scheduler quantum.
-                None if self.auto_joy_engaged[port] => self.apply_auto_joy_state(port),
-                // No pad in a two-controller setup: the numpad keyboard
-                // mapping stands in for it.
-                None if r.keyboard2 == Some(port) => {
-                    self.apply_joystick_state(port, self.keyboard_joystick_state(1))
+        for port in 0..crate::bus::PORT_COUNT {
+            let pad_slot = pad_ports.iter().position(|&p| p == Some(port));
+            let physical = pad_slot.and_then(|slot| pads[slot]);
+            if let Some(state) = physical {
+                if ui_owns_pad {
+                    self.release_joystick_lines(port);
+                } else {
+                    self.apply_joystick_state(port, state.joystick);
                 }
-                // Pad gone/uncalibrated: release the port so nothing sticks.
-                None => self.release_joystick_lines(port),
-            }
-        }
-        // In Gamepad Mouse mode the pad is spent on the mouse port
-        // instead of a joystick one: the routing has already taken it
-        // off the joysticks, so this is the only place it is heard.
-        if let Some(port) = r.gamepad_mouse {
-            match pad {
-                Some(state) if !ui_owns_pad => self.apply_pad_mouse_state(port, state),
-                // The UI has it, or it has gone: let go of the buttons
-                // rather than leaving one down over the guest.
-                _ => self.release_pad_mouse(port),
-            }
-        }
-        if let Some(port) = r.keyboard {
-            if self.emu.bus().input.device(port).is_mouse() {
+            } else if r.keyboard == Some(port) && self.emu.bus().input.device(port).is_mouse() {
                 self.apply_keyboard_mouse_state(port);
             } else if self.auto_joy_engaged[port] {
                 self.apply_auto_joy_state(port);
-            } else {
+            } else if r.keyboard == Some(port) {
                 self.apply_joystick_state(port, self.keyboard_joystick_state(0));
+            } else if r.keyboard2 == Some(port) {
+                self.apply_joystick_state(port, self.keyboard_joystick_state(1));
+            } else if pad_slot.is_some() {
+                self.release_joystick_lines(port);
             }
         }
-        // Scripted joy state on ports no host source drives asserts
-        // independently.
-        for port in 0..crate::bus::PORT_COUNT {
-            if Some(port) != r.gamepad && Some(port) != r.keyboard && self.auto_joy_engaged[port] {
-                self.apply_auto_joy_state(port);
+        if let Some(port) = r.gamepad_mouse {
+            match pads[0] {
+                Some(state) if !ui_owns_pad => self.apply_pad_mouse_state(port, state),
+                _ => self.release_pad_mouse(port),
             }
         }
     }
@@ -3118,8 +3139,17 @@ impl App {
         };
         let active = self.keyboard_mapping_active(mapping);
         let was_held = self.keyboard_joy_held[mapping].is_set(code);
-        if !active && !was_held {
+        if (!active || !pressed) && !was_held {
+            // A key pressed before this mapping took ownership still owes
+            // its release to the Amiga keyboard, even after a pad unplug.
             return false;
+        }
+        if pressed && !was_held {
+            // A repeated press can arrive after routing changes. End any
+            // guest key hold before taking it over as a joystick control.
+            if let Some(rawkey) = host_to_amiga_rawkey(code) {
+                self.release_amiga_rawkey_if_held(rawkey);
+            }
         }
         self.keyboard_joy_held[mapping].set(code, pressed);
         if active {

@@ -1504,9 +1504,8 @@ pub(crate) fn parse_parallel_device(s: &str) -> Result<ParallelDevice> {
         "none" | "off" => Ok(ParallelDevice::None),
         "printer" => Ok(ParallelDevice::Printer),
         "sampler" => Ok(ParallelDevice::Sampler),
-        "joystick-adapter" | "joystick_adapter" | "joysticks" | "four-player" | "4-player" => {
-            Ok(ParallelDevice::JoystickAdapter)
-        }
+        "joystick-adapter" | "joystick_adapter" | "joysticks" | "four-player" | "4-player"
+        | "multitap" => Ok(ParallelDevice::JoystickAdapter),
         other => bail!(
             "[parallel] device must be \"none\", \"printer\", \"sampler\", or \
              \"joystick-adapter\", got \"{other}\""

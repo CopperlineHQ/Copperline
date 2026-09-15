@@ -428,6 +428,7 @@ fn host_routing_assigns_sources_by_device_and_mode() {
         HostRouting {
             mouse,
             gamepad,
+            additional_gamepads: [None; 3],
             gamepad_mouse: None,
             keyboard,
             keyboard2,
@@ -460,7 +461,9 @@ fn host_routing_assigns_sources_by_device_and_mode() {
     // mapping -- and the cursor-key mapping drive one each; the mode
     // picks which pair gets the lower-numbered port.
     set(&mut app, PortDevice::Joystick, PortDevice::Joystick);
-    assert_eq!(app.host_routing(), routing(None, Some(0), Some(1), Some(0)));
+    let mut two_pads = routing(None, Some(0), Some(1), Some(0));
+    two_pads.additional_gamepads[0] = Some(1);
+    assert_eq!(app.host_routing(), two_pads);
     assert!(app.keyboard_mapping_active(1));
     app.joystick_input_mode = JoystickInputMode::Keyboard;
     assert_eq!(app.host_routing(), routing(None, Some(1), Some(0), Some(1)));
@@ -498,6 +501,7 @@ fn a_gamepad_mouse_takes_the_pad_off_the_joystick() {
         HostRouting {
             mouse: Some(0),
             gamepad: None,
+            additional_gamepads: [None; 3],
             gamepad_mouse: Some(0),
             keyboard: Some(1),
             keyboard2: None,
@@ -516,6 +520,7 @@ fn a_gamepad_mouse_takes_the_pad_off_the_joystick() {
         HostRouting {
             mouse: Some(0),
             gamepad: Some(1),
+            additional_gamepads: [None; 3],
             gamepad_mouse: None,
             keyboard: None,
             keyboard2: None,
@@ -12942,4 +12947,138 @@ fn netplay_gui_spectator_follows_the_players_without_input_or_disk_controls() ->
         })?
         .join()
         .unwrap()
+}
+
+#[test]
+fn multitap_routes_four_pads_and_releases_only_the_disconnected_player() {
+    use crate::bus::PortDevice as D;
+    use crate::gamepad::{JoystickState, PadState};
+    let mut app = test_app();
+    for port in 0..4 {
+        app.emu.bus_mut().input.set_port_device(port, D::Joystick);
+    }
+    let pads = [
+        JoystickState {
+            up: true,
+            fire: true,
+            ..Default::default()
+        },
+        JoystickState {
+            down: true,
+            ..Default::default()
+        },
+        JoystickState {
+            left: true,
+            fire: true,
+            ..Default::default()
+        },
+        JoystickState {
+            right: true,
+            fire: true,
+            ..Default::default()
+        },
+    ]
+    .map(|joystick| {
+        Some(PadState {
+            joystick,
+            ..Default::default()
+        })
+    });
+    app.apply_host_gamepads(pads);
+    let input = &app.emu.bus().input;
+    assert!(input.ports[0].up && input.ports[0].fire);
+    assert!(input.ports[1].down && !input.ports[1].fire);
+    assert!(input.parallel_joysticks[0].left && input.parallel_joysticks[0].fire);
+    assert!(input.parallel_joysticks[1].right && input.parallel_joysticks[1].fire);
+    assert!(!app.keyboard_mapping_active(0));
+    assert!(!app.keyboard_mapping_active(1));
+    let mut unplugged = pads;
+    unplugged[2] = None;
+    app.apply_host_gamepads(unplugged);
+    let input = &app.emu.bus().input;
+    assert!(!input.parallel_joysticks[0].left && !input.parallel_joysticks[0].fire);
+    assert!(input.parallel_joysticks[1].right && input.parallel_joysticks[1].fire);
+    app.ui.menu_open = true;
+    app.apply_host_gamepads(pads);
+    let input = &app.emu.bus().input;
+    assert!(!input.ports[0].fire && !input.ports[1].down);
+    assert!(!input.parallel_joysticks[0].fire && !input.parallel_joysticks[1].fire);
+}
+
+#[test]
+fn multitap_combines_two_keyboards_with_two_pads_and_can_reserve_keyboard_player() {
+    use crate::bus::PortDevice as D;
+    use crate::gamepad::{JoystickState, PadState};
+    let mut app = test_app();
+    for port in 0..4 {
+        app.emu.bus_mut().input.set_port_device(port, D::Joystick);
+    }
+    app.keyboard_joy_held[0].set(KeyCode::ArrowLeft, true);
+    app.keyboard_joy_held[0].set(KeyCode::ControlRight, true);
+    app.keyboard_joy_held[1].set(KeyCode::Numpad6, true);
+    app.keyboard_joy_held[1].set(KeyCode::Numpad0, true);
+    let pad = Some(PadState {
+        joystick: JoystickState {
+            up: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    app.apply_host_gamepads([pad, pad, None, None]);
+    let input = &app.emu.bus().input;
+    assert!(input.ports[0].up && input.ports[1].up);
+    assert!(input.parallel_joysticks[0].left && input.parallel_joysticks[0].fire);
+    assert!(input.parallel_joysticks[1].right && input.parallel_joysticks[1].fire);
+    app.joystick_input_mode = JoystickInputMode::Keyboard;
+    app.apply_host_gamepads([pad; 4]);
+    let input = &app.emu.bus().input;
+    assert!(input.ports[0].left && input.ports[0].fire);
+    assert!(input.ports[1].up);
+    assert!(input.parallel_joysticks[0].up && input.parallel_joysticks[1].up);
+    assert!(app.keyboard_mapping_active(0));
+    assert!(!app.keyboard_mapping_active(1));
+}
+
+#[test]
+fn multitap_keeps_the_primary_pad_on_a_gamepad_mouse() {
+    use crate::bus::PortDevice as D;
+    let r = super::host_routing_for_gamepads(
+        [D::GamepadMouse, D::Joystick],
+        [D::Joystick; 2],
+        JoystickInputMode::Gamepad,
+        [true; 4],
+    );
+    assert_eq!(r.gamepad_mouse, Some(0));
+    assert_eq!(r.gamepad, None);
+    assert_eq!(r.additional_gamepads, [Some(1), Some(2), Some(3)]);
+    assert_eq!(r.keyboard, None);
+    assert_eq!(r.keyboard2, None);
+}
+
+#[test]
+fn multitap_keyboard_takeover_keeps_guest_key_releases_balanced() {
+    use crate::bus::PortDevice as D;
+    use crate::gamepad::PadState;
+    let mut app = test_app();
+    for port in 0..4 {
+        app.emu.bus_mut().input.set_port_device(port, D::Joystick);
+    }
+    app.apply_host_gamepads([Some(PadState::default()); 4]);
+    let raw = host_to_amiga_rawkey(KeyCode::ArrowLeft).unwrap();
+    assert!(!app.handle_keyboard_joystick_key(KeyCode::ArrowLeft, true));
+    app.handle_amiga_key_event(raw, true);
+    app.apply_host_gamepads([None; 4]);
+    assert!(app.keyboard_mapping_active(0));
+    assert!(!app.handle_keyboard_joystick_key(KeyCode::ArrowLeft, false));
+    app.handle_amiga_key_event(raw, false);
+    assert!(!app.amiga_rawkey_held(raw));
+
+    // An autorepeat after the handover must also finish the old guest hold.
+    app.apply_host_gamepads([Some(PadState::default()); 4]);
+    app.handle_amiga_key_event(raw, true);
+    app.apply_host_gamepads([None; 4]);
+    assert!(app.handle_keyboard_joystick_key(KeyCode::ArrowLeft, true));
+    assert!(!app.amiga_rawkey_held(raw));
+    assert!(app.handle_keyboard_joystick_key(KeyCode::ArrowLeft, false));
+    assert!(!app.keyboard_joy_held[0].is_set(KeyCode::ArrowLeft));
 }

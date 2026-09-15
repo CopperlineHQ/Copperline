@@ -2035,7 +2035,11 @@ impl MachineSetup {
                 if self.port_devices[port].is_mouse() {
                     "cursor keys as a mouse (fire keys = buttons)".to_string()
                 } else {
-                    "cursor keys (Ctrl/RAlt = fire, LAlt = button 2)".to_string()
+                    if self.joystick_input_mode == JoystickInputMode::Gamepad {
+                        "gamepad 2, or cursor keys (Ctrl/RAlt = fire)".to_string()
+                    } else {
+                        "cursor keys (Ctrl/RAlt = fire, LAlt = button 2)".to_string()
+                    }
                 }
             } else {
                 match self.port_devices[port] {

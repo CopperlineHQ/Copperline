@@ -1278,16 +1278,35 @@ on every later Amiga; a pen in the other port is logged at start-up. See
 [Port devices](configuration.md#port-devices) for the headless and
 control-protocol forms.
 
-Ports 3 and 4 are the sockets of the passive parallel-port four-player
-adapter (`[parallel] device = "joystick-adapter"`, or simply `[input]
-port3`/`port4 = "joystick"`, or `--port3`/`--port4`), the one Kick Off 2,
-Sensible Soccer, Dyna Blaster and Gauntlet II read. They carry plain switch
-joysticks and join the queue for the host sources behind the game ports:
-the pad and the keyboard mappings fill ports 1 and 2 first and a socket is
-driven only when the game ports have no joystick left for it. One physical
-pad is read; scripted `--joy-after ... 3`/`4` input and the control
-protocol's `input.joy` drive the sockets directly. Netplay and the libretro
-core stay two-player.
+Ports 3 and 4 are the sockets of the parallel-port **multitap**, also called
+the four-player joystick adapter. Select **I/O Ports > Parallel > Multitap
+(4 joysticks)** in the launcher, or use `--parallel multitap` (the existing
+`joystick-adapter` name also works). Games such as Super Skidmarks, Kick Off 2
+and Dyna Blaster read these sockets as two extra joysticks.
+
+For four local USB/Bluetooth controllers, select **Joystick** for both
+native ports and use **gamepad** input mode:
+
+```sh
+copperline --parallel multitap --port1 joystick --port2 joystick --joystick gamepad
+```
+
+Controllers fill the configured joystick ports in port order. Each has its
+own state and calibration; unplugging one releases its controls without
+moving the other controllers between players. The next controller connected
+fills the vacant slot. The first controller also operates Copperline's menu.
+To calibrate another controller, connect it alone while running calibration.
+
+The cursor-key and numeric-keypad mappings fill remaining player slots.
+Two physical controllers plus the two keyboard mappings can
+therefore drive all four players. **Keyboard** input mode reserves the first
+joystick port for cursor keys, with up to three physical controllers filling
+the rest. With no pads, cursor keys and numpad retain their usual two-player
+assignment. Bindings remain editable through **Input Mapping...**.
+
+Scripted `--joy-after ... 3`/`4` and the control protocol's `input.joy` address
+the adapter sockets directly. The [libretro core](libretro.md) also exposes
+both sockets. Copperline's built-in Netplay remains two-player.
 
 A `gamepad-mouse` device is a mouse a gamepad moves as well as the host's
 own; the machine still sees one mouse. The d-pad moves the pointer,
@@ -1310,11 +1329,11 @@ keys aren't working" surprise can be spotted and fixed at a glance:
 - **keyboard**: use the keyboard-joystick mapping so the joystick port
   works without a controller.
 
-With joysticks (or pads) in *both* ports -- a two-player setup -- the
-gamepad and the cursor-key mapping drive one port each, and the mode picks
-which source gets the lower-numbered port. Whenever no physical pad is
-present, a second keyboard mapping on the numeric keypad stands in for it,
-so two players can share one keyboard.
+With joysticks (or pads) in both ports, two connected gamepads drive one
+each in **gamepad** mode. With one gamepad, cursor keys drive the other port;
+with none, the numeric keypad substitutes for the gamepad so two players
+can share one keyboard. **Keyboard** mode keeps cursor keys on the first
+joystick port even when multiple gamepads are connected.
 
 With mice in both ports, the host mouse drives the lower-numbered one and
 the cursor-key mapping drives the second as an emulated mouse (in

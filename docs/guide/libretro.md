@@ -93,6 +93,22 @@ mice; the frontend and its input driver must support multiple mice. A port
 can also be disconnected. This version has no on-screen keyboard or
 gamepad-to-mouse controls.
 
+### Four-player multitap
+
+The core exposes four frontend controller ports. Ports 1 and 2 retain the
+native Amiga mapping above. Ports 3 and 4 are the parallel-port multitap's
+two joystick sockets, as used by Super Skidmarks and other four-player games.
+In RetroArch's **Quick Menu > Controls**, select **Parallel-port joystick
+(multitap)** for ports 3 and 4. Select **Amiga joystick / CD32 pad** for
+ports 1 and 2 to use four gamepads. The adapter sockets default to
+**Disconnected**; enabling either socket connects the adapter.
+
+Each extra socket carries directions, fire and the adapter's shared second
+button line. CD32 serial buttons and mice do not fit these sockets. Use the
+frontend's RetroPad mappings to assign physical controllers or keyboard
+keys to each player. Controller selections and held inputs survive save-state
+restoration; older two-controller states load with both extra sockets empty.
+
 ## Disk swapping and writes
 
 An M3U playlist contains one image path per line, with paths relative to the

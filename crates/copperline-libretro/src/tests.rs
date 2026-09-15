@@ -17,6 +17,8 @@ struct Host {
     messages: Vec<String>,
     av_changes: usize,
     maps: Vec<Vec<MemoryDescriptor>>,
+    pads: [[i16; 16]; 4],
+    controller_ports: usize,
 }
 thread_local! { static HOST: RefCell<Host> = RefCell::new(Host::default()); }
 
@@ -67,7 +69,14 @@ unsafe extern "C" fn environment(command: u32, data: *mut c_void) -> bool {
                 );
                 true
             }
-            11 | 13 | 16 | 18 | 35 => true,
+            35 => {
+                let ports = data.cast::<ControllerInfo>();
+                host.controller_ports = (0..8)
+                    .take_while(|&i| unsafe { (*ports.add(i)).num_types != 0 })
+                    .count();
+                true
+            }
+            11 | 13 | 16 | 18 => true,
             _ => false,
         }
     })
@@ -217,7 +226,15 @@ unsafe extern "C" fn poll() {
     HOST.with(|host| host.borrow_mut().frames += 1);
 }
 unsafe extern "C" fn input(port: u32, device: u32, _: u32, id: u32) -> i16 {
-    HOST.with(|host| scripted(host.borrow().frames, port, device, id))
+    HOST.with(|host| {
+        let host = host.borrow();
+        let value = scripted(host.frames, port, device, id);
+        if device == JOYPAD {
+            value.max(host.pads[port as usize][id as usize])
+        } else {
+            value
+        }
+    })
 }
 fn scripted(frame: u32, port: u32, device: u32, id: u32) -> i16 {
     match (port, device, id) {
@@ -1274,5 +1291,106 @@ fn an_oversized_state_buffer_is_read_by_its_own_payload_length() {
     }
     assert_eq!(HOST.with(|host| host.borrow().video.clone()), expected);
     retro_unload_game();
+    retro_deinit();
+}
+
+#[test]
+fn multitap_maps_four_frontend_players_and_restores_controller_selections() {
+    let root = tempfile::tempdir().unwrap();
+    let config = core::configuration("A1200", "PAL", false, root.path()).unwrap();
+    let mut core = Core::load(&config, None, root.path().into(), true).unwrap();
+    // Empty sockets must not fit the adapter simply because the frontend
+    // reports input for a controller the user has not selected.
+    core.controls
+        .poll(&mut core.emu, |_, d, _| i16::from(d == JOYPAD));
+    assert!(!core.emu.bus().input.parallel_adapter);
+    core.controls.devices = [JOYPAD; 4];
+    for player in 0..4 {
+        core.controls.poll(&mut core.emu, |p, d, id| {
+            i16::from(d == JOYPAD && p == player && [4, 0].contains(&id))
+        });
+        let input = &core.emu.bus().input;
+        for port in 0..2 {
+            assert_eq!(input.ports[1 - port].up, player == port as u32);
+            assert_eq!(input.ports[1 - port].fire, player == port as u32);
+        }
+        for port in 2..4 {
+            assert_eq!(input.parallel_joysticks[port - 2].up, player == port as u32);
+            assert_eq!(
+                input.parallel_joysticks[port - 2].fire,
+                player == port as u32
+            );
+        }
+    }
+    let mut saved = vec![0; core.state_capacity];
+    core.serialize(&mut saved).unwrap();
+    core.controls.devices[2..].fill(NONE);
+    core.controls.poll(&mut core.emu, |_, _, _| 0);
+    assert!(!core.emu.bus().input.parallel_adapter);
+    core.unserialize(&saved).unwrap();
+    assert_eq!(core.controls.devices, [JOYPAD; 4]);
+    assert!(core.emu.bus().input.parallel_joysticks[1].fire);
+    core.controls.devices[2] = NONE;
+    core.controls.poll(&mut core.emu, |p, d, id| {
+        i16::from(p == 3 && d == JOYPAD && id == 0)
+    });
+    assert!(!core.emu.bus().input.parallel_joysticks[0].fitted);
+    assert!(core.emu.bus().input.parallel_joysticks[1].fire);
+}
+
+#[test]
+fn multitap_still_reads_the_previous_two_controller_state_format() {
+    let root = tempfile::tempdir().unwrap();
+    let config = core::configuration("A500", "PAL", false, root.path()).unwrap();
+    let mut core = Core::load(&config, None, root.path().into(), true).unwrap();
+    let mut saved = vec![0; core.state_capacity];
+    core.serialize(&mut saved).unwrap();
+    let length = u32::from_le_bytes(saved[40..44].try_into().unwrap()) as usize;
+    let mut body = saved[76..76 + length].to_vec();
+    // v2 contained the same keyboard and mouse state but only two device IDs.
+    body.drain(128 + 16 + 8..128 + 16 + 16);
+    saved[..8].copy_from_slice(b"CLRETRO2");
+    saved[40..44].copy_from_slice(&(body.len() as u32).to_le_bytes());
+    saved[44..76].copy_from_slice(&Sha256::digest(&body));
+    saved[76..76 + body.len()].copy_from_slice(&body);
+    core.controls.devices[2..].fill(JOYPAD);
+    core.unserialize(&saved).unwrap();
+    assert_eq!(core.controls.devices[2..], [NONE; 2]);
+}
+
+#[test]
+fn multitap_frontend_registration_and_callbacks_reach_all_four_ports() {
+    let root = tempfile::tempdir().unwrap();
+    setup(root.path(), true, false);
+    HOST.with(|host| assert_eq!(host.borrow().controller_ports, 4));
+    for port in 0..4 {
+        retro_set_controller_port_device(port, JOYPAD);
+    }
+    assert!(load(None));
+    HOST.with(|host| {
+        let mut host = host.borrow_mut();
+        for port in 0..4 {
+            host.pads[port][4 + port] = 1;
+        }
+        host.pads[2][0] = 1;
+        host.pads[3][0] = 1;
+    });
+    retro_run();
+    with_core(|core| {
+        let input = &core.emu.bus().input;
+        assert!(input.ports[1].up && input.ports[0].down);
+        assert!(input.parallel_joysticks[0].left && input.parallel_joysticks[0].fire);
+        assert!(input.parallel_joysticks[1].right && input.parallel_joysticks[1].fire);
+        Ok(())
+    })
+    .unwrap();
+    retro_set_controller_port_device(2, NONE);
+    retro_run();
+    with_core(|core| {
+        assert!(!core.emu.bus().input.parallel_joysticks[0].fitted);
+        assert!(core.emu.bus().input.parallel_joysticks[1].fire);
+        Ok(())
+    })
+    .unwrap();
     retro_deinit();
 }

@@ -1272,8 +1272,8 @@ controller too). `--port1` / `--port2` override for one run, the runtime
 menu's **Port 1/2 Device** items hot-plug a device live, and the control
 protocol's `input.set_port` does the same from a script.
 
-Putting joysticks in *both* ports is a real two-player setup: the host
-gamepad and the keyboard mapping then drive one port each (see below).
+Putting joysticks in both ports allows two gamepads, a gamepad and keyboard,
+or two keyboard mappings to drive them (see [Controller ports](ui.md#controller-ports)).
 
 ### Joystick input source
 
@@ -1593,7 +1593,7 @@ from the runtime menu, and the gain with `Cmd/Alt+Shift +/-`. On macOS the CLI
 binary needs microphone permission to capture a real input; routing audio in
 through a loopback device such as BlackHole needs none.
 
-`"joystick-adapter"` is the classic passive four-player adapter (Kick Off 2,
+`"joystick-adapter"` (also accepted as `"multitap"`) is the classic passive four-player adapter (Kick Off 2,
 Sensible Soccer, Dyna Blaster, Gauntlet II, Super Skidmarks and others read
 it): two switch joysticks wired straight to the connector, with no active
 parts. Port 3's directions short the data pins `D0`-`D3` (CIA-A port B bits
@@ -1605,8 +1605,8 @@ joystick model. The switches only pull down pins the guest has programmed as
 inputs (the games clear `DDRB`), so a port a printer driver is driving as
 outputs is left alone. `[input] port3`/`port4` (or `--port3`/`--port4`) say
 which sockets hold a joystick; naming a joystick there fits the adapter by
-itself, and an adapter named here fills every socket left unset. The host
-gamepad and the keyboard mappings reach the sockets through the usual
+itself, and an adapter named here fills every socket left unset. Up to four host
+gamepads and the two keyboard mappings reach the sockets through the usual
 routing (see [Controller ports](ui.md#controller-ports)), and `--joy-after
 ... 3`/`... 4`, `--script` and the control protocol's `input.joy` drive them
 directly.

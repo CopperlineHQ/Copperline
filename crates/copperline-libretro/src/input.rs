@@ -10,7 +10,7 @@ pub struct Controls {
     pub netplay: bool,
     pub keys: [bool; 128],
     pub pending: [[i32; 2]; 2],
-    pub devices: [u32; 2],
+    pub devices: [u32; 4],
 }
 
 impl Default for Controls {
@@ -20,7 +20,7 @@ impl Default for Controls {
             netplay: false,
             keys: [false; 128],
             pending: [[0; 2]; 2],
-            devices: [abi::AUTO; 2],
+            devices: [abi::AUTO, abi::AUTO, abi::NONE, abi::NONE],
         }
     }
 }
@@ -39,6 +39,17 @@ impl Controls {
             }
         }
         self.keys = keys;
+        let fitted = [2, 3].map(|port| matches!(self.devices[port], abi::AUTO | abi::JOYPAD));
+        let state = &mut emu.bus_mut().input;
+        if state.parallel_adapter != fitted.iter().any(|&v| v)
+            || state.parallel_joysticks.each_ref().map(|j| j.fitted) != fitted
+        {
+            state.set_parallel_adapter(fitted.iter().any(|&v| v), fitted);
+        }
+        for port in (2..4).filter(|&port| fitted[port - 2]) {
+            let held = [4, 5, 6, 7, 0, 8].map(|id| input(port as u32, abi::JOYPAD, id) != 0);
+            state.set_joystick(port, held[0], held[1], held[2], held[3], held[4], held[5]);
+        }
         for port in 0..2 {
             let device = match self.devices[port] {
                 abi::AUTO | abi::JOYPAD if self.cd32 => abi::CD32_PAD,
