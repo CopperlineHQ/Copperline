@@ -1593,6 +1593,9 @@ pub struct App {
     present_fb_generation: u64,
     /// What the newest clip-ring frame was built from.
     clip_ring_source: Option<ClipRingSource>,
+    /// The picture buffer of a frame presented on the main thread, kept
+    /// for the next such frame's copy.
+    picture_scratch: Vec<u32>,
     /// Live `--gif-after` captures, armed from `pending_gif_captures` with
     /// the other scheduled flags.
     gif_captures: Vec<GifCaptureState>,
@@ -1835,6 +1838,15 @@ struct PresentJob {
     emulated_frame: Option<u64>,
     draws: Vec<scaler::ScalerDraw>,
     pass: PresentPass,
+    /// The presentation buffer for a display draw that samples it on the
+    /// GPU (`ScalerDraw::picture`), instead of a CPU copy into `frame`.
+    picture: Option<PictureFrame>,
+}
+
+struct PictureFrame {
+    fb: Vec<u32>,
+    width: u32,
+    rows: u32,
 }
 
 enum PresentPass {
@@ -1888,6 +1900,15 @@ fn present_job(
             return Ok(());
         }
         dst.copy_from_slice(frame);
+    }
+    if let Some(picture) = &job.picture {
+        scaler.upload_picture(
+            pixels.device(),
+            pixels.queue(),
+            &picture.fb,
+            picture.width,
+            picture.rows,
+        );
     }
     presenter.render(
         pixels,
@@ -1976,7 +1997,11 @@ enum PresentCmd {
 
 enum PresentBack {
     Gpu(Option<Box<Gpu>>),
-    Frame(Vec<u8>),
+    /// A presented frame's buffers, back for reuse.
+    Frame {
+        frame: Vec<u8>,
+        picture: Option<Vec<u32>>,
+    },
 }
 
 /// Frames the worker may hold at once: the one it is presenting and the
@@ -1995,6 +2020,8 @@ struct PresentWorker {
     in_flight: usize,
     /// Frame buffers the worker returned, ready to compose into.
     recycled: Vec<Vec<u8>>,
+    /// Picture buffers the worker returned, ready to copy into.
+    recycled_pictures: Vec<Vec<u32>>,
 }
 
 impl PresentWorker {
@@ -2014,8 +2041,11 @@ impl PresentWorker {
                                     error!("pixels.render: {e}");
                                 }
                             }
-                            let frame = job.frame.unwrap_or_default();
-                            if back_tx.send(PresentBack::Frame(frame)).is_err() {
+                            let back = PresentBack::Frame {
+                                frame: job.frame.unwrap_or_default(),
+                                picture: job.picture.map(|picture| picture.fb),
+                            };
+                            if back_tx.send(back).is_err() {
                                 break;
                             }
                         }
@@ -2035,6 +2065,7 @@ impl PresentWorker {
             lent: false,
             in_flight: 0,
             recycled: Vec::new(),
+            recycled_pictures: Vec::new(),
         }
     }
 
@@ -2068,23 +2099,26 @@ impl PresentWorker {
         }
         loop {
             match self.back_rx.recv() {
-                Ok(PresentBack::Frame(frame)) => self.take_back(frame),
+                Ok(PresentBack::Frame { frame, picture }) => self.take_back(frame, picture),
                 Ok(PresentBack::Gpu(gpu)) => return gpu,
                 Err(_) => return None,
             }
         }
     }
 
-    fn take_back(&mut self, frame: Vec<u8>) {
+    fn take_back(&mut self, frame: Vec<u8>, picture: Option<Vec<u32>>) {
         self.in_flight = self.in_flight.saturating_sub(1);
         self.recycled.push(frame);
+        if let Some(picture) = picture {
+            self.recycled_pictures.push(picture);
+        }
     }
 
     /// Collect the buffers of frames presented since the last call.
     fn collect(&mut self) {
         while let Ok(back) = self.back_rx.try_recv() {
             match back {
-                PresentBack::Frame(frame) => self.take_back(frame),
+                PresentBack::Frame { frame, picture } => self.take_back(frame, picture),
                 PresentBack::Gpu(Some(gpu)) => {
                     // Only `reclaim` asks for it; put it back to work.
                     let _ = self.lend(gpu);
@@ -2122,8 +2156,18 @@ impl PresentWorker {
         }
     }
 
-    fn recycle(&mut self, frame: Vec<u8>) {
+    fn recycle(&mut self, frame: Vec<u8>, picture: Option<Vec<u32>>) {
         self.recycled.push(frame);
+        if let Some(picture) = picture {
+            self.recycled_pictures.push(picture);
+        }
+    }
+
+    /// An empty buffer to copy the next picture into.
+    fn picture_buffer(&mut self) -> Vec<u32> {
+        let mut buffer = self.recycled_pictures.pop().unwrap_or_default();
+        buffer.clear();
+        buffer
     }
 }
 
@@ -2801,6 +2845,7 @@ impl App {
             clip_fb: Vec::new(),
             present_fb_generation: 0,
             clip_ring_source: None,
+            picture_scratch: Vec::new(),
             gif_captures: Vec::new(),
             pending_gif_captures: gif_after,
         };
@@ -5276,6 +5321,25 @@ impl ApplicationHandler for App {
                     // something only the main thread has: the RTG board's
                     // texture upload, or the inspector's egui paint.
                     let threaded = r.present_worker.is_some() && !rtg_gpu && inspector_ui.is_none();
+                    // The display draw samples the presentation buffer on
+                    // the GPU when nothing has to be composed over the
+                    // picture on the CPU: no UI, overlay, badge or tint,
+                    // and no pass that samples the composed texture.
+                    let picture_on_gpu = !rtg_gpu
+                        && !crt_active
+                        && !bezel_active
+                        && !debug_layout
+                        && self.tint_lut.is_none()
+                        && self.rtg_present_dims.is_none()
+                        && !self.ui.active()
+                        && osd.is_none()
+                        && guest_overlay.is_empty()
+                        && !recording
+                        && !self.perf_overlay
+                        && !self.drop_hover
+                        && self.present_width > 0
+                        && self.present_rows > 0
+                        && self.present_fb.len() >= self.present_rows * self.present_width;
                     let frame_len =
                         texture_width(texture_scale) * texture_height(texture_scale) * 4;
                     'present: {
@@ -5323,7 +5387,10 @@ impl ApplicationHandler for App {
                             r.gpu = gpu_home;
                             break 'present;
                         };
-                        if rtg_gpu {
+                        if picture_on_gpu {
+                            // The picture reaches the surface from its own
+                            // texture; the frame's display rows go unsampled.
+                        } else if rtg_gpu {
                             // The GPU pass overdraws the display region; black it
                             // out so nothing stale shows at the seams.
                             let rows = present_height() * texture_scale;
@@ -5589,11 +5656,40 @@ impl ApplicationHandler for App {
                         } else {
                             PresentPass::Plain
                         };
-                        let job = PresentJob {
+                        let mut draws = layout.draws();
+                        let picture = picture_on_gpu.then(|| {
+                            let map = picture_map(
+                                self.present_rows,
+                                self.present_width,
+                                texture_scale,
+                                self.overscan,
+                                self.tv_centre,
+                                self.present_tv_aperture_rows,
+                                self.bezel.is_on(),
+                            );
+                            if let Some(display) = draws.first_mut() {
+                                display.picture = Some(map);
+                            }
+                            let mut fb = match r.present_worker.as_mut() {
+                                Some(worker) if worker_frame.is_some() => worker.picture_buffer(),
+                                _ => std::mem::take(&mut self.picture_scratch),
+                            };
+                            fb.clear();
+                            fb.extend_from_slice(
+                                &self.present_fb[..self.present_rows * self.present_width],
+                            );
+                            PictureFrame {
+                                fb,
+                                width: self.present_width as u32,
+                                rows: self.present_rows as u32,
+                            }
+                        });
+                        let mut job = PresentJob {
                             frame: worker_frame,
                             emulated_frame: self.last_rendered_emulated_frame,
-                            draws: layout.draws(),
+                            draws,
                             pass,
+                            picture,
                         };
                         match gpu_home.as_deref_mut() {
                             Some(gpu) => {
@@ -5609,6 +5705,9 @@ impl ApplicationHandler for App {
                                 if let Err(e) = present_job(gpu, Some(&window), &job, after) {
                                     error!("pixels.render: {e}");
                                 }
+                                if let Some(picture) = job.picture.take() {
+                                    self.picture_scratch = picture.fb;
+                                }
                             }
                             None => {
                                 // The worker never touches the window; give
@@ -5617,7 +5716,10 @@ impl ApplicationHandler for App {
                                 if let Some(worker) = r.present_worker.as_mut() {
                                     if let Err(job) = worker.submit(job) {
                                         if let Some(frame) = job.frame {
-                                            worker.recycle(frame);
+                                            worker.recycle(
+                                                frame,
+                                                job.picture.map(|picture| picture.fb),
+                                            );
                                         }
                                         self.main_presentation_dirty = true;
                                     }

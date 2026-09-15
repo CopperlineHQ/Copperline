@@ -710,8 +710,9 @@ does not make those refresh rates match.
 from. On (the default) it follows the display's device-pixel density, so a
 200% (Retina) window is fed a 2x texture and every host row picks its own
 woven scanline. Off keeps the texture at canvas resolution and leaves the
-upscale to the GPU's scaler pass, which costs about a quarter of the
-per-frame copy and upload -- worth trying on a slow host that falls short of
+upscale to the GPU's scaler pass, a quarter of the per-frame texture
+upload (and of the CPU copy, when a menu or overlay makes the frame
+compose on the CPU) -- worth trying on a slow host that falls short of
 real time in a high-density window. Integer scaling looks the same either
 way (its whole-number blocks are point-sampled from the 1x texture); the
 smooth fit selects rows at canvas resolution instead of the finer texture

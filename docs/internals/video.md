@@ -460,6 +460,23 @@ the inspector's egui paint, which present synchronously as before
 (`Render::gpu_mut` reclaims it, waiting out a frame in flight).
 `COPPERLINE_THREADED_PRESENT=0` presents every frame from the main thread.
 
+When nothing has to be composed over the picture on the CPU -- no menu,
+panel, OSD, badge or guest overlay, no tint, and no CRT, bezel or RTG pass
+that samples the composed texture -- the display draw of the scaler pass
+samples the presentation buffer itself (`ScalerDraw::picture`,
+`PresentScaler::upload_picture`) instead of a CPU copy of it into the
+texture. The buffer goes up at the canvas's own size, and the shader
+reproduces `copy_window_present_frame` per texel of the texture it stands
+in for: the same row selection and the same 8.8 two-column glass blend in
+the same integer arithmetic (`picture_texel` in `scaler.rs`, from the
+`PictureMap` `present::picture_map` builds from the copy's inputs), then
+the same clamp-to-edge bilinear filter in linear light that the sampler
+applies to the composed texture. Point sampling is bit-identical to the
+CPU path; the sharp filter differs by the sampler's weight precision,
+within two LSBs (`picture_draws_match_the_composed_texture`). The chrome
+band below the picture still comes from the CPU texture, and every case
+above falls back to composing the whole frame on the CPU.
+
 Normal display can be one frame behind emulation; exact capture paths
 call `finish_render_for_current_frame` so screenshots, frame dumps,
 recordings, debugger step, and run-to-PC output use the requested

@@ -828,6 +828,7 @@ impl PresentLayout {
             ],
             dst: self.display_dst,
             filter: self.filter,
+            picture: None,
         }];
         if let Some(chrome_dst) = self.chrome_dst {
             let chrome_rows = (window_present_height() - present_height()) as f32;
@@ -840,6 +841,7 @@ impl PresentLayout {
                 ],
                 dst: chrome_dst,
                 filter: scaler::ScaleFilter::SharpBilinear,
+                picture: None,
             });
         }
         draws
@@ -1184,6 +1186,69 @@ pub(super) fn copy_present_frame(
             }
         }
     }
+}
+
+/// The map the scaler's picture draw reproduces on the GPU in place of
+/// [`copy_window_present_frame`]: the same choice between the TV glass,
+/// the square canvas and the full-overscan copy, from the same inputs.
+/// `src_rows`/`src_width` describe the presentation buffer; the output
+/// is `present_height()` rows at `texture_scale`, like the CPU copy's.
+pub(super) fn picture_map(
+    src_rows: usize,
+    src_width: usize,
+    texture_scale: usize,
+    overscan: Overscan,
+    tv_centre: TvCentre,
+    tv_aperture_rows: Option<usize>,
+    tube_glass: bool,
+) -> scaler::PictureMap {
+    let present_rows = present_height();
+    let out_rows = present_rows * texture_scale;
+    let (x_offset, y_offset) = tv_centre_source_offset(tv_centre);
+    let mut map = scaler::PictureMap {
+        columns: scaler::PictureColumns::Full,
+        scale: texture_scale as i32,
+        out_rows: out_rows as i32,
+        src_rows: src_rows as i32,
+        src_width: src_width as i32,
+        pad_rows: 0,
+        content_rows: out_rows as i32,
+        aperture_rows: 0,
+        source_y: 0,
+        y_offset: 0,
+        x_offset: 0,
+        glass_source_x: TV_CAPTURED_SOURCE_X as i32,
+        glass_width: TV_CAPTURED_WIDTH as i32,
+        pad_x: TV_LIVE_PAD_X as i32,
+        fb_width: FB_WIDTH as i32,
+    };
+    if let Some(aperture_rows) =
+        tv_aperture_rows.filter(|_| overscan == Overscan::Tv && src_width == FB_WIDTH)
+    {
+        let (source_y, aperture_rows) = if tube_glass {
+            (0, tube_aperture_rows(aperture_rows))
+        } else {
+            (TV_PRESENT_SOURCE_Y, aperture_rows)
+        };
+        let square = present_rows == crate::video::PRESENT_HEIGHT_SQUARE;
+        let pad_rows = if square {
+            present_rows.saturating_sub(aperture_rows) / 2 * texture_scale
+        } else {
+            0
+        };
+        map.columns = if square {
+            scaler::PictureColumns::Square
+        } else {
+            scaler::PictureColumns::Glass
+        };
+        map.pad_rows = pad_rows as i32;
+        map.content_rows = (out_rows - 2 * pad_rows) as i32;
+        map.aperture_rows = aperture_rows as i32;
+        map.source_y = source_y as i32;
+        map.y_offset = y_offset;
+        map.x_offset = x_offset;
+    }
+    map
 }
 
 pub(super) fn copy_window_present_frame(
