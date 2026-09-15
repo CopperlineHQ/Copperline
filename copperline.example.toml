@@ -755,6 +755,12 @@ video = "PAL"
 # Video Settings > VSync changes it live. Off may reduce latency but can
 # tear; normal emulation speed is unchanged. PAL on a fixed 60/120 Hz screen
 # can still have an uneven cadence with vsync on.
+# hidpi_texture: draw the presentation texture at the display's device-pixel
+# density (default true), so a 200% (Retina) window is fed a 2x texture.
+# false keeps it at canvas resolution and lets the GPU scale it -- about a
+# quarter of the per-frame copy and upload, for a slow host that falls short
+# of real time in a high-density window. Integer scaling looks the same
+# either way; the smooth fit selects rows a little more coarsely.
 # [display]
 # overscan = "tv"
 # tv_h_centre = 0
@@ -774,6 +780,7 @@ video = "PAL"
 # full_screen = false
 # status_bar = true
 # vsync = true
+# hidpi_texture = true
 
 # [recording] -- the GIF clip ring behind Save Clip as GIF (Cmd/Alt+Shift+G)
 # and the rate of every GIF clip, including headless --gif-after captures.

@@ -374,21 +374,21 @@ impl App {
     /// so the front falls back to bare plastic rather than a stale set.
     pub(super) fn reload_bezel_stickers(&mut self) -> Result<(), String> {
         let path = self.bezel_stickers_path.clone();
-        let Some(r) = self.render.as_mut() else {
+        let Some(gpu) = self.render.as_mut().and_then(Render::gpu_mut) else {
             return Ok(());
         };
         match path {
             None => {
-                r.sticker_pass.set_sheet(None);
+                gpu.sticker_pass.set_sheet(None);
                 Ok(())
             }
             Some(dir) => match stickers::load_sheet(&dir) {
                 Ok(sheet) => {
-                    r.sticker_pass.set_sheet(Some(sheet));
+                    gpu.sticker_pass.set_sheet(Some(sheet));
                     Ok(())
                 }
                 Err(msg) => {
-                    r.sticker_pass.set_sheet(None);
+                    gpu.sticker_pass.set_sheet(None);
                     error!("[display] bezel_stickers: {msg}");
                     Err(msg.lines().next().unwrap_or_default().to_string())
                 }
@@ -409,14 +409,17 @@ impl App {
         let Some(path) = self.custom_shader_path.clone() else {
             return fail("no custom shader configured".to_string());
         };
-        let Some(r) = self.render.as_mut() else {
+        let Some(gpu) = self.render.as_mut().and_then(Render::gpu_mut) else {
             return fail(format!(
                 "cannot load shader {} before the window exists",
                 path.display()
             ));
         };
-        let format = r.pixels.render_texture_format();
-        match r.crt_shader.load_custom(r.pixels.device(), format, &path) {
+        let format = gpu.pixels.render_texture_format();
+        match gpu
+            .crt_shader
+            .load_custom(gpu.pixels.device(), format, &path)
+        {
             Ok(()) => Ok(()),
             Err(msg) => fail(msg),
         }
@@ -463,12 +466,9 @@ impl App {
         }
         self.vsync = enabled;
         self.machine_config.display.vsync = Some(enabled);
-        if let Some(render) = self.render.as_mut() {
-            render.pixels.set_present_mode(window_present_mode(enabled));
-            info!(
-                "window presentation: mode={:?}",
-                render.pixels.present_mode()
-            );
+        if let Some(gpu) = self.render.as_mut().and_then(Render::gpu_mut) {
+            gpu.pixels.set_present_mode(window_present_mode(enabled));
+            info!("window presentation: mode={:?}", gpu.pixels.present_mode());
         }
         self.request_redraw();
     }
@@ -748,6 +748,7 @@ impl App {
         self.present_fb.resize(active, 0);
         self.present_fb
             .copy_from_slice(&self.deinterlacer.output()[..active]);
+        self.note_present_fb_changed();
         self.present_rows = rows;
         self.present_width = width;
     }
@@ -852,6 +853,7 @@ impl App {
         self.main_presentation_dirty = true;
         let old = std::mem::replace(&mut self.present_fb, result.presentation_fb);
         self.render_recycle_fb = old;
+        self.note_present_fb_changed();
         self.present_rows = result.present_rows;
         self.present_width = result.present_width;
         self.present_tv_aperture_rows = next_tv_aperture_rows;
@@ -971,6 +973,7 @@ impl App {
         let composed = compose_rtg_present(self.emu.bus(), &mut rtg, &mut present);
         self.rtg_fb = rtg;
         self.present_fb = present;
+        self.note_present_fb_changed();
         let Some((rows, native_w, native_h)) = composed else {
             // rtg_active() is true but the frame did not compose (e.g. MODE
             // set before ORIG_RES): fall back to the chipset render rather
@@ -1099,6 +1102,7 @@ impl App {
             self.main_presentation_dirty = true;
             let old = std::mem::replace(&mut self.present_fb, next_present_fb);
             self.render_recycle_fb = old;
+            self.note_present_fb_changed();
             self.present_rows = rows;
             self.present_width = width;
             self.present_tv_aperture_rows = next_tv_aperture_rows;

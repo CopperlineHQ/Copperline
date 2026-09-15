@@ -1233,6 +1233,7 @@ impl App {
             !geometry.programmable,
             &mut self.present_fb,
         );
+        self.note_present_fb_changed();
         self.present_rows = rows;
         self.present_width = width;
         self.request_redraw();

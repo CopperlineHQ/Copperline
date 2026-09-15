@@ -694,6 +694,7 @@ menu_scale = "1x"     # size of the pop-up menu: "1x" (default) or "2x"
 full_screen = false   # open fullscreen at start (default false)
 status_bar = true     # show the status bar at start (default true)
 vsync = true          # synchronise desktop presentation to vblank (default true)
+hidpi_texture = true  # draw the presentation texture at device-pixel density (default true)
 ```
 
 `vsync` controls desktop presentation. On uses strict FIFO vsync to prevent
@@ -704,6 +705,18 @@ choice carries into the configuration screen when saving a config. Headless
 captures and the browser frontend are unaffected. Roughly 50 Hz PAL output
 can still show an uneven cadence on fixed 60 Hz or 120 Hz displays: VSync
 does not make those refresh rates match.
+
+`hidpi_texture` decides the resolution of the texture the window is drawn
+from. On (the default) it follows the display's device-pixel density, so a
+200% (Retina) window is fed a 2x texture and every host row picks its own
+woven scanline. Off keeps the texture at canvas resolution and leaves the
+upscale to the GPU's scaler pass, a quarter of the per-frame texture
+upload (and of the CPU copy, when a menu or overlay makes the frame
+compose on the CPU) -- worth trying on a slow host that falls short of
+real time in a high-density window. Integer scaling looks the same either
+way (its whole-number blocks are point-sampled from the 1x texture); the
+smooth fit selects rows at canvas resolution instead of the finer texture
+grid, which fine interlaced detail can show. Captures are never affected.
 
 The emulated framebuffer always carries the full overscan field Denise
 produces. `"tv"` presents what the monitor's glass shows: the captured
@@ -1129,7 +1142,10 @@ Rendering completed frames uses a worker thread by default so emulation can
 advance while the previous frame is painted. The worker is an implementation
 detail of presentation: screenshots, frame dumps, and recordings wait for
 the exact frame they save. `COPPERLINE_THREADED_RENDER=0` forces the old
-synchronous render path for comparison.
+synchronous render path for comparison. Presenting the composed frame --
+the texture upload, the GPU passes and the wait for the display's vsync --
+runs on a second worker, so the main thread's redraw ends at hand-off;
+`COPPERLINE_THREADED_PRESENT=0` presents from the main thread instead.
 
 ## `[audio]`
 

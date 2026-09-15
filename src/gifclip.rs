@@ -292,6 +292,17 @@ impl ClipRing {
         self.selector.take(t)
     }
 
+    /// Note a frame [`wants`](Self::wants) accepted whose picture the
+    /// caller knows is the one the newest stored frame already holds:
+    /// the bookkeeping [`store`](Self::store) does for a repeat, without
+    /// building and comparing the picture. Only valid while the ring is
+    /// not empty.
+    pub fn repeat(&mut self, t: f64) {
+        debug_assert!(!self.frames.is_empty());
+        self.latest_t = Some(t);
+        self.prune();
+    }
+
     /// Store a frame [`wants`](Self::wants) accepted. Returns false when
     /// it repeats the previous picture (which then simply stays on
     /// screen longer).

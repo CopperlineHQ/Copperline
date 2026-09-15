@@ -404,6 +404,7 @@ impl TryFrom<RawConfig> for Config {
         };
         let perf_overlay = raw.display.perf_overlay.unwrap_or(defaults.perf_overlay);
         let vsync = raw.display.vsync.unwrap_or(defaults.vsync);
+        let hidpi_texture = raw.display.hidpi_texture.unwrap_or(defaults.hidpi_texture);
         let tint = match raw.display.tint.as_deref() {
             None => defaults.tint,
             Some(s) => parse_tint(s)?,
@@ -1443,6 +1444,7 @@ impl TryFrom<RawConfig> for Config {
             bezel_stickers,
             perf_overlay,
             vsync,
+            hidpi_texture,
             tint,
             menu_scale,
             full_screen,

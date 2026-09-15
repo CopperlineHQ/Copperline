@@ -1621,8 +1621,8 @@ impl App {
                 shader_error = Some(msg);
                 self.crt_shader_kind = crate::config::ShaderKind::None;
             }
-        } else if let Some(r) = self.render.as_mut() {
-            r.crt_shader.clear_custom();
+        } else if let Some(gpu) = self.render.as_mut().and_then(Render::gpu_mut) {
+            gpu.crt_shader.clear_custom();
         }
         self.shader_strength = crate::config::resolve_shader_strength(cfg.shader_strength);
         // The style itself was adopted with the display settings above.

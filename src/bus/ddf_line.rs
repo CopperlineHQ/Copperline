@@ -652,9 +652,6 @@ impl Bus {
         if self.mem.chip_ram.is_empty() {
             return;
         }
-        let display_bplcon0 = self.effective_bitplane_bplcon0_at(old_emulated_cck);
-        let display_planes =
-            BitplaneMode::from_bplcon0(display_bplcon0, self.aga_enabled()).display_planes();
         let Some(fb_y) = visible_framebuffer_y(
             vpos,
             self.current_frame_visible_start_vpos,
@@ -670,6 +667,8 @@ impl Bus {
         // compact hot-line projection: the authoritative table is still built
         // lazily, but steady-state slot reads need neither a dynamic borrow nor
         // a copy of its ~1KB arrays.
+        // Most colour clocks carry no plane slot: consult the line's slot
+        // table before decoding the display mode for the ones that do.
         let end = new_hpos.min(DDF_SEQ_MAX_LINE_CCKS as u32);
         self.ddf_seq_ensure_hot_line();
         if !(old_hpos..end).any(|hpos| {
@@ -677,6 +676,9 @@ impl Bus {
         }) {
             return;
         }
+        let display_bplcon0 = self.effective_bitplane_bplcon0_at(old_emulated_cck);
+        let display_planes =
+            BitplaneMode::from_bplcon0(display_bplcon0, self.aga_enabled()).display_planes();
         let words_per_row = usize::from(self.ddf_seq_hot_line.words_per_row.get());
         let dma_planes = usize::from(self.ddf_seq_hot_line.dma_planes.get());
         let run_origin = self.ddf_seq_hot_line.run_origin_cck.get();
