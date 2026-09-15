@@ -280,7 +280,7 @@ impl MachineSetup {
                 ParallelDevice::None => "None".to_string(),
                 ParallelDevice::Printer => "Printer".to_string(),
                 ParallelDevice::Sampler => "Sampler".to_string(),
-                ParallelDevice::JoystickAdapter => "Joystick Adapter".to_string(),
+                ParallelDevice::JoystickAdapter => "Multitap (4 joysticks)".to_string(),
             },
             F::SamplerInput => self
                 .sampler_input

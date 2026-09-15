@@ -413,15 +413,45 @@ impl MappedPadState {
     }
 }
 
-/// A gilrs instance with the bundled SDL controller mappings enabled, plus
-/// the current input state accumulated from its events in two forms: raw
-/// axis/button codes (what calibration records and resolves against) and the
-/// named standard layout (the default for recognised, uncalibrated pads).
-struct RawGamepads {
-    gilrs: gilrs::Gilrs,
+/// One controller's raw calibration inputs and named standard controls.
+/// Pads with the same model UUID or button codes still have separate state.
+#[derive(Default)]
+struct RawPadState {
     axes: BTreeMap<u32, f32>,
     buttons: BTreeMap<u32, bool>,
     mapped: MappedPadState,
+}
+
+/// Stable player slots. Removing a controller leaves a hole that the next
+/// connection can fill; controllers still connected never change slots.
+#[derive(Default)]
+struct PadSlots {
+    ids: [Option<usize>; 4],
+    states: [RawPadState; 4],
+}
+
+impl PadSlots {
+    fn connect(&mut self, id: usize) -> Option<usize> {
+        let slot = self
+            .ids
+            .iter()
+            .position(|&v| v == Some(id))
+            .or_else(|| self.ids.iter().position(Option::is_none))?;
+        self.ids[slot] = Some(id);
+        Some(slot)
+    }
+
+    fn disconnect(&mut self, id: usize) {
+        if let Some(slot) = self.ids.iter().position(|&v| v == Some(id)) {
+            self.ids[slot] = None;
+            self.states[slot] = RawPadState::default();
+        }
+    }
+}
+
+struct RawGamepads {
+    gilrs: gilrs::Gilrs,
+    slots: PadSlots,
 }
 
 impl RawGamepads {
@@ -431,90 +461,82 @@ impl RawGamepads {
             .add_env_mappings(true)
             .build()
             .map_err(|e| anyhow!("gamepad init: {e}"))?;
-        Ok(Self {
-            gilrs,
-            axes: BTreeMap::new(),
-            buttons: BTreeMap::new(),
-            mapped: MappedPadState::default(),
-        })
+        let mut slots = PadSlots::default();
+        for (id, _) in gilrs.gamepads() {
+            slots.connect(id.into());
+        }
+        Ok(Self { gilrs, slots })
     }
 
-    /// Drain pending events into the raw and named input state.
+    /// Drain pending events into each controller's raw and named state.
     fn pump(&mut self) {
         while let Some(event) = self.gilrs.next_event() {
-            // COPPERLINE_DIAG_GAMEPAD=1 logs every gilrs event as delivered
-            // (named control, post-mapping value, raw code) plus each pad's
-            // identity and mapping source on connect: the ground truth for
-            // diagnosing a wrong or broken controller-database entry.
             if crate::envcfg::flag("COPPERLINE_DIAG_GAMEPAD") {
                 if event.event == gilrs::EventType::Connected {
                     let pad = self.gilrs.gamepad(event.id);
                     log::info!(
-                        "gamepad diag: connected \"{}\" uuid {} mapping source {:?}",
+                        "gamepad diag: {:?}: connected \"{}\" uuid {} mapping source {:?}",
+                        event.id,
                         pad.name(),
                         uuid_hex(pad.uuid()),
                         pad.mapping_source()
                     );
                 } else {
-                    log::info!("gamepad diag: {:?}", event.event);
+                    log::info!("gamepad diag: {:?}: {:?}", event.id, event.event);
                 }
             }
-            // Any disconnect resets the accumulated state: gilrs has
-            // already dropped the pad from its connected list, so the id
-            // cannot be compared against the driven pad below, and after a
-            // reset the surviving pad's state rebuilds from its next events.
             if event.event == gilrs::EventType::Disconnected {
-                self.axes.clear();
-                self.buttons.clear();
-                self.mapped = MappedPadState::default();
+                self.slots.disconnect(event.id.into());
                 continue;
             }
-            // Accumulate state only for the pad this reader drives -- the
-            // first connected one, the same selection poll() and the
-            // calibration flow make -- so a bystander pad's drift or
-            // presses cannot leak into it.
-            if self.first_gamepad() != Some(event.id) {
+            let Some(slot) = self.slots.connect(event.id.into()) else {
                 continue;
-            }
+            };
+            let collapsed = match event.event {
+                gilrs::EventType::ButtonChanged(button, _, code)
+                | gilrs::EventType::ButtonPressed(button, code)
+                | gilrs::EventType::ButtonReleased(button, code) => {
+                    self.collapsed_dpad_half_axis(event.id, button, code)
+                }
+                _ => false,
+            };
+            let state = &mut self.slots.states[slot];
             match event.event {
                 gilrs::EventType::AxisChanged(axis, value, code) => {
-                    self.axes.insert(code.into_u32(), value);
-                    self.mapped.set_axis(axis, value);
+                    state.axes.insert(code.into_u32(), value);
+                    state.mapped.set_axis(axis, value);
                 }
                 gilrs::EventType::ButtonChanged(button, value, code) => {
-                    if self.collapsed_dpad_half_axis(event.id, button, code) {
+                    if collapsed {
                         apply_collapsed_dpad(
-                            &mut self.axes,
-                            &mut self.buttons,
-                            &mut self.mapped,
+                            &mut state.axes,
+                            &mut state.buttons,
+                            &mut state.mapped,
                             button,
                             value,
                             code.into_u32(),
                         );
                     } else {
                         let pressed = value >= AXIS_ACTIVE_THRESHOLD;
-                        self.buttons.insert(code.into_u32(), pressed);
-                        self.mapped.set_button(button, pressed);
+                        state.buttons.insert(code.into_u32(), pressed);
+                        state.mapped.set_button(button, pressed);
                     }
                 }
-                // A collapsed half-axis d-pad also emits Pressed/Released at
-                // gilrs's threshold crossings; the ButtonChanged value stream
-                // carries the direction, so the guards drop those here.
-                gilrs::EventType::ButtonPressed(button, code)
-                    if !self.collapsed_dpad_half_axis(event.id, button, code) =>
-                {
-                    self.buttons.insert(code.into_u32(), true);
-                    self.mapped.set_button(button, true);
+                gilrs::EventType::ButtonPressed(button, code) if !collapsed => {
+                    state.buttons.insert(code.into_u32(), true);
+                    state.mapped.set_button(button, true);
                 }
-                gilrs::EventType::ButtonReleased(button, code)
-                    if !self.collapsed_dpad_half_axis(event.id, button, code) =>
-                {
-                    self.buttons.insert(code.into_u32(), false);
-                    self.mapped.set_button(button, false);
+                gilrs::EventType::ButtonReleased(button, code) if !collapsed => {
+                    state.buttons.insert(code.into_u32(), false);
+                    state.mapped.set_button(button, false);
                 }
                 _ => {}
             }
         }
+    }
+
+    fn primary_state(&self) -> &RawPadState {
+        &self.slots.states[0]
     }
 
     /// Whether this d-pad button event is really one half of an axis-mapped
@@ -528,7 +550,7 @@ impl RawGamepads {
     /// that one button with the full axis travel in its 0..1 value (0 = the
     /// SDL-negative end = up/left on standard entries, 0.5 = rest). Left as
     /// buttons, one direction per axis is lost and the other fires from the
-    /// wrong end, so [`Self::reroute_collapsed_dpad`] turns these events
+    /// wrong end, so [`apply_collapsed_dpad`] turns these events
     /// back into a signed axis for both the raw and the named state.
     fn collapsed_dpad_half_axis(
         &self,
@@ -553,7 +575,12 @@ impl RawGamepads {
     }
 
     fn first_gamepad(&self) -> Option<gilrs::GamepadId> {
-        self.gilrs.gamepads().next().map(|(id, _)| id)
+        self.slots.ids[0].and_then(|wanted| {
+            self.gilrs
+                .gamepads()
+                .find(|(id, _)| usize::from(*id) == wanted)
+                .map(|(id, _)| id)
+        })
     }
 }
 
@@ -583,17 +610,17 @@ fn apply_collapsed_dpad(
     }
 }
 
-/// Runtime reader: maps the first connected pad to the emulated port-2
-/// joystick, through its saved calibration when one exists and through the
+/// Runtime reader: maps up to four controllers independently, through each
+/// model's saved calibration when one exists and through the
 /// standard layout when the controller database or platform driver knows the
 /// pad. Held by the window and polled once per scheduler quantum.
 pub struct GamepadReader {
     raw: Option<RawGamepads>,
     store: CalibrationStore,
-    warned_uncalibrated: bool,
+    warned_uncalibrated: [bool; 4],
     /// UUID of the pad whose input source we last announced, so we log it
     /// once per pad (and again if a different pad is plugged in).
-    logged_pad: Option<String>,
+    logged_pad: [Option<String>; 4],
 }
 
 impl Default for GamepadReader {
@@ -614,8 +641,8 @@ impl GamepadReader {
         Self {
             raw,
             store: CalibrationStore::load(),
-            warned_uncalibrated: false,
-            logged_pad: None,
+            warned_uncalibrated: [false; 4],
+            logged_pad: Default::default(),
         }
     }
 
@@ -632,7 +659,7 @@ impl GamepadReader {
             let pad = raw.gilrs.gamepad(id);
             (pad.name().to_string(), uuid_hex(pad.uuid()))
         });
-        session.advance(pad, &raw.axes, &raw.buttons)
+        session.advance(pad, &raw.primary_state().axes, &raw.primary_state().buttons)
     }
 
     /// Persist a finished session's bindings for its pad and make them
@@ -645,9 +672,9 @@ impl GamepadReader {
             .gamepads
             .insert(uuid.to_string(), session.to_calibration());
         self.store.save()?;
-        self.warned_uncalibrated = false;
+        self.warned_uncalibrated = [false; 4];
         // Re-announce on the next poll now that a (new) calibration is live.
-        self.logged_pad = None;
+        self.logged_pad = Default::default();
         Ok(())
     }
 
@@ -678,54 +705,73 @@ impl GamepadReader {
     /// pad, or the connected one is neither calibrated nor known to the
     /// controller database.
     pub fn poll(&mut self) -> Option<PadState> {
-        let raw = self.raw.as_mut()?;
+        self.poll_all()[0]
+    }
+
+    /// Poll stable player slots, leaving disconnected or unknown controllers
+    /// as None. Calibration and host menu controls use the first slot.
+    pub fn poll_all(&mut self) -> [Option<PadState>; 4] {
+        let Some(raw) = self.raw.as_mut() else {
+            return [None; 4];
+        };
         raw.pump();
-        let id = raw.first_gamepad()?;
-        let pad = raw.gilrs.gamepad(id);
-        let uuid = uuid_hex(pad.uuid());
-        let mapped = !matches!(pad.mapping_source(), gilrs::MappingSource::None);
-        match self.store.get(&uuid) {
-            Some(cal) => {
-                if self.logged_pad.as_deref() != Some(uuid.as_str()) {
-                    self.logged_pad = Some(uuid.clone());
-                    log::info!("using saved calibration for gamepad \"{}\"", pad.name());
-                    if cal.format < CALIBRATION_FORMAT
-                        && matches!(pad.mapping_source(), gilrs::MappingSource::SdlMappings)
-                    {
-                        // The bundled mappings can flip named-axis signs
-                        // relative to what an old-format calibration
-                        // recorded for this (database-covered) pad.
-                        log::warn!(
-                            "gamepad \"{}\" was calibrated before the bundled controller \
+        std::array::from_fn(|slot| {
+            let Some(wanted) = raw.slots.ids[slot] else {
+                self.logged_pad[slot] = None;
+                self.warned_uncalibrated[slot] = false;
+                return None;
+            };
+            let (id, _) = raw
+                .gilrs
+                .gamepads()
+                .find(|(id, _)| usize::from(*id) == wanted)?;
+            let state = &raw.slots.states[slot];
+            let pad = raw.gilrs.gamepad(id);
+            let uuid = uuid_hex(pad.uuid());
+            let mapped = !matches!(pad.mapping_source(), gilrs::MappingSource::None);
+            match self.store.get(&uuid) {
+                Some(cal) => {
+                    if self.logged_pad[slot].as_deref() != Some(uuid.as_str()) {
+                        self.logged_pad[slot] = Some(uuid.clone());
+                        log::info!("using saved calibration for gamepad \"{}\"", pad.name());
+                        if cal.format < CALIBRATION_FORMAT
+                            && matches!(pad.mapping_source(), gilrs::MappingSource::SdlMappings)
+                        {
+                            // The bundled mappings can flip named-axis signs
+                            // relative to what an old-format calibration
+                            // recorded for this (database-covered) pad.
+                            log::warn!(
+                                "gamepad \"{}\" was calibrated before the bundled controller \
                              mappings were enabled; recalibrate if a direction is reversed",
+                                pad.name()
+                            );
+                        }
+                    }
+                    Some(cal.resolve_pad(&state.axes, &state.buttons))
+                }
+                None if mapped => {
+                    if self.logged_pad[slot].as_deref() != Some(uuid.as_str()) {
+                        self.logged_pad[slot] = Some(uuid.clone());
+                        log::info!(
+                            "gamepad \"{}\" recognised by the controller database; using the \
+                         standard layout (calibrate to customise)",
                             pad.name()
                         );
                     }
+                    Some(state.mapped.resolve_pad())
                 }
-                Some(cal.resolve_pad(&raw.axes, &raw.buttons))
-            }
-            None if mapped => {
-                if self.logged_pad.as_deref() != Some(uuid.as_str()) {
-                    self.logged_pad = Some(uuid.clone());
-                    log::info!(
-                        "gamepad \"{}\" recognised by the controller database; using the \
-                         standard layout (calibrate to customise)",
-                        pad.name()
-                    );
-                }
-                Some(raw.mapped.resolve_pad())
-            }
-            None => {
-                if !self.warned_uncalibrated {
-                    self.warned_uncalibrated = true;
-                    log::warn!(
+                None => {
+                    if !self.warned_uncalibrated[slot] {
+                        self.warned_uncalibrated[slot] = true;
+                        log::warn!(
                         "gamepad \"{}\" is not calibrated; run `copperline --calibrate-gamepad` to use it",
                         pad.name()
                     );
+                    }
+                    None
                 }
-                None
             }
-        }
+        })
     }
 }
 
@@ -1240,14 +1286,14 @@ fn capture(raw: &mut RawGamepads, label: &str, required: bool) -> Result<Option<
 /// The most strongly deflected axis or any pressed button, if past the capture
 /// threshold; otherwise `None`.
 fn strongest_input(raw: &RawGamepads) -> Option<RawInput> {
-    strongest_input_from(&raw.axes, &raw.buttons)
+    strongest_input_from(&raw.primary_state().axes, &raw.primary_state().buttons)
 }
 
 /// Spin until no button is held and no axis is meaningfully deflected.
 fn wait_for_neutral(raw: &mut RawGamepads) {
     loop {
         raw.pump();
-        if raw_state_neutral(&raw.axes, &raw.buttons) {
+        if raw_state_neutral(&raw.primary_state().axes, &raw.primary_state().buttons) {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1257,6 +1303,32 @@ fn wait_for_neutral(raw: &mut RawGamepads) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multitap_slots_keep_identical_controllers_independent_on_disconnect() {
+        let mut pads = PadSlots::default();
+        for id in 10..14 {
+            assert_eq!(pads.connect(id), Some(id - 10));
+        }
+        assert_eq!(pads.connect(14), None);
+        // The same raw code on two identical controllers belongs to each
+        // controller, not to a shared UUID or global button table.
+        pads.states[0].buttons.insert(7, true);
+        pads.states[1].buttons.insert(7, false);
+        pads.states[2].mapped.set_button(gilrs::Button::South, true);
+        pads.states[3]
+            .mapped
+            .set_button(gilrs::Button::DPadRight, true);
+        pads.disconnect(11);
+        assert_eq!(pads.ids, [Some(10), None, Some(12), Some(13)]);
+        assert_eq!(pads.states[0].buttons.get(&7), Some(&true));
+        assert!(pads.states[2].mapped.resolve_pad().joystick.fire);
+        assert!(pads.states[3].mapped.resolve_pad().joystick.right);
+        assert_eq!(pads.connect(14), Some(1));
+        assert!(pads.states[1].buttons.is_empty());
+        assert_eq!(pads.states[1].mapped.resolve_pad(), PadState::default());
+        assert_eq!(pads.connect(12), Some(2));
+    }
 
     fn axis(code: u32, positive: bool) -> Option<RawInput> {
         Some(RawInput::Axis { code, positive })

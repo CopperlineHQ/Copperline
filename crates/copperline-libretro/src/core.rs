@@ -20,7 +20,8 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-const MAGIC: &[u8; 8] = b"CLRETRO2";
+const MAGIC: &[u8; 8] = b"CLRETRO3";
+const PREVIOUS_MAGIC: &[u8; 8] = b"CLRETRO2";
 
 /// The envelope around the machine: the header, the control latches, and up
 /// to the second of pending audio a state may carry.
@@ -586,7 +587,7 @@ impl Core {
 
     pub fn unserialize(&mut self, data: &[u8]) -> Result<()> {
         ensure!(
-            data.len() >= 76 && &data[..8] == MAGIC,
+            data.len() >= 76 && (&data[..8] == MAGIC || &data[..8] == PREVIOUS_MAGIC),
             "not a Copperline libretro state"
         );
         ensure!(
@@ -610,17 +611,13 @@ impl Core {
                 *value = i32::from_le_bytes(reader.take(4)?.try_into()?);
             }
         }
-        for device in &mut controls.devices {
+        controls.devices[2..].fill(crate::abi::NONE);
+        let device_count = if &data[..8] == PREVIOUS_MAGIC { 2 } else { 4 };
+        for (port, device) in controls.devices.iter_mut().enumerate().take(device_count) {
             *device = reader.number()?;
             ensure!(
-                [
-                    crate::abi::AUTO,
-                    crate::abi::CD32_PAD,
-                    crate::abi::NONE,
-                    crate::abi::JOYPAD,
-                    crate::abi::MOUSE
-                ]
-                .contains(device),
+                [crate::abi::AUTO, crate::abi::NONE, crate::abi::JOYPAD].contains(device)
+                    || (port < 2 && [crate::abi::CD32_PAD, crate::abi::MOUSE].contains(device)),
                 "invalid controller"
             );
         }

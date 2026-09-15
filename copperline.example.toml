@@ -1023,12 +1023,13 @@ floppy_sounds_volume = 100
 #              prints; omitted = system default). `sampler_gain` is the preamp
 #              gain in decibels (0 dB = unity; ~ -24 to +24 dB). Needs a build
 #              with the `frontend` feature (it uses cpal, like live audio output).
-#   "joystick-adapter"
+#   "joystick-adapter" (alias "multitap")
 #              the passive four-player joystick adapter: port 3's
 #              directions on D0-D3 (CIA-A PB0-3) and fire on SEL (CIA-B
 #              PA2), port 4's on D4-D7 and BUSY (PA0), second buttons on
 #              POUT (PA1), all switches to ground on pins the guest has
-#              set as inputs. Sockets are [input] port3 / port4.
+#              set as inputs. Sockets are [input] port3 / port4. Supports
+#              up to four host gamepads, with keyboard mappings for spare ports.
 # --parallel DEVICE overrides this per run; --sampler-audio-input /
 # --sampler-input-gain imply "sampler", and [input] port3/port4 =
 # "joystick" implies "joystick-adapter".

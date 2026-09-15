@@ -33,7 +33,7 @@ struct Callbacks {
 #[derive(Default)]
 struct Runtime {
     core: Option<Core>,
-    devices: [Option<u32>; 2],
+    devices: [Option<u32>; 4],
     av: Option<AvInfo>,
     /// Cheats by frontend index; parsed once, poked after every frame.
     cheats: Vec<Option<memory::Cheat>>,
@@ -246,7 +246,17 @@ static DEVICES: [ControllerDescription; 5] = [
         id: NONE,
     },
 ];
-static PORTS: [ControllerInfo; 3] = [
+static PARALLEL_DEVICES: [ControllerDescription; 2] = [
+    ControllerDescription {
+        desc: c"Parallel-port joystick (multitap)".as_ptr(),
+        id: JOYPAD,
+    },
+    ControllerDescription {
+        desc: c"Disconnected".as_ptr(),
+        id: NONE,
+    },
+];
+static PORTS: [ControllerInfo; 5] = [
     ControllerInfo {
         types: DEVICES.as_ptr(),
         num_types: 5,
@@ -254,6 +264,14 @@ static PORTS: [ControllerInfo; 3] = [
     ControllerInfo {
         types: DEVICES.as_ptr(),
         num_types: 5,
+    },
+    ControllerInfo {
+        types: PARALLEL_DEVICES.as_ptr(),
+        num_types: 2,
+    },
+    ControllerInfo {
+        types: PARALLEL_DEVICES.as_ptr(),
+        num_types: 2,
     },
     ControllerInfo {
         types: std::ptr::null(),
@@ -261,7 +279,7 @@ static PORTS: [ControllerInfo; 3] = [
     },
 ];
 
-const fn input_descriptors() -> [InputDescriptor; 23] {
+const fn input_descriptors() -> [InputDescriptor; 35] {
     let mut descriptors = [const {
         InputDescriptor {
             port: 0,
@@ -270,7 +288,7 @@ const fn input_descriptors() -> [InputDescriptor; 23] {
             id: 0,
             description: std::ptr::null(),
         }
-    }; 23];
+    }; 35];
     let names = [
         c"Up",
         c"Down",
@@ -296,9 +314,20 @@ const fn input_descriptors() -> [InputDescriptor; 23] {
         };
         index += 1;
     }
+    while index < 34 {
+        let extra = index - 22;
+        descriptors[index] = InputDescriptor {
+            port: 2 + (extra / 6) as u32,
+            device: JOYPAD,
+            index: 0,
+            id: ids[extra % 6],
+            description: names[extra % 6].as_ptr(),
+        };
+        index += 1;
+    }
     descriptors
 }
-static INPUTS: [InputDescriptor; 23] = input_descriptors();
+static INPUTS: [InputDescriptor; 35] = input_descriptors();
 
 fn register_environment() {
     if let Some(callback) = CALLBACKS.get().environment {
@@ -497,16 +526,18 @@ pub extern "C" fn retro_run() {
         // may query disk state from a callback without aliasing the emulator.
         let mut keyboard = [0i16; 323];
         let mut mice = [[0i16; 7]; 2];
-        let mut pads = [[0i16; 16]; 2];
+        let mut pads = [[0i16; 16]; 4];
         if let Some(input) = callbacks.input {
             for (key, held) in keyboard.iter_mut().enumerate() {
                 *held = unsafe { input(0, KEYBOARD, 0, key as u32) };
             }
-            for port in 0..2 {
-                for (id, held) in mice[port].iter_mut().enumerate() {
+            for (port, mouse) in mice.iter_mut().enumerate() {
+                for (id, held) in mouse.iter_mut().enumerate() {
                     *held = unsafe { input(port as u32, MOUSE, 0, id as u32) };
                 }
-                for (id, held) in pads[port].iter_mut().enumerate() {
+            }
+            for (port, pad) in pads.iter_mut().enumerate() {
+                for (id, held) in pad.iter_mut().enumerate() {
                     *held = unsafe { input(port as u32, JOYPAD, 0, id as u32) };
                 }
             }
@@ -596,12 +627,16 @@ pub extern "C" fn retro_reset() {
 pub extern "C" fn retro_set_controller_port_device(port: u32, device: u32) {
     boundary(|| {
         // RetroArch clears all of its controller slots when a peer joins,
-        // including ports beyond the two connectors exposed by this core.
-        if port >= 2 {
+        // including ports beyond the four controllers exposed by this core.
+        if port >= 4 {
             return Ok(());
         }
         ensure!(
-            port < 2 && [AUTO, NONE, JOYPAD, CD32_PAD, MOUSE].contains(&device),
+            if port < 2 {
+                [AUTO, NONE, JOYPAD, CD32_PAD, MOUSE].contains(&device)
+            } else {
+                [AUTO, NONE, JOYPAD].contains(&device)
+            },
             "unsupported controller"
         );
         RUNTIME.with(|runtime| -> Result<()> {
@@ -613,7 +648,9 @@ pub extern "C" fn retro_set_controller_port_device(port: u32, device: u32) {
             runtime.devices[port as usize] = Some(device);
             if let Some(core) = runtime.core.as_mut() {
                 core.controls.devices[port as usize] = device;
-                core.controls.pending[port as usize] = [0; 2];
+                if let Some(pending) = core.controls.pending.get_mut(port as usize) {
+                    *pending = [0; 2];
+                }
             }
             Ok(())
         })

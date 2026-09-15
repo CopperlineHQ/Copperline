@@ -1104,9 +1104,14 @@ button shorts POUT (PA1) -- the assignment WinUAE's
 written against. The bus overlays the pull-downs on the CIA reads only
 for pins the guest has left as inputs (DDR bit clear), so a printer driver
 driving the port as outputs is unaffected. The host routing
-(`host_routing_for_ports`) queues the sockets behind the game ports for
-the pad and keyboard mappings; the recorder, `--joy-after`'s PORT token
-and the control protocol address them as ports 3 and 4.
+(`host_routing_for_gamepads`) queues the sockets behind the game ports.
+The desktop reader accumulates events separately for four stable controller
+slots, identified by the backend's device ID; model UUIDs select calibration
+only. Disconnecting a controller clears only its slot. Keyboard mappings
+fill vacant player ports, with Keyboard mode reserving the cursor-key port.
+The recorder, `--joy-after` and the control protocol address the adapter as
+ports 3 and 4. Libretro frontend ports 3 and 4 drive these same input states;
+its first two frontend ports retain their reversed native-port mapping.
 
 A `lightpen` port device models the pen/gun's two signals. The
 photodetector pulls the port's pin 6 (/FIRx) low as the beam sweeps past

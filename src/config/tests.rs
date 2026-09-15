@@ -5705,6 +5705,9 @@ fn parallel_adapter_sockets_and_the_light_pen_parse() -> Result<()> {
     let cfg = parse_config("[parallel]\ndevice = \"joystick-adapter\"\n")?;
     assert_eq!(cfg.parallel.device, ParallelDevice::JoystickAdapter);
     assert_eq!(cfg.parallel_joysticks, [true, true]);
+    let multitap = parse_config("[parallel]\ndevice = \"multitap\"\n")?;
+    assert_eq!(multitap.parallel.device, ParallelDevice::JoystickAdapter);
+    assert_eq!(multitap.parallel_joysticks, [true, true]);
     // A socket named implies the adapter; an unnamed socket stays empty.
     let cfg = parse_config("[input]\nport3 = \"joystick\"\n")?;
     assert_eq!(cfg.parallel.device, ParallelDevice::JoystickAdapter);
