@@ -686,14 +686,6 @@ impl Bus {
         ) else {
             return;
         };
-        let started = VideoPipelineStats::probe_timing_sample(
-            &mut self.video_pipeline_stats.sprite_fetch_probes,
-            VIDEO_FETCH_TIMING_SAMPLE_RATE,
-        );
-        let mut pair_slots = 0usize;
-        let mut fetched_lines = 0usize;
-        let bitplane_bplcon0 = self.effective_bitplane_bplcon0();
-        let bitplane_dmacon = self.effective_bitplane_dmacon();
         // Lines above the display start are provisional here: the
         // pre-display replay re-runs them at the display start with the
         // frame's final DMACON/SPRxPT event timeline and owns their latch
@@ -709,6 +701,14 @@ impl Bus {
         if !latch_write_through {
             return;
         }
+        let started = VideoPipelineStats::probe_timing_sample(
+            &mut self.video_pipeline_stats.sprite_fetch_probes,
+            VIDEO_FETCH_TIMING_SAMPLE_RATE,
+        );
+        let mut pair_slots = 0usize;
+        let mut fetched_lines = 0usize;
+        let bitplane_bplcon0 = self.effective_bitplane_bplcon0();
+        let bitplane_dmacon = self.effective_bitplane_dmacon();
         for (sprite, &slot1_hpos) in SPRITE_DMA_SLOT1_HPOS.iter().enumerate() {
             // Each sprite line uses two hardware DMA slots: $15+4N fetches
             // POS or DATA, $17+4N fetches CTL or DATB. Both crossings are

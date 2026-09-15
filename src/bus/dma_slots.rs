@@ -576,7 +576,11 @@ impl Bus {
         // still holds what those fetches would have read. Batching the whole
         // pre-display span at the display start instead let a vertical-blank
         // descriptor rewrite land before the control-word fetch was modelled.
-        if tick.new_frames == 0 && old_vpos < self.display_start_vpos_for_current_control() {
+        // The display start is a function of the DIW registers and the
+        // frame geometry, which nothing below changes before its second
+        // use; resolve it once for the quantum.
+        let display_start = self.display_start_vpos_for_current_control();
+        if tick.new_frames == 0 && old_vpos < display_start {
             // Replay every pre-display sprite slot the beam has now passed, so
             // each fetch reads chip RAM at its own beam time. A line crossing
             // completes the line just left; otherwise stop at the current hpos.
@@ -615,7 +619,6 @@ impl Bus {
                 self.reevaluate_diw_vertical_flop();
             }
         }
-        let display_start = self.display_start_vpos_for_current_control();
         if tick.new_frames == 0 && old_vpos < display_start && self.agnus.vpos >= display_start {
             self.capture_current_frame_display_start();
         }
@@ -829,6 +832,14 @@ impl Bus {
     }
 
     pub(super) fn fixed_dma_owner_at(&self, vpos: u32, hpos: u32) -> Option<ChipBusOwner> {
+        // Refresh, audio, disk and sprite slots all sit below 0x034 or on
+        // the line-end refresh pair: every other colour clock can only carry
+        // bitplane DMA, so it skips their four tests.
+        if hpos >= 0x034 && !Self::line_end_refresh_slot(hpos) {
+            return self
+                .bitplane_slot_active_at(vpos, hpos)
+                .then_some(ChipBusOwner::Bitplane);
+        }
         if Self::refresh_slot_active_at(hpos) {
             return Some(ChipBusOwner::Refresh);
         }
