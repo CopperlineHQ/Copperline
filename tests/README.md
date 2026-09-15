@@ -271,6 +271,53 @@ files, alongside the earlier `tests/copperhf_device.rs` (M2),
     build_image` already supports building it directly via
     `FileSystem { ffs: true, variant: Variant::Intl }` -- no bespoke FFS
     emitter was needed. Verified the same bootmark way as the OFS axis.
+  - **FFS-from-LSEG on Kickstart 1.3** (`kick13_ffs_from_lseg_boots_without_crashing`,
+    needs `KICK13.ROM` plus `test-assets/lide/wb13/Workbench1.3/l/
+    FastFileSystem`) -- currently **passes**. Unlike 3.1, Kickstart 1.3 has
+    no ROM-resident FFS at all (not even DOS\1), so a real 1.3 FFS hard
+    disk always loaded its handler off the RDB -- exactly this path,
+    tagged plain DOS\1 (no DOS\3 trick needed, since nothing on 1.3
+    short-circuits it). Verified by `assert_not_guru` (a screenshot
+    pixel-color check for the Guru Meditation screen's distinctive red,
+    since 1.3 has no ROM-resident `Echo` for the bootmark trick and no
+    golden was ever blessed for this case) rather than
+    `assert_golden`/bootmark.
+
+    **Investigation history (2026-09-14), kept for anyone who hits this
+    again**: this test originally used `test-assets/copperhf/
+    FastFileSystem` (the modern/community `$VER: fs 46.13 (23.9.2018)`
+    release the Kickstart 3.1 FFS-from-LSEG case above uses), following a
+    real user crash report on Kickstart 1.3. That combination reliably
+    took a Guru Meditation partway through mounting DH0. Traced
+    (instruction-level `COPPERLINE_DBG_WATCH`/`COPPERLINE_DBG_TRACE`,
+    `docs/debugger/headless.md`) to exec.library's own jump table (just
+    behind SysBase, e.g. the `Permit()` LVO slot) getting overwritten with
+    unrelated data around the time that binary starts running as DH0's
+    handler process, crashing on the next call through the clobbered
+    vector -- entirely inside real, unmodified Kickstart ROM code doing
+    what looks like exec's own internal InitResident()/MakeLibrary()
+    machinery, not `guest/copperhf/mounter.c`'s own code (already handed
+    off by that point; its hunk-loader/relocation code
+    (`chf_load_lseg_chain`) was re-audited against this finding and looks
+    correct).
+
+    **Root cause CONFIRMED, not a copperhf.device or Copperline bug**: the
+    46.13 binary links `utility.library` (per `strings` on the binary) --
+    a Kickstart 2.0+ (V36+) component Kickstart 1.3 (V34) never shipped at
+    all. Confirmed by A/B test: swapping in the genuinely period-correct
+    `test-assets/lide/wb13/Workbench1.3/l/FastFileSystem` (`$VER: V34.85
+    (8/10/88)` -- the matching V34 designation, and no `utility.library`
+    in its much shorter dependency list) makes the identical mount
+    sequence complete cleanly every time, with no code changes anywhere.
+    A real Amiga 500 running 1.3 with a hard disk formatted by the modern
+    46.13 binary would hit the exact same fault on real hardware -- this
+    is a genuine binary/Kickstart version incompatibility, not an
+    emulation defect. Lesson for any future "it crashed on Kickstart 1.3"
+    report involving copperhf: check which FastFileSystem version the
+    disk actually carries before assuming a Copperline bug -- many
+    real-world disks get reformatted with whatever modern FFS shipped in
+    someone's install media, regardless of which Kickstart they're
+    actually paired with.
   - **PFS3-DS beyond 4 GiB**, Kickstart 3.1 plus a bundled-AROS variant
     (`aros_pfs3_...`, `#[ignore]`d for the pfs3aio asset only). Needs
     `test-assets/copperhf/pfs3aio`, the real PFS3 "all-in-one" binary.
@@ -305,10 +352,11 @@ files, alongside the earlier `tests/copperhf_device.rs` (M2),
 
   | Asset | Used by |
   | --- | --- |
-  | `KICK13.ROM` | the 1.3 OFS axes (golden-screenshot verified) |
+  | `KICK13.ROM` | the 1.3 OFS axes (golden-screenshot verified) and the 1.3 FFS-from-LSEG axis |
   | `KICK31.ROM` | the 3.1 OFS, FFS-from-LSEG, and PFS3 axes |
   | `KICK32.ROM` | the 3.2 OFS axes |
-  | `test-assets/copperhf/FastFileSystem` | the FFS-from-LSEG axis |
+  | `test-assets/copperhf/FastFileSystem` | the 3.1 FFS-from-LSEG axis |
+  | `test-assets/lide/wb13/Workbench1.3/l/FastFileSystem` | the 1.3 FFS-from-LSEG axis (period-correct V34.85 binary; golden-screenshot verified) |
   | `test-assets/copperhf/pfs3aio` | the PFS3-DS >4 GiB axis |
 
   Run the whole file with:

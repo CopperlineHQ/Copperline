@@ -1062,3 +1062,137 @@ fn aros_pfs3_over_4gib_lseg_attach_boots_without_crashing() {
         KICK3X_MACHINE,
     );
 }
+
+// --- FFS-from-LSEG on Kickstart 1.3 ----------------------------------------
+//
+// CONFIRMED root cause as of 2026-09-14 -- not a copperhf.device or
+// Copperline bug, but a real binary/Kickstart version incompatibility. See
+// tests/README.md's copperhf section for the full investigation and the
+// A/B evidence below.
+//
+// Unlike Kickstart 3.1 (where DOS\1 FFS is ROM-resident and the
+// FFS-from-LSEG matrix case above has to use DOS\3 to force the mounter's
+// FSHD/LSEG loader), Kickstart 1.3 has NO ROM-resident FFS at all -- a real
+// 1.3 FFS hard disk always loaded its handler off the RDB, exactly the
+// mounter's FSHD/LSEG path. That combination (1.3 x FFS-from-LSEG) was
+// never in the M6 matrix, because the marker trick the other
+// FFS-from-LSEG cases use needs ROM-resident `Echo` (Kickstart 2.0+),
+// which 1.3 does not have either -- so, like the 1.3 OFS axes above, this
+// uses the empty-Startup-Sequence + golden CLI-prompt screenshot as its
+// positive mount/boot oracle (reaching the CLI prompt at all proves DH0's
+// FFS-from-LSEG handler actually mounted it, since that is the boot
+// volume), backed up by `assert_not_guru` as a belt-and-braces check that
+// gives a specific, readable failure message instead of a golden byte-diff
+// if the guest does crash.
+//
+// The investigation (instruction-level `COPPERLINE_DBG_WATCH`/
+// `COPPERLINE_DBG_TRACE`, `docs/debugger/headless.md`) started from a real
+// crash report: `test-assets/copperhf/FastFileSystem` (the modern/
+// community `$VER: fs 46.13 (23.9.2018)` release this project bundles for
+// the Kickstart 3.1 FFS-from-LSEG case, which links `utility.library` per
+// `strings` on the binary -- a Kickstart 2.0+ (V36+) component Kickstart
+// 1.3/V34 never shipped) reliably takes a "Software Failure" Guru partway
+// through mounting DH0 under 1.3. Traced to: exec.library's own jump
+// table (just behind SysBase, e.g. the Permit() LVO slot) gets overwritten
+// with unrelated data around the time that binary starts running as DH0's
+// handler process, crashing on the next call through the clobbered
+// vector -- entirely inside real, unmodified Kickstart ROM code doing what
+// looks like exec's own internal InitResident()/MakeLibrary() machinery,
+// not copperhf's own guest C code (which has already handed off by that
+// point; `mounter.c`'s hunk-loader/relocation code was re-audited against
+// this finding and looks correct).
+//
+// CONFIRMED by A/B test: swapping in a genuinely period-correct Kickstart
+// 1.3-era FastFileSystem binary already bundled in this repo for other
+// purposes (`test-assets/lide/wb13/Workbench1.3/l/FastFileSystem`, `$VER:
+// V34.85 (8/10/88)` -- note the matching V34 designation, and its much
+// shorter `strings` library list has no `utility.library` at all) makes
+// the exact same mount sequence complete cleanly with no Guru. This is
+// what the test below actually uses, so it is a genuine, currently-passing
+// regression proving copperhf.device correctly mounts and boots real FFS
+// media under Kickstart 1.3. The separate, still-real finding stands as
+// documentation: a hard disk formatted with a too-modern FastFileSystem
+// (as many real disks are, regardless of what Kickstart they're paired
+// with) will crash under 1.3 the same way on real hardware, which is a
+// genuine period incompatibility to be aware of, not a Copperline defect.
+// A user's own "it crashed on 1.3" report should be checked against which
+// FFS version their actual disk carries before assuming a Copperline bug.
+fn assert_not_guru(tag: &str, screenshot_path: &Path) {
+    let decoder = png::Decoder::new(std::io::BufReader::new(
+        std::fs::File::open(screenshot_path).unwrap(),
+    ));
+    let mut reader = decoder.read_info().unwrap();
+    let size = reader.output_buffer_size().unwrap();
+    let mut buf = vec![0u8; size];
+    let info = reader.next_frame(&mut buf).unwrap();
+    let rgba = &buf[..info.buffer_size()];
+    // The Guru Meditation screen's alert text and border are drawn in one
+    // very distinctive, saturated red (sampled from a real reproduction:
+    // RGB (255, 34, 0)); ordinary AmigaDOS CLI/Workbench screens never use
+    // it. A handful of stray matching pixels is noise; hundreds means the
+    // screen actually is a Guru.
+    let guru_red_pixels = rgba
+        .chunks_exact(4)
+        .filter(|p| p[0] == 255 && p[1] == 34 && p[2] == 0)
+        .count();
+    assert!(
+        guru_red_pixels < 50,
+        "[{tag}] screenshot {} looks like a Guru Meditation ({guru_red_pixels} \
+         guru-red pixels found) -- the guest crashed",
+        screenshot_path.display(),
+    );
+}
+
+#[test]
+#[ignore = "runs the emulator and requires a local Kickstart 1.3 ROM plus \
+            test-assets/lide/wb13/Workbench1.3/l/FastFileSystem"]
+fn kick13_ffs_from_lseg_boots_without_crashing() {
+    let tag = "kick13_ffs_from_lseg_boots_without_crashing";
+    if skip_if_debug(tag) {
+        return;
+    }
+    // Deliberately NOT test-assets/copperhf/FastFileSystem: that binary is
+    // a modern release (V46) requiring utility.library, a Kickstart 2.0+
+    // component 1.3 never shipped, and reliably crashes 1.3 as a result --
+    // see this function's own header comment. This period-correct V34.85
+    // FastFileSystem is what an authentic Kickstart 1.3 hard disk carried.
+    let Some(assets) = skip_if_missing(
+        tag,
+        &["KICK13.ROM", "lide/wb13/Workbench1.3/l/FastFileSystem"],
+    ) else {
+        return;
+    };
+    let fs_binary = std::fs::read(&assets[1]).unwrap();
+
+    let scratch = scratch_dir(tag);
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&scratch).unwrap();
+
+    let ffs = FileSystem {
+        ffs: true,
+        variant: Variant::Plain,
+    };
+    let dostype = ffs.dos_type(); // DOS\1, not ROM-resident on 1.3
+    let payload = build_empty_startup_payload("COPPERHFFS", ffs);
+    let image = build_rdb_image(payload, ffs, true, Some((&fs_binary, dostype)));
+
+    let image_path = scratch.join("unit0.hdf");
+    std::fs::File::create(&image_path)
+        .unwrap()
+        .write_all(&image.bytes)
+        .unwrap();
+
+    let screenshot = scratch.join("shot.png");
+    let output = run_boot(
+        tag,
+        KICK13_MACHINE,
+        "rom = \"KICK13.ROM\"",
+        &image_path,
+        25,
+        &screenshot,
+    );
+    assert_ran_ok(tag, &output);
+    assert_not_guru(tag, &screenshot);
+    assert_golden(tag, tag, &screenshot);
+    std::fs::remove_dir_all(&scratch).ok();
+}
