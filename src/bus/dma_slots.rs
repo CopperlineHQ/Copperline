@@ -30,7 +30,63 @@ impl Bus {
         forced_owner: Option<ChipBusOwner>,
         max_cck: u32,
     ) -> (u32, AgnusTick) {
-        self.advance_one_chip_bus_quantum_limited_inner(forced_owner, max_cck, false)
+        let copper_asleep = self.copper_sleeping_before_wake_bound(max_cck);
+        self.advance_one_chip_bus_quantum_limited_inner(forced_owner, max_cck, copper_asleep)
+    }
+
+    /// Whether the Copper is asleep in a WAIT that cannot release within
+    /// this quantum, so the quantum can leave its comparator alone -- the
+    /// same invariant the CPU-idle path passes from
+    /// `invariant_copper_deadline_cck`, here kept as a cached absolute
+    /// bound so the running path pays for it once per WAIT rather than
+    /// once per colour clock. The bound is a floor: at or past it the
+    /// comparator runs every eligible slot again, exactly as before, and
+    /// wakes the Copper at the same slot it always would have.
+    fn copper_sleeping_before_wake_bound(&mut self, max_cck: u32) -> bool {
+        let now = self.emulated_cck;
+        let quantum = u64::from(self.next_chip_bus_quantum().min(max_cck).max(1));
+        match self.copper_wake_bound {
+            CopperWakeBound::At(bound) if now.saturating_add(quantum) <= bound => return true,
+            CopperWakeBound::None => return false,
+            CopperWakeBound::At(_) | CopperWakeBound::Unknown => {}
+        }
+        let bound = self.copper_wake_bound_cck();
+        self.copper_wake_bound = match bound {
+            Some(cck) if cck > 0 => CopperWakeBound::At(now.saturating_add(u64::from(cck))),
+            _ => CopperWakeBound::None,
+        };
+        matches!(self.copper_wake_bound, CopperWakeBound::At(bound) if now.saturating_add(quantum) <= bound)
+    }
+
+    /// Colour clocks until the Copper's sleeping WAIT could release, or
+    /// None when it is not asleep or nothing bounds the wake. The floor
+    /// is the nearest of the frame wrap, a pending frame restart and the
+    /// WAIT's position (the end-of-list WAIT never matches: the frame
+    /// wrap alone). A WAIT already at its position gets no bound -- the
+    /// wake slot and the blitter-finished condition are the per-clock
+    /// path's business -- and a running Copper gets none either.
+    fn copper_wake_bound_cck(&self) -> Option<u32> {
+        if !self.copper_dma_enabled() {
+            return None;
+        }
+        let wait = self.copper.sleeping_wait()?;
+        let mut bound = self.agnus.cck_until_next_frame();
+        if let Some(cck) = self.cck_until_pending_copper_frame_start() {
+            bound = bound.min(cck);
+        }
+        if !wait.is_end_of_list() {
+            if wait.comparator_is_satisfied(self.agnus.vpos, self.agnus.hpos) {
+                return Some(0);
+            }
+            bound = bound.min(self.cck_until_copper_wait_position(wait)?);
+        }
+        Some(bound)
+    }
+
+    /// Forget the cached wake bound: something moved the Copper, the beam
+    /// or the DMA gates, so the next quantum resolves it afresh.
+    pub(super) fn invalidate_copper_wake_bound(&mut self) {
+        self.copper_wake_bound = CopperWakeBound::Unknown;
     }
 
     /// Shared quantum step. `copper_invariant_before_deadline` means either a
@@ -427,6 +483,7 @@ impl Bus {
         let trace_copper_events = trace_full || self.bus_event_observers != 0;
         let fetch_pc = (self.mem_watches_armed() || trace_full).then(|| self.copper.pc());
         let sleeping_before = trace_copper_events && self.copper.sleeping_wait().is_some();
+        let was_asleep = self.copper.sleeping_wait().is_some();
         let mut copper = std::mem::take(&mut self.copper);
         let action = copper.step_eligible_slot(
             &self.mem.chip_ram,
@@ -440,6 +497,9 @@ impl Bus {
             copper_cycle_free,
         );
         self.copper = copper;
+        if was_asleep != self.copper.sleeping_wait().is_some() {
+            self.invalidate_copper_wake_bound();
+        }
         if sleeping_before && self.copper.sleeping_wait().is_none() {
             self.note_bus_event_named(BUS_EVENT_COPPER_WAKE, Some("copper_wake"));
         }
