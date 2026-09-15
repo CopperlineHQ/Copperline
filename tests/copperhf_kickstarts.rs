@@ -1077,9 +1077,13 @@ fn aros_pfs3_over_4gib_lseg_attach_boots_without_crashing() {
 // mounter's FSHD/LSEG path. That combination (1.3 x FFS-from-LSEG) was
 // never in the M6 matrix, because the marker trick the other
 // FFS-from-LSEG cases use needs ROM-resident `Echo` (Kickstart 2.0+),
-// which 1.3 does not have either -- so this uses the empty-Startup-Sequence
-// + guru-screen detector the 1.3 OFS case's golden screenshot would
-// otherwise cover (no golden asset was ever blessed for this case).
+// which 1.3 does not have either -- so, like the 1.3 OFS axes above, this
+// uses the empty-Startup-Sequence + golden CLI-prompt screenshot as its
+// positive mount/boot oracle (reaching the CLI prompt at all proves DH0's
+// FFS-from-LSEG handler actually mounted it, since that is the boot
+// volume), backed up by `assert_not_guru` as a belt-and-braces check that
+// gives a specific, readable failure message instead of a golden byte-diff
+// if the guest does crash.
 //
 // The investigation (instruction-level `COPPERLINE_DBG_WATCH`/
 // `COPPERLINE_DBG_TRACE`, `docs/debugger/headless.md`) started from a real
@@ -1189,5 +1193,6 @@ fn kick13_ffs_from_lseg_boots_without_crashing() {
     );
     assert_ran_ok(tag, &output);
     assert_not_guru(tag, &screenshot);
+    assert_golden(tag, tag, &screenshot);
     std::fs::remove_dir_all(&scratch).ok();
 }

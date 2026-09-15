@@ -352,10 +352,11 @@ files, alongside the earlier `tests/copperhf_device.rs` (M2),
 
   | Asset | Used by |
   | --- | --- |
-  | `KICK13.ROM` | the 1.3 OFS axes (golden-screenshot verified) |
+  | `KICK13.ROM` | the 1.3 OFS axes (golden-screenshot verified) and the 1.3 FFS-from-LSEG axis |
   | `KICK31.ROM` | the 3.1 OFS, FFS-from-LSEG, and PFS3 axes |
   | `KICK32.ROM` | the 3.2 OFS axes |
-  | `test-assets/copperhf/FastFileSystem` | the FFS-from-LSEG axis |
+  | `test-assets/copperhf/FastFileSystem` | the 3.1 FFS-from-LSEG axis |
+  | `test-assets/lide/wb13/Workbench1.3/l/FastFileSystem` | the 1.3 FFS-from-LSEG axis (period-correct V34.85 binary; golden-screenshot verified) |
   | `test-assets/copperhf/pfs3aio` | the PFS3-DS >4 GiB axis |
 
   Run the whole file with:
