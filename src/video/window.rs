@@ -650,6 +650,19 @@ struct PerfOverlay {
     baseline: Option<PerfBaseline>,
 }
 
+/// What the newest clip-ring frame was built from: the presentation
+/// buffer's generation and the crop knobs that shape the saved picture.
+/// A pass whose source still matches skips building the picture; the
+/// ring then treats it as the frame staying on screen longer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ClipRingSource {
+    generation: u64,
+    overscan: crate::config::Overscan,
+    tv_centre: crate::config::TvCentre,
+    tv_aperture_rows: Option<usize>,
+    rtg: bool,
+}
+
 /// One sample of the cumulative counters the overlay derives rates from.
 struct PerfBaseline {
     at: Instant,
@@ -1574,6 +1587,12 @@ pub struct App {
     /// Scratch presentation picture for the clip ring and the headless
     /// GIF captures (same geometry as a screenshot).
     clip_fb: Vec<u32>,
+    /// Bumped whenever `present_fb` takes a new picture, so the clip ring
+    /// can tell a repeat of the frame it last built from without
+    /// rebuilding and comparing it.
+    present_fb_generation: u64,
+    /// What the newest clip-ring frame was built from.
+    clip_ring_source: Option<ClipRingSource>,
     /// Live `--gif-after` captures, armed from `pending_gif_captures` with
     /// the other scheduled flags.
     gif_captures: Vec<GifCaptureState>,
@@ -2407,6 +2426,8 @@ impl App {
             clip_ring: None,
             clip_save: None,
             clip_fb: Vec::new(),
+            present_fb_generation: 0,
+            clip_ring_source: None,
             gif_captures: Vec::new(),
             pending_gif_captures: gif_after,
         };

@@ -748,6 +748,7 @@ impl App {
         self.present_fb.resize(active, 0);
         self.present_fb
             .copy_from_slice(&self.deinterlacer.output()[..active]);
+        self.note_present_fb_changed();
         self.present_rows = rows;
         self.present_width = width;
     }
@@ -852,6 +853,7 @@ impl App {
         self.main_presentation_dirty = true;
         let old = std::mem::replace(&mut self.present_fb, result.presentation_fb);
         self.render_recycle_fb = old;
+        self.note_present_fb_changed();
         self.present_rows = result.present_rows;
         self.present_width = result.present_width;
         self.present_tv_aperture_rows = next_tv_aperture_rows;
@@ -971,6 +973,7 @@ impl App {
         let composed = compose_rtg_present(self.emu.bus(), &mut rtg, &mut present);
         self.rtg_fb = rtg;
         self.present_fb = present;
+        self.note_present_fb_changed();
         let Some((rows, native_w, native_h)) = composed else {
             // rtg_active() is true but the frame did not compose (e.g. MODE
             // set before ORIG_RES): fall back to the chipset render rather
@@ -1099,6 +1102,7 @@ impl App {
             self.main_presentation_dirty = true;
             let old = std::mem::replace(&mut self.present_fb, next_present_fb);
             self.render_recycle_fb = old;
+            self.note_present_fb_changed();
             self.present_rows = rows;
             self.present_width = width;
             self.present_tv_aperture_rows = next_tv_aperture_rows;

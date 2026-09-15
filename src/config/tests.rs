@@ -1263,6 +1263,19 @@ fn display_bezel_stickers_names_a_folder_and_defaults_to_none() -> Result<()> {
 }
 
 #[test]
+fn display_hidpi_texture_parses_and_defaults_to_on() -> Result<()> {
+    assert!(parse_config("")?.hidpi_texture);
+    let cfg = parse_config(
+        r#"
+            [display]
+            hidpi_texture = false
+            "#,
+    )?;
+    assert!(!cfg.hidpi_texture);
+    Ok(())
+}
+
+#[test]
 fn display_perf_overlay_parses_and_defaults_to_off() -> Result<()> {
     assert!(!parse_config("")?.perf_overlay);
     let cfg = parse_config(

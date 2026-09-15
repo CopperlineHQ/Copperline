@@ -6,14 +6,14 @@
 
 use super::ui::{AnalyzerTab, Panel, UiControl};
 use super::{
-    bar_layout, center_present_frame_for_visible_start, center_present_frame_horizontally,
-    control_at, copperline_icon_image, copperline_logo_image, copy_present_frame,
-    copy_tv_aperture_to_window, copy_window_present_frame, cursor_position_in_texture,
-    draw_seven_segment_digit, draw_status_bar, fdd_track_counter_rect, fdd_track_digit_rect,
-    host_shortcut_modifier_pressed, host_to_amiga_rawkey, joystick_toggle_rect, kbdpanel,
-    keyboard_toggle_rect, led_row_rect, mask_present_frame_to_tv, paint_test_screen,
-    parse_amiga_key, pause_button_rect, plan_present_scaling_for, power_button_rect,
-    present_height, presentation_pixels_equal, presentation_source_y_offset,
+    bar_layout, cap_texture_scale, center_present_frame_for_visible_start,
+    center_present_frame_horizontally, control_at, copperline_icon_image, copperline_logo_image,
+    copy_present_frame, copy_tv_aperture_to_window, copy_window_present_frame,
+    cursor_position_in_texture, draw_seven_segment_digit, draw_status_bar, fdd_track_counter_rect,
+    fdd_track_digit_rect, host_shortcut_modifier_pressed, host_to_amiga_rawkey,
+    joystick_toggle_rect, kbdpanel, keyboard_toggle_rect, led_row_rect, mask_present_frame_to_tv,
+    paint_test_screen, parse_amiga_key, pause_button_rect, plan_present_scaling_for,
+    power_button_rect, present_height, presentation_pixels_equal, presentation_source_y_offset,
     raw_device_qualifier_family_held, raw_device_qualifier_rawkey, rawkey_is_held,
     rawkey_transition_is_duplicate, reboot_button_rect, repeated_main_key_should_drop, rgba,
     short_status_error, shorten_status_paths, shot_button_rect, should_render_emulated_frame,
@@ -3209,6 +3209,25 @@ fn status_bar_draws_at_hidpi_texture_scale() {
     );
 }
 
+/// `[display] hidpi_texture = false` pins the backing texture to canvas
+/// resolution and leaves everything else of the plan alone: the integer
+/// multiple still draws its blocks from the 1x texture.
+#[test]
+fn hidpi_texture_off_caps_the_texture_scale_only() {
+    let smooth = plan_present_scaling_for(false, 2.0, (1432, 1074), (716, 537));
+    assert_eq!(smooth.texture_scale, 2);
+    let capped = cap_texture_scale(smooth, false);
+    assert_eq!(capped.texture_scale, 1);
+    assert_eq!(capped.multiple, None);
+    assert_eq!(cap_texture_scale(smooth, true), smooth);
+
+    let integer = plan_present_scaling_for(true, 2.0, (2560, 1600), (716, 537));
+    assert_eq!(integer.multiple, Some(2));
+    let capped = cap_texture_scale(integer, false);
+    assert_eq!(capped.texture_scale, 1);
+    assert_eq!(capped.multiple, Some(2));
+}
+
 #[test]
 fn present_frame_copy_scales_texture_rows_at_hidpi() {
     use crate::video::deinterlace::{OUT_HEIGHT, OUT_PIXELS};
@@ -3397,6 +3416,104 @@ fn tint_display_rows_leave_the_status_bar_alone() {
     }
     for px in frame[display_bytes..].chunks_exact(4) {
         assert_eq!(px, saturated, "status-bar pixel was tinted");
+    }
+}
+
+/// The live copies resolve the glass column map once per frame and copy
+/// texture rows that repeat a source row -- bookkeeping that must not
+/// change a pixel. Against a per-pixel reference walking
+/// `tv_glass_sample`, `tv_aperture_source_row` and `scaled_source_row`
+/// directly, every texture pixel is identical: on both canvases, at
+/// every texture scale, with the picture nudged off centre so unscanned
+/// glass and clamped edge samples are exercised too.
+#[test]
+fn window_copies_match_a_per_pixel_reference() {
+    use crate::video::deinterlace::{OUT_HEIGHT, OUT_PIXELS};
+    // A pseudo-random picture: every column and row distinct, so a wrong
+    // source column, row or blend weight shows.
+    let mut seed = 0x1234_5678u32;
+    let mut src = vec![0u32; OUT_PIXELS];
+    for px in src.iter_mut() {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        *px = seed | 0xFF00_0000;
+    }
+    let black = rgba(0, 0, 0);
+    let at = |frame: &[u8], stride: usize, x: usize, y: usize| -> u32 {
+        u32::from_le_bytes(frame[(y * stride + x) * 4..][..4].try_into().unwrap())
+    };
+    for scale in 1..=3 {
+        let stride = texture_width(scale);
+        for &(present_rows, offset) in &[
+            (crate::video::PRESENT_HEIGHT_TV, (0i32, 0i32)),
+            (crate::video::PRESENT_HEIGHT_TV, (5, -3)),
+            (crate::video::PRESENT_HEIGHT_SQUARE, (0, 0)),
+            (crate::video::PRESENT_HEIGHT_SQUARE, (-7, 4)),
+        ] {
+            let out_rows = present_rows * scale;
+            let mut frame = vec![0u8; stride * out_rows * 4];
+            copy_tv_aperture_to_window(
+                &src,
+                OUT_HEIGHT,
+                &mut frame,
+                scale,
+                TV_PAL_PRESENT_HEIGHT,
+                present_rows,
+                TV_PRESENT_SOURCE_Y,
+                offset,
+            );
+            let square = present_rows == crate::video::PRESENT_HEIGHT_SQUARE;
+            for y in 0..out_rows {
+                let src_y = tv_aperture_source_row(y, present_rows, scale, TV_PAL_PRESENT_HEIGHT)
+                    .map(|crop| (TV_PRESENT_SOURCE_Y + crop).min(OUT_HEIGHT - 1) as i32 + offset.1)
+                    .filter(|sy| (0..OUT_HEIGHT as i32).contains(sy));
+                for x in 0..stride {
+                    let out_x = x / scale;
+                    let expected = match src_y {
+                        None => black,
+                        Some(sy) => {
+                            let row = &src[sy as usize * FB_WIDTH..(sy as usize + 1) * FB_WIDTH];
+                            if !square {
+                                crate::video::present_common::tv_glass_sample(row, out_x, offset.0)
+                            } else if (TV_LIVE_PAD_X..TV_LIVE_PAD_X + TV_CAPTURED_WIDTH)
+                                .contains(&out_x)
+                            {
+                                let sx = TV_CAPTURED_SOURCE_X as i32
+                                    + offset.0
+                                    + (out_x - TV_LIVE_PAD_X) as i32;
+                                if (0..FB_WIDTH as i32).contains(&sx) {
+                                    row[sx as usize]
+                                } else {
+                                    black
+                                }
+                            } else {
+                                black
+                            }
+                        }
+                    };
+                    assert_eq!(
+                        at(&frame, stride, x, y),
+                        expected,
+                        "tv copy scale {scale} rows {present_rows} offset {offset:?} at ({x}, {y})"
+                    );
+                }
+            }
+        }
+
+        // The full-overscan copy: centre-aligned row selection, columns
+        // duplicated across the texture scale.
+        let out_rows = present_height() * scale;
+        let mut frame = vec![0u8; stride * texture_height(scale) * 4];
+        copy_present_frame(&src, OUT_HEIGHT, FB_WIDTH, &mut frame, scale);
+        for y in 0..out_rows {
+            let src_y = crate::screenshot::scaled_source_row(y, OUT_HEIGHT, out_rows);
+            for x in 0..stride {
+                assert_eq!(
+                    at(&frame, stride, x, y),
+                    src[src_y * FB_WIDTH + x / scale],
+                    "full copy scale {scale} at ({x}, {y})"
+                );
+            }
+        }
     }
 }
 
@@ -8691,6 +8808,69 @@ fn clip_ring_captures_presented_frames_and_saves_a_gif() {
     // Without a ring there is nothing to save.
     let bare = test_app();
     assert!(bare.save_clip_gif_to(&path).is_err());
+}
+
+/// A clip slot reached while `present_fb` still holds the picture the
+/// ring's newest frame was built from is noted without rebuilding it:
+/// the ring's timeline advances, nothing is copied into `clip_fb`, and
+/// the recorded source stays. Once the presentation takes a new picture
+/// the next slot builds again.
+#[test]
+fn clip_ring_notes_an_unchanged_presentation_without_rebuilding_it() {
+    let mut app = test_app();
+    let mut quanta = 0;
+    while app.clip_ring.as_ref().is_none_or(|ring| ring.is_empty()) {
+        app.emu.step_frame().expect("step frame");
+        let rendered = if app.render_worker.is_some() {
+            app.finish_render_for_current_frame()
+        } else {
+            app.render_emulated_frame_if_needed()
+        };
+        app.capture_clip_frame(rendered);
+        quanta += 1;
+        assert!(
+            quanta <= 24,
+            "fixture should present a frame the ring stores"
+        );
+    }
+    let seeded = app
+        .clip_ring_source
+        .expect("a built frame records its source");
+    let (frames, end) = {
+        let ring = app.clip_ring.as_ref().expect("ring seeded");
+        (ring.frame_count(), ring.clip().1)
+    };
+    // Reach the next clip slot without a new picture. The build is the
+    // only writer of `clip_fb`, so an emptied buffer shows whether it ran.
+    app.clip_fb.clear();
+    for _ in 0..3 {
+        app.emu.step_frame().expect("step frame");
+    }
+    app.capture_clip_frame(true);
+    let ring = app.clip_ring.as_ref().expect("ring kept");
+    assert!(
+        app.clip_fb.is_empty(),
+        "an unchanged presentation is not rebuilt"
+    );
+    assert_eq!(app.clip_ring_source, Some(seeded));
+    assert_eq!(ring.frame_count(), frames);
+    assert!(
+        ring.clip().1 > end,
+        "the repeat still advances the ring's timeline"
+    );
+
+    // A new picture in the presentation buffer builds the next slot.
+    app.note_present_fb_changed();
+    for _ in 0..3 {
+        app.emu.step_frame().expect("step frame");
+    }
+    app.capture_clip_frame(true);
+    assert!(
+        !app.clip_fb.is_empty(),
+        "a changed presentation is built again"
+    );
+    let source = app.clip_ring_source.expect("the build records its source");
+    assert!(source.generation > seeded.generation);
 }
 
 /// `--gif-after` through the windowless loop: the clip covers exactly its

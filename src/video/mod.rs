@@ -165,6 +165,20 @@ pub fn display_scaling() -> crate::config::DisplayScaling {
     }
 }
 
+/// Whether the window's presentation texture follows the display's
+/// device-pixel density (`[display] hidpi_texture`, default on) or stays
+/// at canvas resolution for the GPU to scale. Main thread only, like
+/// [`INTEGER_SCALING`]; the atomic only satisfies `static` safety.
+static HIDPI_TEXTURE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_hidpi_texture(enabled: bool) {
+    HIDPI_TEXTURE.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn hidpi_texture() -> bool {
+    HIDPI_TEXTURE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Whether a monitor bezel is drawn around the picture (`[display] bezel`,
 /// runtime-toggled by the menu and its shortcut). A mirror of the window's
 /// own style field for the canvas rule below: a bezel's fixed 4:3 opening

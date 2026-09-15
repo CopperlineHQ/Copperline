@@ -165,18 +165,30 @@ pub const fn tv_centre_source_offset(centre: TvCentre) -> (i32, i32) {
 #[inline]
 pub fn tv_glass_sample(row: &[u32], out_x: usize, source_x_offset: i32) -> u32 {
     debug_assert!(row.len() >= FB_WIDTH);
+    match tv_glass_column(out_x, source_x_offset) {
+        Some((i0, i1, frac)) => crate::video::blend_rgba(row[i0], row[i1], frac),
+        None => rgba(0, 0, 0),
+    }
+}
+
+/// The two source columns and 8-bit blend weight glass column `out_x`
+/// samples ([`tv_glass_sample`] is one such sample), or None where the
+/// glass is pushed past the captured raster. Depends on the column alone,
+/// so the live window builds a frame's map once and applies it to every
+/// row rather than resolving it per pixel.
+#[inline]
+pub fn tv_glass_column(out_x: usize, source_x_offset: i32) -> Option<(usize, usize, u32)> {
     let s = (TV_CAPTURED_SOURCE_X as i64 + source_x_offset as i64) * 256
         + ((2 * out_x as i64 + 1) * (TV_CAPTURED_WIDTH as i64) * 256) / (2 * FB_WIDTH as i64)
         - 128;
     // Half a texel of slack on each side: the default aperture's own edge
     // samples land there and clamp, exactly as before the offset existed.
     if !(-128..=(FB_WIDTH as i64 - 1) * 256 + 128).contains(&s) {
-        return rgba(0, 0, 0);
+        return None;
     }
     let s = s.clamp(0, (FB_WIDTH as i64 - 1) * 256);
     let i = (s >> 8) as usize;
-    let frac = (s & 255) as u32;
-    crate::video::blend_rgba(row[i], row[(i + 1).min(FB_WIDTH - 1)], frac)
+    Some((i, (i + 1).min(FB_WIDTH - 1), (s & 255) as u32))
 }
 
 /// Turn a rendered field into a presentable frame in place, and report

@@ -408,6 +408,14 @@ pub struct Config {
     /// Synchronise desktop presentation to vblank (`[display] vsync`).
     /// Enabled by default; independent of the emulator's real-time pacing.
     pub vsync: bool,
+    /// Draw the window's presentation texture at the display's
+    /// device-pixel density (`[display] hidpi_texture`, default true), so
+    /// a 200% (Retina) window is fed a 2x texture. `false` draws it at
+    /// canvas resolution and leaves the upscale to the GPU's scaler pass:
+    /// a quarter of the per-frame copy and upload, for slow hosts. The
+    /// picture's rows are then selected at canvas resolution rather than
+    /// at the finer texture grid, which fine interlaced detail can show.
+    pub hidpi_texture: bool,
     /// Screen tint applied to the window image: the phosphor colour of a
     /// monochrome monitor, or a sepia treatment. See [`Tint`].
     pub tint: Tint,
@@ -2685,6 +2693,7 @@ impl Default for Config {
             bezel_stickers: None,
             perf_overlay: false,
             vsync: true,
+            hidpi_texture: true,
             tint: Tint::None,
             menu_scale: MenuScale::Normal,
             full_screen: false,

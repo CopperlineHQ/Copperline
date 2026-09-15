@@ -29,7 +29,13 @@ impl Bus {
             self.last_frame_geometry = self.current_frame_geometry;
             self.last_frame_presentation_h_window = self.current_frame_presentation_h_window;
             self.last_frame_presentation_v_window = self.current_frame_presentation_v_window;
-            self.last_frame_render_events = std::mem::take(&mut self.current_frame_render_events);
+            // Swap rather than take: the retired buffer keeps its capacity
+            // for the next frame instead of regrowing from empty every frame.
+            std::mem::swap(
+                &mut self.last_frame_render_events,
+                &mut self.current_frame_render_events,
+            );
+            self.current_frame_render_events.clear();
         } else {
             self.last_frame_render_base = None;
             self.last_frame_render_events.clear();
@@ -46,8 +52,11 @@ impl Bus {
         self.current_frame_collision_bpldat_index = None;
         self.current_frame_collision_sprite_index = None;
         if promote_render_frame {
-            self.last_frame_chip_ram_writes =
-                std::mem::take(&mut self.current_frame_chip_ram_writes);
+            std::mem::swap(
+                &mut self.last_frame_chip_ram_writes,
+                &mut self.current_frame_chip_ram_writes,
+            );
+            self.current_frame_chip_ram_writes.clear();
             self.last_frame_beam_top_palette = self.current_frame_beam_top_palette;
             self.last_frame_beam_top_palette_end = self.beam_top_palette;
             self.last_frame_beam_bottom_palette = self.beam_bottom_palette;
@@ -98,12 +107,15 @@ impl Bus {
         if let Ok(rows) = std::sync::Arc::try_unwrap(old_bitplane_rows) {
             self.recycle_captured_bitplane_rows(rows);
         }
-        self.last_frame_sprite_lines = if promote_render_frame {
-            std::mem::take(&mut self.current_frame_sprite_lines)
+        if promote_render_frame {
+            std::mem::swap(
+                &mut self.last_frame_sprite_lines,
+                &mut self.current_frame_sprite_lines,
+            );
         } else {
-            self.current_frame_sprite_lines.clear();
-            Vec::new()
-        };
+            self.last_frame_sprite_lines.clear();
+        }
+        self.current_frame_sprite_lines.clear();
         self.last_frame_held_sprites = if promote_render_frame {
             std::mem::take(&mut self.current_frame_held_sprites)
         } else {

@@ -579,12 +579,29 @@ pub(super) fn plan_present_scaling(
     scale_factor: f64,
     surface: (u32, u32),
 ) -> PresentPlan {
-    plan_present_scaling_for(
+    let plan = plan_present_scaling_for(
         integer_requested,
         scale_factor,
         surface,
         (FB_WIDTH as u32, window_present_height() as u32),
-    )
+    );
+    cap_texture_scale(plan, crate::video::hidpi_texture())
+}
+
+/// Apply `[display] hidpi_texture`: off keeps the backing texture at
+/// canvas resolution whatever the density or integer multiple asked for.
+/// The multiple itself stands -- the scaler pass draws the 1x texture at
+/// the same whole-number blocks, point-sampled, so integer scaling looks
+/// the same; only the smooth fit's row selection coarsens.
+pub(super) fn cap_texture_scale(plan: PresentPlan, hidpi: bool) -> PresentPlan {
+    if hidpi {
+        plan
+    } else {
+        PresentPlan {
+            texture_scale: 1,
+            ..plan
+        }
+    }
 }
 
 /// The live plan for the emulator window, from its configured surface
@@ -1104,11 +1121,21 @@ pub(super) fn copy_present_frame(
     // the HiDPI texture scale). Select whole source rows instead of blending
     // adjacent Amiga scanlines; normal presentation should not synthesize
     // intermediate colours from line-to-line dithering.
+    // Texture rows outnumber source rows on a HiDPI texture, so runs of
+    // them show one source row: a run's later rows copy the row just built.
+    let mut built: Option<(usize, usize)> = None;
     for y in 0..out_rows {
         let src_y = screenshot::scaled_source_row(y, src_rows, out_rows);
+        let dst_off = y * dst_stride;
+        if let Some((built_y, built_off)) = built {
+            if built_y == src_y {
+                frame.copy_within(built_off..built_off + dst_stride, dst_off);
+                continue;
+            }
+        }
+        built = Some((src_y, dst_off));
         let row = &src_fb[src_y * src_width..(src_y + 1) * src_width];
 
-        let dst_off = y * dst_stride;
         if src_width == dst_stride_px {
             // A 35 ns canvas whose width matches the HiDPI texture row
             // (the common Retina case): every canvas pixel is one texture
@@ -1233,48 +1260,68 @@ pub(super) fn copy_tv_aperture_to_window(
     let black_px = rgba(0, 0, 0);
     let black = black_px.to_le_bytes();
     let square = present_rows == crate::video::PRESENT_HEIGHT_SQUARE;
-    let pixel_at = |row: &[u32], out_x: usize| -> u32 {
-        if square {
-            if (TV_LIVE_PAD_X..TV_LIVE_PAD_X + TV_CAPTURED_WIDTH).contains(&out_x) {
-                let src_x =
-                    TV_CAPTURED_SOURCE_X as i32 + source_x_offset + (out_x - TV_LIVE_PAD_X) as i32;
-                if (0..FB_WIDTH as i32).contains(&src_x) {
-                    row[src_x as usize]
-                } else {
-                    black_px
-                }
+    // Which captured columns each glass column samples is the same on
+    // every row, so resolve the map once per frame. None is unscanned
+    // glass; a zero weight is a unit column, sampled without blending.
+    let columns: Vec<Option<(usize, usize, u32)>> = (0..FB_WIDTH)
+        .map(|out_x| {
+            if square {
+                (TV_LIVE_PAD_X..TV_LIVE_PAD_X + TV_CAPTURED_WIDTH)
+                    .contains(&out_x)
+                    .then(|| {
+                        TV_CAPTURED_SOURCE_X as i32
+                            + source_x_offset
+                            + (out_x - TV_LIVE_PAD_X) as i32
+                    })
+                    .filter(|src_x| (0..FB_WIDTH as i32).contains(src_x))
+                    .map(|src_x| (src_x as usize, src_x as usize, 0))
             } else {
-                black_px
+                tv_glass_column(out_x, source_x_offset)
             }
-        } else {
-            tv_glass_sample(row, out_x, source_x_offset)
+        })
+        .collect();
+    let sample = |row: &[u32], column: Option<(usize, usize, u32)>| -> u32 {
+        match column {
+            Some((i0, _, 0)) => row[i0],
+            Some((i0, i1, frac)) => crate::video::blend_rgba(row[i0], row[i1], frac),
+            None => black_px,
         }
     };
+    // The texture rows outnumber the aperture's, so runs of them show
+    // one source row: a run's later rows copy the row just built.
+    let mut built: Option<(usize, usize)> = None;
     for y in 0..out_rows {
+        let dst_off = y * dst_stride;
         let src_y = tv_aperture_source_row(y, present_rows, texture_scale, aperture_rows)
             .map(|crop_y| (source_y + crop_y).min(src_rows - 1) as i32 + source_y_offset)
             .filter(|src_y| (0..src_rows as i32).contains(src_y));
         let Some(src_y) = src_y else {
-            let dst = &mut frame[y * dst_stride..(y + 1) * dst_stride];
+            let dst = &mut frame[dst_off..dst_off + dst_stride];
             for px in dst.chunks_exact_mut(4) {
                 px.copy_from_slice(&black);
             }
+            built = None;
             continue;
         };
         let src_y = src_y as usize;
+        if let Some((built_y, built_off)) = built {
+            if built_y == src_y {
+                frame.copy_within(built_off..built_off + dst_stride, dst_off);
+                continue;
+            }
+        }
         let row = &src_fb[src_y * FB_WIDTH..(src_y + 1) * FB_WIDTH];
-        let dst_off = y * dst_stride;
         match texture_scale {
             1 => {
                 let dst = &mut frame[dst_off..dst_off + dst_stride];
-                for x in 0..FB_WIDTH {
-                    let pixel = pixel_at(row, x);
+                for (x, &column) in columns.iter().enumerate() {
+                    let pixel = sample(row, column);
                     dst[x * 4..x * 4 + 4].copy_from_slice(&pixel.to_le_bytes());
                 }
             }
             2 => {
-                for x in 0..FB_WIDTH {
-                    let pixel = pixel_at(row, x);
+                for (x, &column) in columns.iter().enumerate() {
+                    let pixel = sample(row, column);
                     let pair = pixel as u64 | ((pixel as u64) << 32);
                     unsafe {
                         (frame.as_mut_ptr().add(dst_off + x * 8) as *mut u64).write_unaligned(pair);
@@ -1284,11 +1331,12 @@ pub(super) fn copy_tv_aperture_to_window(
             _ => {
                 let dst = &mut frame[dst_off..dst_off + dst_stride];
                 for x in 0..FB_WIDTH * texture_scale {
-                    let pixel = pixel_at(row, x / texture_scale);
+                    let pixel = sample(row, columns[x / texture_scale]);
                     dst[x * 4..x * 4 + 4].copy_from_slice(&pixel.to_le_bytes());
                 }
             }
         }
+        built = Some((src_y, dst_off));
     }
 }
 
