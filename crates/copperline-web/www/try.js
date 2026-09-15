@@ -2585,8 +2585,9 @@ function updateFsUi() {
 }
 
 // The pinned fallback is plain inline styles so it works with any page
-// shell. The z-index clears the page's fixed overlays (the scanline layer
-// sits at 9999); real fullscreen renders above them via the top layer.
+// shell. The z-index clears the page's fixed overlays (the hosted site's
+// scanline layer sits at 9999); real fullscreen renders above them via
+// the top layer.
 const CSS_FS_SHELL = {
   position: 'fixed',
   inset: '0',
@@ -2946,9 +2947,12 @@ function ensureKeyboard() {
   // viewport in the page, against the fullscreen area in real fullscreen,
   // and against the visible area under the pinned CSS fallback - one
   // placement for all three - and it escapes the shell's overflow:hidden.
-  // Above the sticky page furniture but below the site's cosmetic scanline
-  // layer (9999, pointer-events:none), so the keys wear the same CRT
-  // texture as everything else.
+  // Above the sticky page furniture. The keyboard is a child of the
+  // shell, so a page that gives the shell a z-index (the hosted try page
+  // lifts it above the site's cosmetic scanline overlay, which would
+  // otherwise run across the drawn bezel) carries the keys up with it;
+  // in a shell without one this sits just below that overlay's level
+  // (9999, pointer-events:none).
   root.style.cssText =
     'position:fixed;left:0;right:0;bottom:0;z-index:9998;display:none;' +
     'box-sizing:border-box;overflow:hidden;background:rgba(12,15,24,0.94);' +
