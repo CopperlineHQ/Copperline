@@ -176,10 +176,14 @@ impl App {
             return;
         }
         let preferences = self.egui_layout_preferences().clone();
-        let Some(r) = &mut self.render else {
+        let Some(r) = self.render.as_mut() else {
             return;
         };
-        let mut ui = DebuggerUi::new(&r.window, &r.pixels, preferences);
+        let window = r.window.clone();
+        let Some(gpu) = r.gpu_mut() else {
+            return;
+        };
+        let mut ui = DebuggerUi::new(&window, &gpu.pixels, preferences);
         ui.layout.workspace = true;
         self.debugger_ui = Some(ui);
         self.request_redraw();
@@ -374,13 +378,19 @@ impl App {
         ui.layout.guest_input = self.debug_guest_input;
         ui.layout.tools = self.egui_tool_tab_states();
         let snapshot = ui.snapshot.take();
-        let actions = if let Some(r) = &self.render {
+        // The egui prepare step uploads through the device and queue, so
+        // the GPU side comes home for it (it stays for the paint below).
+        let gpu_home = self.render.as_mut().and_then(|r| {
+            let window = r.window.clone();
+            r.gpu_mut().map(|gpu| (window, gpu))
+        });
+        let actions = if let Some((window, gpu)) = gpu_home {
             match &snapshot {
                 Some(Snapshot::Debugger(view)) => {
                     self.debugger_panel.as_mut().map_or_else(Vec::new, |panel| {
                         ui.prepare(
-                            &r.window,
-                            &r.pixels,
+                            &window,
+                            &gpu.pixels,
                             Content::Debugger(panel, view),
                             self.mouse_captured,
                         )
@@ -391,8 +401,8 @@ impl App {
                         .as_mut()
                         .map_or_else(Vec::new, |panel| {
                             ui.prepare(
-                                &r.window,
-                                &r.pixels,
+                                &window,
+                                &gpu.pixels,
                                 Content::Analyzer(panel, view),
                                 self.mouse_captured,
                             )
@@ -401,8 +411,8 @@ impl App {
                 Some(Snapshot::Console) => {
                     self.console_panel.as_mut().map_or_else(Vec::new, |panel| {
                         ui.prepare(
-                            &r.window,
-                            &r.pixels,
+                            &window,
+                            &gpu.pixels,
                             Content::Console(panel, if self.paused { "Paused" } else { "Running" }),
                             self.mouse_captured,
                         )

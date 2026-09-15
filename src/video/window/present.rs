@@ -907,9 +907,11 @@ pub(super) fn sync_main_present_scaling(
     );
     let scale = plan.texture_scale;
     let want = (texture_width(scale) as u32, texture_height(scale) as u32);
-    let have = r.pixels.context().texture_extent;
-    if (have.width, have.height) != want {
-        r.pixels.resize_buffer(want.0, want.1)?;
+    if let Some(gpu) = r.gpu_mut() {
+        let have = gpu.pixels.context().texture_extent;
+        if (have.width, have.height) != want {
+            gpu.pixels.resize_buffer(want.0, want.1)?;
+        }
     }
     r.texture_scale = scale;
     Ok(())
@@ -1627,6 +1629,18 @@ pub(super) fn hcenter_enabled() -> bool {
         Some(v) => !matches!(
             v.trim().to_ascii_lowercase().as_str(),
             "0" | "false" | "off" | "no"
+        ),
+        None => true,
+    }
+}
+
+/// Whether frames present from the present worker's thread
+/// (`COPPERLINE_THREADED_PRESENT`, default on).
+pub(super) fn threaded_present_enabled() -> bool {
+    match crate::envcfg::var("COPPERLINE_THREADED_PRESENT") {
+        Some(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "off" | "no"
         ),
         None => true,
     }

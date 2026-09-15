@@ -5,8 +5,9 @@ does not paint pixels as it runs; instead, every render-relevant event is
 recorded with its beam position, and the renderer replays the completed
 frame's events afterwards. The live emulation and the painting of pixels
 are decoupled in time but exact in beam position. In normal windowed and
-headless runs, replay happens on the default render worker; the CPU,
-custom-chip model, and GPU presentation remain on the main thread.
+headless runs, replay happens on the default render worker, and the
+window's GPU presentation on a present worker; the CPU and custom-chip
+model remain on the main thread.
 
 ## Recording: beam events (`video/beam.rs`)
 
@@ -439,11 +440,29 @@ Denise after painting, but the threaded path treats those bits as diagnostic
 render output and records only the returned render timing on the main
 thread.
 
-wgpu and winit remain main-thread-only: the worker paints CPU buffers, and
-the main thread uploads the newest completed presentation buffer to the
-`pixels` surface. Normal display can be one frame behind emulation; exact
-capture paths call `finish_render_for_current_frame` so screenshots, frame
-dumps, recordings, debugger step, and run-to-PC output use the requested
+The render worker paints CPU buffers only. The main thread composes the
+newest completed presentation buffer into the texture image (the TV
+aperture or full-overscan copy, the tint, the status bar, panels and
+overlays) and hands that image to a second worker, `copperline-present`,
+which owns the GPU side of the window (the `pixels` surface and the
+scaler, CRT, bezel and sticker passes: `Gpu` in `window.rs`). The worker
+uploads the image, draws the passes and presents, so the main thread's
+redraw ends at hand-off rather than at the surface's vsync wait -- on a
+host that falls short of real time, that wait was otherwise a per-frame
+stall of the emulation loop. Up to two frames are in flight; a third
+redraw waits for the next pass. The worker never calls winit: the window's
+pre-present hint is given at hand-off, and everything the passes need
+(scaler draws, CRT uniforms, the RTG rect) is resolved on the main thread
+into the `PresentJob`. The GPU side comes home for the operations that
+need the main thread -- surface and texture resizes, present-mode and
+shader changes, and any frame carrying the RTG board's texture upload or
+the inspector's egui paint, which present synchronously as before
+(`Render::gpu_mut` reclaims it, waiting out a frame in flight).
+`COPPERLINE_THREADED_PRESENT=0` presents every frame from the main thread.
+
+Normal display can be one frame behind emulation; exact capture paths
+call `finish_render_for_current_frame` so screenshots, frame dumps,
+recordings, debugger step, and run-to-PC output use the requested
 emulated frame.
 
 Run-ahead (`[emulation] run_ahead_frames`) sits above this pipeline. A burst

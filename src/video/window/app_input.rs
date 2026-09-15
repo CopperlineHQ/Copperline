@@ -113,14 +113,16 @@ impl App {
         let scale_factor = r.window.scale_factor();
         let inner = r.window.inner_size();
         let phys = self.last_cursor_phys;
-        let context = r.pixels.context();
         // The rect the display quad is actually drawn into -- the
         // sub-rect's under autocrop or per-axis scaling, the classic
         // letterbox otherwise -- so the trace shows the same mapping the
         // position below went through.
         let layout = main_present_layout(r, display_src);
         let clip = layout.display_dst;
-        let texture = (context.texture_extent.width, context.texture_extent.height);
+        let texture = (
+            texture_width(r.texture_scale) as u32,
+            texture_height(r.texture_scale) as u32,
+        );
         let pos = phys.and_then(|p| layout.cursor_position(p));
         let region = match pos {
             Some(p) if cursor_in_status_bar(p) => "status_bar",

@@ -1141,7 +1141,10 @@ Rendering completed frames uses a worker thread by default so emulation can
 advance while the previous frame is painted. The worker is an implementation
 detail of presentation: screenshots, frame dumps, and recordings wait for
 the exact frame they save. `COPPERLINE_THREADED_RENDER=0` forces the old
-synchronous render path for comparison.
+synchronous render path for comparison. Presenting the composed frame --
+the texture upload, the GPU passes and the wait for the display's vsync --
+runs on a second worker, so the main thread's redraw ends at hand-off;
+`COPPERLINE_THREADED_PRESENT=0` presents from the main thread instead.
 
 ## `[audio]`
 

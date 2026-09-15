@@ -24,7 +24,7 @@ impl Presenter {
     pub(super) fn render<F>(
         &mut self,
         pixels: &Pixels<'_>,
-        window: &Window,
+        window: Option<&Window>,
         emulated_frame: Option<u64>,
         draw: F,
     ) -> Result<(), pixels::Error>
@@ -42,7 +42,9 @@ impl Presenter {
             // a timeout/occluded surface must not arm a callback for a buffer
             // that will never be committed. On Wayland this lets winit align
             // subsequent redraws with compositor frame callbacks.
-            window.pre_present_notify();
+            if let Some(window) = window {
+                window.pre_present_notify();
+            }
             drawn = self.profile.then(Instant::now);
             Ok(())
         });
@@ -56,7 +58,8 @@ impl Presenter {
             let draw_ms = acquired.zip(drawn).map_or(-1.0, |(a, d)| millis(d, a));
             let submit_present_ms = drawn.map_or(-1.0, |at| millis(finished, at));
             log::info!(
-                "window frame: emulated_frame={emulated_frame:?} mode={:?} submitted={} interval_ms={interval_ms:.3} acquire_upload_ms={acquire_upload_ms:.3} draw_ms={draw_ms:.3} submit_present_ms={submit_present_ms:.3} total_ms={:.3}",
+                "window frame: thread={} emulated_frame={emulated_frame:?} mode={:?} submitted={} interval_ms={interval_ms:.3} acquire_upload_ms={acquire_upload_ms:.3} draw_ms={draw_ms:.3} submit_present_ms={submit_present_ms:.3} total_ms={:.3}",
+                std::thread::current().name().unwrap_or("?"),
                 pixels.present_mode(),
                 drawn.is_some() && result.is_ok(),
                 millis(finished, started),

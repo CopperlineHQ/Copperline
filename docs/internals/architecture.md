@@ -121,7 +121,10 @@ and chipset: each turn of the loop (`Emulator::step_real`,
 emulated time, cycle-stepping the CPU and the chipset together. By default,
 the completed-frame renderer runs one frame behind on a worker thread; set
 `COPPERLINE_THREADED_RENDER=0` to use the synchronous renderer for
-comparison.
+comparison. A second worker presents the composed frame to the GPU
+surface (`COPPERLINE_THREADED_PRESENT=0` presents from the main thread),
+so neither the texture upload nor the vsync wait sits in the emulation
+loop's turn.
 
 The winit window is only the default frontend. With the default `frontend`
 cargo feature disabled, the crate builds as the portable headless core plus
