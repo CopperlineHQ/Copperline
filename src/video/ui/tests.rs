@@ -4005,10 +4005,11 @@ fn panels_render_into_their_rects() {
         }
     }
 
-    // The FMV module's action is live even with no custom path: Remove writes
-    // the explicit empty-slot state, then the same button offers Default and
-    // restores the bundled ROM. This is a tri-state module control, not an
-    // ordinary path Clear that goes dead while the default is in force.
+    // The FMV module's action is live even with no custom path: from the
+    // default empty slot the button offers Fit and fits the module with the
+    // bundled ROM, then the same button offers Remove and empties the slot
+    // again. This is a module control, not an ordinary path Clear that goes
+    // dead while the default is in force.
     {
         let probe = |setup: launcher::MachineSetup| {
             let mut state = LauncherState::new(setup);
@@ -4051,16 +4052,13 @@ fn panels_render_into_their_rects() {
         setup.select_model(Some(MachineModel::Cd32));
         assert_eq!(
             probe(setup.clone()),
-            (
-                "Remove",
-                Some(UiControl::LauncherClear(LauncherField::FmvRom))
-            )
+            ("Fit", Some(UiControl::LauncherClear(LauncherField::FmvRom)))
         );
         setup.toggle_fmv_module();
         assert_eq!(
             probe(setup),
             (
-                "Default",
+                "Remove",
                 Some(UiControl::LauncherClear(LauncherField::FmvRom))
             )
         );

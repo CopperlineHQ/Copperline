@@ -32,8 +32,9 @@ pub(crate) fn raw_from_path(path: &Path) -> Result<RawConfig> {
 // the output minimal -- only fields and sections the user actually set are
 // emitted, matching the style of the hand-written `*.example.toml`. The
 // `toml` serializer requires every top-level scalar key to be emitted before
-// any `[table]`, so the top-level scalars (`rom`, `extended_rom`, `fmv_rom`,
-// `identify`) are declared first, ahead of the section tables and the `zorro`
+// any `[table]`, so the top-level scalars (`rom`, `extended_rom`, `fmv`,
+// `fmv_rom`, `identify`) are declared first, ahead of the section tables and
+// the `zorro`
 // array of tables. Field declaration order otherwise mirrors deserialization,
 // which is order-independent.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -49,8 +50,12 @@ pub struct RawConfig {
     /// Extended ROM image (CD32 512K at $E00000, CDTV 256K at $F00000).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) extended_rom: Option<String>,
-    /// CD32 Full Motion Video cartridge ROM (bundled open 256 KiB default;
-    /// an empty string leaves the module unfitted).
+    /// `fmv = true` fits the CD32 Full Motion Video module with the bundled
+    /// open 256 KiB ROM (default: the cartridge slot is empty).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fmv: Option<bool>,
+    /// CD32 Full Motion Video cartridge ROM: naming one fits the module with
+    /// that image. An empty string is the older spelling of an empty slot.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) fmv_rom: Option<String>,
     /// `identify = false` drops the Copperline identification board from the

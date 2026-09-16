@@ -866,9 +866,11 @@ Liberation's CD32 intro busy-waits on its first frame interrupt after
 
 ### CD32 Full Motion Video module (`cd32_fmv.rs`)
 
-The CD32 profile fits a 1 MiB Zorro II FMV cartridge by default using the
-bundled open ROM; top-level `fmv_rom` overrides it and an empty value removes
-it. The module is the first autoconfig board, normally at `$200000`
+Top-level `fmv = true` fits a 1 MiB Zorro II FMV cartridge on the CD32
+profile using the bundled open ROM, and `fmv_rom` fits it with another image;
+the slot is empty by default, as on a stock CD32, because the module's
+resident ROM moves the guest's memory layout and boot timing. The module is
+the first autoconfig board, normally at `$200000`
 (manufacturer 514, product
 `$6A`, serial `$0028001E`). Its window follows the physical decode: 256 KiB ROM at
 `+$000000`, board status/control at `+$040000`, LSI L64111 MPEG Layer II audio

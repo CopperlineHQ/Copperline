@@ -38,9 +38,10 @@ fn is_default<T: Default + PartialEq>(value: &T) -> bool {
 /// `rom = "..."` or the CLI argument) always replaces it.
 pub const BUNDLED_AROS_ROM: &str = "<bundled-aros>";
 
-/// Sentinel `fmv_rom_path` for the CD32 profile's freely redistributable FMV
-/// cartridge ROM. `fmv_rom = "..."` replaces it; `fmv_rom = ""` explicitly
-/// leaves the cartridge slot empty.
+/// Sentinel `fmv_rom_path` for the freely redistributable FMV cartridge ROM
+/// that `fmv = true` fits on the CD32 profile. `fmv_rom = "..."` fits the
+/// module with that image instead; without either the cartridge slot is
+/// empty.
 pub const BUNDLED_FMV_ROM: &str = "<bundled-fmv>";
 
 /// The player build's persisted end-user settings, an ordinary
@@ -213,9 +214,11 @@ pub struct Config {
     /// Extended ROM image (`extended_rom = "path"`): 512 KiB maps at
     /// $E00000 (CD32), 256 KiB at $F00000 (CDTV).
     pub extended_rom_path: Option<PathBuf>,
-    /// CD32 Full Motion Video cartridge ROM (`fmv_rom = "path"`). The CD32
-    /// profile defaults to Copperline's bundled open ROM; an empty string
-    /// explicitly leaves the physical 1 MiB autoconfig module unfitted.
+    /// CD32 Full Motion Video cartridge ROM: `fmv = true` fits the module
+    /// with Copperline's bundled open ROM, `fmv_rom = "path"` with that
+    /// image. None leaves the physical 1 MiB autoconfig module unfitted,
+    /// the default: a stock CD32 has no cartridge, and fitting one moves
+    /// the guest's memory layout and boot timing.
     pub fmv_rom_path: Option<PathBuf>,
     /// CD image (`[cd] image = "disc.cue"`), mounted on the machine's CD
     /// controller (CD32 Akiko or CDTV DMAC).

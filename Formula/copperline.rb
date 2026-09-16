@@ -57,7 +57,8 @@ class Copperline < Formula
     # AROS is APL-licensed and freely redistributable, unlike a real Kickstart.
     (pkgshare/"aros").install Dir["assets/aros/*"]
 
-    # The CD32 profile's freely redistributable FMV cartridge ROM.
+    # The freely redistributable FMV cartridge ROM that fmv = true fits on the
+    # CD32 profile.
     (pkgshare/"fmv").install Dir["assets/fmv/*"]
 
     # Install the bundled open-source A4091 autoboot ROM (default when a config

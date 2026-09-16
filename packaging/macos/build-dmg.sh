@@ -140,7 +140,7 @@ for f in \
   cp "assets/aros/$f" "$app/Contents/Resources/aros/$f"
 done
 
-# Bundled open CD32 FMV cartridge ROM (the CD32 profile default).
+# Bundled open CD32 FMV cartridge ROM (fitted by fmv = true on the CD32 profile).
 mkdir -p "$app/Contents/Resources/fmv"
 for f in copperline-fmv.rom README.md; do
   cp "assets/fmv/$f" "$app/Contents/Resources/fmv/$f"

@@ -3775,7 +3775,7 @@ fn build_machine_inner(
     }
     #[cfg(not(feature = "cd32-fmv"))]
     if cfg.fmv_rom_path.is_some() {
-        anyhow::bail!("fmv_rom needs a build with the cd32-fmv feature");
+        anyhow::bail!("fmv = true / fmv_rom need a build with the cd32-fmv feature");
     }
     // The A3000's motherboard SCSI is not a Zorro board: its drives are fitted
     // to the Super DMAC further down, once the bus exists.

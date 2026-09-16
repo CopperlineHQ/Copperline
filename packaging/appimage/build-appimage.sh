@@ -66,7 +66,7 @@ install -Dm644 assets/aros/LICENSE \
 install -Dm644 assets/egui/THIRD_PARTY_FONTS.txt \
   "$appdir/usr/share/copperline/THIRD_PARTY_FONTS.txt"
 
-# Bundled open CD32 FMV cartridge ROM (the CD32 profile default).
+# Bundled open CD32 FMV cartridge ROM (fitted by fmv = true on the CD32 profile).
 install -Dm644 assets/fmv/copperline-fmv.rom \
   "$appdir/usr/share/copperline/fmv/copperline-fmv.rom"
 install -Dm644 assets/fmv/README.md \

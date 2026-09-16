@@ -75,7 +75,7 @@ foreach ($f in @(
     Copy-Item "assets\aros\$f" (Join-Path $arosDir $f)
 }
 
-# Bundled open CD32 FMV cartridge ROM (the CD32 profile default).
+# Bundled open CD32 FMV cartridge ROM (fitted by fmv = true on the CD32 profile).
 $fmvDir = Join-Path $stage "fmv"
 New-Item -ItemType Directory -Force -Path $fmvDir | Out-Null
 foreach ($f in @("copperline-fmv.rom", "README.md")) {

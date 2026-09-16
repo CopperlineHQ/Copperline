@@ -16,8 +16,9 @@ make -C fmv-rom check
 make -C fmv-rom bundle
 ```
 
-The CD32 machine profile fits this ROM by default. An explicit `fmv_rom` path
-still wins; `fmv_rom = ""` leaves the module unfitted. The ROM is licensed
+`fmv = true` in a CD32 configuration fits the module with this ROM; an
+explicit `fmv_rom` path fits another image instead, and without either the
+cartridge slot stays empty (the default). The ROM is licensed
 under GNU GPL v3.0 or later, the same `LICENSE` shipped at Copperline's root.
 
 Compatibility validated on 2026-08-30 (Kickstart) and 2026-09-05 (AROS):

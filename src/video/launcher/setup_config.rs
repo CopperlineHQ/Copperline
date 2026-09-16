@@ -65,7 +65,8 @@ impl MachineSetup {
                 .as_deref()
                 .filter(|path| !path.is_empty())
                 .map(PathBuf::from),
-            fmv_rom_disabled: raw.fmv_rom.as_deref() == Some(""),
+            fmv_fitted: raw.fmv == Some(true)
+                || raw.fmv_rom.as_deref().is_some_and(|path| !path.is_empty()),
             floppy_drives: raw.floppy.drives.unwrap_or(connected).min(4),
             floppy_speed: cfg.floppy.speed,
             df_playlists: cfg.floppy_playlists.clone(),
@@ -496,11 +497,10 @@ impl MachineSetup {
         // ROM
         raw.rom = self.rom.as_deref().map(path_string);
         raw.extended_rom = self.extended_rom.as_deref().map(path_string);
-        raw.fmv_rom = match self.fmv_rom.as_deref() {
-            Some(path) => Some(path_string(path)),
-            None if self.fmv_rom_disabled => Some(String::new()),
-            None => None,
-        };
+        // A named ROM fits the module by itself; the bundled ROM needs the
+        // `fmv = true` switch, and an empty slot is the default.
+        raw.fmv_rom = self.fmv_rom.as_deref().map(path_string);
+        raw.fmv = (self.fmv_fitted && self.fmv_rom.is_none()).then_some(true);
     }
 
     fn write_media_config(&self, raw: &mut RawConfig, base: &Config) {
