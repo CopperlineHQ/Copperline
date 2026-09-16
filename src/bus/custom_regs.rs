@@ -163,6 +163,7 @@ impl Bus {
     /// COP1LC/COP2LC now. Fired by any bus access to the strobe address,
     /// read or write, since the decode acts on the address alone.
     fn copjmp_strobe(&mut self, list: u8) {
+        self.invalidate_copper_wake_bound();
         self.pending_copper_frame_start = None;
         self.copper_current_list = list;
         self.copper.jump(match list {
@@ -340,6 +341,10 @@ impl Bus {
         if is_audio_timing_custom_write(off) {
             self.flush_audio();
         }
+        if is_beam_timing_custom_write(off) {
+            // Line and frame lengths feed the Copper's wake bound.
+            self.invalidate_copper_wake_bound();
+        }
         if is_render_relevant_custom_write(off)
             && !matches!(off, 0x180..=0x1BE)
             && (off != 0x1E4 || self.denise_ecs_registers())
@@ -362,10 +367,12 @@ impl Bus {
             }
             0x02A => {
                 self.agnus.write_vposw(val);
+                self.invalidate_copper_wake_bound();
                 false
             }
             0x02C => {
                 self.agnus.write_vhposw(val);
+                self.invalidate_copper_wake_bound();
                 false
             }
             0x02E => {
@@ -568,7 +575,14 @@ impl Bus {
                 let previous = self.effective_bitplane_dmacon();
                 let old_dmacon = self.agnus.dmacon;
                 let copen_before = self.agnus.dmacon & crate::chipset::copper::DMACON_COPEN != 0;
+                let copper_dma_before = self.copper_dma_enabled();
                 self.agnus.write_dmacon(val);
+                // Only the Copper's own DMA gate moves its wake; the rest
+                // of DMACON (blitter, planes, sprites) leaves a sleeping
+                // WAIT where it is.
+                if self.copper_dma_enabled() != copper_dma_before {
+                    self.invalidate_copper_wake_bound();
+                }
                 // Audio channel on/off edges drive the Paula state machine
                 // at the write itself (pending audio time was flushed by
                 // is_audio_timing_custom_write before dispatch).

@@ -278,9 +278,20 @@ the deadline while the ordinary DMA arbiter continues to own every colour
 clock. The shortcut is capped at the field wrap because the vertical-blank
 COP1LC strobe supersedes a wait that would otherwise extend into the next
 field. Instruction-tail and wake-up cycles remain individually stepped.
-Ordinary CPU-driven advances do not calculate this deadline: their spans are
-only a few colour clocks, so doing the prediction repeatedly would cost more
-than the comparator calls it replaces.
+
+Ordinary CPU-driven advances use the same invariant through a cached bound
+(`Bus::copper_sleeping_before_wake_bound`, consulted by every bus quantum):
+once a WAIT is in its steady comparator phase, the earliest colour clock at
+which it could release -- the nearest of its position, a pending frame
+restart and the field wrap, with the end-of-list WAIT bounded by the wrap
+alone -- is computed once and kept as an absolute clock. Quanta strictly
+before it leave the comparator dormant; at it, the comparator runs every
+eligible slot again and wakes the Copper at the slot it always would. A
+WAIT already at its position, including one held by a running blitter,
+gets no bound: the wake slot and the blitter-finished condition stay with
+the per-clock path. The bound is dropped by whatever can move the wake --
+a COPJMP strobe, VPOSW/VHPOSW, a DMACON write that changes the Copper's
+own DMA gate, a sleep/wake transition, reset -- and is never saved.
 
 Register writes take effect a fixed number of colour clocks after the
 chip-bus slot that carried them, and the delay is a property of the

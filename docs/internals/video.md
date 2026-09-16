@@ -5,8 +5,9 @@ does not paint pixels as it runs; instead, every render-relevant event is
 recorded with its beam position, and the renderer replays the completed
 frame's events afterwards. The live emulation and the painting of pixels
 are decoupled in time but exact in beam position. In normal windowed and
-headless runs, replay happens on the default render worker; the CPU,
-custom-chip model, and GPU presentation remain on the main thread.
+headless runs, replay happens on the default render worker, and the
+window's GPU presentation on a present worker; the CPU and custom-chip
+model remain on the main thread.
 
 ## Recording: beam events (`video/beam.rs`)
 
@@ -439,11 +440,48 @@ Denise after painting, but the threaded path treats those bits as diagnostic
 render output and records only the returned render timing on the main
 thread.
 
-wgpu and winit remain main-thread-only: the worker paints CPU buffers, and
-the main thread uploads the newest completed presentation buffer to the
-`pixels` surface. Normal display can be one frame behind emulation; exact
-capture paths call `finish_render_for_current_frame` so screenshots, frame
-dumps, recordings, debugger step, and run-to-PC output use the requested
+The render worker paints CPU buffers only. The main thread composes the
+newest completed presentation buffer into the texture image (the TV
+aperture or full-overscan copy, the tint, the status bar, panels and
+overlays) and hands that image to a second worker, `copperline-present`,
+which owns the GPU side of the window (the `pixels` surface and the
+scaler, CRT, bezel and sticker passes: `Gpu` in `window.rs`). The worker
+uploads the image, draws the passes and presents, so the main thread's
+redraw ends at hand-off rather than at the surface's vsync wait -- on a
+host that falls short of real time, that wait was otherwise a per-frame
+stall of the emulation loop. Up to two frames are in flight; a third
+redraw waits for the next pass. Everything the passes need (scaler
+draws, CRT uniforms, the RTG rect) is resolved on the main thread into
+the `PresentJob`. The worker gives the window's pre-present hint in the
+established order, after the draw and before the present, except on
+macOS, where every winit window method waits on the main thread and the
+hint is a no-op anyway. The GPU side comes home for the operations that
+need the main thread -- surface and texture resizes, present-mode and
+shader changes, and any frame carrying the RTG board's texture upload or
+the inspector's egui paint, which present synchronously as before
+(`Render::gpu_mut` reclaims it, waiting out a frame in flight).
+`COPPERLINE_THREADED_PRESENT=0` presents every frame from the main thread.
+
+When nothing has to be composed over the picture on the CPU -- no menu,
+panel, OSD, badge or guest overlay, no tint, and no CRT, bezel or RTG pass
+that samples the composed texture -- the display draw of the scaler pass
+samples the presentation buffer itself (`ScalerDraw::picture`,
+`PresentScaler::upload_picture`) instead of a CPU copy of it into the
+texture. The buffer goes up at the canvas's own size, and the shader
+reproduces `copy_window_present_frame` per texel of the texture it stands
+in for: the same row selection and the same 8.8 two-column glass blend in
+the same integer arithmetic (`picture_texel` in `scaler.rs`, from the
+`PictureMap` `present::picture_map` builds from the copy's inputs), then
+the same clamp-to-edge bilinear filter in linear light that the sampler
+applies to the composed texture. Point sampling is bit-identical to the
+CPU path; the sharp filter differs by the sampler's weight precision,
+within two LSBs (`picture_draws_match_the_composed_texture`). The chrome
+band below the picture still comes from the CPU texture, and every case
+above falls back to composing the whole frame on the CPU.
+
+Normal display can be one frame behind emulation; exact capture paths
+call `finish_render_for_current_frame` so screenshots, frame dumps,
+recordings, debugger step, and run-to-PC output use the requested
 emulated frame.
 
 Run-ahead (`[emulation] run_ahead_frames`) sits above this pipeline. A burst

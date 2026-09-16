@@ -1554,6 +1554,7 @@ impl App {
         self.apply_bezel_style(crate::config::resolve_bezel(cfg.bezel));
         self.apply_display_scaling(cfg.scaling);
         self.apply_vsync(cfg.vsync);
+        self.apply_hidpi_texture(cfg.hidpi_texture);
         self.apply_autocrop(cfg.autocrop);
         // Apply the configured start-up window state; the runtime toggles
         // (Cmd+F, Cmd+Shift+F) take over from here. Reuse the toggles so the
@@ -1621,8 +1622,8 @@ impl App {
                 shader_error = Some(msg);
                 self.crt_shader_kind = crate::config::ShaderKind::None;
             }
-        } else if let Some(r) = self.render.as_mut() {
-            r.crt_shader.clear_custom();
+        } else if let Some(gpu) = self.render.as_mut().and_then(Render::gpu_mut) {
+            gpu.crt_shader.clear_custom();
         }
         self.shader_strength = crate::config::resolve_shader_strength(cfg.shader_strength);
         // The style itself was adopted with the display settings above.

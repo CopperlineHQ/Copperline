@@ -990,6 +990,13 @@ pub struct Bus {
     current_frame_display_snapshot_taken: bool,
     #[serde(skip)]
     ocs_same_line_diw_start_blocked_vpos: Option<u32>,
+    /// The earliest colour clock at which the Copper's sleeping WAIT could
+    /// release, so the bus quantum can skip the comparator until then
+    /// (`copper_sleeping_before_wake_bound`). A cache of state the bus
+    /// already holds: rebuilt on demand, cleared by whatever can move the
+    /// wake (`invalidate_copper_wake_bound`), and not saved.
+    #[serde(skip)]
+    copper_wake_bound: CopperWakeBound,
     /// Agnus vertical display window flop: SET when the beam line matches
     /// DIWSTRT.V, RESET when it matches DIWSTOP.V (reset wins on a tie).
     /// The comparators are equality matches against the live registers, so
@@ -3746,6 +3753,7 @@ impl Bus {
             last_frame_sprite_dma_observed: false,
             current_frame_display_snapshot_taken: false,
             ocs_same_line_diw_start_blocked_vpos: None,
+            copper_wake_bound: CopperWakeBound::Unknown,
             diw_vertical_open: None,
             current_frame_render_blocked: false,
             current_frame_visible_start_vpos: RENDER_VISIBLE_START_VPOS,
@@ -5142,6 +5150,7 @@ impl Bus {
         self.paula.reset_registers();
         self.agnus = Agnus::with_video_standard_and_revision(video_standard, agnus_revision);
         self.copper = Copper::new();
+        self.copper_wake_bound = CopperWakeBound::Unknown;
         self.denise = Denise::new();
         self.blitter = Blitter::new();
         self.configure_chip_dma_masks();
@@ -10525,6 +10534,19 @@ fn sprite_dma_first_active_vpos(video_standard: VideoStandard) -> u32 {
     }
 }
 
+/// What the bus knows about when the Copper's sleeping WAIT can release.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum CopperWakeBound {
+    /// Not computed since the last change; the next quantum resolves it.
+    #[default]
+    Unknown,
+    /// Computed, and there is no usable bound: the comparator runs every
+    /// eligible slot, as it always did.
+    None,
+    /// The WAIT cannot release before this absolute colour clock.
+    At(u64),
+}
+
 fn next_chip_bus_quantum_at(hpos: u32, line_cck: u32) -> u32 {
     CHIP_BUS_SLOT_CCK.min(line_cck.saturating_sub(hpos).max(1))
 }
@@ -12479,6 +12501,12 @@ fn is_live_collision_bpldat_custom_write(off: u16) -> bool {
 
 fn is_live_collision_sprite_custom_write(off: u16) -> bool {
     matches!(off & 0x01FE, 0x140..=0x17F)
+}
+
+/// The ECS beam-timing registers (HTOTAL through HCENTER, BEAMCON0
+/// among them): a write can change the current line's or frame's length.
+fn is_beam_timing_custom_write(off: u16) -> bool {
+    matches!(off, 0x1C0..=0x1E2)
 }
 
 fn is_audio_timing_custom_write(off: u16) -> bool {

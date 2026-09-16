@@ -53,8 +53,14 @@ struct ScalerUniforms {
     // identity (0, 0, 1, 1) maps the whole texture across the viewport.
     rect: vec4<f32>,
     // x: 1.0 = nearest (texel-centre) sampling, 0.0 = sharp bilinear.
-    // yzw: reserved.
+    // y: 1.0 = sample the picture through the map below, 0.0 = the
+    // composed texture. zw: reserved.
     params: vec4<f32>,
+    // The picture map (`PictureMap::uniforms`), integer texel units.
+    pic_a: vec4<i32>,
+    pic_b: vec4<i32>,
+    pic_c: vec4<i32>,
+    pic_d: vec4<i32>,
 };
 
 @vertex
@@ -71,6 +77,117 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VOut {
 @group(0) @binding(0) var tex: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var<uniform> u: ScalerUniforms;
+@group(0) @binding(3) var pic: texture_2d<f32>;
+
+// The picture texel at (x, y) of the presentation buffer, as the encoded
+// byte values 0..255 per channel (the texture is not sRGB-typed).
+fn picture_load(x: i32, y: i32) -> vec3<i32> {
+    let v = textureLoad(pic, vec2<i32>(x, y), 0);
+    return vec3<i32>(round(v.rgb * 255.0));
+}
+
+// The composed texel at (tx, ty) of the texture the CPU copy would have
+// written: the row selection and the glass column blend of
+// present.rs copy_tv_aperture_to_window / copy_present_frame, in the
+// same integer arithmetic. Encoded values 0..1; black off the raster.
+fn picture_texel(tx: i32, ty: i32) -> vec3<f32> {
+    let scale = u.pic_a.x;
+    let out_rows = u.pic_a.y;
+    let src_rows = u.pic_a.w;
+    let src_width = u.pic_b.x;
+    let mode = u.pic_b.y;
+    let fbw = u.pic_d.w;
+    var src_y: i32;
+    if (mode == 0) {
+        src_y = min(((2 * ty + 1) * src_rows) / (2 * out_rows), src_rows - 1);
+    } else {
+        let pad = u.pic_b.z;
+        let content = u.pic_b.w;
+        let aperture = u.pic_c.x;
+        if (ty < pad || ty >= pad + content) {
+            return vec3<f32>(0.0);
+        }
+        let crop = min(((2 * (ty - pad) + 1) * aperture) / (2 * content), aperture - 1);
+        src_y = min(u.pic_c.y + crop, src_rows - 1) + u.pic_c.z;
+        if (src_y < 0 || src_y >= src_rows) {
+            return vec3<f32>(0.0);
+        }
+    }
+    if (mode == 0) {
+        let texw = fbw * scale;
+        if (src_width == texw) {
+            return vec3<f32>(picture_load(tx, src_y)) / 255.0;
+        }
+        if (src_width != fbw) {
+            return vec3<f32>(picture_load((tx * src_width) / texw, src_y)) / 255.0;
+        }
+        return vec3<f32>(picture_load(tx / scale, src_y)) / 255.0;
+    }
+    let out_x = tx / scale;
+    if (mode == 2) {
+        let pad_x = u.pic_d.z;
+        let width = u.pic_d.y;
+        if (out_x < pad_x || out_x >= pad_x + width) {
+            return vec3<f32>(0.0);
+        }
+        let sx = u.pic_d.x + u.pic_c.w + (out_x - pad_x);
+        if (sx < 0 || sx >= fbw) {
+            return vec3<f32>(0.0);
+        }
+        return vec3<f32>(picture_load(sx, src_y)) / 255.0;
+    }
+    let s = (u.pic_d.x + u.pic_c.w) * 256 + ((2 * out_x + 1) * u.pic_d.y * 256) / (2 * fbw) - 128;
+    if (s < -128 || s > (fbw - 1) * 256 + 128) {
+        return vec3<f32>(0.0);
+    }
+    let sc = clamp(s, 0, (fbw - 1) * 256);
+    let i = sc >> 8u;
+    let frac = sc & 255;
+    let a = picture_load(i, src_y);
+    let b = picture_load(min(i + 1, fbw - 1), src_y);
+    let c = (a * (256 - frac) + b * frac) >> vec3<u32>(8u);
+    return vec3<f32>(c) / 255.0;
+}
+
+// The decode the sampler applies to the sRGB composed texture, so the
+// picture path filters in linear light exactly like the composed one.
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let lo = c / 12.92;
+    let hi = pow((c + 0.055) / 1.055, vec3<f32>(2.4));
+    return select(hi, lo, c <= vec3<f32>(0.04045));
+}
+
+// Sample the virtual composed texture at texel-space `coord` the way the
+// linear clamp-to-edge sampler would, from the picture.
+// A composed texel in linear light: the picture rows through the map,
+// the rows below them -- the CPU-drawn chrome band of the classic
+// single-draw layout -- from the composed texture itself, whose sRGB
+// typing has textureLoad decode them.
+fn composed_texel_linear(x: i32, y: i32, picture_rows: i32) -> vec3<f32> {
+    if (y < picture_rows) {
+        return srgb_to_linear(picture_texel(x, y));
+    }
+    return textureLoad(tex, vec2<i32>(x, y), 0).rgb;
+}
+
+fn picture_sample(coord: vec2<f32>) -> vec4<f32> {
+    let dims = vec2<i32>(textureDimensions(tex));
+    let w = u.pic_d.w * u.pic_a.x;
+    let h = u.pic_a.y;
+    let p = coord - 0.5;
+    let p0 = floor(p);
+    let f = p - p0;
+    let x0 = clamp(i32(p0.x), 0, w - 1);
+    let y0 = clamp(i32(p0.y), 0, dims.y - 1);
+    let x1 = clamp(i32(p0.x) + 1, 0, w - 1);
+    let y1 = clamp(i32(p0.y) + 1, 0, dims.y - 1);
+    let c00 = composed_texel_linear(x0, y0, h);
+    let c10 = composed_texel_linear(x1, y0, h);
+    let c01 = composed_texel_linear(x0, y1, h);
+    let c11 = composed_texel_linear(x1, y1, h);
+    let c = mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+    return vec4<f32>(c, 1.0);
+}
 
 @fragment
 fn fs_background() -> @location(0) vec4<f32> {
@@ -93,7 +210,13 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     // sampler; sampling exactly at a centre returns that texel alone.
     let sub = select(sharp, vec2<f32>(0.5), u.params.x > 0.5);
     let coord = (floor(t) + sub) / dims;
-    return textureSample(tex, samp, coord);
+    // Sampled unconditionally so the derivative-taking sample stays in
+    // uniform control flow; the uniform picks the source per draw.
+    let composed = textureSample(tex, samp, coord);
+    if (u.params.y > 0.5) {
+        return picture_sample(floor(t) + sub);
+    }
+    return composed;
 }
 "#;
 
@@ -114,6 +237,73 @@ pub(super) enum ScaleFilter {
 struct ScalerUniforms {
     rect: [f32; 4],
     params: [f32; 4],
+    pic_a: [i32; 4],
+    pic_b: [i32; 4],
+    pic_c: [i32; 4],
+    pic_d: [i32; 4],
+}
+
+/// The column map of a picture draw: how the shader reaches the
+/// presentation buffer's columns for a texel of the composed texture it
+/// stands in for (`copy_window_present_frame`'s three copies).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PictureColumns {
+    /// `copy_present_frame`: full overscan, columns duplicated across the
+    /// texture scale (or a wider canvas mapped by nearest sample).
+    Full,
+    /// The TV glass: the captured aperture's columns resampled onto the
+    /// glass width with the 8.8 two-column blend.
+    Glass,
+    /// The square-pixel canvas: unit columns centred between black pads.
+    Square,
+}
+
+/// One frame's map for a picture draw, built by `present::picture_map`
+/// from the inputs the CPU copy takes. Rows are texture texels (already
+/// times the texture scale); columns and offsets are canvas pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PictureMap {
+    pub(super) columns: PictureColumns,
+    pub(super) scale: i32,
+    pub(super) out_rows: i32,
+    pub(super) src_rows: i32,
+    pub(super) src_width: i32,
+    pub(super) pad_rows: i32,
+    pub(super) content_rows: i32,
+    pub(super) aperture_rows: i32,
+    pub(super) source_y: i32,
+    pub(super) y_offset: i32,
+    pub(super) x_offset: i32,
+    pub(super) glass_source_x: i32,
+    pub(super) glass_width: i32,
+    pub(super) pad_x: i32,
+    pub(super) fb_width: i32,
+}
+
+impl PictureMap {
+    fn uniforms(&self) -> [[i32; 4]; 4] {
+        let mode = match self.columns {
+            PictureColumns::Full => 0,
+            PictureColumns::Glass => 1,
+            PictureColumns::Square => 2,
+        };
+        [
+            [self.scale, self.out_rows, 0, self.src_rows],
+            [self.src_width, mode, self.pad_rows, self.content_rows],
+            [
+                self.aperture_rows,
+                self.source_y,
+                self.y_offset,
+                self.x_offset,
+            ],
+            [
+                self.glass_source_x,
+                self.glass_width,
+                self.pad_x,
+                self.fb_width,
+            ],
+        ]
+    }
 }
 
 /// Size of the uniform block, in bytes. Also the layout's
@@ -130,6 +320,9 @@ pub(super) struct ScalerDraw {
     /// Destination rect on the surface, physical pixels.
     pub(super) dst: (u32, u32, u32, u32),
     pub(super) filter: ScaleFilter,
+    /// Sample the uploaded picture through this map instead of the bound
+    /// texture (`PresentScaler::upload_picture`).
+    pub(super) picture: Option<PictureMap>,
 }
 
 impl ScalerDraw {
@@ -142,6 +335,7 @@ impl ScalerDraw {
             src: [0.0, 0.0, 1.0, 1.0],
             dst,
             filter,
+            picture: None,
         }
     }
 }
@@ -200,6 +394,30 @@ pub(super) struct PresentScaler {
     /// recreates its backing texture on a buffer resize, and the stale
     /// views have to be dropped with it.
     bound_texture: Option<wgpu::Texture>,
+    /// The presentation buffer as uploaded for picture draws, at the
+    /// canvas's own size; a 1x1 placeholder until the first upload.
+    picture: wgpu::Texture,
+    picture_dims: (u32, u32),
+    bound_picture: Option<wgpu::Texture>,
+}
+
+fn picture_texture(device: &wgpu::Device, dims: (u32, u32)) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("present_scaler_picture"),
+        size: wgpu::Extent3d {
+            width: dims.0,
+            height: dims.1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        // Not sRGB-typed: the shader blends the encoded byte values as
+        // the CPU copy does, then decodes them for the filter.
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    })
 }
 
 impl PresentScaler {
@@ -234,6 +452,16 @@ impl PresentScaler {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
                         min_binding_size: wgpu::BufferSize::new(UNIFORM_BYTES),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
                     },
                     count: None,
                 },
@@ -307,7 +535,50 @@ impl PresentScaler {
             uniforms,
             bind_groups: None,
             bound_texture: None,
+            picture: picture_texture(device, (1, 1)),
+            picture_dims: (1, 1),
+            bound_picture: None,
         }
+    }
+
+    /// Upload the presentation buffer (`w` x `h` texels of `src`) for the
+    /// picture draws of the next `render`.
+    pub(super) fn upload_picture(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        src: &[u32],
+        w: u32,
+        h: u32,
+    ) {
+        if w == 0 || h == 0 || src.len() < (w * h) as usize {
+            return;
+        }
+        if self.picture_dims != (w, h) {
+            self.picture = picture_texture(device, (w, h));
+            self.picture_dims = (w, h);
+        }
+        let bytes =
+            unsafe { std::slice::from_raw_parts(src.as_ptr() as *const u8, (w * h * 4) as usize) };
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.picture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(w * 4),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
     }
 
     /// Draw `texture` onto `target`: paint the whole surface black,
@@ -328,8 +599,15 @@ impl PresentScaler {
             .bound_texture
             .as_ref()
             .is_none_or(|bound| bound != texture)
+            || self
+                .bound_picture
+                .as_ref()
+                .is_none_or(|bound| *bound != self.picture)
         {
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let picture_view = self
+                .picture
+                .create_view(&wgpu::TextureViewDescriptor::default());
             self.bind_groups = Some(std::array::from_fn(|i| {
                 device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some(&format!("present_scaler_bg_{i}")),
@@ -347,12 +625,21 @@ impl PresentScaler {
                             binding: 2,
                             resource: self.uniforms[i].as_entire_binding(),
                         },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(&picture_view),
+                        },
                     ],
                 })
             }));
             self.bound_texture = Some(texture.clone());
+            self.bound_picture = Some(self.picture.clone());
         }
         for (i, draw) in draws.iter().take(MAX_DRAWS).enumerate() {
+            let [pic_a, pic_b, pic_c, pic_d] = draw
+                .picture
+                .map(|map| map.uniforms())
+                .unwrap_or([[0; 4]; 4]);
             let uniforms = ScalerUniforms {
                 rect: draw.src,
                 params: [
@@ -360,10 +647,14 @@ impl PresentScaler {
                         ScaleFilter::Nearest => 1.0,
                         ScaleFilter::SharpBilinear => 0.0,
                     },
-                    0.0,
+                    if draw.picture.is_some() { 1.0 } else { 0.0 },
                     0.0,
                     0.0,
                 ],
+                pic_a,
+                pic_b,
+                pic_c,
+                pic_d,
             };
             queue.write_buffer(&self.uniforms[i], 0, uniforms.as_bytes());
         }
@@ -505,6 +796,7 @@ mod tests {
             target_size,
             FORMAT,
             &[ScalerDraw::full(clip, filter)],
+            None,
         )
     }
 
@@ -516,6 +808,7 @@ mod tests {
         target_size: (u32, u32),
         target_format: wgpu::TextureFormat,
         draws: &[ScalerDraw],
+        picture: Option<(&[u32], (u32, u32))>,
     ) -> Vec<[u8; 4]> {
         let (tw, th) = tex_size;
         let (w, h) = target_size;
@@ -588,6 +881,9 @@ mod tests {
             multiview_mask: None,
         }));
         let mut scaler = PresentScaler::new(device, target_format);
+        if let Some((texels, (w, h))) = picture {
+            scaler.upload_picture(device, queue, texels, w, h);
+        }
         scaler.render(device, queue, &texture, &mut encoder, &view, draws);
 
         let padded = (w * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
@@ -663,6 +959,7 @@ mod tests {
                     (w, h),
                     format,
                     &[ScalerDraw::full(clip, ScaleFilter::SharpBilinear)],
+                    None,
                 );
                 for y in 0..h {
                     for x in 0..w {
@@ -697,6 +994,7 @@ mod tests {
                 (13, 11),
                 FORMAT,
                 &draws,
+                None,
             );
             assert!(px.iter().all(|p| *p == BLACK));
         }
@@ -719,13 +1017,16 @@ mod tests {
                     src: [0.0, 0.0, 1.0, 0.5],
                     dst: (3, 1, 6, 4),
                     filter: ScaleFilter::Nearest,
+                    picture: None,
                 },
                 ScalerDraw {
                     src: [0.0, 0.5, 1.0, 0.5],
                     dst: (1, 7, 10, 2),
                     filter: ScaleFilter::Nearest,
+                    picture: None,
                 },
             ],
+            None,
         );
         for y in 0..10 {
             for x in 0..12 {
@@ -830,6 +1131,169 @@ mod tests {
             (8, 8, WHITE),
         ] {
             assert_eq!(at(x, y), want.to_le_bytes(), "({x}, {y}) not flat");
+        }
+    }
+
+    /// The picture draw stands in for the CPU-composed texture: drawing
+    /// the presentation buffer through its map gives the surface pixels
+    /// that composing the texture on the CPU and drawing that gives, on
+    /// the TV glass and the full-overscan copies, at an exact multiple
+    /// point-sampled and at a fractional fit through the sharp filter.
+    #[test]
+    fn picture_draws_match_the_composed_texture() {
+        use super::super::present::{
+            copy_window_present_frame, picture_map, texture_height, texture_width,
+        };
+        use super::super::window_present_height;
+        use crate::config::{Overscan, TvCentre};
+        use crate::video::deinterlace::{OUT_HEIGHT, OUT_PIXELS};
+        use crate::video::present_common::TV_PAL_PRESENT_HEIGHT;
+        use crate::video::{present_height, FB_WIDTH};
+        let Some(gpu) = gpu() else {
+            return;
+        };
+        let mut seed = 0x9E37_79B9u32;
+        let mut src = vec![0u32; OUT_PIXELS];
+        for px in src.iter_mut() {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *px = seed | 0xFF00_0000;
+        }
+        let scale = 2;
+        let tex = (texture_width(scale) as u32, texture_height(scale) as u32);
+        let src_rect = [
+            0.0,
+            0.0,
+            1.0,
+            present_height() as f32 / window_present_height() as f32,
+        ];
+        for (overscan, aperture, centre) in [
+            (
+                Overscan::Tv,
+                Some(TV_PAL_PRESENT_HEIGHT),
+                TvCentre::default(),
+            ),
+            (
+                Overscan::Tv,
+                Some(TV_PAL_PRESENT_HEIGHT),
+                TvCentre { h: 5, v: -3 },
+            ),
+            (Overscan::Full, None, TvCentre::default()),
+        ] {
+            let mut frame = vec![0u8; tex.0 as usize * tex.1 as usize * 4];
+            copy_window_present_frame(
+                &src, OUT_HEIGHT, FB_WIDTH, &mut frame, scale, overscan, centre, aperture, false,
+            );
+            // The chrome band below the picture, as the CPU draws it into
+            // the composed texture whatever path the picture takes.
+            let stride = tex.0 as usize * 4;
+            for (y, row) in frame
+                .chunks_exact_mut(stride)
+                .enumerate()
+                .skip(present_height() * scale)
+            {
+                for (x, px) in row.chunks_exact_mut(4).enumerate() {
+                    px.copy_from_slice(&[(x * 7 + y * 3) as u8, y as u8, 0x40, 0xFF]);
+                }
+            }
+            let composed: Vec<u32> = frame
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            let map = picture_map(
+                OUT_HEIGHT, FB_WIDTH, scale, overscan, centre, aperture, false,
+            );
+            // The autocrop layout's display draw, then the classic layout's
+            // single draw over picture and chrome band alike.
+            let full_rect = [0.0, 0.0, 1.0, 1.0];
+            for (target, filter, src_rect) in [
+                ((1432u32, 1074u32), ScaleFilter::Nearest, src_rect),
+                ((1000, 750), ScaleFilter::SharpBilinear, src_rect),
+                ((tex.0, tex.1), ScaleFilter::Nearest, full_rect),
+                ((1000, 780), ScaleFilter::SharpBilinear, full_rect),
+            ] {
+                let clip = (0, 0, target.0, target.1);
+                let reference = render_draws(
+                    gpu.device(),
+                    gpu.queue(),
+                    &composed,
+                    tex,
+                    target,
+                    FORMAT,
+                    &[ScalerDraw {
+                        src: src_rect,
+                        dst: clip,
+                        filter,
+                        picture: None,
+                    }],
+                    None,
+                );
+                let through_map = render_draws(
+                    gpu.device(),
+                    gpu.queue(),
+                    &composed,
+                    tex,
+                    target,
+                    FORMAT,
+                    &[ScalerDraw {
+                        src: src_rect,
+                        dst: clip,
+                        filter,
+                        picture: Some(map),
+                    }],
+                    Some((&src, (FB_WIDTH as u32, OUT_HEIGHT as u32))),
+                );
+                // Point sampling reproduces the composed texel bit for bit.
+                // The sharp filter blends in linear light on both paths, but
+                // the sampler's weights and sRGB decode carry less precision
+                // than the shader's float maths, so the two differ by a
+                // little in linear light -- which the steep foot of the sRGB
+                // curve turns into several encoded LSBs near black. Measure
+                // the difference in linear light, then: a mapping error is
+                // tens of LSBs over most of the picture, not this.
+                let linear = |v: u8| {
+                    let c = f32::from(v) / 255.0;
+                    if c <= 0.04045 {
+                        c / 12.92
+                    } else {
+                        ((c + 0.055) / 1.055).powf(2.4)
+                    }
+                };
+                let allowed_linear = match filter {
+                    ScaleFilter::Nearest => 0.0,
+                    ScaleFilter::SharpBilinear => 2.5 / 255.0,
+                };
+                let mut worst = 0.0f32;
+                let mut worst_at = (0usize, [0u8; 4], [0u8; 4]);
+                let mut off = 0usize;
+                for (i, (a, b)) in reference.iter().zip(&through_map).enumerate() {
+                    let d = (0..3)
+                        .map(|c| (linear(a[c]) - linear(b[c])).abs())
+                        .fold(0.0f32, f32::max);
+                    if d > worst {
+                        worst = d;
+                        worst_at = (i, *a, *b);
+                    }
+                    off += usize::from(a[..3] != b[..3]);
+                }
+                eprintln!(
+                    "picture draw vs composed: {overscan:?} centre {centre:?} {target:?} {filter:?}: worst {:.2}/255 linear at ({}, {}) {:?} vs {:?}, {off} of {} pixels differ",
+                    worst * 255.0,
+                    worst_at.0 % target.0 as usize,
+                    worst_at.0 / target.0 as usize,
+                    worst_at.1,
+                    worst_at.2,
+                    reference.len()
+                );
+                assert!(
+                    worst <= allowed_linear,
+                    "{overscan:?} {target:?} {filter:?}: worst linear difference {:.2}/255",
+                    worst * 255.0
+                );
+                assert!(
+                    off * 4 < reference.len(),
+                    "{overscan:?} {target:?} {filter:?}: {off} pixels differ, a bias not noise"
+                );
+            }
         }
     }
 }

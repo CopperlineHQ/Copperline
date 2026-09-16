@@ -370,6 +370,10 @@ pub(crate) struct RawDisplay {
     /// Synchronise desktop presentation to vblank (default true).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) vsync: Option<bool>,
+    /// Draw the presentation texture at the display's device-pixel
+    /// density (default true); false draws it at canvas resolution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) hidpi_texture: Option<bool>,
     /// Screen tint: "none" (default), "bw", "green", "amber", or "sepia".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) tint: Option<String>,

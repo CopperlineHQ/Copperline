@@ -1244,9 +1244,32 @@ impl App {
         if !ring.wants(t) {
             return;
         }
+        let source = super::ClipRingSource {
+            generation: self.present_fb_generation,
+            overscan: self.overscan,
+            tv_centre: self.tv_centre,
+            tv_aperture_rows: self.present_tv_aperture_rows,
+            capture_rows: crate::video::capture_height(),
+            rtg: self.rtg_present_dims.is_some(),
+        };
+        // The picture on screen is the one the ring's newest frame already
+        // holds: note the repeat without building it. The build is a
+        // full-frame crop plus an exact-palette scan, main-thread work on
+        // every clip slot otherwise.
+        if !ring.is_empty() && self.clip_ring_source == Some(source) {
+            ring.repeat(t);
+            return;
+        }
         let (width, height) = self.presented_capture_frame();
         let ring = self.clip_ring.as_mut().expect("ring built above");
         ring.store(t, width, height, &self.clip_fb);
+        self.clip_ring_source = Some(source);
+    }
+
+    /// `present_fb` took a new picture: whatever the clip ring last built
+    /// from it no longer describes the screen.
+    pub(super) fn note_present_fb_changed(&mut self) {
+        self.present_fb_generation = self.present_fb_generation.wrapping_add(1);
     }
 
     /// Save Clip as GIF (shortcut / menu item): write the ring's frames to

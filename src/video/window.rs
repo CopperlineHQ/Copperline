@@ -698,6 +698,21 @@ struct PerfOverlay {
     baseline: Option<PerfBaseline>,
 }
 
+/// What the newest clip-ring frame was built from: the presentation
+/// buffer's generation and the crop knobs that shape the saved picture.
+/// A pass whose source still matches skips building the picture; the
+/// ring then treats it as the frame staying on screen longer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ClipRingSource {
+    generation: u64,
+    overscan: crate::config::Overscan,
+    tv_centre: crate::config::TvCentre,
+    tv_aperture_rows: Option<usize>,
+    /// The capture's row count, which follows the pixel aspect.
+    capture_rows: usize,
+    rtg: bool,
+}
+
 /// One sample of the cumulative counters the overlay derives rates from.
 struct PerfBaseline {
     at: Instant,
@@ -821,7 +836,7 @@ pub struct DiskInsertSpec {
 
 use anyhow::{anyhow, Context, Result};
 use log::{error, info, warn};
-use pixels::{Pixels, PixelsBuilder, ScalingMode, SurfaceTexture};
+use pixels::{wgpu, Pixels, PixelsBuilder, ScalingMode, SurfaceTexture};
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::{
@@ -1623,6 +1638,15 @@ pub struct App {
     /// Scratch presentation picture for the clip ring and the headless
     /// GIF captures (same geometry as a screenshot).
     clip_fb: Vec<u32>,
+    /// Bumped whenever `present_fb` takes a new picture, so the clip ring
+    /// can tell a repeat of the frame it last built from without
+    /// rebuilding and comparing it.
+    present_fb_generation: u64,
+    /// What the newest clip-ring frame was built from.
+    clip_ring_source: Option<ClipRingSource>,
+    /// The picture buffer of a frame presented on the main thread, kept
+    /// for the next such frame's copy.
+    picture_scratch: Vec<u32>,
     /// Live `--gif-after` captures, armed from `pending_gif_captures` with
     /// the other scheduled flags.
     gif_captures: Vec<GifCaptureState>,
@@ -1738,10 +1762,88 @@ impl Drop for GifCaptureState {
 
 struct Render {
     window: Arc<Window>,
-    pixels: Pixels<'static>,
-    presenter: presenter::Presenter,
+    /// The GPU side, at home on the main thread. None while it is lent to
+    /// the present worker; `gpu_mut` brings it back.
+    gpu: Option<Box<Gpu>>,
+    /// Presents frames off the main thread (`COPPERLINE_THREADED_PRESENT`);
+    /// None presents synchronously from the redraw handler.
+    present_worker: Option<PresentWorker>,
     texture_scale: usize,
     debug_viewport: Option<(u32, u32, u32, u32)>,
+    /// True while the host window is minimized (Windows delivers a 0x0
+    /// Resized). Presenting while minimized deadlocks on Windows: DWM stops
+    /// consuming swapchain frames, so once the in-flight buffers fill,
+    /// pixels.render() blocks the main thread, the message pump dies, and
+    /// the window can never be restored (which is what would unblock the
+    /// present). Skip all rendering until a nonzero resize restores it.
+    minimized: bool,
+    /// The physical surface size `pixels` was last configured with, so a
+    /// redraw can tell that the host window has outgrown it (see
+    /// `resync_surface_size`).
+    surface_size: (u32, u32),
+}
+
+impl Render {
+    /// Resize the presentation surface, recording the size it was configured
+    /// with. Every resize goes through here (the first configure is
+    /// `build_pixels_for_window`'s, whose size this struct is built with):
+    /// `pixels` reconfigures its swapchain from its own copy of this size and
+    /// nothing else can correct it, so the record must never lag behind what
+    /// `pixels` holds.
+    fn resize_surface(&mut self, size: PhysicalSize<u32>) -> Result<(), pixels::TextureError> {
+        let (width, height) = (size.width.max(1), size.height.max(1));
+        if let Some(gpu) = self.gpu_mut() {
+            gpu.pixels.resize_surface(width, height)?;
+        }
+        self.surface_size = (width, height);
+        Ok(())
+    }
+
+    /// The GPU side for a main-thread operation: reconfiguring the
+    /// surface or texture, loading a shader, presenting a frame that
+    /// carries something only this thread has. Reclaims it from the
+    /// present worker first, waiting out a frame in flight; it stays home
+    /// until the next threaded frame lends it again.
+    fn gpu_mut(&mut self) -> Option<&mut Gpu> {
+        if self.gpu.is_none() {
+            if let Some(worker) = self.present_worker.as_mut() {
+                self.gpu = worker.reclaim();
+                if self.gpu.is_none() {
+                    error!("present worker lost the GPU side; presenting nothing further");
+                    self.present_worker = None;
+                }
+            }
+        }
+        self.gpu.as_deref_mut()
+    }
+
+    /// Hand the GPU side to the present worker. A no-op without a worker
+    /// or when the worker already holds it.
+    fn lend_gpu(&mut self) {
+        if let Some(worker) = self.present_worker.as_mut() {
+            if let Some(gpu) = self.gpu.take() {
+                if let Err(gpu) = worker.lend(gpu) {
+                    self.gpu = Some(gpu);
+                    self.present_worker = None;
+                }
+            }
+        }
+    }
+}
+
+impl Drop for Render {
+    fn drop(&mut self) {
+        // The surface and its layer go away on the thread that made them.
+        let _ = self.gpu_mut();
+    }
+}
+
+/// The GPU side of the window: the pixels surface and the passes drawn
+/// into it. Frames present from the present worker's thread; the rare
+/// operations that reconfigure it run on the main thread with it at home.
+struct Gpu {
+    pixels: Pixels<'static>,
+    presenter: presenter::Presenter,
     /// The pass that puts the composited buffer on the surface (see
     /// [`scaler`]): the emulator window's replacement for the `pixels`
     /// built-in scaling renderer, so the displayed integer multiple is
@@ -1765,31 +1867,382 @@ struct Render {
     /// Built with the window whatever the setting, like the passes above;
     /// it draws nothing until a sheet is loaded into it.
     sticker_pass: stickers::StickerPass,
-    /// True while the host window is minimized (Windows delivers a 0x0
-    /// Resized). Presenting while minimized deadlocks on Windows: DWM stops
-    /// consuming swapchain frames, so once the in-flight buffers fill,
-    /// pixels.render() blocks the main thread, the message pump dies, and
-    /// the window can never be restored (which is what would unblock the
-    /// present). Skip all rendering until a nonzero resize restores it.
-    minimized: bool,
-    /// The physical surface size `pixels` was last configured with, so a
-    /// redraw can tell that the host window has outgrown it (see
-    /// `resync_surface_size`).
-    surface_size: (u32, u32),
 }
 
-impl Render {
-    /// Resize the presentation surface, recording the size it was configured
-    /// with. Every resize goes through here (the first configure is
-    /// `build_pixels_for_window`'s, whose size this struct is built with):
-    /// `pixels` reconfigures its swapchain from its own copy of this size and
-    /// nothing else can correct it, so the record must never lag behind what
-    /// `pixels` holds.
-    fn resize_surface(&mut self, size: PhysicalSize<u32>) -> Result<(), pixels::TextureError> {
-        let (width, height) = (size.width.max(1), size.height.max(1));
-        self.pixels.resize_surface(width, height)?;
-        self.surface_size = (width, height);
-        Ok(())
+// The GPU side crosses between the main thread and the present worker.
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<Gpu>();
+};
+
+/// The main-thread paint that follows the passes on a frame presented in
+/// place: the inspector's egui, which cannot cross to the worker.
+type PresentAfter<'a> =
+    &'a mut dyn FnMut(&wgpu::Device, &wgpu::Queue, &mut wgpu::CommandEncoder, &wgpu::TextureView);
+
+/// One frame for the GPU passes: the composed texture image (None when
+/// it was composed straight into the pixels buffer) and everything the
+/// passes need, resolved on the main thread so the worker reads no
+/// window state.
+struct PresentJob {
+    frame: Option<Vec<u8>>,
+    emulated_frame: Option<u64>,
+    draws: Vec<scaler::ScalerDraw>,
+    pass: PresentPass,
+    /// The presentation buffer for a display draw that samples it on the
+    /// GPU (`ScalerDraw::picture`), instead of a CPU copy into `frame`.
+    picture: Option<PictureFrame>,
+}
+
+struct PictureFrame {
+    fb: Vec<u32>,
+    width: u32,
+    rows: u32,
+}
+
+enum PresentPass {
+    Plain,
+    /// The RTG board's own texture over the display rect.
+    Rtg {
+        rect: (f32, f32, f32, f32),
+        integer_scaling: bool,
+    },
+    Crt(CrtPresent),
+}
+
+/// The CRT and bezel passes' inputs for one frame.
+struct CrtPresent {
+    kind: crate::config::ShaderKind,
+    style: BezelStyle,
+    crt_active: bool,
+    bezel_active: bool,
+    uniforms: crt_shader::CrtUniforms,
+    viewport: (f32, f32, f32, f32),
+}
+
+/// Draw one frame through the GPU passes and present it. The present
+/// worker runs this for the normal display; the main thread runs it for a
+/// frame that carries something only it has (the RTG texture upload, the
+/// inspector's egui paint through `after`). `notify` is the window whose
+/// `pre_present_notify` runs after the draw and before the present, as it
+/// always did; see `worker_notify_window` for why the worker passes None
+/// on macOS.
+fn present_job(
+    gpu: &mut Gpu,
+    notify: Option<&Window>,
+    job: &PresentJob,
+    mut after: Option<PresentAfter<'_>>,
+) -> Result<(), pixels::Error> {
+    let Gpu {
+        pixels,
+        presenter,
+        scaler,
+        rtg_texture,
+        crt_shader,
+        bezel_shader,
+        sticker_pass,
+    } = gpu;
+    if let Some(frame) = &job.frame {
+        let dst = pixels.frame_mut();
+        if dst.len() != frame.len() {
+            // The texture was replanned after this frame was composed;
+            // the next redraw composes at the new size.
+            return Ok(());
+        }
+        dst.copy_from_slice(frame);
+    }
+    if let Some(picture) = &job.picture {
+        scaler.upload_picture(
+            pixels.device(),
+            pixels.queue(),
+            &picture.fb,
+            picture.width,
+            picture.rows,
+        );
+    }
+    presenter.render(
+        pixels,
+        notify,
+        job.emulated_frame,
+        |encoder, target, ctx| {
+            scaler.render(
+                &ctx.device,
+                &ctx.queue,
+                &ctx.texture,
+                encoder,
+                target,
+                &job.draws,
+            );
+            match &job.pass {
+                PresentPass::Plain => {}
+                PresentPass::Rtg {
+                    rect,
+                    integer_scaling,
+                } => rtg_texture.render(&ctx.queue, encoder, target, *rect, *integer_scaling),
+                PresentPass::Crt(crt) => {
+                    if crt.bezel_active {
+                        let opening = bezel::opening_rect(crt.style, crt.viewport);
+                        if crt.crt_active {
+                            crt_shader.render(
+                                &ctx.device,
+                                &ctx.queue,
+                                &ctx.texture,
+                                encoder,
+                                target,
+                                opening,
+                                crt.kind,
+                                crt.uniforms.with_viewport(opening),
+                            );
+                        }
+                        bezel_shader.render(
+                            &ctx.device,
+                            &ctx.queue,
+                            &ctx.texture,
+                            encoder,
+                            target,
+                            crt.viewport,
+                            crt.style,
+                            bezel::uniforms_from(
+                                &crt.uniforms,
+                                crt.viewport,
+                                opening,
+                                crt.crt_active,
+                            ),
+                        );
+                        sticker_pass.render(
+                            &ctx.device,
+                            &ctx.queue,
+                            encoder,
+                            target,
+                            crt.viewport,
+                            opening,
+                        );
+                    } else {
+                        crt_shader.render(
+                            &ctx.device,
+                            &ctx.queue,
+                            &ctx.texture,
+                            encoder,
+                            target,
+                            crt.viewport,
+                            crt.kind,
+                            crt.uniforms,
+                        );
+                    }
+                }
+            }
+            if let Some(after) = after.as_mut() {
+                after(&ctx.device, &ctx.queue, encoder, target);
+            }
+            Ok(())
+        },
+    )
+}
+
+enum PresentCmd {
+    Lend(Box<Gpu>),
+    Frame(PresentJob),
+    Return,
+}
+
+enum PresentBack {
+    Gpu(Option<Box<Gpu>>),
+    /// A presented frame's buffers, back for reuse.
+    Frame {
+        frame: Vec<u8>,
+        picture: Option<Vec<u32>>,
+    },
+}
+
+/// Frames the worker may hold at once: the one it is presenting and the
+/// next, composed while it waits on vsync. A third redraw waits.
+const PRESENT_FRAMES_IN_FLIGHT: usize = 2;
+
+/// Presents frames on its own thread, so the main thread's redraw ends at
+/// hand-off instead of at the surface's vsync wait and the upload. It
+/// holds the GPU side while frames are threaded and hands it back for
+/// main-thread operations (`Render::gpu_mut`).
+struct PresentWorker {
+    cmd_tx: Option<SyncSender<PresentCmd>>,
+    back_rx: Receiver<PresentBack>,
+    handle: Option<JoinHandle<()>>,
+    lent: bool,
+    in_flight: usize,
+    /// Frame buffers the worker returned, ready to compose into.
+    recycled: Vec<Vec<u8>>,
+    /// Picture buffers the worker returned, ready to copy into.
+    recycled_pictures: Vec<Vec<u32>>,
+}
+
+/// The window the present worker hands to `present_job` for the
+/// pre-present hint. On macOS every winit `Window` method dispatches to
+/// the main thread and waits for it -- a deadlock against a main thread
+/// waiting in `reclaim` -- and the hint is a no-op there anyway, so the
+/// worker passes None. Elsewhere (Wayland is where the hint matters) the
+/// window is thread-safe and the worker notifies in the established
+/// order: after a successful draw, right before submission.
+fn worker_notify_window(window: &Arc<Window>) -> Option<&Window> {
+    if cfg!(target_os = "macos") {
+        None
+    } else {
+        Some(window)
+    }
+}
+
+impl PresentWorker {
+    fn new(window: Arc<Window>) -> Self {
+        let (cmd_tx, cmd_rx) = mpsc::sync_channel::<PresentCmd>(PRESENT_FRAMES_IN_FLIGHT + 2);
+        let (back_tx, back_rx) = mpsc::channel::<PresentBack>();
+        let handle = std::thread::Builder::new()
+            .name("copperline-present".to_string())
+            .spawn(move || {
+                let mut held: Option<Box<Gpu>> = None;
+                while let Ok(cmd) = cmd_rx.recv() {
+                    match cmd {
+                        PresentCmd::Lend(gpu) => held = Some(gpu),
+                        PresentCmd::Frame(job) => {
+                            if let Some(gpu) = held.as_mut() {
+                                let notify = worker_notify_window(&window);
+                                if let Err(e) = present_job(gpu, notify, &job, None) {
+                                    error!("pixels.render: {e}");
+                                }
+                            }
+                            let back = PresentBack::Frame {
+                                frame: job.frame.unwrap_or_default(),
+                                picture: job.picture.map(|picture| picture.fb),
+                            };
+                            if back_tx.send(back).is_err() {
+                                break;
+                            }
+                        }
+                        PresentCmd::Return => {
+                            if back_tx.send(PresentBack::Gpu(held.take())).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            })
+            .expect("spawn present worker");
+        Self {
+            cmd_tx: Some(cmd_tx),
+            back_rx,
+            handle: Some(handle),
+            lent: false,
+            in_flight: 0,
+            recycled: Vec::new(),
+            recycled_pictures: Vec::new(),
+        }
+    }
+
+    fn lend(&mut self, gpu: Box<Gpu>) -> std::result::Result<(), Box<Gpu>> {
+        let Some(tx) = self.cmd_tx.as_ref() else {
+            return Err(gpu);
+        };
+        match tx.send(PresentCmd::Lend(gpu)) {
+            Ok(()) => {
+                self.lent = true;
+                Ok(())
+            }
+            Err(mpsc::SendError(PresentCmd::Lend(gpu))) => Err(gpu),
+            Err(_) => unreachable!("a lend returns a lend"),
+        }
+    }
+
+    /// Take the GPU side back, waiting out a frame in flight. None when
+    /// the worker never had it, or it is gone with the worker.
+    fn reclaim(&mut self) -> Option<Box<Gpu>> {
+        if !self.lent {
+            return None;
+        }
+        self.lent = false;
+        let sent = self
+            .cmd_tx
+            .as_ref()
+            .is_some_and(|tx| tx.send(PresentCmd::Return).is_ok());
+        if !sent {
+            return None;
+        }
+        loop {
+            match self.back_rx.recv() {
+                Ok(PresentBack::Frame { frame, picture }) => self.take_back(frame, picture),
+                Ok(PresentBack::Gpu(gpu)) => return gpu,
+                Err(_) => return None,
+            }
+        }
+    }
+
+    fn take_back(&mut self, frame: Vec<u8>, picture: Option<Vec<u32>>) {
+        self.in_flight = self.in_flight.saturating_sub(1);
+        self.recycled.push(frame);
+        if let Some(picture) = picture {
+            self.recycled_pictures.push(picture);
+        }
+    }
+
+    /// Collect the buffers of frames presented since the last call.
+    fn collect(&mut self) {
+        while let Ok(back) = self.back_rx.try_recv() {
+            match back {
+                PresentBack::Frame { frame, picture } => self.take_back(frame, picture),
+                PresentBack::Gpu(Some(gpu)) => {
+                    // Only `reclaim` asks for it; put it back to work.
+                    let _ = self.lend(gpu);
+                }
+                PresentBack::Gpu(None) => {}
+            }
+        }
+    }
+
+    /// A buffer of `len` bytes to compose the next frame into, or None
+    /// while the worker still holds every buffer it may.
+    fn frame_buffer(&mut self, len: usize) -> Option<Vec<u8>> {
+        self.collect();
+        if let Some(mut frame) = self.recycled.pop() {
+            frame.resize(len, 0);
+            return Some(frame);
+        }
+        (self.in_flight < PRESENT_FRAMES_IN_FLIGHT).then(|| vec![0u8; len])
+    }
+
+    /// Queue a frame; back on Err when the worker cannot take it now.
+    #[allow(clippy::result_large_err)]
+    fn submit(&mut self, job: PresentJob) -> std::result::Result<(), PresentJob> {
+        let Some(tx) = self.cmd_tx.as_ref() else {
+            return Err(job);
+        };
+        match tx.try_send(PresentCmd::Frame(job)) {
+            Ok(()) => {
+                self.in_flight += 1;
+                Ok(())
+            }
+            Err(mpsc::TrySendError::Full(PresentCmd::Frame(job)))
+            | Err(mpsc::TrySendError::Disconnected(PresentCmd::Frame(job))) => Err(job),
+            Err(_) => unreachable!("a frame returns a frame"),
+        }
+    }
+
+    fn recycle(&mut self, frame: Vec<u8>, picture: Option<Vec<u32>>) {
+        self.recycled.push(frame);
+        if let Some(picture) = picture {
+            self.recycled_pictures.push(picture);
+        }
+    }
+
+    /// An empty buffer to copy the next picture into.
+    fn picture_buffer(&mut self) -> Vec<u32> {
+        let mut buffer = self.recycled_pictures.pop().unwrap_or_default();
+        buffer.clear();
+        buffer
+    }
+}
+
+impl Drop for PresentWorker {
+    fn drop(&mut self) {
+        self.cmd_tx.take();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -2457,6 +2910,9 @@ impl App {
             clip_ring: None,
             clip_save: None,
             clip_fb: Vec::new(),
+            present_fb_generation: 0,
+            clip_ring_source: None,
+            picture_scratch: Vec::new(),
             gif_captures: Vec::new(),
             pending_gif_captures: gif_after,
         };
@@ -4020,16 +4476,29 @@ impl ApplicationHandler for App {
         if shader_error.is_some() {
             self.crt_shader_kind = crate::config::ShaderKind::None;
         }
+        let present_worker =
+            threaded_present_enabled().then(|| PresentWorker::new(Arc::clone(&window)));
+        info!(
+            "presentation: {}",
+            if present_worker.is_some() {
+                "present worker (COPPERLINE_THREADED_PRESENT=0 presents on the main thread)"
+            } else {
+                "main thread"
+            }
+        );
         self.render = Some(Render {
             window,
-            pixels,
-            presenter: presenter::Presenter::new(),
+            gpu: Some(Box::new(Gpu {
+                pixels,
+                presenter: presenter::Presenter::new(),
+                scaler,
+                rtg_texture,
+                crt_shader,
+                bezel_shader,
+                sticker_pass,
+            })),
+            present_worker,
             texture_scale,
-            scaler,
-            rtg_texture,
-            crt_shader,
-            bezel_shader,
-            sticker_pass,
             debug_viewport: None,
             minimized: false,
             surface_size: (inner.width.max(1), inner.height.max(1)),
@@ -4894,425 +5363,415 @@ impl ApplicationHandler for App {
                     // sample.
                     let bezel_active =
                         self.bezel.is_on() && !self.ui.active() && self.rtg_present_dims.is_none();
-                    if let Some((w, h)) = self.rtg_present_dims.filter(|_| rtg_gpu) {
-                        r.rtg_texture.upload(
-                            r.pixels.device(),
-                            r.pixels.queue(),
-                            &self.rtg_fb,
-                            w,
-                            h,
-                        );
-                    }
-                    let frame = r.pixels.frame_mut();
-                    if rtg_gpu {
-                        // The GPU pass overdraws the display region; black it
-                        // out so nothing stale shows at the seams.
-                        let rows = present_height() * r.texture_scale;
-                        let stride = texture_width(r.texture_scale) * 4;
-                        frame[..rows * stride].fill(0);
-                    } else {
-                        copy_window_present_frame(
-                            &self.present_fb,
-                            self.present_rows,
-                            self.present_width,
-                            frame,
-                            r.texture_scale,
-                            self.overscan,
-                            self.tv_centre,
-                            // The TV aperture is a chipset crop rect. An RTG
-                            // frame fills the buffer on its own terms, so
-                            // applying it here would show a sub-rect of the
-                            // board's screen.
-                            self.present_tv_aperture_rows
-                                .filter(|_| self.rtg_present_dims.is_none()),
-                            // A drawn bezel shows the tube aperture. Keyed to
-                            // the style alone, not bezel_active: an open
-                            // overlay suspends the bezel *pass*, and the
-                            // picture must not jump between apertures when a
-                            // panel opens over it.
-                            self.bezel.is_on(),
-                        );
-                        // The tint models the monitor on the Amiga's video
-                        // output, so RTG board scanout stays untinted here
-                        // too, matching the GPU RTG path (which never sees
-                        // this buffer).
-                        if self.rtg_present_dims.is_none() {
-                            if let Some(lut) = &self.tint_lut {
-                                tint_display_rows(frame, r.texture_scale, lut);
+                    let texture_scale = r.texture_scale;
+                    let surface_size = r.surface_size;
+                    // Frames present from the worker unless this one carries
+                    // something only the main thread has: the RTG board's
+                    // texture upload, or the inspector's egui paint.
+                    let threaded = r.present_worker.is_some() && !rtg_gpu && inspector_ui.is_none();
+                    // The display draw samples the presentation buffer on
+                    // the GPU when nothing has to be composed over the
+                    // picture on the CPU: no UI, overlay, badge or tint,
+                    // and no pass that samples the composed texture.
+                    let picture_on_gpu = !rtg_gpu
+                        && !crt_active
+                        && !bezel_active
+                        && !debug_layout
+                        && self.tint_lut.is_none()
+                        && self.rtg_present_dims.is_none()
+                        && !self.ui.active()
+                        && osd.is_none()
+                        && guest_overlay.is_empty()
+                        && !recording
+                        && !self.perf_overlay
+                        && !self.drop_hover
+                        && self.present_width > 0
+                        && self.present_rows > 0
+                        && self.present_fb.len() >= self.present_rows * self.present_width;
+                    let frame_len =
+                        texture_width(texture_scale) * texture_height(texture_scale) * 4;
+                    'present: {
+                        let mut worker_frame = None;
+                        if threaded {
+                            r.lend_gpu();
+                            worker_frame = r
+                                .present_worker
+                                .as_mut()
+                                .and_then(|worker| worker.frame_buffer(frame_len));
+                            if worker_frame.is_none() {
+                                // The worker still holds every buffer it may:
+                                // this redraw waits for the next pass.
+                                self.main_presentation_dirty = true;
+                                break 'present;
                             }
                         }
-                    }
-                    #[cfg(feature = "mt32")]
-                    if let Some(panel) = &mt32_panel {
-                        mt32panel::draw(frame, panel, present_height(), r.texture_scale);
-                    }
-                    #[cfg(feature = "coppersynth")]
-                    if let Some(panel) = &csynth_panel {
-                        csynthpanel::draw(frame, panel, csynth_panel_top(), r.texture_scale);
-                    }
-                    if let Some(panel) = &kbd_panel {
-                        kbdpanel::draw(frame, panel, keyboard_panel_top(), r.texture_scale);
-                    }
-                    if !super::status_bar_hidden() {
-                        // The bar lights its focus the way the
-                        // surfaces light theirs, and knows when the
-                        // marker is up on one of them instead.
-                        statusbar::set_nav_light(nav_bar_target, nav_bar_mix, nav_target.is_some());
-                        draw_status_bar(frame, &view, r.texture_scale);
-                        statusbar::set_nav_light(None, 0.0, false);
-                    }
-                    // The picture loses its corners to a front's aperture
-                    // and to a preset's bowed face; all three overlays live
-                    // in one, so all three come in far enough to clear
-                    // whichever is drawn (nil when the picture is a plain
-                    // rectangle). Worked out before any of them is drawn.
-                    let corner = bezel::corner_inset(
-                        self.bezel,
-                        if crt_active {
-                            crt_shader::face_curvature(self.crt_shader_kind)
+                        let window = r.window.clone();
+                        let layout = main_present_layout(r, display_src);
+                        // A frame the main thread presents itself composes
+                        // straight into the pixels buffer, with the GPU side
+                        // at home; it goes back into `r` at the end.
+                        let mut gpu_home = if worker_frame.is_none() {
+                            r.gpu_mut();
+                            r.gpu.take()
                         } else {
-                            0.0
-                        },
-                        self.shader_strength,
-                        r.texture_scale,
-                    );
-                    // The corner overlays anchor to the display region the
-                    // viewer actually sees: the whole display classically,
-                    // the sub-rect while autocrop or per-axis scaling
-                    // presents one.
-                    let overlay_anchor = display_src.map(|src| src.rect).unwrap_or((
-                        0,
-                        0,
-                        FB_WIDTH,
-                        present_height(),
-                    ));
-                    if !guest_overlay.is_empty() {
-                        // The guest's debug overlay sits directly on the
-                        // picture, under every piece of host chrome, and --
-                        // like everything from here down -- never in a
-                        // capture.
-                        draw_guest_overlay(
-                            frame,
-                            &mut self.guest_overlay_cache,
-                            &guest_overlay,
-                            r.texture_scale,
-                            overlay_anchor,
-                        );
-                    }
-                    if recording {
-                        // Painted into the presentation texture only, so
-                        // the badge never appears in the recorded file.
-                        draw_record_badge(frame, r.texture_scale, corner, overlay_anchor);
-                    }
-                    if self.perf_overlay {
-                        draw_perf_overlay(
-                            frame,
-                            &self.perf.lines,
-                            r.texture_scale,
-                            recording,
-                            corner,
-                            overlay_anchor,
-                        );
-                    }
-                    if let Some((text, warning)) = &osd {
-                        draw_osd(
-                            frame,
-                            text,
-                            *warning,
-                            r.texture_scale,
-                            corner,
-                            overlay_anchor,
-                        );
-                    }
-                    // The focus lights its control the way the pointer
-                    // does, breathing between the two.
-                    ui::set_nav_light(nav_target, nav_mix, nav_is_open, nav_bar_target.is_some());
-                    ui::draw(frame, r.texture_scale, &self.ui, ui_hover, ui_data.as_ref());
-                    ui::set_nav_light(None, 0.0, false, false);
-                    // The drag hint sits on top of everything: the drop will
-                    // land wherever the drag is released, panels or not. The
-                    // launcher refuses drops, so no hint over it.
-                    if self.drop_hover && !matches!(self.ui.panel, Some(Panel::Launcher(_))) {
-                        ui::draw_drop_hint(frame, r.texture_scale);
-                    }
-                    // The scaler pass draws the composited buffer with this
-                    // layout; every overlay pass below keys its viewport off
-                    // the same display rect, and the cursor mapping inverts
-                    // the same layout, so all of them agree by construction.
-                    // The branches that draw over the display (RTG, CRT,
-                    // bezel) only run when the sub-rect modes are
-                    // suspended, so their layout is the classic
-                    // whole-texture letterbox.
-                    let layout = main_present_layout(r, display_src);
-                    // COPPERLINE_DIAG_AUTOCROP: the window half of the
-                    // renderer-side envelope trace -- the exact rects the
-                    // scaler pass draws this frame, logged when they
-                    // change, with the mode spelled out: a classic layout
-                    // must say WHY it is classic (both modes off, or which
-                    // condition suspended them), because the envelope
-                    // line prints whether or not a mode is on and the
-                    // difference is invisible from it alone. The factors
-                    // are the whole-number draw's pixels per canvas
-                    // column and per field line, the shape is the glass
-                    // ratio a per-axis draw aims at, and the scan says
-                    // which window model the envelope came through (a
-                    // programmable scan crops too, at the uniform
-                    // multiple).
-                    if crate::envcfg::flag("COPPERLINE_DIAG_AUTOCROP")
-                        && self.last_diag_layout != Some(layout)
-                    {
-                        let autocrop = crate::video::autocrop();
-                        let per_axis = per_axis_scaling_requested();
-                        let mode = if !autocrop && !per_axis {
-                            "off"
-                        } else if self.rtg_present_dims.is_some() {
-                            "suspended(rtg)"
-                        } else if self.bezel.is_on() {
-                            "suspended(bezel)"
-                        } else if autocrop && per_axis {
-                            "active(autocrop+per-axis)"
-                        } else if per_axis {
-                            "active(per-axis)"
-                        } else {
-                            "active(autocrop)"
+                            None
                         };
-                        info!(
-                            "[DIAG_AUTOCROP] layout mode={} scan={} surface={:?} \
-                             src_canvas={:?} display_dst={:?} chrome_dst={:?} filter={:?} \
-                             factors={:?} shape={:?}",
-                            mode,
-                            if self.present_programmable {
-                                "programmable"
+                        if let (Some((w, h)), Some(gpu)) = (
+                            self.rtg_present_dims.filter(|_| rtg_gpu),
+                            gpu_home.as_deref_mut(),
+                        ) {
+                            gpu.rtg_texture.upload(
+                                gpu.pixels.device(),
+                                gpu.pixels.queue(),
+                                &self.rtg_fb,
+                                w,
+                                h,
+                            );
+                        }
+                        let Some(frame) = worker_frame
+                            .as_deref_mut()
+                            .or_else(|| gpu_home.as_deref_mut().map(|gpu| gpu.pixels.frame_mut()))
+                        else {
+                            r.gpu = gpu_home;
+                            break 'present;
+                        };
+                        if picture_on_gpu {
+                            // The picture reaches the surface from its own
+                            // texture; the frame's display rows go unsampled.
+                        } else if rtg_gpu {
+                            // The GPU pass overdraws the display region; black it
+                            // out so nothing stale shows at the seams.
+                            let rows = present_height() * texture_scale;
+                            let stride = texture_width(texture_scale) * 4;
+                            frame[..rows * stride].fill(0);
+                        } else {
+                            copy_window_present_frame(
+                                &self.present_fb,
+                                self.present_rows,
+                                self.present_width,
+                                frame,
+                                texture_scale,
+                                self.overscan,
+                                self.tv_centre,
+                                // The TV aperture is a chipset crop rect. An RTG
+                                // frame fills the buffer on its own terms, so
+                                // applying it here would show a sub-rect of the
+                                // board's screen.
+                                self.present_tv_aperture_rows
+                                    .filter(|_| self.rtg_present_dims.is_none()),
+                                // A drawn bezel shows the tube aperture. Keyed to
+                                // the style alone, not bezel_active: an open
+                                // overlay suspends the bezel *pass*, and the
+                                // picture must not jump between apertures when a
+                                // panel opens over it.
+                                self.bezel.is_on(),
+                            );
+                            // The tint models the monitor on the Amiga's video
+                            // output, so RTG board scanout stays untinted here
+                            // too, matching the GPU RTG path (which never sees
+                            // this buffer).
+                            if self.rtg_present_dims.is_none() {
+                                if let Some(lut) = &self.tint_lut {
+                                    tint_display_rows(frame, texture_scale, lut);
+                                }
+                            }
+                        }
+                        #[cfg(feature = "mt32")]
+                        if let Some(panel) = &mt32_panel {
+                            mt32panel::draw(frame, panel, present_height(), texture_scale);
+                        }
+                        #[cfg(feature = "coppersynth")]
+                        if let Some(panel) = &csynth_panel {
+                            csynthpanel::draw(frame, panel, csynth_panel_top(), texture_scale);
+                        }
+                        if let Some(panel) = &kbd_panel {
+                            kbdpanel::draw(frame, panel, keyboard_panel_top(), texture_scale);
+                        }
+                        if !super::status_bar_hidden() {
+                            // The bar lights its focus the way the
+                            // surfaces light theirs, and knows when the
+                            // marker is up on one of them instead.
+                            statusbar::set_nav_light(
+                                nav_bar_target,
+                                nav_bar_mix,
+                                nav_target.is_some(),
+                            );
+                            draw_status_bar(frame, &view, texture_scale);
+                            statusbar::set_nav_light(None, 0.0, false);
+                        }
+                        // The picture loses its corners to a front's aperture
+                        // and to a preset's bowed face; all three overlays live
+                        // in one, so all three come in far enough to clear
+                        // whichever is drawn (nil when the picture is a plain
+                        // rectangle). Worked out before any of them is drawn.
+                        let corner = bezel::corner_inset(
+                            self.bezel,
+                            if crt_active {
+                                crt_shader::face_curvature(self.crt_shader_kind)
                             } else {
-                                "standard"
+                                0.0
                             },
-                            r.surface_size,
-                            layout.src_canvas,
-                            layout.display_dst,
-                            layout.chrome_dst,
-                            layout.filter,
-                            layout.factors,
-                            display_src.map(|src| src.par),
+                            self.shader_strength,
+                            texture_scale,
                         );
-                        self.last_diag_layout = Some(layout);
-                    }
-                    let present_clip = layout.display_dst;
-                    let present_draws = layout.draws();
-                    let scaler = &mut r.scaler;
-                    let render_result = if rtg_gpu {
-                        // Draw the UI buffer, then overdraw the display region
-                        // with the native RTG texture (GPU-scaled). The display
-                        // rect is the top present_height fraction of the buffer's
-                        // letterboxed clip rect on the surface.
-                        let rtg = &r.rtg_texture;
-                        // The board frame is drawn straight to the surface,
-                        // so integer scaling applies to it in its own native
-                        // pixels rather than through the canvas texture the
-                        // scaler pass letterboxed above.
-                        let integer_scaling = integer_scaling_requested();
-                        r.presenter.render(
-                            &r.pixels,
-                            &r.window,
-                            self.last_rendered_emulated_frame,
-                            |encoder, target, ctx| {
-                                scaler.render(
-                                    &ctx.device,
-                                    &ctx.queue,
-                                    &ctx.texture,
-                                    encoder,
-                                    target,
-                                    &present_draws,
-                                );
-                                let (cx, cy, cw, ch) = present_clip;
-                                let disp_h = if debug_layout {
-                                    ch as f32
-                                } else {
-                                    ch as f32 * present_height() as f32
-                                        / window_present_height() as f32
-                                };
-                                rtg.render(
-                                    &ctx.queue,
-                                    encoder,
-                                    target,
-                                    (cx as f32, cy as f32, cw as f32, disp_h),
-                                    integer_scaling,
-                                );
-                                if let Some(ui) = inspector_ui {
-                                    ui.paint_prepared(&ctx.device, &ctx.queue, encoder, target);
-                                }
-                                Ok(())
-                            },
-                        )
-                    } else if crt_active || bezel_active {
-                        // Draw the composited buffer, then re-draw the display
-                        // rect. Bezel alone: one pass draws the frame with the
-                        // picture scaled into its opening. Preset alone: the
-                        // pass covers the display rect. Both: the preset paints
-                        // the picture into the opening first and the bezel
-                        // frames it on top in frame-only mode -- the plastic
-                        // overlaps the tube face, so the frame's rounded
-                        // corners and chamfer clip the preset's square viewport
-                        // rather than being buried under it. One CRT beam pass
-                        // per emulated field line the copy above actually
-                        // shows.
-                        let scanlines = crt_scanline_count(
-                            self.present_rows,
+                        // The corner overlays anchor to the display region the
+                        // viewer actually sees: the whole display classically,
+                        // the sub-rect while autocrop or per-axis scaling
+                        // presents one.
+                        let overlay_anchor = display_src.map(|src| src.rect).unwrap_or((
+                            0,
+                            0,
+                            FB_WIDTH,
                             present_height(),
-                            // The same branch copy_window_present_frame took,
-                            // tube aperture included: the line count follows
-                            // the rows the copy actually put on the glass.
-                            self.present_tv_aperture_rows
-                                .filter(|_| {
-                                    self.overscan == Overscan::Tv
-                                        && self.rtg_present_dims.is_none()
-                                        && self.present_width == FB_WIDTH
-                                })
-                                .map(|rows| {
-                                    if self.bezel.is_on() {
-                                        tube_aperture_rows(rows)
-                                    } else {
-                                        rows
-                                    }
-                                }),
+                        ));
+                        if !guest_overlay.is_empty() {
+                            // The guest's debug overlay sits directly on the
+                            // picture, under every piece of host chrome, and --
+                            // like everything from here down -- never in a
+                            // capture.
+                            draw_guest_overlay(
+                                frame,
+                                &mut self.guest_overlay_cache,
+                                &guest_overlay,
+                                texture_scale,
+                                overlay_anchor,
+                            );
+                        }
+                        if recording {
+                            // Painted into the presentation texture only, so
+                            // the badge never appears in the recorded file.
+                            draw_record_badge(frame, texture_scale, corner, overlay_anchor);
+                        }
+                        if self.perf_overlay {
+                            draw_perf_overlay(
+                                frame,
+                                &self.perf.lines,
+                                texture_scale,
+                                recording,
+                                corner,
+                                overlay_anchor,
+                            );
+                        }
+                        if let Some((text, warning)) = &osd {
+                            draw_osd(frame, text, *warning, texture_scale, corner, overlay_anchor);
+                        }
+                        // The focus lights its control the way the pointer
+                        // does, breathing between the two.
+                        ui::set_nav_light(
+                            nav_target,
+                            nav_mix,
+                            nav_is_open,
+                            nav_bar_target.is_some(),
                         );
-                        let kind = self.crt_shader_kind;
-                        let strength = self.shader_strength;
-                        let bezel_style = self.bezel;
-                        // Under a sub-rect layout the preset re-draws the
-                        // rect into the rect's own viewport -- the same
-                        // sub-rect the scaler pass just drew -- with the
-                        // beam-line count scaled to the rows the rect shows.
-                        // The bezel suspends the sub-rect modes, so this is
-                        // never the bezel case.
-                        let crt_crop = (display_src.is_some() || debug_layout).then(|| {
-                            (
-                                layout.display_dst,
-                                layout.src_canvas,
-                                scanlines * layout.src_canvas.3 as f32
-                                    / present_height().max(1) as f32,
-                            )
-                        });
-                        // The closure is FnOnce and captures `r`, so the
-                        // shaders have to be split out of it as separate
-                        // borrows rather than reached through `r` inside.
-                        let crt = &mut r.crt_shader;
-                        let bezel_shader = &mut r.bezel_shader;
-                        let sticker_pass = &mut r.sticker_pass;
-                        r.presenter.render(
-                            &r.pixels,
-                            &r.window,
-                            self.last_rendered_emulated_frame,
-                            |encoder, target, ctx| {
-                                scaler.render(
-                                    &ctx.device,
-                                    &ctx.queue,
-                                    &ctx.texture,
-                                    encoder,
-                                    target,
-                                    &present_draws,
-                                );
-                                let texture_extent =
-                                    (ctx.texture_extent.width, ctx.texture_extent.height);
-                                let (uniforms, viewport) = match crt_crop {
-                                    Some((dst, src, crop_scanlines)) => {
-                                        crt_shader::uniforms_for_rect(
-                                            kind,
-                                            strength,
-                                            dst,
-                                            src,
-                                            (FB_WIDTH, window_present_height()),
-                                            texture_extent,
-                                            crop_scanlines,
-                                        )
-                                    }
-                                    None => crt_shader::uniforms_for(
-                                        kind,
-                                        strength,
-                                        present_clip,
-                                        present_height(),
-                                        window_present_height(),
-                                        texture_extent,
-                                        scanlines,
-                                    ),
-                                };
-                                if bezel_active {
-                                    let opening = bezel::opening_rect(bezel_style, viewport);
-                                    if crt_active {
-                                        crt.render(
-                                            &ctx.device,
-                                            &ctx.queue,
-                                            &ctx.texture,
-                                            encoder,
-                                            target,
-                                            opening,
-                                            kind,
-                                            uniforms.with_viewport(opening),
-                                        );
-                                    }
-                                    bezel_shader.render(
-                                        &ctx.device,
-                                        &ctx.queue,
-                                        &ctx.texture,
-                                        encoder,
-                                        target,
-                                        viewport,
-                                        bezel_style,
-                                        bezel::uniforms_from(
-                                            &uniforms, viewport, opening, crt_active,
-                                        ),
-                                    );
-                                    // Decals stick to the plastic, so they ride
-                                    // the bezel pass: suspended with it, never
-                                    // drawn over a bare picture.
-                                    sticker_pass.render(
-                                        &ctx.device,
-                                        &ctx.queue,
-                                        encoder,
-                                        target,
-                                        viewport,
-                                        opening,
-                                    );
+                        ui::draw(frame, texture_scale, &self.ui, ui_hover, ui_data.as_ref());
+                        ui::set_nav_light(None, 0.0, false, false);
+                        // The drag hint sits on top of everything: the drop will
+                        // land wherever the drag is released, panels or not. The
+                        // launcher refuses drops, so no hint over it.
+                        if self.drop_hover && !matches!(self.ui.panel, Some(Panel::Launcher(_))) {
+                            ui::draw_drop_hint(frame, texture_scale);
+                        }
+                        // The scaler pass draws the composited buffer with this
+                        // layout; every overlay pass below keys its viewport off
+                        // the same display rect, and the cursor mapping inverts
+                        // the same layout, so all of them agree by construction.
+                        // The branches that draw over the display (RTG, CRT,
+                        // bezel) only run when the sub-rect modes are
+                        // suspended, so their layout is the classic
+                        // whole-texture letterbox.
+                        // COPPERLINE_DIAG_AUTOCROP: the window half of the
+                        // renderer-side envelope trace -- the exact rects the
+                        // scaler pass draws this frame, logged when they
+                        // change, with the mode spelled out: a classic layout
+                        // must say WHY it is classic (both modes off, or which
+                        // condition suspended them), because the envelope
+                        // line prints whether or not a mode is on and the
+                        // difference is invisible from it alone. The factors
+                        // are the whole-number draw's pixels per canvas
+                        // column and per field line, the shape is the glass
+                        // ratio a per-axis draw aims at, and the scan says
+                        // which window model the envelope came through (a
+                        // programmable scan crops too, at the uniform
+                        // multiple).
+                        if crate::envcfg::flag("COPPERLINE_DIAG_AUTOCROP")
+                            && self.last_diag_layout != Some(layout)
+                        {
+                            let autocrop = crate::video::autocrop();
+                            let per_axis = per_axis_scaling_requested();
+                            let mode = if !autocrop && !per_axis {
+                                "off"
+                            } else if self.rtg_present_dims.is_some() {
+                                "suspended(rtg)"
+                            } else if self.bezel.is_on() {
+                                "suspended(bezel)"
+                            } else if autocrop && per_axis {
+                                "active(autocrop+per-axis)"
+                            } else if per_axis {
+                                "active(per-axis)"
+                            } else {
+                                "active(autocrop)"
+                            };
+                            info!(
+                                "[DIAG_AUTOCROP] layout mode={} scan={} surface={:?} \
+                                 src_canvas={:?} display_dst={:?} chrome_dst={:?} filter={:?} \
+                                 factors={:?} shape={:?}",
+                                mode,
+                                if self.present_programmable {
+                                    "programmable"
                                 } else {
-                                    crt.render(
-                                        &ctx.device,
-                                        &ctx.queue,
-                                        &ctx.texture,
-                                        encoder,
-                                        target,
-                                        viewport,
-                                        kind,
-                                        uniforms,
-                                    );
+                                    "standard"
+                                },
+                                surface_size,
+                                layout.src_canvas,
+                                layout.display_dst,
+                                layout.chrome_dst,
+                                layout.filter,
+                                layout.factors,
+                                display_src.map(|src| src.par),
+                            );
+                            self.last_diag_layout = Some(layout);
+                        }
+                        let present_clip = layout.display_dst;
+                        let texture_extent = (
+                            texture_width(texture_scale) as u32,
+                            texture_height(texture_scale) as u32,
+                        );
+                        let pass = if rtg_gpu {
+                            let (cx, cy, cw, ch) = present_clip;
+                            let disp_h = if debug_layout {
+                                ch as f32
+                            } else {
+                                ch as f32 * present_height() as f32 / window_present_height() as f32
+                            };
+                            PresentPass::Rtg {
+                                rect: (cx as f32, cy as f32, cw as f32, disp_h),
+                                integer_scaling: integer_scaling_requested(),
+                            }
+                        } else if crt_active || bezel_active {
+                            let scanlines = crt_scanline_count(
+                                self.present_rows,
+                                present_height(),
+                                self.present_tv_aperture_rows
+                                    .filter(|_| {
+                                        self.overscan == Overscan::Tv
+                                            && self.rtg_present_dims.is_none()
+                                            && self.present_width == FB_WIDTH
+                                    })
+                                    .map(|rows| {
+                                        if self.bezel.is_on() {
+                                            tube_aperture_rows(rows)
+                                        } else {
+                                            rows
+                                        }
+                                    }),
+                            );
+                            let crt_crop = (display_src.is_some() || debug_layout).then(|| {
+                                (
+                                    layout.display_dst,
+                                    layout.src_canvas,
+                                    scanlines * layout.src_canvas.3 as f32
+                                        / present_height().max(1) as f32,
+                                )
+                            });
+                            let (uniforms, viewport) = match crt_crop {
+                                Some((dst, src, crop_scanlines)) => crt_shader::uniforms_for_rect(
+                                    self.crt_shader_kind,
+                                    self.shader_strength,
+                                    dst,
+                                    src,
+                                    (FB_WIDTH, window_present_height()),
+                                    texture_extent,
+                                    crop_scanlines,
+                                ),
+                                None => crt_shader::uniforms_for(
+                                    self.crt_shader_kind,
+                                    self.shader_strength,
+                                    present_clip,
+                                    present_height(),
+                                    window_present_height(),
+                                    texture_extent,
+                                    scanlines,
+                                ),
+                            };
+                            PresentPass::Crt(CrtPresent {
+                                kind: self.crt_shader_kind,
+                                style: self.bezel,
+                                crt_active,
+                                bezel_active,
+                                uniforms,
+                                viewport,
+                            })
+                        } else {
+                            PresentPass::Plain
+                        };
+                        let mut draws = layout.draws();
+                        let picture = picture_on_gpu.then(|| {
+                            let map = picture_map(
+                                self.present_rows,
+                                self.present_width,
+                                texture_scale,
+                                self.overscan,
+                                self.tv_centre,
+                                self.present_tv_aperture_rows,
+                                self.bezel.is_on(),
+                            );
+                            if let Some(display) = draws.first_mut() {
+                                display.picture = Some(map);
+                            }
+                            let mut fb = match r.present_worker.as_mut() {
+                                Some(worker) if worker_frame.is_some() => worker.picture_buffer(),
+                                _ => std::mem::take(&mut self.picture_scratch),
+                            };
+                            fb.clear();
+                            fb.extend_from_slice(
+                                &self.present_fb[..self.present_rows * self.present_width],
+                            );
+                            PictureFrame {
+                                fb,
+                                width: self.present_width as u32,
+                                rows: self.present_rows as u32,
+                            }
+                        });
+                        let mut job = PresentJob {
+                            frame: worker_frame,
+                            emulated_frame: self.last_rendered_emulated_frame,
+                            draws,
+                            pass,
+                            picture,
+                        };
+                        match gpu_home.as_deref_mut() {
+                            Some(gpu) => {
+                                let mut paint = inspector_ui.map(|ui| {
+                                    move |device: &wgpu::Device,
+                                          queue: &wgpu::Queue,
+                                          encoder: &mut wgpu::CommandEncoder,
+                                          target: &wgpu::TextureView| {
+                                        ui.paint_prepared(device, queue, encoder, target)
+                                    }
+                                });
+                                let after = paint.as_mut().map(|paint| paint as PresentAfter<'_>);
+                                if let Err(e) = present_job(gpu, Some(&window), &job, after) {
+                                    error!("pixels.render: {e}");
                                 }
-                                if let Some(ui) = inspector_ui {
-                                    ui.paint_prepared(&ctx.device, &ctx.queue, encoder, target);
+                                if let Some(picture) = job.picture.take() {
+                                    self.picture_scratch = picture.fb;
                                 }
-                                Ok(())
-                            },
-                        )
-                    } else {
-                        r.presenter.render(
-                            &r.pixels,
-                            &r.window,
-                            self.last_rendered_emulated_frame,
-                            |encoder, target, ctx| {
-                                scaler.render(
-                                    &ctx.device,
-                                    &ctx.queue,
-                                    &ctx.texture,
-                                    encoder,
-                                    target,
-                                    &present_draws,
-                                );
-                                if let Some(ui) = inspector_ui {
-                                    ui.paint_prepared(&ctx.device, &ctx.queue, encoder, target);
+                            }
+                            None => {
+                                if let Some(worker) = r.present_worker.as_mut() {
+                                    if let Err(job) = worker.submit(job) {
+                                        if let Some(frame) = job.frame {
+                                            worker.recycle(
+                                                frame,
+                                                job.picture.map(|picture| picture.fb),
+                                            );
+                                        }
+                                        self.main_presentation_dirty = true;
+                                    }
                                 }
-                                Ok(())
-                            },
-                        )
-                    };
-                    if let Err(e) = render_result {
-                        error!("pixels.render: {e}");
+                            }
+                        }
+                        r.gpu = gpu_home;
                     }
                 }
                 self.dispatch_egui_frame(inspector_actions, Ok(()));
@@ -5798,7 +6257,17 @@ impl ApplicationHandler for App {
         // Paused/off animations have no emulation-clock sleep. With vsync
         // disabled they also lose the swapchain wait, so bound their polling
         // to a UI frame. Credit any sleeps/work already done above.
-        if !self.vsync && !running && event_loop.control_flow() == ControlFlow::Poll {
+        // Without a vsync wait in the redraw -- vsync off, or frames
+        // presented by the worker -- a polling loop with nothing running
+        // would spin; tick it at a human rate instead.
+        let threaded_present = self
+            .render
+            .as_ref()
+            .is_some_and(|r| r.present_worker.is_some());
+        if (!self.vsync || threaded_present)
+            && !running
+            && event_loop.control_flow() == ControlFlow::Poll
+        {
             let wait =
                 std::time::Duration::from_millis(16).saturating_sub(host_poll_started.elapsed());
             if !wait.is_zero() {
