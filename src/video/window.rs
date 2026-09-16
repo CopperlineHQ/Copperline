@@ -660,6 +660,8 @@ struct ClipRingSource {
     overscan: crate::config::Overscan,
     tv_centre: crate::config::TvCentre,
     tv_aperture_rows: Option<usize>,
+    /// The capture's row count, which follows the pixel aspect.
+    capture_rows: usize,
     rtg: bool,
 }
 
@@ -1873,10 +1875,9 @@ struct CrtPresent {
 /// worker runs this for the normal display; the main thread runs it for a
 /// frame that carries something only it has (the RTG texture upload, the
 /// inspector's egui paint through `after`). `notify` is the window whose
-/// `pre_present_notify` precedes the present: None on the worker, where
-/// the main thread gave it at hand-off instead, since winit's window
-/// methods must not be called from another thread (on macOS they wait on
-/// the main thread).
+/// `pre_present_notify` runs after the draw and before the present, as it
+/// always did; see `worker_notify_window` for why the worker passes None
+/// on macOS.
 fn present_job(
     gpu: &mut Gpu,
     notify: Option<&Window>,
@@ -2024,8 +2025,23 @@ struct PresentWorker {
     recycled_pictures: Vec<Vec<u32>>,
 }
 
+/// The window the present worker hands to `present_job` for the
+/// pre-present hint. On macOS every winit `Window` method dispatches to
+/// the main thread and waits for it -- a deadlock against a main thread
+/// waiting in `reclaim` -- and the hint is a no-op there anyway, so the
+/// worker passes None. Elsewhere (Wayland is where the hint matters) the
+/// window is thread-safe and the worker notifies in the established
+/// order: after a successful draw, right before submission.
+fn worker_notify_window(window: &Arc<Window>) -> Option<&Window> {
+    if cfg!(target_os = "macos") {
+        None
+    } else {
+        Some(window)
+    }
+}
+
 impl PresentWorker {
-    fn new() -> Self {
+    fn new(window: Arc<Window>) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::sync_channel::<PresentCmd>(PRESENT_FRAMES_IN_FLIGHT + 2);
         let (back_tx, back_rx) = mpsc::channel::<PresentBack>();
         let handle = std::thread::Builder::new()
@@ -2037,7 +2053,8 @@ impl PresentWorker {
                         PresentCmd::Lend(gpu) => held = Some(gpu),
                         PresentCmd::Frame(job) => {
                             if let Some(gpu) = held.as_mut() {
-                                if let Err(e) = present_job(gpu, None, &job, None) {
+                                let notify = worker_notify_window(&window);
+                                if let Err(e) = present_job(gpu, notify, &job, None) {
                                     error!("pixels.render: {e}");
                                 }
                             }
@@ -4429,7 +4446,8 @@ impl ApplicationHandler for App {
         if shader_error.is_some() {
             self.crt_shader_kind = crate::config::ShaderKind::None;
         }
-        let present_worker = threaded_present_enabled().then(PresentWorker::new);
+        let present_worker =
+            threaded_present_enabled().then(|| PresentWorker::new(Arc::clone(&window)));
         info!(
             "presentation: {}",
             if present_worker.is_some() {
@@ -5710,9 +5728,6 @@ impl ApplicationHandler for App {
                                 }
                             }
                             None => {
-                                // The worker never touches the window; give
-                                // the pre-present hint here at hand-off.
-                                window.pre_present_notify();
                                 if let Some(worker) = r.present_worker.as_mut() {
                                     if let Err(job) = worker.submit(job) {
                                         if let Some(frame) = job.frame {

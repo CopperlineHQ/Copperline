@@ -460,6 +460,16 @@ impl App {
 
     /// Change the host swapchain without restarting or changing guest pacing.
     /// Keep the configuration screen in sync so Save retains the live choice.
+    /// `[display] hidpi_texture` for a machine started from the launcher:
+    /// set the global and replan the backing texture to the new density.
+    pub(super) fn apply_hidpi_texture(&mut self, enabled: bool) {
+        if enabled == crate::video::hidpi_texture() {
+            return;
+        }
+        crate::video::set_hidpi_texture(enabled);
+        self.replan_main_texture();
+    }
+
     pub(super) fn apply_vsync(&mut self, enabled: bool) {
         if self.vsync == enabled {
             return;

@@ -1249,6 +1249,7 @@ impl App {
             overscan: self.overscan,
             tv_centre: self.tv_centre,
             tv_aperture_rows: self.present_tv_aperture_rows,
+            capture_rows: crate::video::capture_height(),
             rtg: self.rtg_present_dims.is_some(),
         };
         // The picture on screen is the one the ring's newest frame already

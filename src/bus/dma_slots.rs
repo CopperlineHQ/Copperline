@@ -686,6 +686,12 @@ impl Bus {
             self.emulated_frames = self.emulated_frames.saturating_add(1);
             self.begin_new_beam_frame();
         }
+        if tick.new_frames != 0 {
+            // A wrap that came earlier than the bound assumed (a frame
+            // shortened under it) must not leave the bound standing over
+            // the restarted Copper.
+            self.invalidate_copper_wake_bound();
+        }
         self.start_pending_copper_frame_if_due();
         tick
     }

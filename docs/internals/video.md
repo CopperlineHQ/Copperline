@@ -450,10 +450,12 @@ uploads the image, draws the passes and presents, so the main thread's
 redraw ends at hand-off rather than at the surface's vsync wait -- on a
 host that falls short of real time, that wait was otherwise a per-frame
 stall of the emulation loop. Up to two frames are in flight; a third
-redraw waits for the next pass. The worker never calls winit: the window's
-pre-present hint is given at hand-off, and everything the passes need
-(scaler draws, CRT uniforms, the RTG rect) is resolved on the main thread
-into the `PresentJob`. The GPU side comes home for the operations that
+redraw waits for the next pass. Everything the passes need (scaler
+draws, CRT uniforms, the RTG rect) is resolved on the main thread into
+the `PresentJob`. The worker gives the window's pre-present hint in the
+established order, after the draw and before the present, except on
+macOS, where every winit window method waits on the main thread and the
+hint is a no-op anyway. The GPU side comes home for the operations that
 need the main thread -- surface and texture resizes, present-mode and
 shader changes, and any frame carrying the RTG board's texture upload or
 the inspector's egui paint, which present synchronously as before

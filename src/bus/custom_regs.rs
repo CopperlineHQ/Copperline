@@ -341,6 +341,10 @@ impl Bus {
         if is_audio_timing_custom_write(off) {
             self.flush_audio();
         }
+        if is_beam_timing_custom_write(off) {
+            // Line and frame lengths feed the Copper's wake bound.
+            self.invalidate_copper_wake_bound();
+        }
         if is_render_relevant_custom_write(off)
             && !matches!(off, 0x180..=0x1BE)
             && (off != 0x1E4 || self.denise_ecs_registers())

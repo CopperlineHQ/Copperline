@@ -159,20 +159,32 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
 
 // Sample the virtual composed texture at texel-space `coord` the way the
 // linear clamp-to-edge sampler would, from the picture.
+// A composed texel in linear light: the picture rows through the map,
+// the rows below them -- the CPU-drawn chrome band of the classic
+// single-draw layout -- from the composed texture itself, whose sRGB
+// typing has textureLoad decode them.
+fn composed_texel_linear(x: i32, y: i32, picture_rows: i32) -> vec3<f32> {
+    if (y < picture_rows) {
+        return srgb_to_linear(picture_texel(x, y));
+    }
+    return textureLoad(tex, vec2<i32>(x, y), 0).rgb;
+}
+
 fn picture_sample(coord: vec2<f32>) -> vec4<f32> {
+    let dims = vec2<i32>(textureDimensions(tex));
     let w = u.pic_d.w * u.pic_a.x;
     let h = u.pic_a.y;
     let p = coord - 0.5;
     let p0 = floor(p);
     let f = p - p0;
     let x0 = clamp(i32(p0.x), 0, w - 1);
-    let y0 = clamp(i32(p0.y), 0, h - 1);
+    let y0 = clamp(i32(p0.y), 0, dims.y - 1);
     let x1 = clamp(i32(p0.x) + 1, 0, w - 1);
-    let y1 = clamp(i32(p0.y) + 1, 0, h - 1);
-    let c00 = srgb_to_linear(picture_texel(x0, y0));
-    let c10 = srgb_to_linear(picture_texel(x1, y0));
-    let c01 = srgb_to_linear(picture_texel(x0, y1));
-    let c11 = srgb_to_linear(picture_texel(x1, y1));
+    let y1 = clamp(i32(p0.y) + 1, 0, dims.y - 1);
+    let c00 = composed_texel_linear(x0, y0, h);
+    let c10 = composed_texel_linear(x1, y0, h);
+    let c01 = composed_texel_linear(x0, y1, h);
+    let c11 = composed_texel_linear(x1, y1, h);
     let c = mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
     return vec4<f32>(c, 1.0);
 }
@@ -1171,6 +1183,18 @@ mod tests {
             copy_window_present_frame(
                 &src, OUT_HEIGHT, FB_WIDTH, &mut frame, scale, overscan, centre, aperture, false,
             );
+            // The chrome band below the picture, as the CPU draws it into
+            // the composed texture whatever path the picture takes.
+            let stride = tex.0 as usize * 4;
+            for (y, row) in frame
+                .chunks_exact_mut(stride)
+                .enumerate()
+                .skip(present_height() * scale)
+            {
+                for (x, px) in row.chunks_exact_mut(4).enumerate() {
+                    px.copy_from_slice(&[(x * 7 + y * 3) as u8, y as u8, 0x40, 0xFF]);
+                }
+            }
             let composed: Vec<u32> = frame
                 .chunks_exact(4)
                 .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
@@ -1178,9 +1202,14 @@ mod tests {
             let map = picture_map(
                 OUT_HEIGHT, FB_WIDTH, scale, overscan, centre, aperture, false,
             );
-            for (target, filter) in [
-                ((1432u32, 1074u32), ScaleFilter::Nearest),
-                ((1000, 750), ScaleFilter::SharpBilinear),
+            // The autocrop layout's display draw, then the classic layout's
+            // single draw over picture and chrome band alike.
+            let full_rect = [0.0, 0.0, 1.0, 1.0];
+            for (target, filter, src_rect) in [
+                ((1432u32, 1074u32), ScaleFilter::Nearest, src_rect),
+                ((1000, 750), ScaleFilter::SharpBilinear, src_rect),
+                ((tex.0, tex.1), ScaleFilter::Nearest, full_rect),
+                ((1000, 780), ScaleFilter::SharpBilinear, full_rect),
             ] {
                 let clip = (0, 0, target.0, target.1);
                 let reference = render_draws(
@@ -1213,31 +1242,52 @@ mod tests {
                     }],
                     Some((&src, (FB_WIDTH as u32, OUT_HEIGHT as u32))),
                 );
-                let mut worst = 0;
-                let mut off = 0usize;
-                for (a, b) in reference.iter().zip(&through_map) {
-                    let d = (0..3)
-                        .map(|c| (i32::from(a[c]) - i32::from(b[c])).abs())
-                        .max()
-                        .unwrap();
-                    worst = worst.max(d);
-                    off += usize::from(d > 0);
-                }
-                eprintln!(
-                    "picture draw vs composed: {overscan:?} centre {centre:?} {target:?} {filter:?}: worst {worst}, {off} of {} pixels differ",
-                    reference.len()
-                );
                 // Point sampling reproduces the composed texel bit for bit.
                 // The sharp filter blends in linear light on both paths, but
                 // the sampler's weights and sRGB decode carry less precision
-                // than the shader's float maths: a couple of LSBs at edges.
-                let allowed = match filter {
-                    ScaleFilter::Nearest => 0,
-                    ScaleFilter::SharpBilinear => 2,
+                // than the shader's float maths, so the two differ by a
+                // little in linear light -- which the steep foot of the sRGB
+                // curve turns into several encoded LSBs near black. Measure
+                // the difference in linear light, then: a mapping error is
+                // tens of LSBs over most of the picture, not this.
+                let linear = |v: u8| {
+                    let c = f32::from(v) / 255.0;
+                    if c <= 0.04045 {
+                        c / 12.92
+                    } else {
+                        ((c + 0.055) / 1.055).powf(2.4)
+                    }
                 };
+                let allowed_linear = match filter {
+                    ScaleFilter::Nearest => 0.0,
+                    ScaleFilter::SharpBilinear => 2.5 / 255.0,
+                };
+                let mut worst = 0.0f32;
+                let mut worst_at = (0usize, [0u8; 4], [0u8; 4]);
+                let mut off = 0usize;
+                for (i, (a, b)) in reference.iter().zip(&through_map).enumerate() {
+                    let d = (0..3)
+                        .map(|c| (linear(a[c]) - linear(b[c])).abs())
+                        .fold(0.0f32, f32::max);
+                    if d > worst {
+                        worst = d;
+                        worst_at = (i, *a, *b);
+                    }
+                    off += usize::from(a[..3] != b[..3]);
+                }
+                eprintln!(
+                    "picture draw vs composed: {overscan:?} centre {centre:?} {target:?} {filter:?}: worst {:.2}/255 linear at ({}, {}) {:?} vs {:?}, {off} of {} pixels differ",
+                    worst * 255.0,
+                    worst_at.0 % target.0 as usize,
+                    worst_at.0 / target.0 as usize,
+                    worst_at.1,
+                    worst_at.2,
+                    reference.len()
+                );
                 assert!(
-                    worst <= allowed,
-                    "{overscan:?} {target:?} {filter:?}: worst channel difference {worst}"
+                    worst <= allowed_linear,
+                    "{overscan:?} {target:?} {filter:?}: worst linear difference {:.2}/255",
+                    worst * 255.0
                 );
                 assert!(
                     off * 4 < reference.len(),

@@ -12503,6 +12503,12 @@ fn is_live_collision_sprite_custom_write(off: u16) -> bool {
     matches!(off & 0x01FE, 0x140..=0x17F)
 }
 
+/// The ECS beam-timing registers (HTOTAL through HCENTER, BEAMCON0
+/// among them): a write can change the current line's or frame's length.
+fn is_beam_timing_custom_write(off: u16) -> bool {
+    matches!(off, 0x1C0..=0x1E2)
+}
+
 fn is_audio_timing_custom_write(off: u16) -> bool {
     // DMACON, INTREQ (audio-interrupt acks gate the state machine's
     // AUDxIP tests), ADKCON, the audio registers, and the beam-rate
