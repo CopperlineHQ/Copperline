@@ -2066,6 +2066,14 @@ struct PresentWorker {
     cmd_tx: Option<SyncSender<PresentCmd>>,
     back_rx: Receiver<PresentBack>,
     handle: Option<JoinHandle<()>>,
+    /// The window, shared with the thread. Held here so the thread's
+    /// clone is never the last reference: a winit `Window` dropped off
+    /// the main thread dispatches its drop to the main thread and waits
+    /// (macOS), and the main thread is the one joining the worker in
+    /// `Drop` -- the thread would then be releasing the window into a
+    /// join that waits for the thread. This reference outlives the join
+    /// and drops on the main thread, after it. Held for that drop alone.
+    _window: Arc<Window>,
     lent: bool,
     in_flight: usize,
     /// Frame buffers the worker returned, ready to compose into.
@@ -2093,9 +2101,11 @@ impl PresentWorker {
     fn new(window: Arc<Window>) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::sync_channel::<PresentCmd>(PRESENT_FRAMES_IN_FLIGHT + 2);
         let (back_tx, back_rx) = mpsc::channel::<PresentBack>();
+        let thread_window = Arc::clone(&window);
         let handle = std::thread::Builder::new()
             .name("copperline-present".to_string())
             .spawn(move || {
+                let window = thread_window;
                 let mut held: Option<Box<Gpu>> = None;
                 while let Ok(cmd) = cmd_rx.recv() {
                     match cmd {
@@ -2128,6 +2138,7 @@ impl PresentWorker {
             cmd_tx: Some(cmd_tx),
             back_rx,
             handle: Some(handle),
+            _window: window,
             lent: false,
             in_flight: 0,
             recycled: Vec::new(),
@@ -2239,6 +2250,11 @@ impl PresentWorker {
 
 impl Drop for PresentWorker {
     fn drop(&mut self) {
+        // The join runs the thread's last drops, its window clone among
+        // them; `self._window` keeps the window alive past the join (see
+        // the field), so that clone never dispatches a drop back to the
+        // thread waiting here. The GPU side is home by now
+        // (`Render::gpu_mut` reclaims it before the worker goes).
         self.cmd_tx.take();
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();

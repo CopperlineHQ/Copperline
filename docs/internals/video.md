@@ -459,7 +459,13 @@ hint is a no-op anyway. The GPU side comes home for the operations that
 need the main thread -- surface and texture resizes, present-mode and
 shader changes, and any frame carrying the RTG board's texture upload or
 the inspector's egui paint, which present synchronously as before
-(`Render::gpu_mut` reclaims it, waiting out a frame in flight).
+(`Render::gpu_mut` reclaims it, waiting out a frame in flight). The
+worker shares the window with the main thread but never owns the last
+reference to it: on macOS a winit window dropped off the main thread
+dispatches its drop to the main thread and waits, and the main thread
+is the one joining the worker at shutdown, so the worker's clone
+releasing the window inside that join would deadlock the exit. The
+main-thread side keeps a reference past the join.
 `COPPERLINE_THREADED_PRESENT=0` presents every frame from the main thread.
 
 When nothing has to be composed over the picture on the CPU -- no menu,
