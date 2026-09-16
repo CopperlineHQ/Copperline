@@ -1316,9 +1316,24 @@ impl TryFrom<RawConfig> for Config {
             .iter()
             .any(|disk| !disk.attach.is_scsi() && !disk.attach.is_pcmcia());
         let host_disk_on_scsi = host_disks.iter().any(|disk| disk.attach.is_scsi());
-        if raw.fmv_rom.is_some() && !defaults.akiko {
-            anyhow::bail!("fmv_rom is only valid for a CD32 machine profile");
+        if (raw.fmv.is_some() || raw.fmv_rom.is_some()) && !defaults.akiko {
+            anyhow::bail!("fmv and fmv_rom are only valid for a CD32 machine profile");
         }
+        // The module is opt-in: `fmv = true` fits the bundled open ROM, a
+        // named `fmv_rom` fits that image, and the empty string keeps its
+        // older meaning of an empty slot. The two keys must agree.
+        let fmv_rom_path = match (raw.fmv, raw.fmv_rom.as_deref()) {
+            (Some(false), Some(path)) if !path.is_empty() => {
+                anyhow::bail!("fmv = false conflicts with fmv_rom = \"{path}\"");
+            }
+            (Some(true), Some("")) => {
+                anyhow::bail!("fmv = true conflicts with fmv_rom = \"\"");
+            }
+            (_, Some("")) => None,
+            (_, Some(path)) => Some(PathBuf::from(path)),
+            (Some(true), None) => Some(PathBuf::from(BUNDLED_FMV_ROM)),
+            (Some(false) | None, None) => defaults.fmv_rom_path,
+        };
         Ok(Config {
             host_disks,
             pcmcia,
@@ -1385,11 +1400,7 @@ impl TryFrom<RawConfig> for Config {
                 .extended_rom
                 .map(PathBuf::from)
                 .or(defaults.extended_rom_path),
-            fmv_rom_path: match raw.fmv_rom.as_deref() {
-                Some("") => None,
-                Some(path) => Some(PathBuf::from(path)),
-                None => defaults.fmv_rom_path,
-            },
+            fmv_rom_path,
             cd_image_path: raw.cd.image.map(PathBuf::from),
             cd_insert_delay_secs,
             cd32_nvram_path: raw
@@ -1930,10 +1941,9 @@ pub fn machine_profile_defaults(model: MachineModel) -> Config {
             d.cpu_clock_mhz = 14.18;
             d.floppy_connected = [false; 4];
             d.akiko = true;
-            #[cfg(feature = "cd32-fmv")]
-            {
-                d.fmv_rom_path = Some(PathBuf::from(BUNDLED_FMV_ROM));
-            }
+            // No FMV cartridge: a stock CD32 has none, and the module is
+            // opt-in (`fmv = true` / `fmv_rom`) because its resident ROM
+            // moves the guest's memory layout and boot timing.
             // The bundled controller: lowlevel.library expects the pad's
             // serial button protocol on port 2.
             d.port_devices[1] = PortDevice::Cd32Pad;

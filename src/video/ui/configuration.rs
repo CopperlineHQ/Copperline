@@ -1486,10 +1486,10 @@ pub(in crate::video::ui) fn launcher_path_inherits(
         return setup.path(field).is_none();
     }
     // The ROMs with bundled defaults read the same way: unset means the
-    // bundled image, dimmed as Copperline's answer.
+    // bundled image (or, on the FMV row, no module at all), dimmed as
+    // Copperline's answer.
     if matches!(field, LauncherField::Rom | LauncherField::FmvRom) {
-        return setup.path(field).is_none()
-            && (field != LauncherField::FmvRom || !setup.fmv_rom_disabled());
+        return setup.path(field).is_none();
     }
     if field == LauncherField::ScsiRom {
         return setup.scsi_bundled_rom_label().is_some() && setup.path(field).is_none();
@@ -1516,17 +1516,18 @@ pub(in crate::video::ui) fn launcher_clear_enabled(
 }
 
 /// The FMV path row's second button controls the physical module, not just a
-/// pathname: it must be usable from the bundled-default state so the launcher
-/// can write `fmv_rom = ""`, and usable again to restore that default.
+/// pathname: from the default empty slot it fits the module with the bundled
+/// ROM (the launcher writes `fmv = true`), and from a fitted module it
+/// empties the slot again.
 pub(in crate::video::ui) fn launcher_clear_label(
     setup: &launcher::MachineSetup,
     field: LauncherField,
 ) -> &'static str {
     if field == LauncherField::FmvRom {
-        if setup.fmv_rom_disabled() {
-            "Default"
-        } else {
+        if setup.fmv_fitted() {
             "Remove"
+        } else {
+            "Fit"
         }
     } else if field.is_paths_field() {
         "Reset"

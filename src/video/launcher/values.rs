@@ -402,7 +402,7 @@ impl MachineSetup {
             F::WhdloadWhdPackage | F::WhdloadSkickPackage => self.path_label(field, "(none)"),
             // Path/drive fields: the file name, or a placeholder.
             F::Rom => self.path_label(field, "(bundled AROS)"),
-            F::FmvRom if self.fmv_rom_disabled => "(no FMV module)".to_string(),
+            F::FmvRom if !self.fmv_fitted => "(no FMV module)".to_string(),
             F::FmvRom => self.path_label(field, "(bundled open FMV ROM)"),
             // Both Zorro SCSI boards have bundled open autoboot ROMs.
             F::ScsiRom if self.scsi_bundled_rom_label().is_some() => {

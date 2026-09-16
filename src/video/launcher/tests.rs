@@ -1253,24 +1253,36 @@ fn the_rom_tab_carries_an_identification_line_under_each_path_row() {
 fn fmv_rom_path_round_trips_through_the_launcher() {
     let mut setup = MachineSetup::default();
     setup.select_model(Some(MachineModel::Cd32));
-    assert_eq!(setup.value_label(F::FmvRom), "(bundled open FMV ROM)");
+    // The slot starts empty: a stock CD32 has no cartridge.
+    assert!(!setup.fmv_fitted());
+    assert_eq!(setup.value_label(F::FmvRom), "(no FMV module)");
+    assert_eq!(setup.to_raw().fmv, None);
     assert_eq!(setup.to_raw().fmv_rom, None);
     let path = PathBuf::from("/roms/cd32fmv.rom");
     setup.set_path(F::FmvRom, path.clone());
+    assert!(setup.fmv_fitted(), "a named ROM fits the module");
     assert_eq!(setup.path(F::FmvRom), Some(path.as_path()));
     assert_eq!(setup.to_raw().fmv_rom.as_deref(), Some("/roms/cd32fmv.rom"));
+    assert_eq!(setup.to_raw().fmv, None);
 
+    // Clearing the ROM keeps the module, now on the bundled image.
     setup.clear_path(F::FmvRom);
+    assert!(setup.fmv_fitted());
     assert_eq!(setup.path(F::FmvRom), None);
+    assert_eq!(setup.value_label(F::FmvRom), "(bundled open FMV ROM)");
+    assert_eq!(setup.to_raw().fmv, Some(true));
     assert_eq!(setup.to_raw().fmv_rom, None);
 
     setup.set_path(F::FmvRom, path);
     setup.select_model(Some(MachineModel::A1200));
     assert_eq!(setup.path(F::FmvRom), None, "non-CD32 profile drops module");
+    assert!(!setup.fmv_fitted());
 }
 
 #[test]
-fn fmv_rom_explicit_opt_out_survives_a_launcher_round_trip() {
+fn fmv_switch_and_legacy_opt_out_round_trip_through_the_launcher() {
+    // The older explicit opt-out spelling reads as the (now default) empty
+    // slot and is written back as nothing.
     let raw = RawConfig::parse(
         r#"
         fmv_rom = ""
@@ -1280,33 +1292,55 @@ fn fmv_rom_explicit_opt_out_survives_a_launcher_round_trip() {
     )
     .unwrap();
     let mut setup = MachineSetup::from_raw(&raw).unwrap();
+    assert!(!setup.fmv_fitted());
     assert_eq!(setup.path(F::FmvRom), None);
     assert_eq!(setup.value_label(F::FmvRom), "(no FMV module)");
-    assert_eq!(setup.to_raw().fmv_rom.as_deref(), Some(""));
+    assert_eq!(setup.to_raw().fmv, None);
+    assert_eq!(setup.to_raw().fmv_rom, None);
 
     setup.set_path(F::FmvRom, PathBuf::from("replacement.rom"));
     assert_eq!(setup.to_raw().fmv_rom.as_deref(), Some("replacement.rom"));
+
+    // `fmv = true` fits the bundled ROM and survives a round trip.
+    let raw = RawConfig::parse(
+        r#"
+        fmv = true
+        [machine]
+        profile = "CD32"
+        "#,
+    )
+    .unwrap();
+    let setup = MachineSetup::from_raw(&raw).unwrap();
+    assert!(setup.fmv_fitted());
+    assert_eq!(setup.path(F::FmvRom), None);
+    assert_eq!(setup.value_label(F::FmvRom), "(bundled open FMV ROM)");
+    assert_eq!(setup.to_raw().fmv, Some(true));
+    assert_eq!(setup.to_raw().fmv_rom, None);
 }
 
 #[test]
-fn fmv_module_action_switches_between_an_empty_slot_and_the_bundled_default() {
+fn fmv_module_action_switches_between_an_empty_slot_and_the_bundled_module() {
     let mut setup = MachineSetup::default();
     setup.select_model(Some(MachineModel::Cd32));
 
     setup.toggle_fmv_module();
-    assert!(setup.fmv_rom_disabled());
-    assert_eq!(setup.value_label(F::FmvRom), "(no FMV module)");
-    assert_eq!(setup.to_raw().fmv_rom.as_deref(), Some(""));
+    assert!(setup.fmv_fitted());
+    assert_eq!(setup.value_label(F::FmvRom), "(bundled open FMV ROM)");
+    assert_eq!(setup.to_raw().fmv, Some(true));
+    assert_eq!(setup.to_raw().fmv_rom, None);
 
     setup.toggle_fmv_module();
-    assert!(!setup.fmv_rom_disabled());
-    assert_eq!(setup.value_label(F::FmvRom), "(bundled open FMV ROM)");
+    assert!(!setup.fmv_fitted());
+    assert_eq!(setup.value_label(F::FmvRom), "(no FMV module)");
+    assert_eq!(setup.to_raw().fmv, None);
     assert_eq!(setup.to_raw().fmv_rom, None);
 
     setup.set_path(F::FmvRom, PathBuf::from("replacement.rom"));
     setup.toggle_fmv_module();
+    assert!(!setup.fmv_fitted());
     assert_eq!(setup.path(F::FmvRom), None);
-    assert_eq!(setup.to_raw().fmv_rom.as_deref(), Some(""));
+    assert_eq!(setup.to_raw().fmv, None);
+    assert_eq!(setup.to_raw().fmv_rom, None);
 }
 
 #[test]

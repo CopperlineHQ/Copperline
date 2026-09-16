@@ -1553,8 +1553,18 @@ fn machine_profile_defaults_match_bare_profile_configs() -> Result<()> {
 
 #[test]
 fn fmv_rom_is_cd32_only() -> Result<()> {
+    // The slot is empty unless asked for: a stock CD32 has no cartridge.
+    let stock = parse_config(
+        r#"
+            [machine]
+            profile = "CD32"
+            "#,
+    )?;
+    assert_eq!(stock.fmv_rom_path, None);
+
     let bundled = parse_config(
         r#"
+            fmv = true
             [machine]
             profile = "CD32"
             "#,
@@ -1581,6 +1591,47 @@ fn fmv_rom_is_cd32_only() -> Result<()> {
             "#,
     )?;
     assert_eq!(unfitted.fmv_rom_path, None);
+
+    let off = parse_config(
+        r#"
+            fmv = false
+            [machine]
+            profile = "CD32"
+            "#,
+    )?;
+    assert_eq!(off.fmv_rom_path, None);
+
+    // The two keys must agree.
+    let err = parse_config(
+        r#"
+            fmv = false
+            fmv_rom = "cd32fmv.rom"
+            [machine]
+            profile = "CD32"
+            "#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("fmv = false conflicts"), "{err:#}");
+    let err = parse_config(
+        r#"
+            fmv = true
+            fmv_rom = ""
+            [machine]
+            profile = "CD32"
+            "#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("fmv = true conflicts"), "{err:#}");
+
+    let err = parse_config(
+        r#"
+            fmv = true
+            [machine]
+            profile = "A1200"
+            "#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("only valid for a CD32"), "{err:#}");
 
     let err = parse_config(
         r#"
@@ -2927,11 +2978,13 @@ fn the_a3000_scsi_bus_takes_drives_without_a_boot_rom() -> Result<()> {
     Ok(())
 }
 
-/// A CD32 without an FMV-ROM override resolves the bundled open cartridge.
+/// A CD32 asking for the module without naming a ROM resolves the bundled
+/// open cartridge.
 #[test]
-fn cd32_without_fmv_override_resolves_the_bundled_rom() -> Result<()> {
+fn cd32_fmv_switch_resolves_the_bundled_rom() -> Result<()> {
     let mut cfg = parse_config(
         r#"
+            fmv = true
             [machine]
             profile = "CD32"
             "#,

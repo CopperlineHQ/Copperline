@@ -223,9 +223,9 @@ fn resolve_bundled_fmv_rom(cfg: &mut Config) -> Result<()> {
     }
     let rom = crate::romsearch::find_bundled_fmv().ok_or_else(|| {
         anyhow!(
-            "the CD32 profile's bundled FMV ROM was not found. Set fmv_rom = \"\" \
-             to leave the module unfitted, name another 256 KiB FMV ROM, or install \
-             {} next to the binary or under share/copperline/fmv/.",
+            "fmv = true but the bundled FMV ROM was not found. Drop fmv = true to \
+             leave the module unfitted, name another 256 KiB FMV ROM with fmv_rom, \
+             or install {} next to the binary or under share/copperline/fmv/.",
             crate::romsearch::FMV_ROM_FILE
         )
     })?;

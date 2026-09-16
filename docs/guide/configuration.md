@@ -132,8 +132,8 @@ described with their `[audio]`, `[serial]`, `[parallel]`, `[a2065]`, and
 rom = "KICK13.ROM"            # Kickstart image, 512 KiB (or a 256 KiB 1.x part)
 extended_rom = "cd32ext.rom"  # optional: CDTV (256K at $F00000) or
                               # CD32 (512K at $E00000) extended ROM
-# fmv_rom = "another.rom"     # CD32: bundled open FMV ROM by default
-# fmv_rom = ""                # explicitly leave the module unfitted
+# fmv = true                  # CD32: fit the FMV module (bundled open ROM)
+# fmv_rom = "another.rom"     # CD32: fit the FMV module with this ROM
 # identify = false            # drop the Copperline identification board
                               # from the Zorro chain (default: present)
 ```
@@ -166,13 +166,16 @@ file boots identically. A 256 KiB Kickstart 1.x part is mirrored across the
 pairs for the 32-bit machines are not accepted; use the matching single-file
 image instead.
 
-`fmv_rom` fits the CD32 Full Motion Video module and is valid only with the
-`CD32` machine profile. The profile loads Copperline's bundled open-source 256 KiB
-replacement ROM by default. Supplying a path overrides it with a custom image (such
-as the Commodore v40.30 ROM); `fmv_rom = ""` leaves the cartridge slot empty. The
-module autoconfigures ahead of the standard Zorro chain, driving the CL450 video
-and L64111 MPEG Layer II audio decoders through guest code. The launcher's **ROM**
-tab exposes this setting as **FMV module ROM**.
+`fmv = true` fits the CD32 Full Motion Video module with Copperline's bundled
+open-source 256 KiB replacement ROM, and `fmv_rom = "path"` fits it with a
+custom image (such as the Commodore v40.30 ROM) instead; both are valid only
+with the `CD32` machine profile. The cartridge slot is empty by default: a
+stock CD32 has no module, and fitting one changes the guest's memory layout
+and boot timing enough to alter titles that never used it (`fmv_rom = ""`, the
+older spelling of an empty slot, is still accepted). The module autoconfigures
+ahead of the standard Zorro chain, driving the CL450 video and L64111 MPEG
+Layer II audio decoders through guest code. The launcher's **ROM** tab exposes
+this setting as **FMV module ROM**.
 
 The open ROM includes a clean-room `cd32mpeg.device` and `videocd.library` compatible
 with CD32 Kickstart 3.1. The library identifies inserted Video CDs and parses their
@@ -2376,9 +2379,9 @@ and P/Q parity) when an Akiko client requests raw sectors. CD32 discs that
 use a CDTV trademark boot record for backward-compatible startup are accepted
 by the same path.
 
-CD32 FMV-enhanced titles use the same Akiko media path and the CD32 profile
-fits the bundled open module automatically. Naming top-level `fmv_rom`
-overrides that image; an empty value removes the module. Under CD32 Kickstart,
+CD32 FMV-enhanced titles use the same Akiko media path once the module is
+fitted: top-level `fmv = true` fits the bundled open module, and naming
+`fmv_rom` fits another image. Under CD32 Kickstart,
 raw Video CD movie discs auto-launch the open cartridge's track player; use
 up/down, Red, and Blue to select, play, and stop. The AROS system-ROM path
 deliberately skips the cartridge diagnostic and therefore does not install

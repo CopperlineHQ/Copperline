@@ -237,12 +237,13 @@ model = "68000"
 # main rom.
 # extended_rom = "cdtv-extended.rom"
 
-# CD32 Full Motion Video module ROM. The CD32 profile automatically loads
-# Copperline's bundled open-source 256 KiB FMV ROM by default. Specify a custom
-# ROM file (such as the Commodore v40.30 ROM) to override it, or set to an
-# empty string to emulate a CD32 without the FMV cartridge.
+# CD32 Full Motion Video module. The cartridge slot is empty by default, as
+# on a stock CD32 (fitting the module moves the guest's memory layout and
+# boot timing). fmv = true fits it with Copperline's bundled open-source
+# 256 KiB FMV ROM; fmv_rom names a custom ROM file (such as the Commodore
+# v40.30 ROM) to fit instead.
+# fmv = true
 # fmv_rom = "another-fmv.rom"
-# fmv_rom = ""
 
 
 # CD image (a cue sheet, single- or multi-file, with MODE1/2048, MODE1/2352,

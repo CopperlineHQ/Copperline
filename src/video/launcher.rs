@@ -592,12 +592,14 @@ pub struct MachineSetup {
     mb_ram: usize,
     accel_ram: usize,
     z3_ram: usize,
-    // ROM (None = bundled default for the boot and CD32 FMV ROMs)
+    // ROM (None = bundled default for the boot ROM, and for the CD32 FMV
+    // ROM once the module is fitted)
     rom: Option<PathBuf>,
     extended_rom: Option<PathBuf>,
     fmv_rom: Option<PathBuf>,
-    /// An explicit `fmv_rom = ""` leaves the CD32 cartridge slot empty.
-    fmv_rom_disabled: bool,
+    /// Whether the CD32 FMV cartridge is fitted (`fmv = true` or a named
+    /// `fmv_rom`); the slot is empty by default.
+    fmv_fitted: bool,
     // Floppy
     floppy_drives: u8,
     /// `[floppy] speed`: a percentage (100/200/400/800) or 0 for turbo.
@@ -1219,7 +1221,7 @@ impl MachineSetup {
         if model != Some(MachineModel::Cd32) {
             self.cd32_nvram = None;
             self.fmv_rom = None;
-            self.fmv_rom_disabled = false;
+            self.fmv_fitted = false;
         }
         // The motherboard SCSI leaves with the motherboard; the drives stay and
         // land on the default Zorro board instead.
@@ -1559,18 +1561,18 @@ impl MachineSetup {
         }
     }
 
-    /// Whether the CD32 FMV cartridge was explicitly removed rather than
-    /// left to inherit the bundled open ROM.
-    pub fn fmv_rom_disabled(&self) -> bool {
-        self.fmv_rom_disabled
+    /// Whether the CD32 FMV cartridge is fitted, with the bundled open ROM
+    /// or a named one.
+    pub fn fmv_fitted(&self) -> bool {
+        self.fmv_fitted
     }
 
-    /// Switch the CD32 FMV row between the bundled module and an empty slot.
-    /// A named replacement is removed along with the module; the next press
-    /// restores the bundled default.
+    /// Switch the CD32 FMV row between an empty slot and the module with
+    /// the bundled open ROM. A named replacement is removed along with the
+    /// module; fitting it again starts from the bundled ROM.
     pub fn toggle_fmv_module(&mut self) {
         self.fmv_rom = None;
-        self.fmv_rom_disabled = !self.fmv_rom_disabled;
+        self.fmv_fitted = !self.fmv_fitted;
     }
 
     /// The current path of a path field, if any.
@@ -2108,7 +2110,7 @@ impl MachineSetup {
             F::ExtendedRom => self.extended_rom = Some(path),
             F::FmvRom => {
                 self.fmv_rom = Some(path);
-                self.fmv_rom_disabled = false;
+                self.fmv_fitted = true;
             }
             F::Df0Image => self.set_floppy(0, path),
             F::Df1Image => self.set_floppy(1, path),
@@ -2190,10 +2192,9 @@ impl MachineSetup {
         match field {
             F::Rom => self.rom = None,
             F::ExtendedRom => self.extended_rom = None,
-            F::FmvRom => {
-                self.fmv_rom = None;
-                self.fmv_rom_disabled = false;
-            }
+            // Clearing the ROM keeps the module fitted, on the bundled ROM;
+            // the slot itself is `toggle_fmv_module`'s business.
+            F::FmvRom => self.fmv_rom = None,
             F::Mt32ControlRom => self.mt32_control_rom = None,
             #[cfg(feature = "coppersynth")]
             F::CsynthSoundfont => self.csynth_soundfont = None,
