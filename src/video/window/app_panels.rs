@@ -413,15 +413,18 @@ impl App {
     /// the menu alike: pick a file, refit the synth around it.
     #[cfg(feature = "coppersynth")]
     pub(super) fn load_csynth_soundfont(&mut self) {
-        let picked = super::native_dialog::pick(|| {
-            rfd::FileDialog::new()
-                .set_title("Choose a SoundFont")
-                .add_filter("SoundFonts", &["sf2", "SF2", "zip", "ZIP"])
-                .pick_file()
+        let dialog = PickRequest::file("Choose a SoundFont")
+            .filter("SoundFonts", &["sf2", "SF2", "zip", "ZIP"]);
+        self.pick_path(dialog, |app, picked| {
+            if let Some(path) = picked {
+                app.fit_csynth_soundfont(path);
+            }
         });
-        let Some(path) = picked else {
-            return;
-        };
+    }
+
+    /// Refit the synth around the soundfont its picker was given.
+    #[cfg(feature = "coppersynth")]
+    fn fit_csynth_soundfont(&mut self, path: PathBuf) {
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -453,15 +456,17 @@ impl App {
         } else {
             "Choose an MT-32 PCM ROM"
         };
-        let picked = super::native_dialog::pick(|| {
-            rfd::FileDialog::new()
-                .set_title(title)
-                .add_filter("ROM images", &["rom", "ROM", "bin", "BIN"])
-                .pick_file()
+        let dialog = PickRequest::file(title).filter("ROM images", &["rom", "ROM", "bin", "BIN"]);
+        self.pick_path(dialog, move |app, picked| {
+            if let Some(path) = picked {
+                app.fit_mt32_rom(control, path);
+            }
         });
-        let Some(path) = picked else {
-            return;
-        };
+    }
+
+    /// Fit the half of the MT-32's firmware its picker was given.
+    #[cfg(feature = "mt32")]
+    fn fit_mt32_rom(&mut self, control: bool, path: PathBuf) {
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())

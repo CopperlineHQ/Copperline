@@ -21,7 +21,7 @@ impl App {
     /// way to name a state, so that opens instead.
     pub(super) fn open_states_browser(&mut self) {
         let Some(dir) = self.states_dir() else {
-            self.load_state_from_dialog(None);
+            self.load_state_from_dialog();
             return;
         };
         self.open_states_browser_at(&dir);
@@ -222,7 +222,7 @@ impl App {
             }
             ui::StatesAction::Browse => {
                 self.ui.panel = None;
-                self.load_state_from_dialog(event_loop);
+                self.load_state_from_dialog();
             }
         }
     }

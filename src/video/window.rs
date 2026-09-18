@@ -1393,6 +1393,10 @@ pub struct App {
     /// thread would look like a hang, so it runs on a worker and the loop
     /// stays awake to collect it.
     image_job: Option<ImageJob>,
+    /// A native file picker that is up as a sheet, with what its caller
+    /// wants done with the answer. Only macOS ever has one (see
+    /// `native_dialog`); the machine is held while it is there.
+    pending_pick: Option<native_dialog::PendingPick>,
     /// Per-drive disk-swap playlists: the ordered image paths the user can
     /// cycle through for each drive with the disk-swap shortcut. Lets a
     /// multi-disk demo run on a single drive.
@@ -2841,6 +2845,7 @@ impl App {
             #[cfg(feature = "game-library")]
             whdload_job: None,
             image_job: None,
+            pending_pick: None,
             disk_playlists,
             disk_write_protected,
             disk_playlist_index: [0; 4],
@@ -5858,7 +5863,16 @@ impl ApplicationHandler for App {
             let files = std::mem::take(&mut self.pending_dropped_files);
             self.handle_dropped_files(files);
         }
-        let running = self.powered_on && !self.cpu_halted && !self.paused;
+        // A picker sheet that was dismissed is answered here, ahead of the
+        // run state: what was waiting on it may power the machine on (a
+        // loaded state, a configuration that runs at once).
+        self.poll_native_pick();
+        // While a sheet is still up the machine is held, as it is for the
+        // life of a blocking picker on the other hosts. A netplay session is
+        // the exception: the peer has to be serviced whatever this side is
+        // looking at.
+        let picking = self.native_pick_pending();
+        let running = self.machine_advances();
         // While a transient overlay is up, keep the loop awake (and, when
         // the machine is paused/off, request repaints) so the message
         // fades on schedule instead of freezing on the last drawn frame.
@@ -5925,7 +5939,10 @@ impl ApplicationHandler for App {
         let downloading = false;
         // A status line waiting to clear itself keeps the loop awake too,
         // or it would sit there until something else woke it.
-        let writing_image = self.image_job.is_some() || downloading || self.status_until.is_some();
+        // So does a picker sheet: its answer is collected by this loop, and
+        // with the machine held nothing else would wake it.
+        let writing_image =
+            self.image_job.is_some() || downloading || self.status_until.is_some() || picking;
         // Likewise the caret: it has no event of its own either, and a panel
         // with a box open in it is otherwise perfectly still.
         let typing = self.blink_caret();
@@ -6008,7 +6025,9 @@ impl ApplicationHandler for App {
         } else {
             self.pump_joystick_input();
         }
-        if self.netplay.is_none() {
+        // The window under a sheet takes no pointer or key input; the pad
+        // is not the window system's to withhold, so it is withheld here.
+        if self.netplay.is_none() && !picking {
             self.drive_interface_with_pad(event_loop);
         }
         if self.quit_requested {
@@ -7526,6 +7545,7 @@ mod app_nav;
 mod app_netplay;
 mod app_states;
 use app_nav::{cycle_hold_delay, PadNav};
+use native_dialog::PickRequest;
 mod adapter;
 mod app_panels;
 mod app_session;
