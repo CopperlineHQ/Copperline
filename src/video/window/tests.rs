@@ -12580,7 +12580,10 @@ fn netplay_gui_run_rejects_errors_and_preserves_the_current_machine() {
     app.machine_config.audio.output_enabled = Some(false);
     app.open_launcher();
     let before = app.emu.netplay_snapshot().unwrap();
-    app.activate_ui_control(UiControl::LauncherToggle(F::NetplayEnabled));
+    app.activate_ui_control(UiControl::LauncherCycle {
+        field: F::NetplayEnabled,
+        forward: true,
+    });
     app.activate_ui_control(UiControl::LauncherNetplayAction(F::NetplayNewCode));
     assert_eq!(app.launcher_state().unwrap().netplay.code.len(), 32);
     app.activate_ui_control(UiControl::LauncherNetplayEdit(F::NetplayPeer));
@@ -12608,7 +12611,10 @@ fn assert_netplay_gui_rejects_endpoint(mut app: super::App, endpoint: &str) {
     use crate::video::launcher::{LauncherField as F, StatusKind};
     app.machine_config.audio.output_enabled = Some(false);
     app.open_launcher();
-    app.activate_ui_control(UiControl::LauncherToggle(F::NetplayEnabled));
+    app.activate_ui_control(UiControl::LauncherCycle {
+        field: F::NetplayEnabled,
+        forward: true,
+    });
     let state = app.launcher_state_mut().unwrap();
     state.netplay.bind = "127.0.0.1:0".into();
     state.netplay.peer = "127.0.0.1:19732".into();
@@ -12658,7 +12664,10 @@ fn netplay_gui_peers_connect_and_can_return_to_setup_and_retry() -> anyhow::Resu
             for (player, app) in apps.iter_mut().enumerate() {
                 app.machine_config.audio.output_enabled = Some(false);
                 app.open_launcher();
-                app.activate_ui_control(UiControl::LauncherToggle(F::NetplayEnabled));
+                app.activate_ui_control(UiControl::LauncherCycle {
+                    field: F::NetplayEnabled,
+                    forward: true,
+                });
                 let state = app.launcher_state_mut().unwrap();
                 state.netplay.bind = addresses[player].to_string();
                 state.netplay.peer = addresses[1 - player].to_string();
@@ -13014,7 +13023,10 @@ fn netplay_gui_spectator_follows_the_players_without_input_or_disk_controls() ->
             for (player, app) in apps.iter_mut().take(2).enumerate() {
                 app.machine_config.audio.output_enabled = Some(false);
                 app.open_launcher();
-                app.activate_ui_control(UiControl::LauncherToggle(F::NetplayEnabled));
+                app.activate_ui_control(UiControl::LauncherCycle {
+                    field: F::NetplayEnabled,
+                    forward: true,
+                });
                 let state = app.launcher_state_mut().unwrap();
                 state.netplay.bind = addresses[player].to_string();
                 state.netplay.peer = addresses[1 - player].to_string();
@@ -13055,7 +13067,10 @@ fn netplay_gui_spectator_follows_the_players_without_input_or_disk_controls() ->
                 let app = &mut apps[2];
                 app.machine_config.audio.output_enabled = Some(false);
                 app.open_launcher();
-                app.activate_ui_control(UiControl::LauncherToggle(F::NetplayEnabled));
+                app.activate_ui_control(UiControl::LauncherCycle {
+                    field: F::NetplayEnabled,
+                    forward: true,
+                });
                 let state = app.launcher_state_mut().unwrap();
                 state.netplay.spectator = true;
                 state.netplay.bind = addresses[2].to_string();

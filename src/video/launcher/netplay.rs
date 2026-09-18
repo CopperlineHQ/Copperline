@@ -296,6 +296,7 @@ impl NetplaySetup {
 
     pub fn value(&self, field: F) -> String {
         match field {
+            F::NetplayEnabled => if self.enabled { "Enabled" } else { "Disabled" }.into(),
             F::NetplayMode => if self.internet {
                 "Internet"
             } else {
@@ -423,6 +424,17 @@ impl LauncherState {
     pub fn toggle_netplay(&mut self) {
         self.netplay.enabled = !self.netplay.enabled;
         self.prepare_netplay_machine();
+    }
+
+    /// Step a Netplay row. The Netplay row itself is the one that reaches
+    /// past the page: enabling it settles the machine on the other pages
+    /// (`prepare_netplay_machine`), which `NetplaySetup` cannot see.
+    pub fn cycle_netplay(&mut self, field: F, forward: bool) {
+        if field == F::NetplayEnabled {
+            self.toggle_netplay();
+        } else {
+            self.netplay.cycle(field, forward);
+        }
     }
 
     pub fn prepare_netplay_machine(&mut self) {
