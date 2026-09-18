@@ -326,7 +326,6 @@ snapshot:
   it and pushes the restored machine's DTR/RTS and line rate onto it),
   and an adapter pulled mid-run reads as an unplugged cable. Physical
   floppy drives also require wall-clock pacing.
-  or services. Physical floppy drives also require wall-clock pacing.
 - The host clipboard (`[clipboard] share`, `clipboard.rs`) is live host
   state. It reaches the guest only through the windowed session's poll or
   a control-protocol `clipboard.set`, never from the board itself, so a
