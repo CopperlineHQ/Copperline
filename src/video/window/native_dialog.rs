@@ -231,10 +231,11 @@ impl PickRequest {
 
 /// A picker that has been opened and not yet answered.
 #[cfg(any(target_os = "macos", test))]
-type PickFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Option<Vec<PathBuf>>>>>;
+pub(super) type PickFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Option<Vec<PathBuf>>>>>;
 
 /// What a caller wants done with a picker's answer; `None` is a cancel.
-type PickThen = Box<dyn FnOnce(&mut App, Option<Vec<PathBuf>>)>;
+pub(super) type PickThen = Box<dyn FnOnce(&mut App, Option<Vec<PathBuf>>)>;
 
 /// A sheet that is up, and what is waiting on it.
 ///
@@ -280,21 +281,29 @@ impl App {
             );
             return;
         }
-        self.suspend_live_audio_for_host_io();
         #[cfg(target_os = "macos")]
         {
             self.open_deferred_pick(request.open_deferred(), Box::new(then));
         }
         #[cfg(not(target_os = "macos"))]
         {
+            // Nothing else runs on this thread until the picker answers, so
+            // the mute needs no state behind it.
+            self.suspend_live_audio_for_host_io();
             let picked = pick(move || request.run_blocking());
             self.finish_pick(Box::new(then), picked);
         }
     }
 
+    /// Put a sheet up. The loop runs on under it, so its mute is not a
+    /// one-off call that the next `sync_live_audio_suspension` -- a control
+    /// client or a debugger changing the run state -- would undo: the sheet
+    /// is part of what that predicate reads (`machine_advances`), and stays
+    /// so until `finish_pick`.
     #[cfg(any(target_os = "macos", test))]
-    fn open_deferred_pick(&mut self, picked: PickFuture, then: PickThen) {
+    pub(super) fn open_deferred_pick(&mut self, picked: PickFuture, then: PickThen) {
         self.pending_pick = Some(PendingPick { picked, then });
+        self.sync_live_audio_suspension();
     }
 
     /// Whether a picker sheet is up. The machine is held for as long as one

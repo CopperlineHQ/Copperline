@@ -1557,7 +1557,10 @@ impl App {
             || self.warp_boot.as_ref().is_some_and(|g| g.engaged)
             || !self.warp_holds.is_empty()
             || self.netplay.as_ref().is_some_and(|s| s.catching_up());
-        let suspended = !self.powered_on || self.cpu_halted || self.paused || warp_muted;
+        // A machine standing behind a picker sheet is as silent as a paused
+        // one, for as long as the sheet is up: `machine_advances` is the
+        // run state with the sheet counted in.
+        let suspended = !self.machine_advances() || warp_muted;
         self.emu.set_live_audio_suspended(suspended);
     }
 
