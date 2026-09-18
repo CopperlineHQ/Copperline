@@ -26,24 +26,19 @@ impl App {
             ));
             return;
         }
-        self.suspend_live_audio_for_host_io();
-        let picked = super::native_dialog::pick(move || {
-            rfd::FileDialog::new()
-                .set_title(format!("Load DF{drive_idx} disk image(s)"))
-                .add_filter("Amiga disk images", crate::floppy::IMAGE_EXTENSIONS)
-                .pick_files()
-        });
-
-        // The modal file dialog blocks this (the main/emulation) thread, so
-        // wall-clock time advanced while emulated time stood still. Re-baseline
-        // the pacing anchor whether or not a file was chosen, otherwise the
+        // The machine stands still while the picker is up, so wall-clock time
+        // advances while emulated time does not. `pick_paths` re-baselines the
+        // pacing anchor whether or not a file was chosen, otherwise the
         // pacer would fast-forward to catch up and corrupt pacing for the
         // freshly inserted disk. insert_disk_image -> bus floppy
         // insert_disk_image already asserts the disk-change/eject signal.
-        if let Some(paths) = picked {
-            self.insert_disk_playlist(drive_idx, paths);
-        }
-        self.finish_host_io_pause();
+        let dialog = PickRequest::files(format!("Load DF{drive_idx} disk image(s)"))
+            .filter("Amiga disk images", crate::floppy::IMAGE_EXTENSIONS);
+        self.pick_paths(dialog, move |app, picked| {
+            if let Some(paths) = picked {
+                app.insert_disk_playlist(drive_idx, paths);
+            }
+        });
     }
 
     /// Replace a drive's swap playlist with `paths` and insert the first
@@ -132,19 +127,14 @@ impl App {
     /// Pick a CD image and mount it with the media-change notification,
     /// ejecting any current disc first.
     pub(super) fn load_cd_from_dialog(&mut self) {
-        self.suspend_live_audio_for_host_io();
-        let picked = super::native_dialog::pick(|| {
-            rfd::FileDialog::new()
-                .set_title("Load CD image")
-                .add_filter("CD images", &["cue", "iso", "nrg", "chd"])
-                .pick_file()
+        // Pacing is re-baselined after the picker, as for floppies.
+        let dialog =
+            PickRequest::file("Load CD image").filter("CD images", &["cue", "iso", "nrg", "chd"]);
+        self.pick_path(dialog, |app, picked| {
+            if let Some(path) = picked {
+                app.insert_cd_image_from_path(&path);
+            }
         });
-
-        // Re-baseline pacing after the modal dialog, as for floppies.
-        if let Some(path) = picked {
-            self.insert_cd_image_from_path(&path);
-        }
-        self.finish_host_io_pause();
     }
 
     /// Mount a CD image with the media-change notification, ejecting any
@@ -173,29 +163,24 @@ impl App {
             self.show_osd("PCMCIA: no slot on this machine");
             return;
         }
-        self.suspend_live_audio_for_host_io();
-        let picked = super::native_dialog::pick(|| {
-            rfd::FileDialog::new()
-                .set_title("Insert PCMCIA CF card image")
-                .add_filter("Hard-disk images", &["hdf", "hdz", "img", "chd"])
-                .pick_file()
-        });
-        if let Some(path) = picked {
+        let dialog = PickRequest::file("Insert PCMCIA CF card image")
+            .filter("Hard-disk images", &["hdf", "hdz", "img", "chd"]);
+        self.pick_path(dialog, |app, picked| {
+            let Some(path) = picked else { return };
             match crate::pcmcia::CfCard::open(&path) {
                 Ok(card) => {
                     let card = crate::pcmcia::PcmciaCard::cf(card);
                     info!("pcmcia: {}", card.describe());
-                    self.emu.bus_mut().pcmcia_insert(card);
-                    self.show_osd(format!("PCMCIA: {}", display_file_name(&path)));
-                    self.request_redraw();
+                    app.emu.bus_mut().pcmcia_insert(card);
+                    app.show_osd(format!("PCMCIA: {}", display_file_name(&path)));
+                    app.request_redraw();
                 }
                 Err(e) => {
                     warn!("pcmcia: card image open failed ({}): {e:#}", path.display());
-                    self.show_osd("PCMCIA: card image open failed (see log)");
+                    app.show_osd("PCMCIA: card image open failed (see log)");
                 }
             }
-        }
-        self.finish_host_io_pause();
+        });
     }
 
     /// Pull the card out of the PCMCIA slot; says whether there was one.

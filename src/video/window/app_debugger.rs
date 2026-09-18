@@ -741,25 +741,21 @@ impl App {
                 }
             })
             .collect();
-        self.suspend_live_audio_for_host_io();
         let file_name = format!("{}.png", if name.is_empty() { "resource" } else { &name });
-        let picked = super::native_dialog::pick(move || {
-            rfd::FileDialog::new()
-                .set_title("Save debug resource")
-                .set_file_name(file_name)
-                .add_filter("PNG image", &["png"])
-                .save_file()
-        });
-        if let Some(path) = picked {
-            match self.emu.export_uaelib_resource(resource.address, &path) {
-                Ok(_) => self.show_osd(format!("Saved {}", display_file_name(&path))),
+        let dialog = PickRequest::save("Save debug resource")
+            .file_name(file_name)
+            .filter("PNG image", &["png"]);
+        let address = resource.address;
+        self.pick_path(dialog, move |app, picked| {
+            let Some(path) = picked else { return };
+            match app.emu.export_uaelib_resource(address, &path) {
+                Ok(_) => app.show_osd(format!("Saved {}", display_file_name(&path))),
                 Err(error) => {
                     warn!("resource export failed ({}): {error:#}", path.display());
-                    self.show_osd("Resource export failed (see log)");
+                    app.show_osd("Resource export failed (see log)");
                 }
             }
-        }
-        self.finish_host_io_pause();
+        });
     }
 
     /// The palette a bitmap preview is decoded with: the first palette
@@ -1621,28 +1617,25 @@ impl App {
         // bytes actually came from on a 24-bit model, and a 32-bit dump
         // above the 24-bit space passes through untouched on 020+.
         let addr = addr & self.emu.machine.ui_addr_mask();
-        self.suspend_live_audio_for_host_io();
         let file_name = format!("mem-{addr:06X}-{len:X}.bin");
-        let picked = super::native_dialog::pick(move || {
-            rfd::FileDialog::new()
-                .set_title("Save memory region")
-                .set_file_name(file_name)
-                .save_file()
-        });
-        if let Some(path) = picked {
-            let bytes = self.emu.machine.debug_read_memory(addr, len as usize);
+        let dialog = PickRequest::save("Save memory region").file_name(file_name);
+        // Read once the picker is answered, as before. The machine is held
+        // while it is up (see `machine_advances`), so outside a netplay
+        // session these are the bytes that were there when it was asked for.
+        self.pick_path(dialog, move |app, picked| {
+            let Some(path) = picked else { return };
+            let bytes = app.emu.machine.debug_read_memory(addr, len as usize);
             match std::fs::write(&path, &bytes) {
-                Ok(()) => self.show_osd(format!(
+                Ok(()) => app.show_osd(format!(
                     "Saved ${addr:06X}+${len:X} to {}",
                     display_file_name(&path)
                 )),
                 Err(e) => {
                     warn!("memory region save failed ({}): {e:#}", path.display());
-                    self.show_osd("Memory save failed (see log)");
+                    app.show_osd("Memory save failed (see log)");
                 }
             }
-        }
-        self.finish_host_io_pause();
+        });
     }
 
     /// Report the last instruction that wrote the word at the entry

@@ -5324,6 +5324,49 @@ fn host_io_audio_suspension_restores_current_run_state() {
     assert_eq!(states.borrow().last(), Some(&true));
 }
 
+/// A picker sheet's mute has to outlive every later synchronisation, not
+/// just be set once: a control client or a debugger changing the run state
+/// while the sheet is up re-reads the predicate, and on a running machine
+/// that used to come out as "not suspended" and bring the sink back before
+/// the sheet had closed.
+#[test]
+fn a_picker_sheet_keeps_live_audio_suspended_across_later_synchronisation() {
+    let states = Rc::new(RefCell::new(Vec::new()));
+    let mut app = test_app_with_audio(Box::new(SuspensionSink {
+        states: Rc::clone(&states),
+    }));
+    app.powered_on = true;
+    app.sync_live_audio_suspension();
+    assert_eq!(states.borrow().last(), Some(&false));
+
+    let answer = Rc::new(RefCell::new(None));
+    let slot = Rc::clone(&answer);
+    let picked: super::native_dialog::PickFuture =
+        Box::pin(std::future::poll_fn(move |_| {
+            match slot.borrow_mut().take() {
+                Some(answer) => std::task::Poll::Ready(answer),
+                None => std::task::Poll::Pending,
+            }
+        }));
+    app.open_deferred_pick(picked, Box::new(|_, _| {}));
+    assert_eq!(states.borrow().last(), Some(&true), "the sheet mutes");
+
+    // What a CCP or GDB run-state change does while the sheet is up.
+    app.sync_live_audio_suspension();
+    assert_eq!(states.borrow().last(), Some(&true), "and stays muted");
+    app.toggle_pause();
+    app.toggle_pause();
+    assert_eq!(
+        states.borrow().last(),
+        Some(&true),
+        "through a pause and back"
+    );
+
+    *answer.borrow_mut() = Some(None);
+    app.poll_native_pick();
+    assert_eq!(states.borrow().last(), Some(&false), "until it closes");
+}
+
 #[test]
 fn restoring_over_placeholder_detected_only_for_the_silent_config_screen() {
     // The exact configuration-screen placeholder: powered off, launcher

@@ -77,7 +77,6 @@ impl App {
             .and_then(|s| s.setup.path(field))
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
             .or_else(|| Self::media_start_dir(field));
-        self.suspend_live_audio_for_host_io();
         // A hard-drive slot can be a raw image or a host directory (built
         // into an in-memory FFS/OFS volume at open time; see
         // `HardDriveImage`, shared by IdeDrive/ScsiDisk/lide's own open
@@ -111,14 +110,13 @@ impl App {
                 | LauncherField::CopperhfUnit6
                 | LauncherField::Sf2000SdCard
         );
-        let title = if hard_drive_slot && cfg!(target_os = "macos") {
-            "Select file or folder"
+        let dialog = if hard_drive_slot && PickRequest::FILE_OR_FOLDER_TAKES_FOLDERS {
+            PickRequest::file_or_folder("Select file or folder")
         } else {
-            "Select file"
+            PickRequest::file("Select file")
         };
-        let picked = super::native_dialog::pick(move || {
-            let mut dialog = rfd::FileDialog::new().set_title(title);
-            dialog = match field {
+        let dialog = {
+            match field {
                 LauncherField::Rom
                 | LauncherField::ExtendedRom
                 | LauncherField::FmvRom
@@ -131,37 +129,33 @@ impl App {
                 | LauncherField::Mt32PcmRom => {
                     // Both cases spelled out: ROM dumps are as often shouted as
                     // not, and some hosts match the filter case-sensitively.
-                    dialog.add_filter("ROM images", &["rom", "ROM", "bin", "BIN"])
+                    dialog.filter("ROM images", &["rom", "ROM", "bin", "BIN"])
                 }
                 LauncherField::Df0Image
                 | LauncherField::Df1Image
                 | LauncherField::Df2Image
                 | LauncherField::Df3Image => {
-                    dialog.add_filter("Floppy images", crate::floppy::IMAGE_EXTENSIONS)
+                    dialog.filter("Floppy images", crate::floppy::IMAGE_EXTENSIONS)
                 }
                 // Only formats CdImage::load takes: a cue sheet, a bare ISO,
                 // an NRG, or a CHD (a raw .bin is a cue sheet's payload, not loadable
                 // alone).
-                LauncherField::CdImage => {
-                    dialog.add_filter("CD images", &["cue", "iso", "nrg", "chd"])
-                }
+                LauncherField::CdImage => dialog.filter("CD images", &["cue", "iso", "nrg", "chd"]),
                 // A WHDLoad package however it arrived: as distributed
                 // (`.lha`), zipped, or as a bare `.slave` picked inside an
                 // already-extracted one (stored as its directory, which is
                 // what the stager mounts). Spelled in both cases like the ROM
                 // filters, since the dialog matches exactly.
-                LauncherField::WhdloadGame => dialog.add_filter(
+                LauncherField::WhdloadGame => dialog.filter(
                     "WHDLoad packages",
                     &[
                         "lha", "LHA", "lzh", "LZH", "zip", "ZIP", "slave", "Slave", "slav", "Slav",
                     ],
                 ),
-                LauncherField::Cd32Nvram => {
-                    dialog.add_filter("NVRAM images", &["bin", "nv", "sav"])
-                }
+                LauncherField::Cd32Nvram => dialog.filter("NVRAM images", &["bin", "nv", "sav"]),
                 #[cfg(feature = "coppersynth")]
                 LauncherField::CsynthSoundfont => {
-                    dialog.add_filter("SoundFonts", &["sf2", "SF2", "zip", "ZIP"])
+                    dialog.filter("SoundFonts", &["sf2", "SF2", "zip", "ZIP"])
                 }
                 // SCSI, IDE, and lide drive slots all take hard disks or CD
                 // images (a cue/iso/nrg/chd attaches a CD-ROM drive at that slot,
@@ -179,8 +173,8 @@ impl App {
                 | LauncherField::LideDrive1
                 | LauncherField::LideDrive2
                 | LauncherField::LideDrive3 => dialog
-                    .add_filter("Hard disk images", &["hdf", "hdz", "img", "bin", "chd"])
-                    .add_filter("CD images", &["cue", "iso", "nrg", "chd"]),
+                    .filter("Hard disk images", &["hdf", "hdz", "img", "bin", "chd"])
+                    .filter("CD images", &["cue", "iso", "nrg", "chd"]),
                 // copperhf.device serves hard disks only -- no ATAPI/SCSI-CDROM
                 // emulation behind it (`copperhf_drive_image` rejects a CD
                 // extension) -- so its units get no CD filter, unlike the slots
@@ -192,45 +186,30 @@ impl App {
                 | LauncherField::CopperhfUnit4
                 | LauncherField::CopperhfUnit5
                 | LauncherField::CopperhfUnit6 => {
-                    dialog.add_filter("Hard disk images", &["hdf", "hdz", "img", "bin", "chd"])
+                    dialog.filter("Hard disk images", &["hdf", "hdz", "img", "bin", "chd"])
                 }
                 // The SF2000 SD card controller is hard disks only too --
                 // it speaks the SD card command set, not ATAPI/SCSI-CDROM
                 // (see `copperhf_drive_image`, reused for `[sf2000sd] card`).
                 LauncherField::Sf2000SdCard => {
-                    dialog.add_filter("Hard disk images", &["hdf", "hdz", "img", "bin", "chd"])
+                    dialog.filter("Hard disk images", &["hdf", "hdz", "img", "bin", "chd"])
                 }
-                _ => dialog.add_filter("Hard disk images", &["hdf", "hdz", "img", "bin", "chd"]),
-            };
-            if let Some(dir) = start_dir {
-                dialog = dialog.set_directory(dir);
+                _ => dialog.filter("Hard disk images", &["hdf", "hdz", "img", "bin", "chd"]),
             }
-            #[cfg(target_os = "macos")]
-            let picked = if hard_drive_slot {
-                dialog.pick_file_or_folder()
-            } else {
-                dialog.pick_file()
-            };
-            #[cfg(not(target_os = "macos"))]
-            let picked = {
-                let _ = hard_drive_slot;
-                dialog.pick_file()
-            };
-            picked
-        });
-        if let Some(mut path) = picked {
+        };
+        self.pick_path(dialog.directory(start_dir), move |app, picked| {
+            let Some(mut path) = picked else { return };
             if field == LauncherField::WhdloadGame {
                 path = whdload_game_config_path(path);
             }
-            if let Some(state) = self.launcher_state_mut() {
+            if let Some(state) = app.launcher_state_mut() {
                 // A pending volume-name edit (on this or another drive row)
                 // would otherwise be left visually focused after the dialog.
                 state.edit_cancel();
                 state.setup.set_path(field, path);
                 state.status = None;
             }
-        }
-        self.finish_host_io_pause();
+        });
     }
 
     /// The directory a dialog opens at when its field is empty, by what the
@@ -290,22 +269,15 @@ impl App {
                     .or_else(|| s.setup.path(field).map(std::path::Path::to_path_buf))
             })
             .or_else(crate::paths::harddrives_dir);
-        self.suspend_live_audio_for_host_io();
-        let picked = super::native_dialog::pick(move || {
-            let mut dialog = rfd::FileDialog::new().set_title("Select host directory");
-            if let Some(dir) = start_dir {
-                dialog = dialog.set_directory(dir);
-            }
-            dialog.pick_folder()
-        });
-        if let Some(path) = picked {
-            if let Some(state) = self.launcher_state_mut() {
+        let dialog = PickRequest::folder("Select host directory").directory(start_dir);
+        self.pick_path(dialog, move |app, picked| {
+            let Some(path) = picked else { return };
+            if let Some(state) = app.launcher_state_mut() {
                 state.edit_cancel();
                 state.setup.set_path(field, path);
                 state.status = None;
             }
-        }
-        self.finish_host_io_pause();
+        });
     }
 
     /// Save-file picker for a path field that names a host file to create or
@@ -317,7 +289,6 @@ impl App {
             .launcher_state()
             .and_then(|s| s.setup.path(field))
             .map(|p| p.to_path_buf());
-        self.suspend_live_audio_for_host_io();
         // Seed with the existing path's directory and name, else the default.
         let start_dir = current
             .as_ref()
@@ -330,21 +301,17 @@ impl App {
             .and_then(|n| n.to_str())
             .unwrap_or(default_name)
             .to_string();
-        let picked = super::native_dialog::pick(move || {
-            let mut dialog = rfd::FileDialog::new().set_title("Choose output file");
-            if let Some(dir) = start_dir {
-                dialog = dialog.set_directory(dir);
-            }
-            dialog.set_file_name(name).save_file()
-        });
-        if let Some(path) = picked {
-            if let Some(state) = self.launcher_state_mut() {
+        let dialog = PickRequest::save("Choose output file")
+            .directory(start_dir)
+            .file_name(name);
+        self.pick_path(dialog, move |app, picked| {
+            let Some(path) = picked else { return };
+            if let Some(state) = app.launcher_state_mut() {
                 state.edit_cancel();
                 state.setup.set_path(field, path);
                 state.status = None;
             }
-        }
-        self.finish_host_io_pause();
+        });
     }
 
     /// Make a fresh disk image from what the Create Image page is showing.
@@ -476,15 +443,17 @@ impl App {
     /// right extension.
     #[cfg(feature = "game-library")]
     pub(super) fn meta_choose_art(&mut self) {
-        let picked = super::native_dialog::pick(|| {
-            rfd::FileDialog::new()
-                .set_title("Choose cover art")
-                .add_filter("PNG image", &["png"])
-                .pick_file()
+        let dialog = PickRequest::file("Choose cover art").filter("PNG image", &["png"]);
+        self.pick_path(dialog, |app, picked| {
+            if let Some(picked) = picked {
+                app.meta_keep_art(picked);
+            }
         });
-        let Some(picked) = picked else {
-            return;
-        };
+    }
+
+    /// Keep the picture `meta_choose_art` was given.
+    #[cfg(feature = "game-library")]
+    fn meta_keep_art(&mut self, picked: std::path::PathBuf) {
         let config = crate::paths::library_root();
         let Some(state) = self.launcher_state_mut() else {
             return;
@@ -939,7 +908,6 @@ impl App {
             ImageToMake::Hard(state.workshop.hard_spec())
         };
 
-        self.suspend_live_audio_for_host_io();
         let (kind, ext) = if floppy {
             ("Amiga floppy image", vec!["adf"])
         } else {
@@ -947,16 +915,19 @@ impl App {
             // .img what a card writer expects, so both are offered.
             ("Amiga hard disk image", vec!["hdf", "img", "chd"])
         };
-        let picked = super::native_dialog::pick(move || {
-            rfd::FileDialog::new()
-                .set_title("Create disk image")
-                .add_filter(kind, &ext)
-                .set_file_name(suggested)
-                .save_file()
+        let dialog = PickRequest::save("Create disk image")
+            .filter(kind, &ext)
+            .file_name(suggested);
+        self.pick_path(dialog, move |app, picked| {
+            if let Some(path) = picked {
+                app.launcher_write_image(spec, path);
+            }
         });
-        self.finish_host_io_pause();
+    }
 
-        let Some(path) = picked else { return };
+    /// Write the image the Create Image page described to the file its save
+    /// dialog named.
+    fn launcher_write_image(&mut self, spec: ImageToMake, path: std::path::PathBuf) {
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -1049,90 +1020,83 @@ impl App {
     }
 
     pub(super) fn launcher_add_zorro(&mut self) {
-        self.suspend_live_audio_for_host_io();
-        let picked = super::native_dialog::pick(|| {
-            rfd::FileDialog::new()
-                .set_title("Add Zorro board metadata")
-                .add_filter("Board metadata", &["toml"])
-                .pick_file()
-        });
-        if let Some(path) = picked {
-            if let Some(state) = self.launcher_state_mut() {
+        let dialog =
+            PickRequest::file("Add Zorro board metadata").filter("Board metadata", &["toml"]);
+        self.pick_path(dialog, |app, picked| {
+            let Some(path) = picked else { return };
+            if let Some(state) = app.launcher_state_mut() {
                 state.setup.add_zorro(path);
                 state.status = None;
             }
-        }
-        self.finish_host_io_pause();
+        });
     }
 
     /// Pick a file for a plugin board's file-typed config option.
     pub(super) fn launcher_board_browse(&mut self, board: usize, opt: usize) {
-        self.suspend_live_audio_for_host_io();
-        let picked = super::native_dialog::pick(|| {
-            rfd::FileDialog::new()
-                .set_title("Choose plugin file")
-                .pick_file()
-        });
-        if let Some(path) = picked {
-            if let Some(state) = self.launcher_state_mut() {
-                state.edit_cancel();
-                state
-                    .setup
-                    .zorro_option_set(board, opt, path.to_string_lossy().into_owned());
-                state.status = None;
-            }
-        }
-        self.finish_host_io_pause();
+        self.pick_path(
+            PickRequest::file("Choose plugin file"),
+            move |app, picked| {
+                let Some(path) = picked else { return };
+                if let Some(state) = app.launcher_state_mut() {
+                    state.edit_cancel();
+                    state
+                        .setup
+                        .zorro_option_set(board, opt, path.to_string_lossy().into_owned());
+                    state.status = None;
+                }
+            },
+        );
     }
 
     pub(super) fn launcher_load(&mut self) {
-        self.suspend_live_audio_for_host_io();
-        let picked = super::native_dialog::pick(|| {
-            rfd::FileDialog::new()
-                .set_title("Load configuration")
-                .add_filter("Copperline config", &["toml"])
-                .pick_file()
+        let dialog = PickRequest::file("Load configuration").filter("Copperline config", &["toml"]);
+        self.pick_path(dialog, |app, picked| {
+            if let Some(path) = picked {
+                app.launcher_load_from(&path);
+            }
         });
+    }
+
+    /// Open the configuration `launcher_load` was given, and run it at once
+    /// if it asks for that.
+    fn launcher_load_from(&mut self, path: &std::path::Path) {
         let mut run_at_once = false;
-        if let Some(path) = picked {
-            match MachineSetup::load_from(&path) {
-                Ok(setup) => {
-                    if let Some(state) = self.launcher_state_mut() {
-                        // `[emulation] auto_launch`: the file asks to run
-                        // the moment it is opened, configuration screen
-                        // skipped. Loaded first so a failed run leaves the
-                        // launcher showing the loaded setup and the error.
-                        run_at_once = setup.auto_launch();
-                        state.setup = setup;
-                        // The page being looked at may not exist under the
-                        // loaded machine (the second boot page, emptied).
-                        state.tab = state.setup.settle_tab(state.tab);
-                        // Re-read host device lists so the loaded setup's pickers
-                        // are populated, not stuck on "Default"/"None".
-                        state.setup.refresh_host_devices();
-                        // The loaded configuration may name a different
-                        // library and a different cache. Everything the
-                        // page held belongs to the one before it.
-                        #[cfg(feature = "game-library")]
-                        {
-                            state.library = Default::default();
-                        }
-                        state.status = Some(StatusMessage::ok(format!(
-                            "Loaded {}",
-                            display_file_name(&path)
-                        )));
+        match MachineSetup::load_from(path) {
+            Ok(setup) => {
+                if let Some(state) = self.launcher_state_mut() {
+                    // `[emulation] auto_launch`: the file asks to run
+                    // the moment it is opened, configuration screen
+                    // skipped. Loaded first so a failed run leaves the
+                    // launcher showing the loaded setup and the error.
+                    run_at_once = setup.auto_launch();
+                    state.setup = setup;
+                    // The page being looked at may not exist under the
+                    // loaded machine (the second boot page, emptied).
+                    state.tab = state.setup.settle_tab(state.tab);
+                    // Re-read host device lists so the loaded setup's pickers
+                    // are populated, not stuck on "Default"/"None".
+                    state.setup.refresh_host_devices();
+                    // The loaded configuration may name a different
+                    // library and a different cache. Everything the
+                    // page held belongs to the one before it.
+                    #[cfg(feature = "game-library")]
+                    {
+                        state.library = Default::default();
                     }
-                }
-                Err(e) => {
-                    warn!("config load failed ({}): {e:#}", path.display());
-                    self.set_launcher_status(StatusMessage::err(format!(
-                        "Load failed: {}",
-                        short_status_error(&e)
+                    state.status = Some(StatusMessage::ok(format!(
+                        "Loaded {}",
+                        display_file_name(path)
                     )));
                 }
             }
+            Err(e) => {
+                warn!("config load failed ({}): {e:#}", path.display());
+                self.set_launcher_status(StatusMessage::err(format!(
+                    "Load failed: {}",
+                    short_status_error(&e)
+                )));
+            }
         }
-        self.finish_host_io_pause();
         if run_at_once {
             self.run_honors_power_on = true;
             self.launcher_run();
@@ -1276,32 +1240,25 @@ impl App {
         let Some(toml) = self.launcher_toml_for_save() else {
             return;
         };
-        self.suspend_live_audio_for_host_io();
-        let picked = super::native_dialog::pick(|| {
-            let mut dialog = rfd::FileDialog::new()
-                .set_title("Save configuration")
-                .add_filter("Copperline config", &["toml"])
-                .set_file_name("machine.toml");
+        let dialog = PickRequest::save("Save configuration")
+            .filter("Copperline config", &["toml"])
+            .file_name("machine.toml")
             // Where configurations are kept, which is a better first answer
             // than wherever the last unrelated dialog happened to end up.
-            if let Some(dir) = crate::paths::configs_dir() {
-                dialog = dialog.set_directory(dir);
-            }
-            dialog.save_file()
-        });
-        if let Some(path) = picked {
+            .directory(crate::paths::configs_dir());
+        self.pick_path(dialog, move |app, picked| {
+            let Some(path) = picked else { return };
             match std::fs::write(&path, toml) {
-                Ok(()) => self.set_launcher_status(StatusMessage::ok(format!(
+                Ok(()) => app.set_launcher_status(StatusMessage::ok(format!(
                     "Saved {}",
                     display_file_name(&path)
                 ))),
                 Err(e) => {
                     warn!("config save failed ({}): {e}", path.display());
-                    self.set_launcher_status(StatusMessage::err("Save failed (see log)"));
+                    app.set_launcher_status(StatusMessage::err("Save failed (see log)"));
                 }
             }
-        }
-        self.finish_host_io_pause();
+        });
     }
 
     /// Run the opened configuration at once when it asks for that --

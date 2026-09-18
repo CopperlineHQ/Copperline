@@ -882,26 +882,22 @@ impl App {
     /// success the machine continues from the state's timeline: power is
     /// forced on, any CPU halt is cleared, and the display re-renders from
     /// the restored Bus. On failure the running machine is untouched.
-    pub(super) fn load_state_from_dialog(&mut self, event_loop: Option<&ActiveEventLoop>) {
-        self.suspend_live_audio_for_host_io();
-        let picked = super::native_dialog::pick(|| {
-            rfd::FileDialog::new()
-                .set_title("Load save state")
-                .add_filter("Copperline save states", &["clstate"])
-                .pick_file()
-        });
-
-        // Re-baseline pacing after the modal dialog, as for floppies; a
+    ///
+    /// Nothing here wakes the loop for the restored machine: the answer may
+    /// arrive on a later pass than the one that asked (see `native_dialog`),
+    /// and `about_to_wait` settles the control flow from the run state after
+    /// every pass in any case.
+    pub(super) fn load_state_from_dialog(&mut self) {
+        // Pacing is re-baselined after the picker, as for floppies; a
         // successful load re-anchors again to the restored timeline inside
         // Emulator::load_state.
-        if let Some(path) = picked {
-            if self.load_state_from_path(&path) {
-                if let Some(event_loop) = event_loop {
-                    event_loop.set_control_flow(ControlFlow::Poll);
-                }
+        let dialog =
+            PickRequest::file("Load save state").filter("Copperline save states", &["clstate"]);
+        self.pick_path(dialog, |app, picked| {
+            if let Some(path) = picked {
+                app.load_state_from_path(&path);
             }
-        }
-        self.finish_host_io_pause();
+        });
     }
 
     pub(super) fn load_state_from_path(&mut self, path: &std::path::Path) -> bool {
@@ -976,109 +972,108 @@ impl App {
     /// an extended ROM is 512 KiB ($E00000) or 256 KiB ($F00000).
     /// On any error the running machine keeps its current ROM.
     pub(super) fn load_rom_from_dialog(&mut self) {
-        self.suspend_live_audio_for_host_io();
-        let picked = super::native_dialog::pick(|| {
-            rfd::FileDialog::new()
-                .set_title("Load Kickstart ROM (512 or 256 KiB)")
-                .add_filter("Amiga ROM images", &["rom", "bin"])
-                .pick_file()
-        });
-        if let Some(main_path) = picked {
+        let dialog = PickRequest::file("Load Kickstart ROM (512 or 256 KiB)")
+            .filter("Amiga ROM images", &["rom", "bin"]);
+        self.pick_path(dialog, |app, picked| {
+            let Some(main_path) = picked else { return };
             // Offer an optional extended ROM (AROS/CDTV/CD32). Cancelling skips it
             // and removes any extended ROM currently fitted.
-            let ext_path = super::native_dialog::pick(|| {
-                rfd::FileDialog::new()
-                    .set_title("Load extended ROM (optional; Cancel to skip)")
-                    .add_filter("Amiga ROM images", &["rom", "bin"])
-                    .pick_file()
+            let dialog = PickRequest::file("Load extended ROM (optional; Cancel to skip)")
+                .filter("Amiga ROM images", &["rom", "bin"]);
+            app.pick_path(dialog, move |app, ext_path| {
+                app.fit_rom(main_path, ext_path)
             });
+        });
+    }
 
-            // The identification comes off the bytes already in hand (the
-            // image is handed to the machine straight after), so the OSD and
-            // the log name the Kickstart without re-reading the file.
-            let result = (|| -> anyhow::Result<Option<&'static str>> {
-                let rom = std::fs::read(&main_path)
-                    .map_err(|e| anyhow::anyhow!("reading ROM {}: {e}", main_path.display()))?;
-                let ext = match &ext_path {
+    /// Fit the ROM, and the extended ROM if one was chosen, that
+    /// `load_rom_from_dialog` was given.
+    fn fit_rom(&mut self, main_path: PathBuf, ext_path: Option<PathBuf>) {
+        // The identification comes off the bytes already in hand (the
+        // image is handed to the machine straight after), so the OSD and
+        // the log name the Kickstart without re-reading the file.
+        let result = (|| -> anyhow::Result<Option<&'static str>> {
+            let rom = std::fs::read(&main_path)
+                .map_err(|e| anyhow::anyhow!("reading ROM {}: {e}", main_path.display()))?;
+            let ext =
+                match &ext_path {
                     Some(p) => Some(std::fs::read(p).map_err(|e| {
                         anyhow::anyhow!("reading extended ROM {}: {e}", p.display())
                     })?),
                     None => None,
                 };
-                let identified = crate::romdb::describe(&rom).map(|id| id.label());
-                self.emu.reload_rom(rom, ext)?;
-                Ok(identified)
-            })();
+            let identified = crate::romdb::describe(&rom).map(|id| id.label());
+            self.emu.reload_rom(rom, ext)?;
+            Ok(identified)
+        })();
 
-            match result {
-                Ok(identified) => {
-                    let name = display_file_name(&main_path);
-                    // The in-memory identification sees through a Cloanto
-                    // wrapper; the path-based one names an AROS image's
-                    // version and revision. Prefer the former, fall back
-                    // to the latter.
-                    let line_id = identified
-                        .map(str::to_string)
-                        .or_else(|| crate::config::about_rom_identification(&main_path));
-                    let rom_line = crate::config::about_rom_line(&name, line_id.as_deref());
-                    match identified {
-                        Some(id) => info!("boot ROM loaded: {} ({id})", main_path.display()),
-                        None => info!("boot ROM loaded: {}", main_path.display()),
-                    }
-                    self.show_osd(rom_line.clone());
-                    // The About panel's machine lines are cached from the
-                    // configuration; the chip in the machine just changed,
-                    // so its ROM line has to follow the swap.
-                    match self
-                        .about_machine_lines
-                        .iter_mut()
-                        .find(|l| l.starts_with("ROM: "))
-                    {
-                        Some(line) => *line = rom_line,
-                        None => self.about_machine_lines.push(rom_line),
-                    }
-                    // The extended ROM line follows the same swap: updated,
-                    // added after the boot ROM's line, or dropped to match
-                    // what is now fitted.
-                    let ext_line = ext_path.as_deref().map(|p| {
-                        crate::config::about_ext_rom_line(
-                            &display_file_name(p),
-                            crate::config::about_rom_identification(p).as_deref(),
-                        )
-                    });
-                    let at = self
-                        .about_machine_lines
-                        .iter()
-                        .position(|l| l.starts_with("Extended ROM: "));
-                    match (at, ext_line) {
-                        (Some(i), Some(line)) => self.about_machine_lines[i] = line,
-                        (Some(i), None) => {
-                            self.about_machine_lines.remove(i);
-                        }
-                        (None, Some(line)) => {
-                            let after_rom = self
-                                .about_machine_lines
-                                .iter()
-                                .position(|l| l.starts_with("ROM: "))
-                                .map(|i| i + 1)
-                                .unwrap_or(self.about_machine_lines.len());
-                            self.about_machine_lines.insert(after_rom, line);
-                        }
-                        (None, None) => {}
-                    }
-                    self.powered_on = true;
-                    self.cpu_halted = false;
-                    // The cold reset restarts the frame timeline; force a repaint.
-                    self.reset_render_pipeline();
-                    self.request_redraw();
+        match result {
+            Ok(identified) => {
+                let name = display_file_name(&main_path);
+                // The in-memory identification sees through a Cloanto
+                // wrapper; the path-based one names an AROS image's
+                // version and revision. Prefer the former, fall back
+                // to the latter.
+                let line_id = identified
+                    .map(str::to_string)
+                    .or_else(|| crate::config::about_rom_identification(&main_path));
+                let rom_line = crate::config::about_rom_line(&name, line_id.as_deref());
+                match identified {
+                    Some(id) => info!("boot ROM loaded: {} ({id})", main_path.display()),
+                    None => info!("boot ROM loaded: {}", main_path.display()),
                 }
-                Err(e) => {
-                    warn!("ROM load failed ({}): {e:#}", main_path.display());
-                    self.show_osd("ROM load failed (see log)");
+                self.show_osd(rom_line.clone());
+                // The About panel's machine lines are cached from the
+                // configuration; the chip in the machine just changed,
+                // so its ROM line has to follow the swap.
+                match self
+                    .about_machine_lines
+                    .iter_mut()
+                    .find(|l| l.starts_with("ROM: "))
+                {
+                    Some(line) => *line = rom_line,
+                    None => self.about_machine_lines.push(rom_line),
                 }
+                // The extended ROM line follows the same swap: updated,
+                // added after the boot ROM's line, or dropped to match
+                // what is now fitted.
+                let ext_line = ext_path.as_deref().map(|p| {
+                    crate::config::about_ext_rom_line(
+                        &display_file_name(p),
+                        crate::config::about_rom_identification(p).as_deref(),
+                    )
+                });
+                let at = self
+                    .about_machine_lines
+                    .iter()
+                    .position(|l| l.starts_with("Extended ROM: "));
+                match (at, ext_line) {
+                    (Some(i), Some(line)) => self.about_machine_lines[i] = line,
+                    (Some(i), None) => {
+                        self.about_machine_lines.remove(i);
+                    }
+                    (None, Some(line)) => {
+                        let after_rom = self
+                            .about_machine_lines
+                            .iter()
+                            .position(|l| l.starts_with("ROM: "))
+                            .map(|i| i + 1)
+                            .unwrap_or(self.about_machine_lines.len());
+                        self.about_machine_lines.insert(after_rom, line);
+                    }
+                    (None, None) => {}
+                }
+                self.powered_on = true;
+                self.cpu_halted = false;
+                // The cold reset restarts the frame timeline; force a repaint.
+                self.reset_render_pipeline();
+                self.request_redraw();
+            }
+            Err(e) => {
+                warn!("ROM load failed ({}): {e:#}", main_path.display());
+                self.show_osd("ROM load failed (see log)");
             }
         }
-        self.finish_host_io_pause();
     }
 
     /// Start or stop the video+audio capture (shortcut / menu item).
@@ -1562,7 +1557,10 @@ impl App {
             || self.warp_boot.as_ref().is_some_and(|g| g.engaged)
             || !self.warp_holds.is_empty()
             || self.netplay.as_ref().is_some_and(|s| s.catching_up());
-        let suspended = !self.powered_on || self.cpu_halted || self.paused || warp_muted;
+        // A machine standing behind a picker sheet is as silent as a paused
+        // one, for as long as the sheet is up: `machine_advances` is the
+        // run state with the sheet counted in.
+        let suspended = !self.machine_advances() || warp_muted;
         self.emu.set_live_audio_suspended(suspended);
     }
 
