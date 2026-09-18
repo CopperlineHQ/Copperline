@@ -490,7 +490,9 @@ pub struct MenuState<'a> {
     pub keyboard_panel: bool,
     pub port_devices: [PortDevice; 2],
     /// Whether the machine has a PCMCIA slot (A600/A1200), and what is
-    /// in it: the category is only offered on a machine with the slot.
+    /// in it: the category is only offered on a machine with the slot. A
+    /// card goes by the name of the file behind it, as the MT-32's ROMs do;
+    /// an SRAM card with no file behind it by what it is.
     pub pcmcia_slot: bool,
     pub pcmcia_card: Option<String>,
     pub pixel_aspect: PixelAspect,
@@ -608,9 +610,11 @@ pub fn build(s: &MenuState) -> Vec<MenuRow> {
             MenuAction::FreezeCartridge,
         )
         .available(s.cartridge.is_some()),
+        MenuRow::submenu("Emulation Settings", emulation_rows(s)),
         MenuRow::submenu("Audio Settings", audio_rows(s)),
         MenuRow::submenu("Video Settings", video_rows(s)),
         MenuRow::submenu("Input Settings", input_rows(s)),
+        MenuRow::submenu("Warp Settings", warp_rows(s)),
     ];
 
     // A port with nothing on it has nothing to set, so it contributes no
@@ -629,17 +633,13 @@ pub fn build(s: &MenuState) -> Vec<MenuRow> {
 
     // Only a machine with the slot has anything to put in it. The floppy
     // and CD controls live on the status bar; the slot has no bar icon,
-    // so its insert/eject sit here.
+    // so its insert/eject sit here. No value on the row: a slot is empty
+    // most of the time, and the list it opens says what is in it.
     if s.pcmcia_slot {
-        rows.push(
-            MenuRow::submenu("PCMCIA Card", pcmcia_rows(s))
-                .with_value(s.pcmcia_card.clone().unwrap_or_else(|| "Empty".to_string())),
-        );
+        rows.push(MenuRow::submenu("PCMCIA Card", pcmcia_rows(s)));
     }
 
     rows.extend([
-        MenuRow::submenu("Emulation Settings", emulation_rows(s)),
-        MenuRow::submenu("Warp Settings", warp_rows(s)),
         MenuRow::submenu("Recording", recording_rows(s)),
         MenuRow::submenu("Save State", save_state_rows(s)),
         MenuRow::action("Load Kickstart ROM...", MenuAction::LoadRom),
@@ -1111,12 +1111,35 @@ fn parallel_rows(s: &MenuState) -> Vec<MenuRow> {
     ]
 }
 
+/// The slot, in the shape of the MT-32's firmware slots: what is in it (or
+/// a dimmed None), then the ways to change that.
 fn pcmcia_rows(s: &MenuState) -> Vec<MenuRow> {
-    vec![
-        MenuRow::action("Insert CF Card Image...", MenuAction::InsertPcmciaCard),
-        MenuRow::action("Eject Card", MenuAction::EjectPcmciaCard)
-            .available(s.pcmcia_card.is_some()),
-    ]
+    let insert = MenuRow::action("Insert CF Card Image...", MenuAction::InsertPcmciaCard);
+    let eject = MenuRow::action("Eject Card", MenuAction::EjectPcmciaCard)
+        .available(s.pcmcia_card.is_some());
+    // A level is as wide as its widest row, so an image with a long name
+    // would stretch the whole list. The name is cut to the width the two
+    // rows under it already give the level.
+    let room = insert
+        .label
+        .chars()
+        .count()
+        .max(eject.label.chars().count());
+    let card = match &s.pcmcia_card {
+        Some(name) => MenuRow::caption(&clip_label(name, room)),
+        None => MenuRow::action("None", MenuAction::InsertPcmciaCard).available(false),
+    };
+    vec![card, insert, eject]
+}
+
+/// `label` cut to `room` characters, the last of them a `~` when anything
+/// was lost -- the mark the launcher's path rows use for the same thing.
+fn clip_label(label: &str, room: usize) -> String {
+    if label.chars().count() <= room {
+        return label.to_string();
+    }
+    let kept: String = label.chars().take(room.saturating_sub(1)).collect();
+    format!("{kept}~")
 }
 
 fn emulation_rows(s: &MenuState) -> Vec<MenuRow> {
@@ -1923,5 +1946,112 @@ mod tests {
         let steps = strength.children().expect("steps");
         assert!(!find(steps, "Stronger").expect("stronger").enabled);
         assert!(find(steps, "Softer").expect("softer").enabled);
+    }
+
+    /// The slot says what is in it inside its own list, not on the main
+    /// menu, where it would read "empty" nearly every time the menu opened.
+    /// An empty slot is a dimmed None with nothing to eject; a fitted one
+    /// names its card in a caption -- drawn in the colour a value carries,
+    /// as a loaded MT-32 ROM's name is -- and can be ejected.
+    #[test]
+    fn the_pcmcia_list_names_the_card_and_the_main_menu_does_not() {
+        let none: [String; 0] = [];
+        let slots = empty_slots();
+        let mut st = state(&none, &none, &none, &none, &slots);
+        assert!(find(&build(&st), "PCMCIA Card").is_none());
+
+        st.pcmcia_slot = true;
+        let rows = build(&st);
+        let slot = find(&rows, "PCMCIA Card").expect("slot");
+        assert_eq!(slot.value, None);
+        let list = slot.children().expect("children");
+        let labels: Vec<&str> = list.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(labels, ["None", "Insert CF Card Image...", "Eject Card"]);
+        assert!(!list[0].enabled);
+        assert!(list[1].enabled);
+        assert!(!list[2].enabled);
+
+        st.pcmcia_card = Some("Workbench.hdf".to_string());
+        let rows = build(&st);
+        let slot = find(&rows, "PCMCIA Card").expect("slot");
+        assert_eq!(slot.value, None);
+        let list = slot.children().expect("children");
+        assert_eq!(list[0].label, "Workbench.hdf");
+        assert!(matches!(list[0].kind, MenuRowKind::Caption));
+        assert!(list[0].menu_action().is_none());
+        assert!(list[2].enabled);
+    }
+
+    /// A long image name is cut rather than stretching the list: the level
+    /// is exactly as wide with it as with the slot empty.
+    #[test]
+    fn a_long_card_name_does_not_widen_the_pcmcia_list() {
+        let none: [String; 0] = [];
+        let slots = empty_slots();
+        let mut st = state(&none, &none, &none, &none, &slots);
+        st.pcmcia_slot = true;
+        let width = |st: &MenuState| {
+            let rows = build(st);
+            let at = rows
+                .iter()
+                .position(|r| r.label == "PCMCIA Card")
+                .expect("slot");
+            let list = rows[at].children().expect("children");
+            let levels: Vec<&[MenuRow]> = vec![&rows, list];
+            layout::columns(&levels, &[Some(at)], 600, 800, 1)[1].w
+        };
+        let empty = width(&st);
+
+        let long = "A very long name for a CompactFlash card image indeed.hdf";
+        st.pcmcia_card = Some(long.to_string());
+        assert_eq!(width(&st), empty);
+
+        let rows = build(&st);
+        let list = find(&rows, "PCMCIA Card")
+            .and_then(|r| r.children())
+            .expect("children");
+        let room = "Insert CF Card Image...".chars().count();
+        assert_eq!(list[0].label.chars().count(), room);
+        assert!(list[0].label.ends_with('~'));
+        assert!(long.starts_with(list[0].label.trim_end_matches('~')));
+
+        // A name that fits is left alone, to the character.
+        assert_eq!(clip_label("Workbench.hdf", room), "Workbench.hdf");
+        assert_eq!(clip_label(&"x".repeat(room), room), "x".repeat(room));
+    }
+
+    /// Emulation Settings leads the settings categories and Warp Settings
+    /// closes them, ahead of the ports a machine may or may not have.
+    #[test]
+    fn the_settings_categories_keep_their_order() {
+        let slots = empty_slots();
+        let devices = ["Interface".to_string()];
+        let none: [String; 0] = [];
+        let mut st = state(&none, &devices, &devices, &devices, &slots);
+        st.pcmcia_slot = true;
+        let rows = build(&st);
+        let order: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+        let at = |label: &str| {
+            order
+                .iter()
+                .position(|l| *l == label)
+                .unwrap_or_else(|| panic!("missing {label}"))
+        };
+        let run = [
+            "Emulation Settings",
+            "Audio Settings",
+            "Video Settings",
+            "Input Settings",
+            "Warp Settings",
+        ];
+        let first = at(run[0]);
+        assert_eq!(order[first..first + run.len()], run);
+        for port in ["Serial Port", "Parallel Port", "PCMCIA Card"] {
+            assert!(
+                at(port) > at("Warp Settings"),
+                "{port} before Warp Settings"
+            );
+            assert!(at(port) < at("Recording"), "{port} after Recording");
+        }
     }
 }

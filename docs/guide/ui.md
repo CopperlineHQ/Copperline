@@ -377,6 +377,35 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   or the configuration screen's *Freezer cartridge* row); see
   [Configuration](configuration.md#freezer-cartridge).
 
+### Emulation Settings
+
+- **Floppy Speed**: the emulated drive speed -- 100% (real speed), 200%,
+  400%, 800%, or turbo (disk DMA transfers complete almost instantly).
+  Changes apply to the live machine immediately. The start-up value comes
+  from `[floppy] speed`; see [Configuration](configuration.md) for what each
+  level preserves and the compatibility trade-off.
+- **Rewind** (the hotkey is `Cmd+Z` / `Alt+Z`): records rewind history. While
+  it is on, the emulator keeps a ring of whole-machine snapshots and the
+  hotkey steps the machine back through them -- the whole machine, not just
+  the picture: CPU, chips, RAM and all. One press goes back one capture
+  interval (half a second of emulated time by default). Turning it off
+  releases the snapshots, which is where the memory goes; the budget and
+  interval are `[emulation] rewind_budget_mb` and `rewind_interval_frames`,
+  and `rewind = true` starts recording at launch (see
+  [Configuration](configuration.md)). It shares its substrate with the
+  debugger's reverse controls, so the same determinism caveats apply -- see
+  [](../debugger/reverse).
+- **Run Ahead**: input-latency reduction for play. Each display refresh
+  commits one frame, runs a few silent future frames, presents the last future
+  image, and rewinds to the committed boundary. Level **1 frame** is the best
+  starting point; higher levels need proportionally more host CPU (watch the
+  performance overlay) and skip more intermediate animation. When a live
+  device, writable medium, debugger, capture, or other host coupling makes
+  speculation unsafe, selecting a level keeps it configured but the OSD says
+  why it is inactive. The start-up value is
+  `[emulation] run_ahead_frames` or `--run-ahead`; the full compatibility list
+  is in [Configuration](configuration.md).
+
 ### Audio Settings
 
 - **Audio Output** (also `Cmd+Shift+A` / `Alt+Shift+A`): the system default,
@@ -523,64 +552,6 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
 - **Input Mapping...**: edits which host keys drive the controller controls,
   for both keyboard mappings; see [](#input-mapping).
 
-### Serial Port and Parallel Port
-
-Shown only when something is on the port.
-
-- **MIDI In / MIDI Out** (serial port in MIDI mode): Paula's serial bridge
-  onto the host's MIDI sources and destinations; see the `[serial]` section
-  of [Configuration](configuration.md). **MT-32** is offered here too,
-  and with it playing, an **MT-32** submenu carries its front panel and
-  display style; see [The MT-32](mt32.md).
-- **Sampler Input / Sampler Gain** (parallel-port sampler attached): the
-  sampler's host capture device, and its input gain, which the *Increase* and
-  *Decrease* rows step (also `Cmd/Alt+Shift +/-`). Both change live. See the
-  `[parallel]` section of [Configuration](configuration.md).
-
-### PCMCIA Card
-
-Offered only on an A600 or A1200, whose Gayle carries the credit-card
-slot; the category row shows what is in the slot (or *Empty*).
-
-- **Insert CF Card Image...**: pick a hard-disk image (anything `[ide]`
-  accepts) and push it into the slot as a CompactFlash card, ejecting
-  whatever was there. Gayle latches the card-detect change, so a
-  `card.resource` client sees a real insertion.
-- **Eject Card**: pull the card (greyed with an empty slot). An SRAM
-  card's backing file is written back on the way out.
-
-See the `[pcmcia]` section of [Configuration](configuration.md) for
-boot-time cards, SRAM cards, real card readers, and the fast-RAM rule.
-
-### Emulation Settings
-
-- **Floppy Speed**: the emulated drive speed -- 100% (real speed), 200%,
-  400%, 800%, or turbo (disk DMA transfers complete almost instantly).
-  Changes apply to the live machine immediately. The start-up value comes
-  from `[floppy] speed`; see [Configuration](configuration.md) for what each
-  level preserves and the compatibility trade-off.
-- **Rewind** (the hotkey is `Cmd+Z` / `Alt+Z`): records rewind history. While
-  it is on, the emulator keeps a ring of whole-machine snapshots and the
-  hotkey steps the machine back through them -- the whole machine, not just
-  the picture: CPU, chips, RAM and all. One press goes back one capture
-  interval (half a second of emulated time by default). Turning it off
-  releases the snapshots, which is where the memory goes; the budget and
-  interval are `[emulation] rewind_budget_mb` and `rewind_interval_frames`,
-  and `rewind = true` starts recording at launch (see
-  [Configuration](configuration.md)). It shares its substrate with the
-  debugger's reverse controls, so the same determinism caveats apply -- see
-  [](../debugger/reverse).
-- **Run Ahead**: input-latency reduction for play. Each display refresh
-  commits one frame, runs a few silent future frames, presents the last future
-  image, and rewinds to the committed boundary. Level **1 frame** is the best
-  starting point; higher levels need proportionally more host CPU (watch the
-  performance overlay) and skip more intermediate animation. When a live
-  device, writable medium, debugger, capture, or other host coupling makes
-  speculation unsafe, selecting a level keeps it configured but the OSD says
-  why it is inactive. The start-up value is
-  `[emulation] run_ahead_frames` or `--run-ahead`; the full compatibility list
-  is in [Configuration](configuration.md).
-
 ### Warp Settings
 
 - **Warp Speed** (also `Cmd+W` / `Alt+W`): runs the emulator unpaced for
@@ -600,6 +571,37 @@ boot-time cards, SRAM cards, real card readers, and the fast-RAM rule.
   at vsync when enabled. With VSync off, presentation frequency depends on
   host throughput and compositor redraw scheduling. The default is set by
   `[emulation] warp_speed` (see [Configuration](configuration.md)).
+
+### Serial Port and Parallel Port
+
+Shown only when something is on the port.
+
+- **MIDI In / MIDI Out** (serial port in MIDI mode): Paula's serial bridge
+  onto the host's MIDI sources and destinations; see the `[serial]` section
+  of [Configuration](configuration.md). **MT-32** is offered here too,
+  and with it playing, an **MT-32** submenu carries its front panel and
+  display style; see [The MT-32](mt32.md).
+- **Sampler Input / Sampler Gain** (parallel-port sampler attached): the
+  sampler's host capture device, and its input gain, which the *Increase* and
+  *Decrease* rows step (also `Cmd/Alt+Shift +/-`). Both change live. See the
+  `[parallel]` section of [Configuration](configuration.md).
+
+### PCMCIA Card
+
+Offered only on an A600 or A1200, whose Gayle carries the credit-card
+slot. The list opens with what is in the slot, which cannot be picked:
+the card image's file name, in the colour a value carries (cut short with
+a `~` if it is wider than the list), or a greyed *None*.
+
+- **Insert CF Card Image...**: pick a hard-disk image (anything `[ide]`
+  accepts) and push it into the slot as a CompactFlash card, ejecting
+  whatever was there. Gayle latches the card-detect change, so a
+  `card.resource` client sees a real insertion.
+- **Eject Card**: pull the card (greyed with an empty slot). An SRAM
+  card's backing file is written back on the way out.
+
+See the `[pcmcia]` section of [Configuration](configuration.md) for
+boot-time cards, SRAM cards, real card readers, and the fast-RAM rule.
 
 ### Recording
 
