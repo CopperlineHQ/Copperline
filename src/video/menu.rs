@@ -1951,7 +1951,8 @@ mod tests {
     /// The slot says what is in it inside its own list, not on the main
     /// menu, where it would read "empty" nearly every time the menu opened.
     /// An empty slot is a dimmed None with nothing to eject; a fitted one
-    /// names its card, dimmed the same way, and can be ejected.
+    /// names its card in a caption -- drawn in the colour a value carries,
+    /// as a loaded MT-32 ROM's name is -- and can be ejected.
     #[test]
     fn the_pcmcia_list_names_the_card_and_the_main_menu_does_not() {
         let none: [String; 0] = [];
@@ -1976,7 +1977,7 @@ mod tests {
         assert_eq!(slot.value, None);
         let list = slot.children().expect("children");
         assert_eq!(list[0].label, "Workbench.hdf");
-        assert!(!list[0].enabled);
+        assert!(matches!(list[0].kind, MenuRowKind::Caption));
         assert!(list[0].menu_action().is_none());
         assert!(list[2].enabled);
     }

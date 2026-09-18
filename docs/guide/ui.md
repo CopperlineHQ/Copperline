@@ -589,8 +589,9 @@ Shown only when something is on the port.
 ### PCMCIA Card
 
 Offered only on an A600 or A1200, whose Gayle carries the credit-card
-slot. The list opens with what is in the slot, greyed: the card image's
-file name (cut short with a `~` if it is wider than the list), or *None*.
+slot. The list opens with what is in the slot, which cannot be picked:
+the card image's file name, in the colour a value carries (cut short with
+a `~` if it is wider than the list), or a greyed *None*.
 
 - **Insert CF Card Image...**: pick a hard-disk image (anything `[ide]`
   accepts) and push it into the slot as a CompactFlash card, ejecting
