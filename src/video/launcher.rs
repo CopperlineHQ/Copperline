@@ -5002,9 +5002,6 @@ impl LauncherState {
 
     /// Whether a row's tick box is on, from wherever it lives.
     pub fn row_toggle(&self, field: LauncherField) -> bool {
-        if field == F::NetplayEnabled {
-            return self.netplay.enabled;
-        }
         if Self::is_workshop(field) {
             self.workshop_toggle(field)
         } else {

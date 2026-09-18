@@ -1331,7 +1331,7 @@ pub(super) const NEW_GEOMETRY_ROWS: [Row; 10] = [
 ];
 
 pub(super) const NETPLAY_ROWS: [Row; 10] = [
-    row(F::NetplayEnabled, "Netplay", Toggle),
+    row(F::NetplayEnabled, "Netplay", Cycle),
     row(F::NetplayMode, "Connection", Cycle),
     row(F::NetplayPlayer, "Local player", Cycle),
     row(F::NetplayBind, "Local address", RowKind::Text),
@@ -1344,7 +1344,7 @@ pub(super) const NETPLAY_ROWS: [Row; 10] = [
 ];
 
 pub(super) const INTERNET_NETPLAY_ROWS: [Row; 11] = [
-    row(F::NetplayEnabled, "Netplay", Toggle),
+    row(F::NetplayEnabled, "Netplay", Cycle),
     row(F::NetplayMode, "Connection", Cycle),
     row(F::NetplayPlayer, "Local player", Cycle),
     row(F::NetplayCode, "Invitation", RowKind::Text),

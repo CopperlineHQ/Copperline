@@ -5789,10 +5789,10 @@ fn a_long_boot_order_pages_and_a_short_one_does_not() {
 #[test]
 fn netplay_setup_edits_all_controls_without_persisting_connection_details() -> Result<()> {
     let mut state = LauncherState::new(MachineSetup::default());
-    assert!(!state.row_toggle(F::NetplayEnabled));
+    assert_eq!(state.row_value(F::NetplayEnabled), "Disabled");
     assert!(!state.row_applies(F::NetplayPeer));
-    state.toggle_netplay();
-    assert!(state.row_toggle(F::NetplayEnabled));
+    state.cycle_netplay(F::NetplayEnabled, true);
+    assert_eq!(state.row_value(F::NetplayEnabled), "Enabled");
     assert_eq!(
         state.setup.port_devices,
         [PortDevice::Mouse, PortDevice::Joystick]
@@ -6133,5 +6133,33 @@ fn serial_device_picker_walks_the_host_ports_and_keeps_an_unlisted_path() {
     match setup.serial_device.as_deref() {
         Some(path) => assert!(setup.serial_devices.iter().any(|p| p == path), "{label}"),
         None => assert!(label.starts_with("(no serial ports found)") || label == "(pick a port)"),
+    }
+}
+
+/// The Netplay row is an `Enabled`/`Disabled` stepper like every other
+/// switch in the launcher, on both forms of the page, and either arrow
+/// flips it -- settling the machine on the other pages as it goes on.
+#[test]
+fn the_netplay_row_is_an_enabled_disabled_stepper_on_both_pages() {
+    for internet in [false, true] {
+        let mut state = LauncherState::new(MachineSetup::default());
+        state.tab = LauncherTab::Netplay;
+        state.netplay.internet = internet;
+        let rows = state.rows();
+        let row = rows
+            .iter()
+            .find(|row| row.field == F::NetplayEnabled)
+            .expect("the Netplay page opens with the Netplay row");
+        assert_eq!(row.kind, RowKind::Cycle);
+
+        state.setup.serial_mode = SerialMode::Tcp;
+        assert_eq!(state.row_value(F::NetplayEnabled), "Disabled");
+        state.cycle_netplay(F::NetplayEnabled, false);
+        assert_eq!(state.row_value(F::NetplayEnabled), "Enabled");
+        assert!(state.netplay.enabled);
+        assert_eq!(state.setup.serial_mode, SerialMode::Off);
+        state.cycle_netplay(F::NetplayEnabled, true);
+        assert_eq!(state.row_value(F::NetplayEnabled), "Disabled");
+        assert!(!state.netplay.enabled);
     }
 }

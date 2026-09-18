@@ -4497,8 +4497,15 @@ fn check_netplay_controls(internet: bool, player: usize) {
         &ui,
         UiControl::LauncherNetplayEdit(LauncherField::NetplayCode)
     ));
-    assert!(control_live(
-        &ui,
-        UiControl::LauncherToggle(LauncherField::NetplayEnabled)
-    ));
+    // The Netplay row is the one control that stays live with netplay off,
+    // from either arrow of its stepper.
+    for forward in [false, true] {
+        assert!(control_live(
+            &ui,
+            UiControl::LauncherCycle {
+                field: LauncherField::NetplayEnabled,
+                forward,
+            }
+        ));
+    }
 }

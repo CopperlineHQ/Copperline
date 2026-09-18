@@ -6965,7 +6965,7 @@ impl App {
                     state.edit_commit();
                     if state.editing().is_none() {
                         if field.is_netplay() {
-                            state.netplay.cycle(field, forward);
+                            state.cycle_netplay(field, forward);
                         } else if LauncherState::is_workshop(field) {
                             state.workshop_cycle(field, forward);
                         } else {
@@ -6983,9 +6983,7 @@ impl App {
                 if let Some(state) = self.launcher_state_mut() {
                     state.edit_commit();
                     if state.editing().is_none() {
-                        if field == LauncherField::NetplayEnabled {
-                            state.toggle_netplay();
-                        } else if LauncherState::is_workshop(field) {
+                        if LauncherState::is_workshop(field) {
                             state.workshop_toggle_flip(field);
                         } else {
                             state.setup.toggle(field);
