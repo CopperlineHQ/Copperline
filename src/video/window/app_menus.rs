@@ -134,11 +134,10 @@ impl App {
                 self.emu.bus().input.device(1),
             ],
             pcmcia_slot: self.emu.bus().pcmcia_slot_present(),
-            pcmcia_card: self
-                .emu
-                .bus()
-                .pcmcia_card()
-                .map(crate::pcmcia::PcmciaCard::describe),
+            pcmcia_card: self.emu.bus().pcmcia_card().map(|card| {
+                card.path()
+                    .map_or_else(|| card.describe(), display_file_name)
+            }),
             pixel_aspect: crate::video::pixel_aspect(),
             scaling: crate::video::display_scaling(),
             autocrop: crate::video::autocrop(),
