@@ -26,6 +26,14 @@ pub struct Invitation {
     pub session: [u8; 16],
     pub delay: u8,
     pub window: u8,
+    /// Controller ports the session drives. Older invitations carried no
+    /// count and always meant two players.
+    #[serde(default = "two_players")]
+    pub players: u8,
+}
+
+fn two_players() -> u8 {
+    2
 }
 
 /// A separate capability admits spectators without exposing the player slot.
@@ -92,6 +100,7 @@ impl Invitation {
     pub fn settings(&self, player: usize) -> Settings {
         Settings {
             player,
+            players: usize::from(self.players),
             session: self.session,
             input_delay: self.delay,
             rollback_frames: self.window,
@@ -146,6 +155,7 @@ impl Options {
     pub fn host(
         delay: u8,
         window: u8,
+        players: u8,
         relay: &str,
         relay_only: bool,
         spectators: u8,
@@ -169,6 +179,7 @@ impl Options {
             session: random[..16].try_into()?,
             delay,
             window,
+            players,
         };
         let options = Self {
             invitation,
@@ -191,9 +202,16 @@ impl Options {
         })
     }
 
+    /// A guest starts on the first guest port and adopts the one the host
+    /// assigns it when the invitation admits more than two players.
     pub fn settings(&self) -> Settings {
         self.invitation
             .settings(usize::from(self.host_key.is_none()))
+    }
+
+    /// Controller ports this session drives.
+    pub fn players(&self) -> usize {
+        usize::from(self.invitation.players)
     }
 
     pub fn role(&self) -> Role {
@@ -270,6 +288,8 @@ struct Shared {
     failure: Option<String>,
     /// The emulation thread dropped its handle; the worker closes the link.
     closed: bool,
+    /// Guest connections accepted since the emulation thread last looked.
+    players: Vec<Arc<Mutex<Shared>>>,
     /// Spectator connections accepted since the emulation thread last looked.
     spectators: Vec<Arc<Mutex<Shared>>>,
 }
@@ -335,10 +355,17 @@ impl InternetTransport {
         }
     }
 
-    pub(super) fn take_spectators(&mut self) -> Vec<SpectatorPeer> {
+    pub(super) fn take_players(&mut self) -> Vec<PeerLink> {
+        std::mem::take(&mut self.shared.lock().unwrap().players)
+            .into_iter()
+            .map(|shared| PeerLink { shared })
+            .collect()
+    }
+
+    pub(super) fn take_spectators(&mut self) -> Vec<PeerLink> {
         std::mem::take(&mut self.shared.lock().unwrap().spectators)
             .into_iter()
-            .map(|shared| SpectatorPeer { shared })
+            .map(|shared| PeerLink { shared })
             .collect()
     }
 }
@@ -393,19 +420,19 @@ impl Transport for InternetTransport {
     }
 }
 
-/// The host's handle for one accepted spectator connection. Dropping it
-/// closes that connection without touching the players' link.
-pub struct SpectatorPeer {
+/// The host's handle for one accepted guest or spectator connection.
+/// Dropping it closes that connection without touching the others.
+pub struct PeerLink {
     shared: Arc<Mutex<Shared>>,
 }
 
-impl Drop for SpectatorPeer {
+impl Drop for PeerLink {
     fn drop(&mut self) {
         self.shared.lock().unwrap().closed = true;
     }
 }
 
-impl Transport for SpectatorPeer {
+impl Transport for PeerLink {
     fn route(&self) -> &'static str {
         shared_route(&self.shared)
     }
@@ -561,6 +588,21 @@ enum Admitted {
     Spectator(iroh::endpoint::Connection),
 }
 
+/// Admitted links a host reports to the emulation thread.
+fn publish(shared: &Arc<Mutex<Shared>>, player: bool) -> Arc<Mutex<Shared>> {
+    let queues = Arc::new(Mutex::new(Shared {
+        ready: true,
+        ..Default::default()
+    }));
+    let mut state = shared.lock().unwrap();
+    if player {
+        state.players.push(queues.clone());
+    } else {
+        state.spectators.push(queues.clone());
+    }
+    queues
+}
+
 /// Accept connections until one presents an admissible capability. Failed,
 /// unrelated or currently unwanted handshakes never claim a slot.
 async fn admit(
@@ -570,6 +612,8 @@ async fn admit(
     want_player: bool,
     want_spectator: bool,
 ) -> Result<Admitted> {
+    // The session capability admits any guest while ports remain; the
+    // separate spectator capability never opens a player's port.
     loop {
         let incoming = endpoint
             .accept()
@@ -614,38 +658,39 @@ async fn admit(
     }
 }
 
-/// The host: admit the one player, then keep admitting spectators while the
+/// The host: admit every guest, then keep admitting spectators while the
 /// session lasts. Each connection is pumped by its own task; a spectator's
-/// failure is confined to its queues.
+/// failure is confined to its queues, and so is a guest's until the
+/// timeline notices the link has gone quiet.
 async fn serve(endpoint: &Endpoint, options: &Options, shared: &Arc<Mutex<Shared>>) -> Result<()> {
     let session = options.invitation.session;
     let spectator = options.spectator_capability;
     let cap = usize::from(options.spectators);
+    let wanted = options.settings().expected_links();
     let mut tasks: JoinSet<(bool, Result<()>)> = JoinSet::new();
-    let mut player = false;
+    let mut players = 0usize;
     let mut spectators = 0usize;
+    // The listener itself carries no timeline; its readiness only reports
+    // that the endpoint is open, so setup failures reach the frontend.
+    shared.lock().unwrap().ready = true;
     let deadline = tokio::time::sleep(SETUP_TIMEOUT);
     tokio::pin!(deadline);
     loop {
         tokio::select! {
-            _ = &mut deadline, if !player => {
+            _ = &mut deadline, if players < wanted => {
                 bail!("Internet invitation timed out; start a new session");
             }
-            admitted = admit(endpoint, &session, spectator.as_ref(), !player, spectators < cap) => {
+            admitted = admit(endpoint, &session, spectator.as_ref(), players < wanted, spectators < cap) => {
                 match admitted? {
                     Admitted::Player(connection) => {
-                        player = true;
-                        shared.lock().unwrap().ready = true;
-                        let queues = shared.clone();
+                        players += 1;
+                        log::info!("netplay: player {} of {} connected", players + 1, wanted + 1);
+                        let queues = publish(shared, true);
                         tasks.spawn(async move { (true, pump(connection, queues).await) });
                     }
                     Admitted::Spectator(connection) => {
                         spectators += 1;
-                        let queues = Arc::new(Mutex::new(Shared {
-                            ready: true,
-                            ..Default::default()
-                        }));
-                        shared.lock().unwrap().spectators.push(queues.clone());
+                        let queues = publish(shared, false);
                         log::info!("netplay: spectator connected");
                         tasks.spawn(async move { (false, pump(connection, queues).await) });
                     }
@@ -653,7 +698,14 @@ async fn serve(endpoint: &Endpoint, options: &Options, shared: &Arc<Mutex<Shared
             }
             Some(finished) = tasks.join_next(), if !tasks.is_empty() => {
                 match finished {
-                    Ok((true, result)) => return result.and_then(|()| bail!("Internet peer disconnected")),
+                    // A guest that disconnects leaves its own queues failed;
+                    // the timeline reports which player went away.
+                    Ok((true, result)) => {
+                        players -= 1;
+                        if let Err(error) = result {
+                            log::info!("netplay: player left: {error:#}");
+                        }
+                    }
                     Ok((false, result)) => {
                         spectators -= 1;
                         if let Err(error) = result {
@@ -680,7 +732,7 @@ mod tests {
         };
         state.packets.push(&[1, 2, 3])?;
         let mut transport = InternetTransport {
-            kind: Kind::Play(Box::new(Options::host(2, 8, "", false, 0)?)),
+            kind: Kind::Play(Box::new(Options::host(2, 8, 2, "", false, 0)?)),
             shared: Arc::new(Mutex::new(state)),
             cancel: None,
         };
@@ -696,7 +748,7 @@ mod tests {
 
     #[test]
     fn invitations_keep_host_keys_private_and_validate_routes_and_settings() -> Result<()> {
-        let host = Options::host(6, 12, "https://relay.example.com", false, 0)?;
+        let host = Options::host(6, 12, 2, "https://relay.example.com", false, 0)?;
         let code = host.invitation.encode()?;
         let guest = Options::join(&code, true)?;
         assert_eq!(guest.settings().player, 1);
@@ -722,11 +774,18 @@ mod tests {
             "https://relay.example.com?token=1",
             "https://relay.example.com#fragment",
         ] {
-            assert!(Options::host(2, 8, bad, false, 0).is_err());
+            assert!(Options::host(2, 8, 2, bad, false, 0).is_err());
         }
         let mut invalid = host.clone();
         invalid.invitation.delay = 7;
         assert!(invalid.validate().is_err());
+        invalid = host.clone();
+        invalid.invitation.players = 5;
+        assert!(invalid.validate().is_err(), "only four ports exist");
+        invalid = host.clone();
+        invalid.invitation.players = 4;
+        assert_eq!(invalid.players(), 4);
+        assert!(Invitation::decode(&invalid.invitation.encode()?).is_ok());
         invalid = host.clone();
         invalid.invitation.window = 0;
         assert!(invalid.validate().is_err());
@@ -741,7 +800,7 @@ mod tests {
 
     #[test]
     fn spectator_invitations_carry_their_own_capability() -> Result<()> {
-        let host = Options::host(2, 8, "https://relay.example.com", false, 3)?;
+        let host = Options::host(2, 8, 2, "https://relay.example.com", false, 3)?;
         let spectator = host.spectator_invitation().unwrap();
         let code = spectator.encode()?;
         assert!(SpectatorInvitation::is_code(&code));
@@ -758,8 +817,8 @@ mod tests {
             "a spectator code is not a player invitation"
         );
         assert!(SpectatorOptions::watch(&host.invitation.encode()?, false).is_err());
-        assert!(Options::host(2, 8, "", false, 9).is_err());
-        let mut invalid = Options::host(2, 8, "", false, 0)?;
+        assert!(Options::host(2, 8, 2, "", false, 9).is_err());
+        let mut invalid = Options::host(2, 8, 2, "", false, 0)?;
         invalid.spectator_capability = Some([1; 16]);
         assert!(invalid.validate().is_err());
         Ok(())
@@ -785,7 +844,7 @@ mod tests {
                         .bind_addr("127.0.0.1:0")?
                         .bind()
                         .await?;
-                    let mut host = Options::host(0, 8, "", false, 1)?;
+                    let mut host = Options::host(0, 8, 2, "", false, 1)?;
                     host.host_key = Some(host_ep.secret_key().clone());
                     host.invitation.endpoint = host_ep.addr();
                     host.validate()?;

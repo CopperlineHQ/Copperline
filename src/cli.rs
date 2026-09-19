@@ -407,8 +407,9 @@ where
     let mut netplay_relay = None::<String>;
     let mut netplay_relay_only = false;
     let mut netplay_bind = None;
-    let mut netplay_peer = None;
+    let mut netplay_peers: Vec<std::net::SocketAddr> = Vec::new();
     let mut netplay_player = None;
+    let mut netplay_players: Option<u8> = None;
     let mut netplay_session = None;
     let mut netplay_delay = None;
     let mut netplay_rollback = None;
@@ -914,18 +915,23 @@ where
                     "invalid netplay bind address",
                 )?)
             }
-            "--netplay-peer" => {
-                netplay_peer = Some(next_arg(
-                    &mut args,
-                    "--netplay-peer requires IP:PORT",
-                    "invalid netplay peer address",
-                )?)
-            }
+            "--netplay-peer" => netplay_peers.push(next_arg(
+                &mut args,
+                "--netplay-peer requires IP:PORT",
+                "invalid netplay peer address",
+            )?),
             "--netplay-player" => {
                 netplay_player = Some(next_arg::<u8>(
                     &mut args,
-                    "--netplay-player requires 1 or 2",
+                    "--netplay-player requires 1..4",
                     "invalid netplay player",
+                )?)
+            }
+            "--netplay-players" => {
+                netplay_players = Some(next_arg::<u8>(
+                    &mut args,
+                    "--netplay-players requires 2..4",
+                    "invalid netplay player count",
                 )?)
             }
             "--netplay-delay" => {
@@ -1614,8 +1620,9 @@ where
         || watch_code.is_some();
     let netplay = if internet_requested
         || netplay_bind.is_some()
-        || netplay_peer.is_some()
+        || !netplay_peers.is_empty()
         || netplay_player.is_some()
+        || netplay_players.is_some()
         || netplay_session.is_some()
         || netplay_delay.is_some()
         || netplay_rollback.is_some()
@@ -1623,14 +1630,18 @@ where
         || netplay_spectators.is_some()
         || netplay_spectator_invite.is_some()
     {
-        use copperline::netplay::{ConnectionOptions, Role};
+        use copperline::netplay::{ConnectionOptions, Role, MAX_PLAYERS};
         let spectators = netplay_spectators.unwrap_or(0);
         if netplay_spectators.is_some() && !(1..=8).contains(&spectators) {
             bail!("--netplay-spectators must be 1..8");
         }
+        let players = netplay_players.unwrap_or(2);
+        if !(2..=MAX_PLAYERS as u8).contains(&players) {
+            bail!("--netplay-players must be 2..{MAX_PLAYERS}");
+        }
         let options = if internet_requested {
             if netplay_bind.is_some()
-                || netplay_peer.is_some()
+                || !netplay_peers.is_empty()
                 || netplay_player.is_some()
                 || netplay_session.is_some()
                 || (netplay_watch.is_some() && watch_code.is_none())
@@ -1650,6 +1661,7 @@ where
                         ConnectionOptions::Internet(Box::new(internet::Options::host(
                             netplay_delay.unwrap_or(2),
                             netplay_rollback.unwrap_or(8),
+                            players,
                             netplay_relay.as_deref().unwrap_or(""),
                             netplay_relay_only,
                             spectators,
@@ -1662,8 +1674,8 @@ where
                         {
                             bail!("The Internet invitation supplies the host's timing and relay settings");
                         }
-                        if netplay_spectators.is_some() {
-                            bail!("Only the host admits spectators");
+                        if netplay_spectators.is_some() || netplay_players.is_some() {
+                            bail!("Only the host sets the player count and admits spectators");
                         }
                         ConnectionOptions::Internet(Box::new(internet::Options::join(
                             code,
@@ -1675,6 +1687,7 @@ where
                             || netplay_rollback.is_some()
                             || netplay_relay.is_some()
                             || netplay_spectators.is_some()
+                            || netplay_players.is_some()
                         {
                             bail!("A spectator follows the host's settings; only --netplay-relay-only applies");
                         }
@@ -1690,10 +1703,11 @@ where
         } else if let Some(host) = netplay_watch {
             let usage = "spectating requires --netplay-watch IP:PORT and --netplay-session HEX";
             if netplay_player.is_some()
-                || netplay_peer.is_some()
+                || !netplay_peers.is_empty()
                 || netplay_delay.is_some()
                 || netplay_rollback.is_some()
                 || netplay_spectators.is_some()
+                || netplay_players.is_some()
             {
                 bail!("A spectator takes no player, peer, timing or spectator flags");
             }
@@ -1713,20 +1727,39 @@ where
             options.validate()?;
             ConnectionOptions::Watch(options)
         } else {
-            let usage = "netplay requires --netplay-bind IP:PORT, --netplay-peer IP:PORT, --netplay-player 1|2 and --netplay-session HEX";
+            let usage = "netplay requires --netplay-bind IP:PORT, --netplay-player 1..4, --netplay-session HEX, and --netplay-peer IP:PORT for each peer";
             let player = netplay_player.ok_or_else(|| anyhow!(usage))?;
-            if !(1..=2).contains(&player) {
-                bail!("--netplay-player must be 1 or 2");
+            if !(1..=MAX_PLAYERS as u8).contains(&player) {
+                bail!("--netplay-player must be 1..{MAX_PLAYERS}");
             }
-            if player == 2 && netplay_spectators.is_some() {
-                bail!("Only player 1 admits spectators");
+            if player != 1 && (netplay_spectators.is_some() || netplay_players.is_some()) {
+                bail!("Only player 1 sets the player count and admits spectators");
+            }
+            // The host states how many ports are in play; a guest only needs
+            // room for the one it asked for, and is told the real count when
+            // it joins.
+            let players = if player == 1 {
+                players
+            } else {
+                players.max(player)
+            };
+            // A guest names its host; a host may name each guest it will
+            // accept, or leave the list empty to admit any peer that
+            // presents the session ID.
+            if player == 1 {
+                if netplay_peers.len() >= usize::from(players) {
+                    bail!("--netplay-peer takes at most one address per guest");
+                }
+            } else if netplay_peers.len() != 1 {
+                bail!("a netplay guest needs one --netplay-peer IP:PORT for the host");
             }
             let code: String = netplay_session.ok_or_else(|| anyhow!(usage))?;
             let session = copperline::netplay::parse_session_id(&code)?;
             let options = copperline::netplay::Options {
                 bind: netplay_bind.ok_or_else(|| anyhow!(usage))?,
-                peer: netplay_peer.ok_or_else(|| anyhow!(usage))?,
+                peers: netplay_peers,
                 player: usize::from(player - 1),
+                players: usize::from(players),
                 session,
                 input_delay: netplay_delay.unwrap_or(2),
                 rollback_frames: netplay_rollback.unwrap_or(8),
@@ -1975,8 +2008,11 @@ fn print_help() {
          --netplay-relay URL            host using a custom HTTPS iroh relay\n  \
          --netplay-relay-only           force Internet traffic through the relay\n  \
          --netplay-bind IP:PORT         local UDP endpoint for two-player rollback netplay\n  \
-         --netplay-peer IP:PORT         remote player's UDP endpoint\n  \
-         --netplay-player 1|2           controller port owned by this player\n  \
+         --netplay-peer IP:PORT         the host's UDP endpoint; a host repeats it once\n  \
+         \x20                            per guest, or omits it to admit any peer\n  \
+         --netplay-player 1..4          controller port owned by this player\n  \
+         --netplay-players N            host: controller ports in play, 2..4 (ports 3 and 4\n  \
+         \x20                            are the parallel-port adapter's sockets)\n  \
          --netplay-session HEX          shared 32-digit hexadecimal session ID\n  \
          --netplay-delay FRAMES         local input delay, 0..6 (default 2)\n  \
          --netplay-rollback FRAMES      prediction limit, 1..12 (default 8)\n  \

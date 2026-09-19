@@ -16,12 +16,14 @@ impl Machine for ToyMachine {
         self.state = u64::from_le_bytes(bytes.try_into().unwrap());
         Ok(())
     }
-    fn frame(&mut self, input: [Input; 2], previous: [u8; 16], replay: bool) -> Result<()> {
-        self.state = self
-            .state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(u64::from(input[0].buttons) + 100 * u64::from(input[1].buttons));
-        for (i, key) in Input::merged_keys(input).iter().enumerate() {
+    fn frame(&mut self, inputs: &[Input], previous: [u8; 16], replay: bool) -> Result<()> {
+        for (port, input) in inputs.iter().enumerate() {
+            self.state = self
+                .state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(u64::from(input.buttons) * (port as u64 + 1));
+        }
+        for (i, key) in Input::merged_keys(inputs).iter().enumerate() {
             self.state = self.state.wrapping_add(u64::from(key ^ previous[i]));
         }
         if !replay {
@@ -48,7 +50,7 @@ fn late_reordered_and_duplicate_input_replays_to_the_baseline() -> Result<()> {
     for delay in [0, 2, 6] {
         let mut baseline = ToyMachine::default();
         let mut predicted = ToyMachine::default();
-        let mut rb = Rollback::new(0, delay, 8);
+        let mut rb = Rollback::new(0, 2, delay, 8);
         let mut previous = [0; 16];
         for f in 0..240 {
             // Delay alternating packets by 5 frames; deliver newest first and
@@ -60,11 +62,11 @@ fn late_reordered_and_duplicate_input_replays_to_the_baseline() -> Result<()> {
                     } else {
                         input(remote - u64::from(delay), 1)
                     };
-                    rb.receive(remote, value)?;
-                    rb.receive(remote, value)?;
+                    rb.receive(1, remote, value)?;
+                    rb.receive(1, remote, value)?;
                 }
             }
-            rb.acknowledged = f + u64::from(delay);
+            rb.acknowledged[1] = f + u64::from(delay);
             rb.reconcile(&mut predicted)?;
             assert!(rb.advance(&mut predicted, input(f, 0))?);
             let pair = if f < u64::from(delay) {
@@ -75,11 +77,11 @@ fn late_reordered_and_duplicate_input_replays_to_the_baseline() -> Result<()> {
                     input(f - u64::from(delay), 1),
                 ]
             };
-            baseline.frame(pair, previous, false)?;
-            previous = Input::merged_keys(pair);
+            baseline.frame(&pair, previous, false)?;
+            previous = Input::merged_keys(&pair);
         }
         for f in 235..240 {
-            rb.receive(f, input(f - u64::from(delay), 1))?;
+            rb.receive(1, f, input(f - u64::from(delay), 1))?;
         }
         rb.reconcile(&mut predicted)?;
         assert_eq!(predicted.state, baseline.state, "delay {delay}");
@@ -96,7 +98,7 @@ fn late_reordered_and_duplicate_input_replays_to_the_baseline() -> Result<()> {
 
 #[test]
 fn prediction_window_stalls_then_recovers_without_resampling_input() -> Result<()> {
-    let mut rb = Rollback::new(0, 0, 3);
+    let mut rb = Rollback::new(0, 2, 0, 3);
     let mut machine = ToyMachine::default();
     for f in 0..3 {
         assert!(rb.advance(&mut machine, input(f, 0))?);
@@ -105,9 +107,9 @@ fn prediction_window_stalls_then_recovers_without_resampling_input() -> Result<(
     assert!(!rb.advance(&mut machine, original)?);
     assert!(!rb.advance(&mut machine, input(99, 0))?);
     for f in 0..4 {
-        rb.receive(f, input(f, 1))?;
+        rb.receive(1, f, input(f, 1))?;
     }
-    rb.acknowledge(4)?;
+    rb.acknowledge(1, 4)?;
     rb.reconcile(&mut machine)?;
     assert_eq!(rb.local[&3], original);
     assert!(rb.advance(&mut machine, input(99, 0))?);
@@ -118,27 +120,27 @@ fn prediction_window_stalls_then_recovers_without_resampling_input() -> Result<(
 fn delayed_input_from_a_faster_peer_stays_within_the_receive_horizon() -> Result<()> {
     for delay in [0, 2, 6] {
         for window in [1, 8, 12] {
-            let mut slow = Rollback::new(0, delay, window);
-            let mut fast = Rollback::new(1, delay, window);
+            let mut slow = Rollback::new(0, 2, delay, window);
+            let mut fast = Rollback::new(1, 2, delay, window);
             let mut machine = ToyMachine::default();
             slow.submit_local(input(0, 0));
-            fast.receive(u64::from(delay), input(0, 0))?;
+            fast.receive(0, u64::from(delay), input(0, 0))?;
             loop {
                 let advanced = fast.advance(&mut machine, input(fast.current, 1))?;
                 // The slow peer polls and acknowledges input while its machine
                 // remains at frame zero, as during expensive rendering or I/O.
                 for (&frame, &value) in &fast.local {
-                    slow.receive(frame, value)?;
+                    slow.receive(1, frame, value)?;
                 }
-                fast.acknowledge(slow.received)?;
+                fast.acknowledge(0, slow.received[1])?;
                 if !advanced {
                     break;
                 }
             }
             assert_eq!(fast.current, u64::from(delay + window) + 1);
             let last = fast.current + u64::from(delay);
-            assert_eq!(slow.received, last + 1);
-            assert!(slow.receive(last + 1, Input::default()).is_err());
+            assert_eq!(slow.received[1], last + 1);
+            assert!(slow.receive(1, last + 1, Input::default()).is_err());
         }
     }
     Ok(())
@@ -146,11 +148,11 @@ fn delayed_input_from_a_faster_peer_stays_within_the_receive_horizon() -> Result
 
 #[test]
 fn invalid_input_and_ack_are_rejected() -> Result<()> {
-    let mut rb = Rollback::new(0, 0, 8);
-    rb.receive(0, input(0, 1))?;
-    assert!(rb.receive(0, input(999, 1)).is_err());
-    assert!(rb.receive(u64::MAX, Input::default()).is_err());
-    assert!(rb.acknowledge(100).is_err());
+    let mut rb = Rollback::new(0, 2, 0, 8);
+    rb.receive(1, 0, input(0, 1))?;
+    assert!(rb.receive(1, 0, input(999, 1)).is_err());
+    assert!(rb.receive(1, u64::MAX, Input::default()).is_err());
+    assert!(rb.acknowledge(1, 100).is_err());
     Ok(())
 }
 
@@ -185,11 +187,12 @@ fn wire_round_trip_and_bounded_rejection() {
         session: [1; 16],
         identity: [2; 32],
         player: 1,
+        players: 2,
         ready: true,
         delay: 2,
         window: 8,
-        ack: 3,
-        inputs: vec![(3, input(3, 1)), (4, input(4, 1))],
+        acks: [3, 0, 0, 0],
+        inputs: vec![(0, 3, input(3, 1)), (0, 4, input(4, 1))],
         checksum: Some((60, [3; 32])),
     };
     let bytes = packet.encode();
@@ -197,6 +200,7 @@ fn wire_round_trip_and_bounded_rejection() {
     full.inputs = (0..wire::MAX_INPUTS as u64)
         .map(|frame| {
             (
+                0,
                 frame,
                 Input {
                     mouse_dx: i16::MIN,
@@ -209,7 +213,7 @@ fn wire_round_trip_and_bounded_rejection() {
         .collect();
     let maximum = full.encode();
     assert_eq!(maximum.len(), wire::MAX_PACKET);
-    assert!(maximum.len() <= 1200);
+    assert!(maximum.len() <= 1400, "a packet fits an ordinary datagram");
     assert_eq!(wire::Packet::decode(&maximum), Some(full));
     let mut invalid_mouse = bytes.clone();
     invalid_mouse[wire::HEADER + wire::INPUT_RECORD - 1] = 8;
@@ -224,6 +228,42 @@ fn wire_round_trip_and_bounded_rejection() {
     for length in [0, 1, 117, 1200, 65535] {
         assert!(wire::Packet::decode(&vec![0xff; length]).is_none());
     }
+    // A four-player packet relays every other port, ordered by port then
+    // frame, and acknowledges each of them separately.
+    let relayed = wire::Packet {
+        session: [5; 16],
+        identity: [6; 32],
+        player: 0,
+        players: 4,
+        ready: true,
+        delay: 2,
+        window: 8,
+        acks: [0, 11, 12, 13],
+        inputs: vec![
+            (1, 11, input(11, 1)),
+            (1, 12, input(12, 1)),
+            (2, 12, input(12, 2)),
+            (3, 13, input(13, 3)),
+        ],
+        checksum: None,
+    };
+    let bytes = relayed.encode();
+    assert_eq!(wire::Packet::decode(&bytes), Some(relayed.clone()));
+    // Records must not repeat or go backwards within a port, a port must
+    // exist, and an unused port acknowledges nothing.
+    let mut unordered = relayed.clone();
+    unordered.inputs.swap(0, 1);
+    assert!(wire::Packet::decode(&unordered.encode()).is_none());
+    let mut absent = relayed.clone();
+    absent.players = 2;
+    assert!(wire::Packet::decode(&absent.encode()).is_none());
+    let mut spare = relayed.clone();
+    spare.players = 2;
+    spare.inputs.truncate(1);
+    assert!(
+        wire::Packet::decode(&spare.encode()).is_none(),
+        "ports 3 and 4 cannot acknowledge in a two-player session"
+    );
 }
 
 pub(super) fn emulator() -> Result<Emulator> {
@@ -240,10 +280,14 @@ pub(super) fn emulator() -> Result<Emulator> {
     rom[..4].copy_from_slice(&0x0007fffeu32.to_be_bytes());
     rom[4..8].copy_from_slice(&(ROM_BASE as u32 + 8).to_be_bytes());
     // Copy both JOYDAT registers and CIA fire lines to RAM; also drive COLOR00
-    // from port 1 so the rendered output depends on the predicted input.
-    let program: [u16; 23] = [
+    // from port 1 so the rendered output depends on the predicted input. The
+    // last two reads are CIA-A port B and CIA-B port A, which carry the
+    // four-player adapter's direction switches and fire buttons, so a
+    // guest's machine state depends on ports 3 and 4 as well.
+    let program: [u16; 33] = [
         0x33f9, 0x00df, 0xf00a, 0, 0x0180, 0x33f9, 0x00df, 0xf00c, 0, 0x0182, 0x13f9, 0x00bf,
-        0xe001, 0, 0x0184, 0x33f9, 0x00df, 0xf00a, 0x00df, 0xf180, 0x52b8, 0x0188, 0x60d2,
+        0xe001, 0, 0x0184, 0x33f9, 0x00df, 0xf00a, 0x00df, 0xf180, 0x52b8, 0x0188, 0x13f9, 0x00bf,
+        0xe101, 0, 0x0185, 0x13f9, 0x00bf, 0xd000, 0, 0x0186, 0x60be,
     ];
     for (n, word) in program.iter().enumerate() {
         rom[8 + n * 2..10 + n * 2].copy_from_slice(&word.to_be_bytes());
@@ -298,23 +342,23 @@ fn replay_matches_devices(devices: [crate::bus::PortDevice; 2]) -> Result<()> {
             emu.bus_mut().input.set_port_device(port, device);
         }
     }
-    let mut rb = Rollback::new(0, 0, 8);
+    let mut rb = Rollback::new(0, 2, 0, 8);
     let mut previous = [0; 16];
     for f in 0..60 {
         if f % 6 == 5 && f < 59 {
             for remote in (f - 5..=f).rev() {
-                rb.receive(remote, input(remote, 1))?;
+                rb.receive(1, remote, input(remote, 1))?;
             }
         }
-        rb.acknowledged = f;
+        rb.acknowledged[1] = f;
         rb.reconcile(&mut EmulatedMachine(&mut predicted))?;
         assert!(rb.advance(&mut EmulatedMachine(&mut predicted), input(f, 0))?);
         let pair = [input(f, 0), input(f, 1)];
-        EmulatedMachine(&mut baseline).frame(pair, previous, false)?;
-        previous = Input::merged_keys(pair);
+        EmulatedMachine(&mut baseline).frame(&pair, previous, false)?;
+        previous = Input::merged_keys(&pair);
     }
     for f in 54..60 {
-        rb.receive(f, input(f, 1))?;
+        rb.receive(1, f, input(f, 1))?;
     }
     rb.reconcile(&mut EmulatedMachine(&mut predicted))?;
     assert!(rb.rollbacks > 1);
@@ -339,8 +383,9 @@ fn replay_matches_devices(devices: [crate::bus::PortDevice; 2]) -> Result<()> {
 fn options(peer: SocketAddr, player: usize) -> Options {
     Options {
         bind: "127.0.0.1:0".parse().unwrap(),
-        peer,
+        peers: vec![peer],
         player,
+        players: 2,
         session: [42; 16],
         input_delay: 0,
         rollback_frames: 8,
@@ -377,8 +422,8 @@ fn udp_pair_with_delay(delay: u8, window: u8) -> Result<()> {
         Connection::<NativeTransport>::new(session_options(1)?, &mut machines[1], &safe_config()?)?,
     ];
     let destinations = [
-        sessions[0].transport.socket().local_addr()?,
-        sessions[1].transport.socket().local_addr()?,
+        sessions[0].links[0].transport.socket().local_addr()?,
+        sessions[1].links[0].transport.socket().local_addr()?,
     ];
     let mut queued = Vec::<(u64, usize, Vec<u8>)>::new();
     let mut packets = 0u64;
@@ -386,7 +431,7 @@ fn udp_pair_with_delay(delay: u8, window: u8) -> Result<()> {
         for player in 0..2 {
             let frame = sessions[player].status().frame;
             // A virtual transport tick is the retry clock for this test.
-            sessions[player].last_sent = None;
+            sessions[player].links[0].last_sent = None;
             sessions[player].step(
                 &mut machines[player],
                 input(frame, player as u64),
@@ -445,14 +490,18 @@ fn mismatch_desync_and_disconnect_stop_the_session() -> Result<()> {
         session: [42; 16],
         identity: [0; 32],
         player: 1,
+        players: 2,
         ready: true,
         delay: 0,
         window: 8,
-        ack: 0,
+        acks: [0; 4],
         inputs: vec![],
         checksum: None,
     };
-    peer.send_to(&packet.encode(), session.transport.socket().local_addr()?)?;
+    peer.send_to(
+        &packet.encode(),
+        session.links[0].transport.socket().local_addr()?,
+    )?;
     assert!(poll_error(&mut session, &mut emu)
         .to_string()
         .contains("mismatch"));
@@ -469,10 +518,13 @@ fn mismatch_desync_and_disconnect_stop_the_session() -> Result<()> {
     session.connected = true;
     session.rollback.current = 60;
     session.rollback.confirmed = 60;
-    session.rollback.received = 60;
+    session.rollback.received = [60; MAX_PLAYERS];
     session.rollback.hashes.insert(60, [1; 32]);
     packet.checksum = Some((60, [2; 32]));
-    peer.send_to(&packet.encode(), session.transport.socket().local_addr()?)?;
+    peer.send_to(
+        &packet.encode(),
+        session.links[0].transport.socket().local_addr()?,
+    )?;
     assert!(poll_error(&mut session, &mut emu)
         .to_string()
         .contains("desynchronized"));
@@ -482,7 +534,7 @@ fn mismatch_desync_and_disconnect_stop_the_session() -> Result<()> {
         &safe_config()?,
     )?;
     session.connected = true;
-    session.last_received = Instant::now() - Duration::from_secs(11);
+    session.links[0].last_received = Instant::now() - Duration::from_secs(11);
     assert!(session
         .step(&mut emu, Input::default(), false)
         .unwrap_err()
@@ -495,6 +547,45 @@ pub(super) fn safe_config() -> Result<crate::config::Config> {
     let mut cfg = crate::config::Config::try_from(crate::config::RawConfig::default())?;
     cfg.serial.mode = crate::config::SerialMode::Off;
     Ok(cfg)
+}
+
+/// The same machine with the passive four-player adapter plugged into the
+/// parallel port and a joystick in each of its sockets, which is what
+/// players three and four need.
+pub(super) fn emulator_with_adapter() -> Result<Emulator> {
+    let mut emu = emulator()?;
+    emu.bus_mut().input.set_parallel_adapter(true, [true; 2]);
+    Ok(emu)
+}
+
+pub(super) fn adapter_config() -> Result<crate::config::Config> {
+    let mut cfg = safe_config()?;
+    cfg.parallel.device = crate::config::ParallelDevice::JoystickAdapter;
+    cfg.parallel_joysticks = [true; 2];
+    // Four joysticks: the game ports as well as the adapter's sockets.
+    cfg.port_devices = [crate::bus::PortDevice::Joystick; 2];
+    Ok(cfg)
+}
+
+#[test]
+fn netplay_needs_the_adapter_for_players_three_and_four() -> Result<()> {
+    // The four-player adapter is passive wiring, so netplay keeps it where
+    // a printer or sampler is refused.
+    let mut cfg = adapter_config()?;
+    prepare_config(&mut cfg)?;
+    let plain = emulator()?;
+    let fitted = emulator_with_adapter()?;
+    for players in 2..=MAX_PLAYERS {
+        assert!(validate_player_ports(&fitted, players).is_ok());
+        assert_eq!(
+            validate_player_ports(&plain, players).is_ok(),
+            players == 2,
+            "{players} players without an adapter"
+        );
+    }
+    let error = validate_player_ports(&plain, 3).unwrap_err().to_string();
+    assert!(error.contains("port3"), "{error}");
+    Ok(())
 }
 
 #[test]
@@ -549,14 +640,18 @@ fn capture_waits_for_the_peer_to_acknowledge_retransmitted_local_input() -> Resu
         session: session.settings.session,
         identity: session.identity,
         player: 1,
+        players: 2,
         ready: true,
         delay: 0,
         window: 8,
-        ack: 0,
-        inputs: vec![(0, input(0, 1))],
+        acks: [0; 4],
+        inputs: vec![(1, 0, input(0, 1))],
         checksum: None,
     };
-    peer.send_to(&packet.encode(), session.transport.socket().local_addr()?)?;
+    peer.send_to(
+        &packet.encode(),
+        session.links[0].transport.socket().local_addr()?,
+    )?;
     for _ in 0..100 {
         if session.step(&mut emu, input(0, 0), true)? {
             break;
@@ -570,7 +665,8 @@ fn capture_waits_for_the_peer_to_acknowledge_retransmitted_local_input() -> Resu
     // Discard the first local input datagram as an asymmetric packet loss.
     let mut bytes = [0; wire::MAX_PACKET + 1];
     let received_input = |bytes: &[u8]| {
-        wire::Packet::decode(bytes).is_some_and(|packet| packet.inputs.contains(&(0, input(0, 0))))
+        wire::Packet::decode(bytes)
+            .is_some_and(|packet| packet.inputs.contains(&(0, 0, input(0, 0))))
     };
     loop {
         let len = peer.recv(&mut bytes)?;
@@ -586,8 +682,11 @@ fn capture_waits_for_the_peer_to_acknowledge_retransmitted_local_input() -> Resu
         "capture polling retransmits input"
     );
     assert!(!session.status().ready_to_capture());
-    packet.ack = 1;
-    peer.send_to(&packet.encode(), session.transport.socket().local_addr()?)?;
+    packet.acks[0] = 1;
+    peer.send_to(
+        &packet.encode(),
+        session.links[0].transport.socket().local_addr()?,
+    )?;
     for _ in 0..100 {
         session.step(&mut emu, Input::default(), false)?;
         if session.status().ready_to_capture() {
@@ -614,7 +713,7 @@ fn poll_error(session: &mut Connection<NativeTransport>, emu: &mut Emulator) -> 
 #[test]
 fn netplay_snapshot_preserves_the_completed_frame_and_runtime_latches() -> Result<()> {
     let mut emu = emulator()?;
-    EmulatedMachine(&mut emu).frame([input(30, 0), input(30, 1)], [0; 16], false)?;
+    EmulatedMachine(&mut emu).frame(&[input(30, 0), input(30, 1)], [0; 16], false)?;
     let before = emu.netplay_snapshot()?;
     emu.netplay_restore(&before)?;
     assert_eq!(emu.netplay_snapshot()?, before);
@@ -626,6 +725,7 @@ fn queued_peers_confirm_input_driven_machine_state() -> Result<()> {
     let mut machines = [emulator()?, emulator()?];
     let settings = |player| Settings {
         player,
+        players: 2,
         session: [42; 16],
         input_delay: 0,
         rollback_frames: 8,
@@ -673,7 +773,7 @@ fn queued_peers_confirm_input_driven_machine_state() -> Result<()> {
     // result from both transport adapters silently dropping the same input.
     let mut baseline = emulator()?;
     for _ in 0..60 {
-        EmulatedMachine(&mut baseline).frame(inputs, [0; 16], false)?;
+        EmulatedMachine(&mut baseline).frame(&inputs, [0; 16], false)?;
     }
     for machine in &machines {
         assert_eq!(machine.netplay_snapshot()?, baseline.netplay_snapshot()?);
@@ -692,6 +792,7 @@ fn recognized_session_reports_incompatible_build_but_ignores_other_sessions() ->
         let mut peer = Connection::with_transport(
             Settings {
                 player: 0,
+                players: 2,
                 session: [42; 16],
                 input_delay: 0,
                 rollback_frames: 8,
@@ -721,7 +822,7 @@ fn recognized_session_reports_incompatible_build_but_ignores_other_sessions() ->
 fn udp_transport_discards_foreign_source_and_keeps_expected_peer() -> Result<()> {
     let expected = UdpSocket::bind("127.0.0.1:0")?;
     let foreign = UdpSocket::bind("127.0.0.1:0")?;
-    let mut transport = UdpTransport::new(options(expected.local_addr()?, 0))?;
+    let mut transport = UdpTransport::connect(options(expected.local_addr()?, 0))?;
     foreign.send_to(&[1], transport.socket.local_addr()?)?;
     let mut bytes = [0; 8];
     let receive = |transport: &mut UdpTransport, bytes: &mut [u8]| -> Result<Option<usize>> {
@@ -748,8 +849,9 @@ fn mouse_prediction_holds_buttons_without_repeating_motion() -> Result<()> {
         .bus_mut()
         .input
         .set_port_device(1, crate::bus::PortDevice::Mouse);
-    let mut rb = Rollback::new(0, 0, 8);
+    let mut rb = Rollback::new(0, 2, 0, 8);
     rb.receive(
+        1,
         0,
         Input {
             mouse_dx: -17,
@@ -766,6 +868,7 @@ fn mouse_prediction_holds_buttons_without_repeating_motion() -> Result<()> {
     }
     // A future packet must not seed motion or held buttons on an earlier frame.
     rb.receive(
+        1,
         6,
         Input {
             mouse_dx: 80,
@@ -789,6 +892,7 @@ fn mouse_motion_is_consumed_once_when_sampling_through_stalls() -> Result<()> {
     cfg.serial.mode = crate::config::SerialMode::Off;
     let settings = Settings {
         player: 0,
+        players: 2,
         session: [23; 16],
         input_delay: 0,
         rollback_frames: 1,
@@ -824,11 +928,11 @@ fn mouse_motion_is_consumed_once_when_sampling_through_stalls() -> Result<()> {
         pending.mouse_pending.0, 57,
         "new motion waits for the next unsampled frame"
     );
-    peer.rollback.receive(0, Input::default())?;
-    peer.rollback.acknowledge(2)?;
+    peer.rollback.receive(1, 0, Input::default())?;
+    peer.rollback.acknowledge(1, 2)?;
     assert!(peer.step_local(&mut machine, &mut pending, true)?);
     assert_eq!(pending.mouse_pending.0, 57);
-    peer.rollback.receive(1, Input::default())?;
+    peer.rollback.receive(1, 1, Input::default())?;
     assert!(peer.step_local(&mut machine, &mut pending, true)?);
     assert_eq!(pending.mouse_pending, (0, 0));
     assert_eq!(pending.held.mouse_buttons, 7);
@@ -850,6 +954,7 @@ fn large_pending_mouse_motion_reaches_the_wire_without_truncation() -> Result<()
     let mut peer = Connection::with_transport(
         Settings {
             player: 0,
+            players: 2,
             session: [24; 16],
             input_delay: 0,
             rollback_frames: 1,
@@ -866,17 +971,18 @@ fn large_pending_mouse_motion_reaches_the_wire_without_truncation() -> Result<()
             session: [24; 16],
             identity: peer.identity,
             player: 1,
+            players: 2,
             ready: true,
             delay: 0,
             window: 1,
-            ack: frame,
-            inputs: vec![(frame, Input::default())],
+            acks: [frame, 0, 0, 0],
+            inputs: vec![(1, frame, Input::default())],
             checksum: None,
         };
         peer.transport_mut().push(&remote.encode())?;
         assert!(peer.step_local(&mut machine, &mut pending, true)?);
         while let Some(bytes) = peer.transport_mut().pop() {
-            for (number, input) in wire::Packet::decode(&bytes).unwrap().inputs {
+            for (_, number, input) in wire::Packet::decode(&bytes).unwrap().inputs {
                 assert!(input.mouse_dx.abs() <= 100 && input.mouse_dy.abs() <= 100);
                 transmitted.insert(number, input);
             }
@@ -906,7 +1012,7 @@ fn internet_netplay_relay_only_confirms_machine_states() -> Result<()> {
 
 #[cfg(feature = "netplay-internet")]
 fn internet_pair(relay_only: bool) -> Result<()> {
-    let host = internet::Options::host(2, 8, "", relay_only, 0)?;
+    let host = internet::Options::host(2, 8, 2, "", relay_only, 0)?;
     let guest = internet::Options::join(&host.invitation.encode()?, relay_only)?;
     let mut machines = [emulator()?, emulator()?];
     let cfg = safe_config()?;
@@ -974,6 +1080,7 @@ fn pending_transport_holds_cold_boot_and_input_until_setup_finishes() -> Result<
     let mut peer = Connection::with_transport(
         Settings {
             player: 0,
+            players: 2,
             session: [42; 16],
             input_delay: 2,
             rollback_frames: 8,
@@ -999,9 +1106,9 @@ fn confirmed_log_matches_the_baseline_and_drives_a_spectator() -> Result<()> {
     for delay in [0, 2, 6] {
         let mut baseline = ToyMachine::default();
         let mut predicted = ToyMachine::default();
-        let mut rb = Rollback::new(0, delay, 8);
+        let mut rb = Rollback::new(0, 2, delay, 8);
         rb.log = Some(Default::default());
-        let mut feed = Feed::new(1 << 20);
+        let mut feed = Feed::new(1 << 20, 2);
         let drain = |rb: &mut Rollback, feed: &mut Feed| -> Result<()> {
             let log = rb.log.as_mut().unwrap();
             for (frame, inputs) in log.inputs.drain(..) {
@@ -1021,10 +1128,10 @@ fn confirmed_log_matches_the_baseline_and_drives_a_spectator() -> Result<()> {
                     } else {
                         input(remote - u64::from(delay), 1)
                     };
-                    rb.receive(remote, value)?;
+                    rb.receive(1, remote, value)?;
                 }
             }
-            rb.acknowledged = f + u64::from(delay);
+            rb.acknowledged[1] = f + u64::from(delay);
             rb.reconcile(&mut predicted)?;
             assert!(rb.advance(&mut predicted, input(f, 0))?);
             drain(&mut rb, &mut feed)?;
@@ -1036,11 +1143,11 @@ fn confirmed_log_matches_the_baseline_and_drives_a_spectator() -> Result<()> {
                     input(f - u64::from(delay), 1),
                 ]
             };
-            baseline.frame(pair, previous, false)?;
-            previous = Input::merged_keys(pair);
+            baseline.frame(&pair, previous, false)?;
+            previous = Input::merged_keys(&pair);
         }
         for f in 235..240 {
-            rb.receive(f, input(f - u64::from(delay), 1))?;
+            rb.receive(1, f, input(f - u64::from(delay), 1))?;
         }
         rb.reconcile(&mut predicted)?;
         drain(&mut rb, &mut feed)?;
@@ -1065,16 +1172,25 @@ fn confirmed_log_matches_the_baseline_and_drives_a_spectator() -> Result<()> {
 }
 
 #[test]
-fn udp_host_demultiplexes_spectator_control_packets_by_source() -> Result<()> {
-    use super::control::{Control, ROLE_HOST, ROLE_SPECTATOR};
-    let player = UdpSocket::bind("127.0.0.1:0")?;
+fn udp_host_demultiplexes_guest_and_spectator_links_by_source() -> Result<()> {
+    use super::control::{Control, ROLE_GUEST, ROLE_HOST, ROLE_SPECTATOR};
+    use super::transport::SlotKind;
+    let guests = [
+        UdpSocket::bind("127.0.0.1:0")?,
+        UdpSocket::bind("127.0.0.1:0")?,
+        UdpSocket::bind("127.0.0.1:0")?,
+    ];
     let spectators = [
         UdpSocket::bind("127.0.0.1:0")?,
         UdpSocket::bind("127.0.0.1:0")?,
     ];
-    let mut options = options(player.local_addr()?, 0);
+    // A three-player host with one spectator place, naming no guest
+    // addresses: any source presenting the session may claim a port.
+    let mut options = options(guests[0].local_addr()?, 0);
+    options.peers.clear();
+    options.players = 3;
     options.spectators = 1;
-    let mut transport = UdpTransport::new(options.clone())?;
+    let mut transport = UdpTransport::listen(options.clone())?;
     let host = transport.socket.local_addr()?;
     let hello = |session: [u8; 16], role: u8| -> Result<Vec<u8>> {
         let mut control = Control::new(PacketQueue::default(), session, role, ROLE_HOST);
@@ -1093,43 +1209,77 @@ fn udp_host_demultiplexes_spectator_control_packets_by_source() -> Result<()> {
             std::thread::yield_now();
         }
     };
-    // Foreign datagrams that are not spectator control packets are still
-    // discarded: a bare byte, a player-role packet, a wrong session.
-    spectators[0].send_to(&[1], host)?;
-    assert_eq!(receive(&mut transport)?, Some(0));
-    spectators[0].send_to(&hello(options.session, 1)?, host)?;
+    // Datagrams that claim no role are discarded: a bare byte, and a
+    // control packet for an unrelated session.
+    guests[0].send_to(&[1], host)?;
     assert_eq!(receive(&mut transport)?, Some(0));
     let mut wrong = options.session;
     wrong[0] ^= 1;
-    spectators[0].send_to(&hello(wrong, ROLE_SPECTATOR)?, host)?;
+    guests[0].send_to(&hello(wrong, ROLE_GUEST)?, host)?;
     assert_eq!(receive(&mut transport)?, Some(0));
-    assert!(transport.take_spectators().is_empty());
-    // A spectator hello claims the one place; a second source is refused
-    // while it is taken.
-    let packet = hello(options.session, ROLE_SPECTATOR)?;
-    spectators[0].send_to(&packet, host)?;
+    assert!(transport.take_links(SlotKind::Player).is_empty());
+    assert!(transport.take_links(SlotKind::Spectator).is_empty());
+    // Two guests claim the two free ports; a third is refused.
+    let guest_hello = hello(options.session, ROLE_GUEST)?;
+    for guest in &guests[..2] {
+        guest.send_to(&guest_hello, host)?;
+        assert_eq!(receive(&mut transport)?, Some(0));
+    }
+    let mut player_links = transport.take_links(SlotKind::Player);
+    assert_eq!(player_links.len(), 2);
+    guests[2].send_to(&guest_hello, host)?;
     assert_eq!(receive(&mut transport)?, Some(0));
-    let mut links = transport.take_spectators();
-    assert_eq!(links.len(), 1);
-    spectators[1].send_to(&packet, host)?;
+    assert!(transport.take_links(SlotKind::Player).is_empty());
+    // A spectator claims its own place and never a player's.
+    let watch_hello = hello(options.session, ROLE_SPECTATOR)?;
+    spectators[0].send_to(&watch_hello, host)?;
     assert_eq!(receive(&mut transport)?, Some(0));
-    assert!(transport.take_spectators().is_empty());
-    // The link reads what its source sent and answers that source; the
-    // player's packets keep arriving on the main transport.
+    let mut watch_links = transport.take_links(SlotKind::Spectator);
+    assert_eq!(watch_links.len(), 1);
+    spectators[1].send_to(&watch_hello, host)?;
+    assert_eq!(receive(&mut transport)?, Some(0));
+    assert!(transport.take_links(SlotKind::Spectator).is_empty());
+    // Each link reads what its own source sent and answers that source.
     let mut bytes = [0; MAX_PACKET];
-    assert_eq!(links[0].receive(&mut bytes)?, Some(packet.len()));
-    assert_eq!(&bytes[..packet.len()], &packet[..]);
-    assert_eq!(links[0].receive(&mut bytes)?, None);
-    assert!(links[0].send(&[9, 9])?);
-    let (len, from) = spectators[0].recv_from(&mut bytes)?;
+    assert_eq!(
+        player_links[0].receive(&mut bytes)?,
+        Some(guest_hello.len())
+    );
+    assert_eq!(&bytes[..guest_hello.len()], &guest_hello[..]);
+    assert_eq!(player_links[0].receive(&mut bytes)?, None);
+    assert!(player_links[0].send(&[9, 9])?);
+    let (len, from) = guests[0].recv_from(&mut bytes)?;
     assert_eq!((&bytes[..len], from), (&[9u8, 9][..], host));
-    player.send_to(&[2, 3], host)?;
-    assert_eq!(receive(&mut transport)?, Some(2));
-    // Dropping the link frees its place for another spectator.
-    drop(links);
-    spectators[1].send_to(&packet, host)?;
+    assert_eq!(watch_links[0].receive(&mut bytes)?, Some(watch_hello.len()));
+    // An admitted guest's later datagrams reach its link whatever they
+    // carry: input packets are not control packets.
+    assert_eq!(
+        player_links[1].receive(&mut bytes)?,
+        Some(guest_hello.len())
+    );
+    guests[1].send_to(&[2, 3], host)?;
     assert_eq!(receive(&mut transport)?, Some(0));
-    assert_eq!(transport.take_spectators().len(), 1);
+    assert_eq!(player_links[1].receive(&mut bytes)?, Some(2));
+    assert_eq!(&bytes[..2], &[2, 3]);
+    // Dropping a link frees its port for another guest.
+    player_links.remove(0);
+    guests[2].send_to(&guest_hello, host)?;
+    assert_eq!(receive(&mut transport)?, Some(0));
+    assert_eq!(transport.take_links(SlotKind::Player).len(), 1);
+    drop(player_links);
+    drop(watch_links);
+    // A host that names its guests admits those addresses only.
+    let mut named = options.clone();
+    named.players = 2;
+    named.peers = vec![guests[0].local_addr()?];
+    let mut transport = UdpTransport::listen(named)?;
+    let host = transport.socket.local_addr()?;
+    guests[1].send_to(&guest_hello, host)?;
+    assert_eq!(receive(&mut transport)?, Some(0));
+    assert!(transport.take_links(SlotKind::Player).is_empty());
+    guests[0].send_to(&guest_hello, host)?;
+    assert_eq!(receive(&mut transport)?, Some(0));
+    assert_eq!(transport.take_links(SlotKind::Player).len(), 1);
     Ok(())
 }
 
@@ -1140,7 +1290,7 @@ fn internet_netplay_admits_a_late_spectator() -> Result<()> {
     std::thread::Builder::new()
         .stack_size(48 * 1024 * 1024)
         .spawn(|| -> Result<()> {
-            let host = internet::Options::host(2, 8, "", false, 1)?;
+            let host = internet::Options::host(2, 8, 2, "", false, 1)?;
             let guest = internet::Options::join(&host.invitation.encode()?, false)?;
             let watch = internet::SpectatorOptions::watch(
                 &host.spectator_invitation().unwrap().encode()?,

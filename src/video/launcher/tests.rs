@@ -5813,7 +5813,9 @@ fn netplay_setup_edits_all_controls_without_persisting_connection_details() -> R
         assert!(state.row_applies(field));
     }
     for (field, count) in [
-        (F::NetplayPlayer, 3),
+        // Every controller port the adapter can reach, then Spectator.
+        (F::NetplayPlayer, 5),
+        (F::NetplayPlayers, 3),
         (F::NetplayDelay, 7),
         (F::NetplayRollback, 12),
         (F::NetplaySpectators, 9),
@@ -5832,7 +5834,7 @@ fn netplay_setup_edits_all_controls_without_persisting_connection_details() -> R
     }
     let options = state.netplay.options()?.unwrap();
     assert!(options.bind.is_ipv6());
-    assert!(options.peer.is_ipv6());
+    assert!(options.peers.iter().all(|peer| peer.is_ipv6()));
     assert!(TABS.contains(&LauncherTab::Netplay));
     assert!(tabs(true).contains(&LauncherTab::Netplay));
     let raw = state.setup.to_raw();
@@ -5881,11 +5883,19 @@ fn netplay_spectator_role_watches_the_host_and_only_hosts_admit_spectators() -> 
     state.netplay.new_code();
     let options = state.netplay.connection_options()?.unwrap();
     assert_eq!((options.role(), options.spectators()), (Role::Host, 8));
-    // Player 2 admits nobody, and the row says so.
-    state.netplay.cycle(F::NetplayPlayer, true);
-    assert_eq!(state.netplay.role(), Role::Guest);
-    assert!(!state.row_applies(F::NetplaySpectators));
-    assert_eq!(state.netplay.connection_options()?.unwrap().spectators(), 0);
+    // Every guest admits nobody, and the row says so. Ports 3 and 4 sit in
+    // the parallel adapter, which the machine pages then show fitted.
+    for port in 2..=crate::netplay::MAX_PLAYERS {
+        state.netplay.cycle(F::NetplayPlayer, true);
+        assert_eq!(state.netplay.role(), Role::Guest);
+        assert_eq!(
+            state.row_value(F::NetplayPlayer),
+            format!("{port} (port {port})")
+        );
+        assert!(!state.row_applies(F::NetplaySpectators));
+        assert!(!state.row_applies(F::NetplayPlayers));
+        assert_eq!(state.netplay.connection_options()?.unwrap().spectators(), 0);
+    }
     // A spectator addresses the host with the session code and negotiates
     // no timing of its own.
     state.netplay.cycle(F::NetplayPlayer, true);

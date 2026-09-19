@@ -12580,8 +12580,9 @@ fn netplay_routes_local_inputs_and_blocks_unilateral_menu_actions() -> anyhow::R
             cfg.port_devices[0] = crate::bus::PortDevice::Joystick;
             let options = crate::netplay::Options {
                 bind: "127.0.0.1:0".parse()?,
-                peer: "127.0.0.1:19732".parse()?,
+                peers: vec!["127.0.0.1:19732".parse()?],
                 player: 0,
+                players: 2,
                 session: [7; 16],
                 input_delay: 0,
                 rollback_frames: 8,
@@ -12830,8 +12831,9 @@ fn netplay_continuous_mouse_corrections_present_every_frame() -> anyhow::Result<
                 let session = Session::new(
                     Options {
                         bind: addresses[player],
-                        peer: addresses[1 - player],
+                        peers: vec![addresses[1 - player]],
                         player,
+                        players: 2,
                         session: [32; 16],
                         input_delay: 2,
                         rollback_frames: 8,
@@ -12946,8 +12948,9 @@ fn netplay_host_mouse_owns_only_the_local_mouse_port() -> anyhow::Result<()> {
                 let session = crate::netplay::Session::new(
                     crate::netplay::Options {
                         bind: "127.0.0.1:0".parse()?,
-                        peer: "127.0.0.1:19732".parse()?,
+                        peers: vec!["127.0.0.1:19732".parse()?],
                         player,
+                        players: 2,
                         session: [31; 16],
                         input_delay: 0,
                         rollback_frames: 8,

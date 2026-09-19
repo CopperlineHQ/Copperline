@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Spectator feed: the host's confirmed two-player input history, streamed in
-//! order to lockstep observers over a reliable channel. Records use the same
+//! Spectator feed: the host's confirmed input history for every controller
+//! port, streamed in order to lockstep observers over a reliable channel. Records use the same
 //! fixed layouts as the input datagrams. Decoding is bounded and never
 //! deserializes machine state: a spectator rebuilds the game from the cold
 //! bundle and the inputs alone.
 
 use super::rollback::{Machine, HASH_INTERVAL};
-use super::{digest, Input};
+use super::{digest, Input, MAX_PLAYERS};
 use crate::emulator::Emulator;
 use anyhow::{bail, ensure, Result};
 use std::collections::{BTreeMap, VecDeque};
@@ -27,8 +27,11 @@ pub const WEB_FEED_LIMIT: usize = 64 * 1024 * 1024;
 pub const MAX_SPECTATORS: usize = 8;
 
 const INPUT_BYTES: usize = 2 + 16 + 2 + 2 + 1;
-const RECORD: usize = 2 * INPUT_BYTES;
-const FRAMES_HEADER: usize = 8 + 2;
+/// A frame record carries one input per controller port the session drives.
+const fn record(players: usize) -> usize {
+    players * INPUT_BYTES
+}
+const FRAMES_HEADER: usize = 8 + 2 + 1;
 const CHECKPOINT_LEN: usize = 8 + 32;
 const SWAP_HEADER: usize = 8 + 1 + 1 + 32 + 32 + 4;
 const HEADER: usize = 1 + 4;
@@ -58,12 +61,27 @@ pub struct SwapRecord {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FeedMessage {
-    Frames { first: u64, inputs: Vec<[Input; 2]> },
-    Checkpoint { frame: u64, hash: [u8; 32] },
+    /// Confirmed inputs from `first`, `players` ports each. Entries beyond
+    /// that port count are unused and always neutral.
+    Frames {
+        first: u64,
+        players: usize,
+        inputs: Vec<[Input; MAX_PLAYERS]>,
+    },
+    Checkpoint {
+        frame: u64,
+        hash: [u8; 32],
+    },
     Swap(SwapRecord),
-    Head { frame: u64 },
-    Verified { identity: [u8; 32] },
-    Status { frame: u64 },
+    Head {
+        frame: u64,
+    },
+    Verified {
+        identity: [u8; 32],
+    },
+    Status {
+        frame: u64,
+    },
 }
 
 fn encode_input(out: &mut Vec<u8>, input: &Input) {
@@ -96,14 +114,21 @@ impl FeedMessage {
         out.push(0);
         out.extend_from_slice(&[0; 4]);
         match self {
-            Self::Frames { first, inputs } => {
+            Self::Frames {
+                first,
+                players,
+                inputs,
+            } => {
                 assert!(!inputs.is_empty() && inputs.len() <= MAX_BATCH);
+                assert!((2..=MAX_PLAYERS).contains(players));
                 out[start] = KIND_FRAMES;
                 out.extend_from_slice(&first.to_le_bytes());
                 out.extend_from_slice(&(inputs.len() as u16).to_le_bytes());
-                for pair in inputs {
-                    encode_input(out, &pair[0]);
-                    encode_input(out, &pair[1]);
+                out.push(*players as u8);
+                for set in inputs {
+                    for input in &set[..*players] {
+                        encode_input(out, input);
+                    }
                 }
             }
             Self::Checkpoint { frame, hash } => {
@@ -147,10 +172,11 @@ impl FeedMessage {
 
     fn check_header(kind: u8, len: usize) -> Result<()> {
         let valid = match kind {
+            // The port count travels inside the payload, so the header
+            // check bounds the message and `decode` checks it exactly.
             KIND_FRAMES => {
-                len >= FRAMES_HEADER + RECORD
-                    && (len - FRAMES_HEADER).is_multiple_of(RECORD)
-                    && (len - FRAMES_HEADER) / RECORD <= MAX_BATCH
+                len >= FRAMES_HEADER + record(2)
+                    && len - FRAMES_HEADER <= MAX_BATCH * record(MAX_PLAYERS)
             }
             KIND_CHECKPOINT => len == CHECKPOINT_LEN,
             KIND_SWAP => len >= SWAP_HEADER && len - SWAP_HEADER <= SWAP_LIMIT,
@@ -170,18 +196,27 @@ impl FeedMessage {
             KIND_FRAMES => {
                 let first = u64_at(payload, 0);
                 let count = usize::from(u16::from_le_bytes([payload[8], payload[9]]));
+                let players = usize::from(payload[10]);
                 ensure!(
-                    count * RECORD == payload.len() - FRAMES_HEADER,
+                    (2..=MAX_PLAYERS).contains(&players)
+                        && count > 0
+                        && count <= MAX_BATCH
+                        && count * record(players) == payload.len() - FRAMES_HEADER,
                     "spectator frame count mismatch"
                 );
                 let mut inputs = Vec::with_capacity(count);
-                for record in payload[FRAMES_HEADER..].chunks_exact(RECORD) {
-                    inputs.push([
-                        decode_input(&record[..INPUT_BYTES])?,
-                        decode_input(&record[INPUT_BYTES..])?,
-                    ]);
+                for chunk in payload[FRAMES_HEADER..].chunks_exact(record(players)) {
+                    let mut set = [Input::default(); MAX_PLAYERS];
+                    for (port, slot) in set.iter_mut().enumerate().take(players) {
+                        *slot = decode_input(&chunk[port * INPUT_BYTES..][..INPUT_BYTES])?;
+                    }
+                    inputs.push(set);
                 }
-                Self::Frames { first, inputs }
+                Self::Frames {
+                    first,
+                    players,
+                    inputs,
+                }
             }
             KIND_CHECKPOINT => {
                 let frame = u64_at(payload, 0);
@@ -282,21 +317,23 @@ pub struct FeedCursor {
 
 /// The host's complete confirmed history for the session.
 pub struct Feed {
-    frames: Vec<[Input; 2]>,
+    frames: Vec<[Input; MAX_PLAYERS]>,
     checkpoints: Vec<(u64, [u8; 32])>,
     swaps: Vec<SwapRecord>,
     bytes: usize,
     limit: usize,
+    players: usize,
 }
 
 impl Feed {
-    pub fn new(limit: usize) -> Self {
+    pub fn new(limit: usize, players: usize) -> Self {
         Self {
             frames: Vec::new(),
             checkpoints: Vec::new(),
             swaps: Vec::new(),
             bytes: 0,
             limit,
+            players,
         }
     }
 
@@ -310,13 +347,13 @@ impl Feed {
         self.bytes > self.limit
     }
 
-    pub fn record_frame(&mut self, frame: u64, inputs: [Input; 2]) -> Result<()> {
+    pub fn record_frame(&mut self, frame: u64, inputs: [Input; MAX_PLAYERS]) -> Result<()> {
         ensure!(
             frame == self.frames(),
             "confirmed frames must be recorded in order"
         );
         self.frames.push(inputs);
-        self.bytes += RECORD;
+        self.bytes += record(self.players);
         Ok(())
     }
 
@@ -380,6 +417,7 @@ impl Feed {
         Some((
             FeedMessage::Frames {
                 first: cursor.frame,
+                players: self.players,
                 inputs: self.frames[cursor.frame as usize..end as usize].to_vec(),
             },
             next,
@@ -417,7 +455,9 @@ pub struct Spectator {
     decoder: FeedDecoder,
     identity: [u8; 32],
     executed: u64,
-    inputs: VecDeque<[Input; 2]>,
+    /// Ports the host's session drives, adopted from its first batch.
+    players: Option<usize>,
+    inputs: VecDeque<[Input; MAX_PLAYERS]>,
     swaps: VecDeque<SwapRecord>,
     checkpoints: BTreeMap<u64, [u8; 32]>,
     head: u64,
@@ -433,6 +473,7 @@ impl Spectator {
             decoder: FeedDecoder::default(),
             identity,
             executed: 0,
+            players: None,
             inputs: VecDeque::new(),
             swaps: VecDeque::new(),
             checkpoints: BTreeMap::new(),
@@ -459,10 +500,18 @@ impl Spectator {
 
     pub fn receive(&mut self, message: FeedMessage) -> Result<()> {
         match message {
-            FeedMessage::Frames { first, inputs } => {
+            FeedMessage::Frames {
+                first,
+                players,
+                inputs,
+            } => {
                 ensure!(
                     first == self.executed + self.inputs.len() as u64,
                     "spectator feed skipped or repeated frames"
+                );
+                ensure!(
+                    *self.players.get_or_insert(players) == players,
+                    "spectator feed changed its player count"
                 );
                 ensure!(
                     self.inputs.len() + inputs.len() <= MAX_PENDING_FRAMES,
@@ -567,14 +616,19 @@ impl Spectator {
         let Some(inputs) = self.inputs.pop_front() else {
             return Ok(false);
         };
-        machine.frame(inputs, self.previous_keys, false)?;
-        self.previous_keys = Input::merged_keys(inputs);
+        let players = self.players.unwrap_or(2);
+        machine.frame(&inputs[..players], self.previous_keys, false)?;
+        self.previous_keys = Input::merged_keys(&inputs[..players]);
         self.executed += 1;
         Ok(true)
     }
 
     pub fn executed(&self) -> u64 {
         self.executed
+    }
+    /// Ports the host's session drives, once its first batch has arrived.
+    pub fn players(&self) -> Option<usize> {
+        self.players
     }
     pub fn head(&self) -> u64 {
         self.head
@@ -649,13 +703,15 @@ mod tests {
             self.state = u64::from_le_bytes(bytes.try_into().unwrap());
             Ok(())
         }
-        fn frame(&mut self, input: [Input; 2], previous: [u8; 16], _replay: bool) -> Result<()> {
-            self.state = self
-                .state
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(u64::from(input[0].buttons) + 100 * u64::from(input[1].buttons))
-                .wrapping_add(u64::from(input[1].mouse_dx as u16));
-            for (i, key) in Input::merged_keys(input).iter().enumerate() {
+        fn frame(&mut self, inputs: &[Input], previous: [u8; 16], _replay: bool) -> Result<()> {
+            for (port, input) in inputs.iter().enumerate() {
+                self.state = self
+                    .state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(u64::from(input.buttons) * (port as u64 + 1))
+                    .wrapping_add(u64::from(input.mouse_dx as u16));
+            }
+            for (i, key) in Input::merged_keys(inputs).iter().enumerate() {
                 self.state = self.state.wrapping_add(u64::from(key ^ previous[i]));
             }
             Ok(())
@@ -674,8 +730,19 @@ mod tests {
         i
     }
 
-    fn pair(frame: u64) -> [Input; 2] {
-        [input(frame, 0), input(frame, 1)]
+    fn pair(frame: u64) -> [Input; MAX_PLAYERS] {
+        set(frame, 2)
+    }
+
+    /// One frame's inputs for a `players`-port session.
+    fn set(frame: u64, players: usize) -> [Input; MAX_PLAYERS] {
+        std::array::from_fn(|player| {
+            if player < players {
+                input(frame, player as u64)
+            } else {
+                Input::default()
+            }
+        })
     }
 
     fn swap(frame: u64, bytes: Vec<u8>) -> SwapRecord {
@@ -694,7 +761,13 @@ mod tests {
         let messages = vec![
             FeedMessage::Frames {
                 first: 7,
+                players: 2,
                 inputs: (7..10).map(pair).collect(),
+            },
+            FeedMessage::Frames {
+                first: 10,
+                players: 4,
+                inputs: (10..13).map(|frame| set(frame, 4)).collect(),
             },
             FeedMessage::Checkpoint {
                 frame: 60,
@@ -735,8 +808,10 @@ mod tests {
         for (kind, len) in [
             (9, 0),
             (KIND_FRAMES, FRAMES_HEADER),
-            (KIND_FRAMES, FRAMES_HEADER + RECORD + 1),
-            (KIND_FRAMES, FRAMES_HEADER + (MAX_BATCH + 1) * RECORD),
+            (
+                KIND_FRAMES,
+                FRAMES_HEADER + (MAX_BATCH + 1) * record(MAX_PLAYERS),
+            ),
             (KIND_CHECKPOINT, 39),
             (KIND_SWAP, SWAP_HEADER + SWAP_LIMIT + 1),
             (KIND_HEAD, 7),
@@ -750,13 +825,25 @@ mod tests {
         // Payload checks: a count that disagrees with the length, an
         // off-grid checkpoint, a bad drive, and controller bits outside
         // the mask.
-        let mut frames = header(KIND_FRAMES, FRAMES_HEADER + RECORD);
+        let mut frames = header(KIND_FRAMES, FRAMES_HEADER + record(2));
         frames.extend(0u64.to_le_bytes());
         frames.extend(2u16.to_le_bytes());
-        frames.extend([0; RECORD]);
+        frames.push(2);
+        frames.extend([0; record(2)]);
         let mut decoder = FeedDecoder::default();
         decoder.push(&frames)?;
         assert!(decoder.next_message().is_err());
+        // A port count the payload cannot hold, and one out of range.
+        for players in [3u8, 1, 5] {
+            let mut frames = header(KIND_FRAMES, FRAMES_HEADER + record(2));
+            frames.extend(0u64.to_le_bytes());
+            frames.extend(1u16.to_le_bytes());
+            frames.push(players);
+            frames.extend([0; record(2)]);
+            let mut decoder = FeedDecoder::default();
+            decoder.push(&frames)?;
+            assert!(decoder.next_message().is_err(), "players {players}");
+        }
         let mut checkpoint = header(KIND_CHECKPOINT, CHECKPOINT_LEN);
         checkpoint.extend(61u64.to_le_bytes());
         checkpoint.extend([0; 32]);
@@ -770,6 +857,7 @@ mod tests {
         assert!(decoder.next_message().is_err());
         let mut bad_input = FeedMessage::Frames {
             first: 0,
+            players: 2,
             inputs: vec![pair(0)],
         }
         .encode();
@@ -787,7 +875,7 @@ mod tests {
 
     fn describe(message: &FeedMessage) -> String {
         match message {
-            FeedMessage::Frames { first, inputs } => {
+            FeedMessage::Frames { first, inputs, .. } => {
                 format!("frames {first}..{}", first + inputs.len() as u64)
             }
             FeedMessage::Checkpoint { frame, .. } => format!("checkpoint {frame}"),
@@ -800,7 +888,7 @@ mod tests {
 
     #[test]
     fn feed_streams_checkpoints_and_disk_changes_in_replay_order() -> Result<()> {
-        let mut feed = Feed::new(1 << 20);
+        let mut feed = Feed::new(1 << 20, 2);
         for frame in 0..130 {
             feed.record_frame(frame, pair(frame))?;
             if (frame + 1).is_multiple_of(60) {
@@ -864,7 +952,7 @@ mod tests {
         );
         assert_eq!(feed.head(), FeedMessage::Head { frame: 200 });
         // A small budget refuses more spectators once history outgrows it.
-        let mut small = Feed::new(100);
+        let mut small = Feed::new(100, 2);
         small.record_frame(0, pair(0))?;
         assert!(!small.full());
         small.record_swap(swap(1, vec![0; 200]))?;
@@ -876,11 +964,11 @@ mod tests {
     fn spectator_replays_the_feed_and_verifies_checkpoints() -> Result<()> {
         let mut baseline = Toy::default();
         let mut previous = [0; 16];
-        let mut feed = Feed::new(1 << 20);
+        let mut feed = Feed::new(1 << 20, 2);
         for frame in 0..200 {
             let inputs = pair(frame);
-            baseline.frame(inputs, previous, false)?;
-            previous = Input::merged_keys(inputs);
+            baseline.frame(&inputs[..2], previous, false)?;
+            previous = Input::merged_keys(&inputs[..2]);
             feed.record_frame(frame, inputs)?;
             if (frame + 1).is_multiple_of(60) {
                 feed.record_checkpoint(frame + 1, digest(&baseline.save()?))?;
@@ -936,6 +1024,7 @@ mod tests {
         let mut toy = Toy::default();
         spectator.receive(FeedMessage::Frames {
             first: 0,
+            players: 2,
             inputs: (0..61).map(pair).collect(),
         })?;
         for _ in 0..60 {
@@ -954,13 +1043,23 @@ mod tests {
         assert!(spectator
             .receive(FeedMessage::Frames {
                 first: 5,
+                players: 2,
                 inputs: vec![pair(5)],
             })
             .is_err());
         spectator.receive(FeedMessage::Frames {
             first: 0,
+            players: 2,
             inputs: (0..10).map(pair).collect(),
         })?;
+        // The port count may not change once the feed has started.
+        assert!(spectator
+            .receive(FeedMessage::Frames {
+                first: 10,
+                players: 4,
+                inputs: vec![set(10, 4)],
+            })
+            .is_err());
         assert!(spectator
             .receive(FeedMessage::Swap(swap(9, Vec::new())))
             .is_err());

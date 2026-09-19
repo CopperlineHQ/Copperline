@@ -23,6 +23,8 @@ def main():
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--internet", action="store_true", help="use Internet invitations and public relays")
     parser.add_argument("--relay-only", action="store_true", help="disable direct IP paths (requires --internet)")
+    parser.add_argument("--players", type=int, default=2,
+                        help="controller ports in play (2..4); 3 and 4 use the four-player adapter")
     parser.add_argument("--spectators", type=int, default=0, help="spectators that join the host (0..8)")
     parser.add_argument("--spectate-after", type=float, default=1.0,
                         help="wall-clock seconds after the players connect before spectators start")
@@ -33,6 +35,8 @@ def main():
         parser.error("--seconds must be finite and positive")
     if args.relay_only and not args.internet:
         parser.error("--relay-only requires --internet")
+    if not 2 <= args.players <= 4:
+        parser.error("--players must be 2..4")
     if not 0 <= args.spectators <= 8:
         parser.error("--spectators must be 0..8")
     if not math.isfinite(args.spectate_after) or args.spectate_after < 0:
@@ -47,11 +51,14 @@ def main():
     ports = []
     if not args.internet:
         # Reserve distinct ports together, then release them immediately before launch.
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as first, \
-                socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as second:
-            first.bind(("127.0.0.1", 0))
-            second.bind(("127.0.0.1", 0))
-            ports = [first.getsockname()[1], second.getsockname()[1]]
+        reserved = [socket.socket(socket.AF_INET, socket.SOCK_DGRAM) for _ in range(args.players)]
+        try:
+            for sock in reserved:
+                sock.bind(("127.0.0.1", 0))
+            ports = [sock.getsockname()[1] for sock in reserved]
+        finally:
+            for sock in reserved:
+                sock.close()
     invitation = output / "invitation.txt"
     spectator_invitation = output / "spectator-invitation.txt"
     if args.internet and (invitation.exists() or spectator_invitation.exists()):
@@ -59,7 +66,10 @@ def main():
     session = secrets.token_hex(16)
     processes = []
     logs = []
-    names = ["player1", "player2"] + [f"spectator{n + 1}" for n in range(args.spectators)]
+    players = args.players
+    names = [f"player{n + 1}" for n in range(players)] + [
+        f"spectator{n + 1}" for n in range(args.spectators)
+    ]
 
     def wait_for_code(path, deadline):
         while not path.exists():
@@ -78,6 +88,11 @@ def main():
         logs.append(log)
         command = [str(args.binary.resolve()), "--factory", "--model", "A500",
                    "--serial", "off", "--port1", "joystick", "--port2", "joystick"]
+        # Players three and four sit in the parallel-port four-player adapter.
+        if players > 2:
+            command += ["--parallel", "joystick-adapter",
+                        "--port3", "joystick" if players > 2 else "none",
+                        "--port4", "joystick" if players > 3 else "none"]
         # Only the host has game assets/configuration. Guests and spectators
         # prove setup transfer by starting with their bare local defaults.
         if role == 0:
@@ -85,33 +100,43 @@ def main():
         if args.internet:
             if role == 0:
                 command += ["--netplay-host", str(invitation)]
+                if players > 2:
+                    command += ["--netplay-players", str(players)]
                 if args.spectators:
                     command += ["--netplay-spectators", str(args.spectators),
                                 "--netplay-spectator-invite", str(spectator_invitation)]
-            elif role == 1:
+            elif role < players:
                 command += ["--netplay-join", wait_for_code(invitation, time.monotonic() + 30)]
             else:
                 command += ["--netplay-watch", wait_for_code(spectator_invitation, time.monotonic() + 30)]
             if args.relay_only:
                 command += ["--netplay-relay-only"]
-        elif role < 2:
+        elif role < players:
             command += ["--netplay-bind", f"127.0.0.1:{ports[role]}",
-                        "--netplay-peer", f"127.0.0.1:{ports[1 - role]}",
                         "--netplay-player", str(role + 1), "--netplay-session", session]
-            if role == 0 and args.spectators:
-                command += ["--netplay-spectators", str(args.spectators)]
+            if role == 0:
+                # The host names every guest it will accept; each guest
+                # names the host.
+                for guest in range(1, players):
+                    command += ["--netplay-peer", f"127.0.0.1:{ports[guest]}"]
+                if players > 2:
+                    command += ["--netplay-players", str(players)]
+                if args.spectators:
+                    command += ["--netplay-spectators", str(args.spectators)]
+            else:
+                command += ["--netplay-peer", f"127.0.0.1:{ports[0]}"]
         else:
             command += ["--netplay-watch", f"127.0.0.1:{ports[0]}", "--netplay-session", session,
                         "--netplay-bind", "127.0.0.1:0"]
         command += ["--noaudio"]
-        if role < 2:
+        if role < players:
             command += ["--joy-after", str(args.seconds / 2), "red", "100", str(role + 1)]
         command += ["--screenshot-after", str(args.seconds), str(output / f"{name}.png")]
         processes.append(subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
                                           env={**os.environ, "RUST_LOG": "warn,copperline::netplay=info"}))
 
     try:
-        for role in range(2):
+        for role in range(players):
             launch(names[role], role)
         if args.spectators:
             # Spectators join a game in progress and replay its history:
@@ -127,7 +152,7 @@ def main():
             if any(process.poll() is not None for process in processes):
                 raise RuntimeError(f"a player exited before the spectators joined; use a longer --seconds; see {output}")
             for n in range(args.spectators):
-                launch(names[2 + n], 2 + n)
+                launch(names[players + n], players + n)
         deadline = time.monotonic() + max(90, args.seconds * 10)
         for name, process in zip(names, processes):
             result = process.wait(timeout=max(0.1, deadline - time.monotonic()))
@@ -149,7 +174,7 @@ def main():
         text = (output / f"{name}.log").read_text()
         if args.relay_only and "Internet route is relay" not in text:
             raise RuntimeError(f"{name} did not select a relay; see {output}")
-        if role < 2:
+        if role < players:
             status = re.search(r"netplay: finished frames=(\d+) confirmed=(\d+) checked=(\d+)", text)
             if not status or status[1] != status[2] or (args.seconds >= 2 and int(status[3]) == 0):
                 raise RuntimeError(f"{name} did not finish with confirmed input/checksums; see {output}")

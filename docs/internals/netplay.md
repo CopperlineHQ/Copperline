@@ -127,6 +127,29 @@ and 10-second connected-peer timeouts. Dropping the transport cancels the worker
 and closes its endpoint without blocking the UI. Runtime errors return through
 the ordinary netplay error path. Run after F11 builds a new cold machine.
 
+## Players and topology
+
+A session drives two to four controller ports, one per peer. Ports 3 and 4
+are the passive parallel-port adapter's sockets, so a session with more than
+two players needs that adapter fitted with a joystick in each socket it uses;
+`validate_player_ports` checks this on the machine every peer actually runs,
+and the adapter travels in the setup manifest so each peer rebuilds it.
+The adapter is wiring with no host peripheral behind it, which is why netplay
+accepts it where it refuses a printer or sampler.
+
+Player 1 hosts. Guests connect only to the host, which relays every port's
+input to every other player: guests never address each other, so a session
+needs one reachable endpoint rather than a full mesh. `Connection` therefore
+holds one `Link` per peer -- a guest has one, to the host -- and the host's
+socket or endpoint stays a listener that admits each guest and spectator and
+hands out a per-peer transport. Every player must be present before frame
+zero, since a latecomer could not reproduce the frames already executed.
+
+A guest submits its input to the host alone, so only the host's
+acknowledgement releases its local history. The host owes each port's inputs
+to every other player, and keeps them until the last link has acknowledged
+them (`relay_floor`), which is separate from the confirmed frontier.
+
 ## Frame ownership
 
 Network frame zero begins at cold boot. Each network frame ends when Agnus next
@@ -137,8 +160,10 @@ The scheduler state and transport remain outside serialized guest state.
 
 An input contains eleven digital controller bits, a 128-key held-state bitmap,
 signed mouse X/Y deltas and three held mouse buttons.
-Each peer owns one port. Key bitmaps are ORed, and transitions from the previous
-merged bitmap are enqueued in raw-key order at the frame boundary. Controller
+Each peer owns one port. Key bitmaps from every player are ORed, and
+transitions from the previous merged bitmap are enqueued in raw-key order at
+the frame boundary. An adapter socket carries switch joysticks only, so the
+six direction and button bits are all that reach ports 3 and 4. Controller
 buttons and keyboard prediction repeat the most recent remote held state at or
 before that frame. Predicted mouse motion is zero: relative movement belongs to
 one frame and must not repeat while waiting for another packet. Out-of-order
@@ -190,16 +215,22 @@ for replay. It retains eight recent checkpoint hashes. Snapshot storage has a
 
 ## Wire protocol
 
-`wire.rs` defines protocol version 2. Packets carry `CLNP`, the protocol
+`wire.rs` defines protocol version 3. Packets carry `CLNP`, the protocol
 version and the save-state schema fingerprint
 (`savestate::SCHEMA_FINGERPRINT`: crate version, container version, and
 every chunk's version), a 16-byte session ID, a 32-byte initial-machine fingerprint,
-player index, handshake-ready flag, delay/window settings, cumulative input
-acknowledgement, the latest confirmed checkpoint, and up to 32 input records.
-Integers are little-endian. Records contain an eight-byte frame number, two-byte
+the sending player's index, the session's player count, handshake-ready flag,
+delay/window settings, one cumulative input acknowledgement per player, the
+latest confirmed checkpoint, and up to 32 input records.
+Integers are little-endian. Records name the port they belong to and contain
+an eight-byte frame number, two-byte
 controller bitmap, sixteen-byte key bitmap, two signed two-byte mouse deltas,
-and one byte containing the three mouse buttons. Each record is 31 bytes and
-the maximum packet is 1103 bytes. Version 1 peers are rejected as incompatible,
+and one byte containing the three mouse buttons. Each record is 32 bytes and
+the maximum packet is 1160 bytes. Records are ordered by port and then frame,
+so a repeated or reordered record inside a packet is rejected, and a port
+outside the session acknowledges nothing. A host sends each link only the
+ports that link does not own, in as many packets as the window needs.
+Version 1 and 2 peers are rejected as incompatible,
 as are peers whose schema fingerprint differs.
 
 The initial fingerprint hashes Copperline's display build version and the entire
@@ -212,9 +243,11 @@ neither cryptographic peer authentication nor encryption. Browser WebRTC adds
 transport encryption; native Internet mode adds QUIC encryption and invitation
 authorization. Direct UDP needs a VPN for that protection.
 
-Every datagram repeats the session fingerprint and settings. Peers announce
-whether they have seen a matching peer; emulation starts after receiving that
-acknowledgement. Input packets repeat all unacknowledged local inputs. Sampling
+Every datagram repeats the session fingerprint and settings. The host
+announces readiness once it has heard from every guest, and a guest starts on
+that announcement, so all of them begin within one round trip. A guest's
+packets are accepted only for its own port; the host is the only authority
+for the others. Input packets repeat all unacknowledged local inputs. Sampling
 and confirmation polls send immediately; handshake retries use a 10 ms timer.
 The frontend sleeps between stalled polls. Each service call reads at most
 64 packets.
@@ -231,9 +264,10 @@ Same-process checkpoints include the CPU adapter's sampled interrupt level and
 microcode poll hold. Restoring the chipset without these latches can recognize
 an interrupt one instruction early after replay. They remain outside file save
 states; the rollback prefix and initial fingerprint change with the build.
-`Session` is the native alias for `Connection<NativeTransport>`;
-`ConnectionOptions` selects direct UDP `Options` or Internet invitation settings. Transport-independent `Settings` contains the player,
-session ID, input delay and prediction limit. Timers use `timebase::Instant` on
+`Session` is the native alias for the desktop connection;
+`ConnectionOptions` selects direct UDP `Options` or Internet invitation settings. Transport-independent `Settings` contains the player, the session's player
+count, session ID, input delay and prediction limit. Browser sessions stay at
+two players: a page cannot fit the parallel-port adapter. Timers use `timebase::Instant` on
 both targets. Neither target serializes transport or wall-clock state.
 
 The web wrapper owns `Connection<PacketQueue>`. Each direction holds at most
@@ -251,6 +285,13 @@ set still fails setup, and diagnostics record a gathering-deadline event.
 for an answer every 1.5 seconds until joined, cancelled or expired. Manual
 copy/paste remains available under Advanced and needs no signaling service.
 Neither path trickles candidates.
+
+Direct UDP admits a guest by its first control packet: the host names the
+guest addresses it will accept, or names none and admits any source that
+presents the session ID, as spectators already were. Internet mode admits
+guests by the invitation's capability and seats each on the next free port,
+which it names in the `Offer`; a direct-IP guest asks for the port it was
+configured for and the host confirms or refuses it.
 
 `services/netplay` implements the Cloudflare Worker and SQLite Durable Object
 used for each invitation. Room IDs and separate owner/guest tokens each contain
@@ -346,18 +387,19 @@ ignored.
 ## Spectators
 
 A spectator is a third kind of participant: it owns no controller port, sends
-no input, and never enters the players' rollback timeline. Only the host serves
-spectators (star topology), so the guest and the `CLNP` input protocol are
-unchanged; `Role::{Host, Guest, Spectator}` on `ConnectionOptions` and
-`Session` replaces the old "opposite player" assumptions, and `Settings` stays
-the two-player structure the browser build shares.
+no input, and never enters the players' rollback timeline. The host serves
+spectators on the same star topology it already relays players over, so the
+guests and the `CLNP` input protocol are unchanged;
+`Role::{Host, Guest, Spectator}` on `ConnectionOptions` and `Session` says
+which of the three a participant is.
 
 The host's `Rollback` records a `ConfirmedLog` inside `confirm()`: for every
-frame that becomes confirmed it stores both ports' inputs (its own submitted
-input and the peer's received one, which can no longer change) and every
+frame that becomes confirmed it stores every port's input (its own submitted
+input and the received ones, which can no longer change) and every
 checkpoint digest at insertion, before the prune that releases them.
 `Connection::enable_feed` (host only, at frame zero) drains that log into a
-`spectate::Feed`: the complete confirmed history (46 bytes per frame), the
+`spectate::Feed`: the complete confirmed history (23 bytes per port per
+frame, with the port count in each batch), the
 checkpoint digests, and every disk change as a `SwapRecord` with the drive,
 write flag, image bytes and the full-state digests the host measured before
 and after applying it. The feed is capped (256 MiB native, 64 MiB browser);
@@ -374,8 +416,9 @@ length never allocates, and reassembles across arbitrary chunk boundaries.
 Reverse messages are `Verified` (the spectator's initial fingerprint) and
 `Status` (its executed frame, once a second, as a liveness report).
 
-`Spectator` is the confirmed-only timeline: it executes `[Input; 2]` per
-frame through the same `Machine` adapter as rollback, with no prediction and
+`Spectator` is the confirmed-only timeline: it executes one input per
+controller port through the same `Machine` adapter as rollback, adopting the
+host's port count from its first batch, with no prediction and
 no snapshot history. At every multiple of 60 frames it waits for the host's
 checkpoint, compares `digest(netplay_snapshot())`, and fails closed on a
 mismatch before executing further. A due `SwapRecord` blocks the frame until
@@ -385,20 +428,22 @@ contiguous and in order; a swap below the buffered frontier, a late
 checkpoint, or more than a million buffered frames is rejected.
 
 Desktop: `Session` holds either a player `Connection` or a `Watcher`
-(`Control<NativeTransport>` plus a `Spectator`). A spectator's control link
+(a control link plus a `Spectator`). A spectator's control link
 uses role byte 2; `Control` now checks a `(local, peer)` role pair, holds
 chunks in its receive window instead of failing once four messages are
-queued, and shares `Arc` parts so one bundle serves the guest and every
+queued, and shares `Arc` parts so one bundle serves every guest and every
 spectator without copies. Kind byte 4 carries feed bytes beside the JSON
-setup messages (`Watch`, `Verified`, `Start`, `Refused`) and the bundle. A
+setup messages (`Hello`, `Offer`, `Watch`, `Verified`, `Start`, `Refused`)
+and the bundle. A
 spectator's setup is the guest's: bundle in, `machine_identity` compared by
 the host, then the feed streams from frame zero. Direct UDP demultiplexes
-spectator control packets by source address on the host's existing socket
-(`SlotTable`, one slot per admitted spectator, freed when its link drops);
-Internet mode keeps the host's iroh endpoint accepting after the player and
-classifies each connection by its capability: the invitation's session admits
-the one player, a separate random capability in the `CLNS1.` code admits
-spectators, and neither opens the other role. Each connection is pumped by
+guest and spectator control packets by source address on the host's existing
+socket (`SlotTable`, one slot per admitted link, freed when it drops, with a
+separate cap for each kind);
+Internet mode keeps the host's iroh endpoint accepting after the last player
+and classifies each connection by its capability: the invitation's session
+admits players while ports remain, a separate random capability in the
+`CLNS1.` code admits spectators, and neither opens the other role. Each connection is pumped by
 its own task, so a spectator's failure lands only in its own queues. The host
 services every link after its own step: at most four feed messages in flight
 per link, a `Head` keepalive after a second of silence, a 10-second silence
@@ -483,6 +528,12 @@ The regression suite covers:
   loss, delay, duplication, reordering, and asymmetric pauses, with zero, default,
   and maximum input delay; both must confirm the same checkpoint and end with
   identical machine-state digests.
+- Four complete emulators, one per controller port, connected through the host:
+  each drives a different direction, every machine must show all four ports'
+  switches, and all four must end with identical machine-state digests. A
+  session without the adapter fitted is refused before it starts.
+- UDP demultiplexing of guest and spectator links by source address, the
+  port cap, and a host that admits only the guest addresses it names.
 - Packet truncation/size bounds, conflicting inputs, invalid acknowledgements,
   initial mismatch, desynchronization, and disconnect timeouts.
 - CLI combinations, GUI field/edit/navigation coverage, and frontend input/mutation
