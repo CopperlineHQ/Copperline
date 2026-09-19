@@ -86,16 +86,17 @@ try {
     const emu = window.__emu;
     const take = emu.netplay_take_packet.bind(emu);
     const [protocol, , headerBytes, inputBytes] = emu.constructor.netplay_packet_layout();
-    if (protocol !== 2 || headerBytes !== 111 || inputBytes !== 31) throw new Error('Packet decoder layout changed');
+    if (protocol !== 3 || headerBytes !== 136 || inputBytes !== 32) throw new Error('Packet decoder layout changed');
     window.__testKeyFrames = [];
     emu.netplay_take_packet = () => {
       const packet = take();
-      // Protocol v2: 111-byte header, then 31-byte input records. Check the
-      // emitted held-key states, not merely the UI's keydown/up callbacks.
+      // Protocol v3: a 136-byte header, then 32-byte input records that
+      // open with the controller port. Check the emitted held-key states,
+      // not merely the UI's keydown/up callbacks.
       const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength);
       for (let offset = headerBytes; offset + inputBytes <= packet.length; offset += inputBytes) {
-        window.__testKeyFrames.push([Number(view.getBigUint64(offset, true)),
-          !!(packet[offset + 10 + (0x20 >> 3)] & (1 << (0x20 & 7)))]);
+        window.__testKeyFrames.push([Number(view.getBigUint64(offset + 1, true)),
+          !!(packet[offset + 11 + (0x20 >> 3)] & (1 << (0x20 & 7)))]);
       }
       return packet;
     };
@@ -138,9 +139,9 @@ try {
       emu.netplay_take_packet = () => {
         const packet = take();
         const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength);
-        for (let offset = 111; offset + 31 <= packet.length; offset += 31) {
-          window.__testMouseFrames.push([Number(view.getBigUint64(offset, true)),
-            view.getInt16(offset + 26, true), view.getInt16(offset + 28, true), packet[offset + 30]]);
+        for (let offset = 136; offset + 32 <= packet.length; offset += 32) {
+          window.__testMouseFrames.push([Number(view.getBigUint64(offset + 1, true)),
+            view.getInt16(offset + 27, true), view.getInt16(offset + 29, true), packet[offset + 31]]);
         }
         return packet;
       };

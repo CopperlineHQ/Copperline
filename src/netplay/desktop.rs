@@ -1723,18 +1723,24 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| -> Result<()> {
                 let addresses = addresses(4)?;
-                let mut machines: Vec<_> = (0..4)
-                    .map(|_| super::super::tests::emulator_with_adapter())
-                    .collect::<Result<_>>()?;
+                // Only the host has the adapter, the game and the player
+                // count: a guest waits on a bare machine and takes the
+                // host's, exactly as the documented guest command does.
+                let mut machines: Vec<_> =
+                    std::iter::once(super::super::tests::emulator_with_adapter())
+                        .chain((1..4).map(|_| super::super::tests::emulator()))
+                        .collect::<Result<_>>()?;
                 let mut cfg = super::super::tests::adapter_config()?;
                 cfg.floppy_connected = [true; 4];
                 prepare_config(&mut cfg)?;
+                let guest_cfg = super::super::tests::safe_config()?;
                 let mut peers: Vec<Session> = Vec::new();
                 for player in 0..4 {
+                    let local = if player == 0 { &cfg } else { &guest_cfg };
                     peers.push(Session::new(
                         options(&addresses, player, 4, [43; 16], 0),
                         &mut machines[player],
-                        &cfg,
+                        local,
                     )?);
                 }
                 assert_eq!(peers[0].role(), Role::Host);
@@ -1754,6 +1760,14 @@ mod tests {
                 for (player, peer) in peers.iter().enumerate() {
                     assert_eq!(peer.port(), Some(player));
                     assert_eq!(peer.players(), 4);
+                }
+                // The host's bundle brought the adapter with it.
+                for (player, machine) in machines.iter().enumerate() {
+                    assert!(
+                        machine.bus().input.parallel_adapter,
+                        "player {} has no adapter",
+                        player + 1
+                    );
                 }
                 // One direction per player: up, down, left, right.
                 let held = |player: usize| Input {

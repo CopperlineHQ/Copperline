@@ -23,10 +23,10 @@ function fresh(model = 'A500', video = 'PAL') {
 }
 
 const [protocol, packetLimit, headerBytes, inputBytes] = WebEmu.netplay_packet_layout();
-assert.equal(protocol, 2);
+assert.equal(protocol, 3);
 assert.equal(packetLimit, PACKET_LIMIT, 'Rust and WebRTC packet limits must match');
-assert.equal(headerBytes, 111);
-assert.equal(inputBytes, 31);
+assert.equal(headerBytes, 136);
+assert.equal(inputBytes, 32);
 const validation = fresh();
 try {
   for (const player of [-1, 0, 3, 1.5, 257, NaN, Infinity]) {
@@ -98,22 +98,25 @@ for (const [model, video, delay, window, controller] of [
           const bytes = emu.netplay_take_packet();
           if (!bytes.length) break;
           assert.ok(bytes.length <= packetLimit);
-          // Inspect the sampled input, independently of peer checksum equality.
+          // Inspect the sampled input, independently of peer checksum
+          // equality. A record names its controller port, then the frame,
+          // controls, held keys and mouse motion.
           const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
           for (let offset = headerBytes; offset < bytes.length; offset += inputBytes) {
-            const sampled = Number(view.getBigUint64(offset, true)) - delay;
+            assert.equal(bytes[offset], player, 'a peer reports only its own port');
+            const sampled = Number(view.getBigUint64(offset + 1, true)) - delay;
             if (sampled < 0) continue;
             const expected = (sampled % 9 < 3 ? 1 : 0) | (sampled % 7 < 3 ? 16 : 0)
               | (sampled % 5 < 2 ? 64 : 0) | (sampled % 7 < 2 ? 128 : 0)
               | (sampled % 11 < 3 ? 256 : 0) | (sampled % 13 < 4 ? 512 : 0)
               | (sampled % 17 < 3 ? 1024 : 0);
-            assert.equal(view.getUint16(offset + 8, true), controller === 'mouse' ? 0 : expected, 'controller routing');
+            assert.equal(view.getUint16(offset + 9, true), controller === 'mouse' ? 0 : expected, 'controller routing');
             if (controller === 'mouse') {
-              assert.equal(view.getInt16(offset + 26, true), sampled % 19 - 9, 'mouse X sampled once');
-              assert.equal(view.getInt16(offset + 28, true), 11 - (sampled + player) % 23, 'mouse Y sampled once');
-              assert.equal(bytes[offset + 30], sampled % 8, 'three mouse buttons');
+              assert.equal(view.getInt16(offset + 27, true), sampled % 19 - 9, 'mouse X sampled once');
+              assert.equal(view.getInt16(offset + 29, true), 11 - (sampled + player) % 23, 'mouse Y sampled once');
+              assert.equal(bytes[offset + 31], sampled % 8, 'three mouse buttons');
             }
-            assert.equal(bytes[offset + 10 + 8], sampled % 13 < 4 ? 1 : 0, 'Space key routing');
+            assert.equal(bytes[offset + 11 + 8], sampled % 13 < 4 ? 1 : 0, 'Space key routing');
           }
           packets++;
           if (packets % 7 === 0) continue;

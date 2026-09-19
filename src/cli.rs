@@ -2007,7 +2007,7 @@ fn print_help() {
          --netplay-join CODE            join a desktop Internet invitation\n  \
          --netplay-relay URL            host using a custom HTTPS iroh relay\n  \
          --netplay-relay-only           force Internet traffic through the relay\n  \
-         --netplay-bind IP:PORT         local UDP endpoint for two-player rollback netplay\n  \
+         --netplay-bind IP:PORT         local UDP endpoint for rollback netplay\n  \
          --netplay-peer IP:PORT         the host's UDP endpoint; a host repeats it once\n  \
          \x20                            per guest, or omits it to admit any peer\n  \
          --netplay-player 1..4          controller port owned by this player\n  \

@@ -263,6 +263,10 @@ impl NetplaySetup {
             if let Ok(invitation) = crate::netplay::internet::Invitation::decode(&self.code) {
                 self.delay = invitation.delay;
                 self.rollback = invitation.window;
+                // The row is the host's to set, so the pasted invitation is
+                // the only thing that can tell a guest how many ports the
+                // game has.
+                self.players = invitation.players;
             }
         }
     }

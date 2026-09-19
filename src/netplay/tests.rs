@@ -393,6 +393,50 @@ fn options(peer: SocketAddr, player: usize) -> Options {
     }
 }
 
+/// An unlisted source is turned away and one source holds one port, so a
+/// host's allow-list has to name every guest or nobody at all.
+#[test]
+fn a_host_names_every_guest_or_admits_any_peer() -> Result<()> {
+    let address = |port: u16| -> SocketAddr { format!("127.0.0.1:{port}").parse().unwrap() };
+    let host = |players: usize, peers: Vec<SocketAddr>| Options {
+        bind: address(0),
+        peers,
+        player: 0,
+        players,
+        session: [42; 16],
+        input_delay: 0,
+        rollback_frames: 8,
+        spectators: 0,
+    };
+    // Open admission, and a complete list, are both usable.
+    host(4, Vec::new()).validate()?;
+    host(4, (1..4).map(address).collect()).validate()?;
+    host(2, vec![address(1)]).validate()?;
+    // A list that cannot fill the session is refused rather than left to
+    // time out: too few addresses, a repeated one, or too many.
+    for peers in [
+        vec![address(1)],
+        vec![address(1), address(2)],
+        vec![address(1), address(1), address(1)],
+        vec![address(1), address(2), address(3), address(4)],
+    ] {
+        let error = host(4, peers.clone()).validate().unwrap_err().to_string();
+        assert!(
+            error.contains("one address per guest"),
+            "{peers:?}: {error}"
+        );
+    }
+    // A guest names its host, and only its host.
+    let guest = |peers: Vec<SocketAddr>| Options {
+        player: 2,
+        ..host(4, peers)
+    };
+    guest(vec![address(1)]).validate()?;
+    assert!(guest(Vec::new()).validate().is_err());
+    assert!(guest(vec![address(1), address(2)]).validate().is_err());
+    Ok(())
+}
+
 #[test]
 fn udp_peers_recover_loss_reordering_and_duplicates_and_confirm_checksums() -> Result<()> {
     for (delay, window) in [(0, 8), (2, 8), (6, 1)] {

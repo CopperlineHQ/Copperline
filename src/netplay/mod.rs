@@ -394,9 +394,16 @@ impl Options {
             spectate::MAX_SPECTATORS
         );
         if settings.hosting() {
+            // Every unlisted source is turned away and one source can hold
+            // only one port, so a short or repeated list can never fill the
+            // session. Take a complete list or none at all.
+            let distinct: std::collections::BTreeSet<_> = self.peers.iter().collect();
             ensure!(
-                self.peers.len() <= settings.expected_links(),
-                "a netplay host lists at most one peer address per guest"
+                self.peers.is_empty()
+                    || (self.peers.len() == settings.expected_links()
+                        && distinct.len() == self.peers.len()),
+                "a netplay host lists one address per guest ({} of them), or none to admit any peer holding the session code",
+                settings.expected_links()
             );
         } else {
             ensure!(
@@ -603,14 +610,17 @@ fn initial_identity(
     cfg: &crate::config::Config,
 ) -> Result<[u8; 32]> {
     settings.validate()?;
-    let identity = machine_identity(emu, cfg)?;
-    validate_player_ports(emu, settings.players)?;
-    Ok(identity)
+    machine_identity(emu, cfg)
 }
 
 /// Every player needs a controller its inputs can reach. Ports 3 and 4 are
 /// sockets on the passive four-player adapter, so the adapter must be
 /// plugged in with a joystick in each socket the session uses.
+///
+/// Only a machine that will actually run the game is checked: the host's,
+/// and a guest's once the host's bundle has built it. A guest waits on a
+/// bare placeholder machine that is not expected to have the adapter, and
+/// nothing it holds reaches the game.
 pub fn validate_player_ports(emu: &Emulator, players: usize) -> Result<()> {
     for player in crate::bus::PARALLEL_PORT_FIRST..players {
         ensure!(

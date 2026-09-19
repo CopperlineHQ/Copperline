@@ -271,7 +271,7 @@ two players: a page cannot fit the parallel-port adapter. Timers use `timebase::
 both targets. Neither target serializes transport or wall-clock state.
 
 The web wrapper owns `Connection<PacketQueue>`. Each direction holds at most
-64 packets of at most 1103 bytes. Incoming bursts evict the oldest datagram, relying
+64 packets of at most 1160 bytes. Incoming bursts evict the oldest datagram, relying
 on subsequent retransmissions; a full outgoing queue reports backpressure.
 `netplay.js` also bounds its receive queue and stops draining Rust's send queue
 when the channel's buffered amount reaches 64 maximum-size packets.
