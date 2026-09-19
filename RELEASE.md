@@ -108,7 +108,7 @@ Build the documentation:
 ```sh
 cd docs
 myst build --html --ci --strict --check-links
-myst build --pdf --ci --strict
+python3 ../tools/build-docs-pdf.py --ci --strict
 test -s _build/exports/copperline.pdf
 ```
 

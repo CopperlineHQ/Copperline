@@ -44,12 +44,18 @@ back to system fonts; everything else looks the same.
 
 ```sh
 cd docs
-myst build --pdf         # writes docs/_build/exports/copperline.pdf
+python3 ../tools/build-docs-pdf.py  # writes docs/_build/exports/copperline.pdf
 ```
 
 The PDF export collects the chapters listed in `myst.yml` under `exports`.
 The individual custom-register reference pages are available in the HTML manual
 and embedded debugger help; they are not included in the PDF.
+
+The helper renders MyST's generated sources with native Typst tables. This avoids
+the legacy `tablex` helper's layout-convergence failures and incorrect page counts
+in long manuals. It also corrects menu arrows emitted as literal `arrow.r` text
+by MyST 1.10. Markdown sources and the downloaded templates are left unchanged.
+New tablex features fail the build until an equivalent native mapping is added.
 
 ## Validation
 
@@ -58,7 +64,7 @@ Run the same checks as CI before submitting documentation changes:
 ```sh
 cd docs
 myst build --html --ci --strict --check-links
-myst build --pdf --ci --strict
+python3 ../tools/build-docs-pdf.py --ci --strict
 test -s _build/exports/copperline.pdf
 ```
 

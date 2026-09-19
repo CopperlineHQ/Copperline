@@ -44,7 +44,7 @@ jobs:
         # on cross-reference/label errors. Assert the artifact is non-empty so
         # the job fails even if the CLI returns success on a partial render.
         run: |
-          myst build --pdf --ci --strict
+          python3 ../tools/build-docs-pdf.py --ci --strict
           test -s _build/exports/copperline.pdf
       - name: Name the asset
         id: asset

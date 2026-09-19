@@ -1,5 +1,6 @@
 # MyST project configuration for the Copperline documentation.
-# Build HTML with `myst build --html` and PDF with `myst build --pdf`
+# Build HTML with `myst build --html` and PDF with
+# `python3 ../tools/build-docs-pdf.py`
 # (the PDF export renders through Typst; see docs/README.md for the
 # required tools).
 version: 1
