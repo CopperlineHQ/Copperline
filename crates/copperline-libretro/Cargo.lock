@@ -202,7 +202,7 @@ checksum = "00c1c79b421ca69d94677a49b2ccf389dab3409952aed790594de8fa03b07989"
 
 [[package]]
 name = "copperline"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "anyhow",
  "bincode",

@@ -61,6 +61,11 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.21.0" date="2026-09-19">
+      <description>
+        <p>Netplay hosts can invite up to eight spectators on desktop or in the browser. Local play gains four independent gamepads and keyboard mappings for spare player slots; the RetroArch core gains the four-player parallel-port adapter. Desktop display work adds a VSync switch, improves Wayland pacing and reduces presentation overhead. File pickers and shutdown are more reliable on macOS and Windows. Clipboard sharing and the CD32 FMV module are now opt-in. New regression coverage verifies copperhf.device with Kickstart 1.3 and a compatible FastFileSystem.</p>
+      </description>
+    </release>
     <release version="0.20.0" date="2026-09-12">
       <description>
         <p>Two-player rollback netplay on desktop and in the browser, with invitations, automatic game setup transfer and synchronized floppy changes. A rebuilt debugging workspace brings the Amiga display, debugger, console and hardware inspectors together. A new libretro core supports A500, A1200 and CD32 games, WHDLoad and RetroArch netplay. Save states gain thumbnails and a versioned chunk format; recording gains GIF clips. Also: clipboard sharing, a four-player joystick adapter, light pens, A600/A1200 PCMCIA cards, compressed CHD hard disks, host serial ports, the SF2000 SD controller, guest code coverage and headless verification tools, cleaner Paula audio, and CPU, display and storage fixes.</p>
