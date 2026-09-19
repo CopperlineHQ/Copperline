@@ -12,7 +12,7 @@ export { decodeCode, encodeCode, newSettings, validateSettings, validateWatchSet
 
 // Signaling uses expiring room invitations or manual copy/paste codes.
 // Only bounded input packets use the data channel.
-export const PACKET_LIMIT = 1103;
+export const PACKET_LIMIT = 1160;
 const QUEUE_LIMIT = 64;
 const CHANNEL = 'copperline-netplay-v1';
 const SPECTATOR_SLOTS = 8;

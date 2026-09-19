@@ -3056,14 +3056,13 @@ impl App {
 
     /// Live host-mouse input drives the lowest-numbered mouse port locally.
     /// During netplay it drives only this peer's assigned port, if that port
-    /// holds a mouse. Otherwise live mouse input is dropped.
+    /// holds a mouse. A player on one of the parallel adapter's sockets has
+    /// a switch joystick and no mouse at all. Otherwise live mouse input is
+    /// dropped.
     fn mouse_port(&self) -> Option<usize> {
         if let Some(peer) = &self.netplay {
             let port = peer.port()?;
-            return self.emu.bus().input.ports[port]
-                .device
-                .is_mouse()
-                .then_some(port);
+            return self.emu.bus().input.device(port).is_mouse().then_some(port);
         }
         self.emu
             .bus()

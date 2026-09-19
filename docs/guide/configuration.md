@@ -2839,7 +2839,9 @@ default; it costs a 1 MiB execution map while armed.
 ## Rollback netplay
 
 The `--netplay-bind`, `--netplay-peer`, `--netplay-player`, and
-`--netplay-session` flags start a direct two-player session. Input delay and
+`--netplay-session` flags start a direct session. `--netplay-players` gives
+the host three or four controller ports, the last two through the
+[four-player adapter](#parallel-port). Input delay and
 prediction limits use `--netplay-delay` and `--netplay-rollback`.
 The configuration screen also has a **Netplay** page. Connection details are
 kept for the app session and are not written to machine configuration files.

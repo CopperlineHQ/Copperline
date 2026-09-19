@@ -384,6 +384,7 @@ pub enum LauncherField {
     NetplayBind,
     NetplayPeer,
     NetplayPlayer,
+    NetplayPlayers,
     NetplayCode,
     NetplayDelay,
     NetplayRollback,
@@ -1330,9 +1331,10 @@ pub(super) const NEW_GEOMETRY_ROWS: [Row; 10] = [
     row(F::NewGeomSave, "", RowKind::Action),
 ];
 
-pub(super) const NETPLAY_ROWS: [Row; 10] = [
+pub(super) const NETPLAY_ROWS: [Row; 11] = [
     row(F::NetplayEnabled, "Netplay", Cycle),
     row(F::NetplayMode, "Connection", Cycle),
+    row(F::NetplayPlayers, "Players", Cycle),
     row(F::NetplayPlayer, "Local player", Cycle),
     row(F::NetplayBind, "Local address", RowKind::Text),
     row(F::NetplayPeer, "Peer address", RowKind::Text),
@@ -1343,9 +1345,10 @@ pub(super) const NETPLAY_ROWS: [Row; 10] = [
     row(F::NetplayNewCode, "", RowKind::Action),
 ];
 
-pub(super) const INTERNET_NETPLAY_ROWS: [Row; 11] = [
+pub(super) const INTERNET_NETPLAY_ROWS: [Row; 12] = [
     row(F::NetplayEnabled, "Netplay", Cycle),
     row(F::NetplayMode, "Connection", Cycle),
+    row(F::NetplayPlayers, "Players", Cycle),
     row(F::NetplayPlayer, "Local player", Cycle),
     row(F::NetplayCode, "Invitation", RowKind::Text),
     row(F::NetplayRelay, "Relay server", RowKind::Text),

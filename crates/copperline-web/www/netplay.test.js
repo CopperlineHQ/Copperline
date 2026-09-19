@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { RtcLink, decodeCode, encodeCode, newSettings, validateSettings } from './netplay.js';
+import { PACKET_LIMIT, RtcLink, decodeCode, encodeCode, newSettings, validateSettings } from './netplay.js';
 
 const settings = { session: '0123456789abcdef0123456789abcdef', delay: 2, window: 8, controller: 'joystick' };
 const description = type => ({ type, sdp: 'v=0\r\ns=-\r\n' });
@@ -127,13 +127,13 @@ test('packet queues bound throttled-browser bursts and respect send backpressure
   assert.equal(received.at(-1), 99);
   let drained = 0;
   const emu = { netplay_take_packet: () => ++drained < 3 ? new Uint8Array([1]) : new Uint8Array() };
-  channel.bufferedAmount = 1103 * 64;
+  channel.bufferedAmount = PACKET_LIMIT * 64;
   link.send(emu);
   assert.equal(drained, 0);
   channel.bufferedAmount = 0;
   link.send(emu);
   assert.equal(channel.sent.length, 2);
-  channel.onmessage({ data: new ArrayBuffer(1104) });
+  channel.onmessage({ data: new ArrayBuffer(PACKET_LIMIT + 1) });
   assert.equal(link.closed, true);
 });
 
