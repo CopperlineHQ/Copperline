@@ -16,8 +16,14 @@ pub struct NetplaySetup {
     #[cfg(feature = "netplay-internet")]
     pub internet_host: Option<crate::netplay::internet::Options>,
     pub bind: String,
+    /// The host's address for a guest; for a host, the guests it will
+    /// accept, separated by commas. A host may leave it empty to admit
+    /// any peer that presents the session code.
     pub peer: String,
     pub player: usize,
+    /// Controller ports the session drives, 2..=4. Ports 3 and 4 are the
+    /// parallel-port adapter's sockets.
+    pub players: u8,
     /// Watch the host's game without owning a controller port.
     pub spectator: bool,
     /// Spectators a host admits (0 = none).
@@ -41,6 +47,7 @@ impl Default for NetplaySetup {
             bind: "0.0.0.0:19732".into(),
             peer: String::new(),
             player: 0,
+            players: 2,
             spectator: false,
             spectators: 0,
             code: String::new(),
@@ -60,8 +67,14 @@ impl From<&Options> for NetplaySetup {
         Self {
             enabled: true,
             bind: options.bind.to_string(),
-            peer: options.peer.to_string(),
+            peer: options
+                .peers
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
             player: options.player,
+            players: options.players as u8,
             spectators: options.spectators,
             code: hex(&options.session),
             delay: options.input_delay,
@@ -103,6 +116,7 @@ impl From<&crate::netplay::ConnectionOptions> for NetplaySetup {
                 enabled: true,
                 internet: true,
                 player: options.settings().player,
+                players: options.invitation.players,
                 spectators: options.spectators,
                 code: options.invitation.encode().expect("validated invitation"),
                 spectator_code: options
@@ -159,6 +173,7 @@ impl NetplaySetup {
                             host.invitation.encode()? == self.code
                                 && host.invitation.delay == self.delay
                                 && host.invitation.window == self.rollback
+                                && host.invitation.players == self.players
                                 && host.spectators == self.spectators,
                             "Create a new invitation after changing host settings"
                         );
@@ -197,6 +212,7 @@ impl NetplaySetup {
                 let host = crate::netplay::internet::Options::host(
                     self.delay,
                     self.rollback,
+                    self.players,
                     &self.relay,
                     self.relay_only,
                     self.spectators,
@@ -230,6 +246,9 @@ impl NetplaySetup {
             F::NetplayBind | F::NetplayPeer => !self.internet,
             F::NetplayRelay => self.internet && host,
             F::NetplayRelayOnly => self.internet,
+            // The host decides how many ports the game has; everyone else
+            // is told when they join.
+            F::NetplayPlayers => host,
             F::NetplayNewCode | F::NetplayDelay | F::NetplayRollback => {
                 !self.spectator && (!self.internet || host)
             }
@@ -244,8 +263,27 @@ impl NetplaySetup {
             if let Ok(invitation) = crate::netplay::internet::Invitation::decode(&self.code) {
                 self.delay = invitation.delay;
                 self.rollback = invitation.window;
+                // The row is the host's to set, so the pasted invitation is
+                // the only thing that can tell a guest how many ports the
+                // game has.
+                self.players = invitation.players;
             }
         }
+    }
+
+    /// Peer addresses, one per non-empty comma-separated entry.
+    fn peer_addresses(&self) -> Result<Vec<std::net::SocketAddr>> {
+        use anyhow::Context;
+        self.peer
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| {
+                entry
+                    .parse()
+                    .with_context(|| format!("Peer address needs IP:port, got {entry:?}"))
+            })
+            .collect()
     }
 
     /// Direct player options; none for a spectator.
@@ -254,14 +292,22 @@ impl NetplaySetup {
         if !self.enabled || self.spectator {
             return Ok(None);
         }
+        let host = self.player == 0;
         let options = Options {
             bind: self.bind.parse().context("Local address needs IP:port")?,
-            peer: self.peer.parse().context("Peer address needs IP:port")?,
+            peers: self.peer_addresses()?,
             player: self.player,
+            // A guest is told the real count when it joins; it only needs
+            // room for the port it asked for.
+            players: if host {
+                usize::from(self.players)
+            } else {
+                usize::from(self.players).max(self.player + 1)
+            },
             session: crate::netplay::parse_session_id(&self.code)?,
             input_delay: self.delay,
             rollback_frames: self.rollback,
-            spectators: if self.player == 0 { self.spectators } else { 0 },
+            spectators: if host { self.spectators } else { 0 },
         };
         options.validate()?;
         Ok(Some(options))
@@ -273,9 +319,13 @@ impl NetplaySetup {
         if !self.enabled || !self.spectator {
             return Ok(None);
         }
+        let host = *self
+            .peer_addresses()?
+            .first()
+            .context("Host address needs IP:port")?;
         let options = WatchOptions {
             bind: self.bind.parse().context("Local address needs IP:port")?,
-            host: self.peer.parse().context("Host address needs IP:port")?,
+            host,
             session: crate::netplay::parse_session_id(&self.code)?,
         };
         options.validate()?;
@@ -317,9 +367,10 @@ impl NetplaySetup {
                 (Role::Spectator, true) => "Watch".into(),
                 (Role::Spectator, false) => "Spectator".into(),
                 (Role::Host, true) => "Host (port 1)".into(),
-                (Role::Guest, true) => "Join (port 2)".into(),
+                (Role::Guest, true) => "Join (next free port)".into(),
                 (_, false) => format!("{} (port {})", self.player + 1, self.player + 1),
             },
+            F::NetplayPlayers => format!("{} players", self.players),
             F::NetplaySpectators => match self.spectators {
                 0 => "Off".into(),
                 n => format!("Up to {n}"),
@@ -354,16 +405,28 @@ impl NetplaySetup {
             }
             F::NetplayRelayOnly => self.relay_only = !self.relay_only,
             F::NetplayPlayer => {
-                // Host, join, watch, and round again.
-                let index = match self.role() {
-                    Role::Host => 0,
-                    Role::Guest => 1,
-                    Role::Spectator => 2,
+                // Internet: host, join, watch. Direct IP names the port, so
+                // it cycles through every one the adapter can reach.
+                let last = if self.internet {
+                    2
+                } else {
+                    crate::netplay::MAX_PLAYERS
                 };
-                let next = (index + if forward { 1 } else { 2 }) % 3;
-                self.spectator = next == 2;
-                self.player = usize::from(next == 1);
+                let index = match self.role() {
+                    Role::Spectator => last,
+                    _ => self.player,
+                };
+                let next = if forward {
+                    (index + 1) % (last + 1)
+                } else {
+                    (index + last) % (last + 1)
+                };
+                self.spectator = next == last;
+                self.player = if self.spectator { 0 } else { next };
                 self.adopt_invitation();
+            }
+            F::NetplayPlayers => {
+                self.players = cycle_slice(&[2, 3, 4], self.players, forward);
             }
             F::NetplaySpectators => {
                 self.spectators =
@@ -395,6 +458,7 @@ impl LauncherField {
                 | F::NetplayBind
                 | F::NetplayPeer
                 | F::NetplayPlayer
+                | F::NetplayPlayers
                 | F::NetplaySpectators
                 | F::NetplayCode
                 | F::NetplayDelay
@@ -454,6 +518,15 @@ impl LauncherState {
                     *port = PortDevice::Joystick;
                 }
             }
+            // Players three and four sit in the parallel-port adapter, so
+            // the machine needs it plugged in with joysticks in its sockets.
+            self.setup.parallel_device = if self.netplay.players > 2 {
+                crate::config::ParallelDevice::JoystickAdapter
+            } else if self.setup.parallel_device == crate::config::ParallelDevice::JoystickAdapter {
+                self.setup.parallel_device
+            } else {
+                crate::config::ParallelDevice::None
+            };
         }
     }
 

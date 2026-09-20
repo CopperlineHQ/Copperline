@@ -110,6 +110,12 @@ struct Hardware {
     connected: [bool; 4],
     speed: u16,
     ports: [String; 2],
+    /// The four-player adapter, and a joystick in each of its sockets.
+    /// Absent in a bundle from a build that only knew two players.
+    #[serde(default)]
+    adapter: bool,
+    #[serde(default)]
+    sockets: [bool; 2],
     rtg: RawRtg,
     boards: Vec<crate::zorro::BoardSpec>,
     scsi: Option<String>,
@@ -191,6 +197,8 @@ impl Hardware {
             connected: cfg.floppy_connected,
             speed: cfg.floppy.speed,
             ports: cfg.port_devices.map(|p| p.label().to_owned()),
+            adapter: cfg.parallel.device == ParallelDevice::JoystickAdapter,
+            sockets: cfg.parallel_joysticks,
             rtg: RawRtg {
                 card: Some(format!("{:?}", cfg.rtg)),
                 vram: Some(cfg.rtg_vram_bytes.to_string()),
@@ -250,6 +258,24 @@ impl Hardware {
         raw.serial.mode = Some("off".into());
         raw.input.port1 = Some(self.ports[0].clone());
         raw.input.port2 = Some(self.ports[1].clone());
+        // Only the passive adapter crosses the wire. A printer or sampler
+        // is a host peripheral, which `validate_config` refuses below.
+        if self.adapter {
+            raw.parallel.device = Some(ParallelDevice::JoystickAdapter.label().to_owned());
+        }
+        let socket = |fitted: bool| {
+            Some(
+                if fitted {
+                    crate::bus::PortDevice::Joystick
+                } else {
+                    crate::bus::PortDevice::None
+                }
+                .label()
+                .to_owned(),
+            )
+        };
+        raw.input.port3 = socket(self.adapter && self.sockets[0]);
+        raw.input.port4 = socket(self.adapter && self.sockets[1]);
         // Controller ROMs are supplied separately. Empty ROM settings opt out
         // of bundled-asset lookup while validating the hardware selection.
         if let Some(controller) = &self.scsi {

@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Two-peer GGPO-style netplay. Gameplay exchanges inputs and state digests;
-//! desktop setup and floppy changes also transfer the host's settings and media.
+//! GGPO-style netplay for two to four players. Gameplay exchanges inputs and
+//! state digests; desktop setup and floppy changes also transfer the host's
+//! settings and media.
+//!
+//! Each player owns one controller port, so a session with the four-player
+//! adapter fitted carries ports 3 and 4 as well. Players past the second
+//! connect to the host, which relays every port's input to every other
+//! player: guests never address each other.
 
 #[cfg(not(target_arch = "wasm32"))]
 mod control;
@@ -27,6 +33,9 @@ pub use transport::{PacketQueue, Transport};
 pub use wire::{HEADER as PACKET_HEADER, INPUT_RECORD, MAX_PACKET, VERSION as PROTOCOL_VERSION};
 /// Default seed for a fitted clock in deterministic netplay sessions.
 pub const RTC_SEED: u64 = 946684800;
+/// Controller ports a session can drive: the two game ports plus the
+/// four-player adapter's two sockets.
+pub const MAX_PLAYERS: usize = crate::bus::PORT_COUNT;
 
 use crate::emulator::Emulator;
 use crate::timebase::{Duration, Instant};
@@ -93,8 +102,14 @@ impl Input {
         }
     }
 
-    fn merged_keys(inputs: [Self; 2]) -> [u8; 16] {
-        std::array::from_fn(|i| inputs[0].keys[i] | inputs[1].keys[i])
+    /// A key is held while any player holds it.
+    pub(crate) fn merged_keys(inputs: &[Self]) -> [u8; 16] {
+        inputs.iter().fold([0; 16], |mut keys, input| {
+            for (byte, held) in keys.iter_mut().zip(input.keys) {
+                *byte |= held;
+            }
+            keys
+        })
     }
 }
 
@@ -158,8 +173,11 @@ pub enum Role {
 /// Negotiated timeline settings, shared by every transport.
 #[derive(Clone, Debug)]
 pub struct Settings {
-    /// Zero-based controller port owned by this peer.
+    /// Zero-based controller port owned by this peer. Player 1 (index 0)
+    /// hosts; ports 3 and 4 are the four-player adapter's sockets.
     pub player: usize,
+    /// Controller ports the session drives, 2..=[`MAX_PLAYERS`].
+    pub players: usize,
     pub session: [u8; 16],
     pub input_delay: u8,
     pub rollback_frames: u8,
@@ -167,7 +185,15 @@ pub struct Settings {
 
 impl Settings {
     pub fn validate(&self) -> Result<()> {
-        ensure!(self.player < 2, "netplay player must be 1 or 2");
+        ensure!(
+            (2..=MAX_PLAYERS).contains(&self.players),
+            "netplay needs 2 to {MAX_PLAYERS} players"
+        );
+        ensure!(
+            self.player < self.players,
+            "netplay player must be 1..{}",
+            self.players
+        );
         ensure!(
             self.input_delay <= 6,
             "netplay input delay must be 0..6 frames"
@@ -178,16 +204,35 @@ impl Settings {
         );
         Ok(())
     }
+
+    /// The host owns port 1 and relays for everybody else.
+    pub fn hosting(&self) -> bool {
+        self.player == 0
+    }
+
+    /// Links this peer holds once the session is complete: a guest talks
+    /// only to the host, and the host to every guest.
+    pub fn expected_links(&self) -> usize {
+        if self.hosting() {
+            self.players - 1
+        } else {
+            1
+        }
+    }
 }
 
-/// Both peers specify each other's reachable UDP address and the same session ID.
+/// Direct UDP endpoints. A guest names the host; a host may name the guests
+/// it will accept, or leave the list empty to admit any source presenting
+/// the session ID, as it already does for spectators.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug)]
 pub struct Options {
     pub bind: SocketAddr,
-    pub peer: SocketAddr,
+    pub peers: Vec<SocketAddr>,
     /// Zero-based controller port owned by this peer.
     pub player: usize,
+    /// Controller ports the session drives, 2..=[`MAX_PLAYERS`].
+    pub players: usize,
     pub session: [u8; 16],
     pub input_delay: u8,
     pub rollback_frames: u8,
@@ -263,6 +308,13 @@ impl ConnectionOptions {
         }
     }
 
+    /// Whether this peer was configured for a particular controller port.
+    /// Direct-IP guests name their player number; an Internet guest takes
+    /// whichever port the host still has free.
+    pub fn names_player(&self) -> bool {
+        matches!(self, Self::Direct(_))
+    }
+
     pub fn role(&self) -> Role {
         match self {
             Self::Direct(options) => options.role(),
@@ -287,7 +339,9 @@ impl ConnectionOptions {
     /// Spectators a hosting player admits.
     pub fn spectators(&self) -> usize {
         match self {
-            Self::Direct(options) if options.player == 0 => usize::from(options.spectators),
+            Self::Direct(options) if options.settings().hosting() => {
+                usize::from(options.spectators)
+            }
             #[cfg(feature = "netplay-internet")]
             Self::Internet(options) if options.host_key.is_some() => {
                 usize::from(options.spectators)
@@ -310,9 +364,10 @@ impl ConnectionOptions {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Options {
-    fn settings(&self) -> Settings {
+    pub fn settings(&self) -> Settings {
         Settings {
             player: self.player,
+            players: self.players,
             session: self.session,
             input_delay: self.input_delay,
             rollback_frames: self.rollback_frames,
@@ -325,15 +380,41 @@ impl Options {
             Role::Guest
         }
     }
+    /// The one endpoint a guest sends to.
+    pub fn host_address(&self) -> Option<SocketAddr> {
+        (!self.settings().hosting()).then(|| self.peers[0])
+    }
     pub fn validate(&self) -> Result<()> {
-        self.settings().validate()?;
+        let settings = self.settings();
+        settings.validate()?;
         ensure!(
             usize::from(self.spectators) <= spectate::MAX_SPECTATORS
-                && (self.spectators == 0 || self.player == 0),
+                && (self.spectators == 0 || settings.hosting()),
             "netplay spectators are served by player 1, up to {}",
             spectate::MAX_SPECTATORS
         );
-        validate_peer(self.bind, self.peer)
+        if settings.hosting() {
+            // Every unlisted source is turned away and one source can hold
+            // only one port, so a short or repeated list can never fill the
+            // session. Take a complete list or none at all.
+            let distinct: std::collections::BTreeSet<_> = self.peers.iter().collect();
+            ensure!(
+                self.peers.is_empty()
+                    || (self.peers.len() == settings.expected_links()
+                        && distinct.len() == self.peers.len()),
+                "a netplay host lists one address per guest ({} of them), or none to admit any peer holding the session code",
+                settings.expected_links()
+            );
+        } else {
+            ensure!(
+                self.peers.len() == 1,
+                "a netplay guest needs the host's peer address"
+            );
+        }
+        for peer in &self.peers {
+            validate_peer(self.bind, *peer)?;
+        }
+        Ok(())
     }
 }
 
@@ -368,10 +449,15 @@ pub fn validate_config(cfg: &crate::config::Config) -> Result<()> {
         "netplay cannot use ATAPI or SCSI CD images"
     );
     // The sampler attaches in the frontend after session construction; reject
-    // it here, before fingerprinting or opening any parallel host device.
+    // it here, before fingerprinting or opening any parallel host device. The
+    // four-player adapter is passive wiring with no host peripheral behind it,
+    // so it stays: ports 3 and 4 are exactly what a multitap session plays on.
     ensure!(
-        cfg.parallel.device == crate::config::ParallelDevice::None,
-        "netplay requires the parallel port device to be none"
+        matches!(
+            cfg.parallel.device,
+            crate::config::ParallelDevice::None | crate::config::ParallelDevice::JoystickAdapter
+        ),
+        "netplay requires the parallel port device to be none or the four-player adapter"
     );
     // Its rate-specific resamplers serialize from a randomized HashMap, so
     // equivalent boards cannot yet guarantee byte-identical checkpoints.
@@ -423,17 +509,33 @@ pub fn prepare_config(cfg: &mut crate::config::Config) -> Result<()> {
 #[cfg(not(target_arch = "wasm32"))]
 pub use desktop::Session;
 
-pub struct Connection<T: Transport> {
+/// One peer's link. A guest holds a single link to the host; the host holds
+/// one per guest and relays between them.
+struct Link<T> {
+    player: usize,
     transport: T,
+    /// A valid packet has arrived from this peer.
+    seen: bool,
+    /// The peer reports that it has everyone it is waiting for.
+    ready: bool,
+    /// What this peer still needs from each player.
+    acks: [u64; MAX_PLAYERS],
+    last_received: Instant,
+    last_sent: Option<Instant>,
+}
+
+/// Packets one service call may send to one link. Redundant unacknowledged
+/// inputs for three other ports can outgrow a single datagram.
+const MAX_SEND_PACKETS: usize = 4;
+
+pub struct Connection<T: Transport> {
+    links: Vec<Link<T>>,
     settings: Settings,
     identity: [u8; 32],
     rollback: Rollback,
-    seen_peer: bool,
     connected: bool,
     started: Instant,
-    last_received: Instant,
-    last_sent: Option<Instant>,
-    peer_hashes: BTreeMap<u64, [u8; 32]>,
+    peer_hashes: BTreeMap<(u64, usize), [u8; 32]>,
     last_checked: u64,
     failure: Option<String>,
     feed: Option<Feed>,
@@ -444,7 +546,7 @@ pub struct Status {
     pub connected: bool,
     pub frame: u64,
     pub confirmed_frame: u64,
-    /// All local inputs below this frame have reached the peer.
+    /// All local inputs below this frame have reached every peer.
     pub acknowledged_frame: u64,
     pub rollbacks: u64,
     pub replayed_frames: u64,
@@ -454,7 +556,7 @@ pub struct Status {
 }
 
 impl Status {
-    /// A capture may end this process, so both peers need its frame's inputs.
+    /// A capture may end this process, so every peer needs its frame's inputs.
     pub fn ready_to_capture(&self) -> bool {
         self.connected
             && self.frame == self.confirmed_frame
@@ -472,9 +574,13 @@ impl Connection<NativeTransport> {
         let (settings, transport) = match options.into() {
             ConnectionOptions::Direct(options) => {
                 options.validate()?;
+                ensure!(
+                    options.players == 2 && options.peers.len() == 1,
+                    "a session with more than two players is coordinated by its host"
+                );
                 (
                     options.settings(),
-                    NativeTransport::Udp(UdpTransport::new(options)?),
+                    NativeTransport::Udp(UdpTransport::connect(options)?),
                 )
             }
             #[cfg(feature = "netplay-internet")]
@@ -494,7 +600,7 @@ impl Connection<NativeTransport> {
     }
 
     pub fn options(&self) -> ConnectionOptions {
-        self.transport.options()
+        self.links[0].transport.options()
     }
 }
 
@@ -505,6 +611,26 @@ fn initial_identity(
 ) -> Result<[u8; 32]> {
     settings.validate()?;
     machine_identity(emu, cfg)
+}
+
+/// Every player needs a controller its inputs can reach. Ports 3 and 4 are
+/// sockets on the passive four-player adapter, so the adapter must be
+/// plugged in with a joystick in each socket the session uses.
+///
+/// Only a machine that will actually run the game is checked: the host's,
+/// and a guest's once the host's bundle has built it. A guest waits on a
+/// bare placeholder machine that is not expected to have the adapter, and
+/// nothing it holds reaches the game.
+pub fn validate_player_ports(emu: &Emulator, players: usize) -> Result<()> {
+    for player in crate::bus::PARALLEL_PORT_FIRST..players {
+        ensure!(
+            emu.bus().input.device(player) == crate::bus::PortDevice::Joystick,
+            "netplay player {} needs a joystick in the four-player adapter's socket; set port{} = joystick",
+            player + 1,
+            player + 1
+        );
+    }
+    Ok(())
 }
 
 /// Fingerprint a cold machine every participant must reproduce exactly:
@@ -536,7 +662,7 @@ pub fn machine_identity(emu: &mut Emulator, cfg: &crate::config::Config) -> Resu
                 | crate::bus::PortDevice::Joystick
                 | crate::bus::PortDevice::Cd32Pad
         )),
-        "netplay requires mouse, joystick or CD32 controllers on both ports"
+        "netplay requires mouse, joystick or CD32 controllers on both game ports"
     );
     let mut identity_hash = Sha256::new();
     identity_hash.update(env!("COPPERLINE_DISPLAY_VERSION").as_bytes());
@@ -546,30 +672,31 @@ pub fn machine_identity(emu: &mut Emulator, cfg: &crate::config::Config) -> Resu
 
 impl<T: Transport> Connection<T> {
     pub fn route(&self) -> &'static str {
-        self.transport.route()
+        self.links
+            .first()
+            .map_or("connecting", |link| link.transport.route())
     }
-    pub fn with_transport(
+
+    /// A peer whose links are added as the other players arrive.
+    pub fn without_links(
         settings: Settings,
-        transport: T,
         emu: &mut Emulator,
         cfg: &crate::config::Config,
     ) -> Result<Self> {
         let identity = initial_identity(&settings, emu, cfg)?;
         let rollback = Rollback::new(
             settings.player,
+            settings.players,
             settings.input_delay,
             settings.rollback_frames,
         );
         Ok(Self {
-            transport,
+            links: Vec::new(),
             settings,
             identity,
             rollback,
-            seen_peer: false,
             connected: false,
             started: Instant::now(),
-            last_received: Instant::now(),
-            last_sent: None,
             peer_hashes: BTreeMap::new(),
             last_checked: 0,
             failure: None,
@@ -577,12 +704,100 @@ impl<T: Transport> Connection<T> {
         })
     }
 
+    /// A complete two-player session, or a guest's single link to the host.
+    pub fn with_transport(
+        settings: Settings,
+        transport: T,
+        emu: &mut Emulator,
+        cfg: &crate::config::Config,
+    ) -> Result<Self> {
+        let peer = if settings.hosting() { 1 } else { 0 };
+        ensure!(
+            !settings.hosting() || settings.players == 2,
+            "a host with more than two players holds one link per guest"
+        );
+        let mut connection = Self::without_links(settings, emu, cfg)?;
+        connection.add_link(peer, transport)?;
+        Ok(connection)
+    }
+
+    /// Admit another player's link. Every player must be present before the
+    /// first frame: the timeline has no way to seat a latecomer.
+    pub fn add_link(&mut self, player: usize, transport: T) -> Result<()> {
+        ensure!(
+            self.rollback.current == 0,
+            "netplay players must all join before the game starts"
+        );
+        ensure!(
+            player < self.settings.players && player != self.settings.player,
+            "netplay player {} is not part of this session",
+            player + 1
+        );
+        ensure!(
+            !self.links.iter().any(|link| link.player == player),
+            "netplay port {} already has a player",
+            player + 1
+        );
+        ensure!(
+            self.links.len() < self.settings.expected_links(),
+            "netplay session is full"
+        );
+        let now = Instant::now();
+        self.links.push(Link {
+            player,
+            transport,
+            seen: false,
+            ready: false,
+            acks: [0; MAX_PLAYERS],
+            last_received: now,
+            last_sent: None,
+        });
+        Ok(())
+    }
+
+    /// Ports still waiting for a player, lowest first.
+    pub fn free_players(&self) -> impl Iterator<Item = usize> + use<'_, T> {
+        (0..self.settings.players).filter(|player| {
+            *player != self.settings.player && !self.links.iter().any(|link| link.player == *player)
+        })
+    }
+
+    pub fn link_mut(&mut self, player: usize) -> Option<&mut T> {
+        self.links
+            .iter_mut()
+            .find(|link| link.player == player)
+            .map(|link| &mut link.transport)
+    }
+
+    pub fn link(&self, player: usize) -> Option<&T> {
+        self.links
+            .iter()
+            .find(|link| link.player == player)
+            .map(|link| &link.transport)
+    }
+
+    /// Every peer's link, in the order they joined.
+    pub fn links_mut(&mut self) -> impl Iterator<Item = (usize, &mut T)> {
+        self.links
+            .iter_mut()
+            .map(|link| (link.player, &mut link.transport))
+    }
+
+    pub fn transports(&self) -> impl Iterator<Item = (usize, &T)> {
+        self.links.iter().map(|link| (link.player, &link.transport))
+    }
+
+    /// The only link of a two-player peer, which the browser owns directly.
     pub fn transport_mut(&mut self) -> &mut T {
-        &mut self.transport
+        &mut self.links[0].transport
     }
 
     pub fn player(&self) -> usize {
         self.settings.player
+    }
+
+    pub fn players(&self) -> usize {
+        self.settings.players
     }
 
     pub fn identity(&self) -> [u8; 32] {
@@ -597,7 +812,7 @@ impl<T: Transport> Connection<T> {
             "spectator history must start at frame zero"
         );
         self.rollback.log = Some(Default::default());
-        self.feed = Some(Feed::new(limit));
+        self.feed = Some(Feed::new(limit, self.settings.players));
         Ok(())
     }
 
@@ -631,7 +846,7 @@ impl<T: Transport> Connection<T> {
             connected: self.connected,
             frame: self.rollback.current,
             confirmed_frame: self.rollback.confirmed,
-            acknowledged_frame: self.rollback.acknowledged,
+            acknowledged_frame: self.rollback.ack_frontier(),
             rollbacks: self.rollback.rollbacks,
             replayed_frames: self.rollback.replayed_frames,
             checked_frame: self.last_checked,
@@ -674,76 +889,51 @@ impl<T: Transport> Connection<T> {
         result
     }
 
+    /// This peer has every link it is waiting for and has heard from each.
+    fn locally_ready(&self) -> bool {
+        self.links.len() == self.settings.expected_links()
+            && self.links.iter().all(|link| link.seen)
+    }
+
     fn step_inner(
         &mut self,
         emu: &mut Emulator,
         input: &mut LocalInput,
         advance: bool,
     ) -> Result<bool> {
-        if !self.transport.ready()? {
-            self.started = Instant::now();
-            return Ok(false);
-        }
-        // A finite receive budget keeps window input responsive under a burst.
-        let mut buffer = [0; wire::MAX_PACKET + 1];
-        for _ in 0..64 {
-            match self.transport.receive(&mut buffer) {
-                Ok(Some(len)) => {
-                    let Some(bytes) = buffer.get(..len) else {
-                        continue;
-                    };
-                    wire::Packet::check_version(bytes, &self.settings.session)?;
-                    let Some(packet) = wire::Packet::decode(bytes) else {
-                        continue;
-                    };
-                    if packet.session != self.settings.session {
-                        continue;
-                    }
-                    ensure!(packet.player == 1 - self.settings.player && packet.delay == self.settings.input_delay && packet.window == self.settings.rollback_frames,
-                        "netplay settings differ: use opposite players and identical delay/rollback values");
-                    ensure!(packet.identity == self.identity, "netplay initial machine mismatch: use the same build, ROM, disks, floppy sounds and deterministic machine settings");
-                    self.seen_peer = true;
-                    if packet.ready && !self.connected {
-                        self.connected = true;
-                        emu.reanchor_realtime_clock();
-                        log::info!(
-                            "netplay: connected; local controller port {}",
-                            self.player() + 1
-                        );
-                    }
-                    self.last_received = Instant::now();
-                    self.rollback.acknowledge(packet.ack)?;
-                    for (frame, input) in packet.inputs {
-                        self.rollback.receive(frame, input)?;
-                    }
-                    if let Some((frame, hash)) = packet.checksum {
-                        ensure!(
-                            frame
-                                <= self.rollback.current + u64::from(self.settings.input_delay) + 1,
-                            "netplay checksum is too far in the future"
-                        );
-                        if frame > self.last_checked {
-                            self.peer_hashes.insert(frame, hash);
-                        }
-                    }
-                }
-                Ok(None) => break,
-                Err(e) => return Err(e).context("receiving netplay input"),
+        let mut ready = self.links.len() == self.settings.expected_links();
+        for link in &mut self.links {
+            if !link.transport.ready()? {
+                ready = false;
             }
         }
+        if !ready {
+            self.started = Instant::now();
+            for link in &mut self.links {
+                link.last_received = self.started;
+            }
+            return Ok(false);
+        }
+        self.receive_packets(emu)?;
         ensure!(
             input.held.buttons & !Input::BUTTONS == 0 && input.held.mouse_buttons & !7 == 0,
             "invalid local netplay controller input"
         );
         let now = Instant::now();
-        ensure!(
-            if self.connected {
-                now.duration_since(self.last_received) < Duration::from_secs(10)
-            } else {
-                now.duration_since(self.started) < Duration::from_secs(60)
-            },
-            "netplay peer timed out"
-        );
+        if self.connected {
+            for link in &self.links {
+                ensure!(
+                    now.duration_since(link.last_received) < Duration::from_secs(10),
+                    "netplay player {} timed out",
+                    link.player + 1
+                );
+            }
+        } else {
+            ensure!(
+                now.duration_since(self.started) < Duration::from_secs(60),
+                "netplay peer timed out"
+            );
+        }
         let mut stepped = false;
         let sampled = input.sample();
         if self.connected && advance {
@@ -753,63 +943,208 @@ impl<T: Transport> Connection<T> {
             }
             // Send sampled input before replay, emulation, or pacing can add
             // another frame of avoidable network latency.
-            self.send_packet(true)?;
+            self.send_packets(true)?;
         }
         if self.connected {
+            self.update_relay_floor();
             let mut machine = EmulatedMachine(emu);
             self.rollback.reconcile(&mut machine)?;
             if advance {
                 stepped = self.rollback.advance(&mut machine, sampled)?;
             }
             self.drain_feed()?;
-            for (&frame, expected) in &self.peer_hashes {
+            for (&(frame, player), expected) in &self.peer_hashes {
                 if let Some(actual) = self.rollback.hashes.get(&frame) {
                     ensure!(
                         expected == actual,
-                        "netplay desynchronized at confirmed frame {frame}"
+                        "netplay desynchronized with player {} at confirmed frame {frame}",
+                        player + 1
                     );
                     self.last_checked = self.last_checked.max(frame);
                 }
             }
-            self.peer_hashes.retain(|f, _| *f > self.last_checked);
+            let checked = self.last_checked;
+            self.peer_hashes.retain(|(frame, _), _| *frame > checked);
         }
-        self.send_packet(!advance)?;
+        self.send_packets(!advance)?;
         Ok(stepped)
     }
 
-    fn send_packet(&mut self, force: bool) -> Result<()> {
-        let now = Instant::now();
-        if force
-            || self
-                .last_sent
-                .is_none_or(|last| now.duration_since(last) >= Duration::from_millis(10))
-        {
-            let packet = wire::Packet {
-                session: self.settings.session,
-                identity: self.identity,
-                player: self.player(),
-                ready: self.seen_peer,
-                delay: self.settings.input_delay,
-                window: self.settings.rollback_frames,
-                ack: self.rollback.received,
-                inputs: self
-                    .rollback
-                    .local
-                    .range(self.rollback.acknowledged..)
-                    .map(|(&f, &i)| (f, i))
-                    .collect(),
-                checksum: self.rollback.hashes.last_key_value().map(|(&f, &h)| (f, h)),
-            }
-            .encode();
-            if self
-                .transport
-                .send(&packet)
-                .context("sending netplay input")?
-            {
-                self.last_sent = Some(now);
+    fn receive_packets(&mut self, emu: &mut Emulator) -> Result<()> {
+        // A finite receive budget keeps window input responsive under a burst.
+        let mut buffer = [0; wire::MAX_PACKET + 1];
+        for index in 0..self.links.len() {
+            for _ in 0..64 {
+                match self.links[index].transport.receive(&mut buffer) {
+                    Ok(Some(len)) => {
+                        let Some(bytes) = buffer.get(..len) else {
+                            continue;
+                        };
+                        wire::Packet::check_version(bytes, &self.settings.session)?;
+                        let Some(packet) = wire::Packet::decode(bytes) else {
+                            continue;
+                        };
+                        if packet.session != self.settings.session {
+                            continue;
+                        }
+                        self.accept(emu, index, packet)?;
+                    }
+                    Ok(None) => break,
+                    Err(e) => return Err(e).context("receiving netplay input"),
+                }
             }
         }
         Ok(())
+    }
+
+    fn accept(&mut self, emu: &mut Emulator, index: usize, packet: wire::Packet) -> Result<()> {
+        let player = self.links[index].player;
+        ensure!(
+            packet.player == player,
+            "netplay packet claims port {} on player {}'s link",
+            packet.player + 1,
+            player + 1
+        );
+        ensure!(packet.players == self.settings.players && packet.delay == self.settings.input_delay && packet.window == self.settings.rollback_frames,
+            "netplay settings differ: use the same number of players and identical delay/rollback values");
+        ensure!(packet.identity == self.identity, "netplay initial machine mismatch: use the same build, ROM, disks, floppy sounds and deterministic machine settings");
+        self.links[index].seen = true;
+        self.links[index].ready = packet.ready;
+        self.links[index].acks = packet.acks;
+        self.links[index].last_received = Instant::now();
+        self.rollback
+            .acknowledge(player, packet.acks[self.settings.player])?;
+        for (source, frame, input) in packet.inputs {
+            // A guest reports only its own port; the host relays every other
+            // port to it and never echoes back what it just sent.
+            if self.settings.hosting() {
+                ensure!(
+                    source == player,
+                    "netplay player {} submitted input for port {}",
+                    player + 1,
+                    source + 1
+                );
+            } else {
+                ensure!(
+                    source != self.settings.player,
+                    "netplay host echoed this player's own input"
+                );
+            }
+            self.rollback.receive(source, frame, input)?;
+        }
+        if let Some((frame, hash)) = packet.checksum {
+            ensure!(
+                frame <= self.rollback.current + u64::from(self.settings.input_delay) + 1,
+                "netplay checksum is too far in the future"
+            );
+            if frame > self.last_checked {
+                self.peer_hashes.insert((frame, player), hash);
+            }
+        }
+        // The host starts once every guest is present; a guest starts when
+        // the host says so, which is the same instant for all of them.
+        let connected = if self.settings.hosting() {
+            self.locally_ready()
+        } else {
+            self.links[index].ready
+        };
+        if connected && !self.connected {
+            self.connected = true;
+            emu.reanchor_realtime_clock();
+            log::info!(
+                "netplay: connected; {} players, local controller port {}",
+                self.settings.players,
+                self.settings.player + 1
+            );
+        }
+        Ok(())
+    }
+
+    /// A host keeps each port's inputs until the last link that still needs
+    /// them has acknowledged them, since it is the only route between guests.
+    fn update_relay_floor(&mut self) {
+        if !self.settings.hosting() {
+            return;
+        }
+        let mut floor = [u64::MAX; MAX_PLAYERS];
+        for source in 0..self.settings.players {
+            for link in self.links.iter().filter(|link| link.player != source) {
+                floor[source] = floor[source].min(link.acks[source]);
+            }
+        }
+        self.rollback.relay_floor = floor;
+    }
+
+    fn send_packets(&mut self, force: bool) -> Result<()> {
+        let now = Instant::now();
+        for index in 0..self.links.len() {
+            let due = force
+                || self.links[index]
+                    .last_sent
+                    .is_none_or(|last| now.duration_since(last) >= Duration::from_millis(10));
+            if !due {
+                continue;
+            }
+            let player = self.links[index].player;
+            let acks = self.links[index].acks;
+            // Records stay ordered by port and then frame, which is how the
+            // wire format requires them, and how chunking preserves them.
+            let mut records = Vec::new();
+            for source in 0..self.settings.players {
+                if source == player || (!self.settings.hosting() && source != self.settings.player)
+                {
+                    continue;
+                }
+                records.extend(
+                    self.rollback
+                        .pending(source, acks[source])
+                        .map(|(frame, input)| (source, frame, input)),
+                );
+            }
+            let mut sent = false;
+            if records.is_empty() {
+                sent = self.send_one(index, Vec::new())?;
+            } else {
+                for chunk in records.chunks(wire::MAX_INPUTS).take(MAX_SEND_PACKETS) {
+                    if !self.send_one(index, chunk.to_vec())? {
+                        break;
+                    }
+                    sent = true;
+                }
+            }
+            if sent {
+                self.links[index].last_sent = Some(now);
+            }
+        }
+        Ok(())
+    }
+
+    fn send_one(&mut self, index: usize, inputs: Vec<(usize, u64, Input)>) -> Result<bool> {
+        let mut acks = self.rollback.received;
+        // A peer never reports what it needs from itself, and ports outside
+        // the session never acknowledge anything.
+        for (player, ack) in acks.iter_mut().enumerate() {
+            if player == self.settings.player || player >= self.settings.players {
+                *ack = 0;
+            }
+        }
+        let packet = wire::Packet {
+            session: self.settings.session,
+            identity: self.identity,
+            player: self.settings.player,
+            players: self.settings.players,
+            ready: self.locally_ready(),
+            delay: self.settings.input_delay,
+            window: self.settings.rollback_frames,
+            acks,
+            inputs,
+            checksum: self.rollback.hashes.last_key_value().map(|(&f, &h)| (f, h)),
+        }
+        .encode();
+        self.links[index]
+            .transport
+            .send(&packet)
+            .context("sending netplay input")
     }
 }
 
@@ -835,9 +1170,14 @@ impl Machine for EmulatedMachine<'_> {
     fn load(&mut self, state: &[u8]) -> Result<()> {
         self.0.netplay_restore(state)
     }
-    fn frame(&mut self, inputs: [Input; 2], previous_keys: [u8; 16], replay: bool) -> Result<()> {
+    fn frame(&mut self, inputs: &[Input], previous_keys: [u8; 16], replay: bool) -> Result<()> {
         for (port, input) in inputs.iter().enumerate() {
-            if self.0.bus().input.ports[port].device == crate::bus::PortDevice::Mouse {
+            // A mouse port takes motion and buttons; a digital controller
+            // update must not replace the device plugged into it. Ports 3
+            // and 4 are adapter sockets, which carry switch joysticks only.
+            if port < crate::bus::PARALLEL_PORT_FIRST
+                && self.0.bus().input.ports[port].device.is_mouse()
+            {
                 let hardware = &mut self.0.bus_mut().input;
                 hardware.add_mouse_delta(
                     port,

@@ -1,11 +1,19 @@
 # Rollback netplay
 
-Copperline can run a two-player game across two desktop instances or two browsers.
-Each peer emulates the whole Amiga and owns one controller port. Both players
-see their own input after a small configurable delay. Copperline predicts late
+Copperline can run a two-player game across two desktop instances or two
+browsers, and a three- or four-player game across as many desktop instances.
+Each peer emulates the whole Amiga and owns one controller port. Every player
+sees their own input after a small configurable delay. Copperline predicts late
 remote input, then restores and replays frames when that prediction was wrong.
 This follows the approach described by [GGPO](https://github.com/pond3r/ggpo);
 it uses Copperline's own Rust implementation and wire protocol.
+
+Players three and four play through the
+[four-player adapter](configuration.md#parallel-port) on the parallel port, exactly as they would
+sitting at one machine: two switch joysticks, no mouse and no CD32 buttons.
+Player 1 hosts, and every other player connects to it; the host passes each
+player's controls on to the others, so only the host needs to be reachable.
+All the players have to be connected before the game starts.
 
 Desktop builds offer direct UDP connections by IP address or encrypted Internet
 connections with automatic NAT traversal and relay fallback. Browsers use WebRTC
@@ -14,7 +22,8 @@ service configured. Browser manual connection codes remain available.
 The host can admit up to eight spectators, who watch the game without playing
 and may join while it is in progress (see [Spectators](#netplay-spectators)).
 There is no public lobby or automatic reconnect. Browser and desktop peers
-cannot connect to each other. Use the same Copperline build on every machine;
+cannot connect to each other, and browser games are always two-player: a web
+page has no parallel port to plug the adapter into. Use the same Copperline build on every machine;
 mixed operating systems and browser engines have not yet been qualified.
 
 (browser-netplay)=
@@ -166,12 +175,15 @@ through an HTTPS relay. No port forwarding is normally needed.
 
 ![Internet netplay setup](../images/ui-preview-launcher-netplay-internet.png)
 
-1. The host chooses **Host (port 1)**, sets **Input delay** and **Rollback limit**,
+1. The host chooses **Host (port 1)**, sets **Players**, **Input delay** and
+   **Rollback limit**,
    then clicks **New invitation** and **Copy code**. Send that code privately to
-   the other player, then click **Run**.
-2. The guest chooses **Join (port 2)**, pastes the code into **Invitation**, and
-   clicks **Run**. The invitation supplies the host's timing and relay settings.
-   The host then transfers the machine settings, ROMs and game media. The guest's
+   the other players, then click **Run**.
+2. Each guest chooses **Join**, pastes the code into **Invitation**, and
+   clicks **Run**. The invitation supplies the host's timing, player count and
+   relay settings, and the host seats each guest on the next free controller
+   port as it arrives.
+   The host then transfers the machine settings, ROMs and game media. A guest's
    saved configuration and original files remain unchanged.
 3. The cold machine waits for the peer before running. The connection message
    reports the route; the log records changes between direct and relay paths.
@@ -204,18 +216,27 @@ Choose **Connection → Direct IP (UDP)** on both computers.
 
 ![Direct IP netplay setup](../images/ui-preview-launcher-netplay.png)
 
-1. Choose **Player 1** on one computer and **Player 2** on the other.
+1. Choose **Player 1** on one computer, and **Player 2**, **3** or **4** on
+   each of the others. Player 1 sets **Players** to the number taking part.
 2. Leave **Local address** at `0.0.0.0:19732` to listen on all local IPv4
-   interfaces. Set **Peer address** to the other computer's reachable IP and
-   port, for example `192.168.1.11:19732`. For IPv6, use bracketed addresses
-   such as `[::]:19732` and `[2001:db8::2]:19732` on both peers.
-3. One player clicks **New code**, then **Copy code**, and shares it with the
-   other player. The other player pastes that code into **Session code**.
+   interfaces. On each guest, set **Peer address** to the host's reachable IP
+   and port, for example `192.168.1.10:19732`. The host may list the guests it
+   will accept, separated by commas, or leave the box empty to accept anyone
+   who has the session code. For IPv6, use bracketed addresses
+   such as `[::]:19732` and `[2001:db8::2]:19732` on every peer.
+3. Player 1 clicks **New code**, then **Copy code**, and shares it with the
+   other players, who paste it into **Session code**.
    Cmd+V on macOS or Ctrl+V elsewhere replaces the focused address/code box;
    Return commits an edit and Escape cancels it.
 4. Player 1 chooses **Input delay** and **Rollback limit**. Click **Run** on
-   both computers. Player 1 sends the setup and files to player 2; both windows
-   wait for verification before emulation begins.
+   every computer. Player 1 sends the setup and files to each guest; every
+   window waits for verification, and for the last player to arrive, before
+   emulation begins.
+
+**Players** sets how many controller ports the game uses. Choosing three or
+four fits the four-player adapter with a joystick in each of its sockets, so
+**Local player** then offers ports 3 and 4 as well. Only the host sets the
+count; everyone else is told when they join.
 
 Enabling netplay changes analogue, gamepad-mouse and empty ports to joysticks, turns serial
 and JIT off, disables run-ahead and warp boot, and enables power on. Existing
@@ -325,6 +346,42 @@ copperline \
   --netplay-player 2 --netplay-session 8b21488dae9544f591adf03e291ce976
 ```
 
+The host repeats `--netplay-peer` once per guest, or omits it to accept
+anyone who has the session code. Omitting it is convenient, but the session
+code is then the only thing standing between a stranger and a controller
+port, so keep the advice below about VPNs in mind.
+
+### Four players on the command line
+
+Players three and four need the adapter, which `--netplay-players` and
+`--port3`/`--port4` fit:
+
+```sh
+# Player 1 hosts all four ports:
+copperline --factory --model A500 --serial off \
+  --port1 joystick --port2 joystick --port3 joystick --port4 joystick \
+  --netplay-bind 0.0.0.0:19732 --netplay-players 4 \
+  --netplay-player 1 --netplay-session 8b21488dae9544f591adf03e291ce976 \
+  --insert-disk-after 0 df0 game.adf KICK13.ROM
+
+# Players 2, 3 and 4, each on their own machine:
+copperline --netplay-bind 0.0.0.0:19732 --netplay-peer 192.168.1.10:19732 \
+  --netplay-player 3 --netplay-session 8b21488dae9544f591adf03e291ce976
+```
+
+Every guest names the host and its own player number; the host needs no
+`--netplay-peer` unless it wants to restrict which addresses may join. Only
+the host passes `--netplay-players`, and its machine needs a joystick in
+each adapter socket the session uses. The same flag works for an Internet
+host, whose invitation then carries the count:
+
+```sh
+copperline --factory --model A500 --serial off \
+  --port1 joystick --port2 joystick --port3 joystick --port4 joystick \
+  --netplay-players 4 --netplay-host invitation.txt \
+  --insert-disk-after 0 df0 game.adf KICK13.ROM
+```
+
 A direct IP spectator names the host's endpoint and the players' session ID;
 the host adds `--netplay-spectators N`, and spectators share its UDP port:
 
@@ -381,12 +438,14 @@ in a private temporary directory which is removed at disconnect.
 
 ## Controls
 
-Player 1 controls Amiga port 1; player 2 controls port 2. For joystick/CD32
-ports, a connected gamepad drives the local port. Without a gamepad, the first
+Each player controls the Amiga port their player number names. For
+joystick/CD32 ports, a connected gamepad drives the local port. Without a gamepad, the first
 keyboard controller mapping drives it: by default arrows move, right Ctrl fires, and
 left Alt is the second button. The existing saved input mappings apply.
-The desktop host chooses `mouse`, `joystick` or `cd32` for each port; the guest
-inherits those choices. A mouse port takes that player's host mouse, with
+The desktop host chooses `mouse`, `joystick` or `cd32` for each game port; the
+guests inherit those choices. Ports 3 and 4 are adapter sockets and always
+carry switch joysticks, so a player on one of them has no mouse and no CD32
+buttons. A mouse port takes that player's host mouse, with
 keyboard typing enabled automatically. For two mice, pass
 `--port1 mouse --port2 mouse` on the host. Mixed mouse and joystick/CD32
 configurations also work on desktop.
@@ -396,8 +455,8 @@ host input preferences such as mouse sensitivity remain local to each player.
 
 For joystick/CD32 ports, press **F12** to switch between keyboard controller
 mode and typing on the Amiga keyboard. Typing mode sends keys such as Return and the arrows to the guest
-instead of consuming them as controller bindings. Keyboard input from the two
-peers is combined: a key stays pressed while either player holds it. Losing
+instead of consuming them as controller bindings. Keyboard input from every
+peer is combined: a key stays pressed while any player holds it. Losing
 window focus releases local held controls on the next sampled frame.
 
 The host Quit and Fullscreen shortcuts remain available (Cmd+Q/Cmd+F on macOS,
@@ -415,6 +474,7 @@ netplay.
 | `--netplay-delay` | 2 | 0–6 frames | Delays local input to reduce corrections |
 | `--netplay-rollback` | 8 | 1–12 frames | Caps prediction while waiting for input |
 | `--netplay-spectators` | 0 | 0–8 | Spectators the host admits |
+| `--netplay-players` | 2 | 2–4 | Controller ports in play |
 
 Desktop guests inherit these values from the host. At PAL's nominal 50 Hz, two frames are
 about 40 ms. Zero delay gives immediate local input but can produce more visible
@@ -460,7 +520,9 @@ setting takes precedence over this logging preset, including the debug flag.
 ## Supported machines and verification
 
 Use a cold boot with interpreter execution, matching mouse/joystick/CD32 port
-configurations on both peers, serial off, and rewind/run-ahead disabled. Floppy images become session-local memory images;
+configurations on every peer, serial off, and rewind/run-ahead disabled. The
+parallel port must be empty or carry the four-player adapter; a printer or
+sampler is a host peripheral and is refused. Floppy images become session-local memory images;
 guest disk writes can be rolled back and do **not** modify the original files.
 Disk changes and in-session saves are not persisted.
 
@@ -483,8 +545,9 @@ and exiting. `--press-after` and `--key-after`
 feed the synchronized keyboard; `--joy-after ... PORT` must name that peer's
 own port. Input schedules belong to each peer and need not be identical.
 
-The local smoke check starts both peers, schedules a button press on each, and
-compares confirmed PNGs and checkpoint logs. `--spectators N` adds spectators
+The local smoke check starts every peer, schedules a button press on each, and
+compares confirmed PNGs and checkpoint logs. `--players N` runs a three- or
+four-player game through the adapter. `--spectators N` adds spectators
 that join a second after the players connect (`--spectate-after SECS` changes
 the delay), replay the history, and must produce the same PNG as the players.
 A headless host keeps serving connected spectators for up to five seconds
@@ -495,6 +558,7 @@ python3 tools/check-netplay.py --binary target/release/copperline
 # Add the host's machine options after --, for example:
 python3 tools/check-netplay.py --seconds 10 -- --config game.toml
 python3 tools/check-netplay.py --seconds 20 --spectators 2
+python3 tools/check-netplay.py --seconds 10 --players 4
 ```
 
 A spectator's log ends with `netplay: spectating finished frames=... checked=...`.

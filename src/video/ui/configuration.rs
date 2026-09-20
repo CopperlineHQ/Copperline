@@ -2925,14 +2925,14 @@ pub(in crate::video::ui) fn draw_launcher(
                 "Host: new invitation, copy code, then Run. Join: paste, Run.",
                 "Watch: paste the host's spectator code, then Run.",
                 "Blank relay uses n0's public service; custom URL optional.",
-                "Run connects. F11 disconnects. Guest uses host timing.",
+                "Run connects. F11 disconnects. The host seats each guest.",
             ]
         } else {
             [
                 "Use the same machine, ROM and floppy contents.",
-                "Share one session code; choose opposite players.",
-                "Spectator: peer address is the host's, same code.",
-                "Netplay sets digital ports, serial off and interpreter.",
+                "Share one session code; give each player its own port.",
+                "Guests and spectators use the host's address; it may list them.",
+                "Ports 3 and 4 play through the four-player adapter.",
                 "Run connects. F11 returns here. Settings last this session.",
             ]
         }

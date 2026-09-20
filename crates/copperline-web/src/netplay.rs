@@ -53,6 +53,9 @@ impl WebEmu {
         }
         let settings = Settings {
             player: usize::from(integer(player, 1, 2, "player")? - 1),
+            // Browser sessions are two-player: the page has no way to fit
+            // the parallel-port adapter that ports 3 and 4 live on.
+            players: 2,
             session: copperline::netplay::parse_session_id(code).map_err(js_err)?,
             input_delay: integer(delay, 0, 6, "input delay")?,
             rollback_frames: integer(window, 1, 12, "rollback window")?,
@@ -680,6 +683,7 @@ mod tests {
     fn settings(player: usize) -> Settings {
         Settings {
             player,
+            players: 2,
             session: [42; 16],
             input_delay: 0,
             rollback_frames: 8,

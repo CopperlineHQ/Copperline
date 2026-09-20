@@ -3086,6 +3086,9 @@ fn panels_render_into_their_rects() {
     state.toggle_netplay();
     state.netplay.peer = "192.168.1.11:19732".into();
     state.netplay.code = "8b21488dae9544f591adf03e291ce976".into();
+    // A four-player session, so the page shows the adapter's ports too.
+    state.netplay.players = 4;
+    state.prepare_netplay_machine();
     state.tab = LauncherTab::Netplay;
     let ui = UiState {
         panel: Some(Panel::Launcher(Box::new(state))),

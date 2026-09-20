@@ -3047,6 +3047,59 @@ mod netplay_cli_tests {
         Ok(())
     }
 
+    /// A host lists one peer per guest and says how many ports are in play;
+    /// a guest names only the host and the port it wants.
+    #[test]
+    fn netplay_seats_four_players_through_the_adapter() -> Result<()> {
+        let host = parse_args_from(
+            [
+                "--netplay-bind",
+                "127.0.0.1:19732",
+                "--netplay-peer",
+                "127.0.0.1:19733",
+                "--netplay-peer",
+                "127.0.0.1:19734",
+                "--netplay-peer",
+                "127.0.0.1:19735",
+                "--netplay-players",
+                "4",
+                "--netplay-player",
+                "1",
+                "--netplay-session",
+                "0123456789abcdef0123456789abcdef",
+            ]
+            .map(str::to_string),
+        )?;
+        let settings = host.netplay.as_ref().unwrap().settings().unwrap();
+        assert_eq!((settings.player, settings.players), (0, 4));
+        for port in 2..=4u8 {
+            let guest = parse_args_from(
+                [
+                    "--netplay-bind",
+                    "127.0.0.1:0",
+                    "--netplay-peer",
+                    "127.0.0.1:19732",
+                    "--netplay-player",
+                    &port.to_string(),
+                    "--netplay-session",
+                    "0123456789abcdef0123456789abcdef",
+                ]
+                .map(str::to_string),
+            )?;
+            // A guest is told the real count when it joins, so it only needs
+            // room for the port it asked for.
+            let settings = guest.netplay.as_ref().unwrap().settings().unwrap();
+            assert_eq!(settings.player, usize::from(port) - 1);
+            assert!(settings.players >= usize::from(port));
+            settings.validate()?;
+        }
+        // Only the host sets the count, and it may not name more peers than
+        // it has ports for.
+        assert!(args(&["--netplay-player", "2", "--netplay-players", "4"]).is_err());
+        assert!(args(&["--netplay-peer", "127.0.0.1:19734"]).is_err());
+        Ok(())
+    }
+
     #[test]
     fn netplay_host_accepts_boot_packages_and_scheduled_floppy_swaps() -> Result<()> {
         for extra in [
@@ -3075,7 +3128,9 @@ mod netplay_cli_tests {
         assert!(parse_args_from(["--netplay-delay".to_string(), "2".to_string()]).is_err());
         for extra in [
             vec!["--netplay-player", "0"],
-            vec!["--netplay-player", "3"],
+            vec!["--netplay-player", "5"],
+            vec!["--netplay-players", "1"],
+            vec!["--netplay-players", "5"],
             vec!["--netplay-delay", "7"],
             vec!["--netplay-rollback", "0"],
             vec!["--netplay-rollback", "13"],

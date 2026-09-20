@@ -1309,7 +1309,8 @@ assignment. Bindings remain editable through **Input Mapping...**.
 
 Scripted `--joy-after ... 3`/`4` and the control protocol's `input.joy` address
 the adapter sockets directly. The [libretro core](libretro.md) also exposes
-both sockets. Copperline's built-in Netplay remains two-player.
+both sockets, and [Netplay](netplay.md) can give each socket to a player on
+another computer.
 
 A `gamepad-mouse` device is a mouse a gamepad moves as well as the host's
 own; the machine still sees one mouse. The d-pad moves the pointer,
