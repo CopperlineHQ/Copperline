@@ -207,12 +207,12 @@ const CONSOLE_HELP: &[&str] = &[
     "execution:  run  pause  step/s [N]  over  out  frame/f  line  cstep",
     "            runto ADDR   outrom   toslot V [H]   rstep [N]  rframe  rrun",
     "stops:      break/b ADDR [COND] [IGN N]   watch/w ADDR [CPU|BLITTER|DISK]",
-    "            rwatch REG",
+    "            rwatch REG   mwatch ADDR[:LEN] [READ|WRITE|ACCESS]",
     "            btrap V [H]   cbreak ADDR   catch irq N|trap N|vec N",
     "            catchtask [NAME]   catchalert   breaks (list)   clearbreaks",
     "inspect:    status  regs/r  mem/m ADDR [BYTES]  dis/d [ADDR] [N]",
     "            copper [pc|ADDR] [N]   custom [REG]   blits   cpuwait   find HEX [START]",
-    "            writer ADDR   dbgres",
+    "            writer ADDR   dbgres   cdtrace [N]",
     "            history/h [N]   stack/bt",
     "os:         tasks  task [ADDR|NAME]  execbase  memlist  segments",
     "            libs  devs  resources  ports  who ADDR  guru [CODE]",
@@ -461,6 +461,55 @@ impl App {
                         .unwrap_or_default(),
                     if set { "set" } else { "removed" }
                 ))
+            }
+            "MWATCH" | "MW" => {
+                let Some(watch) = crate::debugger::MmioWatch::parse_hex_len(&args.join(" ")) else {
+                    return ConsoleOutcome::error(
+                        "usage: MWATCH ADDR[:LEN] [READ|WRITE|ACCESS] (LEN hex bytes, default 2)",
+                    );
+                };
+                let set = self.emu.machine.ui_toggle_mmio_watch(watch);
+                let shown = crate::debugger::MmioWatch::new(
+                    watch.addr & self.emu.machine.ui_addr_mask(),
+                    watch.len,
+                    watch.access,
+                );
+                ConsoleOutcome::one(format!(
+                    "mmio watch {} {}",
+                    shown.describe(),
+                    if set { "set" } else { "removed" }
+                ))
+            }
+            "CDTRACE" => {
+                let count = match args.first() {
+                    None => 16,
+                    Some(token) => match token.parse::<usize>() {
+                        Ok(n) if n > 0 => n,
+                        _ => return ConsoleOutcome::error("usage: CDTRACE [N] (decimal count)"),
+                    },
+                };
+                let Some(trace) = self.emu.bus().cd_trace() else {
+                    return ConsoleOutcome::error(
+                        "no traced CD drive (the command trace follows the CD32's Akiko)",
+                    );
+                };
+                let mut records: Vec<&crate::cdtrace::CdCommandRecord> =
+                    trace.records().rev().take(count).collect();
+                if records.is_empty() {
+                    return ConsoleOutcome::one("no CD commands yet".to_string());
+                }
+                records.reverse();
+                let lines = records
+                    .into_iter()
+                    .map(|record| {
+                        format!(
+                            "{:.6}s {}",
+                            crate::cdtrace::cck_seconds(record.issued_cck),
+                            record.describe()
+                        )
+                    })
+                    .collect();
+                ConsoleOutcome::lines(lines)
             }
             "RWATCH" | "RW" => {
                 let Some(off) = args
@@ -1654,6 +1703,10 @@ impl App {
                 "rwatch {} (${off:03X})",
                 crate::debugger::custom_reg_name(*off)
             ));
+            any = true;
+        }
+        for watch in &breaks.mmio_watches {
+            lines.push(format!("mwatch {}", watch.describe()));
             any = true;
         }
         for vector in &breaks.catches {

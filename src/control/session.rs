@@ -5,7 +5,7 @@
 //! [`MachineInputState`] follows the emulated machine across connection
 //! turnover and owns deferred input plus the headless recording hook.
 
-use crate::debugger::{BreakCond, WatchAccess, WatchSource};
+use crate::debugger::{BreakCond, MmioWatch, WatchAccess, WatchSource};
 use crate::emulator::Emulator;
 use crate::inputrec::InputRecorder;
 use crate::inputsched::{JoyState, ReplayAction};
@@ -45,6 +45,10 @@ pub enum BreakSpec {
         /// Stop only for a program with this basename (case-insensitive);
         /// None stops on every program load.
         name: Option<String>,
+    },
+    /// Stop on a CPU access to a byte range (device registers included).
+    Mmio {
+        watch: MmioWatch,
     },
 }
 
@@ -277,6 +281,14 @@ impl SessionCtx {
             BreakSpec::Copper { addr } => emu.bus().ui_copper_breaks().contains(addr),
             BreakSpec::Catch { vector } => emu.machine.ui_breaks().catches.contains(vector),
             BreakSpec::LoadSeg { .. } => emu.machine.ui_breaks().loadseg_catch.is_some(),
+            BreakSpec::Mmio { watch } => {
+                let addr = watch.addr & emu.machine.ui_breaks().addr_mask;
+                emu.machine
+                    .ui_breaks()
+                    .mmio_watches
+                    .iter()
+                    .any(|w| w.addr == addr && w.len == watch.len)
+            }
         }
     }
 
@@ -286,9 +298,10 @@ impl SessionCtx {
         events: &[super::observe::EventKind],
         frame_interval: Option<u64>,
         frame_digest: Option<bool>,
+        mmio: Option<&[MmioWatch]>,
     ) -> serde_json::Value {
         self.observations
-            .subscribe(emu, events, frame_interval, frame_digest)
+            .subscribe(emu, events, frame_interval, frame_digest, mmio)
     }
 
     pub fn unsubscribe_events(
@@ -352,6 +365,9 @@ fn normalize_spec(emu: &Emulator, spec: BreakSpec) -> BreakSpec {
         BreakSpec::Copper { addr } => BreakSpec::Copper {
             addr: addr & 0x00FF_FFFE,
         },
+        BreakSpec::Mmio { watch } => BreakSpec::Mmio {
+            watch: MmioWatch::new(watch.addr & addr_mask, watch.len, watch.access),
+        },
         other @ (BreakSpec::RegWatch { .. }
         | BreakSpec::Beam { .. }
         | BreakSpec::Catch { .. }
@@ -375,6 +391,10 @@ fn same_point(a: &BreakSpec, b: &BreakSpec) -> bool {
         // The machine's store holds at most one loadseg catch, so any two
         // specs address the same point whatever their name filters.
         (BreakSpec::LoadSeg { .. }, BreakSpec::LoadSeg { .. }) => true,
+        // Keyed on the range, like the machine's store.
+        (BreakSpec::Mmio { watch: x }, BreakSpec::Mmio { watch: y }) => {
+            x.addr == y.addr && x.len == y.len
+        }
         _ => false,
     }
 }
@@ -399,6 +419,7 @@ fn toggle_spec(emu: &mut Emulator, spec: &BreakSpec) -> bool {
         BreakSpec::Copper { addr } => emu.bus_mut().ui_toggle_copper_break(*addr),
         BreakSpec::Catch { vector } => emu.machine.ui_toggle_catch(*vector),
         BreakSpec::LoadSeg { name } => emu.machine.ui_toggle_loadseg_catch(name.clone()),
+        BreakSpec::Mmio { watch } => emu.machine.ui_toggle_mmio_watch(*watch),
     }
 }
 
@@ -446,6 +467,7 @@ pub fn describe_spec(spec: &BreakSpec) -> String {
             Some(name) => format!("loadseg catch (name {name:?})"),
             None => "loadseg catch".to_string(),
         },
+        BreakSpec::Mmio { watch } => format!("mmio watch {}", watch.describe()),
     }
 }
 

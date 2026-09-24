@@ -6,6 +6,7 @@
 //! windowed delivery adds another bounded queue at the socket boundary.
 
 use super::{exec, proto};
+use crate::debugger::MmioWatch;
 use crate::emulator::Emulator;
 use crate::serial::SERIAL_OBSERVATION_CAPACITY;
 use crate::uaelib::DebugEvent;
@@ -20,6 +21,8 @@ const INTERRUPT: u8 = 1 << 2;
 const MEDIA: u8 = 1 << 3;
 const DEBUG: u8 = 1 << 4;
 const BUS: u8 = 1 << 5;
+const MMIO: u8 = 1 << 6;
+const CD: u8 = 1 << 7;
 
 /// Event families exposed by `events.subscribe`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,16 +35,22 @@ pub enum EventKind {
     Debug,
     /// Exact hardware events emitted by the slot arbiter.
     Bus,
+    /// CPU accesses to the subscription's MMIO ranges, one per access.
+    Mmio,
+    /// Timestamped CD drive commands (`crate::cdtrace`), one per phase.
+    Cd,
 }
 
 impl EventKind {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 8] = [
         Self::Frame,
         Self::Serial,
         Self::Interrupt,
         Self::Media,
         Self::Debug,
         Self::Bus,
+        Self::Mmio,
+        Self::Cd,
     ];
 
     pub fn from_name(name: &str) -> Option<Self> {
@@ -52,6 +61,8 @@ impl EventKind {
             "media" => Some(Self::Media),
             "debug" => Some(Self::Debug),
             "bus" => Some(Self::Bus),
+            "mmio" => Some(Self::Mmio),
+            "cd" => Some(Self::Cd),
             _ => None,
         }
     }
@@ -64,6 +75,8 @@ impl EventKind {
             Self::Media => "media",
             Self::Debug => "debug",
             Self::Bus => "bus",
+            Self::Mmio => "mmio",
+            Self::Cd => "cd",
         }
     }
 
@@ -75,6 +88,8 @@ impl EventKind {
             Self::Media => MEDIA,
             Self::Debug => DEBUG,
             Self::Bus => BUS,
+            Self::Mmio => MMIO,
+            Self::Cd => CD,
         }
     }
 }
@@ -105,6 +120,11 @@ pub struct Observer {
     last_media: Option<MediaState>,
     dropped_notifications: u64,
     bus_cursor: u64,
+    /// The ranges this connection streams (a subset of the Bus's union of
+    /// every subscriber's ranges) and its cursor into the access queue.
+    mmio_watches: Vec<MmioWatch>,
+    mmio_cursor: u64,
+    cd_cursor: u64,
 }
 
 impl Observer {
@@ -118,6 +138,9 @@ impl Observer {
             last_media: None,
             dropped_notifications: 0,
             bus_cursor: 0,
+            mmio_watches: Vec::new(),
+            mmio_cursor: 0,
+            cd_cursor: 0,
         }
     }
 
@@ -127,7 +150,17 @@ impl Observer {
         events: &[EventKind],
         frame_interval: Option<u64>,
         frame_digest: Option<bool>,
+        mmio: Option<&[MmioWatch]>,
     ) -> Value {
+        // New ranges replace this connection's old ones, whether or not the
+        // family was already active; the cursor only resets for a fresh
+        // subscription.
+        if let Some(ranges) = mmio {
+            let bus = emu.bus_mut();
+            bus.remove_mmio_stream_watches(&self.mmio_watches);
+            bus.add_mmio_stream_watches(ranges);
+            self.mmio_watches = ranges.to_vec();
+        }
         if let Some(interval) = frame_interval {
             self.frame_interval = interval;
         }
@@ -152,6 +185,13 @@ impl Observer {
                     self.bus_cursor = emu.bus().bus_event_cursor();
                     emu.bus_mut().set_bus_event_observation_enabled(true);
                 }
+                EventKind::Mmio => self.mmio_cursor = emu.bus().mmio_event_cursor(),
+                EventKind::Cd => {
+                    self.cd_cursor = emu
+                        .bus()
+                        .cd_trace()
+                        .map_or(0, crate::cdtrace::CdTrace::event_cursor)
+                }
             }
         }
         self.list_value()
@@ -160,7 +200,7 @@ impl Observer {
     pub fn unsubscribe(&mut self, emu: &mut Emulator, events: Option<&[EventKind]>) -> Value {
         let remove = events
             .map(|events| events.iter().fold(0, |bits, event| bits | event.bit()))
-            .unwrap_or(FRAME | SERIAL | INTERRUPT | MEDIA | DEBUG | BUS);
+            .unwrap_or(FRAME | SERIAL | INTERRUPT | MEDIA | DEBUG | BUS | MMIO | CD);
         let serial_was_active = self.active & SERIAL != 0;
         let bus_was_active = self.active & BUS != 0;
         self.active &= !remove;
@@ -182,6 +222,11 @@ impl Observer {
             emu.bus_mut().set_bus_event_observation_enabled(false);
             self.bus_cursor = 0;
         }
+        if remove & MMIO != 0 && !self.mmio_watches.is_empty() {
+            emu.bus_mut().remove_mmio_stream_watches(&self.mmio_watches);
+            self.mmio_watches.clear();
+            self.mmio_cursor = 0;
+        }
         self.list_value()
     }
 
@@ -196,11 +241,23 @@ impl Observer {
             .filter(|event| self.active & event.bit() != 0)
             .map(|event| event.name())
             .collect();
+        let mmio: Vec<Value> = self
+            .mmio_watches
+            .iter()
+            .map(|watch| {
+                json!({
+                    "addr": watch.addr,
+                    "len": watch.len,
+                    "access": watch.access.name(),
+                })
+            })
+            .collect();
         json!({
             "supported": supported,
             "active": active,
             "frame_interval": self.frame_interval,
             "frame_digest": self.frame_digest,
+            "mmio": mmio,
             "dropped_notifications": self.dropped_notifications,
             "limits": {
                 "serial_records": SERIAL_OBSERVATION_CAPACITY,
@@ -208,6 +265,8 @@ impl Observer {
                 "debug_resources": crate::uaelib::RESOURCE_MAX,
                 "windowed_outbound_notifications": OUTBOUND_NOTIFICATION_CAPACITY,
                 "bus_events": crate::bus::BUS_EVENT_OBSERVATION_CAPACITY,
+                "mmio_events": crate::bus::MMIO_EVENT_OBSERVATION_CAPACITY,
+                "cd_events": crate::cdtrace::CD_TRACE_EVENT_CAPACITY,
             },
         })
     }
@@ -242,6 +301,48 @@ impl Observer {
                         "dropped_notifications": self.dropped_notifications,
                     }),
                 ));
+            }
+        }
+
+        if self.active & MMIO != 0 {
+            let (records, cursor, dropped) = emu.bus().mmio_events_since(self.mmio_cursor);
+            self.mmio_cursor = cursor;
+            for event in records {
+                let access = event.access;
+                // The queue holds every subscriber's ranges; report ours.
+                if !self
+                    .mmio_watches
+                    .iter()
+                    .any(|w| w.matches(access.addr, u32::from(access.size), access.write))
+                {
+                    continue;
+                }
+                let mut params = exec::mmio_access_value(&access);
+                params["dropped_events"] = json!(dropped);
+                params["dropped_notifications"] = json!(self.dropped_notifications);
+                events.push(proto::event_line("event.mmio", params));
+            }
+        }
+
+        if self.active & CD != 0 {
+            if let Some(trace) = emu.bus().cd_trace() {
+                // A rebuilt drive (new machine) restarts its numbering.
+                if self.cd_cursor > trace.event_cursor() {
+                    self.cd_cursor = 0;
+                }
+                let (records, cursor, dropped) = trace.events_since(self.cd_cursor);
+                self.cd_cursor = cursor;
+                for event in records {
+                    events.push(proto::event_line(
+                        "event.cd",
+                        json!({
+                            "phase": event.phase.name(),
+                            "command": exec::cd_record_value(&event.record),
+                            "dropped_events": dropped,
+                            "dropped_notifications": self.dropped_notifications,
+                        }),
+                    ));
+                }
             }
         }
 
@@ -446,7 +547,7 @@ mod tests {
     fn frame_subscription_is_baselined_and_interval_limited() {
         let mut emu = test_emulator();
         let mut observer = Observer::new();
-        observer.subscribe(&mut emu, &[EventKind::Frame], Some(2), Some(false));
+        observer.subscribe(&mut emu, &[EventKind::Frame], Some(2), Some(false), None);
 
         assert!(observer.poll(&mut emu).is_empty());
 
@@ -465,7 +566,7 @@ mod tests {
     fn interrupt_subscription_reports_state_changes() {
         let mut emu = test_emulator();
         let mut observer = Observer::new();
-        observer.subscribe(&mut emu, &[EventKind::Interrupt], None, None);
+        observer.subscribe(&mut emu, &[EventKind::Interrupt], None, None, None);
         emu.bus_mut().paula.intreq ^= 1 << 5;
 
         let events = observer.poll(&mut emu);
@@ -479,7 +580,7 @@ mod tests {
     fn bus_subscription_streams_named_events_without_full_frame_tracing() {
         let mut emu = test_emulator();
         let mut observer = Observer::new();
-        let state = observer.subscribe(&mut emu, &[EventKind::Bus], None, None);
+        let state = observer.subscribe(&mut emu, &[EventKind::Bus], None, None, None);
         assert_eq!(state["active"], json!(["bus"]));
         assert!(!emu.bus().frame_analyzer_enabled());
 
@@ -510,7 +611,7 @@ mod tests {
     fn unsubscribe_disables_all_families() {
         let mut emu = test_emulator();
         let mut observer = Observer::new();
-        observer.subscribe(&mut emu, &EventKind::ALL, Some(3), Some(true));
+        observer.subscribe(&mut emu, &EventKind::ALL, Some(3), Some(true), None);
         let state = observer.unsubscribe(&mut emu, None);
         assert_eq!(state["active"], json!([]));
         assert_eq!(state["frame_digest"], false);
@@ -550,13 +651,52 @@ mod tests {
     }
 
     #[test]
+    fn mmio_family_reports_only_this_connections_ranges() {
+        use crate::debugger::{MmioWatch, WatchAccess};
+        let mut emu = test_emulator();
+        let ours = MmioWatch::new(0x0002_0000, 2, WatchAccess::Write);
+        let theirs = MmioWatch::new(0x00BF_E001, 1, WatchAccess::Access);
+        // Another connection's range shares the Bus queue.
+        emu.bus_mut().add_mmio_stream_watches(&[theirs]);
+        let mut observer = Observer::new();
+        let state = observer.subscribe(&mut emu, &[EventKind::Mmio], None, None, Some(&[ours]));
+        assert_eq!(state["active"], json!(["mmio"]));
+        assert_eq!(state["mmio"][0]["addr"], 0x0002_0000);
+        assert_eq!(state["mmio"][0]["access"], "write");
+
+        emu.bus_mut().note_mmio_access(0x00BF_E001, 1, 0xFC, false);
+        emu.bus_mut().note_mmio_access(0x0002_0000, 2, 0x1234, true);
+        let lines = observer.poll(&mut emu);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let event: Value = serde_json::from_str(&lines[0]).unwrap();
+        assert_eq!(event["method"], "event.mmio");
+        assert_eq!(event["params"]["value"], 0x1234);
+        assert_eq!(event["params"]["access"], "write");
+
+        // Unsubscribing removes exactly our range from the Bus.
+        observer.unsubscribe(&mut emu, Some(&[EventKind::Mmio]));
+        assert!(emu.bus().mmio_watch_armed(), "the other range remains");
+        emu.bus_mut().remove_mmio_stream_watches(&[theirs]);
+        assert!(!emu.bus().mmio_watch_armed());
+    }
+
+    #[test]
+    fn cd_family_is_quiet_without_a_traced_drive() {
+        let mut emu = test_emulator();
+        let mut observer = Observer::new();
+        let state = observer.subscribe(&mut emu, &[EventKind::Cd], None, None, None);
+        assert_eq!(state["active"], json!(["cd"]));
+        assert!(observer.poll(&mut emu).is_empty());
+    }
+
+    #[test]
     fn debug_family_is_named_listed_and_cleared() {
         assert_eq!(EventKind::from_name("debug"), Some(EventKind::Debug));
         assert_eq!(EventKind::Debug.name(), "debug");
-        assert_eq!(EventKind::ALL.len(), 6);
+        assert_eq!(EventKind::ALL.len(), 8);
         let mut emu = uaelib_emulator();
         let mut observer = Observer::new();
-        let state = observer.subscribe(&mut emu, &[EventKind::Debug], None, None);
+        let state = observer.subscribe(&mut emu, &[EventKind::Debug], None, None, None);
         assert_eq!(state["active"], json!(["debug"]));
         assert_eq!(
             state["limits"]["debug_events"],
@@ -580,7 +720,7 @@ mod tests {
             .as_mut()
             .unwrap()
             .queue_debug_line("stale");
-        observer.subscribe(&mut emu, &[EventKind::Debug], None, None);
+        observer.subscribe(&mut emu, &[EventKind::Debug], None, None, None);
         assert!(observer.poll(&mut emu).is_empty());
 
         {
@@ -622,7 +762,7 @@ mod tests {
     fn frame_events_carry_guest_idle_cck_once_used() {
         let mut emu = uaelib_emulator();
         let mut observer = Observer::new();
-        observer.subscribe(&mut emu, &[EventKind::Frame], Some(1), Some(false));
+        observer.subscribe(&mut emu, &[EventKind::Frame], Some(1), Some(false), None);
         let start = emu.bus().emulated_frames();
         observer.last_frame = Some(start + 1);
         let events = observer.poll(&mut emu);

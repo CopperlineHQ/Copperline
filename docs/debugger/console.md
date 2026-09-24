@@ -71,6 +71,7 @@ in `INTENA`) stays stopped after two video frames of waiting.
 | `BREAK ADDR [COND] [IGN N]` (or `B`) | Set PC breakpoint (toggle) with optional condition and ignore count |
 | `WATCH ADDR [CLASS] [PC=ADDR]` (or `W`) | Set memory watchpoint. `CLASS` can be `CPU`, `BLITTER`, `DISK`, `COPPER`, or DMA channels (`BPL1`..`BPL8`, `SPR0`..`SPR7`, `AUD0`..`AUD3`) |
 | `RWATCH NAME\|OFFSET` (or `RW`) | Set custom register write watchpoint (e.g. `RWATCH DMACON`) |
+| `MWATCH ADDR[:LEN] [READ\|WRITE\|ACCESS]` (or `MW`) | Toggle an MMIO (CPU access) watch over `LEN` bytes (hex, default 2) at `ADDR`: stops after any CPU data access to the range in the class (default `ACCESS`), reporting size, value, direction, PC, frame, beam position, and colour clock. Works on device registers such as Akiko's (`MWATCH B80000:40`), which a value-comparing `WATCH` cannot see; see [MMIO watches](window.md#debugger-breakpoints) |
 | `BTRAP V [H]` | Set raster beam trap at decimal coordinates (VPOS, HPOS) |
 | `CBREAK ADDR` | Set Copper instruction breakpoint at hex address |
 | `CATCH IRQ N \| TRAP N \| VEC N` | Catch CPU exception vectors |
@@ -91,6 +92,7 @@ in `INTENA`) stays stopped after two video frames of waiting.
 | `CPUWAIT` | Summarise the traced frame's CPU chip-bus waits: waited clocks by denier (bitplane, Copper, blitter with BLTPRI clear or set, ...) and by access kind, and the instructions that waited longest (requires Frame Analyzer; see [the CPU wait view](window.md#frame-analyzer-pane)) |
 | `FIND HEXBYTES [START]` | Search CPU-visible memory (RAM and ROM) for byte sequence |
 | `WRITER ADDR` | Replay retained snapshots to the last observed change of the word at `ADDR`; moves execution back to that point |
+| `CDTRACE [N]` | List the CD drive's last `N` commands (default 16), oldest first: emulated issue time, decoded kind, sector range, speed, reply status, and each later step as milliseconds after issue, with the outcome (CD32 Akiko; see [the CD tab](window.md#debugger-cd-tab)) |
 | `DBGRES` | List debug resources (bitmaps, palettes, copper lists) registered by guest code via the uaelib trap (distinct from `RESOURCES`, which lists Exec OS resource nodes) |
 | `OUTROM` | Run until PC leaves the default Kickstart ROM window (`$F80000-$FFFFFF`) |
 | `HISTORY [N]` (or `H`) | Display recent instruction history |

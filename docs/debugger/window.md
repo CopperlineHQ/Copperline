@@ -225,18 +225,37 @@ Selecting a register decodes its individual bitfields (e.g. `DMACON`, `INTENA`,
 `BPLCON0`, `ADKCON`).
 
 ### Break
-Manages active breakpoints, memory watchpoints, and custom register write traps.
+Manages active breakpoints, memory watchpoints, custom register write traps, and
+MMIO (CPU access) watches.
 
 ```{figure} ../images/ui-preview-debugger-break-egui.png
 :alt: The Break tab
 :width: 90%
 
-Active PC breakpoints, memory watchpoints, and custom register traps.
+Active PC breakpoints, memory watchpoints, custom register traps, and MMIO watches.
 ```
 
 ### Wave
 Interface for arming and configuring VCD logic analyzer waveform exports (see [](waveform.md)).
 
+(debugger-cd-tab)=
+### CD
+The CD drive's command trace (CD32 Akiko only; other machines show why the tab is
+empty). Each command the host sent is listed newest first as a headline -- its
+number, decoded kind (`read`, `play`, `toc`, `stop`, `pause`, `info`, `led`, ...),
+sector range, requested speed, the drive's reply status byte, and the emulated time
+it was issued -- followed by its timeline: each later step as milliseconds after
+issue (`accept` when the drive parsed the packet, `exec` when it acted on it, `reply`
+when the answer reached the host, `first` when a read, play, or TOC dump delivered
+its first unit), the units delivered, and how it ended (`end`, `stopped`,
+`superseded`, `refused`, `no_disc`, `abandoned` after a state load, ...). Commands still running are highlighted.
+
+All times are emulated, so the trace is identical from run to run and unaffected by
+warp. Comparing two ROMs' drivers, a locate's first-sector latency, or the gaps
+between reads is a matter of reading the offsets. The console's `CDTRACE` and the
+control protocol's `cd.trace` / `event.cd` read the same trace.
+
+(debugger-breakpoints)=
 ## Breakpoints, watchpoints, and traps
 
 From the **Break** tab, enter a target address or identifier:
@@ -246,6 +265,14 @@ From the **Break** tab, enter a target address or identifier:
   by CPU, Blitter, or DMA channels.
 - **Reg:** Custom register write trap (e.g. `DMACON` or `96`). Halts whenever CPU
   or Copper writes to the register.
+- **MMIO:** CPU access watch over a byte range, `ADDR[:LEN] [READ|WRITE|ACCESS]`
+  (`LEN` in bytes, hex like every entry-box number, default 2; default class
+  `ACCESS`), e.g. `B80000:40` for Akiko's 64 register bytes. Halts after the instruction whose data
+  access touches the range, and the stop reports the access's address, size, value,
+  direction, PC, frame, beam position, and colour clock. A memory watch compares
+  values and cannot see device registers (reading one has side effects, so it
+  cannot be peeked); the MMIO watch is taken at the CPU's bus access itself, so it
+  sees Akiko, the CIAs, Gayle, Zorro boards, and custom registers as well as RAM.
 - **Beam:** Raster beam trap. Halts when the beam reaches the specified decimal `VPOS`
   (and optional `HPOS`).
 - **Catch:** Exception vector trap (e.g. `irq 3`, `trap 0`, `vec 2`).

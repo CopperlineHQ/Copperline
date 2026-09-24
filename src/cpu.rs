@@ -142,6 +142,10 @@ pub struct M68kMachine {
     // window polls and surfaces (pause + reopen the debugger).
     ui_breaks: crate::debugger::InteractiveBreaks,
     ui_stop: Option<crate::debugger::DebugStop>,
+    /// The access behind the most recently taken MMIO watch stop, so a
+    /// stop report built from the stop's reason string can still carry the
+    /// structured access (`exec::stop_snapshot`). Debug-only state.
+    ui_last_mmio_stop: Option<crate::debugger::MmioAccess>,
     /// ThisTask pointer at the last armed task-catch check, so only a
     /// reschedule (a change) can fire the catch. Debug-only state.
     ui_last_this_task: Option<u32>,
@@ -526,6 +530,7 @@ impl M68kMachine {
             dbg: crate::debugger::Debugger::from_env(address_mask_for_model(cpu_model)),
             ui_breaks: crate::debugger::InteractiveBreaks::new(address_mask_for_model(cpu_model)),
             ui_stop: None,
+            ui_last_mmio_stop: None,
             ui_last_this_task: None,
             ui_loadseg_tracker: crate::amigaos::LibraryTracker::default(),
             coverage: None,
@@ -574,8 +579,41 @@ impl M68kMachine {
         // bus so it bills the shorter post-grant tail (write-posting).
         let short_bus = !machine.cpu.is_pre_68020;
         machine.bus.bus.set_cpu_short_bus_cycle(short_bus);
+        machine.sync_dbg_mmio_watches();
         machine.reset_cpu();
         Ok(machine)
+    }
+
+    /// Mirror the headless debugger's `COPPERLINE_DBG_MMIO` ranges into the
+    /// Bus, whose CPU access path records their hits.
+    fn sync_dbg_mmio_watches(&mut self) {
+        let watches = self
+            .dbg
+            .as_ref()
+            .map(|dbg| dbg.mmio.clone())
+            .unwrap_or_default();
+        self.bus.bus.set_dbg_mmio_watches(&watches);
+    }
+
+    /// COPPERLINE_DBG_MMIO: log each CPU access the last instruction made
+    /// to a watched range, stamped where the access happened. Each line
+    /// counts as a hit against COPPERLINE_DBG_MAXHITS, and the
+    /// AFTER/UNTIL window applies to the access time.
+    fn debug_log_mmio_hits(&mut self) {
+        if self.dbg.as_ref().is_none_or(|dbg| dbg.mmio.is_empty()) {
+            return;
+        }
+        for hit in self.bus.bus.take_dbg_mmio_hits() {
+            let Some(dbg) = self.dbg.as_mut() else {
+                return;
+            };
+            let secs = hit.seconds();
+            if !dbg.enabled_at(secs) {
+                continue;
+            }
+            dbg.hits += 1;
+            log::info!("DBG {} t={secs:.6}", hit.describe());
+        }
     }
 
     // COPPERLINE_DIAG_PCHIST: histogram the CPU PC during the gear/loading window
@@ -2334,6 +2372,18 @@ impl M68kMachine {
         added
     }
 
+    /// Add an MMIO (CPU access) watch, or remove the one over the same
+    /// range. Returns true when now set. The list is mirrored into the Bus,
+    /// whose CPU access path records the hits.
+    pub fn ui_toggle_mmio_watch(&mut self, watch: crate::debugger::MmioWatch) -> bool {
+        let added = self.ui_breaks.toggle_mmio_watch(watch);
+        self.bus
+            .bus
+            .set_ui_mmio_watches(&self.ui_breaks.mmio_watches);
+        self.note_jit_debug_fallback();
+        added
+    }
+
     /// Arm or clear the scheduled-task catch: stop when exec's ThisTask
     /// changes to a task whose name contains `target` (matched
     /// case-insensitively). Arming baselines on the currently scheduled
@@ -2493,6 +2543,7 @@ impl M68kMachine {
         self.ui_loadseg_tracker = crate::amigaos::LibraryTracker::default();
         self.bus.bus.set_ui_reg_watches(&[]);
         self.bus.bus.set_ui_mem_watches(&[]);
+        self.bus.bus.set_ui_mmio_watches(&[]);
         self.bus.bus.ui_clear_beam_traps();
         self.bus.bus.ui_clear_copper_breaks();
         self.ui_stop = None;
@@ -2501,7 +2552,20 @@ impl M68kMachine {
     /// Take the pending interactive break/watch hit, if any.
     pub fn take_ui_debug_stop(&mut self) -> Option<crate::debugger::DebugStop> {
         self.ui_promote_reg_hit();
-        self.ui_stop.take()
+        let stop = self.ui_stop.take();
+        if let Some(stop) = &stop {
+            self.ui_last_mmio_stop = match stop {
+                crate::debugger::DebugStop::Mmio(access) => Some(*access),
+                _ => None,
+            };
+        }
+        stop
+    }
+
+    /// The access behind the most recently taken stop, when that stop was
+    /// an MMIO watch hit.
+    pub fn ui_last_mmio_stop(&self) -> Option<crate::debugger::MmioAccess> {
+        self.ui_last_mmio_stop
     }
 
     /// Whether an interactive break/watch hit is waiting to be surfaced.
@@ -2536,6 +2600,7 @@ impl M68kMachine {
     /// the precise per-instruction loop while any hook is armed.
     pub fn arm_headless_debugger(&mut self, dbg: Option<crate::debugger::Debugger>) {
         self.dbg = dbg;
+        self.sync_dbg_mmio_watches();
         self.note_jit_debug_fallback();
     }
 
@@ -2642,6 +2707,7 @@ impl M68kMachine {
         // Drain read latches even when a higher-priority stop wins, so a
         // breakpoint cannot leave a stale read to fire after resume.
         let read_hits = self.bus.bus.take_ui_mem_reads();
+        let mmio_hit = self.bus.bus.take_ui_mmio_hit();
         // Exception catchpoints: the core records every exception entry
         // (trap, fault, or interrupt) as it loads the handler vector;
         // drain it here so a hit stops at the handler's first
@@ -2667,6 +2733,10 @@ impl M68kMachine {
         }
         self.ui_promote_reg_hit();
         if self.ui_stop.is_some() {
+            return;
+        }
+        if let Some(access) = mmio_hit {
+            self.ui_stop = Some(DebugStop::Mmio(access));
             return;
         }
         let writer_pc = self.cpu.ppc & self.cpu.address_mask;
@@ -2854,6 +2924,7 @@ impl M68kMachine {
             || self.dbg_ipl_on
             || self.dbg_spren_on
             || self.bus.dbg_memw_addr.is_some()
+            || self.bus.bus.mmio_watch_armed()
             || self.ui_breaks.armed()
             || self.ui_pc_history_enabled
             || self.ui_trace.is_some()
@@ -2887,6 +2958,7 @@ impl M68kMachine {
             || self.dbg_ipl_on
             || self.dbg_spren_on
             || self.bus.dbg_memw_addr.is_some()
+            || self.bus.bus.mmio_watch_armed()
             || self.ui_breaks.armed()
             || self.ui_stop.is_some()
             || self.ui_pc_history_enabled
@@ -2964,6 +3036,13 @@ impl M68kMachine {
                     }
                     if self.ui_breakpoint_stops(pc) {
                         self.ui_stop = Some(crate::debugger::DebugStop::Breakpoint { pc });
+                        break;
+                    }
+                    // An MMIO watch over the stack or the vector table
+                    // stops here too, before the handler's first
+                    // instruction runs.
+                    if let Some(access) = self.bus.bus.take_ui_mmio_hit() {
+                        self.ui_stop = Some(crate::debugger::DebugStop::Mmio(access));
                         break;
                     }
                 }
@@ -3055,6 +3134,7 @@ impl M68kMachine {
                             if let Some(snapshot) = dbg_watch_snapshot {
                                 self.debug_after_step(snapshot);
                             }
+                            self.debug_log_mmio_hits();
                             self.debug_check_spren_clear();
                             self.debug_check_frame_counter();
                             self.debug_check_memw();
@@ -3934,6 +4014,17 @@ impl CpuBus {
     }
 
     fn read_sized(&mut self, address: u32, size: usize, kind: CpuBusAccessKind) -> u32 {
+        let value = self.read_sized_unobserved(address, size, kind);
+        // MMIO watches see data reads with the value they returned;
+        // instruction fetches are not register accesses.
+        if kind != CpuBusAccessKind::Fetch && self.bus.mmio_watch_armed() {
+            let addr = self.mask(address);
+            self.bus.note_mmio_access(addr, size as u32, value, false);
+        }
+        value
+    }
+
+    fn read_sized_unobserved(&mut self, address: u32, size: usize, kind: CpuBusAccessKind) -> u32 {
         let addr = self.mask(address);
         if kind == CpuBusAccessKind::Read {
             self.bus
@@ -4265,7 +4356,9 @@ impl CpuBus {
             && range_contains(crate::akiko::AKIKO_BASE, crate::akiko::AKIKO_SIZE, addr)
         {
             self.bus.cpu_slow_external_access(Self::access_words(size));
+            let now = self.bus.emulated_cck();
             if let Some(akiko) = self.bus.akiko.as_mut() {
+                akiko.set_trace_clock(now);
                 return akiko.read(addr, size, &mut self.bus.mem);
             }
         }
@@ -4388,6 +4481,16 @@ impl CpuBus {
     }
 
     fn write_sized(&mut self, address: u32, size: usize, value: u32) {
+        self.write_sized_unobserved(address, size, value);
+        // MMIO watches see the write once it has landed, stamped like a
+        // read: at the end of the access, when the device has it.
+        if self.bus.mmio_watch_armed() {
+            let addr = self.mask(address);
+            self.bus.note_mmio_access(addr, size as u32, value, true);
+        }
+    }
+
+    fn write_sized_unobserved(&mut self, address: u32, size: usize, value: u32) {
         let addr = self.mask(address);
         self.note_cpu_data_bus(addr, size, value);
         if self.bus.smc.is_some() {
@@ -4650,7 +4753,9 @@ impl CpuBus {
             && range_contains(crate::akiko::AKIKO_BASE, crate::akiko::AKIKO_SIZE, addr)
         {
             self.bus.cpu_slow_external_access(Self::access_words(size));
+            let now = self.bus.emulated_cck();
             if let Some(akiko) = self.bus.akiko.as_mut() {
+                akiko.set_trace_clock(now);
                 akiko.write(addr, size, value, &mut self.bus.mem);
             }
             return;
@@ -4707,7 +4812,11 @@ impl CpuBus {
         if size > 1 {
             for idx in 0..size {
                 let shift = (size - 1 - idx) * 8;
-                self.write_sized(addr.wrapping_add(idx as u32), 1, (value >> shift) & 0xFF);
+                self.write_sized_unobserved(
+                    addr.wrapping_add(idx as u32),
+                    1,
+                    (value >> shift) & 0xFF,
+                );
             }
             return;
         }
@@ -6767,6 +6876,139 @@ mod tests {
         write.ui_toggle_watch(0x0400);
         write.step_slice(1)?;
         assert!(write.take_ui_debug_stop().is_none());
+        Ok(())
+    }
+
+    /// MOVE.B #$12,$B8001D (Akiko TX comparator), then MOVE.L $B80000,D0
+    /// (Akiko ID), from ROM.
+    fn akiko_register_program() -> Result<(M68kMachine, u32)> {
+        let pc = ROM_BASE as u32 + 0x0100;
+        let program = &[0x13FC, 0x0012, 0x00B8, 0x001D, 0x2039, 0x00B8, 0x0000];
+        let mut machine = machine_with_program(pc, program)?;
+        machine.bus_mut().attach_akiko(crate::akiko::Akiko::new());
+        Ok((machine, pc))
+    }
+
+    #[test]
+    fn mmio_watch_stops_on_device_register_accesses_with_their_values() -> Result<()> {
+        use crate::debugger::{DebugStop, MmioWatch, WatchAccess};
+        let (mut machine, pc) = akiko_register_program()?;
+        assert!(machine.ui_toggle_mmio_watch(MmioWatch::new(0xB8_0000, 0x40, WatchAccess::Access)));
+
+        machine.step_slice(1)?;
+        let Some(DebugStop::Mmio(write)) = machine.take_ui_debug_stop() else {
+            panic!("the register write must stop the machine");
+        };
+        assert_eq!(
+            (write.addr, write.size, write.value, write.write, write.pc),
+            (0xB8_001D, 1, 0x12, true, pc)
+        );
+        assert_eq!(machine.ui_last_mmio_stop(), Some(write));
+
+        machine.step_slice(1)?;
+        let Some(DebugStop::Mmio(read)) = machine.take_ui_debug_stop() else {
+            panic!("the register read must stop the machine");
+        };
+        // The value the device returned, which no peek could have seen.
+        assert_eq!(
+            (read.addr, read.size, read.value, read.write, read.pc),
+            (0xB8_0000, 4, 0xC0CA_CAFE, false, pc + 8)
+        );
+        assert!(read.cck > write.cck, "stamped where each access happened");
+        assert_eq!(read.frame, write.frame);
+        Ok(())
+    }
+
+    #[test]
+    fn mmio_watch_honours_its_access_class() -> Result<()> {
+        use crate::debugger::{MmioWatch, WatchAccess};
+        let (mut machine, _) = akiko_register_program()?;
+        machine.ui_toggle_mmio_watch(MmioWatch::new(0xB8_0000, 4, WatchAccess::Write));
+        machine.step_slice(2)?;
+        assert!(
+            machine.take_ui_debug_stop().is_none(),
+            "neither the out-of-range write nor the read qualifies"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn headless_mmio_watch_logs_every_access_as_a_hit() -> Result<()> {
+        use crate::debugger::{Debugger, MmioWatch, WatchAccess, UI_ADDR_MASK};
+        let (mut machine, _) = akiko_register_program()?;
+        let mut dbg = Debugger::new(UI_ADDR_MASK);
+        dbg.mmio = vec![MmioWatch::new(0xB8_0000, 0x40, WatchAccess::Access)];
+        machine.arm_headless_debugger(Some(dbg));
+        machine.step_slice(2)?;
+        assert_eq!(machine.dbg.as_ref().map(|d| d.hits), Some(2));
+        assert!(
+            machine.take_ui_debug_stop().is_none(),
+            "logging never stops"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn streamed_mmio_ranges_queue_accesses_for_observers() -> Result<()> {
+        use crate::debugger::{MmioWatch, WatchAccess};
+        let (mut machine, pc) = akiko_register_program()?;
+        let watch = MmioWatch::new(0xB8_0000, 4, WatchAccess::Read);
+        machine.bus_mut().add_mmio_stream_watches(&[watch]);
+        let cursor = machine.bus_mut().mmio_event_cursor();
+        machine.step_slice(2)?;
+        let (events, next, dropped) = machine.bus_mut().mmio_events_since(cursor);
+        assert_eq!(dropped, 0);
+        assert_eq!(next, cursor + 1);
+        assert_eq!(events.len(), 1, "only the ID read is in range");
+        assert_eq!(events[0].access.addr, 0xB8_0000);
+        assert_eq!(events[0].access.pc, pc + 8);
+        machine.bus_mut().remove_mmio_stream_watches(&[watch]);
+        assert!(!machine.bus_mut().mmio_watch_armed());
+        Ok(())
+    }
+
+    #[test]
+    fn mmio_watch_on_the_vector_table_stops_at_interrupt_entry() -> Result<()> {
+        use crate::debugger::{DebugStop, MmioWatch, WatchAccess};
+        let mut bus = test_bus_with_pc(0x0000_0100);
+        write_program(&mut bus, 0x0000_0100, &[0x46FC, 0x2000, 0x4E71]); // MOVE #$2000,SR; NOP
+        write_program(&mut bus, 0x0000_0200, &[0x4E71]); // IRQ handler NOP
+        set_autovector(&mut bus, 3, 0x0000_0200);
+        bus.paula.intena = INT_MASTER | INT_VERTB;
+        bus.paula.intreq = INT_VERTB;
+        bus.irq_latency_setting = 0;
+        let mut machine = M68kMachine::new(bus, CpuModel::M68000, false)?;
+        // The level 3 autovector.
+        machine.ui_toggle_mmio_watch(MmioWatch::new(0x6C, 4, WatchAccess::Read));
+        machine.step_slice(3)?;
+        let Some(DebugStop::Mmio(access)) = machine.take_ui_debug_stop() else {
+            panic!("the vector fetch must stop the machine");
+        };
+        assert_eq!((access.addr & !1, access.write), (0x6C, false));
+        assert_eq!(machine.pc(), 0x0000_0200, "stopped before the handler ran");
+        // Exception processing runs no instruction of its own: its
+        // accesses carry the last instruction retired before it, here the
+        // MOVE that lowered the mask.
+        assert_eq!(access.pc, 0x0000_0100);
+        Ok(())
+    }
+
+    #[test]
+    fn an_unmapped_long_write_is_one_mmio_access() -> Result<()> {
+        use crate::debugger::{MmioWatch, WatchAccess};
+        // MOVE.L #$12345678,$A80000: nothing decodes there, so the bus
+        // splits the write into byte cycles internally.
+        let pc = ROM_BASE as u32 + 0x0100;
+        let mut machine = machine_with_program(pc, &[0x23FC, 0x1234, 0x5678, 0x00A8, 0x0000])?;
+        let watch = MmioWatch::new(0xA8_0000, 4, WatchAccess::Access);
+        machine.bus_mut().add_mmio_stream_watches(&[watch]);
+        machine.step_slice(1)?;
+        let (events, _, _) = machine.bus_mut().mmio_events_since(0);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(
+            (events[0].access.size, events[0].access.value),
+            (4, 0x1234_5678)
+        );
         Ok(())
     }
 

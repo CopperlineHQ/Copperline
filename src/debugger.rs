@@ -41,6 +41,11 @@
 //! COPPERLINE_DBG_LISTCHECK = comma-separated AmigaOS Exec List header addresses;
 //!                      after each instruction, report the first duplicate node
 //!                      or unterminated chain       e.g. "16D6,16E4"
+//! COPPERLINE_DBG_MMIO  = comma-separated CPU access watches, "ADDR[:LEN[:CLASS]]"
+//!                      (LEN bytes, default 2; CLASS read|write|access, default
+//!                      access); logs every CPU data access in the range with its
+//!                      size, value, PC, frame, beam position and colour clock.
+//!                      Works on device registers           e.g. "B80000:64"
 //! ```
 //!
 //! Reverse debugging ("rr"-style) is armed by a separate group of knobs,
@@ -131,6 +136,197 @@ impl WatchAccess {
         } else {
             Self::Access
         }
+    }
+}
+
+/// A CPU access watch over the byte range `[addr, addr + len)`: every CPU
+/// data access (instruction fetches excluded) that overlaps the range and
+/// matches `access` is reported with its size, value, direction, PC and
+/// time.
+///
+/// A memory watch compares a word before and after each instruction,
+/// which cannot work for a device register: reading one has side effects
+/// (Akiko's PIO port pops a byte, CIA ICR reads clear it), so it cannot be
+/// peeked, and a write lands in the device, not in memory. This watch is
+/// taken at the CPU's bus access itself, so it sees Akiko, the CIAs,
+/// Gayle, Zorro boards and the custom chips exactly as the CPU drives
+/// them -- and ordinary memory too, with every access rather than only
+/// value changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MmioWatch {
+    pub addr: u32,
+    /// Range length in bytes (at least 1).
+    pub len: u32,
+    pub access: WatchAccess,
+}
+
+impl MmioWatch {
+    pub fn new(addr: u32, len: u32, access: WatchAccess) -> Self {
+        Self {
+            addr,
+            len: len.max(1),
+            access,
+        }
+    }
+
+    /// Whether a CPU access of `size` bytes at `addr` falls in the watch.
+    pub fn matches(&self, addr: u32, size: u32, write: bool) -> bool {
+        let wanted = if write {
+            self.access.writes()
+        } else {
+            self.access.reads()
+        };
+        let start = u64::from(addr);
+        let end = start + u64::from(size.max(1));
+        let watch_start = u64::from(self.addr);
+        let watch_end = watch_start + u64::from(self.len);
+        wanted && start < watch_end && watch_start < end
+    }
+
+    /// Last byte address covered.
+    pub fn last(&self) -> u32 {
+        self.addr.wrapping_add(self.len - 1)
+    }
+
+    /// `$B80000-$B8003F access`.
+    pub fn describe(&self) -> String {
+        format!(
+            "${:06X}-${:06X} {}",
+            self.addr,
+            self.last(),
+            self.access.name()
+        )
+    }
+
+    /// Parse `ADDR[:LEN][:CLASS]`, where whitespace may stand in for the
+    /// colons (`B80000 64 write`). ADDR is hex; LEN is a byte count,
+    /// decimal or `$`/`0x` hex, default 2 (one word), the way
+    /// `COPPERLINE_DBG_WATCH` reads its lengths; CLASS is `read`, `write`
+    /// or `access` (also `r`, `w`, `rw`), default `access`.
+    pub fn parse(spec: &str) -> Option<Self> {
+        Self::parse_spec(spec, false)
+    }
+
+    /// `parse` for the debugger's entry box and console, where every
+    /// number is hex: LEN is hex too (`B80000:40` is Akiko's 64 bytes).
+    pub fn parse_hex_len(spec: &str) -> Option<Self> {
+        Self::parse_spec(spec, true)
+    }
+
+    fn parse_spec(spec: &str, hex_len: bool) -> Option<Self> {
+        let mut tokens = spec
+            .split(|c: char| c == ':' || c.is_whitespace())
+            .filter(|token| !token.is_empty());
+        let addr = parse_hex(tokens.next()?)?;
+        let mut len = 2;
+        let mut access = WatchAccess::Access;
+        let mut seen_len = false;
+        let mut seen_class = false;
+        for token in tokens {
+            if let Some(class) = parse_mmio_access(token) {
+                if seen_class {
+                    return None;
+                }
+                seen_class = true;
+                access = class;
+            } else if !seen_len && !seen_class {
+                seen_len = true;
+                len = if hex_len {
+                    parse_hex(token)?
+                } else {
+                    parse_byte_count(token)?
+                };
+            } else {
+                return None;
+            }
+        }
+        (len > 0).then(|| Self::new(addr, len, access))
+    }
+}
+
+fn parse_mmio_access(token: &str) -> Option<WatchAccess> {
+    match token.to_ascii_lowercase().as_str() {
+        "r" => Some(WatchAccess::Read),
+        "w" => Some(WatchAccess::Write),
+        "rw" => Some(WatchAccess::Access),
+        other => WatchAccess::parse(other),
+    }
+}
+
+/// A byte count: decimal, or hex with a `$`/`0x` prefix.
+fn parse_byte_count(token: &str) -> Option<u32> {
+    let token = token.trim();
+    if token.starts_with('$') || token.to_ascii_lowercase().starts_with("0x") {
+        parse_hex(token)
+    } else {
+        token.parse().ok()
+    }
+}
+
+/// One CPU access an MMIO watch matched, stamped where it happened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MmioAccess {
+    pub addr: u32,
+    /// Access width in bytes (1, 2, 3 or 4).
+    pub size: u8,
+    /// The value read or written, `size` bytes wide.
+    pub value: u32,
+    pub write: bool,
+    /// The instruction making the access. Exception processing (the stack
+    /// frame, the vector fetch) runs no instruction of its own; its
+    /// accesses carry the last instruction retired before the exception.
+    pub pc: u32,
+    pub frame: u64,
+    /// Emulated colour clocks since power-on.
+    pub cck: u64,
+    pub vpos: u16,
+    pub hpos: u16,
+}
+
+impl MmioAccess {
+    pub fn direction(&self) -> &'static str {
+        if self.write {
+            "write"
+        } else {
+            "read"
+        }
+    }
+
+    /// Emulated seconds since power-on at the access.
+    pub fn seconds(&self) -> f64 {
+        self.cck as f64 / f64::from(crate::chipset::paula::PAULA_CLOCK_HZ)
+    }
+
+    /// `B`, `W` or `L` (a three-byte 68020 operand reads `3`).
+    pub fn size_suffix(&self) -> &'static str {
+        match self.size {
+            1 => "B",
+            2 => "W",
+            3 => "3",
+            _ => "L",
+        }
+    }
+
+    /// The value as hex digits sized to the access.
+    pub fn value_hex(&self) -> String {
+        let digits = usize::from(self.size.clamp(1, 4)) * 2;
+        format!("{:0digits$X}", self.value)
+    }
+
+    /// `MMIO write $B8001D.B = $12 (pc $F80123, f312 v100 h40, cck 4412345)`.
+    pub fn describe(&self) -> String {
+        format!(
+            "MMIO {} ${:06X}.{} = ${} (pc ${:06X}, f{} v{} h{}, cck {})",
+            self.direction(),
+            self.addr,
+            self.size_suffix(),
+            self.value_hex(),
+            self.pc,
+            self.frame,
+            self.vpos,
+            self.hpos,
+            self.cck
+        )
     }
 }
 
@@ -279,6 +475,9 @@ pub enum DebugStop {
     /// `addr` is its first hunk's start (the `add-symbol-file` anchor).
     /// The stop lands before the program's first instruction executes.
     LoadSeg { name: String, addr: u32 },
+    /// The CPU accessed a range an MMIO watch covers; the stop lands after
+    /// the instruction that made the access.
+    Mmio(MmioAccess),
 }
 
 /// Human name of a 68000 exception vector, for catchpoint listings and
@@ -357,6 +556,7 @@ impl DebugStop {
             DebugStop::LoadSeg { name, addr } => {
                 format!("Program loaded: {name} (first hunk ${addr:06X})")
             }
+            DebugStop::Mmio(access) => access.describe(),
         }
     }
 }
@@ -890,6 +1090,10 @@ pub struct InteractiveBreaks {
     /// sees every writer, CPU and Copper alike), so the offsets are
     /// mirrored into the Bus whenever this list changes.
     pub reg_watches: Vec<u16>,
+    /// CPU access watches over device-register (or any) ranges. Hits are
+    /// recorded by the CPU's bus access path, so the list is mirrored into
+    /// the Bus whenever it changes, like `reg_watches`.
+    pub mmio_watches: Vec<MmioWatch>,
     /// Caught exception vector numbers: the machine stops when the CPU
     /// enters one of these vectors (trap, fault, or interrupt).
     pub catches: Vec<u16>,
@@ -919,6 +1123,7 @@ impl InteractiveBreaks {
             breakpoints: Vec::new(),
             watches: Vec::new(),
             reg_watches: Vec::new(),
+            mmio_watches: Vec::new(),
             catches: Vec::new(),
             task_catch: None,
             loadseg_catch: None,
@@ -934,6 +1139,7 @@ impl InteractiveBreaks {
         self.armed = !(self.breakpoints.is_empty()
             && self.watches.is_empty()
             && self.reg_watches.is_empty()
+            && self.mmio_watches.is_empty()
             && self.catches.is_empty()
             && self.task_catch.is_none()
             && self.loadseg_catch.is_none());
@@ -1047,6 +1253,29 @@ impl InteractiveBreaks {
         added
     }
 
+    /// Add an MMIO watch, or remove the one already set over the same range
+    /// (address and length; its access class does not matter). Returns true
+    /// when now set.
+    pub fn toggle_mmio_watch(&mut self, watch: MmioWatch) -> bool {
+        let watch = MmioWatch::new(watch.addr & self.addr_mask, watch.len, watch.access);
+        let added = match self
+            .mmio_watches
+            .iter()
+            .position(|w| w.addr == watch.addr && w.len == watch.len)
+        {
+            Some(pos) => {
+                self.mmio_watches.remove(pos);
+                false
+            }
+            None => {
+                self.mmio_watches.push(watch);
+                true
+            }
+        };
+        self.rearm();
+        added
+    }
+
     /// Add an exception catchpoint for `vector`, or remove it when
     /// already set. Returns true when now set.
     pub fn toggle_catch(&mut self, vector: u16) -> bool {
@@ -1082,6 +1311,7 @@ impl InteractiveBreaks {
         self.breakpoints.clear();
         self.watches.clear();
         self.reg_watches.clear();
+        self.mmio_watches.clear();
         self.catches.clear();
         self.task_catch = None;
         self.loadseg_catch = None;
@@ -1205,6 +1435,10 @@ pub struct Debugger {
     /// across the listed lists) or a chain does not terminate.
     pub listcheck: Vec<u32>,
     pub listcheck_reported: bool,
+    /// COPPERLINE_DBG_MMIO: CPU access watches whose every hit is logged
+    /// (see `MmioWatch`). Mirrored into the Bus, whose CPU access path
+    /// records the hits.
+    pub mmio: Vec<MmioWatch>,
 }
 
 impl Debugger {
@@ -1239,6 +1473,7 @@ impl Debugger {
             ram_dumped: false,
             listcheck: Vec::new(),
             listcheck_reported: false,
+            mmio: Vec::new(),
         }
     }
 
@@ -1256,6 +1491,7 @@ impl Debugger {
         let copper_dump = parse_copper_dump("COPPERLINE_DBG_COPPER");
         let ram_dump = parse_ram_dump("COPPERLINE_DBG_RAMDUMP");
         let listcheck = parse_addr_list("COPPERLINE_DBG_LISTCHECK");
+        let mmio = parse_mmio_list("COPPERLINE_DBG_MMIO");
         if breakpoints.is_empty()
             && watches.is_empty()
             && !trace
@@ -1264,6 +1500,7 @@ impl Debugger {
             && copper_dump.is_none()
             && ram_dump.is_none()
             && listcheck.is_empty()
+            && mmio.is_empty()
         {
             return None;
         }
@@ -1296,9 +1533,10 @@ impl Debugger {
             ram_dumped: false,
             listcheck,
             listcheck_reported: false,
+            mmio,
         };
         log::info!(
-            "debugger armed: breaks={:?} catches={:?} catch_alert={} watches={} dumps={} trace={} listcheck={} window=[{},{}) max_hits={}",
+            "debugger armed: breaks={:?} catches={:?} catch_alert={} watches={} mmio={} dumps={} trace={} listcheck={} window=[{},{}) max_hits={}",
             dbg.breakpoints
                 .iter()
                 .map(|pc| format!("{pc:#X}"))
@@ -1306,6 +1544,7 @@ impl Debugger {
             dbg.catches,
             dbg.catch_alert,
             dbg.watches.len(),
+            dbg.mmio.len(),
             dbg.dumps.len(),
             dbg.trace,
             dbg.listcheck.len(),
@@ -1435,6 +1674,25 @@ fn parse_watch_list(var: &str) -> Vec<Watch> {
                         .unwrap_or(2)
                         .max(1);
                     Some(Watch { addr, len })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Parse `COPPERLINE_DBG_MMIO`: comma-separated `MmioWatch::parse` specs.
+/// A malformed entry is reported and skipped.
+fn parse_mmio_list(var: &str) -> Vec<MmioWatch> {
+    crate::envcfg::var(var)
+        .map(|v| {
+            v.split(',')
+                .filter(|item| !item.trim().is_empty())
+                .filter_map(|item| {
+                    let watch = MmioWatch::parse(item);
+                    if watch.is_none() {
+                        log::warn!("{var}: ignoring malformed entry {item:?}");
+                    }
+                    watch
                 })
                 .collect()
         })
@@ -1951,6 +2209,7 @@ mod tests {
             ram_dumped: false,
             listcheck: Vec::new(),
             listcheck_reported: false,
+            mmio: Vec::new(),
         };
         assert!(dbg.is_breakpoint(0xFFC0_33C2));
         assert!(dbg.is_breakpoint(0x00C0_33C2));
@@ -1983,8 +2242,96 @@ mod tests {
             ram_dumped: false,
             listcheck: Vec::new(),
             listcheck_reported: false,
+            mmio: Vec::new(),
         };
         assert!(dbg.is_breakpoint(0x4000_1000));
         assert!(!dbg.is_breakpoint(0x0000_1000));
+    }
+
+    #[test]
+    fn mmio_watch_spec_parses_range_and_access_class() {
+        assert_eq!(
+            MmioWatch::parse("B80000"),
+            Some(MmioWatch::new(0xB8_0000, 2, WatchAccess::Access))
+        );
+        assert_eq!(
+            MmioWatch::parse("$B80000:64"),
+            Some(MmioWatch::new(0xB8_0000, 64, WatchAccess::Access))
+        );
+        assert_eq!(
+            MmioWatch::parse("B80000:$40:write"),
+            Some(MmioWatch::new(0xB8_0000, 0x40, WatchAccess::Write))
+        );
+        assert_eq!(
+            MmioWatch::parse("  BFE001 1 r "),
+            Some(MmioWatch::new(0xBF_E001, 1, WatchAccess::Read))
+        );
+        assert_eq!(
+            MmioWatch::parse("DFF096 rw"),
+            Some(MmioWatch::new(0xDF_F096, 2, WatchAccess::Access))
+        );
+        for bad in ["", "zz", "B80000:0", "B80000:4:read:write", "B80000 read 4"] {
+            assert_eq!(MmioWatch::parse(bad), None, "{bad:?}");
+        }
+        // The entry box and console read every number as hex.
+        assert_eq!(
+            MmioWatch::parse_hex_len("B80000:40 write"),
+            Some(MmioWatch::new(0xB8_0000, 0x40, WatchAccess::Write))
+        );
+        assert_eq!(
+            MmioWatch::parse_hex_len("B80000"),
+            Some(MmioWatch::new(0xB8_0000, 2, WatchAccess::Access))
+        );
+    }
+
+    #[test]
+    fn mmio_watch_matches_overlapping_accesses_of_its_class() {
+        let watch = MmioWatch::new(0xB8_0004, 4, WatchAccess::Read);
+        // A long read of INTREQ, and a byte read of its last byte.
+        assert!(watch.matches(0xB8_0004, 4, false));
+        assert!(watch.matches(0xB8_0007, 1, false));
+        // A word read that straddles the range's start.
+        assert!(watch.matches(0xB8_0002, 4, false));
+        // Outside the range, or the wrong direction.
+        assert!(!watch.matches(0xB8_0008, 2, false));
+        assert!(!watch.matches(0xB8_0000, 4, false));
+        assert!(!watch.matches(0xB8_0004, 4, true));
+        assert_eq!(watch.describe(), "$B80004-$B80007 read");
+    }
+
+    #[test]
+    fn mmio_access_describes_size_value_and_position() {
+        let access = MmioAccess {
+            addr: 0xB8_001D,
+            size: 1,
+            value: 0x12,
+            write: true,
+            pc: 0xF8_0123,
+            frame: 312,
+            cck: 4_412_345,
+            vpos: 100,
+            hpos: 40,
+        };
+        assert_eq!(
+            access.describe(),
+            "MMIO write $B8001D.B = $12 (pc $F80123, f312 v100 h40, cck 4412345)"
+        );
+        assert_eq!(
+            DebugStop::Mmio(access).describe(),
+            access.describe(),
+            "the stop reads as the access"
+        );
+    }
+
+    #[test]
+    fn interactive_mmio_watches_toggle_by_range_and_arm() {
+        let mut breaks = InteractiveBreaks::new(UI_ADDR_MASK);
+        let watch = MmioWatch::new(0xFFB8_0000, 64, WatchAccess::Access);
+        assert!(breaks.toggle_mmio_watch(watch));
+        assert!(breaks.armed());
+        assert_eq!(breaks.mmio_watches[0].addr, 0xB8_0000, "masked to the bus");
+        // Same range, different class: removes it.
+        assert!(!breaks.toggle_mmio_watch(MmioWatch::new(0xB8_0000, 64, WatchAccess::Read)));
+        assert!(!breaks.armed());
     }
 }

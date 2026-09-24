@@ -823,6 +823,9 @@ impl App {
             (ToolPanelKind::Debugger, UiControl::DebugRegToggle) => {
                 self.debugger_toggle_reg_watch()
             }
+            (ToolPanelKind::Debugger, UiControl::DebugMmioToggle) => {
+                self.debugger_toggle_mmio_watch()
+            }
             (ToolPanelKind::Debugger, UiControl::DebugBeamToggle) => {
                 self.debugger_toggle_beam_trap()
             }

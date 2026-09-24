@@ -37,7 +37,7 @@ use std::time::Instant;
 use copperline::audio::NullSink;
 use copperline::config::Config;
 use copperline::cpu::DiagnosticHooks;
-use copperline::debugger::{Debugger, Watch};
+use copperline::debugger::{Debugger, MmioWatch, Watch, WatchAccess};
 use copperline::emulator::{build_machine, Emulator};
 use copperline::video::{bitplane, FB_WIDTH, MAX_CANVAS_PIXELS};
 
@@ -77,8 +77,9 @@ fn build() -> anyhow::Result<Emulator> {
 /// the boot: a watch over the low chip-RAM vector/ExecBase area the guest
 /// rewrites constantly, a PC breakpoint on the reset vector's first
 /// instruction, the VERTB exception catch (every frame), the exec Alert()
-/// trap arming, a memory dump on every hit, and an instruction trace over a
-/// short window. The hit budget is unbounded so the hooks never retire.
+/// trap arming, a memory dump on every hit, an instruction trace over a
+/// short window, and an MMIO watch logging every CPU access to the custom
+/// chip registers. The hit budget is unbounded so the hooks never retire.
 fn armed_debugger(emu: &Emulator) -> Debugger {
     let mut dbg = Debugger::new(emu.machine.ui_addr_mask());
     dbg.watches.push(Watch {
@@ -91,6 +92,8 @@ fn armed_debugger(emu: &Emulator) -> Debugger {
     dbg.catch_alert = true;
     dbg.dumps.push((0x0000_0004, 4));
     dbg.trace = true;
+    dbg.mmio
+        .push(MmioWatch::new(0x00DF_F000, 0x200, WatchAccess::Access));
     dbg.after_secs = 0.0;
     dbg.until_secs = f64::INFINITY;
     dbg.max_hits = u64::MAX;
@@ -189,9 +192,9 @@ fn run_side_by_side(plain: &mut Emulator, armed: &mut Emulator) -> anyhow::Resul
 }
 
 /// Arming breakpoints, watchpoints, exception catches, Alert() catching,
-/// memory dumps, an instruction trace and every CPU-level diagnostic
-/// observer leaves every frame of the boot byte-identical to an undebugged
-/// run.
+/// memory dumps, an instruction trace, MMIO watches (logged and streamed)
+/// and every CPU-level diagnostic observer leaves every frame of the boot
+/// byte-identical to an undebugged run.
 #[test]
 fn armed_headless_debugger_leaves_the_timeline_unchanged() {
     if cfg!(debug_assertions) {
@@ -209,10 +212,20 @@ fn armed_headless_debugger_leaves_the_timeline_unchanged() {
     let dbg = armed_debugger(&armed);
     armed.machine.arm_headless_debugger(Some(dbg));
     armed.machine.arm_diagnostic_hooks(armed_diagnostic_hooks());
+    // A control client streaming every CIA access (the event.mmio queue).
+    armed.bus_mut().add_mmio_stream_watches(&[MmioWatch::new(
+        0x00BF_D000,
+        0x2000,
+        WatchAccess::Access,
+    )]);
     assert!(armed.machine.headless_debugger_armed());
     assert!(!plain.machine.headless_debugger_armed());
 
     let frames = run_side_by_side(&mut plain, &mut armed).expect("side-by-side run");
+    assert!(
+        armed.bus().mmio_event_cursor() > 0,
+        "the streamed MMIO range saw no CIA access; the check would be vacuous"
+    );
     println!(
         "  {frames} frames ({RUN_SECS}s emulated) byte-identical with the debugger armed, \
          {:.1}s wall",

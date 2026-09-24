@@ -204,6 +204,28 @@ stdin.
 }
 ```
 
+A stop on an `mmio` break (reason `mmio`) adds `access`, the CPU access that
+tripped it: `addr`, `size` in bytes, `value`, `access` (`read` or `write`), the
+`pc` of the instruction that made it, and its own `position` (`frame`, `cck`,
+`seconds`, `vpos`, `hpos`). The stop coordinate itself is the instruction
+boundary after the access. Exception processing (the stack frame, the vector
+fetch) runs no instruction of its own: its accesses carry the last instruction
+retired before the exception, and a watch they trip stops before the handler's
+first instruction.
+
+```json
+{
+  "reason": "mmio",
+  "detail": "MMIO write $B8001D.B = $48 (pc $E593B0, f521 v259 h206, cck 37076570)",
+  "access": {
+    "addr": 12058653, "size": 1, "value": 72, "access": "write", "pc": 15045552,
+    "position": {"frame": 521, "cck": 37076570, "seconds": 10.4532, "vpos": 259, "hpos": 206}
+  },
+  "pc": 15045556, "frame": 521, "vpos": 259, "hpos": 208, "cck": 37076572,
+  "seconds": 10.4532, "retired_instructions": 5710489
+}
+```
+
 (streaming-observability)=
 ## Streaming observability
 
@@ -211,6 +233,7 @@ An authenticated client can subscribe to asynchronous event notifications:
 
 ```text
 events.subscribe {"events":["frame","serial","interrupt","media","debug","bus"],"frame_interval":50,"frame_digest":true}
+events.subscribe {"events":["mmio","cd"],"mmio":[{"addr":"0xB80000","len":64,"access":"write"}]}
 events.list
 events.unsubscribe {"events":["serial"]}
 ```
@@ -235,6 +258,23 @@ events.unsubscribe {"events":["serial"]}
   interrupt and STOP edges, INTREQ, and CIA IRQ pins. Each notification carries
   the raw `events` mask, decoded `event_names`, beam/timeline `position`, `ipl`,
   and queue drop count. Subscribing does not allocate a full frame trace.
+- **`event.mmio`:** One notification per CPU data access (instruction fetches
+  excluded) to the subscription's `mmio` ranges, which `events.subscribe` requires
+  with the family: an array of `{"addr", "len", "access"}` (`len` in bytes, default
+  2; `access` `read`, `write`, or `access`, the default). A later subscribe with
+  new ranges replaces this connection's. Each carries `addr`, `size`, `value`,
+  `access` (`read`/`write`), the instruction's `pc`, the access's `position`
+  (`frame`, `cck`, `seconds`, `vpos`, `hpos`), and the queue drop count. The
+  accesses are captured at the CPU's bus access, so device registers -- Akiko at
+  `$B80000`, the CIAs, Gayle, Zorro boards, custom registers -- report exactly what
+  the CPU read or wrote; a value-comparing memory watch cannot see them. The queue
+  holds 4,096 accesses: keep ranges narrow around busy polling loops. `events.list`
+  reports the connection's ranges as `mmio`.
+- **`event.cd`:** The CD drive's timestamped command trace (CD32 Akiko), one
+  notification per step of a command's life: `phase` `executed`, `first_sector`
+  (a read, play, or TOC dump delivered its first unit), or `completed`, and
+  `command`, the record as `cd.trace` returns it. Silent on machines without a
+  traced drive.
 - **`event.warp`:** Sent without a subscription, in both modes, whenever warp
   or its holder set changes for a reason other than the client's own
   `warp.set`: `{"on", "paced", "source", "position"}` with `source` one of
@@ -312,6 +352,29 @@ events.unsubscribe {"events":["serial"]}
 - `custom.writer {"reg": ...}`: Query last PC and beam cycle that wrote to custom register.
 - `palette.dump {"resource": ...}`: Query active 32-color or 256-color palette; with `resource`, read a guest-registered palette resource (`words` as 12-bit values plus `rgb24`).
 - `cia.get {"cia": "a"|"b"}`: Query CIA-A or CIA-B timer, port, and interrupt states.
+- `cd.trace {"since": SEQ, "max": N}`: The CD drive's recent commands with emulated
+  timestamps (CD32 Akiko; `available` is false elsewhere), oldest first: those
+  numbered `since` or later, the newest `max` (default 64, at most 256), plus
+  `next_seq`, the number the next command gets. Each record has its `seq`, decoded
+  `kind` (`noop`, `stop`, `pause`, `unpause`, `read`, `play`, `toc`, `led`, `subq`,
+  `info`, `other`, `invalid`), `opcode`, the raw packet `bytes` in hex (checksum
+  included), `start_lsn` and exclusive `end_lsn` of a read or play, requested
+  `speed`, and the stamps `issued` (the host handed over the first byte: Akiko's TX
+  DMA fetched it or the CPU wrote the PIO port), `accepted` (the drive parsed the
+  packet), `executed`, `responded` (the reply reached the host), `first_sector` and
+  `last_sector` (units a read, play, or TOC dump delivered), and `completed`, each
+  `{"cck", "seconds"}` of emulated time or null. `sectors` counts the units
+  delivered (data sectors, CD-DA sectors, or TOC packets), `status` is the reply's
+  status byte, `outcome` how it ended (`ok`, `no_disc`, `checksum_error`,
+  `bad_command`, `refused`, `end`, `stopped`, `superseded`, `ejected`, `reset`,
+  `error`, `abandoned` when a state load replaced its timeline, or null while
+  running), and `summary` the same as one line of
+  milliseconds after issue. Differences between the stamps are the drive latencies
+  a driver or ROM comparison needs, identical from run to run and unaffected by
+  warp. The trace is host-side: it is not saved in state files and survives a state
+  load, which ends the commands in flight as `abandoned`; a command the restored
+  drive was already running is not traced, and tracing resumes with its next
+  packet.
 - `beam.get`: Query raster beam coordinates (VPOS, HPOS, colour clock).
 - `frame.slots {"row": V}`: Return the bounded full records for one scanline
   (row 0 through 2047, covering the ECS 11-bit programmable vertical range)
@@ -375,7 +438,7 @@ events.unsubscribe {"events":["serial"]}
 - `profile.start {"path": "...", "frames": ..., "slots": ..., "memory": ..., "screenshots": "none"|"every"|"last", "pc_samples": ..., "samples": ..., "registers": ..., "unwind": {"base": ADDR, "table": BASE64}, "relocation_bases": [ADDR, ...], "code_ranges": [{"base": ADDR, "size": N}, ...], "coverage": ..., "trigger": {"frame": F}|{"busy_cck_over": N}}` / `profile.stop` / `profile.status`: Export per-frame profiling data (DMA ownership, full slot/event records, frame-start custom registers and palette, blit records, CPU chip-bus wait attribution, guest idle time, retired instructions, and stack bounds). `memory` snapshots chip and slow RAM once; because that baseline must align with the first recorded frame, it cannot be combined with a deferred `trigger`. `slots` writes a raw 24-byte-record sidecar per frame. `samples` adds a WinUAE/Bartman-compatible per-instruction binary sidecar; `registers` adds D0-D7/A0-A7/SR, the optional compact unwind table supplies live call stacks, `relocation_bases` preserves every program hunk's runtime base for offline source mapping, and `code_ranges` identifies executable hunks outside the compact hunk-0 table. `coverage` counts every retired instruction over `code_ranges` (every address, bounded, without them) and writes the histogram as `coverage.bin` at stop for `copperline-ctl profile-report --format lcov`; it takes `relocation_bases`/`code_ranges` without `samples` and is refused while a `--coverage` run holds the counters. Data streams to `profile.jsonl` with a `profile.json` summary upon stop; see [](profiling). Arms Frame Analyzer tracing immediately and begins recording only when an optional trigger matches.
 
 ### Breakpoints and traps
-- `break.add`: Add breakpoint (`pc`, `watch`, `reg_watch`, `beam`, `copper`, `catch`, `loadseg`). A memory watch accepts `"access": "write"|"read"|"access"` (default `write`).
+- `break.add`: Add breakpoint (`pc`, `watch`, `reg_watch`, `mmio`, `beam`, `copper`, `catch`, `loadseg`). A memory watch accepts `"access": "write"|"read"|"access"` (default `write`). An `mmio` watch (`addr`, `len` in bytes, default 2, `access` default `access`) stops on any CPU data access to the range, device registers included, and its stop reports the access (see the stop event above); e.g. `{"kind": "mmio", "addr": "0xB80000", "len": 64}` for Akiko.
 - `break.remove {"id": ...}`: Remove breakpoint by ID.
 - `break.list`: List all active breakpoints.
 - `break.clear`: Remove all breakpoints.

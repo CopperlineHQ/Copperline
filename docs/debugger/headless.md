@@ -51,6 +51,41 @@ Two exceptions apply:
 : Memory watchpoints (length in bytes, default 2). Logs memory modifications
   from CPU, Copper, or Blitter DMA.
 
+`COPPERLINE_DBG_MMIO=ADDR[:LEN[:CLASS]][,...]`
+: CPU access watches (MMIO watches). Logs every CPU data access to the byte range
+  -- instruction fetches excluded -- with its direction, address, size, value, PC,
+  frame, beam position, colour clock, and emulated time. `LEN` is a byte count
+  (decimal, or hex with `$`/`0x`; default 2), `CLASS` is `read`, `write`, or
+  `access` (default). Unlike `COPPERLINE_DBG_WATCH`, which compares memory words
+  and so cannot see a device register, the watch is taken at the CPU's bus access,
+  so it reports Akiko, CIA, Gayle, Zorro board, and custom register traffic.
+  Accesses made by exception processing (the stack frame, the vector fetch) carry
+  the last instruction retired before the exception. Each
+  line counts as a hit against `COPPERLINE_DBG_MAXHITS`, and the `AFTER`/`UNTIL`
+  window applies to the access time:
+
+  ```text
+  COPPERLINE_DBG_MMIO="B8001D:1:write,B80020:2:write"
+  DBG MMIO write $B8001D.B = $03 (pc $E593B0, f141 v51 h33, cck 10029801) t=2.827769
+  ```
+
+`COPPERLINE_DBG_CD=1`
+: Logs the CD drive's command trace (CD32 Akiko): one line per step of each
+  command's life -- `executed`, `first_sector` (a read, play, or TOC dump's first
+  delivered unit), and `completed` -- with the decoded command, its sector range,
+  requested speed, reply status, each step as milliseconds after the host issued
+  it, the units delivered, the outcome, and the emulated time and colour clock of
+  the step. The stamps are emulated time, so two runs (two ROMs, two
+  configurations) compare line for line. Not bound by the debugger's hit budget or
+  time window:
+
+  ```text
+  DBG CD completed #4 toc x1 st $00: +5.00ms accept, +5.99ms exec, +9.81ms reply, +5968.97ms first, 81 units, +6282.87ms end t=9.114314 cck=32327513
+  ```
+
+  The same records are the debugger window's [CD tab](window.md#debugger-cd-tab),
+  the console's `CDTRACE`, and the control protocol's `cd.trace` and `event.cd`.
+
 `COPPERLINE_DBG_MEMW=ADDR`
 : CPU-only write watchpoint on a single word. Logs the writing instruction PC,
   post-write value, and emulated timestamp.
