@@ -3026,6 +3026,11 @@ impl M68kMachine {
                 // instruction executes.
                 if DEBUG_HOOKS && self.ui_breaks.armed() {
                     let pc = self.cpu.pc & self.cpu.address_mask;
+                    // Drain the dispatch's MMIO hit even when a catch or
+                    // breakpoint wins, as ui_check_breaks_after_step does:
+                    // left pending, the stale vector fetch would stop the
+                    // machine again after the handler's first instruction.
+                    let mmio_hit = self.bus.bus.take_ui_mmio_hit();
                     if let Some(vector) = self.cpu.last_exception_vector.take() {
                         let vector = vector.min(u32::from(u16::MAX)) as u16;
                         if self.ui_breaks.catches.contains(&vector) {
@@ -3041,7 +3046,7 @@ impl M68kMachine {
                     // An MMIO watch over the stack or the vector table
                     // stops here too, before the handler's first
                     // instruction runs.
-                    if let Some(access) = self.bus.bus.take_ui_mmio_hit() {
+                    if let Some(access) = mmio_hit {
                         self.ui_stop = Some(crate::debugger::DebugStop::Mmio(access));
                         break;
                     }
@@ -6990,6 +6995,39 @@ mod tests {
         // accesses carry the last instruction retired before it, here the
         // MOVE that lowered the mask.
         assert_eq!(access.pc, 0x0000_0100);
+        Ok(())
+    }
+
+    #[test]
+    fn a_catch_at_interrupt_entry_leaves_no_stale_mmio_stop() -> Result<()> {
+        use crate::debugger::{DebugStop, MmioWatch, WatchAccess};
+        // Park the CPU in STOP #$2000, then raise level 3: the interrupt
+        // wakes it through the dispatch path, where the vector catch wins.
+        let mut bus = test_bus_with_pc(0x0000_0100);
+        write_program(&mut bus, 0x0000_0100, &[0x4E72, 0x2000, 0x4E71]);
+        write_program(&mut bus, 0x0000_0200, &[0x4E71, 0x4E71]);
+        set_autovector(&mut bus, 3, 0x0000_0200);
+        bus.paula.intena = INT_MASTER | INT_VERTB;
+        bus.irq_latency_setting = 0;
+        let mut machine = M68kMachine::new(bus, CpuModel::M68000, false)?;
+        machine.step_slice(1)?;
+        assert!(machine.stopped());
+        machine.bus_mut().paula.intreq = INT_VERTB;
+        machine.ui_toggle_catch(27);
+        machine.ui_toggle_mmio_watch(MmioWatch::new(0x6C, 4, WatchAccess::Read));
+        machine.step_slice(3)?;
+        assert!(
+            matches!(
+                machine.take_ui_debug_stop(),
+                Some(DebugStop::Exception { vector: 27, .. })
+            ),
+            "the catch wins at the handler entry"
+        );
+        assert_eq!(machine.pc(), 0x0000_0200);
+        // Resuming runs the handler; the vector fetch the catch already
+        // stopped for must not stop it a second time.
+        machine.step_slice(1)?;
+        assert!(machine.take_ui_debug_stop().is_none());
         Ok(())
     }
 

@@ -16,7 +16,7 @@
 //! - `responded`: the reply packet reached the host (RX DMA or PIO);
 //! - `first_sector` / `last_sector`: the first and latest unit a read,
 //!   play or TOC dump delivered (a data sector into a PBX slot, a CD-DA
-//!   sector into the mixer, a TOC packet);
+//!   sector into the mixer, a TOC packet once the host has read it);
 //! - `completed`: the command's life ended, with its `outcome`.
 //!
 //! Differences between these stamps are the drive latencies a ROM or
@@ -275,6 +275,14 @@ pub struct CdTraceEvent {
     pub record: CdCommandRecord,
 }
 
+/// A TOC dump packet on its way to the host (see `CdTrace::toc_packet`).
+#[derive(Clone, Copy, Debug)]
+struct TocPacket {
+    seq: u64,
+    unit: bool,
+    ends: Option<CdOutcome>,
+}
+
 /// The trace: recent command records, the phase-event queue, and the
 /// bookkeeping that ties drive-model moments to the command they belong
 /// to.
@@ -295,6 +303,10 @@ pub struct CdTrace {
     parsing: Option<u64>,
     /// The command whose reply packet is in flight to the host.
     reply: Option<u64>,
+    /// The TOC dump packet in flight to the host: a unit counts, and a
+    /// dump ends, when the packet reaches the host, not when the drive
+    /// builds it (the host may leave the receive channel stalled).
+    toc_packet: Option<TocPacket>,
     read: Option<u64>,
     play: Option<u64>,
     toc: Option<u64>,
@@ -314,6 +326,7 @@ impl Default for CdTrace {
             pending_issue: None,
             parsing: None,
             reply: None,
+            toc_packet: None,
             read: None,
             play: None,
             toc: None,
@@ -480,8 +493,25 @@ impl CdTrace {
         }
     }
 
-    /// The reply packet in flight reached the host.
-    pub fn reply_delivered(&mut self) {
+    /// The drive queued a TOC dump packet for the host: an entry (`unit`)
+    /// or the error answer, possibly the one that ends the dump (`ends`).
+    pub fn toc_packet_queued(&mut self, unit: bool, ends: Option<CdOutcome>) {
+        self.toc_packet = self.toc.map(|seq| TocPacket { seq, unit, ends });
+    }
+
+    /// The packet in flight reached the host (RX DMA or the PIO port): a
+    /// command's reply, or a TOC dump packet.
+    pub fn packet_delivered(&mut self) {
+        if let Some(packet) = self.toc_packet.take() {
+            if self.toc == Some(packet.seq) {
+                if packet.unit {
+                    self.stream_unit(CdStream::Toc);
+                }
+                if let Some(outcome) = packet.ends {
+                    self.close_stream(CdStream::Toc, outcome);
+                }
+            }
+        }
         let Some(seq) = self.reply.take() else {
             return;
         };
@@ -540,6 +570,7 @@ impl CdTrace {
         {
             self.complete(seq, CdOutcome::Reset);
         }
+        self.toc_packet = None;
         self.pending_issue = None;
         self.fifo_stamps.clear();
     }
@@ -557,6 +588,7 @@ impl CdTrace {
         self.pending_issue = None;
         self.parsing = None;
         self.reply = None;
+        self.toc_packet = None;
         self.read = None;
         self.play = None;
         self.toc = None;
@@ -655,7 +687,7 @@ mod tests {
         trace.set_now(3_700);
         trace.command_executed(Some(0x01), true);
         trace.set_now(4_000);
-        trace.reply_delivered();
+        trace.packet_delivered();
 
         let record = trace.records().last().unwrap();
         assert_eq!(record.issued_cck, 100);
@@ -678,7 +710,7 @@ mod tests {
         trace.set_now(20);
         trace.command_executed(Some(0x02), true);
         trace.set_now(30);
-        trace.reply_delivered();
+        trace.packet_delivered();
         assert_eq!(trace.records().last().unwrap().completed_cck, None);
         trace.set_now(900);
         trace.stream_unit(CdStream::Read);
@@ -721,7 +753,7 @@ mod tests {
         accept(&mut trace, 10, CdCommandKind::Play);
         trace.set_outcome(CdOutcome::Refused);
         trace.command_executed(Some(0x42), true);
-        trace.reply_delivered();
+        trace.packet_delivered();
         assert_eq!(
             trace.records().last().unwrap().outcome,
             Some(CdOutcome::Refused)
@@ -781,6 +813,30 @@ mod tests {
         trace.stream_unit(CdStream::Play);
         let record = trace.records().last().unwrap();
         assert_eq!(record.first_sector_cck, Some(900));
+    }
+
+    #[test]
+    fn a_toc_packet_counts_when_it_reaches_the_host() {
+        let mut trace = CdTrace::default();
+        let seq = accept(&mut trace, 10, CdCommandKind::Toc);
+        trace.open_stream(CdStream::Toc);
+        trace.command_executed(Some(0), true);
+        trace.set_now(20);
+        trace.packet_delivered();
+        // The last entry is built long before the host drains it.
+        trace.set_now(1_000);
+        trace.toc_packet_queued(true, Some(CdOutcome::End));
+        let record = || trace.records().find(|r| r.seq == seq).unwrap().clone();
+        assert_eq!((record().sectors, record().completed_cck), (0, None));
+        trace.set_now(5_000);
+        trace.packet_delivered();
+        let done = trace.records().find(|r| r.seq == seq).unwrap();
+        assert_eq!(done.sectors, 1);
+        assert_eq!(done.first_sector_cck, Some(5_000));
+        assert_eq!(
+            (done.completed_cck, done.outcome),
+            (Some(5_000), Some(CdOutcome::End))
+        );
     }
 
     #[test]

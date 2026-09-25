@@ -874,7 +874,7 @@ impl Akiko {
                         self.intreq &= !CDINT_DRIVERECV;
                         self.receive_length = 0;
                         self.intreq |= CDINT_DRIVEXMIT;
-                        self.trace.reply_delivered();
+                        self.trace.packet_delivered();
                     }
                 } else {
                     self.intreq &= !CDINT_DRIVERECV;
@@ -1640,7 +1640,7 @@ impl Akiko {
         if self.toc.is_empty() {
             self.result_buffer[1] = CDS_ERROR | self.door;
             self.toc_counter = -1;
-            self.trace.close_stream(CdStream::Toc, CdOutcome::Error);
+            self.trace.toc_packet_queued(false, Some(CdOutcome::Error));
             return 15;
         }
         self.result_buffer[1] = 0x0A; // matches real CD32 captures
@@ -1662,11 +1662,14 @@ impl Akiko {
         self.result_buffer[7] = to_bcd((24 + counter / 75) as u8);
         self.result_buffer[8] = to_bcd((counter % 75) as u8);
         self.toc_counter += 1;
-        self.trace.stream_unit(CdStream::Toc);
-        if (self.toc_counter as u32 / TOC_REPEAT) as usize >= self.toc.len() {
+        let last = (self.toc_counter as u32 / TOC_REPEAT) as usize >= self.toc.len();
+        if last {
             self.toc_counter = -1;
-            self.trace.close_stream(CdStream::Toc, CdOutcome::End);
         }
+        // The entry counts, and the last one ends the dump, when the host
+        // has the packet (see `packet_delivered`).
+        self.trace
+            .toc_packet_queued(true, last.then_some(CdOutcome::End));
         15
     }
 
@@ -1740,7 +1743,7 @@ impl Akiko {
             if self.tx_fifo_has_room() {
                 self.intreq |= CDINT_DRIVEXMIT;
             }
-            self.trace.reply_delivered();
+            self.trace.packet_delivered();
         }
     }
 
@@ -3961,6 +3964,66 @@ mod tests {
         assert_eq!(bad.bytes, [0x27, 0x00]);
         assert_eq!(bad.outcome, Some(CdOutcome::ChecksumError));
         assert_eq!(bad.status.map(|s| s & 0xF8), Some(CH_ERR_CHECKSUM));
+    }
+
+    #[test]
+    fn a_toc_entry_counts_only_once_the_host_has_read_it() {
+        // PIO throughout (no DMA flags), like a game driving the drive port.
+        let mut chip = vec![0u8; 64 * 1024];
+        let mut ring = CdAudioRing::default();
+        let mut akiko = Akiko::new();
+        akiko.insert_disc(test_disc());
+        let mut now = 0u64;
+        let mut tick = |akiko: &mut Akiko, chip: &mut Vec<u8>, cck: u32| {
+            now += u64::from(cck);
+            akiko.set_trace_clock(now);
+            akiko.tick(cck, chip, &mut ring);
+        };
+        let pio_read = |akiko: &mut Akiko, chip: &mut Vec<u8>, n: usize| {
+            for _ in 0..n {
+                akiko.read(AKIKO_BASE + 0x28, 1, chip);
+            }
+        };
+        let pio_send = |akiko: &mut Akiko, chip: &mut Vec<u8>, cmd: &[u8]| {
+            let checksum = cmd.iter().fold(0xFFu8, |a, b| a.wrapping_sub(*b));
+            for &byte in cmd.iter().chain([checksum].iter()) {
+                akiko.write(AKIKO_BASE + 0x28, 1, u32::from(byte), chip);
+            }
+        };
+        // Drain the boot media status, identify the firmware, then ask
+        // for the lead-in TOC and take only its acknowledgement.
+        tick(&mut akiko, &mut chip, 2048);
+        pio_read(&mut akiko, &mut chip, 3);
+        pio_send(&mut akiko, &mut chip, &[0x07]);
+        tick(&mut akiko, &mut chip, 4096);
+        pio_read(&mut akiko, &mut chip, 21);
+        pio_send(
+            &mut akiko,
+            &mut chip,
+            &[0x04, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        );
+        tick(&mut akiko, &mut chip, 4096);
+        pio_read(&mut akiko, &mut chip, 3);
+        // Past the cold spin-up: the first entry is built and waits.
+        for _ in 0..18_000 {
+            tick(&mut akiko, &mut chip, 2048);
+        }
+        let toc = |akiko: &Akiko| {
+            akiko
+                .cd_trace()
+                .records()
+                .find(|r| r.kind == CdCommandKind::Toc)
+                .cloned()
+                .unwrap()
+        };
+        let waiting = toc(&akiko);
+        assert!(waiting.responded_cck.is_some(), "acknowledgement drained");
+        assert_eq!((waiting.sectors, waiting.first_sector_cck), (0, None));
+        // The host reads the entry (15 bytes and the checksum).
+        pio_read(&mut akiko, &mut chip, 16);
+        let read = toc(&akiko);
+        assert_eq!(read.sectors, 1);
+        assert_eq!(read.first_sector_cck, Some(akiko.cd_trace().now()));
     }
 
     #[test]
