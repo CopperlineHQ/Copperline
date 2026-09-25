@@ -17,28 +17,130 @@ The two halves are consumed exactly as WinUAE and FS-UAE take them.
 
 ## Provenance
 
-Built from source on 2026-09-11 from AROS upstream master
-(https://github.com/aros-development-team/AROS) at commit `311afcc057`
+Built from source on 2026-09-25 from AROS upstream master
+(https://github.com/aros-development-team/AROS) at commit `f1ec64f45a`.
+No local patch and no unmerged pull request is carried. The previous
+refresh merged pull request 1179 on top of master while it was still
+open; review asked for it to be split up, every part has since landed in
+master as its own commit (listed below) and the pull request was closed,
+so the memory it gives back now comes from upstream.
+
+The build links `.rom` at 515,936 bytes and `.ext` at 508,386 bytes of the
+524,288-byte banks, leaving 8,352 and 15,902 bytes spare. The ext bank had
+only 682 bytes spare at the previous refresh; the room comes from
+icon.library, which no longer links zlib's deflate code into the kickstart
+(`15d1417e3a`). A future refresh that overflows a bank has to drop modules
+from the ROM's module list rather than grow the file.
+
+Free memory when a `--run` staged program starts on a `--factory` machine,
+measured with a guest probe that calls `AvailMem` (a bare assembler
+executable, so no C startup code allocates first; these figures are not
+comparable with the older table further down, which used a C probe):
+
+| Machine                        | previous ROM | this ROM  | change |
+|--------------------------------|--------------|-----------|--------|
+| A500, 512K chip + 512K slow    |      759,320 |   758,520 |   -800 |
+| A500, 1 MB chip, no slow/fast  |      759,424 |   758,624 |   -800 |
+| A1200, 2 MB chip, no fast      |    1,794,720 | 1,793,920 |   -800 |
+
+The largest contiguous chip block moves the same way (752,640 -> 751,816
+bytes on the 1 MB A500, 1,787,936 -> 1,787,112 on the A1200), so the
+split-up pull request 1179 gives back what the merged one did.
+
+Upstream changes since the previous refresh (master `311afcc057` merged
+with pull request 1179) that reach this ROM:
+
+- Pull request 1179 itself, merged as separate commits: m68k CPU context,
+  task state and exception-handler list (`7c59bc3f94`, `38dc95623a`,
+  `0162d11a35`), Exec pools (`03a0533795`, `d11990b395`), gameport and
+  CDVDFS buffers (`3aef17ee44`, `9fa21af22f`, `2ecea7e9d1`, `38eb271bcd`),
+  OOP and HIDD dispatch (`6d72120452`, `2f0d0b809f`), Intuition helpers and
+  class pools (`97a7b938fa`, `f242f983e7`), Shell buffers (`f050679d31`,
+  `fdb29b04f7`, `fc70b44dde`) and RunCommand stacks (`561cbb7099`). The
+  previous refresh's notes below describe what each part does.
+- Low-memory placement follow-ups: on m68k, DOS packets (`42e43be60a`) and
+  the hunks LoadSeg allocates (`ed7865194b`) now come from the high end of
+  free memory like RunCommand's stacks, so short-lived packets no longer
+  punch holes in the low-address block that legacy software addresses
+  with 16-bit Copper pointer updates. A `--run` program is therefore
+  loaded near the top of memory rather than the bottom.
+  `6a327488b5` makes exec's and lddemon's OpenLibrary compare only the
+  low word of the requested version on m68k, as Kickstart does, for
+  callers that load only the low word of D0.
+- cd.device (CD32): cached `CD_INFO` requests complete synchronously
+  under `IOF_QUICK`, so an interrupt-time caller never enters `WaitIO()`,
+  and the service task keeps Commodore's priority (`b218ecc5ff`); audio
+  playback command transitions are fixed (`fdf3c4b137`); `CD_TOCMSF`
+  returns binary positions, `CD_PLAYMSF` and `CD_PLAYLSN` go through the
+  shared asynchronous playback path, raster DMA state is preserved for
+  programs that take over the hardware, and input.device keeps forwarding
+  queued internal events while it is stopped (`de4966229c`, Kid Chaos);
+  and sequential Akiko read streams are retained between requests
+  (`33bf472091`).
+- amigavideo: `66496fd516` fixes AROS issue 1235 (reported by Toni Wilen,
+  PowerPacker 4.x): the classic planar display path of `8643e85cd8`, which
+  the previous two refreshes carried, placed DDFSTOP one fetch unit past
+  the last one -- $DC for a 640-pixel FMODE 0 hires line -- while charging
+  that unit in the modulo. Agnus stops fetching at $D8 (Copperline models
+  this hard stop), so the unit was never fetched and every line started
+  4 bytes early. DDFSTOP now names the start of the last unit ($D4), as
+  Kickstart programs it. `e5336e8b40` fires the display activation
+  callback only for the frontmost screen, so reshowing the native display
+  behind an RTG screen no longer steals the pointer (issue 998), and
+  `096616b657` stops gfx.hidd redrawing an already drawn software pointer.
+- `8480de989a` (amiga kernel): the level 1-6 interrupt handlers set
+  INTENA's master bit again on the way out. A program that holds
+  Disable() while enabling interrupts itself (INTENA=$C020 plus a VERTB
+  server) froze at the first vertical blank, because the Disable()/Enable()
+  pair inside AROS's own VERTB servers cleared INTEN (issue 742).
+- `11d17ac37f` (graphics, intuition, issue 1174): screen user Copper lists
+  work again -- CMove() keeps only the register offset, and RethinkDisplay()
+  remakes every visible ViewPort as AmigaOS does. Fixes WHDLoad 20's
+  "Couldn't find UCL instruction". graphics.library and intuition.library
+  also take their documented argument widths throughout (`2cb305e297`,
+  `93a688b4d8`, `724a9e700f`).
+- `9e8f557c57` (exec): the reset-callback chain survives a handler that
+  never returns.
+- dos.library: `f5c544701d` sends Rename() names as written unless they
+  hold a parent reference, instead of canonicalising both through locks
+  (28 packets for a four-level rename).
+- Shell: the pipe character is enabled by default (`ecdd659765`) with
+  pipe-token parsing fixes (`286175f865`, `96f013e09e`, `881855060b`),
+  error-output redirection is added (`c913c27d17`), readLine reserves a
+  whole line before writing into a buffer that now grows in 128-byte
+  steps (`c8860e674d`), and `.def`/`.key`/`.pushis` script handling is
+  tightened (`94edf67334`, `92a7198be1`, `7f932ef422`, `22ed1a46b9`,
+  `9d6f145b44`).
+- console.device and console.handler: a CSI parameter-width and
+  character-count series (`2123ec9cdc`, `1bbe5f23c0`, `2caea5e827`,
+  `fc64d8feca`, `20b8c29f92`, `be435afed4`, `6d98198dfb`, `c91cfa7b7b`,
+  `f4a7eab198`, `52fa1abb40`), per-unit keymaps (`87805db897`), the BEL
+  visual beep restored (`17af99cb7b`), the live bottom kept when a window
+  grows (`f064f0be82`), and AUTO window lifecycle and completion fixes
+  (`3a937f6bcc`, `1cbf81c69a`, `63c7d64c51`, `3a5cb742d5`, `18ddde7c35`).
+- filesystems and storage: afs-handler read-ahead only fills free cache
+  buffers (`1210ab42d9`; recycling a clean buffer could repurpose a
+  directory block a caller was walking) and honours `DE_MAXTRANSFER`
+  (`c175ccd980`), and ata.device hardens its ATAPI packet transport
+  (`5b2e8650f5`: `HD_SCSICMD` result fields, 12/16-byte CDBs, odd-length
+  transfers, timeout reset).
+
+The previous refresh was built on 2026-09-11 from master `311afcc057`
 merged with pull request 1179
 (https://github.com/aros-development-team/AROS/pull/1179, head
-`2776346929`, open at the time of the build). No local patch is carried
-any more: upstream commit `765871daef` now defines `PROC_MINSTACKSIZE` as
-`PROC_STACKSIZE` (8 KiB) in arch/m68k-amiga/dos/dos_platform.h, which is
-exactly the floor the previous refresh carried as
+`2776346929`). It carried no local patch: upstream commit `765871daef`
+defines `PROC_MINSTACKSIZE` as `PROC_STACKSIZE` (8 KiB) in
+arch/m68k-amiga/dos/dos_platform.h, which is exactly the floor the refresh
+before it carried as
 `patches/0001-m68k-amiga-dos-keep-the-8-KiB-process-stack-floor.patch`, so
-that patch and the `patches/` directory are gone. The 4 KiB floor of
+that patch and the `patches/` directory went away. The 4 KiB floor of
 `e9c4ecde99` was what broke every `--run` and copperhf autoboot: a boot
 that runs a Startup-Sequence with handler processes overflows a 4 KiB
 process stack, the staged program never starts and the boot process
 warm-reboots a minute later.
 
-The ROM banks are close to full at this size: the build links `.rom` at
-513,184 bytes and `.ext` at 523,606 bytes of the 524,288-byte banks, so
-the ext bank has 682 bytes spare. A future refresh that overflows a bank
-has to drop modules from the ROM's module list rather than grow the file.
-
-Pull request 1179 ("m68k: memory footprint reduction", Nicolas Ramz) is
-why this refresh exists. It trims the resident OS's own allocations,
+Pull request 1179 ("m68k: memory footprint reduction", Nicolas Ramz) was
+why that refresh existed. It trims the resident OS's own allocations,
 which is memory a game or demo gets back:
 
 - m68k CPU context allocations are sized to the processor actually
@@ -90,8 +192,8 @@ reports 96,600 bytes saved at Startup-Sequence entry and 117,928 after
 reaching a Workbench 1.3 desktop, so Copperline sees the same figure at
 the point its boot volume hands over.
 
-Upstream changes since the previous refresh (master `a3cfa659ed` plus the
-local stack-floor patch) that reach this ROM:
+That refresh also picked up these changes since the one before it
+(master `a3cfa659ed` plus the local stack-floor patch):
 
 - `765871daef` fixes m68k stack alignment and restores the 8 KiB process
   floor described above.
@@ -109,8 +211,8 @@ local stack-floor patch) that reach this ROM:
   released, and cached planar wrappers are detached with their allocation
   size preserved so closing that screen restores a contiguous chip layout.
 - `93c01c8c78` reverts the m68k CIA timer one-shot "kickstart"
-  (`d771e49b4c`, part of the pull request 1109 series this README
-  described at the previous refresh): CheckTimer already forces the
+  (`d771e49b4c`, part of the pull request 1109 series described
+  below): CheckTimer already forces the
   microhz interrupt through SetICR, which reprograms a stopped one-shot,
   so the extra 1-tick timer fired a second interrupt while the real
   deadline was still counting, timer.device requests completed early and
@@ -138,7 +240,7 @@ local stack-floor patch) that reach this ROM:
 - `e37a98368a` and `f7e31afa34`: graphics/diskfont arbitrates the font
   list with a semaphore, shared by name rather than by LVO.
 
-The previous refresh (master `a3cfa659ed`) picked these up since master
+The 2026-09-05 refresh (master `a3cfa659ed`) picked these up since master
 `6b5933dc` plus the then-draft pull request 1089:
 
 - pull request 1089 (https://github.com/aros-development-team/AROS/pull/1089,
@@ -163,8 +265,8 @@ The previous refresh (master `a3cfa659ed`) picked these up since master
   producer/consumer wrap deadlock on a stock 2 MB CD32. The same series
   honours zero-length CDXL transfer terminators, fixes Microcosm's CDXL
   startup, and restarted the CIA timer after an aborted timer.device
-  request (that last one is reverted in this refresh, see `93c01c8c78`
-  above).
+  request (that last one was reverted by the 2026-09-11 refresh, see
+  `93c01c8c78` above).
 - the CDXL presentation series of pull request 1125
   (https://github.com/aros-development-team/AROS/pull/1125, merged
   2026-09-04): PBX sector copying moves to the cd.device task with
