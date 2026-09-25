@@ -5760,6 +5760,13 @@ fn debugger_views_reflect_machine_state() {
                     .iter()
                     .any(|l| l.text.starts_with("Trigger:  NOW")));
             }
+            super::ui::DebugTab::Cd => {
+                // test_app is not a CD32: the tab says why it is empty.
+                assert!(view
+                    .lines
+                    .iter()
+                    .any(|l| l.text.starts_with("No traced CD drive")));
+            }
         }
     }
 }
@@ -6688,6 +6695,72 @@ fn frame_analyzer_scrub_enable_without_display_window_keeps_selection() {
     let panel = app.frame_analyzer_panel.as_ref().unwrap();
     assert!(panel.show_scrub);
     assert_eq!((panel.selected_vpos, panel.selected_hpos), (0x2C, 0x28));
+}
+
+#[test]
+fn mmio_watch_button_stops_on_a_device_register_write() {
+    let mut app = test_app();
+    // MOVE.W #$8020,$DFF096 (DMACON) a few instructions ahead of the PC.
+    let pc = app.emu.machine.pc();
+    let off = (pc as usize & 0x7FFFF) + 8;
+    let mov: [u16; 4] = [0x33FC, 0x8020, 0x00DF, 0xF096];
+    for (k, word) in mov.iter().enumerate() {
+        app.emu.bus_mut().mem.rom[off + k * 2..off + k * 2 + 2]
+            .copy_from_slice(&word.to_be_bytes());
+    }
+
+    app.open_debugger();
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.tab = super::ui::DebugTab::Break;
+        panel.entry = "DFF096 write".to_string();
+    }
+    app.activate_ui_control(super::ui::UiControl::DebugMmioToggle);
+    assert_eq!(
+        app.emu.machine.ui_breaks().mmio_watches,
+        [crate::debugger::MmioWatch::new(
+            0xDF_F096,
+            2,
+            crate::debugger::WatchAccess::Write
+        )]
+    );
+    let panel = app.debugger_panel.as_ref().unwrap();
+    let view = app.build_debugger_view(panel);
+    assert!(
+        view.lines
+            .iter()
+            .any(|l| l.text == "  $DFF096-$DFF097 write"),
+        "the Break tab lists the watch"
+    );
+    app.debugger_toggle_run();
+    app.close_tool_panel(ToolPanelKind::Debugger);
+
+    app.emu.step_frame().expect("frame");
+    assert!(app.surface_debug_stop());
+    assert!(app.paused);
+    let stop = app.last_debug_stop.as_deref().unwrap();
+    assert!(stop.starts_with("MMIO write $DFF096.W = $8020"), "{stop}");
+}
+
+#[test]
+fn console_mwatch_toggles_and_lists_and_cdtrace_needs_a_cd32() {
+    let mut app = test_app();
+    app.open_console();
+    let out = console_run(&mut app, "MWATCH B80000:40 read");
+    assert_eq!(out, ["mmio watch $B80000-$B8003F read set"]);
+    let out = console_run(&mut app, "BREAKS");
+    assert!(
+        out.iter().any(|l| l == "mwatch $B80000-$B8003F read"),
+        "{out:?}"
+    );
+    let out = console_run(&mut app, "MW B80000:40");
+    assert_eq!(out, ["mmio watch $B80000-$B8003F access removed"]);
+    let out = console_run(&mut app, "MWATCH");
+    assert!(out[0].starts_with('!'), "{out:?}");
+    let out = console_run(&mut app, "CDTRACE");
+    assert!(
+        out[0].starts_with('!') && out[0].contains("Akiko"),
+        "{out:?}"
+    );
 }
 
 /// Type a command into the open console and return the lines it printed.

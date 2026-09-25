@@ -515,6 +515,9 @@ impl GdbCore {
                 crate::debugger::DebugStop::Exception { vector, .. } => {
                     return Ok(Some(StopReason::Exception(vector)))
                 }
+                // An MMIO watch has no GDB watchpoint form; it stops like
+                // a custom-register watch (a plain trap).
+                crate::debugger::DebugStop::Mmio(_) => return Ok(Some(StopReason::RegisterWatch)),
                 _ => {}
             }
         }

@@ -1050,20 +1050,25 @@ fn build() -> Vec<ToolDef> {
              {\"mem\": addr} words with op eq/ne/lt/gt/le/ge/and, and `ignore` count), \
              `watch` (`access` write/read/access at `addr`, optionally by `class` cpu|blitter|disk|copper| \
              bpl1..bpl8|spr0..spr7|aud0..aud3 and, for cpu, a `pc`), `reg_watch` (a write \
-             to custom register `reg`), `beam` (`vpos`, optional `hpos`), `copper` (the \
-             Copper fetching `addr`), `catch` (exception `vector` number), `loadseg` (an \
-             AmigaDOS program load, optionally matching its `name`). Hits end a resume with \
-             the matching stop reason.",
+             to custom register `reg`), `mmio` (a CPU access to the `len`-byte range at \
+             `addr`, default 2 bytes, `access` read/write/access, default access; works on \
+             device registers such as Akiko at $B80000, and the stop's `access` object \
+             reports the address, size, value, direction, PC and emulated position), \
+             `beam` (`vpos`, optional `hpos`), `copper` (the Copper fetching `addr`), \
+             `catch` (exception `vector` number), `loadseg` (an AmigaDOS program load, \
+             optionally matching its `name`). Hits end a resume with the matching stop \
+             reason.",
             object(
                 vec![
                     (
                         "kind",
                         enumeration(
                             "Breakpoint kind",
-                            &["pc", "watch", "reg_watch", "beam", "copper", "catch", "loadseg"],
+                            &["pc", "watch", "reg_watch", "mmio", "beam", "copper", "catch", "loadseg"],
                         ),
                     ),
-                    ("addr", addr("pc/watch/copper: the address")),
+                    ("addr", addr("pc/watch/mmio/copper: the address")),
+                    ("len", uint("mmio: range length in bytes (default 2)", Some(1), None)),
                     (
                         "cond",
                         json!({
@@ -1081,7 +1086,10 @@ fn build() -> Vec<ToolDef> {
                     ("class", string("watch: cpu | blitter | disk | copper | bpl1..bpl8 | spr0..spr7 | aud0..aud3")),
                     (
                         "access",
-                        enumeration("watch access type (default write)", &["write", "read", "access"]),
+                        enumeration(
+                            "watch access type (default write) / mmio access type (default access)",
+                            &["write", "read", "access"],
+                        ),
                     ),
                     ("pc", addr("watch (cpu class): only accesses by the instruction at this PC")),
                     ("reg", addr("reg_watch: custom register name or offset")),
@@ -1361,6 +1369,25 @@ fn build() -> Vec<ToolDef> {
             json!({}),
         ),
         entry(
+            "cd.trace",
+            "The CD drive's recent commands with emulated timestamps (CD32 Akiko; \
+             `available` is false on other machines): each record's decoded `kind`, raw \
+             `bytes`, sector range (`start_lsn`, exclusive `end_lsn`), requested `speed`, \
+             the `issued`, `accepted`, `executed`, `responded`, `first_sector`, \
+             `last_sector` and `completed` stamps as {cck, seconds}, the units delivered, \
+             the reply `status` byte, the `outcome`, and a `summary` with each step as \
+             milliseconds after issue. Records numbered `since` or later, the newest \
+             `max` of them (default 64).",
+            object(
+                vec![
+                    ("since", uint("Only commands with this seq or later", Some(0), None)),
+                    ("max", uint("At most this many of the newest (default 64)", Some(1), Some(256))),
+                ],
+                &[],
+            ),
+            json!({"max": 16}),
+        ),
+        entry(
             "copperhf.attach",
             "Hot-attach a copperhf.device unit's media: opens `path` exactly like a \
              boot-time [copperhf] unit and replaces whatever media the unit had, bumping \
@@ -1406,8 +1433,12 @@ fn build() -> Vec<ToolDef> {
              for events_next / events_drain: `frame` (every `frame_interval` frames, \
              default 1, with an optional framebuffer digest), `serial` (Paula serial \
              output), `interrupt` (INTREQ/INTENA transitions), `media` (disk and CD \
-             changes), `debug` (guest uaelib log lines and resource registrations), and \
-             `bus` (named hardware events such as blitter completion and Copper wake). The \
+             changes), `debug` (guest uaelib log lines and resource registrations), \
+             `bus` (named hardware events such as blitter completion and Copper wake), \
+             `mmio` (every CPU access to the `mmio` ranges, device registers included, with \
+             size, value, direction, PC and emulated position; the ranges are required with \
+             it and replace any earlier ones), and `cd` (the CD drive's timestamped commands, \
+             one notification per executed/first_sector/completed phase; see cd.trace). The \
              queues are bounded; check the drop counts.",
             object(
                 vec![
@@ -1416,12 +1447,29 @@ fn build() -> Vec<ToolDef> {
                         json!({
                             "type": "array",
                             "description": "Event families to subscribe to",
-                            "items": {"type": "string", "enum": ["frame", "serial", "interrupt", "media", "debug", "bus"]},
+                            "items": {"type": "string", "enum": ["frame", "serial", "interrupt", "media", "debug", "bus", "mmio", "cd"]},
                             "minItems": 1
                         }),
                     ),
                     ("frame_interval", uint("Emit one frame event per this many frames (default 1)", Some(1), Some(1_000_000))),
                     ("frame_digest", boolean("Include an FNV-1a digest of each reported frame")),
+                    (
+                        "mmio",
+                        json!({
+                            "type": "array",
+                            "description": "mmio: the ranges to stream (required with the mmio event)",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "addr": {"description": "Range start (integer or hex string)"},
+                                    "len": {"type": "integer", "minimum": 1, "description": "Length in bytes (default 2)"},
+                                    "access": {"type": "string", "enum": ["write", "read", "access"], "description": "Accesses to report (default access)"}
+                                },
+                                "required": ["addr"]
+                            },
+                            "minItems": 1
+                        }),
+                    ),
                 ],
                 &["events"],
             ),
@@ -1437,7 +1485,7 @@ fn build() -> Vec<ToolDef> {
                     json!({
                         "type": "array",
                         "description": "Event families to drop (absent: all)",
-                        "items": {"type": "string", "enum": ["frame", "serial", "interrupt", "media", "debug"]}
+                        "items": {"type": "string", "enum": ["frame", "serial", "interrupt", "media", "debug", "bus", "mmio", "cd"]}
                     }),
                 )],
                 &[],

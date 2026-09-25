@@ -1590,6 +1590,59 @@ mod tests {
     }
 
     #[test]
+    fn mmio_break_and_stream_report_each_cpu_access() {
+        run_session(None, |c| {
+            c.auth();
+            // The test ROM's loop stores D0 to $20000 with MOVE.W at
+            // $F80014 every four instructions.
+            c.result(
+                "break.add",
+                json!({"kind": "mmio", "addr": "0x20000", "access": "write"}),
+            );
+            let listed = c.result("break.list", json!({}));
+            assert!(
+                listed["breaks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|b| { b["kind"] == "mmio" && b["len"] == 2 && b["access"] == "write" }),
+                "{listed}"
+            );
+            let stop = c.result("continue", json!({}));
+            assert_eq!(stop["reason"], "mmio");
+            let access = &stop["access"];
+            assert_eq!(access["addr"], 0x0002_0000);
+            assert_eq!(access["size"], 2);
+            assert_eq!(access["access"], "write");
+            assert_eq!(access["pc"], 0x00F8_0014);
+            assert!(
+                access["position"]["cck"].as_u64().unwrap() <= stop["cck"].as_u64().unwrap(),
+                "the access precedes the instruction boundary the stop reports"
+            );
+            c.result("break.clear", json!({}));
+
+            c.result(
+                "events.subscribe",
+                json!({"events": ["mmio"], "mmio": [{"addr": "0x20000", "access": "write"}]}),
+            );
+            c.result("step", json!({"n": 16}));
+            let values: Vec<u64> = c
+                .stash
+                .iter()
+                .filter(|message| message["method"] == "event.mmio")
+                .map(|message| message["params"]["value"].as_u64().unwrap())
+                .collect();
+            assert!(values.len() >= 3, "{values:?}");
+            assert!(
+                values.windows(2).all(|pair| pair[1] == pair[0] + 1),
+                "one event per store, in order: {values:?}"
+            );
+            let cd = c.result("cd.trace", json!({}));
+            assert_eq!(cd["available"], false);
+        });
+    }
+
+    #[test]
     fn save_load_state_roundtrip() {
         run_session(None, |c| {
             c.auth();

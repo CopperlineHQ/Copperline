@@ -864,6 +864,23 @@ the same position while a play is running or paused (regression example:
 Liberation's CD32 intro busy-waits on its first frame interrupt after
 `CD_PLAYTRACK`).
 
+The drive model feeds a host-side command trace (`cdtrace.rs`): each packet
+becomes a record stamped in emulated colour clocks when its first byte left
+the host (TX DMA fetch or PIO write, tracked per byte through the drive's
+receive buffer), when the drive parsed it, executed it, and delivered its
+reply, when a read, play, or TOC dump delivered its first and latest unit,
+and when it ended. The Bus sets the trace clock to `emulated_cck` before each
+register access and each deferred tick; a countdown that expires inside a
+tick's batch (the command turnaround, the sector and CD-DA frame pacing) is
+stamped where it expired, `batch end - batch length + countdown`, not at the
+end of the batch. The trace is an observer only: it is not serialized, moves
+across state loads as a host resource (ending the commands in flight as
+`abandoned`; a command the restored drive was already running is not
+traced), and survives a guest reset (which ends open commands with the
+`reset` outcome). It backs the debugger's CD tab,
+the console's `CDTRACE`, `COPPERLINE_DBG_CD`, and the control protocol's
+`cd.trace` / `event.cd`.
+
 ### CD32 Full Motion Video module (`cd32_fmv.rs`)
 
 Top-level `fmv = true` fits a 1 MiB Zorro II FMV cartridge on the CD32

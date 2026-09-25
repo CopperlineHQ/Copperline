@@ -1050,7 +1050,7 @@ impl Session {
                 };
                 ("pause", description, Vec::new())
             }
-            "reg_watch" | "beam_trap" | "copper_break" | "task_catch" => {
+            "reg_watch" | "mmio" | "beam_trap" | "copper_break" | "task_catch" => {
                 ("breakpoint", Some(detail.to_string()), Vec::new())
             }
             "loadseg" => ("breakpoint", Some(detail.to_string()), Vec::new()),

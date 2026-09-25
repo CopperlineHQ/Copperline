@@ -203,13 +203,17 @@ impl Shared {
     /// reader starts trying to reopen. Idempotent, so whichever thread
     /// notices first says so once.
     fn detach(&self, why: &io::Error) {
+        // Float the lines before the detach becomes visible: whoever sees
+        // `attached` drop (Acquire) must also see the unplugged cable, not
+        // the carrier the port had a moment ago. A second caller repeats
+        // these stores harmlessly.
+        self.lines
+            .store(SerialControlLines::UNPLUGGED.to_bits(), Ordering::Release);
+        self.ring.store(false, Ordering::Release);
         if !self.attached.swap(false, Ordering::AcqRel) {
             return;
         }
         *self.port.lock().unwrap() = None;
-        self.lines
-            .store(SerialControlLines::UNPLUGGED.to_bits(), Ordering::Release);
-        self.ring.store(false, Ordering::Release);
         log::warn!(
             "serial: host port {} lost ({why}); the guest sees an unplugged cable until it \
              comes back",

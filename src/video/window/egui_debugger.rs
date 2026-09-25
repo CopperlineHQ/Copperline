@@ -896,6 +896,11 @@ impl Layout {
                         panel.entry_addr().is_some(),
                     ),
                     (
+                        "MMIO +/-",
+                        UiControl::DebugMmioToggle,
+                        panel.mmio_spec().is_some(),
+                    ),
+                    (
                         "Beam +/-",
                         UiControl::DebugBeamToggle,
                         ui::parse_beam_spec(&panel.entry).is_some(),

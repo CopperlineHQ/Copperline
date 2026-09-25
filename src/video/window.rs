@@ -6891,6 +6891,9 @@ impl App {
             UiControl::DebugRegToggle => {
                 self.activate_tool_control(ToolPanelKind::Debugger, control)
             }
+            UiControl::DebugMmioToggle => {
+                self.activate_tool_control(ToolPanelKind::Debugger, control)
+            }
             UiControl::DebugBeamToggle => {
                 self.activate_tool_control(ToolPanelKind::Debugger, control)
             }

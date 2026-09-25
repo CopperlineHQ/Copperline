@@ -33,6 +33,7 @@
 //! rate) and sends the drive's start/end notification packets.
 
 use crate::cdrom::{to_bcd, CdImage, CdTrack, LEADIN_SECTORS, RAW_SECTOR_BYTES};
+use crate::cdtrace::{CdCommandKind, CdOutcome, CdStream, CdTrace};
 use crate::chipset::paula::CdAudioRing;
 
 pub const AKIKO_BASE: u32 = 0x00B8_0000;
@@ -139,6 +140,45 @@ fn bcd_msf_to_lsn(msf: &[u8]) -> i64 {
     let s = from_bcd(msf[1]) as i64;
     let f = from_bcd(msf[2]) as i64;
     (m * 60 + s) * 75 + f - i64::from(LEADIN_SECTORS)
+}
+
+/// Decode a parsed drive packet for the command trace: what it asks for,
+/// the sector range of a read or play, and the requested speed of the
+/// seek/play/read command. `valid` is false for a packet that failed its
+/// checksum or named no known opcode.
+fn decode_traced_command(
+    bytes: &[u8],
+    valid: bool,
+) -> (CdCommandKind, Option<(i64, i64)>, Option<u8>) {
+    if !valid || bytes.is_empty() {
+        return (CdCommandKind::Invalid, None, None);
+    }
+    let kind = match bytes[0] & 0x0F {
+        0 => CdCommandKind::Noop,
+        1 => CdCommandKind::Stop,
+        2 => CdCommandKind::Pause,
+        3 => CdCommandKind::Unpause,
+        4 if bytes.len() > 8 => {
+            // The same fields command_multi acts on.
+            let start = bcd_msf_to_lsn(&bytes[1..4]);
+            let end = bcd_msf_to_lsn(&bytes[4..7]);
+            let speed = if bytes[8] & 0x40 != 0 { 2 } else { 1 };
+            let kind = if bytes[7] & 0x80 != 0 {
+                CdCommandKind::Read
+            } else if start < 0 {
+                CdCommandKind::Toc
+            } else {
+                CdCommandKind::Play
+            };
+            let range = (kind != CdCommandKind::Toc).then_some((start, end));
+            return (kind, range, Some(speed));
+        }
+        5 => CdCommandKind::Led,
+        6 => CdCommandKind::Subq,
+        7 => CdCommandKind::Info,
+        other => CdCommandKind::Other(other),
+    };
+    (kind, None, None)
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -498,6 +538,11 @@ pub struct Akiko {
     read_counter_cck: i32,
     frame_counter_cck: i32,
     frame_sync: bool,
+
+    /// Timestamped command trace (`crate::cdtrace`). A host-side observer:
+    /// never serialized, carried across state loads by the Bus.
+    #[serde(skip)]
+    trace: CdTrace,
 }
 
 impl Default for Akiko {
@@ -561,6 +606,7 @@ impl Default for Akiko {
             read_counter_cck: 0,
             frame_counter_cck: 0,
             frame_sync: false,
+            trace: CdTrace::default(),
         }
     }
 }
@@ -642,6 +688,7 @@ impl Akiko {
             // removal notification is owed.
             return;
         }
+        self.trace.close_all(CdOutcome::Ejected);
         self.toc.clear();
         self.playing = false;
         self.paused = false;
@@ -665,11 +712,14 @@ impl Akiko {
         let toc = std::mem::take(&mut self.toc);
         let path = self.nvram.path.take();
         let memory = std::mem::take(&mut self.nvram.memory);
+        let mut trace = std::mem::take(&mut self.trace);
+        trace.reset();
         *self = Self::default();
         self.disc = disc;
         self.toc = toc;
         self.nvram.path = path;
         self.nvram.memory = memory;
+        self.trace = trace;
     }
 
     /// A power cycle stops the mechanism: the next lead-in dump pays the
@@ -704,6 +754,26 @@ impl Akiko {
     /// `Memory::adopt_allocations_from`).
     pub(crate) fn adopt_allocations_from(&mut self, live: &mut Akiko) {
         crate::memory::reuse_allocation(&mut self.nvram.memory, &mut live.nvram.memory);
+    }
+
+    /// The drive's timestamped command trace (see `crate::cdtrace`).
+    pub fn cd_trace(&self) -> &CdTrace {
+        &self.trace
+    }
+
+    /// Stamp the drive activity that follows at emulated colour clock
+    /// `cck` (the bus's `emulated_cck`). The Bus sets it before every
+    /// register access and before each tick, whose batch ends at `cck`.
+    pub fn set_trace_clock(&mut self, cck: u64) {
+        self.trace.set_now(cck);
+    }
+
+    /// Carry the live drive's command trace onto this one, freshly restored
+    /// from a save state: the history and the observers' sequence numbers
+    /// survive, the in-flight links of the abandoned timeline do not.
+    pub(crate) fn adopt_trace_from(&mut self, live: &mut Akiko) {
+        std::mem::swap(&mut self.trace, &mut live.trace);
+        self.trace.forget_in_flight();
     }
 
     /// Seed the EEPROM before boot without installing a host write path.
@@ -804,6 +874,7 @@ impl Akiko {
                         self.intreq &= !CDINT_DRIVERECV;
                         self.receive_length = 0;
                         self.intreq |= CDINT_DRIVEXMIT;
+                        self.trace.packet_delivered();
                     }
                 } else {
                     self.intreq &= !CDINT_DRIVERECV;
@@ -909,6 +980,7 @@ impl Akiko {
                     self.intreq &= !CDINT_DRIVEXMIT;
                     if self.tx_fifo_has_room() {
                         self.tx_fifo.push_back(value);
+                        self.trace.fifo_push(self.tx_fifo.len());
                     }
                     self.parse_commands();
                     if self.transmitter_ready() {
@@ -941,6 +1013,11 @@ impl Akiko {
         mem: &mut (impl DmaSpace + ?Sized),
         cd_audio: &mut CdAudioRing,
     ) {
+        // The batch covers [batch_end - cck, batch_end]: countdowns that
+        // expire inside it stamp their trace events where they expired.
+        let batch_end = self.trace.now();
+        let batch_start = batch_end.saturating_sub(u64::from(cck));
+        let expires_at = |countdown: i64| batch_start + countdown.clamp(0, i64::from(cck)) as u64;
         self.tx_dma_delay_cck = self.tx_dma_delay_cck.saturating_sub(cck);
         self.rx_dma_delay_cck = self.rx_dma_delay_cck.saturating_sub(cck);
 
@@ -971,6 +1048,7 @@ impl Akiko {
         }
 
         if self.command_active > 0 {
+            let due = expires_at(i64::from(self.command_active));
             self.command_active = self.command_active.saturating_sub(cck);
             if self.command_active == 0 {
                 if self.receive_length > 0 {
@@ -991,17 +1069,20 @@ impl Akiko {
                     // response ring according to the completion it observed.
                     self.command_active = 1;
                 } else {
+                    self.trace.set_now(due);
                     self.execute_command();
                 }
             }
         }
 
+        let due = expires_at(i64::from(self.read_counter_cck));
         self.read_counter_cck -= cck as i32;
         if self.read_counter_cck <= 0 {
             self.read_counter_cck += (CCK_PER_CD_FRAME / self.speed.max(1)) as i32;
             if self.seek_delay > 0 {
                 self.seek_delay -= 1;
             } else {
+                self.trace.set_now(due);
                 self.run_sector_read(mem);
             }
         }
@@ -1024,12 +1105,15 @@ impl Akiko {
         }
         // CD-DA always plays at single speed: stream one decoded sector
         // into the host mixer ring per CD frame.
+        let due = expires_at(i64::from(self.audio_counter_cck));
         self.audio_counter_cck -= cck as i32;
         if self.audio_counter_cck <= 0 {
             self.audio_counter_cck += CCK_PER_CD_FRAME as i32;
+            self.trace.set_now(due);
             self.stream_audio_sector(mem, cd_audio);
         }
 
+        self.trace.set_now(batch_end);
         self.handler();
         self.run_internal(mem);
     }
@@ -1053,6 +1137,7 @@ impl Akiko {
         if self.play_position >= self.play_end || self.play_position < 0 {
             self.playing = false;
             self.audio_notify = -1; // play end notification
+            self.trace.close_stream(CdStream::Play, CdOutcome::End);
             return;
         }
         let sector = self.play_position as u32;
@@ -1064,6 +1149,7 @@ impl Akiko {
             }
         }
         self.play_position += 1;
+        self.trace.stream_unit(CdStream::Play);
         // The pickup decodes P-W subcode for every frame it plays, not
         // only for data reads: this stream is what the KS cd.device's
         // subcode interrupt server turns into CD_ADDFRAMEINT calls and
@@ -1197,6 +1283,7 @@ impl Akiko {
         // reads garbage there and fails the packet's checksum).
         let byte = mem.dma_get(self.cdtx_address + u32::from(self.tx_dma_offset & 0xFF));
         self.tx_fifo.push_back(byte);
+        self.trace.fifo_push(self.tx_fifo.len());
         self.tx_dma_offset = self.tx_dma_offset.wrapping_add(1);
         self.cdcomtxinx = self.cdcomtxinx.wrapping_add(1);
         if self.cdcomtxinx == self.cdcomtxcmp {
@@ -1220,14 +1307,20 @@ impl Akiko {
     /// queued commands come out intact and in order once the dump ends.
     fn parse_commands(&mut self) {
         while self.can_send_command() && self.toc_counter < 0 {
+            let stamp = self.trace.fifo_pop(self.tx_fifo.len());
             let Some(byte) = self.tx_fifo.pop_front() else {
                 break;
             };
-            self.add_command_byte(byte);
+            self.add_command_byte(byte, stamp);
         }
     }
 
-    fn add_command_byte(&mut self, byte: u8) {
+    /// Feed one byte to the drive's packet parser. `stamp` is when the
+    /// host issued it (for the command trace), if known.
+    fn add_command_byte(&mut self, byte: u8, stamp: Option<u64>) {
+        if self.command_length == 0 {
+            self.trace.packet_started(stamp);
+        }
         if self.command_length < self.command_buffer.len() {
             self.command_buffer[self.command_length] = byte;
         }
@@ -1241,6 +1334,7 @@ impl Akiko {
         if cmd_len < 0 {
             self.unknown_command = true;
             self.command_active = CMD_EXEC_DELAY_CCK;
+            self.trace_command_accepted(1);
             return;
         }
         let cmd_len = cmd_len as usize;
@@ -1256,6 +1350,16 @@ impl Akiko {
         }
         self.command_active = CMD_EXEC_DELAY_CCK;
         self.command_length = cmd_len;
+        self.trace_command_accepted(cmd_len + 1);
+    }
+
+    /// Record the packet the drive just finished parsing (its first `len`
+    /// bytes, checksum included) in the command trace.
+    fn trace_command_accepted(&mut self, len: usize) {
+        let bytes = &self.command_buffer[..len.min(self.command_buffer.len())];
+        let valid = !self.checksum_error && !self.unknown_command;
+        let (kind, range, speed) = decode_traced_command(bytes, valid);
+        self.trace.command_accepted(bytes, kind, range, speed);
     }
 
     fn execute_command(&mut self) {
@@ -1279,7 +1383,14 @@ impl Akiko {
             } else {
                 CH_ERR_BADCOMMAND | self.door
             };
-            self.start_return_data(2);
+            self.trace.set_outcome(if self.checksum_error {
+                CdOutcome::ChecksumError
+            } else {
+                CdOutcome::BadCommand
+            });
+            let status = self.result_buffer[1];
+            let replied = self.start_return_data(2);
+            self.trace.command_executed(Some(status), replied);
             return;
         }
 
@@ -1297,13 +1408,19 @@ impl Akiko {
             7 => self.command_status(),
             _ => 0,
         };
+        if self.disc.is_none() && matches!(self.command & 0x0F, 1..=4) {
+            self.trace.set_outcome(CdOutcome::NoDisc);
+        }
         if len == 0 {
             if self.tx_fifo_has_room() {
                 self.intreq |= CDINT_DRIVEXMIT;
             }
+            self.trace.command_executed(None, false);
             return;
         }
-        self.start_return_data(len);
+        let status = (len >= 2).then_some(self.result_buffer[1]);
+        let replied = self.start_return_data(len);
+        self.trace.command_executed(status, replied);
     }
 
     fn check_no_disk(&mut self) -> bool {
@@ -1324,12 +1441,15 @@ impl Akiko {
         self.stop_audio();
         self.data_offset = -1;
         self.data_end = -1;
+        self.trace.close_stream(CdStream::Play, CdOutcome::Stopped);
+        self.trace.close_stream(CdStream::Read, CdOutcome::Stopped);
         2
     }
 
     fn command_pause(&mut self) -> usize {
         self.audio_notify = 0;
         self.toc_counter = -1;
+        self.trace.close_stream(CdStream::Toc, CdOutcome::Stopped);
         self.result_buffer[0] = self.command;
         if self.check_no_disk() {
             return 2;
@@ -1358,6 +1478,8 @@ impl Akiko {
 
         if self.playing {
             self.stop_audio();
+            self.trace
+                .close_stream(CdStream::Play, CdOutcome::Superseded);
         }
         self.paused = false;
         self.speed = if self.command_buffer[8] & 0x40 != 0 {
@@ -1412,9 +1534,11 @@ impl Akiko {
             };
             log::debug!("akiko: READ DATA {seekpos}..{endpos} speed {}x", self.speed);
             self.result_buffer[1] |= 0x02;
+            self.trace.open_stream(CdStream::Read);
         } else if seekpos < 0 {
             // Play command with a lead-in address: a TOC dump.
             self.toc_counter = 0;
+            self.trace.open_stream(CdStream::Toc);
         } else if !self
             .disc
             .as_ref()
@@ -1427,6 +1551,9 @@ impl Akiko {
             self.toc_counter = -1;
             self.result_buffer[1] = 0x42;
             self.audio_notify = -3;
+            self.trace
+                .close_stream(CdStream::Toc, CdOutcome::Superseded);
+            self.trace.set_outcome(CdOutcome::Refused);
             log::debug!("akiko: PLAY {seekpos}..{endpos} refused (data track)");
         } else {
             // Audio play: stream CD-DA into the host mixer from here.
@@ -1437,6 +1564,9 @@ impl Akiko {
             self.play_end = endpos;
             self.current_sector = seekpos;
             self.audio_notify = 10; // play-start packet shortly
+            self.trace
+                .close_stream(CdStream::Toc, CdOutcome::Superseded);
+            self.trace.open_stream(CdStream::Play);
             log::debug!("akiko: PLAY {seekpos}..{endpos}");
         }
         2
@@ -1510,6 +1640,7 @@ impl Akiko {
         if self.toc.is_empty() {
             self.result_buffer[1] = CDS_ERROR | self.door;
             self.toc_counter = -1;
+            self.trace.toc_packet_queued(false, Some(CdOutcome::Error));
             return 15;
         }
         self.result_buffer[1] = 0x0A; // matches real CD32 captures
@@ -1531,9 +1662,14 @@ impl Akiko {
         self.result_buffer[7] = to_bcd((24 + counter / 75) as u8);
         self.result_buffer[8] = to_bcd((counter % 75) as u8);
         self.toc_counter += 1;
-        if (self.toc_counter as u32 / TOC_REPEAT) as usize >= self.toc.len() {
+        let last = (self.toc_counter as u32 / TOC_REPEAT) as usize >= self.toc.len();
+        if last {
             self.toc_counter = -1;
         }
+        // The entry counts, and the last one ends the dump, when the host
+        // has the packet (see `packet_delivered`).
+        self.trace
+            .toc_packet_queued(true, last.then_some(CdOutcome::End));
         15
     }
 
@@ -1607,6 +1743,7 @@ impl Akiko {
             if self.tx_fifo_has_room() {
                 self.intreq |= CDINT_DRIVEXMIT;
             }
+            self.trace.packet_delivered();
         }
     }
 
@@ -1651,6 +1788,7 @@ impl Akiko {
         if self.data_end >= 0 && sector > self.data_end {
             self.data_offset = -1;
             self.data_end = -1;
+            self.trace.close_stream(CdStream::Read, CdOutcome::End);
             return;
         }
 
@@ -1671,6 +1809,7 @@ impl Akiko {
                 self.data_offset = -1;
                 self.data_end = -1;
                 self.intreq |= CDINT_PBX;
+                self.trace.close_stream(CdStream::Read, CdOutcome::End);
             }
             return;
         }
@@ -1704,6 +1843,7 @@ impl Akiko {
 
         // Sector-synchronous subcode delivery alongside the payload.
         self.deliver_subcode(mem, read_sector as u32);
+        self.trace.stream_unit(CdStream::Read);
 
         self.sector_counter += 1;
         if at_end {
@@ -1712,6 +1852,7 @@ impl Akiko {
             );
             self.data_offset = -1;
             self.data_end = -1;
+            self.trace.close_stream(CdStream::Read, CdOutcome::End);
         }
     }
 
@@ -3649,5 +3790,255 @@ mod tests {
             .flat_map(|&pt| std::iter::repeat_n(pt, TOC_REPEAT as usize))
             .collect();
         assert_eq!(points, expected, "TOC stream order: tracks then A0/A1/A2");
+    }
+
+    /// A drive driven the way the Bus drives it: every tick advances an
+    /// emulated clock and stamps the trace with the batch's end, and every
+    /// register access stamps it with the current time.
+    struct ClockedDrive {
+        akiko: Akiko,
+        chip: Vec<u8>,
+        ring: CdAudioRing,
+        clock: u64,
+    }
+
+    impl ClockedDrive {
+        const MISC: u32 = 0x0000_1000;
+
+        fn new() -> Self {
+            let mut drive = Self {
+                akiko: Akiko::new(),
+                chip: vec![0u8; 256 * 1024],
+                ring: CdAudioRing::default(),
+                clock: 0,
+            };
+            drive.akiko.insert_disc(test_disc());
+            drive.tick(2048);
+            drive.akiko.cd_initialized = 2;
+            drive.akiko.receive_length = 0;
+            drive.write(AKIKO_BASE + 0x14, 4, Self::MISC);
+            drive.write(AKIKO_BASE + 0x24, 4, CDFLAG_TXD | CDFLAG_RXD);
+            drive
+        }
+
+        fn tick(&mut self, cck: u32) {
+            self.clock += u64::from(cck);
+            self.akiko.set_trace_clock(self.clock);
+            self.akiko.tick(cck, &mut self.chip, &mut self.ring);
+        }
+
+        fn write(&mut self, addr: u32, size: usize, value: u32) {
+            self.akiko.set_trace_clock(self.clock);
+            self.akiko.write(addr, size, value, &mut self.chip);
+        }
+
+        /// Queue `cmd` (checksum appended) in the TX ring and kick the
+        /// DMA; returns the kick time.
+        fn send(&mut self, cmd: &[u8]) -> u64 {
+            let tx_base = (Self::MISC | 0x200) as usize;
+            let start = self.akiko.cdcomtxinx;
+            let mut checksum = 0xFFu8;
+            for (i, b) in cmd.iter().enumerate() {
+                self.chip[tx_base + ((start as usize + i) & 0xFF)] = *b;
+                checksum = checksum.wrapping_sub(*b);
+            }
+            self.chip[tx_base + ((start as usize + cmd.len()) & 0xFF)] = checksum;
+            let end = start.wrapping_add(cmd.len() as u8 + 1);
+            let rx_stop = u32::from(self.akiko.cdcomrxinx.wrapping_sub(1));
+            self.write(AKIKO_BASE + 0x1F, 1, rx_stop);
+            self.write(AKIKO_BASE + 0x1D, 1, u32::from(end));
+            self.clock
+        }
+
+        fn record(&self, kind: CdCommandKind) -> crate::cdtrace::CdCommandRecord {
+            self.akiko
+                .cd_trace()
+                .records()
+                .rfind(|r| r.kind == kind)
+                .cloned()
+                .unwrap_or_else(|| panic!("no {kind:?} record"))
+        }
+    }
+
+    #[test]
+    fn command_trace_stamps_a_data_read_from_issue_to_its_end() {
+        let mut drive = ClockedDrive::new();
+        // READ DATA 00:02:00 - 00:02:02 (LSN 0..2, exclusive), 1x.
+        let kicked = drive.send(&[
+            0x04, 0x00, 0x02, 0x00, 0x00, 0x02, 0x02, 0x80, 0x00, 0x00, 0x00, 0x00,
+        ]);
+        for _ in 0..64 {
+            drive.tick(2048);
+        }
+        drive.write(AKIKO_BASE + 0x10, 4, 0x0001_0000);
+        drive.write(
+            AKIKO_BASE + 0x24,
+            4,
+            CDFLAG_TXD | CDFLAG_RXD | CDFLAG_ENABLE | CDFLAG_PBX | CDFLAG_CAS,
+        );
+        drive.write(AKIKO_BASE + 0x20, 2, 0xFFFF);
+        for _ in 0..200 {
+            drive.tick(CCK_PER_CD_FRAME / 8);
+        }
+
+        let read = drive.record(CdCommandKind::Read);
+        assert_eq!((read.start_lsn, read.end_lsn), (Some(0), Some(2)));
+        assert_eq!(read.speed, Some(1));
+        assert_eq!(read.bytes.len(), 13, "command, payload and checksum");
+        // The TX DMA takes the first byte once its restart delay passes.
+        assert!(read.issued_cck >= kicked + u64::from(DMA_RESTART_DELAY_CCK));
+        assert!(read.accepted_cck >= read.issued_cck);
+        // The turnaround countdown is stamped where it expired, not at
+        // the end of the batch that ran it out.
+        assert_eq!(
+            read.executed_cck,
+            Some(read.accepted_cck + u64::from(CMD_EXEC_DELAY_CCK))
+        );
+        assert_eq!(read.status, Some(0x02), "data-read ack");
+        let responded = read.responded_cck.expect("reply delivered");
+        assert!(responded >= read.executed_cck.unwrap());
+        let first = read.first_sector_cck.expect("first sector");
+        assert!(first > responded, "the locate precedes the first sector");
+        // Sectors 0 and 1, then the exclusive-end boundary probe.
+        assert_eq!(read.sectors, 3);
+        assert_eq!(read.completed_cck, read.last_sector_cck);
+        assert_eq!(read.outcome, Some(CdOutcome::End));
+
+        let trace = drive.akiko.cd_trace();
+        let phases: Vec<crate::cdtrace::CdPhase> = trace
+            .events_since(0)
+            .0
+            .iter()
+            .filter(|event| event.record.seq == read.seq)
+            .map(|event| event.phase)
+            .collect();
+        assert_eq!(
+            phases,
+            [
+                crate::cdtrace::CdPhase::Executed,
+                crate::cdtrace::CdPhase::FirstSector,
+                crate::cdtrace::CdPhase::Completed,
+            ]
+        );
+    }
+
+    #[test]
+    fn command_trace_records_stops_and_rejected_packets() {
+        let mut drive = ClockedDrive::new();
+        // A read left waiting for PBX buffers, then STOP ends it.
+        drive.send(&[
+            0x04, 0x00, 0x02, 0x00, 0x00, 0x02, 0x06, 0x80, 0x40, 0x00, 0x00, 0x00,
+        ]);
+        for _ in 0..64 {
+            drive.tick(2048);
+        }
+        assert_eq!(
+            drive.record(CdCommandKind::Read).outcome,
+            None,
+            "still open"
+        );
+        drive.send(&[0x11, 0x00]);
+        for _ in 0..64 {
+            drive.tick(2048);
+        }
+        let read = drive.record(CdCommandKind::Read);
+        let stop = drive.record(CdCommandKind::Stop);
+        assert_eq!(read.speed, Some(2));
+        assert_eq!(read.outcome, Some(CdOutcome::Stopped));
+        assert_eq!(read.completed_cck, stop.executed_cck);
+        assert_eq!(stop.outcome, Some(CdOutcome::Ok));
+        assert_eq!(stop.completed_cck, stop.responded_cck);
+
+        // A packet with a wrong checksum is traced as invalid.
+        let tx_base = (ClockedDrive::MISC | 0x200) as usize;
+        let start = drive.akiko.cdcomtxinx as usize;
+        drive.chip[tx_base + start] = 0x27;
+        drive.chip[tx_base + ((start + 1) & 0xFF)] = 0x00;
+        let rx_stop = u32::from(drive.akiko.cdcomrxinx.wrapping_sub(1));
+        drive.write(AKIKO_BASE + 0x1F, 1, rx_stop);
+        drive.write(AKIKO_BASE + 0x1D, 1, ((start + 2) & 0xFF) as u32);
+        for _ in 0..64 {
+            drive.tick(2048);
+        }
+        let bad = drive.record(CdCommandKind::Invalid);
+        assert_eq!(bad.bytes, [0x27, 0x00]);
+        assert_eq!(bad.outcome, Some(CdOutcome::ChecksumError));
+        assert_eq!(bad.status.map(|s| s & 0xF8), Some(CH_ERR_CHECKSUM));
+    }
+
+    #[test]
+    fn a_toc_entry_counts_only_once_the_host_has_read_it() {
+        // PIO throughout (no DMA flags), like a game driving the drive port.
+        let mut chip = vec![0u8; 64 * 1024];
+        let mut ring = CdAudioRing::default();
+        let mut akiko = Akiko::new();
+        akiko.insert_disc(test_disc());
+        let mut now = 0u64;
+        let mut tick = |akiko: &mut Akiko, chip: &mut Vec<u8>, cck: u32| {
+            now += u64::from(cck);
+            akiko.set_trace_clock(now);
+            akiko.tick(cck, chip, &mut ring);
+        };
+        let pio_read = |akiko: &mut Akiko, chip: &mut Vec<u8>, n: usize| {
+            for _ in 0..n {
+                akiko.read(AKIKO_BASE + 0x28, 1, chip);
+            }
+        };
+        let pio_send = |akiko: &mut Akiko, chip: &mut Vec<u8>, cmd: &[u8]| {
+            let checksum = cmd.iter().fold(0xFFu8, |a, b| a.wrapping_sub(*b));
+            for &byte in cmd.iter().chain([checksum].iter()) {
+                akiko.write(AKIKO_BASE + 0x28, 1, u32::from(byte), chip);
+            }
+        };
+        // Drain the boot media status, identify the firmware, then ask
+        // for the lead-in TOC and take only its acknowledgement.
+        tick(&mut akiko, &mut chip, 2048);
+        pio_read(&mut akiko, &mut chip, 3);
+        pio_send(&mut akiko, &mut chip, &[0x07]);
+        tick(&mut akiko, &mut chip, 4096);
+        pio_read(&mut akiko, &mut chip, 21);
+        pio_send(
+            &mut akiko,
+            &mut chip,
+            &[0x04, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        );
+        tick(&mut akiko, &mut chip, 4096);
+        pio_read(&mut akiko, &mut chip, 3);
+        // Past the cold spin-up: the first entry is built and waits.
+        for _ in 0..18_000 {
+            tick(&mut akiko, &mut chip, 2048);
+        }
+        let toc = |akiko: &Akiko| {
+            akiko
+                .cd_trace()
+                .records()
+                .find(|r| r.kind == CdCommandKind::Toc)
+                .cloned()
+                .unwrap()
+        };
+        let waiting = toc(&akiko);
+        assert!(waiting.responded_cck.is_some(), "acknowledgement drained");
+        assert_eq!((waiting.sectors, waiting.first_sector_cck), (0, None));
+        // The host reads the entry (15 bytes and the checksum).
+        pio_read(&mut akiko, &mut chip, 16);
+        let read = toc(&akiko);
+        assert_eq!(read.sectors, 1);
+        assert_eq!(read.first_sector_cck, Some(akiko.cd_trace().now()));
+    }
+
+    #[test]
+    fn a_guest_reset_keeps_the_trace_and_ends_open_commands() {
+        let mut drive = ClockedDrive::new();
+        drive.send(&[
+            0x04, 0x00, 0x02, 0x00, 0x00, 0x02, 0x06, 0x80, 0x00, 0x00, 0x00, 0x00,
+        ]);
+        for _ in 0..64 {
+            drive.tick(2048);
+        }
+        let seq = drive.record(CdCommandKind::Read).seq;
+        drive.akiko.reset();
+        let read = drive.record(CdCommandKind::Read);
+        assert_eq!(read.seq, seq, "history survives the reset");
+        assert_eq!(read.outcome, Some(CdOutcome::Reset));
     }
 }

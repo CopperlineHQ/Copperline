@@ -11,7 +11,9 @@
 use super::observe::{EventKind, MAX_FRAME_INTERVAL};
 use super::proto::{self, CtlError, StopEvent};
 use super::session::{BreakSpec, InputAction, SessionCtx};
-use crate::debugger::{BreakCond, CondOp, CondOperand, DebugStop, WatchAccess, WatchSource};
+use crate::debugger::{
+    BreakCond, CondOp, CondOperand, DebugStop, MmioAccess, MmioWatch, WatchAccess, WatchSource,
+};
 use crate::emulator::Emulator;
 use crate::inputsched::JoyState;
 use crate::pointer::{PointerServo, ServoStep};
@@ -189,10 +191,18 @@ pub enum CoreOp {
     FloppyQuery,
     /// What is in the PCMCIA slot, and whether the machine has one.
     PcmciaQuery,
+    /// The CD drive's recent timestamped commands (`cd.trace`): those
+    /// numbered `since` or later, at most `max` of the newest.
+    CdTrace {
+        since: Option<u64>,
+        max: usize,
+    },
     EventsSubscribe {
         events: Vec<EventKind>,
         frame_interval: Option<u64>,
         frame_digest: Option<bool>,
+        /// The ranges an `mmio` subscription streams (required with it).
+        mmio: Option<Vec<MmioWatch>>,
     },
     EventsUnsubscribe {
         events: Option<Vec<EventKind>>,
@@ -293,6 +303,7 @@ impl CoreOp {
                 | CoreOp::BreakList
                 | CoreOp::FloppyQuery
                 | CoreOp::PcmciaQuery
+                | CoreOp::CdTrace { .. }
                 | CoreOp::EventsList
                 | CoreOp::TraceStatus
                 | CoreOp::WaveformStatus
@@ -1492,6 +1503,19 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
         }
         "pcmcia.eject" => host(HostOp::PcmciaEject),
         "pcmcia.query" => core(CoreOp::PcmciaQuery),
+        "cd.trace" => {
+            let max = p.usize_or("max", 64)?;
+            if max == 0 || max > crate::cdtrace::CD_TRACE_RECORDS {
+                return Err(CtlError::invalid_params(format!(
+                    "max must be 1..={}",
+                    crate::cdtrace::CD_TRACE_RECORDS
+                )));
+            }
+            core(CoreOp::CdTrace {
+                since: p.u64_opt("since")?,
+                max,
+            })
+        }
         "copperhf.attach" => {
             let unit = p.usize_req("unit")?;
             if unit >= crate::copperhf::NUM_UNITS {
@@ -1533,10 +1557,28 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
                     "frame_interval must be 1..={MAX_FRAME_INTERVAL}"
                 )));
             }
+            let mmio = match p.get("mmio") {
+                None | Some(Value::Null) => None,
+                Some(value) => Some(parse_mmio_ranges(value)?),
+            };
+            match (events.contains(&EventKind::Mmio), mmio.is_some()) {
+                (true, false) => {
+                    return Err(CtlError::invalid_params(
+                        "the mmio event needs `mmio`, the ranges to stream",
+                    ))
+                }
+                (false, true) => {
+                    return Err(CtlError::invalid_params(
+                        "`mmio` ranges given without the mmio event",
+                    ))
+                }
+                _ => {}
+            }
             core(CoreOp::EventsSubscribe {
                 events,
                 frame_interval,
                 frame_digest: p.bool_opt("frame_digest")?,
+                mmio,
             })
         }
         "events.unsubscribe" => core(CoreOp::EventsUnsubscribe {
@@ -1826,7 +1868,7 @@ fn parse_event_list(
         };
         let Some(event) = EventKind::from_name(name) else {
             return Err(CtlError::invalid_params(format!(
-                "unknown event {name}; expected frame|serial|interrupt|media|debug|bus"
+                "unknown event {name}; expected frame|serial|interrupt|media|debug|bus|mmio|cd"
             )));
         };
         if !events.contains(&event) {
@@ -2049,10 +2091,51 @@ fn parse_break_spec(p: &ParamReader) -> Result<BreakSpec, CtlError> {
         "loadseg" => Ok(BreakSpec::LoadSeg {
             name: p.str_opt("name")?,
         }),
+        "mmio" => Ok(BreakSpec::Mmio {
+            watch: parse_mmio_watch(p)?,
+        }),
         other => Err(CtlError::invalid_params(format!(
-            "kind must be pc|watch|reg_watch|beam|copper|catch|loadseg, got {other}"
+            "kind must be pc|watch|reg_watch|mmio|beam|copper|catch|loadseg, got {other}"
         ))),
     }
+}
+
+/// One MMIO range: `addr`, `len` in bytes (default 2) and `access`
+/// read|write|access (default access).
+fn parse_mmio_watch(p: &ParamReader) -> Result<MmioWatch, CtlError> {
+    let addr = p.u32_req("addr")?;
+    let len = p.u32_or("len", 2)?;
+    if len == 0 {
+        return Err(CtlError::invalid_params("len must be at least 1"));
+    }
+    let access = match p.str_opt("access")?.as_deref() {
+        None => WatchAccess::Access,
+        Some(word) => WatchAccess::parse(word)
+            .ok_or_else(|| CtlError::invalid_params("access must be write|read|access"))?,
+    };
+    Ok(MmioWatch::new(addr, len, access))
+}
+
+/// The `mmio` ranges of an `mmio` event subscription: a non-empty array
+/// of `{addr, len, access}` objects.
+fn parse_mmio_ranges(value: &Value) -> Result<Vec<MmioWatch>, CtlError> {
+    let Some(items) = value.as_array() else {
+        return Err(CtlError::invalid_params("mmio must be an array of ranges"));
+    };
+    if items.is_empty() {
+        return Err(CtlError::invalid_params("mmio must not be empty"));
+    }
+    items
+        .iter()
+        .map(|item| {
+            if !item.is_object() {
+                return Err(CtlError::invalid_params(
+                    "each mmio range must be an object {addr, len, access}",
+                ));
+            }
+            parse_mmio_watch(&ParamReader::new(item)?)
+        })
+        .collect()
 }
 
 fn parse_break_cond(cond: &Value) -> Result<BreakCond, CtlError> {
@@ -2919,11 +3002,13 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             Ok(json!({"drives": drives}))
         }
         CoreOp::PcmciaQuery => Ok(pcmcia_query(emu)),
+        CoreOp::CdTrace { since, max } => Ok(cd_trace_value(emu, *since, *max)),
         CoreOp::EventsSubscribe {
             events,
             frame_interval,
             frame_digest,
-        } => Ok(ctx.subscribe_events(emu, events, *frame_interval, *frame_digest)),
+            mmio,
+        } => Ok(ctx.subscribe_events(emu, events, *frame_interval, *frame_digest, mmio.as_deref())),
         CoreOp::EventsUnsubscribe { events } => Ok(ctx.unsubscribe_events(emu, events.as_deref())),
         CoreOp::EventsList => Ok(ctx.event_subscriptions()),
         CoreOp::TraceStart { path, max_lines } => {
@@ -3260,8 +3345,86 @@ pub fn stop_snapshot(emu: &Emulator, reason: &str, detail: &str) -> StopEvent {
         cck: bus.emulated_cck(),
         seconds: bus.emulated_seconds(),
         retired_instructions: emu.retired_instructions(),
+        access: (reason == "mmio")
+            .then(|| emu.machine.ui_last_mmio_stop())
+            .flatten()
+            .map(|access| mmio_access_value(&access)),
         collect: None,
     }
+}
+
+/// One CPU access an MMIO watch saw, as the stop report and `event.mmio`
+/// carry it.
+pub fn mmio_access_value(access: &MmioAccess) -> Value {
+    json!({
+        "addr": access.addr,
+        "size": access.size,
+        "value": access.value,
+        "access": access.direction(),
+        "pc": access.pc,
+        "position": {
+            "frame": access.frame,
+            "cck": access.cck,
+            "seconds": access.seconds(),
+            "vpos": access.vpos,
+            "hpos": access.hpos,
+        },
+    })
+}
+
+/// One traced CD command, as `cd.trace` and `event.cd` carry it. Each
+/// stamp is `{cck, seconds}` of emulated time, or null when the command
+/// has not reached that step.
+pub fn cd_record_value(record: &crate::cdtrace::CdCommandRecord) -> Value {
+    let at = |cck: Option<u64>| {
+        cck.map_or(
+            Value::Null,
+            |cck| json!({"cck": cck, "seconds": crate::cdtrace::cck_seconds(cck)}),
+        )
+    };
+    let bytes: String = record.bytes.iter().map(|b| format!("{b:02x}")).collect();
+    json!({
+        "seq": record.seq,
+        "kind": record.kind.name(),
+        "opcode": record.opcode(),
+        "bytes": bytes,
+        "start_lsn": record.start_lsn,
+        "end_lsn": record.end_lsn,
+        "speed": record.speed,
+        "issued": at(Some(record.issued_cck)),
+        "accepted": at(Some(record.accepted_cck)),
+        "executed": at(record.executed_cck),
+        "responded": at(record.responded_cck),
+        "first_sector": at(record.first_sector_cck),
+        "last_sector": at(record.last_sector_cck),
+        "completed": at(record.completed_cck),
+        "sectors": record.sectors,
+        "status": record.status,
+        "outcome": record.outcome.map(crate::cdtrace::CdOutcome::name),
+        "summary": record.describe(),
+    })
+}
+
+/// The `cd.trace` reply: whether the machine has a traced CD drive, its
+/// newest `max` commands numbered `since` or later (oldest first), and
+/// the number the next command will get.
+fn cd_trace_value(emu: &Emulator, since: Option<u64>, max: usize) -> Value {
+    let Some(trace) = emu.bus().cd_trace() else {
+        return json!({"available": false, "records": [], "next_seq": Value::Null});
+    };
+    let since = since.unwrap_or(0);
+    let matching: Vec<&crate::cdtrace::CdCommandRecord> =
+        trace.records().filter(|r| r.seq >= since).collect();
+    let skip = matching.len().saturating_sub(max);
+    let records: Vec<Value> = matching[skip..]
+        .iter()
+        .map(|record| cd_record_value(record))
+        .collect();
+    json!({
+        "available": true,
+        "records": records,
+        "next_seq": trace.next_seq(),
+    })
 }
 
 /// Map a machine [`DebugStop`] onto the protocol's stop reason plus its
@@ -3276,6 +3439,7 @@ pub fn stop_reason_of(stop: &DebugStop) -> (&'static str, String) {
         DebugStop::Exception { .. } => "catch",
         DebugStop::Task { .. } => "task_catch",
         DebugStop::LoadSeg { .. } => "loadseg",
+        DebugStop::Mmio(_) => "mmio",
     };
     (reason, stop.describe())
 }
@@ -3593,6 +3757,16 @@ fn break_list_value(emu: &Emulator, ctx: &SessionCtx) -> Value {
     for &addr in emu.bus().ui_copper_breaks() {
         let mut entry = json!({"kind": "copper", "addr": addr});
         push_id(&mut entry, ctx.id_for(&BreakSpec::Copper { addr }));
+        entries.push(entry);
+    }
+    for watch in &breaks.mmio_watches {
+        let mut entry = json!({
+            "kind": "mmio",
+            "addr": watch.addr,
+            "len": watch.len,
+            "access": watch.access.name(),
+        });
+        push_id(&mut entry, ctx.id_for(&BreakSpec::Mmio { watch: *watch }));
         entries.push(entry);
     }
     json!({"breaks": entries})
@@ -4278,6 +4452,106 @@ mod tests {
     }
 
     #[test]
+    fn break_add_parses_an_mmio_range_with_defaults() {
+        assert_eq!(
+            core("break.add", json!({"kind": "mmio", "addr": "0xB80000"})),
+            CoreOp::BreakAdd(BreakSpec::Mmio {
+                watch: MmioWatch::new(0xB8_0000, 2, WatchAccess::Access),
+            })
+        );
+        assert_eq!(
+            core(
+                "break.add",
+                json!({"kind": "mmio", "addr": 0xB8_0000u32, "len": 64, "access": "write"}),
+            ),
+            CoreOp::BreakAdd(BreakSpec::Mmio {
+                watch: MmioWatch::new(0xB8_0000, 64, WatchAccess::Write),
+            })
+        );
+        for bad in [
+            json!({"kind": "mmio"}),
+            json!({"kind": "mmio", "addr": 0, "len": 0}),
+            json!({"kind": "mmio", "addr": 0, "access": "exec"}),
+        ] {
+            assert!(parse_method("break.add", &bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn mmio_subscription_needs_its_ranges_and_only_with_the_event() {
+        assert_eq!(
+            core(
+                "events.subscribe",
+                json!({"events": ["mmio", "cd"], "mmio": [{"addr": "0xB80000", "len": 64}]}),
+            ),
+            CoreOp::EventsSubscribe {
+                events: vec![EventKind::Mmio, EventKind::Cd],
+                frame_interval: None,
+                frame_digest: None,
+                mmio: Some(vec![MmioWatch::new(0xB8_0000, 64, WatchAccess::Access)]),
+            }
+        );
+        for bad in [
+            json!({"events": ["mmio"]}),
+            json!({"events": ["frame"], "mmio": [{"addr": 0}]}),
+            json!({"events": ["mmio"], "mmio": []}),
+            json!({"events": ["mmio"], "mmio": [5]}),
+            json!({"events": ["mmio"], "mmio": [{"len": 2}]}),
+        ] {
+            assert!(parse_method("events.subscribe", &bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn cd_trace_bounds_its_count_and_is_unavailable_without_a_drive() {
+        assert_eq!(
+            core("cd.trace", json!({})),
+            CoreOp::CdTrace {
+                since: None,
+                max: 64
+            }
+        );
+        assert!(parse_method("cd.trace", &json!({"max": 0})).is_err());
+        assert!(parse_method("cd.trace", &json!({"max": 257})).is_err());
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        let reply = exec_core(&mut emu, &mut ctx, &core("cd.trace", json!({}))).unwrap();
+        assert_eq!(reply["available"], false);
+        assert_eq!(reply["records"], json!([]));
+    }
+
+    #[test]
+    fn cd_record_value_carries_each_stamp_in_emulated_time() {
+        let record = crate::cdtrace::CdCommandRecord {
+            seq: 7,
+            bytes: vec![0x04, 0x00],
+            kind: crate::cdtrace::CdCommandKind::Read,
+            start_lsn: Some(16),
+            end_lsn: Some(32),
+            speed: Some(2),
+            issued_cck: 3_546_895,
+            accepted_cck: 3_546_895,
+            executed_cck: Some(3_550_442),
+            responded_cck: None,
+            first_sector_cck: None,
+            last_sector_cck: None,
+            completed_cck: None,
+            sectors: 0,
+            status: Some(0x02),
+            outcome: None,
+        };
+        let value = cd_record_value(&record);
+        assert_eq!(value["kind"], "read");
+        assert_eq!(value["bytes"], "0400");
+        assert_eq!(value["issued"]["cck"], 3_546_895u64);
+        assert_eq!(value["issued"]["seconds"], 1.0);
+        assert_eq!(value["executed"]["cck"], 3_550_442u64);
+        assert_eq!(value["responded"], Value::Null);
+        assert_eq!(value["outcome"], Value::Null);
+        assert_eq!(value["speed"], 2);
+    }
+
+    #[test]
     fn parse_unknown_method_reports_method_not_found() {
         let err = parse_method("warp.nine", &Value::Null).unwrap_err();
         assert_eq!(err.code, proto::METHOD_NOT_FOUND);
@@ -4298,6 +4572,7 @@ mod tests {
                 events: vec![EventKind::Frame, EventKind::Serial, EventKind::Bus],
                 frame_interval: Some(25),
                 frame_digest: Some(true),
+                mmio: None,
             }
         );
         assert_eq!(

@@ -1516,6 +1516,27 @@ impl App {
         ));
     }
 
+    /// Toggle an MMIO (CPU access) watch over the entry's
+    /// "ADDR[:LEN] [READ|WRITE|ACCESS]" range. Unlike a memory watch it
+    /// fires on every access, so it works on device registers.
+    pub(super) fn debugger_toggle_mmio_watch(&mut self) {
+        let Some(watch) = self.debugger_panel.as_ref().and_then(|p| p.mmio_spec()) else {
+            self.show_osd("MMIO: type ADDR[:LEN] [READ|WRITE|ACCESS] first".to_string());
+            return;
+        };
+        let set = self.emu.machine.ui_toggle_mmio_watch(watch);
+        self.show_osd(format!(
+            "MMIO watch {} {}",
+            crate::debugger::MmioWatch::new(
+                watch.addr & self.emu.machine.ui_addr_mask(),
+                watch.len,
+                watch.access
+            )
+            .describe(),
+            if set { "set" } else { "removed" }
+        ));
+    }
+
     /// The debugger entry-box address, or an OSD prompt when empty.
     pub(super) fn debugger_entry_addr(&mut self, what: &str) -> Option<u32> {
         let panel = self.debugger_panel.as_ref()?;
@@ -2841,6 +2862,9 @@ impl App {
                     "Reg takes a custom-register offset (96) or address (DFF096).",
                 ));
                 lines.push(ui::DbgLine::plain(
+                    "MMIO takes ADDR[:LEN] [READ|WRITE|ACCESS], LEN hex  e.g. B80000:40",
+                ));
+                lines.push(ui::DbgLine::plain(
                     "Break cond: ADDR [LHS OP RHS] [IGN N]  e.g. C033C2 D0 EQ 5",
                 ));
                 lines.push(ui::DbgLine::plain(
@@ -2894,6 +2918,16 @@ impl App {
                         "  {} (${off:03X})",
                         crate::debugger::custom_reg_name(*off)
                     )));
+                }
+                lines.push(ui::DbgLine::plain(""));
+                lines.push(ui::DbgLine::plain(
+                    "MMIO watches (stop on a CPU access, device registers too):",
+                ));
+                if breaks.mmio_watches.is_empty() {
+                    lines.push(ui::DbgLine::plain("  (none)"));
+                }
+                for watch in &breaks.mmio_watches {
+                    lines.push(ui::DbgLine::plain(format!("  {}", watch.describe())));
                 }
                 lines.push(ui::DbgLine::plain(""));
                 lines.push(ui::DbgLine::plain(
@@ -2989,6 +3023,7 @@ impl App {
                     "The console WAVE command does the same (Cmd/Alt+K).",
                 ));
             }
+            ui::DebugTab::Cd => cd_trace_lines(bus.cd_trace(), &mut lines),
         }
         // Keep lines inside the panel; the blitter clips at the texture
         // edge, not the panel edge.
@@ -3011,6 +3046,136 @@ impl App {
             audio,
             cpu,
         }
+    }
+}
+
+/// Commands the CD tab lists, newest first.
+const CD_TAB_RECORDS: usize = 40;
+
+/// The CD tab: the drive's timestamped commands, newest first, each as a
+/// headline (what was asked, when it was issued) and its timeline (each
+/// later step as an offset from the issue, then the outcome), wrapped to
+/// the panel width. Commands still running are highlighted.
+fn cd_trace_lines(trace: Option<&crate::cdtrace::CdTrace>, lines: &mut Vec<ui::DbgLine>) {
+    let Some(trace) = trace else {
+        lines.push(ui::DbgLine::plain(
+            "No traced CD drive: the command trace follows the CD32's Akiko.",
+        ));
+        return;
+    };
+    lines.push(ui::DbgLine::hilit(
+        "CD drive commands, newest first (emulated time)".to_string(),
+    ));
+    lines.push(ui::DbgLine::plain(
+        "Steps are offsets from issue; the console CDTRACE and the control",
+    ));
+    lines.push(ui::DbgLine::plain(
+        "protocol's cd.trace / event.cd read the same trace.",
+    ));
+    lines.push(ui::DbgLine::plain(""));
+    let mut any = false;
+    for record in trace.records().rev().take(CD_TAB_RECORDS) {
+        any = true;
+        let headline = format!(
+            "{}  issued {:.6}s",
+            record.headline(),
+            crate::cdtrace::cck_seconds(record.issued_cck)
+        );
+        lines.push(if record.completed_cck.is_none() {
+            ui::DbgLine::hilit(headline)
+        } else {
+            ui::DbgLine::plain(headline)
+        });
+        for text in wrap_parts(&record.timeline(), "    ", 80) {
+            lines.push(ui::DbgLine::plain(text));
+        }
+    }
+    if !any {
+        lines.push(ui::DbgLine::plain("(no commands yet)"));
+    }
+}
+
+/// Join `parts` with ", " into lines of at most `width` characters, each
+/// starting with `indent`.
+fn wrap_parts(parts: &[String], indent: &str, width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut line = indent.to_string();
+    for (index, part) in parts.iter().enumerate() {
+        let piece = if index + 1 < parts.len() {
+            format!("{part},")
+        } else {
+            part.clone()
+        };
+        let sep = if line.len() > indent.len() { " " } else { "" };
+        if line.len() > indent.len() && line.len() + sep.len() + piece.len() > width {
+            out.push(std::mem::replace(&mut line, indent.to_string()));
+            line.push_str(&piece);
+        } else {
+            line.push_str(sep);
+            line.push_str(&piece);
+        }
+    }
+    if line.len() > indent.len() {
+        out.push(line);
+    }
+    out
+}
+
+#[cfg(test)]
+mod cd_tab_tests {
+    use super::{cd_trace_lines, wrap_parts};
+    use crate::cdtrace::{CdCommandKind, CdStream, CdTrace};
+
+    #[test]
+    fn cd_tab_lists_newest_first_and_highlights_open_commands() {
+        let mut trace = CdTrace::default();
+        trace.set_now(100);
+        trace.packet_started(None);
+        trace.command_accepted(&[0x07, 0xF8], CdCommandKind::Info, None, None);
+        trace.set_now(3_700);
+        trace.command_executed(Some(0x01), false);
+        trace.set_now(10_000);
+        trace.packet_started(None);
+        trace.command_accepted(&[0x04], CdCommandKind::Read, Some((16, 32)), Some(2));
+        trace.open_stream(CdStream::Read);
+        trace.set_now(13_547);
+        trace.command_executed(Some(0x02), false);
+
+        let mut lines = Vec::new();
+        cd_trace_lines(Some(&trace), &mut lines);
+        let read = lines
+            .iter()
+            .position(|l| l.text.starts_with("#2 read 16..32 x2 st $02  issued"))
+            .expect("read headline");
+        let info = lines
+            .iter()
+            .position(|l| l.text.starts_with("#1 info st $01  issued"))
+            .expect("info headline");
+        assert!(read < info, "newest first");
+        assert!(lines[read].highlight, "an open read is highlighted");
+        assert!(!lines[info].highlight);
+        assert_eq!(lines[read + 1].text, "    +1.00ms exec, open");
+        assert!(lines.iter().all(|l| l.text.len() <= 82));
+
+        let mut none = Vec::new();
+        cd_trace_lines(None, &mut none);
+        assert!(none[0].text.starts_with("No traced CD drive"));
+    }
+
+    #[test]
+    fn timeline_wraps_between_parts_within_the_width() {
+        let parts: Vec<String> = ["+1.00ms exec", "+1.10ms reply", "+254.10ms first", "end"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            wrap_parts(&parts, "  ", 30),
+            ["  +1.00ms exec, +1.10ms reply,", "  +254.10ms first, end",]
+        );
+        assert_eq!(
+            wrap_parts(&parts, "  ", 200),
+            ["  +1.00ms exec, +1.10ms reply, +254.10ms first, end"]
+        );
     }
 }
 

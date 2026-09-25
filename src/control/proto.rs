@@ -238,6 +238,11 @@ pub struct StopEvent {
     pub cck: u64,
     pub seconds: f64,
     pub retired_instructions: u64,
+    /// For an `mmio` stop: the access that tripped the watch (address,
+    /// size, value, direction, PC, and where on the timeline it happened;
+    /// the stop coordinate above is the instruction boundary after it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub collect: Option<Vec<Value>>,
 }
@@ -516,6 +521,7 @@ mod tests {
             cck: 12345,
             seconds: 0.03,
             retired_instructions: 99,
+            access: None,
             collect: None,
         };
         let v = serde_json::to_value(&ev).unwrap();

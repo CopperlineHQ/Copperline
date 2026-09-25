@@ -29,6 +29,7 @@ pub mod cartridge;
 #[cfg(feature = "cd32-fmv")]
 pub mod cd32_fmv;
 pub mod cdrom;
+pub mod cdtrace;
 pub mod cdtv;
 pub mod chipset;
 pub mod clipboard;

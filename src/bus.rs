@@ -1206,6 +1206,30 @@ pub struct Bus {
     ui_reg_watches: Vec<u16>,
     #[serde(skip)]
     ui_reg_hit: Option<UiRegHit>,
+    /// CPU access (MMIO) watches, from three independent owners: the
+    /// debugger's stopping watches (mirrored from InteractiveBreaks) with
+    /// the first pending hit since the debugger last polled, the headless
+    /// debugger's logged ranges (`COPPERLINE_DBG_MMIO`) with the hits of
+    /// the current instruction, and the control protocol's streamed ranges
+    /// feeding a bounded, sequence-numbered access queue. `mmio_armed`
+    /// folds them into the single gate the CPU access path checks. Host-
+    /// side observer state, never serialized.
+    #[serde(skip)]
+    ui_mmio_watches: Vec<crate::debugger::MmioWatch>,
+    #[serde(skip)]
+    ui_mmio_hit: Option<crate::debugger::MmioAccess>,
+    #[serde(skip)]
+    dbg_mmio_watches: Vec<crate::debugger::MmioWatch>,
+    #[serde(skip)]
+    dbg_mmio_hits: Vec<crate::debugger::MmioAccess>,
+    #[serde(skip)]
+    mmio_stream_watches: Vec<crate::debugger::MmioWatch>,
+    #[serde(skip)]
+    mmio_events: std::collections::VecDeque<MmioEvent>,
+    #[serde(skip)]
+    mmio_event_next_sequence: u64,
+    #[serde(skip)]
+    mmio_armed: bool,
     /// Debugger beam traps and the first pending hit since the debugger
     /// last polled. Checked where the beam advances (`advance_beam`), so a
     /// hit lands at exact beam granularity and even while the CPU sits in
@@ -2020,6 +2044,21 @@ pub fn bus_event_names(events: u32) -> Vec<&'static str> {
 }
 
 pub const BUS_EVENT_OBSERVATION_CAPACITY: usize = 4096;
+
+/// Bound of the streamed MMIO access queue (`event.mmio`).
+pub const MMIO_EVENT_OBSERVATION_CAPACITY: usize = 4096;
+
+/// The headless debugger's per-instruction MMIO hit bound: more than any
+/// one instruction's accesses (MOVEM, exception stacking), so nothing is
+/// lost in practice, while a runaway cannot grow the list.
+const DBG_MMIO_HITS_PER_STEP: usize = 64;
+
+/// One streamed CPU access, numbered for cursor-based observers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MmioEvent {
+    pub sequence: u64,
+    pub access: crate::debugger::MmioAccess,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BusEvent {
@@ -3816,6 +3855,14 @@ impl Bus {
             wave: None,
             ui_reg_watches: Vec::new(),
             ui_reg_hit: None,
+            ui_mmio_watches: Vec::new(),
+            ui_mmio_hit: None,
+            dbg_mmio_watches: Vec::new(),
+            dbg_mmio_hits: Vec::new(),
+            mmio_stream_watches: Vec::new(),
+            mmio_events: std::collections::VecDeque::new(),
+            mmio_event_next_sequence: 0,
+            mmio_armed: false,
             ui_mem_reads: Vec::new(),
             cpu_pc: 0,
             regcheck: None,
@@ -4288,6 +4335,137 @@ impl Bus {
         self.ui_reg_hit.take()
     }
 
+    /// Replace the debugger's stopping MMIO watches. A pending hit is
+    /// dropped so a removed watch cannot fire afterwards.
+    pub fn set_ui_mmio_watches(&mut self, watches: &[crate::debugger::MmioWatch]) {
+        self.ui_mmio_watches = watches.to_vec();
+        self.ui_mmio_hit = None;
+        self.rearm_mmio();
+    }
+
+    /// Take the first MMIO watch hit since the last poll, if any.
+    pub fn take_ui_mmio_hit(&mut self) -> Option<crate::debugger::MmioAccess> {
+        self.ui_mmio_hit.take()
+    }
+
+    /// Replace the headless debugger's logged MMIO ranges.
+    pub fn set_dbg_mmio_watches(&mut self, watches: &[crate::debugger::MmioWatch]) {
+        self.dbg_mmio_watches = watches.to_vec();
+        self.dbg_mmio_hits.clear();
+        self.rearm_mmio();
+    }
+
+    /// Take the headless debugger's hits recorded since the last take, in
+    /// access order.
+    pub(crate) fn take_dbg_mmio_hits(&mut self) -> Vec<crate::debugger::MmioAccess> {
+        std::mem::take(&mut self.dbg_mmio_hits)
+    }
+
+    /// Start streaming CPU accesses to `watches` into the MMIO event queue.
+    /// Streamed ranges are counted per add: each subscriber removes exactly
+    /// what it added, so two observers sharing a range do not cancel.
+    pub fn add_mmio_stream_watches(&mut self, watches: &[crate::debugger::MmioWatch]) {
+        if self.mmio_stream_watches.is_empty() {
+            self.mmio_events.clear();
+        }
+        self.mmio_stream_watches.extend_from_slice(watches);
+        self.rearm_mmio();
+    }
+
+    /// Stop streaming `watches` (one occurrence each).
+    pub fn remove_mmio_stream_watches(&mut self, watches: &[crate::debugger::MmioWatch]) {
+        for watch in watches {
+            if let Some(pos) = self.mmio_stream_watches.iter().position(|w| w == watch) {
+                self.mmio_stream_watches.remove(pos);
+            }
+        }
+        if self.mmio_stream_watches.is_empty() {
+            self.mmio_events.clear();
+        }
+        self.rearm_mmio();
+    }
+
+    pub fn mmio_event_cursor(&self) -> u64 {
+        self.mmio_event_next_sequence
+    }
+
+    /// Streamed accesses from `cursor` on, the new cursor, and how many the
+    /// bounded queue dropped before the observer read them.
+    pub fn mmio_events_since(&self, cursor: u64) -> (Vec<MmioEvent>, u64, u64) {
+        let oldest = self
+            .mmio_events
+            .front()
+            .map_or(self.mmio_event_next_sequence, |event| event.sequence);
+        let dropped = oldest.saturating_sub(cursor);
+        let start = cursor.max(oldest);
+        let events = self
+            .mmio_events
+            .iter()
+            .filter(|event| event.sequence >= start)
+            .copied()
+            .collect();
+        (events, self.mmio_event_next_sequence, dropped)
+    }
+
+    /// Whether any MMIO watch is armed: the CPU access path's one gate.
+    #[inline]
+    pub(crate) fn mmio_watch_armed(&self) -> bool {
+        self.mmio_armed
+    }
+
+    fn rearm_mmio(&mut self) {
+        self.mmio_armed = !(self.ui_mmio_watches.is_empty()
+            && self.dbg_mmio_watches.is_empty()
+            && self.mmio_stream_watches.is_empty());
+    }
+
+    /// Record a CPU data access for the MMIO watches that cover it. Called
+    /// from the CPU access path (behind `mmio_watch_armed`) with the value
+    /// the access read or wrote. A pure observer: it reads the beam and
+    /// timeline counters and bills nothing.
+    pub(crate) fn note_mmio_access(&mut self, addr: u32, size: u32, value: u32, write: bool) {
+        let covers = |watches: &[crate::debugger::MmioWatch]| {
+            watches.iter().any(|w| w.matches(addr, size, write))
+        };
+        let ui = self.ui_mmio_hit.is_none() && covers(&self.ui_mmio_watches);
+        let dbg = covers(&self.dbg_mmio_watches);
+        let stream = covers(&self.mmio_stream_watches);
+        if !(ui || dbg || stream) {
+            return;
+        }
+        let mask = match size {
+            1 => 0xFF,
+            2 => 0xFFFF,
+            3 => 0x00FF_FFFF,
+            _ => u32::MAX,
+        };
+        let access = crate::debugger::MmioAccess {
+            addr,
+            size: size.min(4) as u8,
+            value: value & mask,
+            write,
+            pc: self.cpu_pc,
+            frame: self.emulated_frames,
+            cck: self.emulated_cck,
+            vpos: self.agnus.vpos.min(u32::from(u16::MAX)) as u16,
+            hpos: self.agnus.hpos.min(u32::from(u16::MAX)) as u16,
+        };
+        if ui {
+            self.ui_mmio_hit = Some(access);
+        }
+        if dbg && self.dbg_mmio_hits.len() < DBG_MMIO_HITS_PER_STEP {
+            self.dbg_mmio_hits.push(access);
+        }
+        if stream {
+            if self.mmio_events.len() == MMIO_EVENT_OBSERVATION_CAPACITY {
+                self.mmio_events.pop_front();
+            }
+            let sequence = self.mmio_event_next_sequence;
+            self.mmio_event_next_sequence = sequence.saturating_add(1);
+            self.mmio_events.push_back(MmioEvent { sequence, access });
+        }
+    }
+
     /// The debugger's armed beam traps.
     pub fn ui_beam_traps(&self) -> &[BeamTrap] {
         &self.ui_beam_traps
@@ -4552,6 +4730,22 @@ impl Bus {
         self.floppy.set_dma_trace_enabled(self.frame_analyzer_full);
         let watches = previous.ui_mem_watch_addrs.clone();
         self.set_ui_mem_watches(&watches);
+        // MMIO watches: the stopping and logged ranges are re-armed as
+        // they were; the streamed ranges belong to live control
+        // connections, so their queue and sequence move across and the
+        // observers' cursors stay valid.
+        self.ui_mmio_watches = previous.ui_mmio_watches.clone();
+        self.dbg_mmio_watches = previous.dbg_mmio_watches.clone();
+        std::mem::swap(
+            &mut self.mmio_stream_watches,
+            &mut previous.mmio_stream_watches,
+        );
+        std::mem::swap(&mut self.mmio_events, &mut previous.mmio_events);
+        std::mem::swap(
+            &mut self.mmio_event_next_sequence,
+            &mut previous.mmio_event_next_sequence,
+        );
+        self.rearm_mmio();
     }
 
     /// The debugger's armed Copper breakpoint addresses.
@@ -4871,6 +5065,12 @@ impl Bus {
 
     pub fn attach_ide_a4000(&mut self, ide: crate::ide_a4000::IdeA4000) {
         self.ide_a4000 = Some(ide);
+    }
+
+    /// The CD drive's timestamped command trace (`crate::cdtrace`), when
+    /// the machine has a traced drive: the CD32's Akiko.
+    pub fn cd_trace(&self) -> Option<&crate::cdtrace::CdTrace> {
+        self.akiko.as_ref().map(crate::akiko::Akiko::cd_trace)
     }
 
     pub fn attach_akiko(&mut self, akiko: crate::akiko::Akiko) {
@@ -5932,6 +6132,11 @@ impl Bus {
             &mut self.bus_event_next_sequence,
             &mut live.bus_event_next_sequence,
         );
+        // The CD command trace is an observer of the same kind: keep its
+        // history and sequence numbers.
+        if let (Some(akiko), Some(live)) = (self.akiko.as_mut(), live.akiko.as_mut()) {
+            akiko.adopt_trace_from(live);
+        }
         // Drive speed is host configuration, not machine state: a loaded
         // state keeps the running session's setting.
         self.floppy.set_speed_percent(live.floppy.speed_percent());
@@ -6025,6 +6230,10 @@ impl Bus {
         }
         if self.frame_analyzer_enabled {
             return Some("frame analyzer armed");
+        }
+        if self.mmio_armed {
+            // Speculative frames would log and stream their accesses twice.
+            return Some("MMIO watch armed");
         }
         None
     }
@@ -7813,6 +8022,9 @@ impl Bus {
         // Akiko: advance the CD controller (sector DMA pacing, command
         // and response rings) and level-feed its INT2 line like Gayle's.
         if let Some(akiko) = self.akiko.as_mut() {
+            // The deferred batch ends now: its trace events are stamped
+            // back from here.
+            akiko.set_trace_clock(self.emulated_cck);
             akiko.tick(cck, &mut self.mem, self.paula.cd_audio_mut());
             if akiko.int2_line() {
                 self.paula.intreq |= INT_PORTS;

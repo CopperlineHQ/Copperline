@@ -109,9 +109,11 @@ pub enum DebugTab {
     IoMap,
     Break,
     Waveform,
+    /// The CD drive's timestamped command trace (`crate::cdtrace`).
+    Cd,
 }
 
-pub const DEBUG_TABS: [DebugTab; 9] = [
+pub const DEBUG_TABS: [DebugTab; 10] = [
     DebugTab::Cpu,
     DebugTab::Chipset,
     DebugTab::Copper,
@@ -121,6 +123,7 @@ pub const DEBUG_TABS: [DebugTab; 9] = [
     DebugTab::IoMap,
     DebugTab::Break,
     DebugTab::Waveform,
+    DebugTab::Cd,
 ];
 
 pub(in crate::video) fn debug_tab_label(tab: DebugTab) -> &'static str {
@@ -134,6 +137,7 @@ pub(in crate::video) fn debug_tab_label(tab: DebugTab) -> &'static str {
         DebugTab::IoMap => "IO Map",
         DebugTab::Break => "Break",
         DebugTab::Waveform => "Wave",
+        DebugTab::Cd => "CD",
     }
 }
 
@@ -299,6 +303,12 @@ impl DebuggerPanel {
     /// (Poke uses a second token; the address consumers only need the first.)
     pub fn entry_addr(&self) -> Option<u32> {
         parse_hex_u32(self.entry.split_whitespace().next()?)
+    }
+
+    /// MMIO watch range: "ADDR[:LEN] [READ|WRITE|ACCESS]", LEN in hex like
+    /// every entry-box number (see `MmioWatch::parse_hex_len`).
+    pub fn mmio_spec(&self) -> Option<crate::debugger::MmioWatch> {
+        crate::debugger::MmioWatch::parse_hex_len(&self.entry)
     }
 
     /// Memory poke target: two hex tokens "ADDR VALUE", as an even address and
@@ -912,6 +922,9 @@ pub enum UiControl {
     /// Break tab: toggle a chipset-register write watch at the entry
     /// address (an offset or a full $DFFxxx address).
     DebugRegToggle,
+    /// Break tab: toggle an MMIO (CPU access) watch from the entry's
+    /// "ADDR[:LEN] [READ|WRITE|ACCESS]" range.
+    DebugMmioToggle,
     /// Break tab: toggle a beam trap at the entry's decimal "VPOS [HPOS]"
     /// position (halt when the Agnus beam reaches it).
     DebugBeamToggle,
@@ -1329,9 +1342,9 @@ fn drop_chooser_button_rects(rect: Rect, state: &DropChooserState) -> Vec<(UiCon
 
 // Debugger chrome: a tab row under the title and a control row at the
 // bottom with the transport buttons and the shared hex-entry box.
-// 9 tabs at 70+4 px fit the 684 px panel; the longest label (Chipset,
-// 7 glyphs at 8 px) still leaves 7 px of padding a side.
-const DEBUG_TAB_W: usize = 70;
+// 10 tabs at 62+4 px fit the 684 px panel; the longest label (Chipset,
+// 7 glyphs at 8 px) still leaves 3 px of padding a side.
+const DEBUG_TAB_W: usize = 62;
 const DEBUG_TAB_H: usize = 18;
 const DEBUG_BUTTON_H: usize = 20;
 
@@ -1392,22 +1405,24 @@ fn debug_content_top(rect: Rect) -> usize {
 /// buttons drawn at the top of the content area do not overlap text.
 pub const BREAK_TAB_HEADER_LINES: usize = 3;
 
-/// The Break tab's toggle buttons, drawn at the top of the content area.
-fn break_tab_button_rects(rect: Rect) -> [(UiControl, Rect); 6] {
+/// The Break tab's toggle buttons, drawn at the top of the content area:
+/// seven at 88+6 px fit the 684 px panel.
+fn break_tab_button_rects(rect: Rect) -> [(UiControl, Rect); 7] {
     let y = debug_content_top(rect);
     let button = |i: usize| Rect {
-        x: rect.x + 10 + i * 98,
+        x: rect.x + 10 + i * 94,
         y,
-        w: 90,
+        w: 88,
         h: DEBUG_BUTTON_H,
     };
     [
         (UiControl::DebugBreakToggle, button(0)),
         (UiControl::DebugWatchToggle, button(1)),
         (UiControl::DebugRegToggle, button(2)),
-        (UiControl::DebugBeamToggle, button(3)),
-        (UiControl::DebugCatchToggle, button(4)),
-        (UiControl::DebugBreaksClear, button(5)),
+        (UiControl::DebugMmioToggle, button(3)),
+        (UiControl::DebugBeamToggle, button(4)),
+        (UiControl::DebugCatchToggle, button(5)),
+        (UiControl::DebugBreaksClear, button(6)),
     ]
 }
 
@@ -3206,12 +3221,14 @@ fn draw_debugger(
                 UiControl::DebugBreakToggle => "Break +/-",
                 UiControl::DebugWatchToggle => "Watch +/-",
                 UiControl::DebugRegToggle => "Reg +/-",
+                UiControl::DebugMmioToggle => "MMIO +/-",
                 UiControl::DebugBeamToggle => "Beam +/-",
                 UiControl::DebugCatchToggle => "Catch +/-",
                 _ => "Clear all",
             };
             let enabled = match control {
                 UiControl::DebugBreaksClear => true,
+                UiControl::DebugMmioToggle => panel.mmio_spec().is_some(),
                 UiControl::DebugBeamToggle => parse_beam_spec(&panel.entry).is_some(),
                 UiControl::DebugCatchToggle => parse_catch_spec(&panel.entry).is_some(),
                 _ => panel.entry_addr().is_some(),
