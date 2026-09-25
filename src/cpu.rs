@@ -104,6 +104,14 @@ struct CoverageArm {
     tracker: crate::amigaos::LibraryTracker,
 }
 
+/// The program a caught `--coverage` arm is counting: the longword that
+/// names its seglist while it runs (its CLI's cli_Module), and that seglist.
+#[derive(Clone, Copy)]
+struct CoverageOwner {
+    slot: u32,
+    seglist: u32,
+}
+
 pub struct M68kMachine {
     cpu: CpuCore,
     bus: CpuBus,
@@ -176,6 +184,11 @@ pub struct M68kMachine {
     coverage_arm: Option<CoverageArm>,
     /// The segments the arm observed, for the owner to relocate by.
     coverage_loaded: Option<Vec<(u32, u32)>>,
+    /// The caught program, checked at every retired instruction: once
+    /// its seglist slot stops naming it, the program has returned and the
+    /// counters close, so a command the CLI loads over its freed hunks is
+    /// not counted as the program.
+    coverage_owner: Option<CoverageOwner>,
     // COPPERLINE_DBG_SPREN: previous DMACON, to detect the instruction that
     // clears the sprite-DMA-enable bit.
     dbg_prev_dmacon: u16,
@@ -536,6 +549,7 @@ impl M68kMachine {
             coverage: None,
             coverage_arm: None,
             coverage_loaded: None,
+            coverage_owner: None,
             ui_pc_history: [0; UI_PC_HISTORY_CAP],
             ui_pc_history_next: 0,
             ui_pc_history_len: 0,
@@ -2045,12 +2059,14 @@ impl M68kMachine {
             return false;
         }
         self.coverage = Some(crate::coverage::CoverageCollector::new(ranges));
+        self.coverage_owner = None;
         self.note_jit_debug_fallback();
         true
     }
 
     /// Disarm and hand back the counters.
     pub fn stop_coverage(&mut self) -> Option<crate::coverage::CoverageCollector> {
+        self.coverage_owner = None;
         self.coverage.take()
     }
 
@@ -2109,19 +2125,24 @@ impl M68kMachine {
         };
         let tracker = &mut arm.tracker;
         let name = &arm.name;
-        let segments = crate::amigaos::with_bus_memory(&self.bus.bus, |os| {
-            tracker
+        let caught = crate::amigaos::with_bus_memory(&self.bus.bus, |os| {
+            let module = tracker
                 .observe(os)
-                .filter(|module| module.name.eq_ignore_ascii_case(name))
-                .map(|module| {
-                    module
-                        .segments
-                        .iter()
-                        .map(|seg| (seg.start, seg.size))
-                        .collect::<Vec<(u32, u32)>>()
-                })
+                .filter(|module| module.name.eq_ignore_ascii_case(name))?;
+            let segments = module
+                .segments
+                .iter()
+                .map(|seg| (seg.start, seg.size))
+                .collect::<Vec<(u32, u32)>>();
+            let owner = os
+                .process_seglist_slot(module.task)
+                .map(|slot| CoverageOwner {
+                    slot,
+                    seglist: module.seglist,
+                });
+            Some((segments, owner))
         });
-        let Some(segments) = segments else {
+        let Some((segments, owner)) = caught else {
             return;
         };
         let mut ranges: Vec<(u32, u32)> = segments
@@ -2135,15 +2156,26 @@ impl M68kMachine {
         }
         self.coverage = Some(crate::coverage::CoverageCollector::new(&ranges));
         self.coverage_loaded = Some(segments);
+        self.coverage_owner = owner;
         self.coverage_arm = None;
     }
 
     /// One retired instruction at `pc` for an armed coverage counter.
     #[inline]
     fn coverage_retire(&mut self, pc: u32) {
-        if let Some(coverage) = self.coverage.as_mut() {
-            coverage.hit(pc & self.cpu.address_mask);
+        let Some(coverage) = self.coverage.as_mut() else {
+            return;
+        };
+        if let Some(owner) = self.coverage_owner {
+            let bus = &self.bus.bus;
+            let named = (u32::from(bus.peek_word_any(owner.slot)) << 16)
+                | u32::from(bus.peek_word_any(owner.slot.wrapping_add(2)));
+            if named != owner.seglist {
+                self.coverage_owner = None;
+                coverage.close();
+            }
         }
+        coverage.hit(pc & self.cpu.address_mask);
     }
 
     /// Whether the CPU is halted in STOP waiting for an interrupt.

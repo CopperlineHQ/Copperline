@@ -339,8 +339,12 @@ copperline --factory --noaudio --run build/hello --coverage build/lcov.info
 Copperline boots, watches the guest's `LoadSeg()` results for the program,
 relocates its debug information by the segments the loader reports (a
 `PROG.elf` beside the executable is used automatically), counts from the
-program's first instruction, and writes the lcov file when the boot script's
-completion marker shows the program exited. On its own the flag is a headless
+program's first instruction to its return, and writes the lcov file when the
+boot script's completion marker shows the program exited. Counting stops the
+moment the program's CLI drops its seglist (cli_Module), so the command the
+script runs next is not counted even when the loader places it over the
+program's freed hunks, as the AROS ROM does with its top-of-memory LoadSeg
+allocations. On its own the flag is a headless
 capture run like `--screenshot-after`: unpaced, windowless, ending with the
 program (or after 60 emulated seconds if it never loads, leaving an
 all-zero file that still lists every line and function). Combine it with

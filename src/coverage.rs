@@ -225,6 +225,10 @@ pub struct CoverageCollector {
     sparse: BTreeMap<u32, u32>,
     outside_hits: u64,
     total_hits: u64,
+    /// Set when the counted program returned: later instructions,
+    /// including another command loaded over its freed hunks, are not
+    /// the program's.
+    closed: bool,
 }
 
 impl CoverageCollector {
@@ -240,6 +244,7 @@ impl CoverageCollector {
             sparse: BTreeMap::new(),
             outside_hits: 0,
             total_hits: 0,
+            closed: false,
         }
     }
 
@@ -250,6 +255,9 @@ impl CoverageCollector {
     /// One retired instruction at `pc`.
     #[inline]
     pub fn hit(&mut self, pc: u32) {
+        if self.closed {
+            return;
+        }
         self.total_hits = self.total_hits.wrapping_add(1);
         let pc = pc & !1;
         if self.ranges.is_empty() {
@@ -272,6 +280,15 @@ impl CoverageCollector {
 
     pub fn total_hits(&self) -> u64 {
         self.total_hits
+    }
+
+    /// Stop counting: the counters so far are final.
+    pub fn close(&mut self) {
+        self.closed = true;
+    }
+
+    pub fn closed(&self) -> bool {
+        self.closed
     }
 
     /// A copy of the counters so far (periodic flushes while collecting).
@@ -322,6 +339,25 @@ mod tests {
         collector.hit(0x1000);
         collector.hit(0x1000);
         assert_eq!(collector.snapshot().ranges[0].counts[0], u32::MAX);
+    }
+
+    #[test]
+    fn closed_counters_ignore_code_loaded_over_the_program() {
+        let mut collector = CoverageCollector::new(&[(0x1000, 0x10)]);
+        collector.hit(0x1000);
+        collector.hit(0xf8_0000);
+        collector.close();
+        assert!(collector.closed());
+        // The next command, loaded over the freed hunks, and everything
+        // else that runs after the program returned.
+        collector.hit(0x1000);
+        collector.hit(0x1004);
+        collector.hit(0xf8_0000);
+        let data = collector.into_data();
+        assert_eq!(data.total_hits, 2);
+        assert_eq!(data.outside_hits, 1);
+        let hits: Vec<(u32, u32)> = data.hits().collect();
+        assert_eq!(hits, vec![(0x1000, 1)]);
     }
 
     #[test]
