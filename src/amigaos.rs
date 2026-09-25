@@ -582,14 +582,23 @@ impl OsMemory<'_> {
     /// the CLI's loaded command when there is one, else the process's
     /// own creation seglist (entry 3 of the pr_SegList array).
     pub fn process_seglist(&self, task: u32) -> Option<u32> {
+        self.process_seglist_slot(task)
+            .map(|slot| (self.peek32)(slot))
+    }
+
+    /// The address of the longword [`Self::process_seglist`] reads for
+    /// `task`: its CLI's cli_Module while that names a loaded command,
+    /// else entry 3 of its pr_SegList array. The CLI clears cli_Module
+    /// when the command returns, before unloading it.
+    pub fn process_seglist_slot(&self, task: u32) -> Option<u32> {
         if (self.peek8)(task.wrapping_add(LN_TYPE)) != NT_PROCESS {
             return None;
         }
         let cli = (self.peek32)(task.wrapping_add(PR_CLI));
         if plausible_bptr(cli) {
-            let module = (self.peek32)((cli << 2).wrapping_add(CLI_MODULE));
-            if module != 0 {
-                return Some(module);
+            let slot = (cli << 2).wrapping_add(CLI_MODULE);
+            if (self.peek32)(slot) != 0 {
+                return Some(slot);
             }
         }
         let array = (self.peek32)(task.wrapping_add(PR_SEGLIST));
@@ -600,8 +609,8 @@ impl OsMemory<'_> {
         if count < 3 {
             return None;
         }
-        let seg = (self.peek32)((array << 2).wrapping_add(3 * 4));
-        (seg != 0).then_some(seg)
+        let slot = (array << 2).wrapping_add(3 * 4);
+        ((self.peek32)(slot) != 0).then_some(slot)
     }
 
     /// Walk a BPTR segment list into (start, size) hunks. Each segment's

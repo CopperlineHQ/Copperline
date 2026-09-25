@@ -195,7 +195,7 @@ global(s), call-frame info`.
 | Disassembly view | `disasm`, with program symbols, source lines, and live ROM/LVO names; backwards disassembly anchors at the nearest program or ROM function start. |
 | Jump to cursor | `regs.set {"reg": "pc"}`. |
 | Debug Console output | Serial output (which is where `KPrintF` goes) as `stdout`; uaelib function 86 (`debug_log`), optional `emulatorLog`, and the adapter's own notes as `console`. |
-| CPU profiling | Custom `copperline/profile {"frames": N}` -> precise `profile.start`, bounded frame step, `profile.stop`, and a merged `.cpuprofile` path. |
+| CPU profiling | Custom `copperline/profile {"frames": N}` -> precise `profile.start`, `step_frame` quanta until `profile.status` reports the N frames written (bounded; a quantum resumed after a breakpoint can end inside the same video frame), `profile.stop`, and a merged `.cpuprofile` path. |
 | Coverage | The `coverage` launch argument -> the emulator's `--coverage` run; the lcov file appears beside the program when it exits or the session ends. |
 | Modules / loaded sources | The program with its first hunk's address, and the source files its debug information names. |
 

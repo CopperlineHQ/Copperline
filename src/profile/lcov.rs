@@ -325,7 +325,10 @@ pub enum CoveragePoll {
 /// `LoadSeg()` results for the program, relocate its debug information by
 /// the segments the loader reports, arm the collector over its code hunks,
 /// and write the lcov file when the boot script's completion marker appears
-/// or the owner ends the run.
+/// or the owner ends the run. The counts end when the program returns: the
+/// machine closes the counters as soon as its CLI drops the program's
+/// seglist, before the script loads the command that writes the marker
+/// (possibly over the program's freed hunks).
 pub struct CoverageRun {
     target: String,
     done_marker: PathBuf,
