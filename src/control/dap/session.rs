@@ -41,6 +41,10 @@ const DISASSEMBLE_BACK_LIMIT: usize = 512;
 const DISASSEMBLE_CAP: i64 = 4096;
 /// Largest `readMemory` served per request.
 const READ_MEMORY_CAP: u64 = 16 * 1024 * 1024;
+/// `step_frame` quanta a `copperline/profile` request may spend per
+/// requested frame before it reports what it captured. A quantum is a CPU
+/// budget, not a video frame, so a capture can need more quanta than frames.
+const PROFILE_QUANTA_PER_FRAME: u64 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RunKind {
@@ -1247,7 +1251,27 @@ impl Session {
                 "code_ranges": code_ranges,
             }),
         )?;
-        let stepped = self.call_stop("step_frame", json!({"n": frames}));
+        // A `step_frame` quantum resumed after a breakpoint only finishes the
+        // interrupted CPU budget, which can end inside the same video frame
+        // and commit nothing to the capture. Step until the capture has its
+        // frames, or anything but a step stops the machine.
+        let budget = frames.saturating_mul(PROFILE_QUANTA_PER_FRAME);
+        let mut quanta = 0;
+        let stepped = loop {
+            quanta += 1;
+            let stop = match self.call_stop("step_frame", json!({"n": 1})) {
+                Ok(stop) => stop,
+                Err(e) => break Err(e),
+            };
+            let finished = stop["reason"].as_str() != Some("step")
+                || quanta >= budget
+                || self
+                    .call("profile.status", json!({}))
+                    .map_or(true, |status| status["done"].as_bool() == Some(true));
+            if finished {
+                break Ok(stop);
+            }
+        };
         let stopped = self.call("profile.stop", json!({}));
         let stepped = stepped?;
         let stopped = stopped?;
