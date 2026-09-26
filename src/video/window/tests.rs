@@ -6176,12 +6176,18 @@ fn state_browser_lists_loads_flags_and_deletes_states() {
     assert!(app.ui.panel.is_none());
 
     // Loading the other machine's state reconfigures, as any load does,
-    // and the OSD names what was loaded.
+    // and the OSD names what was loaded. The named rows follow save time,
+    // so find its row by name for the same reason as above.
     app.open_states_browser_at(&root);
-    app.activate_ui_control_with_event_loop(
-        UiControl::StateRow(crate::savestate::SLOT_COUNT),
-        None,
-    );
+    let other_row = match app.ui.panel.as_ref() {
+        Some(Panel::States(panel)) => panel
+            .entries
+            .iter()
+            .position(|e| e.label == "copperline-state-20260101000000.clstate")
+            .expect("the named state is listed"),
+        other => panic!("expected the states browser, got {}", other.is_some()),
+    };
+    app.activate_ui_control_with_event_loop(UiControl::StateRow(other_row), None);
     assert!(app.ui.panel.is_none());
     assert_eq!(
         app.emu.machine_descriptor().chipset,
