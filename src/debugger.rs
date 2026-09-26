@@ -563,9 +563,16 @@ impl DebugStop {
 
 /// Decoded bit/field lines for a custom register's value, for the
 /// debugger's IO Map tab. Registers without a decode table return an
-/// empty vec (the raw hex is always shown alongside).
-pub fn custom_reg_bit_decode(off: u16, value: u16) -> Vec<String> {
+/// empty vec (the raw hex is always shown alongside). `agnus` selects the
+/// fitted chipset's view of fields whose width differs by revision (the
+/// DDF comparator precision, AGA's BPU3).
+pub fn custom_reg_bit_decode(
+    off: u16,
+    value: u16,
+    agnus: crate::chipset::agnus::AgnusRevision,
+) -> Vec<String> {
     let off = off & 0x1FE;
+    let aga = matches!(agnus, crate::chipset::agnus::AgnusRevision::AgaAlice);
     let named_bits: &[(u16, &str)] = match off {
         0x002 | 0x096 => &[
             (14, "BBUSY"),
@@ -603,9 +610,10 @@ pub fn custom_reg_bit_decode(off: u16, value: u16) -> Vec<String> {
             (14, "PRECOMP1"),
             (13, "PRECOMP0"),
             (12, "MFMPREC"),
-            (11, "WORDSYNC"),
-            (10, "MSBSYNC"),
-            (9, "FAST"),
+            (11, "UARTBRK"),
+            (10, "WORDSYNC"),
+            (9, "MSBSYNC"),
+            (8, "FAST"),
             (7, "USE3PN"),
             (6, "USE2P3"),
             (5, "USE1P2"),
@@ -627,7 +635,14 @@ pub fn custom_reg_bit_decode(off: u16, value: u16) -> Vec<String> {
             (1, "ERSY"),
             (0, "ECSENA"),
         ],
-        0x104 => &[(6, "PF2PRI"), (10, "KILLEHB")],
+        0x104 => &[
+            (11, "ZDBPEN"),
+            (10, "ZDCTEN"),
+            (9, "KILLEHB"),
+            (8, "RDRAM"),
+            (7, "SOGEN"),
+            (6, "PF2PRI"),
+        ],
         0x098 => &[
             (15, "ENSP7"),
             (14, "ENSP5"),
@@ -678,8 +693,9 @@ pub fn custom_reg_bit_decode(off: u16, value: u16) -> Vec<String> {
     // Multi-bit fields.
     match off {
         0x100 => {
-            let bpu = ((value >> 12) & 7) + (((value >> 4) & 1) << 3);
-            lines.push(format!("BPU={bpu}"));
+            // BPU3 (bit 4) exists only on AGA; OCS/ECS leave the bit unused.
+            let bpu3 = if aga { ((value >> 4) & 1) << 3 } else { 0 };
+            lines.push(format!("BPU={}", ((value >> 12) & 7) + bpu3));
         }
         0x102 => lines.push(format!(
             "PF1H={} PF2H={}",
@@ -687,12 +703,17 @@ pub fn custom_reg_bit_decode(off: u16, value: u16) -> Vec<String> {
             (value >> 4) & 0x000F
         )),
         0x104 => lines.push(format!(
-            "PF1P={} PF2P={}",
+            "PF1P={} PF2P={} ZDBPSEL={}",
             value & 0x0007,
-            (value >> 3) & 0x0007
+            (value >> 3) & 0x0007,
+            (value >> 12) & 0x0007
         )),
         0x08E | 0x090 => lines.push(format!("v={} h={}", (value >> 8) & 0xFF, value & 0xFF)),
-        0x092 | 0x094 => lines.push(format!("cck ${:02X}", value & 0x00FC)),
+        // The comparator bits the fitted Agnus honours: OCS drops bit 1.
+        0x092 | 0x094 => lines.push(format!(
+            "cck ${:02X}",
+            value & crate::chipset::agnus::ddf_register_mask(agnus)
+        )),
         _ => {}
     }
     lines
@@ -2031,15 +2052,104 @@ mod tests {
 
     #[test]
     fn custom_reg_bit_decode_names_set_bits_and_fields() {
-        let lines = custom_reg_bit_decode(0x096, 0x0240);
+        use crate::chipset::agnus::AgnusRevision;
+        let ocs = AgnusRevision::Ocs;
+        let lines = custom_reg_bit_decode(0x096, 0x0240, ocs);
         assert_eq!(lines, vec!["DMAEN BLTEN".to_string()]);
-        let lines = custom_reg_bit_decode(0x100, 0x5800);
+        let lines = custom_reg_bit_decode(0x100, 0x5800, ocs);
         assert_eq!(lines[0], "HAM");
         assert_eq!(lines[1], "BPU=5");
-        let lines = custom_reg_bit_decode(0x102, 0x0021);
+        let lines = custom_reg_bit_decode(0x102, 0x0021, ocs);
         assert_eq!(lines, vec!["PF1H=1 PF2H=2".to_string()]);
         // Unknown registers decode to nothing (hex is always shown).
-        assert!(custom_reg_bit_decode(0x1F0, 0xFFFF).is_empty());
+        assert!(custom_reg_bit_decode(0x1F0, 0xFFFF, ocs).is_empty());
+    }
+
+    #[test]
+    fn adkcon_decode_names_each_bit_at_its_hardware_position() {
+        let ocs = crate::chipset::agnus::AgnusRevision::Ocs;
+        // One bit at a time, so a shifted table cannot pass by accident.
+        for (bit, name) in [
+            (14, "PRECOMP1"),
+            (13, "PRECOMP0"),
+            (12, "MFMPREC"),
+            (11, "UARTBRK"),
+            (10, "WORDSYNC"),
+            (9, "MSBSYNC"),
+            (8, "FAST"),
+            (7, "USE3PN"),
+            (0, "USE0V1"),
+        ] {
+            for off in [0x09E, 0x010] {
+                assert_eq!(
+                    custom_reg_bit_decode(off, 1 << bit, ocs),
+                    vec![name.to_string()],
+                    "ADKCON bit {bit} at ${off:03X}"
+                );
+            }
+        }
+        // The usual MFM read setup, $9500: SET/CLR (not a named bit) with
+        // MFMPREC, WORDSYNC and FAST.
+        assert_eq!(
+            custom_reg_bit_decode(0x09E, 0x9500, ocs),
+            vec!["MFMPREC WORDSYNC FAST".to_string()]
+        );
+    }
+
+    #[test]
+    fn bplcon2_decode_names_genlock_and_palette_bits_and_fields() {
+        let aga = crate::chipset::agnus::AgnusRevision::AgaAlice;
+        for (bit, name) in [
+            (11, "ZDBPEN"),
+            (10, "ZDCTEN"),
+            (9, "KILLEHB"),
+            (8, "RDRAM"),
+            (7, "SOGEN"),
+            (6, "PF2PRI"),
+        ] {
+            assert_eq!(
+                custom_reg_bit_decode(0x104, 1 << bit, aga)[0],
+                name,
+                "BPLCON2 bit {bit}"
+            );
+        }
+        // ZDBPSEL=3, KILLEHB, PF2PRI, PF2P=4, PF1P=2.
+        assert_eq!(
+            custom_reg_bit_decode(0x104, 0x3262, aga),
+            vec![
+                "KILLEHB PF2PRI".to_string(),
+                "PF1P=2 PF2P=4 ZDBPSEL=3".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn chipset_dependent_fields_decode_as_the_fitted_agnus_sees_them() {
+        use crate::chipset::agnus::AgnusRevision;
+        // DDF bit 1 is comparator precision only ECS/AGA Agnus has.
+        assert_eq!(
+            custom_reg_bit_decode(0x092, 0x003A, AgnusRevision::Ocs),
+            vec!["cck $38".to_string()]
+        );
+        for ecs_or_aga in [
+            AgnusRevision::Ecs8372Rev4,
+            AgnusRevision::Ecs8375,
+            AgnusRevision::AgaAlice,
+        ] {
+            assert_eq!(
+                custom_reg_bit_decode(0x094, 0x00D3, ecs_or_aga),
+                vec!["cck $D2".to_string()]
+            );
+        }
+        // BPLCON0 bit 4 is BPU3 on AGA and unused before it.
+        assert_eq!(
+            custom_reg_bit_decode(0x100, 0x0010, AgnusRevision::AgaAlice)[1],
+            "BPU=8"
+        );
+        assert_eq!(
+            custom_reg_bit_decode(0x100, 0x0010, AgnusRevision::Ecs8375)[1],
+            "BPU=0"
+        );
     }
 
     #[test]
