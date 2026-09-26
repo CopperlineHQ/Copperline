@@ -579,7 +579,7 @@ where
             }
             "--whdload" => {
                 let v = args.next().ok_or_else(|| {
-                    anyhow!("--whdload requires a game package (.lha archive or directory)")
+                    anyhow!("--whdload requires a game package (.lha/.zip archive or directory)")
                 })?;
                 whdload = Some(PathBuf::from(v));
             }
@@ -853,7 +853,7 @@ where
                 overrides.port1 = Some(args.next().ok_or_else(|| {
                     anyhow!(
                         "--port1 requires a device \
-                         (mouse/gamepad-mouse/joystick/cd32/analogue/none)"
+                         (mouse/gamepad-mouse/joystick/cd32/analogue/lightpen/none)"
                     )
                 })?);
             }
@@ -1883,14 +1883,18 @@ fn print_help() {
     let midi = "--midi-out NAME                host MIDI destination, or mt32/coppersynth (implies --serial midi)\n  \
                 --midi-in NAME                 host MIDI source, or mt32 (implies --serial midi)\n  \
                 --list-midi                    list host MIDI endpoints and exit\n  \
-                --mt32-control-rom PATH        control ROM for the emulated MT-32\n  \
+                --mt32-control-rom PATH        control ROM for the emulated MT-32 (with\n  \
+                \x20                            --mt32-pcm-rom, makes \"mt32\" selectable as the\n  \
+                \x20                            MIDI output)\n  \
                 --mt32-pcm-rom PATH            PCM ROM for the emulated MT-32\n  \
                 --mt32-panel                   show the MT-32's front panel under the display\n  ";
     #[cfg(all(feature = "midi", feature = "mt32", not(feature = "coppersynth")))]
     let midi = "--midi-out NAME                host MIDI destination, or mt32 (implies --serial midi)\n  \
                 --midi-in NAME                 host MIDI source, or mt32 (implies --serial midi)\n  \
                 --list-midi                    list host MIDI endpoints and exit\n  \
-                --mt32-control-rom PATH        control ROM for the emulated MT-32\n  \
+                --mt32-control-rom PATH        control ROM for the emulated MT-32 (with\n  \
+                \x20                            --mt32-pcm-rom, makes \"mt32\" selectable as the\n  \
+                \x20                            MIDI output)\n  \
                 --mt32-pcm-rom PATH            PCM ROM for the emulated MT-32\n  \
                 --mt32-panel                   show the MT-32's front panel under the display\n  ";
     #[cfg(all(feature = "midi", not(feature = "mt32"), feature = "coppersynth"))]
@@ -1933,8 +1937,9 @@ fn print_help() {
          \x20                            then the configuration saved with Save default)\n  \
          --factory                      ignore the saved default and start from Copperline's own\n  \
          \x20                            settings\n  \
-         --whdload GAME                 boot a WHDLoad game package: an .lha archive or a\n  \
-         \x20                            directory holding a .slave (see docs/guide/whdload.md)\n  \
+         --whdload GAME                 boot a WHDLoad game package: an .lha/.lzh or .zip\n  \
+         \x20                            archive, or a directory holding a .slave\n  \
+         \x20                            (see docs/guide/whdload.md)\n  \
          --run PROG                     warp launch: boot straight into an Amiga executable on\n  \
          \x20                            the host, unthrottled until the OS loads it\n  \
          \x20                            (see docs/guide/run.md)\n  \
@@ -1979,7 +1984,8 @@ fn print_help() {
          --floppy-speed PERCENT         drive speed: 100, 200, 400, 800, or 0 (turbo)\n  \
          {floppy_bridge}--host-disk DEVICE [ATTACH]    give the machine one of the host's own disks\n  \
          \x20                            (--list-disks names them); ATTACH is ide-master\n  \
-         \x20                            (default), ide-slave, scsi0..scsi6, or pcmcia\n  \
+         \x20                            (default), ide-slave, lide0-master..lide1-slave\n  \
+         \x20                            (a [lide] board), scsi0..scsi6, or pcmcia\n  \
          --host-disk-read-only DEVICE [ATTACH]\n  \
          \x20                            the same, but the guest cannot write to the disk\n  \
          --pcmcia-cf PATH               a CompactFlash card in the A600/A1200 PCMCIA slot,\n  \
@@ -1994,8 +2000,9 @@ fn print_help() {
          \x20                            (gamepad lets the keyboard pass through to the Amiga)\n  \
          --mouse-sensitivity N          host mouse sensitivity 0-100 (50 default = 1:1)\n  \
          --mouse-capture MODE           when to grab the host mouse: click (default), auto, manual\n  \
-         --port1 DEVICE                 controller in port 1: mouse (default), joystick,\n  \
-         \x20                            cd32, analogue, lightpen, or none\n  \
+         --port1 DEVICE                 controller in port 1: mouse (default),\n  \
+         \x20                            gamepad-mouse, joystick, cd32, analogue, lightpen,\n  \
+         \x20                            or none\n  \
          --port2 DEVICE                 controller in port 2 (default: joystick;\n  \
          \x20                            cd32 on the CD32 profile)\n  \
          --port3 DEVICE                 joystick or none in the parallel-port four-player\n  \
@@ -2128,10 +2135,6 @@ fn print_help() {
          --perf-overlay                 show the performance overlay at start\n  \
          \x20                            (Cmd/Alt+P toggles it live)\n  \
          --menu-scale SIZE              size of the pop-up menu: 1x (default) or 2x\n  \
-         --mt32-control-rom PATH        MT-32 control ROM (with --mt32-pcm-rom,\n  \
-         \x20                            makes \"mt32\" selectable as the MIDI output)\n  \
-         --mt32-pcm-rom PATH            MT-32 PCM ROM\n  \
-         --mt32-panel                   show the MT-32 front panel\n  \
          --serial MODE                  Paula serial port: off, stdout, midi, tcp,\n  \
          \x20                            tcp-connect, pty, modem, or device\n  \
          --serial-connect HOST:PORT     dial a remote TCP service (a telnet BBS) with the\n  \
@@ -2162,7 +2165,8 @@ fn print_help() {
          -V, --version                  print the version and exit\n\
          \n\
          Window keys:\n  \
-         {shortcut}+S save framebuffer to copperline-screenshot-<unix-ts>.png in cwd\n  \
+         {shortcut}+S save a screenshot to the screenshots folder ([paths] screenshots)\n  \
+         \x20      as copperline-screenshot-<YYYYMMDDHHMMSS>.png, in local time\n  \
          {shortcut}+D swap to the next disk in a drive's configured playlist\n  \
          {shortcut}+G capture/release host mouse; clicking the display also captures\n  \
          {shortcut}+Q quit\n\

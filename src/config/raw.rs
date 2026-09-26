@@ -445,8 +445,8 @@ pub(crate) struct RawWhdload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) machine_type: Option<WhdloadMachine>,
     /// Where the scanned library is written: one entry a game, with the
-    /// metadata a scan resolved for it. Defaults to `whdload/library/db.json`
-    /// in the per-user configuration directory.
+    /// metadata a scan resolved for it. Defaults to
+    /// `whdload/support/launcher.db` in the host data directory.
     ///
     /// Configuration-file only, deliberately: it and `library_cache` say
     /// where the Library page keeps its own working files, which is not
@@ -457,8 +457,8 @@ pub(crate) struct RawWhdload {
     pub(crate) library_db: Option<String>,
     /// Where a scan keeps what it downloaded -- cover art, and the snapshot
     /// of the online database it matched against. Defaults to
-    /// `whdload/library/cache`. Throwing it away costs a re-download and
-    /// nothing else.
+    /// `whdload/support/cache` in the host data directory.
+    /// Throwing it away costs a re-download and nothing else.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) library_cache: Option<String>,
     /// Whether the launcher offers WHDLoad at all: its entry in the
@@ -625,8 +625,9 @@ pub(crate) struct RawSerial {
     /// required there.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) device: Option<String>,
-    /// AT*T1/AT*T0 default at power-on: telnet NVT translation (the
-    /// WiModem extra) on by default. Modem mode only. Defaults to false.
+    /// Whether telnet NVT translation (the WiModem extra, AT*T1/AT*T0) is on
+    /// at power-on. Modem mode only. Defaults to off; left unset, a stored
+    /// AT&W profile's own AT*T setting applies.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) telnet: Option<bool>,
     /// `[serial.phonebook]`: dialable numbers a guest's ATD can look up,
@@ -1376,7 +1377,7 @@ pub(crate) struct RawDebug {
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) detect_smc: bool,
     /// Log CPU accesses that no device decodes. Either `all`, or an address
-    /// range like `"DD0000-DE0000"` (hex, end exclusive) to watch one window.
+    /// range like `"DD0000-DEFFFF"` (hex, end inclusive) to watch one window.
     /// Reads report the floating bus value they returned; writes report the
     /// value that went nowhere.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1473,10 +1474,9 @@ pub(crate) struct RawFloppyDrive {
     /// device; name one when two interfaces are plugged in at once.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) bridge_port: Option<String>,
-    /// How each track is captured: `normal` (the default; `fast` is accepted
-    /// as upstream's own name for it), `compatible`, or `stalling`. `turbo` is
-    /// refused by name -- it answers AmigaDOS calls rather than reading the
-    /// disk.
+    /// How each track is captured: `normal` (the default), `compatible`, or
+    /// `stalling`. `turbo` is refused by name -- it answers AmigaDOS calls
+    /// rather than reading the disk -- and any other name is an error.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) bridge_mode: Option<String>,
     /// Force a density instead of sensing it: `auto`, `dd`, or `hd`.

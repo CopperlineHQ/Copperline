@@ -184,8 +184,9 @@ fn wait_ms() -> (&'static str, Value) {
 
 const STOP_EVENT: &str = "Returns the stop event: {reason, detail, pc, frame, vpos, hpos, cck, \
                           seconds, retired_instructions} plus `collect` results if requested. \
-                          Reasons include breakpoint, watch, step, target, pause, catch, \
-                          loadseg, budget, double_fault.";
+                          The reason is one of breakpoint, watchpoint, reg_watch, mmio, \
+                          beam_trap, copper_break, catch, task_catch, loadseg, step, target, \
+                          pause, budget, double_fault.";
 
 // ---------------------------------------------------------------------
 // The table
@@ -389,18 +390,22 @@ fn build() -> Vec<ToolDef> {
         entry(
             "warp.get",
             "Report whether warp (unpaced emulation) is on, whether the machine is paced \
-             to real time, and who holds warp (`source`: none, manual, control, guest, \
-             launch, boot, capture, headless). A headless (--control) server is unpaced \
-             end to end and reports `headless: true`.",
+             to real time, and who holds warp (`source`: none, manual, control, gdb, guest, \
+             launch, boot, capture, headless). A windowed session adds `holders`, every \
+             programmatic hold in force (control, gdb, guest), `source` being the first. \
+             A headless (--control) server is unpaced end to end, has no holds, and \
+             reports `headless: true`.",
             no_params(),
             json!({}),
         ),
         entry(
             "warp.set",
-            "Engage or release warp on a windowed (--control-gui) session: `on: true` runs \
-             the machine unpaced with audio muted, `on: false` re-paces it and cancels a \
-             pending --run/--warp-boot phase. Accepted as a no-op with a note by a headless \
-             server. Released automatically when the session disconnects.",
+            "Engage or release this client's warp hold on a windowed (--control-gui) \
+             session: `on: true` runs the machine unpaced with audio muted, `on: false` \
+             releases the hold and cancels a pending --run/--warp-boot phase. The machine \
+             re-paces only when no other holder (a GDB client, the guest) remains; the \
+             reply's `note` says who still holds it. Accepted as a no-op with a note by a \
+             headless server. Released automatically when the session disconnects.",
             object(vec![("on", boolean("true to engage warp, false to release it"))], &["on"]),
             json!({"on": true}),
         ),
@@ -408,8 +413,9 @@ fn build() -> Vec<ToolDef> {
         entry(
             "reverse_step",
             "Step backward `n` instructions (default 1) through the recorded timeline. \
-             Needs time travel armed (`tt_armed` in status). Returns the new position or \
-             `history_exhausted`.",
+             Needs time travel armed (`tt_armed` in status). Returns a stop event with \
+             reason `reverse` at the new position, or fails with error -32006 when the \
+             step runs past the retained history.",
             object(vec![("n", int("Instructions to step back", Some(1), None))], &[]),
             json!({"n": 1}),
         ),
@@ -422,8 +428,11 @@ fn build() -> Vec<ToolDef> {
         ),
         entry(
             "reverse_continue",
-            "Run backward until the most recent earlier breakpoint or watch hit, or the \
-             start of the recorded history.",
+            "Run backward to the most recent earlier stop of any armed kind (breakpoint, \
+             watchpoint, register watch, beam trap, Copper breakpoint, exception or task \
+             catch) and return a stop event with reason `reverse`; PC breakpoint \
+             conditions are not evaluated on the way back. With nothing armed, or no such \
+             stop in the recorded history, it fails with error -32006.",
             no_params(),
             json!({}),
         ),
@@ -440,8 +449,10 @@ fn build() -> Vec<ToolDef> {
         entry(
             "last_writer",
             "Find the instruction that last wrote the given memory address by replaying \
-             the recorded history: returns the writer PC, position, and value. Time travel \
-             must be armed; the machine is left at the write.",
+             the recorded history. Returns `outcome` (found, never_written or \
+             beyond_history), the write as `record` (addr, old, new, pc, pos, cck, frame) \
+             when found, and `position`, where the machine was left: at the write when \
+             found. Time travel must be armed.",
             object(vec![("addr", addr("Memory address to trace"))], &["addr"]),
             json!({"addr": "0x20000"}),
         ),
@@ -469,9 +480,10 @@ fn build() -> Vec<ToolDef> {
         entry(
             "mem.read",
             "Read `len` bytes (default 2, at most 1048576) at `addr` through the CPU's \
-             address map (chip, slow, fast RAM, ROM; custom registers read as the CPU \
-             sees them). Returns `data` as lowercase hex, or base64 with \
-             `encoding: \"base64\"`.",
+             address map without side effects: chip, slow and fast RAM, ROM and cartridge \
+             banks read their contents, while custom chip and CIA registers are not read \
+             and come back as $FF (use custom.read and cia.get for those). Returns `data` \
+             as lowercase hex, or base64 with `encoding: \"base64\"`.",
             object(
                 vec![
                     ("addr", addr("Start address")),
@@ -517,8 +529,11 @@ fn build() -> Vec<ToolDef> {
         entry(
             "mem.write",
             "Write bytes at `addr`: `data` is hex (default) or base64 (`encoding`), 1 to \
-             1048576 bytes. Lands at a deterministic timeline boundary and is journaled \
-             for reverse execution.",
+             1048576 bytes. Only chip, slow and fast RAM (and a freezer cartridge's bank) \
+             are written; ROM and device registers are skipped, and `written` reports the \
+             bytes that landed. Memory writes are not part of the reverse-execution \
+             journal, so with reverse execution armed the reply carries \
+             `replay_unsafe: true`: a replay across the write can diverge.",
             object(
                 vec![
                     ("addr", addr("Start address")),
@@ -535,9 +550,10 @@ fn build() -> Vec<ToolDef> {
         entry(
             "disasm",
             "Disassemble `count` 68k instructions (default 16, at most 256) starting at \
-             `addr` (default: the current PC). Each line carries the address, opcode words \
-             and mnemonic, plus `cycles_min`/`cycles_max` from the configured CPU's \
-             generation-specific timing model when the instruction can be evaluated.",
+             `addr` (default: the current PC). Each line carries `addr`, `text` (the \
+             mnemonic and operands) and `len` in bytes, plus `cycles_min`/`cycles_max` \
+             from the configured CPU's generation-specific timing model when the \
+             instruction can be evaluated.",
             object(
                 vec![
                     ("addr", addr("Start address (default: PC)")),
@@ -592,30 +608,40 @@ fn build() -> Vec<ToolDef> {
         ),
         entry(
             "custom.writer",
-            "Report the PC and beam position (frame, vpos, hpos) of the last write to a \
-             custom register, from the last-writer table the chipset validator maintains; \
-             arm it with chipset.validate first.",
+            "Report the last write to a custom register: its `value`, the writer (`by`, \
+             cpu or copper, and `addr`, the CPU's PC or the Copper list address) and the \
+             beam position (frame, vpos, hpos) it landed at, from the last-writer table \
+             the chipset validator maintains; arm it with chipset.validate first.",
             object(vec![("reg", addr("Register name or offset below 0x200"))], &["reg"]),
             json!({"reg": "COLOR00"}),
         ),
         entry(
             "palette.dump",
-            "Dump the live Denise palette: all 256 AGA entries with their high and low \
-             nibble-plane words (32 on OCS/ECS).",
-            no_params(),
+            "Dump the live palette as `hi` and `lo`, the high and low nibble-plane words \
+             of all 256 entries (OCS/ECS machines only write the first 32). With \
+             `resource`, read a palette the guest registered through the uaelib trap \
+             instead: `words` as 12-bit values plus `rgb24`.",
+            object(
+                vec![(
+                    "resource",
+                    string("Registered palette resource name (default: the live palette)"),
+                )],
+                &[],
+            ),
             json!({}),
         ),
         entry(
             "cia.get",
-            "Report one CIA (`a` or `b`): timers A/B with control bits, TOD counter and \
-             alarm, port data and direction registers, serial, and interrupt mask/flags.",
+            "Report one CIA (`a` or `b`): its 16-byte register file (`regs`, read without \
+             side effects), the pending interrupt flags (`icr_data`), and timers A and B \
+             decoded (`count`, `latch`, `running`, `oneshot`).",
             object(vec![("cia", enumeration("Which CIA", &["a", "b"]))], &["cia"]),
             json!({"cia": "a"}),
         ),
         entry(
             "beam.get",
-            "Report the raster beam position: `vpos`, `hpos` (colour clock), `frame`, \
-             the frame's line count, and whether the field is long.",
+            "Report the raster beam position: `vpos`, `hpos` (colour clock), and the \
+             timeline position as `cck`, `frame` and `seconds`.",
             no_params(),
             json!({}),
         ),
@@ -652,16 +678,17 @@ fn build() -> Vec<ToolDef> {
         ),
         entry(
             "display.get",
-            "Report the active display: video standard, canvas size and pixel format, \
-             the display window and fetch registers as decoded, bitplane count, \
-             resolution mode (lores/hires/shres), HAM/dual-playfield, and interlace.",
+            "Report `dmacon` and `display`, one text line of the display registers as \
+             the chipset holds them: DIWSTRT/DIWSTOP, DDFSTRT/DDFSTOP, BPLCON0-2, the \
+             bitplane modulos, and the bitplane pointers (programmed and DMA-live).",
             no_params(),
             json!({}),
         ),
         entry(
             "rtc.get",
-            "Report the emulated battery-backed clock: fitted, frozen, unix seconds and \
-             the calendar time the guest reads.",
+            "Report the emulated battery-backed clock: `present`, the `chip`, whether it \
+             is `seeded` and `frozen`, `unix` seconds, and `time`, the calendar time the \
+             guest reads.",
             no_params(),
             json!({}),
         ),
@@ -836,8 +863,11 @@ fn build() -> Vec<ToolDef> {
         ),
         entry(
             "memory.heatmap",
-            "Enable (default) or disable address-space access tracking over the window \
-             `base`..`base+span` (default the whole 16 MB map). Enabling resets the counts.",
+            "Enable (default) or disable the memory heat map over the window \
+             `base`..`base+span` (default the whole 16 MB map): a 256x256 grid of cells, \
+             each remembering which engine (CPU read or write, blitter, Copper, disk, \
+             bitplane, sprite or audio DMA) last touched it and when. A new window starts \
+             an empty map; repeating the current window keeps what it has collected.",
             object(
                 vec![
                     ("enabled", boolean("true (default) to arm, false to disarm")),
@@ -850,17 +880,20 @@ fn build() -> Vec<ToolDef> {
         ),
         entry(
             "memory.heatmap.report",
-            "Report the memory heat map: per-bucket read/write/execute counts over the \
-             tracked window, optionally also written as a file to `path`.",
-            object(vec![("path", string("Host file to write the report to (optional)"))], &[]),
+            "Report the memory heat map: its window (`base`, `span`, `bytes_per_cell`, \
+             `grid`), the current `frame`, and `census`, the number of recently touched \
+             cells (within the last 32 frames) per engine (`by`, `cells`). With `path`, \
+             the grid is also written as a PNG, each cell coloured by its last engine and \
+             faded by age. Fails unless memory.heatmap has armed the map.",
+            object(vec![("path", string("Host PNG file to write the grid to (optional)"))], &[]),
             json!({}),
         ),
         entry(
             "debug.resources",
             "List the bitmaps, palettes and copper lists the guest registered through the \
              WinUAE-compatible uaelib trap (debug_register_*): address, size, name, type, \
-             flags, geometry and the frame they were registered in. Not found when the \
-             guest registered nothing.",
+             flags, geometry and the frame they were registered in; an empty list when \
+             the guest registered nothing. Not found when the uaelib trap is not fitted.",
             no_params(),
             json!({}),
         ),
@@ -887,8 +920,8 @@ fn build() -> Vec<ToolDef> {
         entry(
             "trace.start",
             "Start writing an instruction execution trace (one line per instruction) to \
-             `path` (default: a file in the working directory), stopping by itself after \
-             `max_lines` (default 1000000, at most 10000000).",
+             `path` (default: a timestamped file in the `[paths]` traces directory), \
+             stopping by itself after `max_lines` (default 1000000, at most 10000000).",
             object(
                 vec![
                     ("path", string("Host file for the trace (optional)")),
@@ -915,9 +948,10 @@ fn build() -> Vec<ToolDef> {
             "Start a per-frame profile export: DMA ownership, blit records, CPU chip-bus \
              wait attribution (waited clocks by denier and access kind, top stalled \
              PCs), guest idle time and retired instructions per frame, streamed as \
-             `profile.jsonl` under `path` (default: the configured profile directory) \
-             with a `profile.json` summary written at stop. Stops by itself after \
-             `frames` (default 500, at most 100000); `slots` adds per-frame chip-bus \
+             `profile.jsonl` under `path` (default: a timestamped directory in the \
+             `[paths]` traces directory) with a `profile.json` summary written at stop. \
+             Stops by itself after `frames` (default 500, at most 100000); `slots` adds \
+             per-frame chip-bus \
              owner and CPU-wait grids plus raw 24-byte records, `memory` snapshots chip \
              and slow RAM once, `screenshots` saves the frame image for none, \
              every or the last frame, `pc_samples` adds a frame-boundary PC. \
@@ -925,7 +959,11 @@ fn build() -> Vec<ToolDef> {
              `registers` appends D0-D7/A0-A7/SR, `unwind` supplies the text base \
              plus a base64 compact unwind table, `relocation_bases` preserves \
              every loaded hunk base for offline source mapping, and `code_ranges` \
-             identifies executable hunks outside that table. An \
+             identifies executable hunks outside that table. `coverage` counts every \
+             retired instruction over `code_ranges` (every address, bounded, without \
+             them) and writes the histogram as `coverage.bin` at stop; it takes \
+             `relocation_bases`/`code_ranges` without `samples` and is refused while a \
+             --coverage run holds the counters. An \
              optional `trigger` ({frame:N} or {busy_cck_over:N}) defers recording while \
              leaving the capture armed. Arms the frame analyzer's trace for the session, \
              which suspends run-ahead.",
@@ -945,6 +983,10 @@ fn build() -> Vec<ToolDef> {
                     ("pc_samples", boolean("Include the frame-boundary PC")),
                     ("samples", boolean("Record precise instruction samples per frame")),
                     ("registers", boolean("Append 17 CPU registers to each sample")),
+                    (
+                        "coverage",
+                        boolean("Count retired instructions per address into coverage.bin"),
+                    ),
                     (
                         "unwind",
                         object(
@@ -1020,7 +1062,10 @@ fn build() -> Vec<ToolDef> {
              capture runs as the machine runs and finishes on its own.",
             object(
                 vec![
-                    ("path", string("Host .vcd file (default: a file in the working directory)")),
+                    (
+                        "path",
+                        string("Host .vcd file (default: a file in the [paths] traces directory)"),
+                    ),
                     ("trigger", string("now | pc=ADDR | beam=VPOS[:HPOS] | reg=OFF | time=SECS")),
                     ("duration", string("Ncck | Nf | Nframes | Nms | Ns")),
                     ("signals", string("Comma-separated groups or all")),
@@ -1037,8 +1082,9 @@ fn build() -> Vec<ToolDef> {
         ),
         entry(
             "waveform.status",
-            "Report the waveform capture state: armed, triggered, running, finished, and \
-             the path.",
+            "Report the waveform capture: `active`, `present`, and `capture` with its \
+             `path`, `state` (armed, capturing or done), trigger, duration, signals and \
+             sample counts.",
             no_params(),
             json!({}),
         ),
@@ -1117,7 +1163,8 @@ fn build() -> Vec<ToolDef> {
         ),
         entry(
             "break.clear",
-            "Remove every breakpoint this session installed.",
+            "Remove every installed breakpoint, watch and trap, including points set from \
+             the debugger window.",
             no_params(),
             json!({}),
         ),
@@ -1318,8 +1365,8 @@ fn build() -> Vec<ToolDef> {
         ),
         entry(
             "media.floppy.query",
-            "Report the connected floppy drives, the image in each, write protection, and \
-             motor/track state.",
+            "Report each of the four drive slots (df0-df3): `drive`, whether a disk is \
+             `inserted`, and the image `name`.",
             no_params(),
             json!({}),
         ),

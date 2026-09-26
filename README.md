@@ -75,7 +75,7 @@ Dependencies:
 - Rust 1.95+ (tested on stable)
 - Windows ARM64 source builds: LLVM clang on `PATH` for Internet netplay's crypto backend. The Windows packaging script also finds Visual Studio's bundled Clang tools.
 - Fedora build dependencies: `sudo dnf install alsa-lib-devel systemd-devel gcc`
-- Debian/Ubuntu build dependencies: `sudo apt install libasound2-dev libsystemd-dev gcc`
+- Debian/Ubuntu build dependencies: `sudo apt install libasound2-dev libudev-dev pkg-config gcc`
 
 ## Quick Start
 

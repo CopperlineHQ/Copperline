@@ -702,14 +702,14 @@ fn audio_rows(s: &MenuState) -> Vec<MenuRow> {
     ));
 
     let filters = [
-        ("Auto", AudioFilterMode::Auto),
-        ("On", AudioFilterMode::On),
-        ("Off", AudioFilterMode::Off),
+        AudioFilterMode::Auto,
+        AudioFilterMode::On,
+        AudioFilterMode::Off,
     ]
     .into_iter()
-    .map(|(label, mode)| {
+    .map(|mode| {
         MenuRow::choice(
-            label,
+            mode.menu_label(),
             MenuAction::SetAudioFilter(mode),
             s.audio_filter == mode,
         )

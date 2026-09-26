@@ -1600,8 +1600,10 @@ impl M68kMachine {
     /// snapshot form (reverse debugging, run-ahead, netplay rollback): fast,
     /// unframed, and only ever read by the build that wrote it. Files use
     /// `write_chunks`. Host-side state (debugger instrumentation, sinks,
-    /// trace files) is not written. Call only at an emulated-frame boundary;
-    /// mid-frame the renderer capture buffers are inconsistent.
+    /// trace files) is not written, and neither are the renderer's capture
+    /// buffers, so any instruction boundary will do, mid-frame included:
+    /// `apply_state` rebuilds that transient video state from the restored
+    /// beam position (see the module doc in src/savestate.rs).
     pub(crate) fn write_state<W: std::io::Write>(&self, w: &mut W) -> Result<()> {
         serialize_component(w, &self.cpu, "CPU core")?;
         serialize_component(w, &self.runtime_state(), "machine runtime")?;
