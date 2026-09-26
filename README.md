@@ -40,16 +40,18 @@ brew install --HEAD copperline
 
 Pre-built disk images (`.dmg`) are also available on the [releases page](https://github.com/CopperlineHQ/Copperline/releases).
 
-### Linux (Flatpak or AppImage)
+### Linux (AppImage)
+
+Standalone AppImage binaries are available on the [releases page](https://github.com/CopperlineHQ/Copperline/releases):
 
 ```sh
-flatpak install flathub dev.copperline.Copperline
-flatpak run dev.copperline.Copperline
+chmod +x Copperline-*.AppImage
+./Copperline-*.AppImage
 ```
 
-Standalone AppImage binaries are also available on the [releases page](https://github.com/CopperlineHQ/Copperline/releases).
+Copperline is not published on Flathub. To build a Flatpak yourself from [`packaging/flatpak`](packaging/flatpak/README.md), follow [Getting started](docs/guide/getting-started.md).
 
-*Note:* On Linux, presentation requires a Vulkan driver. Most modern GPUs support Vulkan natively. For virtual machines or older hardware, install the Mesa software Vulkan driver (`mesa-vulkan-drivers` on Debian/Ubuntu/Fedora, or `vulkan-swrast` on Arch). The Flatpak package bundles software Vulkan automatically.
+*Note:* On Linux, presentation requires a Vulkan driver. Most modern GPUs support Vulkan natively. For virtual machines or older hardware, install the Mesa software Vulkan driver (`mesa-vulkan-drivers` on Debian/Ubuntu/Fedora, or `vulkan-swrast` on Arch). A self-built Flatpak gets software Vulkan from its runtime and needs neither.
 
 ### Building from source
 
