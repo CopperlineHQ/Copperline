@@ -3,8 +3,8 @@
 Copperline compiles to WebAssembly with a canvas and Web Audio frontend. A hosted
 instance is available at [copperline.dev/try](https://copperline.dev/try/).
 
-This chapter covers using the browser build, architecture details, building locally,
-and embedding the emulator into your own web applications.
+This chapter covers using the browser build, its architecture, building it
+locally, and embedding the emulator in your own web pages.
 
 (using-the-hosted-page)=
 ## Using the hosted web emulator
@@ -17,16 +17,19 @@ The web version runs at [copperline.dev/try](https://copperline.dev/try/):
 - **Video standards:** Toggle between PAL (default) and NTSC. URL query parameter: `?video=NTSC`.
 - **Boot ROMs:** The open-source AROS Kickstart replacement is fetched automatically at load.
   You can also load 512 KiB or 256 KiB Kickstart ROM files via the **Kickstart ROM** picker or
-  drag-and-drop.
-- **Floppy disk images:** Mount disk images in `DF0:` and `DF1:` (ADF, ADZ, DMS, IPF, SCP, or ZIP).
-  By default, images mount read-only. Check **Open disks writable** to enable in-memory
-  modifications. Use **Blank DF0/DF1** to create an empty formatted disk, and **Download DF0/DF1**
-  to export modified disk images. URL query parameters: `?df0=<url>&df1=<url>`.
-  Gzip images may expand to at most 128 MiB; netplay replacements have a smaller
-  16 MiB limit on both the file and its expanded contents.
+  drag-and-drop. URL query parameter: `?kick=<url>` (a same-origin path).
+- **Floppy disk images:** Mount disk images in `DF0:` and `DF1:` (ADF, ADZ, DMS, IPF, SCP,
+  or gzip/ZIP-packed). Images mount read-only unless **Open disks writable** is checked,
+  which keeps guest writes in memory. **Blank DF0/DF1** inserts an empty formatted disk,
+  and **Download DF0/DF1** exports the current image. URL query parameters:
+  `?df0=<url>&df1=<url>`. Gzip images may expand to at most 128 MiB; netplay
+  replacements have a smaller 16 MiB limit on both the file and its expanded contents.
+- **Floppy speed:** 100, 200, 400 or 800 percent, or turbo. URL query parameter:
+  `?fdspeed=400` (`0` or `turbo` for turbo).
 - **Display options:**
-  - **Monitor presentation:** Select CRT shader and bezel frames (**1084**, **Classic**,
-    **CRT filter**, or **Plain**).
+  - **Monitor presentation:** Combine the CRT shader with the 1084 cabinet or the Classic
+    bezel: **1084 (CRT + cabinet)** (default), **Classic (CRT + bezel)**, **CRT filter**,
+    **1084 cabinet**, **Classic bezel**, or **Plain**.
   - **View (Overscan):** Crop to standard TV aperture or view full overscan border areas.
   - **Scaling:** **Smooth** (default) fits the picture to the display element using
     linear interpolation. **Integer** matches desktop `[display] scaling = "integer"`:
@@ -50,11 +53,13 @@ The web version runs at [copperline.dev/try](https://copperline.dev/try/):
 - **Physical keyboard:** Maps host keyboard scancodes directly to Amiga raw keycodes.
 - **On-screen keyboard:** Click **Keyboard** to toggle a virtual Amiga 600 keyboard layout
   with latching modifier keys (`Shift`, `Ctrl`, `Alt`, `Amiga`) for mobile and tablet devices.
-- **Joystick emulation:** Cycle between **Keys** (arrow keys + Ctrl/Alt), **CD32**
-  (adds C/X/D/S/Enter/Z/A), and **Touch** (virtual on-screen D-pad and fire buttons).
-  URL query parameter: `?joy=keys`.
+- **Joystick emulation:** Cycle between off, **Keys** (arrow keys + Ctrl/Alt), **CD32**
+  (adds C/X/D/S/Enter/Z/A), and, on touch screens, **Touch** (virtual on-screen D-pad and
+  fire buttons). URL query parameter: `?joy=off|keys|cd32|touch`.
 - **Gamepads:** Standard USB and Bluetooth gamepads are detected automatically via the
-  browser Gamepad API. Controller 1 maps to Amiga Port 2 (standard joystick port).
+  browser Gamepad API. The first gamepad drives Amiga port 2 (the joystick port); a second
+  one takes port 1 for two-player games, and the mouse returns to port 1 when it
+  disconnects.
 
 (browser-save-states)=
 ### Save states in the browser
@@ -72,25 +77,26 @@ The web build uses the same `.clstate` file format as the desktop version:
 
 ### Rollback netplay
 
-**Controls → Netplay** connects two browsers using WebRTC. The host shares an
-invitation link or QR code; the other player opens it and clicks Join game.
-Advanced retains manual offer/answer codes for pages without a room service.
+**Controls -> Netplay** connects two browsers using WebRTC. The host shares an
+invitation link or QR code; the other player opens it and clicks **Join game**.
+**Advanced** keeps manual offer/answer codes for pages without a room service.
 The host sends ROMs, floppy images and machine settings over the encrypted peer
 connection. The guest verifies them before startup and uses them only for the
 session; its remembered ROM and local choices are preserved. Both pages start
 fresh machines with matching ROMs, disks and hardware settings.
-During play the host can use **Netplay → Swap disk** or **Eject selected drive**;
+During play the host can use **Netplay -> Swap disk** or **Eject selected drive**;
 both peers pause and apply the disk change together. The guest receives each
-replacement automatically, including repeated swaps in DF0.
+replacement automatically, including repeated swaps in DF0. Up to eight
+spectators can watch through a separate spectator invitation.
 Each player controls one Amiga port; late input is predicted and corrected by
 rollback. See [browser netplay setup](netplay.md#browser-netplay) for the steps,
 controller mapping, relay troubleshooting and restrictions.
 
 Netplay requires WebRTC data channels as well as WebAssembly. It works on a
 static site; room invitations use a separate signaling service, while manual
-codes need no server. A desktop UDP peer cannot join a browser
-session. Save states, media changes, serial connections and pause are unavailable
-until disconnect.
+codes need no server. A desktop peer cannot join a browser session. Save
+states, media changes, serial connections and pause are unavailable until
+disconnect.
 
 ## Architecture
 
@@ -108,10 +114,13 @@ The browser implementation consists of the following components:
 - **Audio pipeline:** Stereo 44.1 kHz float samples are transferred directly to an
   `AudioWorklet` processor for low-latency playback.
 - **Netplay:** The Rust core owns the shared rollback timeline and bounded packet
-  queues. `www/netplay.js` handles room invitations, manual codes and WebRTC;
-  `www/netplay-media.js` transfers and verifies the host setup on a reliable channel.
-  `www/netplay-swap.js` coordinates host disk changes on confirmed frame boundaries.
-  `try.js` owns the session lifecycle and locks controls that change the machine.
+  queues. `www/netplay.js` builds the netplay panel and the `RtcLink` peer
+  connection on top of `www/netplay-rtc.js` (WebRTC and manual codes) and
+  `www/netplay-room.js` (room invitations). `www/netplay-media.js` transfers and
+  verifies the host setup on a reliable channel, `www/netplay-swap.js` coordinates
+  host disk changes on confirmed frame boundaries, and `www/netplay-watch.js` serves
+  and receives the spectator feed. `try.js` owns the session lifecycle and locks
+  controls that change the machine.
 
 ## Building the WebAssembly package locally
 
@@ -141,8 +150,12 @@ The compiled JavaScript loader (`copperline_web.js`) and WebAssembly binary
 
 From the repository root, `node tools/check-web-netplay.mjs` exercises this release
 bundle with two emulators, packet loss/reordering, input changes and different
-presentation settings. Run `npm test --prefix crates/copperline-web/www` for the
+presentation settings, and `node tools/check-web-netplay-swaps.mjs` adds the
+reliable disk-change channel. Run `npm test --prefix crates/copperline-web/www` for the
 page controller tests. These checks need no display, network or external ROMs.
+`tools/check-web-netplay-browser.mjs` and `tools/check-web-netplay-rooms.mjs`
+drive the real page in a browser through Playwright; the second also needs a
+room service.
 
 ## Embedding with the WebEmu API
 
@@ -192,8 +205,14 @@ requestAnimationFrame(renderLoop);
 
 ### Key `WebEmu` API methods
 
-- `new WebEmu(model, video, drives)`: Instantiate emulator.
-- `load_rom(mainRom, extRom)`: Load Kickstart ROM bytes and reset CPU.
+- `new WebEmu(model, video, drives)`: Instantiate emulator. Each argument is optional:
+  `model` takes the desktop `--model` names (default A500), `video` is `"PAL"` or
+  `"NTSC"` (default: the profile's), and `drives` fits 0-4 floppy drives.
+- `load_rom(mainRom, extRom)`: Fit Kickstart ROM bytes (and an optional extended ROM)
+  and cold-reset the machine. 256 KiB images are mirrored automatically.
+- `run(nowMs, maxFrames)` / `run_hidden(nowMs, maxFrames)`: Step emulated time up to
+  `performance.now()`, at most `maxFrames` frames per call; `run_hidden` skips rendering
+  for a hidden page.
 - `insert_floppy(driveIndex, diskBytes, label)`: Insert read-only floppy image.
 - `insert_floppy_writable(driveIndex, diskBytes, label)`: Insert writable in-memory floppy image.
 - `export_floppy(driveIndex)`: Export current in-memory floppy image as `Uint8Array`.
@@ -219,13 +238,30 @@ requestAnimationFrame(renderLoop);
   smooth scaling). Returns an empty array until the first frame is presented. Used by `try.js`
   when integer scaling or autocrop is enabled without a monitor bezel.
 
+Other methods cover the rest of the page:
+
+- Machine and pacing: `reset()` (cold reset), `resync_clock()` (after a pause),
+  `emulated_seconds()`, `machine_model()`, `video_standard()`, `machine_summary()`, and
+  the static `models()`, `video_standards()`, `floppy_formats()` and `build_info()`.
+- Presentation: `set_tv_centre(h, v)`, `set_monitor_bezel(drawn)`,
+  `set_deinterlace(on)`, `set_phosphor(fraction)` (0 to 0.95), `presentation_revision()`
+  and `present_crt_lines()` (for a page-side CRT shader).
+- Audio and drives: `set_volume_percent(n)`, `set_mono_audio(on)`,
+  `set_floppy_sounds(on)`, `set_floppy_sounds_volume(n)`, `set_floppy_speed(percent)`
+  (100/200/400/800, or 0 for turbo), `drive_connected(drive)`, `disk_name(drive)` and
+  `floppy_write_protected(drive)`.
+- Front panel: `power_led()`, `fdd_led()`, `fdd_track()`, `hdd_led()`, `cd_led()` and
+  `caps_lock_led()`.
+- Serial port: `serial_send(bytes)`, `serial_take()`, `serial_input_backlog()`,
+  `serial_dtr()` and `serial_set_carrier(connected)`.
+
 ### Embedding netplay
 
 Create and load a fresh `WebEmu` for each connection. After WebRTC opens, call
 `start_netplay(player, session, delay, window, controller)` before the first
 `run` or `run_hidden` call. `player` is 1 or 2; `session` is a shared 32-digit hex
 ID; delay is an integer from 0 to 6, window from 1 to 12, and controller is
-`"joystick"` or `"cd32"`. Both ports use that controller. A machine that has run
+`"joystick"`, `"cd32"` or `"mouse"`. Both ports use that controller. A machine that has run
 or loaded a save state is ineligible. A fitted RTC is seeded to 2000-01-01 UTC;
 this does not add a clock to models without one. Failed startup restores the
 machine and leaves it available for local use or another startup attempt.
@@ -240,11 +276,12 @@ on the host, or `transferMedia(null, progress)` on the guest, which returns the
 verified host snapshot. Embedders that omit this setting must supply matching
 media themselves. Its `onClose` callback must stop the page's loops and
 free the machine. Immediately after startup, call `run_hidden(now, 0)` and
-`link.send(emu)` once to send the initial fingerprint. Then call `link.receive(emu)` before `run`/`run_hidden`, then
-`link.send(emu)` afterwards, including polls that advance zero frames. Polls with
-zero frames process handshakes, corrections and retransmissions. The ordinary
-render and audio-drain APIs still apply. On close, drain queued packets and
-poll once more before freeing the machine, to surface a pending mismatch error.
+`link.send(emu)` once to send the initial fingerprint. From then on, call
+`link.receive(emu)` before each `run`/`run_hidden` and `link.send(emu)` after
+it, including polls that advance zero frames: those still process handshakes,
+corrections and retransmissions. The ordinary render and audio-drain APIs
+still apply. On close, drain queued packets and poll once more before freeing
+the machine, to surface a pending mismatch error.
 
 For another transport, pass each complete received packet to
 `netplay_receive(Uint8Array)`, and drain `netplay_take_packet()` until it returns
@@ -256,10 +293,11 @@ Set `settings.swaps = "disk-v1"` and supply `swapCallbacks.machine` (returning
 the current `WebEmu`) to enable the separate reliable disk channel. Optional
 `status` and `changed` callbacks update the page. The host calls
 `link.swaps.swap(drive, {bytes, name, writable})`, or passes `null` to eject.
-Keep polling and running the emulator during this operation: Rust stops forward
-execution at the negotiated boundary but must still process input and acknowledgements.
-Do not call the underlying hold/stage/apply/resume methods independently; both
-peers must complete the coordination protocol before either resumes.
+Keep polling and running the emulator during this operation: Rust stops
+forward execution at the negotiated boundary but must still process input and
+acknowledgements. Do not call the underlying hold/stage/apply/resume methods
+independently; both peers must complete the coordination protocol before
+either resumes.
 
 `netplay_status()` returns `[connected, frame, confirmed, acknowledged, rollbacks,
 replayed, checked]`, with `connected` represented by 0 or 1. It returns an empty
@@ -275,9 +313,23 @@ must match before startup; their setters fail during a session. Output volume
 and mono/stereo presentation remain local.
 
 Machine/media/state operations, including controller fitting and floppy speed,
-fail while a session exists; mouse and serial
-input are ignored. A protocol error stays latched. Free the instance and start
-fresh after any disconnect or error; there is no operation to resume it locally.
+fail while a session exists. Serial input is ignored, and so is mouse input
+unless the session's controller is `"mouse"`. A protocol error stays latched.
+Free the instance and start fresh after any disconnect or error; there is no
+operation to resume it locally.
+
+Spectating uses the same shape. A host that will admit spectators calls
+`netplay_enable_spectators()` straight after `start_netplay`, before the first
+run, so the confirmed history is kept from frame zero; `netplay_identity()`
+returns the fingerprint a spectator must reproduce, and each spectator reads
+the history through `spectator_feed_open()`, `spectator_feed_take(id, maxBytes)`
+and `spectator_feed_close(id)`. A browser host refuses new spectators once it
+retains more than 64 MiB of history. A spectator page loads the host's media
+into a fresh `WebEmu`, calls `start_spectating(controller)`, sends
+`spectate_identity()` to the host, and feeds the host's stream to
+`spectate_receive(bytes)`; `spectate_status()` returns `[spectating, frame,
+behind, checked, diskChanges]`. `www/netplay-watch.js` implements both sides
+over a WebRTC data channel.
 
 ### HTML element hooks in `try.js`
 
@@ -314,18 +366,30 @@ fetches `./copperline.json`):
 }
 ```
 
-Display choices (`overscan`, `tint`, `monitor`, `scaling`, `autocrop`, `deinterlace`,
-`phosphor`) are starting points for first-time visitors: a visitor's own remembered choice
-wins.
+Every key is optional. The file accepts `machine`, `video`, `kick` (a same-origin ROM
+path), `df0`, `df1`, `floppy_speed` (100/200/400/800, or 0 for turbo), `floppy_sounds`,
+`mono_audio`, `overscan` (`tv`/`full`), `tint` (`none`/`bw`/`green`/`amber`/`sepia`),
+`monitor` (`1084`/`classic`/`crt`/`cabinet`/`bezel`/`plain`), `scaling`, `autocrop`,
+`deinterlace`, `phosphor` (0 to 0.95), `joy` (`off`/`keys`/`cd32`/`touch`),
+`background_run`, `serial_url`, `serial_raw` and `autoboot` (power on once everything
+has loaded). The link parameters (`?df0=`, `?df1=`, `?kick=`, `?machine=`, `?video=`,
+`?joy=`, `?fdspeed=`) override the file. Display choices (`overscan`, `tint`, `monitor`,
+`scaling`, `autocrop`, `deinterlace`, `phosphor`) and `background_run` are starting
+points for first-time visitors: a visitor's own remembered choice wins.
 
 ## Serial port over WebSockets
 
-The browser build can route Amiga serial communication to remote WebSocket servers:
+The hosted page can connect the Amiga serial port to a `ws://` or `wss://`
+gateway, such as a telnet BBS behind a WebSocket bridge. Enter the gateway URL and
+click **Connect**; `serial_url` and `serial_raw` in [`copperline.json`](#browser-page-config)
+preset the URL box and the raw checkbox.
 
-- Set `serial_url: "wss://bbs.example.com:8443/"` in configuration or via query parameter `?serial=wss://...`.
-- In standard mode, the browser manages AT modem commands and dials the WebSocket host on connect.
-- In raw mode (`serial_raw: true` or `?serial_raw=1`), bytes sent by the guest are forwarded directly
-  to the WebSocket connection.
+- In the default telnet mode, the page answers telnet negotiation and waits to dial
+  until the guest's terminal has raised DTR and kept the line quiet for three emulated
+  seconds, so boot-time debug output never reaches the far end. The socket's state
+  drives the guest's carrier-detect line, and a terminal that drops DTR hangs up; the
+  page dials again when the terminal returns.
+- In raw mode, bytes pass between the guest and the socket unchanged, with no DTR gate.
 
 (benchmarking-the-core-as-wasm)=
 ## Headless WebAssembly benchmarking
@@ -341,5 +405,7 @@ wasmtime run --dir . target/wasm32-wasip1/release/copperline-bench.wasm \
 ```
 
 Keep the config and its media under the directory exposed by `--dir`.
-`copperline-bench` uses `--seconds`; it has a separate parser from the desktop
-binary. Add `--render` to include framebuffer rendering and post-processing.
+`copperline-bench` has its own small parser, separate from the desktop
+binary's: `--config PATH`, `--rom PATH`, `--ext PATH`, `--df0 PATH` and
+`--seconds N` (default 30). Add `--render` to include framebuffer rendering
+and post-processing.

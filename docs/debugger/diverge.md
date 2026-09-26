@@ -30,13 +30,15 @@ Pass `--factory` (or explicit configs) so a saved default configuration
 cannot leak into either side. Each side may also take its own additions:
 `--config-a`/`--config-b` name a TOML file for that side, and `--arg-a`/
 `--arg-b` (repeatable) add single command-line tokens to that side, for
-example `--arg-b --cpu --arg-b 68020`.
+example `--arg-b --cpu --arg-b 68020`. A side's command line is its
+`--config`, then its own tokens, then the common arguments.
 
 ## What is compared
 
-Both sides are launched with `--control :0 --control-info` and driven over
-the [control protocol](control.md). At every frame boundary the tool
-compares:
+Both sides are launched with `--control :0 --control-info FILE` (plus
+`--noaudio` unless it is already given) and driven over the
+[control protocol](control.md). At every checkpoint (every `--stride`
+frames in the first pass, every frame while narrowing) the tool compares:
 
 - the rendered frame (`capture.digest`);
 - the CPU registers (`regs.get`: D0-D7, A0-A7, PC, SR, and the FPU when
@@ -54,10 +56,10 @@ compares:
 
 1. **Frame pass.** Both sides advance `--stride N` frames at a time
    (default 10), each frame ending on the vertical blank
-   (`run_until {"vpos": 0}`, which stops at instruction resolution where
-   `step_frame` stops on the server's host quantum), with the comparison
-   data collected at each stop, until the first mismatch, `--until SECS`
-   of emulated time, or `--frames N`. At
+   (`run_until {"vpos": 0, "hpos": 0}`, which stops at instruction
+   resolution, whereas `step_frame` stops on the server's host quantum),
+   with the comparison data collected at the stride's last stop, until the
+   first mismatch, `--until SECS` of emulated time, or `--frames N`. At
    every matching stride boundary each side snapshots itself
    (`state.save`); a side only ever reloads its own snapshot, so the two
    builds do not need to share a save-state format.
@@ -84,9 +86,9 @@ clocks with identical registers, the divergence is reported as **timing**.
 
 Snapshots are the fast path, not a requirement: when a side cannot save or
 load state, the tool notes it and narrows by relaunching both sides and
-replaying frames from the start instead. The container version of each
-side's save-state format is reported; when they differ, a shared
-`--load-state` cannot be loaded by both sides, which the launch reports.
+replaying frames from the start instead. The report gives the container
+version of each side's save-state format; when they differ, a note warns
+that a shared `--load-state` cannot load into both sides.
 
 ## Output and exit status
 
@@ -111,11 +113,17 @@ result: DIVERGED at frame 8 (0.160s); last matching frame 7
 ```
 
 `--json` prints the same report as one JSON document (`outcome`,
-`frames_compared`, `sides`, `notes`, `divergence` with `frame`,
-`last_matching_frame`, `frame_mismatch`, `kind`, `cpu`, `memory`,
-`dma_only`, `step_cap_reached`, `screenshots`). `--screenshots DIR` saves
-both sides' frames at the divergence as `a-frame-N.png` and
-`b-frame-N.png`.
+`start_frame`, `end_frame`, `start_seconds`, `end_seconds`,
+`frames_compared`, `memory`, `sides`, `notes`, and `divergence` with
+`frame`, `last_matching_frame`, `seconds`, `frame_mismatch`, `display`,
+`kind`, `cpu`, `memory`, `dma_only`, `step_cap_reached`, `at_start`,
+`screenshots`). `frame_mismatch` lists what differed at the frame boundary
+(`display`, `registers`, `memory`, `timeline`), and `kind` is `cpu`,
+`timing`, `memory`, `display`, or `unknown` when the step cap ended the
+search first. On an error, `--json` prints
+`{"outcome": "error", "error": ..., "interrupted": ...}`.
+`--screenshots DIR` saves both sides' frames at the divergence as
+`a-frame-N.png` and `b-frame-N.png`.
 
 Exit status: 0 when the sides are identical over the compared span, 1 when
 a divergence was found, 2 on error (a side failed to launch, a lockstep

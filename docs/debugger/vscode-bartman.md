@@ -9,7 +9,7 @@ Bartman's Amiga C/C++ extension supplies a compiler, patched GDB, source
 annotations, and a visual profiler. Copperline supplies the emulated machine
 and its instruction, DMA, and memory captures. This walkthrough uses the
 **public Copperline fork of the extension**, installed from a locally built
-VSIX. It remains usable without an upstream release or merge of
+VSIX, so it does not depend on an upstream release or a merge of
 [Bartman PR 307](https://github.com/BartmanAbyss/vscode-amiga-debug/pull/307).
 
 ```{figure} ../images/vscode/01-source-breakpoint-and-live-demo.png
@@ -32,10 +32,10 @@ until GDB connects.
 You also need Git, Node.js/npm, and Visual Studio Code. The fork includes
 the compiler, GDB, elf2hunk, and SDK files; no separate Amiga SDK download is
 needed. Its bundled host tools are x86-64 binaries for macOS, Linux, and
-Windows. Apple Silicon Macs need Rosetta to run those tools. The walkthrough
-was tested on macOS; the included Linux and Windows binaries target x86-64,
-not native ARM hosts. The demo's build task uses `make` on macOS/Linux and
-the bundled `gnumake.exe` on Windows.
+Windows, so Apple Silicon Macs need Rosetta to run them, and ARM Linux and
+Windows hosts are not supported natively. The walkthrough was tested on
+macOS. The demo's build task uses `make` on macOS/Linux and the bundled
+`gnumake.exe` on Windows.
 
 Clone the public fork and pin the tested revision. These commands deliberately
 use a commit, so a later change to the branch does not silently change this
@@ -71,7 +71,7 @@ The pinned revision is
 than the version number. To update later, select a new revision from the
 [fork's `copperline-backend` branch](https://github.com/LinuxJedi/vscode-amiga-debug/tree/copperline-backend),
 fetch and check out that commit, and repeat `npm ci`, packaging, and VSIX
-installation. Upstream merging is not part of that update procedure.
+installation.
 
 ## Create the graphics demo
 
@@ -126,8 +126,9 @@ rebuild both after changing code.
 
 Omitting `kickstart` boots AROS. If adapting an existing UAE launch, remove
 any `cpuboard` option; normal launches support AROS or a ROM you own from
-Kickstart 1.3 onward. Keep detached launch disabled on 1.3. The launch above uses PAL A500 timing,
-1 MiB chip RAM, and 512 KiB slow RAM, matching the profiler walkthrough.
+Kickstart 1.3 onward. Keep detached launch disabled on 1.3. The launch above
+uses PAL A500 timing, 1 MiB chip RAM, and 512 KiB slow RAM, matching the
+profiler walkthrough.
 
 ## Run to a source breakpoint
 

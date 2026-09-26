@@ -1,8 +1,8 @@
 # WHDLoad support
 
-WHDLoad allows floppy-based Amiga games and demos to be installed and run from
-hard disk. Copperline can launch WHDLoad packages directly without requiring a
-pre-installed Workbench environment or manual hardfile setup.
+WHDLoad lets floppy-based Amiga games and demos be installed and run from
+hard disk. Copperline launches WHDLoad packages directly, with no Workbench
+installation or hardfile to prepare.
 
 ```sh
 copperline --whdload "Turrican.lha"
@@ -16,8 +16,14 @@ game = "Turrican.lha"
 kickstarts = "/data/amiga/kickstarts"
 ```
 
-You can also launch packages from the interactive launcher's **WHDLoad** tab
-or by dragging and dropping an archive into the running emulator window.
+You can also launch packages from the launcher's **WHDLoad** pages or by
+dropping an archive onto the running emulator window.
+
+Copperline stages two host directories and mounts them as live volumes: a boot
+volume (`WHDBoot:`) holding the WHDLoad program, a generated
+`S/Startup-Sequence` and the staged Kickstart images, and the game itself
+(`WHDGame:`). The guest reads and writes both directly, so the game's saves
+land on the host.
 
 ## Supported package formats
 
@@ -27,42 +33,70 @@ Copperline supports three package formats:
 - **`.zip` archives**
 - **Unpacked directories** containing installed game data and a `.slave` loader
 
-Archives with nested folders are searched automatically to find the `.slave` file.
+Copperline searches nested folders for the `.slave` file. When a package holds
+more than one, it boots the shallowest (then the first alphabetically).
 
 ## Requirements
 
 ### Kickstart ROMs
 
-Because Kickstart ROMs are proprietary Commodore software, they are not bundled
-with Copperline:
+Kickstart ROMs are proprietary, so Copperline does not bundle them:
 
 - **Boot ROM:** WHDLoad games generally boot using Kickstart 3.1 (40.068 A1200).
   If no Kickstart ROM is provided, Copperline falls back to the bundled AROS ROM;
-  while some titles will boot under AROS, many require an authentic Kickstart image.
+  some titles boot under AROS, but many require a real Kickstart image.
 - **Relocated Kickstart images (SKick):** Many OCS and ECS WHDLoad slaves load a
-  secondary Kickstart image (typically 1.3) into memory during startup.
+  second Kickstart image (typically 1.3) into memory during startup. These
+  images need the `.RTB` relocation tables from the SKick archive, which
+  Copperline stages beside them in `Devs:Kickstarts/`.
 
-Point `kickstarts` (or the launcher's **Kickstart ROMs** directory) to your ROM directory.
-Copperline identifies ROMs by their size and WHDLoad CRC-16 checksum, so filename
-conventions do not matter. Cloanto Amiga Forever ROM images (including encrypted `.rom`
-files with an accompanying `rom.key`) are supported.
+Point `kickstarts` (or the launcher's **Kickstart ROMs** row) at your ROM
+directory. Without it, Copperline looks in the directory of the configured
+`rom`, in `Kickstarts/` under the save-data directory, and in `Kickstarts/`
+beside the WHDLoad support archives. It identifies ROMs by their size and
+WHDLoad CRC-16 checksum, so file names do not matter. Byte-swapped dumps and
+Cloanto Amiga Forever images (encrypted `.rom` files with an accompanying
+`rom.key`) are supported. If a slave names a Kickstart image that none of
+these directories holds, the launch fails with the image's name, size and
+CRC.
 
-### WHDLoad runtime binaries
+### WHDLoad support archives
 
-Pre-built releases include necessary WHDLoad runtime components. When building
-from source, run `tools/fetch-whdload.sh` once or click **Download** in the launcher's
-settings tab. Custom packages can be specified via `whd_package` and `skick_package`.
+Booting a package needs two freely redistributable archives: WHDLoad itself
+(`WHDLoad_usr.lha`) and SKick (`skick346.lha`). Pre-built releases include
+both. In a source build, run `tools/fetch-whdload.sh` once, or press
+**Download** beside the empty **WHDLoad package** and **SKick package** rows
+on the launcher's WHDLoad **Settings...** page. `whd_package` and
+`skick_package` point at your own copies instead.
+
+Copperline looks for the archives in the directory named by
+`COPPERLINE_WHDBOOT_DIR`, then in `whdboot/` next to the executable (or in
+the macOS app bundle's `Resources/whdboot/` or a Homebrew
+`share/copperline/whdboot/`), then in `whdload/support/` in the Copperline
+host data folder, where **Download** saves them, and finally in
+`assets/whdboot/`, where the fetch script puts them.
 
 ## Saves and extracted files
 
-Extracted game data and persistent files (such as high scores and save files)
-are stored under `whdload/save/<GameName>/` in your user configuration directory
-(or locally next to the binary if portable mode is enabled).
+An archive is extracted once, and the game's own files (high scores, save
+games) persist in the extracted copy. Each package gets a directory under
+`whdload/save/` in the Copperline host data folder
+(`~/Documents/Copperline` on macOS and Linux,
+`%USERPROFILE%\Documents\Copperline` on Windows, or the application folder in
+a [portable installation](ui.md#where-files-go)); `library` moves it
+elsewhere. The directory is named after the archive: without its extension
+for an `.lha`, with it for a `.zip`. It holds `game/`, the extracted package
+mounted as `WHDGame:`, and `boot/`, the boot volume regenerated on every
+launch. An installation that already keeps unpacked games directly under
+`whdload/`, as older versions did, carries on using that directory.
 
-To reset a game's state and re-extract it, delete its directory under `whdload/save/`.
-When launching directly from a folder, save data is written back to that folder.
+To reset a game's state and re-extract it, delete its directory under
+`whdload/save/`. A game launched from an unpacked folder is mounted in place,
+so its saves are written back to that folder.
 
-Custom WHDLoad arguments can be passed via the configuration:
+Copperline starts each game with
+`WHDLoad "<slave>" Preload SplashDelay=0`. `args` appends further WHDLoad
+options to that command line:
 
 ```toml
 [whdload]
@@ -72,10 +106,12 @@ args = "ButtonWait NoAutoVec"
 
 ## Machine selection
 
-With `machine_type = "auto"`, Copperline supplies an A1200 profile and 8 MiB
-fast RAM where the configuration has not already selected them. It checks
-the slave's requirements and warns if the declared expansion memory exceeds
-8 MiB. Larger packages may need more RAM.
+With `machine_type = "auto"` (the default), Copperline supplies an A1200
+profile, 8 MiB of fast RAM, and a staged Kickstart 3.1 (40.068 A1200) image as
+the boot ROM, wherever the configuration has not already chosen them. An A1200
+satisfies every slave requirement flag. If the slave says it needs more than
+8 MiB of expansion memory, Copperline logs a warning; configure a larger
+machine if the game then refuses to start.
 
 Explicit CLI overrides or configuration options take precedence:
 
@@ -83,56 +119,62 @@ Explicit CLI overrides or configuration options take precedence:
 copperline --whdload game.lha --model A4000
 ```
 
-In the launcher settings:
+The launcher's **Machine type** row offers the same two choices:
 
-- **Auto:** Automatically chooses machine parameters suitable for WHDLoad.
-- **Copperline:** Uses the specific machine model defined in your current configuration.
+- **Auto:** Derives the machine from the slave header, as above.
+- **Copperline:** Boots the package on the machine your configuration
+  describes, unchanged.
 
 Standard features such as `--screenshot-after`, input recording, and save states
-operate normally during WHDLoad sessions.
+work normally during WHDLoad sessions.
 
 ## Library management in the launcher
 
-The launcher includes a **WHDLoad** library browser with cover art and metadata:
+The launcher's WHDLoad **Library** page lists your collection with cover art
+and metadata. Set **Game library** on the **Settings...** page to your
+collection folder; subfolders are searched too.
 
-Set **Game library** in settings to your game collection folder (subdirectories are
-scanned recursively).
+- **Refresh:** Re-reads the game folder for added or removed packages.
+- **Scan:** Matches the packages against the [OpenRetro](https://openretro.org)
+  database for title, release year, developer, publisher, player count, and box
+  art. Downloading the database needs an OpenRetro account, entered on the
+  **OpenRetro** row of the **Settings...** page; later scans without one reuse
+  the cached copy.
+- **Update:** Opens a dialog to edit the selected game's metadata or give it
+  your own PNG cover art.
+- **Favourite:** Ticks a game into the favourites list.
 
-- **Refresh:** Rescans the game folder for newly added or removed archives.
-- **Scan:** Queries the [OpenRetro](https://openretro.org) database to fetch title,
-  release year, developer, publisher, player count, and box art. An OpenRetro login
-  can be configured in launcher settings.
-- **Update:** Opens a dialog to edit metadata or assign custom PNG cover art.
-- **Favourite:** Toggles a game's starred status in your favourites list.
+When a collection holds a game more than once, each package's file name is
+shown as its version to tell them apart.
 
-When multiple versions of a game exist in a collection, version numbers or disk
-tags from filenames are shown to distinguish them.
-
-To disable the launcher's WHDLoad browser page, set `enabled = false` in `[whdload]`
-or toggle **A/V & Emu -> Emulation -> WHDLoad** in the UI menu.
+To remove the WHDLoad pages from the launcher, set `enabled = false` in
+`[whdload]` or turn off the launcher's **A/V & Emu -> Emulation -> WHDLoad**
+row. `--whdload` and `[whdload] game` still boot games either way.
 
 ## Configuration reference
 
 ```toml
 [whdload]
 game = "path/to/Game.lha"   # .lha, .zip, or directory
-library = "..."             # save directory (default: <config>/whdload/save)
+library = "..."             # save directory (default: <host data>/whdload/save)
 kickstarts = "..."          # Kickstart ROMs directory
 args = "..."                # additional WHDLoad arguments
 machine_type = "auto"       # "auto" or "copperline"
 whd_package = "..."         # custom WHDLoad archive path
 skick_package = "..."       # custom SKick archive path
 
-# Launcher UI settings
-enabled = true              # show WHDLoad tab in launcher
-games = "..."               # root folder for games library
-library_db = "..."          # metadata database path
-library_cache = "..."       # downloaded metadata cache path
+# Launcher only
+enabled = true              # false removes the WHDLoad pages
+games = "..."               # the folder the Library page lists
+library_db = "..."          # default: <host data>/whdload/support/launcher.db
+library_cache = "..."       # covers and database snapshot;
+                            # default: <host data>/whdload/support/cache
 ```
 
 ## Operational notes
 
-- The WHDLoad splash screen displays during boot according to standard WHDLoad behavior.
-  The default quit key is numeric keypad `*` unless customized by the slave.
+- The default quit key is numeric keypad `*` unless customized by the slave.
 - User-supplied cover images must be PNG format.
-- One WHDLoad package can be booted per instance.
+- One WHDLoad package can be booted per instance. An explicit `--run` takes
+  precedence over a game remembered in `[whdload] game`.
+- Under [netplay](netplay.md), a game's saves last for the session only.

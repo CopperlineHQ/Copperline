@@ -3,7 +3,7 @@ Offset: $028
 Access: write
 Chipset: OCS/ECS/AGA
 
-Refresh pointer register.
+Refresh pointer register (not emulated).
 
 ## Bitfields
 

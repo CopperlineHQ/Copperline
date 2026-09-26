@@ -1,9 +1,9 @@
 # SPRHPTL
 Offset: $1EA
 Access: write
-Chipset: AGA
+Chipset: ECS/AGA
 
-UHRES sprite pointer low word.
+UHRES sprite pointer low word (not emulated).
 
 ## Bitfields
 

@@ -8,7 +8,9 @@ timeline. Host files, physical devices, and live services have separate
 User-facing behaviour (shortcuts, menu items, the `--save-state-after` /
 `--load-state` flags, and the operational caveats) is documented in the
 [interactive UI guide](../guide/ui.md#save-states) and the
-[headless-runs guide](../guide/headless.md#save-states-headless).
+[headless-runs guide](../guide/headless.md#save-states-headless), and the
+control protocol's `state.save`, `state.load`, and `state.info` methods in
+the [control protocol reference](../debugger/control.md#state-snapshot-files).
 This chapter is the implementation and format reference.
 
 ## Design
@@ -30,8 +32,8 @@ What is captured:
 |---|---|
 | `CpuCore` | registers, SR flags, prefetch queue, pending interrupt/stop state, MMU/CACR state, cycle-timing configuration, `cpu_type` and address mask |
 | `MachineRuntimeState` | the `M68kMachine` fields outside the core: `last_cacr`, `sync_cck_on`, `cpu_clocks_per_cck`, `cpu_clock_carry` |
-| `icache` / `dcache` | the CPU cache models (`Option<Box<CpuCache>>`, `None` when absent or opted out). If a compatible state lacks a cache that the restored CPU configuration requires, load creates it cold with enable bits derived from CACR |
-| `Bus` | chip/slow RAM, ROM and extended ROM, Zorro boards (including their RAM), both CIAs, RTC, Agnus/Copper/Denise/Paula/blitter state, floppy controller with in-memory disk images, Gayle IDE and its PCMCIA card (an SRAM card's contents included), A2091 SCSI, Akiko/CDTV with NVRAM, beam-event capture buffers, DMA pointers, interrupt latches, and the bus-arbitration counters |
+| `icache` / `dcache` | the CPU cache models (`Option<Box<CpuCache>>`, `None` when absent or opted out). When the state carries `None`, load keeps the running machine's cache model, if it has one, and re-derives its enable and freeze bits from the restored CACR |
+| `Bus` | chip, slow, motherboard, and accelerator RAM, ROM and extended ROM, Zorro boards (including their RAM), both CIAs, RTC, Agnus/Copper/Denise/Paula/blitter state, floppy controller with in-memory disk images, Gayle IDE and its PCMCIA card (an SRAM card's contents included), A2091 SCSI, Akiko/CDTV with NVRAM, beam-event capture buffers, DMA pointers, interrupt latches, and the bus-arbitration counters |
 
 Deliberately excluded, with the mechanism in parentheses:
 
@@ -40,9 +42,18 @@ Deliberately excluded, with the mechanism in parentheses:
   (`#[serde(skip)]`; the sink defaults produce inert null devices). On load,
   `Bus::adopt_host_resources` moves the live sinks and tap from the old Bus
   onto the restored one, so output and an active subscription continue
-  uninterrupted; a sink with a live connection (a host serial port) is
+  uninterrupted. A sink with a live connection (a host serial port) is
   told of the timeline jump, drops what it had queued from the abandoned
-  one, and is handed the restored CIA-B `/DTR`/`/RTS` and SERPER rate.
+  one, and is handed the restored CIA-B `/DTR`/`/RTS` and SERPER rate. The
+  same call carries over the parallel-port device, Paula's capture and
+  scope taps, the CCP bus-event queue and CD command trace, and the floppy
+  drive-speed setting. It first reattaches any A2065 network backend and
+  reacquires saved host disks, so a failure there leaves the running
+  machine untouched.
+- **Host preferences**: Paula's channel mode, stereo separation, and
+  filter override, and the uaelib trap's host file root, are read before
+  the load and reapplied after it (`Emulator::adopt_loaded_state`), so
+  loading a state never changes them.
 - **Diagnostic host state**: the `COPPERLINE_TRACE_BLITTER` file handle
   (skipped, moved across like the sinks), the debugger and its
   breakpoints/watchpoints (never serialized; they stay armed across a
@@ -64,23 +75,31 @@ Deliberately excluded, with the mechanism in parentheses:
   uninterrupted runs produce byte-identical save states
   (verified by `tests/savestate_roundtrip.rs`).
 
-Alongside the descriptor, a state carries a `StateMeta` (`savestate/meta.rs`)
-in its own clear-text `META` chunk: a PNG thumbnail of the display at the
-save (240 pixels wide; 180 rows for a chipset frame, whose presentation
-is always the 4:3 glass, or the board's own shape for an RTG frame),
-rendered by the same side-effect-free display path `capture.screenshot`
-uses (`control::exec::render_frame`) and area-averaged down, so a
-headless and a windowed save of the same frame produce the same bytes;
-the emulated time (seconds and frames); the host wall-clock time of the
-save (0, "unknown", in the browser build, whose wasm32 target has no
-std clock); the descriptor's `short_summary()`; and `MediaNames` -- the file
-names (never paths) of the inserted floppies per connected drive, every
-hard-drive image on every controller (`Bus::media_names` walks Gayle, the
-A4000 IDE port, the A3000 SDMAC bus, and the A2091/A4091/IDE-Zorro/copperhf
-boards), and the disc in the CD drive. It is host metadata, not machine
-state: `Emulator::state_meta` builds it at save time, nothing reads it on
-load, and the wall clock in it is the one thing two saves of the same
-machine at the same instant are expected to differ in (see
+Alongside the machine descriptor (described below), a state carries a
+`StateMeta` (`savestate/meta.rs`) in its own clear-text `META` chunk:
+
+- a PNG thumbnail of the display at the save: 240 pixels wide, and 180
+  rows for a chipset frame (whose presentation is always the 4:3 glass)
+  or the board's own shape for an RTG frame. It is rendered by the
+  side-effect-free display path `capture.screenshot` also uses
+  (`video::render_capture_frame`) and area-averaged down, so a headless
+  and a windowed save of the same frame produce the same bytes. A frame
+  that cannot be rendered leaves the thumbnail empty rather than failing
+  the save;
+- the emulated time, in seconds and frames;
+- the host wall-clock time of the save (0, "unknown", in the browser
+  build, whose wasm32 target has no std clock);
+- the descriptor's `short_summary()`;
+- `MediaNames`: the file names (never paths) of the inserted floppies per
+  connected drive, of every hard-drive image on every controller
+  (`Bus::media_names` walks Gayle, the A4000 IDE port, the A3000 SDMAC
+  bus, and the A2091, A4091, IDE-Zorro, and copperhf boards), and of the
+  disc in the CD drive.
+
+The metadata is host information, not machine state:
+`Emulator::state_meta` builds it at save time and nothing reads it on
+load. Its wall clock is the one thing two saves of the same machine at
+the same instant are expected to differ in (see
 [Verification](#state-verification)).
 
 The ROM bytes are embedded in the state, not loaded from a path: a state
@@ -92,36 +111,41 @@ A state loaded under a different config restores the saved machine model.
 
 To make that takeover visible and to keep host-side derived values in
 step, the header carries a `MachineDescriptor` (`config/mod.rs`): the
-machine "shape" -- CPU model, chip/fast/slow RAM sizes, chipset
-(OCS/ECS/AGA), video standard, and machine profile -- plus a fingerprint
-of the boot and extended ROM (`RomId` = byte length + CRC-32 via
-`flate2::Crc`). It is *not* a correctness gate (the Bus is authoritative);
-it is the human-readable identity used to detect that a load swapped in
-a different machine. On a mismatch `Emulator::load_state` logs the
-field-by-field difference and **reconfigures the host to match the
-state** rather than the now-stale running config:
+machine "shape" -- CPU model, chip, fast, slow, motherboard, and
+accelerator RAM sizes, chipset (OCS/ECS/AGA), video standard, and machine
+profile -- plus a fingerprint of the boot and extended ROM (`RomId` =
+byte length + CRC-32 via `flate2::Crc`). It is *not* a correctness gate
+(the Bus is authoritative); it is the human-readable identity used to
+detect that a load swapped in a different machine. On a mismatch
+`Emulator::load_state` logs the field-by-field difference and
+**reconfigures the host to match the state** rather than the now-stale
+running config, adopting the state's descriptor as the running one:
 
 - The frame pacer's cost-per-instruction is re-derived from the restored
   CPU clock (`cpu_clocks_per_cck`, which travels in `MachineRuntimeState`)
   via `cpu_cycles_per_instruction_for_clock`, so an accelerated or slower
-  restored CPU is paced correctly. Presentation geometry already tracks
-  the restored Bus (the renderer reads `bus().frame_geometry()` per
-  frame), so PAL/NTSC and resolution follow automatically.
-- The window surfaces the reconfiguration in its load OSD; headless runs
-  report the loaded machine summary in the `save state loaded:` log line.
+  restored CPU is paced correctly. Every load does this, whether or not
+  the descriptors match. Presentation geometry already tracks the
+  restored Bus (the renderer reads `bus().frame_geometry()` per frame),
+  so PAL/NTSC and resolution follow automatically.
+- The window surfaces the reconfiguration in its load OSD and drops its
+  disk-swap playlists, which describe the previous machine's drives;
+  headless runs report the loaded machine summary in the
+  `save state loaded:` log line.
 
 The ROM fingerprint is taken from the *in-memory* image (post
 normalization -- a 256 KiB Kickstart 1.x mirrored up to 512 KiB), so the
 running descriptor matches the bytes a save would embed. It is computed
-from the `Bus`, not the `Config` (which holds only a path): main builds
-the shape with `Config::descriptor()` and `Emulator::set_machine_descriptor`
-fills the ROM fields from the live `Bus` via
-`MachineDescriptor::set_rom_fingerprint`; `reload_rom` refreshes them when
-the Kickstart is hot-swapped. Consequently a state taken on the same
-machine shape but a *different* Kickstart is flagged on load (e.g. "ROM
-512K:f6290043 -> 512K:fc24ae0d"). Storage image paths are deliberately
-*not* fingerprinted, but missing storage is still caught on load: HDF/CD
-images reopen by path and fail the load cleanly if absent (see below).
+from the `Bus`, not the `Config` (which holds only a path):
+`emulator::build_machine` stamps the shape from `Config::descriptor()`,
+and `Emulator::set_machine_descriptor` fills the ROM fields from the live
+`Bus` via `MachineDescriptor::set_rom_fingerprint`; `reload_rom` refreshes
+them when the Kickstart is hot-swapped. Consequently a state taken on the
+same machine shape but a *different* Kickstart is flagged on load (e.g.
+"ROM 512K:f6290043 -> 512K:fc24ae0d"). Storage image paths are
+deliberately *not* fingerprinted, but missing storage is still caught on
+load: HDF/CD images reopen by path and fail the load cleanly if absent
+(see below).
 
 ### File-backed images
 
@@ -133,7 +157,7 @@ files during deserialization. Missing or moved images cause a load-time error:
   overlay_write_warned, scsi_bus, host_device, session, chd_overlay }`. A
   file-backed image stores `memory: None` and reopens `path` read/write on
   load; an in-memory directory-built volume stores the whole image in
-  `memory`, so its session-only writes survive the round trip. The
+  `memory`, so writes it holds only in memory survive the round trip. The
   synthesized-RDB overlay for bare hardfiles is embedded either way.
   Consequence: HDF *file contents* are not part of the state -- guest
   writes made after the snapshot are still visible after restoring.
@@ -143,10 +167,14 @@ files during deserialization. Missing or moved images cause a load-time error:
   overlaid sector travels in `chd_overlay` (`#[serde(default)]`, so states
   from before the field load with `None` and leave the sidecar as found).
   Loading rewrites the sidecar to exactly the saved set, so a resumed run
-  sees the disk as it was when the state was taken; the field is `None`
-  for every other backing and for a CHD attached write-protected (no
-  overlay), and a saved set that cannot be put back because the overlay
-  cannot be opened fails the load rather than resuming on the wrong disk.
+  sees the disk as it was when the state was taken. If the overlay cannot
+  be opened to put the saved set back, the load fails rather than resuming
+  on the wrong disk. The field is `None` for every other backing and for a
+  CHD attached write-protected (no overlay).
+- A netplay session disk (`harddrive/session.rs`) stores only its written
+  sectors and a digest of its base image in `session`. The base itself is
+  not in the state and must already be loaded in the same process, so such
+  a state restores only there.
 - `CdImageState::Bin { sources, tracks, extents, total_sectors }` stores
   the source descriptions needed to reopen BIN/WAVE/MP3, ISO, and NRG data.
   `CdImageState::Chd { path }` stores the CHD path and rebuilds the CHD
@@ -154,11 +182,13 @@ files during deserialization. Missing or moved images cause a load-time error:
 - A physical disk stores its identifier, fingerprint, and write-access
   setting in `host_device`. Deserialization creates a pending device;
   the host-disk reopen path then checks its identity and access rules.
-  It is never reopened as an ordinary file. Browser builds reject these states.
+  It is never reopened as an ordinary file. Browser builds reject these
+  states.
 
 Floppy images need no special handling: `FloppyImage` keeps its data
-in memory (`StandardAdf(Vec<u8>)` or per-track structures), so inserted
-disks travel inside the state, unsaved track writes included.
+in memory (`FloppyImageData::StandardAdf(Vec<u8>)` or per-track
+structures), so inserted disks travel inside the state, unsaved track
+writes included.
 
 ## File format
 
@@ -167,7 +197,7 @@ offset  size  contents
 0       8     magic, ASCII "CLSSTATE"
 8       4     container version, u32 little-endian (STATE_VERSION, 82)
 12      ...   DESC chunk: the MachineDescriptor, uncompressed
-...     ...   META chunk: the StateMeta, uncompressed (absent in version 81)
+...     ...   META chunk: the StateMeta, uncompressed (optional; none in v81)
 ...     ...   zlib stream (RFC 1950) of chunks, ending in an END chunk
 ```
 
@@ -186,8 +216,8 @@ A payload length of all ones (`chunk::STREAMED`) means the writer did not
 know the length up front and the payload follows as a run of blocks, each
 a `u32` little-endian length followed by that many bytes, ended by a
 zero-length block. Blocks are at most 1 MiB. The `Bus` chunks are written
-this way; the descriptor and the value chunks carry their length. A reader
-accepts either form for any chunk.
+this way; the descriptor, the metadata, and the value chunks carry their
+length. A reader accepts either form for any chunk.
 
 The `DESC` chunk sits uncompressed ahead of the zlib stream so a load can
 read it (and detect a machine mismatch) without inflating the whole
@@ -211,12 +241,18 @@ change. `META` itself moved the version to 82 for exactly that reason:
 the chunks either side of it are unchanged, but a version-81 reader
 expects the zlib stream directly after `DESC`, and a file that claims 81
 without one there would be a version number describing two incompatible
-layouts. A load that meets a `META` chunk it cannot decode
-(damaged, or written at a version this build has no migration for) logs
-a warning and restores the machine anyway, since the machine does not
-depend on it; `peek` reports the same condition as an error, and the
-browser lists the file without a picture. `savestate::inspect` reads the header, the descriptor, the
-metadata, and the chunk directory of a file without restoring anything.
+layouts. A load that meets a `META` chunk it cannot decode (damaged, or
+written at a version this build has no migration for) logs a warning and
+restores the machine anyway, since the machine does not depend on it.
+`peek` reports the same condition as an error, and the state browser
+lists the file without a picture.
+
+Three more readers stop short of a load. `savestate::read_descriptor`
+checks the header and returns the descriptor, so a frontend with a fixed
+configuration can reject a different machine before loading it.
+`savestate::inspect` reports the header, the descriptor, the metadata, and
+the chunk directory of a file without restoring anything; it inflates the
+body to walk it, checking the framing and end marker as a load does.
 `savestate::machine_body_offset` gives the offset of the zlib stream in a
 file's bytes, for comparing the machine of two files regardless of their
 metadata.
@@ -237,7 +273,7 @@ before it arrived complete.
 | `CPU ` | value | `CpuCore` |
 | `MACH` | value | `MachineRuntimeState` |
 | `ICAC`, `DCAC` | value | `Option<Box<CpuCache>>`, `nil` when absent |
-| `MEM ` | bus fields | `mem` (chip/slow/motherboard/accelerator RAM, ROMs, WCS), `ram_init` |
+| `MEM ` | bus fields | `mem` (chip/slow/motherboard/accelerator RAM, ROMs, WCS, and the Zorro autoconfig chain with its RAM boards), `ram_init` |
 | `CIAA`, `CIAB` | bus fields | `cia_a`, `cia_b` |
 | `PAUL` | bus fields | `paula` |
 | `AGNS` | bus fields | `agnus` |
@@ -257,6 +293,11 @@ before it arrived complete.
 | `KEYB` | bus fields | `keyboard` (the 6500/1 MCU model) |
 | `INPT` | bus fields | `input` (controller ports) |
 | `BUS ` | bus rest | every other `Bus` field: DMA arbitration, interrupt latches, beam-event capture, presentation windows, diagnostics |
+
+The chunks for optional hardware (`GAYL`, `PCMC`, `MOBO`, `UAEL`, `CART`,
+`AKIK`, `CDTV`) hold only `Option` fields and are not required: a state
+without one loads with that hardware absent. Apart from `META`, a state
+missing any other chunk is refused with a message naming it.
 
 `Bus` keeps a single derived `Serialize`/`Deserialize`; the split is done
 by two serde adapters in `savestate/split.rs`. `BusSplitter` is a
@@ -292,7 +333,7 @@ Chunk payloads are MessagePack in a fixed dialect (`chunk::encode`):
   `serde-big-array` ones) as arrays;
 - integers at their natural MessagePack width, so a field widened from
   `u8` to `u32` still reads its old values; `Option` as `nil` or the
-  value; `HashMap`/`BTreeMap` as maps.
+  value; `HashMap`/`BTreeMap` as maps;
 - `BoardDevice` keeps its custom encoding as a two-element array of an
   explicit `u32` kind and the board payload (`zorro_device/state.rs`).
   IDs stay reserved when their Cargo feature is disabled, and loading an
@@ -317,19 +358,22 @@ Compression is `flate2` at `Compression::fast()`; any standard zlib
 inflater reads it regardless of level.
 
 Container versions 1 through 80 were a different layout: the descriptor
-and five bincode components (`CpuCore`, `MachineRuntimeState`, the two
-caches, the whole `Bus`) written positionally, with no field names and
-one global version. Those files are refused with a message saying the
-state must be saved again from a current build; there is no reader for
-them.
+(from version 5) and five bincode components (`CpuCore`,
+`MachineRuntimeState`, the two caches, the whole `Bus`) written
+positionally, with no field names and one global version. Those files
+are refused with a message saying the state must be saved again from a
+current build; there is no reader for them.
 
 In-process snapshots do not use this container. `M68kMachine::write_state`
 writes the same five components as unframed positional bincode for the
-reverse-debugging ring, run-ahead, and netplay rollback checkpoints
-(`emulator.rs`), where speed matters and only the build that wrote a blob
-ever reads it. `write_chunks` is its file-format twin; both go through
-the same `adopt_state` tail on restore.
+reverse-debugging ring and run-ahead (`emulator.rs`), where speed matters
+and only the build that wrote a blob ever reads it. Netplay rollback
+checkpoints use `write_rollback_state`, which prefixes the same blob with
+the rollback latches file states omit (the Bus rollback state and the
+CPU's sampled interrupt level). `write_chunks` is the file-format twin;
+all of them go through the same `adopt_state` tail on restore.
 
+(versioning)=
 ## Versioning
 
 Three things are versioned, at three rates:
@@ -349,6 +393,10 @@ Three things are versioned, at three rates:
   lacks when it is an `Option` or carries `#[serde(default)]` (defaulted),
   reordered fields, and widened integers. Unknown chunks are skipped, so a
   build may add a chunk without invalidating its states for older builds.
+
+In this build every chunk, `DESC` and `META` included, is at version 1 and
+`chunk::MIGRATIONS` is empty; the migration tests supply their own step
+table through `savestate::load_with_migrations`.
 
 The rule for a change to a serialized struct is therefore:
 
@@ -410,7 +458,8 @@ file. After compression and flushing succeed, the file is synced and atomically
 renamed over the destination. Returned errors leave an existing save untouched
 and remove the temporary file. This guarantees complete-file replacement, not
 power-loss durability of the directory entry: the containing directory is not
-fsynced. The browser uses `save_to_writer` and manages publication itself.
+fsynced. The browser build saves through `save_to_writer`
+(`Emulator::save_state_bytes`) and manages publication itself.
 
 The app-level contract is that states are taken at presentation-quantum
 boundaries: the window event loop and the headless timers both act only
@@ -424,18 +473,23 @@ partly reconstructed field non-presentable and waits for the next complete
 field before updating screenshots, frame dumps, or the window.
 
 `savestate::save` takes `&M68kMachine` and does not mutate emulated
-state. `savestate::load` parses fully before applying, then moves host
-resources across, resets any queued live-audio presentation frames from the
-old timeline, and clears transient video capture buffers. The restored guest
-RAM, custom registers, and beam event journal stay intact, while Agnus
-rebuilds sprite control/data latches from the restored pointer context under
-the current descriptor rules. Register-armed sprite streams whose transient
-descriptor latch was not serialized are reconstructed from Denise's retained
+state. `Emulator::save_state` first quiesces a copperhf.device board, so
+its worker-thread I/O is drained before the board is serialized.
+`savestate::load` parses fully before applying, then moves host resources
+across and clears transient video capture buffers; `Emulator::load_state`
+then drops any queued live-audio presentation frames from the old
+timeline. The restored guest RAM, custom registers, and beam event journal
+stay intact, while Agnus rebuilds sprite control/data latches from the
+restored pointer context under the current descriptor rules.
+Register-armed sprite streams whose transient descriptor latch was not
+serialized are reconstructed from Denise's retained
 SPRxPOS/SPRxCTL/data-armed state and the next after-slot SPRxPT low-word
-write in the rendered field, so the first complete field after load follows
-the same data-stream rule as a live run. On success the window forces power
-on, clears any CPU halt latch, and invalidates `last_rendered_emulated_frame`
-so the next presentation re-renders from the restored Bus.
+write in the rendered field, so the first complete field after load
+follows the same data-stream rule as a live run. On success the window
+forces power on, clears any CPU halt latch, and resets its render
+pipeline (`reset_render_pipeline`, which clears
+`last_rendered_emulated_frame`), so the next presentation re-renders from
+the restored Bus.
 
 (state-verification)=
 ## Verification
@@ -451,23 +505,31 @@ The regression checks cover serialization, failure recovery and replay:
 - `zorro_device::state::tests` read and reproduce the same checked-in board
   fixture in default, core-only and MHI-only builds. Disabled kinds also have
   explicit error coverage.
-- `savestate::tests` cover failed writes and failed publication preserving
-  existing destinations and cleaning up temporary files, magic/version
-  rejection (including the flat pre-81 layout), the truncated-payload
-  atomicity guarantee, the header descriptor round trip
-  (`round_trips_the_machine_descriptor`), the chunk directory a file
-  presents (`state_file_is_a_directory_of_versioned_subsystem_chunks`),
-  the split/join adapters on their own
+- `savestate::tests` cover resumption under an active blitter, Copper,
+  and interrupt workload
+  (`resumed_state_continues_byte_identically_under_active_workload`),
+  the in-memory writer/reader path the browser build uses
+  (`writer_reader_round_trip_matches_the_file_format`), failed writes and
+  failed publication preserving existing destinations and cleaning up
+  temporary files, magic/version rejection (including the flat pre-81
+  layout), the truncated-payload atomicity guarantee, the header
+  descriptor round trip (`round_trips_the_machine_descriptor`), the chunk
+  directory a file presents
+  (`state_file_is_a_directory_of_versioned_subsystem_chunks`), the
+  split/join adapters on their own
   (`splitter_streams_struct_fields_by_chunk_and_joiner_reassembles_them`),
-  the compatibility paths listed under [Versioning](#versioning), and
-  that a CD controller travels in the state so the bar's CD controls
-  appear on load (`cd_controller_travels_in_the_state`);
-  `config::tests::rom_fingerprint_distinguishes_same_shape_kickstarts`
+  the compatibility paths listed under [Versioning](#versioning), and that
+  a CD controller travels in the state so the status bar's CD controls
+  appear on load (`cd_controller_travels_in_the_state`).
+- `savestate::meta::tests` cover the thumbnail's shape and area averaging
+  for chipset and RTG frames, the media summary and its JSON form, and the
+  refusal of damaged or oversized thumbnails.
+- `config::tests::rom_fingerprint_distinguishes_same_shape_kickstarts`
   covers flagging a swapped same-shape Kickstart;
   `emulator::tests::pacing_cost_scales_with_cpu_clock` covers the
-  host-pacing re-derivation a mismatched load performs; `harddrive::tests`
-  and `cdrom::tests` cover the reopen-by-path round trips and the
-  missing-file error paths.
+  host-pacing re-derivation a load performs; `harddrive::tests` and
+  `cdrom::tests` cover the reopen-by-path round trips and the missing-file
+  error paths.
 - `tests/savestate_roundtrip.rs` compares the resumed and uninterrupted
   runs' final state files from `machine_body_offset` on -- the `META`
   chunk ahead of it carries the wall clock of the save -- and separately
@@ -498,16 +560,23 @@ window's **&lt; Step** / **&lt; Run**) are documented in
 
 ### Snapshot ring
 
-`SnapshotRing` (in `timetravel.rs`) holds `Snapshot { pos, frame, blob }`
-entries, captured by `Emulator::tt_capture_if_due` at frame boundaries --
-the same quiescent point save states require. The `blob` is produced by
-`M68kMachine::write_state` into a `Vec`, **bypassing the zlib + magic +
-version framing** of a file save state: snapshots live and die inside one
-process running one binary, so format compatibility is a non-issue and
-skipping it keeps capture cheap. Captures are taken every
-`COPPERLINE_DBG_RR_INTERVAL` frames and the oldest are evicted once the
-total blob size passes `COPPERLINE_DBG_RR_BUDGET_MB`; the ring never drops
-below one anchor.
+`SnapshotRing` (in `timetravel.rs`) holds `Snapshot { pos, frame, cck,
+blob }` entries, captured by `Emulator::tt_capture_if_due` at frame
+boundaries -- the same quiescent point save states require. `cck` is the
+emulated colour-clock count, the coordinate the remaining history is
+reported in. The `blob` is produced by `M68kMachine::write_state` into a
+`Vec`, **bypassing the zlib + magic + version framing** of a file save
+state: snapshots live and die inside one process running one binary, so
+format compatibility is a non-issue and skipping it keeps capture cheap.
+Captures are taken at most every `COPPERLINE_DBG_RR_INTERVAL` frames and
+the oldest are evicted once the total blob size passes
+`COPPERLINE_DBG_RR_BUDGET_MB`; the ring never drops below one anchor. A
+debugger can also force a capture at a stop
+(`Emulator::debug_time_travel_anchor_now`, the control protocol's
+`reverse_anchor`), so a later step back replays from the stop rather than
+from an older frame boundary. Repositioning to an earlier point discards
+the snapshots and logged input after it (`Emulator::tt_discard_after`),
+since they describe a future that will not happen again.
 
 ### Position coordinate
 
@@ -526,11 +595,12 @@ Replay is only byte-identical if input is reproduced at the position it was
 applied. The live forward run keeps applying input exactly as before; when
 reverse mode is armed it also *records* each action into a position-keyed
 `ReplayInputLog` (`Emulator::tt_note_input`, called from the central
-keyboard / mouse-button / mouse-motion / joystick helpers, through which
-both scripted and window input funnel). During replay the engine re-applies
-logged actions as it reaches their positions. A floppy media change is
-logged as a marker that warns on replay rather than silently diverging (the
-inserted image is host-file state, not in the log).
+keyboard, mouse-button, mouse-motion, joystick, pot, and light-pen
+helpers, through which scripted, window, and control-protocol input
+funnel, and from the freezer cartridge button). During replay the engine
+re-applies logged actions as it reaches their positions. A floppy media
+change is logged as a marker that warns on replay rather than silently
+diverging (the inserted image is host-file state, not in the log).
 
 (determinism-boundaries)=
 ### Determinism boundaries
@@ -544,9 +614,10 @@ The same host boundary as save states applies, plus the requirement that
   when `--rtc-time` already makes the clock deterministic.
 - Directory-backed (host-folder) filesystems stamp guest-visible host
   datestamps with no fixed-time override -- avoid for reverse replay.
-- HDF/CD images reopen by path and are externally mutable, so a guest disk
-  write after a snapshot is not rolled back by restoring it; floppy
-  contents are in-state and safe.
+- HDF and CD images reopen by path and are externally mutable, so a guest
+  write to an HDF after a snapshot is not rolled back by restoring it.
+  Floppy contents and a CHD hard disk's write overlay are in the state and
+  safe.
 - Physical media and live network, serial, MIDI, or sampler input cannot
   be reproduced from the snapshot alone.
 - Host clipboard sharing (`[clipboard] share`) injects host text when a
@@ -602,25 +673,28 @@ Unsupported active blitter/disk operations and device chunks are rejected;
 other omitted chunks are reported. See the
 [coverage assessment](../guide/winuae-state.md#coverage) before extending it.
 
-The Bartman binary profile writer (`profile/bartman.rs`) is a driver-owned
-bounded operation shared by headless and GUI GDB and the offline CLI. It
-uses the normal precise CPU sampler and full bus trace, translates wire
-record fields explicitly, and embeds the real framebuffer. Its temporary
-file, progress transport and instrumentation are host state and never enter
-native snapshots.
-
-Windowed Bartman `--run` sessions start paused before the first GDB client
-connects. The initial stop query then drives the shared core's LoadSeg
-handshake and saves the program-entry state used by `monitor reset`.
-This keeps debugger startup latency from consuming the load event before
-the per-connection library tracker is armed. Other GUI GDB launches retain
-their normal run-until-attach behavior.
-
-
 An externally forced debugger PC write invalidates the instruction prefetch
 queue before execution resumes at the new address. Native snapshot restores
 retain their saved queue for exact replay; USS imports start with a cold
 queue at the imported PC.
+
+## Bartman GDB sessions
+
+The Bartman binary profile writer (`profile/bartman.rs`) is a driver-owned
+bounded operation shared by headless and GUI GDB and the offline CLI
+(`copperline-ctl`). It uses the normal precise CPU sampler and full bus
+trace, translates wire record fields explicitly, and embeds the real
+framebuffer. Its temporary file, progress transport and instrumentation
+are host state and never enter native snapshots.
+
+Windowed Bartman `--run` sessions start paused before the first GDB client
+connects. The initial stop query then drives the shared core's LoadSeg
+handshake and saves the program-entry state that `monitor reset` restores:
+an in-memory state file (`Emulator::save_state_bytes`, restored with
+`load_state_bytes`). Starting paused keeps debugger startup latency from
+consuming the load event before the per-connection library tracker is
+armed. Other GUI GDB launches keep their normal run-until-attach
+behaviour.
 
 ## Libretro checkpoints
 
@@ -630,6 +704,8 @@ contains the schema fingerprint, `DESC`, a versioned `FLAT` chunk holding
 CPU interrupt-sampling and Bus rollback latches, then the ordinary machine
 chunks and end marker. The machine chunks are uncompressed because RetroArch
 captures them every field and handles transport/storage compression itself.
+A checkpoint loads only into a build with the same schema fingerprint and
+a running machine whose descriptor matches exactly (`savestate::load_frontend`).
 The ordinary desktop `.clstate` format is unchanged by this frontend.
 
 The libretro adapter adds its content identity, checksum, playlist writes,

@@ -10,4 +10,4 @@ Sets the last vertical line number of a programmable field.
 - Bits 10-0: Vertical line number.
 - Bits 15-11: Ignored.
 
-BEAMCON0 selects whether programmable timing is used.
+With BEAMCON0.VARBEAMEN set, each field is VTOTAL + 1 lines long.

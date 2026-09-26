@@ -16,62 +16,68 @@ colour clocks:
   sub-CCK carry so accelerated clocks bill fractional costs exactly.
 - Unmapped space bills one ordinary external cycle per 16-bit bus cycle
   the access performs (an aligned word is one cycle; a misaligned word
-  on 020+ is two), not one per byte of the sized access. Real-CD32
-  measurement (tools/cd32-probe rows URD/ROMRD/ULRD/UWR): a word-read
-  loop over the empty $A80000 expansion window runs at exactly the
-  Kickstart-ROM pace (12.0 CPU clocks per CMP.W (A4)+/DBF iteration),
-  so unmapped reads take the fast `cpu_external_access` class; dropped
-  unmapped writes are posted and earn a one-clock overlap credit so the
-  measured 8.0-clock write+DBF cadence lands. exec's ROMTAG scan
-  word-reads that window for seconds at CD32 boot, which is what made
-  the earlier per-byte slow-class billing start the boot show visibly
-  late.
+  on 020+ is two), not one per byte of the sized access. On a real CD32
+  (`tools/cd32-probe` rows URD/ROMRD/ULRD/UWR), a word-read loop over the
+  empty $A80000 expansion window runs at exactly the Kickstart-ROM pace
+  (12.0 CPU clocks per CMP.W (A4)+/DBF iteration), so unmapped reads take
+  the fast `cpu_external_access` class. Dropped unmapped writes are posted
+  and earn a one-clock overlap credit so the measured 8.0-clock write+DBF
+  cadence lands. exec's ROMTAG scan word-reads that window for seconds at
+  CD32 boot, which is why the earlier per-byte slow-class billing started
+  the boot show visibly late.
 - Addresses are masked to the model's bus width: 24-bit for
   68000/68010/68EC020, 32-bit for 68020/030/040/060.
 
 Selectable models: 68000, 68010, 68EC020, 68020, 68030, 68040, 68060.
-`[cpu] fpu`
-fits a 68881/68882 to any 020/030 (and is on by default for the 68040,
-whose FPU is on-die): the `m68k` core executes the 6888x instruction
-set in true 80-bit extended precision via a pure-Rust software floating-
-point engine
+
+`[cpu] fpu` fits a 68881/68882 to any 020 or 030; it is on by default
+for the 68040 and 68060, whose FPU is on-die. The `m68k` core executes
+the 6888x instruction set in true 80-bit extended precision via a
+pure-Rust software floating-point engine
 ([`softfloat.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.13.0/src/fpu/softfloat.rs)).
-Arithmetic (add, sub,
-mul, div, sqrt, and the single-accuracy FSGLMUL/FSGLDIV, which round the
-mantissa to 24 bits but keep the extended exponent range -- gcc -m68040
-emits them for `float` arithmetic and the Linux/m68k kernel FPSP has no
-emulation entry for them, so a Line-F here is a userspace SIGILL),
-ordered compare, round-to-integer, scale, getexp/getman,
-the format conversions, FMOVE/FMOVEM in every operand format (including
-packed decimal), the constant ROM, FBcc/FScc/FDBcc/FTRAPcc, control
-registers, the FPCR rounding mode/precision and the FPSR exception/accrued
-bytes, and the FSAVE/FRESTORE state frames (NULL after reset, and once
-touched the CPU's own IDLE frame: the 68881-style $18-byte frame on
-020/030 systems, the 68040's version-$41, $28-byte frame on the 040 --
-guests validate the size byte, and Linux/m68k's sigreturn kills a process
-whose saved FPU frame carries a foreign size) are all modelled. The transcendentals (FSIN/FCOS/FTAN,
-FASIN/FACOS/FATAN, the hyperbolics, FETOX/FETOXM1/FTWOTOX/FTENTOX,
-FLOGN/FLOGNP1/FLOG2/FLOG10) and FSINCOS run in extended precision too: a
-double-`FloatX80` ("double-double", ~128-bit) layer
+It models arithmetic (add, sub, mul, div, sqrt, and the single-accuracy
+FSGLMUL/FSGLDIV, which round the mantissa to 24 bits but keep the
+extended exponent range -- gcc -m68040 emits them for `float` arithmetic,
+and the Linux/m68k kernel FPSP has no emulation entry for them, so a
+Line-F there is a userspace SIGILL), ordered compare, round-to-integer,
+scale, getexp/getman, the format conversions, FMOVE/FMOVEM in every
+operand format (including packed decimal), the constant ROM,
+FBcc/FScc/FDBcc/FTRAPcc, the control registers, the FPCR rounding
+mode/precision, the FPSR exception/accrued bytes, and the FSAVE/FRESTORE
+state frames. The state frame is NULL after reset and, once the FPU has
+been touched, the CPU's own IDLE frame: the 68881-style $18-byte frame on
+020/030 systems and the 68040's version-$41, $28-byte frame on the 040.
+Guests validate the size byte, and Linux/m68k's sigreturn kills a process
+whose saved FPU frame carries a foreign size. FMOD/FREM compute the exact
+remainder and the FPSR quotient byte. This covers Kickstart's detection
+and per-task FPU context switching.
+
+The transcendentals (FSIN/FCOS/FTAN, FASIN/FACOS/FATAN, the hyperbolics,
+FETOX/FETOXM1/FTWOTOX/FTENTOX, FLOGN/FLOGNP1/FLOG2/FLOG10) and FSINCOS run
+in extended precision too: a double-`FloatX80` ("double-double",
+~128-bit) layer
 ([`dd.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.13.0/src/fpu/dd.rs))
-evaluates Taylor/atanh series over reduced
-ranges and rounds the result to extended under the FPCR mode, setting INEX
-and the domain flags (OPERR/DZ). Accuracy is validated against an
-arbitrary-precision oracle (the pure-Rust `astro-float`, a dev-only
-dependency;
+evaluates Taylor/atanh series over reduced ranges and rounds the result
+to extended under the FPCR mode, setting INEX and the domain flags
+(OPERR/DZ). Accuracy is validated against an arbitrary-precision oracle
+(the pure-Rust `astro-float`, a dev-only dependency;
 [`fpu_accuracy.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.13.0/tests/fpu_accuracy.rs)):
-every function is within
-1 ULP across a wide sweep and all four rounding modes, and round-to-nearest
-is correctly rounded in practice. They are not chip-bit-exact -- the real
-6888x uses its own CORDIC/polynomial microcode, and on a bare 68040 these
-trap to a software FPSP. FMOD/FREM compute the exact remainder and the FPSR
-quotient byte. This covers Kickstart's
-detection and per-task FPU context switching. The
-68000's per-instruction cycle counts in the `m68k` core have been
+every function is within 1 ULP across a wide sweep and all four rounding
+modes, and round-to-nearest is correctly rounded in practice. The results
+are not chip-bit-exact -- the real 6888x uses its own CORDIC/polynomial
+microcode, and on a bare 68040 these instructions trap to a software FPSP.
+
+The 68000's per-instruction cycle counts in the `m68k` core have been
 corrected to exact totals across the SingleStepTests 68000 cycle corpus
 ([validation details](https://github.com/benletchford/m68k-rs/tree/m68k-v0.13.0#validation--testing)),
-which is what makes
-cycle-budgeted pacing trustworthy.
+which is what makes cycle-budgeted pacing trustworthy. Instruction
+semantics are also checked against Toni Wilen's WinUAE cputest suites
+(every opcode of a CPU model, hundreds of register and memory states each,
+including exception stack frames): `crates/cputest-runner` drives the
+generated test sets against the published `m68k` core, and the nightly
+`cputest.yml` workflow runs the full 68000 suite
+(`crates/cputest-runner/tools/cputest-gen.sh` generates the data for any
+model locally).
 
 ## The batch/JIT execution mode
 
@@ -96,7 +102,7 @@ approximate (`M68kMachine::step_slice_jit`):
   normal `CpuBus` paths and advance the beam as they land (that bus is
   shared silicon), and CIA/RTC accesses keep their E-clock costs, keeping
   chipset side effects ordered against display DMA;
-- interrupts are recognized only at batch boundaries (64 instructions),
+- interrupts are recognized at batch boundaries (every 64 instructions),
   from the live INTENA/INTREQ state; a level the boundary cannot deliver
   is never left in the core, since the batch would take it as soon as the
   mask drops without recomputing INTREQ (a spurious handler re-entry);
@@ -140,8 +146,7 @@ precise.
 The 68000's two-word instruction prefetch queue (IRD/IRC) is modelled in
 the `m68k` core
 ([`prefetch_queue`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.13.0/src/core/cpu.rs)):
-the
-next opcode is fetched before the current instruction finishes, so
+the next opcode is fetched before the current instruction finishes, so
 self-modifying code that overwrites the *next* instruction executes the
 stale pre-write word (real MC68000 Class 1 SMC behaviour), while a taken
 branch flushes and refills the stream from the target. The queue lives in
@@ -150,9 +155,8 @@ flushing depends on the CPU's own control flow, exceptions, and
 interrupts. It is gated to the 68000 and 68010 (`prefetch_enabled`);
 68020+ fetch directly at PC through the bus adapter (their real pipelines
 hide behind the instruction cache model instead). Chip-RAM probes pin both
-cases:
-`cpu_prefetch_probe_documents_self_modified_next_opcode_behavior` (stale
-fall-through) and
+cases: `cpu_prefetch_probe_documents_self_modified_next_opcode_behavior`
+(stale fall-through) and
 `cpu_prefetch_probe_branch_refetches_self_modified_chip_ram_target`
 (branch refetch).
 
@@ -204,12 +208,12 @@ expires, or an exception intervenes (`loop_mode` in
 [`core/cpu.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.13.0/src/core/cpu.rs);
 the loopable set and the DBcc entry/exit arms live in
 [`core/decode.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.13.0/src/core/decode.rs)).
-A looping DBcc iteration costs 6 internal
-clocks and touches the bus only for the body's operands, which is what
-makes tight copy/clear loops measurably faster on a real 68010.
+A looping DBcc iteration costs 6 internal clocks and touches the bus only
+for the body's operands, which is what makes tight copy/clear loops
+measurably faster on a real 68010.
 [`loop_mode_timing_tests.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.13.0/tests/loop_mode_timing_tests.rs)
-pins engagement, the
-68000's non-engagement, and the no-fetch iteration cost.
+pins engagement, the 68000's non-engagement, and the no-fetch iteration
+cost.
 
 The 68010's own cycle costs where they differ from the 68000 are
 calibrated against the vAmigaTS `CPU/Timing`/`CPU/Timing2` measurements
@@ -222,45 +226,48 @@ before its write, long register shifts/rotates use the same base-8 cycle
 total as the 68000 rather than the later barrel-shifter timing, a
 format-0 RTE is 24 clocks (the format word is read once, not re-read),
 and an interrupt dispatch is 46 clocks (12 internal before the four-word
-format-0 frame) against the 68000's 44. STOP semantics shared with the
-68000: the SR operand is loaded VERBATIM (a single-stepped STOP observes
-S and T exactly as written; the SST m68000 fixtures pin this), and an
-S-clear SR stops only momentarily -- at the next instruction boundary the
-stopped state's supervisor check raises a privilege violation stacking
-the STOP itself, so the handler's RTE re-executes it; a pending trace
-(T set in the SR the instruction started with) has priority and recovers
-from the stop, while a T bit loaded *by* STOP does not fire while
-stopped.
+format-0 frame) against the 68000's 44. STOP semantics are shared with
+the 68000: the SR operand is loaded verbatim (a single-stepped STOP
+observes S and T exactly as written; the SingleStepTests 68000 fixtures
+pin this), and an S-clear SR stops only momentarily -- at the next
+instruction boundary the stopped state's supervisor check raises a
+privilege violation stacking the STOP itself, so the handler's RTE
+re-executes it; a pending trace (T set in the SR the instruction started
+with) has priority and recovers from the stop, while a T bit loaded *by*
+STOP does not fire while stopped.
 [`stop_and_68010_timing_tests.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.13.0/tests/stop_and_68010_timing_tests.rs)
 pins all of these.
 
 ## Caches
 
 The on-chip caches are silicon, so they are modelled by default on the parts
-that have them: the instruction cache on the 68020/68EC020/68030/68040 and the
-data cache on the 68030/68040 (`CpuModel::has_instruction_cache`/
-`has_data_cache`). CACR (and CAAR on the 020/030) are always stored; software
+that have them: the instruction cache on the 68EC020/68020/68030/68040/68060
+and the data cache on the 68030/68040/68060
+(`CpuModel::has_instruction_cache`/`has_data_cache`). CACR (and CAAR on the
+020/030) are always stored; software
 (AmigaOS at boot) enables and clears the cache exactly as on hardware. A cache
 hit costs no bus cycle, so a cached instruction fetch does not contend with
-chip-bus DMA -- which is the point: 020/030/040 code looping out of chip RAM
-otherwise pays a bitplane-DMA arbitration stall on every fetch and runs at
-roughly half speed, drifting an AGA demo's interrupt-driven music or animation
-to half its intended rate. The data cache only covers expansion RAM/ROM
-because chip and slow RAM are DMA-visible and cache-inhibited, as on real
-machines. A 68000/68010 models no cache. `[cpu] icache = false`/`dcache =
+chip-bus DMA. That is the point of modelling it: 020+ code looping out of
+chip RAM otherwise pays a bitplane-DMA arbitration stall on every fetch and
+runs at roughly half speed, drifting an AGA demo's interrupt-driven music or
+animation to half its intended rate. The data cache only covers expansion
+RAM/ROM because chip and slow RAM are DMA-visible and cache-inhibited, as on
+real machines. A 68000/68010 models no cache. `[cpu] icache = false`/`dcache =
 false` opt a cached CPU back out; with no cache modelled, the cache-control
 instructions are no-ops and self-modifying code always executes fresh bytes
 (the safe direction).
 
 Each cache is a power-of-two array of direct-mapped longword entries
 (`src/cache.rs`): 64 entries (256 bytes) on the 020/030 -- the exact 68020
-instruction-cache geometry -- and 1024 (4 KB) on the 68040. The larger 040
-capacity is the part that matters here: a chip-RAM loop bigger than 256 bytes
-stays resident on a 040 where it would thrash a 020. The 040's 4-way
-set-associative, 16-byte-line, copyback organisation is deliberately not
-modelled, and need not be -- the data cache only covers expansion RAM, which
-chipset DMA cannot reach, so write-back versus write-through cannot be told
-apart. Virtual boards, however, CAN host-DMA into expansion RAM behind the
+instruction-cache geometry -- 1024 (4 KB) on the 68040, and 2048 (8 KB) on
+the 68060. The larger capacity is the part that matters here: a chip-RAM
+loop bigger than 256 bytes stays resident on a 040 where it would thrash a
+020. The 040's 4-way set-associative, 16-byte-line, copyback organization
+(and the 060's set associativity) is deliberately not modelled, and need
+not be -- the data cache only covers expansion RAM, which chipset DMA
+cannot reach, so write-back versus write-through cannot be told apart.
+
+Virtual boards, however, can host-DMA into expansion RAM behind the
 model (the services board answering a DosPacket, copperhf draining a
 completed disk read, the A3000 SDMAC pumping SCSI data), so both paths that
 let a device touch guest memory report it and the data cache is dropped: the
@@ -272,19 +279,27 @@ not disable the cache -- consumed at the next instruction-boundary flush
 (`flush_timed_devices_dcache_coherent`) and, because the JIT batch path can
 flush timed devices mid-batch, before any data-cache read hit. Without
 the tick half, PFS3 on a 68040 read corrupted file data through copperhf's
-asynchronous completions. The 040 also redefines CACR (only the IE/DE
-enable bits, no freeze or clear strobes) and moves invalidation to the
-CINV/CPUSH instructions; the model maps a CINV/CPUSH to a whole-cache clear of
-the indicated cache(s) -- over-clearing line/page scopes, which is always
-coherent (a push has no dirty data to write back in a write-through model).
+asynchronous completions.
 
-The instruction cache does not snoop writes (authentic 68020 behaviour), so a
-line stays valid until DMA or the CPU rewrites its backing memory, or software
-clears it (via CACR on the 020/030, via CINV/CPUSH on the 040). Restoring a
-save state that predates cache modelling (or was captured with the cache
-disabled) re-establishes the model's cache cold and re-derives its enable bits
-from the restored CACR, so the machine keeps the cache its CPU has rather than
-silently running cacheless after a load.
+The 040 and 060 also redefine CACR (the cache models take only its
+instruction and data cache enable bits; there are no freeze bits or
+cache-clear strobes) and move invalidation to the CINV/CPUSH
+instructions; the model maps a CINV/CPUSH to a whole-cache clear of the
+indicated cache(s) -- over-clearing line/page scopes, which is always
+coherent (a push has no dirty data to write back in a write-through
+model). The data cache is write-through, and a write that
+hits invalidates its entry.
+
+The instruction cache does not snoop writes (authentic 68020 behaviour): a
+line stays valid when the CPU or DMA rewrites its backing memory, until
+software clears it (via CACR on the 020/030, via CINV/CPUSH on the 040/060)
+or another fill replaces it. Only debugger memory writes invalidate it
+directly.
+
+Restoring a save state that predates cache modelling (or was captured with
+the cache disabled) re-establishes the model's cache cold and re-derives its
+enable bits from the restored CACR, so the machine keeps the cache its CPU
+has rather than silently running cacheless after a load.
 
 ## The 68060
 
@@ -302,7 +317,7 @@ effect so the handler can re-decode and re-execute. The unimplemented
 FPU set (the transcendentals, FINT/FINTRZ, FGETEXP/FGETMAN,
 FMOD/FREM/FSCALE, FSINCOS, FMOVECR, and the FDBcc/FTRAPcc/FScc
 conditionals) raises the Line-F vector with the six-word format $2
-frame the 68060SP dispatches on - next-instruction PC stacked, the
+frame the 68060SP dispatches on -- next-instruction PC stacked, the
 calculated operand EA in the frame, FPIAR pointing at the instruction.
 Packed decimal is the unsupported-data-type exception (vector 55),
 dynamic-list FMOVEM and immediate packed operands the unimplemented-EA
@@ -318,34 +333,32 @@ write-only clear strobes. The part has a single supervisor stack: the
 SR M bit is storable (and interrupts clear it) but never banks A7, and
 MSP/ISP are gone from the MOVEC set. Access errors push the eight-word
 format $4 frame with the fault address and FSLW (composed from the MMU
-walk cause, R/W, size, and transfer modifier), and RTE pops it - along
-with the 040's format 7, which previously format-errored. The FPU state
-frame is one long word for NULL (as every part since the 68881; exec's
-hand-built task contexts depend on it) and three for IDLE. The MMU
-shares the 040's three-level walker and TC[15] enable; PTEST is gone
-(undefined F-line) and PLPAR/PLPAW translate an address into An,
-faulting with the format $4 frame.
+walk cause, R/W, size, and transfer modifier), and RTE pops it as well
+as the 040's format 7. The FPU state frame is one long word for NULL (as
+on every part since the 68881; exec's hand-built task contexts depend on
+it) and three for IDLE. The MMU shares the 040's three-level walker and
+TC[15] enable; PTEST is gone (undefined F-line) and PLPAR/PLPAW translate
+an address into An, faulting with the format $4 frame.
 
 **Timing.**
 [`timing_060.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.13.0/src/core/timing_060.rs)
-replaces the 020+
-scaling formula for the 060: every opcode word classifies (a build-once
-64K table over a pure function) into the MC68060UM Chapter 10 dispatch
-classes with a pOEP cycle cost - most ALU/move instructions one clock,
-data-dependent costs derived from the 68000-reference count as
-(raw/4).max(1). Costs are pOEP occupancy at zero-wait: memory latency
-stays billed by the host bus per access, so bus-bound code shows no
-pairing benefit, which matches silicon. Superscalar dual issue is
-modelled retrospectively: an instruction that satisfies the UM Table
-10-1 dispatch test against the previous instruction's open sOEP slot
-(pOEP|sOEP class, simple EA, no RAW/WAW against the head's defs, CCR
-rule, one memory operand per pair, both fetches icache hits, PCR.ESS
-enabled) refunds to zero additional cycles. The 256-entry branch cache
-(CACR.EBC; CABC/CUBC clears) folds correctly predicted taken branches
-onto the preceding instruction's cycle - a lone predicted branch still
-issues for one clock, which both matches the canonical one-clock
-subq/bne loop and guarantees a bare `bra self` idle loop advances
-emulated time. Both structures are serialized: prediction state changes
+replaces the 020+ scaling formula for the 060: every opcode word
+classifies (a build-once 64K table over a pure function) into the
+MC68060UM Chapter 10 dispatch classes with a pOEP cycle cost -- most
+ALU/move instructions one clock, data-dependent costs derived from the
+68000-reference count as `(raw/4).max(1)`. Costs are pOEP occupancy at
+zero-wait: memory latency stays billed by the host bus per access, so
+bus-bound code shows no pairing benefit, which matches silicon.
+Superscalar dual issue is modelled retrospectively: an instruction that
+satisfies the UM Table 10-1 dispatch test against the previous
+instruction's open sOEP slot (pOEP|sOEP class, simple EA, no RAW/WAW
+against the head's defs, CCR rule, one memory operand per pair, both
+fetches icache hits, PCR.ESS enabled) refunds to zero additional cycles.
+The 256-entry branch cache (CACR.EBC; CABC/CUBC clears) folds correctly
+predicted taken branches onto the preceding instruction's cycle -- a lone
+predicted branch still issues for one clock, which both matches the
+canonical one-clock subq/bne loop and guarantees a bare `bra self` idle
+loop advances emulated time. Both structures are serialized: prediction state changes
 cycle counts, and cycle counts change chipset interleaving. timing-test
 rows 28-30 measure the pair/RAW/loop cases end to end (a 50 MHz 060
 runs row 30 at exactly one clock per iteration).
@@ -370,8 +383,7 @@ sizing, and alignment-dependent transfers, so an opcode does not have one
 context-free cycle count.
 
 [`timing_020.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.13.0/src/core/timing_020.rs)
-transcribes the integer timing tables
-from section 8.2 of the
+transcribes the integer timing tables from section 8.2 of the
 [MC68020 User's Manual](https://www.nxp.com/docs/en/data-sheet/MC68020UM.pdf).
 The manual publishes Best Case (cached with maximum execution overlap),
 Cache Case (cached without overlap), and Worst Case (uncached without
@@ -381,64 +393,19 @@ immediate fetches hit the instruction cache; any instruction-stream miss
 selects Worst Case. This covers the standard effective-address tables, the
 complete MOVE matrix, arithmetic and logical instructions, multiply/divide,
 shifts, bit/bitfield operations, branches, control flow, and save/restore
-paths. The 68000 and 68010 timing paths are unchanged.
+paths. The 68000 and 68010 keep their own timing paths.
 
 The 68030 runs the same MC68020UM tables (m68k 0.12): its integer core is
 the 020's, and the real-hardware columns in `timing-test/accelprobe.asm`
 (a 25 MHz 68030 CPU-slot board in an A4000) measure the same anchor
 figures the real A1200's 020 did -- taken `dbra` 6 clocks, `mulu.w` ~29.
-Re-running the probe on `tt-a4000-030.toml` after the switch lands the
-`move.w`, `mulu.w`, and fast-stack `trap` rows within 1% of the board
-(the scaled-68000 approximation had the `move.w` loop 1.26x over and the
-fast-stack `trap` 1.13x under; `mulu.w` was already exact) and pulls the
-bare taken `dbra` from 1.35x to 1.18x over. The call, `movem`, and chip-stack
-`trap` rows are bus-bound and unchanged at 1.2-1.7x over.
-
-## 68040 timing
-
-[`timing_040.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.13.0/src/core/timing_040.rs)
-(m68k 0.12) gives the 68040 a single-issue pipeline model in place of the
-scaled approximation, which the same accelprobe columns (a 25 MHz A3640,
-two byte-identical serial captures) measured as ~2-2.5x pessimistic on
-plain execution: a taken-`dbra` loop runs 4.06 clocks per iteration where
-the approximation billed ~8, a `move.w`+`dbra` loop 4.08 (the one-clock
-body hides entirely in the branch resolution), and `mulu.w #imm`+`dbra`
-14.0 against ~35. The model reuses the 68060 opcode classifier: most
-ALU/move instructions cost their one-clock occupancy, data-dependent and
-unclassified costs derive from the corrected 68000 reference count as
-`(raw/4).max(1)`, an indexed EA adds a clock, and branches pay small static
-costs (taken Bcc/BRA 3, not-taken 2, DBcc 3 either way, computed flow
-changes a 4-clock refill floor) -- the 040 has no branch cache, so there is
-nothing to predict or fold. CINV/CPUSH cost a dozen clocks even on a clean
-line (the A3640 measures ~12 per `CPUSHL DC,(An)`, accelprobe row 15).
-Memory latency stays billed by the host bus per access, as on the 020 and
-060 paths, and exception entries keep the legacy scaled costs so the
-exception timing calibration is unchanged.
-
-DBcc-taken at 3 clocks lands the ubiquitous one-clock-body loop on the
-measured 4 per iteration; the empty `dbra` loop then reads 3 against the
-measured 4.06, the deliberate compromise of a model with no
-overlap/absorption stage. Residuals are not uniformly conservative: there
-is no execute-stage overlap (pessimistic), shifts and bit operations take
-the 060 class costs (optimistic where real 040 silicon runs those forms a
-clock or two slower), and the write-back stage and store buffer are not
-modelled (writes bill at bus rate).
-
-Re-running the probe on `tt-a4000-040.toml` against the A3640 captures:
-the `move.w`+`dbra` row is tick-exact, `mulu.w` and `cpushl` are within
-7%, and the bare `dbra` reads the documented 3.0 against 4.06 clocks. The
-`trap` rows stay 1.4-1.7x under (exception entries keep the legacy scaled
-costs) and `movem` 1.4x over; everything else that still differs is the
-bridge and fast-RAM region billing below, not the core.
-
-What no CPU table covers, the same accelprobe columns quantify and remain
-open on the Copperline side:
-
-- The A3640/BFG9060 CPU-slot bridge increases chip-RAM `move.l` read latency
-  to 2.5-3.4 us (the 68030 board's chip path matches emulated timing directly).
-- Fast RAM regions exhibit distinct access speeds on hardware (CPU-card ~66 ns,
-  motherboard ~320 ns, Zorro III ~530 ns per sequential longword read) whereas
-  the current emulator bills all fast RAM at native CPU clock rates.
+Re-running the probe on `timing-test/tt-a4000-030.toml` with the 020
+tables lands the `move.w`, `mulu.w`, and fast-stack `trap` rows within 1%
+of the board (the scaled-68000 approximation used before had the `move.w`
+loop 1.26x over and the fast-stack `trap` 1.13x under; `mulu.w` was
+already exact) and pulls the bare taken `dbra` from 1.35x to 1.18x over.
+The call, `movem`, and chip-stack `trap` rows are bus-bound and unchanged
+at 1.2-1.7x over.
 
 The manual's totals assume aligned operands and stack, a 32-bit bus, and
 three-clock no-wait reads and writes. They include those ideal transfers.
@@ -487,7 +454,7 @@ that to the *following* instruction's head, which a per-instruction model with
 no overlap stage has nowhere to put, so the m68k core charges it where the
 flush happens (`TAKEN_BRANCH_REFILL`). Without it a `dbra` loop runs at the
 isolated cache-case 6 clocks per iteration, which makes every tight loop --
-depackers, MFM decoders, chase-the-beam poll loops -- fast; it showed up
+depackers, MFM decoders, chase-the-beam poll loops -- too fast; it showed up
 across seven independent `timing-test` rows (4, 5, 7, 14, 28, 29, 30). The
 charge was first calibrated to two clocks against the FS-UAE A1200 reference;
 a real A1200 (stock 68EC020 at 14.19 MHz, 2026-08) measures a cached taken
@@ -500,7 +467,7 @@ A second probe disk then showed the charge is *conditional*: every one of
 those rows happens to place its `dbra` at a longword-aligned address, and a
 `dbra` at `pc % 4 == 2` costs the bare cache-case 6 instead. The refill is
 therefore one clock when the branch opcode is longword-aligned and none
-otherwise, as derived above under the real-A1200 column.
+otherwise (see "Real A1200 column" in `timing-test/README.md`).
 
 This is intentionally a datasheet model, not a claim of cycle exactness.
 The opcode word does not retain a consumed extension word, so full-format
@@ -510,8 +477,8 @@ Coprocessor operations and unclassified encodings retain the old scaled
 fallback. Misalignment, detailed cache-refill sequencing, and instruction
 overlap remain to be added. Motorola explicitly demonstrates in section 8.1
 that the timing of an instruction stream cannot be obtained by simply
-summing isolated table entries; hardware traces are still the final reference
-once a machine is available. `timing-test/` remains the end-to-end regression
+summing isolated table entries; hardware measurements remain the final
+reference. `timing-test/` remains the end-to-end regression
 for checking the combined CPU, cache, and chip-bus model rather than the
 source of the per-opcode constants.
 
@@ -554,7 +521,7 @@ Custom-register reads use a separate return path: one colour clock for
 data return, another for crossing the chipset's 16-bit bus, and one CPU
 synchronizer clock. They are deliberately not aligned to the chip-RAM
 clock boundary. Hardware probes have not yet isolated this path as fully
-as chip RAM; the existing copper-poll beam-position test agrees with the
+as chip RAM; the existing Copper-poll beam-position test agrees with the
 current model, while chip-write-plus-poll composite rows remain about 9%
 low in the recorded comparison.
 
@@ -572,17 +539,64 @@ match this model exactly; the two rows containing `NOP` are about 0.5%
 low. These are measurements of particular loops on one stock A1200, not a
 claim that the full 020 pipeline is cycle-exact.
 
+## 68040 timing
+
+[`timing_040.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.13.0/src/core/timing_040.rs)
+(m68k 0.12) gives the 68040 a single-issue pipeline model in place of the
+scaled approximation, which the same accelprobe columns (a 25 MHz A3640,
+two byte-identical serial captures) measured as ~2-2.5x pessimistic on
+plain execution: a taken-`dbra` loop runs 4.06 clocks per iteration where
+the approximation billed ~8, a `move.w`+`dbra` loop 4.08 (the one-clock
+body hides entirely in the branch resolution), and `mulu.w #imm`+`dbra`
+14.0 against ~35. The model reuses the 68060 opcode classifier: most
+ALU/move instructions cost their one-clock occupancy, data-dependent and
+unclassified costs derive from the corrected 68000 reference count as
+`(raw/4).max(1)`, an indexed EA adds a clock, and branches pay small static
+costs (taken Bcc/BRA 3, not-taken 2, DBcc 3 either way, computed flow
+changes a 4-clock refill floor) -- the 040 has no branch cache, so there is
+nothing to predict or fold. CINV/CPUSH cost a dozen clocks even on a clean
+line (the A3640 measures ~12 per `CPUSHL DC,(An)`, accelprobe row 15).
+Memory latency stays billed by the host bus per access, as on the 020 and
+060 paths, and exception entries keep the legacy scaled costs so the
+exception timing calibration is unchanged.
+
+DBcc-taken at 3 clocks lands the ubiquitous one-clock-body loop on the
+measured 4 per iteration; the empty `dbra` loop then reads 3 against the
+measured 4.06, the deliberate compromise of a model with no
+overlap/absorption stage. Residuals are not uniformly conservative: there
+is no execute-stage overlap (pessimistic), shifts and bit operations take
+the 060 class costs (optimistic where real 040 silicon runs those forms a
+clock or two slower), and the write-back stage and store buffer are not
+modelled (writes bill at bus rate).
+
+Re-running the probe on `timing-test/tt-a4000-040.toml` against the A3640
+captures: the `move.w`+`dbra` row is tick-exact, `mulu.w` and `cpushl` are
+within 7%, and the bare `dbra` reads the documented 3.0 against 4.06
+clocks. The `trap` rows stay 1.4-1.7x under (exception entries keep the
+legacy scaled costs) and `movem` 1.4x over; everything else that still
+differs is the bridge and fast-RAM region billing below, not the core.
+
+The same accelprobe columns quantify two effects no CPU timing table
+covers, both still open on the Copperline side:
+
+- The A3640/BFG9060 CPU-slot bridge increases chip-RAM `move.l` read latency
+  to 2.5-3.4 us (the 68030 board's chip path matches emulated timing directly).
+- Fast RAM regions exhibit distinct access speeds on hardware (CPU-card ~66 ns,
+  motherboard ~320 ns, Zorro III ~530 ns per sequential longword read) whereas
+  the current emulator bills all fast RAM at native CPU clock rates.
+
 ## MMU
 
-The 68030, 68040, and 68060 model the on-chip MMU (`has_pmmu`), so software that sets up
-and enables address translation runs rather than having its MMU writes ignored.
-The two parts differ enough to need separate walkers: the 68030 uses its
-programmable table walk (CRP/SRP selection, the optional function-code lookup
-level (TC FCL), the TC index fields TIA-TID, 4-/8-byte descriptor modes,
-early-termination descriptors, indirect descriptors when the configured
-levels are exhausted, and the long-format supervisor-only bit), while the
-68040 has a fixed-format three-level walk (root -> pointer -> page, 4 KB or
-8 KB pages, URP/SRP split by supervisor) keyed off its own TC layout. Both
+The 68030, 68040, and 68060 model the on-chip MMU (`has_pmmu`), so software
+that sets up and enables address translation runs rather than having its MMU
+writes ignored. The 030 and 040 differ enough to need separate walkers: the
+68030 uses its programmable table walk (CRP/SRP selection, the optional
+function-code lookup level (TC FCL), the TC index fields TIA-TID, 4-/8-byte
+descriptor modes, early-termination descriptors, indirect descriptors when
+the configured levels are exhausted, and the long-format supervisor-only
+bit), while the 68040 (and the 68060, which shares its walker) has a
+fixed-format three-level walk (root -> pointer -> page, 4 KB or 8 KB pages,
+URP/SRP split by supervisor) keyed off its own TC layout. Both walkers
 share the transparent translation registers (TTRs: the 030's TT0/1, the
 040's ITT0/1 + DTT0/1), which short-circuit the walk for a matching address
 range. Accesses carry their function code into the walk: `MOVES` translates
@@ -600,12 +614,13 @@ via `PMOVE PSR`); `PLOAD`/`PFLUSH` are accepted as no-ops on the 030 walk
 
 A 68040 table walk costs three descriptor fetches, far too much to pay on every
 access, so the 040 walker is fronted by an address-translation cache
-(`crate::mmu::atc`, mirrored on the real 64-entry ATC): a direct-mapped cache of
-(logical page -> physical page) keyed by page frame and supervisor flag. It is a
-pure cache -- never serialized (restored empty) -- and is flushed when the
-mapping could change: a write to TC / a root pointer / a TTR, or a PFLUSH. Like
-real hardware a plain write to a descriptor does not auto-flush; software must
-PFLUSH, which is where the ATC is cleared.
+(`mmu::atc` in the `m68k` crate, 64 entries like the real ATC): a
+direct-mapped cache of (logical page -> physical page) keyed by page frame
+and supervisor flag. It is a pure cache -- never serialized (restored
+empty) -- and is flushed when the mapping could change: a write to TC / a
+root pointer / a TTR, or a PFLUSH. As on real hardware, a plain write to a
+descriptor does not auto-flush; software must PFLUSH, which is where the
+ATC is cleared.
 
 The 68040 enforces page protection: a write to a write-protected page (the W
 bit, accumulated across the table and page descriptors) or a user access to a
@@ -702,7 +717,19 @@ microseconds of the interrupt.
 
 ## Exceptions
 
-If the guest triggers something unimplemented (an exotic custom-register
-edge case, say), the CPU may halt with an `EXCEPTION`. This is non-fatal:
-the window stays alive showing the last framebuffer, and the debugger can
-inspect the halted state.
+Guest exceptions -- bus and address errors, illegal and unimplemented
+instructions, traps, privilege violations -- are taken as the real hardware
+exceptions through the guest's vector table: the precise loop hands every
+trap to the core's no-op HLE handler, which declines it. Two conditions stop
+the machine instead:
+
+- A step result the wrapper does not expect ends the frame with an error
+  (`unexpected m68k step result ... at PC=...`). The window marks the CPU
+  halted and stops stepping, but stays alive showing the last framebuffer,
+  and the debugger can inspect the halted state. A headless capture run
+  fails instead, since its captures can never fire.
+- A double fault (a bus or address error during exception processing)
+  halts the CPU, as on real silicon (`M68kMachine::cpu_double_faulted`).
+  The window pauses and reports `CPU halted: double fault at pc ...` once,
+  on the Console and to the control protocol as a `double_fault` stop, and
+  leaves the state for inspection.

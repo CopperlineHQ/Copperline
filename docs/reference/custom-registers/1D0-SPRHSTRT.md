@@ -3,7 +3,7 @@ Offset: $1D0
 Access: write
 Chipset: ECS/AGA
 
-UHRES sprite horizontal start register.
+UHRES sprite horizontal start register (not emulated).
 
 ## Bitfields
 

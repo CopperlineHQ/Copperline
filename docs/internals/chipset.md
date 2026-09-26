@@ -1,8 +1,12 @@
 # Chipset modules
 
 Each custom chip is a module under `src/chipset/`, owned by the `Bus` and
-stepped in emulated time. Unit tests live inline in each module's
-`#[cfg(test)] mod tests` block; the suites are large and are the best
+stepped in emulated time; the CIAs and the keyboard MCU
+(`chipset/keyboard.rs`, see [](peripherals.md)) live there too, and the
+floppy controller is `src/floppy/`. Unit tests live inline in each
+module's `#[cfg(test)] mod tests` block, and the tests that need the whole
+bus or the renderer live in `src/bus/tests.rs` and
+`src/video/bitplane/tests.rs`. The suites are large and are the best
 specification of the modelled behaviour.
 
 ## Agnus (`agnus.rs`)
@@ -13,7 +17,7 @@ alternation) geometry, the long-field flag for interlace, and VPOSR/VHPOSR.
 It also owns DMACON and the display-fetch machinery: for FMODE=0 fetches
 the per-line fetch table comes from the DDF sequencer flop model
 (`src/chipset/ddf_sequencer.rs`; see the [arbitration model](timing) for
-the flop semantics - comparator edges, stop drain through a final
+the flop semantics: comparator edges, stop drain through a final
 modulo-applying unit, cross-line run carry, OCS/ECS rule differences).
 Each fetch unit uses the BPLCON0 value the sequencer sees at that point,
 so a mid-row plane-count change cannot retroactively fetch earlier words,
@@ -157,17 +161,21 @@ an overlay still resume, while new proven-disjoint blits save an empty one.
 Paula owns the interrupt system (INTENA/INTREQ, delivered through the
 modelled IPL-pin pipe and 68000 boundary sampling), serial, and audio.
 
-The IPL pipeline (`DEFAULT_IRQ_LATENCY_CCK`, 5 cck) models the propagation
-delay from interrupt assertion through the level encoder to the CPU IPL pins:
+The IPL pipeline (`DEFAULT_IRQ_LATENCY_CCK`, 5 CCK) models the propagation
+delay from interrupt assertion through the level encoder to the CPU IPL
+pins (see [interrupt-recognition latency](timing.md#interrupt-recognition-latency)):
 
-- **Independent pipelines**: Each interrupt source propagates independently to
-  the IPL pins, ensuring an asserted interrupt does not delay a pending
-  higher-priority interrupt.
-- **Waking from STOP**: A halted CPU waiting in `STOP` is awakened specifically
-  when the signal exits the pipeline rather than at arbitrary event boundaries.
-  This prevents interrupt handling jitter across raster lines, ensuring
-  cycle-accurate timing for demos that update sprite descriptors immediately
-  following the vertical blank (such as *Spooky Town* by Ghostown).
+- **Independent pipelines**: each interrupt source runs its own pipe
+  (the per-bit `irq_latency_visible_at` deadlines in `src/bus.rs`), so
+  asserting one source does not postpone another that is already on its
+  way to the pins.
+- **Waking from STOP**: the idle fast-forward of a CPU halted in `STOP` is
+  bounded by the moment a latched interrupt leaves its pipe
+  (`Bus::next_irq_visible_cck`), so the handler starts a few colour clocks
+  after the raise rather than a whole idle step late. Without that bound
+  the handler entry jitters across raster lines, which breaks software
+  that rewrites sprite descriptors straight after the vertical-blank
+  interrupt (regression example: *Spooky Town* by Ghostown).
 
 The rest of Paula:
 
@@ -197,12 +205,14 @@ The rest of Paula:
   which have not begun output, idle at the write.
   ADKCON attach modes feed the fetched words to the next channel's
   volume latch at word starts and period latch mid-word. LEN=0 plays a
-  full 65536-word block, as on hardware. Output is mixed in emulated
-  time to stereo with the LED filter, then resampled at the host
-  boundary.
+  full 65536-word block, as on hardware. Output is band-limited onto the
+  44.1 kHz mixer grid and mixed to stereo with the LED filter in emulated
+  time; the live output sink converts that to the host device's rate
+  ([](audio.md)).
 - **Serial**: SERDAT through a one-word transmit buffer and a timed shift
-  register to stdout; SERDATR reports TBE/TSRE/RBF. DiagROM's diagnostic
-  stream arrives this way.
+  register to the configured serial sink (stdout by default; see
+  [peripherals](peripherals.md#serial-sink)); SERDATR reports
+  TBE/TSRE/RBF. DiagROM's diagnostic stream arrives this way.
 - **Disk registers**: DSKLEN/DSKBYTR/DSKSYNC/DSKDAT and the disk-block
   interrupt, fed by the floppy controller below.
 - **Pots**: POTGO/POTGOR's integrating converter is H-sync-clocked. START
@@ -253,7 +263,7 @@ shows background between the bars).
 Lisa does not inherit it. Alfred Chicken runs its whole in-game display at
 BPLCON2 = 0x003F -- both codes 7 -- and draws an eight-plane dual playfield
 on real AGA hardware, which the Denise rule would blank to the background
-colour. The quirk reached us from an OCS/ECS-only reference, so it never
+colour. The quirk came from an OCS/ECS-only reference, so it never
 carried evidence about Lisa in the first place; WinUAE, which does model
 AGA, resolves the playfield colour from the plane bits alone and uses the
 codes only to mask sprites. On both chips the code still saturates in the
@@ -297,20 +307,19 @@ mid-frame (DblPAL), so there the reset follows the programmable frame's
 last line instead. The `vdiwprobe-flop` golden render pins the
 progressive-PAL case, where the fixed line and the frame's last line
 coincide; no hardware evidence yet pins the reset line on short fields
-or programmable totals. The
-latch is part of the save state: it is history-dependent, and control
-sessions can snapshot mid-frame where no register-derived reconstruction
-is exact.
+or programmable totals. The latch is part of the save state: it is
+history-dependent, and control sessions can snapshot mid-frame where no
+register-derived reconstruction is exact.
 
-Setting `DIWSTRT.V == DIWSTOP.V` on the same scanline (often below the visible
-area via `DIWHIGH`) creates a vertical display window that never opens,
-blanking bitplanes for the entire frame while buffers are redrawn. Sprites
-remain unaffected because they do not use the bitplane vertical comparator,
-allowing backdrop sprites (`BPLCON3.BRDRSPRT`) to remain visible across the
-blanking interval (e.g. *Nexus 7* scene transitions with
-`DIWSTRT.V = DIWSTOP.V = 301`). The level-based window test treats this tie as
-closed; `vdiwprobe-empty` validates this whole-frame blanking behavior
-(verified against vAmiga).
+Setting `DIWSTRT.V == DIWSTOP.V` (often below the visible area via
+`DIWHIGH`) creates a vertical display window that never opens, which
+software uses to blank the bitplanes for a whole frame while it redraws
+its buffers. Sprites do not use the bitplane vertical comparator, so
+backdrop sprites (`BPLCON3.BRDRSPRT`) stay visible through the blanking
+(regression example: *Nexus 7* scene transitions with
+`DIWSTRT.V = DIWSTOP.V = 301`). The level-based window test treats this
+tie as closed; the `vdiwprobe-empty` golden render (verified against
+vAmiga) pins the whole-frame blanking.
 
 If the registers are rewritten to matching values mid-frame after an earlier
 `DIWSTRT` match already opened the window, the window remains open until the
@@ -320,7 +329,7 @@ and falls back to level tests only when no DMA rows were fetched
 (`vdiwprobe-tieopen`).
 
 The interlace long-frame latch (VPOSR bit 15) auto-toggles only while
-BPLCON0 LACE is set; outside interlace it holds its value - the power-on
+BPLCON0 LACE is set; outside interlace it holds its value -- the power-on
 state is set, so progressive fields normally read LOF=1, and a value
 written through VPOSW persists until the next laced toggle. Non-laced
 frame timing always uses the long frame length regardless of the latch.
@@ -373,7 +382,7 @@ resetting the CPU core or clearing RAM. Copperline resets the CIA port
 state on that line, so CIA-A releases `/OVL` and the boot ROM overlay is
 visible again before Kickstart reads the reset vectors.
 
-## Floppy (`floppy.rs`)
+## Floppy (`floppy/`)
 
 The floppy subsystem is track-timed: a drive has a rotational position,
 and data under the head right now is what disk DMA sees. Track stepping
@@ -381,31 +390,36 @@ pays settle time, direction reversals cost more, and the index pulse fires
 once per revolution into CIA-B FLAG. The stepper also enforces a minimum
 step-pulse spacing (~40 us, 140 colour clocks): a pulse arriving sooner
 after the last accepted one -- in either direction -- is ignored, so the
-mechanism never over-steps on pulses faster than the head can move. Reads assemble MFM bitstreams from
-the 11-sector AmigaDOS track layout; DSKSYNC matching, word-at-a-time
-DSKDAT, and DMA into chip RAM behave as Paula documents. Non-WORDSYNC read
-DMA drains Paula's recovered 16-bit disk word phase even when DSKLEN is
-armed between disk-word boundaries; WORDSYNC is the explicit mode that
-realigns framing to a matched sync word before transfer and again on every
-later DSKSYNC match during it, so the sectors after an index wrap on a track
-whose cell count is not a multiple of 16 still land word-aligned (AROS's
-trackdisk.device reads 1.08 revolutions this way and scans the buffer on the
-word grid; Kickstart's reads without WORDSYNC and bit-searches itself).
+mechanism never over-steps on pulses faster than the head can move.
+
+Reads assemble MFM bitstreams from the 11-sector AmigaDOS track layout;
+DSKSYNC matching, word-at-a-time DSKDAT, and DMA into chip RAM behave as
+Paula documents. Non-WORDSYNC read DMA drains Paula's recovered 16-bit
+disk word phase even when DSKLEN is armed between disk-word boundaries.
+WORDSYNC is the explicit mode that realigns framing to a matched sync word
+before transfer and again on every later DSKSYNC match during it, so the
+sectors after an index wrap on a track whose cell count is not a multiple
+of 16 still land word-aligned (AROS's trackdisk.device reads 1.08
+revolutions this way and scans the buffer on the word grid; Kickstart's
+reads without WORDSYNC and bit-searches itself).
+
 DSKBYTR is driven by the track read shifter: received bytes and `DSKBYT`
-reflect the shifter's bit counter (reset by `WORDSYNC` matches whether or not
-a DMA transfer is active), while `WORDEQUAL` reflects the instantaneous comparator
-level (true only for the single cell matching `DSKSYNC`). Reading `DSKBYTR` clears
-`DSKBYT`, while the `DSKSYNC` interrupt latches the comparator edge. This ensures
-byte framing from arbitrary sync word phases on IPF and flux tracks, which is
-required by protection schemes such as Copylock (e.g. *Lemmings*).
-Supported image
-formats: ADF (read/write), gzip ADZ, single file ZIP, DMS (decompressed by
- `dms.rs`), UAE extended ADF, and read-only IPF (decoded by `ipf.rs`) and SCP
-images.
-Connected mechanisms with no media keep the active-low disk-change line
-asserted; a step pulse only clears that latch once media is actually
-present, so guest software sees a no-disk condition rather than unreadable
-track data.
+reflect the shifter's bit counter (reset by `WORDSYNC` matches whether or
+not a DMA transfer is active), while `WORDEQUAL` reflects the
+instantaneous comparator level (true only for the single cell matching
+`DSKSYNC`). Reading `DSKBYTR` clears `DSKBYT`, while the `DSKSYNC`
+interrupt latches the comparator edge. This keeps byte framing correct
+from any sync-word phase on IPF and flux tracks, which protection schemes
+such as Copylock depend on (regression example: *Lemmings*).
+
+Supported image formats (`floppy/formats.rs`): ADF (read/write), UAE
+extended ADF, DMS (decompressed by `dms.rs`), and read-only IPF (decoded
+by `ipf.rs`) and SCP flux images, each optionally gzip-packed (ADZ) or the
+single file in a ZIP. Real 3.5" drives attach through FluxBridge
+(`src/fluxbridge/`, [](../guide/fluxbridge.md)). Connected mechanisms with
+no media keep the active-low disk-change line asserted; a step pulse only
+clears that latch once media is actually present, so guest software sees a
+no-disk condition rather than unreadable track data.
 
 Standard ADF and AmigaDOS tracks are synthesized as one PAL-sized
 revolution: 11 sectors occupy 5984 MFM words, and the generated revolution
@@ -425,14 +439,15 @@ repeated byte or from forward and backward gap streams whose loop samples
 stretch to meet at the write splice in the middle. Each track is checked
 against the bit counts its descriptors declare and then rotated so the
 revolution starts at the index, matching the shape a flux capture already
-has. IPF track density variations (`IMGE` density field) are modeled as cell-time
-weights relative to nominal speed according to CAPS library specifications:
-Copylock Amiga masters key sectors at -5.5%, -0.5%, and +4.5% (blocks 4-6 or
-0-2), while Copylock ST, Speedlock, and Brierley models apply +/-5-15%
-weighting per block. Scaling the cell clock (`TrackRev::prefix_cck`) allows
-timing loops polling `DSKBYTR` to detect intentional cell density differences
-(such as Copylock checks on *Lemmings*). Weak bits currently replay as the
-single deterministic revolution stored in the file.
+has. IPF track density variations (the `IMGE` density field) are
+modelled as cell-time weights relative to nominal speed, following the
+CAPS library's definitions: Copylock Amiga masters key sectors at -5.5%,
+-0.5%, and +4.5% (blocks 4-6 or 0-2), while the Copylock ST, Speedlock,
+and Brierley models apply +/-5-15% weighting per block. Scaling the cell
+clock (`TrackRev::prefix_cck`) lets timing loops that poll `DSKBYTR`
+detect the intended cell density differences (the Copylock check on
+*Lemmings*, for example). Weak bits currently replay as the single
+deterministic revolution stored in the file.
 
 The synthesized drive sounds ([](../guide/configuration)) are driven by
 this model's real state transitions -- motor spin-up, seeks, the
@@ -456,14 +471,14 @@ turbo burst also refuses drives that are not ready).
 ## Known AGA/ECS gaps and non-goals
 
 Most ECS and AGA behaviour is implemented (the register notes above and
-[](video.md)); the chipset gaps that remain are:
+[](video.md)), including AGA palette reads through BPLCON2.RDRAM with
+BANK/LOCT selection and the read-only COLORxx window (the `rdram-aga`
+golden render); other ECS register readback is pinned by unit tests and
+the vAmigaTS sweep. The chipset gap that remains:
 
 - **Sub-unit AGA DDF stop effects** beyond whole-unit completion are not
   modelled; the current model starts from DDFSTRT and rounds DDFSTOP
   through complete FMODE units.
-- AGA palette reads through BPLCON2.RDRAM are modelled, including BANK/LOCT
-  selection and the read-only COLORxx window. Other ECS register readback is
-  pinned by unit tests and the vAmigaTS sweep.
 
 Deliberate non-goals, recorded so they are not re-investigated: A2024 /
 UHRES dual-scan display (a one-time "not emulated" warning is kept),

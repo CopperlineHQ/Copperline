@@ -10,4 +10,4 @@ Sets the programmable vertical blanking stop.
 - Bits 10-0: Vertical line number.
 - Bits 15-11: Ignored.
 
-BEAMCON0 selects whether programmable timing is used.
+With BEAMCON0.VARVBEN set, Copperline blanks the lines from VBSTRT to VBSTOP; equal values disable programmable vertical blanking.

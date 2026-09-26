@@ -3,7 +3,7 @@ Offset: $08C
 Access: write
 Chipset: OCS/ECS/AGA
 
-Copper instruction register address.
+Copper instruction register address (not emulated).
 
 ## Bitfields
 

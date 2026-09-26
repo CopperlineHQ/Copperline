@@ -7,13 +7,21 @@ Copperline includes a built-in GDB remote debugging stub:
 ```
 
 Port-only syntax (`2345` or `:2345`) binds to `127.0.0.1`. To bind to all
-interfaces on a trusted local network, specify `0.0.0.0:2345`.
+interfaces on a trusted local network, specify `0.0.0.0:2345`. The stub has
+no authentication, so do not expose it to untrusted networks.
 
 ## Headless and windowed modes
 
 `--gdb` runs headless: the stub takes control of the machine, halts at reset,
-advances unthrottled, and cannot be combined with an interactive window or
-scheduled capture flags.
+and advances unthrottled. It cannot be combined with an interactive window,
+the scheduled capture flags (`--screenshot-after`, `--expect-screenshot`,
+`--save-state-after`, `--dump-frames`, `--gif-after`), scheduled input,
+scheduled floppy or CD inserts, `--record-input`, `--exit-on-return`, or
+`--benchmark-until`. It serves one client
+at a time: a detach or dropped connection leaves the machine paused for the
+next client, and GDB's `kill` ends the process. Reverse execution is armed
+from the start, with the budget and snapshot interval taken from
+`COPPERLINE_DBG_RR_BUDGET_MB` and `COPPERLINE_DBG_RR_INTERVAL`.
 
 `--gdb-gui ADDR` attaches the GDB remote stub to an interactive windowed
 session:
@@ -34,8 +42,9 @@ session:
   (`kill` detaches rather than terminating the process so that VS Code "Stop
   Debugging" does not close the window).
 - Breakpoints and watchpoints are shared with the internal debugger and trigger
-  during the windowed frame loop. Breakpoints set within the UI remain independent,
-  and detaching GDB removes only points set by the remote client.
+  during the windowed frame loop; GDB's watchpoints cover at most eight memory
+  words in total. Breakpoints set within the UI remain independent, and
+  detaching GDB removes only points set by the remote client.
 - When execution halts during an active GDB `continue`, the stop event is sent
   to the client. With `--control-gui` attached to the same window, a
   control-protocol resume outstanding at the same time gets its stop reply
@@ -75,7 +84,9 @@ Start a 68k-aware GDB (such as `m68k-amigaos-gdb` or multiarch `gdb`) and connec
 ```
 
 The target starts halted at reset. The stub supports:
-- Register reading and writing (`d0`-`d7`, `a0`-`a5`, `fp`, `sp`, `ps`, `pc`)
+- Register reading and writing (`d0`-`d7`, `a0`-`a5`, `fp`, `sp`, `ps`, `pc`,
+  described to GDB as the `org.gnu.gdb.m68k.core` feature; FPU registers are
+  not exposed)
 - Memory read and write operations
 - Breakpoints plus write (`Z2`), read (`Z3`), and access (`Z4`) watchpoints
 - Single-stepping and continuation; forced PC writes discard stale instruction prefetch
@@ -93,20 +104,44 @@ GDB's `monitor` command provides access to Amiga custom chipset state, raster po
 Copper disassembly, and Exec structures:
 
 ```gdb
+(gdb) monitor help             # List the monitor commands
+(gdb) monitor reset            # Warm-reset the machine (keyboard reset)
 (gdb) monitor status           # Summary: PC, SR, frame, beam position, reverse debug status
 (gdb) monitor beam             # Current raster beam position (VPOS, HPOS) and colour clock
 (gdb) monitor custom           # Custom chipset state dump
 (gdb) monitor reg DMACON       # Read custom register without side effects
 (gdb) monitor write-reg COLOR00 00F # Write custom register
+(gdb) monitor watch-reg BPLCON0 # Stop when the CPU or Copper writes the register
+(gdb) monitor unwatch-reg BPLCON0 # Remove one register watch
+(gdb) monitor clear-reg-watches # Remove every register watch
 (gdb) monitor copper           # Disassemble Copper instructions
 (gdb) monitor beam-trap 100 40 # Break when beam reaches VPOS 100, HPOS 40
+(gdb) monitor clear-beam-traps # Remove every beam trap
 (gdb) monitor copper-break C01000 # Break when Copper PC reaches address
+(gdb) monitor clear-copper-breaks # Remove every Copper breakpoint
+(gdb) monitor stepover         # Step over a BSR/JSR/TRAP (single step otherwise)
+(gdb) monitor finish           # Run until the current subroutine returns
+(gdb) monitor return-to-program # Run until PC leaves $F80000-$FFFFFF
 (gdb) monitor segments         # List loaded hunk segments for current process
 (gdb) monitor who F81234       # Name a live ROM/LVO address and offset
+(gdb) monitor execbase         # Exec's scheduler state and boot-time machine facts
 (gdb) monitor tasks            # List Exec ready, waiting, and active tasks
-(gdb) monitor memlist          # List Exec memory allocations
-(gdb) monitor return-to-program # Run until PC leaves $F80000-$FFFFFF
+(gdb) monitor task input.device # One task or process in full (default: ThisTask)
+(gdb) monitor memlist          # Exec's memory regions with free space and attributes
+(gdb) monitor loadseg-break    # Toggle a stop whenever a new program is loaded
+(gdb) monitor loadseg-list     # List tracked program loads and their segments
 ```
+
+Register arguments take a name or a hex offset (`NAME|OFFSET`), and
+`write-reg` values are hex. `beam-trap VPOS [HPOS]` takes decimal beam
+positions; it and `copper-break ADDR` (hex) toggle, so repeating the command
+removes the trap. `copper [auto|pc|ADDR] [COUNT]` starts at `COP1LC`
+(`auto`, the default), the Copper's current PC (`pc`), or a hex address, and
+disassembles COUNT instructions (COUNT is hex; the default is 64). `task` takes
+a `$`-prefixed address or a task name (matched case-insensitively), and
+with no argument shows ExecBase->ThisTask. `stepover`, `finish`, and
+`return-to-program` stop early at a breakpoint or watchpoint and give up
+after 5,000,000 instructions.
 
 `monitor who` reads the running guest's Exec library and device vectors, so it
 follows `SetFunction()` patches and does not depend on the Kickstart version.
@@ -181,8 +216,9 @@ without its extension, beside a matching `.exe` hunk executable). The backend
 keeps the extension's patched `m68k-amiga-elf-gdb`, maps its model and memory
 presets to Copperline CLI arguments, and seeds the guest RTC from the host
 clock. Use the bundled AROS ROM (omit `kickstart`) or Kickstart 1.3 or
-newer for `--run`; detached launches require 2.0+ or AROS. The standard Marketplace extension does not contain this
-backend; keep the fork installed as described in the setup guide.
+newer for `--run`; detached launches require 2.0+ or AROS. The standard
+Marketplace extension does not contain this backend; keep the fork installed
+as described in the setup guide.
 
 The equivalent manual command is:
 
@@ -207,9 +243,10 @@ default; the switch explicitly selects the patched GDB's wire contract:
   Signal-bearing continue/step requests resume the CPU after the exception;
   they do not inject a second exception into the whole-machine target.
 - Registers are D0-D7, A0-A7, SR, PC, each represented by a 32-bit word.
-- `qAttached` returns `1`; `k` detaches; `monitor reset` restores the saved program-entry state after a `--run`
-  attachment, preserving symbol addresses; without an entry snapshot it resets
-  the machine.
+- `qAttached` returns `1`, and `k` detaches. `monitor reset` restores the
+  saved program-entry state after a `--run` attachment, preserving symbol
+  addresses; without an entry snapshot it warm-resets the machine, as it
+  does in the standard dialect.
 - Guest debug text and monitor messages have a `DBG: ` prefix.
 
 ```gdb
@@ -225,8 +262,8 @@ success and restores its instrumentation on failure. Both transports
 suspend their session-owned exception catches and memory watches during
 capture, restoring them and their watch baselines afterward.
 
-The legacy binary has a fixed PAL 227×313 DMA grid and carries chip and slow
-RAM only. NTSC and programmable geometry use Copperline's native
+The legacy binary has a fixed PAL 227 by 313 DMA grid and carries chip and
+slow RAM only. NTSC and programmable geometry use Copperline's native
 [profile captures](profiling.md). The upstream `.uss` editor's UAE launch
 path is separate; use [USS import](../guide/winuae-state.md) for those states.
 
@@ -243,5 +280,6 @@ python3 tools/check-bartman-gdb.py \
 
 An optional `--unwind FILE` uses the extension's compact table; `--gui`
 checks the windowed transport, including an exact breakpoint stop when
-automatic launch warp ends at the same boundary. The output directory contains emulator/GDB
-logs and the binary profile, suitable for `tools/check-bartman-profile.cjs`.
+automatic launch warp ends at the same boundary. The output directory
+contains the emulator and GDB logs and the binary profile, suitable for
+`tools/check-bartman-profile.cjs`.

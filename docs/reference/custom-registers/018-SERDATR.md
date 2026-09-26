@@ -14,4 +14,4 @@ Reads serial receive data and transmit/receive status.
 - Bit 11: RXD, synchronized receive-pin level.
 - Bits 9-0: Received data and stop bits.
 
-Acknowledge RBF through INTREQ; reading this register does not clear it.
+Acknowledge RBF through INTREQ; reading this register does not clear it. Clearing INTREQ.RBF also clears OVRUN.

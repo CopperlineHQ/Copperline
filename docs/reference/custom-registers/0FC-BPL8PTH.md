@@ -11,4 +11,3 @@ Sets the upper word of bitplane 8's DMA pointer.
 - Bits 15-5: Ignored.
 
 The usable address range also depends on the fitted Agnus and chip RAM.
-

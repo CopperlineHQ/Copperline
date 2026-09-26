@@ -3,7 +3,7 @@ Offset: $1D2
 Access: write
 Chipset: ECS/AGA
 
-UHRES sprite horizontal stop register.
+UHRES sprite horizontal stop register (not emulated).
 
 ## Bitfields
 

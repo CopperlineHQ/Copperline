@@ -10,4 +10,4 @@ Sets the programmable horizontal blanking stop.
 - Bits 8-0: Horizontal position in colour clocks.
 - Bits 15-9: Ignored.
 
-BEAMCON0 selects whether programmable timing is used.
+With BEAMCON0.BLANKEN set, Copperline blanks each line from HBSTRT to HBSTOP; equal values disable programmable horizontal blanking.

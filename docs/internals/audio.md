@@ -3,7 +3,12 @@
 `src/audio/mod.rs` defines the host-facing sinks (`AudioSink`, `NullSink`,
 `CpalSink`, and `WavSink`). `src/audio/mux.rs` defines `AudioMux`, which
 routes the master mix and individual sources to playback or WAV capture.
-Mixing, LED filtering, volume, and stereo width are applied in
+`src/audio/resample.rs` holds the windowed-sinc `Resampler` (for sources
+with their own sample rate, such as the MT-32 engine or a Toccata codec)
+and the `Decimator` described below, and `src/audio/mpeg.rs` pre-parses
+MPEG Layer III frame headers for the [MHI](mhi.md) board and for cue-sheet
+MP3 tracks (`src/cdrom/mp3.rs`). Mixing, LED
+filtering, volume, and stereo width are applied in
 `Paula::push_mixed_frame` (`src/chipset/paula.rs`).
 
 ## Getting Paula onto the host grid
@@ -101,16 +106,23 @@ live playback (`CpalSink`), a mixed WAV (`WavSink`, `--audio-wav`), or no
 output (`NullSink`, `--noaudio`). Optional stem writers capture the source
 taps alongside it.
 
+`CpalSink` (desktop `frontend` builds only) queues the 44.1 kHz mixer
+frames on a lock-free ring that the pacer keeps about 150 ms ahead of the
+device. The cpal callback drains it and converts to the output device's
+own rate by linear interpolation (`CpalResampler`). That conversion is
+host-side only: WAV capture and stems always record the mixer grid.
+
 ## The taps
 
-`push_mixed_frame` pushes seven named sources, each at the point in the
-signal chain described below (not necessarily the point that ends up in
-the master mix -- see each entry):
+`push_mixed_frame` pushes these named sources (seven names in all, of
+which `mt32` and `coppersynth` share one tap), each at the point in the
+signal chain described below. That is not necessarily the point that ends
+up in the master mix; see each entry:
 
 | Source | Tap point | Notes |
 |---|---|---|
 | `paula` | Post-LED-filter, pre-drive/CD/MT-32/Coppersynth/Toccata/MHI | The pure Paula-channel sum |
-| `paula` sub-channels `0`..`3` | `channel_mixed_sample(i)`, scaled | **Not** LED-filtered -- real hardware's filter sits after the channel mixer's summation, so a per-channel stem naturally excludes it |
+| `paula` sub-channels `0`..`3` | Each channel's `Decimator` output, scaled by `PAULA_MIX_SCALE` | **Not** LED-filtered -- real hardware's filter sits after the channel mixer's summation, so a per-channel stem naturally excludes it |
 | `drivesounds` | The synthesized drive-noise sample | Mono; written to a stem as `(sample, sample)` |
 | `cdda` | Post `cd_muted` gate | Reflects audible content -- unlike the debugger's CD scope tap, which stays pre-mute for visibility |
 | `mt32` | The in-process MT-32 synth frame | Silence (`0.0, 0.0`) once the serial sink has latched `synth_silent` |
@@ -135,6 +147,11 @@ for whichever files the selected `StemGranularity` values and registered
 - `Channel` -- `DIR/{id}-{channel}.wav` for each named sub-channel of each
   registered source. Select `Channel` explicitly; `Source` does not include it.
 
+On the command line, `--audio-stems DIR` names the directory and
+`--audio-stems-mode` takes a comma-separated list of `master`, `source`,
+and `channel` (or `[audio] stem_granularity` supplies the default); a
+stem capture replaces live output.
+
 `main.rs::configured_audio_stem_sources` selects sources once at startup:
 
 - `paula` and `drivesounds` always register. Disabled drive sounds produce
@@ -151,6 +168,7 @@ can differ from the startup configuration. Unused sources produce silent
 files. Registration does not change during capture: adding a source later
 will not create a missing stem writer.
 
+(audio-determinism)=
 ## Determinism
 
 `Paula::advance_audio` schedules master and stem samples in emulated time.
@@ -160,7 +178,8 @@ runs. Reproducibility still depends on repeatable source input; see the
 [host boundary](architecture.md#determinism-and-the-host-boundary) and
 [MHI's floating-point limits](mhi.md#copperline-implementation-notes).
 
-## Savestates
+(audio-save-states)=
+## Save states
 
 `Paula::audio: AudioMux` is skipped by serde because it is host output.
 `Bus::adopt_host_resources` moves the live mux, including open stem writers,

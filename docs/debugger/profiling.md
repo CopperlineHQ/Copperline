@@ -1,19 +1,16 @@
 # Per-frame profiling
 
-For an illustrated IDE workflow, see [VS Code CPU profiling](vscode.md#capture-a-cpu-profile)
-and [Bartman frame profiling](vscode-bartman.md#capture-and-explore-a-frame),
-including installation of the Copperline fork independently of upstream.
+For illustrated IDE workflows, see [VS Code CPU profiling](vscode.md#capture-a-cpu-profile)
+and [Bartman frame profiling](vscode-bartman.md#capture-and-explore-a-frame);
+the latter also covers installing the Copperline fork independently of the
+upstream extension.
 
 The `profile.start` method on the [control protocol](control.md) captures
 per-frame performance data for external profilers, analysis tools, and scripts.
 Only one profile capture can run at a time; call `profile.stop` on an active
-session before starting a new one.
-
-For static footprint rather than runtime cost, `copperline-ctl size-report
-PROG [--elf PROG.elf] [--out FILE]` emits a `.cpuprofile` weighted in bytes.
-Its hierarchy is hunk, section, and function, with unattributed bytes kept as
-an explicit node. The VS Code extension's **Profile File Size** command runs
-the same converter and opens the result.
+capture before starting a new one. `path` names the capture directory; it
+defaults to a new `copperline-profile-<timestamp>` directory in the
+[traces folder](../guide/ui.md#where-files-go).
 
 ```text
 profile.start {"path": "out/profile", "frames": 500, "slots": true,
@@ -39,11 +36,15 @@ profile.status
 
 Each committed emulated frame appends a JSON object to `profile.jsonl` in the
 output directory. When the capture completes or `profile.stop` is called, a
-`profile.json` summary is written beside it. Streaming to `profile.jsonl`
-ensures that recorded data is preserved even if emulation stops unexpectedly.
-The `frames` parameter defaults to 500 (approx. 10 seconds in PAL) and is
-capped at 100,000. When the frame budget is reached, capture halts
-automatically (`profile.status` reports `done`).
+`profile.json` summary is written beside it. Because the records are streamed,
+`profile.jsonl` keeps what was recorded even if emulation stops unexpectedly.
+The `frames` parameter defaults to 500 (about 10 seconds of PAL) and is
+capped at 100,000. When the frame budget is reached, recording stops by itself
+(`profile.status` reports `done`).
+
+`registers` and `unwind` require `"samples": true`, and `relocation_bases` and
+`code_ranges` require `samples` or `coverage`. A `coverage` capture cannot run
+while a [`--coverage`](#guest-coverage) run is already counting.
 
 An optional `trigger` keeps the profiler armed but does not write records until
 an absolute emulated `frame` is reached or a completed frame's busy colour-clock
@@ -54,12 +55,12 @@ Because a deferred trigger omits the preceding slot writes, `memory: true`
 cannot be combined with `trigger`: an offline consumer would not have a RAM
 baseline aligned with the first recorded frame.
 
-Running a profile capture activates the Frame Analyzer's cheap owner tracing.
-`"slots": true` promotes it to the full per-colour-clock record level, which
-temporarily suspends run-ahead input latency reduction. Tracing is shared with
-the Frame Analyzer UI pane: closing the UI pane does not interrupt an active
+A profile capture arms the Frame Analyzer's bus tracing: cheap owner tracing,
+promoted to full per-colour-clock records by `"slots": true`. Run-ahead input
+latency reduction is suspended while the tracing is armed. Tracing is shared
+with the Frame Analyzer pane: closing the pane does not interrupt an active
 profile capture, and stopping a profile capture leaves tracing enabled if the
-UI pane remains open.
+pane is still open.
 
 ## `profile.jsonl`
 
@@ -75,7 +76,7 @@ One JSON object per committed frame:
 | `rows`, `line_cck`, `cck_length` | Raster geometry: scanline count, clocks per line, and total clocks per frame. |
 | `owner_cck` | Clocks granted per chip-bus owner (`refresh`, `bitplane`, `sprite`, `disk`, `audio`, `copper`, `blitter`, `cpu`, `idle`). |
 | `blitter` | `busy_cck` (clocks blitter requested bus) and `starve_cck` (breakdown of owners that stalled it). |
-| `blits` | List of blits started during the frame (max 64): control words, size, pointers, and start/end beam positions. |
+| `blits` | The blits the frame references, including one still running from the previous frame (at most 64): control words, size, pointers, and start/end beam positions. |
 | `cpu` | The CPU's side of the arbitration: `wait_cck` (colour clocks the CPU asked for the chip bus and was denied), `wait_by` (those clocks by denier: `refresh`, `bitplane`, `sprite`, `disk`, `audio`, `copper`, `blitter` with BLTPRI clear, `blitter_nasty` with BLTPRI set including its warm-up fence, and `port` for the 020+ chip port's own turnaround), `wait_by_kind` (by the pending access: `read`, which includes the 68000's opcode prefetches since the CPU core issues them as plain word reads; `fetch` for immediate and extension words read outside the prefetch queue; `write`; `custom` for custom-register accesses), `stall_pcs` (up to 16 `{"pc", "cck"}` entries, the instructions that waited longest, longest first), `stall_pcs_distinct` and `stall_pcs_other` (clocks pooled once 4096 distinct PCs are kept). Zero entries are omitted from the maps. |
 | `partial` | True if tracing was enabled mid-frame. |
 | `registers` | Frame-start snapshot: all 256 custom-register words, `chipset_flags`, and the AGA palette's 256 high and low nibbles. Present on every traced frame. |
@@ -91,20 +92,21 @@ One JSON object per committed frame:
 On the precise CPU loop that is the current instruction; under `[cpu] jit`
 the PC is republished once per batch, so the attribution is per batch.
 
-If timeline position moves backward (via state load or reverse step), a
-`{"marker": "reposition", "frame": N}` marker is emitted to rebaseline
-instruction counters.
+If the timeline moves backward (a state load or a reverse step), a
+`{"marker": "reposition", "frame": N}` line is written and the instruction
+counters are rebaselined.
 
 ## `profile.json`
 
-Written when the profile stops: contains `version`, machine configuration,
-capture options, the list of chip-bus owner names (`owners`) and CPU wait
-classes (`cpu_wait_classes`), `started`/`ended` timeline points,
-`frames_written`, and a snapshot of registered uaelib resources (matching
-`debug.resources`) for address labeling. `rom_symbols` snapshots the running
-guest's ROM ranges, resident modules, and live library/device LVO targets at
-capture stop; this makes conversion deterministic while still reflecting
-`SetFunction()` patches. It also records `systemStackLower`,
+Written when the profile stops. It contains `version`, the machine
+configuration, the capture options, the chip-bus owner names (`owners`) and
+CPU wait classes (`cpu_wait_classes`), the `started`/`ended` timeline points,
+`frames_written`, `samples_total`, `irq_cck`, `triggered_at`, the `coverage`
+summary of a coverage capture, and a snapshot of the registered uaelib
+resources (matching `debug.resources`) for address labelling. `rom_symbols`
+snapshots the running guest's ROM ranges, resident modules, and live
+library/device LVO targets at capture stop; this makes conversion deterministic
+while still reflecting `SetFunction()` patches. It also records `systemStackLower`,
 `systemStackUpper`, `stackLower`, and `stackUpper`, read from ExecBase and
 ThisTask when a valid AmigaOS task is running. An unreadable ExecBase makes
 all four fields null; an unavailable or implausible ThisTask leaves the two
@@ -125,8 +127,8 @@ this packed, little-endian 24-byte layout:
 
 | Offset | Type | Field |
 |---:|---|---|
-| 0 | u16 | `reg`: custom-register offset; bit `0x1000` marks a CPU access (`0x1000` alone is ordinary CPU memory, while `0x1000 | offset` is a CPU custom-register access); `0xffff` when not applicable |
-| 2 | u8 | `kind`: refresh 1, CPU 2, Copper 3, audio 4, blitter 5, bitplane 6, sprite 7, disk 8, conflict 9 |
+| 0 | u16 | `reg`: custom-register offset; bit `0x1000` marks a CPU access (`0x1000` alone is ordinary CPU memory, while `0x1000 \| offset` is a CPU custom-register access); `0xffff` when not applicable |
+| 2 | u8 | `kind`: idle 0, refresh 1, CPU 2, Copper 3, audio 4, blitter 5, bitplane 6, sprite 7, disk 8, conflict 9 |
 | 3 | u8 | `subtype`: CPU code/data; Copper move/wait/skip; audio 0-3; bitplane 1-8; sprite 0-7; blitter A-D plus fill bit `0x10` and line bit `0x20` |
 | 4 | u8 | `size`: transferred bytes (1 through 4 for CPU/CIA, 2 for ordinary DMA, 4 or 8 for grouped AGA fetches; zero when no data transfer is attached) |
 | 5 | u8 | `ipl`: CPU-visible interrupt level at this slot |
@@ -136,15 +138,15 @@ this packed, little-endian 24-byte layout:
 | 20 | u32 | `events`: hardware-edge bits listed below |
 
 The same fields are available live from `frame.slots {"row": V}` and in the
-Frame Analyzer's selected/hovered-slot readout. On that JSON surface, `data`
-is a fixed-width hexadecimal string so all 64 bits remain exact.
+Frame Analyzer's selected-slot readout. In the JSON, `data` is a fixed-width
+hexadecimal string so all 64 bits remain exact.
 
 Each frame's `blits` array also carries a stable blit ID, start/end frame and
 beam positions, direction, fill/line mode, enabled channels, all four
 pointers/modulos, A/B shifts, A masks, minterm and formula, effective A/B/C
 constant inputs (including BLTBDAT's write-time-shifted hold latch),
 captured-word counts, and clocks used versus stalled. An in-flight blit is
-referenced from both adjacent frame records and finalised in both when it
+referenced from both adjacent frame records and finalized in both when it
 ends. The full DMA words remain in the live trace for `blit.render`; the
 profile keeps their bounded counts while the slot sidecar is the lossless
 offline transfer stream.
@@ -184,12 +186,11 @@ HDIWS/HDIWE, and DDF events mark their programmable comparator edges.
 `registers.chipset_flags` uses bit 0 for AGA, bit 1 for ECS Agnus or newer,
 bit 2 for NTSC, bit 3 for interlace, and bit 4 for the LOF field.
 
-When precise sampling is enabled, the summary also records
-`cck_per_cpu_cycle`, `samples_total`, `irq_cck`, every loaded hunk base and
-executable range, the unwind text base and size, and the sidecar layouts.
-Samples use colour clocks (CCK), Copperline's native
-chipset time unit; `cck_per_cpu_cycle` converts the configured CPU clock to
-that unit.
+When precise sampling or coverage is enabled, the summary's `sampling` object
+also records `cck_per_cpu_cycle`, every loaded hunk base and executable range,
+the unwind text base and size, and the sidecar layouts. Samples use colour
+clocks (CCK), Copperline's native chipset time unit; `cck_per_cpu_cycle`
+converts the configured CPU clock to that unit.
 
 ## Precise CPU samples and unwinding
 
@@ -265,7 +266,7 @@ inside the capture's `code_ranges` (the program's code hunks) and a single
 total for everything retired outside them: Kickstart, libraries, other
 tasks. Nothing is written per frame; the histogram is written once as
 `coverage.bin` when the capture stops (or reaches its frame budget), and
-`profile.json` summarises it under `coverage`. `relocation_bases` is
+`profile.json` summarizes it under `coverage`. `relocation_bases` is
 recorded as for samples, so the offline converter can relocate the
 program's debug information. Without `code_ranges` every address is counted
 in a bounded sparse map (1M distinct addresses), which is enough for a small
@@ -305,7 +306,7 @@ including lines never executed, and the `LF`/`LH`/`FNF`/`FNH` totals.
 
 A line's count is gcov-like: over each contiguous run of line-table rows for
 the line, the highest hit count of any instruction in the run, summed across
-the runs, so a `for` header split into an initialisation run and a test run
+the runs, so a `for` header split into an initialization run and a test run
 counts each pass once. A function's count is the hit count of its entry
 instruction (or of its most executed instruction when control only entered
 mid-body).
@@ -341,32 +342,33 @@ relocates its debug information by the segments the loader reports (a
 `PROG.elf` beside the executable is used automatically), counts from the
 program's first instruction to its return, and writes the lcov file when the
 boot script's completion marker shows the program exited. Counting stops the
-moment the program's CLI drops its seglist (cli_Module), so the command the
+moment the program's CLI drops its seglist (`cli_Module`), so the command the
 script runs next is not counted even when the loader places it over the
 program's freed hunks, as the AROS ROM does with its top-of-memory LoadSeg
-allocations. On its own the flag is a headless
-capture run like `--screenshot-after`: unpaced, windowless, ending with the
-program (or after 60 emulated seconds if it never loads, leaving an
-all-zero file that still lists every line and function). Combine it with
-`--screenshot-after` and friends to bound a program that does not exit; the
-file is then written when the run ends, or, with `--control-gui`/`--gdb-gui`,
-when the windowed session closes. While the program runs the file is
-rewritten every five emulated seconds, so an interrupted run leaves a
-current one behind. `--coverage-source-map FROM=TO` (repeatable) rewrites
-source paths as `--source-map` does. The [DAP adapter](dap.md#launch-and-attach)'s
-`coverage` launch argument passes the same flag.
+allocations.
+
+On its own the flag makes a headless capture run like `--screenshot-after`:
+unpaced, windowless, and ending with the program (or after 60 emulated seconds
+if it never loads, leaving an all-zero file that still lists every line and
+function). Combine it with `--screenshot-after` and friends to bound a program
+that does not exit; the file is then written when the run ends, or, with
+`--control-gui`/`--gdb-gui`, when the windowed session closes. While the
+program runs, the file is rewritten every 250 frames (five seconds of PAL), so
+an interrupted run leaves a current one behind. `--coverage-source-map FROM=TO`
+(repeatable) rewrites source paths as `--source-map` does. The
+[DAP adapter](dap.md#launch-and-attach)'s `coverage` launch argument passes
+the same flag.
 
 ## Storage overhead
 
-Enabling `slots` keeps one 24-byte record per colour clock live (about 1.7 MiB
+Enabling `slots` keeps one 24-byte record per colour clock live (about 1.6 MiB
 for a 313x227 PAL frame) and writes about the same amount per frame, plus the
 roughly 2-20 KB run-length encoded grids. Setting `"memory": true` adds one
-copy each of chip and slow RAM. Setting `"screenshots": "every"` produces 50 PNG images per emulated
-second in PAL. Precise sampling is larger: without registers each sample is
-the call stack plus one word; registers add 68 bytes per sample. Coverage keeps four bytes per instruction
-word of the code ranges in memory and writes them once. All four
-options are disabled by default. Captures up to 100,000 frames are accepted.
-
+copy each of chip and slow RAM. Setting `"screenshots": "every"` produces 50
+PNG images per emulated second in PAL. Precise sampling is larger: without
+registers each sample is the call stack plus one word; registers add 68 bytes
+per sample. Coverage keeps four bytes per instruction word of the code ranges
+in memory and writes them once. All of these options are off by default.
 
 ## Profiling a saved machine offline
 
@@ -379,10 +381,11 @@ copperline-ctl profile scene.uss --rom kickstart.rom --frames 2 \
   --format bartman --out out/scene.profile
 ```
 
-The default writes the native capture directory with instruction/register
-samples, DMA slots, replay memory and screenshots. `--frames` accepts 1-100.
-A native state supplies its own ROM; a USS file requires the matching ROM
-and discards a reconstructed frame before profiling. See
+The default `--format native` writes the native capture directory with
+instruction/register samples, DMA slots, replay memory and a screenshot of
+every frame. `--frames` accepts 1-100 (default 1). A native state supplies its
+own ROM; a USS file requires the matching ROM and discards a reconstructed
+frame before profiling. See
 [USS coverage and limitations](../guide/winuae-state.md).
 
 Here `--format bartman` selects the legacy binary file documented under
@@ -390,10 +393,17 @@ Here `--format bartman` selects the legacy binary file documented under
 `profile-report --format bartman` command still writes an annotated JSON
 `.cpuprofile` from an existing native capture.
 
-
 For interoperability checks, compile the upstream extension (`npm ci`,
 `npx tsc -p .`) and run its real parser against the exported file:
 
 ```sh
 node tools/check-bartman-profile.cjs /path/to/vscode-amiga-debug scene.profile
 ```
+
+## Static size profile
+
+For static footprint rather than runtime cost, `copperline-ctl size-report
+PROG [--elf PROG.elf] [--out FILE]` emits a `.cpuprofile` weighted in bytes.
+Its hierarchy is hunk, section, and function, with unattributed bytes kept as
+an explicit node. The VS Code extension's **Profile File Size** command runs
+the same converter and opens the result.

@@ -51,10 +51,12 @@ The PDF export collects the chapters listed in `myst.yml` under `exports`.
 The individual custom-register reference pages are available in the HTML manual
 and embedded debugger help; they are not included in the PDF.
 
-The helper renders MyST's generated sources with native Typst tables. This avoids
-the legacy `tablex` helper's layout-convergence failures and incorrect page counts
-in long manuals. It also corrects menu arrows emitted as literal `arrow.r` text
-by MyST 1.10. Markdown sources and the downloaded templates are left unchanged.
+The helper runs `myst build --pdf` (passing on its own arguments, such as
+`--ci --strict`), rewrites the generated Typst sources to use native Typst
+tables, and compiles them with `typst`. This avoids the legacy `tablex`
+helper's layout-convergence failures and incorrect page counts in long
+manuals. It also corrects menu arrows emitted as literal `arrow.r` text by
+MyST 1.10. Markdown sources and the downloaded templates are left unchanged.
 New tablex features fail the build until an equivalent native mapping is added.
 
 ## Validation
@@ -75,15 +77,20 @@ to check their format and control-protocol integration.
 ## Conventions
 
 - Screenshots live in `docs/images/`. Emulator screenshots are taken with
-  deterministic headless runs (`--screenshot-after`), and UI panel images
-  with `COPPERLINE_UI_PREVIEW=1 cargo test --release
-  panels_render_into_their_rects` (output in `target/ui-preview-*.png`),
-  so they can be regenerated exactly. The VS Code walkthroughs use real
-  desktop captures under `images/vscode/`; their provenance and recreation
-  notes are in `images/vscode/README.md`. These include IDE state and are
-  not deterministic framebuffer fixtures.
+  deterministic headless runs (`--screenshot-after`). Software UI images
+  come from the UI tests run with `COPPERLINE_UI_PREVIEW=1` (output in
+  `target/ui-preview-*.png`): `cargo test --release
+  panels_render_into_their_rects` for the panels, and the MT-32,
+  Coppersynth and keyboard panel tests for those strips. The egui inspector
+  images come from the ignored GPU preview tests listed in
+  `internals/video.md`, which write to `target/egui-debugger/`. All of
+  them can be regenerated rather than captured by hand. The VS Code
+  walkthroughs are the exception: real desktop captures under
+  `images/vscode/`, with provenance and recreation notes in
+  `images/vscode/README.md`. They include IDE state and are not
+  deterministic framebuffer fixtures.
 - Keep the hardware-first rule in prose too: describe hardware behaviour,
   and name software titles only as regression examples.
 - Detailed timing rationale lives in `internals/timing.md` and
-  `internals/cpu.md`; the guide chapters summarise and link rather than
+  `internals/cpu.md`; the guide chapters summarize and link rather than
   duplicate.

@@ -1,9 +1,9 @@
 # BPLHMOD
 Offset: $1E6
 Access: write
-Chipset: AGA
+Chipset: ECS/AGA
 
-UHRES bitplane modulo register.
+UHRES bitplane modulo register (not emulated).
 
 ## Bitfields
 

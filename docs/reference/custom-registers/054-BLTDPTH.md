@@ -3,7 +3,7 @@ Offset: $054
 Access: write
 Chipset: OCS/ECS/AGA
 
-Sets the upper word of the BLTD pointer.
+Sets the upper word of the blitter channel D DMA pointer.
 
 ## Bitfields
 
@@ -11,4 +11,3 @@ Sets the upper word of the BLTD pointer.
 - Bits 15-5: Ignored.
 
 The usable address range also depends on the fitted Agnus and chip RAM.
-

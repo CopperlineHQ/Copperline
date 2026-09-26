@@ -1,10 +1,10 @@
 # Debug Adapter Protocol (IDE debugging)
 
 `copperline-ctl --dap` is a [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/)
-server: VS Code, nvim-dap and any other DAP client can debug a program
+server. VS Code, nvim-dap and other DAP clients use it to debug a program
 running in Copperline with source-level breakpoints and stepping, the
 register file, locals and globals, memory, the custom chipset, reverse
-execution and a Debug Console, without a GDB in between.
+execution and a Debug Console, with no GDB in between.
 
 The adapter is a client of the [control protocol](control.md), like the
 MCP mode. It launches an emulator with `--run PROG` (windowed by default,
@@ -26,12 +26,14 @@ For installation, executable paths, a complete launch configuration, and
 screenshots, start with the [VS Code guide](vscode.md). Package and install
 `tools/vscode-copperline` as a VSIX; it contributes the `copperline` debug
 type and runs `copperline-ctl --dap` from your PATH. The settings
-`copperline.ctlExecutable` and
-`copperline.emulatorExecutable` name the two executable files when they
-are elsewhere (a source build's `target/release/copperline-ctl` and
-`target/release/copperline`, or the copies every release package ships;
-see [Command-line tools](../guide/getting-started.md#command-line-tools)
-for where each package puts them). A launch configuration:
+`copperline.ctlExecutable` and `copperline.emulatorExecutable` name the two
+executable files when they are elsewhere (a source build's
+`target/release/copperline-ctl` and `target/release/copperline`, or the
+copies every release package ships; see
+[Command-line tools](../guide/getting-started.md#command-line-tools) for
+where each package puts them). The extension passes
+`copperline.emulatorExecutable` to the adapter as `COPPERLINE_BIN`. A launch
+configuration:
 
 ```json
 {
@@ -56,17 +58,21 @@ one emulated frame and **Profile (Multi)** prompts for a frame count. The
 adapter sends the custom `copperline/profile {"frames": N}` request, derives a
 compact live unwind table from the session's DWARF, captures precise
 instruction samples, converts them to a source-mapped `.cpuprofile`, and opens
-the result in VS Code. The profile contains optimized inline frames and a
-`[Bus wait]` child that isolates time lost to chip-DMA contention. Other DAP
-clients can send the same custom request and open the returned `path`.
+the result in VS Code. The profile includes inlined frames from optimized
+code and a `[Bus wait]` child that isolates time lost to chip-DMA
+contention. Other DAP clients can send the same custom request and open the
+returned `path`.
 
-The same toolbar can open Copperline's native Debugger, Console, and Frame
-Analyzer windows without reimplementing them in a webview. The Debug sidebar's
-**Custom Registers** tree is fed by the adapter's Chipset scope; hovering a
+The same toolbar opens Copperline's native Debugger, Console, and Frame
+Analyzer windows (the custom `copperline/ui.show {"window"}` request). The
+Debug sidebar's **Custom Registers** tree comes from the custom
+`copperline/chipset` request, the data behind the Chipset scope; hovering a
 register shows its shared access, chipset, and bit-field documentation. The
-command palette also provides **Init Amiga Project**, **Convert EXE to ADF**,
-and **Profile File Size**. The project template detects Bartman's installed
-toolchain through `amiga.bin-path`, or can select bebbo amiga-gcc or vbcc/vasm.
+command palette also provides **Init Amiga Project**, **Convert EXE to ADF**
+(`copperline-ctl exe2adf`), **Profile File Size** (`copperline-ctl
+size-report`), and **Show Coverage**. The project template detects Bartman's
+installed toolchain through `amiga.bin-path`, or can select bebbo amiga-gcc
+or vbcc/vasm.
 
 ## Other clients
 
@@ -94,13 +100,13 @@ configuration says. Arguments:
 | Argument | Meaning |
 |---|---|
 | `program` | The hunk executable on the host (required). Its directory is mounted in the guest. |
-| `args` | Command-line arguments for the program (a string or an array). |
+| `args` | Command-line arguments for the program (`--run-args`): a string, or an array whose elements are each quoted for the AmigaDOS command line. |
 | `copperline` | The emulator binary. Default: `COPPERLINE_BIN`, then a `copperline` next to `copperline-ctl`, then PATH. |
 | `config` | A TOML configuration file (`--config`). If omitted, Copperline checks `copperline.toml` in its working directory, then the launcher's saved default, then built-in settings. |
 | `rom` | A Kickstart ROM supplied as Copperline's positional ROM argument. If omitted, the selected configuration's ROM is used, falling back to bundled AROS. |
 | `factory` | Ignore the saved default configuration (`--factory`). |
 | `model`, `chipset`, `cpu`, `chip`, `fast`, `slow` | The matching `copperline` flags. |
-| `memoryFill` | `--ram-init`: `zero`, `random[:SEED]`, `pattern:WORD`, or `0xWORD` for uninitialised-read testing. |
+| `memoryFill` | `--ram-init`: `zero`, `random[:SEED]`, `pattern:WORD`, or `0xWORD` for uninitialized-read testing. |
 | `fpu` | Fit or omit an FPU (`--fpu` / `--no-fpu`). |
 | `stack` | AmigaDOS CLI stack size in bytes before launch, 2048 through 2147483644 (`--run-stack`). |
 | `ntsc` | Select NTSC timing when true, PAL when false (`--video`). |
@@ -119,10 +125,17 @@ configuration says. Arguments:
 
 `attach` connects to a running emulator through `controlInfo` (the
 `--control-info` file) or `address` + `token`, and takes `program`,
-`symbolFile`, `sourceMap`, `entryPoint` and `stopOnEntry` the same way.
-When the program is already running, its segments are matched against the
-file and the symbols relocate at once; otherwise a `loadseg` break waits for
-the guest to load it.
+`symbolFile`, `sourceMap`, `entryPoint` and `stopOnEntry` the same way
+(`stopOnEntry` defaults to false here). When the program is already
+running, its segments are matched against the file and the symbols relocate
+at once; otherwise a `loadseg` break waits for the guest to load it. An
+adapter started with `--info` or `--connect` already has a session, and
+both `launch` and `attach` use it instead of starting an emulator.
+
+Stopping the session shuts down an emulator the adapter launched and leaves
+an attached one running, unless the client asks for it to be terminated.
+Restart relaunches a launched emulator with the same arguments and
+re-attaches to an attached one.
 
 Behind a launch, the control server arms a one-shot `loadseg` stop for the
 program before the first frame runs (the same break-at-entry `--gdb` has), so
@@ -140,7 +153,7 @@ What each toolchain provides:
 |---|---|
 | vasm `-Fhunkexe -linedebug` | Source lines from the `LINE` debug hunks, symbols from the symbol hunks. Breakpoints and stepping by assembly source line. |
 | bebbo amiga-gcc 6.5 (`m68k-amigaos-gcc -g -O0`) | DWARF from the trailing debug hunk: lines, functions, parameters and locals, globals, struct/array/pointer/enum types, call-frame information for the call stack. |
-| bebbo amiga-gcc 13/15/16 (`-g`) | These toolchains' linkers drop the DWARF sections from hunk output: symbols only (function breakpoints, symbolised disassembly, a scanned call stack). Build with the 6.5 toolchain for source-level debugging. |
+| bebbo amiga-gcc 13/15/16 (`-g`) | These toolchains' linkers drop the DWARF sections from hunk output: symbols only (function breakpoints, symbolized disassembly, a scanned call stack). Build with the 6.5 toolchain for source-level debugging. |
 | Bartman's `m68k-amiga-elf` + elf2hunk | The hunk file's symbols plus the ELF's DWARF through `symbolFile` (or `program.elf`), including multi-file DWARF 4/5 builds linked with `-r -nostdlib`; ELF sections map onto hunks in section order, as elf2hunk allocates them. |
 | Anything stripped | Disassembly, registers, memory, chipset. |
 
@@ -194,24 +207,23 @@ global(s), call-frame info`.
 | Memory view | `mem.read` / `mem.write` (base64). |
 | Disassembly view | `disasm`, with program symbols, source lines, and live ROM/LVO names; backwards disassembly anchors at the nearest program or ROM function start. |
 | Jump to cursor | `regs.set {"reg": "pc"}`. |
-| Debug Console output | Serial output (which is where `KPrintF` goes) as `stdout`; uaelib function 86 (`debug_log`), optional `emulatorLog`, and the adapter's own notes as `console`. |
+| Debug Console output | Paula serial output as `stdout`; uaelib function 86 (`debug_log`, which the project template's `KPrintF()` calls), the optional `emulatorLog`, and the adapter's own notes as `console`. |
 | CPU profiling | Custom `copperline/profile {"frames": N}` -> precise `profile.start`, `step_frame` quanta until `profile.status` reports the N frames written (bounded; a quantum resumed after a breakpoint can end inside the same video frame), `profile.stop`, and a merged `.cpuprofile` path. |
-| Coverage | The `coverage` launch argument -> the emulator's `--coverage` run; the lcov file appears beside the program when it exits or the session ends. |
+| Coverage | The `coverage` launch argument -> the emulator's `--coverage` run; the emulator writes the lcov file to that path when the program exits or the session ends. |
 | Modules / loaded sources | The program with its first hunk's address, and the source files its debug information names. |
 
-A stop from a breakpoint the debugger window set, or from a `catch`, `reg
-watch`, beam trap or Copper breakpoint set through `!break.add`, is reported
-as a breakpoint with the machine's description. In a windowed session a
-pause or resume made from the window is noticed within a second and
-reflected in the IDE.
+A stop from a breakpoint the debugger window set, or from a `catch`,
+`reg_watch`, beam trap or Copper breakpoint set through `!break.add`, is
+reported as a breakpoint with the machine's description. In a windowed
+session the IDE picks up a pause or resume made from the window within a
+second.
 
 ## Limitations
 
 - Locals are shown for simple location expressions and one level of
-  struct/array nesting; optimised code, location lists and DWARF
+  struct/array nesting; optimized code, location lists and DWARF
   expressions render as unsupported.
 - One thread (the CPU) is presented; Exec tasks are not separate threads.
 - The `sourceMap` is a prefix replacement; when a recorded path does not
   exist on the host, the adapter also tries the path's tail under the
   program's directory.
-- Restart re-launches the emulator with the same arguments.
