@@ -4479,6 +4479,53 @@ fn uae_extended_adf_blank_amigados_track_without_sector_payload_is_empty() -> Re
     Ok(())
 }
 
+/// A double-density drive passes at most eleven AmigaDOS sectors per
+/// revolution. A UAE-1ADF type-0 track holding twenty-two was read from a
+/// high-density disk, which the emulated DD drives cannot present, so the
+/// loader refuses it -- whether the bit length or the stored length sizes
+/// the sector run -- while an eleven-sector track still loads.
+#[test]
+fn uae_extended_adf_refuses_amigados_track_beyond_double_density_sectors() -> Result<()> {
+    let dd = vec![0u8; SECTORS_PER_TRACK * BYTES_PER_SECTOR];
+    let mut ctrl = FloppyController::default();
+    ctrl.insert_memory_disk_image_bytes(
+        0,
+        ext2_track_image(0, (dd.len() * 8) as u32, 1, &dd),
+        "dd.ext.adf".into(),
+        true,
+    )?;
+
+    let hd = vec![0u8; 2 * SECTORS_PER_TRACK * BYTES_PER_SECTOR];
+    for bit_len in [(hd.len() * 8) as u32, 0] {
+        let err = ctrl
+            .insert_memory_disk_image_bytes(
+                0,
+                ext2_track_image(0, bit_len, 1, &hd),
+                "hd.ext.adf".into(),
+                true,
+            )
+            .expect_err("22 AmigaDOS sectors on a track need a high-density drive");
+        assert!(format!("{err:#}").contains("high-density"), "{err:#}");
+    }
+    Ok(())
+}
+
+/// The legacy UAE--ADF container stores AmigaDOS tracks (sync 0) the same
+/// way, so the same double-density sector limit applies to it.
+#[test]
+fn legacy_extended_adf_refuses_amigados_track_beyond_double_density_sectors() -> Result<()> {
+    let dd = vec![0u8; SECTORS_PER_TRACK * BYTES_PER_SECTOR];
+    let mut ctrl = FloppyController::default();
+    ctrl.insert_memory_disk_image_bytes(0, ext1_track_image(0, &dd), "dd.ext.adf".into(), true)?;
+
+    let hd = vec![0u8; 2 * SECTORS_PER_TRACK * BYTES_PER_SECTOR];
+    let err = ctrl
+        .insert_memory_disk_image_bytes(0, ext1_track_image(0, &hd), "hd.ext.adf".into(), true)
+        .expect_err("22 AmigaDOS sectors on a track need a high-density drive");
+    assert!(format!("{err:#}").contains("high-density"), "{err:#}");
+    Ok(())
+}
+
 #[test]
 fn writable_extended_adf_amigados_track_persists_sector_updates() -> Result<()> {
     let path = temp_ext2_amigados(&vec![0u8; SECTORS_PER_TRACK * BYTES_PER_SECTOR])?;
@@ -5734,6 +5781,13 @@ fn temp_ext1_raw(words: &[u16]) -> Result<PathBuf> {
 
 fn temp_ext1_raw_payload(sync: u16, payload: &[u8]) -> Result<PathBuf> {
     let path = temp_path("test-legacy.ext.adf");
+    fs::write(&path, ext1_track_image(sync, payload))?;
+    Ok(path)
+}
+
+/// A legacy UAE--ADF image whose first track holds `payload` (sync 0 is an
+/// AmigaDOS sector track) and whose other 159 tracks are empty.
+fn ext1_track_image(sync: u16, payload: &[u8]) -> Vec<u8> {
     let mut image = Vec::new();
     image.extend_from_slice(UAE_EXT1_SIGNATURE);
     image.extend_from_slice(&sync.to_be_bytes());
@@ -5743,8 +5797,7 @@ fn temp_ext1_raw_payload(sync: u16, payload: &[u8]) -> Result<PathBuf> {
         image.extend_from_slice(&0u16.to_be_bytes());
     }
     image.extend_from_slice(payload);
-    fs::write(&path, image)?;
-    Ok(path)
+    image
 }
 
 fn temp_ext2_raw_revolutions(words: &[u16], bit_len: u32, revolutions: u8) -> Result<PathBuf> {

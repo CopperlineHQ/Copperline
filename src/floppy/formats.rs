@@ -469,7 +469,24 @@ pub(super) fn decode_uae_extended_amigados_payload(
         payload[data_len..].iter().all(|&byte| byte == 0),
         "UAE extended ADF track {track} AmigaDOS padding after bit length is non-zero"
     );
+    ensure_double_density_sectors("UAE extended ADF", track, data_len)?;
     Ok(Some(&payload[..data_len]))
+}
+
+/// A double-density drive passes at most [`SECTORS_PER_TRACK`] AmigaDOS
+/// sectors under the head per revolution. More than that on one track is a
+/// high-density disk -- twice the sectors at the same 2 us cells, with the
+/// drive turning at half speed -- and the emulated drives are DD units, so
+/// encoding it into one DD revolution would present a track no DD drive
+/// can read. Raw MFM tracks carry their own timing and are not checked.
+fn ensure_double_density_sectors(container: &str, track: usize, data_len: usize) -> Result<()> {
+    let sectors = data_len / BYTES_PER_SECTOR;
+    ensure!(
+        sectors <= SECTORS_PER_TRACK,
+        "high-density {container} images are not supported: track {track} holds \
+         {sectors} AmigaDOS sectors, a double-density track holds {SECTORS_PER_TRACK}"
+    );
+    Ok(())
 }
 
 pub(super) fn decode_uae_legacy_extended_adf(data: &[u8]) -> Result<FloppyImageData> {
@@ -497,6 +514,7 @@ pub(super) fn decode_uae_legacy_extended_adf(data: &[u8]) -> Result<FloppyImageD
                 len.is_multiple_of(BYTES_PER_SECTOR),
                 "UAE--ADF track {track} AmigaDOS data is not sector-aligned"
             );
+            ensure_double_density_sectors("UAE--ADF", track, len)?;
             out.push(Some(FloppyTrackImage::AmigaDos(payload.to_vec())));
         } else {
             let mut words = Vec::with_capacity(len / 2 + 1);
