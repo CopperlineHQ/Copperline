@@ -3388,9 +3388,9 @@ dependencies = [
 
 [[package]]
 name = "m68k"
-version = "0.13.0"
+version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7e614e34e0fe46c6b8d6e9e8b778eb6bc6ff1e0ffafabcb8243f2bd2c9f5b29"
+checksum = "e91f214b4fa2dda74ed63fbfcc94b29eec9b0972d47fd104d5cf5c457eae8924"
 dependencies = [
  "cranelift-codegen 0.132.3",
  "cranelift-frontend 0.132.3",
@@ -6014,7 +6014,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
