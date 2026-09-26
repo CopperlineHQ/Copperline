@@ -3122,6 +3122,41 @@ fn the_disk_image_pages_describe_what_gets_built() {
     assert_eq!(state.workshop.suggested_name(false), "image.hdf");
 }
 
+/// The Create Floppy page warns about exactly the density the emulated
+/// drives cannot take: they are double-density units, so a DD image the
+/// page writes loads and an HD one is refused, in either container. If a
+/// high-density drive model lands, this fails and the warning should go
+/// with it.
+#[test]
+fn the_hd_floppy_warning_matches_the_double_density_drives() {
+    use crate::diskimage::{Container, Density};
+    let dir = tempfile::tempdir().unwrap();
+    for density in Density::ALL {
+        for container in Container::ALL {
+            let mut state = LauncherState::new(MachineSetup::default());
+            state.workshop.density = density;
+            state.workshop.container = container;
+            let path = dir.path().join(format!("{density:?}-{container:?}.adf"));
+            crate::diskimage::create_floppy(&path, &state.workshop.floppy_spec())
+                .expect("floppy written");
+            let mut drives = crate::floppy::FloppyController::default();
+            let loads = drives
+                .insert_memory_disk_image_bytes(
+                    0,
+                    std::fs::read(&path).unwrap(),
+                    path.clone(),
+                    true,
+                )
+                .is_ok();
+            assert_eq!(
+                state.workshop.floppy_needs_hd_drive(),
+                !loads,
+                "{density:?} {container:?}: warning shown vs. image loaded"
+            );
+        }
+    }
+}
+
 /// Drive the workshop pages the way a user does -- type into the boxes,
 /// walk the pickers, flip the ticks -- and check every one of those
 /// choices survives all the way into the bytes on disk. A setting that
