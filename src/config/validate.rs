@@ -1204,7 +1204,7 @@ impl TryFrom<RawConfig> for Config {
             if board.version == ZorroVersion::III && !cpu_has_32bit_bus(cpu) {
                 errors.push(anyhow!(
                     "zorro board {:?} is Zorro III, which needs a 32-bit CPU \
-                     (68020/68030/68040); {:?} has a 24-bit address bus",
+                     (68020/68030/68040/68060); {:?} has a 24-bit address bus",
                     board.name,
                     cpu
                 ));
@@ -2356,7 +2356,7 @@ fn validate_z3_ram(z3: usize, cpu: CpuModel) -> Result<()> {
     if !cpu_has_32bit_bus(cpu) {
         bail!(
             "Zorro III RAM needs a CPU with a 32-bit address bus \
-             (68020/68030/68040); {:?} has a 24-bit bus",
+             (68020/68030/68040/68060); {:?} has a 24-bit bus",
             cpu
         );
     }

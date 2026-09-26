@@ -3,7 +3,7 @@ Offset: $1D4
 Access: write
 Chipset: ECS/AGA
 
-UHRES bitplane horizontal start register.
+UHRES bitplane horizontal start register (not emulated).
 
 ## Bitfields
 

@@ -18,25 +18,26 @@ guest-side and why.
 
 ## Zorro identity
 
-- Zorro II slave, one 64 KiB register window, no autoboot ROM (`romtype`
-  not present -- the board never appears in the Exec free-memory list and
-  never autoboots).
+- Zorro II slave, one 64 KiB register window, no autoboot ROM or
+  DiagArea. It is an I/O board: it adds nothing to the Exec free-memory
+  list and never autoboots.
 - Manufacturer **5192** / `0x1448` (the Copperline manufacturer ID; see
   [](../zorro)'s [manufacturer ID table](../zorro.md#the-copperline-manufacturer-id)),
   product **7** -- the next free product number after HostSocket (6).
 - The board is **not** a bus master at the guest-visible level: nothing in
   this protocol lets the guest program a live DMA pointer the board reads
-  asynchronously. The guest only ever hands the board a static
-  address+length pair per descriptor (see
-  [Descriptor queue and doorbell](#descriptor-queue-and-doorbell)); when the board consumes it,
-  it is Copperline's own host-side implementation detail that the copy
-  happens through `DeviceHost`'s DMA accessors, exactly as the A2091
-  SCSI controller's data phase does. Another emulator could just as
-  validly implement "consume the descriptor" by memcpy'ing from its own
-  guest RAM model directly -- the protocol only promises *what* gets read
-  (a byte range of 24-bit Amiga address space) and *when* (in emulated
-  time, at the decoded-audio rate -- see [Determinism and timing](#determinism-and-timing)),
-  never *how*.
+  asynchronously. The guest only hands the board a static address+length
+  pair per descriptor (see
+  [Descriptor queue and doorbell](#descriptor-queue-and-doorbell)). How
+  the board reads those bytes is an implementation detail: Copperline
+  copies the whole range when `DOORBELL` is written, through
+  `DeviceHost::dma_read` (the same 24-bit DMA decode the A2091's SCSI
+  data phase uses), and only the *consumption* and *completion* of those
+  bytes are paced in emulated time (see
+  [Determinism and timing](#determinism-and-timing)). Another emulator
+  could just as validly copy straight from its own guest RAM model -- the
+  protocol only promises *what* gets read (a byte range of the 24-bit
+  Amiga address space), never *how*.
 
 (register-map)=
 ## Register map
@@ -72,9 +73,8 @@ implements degrades safely on old fields rather than reading garbage. See
 
 The window is 64 KiB (the smallest legal Zorro II size) even though only
 32 bytes contain registers. The remaining space is reserved for future
-protocol versions
-without moving the board to a bigger window, which would change its
-autoconfig identity.
+protocol versions, so they can grow without moving the board to a bigger
+window, which would change its autoconfig identity.
 
 (capability-version-registers)=
 ### Capability/version registers
@@ -143,7 +143,7 @@ autoconfig identity.
   | `0` | (no-op) | Ignored; reserved so an accidental zero write is inert |
   | `1` | `PLAY` | `STOPPED`/`PAUSED` &rarr; `PLAYING`. From `STOPPED`, playback (and bitstream consumption) starts at the head of the queue if non-empty, or the board immediately reports `OUT_OF_DATA` if the queue is empty. From `PAUSED`, resumes exactly where it left off. No-op from `PLAYING`/`OUT_OF_DATA`. |
   | `2` | `PAUSE` | `PLAYING` &rarr; `PAUSED`. Halts bitstream consumption and audio output; the queue is untouched and the decoder's cross-frame state is preserved, so `PLAY` resumes mid-stream with no audible gap or restart. No-op from any other state (in particular, `PAUSE` from `OUT_OF_DATA` or `STOPPED` does nothing -- MHI's own `MHIPause` is only meaningful while playing). |
-  | `3` | `STOP` | Any state &rarr; `STOPPED`. **Discards every queued descriptor**, completed or not yet started (`QUEUE_COUNT` &rarr; 0), and resets `COMPLETED_COUNT` to 0. **Also resets the decoder's cross-frame state** (bit reservoir, MDCT/QMF overlap) -- a fresh transport session starts with a fresh decoder, not one still carrying the discarded stream's reservoir into whatever plays next. This matches `MHIStop`'s documented semantics exactly ("stop all decoding... all buffers in the queue are flushed") -- the guest library performs no separate flush step, and this is also exactly what a seeking player's `MHIStop` &rarr; reposition &rarr; `MHIQueueBuffer` sequence needs: nothing from the pre-seek stream can bleed into the post-seek decode (see [Seek-entry hardening](#seek-entry-hardening)). |
+  | `3` | `STOP` | Any state &rarr; `STOPPED`. **Discards every queued descriptor**, whether or not decoding has reached it (`QUEUE_COUNT` &rarr; 0), and resets `COMPLETED_COUNT` to 0. **Also resets the decoder's cross-frame state** (bit reservoir, MDCT/QMF overlap) -- a fresh transport session starts with a fresh decoder, not one still carrying the discarded stream's reservoir into whatever plays next. This matches `MHIStop`'s documented semantics exactly ("stop all decoding... all buffers in the queue are flushed") -- the guest library performs no separate flush step, and this is also exactly what a seeking player's `MHIStop` &rarr; reposition &rarr; `MHIQueueBuffer` sequence needs: nothing from the pre-seek stream can bleed into the post-seek decode (see [Seek-entry hardening](#seek-entry-hardening)). |
 
   Values above `3` are reserved and behave as the no-op.
 
@@ -177,7 +177,8 @@ INT2, level-sensitive: the line is asserted whenever `(INTREQ & INTENA) !=
 - **`INTENA`** (`0x0A`, RW) -- enable mask, same bit layout, reset to
   `0x0000` (fully masked) like every other Zorro board's interrupt enable
   on power-on/reset. The guest library must set the bits it wants before
-  it can expect INT2 to fire.
+  it can expect INT2 to fire; `mhi_copperline.library` enables
+  `BUFFER_DONE` and `OUT_OF_DATA` and leaves `QUEUE_OVERFLOW` masked.
 
 (descriptor-queue-and-doorbell)=
 ### Descriptor queue and doorbell
@@ -210,12 +211,12 @@ To enqueue a descriptor:
 If the queue is full (`QUEUE_COUNT == QUEUE_DEPTH`) when `DOORBELL` is
 written, the descriptor is **dropped** (the staged address/length are
 left as-is, so the guest may simply retry once space frees) and
-`INTREQ.QUEUE_OVERFLOW` is set. This mirrors `MHIQueueBuffer`'s own
-contract: it returns `FALSE` when a buffer cannot be queued, and the
-guest library is expected to poll room before calling it via
-`QUEUE_COUNT < QUEUE_DEPTH`, exactly as `MHIGetEmpty` polls for reclaimed
-buffers. `QUEUE_OVERFLOW` exists as a diagnostic for a guest bug (racing
-the check), not as a code path production drivers should hit.
+`INTREQ.QUEUE_OVERFLOW` is set. `MHIQueueBuffer`'s own contract is to
+return `FALSE` when a buffer cannot be queued, so the guest library
+checks `QUEUE_COUNT < QUEUE_DEPTH` before ringing the doorbell and
+returns `FALSE` when there is no room. `QUEUE_OVERFLOW` exists as a
+diagnostic for a guest bug (racing that check), not as a code path
+production drivers should hit.
 
 A **zero-length descriptor** (`DESC_LEN_HI:DESC_LEN_LO == 0` at the
 `DOORBELL` write) is accepted, not dropped, but **completes immediately**:
@@ -233,7 +234,7 @@ completes (and raises `BUFFER_DONE`) without moving `STATUS` back to
   bare number) so a future board revision could legally offer a deeper
   queue and have a conforming guest library adapt without a rebuild.
 - **`QUEUE_COUNT`** (`0x0E`, RO) -- the number of descriptors currently
-  outstanding: enqueued but not yet fully consumed. Incremented by a
+  outstanding: enqueued but not yet fully played out. Incremented by a
   successful `DOORBELL` write, decremented when a descriptor finishes
   playing out (the same instant `COMPLETED_COUNT` advances and
   `INTREQ.BUFFER_DONE` is set). Reset to `0` by `CONTROL=STOP` or a
@@ -252,14 +253,14 @@ records:
   incremented by one each time a descriptor finishes playing out (see
   [Determinism and timing](#determinism-and-timing)), wrapping modulo
   65536. Reading it has no side effect. The guest library keeps its own
-  local copy of the last-observed value and, on each `BUFFER_DONE`
-  interrupt (or when polling `MHIGetEmpty` directly), computes the delta
-  with wraparound-safe 16-bit subtraction (`(u16)(now - last)`) to learn
-  how many buffers to pop from its own client-side queue and return via
-  `MHIGetEmpty` -- the same idiom other in-tree boards use for
-  free-running hardware counters. `CONTROL=STOP` resets it to `0`
-  alongside `QUEUE_COUNT`; a guest observing a `STOP` (its own or another
-  client's, if the board is ever shared -- it uses a single
+  local copy of the last-observed value. Its INT2 server only
+  acknowledges the interrupt and signals the client task; `MHIGetEmpty`,
+  in task context, computes the delta with wraparound-safe 16-bit
+  subtraction (`(u16)(now - last)`) to learn how many buffers to pop from
+  its own client-side queue and return -- the same idiom other in-tree
+  boards use for free-running hardware counters. `CONTROL=STOP` resets it
+  to `0` alongside `QUEUE_COUNT`; a guest observing a `STOP` (its own or
+  another client's, if the board is ever shared -- it uses a single
   `MHIAllocDecoder` model) must resynchronize its local counter to `0`
   rather than compute a delta across the reset.
 
@@ -293,8 +294,8 @@ regardless of how many parameters the guest library ends up exposing.
   Indices `7`-`65535` are reserved (unimplemented in this version; a
   future version adding the 5/10-band EQ params would assign them here
   under a `VERSION` bump). Selecting a reserved index and then reading or
-  writing `PARAM_VALUE` is well-defined but inert: reads return `0`,
-  writes are latched but never consulted by anything.
+  writing `PARAM_VALUE` is well-defined but inert: writes are discarded
+  (nothing is stored), so reads always return `0`.
 - **`PARAM_VALUE`** (`0x1E`, RW) -- write: latches the given value against
   whichever index `PARAM_SELECT` currently holds (out-of-range values for
   a 0-100 parameter are clamped by the board, not rejected). Read:
@@ -416,10 +417,11 @@ decoder's own reservoir does.
     a1=2*((A-1)-(A+1)*cs), a2=(A+1)-(A-1)*cs-2*sqrt(A)*alpha`.
 
   Every `b`/`a` coefficient above is then normalized by dividing through
-  by `a0` (the classic Direct Form II transposed structure Copperline's
-  own `AnalogLedFilter`/`BiquadLowPass` -- `src/chipset/paula.rs` -- already
-  uses for the LED filter, reused here rather than inventing a second
-  filter-processing convention in the same codebase).
+  by `a0`, and each section runs as a Direct Form II transposed biquad --
+  the structure `AnalogLedFilter`/`BiquadLowPass` in
+  `src/chipset/paula.rs` already use for the LED filter, reused here
+  rather than inventing a second filter-processing convention in the same
+  codebase.
 
 (access-size-and-alignment)=
 ## Access size and alignment
@@ -433,10 +435,12 @@ decodes even addresses.
 - **Byte access** (`move.b`) is honored for compatibility: the high byte
   of a register is at its listed offset, the low byte at offset+1
   (big-endian, matching 68k byte order), and a byte write only changes
-  that half of the register -- there is no special latch-on-low-byte
-  behaviour the way the 32-bit descriptor fields latch on a separate
-  register (see below). A `WO` register's byte-write value is simply
-  discarded like any other write to it.
+  that half of the register. There is no latch-on-low-byte behaviour;
+  the only deferred commit is the descriptor latches, which `DOORBELL`
+  commits. `CONTROL` and `DOORBELL` store nothing: a byte write to
+  `CONTROL`'s low byte (`0x07`) issues that command, one to its high byte
+  (`0x06`) lands as a reserved no-op value, and a write of any size to
+  either `DOORBELL` byte commits the staged descriptor.
 - **Longword access** (`move.l`) is **not supported** and its behaviour
   is undefined at the protocol level -- the bus is 16 bits wide, so a
   32-bit access does not atomically span two registers the way it would
@@ -445,7 +449,10 @@ decodes even addresses.
   32-bit `DESC_ADDR_*`/`DESC_LEN_*` pairs (see
   [Descriptor queue and doorbell](#descriptor-queue-and-doorbell)), which are
   deliberately specified as two independent word registers rather than
-  one 32-bit register precisely so this never comes up.
+  one 32-bit register precisely so this never comes up. (Copperline's
+  board treats a longword access as a single access to the addressed
+  register: a read returns that register's word, and a write stores the
+  low 16 bits of the value there.)
 - Reads of a **`WO`** register return `0`; writes to an **`RO`** register
   are silently discarded. Neither is an error condition -- there is no
   fault or diagnostic bit for it, matching the rest of Copperline's
@@ -503,10 +510,10 @@ merely spreads across a handful of ticks instead of resolving within one.
 (Skipped bytes are not paced at the decoded audio's sample rate the way
 played-out bytes are -- there is no audio to pace them by -- so an
 all-garbage descriptor drains in far less emulated time than the same
-bytes of genuine audio would take to play out.) Nothing about the
-guest-visible contract changes -- `COMPLETED_COUNT`/`QUEUE_COUNT`/`INTREQ`
-still only ever advance in whole-descriptor, whole-frame steps -- only the
-emulated wall-clock-adjacent pacing of how many ticks that takes.
+bytes of genuine audio would take to play out.) The guest-visible
+contract does not change -- `COMPLETED_COUNT`/`QUEUE_COUNT`/`INTREQ`
+still only advance in whole-descriptor, whole-frame steps -- only the
+number of ticks it takes to get there.
 
 (seek-entry-hardening)=
 ### Seek-entry hardening
@@ -549,17 +556,18 @@ The board must handle both parts of a seek:
   real decoder does when handed a stream it has never seen the start of),
   but decoding itself is always correct and resumes clean steady-state
   output once caught up.
-  `mid_frame_entry_resyncs_to_the_next_real_frame` and
-  `seek_entry_past_an_id3v2_tag_resyncs_correctly` in `src/mhi.rs` cover
-  these cases directly.
+  `mid_frame_entry_resyncs_to_the_next_real_frame`,
+  `seek_entry_past_an_id3v2_tag_resyncs_correctly`, and
+  `seek_entry_into_vbr_content_decodes_cleanly_after_a_settle_window` in
+  `src/mhi.rs` cover these cases directly.
 
 **An incomplete trailing frame** (the queued bytes end mid-frame -- too few
 bytes for the decoder to tell whether they are even a valid sync, let alone
 decode them) is different from undecodable content: it is not junk to skip,
 it is a real frame waiting on the rest of its bytes, which a subsequent
 `DOORBELL` may yet supply (the guest's next descriptor can complete a frame
-split across a buffer boundary, and this is expected to happen routinely --
-see "Determinism and timing" below). The board therefore holds those bytes
+split across a buffer boundary, and this is expected to happen
+routinely). The board therefore holds those bytes
 and does not touch `QUEUE_COUNT`/`STATUS` while it waits. If no further
 `DOORBELL` ever completes the frame, though, an implementation must not
 wait forever: `QUEUE_COUNT`/`STATUS` need to recover in bounded time so a
@@ -573,10 +581,12 @@ implementation notes below.
 
 The board consumes a descriptor's bitstream at the **decoded audio's own
 emulated-time rate**, the same principle as every other in-tree audio
-device (see [](audio.md)'s determinism section and [](toccata.md)'s "mixer
-cadence" for the worked example): a decoded MPEG frame (1152 PCM samples
-at the stream's sample rate) is not considered "played out" -- and its
-bytes are not considered consumed from the descriptor, and
+device (see [](audio.md)'s determinism section and [](toccata.md)'s "Mixer
+cadence and resampling" for the worked example). A decoded MPEG frame
+(1152 PCM samples per channel for MPEG-1 Layer III, 576 for the
+MPEG-2/2.5 half-rate frames, at the stream's sample rate) is not
+considered "played out" --
+its bytes are not considered consumed from the descriptor, and
 `COMPLETED_COUNT`/`INTREQ` do not advance -- until that many emulated
 sample-clock ticks have elapsed, exactly as if the samples were being
 produced for playback in real time. A descriptor's completion event and
@@ -585,9 +595,9 @@ host-wall-clock ones: they fire the tick a frame's worth of emulated
 sample time has elapsed, identically whether the host machine runs in
 real time, is throttled, or is warped as fast as the host CPU allows.
 This is what makes a scripted scenario against this board reproducible
-byte-for-byte and makes `--audio-wav`/stem captures of its output
-deterministic across runs, the same guarantee every other Copperline
-audio path already gives.
+byte-for-byte and makes `--audio-wav` and `--audio-stems` captures of its
+output deterministic across runs, the same guarantee every other
+Copperline audio path already gives.
 
 (the-mhi-api-board-split)=
 ## The MHI-API/board split
@@ -601,9 +611,10 @@ protocol, and the split is intentional, not an oversight:
 | Decoder identity strings (`MHIQ_DECODER_NAME`/`_VERSION`, `MHIQ_AUTHOR`, the `MHIQ_CAPABILITIES` MIME-type string) | Guest library (`guest/mhi/`) -- compile-time constants; they describe the library, not the board |
 | `MHIQ_IS_HARDWARE`/`_IS_68K`/`_IS_PPC` | Guest library -- static answers (this is a real register-mailbox device the library talks to over the Zorro bus, so `MHIQ_IS_HARDWARE` answers true; it runs no 68k/PPC code of its own, so both processor queries answer false) |
 | MPEG version/layer/bitrate-mode support (`MHIQ_MPEG1`/`_MPEG2`/`_MPEG25`, `MHIQ_LAYER3`, `MHIQ_VARIABLE_BITRATE`) | `CAPS` register (`0x02`) -- genuinely board-reported, since a future board revision's decoder could differ |
+| `MHIQ_LAYER1`/`_LAYER2`, `MHIQ_MPEG4` | Guest library -- fixed `MHIF_UNSUPPORTED`; `CAPS` has no bit for them in this version |
 | `MHIQ_JOINT_STEREO` | Guest library -- fixed `MHIF_SUPPORTED`; decoding joint-stereo Layer III is inherent to any conforming decoder, not a distinct board capability worth its own `CAPS` bit |
-| Tone/volume/output query flags (`MHIQ_VOLUME_CONTROL`, `MHIQ_PANNING_CONTROL`, `MHIQ_BASS_CONTROL`, `MHIQ_TREBLE_CONTROL`, `MHIQ_MID_CONTROL`, `MHIQ_PREFACTOR_CONTROL`, `MHIQ_CROSSMIXING`, `MHIQ_5_BAND_EQ`, `MHIQ_10_BAND_EQ`) | Guest library -- keyed off `CAPS` bit 6 for the seven params this board's [param latch](#param-latches) table defines (indices `0`-`6`: volume, panning, bass, mid, treble, crossmixing, prefactor): `MHIF_UNSUPPORTED` against a version-1 board (bit 6 clear -- the latches exist and round-trip, but nothing applies them to decoded PCM, so answering `MHIF_SUPPORTED` would tell a client its `MHISetParam` calls are audible when they are not), `MHIF_SUPPORTED` when bit 6 is set (bit 6 set). One guest library binary answers correctly either way -- see `CAPS`'s own bit-6 note above. The 5/10-band EQ stays `MHIF_UNSUPPORTED` regardless of bit 6, until a later `VERSION` adds `MHIP_MIDBASS`/`MHIP_MIDHIGH`/`MHIP_BAND1`-`MHIP_BAND10` equivalents at reserved indices `7`+ |
-| Decoder handle, client task pointer, signal mask (`MHIAllocDecoder`/`MHIFreeDecoder`) | Guest library only -- entirely a host-side (Amiga-side) bookkeeping concept; the board has no notion of "a handle" and serves exactly one client at a time |
+| Tone/volume/output query flags (`MHIQ_VOLUME_CONTROL`, `MHIQ_PANNING_CONTROL`, `MHIQ_BASS_CONTROL`, `MHIQ_TREBLE_CONTROL`, `MHIQ_MID_CONTROL`, `MHIQ_PREFACTOR_CONTROL`, `MHIQ_CROSSMIXING`, `MHIQ_5_BAND_EQ`, `MHIQ_10_BAND_EQ`) | Guest library -- keyed off `CAPS` bit 6 for the seven params this board's [param latch](#param-latches) table defines (indices `0`-`6`: volume, panning, bass, mid, treble, crossmixing, prefactor): `MHIF_UNSUPPORTED` against a version-1 board (bit 6 clear -- the latches exist and round-trip, but nothing applies them to decoded PCM, so answering `MHIF_SUPPORTED` would tell a client its `MHISetParam` calls are audible when they are not), `MHIF_SUPPORTED` when bit 6 is set. One guest library binary answers correctly either way -- see `CAPS`'s own bit-6 note above. The 5/10-band EQ stays `MHIF_UNSUPPORTED` regardless of bit 6, until a later `VERSION` adds `MHIP_MIDBASS`/`MHIP_MIDHIGH`/`MHIP_BAND1`-`MHIP_BAND10` equivalents at reserved indices `7`+ |
+| Decoder handle, client task pointer, signal mask (`MHIAllocDecoder`/`MHIFreeDecoder`) | Guest library only -- entirely an Amiga-side bookkeeping concept; the board has no notion of "a handle" and serves exactly one client at a time |
 | Transport (`MHIPlay`/`MHIStop`/`MHIPause`), status (`MHIGetStatus`), queueing (`MHIQueueBuffer`/`MHIGetEmpty`), params (`MHISetParam`) | Guest library translates 1:1 to/from this board's `CONTROL`/`STATUS`/descriptor-queue/`PARAM_*` registers |
 
 Keeping MHI's own vocabulary entirely out of the wire protocol is what
@@ -655,49 +666,68 @@ to:
    scenarios and captures built against one implementation reproduce on
    the other.
 
-Copperline's own implementation notes -- the Symphonia-based decoder
-choice, how `push_source("mhi", ...)` joins the mixer, `BoardDevice`
-wiring, and savestate serialization of in-flight decoder/queue state --
-are Copperline-internal and out of scope for this document; they belong
-in `src/mhi.rs`'s own doc comments and this page's future host-board
-implementation notes once WP3 lands, not in the protocol spec itself.
+Copperline's own implementation choices -- the Symphonia-based decoder,
+how the board's output joins the mixer, `BoardDevice` wiring, and
+save-state serialization of in-flight decoder/queue state -- are not part
+of the protocol. The next section summarizes them.
 
 ## Copperline implementation notes
 
-This section summarizes `src/mhi.rs` (`[mhi]`, feature-gated behind the
-default-on `mhi` build feature); it does not change any of the protocol
-content above.
+This section summarizes `src/mhi.rs`; it does not change any of the
+protocol content above.
 
+- **Fitting the board**: `[mhi] enabled = true` is the only option (there
+  is no command-line flag). The emulator then adds `BoardSpec::mhi` to
+  the Zorro chain (`src/zorro.rs`) and a `BoardDevice::Mhi` to the bus's
+  device list (`src/emulator.rs`). The board needs the default-on `mhi`
+  build feature (the wasm32 browser build leaves it out); without it,
+  `[mhi] enabled = true` only logs a warning and fits no board.
 - **Decoder**:
   [Symphonia](https://github.com/pdeljanov/Symphonia)'s pure-Rust
   MPEG audio decoder (`MpaDecoder`, MPL-2.0), with only its Layer III
   feature enabled to match `CAPS`. It requires no C decoder build.
-  `MpaDecoder` is
-  packet-based, so `src/mhi.rs` carries its own packetizer that cuts the
-  doorbell-fed byte queue into whole frames using the same ISO 11172-3
-  header/length arithmetic Symphonia's parser applies; junk bytes, fake
-  syncs, free-format frames (bitrate index 0, outside `CAPS`), and
-  non-Layer-III frames are consumed as resync junk. Everything
-  register-visible (pacing, completion counts, interrupts) derives from
-  integer header parsing and decode success/failure, so emulated-machine
-  behaviour is reproducible byte-for-byte across platforms; the decoded
-  PCM itself is deterministic per platform, but a few of Symphonia's
-  precomputed tables call `powf`, whose last-ulp rounding may differ
-  between libm implementations, so `--audio-wav` captures of MHI audio
-  are guaranteed identical run-to-run on one platform rather than across
-  operating systems.
+  `MpaDecoder` is packet-based, so `src/mhi.rs` carries its own
+  packetizer (`Decoder::decode_frame`) that cuts the doorbell-fed byte
+  queue into whole frames. It uses the header parser in
+  `src/audio/mpeg.rs` (shared with the cue-sheet MP3 track backend),
+  which applies the same ISO 11172-3 header/length arithmetic as
+  Symphonia's own parser. Junk bytes, free-format frames (bitrate index
+  0, outside `CAPS`), and non-Layer-III frames are consumed as resync
+  junk. A header-shaped word whose frame then fails to decode is not
+  skipped wholesale: the hunt resumes at the next header candidate inside
+  its declared span, so a real frame hiding there is still found. Resync
+  work is bounded to `MAX_RESYNC_ATTEMPTS_PER_TICK` (64) decode attempts
+  per call and resumes from the same position on the next tick. A
+  mid-stream change of sample rate or channel count starts a fresh
+  decoder.
+- **Determinism**: everything register-visible (pacing, completion
+  counts, interrupts) derives from integer header parsing and decode
+  success/failure, so emulated-machine behaviour is reproducible
+  byte-for-byte across platforms. The decoded PCM itself is deterministic
+  per platform, but a few of Symphonia's precomputed tables call `powf`,
+  whose last-ulp rounding may differ between libm implementations, so
+  `--audio-wav` captures of MHI audio are guaranteed identical
+  run-to-run on one platform rather than across operating systems.
 - **Mixer cadence**: reuses Toccata's causal-producer/non-causal-resampler
   split ([](toccata.md)'s "Mixer cadence and resampling") -- a causal
   producer decodes and evaluates queue/interrupt state at the board's own
-  paced rate into a plain FIFO of raw frames, and a separate non-causal
-  `Resampler` (`src/audio/resample.rs`, per-rate cached) pulls from that
-  FIFO to the mixer's fixed rate, so the resampler's lookahead can never
-  reorder when a descriptor completes or an interrupt raises.
+  paced rate into a plain FIFO of native-rate samples, and a separate
+  non-causal `Resampler` (`src/audio/resample.rs`, per-rate cached) pulls
+  from that FIFO to the mixer's fixed rate, so the resampler's lookahead
+  can never reorder when a descriptor completes or an interrupt raises.
+  The resampled frames go into Paula's `MhiAudioRing`
+  (`src/chipset/paula.rs`); Paula adds them to the mix after the LED
+  filter and pushes them to the mixer as the `mhi` source, which is also
+  the `mhi` stem for `--audio-stems` (see [](audio.md)).
 - **Savestates**: Symphonia keeps its cross-frame decoder state private.
   `DecoderSnapshot` therefore stores a bounded history of encoded frames;
   restoring a board replays them into a fresh decoder and discards the
-  warmup output. Queued descriptor bytes and the unplayed sample tail
-  are saved too. The in-process unit test
+  warmup output. The history (`WARMUP_HISTORY_*`, `Decoder::trim_history`)
+  keeps at least 4 KiB and 4 frames, to cover Symphonia's 2048-byte bit
+  reservoir, and never drops one of the two most recent successfully
+  decoded frames unless it grows past 16 KiB or 256 frames. Queued
+  descriptor bytes and the unplayed sample tail are saved too. The
+  in-process unit test
   `savestate_round_trip_reproduces_an_uninterrupted_runs_output` verifies
   exact output after restoration. The separate-process integration test
   `mhi_m2_savestate_resume_matches_the_uninterrupted_tail` in `tests/mhi.rs`
@@ -707,8 +737,9 @@ content above.
 - **Save-state layout**: decoder warmup history, tone-filter coefficients,
   and filter memory are serialized machine state, in the `ZORR` chunk.
   A new field needs `#[serde(default)]`; a change of meaning bumps that
-  chunk's version with a migration (`docs/internals/savestate.md`,
-  "Versioning"), independently of the board's register-protocol version.
+  chunk's version with a migration (see
+  [Versioning](savestate.md#versioning)), independently of the board's
+  register-protocol version.
 - **DSP chain implementation**: `Biquad` is Direct Form II transposed,
   reusing `src/chipset/paula.rs`'s `AnalogLedFilter`/`BiquadLowPass`
   structure and `process` shape rather than a second filter convention in
@@ -717,48 +748,65 @@ content above.
   only when the latch values or the native sample rate actually change
   (`retune_if_stale`), preserving each biquad's own `z1`/`z2` memory across
   a recompute so a latch write never introduces a discontinuity beyond
-  what the new coefficients themselves imply. `STOP` (`cmd_stop`) and
-  `RESET` both clear that filter memory (`ToneFilterBank::clear_state`/a
-  fresh `ToneFilterBank`), matching the existing resampler-history-clear
-  reasoning in both places -- a stopped or reset stream's filter ringing
-  must not bleed into whatever plays next.
+  what the new coefficients themselves imply. `STOP` (`cmd_stop`) and a
+  machine reset (`reset`) both clear that filter memory
+  (`ToneFilterBank::clear_state`/a fresh `ToneFilterBank`), matching the
+  existing resampler-history-clear reasoning in both places -- a stopped
+  or reset stream's filter ringing must not bleed into whatever plays
+  next.
 - **Launcher**: the machine-configuration launcher's **I/O Ports** tab
-  (Audio page) has a plain fit/don't-fit toggle for the board (same as
-  Toccata, see [](toccata.md)'s "What's out of scope" section); host-side
-  audio capture/backend options stay command-line/config-file only.
+  (Audio category) has a plain fit/don't-fit **MHI decoder** toggle for
+  the board (same as Toccata, see [](toccata.md)'s "Out of scope"
+  section); host-side audio capture/backend options stay
+  command-line/config-file only.
+- **Debugger**: while the board is fitted, the debugger window's Audio tab
+  shows an MHI row with the transport state, native sample rate,
+  `QUEUE_COUNT`, and the volume, pan, and bass/mid/treble latches
+  (`Mhi::debug_status`), plus a scope trace and a mute toggle. The mute
+  is host-side: it zeroes the board's contribution in Paula's mix without
+  touching board state.
 - **Large-descriptor DMA copy**: `DESC_LEN` genuinely does not truncate --
   `Mhi` copies a descriptor's full length into its bitstream buffer in
   bounded chunks (`MAX_DESCRIPTOR_BYTES`, 1 MiB) so a single oversized
   `DOORBELL` write cannot force one huge host-side allocation, but every
-  byte still lands regardless of how many chunks that takes.
+  byte still lands regardless of how many chunks that takes
+  (`doorbell_copies_a_descriptor_larger_than_the_dma_chunk_cap_without_truncating`).
+  Unmapped source addresses read as `0xFF`.
 - **Incomplete-trailing-frame reclaim** ("An incomplete trailing frame"
   above): `Mhi` gives a stalled trailing frame up to `MAX_STALL_TICKS`
   (1/10 s of emulated Paula-clock time -- comfortably longer than any real
   `DOORBELL` round-trip, short enough not to visibly stall playback) to be
   completed by a subsequent doorbell before discarding the leftover bytes
   and reclaiming every descriptor they belong to, the same "skip and
-  complete" treatment undecodable content gets. Reset on `RESET`/`STOP`
-  and whenever a frame decodes or the bitstream reaches empty, so it never
-  carries stale state across sessions.
+  complete" treatment undecodable content gets
+  (`a_frame_split_at_the_last_queued_buffer_eventually_reclaims_the_descriptor`).
+  The stall counter is cleared by a machine reset or `STOP`, and whenever
+  a frame decodes or the bitstream empties, so it never carries stale
+  state across sessions.
 - **Golden CI fixtures**: `tests/data/mhi/golden_tone_cbr64_mono.mp3` (a
   tiny locally-synthesized CBR fixture, `ffmpeg` sine source encoded with
   `lame`) and `vbr_sweep.mp3` (same synthesis, LAME `-V4` VBR) are
-  committed -- unlike `test-assets/mhi/` (gitignored, fetched from Aminet),
+  committed, alongside `golden_tone2_880hz_cbr64_mono.mp3` and
+  `param_tone_cbr64_mono.mp3` for the seek and parameter integration
+  tests below. Unlike the local assets the M2 integration tests use
+  (`test-assets/mhi-devkit/`, the Aminet MHI developer kit's `MHIplay`,
+  and a tone MP3 under `test-assets/mp3/`; see `test-assets/mhi/NOTES.md`),
   these are Copperline's own generated output, not third-party binaries,
   so the "ROMs and disk images are local assets and are never committed"
-  rule does not apply. `src/mhi.rs`'s `golden_tone_decodes_to_a_stable_pcm_capture`
-  decodes the CBR fixture through the real board/decoder path and compares
-  against a committed golden PCM capture
-  (`golden_tone_cbr64_mono.pcm`, within a small per-sample tolerance --
-  Symphonia's own precomputed tables call `powf`, whose last-ulp rounding
-  differs across platforms/optimization levels, confirmed in practice
-  across CI's Linux/Windows/macOS legs) on every plain `cargo test` -- unlike
-  every `#[ignore]`d integration test in `tests/mhi.rs`, this needs no
-  fetched `test-assets/`, so it catches decoder-dependency drift or
-  resampler/pacing regressions immediately rather than only when a
-  developer happens to have local assets staged. The same two fixtures
-  back the seek-entry tests (`stop_resets_decoder_state_so_a_reseek_
-  matches_a_fresh_decode`, `mid_frame_entry_resyncs_to_the_next_real_frame`,
+  rule does not apply. `src/mhi.rs`'s
+  `golden_tone_decodes_to_a_stable_pcm_capture` decodes the CBR fixture
+  through the board's own packetizer and decoder (no pacing or
+  resampling) and compares the result against a committed golden PCM
+  capture, `golden_tone_cbr64_mono.pcm`. The comparison allows a maximum
+  per-sample difference of `1e-4`, because Symphonia's precomputed tables
+  call `powf`, whose last-ulp rounding differs across platforms and
+  optimization levels (confirmed in practice across CI's
+  Linux/Windows/macOS legs). It runs on every plain `cargo test` -- every
+  test in `tests/mhi.rs` boots the emulator and is `#[ignore]`d -- so it
+  catches decoder-dependency drift or packetizer/resync regressions
+  immediately. The CBR and VBR fixtures also back the seek-entry tests
+  (`stop_resets_decoder_state_so_a_reseek_matches_a_fresh_decode`,
+  `mid_frame_entry_resyncs_to_the_next_real_frame`,
   `seek_entry_into_vbr_content_decodes_cleanly_after_a_settle_window`) --
   real encoded streams carry genuine cross-frame reservoir state that a
   hand-authored `mp3_frame` (all-zero body, no reservoir use) cannot, so
@@ -766,3 +814,17 @@ content above.
   only against real content. To regenerate after an intentional
   decode-path change, see `golden_tone_decodes_to_a_stable_pcm_capture`'s
   own doc comment.
+- **Integration tests** (`tests/mhi.rs`, all `#[ignore]`d; run with
+  `cargo test --release --test mhi -- --ignored`): each boots the bundled
+  AROS ROM with `[mhi] enabled = true` and a host-directory boot volume
+  holding the committed `guest/mhi/mhi_copperline.library` and a client
+  program. `mhi_m1_open_query_alloc_doorbell_interrupt_round_trip` runs
+  the `guest/mhi/test/mhitest` probe to check open/query/alloc/free and
+  the doorbell-to-interrupt round trip.
+  `mhi_m3_seek_switches_from_tone_a_to_tone_b_across_a_stop` (`mhiseek`)
+  plays one committed tone, issues `MHIStop`, and plays the other.
+  `mhi_m4_live_setparam_changes_volume_and_balance_mid_playback`
+  (`mhiparam`) changes latches mid-playback. The three `mhi_m2_*` tests
+  play a tone through the dev kit's `MHIplay` and check that it reaches
+  `--audio-wav`, is identical across runs, and survives a save state;
+  they need the local assets above and skip cleanly without them.

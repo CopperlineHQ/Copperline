@@ -300,14 +300,8 @@ impl App {
                 self.show_osd(format!("Audio output: {}", self.audio_output.label()));
             }
             A::SetAudioFilter(mode) => {
-                use crate::config::AudioFilterMode;
                 self.emu.bus_mut().paula.set_led_filter_mode(mode);
-                let label = match mode {
-                    AudioFilterMode::Auto => "Auto",
-                    AudioFilterMode::On => "Enabled",
-                    AudioFilterMode::Off => "Disabled",
-                };
-                self.show_osd(format!("Audio filter: {label}"));
+                self.show_osd(format!("Audio filter: {}", mode.menu_label()));
                 self.request_redraw();
             }
 

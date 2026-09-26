@@ -2799,20 +2799,23 @@ pub fn draw_drop_hint(frame: &mut [u8], texture_scale: usize) {
 /// Vertical pitch of a shortcut row. The panel is sized from this and the
 /// row count, and must stay inside `present_height()`.
 const SHORTCUT_ROW_H: usize = 16;
-/// Trailing note lines under the shortcut table, and their pitch.
-const SHORTCUT_NOTES: [&str; 3] = [
+/// Trailing note lines under the shortcut table, and their pitch. The
+/// stepped adjusters live here rather than in the table: two pairs of keys
+/// on one line cost less height than two rows.
+const SHORTCUT_NOTES: [&str; 4] = [
     "Shortcuts: Cmd on macOS, Alt on Linux/Windows",
+    "Cmd/Alt+Shift+=/- sampler gain, Cmd/Alt+Shift+./, mouse sensitivity",
     "Amiga modifiers: Alt, Cmd/Super=Amiga, Ctrl",
     "In the debugger: S step, O over, U out, F frame, R run/pause",
 ];
-const SHORTCUT_NOTE_H: usize = 12;
+const SHORTCUT_NOTE_H: usize = 10;
 /// Space between the last table row and the first note line.
-const SHORTCUT_NOTES_GAP: usize = 6;
+const SHORTCUT_NOTES_GAP: usize = 5;
 
 /// Panel height that exactly holds the table plus the notes, so adding a row
-/// does not silently push the last one off the bottom. The gap above the
-/// notes and the bottom margin are what a 27-row table leaves within the
-/// display.
+/// does not silently push the last one off the bottom. A 28-row table with
+/// four notes fills the 537-line TV display exactly; another row or note
+/// needs the layout rethought.
 fn shortcuts_panel_height() -> usize {
     TITLE_H
         + 14
@@ -2822,7 +2825,9 @@ fn shortcuts_panel_height() -> usize {
         + 8
 }
 
-const SHORTCUT_ROWS: [(&str, &str, bool); 27] = [
+/// The action column starts 248 px in, so at the panel's 2x text an action
+/// label fits in 22 characters.
+const SHORTCUT_ROWS: [(&str, &str, bool); 28] = [
     ("Q", "Quit", true),
     ("E", "Open the menu", true),
     ("S", "Save screenshot", true),
@@ -2842,9 +2847,10 @@ const SHORTCUT_ROWS: [(&str, &str, bool); 27] = [
     ("J", "Joystick input mode", true),
     ("M", "Monitor bezel off/on", true),
     ("Shift+A", "Cycle audio output", true),
+    ("A", "Cycle audio filter", true),
     ("F", "Fullscreen on/off", true),
     ("Shift+F", "Status bar on/off", true),
-    ("P", "Performance overlay on/off", true),
+    ("P", "Perf overlay on/off", true),
     ("W", "Warp speed on/off", true),
     ("Shift+W", "Warp limit (2x..Max)", true),
     ("Z", "Rewind one step", true),

@@ -5,9 +5,9 @@
 #let breakableDefault = false
 ```
 
-Copperline supports two VS Code integrations. Both launch a real emulator
-window and debug the Amiga program's source. Choose the extension for the
-workflow you want:
+Copperline supports two VS Code integrations. Both launch an emulator window
+and debug the Amiga program's source. Choose the extension for the workflow
+you want:
 
 | Integration | Use it for | Launch type |
 |---|---|---|
@@ -25,7 +25,8 @@ in **Run and Debug**, and stop one session before starting the other.
 ## Build Copperline
 
 The debugging features in these chapters ship in Copperline 0.19.0 and
-later. The setup was checked against Copperline commit
+later; [guest coverage](#view-guest-coverage) needs 0.20.0 or later. The
+setup was checked against Copperline commit
 [`3d334a11`](https://github.com/CopperlineHQ/Copperline/commit/3d334a11),
 which includes the Bartman debugger startup fixes. An older installed
 release does not contain them: install 0.19.0 or newer, or build from
@@ -82,7 +83,9 @@ code --install-extension ./copperline-debug.vsix --force
 There is no separate JavaScript compilation step. If `code` is not on PATH,
 run **Extensions: Install from VSIX...** in VS Code's command palette and
 select the generated file. Reload the VS Code window after replacing an
-already loaded extension.
+already loaded extension. The extension is packaged as an extension pack
+with `prb28.amiga-assembly`, which supplies Amiga assembly syntax
+highlighting, documentation, and language tooling.
 
 Open your Amiga project's folder. Add these workspace settings to
 `.vscode/settings.json`, replacing the example paths with absolute paths to
@@ -102,13 +105,18 @@ On Windows, JSON paths can use forward slashes, for example
 
 Use your existing vasm, amiga-gcc, or ELF/elf2hunk project. For a new project,
 run **Copperline: Init Amiga Project**, choose a destination and toolchain,
-then open that folder. The generated **Copperline: Build** task builds
-`demo`; the Bartman toolchain option also produces `demo.elf`. Its compiler
-can be detected through the installed Bartman extension. Other toolchains
-can be selected independently.
+then open that folder. The toolchain choices are auto-detect, Bartman's
+`m68k-amiga-elf` (found through the installed Bartman extension when
+present), bebbo amiga-gcc, and vbcc with vasm. The generated
+**Copperline: Build** task builds `demo`; the Bartman toolchain option also
+produces `demo.elf`. The project also gets **Copperline: Clean**,
+**Copperline: Convert EXE to ADF**, and **Copperline: Profile File Size**
+tasks, and a `.vscode/launch.json` with six machine presets, of which the
+A500 one prompts for a Kickstart 1.3 ROM.
 
-For that generated project, use the following `.vscode/launch.json`. It
-selects a predictable A500 with AROS, regardless of saved launcher defaults:
+For that generated project, replace `.vscode/launch.json` with the following.
+It selects a predictable A500 with AROS, regardless of saved launcher
+defaults:
 
 ```json
 {
@@ -187,7 +195,7 @@ child separates chip-DMA contention from CPU work in a function.
 
 For bitmap previews, blitter channels, and the combined CPU/DMA timeline,
 use the separate [Bartman profiling walkthrough](vscode-bartman.md#capture-and-explore-a-frame).
-See [Instruction profiling](profiling.md) for capture formats and automation,
+See [Per-frame profiling](profiling.md) for capture formats and automation,
 and [the DAP reference](dap.md) for all launch and attach options.
 
 (view-guest-coverage)=
@@ -220,10 +228,10 @@ with `sourceMap` applied to its paths. Two ways to see it:
   gutters and **Watch** keeps them current across runs.
 - VS Code's built-in coverage view: run **Copperline: Show Coverage** from
   the command palette (or **Run Tests with Coverage** on the *Copperline
-  Coverage* item in the Test Explorer). The command asks for the `.info`
-  file, then VS Code's Test Coverage panel lists each source file with its
-  line and function percentages and the editor shows per-line hit counts
-  and uncovered lines.
+  Coverage* item in the Test Explorer). The command offers the file named by
+  the last launch's `coverage` or asks for an `.info` file. VS Code's Test
+  Coverage panel then lists each source file with its line and function
+  percentages, and the editor shows per-line hit counts and uncovered lines.
 
 For a static report, `genhtml lcov.info -o coverage-html` from the lcov
 package renders the same file. The file's leading `#` lines account for

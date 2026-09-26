@@ -7,6 +7,6 @@ Controls the Copper's access to low custom-register addresses.
 
 ## Bitfields
 
-- Bit 1: CDANG, permit Copper writes to the blitter register range.
+- Bit 1: CDANG, let the Copper write registers below $080.
 
-On OCS, clearing CDANG restricts writes to $080 and above; setting it lowers the boundary to $040. ECS/AGA extend the permitted range when CDANG is set.
+With CDANG clear, the Copper can write only $080 and above. Setting CDANG lowers the limit to $040 on OCS and removes it on ECS/AGA. A MOVE to a protected register stops the Copper.

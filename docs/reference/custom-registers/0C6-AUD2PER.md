@@ -7,6 +7,6 @@ Sets audio channel 2's sample playback period.
 
 ## Bitfields
 
-- Bits 15-0: Period in Paula clocks per 8-bit sample.
+- Bits 15-0: Period in colour clocks per 8-bit sample.
 
-DMA supplies two samples per word; a shorter period increases playback rate.
+DMA supplies two samples per word; a shorter period raises the playback rate.

@@ -7,8 +7,8 @@ and uses the desktop emulator's CPU, chipset, renderer and audio mixer.
 Supported content includes standard 880 KiB and 1760 KiB ADFs, ISO/CUE/CHD/NRG
 CD images, M3U playlists, and WHDLoad LHA/LZH/ZIP packages. CUE audio tracks
 can be BINARY or WAVE; this build does not enable MP3 track decoding. PAL and
-NTSC are available. Extended ADFs, arbitrary hardfiles and desktop configuration files
-are not accepted by this frontend.
+NTSC are available. The core does not accept extended ADFs, arbitrary
+hardfiles or desktop configuration files.
 
 ## Build and install
 
@@ -32,9 +32,10 @@ The output is under `crates/copperline-libretro/target/release/`:
 
 Copy the library to the frontend's cores directory using the installed name,
 and copy `crates/copperline-libretro/copperline_libretro.info` to its core-info
-directory. RetroArch shows these locations under **Settings → Directory**.
-Load the Copperline core, then open a supported image or package through **Load Content**.
-Starting the core without content boots AROS with an empty drive.
+directory. RetroArch shows these locations under **Settings -> Directory**.
+Load the Copperline core, then open a supported image or package through
+**Load Content**. Starting the core without content boots AROS with an empty
+drive.
 
 The repository's Libretro workflow builds packages for Linux, macOS and
 Windows. Each package includes the core, its info file, the Copperline license,
@@ -45,12 +46,15 @@ artifacts. Installation through RetroArch's Online Updater is not configured.
 
 ## Machine and ROM options
 
-The **Auto** machine option selects A500 for floppies, CD32 for discs and
-A1200 with 8 MiB fast RAM for WHDLoad. You can also select A500, A1200 or CD32
-explicitly. Other options select PAL/NTSC, AROS/Kickstart, floppy write
-protection and netplay mode. Close and reload content after changing an option;
-the frontend's Reset command resets the current machine without applying new
-options. The core does not read the desktop's saved defaults or `copperline.toml`.
+The core has five options, each applied when content loads: **Machine**,
+**Video standard**, **Boot ROM**, **Floppy write protection** and **Netplay
+mode**. The **Auto** machine selects A500 for floppies, CD32 for discs and
+A1200 with 8 MiB fast RAM for WHDLoad; A500, A1200 or CD32 can also be chosen
+explicitly. The video standard is PAL (default) or NTSC, the boot ROM AROS
+(default) or Kickstart, and write protection and netplay mode are off by
+default. Close and reload content after changing an option; the frontend's
+Reset command resets the current machine without applying new options. The
+core does not read the desktop's saved defaults or `copperline.toml`.
 
 AROS is embedded in the library and needs no external files. For software that
 needs a Commodore ROM, select **Kickstart** and put your ROM in the frontend's
@@ -87,10 +91,11 @@ through without triggering its normal hotkeys.
 | Insert or Help | Amiga Help |
 
 Frontend port 1 corresponds to Amiga port 2; frontend port 2 corresponds to
-Amiga port 1. Select **Amiga joystick / CD32 pad** for both to use two gamepads. Select
+Amiga port 1. Select **Amiga joystick / CD32 pad** for both to use two
+gamepads, or **CD32 gamepad** to fit a CD32 pad on any machine. Select
 **Amiga mouse** explicitly for both to use the frontend's first and second
 mice; the frontend and its input driver must support multiple mice. A port
-can also be disconnected. This version has no on-screen keyboard or
+can also be **Disconnected**. This version has no on-screen keyboard or
 gamepad-to-mouse controls.
 
 ### Four-player multitap
@@ -98,7 +103,7 @@ gamepad-to-mouse controls.
 The core exposes four frontend controller ports. Ports 1 and 2 retain the
 native Amiga mapping above. Ports 3 and 4 are the parallel-port multitap's
 two joystick sockets, as used by Super Skidmarks and other four-player games.
-In RetroArch's **Quick Menu > Controls**, select **Parallel-port joystick
+In RetroArch's **Quick Menu -> Controls**, select **Parallel-port joystick
 (multitap)** for ports 3 and 4. Select **Amiga joystick / CD32 pad** for
 ports 1 and 2 to use four gamepads. The adapter sockets default to
 **Disconnected**; enabling either socket connects the adapter.
@@ -114,8 +119,8 @@ restoration; older two-controller states load with both extra sockets empty.
 An M3U playlist contains one image path per line, with paths relative to the
 playlist's directory or absolute. Blank lines and lines beginning with `#`
 are ignored. UTF-8 with an optional BOM and either Unix or Windows line
-endings is accepted. A playlist can hold up to sixteen images. Use either floppies or CDs in a
-playlist; mixing the two is rejected.
+endings is accepted. A playlist can hold up to sixteen images. Use either
+floppies or CDs in a playlist; mixing the two is rejected.
 
 ```text
 Game Disk 1.adf
@@ -124,15 +129,16 @@ Save Disk.adf
 ```
 
 Use the frontend's **Disc Control** menu to eject, select an image, then
-insert it. Selections use DF0 on Amiga models or the optical drive on CD32. Adding and replacing playlist images
-also requires an ejected drive.
+insert it. Selections use DF0 on Amiga models or the optical drive on CD32.
+Adding and replacing playlist images also requires an ejected drive.
 
 Guest writes update memory during emulation. When a disk is ejected or
 content is closed, changed ADFs are written under `copperline/` in the
 frontend's save directory. Names include a digest of the original image to
 separate different disks with the same filename. The original ADFs remain
 unchanged. CDs are read-only. CD32 EEPROM saves are kept in
-`copperline/cd32.nvram` on normal close. Loading the same content picks up these saved copies.
+`copperline/cd32.nvram` on normal close. Loading the same content picks up
+these saved copies.
 
 At load time, the core copies every CD source file into a private temporary
 directory and hashes the copies. This requires temporary disk space equal to
@@ -159,7 +165,7 @@ multiple slaves, it uses the first in sorted order.
 The frontend's system directory must contain:
 
 ```text
-kickstart-a1200.rom
+kickstart-a1200.rom      # or kickstart.rom
 whdboot/WHDLoad_usr.lha
 whdboot/skick346.lha
 Kickstarts/              # additional Kickstart images required by slaves
@@ -175,15 +181,14 @@ Guest writes stay in memory until normal close, then changed sectors are
 saved under `copperline/whdload/<digest>/`. Reloading the same package restores
 its game saves, including after a support-archive or firmware change. Changing
 the game volume itself starts a separate save set. The original archive is
-unchanged.
-Each generated volume is limited to 128 MiB; large packages also require
-substantial save-state memory.
+unchanged. Each generated volume is limited to 128 MiB; large packages also
+require substantial save-state memory.
 
 ## RetroArch netplay
 
 1. Install both the core library and its matching `.info` file. RetroArch uses
    the info file to recognize deterministic save-state support.
-2. Both players select **Netplay mode → enabled**, then close and reload
+2. Both players set **Netplay mode** to **enabled**, then close and reload
    content. Use the same core build, machine/ROM/video options and original
    content. Use identical playlists with relative entries. WHDLoad also needs
    identical support archives and staged firmware.
@@ -272,11 +277,12 @@ in a single-player session.
 
 ## Save states and presentation
 
-Frontend save states include the machine, writable floppy and hard-disk data, the
-selected image and eject state, controller selections, and pending mouse and
-keyboard input. They also retain pending audio samples outside netplay mode and the video aperture
-classification. Restoring a state also restores disk contents. Those contents
-become the persistent copies on the next eject or normal close.
+Frontend save states include the machine, writable floppy and hard-disk data,
+the selected image and eject state, controller selections, and pending mouse
+and keyboard input. They also keep the video aperture classification and,
+outside netplay mode, pending audio samples. Restoring a state also restores
+disk contents, which become the persistent copies on the next eject or normal
+close.
 
 States require the same machine, boot ROM, original media, write-protection
 and netplay options. Version 0.2 uses a new libretro envelope around the shared
@@ -296,14 +302,13 @@ per-frame cost, particularly for large WHDLoad packages. CD contents are
 referenced, not copied into each checkpoint.
 
 A floppy session reserves its playlist plus two spare slots, because every slot
-costs an image in every checkpoint; adding more discs than that is refused with
-the session's limit. A CD session, whose slots hold only a reference, keeps all
-sixteen. A state that arrives in a buffer larger than the session reserves, as
-one written against the 64 MiB envelope does, is read on the strength of the
-payload length in its own header, so the smaller envelope is not what turns it
-away. What a state must still match is the build: every frontend payload is
-stamped with a schema fingerprint covering the release version and every chunk,
-and one that differs is refused.
+costs an image in every checkpoint; adding more images than that is refused. A
+CD session, whose slots hold only a reference, keeps all sixteen. A state in a
+buffer larger than the session reserves, such as one written against the old
+64 MiB envelope, still loads, because the core reads the payload length from
+the state's own header. A state must still come from the same build: every
+frontend payload is stamped with a schema fingerprint covering the release
+version and every chunk, and a state whose fingerprint differs is refused.
 
 The frontend owns pacing, video output and audio output. Each `retro_run`
 advances one hardware video field. Refresh information follows Agnus's actual

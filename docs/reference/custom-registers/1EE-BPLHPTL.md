@@ -1,9 +1,9 @@
 # BPLHPTL
 Offset: $1EE
 Access: write
-Chipset: AGA
+Chipset: ECS/AGA
 
-UHRES bitplane pointer low word.
+UHRES bitplane pointer low word (not emulated).
 
 ## Bitfields
 

@@ -10,5 +10,5 @@ Latches the half-line sync position for interlaced timing.
 - Bits 8-0: Horizontal position in colour clocks.
 - Bits 15-9: Ignored.
 
-Copperline stores this value for debugger inspection and byte-write
-reconstruction. It does not currently apply HCENTER to sync timing.
+Copperline stores this value for debugger inspection only; it does not
+apply HCENTER to sync timing.

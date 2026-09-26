@@ -10,9 +10,10 @@ metadata files without writing any Rust. The built-in `[memory] fast` and
 the device-board notes below and the `[scsi]` section of
 [](guide/configuration); the third `[scsi]` choice, the A3000's
 motherboard SDMAC, is silicon at `$DD0000` rather than a Zorro board).
-Both Zorro controllers have freely redistributable bundled autoboot ROMs;
-the A2091 image is built from `a2091-rom/` and installed under
-`share/copperline/a2091/`.
+Both Zorro controllers have freely redistributable bundled autoboot ROMs:
+the A2091 image is built from `a2091-rom/`, the A4091 image is the open
+A4091 project's `a4091_cdfs.rom` release, and they install under
+`share/copperline/a2091/` and `share/copperline/a4091/`.
 
 There are two board kinds:
 
@@ -24,10 +25,52 @@ There are two board kinds:
   forking and recompiling Copperline. See
   [WASM plugin boards](#wasm-plugin-boards) below.
 
-Functional boards (the A2091, the A4091, the A2065, the CDTV DMAC, the
-Toccata, the MHI decoder board, and WASM plugins) all implement the `ZorroDevice` trait
+Every functional board -- the in-tree boards listed below, the CDTV
+DMAC, and WASM plugins -- implements the `ZorroDevice` trait
 (`src/zorro_device.rs`): the bus drives every board through that one
 boundary for register access, ticking, interrupts, and DMA.
+
+(built-in-boards)=
+## Built-in boards
+
+These are the boards Copperline can fit without a metadata file. The
+table lists them in autoconfig chain order, which decides the base
+address each one gets:
+
+| Board | Fitted by | Bus | Manufacturer / product | Window |
+|---|---|---|---|---|
+| CD32 Full Motion Video module | `fmv = true` or `fmv_rom` (CD32 only) | II | 514 / `$6A` | 1 MiB |
+| Fast RAM | `[memory] fast` | II | 5192 / 3 | 64K-8M |
+| Zorro III RAM | `[memory] z3` | III | 5192 / 4 | 64K-1G |
+| RAM boards from `[[zorro]]` metadata files | `[[zorro]]` | II/III | from the file | from the file |
+| Copperline identification board | `identify` (on by default) | II | 5192 / 2 | 64K |
+| A2091 SCSI | `[scsi] controller = "a2091"` | II | 514 / 3 | 64K |
+| A4091 SCSI | `[scsi] controller = "a4091"` | III | 514 / 84 | 16M |
+| lide RIPPLE / RIDE IDE | `[lide] board = "ripple"` / `"ride"` | II | 5194 (`$144A`) / 7, 9 | 128K |
+| lide AT-Bus 2008 IDE | `[lide] board = "atbus2008"` | II | 2092 (`$082C`) / 6 | 64K |
+| copperhf virtual hardfile controller | `[copperhf]` | II | 5192 / 8 | 64K |
+| SF2000 SD card controller | `[sf2000sd]` | II | 5194 (`$144A`) / 11 | 64K |
+| WASM plugin boards from `[[zorro]]` | `[[zorro]]` | II/III | from the file | from the file |
+| HostSocket | `[hostsocket]` | II | 5192 / 6 | 64K |
+| zz9k crypto board | `[zz9k]` | III or II | 28014 (`$6D6E`) / 4 (III), 3 (II) | 1M-256M (III), 4M (II) |
+| Copperline services board | `[[filesys]]`, `[clipboard] share`, `[machine] rom_scsi_device_disable` | II | 5192 / 5 | 64K |
+| A2065 Ethernet | `[a2065]` | II | 514 / `$70` | 64K |
+| Toccata sound board | `[toccata]` | II | 18260 (`$4754`) / 12 | 64K |
+| MHI MPEG audio decoder | `[mhi]` | II | 5192 / 7 | 64K |
+| Z3660 RTG | `[rtg] card = "z3660"` | III | 5195 (`$144B`) / 1 | 128M |
+| Picasso II / II+ | `[rtg] card = "picasso2"` / `"picasso2plus"` | II | 2167 / 11 + 12 | 1-2M + 64K |
+| Graffity [Zorro II] | `[rtg] card = "graffityz2"` | II | 2092 / 34 + 33 | 1-2M + 128K |
+| Graffity [Zorro III] | `[rtg] card = "graffityz3"` | III | 2092 / 33 | 16M |
+
+The FMV module is put at the front of the chain because its ROM expects
+the first Zorro II placement, `$200000`. On a CDTV the DMAC (Commodore
+514, product 3) is not on this chain at all: it autoconfigs ahead of it,
+as on the real machine (see [below](#how-autoconfig-works-in-copperline)).
+The sections that follow describe the RAM, plugin, network, sound,
+crypto, and RTG boards; the storage controllers are covered in
+[](internals/peripherals), copperhf in [](internals/copperhf), and the
+manufacturer 5192 products in
+[The Copperline manufacturer ID](#the-copperline-manufacturer-id).
 
 ## Describing a board in TOML
 
@@ -39,8 +82,11 @@ Reference a board metadata file from the main configuration:
 metadata = "boards/megaram.toml"
 ```
 
-Multiple `[[zorro]]` entries are allowed; boards join the autoconfig chain
-in file order, after the built-in fast/z3 RAM boards.
+The metadata path is resolved relative to the working directory. Multiple
+`[[zorro]]` entries are allowed and keep their file order on the
+autoconfig chain: RAM boards follow the built-in fast/Z3 RAM boards, and
+plugin boards follow the in-tree storage controllers (see
+[Built-in boards](#built-in-boards)).
 
 The metadata file:
 
@@ -53,7 +99,7 @@ size = "64M"
 manufacturer = 0x07DB   # 16-bit autoconfig manufacturer ID
 product = 0x20          # 8-bit product code, unique per manufacturer
 serial = 0              # optional, defaults to 0
-memlist = true          # optional; defaults true for type = "ram"
+memlist = true          # optional; defaults true for "ram", false for "wasm"
 ```
 
 Field notes:
@@ -66,16 +112,17 @@ Field notes:
   address bus cannot reach the Zorro III space.
 - `memlist` sets the autoconfig `ERTF_MEMLIST` flag, which asks Kickstart to
   link the board's space into the Exec free-memory list. Leave it `true`
-  for RAM boards; a future I/O-style board would set it `false`.
+  for RAM boards; register-window (plugin) boards leave it `false`.
 - `manufacturer`/`product`/`serial` are what the guest OS sees in the
   expansion database. `0x07DB` is the conventional "hacker"/"prototype" ID
   for homemade boards. Copperline's own built-in boards instead use its
   registered manufacturer ID (5192 / `0x1448`, dec0de Consulting); see
   [The Copperline manufacturer ID](#the-copperline-manufacturer-id) below.
 
-The spec is validated on load (`BoardSpec::validate`,
-`src/zorro.rs`): bad sizes, unknown `zorro` versions, and unknown backing
-types are reported with the metadata file's path.
+The file is validated on load (`load_board_metadata` and
+`BoardSpec::validate`, `src/zorro.rs`): unknown keys, bad sizes, unknown
+`zorro` versions, out-of-range IDs, and unknown backing types are reported
+with the metadata file's path.
 
 (wasm-plugin-boards)=
 ## WASM plugin boards
@@ -98,19 +145,25 @@ dma  = true             # capabilities, all default false:
 int2 = true             #   dma  -> the dma_read/dma_write host imports
 int6 = false            #   int2 -> may assert INT2 (PORTS)
                         #   int6 -> may assert INT6 (EXTER)
+# diag_vec = 0x40        # DiagArea offset in the window, for a plugin that
+                        # serves its own autoboot ROM (see below)
 # A NIC plugin may also request the shared host networking capability:
 # net = "bridge"         # none / loopback / nat / bridge
-# net_interface = "en0" # required for bridge
+# net_interface = "en0"  # required for bridge
 # resolve = true         # host-OS-resolver DNS lookups (resolve_start/resolve_poll)
+# host_sockets = true    # direct host-socket passthrough (the sock_* imports)
 ```
 
 WASM is chosen because a module's entire mutable state lives in its linear
 memory -- a flat byte array that Copperline's save states snapshot and restore
-exactly like Amiga RAM, preserving deterministic replay. The engine is run with
+exactly like Amiga RAM, preserving deterministic replay. The engine runs with
 NaN canonicalization and without SIMD or threads for determinism; a plugin's
 persistent state must live in linear memory (WebAssembly globals are not
-captured). A save state stores the module's path and replays its memory image
-on load, so the `.wasm` file must remain where the manifest points.
+captured). Every call into the module is metered: its fuel is refilled to 50
+million units before each export call, so a runaway loop traps (and takes the
+board offline, below) instead of hanging the emulator. A save state stores the
+module's path and replays its memory image on load, so the `.wasm` file, and
+any file a file-typed option names, must remain where the manifest points.
 
 ### Module ABI
 
@@ -132,69 +185,80 @@ manifest capabilities; importing one that was not granted fails to load):
 | Import | Signature | Capability |
 |--------|-----------|------------|
 | `log` | `(ptr i32, len i32)` | always available |
-| `config_get` / `resource_len` / `resource_read` | see below | always available |
+| `config_get` | `(key_ptr i32, key_len i32, out_ptr i32, out_cap i32) -> i32` | always: copy a setting's value to `out_ptr` (truncated to `out_cap`); returns its full length, or -1 if unset |
+| `resource_len` | `(name_ptr i32, name_len i32) -> i32` | always: byte length of a file resource, or -1 if absent |
+| `resource_read` | `(name_ptr i32, name_len i32, off i32, out_ptr i32, len i32) -> i32` | always: copy up to `len` bytes from offset `off`; returns the count, or -1 if absent |
 | `dma_read` | `(addr i32, ptr i32, len i32)` | `dma`: Amiga `addr` -> plugin memory `ptr` |
 | `dma_write` | `(addr i32, ptr i32, len i32)` | `dma`: plugin memory `ptr` -> Amiga `addr` |
 | `net_send` | `(ptr i32, len i32)` | `net`: transmit the Ethernet frame at plugin memory `ptr` |
 | `net_recv` | `(ptr i32, cap i32) -> i32` | `net`: copy the next inbound frame into `ptr` (truncated to `cap`), or 0 |
 | `resolve_start` | `(name_ptr i32, name_len i32) -> i32` | `resolve`: start a host-OS-resolver lookup, returns a request id or -1 |
 | `resolve_poll` | `(id i32, out_ptr i32) -> i32` | `resolve`: poll it -- -2 pending, -1 failed, or 0 with the address at `out_ptr` |
+| `sock_open`, `sock_connect`, `sock_send`, `sock_recv`, `sock_poll`, `sock_close`, ... (21 in all) | see below | `host_sockets`: non-blocking passthrough to real host OS sockets |
 
-DMA transfers (`dma_read`/`dma_write`) are transactional and permitted only
-during active host transactions (`read`, `write`, `tick`). Calling DMA
-functions during module initialization (`init`) traps immediately and causes
-plugin instantiation to fail. Calling DMA functions during passive interrupt
-queries (`int2`, `int6`) traps immediately and transitions the board into the
-faulted offline state. Within an active host callback, `dma_write` buffers
-transfers into a host-side journal (bounded to 4,096 transfers and 16 MiB
-cumulative size per callback to prevent host resource exhaustion); pending
-writes are committed to Amiga memory only upon successful return. If the plugin
-traps (e.g. out of fuel, panic, or unhandled exception), uncommitted writes are
-rolled back, leaving Amiga memory untouched. `dma_read` provides read-your-writes
-coherency by overlaying pending uncommitted writes, including across 32-bit
-address wrap boundaries (`0xFFFF_FFFF` -> `0x0000_0000`).
+DMA transfers (`dma_read`/`dma_write`) are permitted only inside an active
+host transaction (`read`, `write`, `tick`). A DMA call from `init` traps and
+makes instantiation fail; one from an interrupt query (`int2`, `int6`) traps
+and takes the board offline. Within a transaction, `dma_write` buffers
+transfers in a host-side journal, bounded to 4,096 transfers and 16 MiB per
+callback so a plugin cannot exhaust host memory, and the journal is committed
+to Amiga memory only when the callback returns successfully. If the plugin
+traps (out of fuel, a panic, or any other trap), the uncommitted writes are
+discarded and Amiga memory is untouched. `dma_read` overlays the pending
+writes, so a plugin reads its own writes, including across the 32-bit address
+wrap (`0xFFFF_FFFF` -> `0x0000_0000`).
 
 ### Fault isolation and lifecycle
 
-When a plugin traps during runtime execution (`read`, `write`, `tick`, `int2`,
-or `int6` -- e.g. from fuel exhaustion, unreachable code, out-of-bounds access,
-or calling DMA outside active transactions):
+When a plugin traps in `read`, `write`, `tick`, `int2`, or `int6` (fuel
+exhaustion, unreachable code, an out-of-bounds access, or a DMA call outside a
+transaction):
+
 - The board immediately enters a **faulted offline state**.
-- Open host resources are cleaned up: sockets are closed, uncommitted DMA
-  journals are discarded, and background resolve receiver handles are dropped
-  (in-flight OS resolver threads terminate on their own and their responses are
-  discarded).
-- Subsequent host callbacks bypass the WASM module entirely:
-  - Register reads return Open Bus (`0xFFFF_FFFF`).
-  - Register writes and clock ticks are ignored (no-ops).
-  - Interrupt lines (`int2`, `int6`) remain unasserted (low / `0`).
-- The faulted state is preserved across save-state snapshots and restores.
-- The board remains offline until a bus reset (`reset()`), including a warm
-  keyboard reset, which re-instantiates a clean module instance with reset
-  linear memory.
+- Its host resources are released: sockets are closed, the uncommitted DMA
+  journal is discarded, and pending resolver lookups are dropped (their
+  threads finish on their own and the answers are ignored).
+- Later host callbacks bypass the module entirely:
+  - Register reads return open bus (`0xFFFF_FFFF`).
+  - Register writes and clock ticks are ignored.
+  - Both interrupt lines stay deasserted.
+- The faulted state is preserved across save states.
+- The board stays offline until a bus reset (`reset()`), including a warm
+  keyboard reset, which re-instantiates the module with fresh linear memory.
 
 Interrupt lines are level-sensitive and polled, exactly like the in-tree
 boards: a plugin holds `int2`/`int6` non-zero while the line is asserted, and
-the bus applies the interrupt-delivery pipeline automatically -- the
-plugin never pulses INTREQ.
+the bus applies the interrupt-delivery pipeline -- the plugin never pulses
+INTREQ.
 
 `resolve_start`/`resolve_poll` ask Copperline's own process to resolve a
-hostname via its OS resolver (`getaddrinfo`) on a short-lived background
-thread, rather than the plugin having to speak DNS wire format itself over
-its own `net` traffic -- the only way a plugin can get "whatever the host's
-resolver is configured for" name resolution under a backend (like a direct
-LAN bridge) with no virtual DNS forwarder of its own. `resolve_start` reads
-the name from the plugin's own linear memory and returns a request id;
-`resolve_poll` is a non-blocking poll of that id, writing the resolved IPv4
-address (4 bytes, big-endian) into the plugin's own linear memory at
-`out_ptr` on success (0). Like `net`, using it makes a board
-non-deterministic -- see [](guide/configuration)'s `[hostsocket]` section for
-the concrete example (its `resolver` key, which defaults to using this
-capability under `net = "nat"`/`"bridge"`).
+hostname through the host OS resolver (`getaddrinfo`) on a short-lived
+background thread, so the plugin need not speak DNS itself over its `net`
+traffic. It is the only way a plugin gets the host's configured name
+resolution under a backend with no virtual DNS forwarder of its own, such as a
+direct LAN bridge. `resolve_start` reads the name from the plugin's linear
+memory and returns a request id; `resolve_poll` polls that id without
+blocking, and on success (0) writes the IPv4 address (4 bytes, big-endian)
+into the plugin's memory at `out_ptr`. Like `net`, using it makes a board
+non-deterministic. The `[hostsocket]` section of [](guide/configuration) is
+the concrete example: its `resolver` key defaults to this capability under
+`net = "nat"`, `"bridge"`, or `"host"`.
+
+The `sock_*` family (`host_sockets`) goes further and hands the plugin real,
+non-blocking host sockets: BSD-style open/bind/listen/accept/connect,
+send/receive (including `sendto`/`recvfrom`, peek, and out-of-band data), a
+small set of socket options, `dup`, and `shutdown`, with host errno values
+normalized to the guest's BSD numbering. A plugin holding it can reach
+anything the host process can, on the host's own network identity, so it is
+never implied by `net` or `resolve`. Socket handles are host resources: after
+a save-state restore every handle the plugin remembers is stale and fails with
+`-EBADF`. The module documentation in `src/wasmboard.rs` details each
+call's arguments and return values.
 
 Plugins can be written in any language that targets `wasm32` (Rust, C, Zig,
-...). An inert example module and its manifest can be generated with the
-ignored test `emit_example_plugin_wasm` (see `src/wasmboard.rs`).
+...). The ignored test `emit_example_plugin_wasm` (`src/wasmboard.rs`)
+writes an inert example module to the path in `COPPERLINE_EMIT_WASM`; pair
+it with a manifest like the one above.
 
 ### Plugin settings, files, and the config panel
 
@@ -215,6 +279,11 @@ key = "rom"
 label = "Boot ROM"
 type = "file"            # the host loads the file and exposes it as a resource
 ```
+
+An `[[option]]` may also carry its own `default`; a `[config]` entry for the
+same key overrides it. `label` defaults to the key, and an `enum` option
+must list its `choices`. A file-typed default is resolved relative to the
+metadata file.
 
 At runtime the module reads a setting via the `config_get` host import, and a
 file-typed option's bytes via `resource_len` / `resource_read` (keyed by the
@@ -249,9 +318,9 @@ net = "nat"   # "bridge", "loopback", or "none" for isolation
 
 (`--a2065-net BACKEND` is the matching per-run flag, and the launcher's
 **I/O Ports** tab's **Networking** page has the same picker under its
-**Ethernet:** heading. Bridged
-mode adds a live host-adapter picker. `--list-net-interfaces` prints the stable
-names accepted by `[a2065] interface` and `--a2065-interface`.)
+**Ethernet:** heading. Bridged mode adds a live host-adapter picker.
+`--list-net-interfaces` prints the stable names accepted by
+`[a2065] interface` and `--a2065-interface`.)
 
 Unlike the DMAC boards, the LANCE does not master the Amiga bus: its init
 block, descriptor rings, and packet buffers live in the board's own 32 KiB RAM
@@ -264,7 +333,7 @@ built in:
 - **`nat`** -- userspace NAT (`src/net/nat/`, behind the default-on `net-nat`
   build feature): a slirp-style virtual gateway that NATs the guest's outbound
   IPv4 onto ordinary host sockets. No host privileges, drivers, or setup, and
-  identical behavior on Linux, macOS, and Windows. The guest sees the QEMU/slirp
+  identical behaviour on Linux, macOS, and Windows. The guest sees the QEMU/slirp
   segment -- configure its TCP/IP stack with:
 
   | Setting | Value |
@@ -330,12 +399,12 @@ Copperline-specific driver work:
 enabled = true
 ```
 
-No other options exist yet. Unlike the A2065/HostSocket boards above,
-Toccata's guest interface is purely register-and-FIFO, not bus-mastering
-DMA, and its output joins Copperline's own mixer as a named source (the
-`toccata` stem in `--audio-stems`) rather than talking to a host device
-directly -- see [](internals/toccata) for the register model and
-[](internals/audio) for the mixer/stem-capture integration.
+No other options exist yet. Toccata's guest interface is purely
+register-and-FIFO, not bus-mastering DMA, and unlike the network boards it
+does not talk to a host device directly: its output joins Copperline's own
+mixer as a named source (the `toccata` stem in `--audio-stems`). See
+[](internals/toccata) for the register model and [](internals/audio) for
+the mixer and stem-capture integration.
 
 ## Audio: the MHI decoder board
 
@@ -364,13 +433,15 @@ and [](internals/audio) for the mixer/stem-capture integration.
 `bsdsocket.library` backed by a host-side smoltcp TCP/IP stack, so
 socket-using applications run with no guest network stack to boot -- see the
 [configuration guide](guide/configuration.md) for the user-facing knobs and
-caveats. Where the A2065 answers "does this driver/stack work," HostSocket
-answers "does this application use sockets correctly," and serves it as the
-real, everyday `bsdsocket.library` for software running under Copperline.
+caveats. The A2065 is for testing a guest network driver and TCP/IP stack;
+HostSocket is for running socket applications, and serves as the everyday
+`bsdsocket.library` for software running under Copperline. With
+`net = "host"` its new TCP and UDP sockets bypass smoltcp and become real host
+sockets through the plugin `host_sockets` capability.
 
-Architecturally it is not a native board like the A2065 but a WASM plugin
-board (previous section) whose module and guest autoboot ROM ship inside the
-`copperline` binary:
+Architecturally it is not a native board like the A2065 but a
+[WASM plugin board](#wasm-plugin-boards) whose module and guest autoboot ROM
+ship inside the `copperline` binary:
 
 - `crates/hostsocket-plugin/` is the plugin source; the committed artifact it
   builds (`assets/hostsocket/hostsocket_plugin.wasm`) is what a plain
@@ -419,8 +490,8 @@ so fitting it keeps the machine fully deterministic and replay-safe, and it
 carries no autoboot ROM or guest driver of its own: the SDK software finds
 the board via `FindConfigDev` and speaks to it directly.
 
-It is also the one bundled board that does **not** autoconfig under the
-Copperline manufacturer ID: it presents the ZZ9000's own identity
+Unlike HostSocket it does **not** autoconfig under the Copperline
+manufacturer ID: it presents the ZZ9000's own identity
 (manufacturer 0x6D6E, product 4 on Zorro III / 3 on Zorro II), because that
 identity is what the SDK's board probe looks for. The RTG/USB/Ethernet
 faces of the real ZZ9000 are absent -- their registers read zero and their
@@ -429,9 +500,10 @@ services report unsupported -- so installing the real board's P96
 
 ## Graphics: RTG boards
 
-Copperline fits at most one RTG board through `[rtg]`. Both are functional
-device-backed boards whose guest drivers program real hardware interfaces;
-there is no software-aware virtual framebuffer.
+Copperline fits at most one RTG board through `[rtg]`: the Z3660, a
+Picasso II or II+, or a Graffity. All are functional device-backed boards
+whose guest drivers program real hardware interfaces; there is no
+software-aware virtual framebuffer.
 
 ### Z3660
 
@@ -527,11 +599,15 @@ window:
 | `+$800000` | 64 KB | VGA registers, same direct port addressing as the Zorro II variant |
 | `+$C00000` | 1 or 2 MB | linear VRAM |
 
-Both variants decode the monitor switch the same way Picasso II does (`$60`
-selects RTG, `$40` selects native Amiga pass-through), but neither has a
-board-level interrupt-enable latch: INT2 follows the CL-GD5428 core's own
-vertical-blank state directly.
+Both variants take the monitor switch as a write strobe, but decode it
+from different address bits than Picasso II: with address bits 6:5 at `11`
+(offset `+$60`) the write selects RTG, and at `10` (`+$40`) native Amiga
+pass-through. The Zorro II board takes the strobe anywhere from `+$8000` in
+its register aperture, the Zorro III board anywhere in its switch aperture.
+Neither has a board-level interrupt-enable latch: INT2 follows the
+CL-GD5428 core's own vertical-blank state directly.
 
+(how-autoconfig-works-in-copperline)=
 ## How autoconfig works in Copperline
 
 Everything below happens automatically; it is documented so you can debug a
@@ -540,7 +616,7 @@ adding new backing types.
 
 At reset every board is unconfigured and the first board in the chain
 appears in the autoconfig window at `$E80000`-`$E8FFFF`
-(`AUTOCONFIG_BASE`/`AUTOCONFIG_SIZE`, `src/zorro.rs:22`). Kickstart's
+(`AUTOCONFIG_BASE`/`AUTOCONFIG_SIZE` in `src/zorro.rs`). Kickstart's
 expansion library then walks the chain:
 
 1. **Discovery.** The board exposes a 16-byte autoconfig ROM,
@@ -556,7 +632,8 @@ expansion library then walks the chain:
 3. **Chain advance.** The configured board disappears from the config
    window and the next unconfigured board appears. Kickstart can also write
    `$E8004C` to "shut up" a board it cannot place, removing it without
-   mapping.
+   mapping; a board with `ERFF_NOSHUTUP` set (the CD32 FMV module) ignores
+   that write.
 
 Successful configuration is logged:
 
@@ -592,11 +669,11 @@ ways:
 On CDTV machines the DMAC occupies the config window first; the Zorro chain
 follows once it is configured, matching real-machine autoconfig order.
 
-On a CD32 with `fmv_rom`, the Commodore Full Motion Video cartridge instead
-occupies the first Zorro II slot, as its module ROM expects: manufacturer 514,
-product `$6A`, serial `$0028001E`, 1 MiB memory-space board with DiagArea vector
-`$80` and the no-shut-up flag. Its hardware model and address map are documented in
-[](internals/peripherals).
+On a CD32 with `fmv = true` (or `fmv_rom`), the Commodore Full Motion Video
+cartridge instead occupies the first Zorro II slot, as its module ROM
+expects: manufacturer 514, product `$6A`, serial `$0028001E`, a 1 MiB
+memory-space board with DiagArea vector `$80` and the no-shut-up flag. Its
+hardware model and address map are documented in [](internals/peripherals).
 
 (the-copperline-manufacturer-id)=
 ## The Copperline manufacturer ID
@@ -611,7 +688,7 @@ makes the real ROMulus flash-ROM board. The product numbers under it are:
 | 2 | Copperline identification board |
 | 3 | Built-in fast RAM (`[memory] fast`) |
 | 4 | Built-in Zorro III RAM (`[memory] z3`) |
-| 5 | Copperline services board (host `[[filesys]]` mounts; `filesys.rs`) |
+| 5 | Copperline services board (host `[[filesys]]` mounts and the `[clipboard]` unit; `filesys.rs`) |
 | 6 | HostSocket bsdsocket.library board (`[hostsocket]`; `hostsocket.rs`) |
 | 7 | MHI virtual MPEG audio decoder board (`[mhi]`; `mhi.rs`) |
 | 8 | copperhf virtual hardfile controller (`[copperhf]`; `copperhf.rs`) |
@@ -632,10 +709,12 @@ autoconfig serial number carries the running Copperline version packed as
 `major << 16 | minor << 8 | patch`, so a tool can report the exact version
 and not just the emulator name.
 
-The board is added last, after the RAM and `[[zorro]]` boards, so those keep
-the base addresses they would get without it. Set `identify = false` in the
-configuration to drop it entirely (for a chain with no emulator-identifying
-board); see the `identify` option in [](guide/configuration).
+The board follows the RAM boards (built-in and `[[zorro]]`) on the chain,
+so those keep the base addresses they would get without it; the
+functional boards come after it (see [Built-in boards](#built-in-boards)).
+Set `identify = false` in the configuration to drop it entirely (for a
+chain with no emulator-identifying board); see the `identify` option in
+[](guide/configuration).
 
 ## Adding a board in Rust
 
@@ -657,9 +736,9 @@ In-tree functional boards implement the `ZorroDevice` trait
    `kind`) for the new variant. `Bus` ticks every board at each timed-device
    boundary, then samples its IRQ lines. A board may return early internally
    when it has no work; the bus does not query board idle/deadline hooks.
-2. Provide a `BoardSpec` constructor with `backing: BoardBacking::Device(slot)`,
-   mirroring the existing ones -- note the full field set (a stale example
-   here previously omitted three of them):
+2. Provide a `BoardSpec` constructor mirroring the existing ones, with the
+   full field set. A functional board uses `backing: BoardBacking::Device(slot)`
+   where this RAM example has `BoardBacking::Ram`:
 
    ```rust
    pub fn fast_ram(size_bytes: usize) -> Self {
@@ -674,6 +753,7 @@ In-tree functional boards implement the `ZorroDevice` trait
            memlist: true,
            memory_space: true,
            chained: false,
+           no_shutup: false,
            window: 0,
            diag_vec: None,
        }
@@ -684,14 +764,12 @@ In-tree functional boards implement the `ZorroDevice` trait
    `src/main.rs`): assign it a slot, add its `BoardSpec` to the chain, and
    push the `BoardDevice` onto `Bus::devices` (the A2091 block, and the
    lide-compatible IDE board's block right after it, are worked templates).
-   Give the new `BoardDevice` variant the next free kind ID in
-   `zorro_device/state.rs` (IDs are never reused). A new board needs no
-   save-state version change: boards travel in the `ZORR` chunk, whose
-   payload names its fields, so older states simply lack the board. Bump
-   that chunk's version in `savestate/chunk.rs` (with a migration) only if
-   an existing board's serialized meaning changes in a way a
-   `#[serde(default)]` cannot express (`docs/internals/savestate.md`,
-   "Versioning").
+   A new board needs no save-state version change: boards travel in the
+   `ZORR` chunk, whose payload names its fields, so older states simply lack
+   the board. Bump that chunk's version in `savestate/chunk.rs` (with a
+   migration) only if an existing board's serialized meaning changes in a
+   way a `#[serde(default)]` cannot express (see
+   [Versioning](internals/savestate.md#versioning)).
 4. Add unit tests next to the existing ones in `src/zorro.rs`, which cover
    ROM nibble encoding, Zorro II/III base assignment, chain advance,
    shut-up, and power-on reset -- they are the best worked examples of the

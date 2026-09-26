@@ -17,9 +17,12 @@ Picasso II's 64 KB, though only the low VGA port range within it is live.
 
 Unlike Picasso II, Graffity's register window addresses VGA ports directly at
 the window offset (no odd/even port-mirroring quirk): offset `$3B0`-`$3DF`
-reaches the corresponding VGA port 1:1. The monitor switch strobe lives at
-offset bit 15 (`$8000`+): bits `$60` show the RTG screen, `$40` restores the
-native Amiga display, matching Picasso II's encoding.
+reaches the corresponding VGA port 1:1. Any write with offset bit 15 set
+(`$8000`+) is a monitor-switch strobe decoded from address bits 6:5: `11`
+(`+$60`) shows the RTG screen, `10` (`+$40`) restores the native Amiga
+display, and other patterns are ignored. This is a different encoding from
+Picasso II, which decodes the switch from address bit 12 of an even-address
+write.
 
 ## Zorro III layout
 
@@ -27,18 +30,28 @@ The Zorro III board is a single 16 MB autoconfig window (product 33, no
 window tag) with three fixed sub-apertures:
 
 - `+$400000`, 64 KB: pure monitor-switch strobe trap. Writes here never reach
-  the VGA core; only the `$60`/`$40` low-bit pattern toggles the switch.
+  the VGA core; only the `$60`/`$40` address pattern toggles the switch.
 - `+$800000`, 64 KB: the real VGA-register window, same direct port
   addressing as the Zorro II variant.
 - `+$C00000`: linear VRAM, sized to the configured 1 or 2 MB.
+
+Everything else in the window reads as open bus and ignores writes.
 
 ## INT2 wiring
 
 Graffity has no board-level interrupt-enable latch of its own (unlike
 Picasso II+'s register-window `$1000`/`$1001` gate). INT2 follows the
 CL-GD5428 core's own vertical-blank state directly
-(`CirrusGd5426::vblank_pending`), which is itself gated by the guest arming
-VGA CRTC `$11`.
+(`CirrusGd5426::vblank_pending`), which latches only when the guest has
+enabled the vertical interrupt through VGA CRTC `$11`; writing CRTC `$11`
+with bit 4 clear acknowledges it.
+
+## Presentation and diagnostics
+
+As on Picasso II, the board presents its own frame only while the monitor
+switch selects RTG and the programmed mode is valid.
+`COPPERLINE_DIAG_PICASSO=1` enables the same diagnostic logging as on
+Picasso II, including monitor-switch changes.
 
 ## Reference
 

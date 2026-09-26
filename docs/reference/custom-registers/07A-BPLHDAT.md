@@ -3,7 +3,7 @@ Offset: $07A
 Access: write
 Chipset: ECS/AGA
 
-UHRES bitplane identifier/data register.
+UHRES bitplane identifier/data register (not emulated).
 
 ## Bitfields
 

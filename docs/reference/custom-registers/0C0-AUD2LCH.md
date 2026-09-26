@@ -11,4 +11,3 @@ Sets the upper word of audio channel 2's sample pointer.
 - Bits 15-5: Ignored.
 
 The usable address range also depends on the fitted Agnus and chip RAM.
-

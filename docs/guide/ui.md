@@ -5,13 +5,13 @@ TV-like 4:3 aspect ratio, above a status bar with the machine's controls.
 The window scales continuously when resized.
 
 The display defaults to buffered, synchronised presentation (strict FIFO
-vsync) on all desktop platforms. **Video Settings > VSync** changes this
-immediately; it is also in the configuration screen's A/V & Emu > Display
+vsync) on all desktop platforms. **Video Settings -> VSync** changes this
+immediately; it is also in the configuration screen's **A/V & Emu -> Display**
 category and saved as `[display] vsync`. PAL output is roughly 50 Hz, so
-motion can still have an uneven cadence on a fixed 60 Hz
-or 120 Hz display as some Amiga frames stay on screen for an extra refresh.
-Vsync prevents tearing but does not make those refresh rates match or change
-the emulated machine's speed.
+motion can still have an uneven cadence on a fixed 60 Hz or 120 Hz display,
+where some Amiga frames stay on screen for an extra refresh. VSync prevents
+tearing, but it does not make those refresh rates match or change the
+emulated machine's speed.
 
 On native Wayland, redraws also follow compositor frame callbacks. This
 allows the compositor to throttle a hidden window and schedule visible
@@ -48,29 +48,29 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 | `Cmd+S` | `Alt+S` | Save a screenshot (`copperline-screenshot-<YYYYMMDDHHmmSS>.png` in the [screenshots folder](#where-files-go); the on-screen confirmation overlay is not part of the saved image) |
 | `Cmd+R` | `Alt+R` | Start / stop a video-with-audio recording (below) |
 | `Cmd+Shift+R` | `Alt+Shift+R` | Start / stop an input recording (below) |
-| `Cmd+Shift+V` | `Alt+Shift+V` | Paste as keystrokes: type the host clipboard's text on the emulated keyboard (also *Input Settings > Paste as Keystrokes*) |
+| `Cmd+Shift+V` | `Alt+Shift+V` | Paste as keystrokes: type the host clipboard's text on the emulated keyboard (also *Input Settings -> Paste as Keystrokes*) |
 | `Cmd+Shift+G` | `Alt+Shift+G` | Save the last few seconds of the display as an animated GIF (`copperline-clip-<YYYYMMDDHHmmSS>.gif` in the [recordings folder](#where-files-go); see [Saving a GIF clip](#saving-a-gif-clip)) |
 | `Cmd+Shift+S` | `Alt+Shift+S` | Save a state (`copperline-state-<YYYYMMDDHHmmSS>.clstate` in the [states folder](#where-files-go)) |
 | `Cmd+Shift+L` | `Alt+Shift+L` | Open the [Load State browser](#load-state-browser) |
 | `Cmd+1`..`Cmd+9`, `Cmd+0` | `Alt+1`..`Alt+9`, `Alt+0` | Quick-save to numbered slot 1-10 |
 | `Cmd+Shift+1`..`Cmd+Shift+0` | `Alt+Shift+1`..`Alt+Shift+0` | Quick-load from that slot |
-| `Cmd+D` | `Alt+D` | Swap to the next disk in a drive's configured playlist |
+| `Cmd+D` | `Alt+D` | Swap the first drive with a queued playlist to its next disk |
 | `Cmd+G` | `Alt+G` | Capture / release the host mouse (clicking the display also captures) |
 | `Cmd+B` | `Alt+B` | Toggle the [Debug layout](../debugger/window) |
 | `Cmd+Shift+B` | `Alt+Shift+B` | Press the freezer cartridge's button: enter the HRTMon monitor (`[cartridge] model`, see [Configuration](configuration.md#freezer-cartridge)) |
 | `Cmd+K` | `Alt+K` | Toggle the [Console](../debugger/console) in Debug layout |
 | `Cmd+J` | `Alt+J` | Toggle joystick input mode: gamepad / keyboard (also the status-bar icon) |
-| `Cmd+M` | `Alt+M` | Turn the monitor bezel off, or back on to the chosen front (*Video Settings > Monitor Bezel* picks it; `[display] bezel` sets the start-up value) |
-| `Cmd+Shift+A` | `Alt+Shift+A` | Cycle the audio output: Default, each host device, then Disabled (also *Audio Settings > Audio Output*) |
-| `Cmd+A` | `Alt+A` | Cycle Paula's audio filter: auto, on, off (also *Audio Settings > Audio Filter*) |
-| `Cmd+Shift++` / `Cmd+Shift+-` | `Alt+Shift++` / `Alt+Shift+-` | Raise / lower the parallel-port sampler input gain (only when a sampler is attached; also *Parallel Port > Sampler Gain*) |
+| `Cmd+M` | `Alt+M` | Turn the monitor bezel off, or back on to the chosen front (*Video Settings -> Monitor Bezel* picks it; `[display] bezel` sets the start-up value) |
+| `Cmd+Shift+A` | `Alt+Shift+A` | Cycle the audio output: Default, each host device, then Disabled (also *Audio Settings -> Audio Output*) |
+| `Cmd+A` | `Alt+A` | Cycle Paula's audio filter: auto, on, off (also *Audio Settings -> Audio Filter*) |
+| `Cmd+Shift++` / `Cmd+Shift+-` | `Alt+Shift++` / `Alt+Shift+-` | Raise / lower the parallel-port sampler input gain (only when a sampler is attached; also *Parallel Port -> Sampler Gain*) |
 | `Cmd+Shift+>` / `Cmd+Shift+<` | `Alt+Shift+>` / `Alt+Shift+<` | Raise / lower the host mouse sensitivity (also the launcher's Input tab) |
 | `Cmd+F` | `Alt+F` | Toggle fullscreen on / off |
 | `Cmd+Shift+F` | `Alt+Shift+F` | Show / hide the status bar |
 | `Cmd+P` | `Alt+P` | Toggle the [performance overlay](#performance-overlay) (`[display] perf_overlay` sets the start-up value) |
 | `Cmd+W` | `Alt+W` | Toggle Warp Speed (turbo) on / off; one press also ends every warp a control client, a GDB client, the guest, or a boot phase engaged |
 | `Cmd+Shift+W` | `Alt+Shift+W` | Cycle the Warp Speed limit: 2x, 4x, 8x, 16x, Max |
-| `Cmd+Z` | `Alt+Z` | Rewind the machine one step (needs `[emulation] rewind` or *Emulation Settings > Rewind*) |
+| `Cmd+Z` | `Alt+Z` | Rewind the machine one step (needs `[emulation] rewind` or *Emulation Settings -> Rewind*) |
 | `Esc` | `Esc` | Close an open menu or overlay panel (in Debug controls, return to Play); otherwise passed through to the Amiga |
 | `Ctrl+Amiga+Amiga` | `Ctrl+Amiga+Amiga` | Keyboard reset (warm reboot) |
 
@@ -79,15 +79,19 @@ the Amiga keyboard: Alt becomes Amiga Alt, Cmd/Super becomes the left/right
 Amiga keys, and left Ctrl becomes Amiga Ctrl, so `Ctrl+Amiga+Amiga` is
 typed naturally. The Amiga keyboard has no right Ctrl, so host right Ctrl
 also acts as the right Amiga key -- handy on PC/laptop keyboards that lack
-a right Super/Win key.
+a right Super/Win key. Host `F11` types the Amiga Help key, and the ISO key
+between left Shift and Z types the Amiga key in the same position.
 
-All other keys are sent to the emulated machine through the real path: a
-bit-timed keyboard-MCU model clocks each transition into CIA-A's serial
+All other keys reach the emulated machine through a bit-timed model of the
+keyboard's microcontroller. It clocks each transition into CIA-A's serial
 register over the emulated KCLK/KDAT lines, with the real handshake,
-power-up stream, and recovery protocol -- so even software that talks to
-the keyboard hardware directly behaves. `Ctrl+Amiga+Amiga` runs the
+power-up stream, and recovery protocol, so software that drives the
+keyboard hardware directly works too. `Ctrl+Amiga+Amiga` runs the
 authentic reset protocol (reset warning, then KCLK held low), so the
 reboot lands a fraction of a second after the chord, as on real hardware.
+
+During a netplay session only a few of these shortcuts apply; see
+[Netplay controls](netplay.md#netplay-controls).
 
 (keyboard-and-controller-navigation)=
 ## Keyboard and controller navigation
@@ -120,10 +124,10 @@ returns. Left out of a settings page returns to the category button that
 opened it, and right opens that button's page. Walking off the bottom of
 the menu closes it and leaves the focus on the menu button.
 
-Clicking anything puts the focus away and leaves it where the pointer
+Clicking anything hides the focus and moves it to where the pointer
 pressed, so going back to the keyboard resumes from there. While the
-focus is shown the pointer highlights nothing; moving the mouse puts it
-away again.
+focus is shown the pointer highlights nothing; moving the mouse hides the
+focus again.
 
 A controller drives all of this with its d-pad, fire and second button.
 Its [Menu button](#gamepad-calibration) is the way in from a running
@@ -131,35 +135,37 @@ machine, and the way out too: the menu's last row is **Quit**, and the
 Menu button *held* quits -- unless the pad's calibration bound a
 separate Quit control, which then owns the hold instead.
 
-The debugger, frame analyzer and console windows are not navigated this
-way, but `Esc` closes the focused one and the pad's second button closes
-the top one.
+The inspectors of the [Debug workspace](../debugger/window.md) -- the
+debugger, Frame Analyzer and Console -- are not walked this way. There
+`Esc` leaves a text field first and then returns to Play, and the pad's
+second button closes the inspector in front.
 
 ## Status bar
 
-The status bar (44 pixels below the display) holds, left to right (it can
-be hidden entirely with `Cmd+Shift+F` / `Alt+Shift+F` or *Video Settings >
-Status Bar*):
+The status bar is a 44-pixel strip below the display. `Cmd+Shift+F` /
+`Alt+Shift+F` or *Video Settings -> Status Bar* hides it entirely. From
+left to right it holds:
 
-- **LED block.** PWR and FDD always; a green HDD activity LED on machines
-  with a hard-disk controller (Gayle or A4000 IDE, or any SCSI adapter) or a
-  host-folder filesystem mount (`[[filesys]]`), lit while either is accessed; a
-  blue CD activity LED on CDTV/CD32 that lights while the drive reads data
-  or plays CD audio (on a machine whose CD drive is a SCSI CD-ROM unit,
-  the LED shows CD-DA playback; its data reads ride the HDD LED with the
-  rest of the SCSI bus). Small digital counters show the current floppy and
-  CD tracks, in green and blue respectively. A machine with only one kind of
-  removable drive gets one full-size counter; a machine with both gets two
-  vertically stacked counters, and a zero-floppy CDTV/CD32 does not show an
-  empty FDD counter. When a built-in CD controller and an expansion CD-ROM are
-  both fitted, the CD LED, counter, and media buttons stay assigned to the
-  built-in drive. The PWR LED is lit whenever the machine is powered,
-  driven by the guest's /LED line the way it drives the LED on an A500
-  rev 6 or later board: full brightness while the line is engaged (Paula's
-  analogue filter on), dimmed -- not extinguished -- once the software
-  releases it.
-  It follows the pin itself, so the **Audio Filter** menu override changes
-  what you hear, never the LED.
+- **LED block.** PWR and FDD always. A green HDD activity LED appears on
+  machines with a hard-disk controller (Gayle or A4000 IDE, a SCSI
+  adapter, a Lide board, or the SF2000 SD controller) or a host-folder
+  filesystem mount (`[[filesys]]`), and lights while either is accessed.
+  A blue CD activity LED appears on the CDTV and CD32 and lights while the
+  drive reads data or plays CD audio. On a machine whose CD drive is a
+  SCSI CD-ROM unit, the CD LED shows CD-DA playback and the unit's data
+  reads light the HDD LED with the rest of the SCSI bus. Small digital
+  counters show the current floppy and CD tracks, in green and blue
+  respectively. A machine with only one kind of removable drive gets one
+  full-size counter; a machine with both gets two vertically stacked
+  counters, and a zero-floppy CDTV/CD32 does not show an empty FDD
+  counter. When a built-in CD controller and an expansion CD-ROM are both
+  fitted, the CD LED, counter, and media buttons stay assigned to the
+  built-in drive. The PWR LED is lit whenever the machine is powered and
+  follows the guest's /LED line as an A500 rev 6 or later board does:
+  full brightness while the line is engaged (Paula's analogue filter on),
+  dimmed -- not extinguished -- once the software releases it. It follows
+  the pin itself, so the **Audio Filter** menu override changes what you
+  hear, never the LED.
 - **Per-drive floppy controls.** Every connected drive gets a disk button
   (marked with the drive number) that opens a file dialog -- multi-select
   several images to queue a swap playlist for that drive -- plus a swap
@@ -173,13 +179,13 @@ Status Bar*):
   CD-ROM unit): a CD button that loads (or swaps) a CD image
   (`.cue`/`.iso`/`.nrg`/`.chd`) with the proper media-change notification, and a
   CD eject button. These do not appear on machines without a CD drive.
+- **Keyboard toggle** (just left of the joystick toggle): a small keyboard
+  icon, lit while the on-screen Amiga keyboard is up. Click it to show or
+  hide it (see [](#on-screen-keyboard)).
 - **Joystick toggle** (just left of the volume control): a gamepad or
   keyboard icon showing which source drives the joystick port. Click it to
   flip between gamepad-only and keyboard joystick emulation; see
   [](#controller-ports).
-- **Keyboard toggle** (just left of the joystick toggle): a small keyboard
-  icon, lit while the on-screen Amiga keyboard is up. Click it to show or
-  hide it (see [](#on-screen-keyboard)).
 - **Volume slider**: drag, or scroll the mouse wheel over it for 5% steps.
 - **Hamburger menu button**: opens the pop-up menu (below).
 - **Camera button**: saves a screenshot (same as `Cmd+S` on macOS or
@@ -192,7 +198,7 @@ Status Bar*):
 (on-screen-keyboard)=
 ## On-screen keyboard
 
-The keyboard button in the status bar, or *Input Settings > On-Screen
+The keyboard button in the status bar, or *Input Settings -> On-Screen
 Keyboard*, draws an Amiga keyboard in a strip between the display and the
 status bar. The window grows to make room for it: the picture keeps its
 size, the canvas gets taller, and hiding the keyboard gives the height
@@ -209,17 +215,18 @@ same key: pressing a cap the host keyboard is already holding down changes
 nothing for the machine, and the key comes up only when the last of the two
 lets go.
 
-The keyboard is the way to reach the keys a host keyboard has no
-equivalent of -- Help, both Amiga keys, and the `#`/`~` key beside Return --
-and the way to drive a session entirely with the mouse.
+The keyboard reaches the keys a host keyboard may lack -- Help, both
+Amiga keys, and the `#`/`~` key beside Return -- and lets you drive a
+session entirely with the mouse.
 
-- **Qualifiers latch.** To enter keyboard chords with sequential clicks,
-  Ctrl, both Shifts, both Alts and both Amiga keys stay down when clicked: click one and it
-  is held for the next keystroke, then released with it. Click it twice in
-  quick succession to lock it down until you click it again; click a locked
-  one to let it go. Press and *hold* one instead, and it behaves like the
-  real key, coming up when the button does. A latched qualifier is drawn
-  with an orange ring, a locked one filled orange.
+- **Qualifiers latch.** So that chords can be entered with sequential
+  clicks, Ctrl, both Shifts, both Alts and both Amiga keys stay down when
+  clicked: click one and it is held for the next keystroke, then released
+  with it. Click it twice in quick succession to lock it down until you
+  click it again; click a locked one to let it go. Press and *hold* one
+  instead, and it behaves like the real key, coming up when the button
+  does. A latched qualifier is drawn with an orange ring, a locked one
+  filled orange.
 - **Ctrl+Amiga+Amiga** is typed by latching the three, as any other chord
   is. The moment the chord completes, the keyboard lets go of all three --
   the MCU's reset protocol is already running, and qualifiers still held
@@ -238,7 +245,7 @@ and the way to drive a session entirely with the mouse.
 (performance-overlay)=
 ## Performance overlay
 
-`Cmd+P` (macOS) / `Alt+P`, *Video Settings > Performance*, or
+`Cmd+P` (macOS) / `Alt+P` (Linux/Windows), *Video Settings -> Performance*, or
 `[display] perf_overlay = true` shows a live emulation-performance readout
 in the top-right corner of the display, one line per data point at the
 menu's font size (it follows *Menu Size*), refreshed twice a second:
@@ -257,9 +264,8 @@ Copperline never skips frames to keep pace: when the host cannot sustain
 real time the machine slows down (fps and the speed factor fall below
 nominal while `host` sits near 100%). After a long stall, the pacer resets
 its host-time target and increments `slip`; guest execution continues from
-the same point. Under Warp Speed
-the presentation shows one frame per burst, but every emulated frame is
-still computed.
+the same point. Under Warp Speed the presentation shows one frame per
+burst, but every emulated frame is still computed.
 
 Like the transient message overlay, the readout is painted into the
 presentation only: screenshots, frame dumps, and recordings never include
@@ -272,12 +278,12 @@ headless runs (see [](../debugger/control)).
 
 ## Guest debug overlay
 
-Guest programs (such as those using the vscode-amiga-debug template) can render
-custom debug shapes and text onto the screen using uaelib trap helpers
-(`debug_rect`, `debug_filled_rect`, and `debug_text`; see [](run)). Overlay
-commands use a virtual 768x576 coordinate space mapped across the active display
-area, adapting automatically to autocrop and scaling settings until cleared with
-`debug_clear`. The debug overlay is rendered beneath host UI elements (status
+Guest programs (such as those using the vscode-amiga-debug template) can draw
+debug shapes and text on the screen with the uaelib trap helpers
+(`debug_rect`, `debug_filled_rect`, and `debug_text`; see [](run)). They stay
+until `debug_clear` removes them. Their coordinates are in a virtual 768x576
+space mapped across the active display area, so they follow the autocrop and
+scaling settings. The debug overlay is drawn beneath the host UI (status
 bar, OSD, performance overlay) and affects only live window presentation;
 screenshots, frame dumps, and video recordings exclude it. Disabling
 `[emulation] uaelib` removes the uaelib trap entirely.
@@ -286,28 +292,35 @@ screenshots, frame dumps, and video recordings exclude it. Disabling
 
 Disk images can be dropped anywhere on the emulator window:
 
-- **Floppy images** (ADF/ADZ/DMS/IPF/SCP, gzip or zip packed): with one
+- **Floppy images** (ADF/ADZ/DMS/IPF/SCP, plain or gzip packed): with one
   connected drive the disk is inserted immediately. With several, a drive
-  chooser opens over the display -- click a drive, press its number
-  (`1`-`4`), or press `Esc` to cancel. Dropping several floppies at once
-  queues them all as the target drive's swap playlist, exactly like a
-  multi-selection in the disk dialog.
+  chooser opens over the display -- click a drive, press its position in
+  the list (`1`-`4`), or press `Esc` to cancel. Dropping several floppies
+  at once queues them all as the target drive's swap playlist, exactly
+  like a multi-selection in the disk dialog. A dropped `.zip` is taken for
+  a WHDLoad package (below); load a zip-packed disk image through the
+  drive's disk button instead.
 - **CD images** (`.cue`/`.iso`/`.nrg`/`.chd`) mount in the machine's CD drive
   (CDTV, CD32, or a SCSI CD-ROM unit), with the media-change notification.
   A `.chd` is read to see what it holds: one made with chdman's `createhd`
   is a hard-disk image and is treated as such below.
-- **WHDLoad packages** (`.lha`, `.zip`, or a bare `.slave`) reboot the
-  machine straight into the game through the [WHDLoad booter](whdload.md),
-  keeping any explicit machine choices; dropped on the configuration
-  screen they fill the **WHDLoad** page's game field instead.
-- **Hard disk images and Kickstart ROMs** are not accepted as drops. Configure
-  hard disks in the machine-configuration screen. To replace a running
-  machine's ROM and cold-reset it, use **Load Kickstart ROM...** from the menu.
+- **WHDLoad packages** (`.lha`, `.lzh`, `.zip`, or a bare `.slave`) reboot
+  the machine straight into the game through the
+  [WHDLoad booter](whdload.md), keeping any explicit machine choices.
+  Dropped on the configuration screen they fill the **WHDLoad** page's
+  game field instead; that screen refuses every other kind of drop.
+- **Hard disk images and Kickstart ROMs** (`.hdf`, `.hdz`, `.img`, a
+  hard-disk `.chd`, `.rom`) are not accepted as drops. Configure hard disks
+  in the machine configuration screen. To replace a running machine's ROM
+  and cold-reset it, use **Load Kickstart ROM...** from the menu.
+
+During a [netplay](netplay.md) session only the host can drop disks, and
+only floppy images; they go to the first connected drive.
 
 The chooser opens after the drop rather than offering per-drive drop
 targets because the windowing layer reports file drops without a cursor
-position. For the same reason drops are unavailable under native Wayland
-(X11/XWayland works).
+position. Drops are not delivered at all under native Wayland (X11 and
+XWayland work).
 
 ## Menu, tool windows, and overlay panels
 
@@ -320,17 +333,18 @@ The menu, with a category open beside it.
 
 The hamburger button at the right of the status bar opens the menu, as does
 `Cmd+E` / `Alt+E`. It grows upward from the status bar and dims the picture
-behind it, so what it covers stays readable without competing for attention.
-The dimming is a window effect: it never appears in a screenshot, a frame
-dump, or a recording.
+behind it, so the menu stays readable over a busy picture. The dimming is a
+window effect: it never appears in a screenshot, a frame dump, or a
+recording.
 
-The top level holds the tools, then a category per area of the machine, then
-the ROM, the shortcut reference and **About...** last. A category is marked
-`>` and opens a list of its own beside it; a setting with more than two
-values opens a further list of those values with the one in force ticked, and
-a setting that is simply on or off is ticked in place. Categories with
-nothing to offer -- the serial and parallel ports on a machine with nothing
-on them -- are not shown at all.
+The top level holds the tools, then a category per area of the machine,
+then **Load Kickstart ROM...**, **Keyboard Shortcuts...**, **About...**,
+and **Quit** at the foot. A category is marked `>` and opens a list of its
+own beside it; a setting with more than two values opens a further list of
+those values with the one in force ticked, and a setting that is simply on
+or off is ticked in place. Categories with nothing to offer are not shown
+at all: the serial port unless it is in MIDI mode, the parallel port
+unless a sampler is on it, and the PCMCIA slot on machines without one.
 
 Point at a category and it opens; point at one of its rows and that row is
 where the keyboard is. The cursor keys walk the same path -- up and down
@@ -379,11 +393,14 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
 
 ### Emulation Settings
 
-- **Floppy Speed**: the emulated drive speed -- 100% (real speed), 200%,
-  400%, 800%, or turbo (disk DMA transfers complete almost instantly).
-  Changes apply to the live machine immediately. The start-up value comes
-  from `[floppy] speed`; see [Configuration](configuration.md) for what each
-  level preserves and the compatibility trade-off.
+- **Floppy Speed**: the emulated drive speed -- turbo (disk DMA transfers
+  complete almost instantly), 100% (real speed), 200%, 400%, or 800%.
+  Changes apply to the live machine immediately. The row is greyed when no
+  connected drive reads from an image -- no drives at all, or only
+  [physical drives](fluxbridge.md), whose data rate is the disk's own. The
+  start-up value comes from `[floppy] speed`; see
+  [Configuration](configuration.md) for what each level preserves and the
+  compatibility trade-off.
 - **Rewind** (the hotkey is `Cmd+Z` / `Alt+Z`): records rewind history. While
   it is on, the emulator keeps a ring of whole-machine snapshots and the
   hotkey steps the machine back through them -- the whole machine, not just
@@ -395,16 +412,17 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   [Configuration](configuration.md)). It shares its substrate with the
   debugger's reverse controls, so the same determinism caveats apply -- see
   [](../debugger/reverse).
-- **Run Ahead**: input-latency reduction for play. Each display refresh
-  commits one frame, runs a few silent future frames, presents the last future
-  image, and rewinds to the committed boundary. Level **1 frame** is the best
-  starting point; higher levels need proportionally more host CPU (watch the
-  performance overlay) and skip more intermediate animation. When a live
-  device, writable medium, debugger, capture, or other host coupling makes
-  speculation unsafe, selecting a level keeps it configured but the OSD says
-  why it is inactive. The start-up value is
-  `[emulation] run_ahead_frames` or `--run-ahead`; the full compatibility list
-  is in [Configuration](configuration.md).
+- **Run Ahead**: input-latency reduction for play -- **Off**, or 1 to 4
+  frames. Each display refresh commits one frame, runs a few silent future
+  frames, presents the last future image, and rewinds to the committed
+  boundary. Level **1 frame** is the best starting point; higher levels
+  need proportionally more host CPU (watch the performance overlay) and
+  skip more intermediate animation. When a live device, writable medium,
+  debugger, capture, or other host coupling makes speculation unsafe,
+  selecting a level keeps it configured but the OSD says why it is
+  inactive. The start-up value is `[emulation] run_ahead_frames` or
+  `--run-ahead`; the full compatibility list is in
+  [Configuration](configuration.md).
 
 ### Audio Settings
 
@@ -412,41 +430,42 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   any host output device, or **Disabled** (sound off entirely, equivalent to
   `--noaudio`). The device switches live without a restart.
 - **Audio Filter** (also `Cmd+A` / `Alt+A`): Paula's analogue low-pass
-  filter -- **Auto** (guest-driven, the default), **Enabled**, or
-  **Disabled**. The forced settings apply regardless of what the software
-  asks; auto restores hardware behaviour. The PWR LED keeps following the
-  guest's /LED line whatever is forced here.
+  filter -- **Auto** (guest-driven, the default), **On**, or **Off**. The
+  forced settings apply regardless of what the software asks; Auto
+  restores hardware behaviour. The PWR LED keeps following the guest's
+  /LED line whatever is forced here.
 
 ### Video Settings
 
 - **Menu Size**: 1x or 2x, described above.
-- **Pixel Aspect**: the 4:3 CRT pixel aspect (the default; PAL lo-res pixels
-  slightly wider than tall, as a real TV shows them) or square pixels (a
-  320x256 screen is an exact 640x512, handy for pixel-exact comparison with
-  square-pixel emulators). The window and its backing texture resize with the
-  mode. The start-up mode comes from `[display] pixel_aspect`
-  (see [Configuration](configuration.md)).
-- **Scaling**: How the display canvas is mapped to the window:
-  - **Smooth** (default): Fits the display canvas to the window while preserving
-    aspect ratio, using linear interpolation.
-  - **Integer**: Scales using whole-number multiples of the native canvas,
-    centered with black borders and point-sampled. Under the default TV aspect,
-    horizontal and vertical axes scale using independent integer multiples to
-    preserve the 4:3 aspect ratio (e.g. 4:5 pixel aspect for NTSC on 1080p).
-    In square pixel mode, scaling is uniform. Integer scaling also applies to
-    RTG modes at multiples of native resolution, falling back to smooth scaling
-    if the window is smaller than 1:1. Toggling integer scaling in TV mode
-    resizes the window to the native canvas. Configured via `[display] scaling`
-    (see [Configuration](configuration.md)).
-- **Autocrop**: Automatically crops the presentation to the active raster lines
-  programmed by the Amiga hardware, allowing games with smaller viewports to
-  fill more of wide screens. When combined with integer scaling, the integer
-  scale multiplier is recalculated against the cropped area. The status bar and
-  overlay panels remain docked at the bottom of the window; opening a menu or
-  panel temporarily expands the display to the full area so controls remain
-  accessible. Presentation-only (captures always use full aperture), supports
-  CRT shaders, works with programmable multisync modes, and is suspended when
-  using monitor bezels or RTG modes. Configured via `[display] autocrop` (see
+- **Pixel Aspect**: **TV (4:3)**, the CRT pixel aspect (the default; PAL
+  lo-res pixels slightly wider than tall, as a real TV shows them), or
+  **Square** (a 320x256 screen is an exact 640x512, handy for pixel-exact
+  comparison with square-pixel emulators). The window and its backing
+  texture resize with the mode. The start-up mode comes from
+  `[display] pixel_aspect` (see [Configuration](configuration.md)).
+- **Scaling**: how the display canvas is mapped to the window:
+  - **Smooth** (default): fits the display canvas to the window while
+    preserving the aspect ratio, using linear interpolation.
+  - **Integer**: scales by whole-number multiples of the native canvas,
+    centred with black borders and point-sampled. Under the default TV aspect
+    the horizontal and vertical axes take independent integer multiples that
+    approximate the 4:3 aspect ratio (e.g. 4:5 pixel aspect for NTSC on
+    1080p). In square pixel mode, scaling is uniform. Integer scaling also
+    applies to RTG modes at multiples of native resolution, falling back to
+    smooth scaling if the window is smaller than 1:1. Toggling integer
+    scaling in TV mode resizes the window to the native canvas. The start-up
+    mode is `[display] scaling` (see [Configuration](configuration.md)).
+- **Autocrop**: crops the presentation to the active raster lines the Amiga
+  hardware is programmed to display, so software with a smaller display
+  window fills more of a wide screen. Combined with integer scaling, the
+  integer multiplier is recalculated for the cropped area. The status bar
+  and overlay panels stay docked at the bottom of the window; opening a menu
+  or panel temporarily expands the display to the full area so the controls
+  remain reachable. Autocrop affects the presentation only (captures always
+  use the full aperture). It works with the CRT shaders and programmable
+  multisync modes, and is suspended while a monitor bezel is drawn or an RTG
+  mode is shown. The start-up value is `[display] autocrop` (see
   [Configuration](configuration.md)).
 - **Screen Centring**: nudge where the TV picture sits on the glass, the
   H-CENTER/V-CENTER controls a real monitor carried on its front.
@@ -456,7 +475,7 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   captured left overscan into view -- artwork that leans off the default
   view, like the CD32 boot logo's leading serif -- while glass nudged
   past the captured raster shows black, as past the raster's edge on a
-  real tube. A TV-aperture control, so it is greyed under
+  real tube. It is a TV-aperture control, so it is greyed under
   `overscan = "full"`, which already shows everything. Unlike the shader
   and tint it is picture geometry, not a window effect: screenshots and
   frame dumps follow it. Session-only; the start-up values are
@@ -465,11 +484,11 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
 - **CRT Shader**: the GPU tube-emulation pass over the picture --
   **Disabled**, **Scanlines** (the line structure of a 15 kHz set), **Mask**
   (an RGB phosphor shadow mask), **CRT (1084)** (both, plus a bowed tube face
-  and a corner vignette), and **Custom** when the config named a shader of
-  your own, which is re-read from disk each time it is chosen. The change is
-  session-only: the start-up preset, the strength knob, and how to write a
-  custom shader are `[display] shader` and `shader_strength` (see
-  [Configuration](configuration.md)). The pass is a window effect only --
+  and a corner vignette), and **Custom**, greyed unless the config names a
+  shader of your own, which is re-read from disk each time it is chosen.
+  The change is session-only: the start-up preset, the strength knob, and
+  how to write a custom shader are `[display] shader` and `shader_strength`
+  (see [Configuration](configuration.md)). The pass is a window effect only --
   screenshots, frame dumps and recordings are never shader-processed -- and
   it steps aside for the frames it cannot sensibly draw: while the menu or
   any panel is open, under RTG, and in programmable multisync scan modes.
@@ -489,14 +508,6 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   bars as needed, exactly as when resizing the window.
 - **Status Bar** (also `Cmd+Shift+F` / `Alt+Shift+F`): show or hide the
   status bar. Handy alongside fullscreen for a clean, chrome-free picture.
-- **VSync**: synchronise presentation to the monitor's vertical blank
-  (on by default). Turning it off requests presentation without waiting for
-  vblank where the graphics backend supports it; this may reduce latency
-  but can tear. It takes effect immediately and keeps normal emulation
-  speed unchanged. The choice carries into **Machine Configuration...**
-  when saving a config, as `[display] vsync`. VSync prevents tearing but
-  cannot remove the uneven cadence of PAL output on a mismatched monitor
-  refresh rate.
 - **Monitor Bezel**: which monitor front the picture sits inside instead
   of filling the window -- **Disabled**, **1084** (a two-tone cabinet with
   the tube sunk into its moulding, and the model badge, the Copperline name
@@ -505,24 +516,30 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   room for either, and the tube shows a little more of it: the whole
   captured raster fills the glass edge to edge, border colour and all,
   so the opening's rounded corners crop into the overscan border the way
-  a real tube's do, not into the picture.
-  `Cmd+M` / `Alt+M` turns the chosen front off and back
-  on; it never changes which. Session-only; the start-up value is
-  `[display] bezel` (see [Configuration](configuration.md)). A window
-  effect only, like the shader: screenshots, frame dumps and recordings
-  never include it. A folder of PNG stickers can be drawn onto either
-  front -- die-cut decals on the plastic, riding the same toggle -- via
-  `[display] bezel_stickers` (no menu item; see
-  [Configuration](configuration.md)).
+  a real tube's do, not into the picture. `Cmd+M` / `Alt+M` turns the
+  chosen front off and back on; it never changes which. Session-only; the
+  start-up value is `[display] bezel` (see
+  [Configuration](configuration.md)). A window effect only, like the
+  shader: screenshots, frame dumps and recordings never include it. A
+  folder of PNG stickers can be drawn onto either front -- die-cut decals
+  on the plastic, riding the same toggle -- via `[display] bezel_stickers`
+  (no menu item; see [Configuration](configuration.md)).
 - **Performance** (also `Cmd+P` / `Alt+P`): show or hide the
   [performance overlay](#performance-overlay). Session-only; the start-up
   value is `[display] perf_overlay` (see
   [Configuration](configuration.md)).
+- **VSync**: synchronise presentation to the monitor's vertical blank
+  (on by default). Turning it off requests presentation without waiting for
+  vblank where the graphics backend supports it; this may reduce latency
+  but can tear. It takes effect immediately and leaves the emulation speed
+  unchanged. The choice carries into **Machine Configuration...** when
+  saving a config, as `[display] vsync`.
 
 ### Input Settings
 
 - **Port 1 Device / Port 2 Device**: hot-plug the controller in a game
-  port -- Mouse, Joystick, CD32 pad, Analogue, or None; see
+  port -- **Mouse**, **Gamepad Mouse** (port 1 only), **Joystick**,
+  **CD32 Pad**, **Analogue**, **Light Pen**, or **None**; see
   [](#controller-ports).
 - **Joystick Input** (also `Cmd+J` / `Alt+J`, or the status-bar icon):
   Gamepad-only or Keyboard joystick emulation.
@@ -558,13 +575,13 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   fast-forward. Toggling back re-anchors real-time pacing cleanly. A
   control-protocol client (`warp.set`), a GDB client (`monitor warp`), or the
   guest program (`warpmode()` through the uaelib trap, see
-  [Direct launching](run.md)) can engage warp too; each holds it
-  independently and releases only its own, such a warp mutes live audio, the
-  OSD names who asked, and one press of the shortcut ends them all.
+  [Direct launching](run.md)) can engage warp too. Each holds it
+  independently and releases only its own; such a warp mutes live audio,
+  the OSD names who asked, and one press of the shortcut ends them all.
 - **Warp Limit** (also `Cmd+Shift+W` / `Alt+Shift+W`): how fast warp runs.
-  With VSync enabled, emulating one frame per presented
-  frame would cap warp at the host monitor's refresh rate (about 1.2x for
-  50 Hz PAL on a 60 Hz display). The limit sets an output frame skip -- 2x,
+  With VSync enabled, emulating one frame per presented frame would cap
+  warp at the host monitor's refresh rate (about 1.2x for 50 Hz PAL on a
+  60 Hz display). The limit sets an output frame skip -- 2x,
   4x, 8x, 16x, or **Max** -- so warp retires that many emulated frames per
   presented frame, making the effective speed roughly the limit times the
   refresh rate (host CPU permitting). `Max` runs flat out and still presents
@@ -574,13 +591,24 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
 
 ### Serial Port and Parallel Port
 
-Shown only when something is on the port.
+Shown only when something is on the port: the serial port in MIDI mode,
+or a sampler on the parallel port.
 
 - **MIDI In / MIDI Out** (serial port in MIDI mode): Paula's serial bridge
   onto the host's MIDI sources and destinations; see the `[serial]` section
-  of [Configuration](configuration.md). **MT-32** is offered here too,
-  and with it playing, an **MT-32** submenu carries its front panel and
-  display style; see [The MT-32](mt32.md).
+  of [Configuration](configuration.md). Each list starts with **None**.
+  **MIDI Out** also offers the built-in **MT-32** and **Coppersynth**, and
+  **MIDI In** offers the MT-32 while it is running, so an editor or
+  librarian on the Amiga hears its replies.
+- **MT-32** (the MT-32 chosen as the MIDI output): **Front Panel** shows or
+  hides its panel, **Display** (with the panel up) picks the panel's
+  display style, and **Control ROM** / **PCM ROM** name the loaded ROM
+  images, each with a **Load...** row to fit another. See
+  [The MT-32](mt32.md).
+- **Coppersynth** (Coppersynth chosen as the MIDI output): **Front Panel**,
+  **SoundFont** (**Load...** another, or **Reset** to the bundled one), and
+  **MT-32 Mode** (**Auto**, **On**, or **Off**). See
+  [Coppersynth](coppersynth.md).
 - **Sampler Input / Sampler Gain** (parallel-port sampler attached): the
   sampler's host capture device, and its input gain, which the *Increase* and
   *Decrease* rows step (also `Cmd/Alt+Shift +/-`). Both change live. See the
@@ -606,10 +634,12 @@ boot-time cards, SRAM cards, real card readers, and the fast-RAM rule.
 ### Recording
 
 - **Record Video** (also `Cmd+R` / `Alt+R`): starts a video-with-audio
-  recording; the same row (or shortcut again) stops it. See below.
+  recording. While one runs the row reads **Stop Video Recording**, and it
+  (or the shortcut again) stops it. See below.
 - **Record Input** (also `Cmd+Shift+R` / `Alt+Shift+R`): records every
-  input event that reaches the emulated machine; stopping writes a script
-  file that `--script` replays deterministically. See below.
+  input event that reaches the emulated machine. The row then reads **Stop
+  Input Recording**; stopping writes a script file that `--script` replays
+  deterministically. See below.
 - **Save Clip as GIF** (also `Cmd+Shift+G` / `Alt+Shift+G`): writes the
   last `[recording] clip_seconds` (ten by default) of the display as an
   animated GIF. See [Saving a GIF clip](#saving-a-gif-clip).
@@ -634,20 +664,20 @@ boot-time cards, SRAM cards, real card readers, and the fast-RAM rule.
 ### Application controls
 
 - **Load Kickstart ROM...**: fit a different boot ROM. Pick a 512 KiB
-  Kickstart or a 256 KiB Kickstart 1.x image, then optionally a second file for the extended ROM (512 KiB at
-  $E00000 or 256 KiB at $F00000; Cancel to skip and remove any fitted
-  extended ROM). The machine then cold-resets, as if the chip had been
-  swapped and the power cycled. The OSD names the image it fitted -- the
-  file name plus the Kickstart it was identified as, e.g.
-  `ROM: kick40068.A1200 (Kickstart 3.1 (40.68) A1200)`.
+  Kickstart or a 256 KiB Kickstart 1.x image, then optionally a second
+  file for the extended ROM (512 KiB at $E00000 or 256 KiB at $F00000;
+  Cancel to skip and remove any fitted extended ROM). The machine then
+  cold-resets, as if the chip had been swapped and the power cycled. The
+  OSD names the image it fitted -- the file name plus the Kickstart it was
+  identified as, e.g. `ROM: kick40068.A1200 (Kickstart 3.1 (40.68) A1200)`.
 - **Keyboard Shortcuts...**: the shortcut reference.
-- **About...**: app version plus a summary of the emulated machine -- its
-  `ROM:` line names the boot ROM file and, for a released image, which
-  Kickstart it is (identified by checksum, see [Configuration](configuration.md)) -- and
-  credits including Copperline's contributors and Patreon sponsors (see
-  `CREDITS.md`). Builds
-  made from an untagged git commit append the short commit ID to the version
-  shown in the window title and About panel.
+- **About...**: the app version and a summary of the emulated machine --
+  its `ROM:` line names the boot ROM file and, for a released image, which
+  Kickstart it is (identified by checksum, see
+  [Configuration](configuration.md)) -- and credits, including
+  Copperline's contributors and Patreon sponsors (see `CREDITS.md`).
+  Builds made from an untagged git commit append the short commit ID to
+  the version shown in the window title and About panel.
 - **Quit** (also `Cmd+Q` / `Alt+Q`): exits Copperline. It is the last row
   so that a [controller or keyboard walking the
   menu](#keyboard-and-controller-navigation) finds it at the foot, with
@@ -682,147 +712,173 @@ an A1200 is selected on the Memory tab; Zorro III RAM is greyed with the reason
 
 The layout is:
 
-- **Machine selector** (top). Pick a machine -- A1000, A500 (OCS), A500, A500+,
-  A600, A1200, A3000, A4000, CDTV, or CD32. With no profile chosen the A500 is
-  highlighted,
-  since that is the machine the defaults describe. Selecting a machine applies
-  that profile's defaults (chipset, CPU, RAM, gate array, RTC) to every tab;
-  settings that no longer apply (an IDE image on a machine with no IDE port, a
-  CD image
-  on a machine with no CD drive) are dropped so they cannot block a launch.
-- **Category tabs** (left sidebar). *System* (chipset and Agnus/Denise
-  overrides, video standard, RTC, identify board, RTG card, freezer
-  cartridge), *CPU* (model,
-  FPU, clock, caches, and the experimental not-cycle-exact JIT mode --
-  see `[cpu] jit` in [Configuration](configuration.md)),
-  *Memory* (cold power-on fill -- zero, deterministic random, or a typed fixed
-  16-bit word -- plus chip/fast/slow/motherboard/accelerator/Zorro III RAM),
-  *ROM*
-  (Kickstart, extended ROM, and the CD32-only **FMV module ROM**; the
-  Kickstart row carries **Name**, **Version** and
-  **Revision** lines naming what the chosen image is, identified by
-  checksum rather than by file name -- blank for an image Copperline does
-  not know, and read from the image itself for the bundled AROS. The FMV row
-  starts as an empty cartridge slot on CD32; its **Fit** action fits the
-  module with the bundled open ROM (saved as `fmv = true`), choosing a file
-  fits it with another 256 KiB module ROM, and **Remove** empties the slot
-  again. It is greyed on non-CD32 profiles;
-  see [Configuration](configuration.md),
-  *Floppy* (drive count from zero to four -- CDTV/CD32 default to zero -- and
-  speed, then each wired drive as a
-  greyed **DFn:** heading with its indented disk image and write-protect;
-  drives that are not enabled are hidden rather than greyed. A drive holding
-  an image stays wired until that image is cleared, so reducing the count
-  cannot hide media that will still be present when the machine starts. Each
-  drive also carries a **Physical drive** tick box that hands the bay to a physical
-  floppy drive: its media row then names the interface -- or `None` with nothing
-  plugged in -- and a **Configure** button opens that drive's own page,
-  headed with the built-in FluxBridge library and its version, for the
-  serial port, drive select, density, read mode and replay speed, greying
-  whatever the chosen interface does not honour. See [](fluxbridge.md)),
-  *Storage* (IDE master/slave -- either can be a CD image instead of a hard
-  disk, attaching an ATAPI CD-ROM drive there -- and the SCSI controller --
-  A2091, A4091, or the A3000's onboard SCSI. Its boot ROM and unit rows, a
-  unit likewise a CD image attaching a SCSI CD-ROM drive, appear once a
-  controller is chosen and are hidden with none, the same way disabled
-  floppy drives are; a block of buttons at
-  the top links to seven sub-pages: **CD** (image, insert delay,
-  CD32 NVRAM); **Host Folder**, for host directories
-  served live as AmigaDOS volumes (up to four mounts, each with a boot
-  priority and a read-write/read-only **Access** field -- the config file
-  itself takes up to eight `[[filesys]]` mounts, of which the launcher edits
-  the first four); **Host Disk**, for a real disk of this computer's (see
-  [](host-disks.md)); **Lide**, the built-in `[lide]` Zorro II IDE board --
-  personality (RIPPLE/RIDE/AT-Bus 2008), boot ROM(s), and up to four drives
-  (two on RIDE/AT-Bus 2008, any of which can likewise be a CD image);
-  **Copperline HD**, the emulator's own virtual hardfile controller
-  (`copperhf.device`, configured as `[copperhf]` -- see
-  [](configuration.md)) -- up to seven units, always
-  shown with no controller or personality to pick first (there is no real
-  hardware behind it), and hard disks only: unlike IDE, SCSI, and Lide a
-  Copperline HD unit cannot be a CD image. A unit configured here attaches at
-  boot, the same as any other drive; swapping one's media while the machine
-  runs is not a screen or menu action here but a
-  [control-protocol](../debugger/control.md) call
-  (`copperhf.attach`/`copperhf.eject`), which the window surfaces with an
-  on-screen notice the way any other host-initiated media change is;
-  **Boot Priority**, which sets each drive's
-  synthesized-RDB boot priority (see below); and **Create Image...**, which
-  makes new ADF and HDF images (see below). Each sub-page has a **< Back**
-  button in that block that returns to Storage),
-  *Input* (the controller device in each game port and the joystick input
-  source),
-  *I/O Ports* (the serial, parallel, networking, and audio boards, each
-  on its own page -- **Serial Port**, **Parallel Port**, **Networking**,
-  **Audio** -- switched between on the top nav row, with
-  each port's options indented
-  beneath its heading: serial mode and MIDI endpoints, with the emulated
-  MT-32's ROM
-  images, front panel and display style when it is the chosen output (see
-  [The MT-32](mt32.md)), and, for TCP and modem modes, the connection
-  address -- **Connect** (`tcp-connect`) for the remote target, or **Listen**
-  (`tcp`, `modem`) for the local bind address -- configured via host and
-  port fields. Leaving a field blank uses the default (host `127.0.0.1` for
-  Listen, port `1234`; Connect requires a host/IP). Valid ports are 1-65535;
-  on macOS and Linux, binding a Listen port below 1024 requires root
-  privileges (outbound connections have no port restrictions). The
-  **Host port** mode (`device`) shows a **Port** picker instead, stepping
-  through the serial ports the host has at that moment (re-read on every
-  step, so a freshly plugged adapter appears; a saved path the host does
-  not list is kept and marked "not found"); the
-  parallel device -- None, Printer, or Sampler -- with, for the printer, its
-  capture output file, or for the sampler, its host audio input and input gain;
-  and the A2065 Ethernet and HostSocket bsdsocket.library boards, each --
-  None, Isolated, Loopback, NAT, or Bridged; Bridged adds a host-adapter
-  row. NAT and Bridged show a warning because host-clocked traffic makes
-  input recordings and save-state replays non-reproducible while it flows;
-  and the Toccata and MHI sound boards, each a plain fit/don't-fit toggle
-  with no other options -- host-side audio capture and backend settings
-  such as `--audio-wav`, `--audio-stems`, and device selection stay
-  command-line/config-file only and have no row here),
-  *Zorro* (extra autoconfig boards by metadata file, with a config panel for a
-  WASM plugin board's declared options),
-  *WHDLoad* (your game collection, and the settings games boot with -- see
-  [](whdload.md)),
-  and *A/V & Emu*, split by a row of category buttons at the top into
-  **Audio** (output device, channel mode, stereo separation, filter, floppy
-  sounds and volume), **Video** -- the emulated picture (monitor bezel style,
-  overscan, pixel aspect, scaling, deinterlace, screen tint, phosphor, CRT
-  shader and shader strength), **Display** -- the host window (start
-  fullscreen, status bar, perf overlay, menu size),
-  **Emulation**
-  (power-on, run on startup -- `[emulation] auto_launch`, the launcher
-  running an opened configuration at once -- realtime priority, pacing,
-  warp speed),
-  and **Paths** -- opening on Audio, and switched freely between the five.
-  The Paths page edits the `[paths]` section of the configuration (see
-  [](configuration.md)): the base folder on top, then one row per folder.
-  A row reads `(default)` until a folder is chosen for it; **Browse** picks
-  one and a **Reset** button then appears to put the row back to inheriting.
-  The base folder always shows its full path, and swaps Browse for Reset
-  once set. Changes take effect immediately -- a screenshot taken after
-  moving the row lands where the row now says -- and are written to the
-  configuration by **Save As** or **Save default** like everything else.
-- **Settings rows** (right pane). `[<]`/`[>]` step through a value, On/Off
-  buttons flip a toggle, and the **Browse** and **Clear** buttons set or remove
-  a file path through a native file dialog. On the *Storage* tab (IDE master/
-  slave, a SCSI unit, a lide drive, or a Copperline HD unit), **Browse** lets you
-  pick a directory as well as a file -- on macOS -- since any of those slots
-  can be a host directory mounted as an in-memory FFS volume instead of a raw
-  image; on other platforms the dialog is file-only there too, matching the
-  rest of the launcher, and a directory target still has to be set some other
-  way (e.g. editing the config file directly). Once an IDE, SCSI, lide, or
-  Copperline HD drive has an image a small editable box appears next to **Browse**:
-  click it and type to set the volume name for a directory mount (left blank, a
-  directory mount inherits the host directory's name; the box has no effect on a
-  raw HDF). Once that image is a host **directory** specifically, an **FFS/OFS**
+- **Machine selector** (top). Pick a machine -- A1000, A500 OCS, A500,
+  A500+, A600, A1200, A3000, A4000, CDTV, or CD32. With no profile chosen
+  the A500 is highlighted, since that is the machine the defaults describe.
+  Selecting a machine applies that profile's defaults (chipset, CPU, RAM,
+  gate array, RTC) to every tab; settings that no longer apply (an IDE
+  image on a machine with no IDE port, a CD image on a machine with no CD
+  drive) are dropped so they cannot block a launch.
+- **Category tabs** (left sidebar):
+  - *System*: chipset and Agnus/Denise overrides, video standard,
+    real-time clock, identify board, RTG card, and freezer cartridge.
+  - *CPU*: model, FPU, clock, caches, and the experimental JIT mode, which
+    is not cycle-exact (see `[cpu] jit` in [Configuration](configuration.md)).
+  - *Memory*: chip, fast and slow RAM; the cold power-on fill (zero,
+    deterministic random, or a typed fixed 16-bit word); and motherboard,
+    accelerator and Zorro III RAM.
+  - *ROM*: Kickstart, extended ROM, and the CD32-only **FMV module ROM**.
+    The Kickstart row carries **Name**, **Version** and **Revision** lines
+    naming what the chosen image is, identified by checksum rather than by
+    file name -- blank for an image Copperline does not know, and read from
+    the image itself for the bundled AROS. The FMV row starts as an empty
+    cartridge slot on the CD32: its **Fit** button fits the module with the
+    bundled open ROM (saved as `fmv = true`), choosing a file fits it with
+    another 256 KiB module ROM, and **Remove** empties the slot again. It is
+    greyed on other profiles; see [Configuration](configuration.md).
+  - *Floppy*: the drive count, from zero to four (the CDTV and CD32 default
+    to zero), and the drive speed, then each wired drive as a greyed
+    **DFn:** heading with its indented disk image and write-protect box.
+    Drives that are not enabled are hidden rather than greyed. A drive
+    holding an image stays wired until that image is cleared, so reducing
+    the count cannot hide media that will still be present when the machine
+    starts. Each drive also carries a **Physical drive** tick box that hands
+    the bay to a physical floppy drive: its media row then names the
+    interface -- or `None` with nothing plugged in -- and a **Configure**
+    button opens that drive's own page. That page is headed with the
+    built-in FluxBridge library and its version, and sets the serial port,
+    drive select, density, read mode and replay speed, greying whatever the
+    chosen interface does not honour. See [](fluxbridge.md).
+  - *Storage*: IDE master and slave -- either can be a CD image instead of
+    a hard disk, attaching an ATAPI CD-ROM drive there -- and the SCSI
+    controller: A2091, A4091, or, on the A3000, its onboard SCSI. The
+    controller's boot ROM and unit rows appear once a controller is chosen
+    and are hidden with none, the same way disabled floppy drives are; a
+    unit can likewise be a CD image, attaching a SCSI CD-ROM drive. A block
+    of buttons at the top links to eight sub-pages, each with a **< Back**
+    button in that block that returns to Storage:
+    - **CD**: image, insert delay, and CD32 NVRAM.
+    - **Host Folder**: host directories served live as AmigaDOS volumes --
+      up to four mounts, each with a boot priority and a
+      read-write/read-only **Access** field. The config file itself takes up
+      to eight `[[filesys]]` mounts, of which the screen edits the first
+      four.
+    - **Host Disk**: a real disk of this computer's (see [](host-disks.md)).
+    - **Lide**: the built-in `[lide]` Zorro II IDE board -- personality
+      (RIPPLE, RIDE or AT-Bus 2008), boot ROM(s), and up to four drives (two
+      on RIDE and AT-Bus 2008), any of which can likewise be a CD image.
+    - **Copperline HD**: the emulator's own virtual hardfile controller
+      (`copperhf.device`, configured as `[copperhf]` -- see
+      [](configuration.md)), with up to seven units. There is no real
+      hardware behind it, so the units are always shown, with no controller
+      or personality to pick first. They take hard disks only: unlike IDE,
+      SCSI, and Lide, a Copperline HD unit cannot be a CD image. A unit
+      configured here attaches at boot like any other drive. Swapping its
+      media while the machine runs is not a screen or menu action but a
+      [control-protocol](../debugger/control.md) call
+      (`copperhf.attach`/`copperhf.eject`), which the window reports with an
+      on-screen notice, as it does any other host-initiated media change.
+    - **SF2000 SD**: the SF2000 accelerator's Zorro II SD card controller
+      (`[sf2000sd]`) -- one card slot and an optional boot ROM.
+    - **Boot Priority**: each drive's synthesized-RDB boot priority (see
+      below).
+    - **Create Image...**: makes new ADF and HDF images (see
+      [below](#create-image)).
+  - *Input*: the controller device in each game port, the joystick input
+    source, the mouse sensitivity, and when the host mouse is captured (see
+    [](#controller-ports)).
+  - *Netplay*: rollback netplay over the internet or a direct IP
+    connection -- players, seat, invitation or addresses, input delay,
+    rollback limit, and spectators (see
+    [Rollback netplay](netplay.md#set-up-in-the-gui)).
+  - *I/O Ports*: the serial, parallel, networking, and audio boards, each
+    on its own page -- **Serial Port**, **Parallel Port**, **Networking**,
+    **Audio** -- switched between on the top nav row, with each port's
+    options indented beneath its heading:
+    - **Serial Port**: the **Device / Mode** (None, Stdout, MIDI, TCP, TCP
+      connect, PTY, Modem, or Host port) and what that mode needs. MIDI
+      mode adds the MIDI input and output. With the emulated MT-32 as the
+      output it also shows the MT-32's ROM images, front panel and display
+      style (see [The MT-32](mt32.md)); with Coppersynth, its SoundFont,
+      front panel and MT-32 mode (see [Coppersynth](coppersynth.md)). The
+      TCP and modem modes take a connection address -- **Connect**
+      (`tcp-connect`) for the remote target, or **Listen** (`tcp`,
+      `modem`) for the local bind address -- in host and port fields.
+      Leaving a field blank uses the default (host `127.0.0.1` for Listen,
+      port `1234`; Connect requires a host/IP). Valid ports are 1-65535; on
+      macOS and Linux, binding a Listen port below 1024 requires root
+      privileges (outbound connections have no port restrictions). Modem
+      mode adds a **Telnet** row, whether telnet translation (`AT*T1`) is
+      on at power-on. **Host port** mode (`device`) shows a **Port** picker
+      instead, stepping through the serial ports the host has at that
+      moment (re-read on every step, so a freshly plugged adapter appears;
+      a saved path the host does not list is kept and marked "not found").
+    - **Parallel Port**: the device -- None, Printer, Sampler, or Multitap
+      (4 joysticks) -- with, for the printer, its capture output file, or
+      for the sampler, its host audio input and input gain.
+    - **Networking**: the A2065 Ethernet and HostSocket bsdsocket.library
+      boards, each None, Isolated, Loopback, NAT (in builds that support
+      it), or Bridged (when the host has an adapter to bridge to).
+      HostSocket also offers **Host**, which passes the guest's sockets
+      straight through to the host's. Bridged adds a host-adapter row. NAT,
+      Bridged and Host show a warning, because host-clocked traffic makes
+      input recordings and save-state replays non-reproducible while it
+      flows.
+    - **Audio**: the Toccata and MHI sound boards, each a plain
+      fit/don't-fit toggle with no other options. Host-side audio capture
+      (`--audio-wav`, `--audio-stems`) stays command-line/config-file only
+      and has no row here.
+  - *Zorro*: extra autoconfig boards by metadata file, with a config panel
+    for a WASM plugin board's declared options.
+  - *WHDLoad*: your game collection, and the settings games boot with (see
+    [](whdload.md)).
+  - *A/V & Emu*: five pages switched on the top nav row, opening on Audio:
+    - **Audio**: output device, channel mode, stereo separation, filter,
+      floppy sounds and their volume.
+    - **Video** -- the emulated picture: monitor bezel style, overscan,
+      pixel aspect, scaling, autocrop, deinterlace, screen tint, phosphor,
+      CRT shader and shader strength.
+    - **Display** -- the host window: start fullscreen, status bar, perf
+      overlay, VSync, and menu size.
+    - **Emulation**: power on at startup; run on startup (`[emulation]
+      auto_launch`, which runs an opened configuration at once); realtime
+      priority; pacing budget; warp speed; warp boot and its storage-idle
+      threshold; and the **WHDLoad** switch, which removes the WHDLoad tab
+      and everything behind it when off.
+    - **Paths**: the `[paths]` section of the configuration (see
+      [](configuration.md)): the base folder on top, then one row per
+      folder. The **ROMs**, **Floppies**, **Hard drives** and **CD images**
+      rows set where file dialogs open rather than where output goes. A row
+      reads `(default)` until a folder is chosen for it; **Browse** picks
+      one and a **Reset** button then appears to put the row back to
+      inheriting. The base folder always shows its full path, and swaps
+      Browse for Reset once set. Changes take effect immediately -- a
+      screenshot taken after moving the row lands where the row now says --
+      and are written to the configuration by **Save As** or **Save
+      default** like everything else.
+- **Settings rows** (right pane). `[<]`/`[>]` step through a value (an
+  on/off setting steps between **Enabled** and **Disabled**), and the
+  **Browse** and **Clear** buttons set or remove a file path through a
+  native file dialog. For a hard-drive slot on the *Storage* tab or its
+  sub-pages (IDE master/slave, a SCSI unit, a Lide drive, a Copperline HD
+  unit, or the SF2000 SD card), **Browse** on macOS lets you pick a
+  directory as well as a file, since any of those slots can be a host
+  directory mounted as an in-memory FFS volume instead of a raw image. On
+  other platforms the dialog is file-only there too, matching the rest of
+  the screen, and a directory target has to be set some other way (e.g.
+  by editing the config file). Once such a slot has an image, a small
+  editable box appears next to **Browse**: click it and type to set the
+  volume name for a directory mount (left blank, a directory mount
+  inherits the host directory's name; the box has no effect on a raw HDF).
+  Once that image is a host **directory** specifically, an **FFS/OFS**
   button appears just left of the volume-name box: click it to flip the
   in-memory volume's filesystem (FFS by default; OFS is the one every
-  Kickstart from 1.2 onward can read with no guest-side setup).
-  A setting that does not apply to the chosen machine is greyed and
-  shows why in place of its control -- "needs 32-bit CPU" for Zorro III RAM
-  and the RTG card, "needs 68020+" for the FPU, "needs A600/A1200/A4000 or Lide" for
-  IDE.
+  Kickstart from 1.2 onward can read with no guest-side setup). A setting
+  that does not apply to the chosen machine is greyed and shows why in
+  place of its control -- "needs 32-bit CPU" for Zorro III and accelerator
+  RAM, "needs 68020+" for the FPU, "needs A600/A1200/A4000 or Lide" for
+  IDE. On a 24-bit CPU the RTG card list simply leaves out the Zorro III
+  cards.
 - **Boot Priority sub-page** (from *Storage*). One row per hard-disk drive,
   under **Drive** / **Priority** / **Status** columns, setting the `de_BootPri`
   written into the partition Copperline synthesizes in front of a bare hardfile
@@ -831,21 +887,22 @@ The layout is:
   field -- click it and type any priority (-128..127), then Enter. The Status
   column's **Bootable** box is ticked by default; clearing it greys that row's
   priority and writes the -128 "disabled" sentinel, so the volume mounts but
-  never boots.
-  Priority arrows step each attached drive, including all seven Copperline HD
-  units; they leave the remembered priority unchanged while Bootable is cleared.
-  Drives without media or configured as CD-ROMs are disabled ("No drive" /
-  "CD-ROM"). SCSI, Lide, and Copperline HD units appear only when media is
-  attached, ensuring the list reflects valid boot sources. Drives are
-  listed in order: IDE bays, SCSI units, Lide drives, and Copperline HD
-  units. If the list exceeds one page, use **Next Page >** to walk forward
-  through as many pages as the drives need; every page's **< Back**
+  never boots. Priority arrows step each attached drive, including all
+  seven Copperline HD units; they leave the remembered priority unchanged
+  while Bootable is cleared. A drive with no media, a CD image, or a real
+  host disk (whose partitions carry their own priorities) is greyed with
+  the reason ("No drive", "CD-ROM", "Host Disk"). SCSI, Lide, SF2000 SD and
+  Copperline HD units appear only when media is attached, so the list shows
+  only real boot sources. Drives are listed in order: IDE bays, SCSI
+  units, Lide drives, the SF2000 SD card, and Copperline HD units. A page
+  holds nine drives; if the list is longer, **Next Page >** walks forward
+  through as many pages as the drives need, and every page's **< Back**
   returns to the first. Newly added drives are assigned cascading default
   priorities (0 for the first hard drive, followed by -35, -40, -45) to
   avoid boot conflicts. A drive already carrying a priority in the config
-  keeps it, and one that just names a device with no `bootpri` stays at 0. See
-  [](configuration.md) for how the priority ranks against Kickstart's DF0: boot
-  node at 5.
+  keeps it, and one that just names a device with no `bootpri` stays at 0.
+  See [](configuration.md) for how the priority ranks against Kickstart's
+  DF0: boot node at 5.
 - **Action bar** (bottom). **Load...** reads a `.toml` config through a file
   dialog. **Save...** opens a small dialog of three buttons, each described
   in the dialog as the pointer moves over it: **Save As** writes a `.toml`
@@ -854,14 +911,14 @@ The layout is:
   **Save default** saves the running configuration as the one Copperline
   starts with: this screen opens showing it, and a run with no `--config`
   and no `./copperline.toml` boots it (see [](configuration.md));
-  **Reset default** deletes that saved default after
-  an "Are you sure?", returning Copperline to factory settings. The close
-  gadget, or a click anywhere else, puts the dialog away.
-  **Defaults** resets the screen to the selected profile. **Run** validates
-  the configuration and boots it; if anything is wrong -- an unusable RAM
-  size, a missing disk image, a ROM file that cannot be read, an option the
-  chosen machine cannot use -- the reason is
-  shown on the status line and you stay on the screen to fix it.
+  `--factory` ignores it for one run. **Reset default** deletes that saved
+  default after an "Are you sure?", returning Copperline to factory
+  settings. The close gadget, or a click anywhere else, puts the dialog
+  away. **Defaults** resets the screen to the selected profile. **Run**
+  validates the configuration and boots it; if anything is wrong -- an
+  unusable RAM size, a missing disk image, a ROM file that cannot be read,
+  an option the chosen machine cannot use -- the reason is shown on the
+  status line and you stay on the screen to fix it.
 
 ```{figure} ../images/ui-preview-launcher-boot-priority.png
 :alt: The Boot Priority sub-page of the Storage tab
@@ -879,6 +936,7 @@ interchangeable: configure a machine and save it, or load an existing config to
 tweak it. **Run** builds the machine in place, so the configuration screen and a
 direct `--config` launch produce an identical machine.
 
+(create-image)=
 ### Create Image
 
 *Storage -> Create Image...* makes new, empty disk images: **Floppy Disk**
@@ -915,7 +973,7 @@ so the window stays responsive while a large image is written.
 | **Bootable** | Sets the partition's bootable flag. RDB only. |
 | **Boot priority** | The partition's `de_BootPri`, -128 to 127. Kickstart enters DF0: at 5, so 6 boots the hard disk ahead of a floppy. Applies while Bootable is ticked. |
 | **Read only** | Marks the finished file read-only on this computer. |
-| **Sparse image** | On by default: the file is created at full length with only its structure written, and the host fills the rest in as it is used. Clear it to write the whole file now, which takes as long as writing that many bytes takes. |
+| **Sparse image** | On by default: the file is created at full length with only its structure written, and the host fills the rest in as it is used. Clear it to write the whole file now, which takes as long as writing that many bytes. |
 
 An image larger than 2048 GB can be made only with `Partitioning: None`
 and `Filesystem: Unformatted`: every block number an RDB or an AmigaDOS
@@ -923,6 +981,14 @@ volume uses is a 32-bit field.
 
 With **Sparse image** cleared, the volume the file is being written to is
 checked for room first, and the write is refused if there is not enough.
+
+```{figure} ../images/ui-preview-launcher-new-hard.png
+:alt: The Hard Disk page of the Create Image sub-page
+:width: 75%
+
+The Hard Disk page, set up for a 64 MB bootable FFS volume in an RDB with
+custom geometry.
+```
 
 #### Geometry editor
 
@@ -968,15 +1034,16 @@ and greyed alongside either.
 `Dir cache` needs Kickstart 3.0, `International` needs 2.0, and `Long
 names` needs a filesystem no Kickstart provides.
 
+(recording-video)=
 ## Recording video
 
 `Cmd+R` on macOS or `Alt+R` on Linux/Windows (or the menu's "Record Video")
 starts capturing the emulated display and sound to
-`copperline-video-<YYYYMMDDHHmmSS>.avi` in the [recordings folder](#where-files-go); pressing it again
-stops and finalizes the file. A red REC
-badge sits in the display's top-right corner while a recording runs --
-like the screenshot overlay, the badge, status bar, and menus are never
-part of the captured video.
+`copperline-video-<YYYYMMDDHHmmSS>.avi` in the
+[recordings folder](#where-files-go); pressing it again stops and
+finalizes the file. A red REC badge sits in the display's top-right corner
+while a recording runs. Like the screenshot overlay, the badge, status
+bar, and menus are never part of the captured video.
 
 The file is an AVI with lossless ZMBV video (the DOSBox capture codec:
 zlib-compressed keyframes plus frame deltas, which keeps typical Amiga
@@ -996,21 +1063,22 @@ continues.
 (saving-a-gif-clip)=
 ## Saving a GIF clip
 
-The window keeps a rolling ring of the last ten emulated seconds of the
-picture it presents, so a moment worth sharing can be saved *after* it
-happened: `Cmd+Shift+G` on macOS or `Alt+Shift+G` on Linux/Windows (or the
-menu's "Save Clip as GIF") writes the ring as
+The window keeps a rolling ring of the last ten emulated seconds (by
+default) of the picture it presents, so a moment worth sharing can be
+saved *after* it happened: `Cmd+Shift+G` on macOS or `Alt+Shift+G` on
+Linux/Windows (or the menu's "Save Clip as GIF") writes the ring as
 `copperline-clip-<YYYYMMDDHHmmSS>.gif` in the
 [recordings folder](#where-files-go) and confirms the file name on screen
 when it is done. The clip is written on a background thread, so emulation
-never pauses; a second save waits for the first to finish.
+never pauses; asking for another clip while one is still being written
+only shows a notice.
 
 The GIF shows exactly what a screenshot would: the presentation's crop,
 TV aperture, H/V centre and pixel aspect, with the status bar, menus and
 the on-screen message left out. Frames are thinned to 25 per second on
 PAL and 30 on NTSC (`[recording] clip_fps` sets another rate) and each
 carries its own palette, so the usual Amiga picture is stored losslessly;
-a frame with more than 256 colours (HAM, AGA truecolour-ish output) is
+a frame with more than 256 colours (a HAM picture, for example) is
 reduced to 256 with NeuQuant when the file is written. Frame delays
 follow the emulated timeline, so a clip made under Warp Speed plays at
 normal speed, and a stretch where Warp presented no frames plays as one
@@ -1018,11 +1086,11 @@ held frame rather than a burst. A clip has no sound; use
 [Record Video](#recording-video) for that.
 
 `[recording] clip_seconds` sets the ring's length (up to 120 seconds; 0
-switches the ring and the menu item off) -- see
-[Configuration](configuration.md#recording-config). The ring holds pictures in
-their palette-indexed form and stores a picture once however long it
-stays on screen, so a ten-second ring costs well under 100 MB of host
-memory in practice; it is bounded at 256 MB regardless. Loading a save
+switches the ring off, and the menu item and shortcut then only say so)
+-- see [Configuration](configuration.md#recording-config). The ring holds
+pictures in their palette-indexed form and stores a picture once however
+long it stays on screen, so a ten-second ring costs well under 100 MB of
+host memory in practice; it is bounded at 256 MB regardless. Loading a save
 state, resetting or running a different machine starts the ring over.
 The headless `--gif-after` flag writes the same kind of clip from a
 scheduled emulated time (see [](headless.md#capturing-gif-clips)).
@@ -1034,13 +1102,14 @@ scheduled emulated time (see [](headless.md#capturing-gif-clips)).
 machine -- key presses with their hold times (typed on the host keyboard
 or clicked on the [on-screen one](#on-screen-keyboard), which reaches the
 machine by the same path), mouse buttons and motion, joystick / CD32-pad
-controls, analogue pot positions, and floppy inserts,
-on whichever port carries each device -- each stamped
-with its emulated time. Pressing it again stops the recording and writes
-`copperline-input-<YYYYMMDDHHmmSS>.clscript` in the [recordings folder](#where-files-go): a plain
-text file of scripted-input directives that
-`copperline --script FILE` replays exactly, because the core is
-deterministic and the events re-fire at the same emulated timestamps.
+controls, analogue pot positions, and floppy inserts, on whichever port
+carries each device -- each stamped with its emulated time. Pressing it
+again stops the recording and writes
+`copperline-input-<YYYYMMDDHHmmSS>.clscript` in the
+[recordings folder](#where-files-go): a plain text file of scripted-input
+directives that `copperline --script FILE` replays exactly, because the
+core is deterministic and the events re-fire at the same emulated
+timestamps.
 
 This is the direct way to turn "I can reproduce it by hand" into a
 regression: play the sequence once while recording, then keep the script
@@ -1238,15 +1307,15 @@ the guest is the first one aimed at it -- otherwise a single click on a
 gadget arrives as two, close enough together to read as a double click.
 
 While an overlay panel is open, host cursor motion is not fed to the
-emulated mouse. Tool windows are not modal that way: with the debugger
-or analyzer open, motion and clicks over the main window's display still
-drive the Amiga, and the capture click and shortcut work as usual. A
-panel or tool window opened while the mouse was captured borrows the
-cursor and hands the capture back when the last of them closes, so a
-visit to the debugger does not leave the machine uncaptured -- which
-matters most in fullscreen, where there is no desktop to reach for. An
-explicit `Cmd/Alt+G` release settles it the other way: the capture
-stays off.
+emulated mouse. In the [Debug workspace](../debugger/window.md) the
+inspectors own the keyboard and mouse until you click the display: that
+click hands input to the Amiga (capturing the mouse when a port has
+one), and `Cmd/Alt+G` or a click outside the display hands it back.
+Entering the Debug workspace while the mouse is captured borrows the
+cursor, and returning to Play hands the capture back, so a visit to the
+debugger does not leave the machine uncaptured -- which matters most in
+fullscreen, where there is no desktop to reach for. An explicit
+`Cmd/Alt+G` release settles it the other way: the capture stays off.
 
 Uncaptured, host cursor motion over the display still drives the
 emulated mouse, and `[input] mouse_sensitivity` scales it the same way
@@ -1281,11 +1350,12 @@ on every later Amiga; a pen in the other port is logged at start-up. See
 [Port devices](configuration.md#port-devices) for the headless and
 control-protocol forms.
 
-Ports 3 and 4 are the sockets of the parallel-port **multitap**, also called
-the four-player joystick adapter. Select **I/O Ports > Parallel > Multitap
-(4 joysticks)** in the launcher, or use `--parallel multitap` (the existing
-`joystick-adapter` name also works). Games such as Super Skidmarks, Kick Off 2
-and Dyna Blaster read these sockets as two extra joysticks.
+Ports 3 and 4 are the sockets of the parallel-port **multitap**, also
+called the four-player joystick adapter. Set **I/O Ports -> Parallel Port ->
+Device** to **Multitap (4 joysticks)** in the launcher, or use
+`--parallel multitap` (the `joystick-adapter` name also works). Games
+such as Super Skidmarks, Kick Off 2 and Dyna Blaster read these sockets
+as two extra joysticks.
 
 For four local USB/Bluetooth controllers, select **Joystick** for both
 native ports and use **gamepad** input mode:
@@ -1400,11 +1470,12 @@ Run it either from the menu ("Calibrate Gamepad...") -- which ends with a
 live test of the finished bindings and a Save button that makes them live
 immediately -- or from the terminal with `copperline --calibrate-gamepad`.
 The steps are the four directions, fire (CD32 red), button 2 (CD32 blue),
-the optional CD32 green/yellow/play/rewind/forward buttons, an optional
-**Open menu** button, an optional **Quit Copperline** hotkey, and finally
-the four directions again as optional **alternates**. Push a control to
-bind it, or hold any control for about a second to skip a step the pad
-has no control for; the four directions and fire cannot be skipped.
+the CD32 green/yellow/play/reverse/forward buttons, an **Open menu**
+button, a **Quit Copperline** hotkey, and finally the four directions
+again as **alternates**. Push a control to bind it. To skip a step the pad
+has no control for, press **Skip** or hold any control for 0.7 seconds
+(in the terminal flow, wait five seconds); every step after fire can be
+skipped, but the four directions and fire cannot.
 
 The alternates are for a pad with both a stick and a d-pad: bind the
 stick to the first four steps and the d-pad to the alternates (or the
@@ -1432,7 +1503,8 @@ to itself. Skip both steps to leave quitting to the menu row and the
 keyboard shortcut.
 
 The Menu button is the other host-side control: a press opens the pop-up
-menu (or closes an open overlay panel), and from there the pad walks
+menu, or closes whatever is up instead -- the menu, an overlay panel, or
+the Debug workspace's front inspector. From the menu the pad walks
 whatever is up, as described under
 [Keyboard and controller navigation](#keyboard-and-controller-navigation)
 above. While the menu or a panel is open the pad stops driving the
@@ -1447,8 +1519,8 @@ calibration can be finished without the mouse.
 Calibrations are saved per controller UUID in
 `~/Documents/Copperline/gamepads.toml`
 (`%USERPROFILE%\Documents\Copperline\` on Windows, or beside the
-executable in [portable mode](#quick-save-slots)). A calibration recorded by a
-Copperline version that predates the bundled controller database can
+executable in [portable mode](#where-files-go)). A calibration recorded by
+a Copperline version that predates the bundled controller database can
 resolve a stick direction reversed on a database-covered pad; the log
 suggests recalibrating when it loads such a file, and recalibrating
 once fixes it.
@@ -1471,7 +1543,7 @@ Pick the mapping with the **Controller 1** / **Controller 2** tabs, then
 **Set** on a row and press the key to bind (Escape cancels that row without
 closing the panel). **Clear** unbinds a control entirely, **Defaults**
 restores the built-in layouts, and **Save** writes the map and applies it to
-the running machine. Closing the window discards the edits.
+the running machine. Closing the panel without saving discards the edits.
 
 A control may hold several keys, and they OR together: fire ships bound to
 Right Ctrl, Right Alt, Left Ctrl and `C`, so compact keyboards without the

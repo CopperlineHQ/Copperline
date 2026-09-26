@@ -5,36 +5,43 @@ does not paint pixels as it runs; instead, every render-relevant event is
 recorded with its beam position, and the renderer replays the completed
 frame's events afterwards. The live emulation and the painting of pixels
 are decoupled in time but exact in beam position. In normal windowed and
-headless runs, replay happens on the default render worker, and the
-window's GPU presentation on a present worker; the CPU and custom-chip
-model remain on the main thread.
+headless runs, replay runs on a render worker thread, and a window's GPU
+presentation runs on a present worker thread; the CPU and custom-chip
+model stay on the main thread.
 
 ## Recording: beam events (`video/beam.rs`)
 
-As the core runs, Copper and CPU writes to render-relevant registers --
-BPLxPT, BPLCONx, COLORxx, DIWSTRT/STOP, DDFSTRT/STOP, modulos, sprite
-registers -- are recorded as `BeamRegisterWrite` events tagged with
-`(vpos, hpos, source)`. Chip-RAM writes that can affect a frame already
-being fetched are recorded similarly. `BeamEventIndex` buckets events per
-scanline so replay does not rescan the full frame log per line.
+As the core runs, the bus records Copper and CPU writes to render-relevant
+registers -- BPLxPT, BPLCONx, COLORxx, DIWSTRT/STOP, DDFSTRT/STOP, modulos,
+sprite registers -- as `BeamRegisterWrite` events tagged with
+`(vpos, hpos, source)` (`bus.rs`). Chip-RAM writes that can affect a frame
+already being fetched are recorded similarly, as `BeamChipRamWrite`.
+`BeamEventIndex` (`video/beam.rs`) buckets events per scanline so replay
+does not rescan the full frame log per line.
 
 ## Replay: planar to RGBA (`video/bitplane.rs`)
 
 At frame end the renderer starts from a snapshot of display state, then
 walks each scanline applying that line's recorded events at their beam
 positions: a palette write at `hpos` changes the colour of pixels to its
-right, a mid-line BPLCON1 write shifts scroll mid-line, exactly as the
-beam would have seen it. Bitplane data is fetched via the recorded BPLxPT
-state in the hardware fetch order, shifted through beam-timed BPLCON1,
-decoded through EHB / HAM / HAM8 / dual-playfield rules (the pixel
-pipeline carries 24-bit colour end to end; OCS/ECS paths keep their exact
-12-bit maths and expand by nibble), composited with the eight sprites
-under playfield priority, and CLXDAT collisions are accumulated.
+right, and a mid-line BPLCON1 write shifts the scroll mid-line, exactly as
+the beam would have seen it. Bitplane data is fetched via the recorded
+BPLxPT state in the hardware fetch order, shifted through beam-timed
+BPLCON1, decoded through EHB / HAM / HAM8 / dual-playfield rules (the
+pixel pipeline carries 24-bit colour end to end; OCS/ECS paths keep their
+exact 12-bit maths and expand by nibble), and composited with the eight
+sprites under playfield priority, while CLXDAT collisions are accumulated.
+Size-split child modules in `video/bitplane/` hold the fetch geometry
+(`fetch.rs`), Denise pixel output and colour decode (`output.rs`), sprite
+collection and drawing (`sprite.rs`), and the `COPPERLINE_*` diagnostic
+logging (`diag.rs`).
+
 The CLXCON/CLXCON2 playfield classification is a frame-local 256-entry
 truth table retained across scanlines and rebuilt when its control key
 changes. Each framebuffer collision entry is packed into one byte; this
 is only a representation change, and the same playfield-presence and
 match bits feed sprite priority and CLXDAT.
+
 For DMA-fetched HAM playfields, the display window gates framebuffer output
 and collision recording, but it does not rewind the HAM component history:
 Denise's hold register advances on every shifted sample, so fetched samples
@@ -47,37 +54,37 @@ samples. Overscan HAM pictures rely on the hidden span: the Lemmings 2
 FES demo's DMA Design logo (DDFSTRT `$30`, DIW HSTART `$79`) opens each
 line with a set-palette pixel in the eight hidden lo-res samples, and
 bounding the history to the display-phase samples turned its left edge
-into modify-green streaks. Single-word lo-res fetch placement is linear in DDFSTRT: each 8-cck fetch
+into modify-green streaks.
+
+Single-word lo-res fetch placement is linear in DDFSTRT: each 8-cck fetch
 period before the standard `$38` slot moves the picture exactly 16 lo-res
-pixels left (hardware-verified
-against the vAmigaTS `Agnus/DIW/OLDDIW/diw1` A500 photos, OCS and ECS).
-Early and late single-word lo-res DDF keep the picture beam-anchored;
-the renderer must not add or subtract a sample just to
-align the picture to a fetch-unit boundary.
-Hi-res early DDF is beam-anchored the same way: content fetched ahead of the
-window edge is hidden by the window comparator alone (XSysInfo's DDFSTRT `$38`
-panel clips exactly its one pre-fetch word), so when an extreme-overscan
-screen opens the window early as well (KS 3.2 Overscan editor on ECS:
-DDFSTRT `$28` with DIWSTRT h `$5D`), the early words are visible inside the
-window rather than being snapped away (issue #186).
+pixels left (hardware-verified against the vAmigaTS
+`Agnus/DIW/OLDDIW/diw1` A500 photos, OCS and ECS). Early and late
+single-word lo-res DDF keep the picture beam-anchored; the renderer must
+not add or subtract a sample just to align the picture to a fetch-unit
+boundary. Hi-res early DDF is beam-anchored the same way: content fetched
+ahead of the window edge is hidden by the window comparator alone
+(XSysInfo's DDFSTRT `$38` panel clips exactly its one pre-fetch word), so
+when an extreme-overscan screen opens the window early as well (KS 3.2
+Overscan editor on ECS: DDFSTRT `$28` with DIWSTRT h `$5D`), the early
+words are visible inside the window rather than being snapped away
+(issue #186).
+
 When DDFSTRT is late enough that DIW opens before DMA has delivered the
 first BPL1DAT word for the row, playfield output remains border-colour until
 that plane-0 fetch reaches Denise instead of sampling stale shifter contents.
 That gate is placed in the bitplane/DIW coordinate domain, not the normal
 Copper/register-write output domain, because it follows the fetch slot that
-loads BPL1DAT.
-Horizontal DIW clipping applies to sprites unless AGA border sprites are
-enabled by BPLCON3.BRDSPRT; if BPLCON3.BRDRBLNK is asserted, the border-sprite
-bypass is suppressed along with the blanked border.
-Once that first DMA word is visible, the renderer samples the enabled
-bitplanes from the complete latched word; it does not expose the first word
-plane-by-plane according to each plane's individual DMA slot.
+loads BPL1DAT. Once that first DMA word is visible, the renderer samples the
+enabled bitplanes from the complete latched word; it does not expose the
+first word plane-by-plane according to each plane's individual DMA slot.
+
 If a manual BPL1DAT write starts a word before a later DMA BPL1DAT load
 point, replay stops the manual word where that DMA word replaces Denise's
 shifter.
 A manual BPLxDAT write (Copper or CPU, typically with bitplane DMA off --
 the "chunky copper" display technique) loads Denise's holding register, and
-the serialiser parallel-loads the held word on its free-running word
+the serializer parallel-loads the held word on its free-running word
 cadence, not at the write position: the 16-pixel batch snaps to the next
 word-grid slot after the write's bus landing (slots every 32 framebuffer
 pixels in lo-res and 16 in hi-res, anchored two pixels left of the DIW
@@ -89,6 +96,7 @@ with a straight window-edge clip. Pinned by the `bplprobe-dat` golden
 probe (WAIT-position sweeps against the DIW border plus double-write,
 bit-order, scroll, and hi-res bands; vAmiga-verified byte-identical) --
 the Desire "Hamazing" Hexagon left-edge regression class.
+
 The OCS/ECS BPLCON1 scroll nibbles count lo-res pixels regardless of
 resolution: one step shifts a hi-res playfield two hi-res samples and a
 super-hi-res playfield four, and the comparison narrows with the word
@@ -98,6 +106,7 @@ constellation, vAmiga-verified). AGA's extended BPLCON1 fields feed the
 same per-plane delays through `aga_bplcon1_scroll_samples`, masked to one
 fetch-unit width (32-bit fetches scroll within 32 lo-res px, 64-bit within
 64).
+
 An off-grid DDFSTRT interacts with the scroll in both fetch regimes. An
 FMODE=0 fetch placed off the shifter reload grid rounds UP (the data is
 late for its own slot), and a scroll that covers the lateness catches the
@@ -128,23 +137,23 @@ rule (`fold at gulp - earliness`) reproduced AB2's map but folded every
 Roots tap >= 16, pulling the swirl a gulp left and shearing the
 kaleidoscope line by line. The hi-res/SHRES scaling of the pipeline is
 not yet externally verified; only lo-res is pinned.
+
 BPLCON1-delayed samples at the left edge of a scanline do not reuse the
 previous line's final bitplane word. Before the current line's shifter has a
 sample for a delayed tap, replay marks playfield output active but returns
 colour index 0. Same-line samples fetched before DIW opened do scroll into
 view, on every line alike: the delay taps pixels the shifter loaded from the
 line's own pre-window fetch, so the first line of a bitplane-DMA block --
-whether gated by a copper DMACON BPLEN write or by DIWSTRT's vertical
+whether gated by a Copper DMACON BPLEN write or by DIWSTRT's vertical
 comparator -- renders its scrolled-in left edge exactly like the interior
 lines (`ddfprobe-blockscroll`, vAmiga-verified; the Super Skidmarks CD32
 menu corner-notch regression class). The scroll-in still never comes from a
-previous scanline's tail. AGA's
-extended BPLCON1 delays can exceed one 16-bit shifter word; the extra leading
-gap also stays background until current-line samples reach Lisa.
-A BPLCON1 write whose normal register position is already at or beyond DIW's
-right edge is not pulled left into the current line's bitplane-scroll domain;
-it updates following lines without retapping the visible HAM tail of the
-current line.
+previous scanline's tail. AGA's extended BPLCON1 delays can exceed one
+16-bit shifter word; the extra leading gap also stays background until
+current-line samples reach Lisa. A BPLCON1 write whose normal register
+position is already at or beyond DIW's right edge is not pulled left into
+the current line's bitplane-scroll domain; it updates following lines
+without retapping the visible HAM tail of the current line.
 
 The playfield pixel loop runs in control-run chunks: recorded control,
 scroll, and palette events take effect at output-pixel boundaries, so
@@ -152,7 +161,7 @@ between two event positions everything derived from `ControlState` (the
 BPLCON0 mode decode, display-window edges, fetch-origin quantization,
 per-plane scroll delays) is constant and is computed once per run rather
 than per pixel. The per-pixel decisions inside a run are unchanged -- the
-chunking is a host-CPU optimisation, not a model change.
+chunking is a host-CPU optimization, not a model change.
 History-independent colour modes also cache their complete 256-entry
 Denise/Lisa index tables in up to eight frame-local entries. The cache
 compares the palette, the AGA colour-path selection and
@@ -165,11 +174,10 @@ every output depends on the preceding colour. An indexed lookup still
 seeds the held colour for a later switch into HAM. Prepared planar rows
 similarly share a single byte lookup when the odd and even BPLCON1 taps
 have the same delay; the exhaustive prepared-pixel/word-sampler comparison
-covers both that common path and
-separate dual-playfield taps.
+covers both that common path and separate dual-playfield taps.
 
-The horizontal display-window flip-flop is still the same 9-bit Denise
-counter model. Lines without a mid-line DIW write solve its exact comparator
+The horizontal display-window flip-flop keeps the 9-bit Denise counter
+model. Lines without a mid-line DIW write solve its exact comparator
 transition ticks directly; a changed line replays all 454 ticks. A randomized
 equivalence test compares both paths across counter starts, wrap behaviour,
 window bounds and carried flip-flop state.
@@ -192,12 +200,15 @@ the carried-in run's data, with only the closed gap masked as border.
 Rows that enter the framebuffer closed keep the DIWSTRT anchor as the
 paint start, so ordinary windows clip exactly as before. (Sprites still
 clip by the register-derived window rather than the flip-flop -- a
-remaining gap.)
+remaining gap.) Horizontal DIW clipping applies to sprites unless AGA
+border sprites are enabled by BPLCON3.BRDSPRT; if BPLCON3.BRDRBLNK is
+asserted, the border-sprite bypass is suppressed along with the blanked
+border.
 
 BPLCON0 is itself split across two of those timelines. The plane count and
-the resolution bits gate the fetch/serialiser side and stay in the generic
+the resolution bits gate the fetch/serializer side and stay in the generic
 register domain, but the HAM select does not reach the shifter at all: it
-picks how the already-serialised index becomes a colour, in the same
+picks how the already-serialized index becomes a colour, in the same
 colour-selection phase a COLORxx write feeds. Replay therefore samples the
 HAM bit `DENISE_HAM_SELECT_PIPELINE_FB` framebuffer pixels left of the rest
 of the control state, so a HAM change and a COLORxx write carried by the same
@@ -215,9 +226,9 @@ high-byte BPLAM bitplane XOR follows the normal control timeline, but the
 low-byte ESPRM/OSPRM sprite palette-base fields are visible to sprite
 colour lookup at Lisa's earlier sprite palette-control x position. Ordinary
 COLORxx palette writes stay on the Denise palette-output timeline; sharing
-the sprite path shifts copper palette gradients horizontally and
-turns smooth per-line colour ramps into bands.
-The render event journal therefore creates a sprite-only BPLCON4 segment
+the sprite path shifts Copper palette gradients horizontally and
+turns smooth per-line colour ramps into bands. The render event journal
+therefore creates a sprite-only BPLCON4 segment
 when those two x positions differ, then applies the full BPLCON4 value on
 the normal control segment.
 
@@ -229,9 +240,10 @@ later compare or scanline, not the word already shifting. SPRxPOS writes
 re-arm the sprite horizontal comparator: if the write occurs before the
 newly programmed HSTART, the sprite can still begin at that HSTART. The
 replay clips those position intervals in the sprite-comparator domain
-(seven CCK ahead of the normal register-output position) so adjacent manual
-sprite words can abut at their HSTARTs and staggered even/odd attached-pair
-position writes do not create artificial half-pair strips. Once a manual
+(seven colour clocks ahead of the normal register-output position) so
+adjacent manual sprite words can abut at their HSTARTs and staggered
+even/odd attached-pair position writes do not create artificial half-pair
+strips. Once a manual
 sprite word has started shifting, later same-line POS/CTL writes can arm a
 future compare but do not truncate that active word. A POS write that lands
 exactly on the HSTART compare boundary is on the already-started side of
@@ -253,12 +265,13 @@ sprite data.
 
 Sprite DMA starts at the top of the field above the active display window
 (PAL line $19, NTSC $14). The pre-display scanlines are reconstructed by replay
-in `frame_capture.rs`. This replay is paced cycle-by-cycle with the raster beam --
-executing sprite slots as the beam advances and applying intermediate `DMACON`,
-`SPRxPT`, and `SPRxPOS`/`SPRxCTL` writes -- because DMA reads dynamic Chip RAM.
-Replaying pre-display cycles at display start previously allowed descriptors
-modified by vertical blank interrupts to corrupt earlier sprite control fetches
-(*Spooky Town* regression).
+in `bus/frame_capture.rs`. This replay is paced cycle by cycle with the raster
+beam -- executing sprite slots as the beam advances and applying intermediate
+`DMACON`, `SPRxPT`, and `SPRxPOS`/`SPRxCTL` writes -- because the DMA reads
+chip RAM that the CPU may still be changing. Replaying all the pre-display
+cycles at display start instead let descriptors modified by the vertical-blank
+interrupt corrupt earlier sprite control fetches (the *Spooky Town*
+regression).
 
 A DMA fetch arms the channel as it lands, but the serializer still only
 copies the latches when the horizontal comparator fires, so a SPRxCTL write
@@ -313,22 +326,26 @@ and hi-res. The display-window comparator maps a DIWSTRT hstart H to
 framebuffer x = 2H - 196 (hardware-verified against the sblit0 A500 photo).
 A standard lo-res `$81`/`$38` picture is flush with that edge; a standard
 hi-res `$81`/`$3C` picture starts its 640 fetched pixels one lo-res pixel
-inside the window (matching vAmiga), with no wider leading border. Wide-FMODE DMA fetches start from the revision-masked
-DDFSTRT comparator value and complete whole units, but the displayed shifter
-origin is still quantized by the FMODE fetch gulp; the renderer keeps those
-two effects separate. That absolute gulp grid remains linear below the
-standard fetch slots rather than clamping at the `$18` hard start. In lo-res
-BPL64, DDFSTRT `$18` / DDFSTOP `$B8` therefore puts the whole first 64-pixel
-gulp left of a standard `$81` DIW and fills the window with the remaining five
-gulps; `ddfprobe-agaorigin` pins the hidden first gulp and the flush right edge
-against an equivalent FS-UAE A1200 capture. Denise's output line starts at the horizontal blanking
-start counter; COLORxx writes before that counter are the wrapped tail of
-the previous output row, while the palette value they load is still the
-base colour for the following row. These anchors were calibrated against
-real-hardware captures and other emulators; `COPPERLINE_HCENTER=0` and
+inside the window (matching vAmiga), with no wider leading border.
+
+Wide-FMODE DMA fetches start from the revision-masked DDFSTRT comparator
+value and complete whole units, but the displayed shifter origin is still
+quantized by the FMODE fetch gulp; the renderer keeps those two effects
+separate. That absolute gulp grid remains linear below the standard fetch
+slots rather than clamping at the `$18` hard start. In lo-res BPL64,
+DDFSTRT `$18` / DDFSTOP `$B8` therefore puts the whole first 64-pixel gulp
+left of a standard `$81` DIW and fills the window with the remaining five
+gulps; `ddfprobe-agaorigin` pins the hidden first gulp and the flush right
+edge against an equivalent FS-UAE A1200 capture.
+
+Denise's output line starts at the horizontal blanking start counter;
+COLORxx writes before that counter are the wrapped tail of the previous
+output row, while the palette value they load is still the base colour for
+the following row. These anchors were calibrated against real-hardware
+captures and other emulators; `COPPERLINE_HCENTER=0` and
 `COPPERLINE_OVERSCAN=full` help when re-checking them.
 
-For FMODE=0 lo-res, the one-sample low-res phase bias is applied on both
+For FMODE=0 lo-res, the one-sample phase bias is applied on both
 standard and late fetch origins. If a late DDF row completes exactly at
 DIWSTOP, the final visible DIW sample still includes undelayed planes; BPLCON1
 delay only retaps the per-plane shifters, it does not make the undelayed planes
@@ -340,7 +357,7 @@ For standard 15 kHz PAL/NTSC fields, row zero is anchored at Copperline's
 fixed overscan top rather than the current DIWSTRT vertical value. DIW still
 acts as the hardware display-window flip-flop: it decides when the frame's
 chip-RAM snapshot and bitplane DMA capture begin, but changing DIWSTRT later
-in the field does not recenter the already-visible top border. Programmable
+in the field does not recentre the already-visible top border. Programmable
 VARBEAMEN scans instead use their programmed visible window as the render
 origin. Under VARBEAMEN, Denise's horizontal counter restarts at 0 with the
 programmable line rather than free-running at the standard 15 kHz phase, so
@@ -379,7 +396,7 @@ composition, while CLXDAT keeps its 70 ns column pitch and combines adjacent
 on either canvas, as on Lisa; SPRES changes pixel width, not the comparator's
 positional granularity.
 
-Two vertical edge cases the replay honours:
+Three vertical edge cases the replay honours:
 
 - A display window can open above the captured canvas. Bitplane pointers are
   pre-advanced for those clipped rows by replaying the frame's
@@ -408,9 +425,8 @@ plane row. A completed job releases those references before the next frame
 wrap so the RAM allocation normally returns to the capture side. Released
 bitplane rows are kept in a bounded capture-side pool, preserving the eight
 plane-vector allocations across frames while clearing their contents before
-reuse.
-`render_from_input` consumes only this frozen bundle, so the main thread can
-start emulating frame N+1 while the worker renders frame N.
+reuse. `render_from_input` consumes only this frozen bundle, so the main
+thread can start emulating frame N+1 while the worker renders frame N.
 
 Each render thread also retains a `RenderScratch` arena across calls. The
 per-row base palettes and control state, their nested segment vectors, the
@@ -448,25 +464,27 @@ which owns the GPU side of the window (the `pixels` surface and the
 scaler, CRT, bezel and sticker passes: `Gpu` in `window.rs`). The worker
 uploads the image, draws the passes and presents, so the main thread's
 redraw ends at hand-off rather than at the surface's vsync wait -- on a
-host that falls short of real time, that wait was otherwise a per-frame
-stall of the emulation loop. Up to two frames are in flight; a third
-redraw waits for the next pass. Everything the passes need (scaler
-draws, CRT uniforms, the RTG rect) is resolved on the main thread into
-the `PresentJob`. The worker gives the window's pre-present hint in the
-established order, after the draw and before the present, except on
-macOS, where every winit window method waits on the main thread and the
-hint is a no-op anyway. The GPU side comes home for the operations that
-need the main thread -- surface and texture resizes, present-mode and
-shader changes, and any frame carrying the RTG board's texture upload or
-the inspector's egui paint, which present synchronously as before
-(`Render::gpu_mut` reclaims it, waiting out a frame in flight). The
-worker shares the window with the main thread but never owns the last
-reference to it: on macOS a winit window dropped off the main thread
-dispatches its drop to the main thread and waits, and the main thread
-is the one joining the worker at shutdown, so the worker's clone
-releasing the window inside that join would deadlock the exit. The
-main-thread side keeps a reference past the join.
-`COPPERLINE_THREADED_PRESENT=0` presents every frame from the main thread.
+host that falls short of real time, that wait would otherwise stall the
+emulation loop every frame. Up to two frames are in flight
+(`PRESENT_FRAMES_IN_FLIGHT`); a third redraw waits for the next pass.
+Everything the passes need (scaler draws, CRT uniforms, the RTG rect) is
+resolved on the main thread into the `PresentJob`. The worker issues
+winit's pre-present hint after the draw and before the present, as the
+main thread does, except on macOS, where every winit window method waits
+on the main thread and the hint is a no-op anyway.
+
+The GPU side comes home for the operations that need the main thread:
+surface and texture resizes, present-mode and shader changes, and any
+frame carrying the RTG board's texture upload or the inspector's egui
+paint, which still present synchronously (`Render::gpu_mut` reclaims it,
+waiting out a frame in flight). The worker shares the window with the
+main thread but never owns the last reference to it. On macOS a winit
+window dropped off the main thread dispatches its drop to the main thread
+and waits, and the main thread is the one joining the worker at shutdown,
+so the worker's clone releasing the window inside that join would
+deadlock the exit; the main-thread side therefore keeps a reference past
+the join. `COPPERLINE_THREADED_PRESENT=0` presents every frame from the
+main thread.
 
 When nothing has to be composed over the picture on the CPU -- no menu,
 panel, OSD, badge or guest overlay, no tint, and no CRT, bezel or RTG pass
@@ -495,7 +513,7 @@ first retires one committed anchor frame, snapshots the machine, and then
 retires `n` speculative frames with per-frame pacing suppressed. Every
 speculative frame is silent: `AudioMux` drops all master/source/channel fanout,
 and Paula withholds completed serial words from both its sink and observer.
-The final future frame is synchronously rendered while its Bus is still live;
+The final future frame is synchronously rendered while its bus is still live;
 only then is the anchor restored. Rendering after restore would present the
 past, and merely submitting a worker job before restore would race the
 fallback renderer. One `pace_runahead_burst` call at the end uses the anchor's
@@ -523,7 +541,7 @@ presentation result. The two-frame arming step avoids deep-copying captured
 plane data on changing displays. Interlace, phosphor history, and
 time-dependent render diagnostics do not take this shortcut.
 
-The browser wrapper exposes a monotonically wrapping presentation revision.
+The browser wrapper exposes a wrapping presentation revision counter.
 It advances only after a non-reused frame has completed post-processing and
 been copied into the page-facing presentation buffer. JavaScript remembers
 the last uploaded revision, so an exact pre-render reuse also suppresses the
@@ -577,8 +595,8 @@ interpolating on alternate pixels.
 
 Fields are routed by the hardware convention (the long field, LOF=1,
 carries the upper output rows), but software that never observes LOF and
-simply ping-pongs two per-field images - a chained pair of copper lists,
-each repointing COP1LC at the other - lands on an arbitrary pairing
+simply ping-pongs two per-field images -- a chained pair of Copper lists,
+each repointing COP1LC at the other -- lands on an arbitrary pairing
 decided by which field happened to be running when its chain started. A
 real CRT hides the wrong phase in field-rate flicker; a progressive weave
 turns it into a one-line comb through every detail. The deinterlacer
@@ -587,12 +605,13 @@ field each laced push: motion widens both sums about equally and fails
 the margin test, but a static picture drawn for the opposite pairing makes
 the losing sum carry the comb, and after four consecutive losing fields
 the weave phase flips (relabelling the stored field history with it). The
-flip and its votes reset whenever the weave history is dropped -
+flip and its votes reset whenever the weave history is dropped --
 progressive fields, machine swaps, resets, state loads, deinterlace
-toggles and scan changes alike - so a stale phase from one stream never
+toggles and scan changes alike -- so a stale phase from one stream never
 routes the next stream's fields to the wrong parity. Kang Fu CD32's
 laced HAM8 intro screens are the regression example: with the phase
 wrong, its thin lettering rendered as "every other line missing".
+
 Progressive content is line-doubled without history. With phosphor
 persistence off, the common progressive path writes those doubled rows
 directly into the frontend-owned presentation buffer instead of filling
@@ -600,11 +619,12 @@ the deinterlacer's intermediate output and then copying the complete
 frame. Interlaced and phosphor-blended frames retain the history buffer.
 `[display] deinterlace = false` (or the `COPPERLINE_DEINTERLACE=0` env
 override) falls back to plain line doubling; like phosphor, the setting
-travels in every render job.
-The browser deliberately starts with both history-dependent effects off for
-throughput and exposes live controls for pages that prefer their CRT
-presentation. Desktop defaults are unchanged: motion-adaptive deinterlacing
-remains on and phosphor persistence remains off.
+travels in every render job. The browser starts with both
+history-dependent effects off for throughput and exposes live controls
+for pages that prefer their CRT presentation; on the desktop,
+motion-adaptive deinterlacing is on and phosphor persistence is off by
+default.
+
 In the default threaded pipeline the worker owns this history; the
 synchronous fallback keeps it on the window `App`. The worker drops its
 history whenever the render generation changes (machine swap, reset,
@@ -614,8 +634,9 @@ glows into the next one.
 The deinterlacer also hosts the optional CRT phosphor-persistence stage
 (`[display] phosphor` / `COPPERLINE_PHOSPHOR`, off by default, clamped to
 0.95): when on, `present_with_phosphor` blends each presented frame over a
-retained copy of the previous one, keeping `phosphor`/256 of the old value
-per channel for an exponential trail. This is what fuses field-rate flicker
+retained copy of the previous one, keeping the `phosphor` fraction of the
+old value per channel (quantized to 1/256) for an exponential trail. This
+is what fuses field-rate flicker
 (alternate-field dither transparency, flicker-dithered animation) the way a
 real tube does. Like the rest of the deinterlacer it operates on the
 presentation buffer only and never touches the emulated framebuffer. The
@@ -638,10 +659,11 @@ value.
 ## Presentation (`video/present_common.rs`, `video/window.rs`, `video/ui.rs`)
 
 `window.rs` owns the winit `ApplicationHandler` and the `pixels` GPU
-surface: the field is presented at a TV-like 4:3 aspect plus the
-44-pixel status bar, scaling continuously with the window. The GPU surface
-is fed from `present_fb`, the post-processed presentation buffer produced by
-either the render worker or the synchronous fallback.
+surface: the field is presented at a TV-like 4:3 aspect (or with square
+pixels under `[display] pixel_aspect = "square"`) above the 44-pixel
+status bar, scaling with the window. The GPU surface is fed from
+`present_fb`, the post-processed presentation buffer produced by either
+the render worker or the synchronous fallback.
 
 Window creation selects its graphics backend before constructing the scaler,
 CRT passes, or egui renderer. On Windows, an automatically selected CPU adapter
@@ -653,14 +675,21 @@ it propagates to the window creator. `WGPU_BACKEND` and
 selection policy, including Linux's Vulkan default.
 
 The emulator window is drawn onto the surface by its own scaling pass
-(`window/scaler.rs`), while the inspectors draw directly with egui. The custom
-scaler pass accepts destination
-rectangles and filter modes directly, allowing integer scaling multipliers beyond
-4x on high-resolution displays. Point sampling remains exact because the present
-copy replicates each canvas pixel into a uniform texel block. Smooth filtering
-uses a sharp bilinear shader with texel snapping. `PresentLayout`
-(`window/present.rs`) is the single source of truth for display geometry, cursor
-coordinates, and overlay positioning.
+(`window/scaler.rs`, replacing the `pixels` crate's built-in scaling
+renderer), while the inspectors draw directly with egui. The scaler pass
+takes its destination rectangles and filter modes as inputs, so an integer
+multiple is not tied to the backing texture's supersample factor. That
+factor is planned per window (`plan_present_scaling` in
+`window/present.rs`): smooth scaling uses the rounded host DPI factor (at
+most 2), and integer scaling uses the planned multiple, capped at
+`MAX_INTEGER_TEXTURE_SCALE` (4) to bound the texture and the per-frame
+copy; `[display] hidpi_texture = false` keeps the texture at canvas
+resolution. A multiple past the cap is still drawn in full. Point sampling
+remains exact because the present copy replicates each canvas pixel into
+a uniform texel block. Smooth filtering uses a sharp bilinear shader with
+texel snapping. `PresentLayout` (`window/present.rs`) is the single source
+of truth for display geometry, cursor coordinates, and overlay
+positioning.
 
 The scaler draws an opaque black background across the surface before drawing
 the picture and chrome. A render-pass clear alone can leave corrupt colour and
@@ -673,19 +702,23 @@ frame (`RenderResult::content_rect`), computed from raster lines containing
 fetched bitplane data. Chrome elements (panels and status bar) are drawn
 separately in a docked bottom band sized identically to the letterboxed layout.
 `AutocropLatch` filters frame-to-frame variations: viewport expansions apply
-immediately, while reductions require stability over a debounce window to prevent
-zoom pumping during transitions. Opening menus or panels expands the display
-quad to the full display area so overlays remain visible. CRT presets render over
-the cropped area. Programmable multisync modes (e.g. DblPAL) are cropped using
-their sync-anchored windows. Autocrop is suspended when using monitor bezels or
-RTG modes; capture outputs retain full aperture.
+immediately, while a smaller envelope must hold for
+`SHRINK_STABLE_FRAMES` (25) consecutive frames before the crop tightens,
+which prevents zoom pumping during transitions. Opening menus or panels
+expands the display quad to the full display area so overlays remain
+visible. CRT presets render over the cropped area. Programmable multisync
+modes (e.g. DblPAL) are cropped using their sync-anchored windows.
+Autocrop is suspended when a monitor bezel is drawn or an RTG board owns
+the display; captures keep the full aperture.
 
 Integer scaling presents from the unresampled canvas in both TV and square pixel
-modes (`video::square_canvas`). In TV mode, `per_axis_fit` calculates horizontal
-and vertical integer multipliers independently to match the 4:3 CRT pixel aspect
-ratio (`glass_par`). On a 1080p display, 200-line NTSC content scales to a 4:5
-pixel aspect (1280x1000). Monitor bezels retain the resampled TV canvas, while
-RTG and programmable modes scale uniformly.
+modes (`video::square_canvas`). In TV mode, `per_axis_fit` chooses horizontal
+and vertical integer multipliers independently: the tallest fit whose pixel
+shape stays within 10% of the shape a standard scan has on the 4:3 glass
+(`glass_par`: about 1.078 for PAL, 0.854 for NTSC). On a 1080p display,
+200-line NTSC content scales to a 4:5 pixel aspect (1280x1000). Monitor
+bezels retain the resampled TV canvas, while RTG and programmable modes
+scale uniformly.
 
 Every redraw first re-syncs the surface to the host window's current size
 (`resync_surface_size`), rather than trusting the Resized event to have
@@ -696,7 +729,7 @@ not a misdraw: a driver that rejects the mismatched extent (Mesa's X11
 Vulkan WSI answers `VK_ERROR_OUT_OF_DATE_KHR`) sends that loop round
 forever, and because it runs inside the event callback it also starves the
 Resized event that would have corrected the size. Entering or leaving
-fullscreen is the common way in, the window manager resizing the window a
+fullscreen is the usual trigger: the window manager resizes the window a
 moment before the event is delivered. Both window kinds record the size
 their surface was configured with, and all resizes go through the wrappers
 that keep that record in step.
@@ -710,7 +743,7 @@ desktop path is unchanged; headless consumers -- `cpu.rs`'s debug
 screenshots and the [browser (WebAssembly) frontend](../guide/browser.md)
 -- present frames through it without the winit stack.
 
-Two presentation-only adjustments (they never alter the emulated
+The presentation-only adjustments (none of them alters the emulated
 framebuffer):
 
 - **Overscan mask**: `[display] overscan = "tv"` masks deep-overscan
@@ -722,12 +755,16 @@ framebuffer):
   rendered source texture instead of copying the picture sideways. Vertical
   border colour changes remain visible because they are part of the Denise
   output and are often deliberate border effects.
-- **TV glass**: normal screenshots and `--dump-frames` in TV mode present the
-  same 716x540 4:3 glass as the live window. Horizontally the framebuffer's
-  captured aperture (`TV_CAPTURED_*`, 668 columns) contains the 640-pixel
-  standard display with 14 captured overscan pixels on each side. Those real
-  columns are nearest-neighbour resampled across the 716-pixel glass, so the
-  raster reaches both edges without synthetic black bezel columns. Vertically
+- **TV glass**: normal screenshots and `--dump-frames` in TV mode save the
+  same 4:3 glass the live window shows, at 716x540. Horizontally the
+  framebuffer's captured aperture (`TV_CAPTURED_*`, 668 columns) contains the
+  640-pixel standard display with 14 captured overscan pixels on each side.
+  Those real columns are resampled across the 716-pixel glass with an 8.8
+  fixed-point blend of the two nearest columns (`tv_glass_sample`), so the
+  raster reaches both edges without synthetic black bezel columns. The
+  `[display] tv_h_centre`/`tv_v_centre` knobs slide the aperture's source
+  window (`tv_centre_source_offset`); glass pushed past the captured raster
+  shows black, and captures follow the knobs. Vertically
   the aperture follows the scan the frame actually ran: a 312/313-line (50 Hz)
   field contributes 540 woven rows, while a 262/263-line (60 Hz) field
   contributes 428. The shorter crop is resampled onto the same 540 output rows,
@@ -754,13 +791,19 @@ framebuffer):
   picture (Virtual Dreams' "Absolute Inebriation") is still recentred, while a
   display that genuinely fetches bitplane data into the overscan border is left
   exactly as rendered.
+- **Tint**: `[display] tint` recolours the picture through a 256-entry
+  luma-indexed table (`tint_lut` in `window/present.rs`) built by evaluating
+  the web frontend's CSS filter chain on grey. The window applies it to the
+  display rows of the composed texture after the display copy and before the
+  status bar and UI are drawn, so only the emulated picture is tinted and
+  captures never are.
 
 Both content-keyed decisions -- the TV aperture crop and the full-overscan
 recentring shift -- are latched across border-only frames
 (`PresentationLatch` in `present_common.rs`). A frame with no bitplane
 content intersecting the window (registers cleared during boot, or the
 blank frame or two Intuition emits at every screen change while it rebuilds
-the copper list) carries no evidence about the display's layout, so it
+the Copper list) carries no evidence about the display's layout, so it
 keeps the previous frame's geometry instead of snapping to the full
 framebuffer -- the monitor does not move between screens. The power-on
 default is the stock standard display (aperture on, standard recentring
@@ -771,7 +814,7 @@ resets on presentation discontinuities (machine swap, reset, state load).
 Frame dumps and screenshots share the resolved decision, so a TV-mode dump's
 PNG dimensions remain 716x540 across a boot.
 
-### RTG scanout (Z3660 and Picasso II/II+)
+### RTG scanout (Z3660, Picasso II/II+ and Graffity)
 
 When a fitted `[rtg]` board's guest driver switches the display to RTG,
 the presentation path swaps sources: the board's panned framebuffer
@@ -779,17 +822,17 @@ the presentation path swaps sources: the board's panned framebuffer
 composited over it) replaces the chipset render. Z3660 implements its FPGA
 scanout and sprite in `z3660.rs`; Picasso II/II+ implement the CL-GD5426/5428
 scanout, two-plane cursor, and physical pass-through switch in
-`picasso2/gd5426.rs`.
-The window presents
+`picasso2/gd5426.rs`, and the Graffity Zorro II/III boards (`graffity.rs`)
+reuse that CL-GD5428 core. The window presents
 that frame at its native resolution through a dedicated GPU texture
-rather than the 716-wide chipset buffer, and the TV aperture crop is
-suppressed -- it is a chipset crop rect, and applying it would show a
-sub-rect of the board's screen. While a menu or panel is open the window
-falls back to the CPU present path (at the cost of the downscale) so the
-overlay is not overdrawn by the GPU pass. If the board claims the display
-but its frame does not compose yet (mode set before the resolution
-registers), presentation falls back to the chipset render rather than
-freezing on a stale frame.
+(`window/rtg_texture.rs`) rather than the 716-wide chipset buffer, and the
+TV aperture crop is suppressed -- it is a chipset crop rect, and applying it
+would show a sub-rect of the board's screen. While a menu, panel or guest
+overlay is open the window falls back to the CPU present path (at the cost
+of the downscale) so the overlay is not overdrawn by the GPU pass. If the
+board claims the display but its frame does not compose yet (mode set
+before the resolution registers), presentation falls back to the chipset
+render rather than freezing on a stale frame.
 
 `compose_rtg_present` (`present_common.rs`) also keeps an
 `FB_WIDTH`-stride copy of the native frame for the screenshot and CCP
@@ -799,16 +842,19 @@ sampling each output pixel's source-span centre so the rightmost source
 columns survive. Screenshots under RTG are therefore 716 wide at the
 board's native row count.
 
-Picasso II and II+ remain on native pass-through after reset. Even after the guest
-writes its VGA-output switch, `rtg_active` requires a running, unblanked
-sequencer and a plausible CRTC mode whose visible rows fit in VRAM. During
-driver mode changes this makes presentation fall back to the native chipset
-frame instead of exposing stale or out-of-bounds VRAM.
+The Cirrus-based boards (Picasso II/II+ and Graffity) remain on native
+pass-through after reset. Even after the guest writes the monitor switch,
+`rtg_active` requires a running, unblanked sequencer and a plausible CRTC
+mode whose visible rows fit in VRAM (`video_valid`). During driver mode
+changes this makes presentation fall back to the native chipset frame
+instead of exposing stale or out-of-bounds VRAM.
 
-`ui.rs` implements the status bar widgets, pop-up menu, and smaller overlay
-panels (About, Shortcuts, Calibration), using the 8x8 `font.rs` glyphs. Its
-software inspector drawing helpers remain available for tests and rendering
-comparisons. `COPPERLINE_UI_PREVIEW=1 cargo test panels_render_into_their_rects`
+`ui.rs` lays out, hit-tests and draws the pop-up menu (whose rows and
+actions are defined in `menu.rs`) and the smaller overlay panels (About,
+Shortcuts, Calibration); the status bar is drawn by `window/statusbar.rs`.
+Both use the 8x8 `font.rs` glyphs. The software inspector drawing helpers
+in `ui.rs` remain available for tests and rendering comparisons.
+`COPPERLINE_UI_PREVIEW=1 cargo test panels_render_into_their_rects`
 renders the software panels into `target/ui-preview-*.png`.
 
 The desktop `frontend` feature includes egui. `window/egui_debugger.rs` owns the
@@ -828,9 +874,12 @@ continues at its usual cadence, composing the cached UI between inspector update
 Textures retired by egui remain alive while the cached frame can still use
 them. They are released when that frame is replaced, before uploading the
 next frame's texture updates.
+
 Headless, browser, and libretro builds omit the desktop frontend and egui.
-`egui_debugger/analyzer.rs` supplies the four analyzer views, and
-`egui_debugger/console.rs` supplies the command field and selectable output.
+`egui_debugger/analyzer.rs` supplies the four analyzer views (Beam, Blits,
+Memory, Resources), and `egui_debugger/console.rs` supplies the command
+field and selectable output.
+
 The inspector context replaces egui's Hack face with the bundled
 `assets/egui/hack-slash/HackSlash-Regular.ttf`. Only the zero outline changes,
 using Source Foundry's forward-slash alternate; character advances, line
@@ -879,9 +928,11 @@ Text edits stay in the panel, and submission becomes a single post-layout
 command batch, so paste and repeated sizing passes cannot execute commands.
 A `CLOSE` stops that batch. Hidden Console panels still receive guest output.
 
-`egui_debugger/preferences.rs` stores a small TOML file in the host data directory:
-Debug layout size, display divider, CPU divider sizes, and tab names. It is loaded
-lazily and saved atomically on returning to Play, closing an inspector, or exiting.
+`egui_debugger/preferences.rs` stores a small TOML file,
+`inspector-layout.toml` in the Copperline configuration directory: Debug
+layout size, display divider, CPU divider sizes, and tab names. It is
+loaded lazily and saved atomically on returning to Play, closing an
+inspector, or exiting.
 The Play window size and position are kept in host memory while Debug is visible;
 position restoration checks that the title bar remains on a connected monitor.
 Invalid preferences fall back to defaults and sizes are bounded. Legacy inspector
@@ -910,7 +961,7 @@ cargo test --release --locked --lib render_analyzer_previews -- --ignored --noca
 cargo test --release --locked --lib render_console_preview -- --ignored --nocapture
 ```
 
-These write the nine debugger, four analyzer, and Console images to
+These write the ten debugger, four analyzer, and Console images to
 `target/egui-debugger/`. The similarly invoked
 `benchmark_debugger_repaint` test measures alternating, warmed CPU-tab repaints:
 legacy software drawing plus texture upload against egui layout, tessellation,
@@ -935,12 +986,13 @@ presentation, I/O, audio and expansion sections.
 The optional tube emulation (`[display] shader`, off by default) is a second
 pass inside the same `pixels` `render_with` closure the RTG texture uses:
 the presentation scaler pass draws the composited buffer first, then
-`CrtShader` re-draws the display rectangle through a fragment shader. Its viewport is
-the display sub-rect of the letterboxed clip rect -- the clip rect scaled by
-`present_height() / window_present_height()`, the same multiply-then-divide
-the RTG display rect uses so the two land identically -- and it samples only
-the matching `src_rect` of the presentation texture, so the status bar
-below is neither read nor overdrawn. `uniforms_for` builds the uniform block
+`CrtShader` re-draws the display rectangle through a fragment shader. Its
+viewport is the display sub-rect of the letterboxed clip rect -- the clip
+rect scaled by `present_height() / window_present_height()`, the same
+multiply-then-divide the RTG display rect uses so the two land
+identically -- and it samples only the matching `src_rect` of the
+presentation texture, so the status bar below is neither read nor
+overdrawn. `uniforms_for` builds the uniform block
 and that viewport from pure arithmetic, with no GPU state, so the mapping is
 unit tested on its own.
 
@@ -978,10 +1030,11 @@ rows, or `TV_NTSC_PRESENT_HEIGHT`, 428) rather than the whole woven
 buffer, so its count comes from the aperture -- 270 lines on a 50 Hz scan
 and 214 on a 60 Hz one, against 285 for a standard field in `"full"`
 overscan, or the tube aperture's 285/235 while a bezel widens the copy --
-and is rescaled by the rect/content ratio when the
-square-pixel canvas pads the aperture with bezel rows. Interlaced content is deliberately drawn at field-line pitch over the
-woven frame: one gap per emulated line, which is what a 15 kHz set fed an
-interlaced signal looks like, rather than one per woven row.
+and is rescaled by the rect/content ratio when the square-pixel canvas pads
+the aperture with bezel rows. Interlaced content is deliberately drawn at
+field-line pitch over the woven frame: one gap per emulated line, which is
+what a 15 kHz set fed an interlaced signal looks like, rather than one per
+woven row.
 
 Three classes of frame skip the pass. While a menu or panel is open the CRT
 pass would re-draw the UI the compositor just wrote into the buffer, through
@@ -998,7 +1051,7 @@ parse, full validation, and a look for the `vs_main`/`fs_main` entry points
 -- before any pipeline is built, so a mistake is reported with its WGSL
 source location instead of surfacing as a device error later; the file is
 size-capped at 1 MiB. It is loaded at window creation, at launcher machine
-start, and each time the menu cycles onto `Custom`, which re-reads it from
+start, and each time the menu selects `Custom`, which re-reads it from
 disk (the live-reload path). A failed load leaves no custom pipeline, and
 the selection falls back to `None` with the full diagnostic logged and its
 first line shown as an OSD message.
@@ -1012,26 +1065,67 @@ scaler pass uses a texel-snapped sharp bilinear, so it is marginally
 softer at magnification than the pass-through; `ShaderKind::None` skips the
 pass entirely and is the only zero-cost path.
 
+### Monitor bezel and sticker passes (`window/bezel.rs`, `window/stickers.rs`)
+
+`[display] bezel` draws a procedural monitor front over the display rect.
+Each `BezelStyle` (the 1084 and the classic front) is one
+`shaders/bezel_*.wgsl` source plus the rounded opening it leaves
+(`opening_rect`); the styles share one pass, uniform block and pipeline
+cache, and each style's pipeline is compiled the first time it is drawn.
+The pass runs after the scaler pass on the same viewport as the CRT pass
+and, like it, samples only the display region of the texture. Without a
+CRT preset, the bezel pass draws both the frame and the picture scaled
+into the opening. With a preset, the CRT pass draws the picture first,
+re-aimed at the opening's bounding box (`CrtUniforms::with_viewport`), and
+the bezel follows in frame-only mode, discarding the opening's interior:
+the moulding overlaps the tube face as on the real monitor, so its rounded
+corners clip the preset's square viewport instead of being buried under
+it. The bezel has no strength setting and is not user-replaceable. Unlike
+the CRT pass it stays on for programmable scans, since a frame has no line
+structure to get wrong; it shares the other two suspensions (an open
+overlay, RTG scanout). `corner_inset` computes, from the same aperture
+radius and face warp the shaders use, how far overlays must move in so
+their corners stay inside the visible picture.
+
+`[display] bezel_stickers` names a folder of PNG decals that the sticker
+pass draws onto the front after the bezel pass. Every `*.png` becomes one
+sticker; an optional `stickers.toml` places each one, and without it they
+line up along the cabinet's top band with a slight alternating tilt.
+Placement is in fractions of the monitor front, so a sheet lays out the
+same at any window size. The images (at most `MAX_STICKERS`, 16, each
+capped at 512 texels on its longest side) are decoded and packed into one
+atlas on the CPU at load time, and the pass draws one rotated quad per
+sticker with a drop shadow (`shaders/bezel_stickers.wgsl`; the web
+player's `try.js` carries a GLSL port that must be kept in step). Stickers
+draw only while the bezel does.
+
+Both passes are presentation only: screenshots, frame dumps, recordings
+and headless runs never include the bezel or its stickers.
+
 ## Headless capture (`screenshot.rs`)
 
 `--screenshot-after` and `--dump-frames` render through the identical
-pipeline with the window hidden; PNGs are scaled to the same geometry the
+pipeline; a capture run with no `--control-gui` or `--gdb-gui` session
+creates no window at all (`App::run_headless`), so it works on hosts
+without a display connection. PNGs are scaled to the same geometry the
 window would present unless `COPPERLINE_SHOT_RAW=1` requests the unscaled
 woven framebuffer. The default vertical presentation scale selects whole
 source rows rather than blending adjacent Amiga scanlines, matching the
 normal unfiltered display path. Because the default render worker may be one
 frame behind, these paths wait for the worker result matching the target
 emulated frame before writing the PNG. The
-[headless debugger](../debugger/headless) `COPPERLINE_DBG_SHOT` hook reuses
-the same path to capture the last completed frame at a breakpoint.
+[headless debugger](../debugger/headless) `COPPERLINE_DBG_SHOT` hook
+(`cpu.rs`) instead renders the last completed frame synchronously at a
+breakpoint and saves it through the same `screenshot.rs` vertical scaling,
+at full-overscan geometry (without the TV aperture crop).
 
 ## Video recording (`recorder.rs`)
 
 The [interactive recording](../guide/ui) shortcut writes an AVI containing
 lossless ZMBV video -- the DOSBox capture codec: zlib-deflated intra frames
-plus XOR-delta inter frames on a
-16x16-block grid, encoded entirely with the `flate2` crate -- and
-16-bit stereo PCM at the 44.1 kHz mixer rate. `recorder.rs` owns both
+plus XOR-delta inter frames on a 16x16-block grid, encoded entirely with
+the `flate2` crate -- and 16-bit stereo PCM at the 44.1 kHz mixer rate.
+`recorder.rs` owns both
 the encoder and the AVI muxer, and its unit tests round-trip the stream
 through a reference decoder.
 
@@ -1039,13 +1133,15 @@ Capture is locked to the emulated timeline, not the host clock. Paula
 carries an optional capture tap that collects every mixed stereo frame
 (before the master output volume); the window drains it once per
 emulated frame and, when the frame loop completed a new emulated frame,
-waits for the matching presentation buffer before pushing it through the same
-`scale_y_into` source-row presentation scale as the live window. At finish the
-AVI's video rate/scale is patched from the exact frames-to-audio-samples ratio,
-so a nominal "50 fps" label never drifts against PAL's true field rate and
-warp-speed captures play back at normal speed. The REC badge, status bar, OSD,
-and menus are drawn into the presentation texture after capture, so they never
-appear in the file.
+waits for the matching presentation buffer before scaling it to the capture
+canvas height with the source-row `scale_y_into` (a 35 ns canvas is first
+averaged down to `FB_WIDTH`). Unlike screenshots and GIF clips, a recording
+keeps the whole presentation buffer rather than the TV aperture crop. At
+finish the AVI's video rate/scale is patched from the exact
+frames-to-audio-samples ratio, so a nominal "50 fps" label never drifts
+against PAL's true field rate and warp-speed captures play back at normal
+speed. The REC badge, status bar, OSD, and menus are drawn into the
+presentation texture after capture, so they never appear in the file.
 
 ## GIF clips (`gifclip.rs`)
 
@@ -1066,8 +1162,8 @@ an exact first-seen-order palette plus 8-bit indices when the picture
 has 256 colours or fewer, the RGBA pixels otherwise. The interactive
 `ClipRing` keeps the last `clip_seconds` of those, stores a picture once
 however long it stays on screen (the next stored frame ends it), keeps
-the frame that was showing when the window opens with its time clamped to
-the window's start, and evicts the oldest frames past a 256 MiB byte
+the frame that was showing when the clip's time window opens, with its time
+clamped to the window's start, and evicts the oldest frames past a 256 MiB byte
 budget; a timestamp that moves backwards (state load, reset) restarts it.
 
 `GifWriter` streams frames through the `gif` crate as a looping GIF89a

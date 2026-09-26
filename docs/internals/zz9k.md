@@ -1,7 +1,7 @@
 # The zz9k crypto board: ZZ9000 SDK v2 protocol subset
 
 This page is the **contract**, not an implementation note: it specifies the
-register- and opcode-level behavior of Copperline's bundled ZZ9000 SDK
+register- and opcode-level behaviour of Copperline's bundled ZZ9000 SDK
 crypto board (`[zz9k]`), precisely enough that the board
 (`crates/zz9k-plugin`, hosted by `src/wasmboard.rs` and bundled by
 `src/zz9k.rs`) can be verified against the SDK's own Amiga-side software.
@@ -11,9 +11,9 @@ Unlike the other board contracts in this directory, the protocol is not
 Copperline's to define: the board implements a subset of the **MNT ZZ9000
 "SDK v2" service platform**, whose authoritative definition is the
 zz9000-sdk repository (BlitterStudio/zz9000-sdk, GPL-3.0-or-later, the same
-license as Copperline). This page pins the exact revision the board was
+licence as Copperline). This page pins the exact revision the board was
 written against and records every choice the board makes where the ABI
-leaves the firmware latitude. The behavioral reference is the SDK's own
+leaves the firmware latitude. The behavioural reference is the SDK's own
 Amiga-side transport, `host/src/zz9k_host.c` -- the code every SDK tool and
 the accelerated AmiSSL build link.
 
@@ -68,6 +68,7 @@ register probes read zeroes rather than crash the machine.
 |---|---|
 | `0x0000`-`0x0FFF` | Registers (below); everything unlisted reads 0, writes ignored |
 | `0x1000`-`0x1FFF` | Zorro III register aperture: aliases `0x0000`-`0x0FFF` (the transport writes the doorbell through it on Z3) |
+| `0x2000`-`0x9FFF` | Unused: reads 0, writes ignored |
 | `0xA000`-`0xFFFF` | Legacy mapped-IO window = ARM `0x3FE40000`-`0x3FE46000` |
 | `0xD000`-`0xD07F` | Mailbox descriptor (inside the mapped-IO window, = ARM `0x3FE43000`) |
 | `0xD080`-`0xD87F` | Request ring, 32 x 64-byte entries |
@@ -86,9 +87,9 @@ access size 1/2/4 at any offset, composing bytes big-endian.
 
 ## Registers
 
-| Offset | Name | Behavior |
+| Offset | Name | Behaviour |
 |---|---|---|
-| `0x0004` | CONFIG | Read: interrupt status, bit `0x0008` = SDK completion pending. Write `0x0088` (ACK_MODE\|ACK_SDK): acknowledge |
+| `0x0004` | CONFIG | Read: interrupt status, bit `0x0008` = SDK completion pending. Write with bit `0x0080` (ACK_SDK) set, as the transport's `0x0088` (ACK_MODE\|ACK_SDK) is: acknowledge |
 | `0x00E8` | CONFIG_KEY | Latched key query: write a key id, read back the key's value. Key **5** = `int2` (nonzero: completion IRQ on INT2/PORTS instead of INT6/EXTER) |
 | `0x00EA` | CONFIG_PRESENT | Read: nonzero if the last key id written to CONFIG_KEY is known |
 | `0x0100` | SDK_MAGIC | Reads `0x5A39` |
@@ -130,8 +131,9 @@ The board consumes **at most one request per emulated tick** (one CPU
 instruction boundary), computes it immediately -- inputs are read at
 dispatch, so mutating a buffer after submission does not affect an
 in-flight op, matching real firmware -- and publishes the completion after
-a deterministic latency in colour clocks (CCK = 3,546,895 per emulated
-second), modelling a serial coprocessor:
+a deterministic latency in colour clocks, modelling a serial coprocessor.
+The latencies are fixed CCK counts converted at the PAL colour clock
+(3,546,895 CCK per emulated second):
 
 | Operation | Latency |
 |---|---|
@@ -142,15 +144,16 @@ second), modelling a serial coprocessor:
 | VERIFY ECDSA-P256 | 2 ms |
 | VERIFY RSA | 1 ms |
 
-Completions publish in submission order; a full completion ring holds the
+Completions publish in submission order. A full completion ring holds the
 queue until the guest consumes, and once a ring's worth of completions is
-waiting the board stops consuming requests -- the request ring then fills
-and the guest transport reports BUSY at submit, like stalled hardware --
-so an unconsumed completion ring can never grow board state without
-bound. When the completion interrupt is enabled
-(`0x010C` = 2), publishing a completion raises the selected line (INT6 by
-default, INT2 when the `int2` config key says so) level-sensitively until
-either acknowledge form (`0x010C` = 1 or CONFIG = `0x0088`) clears it.
+waiting, the board stops consuming requests. The request ring then fills
+and the guest transport reports BUSY at submit, like stalled hardware, so
+an unconsumed completion ring can never grow board state without bound.
+When the completion interrupt is enabled (`0x010C` = 2), publishing a
+completion raises the selected line (INT6 by default, INT2 when the `int2`
+config key says so) level-sensitively until either acknowledge form
+(`0x010C` = 1 or CONFIG = `0x0088`) clears it; disabling the interrupt
+(`0x010C` = 4) masks the line without clearing the pending state.
 
 ## Services
 
@@ -277,8 +280,9 @@ elapsed at save time arrives on schedule after load).
   `tools/rsa_kat_vector.h`), the allocator, and the full mailbox protocol
   driven through 16-bit accesses like the 68k's.
 - `src/wasmboard.rs` tests drive the committed artifact through wasmtime:
-  bootstrap detection, a mailbox hash round trip, IRQ line selection, and
-  the mid-operation save-state resume.
+  bootstrap detection, a mailbox hash round trip, IRQ line selection, the
+  fuel headroom of the largest allowed operation, and the mid-operation
+  save-state resume.
 - `tests/zz9k.rs` (ignored; needs the bundled AROS only) boots the
   in-repo guest probe `guest/zz9kprobe` -- the SDK's real transport code
   compiled for m68k -- against the board.
@@ -286,7 +290,7 @@ elapsed at save time arrives on schedule after load).
   `test-assets/zz9k/`) runs the unmodified SDK tools.
 - **AmiSSL end-to-end (verified manually, 2026-08-18):** the SDK's AmiSSL
   provider self-test (`amiga/provider/zz9k_amissl_selftest.c`, built per
-  `docs/zz9k-amissl-provider.md` against the AmiSSL SDK) reports
+  the SDK's `docs/zz9k-amissl-provider.md` against the AmiSSL SDK) reports
   `ALL PASS` with every offloadable operation `via 'zz9000'` against this
   board, on a 68030 + Kickstart 3.1 machine with the official AmiSSL 5.27
   OS3 runtime -- both with the stock `amissl_v362.library` (application-

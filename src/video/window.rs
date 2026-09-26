@@ -3444,12 +3444,7 @@ impl App {
             AudioFilterMode::Off => AudioFilterMode::Auto,
         };
         self.emu.bus_mut().paula.set_led_filter_mode(next);
-        let label = match next {
-            AudioFilterMode::Auto => "Auto",
-            AudioFilterMode::On => "Enabled",
-            AudioFilterMode::Off => "Disabled",
-        };
-        self.show_osd(format!("Audio filter: {label}"));
+        self.show_osd(format!("Audio filter: {}", next.menu_label()));
         self.request_redraw();
     }
 

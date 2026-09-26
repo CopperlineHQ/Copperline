@@ -10,4 +10,4 @@ Sets the last horizontal colour-clock position of a programmable line.
 - Bits 8-0: Horizontal position in colour clocks.
 - Bits 15-9: Ignored.
 
-BEAMCON0 selects whether programmable timing is used.
+With BEAMCON0.VARBEAMEN set, each line is HTOTAL + 1 colour clocks long.

@@ -1,12 +1,14 @@
 # Physical floppy drives (FluxBridge)
 
-Copperline can interface directly with real 3.5" floppy drives connected to the
-host via a [Greaseweazle](https://github.com/keirf/greaseweazle) USB controller.
-Hardware communication is handled by the [FluxBridge](https://github.com/CopperlineHQ/FluxBridge)
-library.
+Copperline can use a real 3.5" floppy drive connected to the host through a
+[Greaseweazle](https://github.com/keirf/greaseweazle) USB controller in place
+of a disk image. The pure-Rust
+[FluxBridge](https://github.com/CopperlineHQ/FluxBridge) library, compiled
+into Copperline, talks to the hardware.
 
-When using a physical drive, the bridge streams MFM data to Paula and disk DMA,
-allowing `trackdisk.device` and custom loaders to operate as they would on hardware.
+The bridge supplies the MFM data passing under the real drive's head, and the
+emulated machine is otherwise unchanged: Paula's disk DMA,
+`trackdisk.device`, and custom loaders work as they would on hardware.
 
 ## Requirements
 
@@ -15,23 +17,24 @@ allowing `trackdisk.device` and custom loaders to operate as they would on hardw
 - Standard double-density (DD) or high-density (HD) floppy disks.
 
 FluxBridge is compiled into Copperline by default. To build without physical
-drive support:
+drive support, leave out the `fluxbridge` feature (see
+[Cargo features](getting-started.md#cargo-features)):
 
 ```sh
 cargo build --release --no-default-features \
-  --features "midi,frontend,wasm-boards,control,ctl-bin,import-uae-bin,net-nat,net-bridge,mt32,coppersynth,cpu-jit,profile-stats,game-library,mhi,cd-mp3,cd32-fmv,gdb,dap"
+  --features "midi,frontend,wasm-boards,control,ctl-bin,import-uae-bin,net-nat,net-bridge,mt32,coppersynth,cpu-jit,profile-stats,game-library,mhi,cd-mp3,cd32-fmv,gdb,dap,netplay-internet,host-serial"
 ```
 
 ## Configuration
 
-In the launcher, navigate to the **Floppy** tab and enable the **Physical drive**
-checkbox for the desired bay (`DF0:` through `DF3:`), then select **Configure**.
+In the launcher, open the **Floppy** tab and tick the **Physical drive** box
+for the desired bay (`DF0:` through `DF3:`), then press **Configure**.
 
 In `copperline.toml`:
 
 ```toml
 [floppy.df0]
-bridge = "greaseweazle"      # "greaseweazle" or "off"
+bridge = "greaseweazle"      # "greaseweazle" (or "gw") or "off"
 write_protected = true       # emulator-level write protection (default: true)
 # bridge_port = "/dev/ttyACM0"   # serial port path (omit for auto-detection)
 # bridge_cable = "a"             # "a"/"b" (PC cable) or "0".."3" (Shugart)
@@ -48,7 +51,7 @@ copperline --model A500 --floppy-bridge df0 greaseweazle kickstart.rom
 
 | Command-line flag | Configuration key | Description |
 |---|---|---|
-| `--floppy-bridge DFN NAME` | `bridge` | Enable bridge device (`greaseweazle` or `off`) |
+| `--floppy-bridge DFN NAME` | `bridge` | Interface driving the bay (`greaseweazle` or `off`) |
 | `--floppy-bridge-port DFN PORT` | `bridge_port` | Serial device path (default: auto-detect) |
 | `--floppy-bridge-cable DFN SEL` | `bridge_cable` | Cable drive select (`a`, `b`, `0`..`3`) |
 | `--floppy-bridge-mode DFN MODE` | `bridge_mode` | Read mode (`normal`, `compatible`, `stalling`) |
@@ -58,8 +61,8 @@ copperline --model A500 --floppy-bridge df0 greaseweazle kickstart.rom
 
 ### Serial port detection
 
-By default, Copperline automatically scans for connected Greaseweazle devices.
-If multiple serial devices are attached, set `bridge_port` explicitly (e.g.,
+By default, Copperline finds a connected Greaseweazle by itself. If more than
+one interface is plugged in, set `bridge_port` explicitly (for example
 `/dev/ttyACM0` on Linux or `COM3` on Windows).
 
 ### Cable conventions and drive select
@@ -68,65 +71,74 @@ If multiple serial devices are attached, set `bridge_port` explicitly (e.g.,
 - `a` or `b` for standard IBM PC twisted floppy cables (drive A or B).
 - `0` through `3` for straight Shugart cables.
 
-Ensure this matches your physical cabling and drive jumper configuration.
-Disk change detection is supported on PC cables; on Shugart configurations,
-disk swaps are detected during subsequent read operations.
+Make sure this matches your cabling and the drive's jumpers. Disk changes are
+detected directly on PC cables; on Shugart cabling, a swapped disk is noticed
+on the next read.
 
 ### Density detection
 
-`bridge_density` defaults to `auto`, detecting bit timings directly from flux
-transitions. You can explicitly force `dd` or `hd` if reading non-standard disks
-(such as high-density media formatted as double-density).
+`bridge_density` defaults to `auto`, which senses the density from the disk.
+Force `dd` or `hd` for non-standard disks, such as high-density media
+formatted as double-density.
 
 ### Read modes
 
-- **`normal` (Default):** Captures begin immediately when the drive head settles
-  without waiting for an index pulse. Data is decoded and supplied to the guest
-  pipelined in real time. Track revolutions that start off-index are reconstructed
-  and verified against AmigaDOS track checksums. Verified tracks are cached in memory.
-- **`compatible`:** Captures strictly from index pulse to index pulse. This mode
-  incurs a slight delay waiting for the index hole, but preserves non-standard
-  and copy-protected track structures exactly as recorded on the physical disk.
-- **`stalling`:** Index-aligned capture that stalls guest CPU execution until track
-  reading completes. This is intended only for timing-sensitive custom loaders
-  that fail under normal read latency.
+- **`normal` (default):** Capture starts as soon as the head settles, without
+  waiting for the index pulse. A revolution captured off-index is joined where
+  the recording repeats, and FluxBridge checks the join and the AmigaDOS track
+  checksums before the track is kept in memory; an unverified capture is used
+  for one pass only and then read again. (`fast`, the upstream name for this
+  mode, is also accepted.)
+- **`compatible`:** Captures from one index pulse to the next. Waiting for the
+  index costs a little time, but non-standard and copy-protected tracks are
+  reproduced exactly as recorded.
+- **`stalling`:** Index-aligned like `compatible`, but the emulated machine
+  waits until the track has been read. Use it only for timing-sensitive custom
+  loaders that fail with the normal read latency.
+
+`bridge_mode = "turbo"` is refused: that mode answers AmigaDOS calls instead of
+reading the disk.
 
 ### Replay speed
 
-Once a track is verified and cached in memory, `replay_speed` controls how fast
-subsequent reads of that track are served:
+Once a track is verified and kept in memory, `replay_speed` controls how fast
+later reads of that track are served:
 
-- `fast` (Default): Cached tracks are replayed at double speed. The initial read
-  always occurs at the physical platter rate.
-- `normal`: Cached tracks are replayed at standard 1x rotational speed.
+- `fast` (default): Kept tracks are replayed at double speed. The first read
+  always happens at the platter's own rate.
+- `normal`: Kept tracks are replayed at the normal rotational speed.
 
 ## Write protection and disk writes
 
-To write to a physical disk, two requirements must be met:
+Writing to a physical disk needs both of these:
 
-1. The physical write-protect tab on the 3.5" disk must be set to writable.
-2. `write_protected = false` (or `--floppy-bridge-writable`) must be specified in the configuration.
+1. The disk's own write-protect tab must be set to writable.
+2. The configuration must set `write_protected = false` (or pass
+   `--floppy-bridge-writable`).
 
-Writes are verified and committed directly to the physical medium. Full-track
-revolution writes can start at any rotational position. However, partial track
-writes that do not begin at the index pulse are refused because the hardware interface
-cannot accurately position an offset partial write.
+Writes go straight to the physical disk as it turns, without the emulated
+machine waiting for them. A write of a full revolution can start at any
+rotational position, but a partial-track write that does not begin at the
+index pulse is refused, because the interface cannot place it accurately.
 
 ## Operational differences from disk images
 
-- **Physical disk swapping:** Insert and eject disks directly using the physical drive.
-  The status bar displays drive status and write-protection state.
-- **Drive sound effects:** Virtual floppy drive sound synthesis is disabled for bridged
-  drives since the physical drive produces acoustic feedback.
-- **Emulation pacing:** Sessions using physical drives run at 1x wall-clock speed
-  to maintain synchronization with the mechanical drive spindle.
-- **Save states:** Save states cannot capture the state of physical magnetic media.
+- **Physical disk swapping:** Insert and eject disks in the drive itself.
+  The status bar shows the drive's status and write-protection state.
+- **Drive sound effects:** Copperline's floppy drive sounds are off for bridged
+  drives, since the real drive makes its own noise.
+- **Emulation pacing:** A machine with a physical drive always runs at real
+  speed, including headless capture runs, and refuses warp, because the real
+  platter cannot be hurried.
+- **Determinism:** Save states cannot capture the physical medium, and input
+  recordings do not replay identically against a real drive.
 
 ## Troubleshooting
 
-- **Device permissions (Linux):** Ensure your host user account belongs to the `dialout`
-  (or `uucp` / `plugdev`) group so it has permission to access `/dev/ttyACM*`.
-- **Greaseweazle firmware:** Ensure your Greaseweazle board is running firmware 0.27
-  or newer using the official `gw` utility.
-- **Detailed diagnostic logging:** Set the environment variable `COPPERLINE_DIAG_FLUXBRIDGE=1`
-  to view detailed head stepping, track decoding metrics, and seek timings in the terminal.
+- **Device permissions (Linux):** Your user account must belong to the `dialout`
+  (or `uucp` / `plugdev`) group to open `/dev/ttyACM*`.
+- **Greaseweazle firmware:** Copperline refuses firmware older than 0.27; update
+  it with the official `gw` utility.
+- **Detailed diagnostic logging:** Set `COPPERLINE_DIAG_FLUXBRIDGE=1` in the
+  environment to log head stepping, track capture and decoding, and seek
+  timings.

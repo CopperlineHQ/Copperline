@@ -1783,6 +1783,16 @@ impl AudioFilterMode {
             AudioFilterMode::Off => "off",
         }
     }
+
+    /// How the pop-up menu names the mode, and so every on-screen message
+    /// that reports it.
+    pub fn menu_label(self) -> &'static str {
+        match self {
+            AudioFilterMode::Auto => "Auto",
+            AudioFilterMode::On => "On",
+            AudioFilterMode::Off => "Off",
+        }
+    }
 }
 
 pub(crate) fn parse_audio_filter_mode(s: &str) -> Result<AudioFilterMode> {

@@ -11,6 +11,15 @@ also describe Copperline's implementation limits, including registers that
 are only latched or have no effect. They are a programming reference for
 the emulator, not a complete specification of external chip signals.
 
+`(ECS/AGA)` and `(AGA)` mark fields that exist only on those chipsets.
+`(not emulated)` marks fields and registers that have no effect in
+Copperline; some of them are still stored for the debugger.
+
+`build.rs` compiles the pages into the emulator, so each one keeps the same
+layout: the `# NAME`, `Offset:`, `Access:` and `Chipset:` lines, a
+one-paragraph summary (the text the debugger shows), and a `## Bitfields`
+section. Pages must stay ASCII and sort by offset.
+
 | Offset | Register | Access | Chipset |
 |---:|---|---|---|
 | $000 | [BLTDDAT](000-BLTDDAT.md) | read | OCS/ECS/AGA |
@@ -243,10 +252,10 @@ the emulator, not a complete specification of external chip signals.
 | $1E0 | [VSSTRT](1E0-VSSTRT.md) | write | ECS/AGA |
 | $1E2 | [HCENTER](1E2-HCENTER.md) | write | ECS/AGA |
 | $1E4 | [DIWHIGH](1E4-DIWHIGH.md) | write | ECS/AGA |
-| $1E6 | [BPLHMOD](1E6-BPLHMOD.md) | write | AGA |
-| $1E8 | [SPRHPTH](1E8-SPRHPTH.md) | write | AGA |
-| $1EA | [SPRHPTL](1EA-SPRHPTL.md) | write | AGA |
-| $1EC | [BPLHPTH](1EC-BPLHPTH.md) | write | AGA |
-| $1EE | [BPLHPTL](1EE-BPLHPTL.md) | write | AGA |
+| $1E6 | [BPLHMOD](1E6-BPLHMOD.md) | write | ECS/AGA |
+| $1E8 | [SPRHPTH](1E8-SPRHPTH.md) | write | ECS/AGA |
+| $1EA | [SPRHPTL](1EA-SPRHPTL.md) | write | ECS/AGA |
+| $1EC | [BPLHPTH](1EC-BPLHPTH.md) | write | ECS/AGA |
+| $1EE | [BPLHPTL](1EE-BPLHPTL.md) | write | ECS/AGA |
 | $1FC | [FMODE](1FC-FMODE.md) | write | AGA |
 | $1FE | [NO-OP](1FE-NO-OP.md) | write | ECS/AGA |

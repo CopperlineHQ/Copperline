@@ -3,8 +3,13 @@
 This chapter describes the source layout, frame loop, and host boundary.
 Related chapters cover the
 [timing model](timing.md), the [chipset modules](chipset.md), the
-[video pipeline](video.md), the [CPU integration](cpu.md), the
-[peripherals](peripherals.md), and the [save-state format](savestate.md).
+[video pipeline](video.md), the [audio path](audio.md), the
+[CPU integration](cpu.md), the [peripherals](peripherals.md),
+[netplay](netplay.md), and the [save-state format](savestate.md).
+[](../zorro.md) covers the Zorro bus and board plugins, and several
+expansion boards have chapters of their own: [Toccata](toccata.md),
+[MHI](mhi.md), [copperhf](copperhf.md), [zz9k](zz9k.md),
+[Picasso II](picasso2.md), and [Graffity](graffity.md).
 
 ## Source layout
 
@@ -12,19 +17,39 @@ Related chapters cover the
 src/
   main.rs           # native binary: config load, boot, execution-mode selection
   cli.rs            # binary-local command-line parser
-  bin/bench.rs      # copperline-bench headless benchmark (native + wasm32-wasip1)
+  bin/              # auxiliary binaries, each behind its own cargo feature:
+                    #   bench.rs: copperline-bench headless benchmark (native + wasm32-wasip1)
+                    #   copperline-ctl.rs: control-protocol client, MCP server, DAP adapter
+                    #   copperline-import-uae.rs + import_uae/: UAE config importer
+                    #   copperline-net-helper.rs: Linux bridge-networking helper
   lib.rs            # library entry point shared by native and browser frontends
   config/           # TOML config + validation + machine profiles
                     #   (mod.rs, raw.rs, validate.rs, resolve.rs, about.rs, tests.rs)
+  paths.rs          # host data directories (platform config dir, portable mode)
+  pathconf.rs       # [paths]: output locations and file-dialog start folders
   envcfg.rs         # cached COPPERLINE_* environment-variable snapshot
   emulator.rs       # frame loop driving CPU, chipset, and host I/O
+  warpboot.rs       # warp boot: run unpaced until a condition holds, then pace
+  runprog.rs        # --run: boot straight into a host executable
+  whdload.rs        # --whdload direct boot (package.rs, lha.rs: game packages)
+  gamelib/          # WHDLoad game library and OpenRetro database sync
   debugger.rs       # env-driven headless debugger
   waveform.rs       # trigger-based VCD chipset-signal capture (GTKWave)
   disasm.rs         # 68000 + Copper-list disassemblers
   gdbstub/          # GDB remote-protocol stub (transport-free core, headless and windowed drivers)
   control/          # control protocol (JSON-RPC over TCP), its MCP server and DAP adapter (control/dap/)
   debuginfo/        # guest program debug information: hunk symbols, LINE hunks, DWARF, unwinding
+  profile.rs        # profile.start capture and export (profile/: samples, lcov, reports)
+  coverage.rs       # guest code-coverage histogram and coverage.bin sidecar
+  heatmap.rs        # memory heat map
+  regcheck.rs       # custom-register access validator
+  smc.rs            # self-modifying-code detector
+  blitviz.rs        # Frame Analyzer blitter visualisation helpers
+  cdtrace.rs        # timestamped CD drive command trace
+  customregs.rs     # custom-register reference table compiled from docs/reference
   amigaos.rs        # read-only exec.library structure walking for the debugger
+                    #   (amigaos/: DOS ABI mirror, text dumps, ROM symbols)
+  uaelib.rs         # WinUAE-compatible uaelib trap at $F0FF60
   cpu.rs            # m68k core wrapper and CPU-visible bus adapter
   cache.rs          # 68020/030/040 on-chip instruction/data cache model
   bus.rs            # shared RAM, ROM, chipset, CIA, RTC, and I/O state
@@ -36,47 +61,81 @@ src/
     frame_capture.rs#   per-frame sprite/bitplane DMA + render capture
     wave.rs         #   waveform-capture signal sampling hooks
   memory.rs         # chip/slow RAM, ROM, extended ROM containers
-  romsearch.rs      # locate the bundled AROS default boot ROM
+  romsearch.rs      # locate the bundled AROS boot ROM and open CD32 FMV ROM
+  romdb.rs          # Kickstart ROM identification by checksum
+  romtags.rs        # cull ROM resident tags before Kickstart initializes them
   zorro.rs          # Zorro II/III autoconfig chain and boards
   zorro_device.rs   # the functional-Zorro-board boundary (ZorroDevice trait)
   wasmboard.rs      # WASM plugin boards under wasmtime (wasm-boards feature)
   wasm_manifest.rs  # plugin manifest types shared with wasmtime-less builds
   floppy/           # timed disk DMA controller + disk image decoding
-                    #   (mod.rs controller/drive core, formats.rs images, tests.rs)
+                    #   (mod.rs controller/drive core, formats.rs images,
+                    #    transfer.rs netplay disk transfer, tests.rs)
+  ipf.rs            # IPF preservation images (native decoder)
   dms.rs            # DMS archive decompression
   gzip.rs           # gzip member loop behind ADZ/HDZ (multi-member, padding-tolerant)
+  diskimage.rs      # blank ADF/HDF creation
+  fluxbridge/       # real floppy drives through the FluxBridge library
   drive_sounds.rs   # synthesized floppy-drive sound effects
   gary.rs           # Gary motherboard address decode (big-box machines)
   ramsey.rs         # Ramsey memory controller registers (A3000/A4000)
   gayle.rs          # A600/A1200 Gayle gate array + IDE
+  pcmcia.rs         # the card in the A600/A1200 PCMCIA slot
   ata.rs            # shared ATA task-file/drive model behind Gayle and A4000 IDE
   ide_a4000.rs      # A4000 motherboard IDE at $DD2020
+  ide_zorro.rs      # lide.device-compatible Zorro II IDE boards
   a2091.rs          # A2091 SCSI controller board (DMAC + boot ROM)
   a4091.rs          # A4091 Zorro III SCSI-2 controller (NCR 53C710)
-  scsi.rs           # WD33C93A SBIC + SCSI-2 disk targets
+  scsi.rs           # WD33C93A SBIC + SCSI-2 disk targets (scsi/cd.rs: CD-ROM target)
   copperhf.rs       # virtual hardfile controller with ordered worker-thread I/O
   sdmac.rs          # A3000 Super DMAC fronting the WD33C93
-  harddrive.rs      # shared hard-drive image backend (IDE + SCSI)
+  sf2000sd.rs       # SF2000 accelerator SD card controller (sdcard.rs: the card)
+  harddrive.rs      # shared hard-drive image backend (IDE + SCSI; harddrive/: CHD, sessions)
+  blockdev/         # physical host disks standing in for hard-drive images
   dirfs.rs          # host directory -> in-memory FFS/OFS partition image
   filesys.rs        # host directories mounted live as AmigaDOS volumes
+  clipboard.rs      # host clipboard unit of the services board
+  hostsocket.rs     # bundled HostSocket board (bsdsocket.library backed by the host)
+  zz9k.rs           # bundled ZZ9000 SDK crypto board
   a2065.rs          # A2065 Zorro II Ethernet board (Am7990 LANCE)
   net/              # loopback, userspace NAT, and host-adapter bridge backends
-  cdrom.rs          # CD images: cue sheets (BINARY/WAVE/MP3), ISO, NRG, CHD
+  picasso2.rs       # Picasso II/II+ RTG boards (picasso2/: CL-GD5426/5428 core)
+  graffity.rs       # Graffity RTG boards (Zorro II and III)
+  z3660.rs          # Z3660 RTG board
+  toccata.rs        # Toccata sound board (toccata/: AD1848 codec)
+  mhi.rs            # MHI MPEG audio decoder board
+  cartridge.rs      # freezer cartridge (HRTMon), entered by NMI
+  cdrom.rs          # CD images: cue sheets (BINARY/WAVE/MP3), ISO, NRG, CHD (cdrom/)
   cdtv.rs           # CDTV DMAC + Matshita drive model
   akiko.rs          # CD32 Akiko (C2P, NVRAM, Chinon drive)
   cd32_fmv.rs       # CD32 FMV cartridge (CL450 video + L64111 MPEG audio)
   rtc.rs            # MSM6242 and RP5C01 battery RTCs
-  serial.rs         # Paula serial sinks (stdout, TCP, pty)
+  serial.rs         # Paula serial sinks (stdout, TCP, pty; serial/device.rs: host port)
+  modem/            # Hayes-compatible modem on the serial port
   midi/             # host MIDI serial bridge (CoreMIDI / ALSA / WinMM)
-  audio/            # AudioSink outputs, source/stem mux, and resampler
+  mt32/             # in-process MT-32 (mt32-rs) as a MIDI output
+  csynth/           # Coppersynth General MIDI synthesizer as a MIDI output
+  parallel.rs       # Centronics parallel-port peripheral boundary
+  sampler.rs        # parallel-port audio sampler
+  audio/            # AudioSink outputs, source/stem mux, resamplers, MPEG frame parsing
   priority.rs       # opt-in realtime-like thread scheduling (pacer + audio)
   gamepad.rs        # gilrs input: database layout + calibration override
+  keymap.rs         # host-keyboard to game-port controller mapping
+  pointer.rs        # absolute pointer positioning by mouse-motion servo
+  typing.rs         # host text to Amiga keystrokes (--type-after)
   screenshot.rs     # PNG export helpers
+  expect.rs         # --expect-screenshot comparisons
+  gifclip.rs        # animated GIF clip export
   recorder.rs       # video+audio capture (ZMBV/PCM AVI writer)
   inputrec.rs       # live-input recording to the scripted-input format
   inputsched.rs     # deterministic input replay for reverse debugging
-  savestate.rs      # whole-machine snapshot/restore (versioned file format)
+  savestate.rs      # whole-machine snapshot/restore (savestate/: chunked file format)
+  uss.rs            # WinUAE ASF/USS state import
   timetravel.rs     # reverse-debugging snapshot ring + replay
+  netplay/          # GGPO-style netplay for two to four players
+  verdict.rs        # the process exit status of a session
+  crashlog.rs       # persistent crash reports from the panic hook
+  winconsole.rs     # closes the console a desktop launch brings (Windows)
   timestamp.rs      # compact wall-clock stamps for generated filenames
   timebase.rs       # host clock imports shared with the browser build
   chipset/
@@ -84,7 +143,7 @@ src/
     copper.rs       # Copper decode + cycle-stepped execution
     ddf_sequencer.rs#   Agnus DDF comparator/flop model (bitplane fetch gating)
     blitter.rs      # scheduled per-DMA-slot blitter engine
-    paula.rs        # interrupts, audio DMA, serial, disk regs
+    paula.rs        # interrupts, audio DMA and mixer, serial, disk regs
     denise.rs       # palette + bitplane/sprite control registers
     cia.rs          # 8520 CIA model (CIA-A and CIA-B)
     keyboard.rs     # bit-timed 6500/1 keyboard MCU into CIA-A
@@ -95,28 +154,40 @@ src/
                     #   (sprite.rs, fetch.rs, output.rs, diag.rs, tests.rs)
     deinterlace.rs  # motion-adaptive deinterlacer
     present_common.rs # frontend-independent post-processing + TV apertures
-    window.rs       # winit ApplicationHandler + render worker + main/tool pixels surfaces + status bar
-    window/         # size-split App impl blocks + window submodules + its test suite
-                    #   (app_input.rs, app_menus.rs, app_debugger.rs, app_launcher.rs,
-                    #    app_session.rs, app_display.rs, app_panels.rs, app_media.rs,
-                    #    statusbar.rs, present.rs, host_input.rs, console.rs, tests.rs)
-    ui.rs           # pop-up menu, overlay panels, and debugger/analyzer panel drawing
-      configuration/ # configuration rows, library rendering and dialogs
+    window.rs       # winit ApplicationHandler, render and present workers, window surface
+    window/         # size-split App impl blocks + window submodules + its test suite:
+                    #   app_*.rs (input, menus, session, display, panels, media,
+                    #   launcher, debugger, nav, netplay, states), present.rs,
+                    #   presenter.rs and scaler.rs (presentation), crt_shader.rs,
+                    #   bezel.rs, stickers.rs, rtg_texture.rs (GPU passes),
+                    #   egui_debugger.rs + egui_debugger/ (debugger workspace),
+                    #   console.rs, control.rs + gdb.rs (windowed CCP/GDB drains),
+                    #   statusbar.rs, host_input.rs, kbdpanel.rs, mt32panel.rs,
+                    #   csynthpanel.rs, native_dialog.rs, tests.rs
+    ui.rs           # pop-up menu, status-bar widgets, and overlay panels
+    ui/             # configuration screen rows/library/dialogs, Load State browser
+    menu.rs         # the pop-up menu's shape and actions
+    nav.rs          # pointer-free (keyboard/controller) navigation
+    about.rs        # the About panel
+    resource_preview.rs # previews of guest-registered debug resources
     launcher.rs     # machine-configuration (launcher) editable model
     launcher/       # field metadata, value edits and config conversion
     font.rs         # 8x8 overlay font
-crates/copperline-web/   # standalone wasm-bindgen browser frontend (WebEmu + page glue)
+crates/copperline-web/      # standalone wasm-bindgen browser frontend (WebEmu + page glue)
 crates/copperline-libretro/ # standalone libretro C ABI frontend
-crates/cputest-runner/   # WinUAE cputest instruction-suite runner for the m68k core
+crates/copperline-player/   # standalone single-game player (player kit, see guide/publishing.md)
+crates/cputest-runner/      # WinUAE cputest instruction-suite runner for the m68k core
+crates/hostsocket-plugin/   # the bundled HostSocket board's WASM module
+crates/zz9k-plugin/         # the bundled zz9k board's WASM module
 tests/              # self-contained integration tests and ignored local-asset tests
-timing-test/        # bootable cross-emulator timing-measurement disk
+timing-test/        # bootable cross-emulator timing-measurement disk + golden probes
 ```
 
 ## The big picture
 
 Copperline's emulated machine runs synchronously on the main thread inside
 winit's event loop. There is no emulation thread and no locking between CPU
-and chipset: each turn of the loop (`Emulator::step_real`,
+and chipset: each turn of the loop (`Emulator::step_frame`,
 `src/emulator.rs`) advances the deterministic core a frame's worth of
 emulated time, cycle-stepping the CPU and the chipset together. By default,
 the completed-frame renderer runs one frame behind on a worker thread; set
@@ -124,18 +195,18 @@ the completed-frame renderer runs one frame behind on a worker thread; set
 comparison. A second worker presents the composed frame to the GPU
 surface (`COPPERLINE_THREADED_PRESENT=0` presents from the main thread),
 so neither the texture upload nor the vsync wait sits in the emulation
-loop's turn; with no UI over the picture, the scaler pass samples the
+loop's turn. With no UI over the picture, the scaler pass samples the
 presentation buffer directly rather than a CPU copy of it.
 
 The winit window is only the default frontend. With the default `frontend`
 cargo feature disabled, the crate builds as the portable headless core plus
 the frontend-independent presentation helpers (`video/present_common.rs`),
-with no desktop dependencies; that is the surface the browser (WebAssembly)
-frontend in `crates/copperline-web` wraps
-([](../guide/browser.md)), and `cargo check --no-default-features` is the
-CI-enforced portability invariant. Native default builds also enable the
-`profile-stats` feature for detailed MMIO-poll and render-phase diagnostics.
-The browser dependency deliberately leaves it disabled: browser status still
+with no desktop dependencies. The browser (WebAssembly) frontend in
+`crates/copperline-web` wraps that surface ([](../guide/browser.md)), and
+CI runs `cargo check --no-default-features` to keep it portable. Native
+default builds also enable the `profile-stats` feature for detailed
+MMIO-poll and render-phase diagnostics. The browser dependency
+deliberately leaves it disabled: browser status still
 measures coarse core and render cost at the wrapper boundary, but the
 instruction and renderer hot paths do not maintain native-only counters or
 sample host clocks.
@@ -159,11 +230,12 @@ so rollback neither accesses a live directory mount nor persists guest writes.
 The flow of a frame:
 
 1. The frame loop hands the CPU an instruction budget. The CPU executes
-   one instruction at a time through the published `m68k` core; every memory
-   access the instruction makes is routed through the bus adapter and
-   *billed in colour clocks* (CCK, 3.546895 MHz -- the chip bus clock).
-   The precise CPU loop selects its diagnostic-capable or branch-free normal
-   form once per slice. Arming a debugger, trace, watchpoint, waveform PC
+   one instruction at a time through the published `m68k` core (or, with
+   the experimental `[cpu] jit`, in fixed multi-instruction batches; see
+   [](cpu.md)). Every memory access the instruction makes is routed through
+   the bus adapter and *billed in colour clocks* (CCK, 3.546895 MHz -- the
+   chip bus clock). The precise CPU loop selects its diagnostic-capable or
+   branch-free normal form once per slice. Arming a debugger, trace, watchpoint, waveform PC
    trigger or diagnostic recorder selects the former; normal and browser
    runs therefore do not retest every inactive hook after every instruction.
    An instruction-granular control stop retains the unfinished budget and its
@@ -172,9 +244,12 @@ The flow of a frame:
    emulated interrupt race by repartitioning the execution loop.
 2. Advancing the clock for a CPU access also advances everything else:
    Agnus beam counters, Copper fetches, blitter slots, Paula audio and disk
-   DMA, CIA timers. The chip bus is arbitrated per colour clock, so a CPU
-   chip-RAM access that loses arbitration genuinely waits
-   ([](timing)).
+   DMA, CIA timers. (Devices the CPU can only observe through their
+   registers are ticked in batches, flushed before any access that could
+   observe them; see
+   [deferred timed-device ticks](timing.md#deferred-timed-device-ticks).)
+   The chip bus is arbitrated per colour clock, so a CPU chip-RAM access
+   that loses arbitration genuinely waits ([](timing)).
 3. When the CPU sits in `STOP`, the loop fast-forwards device time to the
    next event (timer underflow, raised interrupt) instead of spinning.
 4. Render-relevant register writes (by Copper or CPU) are recorded as
@@ -187,8 +262,13 @@ The flow of a frame:
 5. In the default path `window.rs` sends `RenderInput` to the
    `copperline-render` worker while the main thread advances the next frame.
    The worker paints into a CPU framebuffer, owns the deinterlacer history,
-   and returns a presentation buffer tagged with the emulated frame. GPU
-   upload and winit/window operations stay on the main thread.
+   and returns a presentation buffer tagged with the emulated frame. The
+   main thread composes the window image (picture, status bar, panels,
+   overlays) and hands it to the `copperline-present` worker, which uploads
+   it, runs the GPU passes and presents. The main thread reclaims the GPU
+   side for surface changes and for frames only it can draw (the RTG
+   texture, the egui debugger), and winit window operations stay on it
+   ([](video.md)).
 6. For screenshots, frame dumps, video recording, debugger stepping, and
    run-to-PC commands, the window code waits for the worker result for the
    exact emulated frame being captured or inspected. For normal interactive
@@ -202,17 +282,20 @@ draw callback, it calls winit's `pre_present_notify` before pixels submits
 and presents the buffer. Native Wayland uses that notification to request
 a compositor frame callback for subsequent redraws. A surface acquisition
 that times out or reports occlusion does not arm a callback, because no
-buffer will be committed. This schedules host redraws independently of the
-emulated clock. `COPPERLINE_PRESENT_PROFILE=1` enables per-attempt CPU
-timings for acquisition/upload, draw-command recording, and submission;
-these do not measure GPU completion or display scanout.
+buffer will be committed. On macOS the present worker skips the call: the
+hint is a no-op there, and every winit window method would wait on the
+main thread. This schedules host redraws independently of the emulated
+clock. `COPPERLINE_PRESENT_PROFILE=1` enables per-attempt CPU timings for
+acquisition/upload, draw-command recording, and submission; these do not
+measure GPU completion or display scanout.
 
 The main presentation path uses the **main thread** (event loop, core,
-and pacer), the **`copperline-render` worker**, and the **cpal audio
-callback**. Rendering passes owned buffers and immutable shared snapshots;
-audio passes samples through a lock-free ring buffer. Enabled devices and
-services can create additional workers, including copperhf file I/O and
-debugger socket handling. The pacer and the audio callback are
+and pacer), the **`copperline-render`** and **`copperline-present`**
+workers, and the **cpal audio callback**. Rendering and presentation pass
+owned buffers and immutable shared snapshots; audio passes samples through
+a lock-free ring buffer. Enabled devices and services can create
+additional workers, including copperhf file I/O and debugger socket
+handling. The pacer and the audio callback are
 latency-critical and can optionally be given above-normal scheduling priority
 (`[emulation] realtime_priority`, `src/priority.rs`); see
 [](timing) for what that does per platform.
@@ -236,8 +319,10 @@ The CPU-visible memory map:
 | `$C00000` | Slow ("ranger") RAM, up to 512K |
 | `$DA0000` / `$DE1000` | Gayle IDE task file / Gayle ID and status (A600/A1200) |
 | `$DC0000` | Battery RTC (MSM6242 or RP5C01, according to configuration) |
+| `$DD0000` / `$DD2020` | A3000 Super DMAC / A4000 motherboard IDE |
+| `$DE0000` | Fat Gary and Ramsey registers (A3000/A4000) |
 | `$DFF000` | Custom-chip register window |
-| `$E80000` | Zorro autoconfig window (then CDTV DMAC first on CDTV) |
+| `$E80000` | Zorro autoconfig window (on a CDTV the DMAC is first in the chain) |
 | `$E00000` / `$F00000` | Extended ROM (CD32 / CDTV) |
 | `$F80000` | Kickstart ROM (512 KiB) |
 | `$40000000`+ | Zorro III space (32-bit CPUs) |
@@ -257,15 +342,19 @@ space and dies on a yellow screen. Machines with a Gayle or Fat
 Gary/Ramsey decode the space properly and have no mirror.
 
 A CPU read of an address no region claims floats to the last value the
-chip data bus carried (`Bus.data_bus`, fed by the live display and audio
-DMA fetches), as on real Agnus-arbitrated hardware -- not a fixed all-ones
-pattern; on a blank screen that value is 0. The constant matters: software
-that chases a pointer off into unmapped space (e.g. a filesystem walking a
-corrupted buffer-cache chain) can loop forever on a fixed value, where the
-ever-changing floating value lets the chase wander to a zero terminator as
-on silicon. Device windows that decode their own floating bus keep their
-own values -- e.g. the A2091 board's unpopulated XT-interface bytes read
-`$FF` from its own model, not the chip data bus.
+chip data bus carried (`Bus.data_bus`), as on real Agnus-arbitrated
+hardware -- not a fixed all-ones pattern. DMA fetches drive that bus, and
+so do a 68000's or 68010's own fetches and writes, because those CPUs share
+the 16-bit chip data bus with Agnus (`note_cpu_data_bus` in `src/cpu.rs`);
+an unmapped read straight after an instruction fetch therefore floats to
+the instruction stream. The 68020 and later run on their own local bus and
+do not echo their transfers into it. The difference from a constant
+matters: software that chases a pointer off into unmapped space (e.g. a
+filesystem walking a corrupted buffer-cache chain) can loop forever on a
+fixed value, where the ever-changing floating value lets the chase wander
+to a zero terminator as on silicon. Device windows that decode their own
+floating bus keep their own values -- e.g. the A2091 board's unpopulated
+XT-interface bytes read `$FF` from its own model, not the chip data bus.
 
 Write-only and unmapped custom-register offsets float the same way: the
 chips decode the address but drive no data, so `move.w $DFF106,d0` returns
@@ -273,13 +362,13 @@ the bus residue rather than the register's internal latch (which the
 debugger still inspects separately). Each driven word cycle recharges the
 bus, so a longword read pairing a readable register with a write-only one
 floats the second word to the first -- `move.l $DFF01E,d0` reads INTREQR
-in both halves. Reading a write-only register back
-and OR-ing the result into a fresh write therefore picks up garbage bits
-exactly as on real hardware -- a floating BPLCON3 LOCT bit, for example,
-misroutes AGA palette writes into the low nibbles and darkens the whole
-palette. The one deliberate exception is DENISEID (`$07C`) on OCS Denise,
-held at `$FFFF` so ECS-detection code (low byte `$FC`) cannot false-match
-a residue; see the TODO in `read_custom_word`.
+in both halves. Software that reads a write-only register back and ORs the
+result into a fresh write therefore picks up garbage bits exactly as on
+real hardware: a floating BPLCON3 LOCT bit, for example, misroutes AGA
+palette writes into the low nibbles and darkens the whole palette. The one
+deliberate exception is DENISEID (`$07C`) on OCS Denise, held at `$FFFF`
+so ECS-detection code (low byte `$FC`) cannot false-match a residue; see
+the TODO in `read_custom_word`.
 
 ## Direct executable boot support
 
@@ -287,15 +376,18 @@ a residue; see the TODO in `read_custom_word`.
 `RunProg:`. The generated Startup-Sequence runs through the guest's normal
 CLI and LoadSeg path, which also supplies the debugger's hunk relocation
 and entry stop. It includes the relocatable 68000 commands built from
-`guest/run-tools/`: `FailAt`, `CD`, `Stack`, `Echo`, and `Execute`. Their checked-in
-executables are embedded in Copperline and written into the boot volume's
-`C` directory, so installations need no external command archive or compiler.
+`guest/run-tools/`: `FailAt`, `CD`, `Stack`, `Echo`, `Execute`, and
+`Done`. Their checked-in executables are embedded in Copperline and
+written into the boot volume's `C` directory, so installations need no
+external command archive or compiler.
 
 The commands use Exec/DOS 1.x calls and public Process/CLI fields. They change
 the CLI failure threshold and default command stack, acquire the working
-directory lock, and write the completion marker through ordinary DOS I/O.
+directory lock, and write the completion marker through ordinary DOS I/O:
+`Done` records the program's return code in `RunBoot:done`, which
+`--exit-on-return` reads back as the process exit status.
 CLI, DAP, and staging share stack-size validation matching the guest helper,
-so an unsupported size cannot be silently ignored by the startup script.
+so the startup script cannot silently ignore an unsupported size.
 No ROM identification, host-side state patch, or emulator trap is involved;
 newer shells resolve their internal commands normally. The optional detached
 path uses the ROM's `Run`/`EndCLI` commands and requires Kickstart 2.0+ or
@@ -332,10 +424,11 @@ snapshot:
   headless run never depends on it: a headless run with the bridge fitted
   (`--clipboard`, so a windowed recording replays on the same machine)
   executes the same timeline as one with no host traffic. The bridge is
-  fitted only where it was configured, off by default in every session,
-  because it is a unit of the services board and an autoconfig board the
-  guest did not ask for moves every Exec allocation behind it -- a machine
-  the configuration does not describe (`Config::resolve_clipboard_share`).
+  off by default and fitted only when the configuration asks for it (never
+  under netplay; `Config::resolve_clipboard_share`). It is a unit of the
+  services board, and an autoconfig board the guest did not ask for moves
+  every Exec allocation behind it, which makes a different machine from
+  the one the configuration describes.
 
 Use fixed image files and scripted inputs for deterministic regression
 tests. See [save-state boundaries](savestate.md#determinism-boundaries) for
@@ -349,11 +442,12 @@ at the first frame boundary at-or-after each event's emulated timestamp.
 The input recorder (window shortcut / `--record-input`) produces those
 scripts from a live session by combining two capture styles: direct
 hooks where event identity matters (the keyboard choke point
-`handle_amiga_key_event`, floppy inserts) and a once-per-quantum diff of
-the live `InputState` for each port's configured device: mouse buttons and
-motion, joystick/CD32 controls, or analogue positions. Wrapped quadrature
-counter deltas become `mouse-after` directives. Port-device changes themselves
-are not recorded, so replay must use the same port configuration. Two details keep record-then-replay
+`handle_amiga_key_event`, floppy inserts, freezer-cartridge button presses)
+and a once-per-quantum diff of the live `InputState` for each port's
+configured device: mouse buttons and motion, joystick/CD32 controls, or
+analogue positions. Wrapped quadrature counter deltas become `mouse-after`
+directives. Port-device changes themselves are not recorded, so replay must
+use the same port configuration. Two details keep record-then-replay
 byte-identical: recorded timestamps are the emulated times the events
 were *applied* (frame boundaries, not the wall-clock moment the host
 delivered them), and times/holds are floored -- never rounded -- to
@@ -361,7 +455,7 @@ milliseconds, because rounding a boundary time up would push the
 replayed event one frame late. The end-to-end gate is the same as for
 save states: record a scripted run, replay the recording, `cmp` the
 screenshots. User-facing usage is in
-[Input recording and scripts](../guide/headless.md#input-recording-and-script-files).
+[Input scripts and recording](../guide/headless.md#input-recording-and-script-files).
 
 ## Guest debug information
 
@@ -397,6 +491,11 @@ Three consequences for contributors:
   even `envcfg::flag`/`envcfg::var` are too expensive: each call hashes the
   variable name to probe the snapshot map. Cache the value once through a
   `OnceLock` helper next to the call site -- see `dbg_cia_on()` and
-  `no_disk_stall()` in `src/bus.rs` or `clamp_planes_setting()` in
+  `diag_blt_slots()` in `src/bus.rs` or `clamp_planes_setting()` in
   `src/video/bitplane.rs` for the pattern. (A per-pixel `envcfg::var` call
   in the playfield decoder once cost ~20% of total host CPU.)
+
+The standalone player (`crates/copperline-player`) calls `envcfg::seal()`
+before anything reads the environment. The snapshot then omits every
+`COPPERLINE_*` variable, so a shipped game exposes no diagnostic or
+debugging knobs.

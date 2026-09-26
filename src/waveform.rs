@@ -266,7 +266,7 @@ impl WaveOptions {
 /// contains `=` (or is `now`), a duration starts with a digit, a signal
 /// list is made of known group names, and anything else is the output
 /// path (at most one). An omitted path gets a timestamped default in
-/// the working directory.
+/// the `[paths]` traces directory.
 pub fn parse_wave_args<'a, I>(tokens: I) -> Result<WaveOptions, String>
 where
     I: IntoIterator<Item = &'a str>,

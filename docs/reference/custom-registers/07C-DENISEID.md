@@ -9,4 +9,4 @@ Identifies ECS Denise or AGA Lisa.
 
 - ECS Denise reads $FFFC.
 - AGA Lisa reads $00F8.
-- OCS has no register here; Copperline returns $FFFF as a detection workaround instead of the floating-bus residue.
+- OCS Denise has no register here. Copperline returns $FFFF rather than the undriven bus value, so detection code reliably identifies OCS.

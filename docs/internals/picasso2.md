@@ -40,10 +40,15 @@ selecting the VGA output.
 ## Timing and determinism
 
 The selected VCLK numerator, denominator, and post-divider produce the pixel
-clock from the Cirrus controller's 14.318184 MHz reference. CRTC totals derive a frame
-period in Amiga colour clocks. `$3DA` vertical-retrace and display-enable status
-therefore advance only through device `tick` calls; no host or wall clock enters
-the model.
+clock from the Cirrus controller's 14.318184 MHz reference, and the CRTC totals
+turn that into a frame period in Amiga colour clocks. `$3DA` vertical-retrace
+and display-enable status therefore advance only through device `tick` calls;
+no host or wall clock enters the model.
+
+The board presents its own frame instead of the chipset picture only while the
+monitor switch selects the VGA output and the programmed mode is a valid
+packed-pixel display: sequencer running, screen enabled, 16 to 4096 pixels in
+each direction, and the whole frame inside VRAM (`Picasso2::rtg_active`).
 
 On the II+, crossing the programmed vertical-retrace start latches an interrupt
 when VGA CRTC `$11` enables it. Register-window offset `$1001` gates the latch

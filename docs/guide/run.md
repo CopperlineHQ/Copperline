@@ -1,8 +1,8 @@
 # Direct executable launching (`--run`)
 
-The `--run` flag allows you to boot Copperline directly into an Amiga executable
-located on your host filesystem without preparing a disk image or Workbench installation.
-This is particularly useful when developing with an Amiga cross-compiler toolchain:
+The `--run` flag boots Copperline straight into an Amiga executable on the
+host filesystem, with no disk image or Workbench installation to prepare. This
+suits development with an Amiga cross-compiler toolchain:
 
 ```sh
 copperline --run build/hello
@@ -11,38 +11,42 @@ copperline --run build/hello --run-stack 32768 --run-detach
 ```
 
 To turn an already linked hunk executable into a standard 880 KiB floppy, use
-`copperline-ctl exe2adf PROG --boot [--out PROG.adf]`. It writes the executable
-and `S/Startup-Sequence` through the same OFS directory-tree writer used by
-Copperline's virtual filesystems; `--boot` installs the AmigaDOS boot block.
-Omit `--boot` for a mountable data disk. The executable's filename must be 1-30
-Latin-1 characters and cannot contain `:` or `/`; the generated script uses the
-same single-byte name stored in the disk directory.
+`copperline-ctl exe2adf PROG --boot [--out FILE]` (by default the output is
+`PROG` with its extension changed to `.adf`). It writes the executable and an
+`S/Startup-Sequence` that runs it, using the same OFS directory-tree writer as
+Copperline's virtual filesystems; `--boot` installs the AmigaDOS boot
+block. Omit `--boot` for a mountable data disk. The executable's filename must
+be 1-30 Latin-1 characters and cannot contain `:` or `/`; the generated script
+uses the same single-byte name stored in the disk directory.
 
 ## How it works
 
-When `--run` is used, Copperline mounts two virtual filesystem volumes using the
-host filesystem interface:
+When `--run` is used, Copperline mounts two host directories as live AmigaDOS
+volumes:
 
-1. **`RunBoot:`** (Boot priority 6) -- A dynamically generated boot volume containing
-   an `S/Startup-Sequence` that sets the current directory, launches the specified
-   executable, and records a completion marker holding the program's AmigaDOS
-   return code when it exits. This volume
-   is created in a per-process temporary staging directory. Bundled `C:FailAt`,
-   `C:CD`, `C:Stack`, `C:Echo`, and `C:Done` executables supply the commands
-   missing from a bare Kickstart 1.3 ROM (`Done` writes the return code the CLI
-   keeps in `cli_ReturnCode`); `C:Execute` supplies the detached script handoff
-   on later ROMs. No Workbench command files are needed.
-2. **`RunProg:`** (Read/Write) -- The host directory containing the target executable.
-   The guest loads the binary directly from this volume, and any output files written
-   by the program are saved to the same host directory.
+1. **`RunBoot:`** (boot priority 6) -- A generated boot volume containing an
+   `S/Startup-Sequence` that sets the current directory, launches the
+   executable, and writes a completion marker holding the program's AmigaDOS
+   return code when it exits. Copperline stages it in `run/boot-<pid>/` under
+   the Copperline host data folder and regenerates it on every launch.
+   Bundled `C:FailAt`, `C:CD`, `C:Stack`, `C:Echo`, and `C:Done` executables
+   supply the commands missing from a bare Kickstart 1.3 ROM (`Done` writes
+   the return code the CLI keeps in `cli_ReturnCode`); `C:Execute` supplies
+   the detached script handoff on later ROMs. No Workbench command files are
+   needed.
+2. **`RunProg:`** (read/write) -- The host directory containing the executable.
+   The guest loads the binary directly from this volume, and any files the
+   program writes land in the same host directory.
 
-Other machine settings are configured normally via configuration files or CLI flags.
-`--run-stack BYTES` accepts 2048 through 2147483644 bytes and emits an
+`--run-args STRING` appends arguments to the program's command line.
+`--run-stack BYTES` accepts 2048 through 2147483644 bytes and issues an
 AmigaDOS `Stack` command before the executable; invalid sizes are rejected
-before booting.
-`--run-detach` launches it through `Run >NIL: <NIL:` and closes the boot CLI
-(Kickstart 2.0+ or AROS).
-By default, the bundled AROS Kickstart replacement is used on the standard machine profile:
+before booting. `--run-detach` launches the program through
+`Run >NIL: <NIL:` and closes the boot CLI (Kickstart 2.0+ or AROS).
+
+Unlike [WHDLoad](whdload.md), `--run` derives nothing: the machine is whatever
+the configuration and CLI flags describe, which by default is an A500 with the
+bundled AROS Kickstart replacement. Choose another machine as usual:
 
 ```sh
 copperline --model A1200 --fast 8M KICK31.ROM --run build/demo
@@ -51,22 +55,26 @@ copperline --model A1200 --fast 8M KICK31.ROM --run build/demo
 (exit-on-return)=
 ## Guest exit status (`--exit-on-return`)
 
-With `--exit-on-return`, the session ends the moment the program's return
-code lands in the completion marker, and Copperline's own exit status is that
-code (clamped to 0-255). Windowed sessions close their window; headless runs
-need no capture flag to bound them:
+With `--exit-on-return` (which requires `--run`), the session ends the
+moment the program's return code lands in the completion marker, and
+Copperline's own exit status is that code (clamped to 0-255). Like
+`--coverage`, the flag on its own makes a headless run: no window,
+unthrottled, and no capture flag needed to end it. Only with
+`--control-gui` or `--gdb-gui` does the session stay windowed, and the
+window then closes when the program returns. `--gdb` and `--control`, which
+own the run loop themselves, refuse the flag.
 
 ```sh
 copperline --run build/tests --exit-on-return --noaudio; echo $?
 ```
 
-If the run ends for another reason first (the last `--screenshot-after`
-fired, the window was closed) before the program returned, the status is 4.
-A program that never returns therefore needs a bounding flag such as
+If the run ends for another reason before the program returns (the last
+`--screenshot-after` fired, or the window was closed), the status is 4. A
+program that never returns therefore needs a bounding flag such as
 `--screenshot-after 60 /tmp/end.png` to turn into a 4 rather than an
 endless run. The generated script sets `FailAt 2147483647` so no return code
-aborts it before the marker is written; a non-zero code takes precedence
-over a failed `--expect-screenshot` (status 3), a zero one does not hide it.
+aborts it before the marker is written. A non-zero code takes precedence
+over a failed `--expect-screenshot` (status 3); a zero one does not hide it.
 The full status table is in [Headless](headless.md#exit-statuses).
 `guest/run-tools/retcode` returns the number given as its argument, for
 checking the plumbing end to end.
@@ -76,18 +84,19 @@ checking the plumbing end to end.
 In interactive windowed sessions, `--run` automatically enables warp mode during boot.
 (For configurations booting from media rather than `--run`, warp boot is also available via
 `--warp-boot` / `--warp-until`; see [Configuration](configuration.md).)
-The emulator runs unthrottled with audio muted until the guest OS loads the executable
-(tracked at the `LoadSeg` call before executing the first instruction). Once loaded,
-emulation and audio immediately return to normal real-time playback.
+The emulator runs unthrottled with audio muted until the guest OS loads the
+executable (detected at its `LoadSeg`, before its first instruction runs).
+Emulation and audio then return to real time.
 
 Additional operational notes:
 
-- **Early termination:** If the program completes execution quickly, the completion
-  marker the `Startup-Sequence` writes disables warp mode.
-- **Boot timeouts:** If the program fails to load within 60 emulated seconds (for example,
-  due to a crash during OS initialization), warp mode disengages so the system state can
-  be inspected.
-- **File naming:** Target filenames must use printable ASCII characters without quotes (`"`),
+- **Early termination:** A program that runs to completion before the
+  per-frame check sees it load still ends warp mode, through the completion
+  marker the `Startup-Sequence` writes.
+- **Boot timeouts:** If the program has not loaded within 60 emulated seconds (for
+  example, because the OS crashed during initialization), warp mode disengages so the
+  system state can be inspected.
+- **File naming:** Executable names must use printable ASCII characters without quotes (`"`),
   colons (`:`), or slashes (`/`). Spaces in executable names are supported and quoted automatically.
 - **Manual override:** Pressing the warp toggle shortcut (`Cmd+W` / `Alt+W`) cancels
   the automatic warp phase and every programmatic warp hold at once, returning
@@ -100,10 +109,10 @@ Additional operational notes:
   audio while engaged; `warp.set {"on": false}`, `monitor warp off`, or
   `warpmode(0)` release only that holder, real time returns when the last hold
   goes, and the shortcut returns to real time regardless.
-- **Physical floppy drives:** If a physical floppy drive (FluxBridge) is attached, warp
-  mode is disabled to match the physical drive rate.
+- **Physical floppy drives:** With a [physical floppy drive](fluxbridge.md)
+  attached, the machine stays paced to the real drive, so there is no warp.
 - **Headless mode:** Headless capture runs (`--screenshot-after`, `--dump-frames`) run
-  unthrottled by default and work with `--run`.
+  unthrottled anyway and work with `--run`.
 
 ## Debugging
 
@@ -140,7 +149,7 @@ WinUAE's boot ROM provides guest programs with a lightweight service interface,
 the "uaelib" trap at `$F0FF60`. Cross-compiler toolchains and templates (such
 as `vscode-amiga-debug`) use this trap for helpers like `warpmode()`, `KPrintF()`,
 and `debug_register_*()`. Copperline implements the same ABI at the same address,
-allowing code written for that template to work unmodified.
+so code written for that template works unmodified.
 
 Guest code checks the instruction word at `$F0FF60` (`0x4EB9` for a `JSR`, or
 WinUAE's A-line `0xA00E`) and invokes the address as a C function, passing the

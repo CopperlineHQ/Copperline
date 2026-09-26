@@ -7,8 +7,10 @@ nibble-encoded config ROMs in the `$E80000` window, base-address
 assignment, shut-up, chain advance, and power-on reset. Boards are
 described by data (`BoardSpec`) rather than a trait; the built-in fast and
 Z3 RAM options and user `[[zorro]]` metadata boards all build the same
-specs. The user-facing guide, including the metadata file format and the
-autoconfig walk-through, is [](../zorro).
+specs, and functional boards add a `ZorroDevice` behind theirs. The
+user-facing guide, including the list of built-in boards, the metadata file
+format, the WASM plugin ABI, and the autoconfig walk-through, is
+[](../zorro).
 
 ## Fat Gary and Ramsey (`gary.rs`, `ramsey.rs`)
 
@@ -59,14 +61,15 @@ Zorro III space begins, gated only on a 32-bit CPU
 ## Gayle IDE (`gayle.rs`)
 
 A600/A1200 machines get the Gayle gate array: the ID register at
-`$DE1000`, the IDE task file at `$DA0000` (byte registers on the odd word
-half, 4-byte stride), and the IDE interrupt and status bits. Drives are
-raw flat HDF images with an RDB inside, opened read/write; PIO transfers
-complete synchronously within the access. One hardware subtlety worth
-knowing: Gayle byte-swaps the IDE bus, so IDENTIFY data words are
-low-byte-first while sector data passes through untouched -- Kickstart
-3.1 expects exactly this. The absent-slave behaviour follows the
-WinUAE-verified model so device scans terminate correctly.
+`$DE1000`, the IDE interface at `$DA0000` (the task file at `$DA2000` with
+a 4-byte stride, byte registers on the odd word half), and the IDE
+interrupt and status bits. The drives, task file, and command engine are
+the shared ATA core in `ata.rs`, over the shared drive backend described
+below; PIO transfers complete synchronously within the access. Gayle
+byte-swaps the IDE bus, so IDENTIFY data words are low-byte-first while
+sector data passes through untouched -- Kickstart 3.1 expects exactly
+this. The absent-slave behaviour follows the WinUAE-verified model so
+device scans terminate correctly.
 
 ### Gayle PCMCIA slot (`gayle.rs`, `pcmcia.rs`)
 
@@ -155,15 +158,16 @@ when a memory card is pulled, and why `pcmcia.eject` on that machine
 resets it. A CF card hot-inserted afterwards has its four latched changes
 (CCDET/BVD1/BVD2/WR) acknowledged by the ROM's INT6 handler within a
 second, and an empty socket reading all-zero pins boots cleanly. Register
-semantics and CIS layouts were cross-checked against WinUAE's model; tests
-in `gayle.rs` (status/change/enable/config bits,
-INT2/INT6 routing, DIS, RESET/BERR, shadowing), `pcmcia.rs` (window
-decode, CIS, SRAM size encoding, backing file), and `bus/tests.rs` (CF
-task-file mapping per configuration, IREQ# to INT2, reset register,
-eject to INT6, SRAM window, shadowing).
+semantics and CIS layouts were cross-checked against WinUAE's model. The
+tests cover the register file in `gayle.rs` (status/change/enable/config
+bits, INT2/INT6 routing, DIS, RESET/BERR, shadowing), the card in
+`pcmcia.rs` (window decode, CIS, SRAM size encoding, backing file), and
+the machine in `bus/tests.rs` (CF task-file mapping per configuration,
+IREQ# to INT2, reset register, eject to INT6, SRAM window, shadowing).
 
-Either drive slot may instead be an ATAPI CD-ROM (a `.cue`/`.iso`/`.nrg`/`.chd`
-image): `ata.rs`'s task-file engine drives the PACKET (0xA0) command,
+Either IDE drive slot may instead be an ATAPI CD-ROM (a
+`.cue`/`.iso`/`.nrg`/`.chd` image): `ata.rs`'s task-file engine drives the
+PACKET (0xA0) command,
 handing 12-byte CDBs to the same bus-agnostic SCSI-2 CD-ROM command engine
 (`scsi/cd.rs`'s `ScsiCdRom`) the `[scsi]` host adapters use, so the read
 family, TOC/sub-channel queries, mode pages, and CD-DA playback all behave
@@ -184,20 +188,21 @@ same PACKET protocol.
 ## SCSI controllers (`a2091.rs`, `a4091.rs`, `sdmac.rs`, `scsi.rs`)
 
 The `[scsi]` option attaches one of three host adapters, selected by its
-`controller` key: the Zorro II A2091 (the default), the Zorro III A4091,
-or the A3000's motherboard Super DMAC. All three drive the same SCSI-2
+`controller` key: the Zorro II A2091 (`"a2091"`, the default), the Zorro
+III A4091 (`"a4091"`), or the A3000's motherboard Super DMAC (`"a3000"`,
+the default on a machine that has one). All three drive the same SCSI-2
 target layer in `scsi.rs`.
 
 ### A2091 (`a2091.rs`)
 
 The A2091 is a Zorro II device board pairing the Commodore DMAC (rev 02
-modeled) with a WD33C93A SBIC, plus the board's autoboot ROM whose
-`scsi.device` drives them. The autoconfig
-identity comes from the DMAC -- Commodore West Chester (514), product 3,
-`ERTF_DIAGVALID` with `er_InitDiagVec` pointing at `$2000` -- while the
-ROM supplies the DiagArea and the driver. Copperline defaults to its bundled
-clean-room open ROM; `rom`/`rom_odd` override it with merged or split EPROM
-dumps (interleaved U13-first).
+modelled) with a WD33C93A SBIC, plus the board's autoboot ROM whose
+`scsi.device` drives them. The autoconfig identity comes from the DMAC --
+Commodore West Chester (514), product 3, `ERTF_DIAGVALID` with
+`er_InitDiagVec` pointing at `$2000` -- while the ROM supplies the
+DiagArea and the driver. Copperline defaults to its bundled clean-room
+open ROM (`a2091-rom/`); `rom`/`rom_odd` override it with merged or split
+EPROM dumps (interleaved U13-first).
 
 Board window layout: ISTR `$40`, CNTR `$42`, WTC `$80/$82`, ACR
 `$84/$86` (low bit forced even), DAWR `$8E`, the WD33C93 SASR/auxiliary
@@ -231,11 +236,11 @@ short emulated delay, and INT2 is the level `CNTR_INTEN && ISTR &
 (INTS|E_INT)` fed to Paula's PORTS latch each tick. DMAC bus-master
 cycles are not yet arbitrated against the CPU (TODO in `a2091.rs`).
 
-The bundled driver executes inquiry, sense, and mode commands using
+The bundled ROM's driver runs inquiry, sense, and mode commands with
 asynchronous PIO. Sector transfers use the DMAC when the buffer address and
-length are even-aligned and reside entirely below 16 MiB; unaligned or
-high-memory transfers are bounced through Chip RAM. Transfers program the ACR,
-start the DMAC, and complete via a shared `INTB_PORTS` interrupt handler that
+length are even and the whole buffer lies below 16 MiB; other transfers are
+bounced through a chip RAM buffer. A DMA transfer programs the ACR, starts
+the DMAC, and completes through a shared `INTB_PORTS` interrupt server that
 queues command-complete and disconnect status pairs.
 
 ### A4091 (`a4091.rs`)
@@ -251,7 +256,9 @@ relies on the `+$40` shadow as a cache write-allocate workaround), and
 enables). A DSP write starts the 53C710's SCRIPTS processor, whose phase
 engine executes the driver's SCRIPTS programs against the disk targets.
 The autoconfig identity is Commodore product 84 with `er_InitDiagVec`
-`$0200`.
+`$0200`. With no `rom` named, Copperline serves the open-source A4091
+project's `a4091_cdfs.rom` release (`assets/a4091/`), which carries
+`a4091.device` and a CD filesystem.
 
 ### A3000 Super DMAC (`sdmac.rs`)
 
@@ -268,7 +275,8 @@ no boot ROM to configure.
 
 ### Shared drive backend
 
-All IDE, SCSI, and copperhf drives share the `harddrive.rs` sector backend:
+All IDE (Gayle, A4000, lide, PCMCIA CompactFlash), SCSI, copperhf, and
+SF2000 SD drives share the `harddrive.rs` sector backend:
 raw HDF images, bare partition hardfiles wrapped in a synthesized RDB
 (bootable `DHn` named after the unit), gzip-compressed hardfiles (`.hdz`,
 sniffed by gzip magic and unpacked by `gzip.rs` into memory at open time
@@ -280,10 +288,12 @@ the one every Kickstart from 1.2 onward can read with no guest-side
 setup -- FFS needs a handler loaded from disk or an RDB `FileSystemHeader`
 chain, neither of which Copperline bundles). The volume label defaults to
 the directory name, or a `name` override configured on the drive. The
-SCSI-2 target layer in
-`scsi.rs` answers INQUIRY, MODE SENSE pages 3/4, READ CAPACITY,
-READ/WRITE(6)/(10), REQUEST SENSE, and the no-op housekeeping commands,
-with sense state kept per target.
+SCSI-2 disk target in `scsi.rs` answers INQUIRY, REQUEST SENSE, MODE
+SENSE(6)/(10) (pages 3 and 4, or all), MODE SELECT, READ CAPACITY(10)/(16),
+READ/WRITE(6)/(10)/(12)/(16), VERIFY, SYNCHRONIZE CACHE, READ DEFECT DATA,
+and the no-op housekeeping commands (TEST UNIT READY, SEEK, START STOP,
+RESERVE/RELEASE, FORMAT UNIT, and the like), with sense state kept per
+target.
 
 `HardDriveImage::write_protected` says whether the backing refuses writes
 (a CHD with no overlay, a read-only netplay session copy, a host disk
@@ -293,6 +303,35 @@ the WP bit in the MODE SENSE header), copperhf as `TDERR_WriteProt` with
 `CHF_UNIT_RDONLY`/`TD_PROTSTATUS` set, and the ATA core as an aborted
 command (ATA has no write-protect status). The filesystem turns those into
 its own write-protect error instead of a disk fault.
+
+The drive controllers latch read/write activity, which the bus drains to
+light the status-bar HDD LED; the LED holds for a short minimum period so
+brief accesses stay visible. Gayle (including a CompactFlash card in the
+PCMCIA slot), the A4000 IDE, the A2091, the SDMAC, the lide-compatible
+board, copperhf, and the SF2000 SD controller report activity, and the
+services board and the A2065 blink the same LED for host-filesystem
+packets and network traffic. The A4091 shows the LED but does not latch
+activity into it yet.
+
+#### Host block devices (`blockdev/`)
+
+`[[host_disk]]` (`--host-disk`, `--host-disk-read-only`) puts a whole
+physical disk behind a drive slot in place of an image: an IDE or lide
+channel, a SCSI unit, or the PCMCIA slot as a CompactFlash card (see
+[](../guide/host-disks)). `blockdev/` enumerates the host's disks without
+opening them and classifies the disk the host runs from as a system disk,
+which is never offered for attachment (`--list-disks` names it but marks it
+unusable) and never opened. The platform backend (`linux.rs`,
+`macos.rs`, `windows.rs`) obtains the raw-media privilege through the
+system's own prompt and translates between the guest's 512-byte sectors
+and the medium's native block size. Nothing synthesizes an RDB over a
+physical disk: it must carry its own.
+
+The medium's contents are not machine state. A save state records the
+device name, its hardware fingerprint, and whether it was writable; a load
+decodes the whole state first and only then reopens the disk
+(`HardDriveImage::materialize_host_disk`), matching it by fingerprint so a
+renamed device is still found and a missing or ambiguous one is refused.
 
 #### CHD hard-disk images (`harddrive/chd.rs`)
 
@@ -362,12 +401,6 @@ intact rather than a half-written disk. A resumed run sees the disk as it
 was when the state was taken -- unlike an HDF, whose file contents are deliberately not
 part of the state (`docs/internals/savestate.md`).
 
-The drive controllers latch read/write activity, which the bus drains to
-light the status-bar HDD LED; the LED holds for a short minimum period so
-brief accesses stay visible. Gayle, the A4000 IDE, the A2091, the SDMAC,
-and the lide-compatible board (below) report activity today; the A4091
-shows the LED but does not latch activity into it yet.
-
 ## lide.device-compatible Zorro II IDE (`ide_zorro.rs`)
 
 `[lide]` attaches a Zorro II IDE board compatible with LIV2's
@@ -378,10 +411,10 @@ RIPPLE's ROM image and register layout), and **AT-Bus 2008** (mfg
 `0x082C`/product 6, one channel, the register model shared by that board's
 whole clone family). All three reuse the front-end-agnostic ATA core in
 `ata.rs` (the same one Gayle and the A4000 IDE port use) and the shared
-drive backend above; the new work is entirely in the board's own address
-decode, since none of the three personalities resemble Gayle's 4-byte task
-file. Drive slots may be ATA hard disks or, since `ata.rs` gained ATAPI
-PACKET support, `.cue`/`.iso`/`.nrg` (or CD-holding `.chd`) CD-ROM images.
+drive backend above; what is specific to the board is its address decode,
+since none of the three personalities resembles Gayle's 4-byte task file.
+Drive slots may be ATA hard disks, ATAPI CD-ROM images (`.cue`/`.iso`/`.nrg`
+or a CD-holding `.chd`), or host disks attached with `[[host_disk]]`.
 
 **Register decode.** Each ATA channel occupies a 4K block of the board
 window, with register index `(offset >> 9) & 7` -- ATA A0-A2 are wired to
@@ -396,12 +429,11 @@ block at `$2000` (so `$2C00` is the alternate-status register the driver's
 channel-autodetect polls against `$1E00`). A channel with **no drives
 attached at all** floats every register, not only status: `AtaBus::read_reg`
 only special-cases status/alt-status for "no drive selected", so the
-front-end checks `AtaBus::any_drive_attached` itself -- without it, an
-empty channel's device/head register reads a hard zero, which real
-`lide.device` reads as "a device answered" and polls forever waiting for
-it to respond. (Found and fixed by booting a downloaded `lide.rom` under
-RIPPLE with only channel 0 populated -- see `ide_zorro.rs`'s tests and
-module docs.)
+front-end checks `AtaBus::any_drive_attached` itself. Otherwise an empty
+channel's device/head register reads a hard zero, which real `lide.device`
+takes as "a device answered", and it then polls forever waiting for that
+device (reproduced by booting a real `lide.rom` under RIPPLE with only
+channel 0 populated; see `ide_zorro.rs`'s tests and module docs).
 
 **ROM window and banking.** The flash is byte-wide, so a 32K bank fills 64K
 of window at even addresses (stride 2; the odd lane on AT-Bus 2008, whose
@@ -439,14 +471,13 @@ RDB image.
 
 AT-Bus 2008's ROM and register blocks share address space by byte lane
 (ROM odd, registers even, per above), including inside the control block
-at `$2000`: the board's read dispatch used to match the control block
-first regardless of lane, so odd-lane reads there -- exactly where the
-boot ROM's chainloader fetches its relocatable driver payload -- floated
-as an unpopulated register instead of reaching ROM. `lide.device` never
-loaded and the machine never got past the "insert disk" screen; RIPPLE and
-RIDE were unaffected, since their ROM sits on the even lane, clear of any
-register. Fixed by checking the ROM lane ahead of the register-block
-dispatch in `IdeZorro::read()` (see `ide_zorro.rs`'s tests).
+at `$2000`, which is where the boot ROM's chainloader fetches its
+relocatable driver payload from the odd lane. `IdeZorro::read()` therefore
+checks the ROM lane before dispatching to a register block: matching the
+control block first would float those reads as an unpopulated register,
+and `lide.device` would never load (the machine stops at the "insert
+disk" screen). RIPPLE and RIDE cannot hit this, since their ROM sits on the
+even lane, clear of any register (see `ide_zorro.rs`'s tests).
 
 ## SF2000 accelerator Zorro II SD card controller (`sf2000sd.rs`, `sdcard.rs`)
 
@@ -565,8 +596,8 @@ boots the machine from a hostfs volume on 1.3 exactly as it does on
 2.0+. V34's own boot-time handler startup carries BCPL process
 parameters rather than a V36 `ACTION_STARTUP` (`dp_Arg3` is NULL; the
 handler locates its unit through `dp_Arg2`'s `FileSysStartupMsg`
-instead). The handler forwards
-every DosPacket to the host through a doorbell register in the board's
+instead). The handler forwards every DosPacket to the host through a
+doorbell register in the board's
 MMIO window: writing the packet APTR to `REG_DOSPKT` services the packet
 synchronously inside the register write, so `dp_Res1`/`dp_Res2` and the
 result registers are filled before the next guest instruction runs. All
@@ -606,8 +637,8 @@ Latin-1, hiding names with no Latin-1 spelling; host symlinks are
 followed (the guest cannot create one, so a symlink is the host user
 deliberately grafting a tree into the mount), while path escapes that a
 guest could construct on its own (`..`, embedded separators) are
-blocked. A `readonly`
-mount refuses writes with the standard write-protection error.
+blocked. A `readonly` mount refuses writes with the standard
+write-protection error.
 
 ### Clipboard service (`clipboard.rs`)
 
@@ -668,53 +699,60 @@ called by guest utilities and cross-compiler templates (`uae-configuration`,
 provides a compatible ABI at `$F0FF60` (see
 [Direct launching](../guide/run.md#uaelib-trap)).
 
-- **Bus-level implementation**: Rather than hooking CPU opcodes directly,
-  Copperline decodes a 32-byte ROM region in the memory map (`cpu.rs`): `JSR` to
-  an internal handler, `MOVE.L A7,(doorbell)`, `MOVE.L (result),D0`, `RTS`,
-  `RTS`. The entry word is `0x4EB9`. Arguments are read from the guest stack at
-  `A7 + 8 + 4n` through the CPU address mask; D0 and CCR are the only modified
-  registers.
+- **Bus-level implementation**: Rather than hooking CPU opcodes, Copperline
+  decodes a 32-byte ROM-like region in the memory map (`cpu.rs`) holding
+  ordinary 68k code: a `JSR` to an internal entry followed by `RTS`, and at
+  that entry `MOVE.L A7,(doorbell)`, `MOVE.L (result),D0`, `RTS`. The first
+  word, `0x4EB9`, is what the vscode-amiga-debug template checks for.
+  Arguments are read from the guest stack at `A7 + 8 + 4n` through the CPU
+  address mask; D0 and CCR are the only modified registers.
 - **Doorbell synchronization**: Longword writes to the doorbell register trigger
   synchronous processing on completion (`completes_long_reg`), latching the
   result for the subsequent read. The region is cache-inhibited.
 - **Memory hierarchy**: `classify_plain_memory` decodes RAM and ROM with higher
-  priority, so CDTV extended ROM at `$F00000` naturally covers this region.
+  priority, so a CDTV extended ROM at `$F00000` covers this region.
 - **Function dispatch**: Function 13 (WinUAE `ExitEmu`, `uae_quit()`) latches
   an exit request the frontend takes at the next frame boundary and ends the
   session on (exit status 0, or 3 after a failed screenshot expectation; see
   `verdict.rs`); function 82 parses `"key value"` pairs and handles
   `warp`; function 86 prints log strings to stdout and queues `event.debug`
   events; function 88 manages the resource registry, idle time accounting, and
-  the 768x576 debug overlay. Unhandled functions return 0. The exit latch is
-  host-side and, like the warp latch, is not carried by a save state.
+  the 768x576 debug overlay, plus file load/save when
+  `[emulation] uaelib_files = true` (confined to the `--run` program's
+  directory). Unhandled functions return 0. The exit latch is host-side and,
+  like the warp latch, is not carried by a save state.
 - **State serialization**: Trap state, resource registries, and overlay lists
-  are serialized as part of `Bus` state (save-state version 76).
+  travel in the `UAEL` save-state chunk.
 
 ## Freezer cartridge (`cartridge.rs`)
 
 The freezer cartridge models an Action Replay-style system monitor mapped in
-memory and triggered via level-7 NMI (see
+memory and entered through a level-7 NMI (see
 [Configuration](../guide/configuration.md#freezer-cartridge)).
-The bundled implementation uses HRTMon 2.39 assembled for the UAE cartridge
-target (`assets/hrtmon/hrtmon.rom`).
+The bundled implementation is HRTMon 2.39 assembled for the UAE cartridge
+target (`hrtmon-rom/`, installed as `assets/hrtmon/hrtmon.rom`).
 
-- **Memory mapping**: Maps a 1 MiB bank at `$A10000` containing monitor code,
-  stack, and workspace RAM. The bank is present at all times and preserved in
-  save states.
-- **Configuration header**: The header block at `+20`..`+72` configures monitor
-  runtime settings (`mon_size`, screen colors, hardware detection flags).
-  These are populated on reset from active emulator hardware.
-- **Register shadows**: Because custom chipset registers are write-only, the bus
-  maintains a 512-byte shadow of custom registers and CIA registers
-  (`write_custom_word_from`, `custom_read`). On freeze, shadows are copied into
-  the cartridge bank (`$A9F000` for custom registers, `$A9E000`/`$A9D000` for
-  CIAs) allowing the monitor to inspect and restore state.
-- **Entry mechanism**: `Cartridge::freeze` updates register shadows, writes the
-  level-7 autovector (VBR + `$7C`) pointing to monitor entry, and raises an NMI.
-  The 68000 enters the monitor on the next instruction boundary, and the
-  interrupt acknowledge consumes the request.
-- **State serialization**: Cartridge memory, register shadows, and interrupt
-  state are serialized in `Bus` state (save-state version 75).
+- **Memory mapping**: A 1 MiB bank at `$A10000` holds the monitor code,
+  stack, and workspace RAM. The bank is present at all times, not only after
+  a freeze.
+- **Configuration header**: The block at `+20`..`+72` of the image tells the
+  monitor about the machine (`mon_size`, screen colours, chipset, video
+  standard, IDE interface, chip RAM size). The host fills it from the
+  emulated hardware when the cartridge is fitted and again at every reset.
+- **Register shadows**: Because the custom chipset registers are write-only,
+  the bus shadows every custom-register write (CPU and Copper) in a 512-byte
+  image, plus the last byte written to each CIA register
+  (`write_custom_word_from`, `custom_read`). On a freeze the shadows are
+  copied into the cartridge bank (`$A9F000` for the custom registers,
+  `$A9E000`/`$A9D000` for the CIAs) so the monitor can show and later
+  restore them.
+- **Entry mechanism**: `Cartridge::freeze` updates the register shadows,
+  points the level-7 autovector (VBR + `$7C`) at the monitor entry, and
+  raises an NMI. The CPU takes it at the next instruction boundary whatever
+  the SR mask says, and the interrupt acknowledge consumes the request.
+- **State serialization**: Cartridge memory, register shadows, and the
+  pending interrupt travel in the `CART` save-state chunk, so run-ahead and
+  rewind restore them with the guest.
 
 ## A2065 Ethernet (`a2065.rs`, `net/`)
 
@@ -776,31 +814,34 @@ stages each LVO through a Forbid-bracketed register-window RPC, with a
 wake-queue interrupt path for blocking calls -- the same host-does-the-work
 pattern as the services board's hostfs handler. The board reuses the shared
 `NetBackend`s above through the plugin `net` capability; `loopback` is
-deterministic, `nat`/`bridge` are not. `gethostbyname()` defaults to the
-plugin ABI's `resolve` capability under `net = "nat"`/`"bridge"`
-(`resolve_start`/`resolve_poll` in `wasmboard.rs`, `register_host_fns`),
-resolving via the host's own OS resolver on a short-lived background
-thread -- the same `getaddrinfo`-on-a-thread shape the NAT DNS forwarder
-above already uses, reused directly (`net::nat::dns::resolve_a`) rather than
-reimplemented -- so it works out of the box under `net = "bridge"` with no
-`dns_server` hand-configured to match the LAN. `[hostsocket] resolver =
-"dns"` opts back into the board speaking DNS itself over that same `net`
-traffic, to target a specific server instead of the host's own resolver.
-The library's own LVO table covers the real bsdsocket_lib.sfd order from
-`socket()` all the way to the table's real end at LVO -858 (confirmed
-against Olaf Barthel's own authoritative `.sfd`, not just the -30..-300
-range Phase 4 originally shipped, and not just the AmiTCP-4.0-compatible
-subset through `ObtainServerSocket` at -696) -- `inet_aton`/`inet_ntop`/
-`inet_pton`, `In_LocalAddr`/`In_CanForward`, the `setservent`/`setprotoent`/
-`setnetent` iterator families, and Roadshow's own resolver-family extension
+deterministic, `nat`/`bridge` are not. `net = "host"` instead routes new TCP
+and UDP sockets straight to real host sockets through the plugin's
+`host_sockets` capability (the `sock_*` imports), bypassing smoltcp; it is
+equally non-deterministic.
+
+Under `net = "nat"`, `"bridge"`, or `"host"`, `gethostbyname()` defaults to
+the plugin ABI's `resolve` capability (`resolve_start`/`resolve_poll`,
+registered in `wasmboard.rs`'s `register_host_fns`), which resolves through
+the host OS resolver on a short-lived background thread. That is the same
+`getaddrinfo`-on-a-thread code the NAT DNS forwarder uses
+(`net::nat::dns::resolve_a`), so name lookups work under `net = "bridge"`
+with no `dns_server` configured to match the LAN. `[hostsocket] resolver =
+"dns"` makes the board speak DNS itself over its `net` traffic instead, to
+query a specific server.
+
+The library's LVO table follows the real `bsdsocket_lib.sfd` order from
+`socket()` to the table's end at LVO -858 (checked against Olaf Barthel's
+authoritative `.sfd`), well past the AmiTCP 4.0 subset that ends with
+`ObtainServerSocket` at -696. `inet_aton`/`inet_ntop`/`inet_pton`,
+`In_LocalAddr`/`In_CanForward`, the `setservent`/`setprotoent`/`setnetent`
+iterator families, and Roadshow's resolver extension
 (`getaddrinfo`/`getnameinfo`/`gai_strerror`/`freeaddrinfo`, plus the
-reentrant `gethostbyname_r`/`gethostbyaddr_r`) all get real bodies too,
-while the LVOs with no equivalent in this project's model (raw packet
-capture, host routing tables, live interface reconfiguration, direct BSD
-mbuf-chain manipulation, Roadshow's own internal global-data-access
-functions) stay `_hs_stub` rather than jumping off the end of the table
-(see `guest/hostsocket/entry.s`'s own jump-table comment for the full
-accounting).
+reentrant `gethostbyname_r`/`gethostbyaddr_r`) all have real bodies. The
+LVOs with no equivalent in this model (raw packet capture, host routing
+tables, live interface reconfiguration, direct BSD mbuf-chain manipulation,
+and Roadshow's internal global-data-access functions) point at `_hs_stub`
+rather than off the end of the table; the jump-table comment in
+`guest/hostsocket/entry.s` has the full accounting.
 
 ## zz9k crypto board (`zz9k.rs`, `crates/zz9k-plugin/`)
 
@@ -837,8 +878,16 @@ and TOC queries, with responses delivered byte-by-byte with STEN pulses.
 Data sectors DMA onto the system bus at the 24-bit ACR address -- chip,
 slow, or Zorro board RAM, like the A2091's DMAC; Kickstart allocates the
 CD buffers in fast RAM when a board is fitted -- paced at single speed and
-raising the DMAC interrupt on completion. The 256 KiB extended ROM sits at
-`$F00000`.
+raising the DMAC interrupt on completion. The drive handshake lines (SBCP,
+SCOR, STCH, STEN) and the drive/DAC control strobes run through a 6525 TPI
+in the same 64 KiB window. CD audio streams into the shared mixer ring like
+the CD32's; subcode payload (CD+G) is not implemented, so SCOR pulses while
+the motor runs but SBCP never presents data. The 256 KiB extended ROM sits
+at `$F00000`, and the battery-backed bookmark RAM at `$DC8000` (16 KiB,
+mirrored to `$DCFFFF`) is session-only: it is not yet persisted to a file.
+`[cd] insert_delay` (which the CD32 drive also honours) holds the disc out
+of the tray for that many emulated seconds, for discs that only boot when
+inserted after the boot screen.
 
 ## CD32 Akiko (`akiko.rs`)
 
@@ -884,15 +933,15 @@ the console's `CDTRACE`, `COPPERLINE_DBG_CD`, and the control protocol's
 ### CD32 Full Motion Video module (`cd32_fmv.rs`)
 
 Top-level `fmv = true` fits a 1 MiB Zorro II FMV cartridge on the CD32
-profile using the bundled open ROM, and `fmv_rom` fits it with another image;
-the slot is empty by default, as on a stock CD32, because the module's
+profile using the bundled open ROM, and `fmv_rom` fits it with another image.
+The slot is empty by default, as on a stock CD32, because the module's
 resident ROM moves the guest's memory layout and boot timing. The module is
-the first autoconfig board, normally at `$200000`
-(manufacturer 514, product
-`$6A`, serial `$0028001E`). Its window follows the physical decode: 256 KiB ROM at
-`+$000000`, board status/control at `+$040000`, LSI L64111 MPEG Layer II audio
-at `+$050000`, the C-Cube CL450 bitstream port at `+$060000`, CL450 registers
-at `+$070000`, and 512 KiB module RAM at `+$080000`.
+the first autoconfig board, normally at `$200000` (manufacturer 514, product
+`$6A`, serial `$0028001E`). Its window follows the physical decode: 256 KiB
+ROM at `+$000000`, board status/control at `+$040000`, the LSI L64111 MPEG
+Layer II audio decoder at `+$050000`, the C-Cube CL450 bitstream port at
+`+$060000`, CL450 registers at `+$070000`, and 512 KiB module RAM at
+`+$080000`.
 
 The guest module ROM remains responsible for reading sectors through Akiko
 and programming both chips. Copperline implements their register, command,
@@ -922,21 +971,21 @@ the CD32 extended ROM's lower-version resident in place, claims only White
 Book media, and chains the displaced init entry for normal game discs. A
 claimed disc starts a controller-driven task which lists the parsed tracks,
 submits asynchronous `PLAYLSN`, and aborts it on Blue before hiding the
-decoder overlay and redrawing the menu. Under AROS PR 1089 the system-ROM MPEG
-device is used instead and the cartridge diagnostic is deliberately skipped
-to keep the legacy Commodore ROM from replacing AROS's `cd.device`; that also
-means the cartridge library and player are not installed on AROS. Both paths
-use the cartridge's empty CL450 container. Starting
+decoder overlay and redrawing the menu. Under AROS (with its PR 1089) the
+system ROM's own MPEG device is used instead, and the cartridge diagnostic is
+deliberately skipped so the legacy Commodore ROM cannot replace AROS's
+`cd.device`; the cartridge library and player are therefore not installed on
+AROS. Both paths use the cartridge's empty CL450 container. Starting
 `CPU_CONTROL` is the boundary at which Copperline marks its command-level
 CL450 model ready, so no proprietary microcode is copied or executed.
 
-The matching AROS PR 1089, merged upstream on 2026-09-01, includes
-Copperline's ordering fix as commit `64eb7ed1`.
-Akiko allocates the highest armed PBX slot first; when a high slot is re-armed
-before an older low-slot sector is consumed, slot-number order is no longer
-arrival order. The driver sorts each CDXL snapshot by the raw sector MSF,
-preserving an exact chronological Mode-2 stream without changing Akiko's
-hardware arbitration.
+Akiko allocates the highest armed PBX slot first, so when a high slot is
+re-armed before an older low-slot sector is consumed, slot-number order is no
+longer arrival order. AROS's `cd.device` therefore sorts each CDXL snapshot
+by the raw sector MSF, preserving an exact chronological Mode-2 stream
+without changing Akiko's hardware arbitration. Copperline contributed that
+fix upstream as commit `64eb7ed1`, merged with AROS PR 1089 on 2026-09-01
+(`fmv-rom/AROS-CDXL-ORDERING.md`).
 
 The optical sector clock and the firmware command transport are separate:
 sector payloads retain their physical 75/150 Hz cadence, while the drive's
@@ -949,24 +998,24 @@ mechanism's spin-up before the first lead-in dump delivers entries (~8.8 s
 from a cold power-on, ~3.5 s for a change on a warm drive; a guest reset
 keeps the disc spinning, so warm reboots skip it), and an in-flight dump is
 finished before the drive acts on the next queued command. Together these
-hold the KS driver's first TOC transaction -- and every io queued behind
-it, the boot screen's one-shot CD_CHANGESTATE included -- open until the
-disc is genuinely readable, which is why a real CD32 with a bootable disc
-inserted at power-on goes straight from the Kickstart grey screen to the
-boot display without ever starting the fly-in show, and why the emulated
-cold boot now reaches the startup-sequence within 50 ms of the filmed real
-machine (14.36 s vs 14.31 s). The hold is the drive's, not Akiko's: the
+hold the Kickstart driver's first TOC transaction -- and every I/O request
+queued behind it, the boot screen's one-shot `CD_CHANGESTATE` included --
+open until the disc is genuinely readable. That is why a real CD32 with a
+bootable disc inserted at power-on goes straight from the Kickstart grey
+screen to the boot display without ever starting the fly-in show, and why
+the emulated cold boot reaches the startup-sequence within 50 ms of the
+filmed real machine (14.36 s vs 14.31 s). The hold is the drive's, not Akiko's: the
 TX DMA keeps draining the guest's command ring into the drive's receive
 buffer whatever the drive is doing, and the drive parses commands out of
-that buffer one at a time between dumps. That distinction matters
-because Kickstart's driver queues a 3-byte LED packet for every TOC
-entry it receives (and an unpause right behind the request itself): on a
-disc with more than about 25 tracks those packets outrun a 256-byte ring
-that nothing consumes, and the lapped bytes then parse as garbage after
-the dump: the driver's LED toggles and its unpause come back as
-checksum-error replies, which the real machine never produces (observed
-with Pinball Illusions CD32, 39 tracks, whose boot showed four such
-replies before the first data read). A data locate
+that buffer one at a time between dumps. The distinction matters because
+Kickstart's driver queues a 3-byte LED packet for every TOC entry it
+receives (and an unpause right behind the request itself). On a disc with
+more than about 25 tracks those packets would outrun a 256-byte ring that
+nothing consumed, and the lapped bytes would parse as garbage after the
+dump, turning the driver's LED toggles and its unpause into checksum-error
+replies that the real machine never produces (the regression example is
+Pinball Illusions CD32, 39 tracks, whose boot showed four such replies
+before the first data read). A data locate
 also pays the tray mechanism's real seek time, calibrated against a real
 CD32 with `tools/cd32-probe`: a +500-sector hop costs 253 ms, +1000 costs
 301 ms, and long strokes flatten out around 1.4 s (WinUAE bills a single
@@ -1000,11 +1049,11 @@ bits stay latched until the matching comparator register is rewritten, so
 an INT2 server that reads CDINTREQ on every chain entry must ignore
 sources it has not armed (an earlier Copperline masked the read to protect
 AROS's server from its own stale latches; that server is fixed instead,
-and the bundled ROM carries the fix). Akiko's DMA engines drive a full 24-bit address bus (the
-address registers mask to `$00FFF000`), so the rings and sector buffers
-resolve through every RAM bank in the low 16 MB -- Zorro II fast RAM
-included, which is where AROS places its `MEMF_24BITDMA` allocations when
-fast RAM exists -- not just chip RAM. The command/status comparator indices
+and the bundled ROM carries the fix). Akiko's DMA engines drive a full
+24-bit address bus (the address registers mask to `$00FFF000`), so the
+rings and sector buffers resolve through every RAM bank in the low 16 MB --
+Zorro II fast RAM included, which is where AROS places its `MEMF_24BITDMA`
+allocations when fast RAM exists -- not just chip RAM. The command/status comparator indices
 are eight-bit and the DMA addresses fold to their 256-byte pages on every
 access, TX and RX alike: Kickstart's command producer uses eight-bit index
 arithmetic, so a packet whose bytes straddle index `$FF` wraps to the start
@@ -1051,9 +1100,24 @@ reopens (re-indexes) it on load.
 
 ## RTC (`rtc.rs`)
 
-An MSM6242-compatible register view at `$DC0000`, present on machines
-configured with `rtc = true`. Reads reflect host time; guest writes only
-affect the emulated latch/control state, never the host clock.
+A four-bit battery clock at `$DC0000`, present on machines configured with
+`rtc = true` (the default only on the profiles that shipped with one). Two
+parts fill that socket, selected by `[machine] rtc_chip`: the Oki MSM6242
+(the default; A500+/A2000/CDTV boards and the clock expansions) and the
+Ricoh RP5C01 of the A3000/A4000 motherboards, which has a different
+register layout, banked register blocks, and 26 nibbles of battery-backed
+RAM. AmigaOS probes for either part, but Linux/m68k drives the one its
+machine model dictates, so the A3000/A4000 profiles fit the RP5C01. The
+RP5C01's battery RAM persists to `[machine] battmem` (default
+`battmem.nvram`) in the `.nvram` layout WinUAE and Amiberry use, so AmigaOS
+`battmem.resource` settings survive a power cycle.
+
+Reads reflect the host's local time; guest writes only affect the emulated
+latch, bank, and control state (and the RP5C01's battery RAM), never the
+host clock. A seed (`[machine] rtc_time`, `--rtc-time`) replaces the host
+clock: the chip powers on reading the seed and ticks with emulated time, so
+reads are reproducible byte-for-byte, and `rtc_frozen` stops the tick
+altogether (see [](../guide/configuration)).
 
 The part is four bits wide and wired to the low byte lane alone, so it answers
 on odd addresses while the even lane floats with the bus -- with or without a
@@ -1086,7 +1150,8 @@ overflow, and ghost suppression on the real A500 key matrix (the seven
 qualifiers are on dedicated lines and never ghost). The protocol was
 cross-checked against real-hardware-validated replacement keyboard
 firmware. Mouse deltas
-feed the JOY0DAT quadrature counters. Gamepads are read through `gilrs`
+feed the mouse port's JOYxDAT quadrature counters (JOY0DAT for the usual
+port 1). Gamepads are read through `gilrs`
 with its bundled SDL controller database enabled: a recognised pad
 resolves through a fixed standard layout, overridden per-UUID by the
 calibration described in [](../guide/ui), which records raw event codes
@@ -1158,22 +1223,29 @@ protocol's `input.pen` set the position directly.
 
 Keyboard joystick emulation is deliberately a host input source, not a
 guest-keyboard behaviour. When active, the winit key handler consumes the
-mapped host keys before rawkey translation: cursor keys drive directions,
-Right Ctrl/Right Alt drive fire, and the CD32 extras are C/X/D/S/Return/Z/A.
+mapped host keys before rawkey translation. `keymap.rs` holds two mappings
+so one keyboard can drive two controllers. The default first mapping is
+the FS-UAE layout: cursor keys for directions, Right Ctrl, Right Alt, Left
+Ctrl, or C for fire, Left Alt or X for the second button, and D/S/Return/Z/A
+for the CD32 green, yellow, play, rewind, and forward buttons. The default
+second mapping is the numeric keypad. Both can be rebound, and the
+overrides persist in the per-user `keymap.toml` (see [](../guide/ui)).
 Each alias is tracked independently before resolving to a single joystick
 state, so releasing one fire alias does not clear fire while another alias
 is still held. Releases for keys already captured as joystick controls are
 also swallowed if the source mode changes before key-up, preventing stray
 Amiga rawkey releases.
 
-## Audio output (`audio.rs`)
+## Audio output (`audio/`)
 
-`AudioSink` abstracts the host boundary: a cpal live sink, a WAV-file sink
-(`--audio-wav`), and a null sink (`--noaudio`). Paula renders in emulated
-time; the live sink resamples and buffers against wall-clock. The
-`CPAL_*` lead/prebuffer/stale-drop targets in `audio.rs` are fixed rather
-than adaptive (currently a 131072-frame ring, a ~150 ms prebuffer equal to
-the ~150 ms steady lead, and a ~300 ms stale-drop threshold at 44.1 kHz).
+`AudioSink` (`audio/mod.rs`) abstracts the host boundary: a cpal live sink,
+a WAV-file sink (`--audio-wav`), and a null sink (`--noaudio`); the mixer
+and stem capture in front of it are described in [](audio.md). Paula renders
+in emulated time; the live sink resamples and buffers against wall-clock.
+The `CPAL_*` lead/prebuffer/stale-drop targets in `audio/mod.rs` are fixed
+rather than adaptive (currently a 131072-frame ring, a ~150 ms prebuffer
+equal to the ~150 ms steady lead, and a ~300 ms stale-drop threshold at
+44.1 kHz).
 Playback starts only after the first audible frames have filled that
 prebuffer, so silent boot/load periods do not queue seconds of zeros. If the
 cpal callback later drains the queue completely, it stops playback, outputs
@@ -1218,8 +1290,13 @@ dials out to a remote endpoint (`mode = "tcp-connect"` with `connect =
 "host:port"` -- the BBS-client wiring), and `PtySerialSink` bridges to a
 host pseudo-terminal pair (`mode = "pty"`, Unix only); all are
 bidirectional, so an `AUX:` shell on the Amiga side gives a remote
-AmigaDOS console. The browser build swaps in a channel-backed sink that
-the page bridges to a WebSocket.
+AmigaDOS console. `ModemSerialSink` (`modem/`, `mode = "modem"`) puts a
+Hayes-compatible AT modem on the port, dialling or answering TCP
+connections, with an optional telnet layer and a scripted-session
+transport for reproducible headless runs (see [](../guide/modem)).
+`mode = "off"` fits an inert sink: output is discarded and nothing is
+received. The browser build swaps in a channel-backed sink that the page
+bridges to a WebSocket.
 
 `DeviceSerialSink` (`serial/device.rs`, `mode = "device"`, behind the
 `host-serial` feature) is a real host serial port on the same trait: the
@@ -1273,7 +1350,9 @@ unplugged cable (every input high), which is what the inert and MIDI sinks
 keep; `StdoutSink` is a ready device with no carrier; `TcpSerialSink`
 is a modem whose carrier follows the live connection (an atomic flag the
 acceptor/reader thread maintains, so the PRA read never touches the
-writer lock); `PtySerialSink` is a null-modem peer with its port open;
+writer lock); `ModemSerialSink` holds DSR and CTS asserted and raises
+carrier for a call (or always, after `AT&C0`); `PtySerialSink` is a
+null-modem peer with its port open;
 `ChannelSerialSink` starts ready-without-carrier and lets the frontend set
 the lines (`ChannelSerialHandle::set_carrier`, exported to the browser as
 `serial_set_carrier`); `DeviceSerialSink` reports the real wire. The lines
@@ -1294,10 +1373,15 @@ sinks; disconnecting or unsubscribing removes it.
 ## MIDI serial bridge (`midi/`)
 
 `[serial] mode = "midi"` (or `--midi-out`/`--midi-in`) bridges Paula's
-serial port to host MIDI, behind the optional `midi` cargo feature -- a
-plain build compiles none of it and the mode falls back with a clear
+serial port to host MIDI, behind the default-on `midi` cargo feature -- a
+build without it compiles none of this and the mode falls back with a clear
 message. The whole thing hangs off one `SerialSink`, `MidiSerialSink`, so
-the emulator core is unchanged from any other serial target.
+the emulator core is unchanged from any other serial target. The MIDI-Out
+target can also be one of two in-process synthesizers instead of a host
+port, `mt32` (the Roland MT-32 emulation, [](../guide/mt32)) or
+`coppersynth` (the built-in General MIDI synthesizer,
+[](../guide/coppersynth)); both render into Copperline's own mixer as
+their own stems.
 
 The load-bearing detail is that byte timing survives to the wire. Paula
 stamps each transmitted byte with the emulated colour clock it left on

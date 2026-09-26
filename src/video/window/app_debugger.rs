@@ -2834,7 +2834,9 @@ impl App {
                         .unwrap_or_else(|| "(no latch)".to_string())
                 )));
                 if let Some(value) = value {
-                    for line in crate::debugger::custom_reg_bit_decode(off, value) {
+                    for line in
+                        crate::debugger::custom_reg_bit_decode(off, value, bus.agnus.revision())
+                    {
                         lines.push(ui::DbgLine::plain(format!("  {line}")));
                     }
                 }

@@ -958,7 +958,7 @@ impl App {
                         lines.push(doc.summary.to_string());
                     }
                     lines.extend(
-                        crate::debugger::custom_reg_bit_decode(off, value)
+                        crate::debugger::custom_reg_bit_decode(off, value, bus.agnus.revision())
                             .into_iter()
                             .map(|line| format!("  {line}")),
                     );

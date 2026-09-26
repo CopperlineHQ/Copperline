@@ -8,20 +8,21 @@ system requirements, installation, building from source, and initial setup.
 
 - **Rust (source builds only):** 1.95 or newer; CI uses the stable toolchain.
 - **Supported operating systems:** macOS, Linux, and Windows.
-- **Graphics backend:** Metal on macOS, Direct3D 12 on Windows, and Vulkan on Linux
-  (see [](#vulkan-is-required-on-linux)).
+- **Graphics backend:** Metal on macOS, Direct3D 12 or Vulkan on Windows, and
+  Vulkan on Linux (see [](#vulkan-is-required-on-linux)).
 - **Linux build dependencies:** `sudo dnf install alsa-lib-devel systemd-devel gcc`
-  on Fedora, or `sudo apt install libasound2-dev libsystemd-dev gcc` on Debian/Ubuntu.
+  on Fedora, or `sudo apt install libasound2-dev libudev-dev pkg-config gcc` on
+  Debian/Ubuntu.
 - **Boot ROM:** Copperline includes the open-source [AROS](http://www.aros.org/)
-  Kickstart replacement and boots it by default. It also supports official
-  Commodore Kickstart ROMs (1.3, 2.05, 3.1, plus CDTV and CD32 extended ROMs)
-  and [DiagROM](https://www.diagrom.com/). Use a single-file 512 KiB image or
+  Kickstart replacement and boots it by default. It also runs real Kickstart
+  ROMs (1.x through 3.2, plus the CDTV and CD32 extended ROMs) and
+  [DiagROM](https://www.diagrom.com/). Use a single-file 512 KiB image or
   a 256 KiB Kickstart 1.x image; Copperline mirrors the latter across its
   512 KiB ROM window. See [ROM formats](configuration.md#top-level).
 
 ## Installing on macOS (Homebrew)
 
-To install using Homebrew:
+The repository doubles as a Homebrew tap:
 
 ```sh
 brew tap copperlinehq/copperline https://github.com/CopperlineHQ/Copperline
@@ -37,7 +38,7 @@ brew install --HEAD copperline
 Pre-built macOS application bundles (`Copperline-X.Y.Z-macos-universal.dmg`) are
 also available on the [releases page](https://github.com/CopperlineHQ/Copperline/releases).
 Mount the disk image and copy `Copperline.app` to `/Applications`. If macOS
-quarantine blocks initial launch, right-click the app and choose **Open**, or run:
+quarantine blocks the first launch, right-click the app and choose **Open**, or run:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/Copperline.app
@@ -47,7 +48,8 @@ xattr -dr com.apple.quarantine /Applications/Copperline.app
 
 ### Flatpak
 
-Flatpak packages include all runtime dependencies and work across distributions:
+The Flatpak package brings its own runtime dependencies and works across
+distributions:
 
 ```sh
 flatpak install flathub dev.copperline.Copperline
@@ -77,7 +79,8 @@ For virtual machines or older hardware, install the software Vulkan driver (lava
 - **Debian / Ubuntu:** `sudo apt install mesa-vulkan-drivers`
 - **Fedora:** `sudo dnf install mesa-vulkan-drivers`
 
-The Flatpak build bundles lavapipe by default.
+The Flatpak needs no host package: its Freedesktop runtime supplies Mesa,
+including lavapipe.
 
 ## Installing on Windows
 
@@ -88,15 +91,14 @@ matching your Windows architecture. Extract the whole archive and run
 
 ### The console window
 
-`copperline.exe` is one program doing two jobs, and it is built for the
-command line: run it from a prompt and it behaves like any other tool there.
-The shell waits for it, and `--help`, the log and every
-[headless flag](headless.md)'s output go to that terminal.
+`copperline.exe` is a console program. Run from a command prompt, it behaves
+like any other command-line tool: the shell waits for it, and `--help`, the
+log and the output of every [headless flag](headless.md) go to that terminal.
 
-Started from Explorer or the Start menu, there is no prompt to write to, so
-Copperline closes the console window Windows opens for it and
-leaves only the emulator. The window may still flash briefly: Windows puts it
-on screen before Copperline gets to run.
+Started from Explorer or the Start menu, it has no prompt to write to, so
+Copperline closes the console window Windows opens for it and leaves only the
+emulator window. The console may still flash briefly, because Windows shows it
+before Copperline starts running.
 
 (command-line-tools)=
 ## Command-line tools
@@ -130,6 +132,43 @@ build option, not a Copperline command-line flag. Unoptimized debug builds
 are too slow for real-time emulation.
 ```
 
+(cargo-features)=
+### Cargo features
+
+A default build includes everything below except the last three features.
+To leave something out, build with `--no-default-features` and list the
+features to keep; the [FluxBridge](fluxbridge.md), [MT-32](mt32.md), and
+[Coppersynth](coppersynth.md) chapters show complete examples.
+
+| Feature | Default | What it adds |
+|---|---|---|
+| `frontend` | yes | The desktop window, launcher, inspectors, host audio, gamepads, and file dialogs. The `copperline` binary requires it. |
+| `midi` | yes | Host MIDI for `[serial] mode = "midi"` (CoreMIDI, the ALSA sequencer, or WinMM). |
+| `mt32` | yes | The built-in [MT-32](mt32.md). |
+| `coppersynth` | yes | The built-in [Coppersynth](coppersynth.md) General MIDI synthesizer. |
+| `host-serial` | yes | A real host serial port on Paula's UART (`[serial] mode = "device"`). |
+| `fluxbridge` | yes | [Physical floppy drives](fluxbridge.md) through a Greaseweazle. |
+| `net-nat` | yes | User-mode NAT networking for the emulated network boards. |
+| `net-bridge` | yes | Bridged networking to a host Ethernet adapter, and the `copperline-net-helper` binary. |
+| `netplay-internet` | yes | Internet [netplay](netplay.md) with NAT traversal and relay fallback. |
+| `wasm-boards` | yes | WebAssembly [Zorro board plugins](../zorro.md). |
+| `cpu-jit` | yes | Native code generation for `[cpu] jit`. |
+| `control` | yes | The [control protocol](../debugger/control.md) server (`--control`, `--control-gui`). |
+| `ctl-bin` | yes | The `copperline-ctl` binary, with its MCP and DAP modes. |
+| `gdb` | yes | The [GDB remote stub](../debugger/gdb.md). |
+| `dap` | yes | The [Debug Adapter Protocol](../debugger/dap.md) adapter and the guest debug-information reader. |
+| `import-uae-bin` | yes | The [`copperline-import-uae`](import-uae.md) converter. |
+| `game-library` | yes | The launcher's [WHDLoad](whdload.md) Library page and its OpenRetro sync. |
+| `mhi` | yes | The MHI MPEG audio decoder board. |
+| `cd-mp3` | yes | MP3 audio tracks in CD cue sheets. |
+| `cd32-fmv` | yes | The CD32 Full Motion Video module. |
+| `profile-stats` | yes | Detailed host-cost counters for native diagnostics. |
+| `bench-bin` | no | The headless `copperline-bench` benchmark binary (see [](browser.md)). |
+| `display-plan-trace` | no | Display-plan tracing (`COPPERLINE_TRACE_DISPLAY_PLAN`) in release builds; debug and test builds always have it. |
+| `internal-diagnostics` | no | Environment overrides that deliberately change timing (`COPPERLINE_NO_BUS_ARB` and similar), for local investigation only. |
+
+### Tests
+
 To run the test suite:
 
 ```sh
@@ -137,12 +176,24 @@ cargo test                          # Unit tests (no external assets required)
 cargo test --release -- --ignored   # Integration tests (requires local test media)
 ```
 
+The ignored integration tests in `tests/` need Kickstart ROMs and disk images
+that are not part of the repository. They look for them in the directory
+named by `COPPERLINE_TEST_ASSETS`, then in `test-assets/` at the repository
+root, and pass without running when their assets are absent.
+[`tests/README.md`](https://github.com/CopperlineHQ/Copperline/blob/main/tests/README.md)
+lists what each test needs.
+
 For the optimized native CI suite, including the deterministic golden renders,
 use `cargo test --profile ci --locked`. The `ci` profile inherits release
 settings but disables LTO and uses parallel code generation to compile test
 executables faster. Its binaries are in `target/ci/`; normal builds and
 performance benchmarks continue to use `--release`. Add `--timings` to write
 a build report to `target/cargo-timings/cargo-timing.html`.
+
+The golden renders live in `timing-test/golden/`. A hardware-model change
+that alters them on purpose is re-blessed with
+`COPPERLINE_BLESS_GOLDEN=1 cargo test --release --test probe_golden`, and the
+render differences are reviewed as part of the change.
 
 ## First boot
 
@@ -154,13 +205,19 @@ Run Copperline from the terminal:
 
 When started with no arguments and no `copperline.toml` in the current directory,
 Copperline displays the interactive launcher screen where you can configure
-machine models, memory, storage, and peripherals.
+machine models, memory, storage, and peripherals. Any machine, media, or
+headless option skips the launcher; `--factory` on its own does not.
 
 With no saved default, the launcher starts with an Amiga 500 (Rev 6A): ECS
 8372A Agnus, OCS 8362 Denise, 512 KiB chip RAM, 512 KiB slow RAM, and the
-bundled AROS Kickstart replacement. **Save default** remembers your settings
-for later launches. `--factory` ignores that saved default; an explicit
-`--config` or a local `copperline.toml` still takes precedence.
+bundled AROS Kickstart replacement. **Save default** writes your settings to
+`default.toml` in the configurations folder (see
+[Where files go](ui.md#where-files-go)) and every later run that names no
+configuration loads it. If that saved default has **Run on startup** set
+(`[emulation] auto_launch`), the launcher starts the machine straight away.
+`--factory` ignores the saved default, and also leaves Coppersynth's and the
+modem's stored settings untouched; an explicit `--config` or a local
+`copperline.toml` still takes precedence.
 
 To boot directly into a specific Kickstart ROM or configuration file:
 
@@ -208,9 +265,11 @@ in the root of the repository. Copy it to `copperline.toml` or pass it via `--co
 
 ## Logging and crash reports
 
-Set `RUST_LOG=debug` or `RUST_LOG=trace` in the environment to enable detailed logging.
+The log goes to stderr at the `info` level. Set `RUST_LOG=debug` or
+`RUST_LOG=trace` in the environment for more detail.
 
-If an unhandled panic occurs, Copperline writes diagnostic output and a backtrace
-to `copperline-crash.txt` (attempted next to the executable first, falling back to
-the current working directory, and then to the system temporary directory).
-Please include this file when reporting bugs.
+If Copperline panics, it writes the panic message and a backtrace to
+`copperline-crash.txt`: next to the executable when that folder is writable,
+otherwise in the current working directory, and failing that in the system
+temporary directory. The path it chose is printed to stderr. Please include
+this file when reporting bugs.

@@ -1,8 +1,15 @@
 # Headless and scripted execution
 
-Copperline supports non-interactive, headless execution for continuous integration,
-automated regression testing, and scripted media capture. Headless runs execute
-unthrottled without creating a window or connecting to a display server.
+Copperline runs without a window for continuous integration, regression
+testing and scripted capture. A run that schedules a screenshot, screenshot
+expectation, frame dump, GIF clip or `--coverage` file, or that waits for a
+`--run` program's return code with `--exit-on-return`, opens no window,
+needs no display server, and runs unthrottled; the emulated result is the
+same as a windowed run's. Other scheduled work (`--save-state-after`,
+`--audio-wav`, `--record-input`, the scripted-input flags) does not make a
+run headless by itself: add a capture flag to end the run.
+`--warp-boot` and `--warp-until` only affect windowed sessions, since a
+capture run is already unthrottled from the start.
 
 Physical floppy drives attached through [FluxBridge](fluxbridge.md) require
 wall-clock pacing. For repeatable captures, use image-backed media, a fixed
@@ -12,14 +19,14 @@ serial or audio input, and changing host files also affect replay; see the
 
 ## Capturing screenshots
 
-To emulate for a specified number of emulated seconds, write a PNG screenshot, and exit:
+To emulate for 30 emulated seconds, save the display as a PNG, and exit:
 
 ```sh
 ./target/release/copperline --config copperline.example.toml --noaudio \
   --screenshot-after 30 /tmp/out-30s.png
 ```
 
-Multiple screenshots can be captured during a single execution by repeating the flag:
+Repeat the flag to capture several screenshots in one run:
 
 ```sh
 ./target/release/copperline --config copperline.example.toml --noaudio \
@@ -28,10 +35,11 @@ Multiple screenshots can be captured during a single execution by repeating the 
   --screenshot-after 60 /tmp/boss.png
 ```
 
-For a screenshot-only run, the process exits after the final screenshot.
-When combined with `--dump-frames`, the run exits as soon as either the frame
-dump or the screenshot schedule finishes. Use separate runs if both need
-to reach different end times.
+The run exits after the last scheduled capture of any kind: screenshot,
+expectation, GIF clip or frame dump. The one exception is a frame dump,
+which ends the run as soon as its last frame is written, even when a
+screenshot or clip is scheduled later. Schedule those to finish before the
+dump does, or use a separate run.
 
 (screenshot-expectations)=
 ## Checking screenshots against expected images
@@ -87,15 +95,17 @@ run with status 0, or 3 if an expectation had failed.
 
 ## Dumping frame sequences
 
-To capture consecutive frames (useful for debugging animation or beam synchronization):
+To capture consecutive frames (useful for debugging animation or beam
+synchronization):
 
 ```sh
 ./target/release/copperline --config copperline.example.toml --noaudio \
   --dump-frames /tmp/frames --dump-start 24 --dump-count 120
 ```
 
-Frames are saved as zero-padded PNG files (`000000.png`, `000001.png`, etc.) in the
-specified output directory.
+`--dump-frames DIR` needs `--dump-count COUNT`; `--dump-start SECS`
+defaults to 0. Frames are saved in DIR as `frame-000000.png`,
+`frame-000001.png`, and so on, and the run exits after the last one.
 
 (capturing-gif-clips)=
 ## Capturing GIF clips
@@ -109,18 +119,19 @@ scheduled emulated time instead of the last few seconds:
   --gif-after 24 /tmp/intro.gif --gif-seconds 5
 ```
 
-`--gif-after SECS PATH` starts the clip at SECS emulated seconds;
-`--gif-seconds N` sets its length and defaults to `[recording]
-clip_seconds` (ten seconds). Frames are thinned to `[recording] clip_fps`
-(25 per second on PAL, 30 on NTSC by default), presented through the same
-crop and aspect as a screenshot, and given delays from the emulated
-timeline, so the file plays back at real speed however fast the run went.
+`--gif-after SECS PATH` starts the clip at SECS emulated seconds.
+`--gif-seconds N` sets its length (up to 120 seconds) and defaults to
+`[recording] clip_seconds` (10); with `clip_seconds = 0` it must be given.
+Frames are thinned to `[recording] clip_fps` (25 per second on PAL, 30 on
+NTSC by default), presented through the same crop and aspect as a
+screenshot, and given delays from the emulated timeline, so the file plays
+back at real speed however fast the run went.
 The flag repeats to bracket several moments in one run; each clip is its
 own file. A run ends when every scheduled capture has finished, whichever
 kind comes last: a clip that completes early keeps running for a later
 `--screenshot-after`, and a finished screenshot schedule waits for a clip
-that is still recording. A clip has no audio track;
-`--audio-wav` captures the sound of the same interval.
+that is still recording. A clip has no audio track; record the run's
+sound with `--audio-wav`.
 
 Timestamps are absolute like every other scheduled flag, so the capture
 composes with `--load-state`, `--script` and the scheduled-input flags:
@@ -146,8 +157,12 @@ Save states allow fast iteration by skipping lengthy boot and loading sequences:
   --screenshot-after 125 /tmp/scene.png
 ```
 
-When resuming with `--load-state`, all scheduled-input, screenshot and GIF clip
-timestamps remain referenced to the original emulated timeline.
+`--save-state-after` repeats, and the run keeps going after each save; it
+needs a capture flag (here the marker screenshot) to run headless and end.
+After `--load-state`, every scheduled timestamp stays absolute on the
+original emulated timeline: resuming a 120 s state, `--press-after 130 ...`
+fires ten seconds in, and anything scheduled before 120 s has already
+passed.
 
 A state written by `--save-state-after` carries the same metadata card as
 one saved from the window: a thumbnail of the display at the save
@@ -176,36 +191,41 @@ with `--screenshot-after` it ends with the last screenshot instead:
 ```
 
 The program's own debug information (`-g`, or vasm `-linedebug`; a
-`PROG.elf` beside it is picked up) supplies the source lines. See
+`PROG.elf` beside it is picked up) supplies the source lines.
+`--coverage-source-map FROM=TO` rewrites a source path prefix in the
+output and can be repeated. See
 [Guest code coverage](../debugger/profiling.md#guest-coverage).
 
 ## Scripted input events
 
-You can schedule keyboard, mouse, and joystick inputs at specific emulated timestamps:
+Keyboard, mouse, controller and media events can be scheduled at emulated
+timestamps. Every flag repeats:
 
 | Flag | Description |
 |---|---|
-| `--press-after SECS KEY` | Press and release a key (~100 ms hold) |
-| `--key-after SECS KEY MS` | Hold a key for specified duration in milliseconds |
-| `--type-after SECS TEXT` | Type TEXT on the US Amiga keyboard from SECS, one key every 100 ms (below) |
-| `--click-after SECS BTN MS [PORT]` | Click mouse button (`left`, `right`, `middle`) for MS (default port 1) |
-| `--joy-after SECS BTN MS [PORT]` | Trigger joystick/CD32 button (`up`, `down`, `left`, `right`, `red`, `blue`, etc.) on port 1-4 (default port 2; 3 and 4 are the parallel-port adapter's sockets) |
-| `--mouse-after SECS DX DY [PORT]` | Move mouse by relative delta (DX, DY) (default port 1) |
-| `--mouse-to-after SECS X Y [PORT]` | Steer sprite 0 pointer to pixel coordinates (X, Y) (default port 1) |
-| `--pot-after SECS X Y [PORT]` | Set analogue paddle/pot position (0-255) (default port 2) |
+| `--press-after SECS KEY` | Press and release a key (100 ms hold) |
+| `--key-after SECS KEY MS` | Hold a key for MS milliseconds |
+| `--type-after SECS TEXT` | Type TEXT on the US Amiga keyboard from SECS, one key every 100 ms ([below](#typing-text)) |
+| `--click-after SECS BTN MS [PORT]` | Hold mouse button `left`, `right` or `middle` for MS (default port 1) |
+| `--joy-after SECS BTN MS [PORT]` | Hold a joystick/CD32-pad control for MS on port 1-4 (default port 2; 3 and 4 are the parallel-port adapter's sockets) |
+| `--mouse-after SECS DX DY [PORT]` | Move the mouse by a relative delta (DX, DY) (default port 1) |
+| `--mouse-to-after SECS X Y [PORT]` | Steer the sprite 0 pointer to screen pixel (X, Y) (default port 1) |
+| `--pot-after SECS X Y [PORT]` | Set an analogue paddle/pot position, 0-255 per axis (default port 2) |
 | `--pen-after SECS X Y [PORT]` | Hold the light pen over pixel (X, Y), the `--mouse-to-after` coordinates; a negative coordinate lifts it off (default: the port with the pen) |
 | `--insert-disk-after SECS DFN PATH` | Insert a disk image into `df0`..`df3` |
-| `--defer-disk-insert SECS DFN` | Delay insertion of configured disk until SECS |
-| `--insert-cd-after SECS PATH` | Swap CD image (`.cue`, `.iso`, `.nrg`, `.chd`) in CD drive |
-| `--freeze-after SECS` | Trigger freezer cartridge button (`--cartridge hrtmon`): HRTMon takes over at SECS |
+| `--defer-disk-insert SECS DFN` | Start with DFN empty and insert its configured disk at SECS |
+| `--insert-cd-after SECS PATH` | Swap the CD image (`.cue`, `.iso`, `.nrg`, `.chd`) in the machine's CD drive |
+| `--freeze-after SECS` | Press the freezer cartridge's button (`--cartridge hrtmon`): HRTMon takes over at SECS |
 | `--expect-screenshot SECS PATH [TOLERANCE]` | Compare the frame at SECS with a PNG ([above](#screenshot-expectations)) |
-| `--script FILE` | Execute script file containing input directives |
-| `--record-input PATH` | Record all inputs to script file on exit |
-| `--coverage FILE` | Write lcov line/function coverage of the `--run` program to FILE when it exits or the run ends |
-| `--coverage-source-map FROM=TO` | Rewrite a source path prefix in the coverage file (repeatable) |
+| `--script FILE` | Read scripted-input directives from FILE ([below](#input-recording-and-script-files)) |
+| `--record-input PATH` | Record all machine-bound input for the whole run and write it as a script to PATH on exit |
 
-Key identifiers can be raw key codes (`0x45`) or standard names (`ctrl`, `lalt`,
-`lami`, `f1`, `esc`, alphanumeric characters).
+KEY is a raw key code in decimal, `0x45` or `$45` form, or a name:
+letters, digits, `space`, `return`, `tab`, `esc`, `del`, `backspace`,
+`up`/`down`/`left`/`right`, `f1`-`f10`, `shift`/`lshift`/`rshift`, `caps`,
+`ctrl`, `lalt`/`ralt` and `lami`/`rami`. Names ignore case. The
+`--joy-after` controls are `up`, `down`, `left`, `right`, `red` (or `fire`),
+`blue`, and the CD32 pad's `green`, `yellow`, `play`, `rwd` and `ffw`.
 
 (typing-text)=
 ### Typing text
@@ -215,9 +235,9 @@ would make on a US Amiga keyboard: letters, digits and the punctuation on
 the key caps, with Shift held for upper case and shifted symbols. `\n` is
 Return, `\t` Tab, `\e` Esc, `\b` Backspace, and `\\` a literal backslash;
 characters the US keymap has no key for are an error. Keys are paced in
-emulated time (each held 50 ms, one key every 100 ms, Shift a frame ahead of
-the key it qualifies), which the keyboard MCU's ten-event type-ahead buffer
-and the guest's keyboard driver take in their stride:
+emulated time (each held 50 ms, one key every 100 ms, Shift 20 ms ahead of
+the key it qualifies), a rate the keyboard MCU's ten-event type-ahead buffer
+and the guest's keyboard driver keep up with:
 
 ```sh
 ./target/release/copperline --config workbench.toml --noaudio \
@@ -244,14 +264,15 @@ parallel-port four-player adapter (`--parallel joystick-adapter`) are ports
 
 `--freeze-after` requires an enabled cartridge (`--cartridge hrtmon` or
 `[cartridge] model`, see [Configuration](configuration.md#freezer-cartridge)).
-The monitor screen is captured by subsequent `--screenshot-after` commands,
-and `--save-state-after` snapshots taken inside the monitor resume directly
-within it. Input recordings store freeze events as `freeze-after SECS`.
+Later `--screenshot-after` captures show the monitor screen, and a
+`--save-state-after` snapshot taken inside the monitor resumes inside it.
+Input recordings store freeze events as `freeze-after SECS`.
 
 (input-recording-and-script-files)=
 ### Input scripts and recording
 
-Input sequences can be stored in text files (one command per line without leading dashes):
+An input script is a text file of directives, one per line, written like
+the flags without their leading dashes:
 
 ```text
 # Automated test script
@@ -264,8 +285,15 @@ expect-screenshot 100.0 "expected/level.png" 0.001
 freeze-after 120.0
 ```
 
-`type` (also spelled `type-after`) and `expect-screenshot` take the same
-arguments as their flags.
+The accepted directives are `press-after`, `key-after` (also spelled
+`hold-key-after`), `type` (also `type-after`), `click-after`, `joy-after`,
+`mouse-after`, `mouse-to-after`, `pot-after`, `pen-after`,
+`insert-disk-after`, `defer-disk-insert`, `insert-cd-after`,
+`freeze-after` and `expect-screenshot`, each taking the same arguments as
+its flag. Other flags, including `--screenshot-after` and
+`--save-state-after`, are not accepted in a script, and a script cannot
+include another. Blank lines and lines starting with `#` are ignored, and
+double quotes keep a token with spaces (such as a path) together.
 
 Run with `--script`:
 
@@ -275,16 +303,20 @@ Run with `--script`:
 ```
 
 Host clipboard sharing is off unless asked for, windowed or headless (see
-`[clipboard]` in [Configuration](configuration.md#clipboard)). It fits a
-services board, so it is part of the machine: replay a recording made in a
-window that had it on with `--clipboard` so the headless machine matches
-(headless, the bridge never reads the host clipboard, so the replay stays
-deterministic).
+`[clipboard]` in [Configuration](configuration.md#clipboard)). Sharing fits
+a services board, so it is part of the machine. To replay a recording made
+in a window that had sharing on, pass `--clipboard` so the headless machine
+matches; a headless run never reads the host clipboard, so the replay stays
+deterministic.
 
 To record an interactive session to a script file:
 
-- Press `Cmd+Shift+R` (macOS) or `Alt+Shift+R` (Linux/Windows) in the emulator window.
-- Or launch with `--record-input /tmp/session.clscript`.
+- Press `Cmd+Shift+R` (macOS) or `Alt+Shift+R` (Linux/Windows) in the
+  emulator window to start, and again to stop. The script is written as
+  `copperline-input-<YYYYMMDDHHmmSS>.clscript` in the recordings folder
+  (see [Recording input](ui.md#recording-input)).
+- Or launch with `--record-input /tmp/session.clscript`, which records the
+  whole run and writes the file on exit.
 
 ## Setting a deterministic real-time clock (RTC)
 
@@ -297,14 +329,25 @@ To test date- and time-dependent guest software, seed the RTC with a fixed times
   --screenshot-after 45 /tmp/clock.png
 ```
 
-Use `--rtc-frozen` to hold the RTC at the initial seed without advancing.
+`--rtc-time` takes Unix seconds or `"YYYY-MM-DD HH:MM[:SS]"` and fits a
+battery clock if the machine has none. The clock then ticks in emulated
+time, so every run boots to the same moment. Use `--rtc-frozen` to hold
+the RTC at the seed without advancing. Kickstart 2.0 and later load the
+system time from the battery clock at boot; Kickstart 1.3 needs
+`SetClock LOAD` in the startup-sequence. A
+[control protocol](../debugger/control.md) session can also read, move,
+freeze and resume the clock mid-run with `rtc.get` and `rtc.set`.
 
 ## Audio capture and stem separation
 
 - `--noaudio`: Run silently.
-- `--audio-wav PATH`: Write mixed stereo output to a 32-bit float 44.1 kHz WAV file.
-- `--audio-stems DIR --audio-stems-mode LIST`: Export separate WAV stems into `DIR`.
-  `LIST` is a comma-separated combination of:
+- `--audio-wav PATH`: Write the mixed stereo output to a 32-bit float
+  44.1 kHz WAV file in emulated time, instead of playing it.
+- `--audio-stems DIR --audio-stems-mode LIST`: Write separate WAV stems into
+  `DIR` instead of playing the output. `--audio-stems` and `--audio-wav`
+  cannot be combined. Without `--audio-stems-mode`, the list comes from
+  `[audio] stem_granularity` in the configuration. `LIST` is a
+  comma-separated combination of:
   - `master`: Master mix (`DIR/master.wav`).
   - `source`: Individual audio sources conditionally generated based on configured
     hardware: `DIR/paula.wav` and `DIR/drivesounds.wav` are always created, while
@@ -313,20 +356,29 @@ Use `--rtc-frozen` to hold the RTC at the initial seed without advancing.
     `--load-state`, additional source files are created because the restored
     machine may have different hardware; unused sources produce silent files.
   - `channel`: Individual physical hardware channels (`DIR/paula-0.wav` through `DIR/paula-3.wav`).
+- `--profile-live-audio SECS`: Run a windowless Paula-to-host-audio
+  profiling workload for SECS seconds and exit; combine it with
+  `COPPERLINE_AUDIO_PROFILE=1` for live-audio counters (see
+  [Peripherals](../internals/peripherals.md)).
 
 ## Benchmarking CPU performance
 
-Measure host emulation throughput without rendering to a window:
+Measure host emulation throughput without a window:
 
 ```sh
 ./target/release/copperline --config demo.toml --benchmark-until 30
 ```
 
-The emulator runs unthrottled for 30 emulated seconds, prints execution metrics
-(elapsed host time, emulated time, average FPS), and exits.
+The emulator runs unthrottled until the absolute emulated time 30 s (after
+`--load-state`, the target must lie beyond the state's own time), then
+reports the emulated and host time taken, the frame count and rate, the
+p50/p90/p99/max host time per frame, and every frame that took longer than
+20 ms, and exits. Live audio is off unless `--audio` is given.
 
-`--benchmark-until` cannot be combined with scheduled screenshots, frame dumps,
-save-state writes, input events, floppy inserts, or input recording.
+`--benchmark-until` cannot be combined with scheduled screenshots or
+expectations, frame dumps, GIF clips, save-state writes, scheduled input,
+scheduled floppy or CD inserts, input recording, `--exit-on-return`,
+`--profile-live-audio`, `--gdb` or `--control`.
 
 ## Automated compatibility testing (vAmigaTS)
 
@@ -342,12 +394,15 @@ cargo test --release --test vamiga_ts -- --ignored --nocapture
 
 Test options:
 
+- `COPPERLINE_VAMIGATS_FILTER=TEXT`: Run only the cases whose name contains TEXT.
 - `COPPERLINE_VAMIGATS_LIMIT=N`: Maximum tests to run.
-- `COPPERLINE_VAMIGATS_SECONDS=SECS`: Delay before screenshot (default: 9s).
+- `COPPERLINE_VAMIGATS_SECONDS=SECS`: Screenshot time for every case,
+  overriding each case's own wait from its shipped script (default 9 s).
 - `COPPERLINE_VAMIGATS_OUT=DIR`: Directory to save test screenshots.
 - `COPPERLINE_VAMIGATS_BASELINE=DIR`: Baseline directory for automated PNG comparison.
 - `COPPERLINE_VAMIGATS_VAMIGA=PATH`: Path to reference `VAHeadless` binary.
-
+- `COPPERLINE_VAMIGATS_VAMIGA_SETUP=SETUP`: Machine setup for every
+  reference run, instead of the one each case's script names.
 
 ## Importing a WinUAE state
 
@@ -356,3 +411,20 @@ AmigaStateFile, verifies the configured ROM, and skips one reconstructed
 frame. Scheduled times start on Copperline's new timeline. See
 [WinUAE state import](winuae-state.md) for commands, supported chunks and
 limits on using these states for frame profiling.
+
+## Debugging headless runs
+
+These interfaces are documented with the debugger:
+
+- The `COPPERLINE_DBG_*` environment variables add breakpoints,
+  watchpoints, instruction traces, Copper-list dumps and per-hit
+  screenshots to any run without changing its timeline
+  ([Headless debugger](../debugger/headless.md)).
+- `--waveform PATH` with `--wave-trigger`, `--wave-duration` and
+  `--wave-signals` writes a VCD chip-signal trace for GTKWave
+  ([Waveform export](../debugger/waveform.md)).
+- `--control ADDR` runs the machine under the JSON-RPC
+  [control protocol](../debugger/control.md), and `--gdb ADDR` under a
+  [GDB remote stub](../debugger/gdb.md). Each owns the run loop, so neither
+  combines with the scheduled capture and input flags; use the protocol's
+  own capture, state and input methods instead.

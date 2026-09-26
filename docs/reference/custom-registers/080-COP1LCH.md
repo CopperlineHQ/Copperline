@@ -3,7 +3,7 @@ Offset: $080
 Access: write
 Chipset: OCS/ECS/AGA
 
-Sets the upper word of the COP1 pointer.
+Sets the upper word of the Copper list 1 address.
 
 ## Bitfields
 
@@ -11,4 +11,3 @@ Sets the upper word of the COP1 pointer.
 - Bits 15-5: Ignored.
 
 The usable address range also depends on the fitted Agnus and chip RAM.
-

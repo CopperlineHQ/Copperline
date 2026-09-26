@@ -5,8 +5,10 @@ idea applied consistently: **the chip bus is a single resource arbitrated
 per colour clock (CCK), and everyone pays for their slots.** Reference
 numbers come from real hardware via the `timing-test/` disk. The Copper
 and blitter timing models are documented in full below; the 68000 prefetch
-model is in [](cpu.md). Every rule here is backed by named regression tests in
-the inline suites (`src/chipset/copper.rs`, `blitter.rs`, `src/bus.rs`).
+model is in [](cpu.md). Every rule here is backed by named regression tests
+(the inline suites in `src/chipset/copper.rs` and `src/chipset/blitter.rs`,
+plus `src/bus/tests.rs` and `src/video/bitplane/tests.rs`), and many by a
+golden probe render (see [](#cross-checking-against-hardware)).
 
 ## Chip-bus arbitration
 
@@ -42,7 +44,7 @@ disk, which is equivalent because their fixed slots never overlap.)
 For FMODE=0 fetches (OCS/ECS, and AGA with a 1-word fetch quantum) the
 bitplane decision (step 5) is driven by the Agnus DDF sequencer flop model
 (`src/chipset/ddf_sequencer.rs`, walked per line by `src/bus/ddf_line.rs`):
-DDFSTRT and DDFSTOP are comparator EDGES that set/clear flip-flops, not a
+DDFSTRT and DDFSTOP are comparator *edges* that set/clear flip-flops, not a
 value range. A stop request drains through one final fetch unit (which
 applies the modulos per plane), the hardwired window ($18/$D8, HARDDIS
 relaxes the stop to $E0) gates starts and forces stops, and the flop state
@@ -58,15 +60,16 @@ lines fetch on alternating rasters with the picture sitting linearly left
 of the standard grid (its early words run through the left border). The
 renderer honours this through the captured run geometry: a below-$18 run
 origin keeps its raw fetch grid, and a line without a captured fetch
-paints nothing (vAmigaTS Agnus/DDF/DDF/oldhwstop3/4 A500 photos). For a
-line with no mid-line sequencer writes, the walked fetch plan is keyed on
-the complete carried flop state, masked DDF registers, line geometry,
-chip revision and hard-stop mode. An identical key reuses the preceding
-line's immutable slots and end state; the ordinary static walk is
-allocation-free. DDFSTRT/DDFSTOP/BPLCON0/DMACON/DIW writes invalidate that
+paints nothing (vAmigaTS Agnus/DDF/DDF/oldhwstop3/4 A500 photos).
+
+For a line with no mid-line sequencer writes, the walked fetch plan is
+keyed on the complete carried flop state, masked DDF registers, line
+geometry, chip revision and hard-stop mode. An identical key reuses the
+preceding line's immutable slots and end state; the ordinary static walk
+is allocation-free. DDFSTRT/DDFSTOP/BPLCON0/DMACON/DIW writes invalidate that
 plan and rebuild the affected line (DDF writes commit to the comparators
 four colour clocks after the write slot; an old DDFSTOP still fires on its
-commit clock, an old DDFSTRT does not - vAmiga's sequencer semantics,
+commit clock, an old DDFSTRT does not -- vAmiga's sequencer semantics,
 hardware-verified in aggregate by the vAmigaTS
 Agnus/DDF/DDF/oldhwstop1-4 A500 photos). Because the complete initial state
 is in the key, a run carried across horizontal blanking or a vertical-window
@@ -74,6 +77,7 @@ transition cannot accidentally reuse an ordinary interior line. A
 mid-row BPLCON0 change switches the fetch-unit slot layout from its commit
 clock; word addressing is unit-based, so late-enabled planes keep their
 word positions and earlier words stay zero.
+
 The lo-res fetch unit is eight colour clocks with eight usable DMA slots.
 OCS/ECS Agnus drives six of them (slot order 4,6,2,3,5,1 at unit offsets
 1,2,3,5,6,7), leaving offsets 0 and 4 free for the Copper/blitter/CPU --
@@ -81,6 +85,7 @@ which is why lo-res tops out at six bitplanes there. Alice drives those two
 remaining slots once BPLCON0 asks for more than six planes (plane 8 at
 offset 0, plane 7 at offset 4, giving the full order 8,4,6,2,7,3,5,1), so an
 eight-bitplane AGA lo-res screen leaves no spare bitplane slot in the unit.
+
 Wide-FMODE (quantum > 1) fetches keep the memoized value-window plan: the
 effective DDF window, fetch cadence, and per-plane fetch-order mask live in
 a `BitplaneSlotPlan` keyed on the register inputs (`BitplaneSlotKey`,
@@ -94,10 +99,10 @@ calculation for the rest of that line. If a delayed BPLCON0 or DMACON change
 crosses the line boundary, the following line also remains dynamic until the
 delayed value has taken effect. A restored save state likewise keeps the
 remainder of its partial line dynamic, then republishes from the next
-unchanged line.
-Wide-FMODE lo-res slots are packed into the first eight CCKs of each
-16/32-CCK fetch unit; the rest of the unit remains available to later
-arbitration priorities.
+unchanged line. Wide-FMODE lo-res slots are packed into the first eight
+CCKs of each 16/32-CCK fetch unit; the rest of the unit remains available
+to later arbitration priorities.
+
 The value-window model still honours the DDF start comparator's single-cycle
 match. A DDFSTRT write that moves the match position to the current colour
 clock or behind the beam, before the position it replaces has fired, leaves
@@ -166,37 +171,32 @@ back-pressure rule are detailed under [](#cpu-contention) below.
 
 ### Sprite DMA control rewrites
 
-Sprite DMA fetches POS/CTL at the fixed pair slots, then data words for
-the active line. Standard hard vertical blank suppresses those fetches until
-PAL line $19 or NTSC line $14, so frame-start SPRxPT writes made before that
-boundary still name a memory descriptor rather than retargeting a descriptor
-that could not yet have been fetched. Software can still rewrite
-SPRxPOS/SPRxCTL while a descriptor is pending or before a later pair slot to
-reposition an already active sprite on that scanline. Those writes update the
-live horizontal and vertical comparators, but they do not restart the sprite
-data stream: the
-data pointer stays with the descriptor that armed the sprite, and active
-row offsets remain relative to that descriptor. Copperline therefore keeps
-a runtime-only data-origin VSTART alongside the live comparator VSTART,
-preserving it across active POS/CTL rewrites while still using the
-rewritten HSTART for the line. SPRxPT rewrites on a later beam line while a
-descriptor is still pending retarget that descriptor's data stream; same-line
-rewrites after the descriptor fetch restart from a memory descriptor on the
-next sprite slot. Directly armed register sprites use the same runtime origin
-marker when an after-slot SPRxPT write refreshes a data stream instead of a
-memory descriptor. The runtime origin is skipped in save states to preserve
-the fixed bincode layout; after load, retained Denise armed state and the
-next after-slot SPRxPT low-word write reconstruct this case for subsequent
-full frames.
-Future save-state versioning should serialize it if mid-line sprite-DMA
-resume accuracy is tightened. Tests:
+Sprite DMA fetches POS/CTL at a channel's fixed pair slots on its vstop
+line, and DATA/DATB on the lines between vstart and vstop; the
+register-level channel model is described in [](chipset.md). Standard hard
+vertical blank suppresses those fetches until PAL line $19 or NTSC line
+$14, so SPRxPT writes made before that boundary set where the field's first
+control-word fetch reads rather than retargeting words that could not yet
+have been fetched. Software can rewrite SPRxPOS/SPRxCTL while a sprite is
+pending, or before a later pair slot, to reposition an already active
+sprite on that scanline. Those writes update the channel's register copies
+and vertical comparators (re-evaluated at once when they land on the
+matching line), but they leave SPRxPT alone: the data stream continues
+from the live pointer, and only the rewritten HSTART applies from that
+line. An SPRxPT write while a sprite is pending or armed retargets the
+next fetched data words, including for a sprite armed directly by CPU
+POS/CTL writes. The whole per-channel state is chip state and is
+serialized in save states. Tests:
 `pending_sprite_control_rewrite_preserves_descriptor_data_origin`,
 `active_sprite_control_rewrite_preserves_descriptor_data_origin`,
 `pending_descriptor_sprite_pointer_write_retargets_data_stream`,
 `after_slot_armed_sprite_pointer_write_seeds_dma_data_stream`.
 
 Beam-timed SPRxPOS writes are replayed in Denise's horizontal-comparator
-domain, seven colour clocks ahead of the normal register-output position.
+domain, seven colour clocks ahead of the normal register-output position
+(`SPRITE_REGISTER_WRITE_PIPELINE_CCK` in `src/video/bitplane.rs`). Copper
+writes use three, which takes back out the four-clock WAIT-comparator
+lookahead already in the Copper's landings.
 This matters for manual sprite reuse with sprite DMA disabled: Copper lists
 can write consecutive SPRxPOS values whose HSTARTs exactly abut. SPRxDATA
 and SPRxDATB writes update Denise's data latches at their ordinary beam
@@ -329,11 +329,11 @@ models COLORxx on Denise's final palette/output phase, one lores pixel
 ahead of writes that feed delayed shifter/control paths. OCS Denise (8362)
 and ECS Denise (8373) share this timing; the only OCS/ECS colour-path
 difference is the OCS 12-bit value mask. (AGA Lisa delays colour changes by
-one hires pixel relative to OCS/ECS; the AGA replay adds that one framebuffer
-sample after the common COLOR write anchor.) AGA BPLCON4's sprite palette-base byte uses Lisa's
-earlier sprite colour-lookup path at `(hpos - $36) * 4`
-(`SPRITE_PALETTE_CONTROL_HPOS_FB0`), one lores pixel ahead of ordinary
-COLORxx replay. Tests:
+one hires pixel relative to OCS/ECS; the AGA replay adds that one
+framebuffer sample after the common COLOR write anchor.) AGA BPLCON4's
+sprite palette-base byte uses Lisa's earlier sprite colour-lookup path at
+`(hpos - $36) * 4` (`SPRITE_PALETTE_CONTROL_HPOS_FB0`), one lores pixel
+ahead of ordinary COLORxx replay. Tests:
 `copper_move_writes_visible_registers_on_second_dma_slot`,
 `copper_move_spends_four_color_clocks_leaving_alternate_cycles_free`,
 `color_register_writes_use_final_output_position`.
@@ -351,7 +351,7 @@ colour clock, landing on the `pos.pixel()` that `Denise::pokeCOLORxx`
 uses. A saturated segment position (a write recorded past the display
 window) keeps the register-domain position so it cannot be dragged back
 into the visible line. Regression example: Hollywood Poker Pro draws a HAM
-photo and an ordinary 6-bitplane scoreboard on the same scanlines and
+photo and an EHB (6-bitplane) scoreboard on the same scanlines and
 clears HAM at `WAIT hp=$A2`; in the generic domain the switch landed 26
 lo-res pixels late and the scoreboard's left 24 columns decoded as HAM
 modify-blue. Tests: `ham_select_lands_in_the_colour_write_domain`, and the
@@ -529,7 +529,8 @@ are treated as deferred by draining first. Tests:
 ### Micro-cycle stall classes
 
 Non-bus blitter cycles come in two hardware classes, mirrored from
-vAmiga's micro-instructions and encoded as `BlitSlotClass`:
+vAmiga's micro-instructions and encoded as `BlitSlotClass::BusFree` and
+`BlitSlotClass::Internal` (bus-access cycles are `BlitSlotClass::Bus`):
 
 - **Bus-free** cycles (vAmiga BUSIDLE: the D pipeline bubble, area
   fill's extra idle cycle, the BLT_STRT startup cycles, a line blit's
@@ -586,18 +587,19 @@ Tests: `blithog_clear_busy_blitter_yields_to_cpu_only_after_starvation`,
 `bltpri_stalls_cpu_chip_access_through_blitter_access_cycles`.
 
 The Frame Analyzer's CPU wait view (and the `cpu` record of a
-`profile.start` export) attributes every colour clock the CPU spends in
-this wait loop to the case that denied it: fixed DMA (`refresh`,
-`bitplane`, `sprite`, `disk`, `audio`), the Copper's access clock,
-`blitter` for the nice hold before the counter yields, `blitter_nasty` for
-a BLTPRI-set blitter including the warm-up fence (where the slot's recorded
+`profile.start` export) attributes every colour clock the CPU spends in this
+wait loop to the case that denied it: fixed DMA (`refresh`, `bitplane`,
+`sprite`, `disk`, `audio`), the Copper's access clock (`copper`), `blitter`
+for the nice hold before the counter yields, `blitter_nasty` for a
+BLTPRI-set blitter including the warm-up fence (where the slot's recorded
 owner is idle), and `port` for the 020+ chip port's two-clock turnaround,
 which is a wait on the CPU's own bus unit rather than a denial. The class is
 taken before each missed clock from the arbitration view the waiting access
 is subject to: a synchronous grant sees the CPU's view (fence and yield
 included); a posted 020+ write drains through the ordinary arbitration,
 where a busy blitter keeps every access cycle. It is recorded on the cold
-bus-observer path, so arming it leaves the timeline untouched. Tests: `frame_analyzer_attributes_cpu_wait_to_nice_blitter`,
+bus-observer path, so arming it leaves the timeline untouched. Tests:
+`frame_analyzer_attributes_cpu_wait_to_nice_blitter`,
 `frame_analyzer_attributes_cpu_wait_to_bltpri_fence`.
 
 The analyzer has two recording levels. The cheap level keeps the one-byte
@@ -708,14 +710,15 @@ late and dominated the vAmigaTS cputim/irqtim divergence.
 ## Beam-register readback
 
 Live VHPOSR reads expose a pipelined beam position, not the exact internal
-counter. Copperline reports the horizontal byte three colour clocks ahead of
-the internal Agnus counter at the CPU-visible register-read point, while the
-first two reported positions of a new line still carry the previous vertical
-line number. vAmiga models the same hardware quirk as a five-cycle lead at its
-peek point; Copperline's smaller residual lead accounts for the chip-bus grant
-already advancing the beam before `read_vhposr` samples it. The low byte is raw
-colour clocks, not half clocks. This is visible in timing-test rows 19/20/22/27
-and in line-wrap polling loops that read VHPOSR immediately after INTREQR bits
+counter. Copperline reports the horizontal byte three colour clocks
+(`VHPOSR_LOOKAHEAD_CCK`) ahead of the internal Agnus counter at the
+CPU-visible register-read point, while the first two reported positions of a
+new line still carry the previous vertical line number. vAmiga models the
+same hardware quirk as a five-cycle lead at its peek point; Copperline's
+smaller residual lead accounts for the chip-bus grant already advancing the
+beam before `read_vhposr` samples it. The low byte is raw colour clocks, not
+half clocks. This is visible in timing-test rows 19/20/22/27 and in
+line-wrap polling loops that read VHPOSR immediately after INTREQR bits
 become visible.
 
 ## Real-time pacing
@@ -763,10 +766,11 @@ which advances the core and calls `thread::sleep` in
 device clock). During live-audio startup and rebuffering, the pacer treats the
 unfilled prebuffer as additional required lead; the large-stall self-heal
 allows for that lead so it does not cancel the refill as if it were a host
-pause. The `copperline-render` worker ([](architecture.md)) is a
-throughput thread, not a latency one, and is left at normal priority. When the
-host is busy, a scheduler that preempts the pacer shows up as frame stutter,
-and one that preempts the audio callback shows up as an audible underrun.
+pause. The `copperline-render` and `copperline-present` workers
+([](architecture.md)) are throughput threads, not latency ones, and are
+left at normal priority. When the host is busy, a scheduler that preempts
+the pacer shows up as frame stutter, and one that preempts the audio
+callback shows up as an audible underrun.
 
 `[emulation] realtime_priority` (off by default; `COPPERLINE_REALTIME_PRIORITY`
 overrides it for one run) asks the OS to schedule those two threads above
@@ -789,6 +793,7 @@ The pacer sleeps between work chunks rather than spinning, so even the
 strongest scheduling class it can land in still yields the CPU and cannot
 starve the host -- which is why elevating it is safe to offer.
 
+(cross-checking-against-hardware)=
 ## Cross-checking against hardware
 
 `timing-test/` is a bootable disk that measures CPU and chip-bus operation
@@ -798,3 +803,25 @@ and real Amigas; several timing fixes (IRQ latency, the area-fill C slot)
 were validated this way. When changing the timing model, update the
 corresponding reference doc and add a named regression test for the
 hardware behaviour.
+
+Behaviours with a natural on-screen form are also pinned by golden probe
+renders. Each probe is a bootblock program in `timing-test/` (the `.asm`
+source committed beside its assembled `.bin`) that takes over the machine
+and draws the behaviour as a static display: bars, strips, or marker
+positions. `tests/probe_golden.rs` wraps each `.bin` in a bootable ADF,
+boots it on the bundled AROS ROM, and compares a screenshot pixel for pixel
+with `timing-test/golden/<name>.png`; the probes named in this chapter
+(`ddfprobe-ddfmiss`, `ddfprobe-sotb`, `hamprobe-select`,
+`copprobe-jmpread`, ...) are among them. The suite runs only in release
+builds. After an intentional change, re-bless the goldens and review the
+render diff:
+
+```sh
+COPPERLINE_BLESS_GOLDEN=1 cargo test --release --test probe_golden
+```
+
+The two probes that display live E-clock-referenced counts (`timing-test`
+itself and `bltprobe-pace`) also move whenever the bundled AROS ROM is
+refreshed, because their phase depends on how long the ROM takes to boot.
+`timing-test/README.md` ("CI golden renders") has the details, including
+the vAmiga cross-checks behind individual probes.

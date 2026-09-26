@@ -12,10 +12,16 @@
 //! contents are NOT part of the state -- a guest that wrote to a hard
 //! drive after the snapshot will see those writes after restoring too.
 //!
-//! Save and load must happen at an emulated-frame boundary; mid-frame the
-//! beam-event capture buffers and slice accounting are not in a resumable
-//! state. The emulator wrappers (`Emulator::save_state`/`load_state`) are
-//! called from the frame loop between frames, which satisfies this.
+//! Save and load happen between CPU slices, at an instruction boundary,
+//! but need not fall on an emulated-frame boundary: the emulator wrappers
+//! (`Emulator::save_state`/`load_state`) run after a presentation quantum,
+//! which can end inside a field, so the serialized surface round-trips any
+//! inter-instruction point (history-dependent beam state such as the
+//! vertical display flop travels in the state for this reason). A load
+//! clears the transient render-capture buffers; one that resumes anywhere
+//! but the start of a field continues the hardware exactly from that beam
+//! position and blocks rendering of the partly reconstructed field, so the
+//! next complete field is the first one presented.
 //!
 //! File format: an 8-byte magic, a little-endian u32 container version, an
 //! uncompressed `DESC` chunk holding the `MachineDescriptor` that names the
@@ -1014,9 +1020,10 @@ mod tests {
     fn resumed_state_continues_byte_identically_under_active_workload() {
         let mut machine = blitting_workload_machine();
 
-        // Run past boot into the steady blit loop, then to a frame boundary
-        // (production saves happen there), then onto a colour clock where a
-        // blit is actually in flight. `step_slice(n)` is a budget that ends
+        // Run past boot into the steady blit loop, then to a frame boundary,
+        // then on to a colour clock where a blit is actually in flight (a
+        // production save can land mid-field too: a presentation quantum can
+        // end inside one). `step_slice(n)` is a budget that ends
         // early on MMIO preempts (every BLTSIZE write), so loop on the
         // retired-instruction count like the production frame loop does.
         let mut retired = 0usize;
