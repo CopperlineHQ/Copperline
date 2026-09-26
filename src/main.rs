@@ -133,9 +133,9 @@ fn validate_benchmark_args(cli: &CliArgs) -> Result<()> {
             "--benchmark-until cannot be combined with --record-input"
         ));
     }
-    if !cli.disk_insert_after.is_empty() {
+    if !cli.disk_insert_after.is_empty() || !cli.cd_insert_after.is_empty() {
         return Err(anyhow!(
-            "--benchmark-until cannot be combined with scheduled disk inserts"
+            "--benchmark-until cannot be combined with scheduled disk or CD inserts"
         ));
     }
 
@@ -236,10 +236,15 @@ fn validate_gdb_args(cli: &CliArgs) -> Result<()> {
     if cli.record_input.is_some() {
         return Err(anyhow!("--gdb cannot be combined with --record-input"));
     }
-    if !cli.disk_insert_after.is_empty() {
+    if !cli.disk_insert_after.is_empty() || !cli.cd_insert_after.is_empty() {
         return Err(anyhow!(
-            "--gdb cannot be combined with scheduled disk inserts"
+            "--gdb cannot be combined with scheduled disk or CD inserts"
         ));
+    }
+    // The stub owns the run loop and never watches the --run completion
+    // marker, so the guest's return code could not reach the exit status.
+    if cli.exit_on_return {
+        return Err(anyhow!("--gdb cannot be combined with --exit-on-return"));
     }
     Ok(())
 }
@@ -277,6 +282,12 @@ fn validate_control_args(cli: &CliArgs) -> Result<()> {
             "--control cannot be combined with --screenshot-after (use capture.screenshot)"
         ));
     }
+    if !cli.expect_screenshot.is_empty() {
+        return Err(anyhow!(
+            "--control cannot be combined with --expect-screenshot (use capture.screenshot \
+             and compare the image)"
+        ));
+    }
     if !cli.save_state_after.is_empty() {
         return Err(anyhow!(
             "--control cannot be combined with --save-state-after (use state.save)"
@@ -307,9 +318,15 @@ fn validate_control_args(cli: &CliArgs) -> Result<()> {
              and cartridge.freeze)"
         ));
     }
-    if !cli.disk_insert_after.is_empty() {
+    if !cli.disk_insert_after.is_empty() || !cli.cd_insert_after.is_empty() {
         return Err(anyhow!(
-            "--control cannot be combined with scheduled disk inserts (use media.*)"
+            "--control cannot be combined with scheduled disk or CD inserts (use media.*)"
+        ));
+    }
+    // Like --gdb, the server never watches the --run completion marker.
+    if cli.exit_on_return {
+        return Err(anyhow!(
+            "--control cannot be combined with --exit-on-return"
         ));
     }
     Ok(())
@@ -1118,6 +1135,9 @@ fn main() -> Result<()> {
     // --control-gui/--gdb-gui it rides along the windowed session instead.
     let coverage_capture =
         cli.coverage.is_some() && cli.control_gui.is_none() && cli.gdb_gui.is_none();
+    // --exit-on-return is the same kind of run: it ends by itself when the
+    // program returns, so on its own it needs no window either.
+    let exit_capture = cli.exit_on_return && cli.control_gui.is_none() && cli.gdb_gui.is_none();
     let headless_capture = !cli.screenshot_after.is_empty()
         || !cli.expect_screenshot.is_empty()
         || cli.frame_dump.is_some()
@@ -1125,7 +1145,8 @@ fn main() -> Result<()> {
         || cli.benchmark_until.is_some()
         || cli.gdb.is_some()
         || cli.control.is_some()
-        || coverage_capture;
+        || coverage_capture
+        || exit_capture;
     // A real drive on a bridge is the exception: its platter turns in
     // wall-clock time and cannot be hurried. Left unthrottled, the emulated
     // machine outruns it -- spinning the motor up and down faster than it can
@@ -1265,7 +1286,8 @@ fn main() -> Result<()> {
         || !cli.expect_screenshot.is_empty()
         || cli.frame_dump.is_some()
         || !cli.gif_after.is_empty()
-        || coverage_capture)
+        || coverage_capture
+        || exit_capture)
         && cli.control_gui.is_none()
         && cli.gdb_gui.is_none();
     // The warp-launch gate belongs to interactive sessions only: a capture
@@ -2599,6 +2621,41 @@ mod tests {
         Ok(())
     }
 
+    /// Every scheduled item the headless servers and the benchmark would
+    /// silently drop is refused instead: they own the run loop, and the App
+    /// that fires scheduled work never runs.
+    #[test]
+    fn server_and_benchmark_modes_refuse_work_they_would_drop() -> Result<()> {
+        let cd = ["--insert-cd-after", "5", "game.cue"];
+        let ret = ["--run", "prog", "--exit-on-return"];
+        let shot = ["--expect-screenshot", "5", "ref.png"];
+        for (mode, validate) in [
+            (
+                ["--benchmark-until", "10"],
+                validate_benchmark_args as fn(&CliArgs) -> Result<()>,
+            ),
+            (["--gdb", ":2345"], validate_gdb_args),
+            (["--control", ":7710"], validate_control_args),
+        ] {
+            for (extra, named) in [
+                (&cd[..], "CD inserts"),
+                (&ret[..], "--exit-on-return"),
+                (&shot[..], "--expect-screenshot"),
+            ] {
+                let args = parse(&[&mode[..], extra].concat())?;
+                let err = validate(&args).expect_err(&format!("{mode:?} accepted {extra:?}"));
+                assert!(err.to_string().contains(named), "{mode:?}: {err:#}");
+            }
+        }
+        // The windowed forms keep the App, which fires all three.
+        for mode in [["--control-gui", ":7710"], ["--gdb-gui", ":2345"]] {
+            let args = parse(&[&mode[..], &cd[..], &ret[..], &shot[..]].concat())?;
+            validate_gdb_args(&args)?;
+            validate_control_args(&args)?;
+        }
+        Ok(())
+    }
+
     #[test]
     fn gdb_mode_rejects_window_scheduled_work() -> Result<()> {
         let args = parse(&["--gdb", ":2345", "--press-after", "1.0", "ctrl"])?;
@@ -3142,6 +3199,9 @@ mod netplay_cli_tests {
             vec!["--audio-wav", "/tmp/netplay.wav"],
             vec!["--joy-after", "1", "red", "100", "2"],
             vec!["--mouse-after", "1", "3", "4"],
+            // A light pen is pointer input like the mouse: only the local
+            // machine would see it.
+            vec!["--pen-after", "1", "160", "100"],
         ] {
             assert!(args(&extra).is_err(), "accepted {extra:?}");
         }

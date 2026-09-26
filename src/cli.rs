@@ -1794,12 +1794,13 @@ where
             || !mouse_after.is_empty()
             || !mouse_to_after.is_empty()
             || !pot_after.is_empty()
+            || !pen_after.is_empty()
             || (role != Role::Host && !disk_insert_after.is_empty())
             || joy_after
                 .iter()
                 .any(|j| Some(usize::from(j.3)) != local_port)
         {
-            bail!("netplay supports cold boot, host floppy changes, local-port --joy-after and keyboard input; state loads, guest media changes, scripted mouse/analogue input, debugging, warp and recording are unavailable");
+            bail!("netplay supports cold boot, host floppy changes, local-port --joy-after and keyboard input; state loads, guest media changes, scripted mouse/analogue/light-pen input, debugging, warp and recording are unavailable");
         }
         if role == Role::Spectator && !press_after.is_empty() {
             bail!("a spectator sends no input: scripted keys, controllers and media changes are unavailable");
