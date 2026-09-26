@@ -11,8 +11,9 @@
 # pointed at that offline registry.
 #
 # Local build and test:
-#   flatpak install flathub org.freedesktop.Platform//25.08 \
-#       org.freedesktop.Sdk//25.08 org.freedesktop.Sdk.Extension.rust-stable//25.08
+#   flatpak remote-add --if-not-exists --user flathub \
+#       https://dl.flathub.org/repo/flathub.flatpakrepo
+#   flatpak install --user flathub org.flatpak.Builder
 #   ./packaging/flatpak/generate-cargo-sources.sh
 #   flatpak run org.flatpak.Builder --force-clean --user --install \
 #       --install-deps-from=flathub --repo=repo builddir \

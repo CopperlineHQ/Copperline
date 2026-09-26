@@ -1,7 +1,9 @@
 # Flatpak packaging
 
 These files build Copperline as a Flatpak and are also what a Flathub
-submission consists of.
+submission consists of. Copperline is not currently on Flathub (the first
+submission, flathub/flathub#9401, closed unmerged) and releases carry no
+`.flatpak` bundle, so building from here is the only way to get one.
 
 | File | Purpose |
 | --- | --- |
@@ -28,8 +30,8 @@ The file must exist beside the manifest before invoking `flatpak-builder`.
 ## Build and test locally (on Linux)
 
 ```sh
-flatpak install flathub org.freedesktop.Platform//25.08 \
-    org.freedesktop.Sdk//25.08 org.freedesktop.Sdk.Extension.rust-stable//25.08
+flatpak remote-add --if-not-exists --user flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+flatpak install --user flathub org.flatpak.Builder
 
 ./packaging/flatpak/generate-cargo-sources.sh
 
