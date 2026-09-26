@@ -4,11 +4,12 @@ Copperline's libretro core runs Amiga floppy software, CD32 discs and WHDLoad
 packages in RetroArch and other libretro frontends. It includes AROS boot ROMs
 and uses the desktop emulator's CPU, chipset, renderer and audio mixer.
 
-Supported content includes standard 880 KiB and 1760 KiB ADFs, ISO/CUE/CHD/NRG
-CD images, M3U playlists, and WHDLoad LHA/LZH/ZIP packages. CUE audio tracks
-can be BINARY or WAVE; this build does not enable MP3 track decoding. PAL and
-NTSC are available. The core does not accept extended ADFs, arbitrary
-hardfiles or desktop configuration files.
+Supported content includes standard 880 KiB ADFs, ISO/CUE/CHD/NRG CD images,
+M3U playlists, and WHDLoad LHA/LZH/ZIP packages. CUE audio tracks can be
+BINARY or WAVE; this build does not enable MP3 track decoding. PAL and NTSC
+are available. The core does not accept extended ADFs, 1760 KiB
+high-density ADFs (Copperline's floppy drives are double-density only),
+arbitrary hardfiles or desktop configuration files.
 
 ## Build and install
 
