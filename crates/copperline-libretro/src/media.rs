@@ -22,10 +22,12 @@ pub fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Copperline's floppy drives are double-density units, so the only ADF
+/// they load is a plain 880 KiB one.
 pub fn validate_adf(data: &[u8]) -> Result<()> {
     ensure!(
-        matches!(data.len(), 901_120 | 1_802_240),
-        "this core supports standard 880 KiB and 1760 KiB ADF images"
+        data.len() == copperline::floppy::ADF_SIZE,
+        "this core supports standard 880 KiB (double-density) ADF images only"
     );
     Ok(())
 }

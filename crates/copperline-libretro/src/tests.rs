@@ -612,6 +612,24 @@ fn disk_slots_no_disk_selection_and_write_protection() {
 }
 
 #[test]
+fn hd_adfs_are_refused_with_the_supported_size() {
+    // The drives are double-density units: an HD-sized ADF is refused
+    // here, naming what does load, rather than passed on to the machine.
+    let root = tempfile::tempdir().unwrap();
+    let dd = root.path().join("dd.adf");
+    let hd = root.path().join("hd.adf");
+    std::fs::write(&dd, vec![0; 901_120]).unwrap();
+    std::fs::write(&hd, vec![0; 1_802_240]).unwrap();
+    assert!(media::Disk::open(&dd, root.path()).is_ok());
+    let Err(error) = media::Disk::open(&hd, root.path()) else {
+        panic!("an HD ADF was accepted");
+    };
+    let error = error.to_string();
+    assert!(error.contains("880 KiB"), "{error}");
+    assert!(!error.contains("1760"), "{error}");
+}
+
+#[test]
 fn frontend_is_notified_of_runtime_video_timing_changes() {
     let root = tempfile::tempdir().unwrap();
     setup(root.path(), true, false);

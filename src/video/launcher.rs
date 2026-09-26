@@ -3791,6 +3791,15 @@ impl ImageWorkshop {
         }
     }
 
+    /// Whether the floppy described is one Copperline's own drives cannot
+    /// read (the Create Floppy page shows a warning). Every emulated drive
+    /// is a double-density unit: it answers the drive-ID poll as DD and
+    /// spins at the DD rate, so an HD image is made for another emulator
+    /// or a real Amiga with a high-density drive.
+    pub fn floppy_needs_hd_drive(&self) -> bool {
+        self.density == crate::diskimage::Density::Hd
+    }
+
     pub fn floppy_spec(&self) -> crate::diskimage::FloppySpec {
         crate::diskimage::FloppySpec {
             density: self.density,

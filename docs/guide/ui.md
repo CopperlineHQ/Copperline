@@ -952,7 +952,7 @@ so the window stays responsive while a large image is written.
 
 | Option | Effect |
 |---|---|
-| **Density** | `DD (880K)` or `HD (1.76M)`. Sets the image size: 901,120 or 1,802,240 bytes. |
+| **Density** | `DD (880K)` or `HD (1.76M)`. Sets the image size: 901,120 or 1,802,240 bytes. Copperline's floppy drives are double-density only and cannot use an HD image in either container, so the page shows a warning while HD is selected. Make HD images for another emulator, or for a real Amiga with a high-density drive. |
 | **Container** | `Standard ADF` writes the sectors in order. `Extended ADF` wraps them in the `UAE-1ADF` container, which stores one record per track. |
 | **Filesystem** | `Unformatted` leaves the image blank for the Amiga to format. `OFS` and `FFS` write a boot block, root block and bitmap. |
 | **DOSType** | The DOS type's options: `International` case folding, `Dir cache`, `Long names`. See **DOSType** below. |

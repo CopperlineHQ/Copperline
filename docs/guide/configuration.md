@@ -1734,8 +1734,12 @@ load time and always treated as write-protected; set `write_protected = false`
 on a plain ADF to allow write-through updates to the image file. A DMS archive
 is unpacked cylinder by cylinder into the DD image the disk was read from, so
 archives that repeat a cylinder (an advertising boot block ahead of the real
-one) or omit the cylinders that read back blank load normally; high-density
-DMS archives are rejected, matching the DD-only floppy support.
+one) or omit the cylinders that read back blank load normally.
+
+The emulated drives are double-density units, so high-density images are
+rejected: a 1,802,240-byte HD ADF, a high-density DMS archive, an IPF
+recorded at the HD cell rate, and a UAE extended ADF whose AmigaDOS tracks
+hold more than the 11 sectors a DD track carries.
 
 IPF (the SPS/CAPS preservation format) is decoded by Copperline itself rather
 than through the closed-source `capsimg` library, so every build reads IPF on

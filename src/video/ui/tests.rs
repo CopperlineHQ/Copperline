@@ -3495,16 +3495,20 @@ fn panels_render_into_their_rects() {
     draw(&mut frame, scale, &ui, None, None);
     save(&frame, "launcher-storage");
 
-    // The Create Image workshop: its two pages, and the geometry editor
-    // behind the hard-drive one.
-    for (tab, name) in [
-        (LauncherTab::CreateFloppy, "launcher-new-floppy"),
-        (LauncherTab::CreateHard, "launcher-new-hard"),
-        (LauncherTab::CreateGeometry, "launcher-new-geometry"),
+    // The Create Image workshop: its two pages (the floppy one again with
+    // HD picked, which adds the double-density-drives warning), and the
+    // geometry editor behind the hard-drive one.
+    use crate::diskimage::Density::{Dd, Hd};
+    for (tab, density, name) in [
+        (LauncherTab::CreateFloppy, Dd, "launcher-new-floppy"),
+        (LauncherTab::CreateFloppy, Hd, "launcher-new-floppy-hd"),
+        (LauncherTab::CreateHard, Dd, "launcher-new-hard"),
+        (LauncherTab::CreateGeometry, Dd, "launcher-new-geometry"),
     ] {
         let mut frame = vec![0u8; w * h * 4];
         let mut state = LauncherState::new(launcher::MachineSetup::default());
         state.tab = tab;
+        state.workshop.density = density;
         state.workshop.geometry_custom = true;
         let ui = UiState {
             menu_open: false,

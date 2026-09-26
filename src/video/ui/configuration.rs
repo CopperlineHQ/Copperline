@@ -3109,6 +3109,49 @@ pub(in crate::video::ui) fn draw_launcher(
             );
         }
     }
+    // The emulated floppy drives are double-density only, so an HD image
+    // is made for somewhere else: say so while HD is picked, before the file
+    // is written rather than when a drive fails to read it.
+    if state.tab == LauncherTab::CreateFloppy && state.workshop.floppy_needs_hd_drive() {
+        let note_top = launcher_row_y(
+            rect,
+            launcher::rows(
+                LauncherTab::CreateFloppy,
+                state.setup.parallel_device(),
+                state.setup.serial_mode(),
+                state.setup.midi_out_is_mt32(),
+                state.setup.midi_out_is_csynth(),
+            )
+            .len()
+                + 1,
+        ) + row_offset;
+        draw_panel_text(
+            frame,
+            launcher_pane_x(rect),
+            note_top,
+            "Warning: Copperline's floppy drives are double-density only.",
+            PANEL_TEXT_ACCENT,
+            1,
+            scale,
+        );
+        for (i, line) in [
+            "An HD image will not work in them. Make one for another",
+            "emulator, or for a real Amiga with a high-density drive.",
+        ]
+        .iter()
+        .enumerate()
+        {
+            draw_panel_text(
+                frame,
+                launcher_pane_x(rect) + 8,
+                note_top + 16 + i * 14,
+                line,
+                PANEL_TEXT,
+                1,
+                scale,
+            );
+        }
+    }
     // Status / error line.
     if let Some(status) = &state.status {
         let color = match status.kind {
