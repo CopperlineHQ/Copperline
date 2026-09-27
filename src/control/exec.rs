@@ -5789,6 +5789,78 @@ mod tests {
     }
 
     #[test]
+    fn profile_sample_overflow_is_reported_live_and_retained_after_stop() {
+        use crate::profile::samples::MAX_PENDING_SAMPLES;
+
+        for drain_frame in [false, true] {
+            let mut emu = test_emulator();
+            let mut ctx = SessionCtx::new();
+            let dir = profile_scratch(if drain_frame {
+                "overflow-drain"
+            } else {
+                "overflow-stop"
+            });
+            exec_core(
+                &mut emu,
+                &mut ctx,
+                &core(
+                    "profile.start",
+                    json!({
+                        "path": dir, "frames": 1, "samples": true,
+                    }),
+                ),
+            )
+            .unwrap();
+            for _ in 0..MAX_PENDING_SAMPLES + 64 {
+                emu.debug_step_realtime().unwrap();
+            }
+            let status = emu.profile_status_value();
+            assert_eq!(status["samples_buffer_limit"], MAX_PENDING_SAMPLES);
+            assert_eq!(status["samples_dropped"], 64);
+
+            if drain_frame {
+                for _ in 0..4 {
+                    emu.step_frame().unwrap();
+                }
+                let status = emu.profile_status_value();
+                assert_eq!(status["done"], true);
+                assert!(status["samples_dropped"].as_u64().unwrap() >= 64);
+                assert_eq!(status["samples_total"], MAX_PENDING_SAMPLES);
+            }
+            let dropped = emu.profile_status_value()["samples_dropped"].clone();
+            let stopped = exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStop).unwrap();
+            assert_eq!(stopped["samples_dropped"], dropped);
+            let summary: Value =
+                serde_json::from_slice(&std::fs::read(dir.join("profile.json")).unwrap()).unwrap();
+            assert_eq!(summary["samples_dropped"], dropped);
+            assert_eq!(summary["samples_buffer_limit"], MAX_PENDING_SAMPLES);
+            if drain_frame {
+                let jsonl = std::fs::read_to_string(dir.join("profile.jsonl")).unwrap();
+                let record: Value = serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
+                assert_eq!(record["samples_dropped"], dropped);
+            }
+            exec_core(
+                &mut emu,
+                &mut ctx,
+                &core(
+                    "profile.start",
+                    json!({
+                        "path": dir, "samples": true,
+                    }),
+                ),
+            )
+            .unwrap();
+            assert_eq!(
+                emu.profile_status_value()["samples_dropped"],
+                0,
+                "a new capture starts clean"
+            );
+            exec_core(&mut emu, &mut ctx, &CoreOp::ProfileStop).unwrap();
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
     fn profile_memory_snapshot_is_written_once_at_capture_start() {
         let mut emu = uaelib_emulator();
         emu.bus_mut().mem.chip_ram[0..4].copy_from_slice(&[1, 2, 3, 4]);

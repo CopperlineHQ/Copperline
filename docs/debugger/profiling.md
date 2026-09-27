@@ -42,6 +42,23 @@ The `frames` parameter defaults to 500 (about 10 seconds of PAL) and is
 capped at 100,000. When the frame budget is reached, recording stops by itself
 (`profile.status` reports `done`).
 
+Instruction sampling buffers at most 262,144 pending records (about 42 MiB on
+64-bit hosts), including interrupt records. If execution outpaces profile
+draining, the earliest pending records are kept and later samples are dropped
+until the buffer is drained. Copperline logs one warning per capture.
+`profile.status`, the `profile.stop` result, and `profile.json` expose
+`samples_buffer_limit` and the cumulative `samples_dropped` count; sampled
+`profile.jsonl` records also carry the cumulative drop count. A nonzero count
+means the instruction profile is incomplete, including its timing totals.
+The count survives buffer drains and the frame limit stopping the sampler;
+starting a new capture resets it. Bartman binary export fails on overflow
+instead of publishing an incomplete capture.
+
+This buffer limit also applies during long debugger steps and runs to a PC,
+which currently do not drain profiles or advance their capture frame limit.
+Use normal frame execution for instruction profiles, or stop profiling before
+those debugger operations.
+
 `registers` and `unwind` require `"samples": true`, and `relocation_bases` and
 `code_ranges` require `samples` or `coverage`. A `coverage` capture cannot run
 while a [`--coverage`](#guest-coverage) run is already counting.
