@@ -1846,6 +1846,18 @@ WHDLoad saves, a volume needing validation) gets the write-protect error.
 A delta CHD (one made against a parent image) is refused; flatten it with
 chdman first.
 
+A **VHD** attaches too: the Microsoft Virtual Hard Disk container WinUAE
+creates hardfiles in (and Windows Disk Management, Virtual PC, VirtualBox
+and `qemu-img` write). It is recognised by content, like the forms above,
+and both kinds of hardfile work inside it. A **fixed** VHD is a raw image
+with a 512-byte footer on the end; the footer is not part of the disk the
+guest sees. A **dynamic** VHD only holds the parts of the disk that have
+been written: the rest reads as zeros, and the file grows a block (2 MiB,
+usually) at a time as the guest writes somewhere new. Either way the
+guest's writes go back into the `.vhd`, as they do for an HDF, so the
+image stays usable in WinUAE. A differencing VHD (one holding only the
+changes to a parent image) is refused; merge it into its parent first.
+
 A path may also name a **host directory**: its tree is built into an
 in-memory volume at startup (volume name = directory name, files and
 subdirectories included; entries whose names cannot exist on an Amiga
@@ -2027,7 +2039,8 @@ Each `unitN` accepts everything `[ide]` paths do: RDB images, bare
 partition hardfiles (a synthesized RDB advertises a bootable `DHn`
 partition, named after the SCSI ID), gzip-compressed hardfiles (`.hdz`),
 CHD hard-disk images (`.chd`, writes kept in the `.chd.wov` overlay),
-and host directories built into in-memory FFS/OFS volumes -- including the
+fixed and dynamic VHDs (`.vhd`), and host directories built into in-memory
+FFS/OFS volumes -- including the
 `{ path = "...", name = "...", bootpri = N, filesystem = "..." }` table
 form that overrides a directory mount's volume name, filesystem, and the
 synthesized partition's boot priority. The HDD activity LED covers SCSI
@@ -2079,7 +2092,7 @@ It takes up to **seven units** (0-6), each in the same bare-path/table drive
 form as `[ide]`/`[scsi]`/`[lide]`: RDB images, bare partition hardfiles (the
 synthesized RDB names the bootable partition `DH0`..`DH6` after the unit
 number), gzip-compressed hardfiles (`.hdz`), CHD hard-disk images (`.chd`,
-writes kept in the `.chd.wov` overlay), and host directories built into
+writes kept in the `.chd.wov` overlay), VHDs (`.vhd`), and host directories built into
 in-memory FFS/OFS volumes, including the
 `{ path = "...", name = "...", bootpri = N, filesystem = "..." }` table form
 described under `[ide]`. The images go through the same shared hardfile
@@ -2133,7 +2146,7 @@ one channel, no ROM banking. None of the three wire an interrupt line --
 `lide.device` is a purely polling driver.
 
 `drive0`..`drive3` take the same bare-path/table form as `[ide]`/`[scsi]`
-(RDB images, bare partition hardfiles, `.hdz`, `.chd`, host directories, and the
+(RDB images, bare partition hardfiles, `.hdz`, `.chd`, `.vhd`, host directories, and the
 `{ path = "...", name = "...", bootpri = N, filesystem = "..." }` table), one
 key per slot in (channel, master/slave) order: `drive0` and `drive1` are
 channel 0's master and slave, `drive2` and `drive3` are channel 1's

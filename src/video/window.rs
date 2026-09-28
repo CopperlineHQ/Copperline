@@ -6344,7 +6344,7 @@ fn classify_dropped_media(path: &std::path::Path) -> DroppedMediaKind {
     match ext.as_deref() {
         Some("chd") if crate::harddrive::chd::is_hard_disk_chd(path) => DroppedMediaKind::HardDisk,
         Some("cue") | Some("iso") | Some("nrg") | Some("chd") => DroppedMediaKind::Cd,
-        Some("hdf") | Some("hdz") | Some("img") => DroppedMediaKind::HardDisk,
+        Some("hdf") | Some("hdz") | Some("vhd") | Some("img") => DroppedMediaKind::HardDisk,
         Some("rom") => DroppedMediaKind::Rom,
         // Every shape `package` accepts, or a dropped zip would be taken
         // for a disk image and handed to the floppy bay.

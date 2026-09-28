@@ -309,8 +309,8 @@ Disk images can be dropped anywhere on the emulator window:
   [WHDLoad booter](whdload.md), keeping any explicit machine choices.
   Dropped on the configuration screen they fill the **WHDLoad** page's
   game field instead; that screen refuses every other kind of drop.
-- **Hard disk images and Kickstart ROMs** (`.hdf`, `.hdz`, `.img`, a
-  hard-disk `.chd`, `.rom`) are not accepted as drops. Configure hard disks
+- **Hard disk images and Kickstart ROMs** (`.hdf`, `.hdz`, `.vhd`, `.img`,
+  a hard-disk `.chd`, `.rom`) are not accepted as drops. Configure hard disks
   in the machine configuration screen. To replace a running machine's ROM
   and cold-reset it, use **Load Kickstart ROM...** from the menu.
 

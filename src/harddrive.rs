@@ -6,9 +6,10 @@
 //! A unit opens from a raw HDF image file, from a gzip-compressed one (the
 //! `.hdz` convention), from a MAME CHD hard-disk image (`chd.rs`, read
 //! through the `chd` crate with guest writes kept in a copy-on-write
-//! sidecar), or from a host directory (built into an in-memory FFS or OFS
-//! volume at open time, caller's choice; see `dirfs.rs`). Bare partition
-//! hardfiles (a filesystem boot block at sector 0, no RDSK) get a
+//! sidecar), from a fixed or dynamic VHD (`vhd.rs`, the container WinUAE
+//! and Windows write), or from a host directory (built into an in-memory
+//! FFS or OFS volume at open time, caller's choice; see `dirfs.rs`). Bare
+//! partition hardfiles (a filesystem boot block at sector 0, no RDSK) get a
 //! synthesized RDB cylinder prepended so the ROM boot driver can mount them
 //! without pre-conversion.
 
@@ -19,10 +20,22 @@ use std::path::{Path, PathBuf};
 
 pub mod chd;
 mod session;
+mod vhd;
 use chd::ChdHardDisk;
 use session::SessionImage;
+use vhd::VhdHardDisk;
 
 pub const SECTOR_SIZE: usize = 512;
+
+/// The file extensions hard-disk images conventionally carry, in menu order.
+///
+/// Opening never looks at a name: gzip, CHD and VHD images are recognised
+/// by content and anything else is raw sectors, which is why an oddly-named
+/// image still attaches. This list exists only for the file dialogs, which
+/// hide whatever they do not list. It lives beside the opener so that a new
+/// container and its filter entry are one change, not a format that
+/// attaches when typed in but cannot be picked.
+pub const IMAGE_EXTENSIONS: &[&str] = &["hdf", "hdz", "vhd", "img", "bin", "chd"];
 
 /// Largest image a gzip-compressed hardfile may unpack to. Deflate has no
 /// random access, so the whole disk has to be held in memory rather than
@@ -53,6 +66,9 @@ enum Backing {
     /// A CHD hard-disk image: sectors decompressed on demand, writes in
     /// the overlay sidecar beside it (or refused, when there is none).
     Chd(Box<ChdHardDisk>),
+    /// A VHD: sectors found through its footer (and, for a dynamic disk,
+    /// its block table), writes into the file like a raw image's.
+    Vhd(Box<VhdHardDisk>),
     /// A real disk attached to the host. Presents 512-byte sectors like the
     /// others; the block size the media actually uses, and the privilege the
     /// open needed, are the device's own business.
@@ -215,6 +231,11 @@ impl<'de> serde::Deserialize<'de> for HardDriveImage {
                         })?;
                     }
                     Backing::Chd(Box::new(disk))
+                } else if vhd::is_vhd_file(&state.path).map_err(|e| reopen_error(&e))? {
+                    Backing::Vhd(Box::new(
+                        VhdHardDisk::open(&state.path, bus_name, true)
+                            .map_err(|e| reopen_error(&format!("{e:#}")))?,
+                    ))
                 } else {
                     Backing::File(
                         OpenOptions::new()
@@ -575,10 +596,10 @@ impl HardDriveImage {
     /// log messages. A synthesized RDB names itself (see
     /// [`default_rdb_identity`]); nothing a caller passes reaches it.
     /// The path may be a raw HDF image file, a gzip-compressed one (`.hdz`),
-    /// or a host directory, which is built into an in-memory FFS or OFS
-    /// volume at open time (`filesystem` picks which; irrelevant to every
-    /// other path form here, since an HDF/gzip image already carries its own
-    /// filesystem inside it). `volume_override` names that volume; when
+    /// a CHD or VHD image, or a host directory, which is built into an
+    /// in-memory FFS or OFS volume at open time (`filesystem` picks which;
+    /// irrelevant to every other path form here, since an image file already
+    /// carries its own filesystem inside it). `volume_override` names that volume; when
     /// `None` the directory name is used. It has no effect on an HDF, which
     /// carries its own label inside the image. `boot_pri` is the
     /// `de_BootPri` written into a synthesized RDB; it too is ignored by an
@@ -685,6 +706,12 @@ impl HardDriveImage {
                     // persistent drive gets (or creates) the overlay sidecar.
                     Backing::Chd(Box::new(ChdHardDisk::open(path, bus_name, !session)?))
                 }
+                None if vhd::is_vhd_file(path).map_err(|e| {
+                    anyhow::anyhow!("reading {bus_name} image {}: {e}", path.display())
+                })? =>
+                {
+                    Backing::Vhd(Box::new(VhdHardDisk::open(path, bus_name, !session)?))
+                }
                 None => Backing::File(
                     OpenOptions::new()
                         .read(true)
@@ -703,6 +730,7 @@ impl HardDriveImage {
                 .len(),
             Backing::Memory(image) => image.len() as u64,
             Backing::Chd(disk) => disk.total_sectors() * SECTOR_SIZE as u64,
+            Backing::Vhd(disk) => disk.total_sectors() * SECTOR_SIZE as u64,
             Backing::Session(_) => unreachable!("session backing is installed after validation"),
             #[cfg(not(target_arch = "wasm32"))]
             Backing::Device(device) => device.total_sectors() * SECTOR_SIZE as u64,
@@ -736,6 +764,13 @@ impl HardDriveImage {
                 .map_err(|e| anyhow::anyhow!("reading {bus_name} image {}: {e}", path.display()))?,
             Backing::Memory(image) => head.copy_from_slice(&image[..sniff_len]),
             Backing::Chd(disk) => {
+                for (lba, sector) in head.chunks_mut(SECTOR_SIZE).enumerate() {
+                    disk.read_sector(lba as u64, sector).map_err(|e| {
+                        anyhow::anyhow!("reading {bus_name} image {}: {e}", path.display())
+                    })?;
+                }
+            }
+            Backing::Vhd(disk) => {
                 for (lba, sector) in head.chunks_mut(SECTOR_SIZE).enumerate() {
                     disk.read_sector(lba as u64, sector).map_err(|e| {
                         anyhow::anyhow!("reading {bus_name} image {}: {e}", path.display())
@@ -827,6 +862,15 @@ impl HardDriveImage {
                     }
                     bytes
                 }
+                Backing::Vhd(mut disk) => {
+                    let mut bytes = vec![0; len as usize];
+                    for (lba, sector) in bytes.chunks_mut(SECTOR_SIZE).enumerate() {
+                        disk.read_sector(lba as u64, sector).map_err(|e| {
+                            anyhow::anyhow!("reading {bus_name} image {}: {e}", path.display())
+                        })?;
+                    }
+                    bytes
+                }
                 _ => unreachable!("only image files and directories are session sources"),
             };
             backing = Backing::Session(SessionImage::new(bytes, false));
@@ -903,7 +947,7 @@ impl HardDriveImage {
             Backing::Device(device) => !device.writable(),
             #[cfg(not(target_arch = "wasm32"))]
             Backing::PendingDevice(saved) => !saved.writable,
-            Backing::File(_) | Backing::Memory(_) => false,
+            Backing::File(_) | Backing::Memory(_) | Backing::Vhd(_) => false,
         }
     }
 
@@ -936,6 +980,7 @@ impl HardDriveImage {
             }
             Backing::Session(image) => image.read(file_lba, buf),
             Backing::Chd(disk) => disk.read_sector(file_lba, buf),
+            Backing::Vhd(disk) => disk.read_sector(file_lba, buf),
             #[cfg(not(target_arch = "wasm32"))]
             Backing::Device(device) => device.read_sector(file_lba, buf),
             #[cfg(not(target_arch = "wasm32"))]
@@ -981,6 +1026,7 @@ impl HardDriveImage {
             }
             Backing::Session(image) => image.write(file_lba, buf),
             Backing::Chd(disk) => disk.write_sector(file_lba, buf),
+            Backing::Vhd(disk) => disk.write_sector(file_lba, buf),
             #[cfg(not(target_arch = "wasm32"))]
             Backing::Device(device) => device.write_sector(file_lba, buf),
             #[cfg(not(target_arch = "wasm32"))]
@@ -1000,6 +1046,7 @@ impl HardDriveImage {
         match &mut self.backing {
             Backing::File(file) => file.flush(),
             Backing::Chd(disk) => disk.flush(),
+            Backing::Vhd(disk) => disk.flush(),
             _ => Ok(()),
         }
     }
@@ -1339,6 +1386,114 @@ mod tests {
         original.read_sector(7, &mut a).unwrap();
         assert_eq!(a, sector);
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn open_ide(path: &Path) -> HardDriveImage {
+        HardDriveImage::open(
+            path,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn fixed_vhd_bare_partition_gets_its_rdb_without_the_footer_in_the_way() {
+        // Opened as raw bytes the footer made this one sector longer than a
+        // whole number of cylinders, and the RDB could not be synthesized.
+        let bytes = bare_partition_bytes(2);
+        let path = temp_image("bare.vhd", &vhd::tests::fixed_vhd(&bytes));
+        let mut drive = open_ide(&path);
+        assert!(!drive.has_own_rdb());
+        assert_eq!(
+            drive.total_sectors(),
+            u64::from(CYL_SECTORS) + (bytes.len() / SECTOR_SIZE) as u64
+        );
+        let mut sector = vec![0u8; SECTOR_SIZE];
+        drive
+            .read_sector(u64::from(CYL_SECTORS) + 5, &mut sector)
+            .unwrap();
+        assert_eq!(&sector[..4], b"MARK");
+        // The file's last sector is the footer, not the disk's.
+        let last = drive.total_sectors() - 1;
+        drive.write_sector(last, &[0x5A; SECTOR_SIZE]).unwrap();
+        drive.flush().unwrap();
+        let file = std::fs::read(&path).unwrap();
+        assert_eq!(&file[file.len() - SECTOR_SIZE..][..8], b"conectix");
+        assert_eq!(
+            &file[file.len() - 2 * SECTOR_SIZE..file.len() - SECTOR_SIZE],
+            &[0x5A; SECTOR_SIZE][..]
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn dynamic_vhd_attaches_and_survives_a_save_state_round_trip() {
+        assert!(
+            IMAGE_EXTENSIONS.contains(&"vhd"),
+            "the file dialogs must offer what attaches"
+        );
+        // Named .hdf: it is the content that decides.
+        let path = temp_image(
+            "dynamic.hdf",
+            &vhd::tests::empty_dynamic_vhd(8 << 20, 2 << 20),
+        );
+        let mut rdsk = vec![0u8; SECTOR_SIZE];
+        rdsk[..4].copy_from_slice(b"RDSK");
+        {
+            let mut drive = open_ide(&path);
+            assert_eq!(drive.total_sectors(), (8 << 20) / SECTOR_SIZE as u64);
+            drive.write_sector(0, &rdsk).unwrap();
+        }
+        // Reopened, the RDSK written at sector 0 is found where the guest
+        // put it, so no RDB is synthesized over the top.
+        let mut original = open_ide(&path);
+        assert!(original.has_own_rdb());
+        let mut sector = vec![0u8; SECTOR_SIZE];
+        original.read_sector(0, &mut sector).unwrap();
+        assert_eq!(sector, rdsk);
+
+        let encoded = bincode::serialize(&original).unwrap();
+        let mut restored: HardDriveImage = bincode::deserialize(&encoded).unwrap();
+        assert!(matches!(restored.backing, Backing::Vhd(_)));
+        assert_eq!(restored.total_sectors(), original.total_sectors());
+        let lba = 3 * (2 << 20) / SECTOR_SIZE as u64 + 1;
+        restored.write_sector(lba, &[0xA5; SECTOR_SIZE]).unwrap();
+        restored.flush().unwrap();
+        original.read_sector(lba, &mut sector).unwrap();
+        assert_eq!(sector, [0xA5; SECTOR_SIZE]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn session_copy_of_a_dynamic_vhd_holds_the_disk_not_the_file() {
+        let image = vhd::tests::empty_dynamic_vhd(4 << 20, 2 << 20);
+        let path = temp_image("session.vhd", &image);
+        let lba = 4097;
+        {
+            let mut drive = open_ide(&path);
+            drive.write_sector(lba, &[0x3C; SECTOR_SIZE]).unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+        let mut session = HardDriveImage::open_session(
+            &path,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
+        assert_eq!(session.total_sectors(), (4 << 20) / SECTOR_SIZE as u64);
+        let mut sector = vec![0u8; SECTOR_SIZE];
+        session.read_sector(lba, &mut sector).unwrap();
+        assert_eq!(sector, [0x3C; SECTOR_SIZE]);
+        session.write_sector(1, &[0x11; SECTOR_SIZE]).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), before);
         let _ = std::fs::remove_file(&path);
     }
 

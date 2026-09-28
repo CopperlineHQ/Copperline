@@ -1,9 +1,10 @@
 //! Fuzz hardfile opening and classification: `HardDriveImage::open` validates
 //! raw-image sizing, sniffs the first 16 sectors for `RDSK`, and distinguishes
 //! those images from bare DOS volumes that need a synthesized RDB overlay.
-//! The same open sniffs gzip and CHD magic, so a hostile `.hdz` or a CHD
-//! header claiming a petabyte of hunks reaches their parsers here too; the
-//! cheap CHD media classifier the configuration uses gets the bytes as well.
+//! The same open sniffs gzip and CHD magic and the VHD footer, so a hostile
+//! `.hdz`, a CHD header claiming a petabyte of hunks, or a dynamic VHD whose
+//! block table points anywhere reaches their parsers here too; the cheap CHD
+//! media classifier the configuration uses gets the bytes as well.
 
 #![no_main]
 
