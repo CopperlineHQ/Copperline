@@ -8077,6 +8077,8 @@ fn dropped_media_classifies_by_extension() {
     let _ = std::fs::remove_file(&chd);
     assert_eq!(kind("disk.hdf"), DroppedMediaKind::HardDisk);
     assert_eq!(kind("disk.HDZ"), DroppedMediaKind::HardDisk);
+    // A WinUAE VHD, which used to go to the floppy bay.
+    assert_eq!(kind("Disk.VHD"), DroppedMediaKind::HardDisk);
     assert_eq!(kind("disk.img"), DroppedMediaKind::HardDisk);
     assert_eq!(kind("kick31.rom"), DroppedMediaKind::Rom);
     // Every shape a WHDLoad package comes in, since the launcher and the

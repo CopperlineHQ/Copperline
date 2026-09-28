@@ -173,7 +173,7 @@ impl App {
                 | LauncherField::LideDrive1
                 | LauncherField::LideDrive2
                 | LauncherField::LideDrive3 => dialog
-                    .filter("Hard disk images", &["hdf", "hdz", "img", "bin", "chd"])
+                    .filter("Hard disk images", crate::harddrive::IMAGE_EXTENSIONS)
                     .filter("CD images", &["cue", "iso", "nrg", "chd"]),
                 // copperhf.device serves hard disks only -- no ATAPI/SCSI-CDROM
                 // emulation behind it (`copperhf_drive_image` rejects a CD
@@ -186,15 +186,15 @@ impl App {
                 | LauncherField::CopperhfUnit4
                 | LauncherField::CopperhfUnit5
                 | LauncherField::CopperhfUnit6 => {
-                    dialog.filter("Hard disk images", &["hdf", "hdz", "img", "bin", "chd"])
+                    dialog.filter("Hard disk images", crate::harddrive::IMAGE_EXTENSIONS)
                 }
                 // The SF2000 SD card controller is hard disks only too --
                 // it speaks the SD card command set, not ATAPI/SCSI-CDROM
                 // (see `copperhf_drive_image`, reused for `[sf2000sd] card`).
                 LauncherField::Sf2000SdCard => {
-                    dialog.filter("Hard disk images", &["hdf", "hdz", "img", "bin", "chd"])
+                    dialog.filter("Hard disk images", crate::harddrive::IMAGE_EXTENSIONS)
                 }
-                _ => dialog.filter("Hard disk images", &["hdf", "hdz", "img", "bin", "chd"]),
+                _ => dialog.filter("Hard disk images", crate::harddrive::IMAGE_EXTENSIONS),
             }
         };
         self.pick_path(dialog.directory(start_dir), move |app, picked| {

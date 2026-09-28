@@ -164,7 +164,7 @@ impl App {
             return;
         }
         let dialog = PickRequest::file("Insert PCMCIA CF card image")
-            .filter("Hard-disk images", &["hdf", "hdz", "img", "chd"]);
+            .filter("Hard-disk images", crate::harddrive::IMAGE_EXTENSIONS);
         self.pick_path(dialog, |app, picked| {
             let Some(path) = picked else { return };
             match crate::pcmcia::CfCard::open(&path) {

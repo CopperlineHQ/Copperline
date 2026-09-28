@@ -455,12 +455,13 @@ slow = "512K"
 # autoboots on Kickstart 1.3+, so it does not depend on the Kickstart IDE
 # driver (which only probes the master on stock 3.1). Drive paths accept the
 # same images as [ide]: RDB HDFs, bare partition hardfiles, gzip-compressed
-# hardfiles (.hdz), CHD hard-disk images (.chd), or host directories. A path
-# ending in .cue, .iso, .nrg, or a .chd holding a CD (chdman createcd; a
-# createhd one is a hard disk -- the CHD's metadata decides, not its name)
-# attaches a SCSI CD-ROM drive at that ID instead (read-only; mount it in the
-# guest with a CD filesystem pointed at the controller's scsi.device and that
-# unit number). CD audio tracks play through the machine's audio output, and
+# hardfiles (.hdz), CHD hard-disk images (.chd), VHDs (.vhd), or host
+# directories. A path ending in .cue, .iso, .nrg, or a .chd holding a CD
+# (chdman createcd; a createhd one is a hard disk -- the CHD's metadata
+# decides, not its name) attaches a SCSI CD-ROM drive at that ID instead
+# (read-only; mount it in the guest with a CD filesystem pointed at the
+# controller's scsi.device and that unit number). CD audio tracks play
+# through the machine's audio output, and
 # discs swap at runtime (status-bar CD buttons, drag-and-drop,
 # --insert-cd-after).
 #
@@ -510,7 +511,7 @@ slow = "512K"
 # and atbus2008 have one channel). Each is independent, so any slot can be
 # left empty -- the same shape as [ide]'s master/slave and [scsi]'s
 # unit0..unit6, taking the same bare-path/table image forms (RDB HDFs, bare
-# partition hardfiles, .hdz, .chd, host directories, CD images). The older
+# partition hardfiles, .hdz, .chd, .vhd, host directories, CD images). The older
 # positional `drives = [...]` array is still read for existing configs.
 # [lide]
 # board = "ripple"
@@ -524,7 +525,7 @@ slow = "512K"
 # none of a real chip's register timing to model. Up to seven units, same
 # bare-path/table drive form as [ide]/[scsi]/[lide]: RDB HDFs, bare partition
 # hardfiles, gzip-compressed hardfiles (.hdz), CHD hard-disk images (.chd),
-# and host directories all work the same way, RDB and RDB-less images
+# VHDs (.vhd), and host directories all work the same way, RDB and RDB-less images
 # handled identically to the other controllers. Hard disks only -- a CD image
 # path (.cue/.iso/.nrg, or a .chd holding a CD) is rejected; attach CD images
 # to [scsi] or [ide]/[lide] instead. No rom key:
@@ -582,7 +583,9 @@ video = "PAL"
 # is decompressed a sector at a time and never written: guest writes go to a
 # copy-on-write overlay beside it, disk.chd.wov, which persists across
 # sessions (delete it to return to the pristine image). If the overlay cannot
-# be created the disk attaches write-protected. A path may also name a host
+# be created the disk attaches write-protected. A VHD (fixed or dynamic, the
+# container WinUAE creates hardfiles in; recognised by content) is read and
+# written in place like an HDF. A path may also name a host
 # directory, mounted as an in-memory FFS or OFS volume (guest writes are
 # likewise not synced back to the host).
 #
