@@ -24,11 +24,16 @@
   <string>@VERSION@</string>
   <key>LSApplicationCategoryType</key>
   <string>public.app-category.games</string>
-  <!-- The universal binary's arm64 slice requires macOS 11 (Big Sur); the
-       x86_64 slice runs further back, but LSMinimumSystemVersion governs the
-       whole bundle, so it is set to the higher floor. -->
+  <!-- The real floor is set by the newest system symbol the executable
+       binds at load time, not by the compiler target: cpal's CoreAudio host
+       links AudioHardwareCreateProcessTap (macOS 14.2) and the host-disk code
+       links kIOMainPortDefault (macOS 12). Rust extern declarations carry no
+       availability markers, so both are strong imports and dyld refuses to
+       start the binary on anything older. Declaring the same floor here makes
+       Finder report the requirement instead of the launch crashing. Raise it
+       whenever a dependency binds a newer API. -->
   <key>LSMinimumSystemVersion</key>
-  <string>11.0</string>
+  <string>14.2</string>
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSHumanReadableCopyright</key>

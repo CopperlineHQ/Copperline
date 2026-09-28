@@ -25,6 +25,10 @@ class Copperline < Formula
   head "https://github.com/CopperlineHQ/Copperline.git", branch: "main"
 
   depends_on "rust" => :build
+  # cpal's Core Audio host binds AudioHardwareCreateProcessTap, new in 14.2;
+  # Homebrew can only express the major release (see
+  # packaging/macos/Info.plist.in for the exact floor).
+  depends_on macos: :sonoma
 
   # WHDLoad support archives for the direct WHDLoad boot (src/whdload.rs).
   # Both are freely redistributable and shipped unmodified; checksums are
