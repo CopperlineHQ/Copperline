@@ -948,6 +948,10 @@ is saved to a configuration file.
 reports progress and the finished size; the write runs in the background,
 so the window stays responsive while a large image is written.
 
+A hard disk image is saved as `.hdf` or `.img`, which hold the same bytes.
+The page does not write CHD, and refuses a name ending in `.chd`; make a
+CHD from the finished image with `chdman createhd`.
+
 #### Floppy Disk
 
 | Option | Effect |

@@ -923,6 +923,13 @@ fn write_extended_adf(file: &mut File, image: &[u8], density: Density) -> io::Re
 
 // --- hard drives ----------------------------------------------------------
 
+/// The extensions a fresh hard drive image is offered under. Both name the
+/// same bytes: `.hdf` is what emulators look for, `.img` what a card writer
+/// expects. `.chd` is not one of them, and [`create_hard`] refuses it: the
+/// image is raw sectors, and a raw file with a CHD name is taken for a CD
+/// image when it is put on a drive slot or dropped on the window.
+pub const HARD_EXTENSIONS: &[&str] = &["hdf", "img"];
+
 /// Write a fresh hard drive image.
 ///
 /// A sparse image is created at its full length with only the blocks that
@@ -932,6 +939,18 @@ fn write_extended_adf(file: &mut File, image: &[u8], density: Density) -> io::Re
 /// Clearing [`HardSpec::sparse`] walks the whole file instead, which takes
 /// as long as writing that many bytes takes.
 pub fn create_hard(path: &Path, spec: &HardSpec) -> io::Result<Created> {
+    // The save dialog does not offer the name, but a host dialog that takes
+    // whatever is typed would still hand one over. See HARD_EXTENSIONS.
+    if path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("chd"))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "hard disk images are written as HDF, not CHD -- save it as .hdf \
+             or .img (chdman createhd makes a CHD from one)",
+        ));
+    }
     let geometry = spec
         .geometry
         .unwrap_or_else(|| Geometry::for_size(spec.bytes));
@@ -1583,6 +1602,53 @@ mod tests {
                 io::ErrorKind::InvalidInput,
                 "an unpartitioned drive was refused for a limit it does not have"
             ),
+        }
+    }
+
+    #[test]
+    fn every_offered_hard_extension_is_taken_for_a_hard_disk() {
+        // A drive slot and the window's drop handling tell a hard disk from
+        // a CD by the file's name, so an image made under any name the save
+        // dialog offers has to come back as a hard disk.
+        let spec = HardSpec {
+            bytes: 2 * 1024 * 1024,
+            ..Default::default()
+        };
+        for ext in HARD_EXTENSIONS {
+            let s = Scratch::new(&format!("offered.{ext}"));
+            create_hard(s.path(), &spec).expect("created");
+            assert!(
+                !crate::config::is_cd_image_path(s.path()),
+                "a fresh .{ext} image is taken for a CD"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hard_image_is_not_written_under_a_chd_name() {
+        // What the writer produces is raw sectors, and under a CHD name
+        // those are taken for a CD image: a CHD that does not read as a
+        // chdman hard disk counts as a CD.
+        let spec = HardSpec {
+            bytes: 2 * 1024 * 1024,
+            ..Default::default()
+        };
+        let raw = Scratch::new("raw.hdf");
+        create_hard(raw.path(), &spec).expect("created");
+        let renamed = Scratch::new("renamed.chd");
+        std::fs::copy(raw.path(), renamed.path()).unwrap();
+        assert!(
+            crate::config::is_cd_image_path(renamed.path()),
+            "a raw image under a CHD name no longer reads as a CD; \
+             the refusal below may have outlived its reason"
+        );
+
+        // So the name is refused, in either case, and nothing is left under it.
+        for name in ["new.chd", "NEW.CHD"] {
+            let s = Scratch::new(name);
+            let err = create_hard(s.path(), &spec).expect_err("a CHD name is refused");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert!(!s.path().exists(), "a raw image was left under {name}");
         }
     }
 
