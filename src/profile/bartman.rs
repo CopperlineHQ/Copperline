@@ -158,6 +158,9 @@ pub fn capture(
             progress(&format!("PRF: {}/{}\n", frame + 1, request.frames))?;
             let start = emu.bus().emulated_cck();
             advance_frame(emu)?;
+            if emu.machine.profile_samples_dropped() != 0 {
+                bail!("instruction sample buffer overflowed; Bartman capture is incomplete");
+            }
             let samples = emu.machine.take_profile_samples();
             let bus = emu.bus();
             let trace = bus

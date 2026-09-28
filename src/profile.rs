@@ -146,6 +146,7 @@ pub struct ProfileCapture {
     triggered: bool,
     triggered_at: Option<u64>,
     samples_total: u64,
+    samples_dropped: u64,
     irq_cck: u64,
     sample_sequence: u64,
     slot_sequence: u64,
@@ -183,6 +184,7 @@ impl ProfileCapture {
             triggered,
             triggered_at: triggered.then_some(frame),
             samples_total: 0,
+            samples_dropped: 0,
             irq_cck: 0,
             sample_sequence: 0,
             slot_sequence: 0,
@@ -294,6 +296,15 @@ impl ProfileCapture {
         Ok(())
     }
 
+    /// Retain overflow evidence even after the CPU sampler is stopped.
+    pub fn note_samples_dropped(&mut self, dropped: u64) {
+        self.samples_dropped = self.samples_dropped.max(dropped);
+    }
+
+    pub fn samples_dropped(&self) -> u64 {
+        self.samples_dropped
+    }
+
     pub fn status_value(&self, active: bool) -> Value {
         json!({
             "active": active,
@@ -311,6 +322,8 @@ impl ProfileCapture {
             "triggered": self.triggered,
             "triggered_at": self.triggered_at,
             "samples_total": self.samples_total,
+            "samples_dropped": self.samples_dropped,
+            "samples_buffer_limit": samples::MAX_PENDING_SAMPLES,
             "irq_cck": self.irq_cck,
             "done": self.done,
         })
@@ -469,6 +482,8 @@ impl ProfileCapture {
             "ended": { "frame": frame, "seconds": seconds },
             "frames_written": self.frames_written,
             "samples_total": self.samples_total,
+            "samples_dropped": self.samples_dropped,
+            "samples_buffer_limit": samples::MAX_PENDING_SAMPLES,
             "irq_cck": self.irq_cck,
             "sampling": (self.opts.samples || self.opts.coverage).then(|| json!({
                 "clock_unit": "cck",

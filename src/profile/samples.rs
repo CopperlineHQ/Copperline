@@ -7,6 +7,10 @@ use crate::bus::Bus;
 pub const IRQ_MARKER: u32 = 0x7fff_ffff;
 pub const MAX_CALLSTACK_DEPTH: usize = 16;
 pub const REGISTER_COUNT: usize = 17;
+/// Maximum records awaiting a profile drain (42 MiB on 64-bit hosts).
+/// Keep this a power of two so Vec's geometric growth reaches the cap
+/// without reserving space beyond it.
+pub const MAX_PENDING_SAMPLES: usize = 1 << 18;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompactUnwindRow {
@@ -178,6 +182,7 @@ pub struct InstructionSampler {
     code_ranges: Vec<(u32, u32)>,
     include_registers: bool,
     pending: Vec<InstructionSample>,
+    dropped: u64,
 }
 
 impl InstructionSampler {
@@ -191,6 +196,7 @@ impl InstructionSampler {
             code_ranges,
             include_registers,
             pending: Vec::new(),
+            dropped: 0,
         }
     }
 
@@ -229,6 +235,9 @@ impl InstructionSampler {
     }
 
     pub fn finish_instruction(&mut self, start: SampleStart, instruction_cck: u32, bus: &Bus) {
+        if !self.accept_sample() {
+            return;
+        }
         let (total_cck, instruction_cck, bus_wait_cck) = Self::elapsed(start, instruction_cck, bus);
         let mut callstack = Callstack::default();
         if let Some(unwind) = &self.unwind {
@@ -256,6 +265,9 @@ impl InstructionSampler {
         irq: IrqInfo,
         bus: &Bus,
     ) {
+        if !self.accept_sample() {
+            return;
+        }
         let (total_cck, instruction_cck, bus_wait_cck) = Self::elapsed(start, instruction_cck, bus);
         self.pending.push(InstructionSample {
             callstack: [IRQ_MARKER; MAX_CALLSTACK_DEPTH],
@@ -275,11 +287,73 @@ impl InstructionSampler {
     pub fn clear(&mut self) {
         self.pending.clear();
     }
+
+    /// Cumulative overflow count for this capture, including IRQ records.
+    /// Draining or discarding pending records does not erase evidence of loss.
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
+    fn accept_sample(&mut self) -> bool {
+        if self.pending.len() < MAX_PENDING_SAMPLES {
+            return true;
+        }
+        if self.dropped == 0 {
+            log::warn!(
+                "profile: pending instruction samples reached the {MAX_PENDING_SAMPLES}-record limit; \
+                 further samples are discarded until the buffer is drained; capture is incomplete"
+            );
+        }
+        self.dropped = self.dropped.saturating_add(1);
+        false
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_samples_bound_instructions_and_irqs_and_resume_after_drain() {
+        let emu = crate::control::test_emulator();
+        let bus = emu.bus();
+        let mut sampler = InstructionSampler::new(None, Vec::new(), true);
+        let irq = IrqInfo {
+            level: 2,
+            vector: 26,
+        };
+        for n in 0..MAX_PENDING_SAMPLES + 1000 {
+            let start = sampler.start(n as u32, [0; REGISTER_COUNT], 0, 0);
+            if n.is_multiple_of(2) {
+                sampler.finish_instruction(start, 4, bus);
+            } else {
+                sampler.finish_irq(start, 22, irq, bus);
+            }
+        }
+        assert_eq!(sampler.pending.len(), MAX_PENDING_SAMPLES);
+        assert!(sampler.pending.capacity() <= MAX_PENDING_SAMPLES);
+        assert_eq!(sampler.dropped(), 1000);
+        let retained = sampler.take();
+        assert_eq!(retained[0].callstack[0], 0);
+        assert_eq!(
+            retained[MAX_PENDING_SAMPLES - 2].callstack[0],
+            (MAX_PENDING_SAMPLES - 2) as u32
+        );
+        assert_eq!(retained[MAX_PENDING_SAMPLES - 1].irq, Some(irq));
+        assert_eq!(sampler.dropped(), 1000, "draining preserves loss evidence");
+
+        let start = sampler.start(0x1000, [0; REGISTER_COUNT], 0, 0);
+        sampler.finish_instruction(start, 4, bus);
+        assert_eq!(sampler.pending.len(), 1, "sampling resumes after a drain");
+        sampler.clear();
+        sampler.finish_irq(start, 22, irq, bus);
+        assert_eq!(sampler.take()[0].irq, Some(irq));
+        assert_eq!(
+            sampler.dropped(),
+            1000,
+            "discarding preserves loss evidence"
+        );
+    }
 
     #[test]
     fn decodes_signed_offsets_without_narrowing_the_internal_form() {

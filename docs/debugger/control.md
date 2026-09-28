@@ -528,6 +528,11 @@ fails with code `-32006`.
   unsupported error.
 
 ### Diagnostics and profiling
+
+Instruction profiles retain at most 262,144 pending samples. `profile.status`
+and `profile.stop` report `samples_buffer_limit` and cumulative
+`samples_dropped`; a nonzero count marks an incomplete instruction capture.
+See [profiling limits](profiling.md) for overflow behavior and debugger stepping.
 - `chipset.validate {"enabled": ..., "clear": ...}` / `chipset.report`: Arm or query custom register access validator.
 - `smc.detect {"enabled": ..., "clear": ...}` / `smc.report`: Arm or query self-modifying code detector.
 - `fault.inject {"addr": ..., "len": ..., "on": "read"|"write"|"both", "count": ...}`: Make accesses to `len` bytes at `addr` (default 2) raise a bus error in the guest: reads, writes, or both (the default), for the next `count` matching accesses (default: every access). Returns the fault's id.

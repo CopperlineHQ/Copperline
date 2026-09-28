@@ -569,7 +569,15 @@ impl Emulator {
     pub fn profile_status_value(&self) -> serde_json::Value {
         self.profile.as_ref().map_or_else(
             || serde_json::json!({ "active": false }),
-            |profile| profile.status_value(true),
+            |profile| {
+                let mut status = profile.status_value(true);
+                status["samples_dropped"] = serde_json::Value::from(
+                    profile
+                        .samples_dropped()
+                        .max(self.machine.profile_samples_dropped()),
+                );
+                status
+            },
         )
     }
 
@@ -665,6 +673,7 @@ impl Emulator {
             return Ok(serde_json::json!({ "active": false }));
         };
         capture.set_stack_bounds(crate::amigaos::stack_bounds_on_bus(self.bus()));
+        capture.note_samples_dropped(self.machine.profile_samples_dropped());
         self.machine.stop_profile_samples();
         if capture.options().coverage {
             if let Some(collector) = self.machine.stop_coverage() {
@@ -704,6 +713,9 @@ impl Emulator {
     #[cfg(feature = "control")]
     fn profile_poll(&mut self) -> Result<()> {
         use serde_json::{json, Value};
+        if let Some(profile) = self.profile.as_mut() {
+            profile.note_samples_dropped(self.machine.profile_samples_dropped());
+        }
         let Some(opts) = self
             .profile
             .as_ref()
@@ -953,6 +965,7 @@ impl Emulator {
                 record["samples_meta"] = Value::from(stats.metadata_name);
                 record["sample_count"] = Value::from(stats.count);
                 record["samples_total"] = Value::from(stats.samples_total);
+                record["samples_dropped"] = Value::from(profile.samples_dropped());
                 record["irq_cck"] = Value::from(stats.irq_cck);
             }
             profile

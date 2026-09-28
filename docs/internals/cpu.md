@@ -131,6 +131,16 @@ are physical). Arming any per-instruction debug or diagnostic hook
 (breakpoints, watches, traces, `COPPERLINE_DBG_*`) drops the whole slice
 back to the precise loop, so the debugger always sees every instruction.
 
+The host-side instruction profiler (`profile::samples::InstructionSampler`)
+retains at most 262,144 pending instruction/IRQ records, about 42 MiB on
+64-bit hosts. Both producers check the cap before constructing a record or
+unwinding a stack. Overflow drops new records without altering CPU execution,
+increments a saturating counter, and warns once per sampler lifetime. Draining
+or clearing the buffer allows sampling to resume but preserves the counter.
+The profile status and summary retain the loss count after the sampler stops.
+This bound is independent of frame polling, so a debugger execution path that
+does not drain samples cannot grow the buffer indefinitely.
+
 The 68000 and 68010 never take the batch path. On the small-box machines
 every CPU cycle drives the one bus shared with Agnus, and the floating-bus
 model is prefetch-order dependent: Kickstart's diagnostic-ROM probe

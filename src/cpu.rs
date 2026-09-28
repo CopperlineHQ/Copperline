@@ -2038,6 +2038,13 @@ impl M68kMachine {
     }
 
     #[cfg(feature = "control")]
+    pub fn profile_samples_dropped(&self) -> u64 {
+        self.profile_samples
+            .as_ref()
+            .map_or(0, crate::profile::samples::InstructionSampler::dropped)
+    }
+
+    #[cfg(feature = "control")]
     pub fn take_profile_samples(&mut self) -> Vec<crate::profile::samples::InstructionSample> {
         self.profile_samples
             .as_mut()
