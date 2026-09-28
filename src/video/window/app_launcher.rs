@@ -908,15 +908,13 @@ impl App {
             ImageToMake::Hard(state.workshop.hard_spec())
         };
 
-        let (kind, ext) = if floppy {
-            ("Amiga floppy image", vec!["adf"])
+        let (kind, ext): (_, &[&str]) = if floppy {
+            ("Amiga floppy image", &["adf"])
         } else {
-            // The same bytes either way: .hdf is what emulators look for,
-            // .img what a card writer expects, so both are offered.
-            ("Amiga hard disk image", vec!["hdf", "img", "chd"])
+            ("Amiga hard disk image", crate::diskimage::HARD_EXTENSIONS)
         };
         let dialog = PickRequest::save("Create disk image")
-            .filter(kind, &ext)
+            .filter(kind, ext)
             .file_name(suggested);
         self.pick_path(dialog, move |app, picked| {
             if let Some(path) = picked {
