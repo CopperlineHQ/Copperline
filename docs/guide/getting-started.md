@@ -7,7 +7,9 @@ system requirements, installation, building from source, and initial setup.
 ## System requirements
 
 - **Rust (source builds only):** 1.95 or newer; CI uses the stable toolchain.
-- **Supported operating systems:** macOS, Linux, and Windows.
+- **Supported operating systems:** macOS 14.2 (Sonoma) or newer, Linux, and
+  Windows. The macOS floor applies to source builds as well as the pre-built
+  application: the audio backend uses Core Audio APIs introduced in 14.2.
 - **Graphics backend:** Metal on macOS, Direct3D 12 or Vulkan on Windows, and
   Vulkan on Linux (see [](#vulkan-is-required-on-linux)).
 - **Linux build dependencies:** `sudo dnf install alsa-lib-devel systemd-devel gcc`
