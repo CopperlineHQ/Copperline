@@ -1134,6 +1134,9 @@ state. `Cmd+Shift+L` / `Alt+Shift+L` (or "Load State...") opens the
 [browser below](#load-state-browser) to restore one; the machine continues
 from exactly the saved point, byte-for-byte -- the core is deterministic,
 so a resumed run is indistinguishable from one that was never interrupted.
+Your audio output settings (the volume slider, mono/stereo, stereo
+separation, and the filter override) are not part of the machine: loading
+a state or rewinding keeps whatever they are set to now.
 
 Every state also carries a small card about itself, written ahead of the
 machine so it can be read without loading anything: a thumbnail of the

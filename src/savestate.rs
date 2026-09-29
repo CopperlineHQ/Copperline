@@ -1944,6 +1944,41 @@ mod tests {
     }
 
     #[test]
+    fn host_output_volume_is_not_saved_and_old_states_that_name_it_still_load() {
+        let mut machine = test_machine();
+        machine.bus_mut().set_output_volume_percent(60);
+        let (prefix, mut chunks) = unpack(&saved_blob(&machine));
+        let paula = chunk_mut(&mut chunks, &chunk::PAUL);
+        let mut named_volume = false;
+        paula.payload = edit_map(&paula.payload, |entries| {
+            let (_, fields) = entries
+                .iter_mut()
+                .find(|(key, _)| key.as_str() == Some("paula"))
+                .expect("the PAUL chunk carries the paula field");
+            let rmpv::Value::Map(fields) = fields else {
+                panic!("Paula serializes as a field map");
+            };
+            named_volume = fields
+                .iter()
+                .any(|(key, _)| key.as_str() == Some("output_volume"));
+            // What a state written before the volume became a host
+            // preference carries.
+            fields.push((rmpv::Value::from("output_volume"), rmpv::Value::F32(0.25)));
+        });
+        assert!(!named_volume, "a new state does not write the host volume");
+
+        let mut restored = test_machine();
+        restored.bus_mut().set_output_volume_percent(80);
+        load_from_reader(&mut restored, pack(&prefix, &chunks).as_slice()).unwrap();
+        assert_eq!(restored.pc(), machine.pc());
+        assert_eq!(
+            restored.bus().output_volume_percent(),
+            80,
+            "the stored volume is ignored and the running one kept"
+        );
+    }
+
+    #[test]
     fn older_chunk_versions_load_through_migrations_and_newer_ones_are_refused() {
         let mut machine = blitting_workload_machine();
         machine.step_slice(3000).unwrap();
