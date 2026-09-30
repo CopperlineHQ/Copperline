@@ -187,6 +187,9 @@ left to right it holds:
   flip between gamepad-only and keyboard joystick emulation; see
   [](#controller-ports).
 - **Volume slider**: drag, or scroll the mouse wheel over it for 5% steps.
+  Clicking the speaker beside it mutes; clicking it again restores the
+  volume it muted from. Moving the slider while muted unmutes at the new
+  level.
 - **Hamburger menu button**: opens the pop-up menu (below).
 - **Camera button**: saves a screenshot (same as `Cmd+S` on macOS or
   `Alt+S` on Linux/Windows).
