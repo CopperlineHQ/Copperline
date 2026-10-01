@@ -20,17 +20,17 @@ use super::{
     standard_window_top_row, status_with_latched_fdd_track, take_integral_mouse_delta,
     texture_height, texture_width, tint_display_rows, tint_lut, tint_rows_in_place,
     track_counter_digit_rect, track_counter_layout, tv_aperture_source_row,
-    tv_centre_source_offset, tv_source_h_bounds, volume_percent_from_pos, volume_slider_track_rect,
-    BarControl, DriveBar, JoystickInputMode, MediaBar, PresentationLatch, StatusBarView,
-    ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT, AMIGA_RAWKEY_LEFT_SHIFT, AMIGA_RAWKEY_RIGHT_ALT,
-    AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH, BUTTON_GLYPH_DISABLED, CD_BODY, CD_LED_OFF, CD_LED_ON,
-    CD_TRACK_SEGMENT_OFF, CD_TRACK_SEGMENT_ON, DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL,
-    FDD_LED_OFF, FDD_LED_ON, HDD_LED_OFF, HDD_LED_ON, POWER_GLYPH_OFF, POWER_GLYPH_ON,
-    POWER_LED_BRIGHT, POWER_LED_DIM, POWER_LED_OFF, STANDARD_PAL_VISIBLE_LINES,
-    STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG, TRACK_SEGMENT_OFF, TRACK_SEGMENT_ON,
-    TUBE_NTSC_PRESENT_HEIGHT, TUBE_PAL_PRESENT_HEIGHT, TV_CAPTURED_SOURCE_X, TV_CAPTURED_WIDTH,
-    TV_LIVE_PAD_X, TV_NTSC_PRESENT_HEIGHT, TV_PAL_PRESENT_HEIGHT, TV_PRESENT_SOURCE_Y, VOLUME_FILL,
-    VOLUME_GLYPH_X,
+    tv_centre_source_offset, tv_source_h_bounds, volume_mute_hit_rect, volume_percent_from_pos,
+    volume_slider_knob_rect, volume_slider_track_rect, BarControl, DriveBar, JoystickInputMode,
+    MediaBar, PresentationLatch, StatusBarView, ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT,
+    AMIGA_RAWKEY_LEFT_SHIFT, AMIGA_RAWKEY_RIGHT_ALT, AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH,
+    BUTTON_GLYPH_DISABLED, CD_BODY, CD_LED_OFF, CD_LED_ON, CD_TRACK_SEGMENT_OFF,
+    CD_TRACK_SEGMENT_ON, DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL, FDD_LED_OFF, FDD_LED_ON,
+    HDD_LED_OFF, HDD_LED_ON, POWER_GLYPH_OFF, POWER_GLYPH_ON, POWER_LED_BRIGHT, POWER_LED_DIM,
+    POWER_LED_OFF, STANDARD_PAL_VISIBLE_LINES, STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG,
+    TRACK_SEGMENT_OFF, TRACK_SEGMENT_ON, TUBE_NTSC_PRESENT_HEIGHT, TUBE_PAL_PRESENT_HEIGHT,
+    TV_CAPTURED_SOURCE_X, TV_CAPTURED_WIDTH, TV_LIVE_PAD_X, TV_NTSC_PRESENT_HEIGHT,
+    TV_PAL_PRESENT_HEIGHT, TV_PRESENT_SOURCE_Y, VOLUME_FILL, VOLUME_GLYPH_X,
 };
 use crate::audio::{AudioSink, NullSink};
 use crate::bus::{FrontPanelStatus, RenderRegisterSnapshot};
@@ -3134,6 +3134,75 @@ fn status_bar_draws_volume_control_and_maps_pointer_position() {
         pixel(&frame, track.x + track.w / 4, track.y + track.h / 2, scale),
         VOLUME_FILL.to_le_bytes()
     );
+
+    // The speaker cone, not just its sound arcs, is the mute button.
+    let cone = ((VOLUME_GLYPH_X + 6) as i32, (track.y + track.h / 2) as i32);
+    let layout = bar_layout(&MediaBar {
+        drives: Default::default(),
+        cd: None,
+    });
+    assert_eq!(control_at(cone, &layout), Some(BarControl::Volume));
+    assert!(volume_mute_hit_rect().contains(cone));
+    // The mute area ends before the knob at 0% begins.
+    let mute = volume_mute_hit_rect();
+    assert!(mute.x + mute.w <= volume_slider_knob_rect(0).x);
+}
+
+#[test]
+fn speaker_click_mutes_and_restores_the_volume() {
+    let mut app = test_app();
+    let track = volume_slider_track_rect();
+    let at = |percent: usize| {
+        (
+            (track.x + (track.w - 1) * percent / 100) as i32,
+            track.y as i32,
+        )
+    };
+    let volume = |app: &super::App| app.emu.bus().output_volume_percent();
+
+    app.set_output_volume_from_pos(at(60));
+    let high = volume(&app);
+    assert!(high > 0);
+    app.toggle_output_mute();
+    assert_eq!(volume(&app), 0);
+    app.toggle_output_mute();
+    assert_eq!(volume(&app), high);
+
+    // A slider click while muted unmutes to where it landed, and the next
+    // mute saves that value instead.
+    app.toggle_output_mute();
+    app.set_output_volume_from_pos(at(30));
+    let low = volume(&app);
+    assert!(low > 0 && low != high);
+    app.toggle_output_mute();
+    assert_eq!(volume(&app), 0);
+    app.toggle_output_mute();
+    assert_eq!(volume(&app), low);
+}
+
+#[test]
+fn speaker_click_follows_volume_changed_outside_the_app() {
+    let mut app = test_app();
+    let volume = |app: &super::App| app.emu.bus().output_volume_percent();
+
+    // A state load while muted brings the volume back: the next click
+    // mutes rather than restoring the stale saved value.
+    app.emu.bus_mut().set_output_volume_percent(40);
+    app.toggle_output_mute();
+    assert_eq!(volume(&app), 0);
+    app.emu.bus_mut().set_output_volume_percent(80);
+    app.toggle_output_mute();
+    assert_eq!(volume(&app), 0);
+    app.toggle_output_mute();
+    assert_eq!(volume(&app), 80);
+
+    // Slider dragged to 0%: the click has nothing to restore and comes
+    // back at full volume.
+    let track = volume_slider_track_rect();
+    app.set_output_volume_from_pos((track.x as i32, track.y as i32));
+    assert_eq!(volume(&app), 0);
+    app.toggle_output_mute();
+    assert_eq!(volume(&app), 100);
 }
 
 #[test]

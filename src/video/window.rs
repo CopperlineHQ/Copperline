@@ -447,12 +447,14 @@ const VOLUME_SLIDER_Y: usize = STATUS_CONTROL_Y + 7;
 // The slider is as wide as the slot between the media controls and the menu
 // button leaves once the two icon toggles below have taken their 24 pixels
 // each: the bar has one free run of x, and every control on it competes for
-// the same worst case (four floppies plus a CD, ending at x=372).
-const VOLUME_SLIDER_W: usize = 48;
+// the same worst case (four floppies plus a CD, ending at x=372), less the
+// breathing room between the speaker glyph and the knob at 0%.
+const VOLUME_SLIDER_W: usize = 44;
 const VOLUME_SLIDER_H: usize = 8;
 const VOLUME_KNOB_W: usize = 8;
 const VOLUME_KNOB_H: usize = 16;
-const VOLUME_GLYPH_X: usize = VOLUME_SLIDER_X - 16;
+const VOLUME_GLYPH_X: usize = VOLUME_SLIDER_X - 20;
+const VOLUME_GLYPH_W: usize = 13;
 // Joystick input-source and on-screen-keyboard toggles: compact icon buttons
 // just left of the volume glyph, in the otherwise-free slot before the
 // right-hand control cluster. The widest media layout (four floppies plus a
@@ -1313,6 +1315,10 @@ pub struct App {
     /// pixel.
     last_cursor_phys: Option<winit::dpi::PhysicalPosition<f64>>,
     volume_dragging: bool,
+    /// The volume the speaker glyph muted from; clicking it at 0% restores
+    /// this, or full volume when there is nothing to restore. Slider and
+    /// keyboard volume changes forget it.
+    volume_before_mute: Option<u8>,
     /// A scroll arrow held down: which control, and when its next repeat is
     /// due. A click moves one row and lets go; keeping the button down
     /// starts the list running after a pause, the way a held key does. Any
@@ -2817,6 +2823,7 @@ impl App {
             last_display_cursor_pos: None,
             last_cursor_phys: None,
             volume_dragging: false,
+            volume_before_mute: None,
             scroll_hold: None,
             cycle_hold: None,
             nav: crate::video::nav::Nav::default(),
@@ -5166,8 +5173,12 @@ impl ApplicationHandler for App {
                                     self.nav.follow_pointer(crate::video::nav::NavTarget::Bar(
                                         BarControl::Volume,
                                     ));
-                                    self.volume_dragging = true;
-                                    self.set_output_volume_from_pos(pos);
+                                    if volume_mute_hit_rect().contains(pos) {
+                                        self.toggle_output_mute();
+                                    } else {
+                                        self.volume_dragging = true;
+                                        self.set_output_volume_from_pos(pos);
+                                    }
                                 }
                                 Some(control) => {
                                     self.nav
@@ -6571,6 +6582,7 @@ fn decode_embedded_png(bytes: &[u8]) -> Result<EmbeddedRgbaImage> {
 
 impl App {
     fn set_output_volume_from_pos(&mut self, pos: (i32, i32)) {
+        self.volume_before_mute = None;
         self.emu
             .bus_mut()
             .set_output_volume_percent(volume_percent_from_pos(pos));
@@ -6578,7 +6590,26 @@ impl App {
     }
 
     fn adjust_output_volume(&mut self, delta: i16) {
+        self.volume_before_mute = None;
         self.emu.bus_mut().adjust_output_volume_percent(delta);
+        self.request_redraw();
+    }
+
+    fn toggle_output_mute(&mut self) {
+        let bus = self.emu.bus_mut();
+        let current = bus.output_volume_percent();
+        // Decided from the live volume, not the saved one: a state load,
+        // rewind or new machine can change it behind App's back.
+        let percent = if current == 0 {
+            match self.volume_before_mute.take() {
+                Some(saved) if saved > 0 => saved,
+                _ => 100,
+            }
+        } else {
+            self.volume_before_mute = Some(current);
+            0
+        };
+        bus.set_output_volume_percent(percent);
         self.request_redraw();
     }
 

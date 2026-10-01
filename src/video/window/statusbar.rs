@@ -623,9 +623,19 @@ pub(super) fn menu_button_rect() -> Rect {
 
 pub(in crate::video) fn volume_control_hit_rect() -> Rect {
     Rect {
-        x: VOLUME_SLIDER_X - 8,
+        x: VOLUME_GLYPH_X,
         y: status_bar_top() + STATUS_CONTROL_Y,
-        w: VOLUME_SLIDER_W + 16,
+        w: VOLUME_SLIDER_X + VOLUME_SLIDER_W + 8 - VOLUME_GLYPH_X,
+        h: STATUS_CONTROL_H,
+    }
+}
+
+/// The speaker glyph (cone and sound arcs): clicking it toggles mute.
+pub(super) fn volume_mute_hit_rect() -> Rect {
+    Rect {
+        x: VOLUME_GLYPH_X,
+        y: status_bar_top() + STATUS_CONTROL_Y,
+        w: VOLUME_GLYPH_W,
         h: STATUS_CONTROL_H,
     }
 }
@@ -1115,7 +1125,7 @@ pub(super) fn draw_speaker_glyph(frame: &mut [u8], texture_scale: usize) {
     );
     draw_vline_span(
         frame,
-        x + 12 * s,
+        x + (VOLUME_GLYPH_W - 1) * s,
         y + 6 * s,
         y + 17 * s,
         STATUS_TEXT,
