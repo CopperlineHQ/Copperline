@@ -438,7 +438,10 @@ impl WebEmu {
             Ok(connection) => self.netplay = Some(connection),
             Err(error) => {
                 let restored = self.emu.netplay_restore(&checkpoint);
+                // Host output settings are not checkpointed: put the
+                // serial sink and the volume back by hand.
                 self.emu.bus_mut().paula.serial = serial;
+                self.emu.bus_mut().set_output_volume_percent(volume);
                 restored?;
                 return Err(error);
             }
@@ -474,6 +477,7 @@ impl WebEmu {
             Err(error) => {
                 let restored = self.emu.netplay_restore(&checkpoint);
                 self.emu.bus_mut().paula.serial = serial;
+                self.emu.bus_mut().set_output_volume_percent(volume);
                 restored?;
                 return Err(error);
             }
@@ -712,6 +716,8 @@ mod tests {
             web.emu.netplay_snapshot()? == before,
             "startup changed the machine"
         );
+        // The volume is a host setting outside the checkpoint.
+        assert_eq!(web.emu.bus().output_volume_percent(), 37);
         assert_eq!(web.emu.bus().paula.serial.control_lines(), lines);
         assert_eq!(web.mouse_pending, (12, -3));
         assert_eq!(web.mouse_remainder, (0.5, -0.25));

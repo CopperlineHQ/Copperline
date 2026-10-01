@@ -50,10 +50,18 @@ Deliberately excluded, with the mechanism in parentheses:
   drive-speed setting. It first reattaches any A2065 network backend and
   reacquires saved host disks, so a failure there leaves the running
   machine untouched.
-- **Host preferences**: Paula's channel mode, stereo separation, and
-  filter override, and the uaelib trap's host file root, are read before
-  the load and reapplied after it (`Emulator::adopt_loaded_state`), so
-  loading a state never changes them.
+- **Host preferences**: Paula's output volume, channel mode, stereo
+  separation, and filter override (`#[serde(skip)]`; volume and
+  separation default to full scale, so a Paula decoded on its own is
+  neither muted nor mono). `Bus::adopt_host_resources` copies them from
+  the live Paula onto the restored one, so no restore changes them: not a
+  state load, a rewind, a run-ahead rewind, or a netplay rollback. Being
+  outside the payload also keeps them out of netplay's checkpoint
+  checksums, so peers with different volumes do not read as
+  desynchronized. States written before the volume became a host
+  preference still name `output_volume`; the named-field decoder ignores
+  it. The uaelib trap's host file root is read before a load and
+  reapplied after it (`Emulator::adopt_loaded_state`).
 - **Diagnostic host state**: the `COPPERLINE_TRACE_BLITTER` file handle
   (skipped, moved across like the sinks), the debugger and its
   breakpoints/watchpoints (never serialized; they stay armed across a

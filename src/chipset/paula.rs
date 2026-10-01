@@ -466,6 +466,13 @@ fn default_stereo_separation() -> f32 {
     1.0
 }
 
+/// serde default for the skipped `output_volume` field: unity gain, so a
+/// Paula deserialized without a live one to adopt from plays at full level
+/// rather than muted (a bare skip would default the f32 to 0.0).
+fn default_output_volume() -> f32 {
+    1.0
+}
+
 /// serde default for `led_filter_guest_on`: the guest's /LED line reads engaged
 /// until it drives it otherwise, matching the power-on default.
 fn default_true() -> bool {
@@ -558,10 +565,15 @@ pub struct Paula {
     #[serde(default = "default_true")]
     led_filter_guest_on: bool,
     led_filter: StereoLedFilter,
+    // Host output level (the status-bar volume slider), 0.0 to 1.0. A host
+    // preference like mono_output: skipped in save states, so netplay peers
+    // at different volumes still checksum alike. States written before it
+    // was skipped still name it; the named-field decoder ignores that entry.
+    #[serde(skip, default = "default_output_volume")]
     output_volume: f32,
     // Host output preference: average L/R into both channels. Not part of the
     // emulated machine state, so it is skipped in save states and re-applied
-    // from config (carried over across a state load, see Emulator::load_state).
+    // from config (carried over across a restore, see adopt_host_preferences).
     #[serde(skip)]
     mono_output: bool,
     // Stereo width, 0.0 (mono) to 1.0 (full hardware panning, the default).
@@ -770,6 +782,18 @@ impl Paula {
         std::mem::swap(&mut self.synth_scope, &mut live.synth_scope);
         std::mem::swap(&mut self.toccata_scope, &mut live.toccata_scope);
         std::mem::swap(&mut self.mhi_scope, &mut live.mhi_scope);
+    }
+
+    /// Carry the user's output preferences (volume, channel mode, stereo
+    /// width, filter override) from the live Paula onto a freshly
+    /// deserialized one. They are skipped in save states, so without this
+    /// every restore -- state load, rewind, run-ahead, netplay rollback --
+    /// would reset them to their defaults.
+    pub(crate) fn adopt_host_preferences(&mut self, live: &Paula) {
+        self.output_volume = live.output_volume;
+        self.mono_output = live.mono_output;
+        self.stereo_separation = live.stereo_separation;
+        self.set_led_filter_mode(live.led_filter_mode);
     }
 
     /// Drain transmissions completed since the last poll, plus the number of
@@ -4328,6 +4352,21 @@ mod tests {
         assert_eq!(paula.chans[0].audvol, 64);
         assert!((frames[0].0 - CHANNEL_64_LEVEL * 0.5).abs() < 1e-6);
         assert_eq!(frames[0].1, 0.0);
+    }
+
+    #[test]
+    fn host_output_volume_is_not_serialized_and_decodes_at_full_level() {
+        let mut paula = Paula::new(
+            Box::new(crate::serial::NullSerialSink),
+            Box::new(crate::audio::NullSink),
+        );
+        paula.set_output_volume_percent(30);
+        let mut bytes = Vec::new();
+        crate::savestate::chunk::encode(&paula, &mut bytes).unwrap();
+        let decoded: Paula = crate::savestate::chunk::decode(&bytes).unwrap();
+        // With no live Paula to adopt from, the skipped field takes its
+        // serde default: unity gain, not an f32's 0.0 (a muted machine).
+        assert_eq!(decoded.output_volume_percent(), 100);
     }
 
     #[test]

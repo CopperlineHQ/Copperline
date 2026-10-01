@@ -6140,6 +6140,9 @@ impl Bus {
         // Drive speed is host configuration, not machine state: a loaded
         // state keeps the running session's setting.
         self.floppy.set_speed_percent(live.floppy.speed_percent());
+        // So are Paula's output volume, channel mode, stereo width, and
+        // filter override.
+        self.paula.adopt_host_preferences(&live.paula);
         // Host addresses of the RAM banks and the CD32 EEPROM are host
         // resources too: a frontend that mapped them (libretro memory maps,
         // save RAM) keeps valid pointers across the restore.
