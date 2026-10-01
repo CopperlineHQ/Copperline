@@ -426,6 +426,71 @@ fn every_launcher_tab_row_fits_inside_the_panel() {
     }
 }
 
+/// A greyed row that explains itself draws its reason as free text from the
+/// control column's left edge ([`GreyedAs::Reason`]), with no box to clip it
+/// and no truncation on the way out -- unlike the dimmed-value kinds, which
+/// pass theirs through `truncate_to_width`. So the string itself is the
+/// limit: one too long for the column runs off the panel's right edge.
+/// Writing one fails here rather than in a screenshot.
+#[test]
+fn every_greyed_reason_fits_the_column() {
+    let rect = panel_rect(&Panel::Launcher(Box::new(LauncherState::new(
+        launcher::MachineSetup::default(),
+    ))));
+    // Where the text starts, and the margin it must stop short of.
+    let room = (rect.x + rect.w - LAUNCH_MARGIN) - launcher_control_x(rect);
+    // Every model, so the rows each machine greys are all walked: a
+    // machine without IDE, a machine without a CD drive, and the CPU
+    // every profile brings with it (greying the FPU/cache/Zorro III rows
+    // the 68000 profiles cannot have).
+    for model in launcher::MODELS {
+        let mut setup = launcher::MachineSetup::default();
+        setup.select_model(Some(model));
+        // The strip tabs, plus the sub-pages reached from a nav row: the
+        // CD page is one of them, and its rows are among the few that
+        // explain themselves this way.
+        let off_strip = [
+            LauncherTab::IoParallel,
+            LauncherTab::IoNetworking,
+            LauncherTab::IoAudio,
+            LauncherTab::Cd,
+            LauncherTab::HostFs,
+            LauncherTab::Whdload,
+            LauncherTab::Lide,
+            LauncherTab::Copperhf,
+            LauncherTab::Sf2000Sd,
+            LauncherTab::AvVideo,
+            LauncherTab::AvDisplay,
+            LauncherTab::AvEmulation,
+            LauncherTab::AvPaths,
+        ];
+        for &tab in launcher::TABS.iter().chain(off_strip.iter()) {
+            for r in launcher::rows(
+                tab,
+                crate::config::ParallelDevice::None,
+                crate::config::SerialMode::Off,
+                false,
+                false,
+            )
+            .iter()
+            {
+                let Some(reason) = setup.disabled_reason(r.field) else {
+                    continue;
+                };
+                if greyed_presentation(r, &setup) != GreyedAs::Reason {
+                    continue;
+                }
+                let width = font::text_width(reason, 1);
+                assert!(
+                    width <= room,
+                    "{model:?} {tab:?} {:?}: reason {reason:?} is {width} wide, past the {room} the column has",
+                    r.label
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn frame_analyzer_controls_hit_test() {
     let ui = UiState {
