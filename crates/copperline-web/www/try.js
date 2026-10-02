@@ -3991,9 +3991,13 @@ function togglePause() {
 // sake, and a capture keeps the smooth presentation's shape whatever
 // the page draws, as the desktop's captures keep the aspect's own shape
 // whatever its window draws.
+// Smart autocrop uses the full raster as its live buffer, so suspend
+// autocrop during the read too, then restore the visitor's setting.
 function withTvAperture(f) {
   const bezel = monitorBezelOn();
   const integer = layoutSupported && scalingMode === 'integer';
+  const autocrop = layoutSupported && autocropOn;
+  if (autocrop) emu.set_autocrop?.(false);
   if (bezel) emu.set_monitor_bezel?.(false);
   if (integer) emu.set_scaling?.('smooth');
   try {
@@ -4001,6 +4005,7 @@ function withTvAperture(f) {
   } finally {
     if (integer) emu.set_scaling?.('integer');
     if (bezel) emu.set_monitor_bezel?.(true);
+    if (autocrop) emu.set_autocrop?.(true);
   }
 }
 async function copyScreenshot() {
@@ -5088,13 +5093,14 @@ function storePref(key, value) {
 }
 
 const OVERSCAN_STORAGE_KEY = 'copperline-overscan';
-const OVERSCAN_MODES = ['tv', 'full'];
-const OVERSCAN_LABELS = { tv: 'TV', full: 'Full overscan' };
+const OVERSCAN_MODES = ['tv', 'smart', 'full'];
+const OVERSCAN_LABELS = { tv: 'TV', smart: 'Smart', full: 'Full overscan' };
 
 const overscanShellSel = $('overscan');
 const overscanSel = overscanShellSel ?? buildSettingControl('overscan', 'View');
-if (!overscanSel.options.length) {
+{
   for (const mode of OVERSCAN_MODES) {
+    if (Array.from(overscanSel.options).some(option => option.value === mode)) continue;
     const option = document.createElement('option');
     option.value = mode;
     option.textContent = OVERSCAN_LABELS[mode];
@@ -7369,7 +7375,7 @@ const pageParams = new URLSearchParams(location.search);
 //     "floppy_sounds": false,        preset the drive-sounds toggle
 //     "mono_audio": true,            preset the mono-audio toggle
 //     "floppy_speed": 800,           100|200|400|800|0 (0 = turbo)
-//     "overscan": "full",            starting view (tv|full); a visitor's
+//     "overscan": "full",            starting view (tv|smart|full); a visitor's
 //                                    own remembered choice wins
 //     "tint": "green",               starting screen tint (none|bw|green|
 //                                    amber|sepia); same visitor rule

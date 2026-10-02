@@ -2192,6 +2192,7 @@ fn debug_viewport_uses_the_same_pixel_rect_for_picture_and_input() {
                 Some(DisplaySrc {
                     rect: (24, 18, 320, 200),
                     par: (1, 1),
+                    horizontal_repeat: 1,
                 }),
             );
             let (x, y, w, h) = layout.display_dst;

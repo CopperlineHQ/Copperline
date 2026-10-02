@@ -30,7 +30,7 @@ The web version runs at [copperline.dev/try](https://copperline.dev/try/):
   - **Monitor presentation:** Combine the CRT shader with the 1084 cabinet or the Classic
     bezel: **1084 (CRT + cabinet)** (default), **Classic (CRT + bezel)**, **CRT filter**,
     **1084 cabinet**, **Classic bezel**, or **Plain**.
-  - **View (Overscan):** Crop to standard TV aperture or view full overscan border areas.
+  - **View (Overscan):** TV keeps the fixed aperture; Smart corrects stable horizontal display offsets; Full overscan shows the captured raster.
   - **Scaling:** **Smooth** (default) fits the picture to the display element using
     linear interpolation. **Integer** matches desktop `[display] scaling = "integer"`:
     the picture scales by whole device pixels per column and scan line using independent
@@ -40,8 +40,8 @@ The web version runs at [copperline.dev/try](https://copperline.dev/try/):
     to the active raster area containing fetched bitplane data rather than the fixed TV
     aperture. When paired with **Integer** scaling, integer multipliers recalculate
     against the cropped viewport. Both scaling and autocrop are automatically suspended
-    when monitor bezels are enabled. Screenshots capture the standard presentation buffer
-    geometry.
+    when monitor bezels are enabled. Screenshots retain the configured framing aperture
+    and centring, including with Smart autocrop, and leave the live settings unchanged.
   - **Screen tint:** Monochrome simulation presets (Black & White, Green, Amber, Sepia).
   - **Deinterlacing:** Motion-adaptive field merging for interlaced display modes.
   - **Phosphor persistence:** Simulates CRT phosphor decay trails.
@@ -226,10 +226,13 @@ requestAnimationFrame(renderLoop);
 - `set_port_device(port, device)`: Configure controller port device (`port` 1 or 2, e.g., `"mouse"`, `"joystick"`, `"cd32"`, `"analogue"`, `"none"`).
 - `save_state()`: Export full machine state as `Uint8Array`.
 - `load_state(stateBytes)`: Restore machine state from `Uint8Array`.
-- `set_overscan(mode)`: `"tv"` (default) or `"full"` presentation overscan.
+- `set_overscan(mode)`: `"tv"` (default), `"smart"` or `"full"` presentation overscan.
 - `set_scaling(mode)`: `"smooth"` (default) or `"integer"`. Under `"integer"`, 60 Hz
   standard scans present captured apertures at native scanlines without resampling.
-- `set_autocrop(on)`: Enable or disable autocrop.
+- `set_autocrop(on)`: Enable or disable autocrop. In Smart view it selects from the
+  unmasked raster, preserving the detected display beyond the TV aperture; pixel
+  aspect remains tied to the PAL/NTSC scan. Combine with integer scaling for the
+  largest whole-pixel fit without discarding picture content.
 - `present_content_rect()`: Returns the active content bounding box as `[x, y, width, height]`
   in presentation-buffer pixels, or an empty array if no frame has been drawn.
 - `present_layout(availWidth, availHeight)`: Computes presentation placement for a viewport
@@ -339,7 +342,7 @@ When using the bundled `try.js` harness, standard UI elements can be connected b
 - `#video`: `<select>` element for PAL / NTSC switching.
 - `#floppy-speed`: `<select>` for floppy drive speed multiplier (`100`, `200`, `400`, `800`, `0` for turbo).
 - `#monitor`: `<select>` for CRT shader and bezel style.
-- `#overscan`: `<select>` for TV aperture vs. full overscan view.
+- `#overscan`: `<select>` for TV, Smart or Full overscan framing.
 - `#scaling`: `<select>` for smooth vs. integer scaling (`smooth` / `integer`).
 - `#autocrop`: `<input type="checkbox">` for the autocrop presentation. A shell can ship
   both with the `hidden` attribute; the glue un-hides them on a bundle that supports them.
@@ -368,7 +371,7 @@ fetches `./copperline.json`):
 
 Every key is optional. The file accepts `machine`, `video`, `kick` (a same-origin ROM
 path), `df0`, `df1`, `floppy_speed` (100/200/400/800, or 0 for turbo), `floppy_sounds`,
-`mono_audio`, `overscan` (`tv`/`full`), `tint` (`none`/`bw`/`green`/`amber`/`sepia`),
+`mono_audio`, `overscan` (`tv`/`smart`/`full`), `tint` (`none`/`bw`/`green`/`amber`/`sepia`),
 `monitor` (`1084`/`classic`/`crt`/`cabinet`/`bezel`/`plain`), `scaling`, `autocrop`,
 `deinterlace`, `phosphor` (0 to 0.95), `joy` (`off`/`keys`/`cd32`/`touch`),
 `background_run`, `serial_url`, `serial_raw` and `autoboot` (power on once everything

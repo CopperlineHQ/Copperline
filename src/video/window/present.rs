@@ -29,6 +29,8 @@ struct RepeatedPresentationMetadata {
     tv_aperture: TvApertureFrame,
     programmable: bool,
     content_rect: Option<bitplane::ContentRect>,
+    placement: FieldPlacement,
+    horizontal_repeat: usize,
 }
 
 /// Exact previous-frame detector owned by the render worker. The bitplane
@@ -126,6 +128,8 @@ pub(super) fn render_job_to_presentation(
             tv_aperture: metadata.tv_aperture,
             programmable: metadata.programmable,
             content_rect: metadata.content_rect,
+            placement: metadata.placement,
+            horizontal_repeat: metadata.horizontal_repeat,
             input,
         };
     }
@@ -169,6 +173,12 @@ pub(super) fn render_job_to_presentation(
         tv_aperture: standard_tv_aperture_frame(geometry, present_rows, &base),
         programmable: geometry.programmable,
         content_rect,
+        placement,
+        horizontal_repeat: if overscan == Overscan::Smart && !geometry.programmable {
+            content_horizontal_repeat(&presentation_fb, present_width, present_rows, content_rect)
+        } else {
+            1
+        },
     };
     repeated_frame_cache.note_rendered(&input, &mut render_result, settings, phosphor, metadata);
     RenderWorkerResult {
@@ -182,6 +192,8 @@ pub(super) fn render_job_to_presentation(
         tv_aperture: metadata.tv_aperture,
         programmable: metadata.programmable,
         content_rect,
+        placement,
+        horizontal_repeat: metadata.horizontal_repeat,
         input,
     }
 }
@@ -217,7 +229,7 @@ pub(super) fn canvas_source_point(
         return None;
     }
     match tv_aperture_rows {
-        Some(aperture_rows) if overscan == Overscan::Tv => {
+        Some(aperture_rows) if overscan.is_tv() => {
             let (x_off, y_off) = tv_centre_source_offset(tv_centre);
             let src_y = tv_aperture_source_row(y, canvas_rows, 1, aperture_rows)
                 .map(|crop_y| (TV_PRESENT_SOURCE_Y + crop_y) as i32 + y_off)?;
@@ -256,7 +268,7 @@ pub(super) fn canvas_content_rect(
     let (mut y_min, mut y_max) = (None, None);
     let (mut x_min, mut x_max) = (None, None);
     match tv_aperture_rows {
-        Some(aperture_rows) if overscan == Overscan::Tv => {
+        Some(aperture_rows) if overscan.is_tv() => {
             let (x_off, y_off) = tv_centre_source_offset(tv_centre);
             for y in 0..canvas_rows {
                 let src = tv_aperture_source_row(y, canvas_rows, 1, aperture_rows)
@@ -667,6 +679,7 @@ pub(super) struct DisplaySrc {
     /// or the square canvas under the square aspect), the glass ratio
     /// ([`glass_par`]) for the square canvas under the tv aspect.
     pub(super) par: (u32, u32),
+    pub(super) horizontal_repeat: usize,
 }
 
 /// The shape of one square-canvas pixel on the 4:3 glass, as a ratio
@@ -687,7 +700,7 @@ pub(super) fn glass_par(
     present_rows: usize,
 ) -> (u32, u32) {
     match tv_aperture_rows {
-        Some(rows) if overscan == Overscan::Tv => (
+        Some(rows) if overscan.is_tv() => (
             (FB_WIDTH * rows) as u32,
             (crate::video::PRESENT_HEIGHT_TV * TV_CAPTURED_WIDTH) as u32,
         ),
@@ -768,6 +781,7 @@ pub(super) fn debug_present_layout(
         .unwrap_or(DisplaySrc {
             rect: (0, 0, FB_WIDTH, present_height()),
             par: (1, 1),
+            horizontal_repeat: 1,
         });
     let mut layout = display_src_layout((width.max(1), height.max(1)), integer, src, None);
     layout.display_dst.0 += x;
@@ -798,7 +812,7 @@ pub(super) fn display_src_layout(
     let SubRectFit {
         factors,
         dst: display_dst,
-    } = sub_rect_fit(avail, integer, src.rect, src.par);
+    } = sub_rect_fit_native(avail, integer, src.rect, src.par, src.horizontal_repeat);
     PresentLayout {
         src_canvas: src.rect,
         display_dst,
@@ -1223,7 +1237,7 @@ pub(super) fn picture_map(
         fb_width: FB_WIDTH as i32,
     };
     if let Some(aperture_rows) =
-        tv_aperture_rows.filter(|_| overscan == Overscan::Tv && src_width == FB_WIDTH)
+        tv_aperture_rows.filter(|_| overscan.is_tv() && src_width == FB_WIDTH)
     {
         let (source_y, aperture_rows) = if tube_glass {
             (0, tube_aperture_rows(aperture_rows))
@@ -1267,7 +1281,7 @@ pub(super) fn copy_window_present_frame(
     // to the tube aperture: the whole rendered field of the same standard,
     // which the bezel shaders underscan inside the tube face.
     match tv_aperture_rows {
-        Some(aperture_rows) if overscan == Overscan::Tv && src_width == FB_WIDTH => {
+        Some(aperture_rows) if overscan.is_tv() && src_width == FB_WIDTH => {
             let (source_y, aperture_rows) = if tube_glass {
                 (0, tube_aperture_rows(aperture_rows))
             } else {
@@ -1834,7 +1848,7 @@ pub(super) fn present_capture_frame(
     out: &mut Vec<u32>,
 ) -> (usize, usize) {
     if let Some(aperture_rows) = tv_aperture_rows {
-        if overscan == Overscan::Tv && src_width == FB_WIDTH {
+        if overscan.is_tv() && src_width == FB_WIDTH {
             // Both standards' apertures fill the same 4:3 glass, so the
             // saved picture keeps one shape: the captured aperture's
             // columns resample onto the glass width, exactly like the

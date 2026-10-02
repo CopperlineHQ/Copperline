@@ -441,6 +441,12 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
 ### Video Settings
 
 - **Menu Size**: 1x or 2x, described above.
+- **Framing**: **TV** keeps the fixed monitor aperture (the default);
+  **Smart** corrects small horizontal display offsets after the hardware
+  envelope stays stable, with at most eight lo-res pixels of automatic
+  adjustment; **Full overscan** shows the entire captured raster. Blank
+  frames hold the previous Smart position. Manual centring adds a trim.
+  Screenshots and frame dumps follow the selected framing.
 - **Pixel Aspect**: **TV (4:3)**, the CRT pixel aspect (the default; PAL
   lo-res pixels slightly wider than tall, as a real TV shows them), or
   **Square** (a 320x256 screen is an exact 640x512, handy for pixel-exact
@@ -470,6 +476,9 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   multisync modes, and is suspended while a monitor bezel is drawn or an RTG
   mode is shown. The start-up value is `[display] autocrop` (see
   [Configuration](configuration.md)).
+  In Smart framing, autocrop selects from the unmasked raster before the
+  TV aperture clips artwork. Integer scaling fits the complete detected
+  display; PAL/NTSC pixel aspect stays tied to the scan.
 - **Screen Centring**: nudge where the TV picture sits on the glass, the
   H-CENTER/V-CENTER controls a real monitor carried on its front.
   **Picture Left/Right** step one lo-res pixel (up to 16 each way),

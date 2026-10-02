@@ -1117,6 +1117,10 @@ fn display_overscan_parses_and_defaults_to_tv() -> Result<()> {
             "#,
     )?;
     assert_eq!(cfg.overscan, Overscan::Full);
+    assert_eq!(
+        parse_config("[display]\noverscan = \"Smart\"")?.overscan,
+        Overscan::Smart
+    );
     assert!(parse_config("[display]\noverscan = \"crop\"").is_err());
     Ok(())
 }

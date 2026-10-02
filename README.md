@@ -62,6 +62,11 @@ cargo build --release
 Run the resulting `target/release/copperline` binary. `--release` is a Cargo
 build option; unoptimized debug builds are too slow for real-time emulation.
 
+**Video Settings -> Framing -> Smart** automatically corrects small horizontal
+display offsets. Combine it with **Autocrop** and **Integer** scaling to fit
+the detected display at the largest whole-pixel scale, including artwork
+outside the normal TV aperture. See [display configuration](docs/guide/configuration.md).
+
 The [Debug workspace](docs/debugger/window.md) puts the Amiga display beside
 its debugger, Frame Analyzer, and Console in one desktop window. Open
 **Debugger...** in the menu or press

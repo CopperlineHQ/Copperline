@@ -1084,6 +1084,7 @@ pub struct App {
     /// Pixels per `present_fb` row: FB_WIDTH classically, twice that for
     /// a 35 ns super-hi-res canvas.
     present_width: usize,
+    present_horizontal_repeat: usize,
     /// TV-aperture crop rows for the presented frame when it is a standard
     /// 15 kHz scan with the standard horizontal window (None otherwise);
     /// applied by the present copy under `Overscan::Tv`.
@@ -1424,6 +1425,9 @@ pub struct App {
     /// the menu steps change the live value without affecting the
     /// configured start-up one.
     tv_centre: crate::config::TvCentre,
+    /// Manual trim plus the latched Smart correction. Every picture and
+    /// input mapping consumes this same resolved position.
+    present_tv_centre: crate::config::TvCentre,
     /// Window shader pass in effect ([display] shader). Presentation only:
     /// screenshots, frame dumps and recordings never go through it.
     crt_shader_kind: crate::config::ShaderKind,
@@ -2322,6 +2326,8 @@ struct RenderWorkerResult {
     presentation_fb: Vec<u32>,
     present_rows: usize,
     present_width: usize,
+    placement: FieldPlacement,
+    horizontal_repeat: usize,
     /// The frame's aperture classification; the App resolves it through
     /// its `PresentationLatch` when the result lands, so border-only
     /// frames keep the previous geometry.
@@ -2729,6 +2735,7 @@ impl App {
             present_fb: vec![0u32; FB_WIDTH * OUT_HEIGHT],
             present_rows: OUT_HEIGHT,
             present_width: FB_WIDTH,
+            present_horizontal_repeat: 1,
             rtg_fb: Vec::new(),
             rtg_present_dims: None,
             present_tv_aperture_rows: Some(TV_PAL_PRESENT_HEIGHT),
@@ -2859,6 +2866,7 @@ impl App {
             hcenter: hcenter_enabled(),
             overscan,
             tv_centre,
+            present_tv_centre: tv_centre,
             crt_shader_kind: shader.kind(),
             custom_shader_path: match &shader {
                 crate::config::ShaderMode::Custom(path) => Some(path.clone()),
@@ -3158,8 +3166,8 @@ impl App {
             self.present_rows,
             self.present_width,
             self.overscan,
-            self.tv_centre,
-            self.present_tv_aperture_rows,
+            self.present_tv_centre,
+            self.window_tv_aperture_rows(),
             present_height(),
         )?;
         placement.field_point(sx, sy, self.present_rows)
@@ -5280,6 +5288,7 @@ impl ApplicationHandler for App {
                 // keeps hover and click hit-testing aligned with the
                 // pixels this frame actually shows.
                 let display_src = self.display_canvas_src();
+                let window_aperture_rows = self.window_tv_aperture_rows();
                 if let (Some(phys), Some(r)) = (self.last_cursor_phys, self.render.as_ref()) {
                     self.cursor_pos = main_cursor_position(r, display_src, phys);
                 }
@@ -5478,13 +5487,12 @@ impl ApplicationHandler for App {
                                 frame,
                                 texture_scale,
                                 self.overscan,
-                                self.tv_centre,
+                                self.present_tv_centre,
                                 // The TV aperture is a chipset crop rect. An RTG
                                 // frame fills the buffer on its own terms, so
                                 // applying it here would show a sub-rect of the
                                 // board's screen.
-                                self.present_tv_aperture_rows
-                                    .filter(|_| self.rtg_present_dims.is_none()),
+                                window_aperture_rows.filter(|_| self.rtg_present_dims.is_none()),
                                 // A drawn bezel shows the tube aperture. Keyed to
                                 // the style alone, not bezel_active: an open
                                 // overlay suspends the bezel *pass*, and the
@@ -5677,9 +5685,9 @@ impl ApplicationHandler for App {
                             let scanlines = crt_scanline_count(
                                 self.present_rows,
                                 present_height(),
-                                self.present_tv_aperture_rows
+                                window_aperture_rows
                                     .filter(|_| {
-                                        self.overscan == Overscan::Tv
+                                        self.overscan.is_tv()
                                             && self.rtg_present_dims.is_none()
                                             && self.present_width == FB_WIDTH
                                     })
@@ -5737,8 +5745,8 @@ impl ApplicationHandler for App {
                                 self.present_width,
                                 texture_scale,
                                 self.overscan,
-                                self.tv_centre,
-                                self.present_tv_aperture_rows,
+                                self.present_tv_centre,
+                                window_aperture_rows,
                                 self.bezel.is_on(),
                             );
                             if let Some(display) = draws.first_mut() {
@@ -6758,6 +6766,7 @@ impl App {
         raw.display.bezel = Some(crate::config::RawBezel::Named(self.bezel.label().into()));
         raw.display.tv_h_centre = Some(self.tv_centre.h);
         raw.display.tv_v_centre = Some(self.tv_centre.v);
+        raw.display.overscan = Some(self.overscan.as_str().to_string());
         raw.display.full_screen = Some(
             self.render
                 .as_ref()

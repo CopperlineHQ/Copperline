@@ -5,6 +5,38 @@
 use super::*;
 
 impl App {
+    /// Smart autocrop selects from the unmasked raster, before the fixed TV
+    /// aperture can discard artwork. Captures retain their configured view.
+    pub(super) fn window_tv_aperture_rows(&self) -> Option<usize> {
+        self.window_tv_aperture_rows_for(crate::video::autocrop())
+    }
+
+    fn window_tv_aperture_rows_for(&self, autocrop: bool) -> Option<usize> {
+        self.present_tv_aperture_rows
+            .filter(|_| !(self.overscan == Overscan::Smart && autocrop && !self.bezel.is_on()))
+    }
+
+    pub(super) fn refresh_tv_centre(&mut self) {
+        let centre = self
+            .presentation_latch
+            .tv_centre(self.overscan, self.tv_centre);
+        if centre != self.present_tv_centre {
+            self.present_tv_centre = centre;
+            self.main_presentation_dirty = true;
+        }
+    }
+
+    pub(super) fn apply_overscan(&mut self, overscan: Overscan) {
+        if self.overscan == overscan {
+            return;
+        }
+        self.overscan = overscan;
+        self.reset_render_pipeline();
+        self.render_emulated_frame_if_needed();
+        self.show_osd(format!("Framing: {}", overscan.label()));
+        self.request_redraw();
+    }
+
     /// Re-plan the presentation after the canvas height changed, and resize
     /// every buffer that indexes by it. False when the texture could not be
     /// resized, in which case the caller has to put its flag back: the draw
@@ -619,7 +651,11 @@ impl App {
         // pairs for a per-line factor to step by half a row: it keeps
         // the uniform multiple of the square canvas, so only the tv
         // canvas of a standard scan asks for the glass shape.
-        let par = if per_axis && !self.present_programmable {
+        let native_crop = self.overscan == Overscan::Smart && autocrop;
+        let mut par = if (per_axis || native_crop)
+            && !self.present_programmable
+            && crate::video::pixel_aspect() == crate::config::PixelAspect::Tv
+        {
             glass_par(
                 self.overscan,
                 self.present_tv_aperture_rows,
@@ -628,15 +664,26 @@ impl App {
         } else {
             (1, 1)
         };
+        // A smooth TV canvas already resampled the whole woven field onto
+        // its shorter canvas. Compensate that row map while retaining the
+        // scan's pixel aspect; a crop's own dimensions never define its PAR.
+        if native_crop && !crate::video::square_canvas() && !self.present_programmable {
+            par.0 *= present_height() as u32;
+            par.1 *= self.present_rows.max(1) as u32;
+        }
         let full = (0, 0, FB_WIDTH, present_height());
         if self.ui.active() {
-            return Some(DisplaySrc { rect: full, par });
+            return Some(DisplaySrc {
+                rect: full,
+                par,
+                horizontal_repeat: 1,
+            });
         }
         // What the per-axis draw shows with nothing tighter to show: the
         // aperture the tv canvas fills its glass with, not the pads
         // around it. (The full-overscan canvas is its own aperture.)
-        let base = match self.present_tv_aperture_rows {
-            Some(rows) if per_axis && self.overscan == Overscan::Tv => aperture_canvas_rect(rows),
+        let base = match self.window_tv_aperture_rows_for(autocrop) {
+            Some(rows) if per_axis && self.overscan.is_tv() => aperture_canvas_rect(rows),
             _ => full,
         };
         let rect = if autocrop {
@@ -647,8 +694,8 @@ impl App {
                         self.present_rows,
                         self.present_width,
                         self.overscan,
-                        self.tv_centre,
-                        self.present_tv_aperture_rows,
+                        self.present_tv_centre,
+                        self.window_tv_aperture_rows_for(autocrop),
                         present_height(),
                     )
                 })
@@ -656,7 +703,15 @@ impl App {
         } else {
             base
         };
-        Some(DisplaySrc { rect, par })
+        Some(DisplaySrc {
+            rect,
+            par,
+            horizontal_repeat: if native_crop && crate::video::square_canvas() {
+                self.present_horizontal_repeat
+            } else {
+                1
+            },
+        })
     }
 
     /// Switch the autocrop presentation live. Purely a scaler-pass
@@ -690,6 +745,7 @@ impl App {
         centre.h = (centre.h + dh).clamp(-TV_H_CENTRE_RANGE, TV_H_CENTRE_RANGE);
         centre.v = (centre.v + dv).clamp(-TV_V_CENTRE_RANGE, TV_V_CENTRE_RANGE);
         let centre = *centre;
+        self.refresh_tv_centre();
         self.show_osd(format!("Centring: H {:+}, V {:+}", centre.h, centre.v));
         self.main_presentation_dirty = true;
         self.request_redraw();
@@ -797,6 +853,7 @@ impl App {
         self.last_rendered_emulated_frame = None;
         self.last_submitted_render_frame = None;
         self.presentation_latch.reset();
+        self.refresh_tv_centre();
         self.autocrop_latch.reset();
         self.present_content_rect = None;
         self.last_main_redraw_state = None;
@@ -828,6 +885,21 @@ impl App {
             result.present_width,
         );
         let smoothed = self.autocrop_latch.resolve(result.content_rect);
+        self.present_placement = Some(result.placement);
+        if result.content_rect.is_some()
+            && self.present_horizontal_repeat != result.horizontal_repeat
+        {
+            self.present_horizontal_repeat = result.horizontal_repeat;
+            self.main_presentation_dirty = true;
+        }
+        if self.overscan == Overscan::Smart {
+            self.presentation_latch.resolve_smart_centre(
+                result.content_rect,
+                result.emulated_frame,
+                result.programmable,
+            );
+            self.refresh_tv_centre();
+        }
         if smoothed != self.present_content_rect {
             self.present_content_rect = smoothed;
             self.main_presentation_dirty = true;
@@ -1002,6 +1074,7 @@ impl App {
             // buffer instead of producing the first returning chipset frame.
             self.render_generation = self.render_generation.wrapping_add(1);
             self.presentation_latch.reset();
+            self.refresh_tv_centre();
             self.autocrop_latch.reset();
             self.present_content_rect = None;
         }
@@ -1085,6 +1158,30 @@ impl App {
             &mut next_present_fb,
         );
         self.reset_autocrop_latch_across_scan_change(geometry.programmable, rows, width);
+        if field_content.is_some() {
+            let repeat = if self.overscan == Overscan::Smart && !geometry.programmable {
+                content_horizontal_repeat(
+                    &next_present_fb,
+                    width,
+                    rows,
+                    field_content.and_then(|rect| placement.content_rect(rect, rows)),
+                )
+            } else {
+                1
+            };
+            if repeat != self.present_horizontal_repeat {
+                self.present_horizontal_repeat = repeat;
+                self.main_presentation_dirty = true;
+            }
+        }
+        if self.overscan == Overscan::Smart {
+            self.presentation_latch.resolve_smart_centre(
+                field_content.and_then(|rect| placement.content_rect(rect, rows)),
+                emulated_frame,
+                geometry.programmable,
+            );
+            self.refresh_tv_centre();
+        }
         let smoothed = self
             .autocrop_latch
             .resolve(field_content.and_then(|rect| placement.content_rect(rect, rows)));

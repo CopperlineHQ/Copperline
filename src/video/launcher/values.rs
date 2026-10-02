@@ -111,10 +111,7 @@ impl MachineSetup {
                     format!("{:.0} s", self.cd_insert_delay)
                 }
             }
-            F::Overscan => match self.overscan {
-                Overscan::Tv => "TV".to_string(),
-                Overscan::Full => "Full".to_string(),
-            },
+            F::Overscan => self.overscan.label().to_string(),
             F::PixelAspect => match self.pixel_aspect {
                 PixelAspect::Tv => "TV (4:3)".to_string(),
                 PixelAspect::Square => "Square".to_string(),

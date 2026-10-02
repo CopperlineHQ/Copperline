@@ -1566,7 +1566,8 @@ pub(crate) fn parse_overscan(s: &str) -> Result<Overscan> {
     match s.trim().to_ascii_lowercase().as_str() {
         "full" => Ok(Overscan::Full),
         "tv" => Ok(Overscan::Tv),
-        other => bail!("[display] overscan must be \"full\" or \"tv\", got \"{other}\""),
+        "smart" => Ok(Overscan::Smart),
+        other => bail!("[display] overscan must be \"tv\", \"smart\" or \"full\", got \"{other}\""),
     }
 }
 
