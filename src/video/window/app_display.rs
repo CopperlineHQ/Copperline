@@ -141,9 +141,9 @@ impl App {
         true
     }
 
-    /// Size the window to its configured canvas multiple, unless fullscreen or
-    /// maximized. A fullscreen
-    /// request resizes nothing there and instead shrinks the drawable into a
+    /// Size the window to its configured canvas multiple, unless fullscreen,
+    /// maximized, or owned by Debug. A fullscreen request resizes nothing there
+    /// and instead shrinks the drawable into a
     /// corner (macOS and Windows; Linux window managers ignore it), so leave the
     /// display-sized surface alone and let the presentation scale into it.
     ///
@@ -158,10 +158,14 @@ impl App {
         let Some(window) = self.render.as_ref().map(|r| r.window.clone()) else {
             return;
         };
-        if window.fullscreen().is_some() || window.is_maximized() {
+        if self.debug_layout_active || window.fullscreen().is_some() || window.is_maximized() {
             return;
         }
-        let size = canvas_window_size(window_present_height(), self.window_scale);
+        let canvas_height = window_present_height();
+        // A shorter canvas may otherwise be clamped to the minimum from
+        // before a status-bar or pixel-aspect change, especially at 0.5x.
+        window.set_min_inner_size(Some(canvas_window_size(canvas_height, 0.5)));
+        let size = canvas_window_size(canvas_height, self.window_scale);
         if let Some(applied) = window.request_inner_size(size) {
             self.apply_surface_size(applied);
             // This backend applied the request synchronously, so no Resized
@@ -239,6 +243,7 @@ impl App {
         let logical_w = f64::from(size.width) / scale;
         let logical_h = f64::from(size.height) / scale;
         let want = (logical_h + f64::from(delta)).max(1.0);
+        window.set_min_inner_size(Some(canvas_window_size(window_present_height(), 0.5)));
         if let Some(applied) = window.request_inner_size(LogicalSize::new(logical_w, want)) {
             // Applied client-side, with no Resized event to follow.
             self.apply_surface_size(applied);

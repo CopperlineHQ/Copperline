@@ -1514,6 +1514,10 @@ impl App {
         // Apply the configured start-up window state; the runtime toggles
         // (Cmd+F, Cmd+Shift+F) take over from here. Reuse the toggles so the
         // surface/window resize stays in one place.
+        // Auto-launch runs before resumed creates the window, so retain the
+        // selected modes for creation as well as updating an existing window.
+        self.start_fullscreen = cfg.full_screen;
+        self.start_maximized = cfg.maximized && !cfg.full_screen;
         let is_fullscreen = self
             .render
             .as_ref()
@@ -1527,7 +1531,8 @@ impl App {
         if self.window_scale != cfg.window_scale {
             self.window_scale = cfg.window_scale;
             self.window_manually_sized = false;
-            if cfg.full_screen
+            if self.debug_layout_active
+                || cfg.full_screen
                 || cfg.maximized
                 || self
                     .render

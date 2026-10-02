@@ -5358,6 +5358,47 @@ fn auto_launch_runs_only_when_the_config_asks() {
 }
 
 #[test]
+fn automatic_run_retains_window_modes_before_window_creation() {
+    // Auto-launch replaces the placeholder before resumed creates a host
+    // window. Both mode fields must describe that new configuration.
+    for (fullscreen, maximized) in [(false, true), (true, false), (true, true), (false, false)] {
+        let mut raw = crate::config::RawConfig::default();
+        raw.display.full_screen = Some(fullscreen);
+        raw.display.maximized = Some(maximized);
+        raw.display.window_scale = Some(2.0);
+        let cfg = crate::config::Config::try_from(raw.clone()).expect("config");
+        let mut app = test_app();
+        app.run_honors_power_on = true;
+        let emu = test_emulator(Box::new(NullSink), crate::config::CpuModel::M68000, &[]);
+        app.run_machine(emu, &cfg, raw);
+        assert!(app.render.is_none());
+        assert_eq!(app.start_fullscreen, fullscreen);
+        assert_eq!(app.start_maximized, maximized && !fullscreen);
+        assert_eq!(app.window_scale, 2.0);
+    }
+}
+
+#[test]
+fn running_a_new_window_scale_in_debug_defers_canvas_sizing() {
+    let mut raw = crate::config::RawConfig::default();
+    raw.display.window_scale = Some(2.0);
+    let cfg = crate::config::Config::try_from(raw.clone()).expect("config");
+    let mut app = test_app();
+    app.enter_debug_workspace();
+    let emu = test_emulator(Box::new(NullSink), crate::config::CpuModel::M68000, &[]);
+    app.run_machine(emu, &cfg, raw);
+    assert!(app.debug_layout_active, "Run must keep the workspace open");
+    assert_eq!(app.window_scale, 2.0);
+    assert_eq!(app.pending_canvas_follow, Some(super::CanvasFollow::Snap));
+    app.resync_surface_size();
+    assert_eq!(app.pending_canvas_follow, Some(super::CanvasFollow::Snap));
+    app.leave_debug_workspace();
+    assert!(!app.debug_layout_active);
+    // The deferred request survives until a host window is available in Play.
+    assert_eq!(app.pending_canvas_follow, Some(super::CanvasFollow::Snap));
+}
+
+#[test]
 fn an_automatic_run_keeps_the_configured_power_state() {
     // Exercised at run_machine, below the staging that needs a live audio
     // device (which CI has none of): the launcher's two automatic paths

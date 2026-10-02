@@ -1145,6 +1145,9 @@ clears maximization; the last of `--full-screen`, `--maximized`, and
 `--windowed` wins. In a config that enables both `full_screen` and
 `maximized`, fullscreen takes precedence. Canvas changes leave a maximized
 window at its desktop size; restoring it resumes the normal canvas sizing.
+Saved auto-launch configurations use these window preferences too. Changing
+`window_scale` by running a configuration from Debug applies the new size when
+returning to Play, leaving the inspector workspace at its current size.
 
 Rendering completed frames uses a worker thread by default so emulation can
 advance while the previous frame is painted. The worker is an implementation
