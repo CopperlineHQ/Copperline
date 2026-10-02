@@ -102,6 +102,11 @@ To boot directly into a Kickstart ROM, configuration file, or floppy image:
 ./target/release/copperline --model A1200 --fast 8M KICK31.ROM --insert-disk-after 0 df0 game.adf
 ```
 
+For a build pipeline, use `copperline --run build/hello --window-scale 2` to
+start at twice the normal window width and height. `--maximized` opens a
+maximized window with its title bar and desktop taskbar visible;
+`--full-screen` opens borderless fullscreen.
+
 ### Essential keyboard shortcuts
 
 - **Quit**: `Cmd+Q` (macOS) / `Alt+Q` (Linux/Windows)

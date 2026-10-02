@@ -558,17 +558,30 @@ fn last_bezel_style(style: BezelStyle) -> BezelStyle {
     }
 }
 
-/// Whether a window's logical inner size equals the presentation canvas
-/// (FB_WIDTH x `canvas_height`) within a small rounding tolerance -- i.e. the
-/// user has not manually resized it.
-fn logical_size_is_canvas(logical_w: f64, logical_h: f64, canvas_height: usize) -> bool {
-    (logical_w - FB_WIDTH as f64).abs() < 2.0 && (logical_h - canvas_height as f64).abs() < 2.0
+/// Requested logical size, independent of the monitor's DPI factor.
+fn canvas_window_size(canvas_height: usize, window_scale: f64) -> LogicalSize<f64> {
+    LogicalSize::new(
+        FB_WIDTH as f64 * window_scale,
+        canvas_height as f64 * window_scale,
+    )
+}
+
+/// Whether the window still matches its configured canvas multiple, within
+/// a small rounding tolerance, rather than a size chosen by dragging it.
+fn logical_size_is_canvas(
+    logical_w: f64,
+    logical_h: f64,
+    canvas_height: usize,
+    window_scale: f64,
+) -> bool {
+    let size = canvas_window_size(canvas_height, window_scale);
+    (logical_w - size.width).abs() < 2.0 && (logical_h - size.height).abs() < 2.0
 }
 
 const CANVAS_SNAP_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// What a canvas change still owes the window, when it could not be paid
-/// at the time: fullscreen was holding the window and nothing could be
+/// at the time: fullscreen or maximization was holding the window and nothing could be
 /// resized.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum CanvasFollow {
@@ -590,11 +603,12 @@ fn resize_is_canvas_owned(
     logical_w: f64,
     logical_h: f64,
     canvas_height: usize,
+    window_scale: f64,
 ) -> bool {
     snap_request_deadline
         .take()
         .is_some_and(|deadline| now <= deadline)
-        || logical_size_is_canvas(logical_w, logical_h, canvas_height)
+        || logical_size_is_canvas(logical_w, logical_h, canvas_height, window_scale)
 }
 
 /// Host mouse speed multiplier for a 0-100 sensitivity. Exponential so 50 is
@@ -1298,12 +1312,15 @@ pub struct App {
     /// from the current size so a snap the platform clamped or rounded does
     /// not read as the user's own drag and disable future snaps.
     window_manually_sized: bool,
+    /// Configured logical canvas multiple, retained while the window follows
+    /// canvas changes. A manual resize takes ownership as usual.
+    window_scale: f64,
     /// Deadline for the asynchronous response to the last canvas snap, so a
     /// platform-clamped result is not counted as the user's resize. Bounded
     /// because a window manager may ignore the request entirely.
     snap_request_deadline: Option<Instant>,
     /// A canvas change that could not size the window because it was
-    /// fullscreen, waiting for the window to come back.
+    /// fullscreen or maximized, waiting for the window to come back.
     pending_canvas_follow: Option<CanvasFollow>,
     cursor_pos: Option<(i32, i32)>,
     last_display_cursor_pos: Option<(i32, i32)>,
@@ -1469,6 +1486,7 @@ pub struct App {
     /// full_screen). Applied once in `resumed`; the runtime toggle takes over
     /// after that.
     start_fullscreen: bool,
+    start_maximized: bool,
     /// Host USB gamepad reader (pure-Rust, no SDL2), mapped to the emulated
     /// port-2 digital joystick via a per-pad calibration. A no-op when no
     /// input backend is available (e.g. headless CI) or the pad is not yet
@@ -2642,6 +2660,8 @@ impl App {
         vsync: bool,
         tint: crate::config::Tint,
         start_fullscreen: bool,
+        start_maximized: bool,
+        window_scale: f64,
         hide_status_bar: bool,
         warp_speed: WarpSpeed,
         joystick_input_mode: JoystickInputMode,
@@ -2824,6 +2844,7 @@ impl App {
             main_window_focused: false,
             clipboard_next_poll: None,
             window_manually_sized: false,
+            window_scale,
             snap_request_deadline: None,
             pending_canvas_follow: None,
             cursor_pos: None,
@@ -2882,6 +2903,7 @@ impl App {
             tint,
             tint_lut: tint_lut(tint),
             start_fullscreen,
+            start_maximized,
             gamepad: crate::gamepad::GamepadReader::new(),
             gamepad_available: [false; 4],
             gamepad_quit_hold: None,
@@ -4402,7 +4424,7 @@ impl ApplicationHandler for App {
         // Keep the internal overscan field buffer, but present it with
         // the configured pixel aspect: a standard 4:3 Amiga display by
         // default, or square pixels ([display] pixel_aspect = "square").
-        let size = LogicalSize::new(FB_WIDTH as f64, window_present_height() as f64);
+        let size = canvas_window_size(window_present_height(), self.window_scale);
         // Headless capture (screenshot / frame dump) renders into the
         // framebuffer for the saved PNG but has no interactive viewer, so
         // create the window hidden: it avoids flashing an empty window on
@@ -4420,6 +4442,7 @@ impl ApplicationHandler for App {
             .with_window_icon(copperline_window_icon())
             .with_visible(!headless_capture)
             .with_fullscreen(fullscreen)
+            .with_maximized(self.start_maximized && !self.start_fullscreen && !headless_capture)
             .with_inner_size(size)
             .with_min_inner_size(LogicalSize::new(
                 FB_WIDTH as f64 / 2.0,
@@ -4533,6 +4556,9 @@ impl ApplicationHandler for App {
             minimized: false,
             surface_size: (inner.width.max(1), inner.height.max(1)),
         });
+        // The first resize is the platform's response to our initial size,
+        // including any clamp to the available desktop area.
+        self.snap_request_deadline = Some(Instant::now() + CANVAS_SNAP_RESPONSE_TIMEOUT);
         // After the window exists, so the overlay has somewhere to be drawn.
         if let Some(msg) = shader_error {
             self.show_osd(format!("CRT shader: off (custom failed: {msg})"));

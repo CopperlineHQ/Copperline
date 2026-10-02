@@ -1089,6 +1089,7 @@ fn display_fullscreen_and_status_bar_default_and_parse() -> Result<()> {
     // Defaults: windowed, status bar shown.
     let cfg = parse_config("")?;
     assert!(!cfg.full_screen);
+    assert!(!cfg.maximized);
     assert!(cfg.status_bar);
 
     let cfg = parse_config("[display]\nfull_screen = true\nstatus_bar = false\n")?;
@@ -1104,6 +1105,51 @@ fn display_fullscreen_and_status_bar_default_and_parse() -> Result<()> {
     let cfg = load_overrides(&overrides)?;
     assert!(cfg.full_screen);
     assert!(!cfg.status_bar);
+    Ok(())
+}
+
+#[test]
+fn display_maximized_keeps_scale_and_overrides() -> Result<()> {
+    let cfg = parse_config("[display]\nmaximized = true\nwindow_scale = 2\n")?;
+    assert!(cfg.maximized);
+    assert!(!cfg.full_screen);
+    assert_eq!(cfg.window_scale, 2.0);
+    let overrides = ConfigOverrides {
+        full_screen: Some(false),
+        maximized: Some(true),
+        ..Default::default()
+    };
+    let mut raw = RawConfig::parse("[display]\nfull_screen = true\n")?;
+    overrides.apply_to(&mut raw);
+    let cfg = Config::try_from(raw)?;
+    assert!(cfg.maximized);
+    assert!(!cfg.full_screen);
+    Ok(())
+}
+
+#[test]
+fn display_window_scale_validates_and_cli_overrides_file() -> Result<()> {
+    assert_eq!(parse_config("")?.window_scale, 1.0);
+    for value in [0.5, 1.0, 1.5, 2.0, 4.0] {
+        assert_eq!(
+            parse_config(&format!("[display]\nwindow_scale = {value}\n"))?.window_scale,
+            value
+        );
+    }
+    for value in ["0", "-1", "0.49", "4.01", "nan", "inf", "-inf"] {
+        assert!(
+            parse_config(&format!("[display]\nwindow_scale = {value}\n")).is_err(),
+            "accepted {value}"
+        );
+    }
+    let overrides = ConfigOverrides {
+        window_scale: Some(2.0),
+        ..Default::default()
+    };
+    assert!(!overrides.is_empty());
+    let mut raw = RawConfig::parse("[display]\nwindow_scale = 1.5\n")?;
+    overrides.apply_to(&mut raw);
+    assert_eq!(Config::try_from(raw)?.window_scale, 2.0);
     Ok(())
 }
 

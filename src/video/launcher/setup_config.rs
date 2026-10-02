@@ -326,6 +326,8 @@ impl MachineSetup {
             menu_scale: cfg.menu_scale,
             tint: cfg.tint,
             start_fullscreen: cfg.full_screen,
+            start_maximized: cfg.maximized,
+            window_scale: cfg.window_scale,
             show_status_bar: cfg.status_bar,
             floppy_sounds: cfg.audio.floppy_sounds,
             floppy_volume: cfg.audio.floppy_sounds_volume,
@@ -838,6 +840,12 @@ impl MachineSetup {
         }
         if self.start_fullscreen != base.full_screen {
             raw.display.full_screen = Some(self.start_fullscreen);
+        }
+        if self.start_maximized != base.maximized {
+            raw.display.maximized = Some(self.start_maximized);
+        }
+        if self.window_scale != base.window_scale {
+            raw.display.window_scale = Some(self.window_scale);
         }
         if self.show_status_bar != base.status_bar {
             raw.display.status_bar = Some(self.show_status_bar);

@@ -668,9 +668,27 @@ where
             }
             "--full-screen" => {
                 overrides.full_screen = Some(true);
+                overrides.maximized = Some(false);
             }
             "--windowed" => {
                 overrides.full_screen = Some(false);
+                overrides.maximized = Some(false);
+            }
+            "--maximized" => {
+                overrides.full_screen = Some(false);
+                overrides.maximized = Some(true);
+            }
+            "--window-scale" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--window-scale requires a multiplier (0.5 to 4.0)"))?;
+                let scale: f64 = value
+                    .parse()
+                    .map_err(|_| anyhow!("--window-scale requires a multiplier (0.5 to 4.0)"))?;
+                if !(0.5..=4.0).contains(&scale) {
+                    bail!("--window-scale must be between 0.5 and 4.0, got {value}");
+                }
+                overrides.window_scale = Some(scale);
             }
             "--show-status-bar" => {
                 overrides.status_bar = Some(true);
@@ -2131,7 +2149,9 @@ fn print_help() {
          \x20                            \"master\", \"source\", \"channel\" (combinable)\n  \
          --profile-live-audio SECS      run a no-window Paula-to-cpal profile workload;\n  \
          \x20                            combine with COPPERLINE_AUDIO_PROFILE=1 for counters\n  \
-         --full-screen / --windowed     open fullscreen / windowed at start (default: windowed)\n  \
+         --full-screen / --windowed     open borderless fullscreen / windowed at start\n  \
+         --maximized                   open a bordered, maximized window with taskbar visible\n  \
+         --window-scale SCALE          initial window size multiplier: 0.5-4.0 (default: 1)\n  \
          --show-status-bar / --hide-status-bar  status bar at start (default: shown)\n  \
          --perf-overlay                 show the performance overlay at start\n  \
          \x20                            (Cmd/Alt+P toggles it live)\n  \

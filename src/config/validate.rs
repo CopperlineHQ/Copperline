@@ -414,6 +414,13 @@ impl TryFrom<RawConfig> for Config {
             Some(s) => parse_menu_scale(s)?,
         };
         let full_screen = raw.display.full_screen.unwrap_or(defaults.full_screen);
+        let maximized = raw.display.maximized.unwrap_or(defaults.maximized);
+        let window_scale = raw.display.window_scale.unwrap_or(defaults.window_scale);
+        if !(0.5..=4.0).contains(&window_scale) {
+            errors.push(anyhow!(
+                "[display] window_scale must be between 0.5 and 4.0, got {window_scale}"
+            ));
+        }
         let status_bar = raw.display.status_bar.unwrap_or(defaults.status_bar);
         let joystick_input_mode = match raw.input.joystick.as_deref() {
             None => defaults.joystick_input_mode,
@@ -1458,7 +1465,9 @@ impl TryFrom<RawConfig> for Config {
             hidpi_texture,
             tint,
             menu_scale,
+            window_scale,
             full_screen,
+            maximized,
             status_bar,
             joystick_input_mode,
             mouse_sensitivity,

@@ -160,6 +160,8 @@ fn main() -> Result<()> {
         cfg.vsync,
         config::resolve_tint(cfg.tint),
         cfg.full_screen,
+        cfg.maximized,
+        cfg.window_scale,
         true,
         cfg.emulation.warp_speed,
         cfg.joystick_input_mode,

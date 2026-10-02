@@ -2354,23 +2354,57 @@ fn canvas_sized_check_tolerates_rounding_but_not_a_resize() {
     assert!(logical_size_is_canvas(
         FB_WIDTH as f64,
         canvas_h as f64,
-        canvas_h
+        canvas_h,
+        1.0
     ));
     assert!(logical_size_is_canvas(
         FB_WIDTH as f64 + 1.0,
         canvas_h as f64 - 1.0,
-        canvas_h
+        canvas_h,
+        1.0
     ));
     // A real resize in either dimension does not.
     assert!(!logical_size_is_canvas(
         FB_WIDTH as f64 + 40.0,
         canvas_h as f64,
-        canvas_h
+        canvas_h,
+        1.0
     ));
     assert!(!logical_size_is_canvas(
         FB_WIDTH as f64,
         canvas_h as f64 + 40.0,
-        canvas_h
+        canvas_h,
+        1.0
+    ));
+}
+
+#[test]
+fn scaled_canvas_size_keeps_ownership_when_height_changes() {
+    use super::{canvas_window_size, logical_size_is_canvas};
+
+    let with_bar = canvas_window_size(600, 2.0);
+    let without_bar = canvas_window_size(540, 2.0);
+    assert_eq!(with_bar.width, (FB_WIDTH * 2) as f64);
+    assert_eq!(with_bar.height, 1200.0);
+    assert_eq!(without_bar.width, with_bar.width);
+    assert_eq!(with_bar.height - without_bar.height, 120.0);
+    assert!(logical_size_is_canvas(
+        with_bar.width + 1.0,
+        with_bar.height - 1.0,
+        600,
+        2.0,
+    ));
+    assert!(!logical_size_is_canvas(
+        with_bar.width,
+        with_bar.height,
+        600,
+        1.0,
+    ));
+    assert!(!logical_size_is_canvas(
+        with_bar.width + 40.0,
+        with_bar.height,
+        600,
+        2.0,
     ));
 }
 
@@ -2386,7 +2420,8 @@ fn asynchronous_canvas_snap_owns_the_platform_clamped_resize_once() {
         now,
         640.0,
         480.0,
-        600
+        600,
+        2.0
     ));
     assert!(deadline.is_none(), "the asynchronous response is consumed");
 
@@ -2397,7 +2432,8 @@ fn asynchronous_canvas_snap_owns_the_platform_clamped_resize_once() {
         now,
         640.0,
         480.0,
-        600
+        600,
+        2.0
     ));
 }
 
@@ -2413,7 +2449,8 @@ fn ignored_canvas_snap_expires_before_a_later_user_resize() {
         now + Duration::from_millis(1),
         640.0,
         480.0,
-        600
+        600,
+        2.0
     ));
     assert!(deadline.is_none(), "the expired request is discarded");
 }
@@ -4566,6 +4603,8 @@ fn test_app_with_audio_cpu_and_program(
         crate::config::Tint::None,
         false,
         false,
+        1.0,
+        false,
         crate::config::WarpSpeed::Max,
         crate::config::JoystickInputMode::Gamepad,
         50,
@@ -4682,6 +4721,8 @@ fn test_app_with_copperhf_units(units: &[(usize, PathBuf)]) -> super::App {
         true,
         crate::config::Tint::None,
         false,
+        false,
+        1.0,
         false,
         crate::config::WarpSpeed::Max,
         crate::config::JoystickInputMode::Gamepad,

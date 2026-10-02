@@ -424,10 +424,16 @@ pub struct Config {
     pub tint: Tint,
     /// How large the pop-up menu is drawn (`[display] menu_scale`).
     pub menu_scale: MenuScale,
+    /// Initial window width and height as a multiple of the presentation
+    /// canvas (`[display] window_scale` / `--window-scale`, 0.5 to 4.0).
+    pub window_scale: f64,
     /// Open the window in fullscreen at start (`[display] full_screen`, or
     /// `--full-screen` / `--windowed`). The `Cmd+F` / `Alt+F` toggle flips it
     /// live without affecting this start-up value.
     pub full_screen: bool,
+    /// Open a maximized, decorated window, retaining the desktop taskbar
+    /// (`[display] maximized` / `--maximized`). Fullscreen takes precedence.
+    pub maximized: bool,
     /// Show the status bar at start (`[display] status_bar`, or
     /// `--show-status-bar` / `--hide-status-bar`). `Cmd+Shift+F` /
     /// `Alt+Shift+F` toggles it live.
@@ -2736,7 +2742,9 @@ impl Default for Config {
             hidpi_texture: true,
             tint: Tint::None,
             menu_scale: MenuScale::Normal,
+            window_scale: 1.0,
             full_screen: false,
+            maximized: false,
             status_bar: true,
             joystick_input_mode: JoystickInputMode::Gamepad,
             mouse_sensitivity: 50,
@@ -3042,6 +3050,11 @@ pub struct ConfigOverrides {
     /// Open fullscreen at start (`--full-screen` / `--windowed`). Same as
     /// `[display] full_screen`.
     pub full_screen: Option<bool>,
+    /// Start maximized with window decorations (`--maximized`).
+    pub maximized: Option<bool>,
+    /// Initial window size multiplier (`--window-scale`). Same as
+    /// `[display] window_scale`.
+    pub window_scale: Option<f64>,
     /// Show the status bar at start (`--show-status-bar` /
     /// `--hide-status-bar`). Same as `[display] status_bar`.
     pub status_bar: Option<bool>,
@@ -3145,6 +3158,8 @@ impl ConfigOverrides {
             && self.hostsocket_net.is_none()
             && self.hostsocket_interface.is_none()
             && self.full_screen.is_none()
+            && self.maximized.is_none()
+            && self.window_scale.is_none()
             && self.status_bar.is_none()
             && self.perf_overlay.is_none()
             && self.menu_scale.is_none()
@@ -3427,6 +3442,12 @@ impl ConfigOverrides {
         }
         if let Some(full_screen) = self.full_screen {
             raw.display.full_screen = Some(full_screen);
+        }
+        if let Some(maximized) = self.maximized {
+            raw.display.maximized = Some(maximized);
+        }
+        if let Some(window_scale) = self.window_scale {
+            raw.display.window_scale = Some(window_scale);
         }
         if let Some(status_bar) = self.status_bar {
             raw.display.status_bar = Some(status_bar);

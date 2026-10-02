@@ -10,6 +10,11 @@ copperline --run build/hello --run-args "-level 2"
 copperline --run build/hello --run-stack 32768 --run-detach
 ```
 
+Add `--window-scale 2` to open at twice the normal window width and height,
+or `--maximized` for a maximized window that keeps its title bar and the
+desktop taskbar visible. `--full-screen` opens borderless fullscreen.
+These also work with `--config`; see [Configuration](configuration.md).
+
 To turn an already linked hunk executable into a standard 880 KiB floppy, use
 `copperline-ctl exe2adf PROG --boot [--out FILE]` (by default the output is
 `PROG` with its extension changed to `.adf`). It writes the executable and an

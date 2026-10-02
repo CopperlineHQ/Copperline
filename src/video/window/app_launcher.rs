@@ -1524,6 +1524,24 @@ impl App {
         if crate::video::status_bar_hidden() == cfg.status_bar {
             self.toggle_status_bar();
         }
+        if self.window_scale != cfg.window_scale {
+            self.window_scale = cfg.window_scale;
+            self.window_manually_sized = false;
+            if cfg.full_screen
+                || cfg.maximized
+                || self
+                    .render
+                    .as_ref()
+                    .is_some_and(|r| r.window.fullscreen().is_some() || r.window.is_maximized())
+            {
+                self.pending_canvas_follow = Some(CanvasFollow::Snap);
+            } else {
+                self.snap_window_to_canvas();
+            }
+        }
+        if let Some(r) = self.render.as_ref() {
+            r.window.set_maximized(cfg.maximized && !cfg.full_screen);
+        }
         self.warp_speed = cfg.emulation.warp_speed;
         // Reset the host joystick source to the new machine's configured
         // start-up mode (a previous live Cmd+J toggle does not carry over).

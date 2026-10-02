@@ -1419,6 +1419,8 @@ fn main() -> Result<()> {
         cfg.vsync,
         config::resolve_tint(cfg.tint),
         cfg.full_screen,
+        cfg.maximized,
+        cfg.window_scale,
         !cfg.status_bar,
         cfg.emulation.warp_speed,
         cfg.joystick_input_mode,
@@ -1597,6 +1599,8 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         config::resolve_tint(config::Tint::None),
         // The config-screen placeholder is always a normal windowed UI.
         false,
+        false,
+        1.0,
         false,
         config::WarpSpeed::default(),
         config::JoystickInputMode::default(),
@@ -1949,6 +1953,49 @@ mod tests {
         ));
         assert!(!launcher_requested(&parse(&["--noaudio"]).unwrap()));
         assert!(!launcher_requested(&parse(&["--run", "hello"]).unwrap()));
+    }
+
+    #[test]
+    fn window_scale_cli_composes_with_run_and_borderless_fullscreen() {
+        let cli = parse(&[
+            "--run",
+            "build/hello",
+            "--window-scale",
+            "2",
+            "--full-screen",
+        ])
+        .unwrap();
+        assert_eq!(cli.overrides.window_scale, Some(2.0));
+        assert_eq!(cli.overrides.full_screen, Some(true));
+        assert_eq!(cli.overrides.maximized, Some(false));
+        assert!(!launcher_requested(&cli));
+        assert!(!launcher_requested(
+            &parse(&["--window-scale", "2"]).unwrap()
+        ));
+        let cli = parse(&["--full-screen", "--window-scale", "1.5", "--windowed"]).unwrap();
+        assert_eq!(cli.overrides.window_scale, Some(1.5));
+        assert_eq!(cli.overrides.full_screen, Some(false));
+        assert_eq!(cli.overrides.maximized, Some(false));
+        assert!(parse(&["--window-scale"]).is_err());
+        for value in ["big", "0", "-1", "0.49", "4.01", "NaN", "inf", "-inf"] {
+            assert!(
+                parse(&["--window-scale", value]).is_err(),
+                "accepted {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn maximized_window_cli_uses_the_last_window_mode() {
+        let cli = parse(&["--run", "build/hello", "--full-screen", "--maximized"]).unwrap();
+        assert_eq!(cli.overrides.full_screen, Some(false));
+        assert_eq!(cli.overrides.maximized, Some(true));
+        assert!(!launcher_requested(&cli));
+        for flag in ["--full-screen", "--windowed"] {
+            let cli = parse(&["--maximized", flag]).unwrap();
+            assert_eq!(cli.overrides.maximized, Some(false));
+            assert_eq!(cli.overrides.full_screen, Some(flag == "--full-screen"));
+        }
     }
 
     #[test]

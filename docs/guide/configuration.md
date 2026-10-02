@@ -81,6 +81,8 @@ range checks as the equivalent TOML fields:
 | `--coverage FILE` | (none; needs `--run`) | write lcov line/function coverage of the `--run` program to FILE when it exits or the run ends ([coverage](../debugger/profiling.md#guest-coverage)) |
 | `--coverage-source-map FROM=TO` | (none; needs `--coverage`) | rewrite a source path prefix in the coverage file; repeatable |
 | `--full-screen` / `--windowed` | `[display] full_screen` | open fullscreen or windowed at start (default windowed) |
+| `--maximized` | `[display] maximized` | open a maximized window with borders and the desktop taskbar visible |
+| `--window-scale SCALE` | `[display] window_scale` | initial window width and height multiplier, 0.5-4.0 (default 1) |
 | `--show-status-bar` / `--hide-status-bar` | `[display] status_bar` | status bar at start (default shown) |
 | `--perf-overlay` | `[display] perf_overlay` | show performance overlay at start |
 | `--menu-scale SIZE` | `[display] menu_scale` | size of the pop-up menu: `1x` (default) or `2x` |
@@ -742,7 +744,9 @@ bezel = "off"         # monitor front: "off" (default), "1084", or "classic"
 perf_overlay = false  # show the performance overlay at start (default false)
 tint = "none"         # "none" (default), "bw", "green", "amber", or "sepia"
 menu_scale = "1x"     # size of the pop-up menu: "1x" (default) or "2x"
-full_screen = false   # open fullscreen at start (default false)
+full_screen = false   # open borderless fullscreen at start (default false)
+maximized = false     # maximize with title bar and desktop taskbar (default false)
+window_scale = 1.0    # initial window width and height multiplier, 0.5-4.0
 status_bar = true     # show the status bar at start (default true)
 vsync = true          # synchronise desktop presentation to vblank (default true)
 hidpi_texture = true  # draw the presentation texture at device-pixel density (default true)
@@ -1111,6 +1115,23 @@ whole menu, rows and text together. It is a start-up preference:
 value, `--menu-scale` sets it on the command line, and the launcher's A/V &
 Emu page (Display category) has a *Menu size* picker for the same.
 
+`window_scale` multiplies the normal window width and height in logical host
+pixels: `2` opens at twice the normal size on both standard and HiDPI displays.
+It accepts 0.5 through 4.0, including fractional values such as 1.5, and
+defaults to 1. The window keeps this multiple when its canvas changes, such
+as when hiding the status bar, until manually resized. The host may limit
+the requested size to the available desktop area. Screenshots and headless
+captures keep their usual resolution.
+
+`maximized` opens a normal, decorated window filling the available desktop
+area, keeping the title bar and desktop taskbar visible where the platform
+provides them. `--maximized` selects this mode from a build pipeline:
+
+```sh
+copperline --run build/hello --window-scale 2
+copperline --run build/hello --maximized
+```
+
 `full_screen` opens the window fullscreen at start (borderless), and
 `status_bar` chooses whether the status bar starts visible. Both are start-up
 preferences; the runtime toggles -- `Cmd+F` / `Alt+F` for fullscreen and
@@ -1119,7 +1140,11 @@ still flip either live without changing the saved value. On the command line
 `--full-screen` / `--windowed` set the fullscreen state and `--show-status-bar` /
 `--hide-status-bar` set the status bar; the launcher's A/V & Emu page (Display
 category) has *Start fullscreen* and *Status bar* toggles for the same. Left
-unset they keep the defaults: windowed, status bar shown.
+unset they keep the defaults: windowed, status bar shown. `--windowed` also
+clears maximization; the last of `--full-screen`, `--maximized`, and
+`--windowed` wins. In a config that enables both `full_screen` and
+`maximized`, fullscreen takes precedence. Canvas changes leave a maximized
+window at its desktop size; restoring it resumes the normal canvas sizing.
 
 Rendering completed frames uses a worker thread by default so emulation can
 advance while the previous frame is painted. The worker is an implementation

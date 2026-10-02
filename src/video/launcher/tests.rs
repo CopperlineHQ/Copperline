@@ -2173,6 +2173,17 @@ fn the_mt32_rom_pair_and_panel_round_trip_through_raw() {
 }
 
 #[test]
+fn window_scale_round_trips_through_launcher_config() {
+    let raw = RawConfig::parse("[display]\nwindow_scale = 2\nmaximized = true\n").unwrap();
+    let setup = MachineSetup::from_raw(&raw).unwrap();
+    let saved = setup.to_raw();
+    assert_eq!(saved.display.window_scale, Some(2.0));
+    assert_eq!(saved.display.maximized, Some(true));
+    assert_eq!(setup.build_config().unwrap().window_scale, 2.0);
+    assert_eq!(MachineSetup::default().to_raw().display.window_scale, None);
+}
+
+#[test]
 fn menu_scale_round_trips_through_raw() {
     let mut s = MachineSetup::default();
     // 1x is the baseline, so nothing is written for it. The launcher has
