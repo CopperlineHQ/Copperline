@@ -151,11 +151,16 @@ fn parse_release(body: &str) -> Result<Release, Error> {
     Ok(Release { tag, version })
 }
 
-/// Hand `url` to the host's default browser.
+/// Hand `url` to the host's default browser. Whether it took the page
+/// arrives on the returned channel, an error as a few words to show.
 ///
-/// Success means the opener accepted it; a browser that then fails to
-/// start is the opener's to report.
-pub fn open_in_browser(url: &str) -> std::io::Result<()> {
+/// On Windows the shell answers the call itself, so the answer is there
+/// at once. Elsewhere it comes when the opener exits -- usually straight
+/// after handing the page on, though `xdg-open` falling back to running a
+/// browser itself waits for that browser to close. An opener that cannot
+/// be started at all answers at once too.
+pub fn open_in_browser(url: &str) -> Receiver<Result<(), String>> {
+    let (tx, rx) = channel();
     #[cfg(windows)]
     {
         use windows_sys::Win32::UI::Shell::ShellExecuteW;
@@ -175,14 +180,11 @@ pub fn open_in_browser(url: &str) -> std::io::Result<()> {
             )
         };
         // Above 32 is success; at or below, one of its error codes.
-        if result as usize > 32 {
+        let _ = tx.send(if result as usize > 32 {
             Ok(())
         } else {
-            Err(std::io::Error::other(format!(
-                "ShellExecuteW failed ({})",
-                result as usize
-            )))
-        }
+            Err(format!("ShellExecuteW failed ({})", result as usize))
+        });
     }
     #[cfg(not(windows))]
     {
@@ -192,24 +194,30 @@ pub fn open_in_browser(url: &str) -> std::io::Result<()> {
         } else {
             "xdg-open"
         };
-        let mut child = Command::new(opener)
+        let spawned = Command::new(opener)
             .arg(url)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn()?;
-        // Reaped on a thread of its own: the opener hands the URL over and
-        // exits, and a child nobody waits for stays a zombie until
-        // Copperline quits.
-        std::thread::spawn(move || match child.wait() {
-            Ok(status) if !status.success() => {
-                log::warn!("update: {opener} could not open the release page ({status})")
+            .spawn();
+        match spawned {
+            // Waited for on a thread of its own, which also reaps it: a
+            // child nobody waits for stays a zombie until Copperline quits.
+            Ok(mut child) => {
+                std::thread::spawn(move || {
+                    let _ = tx.send(match child.wait() {
+                        Ok(status) if status.success() => Ok(()),
+                        Ok(status) => Err(format!("{opener} failed ({status})")),
+                        Err(e) => Err(format!("{opener}: {e}")),
+                    });
+                });
             }
-            Ok(_) => {}
-            Err(e) => log::warn!("update: waiting for {opener}: {e}"),
-        });
-        Ok(())
+            Err(e) => {
+                let _ = tx.send(Err(format!("{opener}: {e}")));
+            }
+        }
     }
+    rx
 }
 
 /// A transport failure in a few words: the ones a person can act on by
