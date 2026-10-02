@@ -16,8 +16,8 @@
 use crate::bus::PortDevice;
 use crate::config::JoystickInputMode;
 use crate::config::{
-    AudioFilterMode, BezelStyle, DisplayScaling, MenuScale, PixelAspect, ShaderKind, Tint,
-    TvCentre, WarpSpeed, TV_H_CENTRE_RANGE, TV_V_CENTRE_RANGE,
+    AudioFilterMode, BezelStyle, DisplayScaling, MenuScale, Overscan, PixelAspect, ShaderKind,
+    Tint, TvCentre, WarpSpeed, TV_H_CENTRE_RANGE, TV_V_CENTRE_RANGE,
 };
 
 /// What choosing a leaf does. Everything the menu can do is here, so the
@@ -40,6 +40,7 @@ pub enum MenuAction {
     SetAudioFilter(AudioFilterMode),
 
     // Video.
+    SetOverscan(Overscan),
     SetPixelAspect(PixelAspect),
     SetDisplayScaling(DisplayScaling),
     ToggleAutocrop,
@@ -496,6 +497,7 @@ pub struct MenuState<'a> {
     pub pcmcia_slot: bool,
     pub pcmcia_card: Option<String>,
     pub pixel_aspect: PixelAspect,
+    pub overscan: Overscan,
     pub scaling: DisplayScaling,
     /// Whether the window presentation crops to the programmed display
     /// window ([display] autocrop).
@@ -820,10 +822,27 @@ fn centring_row(s: &MenuState) -> MenuRow {
         .available(s.tv_centre_applies)
 }
 
+fn framing_row(s: &MenuState) -> MenuRow {
+    MenuRow::submenu(
+        "Framing",
+        Overscan::ALL
+            .into_iter()
+            .map(|mode| {
+                MenuRow::choice(
+                    mode.label(),
+                    MenuAction::SetOverscan(mode),
+                    s.overscan == mode,
+                )
+            })
+            .collect(),
+    )
+}
+
 fn video_rows(s: &MenuState) -> Vec<MenuRow> {
     vec![
         MenuRow::submenu("Menu Size", menu_size_rows(s)).with_value(s.menu_scale.label()),
         MenuRow::submenu("Pixel Aspect", aspect_rows(s)),
+        framing_row(s),
         MenuRow::submenu("Scaling", scaling_rows(s)),
         MenuRow::toggle("Autocrop", MenuAction::ToggleAutocrop, s.autocrop),
         centring_row(s),
@@ -852,6 +871,7 @@ fn player_video_rows(s: &MenuState) -> Vec<MenuRow> {
     vec![
         MenuRow::submenu("Menu Size", menu_size_rows(s)).with_value(s.menu_scale.label()),
         MenuRow::submenu("Pixel Aspect", aspect_rows(s)),
+        framing_row(s),
         MenuRow::submenu("Scaling", scaling_rows(s)),
         MenuRow::toggle("Autocrop", MenuAction::ToggleAutocrop, s.autocrop),
         centring_row(s),
@@ -1428,6 +1448,7 @@ mod tests {
             pcmcia_slot: false,
             pcmcia_card: None,
             pixel_aspect: PixelAspect::Tv,
+            overscan: Overscan::Tv,
             scaling: DisplayScaling::Smooth,
             autocrop: false,
             tv_centre: TvCentre::default(),

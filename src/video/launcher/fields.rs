@@ -1641,6 +1641,6 @@ pub(super) const Z3_PRESETS: [usize; 8] = [
     512 * 1024 * 1024,
     1024 * 1024 * 1024,
 ];
-pub(super) const OVERSCANS: [Overscan; 2] = [Overscan::Tv, Overscan::Full];
+pub(super) const OVERSCANS: [Overscan; 3] = Overscan::ALL;
 pub(super) const PIXEL_ASPECTS: [PixelAspect; 2] = [PixelAspect::Tv, PixelAspect::Square];
 pub(super) const TINTS: [Tint; 5] = [Tint::None, Tint::Bw, Tint::Green, Tint::Amber, Tint::Sepia];

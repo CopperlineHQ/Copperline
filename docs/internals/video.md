@@ -711,6 +711,36 @@ modes (e.g. DblPAL) are cropped using their sync-anchored windows.
 Autocrop is suspended when a monitor bezel is drawn or an RTG board owns
 the display; captures keep the full aperture.
 
+`Overscan::Smart` leaves the presentation raster unmasked, then applies a
+bounded horizontal correction through the same aperture map as manual
+centring. `PresentationLatch` estimates the centre from the renderer's
+per-line hardware display envelope. An envelope at least 80% of the standard
+window's width and 16 woven rows tall can contribute an offset; narrower
+windows keep the stock centre. The correction is capped at eight lo-res
+pixels and must persist for 25 distinct emulated frames. Repainting a paused
+frame does not advance this clock, and border-only frames hold the correction
+while cancelling a pending candidate. Reset, state load, RTG entry and
+programmable scans clear it. The desktop resolves it for both synchronous
+and worker rendering, including exact frame reuse; the browser rebuilds its
+cropped buffer when a static frame earns a new correction.
+
+Smart autocrop bypasses the fixed aperture for the live picture and maps the
+complete hardware content envelope onto the canvas. The CPU copy, GPU copy,
+CRT pass and pointer map use the same resolved source aperture. Its pixel
+aspect remains the PAL/NTSC scan's aperture-derived shape: it is independent
+of the new source buffer dimensions or crop bounds. The browser carries this
+shape separately and shares `buffer_layout_with_par` / `sub_rect_fit_native` with
+the native fitting path. Captures still use the configured TV aperture,
+and the monitor-bezel path retains its fixed opening. Neither operation
+changes chipset output, timing or serialized machine state.
+
+Smart integer autocrop checks the composed display envelope for exact adjacent
+column pairs. When every pair matches, it fits in native low-resolution pixel
+units, allowing odd horizontal factors such as PAL 5x (1600x1000 for 320x200
+content on a 1080p surface). Mixed-resolution playfields, sprites or Copper
+effects that distinguish the two columns retain the finer grid. Crop edges
+must also align to pairs; they are never moved inward to gain a larger scale.
+
 Integer scaling presents from the unresampled canvas in both TV and square pixel
 modes (`video::square_canvas`). In TV mode, `per_axis_fit` chooses horizontal
 and vertical integer multipliers independently: the tallest fit whose pixel

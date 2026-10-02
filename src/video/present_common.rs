@@ -627,6 +627,7 @@ pub fn presentation_source_y_offset(visible_start_vpos: u32) -> usize {
 pub struct PresentationLatch {
     standard_aperture: bool,
     h_shift: usize,
+    smart_centre: SmartCentreLatch,
 }
 
 impl Default for PresentationLatch {
@@ -634,6 +635,7 @@ impl Default for PresentationLatch {
         Self {
             standard_aperture: true,
             h_shift: bitplane::standard_present_h_shift(),
+            smart_centre: SmartCentreLatch::default(),
         }
     }
 }
@@ -664,7 +666,7 @@ impl PresentationLatch {
             // the fixed source cutout used by reference emulators. Do not
             // copy pixels sideways here: a standard hi-res screen already
             // occupies the right edge of Copperline's 716-pixel cutout.
-            Overscan::Tv => 0,
+            Overscan::Tv | Overscan::Smart => 0,
             Overscan::Full => match bitplane::horizontal_content_class(snapshot) {
                 bitplane::HorizontalContentClass::Standard { shift } => {
                     self.h_shift = shift;
@@ -692,6 +694,83 @@ impl PresentationLatch {
                 None
             }
             TvApertureFrame::Neutral(rows) => self.standard_aperture.then_some(rows),
+        }
+    }
+
+    /// Resolve the raw display envelope before the TV aperture clips it.
+    /// The same emulated frame may be repainted several times by a frontend;
+    /// those repaints must not advance the stability clock.
+    pub fn resolve_smart_centre(
+        &mut self,
+        content: Option<bitplane::ContentRect>,
+        emulated_frame: u64,
+        programmable: bool,
+    ) -> bool {
+        let before = self.smart_centre.h;
+        if programmable {
+            self.smart_centre = SmartCentreLatch::default();
+        } else {
+            self.smart_centre.resolve(content, emulated_frame);
+        }
+        before != self.smart_centre.h
+    }
+
+    /// Manual centring remains a trim over the automatic correction.
+    pub fn tv_centre(&self, overscan: Overscan, manual: TvCentre) -> TvCentre {
+        if overscan != Overscan::Smart {
+            return manual;
+        }
+        TvCentre {
+            h: (manual.h + self.smart_centre.h).clamp(
+                -crate::config::TV_H_CENTRE_RANGE,
+                crate::config::TV_H_CENTRE_RANGE,
+            ),
+            v: manual.v,
+        }
+    }
+}
+
+/// Bounded horizontal correction of the screen envelope, rather than of
+/// moving objects within it. Small windows retain the stock aperture. The
+/// eight-lo-res-pixel travel deliberately leaves deep overscan hidden; a
+/// fixed aperture cannot guarantee that every overscan effect fits inside it.
+#[derive(Clone, Debug, Default)]
+struct SmartCentreLatch {
+    h: i32,
+    candidate: i32,
+    stable_frames: u32,
+    last_frame: Option<u64>,
+}
+
+impl SmartCentreLatch {
+    const RANGE: i32 = 8;
+    const STABLE_FRAMES: u32 = 25;
+
+    fn resolve(&mut self, content: Option<bitplane::ContentRect>, frame: u64) {
+        if self.last_frame == Some(frame) {
+            return;
+        }
+        self.last_frame = Some(frame);
+        let Some(rect) = content else {
+            self.stable_frames = 0;
+            return;
+        };
+        let candidate = if rect.x1.saturating_sub(rect.x0) >= STANDARD_PAL_VISIBLE_WIDTH * 4 / 5
+            && rect.y1.saturating_sub(rect.y0) >= 16
+        {
+            let centre_twice = (2 * TV_CAPTURED_SOURCE_X + TV_CAPTURED_WIDTH) as i32;
+            ((centre_twice - (rect.x0 + rect.x1) as i32) / 4).clamp(-Self::RANGE, Self::RANGE)
+        } else {
+            0
+        };
+        if candidate != self.candidate {
+            self.candidate = candidate;
+            self.stable_frames = 1;
+        } else {
+            self.stable_frames = self.stable_frames.saturating_add(1);
+        }
+        if self.stable_frames >= Self::STABLE_FRAMES {
+            self.h = candidate;
         }
     }
 }
@@ -986,6 +1065,7 @@ pub struct SubRectFit {
     /// The whole-number factors of an integer draw, as surface pixels
     /// `(per column, per field line)` -- a uniform multiple `m` is
     /// `(m, 2 * m)` -- or `None` for a smooth fit.
+    /// Native fitting counts a matching two-column pair as one column.
     pub factors: Option<(usize, usize)>,
     /// Where the rect lands, `(x, y, w, h)` in surface pixels.
     pub dst: (u32, u32, u32, u32),
@@ -1007,7 +1087,27 @@ pub fn sub_rect_fit(
     rect: (usize, usize, usize, usize),
     par: (u32, u32),
 ) -> SubRectFit {
+    sub_rect_fit_native(avail, integer, rect, par, 1)
+}
+
+/// Fit in native pixel units when adjacent framebuffer columns are exact
+/// copies. A low-resolution Amiga pixel occupies two captured columns;
+/// counting that pair as one pixel allows odd integer scales such as PAL 5x.
+/// The source rectangle stays unchanged, so no detected content is trimmed.
+pub fn sub_rect_fit_native(
+    avail: (u32, u32),
+    integer: bool,
+    rect: (usize, usize, usize, usize),
+    par: (u32, u32),
+    horizontal_repeat: usize,
+) -> SubRectFit {
     let (w, h) = (rect.2.max(1), rect.3.max(1));
+    let repeat = if horizontal_repeat == 2 && rect.0.is_multiple_of(2) && w.is_multiple_of(2) {
+        2
+    } else {
+        1
+    };
+    let native_w = w / repeat;
     let factors = if !integer {
         None
     } else if par.0 == par.1 {
@@ -1015,16 +1115,48 @@ pub fn sub_rect_fit(
         // shape, but stated directly: the tolerance that lets a glass
         // shape prefer a taller near-miss must not apply to a canvas
         // asked for as square.
-        let fit = (avail.0 as usize / w).min(avail.1 as usize / h);
-        (fit >= 1).then_some((fit, 2 * fit))
+        let fit = (avail.0 as usize / native_w).min(avail.1 as usize * repeat / h);
+        (fit >= 1).then_some((fit, 2 * fit / repeat))
     } else {
-        per_axis_fit(avail, (w, h), par)
+        per_axis_fit(avail, (native_w, h), (par.0 * repeat as u32, par.1))
     };
     let dst = match factors {
-        Some(factors) => per_axis_rect(avail, (w, h), factors),
+        Some(factors) => per_axis_rect(avail, (native_w, h), factors),
         None => smooth_fit_rect(avail, (w, h), par),
     };
     SubRectFit { factors, dst }
+}
+
+/// Whether a rendered envelope can be presented in two-column native pixel
+/// units without losing detail. Check the actual composed pixels, including
+/// sprites and Copper effects, rather than trusting one BPLCON0 value in a
+/// frame that can mix resolutions. Blank frames conservatively return 1.
+pub fn content_horizontal_repeat(
+    pixels: &[u32],
+    width: usize,
+    rows: usize,
+    content: Option<bitplane::ContentRect>,
+) -> usize {
+    let Some(rect) = content else { return 1 };
+    if rect.x0 >= rect.x1
+        || rect.y0 >= rect.y1
+        || rect.x1 > width
+        || rect.y1 > rows
+        || !rect.x0.is_multiple_of(2)
+        || !rect.x1.is_multiple_of(2)
+        || pixels.len() < width.saturating_mul(rows)
+    {
+        return 1;
+    }
+    if (rect.y0..rect.y1).all(|y| {
+        pixels[y * width + rect.x0..y * width + rect.x1]
+            .chunks_exact(2)
+            .all(|pair| pair[0] == pair[1])
+    }) {
+        2
+    } else {
+        1
+    }
 }
 
 /// The shape of one pixel of a `width` x `rows` presentation buffer
@@ -1126,6 +1258,29 @@ pub fn buffer_layout(
     integer: bool,
     content: Option<bitplane::ContentRect>,
 ) -> BufferLayout {
+    buffer_layout_with_par(
+        avail,
+        (width, rows),
+        programmable,
+        integer,
+        content,
+        buffer_glass_par(width, rows),
+        1,
+    )
+}
+
+/// Fit a crop with the scan's pixel shape kept independently of the buffer
+/// dimensions. Smart autocrop uses the whole raster as its source, while
+/// PAL/NTSC pixel shape continues to come from the standard TV aperture.
+pub fn buffer_layout_with_par(
+    avail: (u32, u32),
+    (width, rows): (usize, usize),
+    programmable: bool,
+    integer: bool,
+    content: Option<bitplane::ContentRect>,
+    pixel_shape: (u32, u32),
+    horizontal_repeat: usize,
+) -> BufferLayout {
     let full = (0, 0, width, rows);
     let src = content
         .map(|rect| (rect.x0, rect.y0, rect.x1 - rect.x0, rect.y1 - rect.y0))
@@ -1134,15 +1289,146 @@ pub fn buffer_layout(
     let par = if programmable && integer {
         (1, 1)
     } else {
-        buffer_glass_par(width, rows)
+        pixel_shape
     };
-    let SubRectFit { factors, dst } = sub_rect_fit(avail, integer, src, par);
+    let SubRectFit { factors, dst } = sub_rect_fit_native(
+        avail,
+        integer,
+        src,
+        par,
+        if programmable { 1 } else { horizontal_repeat },
+    );
     BufferLayout { src, dst, factors }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_pixel_fit_preserves_the_crop_at_odd_pal_and_ntsc_scales() {
+        let rect = (62, 18, 640, 400);
+        let pal = buffer_glass_par(TV_CAPTURED_WIDTH, TV_PAL_PRESENT_HEIGHT);
+        let ntsc = buffer_glass_par(TV_CAPTURED_WIDTH, TV_NTSC_PRESENT_HEIGHT);
+        let fit = sub_rect_fit_native((1920, 1080), true, rect, pal, 2);
+        assert_eq!(fit.factors, Some((5, 5)));
+        assert_eq!(fit.dst, (160, 40, 1600, 1000));
+        let fit = sub_rect_fit_native((1920, 1080), true, rect, ntsc, 2);
+        assert_eq!(fit.factors, Some((4, 5)));
+        assert_eq!(fit.dst, (320, 40, 1280, 1000));
+        let content = bitplane::ContentRect {
+            x0: 0,
+            x1: 714,
+            y0: 2,
+            y1: 566,
+        };
+        let layout = buffer_layout_with_par(
+            (1920, 1080),
+            (FB_WIDTH, OUT_HEIGHT),
+            false,
+            true,
+            Some(content),
+            pal,
+            2,
+        );
+        assert_eq!(layout.src, (0, 2, 714, 564));
+        assert!(layout.dst.2 <= 1920 && layout.dst.3 <= 1080);
+        // A taller screen takes the largest complete fit, with no overscale
+        // crop. Square pixels keep an exact shape, even at odd multiples.
+        let fit = sub_rect_fit_native((1920, 1080), true, (62, 18, 640, 512), pal, 2);
+        assert_eq!(fit.factors, Some((4, 4)));
+        let fit = sub_rect_fit_native((1920, 1080), true, rect, (1, 1), 2);
+        assert_eq!(fit.dst, (160, 40, 1600, 1000));
+        // An unpaired edge cannot be silently dropped to gain native units.
+        assert_eq!(
+            sub_rect_fit_native((1920, 1080), true, (63, 18, 639, 400), pal, 2),
+            sub_rect_fit((1920, 1080), true, (63, 18, 639, 400), pal)
+        );
+    }
+
+    #[test]
+    fn native_pixel_units_require_exact_pairs_including_composed_detail() {
+        let rect = bitplane::ContentRect {
+            x0: 2,
+            x1: 6,
+            y0: 0,
+            y1: 2,
+        };
+        let mut pixels = vec![0, 0, 1, 1, 2, 2, 0, 0, 0, 0, 3, 3, 4, 4, 0, 0];
+        assert_eq!(content_horizontal_repeat(&pixels, 8, 2, Some(rect)), 2);
+        pixels[12] = 5; // A finer sprite or playfield pixel must survive.
+        assert_eq!(content_horizontal_repeat(&pixels, 8, 2, Some(rect)), 1);
+        assert_eq!(content_horizontal_repeat(&pixels, 8, 2, None), 1);
+    }
+
+    #[test]
+    fn smart_centre_waits_for_distinct_stable_frames_and_holds_through_blanks() {
+        let wide = bitplane::ContentRect {
+            x0: 0,
+            x1: 714,
+            y0: 2,
+            y1: 568,
+        };
+        let mut latch = PresentationLatch::default();
+        for _ in 0..100 {
+            latch.resolve_smart_centre(Some(wide), 1, false);
+        }
+        assert_eq!(latch.tv_centre(Overscan::Smart, TvCentre::default()).h, 0);
+        for frame in 2..=25 {
+            latch.resolve_smart_centre(Some(wide), frame, false);
+        }
+        assert_eq!(latch.tv_centre(Overscan::Smart, TvCentre::default()).h, 8);
+        for frame in 26..=50 {
+            latch.resolve_smart_centre(None, frame, false);
+        }
+        assert_eq!(latch.tv_centre(Overscan::Smart, TvCentre::default()).h, 8);
+        assert_eq!(latch.tv_centre(Overscan::Tv, TvCentre::default()).h, 0);
+        assert_eq!(
+            latch.tv_centre(Overscan::Smart, TvCentre { h: 16, v: -3 }),
+            TvCentre { h: 16, v: -3 }
+        );
+        latch.resolve_smart_centre(Some(wide), 51, true);
+        assert_eq!(latch.tv_centre(Overscan::Smart, TvCentre::default()).h, 0);
+    }
+
+    #[test]
+    fn smart_centre_keeps_standard_windows_and_rejects_transient_offsets() {
+        let stock = bitplane::ContentRect {
+            x0: 62,
+            x1: 702,
+            y0: 60,
+            y1: 460,
+        };
+        let shifted = bitplane::ContentRect {
+            x0: 46,
+            x1: 686,
+            ..stock
+        };
+        let small = bitplane::ContentRect {
+            x0: 80,
+            x1: 300,
+            ..stock
+        };
+        let mut latch = PresentationLatch::default();
+        for frame in 0..80 {
+            latch.resolve_smart_centre(
+                Some(if frame % 2 == 0 { stock } else { shifted }),
+                frame,
+                false,
+            );
+        }
+        assert_eq!(latch.tv_centre(Overscan::Smart, TvCentre::default()).h, 0);
+        for frame in 80..105 {
+            latch.resolve_smart_centre(Some(shifted), frame, false);
+        }
+        assert_eq!(latch.tv_centre(Overscan::Smart, TvCentre::default()).h, 8);
+        for frame in 105..130 {
+            latch.resolve_smart_centre(Some(small), frame, false);
+        }
+        assert_eq!(latch.tv_centre(Overscan::Smart, TvCentre::default()).h, 0);
+        latch.reset();
+        assert_eq!(latch.tv_centre(Overscan::Smart, TvCentre::default()).h, 0);
+    }
 
     #[test]
     fn captured_aperture_clears_the_tv_bezel_mask() {

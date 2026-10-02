@@ -139,10 +139,11 @@ impl App {
                     .map_or_else(|| card.describe(), display_file_name)
             }),
             pixel_aspect: crate::video::pixel_aspect(),
+            overscan: self.overscan,
             scaling: crate::video::display_scaling(),
             autocrop: crate::video::autocrop(),
             tv_centre: self.tv_centre,
-            tv_centre_applies: self.overscan == Overscan::Tv,
+            tv_centre_applies: self.overscan.is_tv(),
             shader: self.crt_shader_kind,
             shader_strength: self.shader_strength,
             custom_shader_available: self.custom_shader_path.is_some(),
@@ -305,6 +306,7 @@ impl App {
                 self.request_redraw();
             }
 
+            A::SetOverscan(overscan) => self.apply_overscan(overscan),
             A::SetPixelAspect(aspect) => self.apply_pixel_aspect(aspect),
             A::SetDisplayScaling(scaling) => self.apply_display_scaling(scaling),
             A::ToggleAutocrop => self.apply_autocrop(!crate::video::autocrop()),
@@ -319,6 +321,7 @@ impl App {
             A::StepTvCentre(dh, dv) => self.step_tv_centre(dh, dv),
             A::ResetTvCentre => {
                 self.tv_centre = crate::config::TvCentre::default();
+                self.refresh_tv_centre();
                 self.show_osd("Centring: centred");
                 self.main_presentation_dirty = true;
                 self.request_redraw();

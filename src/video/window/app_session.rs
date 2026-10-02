@@ -1208,7 +1208,7 @@ impl App {
             src_rows,
             self.present_width,
             self.overscan,
-            self.tv_centre,
+            self.present_tv_centre,
             self.present_tv_aperture_rows,
             &mut out,
         );
@@ -1242,7 +1242,7 @@ impl App {
         let source = super::ClipRingSource {
             generation: self.present_fb_generation,
             overscan: self.overscan,
-            tv_centre: self.tv_centre,
+            tv_centre: self.present_tv_centre,
             tv_aperture_rows: self.present_tv_aperture_rows,
             capture_rows: crate::video::capture_height(),
             rtg: self.rtg_present_dims.is_some(),
@@ -1590,7 +1590,7 @@ impl App {
             src_rows,
             self.present_width,
             self.overscan,
-            self.tv_centre,
+            self.present_tv_centre,
             self.present_tv_aperture_rows,
         )
     }
@@ -1694,7 +1694,7 @@ impl App {
             src_rows,
             self.present_width,
             self.overscan,
-            self.tv_centre,
+            self.present_tv_centre,
             self.present_tv_aperture_rows,
         );
         match result {

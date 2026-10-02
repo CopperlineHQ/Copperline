@@ -727,7 +727,7 @@ BPLCON3 SPRES output, BPLCON4, and CLXCON2. Remaining gaps are recorded in
 
 ```toml
 [display]
-overscan = "tv"       # "tv" (default) or "full"
+overscan = "tv"       # "tv" (default), "smart" or "full"
 tv_h_centre = 0       # TV picture centring in lo-res pixels, -16..16 (+ = right)
 tv_v_centre = 0       # TV picture centring in scan lines, -8..8 (+ = down)
 pixel_aspect = "tv"   # "tv" (default, 4:3 CRT) or "square" (exact 2x2 lo-res)
@@ -780,12 +780,28 @@ edge with no black bezel columns. The live window and PNG screenshots /
 that shape because both apertures fill the same glass: an NTSC scan's
 shorter crop (the 200-line standard window plus the same overscan margin)
 is scaled onto the same output rows. `"full"` shows everything, which is
-useful when debugging display alignment. `COPPERLINE_OVERSCAN=full|tv`
-overrides this for a single run. In both modes the presentation geometry
+useful when debugging display alignment. `COPPERLINE_OVERSCAN=full|tv|smart`
+overrides this for a single run. In all modes the presentation geometry
 holds steady across the blank frames a screen change produces: a frame
 showing only border colour keeps the previous frame's aperture and
 centring instead of snapping to the full framebuffer, so the picture does
 not jump sideways at Kickstart screen changes.
+
+`"smart"` keeps the TV aperture and automatically adjusts its horizontal
+position after the hardware display envelope has remained stable for 25
+distinct presented emulated frames. The automatic correction is limited to
+eight lo-res pixels each way; blank frames retain the last position, and
+small display windows do not pull the aperture toward individual objects.
+It can bring slightly off-centre artwork, such as the CD32 boot logo, into
+view without zooming out. Manual H/V centring remains available as a trim;
+the combined horizontal correction is limited to the manual control's
+16-pixel travel. The menu's *Video Settings -> Framing* switches between
+TV, Smart and Full overscan live. TV remains the default.
+
+Smart framing follows display geometry, not software identity or pixel
+colour. A fixed aperture can still crop a large overscan display, and
+deliberate effects in its newly exposed margin may become visible. Use TV
+for a fixed crop, or Full overscan to inspect the entire captured field.
 
 `tv_h_centre` / `tv_v_centre` nudge where the TV presentation centres the
 picture on the glass -- the H-CENTER/V-CENTER controls a real monitor
@@ -881,6 +897,28 @@ presets render over the cropped area. Programmable multisync modes (such as
 DblPAL or 31 kHz displays) are also cropped based on their active display
 windows. Autocrop is automatically suspended when using monitor bezels or RTG
 modes. The menu's *Video Settings -> Autocrop* option toggles it at runtime.
+
+For an automatic crop with the largest integer fit, use:
+
+```toml
+[display]
+overscan = "smart"
+autocrop = true
+scaling = "integer"
+```
+
+Smart autocrop selects directly from the unmasked raster, before the TV
+aperture clips its edges. It includes the full detected display window,
+including artwork outside the usual TV view. PAL/NTSC pixel aspect comes
+from the scan rather than from the crop dimensions. For a 320x200 display
+on a 1920x1080 surface with the status bar hidden, PAL fits at 5x; NTSC uses
+the existing per-axis 4:5 fit. Larger title screens reduce the scale to fit
+their complete detected display. No picture lines are discarded to reach a
+larger multiplier. The detector uses fetched raster lines and programmed
+display spans; black pixels inside those spans remain picture content.
+This is automatic framing rather than per-game overscaling presets.
+Captures retain the configured aperture and centring, as with ordinary
+autocrop. Monitor bezels and RTG modes suspend autocrop.
 
 `deinterlace` controls how interlaced (LACE) displays are presented. On
 (the default), a motion-adaptive deinterlacer weaves the two fields into a

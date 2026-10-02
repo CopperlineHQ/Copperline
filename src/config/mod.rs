@@ -479,7 +479,7 @@ pub struct Config {
 }
 
 /// How much of the overscan field the window presents. The
-/// `COPPERLINE_OVERSCAN` env var (full/tv) overrides the config for one
+/// `COPPERLINE_OVERSCAN` env var (full/tv/smart) overrides the config for one
 /// run (the image-regression harness pins "full" so its baselines keep
 /// the whole field).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -494,6 +494,33 @@ pub enum Overscan {
     /// does this mode. The default.
     #[default]
     Tv,
+    /// Keep the TV aperture, automatically correcting small horizontal
+    /// offsets after the hardware display envelope has remained stable.
+    Smart,
+}
+
+impl Overscan {
+    pub const ALL: [Self; 3] = [Self::Tv, Self::Smart, Self::Full];
+
+    pub const fn is_tv(self) -> bool {
+        matches!(self, Self::Tv | Self::Smart)
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tv => "tv",
+            Self::Smart => "smart",
+            Self::Full => "full",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Tv => "TV",
+            Self::Smart => "Smart",
+            Self::Full => "Full overscan",
+        }
+    }
 }
 
 /// TV-presentation centring (`[display] tv_h_centre` / `tv_v_centre`),

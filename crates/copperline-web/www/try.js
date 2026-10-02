@@ -5088,13 +5088,14 @@ function storePref(key, value) {
 }
 
 const OVERSCAN_STORAGE_KEY = 'copperline-overscan';
-const OVERSCAN_MODES = ['tv', 'full'];
-const OVERSCAN_LABELS = { tv: 'TV', full: 'Full overscan' };
+const OVERSCAN_MODES = ['tv', 'smart', 'full'];
+const OVERSCAN_LABELS = { tv: 'TV', smart: 'Smart', full: 'Full overscan' };
 
 const overscanShellSel = $('overscan');
 const overscanSel = overscanShellSel ?? buildSettingControl('overscan', 'View');
-if (!overscanSel.options.length) {
+{
   for (const mode of OVERSCAN_MODES) {
+    if (Array.from(overscanSel.options).some(option => option.value === mode)) continue;
     const option = document.createElement('option');
     option.value = mode;
     option.textContent = OVERSCAN_LABELS[mode];
@@ -7369,7 +7370,7 @@ const pageParams = new URLSearchParams(location.search);
 //     "floppy_sounds": false,        preset the drive-sounds toggle
 //     "mono_audio": true,            preset the mono-audio toggle
 //     "floppy_speed": 800,           100|200|400|800|0 (0 = turbo)
-//     "overscan": "full",            starting view (tv|full); a visitor's
+//     "overscan": "full",            starting view (tv|smart|full); a visitor's
 //                                    own remembered choice wins
 //     "tint": "green",               starting screen tint (none|bw|green|
 //                                    amber|sepia); same visitor rule

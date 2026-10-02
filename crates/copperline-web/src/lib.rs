@@ -226,6 +226,10 @@ pub struct WebEmu {
     present: Vec<u32>,
     present_width: usize,
     present_rows: usize,
+    /// Pixel shape belongs to the scan, independently of the crop or the
+    /// dimensions of the buffer currently handed to the page.
+    present_pixel_shape: (u32, u32),
+    present_horizontal_repeat: usize,
     /// Wrapping generation of `present`. The page compares this with the last
     /// revision it uploaded, so an emulated frame that the exact-reuse
     /// detector matched does not cross the JS/WebGL presentation path again.
@@ -273,6 +277,9 @@ pub struct WebEmu {
     /// previous presentation geometry instead of snapping to the full
     /// framebuffer, so the canvas does not jump at every mode change.
     presentation_latch: present_common::PresentationLatch,
+    /// Unclipped envelope retained when an exact frame is reused, so Smart
+    /// framing still earns its stability interval on a static screen.
+    last_framing_content: Option<bitplane::ContentRect>,
     /// Presentation scaling, the desktop's `[display] scaling` knob. See
     /// [`Self::set_scaling`].
     scaling: DisplayScaling,
@@ -384,6 +391,8 @@ impl WebEmu {
             present: Vec::new(),
             present_width: FB_WIDTH,
             present_rows: 0,
+            present_pixel_shape: (1, 1),
+            present_horizontal_repeat: 1,
             presentation_revision: 0,
             present_crt_lines: 0.0,
             last_rendered_frame: None,
@@ -396,6 +405,7 @@ impl WebEmu {
             monitor_bezel: false,
             tv_centre: TvCentre::default(),
             presentation_latch: present_common::PresentationLatch::default(),
+            last_framing_content: None,
             scaling: DisplayScaling::Smooth,
             autocrop: false,
             autocrop_latch: present_common::AutocropLatch::default(),
@@ -592,18 +602,33 @@ impl WebEmu {
                 &mut self.repeated_frame_detector,
             ) {
                 bitplane::ReuseRender::Reused => {
-                    self.last_rendered_frame = Some(emulated_frame);
-                    // The autocrop smoothing advances on a reused frame
-                    // too, as on the desktop: a static screen is exactly
-                    // what lets a smaller envelope prove itself stable.
-                    // The envelope is the one the held presentation was
-                    // rendered with, and a crop the latch adopts on it
-                    // must reach the page although the pixels did not
-                    // change: the revision is the page's only redraw cue.
-                    if self.latch_content_rect(self.last_content_rect) {
-                        self.presentation_revision = self.presentation_revision.wrapping_add(1);
+                    let centre_changed = self.overscan == Overscan::Smart
+                        && self.presentation_latch.resolve_smart_centre(
+                            self.last_framing_content,
+                            emulated_frame,
+                            self.present_programmable,
+                        );
+                    if centre_changed && !(self.autocrop && !self.monitor_bezel) {
+                        self.autocrop_latch.reset();
+                        self.repeated_frame_detector = bitplane::RepeatedFrameDetector::default();
+                        // The held page buffer was already cropped at the old
+                        // position. Rebuild from the raw field to show the new
+                        // aperture even though the guest picture is identical.
+                        bitplane::render_display_only_with_content(self.emu.bus(), &mut self.fb)
+                    } else {
+                        self.last_rendered_frame = Some(emulated_frame);
+                        // The autocrop smoothing advances on a reused frame
+                        // too, as on the desktop: a static screen is exactly
+                        // what lets a smaller envelope prove itself stable.
+                        // The envelope is the one the held presentation was
+                        // rendered with, and a crop the latch adopts on it
+                        // must reach the page although the pixels did not
+                        // change: the revision is the page's only redraw cue.
+                        if self.latch_content_rect(self.last_content_rect) {
+                            self.presentation_revision = self.presentation_revision.wrapping_add(1);
+                        }
+                        return;
                     }
-                    return;
                 }
                 bitplane::ReuseRender::Rendered(content) => content,
             }
@@ -650,7 +675,18 @@ impl WebEmu {
         // copy fills the presentation buffer, into the buffer's own
         // pixels, which are what the page draws.
         let woven_content = field_content.and_then(|rect| placement.content_rect(rect, woven_rows));
-        let tv_aperture_rows = if self.overscan == Overscan::Tv {
+        self.last_framing_content = woven_content;
+        if self.overscan == Overscan::Smart
+            && self.presentation_latch.resolve_smart_centre(
+                woven_content,
+                emulated_frame,
+                geometry.programmable,
+            )
+            && !(self.autocrop && !self.monitor_bezel)
+        {
+            self.autocrop_latch.reset();
+        }
+        let scan_aperture_rows = if self.overscan.is_tv() {
             self.presentation_latch
                 .resolve_tv_aperture(present_common::standard_tv_aperture_frame(
                     geometry, woven_rows, &base,
@@ -658,6 +694,9 @@ impl WebEmu {
         } else {
             None
         };
+        let native_autocrop =
+            self.overscan == Overscan::Smart && self.autocrop && !self.monitor_bezel;
+        let tv_aperture_rows = scan_aperture_rows.filter(|_| !native_autocrop);
         let present_content = if let Some(aperture_rows) = tv_aperture_rows {
             // Standard 15 kHz display: present the captured TV aperture, the
             // browser counterpart of the desktop's TV-aperture crop. Clipped
@@ -697,8 +736,10 @@ impl WebEmu {
             } else {
                 destination_rows
             };
-            let (source_x_offset, source_y_offset) =
-                present_common::tv_centre_source_offset(self.tv_centre);
+            let (source_x_offset, source_y_offset) = present_common::tv_centre_source_offset(
+                self.presentation_latch
+                    .tv_centre(self.overscan, self.tv_centre),
+            );
             let source_x = present_common::TV_CAPTURED_SOURCE_X as i32 + source_x_offset;
             let source_y = source_y as i32 + source_y_offset;
             (self.present_rows, self.present_width) =
@@ -756,6 +797,29 @@ impl WebEmu {
             woven_content
         };
         self.present_programmable = geometry.programmable;
+        if present_content.is_some() {
+            self.present_horizontal_repeat = if native_autocrop && !geometry.programmable {
+                present_common::content_horizontal_repeat(
+                    &self.present,
+                    self.present_width,
+                    self.present_rows,
+                    present_content,
+                )
+            } else {
+                1
+            };
+        }
+        self.present_pixel_shape = if native_autocrop {
+            scan_aperture_rows
+                .map(|rows| {
+                    present_common::buffer_glass_par(present_common::TV_CAPTURED_WIDTH, rows)
+                })
+                .unwrap_or_else(|| {
+                    present_common::buffer_glass_par(self.present_width, self.present_rows)
+                })
+        } else {
+            present_common::buffer_glass_par(self.present_width, self.present_rows)
+        };
         // A different scan geometry is a different coordinate space for
         // the envelope -- a programmable scan's own rows against the
         // standard woven field, a 35 ns canvas against the classic one, a
@@ -801,6 +865,7 @@ impl WebEmu {
     /// start over with the next frame.
     fn reset_presentation_latches(&mut self) {
         self.presentation_latch.reset();
+        self.last_framing_content = None;
         self.autocrop_latch.reset();
         self.present_content_rect = None;
         self.last_content_rect = None;
@@ -1351,12 +1416,14 @@ impl WebEmu {
     /// "tv" (the default) masks the deep horizontal overscan margins like a
     /// CRT bezel and presents standard screens as the captured TV
     /// aperture; "full" presents the whole overscan field the renderer
-    /// produces. Unknown names are ignored, like `set_port_device`. The
+    /// produces; "smart" uses bounded automatic centring and lets autocrop
+    /// select from the complete raster. Unknown names are ignored. The
     /// last completed frame is re-presented under the new aperture, so a
     /// paused page repaints without stepping the machine.
     pub fn set_overscan(&mut self, mode: &str) {
         let overscan = match mode.trim().to_ascii_lowercase().as_str() {
             "tv" => Overscan::Tv,
+            "smart" => Overscan::Smart,
             "full" => Overscan::Full,
             _ => return,
         };
@@ -1471,11 +1538,21 @@ impl WebEmu {
     /// smoothed across frames exactly as the desktop smooths its crop --
     /// instead of the fixed TV aperture, so a 200-line game fills far
     /// more of a 16:9 screen, and under integer scaling earns the larger
-    /// whole multiple the cropped picture fits. A layout setting alone:
-    /// the buffer, screenshots and `present_content_rect` are unchanged,
-    /// so the page redraws its held picture rather than re-presenting.
+    /// whole multiple the cropped picture fits. Smart framing also rebuilds
+    /// the source from the complete raster, before the fixed TV aperture
+    /// clips it. Other framing modes change only the layout.
     pub fn set_autocrop(&mut self, autocrop: bool) {
+        if self.autocrop == autocrop {
+            return;
+        }
         self.autocrop = autocrop;
+        if self.overscan == Overscan::Smart {
+            self.autocrop_latch.reset();
+            self.present_content_rect = None;
+            self.last_rendered_frame = None;
+            self.repeated_frame_detector = bitplane::RepeatedFrameDetector::default();
+            self.render_completed_frame();
+        }
     }
 
     /// The latched autocrop envelope in presentation-buffer pixels, as
@@ -1503,11 +1580,11 @@ impl WebEmu {
     /// dh, columns, lines]` -- the buffer sub-rect to show (the autocrop
     /// envelope, or the whole buffer), where to draw it (the viewport
     /// outside it is black), and the whole-number factors of an integer
-    /// draw as device pixels per buffer column and per scan line (0, 0
+    /// draw as device pixels per native pixel and per scan line (0, 0
     /// for a smooth fit). Empty until a frame has been presented.
     ///
-    /// The buffer's pixel shape is the 4:3 glass's, read off the buffer
-    /// itself (the page shows the whole buffer in a 4:3 element): drawn
+    /// The buffer's pixel shape is the 4:3 glass's, retained from the
+    /// scan aperture when Smart autocrop uses the complete raster: drawn
     /// smooth, the whole buffer fills such a viewport exactly as the
     /// page's stretch does, and a crop keeps that shape in a letterbox;
     /// drawn integer, a standard scan takes a whole number per axis
@@ -1525,12 +1602,14 @@ impl WebEmu {
         } else {
             None
         };
-        let layout = present_common::buffer_layout(
+        let layout = present_common::buffer_layout_with_par(
             (avail_w.max(1), avail_h.max(1)),
             (self.present_width, self.present_rows),
             self.present_programmable,
             self.scaling == DisplayScaling::Integer,
             content,
+            self.present_pixel_shape,
+            self.present_horizontal_repeat,
         );
         let (sx, sy, sw, sh) = layout.src;
         let (dx, dy, dw, dh) = layout.dst;
@@ -1660,6 +1739,32 @@ fn elapsed_fields_for_immediate_render(deferred_fields: &mut u32) -> u32 {
 mod tests {
     use super::{elapsed_fields_for_immediate_render, WebEmu};
     use std::path::PathBuf;
+
+    #[test]
+    fn smart_autocrop_uses_the_complete_raster_and_native_pixel_fit() {
+        let mut web = WebEmu::new(Some("A500".into()), Some("PAL".into()), Some(1.0)).unwrap();
+        present_first_frame(&mut web);
+        web.set_overscan("smart");
+        assert_eq!((web.present_width(), web.present_rows()), (668, 540));
+        let revision = web.presentation_revision();
+        web.set_autocrop(true);
+        assert_ne!(web.presentation_revision(), revision);
+        assert_eq!((web.present_width(), web.present_rows()), (716, 570));
+        web.set_scaling("integer");
+        web.present_content_rect = Some(copperline::video::bitplane::ContentRect {
+            x0: 62,
+            x1: 702,
+            y0: 18,
+            y1: 418,
+        });
+        web.present_horizontal_repeat = 2;
+        assert_eq!(
+            web.present_layout(1920, 1080),
+            vec![62, 18, 640, 400, 160, 40, 1600, 1000, 5, 5]
+        );
+        web.set_autocrop(false);
+        assert_eq!((web.present_width(), web.present_rows()), (668, 540));
+    }
 
     #[test]
     fn immediate_render_consumes_deferred_fields_without_double_aging() {

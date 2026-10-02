@@ -322,7 +322,7 @@ impl RawBezel {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawDisplay {
-    /// "tv" (default, mask deep overscan like a CRT bezel) or "full".
+    /// "tv" (default), "smart" (bounded automatic centring), or "full".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) overscan: Option<String>,
     /// Horizontal centring of the TV presentation in lo-res pixels,

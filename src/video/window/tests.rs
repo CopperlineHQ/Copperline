@@ -1176,6 +1176,84 @@ fn choosing_a_setting_leaves_the_menu_open_and_shows_it_took() {
 }
 
 #[test]
+fn smart_framing_reuses_the_capture_and_pointer_aperture() {
+    let mut app = test_app();
+    app.apply_overscan(Overscan::Smart);
+    let envelope = crate::video::bitplane::ContentRect {
+        x0: 0,
+        x1: 714,
+        y0: 2,
+        y1: 568,
+    };
+    for frame in 1..=25 {
+        app.presentation_latch
+            .resolve_smart_centre(Some(envelope), frame, false);
+    }
+    app.refresh_tv_centre();
+    assert_eq!(app.present_tv_centre.h, 8);
+    app.present_placement = Some(crate::video::present_common::FieldPlacement::standard(
+        crate::video::FB_HEIGHT,
+        0x2C,
+        0,
+    ));
+    let image = app.capture_present_image();
+    let reference = super::render_present_frame(
+        &app.present_fb,
+        app.present_rows,
+        app.present_width,
+        Overscan::Tv,
+        crate::config::TvCentre { h: 8, v: 0 },
+        app.present_tv_aperture_rows,
+    );
+    assert_eq!(image.pixels, reference.pixels);
+    assert_eq!(image.width, reference.width);
+    assert_eq!(image.height, reference.height);
+    let (sx, sy) = super::canvas_source_point(
+        0,
+        100,
+        app.present_rows,
+        app.present_width,
+        Overscan::Tv,
+        crate::config::TvCentre { h: 8, v: 0 },
+        app.present_tv_aperture_rows,
+        present_height(),
+    )
+    .unwrap();
+    assert_eq!(
+        app.canvas_to_field_pixel(0, 100),
+        app.present_placement
+            .unwrap()
+            .field_point(sx, sy, app.present_rows)
+    );
+    app.apply_overscan(Overscan::Tv);
+    assert_eq!(app.present_tv_centre, app.tv_centre);
+}
+
+#[test]
+fn smart_autocrop_preserves_content_outside_the_fixed_aperture() {
+    let mut app = test_app();
+    app.overscan = Overscan::Smart;
+    app.present_content_rect = Some(crate::video::bitplane::ContentRect {
+        x0: 0,
+        x1: 714,
+        y0: 2,
+        y1: 566,
+    });
+    let raw = app.display_canvas_src_for(true, true).unwrap();
+    assert_eq!((raw.rect.0, raw.rect.2), (0, 714));
+    // Switching autocrop off restores the bounded TV view; captures keep
+    // that aperture in either case, rather than inheriting the window crop.
+    let fixed = app.display_canvas_src_for(true, false).unwrap();
+    assert_eq!(
+        fixed.rect,
+        super::aperture_canvas_rect(TV_PAL_PRESENT_HEIGHT)
+    );
+    let capture = app.capture_present_image();
+    assert_eq!(capture.height, TV_PAL_PRESENT_HEIGHT as u32);
+    assert_eq!(capture.width, FB_WIDTH as u32);
+}
+
+#[test]
 fn choosing_a_window_closes_the_menu_behind_it() {
     let mut app = test_app();
     app.activate_bar_control(super::BarControl::Menu);
@@ -10082,7 +10160,11 @@ fn autocrop_latch_grows_fast_and_shrinks_only_when_stable() {
 #[test]
 fn display_src_layout_refits_the_multiple_against_the_rect() {
     use super::scaler::ScaleFilter::{Nearest, SharpBilinear};
-    let crop = |rect| super::DisplaySrc { rect, par: (1, 1) };
+    let crop = |rect| super::DisplaySrc {
+        rect,
+        par: (1, 1),
+        horizontal_repeat: 1,
+    };
     let game = (38, 69, 640, 400);
     // A 200-line lo-res game (400 woven rows, 640 canvas px wide) on a
     // 2000x1200 surface, above a pre-sized 100-row chrome band (the
@@ -10389,6 +10471,7 @@ fn per_axis_layout_draws_the_rect_at_its_factors() {
     let src = super::DisplaySrc {
         rect: (38, 71, 640, 400),
         par: ntsc,
+        horizontal_repeat: 1,
     };
     let layout = super::display_src_layout((1920, 1036), true, src, None);
     assert_eq!(layout.factors, Some((2, 5)));

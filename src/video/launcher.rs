@@ -6411,10 +6411,7 @@ fn video_name(video: VideoStandard) -> &'static str {
 }
 
 fn overscan_name(overscan: Overscan) -> &'static str {
-    match overscan {
-        Overscan::Tv => "tv",
-        Overscan::Full => "full",
-    }
+    overscan.as_str()
 }
 
 pub(crate) fn pixel_aspect_name(aspect: PixelAspect) -> &'static str {

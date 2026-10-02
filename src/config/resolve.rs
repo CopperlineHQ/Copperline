@@ -34,7 +34,7 @@ pub fn resolve_deinterlace(from_config: bool) -> bool {
 }
 
 /// Resolve the presented overscan mode: the `COPPERLINE_OVERSCAN` env var
-/// (full/tv) overrides the `[display] overscan` config for one run. The
+/// (full/tv/smart) overrides the `[display] overscan` config for one run. The
 /// image-regression harness pins "full" so its baselines always carry the
 /// whole overscan field regardless of the config default.
 pub fn resolve_overscan(from_config: Overscan) -> Overscan {

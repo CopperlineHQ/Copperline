@@ -693,7 +693,9 @@ video = "PAL"
 
 
 # Presentation options. overscan: "tv" (default; mask deep horizontal
-# overscan like a CRT bezel) or "full".
+# overscan like a CRT bezel), "smart" (bounded automatic horizontal centring),
+# or "full". Smart waits for 25 stable emulated frames and moves at most eight
+# lo-res pixels; manual centring adds a trim.
 # tv_h_centre / tv_v_centre: centre the TV picture on the glass, like a
 # monitor's front-panel H-CENTER/V-CENTER controls. tv_h_centre in lo-res
 # pixels (-16..16, positive right), tv_v_centre in scan lines (-8..8,
@@ -719,7 +721,9 @@ video = "PAL"
 # window programmed by hardware (default false), allowing games with smaller
 # viewports to fill more of wide screens. When combined with integer scaling,
 # the integer multiplier is recalculated against the cropped area. Autocrop
-# only affects window presentation (capture outputs retain full aperture),
+# in smart mode uses the unmasked raster before the TV aperture clips it,
+# preserving the full detected display at the largest fitting integer scale.
+# It only affects window presentation (capture outputs retain full aperture),
 # works with CRT shaders and programmable multisync modes, and is automatically
 # suspended when using monitor bezels or RTG modes.
 # deinterlace: motion-adaptive weaving of interlaced displays (default

@@ -3631,6 +3631,7 @@ fn panels_render_into_their_rects() {
         pcmcia_slot: false,
         pcmcia_card: None,
         pixel_aspect: PixelAspect::Tv,
+        overscan: crate::config::Overscan::Tv,
         scaling: crate::config::DisplayScaling::Smooth,
         autocrop: false,
         tv_centre: crate::config::TvCentre::default(),
