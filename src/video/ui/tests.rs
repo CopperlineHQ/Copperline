@@ -440,12 +440,22 @@ fn every_greyed_reason_fits_the_column() {
     // Where the text starts, and the margin it must stop short of.
     let room = (rect.x + rect.w - LAUNCH_MARGIN) - launcher_control_x(rect);
     // Every model, so the rows each machine greys are all walked: a
-    // machine without IDE, a machine without a CD drive, and the CPU
-    // every profile brings with it (greying the FPU/cache/Zorro III rows
-    // the 68000 profiles cannot have).
-    for model in launcher::MODELS {
+    // machine without IDE, a machine without a CD drive, and the CPU every
+    // profile brings with it (greying the FPU/cache/Zorro III rows the
+    // 68000 profiles cannot have). On each, the whole SCSI controller
+    // cycle too -- the boot-ROM rows are hidden outright while there is no
+    // controller, so a fitted-but-unsuitable one is the only state that
+    // puts their reasons on a page to be measured ("Zorro boards only" for
+    // the A3000's motherboard SCSI, "A2091 only" for the split-EPROM row).
+    for (model, controller_steps) in launcher::MODELS
+        .into_iter()
+        .flat_map(|m| (0..4).map(move |c| (m, c)))
+    {
         let mut setup = launcher::MachineSetup::default();
         setup.select_model(Some(model));
+        for _ in 0..controller_steps {
+            setup.cycle(LauncherField::ScsiController, true);
+        }
         // The strip tabs, plus the sub-pages reached from a nav row: the
         // CD page is one of them, and its rows are among the few that
         // explain themselves this way.
@@ -474,6 +484,14 @@ fn every_greyed_reason_fits_the_column() {
             )
             .iter()
             {
+                // Only what the page actually draws: the draw path filters
+                // the row list the same way, so a row this machine leaves
+                // off has no reason on screen to overflow anything. Holding
+                // a hidden row's text to the column's width would fail a
+                // wording that cannot be seen.
+                if !setup.row_on_page(tab, r.field) {
+                    continue;
+                }
                 let Some(reason) = setup.disabled_reason(r.field) else {
                     continue;
                 };
@@ -483,7 +501,7 @@ fn every_greyed_reason_fits_the_column() {
                 let width = font::text_width(reason, 1);
                 assert!(
                     width <= room,
-                    "{model:?} {tab:?} {:?}: reason {reason:?} is {width} wide, past the {room} the column has",
+                    "{model:?} (+{controller_steps} scsi) {tab:?} {:?}: reason {reason:?} is {width} wide, past the {room} the column has",
                     r.label
                 );
             }
