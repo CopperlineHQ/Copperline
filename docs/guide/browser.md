@@ -40,8 +40,8 @@ The web version runs at [copperline.dev/try](https://copperline.dev/try/):
     to the active raster area containing fetched bitplane data rather than the fixed TV
     aperture. When paired with **Integer** scaling, integer multipliers recalculate
     against the cropped viewport. Both scaling and autocrop are automatically suspended
-    when monitor bezels are enabled. Screenshots capture the standard presentation buffer
-    geometry.
+    when monitor bezels are enabled. Screenshots retain the configured framing aperture
+    and centring, including with Smart autocrop, and leave the live settings unchanged.
   - **Screen tint:** Monochrome simulation presets (Black & White, Green, Amber, Sepia).
   - **Deinterlacing:** Motion-adaptive field merging for interlaced display modes.
   - **Phosphor persistence:** Simulates CRT phosphor decay trails.

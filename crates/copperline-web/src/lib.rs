@@ -608,7 +608,7 @@ impl WebEmu {
                             emulated_frame,
                             self.present_programmable,
                         );
-                    if centre_changed && !(self.autocrop && !self.monitor_bezel) {
+                    if centre_changed && (!self.autocrop || self.monitor_bezel) {
                         self.autocrop_latch.reset();
                         self.repeated_frame_detector = bitplane::RepeatedFrameDetector::default();
                         // The held page buffer was already cropped at the old
@@ -682,7 +682,7 @@ impl WebEmu {
                 emulated_frame,
                 geometry.programmable,
             )
-            && !(self.autocrop && !self.monitor_bezel)
+            && (!self.autocrop || self.monitor_bezel)
         {
             self.autocrop_latch.reset();
         }
@@ -1764,6 +1764,43 @@ mod tests {
         );
         web.set_autocrop(false);
         assert_eq!((web.present_width(), web.present_rows()), (668, 540));
+    }
+
+    #[test]
+    fn smart_autocrop_capture_restores_the_live_raster_without_stepping() {
+        for standard in ["PAL", "NTSC"] {
+            for bezel in [false, true] {
+                let mut web =
+                    WebEmu::new(Some("A500".into()), Some(standard.into()), Some(1.0)).unwrap();
+                present_first_frame(&mut web);
+                web.set_overscan("smart");
+                web.set_tv_centre(4, -2);
+                let capture = web.present.clone();
+                assert_eq!((web.present_width(), web.present_rows()), (668, 540));
+                web.set_autocrop(true);
+                web.set_monitor_bezel(bezel);
+                web.set_scaling("integer");
+                let live = web.present.clone();
+                let live_size = (web.present_width(), web.present_rows());
+                let frame = web.emu.bus().emulated_frames();
+
+                // The page's synchronous screenshot buffer read suspends
+                // the layout settings without advancing the guest.
+                web.set_autocrop(false);
+                web.set_monitor_bezel(false);
+                web.set_scaling("smooth");
+                assert_eq!((web.present_width(), web.present_rows()), (668, 540));
+                assert_eq!(web.present, capture);
+                web.set_scaling("integer");
+                web.set_monitor_bezel(bezel);
+                web.set_autocrop(true);
+
+                assert_eq!((web.present_width(), web.present_rows()), live_size);
+                assert_eq!(web.present, live);
+                assert_eq!(web.emu.bus().emulated_frames(), frame);
+                assert!(web.autocrop);
+            }
+        }
     }
 
     #[test]

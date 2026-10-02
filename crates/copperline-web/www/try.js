@@ -3991,9 +3991,13 @@ function togglePause() {
 // sake, and a capture keeps the smooth presentation's shape whatever
 // the page draws, as the desktop's captures keep the aspect's own shape
 // whatever its window draws.
+// Smart autocrop uses the full raster as its live buffer, so suspend
+// autocrop during the read too, then restore the visitor's setting.
 function withTvAperture(f) {
   const bezel = monitorBezelOn();
   const integer = layoutSupported && scalingMode === 'integer';
+  const autocrop = layoutSupported && autocropOn;
+  if (autocrop) emu.set_autocrop?.(false);
   if (bezel) emu.set_monitor_bezel?.(false);
   if (integer) emu.set_scaling?.('smooth');
   try {
@@ -4001,6 +4005,7 @@ function withTvAperture(f) {
   } finally {
     if (integer) emu.set_scaling?.('integer');
     if (bezel) emu.set_monitor_bezel?.(true);
+    if (autocrop) emu.set_autocrop?.(true);
   }
 }
 async function copyScreenshot() {
