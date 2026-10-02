@@ -690,6 +690,21 @@ boot-time cards, SRAM cards, real card readers, and the fast-RAM rule.
   Copperline's contributors and Patreon sponsors (see `CREDITS.md`).
   Builds made from an untagged git commit append the short commit ID to
   the version shown in the window title and About panel.
+
+  The panel's **Check for updates** button asks GitHub which Copperline
+  release is the latest and compares it with the running version. If a
+  newer release is out, the line beside the button names it and the
+  button becomes **Open release page**, which opens that release's notes
+  and downloads in your browser (or, if no browser will open, puts the
+  page's address on the clipboard). Pre-release ordering follows semantic
+  versioning, so `1.0.0` counts as newer than `1.0.0-rc.1`; a build from an
+  untagged commit is compared by its version alone. Copperline never checks
+  on its own: nothing is sent until the button is pressed, and the
+  answer is forgotten when Copperline quits. The request is a plain HTTPS
+  `GET` to `api.github.com` whose only identifying detail is the
+  `Copperline/<version>` user agent. GitHub limits how often one network
+  address may ask, so a check repeated many times in an hour may be told
+  to wait. Builds without the `update-check` feature have no button.
 - **Quit** (also `Cmd+Q` / `Alt+Q`): exits Copperline. It is the last row
   so that a [controller or keyboard walking the
   menu](#keyboard-and-controller-navigation) finds it at the foot, with

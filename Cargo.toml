@@ -30,6 +30,7 @@ default = [
     "cpu-jit",
     "profile-stats",
     "game-library",
+    "update-check",
     "mhi",
     "cd-mp3",
     "cd32-fmv",
@@ -58,6 +59,12 @@ coppersynth = ["dep:coppersynth"]
 # are parsed and ignored so a configuration written by a full build still
 # loads. See src/gamelib/.
 game-library = ["dep:ureq", "dep:zeroize", "dep:base64"]
+# The About panel's Check for updates button (src/update.rs): one request to
+# GitHub's releases API, made only when the button is pressed, and the
+# release page opened in the host browser when there is something newer.
+# Off, the button is absent and nothing of the check is compiled. It shares
+# the game library's HTTP client and TLS stack (src/http.rs).
+update-check = ["dep:ureq", "dep:semver"]
 # The MHI virtual MPEG audio decoder board (src/mhi.rs, `[mhi]`): pulls in
 # Symphonia's pure-Rust MPEG audio decoder. Kept a default-on feature (not an
 # unconditional dependency) so builds that do not want the board -- the
@@ -203,15 +210,19 @@ object = { version = "0.40", default-features = false, features = ["read_core", 
 # Formatting-preserving TOML writer, so the generated config can carry
 # per-setting comments (copperline-import-uae only).
 toml_edit = { version = "0.25", optional = true }
-# The game library's HTTP client (src/gamelib/openretro.rs) is declared per
-# platform, with the other per-target dependencies below: its TLS backend
-# differs by what each host can build without a C toolchain.
+# The HTTP client (src/http.rs) the game library and the update check share
+# is declared per platform, with the other per-target dependencies below: its
+# TLS backend differs by what each host can build without a C toolchain.
 # Wiping the OpenRetro password and auth token from memory once they are
 # done with. Volatile writes with a compiler fence, which a hand-written
 # overwrite of a buffer nothing reads again is entitled to be optimised
 # away into nothing at all.
 zeroize = { version = "1", optional = true }
 serde-big-array = "0.5"
+# Release-version precedence for the update check (src/update.rs): which of
+# two versions is newer, pre-releases included. Already in every default
+# build through wasmtime's wasmparser, so naming it adds no crate.
+semver = { version = "1", optional = true }
 # MP3 (MPEG-1/2/2.5 Layer III) decoding for the MHI board (src/mhi.rs) and
 # for MP3 audio tracks in cue sheets (src/cdrom/mp3.rs, feature `cd-mp3`).
 # Symphonia's MPEG audio decoder: pure Rust (MPL-2.0, GPL-compatible), so it
@@ -315,8 +326,8 @@ color_quant = "2.0"
 # macOS dock icon: winit's with_window_icon is a no-op on macOS, so the dock
 # icon must be set at runtime via NSApplication. These objc2 versions match the
 # ones rfd already pulls in, so they add no new crate copies to the build.
-# The game library's HTTP client. Blocking, which is what a worker thread
-# wants. The TLS backend differs by platform for build requirements rather
+# The HTTP client the game library and the update check share. Blocking,
+# which is what a worker thread wants. The TLS backend differs by platform for build requirements rather
 # than for taste; the trust anchors do not, since both are pointed at the
 # Mozilla root set `webpki-roots` bundles rather than at the host's store.
 #
@@ -373,7 +384,8 @@ libloading = { version = "0.9", optional = true }
 # that keeps the window serviced while a native file picker runs on a thread of
 # its own (src/video/window/native_dialog.rs), and Storage_FileSystem/Security/
 # System_Console put away the console window a desktop launch is given
-# (src/winconsole.rs).
+# (src/winconsole.rs). Win32_UI_Shell is ShellExecuteW, which hands the update
+# check's release page to the default browser (src/update.rs).
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
@@ -382,6 +394,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
     "Win32_System_IO",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
 

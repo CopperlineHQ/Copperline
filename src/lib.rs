@@ -61,9 +61,9 @@ pub mod floppy;
 #[cfg(feature = "fluxbridge")]
 pub mod fluxbridge;
 // The WHDLoad game library: the launcher's Library page, the local game
-// database, and the OpenRetro sync that fills it. Gated because it is the
-// only part of Copperline that makes network requests of its own, and so
-// the only part that needs an HTTP client and a TLS stack.
+// database, and the OpenRetro sync that fills it. Gated because, with the
+// update check below, it is one of the two parts of Copperline that make
+// network requests of their own, and so need an HTTP client and a TLS stack.
 #[cfg(feature = "game-library")]
 pub mod gamelib;
 #[cfg(feature = "frontend")]
@@ -83,6 +83,9 @@ pub mod harddrive;
 pub mod hash;
 pub mod heatmap;
 pub mod hostsocket;
+// The HTTP client construction the two self-initiated network users share.
+#[cfg(any(feature = "game-library", feature = "update-check"))]
+pub mod http;
 pub mod ide_a4000;
 pub mod ide_zorro;
 pub mod inputrec;
@@ -140,6 +143,10 @@ pub mod timetravel;
 pub mod toccata;
 pub mod typing;
 pub mod uaelib;
+// The About panel's Check for updates: asks GitHub for the latest release,
+// only when the button is pressed. Gated with the HTTP client it needs.
+#[cfg(feature = "update-check")]
+pub mod update;
 pub mod uss;
 pub mod verdict;
 pub mod video;

@@ -181,6 +181,7 @@ features to keep; the [FluxBridge](fluxbridge.md), [MT-32](mt32.md), and
 | `dap` | yes | The [Debug Adapter Protocol](../debugger/dap.md) adapter and the guest debug-information reader. |
 | `import-uae-bin` | yes | The [`copperline-import-uae`](import-uae.md) converter. |
 | `game-library` | yes | The launcher's [WHDLoad](whdload.md) Library page and its OpenRetro sync. |
+| `update-check` | yes | The About panel's [Check for updates](ui.md#application-controls) button, which asks GitHub for the latest release only when pressed. |
 | `mhi` | yes | The MHI MPEG audio decoder board. |
 | `cd-mp3` | yes | MP3 audio tracks in CD cue sheets. |
 | `cd32-fmv` | yes | The CD32 Full Motion Video module. |

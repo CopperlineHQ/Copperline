@@ -981,6 +981,27 @@ mod tests {
         }
     }
 
+    /// The keyboard and a controller reach Check for updates the way the
+    /// pointer does: it is on the About panel's map.
+    #[cfg(feature = "update-check")]
+    #[test]
+    fn the_about_panel_offers_its_update_button() {
+        use crate::video::menu::MenuNav;
+        use crate::video::ui::{Panel, UiState};
+        let ui = UiState {
+            menu_open: false,
+            menu_rows: Vec::new(),
+            menu_nav: MenuNav::default(),
+            panel: Some(Panel::About),
+        };
+        let items = map(
+            &ui,
+            crate::video::window::texture_width(1),
+            crate::video::window::texture_height(1),
+        );
+        assert!(find(&items, NavTarget::Ui(UiControl::AboutUpdate)).is_some());
+    }
+
     /// A page's map, printed, for working out why a step goes where it
     /// does.
     #[test]

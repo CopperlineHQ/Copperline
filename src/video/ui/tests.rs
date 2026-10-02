@@ -1050,6 +1050,31 @@ fn panel_close_button_hit_tests() {
     assert_eq!(ui.control_at((0, 0)), None);
 }
 
+/// The About panel's update button sits in its footer, under the water,
+/// and answers there; the rest of the footer is panel body.
+#[cfg(feature = "update-check")]
+#[test]
+fn the_about_update_button_hit_tests_in_the_footer() {
+    let ui = UiState {
+        menu_open: false,
+        menu_rows: Vec::new(),
+        menu_nav: menu::MenuNav::default(),
+        panel: Some(Panel::About),
+    };
+    let rect = panel_rect(ui.panel.as_ref().unwrap());
+    let button = about_update_button_rect(rect);
+    assert!(button.y >= rect.y + rect.h - ABOUT_FOOTER_H - 8);
+    assert!(button.x + button.w <= rect.x + rect.w && button.y + button.h <= rect.y + rect.h);
+    let centre = (
+        (button.x + button.w / 2) as i32,
+        (button.y + button.h / 2) as i32,
+    );
+    assert_eq!(ui.control_at(centre), Some(UiControl::AboutUpdate));
+    // Beside it, where the status line is drawn: nothing to press.
+    let status = ((rect.x + 20) as i32, centre.1);
+    assert_eq!(ui.control_at(status), Some(UiControl::PanelBody));
+}
+
 /// Clicking a serial address box opens *that* edit, not the Create Image
 /// one the free-text widget was first built for.
 #[cfg(feature = "midi")]
@@ -1987,6 +2012,13 @@ fn panels_render_into_their_rects() {
         // Deep into the entrance so the snapshot shows the settled page.
         elapsed_ms: 60_000,
         machine_fitted: true,
+        // As a session that has not asked finds it.
+        update: Some(crate::video::about::UpdateFooter {
+            status: "Asks GitHub whether a newer release is out".to_string(),
+            tone: crate::video::about::FooterTone::Quiet,
+            button: "Check for updates",
+            enabled: true,
+        }),
     });
     draw(&mut frame, scale, &ui, None, Some(&data));
     assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -2004,6 +2036,7 @@ fn panels_render_into_their_rects() {
             machine_lines: vec![crate::config::ABOUT_PLACEHOLDER_LINE.to_string()],
             elapsed_ms,
             machine_fitted: false,
+            update: None,
         });
         draw(&mut frame, scale, &ui, None, Some(&data));
         frame
@@ -2021,7 +2054,7 @@ fn panels_render_into_their_rects() {
         region_differs(&mid, &opened, slot0, slot0 + 24, title_y, title_y + 24),
         "title's first letter should have settled by mid-entrance"
     );
-    let base = rect.y + rect.h - 8;
+    let base = rect.y + rect.h - 8 - ABOUT_FOOTER_H;
     assert!(
         region_differs(&mid, &opened, rect.x, rect.x + rect.w / 4, base - 8, base),
         "wave columns should have arrived on the left by mid-entrance"

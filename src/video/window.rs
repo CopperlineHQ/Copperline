@@ -1607,6 +1607,10 @@ pub struct App {
     about_redraw_at: Instant,
     /// Emulated-machine summary lines for the About window.
     about_machine_lines: Vec<String>,
+    /// The About panel's update check, for the session: not asked until
+    /// its button is pressed.
+    #[cfg(feature = "update-check")]
+    update_check: app_update::UpdateCheck,
     /// Raw config of the running (or last-applied) machine, so the "Machine
     /// Configuration..." menu item reopens the launcher showing the current
     /// settings.
@@ -2932,6 +2936,8 @@ impl App {
             about_opened_at: Instant::now(),
             about_redraw_at: Instant::now(),
             about_machine_lines,
+            #[cfg(feature = "update-check")]
+            update_check: app_update::UpdateCheck::Idle,
             machine_config,
             paused_before_debugger: false,
             paused_before_analyzer: false,
@@ -5917,6 +5923,11 @@ impl ApplicationHandler for App {
         self.poll_login();
         #[cfg(feature = "game-library")]
         self.poll_library_scan();
+        // The About panel's update check. The panel keeps the loop awake
+        // while it is up; closed, nothing shows the answer, so whenever
+        // the loop next wakes is soon enough to collect it.
+        #[cfg(feature = "update-check")]
+        self.poll_update_check();
         self.repeat_held_scroll();
         self.repeat_held_cycle();
         #[cfg(feature = "game-library")]
@@ -6884,6 +6895,8 @@ impl App {
                 }
             }
             UiControl::CalSave => self.save_calibration(),
+            #[cfg(feature = "update-check")]
+            UiControl::AboutUpdate => self.about_update_pressed(),
             UiControl::DebugTab(tab) => {
                 if let Some(panel) = self.debugger_panel.as_mut() {
                     panel.tab = tab;
@@ -7579,6 +7592,8 @@ mod app_menus;
 mod app_nav;
 mod app_netplay;
 mod app_states;
+#[cfg(feature = "update-check")]
+mod app_update;
 use app_nav::{cycle_hold_delay, PadNav};
 use native_dialog::PickRequest;
 mod adapter;

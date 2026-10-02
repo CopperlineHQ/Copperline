@@ -614,7 +614,7 @@ impl App {
     /// three times a second: retrying would walk the clipboard protocols
     /// (and log a warning from inside `arboard`) that often, for the whole
     /// run. Said once, it tells the user why sharing is doing nothing.
-    fn host_clipboard(&mut self) -> Option<&mut arboard::Clipboard> {
+    pub(super) fn host_clipboard(&mut self) -> Option<&mut arboard::Clipboard> {
         if self.host_clipboard.is_none() && !self.host_clipboard_unavailable {
             match arboard::Clipboard::new() {
                 Ok(clip) => self.host_clipboard = Some(clip),
