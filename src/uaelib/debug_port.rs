@@ -18,12 +18,22 @@ pub(crate) fn decodes(addr: u32) -> bool {
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub(super) struct DebugPort {
     arguments: Vec<u32>,
-    /// A provisional word argument is replaced when its low half arrives.
-    /// The register is kept too, so unrelated halves cannot ring the port.
+    /// One half of a longword transfer within the current CPU instruction.
+    /// A high word is also queued as a provisional standalone argument.
     pending_word: Option<(u32, u16)>,
+    /// An overflowing provisional argument must not pop an accepted value.
+    #[serde(default)]
+    pending_argument_dropped: bool,
 }
 
 impl DebugPort {
+    pub(super) fn begin_instruction(&mut self) {
+        // Native long stores split within one instruction. Keeping a half
+        // across instructions would join a standalone word to a later MOVEM.
+        self.pending_word = None;
+        self.pending_argument_dropped = false;
+    }
+
     pub(super) fn write(
         &mut self,
         addr: u32,
@@ -33,43 +43,57 @@ impl DebugPort {
         address_mask: u32,
     ) -> Option<String> {
         let mut register = addr;
+        let mut completed_long = size == 4;
         match size {
             1 if addr == ARGUMENT || addr == FORMAT => {
                 value &= 0xff;
-                self.pending_word = None;
+                self.begin_instruction();
             }
-            2 if addr == ARGUMENT || addr == FORMAT => {
+            2 if decodes(addr) => {
                 value &= 0xffff;
-                self.pending_word = Some((addr, value as u16));
-            }
-            2 if addr == ARGUMENT + 2 || addr == FORMAT + 2 => {
-                let (high_register, high) = self.pending_word.take()?;
-                if high_register + 2 != addr {
-                    return None;
+                let low_half = addr == ARGUMENT + 2 || addr == FORMAT + 2;
+                register = if low_half { addr - 2 } else { addr };
+                let other_addr = if low_half { register } else { register + 2 };
+                if let Some((pending_addr, pending)) =
+                    self.pending_word.take().filter(|(a, _)| *a == other_addr)
+                {
+                    let (high, low) = if low_half {
+                        (u32::from(pending), value)
+                    } else {
+                        (value, u32::from(pending))
+                    };
+                    value = (high << 16) | low;
+                    if register == ARGUMENT
+                        && pending_addr == ARGUMENT
+                        && !self.pending_argument_dropped
+                    {
+                        self.arguments.pop();
+                    }
+                    self.pending_argument_dropped = false;
+                    completed_long = true;
+                } else {
+                    self.pending_word = Some((addr, value as u16));
+                    self.pending_argument_dropped = false;
+                    if low_half {
+                        return None;
+                    }
                 }
-                register = high_register;
-                value = (u32::from(high) << 16) | (value & 0xffff);
-                if register == ARGUMENT {
-                    self.arguments.pop();
-                }
             }
-            4 if addr == ARGUMENT || addr == FORMAT => self.pending_word = None,
+            4 if addr == ARGUMENT || addr == FORMAT => self.begin_instruction(),
             _ => return None,
         }
         if register == ARGUMENT {
             if self.arguments.len() < ARGUMENT_MAX {
                 self.arguments.push(value);
-            } else {
-                // A dropped high word must not replace the previous argument
-                // when its low half arrives.
-                self.pending_word = None;
+            } else if size == 2 && !completed_long {
+                self.pending_argument_dropped = true;
             }
             return None;
         }
-        if register != FORMAT || (size != 4 && addr != FORMAT + 2) {
+        if register != FORMAT || !completed_long {
             return None;
         }
-        self.pending_word = None;
+        self.begin_instruction();
         // A trigger consumes the queue even when the format is unreadable.
         let arguments = std::mem::take(&mut self.arguments);
         let format = guest_cstring(mem, value & address_mask, DEBUG_TEXT_MAX, address_mask)?;
@@ -186,6 +210,10 @@ fn append(out: &mut Vec<u8>, bytes: &[u8]) {
 
 fn append_text(out: &mut Vec<u8>, bytes: &[u8], spec: &Spec) {
     let bytes = &bytes[..spec.precision.unwrap_or(bytes.len()).min(bytes.len())];
+    append_padded(out, bytes, spec);
+}
+
+fn append_padded(out: &mut Vec<u8>, bytes: &[u8], spec: &Spec) {
     let padding = vec![b' '; spec.width.saturating_sub(bytes.len())];
     if !spec.left {
         append(out, &padding);
@@ -229,7 +257,7 @@ fn format_message(format: &[u8], arguments: &[u32], mem: &Memory, mask: u32) -> 
             continue;
         };
         match spec.conversion {
-            b'p' => append(&mut out, format!("${value:08x}").as_bytes()),
+            b'p' => append_padded(&mut out, format!("${value:08x}").as_bytes(), &spec),
             b'c' => append_text(&mut out, &[value as u8], &spec),
             b's' | b'b' => {
                 let address = value & mask;
@@ -308,6 +336,11 @@ mod tests {
                 vec![0x1234_5678, 0x1234_5678],
                 "305419896 305419896",
             ),
+            (
+                "[%20p][%-20p][%3.2p]",
+                vec![0x1234, 0x1234, 0x1234],
+                "[           $00001234][$00001234           ][$00001234]",
+            ),
         ] {
             assert_eq!(
                 format_message(format.as_bytes(), &args, &mem, MASK),
@@ -366,29 +399,65 @@ mod tests {
     fn debug_port_split_longs_overflow_and_invalid_triggers_consume_no_stale_values() {
         let mut mem = memory();
         mem.chip_ram[0x2000..0x2008].copy_from_slice(b"%ld %ld\0");
+        for low_first in [false, true] {
+            let mut port = DebugPort::default();
+            let halves = |register, high, low| {
+                if low_first {
+                    [(register + 2, low), (register, high)]
+                } else {
+                    [(register, high), (register + 2, low)]
+                }
+            };
+            for _ in 0..2 {
+                for (addr, value) in halves(ARGUMENT, 0x1234, 0x5678) {
+                    port.write(addr, 2, value, &mem, MASK);
+                }
+            }
+            let [(first, first_value), (last, last_value)] = halves(FORMAT, 0, 0x2000);
+            port.write(first, 2, first_value, &mem, MASK);
+            let encoded = bincode::serialize(&port).unwrap();
+            let mut port: DebugPort = bincode::deserialize(&encoded).unwrap();
+            assert_eq!(
+                port.write(last, 2, last_value, &mem, MASK).as_deref(),
+                Some("305419896 305419896")
+            );
+            for i in 0..ARGUMENT_MAX {
+                port.write(ARGUMENT, 4, i as u32, &mem, MASK);
+            }
+            let [(first, first_value), (last, last_value)] = halves(ARGUMENT, 0xbeef, 0xabcd);
+            port.write(first, 2, first_value, &mem, MASK);
+            let encoded = bincode::serialize(&port).unwrap();
+            let mut port: DebugPort = bincode::deserialize(&encoded).unwrap();
+            port.write(last, 2, last_value, &mem, MASK);
+            assert_eq!(port.arguments, (0..ARGUMENT_MAX as u32).collect::<Vec<_>>());
+            assert!(port.write(FORMAT, 4, FORMAT, &mem, MASK).is_none());
+            assert!(port.arguments.is_empty());
+            assert_eq!(
+                port.write(FORMAT, 4, 0x2000, &mem, MASK).as_deref(),
+                Some("<missing> <missing>")
+            );
+        }
+    }
+
+    #[test]
+    fn debug_port_loads_old_partial_word_latches() {
+        let mut mem = memory();
+        mem.chip_ram[0x2000..0x2004].copy_from_slice(b"%ld\0");
         let mut port = DebugPort::default();
-        for _ in 0..2 {
-            port.write(ARGUMENT, 2, 0x1234, &mem, MASK);
-            port.write(ARGUMENT + 2, 2, 0x5678, &mem, MASK);
-        }
-        port.write(FORMAT, 2, 0, &mem, MASK);
-        let encoded = bincode::serialize(&port).unwrap();
-        let mut port: DebugPort = bincode::deserialize(&encoded).unwrap();
-        assert_eq!(
-            port.write(FORMAT + 2, 2, 0x2000, &mem, MASK).as_deref(),
-            Some("305419896 305419896")
-        );
-        for i in 0..ARGUMENT_MAX {
-            port.write(ARGUMENT, 4, i as u32, &mem, MASK);
-        }
-        port.write(ARGUMENT, 2, 0xbeef, &mem, MASK);
-        port.write(ARGUMENT + 2, 2, 0xabcd, &mem, MASK);
-        assert_eq!(port.arguments, (0..ARGUMENT_MAX as u32).collect::<Vec<_>>());
-        assert!(port.write(FORMAT, 4, FORMAT, &mem, MASK).is_none());
-        assert!(port.arguments.is_empty());
+        port.write(ARGUMENT, 2, 0xffff, &mem, MASK);
+        let bytes = rmp_serde::to_vec_named(&port).unwrap();
+        let mut value = rmpv::decode::read_value(&mut bytes.as_slice()).unwrap();
+        let rmpv::Value::Map(ref mut fields) = value else {
+            panic!("debug-port state must be a map");
+        };
+        fields.retain(|(key, _)| key.as_str() != Some("pending_argument_dropped"));
+        let mut bytes = Vec::new();
+        rmpv::encode::write_value(&mut bytes, &value).unwrap();
+        let mut port: DebugPort = rmp_serde::from_slice(&bytes).unwrap();
+        port.write(ARGUMENT + 2, 2, 0xffd6, &mem, MASK);
         assert_eq!(
             port.write(FORMAT, 4, 0x2000, &mem, MASK).as_deref(),
-            Some("<missing> <missing>")
+            Some("-42")
         );
     }
 }

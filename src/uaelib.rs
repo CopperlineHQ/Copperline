@@ -684,6 +684,11 @@ impl UaeLib {
         (1, false)
     }
 
+    /// Separate standalone word arguments from the next instruction's stores.
+    pub(crate) fn begin_debug_port_instruction(&mut self) {
+        self.debug_port.begin_instruction();
+    }
+
     /// Service the write-only WinUAE debug ports without reading guest I/O.
     pub(crate) fn write_debug_port(
         &mut self,

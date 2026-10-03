@@ -5010,6 +5010,9 @@ impl AddressBus for CpuBus {
 
     fn begin_instruction_fetches(&mut self) {
         self.instruction_fetches_cached = true;
+        if let Some(uaelib) = self.bus.uaelib.as_mut() {
+            uaelib.begin_debug_port_instruction();
+        }
     }
 
     fn instruction_fetches_were_cached(&self) -> bool {
@@ -8924,6 +8927,80 @@ mod tests {
                     control.bus.read_long(crate::uaelib::debug_port::FORMAT),
                     "reads keep their hardware decode: {model:?}, jit={jit}"
                 );
+            }
+        }
+        Ok(())
+    }
+
+    /// MOVEM.L with predecrement writes its low word first on a 68000/010.
+    /// A preceding word argument must remain separate from those two transfers.
+    #[test]
+    fn winuae_debug_port_guest_movem_writes_preserve_word_arguments() -> Result<()> {
+        let argument_program = [
+            0x70D6, // moveq #-42,d0
+            0x207C, 0x00BF, 0xFF04, // movea.l #$BFFF04,a0
+            0x33FC, 0x1234, 0x00BF, 0xFF00, // move.w #$1234,($BFFF00).l
+            0x48E0, 0x8000, // movem.l d0,-(a0): argument, low word first
+            0x23FC, 0x0000, 0x2000, 0x00BF, 0xFF04, // native format pointer
+            0x60FE,
+        ];
+        let format_program = [
+            0x33FC, 0x1234, 0x00BF, 0xFF00, // standalone word argument
+            0x23FC, 0xFFFF, 0xFFD6, 0x00BF, 0xFF00, // native long argument
+            0x203C, 0x0000, 0x2000, // move.l #$2000,d0
+            0x207C, 0x00BF, 0xFF08, // movea.l #$BFFF08,a0
+            0x48E0, 0x8000, // movem.l d0,-(a0): format pointer, low word first
+            0x60FE,
+        ];
+        let both_program = [
+            0x70D6, 0x207C, 0x00BF, 0xFF04, 0x33FC, 0x1234, 0x00BF, 0xFF00, 0x48E0, 0x8000, 0x203C,
+            0x0000, 0x2000, 0x207C, 0x00BF, 0xFF08, 0x48E0, 0x8000, 0x60FE,
+        ];
+        for (name, program, instructions) in [
+            ("argument", argument_program.as_slice(), 6),
+            ("format", format_program.as_slice(), 6),
+            ("both", both_program.as_slice(), 8),
+        ] {
+            for model in [
+                CpuModel::M68000,
+                CpuModel::M68010,
+                CpuModel::M68020,
+                CpuModel::M68030,
+                CpuModel::M68040,
+                CpuModel::M68060,
+            ] {
+                for jit in [false, true] {
+                    let mut bus = test_bus_with_pc(0x00F8_0100);
+                    let mut lib = crate::uaelib::UaeLib::new();
+                    lib.mute_stdout();
+                    bus.attach_uaelib(lib);
+                    write_chip_bytes(&mut bus, 0x2000, b"word=%u value=%ld\n\0");
+                    write_program(&mut bus, 0x00F8_0100, program);
+                    let mut machine = build(bus, model, false, 2, Default::default(), jit)?;
+                    machine.step_slice(instructions)?;
+                    let lib = machine.bus.bus.uaelib.as_mut().unwrap();
+                    assert_eq!(
+                        lib.take_debug_events(),
+                        (
+                            vec![crate::uaelib::DebugEvent::Log(
+                                "word=4660 value=-42\n".into()
+                            )],
+                            0
+                        ),
+                        "{name}: {model:?}, jit={jit}"
+                    );
+                    assert_eq!(lib.take_console_lines(), vec!["word=4660 value=-42"]);
+                    let mut control_bus = test_bus_with_pc(0x00F8_0100);
+                    write_chip_bytes(&mut control_bus, 0x2000, b"word=%u value=%ld\n\0");
+                    write_program(&mut control_bus, 0x00F8_0100, program);
+                    let mut control = build(control_bus, model, false, 2, Default::default(), jit)?;
+                    control.step_slice(instructions)?;
+                    assert_eq!(
+                        machine.bus.bus.emulated_cck(),
+                        control.bus.bus.emulated_cck(),
+                        "logging preserves timing: {name}, {model:?}, jit={jit}"
+                    );
+                }
             }
         }
         Ok(())

@@ -226,12 +226,16 @@ works in code that has taken over the machine.
 
 Numeric widths, precision, and the `-`, `+`, space, `#`, and `0` flags are
 supported; `%08lx` prints a zero-padded longword. String widths and precision
-are supported too. Floating point, `*` widths, `%n`, and WinUAE's custom
+are supported too. Pointer width and `-` alignment add spaces around the full
+`$` prefix and eight hex digits; pointer precision does not shorten them.
+Floating point, `*` widths, `%n`, and WinUAE's custom
 `%[CYCLES]` conversion are unsupported; unsupported conversions remain literal.
 
 Argument writes can be bytes, words, or longwords. Format pointers must be
-longwords; paired high/low word writes from a 68000 or 68010 are assembled
-automatically. Up to 32 arguments and 4096 bytes of format/output are accepted.
+longwords; paired word transfers within a 68000 or 68010 instruction are
+assembled automatically in either order, including predecrement `MOVEM.L`.
+Separate word-store instructions remain separate arguments. Up to 32 arguments
+and 4096 bytes of format/output are accepted.
 Extra arguments are ignored, missing ones print `<missing>`, and unreadable
 string arguments print `<invalid>`. An unreadable format pointer clears the
 queue without printing. Strings are read only from guest RAM or ROM, without

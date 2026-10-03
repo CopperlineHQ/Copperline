@@ -772,10 +772,12 @@ The same `UaeLib` instance serves WinUAE's write-only printf ports at `$BFFF00`
 (arguments) and `$BFFF04` (format pointer), implemented in
 `uaelib/debug_port.rs`. The CPU bus decodes these writes after real RAM/ROM
 and before the CIA windows, preserving the ordinary unmapped-write timing.
-Reads and neighbouring addresses keep their normal hardware decode. Paired
-word transfers replace a provisional high-word argument with a completed
-longword; a format pointer triggers only after a longword completes. This
-also works when a CDTV extended ROM covers the trap.
+Reads and neighbouring addresses keep their normal hardware decode. Word
+transfers within one instruction are assembled in either order; a provisional
+high-word argument is replaced by the completed longword. The instruction-fetch
+boundary clears the partial-word latch so a standalone word cannot combine with
+the next instruction's store. A format pointer triggers only after a longword
+completes. This also works when a CDTV extended ROM covers the trap.
 
 The formatter uses bounded guest RAM/ROM reads and formats Amiga 16/32-bit
 integers in Rust, with no host variadic calls or I/O reads. It holds at most
