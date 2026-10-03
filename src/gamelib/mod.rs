@@ -3,11 +3,12 @@
 //! The WHDLoad game library: a list of the packages you have, what the
 //! OpenRetro game database says about them, and the sync that fetches it.
 //!
-//! Compiled only with the `game-library` feature. It is the one part of
-//! Copperline that talks to the internet on its own account, and the only
-//! part that needs an HTTP client and a TLS stack, so a build without the
-//! feature links neither and carries none of this. WHDLoad itself does not
-//! depend on any of it: a package still boots from a path in the
+//! Compiled only with the `game-library` feature. Apart from the About
+//! panel's update check (`crate::update`), it is the one part of Copperline
+//! that talks to the internet on its own account, and it shares that
+//! check's HTTP client and TLS stack (`crate::http`), so a build with
+//! neither feature links neither and carries none of this. WHDLoad itself
+//! does not depend on any of it: a package still boots from a path in the
 //! configuration exactly the same way.
 //!
 //! Deliberately self-contained. Nothing here reaches into the emulator, and
@@ -16,7 +17,6 @@
 
 pub mod cover;
 pub mod db;
-pub mod http;
 pub mod library;
 pub mod openretro;
 pub mod scan;

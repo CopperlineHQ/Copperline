@@ -858,7 +858,15 @@ pub fn panel_control_at(panel: &Panel, pos: (i32, i32)) -> Option<UiControl> {
                 return Some(control);
             }
         }
-        Panel::About | Panel::Shortcuts => {}
+        #[cfg(feature = "update-check")]
+        Panel::About => {
+            if about_update_button_rect(rect).contains(pos) {
+                return Some(UiControl::AboutUpdate);
+            }
+        }
+        #[cfg(not(feature = "update-check"))]
+        Panel::About => {}
+        Panel::Shortcuts => {}
     }
     rect.contains(pos).then_some(UiControl::PanelBody)
 }
@@ -878,6 +886,10 @@ pub enum UiControl {
     CalSkip,
     CalCancel,
     CalSave,
+    /// The About panel's footer button: check for a newer release, or
+    /// open the page of the one a check found.
+    #[cfg(feature = "update-check")]
+    AboutUpdate,
     DebugTab(DebugTab),
     DebugRun,
     DebugStep,
@@ -1206,7 +1218,7 @@ pub enum UiControl {
 
 fn panel_dims(panel: &Panel) -> (usize, usize) {
     match panel {
-        Panel::About => (560, 450),
+        Panel::About => (560, 450 + ABOUT_FOOTER_H),
         Panel::Shortcuts => (600, shortcuts_panel_height()),
         Panel::Calibration(_) => (620, calibration_panel_height()),
         Panel::InputMap(_) => (INPUT_MAP_W, input_map_panel_height()),
@@ -1273,6 +1285,28 @@ fn close_button_rect(rect: Rect) -> Rect {
         y: rect.y,
         w: TITLE_H,
         h: TITLE_H,
+    }
+}
+
+// The About panel's update footer: one button at the bottom right, the
+// line saying where the check stands to its left. The panel grows by the
+// footer, so the page above it lays out exactly as it does without one.
+#[cfg(feature = "update-check")]
+const ABOUT_BUTTON_W: usize = 160;
+const ABOUT_BUTTON_H: usize = 22;
+pub(in crate::video) const ABOUT_FOOTER_H: usize = if cfg!(feature = "update-check") {
+    ABOUT_BUTTON_H + 8
+} else {
+    0
+};
+
+#[cfg(feature = "update-check")]
+fn about_update_button_rect(rect: Rect) -> Rect {
+    Rect {
+        x: rect.x + rect.w - ABOUT_BUTTON_W - 8,
+        y: rect.y + rect.h - ABOUT_BUTTON_H - 8,
+        w: ABOUT_BUTTON_W,
+        h: ABOUT_BUTTON_H,
     }
 }
 
@@ -3172,6 +3206,45 @@ fn draw_calibration(
             lit(hover, control),
             scale,
         );
+    }
+}
+
+/// The About panel's update footer: the button, and beside it the line
+/// saying what it does or what it found, wrapped to two lines at most so
+/// it stays level with the button.
+#[cfg(feature = "update-check")]
+fn draw_about_footer(
+    frame: &mut [u8],
+    rect: Rect,
+    footer: &super::about::UpdateFooter,
+    hover: Option<UiControl>,
+    scale: usize,
+) {
+    use super::about::FooterTone;
+    let button = about_update_button_rect(rect);
+    draw_text_button(
+        frame,
+        button,
+        footer.button,
+        footer.enabled,
+        lit(hover, UiControl::AboutUpdate),
+        scale,
+    );
+    let color = match footer.tone {
+        FooterTone::Quiet => PANEL_TEXT_DIM,
+        FooterTone::News => PANEL_TEXT_HILIGHT,
+        FooterTone::Trouble => PANEL_TEXT_ACCENT,
+    };
+    let x = rect.x + 16;
+    let chars = button.x.saturating_sub(x + 8) / font::GLYPH_W;
+    let mut lines = wrap_text(&footer.status, chars, chars);
+    lines.truncate(2);
+    let pitch = font::GLYPH_H + 2;
+    let height = (lines.len() * pitch).saturating_sub(2);
+    let mut y = button.y + button.h.saturating_sub(height) / 2;
+    for line in &lines {
+        draw_panel_text(frame, x, y, line, color, 1, scale);
+        y += pitch;
     }
 }
 
@@ -5713,7 +5786,11 @@ pub fn draw_panel_layer(
     let rect = panel_rect(panel);
     match (panel, data) {
         (Panel::About, Some(PanelViewData::About(view))) => {
-            super::about::draw(frame, rect, view, texture_scale)
+            super::about::draw(frame, rect, view, texture_scale);
+            #[cfg(feature = "update-check")]
+            if let Some(footer) = &view.update {
+                draw_about_footer(frame, rect, footer, hover, texture_scale);
+            }
         }
         (Panel::Shortcuts, _) => draw_shortcuts(frame, rect, texture_scale),
         (Panel::Calibration(session), Some(PanelViewData::Calibration(view))) => {

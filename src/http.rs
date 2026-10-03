@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Shared HTTP construction: user agent, transfer timeout and the TLS provider
-//! available in this platform's build. All game-library callers use `agent`.
+//! available in this platform's build. Every request Copperline makes on its
+//! own account -- the game library's and the update check's -- goes through
+//! `agent`.
 
 use std::time::Duration;
 

@@ -10,10 +10,16 @@
 //! re-times and re-wraps itself), the pacing constants, and the wave
 //! sheets in [`LAYERS`]. Nothing below them needs touching for a
 //! content change.
+//!
+//! Builds with the update check add a footer under the water: its
+//! button and the line beside it are panel chrome, drawn and hit-tested
+//! by `ui.rs` like every other panel's buttons, from an [`UpdateFooter`]
+//! the window fills in.
 
 use super::font;
 use super::ui::{
-    draw_panel_text, wrap_text, PANEL_TEXT, PANEL_TEXT_DIM, PANEL_TEXT_HILIGHT, TITLE_H,
+    draw_panel_text, wrap_text, ABOUT_FOOTER_H, PANEL_TEXT, PANEL_TEXT_DIM, PANEL_TEXT_HILIGHT,
+    TITLE_H,
 };
 use super::window::{fill_rect, rgba, scale_rect, texture_height, texture_width, Rect};
 
@@ -98,6 +104,30 @@ pub struct AboutView {
     /// than the configuration screen's centred invitation. Power state
     /// does not matter: a stopped machine keeps its reference card.
     pub machine_fitted: bool,
+    /// Where the update check stands, in builds that have one.
+    pub update: Option<UpdateFooter>,
+}
+
+/// The update check's footer: one button, and a line beside it saying
+/// what the button does or what it found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateFooter {
+    pub status: String,
+    pub tone: FooterTone,
+    pub button: &'static str,
+    /// False while a check is out: pressing again would only ask twice.
+    pub enabled: bool,
+}
+
+/// How the footer's line reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FooterTone {
+    /// What the button does, or that there is nothing to do.
+    Quiet,
+    /// A newer release.
+    News,
+    /// The check, or the browser, did not work out.
+    Trouble,
 }
 
 /// The entrance timetable: each element's turn comes in drawing
@@ -249,8 +279,9 @@ pub(in crate::video) fn draw(frame: &mut [u8], rect: Rect, view: &AboutView, sca
     // The floor show, playing from the moment the panel opens across
     // the panel's whole width, and kept below the text -- whatever room
     // is left under the last line is its stage, so growing the credits
-    // can shrink the water but never flood the words.
-    let base = rect.y + rect.h - 8;
+    // can shrink the water but never flood the words. A footer, where
+    // there is one, is the floor it stands on.
+    let base = rect.y + rect.h - 8 - ABOUT_FOOTER_H;
     let room = base.saturating_sub(y + 6).min(WAVE_H);
     if room < 16 {
         return;

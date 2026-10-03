@@ -166,6 +166,8 @@ impl App {
     /// read off the pointer's own hit-testing.
     pub(super) fn nav_items(&self) -> Vec<crate::video::nav::NavItem> {
         let mut items = crate::video::nav::map(&self.ui, texture_width(1), texture_height(1));
+        #[cfg(feature = "update-check")]
+        self.nav_skip_dead_update_button(&mut items);
         // The status bar is part of the same space: it sits under the
         // panels on the screen, so stepping down off the bottom of one
         // reaches it and stepping back up returns. Hidden, it is not

@@ -293,9 +293,9 @@ fn inflate(body: &[u8]) -> Result<String> {
 ///
 /// TLS is verified against the Mozilla root set `webpki-roots` bundles --
 /// not the platform's store -- so it behaves the same on every host, and
-/// which implementation gets there is [`http::agent`]'s business.
+/// which implementation gets there is [`crate::http::agent`]'s business.
 fn agent() -> ureq::Agent {
-    super::http::agent(TIMEOUT)
+    crate::http::agent(TIMEOUT)
 }
 
 /// `application/x-www-form-urlencoded`, escaping everything that is not

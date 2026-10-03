@@ -822,6 +822,7 @@ dependencies = [
  "rmp",
  "rmp-serde",
  "rmpv",
+ "semver",
  "serde",
  "serde-big-array",
  "serde_json",

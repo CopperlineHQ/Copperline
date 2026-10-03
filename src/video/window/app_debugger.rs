@@ -1833,6 +1833,10 @@ impl App {
                 elapsed_ms: self.about_opened_at.elapsed().as_millis() as u64,
                 machine_fitted: self.about_machine_lines.first().map(String::as_str)
                     != Some(crate::config::ABOUT_PLACEHOLDER_LINE),
+                #[cfg(feature = "update-check")]
+                update: Some(self.about_update_footer()),
+                #[cfg(not(feature = "update-check"))]
+                update: None,
             })),
             Panel::Shortcuts => Some(ui::PanelViewData::Shortcuts),
             // Self-contained: the panel's own state is everything it draws.

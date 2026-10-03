@@ -150,7 +150,7 @@ fn fetch(url: &str) -> Result<Vec<u8>, Error> {
     use std::io::Read;
     // Longer than the API's timeout: this is a couple of megabytes over
     // somebody's home connection, not a request for a record.
-    let agent = super::http::agent(std::time::Duration::from_secs(120));
+    let agent = crate::http::agent(std::time::Duration::from_secs(120));
     let mut response = agent
         .get(url)
         .call()
