@@ -1114,7 +1114,7 @@ impl Emulator {
             .is_some_and(|u| u.take_exit_request())
     }
 
-    /// Queued guest debug events (uaelib functions 86 and 88) and the
+    /// Queued guest debug events (uaelib functions 86/88 and printf ports) and the
     /// number dropped since the last take.
     pub fn take_uaelib_debug_events(&mut self) -> (Vec<crate::uaelib::DebugEvent>, u64) {
         self.bus_mut()

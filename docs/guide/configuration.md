@@ -437,7 +437,7 @@ warp_speed = "max"         # turbo limit: "2x", "4x", "8x", "16x", or "max"
 warp_boot = false          # warp the boot until storage goes idle
 warp_boot_idle = 10        # ...for this many emulated seconds
 # warp_until = 12.0        # or warp until an absolute emulated time
-uaelib = true              # WinUAE-compatible uaelib trap at $F0FF60
+uaelib = true              # uaelib trap and WinUAE memory-write debug output
 uaelib_files = false       # opt-in file helpers, below the --run directory
 rewind = false             # true = record rewind history from power-on
 rewind_budget_mb = 256     # host memory the rewind history may hold
@@ -519,8 +519,10 @@ carried no information.)
   `$F0FF60`. Guest programs can use this interface to toggle warp mode (via
   `warpmode()` in the vscode-amiga-debug template), emit debug log messages,
   and register bitmaps, palettes, and copper lists with the debugger (see
-  [](run)). Setting this to `false` leaves `$F0FF60` unmapped. On CDTV
-  configurations, the extended ROM occupies `$F00000` and covers this space.
+  [](run)). It also enables the [memory-write debug ports](run.md#winuae-debug-port)
+  at `$BFFF00` / `$BFFF04`. Setting this to `false` disables the ports and
+  leaves `$F0FF60` unmapped. On CDTV configurations, the extended ROM occupies
+  `$F00000` and covers the trap; the debug ports remain available.
 - `uaelib_files = true` lets the uaelib `debug_load` / `debug_save` calls
   read and write files below the `--run` program's directory. It is off by
   default because guest programs may be untrusted; absolute paths,

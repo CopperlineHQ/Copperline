@@ -765,7 +765,25 @@ provides a compatible ABI at `$F0FF60` (see
   directory). Unhandled functions return 0. The exit latch is host-side and,
   like the warp latch, is not carried by a save state.
 - **State serialization**: Trap state, resource registries, and overlay lists
-  travel in the `UAEL` save-state chunk.
+  travel in the `UAEL` save-state chunk. The memory-write debug-port queue and
+  partial-word latch travel with them; older chunks default to an empty queue.
+
+The same `UaeLib` instance serves WinUAE's write-only printf ports at `$BFFF00`
+(arguments) and `$BFFF04` (format pointer), implemented in
+`uaelib/debug_port.rs`. The CPU bus decodes these writes after real RAM/ROM
+and before the CIA windows, preserving the ordinary unmapped-write timing.
+Reads and neighbouring addresses keep their normal hardware decode. Paired
+word transfers replace a provisional high-word argument with a completed
+longword; a format pointer triggers only after a longword completes. This
+also works when a CDTV extended ROM covers the trap.
+
+The formatter uses bounded guest RAM/ROM reads and formats Amiga 16/32-bit
+integers in Rust, with no host variadic calls or I/O reads. It holds at most
+32 arguments and limits format/output to 4096 bytes. Completed messages use
+the function-86 echo, bounded console mirror, and `event.debug` queue, including
+the existing suppression of speculative run-ahead output. Reset clears the
+argument queue and partial-word latch. See
+[Memory-mapped debug output](../guide/run.md#winuae-debug-port) for the guest ABI.
 
 ## Freezer cartridge (`cartridge.rs`)
 
