@@ -23,6 +23,7 @@ impl App {
             state.setup.refresh_host_disks();
         }
         self.ui.panel = Some(Panel::Launcher(Box::new(state)));
+        self.refresh_launcher_monitors();
         // Every open starts on System, wherever the focus was standing
         // before -- on the status bar, or on the page this one replaced.
         // The first page is where the eye starts, so it is where the
@@ -1095,6 +1096,7 @@ impl App {
                 )));
             }
         }
+        self.refresh_launcher_monitors();
         if run_at_once {
             self.run_honors_power_on = true;
             self.launcher_run();
@@ -1518,12 +1520,23 @@ impl App {
         // selected modes for creation as well as updating an existing window.
         self.start_fullscreen = cfg.full_screen;
         self.start_maximized = cfg.maximized && !cfg.full_screen;
+        self.host_monitor = cfg.monitor.clone();
+        let selected_monitor = self.selected_host_monitor();
+        if selected_monitor.is_some() {
+            self.clear_saved_play_position();
+        }
         let is_fullscreen = self
             .render
             .as_ref()
             .map(|r| r.window.fullscreen().is_some());
         if is_fullscreen == Some(!cfg.full_screen) {
             self.toggle_fullscreen();
+        } else if is_fullscreen == Some(true) && cfg.full_screen {
+            // A new configuration can change the monitor while staying fullscreen.
+            if let Some(r) = &self.render {
+                r.window
+                    .set_fullscreen(Some(Fullscreen::Borderless(selected_monitor.clone())));
+            }
         }
         if crate::video::status_bar_hidden() == cfg.status_bar {
             self.toggle_status_bar();
@@ -1545,6 +1558,11 @@ impl App {
             }
         }
         if let Some(r) = self.render.as_ref() {
+            if !cfg.full_screen {
+                if let Some(monitor) = &selected_monitor {
+                    monitors::place_window(&r.window, monitor);
+                }
+            }
             r.window.set_maximized(cfg.maximized && !cfg.full_screen);
         }
         self.warp_speed = cfg.emulation.warp_speed;

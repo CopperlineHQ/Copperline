@@ -133,7 +133,7 @@ impl App {
             info!("fullscreen off");
             self.show_osd("Fullscreen off");
         } else {
-            window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+            window.set_fullscreen(Some(Fullscreen::Borderless(self.selected_host_monitor())));
             info!("fullscreen on");
             self.show_osd(format!(
                 "Fullscreen on ({HOST_SHORTCUT_MODIFIER_LABEL}+F restores)"

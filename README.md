@@ -106,6 +106,10 @@ For a build pipeline, use `copperline --run build/hello --window-scale 2` to
 start at twice the normal window width and height. `--maximized` opens a
 maximized window with its title bar and desktop taskbar visible;
 `--full-screen` opens borderless fullscreen.
+Use `--list-monitors` to list host displays and `--monitor 2` to open on the
+second display, or select *Host monitor* in the launcher's Display category.
+On Wayland, monitor selection applies to fullscreen; the compositor places
+ordinary windows.
 
 ### Essential keyboard shortcuts
 

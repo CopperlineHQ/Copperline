@@ -933,6 +933,8 @@ pub struct MachineSetup {
     start_fullscreen: bool,
     /// Open maximized ([display] maximized), retained from TOML.
     start_maximized: bool,
+    host_monitor: crate::config::HostMonitor,
+    host_monitors: Vec<(crate::config::HostMonitor, String)>,
     /// Initial window size ([display] window_scale), retained from TOML.
     window_scale: f64,
     /// Show the status bar at start ([display] status_bar).

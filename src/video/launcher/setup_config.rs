@@ -327,6 +327,8 @@ impl MachineSetup {
             tint: cfg.tint,
             start_fullscreen: cfg.full_screen,
             start_maximized: cfg.maximized,
+            host_monitor: cfg.monitor.clone(),
+            host_monitors: Vec::new(),
             window_scale: cfg.window_scale,
             show_status_bar: cfg.status_bar,
             floppy_sounds: cfg.audio.floppy_sounds,
@@ -840,6 +842,9 @@ impl MachineSetup {
         }
         if self.start_fullscreen != base.full_screen {
             raw.display.full_screen = Some(self.start_fullscreen);
+        }
+        if self.host_monitor != base.monitor {
+            raw.display.monitor = Some(self.host_monitor.to_string());
         }
         if self.start_maximized != base.maximized {
             raw.display.maximized = Some(self.start_maximized);

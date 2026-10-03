@@ -82,6 +82,8 @@ range checks as the equivalent TOML fields:
 | `--coverage-source-map FROM=TO` | (none; needs `--coverage`) | rewrite a source path prefix in the coverage file; repeatable |
 | `--full-screen` / `--windowed` | `[display] full_screen` | open fullscreen or windowed at start (default windowed) |
 | `--maximized` | `[display] maximized` | open a maximized window with borders and the desktop taskbar visible |
+| `--monitor SELECTOR` | `[display] monitor` | host display: `auto`, `primary`, a one-based number, or an exact name |
+| `--list-monitors` | -- | list host display numbers, names, resolutions and scale factors, then exit |
 | `--window-scale SCALE` | `[display] window_scale` | initial window width and height multiplier, 0.5-4.0 (default 1) |
 | `--show-status-bar` / `--hide-status-bar` | `[display] status_bar` | status bar at start (default shown) |
 | `--perf-overlay` | `[display] perf_overlay` | show performance overlay at start |
@@ -746,6 +748,7 @@ tint = "none"         # "none" (default), "bw", "green", "amber", or "sepia"
 menu_scale = "1x"     # size of the pop-up menu: "1x" (default) or "2x"
 full_screen = false   # open borderless fullscreen at start (default false)
 maximized = false     # maximize with title bar and desktop taskbar (default false)
+monitor = "auto"      # host display: auto, primary, one-based number, or exact name
 window_scale = 1.0    # initial window width and height multiplier, 0.5-4.0
 status_bar = true     # show the status bar at start (default true)
 vsync = true          # synchronise desktop presentation to vblank (default true)
@@ -1145,6 +1148,35 @@ clears maximization; the last of `--full-screen`, `--maximized`, and
 `--windowed` wins. In a config that enables both `full_screen` and
 `maximized`, fullscreen takes precedence. Canvas changes leave a maximized
 window at its desktop size; restoring it resumes the normal canvas sizing.
+
+`monitor` chooses the host display for the main window. The launcher's
+*Host monitor* picker is in A/V & Emu, Display. It shows the connected
+displays with their names and resolutions; Run applies the choice and Save
+retains it. Monitor selection also applies when entering fullscreen later.
+
+```sh
+copperline --list-monitors
+copperline --monitor 2 --full-screen
+copperline --monitor "External display" --maximized
+```
+
+The default, `"auto"`, leaves placement to the host and enters fullscreen on
+the window's current monitor. `"primary"` selects the primary display when
+the host reports one. Numbers start at 1 and refer to `--list-monitors`;
+their ordering can change when displays are connected or disconnected.
+Names match exactly. `"name:primary"` or `"name:2"` selects a display literally
+named `primary` or `2`. The launcher saves unique names with this prefix,
+using numbers for unnamed displays or duplicate names. An unavailable
+display, ambiguous name or unreported primary display logs a warning and
+falls back to automatic placement without changing the saved preference.
+
+Windows, macOS and X11 can place normal and maximized windows on the selected
+display. On Wayland, the compositor controls ordinary window placement;
+Copperline can request fullscreen on a selected display, subject to the
+compositor's policy. Wayland does not report a primary monitor, so use a
+name or number there. Headless captures ignore monitor selection, and
+`--list-monitors` loads no ROM or machine configuration.
+
 Saved auto-launch configurations use these window preferences too. Changing
 `window_scale` by running a configuration from Debug applies the new size when
 returning to Play, leaving the inspector workspace at its current size.

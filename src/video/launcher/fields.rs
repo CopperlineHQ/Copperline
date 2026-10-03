@@ -622,6 +622,7 @@ pub enum LauncherField {
     Vsync,
     MenuScale,
     StartFullscreen,
+    HostMonitor,
     ShowStatusBar,
     FloppySounds,
     FloppyVolume,
@@ -1225,8 +1226,9 @@ pub(super) const VIDEO_ROWS: [Row; 10] = [
 ];
 
 // The host window and its furniture, as distinct from the picture inside it.
-pub(super) const DISPLAY_ROWS: [Row; 5] = [
+pub(super) const DISPLAY_ROWS: [Row; 6] = [
     row(F::StartFullscreen, "Start fullscreen", Cycle),
+    row(F::HostMonitor, "Host monitor", Cycle),
     row(F::ShowStatusBar, "Status bar", Cycle),
     row(F::PerfOverlay, "Perf overlay", Cycle),
     row(F::Vsync, "VSync", Cycle),

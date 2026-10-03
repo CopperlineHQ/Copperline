@@ -808,6 +808,9 @@ fn main() -> Result<()> {
     if cli.list_serial_ports {
         return list_serial_ports();
     }
+    if cli.list_monitors {
+        return video::window::print_monitors();
+    }
     if cli.list_audio_devices {
         return print_audio_output_devices();
     }
@@ -1420,6 +1423,7 @@ fn main() -> Result<()> {
         config::resolve_tint(cfg.tint),
         cfg.full_screen,
         cfg.maximized,
+        cfg.monitor.clone(),
         cfg.window_scale,
         !cfg.status_bar,
         cfg.emulation.warp_speed,
@@ -1600,6 +1604,7 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         // The config-screen placeholder is always a normal windowed UI.
         false,
         false,
+        config::HostMonitor::Auto,
         1.0,
         false,
         config::WarpSpeed::default(),
@@ -1640,6 +1645,7 @@ fn launcher_requested(cli: &CliArgs) -> bool {
         && cli.whdload.is_none()
         && cli.run.is_none()
         && cli.overrides.is_empty()
+        && !cli.list_monitors
         && !Path::new("copperline.toml").exists()
         && cli.screenshot_after.is_empty()
         && cli.expect_screenshot.is_empty()
@@ -1996,6 +2002,47 @@ mod tests {
             assert_eq!(cli.overrides.maximized, Some(false));
             assert_eq!(cli.overrides.full_screen, Some(flag == "--full-screen"));
         }
+    }
+
+    #[test]
+    fn host_monitor_cli_selects_without_opening_launcher() {
+        use config::HostMonitor;
+        for (selector, expected) in [
+            ("auto", HostMonitor::Auto),
+            ("primary", HostMonitor::Primary),
+            ("2", HostMonitor::Index(2)),
+            (
+                "External display",
+                HostMonitor::Name("External display".into()),
+            ),
+        ] {
+            let cli = parse(&["--monitor", selector, "--full-screen"]).unwrap();
+            assert_eq!(
+                cli.overrides
+                    .monitor
+                    .unwrap()
+                    .parse::<HostMonitor>()
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(cli.overrides.full_screen, Some(true));
+            assert!(!launcher_requested(
+                &parse(&["--monitor", selector]).unwrap()
+            ));
+        }
+        for args in [
+            vec!["--monitor"],
+            vec!["--monitor", "0"],
+            vec!["--monitor", "-1"],
+            vec!["--monitor", "--full-screen"],
+        ] {
+            assert!(parse(&args).is_err(), "accepted {args:?}");
+        }
+        let cli = parse(&["--monitor", "2", "--monitor", "auto"]).unwrap();
+        assert_eq!(cli.overrides.monitor.as_deref(), Some("auto"));
+        let cli = parse(&["--list-monitors"]).unwrap();
+        assert!(cli.list_monitors);
+        assert!(!launcher_requested(&cli));
     }
 
     #[test]

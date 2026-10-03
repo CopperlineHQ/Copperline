@@ -171,6 +171,14 @@ impl App {
         false
     }
 
+    /// Keep the saved Play size when Run moves the window to a chosen host
+    /// display, but do not later restore its position on the previous display.
+    pub(in crate::video::window) fn clear_saved_play_position(&mut self) {
+        if let Some(geometry) = &mut self.debug_play_geometry {
+            geometry.position = None;
+        }
+    }
+
     pub(in crate::video::window) fn ensure_debug_workspace(&mut self) {
         if !self.debug_layout_active || self.debugger_ui.is_some() {
             return;
@@ -486,4 +494,23 @@ pub(super) fn title_bar_visible(position: [i32; 2], monitor: [i32; 2], size: [u3
         && x + 160 <= left + i64::from(size[0])
         && y >= top
         && y + 64 <= top + i64::from(size[1])
+}
+
+#[cfg(test)]
+mod monitor_tests {
+    use super::*;
+
+    #[test]
+    fn changing_host_monitor_keeps_play_size_without_restoring_old_position() {
+        let mut app = crate::video::window::tests::test_app();
+        let size = PhysicalSize::new(716, 574);
+        app.debug_play_geometry = Some(PlayGeometry {
+            size,
+            position: Some(winit::dpi::PhysicalPosition::new(-1920, 100)),
+        });
+        app.clear_saved_play_position();
+        let geometry = app.debug_play_geometry.as_ref().unwrap();
+        assert_eq!(geometry.size, size);
+        assert_eq!(geometry.position, None);
+    }
 }

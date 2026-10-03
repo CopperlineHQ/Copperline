@@ -1,6 +1,33 @@
 use super::*;
 
 #[test]
+fn host_monitor_picker_preserves_saved_and_disconnected_choices() {
+    use crate::config::HostMonitor;
+    let raw = RawConfig::parse("[display]\nmonitor = \"2\"\n").unwrap();
+    let mut setup = MachineSetup::from_raw(&raw).unwrap();
+    setup.set_host_monitors(vec![(
+        HostMonitor::Name("External".into()),
+        "1: External (1920x1080)".into(),
+    )]);
+    assert_eq!(setup.to_raw().display.monitor.as_deref(), Some("2"));
+    setup.select_model(Some(MachineModel::A1200));
+    assert_eq!(setup.to_raw().display.monitor.as_deref(), Some("2"));
+    setup.cycle(F::HostMonitor, true);
+    assert_eq!(setup.value_label(F::HostMonitor), "Auto");
+    assert_eq!(setup.to_raw().display.monitor, None);
+    setup.cycle(F::HostMonitor, true);
+    assert_eq!(setup.value_label(F::HostMonitor), "Primary");
+    setup.cycle(F::HostMonitor, true);
+    assert_eq!(setup.value_label(F::HostMonitor), "1: External (1920x1080)");
+    let saved = setup.to_raw();
+    assert_eq!(saved.display.monitor.as_deref(), Some("name:External"));
+    let mut reloaded = MachineSetup::from_raw(&saved).unwrap();
+    assert_eq!(reloaded.to_raw().display.monitor, saved.display.monitor);
+    reloaded.cycle(F::HostMonitor, false);
+    assert_eq!(reloaded.value_label(F::HostMonitor), "Primary");
+}
+
+#[test]
 fn run_ahead_frames_survives_the_config_screen_round_trip() {
     let raw: RawConfig = toml::from_str("[emulation]\nrun_ahead_frames = 2\n").unwrap();
     let setup = MachineSetup::from_raw(&raw).unwrap();

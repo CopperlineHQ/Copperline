@@ -1018,6 +1018,20 @@ Hardware-dependent edits remain explicit. `launcher/setup_config.rs` handles
 loading and serialization, with `to_raw` delegating to machine, media, WHDLoad,
 presentation, I/O, audio and expansion sections.
 
+Host display selection lives in `config/monitor.rs` (`HostMonitor`) and
+`window/monitors.rs`. The latter resolves saved selectors against fresh winit
+monitor handles at window creation, launcher Run and fullscreen entry, so
+disconnected displays fall back to automatic placement. The launcher keeps
+its enumerated labels separately from serialized configuration and saves a
+unique name where possible. Window placement accounts for negative monitor
+origins and per-display DPI. When moving an existing window, centering uses
+its logical size scaled for the destination display, accounting for the
+resize caused by the DPI change. macOS uses logical desktop coordinates
+when moving between displays. Fullscreen passes the selected handle
+to winit's borderless mode. Ordinary positioning is unavailable on Wayland.
+Monitor preferences and inventories are host presentation state: they do not
+enter save states or change headless capture geometry or emulation timing.
+
 ### CRT shader pass (`window/crt_shader.rs`)
 
 The optional tube emulation (`[display] shader`, off by default) is a second

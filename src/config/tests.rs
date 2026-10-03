@@ -8,6 +8,66 @@ fn parse_config(text: &str) -> Result<Config> {
     raw.try_into()
 }
 
+#[test]
+fn host_monitor_selectors_validate_and_round_trip() -> Result<()> {
+    assert_eq!(Config::default().monitor, HostMonitor::Auto);
+    for (text, expected) in [
+        ("auto", HostMonitor::Auto),
+        ("PRIMARY", HostMonitor::Primary),
+        ("2", HostMonitor::Index(2)),
+        (
+            "External display",
+            HostMonitor::Name("External display".into()),
+        ),
+        ("name:primary", HostMonitor::Name("primary".into())),
+        ("name:2", HostMonitor::Name("2".into())),
+    ] {
+        let parsed: HostMonitor = text.parse()?;
+        assert_eq!(parsed, expected);
+        assert_eq!(parsed.to_string().parse::<HostMonitor>()?, expected);
+        let cfg = parse_config(&format!("[display]\nmonitor = {text:?}\n"))?;
+        assert_eq!(cfg.monitor, expected);
+    }
+    for text in [
+        "",
+        " ",
+        "0",
+        "-1",
+        "name:",
+        "999999999999999999999999999999",
+    ] {
+        assert!(text.parse::<HostMonitor>().is_err(), "accepted {text:?}");
+        assert!(parse_config(&format!("[display]\nmonitor = {text:?}\n")).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn host_monitor_override_replaces_config_and_can_restore_auto() -> Result<()> {
+    let mut raw = RawConfig::parse("[display]\nmonitor = \"primary\"\n")?;
+    let overrides = ConfigOverrides {
+        monitor: Some("2".into()),
+        ..Default::default()
+    };
+    assert!(!overrides.is_empty());
+    overrides.apply_to(&mut raw);
+    assert_eq!(
+        Config::try_from(raw.clone())?.monitor,
+        HostMonitor::Index(2)
+    );
+    assert_eq!(
+        Config::try_from(RawConfig::parse(&raw.to_toml_string()?)?)?.monitor,
+        HostMonitor::Index(2)
+    );
+    ConfigOverrides {
+        monitor: Some("auto".into()),
+        ..Default::default()
+    }
+    .apply_to(&mut raw);
+    assert_eq!(Config::try_from(raw)?.monitor, HostMonitor::Auto);
+    Ok(())
+}
+
 /// The player startup layers its settings file over the manifest's
 /// defaults: what the overlay carries wins, what it omits keeps the
 /// base, so a partial or hand-edited file still behaves.

@@ -763,6 +763,11 @@ video = "PAL"
 # --full-screen / --windowed, and Cmd/Alt+F toggles it live).
 # maximized: open a bordered, maximized window with the desktop taskbar
 # visible (default false; also --maximized). full_screen takes precedence.
+# monitor: host display, "auto" (default), "primary", a one-based number
+# from --list-monitors (e.g. "2"), or an exact display name. Prefix a name
+# with "name:" if it resembles a number or keyword. Also --monitor.
+# Missing/ambiguous displays fall back to auto. Wayland controls ordinary
+# window placement; only fullscreen can request a particular display.
 # window_scale: multiply the initial window width and height by 0.5-4.0
 # (default 1.0; also --window-scale). 2 opens at twice the normal size.
 # status_bar: show the status bar at start (default true; also
@@ -797,6 +802,7 @@ video = "PAL"
 # menu_scale = "1x"
 # full_screen = false
 # maximized = false
+# monitor = "auto"
 # window_scale = 1.0
 # status_bar = true
 # vsync = true
