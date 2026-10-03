@@ -1351,6 +1351,7 @@ port2 = "joystick"        # same values except gamepad-mouse; default "cd32" on 
 joystick = "gamepad"      # "gamepad" (default) or "keyboard"
 mouse_sensitivity = 50    # host mouse speed 0-100 (50 default = 1:1)
 mouse_capture = "click"   # when to grab the mouse: click | auto | manual
+middle_click_release = false # middle click releases capture instead of reaching the guest
 autofire_hz = 0           # pulse a held fire button at this rate; 0 = off
 ```
 
@@ -1473,6 +1474,12 @@ decides when that grab is taken:
 an explicit release is never undone automatically. Opening a panel or tool
 window borrows the cursor and hands the capture back when the last one
 closes.
+
+Set `middle_click_release = true` to release capture with the middle mouse
+button. This is off by default, so middle click reaches the guest as usual.
+While captured, the release click is consumed and any held guest mouse
+buttons are released. An uncaptured middle click keeps its usual behavior.
+The launcher's *Input* tab has the same *Middle to release* toggle.
 
 Uncaptured, host cursor motion over the display still drives the emulated
 mouse in every mode; this setting only decides when the grab is taken, not

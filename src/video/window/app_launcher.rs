@@ -1553,6 +1553,8 @@ impl App {
         self.joystick_input_mode = cfg.joystick_input_mode;
         self.set_mouse_sensitivity(cfg.mouse_sensitivity);
         self.mouse_capture = cfg.mouse_capture;
+        self.middle_click_release = cfg.middle_click_release;
+        self.middle_click_release_held = false;
         self.autofire_hz = cfg.autofire_hz;
         self.run_ahead_frames = cfg
             .emulation

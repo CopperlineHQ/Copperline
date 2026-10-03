@@ -455,6 +455,9 @@ pub struct Config {
     /// historical click-the-display behaviour; `auto` grabs on focus, which
     /// suits a fullscreen session where no host cursor is wanted.
     pub mouse_capture: MouseCapture,
+    /// Release a captured host mouse with middle click (`[input]
+    /// middle_click_release`). Off by default, so middle click reaches the guest.
+    pub middle_click_release: bool,
     /// `[input] autofire_hz`: how fast a held fire button is pulsed, or 0 for
     /// off (the default). A host input convenience, not machine state -- the
     /// emulated port sees an ordinary button being pressed and released.
@@ -2749,6 +2752,7 @@ impl Default for Config {
             joystick_input_mode: JoystickInputMode::Gamepad,
             mouse_sensitivity: 50,
             mouse_capture: MouseCapture::Click,
+            middle_click_release: false,
             autofire_hz: 0,
             port_devices: [PortDevice::Mouse, PortDevice::Joystick],
             parallel_joysticks: [false; 2],

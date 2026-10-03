@@ -636,6 +636,7 @@ pub enum LauncherField {
     Joystick,
     MouseSensitivity,
     MouseCapture,
+    MiddleClickRelease,
     Port1Device,
     Port2Device,
 }
@@ -1360,12 +1361,13 @@ pub(super) const INTERNET_NETPLAY_ROWS: [Row; 12] = [
     row(F::NetplayCopySpectatorCode, "", RowKind::Action),
 ];
 
-pub(super) const INPUT_ROWS: [Row; 5] = [
+pub(super) const INPUT_ROWS: [Row; 6] = [
     row(F::Port1Device, "Port 1", Cycle),
     row(F::Port2Device, "Port 2", Cycle),
     row(F::Joystick, "Joystick input", Cycle),
     row(F::MouseSensitivity, "Mouse sensitivity", Cycle),
     row(F::MouseCapture, "Mouse capture", Cycle),
+    row(F::MiddleClickRelease, "Middle to release", Toggle),
 ];
 
 /// The rows shown on a tab, top to bottom. Most tabs are fixed and borrow their

@@ -345,6 +345,7 @@ impl MachineSetup {
             joystick_input_mode: cfg.joystick_input_mode,
             mouse_sensitivity: cfg.mouse_sensitivity,
             mouse_capture: cfg.mouse_capture,
+            middle_click_release: cfg.middle_click_release,
             port_devices: cfg.port_devices,
             zorro_boards: raw
                 .zorro
@@ -900,6 +901,9 @@ impl MachineSetup {
         }
         if self.mouse_capture != base.mouse_capture {
             raw.input.mouse_capture = Some(self.mouse_capture.label().to_string());
+        }
+        if self.middle_click_release != base.middle_click_release {
+            raw.input.middle_click_release = Some(self.middle_click_release);
         }
         // Per port against the profile baseline, so a CD32 keeps its pad
         // implicit and a stock machine emits no port keys at all.

@@ -578,6 +578,9 @@ pub(crate) struct RawInput {
     /// "manual".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) mouse_capture: Option<String>,
+    /// Release mouse capture with middle click; defaults to false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) middle_click_release: Option<bool>,
     /// Autofire rate in Hz for the fire button, or 0 (the default) for off.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) autofire_hz: Option<u8>,

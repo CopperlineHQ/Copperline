@@ -1426,6 +1426,7 @@ fn main() -> Result<()> {
         cfg.joystick_input_mode,
         cfg.mouse_sensitivity,
         cfg.mouse_capture,
+        cfg.middle_click_release,
         config::about_machine_lines(&cfg),
         raw_cfg,
         if cli.load_state.is_some() {
@@ -1609,6 +1610,7 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         // belongs to the machine, and run_machine installs the real setting
         // when one is started.
         config::MouseCapture::default(),
+        false,
         vec![config::ABOUT_PLACEHOLDER_LINE.to_string()],
         raw_cfg,
         None,

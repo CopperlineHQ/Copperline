@@ -5,6 +5,36 @@
 use super::*;
 
 impl App {
+    /// Consume a middle-button capture-release gesture before UI or guest
+    /// dispatch. The matching lift belongs to the same host action, even if
+    /// the mouse has been captured again in the meantime.
+    pub(super) fn handle_middle_click_release(
+        &mut self,
+        button: MouseButton,
+        state: ElementState,
+    ) -> bool {
+        if button != MouseButton::Middle {
+            return false;
+        }
+        if self.middle_click_release_held {
+            if state == ElementState::Released {
+                self.middle_click_release_held = false;
+            }
+            return true;
+        }
+        if !self.middle_click_release || !self.mouse_captured || state != ElementState::Pressed {
+            return false;
+        }
+        self.middle_click_release_held = true;
+        self.capture_suspended_by_ui = false;
+        if self.debug_layout_active {
+            self.release_debug_guest_input();
+        } else {
+            self.set_mouse_captured(false);
+        }
+        true
+    }
+
     pub(super) fn toggle_mouse_capture(&mut self) {
         if !self.mouse_captured && self.mouse_port().is_none() {
             self.show_osd("No mouse on either port".to_string());
@@ -148,13 +178,13 @@ impl App {
         if self.mouse_captured == captured {
             return;
         }
-        let Some(window) = self.render.as_ref().map(|r| r.window.clone()) else {
-            return;
-        };
         self.volume_dragging = false;
         self.analyzer_dragging = false;
 
         if captured {
+            let Some(window) = self.render.as_ref().map(|r| r.window.clone()) else {
+                return;
+            };
             match window
                 .set_cursor_grab(CursorGrabMode::Locked)
                 .or_else(|locked_err| {
@@ -181,20 +211,24 @@ impl App {
                 }
             }
         } else {
-            if let Err(e) = window.set_cursor_grab(CursorGrabMode::None) {
-                warn!("mouse release failed: {e}");
-            }
+            // Release guest input even without a render window (for example
+            // while the presentation surface is being replaced).
             self.mouse_captured = false;
             self.cursor_pos = None;
             self.last_display_cursor_pos = None;
             self.mouse_delta_remainder = (0.0, 0.0);
             self.release_mouse_buttons();
-            window.set_cursor_visible(true);
-            window.set_title(if self.debug_layout_active {
-                "Copperline · Debug"
-            } else {
-                window_title()
-            });
+            if let Some(r) = self.render.as_ref() {
+                if let Err(e) = r.window.set_cursor_grab(CursorGrabMode::None) {
+                    warn!("mouse release failed: {e}");
+                }
+                r.window.set_cursor_visible(true);
+                r.window.set_title(if self.debug_layout_active {
+                    "Copperline · Debug"
+                } else {
+                    window_title()
+                });
+            }
             info!("mouse released");
         }
     }

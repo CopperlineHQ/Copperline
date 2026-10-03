@@ -884,6 +884,15 @@ fn mouse_capture_defaults_to_click_and_parses_its_modes() -> Result<()> {
 }
 
 #[test]
+fn middle_click_release_defaults_off_and_parses_a_boolean() -> Result<()> {
+    assert!(!parse_config("")?.middle_click_release);
+    assert!(!parse_config("[input]\nmiddle_click_release = false\n")?.middle_click_release);
+    assert!(parse_config("[input]\nmiddle_click_release = true\n")?.middle_click_release);
+    assert!(parse_config("[input]\nmiddle_click_release = \"true\"\n").is_err());
+    Ok(())
+}
+
+#[test]
 fn mouse_capture_cli_override_sets_the_mode() -> Result<()> {
     let overrides = ConfigOverrides {
         mouse_capture: Some("auto".to_string()),

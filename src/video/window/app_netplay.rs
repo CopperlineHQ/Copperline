@@ -457,6 +457,7 @@ impl App {
             WindowEvent::Focused(focused) => {
                 self.main_window_focused = *focused;
                 if !focused {
+                    self.middle_click_release_held = false;
                     self.set_mouse_captured(false);
                     self.mouse_delta_remainder = (0.0, 0.0);
                     self.last_display_cursor_pos = None;
@@ -495,6 +496,9 @@ impl App {
                 true
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                if self.handle_middle_click_release(*button, *state) {
+                    return true;
+                }
                 if *state == ElementState::Pressed
                     && *button == MouseButton::Left
                     && !self.mouse_captured

@@ -929,6 +929,11 @@ floppy_sounds_volume = 100
 # to. Also --mouse-capture MODE and the launcher's Input tab.
 # mouse_capture = "click"
 
+# Release capture with middle click. Off by default, so middle click reaches
+# the guest. The release click is consumed while captured; uncaptured clicks
+# keep their usual behavior. Also the launcher's Input tab.
+# middle_click_release = false
+
 # Autofire: pulse a HELD fire button this many times per second (0 = off, the
 # default; up to 30). Live input only -- the gamepad and the keyboard mapping;
 # scripted --joy-after/--script input is never gated, so a replay reproduces

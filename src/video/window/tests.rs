@@ -1394,6 +1394,151 @@ fn hot_plug_drops_scripted_joy_ownership_so_the_new_device_sticks() {
 }
 
 #[test]
+fn middle_click_releases_capture_and_held_guest_buttons_in_every_mode() {
+    use winit::event::MouseButton;
+    for mode in [
+        crate::config::MouseCapture::Click,
+        crate::config::MouseCapture::Auto,
+        crate::config::MouseCapture::Manual,
+    ] {
+        let mut app = test_app();
+        app.mouse_capture = mode;
+        app.middle_click_release = true;
+        app.mouse_captured = true;
+        app.capture_suspended_by_ui = true;
+        for index in 0..3 {
+            app.emu.bus_mut().input.set_mouse_button(0, index, true);
+        }
+        assert!(app.handle_middle_click_release(MouseButton::Middle, ElementState::Pressed));
+        assert!(!app.mouse_captured);
+        assert!(!app.capture_suspended_by_ui);
+        let port = &app.emu.bus().input.ports[0];
+        assert!(!port.fire && !port.button2 && !port.button3);
+        assert!(app.handle_middle_click_release(MouseButton::Middle, ElementState::Released));
+        assert!(!app.middle_click_release_held);
+        // A fresh uncaptured click follows the ordinary input/capture path.
+        assert!(!app.handle_middle_click_release(MouseButton::Middle, ElementState::Pressed));
+    }
+}
+
+#[test]
+fn middle_click_reaches_normal_dispatch_by_default() {
+    use winit::event::MouseButton;
+    let mut app = test_app();
+    app.mouse_captured = true;
+    assert!(!app.middle_click_release);
+    assert!(!app.handle_middle_click_release(MouseButton::Middle, ElementState::Pressed));
+    assert!(!app.handle_middle_click_release(MouseButton::Middle, ElementState::Released));
+    assert!(app.mouse_captured);
+    app.middle_click_release = true;
+    assert!(!app.handle_middle_click_release(MouseButton::Left, ElementState::Pressed));
+    assert!(!app.handle_middle_click_release(MouseButton::Right, ElementState::Pressed));
+    assert!(app.mouse_captured);
+}
+
+#[test]
+fn middle_click_release_gui_control_toggles_the_saved_setting() {
+    use crate::video::launcher::LauncherField;
+    let mut app = test_app();
+    app.open_launcher();
+    let control = UiControl::LauncherToggle(LauncherField::MiddleClickRelease);
+    app.activate_ui_control(control);
+    assert!(
+        app.launcher_state()
+            .unwrap()
+            .setup
+            .build_config()
+            .unwrap()
+            .middle_click_release
+    );
+    app.activate_ui_control(control);
+    assert!(
+        !app.launcher_state()
+            .unwrap()
+            .setup
+            .build_config()
+            .unwrap()
+            .middle_click_release
+    );
+}
+
+#[test]
+fn middle_click_release_in_debug_returns_input_to_the_workspace() {
+    use winit::event::MouseButton;
+    let mut app = test_app();
+    app.middle_click_release = true;
+    app.debug_layout_active = true;
+    app.debug_guest_input = true;
+    app.mouse_captured = true;
+    app.handle_amiga_key_event(0x20, true);
+    assert!(app.handle_middle_click_release(MouseButton::Middle, ElementState::Pressed));
+    assert!(!app.mouse_captured);
+    assert!(!app.debug_guest_input);
+    assert!(!app.held_rawkeys[0x20]);
+}
+
+#[test]
+fn middle_click_release_in_netplay_clears_local_buttons_without_changing_the_bus(
+) -> anyhow::Result<()> {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| -> anyhow::Result<()> {
+            let mut app = test_app();
+            app.emu
+                .bus_mut()
+                .rtc
+                .set_seed(Some(crate::netplay::RTC_SEED), false);
+            app.emu.bus_mut().paula.serial = Box::new(crate::serial::NullSerialSink);
+            let mut cfg = crate::config::Config::try_from(crate::config::RawConfig::default())?;
+            cfg.serial.mode = crate::config::SerialMode::Off;
+            let options = crate::netplay::Options {
+                bind: "127.0.0.1:0".parse()?,
+                peers: vec!["127.0.0.1:19732".parse()?],
+                player: 0,
+                players: 2,
+                session: [7; 16],
+                input_delay: 0,
+                rollback_frames: 8,
+                spectators: 0,
+            };
+            let session = crate::netplay::Session::new(options, &mut app.emu, &cfg)?;
+            app.attach_netplay(session);
+            app.middle_click_release = true;
+            app.mouse_captured = true;
+            for index in 0..3 {
+                app.netplay_input.held.set_mouse_button(index, true);
+            }
+            let before = app.emu.netplay_snapshot()?;
+            assert!(app.handle_middle_click_release(
+                winit::event::MouseButton::Middle,
+                ElementState::Pressed,
+            ));
+            assert!(!app.mouse_captured);
+            assert_eq!(app.netplay_input.held.mouse_buttons, 0);
+            assert_eq!(app.emu.netplay_snapshot()?, before);
+            Ok(())
+        })?
+        .join()
+        .unwrap()
+}
+
+#[test]
+fn middle_click_release_is_installed_when_a_machine_is_started() {
+    for enabled in [true, false] {
+        let mut raw = crate::config::RawConfig::default();
+        raw.input.middle_click_release = Some(enabled);
+        let cfg = crate::config::Config::try_from(raw.clone()).expect("config");
+        let mut app = test_app();
+        app.middle_click_release = !enabled;
+        app.middle_click_release_held = true;
+        let emu = test_emulator(Box::new(NullSink), crate::config::CpuModel::M68000, &[]);
+        app.run_machine(emu, &cfg, raw);
+        assert_eq!(app.middle_click_release, enabled);
+        assert!(!app.middle_click_release_held);
+    }
+}
+
+#[test]
 fn mouse_capture_is_refused_with_no_mouse_on_either_port() {
     use crate::bus::PortDevice;
     let mut app = test_app();
@@ -1474,8 +1619,8 @@ fn a_tool_panel_hands_the_mouse_capture_back_when_it_closes() {
 
     app.close_tool_panel(ToolPanelKind::Debugger);
     assert!(
-        !app.capture_suspended_by_ui,
-        "and handed it back on the way out"
+        app.capture_suspended_by_ui,
+        "a windowless fixture cannot re-grab, so the loan remains outstanding"
     );
 }
 
@@ -1495,8 +1640,8 @@ fn the_capture_stays_suspended_while_another_panel_wants_the_cursor() {
 
     app.close_tool_panel(ToolPanelKind::FrameAnalyzer);
     assert!(
-        !app.capture_suspended_by_ui,
-        "the last panel out returns the capture"
+        app.capture_suspended_by_ui,
+        "the last panel permits a re-grab, but the fixture has no window"
     );
 }
 
@@ -1537,12 +1682,12 @@ fn a_capture_loan_outlives_a_panel_that_closed_while_unfocused() {
         "the loan survives a close that could not repay it"
     );
 
-    // The Focused(true) that follows is what actually repays it.
+    // Focus gain retries, but this fixture has no window to grab.
     app.main_window_focused = true;
     app.restore_mouse_capture_after_ui();
     assert!(
-        !app.capture_suspended_by_ui,
-        "and is discharged once the window can take the grab"
+        app.capture_suspended_by_ui,
+        "the loan is discharged only when a grab succeeds"
     );
 }
 
@@ -4609,6 +4754,7 @@ fn test_app_with_audio_cpu_and_program(
         crate::config::JoystickInputMode::Gamepad,
         50,
         crate::config::MouseCapture::Click,
+        false,
         vec!["Machine: test".to_string()],
         crate::config::RawConfig::default(),
         None,
@@ -4728,6 +4874,7 @@ fn test_app_with_copperhf_units(units: &[(usize, PathBuf)]) -> super::App {
         crate::config::JoystickInputMode::Gamepad,
         50,
         crate::config::MouseCapture::Click,
+        false,
         vec!["Machine: test".to_string()],
         raw,
         None,
