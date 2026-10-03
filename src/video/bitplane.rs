@@ -4282,12 +4282,16 @@ impl RenderInput {
 
     /// Finest programmed playfield/sprite pitch for an unfiltered capture.
     pub(crate) fn native_canvas_scale(&self) -> usize {
+        // ECS accepts SPRES=11 but keeps its 70 ns serializer; only Lisa
+        // emits 35 ns sprite samples (sprite_pixel_repeat_subpixels).
+        let sprite_shres = self.render_base.agnus_revision == AgnusRevision::AgaAlice
+            && (self.render_base.bplcon3 & BPLCON3_SPRES_MASK == BPLCON3_SPRES_SHRES
+                || self.frame_render_events.iter().any(|event| {
+                    event.offset & 0x01FE == 0x106
+                        && event.value & BPLCON3_SPRES_MASK == BPLCON3_SPRES_SHRES
+                }));
         if canvas_scale_for(true, self.render_base.bplcon0, &self.frame_render_events) == 2
-            || self.render_base.bplcon3 & BPLCON3_SPRES_MASK == BPLCON3_SPRES_SHRES
-            || self.frame_render_events.iter().any(|event| {
-                event.offset & 0x01FE == 0x106
-                    && event.value & BPLCON3_SPRES_MASK == BPLCON3_SPRES_SHRES
-            })
+            || sprite_shres
         {
             2
         } else {
@@ -4297,13 +4301,19 @@ impl RenderInput {
 
     pub(crate) fn native_horizontal_repeat(&self) -> usize {
         let hires = self.render_base.bplcon0 & 0x8000 != 0
-            || self.render_base.bplcon3 & BPLCON3_SPRES_MASK == BPLCON3_SPRES_HIRES
+            || matches!(
+                self.render_base.bplcon3 & BPLCON3_SPRES_MASK,
+                BPLCON3_SPRES_HIRES | BPLCON3_SPRES_SHRES
+            )
             || self
                 .frame_render_events
                 .iter()
                 .any(|event| match event.offset & 0x01FE {
                     0x100 => event.value & 0x8000 != 0,
-                    0x106 => event.value & BPLCON3_SPRES_MASK == BPLCON3_SPRES_HIRES,
+                    0x106 => matches!(
+                        event.value & BPLCON3_SPRES_MASK,
+                        BPLCON3_SPRES_HIRES | BPLCON3_SPRES_SHRES
+                    ),
                     _ => false,
                 });
         if self.native_canvas_scale() == 2 || hires {

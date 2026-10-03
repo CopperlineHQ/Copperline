@@ -1280,6 +1280,41 @@ fn native_screenshots_follow_playfield_resolution_without_tv_borders() {
 }
 
 #[test]
+fn native_screenshot_sprite_pitch_distinguishes_ecs_from_aga() {
+    use crate::chipset::agnus::AgnusRevision;
+    for (revision, width) in [
+        (AgnusRevision::Ecs8372Rev4, 640),
+        (AgnusRevision::Ecs8375, 640),
+        (AgnusRevision::AgaAlice, 1280),
+    ] {
+        let mut app = test_app();
+        let bus = app.emu.bus_mut();
+        bus.set_agnus_revision(revision);
+        for (offset, value) in [
+            (0x08E, 0x2C81),
+            (0x090, 0x2CC1),
+            (0x092, 0x0038),
+            (0x094, 0x00D0),
+            (0x100, 0x1201),
+            (0x106, 0x00C0),
+            (0x096, 0x8300),
+        ] {
+            bus.custom_write(offset, 2, value);
+        }
+        app.emu.step_video_frame().unwrap();
+        app.emu.step_video_frame().unwrap();
+        assert_eq!(app.emu.bus().frame_render_base().bplcon3 & 0xC0, 0xC0);
+        app.set_native_screenshots(true);
+        let image = app.capture_present_image();
+        assert_eq!(
+            (image.width, image.height),
+            (width, 256),
+            "revision {revision:?}"
+        );
+    }
+}
+
+#[test]
 fn choosing_a_window_closes_the_menu_behind_it() {
     let mut app = test_app();
     app.activate_bar_control(super::BarControl::Menu);
