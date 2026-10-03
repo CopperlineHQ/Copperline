@@ -12,6 +12,7 @@ use anyhow::{anyhow, bail, Result};
 use std::path::{Path, PathBuf};
 
 mod about;
+mod monitor;
 mod raw;
 mod resolve;
 #[cfg(test)]
@@ -19,6 +20,7 @@ mod tests;
 mod validate;
 
 pub use about::*;
+pub use monitor::HostMonitor;
 pub use raw::*;
 pub use resolve::*;
 pub use validate::*;
@@ -434,6 +436,8 @@ pub struct Config {
     /// Open a maximized, decorated window, retaining the desktop taskbar
     /// (`[display] maximized` / `--maximized`). Fullscreen takes precedence.
     pub maximized: bool,
+    /// Host monitor for window placement and fullscreen ([display] monitor).
+    pub monitor: HostMonitor,
     /// Show the status bar at start (`[display] status_bar`, or
     /// `--show-status-bar` / `--hide-status-bar`). `Cmd+Shift+F` /
     /// `Alt+Shift+F` toggles it live.
@@ -2745,6 +2749,7 @@ impl Default for Config {
             window_scale: 1.0,
             full_screen: false,
             maximized: false,
+            monitor: HostMonitor::Auto,
             status_bar: true,
             joystick_input_mode: JoystickInputMode::Gamepad,
             mouse_sensitivity: 50,
@@ -3052,6 +3057,8 @@ pub struct ConfigOverrides {
     pub full_screen: Option<bool>,
     /// Start maximized with window decorations (`--maximized`).
     pub maximized: Option<bool>,
+    /// Host display selector (--monitor).
+    pub monitor: Option<String>,
     /// Initial window size multiplier (`--window-scale`). Same as
     /// `[display] window_scale`.
     pub window_scale: Option<f64>,
@@ -3159,6 +3166,7 @@ impl ConfigOverrides {
             && self.hostsocket_interface.is_none()
             && self.full_screen.is_none()
             && self.maximized.is_none()
+            && self.monitor.is_none()
             && self.window_scale.is_none()
             && self.status_bar.is_none()
             && self.perf_overlay.is_none()
@@ -3442,6 +3450,9 @@ impl ConfigOverrides {
         }
         if let Some(full_screen) = self.full_screen {
             raw.display.full_screen = Some(full_screen);
+        }
+        if let Some(monitor) = &self.monitor {
+            raw.display.monitor = Some(monitor.clone());
         }
         if let Some(maximized) = self.maximized {
             raw.display.maximized = Some(maximized);

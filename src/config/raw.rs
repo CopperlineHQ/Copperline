@@ -394,6 +394,9 @@ pub(crate) struct RawDisplay {
     /// Open maximized with window decorations (default false).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) maximized: Option<bool>,
+    /// Host display: auto, primary, a one-based number, or an exact name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) monitor: Option<String>,
     /// Show the status bar at start (default true).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) status_bar: Option<bool>,

@@ -415,6 +415,14 @@ impl TryFrom<RawConfig> for Config {
         };
         let full_screen = raw.display.full_screen.unwrap_or(defaults.full_screen);
         let maximized = raw.display.maximized.unwrap_or(defaults.maximized);
+        let monitor = raw
+            .display
+            .monitor
+            .as_deref()
+            .map(str::parse::<HostMonitor>)
+            .transpose()
+            .context("[display] monitor")?
+            .unwrap_or_default();
         let window_scale = raw.display.window_scale.unwrap_or(defaults.window_scale);
         if !(0.5..=4.0).contains(&window_scale) {
             errors.push(anyhow!(
@@ -1468,6 +1476,7 @@ impl TryFrom<RawConfig> for Config {
             window_scale,
             full_screen,
             maximized,
+            monitor,
             status_bar,
             joystick_input_mode,
             mouse_sensitivity,

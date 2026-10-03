@@ -202,6 +202,8 @@ pub struct CliArgs {
     pub list_serial_ports: bool,
     /// `--list-audio-devices`: print the host audio output devices and exit.
     pub list_audio_devices: bool,
+    /// --list-monitors: print host displays and exit before loading assets.
+    pub list_monitors: bool,
     /// `--list-net-interfaces`: print adapters usable for bridging and exit.
     pub list_net_interfaces: bool,
     pub list_disks: bool,
@@ -473,6 +475,7 @@ where
     let mut list_midi = false;
     let mut list_serial_ports = false;
     let mut list_audio_devices = false;
+    let mut list_monitors = false;
     let mut list_net_interfaces = false;
     let mut list_disks = false;
     // Only the hosts with a privileged half of their own ever fill this in;
@@ -494,6 +497,7 @@ where
             "--list-midi" => {
                 list_midi = true;
             }
+            "--list-monitors" => list_monitors = true,
             "--list-audio-devices" => {
                 list_audio_devices = true;
             }
@@ -673,6 +677,16 @@ where
             "--windowed" => {
                 overrides.full_screen = Some(false);
                 overrides.maximized = Some(false);
+            }
+            "--monitor" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--monitor requires a selector"))?;
+                if value.starts_with("--") {
+                    bail!("--monitor requires a selector before {value}");
+                }
+                let monitor: copperline::config::HostMonitor = value.parse()?;
+                overrides.monitor = Some(monitor.to_string());
             }
             "--maximized" => {
                 overrides.full_screen = Some(false);
@@ -1881,6 +1895,7 @@ where
         list_midi,
         list_serial_ports,
         list_audio_devices,
+        list_monitors,
         list_net_interfaces,
         list_disks,
         host_disk_broker,
@@ -2151,6 +2166,8 @@ fn print_help() {
          \x20                            combine with COPPERLINE_AUDIO_PROFILE=1 for counters\n  \
          --full-screen / --windowed     open borderless fullscreen / windowed at start\n  \
          --maximized                   open a bordered, maximized window with taskbar visible\n  \
+         --monitor SELECTOR            host monitor: auto, primary, 1-based number, or name\n  \
+         --list-monitors               list host monitors and exit\n  \
          --window-scale SCALE          initial window size multiplier: 0.5-4.0 (default: 1)\n  \
          --show-status-bar / --hide-status-bar  status bar at start (default: shown)\n  \
          --perf-overlay                 show the performance overlay at start\n  \

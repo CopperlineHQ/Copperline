@@ -1487,6 +1487,7 @@ pub struct App {
     /// after that.
     start_fullscreen: bool,
     start_maximized: bool,
+    host_monitor: crate::config::HostMonitor,
     /// Host USB gamepad reader (pure-Rust, no SDL2), mapped to the emulated
     /// port-2 digital joystick via a per-pad calibration. A no-op when no
     /// input backend is available (e.g. headless CI) or the pad is not yet
@@ -2665,6 +2666,7 @@ impl App {
         tint: crate::config::Tint,
         start_fullscreen: bool,
         start_maximized: bool,
+        host_monitor: crate::config::HostMonitor,
         window_scale: f64,
         hide_status_bar: bool,
         warp_speed: WarpSpeed,
@@ -2908,6 +2910,7 @@ impl App {
             tint_lut: tint_lut(tint),
             start_fullscreen,
             start_maximized,
+            host_monitor,
             gamepad: crate::gamepad::GamepadReader::new(),
             gamepad_available: [false; 4],
             gamepad_quit_hold: None,
@@ -4441,9 +4444,15 @@ impl ApplicationHandler for App {
             || self.pending_frame_dump.is_some();
         // Start fullscreen only for an interactive window ([display] full_screen
         // / --full-screen); a headless capture window stays hidden and windowed.
-        let fullscreen =
-            (self.start_fullscreen && !headless_capture).then(|| Fullscreen::Borderless(None));
-        let attrs = WindowAttributes::default()
+        let monitors: Vec<_> = event_loop.available_monitors().collect();
+        let selected_monitor = if headless_capture {
+            None
+        } else {
+            monitors::resolve(&self.host_monitor, &monitors, event_loop.primary_monitor())
+        };
+        let fullscreen = (self.start_fullscreen && !headless_capture)
+            .then(|| Fullscreen::Borderless(selected_monitor.clone()));
+        let mut attrs = WindowAttributes::default()
             .with_title(window_title())
             .with_window_icon(copperline_window_icon())
             .with_visible(!headless_capture)
@@ -4454,6 +4463,9 @@ impl ApplicationHandler for App {
                 FB_WIDTH as f64 / 2.0,
                 window_present_height() as f64 / 2.0,
             ));
+        if let Some(monitor) = &selected_monitor {
+            attrs = attrs.with_position(monitors::initial_position(monitor, size));
+        }
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -4462,6 +4474,9 @@ impl ApplicationHandler for App {
                 return;
             }
         };
+        if selected_monitor.is_some() && !self.start_fullscreen {
+            monitors::windowed_placement_supported(&window);
+        }
         // winit's with_window_icon above does nothing for the macOS dock; set
         // the application icon explicitly now that NSApplication exists.
         #[cfg(target_os = "macos")]
@@ -4562,6 +4577,7 @@ impl ApplicationHandler for App {
             minimized: false,
             surface_size: (inner.width.max(1), inner.height.max(1)),
         });
+        self.refresh_launcher_monitors();
         // The first resize is the platform's response to our initial size,
         // including any clamp to the available desktop area.
         self.snap_request_deadline = Some(Instant::now() + CANVAS_SNAP_RESPONSE_TIMEOUT);
@@ -7051,6 +7067,9 @@ impl App {
                 }
             }
             UiControl::LauncherCycle { field, forward } => {
+                if field == LauncherField::HostMonitor {
+                    self.refresh_launcher_monitors();
+                }
                 if let Some(state) = self.launcher_state_mut() {
                     // Reaching for another control ends the typing, the way
                     // Enter does: what is in the box counts. A value the
@@ -7637,9 +7656,11 @@ mod egui_debugger;
 mod gdb;
 mod host_input;
 mod kbdpanel;
+mod monitors;
 #[cfg(feature = "mt32")]
 mod mt32panel;
 mod native_dialog;
+pub use monitors::print_monitors;
 mod present;
 mod presenter;
 mod rtg_texture;

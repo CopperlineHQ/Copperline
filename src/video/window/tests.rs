@@ -4603,6 +4603,7 @@ fn test_app_with_audio_cpu_and_program(
         crate::config::Tint::None,
         false,
         false,
+        crate::config::HostMonitor::Auto,
         1.0,
         false,
         crate::config::WarpSpeed::Max,
@@ -4722,6 +4723,7 @@ fn test_app_with_copperhf_units(units: &[(usize, PathBuf)]) -> super::App {
         crate::config::Tint::None,
         false,
         false,
+        crate::config::HostMonitor::Auto,
         1.0,
         false,
         crate::config::WarpSpeed::Max,
@@ -5358,7 +5360,7 @@ fn auto_launch_runs_only_when_the_config_asks() {
 }
 
 #[test]
-fn automatic_run_retains_window_modes_before_window_creation() {
+fn automatic_run_retains_window_modes_and_host_monitor_before_window_creation() {
     // Auto-launch replaces the placeholder before resumed creates a host
     // window. Both mode fields must describe that new configuration.
     for (fullscreen, maximized) in [(false, true), (true, false), (true, true), (false, false)] {
@@ -5366,6 +5368,7 @@ fn automatic_run_retains_window_modes_before_window_creation() {
         raw.display.full_screen = Some(fullscreen);
         raw.display.maximized = Some(maximized);
         raw.display.window_scale = Some(2.0);
+        raw.display.monitor = Some("2".into());
         let cfg = crate::config::Config::try_from(raw.clone()).expect("config");
         let mut app = test_app();
         app.run_honors_power_on = true;
@@ -5374,6 +5377,7 @@ fn automatic_run_retains_window_modes_before_window_creation() {
         assert!(app.render.is_none());
         assert_eq!(app.start_fullscreen, fullscreen);
         assert_eq!(app.start_maximized, maximized && !fullscreen);
+        assert_eq!(app.host_monitor, crate::config::HostMonitor::Index(2));
         assert_eq!(app.window_scale, 2.0);
     }
 }
