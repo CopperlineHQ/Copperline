@@ -888,9 +888,17 @@ The layout is:
   Kickstart from 1.2 onward can read with no guest-side setup). A setting
   that does not apply to the chosen machine is greyed and shows why in
   place of its control -- "needs 32-bit CPU" for Zorro III and accelerator
-  RAM, "needs 68020+" for the FPU, "needs A600/A1200/A4000 or Lide" for
-  IDE. On a 24-bit CPU the RTG card list simply leaves out the Zorro III
-  cards.
+  RAM, "needs 68020+" for the FPU. On a 24-bit CPU the RTG card list
+  simply leaves out the Zorro III cards. What a greyed row names is that
+  row's own enable condition; where the same thing can be had another way,
+  a clause after a semicolon says where rather than naming it as a second
+  condition the row would turn on for. So the IDE bays read
+  "needs A600/A1200/A4000; Lide has its own" -- they are the motherboard
+  channel alone, and a Lide board carries drives of its own on the *Lide*
+  sub-page -- and the CD rows read
+  "needs CDTV/CD32; on a bus, use a drive slot", `[cd] image` feeding the
+  built-in CDTV/CD32 drive alone while a CD-ROM on SCSI/IDE/Lide is a
+  drive slot holding a CD image.
 - **Boot Priority sub-page** (from *Storage*). One row per hard-disk drive,
   under **Drive** / **Priority** / **Status** columns, setting the `de_BootPri`
   written into the partition Copperline synthesizes in front of a bare hardfile

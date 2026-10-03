@@ -1401,7 +1401,15 @@ impl MachineSetup {
                     },
                 )
             }
-            F::IdeMaster | F::IdeSlave => reason(self.has_ide(), "needs A600/A1200/A4000 or Lide"),
+            // These two bays are the *motherboard's* IDE channel, so the
+            // machine is the whole enable condition. A Lide board carries
+            // drives of its own, in its own fields on its own page -- a
+            // pointer to where those live, not a second way to enable these:
+            // naming it in the condition read as one, and these rows never
+            // enable for a Lide board however it is configured.
+            F::IdeMaster | F::IdeSlave => {
+                reason(self.has_ide(), "needs A600/A1200/A4000; Lide has its own")
+            }
             // The ROM and drives belong to the fitted controller, and with
             // none the rows are hidden outright (`row_hidden`), so only a
             // fitted-but-unsuitable controller is ever explained here: the
@@ -1416,8 +1424,14 @@ impl MachineSetup {
                 self.scsi_controller == Some(ScsiController::A2091),
                 "A2091 only",
             ),
+            // `[cd] image` feeds the machine's *built-in* drive and nothing
+            // else, so CDTV/CD32 is the whole enable condition. A CD-ROM on
+            // SCSI/IDE/Lide is a drive slot holding a CD image, which these
+            // rows never reach: listing those buses in the condition read as
+            // an enable condition they are not, so the clause after the
+            // semicolon points at where that is done instead.
             F::CdImage | F::CdInsertDelay => {
-                reason(self.has_cd(), "needs CDTV/CD32 (or SCSI/IDE/Lide)")
+                reason(self.has_cd(), "needs CDTV/CD32; on a bus, use a drive slot")
             }
             F::Cd32Nvram => reason(self.model == Some(MachineModel::Cd32), "CD32 only"),
             F::FmvRom => reason(self.model == Some(MachineModel::Cd32), "CD32 only"),

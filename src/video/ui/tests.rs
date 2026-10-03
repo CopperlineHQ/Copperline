@@ -426,6 +426,89 @@ fn every_launcher_tab_row_fits_inside_the_panel() {
     }
 }
 
+/// A greyed row that explains itself draws its reason as free text from the
+/// control column's left edge ([`GreyedAs::Reason`]), with no box to clip it
+/// and no truncation on the way out -- unlike the dimmed-value kinds, which
+/// pass theirs through `truncate_to_width`. So the string itself is the
+/// limit: one too long for the column runs off the panel's right edge.
+/// Writing one fails here rather than in a screenshot.
+#[test]
+fn every_greyed_reason_fits_the_column() {
+    let rect = panel_rect(&Panel::Launcher(Box::new(LauncherState::new(
+        launcher::MachineSetup::default(),
+    ))));
+    // Where the text starts, and the margin it must stop short of.
+    let room = (rect.x + rect.w - LAUNCH_MARGIN) - launcher_control_x(rect);
+    // Every model, so the rows each machine greys are all walked: a
+    // machine without IDE, a machine without a CD drive, and the CPU every
+    // profile brings with it (greying the FPU/cache/Zorro III rows the
+    // 68000 profiles cannot have). On each, the whole SCSI controller
+    // cycle too -- the boot-ROM rows are hidden outright while there is no
+    // controller, so a fitted-but-unsuitable one is the only state that
+    // puts their reasons on a page to be measured ("Zorro boards only" for
+    // the A3000's motherboard SCSI, "A2091 only" for the split-EPROM row).
+    for (model, controller_steps) in launcher::MODELS
+        .into_iter()
+        .flat_map(|m| (0..4).map(move |c| (m, c)))
+    {
+        let mut setup = launcher::MachineSetup::default();
+        setup.select_model(Some(model));
+        for _ in 0..controller_steps {
+            setup.cycle(LauncherField::ScsiController, true);
+        }
+        // The strip tabs, plus the sub-pages reached from a nav row: the
+        // CD page is one of them, and its rows are among the few that
+        // explain themselves this way.
+        let off_strip = [
+            LauncherTab::IoParallel,
+            LauncherTab::IoNetworking,
+            LauncherTab::IoAudio,
+            LauncherTab::Cd,
+            LauncherTab::HostFs,
+            LauncherTab::Whdload,
+            LauncherTab::Lide,
+            LauncherTab::Copperhf,
+            LauncherTab::Sf2000Sd,
+            LauncherTab::AvVideo,
+            LauncherTab::AvDisplay,
+            LauncherTab::AvEmulation,
+            LauncherTab::AvPaths,
+        ];
+        for &tab in launcher::TABS.iter().chain(off_strip.iter()) {
+            for r in launcher::rows(
+                tab,
+                crate::config::ParallelDevice::None,
+                crate::config::SerialMode::Off,
+                false,
+                false,
+            )
+            .iter()
+            {
+                // Only what the page actually draws: the draw path filters
+                // the row list the same way, so a row this machine leaves
+                // off has no reason on screen to overflow anything. Holding
+                // a hidden row's text to the column's width would fail a
+                // wording that cannot be seen.
+                if !setup.row_on_page(tab, r.field) {
+                    continue;
+                }
+                let Some(reason) = setup.disabled_reason(r.field) else {
+                    continue;
+                };
+                if greyed_presentation(r, &setup) != GreyedAs::Reason {
+                    continue;
+                }
+                let width = font::text_width(reason, 1);
+                assert!(
+                    width <= room,
+                    "{model:?} (+{controller_steps} scsi) {tab:?} {:?}: reason {reason:?} is {width} wide, past the {room} the column has",
+                    r.label
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn frame_analyzer_controls_hit_test() {
     let ui = UiState {
