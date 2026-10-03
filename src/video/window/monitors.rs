@@ -95,8 +95,12 @@ pub(super) fn choices(monitors: &[MonitorHandle]) -> Vec<(HostMonitor, String)> 
 fn centered_position(
     origin: PhysicalPosition<i32>,
     monitor: PhysicalSize<u32>,
-    window: PhysicalSize<u32>,
+    monitor_scale: f64,
+    window: LogicalSize<f64>,
 ) -> PhysicalPosition<i32> {
+    // A cross-monitor DPI change preserves the logical window size. Center
+    // using its physical size on the destination, before that resize arrives.
+    let window: PhysicalSize<u32> = window.to_physical(monitor_scale);
     let axis = |origin: i32, extent: u32, window: u32| {
         (i64::from(origin) + i64::from(extent.saturating_sub(window)) / 2)
             .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
@@ -123,7 +127,8 @@ pub(super) fn initial_position(monitor: &MonitorHandle, size: LogicalSize<f64>) 
         centered_position(
             monitor.position(),
             monitor.size(),
-            size.to_physical(monitor.scale_factor()),
+            monitor.scale_factor(),
+            size,
         )
         .into()
     }
@@ -181,7 +186,8 @@ pub(super) fn place_window(window: &Window, monitor: &MonitorHandle) {
     window.set_outer_position(centered_position(
         monitor.position(),
         monitor.size(),
-        window.outer_size(),
+        monitor.scale_factor(),
+        window.outer_size().to_logical(window.scale_factor()),
     ));
 }
 
@@ -281,7 +287,8 @@ mod tests {
             centered_position(
                 PhysicalPosition::new(-1920, -200),
                 PhysicalSize::new(1920, 1080),
-                PhysicalSize::new(800, 600)
+                1.0,
+                LogicalSize::new(800.0, 600.0)
             ),
             PhysicalPosition::new(-1360, 40)
         );
@@ -289,10 +296,41 @@ mod tests {
             centered_position(
                 PhysicalPosition::new(1920, 0),
                 PhysicalSize::new(1280, 720),
-                PhysicalSize::new(3000, 2000)
+                1.0,
+                LogicalSize::new(3000.0, 2000.0)
             ),
             PhysicalPosition::new(1920, 0)
         );
+    }
+
+    #[test]
+    fn physical_host_monitor_placement_uses_target_and_window_dpi_independently() {
+        // Moving from 2x to 1x shrinks this 1600x1200 physical window to
+        // 800x600. Its final bounds must be centered on the target display.
+        let position = centered_position(
+            PhysicalPosition::new(-2560, 0),
+            PhysicalSize::new(2560, 1440),
+            1.0,
+            PhysicalSize::new(1600, 1200).to_logical(2.0),
+        );
+        assert_eq!(position, PhysicalPosition::new(-1680, 420));
+
+        // The reverse move grows the window to 1600x1200 on the 2x target.
+        let position = centered_position(
+            PhysicalPosition::new(2560, -400),
+            PhysicalSize::new(3840, 2160),
+            2.0,
+            PhysicalSize::new(800, 600).to_logical(1.0),
+        );
+        assert_eq!(position, PhysicalPosition::new(3680, 80));
+
+        let position = centered_position(
+            PhysicalPosition::new(0, 0),
+            PhysicalSize::new(1920, 1080),
+            1.25,
+            PhysicalSize::new(1200, 900).to_logical(1.5),
+        );
+        assert_eq!(position, PhysicalPosition::new(460, 165));
     }
 
     #[test]
