@@ -17,6 +17,8 @@
 //! - **86** `write_log("DBG: %s")`: a debug line, echoed to the host
 //!   console like serial output and queued for control-protocol
 //!   subscribers.
+//!   The same log output also accepts WinUAE's write-only printf interface
+//!   at `$BFFF00` (arguments) / `$BFFF04` (format pointer).
 //! - **88** the template's `debug_cmd` multiplexer: resource registration
 //!   (bitmaps, palettes, copper lists) and idle markers are recorded for the
 //!   control protocol; overlay drawing is presented by the window. File
@@ -67,6 +69,8 @@ use cap_std::fs::Dir;
 
 use crate::memory::Memory;
 use crate::zorro_device::{dma_read_byte, dma_write_byte};
+
+pub(crate) mod debug_port;
 
 /// Where the trap lives: WinUAE's default rtarea (`$F00000`) + `0xFF60`.
 pub const UAELIB_BASE: u32 = 0x00F0_FF60;
@@ -373,6 +377,10 @@ impl IdleAccounting {
 pub struct UaeLib {
     /// Live copy of `IMAGE`; only the two latches ever change.
     image: [u8; 32],
+    /// WinUAE's memory-write printf interface. Arguments and partial
+    /// longword writes belong to the guest timeline, including rewind.
+    #[serde(default)]
+    debug_port: debug_port::DebugPort,
     /// The latest guest warp request not yet taken by the frontend (the
     /// last one wins within a frame).
     pending_warp: Option<bool>,
@@ -427,6 +435,7 @@ impl UaeLib {
     pub fn new() -> Self {
         Self {
             image: IMAGE,
+            debug_port: debug_port::DebugPort::default(),
             pending_warp: None,
             pending_exit: false,
             debug_events: VecDeque::new(),
@@ -456,6 +465,7 @@ impl UaeLib {
     /// a subscriber that saw the registrations can reconcile.
     pub fn reset(&mut self) {
         self.image = IMAGE;
+        self.debug_port = debug_port::DebugPort::default();
         self.pending_warp = None;
         self.pending_exit = false;
         self.clear_registry();
@@ -670,9 +680,32 @@ impl UaeLib {
             return (0, false);
         };
         let text = String::from_utf8_lossy(&bytes).into_owned();
+        self.emit_debug_log(text);
+        (1, false)
+    }
+
+    /// Separate standalone word arguments from the next instruction's stores.
+    pub(crate) fn begin_debug_port_instruction(&mut self) {
+        self.debug_port.begin_instruction();
+    }
+
+    /// Service the write-only WinUAE debug ports without reading guest I/O.
+    pub(crate) fn write_debug_port(
+        &mut self,
+        addr: u32,
+        size: usize,
+        value: u32,
+        mem: &Memory,
+        address_mask: u32,
+    ) {
+        if let Some(text) = self.debug_port.write(addr, size, value, mem, address_mask) {
+            self.emit_debug_log(text);
+        }
+    }
+
+    fn emit_debug_log(&mut self, text: String) {
         self.echo(&text);
         self.push_event(DebugEvent::Log(text));
-        (1, false)
     }
 
     /// The host console echo, in step with serial output. WinUAE prints
@@ -1233,6 +1266,48 @@ mod tests {
     fn put_str(mem: &mut Memory, addr: u32, s: &str) {
         put(mem, addr, s.as_bytes());
         put(mem, addr + s.len() as u32, &[0]);
+    }
+
+    #[test]
+    fn debug_port_logs_share_speculation_gating_and_reset_with_the_guest() {
+        let mut mem = memory();
+        put_str(&mut mem, 0x2000, "%ld");
+        let mut lib = UaeLib::new();
+        lib.mute_stdout();
+        lib.set_speculative_host_quiet(true);
+        lib.write_debug_port(debug_port::ARGUMENT, 4, 42, &mem, MASK24);
+        lib.write_debug_port(debug_port::FORMAT, 4, 0x2000, &mem, MASK24);
+        assert!(lib.take_console_lines().is_empty());
+        assert_eq!(
+            lib.take_debug_events().0,
+            vec![DebugEvent::Log("42".into())]
+        );
+        lib.set_speculative_host_quiet(false);
+        lib.write_debug_port(debug_port::ARGUMENT, 4, 99, &mem, MASK24);
+        lib.reset();
+        lib.write_debug_port(debug_port::FORMAT, 4, 0x2000, &mem, MASK24);
+        assert_eq!(lib.take_console_lines(), vec!["<missing>"]);
+    }
+
+    #[test]
+    fn debug_port_loads_old_uaelib_maps_with_an_empty_queue() {
+        let bytes = rmp_serde::to_vec_named(&UaeLib::new()).unwrap();
+        let mut value: rmpv::Value = rmpv::decode::read_value(&mut &bytes[..]).unwrap();
+        let rmpv::Value::Map(fields) = &mut value else {
+            panic!("uaelib map")
+        };
+        fields.retain(|(key, _)| key.as_str() != Some("debug_port"));
+        let mut bytes = Vec::new();
+        rmpv::encode::write_value(&mut bytes, &value).unwrap();
+        let mut lib: UaeLib = rmp_serde::from_slice(&bytes).unwrap();
+        lib.mute_stdout();
+        let mut mem = memory();
+        put_str(&mut mem, 0x2000, "old state");
+        lib.write_debug_port(debug_port::FORMAT, 4, 0x2000, &mem, MASK24);
+        assert_eq!(
+            lib.take_debug_events().0,
+            vec![DebugEvent::Log("old state".into())]
+        );
     }
 
     fn byte(mem: &Memory, addr: u32) -> u8 {

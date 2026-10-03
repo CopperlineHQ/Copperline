@@ -122,8 +122,9 @@ pacing_budget = "cycles"
 # WinUAE-compatible "uaelib" trap at $F0FF60 (enabled by default): allows guest
 # software to toggle warp speed, emit KPrintF debug logs to the host console and
 # control protocol, and register bitmaps/palettes/copper lists with the debugger
-# (see docs/guide/run.md). Set to false to leave $F0FF60 unmapped. On CDTV
-# configurations the extended ROM at $F00000 covers the trap.
+# (see docs/guide/run.md). Also enables WinUAE's printf-style writes at $BFFF00
+# (arguments) / $BFFF04 (format pointer). Set to false to disable the ports and
+# leave $F0FF60 unmapped. On CDTV the extended ROM covers only the trap.
 # uaelib = true
 
 # Permit uaelib debug_load/debug_save calls to read and write files below the

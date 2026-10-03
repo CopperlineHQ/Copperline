@@ -4636,6 +4636,19 @@ impl CpuBus {
             None => {}
         }
 
+        if self.bus.uaelib.is_some() && crate::uaelib::debug_port::decodes(addr) {
+            // Emulator service in the otherwise unused CIA page. It is
+            // write-only; ordinary reads and neighbouring addresses keep
+            // their hardware decode. Preserve the posted-write credits of
+            // the ordinary unmapped path (which splits into byte writes).
+            for _ in 0..size {
+                self.bus.credit_cpu_posted_void_write();
+            }
+            if let Some(uaelib) = self.bus.uaelib.as_mut() {
+                uaelib.write_debug_port(addr, size, value, &self.bus.mem, self.address_mask);
+            }
+            return;
+        }
         if range_contains(CIA_A_BASE, CIA_A_SIZE, addr) {
             self.bus.cpu_cia_access(Self::access_words(size));
             let effect = self
@@ -4997,6 +5010,9 @@ impl AddressBus for CpuBus {
 
     fn begin_instruction_fetches(&mut self) {
         self.instruction_fetches_cached = true;
+        if let Some(uaelib) = self.bus.uaelib.as_mut() {
+            uaelib.begin_debug_port_instruction();
+        }
     }
 
     fn instruction_fetches_were_cached(&self) -> bool {
@@ -8855,6 +8871,139 @@ mod tests {
         let off = region_offset(bus.mem.chip_ram.len(), CHIP_RAM_BASE, address, bytes.len())
             .expect("test chip address must fit chip RAM");
         bus.mem.chip_ram[off..off + bytes.len()].copy_from_slice(bytes);
+    }
+
+    /// Guest MOVE.Ls use paired words on a 68000/010 and native longs on
+    /// later CPUs. Exercise the real instruction path, including JIT slow I/O.
+    #[test]
+    fn winuae_debug_port_guest_writes_reach_the_shared_log() -> Result<()> {
+        let program = [
+            0x23FC, 0xFFFF, 0xFFD6, 0x00BF, 0xFF00, // move.l #-42,($BFFF00).l
+            0x23FC, 0xFFFF, 0xFFD6, 0x00BF, 0xFF00, // same value, second argument
+            0x23FC, 0x0000, 0x2000, 0x00BF, 0xFF04, // format pointer
+            0x60FE, // bra.s *
+        ];
+        for model in [
+            CpuModel::M68000,
+            CpuModel::M68010,
+            CpuModel::M68020,
+            CpuModel::M68030,
+            CpuModel::M68040,
+            CpuModel::M68060,
+        ] {
+            for jit in [false, true] {
+                let mut bus = test_bus_with_pc(0x00F8_0100);
+                let mut lib = crate::uaelib::UaeLib::new();
+                lib.mute_stdout();
+                bus.attach_uaelib(lib);
+                write_chip_bytes(&mut bus, 0x2000, b"value=%ld hex=%08lx\n\0");
+                write_program(&mut bus, 0x00F8_0100, &program);
+                let mut machine = build(bus, model, false, 2, Default::default(), jit)?;
+                machine.step_slice(4)?;
+                let lib = machine.bus.bus.uaelib.as_mut().unwrap();
+                assert_eq!(
+                    lib.take_debug_events(),
+                    (
+                        vec![crate::uaelib::DebugEvent::Log(
+                            "value=-42 hex=ffffffd6\n".into()
+                        )],
+                        0
+                    ),
+                    "{model:?}, jit={jit}"
+                );
+                assert_eq!(lib.take_console_lines(), vec!["value=-42 hex=ffffffd6"]);
+                let mut control_bus = test_bus_with_pc(0x00F8_0100);
+                write_chip_bytes(&mut control_bus, 0x2000, b"value=%ld hex=%08lx\n\0");
+                write_program(&mut control_bus, 0x00F8_0100, &program);
+                let mut control = build(control_bus, model, false, 2, Default::default(), jit)?;
+                control.step_slice(4)?;
+                assert_eq!(
+                    machine.bus.bus.emulated_cck(),
+                    control.bus.bus.emulated_cck(),
+                    "logging preserves timing: {model:?}, jit={jit}"
+                );
+                assert_eq!(
+                    machine.bus.read_long(crate::uaelib::debug_port::FORMAT),
+                    control.bus.read_long(crate::uaelib::debug_port::FORMAT),
+                    "reads keep their hardware decode: {model:?}, jit={jit}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// MOVEM.L with predecrement writes its low word first on a 68000/010.
+    /// A preceding word argument must remain separate from those two transfers.
+    #[test]
+    fn winuae_debug_port_guest_movem_writes_preserve_word_arguments() -> Result<()> {
+        let argument_program = [
+            0x70D6, // moveq #-42,d0
+            0x207C, 0x00BF, 0xFF04, // movea.l #$BFFF04,a0
+            0x33FC, 0x1234, 0x00BF, 0xFF00, // move.w #$1234,($BFFF00).l
+            0x48E0, 0x8000, // movem.l d0,-(a0): argument, low word first
+            0x23FC, 0x0000, 0x2000, 0x00BF, 0xFF04, // native format pointer
+            0x60FE,
+        ];
+        let format_program = [
+            0x33FC, 0x1234, 0x00BF, 0xFF00, // standalone word argument
+            0x23FC, 0xFFFF, 0xFFD6, 0x00BF, 0xFF00, // native long argument
+            0x203C, 0x0000, 0x2000, // move.l #$2000,d0
+            0x207C, 0x00BF, 0xFF08, // movea.l #$BFFF08,a0
+            0x48E0, 0x8000, // movem.l d0,-(a0): format pointer, low word first
+            0x60FE,
+        ];
+        let both_program = [
+            0x70D6, 0x207C, 0x00BF, 0xFF04, 0x33FC, 0x1234, 0x00BF, 0xFF00, 0x48E0, 0x8000, 0x203C,
+            0x0000, 0x2000, 0x207C, 0x00BF, 0xFF08, 0x48E0, 0x8000, 0x60FE,
+        ];
+        for (name, program, instructions) in [
+            ("argument", argument_program.as_slice(), 6),
+            ("format", format_program.as_slice(), 6),
+            ("both", both_program.as_slice(), 8),
+        ] {
+            for model in [
+                CpuModel::M68000,
+                CpuModel::M68010,
+                CpuModel::M68020,
+                CpuModel::M68030,
+                CpuModel::M68040,
+                CpuModel::M68060,
+            ] {
+                for jit in [false, true] {
+                    let mut bus = test_bus_with_pc(0x00F8_0100);
+                    let mut lib = crate::uaelib::UaeLib::new();
+                    lib.mute_stdout();
+                    bus.attach_uaelib(lib);
+                    write_chip_bytes(&mut bus, 0x2000, b"word=%u value=%ld\n\0");
+                    write_program(&mut bus, 0x00F8_0100, program);
+                    let mut machine = build(bus, model, false, 2, Default::default(), jit)?;
+                    machine.step_slice(instructions)?;
+                    let lib = machine.bus.bus.uaelib.as_mut().unwrap();
+                    assert_eq!(
+                        lib.take_debug_events(),
+                        (
+                            vec![crate::uaelib::DebugEvent::Log(
+                                "word=4660 value=-42\n".into()
+                            )],
+                            0
+                        ),
+                        "{name}: {model:?}, jit={jit}"
+                    );
+                    assert_eq!(lib.take_console_lines(), vec!["word=4660 value=-42"]);
+                    let mut control_bus = test_bus_with_pc(0x00F8_0100);
+                    write_chip_bytes(&mut control_bus, 0x2000, b"word=%u value=%ld\n\0");
+                    write_program(&mut control_bus, 0x00F8_0100, program);
+                    let mut control = build(control_bus, model, false, 2, Default::default(), jit)?;
+                    control.step_slice(instructions)?;
+                    assert_eq!(
+                        machine.bus.bus.emulated_cck(),
+                        control.bus.bus.emulated_cck(),
+                        "logging preserves timing: {name}, {model:?}, jit={jit}"
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     /// A 68000 rings the doorbell as two word writes, a 68030 as one long

@@ -1578,7 +1578,8 @@ pub struct Emulation {
     pub warp_until: Option<f64>,
     /// The WinUAE-compatible uaelib trap at $F0FF60 (`crate::uaelib`):
     /// guest programs toggle warp, log debug text and register resources
-    /// through it. On by default; `uaelib = false` leaves $F0FF60 floating.
+    /// through it. Also enables printf-style writes at $BFFF00/$BFFF04.
+    /// On by default; `uaelib = false` disables both interfaces.
     pub uaelib: bool,
     /// Permit uaelib function 88's `debug_load` / `debug_save` helpers to
     /// access files below the `--run` program directory. Off by default: the

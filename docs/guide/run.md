@@ -190,6 +190,64 @@ if (*(UWORD *)UaeConf == 0x4eb9 || *(UWORD *)UaeConf == 0xa00e) {
 - Guest-initiated warp mutes live audio; `warpmode(0)` releases the guest's hold, and `Cmd+W` / `Alt+W` ends every hold.
 - The return latch is shared: uaelib calls from interrupt handlers between a main-thread doorbell write and result read may overwrite D0.
 
+(winuae-debug-port)=
+### Memory-mapped debug output
+
+Copperline also accepts WinUAE's printf-style memory writes. Write each argument
+to `$BFFF00`, in order, then write a pointer to a NUL-terminated format string to
+`$BFFF04`. The format write prints one message and clears the argument queue.
+It uses the same `DBG:` output as `KPrintF`: the host terminal, debugger console,
+and control-protocol `debug` subscribers.
+
+```c
+volatile ULONG *debugArgument = (volatile ULONG *)0xbfff00;
+volatile ULONG *debugFormat = (volatile ULONG *)0xbfff04;
+static const char valueFormat[] = "value = %ld (0x%08lx)\n";
+
+*debugArgument = (ULONG)value;
+*debugArgument = (ULONG)value;
+*debugFormat = (ULONG)valueFormat;
+```
+
+The repeated value supplies two arguments, one for each conversion. Use
+`volatile` pointers so the compiler preserves all writes and their order.
+This interface needs no guest library or operating-system call, so it also
+works in code that has taken over the machine.
+
+| Conversion | Meaning |
+|---|---|
+| `%d`, `%i`, `%u` | Signed or unsigned 16-bit integer; `l` selects 32 bits (`%ld`, `%lu`). |
+| `%x`, `%X`, `%o` | Hexadecimal or octal 16-bit integer; `l` selects 32 bits. |
+| `%p` | 32-bit address as `$` followed by eight lowercase hex digits. |
+| `%c` | Low byte as a character. |
+| `%s` | Pointer to a NUL-terminated string. |
+| `%b` | Pointer to a length-prefixed Amiga BSTR (a byte address, not a BPTR). |
+| `%%` | Literal percent sign; consumes no argument. |
+
+Numeric widths, precision, and the `-`, `+`, space, `#`, and `0` flags are
+supported; `%08lx` prints a zero-padded longword. String widths and precision
+are supported too. Pointer width and `-` alignment add spaces around the full
+`$` prefix and eight hex digits; pointer precision does not shorten them.
+Floating point, `*` widths, `%n`, and WinUAE's custom
+`%[CYCLES]` conversion are unsupported; unsupported conversions remain literal.
+
+Argument writes can be bytes, words, or longwords. Format pointers must be
+longwords; paired word transfers within a 68000 or 68010 instruction are
+assembled automatically in either order, including predecrement `MOVEM.L`.
+Separate word-store instructions remain separate arguments. Up to 32 arguments
+and 4096 bytes of format/output are accepted.
+Extra arguments are ignored, missing ones print `<missing>`, and unreadable
+string arguments print `<invalid>`. An unreadable format pointer clears the
+queue without printing. Strings are read only from guest RAM or ROM, without
+accessing hardware registers.
+
+The ports are enabled by default with `[emulation] uaelib = true`; setting it
+to `false` disables them along with the trap. The ports also work on CDTV,
+where an extended ROM can cover the separate `$F0FF60` trap. Pending arguments
+are preserved in save states and rewind, and cleared by a machine reset.
+The queue is shared, so an interrupt handler must not interleave another
+message's writes.
+
 ## Kickstart compatibility
 
 Normal `--run` launches support bare Kickstart 1.3, later ROMs, and bundled

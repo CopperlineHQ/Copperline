@@ -790,8 +790,8 @@ pub struct Bus {
     pub ide_a4000: Option<crate::ide_a4000::IdeA4000>,
     /// WinUAE-compatible uaelib trap at $F0FF60 (`[emulation] uaelib`): a
     /// guest-callable warp toggle, debug log and resource registry
-    /// (`crate::uaelib`). None when disabled; a CDTV extended ROM at
-    /// $F00000 decodes ahead of it and hides it.
+    /// (`crate::uaelib`), plus the printf ports at $BFFF00/$BFFF04. None
+    /// when disabled; a CDTV extended ROM at $F00000 hides only the trap.
     #[serde(default)]
     pub uaelib: Option<crate::uaelib::UaeLib>,
     /// Freezer cartridge (`[cartridge] model`, `crate::cartridge`): the

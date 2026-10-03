@@ -333,7 +333,8 @@ queue has lost.
 - **`event.media`:** A floppy disk, CD image, or PCMCIA card was inserted or
   ejected (`kind`, `action`, and `drive` or `name` where they apply).
 - **`event.debug`:** Guest debug output through the
-  [uaelib trap](../guide/run.md#uaelib-trap): one notification per item, with
+  [uaelib trap](../guide/run.md#uaelib-trap) or
+  [memory-write debug ports](../guide/run.md#winuae-debug-port): one notification per item, with
   `kind` `log` (`text`, a `KPrintF` line, also echoed on the host console) or
   `resource` (`action` and the registered `resource`, as `debug.resources`
   reports it). `dropped_events` counts items the bounded queue lost before

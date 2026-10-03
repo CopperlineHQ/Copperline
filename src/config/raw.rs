@@ -1248,7 +1248,8 @@ pub(crate) struct RawEmulation {
     pub(crate) warp_until: Option<f64>,
     /// The WinUAE-compatible uaelib trap at $F0FF60 (default true): guest
     /// programs toggle warp, log debug text and register resources through
-    /// it. Set false for a machine with nothing at $F0FF60.
+    /// it. Also enables printf-style writes at $BFFF00/$BFFF04. Set false
+    /// to disable both the trap and debug ports.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) uaelib: Option<bool>,
     /// Allow the uaelib `debug_load` / `debug_save` commands to access files

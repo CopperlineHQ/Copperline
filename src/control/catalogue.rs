@@ -1480,7 +1480,7 @@ fn build() -> Vec<ToolDef> {
              for events_next / events_drain: `frame` (every `frame_interval` frames, \
              default 1, with an optional framebuffer digest), `serial` (Paula serial \
              output), `interrupt` (INTREQ/INTENA transitions), `media` (disk and CD \
-             changes), `debug` (guest uaelib log lines and resource registrations), \
+             changes), `debug` (guest uaelib/memory-write log lines and resource registrations), \
              `bus` (named hardware events such as blitter completion and Copper wake), \
              `mmio` (every CPU access to the `mmio` ranges, device registers included, with \
              size, value, direction, PC and emulated position; the ranges are required with \
