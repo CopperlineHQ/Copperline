@@ -1367,7 +1367,7 @@ pub(super) const INPUT_ROWS: [Row; 6] = [
     row(F::Joystick, "Joystick input", Cycle),
     row(F::MouseSensitivity, "Mouse sensitivity", Cycle),
     row(F::MouseCapture, "Mouse capture", Cycle),
-    row(F::MiddleClickRelease, "Middle to release", Toggle),
+    row(F::MiddleClickRelease, "Middle to release", Cycle),
 ];
 
 /// The rows shown on a tab, top to bottom. Most tabs are fixed and borrow their

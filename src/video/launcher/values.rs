@@ -920,9 +920,6 @@ impl MachineSetup {
 
     /// Flip a toggle field (no-op if the field is not a toggle).
     pub fn toggle(&mut self, field: LauncherField) {
-        if self.flip_boolean(field) {
-            return;
-        }
         match field {
             F::Df0WriteProtect | F::Df1WriteProtect | F::Df2WriteProtect | F::Df3WriteProtect
                 if Self::drive_protect_bay(field).is_some() =>

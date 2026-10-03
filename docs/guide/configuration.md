@@ -1479,7 +1479,7 @@ Set `middle_click_release = true` to release capture with the middle mouse
 button. This is off by default, so middle click reaches the guest as usual.
 While captured, the release click is consumed and any held guest mouse
 buttons are released. An uncaptured middle click keeps its usual behavior.
-The launcher's *Input* tab has the same *Middle to release* toggle.
+The launcher's *Input* tab has the same *Middle to release* setting.
 
 Uncaptured, host cursor motion over the display still drives the emulated
 mouse in every mode; this setting only decides when the grab is taken, not

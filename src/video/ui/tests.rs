@@ -314,6 +314,67 @@ fn the_rom_tab_draws_its_identification_line_under_the_path_row() {
     );
 }
 
+#[test]
+fn middle_click_release_has_cycle_controls_and_greys_out_without_a_mouse() {
+    use super::super::window::{texture_height, texture_width};
+
+    let field = LauncherField::MiddleClickRelease;
+    let mut state = LauncherState::new(launcher::MachineSetup::default());
+    state.tab = LauncherTab::Input;
+    let rect = panel_rect(&Panel::Launcher(Box::new(state.clone())));
+    let index = state
+        .rows()
+        .iter()
+        .position(|row| row.field == field)
+        .unwrap();
+    let y = launcher_row_y(rect, index);
+    let (prev, _, next) = launcher_cycle_rects(rect, y);
+    let controls = [(prev, false), (next, true)];
+    for (button, forward) in controls {
+        assert_eq!(
+            launcher_control_at(rect, &state, (button.x as i32 + 1, button.y as i32 + 1)),
+            Some(UiControl::LauncherCycle { field, forward })
+        );
+    }
+
+    // A saved Enabled value still becomes dimmed and inert without a mouse.
+    state.setup.cycle(field, true);
+    state.setup.cycle(LauncherField::Port1Device, false);
+    assert_eq!(state.setup.disabled_reason(field), Some("No mouse"));
+    for (button, _) in controls {
+        assert_eq!(
+            launcher_control_at(rect, &state, (button.x as i32 + 1, button.y as i32 + 1)),
+            None
+        );
+    }
+    let ui = UiState {
+        panel: Some(Panel::Launcher(Box::new(state))),
+        ..Default::default()
+    };
+    let (w, h) = (texture_width(1), texture_height(1));
+    let mut frame = vec![0u8; w * h * 4];
+    draw(&mut frame, 1, &ui, None, None);
+    let pixels = (y..y + LAUNCH_ROW_H).flat_map(|y| {
+        (launcher_control_x(rect)..rect.x + rect.w - LAUNCH_MARGIN).map(move |x| (y * w + x) * 4)
+    });
+    let mut dimmed_text = false;
+    for at in pixels {
+        let pixel = &frame[at..at + 4];
+        dimmed_text |= pixel == PANEL_TEXT_DIM.to_le_bytes();
+        assert_ne!(
+            pixel,
+            BUTTON_TEXT.to_le_bytes(),
+            "an active button is drawn"
+        );
+        assert_ne!(
+            pixel,
+            PANEL_TEXT_HILIGHT.to_le_bytes(),
+            "an active value is drawn"
+        );
+    }
+    assert!(dimmed_text, "the disabled reason is drawn in dimmed text");
+}
+
 /// The launcher panel is a fixed box with no row scrolling, so a tab's
 /// rows have to fit between the content top (below the nav row on pages
 /// that have one) and the status line at the bottom. Nothing may reach

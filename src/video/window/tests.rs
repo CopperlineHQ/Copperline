@@ -1441,8 +1441,10 @@ fn middle_click_release_gui_control_toggles_the_saved_setting() {
     use crate::video::launcher::LauncherField;
     let mut app = test_app();
     app.open_launcher();
-    let control = UiControl::LauncherToggle(LauncherField::MiddleClickRelease);
-    app.activate_ui_control(control);
+    app.activate_ui_control(UiControl::LauncherCycle {
+        field: LauncherField::MiddleClickRelease,
+        forward: true,
+    });
     assert!(
         app.launcher_state()
             .unwrap()
@@ -1451,7 +1453,10 @@ fn middle_click_release_gui_control_toggles_the_saved_setting() {
             .unwrap()
             .middle_click_release
     );
-    app.activate_ui_control(control);
+    app.activate_ui_control(UiControl::LauncherCycle {
+        field: LauncherField::MiddleClickRelease,
+        forward: false,
+    });
     assert!(
         !app.launcher_state()
             .unwrap()

@@ -2305,9 +2305,11 @@ fn middle_click_release_round_trips_through_the_gui_and_toml() {
     let field = LauncherField::MiddleClickRelease;
     let mut s = MachineSetup::default();
     assert!(!s.toggle_value(field));
+    assert_eq!(s.value_label(field), "Disabled");
     assert_eq!(s.to_raw().input.middle_click_release, None);
-    s.toggle(field);
+    s.cycle(field, true);
     assert!(s.toggle_value(field));
+    assert_eq!(s.value_label(field), "Enabled");
     let raw = s.to_raw();
     assert_eq!(raw.input.middle_click_release, Some(true));
     let toml = toml::to_string(&raw).expect("serialize");
@@ -2320,7 +2322,8 @@ fn middle_click_release_round_trips_through_the_gui_and_toml() {
             .expect("valid config")
             .middle_click_release
     );
-    reloaded.toggle(field);
+    reloaded.cycle(field, false);
+    assert_eq!(reloaded.value_label(field), "Disabled");
     assert!(
         !reloaded
             .build_config()
