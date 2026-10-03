@@ -962,6 +962,7 @@ pub struct MachineSetup {
     joystick_input_mode: JoystickInputMode,
     mouse_sensitivity: u8,
     mouse_capture: MouseCapture,
+    middle_click_release: bool,
     port_devices: [PortDevice; 2],
     // Extra Zorro boards (metadata path + plugin config schema/overrides)
     zorro_boards: Vec<ZorroBoardSetup>,
@@ -1211,6 +1212,7 @@ impl MachineSetup {
         self.joystick_input_mode = base.joystick_input_mode;
         self.mouse_sensitivity = base.mouse_sensitivity;
         self.mouse_capture = base.mouse_capture;
+        self.middle_click_release = base.middle_click_release;
         self.port_devices = base.port_devices;
         let profile_drives = connected_floppy_bays(&base.floppy_connected);
         self.floppy_drives = profile_drives.max(self.occupied_floppy_bays());
@@ -1560,8 +1562,8 @@ impl MachineSetup {
                     reason(self.audio_channel_mode != ChannelMode::Mono, "mono")
                 }
             }
-            // Neither mouse row does anything unless a port holds a mouse.
-            F::MouseSensitivity | F::MouseCapture => {
+            // Mouse preferences need a mouse on either port.
+            F::MouseSensitivity | F::MouseCapture | F::MiddleClickRelease => {
                 reason(self.port_devices.iter().any(|d| d.is_mouse()), "No mouse")
             }
             _ => None,

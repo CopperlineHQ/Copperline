@@ -1529,6 +1529,10 @@ pub struct App {
     /// click, automatically whenever the window holds the focus, or only on
     /// the Cmd/Alt+G shortcut.
     mouse_capture: crate::config::MouseCapture,
+    /// Middle click releases capture instead of reaching the guest.
+    middle_click_release: bool,
+    /// Consume the matching lift after a middle click released capture.
+    middle_click_release_held: bool,
     /// Whether the "press Cmd/Alt+G to release" hint has been shown for an
     /// automatic capture yet. Auto mode grabs on every focus gain, and a
     /// message on each one would be noise; the operator only needs telling
@@ -2673,6 +2677,7 @@ impl App {
         joystick_input_mode: JoystickInputMode,
         mouse_sensitivity: u8,
         mouse_capture: crate::config::MouseCapture,
+        middle_click_release: bool,
         about_machine_lines: Vec<String>,
         machine_config: RawConfig,
         runahead_machine_block: Option<&'static str>,
@@ -2925,6 +2930,8 @@ impl App {
             mouse_sensitivity,
             mouse_sensitivity_factor: mouse_sensitivity_factor(mouse_sensitivity),
             mouse_capture,
+            middle_click_release,
+            middle_click_release_held: false,
             auto_capture_hint_shown: false,
             warp_speed,
             rewind_budget_mb,
@@ -4622,6 +4629,11 @@ impl ApplicationHandler for App {
         {
             return;
         }
+        if let WindowEvent::MouseInput { state, button, .. } = &event {
+            if self.handle_middle_click_release(*button, *state) {
+                return;
+            }
+        }
         if self.route_debug_workspace_event(&event) {
             return;
         }
@@ -5055,6 +5067,7 @@ impl ApplicationHandler for App {
                 } else {
                     self.volume_dragging = false;
                     self.analyzer_dragging = false;
+                    self.middle_click_release_held = false;
                     self.set_mouse_captured(false);
                     // The button that was holding a keycap will lift over
                     // some other window, where no MouseInput reaches us.

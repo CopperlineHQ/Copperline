@@ -2328,6 +2328,44 @@ fn mouse_capture_round_trips_through_raw() {
 }
 
 #[test]
+fn middle_click_release_round_trips_through_the_gui_and_toml() {
+    let field = LauncherField::MiddleClickRelease;
+    let mut s = MachineSetup::default();
+    assert!(!s.toggle_value(field));
+    assert_eq!(s.value_label(field), "Disabled");
+    assert_eq!(s.to_raw().input.middle_click_release, None);
+    s.cycle(field, true);
+    assert!(s.toggle_value(field));
+    assert_eq!(s.value_label(field), "Enabled");
+    let raw = s.to_raw();
+    assert_eq!(raw.input.middle_click_release, Some(true));
+    let toml = toml::to_string(&raw).expect("serialize");
+    let loaded: RawConfig = toml::from_str(&toml).expect("parse");
+    let mut reloaded = MachineSetup::from_raw(&loaded).expect("valid config");
+    assert!(reloaded.toggle_value(field));
+    assert!(
+        reloaded
+            .build_config()
+            .expect("valid config")
+            .middle_click_release
+    );
+    reloaded.cycle(field, false);
+    assert_eq!(reloaded.value_label(field), "Disabled");
+    assert!(
+        !reloaded
+            .build_config()
+            .expect("valid config")
+            .middle_click_release
+    );
+    assert_eq!(reloaded.to_raw().input.middle_click_release, None);
+
+    s.port_devices = [PortDevice::Joystick, PortDevice::Joystick];
+    assert_eq!(s.disabled_reason(field), Some("No mouse"));
+    s.port_devices[1] = PortDevice::Mouse;
+    assert_eq!(s.disabled_reason(field), None);
+}
+
+#[test]
 fn mouse_capture_greys_out_without_a_mouse() {
     let mut s = MachineSetup::default();
     assert_eq!(s.disabled_reason(LauncherField::MouseCapture), None);

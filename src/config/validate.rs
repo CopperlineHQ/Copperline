@@ -446,6 +446,10 @@ impl TryFrom<RawConfig> for Config {
             None => defaults.mouse_capture,
             Some(s) => parse_mouse_capture(s)?,
         };
+        let middle_click_release = raw
+            .input
+            .middle_click_release
+            .unwrap_or(defaults.middle_click_release);
         // An implausibly fast autofire is a typo, not a preference: at more
         // than ~30 Hz the pulse is shorter than the frame the guest samples
         // it on, so the button would read as noise or as never pressed.
@@ -1481,6 +1485,7 @@ impl TryFrom<RawConfig> for Config {
             joystick_input_mode,
             mouse_sensitivity,
             mouse_capture,
+            middle_click_release,
             autofire_hz,
             port_devices,
             parallel_joysticks,

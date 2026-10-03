@@ -168,6 +168,7 @@ fn main() -> Result<()> {
         cfg.joystick_input_mode,
         cfg.mouse_sensitivity,
         cfg.mouse_capture,
+        cfg.middle_click_release,
         config::about_machine_lines(&cfg),
         raw_for_app,
         cfg.runahead_machine_block_reason(),

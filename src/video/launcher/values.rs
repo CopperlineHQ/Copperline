@@ -41,6 +41,7 @@ boolean_settings! {
     Deinterlace => deinterlace,
     PerfOverlay => perf_overlay,
     Vsync => vsync,
+    MiddleClickRelease => middle_click_release,
     Mt32Panel => mt32_panel,
     #[cfg(feature = "midi")]
     SerialTelnet => serial_telnet,

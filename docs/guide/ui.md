@@ -812,7 +812,8 @@ The layout is:
     - **Create Image...**: makes new ADF and HDF images (see
       [below](#create-image)).
   - *Input*: the controller device in each game port, the joystick input
-    source, the mouse sensitivity, and when the host mouse is captured (see
+    source, the mouse sensitivity, when the host mouse is captured, and
+    whether middle click releases it (see
     [](#controller-ports)).
   - *Netplay*: rollback netplay over the internet or a direct IP
     connection -- players, seat, invitation or addresses, input delay,
@@ -1370,6 +1371,11 @@ focus and on entering fullscreen, so no host cursor is ever loose over
 the display, and `manual` grabs only on the shortcut, leaving display
 clicks to go straight to the Amiga. See
 [Mouse capture](configuration.md#mouse-capture).
+
+Enable *Middle to release* on the launcher's *Input* tab, or set
+`[input] middle_click_release = true`, to release capture with the middle
+mouse button. It defaults to off, so middle click reaches the guest.
+When enabled, the click that releases capture is consumed.
 
 A USB gamepad drives the emulated digital joystick on whichever port one is
 plugged into: directions through JOYxDAT, fire through /FIRx, and a second
