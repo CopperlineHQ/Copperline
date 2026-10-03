@@ -1598,6 +1598,7 @@ fn build() -> Vec<ToolDef> {
                         "uniqueItems": true,
                         "items": {"type": "string", "enum": ["blits", "overdraw", "sources"]}
                     })),
+                    ("native", boolean("Crop original field pixels at 1:1, or capture RTG at its native resolution; excludes overlays (default false)")),
                 ],
                 &[],
             ),

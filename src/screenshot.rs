@@ -7,6 +7,73 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
+/// Capture original chipset pixels, cropped to the renderer's active
+/// playfield envelope, or an RTG board's native scanout. Chipset output is
+/// one current field, without presentation scaling, weaving or phosphor.
+/// Returns `(pixels, height, width)`; available to core-only frontends too.
+pub fn render_native(bus: &crate::bus::Bus) -> (Vec<u32>, usize, usize) {
+    let mut fb = Vec::new();
+    if let Some((width, height)) = bus.rtg_frame(&mut fb) {
+        return (fb, height as usize, width as usize);
+    }
+    let input = crate::video::bitplane::RenderInput::from_bus(bus);
+    let canvas_scale = input.native_canvas_scale();
+    // A mixed-resolution frame uses its finest programmed pixel pitch.
+    let repeat = input.native_horizontal_repeat();
+    let width = crate::video::FB_WIDTH * canvas_scale;
+    let rows = input.geometry().visible_lines;
+    fb.resize(crate::video::MAX_CANVAS_PIXELS, 0);
+    let result = crate::video::bitplane::render_native_from_input(&input, &mut fb);
+    let rect = result
+        .content_rect
+        .map(|r| crate::video::bitplane::ContentRect {
+            x0: r.x0 * canvas_scale,
+            x1: r.x1 * canvas_scale,
+            ..r
+        });
+    crop_native(&fb, width, rows, rect, repeat)
+}
+
+/// Collapse only exact repeated samples. Copper effects or sprite edges
+/// at a finer pitch keep that detail rather than dropping or averaging it.
+fn crop_native(
+    fb: &[u32],
+    width: usize,
+    rows: usize,
+    rect: Option<crate::video::bitplane::ContentRect>,
+    repeat: usize,
+) -> (Vec<u32>, usize, usize) {
+    let rect = rect.unwrap_or(crate::video::bitplane::ContentRect {
+        x0: 0,
+        x1: width,
+        y0: 0,
+        y1: rows,
+    });
+    let crop_width = rect.x1 - rect.x0;
+    let repeat = if crop_width.is_multiple_of(repeat)
+        && (rect.y0..rect.y1).all(|y| {
+            fb[y * width + rect.x0..y * width + rect.x1]
+                .chunks_exact(repeat)
+                .all(|group| group.iter().all(|p| *p == group[0]))
+        }) {
+        repeat
+    } else {
+        1
+    };
+    let out_width = crop_width / repeat;
+    let out_rows = rect.y1 - rect.y0;
+    let mut out = Vec::with_capacity(out_width * out_rows);
+    for y in rect.y0..rect.y1 {
+        out.extend(
+            fb[y * width + rect.x0..y * width + rect.x1]
+                .iter()
+                .step_by(repeat)
+                .copied(),
+        );
+    }
+    (out, out_rows, out_width)
+}
+
 /// Encode `fb` (RGBA8 packed in memory order R,G,B,A per pixel, as
 /// produced by `video::bitplane::render`) into a PNG at `path`.
 pub fn save(path: &Path, fb: &[u32], width: u32, height: u32) -> Result<()> {
@@ -250,6 +317,34 @@ pub fn auto_filename() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_crop_keeps_black_content_and_exact_sample_colours() {
+        use crate::video::bitplane::ContentRect;
+        let black = 0xFF00_0000;
+        let red = 0xFF00_00FF;
+        let green = 0xFF00_FF00;
+        let mut fb = vec![black; 8 * 4];
+        fb[10..14].copy_from_slice(&[black, black, red, red]);
+        fb[18..22].copy_from_slice(&[green, green, black, black]);
+        let rect = ContentRect {
+            x0: 2,
+            x1: 6,
+            y0: 1,
+            y1: 3,
+        };
+        let (pixels, rows, width) = crop_native(&fb, 8, 4, Some(rect), 2);
+        assert_eq!((width, rows), (2, 2));
+        assert_eq!(pixels, [black, red, green, black]);
+        // One subpixel sprite or Copper edge must keep every source sample.
+        fb[11] = green;
+        let (pixels, rows, width) = crop_native(&fb, 8, 4, Some(rect), 2);
+        assert_eq!((width, rows), (4, 2));
+        assert_eq!(pixels, [black, green, red, red, green, green, black, black]);
+        // Hi-res stays hi-res even when the picture happens to contain pairs.
+        assert_eq!(crop_native(&fb, 8, 4, Some(rect), 1).2, 4);
+        assert_eq!(crop_native(&fb, 8, 4, None, 1), (fb, 4, 8));
+    }
 
     #[test]
     fn vertical_presentation_scale_preserves_source_pixel_values() {

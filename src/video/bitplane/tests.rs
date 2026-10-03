@@ -7619,6 +7619,40 @@ fn canvas_scale_doubles_only_for_programmable_shres_frames() {
 }
 
 #[test]
+fn native_screenshot_preserves_standard_shres_samples_and_presentation() {
+    let mut input = repeated_frame_test_input();
+    input.render_base = ocs_snapshot(0x2C81, 0x2CC1, 0x38, 0xD0);
+    input.render_base.bplcon0 = 0x1240;
+    input.render_base.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+    input.render_base.agnus_revision = AgnusRevision::AgaAlice;
+    input.render_base.palette.write_ocs(0, 0);
+    input.render_base.palette.write_ocs(1, 0xFFF);
+    input.current_render_base = input.render_base;
+    let mut row = input.captured_bitplane_rows[0].clone().unwrap();
+    row.words_per_row = 80;
+    row.planes[0] = vec![0xAAAA; 80];
+    input.captured_bitplane_rows = std::sync::Arc::new(vec![Some(row); FB_HEIGHT]);
+    let mut before = vec![0; crate::video::MAX_CANVAS_PIXELS];
+    let mut native = before.clone();
+    let mut after = before.clone();
+    render_from_input(&input, &mut before);
+    let result = render_native_from_input(&input, &mut native);
+    render_from_input(&input, &mut after);
+    assert_eq!(
+        before, after,
+        "native capture must not change later presentation"
+    );
+    let rect = result.content_rect.expect("active playfield");
+    assert_eq!(rect.x1 - rect.x0, 640);
+    let y = rect.y0 + 1;
+    let pixels = &native[y * FB_WIDTH * 2 + rect.x0 * 2..y * FB_WIDTH * 2 + rect.x1 * 2];
+    assert!(pixels.windows(2).any(|p| p[0] != p[1]));
+    assert!(pixels
+        .iter()
+        .all(|p| *p == rgb12_to_rgba8(0) || *p == rgb12_to_rgba8(0xFFF)));
+}
+
+#[test]
 fn aga_shres_playfield_output_keeps_four_plane_indices() {
     // Regression: the Debian/m68k amifb console (SHRES, 4 bitplanes,
     // FMODE=3) rendered index 14 (yellow) as index 10 (light green) and

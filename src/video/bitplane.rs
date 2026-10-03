@@ -4280,6 +4280,39 @@ impl RenderInput {
         )
     }
 
+    /// Finest programmed playfield/sprite pitch for an unfiltered capture.
+    pub(crate) fn native_canvas_scale(&self) -> usize {
+        if canvas_scale_for(true, self.render_base.bplcon0, &self.frame_render_events) == 2
+            || self.render_base.bplcon3 & BPLCON3_SPRES_MASK == BPLCON3_SPRES_SHRES
+            || self.frame_render_events.iter().any(|event| {
+                event.offset & 0x01FE == 0x106
+                    && event.value & BPLCON3_SPRES_MASK == BPLCON3_SPRES_SHRES
+            })
+        {
+            2
+        } else {
+            1
+        }
+    }
+
+    pub(crate) fn native_horizontal_repeat(&self) -> usize {
+        let hires = self.render_base.bplcon0 & 0x8000 != 0
+            || self.render_base.bplcon3 & BPLCON3_SPRES_MASK == BPLCON3_SPRES_HIRES
+            || self
+                .frame_render_events
+                .iter()
+                .any(|event| match event.offset & 0x01FE {
+                    0x100 => event.value & 0x8000 != 0,
+                    0x106 => event.value & BPLCON3_SPRES_MASK == BPLCON3_SPRES_HIRES,
+                    _ => false,
+                });
+        if self.native_canvas_scale() == 2 || hires {
+            1
+        } else {
+            2
+        }
+    }
+
     /// Drop large shared frame snapshots once a render has completed while
     /// keeping this bundle's reusable event/sprite allocations. Releasing the
     /// RAM reference before the next beam-frame wrap lets the capture side
@@ -4733,18 +4766,25 @@ pub fn framebuffer_beam_position(bus: &Bus, x: i32, y: i32) -> Option<(u32, u32)
 }
 
 pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
-    render_from_input_impl(input, fb, false)
+    render_from_input_impl(input, fb, false, false)
+}
+
+/// Side-effect-free screenshot render at the finest canvas pitch, including
+/// standard-scan SHRES pixels that the normal presentation blends in pairs.
+pub(crate) fn render_native_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
+    render_from_input_impl(input, fb, false, true)
 }
 
 #[doc(hidden)]
 pub fn render_from_input_tracking_reuse(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
-    render_from_input_impl(input, fb, true)
+    render_from_input_impl(input, fb, true, false)
 }
 
 fn render_from_input_impl(
     input: &RenderInput,
     fb: &mut [u32],
     track_read_dependencies: bool,
+    native_canvas: bool,
 ) -> RenderResult {
     thread_local! {
         static RENDER_SCRATCH: std::cell::RefCell<RenderScratch> =
@@ -4752,7 +4792,13 @@ fn render_from_input_impl(
     }
     RENDER_SCRATCH.with(|scratch| {
         let mut scratch = scratch.borrow_mut();
-        render_from_input_with_scratch(input, fb, track_read_dependencies, &mut scratch)
+        render_from_input_with_scratch(
+            input,
+            fb,
+            track_read_dependencies,
+            native_canvas,
+            &mut scratch,
+        )
     })
 }
 
@@ -4760,6 +4806,7 @@ fn render_from_input_with_scratch(
     input: &RenderInput,
     fb: &mut [u32],
     track_read_dependencies: bool,
+    native_canvas: bool,
     scratch: &mut RenderScratch,
 ) -> RenderResult {
     let render_started = render_timing_start();
@@ -4771,7 +4818,11 @@ fn render_from_input_with_scratch(
             0
         })
     });
-    let canvas_scale = input.canvas_scale();
+    let canvas_scale = if native_canvas {
+        input.native_canvas_scale()
+    } else {
+        input.canvas_scale()
+    };
     ACTIVE_CANVAS_SCALE.with(|scale| scale.set(canvas_scale));
     let out_w = FB_WIDTH * canvas_scale;
     let mut render_timing = VideoRenderFrameTiming::default();

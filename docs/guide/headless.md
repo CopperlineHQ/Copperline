@@ -41,6 +41,29 @@ which ends the run as soon as its last frame is written, even when a
 screenshot or clip is scheduled later. Schedule those to finish before the
 dump does, or use a separate run.
 
+For pixel verification, add `--native-screenshots`:
+
+```sh
+./target/release/copperline --factory --noaudio --native-screenshots \
+  --screenshot-after 30 /tmp/native.png
+```
+
+This captures the original rendered pixels before TV framing, aspect
+correction, filtering, deinterlacing, phosphor persistence or tint. The crop
+follows the active playfield's display-window envelope, removing the
+surrounding border without trimming black pixels inside the picture.
+A standard 320×256 lo-res playfield saves at 320×256; a 640×256 hi-res
+playfield at 640×256. Mixed-resolution frames keep the finest programmed
+pitch, and finer sprite or Copper detail is retained if collapsing repeated
+columns would lose it. Super-hi-res samples remain separate. The crop is
+limited to the raster Copperline captures; a frame without a playfield keeps
+the full field. RTG output uses the board's native width and height.
+
+Interlaced chipset output saves the current field at its original height,
+without combining it with another field. `--expect-screenshot` uses the
+same native capture when this flag is present. Frame dumps, GIFs and video
+recordings retain their presentation geometry.
+
 (screenshot-expectations)=
 ## Checking screenshots against expected images
 

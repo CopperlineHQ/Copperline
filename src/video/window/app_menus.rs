@@ -547,6 +547,7 @@ impl App {
             A::ToggleRecord => self.toggle_recording(),
             A::ToggleRecordInput => self.toggle_input_recording(),
             A::SaveClip => self.save_clip_gif(),
+            A::SaveNativeScreenshot => self.take_native_screenshot(),
 
             A::SaveState => self.save_state_interactive(),
             A::LoadState => self.open_states_browser(),

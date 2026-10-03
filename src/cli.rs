@@ -58,6 +58,8 @@ pub struct CliArgs {
     /// occurrence is captured, and the run ends once the last one has
     /// fired.
     pub screenshot_after: Vec<(f32, PathBuf)>,
+    /// Save screenshots and expectations as cropped original field pixels.
+    pub native_screenshots: bool,
     /// `--expect-screenshot SECS PATH [TOLERANCE]`: capture the frame at
     /// SECS exactly as `--screenshot-after` would and compare it with the
     /// PNG at PATH (src/expect.rs). Repeatable; a failed comparison makes
@@ -431,6 +433,7 @@ where
     let mut coverage: Option<PathBuf> = None;
     let mut coverage_source_map: Vec<(String, String)> = Vec::new();
     let mut screenshot_after: Vec<(f32, PathBuf)> = Vec::new();
+    let mut native_screenshots = false;
     let mut expect_screenshot: Vec<ExpectShotSpec> = Vec::new();
     let mut save_state_after: Vec<(f32, PathBuf)> = Vec::new();
     let mut gif_after: Vec<(f32, PathBuf)> = Vec::new();
@@ -1300,6 +1303,7 @@ where
                     hold_ms,
                 });
             }
+            "--native-screenshots" => native_screenshots = true,
             "--screenshot-after" => {
                 const USAGE: &str = "--screenshot-after requires SECS PATH";
                 let secs: f32 =
@@ -1858,6 +1862,7 @@ where
         coverage,
         coverage_source_map,
         screenshot_after,
+        native_screenshots,
         expect_screenshot,
         save_state_after,
         gif_after,
@@ -2066,6 +2071,7 @@ fn print_help() {
          \x20                            (0 = off, the default; windowed sessions only)\n  \
          \x20                            (--model/--cpu/etc. override the config file or defaults)\n  \
          --screenshot-after SECS PATH   save a PNG to PATH after SECS emulated seconds, then exit\n  \
+         --native-screenshots           screenshots/expectations use cropped 1:1 field pixels\n  \
          --expect-screenshot SECS PATH [TOLERANCE]\n  \
          \x20                            capture the frame at SECS like --screenshot-after and\n  \
          \x20                            compare it with the PNG at PATH; TOLERANCE is a fraction\n  \

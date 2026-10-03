@@ -614,7 +614,7 @@ The same card is printed without a session by
 pretty-printed JSON with the same fields.
 
 ### Framebuffer capture
-- `capture.screenshot {"path": "...", "overlays": ["blits", "overdraw", "sources"]}`:
+- `capture.screenshot {"path": "...", "native": false, "overlays": ["blits", "overdraw", "sources"]}`:
   Write a PNG from the side-effect-free display renderer and return its
   `path`, `width` and `height`. Optional overlays outline recorded blitter
   destinations (`blits`), heat pixels by repeated D-channel and other
@@ -623,6 +623,12 @@ pretty-printed JSON with the same fields.
   by playfield 1, playfield 2, sprite number, background, or outside-DIW
   provenance (`sources`). They work in headless sessions, and the MCP bridge
   returns the resulting PNG as its image block.
+  With `native: true`, captures original pixels cropped to the active
+  playfield at 1:1, or RTG at its native resolution. Interlaced chipset
+  output captures the current field without weaving; see
+  [native screenshots](../guide/headless.md#capturing-screenshots).
+  Native capture cannot be combined with diagnostic overlays. Digest,
+  input and overlay coordinates continue to use the default capture's raster.
 - `capture.digest`: Return FNV-1a hash digest of current frame.
 - `capture.region_digest {"x": ..., "y": ..., "w": ..., "h": ...}`: Return the FNV-1a hash of the `w` by `h` rectangle at (`x`, `y`) (default 0, 0), in `capture.screenshot` coordinates; a rectangle outside the frame is an error.
 

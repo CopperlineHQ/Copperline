@@ -109,6 +109,7 @@ pub enum MenuAction {
     ToggleRecord,
     ToggleRecordInput,
     SaveClip,
+    SaveNativeScreenshot,
 
     // Save states.
     SaveState,
@@ -1233,6 +1234,10 @@ fn recording_rows(s: &MenuState) -> Vec<MenuRow> {
             MenuAction::ToggleRecordInput,
         ),
         MenuRow::action("Save Clip as GIF", MenuAction::SaveClip),
+        MenuRow::action(
+            "Save Native Screenshot (1:1)",
+            MenuAction::SaveNativeScreenshot,
+        ),
     ]
 }
 

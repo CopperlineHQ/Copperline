@@ -1254,6 +1254,32 @@ fn smart_autocrop_preserves_content_outside_the_fixed_aperture() {
 }
 
 #[test]
+fn native_screenshots_follow_playfield_resolution_without_tv_borders() {
+    for (mode, width) in [(0x1200, 320), (0x9200, 640), (0x1204, 320)] {
+        let mut app = test_app();
+        let bus = app.emu.bus_mut();
+        bus.custom_write(0x08E, 2, 0x2C81);
+        bus.custom_write(0x090, 2, 0x2CC1);
+        bus.custom_write(0x092, 2, 0x0038);
+        bus.custom_write(0x094, 2, 0x00D0);
+        bus.custom_write(0x100, 2, mode);
+        bus.custom_write(0x096, 2, 0x8300);
+        // Capture a completed field whose frame-start snapshot includes
+        // the programmed mode, rather than the reset-time blank raster.
+        app.emu.step_video_frame().unwrap();
+        app.emu.step_video_frame().unwrap();
+        app.set_native_screenshots(true);
+        let image = app.capture_present_image();
+        assert_eq!(
+            (image.width, image.height),
+            (width, 256),
+            "mode {mode:#06x}"
+        );
+        assert_eq!(image.pixels.len(), width as usize * 256);
+    }
+}
+
+#[test]
 fn choosing_a_window_closes_the_menu_behind_it() {
     let mut app = test_app();
     app.activate_bar_control(super::BarControl::Menu);
