@@ -1192,6 +1192,7 @@ pub struct App {
     /// ends once the last of them has been saved.
     auto_shot: Vec<(f32, PathBuf)>,
     pending_auto_shot: Vec<(f32, PathBuf)>,
+    native_screenshots: bool,
     /// `--expect-screenshot` checks, armed like `auto_shot` (deadline
     /// order) and captured through the same frame path.
     auto_expect: Vec<crate::expect::ExpectShotSpec>,
@@ -2803,6 +2804,7 @@ impl App {
             paused: false,
             auto_shot: Vec::new(),
             pending_auto_shot: screenshot_after,
+            native_screenshots: false,
             auto_expect: Vec::new(),
             pending_auto_expect: Vec::new(),
             verdict: crate::verdict::RunVerdict::default(),
@@ -3881,6 +3883,11 @@ impl App {
     /// `--expect-screenshot` checks to arm alongside the screenshots.
     pub fn set_expect_screenshots(&mut self, specs: Vec<crate::expect::ExpectShotSpec>) {
         self.pending_auto_expect = specs;
+    }
+
+    /// Use original field pixels for screenshots and expectations.
+    pub fn set_native_screenshots(&mut self, native: bool) {
+        self.native_screenshots = native;
     }
 
     /// `--exit-on-return`: end the run when the `--run` program's return

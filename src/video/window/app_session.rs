@@ -1567,11 +1567,10 @@ impl App {
     /// The presented frame as a screenshot captures it, before encoding:
     /// the single path behind saved screenshots and `--expect-screenshot`.
     ///
-    /// COPPERLINE_SHOT_RAW captures the raw woven framebuffer (716x570
-    /// for standard fields, the native scan height for programmable
-    /// modes): the presentation resampler blends adjacent lines, so
-    /// per-scanline forensics need the unscaled field.
     pub(super) fn capture_present_image(&self) -> super::present::PresentImage<'_> {
+        if self.native_screenshots {
+            return self.capture_native_image();
+        }
         let src_rows = self.present_rows;
         if self.rtg_present_dims.is_some() {
             // An RTG board's frame already has one presentation row per
@@ -1600,6 +1599,32 @@ impl App {
         match screenshot::save(path, &image.pixels, image.width, image.height) {
             Ok(()) => info!("screenshot saved: {}", path.display()),
             Err(e) => warn!("screenshot save failed ({}): {e:#}", path.display()),
+        }
+    }
+
+    fn capture_native_image(&self) -> super::present::PresentImage<'static> {
+        let (pixels, rows, width) = screenshot::render_native(self.emu.bus());
+        super::present::PresentImage {
+            pixels: std::borrow::Cow::Owned(pixels),
+            width: width as u32,
+            height: rows as u32,
+        }
+    }
+
+    pub(super) fn take_native_screenshot(&mut self) {
+        let path = screenshot::auto_filename();
+        let image = self.capture_native_image();
+        match screenshot::save(&path, &image.pixels, image.width, image.height) {
+            Ok(()) => self.show_osd(format!(
+                "Saved {} ({}×{})",
+                display_file_name(&path),
+                image.width,
+                image.height
+            )),
+            Err(e) => {
+                warn!("native screenshot save failed ({}): {e:#}", path.display());
+                self.show_osd("Screenshot save failed");
+            }
         }
     }
 

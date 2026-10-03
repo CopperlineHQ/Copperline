@@ -241,6 +241,7 @@ pub enum CoreOp {
     Screenshot {
         path: Option<PathBuf>,
         overlays: Vec<CaptureOverlay>,
+        native: bool,
     },
     ReverseStep {
         n: u64,
@@ -1798,6 +1799,7 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
             path: PathBuf::from(p.str_req("path")?),
         }),
         "capture.screenshot" => {
+            let native = p.bool_or("native", false)?;
             let mut overlays = Vec::new();
             for value in p.str_array("overlays")? {
                 let overlay = CaptureOverlay::parse(&value).ok_or_else(|| {
@@ -1807,9 +1809,15 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
                     overlays.push(overlay);
                 }
             }
+            if native && !overlays.is_empty() {
+                return Err(CtlError::invalid_params(
+                    "native screenshots cannot include overlays",
+                ));
+            }
             core(CoreOp::Screenshot {
                 path: p.str_opt("path")?.map(PathBuf::from),
                 overlays,
+                native,
             })
         }
         "capture.digest" => core(CoreOp::Digest),
@@ -3257,8 +3265,16 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
         }
         CoreOp::Digest => Ok(digest_value(emu)),
         CoreOp::RegionDigest { rect } => region_digest_value(emu, *rect),
-        CoreOp::Screenshot { path, overlays } => {
-            let (fb, lines, width) = render_frame_with_overlays(emu, overlays);
+        CoreOp::Screenshot {
+            path,
+            overlays,
+            native,
+        } => {
+            let (fb, lines, width) = if *native {
+                crate::screenshot::render_native(emu.bus())
+            } else {
+                render_frame_with_overlays(emu, overlays)
+            };
             let path = path
                 .clone()
                 .unwrap_or_else(crate::screenshot::auto_filename);
@@ -6608,6 +6624,7 @@ mod tests {
             &mut ctx,
             &CoreOp::Screenshot {
                 path: Some(shot_path.clone()),
+                native: false,
                 overlays: vec![
                     CaptureOverlay::Blits,
                     CaptureOverlay::Overdraw,
@@ -6700,8 +6717,23 @@ mod tests {
             CoreOp::Screenshot {
                 path: None,
                 overlays: vec![CaptureOverlay::Sources, CaptureOverlay::Overdraw],
+                native: false,
             }
         );
+        assert_eq!(
+            core("capture.screenshot", json!({"native": true})),
+            CoreOp::Screenshot {
+                path: None,
+                overlays: Vec::new(),
+                native: true,
+            }
+        );
+        assert!(parse_method("capture.screenshot", &json!({"native": "yes"})).is_err());
+        assert!(parse_method(
+            "capture.screenshot",
+            &json!({"native": true, "overlays": ["blits"]})
+        )
+        .is_err());
     }
 
     #[test]
@@ -6710,6 +6742,45 @@ mod tests {
             Request::Host(HostOp::CopperhfEject { unit }) => assert_eq!(unit, 3),
             other => panic!("expected CopperhfEject, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn native_screenshot_writes_cropped_png_without_changing_default_digest() {
+        let mut emu = test_emulator();
+        let bus = emu.bus_mut();
+        for (offset, value) in [
+            (0x08E, 0x2C81),
+            (0x090, 0x2CC1),
+            (0x092, 0x0038),
+            (0x094, 0x00D0),
+            (0x100, 0x1200),
+            (0x096, 0x8300),
+        ] {
+            bus.custom_write(offset, 2, value);
+        }
+        emu.step_video_frame().unwrap();
+        emu.step_video_frame().unwrap();
+        let before = digest_value(&emu);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("native.png");
+        let mut ctx = SessionCtx::new();
+        let reply = exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::Screenshot {
+                path: Some(path.clone()),
+                overlays: Vec::new(),
+                native: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(reply["width"], 320);
+        assert_eq!(reply["height"], 256);
+        let decoder =
+            png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path).unwrap()));
+        let reader = decoder.read_info().unwrap();
+        assert_eq!((reader.info().width, reader.info().height), (320, 256));
+        assert_eq!(digest_value(&emu), before);
     }
 
     #[test]

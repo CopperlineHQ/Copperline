@@ -1074,6 +1074,22 @@ and greyed alongside either.
 `Dir cache` needs Kickstart 3.0, `International` needs 2.0, and `Long
 names` needs a filesystem no Kickstart provides.
 
+(native-screenshots)=
+## Saving native screenshots
+
+Choose **Recording → Save Native Screenshot (1:1)** to save the active
+playfield at its original pixel size, without the TV border, aspect
+correction, filtering, phosphor persistence or tint. Black pixels inside the
+playfield are kept. RTG screens save at the board's native resolution.
+Interlaced chipset screens save the current field, without blending or
+weaving another field into it.
+
+Starting Copperline with `--native-screenshots` also makes the camera button
+and `Cmd+S` / `Alt+S` use this capture. See [native headless captures](headless.md#capturing-screenshots)
+for resolution and crop details.
+
+Screenshots save to the [screenshots folder](#where-files-go).
+
 (recording-video)=
 ## Recording video
 

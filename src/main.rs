@@ -1442,6 +1442,7 @@ fn main() -> Result<()> {
         copperline::sampler::SamplerRequest::from_config(&cfg.parallel),
     );
     app.set_expect_screenshots(cli.expect_screenshot);
+    app.set_native_screenshots(cli.native_screenshots);
     if let Some(marker) = run_done_marker {
         app.set_exit_on_return(marker);
     }
@@ -1650,6 +1651,7 @@ fn launcher_requested(cli: &CliArgs) -> bool {
         && !cli.list_monitors
         && !Path::new("copperline.toml").exists()
         && cli.screenshot_after.is_empty()
+        && !cli.native_screenshots
         && cli.expect_screenshot.is_empty()
         && !cli.exit_on_return
         && cli.save_state_after.is_empty()
@@ -2488,6 +2490,24 @@ mod tests {
         );
         assert_eq!(args.expect_screenshot[0].tolerance, Tolerance::Pixels(3));
         let _ = std::fs::remove_file(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn native_screenshots_is_opt_in_and_composes_with_expectations() -> Result<()> {
+        assert!(!parse(&["--screenshot-after", "1", "x.png"])?.native_screenshots);
+        let args = parse(&[
+            "--native-screenshots",
+            "--screenshot-after",
+            "1",
+            "x.png",
+            "--expect-screenshot",
+            "1",
+            "x.png",
+        ])?;
+        assert!(args.native_screenshots);
+        assert_eq!(args.screenshot_after.len(), 1);
+        assert_eq!(args.expect_screenshot.len(), 1);
         Ok(())
     }
 
