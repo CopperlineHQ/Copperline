@@ -761,6 +761,10 @@ video = "PAL"
 # captures are never tinted, and RTG board scanout stays untinted.
 # full_screen: open the window fullscreen at start (default false; also
 # --full-screen / --windowed, and Cmd/Alt+F toggles it live).
+# maximized: open a bordered, maximized window with the desktop taskbar
+# visible (default false; also --maximized). full_screen takes precedence.
+# window_scale: multiply the initial window width and height by 0.5-4.0
+# (default 1.0; also --window-scale). 2 opens at twice the normal size.
 # status_bar: show the status bar at start (default true; also
 # --show-status-bar / --hide-status-bar, and Cmd/Alt+Shift+F toggles it live).
 # menu_scale: how large the pop-up menu is drawn. "1x" (default) or "2x";
@@ -792,6 +796,8 @@ video = "PAL"
 # tint = "none"
 # menu_scale = "1x"
 # full_screen = false
+# maximized = false
+# window_scale = 1.0
 # status_bar = true
 # vsync = true
 # hidpi_texture = true

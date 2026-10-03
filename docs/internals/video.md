@@ -659,7 +659,14 @@ value.
 ## Presentation (`video/present_common.rs`, `video/window.rs`, `video/ui.rs`)
 
 `window.rs` owns the winit `ApplicationHandler` and the `pixels` GPU
-surface: the field is presented at a TV-like 4:3 aspect (or with square
+surface. Startup `window_scale` multiplies the presentation canvas's logical
+dimensions before winit applies host DPI scaling. Canvas snaps and resize
+ownership use the same multiple, preserving it across aspect and chrome
+changes until a manual resize. `maximized` uses winit's decorated window
+maximization; canvas resizes are deferred while maximized or fullscreen and
+settled when the window is restored.
+
+The field is presented at a TV-like 4:3 aspect (or with square
 pixels under `[display] pixel_aspect = "square"`) above the 44-pixel
 status bar, scaling with the window. The GPU surface is fed from
 `present_fb`, the post-processed presentation buffer produced by either

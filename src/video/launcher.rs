@@ -931,6 +931,10 @@ pub struct MachineSetup {
     tint: Tint,
     /// Open fullscreen at start ([display] full_screen).
     start_fullscreen: bool,
+    /// Open maximized ([display] maximized), retained from TOML.
+    start_maximized: bool,
+    /// Initial window size ([display] window_scale), retained from TOML.
+    window_scale: f64,
     /// Show the status bar at start ([display] status_bar).
     show_status_bar: bool,
     floppy_sounds: bool,
@@ -1187,6 +1191,8 @@ impl MachineSetup {
         self.csynth_mt32_mode = base.serial.coppersynth_mt32_mode.clone();
         self.csynth_panel = base.serial.coppersynth_panel;
         self.start_fullscreen = base.full_screen;
+        self.start_maximized = base.maximized;
+        self.window_scale = base.window_scale;
         self.show_status_bar = base.status_bar;
         self.floppy_sounds = base.audio.floppy_sounds;
         self.floppy_volume = base.audio.floppy_sounds_volume;

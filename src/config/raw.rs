@@ -385,9 +385,15 @@ pub(crate) struct RawDisplay {
     /// Size of the pop-up menu: "1x" (default) or "2x".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) menu_scale: Option<String>,
+    /// Initial logical window size multiplier (0.5 to 4.0, default 1.0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) window_scale: Option<f64>,
     /// Open fullscreen at start (default false).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) full_screen: Option<bool>,
+    /// Open maximized with window decorations (default false).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) maximized: Option<bool>,
     /// Show the status bar at start (default true).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) status_bar: Option<bool>,

@@ -1514,6 +1514,10 @@ impl App {
         // Apply the configured start-up window state; the runtime toggles
         // (Cmd+F, Cmd+Shift+F) take over from here. Reuse the toggles so the
         // surface/window resize stays in one place.
+        // Auto-launch runs before resumed creates the window, so retain the
+        // selected modes for creation as well as updating an existing window.
+        self.start_fullscreen = cfg.full_screen;
+        self.start_maximized = cfg.maximized && !cfg.full_screen;
         let is_fullscreen = self
             .render
             .as_ref()
@@ -1523,6 +1527,25 @@ impl App {
         }
         if crate::video::status_bar_hidden() == cfg.status_bar {
             self.toggle_status_bar();
+        }
+        if self.window_scale != cfg.window_scale {
+            self.window_scale = cfg.window_scale;
+            self.window_manually_sized = false;
+            if self.debug_layout_active
+                || cfg.full_screen
+                || cfg.maximized
+                || self
+                    .render
+                    .as_ref()
+                    .is_some_and(|r| r.window.fullscreen().is_some() || r.window.is_maximized())
+            {
+                self.pending_canvas_follow = Some(CanvasFollow::Snap);
+            } else {
+                self.snap_window_to_canvas();
+            }
+        }
+        if let Some(r) = self.render.as_ref() {
+            r.window.set_maximized(cfg.maximized && !cfg.full_screen);
         }
         self.warp_speed = cfg.emulation.warp_speed;
         // Reset the host joystick source to the new machine's configured
