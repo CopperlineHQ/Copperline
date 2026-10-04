@@ -333,11 +333,14 @@ impl WasmRuntime {
         // save-state load already do (see `load_resources`): with the
         // `resource_write` capability the files can have moved on since they
         // were first read, and a reset must not resurrect the stale bytes.
-        // A file that has since become unreadable keeps the copy we have
-        // rather than failing the reset.
-        if let Ok(resources) = load_resources(&self.manifest) {
-            self.resources = resources;
-        }
+        // A file that has since become unreadable falls back to the live
+        // store's cache rather than `self.resources`'s own load-time
+        // snapshot -- `resource_write` keeps only the store's copy
+        // (`HostCtx::resources`) coherent with what it wrote, so falling
+        // back to this field instead would resurrect pre-write bytes after
+        // a successful write, the opposite of what this reset is for.
+        self.resources =
+            load_resources(&self.manifest).unwrap_or_else(|_| self.store.data().resources.clone());
         let (store, memory, exports) = Self::instantiate(
             &self.engine,
             &self.module,
@@ -654,7 +657,15 @@ fn register_host_fns(linker: &mut Linker<HostCtx>, caps: WasmCaps) -> Result<()>
                 // Validate the source window against the plugin's current
                 // linear memory before allocating, exactly as the DMA imports
                 // do: `in_ptr`/`len` are plugin-controlled and unrelated to
-                // how much memory the plugin actually has.
+                // how much memory the plugin actually has. Reject a negative
+                // pointer explicitly first: `checked_wasm_window` clamps a
+                // negative `ptr` to 0 (its other callers discard or don't
+                // care about the clamped value), which would otherwise let
+                // `in_ptr = -1` silently read from address 0 instead of
+                // reporting the bad pointer it actually is.
+                if in_ptr < 0 {
+                    return Ok(RESOURCE_WRITE_BAD_PTR);
+                }
                 let memory = caller_memory(&mut caller)?;
                 let mem_size = memory.data_size(&caller);
                 let Ok((in_ptr, _)) = checked_wasm_window(in_ptr, len as i32, mem_size) else {
@@ -3275,7 +3286,11 @@ mod tests {
             (if (i32.eq (local.get $sel) (i32.const 5))
               (then (i32.store (i32.const 512)
                 (call $resource_write (i32.const 0) (i32.const 4)
-                  (i32.const -1) (i32.const 64) (i32.const 1))))))
+                  (i32.const -1) (i32.const 64) (i32.const 1)))))
+            (if (i32.eq (local.get $sel) (i32.const 6))
+              (then (i32.store (i32.const 512)
+                (call $resource_write (i32.const 0) (i32.const 4)
+                  (i32.const 0) (i32.const -1) (i32.const 1))))))
           (func (export "read") (param $off i32) (param $size i32) (result i32)
             (i32.load (i32.const 512)))
         )
@@ -3339,6 +3354,17 @@ mod tests {
         board.write(4, 0, 0, &mut host);
         assert_eq!(board.read(0, 4, &mut host) as i32, 0xA5);
 
+        // If the file has since become unreadable, the reset must fall
+        // back to the live store's cache (which the write above already
+        // kept coherent), not to `WasmRuntime`'s own load-time snapshot --
+        // that snapshot predates the write entirely, so falling back to it
+        // would resurrect the pre-write bytes right after a write that
+        // just succeeded.
+        std::fs::remove_file(&res).unwrap();
+        board.reset();
+        board.write(4, 0, 0, &mut host);
+        assert_eq!(board.read(0, 4, &mut host) as i32, 0xA5);
+
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&res);
     }
@@ -3373,6 +3399,14 @@ mod tests {
         // A source pointer outside the plugin's own linear memory.
         board.write(3, 0, 0xFF, &mut host);
         assert_eq!(board.read(0, 4, &mut host) as i32, RESOURCE_WRITE_BAD_PTR);
+
+        // A negative source pointer is the same refusal, not address 0:
+        // `checked_wasm_window` alone would clamp -1 to 0 and happily read
+        // from there, silently writing the wrong byte instead of reporting
+        // the bad pointer it actually is.
+        board.write(6, 0, 0, &mut host);
+        assert_eq!(board.read(0, 4, &mut host) as i32, RESOURCE_WRITE_BAD_PTR);
+        assert_eq!(std::fs::read(&res).unwrap(), [0x11, 0x22, 0x33, 0x44]);
 
         // A write to a resource whose host file has gone away: I/O error.
         std::fs::remove_file(&res).unwrap();
