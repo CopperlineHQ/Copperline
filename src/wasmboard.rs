@@ -23,6 +23,8 @@
 //! Imports the host provides in module `env` (capability-gated):
 //! - `log(ptr: i32, len: i32)`                      always available
 //! - `config_get`/`resource_len`/`resource_read`    always available
+//! - `resource_write(name_ptr, name_len, off, in_ptr, len: i32) -> i32`
+//!   requires the `resource_write` capability
 //! - `dma_read(addr: i32, ptr: i32, len: i32)`      requires the `dma` capability
 //! - `dma_write(addr: i32, ptr: i32, len: i32)`     requires the `dma` capability
 //! - `net_send(ptr: i32, len: i32)`                 requires the `net` capability
@@ -54,6 +56,19 @@
 //! shared 24-bit chip/slow/Zorro decode in [`crate::zorro_device`].
 //! `net_send`/`net_recv` move whole Ethernet frames between the plugin's
 //! linear memory and the manifest's configured [`NetConfig`] backend.
+//! `resource_write` is `resource_read`'s counterpart: it copies `len` bytes
+//! out of the plugin's linear memory at `in_ptr` into the named file resource
+//! at offset `off`, write-through to the host file the resource was loaded
+//! from, and returns the byte count written or a negative
+//! `RESOURCE_WRITE_*` code. It lets a board that owns persistent media (a
+//! virtual PC hard disk image, say) keep it. The resource is named, never
+//! pathed, so the writable set is exactly the files the manifest already
+//! chose; a write never extends a resource past the length `resource_len`
+//! reports. File resources are live external state outside the save-state
+//! contract either way (they are reopened by path, not snapshotted), so this
+//! does not weaken determinism -- it surfaces that non-determinism as writes
+//! rather than as a stale cache.
+//!
 //! `resolve_start`/`resolve_poll` ask the host to resolve a hostname via
 //! its own OS resolver on a background thread (`getaddrinfo` blocks, and
 //! this store runs synchronously on the main emulation thread) --
@@ -155,6 +170,14 @@ struct HostCtx {
     config: BTreeMap<String, String>,
     /// Loaded file resources, read by the `resource_*` imports.
     resources: HashMap<String, Vec<u8>>,
+    /// Host file each entry of `resources` was loaded from, for the
+    /// `resource_write` import (the `resource_write` capability). Keyed by
+    /// the same manifest resource *name* the read imports use -- a plugin
+    /// never names a filesystem path, so write-back cannot escape the set
+    /// of files the manifest already chose. A resource with no entry here
+    /// is not file-backed (the bundled HostSocket ROM is the one such case)
+    /// and is therefore read-only.
+    resource_paths: HashMap<String, PathBuf>,
     /// In-flight host-resolver DNS lookups (the `resolve` capability),
     /// keyed by the id `resolve_start` handed back to the plugin. Each
     /// lookup runs on its own short-lived background thread (`getaddrinfo`
@@ -269,6 +292,7 @@ impl WasmRuntime {
                 net,
                 config: manifest.config.clone(),
                 resources: resources.clone(),
+                resource_paths: resource_paths(manifest),
                 resolve_jobs: HashMap::new(),
                 next_resolve_id: 0,
                 sockets: HashMap::new(),
@@ -305,6 +329,18 @@ impl WasmRuntime {
 
     /// Re-instantiate from the kept engine + module (cold reset: clears RAM).
     fn reset(&mut self) -> Result<()> {
+        // Reopen the file resources, the same way instantiation and a
+        // save-state load already do (see `load_resources`): with the
+        // `resource_write` capability the files can have moved on since they
+        // were first read, and a reset must not resurrect the stale bytes.
+        // A file that has since become unreadable falls back to the live
+        // store's cache rather than `self.resources`'s own load-time
+        // snapshot -- `resource_write` keeps only the store's copy
+        // (`HostCtx::resources`) coherent with what it wrote, so falling
+        // back to this field instead would resurrect pre-write bytes after
+        // a successful write, the opposite of what this reset is for.
+        self.resources =
+            load_resources(&self.manifest).unwrap_or_else(|_| self.store.data().resources.clone());
         let (store, memory, exports) = Self::instantiate(
             &self.engine,
             &self.module,
@@ -403,6 +439,50 @@ fn load_resources(manifest: &WasmManifest) -> Result<HashMap<String, Vec<u8>>> {
         }
     }
     Ok(map)
+}
+
+/// The host file backing each file resource, for the `resource_write` import.
+/// Mirrors [`load_resources`]'s own key selection, minus the resources that
+/// have no host file to write back to (the bundled HostSocket ROM, which is
+/// compiled into the binary). A plugin addresses a resource only by its
+/// manifest name, so this map -- not the plugin -- decides which files a
+/// write can ever reach.
+fn resource_paths(manifest: &WasmManifest) -> HashMap<String, PathBuf> {
+    let mut map = HashMap::new();
+    for key in &manifest.file_keys {
+        match manifest.config.get(key) {
+            // Embedded, not a host file: read-only.
+            Some(path) if path == crate::hostsocket::BUNDLED_HOSTSOCKET_ROM => {}
+            Some(path) if !path.is_empty() => {
+                map.insert(key.clone(), PathBuf::from(path));
+            }
+            _ => {}
+        }
+    }
+    map
+}
+
+/// `resource_write` returns the byte count on success and one of these on
+/// failure, extending `resource_read`'s own "-1 means no such resource"
+/// convention with the cases only a write has.
+const RESOURCE_WRITE_NO_RESOURCE: i32 = -1;
+/// `off`/`len` negative, or the range reaching past the resource's length.
+const RESOURCE_WRITE_RANGE: i32 = -2;
+/// `in_ptr`/`len` outside the plugin's own linear memory.
+const RESOURCE_WRITE_BAD_PTR: i32 = -3;
+/// The host file could not be opened, seeked, or written.
+const RESOURCE_WRITE_IO: i32 = -4;
+
+/// Write `buf` into `path` at byte offset `off`, leaving the rest of the file
+/// alone. Opened per call rather than held open for the session: a resource is
+/// deliberately not an owned host handle (see [`load_resources`]), and a
+/// plugin board writes far too rarely for the open to matter.
+fn write_resource_range(path: &Path, off: u64, buf: &[u8]) -> std::io::Result<()> {
+    use std::io::Seek;
+    let mut file = std::fs::OpenOptions::new().write(true).open(path)?;
+    file.seek(std::io::SeekFrom::Start(off))?;
+    file.write_all(buf)?;
+    file.flush()
 }
 
 /// Fuel budget refilled before every entry into a plugin. Copperline runs
@@ -525,6 +605,95 @@ fn register_host_fns(linker: &mut Linker<HostCtx>, caps: WasmCaps) -> Result<()>
             Ok(chunk.len() as i32)
         },
     )?;
+
+    if caps.resource_write {
+        // resource_write(name_ptr, name_len, off, in_ptr, len) -> i32: copy
+        // linear memory[in_ptr..in_ptr+len] into resource[off..off+len],
+        // write-through to the host file it was loaded from. Returns the byte
+        // count written, or one of the negative `RESOURCE_WRITE_*` codes.
+        //
+        // Write-through rather than buffered-and-flushed on purpose: a file
+        // resource is already live external state, reopened by path on
+        // instantiation and again on a save-state load rather than captured
+        // in the snapshot (see `load_resources`). This import does not change
+        // that contract -- it makes the same non-determinism visible as the
+        // plugin's own writes instead of as a silently stale cache, and a
+        // crash mid-session leaves the file as far along as the plugin
+        // actually got, which is what a real disk would do.
+        //
+        // The resource is addressed by its manifest *name*, never by a path
+        // the plugin supplies, so the writable set is exactly the files the
+        // manifest already named -- the same boundary `resource_read` has.
+        linker.func_wrap(
+            "env",
+            "resource_write",
+            |mut caller: Caller<'_, HostCtx>,
+             name_ptr: i32,
+             name_len: i32,
+             off: i32,
+             in_ptr: i32,
+             len: i32|
+             -> Result<i32> {
+                let name = read_wasm_bytes(&mut caller, name_ptr, name_len)?;
+                let name = String::from_utf8_lossy(&name).into_owned();
+                let Some(path) = caller.data().resource_paths.get(&name).cloned() else {
+                    // Unknown name, or a resource with no host file behind it.
+                    return Ok(RESOURCE_WRITE_NO_RESOURCE);
+                };
+                let Some(size) = caller.data().resources.get(&name).map(|b| b.len()) else {
+                    return Ok(RESOURCE_WRITE_NO_RESOURCE);
+                };
+                // A write never extends a resource: its length is the one the
+                // host published through `resource_len`, and a plugin that
+                // could grow it past that would be writing bytes no read
+                // could ever see without a reload.
+                if off < 0 || len < 0 {
+                    return Ok(RESOURCE_WRITE_RANGE);
+                }
+                let (off, len) = (off as usize, len as usize);
+                if off.checked_add(len).is_none_or(|end| end > size) {
+                    return Ok(RESOURCE_WRITE_RANGE);
+                }
+                // Validate the source window against the plugin's current
+                // linear memory before allocating, exactly as the DMA imports
+                // do: `in_ptr`/`len` are plugin-controlled and unrelated to
+                // how much memory the plugin actually has. Reject a negative
+                // pointer explicitly first: `checked_wasm_window` clamps a
+                // negative `ptr` to 0 (its other callers discard or don't
+                // care about the clamped value), which would otherwise let
+                // `in_ptr = -1` silently read from address 0 instead of
+                // reporting the bad pointer it actually is.
+                if in_ptr < 0 {
+                    return Ok(RESOURCE_WRITE_BAD_PTR);
+                }
+                let memory = caller_memory(&mut caller)?;
+                let mem_size = memory.data_size(&caller);
+                let Ok((in_ptr, _)) = checked_wasm_window(in_ptr, len as i32, mem_size) else {
+                    return Ok(RESOURCE_WRITE_BAD_PTR);
+                };
+                let mut buf = vec![0u8; len];
+                memory
+                    .read(&mut caller, in_ptr, &mut buf)
+                    .context("reading WASM plugin memory")?;
+
+                if len > 0 {
+                    if let Err(e) = write_resource_range(&path, off as u64, &buf) {
+                        log::warn!(
+                            "wasm[{}]: resource_write({name:?}, off {off}, {len} bytes) failed: {e}",
+                            caller.data().name
+                        );
+                        return Ok(RESOURCE_WRITE_IO);
+                    }
+                }
+                // Keep the host's cached copy coherent, so a `resource_read`
+                // right after a write sees the written bytes.
+                if let Some(bytes) = caller.data_mut().resources.get_mut(&name) {
+                    bytes[off..off + len].copy_from_slice(&buf);
+                }
+                Ok(len as i32)
+            },
+        )?;
+    }
 
     if caps.dma {
         // dma_read(addr, ptr, len): Amiga[addr..] -> wasm linear memory[ptr..].
@@ -2063,6 +2232,7 @@ mod tests {
                 net: false,
                 resolve: false,
                 host_sockets: false,
+                resource_write: false,
             },
             net: NetConfig::None,
             config: BTreeMap::new(),
@@ -2080,6 +2250,7 @@ mod tests {
                 net: true,
                 resolve: false,
                 host_sockets: false,
+                resource_write: false,
             },
             net: NetConfig::Loopback,
             config: BTreeMap::new(),
@@ -2097,6 +2268,7 @@ mod tests {
                 net: false,
                 resolve: true,
                 host_sockets: false,
+                resource_write: false,
             },
             net: NetConfig::None,
             config: BTreeMap::new(),
@@ -2114,11 +2286,46 @@ mod tests {
                 net: false,
                 resolve: false,
                 host_sockets: true,
+                resource_write: false,
             },
             net: NetConfig::None,
             config: BTreeMap::new(),
             file_keys: Vec::new(),
         }
+    }
+
+    /// A manifest with one file-typed resource named `disk`, backed by
+    /// `path`, optionally granting the `resource_write` capability.
+    fn resource_manifest(name: &str, path: &Path, writable: bool) -> WasmManifest {
+        let mut config = BTreeMap::new();
+        config.insert("disk".to_string(), path.to_string_lossy().into_owned());
+        WasmManifest {
+            name: name.into(),
+            caps: WasmCaps {
+                dma: false,
+                int2: false,
+                int6: false,
+                net: false,
+                resolve: false,
+                host_sockets: false,
+                resource_write: writable,
+            },
+            net: NetConfig::None,
+            config,
+            file_keys: vec!["disk".to_string()],
+        }
+    }
+
+    /// A scratch host file seeded with `bytes`, for a file resource.
+    fn write_resource_file(name: &str, bytes: &[u8]) -> PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "copperline-wasm-res-{name}-{}-{seq}.bin",
+            std::process::id(),
+        ));
+        std::fs::write(&path, bytes).expect("write resource file");
+        path
     }
 
     fn empty_memory() -> Memory {
@@ -3034,6 +3241,182 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&rom_path);
+    }
+
+    /// A plugin that exercises `resource_write` against the `disk` resource.
+    /// `write(sel, _, val)` runs one operation and latches its result at
+    /// linear-memory 512, which `read` returns verbatim:
+    ///
+    /// - `sel` 0: write byte `val` at resource offset 0
+    /// - `sel` 1: write one byte at resource offset `val` (range probe)
+    /// - `sel` 2: write to a resource name the manifest never declared
+    /// - `sel` 3: write from a source pointer outside linear memory
+    /// - `sel` 4: `resource_read` one byte at offset `val` (read-back probe)
+    /// - `sel` 5: write at a negative resource offset
+    const RESOURCE_WRITE_WAT: &str = r#"
+        (module
+          (import "env" "resource_read" (func $resource_read (param i32 i32 i32 i32 i32) (result i32)))
+          (import "env" "resource_write" (func $resource_write (param i32 i32 i32 i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "disk")
+          (data (i32.const 8) "nope")
+          (func (export "write") (param $sel i32) (param $size i32) (param $val i32)
+            (i32.store8 (i32.const 64) (local.get $val))
+            (if (i32.eq (local.get $sel) (i32.const 0))
+              (then (i32.store (i32.const 512)
+                (call $resource_write (i32.const 0) (i32.const 4)
+                  (i32.const 0) (i32.const 64) (i32.const 1)))))
+            (if (i32.eq (local.get $sel) (i32.const 1))
+              (then (i32.store (i32.const 512)
+                (call $resource_write (i32.const 0) (i32.const 4)
+                  (local.get $val) (i32.const 64) (i32.const 1)))))
+            (if (i32.eq (local.get $sel) (i32.const 2))
+              (then (i32.store (i32.const 512)
+                (call $resource_write (i32.const 8) (i32.const 4)
+                  (i32.const 0) (i32.const 64) (i32.const 1)))))
+            (if (i32.eq (local.get $sel) (i32.const 3))
+              (then (i32.store (i32.const 512)
+                (call $resource_write (i32.const 0) (i32.const 4)
+                  (i32.const 0) (i32.const 0x7000_0000) (i32.const 1)))))
+            (if (i32.eq (local.get $sel) (i32.const 4))
+              (then
+                (drop (call $resource_read (i32.const 0) (i32.const 4)
+                  (local.get $val) (i32.const 65) (i32.const 1)))
+                (i32.store (i32.const 512) (i32.load8_u (i32.const 65)))))
+            (if (i32.eq (local.get $sel) (i32.const 5))
+              (then (i32.store (i32.const 512)
+                (call $resource_write (i32.const 0) (i32.const 4)
+                  (i32.const -1) (i32.const 64) (i32.const 1)))))
+            (if (i32.eq (local.get $sel) (i32.const 6))
+              (then (i32.store (i32.const 512)
+                (call $resource_write (i32.const 0) (i32.const 4)
+                  (i32.const 0) (i32.const -1) (i32.const 1))))))
+          (func (export "read") (param $off i32) (param $size i32) (result i32)
+            (i32.load (i32.const 512)))
+        )
+    "#;
+
+    /// A module that imports `resource_write` without the manifest granting
+    /// it fails to instantiate, loudly -- the same "ungranted imports are not
+    /// linked" rule `dma`/`net`/`host_sockets` live by. The capability is
+    /// never silently conferred by the always-available read imports.
+    #[test]
+    fn resource_write_without_the_capability_fails_instantiation() {
+        let res = write_resource_file("nocap", &[0x11, 0x22, 0x33, 0x44]);
+        let path = write_wasm("reswr-nocap", RESOURCE_WRITE_WAT);
+        let msg = match WasmBoard::from_file(&path, resource_manifest("reswr", &res, false)) {
+            Ok(_) => panic!("ungranted resource_write must not link"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(
+            msg.contains("resource_write"),
+            "error should name the missing import: {msg}"
+        );
+        // The file is untouched: nothing ran at all.
+        assert_eq!(std::fs::read(&res).unwrap(), [0x11, 0x22, 0x33, 0x44]);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&res);
+    }
+
+    /// With the capability granted, a write lands on the host file
+    /// immediately (write-through, not buffered) and the host's own cached
+    /// copy stays coherent, so a `resource_read` right after sees it.
+    #[test]
+    fn resource_write_persists_to_the_host_file_and_reads_back() {
+        let res = write_resource_file("rw", &[0x11, 0x22, 0x33, 0x44]);
+        let path = write_wasm("reswr", RESOURCE_WRITE_WAT);
+        let mut board =
+            WasmBoard::from_file(&path, resource_manifest("reswr", &res, true)).unwrap();
+        let mut mem = empty_memory();
+        let mut host = DeviceHost::new(&mut mem);
+
+        // sel 0: write 0xA5 at resource offset 0; returns the byte count.
+        board.write(0, 0, 0xA5, &mut host);
+        assert_eq!(board.read(0, 4, &mut host) as i32, 1);
+        // Straight through to disk, with the rest of the file untouched.
+        assert_eq!(std::fs::read(&res).unwrap(), [0xA5, 0x22, 0x33, 0x44]);
+
+        // sel 1: a one-byte write at the last valid offset.
+        board.write(1, 0, 3, &mut host);
+        assert_eq!(board.read(0, 4, &mut host) as i32, 1);
+        assert_eq!(std::fs::read(&res).unwrap(), [0xA5, 0x22, 0x33, 3]);
+
+        // sel 4: resource_read sees the written bytes, not the load-time ones.
+        board.write(4, 0, 0, &mut host);
+        assert_eq!(board.read(0, 4, &mut host) as i32, 0xA5);
+        board.write(4, 0, 3, &mut host);
+        assert_eq!(board.read(0, 4, &mut host) as i32, 3);
+
+        // A cold reset reopens the file, so the plugin restarts from the
+        // written bytes rather than the stale ones first loaded.
+        board.reset();
+        board.write(4, 0, 0, &mut host);
+        assert_eq!(board.read(0, 4, &mut host) as i32, 0xA5);
+
+        // If the file has since become unreadable, the reset must fall
+        // back to the live store's cache (which the write above already
+        // kept coherent), not to `WasmRuntime`'s own load-time snapshot --
+        // that snapshot predates the write entirely, so falling back to it
+        // would resurrect the pre-write bytes right after a write that
+        // just succeeded.
+        std::fs::remove_file(&res).unwrap();
+        board.reset();
+        board.write(4, 0, 0, &mut host);
+        assert_eq!(board.read(0, 4, &mut host) as i32, 0xA5);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&res);
+    }
+
+    /// Every failure mode returns its negative code and leaves the file
+    /// alone; none of them traps, panics, or faults the board.
+    #[test]
+    fn resource_write_errors_return_negative_codes_without_faulting() {
+        let res = write_resource_file("rw-err", &[0x11, 0x22, 0x33, 0x44]);
+        let path = write_wasm("reswr-err", RESOURCE_WRITE_WAT);
+        let mut board =
+            WasmBoard::from_file(&path, resource_manifest("reswr", &res, true)).unwrap();
+        let mut mem = empty_memory();
+        let mut host = DeviceHost::new(&mut mem);
+
+        // A name the manifest never declared: no such resource.
+        board.write(2, 0, 0xFF, &mut host);
+        assert_eq!(
+            board.read(0, 4, &mut host) as i32,
+            RESOURCE_WRITE_NO_RESOURCE
+        );
+
+        // One byte past the end of a 4-byte resource: out of range. A write
+        // never extends a resource past the length resource_len reports.
+        board.write(1, 0, 4, &mut host);
+        assert_eq!(board.read(0, 4, &mut host) as i32, RESOURCE_WRITE_RANGE);
+
+        // A negative resource offset is the same refusal.
+        board.write(5, 0, 0, &mut host);
+        assert_eq!(board.read(0, 4, &mut host) as i32, RESOURCE_WRITE_RANGE);
+
+        // A source pointer outside the plugin's own linear memory.
+        board.write(3, 0, 0xFF, &mut host);
+        assert_eq!(board.read(0, 4, &mut host) as i32, RESOURCE_WRITE_BAD_PTR);
+
+        // A negative source pointer is the same refusal, not address 0:
+        // `checked_wasm_window` alone would clamp -1 to 0 and happily read
+        // from there, silently writing the wrong byte instead of reporting
+        // the bad pointer it actually is.
+        board.write(6, 0, 0, &mut host);
+        assert_eq!(board.read(0, 4, &mut host) as i32, RESOURCE_WRITE_BAD_PTR);
+        assert_eq!(std::fs::read(&res).unwrap(), [0x11, 0x22, 0x33, 0x44]);
+
+        // A write to a resource whose host file has gone away: I/O error.
+        std::fs::remove_file(&res).unwrap();
+        board.write(0, 0, 0x5A, &mut host);
+        assert_eq!(board.read(0, 4, &mut host) as i32, RESOURCE_WRITE_IO);
+
+        // Nothing above faulted the board -- the plugin is still live.
+        assert!(!board.rt.borrow().faulted);
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

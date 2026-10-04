@@ -1216,6 +1216,11 @@ struct RawBoardMeta {
     /// `WasmCaps::host_sockets`'s own doc comment -- so this is opt-in per
     /// board, never implied by `net`/`resolve`.
     host_sockets: Option<bool>,
+    /// Grants the `resource_write` capability (the `resource_write` import):
+    /// the plugin may write back into the files its own file-typed options
+    /// name, for a board that owns persistent media. Opt-in per board; the
+    /// read-only `resource_len`/`resource_read` imports need no grant.
+    resource_write: Option<bool>,
     /// Host network backend ("none"/"loopback"/"nat"/"bridge"); presence grants the
     /// `net` capability (the net_send/net_recv imports).
     net: Option<String>,
@@ -1422,6 +1427,7 @@ pub fn load_board_metadata(path: &Path) -> Result<LoadedZorroBoard> {
                     net: raw.net.is_some(),
                     resolve: raw.resolve.unwrap_or(false),
                     host_sockets: raw.host_sockets.unwrap_or(false),
+                    resource_write: raw.resource_write.unwrap_or(false),
                 },
                 net,
                 // The merge with the user's per-board overrides happens at
