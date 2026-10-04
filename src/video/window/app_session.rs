@@ -526,8 +526,14 @@ impl App {
         #[cfg(feature = "gdb")]
         self.gdb_log_lines(&lines);
         if let Some(panel) = self.console_panel.as_mut() {
+            let has_output = !lines.is_empty();
             for line in lines {
                 panel.push_output(format!("DBG: {line}"));
+            }
+            if has_output {
+                // A step or breakpoint can leave the machine paused, with
+                // no paced inspector redraw to replace the cached egui frame.
+                self.request_redraw();
             }
         }
         match self.emu.take_uaelib_warp_request() {

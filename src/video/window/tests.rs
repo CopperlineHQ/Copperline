@@ -12305,6 +12305,7 @@ pub(super) mod uaelib_insights {
         let mut app = test_app();
         fit_uaelib(&mut app);
         app.open_console();
+        app.debug_snapshot_dirty.set(false);
         let mask = app.emu.machine.ui_addr_mask();
         {
             let bus = app.emu.bus_mut();
@@ -12323,6 +12324,57 @@ pub(super) mod uaelib_insights {
         assert!(!app.service_uaelib(), "a log line changes no pacing");
         let panel = app.console_panel.as_ref().unwrap();
         assert_eq!(panel.output.back().map(String::as_str), Some("DBG: hello"));
+        assert!(app.debug_snapshot_dirty.get());
+    }
+
+    #[test]
+    fn guest_mmio_debug_lines_refresh_an_open_console() {
+        let program = [
+            0x23FC, 0x0016, 0xA020, 0x00BF, 0xFF00, // chip-RAM value
+            0x23FC, 0x0016, 0xA020, 0x00BF, 0xFF00, // same value for hex
+            0x23FC, 0x0000, 0x2000, 0x00BF, 0xFF04, // format pointer
+            0x60FE,
+        ];
+        for paused in [true, false] {
+            let mut app = super::test_app_with_audio_cpu_and_program(
+                Box::new(crate::audio::NullSink),
+                crate::config::CpuModel::M68000,
+                &program,
+            );
+            fit_uaelib(&mut app);
+            let format = b"Output value: %ld ($%lx)\n\0";
+            app.emu.bus_mut().mem.chip_ram[0x2000..0x2000 + format.len()].copy_from_slice(format);
+            app.open_console();
+            app.paused = paused;
+            // The workspace has already presented and cached its console.
+            // Both a debugger step and ordinary frame execution must surface
+            // new logs without waiting for another UI interaction or timer.
+            app.debug_snapshot_dirty.set(false);
+            if paused {
+                app.emu.debug_step_instructions(3).unwrap();
+            } else {
+                app.emu.step_frame().unwrap();
+            }
+            assert_eq!(app.paused, paused);
+            assert!(!app.service_uaelib());
+            assert_eq!(
+                app.console_panel
+                    .as_ref()
+                    .unwrap()
+                    .output
+                    .back()
+                    .map(String::as_str),
+                Some("DBG: Output value: 1482784 ($16a020)")
+            );
+            assert!(
+                app.debug_snapshot_dirty.get(),
+                "delivering guest output must refresh the cached console UI: paused={paused}"
+            );
+            // An empty poll should leave a freshly presented console cached.
+            app.debug_snapshot_dirty.set(false);
+            assert!(!app.service_uaelib());
+            assert!(!app.debug_snapshot_dirty.get());
+        }
     }
 
     #[test]
