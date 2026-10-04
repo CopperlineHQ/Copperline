@@ -145,6 +145,9 @@ pub fn board_config(
                 // backend), so this is granted unconditionally, same
                 // reasoning as `resolve` just above.
                 host_sockets: true,
+                // The board's only file resource is its own boot ROM, which
+                // it never writes; the bundled ROM is not even a host file.
+                resource_write: false,
             },
             net,
             config,

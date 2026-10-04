@@ -74,6 +74,7 @@ pub fn board_config(
                 net: false,
                 resolve: false,
                 host_sockets: false,
+                resource_write: false,
             },
             net: NetConfig::None,
             config,

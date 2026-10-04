@@ -50,6 +50,18 @@ pub struct WasmCaps {
     /// distinction. Like `net` and `resolve`, using it makes a board
     /// non-deterministic.
     pub host_sockets: bool,
+    /// Write-back to a file-typed resource (the `resource_write` import).
+    /// Without it a plugin can only `resource_len`/`resource_read` the files
+    /// its manifest names; with it, a board that owns persistent media (a
+    /// virtual PC hard disk image, say) can push changed bytes back to the
+    /// host file they came from. Opt-in per board and never implied: the
+    /// read-only imports are always available, this one is not. Resources
+    /// are already live external state reopened by path rather than carried
+    /// in a save state (see `wasmboard::load_resources`), so this does not
+    /// weaken the determinism contract -- it only makes that existing
+    /// non-determinism visible as writes instead of as staleness.
+    #[serde(default)]
+    pub resource_write: bool,
 }
 
 /// A plugin's non-autoconfig metadata: its display name, capabilities, and (for

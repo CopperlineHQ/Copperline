@@ -145,6 +145,8 @@ dma  = true             # capabilities, all default false:
 int2 = true             #   dma  -> the dma_read/dma_write host imports
 int6 = false            #   int2 -> may assert INT2 (PORTS)
                         #   int6 -> may assert INT6 (EXTER)
+# resource_write = true  # write back into its own file-typed options
+                        #   (the resource_write import; see below)
 # diag_vec = 0x40        # DiagArea offset in the window, for a plugin that
                         # serves its own autoboot ROM (see below)
 # A NIC plugin may also request the shared host networking capability:
@@ -188,6 +190,7 @@ manifest capabilities; importing one that was not granted fails to load):
 | `config_get` | `(key_ptr i32, key_len i32, out_ptr i32, out_cap i32) -> i32` | always: copy a setting's value to `out_ptr` (truncated to `out_cap`); returns its full length, or -1 if unset |
 | `resource_len` | `(name_ptr i32, name_len i32) -> i32` | always: byte length of a file resource, or -1 if absent |
 | `resource_read` | `(name_ptr i32, name_len i32, off i32, out_ptr i32, len i32) -> i32` | always: copy up to `len` bytes from offset `off`; returns the count, or -1 if absent |
+| `resource_write` | `(name_ptr i32, name_len i32, off i32, in_ptr i32, len i32) -> i32` | `resource_write`: copy `len` bytes of plugin memory into the resource at offset `off`, write-through to its host file; returns the count, or a negative error code |
 | `dma_read` | `(addr i32, ptr i32, len i32)` | `dma`: Amiga `addr` -> plugin memory `ptr` |
 | `dma_write` | `(addr i32, ptr i32, len i32)` | `dma`: plugin memory `ptr` -> Amiga `addr` |
 | `net_send` | `(ptr i32, len i32)` | `net`: transmit the Ethernet frame at plugin memory `ptr` |
@@ -290,6 +293,22 @@ file-typed option's bytes via `resource_len` / `resource_read` (keyed by the
 option's `key`). For an autoboot ROM, the plugin copies the `rom` resource into
 its linear memory at `init` and serves those bytes from `read()`, with `diag_vec`
 set in the manifest -- just like the in-tree A2091.
+
+File resources are read-only unless the manifest opts in with
+`resource_write = true`, which grants the `resource_write` import. That is for
+a board that owns persistent media -- a virtual hard disk image, say -- and
+needs the guest's changes to survive the session. A write is addressed by the
+option's `key`, never by a path the plugin supplies, so the writable set is
+exactly the files the manifest already named; it is write-through to that file
+at the given offset, and it never extends a resource past the length
+`resource_len` reports. It returns the byte count written, or a negative code:
+`-1` no such resource (or one with no host file behind it, such as the bundled
+HostSocket ROM), `-2` offset/length outside the resource, `-3` a source
+pointer outside the plugin's own linear memory, `-4` a host I/O error. None of
+those faults the board. Like the module itself, file resources are reopened by
+path on instantiation, on a bus reset, and on a save-state load rather than
+captured in a snapshot, so they already sit outside the determinism
+guarantee; writing them makes that visible rather than changing it.
 
 The user overrides settings per board in the main config, layered over the
 manifest defaults:
