@@ -54,8 +54,12 @@ impl<'a> SpriteLineSampler<'a> {
         base_control: ControlState,
         control_segments: &[ControlSegment],
     ) -> Self {
-        let base_x =
-            sprite_base_framebuffer_x(line.hstart, line.hsub_70ns, base_control, control_segments);
+        let base_x = sprite_base_framebuffer_x_resolved(
+            line.hstart,
+            line.hsub_70ns,
+            base_control,
+            control_segments,
+        );
         let mut bit_stops_subpixels = [0i32; SPRITE_LINE_MAX_BITS + 1];
         let mut bit_values = [0u8; SPRITE_LINE_MAX_BITS];
         let mut bit_count = 0usize;
@@ -303,7 +307,7 @@ impl BeamSpriteState {
         let pos = self.sprpos[sprite];
         let ctl = self.sprctl[sprite];
         let held = self.held[sprite];
-        let hstart = sprite_hstart(pos, ctl);
+        let hstart = crate::bus::sprite_hstart_for_fmode(sprite_hstart(pos, ctl), self.fmode);
         let hsub_70ns = sprite_hsub_70ns(ctl);
         let base_x = sprite_nominal_base_framebuffer_x(pos, ctl, self.bplcon0, self.fmode);
         // A held sprite was already active when SPREN was cleared. With no
@@ -646,69 +650,41 @@ pub(super) fn manual_sprite_lines_from_captured_dma_reuse(
 /// pixels the serializer has already shifted out, and a SPRxDATA write arms
 /// the channel again.
 ///
-/// Returns the captured lines that are still armed when their comparator
-/// fires; a cancelled fetch reaches neither the renderer nor the collision
+/// Returns the captured lines that are still armed at any comparator match;
+/// a cancelled fetch reaches neither the renderer nor the collision
 /// accumulator. HSTART is in lo-res pixels and the beam position in colour
 /// clocks, hence the halving.
+#[cfg(test)]
 pub(super) fn retain_armed_captured_sprite_lines<'a>(
     captured_sprite_lines: &'a [CapturedSpriteLine],
     events: &[BeamRegisterWrite],
+    fmode: u16,
 ) -> Cow<'a, [CapturedSpriteLine]> {
-    let is_sprite_ctl_write = |event: &BeamRegisterWrite| {
-        let off = event.offset & 0x01FE;
-        (0x140..=0x17F).contains(&off) && (off - 0x140) & 0x0006 == 0x2
+    let timeline = crate::bus::SpriteDmaMatchTimeline::new(fmode, events);
+    retain_armed_captured_sprite_lines_with_timeline(captured_sprite_lines, &timeline)
+}
+
+pub(super) fn retain_armed_captured_sprite_lines_with_timeline<'a>(
+    captured_sprite_lines: &'a [CapturedSpriteLine],
+    timeline: &crate::bus::SpriteDmaMatchTimeline,
+) -> Cow<'a, [CapturedSpriteLine]> {
+    let armed_at_any_match = |line: &CapturedSpriteLine| {
+        let matches = timeline.match_hstarts(line);
+        // A DMA line with no in-range match can still seed a later SPRxPOS
+        // register reuse, so let the regular replay decide whether it draws.
+        matches.iter().all(Option::is_none)
+            || matches
+                .into_iter()
+                .flatten()
+                .any(|hstart| timeline.armed_at(line, hstart))
     };
-    if captured_sprite_lines.is_empty() || !events.iter().any(is_sprite_ctl_write) {
-        return Cow::Borrowed(captured_sprite_lines);
-    }
-
-    // Per channel, the writes that move the armed latch as (line, beam, arms),
-    // sorted so each captured line can binary-search its own line's block.
-    let mut arming_writes: [Vec<(u32, u32, bool)>; 8] = std::array::from_fn(|_| Vec::new());
-    for event in events {
-        let off = event.offset & 0x01FE;
-        if !(0x140..=0x17F).contains(&off) {
-            continue;
-        }
-        // Only SPRxCTL (disarm) and SPRxDATA (arm) touch the armed latch.
-        let arms = match (off - 0x140) & 0x0006 {
-            0x2 => false,
-            0x4 => true,
-            _ => continue,
-        };
-        let sprite = ((off - 0x140) / 8) as usize;
-        arming_writes[sprite].push((event.vpos, event.hpos, arms));
-    }
-    for writes in &mut arming_writes {
-        writes.sort_unstable();
-    }
-
-    let armed_at_hstart = |line: &CapturedSpriteLine| {
-        if line.sprite >= 8 || line.beam_y < 0 {
-            return true;
-        }
-        let writes = &arming_writes[line.sprite];
-        let dma_hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[line.sprite / 2];
-        let match_hpos = (line.hstart.max(0) / 2) as u32;
-        let beam_y = line.beam_y as u32;
-        let first = writes.partition_point(|&(vpos, hpos, _)| (vpos, hpos) < (beam_y, dma_hpos));
-        let mut armed = true;
-        for &(vpos, hpos, arms) in &writes[first..] {
-            if vpos != beam_y || hpos > match_hpos {
-                break;
-            }
-            armed = arms;
-        }
-        armed
-    };
-
-    if captured_sprite_lines.iter().all(armed_at_hstart) {
+    if captured_sprite_lines.iter().all(armed_at_any_match) {
         return Cow::Borrowed(captured_sprite_lines);
     }
     Cow::Owned(
         captured_sprite_lines
             .iter()
-            .filter(|line| armed_at_hstart(line))
+            .filter(|line| armed_at_any_match(line))
             .copied()
             .collect(),
     )
@@ -989,6 +965,7 @@ pub(super) fn render_sprites_with_manual_lines_and_writes(
         sprite_dma_observed,
         manual_sprite_lines,
         visible_line0,
+        &crate::bus::SpriteDmaMatchTimeline::new(state.fmode, std::iter::empty()),
     )
 }
 
@@ -1013,6 +990,7 @@ pub(super) fn render_sprites_with_manual_lines_and_writes_reusing_mask(
     sprite_dma_observed: bool,
     manual_sprite_lines: Option<&[Vec<SpriteLine>]>,
     visible_line0: i32,
+    sprite_timeline: &crate::bus::SpriteDmaMatchTimeline,
 ) -> u16 {
     #[cfg(feature = "internal-diagnostics")]
     if crate::envcfg::flag("COPPERLINE_EXP_NO_SPRITE_RENDER") {
@@ -1034,6 +1012,7 @@ pub(super) fn render_sprites_with_manual_lines_and_writes_reusing_mask(
             captured_sprite_lines,
             use_captured_sprite_dma,
             manual_sprite_lines,
+            sprite_timeline,
             lines,
         );
     }
@@ -1608,17 +1587,19 @@ pub(super) fn collect_sprite_lines(
         captured_sprite_lines,
         use_captured_sprite_dma,
         manual_sprite_lines,
+        &crate::bus::SpriteDmaMatchTimeline::new(state.fmode, std::iter::empty()),
         &mut lines,
     );
     lines
 }
 
-fn collect_sprite_lines_into(
+pub(super) fn collect_sprite_lines_into(
     sprite: usize,
     state: &RenderState,
     captured_sprite_lines: &[CapturedSpriteLine],
     use_captured_sprite_dma: bool,
     manual_sprite_lines: Option<&[Vec<SpriteLine>]>,
+    sprite_timeline: &crate::bus::SpriteDmaMatchTimeline,
     lines: &mut Vec<SpriteLine>,
 ) {
     let sprite_dma_blocked_by_ddf = sprite_dma_disabled_by_bitplane_ddf(
@@ -1638,18 +1619,25 @@ fn collect_sprite_lines_into(
             captured_sprite_lines
                 .iter()
                 .filter(|line| line.sprite == sprite)
-                .map(|line| SpriteLine {
-                    hstart: line.hstart,
-                    hsub_70ns: line.hsub_70ns,
-                    beam_y: line.beam_y,
-                    data: line.data,
-                    datb: line.datb,
-                    data_ext: line.data_ext,
-                    datb_ext: line.datb_ext,
-                    width_words: line.width_words,
-                    attached: line.attached,
-                    x_start: 0,
-                    x_stop: FB_WIDTH,
+                .flat_map(|line| {
+                    sprite_timeline
+                        .match_hstarts(line)
+                        .into_iter()
+                        .flatten()
+                        .filter(|&hstart| sprite_timeline.armed_at(line, hstart))
+                        .map(|hstart| SpriteLine {
+                            hstart,
+                            hsub_70ns: line.hsub_70ns,
+                            beam_y: line.beam_y,
+                            data: line.data,
+                            datb: line.datb,
+                            data_ext: line.data_ext,
+                            datb_ext: line.datb_ext,
+                            width_words: line.width_words,
+                            attached: line.attached,
+                            x_start: 0,
+                            x_stop: FB_WIDTH,
+                        })
                 }),
         );
     }
@@ -1674,6 +1662,15 @@ fn collect_sprite_lines_into(
     }
 }
 
+#[cfg(test)]
+pub(super) fn sprite_dma_repeat_remains_armed(
+    line: &CapturedSpriteLine,
+    repeat_hstart: i32,
+    events: &[BeamRegisterWrite],
+) -> bool {
+    crate::bus::SpriteDmaMatchTimeline::new(0, events).armed_at(line, repeat_hstart)
+}
+
 pub(super) fn sprite_has_priority(sprite: usize, playfield: u8, control: ControlState) -> bool {
     // Denise resolves the two playfields against each other first (opacity,
     // then PF2PRI where both are opaque) and holds only the winning field's
@@ -1693,7 +1690,22 @@ pub(super) fn sprite_has_priority(sprite: usize, playfield: u8, control: Control
     group < control.playfield_priority_code(winner).min(4)
 }
 
+#[cfg(test)]
 pub(super) fn sprite_base_framebuffer_x(
+    hstart: i32,
+    hsub_70ns: bool,
+    base_control: ControlState,
+    control_segments: &[ControlSegment],
+) -> i32 {
+    sprite_base_framebuffer_x_resolved(
+        crate::bus::sprite_hstart_for_fmode(hstart, base_control.fmode),
+        hsub_70ns,
+        base_control,
+        control_segments,
+    )
+}
+
+fn sprite_base_framebuffer_x_resolved(
     hstart: i32,
     hsub_70ns: bool,
     base_control: ControlState,
@@ -1703,7 +1715,6 @@ pub(super) fn sprite_base_framebuffer_x(
     // horizontal comparator match (crate::bus::SPRITE_OUTPUT_DELAY_LORES,
     // ruler-probed against FS-UAE and vAmiga). The anchor carries the
     // active canvas shift like every comparator mapping.
-    let hstart = crate::bus::sprite_hstart_for_fmode(hstart, base_control.fmode);
     let base_x = (hstart + crate::bus::SPRITE_OUTPUT_DELAY_LORES - DIW_HSTART_FB0
         + active_canvas_shift_h())
         * 2;

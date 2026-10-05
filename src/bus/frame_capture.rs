@@ -827,11 +827,15 @@ impl Bus {
         vpos: u32,
     ) {
         if self.current_frame_sprite_collision_sources[fb_y].is_none() {
+            let timeline = SpriteDmaMatchTimeline::new(
+                self.current_frame_render_base.fmode,
+                &self.current_frame_render_events,
+            );
             self.current_frame_sprite_collision_sources[fb_y] =
                 Some(live_sprite_collision_sources_with_beam_gated_odd(
                     &self.current_frame_sprite_lines_by_y[fb_y],
                     vpos as i32,
-                    self.agnus.fmode(),
+                    &timeline,
                 ));
         }
     }
