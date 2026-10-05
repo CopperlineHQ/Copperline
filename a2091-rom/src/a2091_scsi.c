@@ -14,6 +14,8 @@
 #include <string.h>
 
 #include "scsi_all.h"
+#include "scsi_disk.h"
+#include "scsipi_disk.h"
 
 extern struct ExecBase *SysBase;
 
@@ -281,35 +283,29 @@ a2091_dma_stop(struct siop_softc *sc, int data_in)
 }
 
 static void
-a2091_complete(struct scsipi_xfer *xs, scsipi_xfer_result_t error,
+a2091_result(struct scsipi_xfer *xs, scsipi_xfer_result_t error,
                unsigned char status, int resid)
 {
     xs->error = error;
     xs->status = status;
     xs->resid = resid;
-    scsipi_done(xs);
 }
 
-static void
-a2091_run_xfer(struct siop_softc *sc, struct scsipi_xfer *xs)
+/* Start and finish are separate so the CPU can copy a completed read
+ * buffer while the DMAC fills the other one. Only one SCSI command is ever
+ * active; the shared SCSI layer still receives one completion per xfer. */
+static int
+a2091_start_xfer(struct siop_softc *sc, struct scsipi_xfer *xs)
 {
     struct scsipi_periph *periph = xs->xs_periph;
-    unsigned long left = WD_POLL_LIMIT;
-    int transferred = 0;
-    unsigned char asr;
-    unsigned char csr;
-    unsigned char status = 0;
-    int data_in = (xs->xs_control & XS_CTL_DATA_IN) != 0;
-    int data_out = (xs->xs_control & XS_CTL_DATA_OUT) != 0;
-    int use_dma = xs->datalen != 0 && (data_in || data_out) &&
+    int use_dma = (xs->xs_control & (XS_CTL_DATA_IN | XS_CTL_DATA_OUT)) != 0 &&
                   a2091_dma_safe(xs->data, (unsigned long)xs->datalen);
     int i;
 
     if (wd_wait(sc, ASR_CIP, 0) != 0) {
-        a2091_complete(xs, XS_TIMEOUT, 0, xs->datalen);
-        return;
+        a2091_result(xs, XS_TIMEOUT, 0, xs->datalen);
+        return -1;
     }
-
     wd_write(sc, WD_CONTROL, use_dma ? 0x80 : 0x00);
     wd_write(sc, WD_DESTINATION_ID, (unsigned char)periph->periph_target);
     wd_write(sc, WD_TARGET_LUN, (unsigned char)periph->periph_lun);
@@ -318,8 +314,21 @@ a2091_run_xfer(struct siop_softc *sc, struct scsipi_xfer *xs)
         wd_write_selected(sc, ((unsigned char *)xs->cmd)[i]);
     wd_set_transfer_count(sc, (unsigned long)xs->datalen);
     if (use_dma)
-        a2091_dma_start(sc, xs, data_out);
+        a2091_dma_start(sc, xs, (xs->xs_control & XS_CTL_DATA_OUT) != 0);
     wd_write(sc, WD_COMMAND, WD_CMD_SELECT_ATN_XFER);
+    return 0;
+}
+
+static void
+a2091_finish_xfer(struct siop_softc *sc, struct scsipi_xfer *xs)
+{
+    unsigned long left = WD_POLL_LIMIT;
+    int transferred = 0;
+    unsigned char asr, csr, status;
+    int data_in = (xs->xs_control & XS_CTL_DATA_IN) != 0;
+    int data_out = (xs->xs_control & XS_CTL_DATA_OUT) != 0;
+    int use_dma = (xs->xs_control & (XS_CTL_DATA_IN | XS_CTL_DATA_OUT)) != 0 &&
+                  a2091_dma_safe(xs->data, (unsigned long)xs->datalen);
 
     if (!use_dma && xs->datalen != 0 && (data_in || data_out)) {
         wd_select(sc, WD_DATA);
@@ -331,65 +340,149 @@ a2091_run_xfer(struct siop_softc *sc, struct scsipi_xfer *xs)
                 else
                     wd_write_selected(sc, xs->data[transferred]);
                 transferred++;
-            } else if ((asr & ASR_INT) != 0) {
+            } else if ((asr & ASR_INT) != 0)
                 break;
-            }
         }
-        if (left == 0) {
-            wd_abort(sc);
-            a2091_complete(xs, XS_TIMEOUT, 0, xs->datalen - transferred);
-            return;
-        }
+        if (left == 0)
+            goto timeout;
     }
-
-    if ((wd_asr(sc) & ASR_INT) == 0 && wd_wait_interrupt(sc) != 0) {
-        wd_abort(sc);
-        a2091_complete(xs, XS_TIMEOUT, 0, xs->datalen - transferred);
-        return;
-    }
+    if ((wd_asr(sc) & ASR_INT) == 0 && wd_wait_interrupt(sc) != 0)
+        goto timeout;
     csr = wd_ack(sc);
 
     /* A short variable-length reply changes to status with TC non-zero. */
     if (csr == CSR_UNEXP_STATUS) {
         wd_write(sc, WD_COMMAND_PHASE, 0x46);
         wd_write(sc, WD_COMMAND, WD_CMD_SELECT_ATN_XFER);
-        if (wd_wait_interrupt(sc) != 0) {
-            wd_abort(sc);
-            a2091_complete(xs, XS_TIMEOUT, 0, xs->datalen - transferred);
-            return;
-        }
+        if (wd_wait_interrupt(sc) != 0)
+            goto timeout;
         csr = wd_ack(sc);
     }
-
-    if (csr == CSR_TIMEOUT) {
-        if (use_dma)
-            a2091_dma_stop(sc, data_in);
-        a2091_complete(xs, XS_SELTIMEOUT, 0, xs->datalen - transferred);
-        return;
-    }
-    if (csr == CSR_ABORTED || csr != CSR_SEL_XFER_DONE) {
-        if (use_dma)
-            a2091_dma_stop(sc, data_in);
-        a2091_complete(xs, XS_DRIVER_STUFFUP, 0, xs->datalen - transferred);
-        return;
-    }
-
-    if (use_dma) {
+    if (use_dma)
         a2091_dma_stop(sc, data_in);
-        transferred = xs->datalen;
+    if (csr != CSR_SEL_XFER_DONE) {
+        a2091_result(xs, csr == CSR_TIMEOUT ? XS_SELTIMEOUT : XS_DRIVER_STUFFUP,
+                      0, xs->datalen);
+        return;
     }
-
+    if (use_dma) {
+        unsigned long residual;
+        wd_select(sc, WD_TC_MSB);
+        residual = (unsigned long)wd_read_selected(sc) << 16;
+        residual |= (unsigned long)wd_read_selected(sc) << 8;
+        residual |= wd_read_selected(sc);
+        if (residual > (unsigned long)xs->datalen)
+            residual = xs->datalen;
+        transferred = xs->datalen - residual;
+    }
     status = wd_read(sc, WD_TARGET_LUN);
+    /* Drain bus-free before starting another command. */
+    if (wd_wait_interrupt(sc) == 0)
+        (void)wd_ack(sc);
+    a2091_result(xs, status == SCSI_OK ? XS_NOERROR : XS_BUSY,
+                  status, xs->datalen - transferred);
+    return;
 
-    /* The chip posts bus-free after completion. Drain it if it is ready. */
-    if (wd_wait_interrupt(sc) == 0) {
-        unsigned char disc = wd_ack(sc);
-        (void)disc;
+timeout:
+    /* Stop the bus master before releasing any buffer on an error. */
+    if (use_dma)
+        a2091_dma_stop(sc, data_in);
+    wd_abort(sc);
+    a2091_result(xs, XS_TIMEOUT, 0, xs->datalen - transferred);
+}
+
+static void
+a2091_read_bounced(struct siop_softc *sc, struct scsipi_xfer *xs)
+{
+    struct scsipi_generic command = *xs->cmd;
+    unsigned char *buffers = xs->data;
+    unsigned char *destination = xs->xs_callback_arg;
+    unsigned char *pending = NULL;
+    uint32_t pending_size = 0, offset = 0, copied = 0;
+    uint32_t total = xs->datalen;
+    uint32_t capacity = xs->xs_bounce_chunk;
+    uint32_t blockshift = xs->xs_periph->periph_blkshift;
+    int double_buffered = xs->xs_bounce_allocated > capacity;
+    unsigned int slot = 0;
+    uint64_t block;
+
+    if (xs->cmdlen == sizeof(struct scsi_rw_6))
+        block = _3btol(((struct scsi_rw_6 *)&command)->addr) & 0x1fffff;
+    else if (xs->cmdlen == sizeof(struct scsipi_rw_10))
+        block = _4btol(((struct scsipi_rw_10 *)&command)->addr);
+    else
+        block = _8btol(((struct scsipi_rw_16 *)&command)->addr);
+
+    while (offset < total) {
+        uint32_t length = total - offset;
+        uint32_t blocks;
+        if (length > capacity)
+            length = capacity;
+        blocks = length >> blockshift;
+        *xs->cmd = command;
+        if (xs->cmdlen == sizeof(struct scsi_rw_6)) {
+            struct scsi_rw_6 *cmd = (struct scsi_rw_6 *)xs->cmd;
+            _lto3b(block, cmd->addr);
+            cmd->addr[0] |= command.bytes[0] & SCSI_CMD_LUN_MASK;
+            cmd->length = blocks & 0xff;
+        } else if (xs->cmdlen == sizeof(struct scsipi_rw_10)) {
+            struct scsipi_rw_10 *cmd = (struct scsipi_rw_10 *)xs->cmd;
+            _lto4b(block, cmd->addr);
+            _lto2b(blocks, cmd->length);
+        } else {
+            struct scsipi_rw_16 *cmd = (struct scsipi_rw_16 *)xs->cmd;
+            _lto8b(block, cmd->addr);
+            _lto4b(blocks, cmd->length);
+        }
+        xs->data = buffers + slot * capacity;
+        xs->datalen = length;
+        if (a2091_start_xfer(sc, xs) != 0)
+            break;
+        /* The next DMA is now active. Copy only the previous, completed
+         * chunk, never the buffer the controller is currently writing. */
+        if (pending != NULL) {
+            copy_dma_buffer(pending, destination + copied, pending_size);
+            copied += pending_size;
+            pending = NULL;
+        }
+        a2091_finish_xfer(sc, xs);
+        if (xs->error != XS_NOERROR || xs->resid != 0) {
+            if (xs->error == XS_NOERROR)
+                xs->error = XS_DRIVER_STUFFUP;
+            break;
+        }
+        pending = xs->data;
+        pending_size = length;
+        offset += length;
+        block += blocks;
+        if (double_buffered)
+            slot ^= 1;
+        else {
+            copy_dma_buffer(pending, destination + copied, pending_size);
+            copied += pending_size;
+            pending = NULL;
+        }
     }
+    if (pending != NULL) {
+        copy_dma_buffer(pending, destination + copied, pending_size);
+        copied += pending_size;
+    }
+    /* Preserve the original CDB and dimensions for retries and completion.
+     * Residual counts only data actually copied into the caller's buffer. */
+    *xs->cmd = command;
+    xs->data = buffers;
+    xs->datalen = total;
+    xs->resid = total - copied;
+}
 
-    a2091_complete(xs,
-                   status == SCSI_OK ? XS_NOERROR : XS_BUSY,
-                   status, xs->datalen - transferred);
+static void
+a2091_run_xfer(struct siop_softc *sc, struct scsipi_xfer *xs)
+{
+    if (xs->xs_bounce_chunk != 0)
+        a2091_read_bounced(sc, xs);
+    else if (a2091_start_xfer(sc, xs) == 0)
+        a2091_finish_xfer(sc, xs);
+    scsipi_done(xs);
 }
 
 void

@@ -153,15 +153,15 @@ uint32_t
 get_scripts_dma_addr(const void *scripts, uint32_t size)
 {
     if (__predict_false(controller_dma_needs_bounce((APTR)scripts, size))) {
-        void *copy = AllocMem(size, MEMF_CHIP | MEMF_PUBLIC);
+        void *copy = alloc_dma_buffer(size, MEMF_PUBLIC);
         if (copy != NULL) {
             CopyMem((APTR)scripts, copy, size);
-            printf("Scripts copied to Chip RAM at %lx\n", (unsigned long)copy);
+            printf("Scripts copied to DMA-visible RAM at %lx\n", (unsigned long)copy);
             asave->as_scripts_copy = copy;
             asave->as_scripts_copy_size = size;
             return (uint32_t)copy;
         }
-        printf("Failed to allocate Chip RAM for scripts!\n");
+        printf("Failed to allocate DMA-visible RAM for scripts!\n");
     }
     return (uint32_t)scripts;
 }
@@ -305,7 +305,7 @@ sd_read_capacity(struct scsipi_periph *periph, int *blksize, int flags)
     datap = AllocMem(sizeof (*datap), MEMF_PUBLIC);
     if (__predict_false(datap != NULL && controller_dma_needs_bounce(datap, sizeof (*datap)))) {
         FreeMem(datap, sizeof (*datap));
-        datap = AllocMem(sizeof (*datap), MEMF_CHIP | MEMF_PUBLIC);
+        datap = alloc_dma_buffer(sizeof (*datap), MEMF_PUBLIC);
     }
     if (datap == NULL)
         return (ERROR_NO_MEMORY);
@@ -542,7 +542,12 @@ sd_readwrite(void *periph_p, uint64_t blkno, uint b_flags, void *buf,
     struct scsipi_generic cmdbuf;
     struct scsipi_xfer *xs;
     uint32_t blkshift = periph->periph_blkshift;
-    uint32_t nblks = buflen >> blkshift;
+    uint32_t nblks;
+
+    if (blkshift >= 31 || buflen == 0 || buflen > 0x7fffffffUL ||
+        (buflen & ((1UL << blkshift) - 1)) != 0)
+        return IOERR_BADLENGTH;
+    nblks = buflen >> blkshift;
     int cmdlen;
     int flags;
 
@@ -558,7 +563,8 @@ sd_readwrite(void *periph_p, uint64_t blkno, uint b_flags, void *buf,
         use_6_byte_cmd = false;
     }
 
-    if ((blkno & 0x1fffff) != blkno || (nblks & 0xff) != nblks) {
+    if ((blkno & 0x1fffff) != blkno || (nblks & 0xff) != nblks ||
+        nblks > 0x200000UL - blkno) {
         use_6_byte_cmd = false;
     }
 
@@ -617,51 +623,88 @@ sd_readwrite(void *periph_p, uint64_t blkno, uint b_flags, void *buf,
             return (IOERR_UNITBUSY);
         }
 
-        /* Starting a Zorro II bounce buffer transfer. */
+        /* Starting a DMA bounce-buffer transfer. */
         if (((struct IOExtTD *)ior)->iotd_Req.io_Actual == 0) {
             /* New transfer - save the starting block */
             chan->chan_current_blkno = blkno;
         }
         /* else: continuation - chan_current_blkno already set and updated */
 
-        if (xs->datalen > MAX_BOUNCE_SIZE) {
-            /* Transfer is too large for a single bounce buffer.
-             * Cap the length of this transfer. The completion routine
-             * will issue the next chunk.
-             */
-            uint32_t nblks_new = MAX_BOUNCE_SIZE >> blkshift;
-            xs->datalen = nblks_new << blkshift;
-
-            /* Fix up the command block with new length */
-            if (use_6_byte_cmd) {
-                struct scsi_rw_6 *cmd = (struct scsi_rw_6 *) &xs->cmdstore;
-                cmd->length = nblks_new & 0xff;
-            } else if ((blkno & 0xffffffff) == blkno) {
-                struct scsipi_rw_10 *cmd = (struct scsipi_rw_10 *) &xs->cmdstore;
-                _lto2b(nblks_new, cmd->length);
-            } else {
-                struct scsipi_rw_16 *cmd = (struct scsipi_rw_16 *) &xs->cmdstore;
-                _lto4b(nblks_new, cmd->length);
+#ifdef DRIVER_A2091
+        /* Reads alternate two 64 KiB buffers. Under memory pressure use a
+         * single buffer, then progressively smaller whole-sector chunks. */
+        uint32_t chunk = (b_flags & B_READ) ? 64 * 1024 : MAX_BOUNCE_SIZE;
+        uint32_t sector = 1UL << blkshift;
+        uint32_t allocated = 0;
+        if (chunk > (uint32_t)xs->datalen)
+            chunk = xs->datalen;
+        chunk &= ~(sector - 1);
+        bounce_buf = NULL;
+        while (chunk >= sector && chunk != 0) {
+            allocated = chunk;
+            if ((b_flags & B_READ) && chunk < (uint32_t)xs->datalen)
+                allocated *= 2;
+            bounce_buf = alloc_dma_fast(allocated, MEMF_PUBLIC);
+            if (bounce_buf == NULL && allocated != chunk) {
+                allocated = chunk;
+                bounce_buf = alloc_dma_fast(allocated, MEMF_PUBLIC);
             }
+            /* Prefer one Fast RAM buffer over two Chip RAM buffers. */
+            if (bounce_buf == NULL) {
+                allocated = ((b_flags & B_READ) && chunk < (uint32_t)xs->datalen)
+                            ? chunk * 2 : chunk;
+                bounce_buf = AllocMem(allocated, MEMF_CHIP | MEMF_PUBLIC);
+                if (bounce_buf == NULL && allocated != chunk) {
+                    allocated = chunk;
+                    bounce_buf = AllocMem(allocated, MEMF_CHIP | MEMF_PUBLIC);
+                }
+            }
+            if (bounce_buf != NULL)
+                break;
+            chunk = (chunk / 2) & ~(sector - 1);
         }
-
-        chan->chan_bounce_allocated += xs->datalen;
-        bounce_buf = AllocMem(xs->datalen, MEMF_CHIP | MEMF_PUBLIC);
-        printf("Allocating %"PRIu32" bytes bounce buffer (%"PRIu32" total)\n",
-               xs->datalen, chan->chan_bounce_allocated);
         if (bounce_buf == NULL) {
-            /* Could not allocate bounce buffer, fail the command synchronously */
-            chan->chan_bounce_allocated -= xs->datalen;
             scsipi_put_xs(xs);
             return (TDERR_NoMem);
         }
+        xs->xs_bounce_allocated = allocated;
+        xs->xs_bounce_chunk = (b_flags & B_READ) ? chunk : 0;
+        chan->chan_bounce_allocated += allocated;
+        /* The read transport handles all chunks inside this xfer. Writes
+         * keep the shared command handler's continuation path. */
+        if (!(b_flags & B_READ) && chunk < (uint32_t)xs->datalen) {
+#else
+        uint32_t chunk = MAX_BOUNCE_SIZE;
+        if ((uint32_t)xs->datalen > chunk) {
+#endif
+            uint32_t nblks_new = chunk >> blkshift;
+            xs->datalen = nblks_new << blkshift;
+            if (use_6_byte_cmd) {
+                struct scsi_rw_6 *cmd = (struct scsi_rw_6 *)&xs->cmdstore;
+                cmd->length = nblks_new & 0xff;
+            } else if (cmdlen == sizeof(struct scsipi_rw_10)) {
+                struct scsipi_rw_10 *cmd = (struct scsipi_rw_10 *)&xs->cmdstore;
+                _lto2b(nblks_new, cmd->length);
+            } else {
+                struct scsipi_rw_16 *cmd = (struct scsipi_rw_16 *)&xs->cmdstore;
+                _lto4b(nblks_new, cmd->length);
+            }
+        }
+#ifndef DRIVER_A2091
+        bounce_buf = alloc_dma_buffer(xs->datalen, MEMF_PUBLIC);
+        if (bounce_buf == NULL) {
+            scsipi_put_xs(xs);
+            return (TDERR_NoMem);
+        }
+        chan->chan_bounce_allocated += xs->datalen;
+#endif
 
         xs->xs_callback_arg = xs->data; // Store original buffer
         xs->data = bounce_buf;
 
         if (xs->xs_control & XS_CTL_DATA_OUT) {
             /* Copy data to bounce buffer for a write operation */
-            CopyMem(xs->xs_callback_arg, xs->data, xs->datalen);
+            copy_dma_buffer(xs->xs_callback_arg, xs->data, xs->datalen);
         }
     }
 
@@ -748,7 +791,7 @@ sd_getgeometry(void *periph_p, void *geom_p, void *ior)
     inq = AllocMem(sizeof (*inq), MEMF_PUBLIC);
     if (__predict_false(inq != NULL && controller_dma_needs_bounce(inq, sizeof (*inq)))) {
         FreeMem(inq, sizeof (*inq));
-        inq = AllocMem(sizeof (*inq), MEMF_CHIP | MEMF_PUBLIC);
+        inq = alloc_dma_buffer(sizeof (*inq), MEMF_PUBLIC);
     }
     if (inq == NULL)
         return (ERROR_NO_MEMORY);
@@ -873,7 +916,7 @@ queue_get_mode_page(struct scsipi_xfer *oxs, uint8_t page, uint8_t dbd,
         modepage = AllocMem(sizeof (*modepage), MEMF_PUBLIC | MEMF_CLEAR);
         if (__predict_false(modepage != NULL && controller_dma_needs_bounce(modepage, sizeof (*modepage)))) {
             FreeMem(modepage, sizeof (*modepage));
-            modepage = AllocMem(sizeof (*modepage), MEMF_CHIP | MEMF_PUBLIC | MEMF_CLEAR);
+            modepage = alloc_dma_buffer(sizeof (*modepage), MEMF_PUBLIC | MEMF_CLEAR);
         }
         if (__predict_false(modepage == NULL)) {
             cmd_complete(oxs->amiga_ior, ERROR_NO_MEMORY);
@@ -1201,7 +1244,7 @@ sd_scsidirect(void *periph_p, void *scmd_p, void *ior)
     if (__predict_false(xs == NULL))
         return (1);  // out of memory
 
-    /* Check if buffer is in Zorro II memory and needs bounce buffer */
+    /* Check whether the controller can reach the entire buffer. */
     if (__predict_false(buflen > 0 && controller_dma_needs_bounce(buf, buflen))) {
         struct scsipi_channel *chan = periph->periph_channel;
         void *bounce_buf;
@@ -1220,17 +1263,20 @@ sd_scsidirect(void *periph_p, void *scmd_p, void *ior)
             return (IOERR_UNITBUSY);
         }
 
-        bounce_buf = AllocMem(buflen, MEMF_CHIP | MEMF_PUBLIC);
+        bounce_buf = alloc_dma_buffer(buflen, MEMF_PUBLIC);
         if (bounce_buf == NULL) {
             scsipi_put_xs(xs);
             return (TDERR_NoMem);
         }
 
         chan->chan_bounce_allocated += buflen;
+#ifdef DRIVER_A2091
+        xs->xs_bounce_allocated = buflen;
+#endif
 
         /* For writes, copy data to bounce buffer */
         if (flags & XS_CTL_DATA_OUT)
-            CopyMem(buf, bounce_buf, buflen);
+            copy_dma_buffer(buf, bounce_buf, buflen);
         xs->data = bounce_buf;
     }
 
@@ -1253,21 +1299,34 @@ sd_complete(struct scsipi_xfer *xs)
     struct IOExtTD *iotd = (struct IOExtTD *) xs->amiga_ior;
     struct scsipi_channel *chan = xs->xs_periph->periph_channel;
     bool freed_bounce = false;
+#ifdef DRIVER_A2091
+    bool pipelined = xs->xs_bounce_chunk != 0;
+    uint32_t actual = pipelined ? xs->datalen - xs->resid : xs->datalen;
+#else
+    uint32_t actual = xs->datalen;
+#endif
 
     /* If we used a bounce buffer, handle it now */
     if (xs->xs_callback_arg != NULL) {
         void *orig_buf = xs->xs_callback_arg;
         void *bounce_buf = xs->data;
 
-        if (xs->error == XS_NOERROR && (xs->xs_control & XS_CTL_DATA_IN)) {
-            /* Copy data back from bounce buffer for a read operation */
-            CopyMem(bounce_buf, orig_buf, xs->datalen);
-        }
+        if (xs->error == XS_NOERROR && (xs->xs_control & XS_CTL_DATA_IN)
+#ifdef DRIVER_A2091
+            && !pipelined
+#endif
+            )
+            copy_dma_buffer(bounce_buf, orig_buf, actual);
 
         xs->data = orig_buf; /* Restore original buffer pointer */
         xs->xs_callback_arg = NULL;
+#ifdef DRIVER_A2091
+        FreeMem(bounce_buf, xs->xs_bounce_allocated);
+        chan->chan_bounce_allocated -= xs->xs_bounce_allocated;
+#else
         FreeMem(bounce_buf, xs->datalen);
         chan->chan_bounce_allocated -= xs->datalen;
+#endif
         printf("Freeing %"PRIu32" bytes bounce buffer, %"PRIu32" remaining\n",
                xs->datalen, chan->chan_bounce_allocated);
         freed_bounce = true;
@@ -1275,11 +1334,17 @@ sd_complete(struct scsipi_xfer *xs)
 
     rc = translate_xs_error(xs);
 
+    /* Pipelined reads report only chunks successfully copied, including
+     * when a later chunk fails. Never count bytes from the failed chunk. */
+    if (rc == 0
+#ifdef DRIVER_A2091
+        || pipelined
+#endif
+        ) {
+        iotd->iotd_Req.io_Actual += actual;
+        chan->chan_current_blkno += (actual >> xs->xs_periph->periph_blkshift);
+    }
     if (rc == 0) {
-        /* Update actual bytes transferred */
-        iotd->iotd_Req.io_Actual += xs->datalen;
-        chan->chan_current_blkno += (xs->datalen >> xs->xs_periph->periph_blkshift);
-
         if (iotd->iotd_Req.io_Actual < iotd->iotd_Req.io_Length) {
             /* Split transfer: we have more to do.
              * We cannot call sd_readwrite directly here because we might be
@@ -1426,10 +1491,15 @@ scsidirect_complete(struct scsipi_xfer *xs)
 
         /* For reads, copy data back from bounce buffer */
         if (rc == 0 && (xs->xs_control & XS_CTL_DATA_IN))
-            CopyMem(bounce_buf, orig_buf, actual);
+            copy_dma_buffer(bounce_buf, orig_buf, actual);
 
+#ifdef DRIVER_A2091
+        FreeMem(bounce_buf, xs->xs_bounce_allocated);
+        chan->chan_bounce_allocated -= xs->xs_bounce_allocated;
+#else
         FreeMem(bounce_buf, xs->datalen);
         chan->chan_bounce_allocated -= xs->datalen;
+#endif
 
         /* Wake up any queued requests waiting for bounce buffer */
         Signal(chan->chan_task, chan->chan_sig_mask);

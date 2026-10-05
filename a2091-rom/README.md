@@ -38,9 +38,20 @@ image erased, validates the DiagArea/Resident/HUNK/TOC, and splits U13/U12.
 
 Short control transfers use asynchronous PIO. Sector transfers use the DMAC
 when the buffer address and length are even and the entire range lies below
-16 MiB. The shared SCSI layer allocates a Chip RAM bounce buffer otherwise,
-including for accelerator or Zorro III RAM. DMA completion uses a shared
-`INTB_PORTS` server; disconnect is drained with interrupts gated.
+16 MiB. Buffers outside that range, including accelerator or Zorro III RAM, use
+bounce buffers that prefer DMA-capable 24-bit Fast RAM and fall back to Chip
+RAM. Kickstart 1.3 uses address-bounded Fast RAM allocation because its memory
+headers do not carry `MEMF_24BITDMA`.
+
+Bounced disk reads alternate two 64 KiB buffers: the DMAC fills one while the
+CPU copies the completed contents of the other. If memory is scarce, the
+driver uses a single buffer or smaller whole-sector chunks. Writes use one
+buffer with chunks up to 256 KiB. SCSI-direct commands use the same allocation
+preference but retain their original CDB and are limited to 256 KiB when a
+bounce buffer is required. Copies use `CopyMemQuick` when the addresses and
+length are longword aligned, and `CopyMem` otherwise. A failed read reports
+only chunks already copied to the caller through `io_Actual`. DMA completion
+uses a shared `INTB_PORTS` server; disconnect is drained with interrupts gated.
 
 The ROM has been exercised headlessly against Copperline's A2091 model with
 Kickstart 3.1 and a real RDB Workbench installation. Real A2091/A590 EPROM

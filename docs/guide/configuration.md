@@ -2117,7 +2117,11 @@ drives**. `controller` picks which one:
   carries `scsi.device` and autoboots on Kickstart 1.3 and newer. Omit
   `rom` to use Copperline's bundled clean-room open ROM, which uses PIO for
   control commands and 24-bit DMAC transfers with safe bounce buffers for
-  inaccessible or unaligned memory. This also sidesteps the stock
+  inaccessible or unaligned memory. Bounce buffers prefer DMA-capable
+  24-bit Fast RAM, including controller RAM, and fall back to Chip RAM.
+  Bounced disk reads use two buffers to overlap DMA with copying; scarce
+  memory automatically selects smaller or single-buffer transfers. This
+  also sidesteps the stock
   A600/A1200 `scsi.device` only probing the IDE master. `[ide]` remains
   available, and both can be used at once.
 - `"a4091"`: a Commodore A4091 (NCR 53C710 SCSI-2) as a Zorro III

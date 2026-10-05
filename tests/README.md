@@ -135,6 +135,16 @@ INT2 status. Run all available cases with:
 cargo test --release --test a2091_boot -- --ignored --nocapture
 ```
 
+`tests/a2091_dma.rs` runs the committed `guest/a2091-test/` probe against
+private raw-disk fixtures. It checks Fast/Chip bounce allocation, overlapping
+read buffers, large reads and writes, unaligned copies, SCSI-direct residuals,
+partial failures, recovery, and buffer release. The AROS cases need no local
+assets; the 1.3 and 3.1 cases use the same Kickstart lookup as the boot tests.
+
+```sh
+cargo test --release --test a2091_dma -- --ignored --nocapture
+```
+
 ### Open CD32 FMV ROM
 
 `tests/cd32_fmv_aros.rs` contains two Cannon Fodder paths. The AROS case uses

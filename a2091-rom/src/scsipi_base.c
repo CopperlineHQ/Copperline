@@ -583,9 +583,9 @@ scsipi_get_xs(struct scsipi_periph *periph, int flags)
         memset(xs, 0, sizeof (*xs));
     } else {
         xs = AllocMem(sizeof (*xs), MEMF_CLEAR | MEMF_PUBLIC);
-        if (xs != NULL && is_zorro_ii_address(xs, sizeof (*xs))) {
+        if (xs != NULL && controller_dma_needs_bounce(xs, sizeof (*xs))) {
             FreeMem(xs, sizeof (*xs));
-            xs = AllocMem(sizeof (*xs), MEMF_CLEAR | MEMF_CHIP | MEMF_PUBLIC);
+            xs = alloc_dma_buffer(sizeof (*xs), MEMF_CLEAR | MEMF_PUBLIC);
         }
         if (xs == NULL)
             return (xs);

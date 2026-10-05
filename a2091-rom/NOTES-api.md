@@ -38,10 +38,18 @@ U12-odd split halves.
   and ST_DMA/SP_DMA/CINT/FLUSH at `$E0/$E2/$E4/$E8`.
 - The DMAC masters an even word stream in the 24-bit address space. Buffers
   that are odd, odd-sized, wrap, or end above `$01000000` must use PIO or a
-  Chip RAM bounce buffer.
+  bounce buffer in DMA-capable 24-bit Fast RAM, with Chip RAM as fallback.
+  The buffer allocator supports pre-`MEMF_24BITDMA` Kickstarts by reserving
+  free Fast RAM ranges below the DMAC ceiling through `AllocAbs`.
+- Bounced sector reads use two 64 KiB buffers to overlap copying with the
+  next DMA. A smaller or single-buffer allocation handles memory pressure.
+  Each chunk remains one complete WD33C93 command; generic SCSI-direct CDBs
+  are never split. The transport stops DMA before error completion and
+  reports only successfully copied chunks as actual data.
 - A WD combination command posts command-complete CSR `$16`, followed closely
-  by disconnect CSR `$85`. The interrupt bridge therefore queues status causes
-  rather than storing a single byte.
+  by disconnect CSR `$85`. The interrupt bridge captures completion in a
+  bounded queue and gates the shared PORTS line; the command tail drains
+  disconnect by polling before starting another command.
 
 ## Sources used as specifications
 

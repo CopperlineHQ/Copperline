@@ -310,7 +310,7 @@ unit0 = "{}"
     assert!(
         serial.contains("mfg=514 prod=3")
             && serial.contains("InitResident")
-            && serial.contains("Copperline A2091 scsidisk 42.40"),
+            && serial.contains("Copperline A2091 scsidisk 42.41"),
         "AROS did not initialise the bundled A2091 resident:\n{serial}"
     );
     assert!(distinct_colors(&png)? >= 3, "AROS boot screenshot is blank");
