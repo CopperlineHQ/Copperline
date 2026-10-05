@@ -1,8 +1,8 @@
 PYTHON ?= python3
-FULL_VERSION ?= 42.40
+FULL_VERSION ?= 42.41
 DEVICE_VERSION := 42
-DEVICE_REVISION := 40
-AMIGA_DATE := 31.8.2026
+DEVICE_REVISION := 41
+AMIGA_DATE := 5.10.2026
 
 include ../guest/toolchain.mk
 
@@ -25,13 +25,13 @@ SRCS := src/device.c src/version.c src/port.c src/attach.c \
 	src/a2091_scsi.c
 OBJS := $(patsubst %.c,$(OBJ)/%.o,$(SRCS)) $(OBJ)/src/reloc.o
 
-CFLAGS := -DBUILD_DATE=\"2026-08-31\" -DBUILD_TIME=\"00:00:00\" \
+CFLAGS := -DBUILD_DATE=\"2026-10-05\" -DBUILD_TIME=\"00:00:00\" \
 	-DAMIGA_DATE=\"$(AMIGA_DATE)\" -D_KERNEL -DPORT_AMIGA \
 	-DDRIVER_A2091 -DDEVNAME=scsi -DHAVE_ROM=1 \
 	-DDEVICE_VERSION=$(DEVICE_VERSION) -DDEVICE_REVISION=$(DEVICE_REVISION) \
 	-DFULL_VERSION=$(FULL_VERSION) -Isrc -Ithirdparty/mounter \
 	-Os -fomit-frame-pointer -noixemul -msmall-code -m68000 \
-	-Wall -Wextra -Wno-pointer-sign
+	-Wall -Wextra -Wno-pointer-sign -MMD -MP
 LDFLAGS := -nostartfiles -nostdlib -ldebug -lgcc -lc -lamiga -ramiga-dev
 
 ifeq ($(DEBUG_A2091),1)
@@ -47,7 +47,9 @@ endif
 
 all: $(ROM) $(NODRIVER_ROM)
 
-$(OBJ)/%.o: %.c
+-include $(OBJS:.o=.d)
+
+$(OBJ)/%.o: %.c Makefile
 	mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 

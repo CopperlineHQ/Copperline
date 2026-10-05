@@ -770,8 +770,8 @@ cmd_handler(void)
      * DMA to/from Zorro II address space.
      */
 #ifdef DRIVER_A2091
-    /* Internal protocol buffers must stay below the DMAC's 24-bit ceiling. */
-    asave->need_chip_ram_dma = 1;
+    /* A2091 protocol buffers use alloc_dma_buffer(), including on 1.3. */
+    asave->need_chip_ram_dma = 0;
 #else
     asave->need_chip_ram_dma = is_zorro_ii_address((void *)device_id_string, 1);
 #endif

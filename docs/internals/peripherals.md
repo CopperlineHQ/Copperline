@@ -239,9 +239,20 @@ cycles are not yet arbitrated against the CPU (TODO in `a2091.rs`).
 The bundled ROM's driver runs inquiry, sense, and mode commands with
 asynchronous PIO. Sector transfers use the DMAC when the buffer address and
 length are even and the whole buffer lies below 16 MiB; other transfers are
-bounced through a chip RAM buffer. A DMA transfer programs the ACR, starts
+bounced through DMA-capable 24-bit Fast RAM, falling back to Chip RAM. On
+Kickstart 1.3 the ROM reserves suitable free Fast RAM ranges with `AllocAbs`;
+on newer Exec versions it requests `MEMF_FAST | MEMF_24BITDMA`.
+
+Bounced disk reads alternate two buffers of up to 64 KiB. The driver starts
+the next WD33C93/DMAC command before copying the previous completed buffer,
+and drains that command before reusing its buffer. Memory pressure selects
+a single buffer or smaller whole-sector chunks. SCSI-direct commands retain
+their CDB and use one bounce buffer. On a read error, `io_Actual` includes only
+chunks already copied to the caller; DMA is stopped before buffers are freed.
+A DMA transfer programs the ACR, starts
 the DMAC, and completes through a shared `INTB_PORTS` interrupt server that
-queues command-complete and disconnect status pairs.
+captures command completion. The command tail drains disconnect status with
+interrupts gated.
 
 ### A4091 (`a4091.rs`)
 

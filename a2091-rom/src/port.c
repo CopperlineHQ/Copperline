@@ -51,6 +51,89 @@
 //
 short bug=TRUE;
 
+#ifdef DRIVER_A2091
+/* Kickstart 1.3 does not tag memory with MEMF_24BITDMA. Reserve a free
+ * range from a suitable Fast RAM header instead, under Exec's task lock.
+ * AllocAbs/FreeMem keep the allocation in the normal Exec memory lists. */
+static void *
+alloc_legacy_dma_fast(uint32_t size)
+{
+    struct MemHeader *mem;
+    void *result = NULL;
+    uint32_t rounded;
+
+    if (size == 0 || size > 0x01000000UL - 7)
+        return NULL;
+    rounded = (size + 7) & ~7UL;
+    Forbid();
+    for (mem = (struct MemHeader *)SysBase->MemList.lh_Head;
+         mem->mh_Node.ln_Succ != NULL && result == NULL;
+         mem = (struct MemHeader *)mem->mh_Node.ln_Succ) {
+        struct MemChunk *chunk;
+        /* On 1.3, PUBLIC is not necessarily stored in mh_Attributes. */
+        if ((mem->mh_Attributes & MEMF_FAST) == 0)
+            continue;
+        for (chunk = mem->mh_First; chunk != NULL; chunk = chunk->mc_Next) {
+            uint32_t start = (uint32_t)chunk;
+            uint32_t end = start + chunk->mc_Bytes;
+            if (start >= 0x01000000UL || end < start)
+                continue;
+            if (end > 0x01000000UL)
+                end = 0x01000000UL;
+            if (end - start >= rounded) {
+                result = AllocAbs(size, chunk);
+                if (result != NULL)
+                    break;
+            }
+        }
+    }
+    Permit();
+    return result;
+}
+#endif
+
+#ifdef DRIVER_A2091
+void *
+alloc_dma_fast(uint32_t size, uint32_t flags)
+{
+    void *result;
+    if (SysBase->LibNode.lib_Version >= 37)
+        result = AllocMem(size, flags | MEMF_PUBLIC | MEMF_FAST | MEMF_24BITDMA);
+    else {
+        result = alloc_legacy_dma_fast(size);
+        if (result != NULL && (flags & MEMF_CLEAR))
+            memset(result, 0, size);
+    }
+    if (result != NULL) {
+        if (!controller_dma_needs_bounce(result, (size + 1) & ~1UL))
+            return result;
+        FreeMem(result, size);
+    }
+    return NULL;
+}
+#endif
+
+void *
+alloc_dma_buffer(uint32_t size, uint32_t flags)
+{
+#ifdef DRIVER_A2091
+    void *result = alloc_dma_fast(size, flags);
+    if (result != NULL)
+        return result;
+#endif
+    return AllocMem(size, flags | MEMF_PUBLIC | MEMF_CHIP);
+}
+
+void
+copy_dma_buffer(const void *source, void *destination, uint32_t size)
+{
+    /* Exec's longword copy is safe only when all three operands align. */
+    if ((((uint32_t)source | (uint32_t)destination | size) & 3) == 0)
+        CopyMemQuick((APTR)source, destination, size);
+    else
+        CopyMem((APTR)source, destination, size);
+}
+
 void
 panic(const char *fmt, ...)
 {

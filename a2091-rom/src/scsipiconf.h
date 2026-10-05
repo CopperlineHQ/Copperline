@@ -338,7 +338,7 @@ struct scsipi_channel {
 	struct scsipi_xfer_queue chan_complete;
 
 #ifdef PORT_AMIGA
-	uint32_t chan_bounce_allocated;  /* bytes of Chip RAM used for bounce buffers */
+	uint32_t chan_bounce_allocated;  /* bytes of DMA RAM used for bounce buffers */
 	struct MinList chan_stalled_queue;
 	void *chan_continue_iotd;
 	struct Task *chan_task;
@@ -626,6 +626,10 @@ struct scsipi_xfer {
         void (*xs_done_callback)(struct scsipi_xfer *);
 
         void    *xs_callback_arg;       /* AmigaOS callback data */
+#ifdef DRIVER_A2091
+        uint32_t xs_bounce_allocated;   /* allocation size, independent of I/O */
+        uint32_t xs_bounce_chunk;       /* read pipeline chunk; zero for writes */
+#endif
         void    *amiga_ior;             /* AmigaOS IO request for transfer */
 	int	xs_control;		/* control flags */
 	volatile int xs_status;		/* status flags */

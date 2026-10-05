@@ -82,6 +82,13 @@ bsd_splx(int ilevel)
 
 void delay(int usecs);
 
+/* DMA-visible allocation, with a 24-bit Fast RAM preference on the A2091. */
+void *alloc_dma_buffer(uint32_t size, uint32_t flags);
+#ifdef DRIVER_A2091
+void *alloc_dma_fast(uint32_t size, uint32_t flags);
+#endif
+void copy_dma_buffer(const void *source, void *destination, uint32_t size);
+
 #define __UNVOLATILE(x) ((void *)(unsigned long)(volatile void *)(x))
 #define __UNCONST(a) ((void *)(intptr_t)(a))
 
