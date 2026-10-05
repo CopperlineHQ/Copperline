@@ -252,6 +252,10 @@ impl App {
             self.close_tool_panel(ToolPanelKind::Console);
             return;
         }
+        if outcome.clear {
+            self.service_console_lines();
+            self.console_backlog.clear();
+        }
         if let Some(panel) = self.console_panel.as_mut() {
             if outcome.clear {
                 panel.output.clear();
