@@ -54,8 +54,12 @@ impl<'a> SpriteLineSampler<'a> {
         base_control: ControlState,
         control_segments: &[ControlSegment],
     ) -> Self {
-        let base_x =
-            sprite_base_framebuffer_x(line.hstart, line.hsub_70ns, base_control, control_segments);
+        let base_x = sprite_base_framebuffer_x_resolved(
+            line.hstart,
+            line.hsub_70ns,
+            base_control,
+            control_segments,
+        );
         let mut bit_stops_subpixels = [0i32; SPRITE_LINE_MAX_BITS + 1];
         let mut bit_values = [0u8; SPRITE_LINE_MAX_BITS];
         let mut bit_count = 0usize;
@@ -303,7 +307,7 @@ impl BeamSpriteState {
         let pos = self.sprpos[sprite];
         let ctl = self.sprctl[sprite];
         let held = self.held[sprite];
-        let hstart = sprite_hstart(pos, ctl);
+        let hstart = crate::bus::sprite_hstart_for_fmode(sprite_hstart(pos, ctl), self.fmode);
         let hsub_70ns = sprite_hsub_70ns(ctl);
         let base_x = sprite_nominal_base_framebuffer_x(pos, ctl, self.bplcon0, self.fmode);
         // A held sprite was already active when SPREN was cleared. With no
@@ -653,6 +657,7 @@ pub(super) fn manual_sprite_lines_from_captured_dma_reuse(
 pub(super) fn retain_armed_captured_sprite_lines<'a>(
     captured_sprite_lines: &'a [CapturedSpriteLine],
     events: &[BeamRegisterWrite],
+    fmode: u16,
 ) -> Cow<'a, [CapturedSpriteLine]> {
     let is_sprite_ctl_write = |event: &BeamRegisterWrite| {
         let off = event.offset & 0x01FE;
@@ -689,7 +694,8 @@ pub(super) fn retain_armed_captured_sprite_lines<'a>(
         }
         let writes = &arming_writes[line.sprite];
         let dma_hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[line.sprite / 2];
-        let match_hpos = (line.hstart.max(0) / 2) as u32;
+        let hstart = crate::bus::sprite_dma_hstart_for_fmode(line.hstart, fmode, line.sprite);
+        let match_hpos = (hstart.max(0) / 2) as u32;
         let beam_y = line.beam_y as u32;
         let first = writes.partition_point(|&(vpos, hpos, _)| (vpos, hpos) < (beam_y, dma_hpos));
         let mut armed = true;
@@ -988,6 +994,7 @@ pub(super) fn render_sprites_with_manual_lines_and_writes(
         captured_sprite_lines,
         sprite_dma_observed,
         manual_sprite_lines,
+        &[],
         visible_line0,
     )
 }
@@ -1012,6 +1019,7 @@ pub(super) fn render_sprites_with_manual_lines_and_writes_reusing_mask(
     captured_sprite_lines: &[CapturedSpriteLine],
     sprite_dma_observed: bool,
     manual_sprite_lines: Option<&[Vec<SpriteLine>]>,
+    sprite_events: &[BeamRegisterWrite],
     visible_line0: i32,
 ) -> u16 {
     #[cfg(feature = "internal-diagnostics")]
@@ -1034,6 +1042,7 @@ pub(super) fn render_sprites_with_manual_lines_and_writes_reusing_mask(
             captured_sprite_lines,
             use_captured_sprite_dma,
             manual_sprite_lines,
+            sprite_events,
             lines,
         );
     }
@@ -1608,6 +1617,7 @@ pub(super) fn collect_sprite_lines(
         captured_sprite_lines,
         use_captured_sprite_dma,
         manual_sprite_lines,
+        &[],
         &mut lines,
     );
     lines
@@ -1619,6 +1629,7 @@ fn collect_sprite_lines_into(
     captured_sprite_lines: &[CapturedSpriteLine],
     use_captured_sprite_dma: bool,
     manual_sprite_lines: Option<&[Vec<SpriteLine>]>,
+    sprite_events: &[BeamRegisterWrite],
     lines: &mut Vec<SpriteLine>,
 ) {
     let sprite_dma_blocked_by_ddf = sprite_dma_disabled_by_bitplane_ddf(
@@ -1638,18 +1649,37 @@ fn collect_sprite_lines_into(
             captured_sprite_lines
                 .iter()
                 .filter(|line| line.sprite == sprite)
-                .map(|line| SpriteLine {
-                    hstart: line.hstart,
-                    hsub_70ns: line.hsub_70ns,
-                    beam_y: line.beam_y,
-                    data: line.data,
-                    datb: line.datb,
-                    data_ext: line.data_ext,
-                    datb_ext: line.datb_ext,
-                    width_words: line.width_words,
-                    attached: line.attached,
-                    x_start: 0,
-                    x_stop: FB_WIDTH,
+                .flat_map(|line| {
+                    [
+                        Some(crate::bus::sprite_dma_hstart_for_fmode(
+                            line.hstart,
+                            state.fmode,
+                            sprite,
+                        )),
+                        crate::bus::sprite_dma_repeat_hstart_for_fmode(
+                            line.hstart,
+                            state.fmode,
+                            sprite,
+                        )
+                        .filter(|&repeat| {
+                            sprite_dma_repeat_remains_armed(line, repeat, sprite_events)
+                        }),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .map(|hstart| SpriteLine {
+                        hstart,
+                        hsub_70ns: line.hsub_70ns,
+                        beam_y: line.beam_y,
+                        data: line.data,
+                        datb: line.datb,
+                        data_ext: line.data_ext,
+                        datb_ext: line.datb_ext,
+                        width_words: line.width_words,
+                        attached: line.attached,
+                        x_start: 0,
+                        x_stop: FB_WIDTH,
+                    })
                 }),
         );
     }
@@ -1674,6 +1704,35 @@ fn collect_sprite_lines_into(
     }
 }
 
+pub(super) fn sprite_dma_repeat_remains_armed(
+    line: &CapturedSpriteLine,
+    repeat_hstart: i32,
+    events: &[BeamRegisterWrite],
+) -> bool {
+    let dma_hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[line.sprite / 2];
+    let match_hpos = (repeat_hstart.max(0) / 2) as u32;
+    let beam_y = line.beam_y as u32;
+    let mut latest = None;
+    for (index, event) in events.iter().enumerate() {
+        if event.vpos != beam_y || event.hpos < dma_hpos || event.hpos > match_hpos {
+            continue;
+        }
+        let off = event.offset & 0x01FE;
+        if !(0x140..=0x17F).contains(&off) || ((off - 0x140) / 8) as usize != line.sprite {
+            continue;
+        }
+        let arms = match (off - 0x140) & 0x0006 {
+            0x2 => false,
+            0x4 => true,
+            _ => continue,
+        };
+        if latest.is_none_or(|(hpos, event_index, _)| (event.hpos, index) > (hpos, event_index)) {
+            latest = Some((event.hpos, index, arms));
+        }
+    }
+    latest.is_none_or(|(_, _, armed)| armed)
+}
+
 pub(super) fn sprite_has_priority(sprite: usize, playfield: u8, control: ControlState) -> bool {
     // Denise resolves the two playfields against each other first (opacity,
     // then PF2PRI where both are opaque) and holds only the winning field's
@@ -1693,7 +1752,22 @@ pub(super) fn sprite_has_priority(sprite: usize, playfield: u8, control: Control
     group < control.playfield_priority_code(winner).min(4)
 }
 
+#[cfg(test)]
 pub(super) fn sprite_base_framebuffer_x(
+    hstart: i32,
+    hsub_70ns: bool,
+    base_control: ControlState,
+    control_segments: &[ControlSegment],
+) -> i32 {
+    sprite_base_framebuffer_x_resolved(
+        crate::bus::sprite_hstart_for_fmode(hstart, base_control.fmode),
+        hsub_70ns,
+        base_control,
+        control_segments,
+    )
+}
+
+fn sprite_base_framebuffer_x_resolved(
     hstart: i32,
     hsub_70ns: bool,
     base_control: ControlState,
@@ -1703,7 +1777,6 @@ pub(super) fn sprite_base_framebuffer_x(
     // horizontal comparator match (crate::bus::SPRITE_OUTPUT_DELAY_LORES,
     // ruler-probed against FS-UAE and vAmiga). The anchor carries the
     // active canvas shift like every comparator mapping.
-    let hstart = crate::bus::sprite_hstart_for_fmode(hstart, base_control.fmode);
     let base_x = (hstart + crate::bus::SPRITE_OUTPUT_DELAY_LORES - DIW_HSTART_FB0
         + active_canvas_shift_h())
         * 2;

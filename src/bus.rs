@@ -10828,6 +10828,41 @@ pub(crate) fn sprite_hstart_for_fmode(hstart: i32, fmode: u16) -> i32 {
     }
 }
 
+/// SSCAN2 compares only the low eight horizontal bits. A DMA sprite whose
+/// first compare passed before its DATA slot was armed starts at the next
+/// match, 256 lo-res pixels later. This is distinct from a CPU-armed sprite,
+/// which may already have data at the first match.
+pub(crate) fn sprite_dma_hstart_for_fmode(hstart: i32, fmode: u16, sprite: usize) -> i32 {
+    let compare = sprite_hstart_for_fmode(hstart, fmode);
+    if fmode & 0x8000 == 0 || sprite >= SPRITE_DMA_SLOT1_HPOS.len() {
+        return compare;
+    }
+    // Denise's horizontal counter begins at $24; each Agnus colour clock
+    // advances it by two lo-res positions. The first DMA slot loads DATA and
+    // arms the serializer, so an earlier match cannot start this line.
+    let data_ready = 0x24 + 2 * SPRITE_DMA_SLOT1_HPOS[sprite] as i32;
+    if compare < data_ready {
+        compare + 0x100
+    } else {
+        compare
+    }
+}
+
+/// With SSCAN2 the horizontal high bit is a don't-care, so an armed sprite
+/// whose first match occurred in time can also serialize at HSTART + $100.
+pub(crate) fn sprite_dma_repeat_hstart_for_fmode(
+    hstart: i32,
+    fmode: u16,
+    sprite: usize,
+) -> Option<i32> {
+    if fmode & 0x8000 == 0 {
+        return None;
+    }
+    let first = sprite_dma_hstart_for_fmode(hstart, fmode, sprite);
+    let repeat = first + 0x100;
+    (first < 0x100 && repeat < 0x1C8).then_some(repeat)
+}
+
 fn sprite_hsub_70ns_from_ctl(ctl: u16) -> bool {
     ctl & 0x0010 != 0
 }
@@ -10887,16 +10922,24 @@ fn live_sprite_collision_sources_with_odd_policy(
         if requires_odd_enable && !include_disabled_odd && clxcon & (1 << (12 + group)) == 0 {
             continue;
         }
-        push_live_sprite_collision_source_if_visible(
-            &mut sources,
-            LiveSpriteCollisionSource {
-                group,
-                hstart: sprite_hstart_for_fmode(line.hstart, fmode),
-                hsub_70ns: line.hsub_70ns,
-                words: [line.data, line.datb, 0, 0],
-                requires_odd_enable,
-            },
-        );
+        for hstart in [
+            Some(sprite_dma_hstart_for_fmode(line.hstart, fmode, sprite)),
+            sprite_dma_repeat_hstart_for_fmode(line.hstart, fmode, sprite),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            push_live_sprite_collision_source_if_visible(
+                &mut sources,
+                LiveSpriteCollisionSource {
+                    group,
+                    hstart,
+                    hsub_70ns: line.hsub_70ns,
+                    words: [line.data, line.datb, 0, 0],
+                    requires_odd_enable,
+                },
+            );
+        }
     }
 
     sources

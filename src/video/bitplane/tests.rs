@@ -3001,6 +3001,7 @@ fn aga_shres_sprite_priority_and_underlay_are_resolved_per_35ns_half() {
             &captured,
             true,
             None,
+            &[],
             PAL_VISIBLE_LINE0,
         );
         (fb, sprite_subpixels)
@@ -5427,6 +5428,89 @@ fn captured_sprite_dma_lines_render_without_reparsing_frame_ram() {
 }
 
 #[test]
+fn sscan2_dma_sprites_match_again_after_their_fetch_slots() {
+    let mut state = blank_state();
+    state.agnus_revision = AgnusRevision::AgaAlice;
+    state.dmacon = DMACON_DMAEN | DMACON_SPREN;
+    state.fmode = 0x800C; // SSCAN2, 64-bit sprite fetches.
+    state.palette.write_ocs(25, 0x0F00);
+    state.palette.write_ocs(29, 0x0F00);
+    let base_palettes = [state.palette; FB_HEIGHT];
+    let palette_segments = vec![Vec::new(); FB_HEIGHT];
+    let base_controls = [ControlState::from_render_state(&state); FB_HEIGHT];
+    let control_segments = vec![Vec::new(); FB_HEIGHT];
+    let playfield_mask = vec![0u8; FB_PIXELS];
+    let mut collision_pixels = vec![CollisionPixel::default(); FB_PIXELS];
+    let mut fb = vec![rgb12_to_rgba8(0); FB_PIXELS];
+    let captured = [31, 95, 159].map(|hstart| CapturedSpriteLine {
+        sprite: match hstart {
+            31 => 6,
+            95 => 7,
+            _ => 4,
+        },
+        hstart,
+        hsub_70ns: false,
+        beam_y: PAL_VISIBLE_LINE0,
+        data: 0x8000,
+        datb: 0,
+        attached: false,
+        data_ext: [0; 3],
+        datb_ext: [0; 3],
+        width_words: 4,
+    });
+
+    render_sprites(
+        &state,
+        &[0; 64],
+        &mut fb,
+        SpriteClip {
+            x_start: 0,
+            x_stop: FB_WIDTH,
+            y_start: 0,
+            y_stop: FB_HEIGHT,
+        },
+        &base_palettes,
+        &palette_segments,
+        &base_controls,
+        &control_segments,
+        &playfield_mask,
+        &mut collision_pixels,
+        [false; 8],
+        &captured,
+        true,
+    );
+
+    let first = (287 + crate::bus::SPRITE_OUTPUT_DELAY_LORES - DIW_HSTART_FB0) * 2;
+    let second = (351 + crate::bus::SPRITE_OUTPUT_DELAY_LORES - DIW_HSTART_FB0) * 2;
+    let repeated = (415 + crate::bus::SPRITE_OUTPUT_DELAY_LORES - DIW_HSTART_FB0) * 2;
+    assert_eq!(fb[first as usize], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[second as usize], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[repeated as usize], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[0], rgb12_to_rgba8(0));
+
+    // A control write after the missed first match but before the repeated
+    // match must still disarm the DMA-loaded line.
+    let disarm = [beam_event(
+        PAL_VISIBLE_LINE0 as u32,
+        100,
+        0x0172, // SPR6CTL
+        0,
+    )];
+    assert!(retain_armed_captured_sprite_lines(&captured[..1], &disarm, 0x800C).is_empty());
+
+    let disarm_after_first = [beam_event(PAL_VISIBLE_LINE0 as u32, 180, 0x0162, 0)];
+    assert_eq!(
+        retain_armed_captured_sprite_lines(&captured[2..], &disarm_after_first, 0x800C).len(),
+        1
+    );
+    assert!(!sprite_dma_repeat_remains_armed(
+        &captured[2],
+        415,
+        &disarm_after_first
+    ));
+}
+
+#[test]
 fn dma_loaded_sprite_data_rearms_on_same_line_position_write() {
     let mut state = blank_state();
     state.dmacon = DMACON_DMAEN | DMACON_SPREN;
@@ -5541,7 +5625,7 @@ fn sprite_ctl_write_before_hstart_cancels_dma_loaded_line() {
         dma_loaded_line_with_ctl_write_at(COPPER_WAIT_HPOS_FB0 as u32);
 
     // Nothing survives: neither the captured fetch nor a reuse of its data.
-    assert!(retain_armed_captured_sprite_lines(&captured, &events).is_empty());
+    assert!(retain_armed_captured_sprite_lines(&captured, &events, 0).is_empty());
     let (fb, base_control) = render_dma_loaded_line_with_events(&captured, &events);
     for hstart in [captured[0].hstart, reg_hstart(i32::from(reused_hstart))] {
         let x = sprite_base_framebuffer_x(hstart, false, base_control, &[]);
@@ -5557,7 +5641,7 @@ fn sprite_ctl_write_after_hstart_keeps_dma_loaded_line() {
     let (captured, events, _) = dma_loaded_line_with_ctl_write_at(hstart_hpos);
 
     assert_eq!(
-        retain_armed_captured_sprite_lines(&captured, &events).len(),
+        retain_armed_captured_sprite_lines(&captured, &events, 0).len(),
         1
     );
     let (fb, base_control) = render_dma_loaded_line_with_events(&captured, &events);
@@ -5612,7 +5696,7 @@ fn sprite_ctl_write_stops_dma_data_reuse_by_later_position_write() {
     // the whole scanline stays background: the fetch's own output sits off
     // the left edge and the reposition may not resurrect it.
     assert_eq!(
-        retain_armed_captured_sprite_lines(&captured, &events).len(),
+        retain_armed_captured_sprite_lines(&captured, &events, 0).len(),
         1
     );
     let (fb, base_control) = render_dma_loaded_line_with_events(&captured, &events);
@@ -5685,7 +5769,7 @@ fn render_dma_loaded_line_with_events(
     let mut collision_pixels = vec![CollisionPixel::default(); FB_PIXELS];
     let mut fb = vec![rgb12_to_rgba8(0); FB_PIXELS];
 
-    let armed = retain_armed_captured_sprite_lines(captured, events);
+    let armed = retain_armed_captured_sprite_lines(captured, events, 0);
     let mut manual_sprite_lines = manual_sprite_lines_from_events_with_visible_line0(
         &state,
         events,

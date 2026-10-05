@@ -7999,8 +7999,9 @@ fn fmode_sscan2_masks_sprite_horizontal_comparator_high_bit() {
         attached: false,
     };
     let sources = super::live_sprite_collision_sources_with_beam_gated_odd(&[line], 42, 0x8000);
-    assert_eq!(sources.len(), 1);
+    assert_eq!(sources.len(), 2);
     assert_eq!(sources[0].hstart, 0x065);
+    assert_eq!(sources[1].hstart, 0x165);
 }
 
 /// Frame geometry latches at the frame wrap: a standard frame reports

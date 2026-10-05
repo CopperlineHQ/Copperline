@@ -70,7 +70,11 @@ fetches no bitplanes rather than clamping. FMODE's BSCAN2 and SSCAN2 bits
 repeat bitplane and sprite data on successive display lines. SSCAN2 also masks
 the high bit of Lisa's sprite horizontal comparator: HSTART `$100..$1FF`
 aliases `$000..$0FF` while the bit is active. DblPAL/DblNTSC modes rely on that
-alias for the Workbench pointer.
+alias for the Workbench pointer. DMA sprite data becomes armed at its channel's
+fetch slot; when the low-byte HSTART comparison has already passed, SSCAN2's
+next horizontal match places that sprite 256 lo-res pixels later in the line.
+An armed sprite can also display again at that second match when its first
+match occurred after the DMA fetch.
 
 The CPU sees the reach too: the motherboard decode (Gary and equivalents)
 routes the whole $000000-$1FFFFF window to Agnus, which decodes only as

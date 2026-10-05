@@ -4733,7 +4733,7 @@ pub fn sprite_framebuffer_origin(bus: &Bus, sprite: usize) -> Option<(i32, i32)>
     } else {
         0
     };
-    let hstart = crate::bus::sprite_hstart_for_fmode(top.hstart, base.fmode);
+    let hstart = crate::bus::sprite_dma_hstart_for_fmode(top.hstart, base.fmode, sprite);
     let x = (hstart + crate::bus::SPRITE_OUTPUT_DELAY_LORES - DIW_HSTART_FB0 + shift) * 2
         + i32::from(top.hsub_70ns && base.bplcon0 & BPLCON0_SHRES != 0);
     // Logical sprite coordinates live in the hi-res pitch domain; the
@@ -4966,8 +4966,11 @@ fn render_from_input_with_scratch(
     // A SPRxCTL write between a fetch slot and that channel's HSTART disarms
     // Denise before the serializer ever loads the fetched words, so those
     // captured lines are not displayed at all.
-    let armed_captured_sprite_lines =
-        retain_armed_captured_sprite_lines(&input.captured_sprite_lines, render_events);
+    let armed_captured_sprite_lines = retain_armed_captured_sprite_lines(
+        &input.captured_sprite_lines,
+        render_events,
+        state.fmode,
+    );
     if input.sprite_dma_observed {
         let dma_seeded_lines = manual_sprite_lines_from_captured_dma_reuse(
             &state,
@@ -5694,6 +5697,7 @@ fn render_from_input_with_scratch(
         captured_sprite_lines,
         sprite_dma_observed,
         Some(&manual_sprite_lines),
+        render_events,
         visible_line0,
     );
     render_timing.sprite_nanos = render_timing_elapsed(sprite_started);
