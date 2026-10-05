@@ -12377,32 +12377,111 @@ pub(super) mod uaelib_insights {
         }
     }
 
+    fn emit_guest_debug_line(app: &mut App, text: &str) {
+        let mask = app.emu.machine.ui_addr_mask();
+        let bus = app.emu.bus_mut();
+        bus.mem.chip_ram[0x2000..0x2000 + text.len()].copy_from_slice(text.as_bytes());
+        bus.mem.chip_ram[0x2000 + text.len()] = 0;
+        let mem = &mut bus.mem;
+        let lib = bus.uaelib.as_mut().unwrap();
+        lib.call(
+            crate::uaelib::FN_DEBUG_LOG,
+            [0x2000, 0, 0, 0, 0],
+            mem,
+            mask,
+            0,
+            0,
+        );
+    }
+
     #[test]
-    fn guest_debug_lines_while_the_console_is_closed_are_discarded() {
+    fn guest_debug_lines_survive_console_open_close_and_clear() {
         let mut app = test_app();
         fit_uaelib(&mut app);
-        let mask = app.emu.machine.ui_addr_mask();
-        {
-            let bus = app.emu.bus_mut();
-            bus.mem.chip_ram[0x2000..0x2006].copy_from_slice(b"early\0");
-            let mem = &mut bus.mem;
-            let lib = bus.uaelib.as_mut().unwrap();
-            lib.call(
-                crate::uaelib::FN_DEBUG_LOG,
-                [0x2000, 0, 0, 0, 0],
-                mem,
-                mask,
-                0,
-                0,
-            );
-        }
+        emit_guest_debug_line(&mut app, "early");
+        app.service_uaelib();
+        // Opening also drains anything the guest logged since the last frame.
+        emit_guest_debug_line(&mut app, "pending");
+        app.open_console();
+        assert_eq!(
+            app.console_panel
+                .as_ref()
+                .unwrap()
+                .output
+                .back()
+                .map(String::as_str),
+            Some("DBG: pending")
+        );
+        assert!(app
+            .console_panel
+            .as_ref()
+            .unwrap()
+            .output
+            .contains(&"DBG: early".into()));
+
+        app.close_tool_panel(super::ToolPanelKind::Console);
+        emit_guest_debug_line(&mut app, "later");
         app.service_uaelib();
         app.open_console();
-        app.service_uaelib();
+        let lines: Vec<&str> = app
+            .console_panel
+            .as_ref()
+            .unwrap()
+            .output
+            .iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(lines[1..], ["DBG: early", "DBG: pending", "DBG: later"]);
+
+        emit_guest_debug_line(&mut app, "queued before clear");
+        app.console_panel.as_mut().unwrap().input = "CLEAR".into();
+        app.console_submit();
+        assert!(app.console_backlog.is_empty());
+        assert!(app.console_panel.as_ref().unwrap().output.is_empty());
+        app.close_tool_panel(super::ToolPanelKind::Console);
+        app.open_console();
+        assert!(!app
+            .console_panel
+            .as_ref()
+            .unwrap()
+            .output
+            .iter()
+            .any(|line| line.starts_with("DBG:")));
+    }
+
+    #[test]
+    fn closed_console_guest_backlog_keeps_only_the_latest_500_lines() {
+        let mut app = test_app();
+        fit_uaelib(&mut app);
+        for i in 0..crate::video::ui::CONSOLE_SCROLLBACK_LINES + 3 {
+            emit_guest_debug_line(&mut app, &format!("line {i}"));
+            app.service_uaelib();
+        }
+        assert_eq!(
+            app.console_backlog.len(),
+            crate::video::ui::CONSOLE_SCROLLBACK_LINES
+        );
+        assert_eq!(
+            app.console_backlog.front().map(String::as_str),
+            Some("DBG: line 3")
+        );
+        assert_eq!(
+            app.console_backlog.back().map(String::as_str),
+            Some("DBG: line 502")
+        );
+        app.open_console();
         let panel = app.console_panel.as_ref().unwrap();
-        assert!(
-            !panel.output.iter().any(|line| line.starts_with("DBG:")),
-            "lines from before the pane opened are not replayed"
+        assert_eq!(
+            panel.output.len(),
+            crate::video::ui::CONSOLE_SCROLLBACK_LINES
+        );
+        assert_eq!(
+            panel.output.front().map(String::as_str),
+            Some("DBG: line 3")
+        );
+        assert_eq!(
+            panel.output.back().map(String::as_str),
+            Some("DBG: line 502")
         );
     }
 

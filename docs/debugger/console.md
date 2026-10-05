@@ -22,10 +22,11 @@ Inspector-only preview of the Console.
 Guest debug output sent via the
 [uaelib trap](../guide/run.md#uaelib-trap) `KPrintF` helper or the
 [memory-mapped printf ports](../guide/run.md#winuae-debug-port) appears in the
-console as `DBG:` lines while the pane is open (and is always mirrored to the
-host terminal). New lines refresh the console while paused too, including after
-single steps and breakpoints. Lines emitted while the console is closed are not
-buffered.
+console as `DBG:` lines and is mirrored to the host terminal. New lines refresh
+the console while paused too, including after
+single steps and breakpoints. The most recent 500 guest debug lines are retained
+while the console is closed and shown when it opens. Older lines are discarded;
+`CLEAR` also clears this retained guest log.
 
 Input navigation:
 

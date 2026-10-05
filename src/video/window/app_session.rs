@@ -513,29 +513,35 @@ impl App {
         }
     }
 
+    /// Drain the core's bounded pending queue into the window's session
+    /// scrollback, whether or not the console pane has been opened yet.
+    pub(super) fn service_console_lines(&mut self) {
+        let lines = self.emu.take_uaelib_console_lines();
+        #[cfg(feature = "gdb")]
+        self.gdb_log_lines(&lines);
+        let has_visible_output = self.console_panel.is_some() && !lines.is_empty();
+        for line in lines {
+            let line = format!("DBG: {line}");
+            if self.console_backlog.len() >= ui::CONSOLE_SCROLLBACK_LINES {
+                self.console_backlog.pop_front();
+            }
+            if let Some(panel) = self.console_panel.as_mut() {
+                panel.push_output(line.clone());
+            }
+            self.console_backlog.push_back(line);
+        }
+        if has_visible_output {
+            // A step or breakpoint can leave the machine paused, with
+            // no paced inspector redraw to replace the cached egui frame.
+            self.request_redraw();
+        }
+    }
+
     /// The guest's `warpmode()` through the uaelib trap, once per retired
     /// frame. Returns true when pacing changed, so the burst can break and
     /// the new pacing takes effect at this frame.
     pub(super) fn service_uaelib(&mut self) -> bool {
-        // Drain the console mirror every committed frame (keeping the ring
-        // from sitting full); the lines only land somewhere when the pane
-        // is open. Ones emitted while it is closed are not replayed: they
-        // already reached stdout, and opening the console is opening a new
-        // terminal on the channel, not a scrollback of the old one.
-        let lines = self.emu.take_uaelib_console_lines();
-        #[cfg(feature = "gdb")]
-        self.gdb_log_lines(&lines);
-        if let Some(panel) = self.console_panel.as_mut() {
-            let has_output = !lines.is_empty();
-            for line in lines {
-                panel.push_output(format!("DBG: {line}"));
-            }
-            if has_output {
-                // A step or breakpoint can leave the machine paused, with
-                // no paced inspector redraw to replace the cached egui frame.
-                self.request_redraw();
-            }
-        }
+        self.service_console_lines();
         match self.emu.take_uaelib_warp_request() {
             Some(on) => self.set_warp(on, WarpSource::Guest).changed,
             None => false,

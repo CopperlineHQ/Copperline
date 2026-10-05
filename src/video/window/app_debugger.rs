@@ -287,6 +287,8 @@ impl App {
     }
 
     pub(super) fn open_console(&mut self) {
+        // A guest may have logged since the last frame was serviced.
+        self.service_console_lines();
         let shared_pause = self.egui_other_tool_pause(ToolPanelKind::Console);
         if self.console_panel.is_none() {
             self.suspend_mouse_capture_for_ui();
@@ -296,6 +298,9 @@ impl App {
             self.sync_live_audio_suspension();
             let mut panel = ui::ConsolePanel::default();
             panel.push_output("Copperline debugger console. Type HELP for commands.");
+            for line in &self.console_backlog {
+                panel.push_output(line.clone());
+            }
             self.console_panel = Some(panel);
             self.emu.machine.ui_set_pc_history_enabled(true);
             // Arm reverse debugging so the reverse commands work, exactly

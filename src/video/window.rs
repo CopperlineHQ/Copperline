@@ -1150,6 +1150,8 @@ pub struct App {
     /// The debugger console: a GDB-flavoured command line in its own tool
     /// window, so it can sit beside the debugger and Frame Analyzer.
     console_panel: Option<ui::ConsolePanel>,
+    /// Recent guest debug lines, retained across console open/close cycles.
+    console_backlog: std::collections::VecDeque<String>,
     /// Beam-space render of the analyzer trace's frame for the picture
     /// underlay: unlike `fb`, no presentation recentring or TV masking is
     /// applied, so its pixels line up with the DMA trace's beam grid.
@@ -2789,6 +2791,7 @@ impl App {
             debugger_panel: None,
             frame_analyzer_panel: None,
             console_panel: None,
+            console_backlog: std::collections::VecDeque::new(),
             analyzer_underlay_fb: std::rc::Rc::new(Vec::new()),
             analyzer_underlay_rows: 0,
             analyzer_underlay_width: FB_WIDTH,
