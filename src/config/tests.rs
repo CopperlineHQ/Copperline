@@ -68,6 +68,37 @@ fn host_monitor_override_replaces_config_and_can_restore_auto() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn window_position_round_trips_and_cli_override_replaces_it() -> Result<()> {
+    let mut raw = RawConfig::parse("[display]\nmonitor = \"2\"\nposition = [-40, 75]\n")?;
+    assert_eq!(
+        Config::try_from(raw.clone())?.window_position,
+        Some([-40, 75])
+    );
+    assert_eq!(
+        RawConfig::parse(&raw.to_toml_string()?)?.display.position,
+        Some(vec![-40, 75])
+    );
+    let overrides = ConfigOverrides {
+        window_position: Some([100, 80]),
+        ..Default::default()
+    };
+    assert!(!overrides.is_empty());
+    overrides.apply_to(&mut raw);
+    assert_eq!(Config::try_from(raw)?.window_position, Some([100, 80]));
+    for text in [
+        "position = [100]",
+        "position = [100, 80, 20]",
+        "position = [1.5, 2]",
+    ] {
+        assert!(
+            parse_config(&format!("[display]\n{text}\n")).is_err(),
+            "accepted {text}"
+        );
+    }
+    Ok(())
+}
+
 /// The player startup layers its settings file over the manifest's
 /// defaults: what the overlay carries wins, what it omits keeps the
 /// base, so a partial or hand-edited file still behaves.

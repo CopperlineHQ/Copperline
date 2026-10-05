@@ -83,6 +83,7 @@ range checks as the equivalent TOML fields:
 | `--full-screen` / `--windowed` | `[display] full_screen` | open fullscreen or windowed at start (default windowed) |
 | `--maximized` | `[display] maximized` | open a maximized window with borders and the desktop taskbar visible |
 | `--monitor SELECTOR` | `[display] monitor` | host display: `auto`, `primary`, a one-based number, or an exact name |
+| `--window-position X Y` | `[display] position = [X, Y]` | window top-left in logical pixels relative to the selected monitor |
 | `--list-monitors` | -- | list host display numbers, names, resolutions and scale factors, then exit |
 | `--window-scale SCALE` | `[display] window_scale` | initial window width and height multiplier, 0.5-4.0 (default 1) |
 | `--show-status-bar` / `--hide-status-bar` | `[display] status_bar` | status bar at start (default shown) |
@@ -1155,11 +1156,18 @@ window at its desktop size; restoring it resumes the normal canvas sizing.
 *Host monitor* picker is in A/V & Emu, Display. It shows the connected
 displays with their names and resolutions; Run applies the choice and Save
 retains it. Monitor selection also applies when entering fullscreen later.
+The *Window position* field on that page accepts `X, Y`; emptying it restores
+automatic placement. Coordinates are logical pixels from the chosen display's
+top-left corner, including negative offsets. With `monitor = "auto"`, a
+specified position uses the primary display. Without a position, a selected
+display centres the window; `auto` leaves placement to the host. Fullscreen
+and maximized windows ignore the coordinates.
 
 ```sh
 copperline --list-monitors
 copperline --monitor 2 --full-screen
 copperline --monitor "External display" --maximized
+copperline --monitor 2 --window-position 100 80
 ```
 
 The default, `"auto"`, leaves placement to the host and enters fullscreen on
@@ -1176,7 +1184,8 @@ Windows, macOS and X11 can place normal and maximized windows on the selected
 display. On Wayland, the compositor controls ordinary window placement;
 Copperline can request fullscreen on a selected display, subject to the
 compositor's policy. Wayland does not report a primary monitor, so use a
-name or number there. Headless captures ignore monitor selection, and
+name or number there. Window positions are also compositor controlled on
+Wayland. Headless captures ignore monitor selection and position, and
 `--list-monitors` loads no ROM or machine configuration.
 
 Saved auto-launch configurations use these window preferences too. Changing

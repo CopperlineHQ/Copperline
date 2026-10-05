@@ -1027,7 +1027,10 @@ unique name where possible. Window placement accounts for negative monitor
 origins and per-display DPI. When moving an existing window, centering uses
 its logical size scaled for the destination display, accounting for the
 resize caused by the DPI change. macOS uses logical desktop coordinates
-when moving between displays. Fullscreen passes the selected handle
+when moving between displays. Explicit window coordinates are logical offsets
+from the selected monitor origin; other hosts scale the offset into physical
+desktop coordinates. With an automatic monitor selector, an explicit offset
+uses the primary monitor. Fullscreen passes the selected handle
 to winit's borderless mode. Ordinary positioning is unavailable on Wayland.
 Monitor preferences and inventories are host presentation state: they do not
 enter save states or change headless capture geometry or emulation timing.

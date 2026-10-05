@@ -1308,6 +1308,35 @@ fn fixed_ram_pattern_box_hit_tests_to_its_own_edit() {
 }
 
 #[test]
+fn window_position_box_hit_tests_to_its_own_edit() {
+    let mut state = LauncherState::new(launcher::MachineSetup::default());
+    state.tab = LauncherTab::AvDisplay;
+    let index = launcher::rows(
+        state.tab,
+        state.setup.parallel_device(),
+        state.setup.serial_mode(),
+        state.setup.midi_out_is_mt32(),
+        state.setup.midi_out_is_csynth(),
+    )
+    .iter()
+    .position(|r| r.field == LauncherField::WindowPosition)
+    .unwrap();
+    let ui = UiState {
+        menu_open: false,
+        menu_rows: Vec::new(),
+        menu_nav: menu::MenuNav::default(),
+        panel: Some(Panel::Launcher(Box::new(state))),
+    };
+    let rect = panel_rect(ui.panel.as_ref().unwrap());
+    let row_y = launcher_row_y(rect, index) + launcher_nav_block_h(LauncherTab::AvDisplay);
+    let box_rect = launcher_text_rect(rect, row_y, LauncherField::WindowPosition);
+    assert_eq!(
+        ui.control_at((box_rect.x as i32 + 4, box_rect.y as i32 + 4)),
+        Some(UiControl::LauncherWindowPositionEdit)
+    );
+}
+
+#[test]
 fn debugger_controls_hit_test_and_entry_edits() {
     let ui = UiState {
         menu_open: false,

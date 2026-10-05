@@ -1491,6 +1491,7 @@ pub struct App {
     start_fullscreen: bool,
     start_maximized: bool,
     host_monitor: crate::config::HostMonitor,
+    window_position: Option<[i32; 2]>,
     /// Host USB gamepad reader (pure-Rust, no SDL2), mapped to the emulated
     /// port-2 digital joystick via a per-pad calibration. A no-op when no
     /// input backend is available (e.g. headless CI) or the pad is not yet
@@ -2674,6 +2675,7 @@ impl App {
         start_fullscreen: bool,
         start_maximized: bool,
         host_monitor: crate::config::HostMonitor,
+        window_position: Option<[i32; 2]>,
         window_scale: f64,
         hide_status_bar: bool,
         warp_speed: WarpSpeed,
@@ -2921,6 +2923,7 @@ impl App {
             start_fullscreen,
             start_maximized,
             host_monitor,
+            window_position,
             gamepad: crate::gamepad::GamepadReader::new(),
             gamepad_available: [false; 4],
             gamepad_quit_hold: None,
@@ -4467,6 +4470,18 @@ impl ApplicationHandler for App {
         } else {
             monitors::resolve(&self.host_monitor, &monitors, event_loop.primary_monitor())
         };
+        let position = monitors::effective_window_position(
+            self.window_position,
+            self.start_fullscreen || headless_capture,
+            self.start_maximized,
+        );
+        let placement_monitor = selected_monitor.clone().or_else(|| {
+            if monitors::auto_position_uses_primary(&self.host_monitor, position) {
+                event_loop.primary_monitor()
+            } else {
+                None
+            }
+        });
         let fullscreen = (self.start_fullscreen && !headless_capture)
             .then(|| Fullscreen::Borderless(selected_monitor.clone()));
         let mut attrs = WindowAttributes::default()
@@ -4480,8 +4495,8 @@ impl ApplicationHandler for App {
                 FB_WIDTH as f64 / 2.0,
                 window_present_height() as f64 / 2.0,
             ));
-        if let Some(monitor) = &selected_monitor {
-            attrs = attrs.with_position(monitors::initial_position(monitor, size));
+        if let Some(monitor) = &placement_monitor {
+            attrs = attrs.with_position(monitors::initial_position(monitor, size, position));
         }
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
@@ -7175,6 +7190,14 @@ impl App {
                     state.edit_commit();
                     if state.editing().is_none() {
                         state.begin_edit_ram_pattern();
+                    }
+                }
+            }
+            UiControl::LauncherWindowPositionEdit => {
+                if let Some(state) = self.launcher_state_mut() {
+                    state.edit_commit();
+                    if state.editing().is_none() {
+                        state.begin_edit_window_position();
                     }
                 }
             }

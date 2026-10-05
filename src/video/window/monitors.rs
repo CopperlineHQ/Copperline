@@ -7,7 +7,7 @@ use super::*;
 use crate::config::HostMonitor;
 use anyhow::bail;
 use winit::{
-    dpi::{PhysicalPosition, Position},
+    dpi::{LogicalPosition, PhysicalPosition, Position},
     monitor::MonitorHandle,
 };
 
@@ -111,7 +111,61 @@ fn centered_position(
     )
 }
 
-pub(super) fn initial_position(monitor: &MonitorHandle, size: LogicalSize<f64>) -> Position {
+fn offset_position(
+    origin: PhysicalPosition<i32>,
+    monitor_scale: f64,
+    offset: [i32; 2],
+) -> Position {
+    #[cfg(target_os = "macos")]
+    {
+        let origin = origin.to_logical::<f64>(monitor_scale);
+        LogicalPosition::new(
+            origin.x + f64::from(offset[0]),
+            origin.y + f64::from(offset[1]),
+        )
+        .into()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let offset = LogicalPosition::new(f64::from(offset[0]), f64::from(offset[1]))
+            .to_physical::<i32>(monitor_scale);
+        PhysicalPosition::new(
+            origin.x.saturating_add(offset.x),
+            origin.y.saturating_add(offset.y),
+        )
+        .into()
+    }
+}
+
+/// Fullscreen and maximized modes use their own placement policy; a saved
+/// window offset must not select the primary monitor on their behalf.
+pub(super) fn effective_window_position(
+    position: Option<[i32; 2]>,
+    full_screen: bool,
+    maximized: bool,
+) -> Option<[i32; 2]> {
+    if full_screen || maximized {
+        None
+    } else {
+        position
+    }
+}
+
+pub(super) fn auto_position_uses_primary(
+    selection: &HostMonitor,
+    position: Option<[i32; 2]>,
+) -> bool {
+    *selection == HostMonitor::Auto && position.is_some()
+}
+
+pub(super) fn initial_position(
+    monitor: &MonitorHandle,
+    size: LogicalSize<f64>,
+    offset: Option<[i32; 2]>,
+) -> Position {
+    if let Some(offset) = offset {
+        return offset_position(monitor.position(), monitor.scale_factor(), offset);
+    }
     #[cfg(target_os = "macos")]
     {
         macos_position(
@@ -168,26 +222,17 @@ pub(super) fn windowed_placement_supported(window: &Window) -> bool {
     true
 }
 
-pub(super) fn place_window(window: &Window, monitor: &MonitorHandle) {
+pub(super) fn place_window(window: &Window, monitor: &MonitorHandle, offset: Option<[i32; 2]>) {
     if !windowed_placement_supported(window) {
         return;
     }
     if window.is_maximized() {
         window.set_maximized(false);
     }
-    #[cfg(target_os = "macos")]
-    window.set_outer_position(macos_position(
-        monitor.position(),
-        monitor.size(),
-        monitor.scale_factor(),
+    window.set_outer_position(initial_position(
+        monitor,
         window.outer_size().to_logical(window.scale_factor()),
-    ));
-    #[cfg(not(target_os = "macos"))]
-    window.set_outer_position(centered_position(
-        monitor.position(),
-        monitor.size(),
-        monitor.scale_factor(),
-        window.outer_size().to_logical(window.scale_factor()),
+        offset,
     ));
 }
 
@@ -231,6 +276,13 @@ impl App {
             &window.available_monitors().collect::<Vec<_>>(),
             window.primary_monitor(),
         )
+    }
+
+    pub(super) fn placement_monitor(&self, offset: Option<[i32; 2]>) -> Option<MonitorHandle> {
+        if auto_position_uses_primary(&self.host_monitor, offset) {
+            return self.render.as_ref()?.window.primary_monitor();
+        }
+        self.selected_host_monitor()
     }
 
     pub(super) fn refresh_launcher_monitors(&mut self) {
@@ -350,5 +402,33 @@ mod tests {
             LogicalSize::new(800.0, 600.0),
         );
         assert_eq!(position, winit::dpi::LogicalPosition::new(2880.0, -50.0));
+    }
+
+    #[test]
+    fn explicit_position_uses_target_monitor_origin_and_scale() {
+        let position = offset_position(PhysicalPosition::new(-2560, -200), 2.0, [100, 80]);
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            position,
+            Position::Logical(LogicalPosition::new(-1180.0, -20.0))
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            position,
+            Position::Physical(PhysicalPosition::new(-2360, -40))
+        );
+    }
+
+    #[test]
+    fn fullscreen_and_maximized_ignore_saved_window_position() {
+        let position = Some([100, 80]);
+        assert_eq!(effective_window_position(position, false, false), position);
+        assert!(auto_position_uses_primary(&HostMonitor::Auto, position));
+        for (full_screen, maximized) in [(true, false), (false, true), (true, true)] {
+            let effective = effective_window_position(position, full_screen, maximized);
+            assert_eq!(effective, None);
+            assert!(!auto_position_uses_primary(&HostMonitor::Auto, effective));
+        }
+        assert!(!auto_position_uses_primary(&HostMonitor::Primary, position));
     }
 }

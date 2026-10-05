@@ -1045,6 +1045,8 @@ pub enum UiControl {
     LauncherSerialPortEdit(LauncherField),
     /// The fixed RAM power-on word on the Memory tab.
     LauncherRamPatternEdit,
+    /// Initial host window X/Y position on the Display tab.
+    LauncherWindowPositionEdit,
     /// The Create button on a Create Image page.
     LauncherNewImageCreate(LauncherField),
     /// The MB/GB written beside the hard-drive size, which swaps on click.

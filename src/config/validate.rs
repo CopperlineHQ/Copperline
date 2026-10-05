@@ -423,6 +423,11 @@ impl TryFrom<RawConfig> for Config {
             .transpose()
             .context("[display] monitor")?
             .unwrap_or_default();
+        let window_position = match raw.display.position.as_deref() {
+            None => None,
+            Some([x, y]) => Some([*x, *y]),
+            Some(_) => bail!("[display] position must contain exactly X and Y"),
+        };
         let window_scale = raw.display.window_scale.unwrap_or(defaults.window_scale);
         if !(0.5..=4.0).contains(&window_scale) {
             errors.push(anyhow!(
@@ -1481,6 +1486,7 @@ impl TryFrom<RawConfig> for Config {
             full_screen,
             maximized,
             monitor,
+            window_position,
             status_bar,
             joystick_input_mode,
             mouse_sensitivity,

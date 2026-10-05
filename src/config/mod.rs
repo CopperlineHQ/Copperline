@@ -438,6 +438,9 @@ pub struct Config {
     pub maximized: bool,
     /// Host monitor for window placement and fullscreen ([display] monitor).
     pub monitor: HostMonitor,
+    /// Initial top-left window position in logical pixels relative to the
+    /// selected host monitor (`[display] position` / `--window-position`).
+    pub window_position: Option<[i32; 2]>,
     /// Show the status bar at start (`[display] status_bar`, or
     /// `--show-status-bar` / `--hide-status-bar`). `Cmd+Shift+F` /
     /// `Alt+Shift+F` toggles it live.
@@ -2754,6 +2757,7 @@ impl Default for Config {
             full_screen: false,
             maximized: false,
             monitor: HostMonitor::Auto,
+            window_position: None,
             status_bar: true,
             joystick_input_mode: JoystickInputMode::Gamepad,
             mouse_sensitivity: 50,
@@ -3064,6 +3068,8 @@ pub struct ConfigOverrides {
     pub maximized: Option<bool>,
     /// Host display selector (--monitor).
     pub monitor: Option<String>,
+    /// Initial window position (`--window-position X Y`).
+    pub window_position: Option<[i32; 2]>,
     /// Initial window size multiplier (`--window-scale`). Same as
     /// `[display] window_scale`.
     pub window_scale: Option<f64>,
@@ -3172,6 +3178,7 @@ impl ConfigOverrides {
             && self.full_screen.is_none()
             && self.maximized.is_none()
             && self.monitor.is_none()
+            && self.window_position.is_none()
             && self.window_scale.is_none()
             && self.status_bar.is_none()
             && self.perf_overlay.is_none()
@@ -3458,6 +3465,9 @@ impl ConfigOverrides {
         }
         if let Some(monitor) = &self.monitor {
             raw.display.monitor = Some(monitor.clone());
+        }
+        if let Some(position) = self.window_position {
+            raw.display.position = Some(position.to_vec());
         }
         if let Some(maximized) = self.maximized {
             raw.display.maximized = Some(maximized);

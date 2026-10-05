@@ -1521,8 +1521,14 @@ impl App {
         self.start_fullscreen = cfg.full_screen;
         self.start_maximized = cfg.maximized && !cfg.full_screen;
         self.host_monitor = cfg.monitor.clone();
+        self.window_position = cfg.window_position;
+        let position = monitors::effective_window_position(
+            cfg.window_position,
+            cfg.full_screen,
+            cfg.maximized,
+        );
         let selected_monitor = self.selected_host_monitor();
-        if selected_monitor.is_some() {
+        if selected_monitor.is_some() || position.is_some() {
             self.clear_saved_play_position();
         }
         let is_fullscreen = self
@@ -1559,8 +1565,8 @@ impl App {
         }
         if let Some(r) = self.render.as_ref() {
             if !cfg.full_screen {
-                if let Some(monitor) = &selected_monitor {
-                    monitors::place_window(&r.window, monitor);
+                if let Some(monitor) = self.placement_monitor(position).as_ref() {
+                    monitors::place_window(&r.window, monitor, position);
                 }
             }
             r.window.set_maximized(cfg.maximized && !cfg.full_screen);

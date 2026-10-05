@@ -329,6 +329,7 @@ impl MachineSetup {
             start_maximized: cfg.maximized,
             host_monitor: cfg.monitor.clone(),
             host_monitors: Vec::new(),
+            window_position: cfg.window_position,
             window_scale: cfg.window_scale,
             show_status_bar: cfg.status_bar,
             floppy_sounds: cfg.audio.floppy_sounds,
@@ -846,6 +847,9 @@ impl MachineSetup {
         }
         if self.host_monitor != base.monitor {
             raw.display.monitor = Some(self.host_monitor.to_string());
+        }
+        if self.window_position != base.window_position {
+            raw.display.position = self.window_position.map(|position| position.to_vec());
         }
         if self.start_maximized != base.maximized {
             raw.display.maximized = Some(self.start_maximized);

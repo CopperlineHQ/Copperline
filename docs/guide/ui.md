@@ -866,8 +866,10 @@ The layout is:
     - **Video** -- the emulated picture: monitor bezel style, overscan,
       pixel aspect, scaling, autocrop, deinterlace, screen tint, phosphor,
       CRT shader and shader strength.
-    - **Display** -- the host window: start fullscreen, status bar, perf
-      overlay, VSync, and menu size.
+    - **Display** -- the host window: start fullscreen, host monitor and
+      window position, status bar, perf overlay, VSync, and menu size. The
+      position box accepts `X, Y` offsets from the chosen monitor; clear it
+      for automatic placement.
     - **Emulation**: power on at startup; run on startup (`[emulation]
       auto_launch`, which runs an opened configuration at once); realtime
       priority; pacing budget; warp speed; warp boot and its storage-idle
