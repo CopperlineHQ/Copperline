@@ -4467,11 +4467,13 @@ impl ApplicationHandler for App {
         } else {
             monitors::resolve(&self.host_monitor, &monitors, event_loop.primary_monitor())
         };
+        let position = monitors::effective_window_position(
+            self.window_position,
+            self.start_fullscreen || headless_capture,
+            self.start_maximized,
+        );
         let placement_monitor = selected_monitor.clone().or_else(|| {
-            if self.host_monitor == crate::config::HostMonitor::Auto
-                && self.window_position.is_some()
-                && !headless_capture
-            {
+            if monitors::auto_position_uses_primary(&self.host_monitor, position) {
                 event_loop.primary_monitor()
             } else {
                 None
@@ -4491,11 +4493,6 @@ impl ApplicationHandler for App {
                 window_present_height() as f64 / 2.0,
             ));
         if let Some(monitor) = &placement_monitor {
-            let position = if self.start_fullscreen || self.start_maximized {
-                None
-            } else {
-                self.window_position
-            };
             attrs = attrs.with_position(monitors::initial_position(monitor, size, position));
         }
         let window = match event_loop.create_window(attrs) {

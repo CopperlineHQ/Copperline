@@ -162,6 +162,7 @@ fn main() -> Result<()> {
         cfg.full_screen,
         cfg.maximized,
         cfg.monitor.clone(),
+        cfg.window_position,
         cfg.window_scale,
         true,
         cfg.emulation.warp_speed,

@@ -137,6 +137,27 @@ fn offset_position(
     }
 }
 
+/// Fullscreen and maximized modes use their own placement policy; a saved
+/// window offset must not select the primary monitor on their behalf.
+pub(super) fn effective_window_position(
+    position: Option<[i32; 2]>,
+    full_screen: bool,
+    maximized: bool,
+) -> Option<[i32; 2]> {
+    if full_screen || maximized {
+        None
+    } else {
+        position
+    }
+}
+
+pub(super) fn auto_position_uses_primary(
+    selection: &HostMonitor,
+    position: Option<[i32; 2]>,
+) -> bool {
+    *selection == HostMonitor::Auto && position.is_some()
+}
+
 pub(super) fn initial_position(
     monitor: &MonitorHandle,
     size: LogicalSize<f64>,
@@ -258,7 +279,7 @@ impl App {
     }
 
     pub(super) fn placement_monitor(&self, offset: Option<[i32; 2]>) -> Option<MonitorHandle> {
-        if self.host_monitor == HostMonitor::Auto && offset.is_some() {
+        if auto_position_uses_primary(&self.host_monitor, offset) {
             return self.render.as_ref()?.window.primary_monitor();
         }
         self.selected_host_monitor()
@@ -396,5 +417,18 @@ mod tests {
             position,
             Position::Physical(PhysicalPosition::new(-2360, -40))
         );
+    }
+
+    #[test]
+    fn fullscreen_and_maximized_ignore_saved_window_position() {
+        let position = Some([100, 80]);
+        assert_eq!(effective_window_position(position, false, false), position);
+        assert!(auto_position_uses_primary(&HostMonitor::Auto, position));
+        for (full_screen, maximized) in [(true, false), (false, true), (true, true)] {
+            let effective = effective_window_position(position, full_screen, maximized);
+            assert_eq!(effective, None);
+            assert!(!auto_position_uses_primary(&HostMonitor::Auto, effective));
+        }
+        assert!(!auto_position_uses_primary(&HostMonitor::Primary, position));
     }
 }
