@@ -2,6 +2,7 @@
 //! Byte-accurate, guest-driven tests of the bundled A2091 ROM's DMA buffers.
 //! The probe talks to scsi.device directly; disk images are private fixtures.
 
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -34,6 +35,10 @@ fn dma_addresses(log: &str) -> Vec<u32> {
 }
 
 fn run_case(name: &str, kick: Option<&Path>, fast: &str, chip: &str) {
+    run_case_with_lba(name, kick, fast, chip, false);
+}
+
+fn run_case_with_lba(name: &str, kick: Option<&Path>, fast: &str, chip: &str, boundary: bool) {
     let temp = std::env::temp_dir().join(format!(
         "copperline-a2091-dma-{name}-{}",
         std::process::id()
@@ -54,11 +59,28 @@ fn run_case(name: &str, kick: Option<&Path>, fast: &str, chip: &str) {
     let disk = temp.join("disk.hdf");
     let initial: Vec<u8> = (0..4 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
     std::fs::write(&disk, &initial).unwrap();
+    let large_disk = temp.join("large.hdf");
+    if boundary {
+        // Unix regular files support holes: logical size exceeds 2 TiB,
+        // but this private fixture writes only the 128 KiB boundary window.
+        let start = (1u64 << 41) - 64 * 1024;
+        let data: Vec<u8> = (0..128 * 1024 + 512).map(|i| (i % 251) as u8).collect();
+        let mut file = std::fs::File::create(&large_disk).unwrap();
+        file.set_len(start + data.len() as u64).unwrap();
+        file.seek(SeekFrom::Start(start)).unwrap();
+        file.write_all(&data).unwrap();
+        std::fs::write(temp.join("a2091-lba"), "").unwrap();
+    }
     let config = temp.join("config.toml");
     let quoted = |p: &Path| {
         p.to_string_lossy()
             .replace('\\', "\\\\")
             .replace('"', "\\\"")
+    };
+    let boundary_config = if boundary {
+        format!("unit1 = \"{}\"", quoted(&large_disk))
+    } else {
+        String::new()
     };
     let cpu = if kick.is_some() { "68020" } else { "68000" };
     let accelerator = if kick.is_some() { "8M" } else { "0" };
@@ -81,6 +103,7 @@ revision = "ECS"
 controller = "a2091"
 rom = "{}"
 unit0 = "{}"
+{boundary_config}
 "#,
             quoted(&root().join("assets/a2091/copperline-a2091.rom")),
             quoted(&disk)
@@ -122,7 +145,8 @@ unit0 = "{}"
         temp.display()
     );
     assert_eq!(
-        words[1], 511,
+        words[1],
+        if boundary { 1023 } else { 511 },
         "{name}: a guest data/guard/error check failed"
     );
     assert!(
@@ -227,4 +251,11 @@ fn a2091_dma_kickstarts() {
             },
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "runs the emulator with a sparse disk larger than 2 TiB"]
+fn a2091_dma_read_crosses_32_bit_lba_boundary() {
+    run_case_with_lba("aros-lba", None, "2M", "2M", true);
 }

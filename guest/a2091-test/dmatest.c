@@ -48,7 +48,7 @@ LONG entry(void)
     struct IOStdReq *req = NULL;
     UBYTE *allocation = NULL, *data = NULL;
     APTR hold = NULL;
-    ULONG hold_size = 0, i;
+    ULONG hold_size = 0, i, expected_mask = 511;
     ULONG report[8] = {0x41323039, 0, 0, 0, 0, 0, 0, 0};
     int opened = 0;
     BPTR output;
@@ -180,6 +180,33 @@ LONG entry(void)
             goto done;
     }
     report[1] |= 256;
+    /* Optional sparse-disk fixture straddles the 32-bit LBA boundary.
+     * TD_READ64 supplies byte offset 0x1ff:ffff0000 (2 TiB - 64 KiB). */
+    output = Open((STRPTR)"a2091-lba", MODE_OLDFILE);
+    if (output) {
+        Close(output);
+        expected_mask |= 512;
+        CloseDevice((struct IORequest *)req);
+        opened = 0;
+        if (OpenDevice((STRPTR)"scsi.device", 1, (struct IORequest *)req, 0))
+            goto done;
+        opened = 1;
+        req->io_Command = 24; /* TD_READ64 */
+        req->io_Data = data;
+        req->io_Length = 128UL * 1024 + 512;
+        req->io_Offset = 0xffff0000UL;
+        req->io_Actual = 0x1ff;
+        DoIO((struct IORequest *)req);
+        if (req->io_Error || req->io_Actual != req->io_Length ||
+            !pattern(data, req->io_Length, 0))
+            goto done;
+        report[1] |= 512;
+        CloseDevice((struct IORequest *)req);
+        opened = 0;
+        if (OpenDevice((STRPTR)"scsi.device", 0, (struct IORequest *)req, 0))
+            goto done;
+        opened = 1;
+    }
     /* A later chunk fails at end-of-media: preceding valid data must be
      * preserved, io_Actual must count only copied chunks, and the failed
      * chunk must leave the caller's sentinel untouched. */
@@ -218,5 +245,5 @@ done:
         Close(output);
     }
     CloseLibrary(DOSBase);
-    return report[1] == 511 ? 0 : 20;
+    return report[1] == expected_mask ? 0 : 20;
 }

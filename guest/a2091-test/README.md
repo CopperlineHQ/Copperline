@@ -22,10 +22,14 @@ The tests verify large reads and writes, guard bytes, unaligned copies,
 SCSI-direct reads, short DMA replies with exact residuals, direct DMA into
 Chip RAM, a failure after a successful read chunk, subsequent recovery, and
 buffer release. The host also checks DMA addresses, alternating read buffers,
-and the untouched sectors around the write. Successful fixtures are deleted;
-a failing fixture retains its report, log, disk, and screenshot for diagnosis.
+and the untouched sectors around the write. A Unix-only case uses a sparse
+disk with a seeded 128 KiB window around 2 TiB to verify `TD_READ64` across
+the 32-bit LBA boundary without wrapping to sector zero. Successful fixtures
+are deleted; a failing fixture retains its report, log, disk, and screenshot
+for diagnosis.
 
 `a2091-result` contains eight big-endian 32-bit words: magic `0x41323039`,
-a nine-bit pass mask (`511` on success), destination address, Chip/Fast free
-bytes before I/O, partial-read actual count, and Chip/Fast free bytes after
+a pass mask (`511` on success, `1023` with the optional sparse-LBA fixture),
+destination address, Chip/Fast free bytes before I/O, partial-read actual
+count, and Chip/Fast free bytes after
 I/O. Return code 0 means all checks passed; 20 means a check failed.

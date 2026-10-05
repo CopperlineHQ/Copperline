@@ -138,8 +138,9 @@ cargo test --release --test a2091_boot -- --ignored --nocapture
 `tests/a2091_dma.rs` runs the committed `guest/a2091-test/` probe against
 private raw-disk fixtures. It checks Fast/Chip bounce allocation, overlapping
 read buffers, large reads and writes, unaligned copies, SCSI-direct residuals,
-partial failures, recovery, and buffer release. The AROS cases need no local
-assets; the 1.3 and 3.1 cases use the same Kickstart lookup as the boot tests.
+partial failures, recovery, and buffer release. A Unix-only sparse-disk case
+also reads across the 32-bit LBA boundary through `TD_READ64`. The AROS cases
+need no local assets; the 1.3 and 3.1 cases use the same Kickstart lookup as the boot tests.
 
 ```sh
 cargo test --release --test a2091_dma -- --ignored --nocapture

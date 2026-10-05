@@ -578,8 +578,9 @@ sd_readwrite(void *periph_p, uint64_t blkno, uint b_flags, void *buf,
                                            SCSI_WRITE_6_COMMAND;
         _lto3b(blkno, cmd->addr);
         cmd->length = nblks & 0xff;
-    } else if ((blkno & 0xffffffff) == blkno) {
-        /* 10-byte CDB */
+    } else if ((blkno & 0xffffffff) == blkno &&
+               nblks <= 0x100000000ULL - blkno) {
+        /* Keep every chunk inside the CDB's 32-bit LBA range. */
         struct scsipi_rw_10 *cmd = (struct scsipi_rw_10 *) &cmdbuf;
         cmdlen = sizeof (*cmd);
         memset(cmd, 0, cmdlen);
