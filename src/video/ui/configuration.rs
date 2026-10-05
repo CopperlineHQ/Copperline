@@ -221,6 +221,8 @@ pub(in crate::video::ui) fn launcher_text_rect(
         y: row_y + (LAUNCH_ROW_H - LAUNCH_CONTROL_H) / 2,
         w: if field.is_netplay() {
             300
+        } else if field == LauncherField::WindowPosition {
+            220
         } else {
             LAUNCH_NAME_W
         },
@@ -313,6 +315,8 @@ pub(in crate::video::ui) fn value_box_control(field: LauncherField) -> UiControl
         UiControl::LauncherNetplayEdit(field)
     } else if field == LauncherField::RamPattern {
         UiControl::LauncherRamPatternEdit
+    } else if field == LauncherField::WindowPosition {
+        UiControl::LauncherWindowPositionEdit
     } else {
         // The serial addresses draw their own pair of boxes and never come
         // through here.

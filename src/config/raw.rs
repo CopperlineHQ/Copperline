@@ -397,6 +397,9 @@ pub(crate) struct RawDisplay {
     /// Host display: auto, primary, a one-based number, or an exact name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) monitor: Option<String>,
+    /// Top-left window position [X, Y] in logical pixels relative to the host monitor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) position: Option<Vec<i32>>,
     /// Show the status bar at start (default true).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) status_bar: Option<bool>,

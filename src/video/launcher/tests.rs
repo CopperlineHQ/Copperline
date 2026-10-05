@@ -28,6 +28,31 @@ fn host_monitor_picker_preserves_saved_and_disconnected_choices() {
 }
 
 #[test]
+fn window_position_text_box_validates_saves_and_can_restore_auto() {
+    let raw = RawConfig::parse("[display]\nposition = [-40, 75]\n").unwrap();
+    let mut state = LauncherState::new(MachineSetup::from_raw(&raw).unwrap());
+    assert_eq!(state.setup.value_label(F::WindowPosition), "-40, 75");
+    assert_eq!(state.setup.to_raw().display.position, Some(vec![-40, 75]));
+
+    state.begin_edit_window_position();
+    state.edit_buffer = "100, 80".to_string();
+    state.edit_commit();
+    assert_eq!(
+        state.setup.build_config().unwrap().window_position,
+        Some([100, 80])
+    );
+    state.begin_edit_window_position();
+    state.edit_buffer = "100, nope".to_string();
+    state.edit_commit();
+    assert_eq!(state.editing(), Some(EditTarget::WindowPosition));
+    assert_eq!(state.setup.window_position, Some([100, 80]));
+    state.edit_buffer.clear();
+    state.edit_commit();
+    assert_eq!(state.setup.value_label(F::WindowPosition), "Auto");
+    assert_eq!(state.setup.to_raw().display.position, None);
+}
+
+#[test]
 fn run_ahead_frames_survives_the_config_screen_round_trip() {
     let raw: RawConfig = toml::from_str("[emulation]\nrun_ahead_frames = 2\n").unwrap();
     let setup = MachineSetup::from_raw(&raw).unwrap();

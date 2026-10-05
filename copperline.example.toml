@@ -769,6 +769,10 @@ video = "PAL"
 # with "name:" if it resembles a number or keyword. Also --monitor.
 # Missing/ambiguous displays fall back to auto. Wayland controls ordinary
 # window placement; only fullscreen can request a particular display.
+# position: [X, Y] of the window's top-left corner, in logical pixels from
+# the selected monitor's top-left (or primary monitor when monitor is auto).
+# Example: position = [100, 80]. Omit to use automatic/centred placement.
+# Also --window-position X Y. Fullscreen and maximized modes ignore it.
 # window_scale: multiply the initial window width and height by 0.5-4.0
 # (default 1.0; also --window-scale). 2 opens at twice the normal size.
 # status_bar: show the status bar at start (default true; also

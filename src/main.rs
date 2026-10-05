@@ -1424,6 +1424,7 @@ fn main() -> Result<()> {
         cfg.full_screen,
         cfg.maximized,
         cfg.monitor.clone(),
+        cfg.window_position,
         cfg.window_scale,
         !cfg.status_bar,
         cfg.emulation.warp_speed,
@@ -1607,6 +1608,7 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         false,
         false,
         config::HostMonitor::Auto,
+        None,
         1.0,
         false,
         config::WarpSpeed::default(),
@@ -2047,6 +2049,21 @@ mod tests {
         let cli = parse(&["--list-monitors"]).unwrap();
         assert!(cli.list_monitors);
         assert!(!launcher_requested(&cli));
+    }
+
+    #[test]
+    fn window_position_cli_accepts_signed_coordinates_and_requires_both() {
+        let cli = parse(&["--monitor", "2", "--window-position", "-40", "75"]).unwrap();
+        assert_eq!(cli.overrides.window_position, Some([-40, 75]));
+        assert!(!launcher_requested(&cli));
+        for args in [
+            vec!["--window-position"],
+            vec!["--window-position", "2"],
+            vec!["--window-position", "x", "2"],
+            vec!["--window-position", "2", "--maximized"],
+        ] {
+            assert!(parse(&args).is_err(), "accepted {args:?}");
+        }
     }
 
     #[test]

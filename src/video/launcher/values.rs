@@ -161,6 +161,10 @@ impl MachineSetup {
             F::Scaling => self.scaling.label().to_string(),
             F::Tint => self.tint.menu_label().to_string(),
             F::HostMonitor => self.host_monitor_label(),
+            F::WindowPosition => self
+                .window_position
+                .map(|[x, y]| format!("{x}, {y}"))
+                .unwrap_or_else(|| "Auto".to_string()),
             F::Bezel => self.bezel.menu_label().to_string(),
             F::MenuScale => self.menu_scale.menu_label().to_string(),
             F::Mt32Lcd => self.mt32_lcd.menu_label().to_string(),

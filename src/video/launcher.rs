@@ -935,6 +935,8 @@ pub struct MachineSetup {
     start_maximized: bool,
     host_monitor: crate::config::HostMonitor,
     host_monitors: Vec<(crate::config::HostMonitor, String)>,
+    /// Initial window placement retained when loading and saving a config.
+    window_position: Option<[i32; 2]>,
     /// Initial window size ([display] window_scale), retained from TOML.
     window_scale: f64,
     /// Show the status bar at start ([display] status_bar).
@@ -3329,6 +3331,8 @@ pub enum EditTarget {
     SerialPort(LauncherField),
     /// The fixed 16-bit RAM power-on word on the Memory page.
     RamPattern,
+    /// Logical X and Y offsets from the host monitor's top-left corner.
+    WindowPosition,
     /// A session endpoint or shared game code.
     Netplay(LauncherField),
 }
@@ -4904,6 +4908,7 @@ impl LauncherState {
                 | EditTarget::SerialPort(f)
             ) if f == field
         ) || field == F::RamPattern && self.editing == Some(EditTarget::RamPattern)
+            || field == F::WindowPosition && self.editing == Some(EditTarget::WindowPosition)
     }
 
     /// The filesystem a Create Image row is about: the floppy page's or the
@@ -5250,6 +5255,17 @@ impl LauncherState {
         self.status = None;
     }
 
+    pub fn begin_edit_window_position(&mut self) {
+        self.edit_buffer = self
+            .setup
+            .window_position
+            .map(|[x, y]| format!("{x}, {y}"))
+            .unwrap_or_default();
+        self.editing = Some(EditTarget::WindowPosition);
+        self.edit_caret = Caret::end_of(&self.edit_buffer);
+        self.status = None;
+    }
+
     pub fn new(setup: MachineSetup) -> Self {
         let mut setup = setup;
         // Read the host devices as the screen opens so the pickers show what is
@@ -5520,6 +5536,12 @@ impl LauncherState {
         {
             return;
         }
+        if target == EditTarget::WindowPosition
+            && (self.edit_buffer.len() >= 26
+                || !(c.is_ascii_digit() || matches!(c, '-' | ',' | ' ')))
+        {
+            return;
+        }
         // A boot priority is a signed integer: digits, and a leading minus.
         if let EditTarget::DriveBootpri(_) = target {
             let minus_ok =
@@ -5757,6 +5779,32 @@ impl LauncherState {
                 self.edit_buffer.clear();
                 return;
             }
+            EditTarget::WindowPosition => {
+                let typed = self.edit_buffer.trim();
+                let position = if typed.is_empty() {
+                    None
+                } else {
+                    let parts: Vec<_> = typed.split(',').map(str::trim).collect();
+                    match parts.as_slice() {
+                        [x, y] => match (x.parse::<i32>(), y.parse::<i32>()) {
+                            (Ok(x), Ok(y)) => Some([x, y]),
+                            _ => {
+                                self.status =
+                                    Some(StatusMessage::err("Enter X, Y as signed integers"));
+                                return;
+                            }
+                        },
+                        _ => {
+                            self.status = Some(StatusMessage::err("Enter X, Y as signed integers"));
+                            return;
+                        }
+                    }
+                };
+                self.setup.window_position = position;
+                self.editing = None;
+                self.edit_buffer.clear();
+                return;
+            }
             EditTarget::BoardOption { .. } => {}
         }
         self.editing = None;
@@ -5772,7 +5820,8 @@ impl LauncherState {
             | EditTarget::NewImageText(_)
             | EditTarget::SerialHost(_)
             | EditTarget::SerialPort(_)
-            | EditTarget::RamPattern => {}
+            | EditTarget::RamPattern
+            | EditTarget::WindowPosition => {}
         }
     }
 

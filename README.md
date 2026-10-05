@@ -108,6 +108,8 @@ maximized window with its title bar and desktop taskbar visible;
 `--full-screen` opens borderless fullscreen.
 Use `--list-monitors` to list host displays and `--monitor 2` to open on the
 second display, or select *Host monitor* in the launcher's Display category.
+Use `--window-position 100 80` or the launcher's *Window position* field to
+place its top-left corner 100 by 80 logical pixels into that display.
 On Wayland, monitor selection applies to fullscreen; the compositor places
 ordinary windows.
 

@@ -691,6 +691,17 @@ where
                 let monitor: copperline::config::HostMonitor = value.parse()?;
                 overrides.monitor = Some(monitor.to_string());
             }
+            "--window-position" => {
+                let mut coordinate = |axis| -> Result<i32> {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| anyhow!("--window-position requires X and Y coordinates"))?;
+                    value.parse::<i32>().map_err(|_| {
+                        anyhow!("--window-position {axis} must be a signed integer, got {value:?}")
+                    })
+                };
+                overrides.window_position = Some([coordinate("X")?, coordinate("Y")?]);
+            }
             "--maximized" => {
                 overrides.full_screen = Some(false);
                 overrides.maximized = Some(true);
@@ -2173,6 +2184,7 @@ fn print_help() {
          --full-screen / --windowed     open borderless fullscreen / windowed at start\n  \
          --maximized                   open a bordered, maximized window with taskbar visible\n  \
          --monitor SELECTOR            host monitor: auto, primary, 1-based number, or name\n  \
+         --window-position X Y         window top-left, logical pixels from host monitor\n  \
          --list-monitors               list host monitors and exit\n  \
          --window-scale SCALE          initial window size multiplier: 0.5-4.0 (default: 1)\n  \
          --show-status-bar / --hide-status-bar  status bar at start (default: shown)\n  \
