@@ -3001,8 +3001,8 @@ fn aga_shres_sprite_priority_and_underlay_are_resolved_per_35ns_half() {
             &captured,
             true,
             None,
-            &[],
             PAL_VISIBLE_LINE0,
+            &crate::bus::SpriteDmaMatchTimeline::new(state.fmode, std::iter::empty()),
         );
         (fb, sprite_subpixels)
     };
@@ -5508,6 +5508,53 @@ fn sscan2_dma_sprites_match_again_after_their_fetch_slots() {
         415,
         &disarm_after_first
     ));
+}
+
+#[test]
+fn captured_sprite_lines_use_fmode_when_each_line_was_serialized() {
+    let mut state = blank_state();
+    state.agnus_revision = AgnusRevision::AgaAlice;
+    state.dmacon = DMACON_DMAEN | DMACON_SPREN;
+    state.fmode = 0x800C; // Final frame value must not affect the first row.
+    let first = CapturedSpriteLine {
+        sprite: 4,
+        hstart: 159,
+        hsub_70ns: false,
+        beam_y: PAL_VISIBLE_LINE0,
+        data: 0x8000,
+        datb: 0,
+        attached: false,
+        data_ext: [0; 3],
+        datb_ext: [0; 3],
+        width_words: 1,
+    };
+    let second = CapturedSpriteLine {
+        beam_y: PAL_VISIBLE_LINE0 + 1,
+        ..first
+    };
+    let fmode_write = beam_event((PAL_VISIBLE_LINE0 + 1) as u32, 0, 0x1FC, 0x800C);
+    let timeline = crate::bus::SpriteDmaMatchTimeline::new(0, &[fmode_write]);
+    let mut lines = Vec::new();
+    collect_sprite_lines_into(
+        4,
+        &state,
+        &[first, second],
+        true,
+        None,
+        &timeline,
+        &mut lines,
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .map(|line| (line.beam_y, line.hstart))
+            .collect::<Vec<_>>(),
+        vec![
+            (PAL_VISIBLE_LINE0, 159),
+            (PAL_VISIBLE_LINE0 + 1, 159),
+            (PAL_VISIBLE_LINE0 + 1, 415),
+        ]
+    );
 }
 
 #[test]

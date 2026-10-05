@@ -10828,39 +10828,95 @@ pub(crate) fn sprite_hstart_for_fmode(hstart: i32, fmode: u16) -> i32 {
     }
 }
 
-/// SSCAN2 compares only the low eight horizontal bits. A DMA sprite whose
-/// first compare passed before its DATA slot was armed starts at the next
-/// match, 256 lo-res pixels later. This is distinct from a CPU-armed sprite,
-/// which may already have data at the first match.
-pub(crate) fn sprite_dma_hstart_for_fmode(hstart: i32, fmode: u16, sprite: usize) -> i32 {
-    let compare = sprite_hstart_for_fmode(hstart, fmode);
-    if fmode & 0x8000 == 0 || sprite >= SPRITE_DMA_SLOT1_HPOS.len() {
-        return compare;
-    }
-    // Denise's horizontal counter begins at $24; each Agnus colour clock
-    // advances it by two lo-res positions. The first DMA slot loads DATA and
-    // arms the serializer, so an earlier match cannot start this line.
-    let data_ready = 0x24 + 2 * SPRITE_DMA_SLOT1_HPOS[sprite] as i32;
-    if compare < data_ready {
-        compare + 0x100
-    } else {
-        compare
-    }
+/// Beam-timed comparator inputs shared by frame rendering and live CLXDAT.
+/// A Copper FMODE or SPRxCTL write can change the second SSCAN2 match without
+/// changing the already-serialized first match.
+pub(crate) struct SpriteDmaMatchTimeline {
+    initial_fmode: u16,
+    fmode_writes: Vec<(u32, u32, u16)>,
+    arming_writes: [Vec<(u32, u32, bool)>; 8],
 }
 
-/// With SSCAN2 the horizontal high bit is a don't-care, so an armed sprite
-/// whose first match occurred in time can also serialize at HSTART + $100.
-pub(crate) fn sprite_dma_repeat_hstart_for_fmode(
-    hstart: i32,
-    fmode: u16,
-    sprite: usize,
-) -> Option<i32> {
-    if fmode & 0x8000 == 0 {
-        return None;
+impl SpriteDmaMatchTimeline {
+    pub(crate) fn new<'a>(
+        initial_fmode: u16,
+        events: impl IntoIterator<Item = &'a BeamRegisterWrite>,
+    ) -> Self {
+        let mut timeline = Self {
+            initial_fmode,
+            fmode_writes: Vec::new(),
+            arming_writes: std::array::from_fn(|_| Vec::new()),
+        };
+        for event in events {
+            let off = event.offset & 0x01FE;
+            if off == 0x01FC {
+                timeline
+                    .fmode_writes
+                    .push((event.vpos, event.hpos, event.value & 0xC00F));
+            } else if (0x140..=0x17F).contains(&off) {
+                let arms = match (off - 0x140) & 0x0006 {
+                    0x2 => false,
+                    0x4 => true,
+                    _ => continue,
+                };
+                let sprite = ((off - 0x140) / 8) as usize;
+                timeline.arming_writes[sprite].push((event.vpos, event.hpos, arms));
+            }
+        }
+        timeline.fmode_writes.sort_by_key(|&(y, h, _)| (y, h));
+        for writes in &mut timeline.arming_writes {
+            writes.sort_by_key(|&(y, h, _)| (y, h));
+        }
+        timeline
     }
-    let first = sprite_dma_hstart_for_fmode(hstart, fmode, sprite);
-    let repeat = first + 0x100;
-    (first < 0x100 && repeat < 0x1C8).then_some(repeat)
+
+    fn fmode_at(&self, beam_y: u32, hstart: i32) -> u16 {
+        let hpos = (hstart.max(0) / 2) as u32;
+        let end = self
+            .fmode_writes
+            .partition_point(|&(y, h, _)| (y, h) <= (beam_y, hpos));
+        if end == 0 {
+            self.initial_fmode
+        } else {
+            self.fmode_writes[end - 1].2
+        }
+    }
+
+    pub(crate) fn match_hstarts(&self, line: &CapturedSpriteLine) -> [Option<i32>; 2] {
+        if line.sprite >= 8 || line.beam_y < 0 {
+            return [None, None];
+        }
+        let low = line.hstart & 0xFF;
+        let high = low + 0x100;
+        let ready = 0x24 + 2 * SPRITE_DMA_SLOT1_HPOS[line.sprite] as i32;
+        let matches = |hstart| {
+            let sscan2 = self.fmode_at(line.beam_y as u32, hstart) & 0x8000 != 0;
+            ((sscan2 && hstart >= ready) || (!sscan2 && hstart == line.hstart)).then_some(hstart)
+        };
+        [
+            matches(low),
+            (high < 0x1C8 || high == line.hstart)
+                .then(|| matches(high))
+                .flatten(),
+        ]
+    }
+
+    pub(crate) fn armed_at(&self, line: &CapturedSpriteLine, hstart: i32) -> bool {
+        if line.sprite >= 8 || line.beam_y < 0 {
+            return true;
+        }
+        let beam_y = line.beam_y as u32;
+        let dma_hpos = [0x018, 0x020, 0x028, 0x030][line.sprite / 2];
+        let match_hpos = (hstart.max(0) / 2) as u32;
+        let writes = &self.arming_writes[line.sprite];
+        let first = writes.partition_point(|&(y, h, _)| (y, h) < (beam_y, dma_hpos));
+        let end = writes.partition_point(|&(y, h, _)| (y, h) <= (beam_y, match_hpos));
+        if end <= first {
+            true
+        } else {
+            writes[end - 1].2
+        }
+    }
 }
 
 fn sprite_hsub_70ns_from_ctl(ctl: u16) -> bool {
@@ -10888,23 +10944,23 @@ struct LiveManualSpriteCollisionSource {
 fn live_sprite_playfield_collision_sources(
     lines: &[CapturedSpriteLine],
     beam_y: i32,
-    fmode: u16,
+    timeline: &SpriteDmaMatchTimeline,
 ) -> Vec<LiveSpriteCollisionSource> {
-    live_sprite_collision_sources_with_beam_gated_odd(lines, beam_y, fmode)
+    live_sprite_collision_sources_with_beam_gated_odd(lines, beam_y, timeline)
 }
 
 fn live_sprite_collision_sources_with_beam_gated_odd(
     lines: &[CapturedSpriteLine],
     beam_y: i32,
-    fmode: u16,
+    timeline: &SpriteDmaMatchTimeline,
 ) -> Vec<LiveSpriteCollisionSource> {
-    live_sprite_collision_sources_with_odd_policy(lines, beam_y, fmode, 0, true)
+    live_sprite_collision_sources_with_odd_policy(lines, beam_y, timeline, 0, true)
 }
 
 fn live_sprite_collision_sources_with_odd_policy(
     lines: &[CapturedSpriteLine],
     beam_y: i32,
-    fmode: u16,
+    timeline: &SpriteDmaMatchTimeline,
     clxcon: u16,
     include_disabled_odd: bool,
 ) -> Vec<LiveSpriteCollisionSource> {
@@ -10922,13 +10978,10 @@ fn live_sprite_collision_sources_with_odd_policy(
         if requires_odd_enable && !include_disabled_odd && clxcon & (1 << (12 + group)) == 0 {
             continue;
         }
-        for hstart in [
-            Some(sprite_dma_hstart_for_fmode(line.hstart, fmode, sprite)),
-            sprite_dma_repeat_hstart_for_fmode(line.hstart, fmode, sprite),
-        ]
-        .into_iter()
-        .flatten()
-        {
+        for hstart in timeline.match_hstarts(line).into_iter().flatten() {
+            if !timeline.armed_at(line, hstart) {
+                continue;
+            }
             push_live_sprite_collision_source_if_visible(
                 &mut sources,
                 LiveSpriteCollisionSource {
@@ -12325,7 +12378,23 @@ fn live_manual_bpl_word_collision_bits(
 ) -> u16 {
     const MANUAL_BPL_WORD_BITS: usize = 16;
 
-    let sources = live_sprite_playfield_collision_sources(sprite_lines, beam_y, frame_base.fmode);
+    let line_index = crate::video::beam::visible_line_index(beam_y.max(0) as u32);
+    let sprite_timeline = if let Some(line_index) = line_index {
+        SpriteDmaMatchTimeline::new(
+            frame_base.fmode,
+            sprite_index
+                .register_writes_before_visible_line(line_index)
+                .chain(
+                    sprite_index
+                        .line(line_index)
+                        .into_iter()
+                        .flat_map(|line| line.register_writes()),
+                ),
+        )
+    } else {
+        SpriteDmaMatchTimeline::new(frame_base.fmode, std::iter::empty())
+    };
+    let sources = live_sprite_playfield_collision_sources(sprite_lines, beam_y, &sprite_timeline);
     let manual_sources =
         live_manual_sprite_collision_sources(frame_base, sprite_index, beam_y, x_start, x_stop);
     let mut clxdat = 0u16;
@@ -12743,6 +12812,7 @@ fn is_live_collision_relevant_custom_write(off: u16) -> bool {
         0x08E | 0x090 | 0x092 | 0x098 | 0x100 | 0x102 | 0x106 | 0x110..=0x11A
             | 0x140..=0x17F
             | 0x1E4
+            | 0x1FC
     )
 }
 
@@ -12758,7 +12828,7 @@ fn is_live_collision_bpldat_custom_write(off: u16) -> bool {
 }
 
 fn is_live_collision_sprite_custom_write(off: u16) -> bool {
-    matches!(off & 0x01FE, 0x140..=0x17F)
+    matches!(off & 0x01FE, 0x140..=0x17F | 0x1FC)
 }
 
 /// The ECS beam-timing registers (HTOTAL through HCENTER, BEAMCON0

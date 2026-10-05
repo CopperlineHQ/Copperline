@@ -4719,13 +4719,22 @@ pub(super) fn active_debug_sprite_mask() -> u8 {
 /// renderer's own comparator mapping, so a caller cannot drift out of
 /// step with where the pixels actually land.
 pub fn sprite_framebuffer_origin(bus: &Bus, sprite: usize) -> Option<(i32, i32)> {
-    let top = bus
+    let base = bus.frame_render_base();
+    let geometry = bus.frame_geometry();
+    let timeline = crate::bus::SpriteDmaMatchTimeline::new(base.fmode, bus.frame_render_events());
+    let (top, hstart) = bus
         .frame_captured_sprite_lines()
         .iter()
         .filter(|line| line.sprite == sprite)
-        .min_by_key(|line| line.beam_y)?;
-    let base = bus.frame_render_base();
-    let geometry = bus.frame_geometry();
+        .filter_map(|line| {
+            timeline
+                .match_hstarts(line)
+                .into_iter()
+                .flatten()
+                .find(|&hstart| timeline.armed_at(line, hstart))
+                .map(|hstart| (line, hstart))
+        })
+        .min_by_key(|(line, hstart)| (line.beam_y, *hstart))?;
     // The comparator origin shift render_from_input installs for the
     // running scan; see ACTIVE_CANVAS_SHIFT_H.
     let shift = if geometry.programmable {
@@ -4733,7 +4742,6 @@ pub fn sprite_framebuffer_origin(bus: &Bus, sprite: usize) -> Option<(i32, i32)>
     } else {
         0
     };
-    let hstart = crate::bus::sprite_dma_hstart_for_fmode(top.hstart, base.fmode, sprite);
     let x = (hstart + crate::bus::SPRITE_OUTPUT_DELAY_LORES - DIW_HSTART_FB0 + shift) * 2
         + i32::from(top.hsub_70ns && base.bplcon0 & BPLCON0_SHRES != 0);
     // Logical sprite coordinates live in the hi-res pitch domain; the
@@ -4966,10 +4974,10 @@ fn render_from_input_with_scratch(
     // A SPRxCTL write between a fetch slot and that channel's HSTART disarms
     // Denise before the serializer ever loads the fetched words, so those
     // captured lines are not displayed at all.
-    let armed_captured_sprite_lines = retain_armed_captured_sprite_lines(
+    let sprite_timeline = crate::bus::SpriteDmaMatchTimeline::new(state.fmode, render_events);
+    let armed_captured_sprite_lines = retain_armed_captured_sprite_lines_with_timeline(
         &input.captured_sprite_lines,
-        render_events,
-        state.fmode,
+        &sprite_timeline,
     );
     if input.sprite_dma_observed {
         let dma_seeded_lines = manual_sprite_lines_from_captured_dma_reuse(
@@ -5697,8 +5705,8 @@ fn render_from_input_with_scratch(
         captured_sprite_lines,
         sprite_dma_observed,
         Some(&manual_sprite_lines),
-        render_events,
         visible_line0,
+        &sprite_timeline,
     );
     render_timing.sprite_nanos = render_timing_elapsed(sprite_started);
     maybe_log_frame_pixel_samples(

@@ -7998,10 +7998,100 @@ fn fmode_sscan2_masks_sprite_horizontal_comparator_high_bit() {
         width_words: 1,
         attached: false,
     };
-    let sources = super::live_sprite_collision_sources_with_beam_gated_odd(&[line], 42, 0x8000);
+    let timeline = super::SpriteDmaMatchTimeline::new(0x8000, std::iter::empty());
+    let sources = super::live_sprite_collision_sources_with_beam_gated_odd(&[line], 42, &timeline);
     assert_eq!(sources.len(), 2);
     assert_eq!(sources[0].hstart, 0x065);
     assert_eq!(sources[1].hstart, 0x165);
+}
+
+#[test]
+fn sscan2_dma_matches_use_fmode_at_each_beam_position() {
+    let line = CapturedSpriteLine {
+        sprite: 4,
+        hstart: 159,
+        hsub_70ns: false,
+        beam_y: 42,
+        data: 0x8000,
+        datb: 0,
+        data_ext: [0; 3],
+        datb_ext: [0; 3],
+        width_words: 1,
+        attached: false,
+    };
+    let events = [
+        BeamRegisterWrite {
+            vpos: 43,
+            hpos: 0,
+            offset: 0x1FC,
+            value: 0x800C,
+            source: BeamWriteSource::Copper,
+        },
+        BeamRegisterWrite {
+            vpos: 43,
+            hpos: 180,
+            offset: 0x1FC,
+            value: 0x000C,
+            source: BeamWriteSource::Copper,
+        },
+    ];
+    let timeline = super::SpriteDmaMatchTimeline::new(0, &events);
+    assert_eq!(timeline.match_hstarts(&line), [Some(159), None]);
+    let next = CapturedSpriteLine { beam_y: 43, ..line };
+    assert_eq!(timeline.match_hstarts(&next), [Some(159), None]);
+
+    let always_on = super::SpriteDmaMatchTimeline::new(0x800C, std::iter::empty());
+    assert_eq!(always_on.match_hstarts(&line), [Some(159), Some(415)]);
+    let enable_between_matches = BeamRegisterWrite {
+        vpos: 42,
+        hpos: 180,
+        ..events[0]
+    };
+    let timeline = super::SpriteDmaMatchTimeline::new(0, &[enable_between_matches]);
+    assert_eq!(timeline.match_hstarts(&line), [Some(159), Some(415)]);
+    let timeline = super::SpriteDmaMatchTimeline::new(0, &events);
+    assert_eq!(
+        super::live_sprite_collision_sources_with_beam_gated_odd(&[next], 43, &timeline).len(),
+        1
+    );
+}
+
+#[test]
+fn sscan2_live_collision_repeat_obeys_same_line_sprite_arming() {
+    let line = CapturedSpriteLine {
+        sprite: 4,
+        hstart: 159,
+        hsub_70ns: false,
+        beam_y: 42,
+        data: 0x8000,
+        datb: 0,
+        data_ext: [0; 3],
+        datb_ext: [0; 3],
+        width_words: 1,
+        attached: false,
+    };
+    let disarm = BeamRegisterWrite {
+        vpos: 42,
+        hpos: 180,
+        offset: 0x162, // SPR4CTL, between the first and repeated matches.
+        value: 0,
+        source: BeamWriteSource::Copper,
+    };
+    let timeline = super::SpriteDmaMatchTimeline::new(0x800C, &[disarm]);
+    let sources = super::live_sprite_collision_sources_with_beam_gated_odd(&[line], 42, &timeline);
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].hstart, 159);
+
+    let rearm = BeamRegisterWrite {
+        hpos: 190,
+        offset: 0x164, // SPR4DATA
+        ..disarm
+    };
+    let timeline = super::SpriteDmaMatchTimeline::new(0x800C, &[disarm, rearm]);
+    assert_eq!(
+        super::live_sprite_collision_sources_with_beam_gated_odd(&[line], 42, &timeline).len(),
+        2
+    );
 }
 
 /// Frame geometry latches at the frame wrap: a standard frame reports

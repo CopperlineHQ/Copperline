@@ -74,7 +74,11 @@ alias for the Workbench pointer. DMA sprite data becomes armed at its channel's
 fetch slot; when the low-byte HSTART comparison has already passed, SSCAN2's
 next horizontal match places that sprite 256 lo-res pixels later in the line.
 An armed sprite can also display again at that second match when its first
-match occurred after the DMA fetch.
+match occurred after the DMA fetch. Each match uses FMODE and the sprite's
+armed latch at that beam position: a same-line FMODE change can add or remove
+the second match, and a SPRxCTL write between matches suppresses it until
+SPRxDATA arms the channel again. The renderer and live collision path use
+these same beam-timed decisions.
 
 The CPU sees the reach too: the motherboard decode (Gary and equivalents)
 routes the whole $000000-$1FFFFF window to Agnus, which decodes only as
