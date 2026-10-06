@@ -682,13 +682,6 @@ fn gdb_reg_label(reg: usize) -> String {
     }
 }
 
-fn window_title_mouse_captured() -> String {
-    format!(
-        "{} - Mouse captured ({HOST_SHORTCUT_MODIFIER_LABEL}+G releases)",
-        window_title()
-    )
-}
-
 /// A transient on-screen overlay message drawn over the display (but not
 /// captured in screenshots, since it is painted into the presentation
 /// texture, never into the emulated framebuffer `fb`).
@@ -1634,6 +1627,10 @@ pub struct App {
     about_redraw_at: Instant,
     /// Emulated-machine summary lines for the About window.
     about_machine_lines: Vec<String>,
+    /// Last path-derived ROM name, tied to the live image fingerprint.
+    title_rom_hint: Option<(crate::config::RomId, String)>,
+    #[cfg(target_os = "macos")]
+    macos_about_wake: Option<winit::event_loop::EventLoopProxy<()>>,
     /// The About panel's update check, for the session: not asked until
     /// its button is pressed.
     #[cfg(feature = "update-check")]
@@ -2684,6 +2681,7 @@ impl App {
         mouse_capture: crate::config::MouseCapture,
         middle_click_release: bool,
         about_machine_lines: Vec<String>,
+        rom_hint_trusted: bool,
         machine_config: RawConfig,
         runahead_machine_block: Option<&'static str>,
         // Effective live-audio state for this machine: for a real machine the
@@ -2757,6 +2755,14 @@ impl App {
         // before the first frame: seed it with the style the window opens
         // with, as `main` seeds the aspect and the scaling.
         crate::video::set_bezel_shown(bezel.is_on());
+        let title_rom_hint = rom_hint_trusted
+            .then(|| {
+                about_machine_lines
+                    .iter()
+                    .find_map(|line| line.strip_prefix("ROM: "))
+                    .map(|name| (emu.machine_descriptor().rom, name.to_string()))
+            })
+            .flatten();
         let mut app = Self {
             emu,
             serial_is_midi,
@@ -2976,6 +2982,9 @@ impl App {
             about_opened_at: Instant::now(),
             about_redraw_at: Instant::now(),
             about_machine_lines,
+            title_rom_hint,
+            #[cfg(target_os = "macos")]
+            macos_about_wake: None,
             #[cfg(feature = "update-check")]
             update_check: app_update::UpdateCheck::Idle,
             machine_config,
@@ -3780,6 +3789,10 @@ impl App {
         let event_loop = EventLoop::new().map_err(|e| anyhow!("EventLoop::new: {e}"))?;
         event_loop.set_control_flow(ControlFlow::Poll);
         let mut app = self;
+        #[cfg(target_os = "macos")]
+        {
+            app.macos_about_wake = Some(event_loop.create_proxy());
+        }
         // Start the control server's socket threads with a wake that
         // kicks the loop out of ControlFlow::Wait, so a command arriving
         // while the machine is paused is serviced promptly.
@@ -4485,7 +4498,7 @@ impl ApplicationHandler for App {
         let fullscreen = (self.start_fullscreen && !headless_capture)
             .then(|| Fullscreen::Borderless(selected_monitor.clone()));
         let mut attrs = WindowAttributes::default()
-            .with_title(window_title())
+            .with_title(self.base_window_title())
             .with_window_icon(copperline_window_icon())
             .with_visible(!headless_capture)
             .with_fullscreen(fullscreen)
@@ -4513,6 +4526,10 @@ impl ApplicationHandler for App {
         // the application icon explicitly now that NSApplication exists.
         #[cfg(target_os = "macos")]
         set_macos_dock_icon();
+        #[cfg(target_os = "macos")]
+        if let Some(wake) = self.macos_about_wake.take() {
+            macos_about::install(wake);
+        }
         let inner = window.inner_size();
         let texture_scale = plan_present_scaling(
             integer_scaling_requested(),
@@ -5926,6 +5943,13 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "macos")]
+        if macos_about::take_request() {
+            self.suspend_mouse_capture_for_ui();
+            self.about_opened_at = Instant::now();
+            self.ui.panel = Some(Panel::About);
+            self.request_redraw();
+        }
         // Drain remote control commands first, before this pass's run
         // state is computed, so they land at a frame boundary. Sits
         // ahead of the render guard so tests can drive the drain on an
@@ -7702,6 +7726,8 @@ mod egui_debugger;
 mod gdb;
 mod host_input;
 mod kbdpanel;
+#[cfg(target_os = "macos")]
+mod macos_about;
 mod monitors;
 #[cfg(feature = "mt32")]
 mod mt32panel;
@@ -7713,6 +7739,7 @@ mod rtg_texture;
 mod scaler;
 pub(in crate::video) mod statusbar;
 mod stickers;
+mod title;
 pub(super) use present::{scale_rect, texture_height, texture_width, Rect};
 pub(super) use statusbar::{draw_rect_bevel, fill_rect, fill_rect_blend};
 

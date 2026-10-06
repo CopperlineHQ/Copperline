@@ -434,6 +434,10 @@ impl TryFrom<RawConfig> for Config {
                 "[display] window_scale must be between 0.5 and 4.0, got {window_scale}"
             ));
         }
+        let window_title = raw.display.title.clone();
+        if let Some(template) = &window_title {
+            super::window_title::validate(template).context("[display] title")?;
+        }
         let status_bar = raw.display.status_bar.unwrap_or(defaults.status_bar);
         let joystick_input_mode = match raw.input.joystick.as_deref() {
             None => defaults.joystick_input_mode,
@@ -1483,6 +1487,7 @@ impl TryFrom<RawConfig> for Config {
             tint,
             menu_scale,
             window_scale,
+            window_title,
             full_screen,
             maximized,
             monitor,

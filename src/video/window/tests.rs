@@ -4824,6 +4824,7 @@ fn test_app_with_audio_cpu_and_program(
         crate::config::MouseCapture::Click,
         false,
         vec!["Machine: test".to_string()],
+        true,
         crate::config::RawConfig::default(),
         None,
         true,
@@ -4946,6 +4947,7 @@ fn test_app_with_copperhf_units(units: &[(usize, PathBuf)]) -> super::App {
         crate::config::MouseCapture::Click,
         false,
         vec!["Machine: test".to_string()],
+        true,
         raw,
         None,
         true,
@@ -5693,11 +5695,16 @@ fn state_load_closes_launcher_and_powers_restored_machine() {
     app.power_off();
     let parked_present = app.present_fb.clone();
     app.open_launcher();
+    app.about_machine_lines = vec![crate::config::ABOUT_PLACEHOLDER_LINE.to_string()];
     assert!(matches!(app.ui.panel, Some(Panel::Launcher(_))));
+    assert_eq!(app.base_window_title(), super::window_title());
 
     assert!(app.load_state_from_path(&path));
     assert!(app.ui.panel.is_none(), "state load should dismiss launcher");
     assert!(app.powered_on);
+    assert!(app.base_window_title().contains("A500"));
+    assert!(app.base_window_title().contains("ROM"));
+    assert_ne!(app.base_window_title(), super::window_title());
     assert!(!app.cpu_halted);
     assert!(
         app.present_fb == parked_present,

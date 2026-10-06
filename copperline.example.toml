@@ -809,6 +809,7 @@ video = "PAL"
 # maximized = false
 # monitor = "auto"
 # window_scale = 1.0
+# title = "{app} {version} · {machine} · {rom}"
 # status_bar = true
 # vsync = true
 # hidpi_texture = true

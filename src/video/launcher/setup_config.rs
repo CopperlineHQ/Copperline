@@ -331,6 +331,7 @@ impl MachineSetup {
             host_monitors: Vec::new(),
             window_position: cfg.window_position,
             window_scale: cfg.window_scale,
+            window_title: cfg.window_title.clone(),
             show_status_bar: cfg.status_bar,
             floppy_sounds: cfg.audio.floppy_sounds,
             floppy_volume: cfg.audio.floppy_sounds_volume,
@@ -857,6 +858,7 @@ impl MachineSetup {
         if self.window_scale != base.window_scale {
             raw.display.window_scale = Some(self.window_scale);
         }
+        raw.display.title = self.window_title.clone();
         if self.show_status_bar != base.status_bar {
             raw.display.status_bar = Some(self.show_status_bar);
         }

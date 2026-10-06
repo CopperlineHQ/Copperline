@@ -203,7 +203,7 @@ impl App {
                     self.last_display_cursor_pos = None;
                     self.mouse_delta_remainder = (0.0, 0.0);
                     window.set_cursor_visible(false);
-                    window.set_title(&window_title_mouse_captured());
+                    self.refresh_window_title();
                     info!("mouse captured; press {HOST_SHORTCUT_MODIFIER_LABEL}+G to release");
                 }
                 Err((locked_err, confined_err)) => {
@@ -223,12 +223,8 @@ impl App {
                     warn!("mouse release failed: {e}");
                 }
                 r.window.set_cursor_visible(true);
-                r.window.set_title(if self.debug_layout_active {
-                    "Copperline · Debug"
-                } else {
-                    window_title()
-                });
             }
+            self.refresh_window_title();
             info!("mouse released");
         }
     }

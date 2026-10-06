@@ -18,6 +18,7 @@ mod resolve;
 #[cfg(test)]
 mod tests;
 mod validate;
+pub mod window_title;
 
 pub use about::*;
 pub use monitor::HostMonitor;
@@ -429,6 +430,8 @@ pub struct Config {
     /// Initial window width and height as a multiple of the presentation
     /// canvas (`[display] window_scale` / `--window-scale`, 0.5 to 4.0).
     pub window_scale: f64,
+    /// Optional title template for the desktop window (`[display] title`).
+    pub window_title: Option<String>,
     /// Open the window in fullscreen at start (`[display] full_screen`, or
     /// `--full-screen` / `--windowed`). The `Cmd+F` / `Alt+F` toggle flips it
     /// live without affecting this start-up value.
@@ -2754,6 +2757,7 @@ impl Default for Config {
             tint: Tint::None,
             menu_scale: MenuScale::Normal,
             window_scale: 1.0,
+            window_title: None,
             full_screen: false,
             maximized: false,
             monitor: HostMonitor::Auto,
