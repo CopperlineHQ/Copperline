@@ -221,6 +221,8 @@ impl App {
             self.netplay_keyboard_controller = self.mouse_port().is_none();
             self.keyboard_joy_held = Default::default();
             self.about_machine_lines = crate::config::about_machine_lines(&cfg);
+            self.record_rom_title_hint();
+            self.refresh_window_title();
             self.disk_write_protected = std::array::from_fn(|drive| {
                 self.emu
                     .bus()
@@ -318,6 +320,8 @@ impl App {
             self.netplay_keyboard_controller = false;
             self.keyboard_joy_held = Default::default();
             self.about_machine_lines = crate::config::about_machine_lines(&cfg);
+            self.record_rom_title_hint();
+            self.refresh_window_title();
             self.disk_write_protected = std::array::from_fn(|drive| {
                 self.emu
                     .bus()

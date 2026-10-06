@@ -1605,6 +1605,8 @@ impl App {
         self.rearm_tool_panels();
         self.keyboard_joy_held = [keymap::HeldKeys::default(); keymap::MAPPING_COUNT];
         self.about_machine_lines = crate::config::about_machine_lines(cfg);
+        self.record_rom_title_hint();
+        self.refresh_window_title();
         // The threaded path picks the new settings up from the next render
         // job; the recreated deinterlacer covers the synchronous fallback.
         self.deinterlace = crate::config::resolve_deinterlace(cfg.deinterlace);

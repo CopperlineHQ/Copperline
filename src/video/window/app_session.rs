@@ -966,6 +966,7 @@ impl App {
                 } else {
                     self.show_osd(format!("Loaded {}", display_file_name(path)));
                 }
+                self.refresh_window_title();
                 self.request_redraw();
                 true
             }
@@ -1075,6 +1076,8 @@ impl App {
                     }
                     (None, None) => {}
                 }
+                self.record_rom_title_hint();
+                self.refresh_window_title();
                 self.powered_on = true;
                 self.cpu_halted = false;
                 // The cold reset restarts the frame timeline; force a repaint.

@@ -690,6 +690,9 @@ boot-time cards, SRAM cards, real card readers, and the fast-RAM rule.
   Copperline's contributors and Patreon sponsors (see `CREDITS.md`).
   Builds made from an untagged git commit append the short commit ID to
   the version shown in the window title and About panel.
+  The desktop window title also shows the machine and boot ROM; its format can
+  be changed with `[display] title` in the configuration file.
+  On macOS, **About Copperline** in the application menu opens this same panel.
 
   The panel's **Check for updates** button asks GitHub which Copperline
   release is the latest and compares it with the running version. If a

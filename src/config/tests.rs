@@ -1254,6 +1254,20 @@ fn display_window_scale_validates_and_cli_overrides_file() -> Result<()> {
 }
 
 #[test]
+fn display_title_template_validates_and_round_trips() -> Result<()> {
+    let raw = RawConfig::parse("[display]\ntitle = 'Dev {m}: {r} [{hash}]'\n")?;
+    let cfg = Config::try_from(raw.clone())?;
+    assert_eq!(cfg.window_title.as_deref(), Some("Dev {m}: {r} [{hash}]"));
+    let round_trip = RawConfig::parse(&raw.to_toml_string()?)?;
+    assert_eq!(round_trip.display.title, raw.display.title);
+    for title in ["{unknown}", "{rom", "", "bad\nline"] {
+        let raw = RawConfig::parse(&format!("[display]\ntitle = {title:?}\n"))?;
+        assert!(Config::try_from(raw).is_err(), "accepted {title:?}");
+    }
+    Ok(())
+}
+
+#[test]
 fn display_overscan_parses_and_defaults_to_tv() -> Result<()> {
     assert_eq!(parse_config("")?.overscan, Overscan::Tv);
     let cfg = parse_config(

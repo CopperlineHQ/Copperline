@@ -753,10 +753,19 @@ full_screen = false   # open borderless fullscreen at start (default false)
 maximized = false     # maximize with title bar and desktop taskbar (default false)
 monitor = "auto"      # host display: auto, primary, one-based number, or exact name
 window_scale = 1.0    # initial window width and height multiplier, 0.5-4.0
+# title = "{app} {version} · {machine} · {rom}"
 status_bar = true     # show the status bar at start (default true)
 vsync = true          # synchronise desktop presentation to vblank (default true)
 hidpi_texture = true  # draw the presentation texture at device-pixel density (default true)
 ```
+
+The default window title shows the machine and boot ROM. For a different
+layout, set `title` with `{app}`, `{version}`, `{machine}` (or `{m}`), `{rom}`
+(or `{r}`), and `{hash}` (eight hexadecimal digits of the loaded ROM). Other
+text is literal; `{{` and `}}` insert braces. For example,
+`title = "Workbench test · {m} · {r}"` gives an instance a visible name.
+Known Kickstarts use their checksum-identified version; AROS and unrecognised
+ROMs include the short hash. The title follows ROM changes and loaded states.
 
 `vsync` controls desktop presentation. On uses strict FIFO vsync to prevent
 tearing. Off requests unsynchronised presentation where the graphics backend

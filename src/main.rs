@@ -1433,6 +1433,7 @@ fn main() -> Result<()> {
         cfg.mouse_capture,
         cfg.middle_click_release,
         config::about_machine_lines(&cfg),
+        cli.load_state.is_none(),
         raw_cfg,
         if cli.load_state.is_some() {
             Some("loaded save state")
@@ -1620,6 +1621,7 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         config::MouseCapture::default(),
         false,
         vec![config::ABOUT_PLACEHOLDER_LINE.to_string()],
+        false,
         raw_cfg,
         None,
         audio_output_enabled,

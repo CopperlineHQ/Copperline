@@ -123,6 +123,9 @@ ordinary windows.
 
 See the [UI guide](docs/guide/ui.md) for full interface details.
 
+The desktop window title identifies the machine and boot ROM; `[display] title`
+in a TOML configuration can set a custom title format for multiple instances.
+
 ## Configuration
 
 Copperline uses TOML configuration files. You can copy `copperline.example.toml` to `copperline.toml` to customize machine settings:

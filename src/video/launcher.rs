@@ -939,6 +939,8 @@ pub struct MachineSetup {
     window_position: Option<[i32; 2]>,
     /// Initial window size ([display] window_scale), retained from TOML.
     window_scale: f64,
+    /// Custom desktop title ([display] title), preserved when Run/Save rebuilds TOML.
+    window_title: Option<String>,
     /// Show the status bar at start ([display] status_bar).
     show_status_bar: bool,
     floppy_sounds: bool,

@@ -2236,6 +2236,21 @@ fn window_scale_round_trips_through_launcher_config() {
 }
 
 #[test]
+fn window_title_round_trips_through_launcher_run_and_save() {
+    let raw = RawConfig::parse("[display]\ntitle = 'Dev {m}: {r}'\n").unwrap();
+    let setup = MachineSetup::from_raw(&raw).unwrap();
+    assert_eq!(
+        setup.build_config().unwrap().window_title.as_deref(),
+        Some("Dev {m}: {r}")
+    );
+    assert_eq!(
+        setup.to_raw().display.title.as_deref(),
+        Some("Dev {m}: {r}")
+    );
+    assert_eq!(MachineSetup::default().to_raw().display.title, None);
+}
+
+#[test]
 fn menu_scale_round_trips_through_raw() {
     let mut s = MachineSetup::default();
     // 1x is the baseline, so nothing is written for it. The launcher has

@@ -3,9 +3,7 @@
 //! Main-window layout, presentation preparation, and guest/UI input ownership.
 
 use super::*;
-use crate::video::window::{
-    host_shortcut_modifier_pressed, window_title, HOST_SHORTCUT_MODIFIER_LABEL,
-};
+use crate::video::window::{host_shortcut_modifier_pressed, HOST_SHORTCUT_MODIFIER_LABEL};
 use winit::{
     dpi::{LogicalSize, PhysicalSize},
     event::ElementState,
@@ -67,7 +65,6 @@ impl App {
                             position: r.window.outer_position().ok(),
                         });
                 }
-                r.window.set_title("Copperline · Debug");
                 r.window
                     .set_min_inner_size(Some(LogicalSize::new(900.0, 600.0)));
                 if windowed {
@@ -108,6 +105,7 @@ impl App {
                 r.window.focus_window();
             }
         }
+        self.refresh_window_title();
         self.request_redraw();
     }
 
@@ -120,12 +118,12 @@ impl App {
         self.debug_layout_active = false;
         if let Some(r) = &mut self.render {
             r.debug_viewport = None;
-            r.window.set_title(window_title());
             r.window.set_min_inner_size(Some(LogicalSize::new(
                 crate::video::FB_WIDTH as f64 / 2.0,
                 crate::video::window::window_present_height() as f64 / 2.0,
             )));
         }
+        self.refresh_window_title();
         self.restore_play_geometry();
         self.restore_mouse_capture_after_ui();
         self.apply_auto_mouse_capture();

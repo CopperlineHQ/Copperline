@@ -388,6 +388,9 @@ pub(crate) struct RawDisplay {
     /// Initial logical window size multiplier (0.5 to 4.0, default 1.0).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) window_scale: Option<f64>,
+    /// Window title template; placeholders include {machine}, {rom}, and {hash}.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) title: Option<String>,
     /// Open fullscreen at start (default false).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) full_screen: Option<bool>,
