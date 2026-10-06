@@ -28,6 +28,7 @@ Thank you to:
 
 - Lee Hobson
 - Sphair
+- Karlos_Fandango
 
 ## Bundled third-party code
 
