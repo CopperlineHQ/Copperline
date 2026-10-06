@@ -35,10 +35,11 @@ impl App {
         if let Some(brand) = crate::video::branding_title() {
             return brand.to_string();
         }
-        if self
-            .about_machine_lines
-            .iter()
-            .any(|line| line == crate::config::ABOUT_PLACEHOLDER_LINE)
+        if !self.powered_on
+            && self
+                .about_machine_lines
+                .iter()
+                .any(|line| line == crate::config::ABOUT_PLACEHOLDER_LINE)
         {
             return window_title().to_string();
         }

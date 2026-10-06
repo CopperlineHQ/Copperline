@@ -171,6 +171,7 @@ fn main() -> Result<()> {
         cfg.mouse_capture,
         cfg.middle_click_release,
         config::about_machine_lines(&cfg),
+        true, // This machine was built from cfg's ROM, not restored from a state.
         raw_for_app,
         cfg.runahead_machine_block_reason(),
         live_audio,

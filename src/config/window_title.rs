@@ -55,7 +55,10 @@ pub fn render(template: &str, values: &TitleValues<'_>) -> Result<String> {
 }
 
 pub fn validate(template: &str) -> Result<()> {
-    if template.is_empty() || template.len() > 256 || template.chars().any(char::is_control) {
+    if template.is_empty()
+        || template.chars().count() > 256
+        || template.chars().any(char::is_control)
+    {
         bail!("[display] title must be 1-256 characters with no control characters");
     }
     render(
@@ -90,5 +93,7 @@ mod tests {
         );
         assert!(validate("{missing}").is_err());
         assert!(validate("{rom").is_err());
+        assert!(validate(&"é".repeat(200)).is_ok());
+        assert!(validate(&"é".repeat(257)).is_err());
     }
 }
