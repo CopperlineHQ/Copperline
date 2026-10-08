@@ -111,6 +111,7 @@ impl App {
             bezel: self.bezel,
             perf_overlay: self.perf_overlay,
             vsync: self.vsync,
+            native_screenshot_button: self.native_screenshot_button,
             warp: !self.emu.paced(),
             warp_speed: self.warp_speed,
             rewind: self.rewind_armed,
@@ -316,6 +317,16 @@ impl App {
                     "VSync: on"
                 } else {
                     "VSync: off"
+                });
+            }
+            A::ToggleNativeScreenshotButton => {
+                self.native_screenshot_button = !self.native_screenshot_button;
+                self.machine_config.recording.native_screenshot_button =
+                    Some(self.native_screenshot_button);
+                self.show_osd(if self.native_screenshot_button {
+                    "Native screenshot button: on"
+                } else {
+                    "Native screenshot button: off"
                 });
             }
             A::StepTvCentre(dh, dv) => self.step_tv_centre(dh, dv),

@@ -1504,6 +1504,8 @@ impl App {
         // The clip ring belongs to the machine being replaced: its frames
         // and its automatic rate (the video standard) are that machine's.
         self.clip_settings = cfg.recording.clip_settings();
+        self.native_screenshot_button =
+            self.native_screenshots || cfg.recording.native_screenshot_button;
         self.clip_ring = None;
         self.apply_pixel_aspect(crate::config::resolve_pixel_aspect(cfg.pixel_aspect));
         // The bezel before the scaling: the canvas rule reads both, and

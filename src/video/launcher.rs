@@ -915,6 +915,8 @@ pub struct MachineSetup {
     perf_overlay: bool,
     /// Synchronise desktop presentation to vblank ([display] vsync).
     vsync: bool,
+    /// Screenshot button mode, carried through launcher Run/Save.
+    native_screenshot_button: bool,
     /// The MT-32's two ROM images, whether its front panel starts up, and
     /// how that panel's display is lit.
     mt32_control_rom: Option<PathBuf>,

@@ -123,6 +123,9 @@ ordinary windows.
 
 See the [UI guide](docs/guide/ui.md) for full interface details.
 
+**Video Settings → Native Screenshot Button** makes the camera button and
+screenshot shortcut save the original 1:1 playfield pixels.
+
 The desktop window title identifies the machine and boot ROM; `[display] title`
 in a TOML configuration can set a custom title format for multiple instances.
 

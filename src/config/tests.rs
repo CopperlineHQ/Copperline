@@ -4076,6 +4076,7 @@ fn recording_clip_settings_default_and_validate() -> Result<()> {
         RecordingConfig {
             clip_seconds: crate::gifclip::DEFAULT_CLIP_SECONDS,
             clip_fps: 0,
+            native_screenshot_button: false,
         }
     );
     let cfg = parse_config("[recording]\nclip_seconds = 30\nclip_fps = 15\n")?;
@@ -4090,6 +4091,20 @@ fn recording_clip_settings_default_and_validate() -> Result<()> {
     let cfg = parse_config("[recording]\nclip_seconds = 0\nclip_fps = 0\n")?;
     assert_eq!(cfg.recording.clip_seconds, 0);
     assert_eq!(cfg.recording.clip_fps, 0);
+    assert!(!cfg.recording.native_screenshot_button);
+
+    let raw = RawConfig::parse("[recording]\nnative_screenshot_button = true\n")?;
+    assert!(
+        Config::try_from(raw.clone())?
+            .recording
+            .native_screenshot_button
+    );
+    assert_eq!(
+        RawConfig::parse(&raw.to_toml_string()?)?
+            .recording
+            .native_screenshot_button,
+        Some(true)
+    );
 
     let err = parse_config("[recording]\nclip_seconds = 500\n").unwrap_err();
     assert!(format!("{err:#}").contains("clip_seconds"), "{err:#}");

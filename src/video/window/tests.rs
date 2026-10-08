@@ -1280,6 +1280,52 @@ fn native_screenshots_follow_playfield_resolution_without_tv_borders() {
 }
 
 #[test]
+fn native_screenshot_button_toggle_leaves_scheduled_capture_mode_unchanged() {
+    let mut app = test_app();
+    assert!(!app.native_screenshot_button);
+    assert!(!app.native_screenshots);
+    app.activate_bar_control(BarControl::Menu);
+    pick_menu(&mut app, &["Video Settings", "Native Screenshot Button"]);
+    assert!(app.native_screenshot_button);
+    assert_eq!(
+        app.machine_config.recording.native_screenshot_button,
+        Some(true)
+    );
+    assert!(!app.native_screenshots);
+    assert_eq!(app.capture_present_image().width, FB_WIDTH as u32);
+
+    let bus = app.emu.bus_mut();
+    for (offset, value) in [
+        (0x08E, 0x2C81),
+        (0x090, 0x2CC1),
+        (0x092, 0x0038),
+        (0x094, 0x00D0),
+        (0x100, 0x1200),
+        (0x096, 0x8300),
+    ] {
+        bus.custom_write(offset, 2, value);
+    }
+    app.emu.step_video_frame().unwrap();
+    app.emu.step_video_frame().unwrap();
+    app.set_native_screenshots(true);
+    assert!(app.native_screenshot_button);
+    assert!(app.native_screenshots);
+    assert_eq!(app.capture_present_image().width, 320);
+
+    app.close_menu();
+    app.activate_bar_control(BarControl::Menu);
+    pick_menu(&mut app, &["Video Settings", "Native Screenshot Button"]);
+    assert!(!app.native_screenshot_button);
+    assert!(app.native_screenshots);
+    assert_eq!(
+        app.capture_screenshot_image(app.native_screenshot_button)
+            .width,
+        FB_WIDTH as u32
+    );
+    assert_eq!(app.capture_present_image().width, 320);
+}
+
+#[test]
 fn native_screenshot_sprite_pitch_distinguishes_ecs_from_aga() {
     use crate::chipset::agnus::AgnusRevision;
     for (revision, width) in [
