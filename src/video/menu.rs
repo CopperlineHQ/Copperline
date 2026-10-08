@@ -889,6 +889,11 @@ fn player_video_rows(s: &MenuState) -> Vec<MenuRow> {
         MenuRow::toggle("Fullscreen", MenuAction::ToggleFullscreen, s.fullscreen),
         MenuRow::toggle("VSync", MenuAction::ToggleVsync, s.vsync),
         MenuRow::submenu("Monitor Bezel", bezel_rows(s)),
+        MenuRow::toggle(
+            "Native Screenshot Button",
+            MenuAction::ToggleNativeScreenshotButton,
+            s.native_screenshot_button,
+        ),
     ]
 }
 
@@ -1939,9 +1944,18 @@ mod tests {
             "Monitor Bezel",
             "Fullscreen",
             "VSync",
+            "Native Screenshot Button",
         ] {
             assert!(find(video, kept).is_some(), "missing {kept}");
         }
+        assert!(!find(video, "Native Screenshot Button").unwrap().marked());
+
+        st.native_screenshot_button = true;
+        let rows = build(&st);
+        let video = find(&rows, "Video Settings")
+            .and_then(|r| r.children())
+            .expect("video section");
+        assert!(find(video, "Native Screenshot Button").unwrap().marked());
 
         st.player_save_states = true;
         let rows = build(&st);

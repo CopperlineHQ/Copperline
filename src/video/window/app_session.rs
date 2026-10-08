@@ -1583,7 +1583,14 @@ impl App {
     /// the single path behind saved screenshots and `--expect-screenshot`.
     ///
     pub(super) fn capture_present_image(&self) -> super::present::PresentImage<'_> {
-        if self.native_screenshots {
+        self.capture_screenshot_image(self.native_screenshots)
+    }
+
+    pub(super) fn capture_screenshot_image(
+        &self,
+        native: bool,
+    ) -> super::present::PresentImage<'_> {
+        if native {
             return self.capture_native_image();
         }
         let src_rows = self.present_rows;
@@ -1610,7 +1617,11 @@ impl App {
     }
 
     pub(super) fn save_screenshot(&self, path: &std::path::Path) {
-        let image = self.capture_present_image();
+        self.save_screenshot_with_mode(path, self.native_screenshots);
+    }
+
+    fn save_screenshot_with_mode(&self, path: &std::path::Path, native: bool) {
+        let image = self.capture_screenshot_image(native);
         match screenshot::save(path, &image.pixels, image.width, image.height) {
             Ok(()) => info!("screenshot saved: {}", path.display()),
             Err(e) => warn!("screenshot save failed ({}): {e:#}", path.display()),
@@ -1666,7 +1677,7 @@ impl App {
             return;
         }
         let path = screenshot::auto_filename();
-        self.save_screenshot(&path);
+        self.save_screenshot_with_mode(&path, false);
         self.show_osd(format!("Saved {}", display_file_name(&path)));
     }
 
