@@ -1382,6 +1382,7 @@ It has no effect without `--audio-stems DIR` on the command line.
 [recording]
 clip_seconds = 10   # emulated seconds kept for Save Clip as GIF; 0 = off
 clip_fps = 0        # GIF frame rate; 0 = 25 on PAL, 30 on NTSC
+native_screenshot_button = false  # camera button and Cmd/Alt+S save native pixels
 ```
 
 The window keeps a rolling ring of the last `clip_seconds` (up to 120) of
@@ -1391,6 +1392,13 @@ rate every GIF clip is written at, the interactive one and headless
 `--gif-after` captures alike; the default `0` picks half the field rate,
 25 fps on PAL and 30 on NTSC. Clips land in the `[paths] recordings`
 folder.
+
+`native_screenshot_button = true` makes the window's camera button and
+`Cmd+S` / `Alt+S` save the native playfield pixels. The same setting is
+available in **Video Settings → Native Screenshot Button**. Its default
+is `false`, which saves the presented picture. It does not change scheduled
+screenshots, screenshot expectations, clips, or recordings; use
+`--native-screenshots` for native scheduled captures.
 
 ## `[input]`
 

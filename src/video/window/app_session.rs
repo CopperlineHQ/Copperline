@@ -1661,6 +1661,10 @@ impl App {
     /// appears in the saved image.
     pub(super) fn take_screenshot(&mut self) {
         self.finish_render_for_current_frame();
+        if self.native_screenshot_button {
+            self.take_native_screenshot();
+            return;
+        }
         let path = screenshot::auto_filename();
         self.save_screenshot(&path);
         self.show_osd(format!("Saved {}", display_file_name(&path)));

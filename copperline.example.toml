@@ -814,14 +814,18 @@ video = "PAL"
 # vsync = true
 # hidpi_texture = true
 
-# [recording] -- the GIF clip ring behind Save Clip as GIF (Cmd/Alt+Shift+G)
-# and the rate of every GIF clip, including headless --gif-after captures.
+# [recording] -- GIF clip and interactive screenshot settings.
+# The clip ring is behind Save Clip as GIF (Cmd/Alt+Shift+G); clip_fps also
+# applies to headless --gif-after captures.
 # clip_seconds: emulated seconds of the presented picture the window keeps
 # (default 10, up to 120); 0 switches the ring and the menu item off.
 # clip_fps: GIF frame rate, 1 to 60 (default 0 = 25 on PAL, 30 on NTSC).
+# native_screenshot_button: make the camera button and Cmd/Alt+S save the
+# original playfield pixels (default false, presentation screenshot).
 # [recording]
 # clip_seconds = 10
 # clip_fps = 0
+# native_screenshot_button = false
 
 
 [audio]

@@ -308,9 +308,8 @@ pub struct Config {
     /// monitor in its own bank at $A10000, entered by a level-7 interrupt
     /// on a freeze.
     pub cartridge: CartridgeConfig,
-    /// GIF clip ring (`[recording]`, `crate::gifclip`): how much of the
-    /// presented picture the window keeps for Save Clip as GIF, and the
-    /// rate clips (interactive and `--gif-after`) are written at.
+    /// Capture settings (`[recording]`): the GIF clip ring and interactive
+    /// screenshot button mode.
     pub recording: RecordingConfig,
     /// The MHI virtual MPEG audio decoder board (`[mhi] enabled = true`):
     /// when true, an MHI board autoconfigs on the Zorro chain and its
@@ -1469,8 +1468,7 @@ pub struct LideConfig {
     pub drives: [Option<DriveImage>; 4],
 }
 
-/// `[recording]`: the GIF clip ring behind the window's Save Clip as GIF
-/// and the rate of every GIF clip written.
+/// `[recording]`: GIF clip settings and the interactive screenshot mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecordingConfig {
     /// Emulated seconds of presented frames the window keeps (default
@@ -1480,6 +1478,9 @@ pub struct RecordingConfig {
     /// Clip frame rate, 1 to `gifclip::MAX_CLIP_FPS`; 0 (the default)
     /// picks 25 on PAL and 30 on NTSC.
     pub clip_fps: u32,
+    /// Save native pixels from the interactive camera button and screenshot
+    /// shortcut (`[recording] native_screenshot_button`).
+    pub native_screenshot_button: bool,
 }
 
 impl Default for RecordingConfig {
@@ -1487,6 +1488,7 @@ impl Default for RecordingConfig {
         Self {
             clip_seconds: crate::gifclip::DEFAULT_CLIP_SECONDS,
             clip_fps: 0,
+            native_screenshot_button: false,
         }
     }
 }

@@ -284,6 +284,10 @@ impl RawConfig {
         take(&mut self.display.tv_h_centre, &overlay.display.tv_h_centre);
         take(&mut self.display.tv_v_centre, &overlay.display.tv_v_centre);
         take(&mut self.display.full_screen, &overlay.display.full_screen);
+        take(
+            &mut self.recording.native_screenshot_button,
+            &overlay.recording.native_screenshot_button,
+        );
         take(&mut self.input.port1, &overlay.input.port1);
         take(&mut self.input.port2, &overlay.input.port2);
         take(&mut self.input.port3, &overlay.input.port3);
@@ -1039,7 +1043,7 @@ pub(crate) struct RawCartridge {
     pub(crate) rom: Option<String>,
 }
 
-/// `[recording]` GIF clip ring (`crate::gifclip`).
+/// `[recording]` capture settings.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawRecording {
@@ -1050,6 +1054,9 @@ pub(crate) struct RawRecording {
     /// Clip frame rate (default 0 = 25 on PAL, 30 on NTSC).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) clip_fps: Option<u32>,
+    /// Use native pixels for the interactive camera button and shortcut.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) native_screenshot_button: Option<bool>,
 }
 
 /// `[mhi]` MHI virtual MPEG audio decoder board.

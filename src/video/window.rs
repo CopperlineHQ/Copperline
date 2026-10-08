@@ -1188,6 +1188,8 @@ pub struct App {
     auto_shot: Vec<(f32, PathBuf)>,
     pending_auto_shot: Vec<(f32, PathBuf)>,
     native_screenshots: bool,
+    /// Interactive camera button and screenshot shortcut capture mode.
+    native_screenshot_button: bool,
     /// `--expect-screenshot` checks, armed like `auto_shot` (deadline
     /// order) and captured through the same frame path.
     auto_expect: Vec<crate::expect::ExpectShotSpec>,
@@ -2816,6 +2818,10 @@ impl App {
             auto_shot: Vec::new(),
             pending_auto_shot: screenshot_after,
             native_screenshots: false,
+            native_screenshot_button: machine_config
+                .recording
+                .native_screenshot_button
+                .unwrap_or(false),
             auto_expect: Vec::new(),
             pending_auto_expect: Vec::new(),
             verdict: crate::verdict::RunVerdict::default(),
@@ -3907,6 +3913,9 @@ impl App {
     /// Use original field pixels for screenshots and expectations.
     pub fn set_native_screenshots(&mut self, native: bool) {
         self.native_screenshots = native;
+        if native {
+            self.native_screenshot_button = true;
+        }
     }
 
     /// `--exit-on-return`: end the run when the `--run` program's return
@@ -6865,6 +6874,7 @@ impl App {
         };
         let mut raw = crate::config::RawConfig::default();
         raw.display.vsync = Some(self.vsync);
+        raw.recording.native_screenshot_button = Some(self.native_screenshot_button);
         raw.display.pixel_aspect =
             Some(super::launcher::pixel_aspect_name(crate::video::pixel_aspect()).to_string());
         raw.display.scaling = Some(

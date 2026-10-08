@@ -1280,6 +1280,26 @@ fn native_screenshots_follow_playfield_resolution_without_tv_borders() {
 }
 
 #[test]
+fn native_screenshot_button_toggle_leaves_scheduled_capture_mode_unchanged() {
+    let mut app = test_app();
+    assert!(!app.native_screenshot_button);
+    assert!(!app.native_screenshots);
+    app.activate_bar_control(BarControl::Menu);
+    pick_menu(&mut app, &["Video Settings", "Native Screenshot Button"]);
+    assert!(app.native_screenshot_button);
+    assert_eq!(
+        app.machine_config.recording.native_screenshot_button,
+        Some(true)
+    );
+    assert!(!app.native_screenshots);
+    assert_eq!(app.capture_present_image().width, FB_WIDTH as u32);
+
+    app.set_native_screenshots(true);
+    assert!(app.native_screenshot_button);
+    assert!(app.native_screenshots);
+}
+
+#[test]
 fn native_screenshot_sprite_pitch_distinguishes_ecs_from_aga() {
     use crate::chipset::agnus::AgnusRevision;
     for (revision, width) in [

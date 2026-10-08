@@ -2551,6 +2551,22 @@ fn vsync_launcher_toggle_survives_save_and_reload() {
 }
 
 #[test]
+fn native_screenshot_button_survives_launcher_save_and_reload() {
+    let raw = RawConfig::parse("[recording]\nnative_screenshot_button = true\n").unwrap();
+    let setup = MachineSetup::from_raw(&raw).unwrap();
+    let saved = setup.to_raw();
+    assert_eq!(saved.recording.native_screenshot_button, Some(true));
+    assert!(
+        MachineSetup::from_raw(&saved)
+            .unwrap()
+            .build_config()
+            .unwrap()
+            .recording
+            .native_screenshot_button
+    );
+}
+
+#[test]
 fn cycling_chip_ram_walks_the_presets() {
     let mut s = MachineSetup::default();
     assert_eq!(s.chip_ram, 512 * 1024);

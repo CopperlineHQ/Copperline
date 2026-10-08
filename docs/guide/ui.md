@@ -1090,7 +1090,11 @@ Interlaced chipset screens save the current field, without blending or
 weaving another field into it.
 
 Starting Copperline with `--native-screenshots` also makes the camera button
-and `Cmd+S` / `Alt+S` use this capture. See [native headless captures](headless.md#capturing-screenshots)
+and `Cmd+S` / `Alt+S` use this capture. You can switch just the button and
+shortcut in **Video Settings → Native Screenshot Button**; set
+`[recording] native_screenshot_button = true` to start with it enabled.
+To keep a change made in the menu, choose **Machine Configuration → Save default**.
+See [native headless captures](headless.md#capturing-screenshots)
 for resolution and crop details.
 
 Screenshots save to the [screenshots folder](#where-files-go).
