@@ -17,38 +17,122 @@ The two halves are consumed exactly as WinUAE and FS-UAE take them.
 
 ## Provenance
 
-Built from source on 2026-09-25 from AROS upstream master
-(https://github.com/aros-development-team/AROS) at commit `f1ec64f45a`.
-No local patch and no unmerged pull request is carried. The previous
-refresh merged pull request 1179 on top of master while it was still
-open; review asked for it to be split up, every part has since landed in
-master as its own commit (listed below) and the pull request was closed,
-so the memory it gives back now comes from upstream.
+Built from source on 2026-10-09 from AROS upstream master
+(https://github.com/aros-development-team/AROS) at commit `949d6834f8`.
+No local patch and no unmerged pull request is carried.
 
-The build links `.rom` at 515,936 bytes and `.ext` at 508,386 bytes of the
-524,288-byte banks, leaving 8,352 and 15,902 bytes spare. The ext bank had
-only 682 bytes spare at the previous refresh; the room comes from
-icon.library, which no longer links zlib's deflate code into the kickstart
-(`15d1417e3a`). A future refresh that overflows a bank has to drop modules
-from the ROM's module list rather than grow the file.
+The build links `.rom` at 523,156 bytes and `.ext` at 522,678 bytes of the
+524,288-byte banks, leaving 1,132 and 1,610 bytes spare (8,352 and 15,902
+at the previous refresh). The main bank overflowed upstream during this
+cycle and `55d7530cc1` moved lowlevel.library into the ext bank, which
+also gains ramdrive.device (`1bcf9a04ae`). Both banks are now nearly
+full: a future refresh that overflows one has to drop modules from the
+ROM's module list rather than grow the file.
 
 Free memory when a `--run` staged program starts on a `--factory` machine,
 measured with a guest probe that calls `AvailMem` (a bare assembler
 executable, so no C startup code allocates first; these figures are not
 comparable with the older table further down, which used a C probe):
 
-| Machine                        | previous ROM | this ROM  | change |
-|--------------------------------|--------------|-----------|--------|
-| A500, 512K chip + 512K slow    |      759,320 |   758,520 |   -800 |
-| A500, 1 MB chip, no slow/fast  |      759,424 |   758,624 |   -800 |
-| A1200, 2 MB chip, no fast      |    1,794,720 | 1,793,920 |   -800 |
+| Machine                        | previous ROM | this ROM  | change  |
+|--------------------------------|--------------|-----------|---------|
+| A500, 512K chip + 512K slow    |      758,520 |   790,488 | +31,968 |
+| A500, 1 MB chip, no slow/fast  |      758,624 |   793,736 | +35,112 |
+| A1200, 2 MB chip, no fast      |    1,793,920 | 1,829,032 | +35,112 |
 
-The largest contiguous chip block moves the same way (752,640 -> 751,816
-bytes on the 1 MB A500, 1,787,936 -> 1,787,112 on the A1200), so the
-split-up pull request 1179 gives back what the merged one did.
+The largest contiguous chip block grows by the same amount (751,816 ->
+786,936 bytes on the 1 MB A500, 1,787,112 -> 1,822,248 on the A1200). On
+the 512K chip + 512K slow A500 the whole gain lands in slow RAM; free chip
+RAM there stays at 509,112 bytes.
 
-Upstream changes since the previous refresh (master `311afcc057` merged
-with pull request 1179) that reach this ROM:
+Upstream changes since the previous refresh (master `f1ec64f45a`) that
+reach this ROM:
+
+- m68k memory footprint (Nicolas Ramz). The Exec housekeeper, the
+  AmigaVideo display housekeeper, the CD32 unit task and the
+  console.device task, measured at well under 1 KiB of stack each, run on
+  2 KiB instead of 4 KiB stacks, and the m68k NewCreateTask() floor drops
+  to 2 KiB so those sizes take effect (`b76276f7dc`); DOS processes keep
+  the 8 KiB floor. The Exec Guru task allocates its 2 KiB alert text
+  buffer only while an alert is shown (`92fd9dff5b`, `180182129b`).
+  Buffered DOS file handles get a 1 KiB buffer instead of 4 KiB unless a
+  4 KiB Fast RAM block is free (`b52d25bbba`, `c6b414e515`). RunCommand()
+  no longer raises every command stack to 16 KiB; it clamps to the 8 KiB
+  platform process default and still honours a larger `Stack`
+  (`a473d5fc64`). The 16 KiB stack the Exec bootstrap task runs on is
+  freed when that task exits (`b99f4ee097`), a CD boot runs its Initial
+  CLI in the boot process rather than as a second process (`b20cbfb400`),
+  and CDVDFS splits its minimum cache from a part it reclaims under
+  memory pressure (`cd6da4ca7b`).
+- cia.resource: `28bd18636a` lays CIABase out like Kickstart -- hardware
+  address at $22, masks at $26-$29, the server Interrupt at $2A, five
+  12-byte {iv_Data, iv_Code, iv_Node} vectors at $40 and ExecBase at
+  $7C -- and dispatches through those vectors with iv_Data in A1. A
+  program that hooks a CIA interrupt by writing the vector in place
+  (Gloom patches the CIA-A keyboard vector at $64/$68) used to overwrite
+  the resource's jump table instead.
+- exec: `ba01955a0b` keeps SFF_SoftInt, SFF_QuantumOver and the
+  pending-switch flag in SysFlags bits 13-15 as Kickstart does, leaves
+  m68k interrupt handlers through the ExitIntr() vector, decides
+  Schedule() with interrupts masked, and enters tasks through
+  ex_LaunchPoint, so programs that SetFunction() ExitIntr() or Schedule(),
+  or replace ex_LaunchPoint, are called (AROS issue 1460).
+- timer.device: `ca064a18a5` reloads the E-clock CIA timer latch with a
+  full period once a migrated partial count expires, so only the first
+  interrupt after moving the timer is short.
+- lowlevel.library: `29a86ffb7a` fixes CD32 pad sampling -- /FIR is made
+  an output before POTGO switches pin 5 to shift mode, the first button
+  is read before the first clock pulse, and the identity check expects
+  the pad's final high-then-low bits -- and `1bd99782c2` reports a native
+  mouse as JP_TYPE_MOUSE with both counters and three buttons.
+- CD32: cd.device delivers audio frame callbacks and accepts the normal
+  playback mode (`bbeddf4f81`), and gayle_ata no longer probes A4000 IDE
+  registers on a CD32 (`8afbfdc79c`), where the open-bus reads sometimes
+  passed the drive check and left an ATA controller and its 4 KiB task
+  behind.
+- graphics, amigavideo and intuition (Nicolas Ramz): caller-owned
+  SimpleSprite DMA streams are published on their hardware channels and
+  Chip RAM SetPointer images stay live (`a97b08b258`, `0874c9a4e1`,
+  `fda2055a28`); interleaved planar bitmaps are allocated, wrapped and
+  displayed with the right row stride (`1158d7a150`, `dd2ec763a6`);
+  caller-owned Chip RAM planar screens are displayed and blitted natively
+  (`e3ac66f33a`, `e0800b31d5`, `8e82b0cbe9`, `0b29635c8b`); raw
+  custom-bitmap screens display and draw through the screen's embedded
+  bitmap (`684b78f85c`, `46b571944c`); user Copper lists are sized from
+  the instructions they emit (`f97e556f3c`); a beam-synchronised blit
+  that misses its frame restarts at the next VBlank (`0c93e963a4`); and
+  displayed rows are clipped to the viewport height (`a2fad85b02`).
+- dos.library: legacy BCPL packets carry a reply port and honour
+  packet-wait callbacks (`2e692b5661`, `5e2cfa1966`), large FRead() and
+  FWrite() requests bypass the file buffer with pushback preserved
+  (`11b8928bd9`, `ba40ca031a`), GetDeviceProc() fails cleanly on a
+  non-binding assign whose target is missing (`d81983080a`), and
+  interactive Execute() shells stay open after their initial command
+  (`03a6bc9b30`).
+- afs-handler hardening (`319982a85a`, `df1c24d000`, `65eb2ac0a1`,
+  `ce18cdc5ea`, `4f87fc68a2`, `82f34b893c`, `aa4a8d34f9`, `0fa13c0639`)
+  and `ACTION_FLUSH` (`3b53709ac4`); CDVDFS opens existing files for
+  update on read-only media (`7b213567e6`) and reuses the detected
+  protocol on remount (`ef92933d55`).
+- console.handler control-key line editing, wrapped history and quoted
+  filename completion (`e2c97e7c70`, `b0f0838f5f`, `b01e5dbafe`,
+  `c7f312f1be`), and console.device CSI raster offsets (`4db224352d`).
+
+The previous refresh was built on 2026-09-25 from master `f1ec64f45a`,
+also with no local patch and no unmerged pull request. It linked `.rom`
+at 515,936 bytes and `.ext` at 508,386 bytes; the ext bank had only 682
+bytes spare at the refresh before it, and the room came from
+icon.library, which no longer links zlib's deflate code into the
+kickstart (`15d1417e3a`). The refresh before it had merged pull request
+1179 on top of master while it was still open; review asked for it to be
+split up, every part landed in master as its own commit (listed below)
+and the pull request was closed. Free memory at a `--run` program's
+start came within 800 bytes of the merged build (758,624 against 759,424
+bytes on a 1 MB chip-only A500, 1,793,920 against 1,794,720 on a 2 MB
+A1200), so the split-up pull request gives back what the merged one did.
+
+That refresh picked up these changes since master `311afcc057` merged
+with pull request 1179:
 
 - Pull request 1179 itself, merged as separate commits: m68k CPU context,
   task state and exception-handler list (`7c59bc3f94`, `38dc95623a`,
@@ -57,7 +141,7 @@ with pull request 1179) that reach this ROM:
   OOP and HIDD dispatch (`6d72120452`, `2f0d0b809f`), Intuition helpers and
   class pools (`97a7b938fa`, `f242f983e7`), Shell buffers (`f050679d31`,
   `fdb29b04f7`, `fc70b44dde`) and RunCommand stacks (`561cbb7099`). The
-  previous refresh's notes below describe what each part does.
+  2026-09-11 refresh's notes below describe what each part does.
 - Low-memory placement follow-ups: on m68k, DOS packets (`42e43be60a`) and
   the hunks LoadSeg allocates (`ed7865194b`) now come from the high end of
   free memory like RunCommand's stacks, so short-lived packets no longer
@@ -125,7 +209,7 @@ with pull request 1179) that reach this ROM:
   (`5b2e8650f5`: `HD_SCSICMD` result fields, 12/16-byte CDBs, odd-length
   transfers, timeout reset).
 
-The previous refresh was built on 2026-09-11 from master `311afcc057`
+The 2026-09-11 refresh was built from master `311afcc057`
 merged with pull request 1179
 (https://github.com/aros-development-team/AROS/pull/1179, head
 `2776346929`). It carried no local patch: upstream commit `765871daef`
