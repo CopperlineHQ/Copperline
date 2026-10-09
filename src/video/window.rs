@@ -535,7 +535,7 @@ const CAMERA_LENS: u32 = rgba(20, 22, 24);
 pub(super) const STATUS_TEXT: u32 = rgba(174, 170, 154);
 const VOLUME_FILL: u32 = rgba(44, 178, 94);
 const VOLUME_FILL_HIGHLIGHT: u32 = rgba(128, 244, 150);
-const WINDOW_TITLE: &str = concat!("Copperline ", env!("COPPERLINE_DISPLAY_VERSION"));
+const WINDOW_TITLE: &str = concat!("Copperline ", env!("CARGO_PKG_VERSION"));
 
 /// The title on the window: Copperline's own, unless a player build adopted
 /// the game's through [`crate::video::set_branding`].

@@ -53,7 +53,7 @@ impl App {
         let hash = format!("{:08x}", descriptor.rom.crc32);
         let values = crate::config::window_title::TitleValues {
             app: "Copperline",
-            version: env!("COPPERLINE_DISPLAY_VERSION"),
+            version: env!("CARGO_PKG_VERSION"),
             machine: &machine,
             rom: &rom,
             hash: &hash,
@@ -105,6 +105,8 @@ mod tests {
         app.record_rom_title_hint();
         let hash = format!("{:08x}", app.emu.machine_descriptor().rom.crc32);
         let title = app.base_window_title();
+        // The build's commit ID belongs in About only, not the title.
+        assert!(title.starts_with(concat!("Copperline ", env!("CARGO_PKG_VERSION"), " ")));
         assert!(title.contains("A1200"));
         assert!(title.contains(&format!("AROS 1.0 ({hash})")));
 
