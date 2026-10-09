@@ -121,6 +121,15 @@ fn stage_m1_mount(mount: &Path, probe_name: &str, probe_src: &Path) {
     .expect("write Startup-Sequence");
 }
 
+/// `[audio]` section for the configs whose tests analyse the
+/// `--audio-wav` capture. The synthesized floppy drive sounds are mixed
+/// into that capture, and an empty DF0 clicks every few seconds while the
+/// ROM polls it for a disk change; where those clicks land moves with the
+/// boot timeline, so leaving them on lets a ROM change drop a click into
+/// a measurement window. With them off the capture holds only Paula and
+/// the MHI board.
+const AUDIO_CAPTURE_ONLY: &str = "[audio]\nfloppy_sounds = false\n\n";
+
 fn write_m1_config(cfg_path: &Path, mount: &Path) {
     std::fs::write(
         cfg_path,
@@ -299,6 +308,7 @@ fn write_m2_config(cfg_path: &Path, mount: &Path) {
              # byte-for-byte identical `--audio-wav` captures.\n\
              rtc_time = \"2005-03-18 01:58:29\"\n\
              rtc_frozen = true\n\n\
+             {AUDIO_CAPTURE_ONLY}\
              [mhi]\n\
              enabled = true\n\n\
              [[filesys]]\n\
@@ -867,6 +877,7 @@ fn write_seek_config(cfg_path: &Path, mount: &Path) {
              # noise in the capture.\n\
              rtc_time = \"2005-03-18 01:58:29\"\n\
              rtc_frozen = true\n\n\
+             {AUDIO_CAPTURE_ONLY}\
              [mhi]\n\
              enabled = true\n\n\
              [[filesys]]\n\
@@ -1078,6 +1089,7 @@ fn write_param_config(cfg_path: &Path, mount: &Path) {
              [machine]\n\
              rtc_time = \"2005-03-18 01:58:29\"\n\
              rtc_frozen = true\n\n\
+             {AUDIO_CAPTURE_ONLY}\
              [mhi]\n\
              enabled = true\n\n\
              [[filesys]]\n\
