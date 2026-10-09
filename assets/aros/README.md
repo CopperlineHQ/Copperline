@@ -40,10 +40,10 @@ comparable with the older table further down, which used a C probe):
 | A500, 1 MB chip, no slow/fast  |      758,624 |   793,736 | +35,112 |
 | A1200, 2 MB chip, no fast      |    1,793,920 | 1,829,032 | +35,112 |
 
-The largest contiguous chip block grows by the same amount (751,816 ->
-786,936 bytes on the 1 MB A500, 1,787,112 -> 1,822,248 on the A1200). On
-the 512K chip + 512K slow A500 the whole gain lands in slow RAM; free chip
-RAM there stays at 509,112 bytes.
+The largest contiguous chip block grows by slightly more than the total:
+751,816 -> 786,936 bytes (+35,120) on the 1 MB A500 and 1,787,112 ->
+1,822,248 (+35,136) on the A1200. On the 512K chip + 512K slow A500 the
+whole gain lands in slow RAM; free chip RAM there stays at 509,112 bytes.
 
 Upstream changes since the previous refresh (master `f1ec64f45a`) that
 reach this ROM:
