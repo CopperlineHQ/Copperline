@@ -61,6 +61,11 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="1.0.0" date="2026-10-10">
+      <description>
+        <p>Copperline 1.0, the first stable release. A new Smart framing mode recentres the picture within bounds and, with integer scaling and autocrop, fits the full display at the largest whole-pixel scale. Native 1:1 screenshots save the original Amiga pixels. The window can open scaled, maximized, at a chosen position or on a chosen monitor, and its title shows the machine and ROM. VHD hard-disk images attach read/write, the bundled A2091 ROM uses Fast RAM for bounce buffers, and AGA sprites that use SSCAN2 scan-doubling now match at the right positions. The About panel has a Check for updates button that contacts GitHub only when pressed. WinUAE-style debug output ports are supported, the bundled AROS ROM is refreshed with about 35 KB more free memory, and the app now declares its real macOS minimum, 14.2.</p>
+      </description>
+    </release>
     <!-- "~" sorts a pre-release before its final version in AppStream's
          version comparison; "1.0.0-rc.1" would sort after "1.0.0". -->
     <release version="1.0.0~rc.1" date="2026-09-26" type="development">
