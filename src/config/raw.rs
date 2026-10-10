@@ -283,6 +283,7 @@ impl RawConfig {
         take(&mut self.display.bezel, &overlay.display.bezel);
         take(&mut self.display.tv_h_centre, &overlay.display.tv_h_centre);
         take(&mut self.display.tv_v_centre, &overlay.display.tv_v_centre);
+        take(&mut self.display.overscan, &overlay.display.overscan);
         take(&mut self.display.full_screen, &overlay.display.full_screen);
         take(
             &mut self.recording.native_screenshot_button,

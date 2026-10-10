@@ -110,6 +110,7 @@ fn player_settings_overlay_field_by_field() -> Result<()> {
 
     let overlay = RawConfig::parse(
         "[display]\nshader = \"scanlines\"\nfull_screen = false\nvsync = false\n\
+             overscan = \"smart\"\nautocrop = true\n\
              [input]\nport2 = \"cd32\"\n",
     )?;
     base.merge_player_settings(&overlay);
@@ -118,6 +119,12 @@ fn player_settings_overlay_field_by_field() -> Result<()> {
     assert_eq!(cfg.shader, ShaderMode::Scanlines, "overlay wins");
     assert!(!cfg.full_screen, "overlay wins");
     assert!(!cfg.vsync, "overlay wins");
+    assert_eq!(
+        cfg.overscan,
+        Overscan::Smart,
+        "the Framing choice is restored"
+    );
+    assert!(cfg.autocrop, "the Autocrop choice is restored");
     assert_eq!(cfg.bezel, BezelStyle::Model1084, "omitted keeps the base");
     assert_eq!(cfg.port_devices[1], crate::bus::PortDevice::Cd32Pad);
     assert_eq!(cfg.machine, Some(MachineModel::Cd32));

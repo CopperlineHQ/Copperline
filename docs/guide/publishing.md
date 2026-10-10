@@ -95,7 +95,9 @@ reuses the player binary already built. Package outputs:
 
 - **macOS:** An ad-hoc signed application bundle (`<title>.app`, with the
   payload and assets under `Contents/Resources/`) and
-  `<title>-<version>-macos.zip`.
+  `<title>-<version>-macos.zip`. Like Copperline itself, the bundle needs
+  macOS 14.2 or newer and declares that, so older systems refuse to open it
+  instead of crashing at launch.
 - **Linux and Windows:** A directory named after the game `id`, with the
   payload and assets next to the executable, archived as
   `<title>-<version>-linux.tar.gz` or `<title>-<version>-windows.zip`.
@@ -113,9 +115,9 @@ The game launches directly into the title screen.
 Pressing `Cmd+E` (macOS) or `Alt+E` (Linux/Windows) or the controller Menu/Guide
 button opens a simplified in-game menu:
 
-- **Video Settings:** menu size, pixel aspect, scaling, autocrop, centring,
-  CRT shader and its strength, screen tint, fullscreen, VSync and monitor
-  bezel
+- **Video Settings:** menu size, pixel aspect, framing, scaling, autocrop,
+  centring, CRT shader and its strength, screen tint, fullscreen, VSync,
+  monitor bezel and the native screenshot button
 - **Audio Settings:** output device (or Disabled) and the audio filter
 - **Input Settings:** port devices, joystick input mode, autofire, gamepad
   calibration and input mapping

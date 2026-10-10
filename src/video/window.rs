@@ -6872,6 +6872,21 @@ impl App {
         let Some(path) = crate::paths::config_file(crate::config::PLAYER_SETTINGS_FILE) else {
             return;
         };
+        let written = self.player_prefs().to_toml_string().and_then(|text| {
+            crate::paths::ensure_parent(&path)?;
+            std::fs::write(&path, text)?;
+            Ok(())
+        });
+        if let Err(e) = written {
+            warn!("player settings not saved to {}: {e:#}", path.display());
+        }
+    }
+
+    /// The player-controlled settings as they stand, as the configuration
+    /// fragment [`Self::persist_player_prefs`] writes. Every field set here
+    /// must be one `RawConfig::merge_player_settings` reads back, or the
+    /// player forgets it on the next launch.
+    fn player_prefs(&self) -> crate::config::RawConfig {
         let mut raw = crate::config::RawConfig::default();
         raw.display.vsync = Some(self.vsync);
         raw.recording.native_screenshot_button = Some(self.native_screenshot_button);
@@ -6880,6 +6895,7 @@ impl App {
         raw.display.scaling = Some(
             super::launcher::display_scaling_name(crate::video::display_scaling()).to_string(),
         );
+        raw.display.autocrop = Some(crate::video::autocrop());
         raw.display.menu_scale = Some(crate::video::menu_scale().label().to_string());
         // A custom shader is named by its path, which the player menu never
         // offers; skipping it keeps whatever the manifest said.
@@ -6914,14 +6930,7 @@ impl App {
             }
             .to_string(),
         );
-        let written = raw.to_toml_string().and_then(|text| {
-            crate::paths::ensure_parent(&path)?;
-            std::fs::write(&path, text)?;
-            Ok(())
-        });
-        if let Err(e) = written {
-            warn!("player settings not saved to {}: {e:#}", path.display());
-        }
+        raw
     }
 
     /// Automatic capture waits while the Debug layout or a modal UI is visible.

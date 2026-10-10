@@ -1279,6 +1279,27 @@ fn native_screenshots_follow_playfield_resolution_without_tv_borders() {
     }
 }
 
+/// The player writes its menu settings to `settings.toml` and its startup
+/// layers that file back over the manifest. Whatever the write records must
+/// come back through the merge, or the player forgets the choice on the next
+/// launch: the Framing choice was written but never read back, and Autocrop
+/// was read back but never written.
+#[test]
+fn player_settings_written_are_all_read_back_on_the_next_launch() {
+    let mut app = test_app();
+    app.overscan = Overscan::Smart;
+    let written = app.player_prefs();
+    assert_eq!(written.display.overscan.as_deref(), Some("smart"));
+    assert!(written.display.autocrop.is_some());
+
+    let mut restored = crate::config::RawConfig::default();
+    restored.merge_player_settings(&written);
+    assert_eq!(
+        restored.to_toml_string().unwrap(),
+        written.to_toml_string().unwrap()
+    );
+}
+
 #[test]
 fn native_screenshot_button_toggle_leaves_scheduled_capture_mode_unchanged() {
     let mut app = test_app();

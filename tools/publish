@@ -165,7 +165,10 @@ def bundle_macos(
         "CFBundleShortVersionString": version,
         "CFBundleVersion": version,
         "LSApplicationCategoryType": "public.app-category.games",
-        "LSMinimumSystemVersion": "11.0",
+        # The player binds the same system symbols as the full app (cpal's
+        # Core Audio host needs macOS 14.2), so it declares the same floor;
+        # see the comment in packaging/macos/Info.plist.in.
+        "LSMinimumSystemVersion": "14.2",
         "NSHighResolutionCapable": True,
         "NSHumanReadableCopyright": (
             "Built on Copperline, licensed GPL-3.0-or-later; "
