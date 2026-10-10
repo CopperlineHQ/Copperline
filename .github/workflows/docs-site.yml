@@ -23,38 +23,8 @@ concurrency:
 
 jobs:
   release-branch:
-    name: Check the tag is on a release branch
-    # Releases are cut only from the vN maintenance branches (RELEASE.md,
-    # "Branches"), so a v* tag pushed anywhere else -- a test tag on main,
-    # say -- builds nothing for the site and leaves copperline.dev showing
-    # the current release line. A manual run publishes whatever ref it is
-    # run on, as before.
-    runs-on: ubuntu-latest
-    outputs:
-      publish: ${{ steps.check.outputs.publish }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - id: check
-        env:
-          EVENT: ${{ github.event_name }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          if [ "$EVENT" != "push" ]; then
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          branches=$(git branch -r --contains "$GITHUB_SHA" --format='%(refname:short)' \
-            | grep -E '^origin/v[0-9]+$' || true)
-          if [ -n "$branches" ]; then
-            echo "$TAG is on release branch(es): $branches"
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice::$TAG is not on a vN release branch; copperline.dev is left unchanged."
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-          fi
+    # Publish only tags on a vN release branch; see release-branch.yml.
+    uses: ./.github/workflows/release-branch.yml
 
   publish:
     name: Build and publish HTML docs
