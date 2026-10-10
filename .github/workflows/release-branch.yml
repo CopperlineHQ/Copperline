@@ -1,0 +1,46 @@
+name: Release branch check
+
+# Shared by the workflows that publish copperline.dev (docs-site.yml and
+# wasm-demo.yml), so they cannot disagree about which tags go live.
+#
+# Releases are cut only from the vN maintenance branches (RELEASE.md,
+# "Branches"), so a v* tag pushed anywhere else -- a test tag on main, say --
+# must not replace what the site shows. On a tag push this reports whether
+# the tagged commit is on an origin/vN branch. Any other trigger (a manual
+# workflow_dispatch run of the caller) may publish whatever ref it runs on.
+on:
+  workflow_call:
+    outputs:
+      publish:
+        description: "'true' when the caller should publish to copperline.dev"
+        value: ${{ jobs.check.outputs.publish }}
+
+jobs:
+  check:
+    name: Check the tag is on a release branch
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.check.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: check
+        env:
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != "push" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          branches=$(git branch -r --contains "$GITHUB_SHA" --format='%(refname:short)' \
+            | grep -E '^origin/v[0-9]+$' || true)
+          if [ -n "$branches" ]; then
+            echo "$TAG is on release branch(es): $branches"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::$TAG is not on a vN release branch; copperline.dev is left unchanged."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
