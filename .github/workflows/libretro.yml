@@ -2,7 +2,7 @@ name: Libretro
 
 on:
   push:
-    branches: [main]
+    branches: [main, v1]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:

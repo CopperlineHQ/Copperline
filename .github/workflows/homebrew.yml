@@ -8,7 +8,7 @@ name: Homebrew formula
 # Scoped to formula changes so it does not run on unrelated commits.
 on:
   push:
-    branches: [main]
+    branches: [main, v1]
     paths:
       - "Formula/**"
       - ".github/workflows/homebrew.yml"

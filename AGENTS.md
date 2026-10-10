@@ -234,6 +234,12 @@ cargo test --release -- --ignored # integration tests (need local ROMs/disks)
 cargo clippy && cargo fmt --check # both expected clean
 ```
 
+`main` is the development line and `v1` the 1.x maintenance branch. Base bug
+fixes, documentation corrections and packaging fixes on `v1`, which is merged
+forward into `main`; base new features and compatibility-breaking changes
+(removed or renamed options, changed defaults, save-state or protocol format
+changes) on `main` (`RELEASE.md`, "Branches").
+
 User and developer documentation lives in `docs/` (MyST Markdown): usage in
 `docs/guide/`, debugger interfaces in `docs/debugger/`, architecture and
 timing models in `docs/internals/`. Document changes in the same change that
