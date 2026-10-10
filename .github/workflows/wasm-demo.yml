@@ -2,8 +2,8 @@ name: Browser demo
 
 # Builds the wasm browser frontend (crates/copperline-web) and publishes it
 # to the copperline.dev website repository (CopperlineHQ/copperline.github.io)
-# under /try when a v* tag is pushed, so the in-browser emulator always
-# matches the latest release. A workflow_dispatch trigger allows
+# under /try when a v* tag is pushed on a vN release branch, so the in-browser
+# emulator always matches the latest release. A workflow_dispatch trigger allows
 # re-publishing from whatever ref it is run on without cutting a release.
 #
 # The page shell (try/index.html) is hand-written in the website repository
@@ -26,8 +26,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  release-branch:
+    # Publish only tags on a vN release branch; see release-branch.yml.
+    uses: ./.github/workflows/release-branch.yml
+
   publish:
     name: Build and publish the browser demo
+    needs: release-branch
+    if: needs.release-branch.outputs.publish == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

@@ -2,11 +2,12 @@ name: Docs site HTML
 
 # Builds the HTML manual with MyST and publishes it to the copperline.dev
 # website repository (CopperlineHQ/copperline.github.io) under /docs when a v*
-# tag is pushed, so the docs on the site always match the latest release.
+# tag is pushed on a vN release branch, so the docs on the site always match
+# the latest release.
 # The HTML build itself is checked on every push/PR by the docs job in
 # ci.yml; this workflow only handles publication. A workflow_dispatch
 # trigger allows re-publishing from whatever ref it is run on (e.g. after a
-# docs hotfix on main) without cutting a release.
+# docs hotfix on a release branch) without cutting a release.
 #
 # Pushing to the website repository needs the SITE_DEPLOY_KEY secret: the
 # private half of an SSH deploy key whose public half is installed with
@@ -21,8 +22,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  release-branch:
+    # Publish only tags on a vN release branch; see release-branch.yml.
+    uses: ./.github/workflows/release-branch.yml
+
   publish:
     name: Build and publish HTML docs
+    needs: release-branch
+    if: needs.release-branch.outputs.publish == 'true'
     # No Typst/PDF here, so plain ubuntu is enough (unlike docs-release.yml).
     runs-on: ubuntu-latest
     steps:

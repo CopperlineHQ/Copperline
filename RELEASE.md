@@ -9,6 +9,8 @@ Copperline has two long-lived branches:
 
 - `main` is the default branch and the development line. New features, and
   anything that breaks compatibility, land here for the next major release.
+  Nothing is released from `main`: when that release is ready for its first
+  beta, cut `v2` from `main` and tag the beta there.
 - `v1` is the 1.x maintenance branch, cut from `main` after 1.0.0. Fixes land
   here, and 1.x releases are tagged from it.
 
@@ -51,11 +53,15 @@ Resolving a forward merge:
   `timing-test/README.md`).
 
 To release from `v1`, follow the rest of this checklist on `v1`: bump the
-version, run the checks, tag, then commit the Homebrew update there and merge
-forward. Tags from either branch start the same release workflows, and the
-`Browser demo` and `Docs site HTML` workflows publish whichever tag was
-pushed last to copperline.dev, so do not push a release tag from `main` while
-the site should still show 1.x.
+version, run the checks, push the branch, tag, then commit the Homebrew
+update there and merge forward. Push the release commit to `v1` before the
+tag: the `Browser demo` and `Docs site HTML` workflows publish to
+copperline.dev only when the tagged commit is already on a `vN` release
+branch, and skip any other `v*` tag with a notice (the release-asset
+workflows still run for it). Once two release branches are live, such as
+`v1` alongside a `v2` beta, the site shows whichever of their tags was pushed
+last; to switch it back, run those two workflows by hand (Actions tab, "Use
+workflow from") on the tag the site should show.
 
 The push-triggered workflows run on both branches, and pull requests are
 checked whichever branch they target. Those workflows save Rust build caches
