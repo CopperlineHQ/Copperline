@@ -94,6 +94,13 @@ updates:
           - "version-update:semver-major"
           - "version-update:semver-minor"
       - dependency-name: bincode
+      # Git dependencies have no semver, so the rule above cannot hold them
+      # to patch releases: fluxbridge follows its main branch and the others
+      # are pinned to commits. Move them on v1 by hand when a fix needs it.
+      - dependency-name: fluxbridge
+      - dependency-name: mt32-rs
+      - dependency-name: coppersynth
+      - dependency-name: plmpeg
 
   - package-ecosystem: github-actions
     directory: /

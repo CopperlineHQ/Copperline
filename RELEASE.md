@@ -58,8 +58,9 @@ pushed last to copperline.dev, so do not push a release tag from `main` while
 the site should still show 1.x.
 
 The push-triggered workflows run on both branches, and pull requests are
-checked whichever branch they target. Only `main` saves Rust build caches;
-`v1` restores them.
+checked whichever branch they target. Those workflows save Rust build caches
+only on `main`; on `v1` they restore the default branch's. (A manual run of
+the nightly `cputest` workflow on `v1` does save a cache scoped to `v1`.)
 
 ## Before Creating the Public Repository
 

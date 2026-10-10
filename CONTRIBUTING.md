@@ -12,10 +12,11 @@ condition and add a TODO for the more accurate model that should replace it.
 
 Open fixes for released behaviour against `v1`, the 1.x maintenance branch:
 bug fixes, documentation corrections and packaging fixes. They reach `main`
-when `v1` is merged forward. Open new features, and anything that changes
-existing behaviour, against `main`, the default branch. If you are not sure,
-use `main` and say so in the pull request; it can be retargeted. RELEASE.md
-("Branches") has the details.
+when `v1` is merged forward. Open new features, and changes that could break
+existing configurations, save states or scripts (removed or renamed options,
+changed defaults, format or protocol changes), against `main`, the default
+branch. If you are not sure, use `main` and say so in the pull request; it
+can be retargeted. RELEASE.md ("Branches") has the details.
 
 ## Assets
 
