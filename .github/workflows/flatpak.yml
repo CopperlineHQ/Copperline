@@ -6,7 +6,7 @@ name: Flatpak
 # every build, so dependency PRs cannot leave the offline inputs stale.
 on:
   push:
-    branches: [main]
+    branches: [main, v1]
     paths:
       - "packaging/flatpak/**"
       - "Cargo.lock"

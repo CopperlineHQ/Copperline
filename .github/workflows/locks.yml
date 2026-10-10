@@ -20,7 +20,7 @@ name: Lockfile sync
 
 on:
   push:
-    branches: [main]
+    branches: [main, v1]
     tags: ["v*"]
   pull_request:
 

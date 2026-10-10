@@ -65,6 +65,36 @@ updates:
           - "version-update:semver-major"
           - "version-update:semver-minor"
 
+  # The v1 maintenance branch (see RELEASE.md, "Branches") takes patch
+  # releases only, as one grouped PR, so a 1.0.x release never picks up a
+  # dependency's new minor series. Security fixes in a minor or major release
+  # are not covered here: Dependabot raises security PRs against the default
+  # branch only, so port those to v1 by hand (cargo-deny in CI on v1 flags
+  # them). Dependabot reads this file from the default branch only.
+  - package-ecosystem: cargo
+    target-branch: v1
+    directories:
+      - /
+      - /crates/copperline-web
+      - /crates/copperline-player
+      - /crates/copperline-libretro
+      - /crates/cputest-runner
+      - /crates/hostsocket-plugin
+      - /crates/zz9k-plugin
+      - /tools/bezel-preview
+      - /fuzz
+    schedule:
+      interval: weekly
+    groups:
+      v1-patch-updates:
+        patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+      - dependency-name: bincode
+
   - package-ecosystem: github-actions
     directory: /
     schedule:

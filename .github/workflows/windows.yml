@@ -18,7 +18,7 @@ name: Windows
 # passed.
 on:
   push:
-    branches: [main]
+    branches: [main, v1]
     tags: ["v*"]
     paths:
       - "src/**"

@@ -25,7 +25,7 @@ name: macOS
 # right-click-Open workaround.
 on:
   push:
-    branches: [main]
+    branches: [main, v1]
     tags: ["v*"]
     paths:
       - "src/**"
