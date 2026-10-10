@@ -7,7 +7,7 @@ Support: [Patreon](https://www.patreon.com/cw/Copperline)
 
 Copperline is a cycle-driven Commodore Amiga emulator (OCS, ECS, and AGA) written in Rust. It models the Amiga custom chipset, 680x0 CPU, memory subsystems, and common expansion hardware on a unified clock timeline.
 
-It boots out of the box with the bundled open-source AROS Kickstart replacement, and supports official Kickstart ROMs (1.3 through 3.1), DiagROM, and standard disk, hardfile, and CD media.
+It boots out of the box with the bundled open-source AROS Kickstart replacement, and supports official Kickstart ROMs (1.x through 3.2, plus the CDTV and CD32 extended ROMs), DiagROM, and standard disk, hardfile, and CD media.
 
 ## Features
 
