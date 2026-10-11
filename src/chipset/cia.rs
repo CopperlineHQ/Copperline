@@ -28,6 +28,10 @@ pub struct Cia {
     pub ta_running: bool,
     pub ta_oneshot: bool,
     ta_counts_cnt: bool,
+    /// E-clock stages before a newly enabled timer can decrement. START
+    /// takes two stages; simultaneous LOAD holds counting for one more.
+    #[serde(default)]
+    ta_start_delay: u8,
 
     // Timer B
     pub tb_count: u16,
@@ -35,6 +39,8 @@ pub struct Cia {
     pub tb_running: bool,
     pub tb_oneshot: bool,
     tb_input_mode: TimerBInputMode,
+    #[serde(default)]
+    tb_start_delay: u8,
 
     /// ICR data register: pending interrupt sources.
     ///   bit 0 TA, 1 TB, 2 ALRM, 3 SP, 4 FLG, 7 IR
@@ -160,6 +166,9 @@ impl Cia {
         cia.icr_mask = bytes[16] & 0x1f;
         cia.irq_pin = cia.icr_data & cia.icr_mask & 0x1f != 0;
         cia.irq_pin_delay_eticks = 0;
+        // Legacy USS snapshots describe running timers, not new START writes.
+        cia.ta_start_delay = 0;
+        cia.tb_start_delay = 0;
         cia
     }
 
@@ -177,6 +186,8 @@ impl Cia {
             regs[REG_PRA] = 0xC1;
         }
         Self {
+            ta_start_delay: 0,
+            tb_start_delay: 0,
             which,
             regs,
             ta_count: 0xFFFF,
@@ -243,10 +254,10 @@ impl Cia {
     pub fn next_underflow_ticks(&self) -> Option<u32> {
         let mut min: Option<u32> = None;
         if self.ta_running && !self.ta_counts_cnt {
-            min = Some(self.ta_count as u32 + 1);
+            min = Some(self.ta_count as u32 + 1 + u32::from(self.ta_start_delay));
         }
         if self.tb_running && self.tb_input_mode == TimerBInputMode::Phi2 {
-            let n = self.tb_count as u32 + 1;
+            let n = self.tb_count as u32 + 1 + u32::from(self.tb_start_delay);
             min = Some(match min {
                 Some(m) => m.min(n),
                 None => n,
@@ -544,6 +555,7 @@ impl Cia {
                     self.ta_count = self.ta_latch;
                     if self.ta_oneshot {
                         self.ta_running = true;
+                        self.ta_start_delay = 2;
                         started_timer = true;
                         // The auto-started one-shot reads back as running:
                         // the 8520 sets the CRA START bit, and clears it on
@@ -563,6 +575,7 @@ impl Cia {
                     self.tb_count = self.tb_latch;
                     if self.tb_oneshot {
                         self.tb_running = true;
+                        self.tb_start_delay = 2;
                         started_timer = true;
                         // Mirror the CRB START bit for the auto-started
                         // one-shot, same as timer A above.
@@ -640,7 +653,11 @@ impl Cia {
                     self.ta_count = self.ta_latch;
                 }
                 if !prev_run && self.ta_running {
+                    self.ta_start_delay = if val & CR_LOAD != 0 { 3 } else { 2 };
                     started_timer = true;
+                }
+                if !self.ta_running {
+                    self.ta_start_delay = 0;
                 }
             }
             REG_CRB => {
@@ -656,7 +673,11 @@ impl Cia {
                 //        1 = TOD writes update the alarm register.
                 self.tod_write_alarm = val & 0x80 != 0;
                 if !prev_run && self.tb_running {
+                    self.tb_start_delay = if val & CR_LOAD != 0 { 3 } else { 2 };
                     started_timer = true;
+                }
+                if !self.tb_running {
+                    self.tb_start_delay = 0;
                 }
             }
             _ => {}
@@ -718,6 +739,22 @@ impl Cia {
         if ticks == 0 {
             return false;
         }
+        // Resolve startup on the PHI2 grid even in CNT/cascade mode. In
+        // particular a batched call must not feed timer B underflows that
+        // happened while its own START pipeline was still filling.
+        if ticks > 1 && (self.ta_start_delay != 0 || self.tb_start_delay != 0) {
+            let mut edge = false;
+            let mut remaining = ticks;
+            while remaining != 0 && (self.ta_start_delay != 0 || self.tb_start_delay != 0) {
+                edge |= self.tick(1);
+                remaining -= 1;
+            }
+            return edge | self.tick(remaining);
+        }
+        let ta_ready = self.ta_start_delay == 0;
+        let tb_ready = self.tb_start_delay == 0;
+        self.ta_start_delay = self.ta_start_delay.saturating_sub(1);
+        self.tb_start_delay = self.tb_start_delay.saturating_sub(1);
         // PBON pulse mode holds PB6/PB7 low for one E-clock. A pulse armed by
         // the previous timer/CNT underflow returns high at this E-clock; a new
         // underflow later in this call can arm the next pulse. Reads only
@@ -735,7 +772,7 @@ impl Cia {
         let mut pin_edge = self.drain_irq_pin_delay(ticks);
         let mut timer_mask: u8 = 0;
         let mut ta_underflows = 0;
-        if self.ta_running && !self.ta_counts_cnt && ticks > 0 {
+        if self.ta_running && ta_ready && !self.ta_counts_cnt && ticks > 0 {
             ta_underflows = advance(&mut self.ta_count, self.ta_latch, ticks);
             timer_mask |= u8::from(ta_underflows != 0) * ICR_TA;
             if timer_mask & ICR_TA != 0 && self.ta_oneshot {
@@ -759,7 +796,7 @@ impl Cia {
                 }
             }
         };
-        if self.tb_running && tb_ticks > 0 {
+        if self.tb_running && tb_ready && tb_ticks > 0 {
             let tb_underflows = advance(&mut self.tb_count, self.tb_latch, tb_ticks);
             timer_mask |= u8::from(tb_underflows != 0) * ICR_TB;
             if timer_mask & ICR_TB != 0 && self.tb_oneshot {
@@ -819,7 +856,7 @@ impl Cia {
     fn pulse_cnt(&mut self) -> bool {
         let mut timer_mask = 0;
         let mut sp_mask = 0;
-        if self.ta_running && self.ta_counts_cnt {
+        if self.ta_running && self.ta_start_delay == 0 && self.ta_counts_cnt {
             let ta_underflows = advance(&mut self.ta_count, self.ta_latch, 1);
             timer_mask |= u8::from(ta_underflows != 0) * ICR_TA;
             if ta_underflows != 0 && self.ta_oneshot {
@@ -831,6 +868,7 @@ impl Cia {
             }
             sp_mask |= self.tick_sdr_output(ta_underflows);
             if self.tb_running
+                && self.tb_start_delay == 0
                 && matches!(
                     self.tb_input_mode,
                     TimerBInputMode::TimerA | TimerBInputMode::TimerAWhileCntHigh
@@ -845,7 +883,8 @@ impl Cia {
                 }
             }
         }
-        if self.tb_running && self.tb_input_mode == TimerBInputMode::Cnt {
+        if self.tb_running && self.tb_start_delay == 0 && self.tb_input_mode == TimerBInputMode::Cnt
+        {
             let tb_underflows = advance(&mut self.tb_count, self.tb_latch, 1);
             timer_mask |= u8::from(tb_underflows != 0) * ICR_TB;
             if tb_underflows != 0 && self.tb_oneshot {
@@ -1109,6 +1148,61 @@ mod tests {
     use super::*;
 
     #[test]
+    fn start_and_load_wait_for_e_clock_stages_before_counting() {
+        for which in [Which::A, Which::B] {
+            for (low, high, control, mask) in [
+                (REG_TALO, REG_TAHI, REG_CRA, ICR_TA),
+                (REG_TBLO, REG_TBHI, REG_CRB, ICR_TB),
+            ] {
+                for (value, stages) in [(0x09, 2), (0x19, 3)] {
+                    let mut cia = Cia::new(which);
+                    cia.write(low, 3);
+                    cia.write(high, 0);
+                    cia.write(REG_ICR, 0x80 | mask);
+                    cia.write(control, value);
+                    assert_eq!(cia.next_underflow_ticks(), Some(stages + 4));
+                    for _ in 0..stages {
+                        assert!(!cia.tick(1));
+                        assert_eq!(cia.read(low), 3, "START must not decrement yet");
+                    }
+                    for count in [2, 1, 0] {
+                        assert!(!cia.tick(1));
+                        assert_eq!(cia.read(low), count);
+                    }
+                    assert!(cia.tick(1));
+                    assert_eq!(cia.read(REG_ICR), ICR_IR | mask);
+                    assert_eq!(cia.read(control) & 1, 0, "one-shot stops at underflow");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn timer_startup_survives_snapshot_and_batched_ticks() {
+        let mut initial = Cia::new(Which::A);
+        initial.write(REG_TALO, 7);
+        initial.write(REG_TAHI, 0);
+        initial.write(REG_CRA, 0x19);
+        initial.write(REG_ICR, 0x81);
+        initial.tick(1);
+        let saved = serde_json::to_vec(&initial).unwrap();
+        for ticks in 0..=10 {
+            let mut batched: Cia = serde_json::from_slice(&saved).unwrap();
+            let mut stepped = initial.clone();
+            let batch_edge = batched.tick(ticks);
+            let mut step_edge = false;
+            for _ in 0..ticks {
+                step_edge |= stepped.tick(1);
+            }
+            assert_eq!(batch_edge, step_edge);
+            assert_eq!(
+                serde_json::to_value(&batched).unwrap(),
+                serde_json::to_value(&stepped).unwrap()
+            );
+        }
+    }
+
+    #[test]
     fn anchored_tod_syncs_to_pal_frame_boundaries() {
         let mut cia = Cia::new(Which::B);
         cia.write(REG_TODHI, 0);
@@ -1204,6 +1298,7 @@ mod tests {
         cia.write(REG_TALO, 3);
         cia.write(REG_TAHI, 0);
         cia.write(REG_CRA, 0x21); // START | INMODE = CNT edges
+        cia.tick(2); // START traverses the E-clock count-enable pipeline.
 
         for _ in 0..2 {
             cia.write(REG_PRA, 0xFF); // rising edge on PA1 -> CNT
@@ -1262,6 +1357,7 @@ mod tests {
         cia.write(REG_TAHI, 0);
         // CRA: START | LOAD | INMODE=CNT (bit 5).
         cia.write(REG_CRA, 0x01 | 0x10 | 0x20);
+        cia.tick(3); // START + LOAD, before driving external CNT edges.
         let mut edges = 0;
         let fired = loop {
             edges += 1;
@@ -1451,7 +1547,7 @@ mod tests {
         cia.write(REG_TAHI, 0);
         cia.write(REG_CRA, 0x01);
 
-        assert!(!cia.tick(3));
+        assert!(!cia.tick(5)); // two startup E-clocks, then three decrements
         assert!(!cia.irq_line_asserted());
         assert!(cia.tick(1), "underflow must assert the pin same-cycle");
         assert!(cia.irq_line_asserted());
@@ -1467,7 +1563,7 @@ mod tests {
         cia.write(REG_TAHI, 0);
         cia.write(REG_CRA, 0x01);
 
-        assert!(!cia.tick(3));
+        assert!(!cia.tick(5)); // two startup E-clocks, then three decrements
         let _ = cia.read(REG_ICR); // the read the underflow races
         assert!(!cia.tick(1), "racing underflow must not assert same-cycle");
         assert!(!cia.irq_line_asserted());
@@ -1515,7 +1611,7 @@ mod tests {
         cia.write(REG_TAHI, 0);
         cia.write(REG_CRA, 0x01);
 
-        assert!(!cia.tick(1));
+        assert!(!cia.tick(3)); // startup plus the unmasked underflow
         assert_eq!(cia.icr_data & ICR_TA, ICR_TA);
         assert!(!cia.irq_line_asserted());
 
@@ -1537,7 +1633,7 @@ mod tests {
         cia.write(REG_CRB, 0x40 | 0x01);
         cia.write(REG_CRA, 0x01);
 
-        cia.tick(1);
+        cia.tick(3);
 
         assert_eq!(cia.read(REG_ICR) & (ICR_TA | ICR_TB), ICR_TA | ICR_TB);
     }
@@ -1553,7 +1649,7 @@ mod tests {
         cia.write(REG_CRA, 0x01);
         cia.set_cnt_pin(false);
 
-        cia.tick(1);
+        cia.tick(3);
         assert_eq!(cia.read(REG_ICR) & ICR_TB, 0);
 
         cia.set_cnt_pin(true);
@@ -1568,6 +1664,7 @@ mod tests {
         cia.write(REG_TALO, 0);
         cia.write(REG_TAHI, 0);
         cia.write(REG_CRA, CR_PBON | CR_OUTMODE | 0x01);
+        cia.tick(2);
 
         assert_ne!(cia.read(REG_PRB) & 0x40, 0);
         cia.tick(1);
@@ -1583,6 +1680,7 @@ mod tests {
         cia.write(REG_TBLO, 0);
         cia.write(REG_TBHI, 0);
         cia.write(REG_CRB, CR_PBON | 0x08 | 0x01); // one-shot pulse
+        cia.tick(2);
 
         cia.tick(1);
         assert_eq!(cia.read(REG_PRB) & 0x80, 0);
@@ -1631,6 +1729,7 @@ mod tests {
         cia.write(REG_CRA, CRA_SPMODE);
         cia.write(REG_SDR, 0xA5);
         cia.write(REG_CRA, CRA_SPMODE | 0x01);
+        cia.tick(2);
 
         for _ in 0..7 {
             cia.tick(1);

@@ -221,6 +221,38 @@ fn full_bus_line_markers_match_bartman_signal_state() {
 }
 
 #[test]
+fn cia_vpa_transfer_feeds_start_pipeline_on_the_transfer_edge() {
+    for phase in 0..5 {
+        let mut bus = empty_bus();
+        bus.irq_latency_setting = 6;
+        bus.paula.intena = INT_MASTER | INT_PORTS;
+        bus.cia_a.write(REG_TALO, 3);
+        bus.cia_a.write(REG_TAHI, 0);
+        bus.cia_a.write(REG_ICR, 0x81);
+        bus.advance_devices(phase);
+        bus.set_cpu_bus_arbitration_enabled(true);
+        bus.cpu_cia_access(1);
+        let transfer = bus.emulated_cck();
+        bus.cia_a_write(1 + ((REG_CRA as u64) << 8), 1, 0x19);
+        bus.cpu_cia_access_finish();
+        assert_eq!(bus.emulated_cck(), transfer + 3);
+        assert_eq!(bus.cia_a.next_underflow_ticks(), Some(6));
+        // START+LOAD includes the transfer edge itself. From that edge,
+        // two remaining startup stages and four counter ticks cost 30 CCK.
+        while bus.emulated_cck() < transfer + 30 {
+            assert_eq!(bus.paula.intreq & INT_PORTS, 0);
+            bus.advance_cpu_idle_devices(1);
+        }
+        assert_ne!(bus.paula.intreq & INT_PORTS, 0);
+        while bus.emulated_cck() < transfer + 36 {
+            assert_eq!(bus.cpu_visible_intreq() & INT_PORTS, 0);
+            bus.advance_cpu_idle_devices(1);
+        }
+        assert_ne!(bus.cpu_visible_intreq() & INT_PORTS, 0);
+    }
+}
+
+#[test]
 fn full_bus_record_carries_cia_register_and_e_clock_phase() {
     let mut bus = empty_bus();
     bus.set_frame_analyzer_full(true);
@@ -229,6 +261,7 @@ fn full_bus_record_carries_cia_register_and_e_clock_phase() {
     let (vpos, hpos) = bus.cia_trace_slot.unwrap();
     let cia_a_offset = 1 + u64::from(REG_DDRA as u32) * 0x100;
     let _ = bus.cia_a_write(cia_a_offset, 1, 0x5A);
+    bus.cpu_cia_access_finish();
 
     let record = bus
         .current_frame_bus_trace
@@ -248,6 +281,7 @@ fn full_bus_record_carries_cia_register_and_e_clock_phase() {
     let (vpos, hpos) = bus.cia_trace_slot.unwrap();
     let cia_b_offset = u64::from(REG_DDRB as u32) * 0x100;
     let _ = bus.cia_b_write(cia_b_offset, 1, 0xA5);
+    bus.cpu_cia_access_finish();
     let record = bus
         .current_frame_bus_trace
         .record_at(vpos as usize, hpos as usize)
@@ -258,6 +292,7 @@ fn full_bus_record_carries_cia_register_and_e_clock_phase() {
     bus.cpu_cia_access(1);
     let (vpos, hpos) = bus.cia_trace_slot.unwrap();
     let _ = bus.cia_b_write(cia_b_offset, 2, 0xC300);
+    bus.cpu_cia_access_finish();
     let record = bus
         .current_frame_bus_trace
         .record_at(vpos as usize, hpos as usize)
@@ -268,6 +303,7 @@ fn full_bus_record_carries_cia_register_and_e_clock_phase() {
     bus.cpu_cia_access(1);
     let (vpos, hpos) = bus.cia_trace_slot.unwrap();
     assert_eq!(bus.cia_b_read(cia_b_offset, 2), 0xC300);
+    bus.cpu_cia_access_finish();
     let record = bus
         .current_frame_bus_trace
         .record_at(vpos as usize, hpos as usize)
@@ -494,9 +530,9 @@ fn cia_irq_trace_uses_underflow_slot_during_batched_advance() {
 
     let trace = &bus.current_frame_bus_trace;
     assert_ne!(
-        trace.record_at(0, 4).unwrap().events & BUS_EVENT_CIAA_IRQ,
+        trace.record_at(0, 14).unwrap().events & BUS_EVENT_CIAA_IRQ,
         0,
-        "the first CIA E-clock ends in the colour-clock slot starting at hpos 4"
+        "two startup E-clocks precede the underflow at the third E-clock"
     );
     assert_eq!(
         trace.record_at(0, 20).unwrap().events & BUS_EVENT_CIAA_IRQ,
@@ -2032,7 +2068,7 @@ fn cia_b_mask_enable_propagates_latched_timer_interrupt_to_paula() {
     let _ = bus.cia_b_write(addr(REG_TAHI), 1, 0);
     let _ = bus.cia_b_write(addr(REG_CRA), 1, 0x01);
 
-    assert!(!bus.cia_b.tick(1));
+    assert!(!bus.cia_b.tick(3)); // two START stages, then the unmasked underflow
     assert_eq!(bus.paula.intreq & INT_EXTER, 0);
 
     let _ = bus.cia_b_write(addr(REG_ICR), 1, 0x80 | 0x01);
@@ -2293,6 +2329,7 @@ fn real_mode_cpu_bus_advance_ticks_cia_without_double_counting() {
     bus.cia_b.write(REG_TBLO, 4);
     bus.cia_b.write(REG_TBHI, 0);
     bus.cia_b.write(REG_CRB, 0x11);
+    bus.cia_b.tick(3); // settle START+LOAD before testing bus-time accounting
 
     // Device ticks are deferred from the per-access advance and applied in
     // one batch at the next observation/boundary; flush to apply them here.

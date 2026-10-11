@@ -704,9 +704,9 @@ References: HRM [Blitter Hardware, chapter
 A 68000 does not enter an exception the moment INTREQ rises. Two hardware
 mechanisms sit between the two events, and Copperline models both:
 
-1. **The Paula IPL pipe.** A change to the enabled-pending interrupt set
-   reaches the CPU's IPL pins only after a few chip clocks of pipelining
-   inside Paula (`DEFAULT_IRQ_LATENCY_CCK = 5`, `src/bus.rs`;
+1. **The interrupt propagation pipe.** A change to the enabled-pending
+   interrupt set reaches the CPU through a combined latch/encoder/pin delay
+   (`DEFAULT_IRQ_LATENCY_CCK = 6`, `src/bus.rs`;
    `COPPERLINE_IRQ_LATENCY_CCK` overrides, `0` disables both mechanisms).
    The delay is attached to asynchronous Paula/CIA/blitter/Copper source
    assertions. A CPU write that merely changes INTENA/INTREQ masking or
@@ -731,6 +731,41 @@ not model. An earlier revision used a blanket 65 CCK "recognition latency"
 calibrated against timing-test row 19 with a mis-decoded VHPOSR (the low
 byte is the CCK position, not CCK/2); that delivered every interrupt ~50 CCK
 late and dominated the vAmigaTS cputim/irqtim divergence.
+
+The six-CCK default is calibrated against `a500-irq-probe` captures from a
+PAL A500 with 512 KB chip RAM, 512 KB slow RAM, ECS Agnus and OCS Denise.
+With only Copper DMA enabled, a WAIT at line 64 followed by a MOVE that
+sets SOFTINT wakes a STOPped 68000: the handler's first instruction records
+VHPOSR 37 CCK after the WAIT target at all sixteen horizontal phases,
+twice each. The previous five-CCK default recorded 36. This validates the
+combined Copper/interrupt/CPU/readback path, not an isolated measurement of
+the propagation delay at Paula's pins.
+
+### CIA register transfers and timer startup
+
+A CIA access uses the 68000's synchronous VPA/E bus cycle, not an ordinary
+four-clock DTACK cycle ([MC68000 User's Manual, appendix B](https://www.nxp.com/docs/en/reference-manual/MC68000UM.pdf)). The E period is
+ten CPU clocks, six low and four high. `cpu_cia_access` synchronizes the
+transfer to the E falling edge. The register transfer occurs before that
+edge's CIA update; `cpu_cia_access_finish` applies the edge and then advances
+the final six CPU clocks. Applying a START write after its transfer edge
+would miss the first timer pipeline stage and postpone underflow by an
+entire E-clock. The total access cost is unchanged.
+
+Timers A and B hold counting while their START pipeline fills: two E-clock
+stages for START and three for simultaneous START+LOAD. On a CPU VPA write
+the transfer edge feeds the first stage. The timer's START bit is readable
+during startup; one-shot underflow still clears it. Startup advances on
+PHI2 even for CNT/cascade modes, and underflow predictions include the
+remaining stages so a stopped CPU cannot nap past an interrupt. The two
+startup counters travel in snapshots; older states default them to zero
+(an already-running timer), as do legacy USS imports.
+
+The hardware probe's CIA measurements include register programming, the
+timer, interrupt dispatch and VHPOSR readback. Its launch instruction/E-clock
+phase varies between trials and between boots, so whole-record equality is
+not an accuracy metric. Compare phase-matched samples or elapsed-time
+distributions, and exclude ambiguous VHPOSR reads at horizontal wrap.
 
 ## Beam-register readback
 

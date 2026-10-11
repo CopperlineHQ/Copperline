@@ -4261,11 +4261,15 @@ impl CpuBus {
 
         if range_contains(CIA_A_BASE, CIA_A_SIZE, addr) {
             self.bus.cpu_cia_access(Self::access_words(size));
-            return self.bus.cia_a_read(u64::from(addr - CIA_A_BASE), size) as u32;
+            let value = self.bus.cia_a_read(u64::from(addr - CIA_A_BASE), size) as u32;
+            self.bus.cpu_cia_access_finish();
+            return value;
         }
         if range_contains(CIA_B_BASE, CIA_B_SIZE, addr) {
             self.bus.cpu_cia_access(Self::access_words(size));
-            return self.bus.cia_b_read(u64::from(addr - CIA_B_BASE), size) as u32;
+            let value = self.bus.cia_b_read(u64::from(addr - CIA_B_BASE), size) as u32;
+            self.bus.cpu_cia_access_finish();
+            return value;
         }
         if self.bus.cdtv.is_some() && range_contains(CDTV_BATTRAM_BASE, CDTV_BATTRAM_SIZE, addr) {
             // CDTV battery-backed bookmark RAM overlays the top half of
@@ -4625,6 +4629,7 @@ impl CpuBus {
             let effect = self
                 .bus
                 .cia_a_write(u64::from(addr - CIA_A_BASE), size, u64::from(value));
+            self.bus.cpu_cia_access_finish();
             if effect.disable_overlay {
                 // Gary's overlay flip-flop clears the moment the CIA drives
                 // OVL low: the guest's very next access may already expect
@@ -4648,6 +4653,7 @@ impl CpuBus {
             let effect = self
                 .bus
                 .cia_b_write(u64::from(addr - CIA_B_BASE), size, u64::from(value));
+            self.bus.cpu_cia_access_finish();
             if effect.timer_started {
                 self.bus.slice_preempted = true;
             }
@@ -8428,10 +8434,9 @@ mod tests {
 
         assert_eq!(slice.instructions, 3);
         assert_eq!(machine.d(0), 0x55);
-        // The cycle-exact core keeps a two-word prefetch queue filled ahead of
-        // the program counter, so after the handler's one-word MOVEQ #$55 at
-        // $0200 the reported PC is $0200 + 2 (executed) + 4 (queued ahead).
-        assert_eq!(machine.pc(), 0x0000_0206);
+        // Only the handler's MOVEQ has retired after the two mainline
+        // instructions. Prefetch does not advance the architectural PC.
+        assert_eq!(machine.pc(), 0x0000_0202);
         assert_ne!(machine.bus().paula.intreq & INT_PORTS, 0);
         assert_eq!(machine.bus().delivered_irq_pending & INT_PORTS, INT_PORTS);
         Ok(())
@@ -8510,6 +8515,56 @@ mod tests {
             0xFF,
             "the reboot after RESET reads as warm"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn copper_softint_wakes_stop_at_a500_hardware_beam_positions() -> Result<()> {
+        // a500-irq-probe: WAIT line 64 at sixteen horizontal phases, then
+        // MOVE SET|SOFTINT to INTREQ. The first handler instruction copies
+        // VHPOSR, exactly as on the physical 512K-chip/512K-slow A500.
+        for phase in 0..16 {
+            let target_h = 0x40 + phase * 2;
+            let mut bus = test_bus_with_pc(0x100);
+            bus.set_agnus_revision(crate::chipset::agnus::AgnusRevision::Ecs8372Rev4);
+            write_program(&mut bus, 0x100, &[0x4e72, 0x2000]); // STOP #$2000
+            write_program(&mut bus, 0x200, &[0x3b6e, 0x0006, 0x0000]);
+            write_program(
+                &mut bus,
+                0x300,
+                &[
+                    0x4001 | target_h,
+                    0xfffe,
+                    0x009c,
+                    0x8004, // SET|SOFTINT
+                    0xffff,
+                    0xfffe,
+                ],
+            );
+            set_autovector(&mut bus, 1, 0x200);
+            bus.paula.intena = INT_MASTER | 0x0004;
+            bus.agnus.dmacon = DMACON_DMAEN | DMACON_COPEN;
+            bus.copper.jump(0x300);
+            bus.irq_latency_setting = 6;
+            let mut machine = M68kMachine::new(bus, CpuModel::M68000, false)?;
+            machine.cpu.dar[13] = 0x400;
+            machine.cpu.dar[14] = 0x00df_f000;
+            machine.step_slice(1)?;
+            assert!(machine.stopped());
+            for _ in 0..20_000 {
+                machine.step_slice(1)?;
+                if !machine.stopped() {
+                    break;
+                }
+                machine.bus_mut().advance_cpu_idle_devices(1);
+            }
+            assert!(!machine.stopped(), "SOFTINT must wake STOP");
+            assert_eq!(
+                machine.bus().peek_word_any(0x400),
+                0x4000 | (target_h + 37),
+                "hardware VHPOSR capture at phase {phase}"
+            );
+        }
         Ok(())
     }
 

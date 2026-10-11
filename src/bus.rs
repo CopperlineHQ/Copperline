@@ -140,12 +140,13 @@ fn external_access_cck_x100_setting() -> u32 {
 /// cputim/irqtim/inttim divergence. Set COPPERLINE_IRQ_LATENCY_CCK to override
 /// (0 disables the pipe AND the boundary-sampling delay = raw model).
 ///
-/// 5 = the ~4-cycle pin pipe plus the one-cck register-change commit a poked
-/// INTREQ takes before the level encoder sees it (folded into one constant;
-/// an IRQ-latency probe against vAmiga across seven source/loop geometries
-/// lands within 0..+7 cck, the residual being per-instruction IPL poll-point
-/// detail the m68k core does not model).
-const DEFAULT_IRQ_LATENCY_CCK: u32 = 5;
+/// Six CCK for the combined latch/encoder/pin path. With DMA disabled except
+/// for a Copper WAIT/MOVE, a physical PAL A500 (ECS Agnus, OCS Denise) records
+/// VHPOSR 37 CCK after the WAIT target when waking a STOPped 68000. Five made
+/// that entire path one CCK early at all sixteen tested horizontal phases.
+/// This calibrates the combined path, not an isolated Paula-pin measurement;
+/// instruction IPL poll points remain a separate CPU timing mechanism.
+const DEFAULT_IRQ_LATENCY_CCK: u32 = 6;
 
 /// CPU clocks a 020+ chip read spends returning data past the data-return
 /// colour clock, before the execution unit can use it.
@@ -6976,6 +6977,8 @@ impl Bus {
     /// remainder is the live E phase). Software loops that poll or toggle a
     /// CIA lock to the E clock through this - the vAmigaTS CIA/cnt ramps
     /// count it directly.
+    /// Call `cpu_cia_access_finish` after the register transfer to complete
+    /// the six-CPU-clock trailing E-low phase.
     pub fn cpu_cia_access(&mut self, words: u32) {
         if !self.cpu_bus_arbitration_enabled || words == 0 {
             return;
@@ -6985,12 +6988,36 @@ impl Bus {
         let phase = (self.device_clock.cia_tick_remainder_cck as usize).min(4);
         self.cia_trace_phase = phase as u8;
         let delay = E_SYNC_DELAY_CCK[phase];
-        let cck = delay + words * 2;
-        let tick = self.advance_chipset(cck);
-        self.record_slice_bus_advance(cck, tick);
-        self.credit_cpu_off_chip_access(cck);
+        // The register transfer precedes the final six CPU clocks of the
+        // VPA cycle. Keep the existing E-clock synchronization and total
+        // cycle length, but let the caller observe/mutate the CIA before
+        // advancing that trailing E-low phase.
+        let cck = delay + words * 2 - 3;
+        let before_edge = cck - 1;
+        let tick = self.advance_chipset(before_edge);
+        self.record_slice_bus_advance(before_edge, tick);
+        self.credit_cpu_off_chip_access(before_edge);
         self.flush_timed_devices();
+        // Data/control are present when PHI2 falls. The register transfer
+        // must precede that edge's timer update, not follow it: otherwise a
+        // START/LOAD write misses the first count-enable pipeline stage.
+        // Attribute it to the slot ending at this edge, which has already
+        // been recorded; the trailing bus phase must not overwrite it.
         self.cia_trace_slot = Some((self.agnus.vpos, self.agnus.hpos));
+        let tick = self.advance_chipset(1);
+        self.record_slice_bus_advance(1, tick);
+        self.credit_cpu_off_chip_access(1);
+    }
+
+    pub fn cpu_cia_access_finish(&mut self) {
+        if !self.cpu_bus_arbitration_enabled {
+            return;
+        }
+        self.flush_timed_devices(); // PHI2 edge, after the register transfer
+        let tick = self.advance_chipset(3);
+        self.record_slice_bus_advance(3, tick);
+        self.credit_cpu_off_chip_access(3);
+        self.flush_timed_devices();
     }
 
     pub fn cpu_slow_external_access(&mut self, words: u32) {
