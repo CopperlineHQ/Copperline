@@ -1039,6 +1039,27 @@ mod fixture_tests {
                     .unwrap();
                 assert_eq!(global.location, Location::Static(symbol.at), "{name}");
             }
+            // Hunk symbols normally take precedence for global addresses.
+            // Remove them to verify DW_OP_addr independently maps DATA/BSS,
+            // rather than letting a good symbol hide a bad DWARF address.
+            let mut without_symbols = parsed.clone();
+            for hunk in &mut without_symbols.hunks {
+                hunk.symbols.clear();
+            }
+            let mut dwarf_only = DebugInfo::from_hunk_file(&without_symbols);
+            assert!(dwarf_only.symbols.is_empty());
+            dwarf_only.relocate(vec![0x10000, 0x20000, 0x30000]);
+            for (name, kind) in [("increment", HunkKind::Data), ("result", HunkKind::Bss)] {
+                let index = parsed.hunks.iter().position(|h| h.kind == kind).unwrap();
+                let expected = HunkAddr::new(index as u32, 0);
+                let global = dwarf_only.globals.iter().find(|g| g.name == name).unwrap();
+                assert_eq!(global.location, Location::Static(expected), "{name}");
+                assert_eq!(
+                    dwarf_only.runtime(expected),
+                    Some(0x10000 * (index as u32 + 1)),
+                    "{name}: noncontiguous runtime relocation"
+                );
+            }
             let worker = info.functions.iter().find(|f| f.name == "worker").unwrap();
             assert_eq!(worker.params[0].name, "value");
             assert_eq!(worker.params[0].location, Location::FrameOffset(0));

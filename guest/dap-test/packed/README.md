@@ -11,6 +11,8 @@ The committed probes use GCC 16.2.0b and binutils from
 `tinic/binutils-gdb` revision `ffe2ad82e34e11206efd706338b32a696185ebb4`.
 They cover DWARF 2, 4 and 5, two compilation units, initialized data, BSS,
 a stack parameter and local, source lines, and call-frame information.
+The unit regression also removes Hunk symbols to check DATA/BSS global
+addresses independently of symbol lookup, then relocates the hunks apart.
 No SDK or runtime library is linked. `entry` loops after calling `worker`.
 DWARF 2 uses a `.debug_loc` frame-base list that the producer does not
 retain in this container; its parameter must be reported unsupported.

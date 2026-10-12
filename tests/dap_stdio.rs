@@ -180,7 +180,7 @@ fn dap_binds_linked_elf_with_retained_relocations_after_loadseg() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "boots bundled AROS and launches the emulator plus DAP adapter"]
 fn dap_binds_packed_hunk_dwarf_after_loadseg() {
     for name in ["program-dwarf2", "program-dwarf4", "program-dwarf5"] {
         debug_source_fixture("packed", name, false, None);
