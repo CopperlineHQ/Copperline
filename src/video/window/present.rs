@@ -1565,9 +1565,9 @@ pub(super) fn alpha_blit_rgba(
 // The [display] tint knob: a monochrome-monitor look over the window's
 // picture, matching the web front-end's screen filter. Presentation only,
 // like the CRT shader pass: it runs on the composited window frame after
-// the display copy, so screenshots, frame dumps, recordings and headless
-// runs stay untinted, and the status bar and UI overlays (drawn after it)
-// stay in colour.
+// the display copy. Interactive output screenshots include the tint;
+// scheduled screenshots, frame dumps, recordings and headless runs stay
+// untinted. The status bar and UI overlays (drawn after it) stay in colour.
 //
 // Every tint is a luma ramp: the pixel collapses to its luminance, which
 // indexes a 256-entry table of pre-tinted colours. The ramps reproduce the
@@ -1811,7 +1811,7 @@ pub(super) fn save_present_frame(
 
 /// The CPU presentation frame before PNG encoding: the shared path behind
 /// `--screenshot-after` and `--expect-screenshot`, so an expectation
-/// compares against precisely what a screenshot of the same frame holds.
+/// compares against what a scheduled screenshot of the same frame holds.
 pub(super) fn render_present_frame(
     present_fb: &[u32],
     src_rows: usize,
@@ -1848,7 +1848,7 @@ pub(super) fn render_present_frame(
 /// The picture a capture shows -- the presentation buffer through the
 /// same crop, aperture and aspect geometry as the live window -- built
 /// into `out` (cleared and resized). Returns its width and height. Shared
-/// by screenshots, frame dumps and GIF clips so they all show one shape.
+/// by scheduled screenshots, frame dumps and GIF clips so they show one shape.
 pub(super) fn present_capture_frame(
     present_fb: &[u32],
     src_rows: usize,

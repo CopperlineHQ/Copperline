@@ -1464,8 +1464,8 @@ pub struct App {
     /// shader_strength).
     shader_strength: f32,
     /// Which monitor front the bezel pass draws, if any ([display] bezel,
-    /// Video Settings). Presentation only, like the shader pass: captures
-    /// never include it.
+    /// Video Settings). Interactive output screenshots include it;
+    /// scheduled screenshots, frame dumps and recordings bypass it.
     bezel: BezelStyle,
     /// The style `Cmd/Alt+M` switches back on, so the shortcut is an
     /// on-off for whichever front was chosen rather than a third way of
@@ -1478,7 +1478,8 @@ pub struct App {
     bezel_stickers_path: Option<std::path::PathBuf>,
     /// Performance overlay in effect ([display] perf_overlay, Cmd/Alt+P):
     /// a live emulation-performance readout in the top-right of the
-    /// display. Presentation only, like the OSD: captures never include it.
+    /// display. Interactive output screenshots include it; scheduled
+    /// screenshots, frame dumps and recordings exclude it.
     perf_overlay: bool,
     /// Live desktop vsync preference, also used when recreating the surface.
     vsync: bool,
@@ -5697,9 +5698,9 @@ impl ApplicationHandler for App {
                         ));
                         if !guest_overlay.is_empty() {
                             // The guest's debug overlay sits directly on the
-                            // picture, under every piece of host chrome, and --
-                            // like everything from here down -- never in a
-                            // capture.
+                            // picture, under every piece of host chrome.
+                            // Interactive output screenshots include it;
+                            // scheduled captures and recordings bypass it.
                             draw_guest_overlay(
                                 frame,
                                 &mut self.guest_overlay_cache,

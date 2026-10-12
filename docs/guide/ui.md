@@ -338,9 +338,9 @@ The menu, with a category open beside it.
 
 The hamburger button at the right of the status bar opens the menu, as does
 `Cmd+E` / `Alt+E`. It grows upward from the status bar and dims the picture
-behind it, so the menu stays readable over a busy picture. The dimming is a
-window effect: it never appears in a screenshot, a frame dump, or a
-recording.
+behind it, so the menu stays readable over a busy picture. Interactive
+screenshots include the menu and its dimming. Scheduled screenshots, frame
+dumps and recordings exclude them.
 
 The top level holds the tools, then a category per area of the machine,
 then **Load Kickstart ROM...**, **Keyboard Shortcuts...**, **About...**,
@@ -473,8 +473,9 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   integer multiplier is recalculated for the cropped area. The status bar
   and overlay panels stay docked at the bottom of the window; opening a menu
   or panel temporarily expands the display to the full area so the controls
-  remain reachable. Autocrop affects the presentation only (captures always
-  use the full aperture). It works with the CRT shaders and programmable
+  remain reachable. Interactive screenshots follow the visible crop;
+  scheduled screenshots, frame dumps and recordings use the configured aperture.
+  It works with the CRT shaders and programmable
   multisync modes, and is suspended while a monitor bezel is drawn or an RTG
   mode is shown. The start-up value is `[display] autocrop` (see
   [Configuration](configuration.md)).
@@ -502,9 +503,10 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   shader of your own, which is re-read from disk each time it is chosen.
   The change is session-only: the start-up preset, the strength knob, and
   how to write a custom shader are `[display] shader` and `shader_strength`
-  (see [Configuration](configuration.md)). Interactive screenshots include the pass; scheduled screenshots, frame dumps
-  and recordings bypass it. The pass steps aside for the frames it cannot sensibly draw: while the menu or
-  any panel is open, under RTG, and in programmable multisync scan modes.
+  (see [Configuration](configuration.md)). Interactive screenshots include
+  the active pass; scheduled screenshots, frame dumps and recordings bypass
+  it. The pass steps aside while the menu or any panel is open, under RTG,
+  and in programmable multisync scan modes.
 - **Shader Strength**: how strongly the shader pass is applied, stepped
   10% at a time with **Stronger** / **Softer** (the category row shows the
   figure); greyed while the shader is off. The start-up strength is
@@ -514,8 +516,9 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   two classic monochrome phosphors), and **Sepia** -- the same looks as the
   web frontend's *Screen* selector. Session-only, like the shader; the
   start-up tint is `[display] tint` (see [Configuration](configuration.md)).
-  A window effect only: captures stay untinted, the menu and the status bar
-  keep their colours, and RTG scanout is never tinted.
+  Interactive screenshots include the tint; scheduled screenshots, frame
+  dumps and recordings stay untinted. The menu and status bar keep their
+  colours, and RTG scanout is never tinted.
 - **Fullscreen** (also `Cmd+F` / `Alt+F`): borderless fullscreen on the
   window's current monitor. The picture keeps its aspect with black letterbox
   bars as needed, exactly as when resizing the window.
@@ -1086,7 +1089,9 @@ names` needs a filesystem no Kickstart provides.
 The camera button and `Cmd+S` on macOS or `Alt+S` on Linux/Windows save the
 picture at its current displayed size, including the current crop, scaling,
 tint, CRT shader, monitor bezel and stickers. The status bar and surrounding
-window margins are excluded. The save confirmation appears after capture.
+window margins are excluded. Open menus and panels, their dimming, and any
+overlays within the picture are included. The save confirmation appears
+after capture.
 
 (native-screenshots)=
 ## Saving native screenshots
