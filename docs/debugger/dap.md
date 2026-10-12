@@ -153,7 +153,7 @@ What each toolchain provides:
 |---|---|
 | vasm `-Fhunkexe -linedebug` | Source lines from the `LINE` debug hunks, symbols from the symbol hunks. Breakpoints and stepping by assembly source line. |
 | bebbo amiga-gcc 6.5 (`m68k-amigaos-gcc -g -O0`) | DWARF from the trailing debug hunk: lines, functions, parameters and locals, globals, struct/array/pointer/enum types, call-frame information for the call stack. |
-| bebbo amiga-gcc 13/15/16 (`-g`) | These toolchains' linkers drop the DWARF sections from hunk output: symbols only (function breakpoints, symbolized disassembly, a scanned call stack). Build with the 6.5 toolchain for source-level debugging. |
+| AmigaPorts amiga-gcc with packed Hunk DWARF (`-g -O0`) | DWARF from the length-prefixed trailing debug hunk, including section-relative references: lines, functions, parameters and locals, globals, types and call-frame information. Tested with GCC 16 and DWARF 2, 4 and 5. Support depends on the linker retaining this container, rather than the GCC version alone. |
 | Bartman's `m68k-amiga-elf` + elf2hunk | The hunk file's symbols plus the ELF's DWARF through `symbolFile` (or `program.elf`), including multi-file DWARF 4/5 builds linked with `-r -nostdlib`; ELF sections map onto hunks in section order, as elf2hunk allocates them. |
 | Anything stripped | Disassembly, registers, memory, chipset. |
 
@@ -164,6 +164,17 @@ explicitly with `symbolFile`. For example, a relocatable build can use:
 m68k-amiga-elf-gcc -g -O0 -r -nostdlib main.c worker.c -o program.elf
 elf2hunk program.elf program
 ```
+
+If a linked Hunk executable contains only symbols and no DWARF carrier,
+it supports function breakpoints, symbolized disassembly and a scanned call
+stack, but not source lines or locals. Keep debug information through the
+link and do not strip the executable. A matching ELF sibling is another
+supported way to supply DWARF.
+
+Prefer DWARF 4 or 5 for packed Hunk builds. GCC's DWARF 2 frame-base
+location lists use `.debug_loc`, which this container does not retain;
+frame-relative variables then report an unsupported frame base. Direct
+register-relative locals, source lines and call-frame information still work.
 
 The adapter applies the ELF's debug-section relocations before reading
 DWARF, including references between compilation units' abbreviation and
