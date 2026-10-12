@@ -83,6 +83,13 @@ const MAX_FRAME: usize = 1518;
 /// stored.
 const FCS_LEN: usize = 4;
 
+#[derive(Debug, PartialEq, Eq)]
+enum RxResult {
+    Written,
+    Filtered,
+    Unavailable,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct A2065 {
     /// Synthesized station MAC (locally administered).
@@ -326,12 +333,12 @@ impl A2065 {
     /// set in the first descriptor, ENP and MCNT written in the last). The
     /// stored message is payload plus [`FCS_LEN`] trailer bytes, as received
     /// off the wire.
-    fn receive_frame(&mut self, frame: &[u8]) -> bool {
+    fn receive_frame(&mut self, frame: &[u8]) -> RxResult {
         if !self.running || self.rx_len == 0 || self.mode & MODE_DRX != 0 {
-            return false;
+            return RxResult::Unavailable;
         }
         if !self.accepts_destination(frame) {
-            return false;
+            return RxResult::Filtered;
         }
         let total = (frame.len() + FCS_LEN).min(MAX_FRAME);
         let mut remaining = total;
@@ -345,7 +352,7 @@ impl A2065 {
                 if first {
                     // No descriptor to start the frame in: missed frame.
                     self.csr0 |= CSR0_MISS;
-                    return false;
+                    return RxResult::Unavailable;
                 }
                 // Ran out of chained buffers mid-frame: the last buffer the
                 // chip filled gets BUFF, the frame is truncated, no ENP.
@@ -356,7 +363,7 @@ impl A2065 {
                 self.rx_cur = desc;
                 self.activity = true;
                 self.csr0 |= CSR0_RINT;
-                return true;
+                return RxResult::Written;
             }
             let (buf_addr, cap) = self.desc_buffer(dbase);
             let n = remaining.min(cap);
@@ -386,7 +393,7 @@ impl A2065 {
         self.rx_cur = desc;
         self.activity = true;
         self.csr0 |= CSR0_RINT;
-        true
+        RxResult::Written
     }
 
     fn accepts_destination(&self, frame: &[u8]) -> bool {
@@ -517,9 +524,11 @@ impl ZorroDevice for A2065 {
                 Some(f) => f,
                 None => break,
             };
-            if !self.receive_frame(&frame) {
-                break; // no RX descriptor (MISS latched) or receiver off:
-                       // the frame is lost, as on the real chip
+            if self.receive_frame(&frame) == RxResult::Unavailable {
+                // No RX descriptor (MISS latched) or receiver off: the frame
+                // is lost, as on the real chip. Address rejection consumes
+                // no descriptor and must not delay the following frames.
+                break;
             }
         }
     }
@@ -808,8 +817,9 @@ mod tests {
             write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
             let mut frame = vec![0u8; 60];
             frame[..6].copy_from_slice(&destination);
-            assert!(
-                !board.receive_frame(&frame),
+            assert_eq!(
+                board.receive_frame(&frame),
+                RxResult::Filtered,
                 "unjoined group must be rejected"
             );
             assert_eq!(board.rx_cur, 0);
@@ -818,11 +828,11 @@ mod tests {
 
             // Programming RAM alone must not change the latched filter.
             board.set_ram_word(8 + (index / 16) * 2, 1 << (index % 16));
-            assert!(!board.receive_frame(&frame));
+            assert_eq!(board.receive_frame(&frame), RxResult::Filtered);
             write_csr(&mut board, &mut mem, 0, CSR0_STOP);
             write_csr(&mut board, &mut mem, 0, CSR0_INIT);
             write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
-            assert!(board.receive_frame(&frame), "joined group reaches RX ring");
+            assert_eq!(board.receive_frame(&frame), RxResult::Written);
             assert_eq!(board.desc_status(0x100), DESC_STP | DESC_ENP);
             assert_eq!(board.ram_word(0x106), 64);
             assert_eq!(&board.ram[0x400..0x43c], &frame);
@@ -833,9 +843,37 @@ mod tests {
             write_csr(&mut board, &mut mem, 0, CSR0_STOP);
             write_csr(&mut board, &mut mem, 0, CSR0_INIT);
             write_csr(&mut board, &mut mem, 0, CSR0_STRT);
-            assert!(!board.receive_frame(&frame));
+            assert_eq!(board.receive_frame(&frame), RxResult::Filtered);
             assert_eq!(board.csr0 & CSR0_MISS, 0);
         }
+    }
+
+    #[test]
+    fn rejected_frame_does_not_delay_queued_station_frame() {
+        let mut board = A2065::new(NetConfig::Loopback).unwrap();
+        let mut mem = host_mem();
+        set_up_rings(&mut board, &mut mem);
+        board.set_ram_word(0, 0);
+        write_csr(&mut board, &mut mem, 0, CSR0_INIT);
+        write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
+
+        let mut rejected = vec![0x5a; 60];
+        rejected[..6].copy_from_slice(&[0x33, 0x33, 0, 0, 0, 1]);
+        let mut station = vec![0xa5; 60];
+        station[..6].copy_from_slice(&board.mac);
+        let net = board.net.as_mut().unwrap();
+        net.send(&rejected);
+        net.send(&station);
+        board.tick(1, &mut DeviceHost::new(&mut mem));
+
+        // One tick must skip the unjoined group and receive the following
+        // station packet in the first descriptor, with no missed-frame flag.
+        assert_eq!(&board.ram[0x400..0x43c], &station);
+        assert_eq!(board.desc_status(0x100), DESC_STP | DESC_ENP);
+        assert_eq!(board.ram_word(0x106), 64);
+        assert_ne!(board.csr0 & CSR0_RINT, 0);
+        assert_eq!(board.csr0 & CSR0_MISS, 0);
+        assert!(board.net.as_mut().unwrap().poll().is_none());
     }
 
     #[test]
