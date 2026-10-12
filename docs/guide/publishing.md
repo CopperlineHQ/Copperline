@@ -117,7 +117,7 @@ button opens a simplified in-game menu:
 
 - **Video Settings:** menu size, pixel aspect, framing, scaling, autocrop,
   centring, CRT shader and its strength, screen tint, fullscreen, VSync,
-  monitor bezel and the native screenshot button
+  monitor bezel
 - **Audio Settings:** output device (or Disabled) and the audio filter
 - **Input Settings:** port devices, joystick input mode, autofire, gamepad
   calibration and input mapping

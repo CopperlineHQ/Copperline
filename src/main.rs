@@ -1816,28 +1816,45 @@ fn load_raw_config(
         .then(copperline::paths::default_config_file)
         .flatten()
         .filter(|path| path.is_file());
+    let raw = load_startup_config(explicit, cwd, saved.as_deref(), overrides)?;
+    // Before any conversion: implicit battery-RAM paths use this policy.
+    copperline::paths::adopt(raw.paths());
+    Ok(raw)
+}
+
+fn load_startup_config(
+    explicit: Option<&Path>,
+    cwd: &Path,
+    saved: Option<&Path>,
+    overrides: &ConfigOverrides,
+) -> Result<config::RawConfig> {
     let path = if explicit.is_some() {
         explicit
     } else if cwd.exists() {
         info!("loading config from {}", cwd.display());
         Some(cwd)
-    } else if let Some(saved) = saved.as_deref() {
+    } else if let Some(saved) = saved {
         info!(
             "loading the saved default configuration {}",
             saved.display()
         );
-        Some(saved)
+        // A saved preference must not prevent the launcher from opening.
+        // Keep the file so the user can recover it after access is restored.
+        return match Config::load_raw(Some(saved), overrides) {
+            Ok(raw) => Ok(raw),
+            Err(error) => {
+                warn!(
+                    "cannot load saved default configuration {}: {error:#}; \
+                     continuing with built-in defaults and command-line overrides",
+                    saved.display()
+                );
+                Config::load_raw(None, overrides)
+            }
+        };
     } else {
         None
     };
-    let raw = Config::load_raw(path, overrides)?;
-    // Before any conversion: `Config::try_from` resolves the implicit
-    // battery-RAM backing files through the paths in force, so adopting
-    // afterwards would site this run's NVRAM by the previous answer.
-    // Whatever this host cannot reach is dropped here and inherits
-    // instead, so a config naming somebody else's memory stick still starts.
-    copperline::paths::adopt(raw.paths());
-    Ok(raw)
+    Config::load_raw(path, overrides)
 }
 
 #[cfg(test)]
@@ -1858,6 +1875,44 @@ mod tests {
         // The configuration screen's host machine must build without any ROM
         // file or audio device (it sits powered off behind the launcher).
         build_placeholder_machine().expect("placeholder machine builds");
+    }
+
+    #[test]
+    fn unreadable_saved_default_falls_back_and_preserves_cli_overrides() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let cwd = dir.path().join("copperline.toml");
+        let missing = dir.path().join("default.toml");
+        let overrides = ConfigOverrides {
+            model: Some("A1200".into()),
+            ..Default::default()
+        };
+        // A disappearing file and a path that cannot be read as a file both
+        // recover, without depending on root/host permission behavior.
+        for saved in [&missing, dir.path()] {
+            let raw = load_startup_config(None, &cwd, Some(saved), &overrides)?;
+            assert_eq!(
+                Config::try_from(raw)?.machine,
+                Some(config::MachineModel::A1200)
+            );
+        }
+        assert!(dir.path().is_dir());
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_saved_default_recovers_but_requested_configs_report_errors() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let cwd = dir.path().join("copperline.toml");
+        let saved = dir.path().join("default.toml");
+        std::fs::write(&saved, "[broken")?;
+        let overrides = ConfigOverrides::default();
+        let raw = load_startup_config(None, &cwd, Some(&saved), &overrides)?;
+        Config::try_from(raw)?;
+        assert_eq!(std::fs::read_to_string(&saved)?, "[broken");
+        assert!(load_startup_config(Some(&saved), &cwd, None, &overrides).is_err());
+        std::fs::write(&cwd, "[broken")?;
+        assert!(load_startup_config(None, &cwd, Some(&saved), &overrides).is_err());
+        Ok(())
     }
 
     #[test]

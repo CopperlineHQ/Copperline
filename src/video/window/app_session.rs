@@ -1579,8 +1579,7 @@ impl App {
         self.emu.set_live_audio_suspended(suspended);
     }
 
-    /// The presented frame as a screenshot captures it, before encoding:
-    /// the single path behind saved screenshots and `--expect-screenshot`.
+    /// The CPU presentation image for scheduled screenshots and expectations.
     ///
     pub(super) fn capture_present_image(&self) -> super::present::PresentImage<'_> {
         self.capture_screenshot_image(self.native_screenshots)
@@ -1666,19 +1665,11 @@ impl App {
         }
     }
 
-    /// Interactive screenshot grab: save to an auto-named PNG and
-    /// flash the filename on screen. The overlay is painted into the
-    /// presentation texture after the frame is captured, so it never
-    /// appears in the saved image.
+    /// Save the next displayed picture through the window's GPU passes.
+    /// The success message is shown only after capture, so it is excluded.
     pub(super) fn take_screenshot(&mut self) {
-        self.finish_render_for_current_frame();
-        if self.native_screenshot_button {
-            self.take_native_screenshot();
-            return;
-        }
-        let path = screenshot::auto_filename();
-        self.save_screenshot_with_mode(&path, false);
-        self.show_osd(format!("Saved {}", display_file_name(&path)));
+        self.pending_output_screenshot = Some(screenshot::auto_filename());
+        self.request_main_redraw();
     }
 
     /// Show a transient overlay message over the display for

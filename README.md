@@ -117,14 +117,17 @@ ordinary windows.
 
 - **Quit**: `Cmd+Q` (macOS) / `Alt+Q` (Linux/Windows)
 - **Debugger**: `Cmd+B` (macOS) / `Alt+B` (Linux/Windows)
-- **Screenshot**: `Cmd+S` (macOS) / `Alt+S` (Linux/Windows)
+- **Screenshot**: `Cmd+S` (macOS) / `Alt+S` (Linux/Windows) saves the displayed picture with its current effects.
+- **Native screenshot (1:1)**: `Cmd+Option+S` (macOS) / `Ctrl+Alt+S` (Linux/Windows)
 - **Mouse capture**: `Cmd+G` (macOS) / `Alt+G` (Linux/Windows)
 - **Joystick toggle**: `Cmd+J` (macOS) / `Alt+J` (Linux/Windows) switches between physical gamepad and keyboard arrows.
 
 See the [UI guide](docs/guide/ui.md) for full interface details.
 
-**Video Settings → Native Screenshot Button** makes the camera button and
-screenshot shortcut save the original 1:1 playfield pixels.
+The camera button captures the displayed picture, including scaling, shaders
+and the monitor bezel. Native screenshots save the original playfield pixels.
+The WHDLoad library and favourites support mouse-wheel and trackpad scrolling.
+An unreadable saved default configuration falls back to built-in settings.
 
 The desktop window title identifies the machine and boot ROM; `[display] title`
 in a TOML configuration can set a custom title format for multiple instances.

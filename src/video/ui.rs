@@ -1269,6 +1269,30 @@ pub(in crate::video) fn launcher_panel_rect(ui: &UiState) -> Option<Rect> {
     }
 }
 
+/// Route the wheel to the table under the pointer, including its header
+/// and arrow gutter. Other launcher pages and dialogs do not claim it.
+#[cfg(feature = "game-library")]
+pub(in crate::video) fn launcher_wheel_control(ui: &UiState, pos: (i32, i32)) -> Option<UiControl> {
+    if ui.menu_open {
+        return None;
+    }
+    let Some(Panel::Launcher(state)) = &ui.panel else {
+        return None;
+    };
+    if state.tab != LauncherTab::WhdloadLibrary || state.login.is_some() || state.meta.is_some() {
+        return None;
+    }
+    let rect = launcher_panel_rect(ui)?;
+    let whdload = state.setup.whdload_enabled();
+    if library_table_rect(rect, whdload).contains(pos) {
+        Some(UiControl::LauncherLibraryScroll(0))
+    } else if library_favourites_rect(rect, whdload).contains(pos) {
+        Some(UiControl::LauncherLibraryFavouriteScroll(0))
+    } else {
+        None
+    }
+}
+
 fn panel_rect(panel: &Panel) -> Rect {
     let (w, h) = panel_dims(panel);
     Rect {
@@ -2834,7 +2858,7 @@ pub fn draw_drop_hint(frame: &mut [u8], texture_scale: usize) {
 
 /// Vertical pitch of a shortcut row. The panel is sized from this and the
 /// row count, and must stay inside `present_height()`.
-const SHORTCUT_ROW_H: usize = 16;
+const SHORTCUT_ROW_H: usize = 15;
 /// Trailing note lines under the shortcut table, and their pitch. The
 /// stepped adjusters live here rather than in the table: two pairs of keys
 /// on one line cost less height than two rows.
@@ -2849,8 +2873,8 @@ const SHORTCUT_NOTE_H: usize = 10;
 const SHORTCUT_NOTES_GAP: usize = 5;
 
 /// Panel height that exactly holds the table plus the notes, so adding a row
-/// does not silently push the last one off the bottom. A 28-row table with
-/// four notes fills the 537-line TV display exactly; another row or note
+/// does not silently push the last one off the bottom. A 29-row table with
+/// four notes fits inside the 537-line TV display; another row or note
 /// needs the layout rethought.
 fn shortcuts_panel_height() -> usize {
     TITLE_H
@@ -2863,10 +2887,19 @@ fn shortcuts_panel_height() -> usize {
 
 /// The action column starts 248 px in, so at the panel's 2x text an action
 /// label fits in 22 characters.
-const SHORTCUT_ROWS: [(&str, &str, bool); 28] = [
+const SHORTCUT_ROWS: [(&str, &str, bool); 29] = [
     ("Q", "Quit", true),
     ("E", "Open the menu", true),
     ("S", "Save screenshot", true),
+    (
+        if cfg!(target_os = "macos") {
+            "Option+S"
+        } else {
+            "Ctrl+S"
+        },
+        "Native screenshot",
+        true,
+    ),
     ("R", "Record video on/off", true),
     ("Shift+R", "Record input on/off", true),
     ("Shift+V", "Paste as keystrokes", true),

@@ -827,6 +827,18 @@ pub(super) fn display_src_layout(
 }
 
 impl PresentLayout {
+    /// Visible picture in physical surface pixels, excluding the chrome.
+    pub(super) fn picture_rect(&self) -> (u32, u32, u32, u32) {
+        let (x, y, w, h) = self.display_dst;
+        let picture_rows = self
+            .src_canvas
+            .3
+            .min(present_height().saturating_sub(self.src_canvas.1));
+        let picture_h =
+            (u64::from(h) * picture_rows as u64 / self.src_canvas.3.max(1) as u64) as u32;
+        (x, y, w, picture_h)
+    }
+
     /// The scaler-pass draws this layout amounts to. The classic layout
     /// is one whole-texture draw; a sub-rect layout samples the rect's
     /// uv sub-rect and adds the chrome band below it.
@@ -1775,8 +1787,8 @@ pub(super) struct PresentImage<'a> {
     pub height: u32,
 }
 
-/// Save the presented frame as `--screenshot-after` and the host
-/// screenshot shortcut do: [`render_present_frame`] encoded as a PNG.
+/// Save the CPU presentation frame for a scheduled capture:
+/// [`render_present_frame`] encoded as a PNG.
 pub(super) fn save_present_frame(
     path: &std::path::Path,
     present_fb: &[u32],
@@ -1797,9 +1809,8 @@ pub(super) fn save_present_frame(
     screenshot::save(path, &image.pixels, image.width, image.height)
 }
 
-/// The presented frame exactly as a screenshot saves it, before PNG
-/// encoding: the one capture path behind `--screenshot-after`, the
-/// screenshot shortcut, and `--expect-screenshot`, so an expectation
+/// The CPU presentation frame before PNG encoding: the shared path behind
+/// `--screenshot-after` and `--expect-screenshot`, so an expectation
 /// compares against precisely what a screenshot of the same frame holds.
 pub(super) fn render_present_frame(
     present_fb: &[u32],

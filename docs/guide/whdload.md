@@ -132,7 +132,9 @@ work normally during WHDLoad sessions.
 
 The launcher's WHDLoad **Library** page lists your collection with cover art
 and metadata. Set **Game library** on the **Settings...** page to your
-collection folder; subfolders are searched too.
+collection folder; subfolders are searched too. Scroll the games or favourites
+with the mouse wheel or trackpad while the pointer is over that list. The
+arrow buttons and keyboard navigation also scroll the lists.
 
 - **Refresh:** Re-reads the game folder for added or removed packages.
 - **Scan:** Matches the packages against the [OpenRetro](https://openretro.org)

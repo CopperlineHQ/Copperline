@@ -737,29 +737,30 @@ video = "PAL"
 # the built-in CRT presets "scanlines", "mask" and "crt", or the path of a
 # .wgsl file to load a shader of your own (see
 # docs/guide/configuration.md). This is a window-display effect only:
-# screenshots, frame dumps, recordings and headless runs are never
-# shader-processed, so captures stay comparable whatever is set here.
+# interactive screenshots include it; scheduled screenshots, frame dumps,
+# recordings and headless runs bypass it.
 # shader_strength: how strongly the shader is mixed in, 0.0-1.0 (default
 # 1.0, the preset's full effect); 0.0 leaves the picture visually untouched.
 # bezel: frame the picture with a monitor front: "off" (default), "1084"
 # (the monitor the Amiga shipped with) or "classic" (the plainer frame
 # Copperline drew first). Cmd/Alt+M turns the chosen one off and back on.
 # Composes with any shader setting, and like it is a window-display effect
-# only: captures never include the frame.
+# included in interactive screenshots; scheduled captures omit it.
 # bezel_stickers: folder of PNG stickers drawn onto the bezel, the way
 # owners dress a real monitor (unset by default: none). Every *.png in
 # the folder becomes a die-cut decal; without further instruction they
 # line up along the cabinet's top band, and an optional stickers.toml in
 # the folder places each one (see the configuration guide). Drawn only
-# while a bezel is; captures never include them.
+# while a bezel is; interactive screenshots include them.
 # perf_overlay: show the performance overlay at start (default false; also
 # --perf-overlay, and Cmd/Alt+P toggles it live): emulated fps, speed
 # factor, per-frame emulation cost, host utilisation, audio health, and
-# pacer slips in the top-right of the display. Captures never include it.
+# pacer slips in the top-right of the display. Interactive screenshots include
+# it; scheduled captures and recordings omit it.
 # tint: screen tint over the window image. "none" (default, full colour),
 # "bw" (black and white), "green" or "amber" (monochrome-monitor
 # phosphor), or "sepia". Like shader, a window-display effect only:
-# captures are never tinted, and RTG board scanout stays untinted.
+# interactive screenshots include it; scheduled captures and RTG stay untinted.
 # full_screen: open the window fullscreen at start (default false; also
 # --full-screen / --windowed, and Cmd/Alt+F toggles it live).
 # maximized: open a bordered, maximized window with the desktop taskbar
@@ -820,12 +821,9 @@ video = "PAL"
 # clip_seconds: emulated seconds of the presented picture the window keeps
 # (default 10, up to 120); 0 switches the ring and the menu item off.
 # clip_fps: GIF frame rate, 1 to 60 (default 0 = 25 on PAL, 30 on NTSC).
-# native_screenshot_button: make the camera button and Cmd/Alt+S save the
-# original playfield pixels (default false, presentation screenshot).
 # [recording]
 # clip_seconds = 10
 # clip_fps = 0
-# native_screenshot_button = false
 
 
 [audio]

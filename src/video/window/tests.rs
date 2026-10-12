@@ -1301,49 +1301,83 @@ fn player_settings_written_are_all_read_back_on_the_next_launch() {
 }
 
 #[test]
-fn native_screenshot_button_toggle_leaves_scheduled_capture_mode_unchanged() {
+fn native_scheduled_capture_leaves_interactive_output_capture_unchanged() {
     let mut app = test_app();
-    assert!(!app.native_screenshot_button);
-    assert!(!app.native_screenshots);
-    app.activate_bar_control(BarControl::Menu);
-    pick_menu(&mut app, &["Video Settings", "Native Screenshot Button"]);
-    assert!(app.native_screenshot_button);
-    assert_eq!(
-        app.machine_config.recording.native_screenshot_button,
-        Some(true)
-    );
-    assert!(!app.native_screenshots);
-    assert_eq!(app.capture_present_image().width, FB_WIDTH as u32);
-
-    let bus = app.emu.bus_mut();
-    for (offset, value) in [
-        (0x08E, 0x2C81),
-        (0x090, 0x2CC1),
-        (0x092, 0x0038),
-        (0x094, 0x00D0),
-        (0x100, 0x1200),
-        (0x096, 0x8300),
-    ] {
-        bus.custom_write(offset, 2, value);
-    }
-    app.emu.step_video_frame().unwrap();
-    app.emu.step_video_frame().unwrap();
     app.set_native_screenshots(true);
-    assert!(app.native_screenshot_button);
+    app.take_screenshot();
+    assert!(app.pending_output_screenshot.is_some());
     assert!(app.native_screenshots);
-    assert_eq!(app.capture_present_image().width, 320);
+}
 
-    app.close_menu();
-    app.activate_bar_control(BarControl::Menu);
-    pick_menu(&mut app, &["Video Settings", "Native Screenshot Button"]);
-    assert!(!app.native_screenshot_button);
-    assert!(app.native_screenshots);
-    assert_eq!(
-        app.capture_screenshot_image(app.native_screenshot_button)
-            .width,
-        FB_WIDTH as u32
-    );
-    assert_eq!(app.capture_present_image().width, 320);
+#[test]
+fn native_screenshot_shortcut_is_distinct_from_screenshot_and_save_state() {
+    let host = if cfg!(target_os = "macos") {
+        ModifiersState::SUPER
+    } else {
+        ModifiersState::ALT
+    };
+    let extra = if cfg!(target_os = "macos") {
+        ModifiersState::ALT
+    } else {
+        ModifiersState::CONTROL
+    };
+    assert!(!super::native_screenshot_shortcut_pressed(host));
+    assert!(!super::native_screenshot_shortcut_pressed(extra));
+    assert!(super::native_screenshot_shortcut_pressed(host | extra));
+    assert!(!super::native_screenshot_shortcut_pressed(
+        host | extra | ModifiersState::SHIFT
+    ));
+}
+
+#[cfg(feature = "game-library")]
+#[test]
+fn library_wheel_scrolls_games_and_favourites_and_accumulates_trackpad_motion() {
+    use crate::video::launcher::LauncherTab;
+    use winit::{dpi::PhysicalPosition, event::MouseScrollDelta};
+    let mut app = test_app();
+    app.open_launcher();
+    let state = app.launcher_state_mut().unwrap();
+    state.tab = LauncherTab::WhdloadLibrary;
+    state.library.games =
+        crate::gamelib::Library::of_titles((0..80).map(|i| format!("Game {i:03}")));
+    for i in 0..80 {
+        let title = format!("Game {i:03}");
+        state.library.db.toggle_favourite(&title, &title);
+    }
+    // Find the two actual tables through their public pointer routing.
+    let find = |control| {
+        (0..present_height() as i32)
+            .find_map(|y| {
+                (0..FB_WIDTH as i32).find_map(|x| {
+                    (crate::video::ui::launcher_wheel_control(&app.ui, (x, y)) == Some(control))
+                        .then_some((x, y))
+                })
+            })
+            .unwrap()
+    };
+    let games = find(UiControl::LauncherLibraryScroll(0));
+    let favourites = find(UiControl::LauncherLibraryFavouriteScroll(0));
+    app.cursor_pos = Some(games);
+    assert!(app.scroll_launcher_with_wheel(MouseScrollDelta::LineDelta(0.0, -1.0)));
+    assert_eq!(app.launcher_state().unwrap().library.scroll, 3);
+    for _ in 0..3 {
+        app.scroll_launcher_with_wheel(MouseScrollDelta::PixelDelta(PhysicalPosition::new(
+            0.0, -4.0,
+        )));
+    }
+    assert_eq!(app.launcher_state().unwrap().library.scroll, 3);
+    app.scroll_launcher_with_wheel(MouseScrollDelta::PixelDelta(PhysicalPosition::new(
+        0.0, -4.0,
+    )));
+    assert_eq!(app.launcher_state().unwrap().library.scroll, 4);
+    app.cursor_pos = Some(favourites);
+    app.scroll_launcher_with_wheel(MouseScrollDelta::LineDelta(0.0, -1.0));
+    assert_eq!(app.launcher_state().unwrap().library.favourite_scroll, 3);
+    assert_eq!(app.launcher_state().unwrap().library.scroll, 4);
+    app.scroll_launcher_with_wheel(MouseScrollDelta::LineDelta(0.0, 100.0));
+    assert_eq!(app.launcher_state().unwrap().library.favourite_scroll, 0);
+    app.cursor_pos = Some((0, 0));
+    assert!(!app.scroll_launcher_with_wheel(MouseScrollDelta::LineDelta(0.0, -1.0)));
 }
 
 #[test]

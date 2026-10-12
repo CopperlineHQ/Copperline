@@ -670,6 +670,16 @@ fn host_shortcut_modifier_pressed(modifiers: ModifiersState) -> bool {
     }
 }
 
+fn native_screenshot_shortcut_pressed(modifiers: ModifiersState) -> bool {
+    host_shortcut_modifier_pressed(modifiers)
+        && !modifiers.shift_key()
+        && if cfg!(target_os = "macos") {
+            modifiers.alt_key()
+        } else {
+            modifiers.control_key()
+        }
+}
+
 /// Display name for a GDB-style register index (see `debug_set_register`):
 /// D0-D7, A0-A7, SR, PC.
 fn gdb_reg_label(reg: usize) -> String {
@@ -682,9 +692,8 @@ fn gdb_reg_label(reg: usize) -> String {
     }
 }
 
-/// A transient on-screen overlay message drawn over the display (but not
-/// captured in screenshots, since it is painted into the presentation
-/// texture, never into the emulated framebuffer `fb`).
+/// A transient on-screen overlay message drawn into window presentation.
+/// Scheduled captures bypass it; interactive output captures include it.
 struct Osd {
     text: String,
     expires_at: Instant,
@@ -1188,8 +1197,10 @@ pub struct App {
     auto_shot: Vec<(f32, PathBuf)>,
     pending_auto_shot: Vec<(f32, PathBuf)>,
     native_screenshots: bool,
-    /// Interactive camera button and screenshot shortcut capture mode.
-    native_screenshot_button: bool,
+    /// Interactive output capture, fulfilled by the next GPU redraw.
+    pending_output_screenshot: Option<PathBuf>,
+    #[cfg(feature = "game-library")]
+    library_wheel: (Option<ScrollList>, f64),
     /// `--expect-screenshot` checks, armed like `auto_shot` (deadline
     /// order) and captured through the same frame path.
     auto_expect: Vec<crate::expect::ExpectShotSpec>,
@@ -1444,7 +1455,7 @@ pub struct App {
     /// input mapping consumes this same resolved position.
     present_tv_centre: crate::config::TvCentre,
     /// Window shader pass in effect ([display] shader). Presentation only:
-    /// screenshots, frame dumps and recordings never go through it.
+    /// scheduled screenshots, frame dumps and recordings bypass it.
     crt_shader_kind: crate::config::ShaderKind,
     /// Source file behind `ShaderKind::Custom`, kept so the menu can cycle
     /// back to a user shader (and re-read an edited one) after leaving it.
@@ -1976,6 +1987,7 @@ fn present_job(
     notify: Option<&Window>,
     job: &PresentJob,
     mut after: Option<PresentAfter<'_>>,
+    mut capture: Option<&mut output_capture::OutputCapture>,
 ) -> Result<(), pixels::Error> {
     let Gpu {
         pixels,
@@ -2004,76 +2016,80 @@ fn present_job(
             picture.rows,
         );
     }
-    presenter.render(
-        pixels,
-        notify,
-        job.emulated_frame,
-        |encoder, target, ctx| {
-            scaler.render(
-                &ctx.device,
-                &ctx.queue,
-                &ctx.texture,
-                encoder,
-                target,
-                &job.draws,
-            );
-            match &job.pass {
-                PresentPass::Plain => {}
-                PresentPass::Rtg {
-                    rect,
-                    integer_scaling,
-                } => rtg_texture.render(&ctx.queue, encoder, target, *rect, *integer_scaling),
-                PresentPass::Crt(crt) => {
-                    if crt.bezel_active {
-                        let opening = bezel::opening_rect(crt.style, crt.viewport);
-                        if crt.crt_active {
-                            crt_shader.render(
-                                &ctx.device,
-                                &ctx.queue,
-                                &ctx.texture,
-                                encoder,
-                                target,
-                                opening,
-                                crt.kind,
-                                crt.uniforms.with_viewport(opening),
-                            );
-                        }
-                        bezel_shader.render(
-                            &ctx.device,
-                            &ctx.queue,
-                            &ctx.texture,
-                            encoder,
-                            target,
-                            crt.viewport,
-                            crt.style,
-                            bezel::uniforms_from(
-                                &crt.uniforms,
-                                crt.viewport,
-                                opening,
-                                crt.crt_active,
-                            ),
-                        );
-                        sticker_pass.render(
-                            &ctx.device,
-                            &ctx.queue,
-                            encoder,
-                            target,
-                            crt.viewport,
-                            opening,
-                        );
-                    } else {
+    let mut draw = |encoder: &mut wgpu::CommandEncoder,
+                    target: &wgpu::TextureView,
+                    ctx: &pixels::PixelsContext<'_>| {
+        scaler.render(
+            &ctx.device,
+            &ctx.queue,
+            &ctx.texture,
+            encoder,
+            target,
+            &job.draws,
+        );
+        match &job.pass {
+            PresentPass::Plain => {}
+            PresentPass::Rtg {
+                rect,
+                integer_scaling,
+            } => rtg_texture.render(&ctx.queue, encoder, target, *rect, *integer_scaling),
+            PresentPass::Crt(crt) => {
+                if crt.bezel_active {
+                    let opening = bezel::opening_rect(crt.style, crt.viewport);
+                    if crt.crt_active {
                         crt_shader.render(
                             &ctx.device,
                             &ctx.queue,
                             &ctx.texture,
                             encoder,
                             target,
-                            crt.viewport,
+                            opening,
                             crt.kind,
-                            crt.uniforms,
+                            crt.uniforms.with_viewport(opening),
                         );
                     }
+                    bezel_shader.render(
+                        &ctx.device,
+                        &ctx.queue,
+                        &ctx.texture,
+                        encoder,
+                        target,
+                        crt.viewport,
+                        crt.style,
+                        bezel::uniforms_from(&crt.uniforms, crt.viewport, opening, crt.crt_active),
+                    );
+                    sticker_pass.render(
+                        &ctx.device,
+                        &ctx.queue,
+                        encoder,
+                        target,
+                        crt.viewport,
+                        opening,
+                    );
+                } else {
+                    crt_shader.render(
+                        &ctx.device,
+                        &ctx.queue,
+                        &ctx.texture,
+                        encoder,
+                        target,
+                        crt.viewport,
+                        crt.kind,
+                        crt.uniforms,
+                    );
                 }
+            }
+        }
+    };
+    presenter.render(
+        pixels,
+        notify,
+        job.emulated_frame,
+        |encoder, target, ctx| {
+            draw(encoder, target, ctx);
+            if let Some(capture) = capture.as_mut() {
+                draw(encoder, &capture.view(), ctx);
+                capture.copy(encoder);
             }
             if let Some(after) = after.as_mut() {
                 after(&ctx.device, &ctx.queue, encoder, target);
@@ -2157,7 +2173,7 @@ impl PresentWorker {
                         PresentCmd::Frame(job) => {
                             if let Some(gpu) = held.as_mut() {
                                 let notify = worker_notify_window(&window);
-                                if let Err(e) = present_job(gpu, notify, &job, None) {
+                                if let Err(e) = present_job(gpu, notify, &job, None, None) {
                                     error!("pixels.render: {e}");
                                 }
                             }
@@ -2818,10 +2834,9 @@ impl App {
             auto_shot: Vec::new(),
             pending_auto_shot: screenshot_after,
             native_screenshots: false,
-            native_screenshot_button: machine_config
-                .recording
-                .native_screenshot_button
-                .unwrap_or(false),
+            pending_output_screenshot: None,
+            #[cfg(feature = "game-library")]
+            library_wheel: (None, 0.0),
             auto_expect: Vec::new(),
             pending_auto_expect: Vec::new(),
             verdict: crate::verdict::RunVerdict::default(),
@@ -3913,9 +3928,6 @@ impl App {
     /// Use original field pixels for screenshots and expectations.
     pub fn set_native_screenshots(&mut self, native: bool) {
         self.native_screenshots = native;
-        if native {
-            self.native_screenshot_button = true;
-        }
     }
 
     /// `--exit-on-return`: end the run when the `--run` program's return
@@ -4722,6 +4734,11 @@ impl ApplicationHandler for App {
                         event_loop.exit()
                     }
                     (KeyCode::KeyS, ElementState::Pressed)
+                        if native_screenshot_shortcut_pressed(self.modifiers) =>
+                    {
+                        self.take_native_screenshot()
+                    }
+                    (KeyCode::KeyS, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers)
                             && self.modifiers.shift_key() =>
                     {
@@ -5349,6 +5366,10 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                #[cfg(feature = "game-library")]
+                if self.scroll_launcher_with_wheel(delta) {
+                    return;
+                }
                 // An open menu claims the wheel and does nothing with it,
                 // rather than letting it reach the volume slider underneath.
                 if self.ui.menu_open {
@@ -5391,6 +5412,7 @@ impl ApplicationHandler for App {
                 if self.render.as_ref().is_some_and(|r| r.minimized) {
                     return;
                 }
+                let mut screenshot_message = None;
                 let inspector_actions = self.prepare_debug_workspace();
                 let debug_layout = self.debug_layout_active && !self.ui.active();
                 // The presentation layout can change under a stationary
@@ -5515,7 +5537,10 @@ impl ApplicationHandler for App {
                     // Frames present from the worker unless this one carries
                     // something only the main thread has: the RTG board's
                     // texture upload, or the inspector's egui paint.
-                    let threaded = r.present_worker.is_some() && !rtg_gpu && inspector_ui.is_none();
+                    let threaded = r.present_worker.is_some()
+                        && !rtg_gpu
+                        && inspector_ui.is_none()
+                        && self.pending_output_screenshot.is_none();
                     // The display draw samples the presentation buffer on
                     // the GPU when nothing has to be composed over the
                     // picture on the CPU: no UI, overlay, badge or tint,
@@ -5896,8 +5921,53 @@ impl ApplicationHandler for App {
                                     }
                                 });
                                 let after = paint.as_mut().map(|paint| paint as PresentAfter<'_>);
-                                if let Err(e) = present_job(gpu, Some(&window), &job, after) {
+                                let capture_path = self.pending_output_screenshot.take();
+                                let mut capture = capture_path
+                                    .as_ref()
+                                    .map(|_| {
+                                        output_capture::OutputCapture::new(
+                                            gpu.pixels.device(),
+                                            surface_size,
+                                            layout.picture_rect(),
+                                            gpu.pixels.render_texture_format(),
+                                        )
+                                    })
+                                    .transpose();
+                                let result = match &mut capture {
+                                    Ok(capture) => present_job(
+                                        gpu,
+                                        Some(&window),
+                                        &job,
+                                        after,
+                                        capture.as_mut(),
+                                    ),
+                                    Err(_) => present_job(gpu, Some(&window), &job, after, None),
+                                };
+                                if let Err(e) = &result {
                                     error!("pixels.render: {e}");
+                                }
+                                if let Some(path) = capture_path {
+                                    let saved =
+                                        result.map_err(anyhow::Error::from).and_then(|_| {
+                                            capture?
+                                                .ok_or_else(|| {
+                                                    anyhow::anyhow!("no output capture")
+                                                })?
+                                                .save(gpu.pixels.device(), &path)
+                                        });
+                                    screenshot_message = Some(match saved {
+                                        Ok(()) => {
+                                            info!("screenshot saved: {}", path.display());
+                                            format!("Saved {}", display_file_name(&path))
+                                        }
+                                        Err(error) => {
+                                            warn!(
+                                                "output screenshot failed ({}): {error:#}",
+                                                path.display()
+                                            );
+                                            "Screenshot save failed".to_string()
+                                        }
+                                    });
                                 }
                                 if let Some(picture) = job.picture.take() {
                                     self.picture_scratch = picture.fb;
@@ -5919,6 +5989,10 @@ impl ApplicationHandler for App {
                         }
                         r.gpu = gpu_home;
                     }
+                }
+                if let Some(message) = screenshot_message {
+                    self.show_osd(message);
+                    self.finish_host_io_pause();
                 }
                 self.dispatch_egui_frame(inspector_actions, Ok(()));
             }
@@ -6889,7 +6963,6 @@ impl App {
     fn player_prefs(&self) -> crate::config::RawConfig {
         let mut raw = crate::config::RawConfig::default();
         raw.display.vsync = Some(self.vsync);
-        raw.recording.native_screenshot_button = Some(self.native_screenshot_button);
         raw.display.pixel_aspect =
             Some(super::launcher::pixel_aspect_name(crate::video::pixel_aspect()).to_string());
         raw.display.scaling = Some(
@@ -7752,6 +7825,7 @@ mod monitors;
 mod mt32panel;
 mod native_dialog;
 pub use monitors::print_monitors;
+mod output_capture;
 mod present;
 mod presenter;
 mod rtg_texture;

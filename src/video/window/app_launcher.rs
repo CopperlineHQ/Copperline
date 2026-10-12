@@ -5,6 +5,36 @@
 use super::*;
 
 impl App {
+    #[cfg(feature = "game-library")]
+    pub(super) fn scroll_launcher_with_wheel(&mut self, delta: MouseScrollDelta) -> bool {
+        let target = self
+            .cursor_pos
+            .filter(|_| !self.mouse_captured)
+            .and_then(|pos| crate::video::ui::launcher_wheel_control(&self.ui, pos))
+            .and_then(scroll_arrow_of)
+            .map(|(_, list)| list);
+        if self.library_wheel.0 != target {
+            self.library_wheel = (target, 0.0);
+        }
+        let Some(list) = target else {
+            return false;
+        };
+        let rows = match delta {
+            MouseScrollDelta::LineDelta(_, y) => -f64::from(y) * 3.0,
+            MouseScrollDelta::PixelDelta(pos) => -pos.y / 14.0,
+        };
+        if rows.is_finite() {
+            self.library_wheel.1 += rows;
+            let whole = self.library_wheel.1.trunc() as isize;
+            self.library_wheel.1 -= whole as f64;
+            if whole != 0 {
+                self.activate_ui_control_with_event_loop(scroll_arrow_for(list, whole), None);
+                self.request_redraw();
+            }
+        }
+        true
+    }
+
     /// Open the machine-configuration screen, seeded from the running (or
     /// last-applied) machine so it reflects the current settings.
     pub fn open_launcher(&mut self) {
@@ -1504,8 +1534,6 @@ impl App {
         // The clip ring belongs to the machine being replaced: its frames
         // and its automatic rate (the video standard) are that machine's.
         self.clip_settings = cfg.recording.clip_settings();
-        self.native_screenshot_button =
-            self.native_screenshots || cfg.recording.native_screenshot_button;
         self.clip_ring = None;
         self.apply_pixel_aspect(crate::config::resolve_pixel_aspect(cfg.pixel_aspect));
         // The bezel before the scaling: the canvas rule reads both, and
