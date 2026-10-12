@@ -285,10 +285,6 @@ impl RawConfig {
         take(&mut self.display.tv_v_centre, &overlay.display.tv_v_centre);
         take(&mut self.display.overscan, &overlay.display.overscan);
         take(&mut self.display.full_screen, &overlay.display.full_screen);
-        take(
-            &mut self.recording.native_screenshot_button,
-            &overlay.recording.native_screenshot_button,
-        );
         take(&mut self.input.port1, &overlay.input.port1);
         take(&mut self.input.port2, &overlay.input.port2);
         take(&mut self.input.port3, &overlay.input.port3);
@@ -1055,8 +1051,8 @@ pub(crate) struct RawRecording {
     /// Clip frame rate (default 0 = 25 on PAL, 30 on NTSC).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) clip_fps: Option<u32>,
-    /// Use native pixels for the interactive camera button and shortcut.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Retired preference, accepted so existing saved configs still load.
+    #[serde(skip_serializing)]
     pub(crate) native_screenshot_button: Option<bool>,
 }
 

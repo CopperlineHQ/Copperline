@@ -58,7 +58,6 @@ pub enum MenuAction {
     ToggleStatusBar,
     TogglePerfOverlay,
     ToggleVsync,
-    ToggleNativeScreenshotButton,
 
     // Media.
     /// Pick a hard-disk image and push it into the PCMCIA slot as a CF
@@ -476,7 +475,6 @@ pub struct MenuState<'a> {
     pub bezel: BezelStyle,
     pub perf_overlay: bool,
     pub vsync: bool,
-    pub native_screenshot_button: bool,
     pub warp: bool,
     pub warp_speed: WarpSpeed,
     pub rewind: bool,
@@ -864,11 +862,6 @@ fn video_rows(s: &MenuState) -> Vec<MenuRow> {
         MenuRow::submenu("Monitor Bezel", bezel_rows(s)),
         MenuRow::toggle("Performance", MenuAction::TogglePerfOverlay, s.perf_overlay),
         MenuRow::toggle("VSync", MenuAction::ToggleVsync, s.vsync),
-        MenuRow::toggle(
-            "Native Screenshot Button",
-            MenuAction::ToggleNativeScreenshotButton,
-            s.native_screenshot_button,
-        ),
     ]
 }
 
@@ -889,11 +882,6 @@ fn player_video_rows(s: &MenuState) -> Vec<MenuRow> {
         MenuRow::toggle("Fullscreen", MenuAction::ToggleFullscreen, s.fullscreen),
         MenuRow::toggle("VSync", MenuAction::ToggleVsync, s.vsync),
         MenuRow::submenu("Monitor Bezel", bezel_rows(s)),
-        MenuRow::toggle(
-            "Native Screenshot Button",
-            MenuAction::ToggleNativeScreenshotButton,
-            s.native_screenshot_button,
-        ),
     ]
 }
 
@@ -1450,7 +1438,6 @@ mod tests {
             bezel: BezelStyle::None,
             perf_overlay: false,
             vsync: true,
-            native_screenshot_button: false,
             warp: false,
             warp_speed: WarpSpeed::Max,
             rewind: false,
@@ -1944,18 +1931,10 @@ mod tests {
             "Monitor Bezel",
             "Fullscreen",
             "VSync",
-            "Native Screenshot Button",
         ] {
             assert!(find(video, kept).is_some(), "missing {kept}");
         }
-        assert!(!find(video, "Native Screenshot Button").unwrap().marked());
-
-        st.native_screenshot_button = true;
-        let rows = build(&st);
-        let video = find(&rows, "Video Settings")
-            .and_then(|r| r.children())
-            .expect("video section");
-        assert!(find(video, "Native Screenshot Button").unwrap().marked());
+        assert!(find(video, "Native Screenshot Button").is_none());
 
         st.player_save_states = true;
         let rows = build(&st);

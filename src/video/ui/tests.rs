@@ -3819,7 +3819,6 @@ fn panels_render_into_their_rects() {
         bezel: crate::config::BezelStyle::None,
         perf_overlay: false,
         vsync: true,
-        native_screenshot_button: false,
         warp: false,
         warp_speed: WarpSpeed::Max,
         rewind: false,

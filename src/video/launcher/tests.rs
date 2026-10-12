@@ -2551,19 +2551,15 @@ fn vsync_launcher_toggle_survives_save_and_reload() {
 }
 
 #[test]
-fn native_screenshot_button_survives_launcher_save_and_reload() {
+fn retired_screenshot_preference_does_not_block_launcher() {
     let raw = RawConfig::parse("[recording]\nnative_screenshot_button = true\n").unwrap();
     let setup = MachineSetup::from_raw(&raw).unwrap();
-    let saved = setup.to_raw();
-    assert_eq!(saved.recording.native_screenshot_button, Some(true));
-    assert!(
-        MachineSetup::from_raw(&saved)
-            .unwrap()
-            .build_config()
-            .unwrap()
-            .recording
-            .native_screenshot_button
-    );
+    setup.build_config().unwrap();
+    assert!(!setup
+        .to_raw()
+        .to_toml_string()
+        .unwrap()
+        .contains("native_screenshot_button"));
 }
 
 #[test]
