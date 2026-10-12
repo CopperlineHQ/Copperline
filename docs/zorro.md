@@ -346,6 +346,22 @@ block, descriptor rings, and packet buffers live in the board's own 32 KiB RAM
 (which the CPU reaches through the board window), so the board is self-contained
 and owns its host network backend directly.
 
+The receiver latches the station address and 64-bit multicast filter on INIT.
+It accepts its station address, broadcast, and multicast destinations selected
+by the Am7990's reflected CRC hash; MODE.PROM bypasses destination filtering.
+Rejected frames consume no receive descriptor and do not raise RINT or MISS.
+This matters when testing IPv6 neighbour discovery: accepting every frame can
+hide an incorrectly programmed solicited-node multicast filter in a guest driver.
+Snapshots from before filtering was implemented retain their old receive
+behavior until the guest reinitializes the chip.
+
+The loopback backend reflects the guest's own multicast frames. It is useful
+for SANA-II delivery tests, but can make IPv6 duplicate-address detection see
+the guest's own solicitation as a duplicate. Use an isolated board (`net =
+"none"`) for address-lifecycle tests, or a bridged peer for network tests.
+The NAT backend provides IPv4 connectivity; it does not validate IPv6 or LAN
+multicast interoperability.
+
 Host network backends live in `src/net/` behind the `NetBackend` trait. Three are
 built in:
 
