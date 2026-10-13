@@ -61,8 +61,8 @@ impl AdapterIo for MacAdapter {
         }
     }
 
-    fn set_guest_mac(&mut self, mac: [u8; 6]) -> Result<()> {
-        self.capture.filter(&mac_filter(mac), true)?;
+    fn set_receive_filter(&mut self, mac: [u8; 6], promiscuous: bool) -> Result<()> {
+        self.capture.filter(&mac_filter(mac, promiscuous), true)?;
         Ok(())
     }
 }
