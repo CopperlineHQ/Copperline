@@ -989,7 +989,7 @@ mod tests {
                 slow_ram: Vec::new(),
                 mb_ram: Vec::new(),
                 accel_ram: Vec::new(),
-                rom: vec![0u8; ROM_SIZE],
+                rom: crate::memory::test_rom_with_interrupt_vectors(),
                 overlay: false,
                 zorro: ZorroChain::default(),
                 extended_rom: Vec::new(),

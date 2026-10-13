@@ -741,6 +741,27 @@ twice each. The previous five-CCK default recorded 36. This validates the
 combined Copper/interrupt/CPU/readback path, not an isolated measurement of
 the propagation delay at Paula's pins.
 
+A subsequent RAM-resident ROM probe on the same A500 measured both 37 and
+38 CCK with DMA disabled. A fixed WAIT at line 96, horizontal 64, and a
+NOP sweep before STOP separated the CPU phase from the Copper target.
+Across 256 trials, the parity of the logged entry beam predicted the
+result exactly; inserting EXG (six CPU clocks) reversed the relationship.
+The stock 68000 STOP path therefore retains a four-CPU-clock (two-CCK) polling
+grid from STOP entry and recognizes a newly visible IPL at the next poll.
+This phase is saved with the machine. The Paula propagation setting remains
+six CCK; changing that constant cannot reproduce both results.
+
+On the 68000/68010 motherboard bus, interrupt acknowledge reads the low
+byte of the ROM word at `$FFFFF0 + 2 * level`. Normal Kickstart's final
+eight words contain vector numbers 24 through 31. A custom ROM must supply
+these words; Copperline does not replace a missing word with an autovector
+or suppress delivery because a RAM handler is zero. The freezer cartridge
+retains its own acknowledge behavior. The accelerated CPU bus path retains
+autovector delivery. This ROM-data behavior was checked on the OneROM A500
+by changing the level-1 word to select the installed vector-30 handler.
+The zero-footer measurement ROM now reproduces the physical machine's
+illegal-instruction fault at `$003020`, rather than completing its trials.
+
 ### CIA register transfers and timer startup
 
 A CIA access uses the 68000's synchronous VPA/E bus cycle, not an ordinary
@@ -752,14 +773,25 @@ the final six CPU clocks. Applying a START write after its transfer edge
 would miss the first timer pipeline stage and postpone underflow by an
 entire E-clock. The total access cost is unchanged.
 
-Timers A and B hold counting while their START pipeline fills: two E-clock
-stages for START and three for simultaneous START+LOAD. On a CPU VPA write
-the transfer edge feeds the first stage. The timer's START bit is readable
+Timers A and B propagate START through two count-enable stages on PHI2.
+Clearing START reads back immediately, but counting continues for the two
+edges while those stages drain. A STOP-only delay sweep measured two extra
+decrements on both timers of both physical CIAs (320 trials). One-shot
+underflow stops counting directly. START+LOAD, including a stopped one-shot
+timer's high-byte auto-start, holds counting for three E-clock edges.
+On a CPU VPA write the transfer edge feeds the first stage. The timer's START bit is readable
 during startup; one-shot underflow still clears it. Startup advances on
 PHI2 even for CNT/cascade modes, and underflow predictions include the
-remaining stages so a stopped CPU cannot nap past an interrupt. The two
-startup counters travel in snapshots; older states default them to zero
-(an already-running timer), as do legacy USS imports.
+remaining stages so a stopped CPU cannot nap past an interrupt. The
+LOAD holds and count-enable stages travel in snapshots. Older snapshots
+reconstruct the stages from their running flag and startup delay; legacy
+USS imports restore a steady running or stopped timer.
+
+ICR's IR bit is a latch: clearing an interrupt mask does not clear a
+previously recorded enabled interrupt. Reading ICR acknowledges the latch.
+Re-enabling a still-pending source arms the IRQ pin even when IR was already
+set. The mask-clear captures constrain this readback behavior, rather than
+the electrical pin's precise deassertion edge.
 
 The hardware probe's CIA measurements include register programming, the
 timer, interrupt dispatch and VHPOSR readback. Its launch instruction/E-clock

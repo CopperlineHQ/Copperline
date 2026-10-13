@@ -5223,7 +5223,7 @@ mod tests {
     }
 
     fn emulator_with_call_program() -> super::Emulator {
-        let mut rom = vec![0u8; crate::memory::ROM_SIZE];
+        let mut rom = crate::memory::test_rom_with_interrupt_vectors();
         let put = |mem: &mut [u8], off: usize, word: u16| {
             mem[off..off + 2].copy_from_slice(&word.to_be_bytes());
         };
@@ -5342,7 +5342,7 @@ mod tests {
     /// interrupt mask at 0 so VERTB (level 3) wakes the CPU, `$2700`
     /// masks every interrupt so nothing ever does.
     fn emulator_stopped_waiting_for_vblank(stop_sr: u16) -> super::Emulator {
-        let mut rom = vec![0u8; crate::memory::ROM_SIZE];
+        let mut rom = crate::memory::test_rom_with_interrupt_vectors();
         let put = |mem: &mut [u8], off: usize, word: u16| {
             mem[off..off + 2].copy_from_slice(&word.to_be_bytes());
         };

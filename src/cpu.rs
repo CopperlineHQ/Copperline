@@ -217,6 +217,8 @@ pub struct M68kMachine {
     /// clocks. Carried across instructions so an accelerated CPU (many clocks
     /// per cck) is not rounded up to a whole cck on every instruction.
     cpu_clock_carry: u32,
+    /// Parity of the 68000 STOP polling grid in colour clocks.
+    stop_poll_phase: Option<u8>,
     dbg_sched_on: bool,
     dbg_sched_top_vpos: u32,
     dbg_sched_top_frame: u64,
@@ -320,6 +322,8 @@ struct MachineRuntimeState {
     sync_cck_on: bool,
     cpu_clocks_per_cck: u32,
     cpu_clock_carry: u32,
+    #[serde(default)]
+    stop_poll_phase: Option<u8>,
 }
 
 /// Same-process rollback also needs the interrupt sample consumed at the next
@@ -567,6 +571,7 @@ impl M68kMachine {
             sync_cck_on: sync_cck_enabled_setting(),
             cpu_clocks_per_cck: 2,
             cpu_clock_carry: 0,
+            stop_poll_phase: None,
             dbg_sched_on: crate::envcfg::flag("COPPERLINE_DIAG_SCHED"),
             dbg_sched_top_vpos: 0,
             dbg_sched_top_frame: 0,
@@ -1595,6 +1600,7 @@ impl M68kMachine {
             sync_cck_on: self.sync_cck_on,
             cpu_clocks_per_cck: self.cpu_clocks_per_cck,
             cpu_clock_carry: self.cpu_clock_carry,
+            stop_poll_phase: self.stop_poll_phase,
         }
     }
 
@@ -1795,6 +1801,7 @@ impl M68kMachine {
         self.sync_cck_on = runtime.sync_cck_on;
         self.cpu_clocks_per_cck = runtime.cpu_clocks_per_cck;
         self.cpu_clock_carry = runtime.cpu_clock_carry;
+        self.stop_poll_phase = runtime.stop_poll_phase;
         // The short-bus-cycle flag is derived from the (restored) CPU model and
         // not serialized, so re-establish it here.
         let short_bus = !self.cpu.is_pre_68020;
@@ -1905,6 +1912,7 @@ impl M68kMachine {
         self.cpu.invalidate_prefetch();
         self.cpu.stopped = u32::from(state.stopped);
         self.cpu_clock_carry = 0;
+        self.stop_poll_phase = None;
     }
 
     /// Set one GDB-style core register: D0-D7, A0-A7, SR, PC.
@@ -2881,6 +2889,23 @@ impl M68kMachine {
         // core slice.
         self.bus.flush_timed_devices_dcache_coherent();
         let mut level = self.pending_irq_level();
+        if self.cpu.is_stopped()
+            && self.cpu.cpu_type == CpuType::M68000
+            && self.cpu_clocks_per_cck == 2
+            && self.bus.bus.irq_latency_setting != 0
+        {
+            let now = self.bus.bus.emulated_cck();
+            let phase = *self.stop_poll_phase.get_or_insert((now & 1) as u8);
+            if level > ((self.cpu.get_sr() >> 8) & 7) as u8 && now & 1 != u64::from(phase) {
+                // STOP continues polling IPL every four CPU clocks. Wait
+                // for its next poll instead of waking on any CCK boundary.
+                self.bus.bus.advance_devices(1);
+                self.bus.flush_timed_devices_dcache_coherent();
+                level = self.pending_irq_level();
+            }
+        } else if !self.cpu.is_stopped() {
+            self.stop_poll_phase = None;
+        }
         // The boundary decision uses the IPL level latched at the previous
         // instruction's last bus access (CpuBus::sample_ipl), not the live
         // level: on real silicon a level that rose after that sample is taken
@@ -3281,6 +3306,9 @@ impl M68kMachine {
         // save states are taken -- the accumulator is not serialized.
         self.bus.flush_timed_devices_dcache_coherent();
         self.bus.bus.set_cpu_bus_arbitration_enabled(false);
+        if self.cpu.is_stopped() && self.stop_poll_phase.is_none() {
+            self.stop_poll_phase = Some((self.bus.bus.emulated_cck() & 1) as u8);
+        }
         let (bus_advanced_cck, _bus_tick) = self.bus.bus.take_slice_bus_advance();
         if stopped {
             trace!(
@@ -3589,13 +3617,15 @@ impl M68kMachine {
             return 0;
         }
 
-        // Bring-up guard: hold off an autovector whose handler slot still
+        // Bring-up guard for the accelerated CPU path: hold off a vector whose handler slot still
         // reads zero. The peek is untranslated, so it only means anything
         // while the MMU is off (with translation enabled, VBR holds a
         // virtual address and the physical bytes under it are unrelated --
         // Linux/m68k maps its vector table high while low chip RAM is
         // cleared, and the guard would silence every interrupt for good).
-        if !self.cpu.tc_enable() {
+        // A 68000 must acknowledge even an uninitialized handler. Its ROM
+        // supplies the vector byte; suppressing delivery hides broken ROMs.
+        if self.bus.bus.cpu_short_bus_cycle() && !self.cpu.tc_enable() {
             let vector_addr = self
                 .cpu
                 .vbr
@@ -5255,7 +5285,15 @@ impl AddressBus for CpuBus {
                 );
             }
         }
-        AUTOVECTOR_SENTINEL
+        if !self.bus.cpu_short_bus_cycle() {
+            // On the 68000 motherboard bus the CPU-space IACK address
+            // selects the ROM tail. The low byte supplies the vector;
+            // words 24..31 in a normal Kickstart emulate autovectors.
+            // Do not substitute a vector when a custom ROM omits them.
+            u32::from(self.bus.peek_word_any(0x00ff_fff0 + u32::from(level) * 2) & 0xff)
+        } else {
+            AUTOVECTOR_SENTINEL
+        }
     }
 
     fn reset_devices(&mut self) {
@@ -5454,7 +5492,7 @@ mod tests {
     }
 
     fn reset_rom(sp: u32, pc: u32) -> Vec<u8> {
-        let mut rom = vec![0; ROM_SIZE];
+        let mut rom = crate::memory::test_rom_with_interrupt_vectors();
         rom[0..4].copy_from_slice(&sp.to_be_bytes());
         rom[4..8].copy_from_slice(&pc.to_be_bytes());
         rom
@@ -6618,6 +6656,37 @@ mod tests {
             jit_enabled: false,
             cacr_040_layout: false,
         }
+    }
+
+    #[test]
+    fn motherboard_iack_uses_rom_tail_vector_byte() {
+        let mut bus = cpu_bus(test_bus_with_pc(0x100));
+        for level in 1..=7 {
+            assert_eq!(bus.interrupt_acknowledge(level), u32::from(24 + level));
+        }
+        // High data bits do not participate in the 68000 vector number.
+        let offset = ROM_SIZE - 16 + 2 * 2;
+        bus.bus.mem.rom[offset..offset + 2].copy_from_slice(&[0xab, 0x40]);
+        assert_eq!(bus.interrupt_acknowledge(2), 0x40);
+        bus.bus.mem.rom[offset..offset + 2].fill(0);
+        assert_eq!(bus.interrupt_acknowledge(2), 0);
+    }
+
+    #[test]
+    fn missing_rom_iack_word_dispatches_vector_zero() -> Result<()> {
+        let mut bus = test_bus_with_pc(0x100);
+        write_program(&mut bus, 0x100, &[0x4e72, 0x2000, 0x60fe]);
+        write_program(&mut bus, 0x200, &[0x7007, 0x60fe]);
+        write_chip_long(&mut bus, 0, 0x200);
+        bus.mem.rom[ROM_SIZE - 12..ROM_SIZE - 10].fill(0);
+        bus.paula.intena = INT_MASTER | INT_PORTS;
+        bus.irq_latency_setting = 0;
+        let mut machine = M68kMachine::new(bus, CpuModel::M68000, false)?;
+        machine.step_slice(1)?;
+        machine.bus_mut().paula.intreq = INT_PORTS;
+        machine.step_slice(20)?;
+        assert_eq!(machine.d(0), 7);
+        Ok(())
     }
 
     /// `getreg`/`putreg` as every AmigaOS clock probe writes them: the
@@ -8515,6 +8584,35 @@ mod tests {
             0xFF,
             "the reboot after RESET reads as warm"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn stopped_cpu_poll_phase_survives_restore_between_polls() -> Result<()> {
+        let mut bus = test_bus_with_pc(0x100);
+        write_program(&mut bus, 0x100, &[0x4e72, 0x2000]);
+        write_program(&mut bus, 0x200, &[0x3b6e, 0x0006, 0x0000]);
+        set_autovector(&mut bus, 1, 0x200);
+        bus.paula.intena = INT_MASTER | 4;
+        bus.irq_latency_setting = 6;
+        let mut machine = M68kMachine::new(bus, CpuModel::M68000, false)?;
+        machine.cpu.dar[13] = 0x400;
+        machine.cpu.dar[14] = CUSTOM_BASE;
+        machine.step_slice(1)?;
+        let phase = machine.stop_poll_phase;
+        machine.bus_mut().advance_cpu_idle_devices(1);
+        machine.bus_mut().paula.intreq = 4;
+        machine.bus_mut().advance_cpu_idle_devices(6);
+        let mut checkpoint = Vec::new();
+        machine.write_state(&mut checkpoint)?;
+        machine.step_slice(1)?;
+        let expected_beam = machine.bus().peek_word_any(0x400);
+        let expected_time = machine.bus().emulated_cck();
+        machine.apply_state(&mut std::io::Cursor::new(&checkpoint))?;
+        assert_eq!(machine.stop_poll_phase, phase);
+        machine.step_slice(1)?;
+        assert_eq!(machine.bus().peek_word_any(0x400), expected_beam);
+        assert_eq!(machine.bus().emulated_cck(), expected_time);
         Ok(())
     }
 

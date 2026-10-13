@@ -28,10 +28,14 @@ pub struct Cia {
     pub ta_running: bool,
     pub ta_oneshot: bool,
     ta_counts_cnt: bool,
-    /// E-clock stages before a newly enabled timer can decrement. START
-    /// takes two stages; simultaneous LOAD holds counting for one more.
+    /// LOAD hold remaining on PHI2. Legacy states also use this field
+    /// for START warmup; enable_pipe reconstructs their count-enable stages.
     #[serde(default)]
     ta_start_delay: u8,
+    /// START propagates through two count-enable stages on PHI2.
+    /// None reconstructs the steady state of older snapshots.
+    #[serde(default)]
+    ta_enable_pipe: Option<u8>,
 
     // Timer B
     pub tb_count: u16,
@@ -41,6 +45,8 @@ pub struct Cia {
     tb_input_mode: TimerBInputMode,
     #[serde(default)]
     tb_start_delay: u8,
+    #[serde(default)]
+    tb_enable_pipe: Option<u8>,
 
     /// ICR data register: pending interrupt sources.
     ///   bit 0 TA, 1 TB, 2 ALRM, 3 SP, 4 FLG, 7 IR
@@ -169,6 +175,8 @@ impl Cia {
         // Legacy USS snapshots describe running timers, not new START writes.
         cia.ta_start_delay = 0;
         cia.tb_start_delay = 0;
+        cia.ta_enable_pipe = None;
+        cia.tb_enable_pipe = None;
         cia
     }
 
@@ -188,6 +196,8 @@ impl Cia {
         Self {
             ta_start_delay: 0,
             tb_start_delay: 0,
+            ta_enable_pipe: None,
+            tb_enable_pipe: None,
             which,
             regs,
             ta_count: 0xFFFF,
@@ -253,17 +263,71 @@ impl Cia {
 
     pub fn next_underflow_ticks(&self) -> Option<u32> {
         let mut min: Option<u32> = None;
-        if self.ta_running && !self.ta_counts_cnt {
-            min = Some(self.ta_count as u32 + 1 + u32::from(self.ta_start_delay));
-        }
-        if self.tb_running && self.tb_input_mode == TimerBInputMode::Phi2 {
-            let n = self.tb_count as u32 + 1 + u32::from(self.tb_start_delay);
-            min = Some(match min {
-                Some(m) => m.min(n),
-                None => n,
-            });
+        for (count, running, delay, pipe, phi2) in [
+            (
+                self.ta_count,
+                self.ta_running,
+                self.ta_start_delay,
+                self.ta_enable_pipe,
+                !self.ta_counts_cnt,
+            ),
+            (
+                self.tb_count,
+                self.tb_running,
+                self.tb_start_delay,
+                self.tb_enable_pipe,
+                self.tb_input_mode == TimerBInputMode::Phi2,
+            ),
+        ] {
+            if phi2 {
+                if let Some(n) = Self::timer_deadline(count, running, delay, pipe) {
+                    min = Some(min.map_or(n, |m| m.min(n)));
+                }
+            }
         }
         min
+    }
+
+    fn enable_pipe(running: bool, delay: u8, pipe: Option<u8>) -> u8 {
+        pipe.unwrap_or(if !running || delay >= 2 {
+            0
+        } else if delay == 1 {
+            1
+        } else {
+            3
+        })
+    }
+
+    fn timer_deadline(count: u16, running: bool, delay: u8, pipe: Option<u8>) -> Option<u32> {
+        let mut pipe = Self::enable_pipe(running, delay, pipe);
+        if running {
+            let warmup = if pipe & 2 != 0 {
+                0
+            } else if pipe & 1 != 0 {
+                1
+            } else {
+                2
+            };
+            return Some(u32::from(count) + 1 + u32::from(delay.max(warmup)));
+        }
+        let mut count = u32::from(count);
+        for edge in 1..=2 {
+            if pipe & 2 != 0 && edge > u32::from(delay) {
+                if count == 0 {
+                    return Some(edge);
+                }
+                count -= 1;
+            }
+            pipe = (pipe << 1) & 3;
+        }
+        None
+    }
+
+    fn enable_pipe_pending(&self) -> bool {
+        Self::enable_pipe(self.ta_running, self.ta_start_delay, self.ta_enable_pipe)
+            != if self.ta_running { 3 } else { 0 }
+            || Self::enable_pipe(self.tb_running, self.tb_start_delay, self.tb_enable_pipe)
+                != if self.tb_running { 3 } else { 0 }
     }
 
     pub fn next_tod_alarm_ticks(&self) -> Option<u32> {
@@ -554,8 +618,15 @@ impl Cia {
                     // timer.
                     self.ta_count = self.ta_latch;
                     if self.ta_oneshot {
+                        self.ta_enable_pipe = Some(Self::enable_pipe(
+                            self.ta_running,
+                            self.ta_start_delay,
+                            self.ta_enable_pipe,
+                        ));
                         self.ta_running = true;
-                        self.ta_start_delay = 2;
+                        // The high-byte write loads and starts the timer,
+                        // like START|LOAD: three E-clock edges precede counting.
+                        self.ta_start_delay = 3;
                         started_timer = true;
                         // The auto-started one-shot reads back as running:
                         // the 8520 sets the CRA START bit, and clears it on
@@ -574,8 +645,13 @@ impl Cia {
                 if !self.tb_running {
                     self.tb_count = self.tb_latch;
                     if self.tb_oneshot {
+                        self.tb_enable_pipe = Some(Self::enable_pipe(
+                            self.tb_running,
+                            self.tb_start_delay,
+                            self.tb_enable_pipe,
+                        ));
                         self.tb_running = true;
-                        self.tb_start_delay = 2;
+                        self.tb_start_delay = 3;
                         started_timer = true;
                         // Mirror the CRB START bit for the auto-started
                         // one-shot, same as timer A above.
@@ -640,6 +716,11 @@ impl Cia {
             }
             REG_CRA => {
                 let prev_run = self.ta_running;
+                self.ta_enable_pipe = Some(Self::enable_pipe(
+                    self.ta_running,
+                    self.ta_start_delay,
+                    self.ta_enable_pipe,
+                ));
                 self.ta_running = val & 0x01 != 0;
                 self.ta_oneshot = val & 0x08 != 0;
                 self.ta_counts_cnt = val & 0x20 != 0;
@@ -653,7 +734,7 @@ impl Cia {
                     self.ta_count = self.ta_latch;
                 }
                 if !prev_run && self.ta_running {
-                    self.ta_start_delay = if val & CR_LOAD != 0 { 3 } else { 2 };
+                    self.ta_start_delay = if val & CR_LOAD != 0 { 3 } else { 0 };
                     started_timer = true;
                 }
                 if !self.ta_running {
@@ -662,6 +743,11 @@ impl Cia {
             }
             REG_CRB => {
                 let prev_run = self.tb_running;
+                self.tb_enable_pipe = Some(Self::enable_pipe(
+                    self.tb_running,
+                    self.tb_start_delay,
+                    self.tb_enable_pipe,
+                ));
                 self.tb_running = val & 0x01 != 0;
                 self.tb_oneshot = val & 0x08 != 0;
                 self.tb_input_mode = TimerBInputMode::from_crb(val);
@@ -673,7 +759,7 @@ impl Cia {
                 //        1 = TOD writes update the alarm register.
                 self.tod_write_alarm = val & 0x80 != 0;
                 if !prev_run && self.tb_running {
-                    self.tb_start_delay = if val & CR_LOAD != 0 { 3 } else { 2 };
+                    self.tb_start_delay = if val & CR_LOAD != 0 { 3 } else { 0 };
                     started_timer = true;
                 }
                 if !self.tb_running {
@@ -742,17 +828,27 @@ impl Cia {
         // Resolve startup on the PHI2 grid even in CNT/cascade mode. In
         // particular a batched call must not feed timer B underflows that
         // happened while its own START pipeline was still filling.
-        if ticks > 1 && (self.ta_start_delay != 0 || self.tb_start_delay != 0) {
+        if ticks > 1
+            && (self.ta_start_delay != 0 || self.tb_start_delay != 0 || self.enable_pipe_pending())
+        {
             let mut edge = false;
             let mut remaining = ticks;
-            while remaining != 0 && (self.ta_start_delay != 0 || self.tb_start_delay != 0) {
+            while remaining != 0
+                && (self.ta_start_delay != 0
+                    || self.tb_start_delay != 0
+                    || self.enable_pipe_pending())
+            {
                 edge |= self.tick(1);
                 remaining -= 1;
             }
             return edge | self.tick(remaining);
         }
-        let ta_ready = self.ta_start_delay == 0;
-        let tb_ready = self.tb_start_delay == 0;
+        let ta_pipe = Self::enable_pipe(self.ta_running, self.ta_start_delay, self.ta_enable_pipe);
+        let tb_pipe = Self::enable_pipe(self.tb_running, self.tb_start_delay, self.tb_enable_pipe);
+        let ta_ready = ta_pipe & 2 != 0 && self.ta_start_delay == 0;
+        let tb_ready = tb_pipe & 2 != 0 && self.tb_start_delay == 0;
+        self.ta_enable_pipe = Some(((ta_pipe << 1) | u8::from(self.ta_running)) & 3);
+        self.tb_enable_pipe = Some(((tb_pipe << 1) | u8::from(self.tb_running)) & 3);
         self.ta_start_delay = self.ta_start_delay.saturating_sub(1);
         self.tb_start_delay = self.tb_start_delay.saturating_sub(1);
         // PBON pulse mode holds PB6/PB7 low for one E-clock. A pulse armed by
@@ -772,11 +868,12 @@ impl Cia {
         let mut pin_edge = self.drain_irq_pin_delay(ticks);
         let mut timer_mask: u8 = 0;
         let mut ta_underflows = 0;
-        if self.ta_running && ta_ready && !self.ta_counts_cnt && ticks > 0 {
+        if ta_ready && !self.ta_counts_cnt && ticks > 0 {
             ta_underflows = advance(&mut self.ta_count, self.ta_latch, ticks);
             timer_mask |= u8::from(ta_underflows != 0) * ICR_TA;
             if timer_mask & ICR_TA != 0 && self.ta_oneshot {
                 self.ta_running = false;
+                self.ta_enable_pipe = Some(0);
                 self.regs[REG_CRA] &= !0x01;
             }
             if timer_mask & ICR_TA != 0 {
@@ -796,11 +893,12 @@ impl Cia {
                 }
             }
         };
-        if self.tb_running && tb_ready && tb_ticks > 0 {
+        if tb_ready && tb_ticks > 0 {
             let tb_underflows = advance(&mut self.tb_count, self.tb_latch, tb_ticks);
             timer_mask |= u8::from(tb_underflows != 0) * ICR_TB;
             if timer_mask & ICR_TB != 0 && self.tb_oneshot {
                 self.tb_running = false;
+                self.tb_enable_pipe = Some(0);
                 self.regs[REG_CRB] &= !0x01;
             }
             if timer_mask & ICR_TB != 0 {
@@ -856,18 +954,22 @@ impl Cia {
     fn pulse_cnt(&mut self) -> bool {
         let mut timer_mask = 0;
         let mut sp_mask = 0;
-        if self.ta_running && self.ta_start_delay == 0 && self.ta_counts_cnt {
+        if Self::enable_pipe(self.ta_running, self.ta_start_delay, self.ta_enable_pipe) & 2 != 0
+            && self.ta_start_delay == 0
+            && self.ta_counts_cnt
+        {
             let ta_underflows = advance(&mut self.ta_count, self.ta_latch, 1);
             timer_mask |= u8::from(ta_underflows != 0) * ICR_TA;
             if ta_underflows != 0 && self.ta_oneshot {
                 self.ta_running = false;
+                self.ta_enable_pipe = Some(0);
                 self.regs[REG_CRA] &= !0x01;
             }
             if ta_underflows != 0 {
                 self.update_timer_a_pb_output();
             }
             sp_mask |= self.tick_sdr_output(ta_underflows);
-            if self.tb_running
+            if Self::enable_pipe(self.tb_running, self.tb_start_delay, self.tb_enable_pipe) & 2 != 0
                 && self.tb_start_delay == 0
                 && matches!(
                     self.tb_input_mode,
@@ -883,12 +985,15 @@ impl Cia {
                 }
             }
         }
-        if self.tb_running && self.tb_start_delay == 0 && self.tb_input_mode == TimerBInputMode::Cnt
+        if Self::enable_pipe(self.tb_running, self.tb_start_delay, self.tb_enable_pipe) & 2 != 0
+            && self.tb_start_delay == 0
+            && self.tb_input_mode == TimerBInputMode::Cnt
         {
             let tb_underflows = advance(&mut self.tb_count, self.tb_latch, 1);
             timer_mask |= u8::from(tb_underflows != 0) * ICR_TB;
             if tb_underflows != 0 && self.tb_oneshot {
                 self.tb_running = false;
+                self.tb_enable_pipe = Some(0);
                 self.regs[REG_CRB] &= !0x01;
             }
             if tb_underflows != 0 {
@@ -1017,12 +1122,11 @@ impl Cia {
 
     fn update_irq_line(&mut self) {
         if self.icr_data & self.icr_mask & 0x1F != 0 {
-            if self.icr_data & ICR_IR == 0 {
-                self.icr_data |= ICR_IR;
-                self.arm_irq_pin();
-            }
+            self.icr_data |= ICR_IR;
+            self.arm_irq_pin();
         } else {
-            self.icr_data &= !ICR_IR;
+            // IR records that an enabled interrupt occurred. Clearing the
+            // mask does not acknowledge this latch; only reading ICR does.
             self.irq_pin = false;
             self.irq_pin_delay_eticks = 0;
         }
@@ -1146,6 +1250,44 @@ pub fn reg_from_addr(addr: u64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stop_drains_two_count_enable_stages_and_survives_snapshot() {
+        for (lo, hi, control) in [(REG_TALO, REG_TAHI, REG_CRA), (REG_TBLO, REG_TBHI, REG_CRB)] {
+            let mut cia = Cia::new(Which::A);
+            cia.write(lo, 20);
+            cia.write(hi, 0);
+            cia.write(control, 1);
+            cia.tick(5);
+            assert_eq!(cia.read(lo), 17);
+            cia.write(control, 0);
+            assert_eq!(cia.read(control) & 1, 0);
+            cia.tick(1);
+            assert_eq!(cia.read(lo), 16);
+            let mut restored: Cia =
+                serde_json::from_slice(&serde_json::to_vec(&cia).unwrap()).unwrap();
+            cia.tick(20);
+            for _ in 0..20 {
+                restored.tick(1);
+            }
+            assert_eq!(cia.read(lo), 15);
+            assert_eq!(restored.read(lo), 15);
+            assert_eq!(cia.next_underflow_ticks(), None);
+        }
+    }
+
+    #[test]
+    fn stopped_timer_can_underflow_before_count_enable_drains() {
+        let mut cia = Cia::new(Which::A);
+        cia.write(REG_TALO, 3);
+        cia.write(REG_TAHI, 0);
+        cia.write(REG_CRA, 1);
+        cia.tick(5);
+        cia.write(REG_CRA, 0);
+        assert_eq!(cia.next_underflow_ticks(), Some(1));
+        cia.tick(1);
+        assert_eq!(cia.read(REG_ICR), ICR_TA);
+    }
 
     #[test]
     fn start_and_load_wait_for_e_clock_stages_before_counting() {
@@ -1621,6 +1763,52 @@ mod tests {
         assert!(cia.settle_irq_pin());
         assert!(cia.irq_line_asserted());
         assert_eq!(cia.read(REG_ICR), ICR_IR | ICR_TA);
+    }
+
+    #[test]
+    fn clearing_mask_preserves_ir_until_icr_is_read() {
+        for which in [Which::A, Which::B] {
+            for (control, lo, hi, source) in [
+                (REG_CRA, REG_TALO, REG_TAHI, ICR_TA),
+                (REG_CRB, REG_TBLO, REG_TBHI, ICR_TB),
+            ] {
+                let mut cia = Cia::new(which);
+                cia.write(lo, 0);
+                cia.write(hi, 0);
+                cia.write(REG_ICR, 0x80 | source);
+                cia.write(control, 0x19);
+                cia.tick(4);
+                cia.write(REG_ICR, source);
+                assert_eq!(cia.icr_data, ICR_IR | source);
+                // Re-enabling an unacknowledged source must drive the pin
+                // even though IR was already latched before the mask write.
+                cia.write(REG_ICR, 0x80 | source);
+                assert!(cia.tick(1));
+                assert_eq!(cia.read(REG_ICR), ICR_IR | source);
+                assert_eq!(cia.read(REG_ICR), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn high_byte_one_shot_start_includes_load_stage() {
+        for which in [Which::A, Which::B] {
+            for (control, lo, hi, source) in [
+                (REG_CRA, REG_TALO, REG_TAHI, ICR_TA),
+                (REG_CRB, REG_TBLO, REG_TBHI, ICR_TB),
+            ] {
+                let mut cia = Cia::new(which);
+                cia.write(control, 8);
+                cia.write(lo, 0);
+                cia.write(hi, 0);
+                assert_eq!(cia.next_underflow_ticks(), Some(4));
+                cia.tick(3);
+                assert_eq!(cia.read(REG_ICR), 0);
+                cia.tick(1);
+                assert_eq!(cia.read(REG_ICR), source);
+                assert_eq!(cia.read(control) & 1, 0);
+            }
+        }
     }
 
     #[test]
