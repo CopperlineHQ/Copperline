@@ -317,8 +317,8 @@ impl AdapterIo for WindowsAdapter {
         }
     }
 
-    fn set_guest_mac(&mut self, mac: [u8; 6]) -> Result<()> {
-        let filter = CString::new(mac_filter(mac)).unwrap();
+    fn set_receive_filter(&mut self, mac: [u8; 6], promiscuous: bool) -> Result<()> {
+        let filter = CString::new(mac_filter(mac, promiscuous)).unwrap();
         let mut program = BpfProgram {
             bf_len: 0,
             bf_insns: ptr::null_mut(),

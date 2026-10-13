@@ -47,6 +47,10 @@ pub trait NetBackend: Send {
     /// LANCE learns this from its initialization block after the host backend
     /// has already opened.
     fn set_guest_mac(&mut self, _mac: [u8; 6]) {}
+
+    /// Allow destinations other than the station address and Ethernet groups.
+    /// Backends must retain capture-echo suppression when this is enabled.
+    fn set_promiscuous(&mut self, _enabled: bool) {}
 }
 
 /// Which host backend a NIC board uses. Recorded in the board's config (and
