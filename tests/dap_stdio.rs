@@ -180,6 +180,14 @@ fn dap_binds_linked_elf_with_retained_relocations_after_loadseg() {
 }
 
 #[test]
+#[ignore = "boots bundled AROS and launches the emulator plus DAP adapter"]
+fn dap_binds_packed_hunk_dwarf_after_loadseg() {
+    for name in ["program-dwarf2", "program-dwarf4", "program-dwarf5"] {
+        debug_source_fixture("packed", name, false, None);
+    }
+}
+
+#[test]
 #[ignore = "boots local Kickstart 1.3"]
 fn dap_binds_source_breakpoints_on_kick13() {
     let assets = std::env::var_os("COPPERLINE_TEST_ASSETS")
@@ -194,6 +202,10 @@ fn dap_binds_source_breakpoints_on_kick13() {
 }
 
 fn debug_elf_fixture(name: &str, rom: Option<&std::path::Path>) {
+    debug_source_fixture("reloc", name, true, rom);
+}
+
+fn debug_source_fixture(dir_name: &str, name: &str, elf: bool, rom: Option<&std::path::Path>) {
     // Reap the adapter even when an assertion fails.
     struct Adapter(std::process::Child);
     impl Drop for Adapter {
@@ -202,12 +214,15 @@ fn debug_elf_fixture(name: &str, rom: Option<&std::path::Path>) {
             let _ = self.0.wait();
         }
     }
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("guest/dap-test/reloc");
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("guest/dap-test")
+        .join(dir_name);
     let program = dir.join(name);
     let source = dir.join("worker.c");
-    let line = include_str!("../guest/dap-test/reloc/worker.c")
+    let line = std::fs::read_to_string(&source)
+        .unwrap()
         .lines()
-        .position(|l| l.contains("return value + increment"))
+        .position(|l| l.trim_start().starts_with("return "))
         .unwrap() as u64
         + 1;
     let mut child = Adapter(
@@ -234,11 +249,12 @@ fn debug_elf_fixture(name: &str, rom: Option<&std::path::Path>) {
         "launch",
         json!({
             "program": program,
-            "symbolFile": dir.join(format!("{name}.elf")),
+            "symbolFile": elf.then(|| dir.join(format!("{name}.elf"))),
             "copperline": env!("CARGO_BIN_EXE_copperline"),
             "factory": true,
             "headless": true,
             "model": "A500",
+            "cpu": if elf { "68000" } else { "68020" },
             "rom": rom,
             "stack": 32768,
             "stopOnEntry": true,
@@ -288,6 +304,37 @@ fn debug_elf_fixture(name: &str, rom: Option<&std::path::Path>) {
         .ends_with("worker.c"));
     assert_eq!(top["line"], line, "{frames}");
     assert_eq!(frames["stackFrames"][1]["name"], "entry", "{frames}");
+
+    if !elf {
+        let scopes = c.call("scopes", json!({"frameId": top["id"]}));
+        let locals = scopes["scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == "Locals")
+            .unwrap();
+        let variables = c.call(
+            "variables",
+            json!({"variablesReference": locals["variablesReference"]}),
+        );
+        // GCC's DWARF 2 frame base uses a .debug_loc list. The packed
+        // binutils directory has no slot for that section; the adapter
+        // must report it unsupported, rather than invent a frame base.
+        let parameter = if name == "program-dwarf2" {
+            "<unsupported frame base>"
+        } else {
+            "7"
+        };
+        for (name, expected) in [("value", parameter), ("adjusted", "10")] {
+            let variable = variables["variables"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|v| v["name"] == name)
+                .unwrap();
+            assert_eq!(variable["value"], expected, "{variable}");
+        }
+    }
 
     c.call("disconnect", json!({"terminateDebuggee": true}));
     drop(c);

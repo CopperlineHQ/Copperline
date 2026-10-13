@@ -330,9 +330,9 @@ impl DebugInfo {
             ));
         }
         // amiga-gcc links the hunks back to back from address 0 (text,
-        // then data, then bss, in hunk order); its DWARF addresses and
-        // the debug block's own cross-section offsets are all in that
-        // space.
+        // then data, then bss, in hunk order); its DWARF code/data
+        // addresses use that space. Cross-section debug references are
+        // handled separately according to the carrier layout.
         let mut addr = 0u64;
         for (index, hunk) in file.hunks.iter().enumerate() {
             info.link.segments.push(LinkSegment {
@@ -993,6 +993,98 @@ mod fixture_tests {
 
     const HELLO: &[u8] = include_bytes!("../../guest/dap-test/hello");
     const LINES: &[u8] = include_bytes!("../../guest/dap-test/lines");
+
+    #[test]
+    fn packed_hunk_dwarf_resolves_both_units_variables_lines_and_cfi() {
+        for program in [
+            include_bytes!("../../guest/dap-test/packed/program-dwarf2").as_slice(),
+            include_bytes!("../../guest/dap-test/packed/program-dwarf4").as_slice(),
+            include_bytes!("../../guest/dap-test/packed/program-dwarf5").as_slice(),
+        ] {
+            let parsed = HunkFile::parse(program).unwrap();
+            assert!(parsed.dwarf.as_ref().unwrap().section_relative);
+            let mut info = DebugInfo::load(program, None).unwrap();
+            info.relocate(
+                (0..info.hunks.len())
+                    .map(|i| 0x10000 * (i as u32 + 1))
+                    .collect(),
+            );
+            assert_eq!(info.functions.len(), 2, "{:?}", info.notes);
+            for (name, source) in [("entry", "main.c"), ("worker", "worker.c")] {
+                let function = info.functions.iter().find(|f| f.name == name).unwrap();
+                let symbol = info
+                    .symbols
+                    .iter()
+                    .find(|s| s.name.strip_prefix('_') == Some(name))
+                    .unwrap();
+                assert_eq!(function.at, symbol.at, "{name}: DWARF agrees with hunk");
+                let pc = info.runtime(function.at).unwrap();
+                let row = info.line_for(pc).expect("function entry source line");
+                assert!(info.files[row.file as usize].path.ends_with(source));
+                let cfi = info
+                    .cfi
+                    .as_ref()
+                    .unwrap()
+                    .row_for(info.link.to_link(function.at).unwrap())
+                    .unwrap();
+                assert_eq!((cfi.cfa_reg, cfi.cfa_offset), (15, 4), "{name}");
+                assert_eq!(cfi.ra_reg, 24);
+            }
+            for name in ["increment", "result"] {
+                let global = info.globals.iter().find(|g| g.name == name).unwrap();
+                let symbol = info
+                    .symbols
+                    .iter()
+                    .find(|s| s.name.strip_prefix('_') == Some(name))
+                    .unwrap();
+                assert_eq!(global.location, Location::Static(symbol.at), "{name}");
+            }
+            // Hunk symbols normally take precedence for global addresses.
+            // Remove them to verify DW_OP_addr independently maps DATA/BSS,
+            // rather than letting a good symbol hide a bad DWARF address.
+            let mut without_symbols = parsed.clone();
+            for hunk in &mut without_symbols.hunks {
+                hunk.symbols.clear();
+            }
+            let mut dwarf_only = DebugInfo::from_hunk_file(&without_symbols);
+            assert!(dwarf_only.symbols.is_empty());
+            dwarf_only.relocate(vec![0x10000, 0x20000, 0x30000]);
+            for (name, kind) in [("increment", HunkKind::Data), ("result", HunkKind::Bss)] {
+                let index = parsed.hunks.iter().position(|h| h.kind == kind).unwrap();
+                let expected = HunkAddr::new(index as u32, 0);
+                let global = dwarf_only.globals.iter().find(|g| g.name == name).unwrap();
+                assert_eq!(global.location, Location::Static(expected), "{name}");
+                assert_eq!(
+                    dwarf_only.runtime(expected),
+                    Some(0x10000 * (index as u32 + 1)),
+                    "{name}: noncontiguous runtime relocation"
+                );
+            }
+            let worker = info.functions.iter().find(|f| f.name == "worker").unwrap();
+            assert_eq!(worker.params[0].name, "value");
+            assert_eq!(worker.params[0].location, Location::FrameOffset(0));
+            let local = worker.locals.iter().find(|v| v.name == "adjusted").unwrap();
+            assert_eq!(
+                local.location,
+                Location::RegOffset {
+                    reg: 13,
+                    offset: -4
+                }
+            );
+            let file = info.find_file("worker.c").unwrap();
+            let return_line = include_str!("../../guest/dap-test/packed/worker.c")
+                .lines()
+                .position(|l| l.contains("return adjusted"))
+                .unwrap() as u32
+                + 1;
+            let (line, addresses) = info.resolve_line(file, return_line).unwrap();
+            assert_eq!(line, return_line);
+            assert!(!addresses.is_empty());
+            for pc in addresses {
+                assert_eq!(info.function_at(pc).unwrap().name, "worker");
+            }
+        }
+    }
 
     #[test]
     fn elf_multi_unit_fixtures_resolve_lines_globals_and_cfi() {
