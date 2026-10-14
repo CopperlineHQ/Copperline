@@ -1038,6 +1038,10 @@ impl Paula {
         self.stereo_separation
     }
 
+    pub fn drive_sounds(&self) -> &DriveSounds {
+        &self.drive_sounds
+    }
+
     pub fn drive_sounds_mut(&mut self) -> &mut DriveSounds {
         &mut self.drive_sounds
     }

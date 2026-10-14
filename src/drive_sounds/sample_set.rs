@@ -49,6 +49,15 @@ const CLICK_HOLD_OFF: usize = 3000;
 
 /// A WAV larger than this is not a drive sound.
 const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
+/// Nor is one longer than this. The file-size cap alone does not bound the
+/// resampled output, which grows as the declared rate shrinks: a small file
+/// claiming 1 Hz would resample to trillions of samples. With the rate
+/// range below, this caps each converted member at a minute of mixer-rate
+/// samples (about 10 MiB).
+const MAX_SECONDS: u64 = 60;
+/// Sample rates a drive sound may declare. Anything outside is a broken or
+/// hostile header, not a recording.
+const SAMPLE_RATES: std::ops::RangeInclusive<u32> = 1_000..=192_000;
 
 /// The five files of a set, in the order WinUAE loads them.
 const KINDS: [&str; 5] = ["click", "spin", "spinnd", "startup", "snatch"];
@@ -230,20 +239,17 @@ pub fn display_name(value: &str) -> String {
     locate(value).map_or_else(|_| value.trim().to_string(), |(_, name)| name)
 }
 
-/// Every set in `dir` with a click file, sorted case-insensitively. WinUAE
-/// lists sets the same way, by their click files.
+/// Every set in `dir`, sorted case-insensitively. A set is found by any of
+/// its member files, not only its click: [`SampleSet::load`] takes any
+/// non-empty combination, so a motor-only set is a set too. (WinUAE lists
+/// sets by their click files alone.)
 pub fn list_sets(dir: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
     let mut names: Vec<String> = entries
         .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
-        .filter_map(|file| {
-            let name = set_name_of_member(&file)?;
-            file.to_ascii_lowercase()
-                .starts_with("drive_click_")
-                .then_some(name)
-        })
+        .filter_map(|file| set_name_of_member(&file))
         .collect();
     names.sort_by_key(|name| name.to_ascii_lowercase());
     names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
@@ -315,11 +321,22 @@ fn decode_wav_mono(bytes: &[u8]) -> Result<(Vec<f32>, u32)> {
     let mut reader = hound::WavReader::new(Cursor::new(bytes))
         .map_err(|e| anyhow!("not a readable WAVE file: {e}"))?;
     let spec = reader.spec();
-    if spec.channels == 0 || spec.sample_rate == 0 {
+    if spec.channels == 0 || !SAMPLE_RATES.contains(&spec.sample_rate) {
         bail!(
-            "WAVE header claims {} channels at {} Hz",
+            "WAVE header claims {} channels at {} Hz (a drive sound needs at least one \
+             channel at {}-{} Hz)",
             spec.channels,
-            spec.sample_rate
+            spec.sample_rate,
+            SAMPLE_RATES.start(),
+            SAMPLE_RATES.end()
+        );
+    }
+    // Checked from the header, before anything is decoded or resampled.
+    let frames = u64::from(reader.duration());
+    if frames > u64::from(spec.sample_rate) * MAX_SECONDS {
+        bail!(
+            "{} s long; a drive sound may be at most {MAX_SECONDS} s",
+            frames / u64::from(spec.sample_rate)
         );
     }
     let interleaved: Vec<f32> = match (spec.sample_format, spec.bits_per_sample) {
@@ -523,9 +540,53 @@ mod tests {
             1000.0 / 32768.0
         );
         assert_eq!(set.motor_sample(LeadIn::None, false, 0), 0.0);
-        assert_eq!(list_sets(&dir), ["Test"]);
+        assert_eq!(list_sets(&dir), ["Other", "Test"]);
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
+    }
+
+    #[test]
+    fn a_motor_only_set_is_listed() {
+        let dir = temp_dir();
+        write_wav(
+            &dir.join("drive_spin_Quiet.wav"),
+            MIX_SAMPLE_RATE,
+            1,
+            &[0; 8],
+        );
+        write_wav(
+            &dir.join("drive_snatch_quiet.wav"),
+            MIX_SAMPLE_RATE,
+            1,
+            &[0; 8],
+        );
+        write_wav(
+            &dir.join("drive_click_A500.wav"),
+            MIX_SAMPLE_RATE,
+            1,
+            &[0; 8],
+        );
+        std::fs::write(dir.join("readme.txt"), "not a set").unwrap();
+        assert_eq!(list_sets(&dir), ["A500", "Quiet"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn implausible_rates_and_lengths_are_refused_before_decoding() {
+        let dir = temp_dir();
+        // A tiny file claiming 1 Hz would otherwise resample to an
+        // allocation of tens of millions of samples per input sample.
+        write_wav(&dir.join("drive_spin_Low.wav"), 1, 1, &[0; 64]);
+        let err = SampleSet::load(&dir, "Low").expect_err("1 Hz");
+        assert!(format!("{err:#}").contains("1 Hz"), "{err:#}");
+        // In range, but 61 s long at 1 kHz.
+        write_wav(&dir.join("drive_spin_Long.wav"), 1_000, 1, &[0; 61_000]);
+        let err = SampleSet::load(&dir, "Long").expect_err("too long");
+        assert!(format!("{err:#}").contains("61 s"), "{err:#}");
+        // A minute exactly is fine.
+        write_wav(&dir.join("drive_spin_Minute.wav"), 1_000, 1, &[0; 60_000]);
+        assert!(SampleSet::load(&dir, "Minute").is_ok());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

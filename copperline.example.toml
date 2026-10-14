@@ -832,17 +832,20 @@ video = "PAL"
 
 [audio]
 
-# Synthesized floppy-drive sound effects: motor hum with spin-up/down,
-# head-step clacks (including the classic empty-drive poll click) and
-# the seek buzz of fast stepping. Generated from scratch, not sampled.
-# Mixed into the normal audio output, so they need live audio (or
-# --audio-wav) to be heard.
+# Floppy-drive sound effects on or off. This is the switch for all drive
+# sounds: false silences them even with a floppy_sounds_set below. By
+# default they are synthesized: motor hum with spin-up/down, head-step
+# clacks (including the classic empty-drive poll click) and the seek buzz
+# of fast stepping, generated from scratch, not sampled. Mixed into the
+# normal audio output, so they need live audio (or --audio-wav) to be
+# heard.
 floppy_sounds = true
 
 # Drive sound level, 0-100, relative to Paula's output.
 floppy_sounds_volume = 100
 
-# Play a WinUAE/FS-UAE drive sample set instead of the synthesized sounds:
+# Play a WinUAE/FS-UAE drive sample set instead of the synthesized sounds
+# (only while floppy_sounds is on):
 # drive_click_NAME.wav, drive_spin_NAME.wav, drive_spinnd_NAME.wav,
 # drive_startup_NAME.wav and drive_snatch_NAME.wav (any may be missing). A
 # bare name is looked up in the "Floppy Sounds" folder of the host-data

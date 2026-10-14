@@ -1891,15 +1891,16 @@ pub(crate) fn parse_audio_filter_mode(s: &str) -> Result<AudioFilterMode> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioConfig {
-    /// Synthesized floppy-drive sound effects: motor hum, head-step
-    /// clacks and seek buzz (and the empty-drive change-line poll
-    /// click).
+    /// Floppy-drive sound effects on or off: the synthesized motor hum,
+    /// head-step clacks and seek buzz (and the empty-drive change-line poll
+    /// click), or `floppy_sounds_set` in their place. Off silences both.
     pub floppy_sounds: bool,
     /// Drive sound level, 0-100, relative to Paula's output.
     pub floppy_sounds_volume: u8,
     /// A WinUAE-format drive sample set every drive plays instead of the
-    /// synthesized sounds (`[audio] floppy_sounds_set`): a set name in the
-    /// floppy sounds folder, or a path. `None` synthesizes.
+    /// synthesized sounds (`[audio] floppy_sounds_set`) while
+    /// `floppy_sounds` is on: a set name in the floppy sounds folder, or a
+    /// path. `None` synthesizes.
     pub floppy_sounds_set: Option<String>,
     /// Host audio output device, matched by case-insensitive substring against
     /// the names cpal enumerates. `None` uses the system default output.

@@ -1333,9 +1333,9 @@ shader never fails the config, and never stops the machine from running.
 
 ```toml
 [audio]
-floppy_sounds = true        # synthesized drive sounds (not sampled)
+floppy_sounds = true        # drive sounds on/off: synthesized, or the set below
 floppy_sounds_volume = 100  # 0-100, relative to Paula's output
-# floppy_sounds_set = "A500"  # play a WinUAE/FS-UAE sample set instead; see below
+# floppy_sounds_set = "A500"  # a WinUAE/FS-UAE sample set instead of synthesis; see below
 # output_device = "..."     # host output device (substring); omit = system default
 # output_enabled = true     # false = no sound (GUI "Disabled"); --audio/--noaudio still win
 channel_mode = "stereo"     # "stereo" (default) or "mono"
@@ -1357,9 +1357,11 @@ a real 3.5" mechanism, an outward pulse with the head at track 0 is
 gated by the /TRK0 sensor, so NoClick-style patches silence the
 empty-drive poll just as they do on real hardware.
 
-`floppy_sounds_set` plays a recorded sample set instead -- the drive sound
-packs WinUAE and FS-UAE use (FS-UAE's `floppy_drive_N_sounds`). A set is up
-to five WAV files sharing a name:
+`floppy_sounds` is the switch for all drive sounds: with it `false` the
+drives are silent whatever `floppy_sounds_set` names. While it is on,
+`floppy_sounds_set` replaces the synthesis with a recorded sample set -- the
+drive sound packs WinUAE and FS-UAE use (FS-UAE's `floppy_drive_N_sounds`). A
+set is up to five WAV files sharing a name:
 
 | File | Plays |
 |---|---|
