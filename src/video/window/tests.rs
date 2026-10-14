@@ -1340,6 +1340,67 @@ fn player_settings_written_are_all_read_back_on_the_next_launch() {
     );
 }
 
+/// Menu changes in the full build are written through to the saved default
+/// as they are made -- only the changed keys, over whatever the file holds --
+/// and the session's own configuration follows, so the launcher shows and
+/// saves them too (rewind and controller settings were reported lost across
+/// restarts).
+#[test]
+fn menu_settings_write_through_to_the_saved_default() {
+    use crate::config::RawConfig;
+    let path = std::env::temp_dir().join(format!(
+        "copperline-menu-settings-{}.toml",
+        std::process::id()
+    ));
+    std::fs::write(&path, "[machine]\nprofile = \"A1200\"\n").unwrap();
+    let read_back =
+        |path: &std::path::Path| RawConfig::parse(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let mut app = test_app();
+    // The fixture wires port 2 after construction; a real start configures
+    // the ports before the session takes its settings baseline.
+    app.menu_settings_saved = app.menu_prefs();
+    app.set_menu_settings_file(Some(path.clone()));
+
+    app.toggle_rewind();
+    app.autofire_hz = 8;
+    app.persist_settings();
+    let saved = read_back(&path);
+    assert_eq!(saved.machine.profile.as_deref(), Some("A1200"));
+    assert_eq!(saved.emulation.rewind, Some(true));
+    assert_eq!(saved.input.autofire_hz, Some(8));
+    // Settings the user left alone stay out of the default every machine
+    // starts from.
+    assert_eq!(saved.input.port2, None);
+    assert_eq!(saved.display.vsync, None);
+    assert_eq!(app.machine_config.emulation.rewind, Some(true));
+    assert_eq!(app.machine_config.input.autofire_hz, Some(8));
+
+    // Turning a setting back writes it back.
+    app.toggle_rewind();
+    app.persist_settings();
+    let saved = read_back(&path);
+    assert_eq!(saved.emulation.rewind, Some(false));
+    assert_eq!(saved.input.autofire_hz, Some(8));
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Whatever the full build's menu write-through records must come back
+/// through its merge, or the setting is lost on the next launch.
+#[test]
+fn menu_settings_written_are_all_read_back() {
+    let app = test_app();
+    let written = app.menu_prefs();
+    assert!(written.emulation.rewind.is_some());
+    assert!(written.input.mouse_sensitivity.is_some());
+
+    let mut restored = crate::config::RawConfig::default();
+    restored.merge_menu_settings(&written);
+    assert_eq!(
+        restored.to_toml_string().unwrap(),
+        written.to_toml_string().unwrap()
+    );
+}
+
 #[test]
 fn native_scheduled_capture_leaves_interactive_output_capture_unchanged() {
     let mut app = test_app();

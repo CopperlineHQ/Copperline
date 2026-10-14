@@ -977,6 +977,9 @@ pub struct MachineSetup {
     /// never seen them, because what cannot be reached is dropped when the
     /// configuration is adopted.
     paths: crate::pathconf::Paths,
+    /// The keys the launcher has no rows for, as the configuration it was
+    /// opened on had them (see [`carry_unowned_keys`]).
+    carried: RawConfig,
 }
 
 impl Default for MachineSetup {

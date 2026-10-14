@@ -1651,8 +1651,15 @@ pub struct App {
     update_check: app_update::UpdateCheck,
     /// Raw config of the running (or last-applied) machine, so the "Machine
     /// Configuration..." menu item reopens the launcher showing the current
-    /// settings.
+    /// settings. Menu settings changes are folded in as they are made.
     machine_config: RawConfig,
+    /// The saved default configuration that menu settings changes write
+    /// through to, or `None` when the session's settings belong to a file
+    /// the user named (`--config`, `./copperline.toml`) or to `--factory`.
+    menu_settings_file: Option<PathBuf>,
+    /// The menu-controlled settings as last persisted, or as the machine
+    /// started: [`Self::persist_menu_settings`] writes only what differs.
+    menu_settings_saved: RawConfig,
     /// Host pause state before the debugger forced a pause, restored when
     /// the debugger window closes (unless Run was used inside it).
     paused_before_debugger: bool,
@@ -3010,6 +3017,8 @@ impl App {
             #[cfg(feature = "update-check")]
             update_check: app_update::UpdateCheck::Idle,
             machine_config,
+            menu_settings_file: None,
+            menu_settings_saved: RawConfig::default(),
             paused_before_debugger: false,
             paused_before_analyzer: false,
             paused_before_console: false,
@@ -3044,6 +3053,7 @@ impl App {
                 app.run_ahead_frames
             );
         }
+        app.rebaseline_menu_settings();
         app
     }
 
@@ -3926,6 +3936,12 @@ impl App {
         self.pending_auto_expect = specs;
     }
 
+    /// Write menu settings changes through to `path`, the saved default
+    /// configuration, as they are made (see [`Self::persist_menu_settings`]).
+    pub fn set_menu_settings_file(&mut self, path: Option<PathBuf>) {
+        self.menu_settings_file = path;
+    }
+
     /// Use original field pixels for screenshots and expectations.
     pub fn set_native_screenshots(&mut self, native: bool) {
         self.native_screenshots = native;
@@ -4661,6 +4677,9 @@ impl ApplicationHandler for App {
         if let Err(msg) = self.reload_bezel_stickers() {
             self.show_osd(format!("Bezel stickers: off ({msg})"));
         }
+        // Fullscreen and a custom shader that failed to build settle only
+        // once the window exists; neither is a menu choice to write through.
+        self.rebaseline_menu_settings();
         // Paint at least once so the status bar (and power button) is
         // visible immediately, even when the machine starts powered off
         // and no emulated frame is being produced yet. A powered-off
@@ -4817,19 +4836,20 @@ impl ApplicationHandler for App {
                         if host_shortcut_modifier_pressed(self.modifiers) =>
                     {
                         self.cycle_joystick_input_mode();
-                        self.persist_player_prefs();
+                        self.persist_settings();
                     }
                     (KeyCode::KeyM, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers) =>
                     {
                         self.toggle_bezel();
-                        self.persist_player_prefs();
+                        self.persist_settings();
                     }
                     (KeyCode::KeyP, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers) =>
                     {
                         if !crate::video::player_profile() {
-                            self.toggle_perf_overlay()
+                            self.toggle_perf_overlay();
+                            self.persist_settings();
                         }
                     }
                     (KeyCode::KeyF, ElementState::Pressed)
@@ -4838,14 +4858,15 @@ impl ApplicationHandler for App {
                     {
                         // The player has no status bar to bring back.
                         if !crate::video::player_profile() {
-                            self.toggle_status_bar()
+                            self.toggle_status_bar();
+                            self.persist_settings();
                         }
                     }
                     (KeyCode::KeyF, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers) =>
                     {
                         self.toggle_fullscreen();
-                        self.persist_player_prefs();
+                        self.persist_settings();
                     }
                     (KeyCode::KeyR, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers)
@@ -4875,7 +4896,8 @@ impl ApplicationHandler for App {
                         if host_shortcut_modifier_pressed(self.modifiers)
                             && self.modifiers.shift_key() =>
                     {
-                        self.cycle_warp_speed()
+                        self.cycle_warp_speed();
+                        self.persist_settings();
                     }
                     (KeyCode::KeyZ, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers) =>
@@ -4901,7 +4923,7 @@ impl ApplicationHandler for App {
                         // running machine, not the config-screen placeholder.
                         if !self.modal_ui_active() {
                             self.cycle_audio_output();
-                            self.persist_player_prefs();
+                            self.persist_settings();
                         }
                     }
                     (KeyCode::KeyA, ElementState::Pressed)
@@ -4912,7 +4934,7 @@ impl ApplicationHandler for App {
                         // menu or panel is open.
                         if !self.modal_ui_active() {
                             self.cycle_audio_filter();
-                            self.persist_player_prefs();
+                            self.persist_settings();
                         }
                     }
                     // Quick save/load slots on the number row: the modifier
@@ -4958,7 +4980,8 @@ impl ApplicationHandler for App {
                     {
                         // Raise the host mouse sensitivity (Shift+. is ">").
                         if !self.modal_ui_active() {
-                            self.step_mouse_sensitivity(true)
+                            self.step_mouse_sensitivity(true);
+                            self.persist_settings();
                         }
                     }
                     (KeyCode::Comma, ElementState::Pressed)
@@ -4967,7 +4990,8 @@ impl ApplicationHandler for App {
                     {
                         // Lower the host mouse sensitivity (Shift+, is "<").
                         if !self.modal_ui_active() {
-                            self.step_mouse_sensitivity(false)
+                            self.step_mouse_sensitivity(false);
+                            self.persist_settings();
                         }
                     }
                     (other, state) => {
@@ -6322,7 +6346,7 @@ impl ApplicationHandler for App {
                             Ok(blob) => anchor_snapshot = Some(blob),
                             Err(e) => {
                                 warn!("run-ahead disabled: anchor snapshot failed: {e:?}");
-                                self.run_ahead_frames = 0;
+                                self.drop_run_ahead();
                                 burst_complete = false;
                                 break;
                             }
@@ -6381,7 +6405,7 @@ impl ApplicationHandler for App {
                         runahead_presented = self.finish_render_for_current_frame();
                         if !runahead_presented {
                             error!("run-ahead disabled: speculative frame was not renderable");
-                            self.run_ahead_frames = 0;
+                            self.drop_run_ahead();
                             burst_complete = false;
                         }
                     }
@@ -6929,17 +6953,127 @@ impl App {
         !crate::video::player_profile() || crate::video::player_save_states()
     }
 
+    /// Take the settings as they stand as the write-through baseline: they
+    /// came from a configuration, a save state, the window or the host, not
+    /// from a menu choice, so they are not written to the saved default.
+    pub(super) fn rebaseline_menu_settings(&mut self) {
+        self.menu_settings_saved = self.menu_prefs();
+    }
+
+    /// Turn run-ahead off because the host could not sustain it. That is
+    /// not the user's choice, so the write-through must not save it as one.
+    pub(super) fn drop_run_ahead(&mut self) {
+        self.run_ahead_frames = 0;
+        self.menu_settings_saved.emulation.run_ahead_frames = Some(0);
+    }
+
+    /// Keep a settings change made from the menu or a hotkey for the next
+    /// launch: the player's settings file, or the full build's write-through
+    /// to the saved default.
+    pub(super) fn persist_settings(&mut self) {
+        if crate::video::player_profile() {
+            self.persist_player_prefs();
+        } else {
+            self.persist_menu_settings();
+        }
+    }
+
+    /// Fold the menu settings changed since the last call into the session's
+    /// configuration, so the launcher and its Save buttons see them, and
+    /// write them through to the saved default when the session has one
+    /// (see `menu_settings_file`). Only the changed keys are written, so a
+    /// machine-specific setting the user never touched (a CD32 pad on port
+    /// 2, say) is not copied into the default every machine starts from. A
+    /// write failure costs the persistence, not the session.
+    fn persist_menu_settings(&mut self) {
+        let now = self.menu_prefs();
+        let changed = match now.changed_from(&self.menu_settings_saved) {
+            Ok(changed) => changed,
+            Err(e) => {
+                warn!("menu settings not saved: {e:#}");
+                return;
+            }
+        };
+        self.menu_settings_saved = now;
+        if changed == RawConfig::default() {
+            return;
+        }
+        self.machine_config.merge_menu_settings(&changed);
+        let Some(path) = self.menu_settings_file.as_deref() else {
+            return;
+        };
+        let written = (|| -> anyhow::Result<()> {
+            // A default that exists but does not parse is the user's to fix:
+            // replacing it with just these keys would lose the rest.
+            let mut saved = match std::fs::read_to_string(path) {
+                Ok(text) => RawConfig::parse(&text)?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => RawConfig::default(),
+                Err(e) => return Err(e.into()),
+            };
+            saved.merge_menu_settings(&changed);
+            let text = saved.to_toml_string()?;
+            crate::paths::ensure_parent(path)?;
+            // Through a temp file and a rename: a crash mid-write must not
+            // leave a truncated default that no longer parses.
+            let mut tmp = path.as_os_str().to_owned();
+            tmp.push(".tmp");
+            std::fs::write(&tmp, text)?;
+            std::fs::rename(&tmp, path)?;
+            Ok(())
+        })();
+        match written {
+            Ok(()) => info!("menu settings saved to {}", path.display()),
+            Err(e) => warn!("menu settings not saved to {}: {e:#}", path.display()),
+        }
+    }
+
+    /// The settings the full build's menus and hotkeys change, as the
+    /// configuration fragment [`Self::persist_menu_settings`] diffs: the
+    /// player's set plus what only the full menu offers. Every field set
+    /// here must be one `RawConfig::merge_menu_settings` reads back.
+    fn menu_prefs(&self) -> RawConfig {
+        let mut raw = self.player_prefs();
+        // A key left out is never written (`changed_from` reports changed
+        // keys, not removals), so the choices the player leaves implicit --
+        // the default audio output, a custom shader -- are spelled out here,
+        // or switching back to them would not reach the saved default.
+        let (output_enabled, output_device) = match &self.audio_output {
+            crate::audio::AudioOutput::Default => (true, String::new()),
+            crate::audio::AudioOutput::Device(name) => (true, name.clone()),
+            crate::audio::AudioOutput::Disabled => (false, String::new()),
+        };
+        raw.audio.output_enabled = Some(output_enabled);
+        raw.audio.output_device = Some(output_device);
+        if self.crt_shader_kind == crate::config::ShaderKind::Custom {
+            raw.display.shader = self
+                .custom_shader_path
+                .as_ref()
+                .map(|path| path.display().to_string());
+        }
+        let bus = self.emu.bus();
+        raw.emulation.rewind = Some(self.rewind_armed);
+        raw.emulation.run_ahead_frames = Some(self.run_ahead_frames);
+        raw.emulation.warp_speed = Some(self.warp_speed.label().to_ascii_lowercase());
+        raw.floppy.speed = Some(bus.floppy.speed_percent());
+        raw.display.status_bar = Some(!crate::video::status_bar_hidden());
+        raw.display.perf_overlay = Some(self.perf_overlay);
+        raw.input.mouse_sensitivity = Some(u16::from(self.mouse_sensitivity));
+        raw.clipboard.share = bus
+            .filesys_board()
+            .filter(|board| board.clipboard_fitted())
+            .map(|board| board.clipboard_sharing());
+        raw
+    }
+
     /// Write the player's end-user settings through to `settings.toml` in
     /// the per-game config directory.
     ///
-    /// The full build keeps its session-only menu semantics -- settings
-    /// belong to the config file the user points at. A player has no config
-    /// file for its user to edit, so what they set in the menu is what they
-    /// expect to find on the next launch. The file holds the complete set
-    /// of player-controlled settings as an ordinary configuration fragment,
-    /// which the player's startup layers over the manifest's defaults. A
-    /// no-op outside the player profile, and a write failure costs the
-    /// persistence, not the session.
+    /// A player has no config file for its user to edit, so what they set
+    /// in the menu is what they expect to find on the next launch. The file
+    /// holds the complete set of player-controlled settings as an ordinary
+    /// configuration fragment, which the player's startup layers over the
+    /// manifest's defaults. A no-op outside the player profile, and a write
+    /// failure costs the persistence, not the session.
     fn persist_player_prefs(&self) {
         if !crate::video::player_profile() {
             return;

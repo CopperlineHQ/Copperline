@@ -730,16 +730,16 @@ impl App {
             Some(blob) => {
                 if let Err(e) = self.emu.runahead_restore(blob) {
                     error!("run-ahead disabled: anchor restore failed: {e:?}");
-                    self.run_ahead_frames = 0;
+                    self.drop_run_ahead();
                 }
             }
             None => {
                 error!("run-ahead disabled: speculative burst has no anchor snapshot");
-                self.run_ahead_frames = 0;
+                self.drop_run_ahead();
             }
         }
         if !burst_complete {
-            self.run_ahead_frames = 0;
+            self.drop_run_ahead();
         }
     }
 
@@ -949,6 +949,9 @@ impl App {
                 if restoring_over_placeholder {
                     self.install_live_audio_after_placeholder_load();
                 }
+                // The state brings its machine's own settings (port devices,
+                // floppy speed), which are not menu choices.
+                self.rebaseline_menu_settings();
                 if outcome.reconfigured {
                     // The state was built on a different machine; the host
                     // has been reconfigured to match it (see log for the

@@ -4,6 +4,41 @@
 
 use super::*;
 
+/// Copy the configuration keys the launcher has no rows for from `src` into
+/// `dst`. Run and Save rebuild the configuration from the launcher's own
+/// fields, so a key that is neither edited here nor carried by this list is
+/// silently dropped from both the started machine and the saved file (rewind
+/// and autofire once were). A key added to `RawConfig` belongs either in a
+/// `write_*_config` or here.
+pub(super) fn carry_unowned_keys(src: &RawConfig, dst: &mut RawConfig) {
+    dst.debug = src.debug.clone();
+    dst.cpu.unimplemented = src.cpu.unimplemented.clone();
+    dst.emulation.speed = src.emulation.speed.clone();
+    dst.emulation.rewind = src.emulation.rewind;
+    dst.emulation.rewind_budget_mb = src.emulation.rewind_budget_mb;
+    dst.emulation.rewind_interval_frames = src.emulation.rewind_interval_frames;
+    dst.machine.rtc_chip = src.machine.rtc_chip.clone();
+    dst.machine.rtc_time = src.machine.rtc_time.clone();
+    dst.machine.rtc_frozen = src.machine.rtc_frozen;
+    dst.machine.battmem = src.machine.battmem.clone();
+    dst.machine.mem_controller = src.machine.mem_controller.clone();
+    dst.machine.rom_scsi_device_disable = src.machine.rom_scsi_device_disable;
+    dst.pcmcia = src.pcmcia.clone();
+    dst.clipboard = src.clipboard.clone();
+    // `native_screenshot_button` is retired: read and ignored, never saved.
+    dst.recording.clip_seconds = src.recording.clip_seconds;
+    dst.recording.clip_fps = src.recording.clip_fps;
+    dst.zz9k = src.zz9k.clone();
+    dst.display.tv_h_centre = src.display.tv_h_centre;
+    dst.display.tv_v_centre = src.display.tv_v_centre;
+    dst.display.hidpi_texture = src.display.hidpi_texture;
+    dst.input.port3 = src.input.port3.clone();
+    dst.input.port4 = src.input.port4.clone();
+    dst.input.autofire_hz = src.input.autofire_hz;
+    dst.serial.phonebook = src.serial.phonebook.clone();
+    dst.serial.session = src.serial.session.clone();
+}
+
 impl MachineSetup {
     /// Build the typed model from a raw config, validating it through the
     /// config pipeline first. The validated [`Config`] supplies the resolved
@@ -367,6 +402,11 @@ impl MachineSetup {
                 })
                 .collect(),
             paths: raw.paths.clone(),
+            carried: {
+                let mut carried = RawConfig::default();
+                carry_unowned_keys(raw, &mut carried);
+                carried
+            },
         })
     }
 
@@ -431,7 +471,37 @@ impl MachineSetup {
         self.write_audio_config(&mut raw, &base);
         self.write_zorro_config(&mut raw);
         raw.paths = self.paths.clone();
+        carry_unowned_keys(&self.carried, &mut raw);
+        self.drop_unfitting_carried_keys(&mut raw);
         raw
+    }
+
+    /// Drop carried keys the edited machine can no longer take. They have no
+    /// rows on this screen, so a conflict with an edit made here would fail
+    /// Run and Save with nothing to fix it with.
+    fn drop_unfitting_carried_keys(&self, raw: &mut RawConfig) {
+        if self.parallel_device != ParallelDevice::JoystickAdapter {
+            raw.input.port3 = None;
+            raw.input.port4 = None;
+        }
+        if self.cpu != CpuModel::M68060 {
+            raw.cpu.unimplemented = None;
+        }
+        // The slot holds one card: a host disk attached there displaces it.
+        if !self.has_gayle()
+            || self
+                .host_disks_attached()
+                .iter()
+                .any(|disk| disk.attach.is_pcmcia())
+        {
+            raw.pcmcia = Default::default();
+        }
+        if !self.rtc {
+            raw.machine.rtc_chip = None;
+            raw.machine.rtc_time = None;
+            raw.machine.rtc_frozen = None;
+            raw.machine.battmem = None;
+        }
     }
 
     fn write_machine_config(&self, raw: &mut RawConfig, base: &Config) {
