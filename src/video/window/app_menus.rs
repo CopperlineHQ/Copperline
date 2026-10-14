@@ -108,6 +108,7 @@ impl App {
             cartridge: self.emu.cartridge().map(|c| c.model().display_name()),
             fullscreen,
             status_bar_hidden: crate::video::status_bar_hidden(),
+            track_display: crate::video::track_display(),
             bezel: self.bezel,
             perf_overlay: self.perf_overlay,
             vsync: self.vsync,
@@ -362,6 +363,11 @@ impl App {
             }
             A::ToggleFullscreen => self.toggle_fullscreen(),
             A::ToggleStatusBar => self.toggle_status_bar(),
+            A::SetTrackDisplay(mode) => {
+                crate::video::set_track_display(mode);
+                self.show_osd(format!("Track display: {}", mode.menu_label()));
+                self.request_redraw();
+            }
             A::SetBezel(style) => self.set_bezel(style),
             A::TogglePerfOverlay => self.toggle_perf_overlay(),
 

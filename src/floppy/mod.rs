@@ -242,6 +242,27 @@ fn dma_trace_cck_offset(total_data_cck: u32, remaining_data_cck: u32, scale: u32
         .saturating_sub(1)
 }
 
+/// A head step that reached the stepper, for the drive sound effects: the
+/// drive that stepped and the cylinder the head is on afterwards. A sampled
+/// drive-sound set picks its click by that cylinder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SoundStep {
+    pub drive: u8,
+    pub cylinder: u8,
+}
+
+/// What the drive sound effects hear of one drive's mechanism.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DriveSoundState {
+    /// Platter spin level, 0.0 stopped to 1.0 at speed (the motor
+    /// spin-up/spin-down accumulator).
+    pub spin: f32,
+    /// The spindle motor is switched on.
+    pub motor_on: bool,
+    /// A disk is in the drive.
+    pub disk: bool,
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct FloppyController {
     /// Debugger: watched word addresses and the last disk-DMA write to
@@ -297,9 +318,24 @@ pub struct FloppyController {
     /// arming tries again, like FS-UAE's per-DSKLEN turbo scan.
     #[serde(skip)]
     turbo_burst_spent: bool,
-    // Head-step pulses since the last take_sound_steps() drain; feeds
-    // the synthesized drive sound effects.
-    sound_steps: u32,
+    /// Head steps since the last `drain_sound_steps`, for the drive sound
+    /// effects, drained on the floppy tick after the step. Serialized all
+    /// the same: a state captured between the step and that tick must
+    /// replay it, or the drive sounds' serialized state (which netplay
+    /// checksums cover) would part ways between the original and the
+    /// restored machine. `serde(default)` keeps older states loadable; they
+    /// held a bare step count under the old name `sound_steps`, which is
+    /// now an unknown key and skipped.
+    #[serde(default)]
+    sound_step_events: Vec<SoundStep>,
+    /// Drives (one bit each) whose disk was inserted or ejected since the
+    /// last `take_sound_media_changes`: a sampled sound set plays the
+    /// mechanism grabbing a fresh disk on its next spin-up. An insert lands
+    /// between ticks -- a scheduled or netplay disk swap at a frame
+    /// boundary -- so this is serialized for the same reason as
+    /// `sound_step_events`.
+    #[serde(default)]
+    sound_media_changes: u8,
     // Live Paula read shifter: fed one MFM cell at a time as the selected
     // drive's head rotates, it detects DSKSYNC bit-aligned and frames read-DMA
     // words off the sync bit phase.
@@ -359,7 +395,8 @@ impl Default for FloppyController {
             speed_percent: default_speed_percent(),
             turbo_grace_cck: 0,
             turbo_burst_spent: false,
-            sound_steps: 0,
+            sound_step_events: Vec::new(),
+            sound_media_changes: 0,
             read_shifter: PaulaDiskReadDpllFifo::new(),
             // Idle at power-on; the first tick confirms it.
             idle_cache: true,
@@ -693,6 +730,7 @@ impl FloppyController {
             .with_context(|| format!("loading floppy.df{} image", drive_idx))?;
         self.idle_cache = false;
         self.drives[drive_idx].insert_image(image);
+        self.sound_media_changes |= 1 << drive_idx;
         if self.selected_drive() == Some(drive_idx) {
             self.ensure_track(drive_idx, self.track_for_drive(drive_idx));
         }
@@ -734,6 +772,7 @@ impl FloppyController {
             .with_context(|| format!("loading floppy.df{} image", drive_idx))?;
         self.idle_cache = false;
         self.drives[drive_idx].insert_image(image);
+        self.sound_media_changes |= 1 << drive_idx;
         if self.selected_drive() == Some(drive_idx) {
             self.ensure_track(drive_idx, self.track_for_drive(drive_idx));
         }
@@ -839,6 +878,7 @@ impl FloppyController {
         );
         self.idle_cache = false;
         self.drives[drive_idx].insert_image(image);
+        self.sound_media_changes |= 1 << drive_idx;
         if self.selected_drive() == Some(drive_idx) {
             self.ensure_track(drive_idx, self.track_for_drive(drive_idx));
         }
@@ -865,6 +905,7 @@ impl FloppyController {
         );
         self.idle_cache = false;
         self.drives[drive_idx].eject_image();
+        self.sound_media_changes |= 1 << drive_idx;
         Ok(())
     }
 
@@ -1224,7 +1265,10 @@ impl FloppyController {
                 // heard twice. Per drive, so an image in the next bay still
                 // clicks as it should.
                 if stepper_fired && !self.drives[idx].is_bridged() {
-                    self.sound_steps = self.sound_steps.saturating_add(1);
+                    self.sound_step_events.push(SoundStep {
+                        drive: idx as u8,
+                        cylinder: self.drives[idx].cylinder,
+                    });
                 }
                 #[cfg(feature = "fluxbridge")]
                 if stepper_fired {
@@ -1978,10 +2022,16 @@ impl FloppyController {
         self.dma_enabled(dmacon)
     }
 
-    /// Drain the head-step pulses accumulated since the last call,
-    /// for the synthesized drive sound effects.
-    pub fn take_sound_steps(&mut self) -> u32 {
-        std::mem::take(&mut self.sound_steps)
+    /// Drain the head steps accumulated since the last call, oldest
+    /// first, for the drive sound effects.
+    pub fn drain_sound_steps(&mut self) -> std::vec::Drain<'_, SoundStep> {
+        self.sound_step_events.drain(..)
+    }
+
+    /// Drives (one bit each) whose disk was inserted or ejected since the
+    /// last call, for the drive sound effects.
+    pub fn take_sound_media_changes(&mut self) -> u8 {
+        std::mem::take(&mut self.sound_media_changes)
     }
 
     /// Drains the media changes bridged bays have noticed: `(bay, present,
@@ -2000,13 +2050,25 @@ impl FloppyController {
     /// accumulator, so the audible motor glides over the real ~0.5 s
     /// ramp instead of switching.
     pub fn motor_spin_levels(&self) -> [f32; 4] {
+        self.drive_sound_states().map(|state| state.spin)
+    }
+
+    /// Per-drive mechanism state for the drive sound effects: the spin
+    /// level `motor_spin_levels` reports, plus whether the motor is
+    /// switched on and a disk is in.
+    pub fn drive_sound_states(&self) -> [DriveSoundState; 4] {
         std::array::from_fn(|idx| {
+            let drive = &self.drives[idx];
             // Silent for a bridged drive: the real platter is spinning in the
             // room, so a synthesized motor on top would double it.
-            if self.drives[idx].is_bridged() {
-                return 0.0;
+            if drive.is_bridged() {
+                return DriveSoundState::default();
             }
-            self.drives[idx].motor_cck.min(MOTOR_READY_CCK) as f32 / MOTOR_READY_CCK as f32
+            DriveSoundState {
+                spin: drive.motor_cck.min(MOTOR_READY_CCK) as f32 / MOTOR_READY_CCK as f32,
+                motor_on: drive.motor_on,
+                disk: drive.has_media(),
+            }
         })
     }
 

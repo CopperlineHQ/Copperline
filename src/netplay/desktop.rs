@@ -231,6 +231,23 @@ enum Timeline {
     Watch(Box<Watcher>),
 }
 
+/// Hand the live machine's host-side audio to one staged from the session
+/// bundle: the output sink, and the drive sample sets. A set is each peer's
+/// own choice and never part of the bundle (`setup.rs`), so without this
+/// every peer, the host included, would fall back to the synthesized drive
+/// sounds for the session.
+fn adopt_local_audio(staged: &mut Emulator, live: &mut Emulator) {
+    std::mem::swap(
+        &mut staged.bus_mut().paula.audio,
+        &mut live.bus_mut().paula.audio,
+    );
+    staged
+        .bus_mut()
+        .paula
+        .drive_sounds_mut()
+        .adopt_host_voices(live.bus().paula.drive_sounds());
+}
+
 fn send_message<T: Transport>(control: &mut Control<T>, message: &Message) -> Result<()> {
     let mut bytes = vec![KIND_JSON];
     bytes.extend(serde_json::to_vec(message)?);
@@ -432,10 +449,7 @@ impl Session {
                 validate_player_ports(&staged.emu, settings.players)?;
                 let connection =
                     Connection::without_links(settings.clone(), &mut staged.emu, &staged.cfg)?;
-                std::mem::swap(
-                    &mut staged.emu.bus_mut().paula.audio,
-                    &mut emu.bus_mut().paula.audio,
-                );
+                adopt_local_audio(&mut staged.emu, emu);
                 *emu = *staged.emu;
                 (
                     connection,
@@ -1293,10 +1307,7 @@ impl Session {
                 connection.settings.rollback_frames,
             );
             received.set_paced(emu.paced());
-            std::mem::swap(
-                &mut received.bus_mut().paula.audio,
-                &mut emu.bus_mut().paula.audio,
-            );
+            adopt_local_audio(&mut received, emu);
             *emu = *received;
             *input = LocalInput::default();
             self.directory = Some(directory);
@@ -1486,10 +1497,7 @@ impl Session {
                     } = bundle.stage()?;
                     let identity = machine_identity(&mut received, &cfg)?;
                     received.set_paced(emu.paced());
-                    std::mem::swap(
-                        &mut received.bus_mut().paula.audio,
-                        &mut emu.bus_mut().paula.audio,
-                    );
+                    adopt_local_audio(&mut received, emu);
                     *emu = *received;
                     self.directory = Some(directory);
                     self.changed_config = Some(cfg);
@@ -1581,6 +1589,40 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A machine staged from the session bundle keeps this peer's own drive
+    /// sample sets, which the bundle never carries.
+    #[test]
+    fn staged_machine_keeps_the_local_drive_sample_sets() -> Result<()> {
+        use crate::drive_sounds::{DriveVoice, SampleSet};
+        let mut live = super::super::tests::emulator()?;
+        let set = Arc::new(SampleSet::from_samples(
+            vec![0.5; 8],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ));
+        live.bus_mut()
+            .paula
+            .drive_sounds_mut()
+            .set_drive_voice(1, DriveVoice::Sampled(set));
+        let mut staged = super::super::tests::emulator()?;
+        assert!(staged
+            .bus()
+            .paula
+            .drive_sounds()
+            .drive_sample_set(1)
+            .is_none());
+        adopt_local_audio(&mut staged, &mut live);
+        let sounds = staged.bus().paula.drive_sounds();
+        assert_eq!(
+            sounds.drive_sample_set(1).map(SampleSet::name),
+            Some("test")
+        );
+        assert!(sounds.drive_sample_set(0).is_none());
+        Ok(())
+    }
 
     /// Addresses for `count` peers, reserved together and released before
     /// the sessions bind them.

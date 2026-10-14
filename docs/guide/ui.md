@@ -156,7 +156,9 @@ left to right it holds:
   SCSI CD-ROM unit, the CD LED shows CD-DA playback and the unit's data
   reads light the HDD LED with the rest of the SCSI bus. Small digital
   counters show the current floppy and CD tracks, in green and blue
-  respectively. A machine with only one kind of removable drive gets one
+  respectively. The floppy counter reads the track number, or with
+  *Video Settings -> Track Display -> Cyl.Side* the cylinder and side
+  (`40.1` is cylinder 40, upper side). A machine with only one kind of removable drive gets one
   full-size counter; a machine with both gets two vertically stacked
   counters, and a zero-floppy CDTV/CD32 does not show an empty FDD
   counter. When a built-in CD controller and an expansion CD-ROM are both
@@ -524,6 +526,10 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   bars as needed, exactly as when resizing the window.
 - **Status Bar** (also `Cmd+Shift+F` / `Alt+Shift+F`): show or hide the
   status bar. Handy alongside fullscreen for a clean, chrome-free picture.
+- **Track Display**: what the status bar's floppy counter reads --
+  **Track** (the track number) or **Cyl.Side** (cylinder and side, `40.1`).
+  The start-up choice is `[display] track_display` (see
+  [Configuration](configuration.md)).
 - **Monitor Bezel**: which monitor front the picture sits inside instead
   of filling the window -- **Disabled**, **1084** (a two-tone cabinet with
   the tube sunk into its moulding, and the model badge, the Copperline name
@@ -870,12 +876,14 @@ The layout is:
     [](whdload.md)).
   - *A/V & Emu*: five pages switched on the top nav row, opening on Audio:
     - **Audio**: output device, channel mode, stereo separation, filter,
-      floppy sounds and their volume.
+      floppy sounds, their volume, and the floppy sound set (**Synthesized**
+      or a WinUAE-format sample set from the `Floppy Sounds` folder).
     - **Video** -- the emulated picture: monitor bezel style, overscan,
       pixel aspect, scaling, autocrop, deinterlace, screen tint, phosphor,
       CRT shader and shader strength.
     - **Display** -- the host window: start fullscreen, host monitor and
-      window position, status bar, perf overlay, VSync, and menu size. The
+      window position, status bar, track display, perf overlay, VSync, and
+      menu size. The
       position box accepts `X, Y` offsets from the chosen monitor; clear it
       for automatic placement.
     - **Emulation**: power on at startup; run on startup (`[emulation]

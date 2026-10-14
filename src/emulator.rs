@@ -3172,6 +3172,24 @@ fn realtime_catchup_limit(live_output_lead_seconds: f64) -> Duration {
 /// `Off` discards, `Stdout` is the historical terminal output, and `Midi`
 /// bridges to host MIDI endpoints. `Midi` needs a `--features midi` build, so
 /// without it a `midi` config is a clear error rather than a silent no-op.
+/// Give every drive the configured WinUAE-format sample set. The set is the
+/// user's own files, not part of the machine, so one that is missing or
+/// unreadable leaves the synthesized sounds in place and says why rather
+/// than failing the build.
+fn fit_drive_sample_set(sounds: &mut crate::drive_sounds::DriveSounds, value: &str) {
+    match crate::drive_sounds::SampleSet::open(value) {
+        Ok(set) => {
+            info!("floppy sounds: sample set {:?}", set.name());
+            let set = std::sync::Arc::new(set);
+            for drive in 0..crate::drive_sounds::NUM_DRIVES {
+                sounds
+                    .set_drive_voice(drive, crate::drive_sounds::DriveVoice::Sampled(set.clone()));
+            }
+        }
+        Err(e) => warn!("floppy sounds: {e:#}; using the synthesized drive sounds"),
+    }
+}
+
 fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>> {
     use crate::config::SerialMode;
     match cfg.serial.mode {
@@ -4242,6 +4260,11 @@ fn build_machine_inner(
     paula
         .drive_sounds_mut()
         .set_volume_percent(cfg.audio.floppy_sounds_volume);
+    if cfg.audio.floppy_sounds {
+        if let Some(value) = &cfg.audio.floppy_sounds_set {
+            fit_drive_sample_set(paula.drive_sounds_mut(), value);
+        }
+    }
     paula.set_mono_output(cfg.audio.channel_mode.is_mono());
     paula.set_stereo_separation(f32::from(cfg.audio.stereo_separation) / 100.0);
     paula.set_led_filter_mode(cfg.audio.filter);

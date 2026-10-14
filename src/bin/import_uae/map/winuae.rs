@@ -4,7 +4,7 @@
 //! analogue (or vice versa) would need per-flavour branching, and none of
 //! the core axes below have that split.
 
-use super::{annotate, clamp_chip_mb, set_str, table, MapOutcome};
+use super::{annotate, apply_drive_sounds, clamp_chip_mb, set_str, table, DriveSound, MapOutcome};
 use crate::parse::Entry;
 use crate::report::ImportReport;
 use std::collections::HashMap;
@@ -202,6 +202,49 @@ pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
             _ => report.unsupported(&e.key, &e.value, "expected an integer 0-100"),
         }
     }
+    // `floppyNsound`: 0 silent, 1 WinUAE's built-in set, -1 the external
+    // sample set named by `floppyNsoundext`, 2+ a real PC floppy drive
+    // clicking along.
+    let mut drive_sounds = Vec::new();
+    for n in 0..4 {
+        let Some(e) = by_key(&format!("floppy{n}sound")) else {
+            continue;
+        };
+        seen.insert(&e.key, ());
+        let external = by_key(&format!("floppy{n}soundext"));
+        let choice = match e.value.trim().parse::<i64>() {
+            Ok(0) => DriveSound::Off,
+            Ok(1) => DriveSound::BuiltIn,
+            Ok(-1) => match external.map(|x| x.value.trim()).filter(|v| !v.is_empty()) {
+                Some(name) => DriveSound::Set(name.to_string()),
+                None => {
+                    report.unsupported(
+                        &e.key,
+                        &e.value,
+                        format!("external sound set with no floppy{n}soundext"),
+                    );
+                    continue;
+                }
+            },
+            Ok(_) => {
+                report.unsupported(
+                    &e.key,
+                    &e.value,
+                    "a real PC floppy drive as the sound source has no Copperline equivalent",
+                );
+                continue;
+            }
+            Err(_) => {
+                report.unsupported(&e.key, &e.value, "expected an integer");
+                continue;
+            }
+        };
+        if let Some(x) = external {
+            seen.insert(&x.key, ());
+        }
+        drive_sounds.push((e.key.clone(), e.value.clone(), choice));
+    }
+    apply_drive_sounds(&mut doc, &mut report, &drive_sounds);
 
     // --- Amiberry file-dialog starting directories -----------------------
     // WinUAE-only files never carry these (they're Amiberry GUI settings),
@@ -1711,6 +1754,34 @@ mod tests {
         // would import silence as maximum loudness.
         assert!(convert("floppy_volume=0\n").contains("floppy_sounds_volume = 100"));
         assert!(convert("floppy_volume=100\n").contains("floppy_sounds_volume = 0"));
+    }
+
+    #[test]
+    fn floppy_sound_sets_map_from_df0s_choice() {
+        let out = convert("floppy0sound=-1\nfloppy0soundext=A500Real\n");
+        assert!(out.contains(r#"floppy_sounds_set = "A500Real""#), "{out}");
+        // WinUAE's built-in sounds are Copperline's synthesized ones.
+        let out = convert("floppy0sound=1\n");
+        assert!(!out.contains("floppy_sounds_set"), "{out}");
+        assert!(!out.contains("floppy_sounds ="), "{out}");
+        let out = convert("floppy0sound=0\n");
+        assert!(out.contains("floppy_sounds = false"), "{out}");
+        // One choice for every drive: DF0's wins and DF1's is flagged.
+        let entries =
+            crate::parse::parse("floppy0sound=-1\nfloppy0soundext=LOUD\nfloppy1sound=0\n");
+        let outcome = map(&entries, std::path::Path::new("test.uae"));
+        let out = outcome.doc.to_string();
+        assert!(out.contains(r#"floppy_sounds_set = "LOUD""#), "{out}");
+        assert!(!out.contains("floppy_sounds = false"), "{out}");
+        let flagged: Vec<&str> = outcome
+            .report
+            .flagged
+            .iter()
+            .map(|f| f.source_key.as_str())
+            .collect();
+        assert!(flagged.contains(&"floppy0sound"), "{flagged:?}");
+        assert!(flagged.contains(&"floppy1sound"), "{flagged:?}");
+        assert!(!flagged.contains(&"floppy0soundext"), "{flagged:?}");
     }
 
     #[test]

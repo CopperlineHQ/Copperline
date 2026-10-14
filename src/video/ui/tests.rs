@@ -3816,6 +3816,7 @@ fn panels_render_into_their_rects() {
         cartridge: None,
         fullscreen: false,
         status_bar_hidden: false,
+        track_display: crate::config::TrackDisplay::Track,
         bezel: crate::config::BezelStyle::None,
         perf_overlay: false,
         vsync: true,

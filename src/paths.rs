@@ -176,6 +176,14 @@ pub fn run_stage_dir() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join("run"))
 }
 
+/// Where named floppy drive sample sets are looked for: WinUAE-format
+/// `drive_<kind>_<NAME>.wav` files, the same layout FS-UAE reads from its
+/// own `Floppy Sounds` folder. Copperline ships none and never writes
+/// here; a person drops a set in and picks it by name.
+pub fn floppy_sounds_dir() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("Floppy Sounds"))
+}
+
 /// Where WHDLoad keeps everything of its own: the support archives, the
 /// extracted games and their saves, and the game database.
 ///

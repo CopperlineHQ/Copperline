@@ -303,6 +303,8 @@ thread_local! {
         const { std::cell::Cell::new(None) };
     static MT32_PANEL_SHOWN_LOCAL: std::cell::Cell<Option<bool>> =
         const { std::cell::Cell::new(None) };
+    static TRACK_DISPLAY_LOCAL: std::cell::Cell<Option<crate::config::TrackDisplay>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// Whether the on-screen Amiga keyboard is shown under the display
@@ -386,6 +388,38 @@ pub fn mt32_panel_shown() -> bool {
         return shown;
     }
     MT32_PANEL_SHOWN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// What the status bar's floppy counter reads (`[display] track_display`,
+/// changed live from the menu). Held as an index into
+/// [`TrackDisplay::MENU_ORDER`](crate::config::TrackDisplay::MENU_ORDER);
+/// main thread only, like [`MENU_SCALE`]. Tests set a per-thread value
+/// instead, so parallel status-bar renders cannot see each other's mode.
+static TRACK_DISPLAY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn set_track_display(mode: crate::config::TrackDisplay) {
+    #[cfg(test)]
+    TRACK_DISPLAY_LOCAL.with(|local| local.set(Some(mode)));
+    #[cfg(not(test))]
+    {
+        let index = crate::config::TrackDisplay::MENU_ORDER
+            .iter()
+            .position(|m| *m == mode)
+            .unwrap_or(0);
+        TRACK_DISPLAY.store(index as u8, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+pub fn track_display() -> crate::config::TrackDisplay {
+    #[cfg(test)]
+    if let Some(mode) = TRACK_DISPLAY_LOCAL.with(std::cell::Cell::get) {
+        return mode;
+    }
+    let index = usize::from(TRACK_DISPLAY.load(std::sync::atomic::Ordering::Relaxed));
+    crate::config::TrackDisplay::MENU_ORDER
+        .get(index)
+        .copied()
+        .unwrap_or_default()
 }
 
 /// How large the pop-up menu is drawn (`[display] menu_scale`, changed live

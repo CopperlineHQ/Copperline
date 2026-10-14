@@ -165,6 +165,16 @@ impl RawConfig {
             .unwrap_or_default()
     }
 
+    /// The configured status-bar track display (`[display] track_display`),
+    /// for the launcher's status bar before a machine config is built.
+    pub fn track_display(&self) -> TrackDisplay {
+        self.display
+            .track_display
+            .as_deref()
+            .and_then(|s| parse_track_display(s).ok())
+            .unwrap_or_default()
+    }
+
     /// The configured live-audio state (`[audio] output_enabled`), defaulting to
     /// on when unset -- matching [`AudioConfig`]'s default. Lets the binary seed
     /// the config-screen session audio without reaching into private raw fields.
@@ -407,6 +417,10 @@ pub(crate) struct RawDisplay {
     /// Show the status bar at start (default true).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) status_bar: Option<bool>,
+    /// What the status bar's floppy counter reads: "track" (default, the
+    /// track number) or "cylinder" (CYL.SIDE, e.g. 40.0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) track_display: Option<String>,
 }
 
 /// A host disk named on the command line, before it is checked against the
@@ -1432,6 +1446,11 @@ pub(crate) struct RawAudio {
     pub(crate) floppy_sounds: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) floppy_sounds_volume: Option<u16>,
+    /// A WinUAE-format drive sample set to play instead of the synthesized
+    /// sounds: a set name in the floppy sounds folder, or a path. Empty or
+    /// "synthesized" keeps the synthesized sounds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) floppy_sounds_set: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) output_device: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

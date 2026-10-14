@@ -760,6 +760,7 @@ monitor = "auto"      # host display: auto, primary, one-based number, or exact 
 window_scale = 1.0    # initial window width and height multiplier, 0.5-4.0
 # title = "{app} {version} · {machine} · {rom}"
 status_bar = true     # show the status bar at start (default true)
+track_display = "track"  # floppy counter: "track" (default) or "cylinder" (CYL.SIDE)
 vsync = true          # synchronise desktop presentation to vblank (default true)
 hidpi_texture = true  # draw the presentation texture at device-pixel density (default true)
 ```
@@ -1153,6 +1154,14 @@ copperline --run build/hello --window-scale 2
 copperline --run build/hello --maximized
 ```
 
+`track_display` chooses what the status bar's floppy counter reads: the track
+number (`"track"`, the default, 0-159) or the cylinder and side with a decimal
+point between them (`"cylinder"`, so track 81 reads `40.1`). In cylinder mode
+the first figure changes with every head step, in time with the step sound,
+and the last digit is the side the guest has selected. *Video Settings ->
+Track Display* switches it live, and the launcher's Display category has a
+*Track display* row for the start-up value.
+
 `full_screen` opens the window fullscreen at start (borderless), and
 `status_bar` chooses whether the status bar starts visible. Both are start-up
 preferences; the runtime toggles -- `Cmd+F` / `Alt+F` for fullscreen and
@@ -1324,8 +1333,9 @@ shader never fails the config, and never stops the machine from running.
 
 ```toml
 [audio]
-floppy_sounds = true        # synthesized drive sounds (not sampled)
+floppy_sounds = true        # drive sounds on/off: synthesized, or the set below
 floppy_sounds_volume = 100  # 0-100, relative to Paula's output
+# floppy_sounds_set = "A500"  # a WinUAE/FS-UAE sample set instead of synthesis; see below
 # output_device = "..."     # host output device (substring); omit = system default
 # output_enabled = true     # false = no sound (GUI "Disabled"); --audio/--noaudio still win
 channel_mode = "stereo"     # "stereo" (default) or "mono"
@@ -1346,6 +1356,45 @@ used. Only step pulses that actually fire the stepper are audible: like
 a real 3.5" mechanism, an outward pulse with the head at track 0 is
 gated by the /TRK0 sensor, so NoClick-style patches silence the
 empty-drive poll just as they do on real hardware.
+
+`floppy_sounds` is the switch for all drive sounds: with it `false` the
+drives are silent whatever `floppy_sounds_set` names. While it is on,
+`floppy_sounds_set` replaces the synthesis with a recorded sample set -- the
+drive sound packs WinUAE and FS-UAE use (FS-UAE's `floppy_drive_N_sounds`). A
+set is up to five WAV files sharing a name:
+
+| File | Plays |
+|---|---|
+| `drive_click_NAME.wav` | each head step |
+| `drive_spin_NAME.wav` | looped while the motor runs with a disk in |
+| `drive_spinnd_NAME.wav` | looped while the motor runs with no disk |
+| `drive_startup_NAME.wav` | when the motor starts from a standstill |
+| `drive_snatch_NAME.wav` | on the first spin-up after a disk goes in, in place of the start-up sound |
+
+Copperline ships no sets. Put a set's files in the `Floppy Sounds` folder of
+Copperline's host-data directory (`Documents/Copperline/Floppy Sounds`, or
+beside the executable in a portable install) and name the set:
+`floppy_sounds_set = "A500"`. Any other value with a path separator is a path,
+either to one of the set's files (`".../floppysounds/drive_click_A500.wav"`)
+or to its folder joined with the name (`".../floppysounds/A500"`), so a set
+can stay where WinUAE or FS-UAE keeps it. File names match case-insensitively
+and the `.wav` may be left off, as in WinUAE. Any of the five files may be
+missing; that sound is just silent. The launcher's Audio category has a
+*Floppy sound set* row that steps through **Synthesized** and every set in
+the folder.
+
+A set plays the way WinUAE plays it, so it sounds the same as there. A click
+file may hold several clicks, each starting at a peak above 0x6FF0; the
+first is the click for stepping onto cylinder 0, the next for cylinder 1, and
+so on, the last standing in for any cylinder past the count. The motor and
+click sounds of a drive are averaged together, as are several drives
+sounding at once, and 16-bit full scale is mixed at the same level as CD
+audio; `floppy_sounds_volume` still scales the result. The files are read
+when the machine starts. A set that is missing or unreadable logs a warning
+and leaves the synthesized sounds in place, rather than failing the
+configuration. Which set is playing is a host preference, not machine state:
+save states, input replays and netplay are unaffected by it, and two netplay
+peers may use different sets.
 
 `output_device` picks the host output by a case-insensitive substring of the
 names `--list-audio-devices` prints (`--audio-device` overrides it); an omitted

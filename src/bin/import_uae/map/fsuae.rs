@@ -5,7 +5,7 @@
 //! separately. An explicit `chipset`/`cpu_type`/`*_memory` always overrides
 //! the preset, matching FS-UAE's own precedence.
 
-use super::{annotate, clamp_chip_mb, set_str, table, MapOutcome};
+use super::{annotate, apply_drive_sounds, clamp_chip_mb, set_str, table, DriveSound, MapOutcome};
 use crate::parse::Entry;
 use crate::report::ImportReport;
 use std::collections::HashMap;
@@ -228,6 +228,25 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
             },
         }
     }
+    // `floppy_drive_N_sounds`: a sample set from FS-UAE's "Floppy Sounds"
+    // folder, or "off"; unset (or empty) is FS-UAE's built-in sounds.
+    let mut drive_sounds = Vec::new();
+    for n in 0..4 {
+        let Some(e) = by_key(&format!("floppy_drive_{n}_sounds")) else {
+            continue;
+        };
+        seen.insert(&e.key, ());
+        let value = e.value.trim();
+        let choice = if value.is_empty() {
+            DriveSound::BuiltIn
+        } else if value.eq_ignore_ascii_case("off") {
+            DriveSound::Off
+        } else {
+            DriveSound::Set(value.to_string())
+        };
+        drive_sounds.push((e.key.clone(), e.value.clone(), choice));
+    }
+    apply_drive_sounds(&mut doc, &mut report, &drive_sounds);
 
     // --- Zorro III RAM (FS-UAE counts KB, like its other memory keys) ---
     if let Some(e) = by_key("zorro_iii_memory") {
@@ -392,6 +411,19 @@ mod tests {
     fn convert(text: &str) -> String {
         let entries = crate::parse::parse(text);
         map(&entries).doc.to_string()
+    }
+
+    #[test]
+    fn floppy_drive_sounds_name_a_sample_set_or_turn_the_sounds_off() {
+        let out = convert("floppy_drive_0_sounds = A500Real\n");
+        assert!(out.contains(r#"floppy_sounds_set = "A500Real""#), "{out}");
+        let out = convert("floppy_drive_0_sounds = off\n");
+        assert!(out.contains("floppy_sounds = false"), "{out}");
+        assert!(!out.contains("floppy_sounds_set"), "{out}");
+        // A set on DF1 alone still applies: it is the first drive that
+        // says anything.
+        let out = convert("floppy_drive_1_sounds = ST\n");
+        assert!(out.contains(r#"floppy_sounds_set = "ST""#), "{out}");
     }
 
     #[test]

@@ -1262,6 +1262,7 @@ fn main() -> Result<()> {
     video::set_hidpi_texture(cfg.hidpi_texture);
     video::set_autocrop(cfg.autocrop);
     video::set_menu_scale(cfg.menu_scale);
+    video::set_track_display(cfg.track_display);
     // A fascia belongs to a machine that carries the instrument: with the
     // serial port out of MIDI mode, or another device chosen, the strip
     // would be blank glass, so the flag follows the configuration.
@@ -1568,6 +1569,7 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
     // The launcher opens before a machine config is built, so the menu size
     // comes straight off the raw file.
     video::set_menu_scale(raw_cfg.menu_scale());
+    video::set_track_display(raw_cfg.track_display());
     // The placeholder is always silent; seed the session's audio from the config
     // intent so a state loaded over the launcher gets the configured output.
     let audio_output_enabled = raw_cfg.audio_output_enabled();

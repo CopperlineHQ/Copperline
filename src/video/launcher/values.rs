@@ -167,6 +167,7 @@ impl MachineSetup {
                 .unwrap_or_else(|| "Auto".to_string()),
             F::Bezel => self.bezel.menu_label().to_string(),
             F::MenuScale => self.menu_scale.menu_label().to_string(),
+            F::TrackDisplay => self.track_display.menu_label().to_string(),
             F::Mt32Lcd => self.mt32_lcd.menu_label().to_string(),
             F::Cartridge => cartridge_label(self.cartridge).to_string(),
             F::Phosphor => {
@@ -215,6 +216,10 @@ impl MachineSetup {
             F::Shader => self.shader.kind().menu_label().to_string(),
             F::ShaderStrength => format!("{:.2}", self.shader_strength),
             F::FloppyVolume => format!("{}%", self.floppy_volume),
+            F::FloppySoundSet => match &self.floppy_sounds_set {
+                None => "Synthesized".to_string(),
+                Some(set) => crate::drive_sounds::sample_set::display_name(set),
+            },
             F::PacingBudget => match self.pacing_budget {
                 PacingBudget::Cycles => "Cycles".to_string(),
                 PacingBudget::Instructions => "Instructions".to_string(),
@@ -655,11 +660,24 @@ impl MachineSetup {
                 self.shader_strength = (s.clamp(0.0, 1.0) * 10.0).round() / 10.0;
             }
             F::FloppyVolume => self.floppy_volume = step_u8(self.floppy_volume, forward, 0, 100),
+            F::FloppySoundSet => {
+                // Re-read on each step, like the audio outputs, so a set
+                // dropped into the folder since the screen opened appears.
+                let installed = crate::paths::floppy_sounds_dir()
+                    .map(|dir| crate::drive_sounds::sample_set::list_sets(&dir))
+                    .unwrap_or_default();
+                self.floppy_sounds_set =
+                    cycle_sound_set(&installed, self.floppy_sounds_set.take(), forward);
+            }
             F::Overscan => self.overscan = cycle_slice(&OVERSCANS, self.overscan, forward),
             F::Tint => self.tint = cycle_slice(&TINTS, self.tint, forward),
             F::Bezel => self.bezel = cycle_slice(&BezelStyle::MENU_ORDER, self.bezel, forward),
             F::MenuScale => {
                 self.menu_scale = cycle_slice(&MenuScale::MENU_ORDER, self.menu_scale, forward);
+            }
+            F::TrackDisplay => {
+                self.track_display =
+                    cycle_slice(&TrackDisplay::MENU_ORDER, self.track_display, forward);
             }
             F::Mt32Lcd => {
                 self.mt32_lcd = cycle_slice(&Mt32Lcd::MENU_ORDER, self.mt32_lcd, forward);

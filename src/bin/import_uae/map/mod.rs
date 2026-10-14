@@ -100,6 +100,59 @@ pub(crate) fn set_str(doc: &mut DocumentMut, path: &[&str], key: &str, value: &s
     table(doc, path)[key] = toml_edit::value(value);
 }
 
+/// What one floppy drive's sound setting in the source config asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DriveSound {
+    /// A silent drive.
+    Off,
+    /// The emulator's own built-in sounds; Copperline's are synthesized.
+    BuiltIn,
+    /// A WinUAE-format sample set (`drive_click_NAME.wav` and friends).
+    Set(String),
+}
+
+/// Map per-drive sound settings, given as `(key, value, choice)` in drive
+/// order for the drives the source mentions. Copperline makes one choice
+/// for every drive, so the first drive's decides and a drive asking for
+/// something else is flagged. A named set is the user's own files, which
+/// the import cannot carry over, so it is flagged for them to copy.
+pub(crate) fn apply_drive_sounds(
+    doc: &mut DocumentMut,
+    report: &mut ImportReport,
+    choices: &[(String, String, DriveSound)],
+) {
+    let Some((key, value, choice)) = choices.first() else {
+        return;
+    };
+    match choice {
+        DriveSound::Off => table(doc, &["audio"])["floppy_sounds"] = toml_edit::value(false),
+        DriveSound::BuiltIn => {}
+        DriveSound::Set(name) => {
+            set_str(doc, &["audio"], "floppy_sounds_set", name);
+            report.approximated(
+                key,
+                value,
+                format!(
+                    "copy the set's drive_*_{name}.wav files into Copperline's \"Floppy \
+                     Sounds\" folder (Documents/Copperline/Floppy Sounds), or set \
+                     floppy_sounds_set to the path of one of them"
+                ),
+            );
+        }
+    }
+    for (other_key, other_value, other) in &choices[1..] {
+        if other != choice {
+            report.unsupported(
+                other_key,
+                other_value,
+                format!(
+                    "Copperline makes one drive sound choice for every drive; {key}'s was used"
+                ),
+            );
+        }
+    }
+}
+
 /// Copperline's chip RAM ceiling for the common ECS/AGA case (OCS caps
 /// lower still, at 512K, which validation catches separately). A source
 /// config claiming more chip RAM than real hardware ever carried is

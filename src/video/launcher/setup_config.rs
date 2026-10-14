@@ -333,8 +333,10 @@ impl MachineSetup {
             window_scale: cfg.window_scale,
             window_title: cfg.window_title.clone(),
             show_status_bar: cfg.status_bar,
+            track_display: cfg.track_display,
             floppy_sounds: cfg.audio.floppy_sounds,
             floppy_volume: cfg.audio.floppy_sounds_volume,
+            floppy_sounds_set: cfg.audio.floppy_sounds_set.clone(),
             power_on: cfg.emulation.power_on,
             auto_launch: cfg.emulation.auto_launch,
             pacing_budget: cfg.emulation.pacing_budget,
@@ -862,11 +864,17 @@ impl MachineSetup {
         if self.show_status_bar != base.status_bar {
             raw.display.status_bar = Some(self.show_status_bar);
         }
+        if self.track_display != base.track_display {
+            raw.display.track_display = Some(self.track_display.label().to_string());
+        }
         if self.floppy_sounds != base.audio.floppy_sounds {
             raw.audio.floppy_sounds = Some(self.floppy_sounds);
         }
         if self.floppy_volume != base.audio.floppy_sounds_volume {
             raw.audio.floppy_sounds_volume = Some(u16::from(self.floppy_volume));
+        }
+        if self.floppy_sounds_set != base.audio.floppy_sounds_set {
+            raw.audio.floppy_sounds_set = self.floppy_sounds_set.clone();
         }
         if self.power_on != base.emulation.power_on {
             raw.emulation.power_on = Some(self.power_on);
