@@ -492,8 +492,9 @@ whole bar word). Hardware timing fixes can move the bootblock handoff phase
 too. Re-bless and review the diff after either kind of change.
 
 The OneROM A500 CIA/interrupt timing corrections refresh these two references:
-the timing table changes with the corrected CIA transfer, START/STOP and
-interrupt timing; three `bltprobe-pace` polling bars shorten by one word as
+the timing table changes with the corrected CIA transfer, START/STOP,
+running FORCE LOAD hold, interrupt timing and fixed-DMA starvation counting;
+three `bltprobe-pace` polling bars shorten by one word as
 their counts cross an eight-iteration display bucket. The other 43 golden
 renders remain byte-identical. These references record the deterministic
 probe output; the timing model's hardware evidence is described in

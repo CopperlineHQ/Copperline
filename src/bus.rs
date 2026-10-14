@@ -7506,7 +7506,11 @@ impl Bus {
     fn note_cpu_missed_chip_bus_cycle(&mut self, cck: u32) {
         self.cpu_missed_chip_slots = self.cpu_missed_chip_slots.wrapping_add(1);
         self.cpu_wait_cck_total = self.cpu_wait_cck_total.wrapping_add(u64::from(cck));
-        if self.blitter_slowdown_counter_enabled() && self.blitter.current_slot_counts_for_bls() {
+        // BLS follows the waiting CPU, not the blitter's current pipeline
+        // phase. Fixed DMA can deny the CPU while a disabled blit channel
+        // leaves an idle slot; those misses still count towards the yield.
+        // A grant, rather than an idle blitter phase, resets the counter.
+        if self.blitter_slowdown_counter_enabled() {
             self.blitter_slowdown_cpu_misses = self
                 .blitter_slowdown_cpu_misses
                 .saturating_add(1)

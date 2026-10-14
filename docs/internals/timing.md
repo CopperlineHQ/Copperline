@@ -779,6 +779,14 @@ edges while those stages drain. A STOP-only delay sweep measured two extra
 decrements on both timers of both physical CIAs (320 trials). One-shot
 underflow stops counting directly. START+LOAD, including a stopped one-shot
 timer's high-byte auto-start, holds counting for three E-clock edges.
+FORCE LOAD with START still set applies the same three-edge hold to an
+already-running timer; it does not require a stopped-to-running transition.
+A OneROM sweep on the physical A500 measured this on both timers of both
+CIAs: 640 reload trials, five launch phases and sixteen read delays. Before
+the correction every live sample was three counts too low; afterwards both
+the live and fully stopped counts matched all 640 hardware samples exactly.
+This also removes the three-E-clock bias in repeated `timing-test` stopwatch
+rows, whose one-shot high-byte write starts the timer before CRA FORCE LOAD.
 On a CPU VPA write the transfer edge feeds the first stage. The timer's START bit is readable
 during startup; one-shot underflow still clears it. Startup advances on
 PHI2 even for CNT/cascade modes, and underflow predictions include the
@@ -832,6 +840,30 @@ timer, interrupt dispatch and VHPOSR readback. Its launch instruction/E-clock
 phase varies between trials and between boots, so whole-record equality is
 not an accuracy metric. Compare phase-matched samples or elapsed-time
 distributions, and exclude ambiguous VHPOSR reads at horizontal wrap.
+
+## Blitter slowdown and fixed DMA
+
+With BLTPRI clear, the slowdown counter follows consecutive denied CPU
+access slots. A refresh or other fixed-DMA slot still counts while the
+blitter is in a disabled-channel gap or destination pipeline bubble. A CPU
+grant resets the counter; an idle blitter phase does not. Fixed DMA retains
+its priority, and BLTPRI disables this CPU starvation yield.
+
+OneROM measurements on the same A500 compared D-only, descending-fill and
+line blits with a stopped CPU, normal polling and BLTPRI polling (540 trials).
+For a 220-by-22-word D-only clear, normal polling measured 9923–9934 colour
+clocks. Ignoring fixed-DMA misses during idle blitter phases produced
+9876–9890; counting them produces 9925–9935. The stopped-CPU and BLTPRI
+controls are unchanged. These ranges include launch phase, register access
+and readback time; they are not a constant to add to a blit.
+
+The general timing table still shows a DIVU/bitplane-contention discrepancy:
+its 64-division row measures 5015 colour clocks on the A500 with six planes,
+versus approximately 4824 in Copperline. With display DMA disabled the
+ranges overlap. Changing DIVU prefetch ordering did not resolve this and
+was discarded. The Copper polling row's apparently different fixed beam
+values overlap after sweeping polling phase; it is not evidence for an
+additional fixed Copper interrupt delay.
 
 ## Beam-register readback
 

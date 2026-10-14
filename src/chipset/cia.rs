@@ -871,9 +871,13 @@ impl Cia {
                 // TOD pin source is configured by PAL/NTSC beam timing,
                 // but the control bit is still readable by software.
                 self.regs[REG_CRA] |= val & CRA_TODIN;
-                // bit 4 = FORCE LOAD: copy latch -> count immediately.
+                // FORCE LOAD also holds the count pipeline when START was
+                // already set (including one-shot high-byte auto-start).
                 if val & CR_LOAD != 0 {
                     self.ta_count = self.ta_latch;
+                    if self.ta_running {
+                        self.ta_start_delay = 3;
+                    }
                 }
                 if !prev_run && self.ta_running {
                     self.ta_start_delay = if val & CR_LOAD != 0 { 3 } else { 0 };
@@ -898,6 +902,9 @@ impl Cia {
                 self.regs[REG_CRB] = val & !CR_LOAD;
                 if val & CR_LOAD != 0 {
                     self.tb_count = self.tb_latch;
+                    if self.tb_running {
+                        self.tb_start_delay = 3;
+                    }
                 }
                 // Bit 7: 0 = TOD writes update the counter,
                 //        1 = TOD writes update the alarm register.
@@ -1820,6 +1827,39 @@ mod tests {
         assert_eq!(cia.read(REG_CRA) & CR_LOAD, 0);
         assert_eq!(cia.read(REG_CRB) & CR_LOAD, 0);
         assert_ne!(cia.read(REG_CRA) & CRA_TODIN, 0);
+    }
+
+    #[test]
+    fn force_load_running_timer_holds_count_and_deadline() {
+        for which in [Which::A, Which::B] {
+            for (lo, hi, control, flag) in [
+                (REG_TALO, REG_TAHI, REG_CRA, ICR_TA),
+                (REG_TBLO, REG_TBHI, REG_CRB, ICR_TB),
+            ] {
+                let mut cia = Cia::new(which);
+                cia.write(lo, 20);
+                cia.write(hi, 0);
+                cia.write(control, 0x11);
+                cia.tick(8);
+                assert_ne!(cia.read(lo), 20);
+                cia.write(lo, 7);
+                cia.write(hi, 0);
+                cia.write(control, 0x11); // reload without a START transition
+                assert_eq!(cia.next_underflow_ticks(), Some(11));
+                let mut batched = cia.clone();
+                for _ in 0..3 {
+                    cia.tick(1);
+                    assert_eq!(cia.read(lo), 7);
+                }
+                cia.tick(1);
+                assert_eq!(cia.read(lo), 6);
+                cia.tick(7);
+                batched.tick(11);
+                assert_ne!(cia.read(REG_ICR) & flag, 0);
+                assert_ne!(batched.read(REG_ICR) & flag, 0);
+                assert_eq!(cia.read(lo), batched.read(lo));
+            }
+        }
     }
 
     #[test]

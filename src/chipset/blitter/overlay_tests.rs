@@ -65,10 +65,6 @@ fn assert_slot_equivalent(actual: &Blitter, reference: &Blitter, ram: &[u8], exp
         reference.current_slot_needs_bus()
     );
     assert_eq!(
-        actual.current_slot_counts_for_bls(),
-        reference.current_slot_counts_for_bls()
-    );
-    assert_eq!(
         actual.bltpri_warmup_fences_cpu(),
         reference.bltpri_warmup_fences_cpu()
     );

@@ -11389,32 +11389,44 @@ fn blithog_clear_bls_count_yields_blitter_priority_slot_to_cpu() {
 }
 
 #[test]
-fn normal_blitter_idle_slots_do_not_feed_bls_back_pressure() {
+fn fixed_dma_misses_feed_bls_during_normal_blitter_idle_slots() {
     let mut bus = empty_bus();
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_BLTEN;
     bus.blitter.bltcon0 = 0x0100; // D-only clear.
     bus.blitter.bltdpt = 0x20;
     bus.blitter.start_scheduled((1 << 6) | 2, &bus.mem.chip_ram);
+    bus.agnus.hpos = 0x01; // Refresh owns this slot, even with idle blit DMA.
+    assert_eq!(bus.scheduled_dma_owner(true), ChipBusOwner::Refresh);
 
     // Walk to the first normal-mode A phase. It is a disabled-channel idle
-    // slot, so a CPU miss caused by refresh/fixed DMA must not make the nice
-    // blitter yield earlier.
+    // slot. A CPU miss caused by refresh/fixed DMA still feeds BLS: the
+    // counter follows the denied CPU, independent of the blit channel.
     for _ in 0..4 {
         assert!(!bus.blitter.tick_scheduled_slot(&mut bus.mem.chip_ram));
     }
     bus.note_cpu_missed_chip_bus_cycle(1);
-    assert_eq!(bus.blitter_slowdown_cpu_misses, 0);
+    assert_eq!(bus.blitter_slowdown_cpu_misses, 1);
 
     // The first D phase is also the empty destination pipeline bubble.
     assert!(!bus.blitter.tick_scheduled_slot(&mut bus.mem.chip_ram)); // A0.
     bus.note_cpu_missed_chip_bus_cycle(1);
-    assert_eq!(bus.blitter_slowdown_cpu_misses, 0);
+    assert_eq!(bus.blitter_slowdown_cpu_misses, 2);
 
     // Once a real destination write is pending, misses do feed BLS pressure.
     assert!(!bus.blitter.tick_scheduled_slot(&mut bus.mem.chip_ram)); // D0 bubble.
     assert!(!bus.blitter.tick_scheduled_slot(&mut bus.mem.chip_ram)); // A1.
     bus.note_cpu_missed_chip_bus_cycle(1);
-    assert_eq!(bus.blitter_slowdown_cpu_misses, 1);
+    assert_eq!(
+        bus.blitter_slowdown_cpu_misses,
+        BLITTER_SLOWDOWN_CPU_MISS_LIMIT
+    );
+    assert!(bus.blitter_yields_to_waiting_cpu());
+    assert_eq!(bus.scheduled_dma_owner(true), ChipBusOwner::Refresh);
+    bus.agnus.hpos = 0x20;
+    assert_eq!(bus.scheduled_dma_owner(true), ChipBusOwner::Idle);
+    assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Blitter);
+    bus.note_cpu_granted_chip_bus_cycle();
+    assert_eq!(bus.blitter_slowdown_cpu_misses, 0);
 }
 
 #[test]
