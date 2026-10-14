@@ -401,6 +401,12 @@ probe_tests! {
     // left of a standard DIW and presents the remaining 320 px edge to edge;
     // FS-UAE-verified on the equivalent live display constellation.
     golden_ddfprobe_agaorigin => probe_aga("ddfprobe-agaorigin", "ddfprobe-agaorigin.bin", 16.0);
+    // Alice keeps the hardwired $D8 DDF stop at FMODE=0: a lo-res $28/$E0
+    // window fetches 23 words, so a -46 modulo rewinds each line to the
+    // same row (straight bars); BEAMCON0.HARDDIS in the middle band lifts
+    // the stop and the 24-word fetch shears the markers (the Pacmania
+    // WHDLoad AGA regression class); FS-UAE/WinUAE-core semantics.
+    golden_ddfprobe_agahwstop => probe_aga("ddfprobe-agahwstop", "ddfprobe-agahwstop.bin", 16.0);
     // The DDF start flop sets on the single colour clock where the counter
     // equals DDFSTRT: a write that moves the match behind the beam before
     // the old position fired drops the whole line (the blank middle band),

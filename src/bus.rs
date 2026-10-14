@@ -7,7 +7,8 @@
 use crate::chipset::agnus::{
     bitplane_dma_planes_for_fmode, sprite_dma_disabled_by_bitplane_ddf, wide_fetch_word_address,
     Agnus, AgnusRevision, AgnusTick, VideoStandard, BEAMCON0_DUAL, BEAMCON0_HARDDIS,
-    COLORCLOCKS_PER_LINE, NTSC_LINES, NTSC_LONG_COLORCLOCKS_PER_LINE, PAL_LINES,
+    BEAMCON0_VARBEAMEN, COLORCLOCKS_PER_LINE, NTSC_LINES, NTSC_LONG_COLORCLOCKS_PER_LINE,
+    PAL_LINES,
 };
 use crate::chipset::blitter::{BlitBusAccess, Blitter};
 use crate::chipset::cia::{
@@ -308,6 +309,7 @@ const DENISE_WRITE_EFFECT_DELAY_CCK: u32 = 4;
 const AGNUS_WRITE_EFFECT_DELAY_CCK: u32 = 2;
 const BPLCON0_ECSENA: u16 = 1 << 0;
 const BPLCON0_SHRES: u16 = 1 << 6;
+const BPLCON0_UHRES: u16 = 1 << 7;
 const BPLCON3_BRDSPRT: u16 = 1 << 1;
 const BPLCON3_BRDRBLNK: u16 = 1 << 5;
 const BPLCON3_SPRES_MASK: u16 = 0x00C0;
@@ -5221,14 +5223,17 @@ impl Bus {
         !matches!(self.agnus.revision(), AgnusRevision::Ocs)
     }
 
-    /// Relaxed DDF stop ceiling for every effective-DDF-window computation:
-    /// BEAMCON0.HARDDIS on ECS, and always on AGA Alice (the AGA fetch
-    /// sequencer has no hardwired $D8 stop; the relaxed ceiling is still
-    /// bounded by the canvas).
+    /// Relaxed DDF stop ceiling for every effective-DDF-window computation.
+    /// An ECS Agnus or AGA Alice drops the hardwired $D8 stop while
+    /// BEAMCON0 selects HARDDIS or a programmable scan (VARBEAMEN), or
+    /// BPLCON0 selects SHRES or UHRES (WinUAE `check_harddis`). Otherwise
+    /// the stop holds on Alice exactly as on ECS: a lo-res $28/$E0 window
+    /// fetches 23 words at FMODE=0, not 24. The relaxed ceiling is still
+    /// bounded by the canvas.
     fn harddis_active(&self) -> bool {
-        self.aga_enabled()
-            || (!matches!(self.agnus.revision(), AgnusRevision::Ocs)
-                && self.agnus.beamcon0() & BEAMCON0_HARDDIS != 0)
+        !matches!(self.agnus.revision(), AgnusRevision::Ocs)
+            && (self.agnus.beamcon0() & (BEAMCON0_HARDDIS | BEAMCON0_VARBEAMEN) != 0
+                || self.effective_bitplane_bplcon0() & (BPLCON0_SHRES | BPLCON0_UHRES) != 0)
     }
 
     /// External light-pen pulse at the current beam position: the LP pin

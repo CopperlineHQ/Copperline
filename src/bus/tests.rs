@@ -2454,6 +2454,68 @@ fn harddis_widens_bitplane_arbitration_window() {
 }
 
 #[test]
+fn aga_keeps_hardwired_ddf_stop_at_fmode0() {
+    // Alice keeps the ECS $D8 hard stop: the same past-$D8 lores window
+    // fetches no 22nd word without HARDDIS. Relaxing it unconditionally
+    // over-fetched one word per line, shearing displays whose modulo
+    // assumes the clamped count (Pacmania's WHDLoad install on an A1200).
+    let mut bus = empty_bus();
+    bus.set_agnus_revision(AgnusRevision::AgaAlice);
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+    bus.denise.bplcon0 = 0x4200; // 4 planes, lores, FMODE=0
+    bus.denise.ddfstrt = 0x0038;
+    bus.denise.ddfstop = 0x00E0;
+    bus.denise.diwstrt = 0x2C81;
+    bus.denise.diwstop = 0xF4C1;
+    bus.agnus.vpos = 0x40;
+    bus.agnus.hpos = 0x0E1;
+
+    assert!(!bus.custom_write(0xDFF1DC, 2, BEAMCON0_PAL as u64));
+    assert_ne!(bus.scheduled_dma_owner(false), ChipBusOwner::Bitplane);
+
+    assert!(!bus.custom_write(0xDFF1DC, 2, (BEAMCON0_PAL | BEAMCON0_HARDDIS) as u64));
+    assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Bitplane);
+}
+
+#[test]
+fn ddf_hard_stop_relaxes_for_harddis_varbeamen_shres_and_uhres() {
+    // ECS Agnus and Alice drop the $D8 stop for BEAMCON0 HARDDIS or
+    // VARBEAMEN and for BPLCON0 SHRES or UHRES (WinUAE check_harddis);
+    // OCS has none of these controls and always stops at $D8.
+    for revision in [
+        AgnusRevision::Ocs,
+        AgnusRevision::Ecs8372Rev4,
+        AgnusRevision::AgaAlice,
+    ] {
+        let relaxes = !matches!(revision, AgnusRevision::Ocs);
+        let mut bus = empty_bus();
+        bus.set_agnus_revision(revision);
+        bus.denise.bplcon0 = 0x1200;
+        bus.agnus.write_beamcon0(BEAMCON0_PAL);
+        assert!(!bus.harddis_active(), "{revision:?}: plain PAL lores");
+
+        for beamcon0 in [BEAMCON0_HARDDIS, BEAMCON0_VARBEAMEN] {
+            bus.agnus.write_beamcon0(BEAMCON0_PAL | beamcon0);
+            assert_eq!(
+                bus.harddis_active(),
+                relaxes,
+                "{revision:?}: BEAMCON0 {beamcon0:#06x}"
+            );
+        }
+        bus.agnus.write_beamcon0(BEAMCON0_PAL);
+
+        for bplcon0 in [0x1240, 0x1280] {
+            bus.denise.bplcon0 = bplcon0;
+            assert_eq!(
+                bus.harddis_active(),
+                relaxes,
+                "{revision:?}: BPLCON0 {bplcon0:#06x}"
+            );
+        }
+    }
+}
+
+#[test]
 fn audio_dma_enable_raises_intreq_when_first_startup_word_arrives() {
     let mut bus = empty_bus();
     bus.mem.chip_ram[0] = 0x12;

@@ -43,9 +43,11 @@ pub const BEAMCON0_HARDDIS: u16 = 1 << 14;
 
 const BITPLANE_DDF_HARD_START: u16 = 0x0018;
 const BITPLANE_DDF_HARD_STOP: u16 = 0x00D8;
-/// With BEAMCON0.HARDDIS set, the hardwired DDF stop ceiling is relaxed from
-/// 0xD8 to 0xE0 -- the widest fetch that still lands inside the 704px (hpos
-/// 0x30..0xE0) framebuffer. The start floor is left at 0x18.
+/// With the hard stop disabled (ECS/AGA BEAMCON0 HARDDIS or VARBEAMEN,
+/// BPLCON0 SHRES or UHRES; see `Bus::harddis_active`), the hardwired DDF stop
+/// ceiling is relaxed from 0xD8 to 0xE0 -- the widest fetch that still lands
+/// inside the 704px (hpos 0x30..0xE0) framebuffer. The start floor is left
+/// at 0x18.
 const BITPLANE_DDF_HARD_STOP_RELAXED: u16 = 0x00E0;
 
 /// Resolve the (start_floor, stop_ceiling) DDF hard-window bounds, honoring

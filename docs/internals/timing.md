@@ -46,9 +46,9 @@ bitplane decision (step 5) is driven by the Agnus DDF sequencer flop model
 (`src/chipset/ddf_sequencer.rs`, walked per line by `src/bus/ddf_line.rs`):
 DDFSTRT and DDFSTOP are comparator *edges* that set/clear flip-flops, not a
 value range. A stop request drains through one final fetch unit (which
-applies the modulos per plane), the hardwired window ($18/$D8, HARDDIS
-relaxes the stop to $E0) gates starts and forces stops, and the flop state
-carries across line boundaries. Missed comparators therefore produce the
+applies the modulos per plane), the hardwired window ($18/$D8) gates
+starts and forces stops, and the flop state carries across line
+boundaries. Missed comparators therefore produce the
 hardware's "old stop" behaviours: a rewritten-too-late DDFSTOP lets the run
 continue to the hardware-stop drain, a DDFSTRT match past $D8 starts a run
 that wraps through horizontal blanking into the next line, and an
@@ -61,6 +61,14 @@ of the standard grid (its early words run through the left border). The
 renderer honours this through the captured run geometry: a below-$18 run
 origin keeps its raw fetch grid, and a line without a captured fetch
 paints nothing (vAmigaTS Agnus/DDF/DDF/oldhwstop3/4 A500 photos).
+
+The $D8 stop holds on Alice exactly as on an ECS Agnus. Either relaxes it
+to $E0 (the canvas edge) while BEAMCON0 selects HARDDIS or VARBEAMEN, or
+BPLCON0 selects SHRES or UHRES (WinUAE's `check_harddis` rule); OCS has no
+such controls. A lo-res $28/$E0 window therefore fetches 23 words per line
+on an A1200 as on an A500, and software whose modulo assumes that count
+displays straight (Pacmania's WHDLoad install; the `ddfprobe-agahwstop`
+golden probe).
 
 For a line with no mid-line sequencer writes, the walked fetch plan is
 keyed on the complete carried flop state, masked DDF registers, line
