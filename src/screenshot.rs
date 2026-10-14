@@ -67,7 +67,10 @@ impl NativeField {
 
 /// Two consecutive fields are the halves of one interlaced picture when
 /// both were laced, one is the long field and the other the short one, and
-/// they share a scan and canvas pitch.
+/// they share a scan and canvas pitch: the same line length and row-0 beam
+/// line, with no more than the one line a long field adds over a short one
+/// in either the rows captured or the frame. A change of video standard or
+/// of a programmable scan's vertical timing starts a new picture.
 fn fields_weave(
     current: &crate::video::bitplane::RenderInput,
     previous: &crate::video::bitplane::RenderInput,
@@ -80,6 +83,10 @@ fn fields_weave(
         && now.long_field != before.long_field
         && scan.programmable == previous_scan.programmable
         && scan.line_cck == previous_scan.line_cck
+        && scan.visible_start_vpos == previous_scan.visible_start_vpos
+        && current.visible_start_vpos() == previous.visible_start_vpos()
+        && scan.visible_lines.abs_diff(previous_scan.visible_lines) <= 1
+        && scan.frame_lines.abs_diff(previous_scan.frame_lines) <= 1
         && current.native_canvas_scale() == previous.native_canvas_scale()
 }
 

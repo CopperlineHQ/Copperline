@@ -6994,12 +6994,13 @@ impl App {
                 return;
             }
         };
-        self.menu_settings_saved = now;
         if changed == RawConfig::default() {
+            self.menu_settings_saved = now;
             return;
         }
         self.machine_config.merge_menu_settings(&changed);
         let Some(path) = self.menu_settings_file.as_deref() else {
+            self.menu_settings_saved = now;
             return;
         };
         let written = (|| -> anyhow::Result<()> {
@@ -7021,8 +7022,13 @@ impl App {
             std::fs::rename(&tmp, path)?;
             Ok(())
         })();
+        // A failed write keeps the old baseline, so the next change retries
+        // these keys instead of treating them as saved.
         match written {
-            Ok(()) => info!("menu settings saved to {}", path.display()),
+            Ok(()) => {
+                info!("menu settings saved to {}", path.display());
+                self.menu_settings_saved = now;
+            }
             Err(e) => warn!("menu settings not saved to {}: {e:#}", path.display()),
         }
     }

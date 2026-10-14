@@ -1718,8 +1718,12 @@ pub struct RenderRegisterSnapshot {
     /// Whether BEAMCON0 lifted the hardwired DDF stop (HARDDIS or VARBEAMEN
     /// on an ECS Agnus or Alice) when this frame's registers were captured.
     /// The BPLCON0 half of the rule (SHRES/UHRES) can change within a frame,
-    /// so the renderer applies it from its own register state.
-    pub harddis: bool,
+    /// so the renderer applies it from its own register state. This replaced
+    /// 1.0's `harddis`, which held the whole rule and was true on every AGA
+    /// machine; a state carrying that key leaves it unread, and the default
+    /// (no HARDDIS/VARBEAMEN) is what nearly all such states hold.
+    #[serde(default)]
+    pub beamcon0_lifts_ddf_stop: bool,
     pub dmacon: u16,
     pub bplcon0: u16,
     pub bplcon1: u16,

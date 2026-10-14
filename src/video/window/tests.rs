@@ -1384,6 +1384,32 @@ fn menu_settings_write_through_to_the_saved_default() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// A write-through that fails leaves its change pending rather than
+/// counting it as saved: a default that does not parse is left alone, and
+/// once it is fixed the next persist writes the earlier change.
+#[test]
+fn failed_menu_settings_write_is_retried() {
+    use crate::config::RawConfig;
+    let path = std::env::temp_dir().join(format!(
+        "copperline-menu-settings-retry-{}.toml",
+        std::process::id()
+    ));
+    std::fs::write(&path, "not [toml").unwrap();
+    let mut app = test_app();
+    app.rebaseline_menu_settings();
+    app.set_menu_settings_file(Some(path.clone()));
+
+    app.autofire_hz = 8;
+    app.persist_settings();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "not [toml");
+
+    std::fs::write(&path, "").unwrap();
+    app.persist_settings();
+    let saved = RawConfig::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(saved.input.autofire_hz, Some(8));
+    let _ = std::fs::remove_file(&path);
+}
+
 /// Whatever the full build's menu write-through records must come back
 /// through its merge, or the setting is lost on the next launch.
 #[test]

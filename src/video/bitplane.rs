@@ -2426,7 +2426,7 @@ impl RenderState {
     fn from_snapshot(snapshot: RenderRegisterSnapshot) -> Self {
         Self {
             agnus_revision: snapshot.agnus_revision,
-            harddis: snapshot.harddis,
+            harddis: snapshot.beamcon0_lifts_ddf_stop,
             dmacon: snapshot.dmacon,
             bplcon0: snapshot.bplcon0,
             bplcon1: snapshot.bplcon1,

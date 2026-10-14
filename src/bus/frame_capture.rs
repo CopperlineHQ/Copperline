@@ -1819,7 +1819,7 @@ impl Bus {
     pub(super) fn capture_render_snapshot(&self) -> RenderRegisterSnapshot {
         RenderRegisterSnapshot {
             agnus_revision: self.agnus.revision(),
-            harddis: self.beamcon0_lifts_ddf_hard_stop(),
+            beamcon0_lifts_ddf_stop: self.beamcon0_lifts_ddf_hard_stop(),
             dmacon: self.agnus.dmacon,
             bplcon0: self.denise.bplcon0,
             bplcon1: self.denise.bplcon1,
