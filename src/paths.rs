@@ -149,7 +149,16 @@ const HOME_VAR: &str = "HOME";
 /// Split out, like [`portable_config_dir`], so the shape is testable
 /// without mutating the process environment `envcfg` snapshots.
 fn documents_config_dir(home: Option<std::ffi::OsString>) -> Option<PathBuf> {
-    home.map(|home| PathBuf::from(home).join("Documents").join(app_identity()))
+    home.map(|home| host_data_dir_in(std::path::Path::new(&home)))
+}
+
+/// The host-data directory [`config_dir`] resolves to when the platform's
+/// home variable (`HOME`, or `USERPROFILE` on Windows) names `home` and no
+/// portable marker applies. Public so a harness that runs the emulator
+/// under a scratch home can find what it wrote there without restating
+/// the layout.
+pub fn host_data_dir_in(home: &std::path::Path) -> PathBuf {
+    home.join("Documents").join(app_identity())
 }
 
 /// A player build's hidden per-user directory: the explicit config base
@@ -173,7 +182,12 @@ pub fn config_file(name: &str) -> Option<PathBuf> {
 /// Where `--run` stages its disposable boot volume (src/runprog.rs).
 /// Regenerated on every launch, so nothing under it is worth keeping.
 pub fn run_stage_dir() -> Option<PathBuf> {
-    config_dir().map(|dir| dir.join("run"))
+    config_dir().map(|dir| run_stage_in(&dir))
+}
+
+/// The `--run` staging directory under a given host-data root.
+pub fn run_stage_in(root: &std::path::Path) -> PathBuf {
+    root.join("run")
 }
 
 /// Where named floppy drive sample sets are looked for: WinUAE-format
