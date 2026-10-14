@@ -1450,6 +1450,12 @@ impl ControlState {
         }
     }
 
+    /// Whether this control's fetch runs past the hardwired $D8 stop: the
+    /// frame's BEAMCON0 half (`harddis`) plus this control's BPLCON0.
+    fn ddf_hard_stop_lifted(&self) -> bool {
+        crate::chipset::agnus::ddf_hard_stop_lifted(self.agnus_revision, self.harddis, self.bplcon0)
+    }
+
     fn words_per_row(&self, native_w: usize) -> usize {
         let fallback = native_w / 16;
         let Some((start, stop)) = effective_ddf_window(
@@ -1457,7 +1463,7 @@ impl ControlState {
             self.hires() || self.shres(),
             self.ddfstrt,
             self.ddfstop,
-            self.harddis,
+            self.ddf_hard_stop_lifted(),
         ) else {
             return fallback;
         };
@@ -1478,7 +1484,7 @@ impl ControlState {
                 hires_like,
                 self.ddfstrt,
                 self.ddfstop,
-                self.harddis,
+                self.ddf_hard_stop_lifted(),
             )
             .is_some()
     }
@@ -1503,7 +1509,7 @@ impl ControlState {
             hires_like,
             self.ddfstrt,
             self.ddfstop,
-            self.harddis,
+            self.ddf_hard_stop_lifted(),
         )?;
         let words = self.words_per_row(0) as i32;
         if words == 0 {
@@ -4251,6 +4257,9 @@ impl RenderInput {
         self.chip_ram = chip_ram;
         std::sync::Arc::make_mut(&mut rows).clone_from(&self.captured_bitplane_rows);
         self.captured_bitplane_rows = rows;
+        // Taken at the wrap, the bus's in-progress events are the whole next
+        // frame; a render of this field when it was current saw none of them.
+        self.current_render_events.clear();
     }
 
     /// Override the layer-isolation masks on an existing snapshot (tests

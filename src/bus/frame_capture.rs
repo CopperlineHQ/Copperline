@@ -430,7 +430,7 @@ impl Bus {
                 bplcon0,
                 self.denise.ddfstrt,
                 self.denise.ddfstop,
-                self.harddis_active(),
+                self.harddis_for(bplcon0),
             )
             .is_none()
             {
@@ -442,7 +442,7 @@ impl Bus {
                 self.agnus.fmode(),
                 self.denise.ddfstrt,
                 self.denise.ddfstop,
-                self.harddis_active(),
+                self.harddis_for(bplcon0),
             );
             self.advance_display_dma_ptrs(1, nplanes, words_per_row, vpos);
         }
@@ -758,7 +758,7 @@ impl Bus {
                 bitplane_dmacon,
                 self.denise.ddfstrt,
                 self.denise.ddfstop,
-                self.harddis_active(),
+                self.harddis_for(bitplane_bplcon0),
             );
             if (old_hpos..new_hpos).contains(&slot1_hpos) {
                 let dmacon_now = self.effective_bitplane_dmacon_at(slot_cck(slot1_hpos));
@@ -1182,7 +1182,7 @@ impl Bus {
             display_bplcon0,
             self.denise.ddfstrt,
             self.denise.ddfstop,
-            self.harddis_active(),
+            self.harddis_for(display_bplcon0),
         ) else {
             return;
         };
@@ -1245,7 +1245,7 @@ impl Bus {
                     self.agnus.fmode(),
                     self.denise.ddfstrt,
                     self.denise.ddfstop,
-                    self.harddis_active(),
+                    self.harddis_for(anchor_bplcon0),
                 )
             },
             |plan| plan.words_per_row as usize,
@@ -1819,7 +1819,7 @@ impl Bus {
     pub(super) fn capture_render_snapshot(&self) -> RenderRegisterSnapshot {
         RenderRegisterSnapshot {
             agnus_revision: self.agnus.revision(),
-            harddis: self.harddis_active(),
+            harddis: self.beamcon0_lifts_ddf_hard_stop(),
             dmacon: self.agnus.dmacon,
             bplcon0: self.denise.bplcon0,
             bplcon1: self.denise.bplcon1,

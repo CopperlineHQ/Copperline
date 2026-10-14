@@ -6,9 +6,8 @@
 
 use crate::chipset::agnus::{
     bitplane_dma_planes_for_fmode, sprite_dma_disabled_by_bitplane_ddf, wide_fetch_word_address,
-    Agnus, AgnusRevision, AgnusTick, VideoStandard, BEAMCON0_DUAL, BEAMCON0_HARDDIS,
-    BEAMCON0_VARBEAMEN, COLORCLOCKS_PER_LINE, NTSC_LINES, NTSC_LONG_COLORCLOCKS_PER_LINE,
-    PAL_LINES,
+    Agnus, AgnusRevision, AgnusTick, VideoStandard, BEAMCON0_DUAL, COLORCLOCKS_PER_LINE,
+    NTSC_LINES, NTSC_LONG_COLORCLOCKS_PER_LINE, PAL_LINES,
 };
 use crate::chipset::blitter::{BlitBusAccess, Blitter};
 use crate::chipset::cia::{
@@ -309,7 +308,6 @@ const DENISE_WRITE_EFFECT_DELAY_CCK: u32 = 4;
 const AGNUS_WRITE_EFFECT_DELAY_CCK: u32 = 2;
 const BPLCON0_ECSENA: u16 = 1 << 0;
 const BPLCON0_SHRES: u16 = 1 << 6;
-const BPLCON0_UHRES: u16 = 1 << 7;
 const BPLCON3_BRDSPRT: u16 = 1 << 1;
 const BPLCON3_BRDRBLNK: u16 = 1 << 5;
 const BPLCON3_SPRES_MASK: u16 = 0x00C0;
@@ -328,7 +326,7 @@ const NANOS_PER_SECOND: u128 = 1_000_000_000;
 const VIDEO_FETCH_TIMING_SAMPLE_RATE: u128 = 128;
 const VIDEO_COLLISION_TIMING_SAMPLE_RATE: u128 = 16;
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CapturedBitplaneRow {
     pub nplanes: usize,
     pub words_per_row: usize,
@@ -338,6 +336,29 @@ pub struct CapturedBitplaneRow {
     /// stops draining to the hardware stop, late starts). None when the
     /// register-derived geometry already matches (and for wide-FMODE rows).
     pub fetch_origin_cck: Option<u16>,
+}
+
+impl Clone for CapturedBitplaneRow {
+    fn clone(&self) -> Self {
+        Self {
+            nplanes: self.nplanes,
+            words_per_row: self.words_per_row,
+            planes: self.planes.clone(),
+            fetch_origin_cck: self.fetch_origin_cck,
+        }
+    }
+
+    /// Reuses the eight plane buffers, so copying a frame's rows into a
+    /// retained snapshot (`RenderInput::refill_detached_from_bus`) does not
+    /// reallocate them every frame.
+    fn clone_from(&mut self, source: &Self) {
+        self.nplanes = source.nplanes;
+        self.words_per_row = source.words_per_row;
+        for (plane, from) in self.planes.iter_mut().zip(&source.planes) {
+            plane.clone_from(from);
+        }
+        self.fetch_origin_cck = source.fetch_origin_cck;
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1694,7 +1715,10 @@ impl BeamChipRamWrite {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RenderRegisterSnapshot {
     pub agnus_revision: AgnusRevision,
-    /// BEAMCON0.HARDDIS active when this frame's registers were captured.
+    /// Whether BEAMCON0 lifted the hardwired DDF stop (HARDDIS or VARBEAMEN
+    /// on an ECS Agnus or Alice) when this frame's registers were captured.
+    /// The BPLCON0 half of the rule (SHRES/UHRES) can change within a frame,
+    /// so the renderer applies it from its own register state.
     pub harddis: bool,
     pub dmacon: u16,
     pub bplcon0: u16,
@@ -5230,17 +5254,29 @@ impl Bus {
         !matches!(self.agnus.revision(), AgnusRevision::Ocs)
     }
 
-    /// Relaxed DDF stop ceiling for every effective-DDF-window computation.
-    /// An ECS Agnus or AGA Alice drops the hardwired $D8 stop while
-    /// BEAMCON0 selects HARDDIS or a programmable scan (VARBEAMEN), or
-    /// BPLCON0 selects SHRES or UHRES (WinUAE `check_harddis`). Otherwise
-    /// the stop holds on Alice exactly as on ECS: a lo-res $28/$E0 window
-    /// fetches 23 words at FMODE=0, not 24. The relaxed ceiling is still
-    /// bounded by the canvas.
+    /// Relaxed DDF stop ceiling for every effective-DDF-window computation,
+    /// under the BPLCON0 the sequencer sees now (see
+    /// [`crate::chipset::agnus::ddf_hard_stop_lifted`]). The relaxed ceiling
+    /// is still bounded by the canvas.
     fn harddis_active(&self) -> bool {
+        self.harddis_for(self.effective_bitplane_bplcon0())
+    }
+
+    /// [`Self::harddis_active`] for a fetch decided under `bplcon0`.
+    pub(super) fn harddis_for(&self, bplcon0: u16) -> bool {
+        crate::chipset::agnus::ddf_hard_stop_lifted(
+            self.agnus.revision(),
+            self.beamcon0_lifts_ddf_hard_stop(),
+            bplcon0,
+        )
+    }
+
+    /// The BEAMCON0 half of the hard-stop rule. It holds for a whole frame,
+    /// so it is all the render snapshot records; the renderer adds the
+    /// BPLCON0 half from its own register state.
+    fn beamcon0_lifts_ddf_hard_stop(&self) -> bool {
         !matches!(self.agnus.revision(), AgnusRevision::Ocs)
-            && (self.agnus.beamcon0() & (BEAMCON0_HARDDIS | BEAMCON0_VARBEAMEN) != 0
-                || self.effective_bitplane_bplcon0() & (BPLCON0_SHRES | BPLCON0_UHRES) != 0)
+            && crate::chipset::agnus::beamcon0_lifts_ddf_hard_stop(self.agnus.beamcon0())
     }
 
     /// External light-pen pulse at the current beam position: the LP pin
