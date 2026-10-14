@@ -488,7 +488,16 @@ The two probes that render live E-clock-referenced counts (`timing-test`,
 bootblock handoff depends on how long the ROM took to boot, so their
 displayed counts shift by a tick or two whenever the bundled AROS ROM is
 refreshed (or a count sitting on an 8-iteration display-bucket edge flips a
-whole bar word). Re-bless and review the diff after a ROM refresh.
+whole bar word). Hardware timing fixes can move the bootblock handoff phase
+too. Re-bless and review the diff after either kind of change.
+
+The OneROM A500 CIA/interrupt timing corrections refresh these two references:
+the timing table changes with the corrected CIA transfer, START/STOP and
+interrupt timing; three `bltprobe-pace` polling bars shorten by one word as
+their counts cross an eight-iteration display bucket. The other 43 golden
+renders remain byte-identical. These references record the deterministic
+probe output; the timing model's hardware evidence is described in
+[`docs/internals/timing.md`](../docs/internals/timing.md#cia-register-transfers-and-timer-startup).
 
 Each probe is its own `#[test]`, so the harness runs the emulator boots in
 parallel on the available cores (the full suite of 45 takes ~20 s on an
