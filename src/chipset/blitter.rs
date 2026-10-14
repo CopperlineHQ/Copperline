@@ -228,6 +228,9 @@ pub struct Blitter {
     /// INTREQ.BLIT rises (vAmiga clearBusyFlag at REPEAT vs endBlit;
     /// cross-checked with the slot-trace probe). `busy` above stays the
     /// engine-running flag (bus grants, Copper BFD wait, drain logic).
+    /// The register file belongs to software again once BBUSY drops:
+    /// writes during the terminal cycles program the next blit and do not
+    /// disturb the queued final D word (see `release_registers`).
     pub bbusy: bool,
     /// Set to true at the start of `execute()` and cleared on the first
     /// non-zero D word. Surfaces as DMACONR bit 13.
@@ -285,6 +288,10 @@ struct LineBlitState {
     a_word: u16,
     bltcdat: u16,
     cur_c: u16,
+    /// Whether `release_registers` has published this blit's final register
+    /// state (at the BBUSY drop, or at completion when drained earlier).
+    #[serde(default)]
+    registers_released: bool,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -380,6 +387,10 @@ struct NormalBlitState {
     /// from the live one's). The ordered map serializes deterministically;
     /// the bincode wire shape (length + entries) is the same for both.
     d_overlay: std::collections::BTreeMap<usize, u16>,
+    /// Whether `release_registers` has published this blit's final register
+    /// state (at the BBUSY drop, or at completion when drained earlier).
+    #[serde(default)]
+    registers_released: bool,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -530,7 +541,12 @@ impl Blitter {
     }
 
     pub fn write_bltcon0(&mut self, val: u16) {
-        if self.busy {
+        // Only a write while BBUSY is set reaches the running blit. Once
+        // BBUSY has dropped the write programs the next blit: the terminal
+        // cycles still retire the queued final D word, which a fast CPU
+        // (020+ chip-bus timing) can otherwise beat with its first register
+        // write after a BBUSY poll.
+        if self.bbusy {
             self.disable_pending_d_output();
         }
         self.bltcon0 = val;
@@ -579,7 +595,6 @@ impl Blitter {
     fn finish_blit(&mut self) {
         self.busy = false;
         self.bbusy = false;
-        self.bltbold_init = true;
     }
 
     fn clear_irq_arm(&mut self) {
@@ -615,6 +630,7 @@ impl Blitter {
         } else {
             self.execute_normal(h, w, ram);
         }
+        self.bltbold_init = true;
         self.finish_blit();
     }
 
@@ -682,12 +698,14 @@ impl Blitter {
                 let done = state.tick_slot(ram, &mut self.bzero);
                 // BBUSY drops with the sequencer's final REPEAT (the last
                 // body cycle); the terminal D-flush/BLTDONE cycles (E/F)
-                // still run with the flag already clear.
+                // still run with the flag already clear, and the register
+                // file is software's again from that point.
                 if matches!(
                     state.phase,
                     NormalBlitPhase::E | NormalBlitPhase::F | NormalBlitPhase::Done
                 ) {
                     self.bbusy = false;
+                    state.release_registers(self);
                 }
                 // Entering the terminal BLTDONE cycle (the E tick makes F
                 // pending) asserts the interrupt off its first attempt.
@@ -700,7 +718,7 @@ impl Blitter {
                     self.debug_watched_write = Some(write);
                 }
                 if done {
-                    state.write_back(self);
+                    state.release_registers(self);
                     self.finish_blit();
                     true
                 } else {
@@ -712,12 +730,14 @@ impl Blitter {
                 let phase_before = state.phase;
                 let done = state.tick_slot(ram, &mut self.bzero);
                 // BBUSY drops with the final pixel's D cycle; the two
-                // terminal micro-cycles run with the flag already clear.
+                // terminal micro-cycles run with the flag already clear and
+                // the register file already released.
                 if matches!(
                     state.phase,
                     LineBlitPhase::Tail | LineBlitPhase::TailDone | LineBlitPhase::Done
                 ) {
                     self.bbusy = false;
+                    state.release_registers(self);
                 }
                 // Entering the terminal BLTDONE cycle asserts the interrupt
                 // off its first attempt.
@@ -730,7 +750,7 @@ impl Blitter {
                     self.debug_watched_write = Some(write);
                 }
                 if done {
-                    state.write_back(self);
+                    state.release_registers(self);
                     self.finish_blit();
                     true
                 } else {
@@ -990,12 +1010,12 @@ impl Blitter {
         match &mut pending {
             PendingBlit::Normal(state) => {
                 state.run_to_completion(ram, &mut self.bzero);
-                state.write_back(self);
+                state.release_registers(self);
                 self.finish_blit();
             }
             PendingBlit::Line(state) => {
                 state.run_to_completion(ram, &mut self.bzero);
-                state.write_back(self);
+                state.release_registers(self);
                 self.finish_blit();
             }
         }
@@ -1336,6 +1356,7 @@ impl LineBlitState {
             a_word: blitter.bltadat & blitter.bltafwm,
             bltcdat: blitter.bltcdat,
             cur_c: blitter.bltcdat,
+            registers_released: false,
         }
     }
 
@@ -1588,7 +1609,14 @@ impl LineBlitState {
         self.npixels_remaining = self.npixels_remaining.saturating_sub(1);
     }
 
-    fn write_back(&self, blitter: &mut Blitter) {
+    /// Publish the line blit's hardware-visible end state, once (see
+    /// `NormalBlitState::release_registers`). The last pixel's D cycle has
+    /// already advanced every one of these registers on hardware.
+    fn release_registers(&mut self, blitter: &mut Blitter) {
+        if std::mem::replace(&mut self.registers_released, true) {
+            return;
+        }
+        blitter.bltbold_init = true;
         let mut con1 = self.con1 & !BLTCON1_SIGN;
         if (self.acc as i16) < 0 {
             con1 |= BLTCON1_SIGN;
@@ -1699,6 +1727,7 @@ impl NormalBlitState {
                 && (use_a || use_b)
                 && !Self::sources_disjoint_from_d(blitter, h, w, ram.len()),
             d_overlay: std::collections::BTreeMap::new(),
+            registers_released: false,
         }
     }
 
@@ -2235,7 +2264,20 @@ impl NormalBlitState {
         self.fill_state = self.fci;
     }
 
-    fn write_back(&self, blitter: &mut Blitter) {
+    /// Publish the blit's hardware-visible end state to the register file,
+    /// once. Agnus advances the source pointers and loads BLTCDAT live as
+    /// the sequencer runs, so they hold their final values by the last body
+    /// cycle. Only BLTDPT still has the final word's step ahead of it, and
+    /// nothing reads that write-only pointer before the next BLTSIZE or
+    /// pointer write, both of which drain the terminal cycles first. The
+    /// queued D word itself is written through `d_hold_pt`. Releasing at the BBUSY drop rather than
+    /// at completion keeps the end-of-blit write-back from clobbering
+    /// registers software reprograms after polling BBUSY clear.
+    fn release_registers(&mut self, blitter: &mut Blitter) {
+        if std::mem::replace(&mut self.registers_released, true) {
+            return;
+        }
+        blitter.bltbold_init = true;
         let ptr_mask = blitter.dma_ptr_mask();
         blitter.bltapt = self.apt & ptr_mask;
         blitter.bltbpt = self.bpt & ptr_mask;
