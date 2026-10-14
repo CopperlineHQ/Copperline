@@ -108,6 +108,7 @@ impl App {
             cartridge: self.emu.cartridge().map(|c| c.model().display_name()),
             fullscreen,
             status_bar_hidden: crate::video::status_bar_hidden(),
+            track_display: crate::video::track_display(),
             bezel: self.bezel,
             perf_overlay: self.perf_overlay,
             vsync: self.vsync,
@@ -362,6 +363,11 @@ impl App {
             }
             A::ToggleFullscreen => self.toggle_fullscreen(),
             A::ToggleStatusBar => self.toggle_status_bar(),
+            A::SetTrackDisplay(mode) => {
+                crate::video::set_track_display(mode);
+                self.show_osd(format!("Track display: {}", mode.menu_label()));
+                self.request_redraw();
+            }
             A::SetBezel(style) => self.set_bezel(style),
             A::TogglePerfOverlay => self.toggle_perf_overlay(),
 
@@ -566,9 +572,10 @@ impl App {
             A::ResetMachine => self.reset_emulator(true),
             A::Quit => self.quit_requested = true,
         }
-        // A player session persists what its user just set; the full build
-        // keeps the menu session-only (a no-op inside).
-        self.persist_player_prefs();
+        // Keep what the user just set for the next launch: the player's
+        // settings file, or the full build's saved default (no-ops when the
+        // action changed no setting).
+        self.persist_settings();
     }
 
     /// Put the menu cursor under the pointer. Returns true when it moved.
@@ -750,6 +757,7 @@ impl App {
             BarControl::CdEject => self.eject_cd(),
             BarControl::Joystick => {
                 self.cycle_joystick_input_mode();
+                self.persist_settings();
                 self.request_redraw();
             }
             BarControl::Keyboard => self.toggle_keyboard_panel(),

@@ -28,7 +28,7 @@ use crate::config::{
     FluxBridgeConfig, JoystickInputMode, MachineModel, MenuScale, MouseCapture, Mt32Lcd, Overscan,
     PacingBudget, ParallelDevice, PixelAspect, RawConfig, RawDrive, RawFilesysMount,
     RawFloppyDrive, RawHostDisk, RawZorroBoard, RtgCard, ScsiController, SerialMode, ShaderMode,
-    Tint, WarpSpeed, BOOT_PRI_NEVER,
+    Tint, TrackDisplay, WarpSpeed, BOOT_PRI_NEVER,
 };
 use crate::ide_zorro::LidePersonality;
 use crate::memory::{RamInit, DEFAULT_RAM_PATTERN, DEFAULT_RANDOM_RAM_SEED};
@@ -943,8 +943,13 @@ pub struct MachineSetup {
     window_title: Option<String>,
     /// Show the status bar at start ([display] status_bar).
     show_status_bar: bool,
+    /// What the status bar's floppy counter reads ([display] track_display).
+    track_display: TrackDisplay,
     floppy_sounds: bool,
     floppy_volume: u8,
+    /// A WinUAE-format drive sample set ([audio] floppy_sounds_set): a set
+    /// name in the floppy sounds folder or a path. `None` synthesizes.
+    floppy_sounds_set: Option<String>,
     power_on: bool,
     auto_launch: bool,
     pacing_budget: PacingBudget,
@@ -977,6 +982,9 @@ pub struct MachineSetup {
     /// never seen them, because what cannot be reached is dropped when the
     /// configuration is adopted.
     paths: crate::pathconf::Paths,
+    /// The keys the launcher has no rows for, as the configuration it was
+    /// opened on had them (see [`carry_unowned_keys`]).
+    carried: RawConfig,
 }
 
 impl Default for MachineSetup {
@@ -1201,8 +1209,10 @@ impl MachineSetup {
         self.start_maximized = base.maximized;
         self.window_scale = base.window_scale;
         self.show_status_bar = base.status_bar;
+        self.track_display = base.track_display;
         self.floppy_sounds = base.audio.floppy_sounds;
         self.floppy_volume = base.audio.floppy_sounds_volume;
+        self.floppy_sounds_set = base.audio.floppy_sounds_set.clone();
         self.power_on = base.emulation.power_on;
         self.auto_launch = base.emulation.auto_launch;
         self.pacing_budget = base.emulation.pacing_budget;
@@ -6181,6 +6191,35 @@ fn cycle_slice<T: Copy + PartialEq>(items: &[T], current: T, forward: bool) -> T
         (idx + n - 1) % n
     };
     items[next]
+}
+
+/// Step the floppy sound set through Synthesized (`None`), then each set
+/// installed in the floppy sounds folder. A set the configuration names
+/// that is not among them -- a path, or one since removed -- keeps a place
+/// at the end, so stepping past it and back does not lose it.
+fn cycle_sound_set(installed: &[String], current: Option<String>, forward: bool) -> Option<String> {
+    let mut options: Vec<Option<String>> = std::iter::once(None)
+        .chain(installed.iter().cloned().map(Some))
+        .collect();
+    let same = |a: &Option<String>, b: &Option<String>| match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+        _ => false,
+    };
+    let idx = match options.iter().position(|option| same(option, &current)) {
+        Some(idx) => idx,
+        None => {
+            options.push(current);
+            options.len() - 1
+        }
+    };
+    let n = options.len();
+    let next = if forward {
+        (idx + 1) % n
+    } else {
+        (idx + n - 1) % n
+    };
+    options.swap_remove(next)
 }
 
 /// Cycle a network board's fitted/backend state (`None` = not fitted)

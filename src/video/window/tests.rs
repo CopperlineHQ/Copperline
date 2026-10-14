@@ -9,32 +9,33 @@ use super::{
     bar_layout, cap_texture_scale, center_present_frame_for_visible_start,
     center_present_frame_horizontally, control_at, copperline_icon_image, copperline_logo_image,
     copy_present_frame, copy_tv_aperture_to_window, copy_window_present_frame,
-    cursor_position_in_texture, draw_seven_segment_digit, draw_status_bar, fdd_track_counter_rect,
-    fdd_track_digit_rect, host_shortcut_modifier_pressed, host_to_amiga_rawkey,
-    joystick_toggle_rect, kbdpanel, keyboard_toggle_rect, led_row_rect, mask_present_frame_to_tv,
-    paint_test_screen, parse_amiga_key, pause_button_rect, plan_present_scaling_for,
-    power_button_rect, present_height, presentation_pixels_equal, presentation_source_y_offset,
-    raw_device_qualifier_family_held, raw_device_qualifier_rawkey, rawkey_is_held,
-    rawkey_transition_is_duplicate, reboot_button_rect, repeated_main_key_should_drop, rgba,
-    short_status_error, shorten_status_paths, shot_button_rect, should_render_emulated_frame,
-    standard_window_top_row, status_with_latched_fdd_track, take_integral_mouse_delta,
-    texture_height, texture_width, tint_display_rows, tint_lut, tint_rows_in_place,
-    track_counter_digit_rect, track_counter_layout, tv_aperture_source_row,
-    tv_centre_source_offset, tv_source_h_bounds, volume_mute_hit_rect, volume_percent_from_pos,
-    volume_slider_knob_rect, volume_slider_track_rect, BarControl, DriveBar, JoystickInputMode,
-    MediaBar, PresentationLatch, StatusBarView, ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT,
-    AMIGA_RAWKEY_LEFT_SHIFT, AMIGA_RAWKEY_RIGHT_ALT, AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH,
-    BUTTON_GLYPH_DISABLED, CD_BODY, CD_LED_OFF, CD_LED_ON, CD_TRACK_SEGMENT_OFF,
-    CD_TRACK_SEGMENT_ON, DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL, FDD_LED_OFF, FDD_LED_ON,
-    HDD_LED_OFF, HDD_LED_ON, POWER_GLYPH_OFF, POWER_GLYPH_ON, POWER_LED_BRIGHT, POWER_LED_DIM,
-    POWER_LED_OFF, STANDARD_PAL_VISIBLE_LINES, STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG,
-    TRACK_SEGMENT_OFF, TRACK_SEGMENT_ON, TUBE_NTSC_PRESENT_HEIGHT, TUBE_PAL_PRESENT_HEIGHT,
-    TV_CAPTURED_SOURCE_X, TV_CAPTURED_WIDTH, TV_LIVE_PAD_X, TV_NTSC_PRESENT_HEIGHT,
-    TV_PAL_PRESENT_HEIGHT, TV_PRESENT_SOURCE_Y, VOLUME_FILL, VOLUME_GLYPH_X,
+    cursor_position_in_texture, draw_seven_segment_digit, draw_status_bar, fdd_counter_readout,
+    fdd_track_counter_rect, fdd_track_digit_rect, host_shortcut_modifier_pressed,
+    host_to_amiga_rawkey, joystick_toggle_rect, kbdpanel, keyboard_toggle_rect, led_row_rect,
+    mask_present_frame_to_tv, paint_test_screen, parse_amiga_key, pause_button_rect,
+    plan_present_scaling_for, power_button_rect, present_height, presentation_pixels_equal,
+    presentation_source_y_offset, raw_device_qualifier_family_held, raw_device_qualifier_rawkey,
+    rawkey_is_held, rawkey_transition_is_duplicate, reboot_button_rect,
+    repeated_main_key_should_drop, rgba, short_status_error, shorten_status_paths,
+    shot_button_rect, should_render_emulated_frame, standard_window_top_row,
+    status_with_latched_fdd_track, take_integral_mouse_delta, texture_height, texture_width,
+    tint_display_rows, tint_lut, tint_rows_in_place, track_counter_digit_rect,
+    track_counter_layout, tv_aperture_source_row, tv_centre_source_offset, tv_source_h_bounds,
+    volume_mute_hit_rect, volume_percent_from_pos, volume_slider_knob_rect,
+    volume_slider_track_rect, BarControl, DriveBar, JoystickInputMode, MediaBar, PresentationLatch,
+    StatusBarView, ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT, AMIGA_RAWKEY_LEFT_SHIFT,
+    AMIGA_RAWKEY_RIGHT_ALT, AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH, BUTTON_GLYPH_DISABLED, CD_BODY,
+    CD_LED_OFF, CD_LED_ON, CD_TRACK_SEGMENT_OFF, CD_TRACK_SEGMENT_ON, DISK_BODY, DISK_BODY_SHADOW,
+    DISK_LABEL, FDD_LED_OFF, FDD_LED_ON, HDD_LED_OFF, HDD_LED_ON, POWER_GLYPH_OFF, POWER_GLYPH_ON,
+    POWER_LED_BRIGHT, POWER_LED_DIM, POWER_LED_OFF, STANDARD_PAL_VISIBLE_LINES,
+    STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG, TRACK_SEGMENT_OFF, TRACK_SEGMENT_ON,
+    TUBE_NTSC_PRESENT_HEIGHT, TUBE_PAL_PRESENT_HEIGHT, TV_CAPTURED_SOURCE_X, TV_CAPTURED_WIDTH,
+    TV_LIVE_PAD_X, TV_NTSC_PRESENT_HEIGHT, TV_PAL_PRESENT_HEIGHT, TV_PRESENT_SOURCE_Y, VOLUME_FILL,
+    VOLUME_GLYPH_X,
 };
 use crate::audio::{AudioSink, NullSink};
 use crate::bus::{FrontPanelStatus, RenderRegisterSnapshot};
-use crate::config::{Overscan, Tint, WarpSpeed};
+use crate::config::{Overscan, Tint, TrackDisplay, WarpSpeed};
 use crate::heatmap;
 use crate::video::{FB_PIXELS, FB_WIDTH};
 use std::cell::RefCell;
@@ -1279,6 +1280,46 @@ fn native_screenshots_follow_playfield_resolution_without_tv_borders() {
     }
 }
 
+/// A laced picture is two fields: the native capture weaves the current
+/// field with the one before it, long field on the even rows, so a 320x512
+/// laced lo-res screen saves at 320x512 rather than as one 320x256 field.
+#[test]
+fn native_screenshots_weave_both_fields_of_a_laced_picture() {
+    let mut app = test_app();
+    let bus = app.emu.bus_mut();
+    bus.custom_write(0x08E, 2, 0x2C81);
+    bus.custom_write(0x090, 2, 0x2CC1);
+    bus.custom_write(0x092, 2, 0x0038);
+    bus.custom_write(0x094, 2, 0x00D0);
+    bus.custom_write(0x100, 2, 0x1204);
+    bus.custom_write(0x096, 2, 0x8300);
+    // The first field's frame-start snapshot predates the mode.
+    app.emu.step_video_frame().unwrap();
+    // Paint each laced field its own background so the rows show which
+    // field they came from.
+    let colours: [u16; 2] = [0x0F00, 0x000F];
+    for colour in colours {
+        app.emu.bus_mut().custom_write(0x180, 2, colour.into());
+        app.emu.step_video_frame().unwrap();
+    }
+    app.set_native_screenshots(true);
+    let image = app.capture_present_image();
+    assert_eq!((image.width, image.height), (320, 512));
+
+    let current_is_long = app.emu.bus().frame_render_base().long_field;
+    let (long, short) = if current_is_long {
+        (colours[1], colours[0])
+    } else {
+        (colours[0], colours[1])
+    };
+    let long = crate::chipset::denise::rgb12_to_rgba8(long);
+    let short = crate::chipset::denise::rgb12_to_rgba8(short);
+    for (y, row) in image.pixels.chunks(320).enumerate() {
+        let expected = if y % 2 == 0 { long } else { short };
+        assert!(row.iter().all(|px| *px == expected), "row {y}");
+    }
+}
+
 /// The player writes its menu settings to `settings.toml` and its startup
 /// layers that file back over the manifest. Whatever the write records must
 /// come back through the merge, or the player forgets the choice on the next
@@ -1294,6 +1335,93 @@ fn player_settings_written_are_all_read_back_on_the_next_launch() {
 
     let mut restored = crate::config::RawConfig::default();
     restored.merge_player_settings(&written);
+    assert_eq!(
+        restored.to_toml_string().unwrap(),
+        written.to_toml_string().unwrap()
+    );
+}
+
+/// Menu changes in the full build are written through to the saved default
+/// as they are made -- only the changed keys, over whatever the file holds --
+/// and the session's own configuration follows, so the launcher shows and
+/// saves them too (rewind and controller settings were reported lost across
+/// restarts).
+#[test]
+fn menu_settings_write_through_to_the_saved_default() {
+    use crate::config::RawConfig;
+    let path = std::env::temp_dir().join(format!(
+        "copperline-menu-settings-{}.toml",
+        std::process::id()
+    ));
+    std::fs::write(&path, "[machine]\nprofile = \"A1200\"\n").unwrap();
+    let read_back =
+        |path: &std::path::Path| RawConfig::parse(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let mut app = test_app();
+    // The fixture wires port 2 after construction; a real start configures
+    // the ports before the session takes its settings baseline.
+    app.menu_settings_saved = app.menu_prefs();
+    app.set_menu_settings_file(Some(path.clone()));
+
+    app.toggle_rewind();
+    app.autofire_hz = 8;
+    app.persist_settings();
+    let saved = read_back(&path);
+    assert_eq!(saved.machine.profile.as_deref(), Some("A1200"));
+    assert_eq!(saved.emulation.rewind, Some(true));
+    assert_eq!(saved.input.autofire_hz, Some(8));
+    // Settings the user left alone stay out of the default every machine
+    // starts from.
+    assert_eq!(saved.input.port2, None);
+    assert_eq!(saved.display.vsync, None);
+    assert_eq!(app.machine_config.emulation.rewind, Some(true));
+    assert_eq!(app.machine_config.input.autofire_hz, Some(8));
+
+    // Turning a setting back writes it back.
+    app.toggle_rewind();
+    app.persist_settings();
+    let saved = read_back(&path);
+    assert_eq!(saved.emulation.rewind, Some(false));
+    assert_eq!(saved.input.autofire_hz, Some(8));
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A write-through that fails leaves its change pending rather than
+/// counting it as saved: a default that does not parse is left alone, and
+/// once it is fixed the next persist writes the earlier change.
+#[test]
+fn failed_menu_settings_write_is_retried() {
+    use crate::config::RawConfig;
+    let path = std::env::temp_dir().join(format!(
+        "copperline-menu-settings-retry-{}.toml",
+        std::process::id()
+    ));
+    std::fs::write(&path, "not [toml").unwrap();
+    let mut app = test_app();
+    app.rebaseline_menu_settings();
+    app.set_menu_settings_file(Some(path.clone()));
+
+    app.autofire_hz = 8;
+    app.persist_settings();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "not [toml");
+
+    std::fs::write(&path, "").unwrap();
+    app.persist_settings();
+    let saved = RawConfig::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(saved.input.autofire_hz, Some(8));
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Whatever the full build's menu write-through records must come back
+/// through its merge, or the setting is lost on the next launch.
+#[test]
+fn menu_settings_written_are_all_read_back() {
+    let app = test_app();
+    let written = app.menu_prefs();
+    assert!(written.emulation.rewind.is_some());
+    assert!(written.input.mouse_sensitivity.is_some());
+
+    let mut restored = crate::config::RawConfig::default();
+    restored.merge_menu_settings(&written);
     assert_eq!(
         restored.to_toml_string().unwrap(),
         written.to_toml_string().unwrap()
@@ -3368,6 +3496,84 @@ fn status_bar_adapts_track_counters_to_connected_drives() {
     assert_eq!(
         pixel(&frame, bay.x + 1, bay.y + 1, scale),
         STATUS_BG.to_le_bytes()
+    );
+}
+
+#[test]
+fn fdd_counter_splits_track_into_cylinder_and_side() {
+    // Track = cylinder * 2 + side: track 81 is the upper head on
+    // cylinder 40.
+    let readout = fdd_counter_readout(Some(81), TrackDisplay::Cylinder);
+    assert_eq!(&readout.glyphs, b"401");
+    assert_eq!(readout.point_after, Some(1));
+    let readout = fdd_counter_readout(Some(80), TrackDisplay::Cylinder);
+    assert_eq!(&readout.glyphs, b"400");
+    // Single-digit cylinders keep their leading zero, as the track
+    // readout keeps its leading zeros.
+    assert_eq!(
+        &fdd_counter_readout(Some(11), TrackDisplay::Cylinder).glyphs,
+        b"051"
+    );
+    // The last cylinder of an 80-cylinder mechanism.
+    assert_eq!(
+        &fdd_counter_readout(Some(159), TrackDisplay::Cylinder).glyphs,
+        b"791"
+    );
+    // No drive selected yet: dashes, still in CYL.SIDE shape.
+    let readout = fdd_counter_readout(None, TrackDisplay::Cylinder);
+    assert_eq!(&readout.glyphs, b"---");
+    assert_eq!(readout.point_after, Some(1));
+    // The default mode is unchanged: the plain track number, no point.
+    let readout = fdd_counter_readout(Some(81), TrackDisplay::Track);
+    assert_eq!(&readout.glyphs, b"081");
+    assert_eq!(readout.point_after, None);
+}
+
+#[test]
+fn status_bar_cylinder_mode_lights_the_point_after_the_cylinder() {
+    let scale = 1;
+    let status = FrontPanelStatus {
+        power_led_bright: true,
+        fdd_led_on: true,
+        fdd_track: Some(81),
+        hdd_led: None,
+        cd_led: None,
+        cd_track: None,
+        output_volume_percent: 100,
+    };
+    // The point sits in the gap after the second digit, on the bottom
+    // segment's line.
+    let tens = fdd_track_digit_rect(1);
+    let point = (tens.x + tens.w + 1, tens.y + tens.h - 1);
+
+    crate::video::set_track_display(TrackDisplay::Track);
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    draw_status_bar(&mut frame, &view(status, true, false), scale);
+    assert_ne!(
+        pixel(&frame, point.0, point.1, scale),
+        TRACK_SEGMENT_ON.to_le_bytes(),
+        "track mode drew a decimal point"
+    );
+
+    crate::video::set_track_display(TrackDisplay::Cylinder);
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    draw_status_bar(&mut frame, &view(status, true, false), scale);
+    crate::video::set_track_display(TrackDisplay::Track);
+    assert_eq!(
+        pixel(&frame, point.0, point.1, scale),
+        TRACK_SEGMENT_ON.to_le_bytes(),
+        "cylinder mode left the decimal point dark"
+    );
+    // "40.1": the side digit is a 1, so its left-hand strokes stay dark
+    // while its right-hand ones light.
+    let side = fdd_track_digit_rect(2);
+    assert_eq!(
+        pixel(&frame, side.x, side.y + side.h / 4, scale),
+        TRACK_SEGMENT_OFF.to_le_bytes()
+    );
+    assert_eq!(
+        pixel(&frame, side.x + side.w - 1, side.y + side.h / 4, scale),
+        TRACK_SEGMENT_ON.to_le_bytes()
     );
 }
 

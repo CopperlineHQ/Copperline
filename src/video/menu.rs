@@ -17,7 +17,7 @@ use crate::bus::PortDevice;
 use crate::config::JoystickInputMode;
 use crate::config::{
     AudioFilterMode, BezelStyle, DisplayScaling, MenuScale, Overscan, PixelAspect, ShaderKind,
-    Tint, TvCentre, WarpSpeed, TV_H_CENTRE_RANGE, TV_V_CENTRE_RANGE,
+    Tint, TrackDisplay, TvCentre, WarpSpeed, TV_H_CENTRE_RANGE, TV_V_CENTRE_RANGE,
 };
 
 /// What choosing a leaf does. Everything the menu can do is here, so the
@@ -56,6 +56,8 @@ pub enum MenuAction {
     StepShaderStrength(i8),
     ToggleFullscreen,
     ToggleStatusBar,
+    /// What the status bar's floppy counter reads: track, or CYL.SIDE.
+    SetTrackDisplay(TrackDisplay),
     TogglePerfOverlay,
     ToggleVsync,
 
@@ -471,6 +473,8 @@ pub struct MenuState<'a> {
     pub cartridge: Option<&'a str>,
     pub fullscreen: bool,
     pub status_bar_hidden: bool,
+    /// What the status bar's floppy counter reads.
+    pub track_display: TrackDisplay,
     /// Which monitor front the bezel pass is drawing, if any.
     pub bezel: BezelStyle,
     pub perf_overlay: bool,
@@ -808,6 +812,25 @@ fn centring_rows(s: &MenuState) -> Vec<MenuRow> {
     ]
 }
 
+/// The floppy counter's readout; greyed with the status bar hidden, where
+/// there is no counter to change.
+fn track_display_row(s: &MenuState) -> MenuRow {
+    MenuRow::submenu(
+        "Track Display",
+        TrackDisplay::MENU_ORDER
+            .iter()
+            .map(|m| {
+                MenuRow::choice(
+                    m.menu_label(),
+                    MenuAction::SetTrackDisplay(*m),
+                    s.track_display == *m,
+                )
+            })
+            .collect(),
+    )
+    .available(!s.status_bar_hidden)
+}
+
 fn menu_size_rows(s: &MenuState) -> Vec<MenuRow> {
     MenuScale::MENU_ORDER
         .iter()
@@ -856,6 +879,7 @@ fn video_rows(s: &MenuState) -> Vec<MenuRow> {
             MenuAction::ToggleStatusBar,
             !s.status_bar_hidden,
         ),
+        track_display_row(s),
         // No value on the row: the tick in the child list already says
         // which front is on, and naming it here widens every row in the
         // category to fit the longest style name.
@@ -1435,6 +1459,7 @@ mod tests {
             cartridge: None,
             fullscreen: false,
             status_bar_hidden: false,
+            track_display: TrackDisplay::Track,
             bezel: BezelStyle::None,
             perf_overlay: false,
             vsync: true,
@@ -1812,6 +1837,20 @@ mod tests {
         for row in tint.children().expect("tints") {
             assert!(!row.closes_menu(), "picking {} closed the menu", row.label);
         }
+        // The floppy counter's readout: every mode, the one in force marked.
+        let track = find(video, "Track Display").expect("track display");
+        assert!(track.enabled);
+        let modes = track.children().expect("track display modes");
+        assert_eq!(modes.len(), TrackDisplay::MENU_ORDER.len());
+        for (row, mode) in modes.iter().zip(TrackDisplay::MENU_ORDER) {
+            assert_eq!(row.label, mode.menu_label());
+            assert_eq!(row.menu_action(), Some(&MenuAction::SetTrackDisplay(mode)));
+            assert!(
+                !row.closes_menu(),
+                "picking a track display closed the menu"
+            );
+        }
+        assert!(modes[0].marked(), "the mode in force is not marked");
 
         let save = find(&rows, "Save State").expect("save state");
         let save = save.children().expect("children");

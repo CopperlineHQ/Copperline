@@ -52,6 +52,77 @@ fn window_position_text_box_validates_saves_and_can_restore_auto() {
     assert_eq!(state.setup.to_raw().display.position, None);
 }
 
+/// Run and Save rebuild the configuration from the launcher's own fields.
+/// Keys it has no rows for must come through unchanged, or a launcher-started
+/// machine and the saved default silently lose them (rewind and autofire
+/// were reported lost across restarts).
+#[test]
+fn keys_without_launcher_rows_survive_run_and_save() {
+    let raw = RawConfig::parse(
+        "[emulation]\n\
+         rewind = true\n\
+         rewind_budget_mb = 96\n\
+         rewind_interval_frames = 10\n\
+         [input]\n\
+         autofire_hz = 8\n\
+         port3 = \"joystick\"\n\
+         port4 = \"none\"\n\
+         [parallel]\n\
+         device = \"joystick-adapter\"\n\
+         [display]\n\
+         tv_h_centre = 4\n\
+         tv_v_centre = -2\n\
+         [clipboard]\n\
+         share = true\n\
+         [recording]\n\
+         clip_seconds = 5\n\
+         [machine]\n\
+         rtc_time = \"2005-03-18 01:58:29\"\n\
+         rtc_frozen = true\n",
+    )
+    .unwrap();
+    let out = MachineSetup::from_raw(&raw).unwrap().to_raw();
+    assert_eq!(out.emulation.rewind, Some(true));
+    assert_eq!(out.emulation.rewind_budget_mb, Some(96));
+    assert_eq!(out.emulation.rewind_interval_frames, Some(10));
+    assert_eq!(out.input.autofire_hz, Some(8));
+    assert_eq!(out.input.port3.as_deref(), Some("joystick"));
+    assert_eq!(out.clipboard.share, Some(true));
+    let carried = |raw: &RawConfig| {
+        let mut keys = RawConfig::default();
+        super::setup_config::carry_unowned_keys(raw, &mut keys);
+        keys
+    };
+    assert_eq!(carried(&out), carried(&raw));
+    // And the saved file reads back to the same machine.
+    let reread = RawConfig::parse(&out.to_toml_string().unwrap()).unwrap();
+    assert_eq!(carried(&reread), carried(&raw));
+}
+
+/// A carried key the edited machine can no longer take is dropped rather
+/// than failing Run and Save with no row on the screen to fix it: ports 3/4
+/// need the four-player adapter, the RTC keys need the clock.
+#[test]
+fn carried_keys_follow_the_edits_they_depend_on() {
+    let raw = RawConfig::parse(
+        "[input]\n\
+         port3 = \"joystick\"\n\
+         [parallel]\n\
+         device = \"joystick-adapter\"\n\
+         [machine]\n\
+         rtc = true\n\
+         rtc_time = \"2005-03-18 01:58:29\"\n",
+    )
+    .unwrap();
+    let mut setup = MachineSetup::from_raw(&raw).unwrap();
+    setup.parallel_device = ParallelDevice::None;
+    setup.rtc = false;
+    let out = setup.to_raw();
+    assert_eq!(out.input.port3, None);
+    assert_eq!(out.machine.rtc_time, None);
+    MachineSetup::from_raw(&out).expect("the edited machine still validates");
+}
+
 #[test]
 fn run_ahead_frames_survives_the_config_screen_round_trip() {
     let raw: RawConfig = toml::from_str("[emulation]\nrun_ahead_frames = 2\n").unwrap();
@@ -5534,6 +5605,58 @@ fn display_start_toggles_round_trip_through_raw_config() {
     let raw = s.to_raw();
     assert_eq!(raw.display.full_screen, Some(true));
     assert_eq!(raw.display.status_bar, Some(false));
+}
+
+#[test]
+fn track_display_round_trips_through_raw_config() {
+    let mut s = MachineSetup::default();
+    assert_eq!(s.value_label(LauncherField::TrackDisplay), "Track");
+    assert_eq!(s.to_raw().display.track_display, None);
+    s.cycle(LauncherField::TrackDisplay, true);
+    assert_eq!(s.value_label(LauncherField::TrackDisplay), "Cyl.Side");
+    assert_eq!(
+        s.to_raw().display.track_display.as_deref(),
+        Some("cylinder")
+    );
+    s.cycle(LauncherField::TrackDisplay, true);
+    assert_eq!(s.to_raw().display.track_display, None);
+}
+
+#[test]
+fn floppy_sound_set_cycles_installed_sets_and_keeps_a_custom_one() {
+    let installed = ["A500".to_string(), "LOUD".to_string()];
+    // Synthesized, then each installed set, then round again.
+    let step = |current: Option<&str>, forward| {
+        super::cycle_sound_set(&installed, current.map(str::to_string), forward)
+    };
+    assert_eq!(step(None, true).as_deref(), Some("A500"));
+    assert_eq!(step(Some("A500"), true).as_deref(), Some("LOUD"));
+    assert_eq!(step(Some("loud"), true), None);
+    assert_eq!(step(None, false).as_deref(), Some("LOUD"));
+    // A path the config names keeps its own place at the end.
+    let custom = "/sets/drive_click_ST.wav";
+    assert_eq!(step(Some(custom), true), None);
+    assert_eq!(step(Some(custom), false).as_deref(), Some("LOUD"));
+    // With nothing installed the picker still offers the synthesized
+    // sounds.
+    assert_eq!(super::cycle_sound_set(&[], None, true), None);
+}
+
+#[test]
+fn floppy_sound_set_round_trips_through_raw_config() {
+    let raw = RawConfig::parse("[audio]\nfloppy_sounds_set = \"/sets/drive_click_A500Real.wav\"\n")
+        .unwrap();
+    let mut s = MachineSetup::from_raw(&raw).unwrap();
+    assert_eq!(s.value_label(LauncherField::FloppySoundSet), "A500Real");
+    assert_eq!(
+        s.to_raw().audio.floppy_sounds_set.as_deref(),
+        Some("/sets/drive_click_A500Real.wav")
+    );
+    // The synthesized sounds are the default, so choosing them writes
+    // nothing.
+    s.floppy_sounds_set = None;
+    assert_eq!(s.value_label(LauncherField::FloppySoundSet), "Synthesized");
+    assert_eq!(s.to_raw().audio.floppy_sounds_set, None);
 }
 
 #[test]

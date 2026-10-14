@@ -9,6 +9,26 @@
 use super::*;
 
 impl Bus {
+    /// Before the wrap replaces the completed-frame snapshot, keep it as the
+    /// previous field when it was laced, so the field about to be promoted
+    /// can be woven with it (`screenshot::render_native`). Only laced
+    /// pictures pay for the copy; any other frame drops the history.
+    fn retain_native_previous_field(&mut self) {
+        let laced = self
+            .last_frame_render_base
+            .is_some_and(|base| base.bplcon0 & 0x0004 != 0);
+        if !laced {
+            self.native_previous_field = None;
+            return;
+        }
+        let mut field = match self.native_previous_field.take() {
+            Some(field) => field,
+            None => Box::new(crate::video::bitplane::RenderInput::from_bus(self)),
+        };
+        field.refill_detached_from_bus(self);
+        self.native_previous_field = Some(field);
+    }
+
     pub(super) fn begin_new_beam_frame(&mut self) {
         self.diag_log_frame_start();
         // Only maintain the collision latch across the frame boundary once
@@ -22,6 +42,7 @@ impl Bus {
         }
         self.log_bus_accounting_frame();
         self.finish_frame_bus_trace();
+        self.retain_native_previous_field();
         let promote_render_frame = !self.current_frame_render_blocked;
         if promote_render_frame {
             self.last_frame_render_base = Some(self.current_frame_render_base);
@@ -409,7 +430,7 @@ impl Bus {
                 bplcon0,
                 self.denise.ddfstrt,
                 self.denise.ddfstop,
-                self.harddis_active(),
+                self.harddis_for(bplcon0),
             )
             .is_none()
             {
@@ -421,7 +442,7 @@ impl Bus {
                 self.agnus.fmode(),
                 self.denise.ddfstrt,
                 self.denise.ddfstop,
-                self.harddis_active(),
+                self.harddis_for(bplcon0),
             );
             self.advance_display_dma_ptrs(1, nplanes, words_per_row, vpos);
         }
@@ -737,7 +758,7 @@ impl Bus {
                 bitplane_dmacon,
                 self.denise.ddfstrt,
                 self.denise.ddfstop,
-                self.harddis_active(),
+                self.harddis_for(bitplane_bplcon0),
             );
             if (old_hpos..new_hpos).contains(&slot1_hpos) {
                 let dmacon_now = self.effective_bitplane_dmacon_at(slot_cck(slot1_hpos));
@@ -1161,7 +1182,7 @@ impl Bus {
             display_bplcon0,
             self.denise.ddfstrt,
             self.denise.ddfstop,
-            self.harddis_active(),
+            self.harddis_for(display_bplcon0),
         ) else {
             return;
         };
@@ -1224,7 +1245,7 @@ impl Bus {
                     self.agnus.fmode(),
                     self.denise.ddfstrt,
                     self.denise.ddfstop,
-                    self.harddis_active(),
+                    self.harddis_for(anchor_bplcon0),
                 )
             },
             |plan| plan.words_per_row as usize,
@@ -1798,7 +1819,7 @@ impl Bus {
     pub(super) fn capture_render_snapshot(&self) -> RenderRegisterSnapshot {
         RenderRegisterSnapshot {
             agnus_revision: self.agnus.revision(),
-            harddis: self.harddis_active(),
+            beamcon0_lifts_ddf_stop: self.beamcon0_lifts_ddf_hard_stop(),
             dmacon: self.agnus.dmacon,
             bplcon0: self.denise.bplcon0,
             bplcon1: self.denise.bplcon1,

@@ -156,7 +156,9 @@ left to right it holds:
   SCSI CD-ROM unit, the CD LED shows CD-DA playback and the unit's data
   reads light the HDD LED with the rest of the SCSI bus. Small digital
   counters show the current floppy and CD tracks, in green and blue
-  respectively. A machine with only one kind of removable drive gets one
+  respectively. The floppy counter reads the track number, or with
+  *Video Settings -> Track Display -> Cyl.Side* the cylinder and side
+  (`40.1` is cylinder 40, upper side). A machine with only one kind of removable drive gets one
   full-size counter; a machine with both gets two vertically stacked
   counters, and a zero-floppy CDTV/CD32 does not show an empty FDD
   counter. When a built-in CD controller and an expansion CD-ROM are both
@@ -366,6 +368,32 @@ Opening the menu also releases a captured mouse.
 start-up size is `[display] menu_scale`, `--menu-scale`, or *Menu size* on
 the launcher's A/V & Emu page (Display category).
 
+(menu-settings-persist)=
+### Settings the menu remembers
+
+A setting changed from the menu, its hotkey or the status bar is kept for
+the next launch: Copperline writes it into the
+[saved default](#machine-configuration-screen) configuration as soon as it
+changes, creating that file if there is none yet. This covers the controller
+ports, the joystick input mode, autofire, mouse sensitivity, rewind, run
+ahead, the warp limit, floppy speed, clipboard sharing, and the Video and
+Audio settings (framing, aspect, scaling, shader and strength, tint, bezel,
+screen centring, fullscreen, the status bar, the performance overlay, VSync,
+menu size, audio output and filter). Only the settings you change are
+written, so a value that comes from the machine profile -- the CD32 pad in a
+CD32's port 2, say -- is not copied into the default every machine starts
+from. The changes also show on the
+[machine configuration screen](#machine-configuration-screen) when it is
+opened during the session, so **Save As** and **Save default** include them.
+
+A session started from a file you named -- `--config`, or a
+`copperline.toml` in the working directory -- leaves that file alone, as does
+a `--factory` run: their menu changes last for the session, and the
+configuration screen's **Save As** keeps them. A machine started from the
+configuration screen writes to the saved default even when **Load...** brought
+another file in; the loaded file itself is never rewritten. Scheduled headless
+runs never write the default.
+
 The [Debug workspace](../debugger/window.md) puts the Amiga display beside the
 debugger, Frame Analyzer, and Console in the main window. Switch inspectors with
 the tabs at the top, close one with the close box on its own tab, and resize the
@@ -414,7 +442,8 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   releases the snapshots, which is where the memory goes; the budget and
   interval are `[emulation] rewind_budget_mb` and `rewind_interval_frames`,
   and `rewind = true` starts recording at launch (see
-  [Configuration](configuration.md)). It shares its substrate with the
+  [Configuration](configuration.md)); turning it on from the menu
+  [sets that for the next launch](#menu-settings-persist). It shares its substrate with the
   debugger's reverse controls, so the same determinism caveats apply -- see
   [](../debugger/reverse).
 - **Run Ahead**: input-latency reduction for play -- **Off**, or 1 to 4
@@ -493,7 +522,8 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   real tube. It is a TV-aperture control, so it is greyed under
   `overscan = "full"`, which already shows everything. Unlike the shader
   and tint it is picture geometry, not a window effect: screenshots and
-  frame dumps follow it. Session-only; the start-up values are
+  frame dumps follow it. The menu
+  [remembers it](#menu-settings-persist); the start-up values are
   `[display] tv_h_centre` / `tv_v_centre`
   (see [Configuration](configuration.md)).
 - **CRT Shader**: the GPU tube-emulation pass over the picture --
@@ -501,8 +531,9 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   (an RGB phosphor shadow mask), **CRT (1084)** (both, plus a bowed tube face
   and a corner vignette), and **Custom**, greyed unless the config names a
   shader of your own, which is re-read from disk each time it is chosen.
-  The change is session-only: the start-up preset, the strength knob, and
-  how to write a custom shader are `[display] shader` and `shader_strength`
+  The menu [remembers the choice](#menu-settings-persist); the start-up
+  preset, the strength knob, and how to write a custom shader are
+  `[display] shader` and `shader_strength`
   (see [Configuration](configuration.md)). Interactive screenshots include
   the active pass; scheduled screenshots, frame dumps and recordings bypass
   it. The pass steps aside while the menu or any panel is open, under RTG,
@@ -514,7 +545,7 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
 - **Screen Tint**: the monochrome-monitor tint over the picture --
   **Colour** (full colour), **Black & white**, **Green** and **Amber** (the
   two classic monochrome phosphors), and **Sepia** -- the same looks as the
-  web frontend's *Screen* selector. Session-only, like the shader; the
+  web frontend's *Screen* selector. Remembered like the shader; the
   start-up tint is `[display] tint` (see [Configuration](configuration.md)).
   Interactive screenshots include the tint; scheduled screenshots, frame
   dumps and recordings stay untinted. The menu and status bar keep their
@@ -524,6 +555,10 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   bars as needed, exactly as when resizing the window.
 - **Status Bar** (also `Cmd+Shift+F` / `Alt+Shift+F`): show or hide the
   status bar. Handy alongside fullscreen for a clean, chrome-free picture.
+- **Track Display**: what the status bar's floppy counter reads --
+  **Track** (the track number) or **Cyl.Side** (cylinder and side, `40.1`).
+  The start-up choice is `[display] track_display` (see
+  [Configuration](configuration.md)).
 - **Monitor Bezel**: which monitor front the picture sits inside instead
   of filling the window -- **Disabled**, **1084** (a two-tone cabinet with
   the tube sunk into its moulding, and the model badge, the Copperline name
@@ -533,16 +568,16 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   captured raster fills the glass edge to edge, border colour and all,
   so the opening's rounded corners crop into the overscan border the way
   a real tube's do, not into the picture. `Cmd+M` / `Alt+M` turns the
-  chosen front off and back on; it never changes which. Session-only; the
-  start-up value is `[display] bezel` (see
+  chosen front off and back on; it never changes which. Remembered like
+  the shader; the start-up value is `[display] bezel` (see
   [Configuration](configuration.md)). Interactive screenshots include the bezel.
   Scheduled screenshots, frame dumps and recordings exclude it. A
   folder of PNG stickers can be drawn onto either front -- die-cut decals
   on the plastic, riding the same toggle -- via `[display] bezel_stickers`
   (no menu item; see [Configuration](configuration.md)).
 - **Performance** (also `Cmd+P` / `Alt+P`): show or hide the
-  [performance overlay](#performance-overlay). Session-only; the start-up
-  value is `[display] perf_overlay` (see
+  [performance overlay](#performance-overlay). Remembered like the other
+  Video settings; the start-up value is `[display] perf_overlay` (see
   [Configuration](configuration.md)).
 - **VSync**: synchronise presentation to the monitor's vertical blank
   (on by default). Turning it off requests presentation without waiting for
@@ -870,12 +905,14 @@ The layout is:
     [](whdload.md)).
   - *A/V & Emu*: five pages switched on the top nav row, opening on Audio:
     - **Audio**: output device, channel mode, stereo separation, filter,
-      floppy sounds and their volume.
+      floppy sounds, their volume, and the floppy sound set (**Synthesized**
+      or a WinUAE-format sample set from the `Floppy Sounds` folder).
     - **Video** -- the emulated picture: monitor bezel style, overscan,
       pixel aspect, scaling, autocrop, deinterlace, screen tint, phosphor,
       CRT shader and shader strength.
     - **Display** -- the host window: start fullscreen, host monitor and
-      window position, status bar, perf overlay, VSync, and menu size. The
+      window position, status bar, track display, perf overlay, VSync, and
+      menu size. The
       position box accepts `X, Y` offsets from the chosen monitor; clear it
       for automatic placement.
     - **Emulation**: power on at startup; run on startup (`[emulation]
@@ -955,7 +992,8 @@ The layout is:
   through a file dialog (a minimal file, only the settings that differ from
   the chosen profile's defaults, so it reads like the example configs);
   **Save default** saves the running configuration as the one Copperline
-  starts with: this screen opens showing it, and a run with no `--config`
+  starts with, including settings changed from the menu during the session:
+  this screen opens showing it, and a run with no `--config`
   and no `./copperline.toml` boots it (see [](configuration.md));
   `--factory` ignores it for one run. **Reset default** deletes that saved
   default after an "Are you sure?", returning Copperline to factory
@@ -1101,7 +1139,8 @@ Press `Cmd+Option+S` on macOS or `Ctrl+Alt+S` on Linux/Windows, or choose
 its original pixel size, without the TV border, aspect correction, filtering,
 phosphor persistence or tint. Black pixels inside the playfield are kept.
 RTG screens save at the board's native resolution. Interlaced chipset screens
-save the current field, without blending or weaving another field into it.
+save both fields woven at full height, so a 640×512 laced screen saves at
+640×512 (see [native headless captures](headless.md#capturing-screenshots)).
 
 `--native-screenshots` selects native scheduled captures and expectations.
 See [native headless captures](headless.md#capturing-screenshots) for resolution

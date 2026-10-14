@@ -626,7 +626,7 @@ pretty-printed JSON with the same fields.
   returns the resulting PNG as its image block.
   With `native: true`, captures original pixels cropped to the active
   playfield at 1:1, or RTG at its native resolution. Interlaced chipset
-  output captures the current field without weaving; see
+  output weaves the current field with the previous one at full height; see
   [native screenshots](../guide/headless.md#capturing-screenshots).
   Native capture cannot be combined with diagnostic overlays. Digest,
   input and overlay coordinates continue to use the default capture's raster.

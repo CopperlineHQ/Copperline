@@ -12,11 +12,7 @@ use anyhow::{anyhow, Result};
 use copperline::gdbstub;
 use copperline::{config, crashlog, debugger, emulator, envcfg, gamepad, priority, video};
 use log::{info, warn};
-use std::path::Path;
-// Only the Linux net-helper setup and the Windows disk broker build
-// PathBuf values; other targets would carry an unused-import warning.
-#[cfg(any(windows, target_os = "linux"))]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use copperline::audio::{AudioSink, CpalSink, NullSink, WavSink};
@@ -873,11 +869,10 @@ fn main() -> Result<()> {
     // bare launcher start has no --rom to fold in: launcher_requested
     // requires its absence.)
     if launcher_requested(&cli) {
-        return run_configuration_screen(load_raw_config(
-            cli.config_path.as_deref(),
-            &cli.overrides,
-            cli.factory,
-        )?);
+        return run_configuration_screen(
+            load_raw_config(cli.config_path.as_deref(), &cli.overrides, cli.factory)?,
+            menu_settings_file(cli.config_path.as_deref(), cli.factory),
+        );
     }
 
     // Guests and spectators receive the host's machine; their own
@@ -1150,6 +1145,11 @@ fn main() -> Result<()> {
         || cli.control.is_some()
         || coverage_capture
         || exit_capture;
+    // A scripted capture has no one at the menu, and must not touch the
+    // saved default if something drives it anyway.
+    let menu_settings = (!headless_capture)
+        .then(|| menu_settings_file(cli.config_path.as_deref(), cli.factory))
+        .flatten();
     // A real drive on a bridge is the exception: its platter turns in
     // wall-clock time and cannot be hurried. Left unthrottled, the emulated
     // machine outruns it -- spinning the motor up and down faster than it can
@@ -1262,6 +1262,7 @@ fn main() -> Result<()> {
     video::set_hidpi_texture(cfg.hidpi_texture);
     video::set_autocrop(cfg.autocrop);
     video::set_menu_scale(cfg.menu_scale);
+    video::set_track_display(cfg.track_display);
     // A fascia belongs to a machine that carries the instrument: with the
     // serial port out of MIDI mode, or another device chosen, the strip
     // would be blank glass, so the flag follows the configuration.
@@ -1443,6 +1444,7 @@ fn main() -> Result<()> {
         live_audio,
         copperline::sampler::SamplerRequest::from_config(&cfg.parallel),
     );
+    app.set_menu_settings_file(menu_settings);
     app.set_expect_screenshots(cli.expect_screenshot);
     app.set_native_screenshots(cli.native_screenshots);
     if let Some(marker) = run_done_marker {
@@ -1555,7 +1557,21 @@ fn build_placeholder_machine() -> Result<Emulator> {
 /// started with no machine specified). A placeholder machine sits powered off
 /// behind the panel until the user presses Run, which builds and starts their
 /// chosen machine in place.
-fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
+/// The saved default that menu settings changes are written through to: a
+/// session started from it (or from the built-in defaults, which a first
+/// change turns into one), but not one whose settings belong to a file the
+/// user named (`--config`, `./copperline.toml`) or that `--factory` keeps
+/// independent of the saved default.
+fn menu_settings_file(config_path: Option<&Path>, factory: bool) -> Option<PathBuf> {
+    (config_path.is_none() && !factory && !Path::new("copperline.toml").exists())
+        .then(copperline::paths::default_config_file)
+        .flatten()
+}
+
+fn run_configuration_screen(
+    raw_cfg: config::RawConfig,
+    menu_settings: Option<PathBuf>,
+) -> Result<()> {
     info!("no machine specified; opening the configuration screen");
     let emu = build_placeholder_machine()?;
     video::set_pixel_aspect(config::resolve_pixel_aspect(config::PixelAspect::Tv));
@@ -1568,6 +1584,7 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
     // The launcher opens before a machine config is built, so the menu size
     // comes straight off the raw file.
     video::set_menu_scale(raw_cfg.menu_scale());
+    video::set_track_display(raw_cfg.track_display());
     // The placeholder is always silent; seed the session's audio from the config
     // intent so a state loaded over the launcher gets the configured output.
     let audio_output_enabled = raw_cfg.audio_output_enabled();
@@ -1628,6 +1645,7 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         // The placeholder runs no sampler; run_machine attaches it on Run.
         copperline::sampler::SamplerRequest::default(),
     );
+    app.set_menu_settings_file(menu_settings);
     app.open_launcher();
     // `[emulation] auto_launch` in the configuration the launcher opened
     // showing: straight to the machine, no configuration screen first.
@@ -1868,6 +1886,12 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<CliArgs> {
         parse_args_from(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn menu_settings_write_through_skips_named_and_factory_configs() {
+        assert_eq!(menu_settings_file(Some(Path::new("my.toml")), false), None);
+        assert_eq!(menu_settings_file(None, true), None);
     }
 
     #[test]

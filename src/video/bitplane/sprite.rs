@@ -1610,7 +1610,11 @@ pub(super) fn collect_sprite_lines_into(
         state.dmacon,
         state.ddfstrt,
         state.ddfstop,
-        state.harddis,
+        crate::chipset::agnus::ddf_hard_stop_lifted(
+            state.agnus_revision,
+            state.harddis,
+            state.bplcon0,
+        ),
     );
     lines.clear();
 

@@ -76,7 +76,8 @@ src/
   gzip.rs           # gzip member loop behind ADZ/HDZ (multi-member, padding-tolerant)
   diskimage.rs      # blank ADF/HDF creation
   fluxbridge/       # real floppy drives through the FluxBridge library
-  drive_sounds.rs   # synthesized floppy-drive sound effects
+  drive_sounds.rs   # floppy-drive sound effects: synthesized, or a sample set
+  drive_sounds/     # sample_set.rs: WinUAE-format drive sample sets
   gary.rs           # Gary motherboard address decode (big-box machines)
   ramsey.rs         # Ramsey memory controller registers (A3000/A4000)
   gayle.rs          # A600/A1200 Gayle gate array + IDE

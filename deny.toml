@@ -82,10 +82,13 @@ unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # Project-owned sources: mt32-rs, Coppersynth, and plmpeg-rs are
 # revision-pinned in the manifest; FluxBridge currently follows its
-# maintained main branch.
+# maintained main branch. chd-rs is the revision-pinned [patch.crates-io]
+# fork carrying chd 0.3.4 onto ruzstd 0.9.1 (RUSTSEC-2026-0344, see
+# Cargo.toml); drop it with the patch.
 allow-git = [
     "https://github.com/CopperlineHQ/mt32-rs",
     "https://github.com/CopperlineHQ/Coppersynth",
     "https://github.com/CopperlineHQ/plmpeg-rs",
     "https://github.com/CopperlineHQ/FluxBridge",
+    "https://github.com/CopperlineHQ/chd-rs",
 ]
