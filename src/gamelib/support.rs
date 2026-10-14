@@ -46,7 +46,7 @@ impl Archive {
     /// What it must hash to.
     pub fn sha256(self) -> &'static str {
         match self {
-            Archive::Whdload => "093333953737528d79c1eda7d21a16a0aa298698722624e7cfb31f588a0a156d",
+            Archive::Whdload => "725b9255e6f55c57a57b2dd52dec221b223df5560d29153607088ffff6ae1bc1",
             Archive::Skick => "02b4d01852d12ab391c6469064f917221a0f7319fd0b3ba6c359403ec1d59f96",
         }
     }

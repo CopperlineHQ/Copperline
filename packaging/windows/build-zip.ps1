@@ -122,7 +122,7 @@ foreach ($f in @("hrtmon.rom", "README.md", "LICENSE")) {
 # where whdload::find_whdboot_assets probes a sibling whdboot\ directory.
 $whdbootSources = @(
     @{ Url = "https://whdload.de/whdload/WHDLoad_usr.lha"
-       Sha256 = "093333953737528d79c1eda7d21a16a0aa298698722624e7cfb31f588a0a156d" },
+       Sha256 = "725b9255e6f55c57a57b2dd52dec221b223df5560d29153607088ffff6ae1bc1" },
     @{ Url = "https://aminet.net/util/boot/skick346.lha"
        Sha256 = "02b4d01852d12ab391c6469064f917221a0f7319fd0b3ba6c359403ec1d59f96" }
 )

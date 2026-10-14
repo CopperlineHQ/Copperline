@@ -38,7 +38,7 @@ class Copperline < Formula
   # fetch script's header lists.
   resource "whdload" do
     url "https://whdload.de/whdload/WHDLoad_usr.lha", using: :nounzip
-    sha256 "093333953737528d79c1eda7d21a16a0aa298698722624e7cfb31f588a0a156d"
+    sha256 "725b9255e6f55c57a57b2dd52dec221b223df5560d29153607088ffff6ae1bc1"
   end
 
   resource "skick" do
