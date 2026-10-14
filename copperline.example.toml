@@ -778,6 +778,9 @@ video = "PAL"
 # (default 1.0; also --window-scale). 2 opens at twice the normal size.
 # status_bar: show the status bar at start (default true; also
 # --show-status-bar / --hide-status-bar, and Cmd/Alt+Shift+F toggles it live).
+# track_display: what the status bar's floppy counter reads. "track"
+# (default) is the track number; "cylinder" is CYL.SIDE, e.g. 40.1 for
+# track 81. Video Settings > Track Display changes it live.
 # menu_scale: how large the pop-up menu is drawn. "1x" (default) or "2x";
 # also --menu-scale, and Video Settings > Menu Size changes it live.
 # vsync: synchronise desktop presentation to vblank (default true).
@@ -812,6 +815,7 @@ video = "PAL"
 # window_scale = 1.0
 # title = "{app} {version} · {machine} · {rom}"
 # status_bar = true
+# track_display = "track"
 # vsync = true
 # hidpi_texture = true
 
@@ -837,6 +841,16 @@ floppy_sounds = true
 
 # Drive sound level, 0-100, relative to Paula's output.
 floppy_sounds_volume = 100
+
+# Play a WinUAE/FS-UAE drive sample set instead of the synthesized sounds:
+# drive_click_NAME.wav, drive_spin_NAME.wav, drive_spinnd_NAME.wav,
+# drive_startup_NAME.wav and drive_snatch_NAME.wav (any may be missing). A
+# bare name is looked up in the "Floppy Sounds" folder of the host-data
+# directory (Documents/Copperline/Floppy Sounds); a path names one of the
+# set's files, or its folder joined with the name. Omitted, empty or
+# "synthesized" keeps the synthesized sounds. A missing set warns and falls
+# back to them.
+# floppy_sounds_set = "A500"
 
 # Host audio output device, matched by a case-insensitive substring against
 # the names `--list-audio-devices` prints (also set with `--audio-device`).

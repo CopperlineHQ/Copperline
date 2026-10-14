@@ -5537,6 +5537,58 @@ fn display_start_toggles_round_trip_through_raw_config() {
 }
 
 #[test]
+fn track_display_round_trips_through_raw_config() {
+    let mut s = MachineSetup::default();
+    assert_eq!(s.value_label(LauncherField::TrackDisplay), "Track");
+    assert_eq!(s.to_raw().display.track_display, None);
+    s.cycle(LauncherField::TrackDisplay, true);
+    assert_eq!(s.value_label(LauncherField::TrackDisplay), "Cyl.Side");
+    assert_eq!(
+        s.to_raw().display.track_display.as_deref(),
+        Some("cylinder")
+    );
+    s.cycle(LauncherField::TrackDisplay, true);
+    assert_eq!(s.to_raw().display.track_display, None);
+}
+
+#[test]
+fn floppy_sound_set_cycles_installed_sets_and_keeps_a_custom_one() {
+    let installed = ["A500".to_string(), "LOUD".to_string()];
+    // Synthesized, then each installed set, then round again.
+    let step = |current: Option<&str>, forward| {
+        super::cycle_sound_set(&installed, current.map(str::to_string), forward)
+    };
+    assert_eq!(step(None, true).as_deref(), Some("A500"));
+    assert_eq!(step(Some("A500"), true).as_deref(), Some("LOUD"));
+    assert_eq!(step(Some("loud"), true), None);
+    assert_eq!(step(None, false).as_deref(), Some("LOUD"));
+    // A path the config names keeps its own place at the end.
+    let custom = "/sets/drive_click_ST.wav";
+    assert_eq!(step(Some(custom), true), None);
+    assert_eq!(step(Some(custom), false).as_deref(), Some("LOUD"));
+    // With nothing installed the picker still offers the synthesized
+    // sounds.
+    assert_eq!(super::cycle_sound_set(&[], None, true), None);
+}
+
+#[test]
+fn floppy_sound_set_round_trips_through_raw_config() {
+    let raw = RawConfig::parse("[audio]\nfloppy_sounds_set = \"/sets/drive_click_A500Real.wav\"\n")
+        .unwrap();
+    let mut s = MachineSetup::from_raw(&raw).unwrap();
+    assert_eq!(s.value_label(LauncherField::FloppySoundSet), "A500Real");
+    assert_eq!(
+        s.to_raw().audio.floppy_sounds_set.as_deref(),
+        Some("/sets/drive_click_A500Real.wav")
+    );
+    // The synthesized sounds are the default, so choosing them writes
+    // nothing.
+    s.floppy_sounds_set = None;
+    assert_eq!(s.value_label(LauncherField::FloppySoundSet), "Synthesized");
+    assert_eq!(s.to_raw().audio.floppy_sounds_set, None);
+}
+
+#[test]
 fn disabled_audio_greys_out_channel_mode_and_separation() {
     use crate::audio::AudioOutput;
     let mut s = MachineSetup::default();

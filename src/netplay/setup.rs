@@ -184,6 +184,9 @@ impl Hardware {
                     .into(),
                 ),
             },
+            // No floppy_sounds_set: which drive sample set a peer plays
+            // is never part of the machine state (drive_sounds.rs), so
+            // peers with different sets, or none, stay in step.
             audio: RawAudio {
                 floppy_sounds: Some(cfg.audio.floppy_sounds),
                 floppy_sounds_volume: Some(cfg.audio.floppy_sounds_volume.into()),

@@ -812,6 +812,67 @@ fn step_direction_reversal_moves_on_next_falling_edge() {
 }
 
 #[test]
+fn sound_steps_name_the_drive_and_the_cylinder_landed_on() {
+    // A sampled drive-sound set picks its click by the cylinder the head
+    // arrives at, per drive, so each step reports both.
+    let mut ctrl = FloppyController::default();
+    ctrl.set_connected_drives([true, true, false, false]);
+    let df1 = !CIAB_DSKMOTOR & !CIAB_DSKSEL_MASKS[1];
+    let inward_high = df1 & !CIAB_DSKDIREC;
+    ctrl.write_prb(inward_high);
+    for _ in 0..3 {
+        ctrl.write_prb(inward_high & !CIAB_DSKSTEP);
+        ctrl.write_prb(inward_high);
+        wait_step_floor(&mut ctrl);
+    }
+    let steps: Vec<SoundStep> = ctrl.drain_sound_steps().collect();
+    assert_eq!(
+        steps,
+        [1, 2, 3].map(|cylinder| SoundStep { drive: 1, cylinder })
+    );
+    assert_eq!(ctrl.drain_sound_steps().count(), 0);
+}
+
+#[test]
+fn disk_insert_and_eject_are_reported_to_the_drive_sounds() -> Result<()> {
+    let mut ctrl = FloppyController::default();
+    assert_eq!(ctrl.take_sound_media_changes(), 0);
+    ctrl.insert_disk_image_bytes(0, vec![0; ADF_SIZE], PathBuf::from("a.adf"), true)?;
+    assert_eq!(ctrl.take_sound_media_changes(), 0b1);
+    assert!(ctrl.drive_sound_states()[0].disk);
+    assert_eq!(ctrl.take_sound_media_changes(), 0);
+    ctrl.eject_disk_image(0)?;
+    assert_eq!(ctrl.take_sound_media_changes(), 0b1);
+    assert!(!ctrl.drive_sound_states()[0].disk);
+    Ok(())
+}
+
+#[test]
+fn pending_drive_sound_events_survive_a_state_round_trip() -> Result<()> {
+    // A disk swap lands between floppy ticks (a scheduled or netplay
+    // insert at a frame boundary), and a step's event waits for the next
+    // tick too. A state captured in that gap must carry both, or the
+    // restored machine's drive sounds -- serialized and checksummed --
+    // part ways with the original's.
+    let mut ctrl = FloppyController::default();
+    ctrl.insert_disk_image_bytes(0, vec![0; ADF_SIZE], PathBuf::from("a.adf"), true)?;
+    let inward_high = !CIAB_DSKMOTOR & !CIAB_DSKSEL0 & !CIAB_DSKDIREC;
+    ctrl.write_prb(inward_high);
+    ctrl.write_prb(inward_high & !CIAB_DSKSTEP);
+    let bytes = rmp_serde::to_vec_named(&ctrl)?;
+    let mut restored: FloppyController = rmp_serde::from_slice(&bytes)?;
+    assert_eq!(restored.take_sound_media_changes(), 0b1);
+    assert_eq!(
+        restored.drain_sound_steps().collect::<Vec<_>>(),
+        [SoundStep {
+            drive: 0,
+            cylinder: 1
+        }]
+    );
+    Ok(())
+}
+
+#[test]
 fn outward_step_at_track_zero_is_gated_silent_by_trk0_sensor() {
     // Trackdisk NoClick patches poll the change line by pulsing STEP
     // outward with the head parked at cylinder 0. The /TRK0 sensor
@@ -825,26 +886,26 @@ fn outward_step_at_track_zero_is_gated_silent_by_trk0_sensor() {
     ctrl.write_prb(outward_high);
     ctrl.write_prb(outward_high & !CIAB_DSKSTEP);
     assert_eq!(ctrl.selected_track(), Some(0));
-    assert_eq!(ctrl.take_sound_steps(), 0);
+    assert_eq!(ctrl.drain_sound_steps().count(), 0);
 
     // A pulse that does move the head is audible.
     ctrl.write_prb(inward_high);
     wait_step_floor(&mut ctrl);
     ctrl.write_prb(inward_high & !CIAB_DSKSTEP);
     assert_eq!(ctrl.selected_track(), Some(2));
-    assert_eq!(ctrl.take_sound_steps(), 1);
+    assert_eq!(ctrl.drain_sound_steps().count(), 1);
 
     // Back at cylinder 0, an outward poll goes quiet again.
     ctrl.write_prb(outward_high);
     wait_step_floor(&mut ctrl);
     ctrl.write_prb(outward_high & !CIAB_DSKSTEP);
     assert_eq!(ctrl.selected_track(), Some(0));
-    assert_eq!(ctrl.take_sound_steps(), 1);
+    assert_eq!(ctrl.drain_sound_steps().count(), 1);
     ctrl.write_prb(outward_high);
     wait_step_floor(&mut ctrl);
     ctrl.write_prb(outward_high & !CIAB_DSKSTEP);
     assert_eq!(ctrl.selected_track(), Some(0));
-    assert_eq!(ctrl.take_sound_steps(), 0);
+    assert_eq!(ctrl.drain_sound_steps().count(), 0);
 }
 
 #[test]
@@ -862,11 +923,11 @@ fn inward_step_at_inner_clamp_still_clicks() {
         wait_step_floor(&mut ctrl);
     }
     assert_eq!(ctrl.selected_track(), Some((CYLINDERS as u8 - 1) * 2));
-    ctrl.take_sound_steps();
+    ctrl.drain_sound_steps();
 
     ctrl.write_prb(inward_high & !CIAB_DSKSTEP);
     assert_eq!(ctrl.selected_track(), Some((CYLINDERS as u8 - 1) * 2));
-    assert_eq!(ctrl.take_sound_steps(), 1);
+    assert_eq!(ctrl.drain_sound_steps().count(), 1);
 }
 
 #[test]
@@ -879,12 +940,12 @@ fn step_pulse_swallowed_by_the_mechanism_is_silent() {
     ctrl.write_prb(inward_high);
 
     ctrl.write_prb(inward_high & !CIAB_DSKSTEP);
-    assert_eq!(ctrl.take_sound_steps(), 1);
+    assert_eq!(ctrl.drain_sound_steps().count(), 1);
 
     ctrl.write_prb(inward_high);
     ctrl.write_prb(inward_high & !CIAB_DSKSTEP);
     assert_eq!(ctrl.selected_track(), Some(2));
-    assert_eq!(ctrl.take_sound_steps(), 0);
+    assert_eq!(ctrl.drain_sound_steps().count(), 0);
 }
 
 #[test]

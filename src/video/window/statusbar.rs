@@ -107,7 +107,7 @@ pub(super) fn draw_status_bar(frame: &mut [u8], view: &StatusBarView, texture_sc
         draw_track_counter(
             frame,
             counter,
-            status.fdd_track,
+            fdd_counter_readout(status.fdd_track, crate::video::track_display()),
             TrackPalette::Fdd,
             texture_scale,
         );
@@ -116,7 +116,7 @@ pub(super) fn draw_status_bar(frame: &mut [u8], view: &StatusBarView, texture_sc
         draw_track_counter(
             frame,
             counter,
-            status.cd_track,
+            track_number_readout(status.cd_track),
             TrackPalette::Cd,
             texture_scale,
         );
@@ -734,10 +734,56 @@ impl TrackPalette {
     }
 }
 
+/// What a three-digit counter shows: one glyph per digit, and which digit
+/// (if any) carries a lit decimal point after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CounterReadout {
+    pub(super) glyphs: [u8; 3],
+    pub(super) point_after: Option<usize>,
+}
+
+/// A plain three-digit track number, or dashes when there is none.
+pub(super) fn track_number_readout(track: Option<u8>) -> CounterReadout {
+    let glyphs = track.map_or(*b"---", |track| {
+        [
+            b'0' + track / 100,
+            b'0' + (track / 10) % 10,
+            b'0' + track % 10,
+        ]
+    });
+    CounterReadout {
+        glyphs,
+        point_after: None,
+    }
+}
+
+/// The floppy counter in the chosen mode. A track is cylinder * 2 + side
+/// (`FloppyController::track_for_drive`), so CYL.SIDE splits it back into
+/// the head's cylinder -- two digits, the mechanism has 80 -- and the
+/// /SIDE line, with the decimal point between them: `40.0`.
+pub(super) fn fdd_counter_readout(
+    track: Option<u8>,
+    mode: crate::config::TrackDisplay,
+) -> CounterReadout {
+    match mode {
+        crate::config::TrackDisplay::Track => track_number_readout(track),
+        crate::config::TrackDisplay::Cylinder => {
+            let glyphs = track.map_or(*b"---", |track| {
+                let cylinder = (track / 2).min(99);
+                [b'0' + cylinder / 10, b'0' + cylinder % 10, b'0' + track % 2]
+            });
+            CounterReadout {
+                glyphs,
+                point_after: Some(1),
+            }
+        }
+    }
+}
+
 fn draw_track_counter(
     frame: &mut [u8],
     counter: TrackCounterSpec,
-    track: Option<u8>,
+    readout: CounterReadout,
     palette: TrackPalette,
     texture_scale: usize,
 ) {
@@ -757,22 +803,41 @@ fn draw_track_counter(
         texture_scale,
     );
 
-    let digits = track.map_or(*b"---", |track| {
-        [
-            b'0' + track / 100,
-            b'0' + (track / 10) % 10,
-            b'0' + track % 10,
-        ]
-    });
-    for (idx, ch) in digits.into_iter().enumerate() {
-        draw_seven_segment_digit(
-            frame,
-            scale_rect(track_counter_digit_rect(counter, idx), texture_scale),
-            ch as char,
-            palette.colors(),
-            texture_scale,
-        );
+    for (idx, ch) in readout.glyphs.into_iter().enumerate() {
+        let rect = scale_rect(track_counter_digit_rect(counter, idx), texture_scale);
+        draw_seven_segment_digit(frame, rect, ch as char, palette.colors(), texture_scale);
+        if readout.point_after == Some(idx) {
+            draw_seven_segment_point(frame, rect, palette.colors(), texture_scale);
+        }
     }
+}
+
+/// A lit decimal point in the gap after a seven-segment digit, sitting on
+/// the digit's baseline like the bottom segment. Drawn only where a mode
+/// asks for one, so the plain track readout keeps its look.
+fn draw_seven_segment_point(
+    frame: &mut [u8],
+    digit: Rect,
+    colors: (u32, u32, u32),
+    texture_scale: usize,
+) {
+    let thickness = 2 * texture_scale;
+    let point = Rect {
+        x: digit.x + digit.w + texture_scale,
+        y: digit.y + digit.h - thickness,
+        w: thickness,
+        h: thickness,
+    };
+    let (segment_on, _, segment_highlight) = colors;
+    fill_rect(frame, point, segment_on, texture_scale);
+    draw_hline_span(
+        frame,
+        point.y,
+        point.x,
+        point.x + point.w,
+        segment_highlight,
+        texture_scale,
+    );
 }
 
 pub(super) fn draw_volume_control(

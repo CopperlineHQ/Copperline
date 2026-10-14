@@ -57,12 +57,21 @@ annotated:
 | Toccata, RTC, `uae_hide_autoconfig` | `[toccata]`, `[machine] rtc`, `identify` |
 | Serial port (`TCP://host:port`, or a host device) | `[serial]` |
 | Audio channel modes and filters | `[audio]` settings |
+| Floppy drive sounds (`floppyNsound`, `floppyNsoundext`, `floppy_volume`) | `[audio] floppy_sounds`, `floppy_sounds_set`, `floppy_sounds_volume` |
 | Input port assignments | `[input]` port configurations |
 | Fullscreen and status bar | `[display]` |
 
 The table describes the WinUAE/Amiberry mapper. The FS-UAE mapper covers the
-model, CPU, memory, chipset and video standard, Kickstart, floppy drives, and
-hard drives; everything else in an FS-UAE file is listed as not translated.
+model, CPU, memory, chipset and video standard, Kickstart, floppy drives and
+their sounds (`floppy_drive_N_sounds`), and hard drives; everything else in an
+FS-UAE file is listed as not translated.
+
+Drive sounds are chosen per drive in WinUAE and FS-UAE but once for every drive
+in Copperline, so the first drive the source configures decides and a drive
+asking for something different is listed as not translated. A named sample set
+is the user's own files, which the converter cannot bring along: it is flagged
+as approximated with a reminder to copy the set's `drive_*_NAME.wav` files into
+Copperline's `Floppy Sounds` folder (see [Configuration](configuration.md)).
 
 ## Important differences
 

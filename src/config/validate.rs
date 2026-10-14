@@ -275,6 +275,11 @@ impl TryFrom<RawConfig> for Config {
                     defaults.audio.floppy_sounds_volume
                 }
             },
+            floppy_sounds_set: raw
+                .audio
+                .floppy_sounds_set
+                .as_deref()
+                .and_then(parse_floppy_sounds_set),
             output_device: raw
                 .audio
                 .output_device
@@ -439,6 +444,10 @@ impl TryFrom<RawConfig> for Config {
             super::window_title::validate(template).context("[display] title")?;
         }
         let status_bar = raw.display.status_bar.unwrap_or(defaults.status_bar);
+        let track_display = match raw.display.track_display.as_deref() {
+            None => defaults.track_display,
+            Some(s) => parse_track_display(s)?,
+        };
         let joystick_input_mode = match raw.input.joystick.as_deref() {
             None => defaults.joystick_input_mode,
             Some(s) => parse_joystick_input_mode(s)?,
@@ -1493,6 +1502,7 @@ impl TryFrom<RawConfig> for Config {
             monitor,
             window_position,
             status_bar,
+            track_display,
             joystick_input_mode,
             mouse_sensitivity,
             mouse_capture,
@@ -1678,6 +1688,27 @@ pub(crate) fn parse_menu_scale(s: &str) -> Result<MenuScale> {
         "1x" | "1" | "normal" => Ok(MenuScale::Normal),
         "2x" | "2" | "large" => Ok(MenuScale::Large),
         other => bail!("[display] menu_scale must be \"1x\" or \"2x\", got \"{other}\""),
+    }
+}
+
+/// Parse an `[audio] floppy_sounds_set` value: `None` for the synthesized
+/// sounds (empty, or "synthesized"), otherwise the set's name or path as
+/// written. Whether the set is there is the machine build's business: a
+/// missing set falls back to the synthesized sounds rather than failing
+/// the config, since the files live on the host, not in the config.
+pub(crate) fn parse_floppy_sounds_set(s: &str) -> Option<String> {
+    let s = s.trim();
+    (!s.is_empty() && !s.eq_ignore_ascii_case("synthesized")).then(|| s.to_string())
+}
+
+/// Parse a `[display] track_display` value.
+pub(crate) fn parse_track_display(s: &str) -> Result<TrackDisplay> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "track" => Ok(TrackDisplay::Track),
+        "cylinder" | "cyl.side" | "cyl" => Ok(TrackDisplay::Cylinder),
+        other => {
+            bail!("[display] track_display must be \"track\" or \"cylinder\", got \"{other}\"")
+        }
     }
 }
 

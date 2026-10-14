@@ -625,8 +625,10 @@ pub enum LauncherField {
     HostMonitor,
     WindowPosition,
     ShowStatusBar,
+    TrackDisplay,
     FloppySounds,
     FloppyVolume,
+    FloppySoundSet,
     PowerOn,
     AutoLaunch,
     PacingBudget,
@@ -1228,22 +1230,26 @@ pub(super) const VIDEO_ROWS: [Row; 10] = [
 ];
 
 // The host window and its furniture, as distinct from the picture inside it.
-pub(super) const DISPLAY_ROWS: [Row; 7] = [
+pub(super) const DISPLAY_ROWS: [Row; 8] = [
     row(F::StartFullscreen, "Start fullscreen", Cycle),
     row(F::HostMonitor, "Host monitor", Cycle),
     row(F::WindowPosition, "Window position", RowKind::Text),
     row(F::ShowStatusBar, "Status bar", Cycle),
+    row(F::TrackDisplay, "Track display", Cycle),
     row(F::PerfOverlay, "Perf overlay", Cycle),
     row(F::Vsync, "VSync", Cycle),
     row(F::MenuScale, "Menu size", Cycle),
 ];
-pub(super) const AUDIO_ROWS: [Row; 6] = [
+pub(super) const AUDIO_ROWS: [Row; 7] = [
     row(F::AudioDevice, "Audio output", Cycle),
     row(F::AudioChannelMode, "Channel mode", Cycle),
     row(F::AudioStereoSeparation, "Stereo separation", Cycle),
     row(F::AudioFilter, "Audio filter", Cycle),
     row(F::FloppySounds, "Floppy sounds", Cycle),
     row(F::FloppyVolume, "Floppy volume", Cycle),
+    // Synthesized, or a WinUAE-format sample set from the floppy sounds
+    // folder (`crate::paths::floppy_sounds_dir`).
+    row(F::FloppySoundSet, "Floppy sound set", Cycle),
 ];
 #[cfg(not(feature = "game-library"))]
 pub(super) const EMULATION_ROWS: [Row; 7] = [

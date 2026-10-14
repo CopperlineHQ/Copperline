@@ -1671,6 +1671,7 @@ impl App {
         self.perf = PerfOverlay::default();
         self.set_tint(crate::config::resolve_tint(cfg.tint));
         crate::video::set_menu_scale(cfg.menu_scale);
+        crate::video::set_track_display(cfg.track_display);
         #[cfg(feature = "mt32")]
         {
             crate::video::set_mt32_lcd(cfg.serial.mt32_lcd);

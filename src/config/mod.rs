@@ -447,6 +447,10 @@ pub struct Config {
     /// `--show-status-bar` / `--hide-status-bar`). `Cmd+Shift+F` /
     /// `Alt+Shift+F` toggles it live.
     pub status_bar: bool,
+    /// What the status bar's floppy counter reads (`[display]
+    /// track_display`): the track number, or CYL.SIDE. The menu's *Video
+    /// Settings -> Track Display* switches it live.
+    pub track_display: TrackDisplay,
     /// Initial host input source for the emulated joystick/CD32-pad port
     /// (`[input] joystick` / `--joystick`). Defaults to
     /// [`JoystickInputMode::Gamepad`]; the runtime status-bar toggle, `Cmd+J` /
@@ -829,6 +833,40 @@ impl MenuScale {
         match self {
             MenuScale::Normal => 1,
             MenuScale::Large => 2,
+        }
+    }
+}
+
+/// What the status bar's floppy counter shows for the selected drive's
+/// head position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TrackDisplay {
+    /// The track number, cylinder * 2 + side (0-159). The default.
+    #[default]
+    Track,
+    /// Cylinder and side with a decimal point between them (`40.0`): the
+    /// cylinder changes with every head step, and the side is the
+    /// /SIDE line the guest last drove.
+    Cylinder,
+}
+
+impl TrackDisplay {
+    /// Every mode, in the order a picker offers them.
+    pub const MENU_ORDER: [TrackDisplay; 2] = [TrackDisplay::Track, TrackDisplay::Cylinder];
+
+    /// The config name (round-trips through [`parse_track_display`]).
+    pub fn label(self) -> &'static str {
+        match self {
+            TrackDisplay::Track => "track",
+            TrackDisplay::Cylinder => "cylinder",
+        }
+    }
+
+    /// What a picker shows the user.
+    pub fn menu_label(self) -> &'static str {
+        match self {
+            TrackDisplay::Track => "Track",
+            TrackDisplay::Cylinder => "Cyl.Side",
         }
     }
 }
@@ -1859,6 +1897,10 @@ pub struct AudioConfig {
     pub floppy_sounds: bool,
     /// Drive sound level, 0-100, relative to Paula's output.
     pub floppy_sounds_volume: u8,
+    /// A WinUAE-format drive sample set every drive plays instead of the
+    /// synthesized sounds (`[audio] floppy_sounds_set`): a set name in the
+    /// floppy sounds folder, or a path. `None` synthesizes.
+    pub floppy_sounds_set: Option<String>,
     /// Host audio output device, matched by case-insensitive substring against
     /// the names cpal enumerates. `None` uses the system default output.
     pub output_device: Option<String>,
@@ -1885,6 +1927,7 @@ impl Default for AudioConfig {
         Self {
             floppy_sounds: true,
             floppy_sounds_volume: 100,
+            floppy_sounds_set: None,
             output_device: None,
             output_enabled: true,
             channel_mode: ChannelMode::Stereo,
@@ -2761,6 +2804,7 @@ impl Default for Config {
             monitor: HostMonitor::Auto,
             window_position: None,
             status_bar: true,
+            track_display: TrackDisplay::Track,
             joystick_input_mode: JoystickInputMode::Gamepad,
             mouse_sensitivity: 50,
             mouse_capture: MouseCapture::Click,

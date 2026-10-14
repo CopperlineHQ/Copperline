@@ -1575,6 +1575,25 @@ fn display_menu_scale_rejects_an_unknown_size() {
 }
 
 #[test]
+fn display_track_display_parses_and_defaults_to_track() -> Result<()> {
+    assert_eq!(parse_config("")?.track_display, TrackDisplay::Track);
+    let cfg = parse_config(
+        r#"
+            [display]
+            track_display = "cylinder"
+        "#,
+    )?;
+    assert_eq!(cfg.track_display, TrackDisplay::Cylinder);
+    assert_eq!(parse_track_display(" CYL.SIDE ")?, TrackDisplay::Cylinder);
+    for mode in TrackDisplay::MENU_ORDER {
+        assert_eq!(parse_track_display(mode.label())?, mode);
+    }
+    let err = parse_config("[display]\ntrack_display = \"sector\"\n").expect_err("unknown mode");
+    assert!(err.to_string().contains("track_display"), "{err}");
+    Ok(())
+}
+
+#[test]
 fn display_tint_parses_names_and_defaults_to_none() -> Result<()> {
     assert_eq!(parse_config("")?.tint, Tint::None);
     assert_eq!(parse_tint(" None ")?, Tint::None);

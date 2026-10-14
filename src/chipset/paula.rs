@@ -785,15 +785,17 @@ impl Paula {
     }
 
     /// Carry the user's output preferences (volume, channel mode, stereo
-    /// width, filter override) from the live Paula onto a freshly
-    /// deserialized one. They are skipped in save states, so without this
-    /// every restore -- state load, rewind, run-ahead, netplay rollback --
-    /// would reset them to their defaults.
+    /// width, filter override, drive sample sets) from the live Paula onto
+    /// a freshly deserialized one. They are skipped in save states, so
+    /// without this every restore -- state load, rewind, run-ahead, netplay
+    /// rollback -- would reset them to their defaults.
     pub(crate) fn adopt_host_preferences(&mut self, live: &Paula) {
         self.output_volume = live.output_volume;
         self.mono_output = live.mono_output;
         self.stereo_separation = live.stereo_separation;
         self.set_led_filter_mode(live.led_filter_mode);
+        // Which drives play a sample set is host configuration too.
+        self.drive_sounds.adopt_host_voices(&live.drive_sounds);
     }
 
     /// Drain transmissions completed since the last poll, plus the number of

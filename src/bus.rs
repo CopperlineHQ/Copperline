@@ -8290,23 +8290,30 @@ impl Bus {
         self.arm_irq_recognition_latency();
     }
 
-    /// Forward floppy mechanism activity (head steps, motor spin
-    /// levels) to the synthesized drive sound effects mixed into
-    /// Paula's host output. State updates here trail the
-    /// already-flushed audio batch by at most one chipset tick, well
-    /// under a single host sample.
+    /// Forward floppy mechanism activity (disk changes, head steps,
+    /// motor state) to the drive sound effects mixed into Paula's host
+    /// output. State updates here trail the already-flushed audio batch
+    /// by at most one chipset tick, well under a single host sample.
     fn feed_drive_sounds(&mut self) {
-        let steps = self.floppy.take_sound_steps();
-        let spins = self.floppy.motor_spin_levels();
+        let media_changes = self.floppy.take_sound_media_changes();
+        let states = self.floppy.drive_sound_states();
         let sounds = self.paula.drive_sounds_mut();
+        let steps = self.floppy.drain_sound_steps();
         if !sounds.enabled() {
             return;
         }
-        for _ in 0..steps {
-            sounds.step_pulse();
+        // A disk change first: a motor started in the same tick spins up
+        // on the new disk.
+        for drive in 0..states.len() {
+            if media_changes & (1 << drive) != 0 {
+                sounds.media_changed(drive);
+            }
         }
-        for (drive, spin) in spins.into_iter().enumerate() {
-            sounds.set_motor_spin(drive, spin);
+        for step in steps {
+            sounds.step_pulse(usize::from(step.drive), step.cylinder);
+        }
+        for (drive, state) in states.into_iter().enumerate() {
+            sounds.set_drive_state(drive, state);
         }
     }
 
