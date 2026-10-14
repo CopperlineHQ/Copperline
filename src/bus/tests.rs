@@ -16,15 +16,16 @@ use super::{
     CpuWaitClass, CpuWaitSample, DeviceClock, DisplaySpriteDmaState, DisplaySpriteLineData,
     FrameBusTrace, LiveCollisionControl, LiveCollisionLineReplay, LiveSpriteCollisionSource,
     PortDevice, RenderRegisterSnapshot, BLITTER_SLOWDOWN_CPU_MISS_LIMIT, BLTCON0_USE_A,
-    BLTCON0_USE_C, BLTCON0_USE_D, BLTCON1_DOFF, BLTCON1_LINE, BPLCON0_ECSENA, BPLCON3_BRDRBLNK,
-    BPLCON3_BRDSPRT, BPLCON3_SPRES_HIRES, BPLCON3_SPRES_SHRES, BUS_EVENT_BLIT_FINAL_D,
-    BUS_EVENT_CIAA_IRQ, BUS_EVENT_COPPER_WAKE, BUS_EVENT_DDFSTRT, BUS_EVENT_INTREQ, BUS_EVENT_LOF,
-    BUS_EVENT_LOL, BUS_EVENT_SPECIAL, BUS_EVENT_VB, BUS_EVENT_VDIW, BUS_EVENT_VS,
-    BUS_RECORD_BLITTER, BUS_RECORD_COPPER, BUS_RECORD_CPU, BUS_RECORD_DISK, BUS_RECORD_SPRITE,
-    CPU_WAIT_PC_CAP, DENISE_HPOS_LAG_CCK, DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN,
-    IRQ_SOURCE_BITS, PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS, RENDER_COPPER_WAIT_HPOS_FB0,
-    RENDER_DIW_HSTART_FB0, RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_LINES,
-    RENDER_VISIBLE_START_VPOS, SPRITE_DMA_SLOT1_HPOS, SPRITE_OUTPUT_DELAY_LORES,
+    BLTCON0_USE_B, BLTCON0_USE_C, BLTCON0_USE_D, BLTCON1_DOFF, BLTCON1_LINE, BPLCON0_ECSENA,
+    BPLCON3_BRDRBLNK, BPLCON3_BRDSPRT, BPLCON3_SPRES_HIRES, BPLCON3_SPRES_SHRES,
+    BUS_EVENT_BLIT_FINAL_D, BUS_EVENT_CIAA_IRQ, BUS_EVENT_COPPER_WAKE, BUS_EVENT_DDFSTRT,
+    BUS_EVENT_INTREQ, BUS_EVENT_LOF, BUS_EVENT_LOL, BUS_EVENT_SPECIAL, BUS_EVENT_VB,
+    BUS_EVENT_VDIW, BUS_EVENT_VS, BUS_RECORD_BLITTER, BUS_RECORD_COPPER, BUS_RECORD_CPU,
+    BUS_RECORD_DISK, BUS_RECORD_SPRITE, CPU_WAIT_PC_CAP, DENISE_HPOS_LAG_CCK, DMACON_BLTEN,
+    DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN, IRQ_SOURCE_BITS, PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS,
+    RENDER_COPPER_WAIT_HPOS_FB0, RENDER_DIW_HSTART_FB0, RENDER_MIN_OVERSCAN_START_VPOS,
+    RENDER_VISIBLE_LINES, RENDER_VISIBLE_START_VPOS, SPRITE_DMA_SLOT1_HPOS,
+    SPRITE_OUTPUT_DELAY_LORES,
 };
 use crate::audio::AudioSink;
 use crate::chipset::agnus::{
@@ -11064,6 +11065,111 @@ fn busy_bltcon0_write_disables_remaining_d_output_without_draining_blit() {
     assert_ne!(bus.paula.intreq & INT_BLIT, 0);
 }
 
+/// A 020+ CPU polling DMACONR sees BBUSY drop at the last body cycle and can
+/// write BLTCON0 for its next blit in the terminal cycles, before the queued
+/// final D word lands. That write belongs to the next blit: the pending D
+/// word must still be written. Regression example: graphics.library's
+/// per-plane BltBitMap loop on a fast A4000 lost a whole bitplane of
+/// one-word, one-row copies (p96cts ClipBlit-disjoint, issue #573).
+#[test]
+fn bltcon0_write_after_bbusy_poll_keeps_pending_final_d_write() {
+    let mut bus = empty_bus();
+    bus.set_cpu_bus_arbitration_enabled(true);
+    bus.set_cpu_short_bus_cycle(true);
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BLTEN;
+    bus.agnus.hpos = 0x40;
+    // BltBitMap's copy: A is the BLTADAT window under the first/last-word
+    // masks, D = AB + !AC, one word by one row.
+    bus.blitter.bltcon0 = BLTCON0_USE_B | BLTCON0_USE_C | BLTCON0_USE_D | 0x00CA;
+    bus.blitter.bltcon1 = 0;
+    bus.blitter.bltafwm = 0xFF00;
+    bus.blitter.bltalwm = 0xFF00;
+    bus.blitter.bltadat = 0xFFFF;
+    bus.blitter.bltbpt = 0x10;
+    bus.blitter.bltcpt = 0x20;
+    bus.blitter.bltdpt = 0x20;
+    write_chip_word(&mut bus, 0x10, 0xAAAA);
+    write_chip_word(&mut bus, 0x20, 0x5555);
+    assert!(!bus.custom_write(0x058, 2, (1 << 6) | 1));
+
+    let mut polls = 0;
+    while bus.custom_read(0x002, 2) as u16 & (1 << 14) != 0 {
+        polls += 1;
+        assert!(polls < 32, "one-word blit must drop BBUSY");
+    }
+    // The poll returns inside the terminal cycles, ahead of the final D.
+    assert!(bus.blitter.busy);
+    assert_eq!(&bus.mem.chip_ram[0x20..0x22], &[0x55, 0x55]);
+
+    assert!(!bus.custom_write(0x040, 2, 0x0FF0));
+    assert_eq!(bus.blitter.bltcon0, 0x0FF0);
+    bus.advance_chipset(8);
+
+    assert!(!bus.blitter.busy);
+    assert_eq!(&bus.mem.chip_ram[0x20..0x22], &[0xAA, 0x55]);
+}
+
+/// Once BBUSY drops the register file is software's: values written during
+/// the terminal cycles must survive the blit's completion instead of being
+/// overwritten by its end-of-blit register state.
+#[test]
+fn register_writes_after_bbusy_drop_survive_blit_completion() {
+    // Normal blit: C DMA loads BLTCDAT, and the first BLTBDAT write after
+    // BBUSY drops starts from a cleared B old register.
+    let mut bus = empty_bus();
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BLTEN;
+    bus.agnus.hpos = 0x20;
+    bus.blitter.bltcon0 = BLTCON0_USE_A | BLTCON0_USE_C | BLTCON0_USE_D | 0x00F0;
+    bus.blitter.bltcon1 = 4 << 12;
+    bus.blitter.bltafwm = 0xFFFF;
+    bus.blitter.bltalwm = 0xFFFF;
+    bus.blitter.bltapt = 0x10;
+    bus.blitter.bltcpt = 0x40;
+    bus.blitter.bltdpt = 0x20;
+    write_chip_word(&mut bus, 0x40, 0x1357);
+    write_chip_word(&mut bus, 0x42, 0x2468);
+    assert!(!bus.custom_write(0x072, 2, 0x1234));
+    assert!(!bus.custom_write(0x058, 2, ((1 << 6) | 2) as u64));
+    advance_to_terminal_cycles(&mut bus);
+    assert!(!bus.custom_write(0x070, 2, 0xC0DE));
+    assert!(!bus.custom_write(0x072, 2, 0xF00F));
+    bus.advance_chipset(8);
+    assert!(!bus.blitter.busy);
+    assert_eq!(bus.blitter.bltcdat, 0xC0DE);
+    assert_eq!(bus.blitter.b_hold_latch(), 0x0F00);
+
+    // Line blit: completion must not restore the line's BLTCON0/BLTCON1
+    // over the next blit's control words.
+    let mut bus = empty_bus();
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BLTEN;
+    bus.agnus.hpos = 0x20;
+    bus.blitter.bltcon0 = BLTCON0_USE_A | BLTCON0_USE_C | BLTCON0_USE_D | 0x00CA;
+    bus.blitter.bltcon1 = BLTCON1_LINE;
+    bus.blitter.bltafwm = 0xFFFF;
+    bus.blitter.bltalwm = 0xFFFF;
+    bus.blitter.bltadat = 0x8000;
+    bus.blitter.bltcpt = 0x1000;
+    bus.blitter.bltdpt = 0x1000;
+    assert!(!bus.custom_write(0x058, 2, ((4 << 6) | 2) as u64));
+    advance_to_terminal_cycles(&mut bus);
+    assert!(!bus.custom_write(0x040, 2, 0x09F0));
+    assert!(!bus.custom_write(0x042, 2, 0x0000));
+    bus.advance_chipset(8);
+    assert!(!bus.blitter.busy);
+    assert_eq!(bus.blitter.bltcon0, 0x09F0);
+    assert_eq!(bus.blitter.bltcon1, 0x0000);
+}
+
+fn advance_to_terminal_cycles(bus: &mut Bus) {
+    let mut guard = 0;
+    while bus.blitter.bbusy {
+        bus.advance_chipset(1);
+        guard += 1;
+        assert!(guard < 64, "blit must reach its terminal cycles");
+    }
+    assert!(bus.blitter.busy, "terminal cycles still pending");
+}
+
 #[test]
 fn busy_bltcon1_line_bit_write_updates_register_without_reinterpreting_pipeline_snapshot() {
     let mut bus = bus_with_pending_two_word_a_to_d_blit();
@@ -11320,11 +11426,14 @@ fn ecs_bltcon1_doff_suppresses_destination_writes_but_advances_pointer() {
     assert_eq!(&bus.mem.chip_ram[0x20..0x22], &[0xAA, 0xAA]);
     assert_eq!(bus.blitter.bltdpt, 0x20);
 
+    // Terminal cycles: BBUSY has dropped and the register file already
+    // holds the post-blit pointer while the suppressed final D slot runs.
     bus.advance_chipset(2);
     assert!(bus.blitter.busy);
+    assert!(!bus.blitter.bbusy);
     assert!(!bus.blitter.bzero);
     assert_eq!(&bus.mem.chip_ram[0x20..0x22], &[0xAA, 0xAA]);
-    assert_eq!(bus.blitter.bltdpt, 0x20);
+    assert_eq!(bus.blitter.bltdpt, 0x22);
 
     bus.advance_chipset(2);
 
