@@ -40,6 +40,11 @@ env_logger = "0.11"
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
 
+# The root manifest's chd patch (RUSTSEC-2026-0344); [patch] applies only at
+# a workspace root, so this standalone workspace repeats it. Remove together.
+[patch.crates-io]
+chd = { git = "https://github.com/CopperlineHQ/chd-rs", rev = "a0170de589031c74dc7245c9dc05dade5d919dc6" }
+
 [profile.release]
 opt-level = 3
 lto = "fat"

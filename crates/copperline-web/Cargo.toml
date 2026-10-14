@@ -25,6 +25,11 @@ log = "0.4"
 console_log = "1"
 console_error_panic_hook = "0.1"
 
+# The root manifest's chd patch (RUSTSEC-2026-0344); [patch] applies only at
+# a workspace root, so this standalone workspace repeats it. Remove together.
+[patch.crates-io]
+chd = { git = "https://github.com/CopperlineHQ/chd-rs", rev = "a0170de589031c74dc7245c9dc05dade5d919dc6" }
+
 [profile.release]
 opt-level = 3
 # The emulator's hot path crosses the web wrapper, CPU, bus and chipset

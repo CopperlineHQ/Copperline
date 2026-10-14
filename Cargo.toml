@@ -450,6 +450,18 @@ syn = { version = "3", features = ["full", "visit"] }
 # plugins live as readable text in the tests rather than checked-in binaries.
 wat = "1"
 
+# chd 0.3.4, the latest release, requires ruzstd 0.8, whose zstd decoder
+# never bounds a block's decompressed size: a crafted CHD hunk under 128 KB
+# can allocate gigabytes and abort the process (RUSTSEC-2026-0344, fixed in
+# ruzstd 0.9.1). The CopperlineHQ fork pins the chd-v0.3.4 release with only
+# that bump applied. The nested workspaces (crates/copperline-player,
+# crates/copperline-web, crates/copperline-libretro, fuzz) carry the same
+# patch, since [patch] applies only at a workspace root. Remove all of them
+# once a chd release requires ruzstd >= 0.9.1
+# (https://github.com/SnowflakePowered/chd-rs/pull/23).
+[patch.crates-io]
+chd = { git = "https://github.com/CopperlineHQ/chd-rs", rev = "a0170de589031c74dc7245c9dc05dade5d919dc6" }
+
 [lints.clippy]
 # Chipset pipeline functions take per-signal argument lists that mirror the
 # hardware; bundling them into structs would obscure the data flow.
