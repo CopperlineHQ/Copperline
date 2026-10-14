@@ -346,6 +346,24 @@ block, descriptor rings, and packet buffers live in the board's own 32 KiB RAM
 (which the CPU reaches through the board window), so the board is self-contained
 and owns its host network backend directly.
 
+The receiver latches the station address and 64-bit multicast filter on INIT.
+It accepts its station address, broadcast, and multicast destinations selected
+by the Am7990's reflected CRC hash; MODE.PROM bypasses destination filtering.
+Rejected frames consume no receive descriptor and do not raise RINT or MISS.
+Each emulation tick polls at most 128 inbound frames, including rejected frames,
+so continuous traffic for unjoined groups cannot stall the emulated machine.
+This matters when testing IPv6 neighbour discovery: accepting every frame can
+hide an incorrectly programmed solicited-node multicast filter in a guest driver.
+Snapshots from before filtering was implemented retain their old receive
+behavior until the guest reinitializes the chip.
+
+The loopback backend reflects the guest's own multicast frames. It is useful
+for SANA-II delivery tests, but can make IPv6 duplicate-address detection see
+the guest's own solicitation as a duplicate. Use an isolated board (`net =
+"none"`) for address-lifecycle tests, or a bridged peer for network tests.
+The NAT backend provides IPv4 connectivity; it does not validate IPv6 or LAN
+multicast interoperability.
+
 Host network backends live in `src/net/` behind the `NetBackend` trait. Three are
 built in:
 
@@ -372,7 +390,12 @@ built in:
   self-contained demo, driver bring-up, and tests.
 - **`bridge`** -- direct layer-2 attachment to one host adapter. The guest's
   frames go to the adapter unchanged (destination through payload, no FCS), and
-  receive filters admit its station MAC plus broadcast/multicast. There is no
+  receive filters admit its station MAC plus broadcast/multicast. A2065 MODE.PROM
+  also admits foreign unicast in both the capture and software filters; capture
+  echoes sourced by the guest remain suppressed. The mode is restored with a
+  saved state and cleared on board reset. Promiscuous capture sees only traffic
+  the host adapter receives; it cannot make a switched LAN send other stations'
+  traffic to the adapter. There is no
   protocol translation and no managed TAP device: LAN DHCP, ARP, IPv4, and IPv6
   work as they do for a physical station. LAN peers and the router can reach
   the guest; the host's own IP is not guaranteed to be reachable through the

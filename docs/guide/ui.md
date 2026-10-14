@@ -45,7 +45,8 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 |---|---|---|
 | `Cmd+Q` | `Alt+Q` | Quit (also the [menu's](#and-last) last row; a [calibrated gamepad's](#gamepad-calibration) optional Quit hotkey, held, quits too) |
 | `Cmd+E` | `Alt+E` | Open / close the menu (also the status bar's hamburger button); releases a captured mouse |
-| `Cmd+S` | `Alt+S` | Save a screenshot (`copperline-screenshot-<YYYYMMDDHHmmSS>.png` in the [screenshots folder](#where-files-go); the on-screen confirmation overlay is not part of the saved image) |
+| `Cmd+Option+S` | `Ctrl+Alt+S` | Save a native screenshot at the original pixel size |
+| `Cmd+S` | `Alt+S` | Save the displayed picture with its current effects (`copperline-screenshot-<YYYYMMDDHHmmSS>.png` in the [screenshots folder](#where-files-go); the on-screen confirmation overlay is not part of the saved image) |
 | `Cmd+R` | `Alt+R` | Start / stop a video-with-audio recording (below) |
 | `Cmd+Shift+R` | `Alt+Shift+R` | Start / stop an input recording (below) |
 | `Cmd+Shift+V` | `Alt+Shift+V` | Paste as keystrokes: type the host clipboard's text on the emulated keyboard (also *Input Settings -> Paste as Keystrokes*) |
@@ -271,8 +272,8 @@ the same point. Under Warp Speed the presentation shows one frame per
 burst, but every emulated frame is still computed.
 
 Like the transient message overlay, the readout is painted into the
-presentation only: screenshots, frame dumps, and recordings never include
-it. While a video recording is running the block steps below the `REC`
+presentation only. Interactive screenshots include it; scheduled screenshots,
+frame dumps, and recordings exclude it. While a video recording is running the block steps below the `REC`
 badge. `COPPERLINE_PERF_OVERLAY=1|0` overrides the config for a single
 run, and `--perf-overlay` shows it from the command line; the launcher's
 *Perf overlay* row (*A/V & Emu*, *Display*) makes it stick. The same
@@ -288,7 +289,8 @@ until `debug_clear` removes them. Their coordinates are in a virtual 768x576
 space mapped across the active display area, so they follow the autocrop and
 scaling settings. The debug overlay is drawn beneath the host UI (status
 bar, OSD, performance overlay) and affects only live window presentation;
-screenshots, frame dumps, and video recordings exclude it. Disabling
+interactive screenshots include it, while scheduled screenshots, frame dumps,
+and video recordings exclude it. Disabling
 `[emulation] uaelib` removes the uaelib trap entirely.
 
 ## Drag and drop
@@ -336,9 +338,9 @@ The menu, with a category open beside it.
 
 The hamburger button at the right of the status bar opens the menu, as does
 `Cmd+E` / `Alt+E`. It grows upward from the status bar and dims the picture
-behind it, so the menu stays readable over a busy picture. The dimming is a
-window effect: it never appears in a screenshot, a frame dump, or a
-recording.
+behind it, so the menu stays readable over a busy picture. Interactive
+screenshots include the menu and its dimming. Scheduled screenshots, frame
+dumps and recordings exclude them.
 
 The top level holds the tools, then a category per area of the machine,
 then **Load Kickstart ROM...**, **Keyboard Shortcuts...**, **About...**,
@@ -471,8 +473,9 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   integer multiplier is recalculated for the cropped area. The status bar
   and overlay panels stay docked at the bottom of the window; opening a menu
   or panel temporarily expands the display to the full area so the controls
-  remain reachable. Autocrop affects the presentation only (captures always
-  use the full aperture). It works with the CRT shaders and programmable
+  remain reachable. Interactive screenshots follow the visible crop;
+  scheduled screenshots, frame dumps and recordings use the configured aperture.
+  It works with the CRT shaders and programmable
   multisync modes, and is suspended while a monitor bezel is drawn or an RTG
   mode is shown. The start-up value is `[display] autocrop` (see
   [Configuration](configuration.md)).
@@ -500,10 +503,10 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   shader of your own, which is re-read from disk each time it is chosen.
   The change is session-only: the start-up preset, the strength knob, and
   how to write a custom shader are `[display] shader` and `shader_strength`
-  (see [Configuration](configuration.md)). The pass is a window effect only --
-  screenshots, frame dumps and recordings are never shader-processed -- and
-  it steps aside for the frames it cannot sensibly draw: while the menu or
-  any panel is open, under RTG, and in programmable multisync scan modes.
+  (see [Configuration](configuration.md)). Interactive screenshots include
+  the active pass; scheduled screenshots, frame dumps and recordings bypass
+  it. The pass steps aside while the menu or any panel is open, under RTG,
+  and in programmable multisync scan modes.
 - **Shader Strength**: how strongly the shader pass is applied, stepped
   10% at a time with **Stronger** / **Softer** (the category row shows the
   figure); greyed while the shader is off. The start-up strength is
@@ -513,8 +516,9 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   two classic monochrome phosphors), and **Sepia** -- the same looks as the
   web frontend's *Screen* selector. Session-only, like the shader; the
   start-up tint is `[display] tint` (see [Configuration](configuration.md)).
-  A window effect only: captures stay untinted, the menu and the status bar
-  keep their colours, and RTG scanout is never tinted.
+  Interactive screenshots include the tint; scheduled screenshots, frame
+  dumps and recordings stay untinted. The menu and status bar keep their
+  colours, and RTG scanout is never tinted.
 - **Fullscreen** (also `Cmd+F` / `Alt+F`): borderless fullscreen on the
   window's current monitor. The picture keeps its aspect with black letterbox
   bars as needed, exactly as when resizing the window.
@@ -531,8 +535,8 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   a real tube's do, not into the picture. `Cmd+M` / `Alt+M` turns the
   chosen front off and back on; it never changes which. Session-only; the
   start-up value is `[display] bezel` (see
-  [Configuration](configuration.md)). A window effect only, like the
-  shader: screenshots, frame dumps and recordings never include it. A
+  [Configuration](configuration.md)). Interactive screenshots include the bezel.
+  Scheduled screenshots, frame dumps and recordings exclude it. A
   folder of PNG stickers can be drawn onto either front -- die-cut decals
   on the plastic, riding the same toggle -- via `[display] bezel_stickers`
   (no menu item; see [Configuration](configuration.md)).
@@ -1080,25 +1084,28 @@ and greyed alongside either.
 `Dir cache` needs Kickstart 3.0, `International` needs 2.0, and `Long
 names` needs a filesystem no Kickstart provides.
 
+## Saving screenshots
+
+The camera button and `Cmd+S` on macOS or `Alt+S` on Linux/Windows save the
+picture at its current displayed size, including the current crop, scaling,
+tint, CRT shader, monitor bezel and stickers. The status bar and surrounding
+window margins are excluded. Open menus and panels, their dimming, and any
+overlays within the picture are included. The save confirmation appears
+after capture.
+
 (native-screenshots)=
 ## Saving native screenshots
 
-Choose **Recording → Save Native Screenshot (1:1)** to save the active
-playfield at its original pixel size, without the TV border, aspect
-correction, filtering, phosphor persistence or tint. Black pixels inside the
-playfield are kept. RTG screens save at the board's native resolution.
-Interlaced chipset screens save the current field, without blending or
-weaving another field into it.
+Press `Cmd+Option+S` on macOS or `Ctrl+Alt+S` on Linux/Windows, or choose
+**Recording → Save Native Screenshot (1:1)**, to save the active playfield at
+its original pixel size, without the TV border, aspect correction, filtering,
+phosphor persistence or tint. Black pixels inside the playfield are kept.
+RTG screens save at the board's native resolution. Interlaced chipset screens
+save the current field, without blending or weaving another field into it.
 
-Starting Copperline with `--native-screenshots` also makes the camera button
-and `Cmd+S` / `Alt+S` use this capture. You can switch just the button and
-shortcut in **Video Settings → Native Screenshot Button**; set
-`[recording] native_screenshot_button = true` to start with it enabled.
-To keep a change made in the menu, choose **Machine Configuration → Save default**.
-See [native headless captures](headless.md#capturing-screenshots)
-for resolution and crop details.
-
-Screenshots save to the [screenshots folder](#where-files-go).
+`--native-screenshots` selects native scheduled captures and expectations.
+See [native headless captures](headless.md#capturing-screenshots) for resolution
+and crop details. Screenshots save to the [screenshots folder](#where-files-go).
 
 (recording-video)=
 ## Recording video

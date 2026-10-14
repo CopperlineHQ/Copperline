@@ -60,11 +60,8 @@ const CSR0_ERR: u16 = 1 << 15;
 /// Status bits the host clears by writing 1 (the rest of CSR0 is control).
 const CSR0_RC_BITS: u16 = CSR0_IDON | CSR0_TINT | CSR0_RINT | (0xF << 11) | CSR0_ERR;
 
-// Init-block MODE word bits (Am7990). PROM (bit 15) and the LADRF hash are
-// not modelled: the receiver accepts every frame the backend delivers, which
-// behaves like PROM permanently set. A NAT/loopback backend only ever hands
-// the board frames addressed to it (or broadcasts), so the filter would be
-// a no-op anyway.
+// Init-block MODE word bits (Am7990).
+const MODE_PROM: u16 = 1 << 15;
 const MODE_DRX: u16 = 1 << 0;
 const MODE_DTX: u16 = 1 << 1;
 const MODE_LOOP: u16 = 1 << 2;
@@ -79,12 +76,22 @@ const DESC_ENP: u8 = 1 << 0;
 /// Largest Ethernet frame the chip will move (no jumbo frames).
 const MAX_FRAME: usize = 1518;
 
+/// Limit host ingress work even when every captured frame is rejected.
+const MAX_RX_POLLS: usize = 128;
+
 /// The frame check sequence the chip stores after a received payload. The
 /// receiver writes the frame as it came off the wire, FCS included, and MCNT
 /// counts it; drivers recover the payload length as `MCNT - 4`. No CRC is
 /// modelled (drivers strip the FCS, they never verify it), so zeros are
 /// stored.
 const FCS_LEN: usize = 4;
+
+#[derive(Debug, PartialEq, Eq)]
+enum RxResult {
+    Written,
+    Filtered,
+    Unavailable,
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct A2065 {
@@ -105,6 +112,10 @@ pub struct A2065 {
 
     // Ring state derived from the init block on INIT.
     mode: u16,
+    /// Latched logical address filter. Old snapshots predate filtering;
+    /// None preserves their previous receive behavior until the next INIT.
+    #[serde(default)]
+    logical_filter: Option<u64>,
     rx_ring: u32,
     rx_len: u32,
     rx_mask: u32,
@@ -143,6 +154,7 @@ impl A2065 {
             csr2: 0,
             csr3: 0,
             mode: 0,
+            logical_filter: None,
             rx_ring: 0,
             rx_len: 0,
             rx_mask: 0,
@@ -160,13 +172,18 @@ impl A2065 {
     /// Reattach the live network backend after a save-state load (the backend
     /// is a host resource and is brought up fresh, like an audio sink).
     pub(crate) fn reattach_backend(&mut self) -> Result<()> {
-        let mut backend = make_backend(&self.net_config, Some(self.mac))
+        let backend = make_backend(&self.net_config, Some(self.mac))
             .context("restoring A2065 network backend")?;
+        self.attach_backend(backend);
+        Ok(())
+    }
+
+    fn attach_backend(&mut self, mut backend: Option<Box<dyn NetBackend>>) {
         if let Some(backend) = backend.as_mut() {
             backend.set_guest_mac(self.mac);
+            backend.set_promiscuous(self.mode & MODE_PROM != 0);
         }
         self.net = backend;
-        Ok(())
     }
 
     // ----- board RAM word access (big-endian) ----------------------------
@@ -197,8 +214,11 @@ impl A2065 {
     /// Read the init block (Am7990 layout) from board RAM and set up the rings.
     fn lance_init(&mut self) {
         let iadr = self.init_block_addr();
-        // +0 MODE, +2..+8 PADR (MAC), +8..+10 LADRF (filter, ignored).
+        // +0 MODE, +2..+8 PADR (MAC), +8..+16 LADRF (four words).
         self.mode = self.ram_word(iadr);
+        self.logical_filter = Some((0..4).fold(0, |filter, i| {
+            filter | (u64::from(self.ram_word(iadr + 8 + i * 2)) << (i * 16))
+        }));
         for i in 0..3 {
             let w = self.ram_word(iadr + 2 + i * 2);
             // PADR is stored low-byte-first per word in LANCE order.
@@ -207,6 +227,7 @@ impl A2065 {
         }
         if let Some(net) = self.net.as_mut() {
             net.set_guest_mac(self.mac);
+            net.set_promiscuous(self.mode & MODE_PROM != 0);
         }
         // +$10 RDRA[15:0], +$12 (RLEN<<13) | RDRA[23:16].
         let rdra_lo = self.ram_word(iadr + 0x10);
@@ -321,9 +342,12 @@ impl A2065 {
     /// set in the first descriptor, ENP and MCNT written in the last). The
     /// stored message is payload plus [`FCS_LEN`] trailer bytes, as received
     /// off the wire.
-    fn receive_frame(&mut self, frame: &[u8]) -> bool {
+    fn receive_frame(&mut self, frame: &[u8]) -> RxResult {
         if !self.running || self.rx_len == 0 || self.mode & MODE_DRX != 0 {
-            return false;
+            return RxResult::Unavailable;
+        }
+        if !self.accepts_destination(frame) {
+            return RxResult::Filtered;
         }
         let total = (frame.len() + FCS_LEN).min(MAX_FRAME);
         let mut remaining = total;
@@ -337,7 +361,7 @@ impl A2065 {
                 if first {
                     // No descriptor to start the frame in: missed frame.
                     self.csr0 |= CSR0_MISS;
-                    return false;
+                    return RxResult::Unavailable;
                 }
                 // Ran out of chained buffers mid-frame: the last buffer the
                 // chip filled gets BUFF, the frame is truncated, no ENP.
@@ -348,7 +372,7 @@ impl A2065 {
                 self.rx_cur = desc;
                 self.activity = true;
                 self.csr0 |= CSR0_RINT;
-                return true;
+                return RxResult::Written;
             }
             let (buf_addr, cap) = self.desc_buffer(dbase);
             let n = remaining.min(cap);
@@ -378,7 +402,34 @@ impl A2065 {
         self.rx_cur = desc;
         self.activity = true;
         self.csr0 |= CSR0_RINT;
-        true
+        RxResult::Written
+    }
+
+    fn accepts_destination(&self, frame: &[u8]) -> bool {
+        let Some(filter) = self.logical_filter else {
+            return true; // compatibility with snapshots made before filtering
+        };
+        if self.mode & MODE_PROM != 0 {
+            return true;
+        }
+        let Some(destination) = frame.get(..6) else {
+            return false;
+        };
+        if destination == self.mac || destination == [0xff; 6] {
+            return true;
+        }
+        if destination[0] & 1 == 0 {
+            return false;
+        }
+        // LANCE hashes the reflected CRC register, with no final inversion.
+        let mut crc = u32::MAX;
+        for &byte in destination {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ if crc & 1 != 0 { 0xedb8_8320 } else { 0 };
+            }
+        }
+        filter & (1u64 << (crc >> 26)) != 0
     }
 
     // ----- CSR access -----------------------------------------------------
@@ -477,14 +528,19 @@ impl ZorroDevice for A2065 {
 
     fn tick(&mut self, _cck: u32, _host: &mut DeviceHost) {
         // Pull any inbound frames the backend has queued into the RX ring.
-        while self.running {
+        for _ in 0..MAX_RX_POLLS {
+            if !self.running {
+                break;
+            }
             let frame = match self.net.as_mut().and_then(|n| n.poll()) {
                 Some(f) => f,
                 None => break,
             };
-            if !self.receive_frame(&frame) {
-                break; // no RX descriptor (MISS latched) or receiver off:
-                       // the frame is lost, as on the real chip
+            if self.receive_frame(&frame) == RxResult::Unavailable {
+                // No RX descriptor (MISS latched) or receiver off: the frame
+                // is lost, as on the real chip. Address rejection consumes
+                // no descriptor and must not delay the following frames.
+                break;
             }
         }
     }
@@ -505,6 +561,10 @@ impl ZorroDevice for A2065 {
         self.csr3 = 0;
         self.mode = 0;
         self.running = false;
+        if let Some(net) = self.net.as_mut() {
+            // Clear the retained connection too if reopening it fails below.
+            net.set_promiscuous(false);
+        }
         self.ram.fill(0);
         if let Err(error) = self.reattach_backend() {
             // reattach_backend constructs the replacement before touching
@@ -621,8 +681,8 @@ mod tests {
             board.write(RAM_BASE + addr, 2, u32::from(w), &mut host);
         };
 
-        // Init block: MODE=0, PADR (MAC), LADRF=0, RDRA/RLEN, TDRA/TLEN.
-        put(board, mem, iadr, 0); // mode
+        // Raw descriptor fixtures use PROM; destination filtering is tested separately.
+        put(board, mem, iadr, MODE_PROM); // mode
         put(board, mem, iadr + 2, 0x0002);
         put(board, mem, iadr + 4, 0x0010);
         put(board, mem, iadr + 6, 0x0100);
@@ -754,6 +814,211 @@ mod tests {
         assert_ne!(read_csr(&mut board, &mut mem, 0) & CSR0_IDON, 0);
         write_csr(&mut board, &mut mem, 0, CSR0_STRT);
         assert_ne!(read_csr(&mut board, &mut mem, 0) & CSR0_RXON, 0);
+    }
+
+    #[test]
+    fn destination_filter_uses_lance_crc_and_preserves_rejected_descriptors() {
+        // Independently calculated reflected CRC indices: IPv4 all-hosts 54,
+        // IPv6 all-nodes 23, IPv6 solicited-node 52. DP8390 uses 31, 62, 2.
+        for (destination, index) in [
+            ([0x01, 0x00, 0x5e, 0, 0, 1], 54),
+            ([0x33, 0x33, 0, 0, 0, 1], 23),
+            ([0x33, 0x33, 0xff, 0x12, 0x34, 0x56], 52),
+        ] {
+            let mut board = A2065::new(NetConfig::Loopback).unwrap();
+            let mut mem = host_mem();
+            set_up_rings(&mut board, &mut mem);
+            board.set_ram_word(0, 0);
+            write_csr(&mut board, &mut mem, 0, CSR0_INIT);
+            write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
+            let mut frame = vec![0u8; 60];
+            frame[..6].copy_from_slice(&destination);
+            assert_eq!(
+                board.receive_frame(&frame),
+                RxResult::Filtered,
+                "unjoined group must be rejected"
+            );
+            assert_eq!(board.rx_cur, 0);
+            assert_ne!(board.desc_status(0x100) & DESC_OWN, 0);
+            assert_eq!(board.csr0 & (CSR0_RINT | CSR0_MISS), 0);
+
+            // Programming RAM alone must not change the latched filter.
+            board.set_ram_word(8 + (index / 16) * 2, 1 << (index % 16));
+            assert_eq!(board.receive_frame(&frame), RxResult::Filtered);
+            write_csr(&mut board, &mut mem, 0, CSR0_STOP);
+            write_csr(&mut board, &mut mem, 0, CSR0_INIT);
+            write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
+            assert_eq!(board.receive_frame(&frame), RxResult::Written);
+            assert_eq!(board.desc_status(0x100), DESC_STP | DESC_ENP);
+            assert_eq!(board.ram_word(0x106), 64);
+            assert_eq!(&board.ram[0x400..0x43c], &frame);
+            assert_ne!(board.csr0 & CSR0_RINT, 0);
+
+            // Leaving requires another INIT; old packet ownership is not reused.
+            board.set_ram_word(8 + (index / 16) * 2, 0);
+            write_csr(&mut board, &mut mem, 0, CSR0_STOP);
+            write_csr(&mut board, &mut mem, 0, CSR0_INIT);
+            write_csr(&mut board, &mut mem, 0, CSR0_STRT);
+            assert_eq!(board.receive_frame(&frame), RxResult::Filtered);
+            assert_eq!(board.csr0 & CSR0_MISS, 0);
+        }
+    }
+
+    #[test]
+    fn rejected_frame_does_not_delay_queued_station_frame() {
+        let mut board = A2065::new(NetConfig::Loopback).unwrap();
+        let mut mem = host_mem();
+        set_up_rings(&mut board, &mut mem);
+        board.set_ram_word(0, 0);
+        write_csr(&mut board, &mut mem, 0, CSR0_INIT);
+        write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
+
+        let mut rejected = vec![0x5a; 60];
+        rejected[..6].copy_from_slice(&[0x33, 0x33, 0, 0, 0, 1]);
+        let mut station = vec![0xa5; 60];
+        station[..6].copy_from_slice(&board.mac);
+        let net = board.net.as_mut().unwrap();
+        net.send(&rejected);
+        net.send(&station);
+        board.tick(1, &mut DeviceHost::new(&mut mem));
+
+        // One tick must skip the unjoined group and receive the following
+        // station packet in the first descriptor, with no missed-frame flag.
+        assert_eq!(&board.ram[0x400..0x43c], &station);
+        assert_eq!(board.desc_status(0x100), DESC_STP | DESC_ENP);
+        assert_eq!(board.ram_word(0x106), 64);
+        assert_ne!(board.csr0 & CSR0_RINT, 0);
+        assert_eq!(board.csr0 & CSR0_MISS, 0);
+        assert!(board.net.as_mut().unwrap().poll().is_none());
+    }
+
+    #[test]
+    fn continuously_filtered_source_cannot_starve_a_tick() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        struct Flood(Arc<AtomicUsize>);
+        impl NetBackend for Flood {
+            fn send(&mut self, _: &[u8]) {}
+            fn poll(&mut self) -> Option<Vec<u8>> {
+                // A missing bound fails promptly instead of hanging the test.
+                assert!(self.0.fetch_add(1, Ordering::Relaxed) < MAX_RX_POLLS);
+                let mut frame = vec![0; 60];
+                frame[..6].copy_from_slice(&[0x33, 0x33, 0, 0, 0, 1]);
+                Some(frame)
+            }
+        }
+        let mut board = A2065::new(NetConfig::None).unwrap();
+        let mut mem = host_mem();
+        set_up_rings(&mut board, &mut mem);
+        board.set_ram_word(0, 0);
+        write_csr(&mut board, &mut mem, 0, CSR0_INIT);
+        write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
+        let polls = Arc::new(AtomicUsize::new(0));
+        board.net = Some(Box::new(Flood(Arc::clone(&polls))));
+        board.tick(1, &mut DeviceHost::new(&mut mem));
+        assert_eq!(polls.load(Ordering::Relaxed), MAX_RX_POLLS);
+        assert_eq!(board.rx_cur, 0);
+        assert_ne!(board.desc_status(0x100) & DESC_OWN, 0);
+        assert_eq!(board.csr0 & (CSR0_RINT | CSR0_MISS), 0);
+        polls.store(0, Ordering::Relaxed);
+        board.tick(1, &mut DeviceHost::new(&mut mem));
+        assert_eq!(polls.load(Ordering::Relaxed), MAX_RX_POLLS);
+    }
+
+    #[test]
+    fn poll_budget_leaves_the_next_station_frame_queued() {
+        let mut board = A2065::new(NetConfig::Loopback).unwrap();
+        let mut mem = host_mem();
+        set_up_rings(&mut board, &mut mem);
+        board.set_ram_word(0, 0);
+        write_csr(&mut board, &mut mem, 0, CSR0_INIT);
+        write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
+        let mut rejected = vec![0; 60];
+        rejected[..6].copy_from_slice(&[0x33, 0x33, 0, 0, 0, 1]);
+        let mut station = vec![0xa5; 60];
+        station[..6].copy_from_slice(&board.mac);
+        let net = board.net.as_mut().unwrap();
+        for _ in 0..MAX_RX_POLLS {
+            net.send(&rejected);
+        }
+        net.send(&station);
+        board.tick(1, &mut DeviceHost::new(&mut mem));
+        assert_eq!(board.csr0 & (CSR0_RINT | CSR0_MISS), 0);
+        assert_ne!(board.desc_status(0x100) & DESC_OWN, 0);
+        board.tick(1, &mut DeviceHost::new(&mut mem));
+        assert_eq!(&board.ram[0x400..0x43c], &station);
+        assert_ne!(board.csr0 & CSR0_RINT, 0);
+        assert_eq!(board.csr0 & CSR0_MISS, 0);
+        assert!(board.net.as_mut().unwrap().poll().is_none());
+    }
+
+    #[test]
+    fn backend_promiscuous_mode_follows_init_reset_and_snapshot_restore() {
+        use std::sync::{Arc, Mutex};
+        struct RecordingNet(Arc<Mutex<Vec<bool>>>);
+        impl NetBackend for RecordingNet {
+            fn send(&mut self, _: &[u8]) {}
+            fn poll(&mut self) -> Option<Vec<u8>> {
+                None
+            }
+            fn set_promiscuous(&mut self, enabled: bool) {
+                self.0.lock().unwrap().push(enabled);
+            }
+        }
+        let mut board = A2065::new(NetConfig::None).unwrap();
+        let mut mem = host_mem();
+        set_up_rings(&mut board, &mut mem);
+        let modes = Arc::new(Mutex::new(Vec::new()));
+        board.attach_backend(Some(Box::new(RecordingNet(Arc::clone(&modes)))));
+        assert_eq!(*modes.lock().unwrap(), [false]);
+        board.lance_init(); // fixture sets PROM
+        assert_eq!(*modes.lock().unwrap(), [false, true]);
+        board.set_ram_word(0, 0); // RAM alone must not change the latch
+        assert_eq!(*modes.lock().unwrap(), [false, true]);
+        let state = serde_json::to_string(&board).unwrap();
+        let mut restored: A2065 = serde_json::from_str(&state).unwrap();
+        restored.attach_backend(Some(Box::new(RecordingNet(Arc::clone(&modes)))));
+        assert_eq!(*modes.lock().unwrap(), [false, true, true]);
+        restored.lance_init(); // now latch the RAM's cleared PROM
+        assert_eq!(*modes.lock().unwrap(), [false, true, true, false]);
+        board.reset();
+        assert_eq!(*modes.lock().unwrap(), [false, true, true, false, false]);
+        assert_eq!(board.mode & MODE_PROM, 0);
+    }
+
+    #[test]
+    fn destination_filter_handles_station_broadcast_allmulti_and_promiscuous() {
+        let mut board = A2065::new(NetConfig::None).unwrap();
+        let mut mem = host_mem();
+        set_up_rings(&mut board, &mut mem);
+        board.set_ram_word(0, 0);
+        board.lance_init();
+        assert!(board.accepts_destination(&board.mac));
+        assert!(board.accepts_destination(&[0xff; 6]));
+        assert!(!board.accepts_destination(&[0x02, 1, 2, 3, 4, 5]));
+        assert!(!board.accepts_destination(&[0x33, 0x33, 0, 0, 0, 1]));
+        assert!(!board.accepts_destination(&[0; 5]));
+        board.logical_filter = Some(u64::MAX);
+        assert!(board.accepts_destination(&[0x33, 0x33, 0, 0, 0, 1]));
+        assert!(!board.accepts_destination(&[0x02, 1, 2, 3, 4, 5]));
+        board.mode = MODE_PROM;
+        assert!(board.accepts_destination(&[0x02, 1, 2, 3, 4, 5]));
+    }
+
+    #[test]
+    fn destination_filter_snapshot_preserves_latch_and_loads_old_states() {
+        let mut board = A2065::new(NetConfig::None).unwrap();
+        board.logical_filter = Some(1 << 23);
+        let state = serde_json::to_value(&board).unwrap();
+        let restored: A2065 = serde_json::from_value(state.clone()).unwrap();
+        assert_eq!(restored.logical_filter, Some(1 << 23));
+        let mut old = state;
+        old.as_object_mut().unwrap().remove("logical_filter");
+        let restored: A2065 = serde_json::from_value(old).unwrap();
+        assert_eq!(restored.logical_filter, None);
+        assert!(restored.accepts_destination(&[0x02, 1, 2, 3, 4, 5]));
     }
 
     #[test]
@@ -994,7 +1259,7 @@ mod tests {
     fn rx_frame_chains_across_buffers() {
         let mut board = A2065::new(NetConfig::Loopback).unwrap();
         let mut mem = host_mem();
-        set_up_rings_geom(&mut board, &mut mem, 0, 2, 128, 0);
+        set_up_rings_geom(&mut board, &mut mem, MODE_PROM, 2, 128, 0);
         write_csr(&mut board, &mut mem, 0, CSR0_INIT);
         write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
 
@@ -1035,7 +1300,7 @@ mod tests {
     fn rx_without_free_descriptor_sets_miss() {
         let mut board = A2065::new(NetConfig::Loopback).unwrap();
         let mut mem = host_mem();
-        set_up_rings_geom(&mut board, &mut mem, 0, 0, 256, 0);
+        set_up_rings_geom(&mut board, &mut mem, MODE_PROM, 0, 256, 0);
         write_csr(&mut board, &mut mem, 0, CSR0_INIT);
         write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
         // Take the only RX descriptor away from the chip.
@@ -1058,7 +1323,7 @@ mod tests {
     fn rx_out_of_chained_buffers_sets_buff() {
         let mut board = A2065::new(NetConfig::Loopback).unwrap();
         let mut mem = host_mem();
-        set_up_rings_geom(&mut board, &mut mem, 0, 0, 128, 0);
+        set_up_rings_geom(&mut board, &mut mem, MODE_PROM, 0, 128, 0);
         write_csr(&mut board, &mut mem, 0, CSR0_INIT);
         write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
         board.net.as_mut().unwrap().send(&[0x55u8; 200]);
@@ -1080,7 +1345,7 @@ mod tests {
         // No backend at all: internal loopback never reaches the wire.
         let mut board = A2065::new(NetConfig::None).unwrap();
         let mut mem = host_mem();
-        set_up_rings_geom(&mut board, &mut mem, MODE_LOOP, 0, 256, 0);
+        set_up_rings_geom(&mut board, &mut mem, MODE_LOOP | MODE_PROM, 0, 256, 0);
         write_csr(&mut board, &mut mem, 0, CSR0_INIT);
         write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
 
@@ -1124,7 +1389,7 @@ mod tests {
     fn rx_appends_fcs_to_short_frame() {
         let mut board = A2065::new(NetConfig::Loopback).unwrap();
         let mut mem = host_mem();
-        set_up_rings_geom(&mut board, &mut mem, 0, 0, 256, 0);
+        set_up_rings_geom(&mut board, &mut mem, MODE_PROM, 0, 256, 0);
         write_csr(&mut board, &mut mem, 0, CSR0_INIT);
         write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
         board.net.as_mut().unwrap().send(&[0xAA, 0xBB, 0xCC, 0xDD]);

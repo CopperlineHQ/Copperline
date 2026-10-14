@@ -7,7 +7,9 @@
 //! `HUNK_DEBUG` block bebbo's amiga-gcc `-g` appends after the last hunk,
 //! which carries the DWARF sections back to back with a symbol table
 //! (`__debug_info_start`, `__debug_line_start`, ...) naming where each
-//! begins.
+//! begins. Newer AmigaPorts binutils instead packs fourteen sections in
+//! a fixed order, each preceded by its big-endian byte length and padded
+//! to a longword. Those sections retain section-relative DWARF references.
 //!
 //! Relocation blocks are walked, not applied: the guest loader relocates
 //! the program, and the addresses the debugger needs come from the
@@ -110,15 +112,39 @@ pub struct Hunk {
     pub debug_raw: Vec<Vec<u8>>,
 }
 
-/// The DWARF payload of a bebbo-style trailing debug block: the section
-/// bytes back to back, and each section's start named by a symbol.
+/// The extracted DWARF sections of a trailing debug block, concatenated
+/// without container headers or padding. Starts come from legacy symbols
+/// or from the packed AmigaPorts section directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DwarfBlock {
     pub data: Vec<u8>,
     /// `(section name without the leading ".debug_", start offset)`,
     /// sorted by offset.
     pub sections: Vec<(String, u32)>,
+    /// Packed AmigaPorts sections use section-relative references; older
+    /// symbol-delimited blocks use offsets in the combined link address space.
+    pub section_relative: bool,
 }
+
+// bfd/amigaos.c: debug_names in amiga_pack_dwarf_sections. Missing sections
+// still have a zero length word. This is a container format, not a GCC
+// version test, and must be checked in full before treating a block as packed.
+const PACKED_DWARF_SECTIONS: &[&str] = &[
+    "frame",
+    "info",
+    "abbrev",
+    "loclists",
+    "aranges",
+    "rnglists",
+    "line",
+    "str",
+    "line_str",
+    "types",
+    "macro",
+    "ranges",
+    "addr",
+    "str_offsets",
+];
 
 impl DwarfBlock {
     /// The bytes of `.debug_<name>` (`"info"`, `"line"`, ...), empty
@@ -138,6 +164,9 @@ impl DwarfBlock {
     }
 
     fn from_trailing(data: Vec<u8>, symbols: &[HunkSymbol]) -> Option<Self> {
+        if let Some(block) = Self::from_packed(&data) {
+            return Some(block);
+        }
         let mut sections: Vec<(String, u32)> = symbols
             .iter()
             .filter_map(|s| {
@@ -149,7 +178,38 @@ impl DwarfBlock {
             return None;
         }
         sections.sort_by_key(|(_, off)| *off);
-        Some(Self { data, sections })
+        Some(Self {
+            data,
+            sections,
+            section_relative: false,
+        })
+    }
+
+    fn from_packed(bytes: &[u8]) -> Option<Self> {
+        let mut reader = Reader { bytes, pos: 0 };
+        let mut data = Vec::new();
+        let mut sections = Vec::new();
+        for &name in PACKED_DWARF_SECTIONS {
+            let len = usize::try_from(reader.u32().ok()?).ok()?;
+            let payload = reader.bytes(len).ok()?;
+            // Padding is part of the carrier, not of the DWARF section.
+            let padding = (4 - len % 4) % 4;
+            if reader.bytes(padding).ok()?.iter().any(|&b| b != 0) {
+                return None;
+            }
+            if !payload.is_empty() {
+                sections.push((name.to_string(), u32::try_from(data.len()).ok()?));
+                data.extend_from_slice(payload);
+            }
+        }
+        if reader.pos != bytes.len() || sections.is_empty() {
+            return None;
+        }
+        Some(Self {
+            data,
+            sections,
+            section_relative: true,
+        })
     }
 }
 
@@ -703,6 +763,68 @@ pub(crate) mod tests {
         assert_eq!(block.section("abbrev"), &dwarf[8..16]);
         assert_eq!(block.section("line"), &dwarf[16..32]);
         assert!(block.section("str").is_empty());
+        assert!(!block.section_relative);
+    }
+
+    fn packed_sections() -> Vec<u8> {
+        let mut packed = Vec::new();
+        for name in PACKED_DWARF_SECTIONS {
+            let payload: &[u8] = match *name {
+                "info" => b"info!",
+                "abbrev" => b"abc",
+                "line" => b"lines",
+                "line_str" => b"file.c\0",
+                _ => &[],
+            };
+            lw(&mut packed, payload.len() as u32);
+            packed.extend_from_slice(payload);
+            packed.resize(packed.len().div_ceil(4) * 4, 0);
+        }
+        packed
+    }
+
+    #[test]
+    fn packed_dwarf_sections_need_no_symbols_and_exclude_headers_and_padding() {
+        let packed = packed_sections();
+        for symbols in [vec![], vec![("__debug_frame_start", 0)]] {
+            let mut b = Builder::default();
+            b.hunk(HUNK_CODE, &[0; 4], None)
+                .end()
+                .raw_debug(&packed)
+                .symbols(&symbols)
+                .end();
+            let file = HunkFile::parse(&b.build()).unwrap();
+            let block = file.dwarf.expect("packed DWARF");
+            assert!(block.section_relative);
+            assert_eq!(block.section("info"), b"info!");
+            assert_eq!(block.section("abbrev"), b"abc");
+            assert_eq!(block.section("line"), b"lines");
+            assert_eq!(block.section("line_str"), b"file.c\0");
+            assert!(block.section("frame").is_empty());
+        }
+    }
+
+    #[test]
+    fn packed_dwarf_rejects_truncation_bad_lengths_padding_and_extra_bytes() {
+        let valid = packed_sections();
+        for end in 0..valid.len() {
+            assert!(
+                DwarfBlock::from_packed(&valid[..end]).is_none(),
+                "cut at {end}"
+            );
+        }
+        let mut bad_length = valid.clone();
+        bad_length[4..8].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(DwarfBlock::from_packed(&bad_length).is_none());
+        let mut bad_padding = valid.clone();
+        bad_padding[13] = 1; // padding after the five info bytes
+        assert!(DwarfBlock::from_packed(&bad_padding).is_none());
+        let mut extra = valid.clone();
+        extra.extend_from_slice(&[0; 4]);
+        assert!(DwarfBlock::from_packed(&extra).is_none());
+        assert!(DwarfBlock::from_packed(&[0; 56]).is_none(), "empty carrier");
+        // A malformed or unknown carrier without symbols is not DWARF.
+        assert!(DwarfBlock::from_trailing(bad_length, &[]).is_none());
     }
 
     #[test]

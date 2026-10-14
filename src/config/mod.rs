@@ -1468,7 +1468,7 @@ pub struct LideConfig {
     pub drives: [Option<DriveImage>; 4],
 }
 
-/// `[recording]`: GIF clip settings and the interactive screenshot mode.
+/// `[recording]`: GIF clip settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecordingConfig {
     /// Emulated seconds of presented frames the window keeps (default
@@ -1478,9 +1478,6 @@ pub struct RecordingConfig {
     /// Clip frame rate, 1 to `gifclip::MAX_CLIP_FPS`; 0 (the default)
     /// picks 25 on PAL and 30 on NTSC.
     pub clip_fps: u32,
-    /// Save native pixels from the interactive camera button and screenshot
-    /// shortcut (`[recording] native_screenshot_button`).
-    pub native_screenshot_button: bool,
 }
 
 impl Default for RecordingConfig {
@@ -1488,7 +1485,6 @@ impl Default for RecordingConfig {
         Self {
             clip_seconds: crate::gifclip::DEFAULT_CLIP_SECONDS,
             clip_fps: 0,
-            native_screenshot_button: false,
         }
     }
 }

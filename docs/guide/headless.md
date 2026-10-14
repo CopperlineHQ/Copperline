@@ -41,6 +41,10 @@ which ends the run as soon as its last frame is written, even when a
 screenshot or clip is scheduled later. Schedule those to finish before the
 dump does, or use a separate run.
 
+Scheduled screenshots use the deterministic CPU presentation buffer and bypass
+window scaling, tint, GPU shaders and bezels. The interactive camera button
+captures the displayed output instead (see [Saving screenshots](ui.md#saving-screenshots)).
+
 For pixel verification, add `--native-screenshots`:
 
 ```sh

@@ -157,12 +157,17 @@ where
 ///
 /// Code and data addresses resolve through `link` (the hunks laid back
 /// to back from 0); a global's `DW_OP_addr` prefers its hunk symbol.
+/// Packed AmigaPorts blocks already have section-relative references;
+/// their extracted sections are read directly, without padding or unbiasing.
 pub fn load_block(
     block: &DwarfBlock,
     link: &LinkMap,
     symbols: &[Symbol],
 ) -> Result<Loaded, String> {
     let start_of = |name: &str| -> usize {
+        if block.section_relative {
+            return 0;
+        }
         block
             .sections
             .iter()
@@ -171,7 +176,11 @@ pub fn load_block(
     };
     let info = block.section("info");
     let mut notes = Vec::new();
-    let mut bias = measure_bias(info, start_of("abbrev"));
+    let mut bias = if block.section_relative {
+        0
+    } else {
+        measure_bias(info, start_of("abbrev"))
+    };
     if bias > block.data.len() {
         notes.push(format!(
             "debug block claims an abbreviation offset {bias} bytes past its own size; \

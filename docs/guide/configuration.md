@@ -11,6 +11,11 @@ this reference.
 settings; `--config` and `./copperline.toml` always win over it anyway. With
 no default saved, the flag changes nothing.
 
+If the saved default cannot be read or parsed, Copperline logs a warning and
+continues with built-in settings and any command-line overrides. It leaves
+the saved file untouched. Errors in `--config` or `./copperline.toml` still
+report the requested configuration problem.
+
 Configuration parsing rejects unknown keys, invalid CPU or chipset names,
 and out-of-range sizes. Media are opened during startup; depending on the
 device, an unavailable image either stops startup or leaves the unit absent
@@ -890,8 +895,8 @@ enough for an 8:7 ratio. Odd scanline multiples stay crisp on progressive
 displays because woven line pairs are identical. `pixel_aspect = "square"`
 with `"integer"` keeps the multiples uniform and square, for side-by-side
 pixel comparisons. Switching integer scaling on in TV mode resizes the
-window to the unresampled canvas; captures always keep the configured
-aspect geometry. Monitor bezels (`bezel`) use the resampled TV canvas under
+window to the unresampled canvas; interactive screenshots follow it, while
+scheduled captures keep the configured aspect geometry. Monitor bezels (`bezel`) use the resampled TV canvas under
 both scaling modes. Programmable (ECS/AGA VARBEAMEN) and RTG displays scale
 by uniform integer multiples. The menu's *Video Settings -> Scaling* item
 switches modes at runtime.
@@ -910,8 +915,9 @@ larger display and tightens smoothly after a smaller viewport has remained
 stable for roughly half a second, preventing visual jitter during scene changes.
 The status bar and overlay panels remain docked at the bottom of the window;
 opening a menu or panel temporarily reveals the full display area so no controls
-are obscured. Autocrop only affects window presentation (screenshots, frame
-dumps, and recordings always capture the full configured aperture). CRT shader
+are obscured. Interactive screenshots follow the visible crop. Scheduled
+screenshots, frame dumps, and recordings capture the full configured
+aperture. CRT shader
 presets render over the cropped area. Programmable multisync modes (such as
 DblPAL or 31 kHz displays) are also cropped based on their active display
 windows. Autocrop is automatically suspended when using monitor bezels or RTG
@@ -1011,11 +1017,11 @@ config file; the launcher's *A/V & Emu* tab (*Video* category) has
 `COPPERLINE_SHADER_STRENGTH=0.0..1.0` override the config for a single run.
 There is no command-line flag.
 
-The pass is presentation and nothing else. Screenshots
+Interactive screenshots include the selected shader. Scheduled screenshots
 (`--screenshot-after`), frame dumps (`--dump-frames`), video recordings, the
 [control protocol](../debugger/control.md)'s capture methods and the web
 frontend all read the CPU presentation buffer, which the shader never
-touches, so captures stay comparable whatever is selected here. Individual
+touches, so those captures stay comparable whatever is selected here. Individual
 frames also skip the pass in three cases: while a menu or overlay panel is
 open (a phosphor mask and a curved face make overlay text unreadable), for
 frames coming from an RTG board's scanout (see `[rtg]` below), and for
@@ -1052,8 +1058,8 @@ chosen, for the rest of the session and without touching the config;
 bezel* row (*A/V & Emu*, *Video*) writes it, and `COPPERLINE_BEZEL` (a
 style name, or the old `1`/`0`) overrides the config for a single run.
 
-Like the shader pass, a bezel is presentation and nothing else: captures
-never include it, and it is skipped while a menu or overlay panel is open
+Interactive screenshots include the bezel; scheduled captures bypass it.
+It is skipped while a menu or overlay panel is open
 and for RTG scanout frames. Unlike the shader it does stay on for
 programmable multisync scans -- a frame has no line structure to get wrong.
 
@@ -1092,8 +1098,8 @@ the web player's `#bezel-stickers` page hook
 the app and on a hosting page.
 
 Stickers ride the bezel: they draw only while a front does, follow it
-through Cmd+M / Alt+M, and are presentation only -- captures never include
-them. `COPPERLINE_BEZEL_STICKERS` (a folder path, or empty for none)
+through Cmd+M / Alt+M, and appear in interactive screenshots. Scheduled captures,
+frame dumps and recordings exclude them. `COPPERLINE_BEZEL_STICKERS` (a folder path, or empty for none)
 overrides the config for a single run.
 
 `perf_overlay` (default `false`) shows the performance overlay at start: a
@@ -1105,8 +1111,8 @@ Cmd+P (macOS) / Alt+P toggles it live for the rest of the session without
 touching the config, `--perf-overlay` shows it for one run, and
 `COPPERLINE_PERF_OVERLAY=1|0` overrides the config for a single run; the
 launcher's *Perf overlay* row (*A/V & Emu*, *Display*) writes it. Like the
-transient message overlay it is presentation only: screenshots, frame
-dumps, and recordings never include it.
+transient message overlay it is presentation only. Interactive screenshots
+include it; scheduled screenshots, frame dumps, and recordings exclude it.
 
 `tint` recolours the picture like the phosphor of a monochrome monitor:
 `"bw"` (black and white), `"green"` and `"amber"` (the two classic
@@ -1115,8 +1121,8 @@ accepted) presents full colour. These are the five looks the web frontend's
 *Screen* selector offers, produced by the same colour chain, so a tint
 chosen in the browser matches the desktop. It composes with `shader` --
 green phosphor under the `crt` preset makes a convincing monochrome tube.
-Like the shader, the tint is presentation only: screenshots, frame dumps,
-recordings and headless runs stay untinted, the status bar and overlay
+Interactive screenshots include the tint. Scheduled screenshots, frame dumps,
+recordings and headless runs stay untinted; the status bar and overlay
 menus keep their colours, and RTG board scanout (the monitor on the
 board's own output, not the Amiga's video output) is never tinted. The
 menu's *Screen Tint* item changes the tint live for the rest of the
@@ -1382,7 +1388,6 @@ It has no effect without `--audio-stems DIR` on the command line.
 [recording]
 clip_seconds = 10   # emulated seconds kept for Save Clip as GIF; 0 = off
 clip_fps = 0        # GIF frame rate; 0 = 25 on PAL, 30 on NTSC
-native_screenshot_button = false  # camera button and Cmd/Alt+S save native pixels
 ```
 
 The window keeps a rolling ring of the last `clip_seconds` (up to 120) of
@@ -1393,12 +1398,11 @@ rate every GIF clip is written at, the interactive one and headless
 25 fps on PAL and 30 on NTSC. Clips land in the `[paths] recordings`
 folder.
 
-`native_screenshot_button = true` makes the window's camera button and
-`Cmd+S` / `Alt+S` save the native playfield pixels. The same setting is
-available in **Video Settings → Native Screenshot Button**. Its default
-is `false`, which saves the presented picture. It does not change scheduled
-screenshots, screenshot expectations, clips, or recordings; use
-`--native-screenshots` for native scheduled captures.
+The camera button and `Cmd+S` / `Alt+S` save the displayed picture with its
+current effects. Native screenshots use `Cmd+Option+S` on macOS or
+`Ctrl+Alt+S` on Linux/Windows; `--native-screenshots` selects native scheduled
+captures. The retired `native_screenshot_button` key is accepted and ignored
+when reading older configs, and omitted when saving them.
 
 ## `[input]`
 

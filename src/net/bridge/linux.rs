@@ -158,14 +158,14 @@ impl AdapterIo for LinuxAdapter {
         Ok(Some(self.receive_buffer[..received as usize].to_vec()))
     }
 
-    fn set_guest_mac(&mut self, mac: [u8; 6]) -> Result<()> {
-        attach_filter(self.fd.as_raw_fd(), Some(mac))
+    fn set_receive_filter(&mut self, mac: [u8; 6], promiscuous: bool) -> Result<()> {
+        attach_filter(self.fd.as_raw_fd(), Some(mac), promiscuous)
     }
 }
 
 use std::os::fd::AsRawFd;
 
-fn attach_filter(fd: RawFd, guest_mac: Option<[u8; 6]>) -> Result<()> {
+fn attach_filter(fd: RawFd, guest_mac: Option<[u8; 6]>, promiscuous: bool) -> Result<()> {
     // Kernel guard: admit the guest destination and Ethernet group addresses.
     // Source-MAC echo suppression is repeated in the worker.
     const BPF_LD: u16 = 0x00;
@@ -180,7 +180,10 @@ fn attach_filter(fd: RawFd, guest_mac: Option<[u8; 6]>) -> Result<()> {
     const BPF_RET: u16 = 0x06;
 
     let instruction = |code, jt, jf, k| libc::sock_filter { code, jt, jf, k };
-    let mut instructions = if let Some(mac) = guest_mac {
+    let mut instructions = if promiscuous {
+        // Source-MAC echo suppression remains in the worker.
+        vec![instruction(BPF_RET | BPF_K, 0, 0, 65_535)]
+    } else if let Some(mac) = guest_mac {
         let first = u32::from(u16::from_be_bytes([mac[0], mac[1]]));
         let rest = u32::from_be_bytes([mac[2], mac[3], mac[4], mac[5]]);
         vec![
@@ -284,7 +287,7 @@ fn open_packet_socket(interface: &str, guest_mac: Option<[u8; 6]>) -> Result<Own
         return Err(std::io::Error::last_os_error())
             .with_context(|| format!("enabling promiscuous capture on {interface:?}"));
     }
-    attach_filter(fd.as_raw_fd(), guest_mac)?;
+    attach_filter(fd.as_raw_fd(), guest_mac, false)?;
     Ok(fd)
 }
 

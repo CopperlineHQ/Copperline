@@ -980,10 +980,6 @@ impl TryFrom<RawConfig> for Config {
             RecordingConfig {
                 clip_seconds,
                 clip_fps,
-                native_screenshot_button: raw
-                    .recording
-                    .native_screenshot_button
-                    .unwrap_or(defaults.recording.native_screenshot_button),
             }
         };
 
