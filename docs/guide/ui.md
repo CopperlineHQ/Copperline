@@ -299,14 +299,15 @@ and video recordings exclude it. Disabling
 
 Disk images can be dropped anywhere on the emulator window:
 
-- **Floppy images** (ADF/ADZ/DMS/IPF/SCP, plain or gzip packed): with one
-  connected drive the disk is inserted immediately. With several, a drive
-  chooser opens over the display -- click a drive, press its position in
-  the list (`1`-`4`), or press `Esc` to cancel. Dropping several floppies
+- **Floppy images** (ADF/ADZ/DMS/IPF/SCP, plain or gzip packed, plus
+  ZIP-packed ADF): with one connected drive the disk is inserted
+  immediately. With several, a drive chooser opens over the display --
+  click a drive, press its position in the list (`1`-`4`), or press `Esc`
+  to cancel. Dropping several floppies
   at once queues them all as the target drive's swap playlist, exactly
-  like a multi-selection in the disk dialog. A dropped `.zip` is taken for
-  a WHDLoad package (below); load a zip-packed disk image through the
-  drive's disk button instead.
+  like a multi-selection in the disk dialog. A dropped `.zip` is checked
+  for a WHDLoad slave; without one, it is loaded as a floppy image, just
+  like selecting it through the drive's disk button.
 - **CD images** (`.cue`/`.iso`/`.nrg`/`.chd`) mount in the machine's CD drive
   (CDTV, CD32, or a SCSI CD-ROM unit), with the media-change notification.
   A `.chd` is read to see what it holds: one made with chdman's `createhd`
@@ -314,6 +315,8 @@ Disk images can be dropped anywhere on the emulator window:
 - **WHDLoad packages** (`.lha`, `.lzh`, `.zip`, or a bare `.slave`) reboot
   the machine straight into the game through the
   [WHDLoad booter](whdload.md), keeping any explicit machine choices.
+  A ZIP containing a `.slave` or `.slav` file takes this path even if it
+  also contains disk images.
   Dropped on the configuration screen they fill the **WHDLoad** page's
   game field instead; that screen refuses every other kind of drop.
 - **Hard disk images and Kickstart ROMs** (`.hdf`, `.hdz`, `.vhd`, `.img`,

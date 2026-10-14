@@ -8802,9 +8802,7 @@ fn debugger_poke_writes_memory_and_registers() {
 
 // --- dropped disk images -------------------------------------------------
 
-/// A blank standard ADF written to a unique temp path (floppy inserts read
-/// from the filesystem). Callers remove it when done.
-fn temp_adf(name: &str) -> PathBuf {
+fn temp_drop_path(name: &str) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = std::time::SystemTime::now()
@@ -8812,8 +8810,28 @@ fn temp_adf(name: &str) -> PathBuf {
         .unwrap()
         .as_nanos();
     let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("copperline-drop-test-{nanos}-{counter}-{name}"));
+    std::env::temp_dir().join(format!("copperline-drop-test-{nanos}-{counter}-{name}"))
+}
+
+/// A blank standard ADF written to a unique temp path (floppy inserts read
+/// from the filesystem). Callers remove it when done.
+fn temp_adf(name: &str) -> PathBuf {
+    let path = temp_drop_path(name);
     std::fs::write(&path, vec![0u8; crate::floppy::ADF_SIZE]).unwrap();
+    path
+}
+
+fn temp_drop_zip(name: &str, members: &[(&str, &[u8])]) -> PathBuf {
+    use std::io::Write;
+    let path = temp_drop_path(name);
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    for (name, bytes) in members {
+        zip.start_file(*name, options).unwrap();
+        zip.write_all(bytes).unwrap();
+    }
+    zip.finish().unwrap();
     path
 }
 
@@ -8843,14 +8861,13 @@ fn dropped_media_classifies_by_extension() {
     assert_eq!(kind("Disk.VHD"), DroppedMediaKind::HardDisk);
     assert_eq!(kind("disk.img"), DroppedMediaKind::HardDisk);
     assert_eq!(kind("kick31.rom"), DroppedMediaKind::Rom);
-    // Every shape a WHDLoad package comes in, since the launcher and the
-    // CLI take all of them: a dropped zip used to be handed to the floppy
-    // bay as a disk image.
+    // ZIPs need an actual slave member to select WHDLoad; unreadable or
+    // missing archives fall through to the floppy loader's error handling.
     assert_eq!(kind("game.lha"), DroppedMediaKind::WhdloadGame);
     assert_eq!(kind("Game.LHA"), DroppedMediaKind::WhdloadGame);
     assert_eq!(kind("game.lzh"), DroppedMediaKind::WhdloadGame);
-    assert_eq!(kind("game.zip"), DroppedMediaKind::WhdloadGame);
-    assert_eq!(kind("game.ZIP"), DroppedMediaKind::WhdloadGame);
+    assert_eq!(kind("game.zip"), DroppedMediaKind::Floppy);
+    assert_eq!(kind("game.ZIP"), DroppedMediaKind::Floppy);
     assert_eq!(kind("x.slave"), DroppedMediaKind::WhdloadGame);
     assert_eq!(kind("x.slav"), DroppedMediaKind::WhdloadGame);
 }
@@ -8884,6 +8901,64 @@ fn dropped_floppy_with_single_drive_inserts_directly() {
     assert!(app.ui.panel.is_none());
     assert!(app.osd.as_ref().unwrap().text.starts_with("DF0:"));
     std::fs::remove_file(&adf).unwrap();
+}
+
+#[test]
+fn dropped_zipped_adf_with_single_drive_inserts_directly() {
+    let adf = vec![0x5a; crate::floppy::ADF_SIZE];
+    for name in ["disk.zip", "disk.ZIP", "disk.adz"] {
+        let mut app = test_app();
+        let path = temp_drop_zip(name, &[("disk.adf", &adf)]);
+        app.handle_dropped_files(vec![path.clone()]);
+        assert!(app.emu.bus().floppy.disk_inserted(0), "{name}");
+        assert_eq!(app.emu.bus().floppy.export_disk_image(0).unwrap(), adf);
+        assert_eq!(app.disk_playlists[0], vec![path.clone()]);
+        assert!(app.ui.panel.is_none());
+        assert!(app.osd.as_ref().unwrap().text.starts_with("DF0:"));
+        assert!(app.machine_config.whdload.game.is_none());
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn dropped_zip_ignores_macos_slave_metadata() {
+    use super::{classify_dropped_media, DroppedMediaKind};
+    let path = temp_drop_zip(
+        "disk.zip",
+        &[
+            ("disk.adf", &vec![0; crate::floppy::ADF_SIZE]),
+            ("__MACOSX/._Game.slave", b"resource fork"),
+            ("._Game.slave", b"resource fork"),
+        ],
+    );
+    assert_eq!(classify_dropped_media(&path), DroppedMediaKind::Floppy);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn dropped_zip_with_a_slave_remains_a_whdload_package() {
+    use super::{classify_dropped_media, DroppedMediaKind};
+    use crate::video::launcher::LauncherField;
+    let path = temp_drop_zip(
+        "package.ZIP",
+        &[
+            ("Disk.1", &vec![0; crate::floppy::ADF_SIZE]),
+            ("Game/Game.SlAv", b"slave"),
+        ],
+    );
+    assert_eq!(classify_dropped_media(&path), DroppedMediaKind::WhdloadGame);
+    let mut app = test_app();
+    app.open_launcher();
+    app.handle_dropped_files(vec![path.clone()]);
+    assert_eq!(
+        app.launcher_state_mut()
+            .unwrap()
+            .setup
+            .path(LauncherField::WhdloadGame),
+        Some(path.as_path())
+    );
+    assert!(!app.emu.bus().floppy.disk_inserted(0));
+    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
