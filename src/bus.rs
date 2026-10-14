@@ -9315,7 +9315,11 @@ impl Bus {
     pub fn cia_a_read(&mut self, addr: u64, size: usize) -> u64 {
         self.sync_realtime_devices();
         let reg = reg_from_addr(addr);
-        let mut v = self.cia_a.read(reg);
+        let mut v = if self.cpu_bus_arbitration_enabled {
+            self.cia_a.read_at_transfer(reg)
+        } else {
+            self.cia_a.read(reg)
+        };
         if reg == REG_PRA {
             // PRA bits 6 and 7 (/FIR0, /FIR1) report the live port-1/port-2
             // primary button: left-mouse button or joystick fire (they share
@@ -9452,7 +9456,11 @@ impl Bus {
     pub fn cia_b_read(&mut self, addr: u64, size: usize) -> u64 {
         self.sync_realtime_devices();
         let reg = reg_from_addr(addr);
-        let mut v = self.cia_b.read(reg);
+        let mut v = if self.cpu_bus_arbitration_enabled {
+            self.cia_b.read_at_transfer(reg)
+        } else {
+            self.cia_b.read(reg)
+        };
         if reg == REG_PRA {
             // CIA-B PA0-2 are the parallel port's Centronics status inputs
             // (BUSY, POUT, SEL), pulled up when nothing drives them. An

@@ -36,6 +36,9 @@ pub struct Cia {
     /// None reconstructs the steady state of older snapshots.
     #[serde(default)]
     ta_enable_pipe: Option<u8>,
+    /// Clock-source and one-shot controls reach counting after two PHI2 edges.
+    #[serde(default)]
+    ta_control_pipe: Option<[u8; 2]>,
 
     // Timer B
     pub tb_count: u16,
@@ -47,6 +50,11 @@ pub struct Cia {
     tb_start_delay: u8,
     #[serde(default)]
     tb_enable_pipe: Option<u8>,
+    #[serde(default)]
+    tb_control_pipe: Option<[u8; 2]>,
+    /// Timer-A underflows reach timer B one PHI2 edge later.
+    #[serde(default)]
+    tb_ta_pending_underflows: u32,
 
     /// ICR data register: pending interrupt sources.
     ///   bit 0 TA, 1 TB, 2 ALRM, 3 SP, 4 FLG, 7 IR
@@ -177,6 +185,9 @@ impl Cia {
         cia.tb_start_delay = 0;
         cia.ta_enable_pipe = None;
         cia.tb_enable_pipe = None;
+        cia.ta_control_pipe = None;
+        cia.tb_control_pipe = None;
+        cia.tb_ta_pending_underflows = 0;
         cia
     }
 
@@ -198,6 +209,9 @@ impl Cia {
             tb_start_delay: 0,
             ta_enable_pipe: None,
             tb_enable_pipe: None,
+            ta_control_pipe: None,
+            tb_control_pipe: None,
+            tb_ta_pending_underflows: 0,
             which,
             regs,
             ta_count: 0xFFFF,
@@ -262,6 +276,40 @@ impl Cia {
     }
 
     pub fn next_underflow_ticks(&self) -> Option<u32> {
+        if self.tb_pending_underflow_next_edge() {
+            return Some(1);
+        }
+        if self.control_pipe_pending() {
+            let mut probe = self.clone();
+            for edge in 1..=2 {
+                if probe.tb_pending_underflow_next_edge() {
+                    return Some(edge);
+                }
+                for (count, running, delay, pipe, phi2) in [
+                    (
+                        probe.ta_count,
+                        probe.ta_running,
+                        probe.ta_start_delay,
+                        probe.ta_enable_pipe,
+                        probe.effective_ta_control() & 0x20 == 0,
+                    ),
+                    (
+                        probe.tb_count,
+                        probe.tb_running,
+                        probe.tb_start_delay,
+                        probe.tb_enable_pipe,
+                        TimerBInputMode::from_crb(probe.effective_tb_control())
+                            == TimerBInputMode::Phi2,
+                    ),
+                ] {
+                    if phi2 && Self::timer_deadline(count, running, delay, pipe) == Some(1) {
+                        return Some(edge);
+                    }
+                }
+                probe.tick(1);
+            }
+            return probe.next_underflow_ticks().map(|n| n + 2);
+        }
         let mut min: Option<u32> = None;
         for (count, running, delay, pipe, phi2) in [
             (
@@ -308,7 +356,12 @@ impl Cia {
             } else {
                 2
             };
-            return Some(u32::from(count) + 1 + u32::from(delay.max(warmup)));
+            // Loading zero produces carry on the last LOAD stage, before
+            // the first decrement. Plain START has no LOAD hold.
+            let zero_load_carry = count == 0 && delay > warmup;
+            return Some(
+                u32::from(count) + u32::from(!zero_load_carry) + u32::from(delay.max(warmup)),
+            );
         }
         let mut count = u32::from(count);
         for edge in 1..=2 {
@@ -328,6 +381,93 @@ impl Cia {
             != if self.ta_running { 3 } else { 0 }
             || Self::enable_pipe(self.tb_running, self.tb_start_delay, self.tb_enable_pipe)
                 != if self.tb_running { 3 } else { 0 }
+    }
+
+    fn ta_count_control(&self) -> u8 {
+        (u8::from(self.ta_oneshot) << 3) | (u8::from(self.ta_counts_cnt) << 5)
+    }
+
+    fn tb_count_control(&self) -> u8 {
+        (u8::from(self.tb_oneshot) << 3) | self.tb_input_mode.bits()
+    }
+
+    fn effective_ta_control(&self) -> u8 {
+        self.ta_control_pipe
+            .map_or_else(|| self.ta_count_control(), |p| p[0])
+    }
+
+    fn effective_tb_control(&self) -> u8 {
+        self.tb_control_pipe
+            .map_or_else(|| self.tb_count_control(), |p| p[0])
+    }
+
+    fn control_pipe_pending(&self) -> bool {
+        self.ta_control_pipe
+            .is_some_and(|p| p != [self.ta_count_control(); 2])
+            || self
+                .tb_control_pipe
+                .is_some_and(|p| p != [self.tb_count_control(); 2])
+    }
+
+    fn tb_pending_underflow_next_edge(&self) -> bool {
+        let mode = TimerBInputMode::from_crb(self.effective_tb_control());
+        matches!(
+            mode,
+            TimerBInputMode::TimerA | TimerBInputMode::TimerAWhileCntHigh
+        ) && (mode != TimerBInputMode::TimerAWhileCntHigh || self.cnt_pin_high)
+            && Self::enable_pipe(self.tb_running, self.tb_start_delay, self.tb_enable_pipe) & 2 != 0
+            && self.tb_start_delay == 0
+            && self.tb_ta_pending_underflows > u32::from(self.tb_count)
+    }
+
+    fn clock_control_pipe(pipe: &mut Option<[u8; 2]>, control: u8) {
+        if let Some(p) = pipe {
+            let next = [p[1], control];
+            *pipe = (next != [control; 2]).then_some(next);
+        }
+    }
+
+    /// CPU data sampled during E-high sees the reload mux before the
+    /// falling-edge counter commit. Keep the internal counter untouched.
+    pub(crate) fn read_at_transfer(&mut self, reg: usize) -> u8 {
+        let reload = match reg {
+            REG_TALO | REG_TAHI
+                if self.ta_count == 0
+                    && self.ta_start_delay == 0
+                    && Self::enable_pipe(
+                        self.ta_running,
+                        self.ta_start_delay,
+                        self.ta_enable_pipe,
+                    ) & 2
+                        != 0
+                    && self.effective_ta_control() & 0x20 == 0 =>
+            {
+                Some(self.ta_latch)
+            }
+            REG_TBLO | REG_TBHI
+                if self.tb_count == 0
+                    && self.tb_start_delay == 0
+                    && Self::enable_pipe(
+                        self.tb_running,
+                        self.tb_start_delay,
+                        self.tb_enable_pipe,
+                    ) & 2
+                        != 0
+                    && TimerBInputMode::from_crb(self.effective_tb_control())
+                        == TimerBInputMode::Phi2 =>
+            {
+                Some(self.tb_latch)
+            }
+            _ => None,
+        };
+        if let Some(count) = reload {
+            return if matches!(reg, REG_TAHI | REG_TBHI) {
+                (count >> 8) as u8
+            } else {
+                count as u8
+            };
+        }
+        self.read(reg)
     }
 
     pub fn next_tod_alarm_ticks(&self) -> Option<u32> {
@@ -715,6 +855,8 @@ impl Cia {
                 let _ = self.tod_check_alarm();
             }
             REG_CRA => {
+                self.ta_control_pipe =
+                    Some(self.ta_control_pipe.unwrap_or([self.ta_count_control(); 2]));
                 let prev_run = self.ta_running;
                 self.ta_enable_pipe = Some(Self::enable_pipe(
                     self.ta_running,
@@ -742,6 +884,8 @@ impl Cia {
                 }
             }
             REG_CRB => {
+                self.tb_control_pipe =
+                    Some(self.tb_control_pipe.unwrap_or([self.tb_count_control(); 2]));
                 let prev_run = self.tb_running;
                 self.tb_enable_pipe = Some(Self::enable_pipe(
                     self.tb_running,
@@ -829,14 +973,18 @@ impl Cia {
         // particular a batched call must not feed timer B underflows that
         // happened while its own START pipeline was still filling.
         if ticks > 1
-            && (self.ta_start_delay != 0 || self.tb_start_delay != 0 || self.enable_pipe_pending())
+            && (self.ta_start_delay != 0
+                || self.tb_start_delay != 0
+                || self.enable_pipe_pending()
+                || self.control_pipe_pending())
         {
             let mut edge = false;
             let mut remaining = ticks;
             while remaining != 0
                 && (self.ta_start_delay != 0
                     || self.tb_start_delay != 0
-                    || self.enable_pipe_pending())
+                    || self.enable_pipe_pending()
+                    || self.control_pipe_pending())
             {
                 edge |= self.tick(1);
                 remaining -= 1;
@@ -845,8 +993,18 @@ impl Cia {
         }
         let ta_pipe = Self::enable_pipe(self.ta_running, self.ta_start_delay, self.ta_enable_pipe);
         let tb_pipe = Self::enable_pipe(self.tb_running, self.tb_start_delay, self.tb_enable_pipe);
+        let ta_control = self.effective_ta_control();
+        let tb_control = self.effective_tb_control();
+        let ta_current_control = self.ta_count_control();
+        let tb_current_control = self.tb_count_control();
+        Self::clock_control_pipe(&mut self.ta_control_pipe, ta_current_control);
+        Self::clock_control_pipe(&mut self.tb_control_pipe, tb_current_control);
         let ta_ready = ta_pipe & 2 != 0 && self.ta_start_delay == 0;
         let tb_ready = tb_pipe & 2 != 0 && self.tb_start_delay == 0;
+        let ta_zero_load_carry =
+            self.ta_running && ta_pipe & 2 != 0 && self.ta_start_delay == 1 && self.ta_count == 0;
+        let tb_zero_load_carry =
+            self.tb_running && tb_pipe & 2 != 0 && self.tb_start_delay == 1 && self.tb_count == 0;
         self.ta_enable_pipe = Some(((ta_pipe << 1) | u8::from(self.ta_running)) & 3);
         self.tb_enable_pipe = Some(((tb_pipe << 1) | u8::from(self.tb_running)) & 3);
         self.ta_start_delay = self.ta_start_delay.saturating_sub(1);
@@ -868,10 +1026,22 @@ impl Cia {
         let mut pin_edge = self.drain_irq_pin_delay(ticks);
         let mut timer_mask: u8 = 0;
         let mut ta_underflows = 0;
-        if ta_ready && !self.ta_counts_cnt && ticks > 0 {
-            ta_underflows = advance(&mut self.ta_count, self.ta_latch, ticks);
+        let mut ta_last_edge_underflow = false;
+        if (ta_ready || ta_zero_load_carry) && ta_control & 0x20 == 0 && ticks > 0 {
+            let input_ticks = if ta_control & 8 != 0 {
+                ticks.min(u32::from(self.ta_count) + 1)
+            } else {
+                ticks
+            };
+            ta_underflows = if ta_zero_load_carry {
+                1
+            } else {
+                advance(&mut self.ta_count, self.ta_latch, input_ticks)
+            };
+            ta_last_edge_underflow =
+                ta_underflows != 0 && input_ticks == ticks && self.ta_count == self.ta_latch;
             timer_mask |= u8::from(ta_underflows != 0) * ICR_TA;
-            if timer_mask & ICR_TA != 0 && self.ta_oneshot {
+            if timer_mask & ICR_TA != 0 && ta_control & 8 != 0 {
                 self.ta_running = false;
                 self.ta_enable_pipe = Some(0);
                 self.regs[REG_CRA] &= !0x01;
@@ -881,22 +1051,40 @@ impl Cia {
             }
         }
         let sp_mask = self.tick_sdr_output(ta_underflows);
-        let tb_ticks = match self.tb_input_mode {
+        let delayed_ta_underflows = self
+            .tb_ta_pending_underflows
+            .saturating_add(ta_underflows)
+            .saturating_sub(u32::from(ta_last_edge_underflow));
+        self.tb_ta_pending_underflows = u32::from(ta_last_edge_underflow);
+        let tb_ticks = match TimerBInputMode::from_crb(tb_control) {
             TimerBInputMode::Phi2 => ticks,
             TimerBInputMode::Cnt => 0,
-            TimerBInputMode::TimerA => ta_underflows,
+            TimerBInputMode::TimerA => delayed_ta_underflows,
             TimerBInputMode::TimerAWhileCntHigh => {
                 if self.cnt_pin_high {
-                    ta_underflows
+                    delayed_ta_underflows
                 } else {
                     0
                 }
             }
         };
-        if tb_ready && tb_ticks > 0 {
-            let tb_underflows = advance(&mut self.tb_count, self.tb_latch, tb_ticks);
+        if (tb_ready
+            || (tb_zero_load_carry
+                && TimerBInputMode::from_crb(tb_control) == TimerBInputMode::Phi2))
+            && tb_ticks > 0
+        {
+            let input_ticks = if tb_control & 8 != 0 {
+                tb_ticks.min(u32::from(self.tb_count) + 1)
+            } else {
+                tb_ticks
+            };
+            let tb_underflows = if tb_zero_load_carry {
+                1
+            } else {
+                advance(&mut self.tb_count, self.tb_latch, input_ticks)
+            };
             timer_mask |= u8::from(tb_underflows != 0) * ICR_TB;
-            if timer_mask & ICR_TB != 0 && self.tb_oneshot {
+            if timer_mask & ICR_TB != 0 && tb_control & 8 != 0 {
                 self.tb_running = false;
                 self.tb_enable_pipe = Some(0);
                 self.regs[REG_CRB] &= !0x01;
@@ -954,13 +1142,16 @@ impl Cia {
     fn pulse_cnt(&mut self) -> bool {
         let mut timer_mask = 0;
         let mut sp_mask = 0;
+        let ta_control = self.effective_ta_control();
+        let tb_control = self.effective_tb_control();
+        let tb_input_mode = TimerBInputMode::from_crb(tb_control);
         if Self::enable_pipe(self.ta_running, self.ta_start_delay, self.ta_enable_pipe) & 2 != 0
             && self.ta_start_delay == 0
-            && self.ta_counts_cnt
+            && ta_control & 0x20 != 0
         {
             let ta_underflows = advance(&mut self.ta_count, self.ta_latch, 1);
             timer_mask |= u8::from(ta_underflows != 0) * ICR_TA;
-            if ta_underflows != 0 && self.ta_oneshot {
+            if ta_underflows != 0 && ta_control & 8 != 0 {
                 self.ta_running = false;
                 self.ta_enable_pipe = Some(0);
                 self.regs[REG_CRA] &= !0x01;
@@ -969,29 +1160,16 @@ impl Cia {
                 self.update_timer_a_pb_output();
             }
             sp_mask |= self.tick_sdr_output(ta_underflows);
-            if Self::enable_pipe(self.tb_running, self.tb_start_delay, self.tb_enable_pipe) & 2 != 0
-                && self.tb_start_delay == 0
-                && matches!(
-                    self.tb_input_mode,
-                    TimerBInputMode::TimerA | TimerBInputMode::TimerAWhileCntHigh
-                )
-                && (self.tb_input_mode != TimerBInputMode::TimerAWhileCntHigh || self.cnt_pin_high)
-                && ta_underflows != 0
-            {
-                let tb_underflows = advance(&mut self.tb_count, self.tb_latch, ta_underflows);
-                timer_mask |= u8::from(tb_underflows != 0) * ICR_TB;
-                if tb_underflows != 0 {
-                    self.update_timer_b_pb_output();
-                }
-            }
+            self.tb_ta_pending_underflows =
+                self.tb_ta_pending_underflows.saturating_add(ta_underflows);
         }
         if Self::enable_pipe(self.tb_running, self.tb_start_delay, self.tb_enable_pipe) & 2 != 0
             && self.tb_start_delay == 0
-            && self.tb_input_mode == TimerBInputMode::Cnt
+            && tb_input_mode == TimerBInputMode::Cnt
         {
             let tb_underflows = advance(&mut self.tb_count, self.tb_latch, 1);
             timer_mask |= u8::from(tb_underflows != 0) * ICR_TB;
-            if tb_underflows != 0 && self.tb_oneshot {
+            if tb_underflows != 0 && tb_control & 8 != 0 {
                 self.tb_running = false;
                 self.tb_enable_pipe = Some(0);
                 self.regs[REG_CRB] &= !0x01;
@@ -1178,7 +1356,8 @@ impl Cia {
 #[inline]
 fn advance(count: &mut u16, latch: u16, ticks: u32) -> u32 {
     // Decrement `*count` by `ticks`, wrapping through the latch on
-    // underflow. Returns 1 if at least one underflow happened.
+    // underflow. Returns the number of underflows, including latch zero's
+    // one event per enabled input tick.
     let mut underflows = 0u32;
     let mut t = ticks;
     loop {
@@ -1191,7 +1370,7 @@ fn advance(count: &mut u16, latch: u16, ticks: u32) -> u32 {
         *count = latch;
         underflows = underflows.saturating_add(1);
         if latch == 0 {
-            return underflows;
+            return underflows.saturating_add(t);
         }
     }
 }
@@ -1206,6 +1385,14 @@ enum TimerBInputMode {
 }
 
 impl TimerBInputMode {
+    fn bits(self) -> u8 {
+        match self {
+            Self::Phi2 => 0,
+            Self::Cnt => 0x20,
+            Self::TimerA => 0x40,
+            Self::TimerAWhileCntHigh => 0x60,
+        }
+    }
     fn from_crb(val: u8) -> Self {
         match (val >> 5) & 0x03 {
             0 => Self::Phi2,
@@ -1250,6 +1437,109 @@ pub fn reg_from_addr(addr: u64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_zero_count_reads_reload_data_without_changing_counter() {
+        for which in [Which::A, Which::B] {
+            let mut cia = Cia::new(which);
+            cia.ta_running = true;
+            cia.ta_count = 0;
+            cia.ta_latch = 3;
+            cia.tb_running = true;
+            cia.tb_count = 0;
+            cia.tb_latch = 1;
+            assert_eq!(cia.read_at_transfer(REG_TALO), 3);
+            assert_eq!(cia.read_at_transfer(REG_TBLO), 1);
+            assert_eq!((cia.ta_count, cia.tb_count), (0, 0));
+            cia.ta_running = false;
+            cia.tb_running = false;
+            assert_eq!(cia.read_at_transfer(REG_TALO), 0);
+            assert_eq!(cia.read_at_transfer(REG_TBLO), 0);
+        }
+    }
+
+    #[test]
+    fn source_selector_keeps_two_old_phi2_edges_after_switch() {
+        let mut cia = Cia::new(Which::B);
+        cia.write(REG_TBLO, 200);
+        cia.write(REG_TBHI, 0);
+        cia.write(REG_CRB, 0x11);
+        cia.tick(6);
+        assert_eq!(cia.tb_count, 197);
+        cia.write(REG_CRB, 0x41);
+        assert_eq!(cia.read(REG_CRB), 0x41);
+        cia.tick(20);
+        assert_eq!(cia.tb_count, 195);
+        cia.write(REG_CRB, 1);
+        cia.tick(2);
+        assert_eq!(cia.tb_count, 195);
+        cia.tick(1);
+        assert_eq!(cia.tb_count, 194);
+    }
+
+    #[test]
+    fn clearing_one_shot_does_not_outrun_the_pending_underflow() {
+        let mut cia = Cia::new(Which::A);
+        cia.write(REG_TALO, 3);
+        cia.write(REG_TAHI, 0);
+        cia.write(REG_CRA, 0x19);
+        cia.tick(6);
+        assert_eq!(cia.ta_count, 0);
+        cia.write(REG_CRA, 0);
+        cia.tick(2);
+        assert_eq!(cia.ta_count, 3);
+        assert_eq!(cia.read(REG_ICR), ICR_TA);
+    }
+
+    #[test]
+    fn zero_load_carry_and_delayed_cascade_survive_snapshot() {
+        let mut cia = Cia::new(Which::B);
+        cia.write(REG_TBLO, 0);
+        cia.write(REG_TBHI, 0);
+        cia.write(REG_CRB, 0x51);
+        cia.tick(3);
+        cia.write(REG_TALO, 0);
+        cia.write(REG_TAHI, 0);
+        cia.write(REG_ICR, 0x80 | ICR_TB);
+        cia.write(REG_CRA, 0x19);
+        assert_eq!(cia.next_underflow_ticks(), Some(3));
+        cia.tick(3);
+        assert!(!cia.ta_running);
+        assert_eq!(cia.debug_icr_data(), ICR_TA);
+        assert_eq!(cia.next_underflow_ticks(), Some(1));
+        let mut restored: Cia = serde_json::from_slice(&serde_json::to_vec(&cia).unwrap()).unwrap();
+        assert!(cia.tick(1));
+        assert!(restored.tick(1));
+        assert_eq!(cia.read(REG_ICR), ICR_IR | ICR_TA | ICR_TB);
+        assert_eq!(restored.read(REG_ICR), ICR_IR | ICR_TA | ICR_TB);
+        assert_eq!(
+            serde_json::to_value(&cia).unwrap(),
+            serde_json::to_value(&restored).unwrap()
+        );
+    }
+
+    #[test]
+    fn zero_latch_batches_preserve_every_underflow_and_last_pending_pulse() {
+        for ticks in [1, 2, 3, 20, 1000] {
+            let mut batch = Cia::new(Which::A);
+            batch.ta_running = true;
+            batch.ta_count = 0;
+            batch.ta_latch = 0;
+            batch.tb_running = true;
+            batch.tb_input_mode = TimerBInputMode::TimerA;
+            let mut stepped = batch.clone();
+            batch.tick(ticks);
+            for _ in 0..ticks {
+                stepped.tick(1);
+            }
+            assert_eq!(batch.tb_count, u16::MAX - (ticks - 1) as u16);
+            assert_eq!(batch.tb_ta_pending_underflows, 1);
+            assert_eq!(
+                serde_json::to_value(&batch).unwrap(),
+                serde_json::to_value(&stepped).unwrap()
+            );
+        }
+    }
 
     #[test]
     fn stop_drains_two_count_enable_stages_and_survives_snapshot() {
@@ -1799,11 +2089,14 @@ mod tests {
             ] {
                 let mut cia = Cia::new(which);
                 cia.write(control, 8);
-                cia.write(lo, 0);
+                cia.write(lo, 1);
                 cia.write(hi, 0);
-                assert_eq!(cia.next_underflow_ticks(), Some(4));
+                assert_eq!(cia.next_underflow_ticks(), Some(5));
                 cia.tick(3);
                 assert_eq!(cia.read(REG_ICR), 0);
+                assert_eq!(cia.read(lo), 1);
+                cia.tick(1);
+                assert_eq!(cia.read(lo), 0);
                 cia.tick(1);
                 assert_eq!(cia.read(REG_ICR), source);
                 assert_eq!(cia.read(control) & 1, 0);
@@ -1822,7 +2115,8 @@ mod tests {
         cia.write(REG_CRA, 0x01);
 
         cia.tick(3);
-
+        assert_eq!(cia.read(REG_ICR) & (ICR_TA | ICR_TB), ICR_TA);
+        cia.tick(1);
         assert_eq!(cia.read(REG_ICR) & (ICR_TA | ICR_TB), ICR_TA | ICR_TB);
     }
 

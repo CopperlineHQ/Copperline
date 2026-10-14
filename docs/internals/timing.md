@@ -787,6 +787,40 @@ LOAD holds and count-enable stages travel in snapshots. Older snapshots
 reconstruct the stages from their running flag and startup delay; legacy
 USS imports restore a steady running or stopped timer.
 
+The clock-source and one-shot qualifiers also pass through two PHI2 stages.
+Changing a running timer B from PHI2 to timer-A underflows retains two final
+PHI2 decrements; changing back delays the first PHI2 decrement by two edges.
+Clearing one-shot together with START does not cancel a one-shot underflow
+already in those stages. The qualifier history travels in snapshots.
+
+Timer-A underflows reach timer B's cascade input one E-clock later. The
+pending final pulse is saved and included in STOP wakeup predictions, even
+when timer A has already stopped. Batched updates retain that final pulse
+and deliver all preceding ones; latch zero produces one underflow per
+enabled input tick. One-shot batches stop at their first underflow. A zero
+START+LOAD also produces carry on the last LOAD stage, before the first
+decrement, and can stop a one-shot there.
+
+Synchronous CPU timer reads sample the reload data mux before the falling
+edge commits the counter. At an eligible PHI2 reload slot, internal count
+zero therefore reads as the latch value. This changes readout, not the
+internal countdown or the continuous period of `latch + 1`. Counter
+inspection and fully stopped reads still expose the actual stored count.
+
+These details were isolated with OneROM on the real 512K-chip/512K-slow PAL
+A500 on 13–14 October 2026: independent reference timers were frozen before
+reading, live reads were bracketed by a reference STOP, and timer B counted
+timer-A underflows. A dense 6240-trial live-read sweep fits the same
+E-clock-calibrated read curve on hardware and Copperline, including 60
+hardware reload-boundary samples at latch 15. The calibration offset belongs
+to the probe's instruction sequence and is not an emulator timing setting.
+
+The earlier sparse period probe's reference interval includes setup and
+reads after the first target sample, so matching that whole interval does
+not establish matching target-read phase. Use the bracketed reference and
+large-latch controls for this comparison; raw trial indices and matching
+NOP counts alone are insufficient.
+
 ICR's IR bit is a latch: clearing an interrupt mask does not clear a
 previously recorded enabled interrupt. Reading ICR acknowledges the latch.
 Re-enabling a still-pending source arms the IRQ pin even when IR was already
