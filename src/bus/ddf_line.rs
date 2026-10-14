@@ -320,7 +320,7 @@ impl Bus {
         } else {
             self.denise.bplcon0
         };
-        // BEAMCON0.HARDDIS relaxes the hardwired stop position.
+        // A disabled hard stop (`harddis_active`) relaxes the hardwired stop.
         let (_, hard_stop) = crate::chipset::agnus::ddf_hard_bounds(self.harddis_active());
 
         if writes.is_empty() {

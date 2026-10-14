@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 
 /// Capture original chipset pixels, cropped to the renderer's active
 /// playfield envelope, or an RTG board's native scanout. Chipset output is
-/// one current field, without presentation scaling, weaving or phosphor.
+/// the current field without presentation scaling or phosphor; when it and
+/// the field before it are the two halves of an interlaced picture, they
+/// are woven at full height (long field on the even rows).
 /// Returns `(pixels, height, width)`; available to core-only frontends too.
 pub fn render_native(bus: &crate::bus::Bus) -> (Vec<u32>, usize, usize) {
     let mut fb = Vec::new();
@@ -17,21 +19,108 @@ pub fn render_native(bus: &crate::bus::Bus) -> (Vec<u32>, usize, usize) {
         return (fb, height as usize, width as usize);
     }
     let input = crate::video::bitplane::RenderInput::from_bus(bus);
-    let canvas_scale = input.native_canvas_scale();
-    // A mixed-resolution frame uses its finest programmed pixel pitch.
-    let repeat = input.native_horizontal_repeat();
-    let width = crate::video::FB_WIDTH * canvas_scale;
-    let rows = input.geometry().visible_lines;
-    fb.resize(crate::video::MAX_CANVAS_PIXELS, 0);
-    let result = crate::video::bitplane::render_native_from_input(&input, &mut fb);
-    let rect = result
-        .content_rect
-        .map(|r| crate::video::bitplane::ContentRect {
-            x0: r.x0 * canvas_scale,
-            x1: r.x1 * canvas_scale,
-            ..r
-        });
-    crop_native(&fb, width, rows, rect, repeat)
+    let field = NativeField::render(&input);
+    if let Some(previous) = bus
+        .native_previous_field()
+        .filter(|previous| fields_weave(&input, previous))
+    {
+        let other = NativeField::render(previous);
+        return if input.render_base().long_field {
+            weave_native(&field, &other)
+        } else {
+            weave_native(&other, &field)
+        };
+    }
+    crop_native(&field.fb, field.width, field.rows, field.rect, field.repeat)
+}
+
+/// One chipset field rendered at its finest canvas pitch, before cropping.
+struct NativeField {
+    fb: Vec<u32>,
+    width: usize,
+    rows: usize,
+    rect: Option<crate::video::bitplane::ContentRect>,
+    repeat: usize,
+}
+
+impl NativeField {
+    fn render(input: &crate::video::bitplane::RenderInput) -> Self {
+        let canvas_scale = input.native_canvas_scale();
+        let mut fb = vec![0; crate::video::MAX_CANVAS_PIXELS];
+        let result = crate::video::bitplane::render_native_from_input(input, &mut fb);
+        Self {
+            fb,
+            width: crate::video::FB_WIDTH * canvas_scale,
+            rows: input.geometry().visible_lines,
+            rect: result
+                .content_rect
+                .map(|r| crate::video::bitplane::ContentRect {
+                    x0: r.x0 * canvas_scale,
+                    x1: r.x1 * canvas_scale,
+                    ..r
+                }),
+            // A mixed-resolution frame uses its finest programmed pixel pitch.
+            repeat: input.native_horizontal_repeat(),
+        }
+    }
+}
+
+/// Two consecutive fields are the halves of one interlaced picture when
+/// both were laced, one is the long field and the other the short one, and
+/// they share a scan and canvas pitch: the same line length and row-0 beam
+/// line, with no more than the one line a long field adds over a short one
+/// in either the rows captured or the frame. A change of video standard or
+/// of a programmable scan's vertical timing starts a new picture.
+fn fields_weave(
+    current: &crate::video::bitplane::RenderInput,
+    previous: &crate::video::bitplane::RenderInput,
+) -> bool {
+    const LACE: u16 = 0x0004;
+    let (now, before) = (current.render_base(), previous.render_base());
+    let (scan, previous_scan) = (current.geometry(), previous.geometry());
+    now.bplcon0 & LACE != 0
+        && before.bplcon0 & LACE != 0
+        && now.long_field != before.long_field
+        && scan.programmable == previous_scan.programmable
+        && scan.line_cck == previous_scan.line_cck
+        && scan.visible_start_vpos == previous_scan.visible_start_vpos
+        && current.visible_start_vpos() == previous.visible_start_vpos()
+        && scan.visible_lines.abs_diff(previous_scan.visible_lines) <= 1
+        && scan.frame_lines.abs_diff(previous_scan.frame_lines) <= 1
+        && current.native_canvas_scale() == previous.native_canvas_scale()
+}
+
+/// Interleave a long and a short field row by row (long field on the even
+/// rows) and crop the result to the union of both fields' playfields.
+fn weave_native(long: &NativeField, short: &NativeField) -> (Vec<u32>, usize, usize) {
+    use crate::video::bitplane::ContentRect;
+    let width = long.width;
+    let rows = long.rows.min(short.rows);
+    let mut woven = Vec::with_capacity(width * rows * 2);
+    for y in 0..rows {
+        woven.extend_from_slice(&long.fb[y * width..(y + 1) * width]);
+        woven.extend_from_slice(&short.fb[y * width..(y + 1) * width]);
+    }
+    let field_rect = match (long.rect, short.rect) {
+        (Some(a), Some(b)) => Some(ContentRect {
+            x0: a.x0.min(b.x0),
+            x1: a.x1.max(b.x1),
+            y0: a.y0.min(b.y0),
+            y1: a.y1.max(b.y1),
+        }),
+        (rect, None) | (None, rect) => rect,
+    };
+    let rect = field_rect.map(|r| ContentRect {
+        y0: 2 * r.y0.min(rows),
+        y1: 2 * r.y1.min(rows),
+        ..r
+    });
+    let repeat = if long.repeat == short.repeat {
+        long.repeat
+    } else {
+        1
+    };
+    crop_native(&woven, width, rows * 2, rect, repeat)
 }
 
 /// Collapse only exact repeated samples. Copper effects or sprite edges
@@ -344,6 +433,45 @@ mod tests {
         // Hi-res stays hi-res even when the picture happens to contain pairs.
         assert_eq!(crop_native(&fb, 8, 4, Some(rect), 1).2, 4);
         assert_eq!(crop_native(&fb, 8, 4, None, 1), (fb, 4, 8));
+    }
+
+    #[test]
+    fn interlaced_fields_weave_long_field_on_even_rows() {
+        use crate::video::bitplane::ContentRect;
+        let long_px = 0xFF00_00FF;
+        let short_px = 0xFF00_FF00;
+        let field = |px, rect| NativeField {
+            fb: vec![px; 4 * 3],
+            width: 4,
+            rows: 3,
+            rect: Some(rect),
+            repeat: 1,
+        };
+        let long = field(
+            long_px,
+            ContentRect {
+                x0: 1,
+                x1: 3,
+                y0: 0,
+                y1: 2,
+            },
+        );
+        let short = field(
+            short_px,
+            ContentRect {
+                x0: 0,
+                x1: 3,
+                y0: 1,
+                y1: 3,
+            },
+        );
+        // The crop is the union of both playfields, at full picture height.
+        let (pixels, rows, width) = weave_native(&long, &short);
+        assert_eq!((width, rows), (3, 6));
+        for (y, row) in pixels.chunks(width).enumerate() {
+            let px = if y % 2 == 0 { long_px } else { short_px };
+            assert!(row.iter().all(|p| *p == px), "row {y}");
+        }
     }
 
     #[test]

@@ -43,9 +43,11 @@ pub const BEAMCON0_HARDDIS: u16 = 1 << 14;
 
 const BITPLANE_DDF_HARD_START: u16 = 0x0018;
 const BITPLANE_DDF_HARD_STOP: u16 = 0x00D8;
-/// With BEAMCON0.HARDDIS set, the hardwired DDF stop ceiling is relaxed from
-/// 0xD8 to 0xE0 -- the widest fetch that still lands inside the 704px (hpos
-/// 0x30..0xE0) framebuffer. The start floor is left at 0x18.
+/// With the hard stop disabled (ECS/AGA BEAMCON0 HARDDIS or VARBEAMEN,
+/// BPLCON0 SHRES or UHRES; see `Bus::harddis_active`), the hardwired DDF stop
+/// ceiling is relaxed from 0xD8 to 0xE0 -- the widest fetch that still lands
+/// inside the 704px (hpos 0x30..0xE0) framebuffer. The start floor is left
+/// at 0x18.
 const BITPLANE_DDF_HARD_STOP_RELAXED: u16 = 0x00E0;
 
 /// Resolve the (start_floor, stop_ceiling) DDF hard-window bounds, honoring
@@ -60,6 +62,23 @@ pub fn ddf_hard_bounds(harddis: bool) -> (u16, u16) {
             BITPLANE_DDF_HARD_STOP
         },
     )
+}
+/// The BEAMCON0 half of the hard-stop rule: HARDDIS, or a programmable scan
+/// (VARBEAMEN), lifts the hardwired DDF stop on an ECS Agnus or AGA Alice.
+pub fn beamcon0_lifts_ddf_hard_stop(beamcon0: u16) -> bool {
+    beamcon0 & (BEAMCON0_HARDDIS | BEAMCON0_VARBEAMEN) != 0
+}
+
+/// Whether the hardwired $D8 DDF stop is lifted (WinUAE `check_harddis`):
+/// an ECS Agnus or AGA Alice drops it while BEAMCON0 lifts it
+/// (`beamcon0_lifts`, see [`beamcon0_lifts_ddf_hard_stop`]) or BPLCON0
+/// selects SHRES or UHRES. OCS has none of these controls and always
+/// stops. Alice is no exception: a lo-res $28/$E0 window fetches 23 words
+/// there exactly as on ECS.
+pub fn ddf_hard_stop_lifted(revision: AgnusRevision, beamcon0_lifts: bool, bplcon0: u16) -> bool {
+    const BPLCON0_UHRES_SHRES: u16 = 0x00C0;
+    !matches!(revision, AgnusRevision::Ocs)
+        && (beamcon0_lifts || bplcon0 & BPLCON0_UHRES_SHRES != 0)
 }
 const DEFAULT_HTOTAL: u16 = (COLORCLOCKS_PER_LINE - 1) as u16;
 

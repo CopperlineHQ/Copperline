@@ -1280,6 +1280,46 @@ fn native_screenshots_follow_playfield_resolution_without_tv_borders() {
     }
 }
 
+/// A laced picture is two fields: the native capture weaves the current
+/// field with the one before it, long field on the even rows, so a 320x512
+/// laced lo-res screen saves at 320x512 rather than as one 320x256 field.
+#[test]
+fn native_screenshots_weave_both_fields_of_a_laced_picture() {
+    let mut app = test_app();
+    let bus = app.emu.bus_mut();
+    bus.custom_write(0x08E, 2, 0x2C81);
+    bus.custom_write(0x090, 2, 0x2CC1);
+    bus.custom_write(0x092, 2, 0x0038);
+    bus.custom_write(0x094, 2, 0x00D0);
+    bus.custom_write(0x100, 2, 0x1204);
+    bus.custom_write(0x096, 2, 0x8300);
+    // The first field's frame-start snapshot predates the mode.
+    app.emu.step_video_frame().unwrap();
+    // Paint each laced field its own background so the rows show which
+    // field they came from.
+    let colours: [u16; 2] = [0x0F00, 0x000F];
+    for colour in colours {
+        app.emu.bus_mut().custom_write(0x180, 2, colour.into());
+        app.emu.step_video_frame().unwrap();
+    }
+    app.set_native_screenshots(true);
+    let image = app.capture_present_image();
+    assert_eq!((image.width, image.height), (320, 512));
+
+    let current_is_long = app.emu.bus().frame_render_base().long_field;
+    let (long, short) = if current_is_long {
+        (colours[1], colours[0])
+    } else {
+        (colours[0], colours[1])
+    };
+    let long = crate::chipset::denise::rgb12_to_rgba8(long);
+    let short = crate::chipset::denise::rgb12_to_rgba8(short);
+    for (y, row) in image.pixels.chunks(320).enumerate() {
+        let expected = if y % 2 == 0 { long } else { short };
+        assert!(row.iter().all(|px| *px == expected), "row {y}");
+    }
+}
+
 /// The player writes its menu settings to `settings.toml` and its startup
 /// layers that file back over the manifest. Whatever the write records must
 /// come back through the merge, or the player forgets the choice on the next
@@ -1295,6 +1335,93 @@ fn player_settings_written_are_all_read_back_on_the_next_launch() {
 
     let mut restored = crate::config::RawConfig::default();
     restored.merge_player_settings(&written);
+    assert_eq!(
+        restored.to_toml_string().unwrap(),
+        written.to_toml_string().unwrap()
+    );
+}
+
+/// Menu changes in the full build are written through to the saved default
+/// as they are made -- only the changed keys, over whatever the file holds --
+/// and the session's own configuration follows, so the launcher shows and
+/// saves them too (rewind and controller settings were reported lost across
+/// restarts).
+#[test]
+fn menu_settings_write_through_to_the_saved_default() {
+    use crate::config::RawConfig;
+    let path = std::env::temp_dir().join(format!(
+        "copperline-menu-settings-{}.toml",
+        std::process::id()
+    ));
+    std::fs::write(&path, "[machine]\nprofile = \"A1200\"\n").unwrap();
+    let read_back =
+        |path: &std::path::Path| RawConfig::parse(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let mut app = test_app();
+    // The fixture wires port 2 after construction; a real start configures
+    // the ports before the session takes its settings baseline.
+    app.menu_settings_saved = app.menu_prefs();
+    app.set_menu_settings_file(Some(path.clone()));
+
+    app.toggle_rewind();
+    app.autofire_hz = 8;
+    app.persist_settings();
+    let saved = read_back(&path);
+    assert_eq!(saved.machine.profile.as_deref(), Some("A1200"));
+    assert_eq!(saved.emulation.rewind, Some(true));
+    assert_eq!(saved.input.autofire_hz, Some(8));
+    // Settings the user left alone stay out of the default every machine
+    // starts from.
+    assert_eq!(saved.input.port2, None);
+    assert_eq!(saved.display.vsync, None);
+    assert_eq!(app.machine_config.emulation.rewind, Some(true));
+    assert_eq!(app.machine_config.input.autofire_hz, Some(8));
+
+    // Turning a setting back writes it back.
+    app.toggle_rewind();
+    app.persist_settings();
+    let saved = read_back(&path);
+    assert_eq!(saved.emulation.rewind, Some(false));
+    assert_eq!(saved.input.autofire_hz, Some(8));
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A write-through that fails leaves its change pending rather than
+/// counting it as saved: a default that does not parse is left alone, and
+/// once it is fixed the next persist writes the earlier change.
+#[test]
+fn failed_menu_settings_write_is_retried() {
+    use crate::config::RawConfig;
+    let path = std::env::temp_dir().join(format!(
+        "copperline-menu-settings-retry-{}.toml",
+        std::process::id()
+    ));
+    std::fs::write(&path, "not [toml").unwrap();
+    let mut app = test_app();
+    app.rebaseline_menu_settings();
+    app.set_menu_settings_file(Some(path.clone()));
+
+    app.autofire_hz = 8;
+    app.persist_settings();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "not [toml");
+
+    std::fs::write(&path, "").unwrap();
+    app.persist_settings();
+    let saved = RawConfig::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(saved.input.autofire_hz, Some(8));
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Whatever the full build's menu write-through records must come back
+/// through its merge, or the setting is lost on the next launch.
+#[test]
+fn menu_settings_written_are_all_read_back() {
+    let app = test_app();
+    let written = app.menu_prefs();
+    assert!(written.emulation.rewind.is_some());
+    assert!(written.input.mouse_sensitivity.is_some());
+
+    let mut restored = crate::config::RawConfig::default();
+    restored.merge_menu_settings(&written);
     assert_eq!(
         restored.to_toml_string().unwrap(),
         written.to_toml_string().unwrap()

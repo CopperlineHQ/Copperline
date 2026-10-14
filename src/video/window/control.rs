@@ -548,6 +548,8 @@ impl App {
             }
             HostOp::SetPortDevice { port, device } => {
                 self.hot_plug_port_device(port as usize, device);
+                // A scripted port change is not a menu choice to save.
+                self.rebaseline_menu_settings();
                 self.show_osd(format!("Port {}: {}", port + 1, device.label()));
                 self.control_send(proto::ok_line(
                     &id,

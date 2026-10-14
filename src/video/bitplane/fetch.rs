@@ -24,7 +24,7 @@ pub(super) fn fetch_word_index_active_at_hpos(
         control.hires() || control.shres(),
         control.ddfstrt,
         control.ddfstop,
-        control.harddis,
+        control.ddf_hard_stop_lifted(),
     ) else {
         return false;
     };
@@ -224,7 +224,7 @@ pub(super) fn line_fetch_plans_for_line(
             control.hires() || control.shres(),
             control.ddfstrt,
             control.ddfstop,
-            control.harddis,
+            control.ddf_hard_stop_lifted(),
         ) else {
             continue;
         };

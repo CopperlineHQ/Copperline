@@ -11,10 +11,19 @@ this reference.
 settings; `--config` and `./copperline.toml` always win over it anyway. With
 no default saved, the flag changes nothing.
 
+Settings changed from the menu during a session that started without
+`--config`, `./copperline.toml` or `--factory` are written into the saved
+default as they change (only the changed keys; see
+[Settings the menu remembers](ui.md#menu-settings-persist)).
+
 If the saved default cannot be read or parsed, Copperline logs a warning and
 continues with built-in settings and any command-line overrides. It leaves
-the saved file untouched. Errors in `--config` or `./copperline.toml` still
-report the requested configuration problem.
+the saved file untouched. A saved default that parses but no longer
+validates -- a disk image that moved, a drive not yet mounted -- opens the
+configuration screen on the built-in settings with the reason on its status
+line, so it can be fixed before **Save default** replaces it. Errors in
+`--config` or `./copperline.toml` still report the requested configuration
+problem.
 
 Configuration parsing rejects unknown keys, invalid CPU or chipset names,
 and out-of-range sizes. Media are opened during startup; depending on the

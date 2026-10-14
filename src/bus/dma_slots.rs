@@ -1433,7 +1433,7 @@ impl Bus {
             ddfstrt: self.denise.ddfstrt,
             ddfstop: self.denise.ddfstop,
             fmode: self.agnus.fmode(),
-            harddis: self.harddis_active(),
+            harddis: self.harddis_for(bplcon0),
         };
         if let Some(plan) = self.bitplane_slot_plan_cache.lookup(key) {
             return plan;

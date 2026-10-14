@@ -1450,6 +1450,12 @@ impl ControlState {
         }
     }
 
+    /// Whether this control's fetch runs past the hardwired $D8 stop: the
+    /// frame's BEAMCON0 half (`harddis`) plus this control's BPLCON0.
+    fn ddf_hard_stop_lifted(&self) -> bool {
+        crate::chipset::agnus::ddf_hard_stop_lifted(self.agnus_revision, self.harddis, self.bplcon0)
+    }
+
     fn words_per_row(&self, native_w: usize) -> usize {
         let fallback = native_w / 16;
         let Some((start, stop)) = effective_ddf_window(
@@ -1457,7 +1463,7 @@ impl ControlState {
             self.hires() || self.shres(),
             self.ddfstrt,
             self.ddfstop,
-            self.harddis,
+            self.ddf_hard_stop_lifted(),
         ) else {
             return fallback;
         };
@@ -1478,7 +1484,7 @@ impl ControlState {
                 hires_like,
                 self.ddfstrt,
                 self.ddfstop,
-                self.harddis,
+                self.ddf_hard_stop_lifted(),
             )
             .is_some()
     }
@@ -1503,7 +1509,7 @@ impl ControlState {
             hires_like,
             self.ddfstrt,
             self.ddfstop,
-            self.harddis,
+            self.ddf_hard_stop_lifted(),
         )?;
         let words = self.words_per_row(0) as i32;
         if words == 0 {
@@ -2420,7 +2426,7 @@ impl RenderState {
     fn from_snapshot(snapshot: RenderRegisterSnapshot) -> Self {
         Self {
             agnus_revision: snapshot.agnus_revision,
-            harddis: snapshot.harddis,
+            harddis: snapshot.beamcon0_lifts_ddf_stop,
             dmacon: snapshot.dmacon,
             bplcon0: snapshot.bplcon0,
             bplcon1: snapshot.bplcon1,
@@ -4234,6 +4240,26 @@ impl RenderInput {
         {
             self.fmv = bus.fmv_presentation();
         }
+    }
+
+    /// [`Self::refill_from_bus`] for a snapshot retained past the next frame
+    /// wrap: the chip-RAM and captured-row snapshots are copied into this
+    /// bundle's own buffers (reused from its previous refill) instead of
+    /// sharing the capture side's, which reclaims those buffers at the wrap
+    /// only while nothing else holds them.
+    pub(crate) fn refill_detached_from_bus(&mut self, bus: &Bus) {
+        let mut chip_ram = std::mem::take(&mut self.chip_ram);
+        let mut rows = std::mem::take(&mut self.captured_bitplane_rows);
+        self.refill_from_bus(bus);
+        let owned_ram = std::sync::Arc::make_mut(&mut chip_ram);
+        owned_ram.clear();
+        owned_ram.extend_from_slice(&self.chip_ram);
+        self.chip_ram = chip_ram;
+        std::sync::Arc::make_mut(&mut rows).clone_from(&self.captured_bitplane_rows);
+        self.captured_bitplane_rows = rows;
+        // Taken at the wrap, the bus's in-progress events are the whole next
+        // frame; a render of this field when it was current saw none of them.
+        self.current_render_events.clear();
     }
 
     /// Override the layer-isolation masks on an existing snapshot (tests

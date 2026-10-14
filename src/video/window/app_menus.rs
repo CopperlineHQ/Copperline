@@ -572,9 +572,10 @@ impl App {
             A::ResetMachine => self.reset_emulator(true),
             A::Quit => self.quit_requested = true,
         }
-        // A player session persists what its user just set; the full build
-        // keeps the menu session-only (a no-op inside).
-        self.persist_player_prefs();
+        // Keep what the user just set for the next launch: the player's
+        // settings file, or the full build's saved default (no-ops when the
+        // action changed no setting).
+        self.persist_settings();
     }
 
     /// Put the menu cursor under the pointer. Returns true when it moved.
@@ -756,6 +757,7 @@ impl App {
             BarControl::CdEject => self.eject_cd(),
             BarControl::Joystick => {
                 self.cycle_joystick_input_mode();
+                self.persist_settings();
                 self.request_redraw();
             }
             BarControl::Keyboard => self.toggle_keyboard_panel(),
