@@ -852,8 +852,12 @@ fn run_flag_boots_and_runs_a_guest_binary() -> Result<(), Box<dyn std::error::Er
     }
 
     // The generated Startup-Sequence was staged under the redirected
-    // config home, in the per-process boot-<pid> directory...
-    let boot_dir = std::fs::read_dir(config_home.join("copperline/run"))?
+    // home's host-data directory, in the per-process boot-<pid>
+    // directory...
+    let stage_dir =
+        copperline::paths::run_stage_in(&copperline::paths::host_data_dir_in(&config_home));
+    let boot_dir = std::fs::read_dir(&stage_dir)
+        .map_err(|e| format!("reading --run staging {}: {e}", stage_dir.display()))?
         .filter_map(Result::ok)
         .map(|e| e.path())
         .find(|p| {

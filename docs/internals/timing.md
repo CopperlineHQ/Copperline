@@ -472,7 +472,11 @@ a two-sided slot-trace probe (`COPPERLINE_DIAG_BLT_SLOTS` in Copperline,
   internal D-hold flush and the BLTDONE cycle -- the final D write for
   USED programs, internal otherwise). DMACONR's BBUSY drops with the
   sequencer's final body cycle, BEFORE those terminal cycles: polling
-  loops see BBUSY clear two cycles before the last D word lands.
+  loops see BBUSY clear two cycles before the last D word lands. The
+  register file is published at that same point (pointers, BLTCDAT, and
+  a line blit's ASH/BSH/SIGN/accumulator), so the terminal cycles only
+  retire the queued D word and never write registers back over values
+  software has already programmed for its next blit.
   INTREQ.BLIT rises one colour clock after the BLTDONE cycle's FIRST
   attempt (vAmiga `scheduleIrqRel(BLIT, 1)` runs before the bus
   allocation check), so a bus-blocked final D write raises the interrupt
@@ -524,7 +528,7 @@ classification of writes while BBUSY is set:
 | `BLTAFWM`, `BLTALWM` | Deferred | First/last-word masks captured by the scheduled state at BLTSIZE. |
 | `BLT[ABCD]PTH/PTL` | Deferred | Pointer writes do not retarget the already-scheduled transfer. |
 | `BLT[ABCD]MOD` | Deferred | Modulos captured at BLTSIZE. |
-| `BLTBDAT` | Immediate, write-time shifter | The write runs the B barrel shifter with the BSH/DESC current at write time (unlike BLTADAT/BLTCDAT); USEB-off blits consume that latched hold word. The first B write after completion zeros the B old register; later writes shift through the latched B data. |
+| `BLTBDAT` | Immediate, write-time shifter | The write runs the B barrel shifter with the BSH/DESC current at write time (unlike BLTADAT/BLTCDAT); USEB-off blits consume that latched hold word. The first B write after the previous blit drops BBUSY zeros the B old register; later writes shift through the latched B data. |
 | `BLTSIZE` | Deferred restart | A second start strobe drains the current blit first, then starts the replacement from the post-completion pointer state. |
 | `DMACON.DMAEN/BLTEN` | Immediate | Gate blitter bus grants immediately; clearing leaves BBUSY set and preserves the pending blit until re-enabled. |
 | `DMACON.BLTPRI` | Immediate | Bus arbitration observes the priority bit directly. |
@@ -533,6 +537,19 @@ No covered mid-operation write is modelled as ignored; less common writes
 are treated as deferred by draining first. Tests:
 `busy_bltcon0_write_disables_remaining_d_output_without_draining_blit`,
 `busy_bltsize_write_finishes_current_blit_then_starts_replacement`.
+
+Writes after BBUSY has dropped, while the terminal cycles are still
+pending, program the next blit. They never reach the finishing one:
+`BLTCON0` latches without disabling the queued final D word, the data
+and control registers keep the values software wrote, and the deferred
+groups above still drain the terminal cycles before latching. A 68000
+cannot land a register write in that two-cycle window after a BBUSY poll,
+but the 020+ chip-bus timing can. Treating such a write as mid-blit
+dropped the final D word, which for a one-word, one-row blit is its whole
+output: graphics.library's per-plane `BltBitMap` loop on a fast A4000
+lost entire bitplanes of small copies.
+Tests: `bltcon0_write_after_bbusy_poll_keeps_pending_final_d_write`,
+`register_writes_after_bbusy_drop_survive_blit_completion`.
 
 ### Micro-cycle stall classes
 
