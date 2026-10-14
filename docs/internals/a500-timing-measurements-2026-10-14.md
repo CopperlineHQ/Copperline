@@ -1,10 +1,10 @@
-# A500 timing measurements and remaining work, 14 October 2026
+# A500 timing measurements and remaining work, 14-15 October 2026
 
 ## Scope and method
 
-Measurements used OneROM on the owner's PAL A500: 512 KiB chip RAM, 512 KiB
+Measurements used One ROM on the owner's PAL A500: 512 KiB chip RAM, 512 KiB
 slow RAM, ECS Agnus 8372A (raw VPOSR `$a000`/`$a001`), OCS Denise (raw ID
-`$ffff`). OneROM Fire-40-A ran firmware 0.8.0, USB plugin 0.3.2 and host-control
+`$ffff`). One ROM Fire-40-A ran firmware 0.8.0, USB plugin 0.3.2 and host-control
 0.1.6, with SEL_C resetting the 68000. Timed observations were collected into
 RAM before RBCP USB transfer. Captures validate their additive checksum,
 source ID, trial descriptors, timeouts and skipped rows. No RBCP command ran
@@ -39,9 +39,11 @@ against the physical machine, not against an emulator screenshot.
 | Final destination read, BLTPRI off, 3,456 trials | 0 | 26 word mismatches; 1,176 beam endpoints differ | 0 |
 | Busy/request/memory observers with BLTPRI on, 10,368 trials | 0 masked-state or elapsed mismatches | Startup CPU fence was disproved by the early read samples | 0 masked-state or elapsed mismatches |
 | Fine BZERO/BBUSY/valid DMACONR sweep, 4,608 trials | 20 flag mismatches; 0 timing mismatches | 86 flag mismatches; 0 timing mismatches | 0; complete packet equals hardware byte-for-byte |
-| Native BLIT STOP IRQ, 512 trials | 0 IRQ-beam or saved-PC mismatches | 256 trials +2 CCK; 256 trials +4 CCK | 256 exact; 256 still +2 CCK |
-| Copper-generated BLIT/COPER/SOFT STOP IRQ, 384 trials | 0 IRQ-beam or saved-PC mismatches | 0 | 0 |
-| Line texture/data/BZERO sweep, 2,560 trials | Destination OR and three words: 0 mismatches; flag: 872 mismatches | Separate line-delay candidate, see below | Destination data remains exact; flag remains unresolved |
+| Synchronized native and Copper STOP IRQ paths, 896 trials | 0 IRQ-beam or saved-PC mismatches | 256 native trials +2 CCK; remaining 640 paths exact | 0; result packet matches A500 byte-for-byte |
+| Line-data/BZERO sweep, kind 24, 2,560 trials | Destination data 0; BZERO 872 mismatches | 956 BZERO mismatches at 1-CCK delay | 932 BZERO mismatches at 0-CCK extra delay |
+| Line minterm/BZERO sweep, kind 25, 3,456 trials | 74 BZERO mismatches; 0 beam/data mismatches | 74 BZERO mismatches | 74 BZERO mismatches |
+| Fine line BZERO sweep, kind 26, 544 trials | 434 BZERO mismatches; 0 beam/data mismatches | 454 BZERO mismatches | 450 BZERO mismatches |
+| Line input/order sweep, kind 27, 3,360 trials | 624 BZERO mismatches; 0 beam/data mismatches | 652 BZERO mismatches | 596 BZERO mismatches |
 
 Across both BLTPRI settings the three primary aligned observers provide
 20,736 exact masked-state and elapsed-time matches for the corrected blitter
@@ -64,7 +66,12 @@ Before the source-phase correction Copperline measures 86/87, 108/109 and
 130/131. Afterwards it measures 84/85, 106/107 and 128/129. The NOP phase is
 exact; the EXG phase remains +2. Results are identical with the same handler
 in chip RAM or ROM, excluding handler fetch placement as the explanation.
-All 896 IRQ trials agree on the saved exception PC. Copper-generated sources
+All 896 IRQ trials agree on the saved exception PC. A later STOP fast-forward
+fix preserves the nearest device-event deadline in colour clocks instead of
+advancing the rounded instruction budget past it. With that fix, all 896
+Copperline result records match the A500 packet byte-for-byte; WinUAE has zero
+IRQ-beam and saved-PC mismatches as well. The older +2 CCK odd-phase residual
+is closed for this synchronized kind-23 matrix. Copper-generated sources
 measure 261/262 CCK from launch on all three systems.
 
 ## Changes made
@@ -83,18 +90,20 @@ measure 261/262 CCK from launch on all three systems.
 * A 68000 chip-memory transfer samples data at each granted slot before its
   trailing DMA clock. Byte, word, two-word long and the existing AGA wide-grant
   path have regressions. The accelerated CPU transfer path is unchanged.
-* STOP fast-forwarding is bounded by a BLIT request still pending after the
-  sequencer finishes. Native BLIT recognition accounts for its source phase
-  preceding INTREQR readback by three CCK; software/Copper writes and later
-  unmasking retain their generic recognition paths. This improves the measured
-  native IRQ residual but does not close the odd-phase case.
+* STOP fast-forwarding now retains the earliest device-event deadline in CCK
+  as well as the rounded CPU instruction budget. Idle device advancement is
+  clamped to that deadline, including clocks already advanced by the CPU bus.
+  The exact 896-row One ROM IRQ capture verifies all native and Copper-generated
+  cases, including the formerly +2 CCK odd phase.
 * Normal BZERO visibility is delayed three CCK after the mathematical
   accumulator clears; fill's extra idle phase (`USE-D && !USE-C`) adds one.
   An absolute Bus deadline continues after engine completion or DMA disabling.
   New starts reset it. Self-describing save states default the new field for
   older payloads and preserve an in-flight deadline; no format version changed.
-  The one-CCK line candidate is still provisional and is not proof of the
-  broader line flag behavior.
+  The line-mode visibility delay was reduced from one extra CCK to zero. This
+  lowers BZERO mismatches in three of four line sweeps and leaves normal/fill
+  results byte-identical, but line BZERO still needs a rule for its remaining
+  input-dependent residual.
 * `timing-test` uses the corrected linear PAL beam metric. A two-byte,
   four-CPU-clock NOP replaces the old doubling instruction, preserving its
   size and timing cost. Its real committed binary is exercised by a regression.
@@ -107,17 +116,15 @@ measure 261/262 CCK from launch on all three systems.
 
 ## Open work and measurement plan
 
-### 1. Close native BLIT STOP's remaining odd-phase +2 CCK
+### 1. Extend STOP coverage beyond the measured matrix
 
-Priority: high. Reuse the synchronized kind-23 hardware capture before taking
-more measurements. Trace E, INTREQ readback assertion, the modeled IPL deadline,
-each STOP poll, recognition and the handler's first beam read. Check whether
-`instructions_for_cck`/idle chunk conversion rounds a three-CCK deadline to
-four CCK, followed by another poll-phase adjustment. Compare the ordinary
-execution loop with STOP advancing one CCK at a time. Fix any scheduler
-overshoot rather than adding a title-dependent delay or shifting all IRQs.
+The scheduler-rounding issue is fixed for the synchronized kind-23 matrix.
+Keeping the earliest device-event deadline in CCK eliminates the prior +2 CCK
+odd-phase residual: all 896 Copperline records now match the A500 packet
+byte-for-byte, including IRQ beam and saved exception PC. The follow-up below
+extends phase and contention coverage beyond this exact test matrix.
 
-If the residual survives exact stepping, extend kind 23 with at least sixteen
+For broader coverage, extend kind 23 with at least sixteen
 source horizontal phases, 0–31 NOP positions before STOP and an EXG phase flip.
 Keep native D-only, AD copy, descending fill and line controls, plus Copper
 BLIT/COPER/SOFT using the same IRQ levels and byte-identical RAM/ROM handlers.
@@ -130,38 +137,37 @@ existing Copper 37/38-CCK parity tests and CIA STOP results preserved.
 The three-CCK native source-phase adjustment is an inference from combined
 paths, not a direct measurement of Paula's physical IPL pins. A logic analyzer
 on BLIT/INTREQ-related signals and CPU IPL would distinguish those internal
-stages if software observations remain ambiguous; it is not required to first
-test the scheduler-rounding hypothesis.
+stages if a later phase or contention sweep exposes a residual.
 
-### 2. Determine line-mode BZERO semantics before changing the flag
+### 2. Finish line-mode BZERO isolation
 
-Priority: high. Kind 24 proves that hardware, WinUAE and Copperline draw the
-same observed data, yet hardware clears BZERO even for an all-zero texture
-whose complete 1,024-word destination OR is zero. Writing BLTBDAT before versus
-after BLTCON1 makes no difference. USEB off and on alter the edge, but texture
-positions 1/4/8 do not predict the hardware flag as they predict emulator
-flags. The one-CCK propagation candidate has 956 mismatches in this broader
-sweep, versus WinUAE's 872; this is not an accuracy improvement claim for line
-mode. The final combined executable was not separately recaptured for kind
-24; its line computation/deadline code is unchanged from that candidate.
+Priority: high. Kinds 25-27 are now measured. Their 7,360 hardware trials cover
+minterms, A/B/C source values, USEB, 2- and 22-pixel lines, readback delay,
+NOP/EXG phase, BLTPRI, and early/late BLTBDAT writes. Destination OR, selected
+words and elapsed beam match Copperline exactly in every row. BZERO remains
+input-dependent: in every mismatch, hardware has cleared it while Copperline
+still reports it set. Reducing the extra line visibility delay from one CCK to
+zero improves three of four matrices, but does not establish the underlying
+line ALU/pipeline rule.
 
-Next build a reviewed kind-25 logic matrix: minterms `$00/$ff/$ca/$f0`, A data
-zero/`$8000`, B texture zero/`$ffff`/`$1000`, C initialized zero/`$ffff`, USEB
-off/on, and line lengths 1/2/22. Read at NOP delays 0/1/2/4/8/16 in both NOP
-and EXG phases (3,456 rows). Capture full DMACONR and beam first, then after
-completion the destination OR and words at `$10000/$10050/$100a0`. Explicitly
-initialize masks, pointers, controls and modulo registers; never use
-read-modify-write instructions on write-only custom registers. Verify matrix
-bounds, assemble and run WinUAE preflight before flashing.
+The captures show no effect from early versus late BLTBDAT initialization, line
+length (2 versus 22 pixels), or BLTPRI on the kind-26/27 cases. Kind 27 has no
+mismatch for A=0; nonzero A patterns produce the remaining differences for
+particular B/C/USEB combinations. Hardware destination OR and selected words
+still match exactly. Do not add another global delay or infer BZERO from
+stored pixels from these data alone.
 
-This distinguishes an intermediate line-controller/ALU contribution to
-BZERO from the final stored pixel, a prior-pipeline latch, channel-enable
-effects, or a propagation delay. Add SING, disabled A/C, and other minterms
-only if these controls require them. Derive one hardware rule, then verify
-both the new matrix and the normal/fill 4,608-row sweep. Do not make the flag
-follow rendered pixels merely because that seems intuitive. The interrupted,
-unvalidated kind-25 work is preserved locally in
-`tmp/timing-isolation/unfinished-line-logic.zip`; it is excluded from commits.
+Next, add a small kind-28 pixel-pipeline matrix that samples DMACONR at both
+NOP and EXG phase offsets around each line pixel. Vary one input at a time: the
+first nonzero A bit and its position, B texture bit/shift, C value, and minterms
+$00/$ff/$ca/$f0; compare USEB/USEA/USEC settings. Include one-, two- and
+22-pixel lines, SING suppression, initial SIGN/error accumulator values, and
+destination-enabled and destination-disabled cases. Keep the kind-27 input
+matrix as a regression, record launch/read beams and destination data, and run
+WinUAE preflight before another One ROM capture. Determine whether A500 BZERO
+follows an earlier line ALU/pipeline value than the value later written to D.
+Change the state update point only after the matrix identifies a consistent
+hardware rule.
 
 ### 3. Finish regression and scope checks
 
@@ -198,7 +204,10 @@ checksum parser and portable comparison tests. Its detailed report is
 | Memory, priority off | `be743a9aa847ee58749678375b21b8fd5d72adfdef59d646c270726d29c27cd3` | `rom-amiga500-aligned-memory1` |
 | BZERO fine edges | `634599ff1094acc5fd95f87f8ab34264a61a12407ff0577330b2b30f348fc076` | `rom-amiga500-bzero-edges1` |
 | Synchronized IRQ paths | `e3ed3ab473e1a1f2c2f65d6ad03b33684cbf2eb7aa68f076fb7a75d4cd1a4e0a` | `rom-amiga500-irq-paths2` |
-| Line BZERO and data | `e9ca4607f72ec69f6c5728b87feb1398bb594f2748e995f6642981127ea8e019` | `rom-amiga500-bzero-line-data1` |
+| Line BZERO and data, kind 24 | `e9ca4607f72ec69f6c5728b87feb1398bb594f2748e995f6642981127ea8e019` | `rom-amiga500-bzero-line-data1` |
+| Line logic, kind 25 | `31b9aa0cf37222a2b6dca7c1d7cc982beed7543a3012d43a26c9fe1a6a33eaa7` | `rom-amiga500-line-logic-corrected25` |
+| Fine line BZERO, kind 26 | `c340ff9336275a570317fc8f0b83a6ee5d0edb6a034a8365f74edfd8f6f62bd0` | `rom-amiga500-line-logic-fine26` |
+| Line inputs and ordering, kind 27 | `c610b7ff62314870a21a03dfab5aae8c1ff87ce01578f57c7a2e9a42f6476223` | `rom-amiga500-line-logic-followup27` |
 
 Executable SHA-256 values (invocation provenance, not a current-path guess):
 
@@ -208,14 +217,14 @@ Executable SHA-256 values (invocation provenance, not a current-path guess):
 * BLTPRI/STOP-deadline candidate before BZERO/native-phase correction: `0e5b29f499ed69aae1ca3b17902194b22b0d7d6a81f1c5bf1a3d9da2b92e5bf2`.
 * Initial BZERO candidate, broad fill delay: `f08a8568ac55ebdcb3428ac521db363fcfd3754a315338bdd357c4502a1296e6`.
 * Final measured normal/fill/native-phase candidate: `0c8734718fc6cf9358f0e6ab3c4d3583ca75e2a3021fac456d5b70acc0f1540b`.
+* STOP deadline plus line-mode BZERO candidate measured against kinds 22-27: `97a0b51616eb47bdfd060cb8bd66a2a53ad1ca1b1c4e9242c9858ccf5561dc38`.
 * WinUAE: `f3e55700fd811cd543fdfebf6c3221cfaa3d385828f110c6d3eb534c64503123`.
 
 The final 4,608-row BZERO packet SHA equals hardware:
 `3fc9ac2ef2134a5b03090fefca5d5251e5445c71fbee8c9c2f0759284138e7fe`.
 IRQ hardware packet SHA is
 `9c74959d803b60cea0f2823372d2b6e52a4dd896ac005b366846da7bd6c883c0`;
-the final Copperline IRQ packet is
-`dad7c224a3d6031333e5c68c60849f45802efd42ad05f8c884d99cf4145218cc`.
+the STOP-deadline Copperline IRQ packet is the same SHA, byte-for-byte.
 Line-data hardware SHA is
 `d890ce92ae482a59f739e74a61b10b041fe70ac344277bbce4039da177b5bed5`.
 Superseded bundles are preserved and explicitly excluded from claims.
@@ -226,7 +235,7 @@ Superseded bundles are preserved and explicitly excluded from claims.
   two documented pre-existing Windows tests filtered: GPU picture composition
   tolerance (`picture_draws_match_the_composed_texture`) and the parallel-input
   global-state test (`numpad_mapping_stands_in_for_the_missing_gamepad`). The
-  library result is 4,079 passed, zero failed, 43 ignored and two filtered.
+  library result is 4,081 passed, zero failed, 43 ignored and two filtered.
   Non-ignored integration tests, including the real beam-metric binary test
   and all 45 golden screenshots, pass. Asset-gated ignored tests were not run.
 * Root `cargo fmt --all -- --check` and standard
@@ -237,7 +246,7 @@ Superseded bundles are preserved and explicitly excluded from claims.
 * m68k passes all CONTRIBUTING checks: formatting, strict all-target/all-feature
   Clippy, all-feature tests and clean-tree `cargo package --locked` after its
   local commit. The CPU commit is `54b8623`.
-* The probe repository's 34 Python tests pass. Only reviewed, assembled and
+* The probe repository's 40 Python tests pass. Only reviewed, assembled and
   captured experiment modes were committed; unfinished kind 25 was excluded.
 * Only `timing-test/golden/timing-test.png` was refreshed after reviewing the
   numeric changes. All other screenshot references remain unchanged. These

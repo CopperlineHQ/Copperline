@@ -2823,7 +2823,7 @@ impl Emulator {
         idle_cap: usize,
         force_precise: bool,
     ) -> Result<RealSliceAccounting> {
-        let chunk = if *cpu_idle {
+        let (chunk, idle_event_cck) = if *cpu_idle {
             self.idle_fast_forward_chunk(idle_cap)
         } else if self.cpu_jit && !force_precise {
             // JIT mode hands the machine a fixed multi-instruction slice;
@@ -2832,12 +2832,12 @@ impl Emulator {
             // caller's budget remainder -- keeps the batch boundaries, and
             // therefore interrupt delivery, identical for every caller that
             // replays the same machine state.
-            INSTRUCTIONS_PER_REALTIME_SLICE
+            (INSTRUCTIONS_PER_REALTIME_SLICE, None)
         } else {
-            1
+            (1, None)
         };
         let run = self.execute_cpu_slice(chunk)?;
-        let accounting = real_slice_accounting(
+        let mut accounting = real_slice_accounting(
             &run,
             chunk,
             self.cpu_cycles_per_instruction,
@@ -2848,7 +2848,17 @@ impl Emulator {
             // and timed devices through the idle period. (A running slice
             // needs nothing here: the cycle-exact core already advanced
             // its full device time through sync/grant as it executed.)
-            let idle_cck = accounting.slice_cck.saturating_sub(run.bus_advanced_cck);
+            let idle_cck = bounded_idle_cck(
+                accounting.slice_cck.saturating_sub(run.bus_advanced_cck),
+                if *cpu_idle { idle_event_cck } else { None },
+                run.bus_advanced_cck,
+            );
+            accounting.device_cck = accounting
+                .device_cck
+                .min(idle_cck.saturating_add(run.bus_advanced_cck));
+            accounting.slice_cck = accounting
+                .slice_cck
+                .min(idle_cck.saturating_add(run.bus_advanced_cck));
             self.bus_mut().advance_cpu_idle_devices(idle_cck);
         }
         // `refresh_irq_line` applies any deferred timed-device color clocks
@@ -2874,12 +2884,14 @@ impl Emulator {
     /// to the frame boundary) so the chipset advances only up to that
     /// event -- the CPU then wakes at the correct beam position and the
     /// handler is cycle-stepped from there.
-    fn idle_fast_forward_chunk(&self, remaining: usize) -> usize {
+    fn idle_fast_forward_chunk(&self, remaining: usize) -> (usize, Option<u32>) {
         let mut chunk = remaining
             .min(INSTRUCTIONS_PER_SLICE)
             .min(INSTRUCTIONS_PER_REALTIME_SLICE);
         let bus = self.bus();
-        let cap_cck = |cck: u32, chunk: &mut usize| {
+        let mut event_cck = None;
+        let mut cap_cck = |cck: u32, chunk: &mut usize| {
+            event_cck = Some(event_cck.map_or(cck, |earliest: u32| earliest.min(cck)));
             *chunk = (*chunk).min(self.instructions_for_cck(cck).max(1));
         };
         if let Some(ticks) = bus
@@ -2889,6 +2901,7 @@ impl Emulator {
             .chain(bus.cia_b.next_underflow_ticks())
             .min()
         {
+            cap_cck(ticks.saturating_mul(5), &mut chunk);
             chunk = chunk.min(self.instructions_for_cia_ticks(ticks).max(1));
         }
         // An interrupt already latched in INTREQ but still inside its
@@ -2946,7 +2959,7 @@ impl Emulator {
         if let Some(cck) = bus.next_cia_b_tod_alarm_cck() {
             cap_cck(cck, &mut chunk);
         }
-        chunk.max(1)
+        (chunk.max(1), event_cck)
     }
 
     pub fn report_stats(&self) {
@@ -3173,6 +3186,12 @@ fn cck_for_instructions(instructions: usize, cpu_cycles_per_instruction: f64) ->
 fn instructions_for_cck_value(cck: u32, cpu_cycles_per_instruction: f64) -> usize {
     ((cck as f64 * CPU_CYCLES_PER_COLOR_CLOCK / cpu_cycles_per_instruction).ceil())
         .clamp(0.0, usize::MAX as f64) as usize
+}
+
+fn bounded_idle_cck(bulk_cck: u32, event_cck: Option<u32>, already_advanced_cck: u32) -> u32 {
+    event_cck
+        .map(|deadline| bulk_cck.min(deadline.saturating_sub(already_advanced_cck)))
+        .unwrap_or(bulk_cck)
 }
 
 #[cfg(test)]
@@ -4653,10 +4672,10 @@ fn build_machine_inner(
 #[cfg(test)]
 mod tests {
     use super::{
-        cck_for_instructions, cpu_cycles_per_instruction_for_clock, instructions_for_cck_value,
-        real_cpu_cycles_per_instruction, real_slice_accounting, realtime_budget,
-        realtime_catchup_limit, ExecutedSlice, RealPacingBudgetMode, RealPacingProfile,
-        DEFAULT_CPU_CYCLES_PER_INSTRUCTION,
+        bounded_idle_cck, cck_for_instructions, cpu_cycles_per_instruction_for_clock,
+        instructions_for_cck_value, real_cpu_cycles_per_instruction, real_slice_accounting,
+        realtime_budget, realtime_catchup_limit, ExecutedSlice, RealPacingBudgetMode,
+        RealPacingProfile, DEFAULT_CPU_CYCLES_PER_INSTRUCTION,
     };
     use crate::audio::AudioRuntimeStatus;
 
@@ -4691,6 +4710,47 @@ mod tests {
             instructions_for_cck_value(4, DEFAULT_CPU_CYCLES_PER_INSTRUCTION),
             2
         );
+    }
+
+    #[test]
+    fn stopped_idle_deadline_uses_exact_cck_when_bulk_budget_rounds_up() {
+        // STOP fast-forward bounds a nap by converting the next device event
+        // from CCK to an instruction budget. A one-CCK nap is special-cased
+        // to advance exactly one CCK, but a three-CCK deadline rounds up to
+        // two requested instructions and the bulk accounting advances four
+        // CCK. This is the boundary where one-CCK stepping differs from bulk
+        // idle advancement, and can matter when an IRQ is due between STOP
+        // poll points.
+        let run = ExecutedSlice {
+            actual_instructions: 0,
+            actual_cpu_cycles: 0,
+            actual_cpu_cck: 0,
+            bus_advanced_cck: 0,
+            cpu_stopped: true,
+        };
+
+        let one_cck_budget = instructions_for_cck_value(1, DEFAULT_CPU_CYCLES_PER_INSTRUCTION);
+        assert_eq!(one_cck_budget, 1);
+        let one_cck_bulk = real_slice_accounting(
+            &run,
+            one_cck_budget,
+            DEFAULT_CPU_CYCLES_PER_INSTRUCTION,
+            RealPacingBudgetMode::M68kCycles,
+        );
+        assert_eq!(one_cck_bulk.slice_cck, 1);
+        assert_eq!(bounded_idle_cck(one_cck_bulk.slice_cck, Some(1), 0), 1);
+
+        let three_cck_budget = instructions_for_cck_value(3, DEFAULT_CPU_CYCLES_PER_INSTRUCTION);
+        assert_eq!(three_cck_budget, 2);
+        let three_cck_bulk = real_slice_accounting(
+            &run,
+            three_cck_budget,
+            DEFAULT_CPU_CYCLES_PER_INSTRUCTION,
+            RealPacingBudgetMode::M68kCycles,
+        );
+        assert_eq!(three_cck_bulk.slice_cck, 4);
+        assert_eq!(bounded_idle_cck(three_cck_bulk.slice_cck, Some(3), 0), 3);
+        assert_eq!(bounded_idle_cck(3, Some(3), 1), 2);
     }
 
     #[test]
@@ -5428,11 +5488,12 @@ mod tests {
         }
 
         let irq_instructions = emu.instructions_for_cck(2).max(1);
+        let (chunk, deadline) = emu.idle_fast_forward_chunk(super::INSTRUCTIONS_PER_REALTIME_SLICE);
         assert_eq!(
-            emu.idle_fast_forward_chunk(super::INSTRUCTIONS_PER_REALTIME_SLICE),
-            irq_instructions,
+            chunk, irq_instructions,
             "a stopped CPU must nap only as far as the pending INTREQ.BLIT assertion"
         );
+        assert_eq!(deadline, Some(2));
     }
 
     #[test]

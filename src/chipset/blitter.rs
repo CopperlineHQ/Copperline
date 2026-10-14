@@ -753,7 +753,7 @@ impl Blitter {
     /// DMACONR.BZERO propagation after the mathematical accumulator clears.
     pub(crate) fn bzero_clear_delay_cck(&self) -> u32 {
         match self.pending.as_ref() {
-            Some(PendingBlit::Line(_)) => 1,
+            Some(PendingBlit::Line(_)) => 0,
             Some(PendingBlit::Normal(state))
                 if (state.ife || state.efe) && state.use_d && !state.use_c =>
             {
@@ -3534,5 +3534,19 @@ mod tests {
         let set_bits: u32 = ram[..32].iter().map(|byte| byte.count_ones()).sum();
         assert_eq!(set_bits, 1);
         assert_ne!(ram[0] & 0x80, 0);
+    }
+
+    #[test]
+    fn line_bzero_clear_has_no_extra_cck_delay() {
+        let ram = vec![0u8; 1024];
+        let mut b = Blitter::new();
+        b.bltcon1 = BLTCON1_LINE;
+        b.start_scheduled((1 << 6) | 1, &ram);
+        assert_eq!(b.bzero_clear_delay_cck(), 0);
+
+        // Keep the normal-blit propagation delay unchanged.
+        let mut normal = Blitter::new();
+        normal.start_scheduled((1 << 6) | 1, &ram);
+        assert_eq!(normal.bzero_clear_delay_cck(), 3);
     }
 }
