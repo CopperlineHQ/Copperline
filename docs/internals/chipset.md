@@ -429,6 +429,12 @@ no media keep the active-low disk-change line asserted; a step pulse only
 clears that latch once media is actually present, so guest software sees a
 no-disk condition rather than unreadable track data.
 
+The window's drop handler checks ZIP member names through `package::list`
+before routing an archive. A `.slave` or `.slav` member selects WHDLoad;
+otherwise the archive goes to the floppy loader, as it does through the
+disk picker. The package listing ignores macOS metadata files and requires
+no payload decompression for this decision.
+
 Standard ADF and AmigaDOS tracks are synthesized as one PAL-sized
 revolution: 11 sectors occupy 5984 MFM words, and the generated revolution
 is 6334 16-bit MFM words so the index gap matches normal Amiga floppy

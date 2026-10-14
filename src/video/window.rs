@@ -6556,11 +6556,10 @@ fn display_file_name(path: &std::path::Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-/// What a file dropped on the window should be treated as. Extension-based:
-/// only floppies get content-sniffed (by the insert path itself), and cue
-/// sheets/hard disks/ROMs have no shared magic worth probing here. The one
-/// exception is `.chd`, which holds either a CD or a hard disk and says
-/// which in its metadata.
+/// What a file dropped on the window should be treated as. Extensions route
+/// most files; ZIP member names distinguish WHDLoad packages from floppy
+/// images, and CHD metadata distinguishes CDs from hard disks. The floppy
+/// insert path itself sniffs and validates the image content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DroppedMediaKind {
     /// Anything the floppy loader may accept (floppy::IMAGE_EXTENSIONS and
@@ -6574,7 +6573,7 @@ enum DroppedMediaKind {
     HardDisk,
     /// Kickstart ROMs load from the config screen, not at runtime.
     Rom,
-    /// A WHDLoad game package (.lha), or a .slave inside an extracted one:
+    /// A WHDLoad game package, or a .slave inside an extracted one:
     /// something to boot into (src/whdload.rs), not media to insert.
     WhdloadGame,
 }
@@ -6588,8 +6587,21 @@ fn classify_dropped_media(path: &std::path::Path) -> DroppedMediaKind {
         Some("cue") | Some("iso") | Some("nrg") | Some("chd") => DroppedMediaKind::Cd,
         Some("hdf") | Some("hdz") | Some("vhd") | Some("img") => DroppedMediaKind::HardDisk,
         Some("rom") => DroppedMediaKind::Rom,
-        // Every shape `package` accepts, or a dropped zip would be taken
-        // for a disk image and handed to the floppy bay.
+        Some("zip") => {
+            // WHDLoad packages may themselves contain disk images, so a
+            // slave takes precedence. Listing filters macOS metadata and
+            // does not decompress the archive's payloads.
+            let has_slave = crate::package::list(path).is_ok_and(|members| {
+                members
+                    .iter()
+                    .any(|member| crate::package::is_slave_name(&member.to_string_lossy()))
+            });
+            if has_slave {
+                DroppedMediaKind::WhdloadGame
+            } else {
+                DroppedMediaKind::Floppy
+            }
+        }
         Some(ext)
             if crate::package::EXTENSIONS.contains(&ext)
                 || crate::package::SLAVE_EXTENSIONS.contains(&ext) =>
