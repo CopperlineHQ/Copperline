@@ -59,3 +59,8 @@ path = "tools/generate_savestate_seed.rs"
 
 [workspace]
 members = ["."]
+
+# The root manifest's chd patch (RUSTSEC-2026-0344); [patch] applies only at
+# a workspace root, so this workspace repeats it. Remove together.
+[patch.crates-io]
+chd = { git = "https://github.com/CopperlineHQ/chd-rs", rev = "a0170de589031c74dc7245c9dc05dade5d919dc6" }
