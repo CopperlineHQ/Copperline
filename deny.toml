@@ -11,6 +11,13 @@ yanked = "deny"
 # Each exception is dated, narrow, and explains why an upgrade cannot remove
 # it. Published vulnerabilities still fail the job by default.
 ignore = [
+    # 2026-10-14: Wasmtime's component-model handle-table exhaustion does
+    # not affect this build: Cargo.toml disables default features and enables
+    # only cranelift/runtime, without component-model, even with the root's
+    # --all-features. The engine is pinned for plugin save-state replay;
+    # upgrading it requires a ZORR compatibility change. Revisit by
+    # 2027-01-14; remove if component-model is enabled or the pin is upgraded.
+    "RUSTSEC-2026-0363",
     # 2026-09-07: iroh 1.1 -> netwatch 0.19 -> netlink-packet-core 0.8
     # uses paste 1.0.15, an unmaintained compile-time token-pasting macro.
     # No vulnerability or compatible upgrade is available. Remove when
