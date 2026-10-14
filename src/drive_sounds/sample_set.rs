@@ -247,11 +247,24 @@ pub fn list_sets(dir: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    let mut names: Vec<String> = entries
-        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
-        .filter_map(|file| set_name_of_member(&file))
-        .collect();
-    names.sort_by_key(|name| name.to_ascii_lowercase());
+    sorted_set_names(
+        entries
+            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+            .filter_map(|file| set_name_of_member(&file))
+            .collect(),
+    )
+}
+
+/// Sort set names case-insensitively and keep one of each. Members of one
+/// set may spell its name in different case; ties sort by exact spelling,
+/// so the one kept does not depend on the order the host lists the
+/// directory in, which differs between platforms.
+fn sorted_set_names(mut names: Vec<String>) -> Vec<String> {
+    names.sort_by(|a, b| {
+        a.to_ascii_lowercase()
+            .cmp(&b.to_ascii_lowercase())
+            .then_with(|| a.cmp(b))
+    });
     names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
     names
 }
@@ -569,6 +582,20 @@ mod tests {
         std::fs::write(dir.join("readme.txt"), "not a set").unwrap();
         assert_eq!(list_sets(&dir), ["A500", "Quiet"]);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn set_names_dedup_the_same_way_whatever_the_listing_order() {
+        let names = |list: &[&str]| list.iter().map(|s| s.to_string()).collect();
+        let expected = ["A500", "Quiet"];
+        assert_eq!(
+            sorted_set_names(names(&["quiet", "A500", "Quiet"])),
+            expected
+        );
+        assert_eq!(
+            sorted_set_names(names(&["Quiet", "quiet", "A500"])),
+            expected
+        );
     }
 
     #[test]
