@@ -152,11 +152,14 @@ fn documents_config_dir(home: Option<std::ffi::OsString>) -> Option<PathBuf> {
     home.map(|home| host_data_dir_in(std::path::Path::new(&home)))
 }
 
-/// The host-data directory [`config_dir`] resolves to when the platform's
-/// home variable (`HOME`, or `USERPROFILE` on Windows) names `home` and no
-/// portable marker applies. Public so a harness that runs the emulator
-/// under a scratch home can find what it wrote there without restating
-/// the layout.
+/// The emulator's own Documents-folder host data under `home`:
+/// `<home>/Documents/<identity>`. This is what [`config_dir`] resolves to
+/// for the emulator itself when the platform's home variable (`HOME`, or
+/// `USERPROFILE` on Windows) names `home` and no portable marker applies.
+/// It does not predict a player build's location: after
+/// [`set_app_identity`], [`config_dir`] keeps the hidden per-user tree
+/// instead. Public so a harness that runs the emulator under a scratch
+/// home can find what it wrote there without restating the layout.
 pub fn host_data_dir_in(home: &std::path::Path) -> PathBuf {
     home.join("Documents").join(app_identity())
 }
