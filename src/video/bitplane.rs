@@ -4236,6 +4236,23 @@ impl RenderInput {
         }
     }
 
+    /// [`Self::refill_from_bus`] for a snapshot retained past the next frame
+    /// wrap: the chip-RAM and captured-row snapshots are copied into this
+    /// bundle's own buffers (reused from its previous refill) instead of
+    /// sharing the capture side's, which reclaims those buffers at the wrap
+    /// only while nothing else holds them.
+    pub(crate) fn refill_detached_from_bus(&mut self, bus: &Bus) {
+        let mut chip_ram = std::mem::take(&mut self.chip_ram);
+        let mut rows = std::mem::take(&mut self.captured_bitplane_rows);
+        self.refill_from_bus(bus);
+        let owned_ram = std::sync::Arc::make_mut(&mut chip_ram);
+        owned_ram.clear();
+        owned_ram.extend_from_slice(&self.chip_ram);
+        self.chip_ram = chip_ram;
+        std::sync::Arc::make_mut(&mut rows).clone_from(&self.captured_bitplane_rows);
+        self.captured_bitplane_rows = rows;
+    }
+
     /// Override the layer-isolation masks on an existing snapshot (tests
     /// exercise masking without touching the process-global knobs).
     #[cfg(test)]

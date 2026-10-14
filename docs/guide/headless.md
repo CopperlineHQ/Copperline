@@ -63,9 +63,15 @@ columns would lose it. Super-hi-res samples remain separate. The crop is
 limited to the raster Copperline captures; a frame without a playfield keeps
 the full field. RTG output uses the board's native width and height.
 
-Interlaced chipset output saves the current field at its original height,
-without combining it with another field. `--expect-screenshot` uses the
-same native capture when this flag is present. Frame dumps, GIFs and video
+Interlaced chipset output saves both fields woven at full height: a
+640×512 hi-res laced screen saves at 640×512, each field's lines on
+alternate rows. Fields are placed by the long-field flag (LOF), the long
+field on the even rows, as the display hardware places them, so software
+that pairs its per-field images without reading LOF shows the one-line
+comb that the window's deinterlacer corrects. The first field after
+interlace is switched on (or after a reset or state load) has no partner
+yet and saves on its own. `--expect-screenshot` uses the same native
+capture when this flag is present. Frame dumps, GIFs and video
 recordings retain their presentation geometry.
 
 (screenshot-expectations)=

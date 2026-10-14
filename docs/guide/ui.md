@@ -1101,7 +1101,8 @@ Press `Cmd+Option+S` on macOS or `Ctrl+Alt+S` on Linux/Windows, or choose
 its original pixel size, without the TV border, aspect correction, filtering,
 phosphor persistence or tint. Black pixels inside the playfield are kept.
 RTG screens save at the board's native resolution. Interlaced chipset screens
-save the current field, without blending or weaving another field into it.
+save both fields woven at full height, so a 640×512 laced screen saves at
+640×512 (see [native headless captures](headless.md#capturing-screenshots)).
 
 `--native-screenshots` selects native scheduled captures and expectations.
 See [native headless captures](headless.md#capturing-screenshots) for resolution

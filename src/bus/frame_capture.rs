@@ -9,6 +9,26 @@
 use super::*;
 
 impl Bus {
+    /// Before the wrap replaces the completed-frame snapshot, keep it as the
+    /// previous field when it was laced, so the field about to be promoted
+    /// can be woven with it (`screenshot::render_native`). Only laced
+    /// pictures pay for the copy; any other frame drops the history.
+    fn retain_native_previous_field(&mut self) {
+        let laced = self
+            .last_frame_render_base
+            .is_some_and(|base| base.bplcon0 & 0x0004 != 0);
+        if !laced {
+            self.native_previous_field = None;
+            return;
+        }
+        let mut field = match self.native_previous_field.take() {
+            Some(field) => field,
+            None => Box::new(crate::video::bitplane::RenderInput::from_bus(self)),
+        };
+        field.refill_detached_from_bus(self);
+        self.native_previous_field = Some(field);
+    }
+
     pub(super) fn begin_new_beam_frame(&mut self) {
         self.diag_log_frame_start();
         // Only maintain the collision latch across the frame boundary once
@@ -22,6 +42,7 @@ impl Bus {
         }
         self.log_bus_accounting_frame();
         self.finish_frame_bus_trace();
+        self.retain_native_previous_field();
         let promote_render_frame = !self.current_frame_render_blocked;
         if promote_render_frame {
             self.last_frame_render_base = Some(self.current_frame_render_base);

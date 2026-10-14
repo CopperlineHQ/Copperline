@@ -1279,6 +1279,46 @@ fn native_screenshots_follow_playfield_resolution_without_tv_borders() {
     }
 }
 
+/// A laced picture is two fields: the native capture weaves the current
+/// field with the one before it, long field on the even rows, so a 320x512
+/// laced lo-res screen saves at 320x512 rather than as one 320x256 field.
+#[test]
+fn native_screenshots_weave_both_fields_of_a_laced_picture() {
+    let mut app = test_app();
+    let bus = app.emu.bus_mut();
+    bus.custom_write(0x08E, 2, 0x2C81);
+    bus.custom_write(0x090, 2, 0x2CC1);
+    bus.custom_write(0x092, 2, 0x0038);
+    bus.custom_write(0x094, 2, 0x00D0);
+    bus.custom_write(0x100, 2, 0x1204);
+    bus.custom_write(0x096, 2, 0x8300);
+    // The first field's frame-start snapshot predates the mode.
+    app.emu.step_video_frame().unwrap();
+    // Paint each laced field its own background so the rows show which
+    // field they came from.
+    let colours: [u16; 2] = [0x0F00, 0x000F];
+    for colour in colours {
+        app.emu.bus_mut().custom_write(0x180, 2, colour.into());
+        app.emu.step_video_frame().unwrap();
+    }
+    app.set_native_screenshots(true);
+    let image = app.capture_present_image();
+    assert_eq!((image.width, image.height), (320, 512));
+
+    let current_is_long = app.emu.bus().frame_render_base().long_field;
+    let (long, short) = if current_is_long {
+        (colours[1], colours[0])
+    } else {
+        (colours[0], colours[1])
+    };
+    let long = crate::chipset::denise::rgb12_to_rgba8(long);
+    let short = crate::chipset::denise::rgb12_to_rgba8(short);
+    for (y, row) in image.pixels.chunks(320).enumerate() {
+        let expected = if y % 2 == 0 { long } else { short };
+        assert!(row.iter().all(|px| *px == expected), "row {y}");
+    }
+}
+
 /// The player writes its menu settings to `settings.toml` and its startup
 /// layers that file back over the manifest. Whatever the write records must
 /// come back through the merge, or the player forgets the choice on the next

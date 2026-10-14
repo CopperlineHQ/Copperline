@@ -963,6 +963,12 @@ pub struct Bus {
     last_frame_chip_ram_writes: Vec<BeamChipRamWrite>,
     current_frame_bitplane_rows: Vec<Option<CapturedBitplaneRow>>,
     last_frame_bitplane_rows: std::sync::Arc<Vec<Option<CapturedBitplaneRow>>>,
+    /// The interlaced field completed before the last one, retained with
+    /// private copies of its chip RAM and captured rows so a native
+    /// screenshot can weave the two fields of a laced picture. Cleared by
+    /// any non-laced frame wrap. A render cache, not emulated state.
+    #[serde(skip)]
+    native_previous_field: Option<Box<crate::video::bitplane::RenderInput>>,
     /// Released completed-frame rows retained for their eight plane
     /// allocations. Transient: captured contents are never reused, only the
     /// backing capacities.
@@ -3777,6 +3783,7 @@ impl Bus {
             last_frame_beam_bottom_palette_valid: false,
             current_frame_chip_ram,
             last_frame_chip_ram: std::sync::Arc::new(Vec::new()),
+            native_previous_field: None,
             current_frame_chip_ram_writes: Vec::new(),
             last_frame_chip_ram_writes: Vec::new(),
             current_frame_bitplane_rows: empty_captured_bitplane_rows(),
@@ -5326,6 +5333,7 @@ impl Bus {
         self.last_frame_chip_ram_writes.clear();
         self.current_frame_bitplane_rows = empty_captured_bitplane_rows();
         self.last_frame_bitplane_rows = std::sync::Arc::new(empty_captured_bitplane_rows());
+        self.native_previous_field = None;
         self.bitplane_row_pool.clear();
         self.current_frame_sprite_lines.clear();
         clear_captured_sprite_lines_by_y(&mut self.current_frame_sprite_lines_by_y);
@@ -8404,6 +8412,12 @@ impl Bus {
         } else {
             &self.current_frame_render_events
         }
+    }
+
+    /// The interlaced field completed immediately before the frame the
+    /// `frame_*` accessors describe, when both were laced.
+    pub(crate) fn native_previous_field(&self) -> Option<&crate::video::bitplane::RenderInput> {
+        self.native_previous_field.as_deref()
     }
 
     pub fn frame_render_base(&self) -> RenderRegisterSnapshot {
