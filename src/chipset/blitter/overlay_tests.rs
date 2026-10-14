@@ -65,10 +65,6 @@ fn assert_slot_equivalent(actual: &Blitter, reference: &Blitter, ram: &[u8], exp
         reference.current_slot_needs_bus()
     );
     assert_eq!(
-        actual.bltpri_warmup_fences_cpu(),
-        reference.bltpri_warmup_fences_cpu()
-    );
-    assert_eq!(
         actual.scheduled_slot_access_pattern(64),
         reference.scheduled_slot_access_pattern(64)
     );

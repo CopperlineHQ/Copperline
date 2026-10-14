@@ -20,7 +20,7 @@ impl Bus {
                 if self.blitter.bbusy {
                     r |= 1 << 14;
                 }
-                if self.blitter.bzero {
+                if self.blitter.bzero || self.emulated_cck < self.blitter_bzero_visible_at {
                     r |= 1 << 13;
                 }
                 self.trace_dmaconr_read(r);
@@ -722,6 +722,7 @@ impl Bus {
                 // is idle.
                 self.paula.intreq &= !crate::chipset::paula::INT_BLIT;
                 self.blit_irq_delay_cck = None;
+                self.blitter_bzero_visible_at = 0;
                 self.note_irq_latches_changed();
                 // A blit over the exception-vector area is useful crash context:
                 // flag it so the CPU wrapper can dump the instruction history.
@@ -815,6 +816,7 @@ impl Bus {
                 // blitter-done interrupt request.
                 self.paula.intreq &= !crate::chipset::paula::INT_BLIT;
                 self.blit_irq_delay_cck = None;
+                self.blitter_bzero_visible_at = 0;
                 self.note_irq_latches_changed();
                 if self.blitter_start_may_write_lowmem() {
                     self.diag_lowmem_blit = true;

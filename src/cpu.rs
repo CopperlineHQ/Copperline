@@ -4231,8 +4231,22 @@ impl CpuBus {
                 return read_be(&self.bus.mem.rom, off, size);
             }
             Some(PlainMemRegion::ChipRam(off)) => {
-                self.bus.grant_cpu_bus_access_at(Some(addr), size, kind);
-                return read_be(&self.bus.mem.chip_ram, off, size);
+                let mut sampled = None;
+                self.bus.grant_cpu_bus_access_sampled(
+                    Some(addr),
+                    size,
+                    kind,
+                    |bus, slot, stride| {
+                        let offset = slot as usize * stride;
+                        let width = size.saturating_sub(offset).min(stride);
+                        let value = read_be(&bus.mem.chip_ram, off + offset, width);
+                        sampled = Some(match sampled {
+                            Some(previous) => (previous << (width * 8)) | value,
+                            None => value,
+                        });
+                    },
+                );
+                return sampled.unwrap_or_else(|| read_be(&self.bus.mem.chip_ram, off, size));
             }
             Some(PlainMemRegion::ZorroRam(board, off)) => {
                 // Expansion (Zorro) RAM runs at external-bus speed, off the
@@ -7346,6 +7360,87 @@ mod tests {
         // yielding its regular slots, so it advanced its scheduled work.
         assert!(machine.bus().blitter.scheduled_slots_remaining() < initial_slots);
         Ok(())
+    }
+
+    fn cpu_bus_before_final_d_only_blitter_write(initial_word: u16) -> CpuBus {
+        const BLITTER_DMA_ENABLE: u16 = 1 << 6;
+
+        let mut bus = test_bus_with_pc(0x100);
+        bus.agnus.hpos = 0x20;
+        bus.agnus.dmacon = DMACON_DMAEN | BLITTER_DMA_ENABLE;
+        write_chip_word(&mut bus, 0x0400, initial_word);
+        // D-only clear.
+        bus.blitter.bltcon0 = 0x0100;
+
+        // The first D1 slot writes 0x03FE; the terminal F flush writes
+        // 0x0400, after the CPU samples that address during E.
+        bus.blitter.bltdpt = 0x03FE;
+        bus.blitter.start_scheduled((1 << 6) | 2, &bus.mem.chip_ram);
+
+        // D-only, two-word clear: STRT, INIT, A0, D0, A1, D1. E is the
+        // next internal phase; a CPU grant there advances E -> F, then the
+        // bus-cycle tail gives the blitter its final D slot.
+        for _ in 0..6 {
+            bus.advance_chipset(1);
+        }
+        assert_eq!(bus.blitter.current_slot_label(), "E");
+        assert!(!bus.blitter.current_slot_needs_bus());
+        assert_eq!(read_chip_word(&bus, 0x0400), initial_word);
+
+        let mut bus = cpu_bus(bus);
+        bus.bus.set_cpu_bus_arbitration_enabled(true);
+        bus
+    }
+
+    #[test]
+    fn chip_ram_byte_read_samples_before_final_blitter_d_tail_write() {
+        let mut bus = cpu_bus_before_final_d_only_blitter_write(0xABCD);
+
+        let value = bus.read_sized_uncached(0x0400, 1, CpuBusAccessKind::Read);
+
+        assert_eq!(value, 0xAB);
+        assert_eq!(read_chip_word(&bus.bus, 0x0400), 0x0000);
+        assert!(!bus.bus.blitter.busy);
+    }
+
+    #[test]
+    fn chip_ram_word_read_samples_before_final_blitter_d_tail_write() {
+        let mut bus = cpu_bus_before_final_d_only_blitter_write(0xABCD);
+
+        let value = bus.read_sized_uncached(0x0400, 2, CpuBusAccessKind::Read);
+
+        assert_eq!(value, 0xABCD);
+        assert_eq!(read_chip_word(&bus.bus, 0x0400), 0x0000);
+        assert!(!bus.bus.blitter.busy);
+    }
+
+    #[test]
+    fn chip_ram_long_read_samples_each_word_on_its_own_grant() {
+        let mut bus = cpu_bus_before_final_d_only_blitter_write(0xABCD);
+        write_chip_word(&mut bus.bus, 0x0402, 0x1234);
+
+        let value = bus.read_sized_uncached(0x0400, 4, CpuBusAccessKind::Read);
+
+        assert_eq!(value, 0xABCD_1234);
+        assert_eq!(read_chip_word(&bus.bus, 0x0400), 0x0000);
+        assert_eq!(read_chip_word(&bus.bus, 0x0402), 0x1234);
+        assert!(!bus.bus.blitter.busy);
+    }
+
+    #[test]
+    fn aga_68000_chip_ram_long_read_samples_all_four_bytes_in_one_grant() {
+        use crate::chipset::agnus::AgnusRevision;
+        use crate::chipset::denise::DeniseRevision;
+
+        let mut bus = cpu_bus(test_bus(reset_rom(0, 0)));
+        bus.bus
+            .set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+        bus.bus.set_cpu_bus_arbitration_enabled(true);
+        bus.bus.mem.chip_ram[0x0400..0x0404].copy_from_slice(&0xABCD_1234u32.to_be_bytes());
+
+        let value = bus.read_sized_uncached(0x0400, 4, CpuBusAccessKind::Read);
+
+        assert_eq!(value, 0xABCD_1234);
     }
 
     #[test]

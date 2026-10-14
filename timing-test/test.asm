@@ -964,9 +964,9 @@ getbeam:
         lsr.w   #8,d1           ; V7..V0
         or.w    d1,d0           ; full vpos (d0.w)
         and.w   #$ff,d2         ; raw hpos byte
-        add.w   d2,d2           ; legacy doubled-hpos metric
+        nop                     ; hpos is already colour clocks; keep 4-clock cost
         mulu    #227,d0         ; vpos * cck-per-line (d0.l)
-        add.l   d2,d0           ; + hpos
+        add.l   d2,d0           ; + raw hpos (one CCK per increment)
         rts
 
 ;------------------------------------------------ wait for the blitter to finish

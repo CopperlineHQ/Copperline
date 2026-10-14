@@ -34,6 +34,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: true
       - uses: dtolnay/rust-toolchain@stable
       # cargo tree resolves the full dependency graph without compiling
       # anything, and --locked turns any would-be lockfile update into an

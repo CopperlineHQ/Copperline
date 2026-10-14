@@ -1,0 +1,3 @@
+[submodule "m68k"]
+	path = vendor/m68k
+	url = https://github.com/HakatomOy/m68k-rs.git

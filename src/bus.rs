@@ -147,6 +147,8 @@ fn external_access_cck_x100_setting() -> u32 {
 /// This calibrates the combined path, not an isolated Paula-pin measurement;
 /// instruction IPL poll points remain a separate CPU timing mechanism.
 const DEFAULT_IRQ_LATENCY_CCK: u32 = 6;
+/// Native BLIT INTREQR and CPU-source phase offset measured from E.
+const BLIT_IRQ_READBACK_DELAY_CCK: u32 = 3;
 
 /// CPU clocks a 020+ chip read spends returning data past the data-return
 /// colour clock, before the execution unit can use it.
@@ -1335,12 +1337,15 @@ pub struct Bus {
     #[serde(skip)]
     heatmap: Option<Box<crate::heatmap::HeatMap>>,
     blitter_slowdown_cpu_misses: u8,
-    /// Pending INTREQ.BLIT raise, in colour clocks. Real Agnus raises the
-    /// blitter interrupt one clock after the sequencer's BLTDONE cycle
-    /// (vAmiga scheduleIrqRel(BLIT, 1) at the terminal micro-cycle), so a
-    /// scheduled completion arms this one-cck countdown instead of setting
-    /// INTREQ in the final slot itself. Forced drains raise immediately.
+    /// Pending INTREQ.BLIT raise, in colour clocks. The scheduled sequencer
+    /// arms the interrupt on E and raises it three colour clocks after E's
+    /// tick; the final F/D flush can finish first. Forced drains raise
+    /// immediately.
     blit_irq_delay_cck: Option<u32>,
+    /// Absolute colour-clock deadline for the delayed DMACONR.BZERO clear.
+    /// This is independent of the sequencer's mathematical BZERO accumulator.
+    #[serde(default)]
+    blitter_bzero_visible_at: u64,
     slice_bus_advanced_cck: u32,
     slice_bus_tick: AgnusTick,
     // Deferred timed-device clock. Ticking CIA/serial/pots/audio/floppy/Akiko
@@ -1846,9 +1851,7 @@ pub enum CpuWaitClass {
     /// Blitter holding the bus with BLTPRI clear: the "nice" hold before
     /// the blitter-slowdown counter yields a slot.
     BlitterNice,
-    /// Blitter holding the bus with BLTPRI set ("blitter nasty"), including
-    /// the warm-up fence, where the blitter's own slot needs no bus and the
-    /// recorded slot owner is idle.
+    /// Blitter holding the bus with BLTPRI set ("blitter nasty").
     BlitterNasty,
     Port,
 }
@@ -3921,6 +3924,7 @@ impl Bus {
             ui_mem_writers: Vec::new(),
             blitter_slowdown_cpu_misses: 0,
             blit_irq_delay_cck: None,
+            blitter_bzero_visible_at: 0,
             slice_bus_advanced_cck: 0,
             slice_bus_tick: AgnusTick::default(),
             pending_device_cck: 0,
@@ -7148,6 +7152,18 @@ impl Bus {
         size: usize,
         kind: CpuBusAccessKind,
     ) {
+        self.grant_cpu_bus_access_sampled(addr, size, kind, |_, _, _| {});
+    }
+
+    /// Sample a 68000 memory transfer at the granted slot, before DMA can
+    /// change RAM during the trailing colour clock of the CPU bus cycle.
+    pub(crate) fn grant_cpu_bus_access_sampled(
+        &mut self,
+        addr: Option<u32>,
+        size: usize,
+        kind: CpuBusAccessKind,
+        mut sample: impl FnMut(&mut Self, u32, usize),
+    ) {
         if !self.cpu_bus_arbitration_enabled {
             return;
         }
@@ -7185,6 +7201,7 @@ impl Bus {
         } else {
             bus_slots_for_cpu_access(size)
         };
+        let slot_stride = if wide_bus { 4 } else { 2 };
         // The chip bus' CPU port is single-ported: a new access finds it free
         // only after any posted write has retired, so reads cannot pass a
         // pending write and a second write stalls on the one in-flight cycle.
@@ -7275,6 +7292,7 @@ impl Bus {
             // data-return colour clock billed below, and where the CPU resumes
             // inside that clock is carried by `cpu_chip_clock_phase`.
             if !self.cpu_short_bus_cycle {
+                sample(self, slot, slot_stride);
                 let (cck, tick) = self.advance_one_chip_bus_quantum(None);
                 self.record_slice_bus_advance(cck, tick);
             }
@@ -7591,34 +7609,54 @@ impl Bus {
             // hardware timeline has already been collapsed, so raise now
             // and drop any raise already armed by the terminal cycle.
             self.blit_irq_delay_cck = None;
-            self.raise_blit_irq(source);
+            self.blitter_bzero_visible_at = 0;
+            self.raise_blit_irq(source, 0);
         }
-        // Scheduled completions do not raise here: INTREQ.BLIT is armed
-        // when the sequencer ENTERS its terminal BLTDONE cycle (see
-        // note_blitter_slot_ticked), one colour clock after that cycle's
-        // first attempt -- which real Agnus asserts even while a contended
-        // final D write is still blocked (vAmiga scheduleIrqRel(BLIT, 1)
-        // runs before the bus allocation check).
+        // A scheduled completion leaves the source countdown armed by E.
+        // The OneROM A500 sweeps place INTREQ.BLIT three clocks after that
+        // tick, independently of whether the final D access was delayed.
     }
 
-    /// Post-tick bookkeeping shared by the blitter's bus-slot and
-    /// idle-cycle tick sites: arm the INTREQ.BLIT raise when the sequencer
-    /// just entered its terminal BLTDONE cycle. Armed with 2 because the
-    /// arming tick's own advance_beam decrements it once in the same
-    /// colour clock; the raise then lands at the end of the terminal
-    /// cycle's first attempt.
-    pub(crate) fn note_blitter_slot_ticked(&mut self) {
+    /// Consume the terminal IRQ arm and record the delayed BZERO clear when a
+    /// scheduled slot changes the mathematical accumulator from true to
+    /// false. The BZERO deadline includes this slot's following beam advance;
+    /// reads through that deadline expose the cleared value.
+    pub(crate) fn note_blitter_slot_ticked(&mut self, bzero_before: bool, bzero_delay_cck: u32) {
         if self.blitter.take_irq_arm() {
-            self.blit_irq_delay_cck = Some(2);
+            // The E slot's following beam advance consumes one clock.
+            self.blit_irq_delay_cck = Some(BLIT_IRQ_READBACK_DELAY_CCK + 1);
+        }
+        if bzero_before && !self.blitter.bzero {
+            self.blitter_bzero_visible_at = self
+                .emulated_cck
+                .saturating_add(1 + u64::from(bzero_delay_cck));
         }
     }
 
-    fn raise_blit_irq(&mut self, source: &'static str) {
+    fn raise_blit_irq(&mut self, source: &'static str, source_age_cck: u32) {
         self.note_bus_event_named(BUS_EVENT_BLIT_IRQ, Some("blitter_irq"));
         let intreq_before = self.paula.intreq;
         self.paula.intreq |= INT_BLIT;
+        if source_age_cck != 0 {
+            self.pre_age_enabled_irq_source(INT_BLIT, source_age_cck);
+        }
         self.note_irq_source_asserted();
         self.trace_blitter_completion(source, intreq_before);
+    }
+
+    /// OneROM measurements constrain the native BLIT source's recognition
+    /// phase to begin three colour clocks before its INTREQR edge. This is a
+    /// timing-model inference from the relative source and status deadlines.
+    /// Start only a newly enabled native BLIT source early; software and
+    /// Copper INTREQ writes retain the generic recognition delay.
+    fn pre_age_enabled_irq_source(&mut self, source: u16, age_cck: u32) {
+        let setting = self.irq_latency_setting;
+        if setting == 0 {
+            return;
+        }
+        let pending = self.current_enabled_irq_sources();
+        let newly = pending & !self.irq_latency_last_pending & source;
+        self.arm_irq_latency_bits(newly, setting.saturating_sub(age_cck));
     }
 
     #[cfg(test)]
@@ -7722,6 +7760,13 @@ impl Bus {
             .filter(|&(_, count)| count == slots)
             .and_then(|(mask, count)| self.cck_until_blitter_completes(mask, count));
         Some(prediction.unwrap_or_else(|| slots.saturating_mul(CHIP_BUS_SLOT_CCK).max(1)))
+    }
+
+    /// Colour clocks until a scheduled BLIT interrupt still in its
+    /// post-BLTDONE delay is asserted. The blitter engine can have finished
+    /// its final D flush before this deadline.
+    pub fn next_blitter_irq_cck(&self) -> Option<u32> {
+        self.blit_irq_delay_cck.filter(|&cck| cck != 0)
     }
 
     pub fn next_serial_event_cck(&self) -> Option<u32> {
@@ -10004,10 +10049,10 @@ impl Bus {
         let value = match off {
             0x002 => {
                 let mut r = self.agnus.dmacon & 0x07FF;
-                if self.blitter.busy {
+                if self.blitter.bbusy {
                     r |= 1 << 14;
                 }
-                if self.blitter.bzero {
+                if self.blitter.bzero || self.emulated_cck < self.blitter_bzero_visible_at {
                     r |= 1 << 13;
                 }
                 r

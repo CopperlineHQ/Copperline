@@ -16,6 +16,12 @@ perturbed by the system ROM. Loading to a fixed address also matters: the ROM's
 boot buffer can land in slow RAM, and code-fetch timing must not depend on where
 the code happens to sit.
 
+The beam-based rows use `227 * vertical + horizontal` colour clocks on PAL.
+The VHPOSR horizontal byte already counts colour clocks. Earlier binaries
+incorrectly doubled that byte, creating a discontinuous clock at scanline
+boundaries; those elapsed values must be remeasured before comparing timing.
+The correction replaces the doubling instruction with an equal-cost NOP.
+
 ## Building
 
 Needs [vasm](http://sun.hasenbraten.de/vasm/) (`vasmm68k_mot`, Motorola syntax):

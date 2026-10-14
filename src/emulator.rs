@@ -2914,6 +2914,9 @@ impl Emulator {
         if let Some(cck) = bus.next_blitter_completion_cck() {
             cap_cck(cck, &mut chunk);
         }
+        if let Some(cck) = bus.next_blitter_irq_cck() {
+            cap_cck(cck, &mut chunk);
+        }
         if let Some(cck) = bus.next_serial_event_cck() {
             cap_cck(cck, &mut chunk);
         }
@@ -5400,6 +5403,36 @@ mod tests {
         emu.debug_step_instructions(2).unwrap();
         assert!(emu.machine.stopped(), "the program should be in STOP");
         emu
+    }
+
+    #[test]
+    fn stopped_cpu_fast_forward_is_bounded_by_pending_blitter_irq() {
+        let mut emu = emulator_stopped_waiting_for_vblank(0x2700);
+        {
+            let bus = emu.machine.bus_mut();
+            bus.agnus.hpos = 0x20;
+            bus.agnus.dmacon = crate::chipset::agnus::DMACON_DMAEN | (1 << 6);
+            bus.blitter.bltcon0 = 0x0100; // D-only clear.
+            bus.blitter.bltdpt = 0x0400;
+            bus.blitter.start_scheduled((1 << 6) | 2, &bus.mem.chip_ram);
+
+            // E arms the delayed interrupt; the next F slot finishes the
+            // engine while two clocks of the IRQ delay are still pending.
+            for _ in 0..8 {
+                bus.advance_chipset(1);
+            }
+            assert!(!bus.blitter.busy);
+            assert_eq!(bus.next_blitter_completion_cck(), None);
+            assert_eq!(bus.next_blitter_irq_cck(), Some(2));
+            assert_eq!(bus.paula.intreq & crate::chipset::paula::INT_BLIT, 0);
+        }
+
+        let irq_instructions = emu.instructions_for_cck(2).max(1);
+        assert_eq!(
+            emu.idle_fast_forward_chunk(super::INSTRUCTIONS_PER_REALTIME_SLICE),
+            irq_instructions,
+            "a stopped CPU must nap only as far as the pending INTREQ.BLIT assertion"
+        );
     }
 
     #[test]

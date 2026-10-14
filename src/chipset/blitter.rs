@@ -220,17 +220,9 @@ pub struct Blitter {
     /// for DMACONR even though normally the CPU only observes the
     /// cleared state.
     pub busy: bool,
-    /// DMACONR bit 14 (BBUSY). Real Agnus clears the busy flag with the
-    /// sequencer's final REPEAT decision -- the last body cycle of the
-    /// last word -- while the terminal micro-cycles (the D-flush and the
-    /// BLTDONE cycle that raises the interrupt) still run afterwards. So
-    /// BBUSY reads 0 two cycles before the final D write lands and before
-    /// INTREQ.BLIT rises (vAmiga clearBusyFlag at REPEAT vs endBlit;
-    /// cross-checked with the slot-trace probe). `busy` above stays the
-    /// engine-running flag (bus grants, Copper BFD wait, drain logic).
-    /// The register file belongs to software again once BBUSY drops:
-    /// writes during the terminal cycles program the next blit and do not
-    /// disturb the queued final D word (see `release_registers`).
+    /// DMACONR bit 14 (BBUSY). OneROM A500 readback sweeps place the drop
+    /// after the internal E/NOTHING flush and before the terminal D/BLTDONE
+    /// slot. `busy` remains the engine-running flag until that slot retires.
     pub bbusy: bool,
     /// Set to true at the start of `execute()` and cleared on the first
     /// non-zero D word. Surfaces as DMACONR bit 13.
@@ -239,11 +231,9 @@ pub struct Blitter {
     pending: Option<PendingBlit>,
     dma_addr_mask: u32,
     /// One-shot signal to the bus: the sequencer just entered its terminal
-    /// BLTDONE micro-cycle. Real Agnus asserts the blitter interrupt off
-    /// the BLTDONE cycle's FIRST bus attempt (vAmiga schedules the IRQ
-    /// even when the final D write is still blocked), so INTREQ.BLIT can
-    /// rise before a contended final write lands. Consumed by
-    /// `take_irq_arm`.
+    /// BLTDONE micro-cycle. The bus schedules the measured INTREQ.BLIT
+    /// delay independently of contention on the final D write. Consumed
+    /// by `take_irq_arm`.
     irq_arm_pending: bool,
 }
 
@@ -304,8 +294,7 @@ struct NormalBlitState {
     debug_watched_write: Option<(u32, u16)>,
     phase: NormalBlitPhase,
     /// Extra internal start slots before Init; see NORMAL_START_EXTRA_SLOTS
-    /// for the hardware derivation (register commit + BLT_STRT1/2, first
-    /// body cycle at poke+4).
+    /// for the OneROM A500 measurement. Zero for newly started blits.
     start_extra: u32,
     slots_remaining: u32,
     h_remaining: u32,
@@ -439,12 +428,11 @@ enum LineBlitPhase {
     LBus,
     L4,
     /// First terminal micro-cycle after the last pixel (vAmiga's NOTHING
-    /// instruction): internal, BBUSY already clear.
+    /// instruction): internal; completing this cycle clears BBUSY.
     Tail,
     /// BLTDONE micro-cycle: internal for USEB-off programs; USEB programs
     /// end with `BUSIDLE|BLTDONE`, which waits for a free bus. INTREQ.BLIT
-    /// rises one colour clock after its first attempt (handled by the
-    /// bus-side raise delay).
+    /// is asserted by the separate bus-side delay armed when Tail completes.
     TailDone,
     Done,
 }
@@ -696,14 +684,9 @@ impl Blitter {
             PendingBlit::Normal(state) => {
                 let phase_before = state.phase;
                 let done = state.tick_slot(ram, &mut self.bzero);
-                // BBUSY drops with the sequencer's final REPEAT (the last
-                // body cycle); the terminal D-flush/BLTDONE cycles (E/F)
-                // still run with the flag already clear, and the register
-                // file is software's again from that point.
-                if matches!(
-                    state.phase,
-                    NormalBlitPhase::E | NormalBlitPhase::F | NormalBlitPhase::Done
-                ) {
+                // The final body tick enters E with BBUSY still set. E
+                // clears it; the final D write in F is still pending.
+                if matches!(state.phase, NormalBlitPhase::F | NormalBlitPhase::Done) {
                     self.bbusy = false;
                     state.release_registers(self);
                 }
@@ -729,13 +712,9 @@ impl Blitter {
             PendingBlit::Line(state) => {
                 let phase_before = state.phase;
                 let done = state.tick_slot(ram, &mut self.bzero);
-                // BBUSY drops with the final pixel's D cycle; the two
-                // terminal micro-cycles run with the flag already clear and
-                // the register file already released.
-                if matches!(
-                    state.phase,
-                    LineBlitPhase::Tail | LineBlitPhase::TailDone | LineBlitPhase::Done
-                ) {
+                // The final pixel enters Tail with BBUSY still set.
+                // The internal NOTHING tick clears it before TailDone.
+                if matches!(state.phase, LineBlitPhase::TailDone | LineBlitPhase::Done) {
                     self.bbusy = false;
                     state.release_registers(self);
                 }
@@ -771,6 +750,25 @@ impl Blitter {
         }
     }
 
+    /// DMACONR.BZERO propagation after the mathematical accumulator clears.
+    pub(crate) fn bzero_clear_delay_cck(&self) -> u32 {
+        match self.pending.as_ref() {
+            Some(PendingBlit::Line(_)) => 1,
+            Some(PendingBlit::Normal(state))
+                if (state.ife || state.efe) && state.use_d && !state.use_c =>
+            {
+                4
+            }
+            _ => 3,
+        }
+    }
+
+    /// Legacy compatibility query. BLTPRI follows actual bus requests, so
+    /// startup and pipeline bubbles never add a separate CPU warm-up fence.
+    pub fn bltpri_warmup_fences_cpu(&self) -> bool {
+        false
+    }
+
     /// Whether the blit pipeline cycle that the next `tick_scheduled_slot`
     /// will process performs a chip-bus access. Idle pipeline cycles (the "-"
     /// slots in the HRM blitter cycle diagrams, e.g. the non-write half of a
@@ -786,32 +784,6 @@ impl Blitter {
         match self.pending.as_ref() {
             Some(PendingBlit::Normal(state)) => state.current_slot_needs_bus(),
             Some(PendingBlit::Line(state)) => state.current_slot_needs_bus(),
-            None => false,
-        }
-    }
-
-    /// Whether the pending pipeline cycle falls inside the blit's warm-up
-    /// window, during which BLTPRI's BLS assertion fences the CPU off the
-    /// chip bus even though the cycle itself is bus-free. From the BLTSIZE
-    /// poke until the D pipeline is primed (the first D slot has passed) the
-    /// sequencer's bus request stays asserted: its first fetches are queued
-    /// back-to-back, so the startup ladder and the first-word bubble never
-    /// release the request line. MFM-decode trackloaders (e.g. Jim Power's)
-    /// depend on this: they restore a saved word below a decode blit's
-    /// destination right after writing BLTSIZE, relying on the nasty lockout
-    /// to keep that CPU write (and the instruction prefetches before it) out
-    /// of the startup and first-D holes. Once the pipeline is primed the
-    /// request drops on genuine bus-free micro-cycles -- disabled-channel
-    /// gaps, fill's idle cycle, line-mode Bresenham cycles -- and the CPU
-    /// may use them even under BLTPRI, which line-drawing main loops rely
-    /// on for CPU time (2 of the 4 line cycles per pixel are bus-free).
-    pub fn bltpri_warmup_fences_cpu(&self) -> bool {
-        if !self.busy {
-            return false;
-        }
-        match self.pending.as_ref() {
-            Some(PendingBlit::Normal(state)) => state.bltpri_warmup_fences_cpu(),
-            Some(PendingBlit::Line(state)) => state.bltpri_warmup_fences_cpu(),
             None => false,
         }
     }
@@ -1384,7 +1356,7 @@ impl LineBlitState {
     fn current_slot_class(&self) -> BlitSlotClass {
         match self.phase {
             LineBlitPhase::StartDelay => {
-                if self.start_extra >= LINE_START_EXTRA_SLOTS {
+                if self.start_extra == 0 {
                     BlitSlotClass::Internal
                 } else {
                     BlitSlotClass::BusFree
@@ -1411,30 +1383,19 @@ impl LineBlitState {
         }
     }
 
-    /// Line-mode warm-up window for the BLTPRI CPU fence (see
-    /// `Blitter::bltpri_warmup_fences_cpu`): only the startup ladder. Line
-    /// mode has no D pipeline bubble -- the first D write is a real access --
-    /// so once the per-pixel cadence starts, the bus-free Bresenham cycles
-    /// (L1/L3) release the request line and stay CPU-available.
-    fn bltpri_warmup_fences_cpu(&self) -> bool {
-        matches!(self.phase, LineBlitPhase::StartDelay | LineBlitPhase::Init)
-    }
-
     /// Access pattern of the next `limit` scheduled slots (bit k = slot k
     /// consumes a blitter-eligible colour clock: a bus access or a bus-free
-    /// micro-cycle; clear = internal): the line startup ladder (register
-    /// commit internal, the final BLT_STRT cycle bus-free, Init internal),
+    /// micro-cycle; clear = internal): the two internal startup clocks,
     /// the [L1, L2, L3, L4] cadence per pixel (all eligible-consuming),
     /// then the two internal terminal cycles.
     fn slot_access_pattern(&self, limit: u32) -> (u64, u32) {
         let count = self.slots_remaining.min(limit).min(64);
-        // Eligibility of the lead-in cycles still pending, oldest first:
-        // pending extra is the internal register commit; the StartDelay->Init
-        // transition cycle is the final BLT_STRT cycle; Init is internal.
+        // Eligibility of the lead-in cycles still pending, oldest first.
+        // New blits have StartDelay and Init, both internal.
         let lead: &[bool] = match self.phase {
             LineBlitPhase::StartDelay => {
-                if self.start_extra >= LINE_START_EXTRA_SLOTS {
-                    &[false, true, false]
+                if self.start_extra == 0 {
+                    &[false, false]
                 } else {
                     &[true, false]
                 }
@@ -1780,16 +1741,13 @@ impl NormalBlitState {
     }
 
     /// Arbitration class of the pending pipeline cycle (see BlitSlotClass).
-    /// The startup ladder maps to the hardware timeline: the first extra is
-    /// the BLTSIZE register-commit cycle (internal), the remaining extra
-    /// and the StartDelay cycle are the BLT_STRT1/BLT_STRT2 arbitration
-    /// cycles (bus-free), and Init is the micro-program begin latency
-    /// (internal). Disabled-channel body cycles and the D bubble are
-    /// bus-free; the terminal E flush and a D-less BLTDONE are internal.
+    /// New blits use two internal startup clocks. Disabled-channel body
+    /// cycles and the D bubble are bus-free; the E flush and D-less F are
+    /// internal. Nonzero startup extras occur only in older saved states.
     fn current_slot_class(&self) -> BlitSlotClass {
         match self.phase {
             NormalBlitPhase::StartDelay => {
-                if self.start_extra >= NORMAL_START_EXTRA_SLOTS {
+                if self.start_extra == 0 {
                     BlitSlotClass::Internal
                 } else {
                     BlitSlotClass::BusFree
@@ -1816,32 +1774,6 @@ impl NormalBlitState {
         }
     }
 
-    /// Warm-up window for the BLTPRI CPU fence (see
-    /// `Blitter::bltpri_warmup_fences_cpu`): the startup ladder plus, for
-    /// D-writing blits, the body cycles until the first D slot has primed
-    /// the hold register. That covers the first-word pipeline bubble; from
-    /// the second word on, bus-free micro-cycles release the request line.
-    /// The terminal E/F cycles are past the fence: BBUSY has already
-    /// dropped at the last body cycle. A blit with NO channels enabled
-    /// never asserts a bus request at all, so it fences nothing: BLS
-    /// follows the request line, and interrupt-driven null-blit chains
-    /// (BLTSIZE with BLTCON0 USE=0 restarted every scanline, vAmigaTS
-    /// Agnus/Blitter/bltint) must run with the CPU at full speed.
-    fn bltpri_warmup_fences_cpu(&self) -> bool {
-        if !self.use_a && !self.use_b && !self.use_c && !self.use_d {
-            return false;
-        }
-        match self.phase {
-            NormalBlitPhase::StartDelay | NormalBlitPhase::Init => true,
-            NormalBlitPhase::A
-            | NormalBlitPhase::B
-            | NormalBlitPhase::C
-            | NormalBlitPhase::D
-            | NormalBlitPhase::FillIdle => self.use_d && !self.pipeline_full,
-            NormalBlitPhase::E | NormalBlitPhase::F | NormalBlitPhase::Done => false,
-        }
-    }
-
     /// A D slot claims the bus only when a destination word is queued in
     /// the hold register. The first word's D slot is always the HRM "-"
     /// pipeline bubble -- including in D-only blits: real hardware writes
@@ -1854,8 +1786,7 @@ impl NormalBlitState {
     /// Access pattern of the next `limit` scheduled slots (bit k = slot k
     /// consumes a blitter-eligible colour clock: a bus access or a bus-free
     /// micro-cycle; clear = internal, elapses unconditionally). Mirrors
-    /// process_phase, including the startup ladder (register commit is
-    /// internal, the BLT_STRT cycles are bus-free) and the terminal cycles.
+    /// process_phase, including the internal startup and terminal clocks.
     fn slot_access_pattern(&self, limit: u32) -> (u64, u32) {
         let count = self.slots_remaining.min(limit).min(64);
         let mut mask = 0u64;
@@ -1876,8 +1807,9 @@ impl NormalBlitState {
                 | NormalBlitPhase::C
                 | NormalBlitPhase::D
                 | NormalBlitPhase::FillIdle => true,
-                // The BLT_STRT cycles need a free bus; the commit does not.
-                NormalBlitPhase::StartDelay => start_extra < NORMAL_START_EXTRA_SLOTS,
+                // Only legacy serialized extra BLT_STRT cycles need a free
+                // bus; a current zero-extra StartDelay is internal.
+                NormalBlitPhase::StartDelay => start_extra != 0,
                 // The terminal BLTDONE cycle is the final D write for USED
                 // programs and internal otherwise.
                 NormalBlitPhase::F => self.use_d && pipeline_full,
@@ -2303,25 +2235,13 @@ fn normal_source_slots_per_word(con0: u16, con1: u16) -> u32 {
     1 + u32::from(use_b) + u32::from(c_phase) + u32::from(d_phase) + u32::from(fill_idle)
 }
 
-/// Extra internal slots between the BLTSIZE write and the Init slot. Real
-/// Agnus takes the BLTSIZE poke through a one-cycle register commit and two
-/// bus-arbitration startup cycles (vAmiga BLT_STRT1/BLT_STRT2), and the
-/// first micro-program cycle runs at poke+4. Copperline's sequencer already
-/// ticks once in the poke's own colour clock, so two extras plus the
-/// StartDelay/Init slots put the first body cycle at poke+4 as well
-/// (verified with the two-sided VAMIGA_BLT_PROBE / COPPERLINE_DIAG_BLT_SLOTS
-/// slot trace).
-/// TODO: STRT1/STRT2 on real hardware need free bus slots, so Copper or
-/// fixed-DMA ownership stretches the startup; these extras are plain
-/// internal cycles.
-const NORMAL_START_EXTRA_SLOTS: u32 = 2;
-// Line mode enters the first BUSIDLE/HOLD_A line micro-instruction one
-// colour clock earlier than the normal-mode A/B/C/D pipeline. UAE models
-// this by starting the line cycle counter at -BLITTER_STARTUP_CYCLES and
-// then immediately walking the line diagram; it does not add the extra
-// normal-mode pipeline-init slot on top. This keeps timing-test row 25 at
-// the vAmiga/FS-UAE source-derived line cadence without moving normal blits.
-const LINE_START_EXTRA_SLOTS: u32 = NORMAL_START_EXTRA_SLOTS - 1;
+/// Extra internal slots between the BLTSIZE write and the Init slot.
+/// StartDelay and Init already account for the two clocks between the
+/// completed CPU BLTSIZE access and the first body phase. OneROM A500
+/// channel-mask, fill and line sweeps reject the earlier extra commit clocks.
+/// Keep the serialized startup counters, but new blits need no extra slots.
+const NORMAL_START_EXTRA_SLOTS: u32 = 0;
+const LINE_START_EXTRA_SLOTS: u32 = 0;
 
 fn normal_total_slots(h: u32, w: u32, con0: u16, con1: u16) -> u32 {
     let words = h.saturating_mul(w);
@@ -2331,15 +2251,14 @@ fn normal_total_slots(h: u32, w: u32, con0: u16, con1: u16) -> u32 {
     // Every program ends with the two terminal micro-cycles (E/F): the
     // internal D-hold flush and the BLTDONE cycle. With USED the BLTDONE
     // cycle carries the final D write; without it both are internal, but
-    // they still run -- BBUSY has already dropped at the last body cycle
-    // and INTREQ.BLIT rises one clock after the BLTDONE cycle.
+    // they still run. E clears BBUSY and arms the delayed interrupt;
+    // F retires the final destination word.
     2 + NORMAL_START_EXTRA_SLOTS
         + words.saturating_mul(normal_source_slots_per_word(con0, con1))
         + 2
 }
 
 fn line_total_slots(npixels: u32, use_b: bool) -> u32 {
-    // Line startup is one slot shorter than normal-mode startup; then
     // StartDelay/Init lead into four cycles per pixel (six with USEB: the B
     // fetch and the bare bus cycle), and the two terminal micro-cycles
     // (NOTHING + BLTDONE, vAmiga's line program tail).
@@ -2768,6 +2687,40 @@ mod tests {
     }
 
     #[test]
+    fn bzero_fill_delay_requires_fill_idle_phase() {
+        let ram = vec![0u8; 256];
+
+        let start_fill = |use_c: bool, use_d: bool, b: &mut Blitter| {
+            b.bltcon0 = BLTCON0_USE_A
+                | (if use_c { BLTCON0_USE_C } else { 0 })
+                | (if use_d { BLTCON0_USE_D } else { 0 })
+                | 0x00F0;
+            b.bltcon1 = BLTCON1_DESC | BLTCON1_IFE;
+            b.bltafwm = 0xFFFF;
+            b.bltalwm = 0xFFFF;
+            b.bltapt = 0x10;
+            b.bltcpt = 0x20;
+            b.bltdpt = 0x30;
+            b.start_scheduled((1u16 << 6) | 1, &ram);
+        };
+
+        // USE-D with USE-C clear inserts the fill idle phase and has the
+        // measured four-CCK BZERO propagation. D-off and C-enabled fills do
+        // not have that phase and retain the normal three-CCK delay.
+        let mut fill_idle = Blitter::new();
+        start_fill(false, true, &mut fill_idle);
+        assert_eq!(fill_idle.bzero_clear_delay_cck(), 4);
+
+        let mut d_off = Blitter::new();
+        start_fill(false, false, &mut d_off);
+        assert_eq!(d_off.bzero_clear_delay_cck(), 3);
+
+        let mut c_enabled = Blitter::new();
+        start_fill(true, true, &mut c_enabled);
+        assert_eq!(c_enabled.bzero_clear_delay_cck(), 3);
+    }
+
+    #[test]
     fn four_by_four_c2p_blitter_chain_matches_direct_planar_conversion() {
         assert_c2p_4x4_blitter_chain_matches_direct_planar_conversion(49);
         assert_c2p_4x4_blitter_chain_matches_direct_planar_conversion(102);
@@ -2908,13 +2861,9 @@ mod tests {
         b.start_scheduled(bltsize, &ram);
 
         assert!(b.busy);
-        assert_eq!(b.scheduled_slots_remaining(), Some(10));
+        assert_eq!(b.scheduled_slots_remaining(), Some(8));
         assert_eq!(&ram[0x20..0x24], &[0xAA, 0xAA, 0xAA, 0xAA]);
-        // Walk the two startup extras (register commit + BLT_STRT cycles).
-        for _ in 0..2 {
-            assert!(!b.tick_scheduled_slot(&mut ram));
-        }
-        assert!(!b.tick_scheduled_slot(&mut ram)); // BBUSY start delay.
+        assert!(!b.tick_scheduled_slot(&mut ram)); // BLT_STRT.
         assert_eq!(b.scheduled_slots_remaining(), Some(7));
         assert!(b.busy);
         assert_eq!(&ram[0x20..0x24], &[0xAA, 0xAA, 0xAA, 0xAA]);
@@ -2934,11 +2883,12 @@ mod tests {
         assert_eq!(&ram[0x20..0x24], &[0xAA, 0xAA, 0xAA, 0xAA]);
         assert!(!b.tick_scheduled_slot(&mut ram)); // D1 writes word 0.
         assert_eq!(&ram[0x20..0x24], &[0x00, 0x00, 0xAA, 0xAA]);
-        // BBUSY has dropped with the final body cycle; the engine still
-        // runs the terminal flush/BLTDONE cycles.
-        assert!(!b.bbusy);
+        // BBUSY remains set through the final body cycle and drops on E,
+        // while the engine still runs the terminal BLTDONE cycle.
+        assert!(b.bbusy);
         assert!(b.busy);
         assert!(!b.tick_scheduled_slot(&mut ram)); // E (internal).
+        assert!(!b.bbusy);
         assert_eq!(&ram[0x20..0x24], &[0x00, 0x00, 0xAA, 0xAA]);
         assert!(b.tick_scheduled_slot(&mut ram)); // F writes the final word.
         assert!(!b.busy);
@@ -2963,7 +2913,7 @@ mod tests {
             pattern
         }
 
-        // D-only clear, 1 row x 2 words: startup extras + StartDelay, Init,
+        // D-only clear, 1 row x 2 words: StartDelay, Init,
         // [A D] x2, E, F. The first D cycle is the pipeline bubble even in a
         // D-only clear (hardware: "-- D0 -- D1 | -- D2", vAmiga's first-
         // iteration lockD): only D1 and the final F flush access the bus.
@@ -2974,7 +2924,7 @@ mod tests {
         b.start_scheduled((1u16 << 6) | 2, &ram);
         assert_eq!(
             needs_bus_walk(&mut b, &mut ram),
-            [false, false, false, false, false, false, false, true, false, true]
+            [false, false, false, false, false, true, false, true]
         );
 
         // A->D copy, 1 row x 2 words: the first D phase is the delayed-D
@@ -2990,7 +2940,7 @@ mod tests {
         b.start_scheduled((1u16 << 6) | 2, &ram);
         assert_eq!(
             needs_bus_walk(&mut b, &mut ram),
-            [false, false, false, false, true, false, true, true, false, true]
+            [false, false, true, false, true, true, false, true]
         );
 
         // ABCD cookie-cut, 1 row x 2 words: A/B/C fetch first, then the
@@ -3007,13 +2957,10 @@ mod tests {
         b.start_scheduled((1u16 << 6) | 2, &ram);
         assert_eq!(
             needs_bus_walk(&mut b, &mut ram),
-            [
-                false, false, false, false, true, true, true, false, true, true, true, true, false,
-                true
-            ]
+            [false, false, true, true, true, false, true, true, true, true, false, true]
         );
 
-        // Line blit, 2 pixels: shorter line startup + Init, then
+        // Line blit, 2 pixels: StartDelay + Init, then
         // [L1 L2 L3 L4] per pixel and the two internal terminal cycles.
         // Only L2 (C read) and L4 (D write) access the bus; L1/L3 are
         // bus-free Bresenham cycles.
@@ -3031,10 +2978,7 @@ mod tests {
         b.start_scheduled((2u16 << 6) | 2, &ram);
         assert_eq!(
             needs_bus_walk(&mut b, &mut ram),
-            [
-                false, false, false, false, true, false, true, false, true, false, true, false,
-                false
-            ]
+            [false, false, false, true, false, true, false, true, false, true, false, false]
         );
     }
 
@@ -3052,10 +2996,7 @@ mod tests {
         b.bltdpt = 0x20;
         b.start_scheduled((1u16 << 6) | 1, &ram);
 
-        for _ in 0..2 {
-            assert!(!b.tick_scheduled_slot(&mut ram)); // startup extras
-        }
-        assert!(!b.tick_scheduled_slot(&mut ram)); // BBUSY start delay.
+        assert!(!b.tick_scheduled_slot(&mut ram)); // BLT_STRT.
         assert!(!b.tick_scheduled_slot(&mut ram)); // INIT.
         assert!(!b.tick_scheduled_slot(&mut ram)); // A slot is idle when A DMA is disabled.
         assert!(!b.tick_scheduled_slot(&mut ram)); // B source is fetched here.
@@ -3081,12 +3022,12 @@ mod tests {
         b.bltdpt = 0x20;
         b.start_scheduled((1u16 << 6) | 1, &ram);
 
-        assert_eq!(b.scheduled_slots_remaining(), Some(8));
+        assert_eq!(b.scheduled_slots_remaining(), Some(6));
         assert!(!b.tick_scheduled_slot(&mut ram));
 
         assert_eq!(b.bltapt, 0x10);
         assert_eq!(read_word(&ram, 0x20), 0);
-        assert_eq!(b.scheduled_slots_remaining(), Some(7));
+        assert_eq!(b.scheduled_slots_remaining(), Some(5));
     }
 
     #[test]
@@ -3101,21 +3042,20 @@ mod tests {
         b.bltdpt = 0x20;
         b.start_scheduled((1u16 << 6) | 1, &ram);
 
-        assert_eq!(b.scheduled_slots_remaining(), Some(8));
-        for _ in 0..2 {
-            assert!(!b.tick_scheduled_slot(&mut ram)); // startup extras
-        }
-        assert!(!b.tick_scheduled_slot(&mut ram)); // BBUSY start delay.
+        assert_eq!(b.scheduled_slots_remaining(), Some(6));
+        assert!(!b.tick_scheduled_slot(&mut ram)); // BLT_STRT.
         assert!(!b.tick_scheduled_slot(&mut ram)); // INIT.
         assert!(!b.tick_scheduled_slot(&mut ram)); // A state, empty when A is disabled.
         assert!(!b.tick_scheduled_slot(&mut ram)); // C state is the last body cycle.
 
-        // BBUSY drops with the final body cycle, but the terminal
+        // BBUSY remains set through the final body cycle, then drops on E;
+        // the terminal
         // flush/BLTDONE cycles still run before the engine finishes (the
         // blitter interrupt then rises one clock after the final cycle).
-        assert!(!b.bbusy);
+        assert!(b.bbusy);
         assert!(b.busy);
         assert!(!b.tick_scheduled_slot(&mut ram)); // E (internal).
+        assert!(!b.bbusy);
         assert!(b.tick_scheduled_slot(&mut ram)); // F/BLTDONE (internal, no D).
 
         assert!(!b.busy);
@@ -3163,9 +3103,8 @@ mod tests {
         b.bltdpt = 0;
         b.start_scheduled((1u16 << 6) | 2, &ram);
 
-        assert_eq!(b.scheduled_slots_remaining(), Some(9));
-        assert!(!b.tick_scheduled_slot(&mut ram)); // startup register commit.
-        assert!(!b.tick_scheduled_slot(&mut ram)); // final BLT_STRT cycle.
+        assert_eq!(b.scheduled_slots_remaining(), Some(8));
+        assert!(!b.tick_scheduled_slot(&mut ram)); // BLT_STRT.
         assert!(!b.tick_scheduled_slot(&mut ram)); // INIT.
         assert!(!b.tick_scheduled_slot(&mut ram)); // L1 accumulator state.
         assert!(!b.tick_scheduled_slot(&mut ram)); // L2 fetches C.
@@ -3174,11 +3113,12 @@ mod tests {
         assert!(!b.tick_scheduled_slot(&mut ram)); // L4 stores the latched C result.
 
         assert_eq!(read_word(&ram, 0), 0);
-        // BBUSY drops with the final pixel's store; the two terminal
-        // micro-cycles still run before the engine finishes.
-        assert!(!b.bbusy);
+        // BBUSY remains set through the final pixel's store and drops on the
+        // terminal NOTHING cycle; BLTDONE then finishes the engine.
+        assert!(b.bbusy);
         assert!(b.busy);
         assert!(!b.tick_scheduled_slot(&mut ram)); // terminal NOTHING cycle.
+        assert!(!b.bbusy);
         assert!(b.tick_scheduled_slot(&mut ram)); // terminal BLTDONE cycle.
         assert!(!b.busy);
     }
@@ -3375,12 +3315,12 @@ mod tests {
         let fill_total = fill.scheduled_slots_remaining();
         let (fill_total_walked, fill_bus) = walk_bus(&mut fill, &mut ram);
 
-        // Copy: 2 (startup extras) + 2 (start delay + init) + 2 words *
-        // 2 cyc/word + 2 (terminal flush/BLTDONE) = 10.
-        assert_eq!(copy_total, 10);
-        // Fill: the same, but 3 cyc/word -> 4 + 2*3 + 2 = 12 (two extra slots).
-        assert_eq!(fill_total, Some(12));
-        assert_eq!(fill_total_walked, 12);
+        // Copy: 2 (start delay + init) + 2 words * 2 cyc/word + 2
+        // (terminal flush/BLTDONE) = 8.
+        assert_eq!(copy_total, 8);
+        // Fill: the same, but 3 cyc/word -> 2 + 2*3 + 2 = 10 (two extra slots).
+        assert_eq!(fill_total, Some(10));
+        assert_eq!(fill_total_walked, 10);
         // The extra fill slots are IDLE: the fill performs the same number of
         // bus accesses as the copy (the A reads and D writes), just spread over
         // two more idle cycles.

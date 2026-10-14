@@ -1229,6 +1229,41 @@ mod tests {
     }
 
     #[test]
+    fn pending_blitter_bzero_deadline_survives_and_old_bus_chunks_default_it() {
+        let mut machine = test_machine();
+        machine.bus_mut().blitter.bzero = false;
+        machine.bus_mut().note_blitter_slot_ticked(true, 3);
+        assert_ne!(machine.bus_mut().custom_read(0x002, 2) & (1 << 13), 0);
+
+        let blob = saved_blob(&machine);
+        let mut restored = test_machine();
+        load_from_reader(&mut restored, blob.as_slice()).unwrap();
+        assert_ne!(restored.bus_mut().custom_read(0x002, 2) & (1 << 13), 0);
+        restored.bus_mut().advance_chipset(3);
+        assert_ne!(restored.bus_mut().custom_read(0x002, 2) & (1 << 13), 0);
+        restored.bus_mut().advance_chipset(1);
+        assert_eq!(restored.bus_mut().custom_read(0x002, 2) & (1 << 13), 0);
+
+        // Earlier self-describing Bus payloads lack this field. Removing it
+        // exercises serde(default) while retaining the same chunk version.
+        let (prefix, mut chunks) = unpack(&blob);
+        let bus_rest = chunk::bus_chunks()
+            .into_iter()
+            .find(|spec| matches!(spec.payload, chunk::Payload::BusRest))
+            .expect("Bus has a catch-all chunk");
+        let payload = &chunk_mut(&mut chunks, bus_rest).payload;
+        let payload = edit_map(payload, |entries| {
+            entries.retain(|(key, _)| key.as_str() != Some("blitter_bzero_visible_at"));
+        });
+        chunk_mut(&mut chunks, bus_rest).payload = payload;
+        let old_blob = pack(&prefix, &chunks);
+
+        let mut old_restored = test_machine();
+        load_from_reader(&mut old_restored, old_blob.as_slice()).unwrap();
+        assert_eq!(old_restored.bus_mut().custom_read(0x002, 2) & (1 << 13), 0);
+    }
+
+    #[test]
     fn reader_rejects_a_blob_without_the_state_magic() {
         let mut machine = test_machine();
         let before_pc = machine.pc();
