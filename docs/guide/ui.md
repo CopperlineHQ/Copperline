@@ -632,6 +632,20 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   [Direct launching](run.md)) can engage warp too. Each holds it
   independently and releases only its own; such a warp mutes live audio,
   the OSD names who asked, and one press of the shortcut ends them all.
+
+  Warp runs the guest's clock as fast as its CPU, so a key or mouse button
+  held for a tenth of a second would be held for seconds of emulated time:
+  the guest would repeat the key, and two clicks would land too far apart
+  to count as a double-click. While you hold down a key on the host
+  keyboard or a button on the guest's mouse, warp therefore yields to
+  real-time pacing, and keeps yielding for three quarters of a second after
+  you let go so the second click of a double-click lands in time. It picks
+  up again on its own; warp stays engaged throughout. Scheduled and
+  control-protocol input is timed in emulated time already and does not
+  slow warp down, so text pasted as keystrokes still types at warp speed.
+  For a Workbench that is fast while you use it, a faster CPU or the JIT
+  (`[cpu] jit`, 68020 and up) speeds the guest up while keeping its clock
+  real-time.
 - **Warp Limit** (also `Cmd+Shift+W` / `Alt+Shift+W`): how fast warp runs.
   With VSync enabled, emulating one frame per presented frame would cap
   warp at the host monitor's refresh rate (about 1.2x for 50 Hz PAL on a
@@ -1439,6 +1453,18 @@ Uncaptured, host cursor motion over the display still drives the
 emulated mouse, and `[input] mouse_sensitivity` scales it the same way
 it scales captured motion. At the default setting the factor is 1.0 and
 the pointer tracks the host cursor one-for-one.
+
+The JOYxDAT counters are eight bits wide, and the guest works out how far
+the mouse moved from the difference between two reads, normally once a
+frame; 128 counts or more between reads wraps around and reads as motion
+the other way. A real Amiga mouse never turns its encoders that fast, but
+a modern high-resolution host mouse can (Linux/X11 reports raw device
+counts), so host motion reaches the counters at most 63 counts per axis
+per emulated frame -- over 3000 counts a second. Faster than that, one
+more frame's worth is carried and the rest is dropped, so the pointer
+stops when your hand does. If the pointer feels too fast or tops out,
+lower or raise `[input] mouse_sensitivity`. Scripted `--mouse-after`
+motion is applied exactly as given.
 
 `[input] mouse_capture` (`--mouse-capture`, the launcher's *Input* tab)
 changes when the grab is taken: `auto` grabs whenever the window has the

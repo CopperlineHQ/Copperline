@@ -241,6 +241,29 @@ const PAD_MOUSE_MAX_STEP: std::time::Duration = std::time::Duration::from_millis
 /// rate, a comfortable Workbench pointer speed.
 const KEYBOARD_MOUSE_COUNTS_PER_QUANTUM: i32 = 3;
 
+/// The most live host-mouse motion, in quadrature counts per axis, that
+/// reaches a port's JOYxDAT counters in one emulated video frame.
+///
+/// The counters are eight bits wide, and software takes the difference of
+/// successive reads -- input.device and nearly every game once a frame,
+/// from the vertical blank -- so 128 counts or more between two reads
+/// aliases into motion the other way. A real mouse's encoders never turn
+/// that fast; a host mouse reports whatever the hand does, and a modern
+/// high-resolution one (X11 hands over raw device counts) moved briskly
+/// delivers hundreds of counts a frame. Host motion lands at quantum
+/// boundaries anywhere in a frame, so two deliveries can straddle one read:
+/// half the wrap limit per frame keeps any two reads a frame apart inside
+/// it. At PAL rate that is still over 3000 counts a second.
+const HOST_MOUSE_COUNTS_PER_FRAME: i32 = 63;
+
+/// How long warp keeps yielding to real-time pacing after the operator last
+/// pressed or let go of a host key or mouse button (see
+/// [`crate::emulator::Emulator::set_warp_input_yield`]). Comfortably longer
+/// than the gap between the two clicks of a deliberate double-click, so the
+/// second press lands as far after the first in emulated time as it did in
+/// the hand, inside the guest's double-click window.
+const WARP_INPUT_YIELD_GRACE: std::time::Duration = std::time::Duration::from_millis(750);
+
 /// One port's controls currently held by `--joy-after` scripting.
 #[derive(Debug, Default, Clone, Copy)]
 struct AutoJoyHeld {
@@ -1383,6 +1406,24 @@ pub struct App {
     /// must not count as the operator letting the capture go.
     capture_suspended_by_ui: bool,
     mouse_delta_remainder: (f64, f64),
+    /// Whole host-mouse counts per axis not yet handed to the port, held
+    /// back by [`HOST_MOUSE_COUNTS_PER_FRAME`]; never more than one more
+    /// frame's worth, so the pointer stops when the hand does.
+    mouse_pending: (i32, i32),
+    /// The emulated frame the host mouse last delivered motion in, and the
+    /// counts per axis it has delivered in that frame so far.
+    mouse_frame_sent: (u64, i32, i32),
+    /// Rawkeys the operator is holding on the host keyboard: the live part
+    /// of `held_rawkeys`, which scheduled and control-protocol keys feed as
+    /// well. Warp yields to real-time pacing while one is down.
+    live_held_rawkeys: [bool; 128],
+    /// Host mouse buttons the operator is holding (bit = button index,
+    /// 0 left, 1 right, 2 middle), for the same yield.
+    live_mouse_buttons: u8,
+    /// Until when warp keeps yielding to real-time pacing after the
+    /// operator last touched a key or mouse button (see
+    /// [`WARP_INPUT_YIELD_GRACE`]).
+    warp_input_yield_until: Option<Instant>,
     last_rendered_emulated_frame: Option<u64>,
     last_submitted_render_frame: Option<u64>,
     render_generation: u64,
@@ -2916,6 +2957,11 @@ impl App {
             mouse_captured: false,
             capture_suspended_by_ui: false,
             mouse_delta_remainder: (0.0, 0.0),
+            mouse_pending: (0, 0),
+            mouse_frame_sent: (0, 0, 0),
+            live_held_rawkeys: [false; 128],
+            live_mouse_buttons: 0,
+            warp_input_yield_until: None,
             last_rendered_emulated_frame: None,
             last_submitted_render_frame: None,
             render_generation: 0,
@@ -3421,6 +3467,11 @@ impl App {
         input.set_mouse_button(port, 0, state.fire);
         input.set_mouse_button(port, 1, state.button2);
         input.set_mouse_button(port, 2, state.green);
+        // Held mouse buttons from the keys are a hand on the machine, as the
+        // pad mouse's are (see update_warp_input_yield).
+        if state.fire || state.button2 || state.green {
+            self.note_live_input();
+        }
     }
 
     /// The controller state keyboard mapping `index` is producing right now.
@@ -5009,7 +5060,7 @@ impl ApplicationHandler for App {
                             return;
                         }
                         if let Some(rawkey) = host_to_amiga_rawkey(other) {
-                            self.handle_amiga_key_event(rawkey, pressed);
+                            self.handle_live_amiga_key_event(rawkey, pressed);
                         }
                     }
                 }
@@ -5381,12 +5432,18 @@ impl ApplicationHandler for App {
                     }
                 }
                 if let Some(port) = self.mouse_port() {
-                    let input = &mut self.emu.bus_mut().input;
-                    match button {
-                        MouseButton::Left => input.set_mouse_button(port, 0, pressed),
-                        MouseButton::Right => input.set_mouse_button(port, 1, pressed),
-                        MouseButton::Middle => input.set_mouse_button(port, 2, pressed),
-                        _ => {}
+                    let index = match button {
+                        MouseButton::Left => Some(0),
+                        MouseButton::Right => Some(1),
+                        MouseButton::Middle => Some(2),
+                        _ => None,
+                    };
+                    if let Some(index) = index {
+                        self.emu
+                            .bus_mut()
+                            .input
+                            .set_mouse_button(port, index, pressed);
+                        self.note_live_mouse_button(index, pressed);
                     }
                 }
             }
@@ -6314,6 +6371,10 @@ impl ApplicationHandler for App {
                     }
                 }
             } else {
+                // Host mouse motion held back by the per-frame limit goes
+                // in now that the frame may have moved on.
+                self.deliver_host_mouse_motion();
+                self.update_warp_input_yield();
                 let (total_frames, runahead, time_budget) = self.burst_frames(headless_capture);
                 let burst_start = Instant::now();
                 let mut frames_done = 0usize;

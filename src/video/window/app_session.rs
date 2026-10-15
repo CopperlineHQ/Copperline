@@ -764,7 +764,9 @@ impl App {
         &self,
         headless_capture: bool,
     ) -> (usize, Option<std::time::Duration>) {
-        if self.emu.paced() || headless_capture {
+        // Warp yielding to the operator's input runs paced, one frame per
+        // presented frame, until the hands are off again.
+        if self.emu.paced() || headless_capture || self.emu.warp_input_yield() {
             return (1, None);
         }
         (
@@ -1981,6 +1983,7 @@ impl App {
             self.sync_live_audio_suspension();
         }
         self.held_rawkeys = [false; 128];
+        self.live_held_rawkeys = [false; 128];
         self.reset_render_pipeline();
         self.last_fdd_track = None;
         paint_test_screen(&mut self.fb);
@@ -2006,6 +2009,7 @@ impl App {
             self.last_fdd_track = None;
             if clear_host_keys {
                 self.held_rawkeys = [false; 128];
+                self.live_held_rawkeys = [false; 128];
             }
         }
     }
