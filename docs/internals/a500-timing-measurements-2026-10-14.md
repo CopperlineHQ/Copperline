@@ -154,16 +154,18 @@ with USEB clear; extending it to B DMA introduces measured false clears.
 Other non-wrap effects remain: kind38 demonstrates a C-DMA-dependent flag
 change even with LF=cc, which ignores C in the ordinary minterm.
 
-Next, at BSH4, A=B=0, LF=cc and two pixels, vary one-hot C words separately
-at the first and second C source addresses. Cross USEB/USEC and include
-one-pixel controls with BLTCDAT held at zero. Then measure LF=c0 with all
-A shifts to reconstruct the effective B-bit incidence without depending on
-C in the minterm. Repeat rare opcode-control differences and prime all
-normal-mode A/B/C holds if needed. Do not implement a BSH lookup table.
+The next C-input follow-up is now measured; see the
+[C-input and read-sequence report](a500-line-c-input-2026-10-15.md).
+Kind39 reproducibly isolates the first fetched C word, not the second
+word or BLTCDAT seed. Kind40 adds shift and A-data controls. Kind41
+reveals variable flags between otherwise timing-identical runs, including
+post-busy samples. Do not turn those counts into a fixed mask lookup.
+The new report records the within-blit sequence control and the decision
+tree for retained state, CPU-bus activity, and ROM-versus-RAM execution.
 
-Kinds36–38 are now measured; invalid packaging drafts are excluded. The
-fresh live-ROM backup was restored, hash-verified and reset released after
-each capture. No test ROM remains running on hardware.
+The live-ROM backup is restored and hash-verified after each collection.
+Follow the latest report's cleanup status and current-session backup;
+do not load an earlier backup over a newly configured live image.
 
 ### 3. Finish regression and scope checks
 
