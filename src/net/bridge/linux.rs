@@ -343,9 +343,7 @@ fn request_helper_fd(interface: &str, guest_mac: Option<[u8; 6]>) -> Result<Owne
 
 fn start_helper() -> Result<()> {
     let current = std::env::current_exe().context("locating Copperline executable")?;
-    // Prefer the systemd user socket installed by the companion setup. It is
-    // also the path Flatpak uses: connecting to the exported runtime socket
-    // activates this host service without granting the sandbox raw devices.
+    // Prefer the systemd user socket installed by the companion setup.
     let systemd_started = std::process::Command::new("systemctl")
         .args(["--user", "start", "copperline-net-helper.socket"])
         .status()

@@ -41,7 +41,7 @@ material lives in the repository:
 
 `RELEASE.md`
 : The release checklist: version bump, checks, and packaging for
-  Homebrew, Flatpak/AppImage, Windows, the macOS disk image, and the
+  Homebrew, AppImage, Windows, the macOS disk image, and the
   libretro cores.
 
 `CREDITS.md` and `FUNDING.md`

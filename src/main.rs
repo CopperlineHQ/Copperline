@@ -611,30 +611,6 @@ fn print_net_interfaces() -> Result<()> {
 fn run_net_helper_setup(action: &str) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        if std::env::var_os("FLATPAK_ID").is_some() {
-            if action == "status" {
-                #[cfg(feature = "net-bridge")]
-                {
-                    let socket = copperline::net::bridge::linux::helper_socket_path()?;
-                    if socket.exists() {
-                        println!("host helper socket is visible at {}", socket.display());
-                        return Ok(());
-                    }
-                    anyhow::bail!(
-                        "host helper socket is not visible at {}; install and enable \
-                         the Linux network-helper companion on the host",
-                        socket.display()
-                    );
-                }
-                #[cfg(not(feature = "net-bridge"))]
-                anyhow::bail!("this build has no bridged-networking support");
-            }
-            anyhow::bail!(
-                "the Flatpak cannot install a host capability binary from \
-                 inside its sandbox; download the Copperline Linux network-helper \
-                 companion archive, then run its copperline-net-helper-setup {action}"
-            );
-        }
         let executable = std::env::current_exe()?;
         let mut candidates = vec![
             executable.with_file_name("copperline-net-helper-setup"),

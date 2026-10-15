@@ -12,7 +12,7 @@
 //! from hosts nobody here controls, unpacked, and then *run on the
 //! emulated machine*, so a file that is not the file expected is not
 //! written at all. They are pinned in several places -- this module, the
-//! script, the Flatpak manifest, the Homebrew formula -- and
+//! script, the Homebrew formula, the Windows packaging script -- and
 //! [`tests::the_pinned_digests_match_the_fetch_script`] is what keeps this
 //! copy honest with the script's.
 
@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn the_pinned_digests_match_the_fetch_script() {
         // The same two archives are pinned here, in tools/fetch-whdload.sh,
-        // in the Flatpak manifest and in the Homebrew formula. This one is
+        // and in the Homebrew formula and Windows packaging script. This is
         // the copy a running Copperline checks its download against, so it
         // is the one most worth catching adrift.
         let script = include_str!("../../tools/fetch-whdload.sh");

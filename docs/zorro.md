@@ -414,9 +414,7 @@ built in:
     per-user systemd socket. Only the root-owned helper binary receives
     `CAP_NET_RAW`; it opens/binds/filters a socket and passes the descriptor to
     Copperline, never pumps frames and never runs as root. `--net-helper-status`
-    and `--uninstall-net-helper` inspect/remove it. Flatpak users install the
-    published Linux helper companion on the host; the sandbox can access only
-    `$XDG_RUNTIME_DIR/copperline-net-helper/control.sock`.
+    and `--uninstall-net-helper` inspect/remove it.
 
 Bridge open failures are fatal to startup and save-state restoration; Copperline
 never silently substitutes NAT or isolation. If an adapter disappears while

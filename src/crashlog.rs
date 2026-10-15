@@ -10,7 +10,7 @@
 //! report. The file lands next to the executable (the natural spot for the
 //! portable Windows bundle), falling back to the working directory and then
 //! the system temporary directory when that location is not writable
-//! (installed Homebrew/AppImage/Flatpak layouts).
+//! (installed Homebrew/AppImage layouts).
 
 use std::backtrace::Backtrace;
 use std::fs::OpenOptions;
