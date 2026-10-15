@@ -141,33 +141,27 @@ stages if a later phase or contention sweep exposes a residual.
 
 ### 2. Finish line-mode BZERO isolation
 
-Priority: high. Kinds 25-27 are now measured. Their 7,360 hardware trials cover
-minterms, A/B/C source values, USEB, 2- and 22-pixel lines, readback delay,
-NOP/EXG phase, BLTPRI, and early/late BLTBDAT writes. Destination OR, selected
-words and elapsed beam match Copperline exactly in every row. BZERO remains
-input-dependent: in every mismatch, hardware has cleared it while Copperline
-still reports it set. Reducing the extra line visibility delay from one CCK to
-zero improves three of four matrices, but does not establish the underlying
-line ALU/pipeline rule.
+The 15 October follow-up collected 18,852 validated new A500 records with
+One ROM. See [the detailed report and next-run handoff](a500-line-bzero-2026-10-15.md).
+The old single-region destination observer did not cover later D writes,
+which follow the C pointer in line mode; new probes scan both regions.
+The earlier zero-data statements must be limited to their sampled region.
 
-The captures show no effect from early versus late BLTBDAT initialization, line
-length (2 versus 22 pixels), or BLTPRI on the kind-26/27 cases. Kind 27 has no
-mismatch for A=0; nonzero A patterns produce the remaining differences for
-particular B/C/USEB combinations. Hardware destination OR and selected words
-still match exactly. Do not add another global delay or infer BZERO from
-stored pixels from these data alone.
+Full minterm and nonuniform-C measurements establish an extra inter-pixel
+BZERO evaluation for the tested BSH=0 cases, involving previous A/C holds.
+A universal intermediate B=$ffff rule is disproved by shifted-texture tests.
+Normal B-path priming does not remove the irregular pattern. Equal-cycle
+opcode controls differ in only two of 640 groups, requiring repeats.
+No new core fix was accepted: the provisional L2 implementation was preserved
+as an ignored patch and removed from active source because it has known
+counterexamples and an earliest-read timing error.
 
-Next, add a small kind-28 pixel-pipeline matrix that samples DMACONR at both
-NOP and EXG phase offsets around each line pixel. Vary one input at a time: the
-first nonzero A bit and its position, B texture bit/shift, C value, and minterms
-$00/$ff/$ca/$f0; compare USEB/USEA/USEC settings. Include one-, two- and
-22-pixel lines, SING suppression, initial SIGN/error accumulator values, and
-destination-enabled and destination-disabled cases. Keep the kind-27 input
-matrix as a regression, record launch/read beams and destination data, and run
-WinUAE preflight before another One ROM capture. Determine whether A500 BZERO
-follows an earlier line ALU/pipeline value than the value later written to D.
-Change the state update point only after the matrix identifies a consistent
-hardware rule.
+Next: measure the assembled kind-36 shifted full-minterm ROM, test truth-mask
+closure, then perform the planned 1–18-pixel/all-BSH counter-wrap sweep.
+Repeat variable rows and, if needed, isolate CPU activity using STOP/Copper
+controls. The detailed handoff includes immutable paths, source IDs, expected
+checks and the prototype's limitations. The original Kickstart was restored
+and verified after this session; hardware is no longer running a test ROM.
 
 ### 3. Finish regression and scope checks
 
