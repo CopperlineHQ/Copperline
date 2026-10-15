@@ -490,12 +490,8 @@ impl M68kMachine {
         let mut cpu = CpuCore::new();
         cpu.set_cpu_type(cpu_type_for_model(cpu_model));
         cpu.address_mask = address_mask_for_model(cpu_model);
-        if cpu_model == CpuModel::M68060 && !fpu_enabled {
-            // An FPU-less 060 (LC/EC060) presents as PCR.DFP: the core
-            // raises the faithful format $4 disabled frame instead of the
-            // host's generic Line-F shim for discrete 68881/68882 absence.
-            cpu.pcr |= m68k::PCR_DFP;
-        }
+        // The 060 FPU (fitted or absent) is gated by PCR.DFP, which
+        // `reset_cpu` sets on every reset -- including the one below.
         // A 68020/030 without an attached 68881/68882 routes cpID-1 F-line
         // opcodes to the Line-F exception inside the core. The precise path
         // additionally pre-empts them with `force_fpu_line_f_if_needed`
@@ -3563,6 +3559,19 @@ impl M68kMachine {
     fn reset_cpu(&mut self) {
         self.cpu.reset(&mut self.bus);
         self.cpu.set_sr(0x2700);
+        if self.cpu.is_060() {
+            // Reset clears PCR.DFP, enabling the 060's FPU, but that FPU is
+            // not 68040-compatible: every FSAVE/FRESTORE frame, NULL
+            // included, is three long words, while exec's hand-built task
+            // contexts carry the one-long NULL frame of the 68881/68882/
+            // 68040. A 060 accelerator's boot ROM therefore disables the
+            // FPU on every reset, and 68060.library re-enables it once it
+            // has converted exec's context switch; model that firmware
+            // here. An FPU-less LC/EC060 presents the same way, so FP
+            // instructions take the format $4 FPU-disabled exception
+            // instead of the host's generic Line-F shim.
+            self.cpu.pcr |= m68k::PCR_DFP;
+        }
         self.apply_cacr_updates();
         debug!(
             "reset vector: SP={:#010X} PC={:#010X} SR={:#06X}",
@@ -3641,8 +3650,8 @@ impl M68kMachine {
         if self.fpu_enabled {
             return false;
         }
-        // The 060 models FPU absence in the core via PCR.DFP (set at
-        // construction), with the proper format $4 disabled frame.
+        // The 060 models FPU absence in the core via PCR.DFP (set on
+        // every reset), with the proper format $4 disabled frame.
         if self.cpu.is_060() {
             return false;
         }
@@ -8765,6 +8774,62 @@ mod tests {
         let mut machine = M68kMachine::new(bus, CpuModel::M68020, false)?;
         machine.step_slice(1)?;
         assert_eq!(machine.pc(), 0x0000_0200);
+        Ok(())
+    }
+
+    #[test]
+    fn m68060_reset_disables_the_fpu_until_pcr_dfp_is_cleared() -> Result<()> {
+        // A 060 board's boot ROM sets PCR.DFP on every reset, because the
+        // 060's three-long NULL state frame does not fit exec's hand-built
+        // task contexts; 68060.library clears it again. An LC/EC060 shows
+        // the same disabled FPU, and its DFP must survive resets too.
+        for fpu in [true, false] {
+            let mut bus = test_bus_with_pc(0x0000_0100);
+            write_program(
+                &mut bus,
+                0x0000_0100,
+                &[
+                    0xF200, 0xB000, // FMOVE.L FPCR,D0
+                    0x31FC, 0x0001, 0x3000, // MOVE.W #1,$3000.W (alive marker)
+                ],
+            );
+            // Line-F vector. The FPU-disabled exception is pre-instruction:
+            // the handler enables the FPU and RTE restarts the faulting
+            // instruction.
+            write_chip_long(&mut bus, 0x2C, 0x0000_0200);
+            write_program(
+                &mut bus,
+                0x0000_0200,
+                &[
+                    0x7000, // MOVEQ #0,D0
+                    0x4E7B, 0x0808, // MOVEC D0,PCR (clears DFP)
+                    0x4E73, // RTE
+                ],
+            );
+            let mut machine = M68kMachine::new(bus, CpuModel::M68060, fpu)?;
+            assert_ne!(machine.cpu.pcr & m68k::PCR_DFP, 0, "power-on, fpu={fpu}");
+
+            machine.step_slice(1)?;
+            assert_eq!(machine.pc(), 0x0000_0200, "disabled FPU traps, fpu={fpu}");
+            let frame = machine.cpu.a(7);
+            assert_eq!(
+                read_chip_word(machine.bus(), frame + 6),
+                0x402C,
+                "format $4 FPU-disabled frame on the Line-F vector, fpu={fpu}"
+            );
+            assert_eq!(read_chip_long(machine.bus(), frame + 2), 0x0000_0100);
+            assert_eq!(read_chip_long(machine.bus(), frame + 0x0C), 0x0000_0100);
+            if fpu {
+                // Handler (3), restarted FMOVE, alive marker.
+                machine.step_slice(5)?;
+                assert_eq!(read_chip_word(machine.bus(), 0x3000), 1);
+                assert_eq!(machine.cpu.pcr & m68k::PCR_DFP, 0);
+            }
+
+            // A hardware reset re-runs the board firmware: DFP is set.
+            machine.reset_after_bus_reset();
+            assert_ne!(machine.cpu.pcr & m68k::PCR_DFP, 0, "after reset, fpu={fpu}");
+        }
         Ok(())
     }
 

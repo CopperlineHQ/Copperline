@@ -46,7 +46,8 @@ FBcc/FScc/FDBcc/FTRAPcc, the control registers, the FPCR rounding
 mode/precision, the FPSR exception/accrued bytes, and the FSAVE/FRESTORE
 state frames. The state frame is NULL after reset and, once the FPU has
 been touched, the CPU's own IDLE frame: the 68881-style $18-byte frame on
-020/030 systems and the 68040's version-$41, $28-byte frame on the 040.
+020/030 systems, the 68040's version-$41, $28-byte frame on the 040, and
+three long words on the 060 (see [The 68060](#the-68060)).
 Guests validate the size byte, and Linux/m68k's sigreturn kills a process
 whose saved FPU frame carries a foreign size. FMOD/FREM compute the exact
 remainder and the FPSR quotient byte. This covers Kickstart's detection
@@ -324,7 +325,7 @@ contract. The unimplemented integer set (MOVEP, CHK2/CMP2, CAS2,
 misaligned CAS, 64-bit MUL/DIV) raises vector 61 with a format $0 frame
 stacking the faulting instruction, gated before any architectural side
 effect so the handler can re-decode and re-execute. The unimplemented
-FPU set (the transcendentals, FINT/FINTRZ, FGETEXP/FGETMAN,
+FPU set (the transcendentals, FGETEXP/FGETMAN,
 FMOD/FREM/FSCALE, FSINCOS, FMOVECR, and the FDBcc/FTRAPcc/FScc
 conditionals) raises the Line-F vector with the six-word format $2
 frame the 68060SP dispatches on -- next-instruction PC stacked, the
@@ -344,10 +345,19 @@ SR M bit is storable (and interrupts clear it) but never banks A7, and
 MSP/ISP are gone from the MOVEC set. Access errors push the eight-word
 format $4 frame with the fault address and FSLW (composed from the MMU
 walk cause, R/W, size, and transfer modifier), and RTE pops it as well
-as the 040's format 7. The FPU state frame is one long word for NULL (as
-on every part since the 68881; exec's hand-built task contexts depend on
-it) and three for IDLE. The MMU shares the 040's three-level walker and
-TC[15] enable; PTEST is gone (undefined F-line) and PLPAR/PLPAW translate
+as the 040's format 7. Every FPU state frame is three long words, NULL
+included (MC68060UM section 6.7), where the 68881/68882/68040 NULL frame
+is one long word -- the frame Kickstart's exec hand-builds into every new
+task's context. Restoring that context on an enabled 060 FPU consumes
+eight bytes too many and launches the task from the wrong PC. A real
+060 board's boot ROM therefore disables the FPU (PCR.DFP) on every
+reset, and `68060.library` enables it once it has converted exec's
+context switch; Copperline sets DFP on every CPU reset to model that
+firmware (as WinUAE does), so without the library a 060 runs FPU-less,
+as on a real board. The LC/EC060 (`fpu = false`) presents the same way,
+which keeps its DFP across resets. FINT and FINTRZ are implemented in
+silicon (only the 040 traps them). The MMU shares the 040's three-level
+walker and TC[15] enable; PTEST is gone (undefined F-line) and PLPAR/PLPAW translate
 an address into An, faulting with the format $4 frame.
 
 **Timing.**
@@ -381,7 +391,9 @@ rate; pairing across a folded branch is not modelled, and a branch
 folds only when a pairing window is open; the FSAVE EXCP frame is not
 generated (the softfloat FPU retires every operation completely); FPSR
 quotient-bit and denormal traps behave as on the other parts rather
-than through the 060's unsupported-data path.
+than through the 060's unsupported-data path. The LC/EC060 reports the
+full part's PCR identification ($0430 rather than $0431) and its DFP stays
+writable, so software that clears it gains an FPU the part lacks.
 
 ## 68020 timing
 
