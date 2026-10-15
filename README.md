@@ -49,9 +49,7 @@ chmod +x Copperline-*.AppImage
 ./Copperline-*.AppImage
 ```
 
-Copperline is not published on Flathub. To build a Flatpak yourself from [`packaging/flatpak`](packaging/flatpak/README.md), follow [Getting started](docs/guide/getting-started.md).
-
-*Note:* On Linux, presentation requires a Vulkan driver. Most modern GPUs support Vulkan natively. For virtual machines or older hardware, install the Mesa software Vulkan driver (`mesa-vulkan-drivers` on Debian/Ubuntu/Fedora, or `vulkan-swrast` on Arch). A self-built Flatpak gets software Vulkan from its runtime and needs neither.
+*Note:* On Linux, presentation requires a Vulkan driver. Most modern GPUs support Vulkan natively. For virtual machines or older hardware, install the Mesa software Vulkan driver (`mesa-vulkan-drivers` on Debian/Ubuntu/Fedora, or `vulkan-swrast` on Arch).
 
 ### Building from source
 

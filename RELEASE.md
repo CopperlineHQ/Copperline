@@ -42,7 +42,7 @@ Resolving a forward merge:
 
 - `Cargo.toml` and the lockfiles: a release bump on `v1` edits the version
   line that `main` also owns. Keep `main`'s version.
-- `packaging/flatpak/dev.copperline.Copperline.metainfo.xml`: keep both
+- `packaging/linux/dev.copperline.Copperline.metainfo.xml`: keep both
   sides, so `main` lists every release.
 - `Formula/copperline.rb`: take `v1`'s while `v1` is the newest stable line.
   The tap serves the formula from the default branch, so the forward merge is
@@ -213,27 +213,12 @@ brew upgrade --build-from-source copperlinehq/copperline/copperline
 brew test copperlinehq/copperline/copperline
 ```
 
-## Linux: Flatpak and AppImage
+## Linux: AppImage
 
-Linux distribution uses two channels (see `packaging/`).
-
-**Flatpak / Flathub** (`packaging/flatpak/`) is the primary channel. After a
-release commit lands, generate the untracked vendored crate list and point the
-manifest at the tag:
-
-```sh
-./packaging/flatpak/generate-cargo-sources.sh
-```
-
-Set `tag:` and `commit:` in `dev.copperline.Copperline.yaml` to the release,
-add a `<release>` entry to `dev.copperline.Copperline.metainfo.xml`, then push
-the same change to the `flathub/dev.copperline.Copperline` repository (the
-Flathub app repo created at first acceptance). The `Flatpak` workflow builds
-and lints the bundle the same way Flathub does. First-time submission steps are
-in `packaging/flatpak/README.md`.
-
-**AppImage** (`packaging/appimage/`) is the no-install fallback. The `AppImage`
-workflow builds it on `ubuntu-22.04` and, on a `v*` tag, attaches
+Linux releases ship as an **AppImage** (`packaging/appimage/`). Add a
+`<release>` entry to `packaging/linux/dev.copperline.Copperline.metainfo.xml`
+when bumping the version. The `AppImage` workflow builds it on `ubuntu-22.04`
+and, on a `v*` tag, attaches
 `Copperline-X.Y.Z-<arch>.AppImage` to the GitHub Release automatically. To
 build one by hand on a Linux host:
 

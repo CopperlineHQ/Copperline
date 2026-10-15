@@ -58,36 +58,6 @@ chmod +x Copperline-*.AppImage
 ./Copperline-*.AppImage
 ```
 
-(linux-flatpak)=
-### Flatpak (build it yourself)
-
-Copperline is not published on Flathub, and releases do not include a
-Flatpak bundle. The repository's `packaging/flatpak/` directory holds the
-Flatpak manifest, which you can build into a sandboxed package that brings its
-own runtime dependencies and works across distributions.
-
-The build needs `flatpak`, `curl`, and `python3` with its `venv` module. From
-the top of a clean checkout (check out a release tag for a released version),
-run:
-
-```sh
-flatpak remote-add --if-not-exists --user flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-flatpak install --user flathub org.flatpak.Builder
-./packaging/flatpak/generate-cargo-sources.sh
-flatpak run org.flatpak.Builder --force-clean --user --install \
-    --install-deps-from=flathub --repo=repo builddir \
-    packaging/flatpak/dev.copperline.Copperline.yaml
-flatpak run dev.copperline.Copperline
-```
-
-The script writes the crate list that lets the build run offline, and
-`--install-deps-from=flathub` fetches the Freedesktop runtime, SDK and Rust
-extension the manifest names. The manifest copies the whole checkout into the
-build, including any stray ROM or disk images in the repository root, which is
-why a clean checkout matters.
-[`packaging/flatpak/README.md`](https://github.com/CopperlineHQ/Copperline/blob/main/packaging/flatpak/README.md)
-covers linting and the host-side helper for bridged Ethernet.
-
 (vulkan-is-required-on-linux)=
 ### Vulkan is required on Linux
 
@@ -100,9 +70,6 @@ For virtual machines or older hardware, install the software Vulkan driver (lava
 - **Arch Linux:** `sudo pacman -S vulkan-swrast`
 - **Debian / Ubuntu:** `sudo apt install mesa-vulkan-drivers`
 - **Fedora:** `sudo dnf install mesa-vulkan-drivers`
-
-A [self-built Flatpak](#linux-flatpak) needs no host package: its Freedesktop
-runtime supplies Mesa, including lavapipe.
 
 ## Installing on Windows
 
@@ -137,7 +104,6 @@ converter](import-uae.md). Where they land depends on the package:
 | macOS dmg | Inside the bundle, `Copperline.app/Contents/MacOS/`. Add that directory to PATH or name the files in the VS Code settings. |
 | Windows zip | Next to `copperline.exe` in the extracted folder. Add the folder to PATH or name the `.exe` files in the VS Code settings. |
 | AppImage | The separate `Copperline-X.Y.Z-<arch>-tools.tar.gz` release asset. Unpack it anywhere; set `COPPERLINE_BIN` to the AppImage path so `copperline-ctl` can launch the emulator. |
-| [Self-built Flatpak](#linux-flatpak) | In the sandbox: `flatpak run --command=copperline-ctl dev.copperline.Copperline ...` (and likewise `copperline-import-uae`). |
 
 `copperline-ctl` launches the `copperline` beside it when one is there; the
 [DAP chapter](../debugger/dap.md) lists the full lookup order.

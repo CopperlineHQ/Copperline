@@ -16,7 +16,7 @@ body:
         - Emulation accuracy (display, audio, timing, chipset behaviour)
         - Host integration (keyboard/mouse, window, audio output, UI, save states)
         - Crash, hang, or freeze
-        - Build or packaging (Flatpak, AppImage, Homebrew, etc.)
+        - Build or packaging (AppImage, Homebrew, etc.)
         - Other
     validations:
       required: true

@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- AppStream MetaInfo for Copperline. Validate with:
-       appstreamcli validate dev.copperline.Copperline.metainfo.xml
-     The component id must match the Flatpak id exactly. -->
+       appstreamcli validate dev.copperline.Copperline.metainfo.xml -->
 <component type="desktop-application">
   <id>dev.copperline.Copperline</id>
 
