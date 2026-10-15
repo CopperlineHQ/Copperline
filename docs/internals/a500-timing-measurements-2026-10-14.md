@@ -253,3 +253,11 @@ Superseded bundles are preserved and explicitly excluded from claims.
 An unrelated, pre-existing Copperline process was accidentally stopped during
 an earlier cleanup. Its running state could not be recovered. Subsequent
 runner cleanup was restricted to each runner's own subprocess.
+
+## Focused IRQ follow-up, 15 October
+
+The [masked readback and instruction-poll report](a500-irq-focus-2026-10-15.md)
+closes the observed divider and ordinary-instruction IRQ differences: all
+2,212 focused observations match A500, the 2,560-divider packet is identical,
+and the 896-STOP packet remains identical. It supersedes older open IRQ
+residuals for those measured suites and lists the remaining coverage work.

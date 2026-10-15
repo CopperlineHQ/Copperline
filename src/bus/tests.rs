@@ -3176,6 +3176,79 @@ fn copper_coper_intreq_reaches_cpu_after_chipset_irq_delay() {
     assert_ne!(bus.cpu_visible_intreq() & INT_COPER, 0);
 }
 
+fn bus_with_copper_intreq_move_on_second_word_slot() -> Bus {
+    let mut bus = empty_bus();
+    let cop1 = 0x0100usize;
+    write_chip_word(&mut bus, cop1, 0x009C);
+    write_chip_word(&mut bus, cop1 + 2, 0x8010);
+    write_chip_word(&mut bus, cop1 + 4, 0xFFFF);
+    write_chip_word(&mut bus, cop1 + 6, 0xFFFE);
+    bus.agnus.cop1lc = cop1 as u32;
+    bus.agnus.hpos = 0x20;
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_COPEN;
+    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+
+    // The first MOVE word is fetched at $20. The CPU's granted read at $21
+    // samples before the Copper fetches the value and asserts INTREQ during
+    // the read's trailing color clock at $22.
+    bus.advance_chipset(1);
+    assert_eq!(bus.agnus.hpos, 0x21);
+    assert_eq!(bus.paula.intreq & INT_COPER, 0);
+    bus.set_cpu_bus_arbitration_enabled(true);
+    bus
+}
+
+#[test]
+fn intreqr_word_read_samples_before_copper_write_in_cpu_cycle_tail() {
+    let mut bus = bus_with_copper_intreq_move_on_second_word_slot();
+
+    assert_eq!(bus.custom_read(0x01E, 2), 0);
+    assert_ne!(
+        bus.paula.intreq & INT_COPER,
+        0,
+        "Copper must assert INTREQ during the CPU bus-cycle tail"
+    );
+    assert_eq!(bus.custom_read(0x01E, 2), INT_COPER as u64);
+}
+
+#[test]
+fn intreqr_odd_byte_read_samples_before_copper_write_in_cpu_cycle_tail() {
+    let mut bus = bus_with_copper_intreq_move_on_second_word_slot();
+
+    assert_eq!(bus.custom_read(0x01F, 1), 0);
+    assert_ne!(
+        bus.paula.intreq & INT_COPER,
+        0,
+        "Copper must assert INTREQ during the CPU bus-cycle tail"
+    );
+    assert_eq!(bus.custom_read(0x01F, 1), (INT_COPER & 0x00FF) as u64);
+}
+
+#[test]
+fn intreqr_short_bus_read_keeps_its_later_data_return_sample() {
+    let mut bus = bus_with_copper_intreq_move_on_second_word_slot();
+    bus.set_cpu_short_bus_cycle(true);
+
+    // The 020+ path has no 68000 trailing bus-cycle sample point. Its custom
+    // register data return remains after the modeled return clocks, by which
+    // time this Copper MOVE has asserted INTREQ.
+    assert_eq!(bus.custom_read(0x01E, 2), INT_COPER as u64);
+}
+
+#[test]
+fn long_read_samples_intreq_word_in_its_own_bus_slot() {
+    let mut bus = bus_with_copper_intreq_move_on_second_word_slot();
+    bus.paula.intena = INT_MASTER;
+
+    // The high word (INTENAR) is sampled first. Copper asserts INTREQ in its
+    // tail, then the low word (INTREQR) is sampled on the next CPU slot.
+    assert_eq!(
+        bus.custom_read(0x01C, 4),
+        ((INT_MASTER as u64) << 16) | INT_COPER as u64
+    );
+    assert_ne!(bus.paula.intreq & INT_COPER, 0);
+}
+
 #[test]
 fn clearing_coper_intreq_cancels_pending_cpu_irq_delay() {
     let mut bus = empty_bus();

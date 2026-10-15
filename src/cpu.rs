@@ -440,15 +440,21 @@ struct CpuBus {
     /// defined for the complete instruction being resident, not merely its
     /// opcode word.
     instruction_fetches_cached: bool,
-    /// IPL level as sampled at the CPU's most recent bus access. The real
-    /// 68000 latches its IPL pins during bus cycles, and the take-interrupt
-    /// decision at an instruction boundary uses the value latched during the
-    /// PREVIOUS instruction's last bus access -- a level that rises during an
-    /// instruction's trailing internal cycles is not seen until one
-    /// instruction later. Transient: re-sampled on every access, never
-    /// serialized in file saves (a loaded state re-samples within one instruction).
+    /// IPL level eligible for the next instruction-boundary decision, sampled
+    /// at a CPU bus access. Bus-side deadline qualification and core poll
+    /// markers determine which sample is consumed. Transient: re-sampled on
+    /// every access, never serialized in file saves (a loaded state re-samples
+    /// within one instruction).
     /// Exact rollback captures it in `MachineRollbackState`.
     sampled_irq_level: u8,
+    /// Ordinary operand-read poll sample for stock 68000 instructions. The
+    /// board's boundary-qualification sample remains separate above; this
+    /// earlier candidate is used only by core-marked operand poll points.
+    sampled_operand_irq_level: u8,
+    /// The CPU model, rather than the active bus clock ratio, gates the
+    /// additional 68000 poll candidates. The Bus helper itself limits early
+    /// candidates to the stock two-CPU-clocks-per-CCK path.
+    m68000_ipl_poll: bool,
     /// Set by the core's `ipl_hold_sample` poll-point marker: the current
     /// `sampled_irq_level` is the instruction's microcode poll value and
     /// later accesses in the same instruction must not re-latch it (e.g.
@@ -529,6 +535,8 @@ impl M68kMachine {
                 last_fetch_cache_hit: false,
                 instruction_fetches_cached: false,
                 sampled_irq_level: 0,
+                sampled_operand_irq_level: 0,
+                m68000_ipl_poll: cpu_model == CpuModel::M68000,
                 ipl_sample_held: false,
                 diag_current_pc: 0,
                 jit_enabled: false,
@@ -1788,6 +1796,8 @@ impl M68kMachine {
         self.bus.address_mask = cpu.address_mask;
         self.bus.cacr_040_layout = cacr_040_layout(cpu.cpu_type);
         self.cpu = cpu;
+        self.bus.m68000_ipl_poll = self.cpu.cpu_type == CpuType::M68000;
+        self.bus.sampled_operand_irq_level = 0;
         self.bus.bus = bus;
         // The cache is silicon, not dynamic state: a CPU that has one keeps it
         // across a restore. Snapshots taken with the cache modelled carry warm
@@ -2906,14 +2916,13 @@ impl M68kMachine {
         } else if !self.cpu.is_stopped() {
             self.stop_poll_phase = None;
         }
-        // The boundary decision uses the IPL level latched at the previous
-        // instruction's last bus access (CpuBus::sample_ipl), not the live
-        // level: on real silicon a level that rose after that sample is taken
-        // one instruction later. A STOPped CPU keeps sampling its pins, so it
-        // wakes on the live level. min() so a level that dropped since the
-        // sample (e.g. the instruction's own INTREQ clear) is never delivered
-        // stale. COPPERLINE_IRQ_LATENCY_CCK=0 disables this together with the
-        // IPL pipe (the raw immediate model, used by mechanism tests).
+        // The boundary decision uses the previous instruction's qualified
+        // sample (CpuBus::sample_ipl), not the latest live level. A STOPped
+        // CPU continues polling and wakes from the currently eligible level.
+        // min() so a level that dropped since the sample (e.g. the
+        // instruction's own INTREQ clear) is never delivered stale.
+        // COPPERLINE_IRQ_LATENCY_CCK=0 disables this with the IPL pipe, giving
+        // mechanism tests the raw immediate model.
         // JIT batches run whole stretches of instructions without per-access
         // IPL latching, so the sampled level can be arbitrarily stale there;
         // a JIT machine takes the live level instead (the raw model).
@@ -4928,13 +4937,10 @@ impl CpuBus {
 }
 
 impl CpuBus {
-    /// Latch the IPL level presented to the CPU by (the end of) a bus access.
-    /// The real 68000 samples its IPL pins during bus cycles, and the
-    /// take-interrupt decision at an instruction boundary uses the value
-    /// latched during the previous instruction's last bus access -- a level
-    /// that rises during an instruction's trailing internal cycles is not
-    /// seen until one instruction later (Moira models the same points as
-    /// POLL_IPL). `refresh_irq_line` consumes this latch.
+    /// Refresh the boundary-qualified and operand-poll candidates during a
+    /// CPU bus access. The bus applies recognition-deadline eligibility at
+    /// each candidate's poll point; the core's poll marker selects which one
+    /// `refresh_irq_line` consumes.
     #[inline]
     fn sample_ipl(&mut self) {
         // A poll-point hold (AddressBus::ipl_hold_sample) pins the sample
@@ -4943,10 +4949,21 @@ impl CpuBus {
         if self.ipl_sample_held {
             return;
         }
-        self.sampled_irq_level = if self.bus.cartridge_nmi_pending() {
+        let nmi = self.bus.cartridge_nmi_pending();
+        let master_enabled = self.bus.paula.intena & INT_MASTER != 0;
+        let qualified_lead = if self.m68000_ipl_poll { 2 } else { 0 };
+        let operand_lead = if self.m68000_ipl_poll { 4 } else { 0 };
+        self.sampled_irq_level = if nmi {
             7
-        } else if self.bus.paula.intena & INT_MASTER != 0 {
-            pending_ipl(self.bus.paula.intena & self.bus.cpu_visible_intreq())
+        } else if master_enabled {
+            pending_ipl(self.bus.paula.intena & self.bus.cpu_poll_intreq(qualified_lead))
+        } else {
+            0
+        };
+        self.sampled_operand_irq_level = if nmi {
+            7
+        } else if master_enabled {
+            pending_ipl(self.bus.paula.intena & self.bus.cpu_poll_intreq(operand_lead))
         } else {
             0
         };
@@ -5250,6 +5267,14 @@ impl AddressBus for CpuBus {
     fn ipl_hold_sample(&mut self) {
         // Core-marked IPL poll point: keep the sample latched by the access
         // that just completed until the boundary decision consumes it.
+        self.ipl_sample_held = true;
+    }
+
+    fn ipl_hold_operand_sample(&mut self) {
+        // Operand reads use the separate 68000 poll candidate captured at
+        // their start; the boundary sample above remains eligible only at
+        // its own bus-poll qualification point.
+        self.sampled_irq_level = self.sampled_operand_irq_level;
         self.ipl_sample_held = true;
     }
 
@@ -5931,6 +5956,8 @@ mod tests {
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
+            sampled_operand_irq_level: 0,
+            m68000_ipl_poll: false,
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
@@ -5962,6 +5989,8 @@ mod tests {
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
+            sampled_operand_irq_level: 0,
+            m68000_ipl_poll: false,
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
@@ -6004,6 +6033,8 @@ mod tests {
                 last_fetch_cache_hit: false,
                 instruction_fetches_cached: false,
                 sampled_irq_level: 0,
+                sampled_operand_irq_level: 0,
+                m68000_ipl_poll: false,
                 ipl_sample_held: false,
                 diag_current_pc: 0,
                 jit_enabled: false,
@@ -6061,6 +6092,8 @@ mod tests {
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
+            sampled_operand_irq_level: 0,
+            m68000_ipl_poll: false,
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
@@ -6106,6 +6139,8 @@ mod tests {
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
+            sampled_operand_irq_level: 0,
+            m68000_ipl_poll: false,
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
@@ -6147,6 +6182,8 @@ mod tests {
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
+            sampled_operand_irq_level: 0,
+            m68000_ipl_poll: false,
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
@@ -6197,6 +6234,8 @@ mod tests {
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
+            sampled_operand_irq_level: 0,
+            m68000_ipl_poll: false,
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
@@ -6408,6 +6447,8 @@ mod tests {
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
+            sampled_operand_irq_level: 0,
+            m68000_ipl_poll: false,
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
@@ -6469,6 +6510,8 @@ mod tests {
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
+            sampled_operand_irq_level: 0,
+            m68000_ipl_poll: false,
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
@@ -6606,6 +6649,8 @@ mod tests {
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
+            sampled_operand_irq_level: 0,
+            m68000_ipl_poll: false,
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
@@ -6636,6 +6681,8 @@ mod tests {
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
+            sampled_operand_irq_level: 0,
+            m68000_ipl_poll: false,
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
@@ -6672,6 +6719,8 @@ mod tests {
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
+            sampled_operand_irq_level: 0,
+            m68000_ipl_poll: false,
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
@@ -8514,11 +8563,92 @@ mod tests {
     }
 
     #[test]
+    fn m68000_operand_and_qualified_poll_samples_use_distinct_deadlines() -> Result<()> {
+        let mut bus = test_bus_with_pc(0x100);
+        bus.paula.intena = INT_MASTER | INT_VERTB;
+        bus.paula.intreq = INT_VERTB;
+        bus.irq_latency_setting = 6;
+        // Let Paula's asserted source arm its recognition deadline, then place
+        // the next ROM read exactly four CCKs before that deadline. The ROM
+        // access itself consumes two CCKs on the stock 68000 bus.
+        bus.advance_devices(1);
+        let remaining = bus.next_irq_visible_cck().expect("IRQ latency armed");
+        assert!(remaining >= 4);
+        bus.advance_devices(remaining - 4);
+        assert_eq!(bus.cpu_visible_intreq() & INT_VERTB, 0);
+
+        let mut machine = M68kMachine::new(bus, CpuModel::M68000, false)?;
+        machine.bus.bus.set_cpu_bus_arbitration_enabled(true);
+        let rom = ROM_BASE as u32 + 0x100;
+        machine.bus.read_word(rom);
+        assert_eq!(machine.bus.sampled_irq_level, 0);
+        assert_eq!(machine.bus.sampled_operand_irq_level, 3);
+        assert_eq!(machine.bus.bus.cpu_visible_intreq() & INT_VERTB, 0);
+
+        // The operand poll hook uses the value captured at read start even
+        // though the read has advanced time. It can qualify four CCKs ahead
+        // while the instruction-boundary sample remains two CCKs ahead.
+        AddressBus::ipl_hold_operand_sample(&mut machine.bus);
+        assert_eq!(machine.bus.sampled_irq_level, 3);
+        assert!(machine.bus.ipl_sample_held);
+        assert_eq!(machine.bus.bus.cpu_visible_intreq() & INT_VERTB, 0);
+
+        AddressBus::ipl_release_sample(&mut machine.bus);
+        let remaining = machine
+            .bus
+            .bus
+            .next_irq_visible_cck()
+            .expect("IRQ remains in its recognition delay");
+        assert!(remaining >= 2);
+        machine.bus.bus.advance_devices(remaining - 2);
+        assert_eq!(machine.bus.bus.cpu_visible_intreq() & INT_VERTB, 0);
+        machine.bus.read_word(rom);
+        assert_eq!(machine.bus.sampled_irq_level, 3);
+        assert_eq!(machine.bus.bus.cpu_visible_intreq() & INT_VERTB, INT_VERTB);
+        Ok(())
+    }
+
+    #[test]
+    fn early_ipl_poll_is_limited_to_stock_m68000_and_zero_latency_is_raw() -> Result<()> {
+        let delayed_bus = || {
+            let mut bus = test_bus_with_pc(0x100);
+            bus.paula.intena = INT_MASTER | INT_VERTB;
+            bus.paula.intreq = INT_VERTB;
+            bus.irq_latency_setting = 6;
+            bus.advance_devices(1);
+            let remaining = bus.next_irq_visible_cck().expect("IRQ latency armed");
+            assert!(remaining >= 2);
+            bus.advance_devices(remaining - 2);
+            bus
+        };
+
+        let bus = delayed_bus();
+        assert_eq!(bus.cpu_visible_intreq() & INT_VERTB, 0);
+        let mut m68010 = M68kMachine::new(bus, CpuModel::M68010, false)?;
+        m68010.bus.bus.set_cpu_bus_arbitration_enabled(true);
+        assert!(!m68010.bus.m68000_ipl_poll);
+        m68010.bus.read_word(ROM_BASE as u32 + 0x100);
+        assert_eq!(m68010.bus.sampled_irq_level, 0);
+
+        let mut raw_bus = test_bus_with_pc(0x100);
+        raw_bus.paula.intena = INT_MASTER | INT_VERTB;
+        raw_bus.paula.intreq = INT_VERTB;
+        raw_bus.irq_latency_setting = 0;
+        raw_bus.advance_devices(1);
+        let mut raw = M68kMachine::new(raw_bus, CpuModel::M68000, false)?;
+        raw.bus.bus.set_cpu_bus_arbitration_enabled(true);
+        raw.bus.read_word(ROM_BASE as u32 + 0x100);
+        assert_eq!(raw.bus.sampled_irq_level, 3);
+        assert_eq!(raw.bus.sampled_operand_irq_level, 3);
+        Ok(())
+    }
+
+    #[test]
     fn irq_recognition_uses_previous_instruction_ipl_sample() -> Result<()> {
-        // The 68000 latches its IPL pins during bus cycles: a level that
-        // rises AFTER an instruction's last bus access is not seen at the
-        // next instruction boundary -- it is recognized one instruction
-        // later, once a bus access has sampled the new level.
+        // The instruction-boundary decision uses the previous instruction's
+        // qualified sample: a source that becomes pending AFTER the final
+        // bus access is ineligible at the next boundary and is recognized
+        // after a later access takes a fresh sample.
         let mut bus = test_bus_with_pc(0x0000_0100);
         write_program(
             &mut bus,

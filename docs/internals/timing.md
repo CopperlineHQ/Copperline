@@ -720,36 +720,41 @@ References: HRM [Blitter Hardware, chapter
 
 ## Interrupt-recognition latency
 
-A 68000 does not enter an exception the moment INTREQ rises. Two hardware
-mechanisms sit between the two events, and Copperline models both:
+A 68000 does not enter an exception the moment INTREQ rises. Copperline
+separates source recognition, instruction poll qualification and register
+readback:
 
-1. **The interrupt propagation pipe.** A change to the enabled-pending
-   interrupt set reaches the CPU through a combined latch/encoder/pin delay
-   (`DEFAULT_IRQ_LATENCY_CCK = 6`, `src/bus.rs`;
-   `COPPERLINE_IRQ_LATENCY_CCK` overrides, `0` disables both mechanisms).
-   The delay is attached to asynchronous Paula/CIA/blitter/Copper source
-   assertions. A CPU write that merely changes INTENA/INTREQ masking or
-   acknowledges a latch normally only updates the delayed-bit bookkeeping.
-   PORTS is level-fed by CIA-A/Gayle-style INT2 sources and remains
-   immediately visible when software unmasks an already-latched level; other
-   newly exposed latched sources are treated as freshly-present CPU IPL
-   inputs and still pass through the pipe. INTREQR reads are never delayed:
-   the pipe sits between the level encoder and the pins, not on the register.
-2. **Boundary sampling.** The CPU latches its IPL pins during bus cycles,
-   and the take-interrupt decision at an instruction boundary uses the level
-   latched at the *previous* instruction's last bus access
-   (`CpuBus::sample_ipl`, `src/cpu.rs`). A level that rises during an
-   instruction's trailing internal cycles is therefore recognised one
-   instruction later, exactly as on silicon.
+1. Each newly asserted source receives an independent recognition deadline
+   (`DEFAULT_IRQ_LATENCY_CCK = 6`, `src/bus.rs`). The default is calibrated
+   against the combined A500 board/CPU STOP path, rather than a direct
+   measurement of Paula's IPL pins. Later sources cannot postpone an earlier
+   deadline. CPU mask/acknowledge writes update the bookkeeping; unmasking a
+   latched PORTS level retains its existing immediate behavior.
+2. A running stock 68000 samples candidates at bus-access starts. Its ordinary
+   qualified prefetch poll uses the deadline minus two CCK; a core-marked
+   unqualified operand poll uses the deadline minus four CCK. The core holds
+   the selected sample through subsequent accesses. Memory TST polls on its
+   operand word (the low word for TST.L); DIVS can mark an internal poll before
+   its final prefetch. Other CPU models and accelerated bus ratios retain
+   their previous qualification. STOP uses the unchanged deadline directly
+   and preserves its two-CCK polling grid. A cleared source is not delivered
+   from a stale sample. `COPPERLINE_IRQ_LATENCY_CCK=0` selects the raw model.
+3. INTREQR is the raw Paula latch, independent of the recognition deadline.
+   A 68000 CPU read captures it during its granted transfer, before the bus
+   cycle's trailing CCK. Reading after the tail incorrectly included Copper
+   writes that occurred after the data transfer. Long accesses sample the
+   INTREQR word in its own slot. Other custom registers retain their separately
+   calibrated phases, and the shorter 020+ data-return path is unchanged.
 
-Together these reproduce the raise-to-handler-entry positions measured
-against vAmiga (and the vAmigaTS real-A500 photos) across VERTB and
-copper-poked INTREQ sources under a range of foreground loops; the residual
-is 0..+7 CCK of per-instruction IPL poll-point detail the m68k core does
-not model. An earlier revision used a blanket 65 CCK "recognition latency"
-calibrated against timing-test row 19 with a mis-decoded VHPOSR (the low
-byte is the CCK position, not CCK/2); that delivered every interrupt ~50 CCK
-late and dominated the vAmigaTS cputim/irqtim divergence.
+The [focused One ROM measurements](a500-irq-focus-2026-10-15.md) match all
+2,212 A500 observations after these corrections; the earlier 2,560-divider
+and 896-STOP result packets also match hardware byte-for-byte. WinUAE Best
+Compatibility agrees on the same measured fields. This closes the observed
+poll/readback differences in those suites, not every instruction, source,
+DMA or priority transition. The previous full six-CCK qualification at a
+prefetch's start counted its trailing transfer twice, making ordinary
+instruction recognition two CCK late. Globally shortening the deadline
+fixed those instructions but broke the already accurate STOP path.
 
 The six-CCK default is calibrated against `a500-irq-probe` captures from a
 PAL A500 with 512 KB chip RAM, 512 KB slow RAM, ECS Agnus and OCS Denise.
@@ -767,7 +772,7 @@ Across 256 trials, the parity of the logged entry beam predicted the
 result exactly; inserting EXG (six CPU clocks) reversed the relationship.
 The stock 68000 STOP path therefore retains a four-CPU-clock (two-CCK) polling
 grid from STOP entry and recognizes a newly visible IPL at the next poll.
-This phase is saved with the machine. The Paula propagation setting remains
+This phase is saved with the machine. The boundary-recognition setting remains
 six CCK; changing that constant cannot reproduce both results.
 
 On the 68000/68010 motherboard bus, interrupt acknowledge reads the low

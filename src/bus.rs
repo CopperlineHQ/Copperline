@@ -124,28 +124,18 @@ fn external_access_cck_x100_setting() -> u32 {
     }
 }
 
-/// Paula INTREQ/INTENA -> CPU IPL-pin propagation delay in color clocks
-/// (DEFAULT ON). A change to the enabled-pending interrupt set does not reach
-/// the 68000's IPL pins combinationally: Paula pipelines the encoded level to
-/// the pins over a few chip clocks (vAmiga models the same pipe as iplPipe,
-/// with the pin taking the new value ~4 DMA cycles after the level change).
-/// Together with the IPL sampling model in cpu.rs (the interrupt decision at
-/// an instruction boundary uses the level sampled at the PREVIOUS instruction's
-/// last bus access, as on the real 68000), this reproduces the raise-to-entry
-/// latency measured against vAmiga and the vAmigaTS real-hardware photos.
+/// Default interrupt-recognition deadline in colour clocks. One ROM runs on
+/// a PAL A500 calibrate six CCK for the combined board/CPU STOP path: with
+/// only Copper DMA, the handler reads VHPOSR 37 CCK after the WAIT target.
+/// This is not an isolated measurement of Paula's IPL-pin propagation.
 ///
-/// History: this was 65 for a while, calibrated against timing-test row 19
-/// with a mis-decoded VHPOSR (the low byte is the cck position, not cck/2);
-/// that made every IRQ delivery ~50 cck late and dominated the vAmigaTS
-/// cputim/irqtim/inttim divergence. Set COPPERLINE_IRQ_LATENCY_CCK to override
-/// (0 disables the pipe AND the boundary-sampling delay = raw model).
-///
-/// Six CCK for the combined latch/encoder/pin path. With DMA disabled except
-/// for a Copper WAIT/MOVE, a physical PAL A500 (ECS Agnus, OCS Denise) records
-/// VHPOSR 37 CCK after the WAIT target when waking a STOPped 68000. Five made
-/// that entire path one CCK early at all sixteen tested horizontal phases.
-/// This calibrates the combined path, not an isolated Paula-pin measurement;
-/// instruction IPL poll points remain a separate CPU timing mechanism.
+/// Running 68000 instructions poll before the instruction boundary. Their
+/// qualified final-prefetch sample uses this deadline minus two CCK, while
+/// a core-marked unqualified operand sample uses it minus four CCK. Applying
+/// the full STOP deadline at a prefetch's start counted its transfer twice.
+/// See cpu_poll_intreq and docs/internals/a500-irq-focus-2026-10-15.md.
+/// COPPERLINE_IRQ_LATENCY_CCK overrides the deadline; zero also disables
+/// instruction-boundary sample gating for the raw mechanism-test model.
 const DEFAULT_IRQ_LATENCY_CCK: u32 = 6;
 /// Native BLIT INTREQR and CPU-source phase offset measured from E.
 const BLIT_IRQ_READBACK_DELAY_CCK: u32 = 3;
@@ -926,22 +916,12 @@ pub struct Bus {
     pub(crate) delivered_copper_irq_beam: Option<(u32, u32)>,
     coper_cpu_irq_delay_cck: u32,
 
-    /// Paula INTREQ -> CPU IPL-pin propagation pipe (COPPERLINE_IRQ_LATENCY_CCK,
-    /// see DEFAULT_IRQ_LATENCY_CCK). When the setting is non-zero, a newly
-    /// raised maskable interrupt is held invisible to the CPU for that many cck
-    /// (`irq_latency_mask` = the delayed bits, `irq_latency_visible_at` = the
-    /// colour clock each delayed bit reaches the pins at,
-    /// `irq_latency_last_pending` = previous pending set for rising-edge detect).
-    /// INTREQR reads are NOT delayed (the pipe sits between the level encoder
-    /// and the pins, not on the register).
-    ///
-    /// Each source pipes independently: every source has its own path through
-    /// the level encoder, so one asserting cannot hold another that is already
-    /// on its way to the pins. A single shared countdown restarted by every new
-    /// source stretched an earlier interrupt's delay by the later one's, which
-    /// on a machine with several active sources (audio channels, the Copper,
-    /// vertical blank) jittered handler entry across tens of raster lines
-    /// instead of the few colour clocks the pipe is worth.
+    /// Per-source instruction-boundary recognition deadlines, configured by
+    /// COPPERLINE_IRQ_LATENCY_CCK (see DEFAULT_IRQ_LATENCY_CCK). STOP uses the
+    /// deadline directly; running-68000 poll candidates apply the distinct
+    /// qualification offsets in cpu_poll_intreq. INTREQR reads the raw latch
+    /// at its CPU transfer slot, independently of these deadlines.
+    /// A later source cannot postpone one already awaiting recognition.
     irq_latency_visible_at: [u64; 16],
     irq_latency_mask: u16,
     irq_latency_last_pending: u16,
@@ -7790,6 +7770,20 @@ impl Bus {
     }
 
     pub fn cpu_visible_intreq(&self) -> u16 {
+        self.cpu_poll_intreq(0)
+    }
+
+    /// Resolve a running CPU's microcode poll against the instruction-boundary
+    /// recognition deadline. A 68000 final-prefetch poll precedes that boundary
+    /// by two colour clocks; an unqualified operand poll precedes it by four.
+    /// STOP uses the boundary deadline directly. Only already asserted sources
+    /// are considered: this never predicts a future device interrupt.
+    pub(crate) fn cpu_poll_intreq(&self, lead_cck: u32) -> u16 {
+        let lead_cck = if self.cpu_clocks_per_cck == 2 && !self.cpu_short_bus_cycle {
+            lead_cck
+        } else {
+            0
+        };
         let mut visible = self.paula.intreq;
         if self.coper_cpu_irq_delay_cck != 0 {
             visible &= !INT_COPER;
@@ -7800,7 +7794,9 @@ impl Bus {
         while delayed != 0 {
             let bit = delayed.trailing_zeros() as usize;
             delayed &= delayed - 1;
-            if self.emulated_cck < self.irq_latency_visible_at[bit] {
+            if self.emulated_cck.saturating_add(u64::from(lead_cck))
+                < self.irq_latency_visible_at[bit]
+            {
                 visible &= !(1u16 << bit);
             }
         }
@@ -7824,7 +7820,7 @@ impl Bus {
     }
 
     /// Colour clocks until the earliest interrupt still inside its
-    /// recognition pipe reaches the CPU's IPL pins, for bounding an idle
+    /// recognition deadline becomes eligible, for bounding an idle
     /// STOP nap. `None` when nothing is in flight.
     pub fn next_irq_visible_cck(&self) -> Option<u32> {
         let mut delayed = self.irq_latency_mask;
@@ -9610,10 +9606,23 @@ impl Bus {
     // -----------------------------------------------------------------
 
     pub fn custom_read(&mut self, addr: u64, size: usize) -> u64 {
-        self.grant_cpu_bus_access_at(
+        let off = (addr & 0xFFF) as u16;
+        let mut sampled_intreq = None;
+        self.grant_cpu_bus_access_sampled(
             Some(custom_register_cpu_addr(addr)),
             size,
             CpuBusAccessKind::Custom,
+            |bus, slot, stride| {
+                let word_off = off.wrapping_add((slot as usize * stride) as u16) & 0xFFE;
+                if word_off == 0x01E {
+                    // Paula's request latch is read on the granted transfer,
+                    // before the 68000 bus-cycle tail. A Copper write during
+                    // that tail must not change the value already captured.
+                    // Keep other registers' independently calibrated phases.
+                    bus.flush_timed_devices();
+                    sampled_intreq = Some(bus.read_custom_word(word_off));
+                }
+            },
         );
         if self.cpu_short_bus_cycle {
             self.bill_020_read_data_wait();
@@ -9630,14 +9639,13 @@ impl Bus {
         // reflect timed-device state, so apply the deferred device clocks before
         // reading.
         self.flush_timed_devices();
-        let off = (addr & 0xFFF) as u16;
         if self.regcheck.is_some() {
             self.note_cpu_custom_access(addr, off, size, true);
         }
         self.poll_stats.tick_read_custom(off & 0xFFE);
         let value = match size {
             1 => {
-                let val = self.read_custom_word(off & 0xFFE);
+                let val = sampled_intreq.unwrap_or_else(|| self.read_custom_word(off & 0xFFE));
                 trace!("custom R8  off={:03X} val_word={:04X}", off, val);
                 if diag_cpu_read_matches(off & 0xFFE, size) {
                     self.diag_cpu_read(off & 0xFFE, size, val as u64);
@@ -9652,8 +9660,17 @@ impl Bus {
                 // MOVE.L from $DFFxxx reads two consecutive register
                 // words: high word at addr, low word at addr+2. Each
                 // register is 16 bits wide on the custom chip bus.
-                let hi = self.read_custom_word(off);
-                let lo = self.read_custom_word(off.wrapping_add(2));
+                let hi = if off & 0xFFE == 0x01E {
+                    sampled_intreq.unwrap_or_else(|| self.read_custom_word(off))
+                } else {
+                    self.read_custom_word(off)
+                };
+                let lo_off = off.wrapping_add(2);
+                let lo = if lo_off & 0xFFE == 0x01E {
+                    sampled_intreq.unwrap_or_else(|| self.read_custom_word(lo_off))
+                } else {
+                    self.read_custom_word(lo_off)
+                };
                 let v = ((hi as u64) << 16) | (lo as u64);
                 trace!("custom R32 off={:03X} val={:08X}", off, v);
                 if diag_cpu_read_matches(off, size) {
@@ -9665,7 +9682,7 @@ impl Bus {
                 v
             }
             _ => {
-                let val = self.read_custom_word(off);
+                let val = sampled_intreq.unwrap_or_else(|| self.read_custom_word(off));
                 trace!("custom R16 off={:03X} val={:04X}", off, val);
                 if diag_cpu_read_matches(off, size) {
                     self.diag_cpu_read(off, size, val as u64);
