@@ -230,6 +230,9 @@ impl App {
     }
 
     pub(super) fn release_mouse_buttons(&mut self) {
+        // The machine is being told to let go whatever the hand is doing,
+        // so the hand no longer holds anything warp should yield for.
+        self.live_mouse_buttons = 0;
         if self.netplay.is_some() {
             self.netplay_input.held.mouse_buttons = 0;
             self.netplay_input.mouse_pending = (0, 0);
@@ -581,12 +584,16 @@ impl App {
     }
 
     /// A transition the operator made on the host keyboard, as against a
-    /// scheduled or control-protocol key: noted for warp's input yield,
-    /// then handled like any other host-keyboard transition.
+    /// scheduled or control-protocol key: handled like any other
+    /// host-keyboard transition, then noted for warp's input yield. The key
+    /// is marked live only once the machine actually holds it; any later
+    /// host-keyboard transition of it, from whatever source, clears the
+    /// mark again (see [`Self::handle_amiga_key_event_from`]).
     pub(super) fn handle_live_amiga_key_event(&mut self, rawkey: u8, pressed: bool) {
-        self.live_held_rawkeys[rawkey_index(rawkey)] = pressed;
-        self.note_live_input();
         self.handle_amiga_key_event(rawkey, pressed);
+        self.live_held_rawkeys[rawkey_index(rawkey)] =
+            pressed && rawkey_is_held(&self.held_rawkeys, rawkey);
+        self.note_live_input();
     }
 
     /// A host mouse button the operator pressed or let go of on the guest's
@@ -607,23 +614,27 @@ impl App {
         self.warp_input_yield_until = Some(Instant::now() + WARP_INPUT_YIELD_GRACE);
     }
 
+    /// Drop the live mark of every key and mouse button the machine no
+    /// longer holds. A mark outlives its key when the machine is made to let
+    /// go by something other than the operator's own release -- a reset
+    /// clearing the host keys, a button release that went astray -- and left
+    /// in place it would turn a later scripted or control-protocol press of
+    /// the same key into a "live" hold and pace that input to real time.
+    pub(super) fn prune_live_input_marks(&mut self) {
+        for (live, held) in self.live_held_rawkeys.iter_mut().zip(&self.held_rawkeys) {
+            *live &= *held;
+        }
+        let held_buttons = self.mouse_port().map_or(0, |port| {
+            let p = &self.emu.bus().input.ports[port];
+            u8::from(p.fire) | u8::from(p.button2) << 1 | u8::from(p.button3) << 2
+        });
+        self.live_mouse_buttons &= held_buttons;
+    }
+
     /// Whether the operator is holding down a host key or mouse button the
-    /// machine sees. Each live mark is honoured only while the machine still
-    /// holds the key or button, so a release that went astray (focus lost
-    /// mid-press, capture dropped) cannot leave warp yielding for good.
+    /// machine sees (after [`Self::prune_live_input_marks`]).
     pub(super) fn live_input_held(&self) -> bool {
-        let key = self
-            .live_held_rawkeys
-            .iter()
-            .zip(&self.held_rawkeys)
-            .any(|(live, held)| *live && *held);
-        let button = self.live_mouse_buttons != 0
-            && self.mouse_port().is_some_and(|port| {
-                let p = &self.emu.bus().input.ports[port];
-                let held = u8::from(p.fire) | u8::from(p.button2) << 1 | u8::from(p.button3) << 2;
-                self.live_mouse_buttons & held != 0
-            });
-        key || button
+        self.live_mouse_buttons != 0 || self.live_held_rawkeys.iter().any(|live| *live)
     }
 
     /// Engage or release warp's yield to real-time pacing for this pass
@@ -635,6 +646,7 @@ impl App {
     /// counts: scheduled and control-protocol input is timed in emulated
     /// time already, and pasted keystrokes keep their warp speed.
     pub(super) fn update_warp_input_yield(&mut self) {
+        self.prune_live_input_marks();
         if self.live_input_held() {
             self.note_live_input();
         }
@@ -685,7 +697,14 @@ impl App {
         }
         let was_held = self.amiga_rawkey_held(rawkey);
         match source {
-            KeySource::Host => self.held_rawkeys[idx] = pressed,
+            KeySource::Host => {
+                self.held_rawkeys[idx] = pressed;
+                // Whoever moved the key last owns it: a scheduled press or
+                // a forced release is not the operator's hand, so the live
+                // mark goes (handle_live_amiga_key_event sets it again
+                // after a live transition).
+                self.live_held_rawkeys[idx] = false;
+            }
             KeySource::Panel => self.panel_held_rawkeys[idx] = pressed,
         }
         // The other source is holding the same key, so the aggregate did

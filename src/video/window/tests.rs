@@ -2719,6 +2719,48 @@ fn warp_yields_to_real_time_while_a_live_key_or_button_is_held() {
     assert!(!app.emu.warp_input_yield());
 }
 
+/// When the machine is made to let go of a live key or button by something
+/// other than the operator's release (a debugger hand-back, a capture
+/// release, a scripted release), the live mark has to go with it.
+/// Otherwise a later scripted or control-protocol press of the same key or
+/// button revives it, and warp paces that scripted input to real time.
+#[test]
+fn a_forced_release_leaves_no_live_mark_for_scripted_input() {
+    fn expire_grace_and_update(app: &mut super::App) -> bool {
+        app.warp_input_yield_until = Some(std::time::Instant::now());
+        app.update_warp_input_yield();
+        app.emu.warp_input_yield()
+    }
+    let mut app = test_app();
+    let port = app.mouse_port().expect("fixture has a mouse in port 1");
+
+    // A live key whose physical release never arrives, released by force
+    // (the debugger hand-back path), then pressed again by a script.
+    app.handle_live_amiga_key_event(0x20, true);
+    app.release_amiga_rawkey_if_held(0x20);
+    app.handle_amiga_key_event(0x20, true);
+    assert!(app.amiga_rawkey_held(0x20), "the script holds the key");
+    assert!(!expire_grace_and_update(&mut app), "a scripted key hold");
+    app.handle_amiga_key_event(0x20, false);
+
+    // The same for a live button let go by a capture release.
+    app.emu.bus_mut().input.set_mouse_button(port, 0, true);
+    app.note_live_mouse_button(0, true);
+    app.release_mouse_buttons();
+    app.emu.bus_mut().input.set_mouse_button(port, 0, true);
+    assert!(!expire_grace_and_update(&mut app), "a scripted button hold");
+    app.emu.bus_mut().input.set_mouse_button(port, 0, false);
+
+    // And for one a script let go of: the next pass drops the mark, so a
+    // later scripted press cannot pick it back up.
+    app.emu.bus_mut().input.set_mouse_button(port, 1, true);
+    app.note_live_mouse_button(1, true);
+    app.emu.bus_mut().input.set_mouse_button(port, 1, false);
+    assert!(!expire_grace_and_update(&mut app));
+    app.emu.bus_mut().input.set_mouse_button(port, 1, true);
+    assert!(!expire_grace_and_update(&mut app), "a scripted button hold");
+}
+
 /// Scheduled and control-protocol keys are timed in emulated time already,
 /// so warp has nothing to correct for them: a long paste typed as
 /// keystrokes keeps its warp speed.
