@@ -192,6 +192,17 @@ cases: `cpu_prefetch_probe_documents_self_modified_next_opcode_behavior`
 `cpu_prefetch_probe_branch_refetches_self_modified_chip_ram_target`
 (branch refetch).
 
+MC68000 division spends its internal computation interval before the final
+prefetch. DIVS with a nonnegative dividend and negative divisor, excluding
+early absolute overflow, samples IPL two CPU clocks before that prefetch.
+The backend exposes this through `AddressBus::ipl_poll_internal`: Copperline
+takes a fresh sample at that synchronized internal boundary and holds it
+through the later prefetch until the instruction-boundary decision. This
+differs from `ipl_hold_sample`, which retains a preceding bus access's sample.
+The fetch position and total instruction duration stay unchanged. One ROM
+measurements on the PAL A500 support this sign-dependent poll point; ordinary
+instruction and host IRQ propagation timing remain separately testable.
+
 Instruction handlers can move the final prefetch earlier than the generic
 end-of-instruction top-up when 68000 microcode does so. That matters for
 register-only forms too: immediate ALU and CMPI to `Dn` perform the final

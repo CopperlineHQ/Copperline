@@ -5253,6 +5253,13 @@ impl AddressBus for CpuBus {
         self.ipl_sample_held = true;
     }
 
+    fn ipl_poll_internal(&mut self) {
+        // A divider microcode poll can precede its final prefetch. Sample
+        // the pins now, rather than holding the preceding operand access.
+        self.sample_ipl();
+        self.ipl_sample_held = true;
+    }
+
     fn ipl_release_sample(&mut self) {
         // Exception dispatch: the handler-entry refill is a fresh poll
         // point, so drop any hold from the faulted instruction.
@@ -8478,6 +8485,32 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    #[test]
+    fn internal_ipl_poll_samples_fresh_and_holds_until_release() {
+        let mut bus = test_bus_with_pc(0x100);
+        bus.paula.intena = INT_MASTER | INT_VERTB;
+        bus.irq_latency_setting = 0;
+        let mut machine = M68kMachine::new(bus, CpuModel::M68000, false).unwrap();
+
+        let rom = ROM_BASE as u32 + 0x100;
+        machine.bus.read_word(rom);
+        assert_eq!(machine.bus.sampled_irq_level, 0);
+
+        machine.bus.bus.paula.intreq = INT_VERTB;
+        AddressBus::ipl_poll_internal(&mut machine.bus);
+        assert_eq!(machine.bus.sampled_irq_level, 3);
+        assert!(machine.bus.ipl_sample_held);
+
+        machine.bus.bus.paula.intreq = 0;
+        machine.bus.read_word(rom);
+        assert_eq!(machine.bus.sampled_irq_level, 3);
+
+        AddressBus::ipl_release_sample(&mut machine.bus);
+        machine.bus.read_word(rom);
+        assert_eq!(machine.bus.sampled_irq_level, 0);
+        assert!(!machine.bus.ipl_sample_held);
     }
 
     #[test]

@@ -2,6 +2,56 @@
 
 ## Conclusion
 
+Follow-up core correction: m68k commit `275b2e6` preserves the MC68000
+destination and sets overflow for signed `$80000000 / -1`. It also exposes
+the measured early DIVS poll through `AddressBus::ipl_poll_internal`, taking
+and retaining a fresh sample two CPU clocks before the unchanged final
+prefetch. Copperline implements the hook; it does not reuse the preceding
+operand access's sample. Other CPU models retain their existing behavior.
+All four m68k contribution checks pass, including the new clocked-bus IRQ
+and overflow regressions. The review and counts below describe the preceding
+core version unless explicitly marked as a post-fix replay.
+
+The remaining saved-PC differences must not all be attributed to the host.
+The probe waits in `TST.W DONE(A5)` and a conditional branch after the marker.
+A source comparison also finds an ordinary-instruction poll discrepancy:
+WinUAE's cycle-exact memory TST handler samples IPL before the operand read,
+whereas m68k's `exec_tst` currently leaves the boundary sample to the final
+access. Isolate that waiting-loop poll point separately from the DIV/marker
+boundary and from host IRQ propagation. It is not changed by the DIVS fix.
+
+### Post-fix Copperline replay
+
+The rebuilt release executable replayed the unchanged accepted v3 ROM against
+all 2,560 physical A500 records, with zero excluded launches, timeouts or skips.
+All division results now agree (256 mismatches before, zero after). Saved-PC
+and handler-beam mismatches are 452 (446 before), including 40 DIV/marker
+boundary mismatches (34 before). Final marker values still all agree. The
+early DIVS poll removes an accidental cancellation in six boundary cases;
+it does not close the common recognition discrepancy affecting ordinary
+DIVU/DIVS. These results must not be described as fully accurate end-to-end
+divider interrupts. The core's internal poll placement is separately checked
+by clocked-bus tests, including IRQ arrivals between the poll and prefetch.
+
+Capture: `a500-irq-probe/captures/divider-irq-copperline-fixed-v3`.
+Comparison: `captures/divider-irq-a500-v3-fixed-comparison.json` in that repo.
+Packet SHA-256:
+`8a1f0991a8b8fec991f7935f4053835ccbad0c955d36904f977d148a2d2b10ae`.
+No new hardware run was needed: the ROM and accepted hardware reference are
+unchanged. The physical machine remains on its restored Kickstart firmware.
+
+Validation: m68k formatting, all-target/all-feature Clippy, the complete
+all-feature test suite and clean-tree packaging all passed. Copperline's
+release build, Clippy, formatting and new host-hook test passed. Its full
+library suite returned 4,084 passes, five failures and 43 ignored tests.
+Three failed tests passed on individual rerun (keypad mapping, disk-swap
+netplay and spectator netplay). The picture-scaler comparison and netplay
+mouse-convergence test still failed; both failures also appear in prior
+10/14 October logs, before these changes. A preserved pre-change test binary
+also reproduces the scaler failure. The full host suite is therefore not
+claimed clean. Details are in local `tmp/divider-host-tests.log`,
+`tmp/divider-host-reruns.json`, and `tmp/divider-host-rerun-*.log`.
+
 The computation-before-final-prefetch correction in m68k commit
 `54b862309a0f4a9f150a8d01532cf53d62281473` is supported by the saved One ROM
 A500 measurements and matches the ordering in WinUAE's cycle-exact MC68000
