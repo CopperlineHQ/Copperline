@@ -582,9 +582,9 @@ dependencies = [
 
 [[package]]
 name = "m68k"
-version = "0.14.3"
+version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d147b9f460ceae5beb0ee82c186f70f15dd15e1de317187b7f018eff139626a9"
+checksum = "04155e50c57d68ed5bf1a11fe7bb848f18f4bc3902878890a1a1e34715b3dffb"
 dependencies = [
  "serde",
 ]

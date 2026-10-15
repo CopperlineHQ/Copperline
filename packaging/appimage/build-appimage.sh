@@ -26,7 +26,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
-flatpak_meta="$repo_root/packaging/flatpak"
+linux_meta="$repo_root/packaging/linux"
 cd "$repo_root"
 
 appdir="$repo_root/AppDir"
@@ -124,10 +124,10 @@ install -Dm644 assets/whdboot/skick346.lha \
 install -Dm644 assets/whdboot/README.md \
   "$appdir/usr/share/copperline/whdboot/README.md"
 
-# Desktop integration metadata, shared with the Flatpak build.
-install -Dm644 "$flatpak_meta/dev.copperline.Copperline.desktop" \
+# Linux desktop integration metadata.
+install -Dm644 "$linux_meta/dev.copperline.Copperline.desktop" \
   "$appdir/usr/share/applications/dev.copperline.Copperline.desktop"
-install -Dm644 "$flatpak_meta/dev.copperline.Copperline.metainfo.xml" \
+install -Dm644 "$linux_meta/dev.copperline.Copperline.metainfo.xml" \
   "$appdir/usr/share/metainfo/dev.copperline.Copperline.metainfo.xml"
 install -Dm644 assets/brand/copperline-icon.png \
   "$appdir/usr/share/icons/hicolor/256x256/apps/dev.copperline.Copperline.png"
@@ -153,8 +153,8 @@ export OUTPUT="${OUTPUT:-Copperline-$VERSION-$arch.AppImage}"
   --icon-file "$appdir/usr/share/icons/hicolor/256x256/apps/dev.copperline.Copperline.png" \
   --output appimage
 
-# Standalone host-helper companion for Flatpak users (and native installs
-# that do not use the AppImage). It contains no emulator or ROM assets.
+# Standalone network-helper companion for native installs that do not use
+# the AppImage. It contains no emulator or ROM assets.
 helper_bundle="Copperline-$VERSION-$arch-net-helper"
 helper_stage="$repo_root/target/$helper_bundle"
 rm -rf "$helper_stage"

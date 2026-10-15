@@ -331,8 +331,7 @@ color_quant = "2.0"
 # than for taste; the trust anchors do not, since both are pointed at the
 # Mozilla root set `webpki-roots` bundles rather than at the host's store.
 #
-# Everywhere but Windows: rustls, so a build needs no system OpenSSL and the
-# Flatpak carries no extra runtime.
+# Everywhere but Windows: rustls, so a build needs no system OpenSSL.
 [target.'cfg(not(windows))'.dependencies]
 ureq = { version = "3", default-features = false, features = [
     "rustls",

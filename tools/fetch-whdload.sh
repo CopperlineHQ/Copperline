@@ -6,9 +6,9 @@
 # their canonical homes; neither is committed to the repository (only
 # assets/whdboot/README.md is). Release bundles run this at packaging time
 # (packaging/macos/build-dmg.sh, packaging/appimage/build-appimage.sh; the
-# Windows build fetches in packaging/windows/build-zip.ps1, and the Flatpak
-# manifest and Homebrew formula pin the same URLs + checksums in their own
-# formats), so end users never need it. Developers run it once:
+# Windows build fetches in packaging/windows/build-zip.ps1, and the
+# Homebrew formula pins the same URLs + checksums in its own
+# format), so end users never need it. Developers run it once:
 #
 #   tools/fetch-whdload.sh
 #
