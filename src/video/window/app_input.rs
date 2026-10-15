@@ -201,7 +201,7 @@ impl App {
                     self.nav.clear();
                     self.cursor_pos = None;
                     self.last_display_cursor_pos = None;
-                    self.mouse_delta_remainder = (0.0, 0.0);
+                    self.forget_host_mouse_motion();
                     window.set_cursor_visible(false);
                     self.refresh_window_title();
                     info!("mouse captured; press {HOST_SHORTCUT_MODIFIER_LABEL}+G to release");
@@ -216,7 +216,7 @@ impl App {
             self.mouse_captured = false;
             self.cursor_pos = None;
             self.last_display_cursor_pos = None;
-            self.mouse_delta_remainder = (0.0, 0.0);
+            self.forget_host_mouse_motion();
             self.release_mouse_buttons();
             if let Some(r) = self.render.as_ref() {
                 if let Err(e) = r.window.set_cursor_grab(CursorGrabMode::None) {
@@ -332,6 +332,12 @@ impl App {
         let input = &mut self.emu.bus_mut().input;
         input.set_mouse_button(port, 0, js.fire);
         input.set_mouse_button(port, 1, js.button2);
+        // A pad button held as a mouse button is a hand on the machine like
+        // the host mouse's own; this runs every pass, so holding it keeps
+        // warp's input yield (see update_warp_input_yield) alive.
+        if js.fire || js.button2 {
+            self.note_live_input();
+        }
     }
 
     /// Let go of everything the pad was holding on the mouse, and forget
@@ -389,14 +395,58 @@ impl App {
     }
 
     pub(super) fn add_mouse_delta_i32(&mut self, dx: i32, dy: i32) {
-        let Some(port) = self.mouse_port() else {
+        if self.mouse_port().is_none() {
             return;
-        };
+        }
         if self.netplay.is_some() {
             self.netplay_input.add_mouse_delta(dx, dy);
             return;
         }
-        self.apply_scripted_mouse_delta(port as u8, dx, dy);
+        self.mouse_pending.0 = self.mouse_pending.0.saturating_add(dx);
+        self.mouse_pending.1 = self.mouse_pending.1.saturating_add(dy);
+        self.deliver_host_mouse_motion();
+    }
+
+    /// Hand pending host-mouse motion to the port's counters, as much as
+    /// this emulated frame still has room for under
+    /// [`HOST_MOUSE_COUNTS_PER_FRAME`]. Runs on every host motion event and
+    /// once per pass, so a remainder held back in one frame lands in the
+    /// next even when the hand has stopped. What is still pending beyond one
+    /// more frame's worth is dropped rather than queued: a backlog would
+    /// keep the pointer coasting after the hand stops.
+    pub(super) fn deliver_host_mouse_motion(&mut self) {
+        if self.mouse_pending == (0, 0) {
+            return;
+        }
+        let Some(port) = self.mouse_port() else {
+            self.mouse_pending = (0, 0);
+            return;
+        };
+        let frame = self.emu.bus().emulated_frames();
+        if self.mouse_frame_sent.0 != frame {
+            self.mouse_frame_sent = (frame, 0, 0);
+        }
+        let room_x = HOST_MOUSE_COUNTS_PER_FRAME - self.mouse_frame_sent.1;
+        let room_y = HOST_MOUSE_COUNTS_PER_FRAME - self.mouse_frame_sent.2;
+        let dx = self.mouse_pending.0.clamp(-room_x, room_x);
+        let dy = self.mouse_pending.1.clamp(-room_y, room_y);
+        self.mouse_frame_sent.1 += dx.abs();
+        self.mouse_frame_sent.2 += dy.abs();
+        let carry = HOST_MOUSE_COUNTS_PER_FRAME;
+        self.mouse_pending.0 = (self.mouse_pending.0 - dx).clamp(-carry, carry);
+        self.mouse_pending.1 = (self.mouse_pending.1 - dy).clamp(-carry, carry);
+        if dx != 0 || dy != 0 {
+            self.apply_scripted_mouse_delta(port as u8, dx, dy);
+        }
+    }
+
+    /// Forget host-mouse motion that has not reached the machine yet: the
+    /// fractional remainder and any whole counts held back for a later
+    /// frame. For a capture change, a lost focus, or a netplay session
+    /// taking the mouse over.
+    pub(super) fn forget_host_mouse_motion(&mut self) {
+        self.mouse_delta_remainder = (0.0, 0.0);
+        self.mouse_pending = (0, 0);
     }
 
     /// Apply quadrature motion to an explicit port: scripted/CCP events
@@ -490,7 +540,7 @@ impl App {
         if self.handle_keyboard_joystick_key(code, pressed) {
             return;
         }
-        self.handle_amiga_key_event(rawkey, pressed);
+        self.handle_live_amiga_key_event(rawkey, pressed);
     }
 
     pub(super) fn update_host_modifiers(&mut self, modifiers: ModifiersState) {
@@ -528,6 +578,81 @@ impl App {
     pub(super) fn amiga_rawkey_held(&self, rawkey: u8) -> bool {
         rawkey_is_held(&self.held_rawkeys, rawkey)
             || rawkey_is_held(&self.panel_held_rawkeys, rawkey)
+    }
+
+    /// A transition the operator made on the host keyboard, as against a
+    /// scheduled or control-protocol key: noted for warp's input yield,
+    /// then handled like any other host-keyboard transition.
+    pub(super) fn handle_live_amiga_key_event(&mut self, rawkey: u8, pressed: bool) {
+        self.live_held_rawkeys[rawkey_index(rawkey)] = pressed;
+        self.note_live_input();
+        self.handle_amiga_key_event(rawkey, pressed);
+    }
+
+    /// A host mouse button the operator pressed or let go of on the guest's
+    /// mouse, noted for warp's input yield.
+    pub(super) fn note_live_mouse_button(&mut self, index: u8, pressed: bool) {
+        let bit = 1u8 << index.min(7);
+        if pressed {
+            self.live_mouse_buttons |= bit;
+        } else {
+            self.live_mouse_buttons &= !bit;
+        }
+        self.note_live_input();
+    }
+
+    /// The operator just touched something the machine sees: keep warp
+    /// yielding to real-time pacing for [`WARP_INPUT_YIELD_GRACE`] from now.
+    pub(super) fn note_live_input(&mut self) {
+        self.warp_input_yield_until = Some(Instant::now() + WARP_INPUT_YIELD_GRACE);
+    }
+
+    /// Whether the operator is holding down a host key or mouse button the
+    /// machine sees. Each live mark is honoured only while the machine still
+    /// holds the key or button, so a release that went astray (focus lost
+    /// mid-press, capture dropped) cannot leave warp yielding for good.
+    pub(super) fn live_input_held(&self) -> bool {
+        let key = self
+            .live_held_rawkeys
+            .iter()
+            .zip(&self.held_rawkeys)
+            .any(|(live, held)| *live && *held);
+        let button = self.live_mouse_buttons != 0
+            && self.mouse_port().is_some_and(|port| {
+                let p = &self.emu.bus().input.ports[port];
+                let held = u8::from(p.fire) | u8::from(p.button2) << 1 | u8::from(p.button3) << 2;
+                self.live_mouse_buttons & held != 0
+            });
+        key || button
+    }
+
+    /// Engage or release warp's yield to real-time pacing for this pass
+    /// (see [`crate::emulator::Emulator::set_warp_input_yield`]): on while
+    /// the operator holds a host key or mouse button down, and for
+    /// [`WARP_INPUT_YIELD_GRACE`] after the last one was touched, so a hold
+    /// lasts as long in emulated time as it did in the hand and the two
+    /// clicks of a double-click land as close together. Only live input
+    /// counts: scheduled and control-protocol input is timed in emulated
+    /// time already, and pasted keystrokes keep their warp speed.
+    pub(super) fn update_warp_input_yield(&mut self) {
+        if self.live_input_held() {
+            self.note_live_input();
+        }
+        let yielding = !self.emu.paced()
+            && self
+                .warp_input_yield_until
+                .is_some_and(|until| Instant::now() < until);
+        if yielding != self.emu.warp_input_yield() {
+            log::debug!(
+                "warp: {} real-time pacing for live input",
+                if yielding {
+                    "yielding to"
+                } else {
+                    "resuming after"
+                }
+            );
+        }
+        self.emu.set_warp_input_yield(yielding);
     }
 
     /// A transition from the host keyboard.

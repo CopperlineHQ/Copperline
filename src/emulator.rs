@@ -71,6 +71,11 @@ pub struct Emulator {
     /// (headless screenshot/frame-dump runs). The emulated result is
     /// identical either way.
     paced: bool,
+    /// Wall-clock pacing held on underneath warp while the operator has a
+    /// hand on the machine (see `set_warp_input_yield`). `paced` keeps
+    /// saying whether warp is engaged; this only decides whether the pacer
+    /// sleeps.
+    warp_input_yield: bool,
     /// Run-ahead burst phase (see `set_runahead_phase`): while set, the
     /// per-frame pacing sleep inside `step_real` is suppressed.
     runahead_phase: bool,
@@ -470,6 +475,7 @@ impl Emulator {
             machine,
             stats: EmuStats::default(),
             paced,
+            warp_input_yield: false,
             runahead_phase: false,
             runahead_speculative: false,
             cpu_cycles_per_instruction,
@@ -1505,7 +1511,7 @@ impl Emulator {
     /// first step_frame; unpaced headless runs still leave statistics anchored
     /// at their first executed frame.
     pub fn reanchor_realtime_clock(&mut self) {
-        if self.stats.started_at.is_none() && !self.paced {
+        if self.stats.started_at.is_none() && !self.paces_realtime() {
             return;
         }
         let target_seconds = (self.bus().emulated_seconds()
@@ -1711,7 +1717,7 @@ impl Emulator {
     /// iteration is one frame period even though the burst retired more.
     /// No-op when unpaced (warp/headless).
     pub fn pace_runahead_burst(&mut self, anchor_end_seconds: f64) {
-        if !self.paced {
+        if !self.paces_realtime() {
             return;
         }
         self.pace_to_emulated_target(anchor_end_seconds);
@@ -2291,6 +2297,40 @@ impl Emulator {
         }
     }
 
+    /// Hold wall-clock pacing on underneath warp, or let it go again.
+    ///
+    /// Warp runs emulated time far ahead of the wall clock, so a key or
+    /// mouse button the operator holds for a tenth of a second is held for
+    /// seconds of emulated time: input.device starts repeating the key, and
+    /// two clicks land too far apart to be a double-click. While the window
+    /// sees a hand on the machine it engages this, and the pacer keeps
+    /// emulated time level with the wall clock until it is released. Warp
+    /// itself stays engaged (`paced` is untouched), and the emulated result
+    /// is identical either way. Engaging re-anchors the pacing clock, as
+    /// leaving warp does, so the pacer does not wait out the time warp ran
+    /// ahead.
+    pub fn set_warp_input_yield(&mut self, on: bool) {
+        if self.warp_input_yield == on {
+            return;
+        }
+        self.warp_input_yield = on;
+        if on && !self.paced {
+            self.reanchor_realtime_clock();
+        }
+    }
+
+    /// Whether warp is currently yielding to wall-clock pacing for the
+    /// operator's input (see [`Self::set_warp_input_yield`]).
+    pub fn warp_input_yield(&self) -> bool {
+        self.warp_input_yield
+    }
+
+    /// Whether the pacer holds emulated time to the wall clock: outside
+    /// warp, or while warp yields to the operator's input.
+    fn paces_realtime(&self) -> bool {
+        self.paced || self.warp_input_yield
+    }
+
     pub fn reset_stats(&mut self) {
         self.stats = EmuStats::default();
         self.bus_mut().reset_profile_stats();
@@ -2620,7 +2660,7 @@ impl Emulator {
         })();
         self.set_runahead_speculative(false);
         result?;
-        let slept = if self.paced && !replay {
+        let slept = if self.paces_realtime() && !replay {
             self.sleep_until_realtime_device_time()
         } else {
             Duration::ZERO
@@ -2736,7 +2776,7 @@ impl Emulator {
         // headless runs advance the deterministic core unthrottled. During a
         // run-ahead burst the sleep is deferred to the burst's anchor target
         // (`pace_runahead_burst`), so speculative frames retire unpaced.
-        let slept = if self.paced && !self.runahead_phase {
+        let slept = if self.paces_realtime() && !self.runahead_phase {
             self.sleep_until_realtime_device_time()
         } else {
             Duration::ZERO

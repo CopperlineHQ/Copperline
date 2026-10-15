@@ -773,6 +773,16 @@ for one run; the config overrides the built-in `cycles` default.
 `cpu_clocks_per_cck`; fast RAM/ROM access costs are scaled with sub-CCK
 carry accumulation so fractional costs are not lost.
 
+Warp (`Emulator::set_paced(false)`) skips the sleep entirely. While the
+window sees the operator holding a host key or a button on the guest's
+mouse, and for a short grace period after (`WARP_INPUT_YIELD_GRACE`), it
+engages `Emulator::set_warp_input_yield`, which re-anchors the pacing clock
+and keeps the sleep in force underneath warp until released, so a physical
+hold or the gap between two clicks lasts as long in emulated time as it did
+in the hand. `paced()` keeps reporting warp as engaged throughout; only
+the pacer's sleep decision (`paces_realtime`) changes. Scheduled and
+control-protocol input never engages it.
+
 `cycles` became the default once the core's 68000 cycle counts were made
 accurate: under flat instruction pacing, or with the old static cycle
 counts, a blitter-bound chip-RAM scene had the CPU over-issuing chip-bus

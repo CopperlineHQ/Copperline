@@ -2662,6 +2662,75 @@ fn warp_burst_decouples_emulation_from_the_vsync_present() {
     assert_eq!(app.warp_burst_plan(false), (1, None));
 }
 
+/// Under warp a hand on the machine used to be stretched by the warp
+/// factor: a tenth-of-a-second key tap was held for seconds of emulated
+/// time (input.device repeated it) and two clicks landed too far apart to
+/// be a double-click. A live key or mouse button now holds warp to
+/// real-time pacing while it is down and for a grace period after, without
+/// switching warp itself off.
+#[test]
+fn warp_yields_to_real_time_while_a_live_key_or_button_is_held() {
+    let mut app = test_app();
+    // test_app builds an unpaced (warp) emulator.
+    app.warp_speed = WarpSpeed::X4;
+    app.update_warp_input_yield();
+    assert!(!app.emu.warp_input_yield(), "nothing touched yet");
+    assert_eq!(app.warp_burst_plan(false), (4, None));
+
+    // A host key goes down: real-time pacing, one frame per present, warp
+    // still engaged as far as the toggle and the status bar are concerned.
+    app.handle_live_amiga_key_event(0x20, true);
+    app.update_warp_input_yield();
+    assert!(app.emu.warp_input_yield());
+    assert!(!app.emu.paced(), "warp itself stays on");
+    assert_eq!(app.warp_burst_plan(false), (1, None));
+
+    // Released, it keeps yielding through the grace period, so the next
+    // press of a double-click is not flung seconds ahead...
+    app.handle_live_amiga_key_event(0x20, false);
+    app.update_warp_input_yield();
+    assert!(app.emu.warp_input_yield(), "within the grace period");
+    // ...and once the grace has run out, warp picks up again.
+    app.warp_input_yield_until = Some(std::time::Instant::now());
+    app.update_warp_input_yield();
+    assert!(!app.emu.warp_input_yield());
+    assert_eq!(app.warp_burst_plan(false), (4, None));
+
+    // A mouse button on the guest's mouse does the same, held past any
+    // grace: the hold itself keeps the yield up.
+    let port = app.mouse_port().expect("fixture has a mouse in port 1");
+    app.emu.bus_mut().input.set_mouse_button(port, 0, true);
+    app.note_live_mouse_button(0, true);
+    app.warp_input_yield_until = Some(std::time::Instant::now());
+    app.update_warp_input_yield();
+    assert!(app.emu.warp_input_yield(), "a held button keeps yielding");
+
+    // Should the release go astray (capture dropped, focus lost), the
+    // machine letting go of the button is enough to end it.
+    app.release_mouse_buttons();
+    app.warp_input_yield_until = Some(std::time::Instant::now());
+    app.update_warp_input_yield();
+    assert!(!app.emu.warp_input_yield());
+
+    // Out of warp there is nothing to yield.
+    app.handle_live_amiga_key_event(0x20, true);
+    app.emu.set_paced(true);
+    app.update_warp_input_yield();
+    assert!(!app.emu.warp_input_yield());
+}
+
+/// Scheduled and control-protocol keys are timed in emulated time already,
+/// so warp has nothing to correct for them: a long paste typed as
+/// keystrokes keeps its warp speed.
+#[test]
+fn warp_does_not_yield_to_scripted_keys() {
+    let mut app = test_app();
+    app.handle_amiga_key_event(0x20, true);
+    assert!(app.amiga_rawkey_held(0x20), "the machine has the key down");
+    app.update_warp_input_yield();
+    assert!(!app.emu.warp_input_yield());
+}
+
 #[test]
 fn cycle_warp_speed_walks_the_levels() {
     let mut app = test_app();
@@ -2784,6 +2853,67 @@ fn mouse_delta_integrator_keeps_fractional_remainder() {
     delta -= 1.5;
     assert_eq!(take_integral_mouse_delta(&mut delta), -1);
     assert_eq!(delta, -0.25);
+}
+
+/// A brisk flick of a high-resolution host mouse (X11 reports raw device
+/// counts) used to land in the 8-bit JOYxDAT counters in one piece: 200
+/// counts right read back as 56 counts left, and the pointer jumped the
+/// wrong way. Host motion now reaches the counters at most
+/// HOST_MOUSE_COUNTS_PER_FRAME per axis per emulated frame, with one more
+/// frame's worth carried and the rest dropped.
+#[test]
+fn a_fast_host_mouse_never_wraps_the_quadrature_counters() {
+    use super::HOST_MOUSE_COUNTS_PER_FRAME as PER_FRAME;
+    fn next_frame(app: &mut super::App) {
+        let frame = app.emu.bus().emulated_frames();
+        while app.emu.bus().emulated_frames() == frame {
+            app.emu.step_frame().expect("frame");
+        }
+    }
+    let mut app = test_app();
+    let port = app.mouse_port().expect("fixture has a mouse in port 1");
+    let counters = |app: &super::App| {
+        let p = &app.emu.bus().input.ports[port];
+        (p.counter_x, p.counter_y)
+    };
+    let mut last = counters(&app);
+    let mut moved = |app: &super::App| {
+        let now = counters(app);
+        let delta = (
+            now.0.wrapping_sub(last.0) as i8,
+            now.1.wrapping_sub(last.1) as i8,
+        );
+        last = now;
+        delta
+    };
+
+    app.add_host_mouse_delta(200.0, -200.0);
+    assert_eq!(
+        moved(&app),
+        (PER_FRAME as i8, -PER_FRAME as i8),
+        "a frame's worth goes in, each axis the way the hand went"
+    );
+    app.add_host_mouse_delta(30.0, 0.0);
+    assert_eq!(moved(&app), (0, 0), "this frame has had its share");
+
+    next_frame(&mut app);
+    app.deliver_host_mouse_motion();
+    assert_eq!(
+        moved(&app),
+        (PER_FRAME as i8, -PER_FRAME as i8),
+        "one more frame's worth was carried"
+    );
+    next_frame(&mut app);
+    app.deliver_host_mouse_motion();
+    assert_eq!(
+        moved(&app),
+        (0, 0),
+        "the rest of the flick was dropped, so the pointer stops with the hand"
+    );
+
+    // Ordinary motion is untouched: it arrives whole and at once.
+    app.add_host_mouse_delta(12.0, 5.0);
+    assert_eq!(moved(&app), (12, 5));
 }
 
 #[test]

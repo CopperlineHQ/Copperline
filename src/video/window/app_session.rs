@@ -764,7 +764,9 @@ impl App {
         &self,
         headless_capture: bool,
     ) -> (usize, Option<std::time::Duration>) {
-        if self.emu.paced() || headless_capture {
+        // Warp yielding to the operator's input runs paced, one frame per
+        // presented frame, until the hands are off again.
+        if self.emu.paced() || headless_capture || self.emu.warp_input_yield() {
             return (1, None);
         }
         (
