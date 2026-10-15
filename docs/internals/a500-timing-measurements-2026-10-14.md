@@ -141,27 +141,29 @@ stages if a later phase or contention sweep exposes a residual.
 
 ### 2. Finish line-mode BZERO isolation
 
-The 15 October follow-up collected 18,852 validated new A500 records with
-One ROM. See [the detailed report and next-run handoff](a500-line-bzero-2026-10-15.md).
-The old single-region destination observer did not cover later D writes,
-which follow the C pointer in line mode; new probes scan both regions.
-The earlier zero-data statements must be limited to their sampled region.
+The 15 October follow-up collected 25,636 validated new A500 records with
+One ROM, including the kind-33 repeat. See [the detailed report and next-run
+handoff](a500-line-bzero-2026-10-15.md) for source IDs, comparisons and the
+current acceptance results. The old single-region destination observer did
+not cover later D writes, which follow the C pointer in line mode; new
+probes scan both regions. Limit earlier zero-data statements accordingly.
 
-Full minterm and nonuniform-C measurements establish an extra inter-pixel
-BZERO evaluation for the tested BSH=0 cases, involving previous A/C holds.
-A universal intermediate B=$ffff rule is disproved by shifted-texture tests.
-Normal B-path priming does not remove the irregular pattern. Equal-cycle
-opcode controls differ in only two of 640 groups, requiring repeats.
-No new core fix was accepted: the provisional L2 implementation was preserved
-as an ignored patch and removed from active source because it has known
-counterexamples and an earliest-read timing error.
+Full-minterm, nonuniform-C and length sweeps isolate a texture-counter-wrap
+component using previous A/C holds. The narrowed correction applies only
+with USEB clear; extending it to B DMA introduces measured false clears.
+Other non-wrap effects remain: kind38 demonstrates a C-DMA-dependent flag
+change even with LF=cc, which ignores C in the ordinary minterm.
 
-Next: measure the assembled kind-36 shifted full-minterm ROM, test truth-mask
-closure, then perform the planned 1–18-pixel/all-BSH counter-wrap sweep.
-Repeat variable rows and, if needed, isolate CPU activity using STOP/Copper
-controls. The detailed handoff includes immutable paths, source IDs, expected
-checks and the prototype's limitations. The original Kickstart was restored
-and verified after this session; hardware is no longer running a test ROM.
+Next, at BSH4, A=B=0, LF=cc and two pixels, vary one-hot C words separately
+at the first and second C source addresses. Cross USEB/USEC and include
+one-pixel controls with BLTCDAT held at zero. Then measure LF=c0 with all
+A shifts to reconstruct the effective B-bit incidence without depending on
+C in the minterm. Repeat rare opcode-control differences and prime all
+normal-mode A/B/C holds if needed. Do not implement a BSH lookup table.
+
+Kinds36–38 are now measured; invalid packaging drafts are excluded. The
+fresh live-ROM backup was restored, hash-verified and reset released after
+each capture. No test ROM remains running on hardware.
 
 ### 3. Finish regression and scope checks
 

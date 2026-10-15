@@ -224,8 +224,10 @@ pub struct Blitter {
     /// after the internal E/NOTHING flush and before the terminal D/BLTDONE
     /// slot. `busy` remains the engine-running flag until that slot retires.
     pub bbusy: bool,
-    /// Set to true at the start of `execute()` and cleared on the first
-    /// non-zero D word. Surfaces as DMACONR bit 13.
+    /// Set to true at blit start and cleared by non-zero D results. Line
+    /// mode has an additional measured wrap effect for register-texture
+    /// (USEB-off) blits; B-DMA wrap effects remain unresolved.
+    /// Surfaces as DMACONR bit 13.
     pub bzero: bool,
 
     pending: Option<PendingBlit>,
@@ -282,6 +284,12 @@ struct LineBlitState {
     /// state (at the BBUSY drop, or at completion when drained earlier).
     #[serde(default)]
     registers_released: bool,
+    /// A shifter output held from the preceding line pixel.
+    #[serde(default)]
+    previous_a_hold: Option<u16>,
+    /// USEB-off wrap-triggered BZERO clear awaiting the next L3.
+    #[serde(default)]
+    deferred_bzero_clear: bool,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -590,8 +598,9 @@ impl Blitter {
     }
 
     /// Triggered by a BLTSIZE write. Runs the entire blit synchronously
-    /// against `ram`, updates pointers, sets `bzero` from the OR-of-all-D
-    /// across the run.
+    /// against `ram` and updates pointers. BZERO follows the OR of D results
+    /// plus the measured wrap effect for register-texture (USEB-off) line
+    /// blits. B-DMA wrap effects remain unresolved.
     /// Apply a whole blit's memory effect in one shot. Production issues
     /// blits through `start_scheduled` (progressive timing with the source
     /// snapshotted at BLTSIZE); this immediate form is kept for unit tests
@@ -1191,11 +1200,24 @@ impl Blitter {
         let mut acc = self.bltapt as u16;
         let mut sign = con1 & BLTCON1_SIGN != 0;
         let mut one_dot = false;
+        let mut previous_a_hold = None;
+        let mut previous_c_hold = self.bltcdat;
 
         let mut bdat = self.line_initial_bdat(bsh);
         let a_word = self.bltadat & self.bltafwm;
 
-        for _ in 0..npixels {
+        for pixel in 0..npixels {
+            // Measured register-texture case: a BSH wrap after a prior pixel
+            // causes the extra inter-pixel BZERO evaluation. Prior A/C holds
+            // and effective B=$FFFF fit captured USEB-off cases. The
+            // B-DMA wrap effect remains unresolved.
+            if pixel != 0 && !use_b && bsh == 15 {
+                if let Some(previous_a) = previous_a_hold {
+                    if minterm(lf, previous_a, 0xFFFF, previous_c_hold) != 0 {
+                        self.bzero = false;
+                    }
+                }
+            }
             if use_b {
                 // Line-mode FETCH_B: read BLTBPT, add only BLTBMOD.
                 let fetched = read_word(ram, bpt);
@@ -1217,6 +1239,8 @@ impl Blitter {
                 self.bltcdat
             };
             let d = minterm(lf, a_shifted, b_shifted, c);
+            previous_a_hold = Some(a_shifted);
+            previous_c_hold = c;
 
             if !sign {
                 ash_now = line_step_sometimes(con1, ash_now, bplmod, &mut cpt, &mut one_dot);
@@ -1313,6 +1337,8 @@ impl LineBlitState {
             bltcdat: blitter.bltcdat,
             cur_c: blitter.bltcdat,
             registers_released: false,
+            previous_a_hold: None,
+            deferred_bzero_clear: false,
         }
     }
 
@@ -1463,6 +1489,17 @@ impl LineBlitState {
                 self.phase = LineBlitPhase::L2;
             }
             LineBlitPhase::L2 => {
+                // Measured register-texture case: a BSH wrap on the preceding
+                // pixel triggers this inter-pixel check. Previous A/C holds
+                // and effective B=$FFFF fit captured USEB-off cases; the
+                // B-DMA wrap effect remains unresolved.
+                if !self.use_b && self.bsh == 15 {
+                    if let Some(previous_a) = self.previous_a_hold {
+                        if minterm(self.lf, previous_a, 0xFFFF, self.cur_c) != 0 {
+                            self.deferred_bzero_clear = true;
+                        }
+                    }
+                }
                 self.cur_c = if self.use_c {
                     read_word(ram, self.cpt)
                 } else {
@@ -1471,6 +1508,9 @@ impl LineBlitState {
                 self.phase = LineBlitPhase::L3;
             }
             LineBlitPhase::L3 => {
+                if std::mem::take(&mut self.deferred_bzero_clear) {
+                    *bzero = false;
+                }
                 self.phase = if self.use_b {
                     LineBlitPhase::LBus
                 } else {
@@ -1498,6 +1538,7 @@ impl LineBlitState {
         // (vAmiga HOLD_A/HOLD_D are unconditional; lockD gates WRITE_D).
         let line_pixel = !self.sing || !self.one_dot;
         let a_shifted = self.a_word >> (self.ash_now as u32);
+        self.previous_a_hold = Some(a_shifted);
         self.one_dot = true;
         let b_shifted = if self.bdat & 1 != 0 { 0xFFFF } else { 0 };
         let d = minterm(self.lf, a_shifted, b_shifted, self.cur_c);
@@ -3534,6 +3575,225 @@ mod tests {
         let set_bits: u32 = ram[..32].iter().map(|byte| byte.count_ones()).sum();
         assert_eq!(set_bits, 1);
         assert_ne!(ram[0] & 0x80, 0);
+    }
+
+    #[test]
+    fn line_bzero_wrap_truth_masks_match_one_rom_profiles() {
+        // One ROM A500 kinds 28/29, BSH=0. Both hardware sizes use WIDTH=2:
+        // height 1 is one line pixel and height 2 is two line pixels.
+        let profiles = [
+            (0x0000, 0x0000, 0x0000, 0x01, 0x05),
+            (0x8000, 0x0000, 0x0000, 0x11, 0x55),
+            (0x8000, 0xFFFF, 0x0000, 0x44, 0x44),
+            (0x8000, 0x0000, 0xFFFF, 0x22, 0xAA),
+            (0x0000, 0x0000, 0xFFFF, 0x02, 0x0A),
+        ];
+        for (a, bdat, c, one_mask, two_mask) in profiles {
+            for lf in 0u16..=255 {
+                for (height, mask) in [(1, one_mask), (2, two_mask)] {
+                    let make = || {
+                        let mut b = Blitter::new();
+                        b.bltcon0 = 0x0B00 | lf; // USEA|USEC|USED.
+                        b.bltcon1 = BLTCON1_LINE;
+                        b.bltafwm = 0xFFFF;
+                        b.bltalwm = 0xFFFF;
+                        b.bltadat = a;
+                        b.bltbdat = bdat;
+                        b.bltcpt = 0;
+                        b.bltdpt = 0x0800;
+                        b.bltcmod = 80;
+                        b.bltdmod = 80;
+                        b.bltamod = -280;
+                        b.bltbmod = 0;
+                        b.bltapt = (-80i16) as u16 as u32;
+                        b
+                    };
+                    let mut sync_ram = vec![if c == 0 { 0 } else { 0xFF }; 4096];
+                    let mut sync = make();
+                    sync.execute(((height as u16) << 6) | 2, &mut sync_ram);
+                    assert_eq!(
+                        sync.bzero,
+                        lf & mask == 0,
+                        "A={a:04X} B={bdat:04X} C={c:04X} height={height} LF={lf:02X}"
+                    );
+
+                    let mut scheduled_ram = vec![if c == 0 { 0 } else { 0xFF }; 4096];
+                    let mut scheduled = make();
+                    let source = scheduled_ram.clone();
+                    scheduled.start_scheduled(((height as u16) << 6) | 2, &source);
+                    while scheduled.busy {
+                        scheduled.tick_scheduled_slot(&mut scheduled_ram);
+                    }
+                    assert_eq!(
+                        scheduled.bzero, sync.bzero,
+                        "scheduled LF={lf:02X} height={height}"
+                    );
+                    assert_eq!(
+                        scheduled_ram, sync_ram,
+                        "scheduled memory LF={lf:02X} height={height}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn line_bzero_wrap_lengths_are_conservative() {
+        // Captured first-clear lengths for stable register-texture cases.
+        let profiles = [
+            (0xCC, 0x0000, 0, 2),
+            (0xCC, 0x0000, 1, 3),
+            (0xCC, 0x0000, 2, 4),
+            (0xCA, 0x8000, 0, 2),
+            (0xCA, 0x8000, 1, 3),
+            (0xCA, 0x8000, 2, 4),
+            (0xCA, 0x8000, 8, 10),
+        ];
+        for (lf, a, bsh, first_clear) in profiles {
+            for pixels in 1..=first_clear + 1 {
+                let make = || {
+                    let mut b = Blitter::new();
+                    b.bltcon0 = BLTCON0_USE_A | BLTCON0_USE_C | BLTCON0_USE_D | lf as u16;
+                    b.bltcon1 = ((bsh as u16) << 12) | BLTCON1_LINE;
+                    b.bltafwm = 0xFFFF;
+                    b.bltalwm = 0xFFFF;
+                    b.bltadat = a;
+                    b.bltbdat = 0;
+                    b.bltbpt = 0x0200;
+                    b.bltcpt = 0;
+                    b.bltdpt = 0x0800;
+                    b.bltcmod = 80;
+                    b.bltdmod = 80;
+                    b.bltamod = -280;
+                    b.bltbmod = 0;
+                    b.bltapt = (-80i16) as u16 as u32;
+                    b
+                };
+                let mut sync_ram = vec![0u8; 4096];
+                let mut sync = make();
+                sync.execute(((pixels as u16) << 6) | 2, &mut sync_ram);
+                assert_eq!(
+                    sync.bzero,
+                    pixels < first_clear,
+                    "sync LF={lf:02X} A={a:04X} BSH={bsh} N={pixels}"
+                );
+
+                let mut scheduled_ram = vec![0u8; 4096];
+                let mut scheduled = make();
+                let source = scheduled_ram.clone();
+                scheduled.start_scheduled(((pixels as u16) << 6) | 2, &source);
+                while scheduled.busy {
+                    scheduled.tick_scheduled_slot(&mut scheduled_ram);
+                }
+                assert_eq!(
+                    scheduled.bzero, sync.bzero,
+                    "scheduled LF={lf:02X} A={a:04X} BSH={bsh} N={pixels}"
+                );
+                assert_eq!(
+                    scheduled_ram, sync_ram,
+                    "scheduled memory LF={lf:02X} A={a:04X} BSH={bsh} N={pixels}"
+                );
+            }
+        }
+
+        let mut ram = vec![0u8; 4096];
+        let mut initial_fifteen = Blitter::new();
+        initial_fifteen.bltcon0 = BLTCON0_USE_A | BLTCON0_USE_C | BLTCON0_USE_D | 0x00CA;
+        initial_fifteen.bltcon1 = (15 << 12) | BLTCON1_LINE;
+        initial_fifteen.bltafwm = 0xFFFF;
+        initial_fifteen.bltadat = 0x8000;
+        initial_fifteen.execute((1 << 6) | 2, &mut ram);
+        assert!(
+            initial_fifteen.bzero,
+            "initial BSH=15 has no preceding wrap pixel"
+        );
+    }
+
+    #[test]
+    fn line_bzero_wrap_uses_previous_c_before_fetching_next_c() {
+        for (previous_c, expected_bzero) in [(0x8000, true), (0x4000, false)] {
+            let mut blitter = Blitter::new();
+            blitter.bltcon0 = BLTCON0_USE_C | 0x0048;
+            blitter.bltcon1 = BLTCON1_LINE;
+            blitter.bltadat = 0x8000;
+            blitter.bltafwm = 0xFFFF;
+            let mut state = LineBlitState::new(&blitter, 2);
+            state.phase = LineBlitPhase::L2;
+            state.bsh = 15; // previous pixel wrapped from BSH=0.
+            state.previous_a_hold = Some(0x8000);
+            state.cur_c = previous_c;
+            let mut ram = vec![0u8; 64]; // next C word is zero.
+            let mut bzero = true;
+            state.process_phase(&mut ram, &mut bzero);
+            assert_eq!(state.cur_c, 0, "L2 fetched next C after evaluating prior C");
+            assert!(bzero, "USEB-off BZERO remains set through L2");
+            assert_eq!(state.deferred_bzero_clear, !expected_bzero);
+            state.process_phase(&mut ram, &mut bzero); // L3 commits queued clear.
+            assert_eq!(bzero, expected_bzero, "previous C={previous_c:04X}");
+        }
+    }
+
+    #[test]
+    fn line_bzero_wrap_uses_previous_shifted_a_hold() {
+        for (ash, expected_bzero) in [(0, false), (1, true)] {
+            let mut blitter = Blitter::new();
+            blitter.bltcon0 =
+                ((ash as u16) << 12) | BLTCON0_USE_A | BLTCON0_USE_C | BLTCON0_USE_D | 0x00CA;
+            blitter.bltcon1 = BLTCON1_LINE;
+            blitter.bltafwm = 0xFFFF;
+            blitter.bltadat = 1;
+            let mut state = LineBlitState::new(&blitter, 2);
+            state.phase = LineBlitPhase::L4;
+            state.bsh = 0;
+            state.npixels_remaining = 2;
+            let mut ram = vec![0u8; 64];
+            let mut bzero = true;
+            state.process_phase(&mut ram, &mut bzero); // first pixel holds shifted A.
+            assert_eq!(state.previous_a_hold, Some(1 >> ash));
+            assert_eq!(state.bsh, 15);
+            state.phase = LineBlitPhase::L2;
+            state.process_phase(&mut ram, &mut bzero);
+            assert!(bzero, "USEB-off BZERO remains set through L2");
+            assert_eq!(state.deferred_bzero_clear, !expected_bzero);
+            state.process_phase(&mut ram, &mut bzero); // L3 commits queued clear.
+            assert_eq!(bzero, expected_bzero, "ASH={ash}");
+        }
+    }
+
+    #[test]
+    fn line_bzero_wrap_visibility_and_snapshot_are_phase_specific() {
+        let mut ram = vec![0u8; 4096];
+        let mut b = Blitter::new();
+        b.bltcon0 = BLTCON0_USE_A | BLTCON0_USE_C | BLTCON0_USE_D | 0x00CA;
+        b.bltcon1 = BLTCON1_LINE;
+        b.bltafwm = 0xFFFF;
+        b.bltalwm = 0xFFFF;
+        b.bltadat = 0x8000;
+        b.bltcpt = 0;
+        b.bltdpt = 0x0800;
+        b.start_scheduled((2 << 6) | 2, &ram);
+        loop {
+            b.tick_scheduled_slot(&mut ram);
+            let first_pixel_done = matches!(
+                b.pending,
+                Some(PendingBlit::Line(ref state))
+                    if matches!(state.phase, LineBlitPhase::L1)
+                        && state.npixels_remaining == 1
+            );
+            if first_pixel_done {
+                break;
+            }
+        }
+        assert!(b.bzero, "first pixel has not cleared BZERO");
+        b.tick_scheduled_slot(&mut ram); // second pixel L1
+        assert!(b.bzero, "L1 does not clear BZERO");
+        b.tick_scheduled_slot(&mut ram); // L2 queues the clear
+        assert!(b.bzero, "USEB-off clear is deferred through L2");
+
+        let saved = serde_json::to_vec(&b).expect("serialize queued BZERO clear");
+        let mut resumed: Blitter = serde_json::from_slice(&saved).expect("restore queued clear");
+        resumed.tick_scheduled_slot(&mut ram); // L3
+        assert!(!resumed.bzero, "USEB-off clear commits at L3 after restore");
     }
 
     #[test]

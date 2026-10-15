@@ -174,7 +174,7 @@ consecutive chip-bus clocks, then yields one slot; fixed-DMA denials count
 among those misses. The starvation threshold and reset rule are described in
 [](#cpu-contention) below.
 
-This model is supported by chip-bus regressions and aligned OneROM captures,
+This model is supported by chip-bus regressions and aligned One ROM captures,
 not title-specific timing assumptions. An independent colour-clock sequence
 model that gives BLTPRI precedence only when a blitter bus request is asserted
 reproduces every one of the 3,456 hardware priority-on busy samples. Across
@@ -461,7 +461,7 @@ the same slot-eligibility primitive the live engine uses.
 ### Per-slot FSM
 
 Scheduled blits use explicit phases for the hardware controller. ROM-resident
-OneROM probes on a PAL A500 (ECS Agnus, OCS Denise, 512 KB chip + 512 KB slow)
+One ROM probes on a PAL A500 (ECS Agnus, OCS Denise, 512 KB chip + 512 KB slow)
 separately observe busy, interrupt and destination-memory reads. Launch phases
 are aligned before starting the blit; the observer's first chip-bus access is
 the measured read, followed by a raw beam timestamp. Across all normal USE
@@ -512,7 +512,19 @@ even when SING suppresses the store (unlike copy mode, where a locked D
 slot is bus-idle); with USEC clear no line cycle touches the bus, and the
 terminal BLTDONE cycle of a USEB program is itself a bus-idle cycle.
 A SING-suppressed dot only locks the store: the A shifter, minterm and
-BZERO update still run on the full inputs. The Bresenham error
+BZERO update still run on the full inputs.
+
+One ROM measurements on the PAL A500 additionally show a register-texture
+(USEB clear) BZERO evaluation after the texture counter wraps from BSH=0
+to 15 between pixels. This evaluation uses the preceding pixel's shifted A
+and C holds and an effective B input of $ffff; it does not write a D word.
+L2 evaluates those old holds before fetching the next C word, and L3
+exposes the queued clear. A blit starting at BSH=15 has no preceding pixel
+and does not trigger this check. Save states preserve the prior A hold and
+pending clear. B-DMA and other non-wrap effects remain unresolved; see the
+[One ROM measurement report](a500-line-bzero-2026-10-15.md).
+
+The Bresenham error
 accumulator (BLTAPT's low word) advances only while USEA is enabled, the
 line texture register is BLTBDAT rotated by the LIVE BSH each pixel (no
 write-time latch, unlike the USEB-off copy hold word), and C DMA fetches
@@ -606,7 +618,7 @@ With BLTPRI set, the blitter wins only a slot where its current micro-cycle
 requests a bus access. Idle startup and pipeline cycles remain available to
 the CPU, including startup-ladder cycles and the empty first-D bubble. Once
 running, fill's explicit idle cycle and line-mode BUSIDLE likewise do not
-request the bus. The aligned OneROM busy, IRQ and memory observer captures
+request the bus. The aligned One ROM busy, IRQ and memory observer captures
 match hardware, WinUAE and Copperline for both BLTPRI settings, across 3,456
 trials per observer and setting. The separate kind-22 BZERO matrix also matches
 the tested normal/fill readback; line-texture controls expose additional flag
@@ -764,7 +776,7 @@ eight words contain vector numbers 24 through 31. A custom ROM must supply
 these words; Copperline does not replace a missing word with an autovector
 or suppress delivery because a RAM handler is zero. The freezer cartridge
 retains its own acknowledge behavior. The accelerated CPU bus path retains
-autovector delivery. This ROM-data behavior was checked on the OneROM A500
+autovector delivery. This ROM-data behavior was checked on the One ROM A500
 by changing the level-1 word to select the installed vector-30 handler.
 The zero-footer measurement ROM now reproduces the physical machine's
 illegal-instruction fault at `$003020`, rather than completing its trials.
@@ -788,7 +800,7 @@ underflow stops counting directly. START+LOAD, including a stopped one-shot
 timer's high-byte auto-start, holds counting for three E-clock edges.
 FORCE LOAD with START still set applies the same three-edge hold to an
 already-running timer; it does not require a stopped-to-running transition.
-A OneROM sweep on the physical A500 measured this on both timers of both
+A One ROM sweep on the physical A500 measured this on both timers of both
 CIAs: 640 reload trials, five launch phases and sixteen read delays. Before
 the correction every live sample was three counts too low; afterwards both
 the live and fully stopped counts matched all 640 hardware samples exactly.
@@ -822,7 +834,7 @@ zero therefore reads as the latch value. This changes readout, not the
 internal countdown or the continuous period of `latch + 1`. Counter
 inspection and fully stopped reads still expose the actual stored count.
 
-These details were isolated with OneROM on the real 512K-chip/512K-slow PAL
+These details were isolated with One ROM on the real 512K-chip/512K-slow PAL
 A500 on 13–14 October 2026: independent reference timers were frozen before
 reading, live reads were bracketed by a reference STOP, and timer B counted
 timer-A underflows. A dense 6240-trial live-read sweep fits the same
@@ -856,7 +868,7 @@ blitter is in a disabled-channel gap or destination pipeline bubble. A CPU
 grant resets the counter; an idle blitter phase does not. Fixed DMA retains
 its priority, and BLTPRI disables this CPU starvation yield.
 
-OneROM measurements on the same A500 compared D-only, descending-fill and
+One ROM measurements on the same A500 compared D-only, descending-fill and
 line blits with a stopped CPU, normal polling and BLTPRI polling (540 trials).
 For a 220-by-22-word D-only clear, normal polling measured 9923–9934 colour
 clocks. Ignoring fixed-DMA misses during idle blitter phases produced
@@ -869,7 +881,7 @@ and readback time; they are not a constant to add to a blit.
 The MC68000 divider computes before its final instruction prefetch and IPL
 sample. Both DIVU and DIVS therefore flush their internal clocks before topping
 up the prefetch queue; operand reads still precede computation. MULU/MULS keep
-their separate early-prefetch sequence. OneROM division sweeps vary operands,
+their separate early-prefetch sequence. One ROM division sweeps vary operands,
 addressing modes, bitplane count and loop length. A Copper interrupt during the
 divide confirms that hardware takes the exception before the following marker
 instruction; the previous early-prefetch sequence could execute that marker
