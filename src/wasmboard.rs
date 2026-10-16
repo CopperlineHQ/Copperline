@@ -3625,11 +3625,14 @@ mod tests {
     const HS_CALL_RELEASESOCKET: i32 = 37;
     const HS_CALL_RELEASECOPYOFSOCKET: i32 = 38;
     const HS_CALL_SHUTDOWN: i32 = 15;
+    #[cfg(unix)]
     const HS_CALL_IOCTLSOCKET: i32 = 6;
     const HS_CALL_SENDMSG: i32 = 33;
     const HS_CALL_RECVMSG: i32 = 34;
+    #[cfg(unix)]
     const HS_FIONREAD: i32 = 0x4004667F;
     const HS_MSG_PEEK: i32 = 0x2;
+    #[cfg(unix)]
     const HS_MSG_OOB: i32 = 0x1;
     const HS_AF_INET: i32 = 2;
     const HS_SOCK_STREAM: i32 = 1;

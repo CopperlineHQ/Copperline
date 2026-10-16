@@ -11285,9 +11285,9 @@ fn busy_bltcon0_write_disables_remaining_d_output_without_draining_blit() {
     assert_ne!(bus.paula.intreq & INT_BLIT, 0);
 }
 
-/// A 020+ CPU polling DMACONR sees BBUSY drop at the last body cycle and can
-/// write BLTCON0 for its next blit in the terminal cycles, before the queued
-/// final D word lands. That write belongs to the next blit: the pending D
+/// A CPU can observe BBUSY clear while a DMA-stalled terminal D write is
+/// still queued, then write BLTCON0 for its next blit before the final
+/// D word lands. That write belongs to the next blit: the pending D
 /// word must still be written. Regression example: graphics.library's
 /// per-plane BltBitMap loop on a fast A4000 lost a whole bitplane of
 /// one-word, one-row copies (p96cts ClipBlit-disjoint, issue #573).
@@ -11312,17 +11312,18 @@ fn bltcon0_write_after_bbusy_poll_keeps_pending_final_d_write() {
     write_chip_word(&mut bus, 0x20, 0x5555);
     assert!(!bus.custom_write(0x058, 2, (1 << 6) | 1));
 
-    let mut polls = 0;
-    while bus.custom_read(0x002, 2) as u16 & (1 << 14) != 0 {
-        polls += 1;
-        assert!(polls < 32, "one-word blit must drop BBUSY");
-    }
-    // The poll returns inside the terminal cycles, ahead of the final D.
+    advance_to_terminal_cycles(&mut bus);
+    // Hold the final D transfer across the CPU read/write bus cycles. With
+    // the measured later BBUSY drop, an uncontended D slot can finish before
+    // the polling read returns; DMA suspension exercises the pending case.
+    bus.agnus.dmacon &= !DMACON_BLTEN;
+    assert_eq!(bus.custom_read(0x002, 2) as u16 & (1 << 14), 0);
     assert!(bus.blitter.busy);
     assert_eq!(&bus.mem.chip_ram[0x20..0x22], &[0x55, 0x55]);
 
     assert!(!bus.custom_write(0x040, 2, 0x0FF0));
     assert_eq!(bus.blitter.bltcon0, 0x0FF0);
+    bus.agnus.dmacon |= DMACON_BLTEN;
     bus.advance_chipset(8);
 
     assert!(!bus.blitter.busy);
@@ -11659,7 +11660,7 @@ fn ecs_bltcon1_doff_suppresses_destination_writes_but_advances_pointer() {
     assert_eq!(bus.blitter.bltdpt, 0x20);
 
     // BBUSY and register handoff follow the internal E flush.
-    bus.advance_chipset(1);
+    bus.advance_chipset(2);
     assert!(bus.blitter.busy);
     assert!(!bus.blitter.bbusy);
     assert!(!bus.blitter.bzero);
