@@ -28,10 +28,16 @@
 //!   it, xSysInfo decides there is no Fat Gary and then does not even look for
 //!   the Ramsey behind it.
 //!
-//! Nothing here changes emulated behaviour: bus timeouts are not modelled (an
-//! unanswered cycle floats, it does not fault), and Kickstart reads COLDBOOT
-//! only to decide whether the reboot was warm. The registers exist so the
-//! machine can be identified as what it is.
+//! Bus timeouts are not modelled (an unanswered cycle floats, it does not
+//! fault), so TIMEOUT and TOENB only store and read back. COLDBOOT does change
+//! behaviour: Kickstart reads it at every reset to decide whether the reboot
+//! was warm. With it set, the reset code clears `$4` and rebuilds ExecBase
+//! from scratch, dropping everything a warm reboot carries over (KickMemPtr/
+//! KickTagPtr residents, the capture vectors, a recoverable RAM disk, and the
+//! Kickstart 3.2 boot menu's choice of boot device). Kickstart clears the flag
+//! straight after testing it, and only a power-up sets it again: the /RESET
+//! line from the keyboard or the CPU RESET instruction (`ColdReboot()`) leaves
+//! it clear.
 
 /// The page Gary decodes. Above `$DE8000` the decode stops (amiberry draws the
 /// line in the same place); the A600/A1200's Gayle ID register at `$DE1000` is
@@ -74,7 +80,20 @@ impl Gary {
         }
     }
 
+    /// The system /RESET line (Ctrl-Amiga-Amiga, the CPU RESET instruction):
+    /// the timeout registers are cleared (Kickstart rewrites both on every
+    /// boot, so nothing depends on it), but COLDBOOT is a power-up latch the
+    /// line does not touch, so a warm reboot after Kickstart cleared it still
+    /// reads as warm.
     pub fn reset(&mut self) {
+        *self = Self {
+            coldboot: self.coldboot,
+            ..Self::new()
+        };
+    }
+
+    /// A power cycle: every register back to power-up, COLDBOOT set.
+    pub fn power_on_reset(&mut self) {
         *self = Self::new();
     }
 
@@ -123,6 +142,20 @@ mod tests {
     #[test]
     fn a_fresh_gary_reports_a_cold_boot() {
         assert_eq!(Gary::new().read_byte(GARY_BASE + 2), 0x80);
+    }
+
+    /// Kickstart clears COLDBOOT on every boot; a later /RESET (the
+    /// keyboard, or `ColdReboot()`'s RESET instruction) must leave it clear so
+    /// the reset code takes the warm path and keeps ExecBase, while a power
+    /// cycle sets it again.
+    #[test]
+    fn coldboot_survives_the_reset_line_but_not_a_power_cycle() {
+        let mut g = Gary::new();
+        g.write_byte(GARY_BASE + 2, 0x00);
+        g.reset();
+        assert_eq!(g.read_byte(GARY_BASE + 2), 0x00, "warm reset stays warm");
+        g.power_on_reset();
+        assert_eq!(g.read_byte(GARY_BASE + 2), 0x80, "power cycle is cold");
     }
 
     /// Kickstart writes the timeout mode at $DE0000 on every boot; it and TOENB

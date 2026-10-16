@@ -8226,6 +8226,42 @@ mod tests {
     }
 
     #[test]
+    fn cpu_reset_instruction_leaves_fat_gary_coldboot_clear() -> Result<()> {
+        // Kickstart clears Gary's COLDBOOT latch on every boot, and
+        // ColdReboot()'s RESET instruction must not set it again: the A3000
+        // reset code tests the bit and, finding it set, clears $4 and cold
+        // starts, losing the KickTag/KickMem state a warm reboot carries
+        // (the Kickstart 3.2 boot menu's boot-device choice rides on it).
+        // The program runs from slow RAM: RESET brings the overlay back over
+        // chip RAM and un-configures the Zorro fast RAM, but leaves $C00000.
+        let pc = SLOW_RAM_BASE as u32 + 0x100;
+        let mut bus = test_bus_with_pc(pc);
+        bus.attach_gary(crate::gary::Gary::new());
+        write_program(
+            &mut bus,
+            pc,
+            &[
+                0x08B9, 0x0007, 0x00DE, 0x0002, // BCLR #7,$DE0002
+                0x4E70, // RESET
+                0x0839, 0x0007, 0x00DE, 0x0002, // BTST #7,$DE0002
+                0x57C0, // SEQ D0: $FF when COLDBOOT reads clear
+            ],
+        );
+
+        let mut machine = M68kMachine::new(bus, CpuModel::M68000, false)?;
+        machine.bus_mut().mem.overlay = false;
+        let slice = machine.step_slice(4)?;
+
+        assert_eq!(slice.instructions, 4);
+        assert_eq!(
+            machine.d(0) & 0xFF,
+            0xFF,
+            "the reboot after RESET reads as warm"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn copper_irq_asserted_during_cpu_bus_wait_is_acknowledged_with_beam() -> Result<()> {
         let mut bus = test_bus_with_pc(0x0000_0100);
         write_program(

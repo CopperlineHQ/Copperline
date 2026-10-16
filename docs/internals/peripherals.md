@@ -26,11 +26,18 @@ like nothing in particular are reading a mirror.
 
 Gary's three registers are single read/write bits in bit 7: TIMEOUT
 (`$DE0000`, whether an unanswered bus cycle produces BERR or DSACK), TOENB
-(`$DE0001`, timeout enable), and COLDBOOT (`$DE0002`, the power-up flag
-the OS clears on warm reboot). None of them change emulated behaviour --
-bus timeouts are not modelled; an unanswered cycle floats -- but the
-read/write COLDBOOT bit is what identification tools use to detect a Fat
-Gary, and without one they never go looking for the Ramsey behind it.
+(`$DE0001`, timeout enable), and COLDBOOT (`$DE0002`, the power-up flag).
+Bus timeouts are not modelled -- an unanswered cycle floats -- so TIMEOUT
+and TOENB only store and read back. The read/write COLDBOOT bit is what
+identification tools use to detect a Fat Gary, and without one they never
+go looking for the Ramsey behind it. COLDBOOT also steers Kickstart's reset
+path: early in every reset Kickstart tests it and then clears it, and
+finding it set, it clears `$4` and cold-starts, discarding everything a warm
+reboot keeps (KickTag/KickMem residents, the capture vectors, a recoverable
+RAM disk, and the Kickstart 3.2 boot menu's boot-device choice, which
+crosses a `ColdReboot()`). Only a power cycle sets it: the /RESET line from
+the keyboard or the CPU RESET instruction clears the timeout registers but
+leaves COLDBOOT as the OS last wrote it.
 
 Ramsey drives the motherboard fast RAM (`[memory] motherboard`): a 32-bit
 local bank ending at `$08000000` and growing downward, so a full 16 MiB
