@@ -860,7 +860,7 @@ dependencies = [
 [[package]]
 name = "coppersynth"
 version = "0.14.0"
-source = "git+https://github.com/CopperlineHQ/Coppersynth?rev=cc94c623dea9eb289d85ff769a748d8136956a45#cc94c623dea9eb289d85ff769a748d8136956a45"
+source = "git+https://github.com/CopperlineHQ/Coppersynth?rev=f86c54e399a68395e5ec3e1d5ef7771a882794f8#f86c54e399a68395e5ec3e1d5ef7771a882794f8"
 dependencies = [
  "zip",
 ]
@@ -1944,7 +1944,7 @@ dependencies = [
 [[package]]
 name = "fluxbridge"
 version = "0.3.0"
-source = "git+https://github.com/CopperlineHQ/FluxBridge?branch=main#e01a3746c98011b7be763e6b74fb8b25d468db6b"
+source = "git+https://github.com/CopperlineHQ/FluxBridge?branch=main#f231628837e27498a2fa4a286feed9071a145870"
 dependencies = [
  "bitflags 2.13.1",
  "crossbeam-channel",
@@ -3527,7 +3527,7 @@ dependencies = [
 [[package]]
 name = "mt32-rs"
 version = "0.1.0"
-source = "git+https://github.com/CopperlineHQ/mt32-rs?rev=ac00f818629a549a2712747660091e4f84d55599#ac00f818629a549a2712747660091e4f84d55599"
+source = "git+https://github.com/CopperlineHQ/mt32-rs?rev=aa54c40c232a826f3d6f117ac8a0b165e7571f32#aa54c40c232a826f3d6f117ac8a0b165e7571f32"
 
 [[package]]
 name = "n0-dns-resolver"
@@ -4753,7 +4753,7 @@ dependencies = [
 [[package]]
 name = "plmpeg"
 version = "0.1.0"
-source = "git+https://github.com/CopperlineHQ/plmpeg-rs?rev=d020ba1015b48c0c646d32b16a27157623fff915#d020ba1015b48c0c646d32b16a27157623fff915"
+source = "git+https://github.com/CopperlineHQ/plmpeg-rs?rev=0ae5fd3ac6392952ece2ddfc0f7875d6a6d7c839#0ae5fd3ac6392952ece2ddfc0f7875d6a6d7c839"
 dependencies = [
  "serde",
  "serde-big-array",
