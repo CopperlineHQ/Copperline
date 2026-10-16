@@ -756,7 +756,7 @@ prefetch's start counted its trailing transfer twice, making ordinary
 instruction recognition two CCK late. Globally shortening the deadline
 fixed those instructions but broke the already accurate STOP path.
 
-The six-CCK default is calibrated against `a500-irq-probe` captures from a
+The six-CCK default is calibrated against `amiga-hardware-probes` captures from a
 PAL A500 with 512 KB chip RAM, 512 KB slow RAM, ECS Agnus and OCS Denise.
 With only Copper DMA enabled, a WAIT at line 64 followed by a MOVE that
 sets SOFTINT wakes a STOPped 68000: the handler's first instruction records

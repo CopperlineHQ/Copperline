@@ -33,7 +33,7 @@ DIVU/DIVS. These results must not be described as fully accurate end-to-end
 divider interrupts. The core's internal poll placement is separately checked
 by clocked-bus tests, including IRQ arrivals between the poll and prefetch.
 
-Capture: `a500-irq-probe/captures/divider-irq-copperline-fixed-v3`.
+Capture: `amiga-hardware-probes/captures/divider-irq-copperline-fixed-v3`.
 Comparison: `captures/divider-irq-a500-v3-fixed-comparison.json` in that repo.
 Packet SHA-256:
 `8a1f0991a8b8fec991f7935f4053835ccbad0c955d36904f977d148a2d2b10ae`.
@@ -89,7 +89,7 @@ propagation/sample mechanism from CPU-specific poll points before changing
 general latency. No CPU code was changed during this verification.
 
 The full method, provenance, comparison and next-step plan are in
-[the probe report](C:/Users/seppo/amiga/a500-irq-probe/docs/divider-irq-verification-2026-10-15.md).
+[the probe report](C:/Users/seppo/amiga/amiga-hardware-probes/docs/divider-irq-verification-2026-10-15.md).
 Accepted source ID:
 `5d1558cd75f40b7e947773e4778873a8e8ccf42876309960aed568e3f2261d40`.
 Both hardware result packets have SHA-256

@@ -1,5 +1,10 @@
 # A500 timing measurements and remaining work, 14-15 October 2026
 
+Latest line-mode follow-up: [16 October digital bus measurements](a500-bzero-bus-validation-2026-10-16.md).
+Several older C-dependent flag mismatches no longer reproduce after a cold
+power cycle and installation of the probes; the cause is not yet isolated.
+New kind33 captures retain repeatable shift/B-DMA BZERO differences.
+
 ## Scope and method
 
 Measurements used One ROM on the owner's PAL A500: 512 KiB chip RAM, 512 KiB
@@ -188,7 +193,7 @@ authorized or performed.
 
 ## Evidence inventory
 
-Capture folders are under the sibling `a500-irq-probe/captures` directory.
+Capture folders are under the sibling `amiga-hardware-probes/captures` directory.
 Immutable ROM/source bundles are under Copperline's ignored
 `tmp/timing-isolation`. The probe repository contains the builders, runner,
 checksum parser and portable comparison tests. Its detailed report is

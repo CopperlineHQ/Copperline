@@ -8876,7 +8876,7 @@ mod tests {
 
     #[test]
     fn copper_softint_wakes_stop_at_a500_hardware_beam_positions() -> Result<()> {
-        // a500-irq-probe: WAIT line 64 at sixteen horizontal phases, then
+        // amiga-hardware-probes: WAIT line 64 at sixteen horizontal phases, then
         // MOVE SET|SOFTINT to INTREQ. The first handler instruction copies
         // VHPOSR, exactly as on the physical 512K-chip/512K-slow A500.
         for phase in 0..16 {
