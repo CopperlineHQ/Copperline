@@ -25,7 +25,10 @@ impl App {
         self.netplay_input = Default::default();
         self.netplay_keyboard_controller = !spectator && self.mouse_port().is_none();
         self.netplay_catchup_notice = None;
-        self.mouse_delta_remainder = (0.0, 0.0);
+        self.forget_host_mouse_motion();
+        // Warp's input yield is the local window's pacing policy; a session
+        // paces itself, and a spectator's catch-up must run unthrottled.
+        self.emu.set_warp_input_yield(false);
         self.last_display_cursor_pos = None;
         self.show_osd(
             if spectator {
@@ -463,7 +466,7 @@ impl App {
                 if !focused {
                     self.middle_click_release_held = false;
                     self.set_mouse_captured(false);
-                    self.mouse_delta_remainder = (0.0, 0.0);
+                    self.forget_host_mouse_motion();
                     self.last_display_cursor_pos = None;
                     self.netplay_input = Default::default();
                     self.keyboard_joy_held = Default::default();

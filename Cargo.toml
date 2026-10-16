@@ -184,9 +184,9 @@ host-serial = ["dep:serialport"]
 [dependencies]
 m68k = { version = "0.14", features = ["serde"] }
 # The MT-32 synthesiser engine: our own port of Munt, pinned by revision.
-mt32-rs = { git = "https://github.com/CopperlineHQ/mt32-rs", rev = "ac00f818629a549a2712747660091e4f84d55599", optional = true }
+mt32-rs = { git = "https://github.com/CopperlineHQ/mt32-rs", rev = "aa54c40c232a826f3d6f117ac8a0b165e7571f32", optional = true }
 # The General MIDI synthesiser (Coppersynth), pinned by revision.
-coppersynth = { git = "https://github.com/CopperlineHQ/Coppersynth", rev = "38873e283aa9f2e6d2574d6c71e9a2cf9d0b42a2", optional = true }
+coppersynth = { git = "https://github.com/CopperlineHQ/Coppersynth", rev = "f86c54e399a68395e5ec3e1d5ef7771a882794f8", optional = true }
 pixels = { version = "0.17", optional = true }
 winit = { version = "0.30", optional = true }
 # egui 0.35 shares pixels 0.17's wgpu 29 device and command encoder.
@@ -242,7 +242,7 @@ symphonia-core = { version = "0.6.1", default-features = false, optional = true 
 # Safe incremental MPEG-1 video decoder used by the CD32 FMV module. The
 # serde feature snapshots prediction frames and partial bitstream state rather
 # than retaining and replaying the compressed stream on every save-state load.
-plmpeg = { git = "https://github.com/CopperlineHQ/plmpeg-rs", rev = "d020ba1015b48c0c646d32b16a27157623fff915", features = ["serde"], optional = true }
+plmpeg = { git = "https://github.com/CopperlineHQ/plmpeg-rs", rev = "0ae5fd3ac6392952ece2ddfc0f7875d6a6d7c839", features = ["serde"], optional = true }
 # In-process snapshots (reverse debugging, run-ahead, netplay rollback):
 # positional bincode, written and read by the same build only, so its wire
 # format is never a compatibility concern. Held on the 1.x serde API on
@@ -319,7 +319,7 @@ serialport = { version = "4.9", default-features = false, optional = true }
 # Rust, so it builds for wasm32 browser targets like the rest of the core.
 chd = "0.3"
 delharc = "0.8"
-zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.4", default-features = false, features = ["deflate"] }
 gif = "0.14"
 color_quant = "2.0"
 

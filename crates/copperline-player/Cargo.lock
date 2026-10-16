@@ -2000,9 +2000,9 @@ dependencies = [
 
 [[package]]
 name = "m68k"
-version = "0.14.5"
+version = "0.14.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04155e50c57d68ed5bf1a11fe7bb848f18f4bc3902878890a1a1e34715b3dffb"
+checksum = "a6e4f48ab35e05ea00285865cd57f8346657100655e4bd54c69725c32bfabe12"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
@@ -2751,7 +2751,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 [[package]]
 name = "plmpeg"
 version = "0.1.0"
-source = "git+https://github.com/CopperlineHQ/plmpeg-rs?rev=d020ba1015b48c0c646d32b16a27157623fff915#d020ba1015b48c0c646d32b16a27157623fff915"
+source = "git+https://github.com/CopperlineHQ/plmpeg-rs?rev=0ae5fd3ac6392952ece2ddfc0f7875d6a6d7c839#0ae5fd3ac6392952ece2ddfc0f7875d6a6d7c839"
 dependencies = [
  "serde",
  "serde-big-array",
@@ -4756,14 +4756,15 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "8.6.0"
+version = "9.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
+checksum = "a954114b47a54df49f83d2722814e86b23d4bb1b54a1b90fb7d92b41619ddc22"
 dependencies = [
  "crc32fast",
  "flate2",
  "indexmap",
  "memchr",
+ "nix",
  "typed-path",
  "zopfli",
 ]

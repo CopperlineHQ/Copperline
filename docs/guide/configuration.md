@@ -630,9 +630,10 @@ clock_mhz = 14.0    # optional; defaults to the model's stock speed
   builds), so, as a real 060 board's boot ROM does, Copperline disables
   it (PCR.DFP) on every reset and `68060.library` enables it once it has
   adapted the OS. Without the library the system runs with no FPU under
-  either setting. `fpu = false` on the 68060 models the LC/EC060: FP
-  instructions take the FPU-disabled exception (PCR.DFP), which an OS
-  handler can also use to enable and restart. The 68060's
+  either setting. `fpu = false` on the 68060 models the LC/EC060: its PCR
+  identifies the FPU-less part ($0431) and keeps PCR.DFP set even when
+  software clears it, so FP instructions always take the FPU-disabled
+  exception. The 68060's
   superscalar dual-issue and branch cache are modelled and activate when
   system software enables them (PCR.ESS and CACR.EBC, which `68060.library`
   does at boot); until then the chip runs scalar, as on real silicon.

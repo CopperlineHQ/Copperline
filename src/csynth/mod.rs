@@ -130,9 +130,10 @@ fn open_engine(path: &std::path::Path, mode: Mt32Mode) -> Result<coppersynth::en
             zip::ZipArchive::new(file).map_err(|e| anyhow!("{}: {e}", path.display()))?;
         let entry = (0..archive.len())
             .find(|&i| {
-                archive
-                    .by_index(i)
-                    .is_ok_and(|f| f.name().to_ascii_lowercase().ends_with(".sf2"))
+                archive.by_index(i).is_ok_and(|f| {
+                    f.name()
+                        .is_ok_and(|n| n.to_ascii_lowercase().ends_with(".sf2"))
+                })
             })
             .ok_or_else(|| anyhow!("{}: no .sf2 inside", path.display()))?;
         let mut reader = archive
