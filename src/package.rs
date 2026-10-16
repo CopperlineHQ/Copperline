@@ -195,7 +195,7 @@ pub fn read_first(path: &Path, want: impl Fn(&Path) -> bool) -> Result<Option<Ve
             let mut zip = open_zip(path)?;
             let found = (0..zip.len()).find_map(|i| {
                 let file = zip.by_index(i).ok()?;
-                let member = member_path(file.name())?;
+                let member = zip_member_path(&file)?;
                 (!file.is_dir() && wanted(&member)).then_some(i)
             });
             match found {
@@ -379,6 +379,17 @@ fn member_path(name: &str) -> Option<PathBuf> {
     (!out.as_os_str().is_empty()).then_some(out)
 }
 
+/// A ZIP member's path, or `None` if its name does not decode (a member
+/// flagged UTF-8 whose bytes are not) or does not pass `member_path`.
+fn zip_member_path<R: Read + ?Sized>(file: &zip::read::ZipFile<'_, R>) -> Option<PathBuf> {
+    member_path(&file.name().ok()?)
+}
+
+/// A ZIP member's raw name, lossily decoded, for a warning.
+fn zip_raw_name<R: Read + ?Sized>(file: &zip::read::ZipFile<'_, R>) -> String {
+    String::from_utf8_lossy(file.name_raw()).into_owned()
+}
+
 fn zip_names(path: &Path) -> Result<Vec<PathBuf>> {
     let mut zip = open_zip(path)?;
     let mut out = Vec::new();
@@ -389,12 +400,12 @@ fn zip_names(path: &Path) -> Result<Vec<PathBuf>> {
         if file.is_dir() {
             continue;
         }
-        match member_path(file.name()) {
+        match zip_member_path(&file) {
             Some(member) => out.push(member),
             None => log::warn!(
                 "whdload: {} has a member named {:?}, which is not a relative path; skipped",
                 path.display(),
-                file.name()
+                zip_raw_name(&file)
             ),
         }
     }
@@ -405,7 +416,7 @@ fn read_zip_member(path: &Path, member: &Path) -> Result<Vec<u8>> {
     let mut zip = open_zip(path)?;
     for i in 0..zip.len() {
         let mut file = zip.by_index(i)?;
-        if member_path(file.name()).as_deref() == Some(member) {
+        if zip_member_path(&file).as_deref() == Some(member) {
             let mut data = Vec::new();
             file.read_to_end(&mut data)?;
             return Ok(data);
@@ -424,11 +435,11 @@ fn extract_zip(archive: &Path, dest: &Path) -> Result<usize> {
         if file.is_dir() {
             continue;
         }
-        let Some(member) = member_path(file.name()) else {
+        let Some(member) = zip_member_path(&file) else {
             log::warn!(
                 "whdload: {} has a member named {:?}, which is not a relative path; skipped",
                 archive.display(),
-                file.name()
+                zip_raw_name(&file)
             );
             continue;
         };
