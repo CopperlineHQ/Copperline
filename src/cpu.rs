@@ -492,6 +492,8 @@ impl M68kMachine {
         cpu.address_mask = address_mask_for_model(cpu_model);
         // The 060 FPU (fitted or absent) is gated by PCR.DFP, which
         // `reset_cpu` sets on every reset -- including the one below.
+        // Without an FPU the core models the MC68LC060/MC68EC060: PCR
+        // identification $0431 and DFP held set against MOVEC writes.
         // A 68020/030 without an attached 68881/68882 routes cpID-1 F-line
         // opcodes to the Line-F exception inside the core. The precise path
         // additionally pre-empts them with `force_fpu_line_f_if_needed`
@@ -3567,9 +3569,10 @@ impl M68kMachine {
             // 68040. A 060 accelerator's boot ROM therefore disables the
             // FPU on every reset, and 68060.library re-enables it once it
             // has converted exec's context switch; model that firmware
-            // here. An FPU-less LC/EC060 presents the same way, so FP
-            // instructions take the format $4 FPU-disabled exception
-            // instead of the host's generic Line-F shim.
+            // here. An FPU-less LC/EC060 presents the same way (its core
+            // reset already sets DFP, and holds it), so FP instructions
+            // take the format $4 FPU-disabled exception instead of the
+            // host's generic Line-F shim.
             self.cpu.pcr |= m68k::PCR_DFP;
         }
         self.apply_cacr_updates();
@@ -8829,6 +8832,42 @@ mod tests {
             // A hardware reset re-runs the board firmware: DFP is set.
             machine.reset_after_bus_reset();
             assert_ne!(machine.cpu.pcr & m68k::PCR_DFP, 0, "after reset, fpu={fpu}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn m68lc060_pcr_reports_its_identification_and_holds_dfp() -> Result<()> {
+        // The FPU-less MC68LC060/MC68EC060 identifies as $0431 in
+        // PCR[31:16] (the full MC68060 is $0430) and has no FPU for a
+        // cleared DFP to enable: the bit stays set across MOVEC writes and
+        // resets, where the full part's DFP is software's to clear.
+        for (fpu, id) in [(true, 0x0430u32), (false, 0x0431)] {
+            let mut bus = test_bus_with_pc(0x0000_0100);
+            write_program(
+                &mut bus,
+                0x0000_0100,
+                &[
+                    0x7000, // MOVEQ #0,D0
+                    0x4E7B, 0x0808, // MOVEC D0,PCR (clear EDEBUG/DFP/ESS)
+                    0x4E7A, 0x1808, // MOVEC PCR,D1
+                ],
+            );
+            let mut machine = M68kMachine::new(bus, CpuModel::M68060, fpu)?;
+            // Identification in the high half, revision 1, DFP from reset.
+            let reset_pcr = (id << 16) | 0x0100 | m68k::PCR_DFP;
+            assert_eq!(machine.cpu.pcr, reset_pcr, "power-on, fpu={fpu}");
+
+            machine.step_slice(3)?;
+            let held = if fpu { 0 } else { m68k::PCR_DFP };
+            assert_eq!(
+                machine.cpu.d(1),
+                (id << 16) | 0x0100 | held,
+                "PCR after MOVEC clears it, fpu={fpu}"
+            );
+
+            machine.reset_after_bus_reset();
+            assert_eq!(machine.cpu.pcr, reset_pcr, "after reset, fpu={fpu}");
         }
         Ok(())
     }

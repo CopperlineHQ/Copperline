@@ -355,7 +355,9 @@ reset, and `68060.library` enables it once it has converted exec's
 context switch; Copperline sets DFP on every CPU reset to model that
 firmware (as WinUAE does), so without the library a 060 runs FPU-less,
 as on a real board. The LC/EC060 (`fpu = false`) presents the same way,
-which keeps its DFP across resets. FINT and FINTRZ are implemented in
+but as the part itself: PCR identifies it as $0431 (the full part is
+$0430) and DFP stays set across MOVEC writes and resets, so no software
+can enable the FPU it lacks. FINT and FINTRZ are implemented in
 silicon (only the 040 traps them). The MMU shares the 040's three-level
 walker and TC[15] enable; PTEST is gone (undefined F-line) and PLPAR/PLPAW translate
 an address into An, faulting with the format $4 frame.
@@ -391,9 +393,7 @@ rate; pairing across a folded branch is not modelled, and a branch
 folds only when a pairing window is open; the FSAVE EXCP frame is not
 generated (the softfloat FPU retires every operation completely); FPSR
 quotient-bit and denormal traps behave as on the other parts rather
-than through the 060's unsupported-data path. The LC/EC060 reports the
-full part's PCR identification ($0430 rather than $0431) and its DFP stays
-writable, so software that clears it gains an FPU the part lacks.
+than through the 060's unsupported-data path.
 
 ## 68020 timing
 

@@ -2000,9 +2000,9 @@ dependencies = [
 
 [[package]]
 name = "m68k"
-version = "0.14.5"
+version = "0.14.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04155e50c57d68ed5bf1a11fe7bb848f18f4bc3902878890a1a1e34715b3dffb"
+checksum = "a6e4f48ab35e05ea00285865cd57f8346657100655e4bd54c69725c32bfabe12"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
