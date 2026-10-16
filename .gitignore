@@ -27,8 +27,9 @@
 # Local asset directory for the ignored integration tests.
 /test-assets/
 
-# Local development checkout of the m68k core crate (the root build uses
-# the crates.io release; this tree is for working on the crate itself).
+# Optional local research checkout of m68k; production builds use the pinned
+# upstream Git revision in Cargo.toml.
+/vendor/m68k/
 /crates/m68k/
 
 # HRTMon cartridge image build output (the committed artifact is

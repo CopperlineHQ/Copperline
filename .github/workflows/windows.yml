@@ -82,8 +82,6 @@ jobs:
         # keep the working tree identical to the macOS/Linux jobs.
         run: git config --global core.autocrlf false
       - uses: actions/checkout@v7
-        with:
-          submodules: true
       - name: Ensure rustup
         # windows-latest ships rustup preinstalled; the windows-11-arm image
         # may not. Install the native rustup when it is absent so the
@@ -151,8 +149,6 @@ jobs:
         # comment there).
         run: git config --global core.autocrlf false
       - uses: actions/checkout@v7
-        with:
-          submodules: true
       - name: Ensure rustup
         # See the build job's identical step.
         shell: pwsh

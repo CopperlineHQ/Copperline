@@ -54,7 +54,6 @@ chmod +x Copperline-*.AppImage
 ### Building from source
 
 ```sh
-git submodule update --init
 cargo build --release
 ```
 

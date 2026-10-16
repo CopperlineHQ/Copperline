@@ -40,8 +40,6 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          submodules: true
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -96,8 +94,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          submodules: true
       - name: Install native build dependencies
         # ALSA (cpal) + udev (gilrs) headers; --all-features pulls in no
         # further native libraries on Linux.
@@ -143,8 +139,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          submodules: true
       - name: Install native build dependencies
         run: |
           sudo apt-get update
@@ -174,8 +168,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          submodules: true
       - name: Install native build dependencies
         run: |
           sudo apt-get update
@@ -221,8 +213,6 @@ jobs:
             manifest: crates/copperline-libretro/Cargo.toml
     steps:
       - uses: actions/checkout@v7
-        with:
-          submodules: true
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           manifest-path: ${{ matrix.manifest }}
@@ -459,8 +449,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          submodules: true
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -545,8 +533,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          submodules: true
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown

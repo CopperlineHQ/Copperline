@@ -111,7 +111,6 @@ converter](import-uae.md). Where they land depends on the package:
 ## Building from source
 
 ```sh
-git submodule update --init
 cargo build --release
 ```
 

@@ -47,8 +47,6 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-        with:
-          submodules: true
       - uses: dtolnay/rust-toolchain@stable
       - name: Install dependencies
         # Build: ALSA (cpal) + udev (gilrs). Runtime: software Vulkan (Mesa
