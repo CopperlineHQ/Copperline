@@ -2965,6 +2965,29 @@ fn cold_power_on_reset_clears_chip_ram_and_restores_overlay() {
 }
 
 #[test]
+fn fat_gary_coldboot_is_set_by_power_on_not_by_the_reset_line() {
+    // Kickstart clears COLDBOOT on every boot and reads it at the next reset
+    // to choose the warm (ExecBase-preserving) or cold path. Ctrl-Amiga-Amiga
+    // and the CPU RESET instruction are warm; only a power cycle is cold.
+    const COLDBOOT: u32 = crate::gary::GARY_BASE + 2;
+    let mut bus = empty_bus();
+    bus.attach_gary(crate::gary::Gary::new());
+    let coldboot = |bus: &Bus| bus.gary.as_ref().unwrap().read_byte(COLDBOOT) & 0x80;
+    assert_eq!(coldboot(&bus), 0x80, "the machine comes up cold");
+
+    bus.gary.as_mut().unwrap().write_byte(COLDBOOT, 0x00);
+    bus.reset_for_keyboard_reset();
+    assert_eq!(
+        coldboot(&bus),
+        0x00,
+        "keyboard / RESET-instruction reset is warm"
+    );
+
+    bus.power_on_reset();
+    assert_eq!(coldboot(&bus), 0x80, "a power cycle is cold");
+}
+
+#[test]
 fn cpu_reset_drives_external_floppy_reset_line() {
     let mut bus = empty_bus();
     bus.floppy.set_connected_drives([true, true, false, false]);

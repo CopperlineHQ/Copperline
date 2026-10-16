@@ -5566,6 +5566,11 @@ impl Bus {
     pub fn power_on_reset(&mut self) {
         self.mem.power_on_reset_with(self.ram_init);
         self.reset_for_keyboard_reset();
+        // The /RESET line leaves Gary's COLDBOOT latch alone; only a power
+        // cycle sets it, so Kickstart takes its cold path.
+        if let Some(gary) = self.gary.as_mut() {
+            gary.power_on_reset();
+        }
         // The warm-reset path above keeps a spinning disc's cached
         // lead-in; a power cycle stops the mechanism, so a mounted disc
         // pays the cold spin-up again.
