@@ -186,7 +186,7 @@ m68k = { version = "0.14", features = ["serde"] }
 # The MT-32 synthesiser engine: our own port of Munt, pinned by revision.
 mt32-rs = { git = "https://github.com/CopperlineHQ/mt32-rs", rev = "ac00f818629a549a2712747660091e4f84d55599", optional = true }
 # The General MIDI synthesiser (Coppersynth), pinned by revision.
-coppersynth = { git = "https://github.com/CopperlineHQ/Coppersynth", rev = "38873e283aa9f2e6d2574d6c71e9a2cf9d0b42a2", optional = true }
+coppersynth = { git = "https://github.com/CopperlineHQ/Coppersynth", rev = "cc94c623dea9eb289d85ff769a748d8136956a45", optional = true }
 pixels = { version = "0.17", optional = true }
 winit = { version = "0.30", optional = true }
 # egui 0.35 shares pixels 0.17's wgpu 29 device and command encoder.
@@ -319,7 +319,7 @@ serialport = { version = "4.9", default-features = false, optional = true }
 # Rust, so it builds for wasm32 browser targets like the rest of the core.
 chd = "0.3"
 delharc = "0.8"
-zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.4", default-features = false, features = ["deflate"] }
 gif = "0.14"
 color_quant = "2.0"
 
