@@ -516,12 +516,17 @@ BZERO update still run on the full inputs.
 
 One ROM measurements on the PAL A500 additionally show a register-texture
 (USEB clear) BZERO evaluation after the texture counter wraps from BSH=0
-to 15 between pixels. This evaluation uses the preceding pixel's shifted A
-and C holds and an effective B input of $ffff; it does not write a D word.
+to 15 between pixels. The model evaluates the preceding pixel's shifted A
+and C holds with B=$ffff; it does not write a D word. That B input fits the
+earlier selected cases, but is not a universal hardware rule: the
+[one-hot and minterm controls](a500-copper-blitter-followup-2026-10-17.md)
+find repeatable exceptions at effective A bits 13 and 11, despite matching
+destination data and direct-A flag controls.
 L2 evaluates those old holds before fetching the next C word, and L3
 exposes the queued clear. A blit starting at BSH=15 has no preceding pixel
 and does not trigger this check. Save states preserve the prior A hold and
-pending clear. B-DMA and other non-wrap effects remain unresolved; see the
+pending clear. The wrap-stage input/reduction exceptions, B-DMA and other
+non-wrap effects remain unresolved; see the
 [One ROM measurement report](a500-line-bzero-2026-10-15.md).
 
 The Bresenham error
