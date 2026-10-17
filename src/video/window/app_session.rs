@@ -1620,6 +1620,16 @@ impl App {
         )
     }
 
+    /// How the scheduled-screenshot capture above frames the rendered
+    /// field, for input stated in its pixels (`--mouse-to-after`,
+    /// `--pen-after`, recorded pen lines). Always the default capture's
+    /// framing, whatever `--native-screenshots` says. `None` before a
+    /// frame has been presented, and while an RTG board's frame is what a
+    /// screenshot shows.
+    pub(super) fn capture_field_map(&self) -> Option<super::present::CaptureFieldMap> {
+        capture_field_map_for(CaptureFramingInputs::of(self))
+    }
+
     pub(super) fn save_screenshot(&self, path: &std::path::Path) {
         self.save_screenshot_with_mode(path, self.native_screenshots);
     }
@@ -2013,4 +2023,58 @@ impl App {
             }
         }
     }
+}
+
+/// The presentation state a screenshot's framing depends on, copied out of
+/// the App so the framing can be resolved while another part of it is
+/// borrowed (the input recorder maps pen positions through it).
+#[derive(Clone, Copy)]
+pub(super) struct CaptureFramingInputs {
+    rtg: bool,
+    placement: Option<super::present::FieldPlacement>,
+    present_rows: usize,
+    present_width: usize,
+    overscan: Overscan,
+    tv_centre: crate::config::TvCentre,
+    tv_aperture_rows: Option<usize>,
+}
+
+impl CaptureFramingInputs {
+    pub(super) fn of(app: &App) -> Self {
+        Self {
+            rtg: app.rtg_present_dims.is_some(),
+            placement: app.present_placement,
+            present_rows: app.present_rows,
+            present_width: app.present_width,
+            overscan: app.overscan,
+            tv_centre: app.present_tv_centre,
+            tv_aperture_rows: app.present_tv_aperture_rows,
+        }
+    }
+}
+
+/// [`App::capture_field_map`] for framing inputs already copied out.
+pub(super) fn capture_field_map_for(
+    inputs: CaptureFramingInputs,
+) -> Option<super::present::CaptureFieldMap> {
+    if inputs.rtg {
+        return None;
+    }
+    let placement = inputs.placement?;
+    if crate::envcfg::flag("COPPERLINE_SHOT_RAW") {
+        // The raw-buffer capture (see `render_present_frame`).
+        return Some(super::present::CaptureFieldMap::presentation_buffer(
+            placement,
+            inputs.present_rows,
+            inputs.present_width,
+        ));
+    }
+    Some(super::present::CaptureFieldMap::new(
+        placement,
+        inputs.present_rows,
+        inputs.present_width,
+        inputs.overscan,
+        inputs.tv_centre,
+        inputs.tv_aperture_rows,
+    ))
 }

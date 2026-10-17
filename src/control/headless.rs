@@ -65,6 +65,7 @@ pub fn run(mut emu: Emulator, config: Config) -> Result<()> {
         .as_ref()
         .map(|_| InputRecorder::new(emu.bus().emulated_seconds()));
     let mut input = MachineInputState::new(recorder);
+    input.screenshot_framing = config.screenshot_framing;
 
     loop {
         let (stream, peer) = listener.accept().context("accepting control connection")?;

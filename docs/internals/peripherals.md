@@ -1284,9 +1284,11 @@ it, and on the board that pin is Agnus's LP input -- port 1's on the A1000
 (detected by the WCS at $FC0000), port 2's on the A500 and every later
 Amiga -- so `Bus::light_pen_wired_port` decides whether a fitted pen
 reaches the chip at all. The pen's glass position is kept in rendered-field
-coordinates (the space `sprite_framebuffer_origin`, `--mouse-to-after` and
-`input.mouse_to` share); at every frame start the bus maps it back
-through the renderer's comparator origin
+coordinates (the space `sprite_framebuffer_origin`, `input.mouse_to` and
+`capture.screenshot` share; `--pen-after`, `--mouse-to-after` and recorded
+`pen-after` lines are `--screenshot-after` pixels, mapped to and from the
+field through `present_common::CaptureFieldMap`); at every frame start the
+bus maps it back through the renderer's comparator origin
 (`bitplane::framebuffer_beam_position`) to the beam line and colour clock
 that paints that pixel and hands Agnus the target, and Agnus fires the
 latch as its counters sweep past that exact clock (`light_pen_sweep`),

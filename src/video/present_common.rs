@@ -207,59 +207,41 @@ pub fn post_process_rendered_field(
     overscan: Overscan,
 ) -> FieldPlacement {
     let canvas_width = FB_WIDTH * canvas_scale;
-    let field_rows = geometry.visible_lines.min(fb.len() / canvas_width);
-    // Vertical centring, optional full-overscan horizontal recentring, and the
-    // TV bezel mask are 15 kHz CRT concepts anchored to the standard PAL/NTSC
-    // window; a programmable scan defines its own window and presents in full,
-    // like a multisync monitor.
-    if !geometry.programmable {
-        // Standard scans always render the classic canvas pitch
-        // (`bitplane::canvas_scale_for`).
-        debug_assert_eq!(canvas_scale, 1);
-        center_present_frame_for_visible_start(fb, visible_start_vpos);
-        center_present_frame_horizontally(fb, h_shift);
-        if overscan == Overscan::Tv {
-            mask_present_frame_to_tv(fb, h_shift, standard_window_top_row(visible_start_vpos));
-        }
-        return FieldPlacement {
-            rows: field_rows,
-            canvas_scale,
-            map: PlacementMap::Standard {
-                y_offset: presentation_source_y_offset(visible_start_vpos),
-                h_shift,
-            },
-        };
-    }
-    let columns = if let Some((src_x0, src_w)) = presentation_h_window {
-        // A multisync monitor locks its horizontal deflection to the
-        // programmed sync pulse: the glass shows the line from the sync
-        // trailing edge to the next pulse, centring the picture the way
-        // the mode's own porches place it. The window is computed in
-        // classic-canvas pixels; scale it to this frame's pitch.
-        let (src_x0, src_w) = (src_x0 * canvas_scale as i32, src_w * canvas_scale as u32);
-        screenshot::stretch_rows_x_window(fb, canvas_width, field_rows, src_x0, src_w);
-        ColumnMap::Window { src_x0, src_w }
-    } else if geometry.line_cck != 227 {
-        // No programmed sync to anchor on: fall back to the time-linear
-        // whole-line map (each colour clock of this scan's shorter/longer
-        // line covers 227/line_cck of the glass a standard line's clock
-        // would).
-        screenshot::stretch_rows_x(fb, canvas_width, field_rows, geometry.line_cck, 227);
-        ColumnMap::Linear {
-            src_num: geometry.line_cck,
-            src_den: 227,
-        }
-    } else {
-        ColumnMap::Identity
-    };
-    let rows =
-        presentation_v_window_placement(field_rows, fb.len() / canvas_width, presentation_v_window);
-    place_presentation_v_window(fb, canvas_width, field_rows, rows);
-    FieldPlacement {
-        rows: rows.rows,
+    let placement = FieldPlacement::for_field(
+        geometry,
         canvas_scale,
-        map: PlacementMap::Programmable { columns, rows },
+        fb.len() / canvas_width,
+        presentation_h_window,
+        presentation_v_window,
+        visible_start_vpos,
+        h_shift,
+    );
+    let field_rows = geometry.visible_lines.min(fb.len() / canvas_width);
+    match placement.map {
+        PlacementMap::Standard { .. } => {
+            // Standard scans always render the classic canvas pitch
+            // (`bitplane::canvas_scale_for`).
+            debug_assert_eq!(canvas_scale, 1);
+            center_present_frame_for_visible_start(fb, visible_start_vpos);
+            center_present_frame_horizontally(fb, h_shift);
+            if overscan == Overscan::Tv {
+                mask_present_frame_to_tv(fb, h_shift, standard_window_top_row(visible_start_vpos));
+            }
+        }
+        PlacementMap::Programmable { columns, rows } => {
+            match columns {
+                ColumnMap::Window { src_x0, src_w } => {
+                    screenshot::stretch_rows_x_window(fb, canvas_width, field_rows, src_x0, src_w);
+                }
+                ColumnMap::Linear { src_num, src_den } => {
+                    screenshot::stretch_rows_x(fb, canvas_width, field_rows, src_num, src_den);
+                }
+                ColumnMap::Identity => {}
+            }
+            place_presentation_v_window(fb, canvas_width, field_rows, rows);
+        }
     }
+    placement
 }
 
 /// How [`post_process_rendered_field`] placed a rendered field on the
@@ -331,6 +313,65 @@ impl FieldPlacement {
         }
     }
 
+    /// How [`post_process_rendered_field`] places a field rendered with
+    /// this geometry into a `buffer_rows`-row canvas, decided from the
+    /// scan alone: the pixels do not enter into it. Frontends that keep no
+    /// presentation buffer of their own use it to know where a field
+    /// pixel would be presented.
+    pub fn for_field(
+        geometry: FrameGeometry,
+        canvas_scale: usize,
+        buffer_rows: usize,
+        presentation_h_window: Option<(i32, u32)>,
+        presentation_v_window: Option<(i32, u32)>,
+        visible_start_vpos: u32,
+        h_shift: usize,
+    ) -> Self {
+        let field_rows = geometry.visible_lines.min(buffer_rows);
+        // Vertical centring, optional full-overscan horizontal recentring,
+        // and the TV bezel mask are 15 kHz CRT concepts anchored to the
+        // standard PAL/NTSC window; a programmable scan defines its own
+        // window and presents in full, like a multisync monitor.
+        if !geometry.programmable {
+            return Self {
+                rows: field_rows,
+                canvas_scale,
+                map: PlacementMap::Standard {
+                    y_offset: presentation_source_y_offset(visible_start_vpos),
+                    h_shift,
+                },
+            };
+        }
+        let columns = if let Some((src_x0, src_w)) = presentation_h_window {
+            // A multisync monitor locks its horizontal deflection to the
+            // programmed sync pulse: the glass shows the line from the sync
+            // trailing edge to the next pulse, centring the picture the way
+            // the mode's own porches place it. The window is computed in
+            // classic-canvas pixels; scale it to this frame's pitch.
+            ColumnMap::Window {
+                src_x0: src_x0 * canvas_scale as i32,
+                src_w: src_w * canvas_scale as u32,
+            }
+        } else if geometry.line_cck != 227 {
+            // No programmed sync to anchor on: fall back to the time-linear
+            // whole-line map (each colour clock of this scan's shorter/longer
+            // line covers 227/line_cck of the glass a standard line's clock
+            // would).
+            ColumnMap::Linear {
+                src_num: geometry.line_cck,
+                src_den: 227,
+            }
+        } else {
+            ColumnMap::Identity
+        };
+        let rows = presentation_v_window_placement(field_rows, buffer_rows, presentation_v_window);
+        Self {
+            rows: rows.rows,
+            canvas_scale,
+            map: PlacementMap::Programmable { columns, rows },
+        }
+    }
+
     /// Follow a content envelope the renderer stated in field canvas
     /// space (`x` in hi-res-pitch pixels, `y` in rendered field rows)
     /// through this placement and onto the `present_rows`-row buffer the
@@ -395,8 +436,32 @@ impl FieldPlacement {
     /// buffer pixel that shows no field pixel: the centring bands, a
     /// programmable scan's blanked porches, or off the buffer.
     pub fn field_point(&self, x: usize, y: usize, present_rows: usize) -> Option<(i32, i32)> {
+        Some((self.field_column(x)?, self.field_row(y, present_rows)?))
+    }
+
+    /// The field column buffer column `x` shows: [`Self::field_point`]'s
+    /// horizontal half. The placement maps the two axes independently.
+    pub fn field_column(&self, x: usize) -> Option<i32> {
         let width = FB_WIDTH * self.canvas_scale;
-        if x >= width || y >= present_rows {
+        if x >= width {
+            return None;
+        }
+        match self.map {
+            PlacementMap::Standard { h_shift, .. } => {
+                let fx = x + h_shift;
+                (fx < width).then_some(fx as i32)
+            }
+            PlacementMap::Programmable { columns, .. } => {
+                let (src_x, _) = columns.source(x, width);
+                Some(src_x.min(width - 1) as i32)
+            }
+        }
+    }
+
+    /// The field row row `y` of a `present_rows`-row buffer shows:
+    /// [`Self::field_point`]'s vertical half.
+    pub fn field_row(&self, y: usize, present_rows: usize) -> Option<i32> {
+        if y >= present_rows {
             return None;
         }
         let row_scale = if present_rows >= 2 * self.rows { 2 } else { 1 };
@@ -405,21 +470,246 @@ impl FieldPlacement {
             return None;
         }
         match self.map {
-            PlacementMap::Standard { y_offset, h_shift } => {
-                let fx = x + h_shift;
-                let fy = placed_y.checked_sub(y_offset)?;
-                (fx < width).then_some((fx as i32, fy as i32))
+            PlacementMap::Standard { y_offset, .. } => {
+                placed_y.checked_sub(y_offset).map(|fy| fy as i32)
             }
-            PlacementMap::Programmable { columns, rows } => {
-                let (src_x, _) = columns.source(x, width);
+            PlacementMap::Programmable { rows, .. } => {
                 let fy = placed_y.checked_sub(rows.pad_top)?;
-                if fy >= rows.content_rows {
-                    return None;
-                }
-                Some((src_x.min(width - 1) as i32, (fy + rows.skip_top) as i32))
+                (fy < rows.content_rows).then_some((fy + rows.skip_top) as i32)
             }
         }
     }
+}
+
+/// Whether horizontal recentring is enabled. On unless COPPERLINE_HCENTER is
+/// set to a falsey value (0/false/off/no), so full-overscan presentation can
+/// show the standard display exactly as rendered when debugging alignment.
+pub fn hcenter_enabled() -> bool {
+    match crate::envcfg::var("COPPERLINE_HCENTER") {
+        Some(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
+        None => true,
+    }
+}
+
+/// The configured settings a screenshot's framing depends on, for a
+/// frontend that keeps no presentation state to read them back from
+/// ([`CaptureFieldMap::for_bus`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScreenshotFraming {
+    pub overscan: Overscan,
+    pub tv_centre: TvCentre,
+}
+
+/// The pixel grid a scheduled screenshot (`--screenshot-after`) is
+/// measured in, mapped onto the rendered field: the coordinates sprite 0,
+/// the light pen and the control protocol's `capture.screenshot` use.
+///
+/// A screenshot is the presentation buffer seen through the TV aperture
+/// (or scaled to the capture height), and the presentation buffer is the
+/// field moved through its [`FieldPlacement`]. Both steps map the two
+/// axes independently, so the map is kept as one lookup per capture
+/// column and one per capture row, each built from the same sampling
+/// arithmetic the capture itself uses: a screenshot pixel and the field
+/// pixel the map names for it cannot disagree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaptureFieldMap {
+    /// The field column each capture column shows, `None` for glass the
+    /// capture paints black.
+    columns: Vec<Option<i32>>,
+    /// The field row each capture row shows.
+    rows: Vec<Option<i32>>,
+}
+
+impl CaptureFieldMap {
+    /// The map for a presentation buffer of `present_rows` x
+    /// `present_width` holding a field placed by `placement`, captured
+    /// with `overscan`, `tv_centre` and the frame's resolved TV aperture
+    /// (the arguments the scheduled-screenshot capture takes).
+    pub fn new(
+        placement: FieldPlacement,
+        present_rows: usize,
+        present_width: usize,
+        overscan: Overscan,
+        tv_centre: TvCentre,
+        tv_aperture_rows: Option<usize>,
+    ) -> Self {
+        let field_row = |y: usize| placement.field_row(y, present_rows);
+        match tv_aperture_rows {
+            Some(aperture_rows) if overscan.is_tv() && present_width == FB_WIDTH => {
+                // The TV glass: the captured aperture's columns resampled
+                // onto the glass width (`tv_glass_sample` blends the two
+                // taps; the nearer one is the pixel shown), and the
+                // aperture's rows scaled onto the glass height.
+                let (x_off, y_off) = tv_centre_source_offset(tv_centre);
+                let columns = (0..FB_WIDTH)
+                    .map(|x| {
+                        let (i0, i1, frac) = tv_glass_column(x, x_off)?;
+                        placement.field_column(if frac >= 128 { i1 } else { i0 })
+                    })
+                    .collect();
+                let rows = (0..TV_GLASS_PRESENT_ROWS)
+                    .map(|y| {
+                        let crop_y =
+                            screenshot::scaled_source_row(y, aperture_rows, TV_GLASS_PRESENT_ROWS);
+                        let src_y = (TV_PRESENT_SOURCE_Y + crop_y)
+                            .min(present_rows.saturating_sub(1))
+                            as i32
+                            + y_off;
+                        usize::try_from(src_y).ok().and_then(field_row)
+                    })
+                    .collect();
+                Self { columns, rows }
+            }
+            _ => {
+                // The whole buffer, rows scaled to the capture height.
+                let out_rows = crate::video::capture_height() * present_width / FB_WIDTH;
+                Self {
+                    columns: (0..present_width)
+                        .map(|x| placement.field_column(x))
+                        .collect(),
+                    rows: (0..out_rows)
+                        .map(|y| {
+                            field_row(screenshot::scaled_source_row(y, present_rows, out_rows))
+                        })
+                        .collect(),
+                }
+            }
+        }
+    }
+
+    /// The map for a capture of the presentation buffer itself, with no
+    /// TV framing or row scaling (`COPPERLINE_SHOT_RAW`).
+    pub fn presentation_buffer(
+        placement: FieldPlacement,
+        present_rows: usize,
+        present_width: usize,
+    ) -> Self {
+        Self {
+            columns: (0..present_width)
+                .map(|x| placement.field_column(x))
+                .collect(),
+            rows: (0..present_rows)
+                .map(|y| placement.field_row(y, present_rows))
+                .collect(),
+        }
+    }
+
+    /// The map a frontend with no presentation pipeline of its own would
+    /// get for the bus's last completed field: the placement and aperture
+    /// decided from that field alone, with the presentation latches at
+    /// their power-on defaults (standard aperture, no recentring history,
+    /// no smart-centre trim). It agrees with the window's while the
+    /// display is steady. `None` while an RTG board drives the display,
+    /// since a screenshot then shows the board's frame.
+    pub fn for_bus(bus: &crate::bus::Bus, framing: ScreenshotFraming) -> Option<Self> {
+        let ScreenshotFraming {
+            overscan,
+            tv_centre,
+        } = framing;
+        if bus.rtg_active() {
+            return None;
+        }
+        let geometry = bus.frame_geometry();
+        let canvas_scale = bus.frame_canvas_scale();
+        let base = bus.frame_render_base();
+        let mut latch = PresentationLatch::default();
+        let h_shift = if hcenter_enabled() {
+            latch.presentation_h_shift(&base, overscan)
+        } else {
+            0
+        };
+        let placement = FieldPlacement::for_field(
+            geometry,
+            canvas_scale,
+            crate::video::MAX_CANVAS_PIXELS / (FB_WIDTH * canvas_scale),
+            bus.frame_presentation_h_window(),
+            bus.frame_presentation_v_window(),
+            bus.frame_visible_start_vpos(),
+            h_shift,
+        );
+        // The deinterlacer weaves or line-doubles every standard or laced
+        // field and passes a programmable progressive one through.
+        let lace = base.bplcon0 & 0x0004 != 0;
+        let present_rows = if lace || !geometry.programmable {
+            2 * placement.rows
+        } else {
+            placement.rows
+        };
+        let tv_aperture_rows =
+            latch.resolve_tv_aperture(standard_tv_aperture_frame(geometry, present_rows, &base));
+        Some(Self::new(
+            placement,
+            present_rows,
+            FB_WIDTH * canvas_scale,
+            overscan,
+            latch.tv_centre(overscan, tv_centre),
+            tv_aperture_rows,
+        ))
+    }
+
+    /// The capture's width and height.
+    pub fn size(&self) -> (usize, usize) {
+        (self.columns.len(), self.rows.len())
+    }
+
+    /// The rendered-field pixel capture pixel (`x`, `y`) shows, or `None`
+    /// for a pixel off the capture or on black glass that shows no field.
+    pub fn field_point(&self, x: i32, y: i32) -> Option<(i32, i32)> {
+        let column = *self.columns.get(usize::try_from(x).ok()?)?;
+        let row = *self.rows.get(usize::try_from(y).ok()?)?;
+        Some((column?, row?))
+    }
+
+    /// Where field pixel `field`'s top-left corner lands in the capture:
+    /// the first capture column and row that show it. A field pixel off
+    /// the captured picture (overscan the TV aperture crops) is placed
+    /// beyond the capture's edge at its own pitch, so a position just
+    /// outside the picture still reads as just outside it. `None` only for
+    /// a capture that shows no field at all.
+    pub fn capture_point(&self, field: (i32, i32)) -> Option<(i32, i32)> {
+        Some((
+            capture_index(&self.columns, field.0)?,
+            capture_index(&self.rows, field.1)?,
+        ))
+    }
+
+    /// Capture pixels per field pixel on each axis: a hi-res-pitch column
+    /// is about one TV-glass column, and a field row two.
+    pub fn scale(&self) -> (f64, f64) {
+        (axis_scale(&self.columns), axis_scale(&self.rows))
+    }
+}
+
+/// The capture pixels one axis of a [`CaptureFieldMap`] spends per field
+/// pixel: how many show the field, over the field span they show.
+fn axis_scale(axis: &[Option<i32>]) -> f64 {
+    let shown = axis.iter().flatten();
+    let (Some(lo), Some(hi)) = (shown.clone().min(), shown.clone().max()) else {
+        return 1.0;
+    };
+    shown.count() as f64 / f64::from(hi - lo + 1)
+}
+
+/// The first index of a monotonic capture axis that shows field
+/// coordinate `field` (or the first beyond it, when the resample skips
+/// it), extrapolated at the axis's own pitch off either end.
+fn capture_index(axis: &[Option<i32>], field: i32) -> Option<i32> {
+    let first = axis.iter().position(Option::is_some)?;
+    let last = axis.iter().rposition(Option::is_some)?;
+    let (lo, hi) = (axis[first]?, axis[last]?);
+    let scale = axis_scale(axis);
+    let index = if field < lo {
+        first as i32 - (f64::from(lo - field) * scale).round() as i32
+    } else if field > hi {
+        let hi_start = axis.iter().position(|&v| v == Some(hi))?;
+        hi_start as i32 + (f64::from(field - hi) * scale).round() as i32
+    } else {
+        axis.iter().position(|&v| v.is_some_and(|v| v >= field))? as i32
+    };
+    Some(index)
 }
 
 /// Where [`apply_presentation_v_window`] puts the captured rows of a
@@ -1524,6 +1814,49 @@ mod tests {
     /// change or the Kickstart boot blanks present for a few frames).
     fn blank_snapshot() -> RenderRegisterSnapshot {
         RenderRegisterSnapshot::default()
+    }
+
+    #[test]
+    fn a_tv_screenshot_pixel_maps_to_the_field_pixel_it_shows() {
+        // A standard PAL field presented line-doubled and captured through
+        // the default TV aperture: the 716x540 picture a scheduled
+        // screenshot saves.
+        let placement = FieldPlacement::standard(FB_HEIGHT, 0x1C, 0);
+        let tv = |tv_centre| {
+            CaptureFieldMap::new(
+                placement,
+                2 * FB_HEIGHT,
+                FB_WIDTH,
+                Overscan::Tv,
+                tv_centre,
+                Some(TV_PAL_PRESENT_HEIGHT),
+            )
+        };
+        let map = tv(TvCentre::default());
+        assert_eq!(map.size(), (FB_WIDTH, TV_GLASS_PRESENT_ROWS));
+        // A Workbench icon at screenshot (62, 230): the aperture starts 48
+        // columns into the field and resamples 668 of them onto 716, and
+        // starts 18 woven rows down with two rows per field line.
+        assert_eq!(map.field_point(62, 230), Some((106, 124)));
+        assert_eq!(map.capture_point((106, 124)), Some((62, 230)));
+        assert_eq!(map.field_point(0, 0), Some((48, 9)));
+        assert_eq!(map.capture_point((106, 10)), Some((62, 2)));
+        // A field line the aperture crops lands above the picture, at the
+        // capture's own pitch, so the servo still sees which way to go.
+        assert_eq!(map.capture_point((106, 0)), Some((62, -18)));
+        assert_eq!(map.field_point(-1, 5), None);
+        assert_eq!(map.field_point(FB_WIDTH as i32, 5), None);
+        let (sx, sy) = map.scale();
+        assert!((sx - FB_WIDTH as f64 / 668.0).abs() < 1e-9, "{sx}");
+        assert!((sy - 2.0).abs() < 1e-9, "{sy}");
+        // The H/V-centre nudge slides the aperture over the field: three
+        // lo-res pixels right and two lines up moves the picture, so the
+        // same screenshot pixel shows field pixels 6 columns left and 2
+        // lines down.
+        assert_eq!(
+            tv(TvCentre { h: 3, v: -2 }).field_point(62, 230),
+            Some((100, 126))
+        );
     }
 
     #[test]

@@ -444,7 +444,7 @@ impl FrameRect {
     }
 }
 
-/// Move the guest's pointer to an absolute presented-pixel position by
+/// Move the guest's pointer to an absolute `capture.screenshot` pixel by
 /// servoing relative mouse deltas until sprite 0 lands there; see
 /// [`crate::pointer`] for why absolute positioning has to be closed-loop.
 ///
@@ -459,27 +459,19 @@ pub fn mouse_to(
     max_frames: u32,
     mut inject: impl FnMut(&mut Emulator, InputAction),
 ) -> Result<Value, CtlError> {
+    // Frame-loop steps in a row that completed no field. The servo counts
+    // its budget in displayed fields, so a machine that stopped producing
+    // them would otherwise hold this loop forever; a running one completes
+    // a field every step or two.
+    const IDLE_STEP_LIMIT: u32 = 64;
     let mut servo = PointerServo::new(port, target, tolerance, max_frames);
+    let mut idle_steps = 0;
     loop {
         match servo.poll(emu.bus()) {
             ServoStep::Move { port, dx, dy } => {
                 inject(emu, InputAction::MouseMove { port, dx, dy });
-                emu.step_frame()
-                    .map_err(|e| CtlError::internal(format!("stepping the mouse servo: {e:#}")))?;
-                // step_frame reports Ok even when it ended early on a
-                // breakpoint or watch, so without this the servo would
-                // keep stepping and swallow the stop entirely. The stop
-                // stays pending for the normal path to surface.
-                if emu.machine.ui_debug_stop_pending() {
-                    return Err(CtlError::invalid_state(format!(
-                        "a debugger stop interrupted the pointer servo after {} frame(s); \
-                         the pointer is short of ({}, {})",
-                        servo.frames(),
-                        target.0,
-                        target.1,
-                    )));
-                }
             }
+            ServoStep::Wait => {}
             ServoStep::Arrived { x, y, frames } => {
                 return Ok(json!({
                     "x": x,
@@ -493,6 +485,34 @@ pub fn mouse_to(
             // Not converging is an error, not an "ok, but": a script that
             // carried on would click somewhere it did not intend to.
             ServoStep::Failed(why) => return Err(CtlError::invalid_state(why)),
+        }
+        let field = emu.bus().emulated_frames();
+        emu.step_frame()
+            .map_err(|e| CtlError::internal(format!("stepping the mouse servo: {e:#}")))?;
+        // step_frame reports Ok even when it ended early on a breakpoint
+        // or watch, so without this the servo would keep stepping and
+        // swallow the stop entirely. The stop stays pending for the normal
+        // path to surface.
+        if emu.machine.ui_debug_stop_pending() {
+            return Err(CtlError::invalid_state(format!(
+                "a debugger stop interrupted the pointer servo after {} frame(s); \
+                 the pointer is short of ({}, {})",
+                servo.frames(),
+                target.0,
+                target.1,
+            )));
+        }
+        if emu.bus().emulated_frames() == field {
+            idle_steps += 1;
+            if idle_steps >= IDLE_STEP_LIMIT {
+                return Err(CtlError::invalid_state(format!(
+                    "the machine completed no field in {IDLE_STEP_LIMIT} steps; \
+                     the pointer servo stopped short of ({}, {})",
+                    target.0, target.1,
+                )));
+            }
+        } else {
+            idle_steps = 0;
         }
     }
 }
@@ -740,7 +760,7 @@ pub enum HostOp {
     WarpSet {
         on: bool,
     },
-    /// Servo the guest pointer to an absolute presented-pixel position;
+    /// Servo the guest pointer to an absolute `capture.screenshot` pixel;
     /// see [`mouse_to`]. A host op because it both injects input and runs
     /// the machine, so each driver applies it through its own boundary.
     MouseTo {

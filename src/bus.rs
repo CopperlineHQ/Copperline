@@ -3155,9 +3155,12 @@ impl ParallelJoystick {
 /// Where the light pen's photodetector is held against the glass, in the
 /// rendered field's coordinates: `x` in hi-res-pitch columns (times the
 /// canvas scale of a 35 ns scan), `y` in beam lines from the frame's first
-/// visible line. This is the coordinate space `--mouse-to-after`,
-/// `input.mouse_to` and `sprite_framebuffer_origin` share, so a pen can
-/// be aimed at whatever a screenshot or the pointer sprite reports.
+/// visible line. This is the coordinate space `input.mouse_to`,
+/// `capture.screenshot` and `sprite_framebuffer_origin` share, so a pen
+/// can be aimed at whatever the control protocol's screenshot or the
+/// pointer sprite reports. `--pen-after` and `--mouse-to-after` take
+/// `--screenshot-after` pixels instead, mapped into this space through
+/// `present_common::CaptureFieldMap`.
 /// `None` is a pen off the glass (or capped): it sees no light and never
 /// pulses.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

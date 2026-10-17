@@ -5511,6 +5511,9 @@ const POINTER_COPPER_LIST: u32 = 0x0000_2000;
 /// Chip-RAM address of sprite 0's DMA list: control words, then one
 /// DATA/DATB pair per line, then the null control word.
 const POINTER_SPRITE_LIST: u32 = 0x0000_3000;
+/// Chip-RAM address of the fixture's blank playfield: one lo-res plane
+/// of zeros, which chip RAM already holds.
+const POINTER_PLAYFIELD: u32 = 0x0001_0000;
 /// Lines of sprite data in that list, and so the pointer's height.
 const POINTER_SPRITE_LINES: u16 = 8;
 
@@ -5712,12 +5715,37 @@ fn pointer_machine() -> (super::App, PointerFixture) {
 
     // The Copper list: reload SPR0PT for this field, then park. Without
     // it the channel would fetch from wherever the previous field's DMA
-    // left the pointer.
+    // left the pointer. It also runs a blank one-plane lo-res playfield
+    // in the standard display window -- Denise only shows sprites on
+    // lines bitplane DMA has opened the display on -- and paints the
+    // pointer (sprite colour 17) white on black, so a capture shows it.
     let copper_list = [
         0x0120, // MOVE SPR0PTH
         (POINTER_SPRITE_LIST >> 16) as u16,
         0x0122, // MOVE SPR0PTL
         POINTER_SPRITE_LIST as u16,
+        0x008E, // MOVE DIWSTRT
+        0x2C81,
+        0x0090, // MOVE DIWSTOP
+        0x2CC1,
+        0x0092, // MOVE DDFSTRT
+        0x0038,
+        0x0094, // MOVE DDFSTOP
+        0x00D0,
+        0x0100, // MOVE BPLCON0: one plane, colour
+        0x1200,
+        0x0108, // MOVE BPL1MOD
+        0x0000,
+        0x00E0, // MOVE BPL1PTH
+        (POINTER_PLAYFIELD >> 16) as u16,
+        0x00E2, // MOVE BPL1PTL
+        POINTER_PLAYFIELD as u16,
+        0x0096, // MOVE DMACON: SET|BPLEN
+        0x8100,
+        0x0180, // MOVE COLOR00
+        0x0000,
+        0x01A2, // MOVE COLOR17
+        0x0FFF,
         0xFFFF, // WAIT for a beam position that never comes: end of list
         0xFFFE,
     ];
@@ -5758,16 +5786,152 @@ fn step_fields(app: &mut super::App, fields: u64) {
 }
 
 /// Run the fixture until the hardware is painting sprite 0, and report
-/// where, in the presented-pixel coordinates the servo works in.
+/// where, in rendered-field coordinates (the control protocol's servo
+/// works in these; the scripted one in screenshot pixels).
 fn settle_pointer_machine(app: &mut super::App) -> (i32, i32) {
     step_fields(app, POINTER_SETTLE_FIELDS);
     crate::pointer::pointer_position(app.emu.bus())
         .expect("the fixture's Copper list re-arms sprite 0 every field")
 }
 
-/// Sprite 0's origin on the last completed field, as the servo reads it.
+/// Sprite 0's origin on the last completed field, in rendered-field
+/// coordinates (the control protocol's `capture.screenshot`).
 fn pointer_origin(app: &super::App) -> (i32, i32) {
     crate::pointer::pointer_position(app.emu.bus()).expect("sprite 0 is being drawn")
+}
+
+/// One pass of the headless frame loop: a `step_frame` quantum, that
+/// quantum's presentation, then the scheduled-input pass.
+fn frame_loop_pass(app: &mut super::App) {
+    app.emu.step_frame().expect("the pointer machine runs");
+    app.render_emulated_frame_if_needed();
+    app.fire_scheduled_events();
+}
+
+/// Present the last completed field, so a screenshot shows it.
+fn present_pointer_frame(app: &mut super::App) {
+    app.finish_render_for_current_frame();
+    assert!(
+        app.present_placement.is_some(),
+        "the field has been presented"
+    );
+}
+
+/// Sprite 0's origin in the pixels of a `--screenshot-after` capture of
+/// the presented frame: what `--mouse-to-after` steers.
+fn pointer_in_screenshot(app: &super::App) -> (i32, i32) {
+    app.capture_field_map()
+        .expect("a frame has been presented")
+        .capture_point(pointer_origin(app))
+        .expect("the capture shows the field")
+}
+
+/// The top-left of the white pointer in a scheduled capture of the
+/// presented frame, found by looking at the picture. The TV glass blends
+/// neighbouring columns, so a pixel counts as pointer when it is more
+/// white than black -- the column whose nearer tap is the sprite.
+fn pointer_drawn_in_screenshot(app: &super::App) -> (i32, i32) {
+    let image = app.capture_present_image();
+    let width = image.width as usize;
+    let lit: Vec<usize> = image
+        .pixels
+        .iter()
+        .enumerate()
+        .filter(|(_, px)| ((**px >> 8) & 0xFF) >= 0x80)
+        .map(|(i, _)| i)
+        .collect();
+    let x = lit.iter().map(|i| i % width).min();
+    let y = lit.iter().map(|i| i / width).min();
+    let (Some(x), Some(y)) = (x, y) else {
+        panic!("the capture shows no pointer");
+    };
+    (x as i32, y as i32)
+}
+
+/// The screenshot framings the pointer tests run under: the whole field,
+/// the TV aperture (the default), and the aperture nudged by the H/V
+/// centre controls.
+fn screenshot_framings() -> [crate::video::present_common::ScreenshotFraming; 3] {
+    use crate::config::{Overscan, TvCentre};
+    use crate::video::present_common::ScreenshotFraming;
+    [
+        ScreenshotFraming {
+            overscan: Overscan::Full,
+            tv_centre: TvCentre::default(),
+        },
+        ScreenshotFraming {
+            overscan: Overscan::Tv,
+            tv_centre: TvCentre::default(),
+        },
+        ScreenshotFraming {
+            overscan: Overscan::Tv,
+            tv_centre: TvCentre { h: 3, v: -2 },
+        },
+    ]
+}
+
+/// Present under `framing`, as the window would after the user (or the
+/// config) chose it.
+fn apply_screenshot_framing(
+    app: &mut super::App,
+    framing: crate::video::present_common::ScreenshotFraming,
+) {
+    app.apply_overscan(framing.overscan);
+    app.tv_centre = framing.tv_centre;
+    app.refresh_tv_centre();
+    present_pointer_frame(app);
+}
+
+#[test]
+fn the_pointer_servo_sees_the_pointer_where_a_screenshot_shows_it() {
+    // `--mouse-to-after` targets are read off `--screenshot-after`
+    // captures, which frame the rendered field through the TV aperture:
+    // rows doubled and cropped, columns resampled onto the glass. The
+    // servo's observation has to come through that same framing, or it
+    // steers somewhere other than where the picture says.
+    for framing in screenshot_framings() {
+        let (mut app, _fixture) = pointer_machine();
+        settle_pointer_machine(&mut app);
+        apply_screenshot_framing(&mut app, framing);
+        // Moves that keep the pointer inside the display window: Denise
+        // clips sprites to it, so a pointer left of DIWSTRT draws nothing.
+        for (dx, dy) in [(0, 0), (37, 21), (-20, 45), (100, -30)] {
+            app.emu.bus_mut().input.add_mouse_delta(0, dx, dy);
+            step_fields(&mut app, POINTER_RESPONSE_FIELDS);
+            present_pointer_frame(&mut app);
+            assert_eq!(
+                pointer_in_screenshot(&app),
+                pointer_drawn_in_screenshot(&app),
+                "{framing:?}, rendered-field origin {:?}",
+                pointer_origin(&app)
+            );
+            // And back: the screenshot pixel names the field pixel it shows.
+            let map = app.capture_field_map().unwrap();
+            let (x, y) = pointer_in_screenshot(&app);
+            assert_eq!(
+                map.field_point(x, y),
+                Some(pointer_origin(&app)),
+                "{framing:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_window_without_a_presentation_pipeline_frames_the_screenshot_the_same_way() {
+    // The headless control server records light-pen lines in screenshot
+    // pixels without presenting anything; its framing, decided from the
+    // field and the configured settings, must match the window's.
+    for framing in screenshot_framings() {
+        let (mut app, _fixture) = pointer_machine();
+        settle_pointer_machine(&mut app);
+        apply_screenshot_framing(&mut app, framing);
+        assert_eq!(
+            crate::video::present_common::CaptureFieldMap::for_bus(app.emu.bus(), framing),
+            app.capture_field_map(),
+            "{framing:?}"
+        );
+    }
 }
 
 #[test]
@@ -5828,7 +5992,9 @@ fn sprite_pointer_fixture_redraws_each_frame_via_copper_pointer_rewrite() {
 #[test]
 fn scripted_mouse_deltas_defer_to_a_steering_pointer_servo() {
     let (mut app, _fixture) = pointer_machine();
-    let (x0, y0) = settle_pointer_machine(&mut app);
+    settle_pointer_machine(&mut app);
+    present_pointer_frame(&mut app);
+    let (x0, y0) = pointer_in_screenshot(&app);
 
     // A --mouse-to-after target and a --mouse-after delta both due now.
     // The servo measures the pointer's response to its own counts to
@@ -5844,8 +6010,10 @@ fn scripted_mouse_deltas_defer_to_a_steering_pointer_servo() {
     loop {
         // The servo has to see what its previous delta did before
         // choosing the next, so the scheduled-event pass runs at the
-        // fixture's response cadence.
+        // fixture's response cadence, on a presented frame as the frame
+        // loop runs it.
         step_fields(&mut app, POINTER_RESPONSE_FIELDS);
+        present_pointer_frame(&mut app);
         app.fire_scheduled_events();
         if !app.scripted_pointer_target_active() {
             break;
@@ -5867,7 +6035,7 @@ fn scripted_mouse_deltas_defer_to_a_steering_pointer_servo() {
 
     // The servo arrived rather than being knocked off course, and the
     // pass it finished on released the deltas again.
-    let arrived = pointer_origin(&app);
+    let arrived = pointer_in_screenshot(&app);
     assert!(
         (arrived.0 - target.0).abs() <= crate::pointer::DEFAULT_TOLERANCE
             && (arrived.1 - target.1).abs() <= crate::pointer::DEFAULT_TOLERANCE,
@@ -5879,12 +6047,171 @@ fn scripted_mouse_deltas_defer_to_a_steering_pointer_servo() {
     );
 
     // The held-back delta then lands intact: 20 counts is 20 lo-res
-    // pixels, 40 columns of the presented canvas.
+    // pixels, 40 columns of the rendered field.
+    let arrived = pointer_origin(&app);
     step_fields(&mut app, POINTER_RESPONSE_FIELDS);
     assert_eq!(
         pointer_origin(&app),
         (arrived.0 + 40, arrived.1),
         "the deferred delta is applied, not dropped"
+    );
+}
+
+/// A scripted pointer target driven the way the headless frame loop
+/// drives it: one `step_frame` quantum, its presentation, then the
+/// scheduled-input pass. A quantum is an instruction budget rather than a
+/// field, so the servo is polled more or less often than once per field,
+/// and the guest only samples the counters at its next vertical blank --
+/// counts injected part-way through a field reach the display in the
+/// field after it. Reading that latency as a pointer that refused to move
+/// made the servo stack a second delta into the same field (wrapping the
+/// 8-bit counter) and give up after a couple of fields. The target is a
+/// screenshot pixel, under each framing a screenshot can have.
+#[test]
+fn scripted_pointer_target_converges_at_the_frame_loop_cadence() {
+    for framing in screenshot_framings() {
+        let (mut app, _fixture) = pointer_machine();
+        settle_pointer_machine(&mut app);
+        apply_screenshot_framing(&mut app, framing);
+        let (x0, y0) = pointer_in_screenshot(&app);
+        let target = (x0 + 300, y0 + 40);
+        app.arm_scripted_pointer_target(0.0, target.0, target.1, 0);
+
+        let start = app.emu.bus().emulated_frames();
+        loop {
+            frame_loop_pass(&mut app);
+            if !app.scripted_pointer_target_active() {
+                break;
+            }
+            assert!(
+                app.emu.bus().emulated_frames() - start
+                    <= u64::from(crate::pointer::DEFAULT_MAX_FRAMES),
+                "{framing:?}: the servo should finish inside its own frame budget"
+            );
+        }
+        present_pointer_frame(&mut app);
+        let arrived = pointer_in_screenshot(&app);
+        assert!(
+            (arrived.0 - target.0).abs() <= crate::pointer::DEFAULT_TOLERANCE
+                && (arrived.1 - target.1).abs() <= crate::pointer::DEFAULT_TOLERANCE,
+            "{framing:?}: servo stopped at {arrived:?}, wanted {target:?}"
+        );
+        // Where the picture shows it, not only where the map says.
+        assert_eq!(pointer_drawn_in_screenshot(&app), arrived, "{framing:?}");
+    }
+}
+
+#[test]
+fn a_scheduled_pen_position_is_a_screenshot_pixel() {
+    for framing in screenshot_framings() {
+        let (mut app, _fixture) = pointer_machine();
+        app.emu
+            .bus_mut()
+            .input
+            .set_port_device(1, crate::bus::PortDevice::LightPen);
+        settle_pointer_machine(&mut app);
+        apply_screenshot_framing(&mut app, framing);
+        let map = app.capture_field_map().expect("a frame has been presented");
+        app.auto_pens.push((0.0, 200, 150, None));
+        app.fire_scheduled_events();
+        let held = app.emu.bus().input.light_pen.position;
+        assert!(held.is_some(), "{framing:?}: the pixel shows the field");
+        assert_eq!(held, map.field_point(200, 150), "{framing:?}");
+        // A negative coordinate lifts the pen off the glass.
+        app.auto_pens.push((0.0, -1, -1, None));
+        app.fire_scheduled_events();
+        assert_eq!(app.emu.bus().input.light_pen.position, None);
+    }
+}
+
+#[test]
+fn a_scheduled_pen_position_waits_for_a_presented_frame() {
+    // A screenshot pixel means nothing before there is a screenshot; the
+    // position is held, not dropped or applied in the wrong space.
+    let (mut app, _fixture) = pointer_machine();
+    app.emu
+        .bus_mut()
+        .input
+        .set_port_device(1, crate::bus::PortDevice::LightPen);
+    app.auto_pens.push((0.0, 200, 150, None));
+    app.fire_scheduled_events();
+    assert_eq!(app.auto_pens.len(), 1, "held until a frame is presented");
+    assert_eq!(app.emu.bus().input.light_pen.position, None);
+    settle_pointer_machine(&mut app);
+    present_pointer_frame(&mut app);
+    app.fire_scheduled_events();
+    assert!(app.auto_pens.is_empty());
+    assert!(app.emu.bus().input.light_pen.position.is_some());
+}
+
+#[test]
+fn recorded_pen_lines_name_screenshot_pixels() {
+    let (mut app, _fixture) = pointer_machine();
+    app.emu
+        .bus_mut()
+        .input
+        .set_port_device(1, crate::bus::PortDevice::LightPen);
+    settle_pointer_machine(&mut app);
+    apply_screenshot_framing(&mut app, screenshot_framings()[1]);
+    app.input_recorder = Some(crate::inputrec::InputRecorder::new(
+        app.emu.bus().emulated_seconds(),
+    ));
+    app.fire_scheduled_events();
+    let field = (300, 120);
+    app.emu.bus_mut().input.set_light_pen_position(Some(field));
+    app.fire_scheduled_events();
+    let (x, y) = app
+        .capture_field_map()
+        .unwrap()
+        .capture_point(field)
+        .unwrap();
+    let script = app.input_recorder.take().unwrap().finish();
+    assert!(
+        script.contains(&format!(" {x} {y} 2\n")),
+        "pen at field {field:?} should record as screenshot ({x}, {y}): {script}"
+    );
+    // Replayed, that line puts the pen back on the same field pixel.
+    assert_eq!(
+        app.capture_field_map().unwrap().field_point(x, y),
+        Some(field)
+    );
+}
+
+/// The CCP `input.mouse_to` loop at its own cadence (one `step_frame` per
+/// step) against the same vertical-blank-sampling guest.
+#[cfg(feature = "control")]
+#[test]
+fn ccp_pointer_servo_converges_on_a_guest_that_answers_in_vertical_blank() {
+    let (mut app, _fixture) = pointer_machine();
+    let (x0, y0) = settle_pointer_machine(&mut app);
+    let target = (x0 + 200, y0 - 20);
+
+    let reply = crate::control::exec::mouse_to(
+        &mut app.emu,
+        0,
+        target,
+        crate::pointer::DEFAULT_TOLERANCE,
+        crate::pointer::DEFAULT_MAX_FRAMES,
+        |emu, action| {
+            if let crate::control::session::InputAction::MouseMove { port, dx, dy } = action {
+                emu.bus_mut().input.add_mouse_delta(port as usize, dx, dy);
+            }
+        },
+    )
+    .unwrap_or_else(|err| panic!("the servo should converge: {}", err.message));
+    let landed = (
+        reply["x"].as_i64().expect("x") as i32,
+        reply["y"].as_i64().expect("y") as i32,
+    );
+    assert!(
+        (landed.0 - target.0).abs() <= crate::pointer::DEFAULT_TOLERANCE
+            && (landed.1 - target.1).abs() <= crate::pointer::DEFAULT_TOLERANCE,
+        "servo reported {landed:?}, wanted {target:?}"
+    );
+    assert_eq!(
+        pointer_origin(&app),
+        landed,
+        "the reply is where the hardware is drawing the pointer"
     );
 }
 
@@ -9486,13 +9813,21 @@ mod control_drain {
     fn a_scripted_pointer_target_gives_up_when_no_sprite_pointer_exists() {
         let (mut app, _cmd_tx, _reply_rx) = attached_app();
         app.arm_scripted_pointer_target(0.0, 300, 120, 0);
-        // The NOP sled draws no sprites, so the first poll has nothing to
-        // observe. It must clear the servo rather than steering blind or
-        // retrying every frame for the rest of the run.
-        app.emu.step_frame().unwrap();
+        // The target is a screenshot pixel, so it waits for a presented
+        // frame. The NOP sled draws no sprites, so the first poll after
+        // that has nothing to observe. It must clear the servo rather than
+        // steering blind or retrying every frame for the rest of the run.
+        for _ in 0..8 {
+            app.emu.step_frame().unwrap();
+            app.finish_render_for_current_frame();
+            if app.present_placement.is_some() {
+                break;
+            }
+        }
+        assert!(app.present_placement.is_some(), "the sled presents a frame");
         app.fire_scheduled_events();
         assert!(
-            !app.scripted_pointer_target_active(),
+            !app.scripted_pointer_target_active() && app.auto_mouse_to.is_empty(),
             "a pointerless guest must not leave a servo armed"
         );
     }
