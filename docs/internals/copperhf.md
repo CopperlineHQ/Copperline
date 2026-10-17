@@ -166,9 +166,22 @@ The boot ROM contains an Exec device built from:
   unit. It returns with Z clear.
 
 `BeginIO` never calls `ReplyMsg` itself: it clears `IOF_QUICK`, writes 0 to
-`io_Error`, and rings `CHF_DOORBELL` with the request pointer as a single
-32-bit write. The request completes through the INT2 handler after the
-host worker has finished and the board applies its result.
+`io_Error`, marks the request `NT_MESSAGE`, and rings `CHF_DOORBELL` with the
+request pointer as a single 32-bit write. The request completes through the
+INT2 handler after the host worker has finished and the board applies its
+result.
+
+The `NT_MESSAGE` mark is what tells exec the request is in flight, since
+`WaitIO` and `CheckIO` look at `ln_Type` and nothing else. A request leaves
+`OpenDevice`, or its previous reply, as `NT_REPLYMSG`. Kickstart's `WaitIO`
+stops waiting as soon as it reads that and unlinks the request from its
+reply port. AROS's `SendIO`/`DoIO` clear the field, and its `WaitIO` only
+waits while it reads `NT_MESSAGE`. Left unmarked, `WaitIO` returns before
+the completion interrupt is taken. On Kickstart the unlink then follows a
+NULL `ln_Succ` on a fresh request and clears AbsExecBase at `$4`. Whether
+`WaitIO` gets there first depends only on how soon the CPU takes INT2, so a
+fast CPU can, and `[cpu] jit`, which takes interrupts only at batch
+boundaries, often does. A held `TD_ADDCHANGEINT` is marked the same way.
 
 `Open` fails with `TDERR_BadUnitNum` (32) unless the requested unit is
 below `CHF_UNITS` and its `CHF_UNIT_PRESENT` bit is set. That is the
