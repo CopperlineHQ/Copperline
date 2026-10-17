@@ -815,8 +815,20 @@ static void chf_mount_partition(struct ExecBase *_sysbase, struct Library *_expb
      * without this pad every M6-shaped RDB address-faults mid-mount, in
      * the *general* partition-mounting code, nothing FSHD/LSEG-specific.
      * Pad up to the next longword so this can never recur regardless of
-     * name length. */
-    namepad = (UBYTE)((4 - ((1 + (ULONG)namelen) & 3)) & 3);
+     * name length.
+     *
+     * Both BSTRs built here also carry a trailing NUL, which is why the
+     * pad is computed over 2 + namelen. Handlers use BADDR(bstr) + 1 as a
+     * C string: the ROM FastFileSystem passes BADDR(fssm_Device) + 1
+     * straight to OpenDevice. The device name used to be the last field
+     * of this allocation with no NUL, so with a 4-character partition
+     * name and a 16-entry DosEnvec (HDToolBox's defaults, 152 bytes, no
+     * AllocMem slack) the byte after it was the first byte of the next
+     * allocation -- the high byte of a pointer. In memory below 16 MB
+     * that byte is 0 and the name happened to terminate; in an A3000's
+     * or A4000's 32-bit RAM it is not, OpenDevice cannot find
+     * "copperhf.device" plus garbage, and the partition never mounts. */
+    namepad = (UBYTE)((4 - ((2 + (ULONG)namelen) & 3)) & 3);
 
     tablesize = env[0];
     if (tablesize > 19) /* pb_Environment[20]: indices 0..19 only */
@@ -829,9 +841,9 @@ static void chf_mount_partition(struct ExecBase *_sysbase, struct Library *_expb
     while (device_name[devnamelen] != '\0' && devnamelen < 200)
         devnamelen++;
 
-    allocsize = sizeof(struct DeviceNode) + 1 + namelen + namepad /* volume BSTR, longword-padded */
-                + sizeof(struct FileSysStartupMsg) + envwords * sizeof(ULONG) + 1 +
-                devnamelen; /* device-name BSTR */
+    allocsize = sizeof(struct DeviceNode) + 2 + namelen + namepad /* volume BSTR + NUL, padded */
+                + sizeof(struct FileSysStartupMsg) + envwords * sizeof(ULONG) + 2 +
+                devnamelen; /* device-name BSTR + NUL */
 
     mem = AllocMem(allocsize, MEMF_PUBLIC | MEMF_CLEAR);
     if (mem == NULL)
@@ -839,13 +851,14 @@ static void chf_mount_partition(struct ExecBase *_sysbase, struct Library *_expb
 
     dn = (struct DeviceNode *)mem;
     bname = mem + sizeof(struct DeviceNode);
-    fssm = (struct FileSysStartupMsg *)(bname + 1 + namelen + namepad);
+    fssm = (struct FileSysStartupMsg *)(bname + 2 + namelen + namepad);
     envcopy = (ULONG *)(fssm + 1);
     devbstr = (UBYTE *)(envcopy + envwords);
 
     bname[0] = namelen;
     for (i = 0; i < namelen; i++)
         bname[1 + i] = namebstr[1 + i];
+    bname[1 + namelen] = '\0';
 
     for (i = 0; i < envwords; i++)
         envcopy[i] = env[i];
@@ -858,6 +871,7 @@ static void chf_mount_partition(struct ExecBase *_sysbase, struct Library *_expb
     devbstr[0] = devnamelen;
     for (i = 0; i < devnamelen; i++)
         devbstr[1 + i] = device_name[i];
+    devbstr[1 + devnamelen] = '\0';
 
     fssm->fssm_Unit = unit;
     fssm->fssm_Device = MKBADDR(devbstr);

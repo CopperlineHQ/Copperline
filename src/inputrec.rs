@@ -19,7 +19,10 @@
 //!   buttons and quadrature counters (wrapped u8 deltas become
 //!   `mouse-after` lines), joystick/CD32-pad controls, or analogue pot
 //!   positions. Frame-rate granularity (~20 ms PAL) is the same
-//!   resolution the replay side schedules at.
+//!   resolution the replay side schedules at. Light-pen moves become
+//!   `pen-after` lines in `--screenshot-after` pixels, which is what
+//!   `--pen-after` replays; the bus holds the pen in rendered-field
+//!   coordinates, so the caller supplies the mapping between the two.
 //!
 //! Port tokens are emitted only when they differ from a directive's
 //! default port (`click-after`/`mouse-after` default to port 1,
@@ -255,8 +258,16 @@ impl InputRecorder {
     }
 
     /// Diff the live input state against the previous quantum, per port
-    /// and according to the device plugged into it.
-    pub fn observe(&mut self, input: &InputState, secs: f64) {
+    /// and according to the device plugged into it. `pen_to_screenshot`
+    /// maps a rendered-field light-pen position to the screenshot pixel a
+    /// `pen-after` line names; it is only called when the pen moved, and
+    /// a position it cannot map is recorded as the pen lifted.
+    pub fn observe(
+        &mut self,
+        input: &InputState,
+        secs: f64,
+        pen_to_screenshot: impl FnOnce((i32, i32)) -> Option<(i32, i32)>,
+    ) {
         self.last_secs = secs;
         let Some(prev) = self.prev.replace(*input) else {
             self.first_devices = Some([input.ports[0].device, input.ports[1].device]);
@@ -265,7 +276,11 @@ impl InputRecorder {
 
         if input.light_pen != prev.light_pen {
             if let Some(port) = input.light_pen_port() {
-                let (x, y) = input.light_pen.position.unwrap_or((-1, -1));
+                let (x, y) = input
+                    .light_pen
+                    .position
+                    .and_then(pen_to_screenshot)
+                    .unwrap_or((-1, -1));
                 self.lines.push((
                     secs,
                     format!("pen-after {} {x} {y} {}", fmt_secs(secs), port + 1),
@@ -422,9 +437,9 @@ mod tests {
     #[test]
     fn keys_still_held_at_stop_close_at_last_observed_time() {
         let mut rec = InputRecorder::new(0.0);
-        rec.observe(&base_input(), 2.0);
+        rec.observe(&base_input(), 2.0, Some);
         rec.record_key(0x60, true, 2.0);
-        rec.observe(&base_input(), 3.0);
+        rec.observe(&base_input(), 3.0, Some);
         let script = rec.finish();
         assert!(script.contains("key-after 2.000 0x60 1000"), "{script}");
     }
@@ -433,15 +448,15 @@ mod tests {
     fn mouse_motion_diffs_wrap_and_coalesce_per_observe() {
         let mut rec = InputRecorder::new(0.0);
         let mut input = base_input();
-        rec.observe(&input, 1.0);
+        rec.observe(&input, 1.0, Some);
         // Forward motion, including a wrap through 255 -> 2.
         input.ports[0].counter_x = 253;
         input.ports[0].counter_y = 10;
-        rec.observe(&input, 1.02);
+        rec.observe(&input, 1.02, Some);
         input.ports[0].counter_x = 2;
-        rec.observe(&input, 1.04);
+        rec.observe(&input, 1.04, Some);
         // No motion: no line.
-        rec.observe(&input, 1.06);
+        rec.observe(&input, 1.06, Some);
         let script = rec.finish();
         assert!(script.contains("mouse-after 1.020 -3 10"), "{script}");
         assert!(script.contains("mouse-after 1.040 5 0"), "{script}");
@@ -452,14 +467,14 @@ mod tests {
     fn buttons_and_pad_controls_pair_across_observes() {
         let mut rec = InputRecorder::new(0.0);
         let mut input = base_input();
-        rec.observe(&input, 5.0);
+        rec.observe(&input, 5.0, Some);
         input.ports[0].fire = true;
         input.ports[1].cd32_green = true;
-        rec.observe(&input, 5.5);
+        rec.observe(&input, 5.5, Some);
         input.ports[0].fire = false;
-        rec.observe(&input, 6.0);
+        rec.observe(&input, 6.0, Some);
         input.ports[1].cd32_green = false;
-        rec.observe(&input, 6.5);
+        rec.observe(&input, 6.5, Some);
         let script = rec.finish();
         assert!(script.contains("click-after 5.500 left 500"), "{script}");
         assert!(script.contains("joy-after 5.500 green 1000"), "{script}");
@@ -469,13 +484,13 @@ mod tests {
     fn default_wiring_emits_no_port_tokens_or_ports_header() {
         let mut rec = InputRecorder::new(0.0);
         let mut input = base_input();
-        rec.observe(&input, 1.0);
+        rec.observe(&input, 1.0, Some);
         input.ports[0].fire = true;
         input.ports[1].up = true;
-        rec.observe(&input, 1.5);
+        rec.observe(&input, 1.5, Some);
         input.ports[0].fire = false;
         input.ports[1].up = false;
-        rec.observe(&input, 2.0);
+        rec.observe(&input, 2.0, Some);
         let script = rec.finish();
         assert!(script.contains("click-after 1.500 left 500\n"), "{script}");
         assert!(script.contains("joy-after 1.500 up 500\n"), "{script}");
@@ -496,14 +511,14 @@ mod tests {
         let mut input = InputState::default();
         input.set_port_device(0, PortDevice::Joystick);
         input.set_port_device(1, PortDevice::Mouse);
-        rec.observe(&input, 1.0);
+        rec.observe(&input, 1.0, Some);
         input.ports[0].up = true;
         input.ports[1].fire = true;
         input.ports[1].counter_x = 7;
-        rec.observe(&input, 1.5);
+        rec.observe(&input, 1.5, Some);
         input.ports[0].up = false;
         input.ports[1].fire = false;
-        rec.observe(&input, 2.0);
+        rec.observe(&input, 2.0, Some);
         let script = rec.finish();
         assert!(
             script.contains("# ports: port1=joystick port2=mouse"),
@@ -519,11 +534,11 @@ mod tests {
         let mut rec = InputRecorder::new(0.0);
         let mut input = base_input();
         input.set_analogue(1, 128, 128);
-        rec.observe(&input, 1.0);
+        rec.observe(&input, 1.0, Some);
         input.set_analogue(1, 50, 200);
-        rec.observe(&input, 1.5);
+        rec.observe(&input, 1.5, Some);
         // Unchanged position: no line.
-        rec.observe(&input, 2.0);
+        rec.observe(&input, 2.0, Some);
         let script = rec.finish();
         assert!(script.contains("pot-after 1.500 50 200\n"), "{script}");
         assert_eq!(script.matches("pot-after").count(), 1, "{script}");
@@ -533,11 +548,11 @@ mod tests {
     fn hot_plug_closes_the_old_devices_open_holds() {
         let mut rec = InputRecorder::new(0.0);
         let mut input = base_input();
-        rec.observe(&input, 1.0);
+        rec.observe(&input, 1.0, Some);
         input.ports[1].fire = true;
-        rec.observe(&input, 1.5);
+        rec.observe(&input, 1.5, Some);
         input.set_port_device(1, PortDevice::Mouse);
-        rec.observe(&input, 2.0);
+        rec.observe(&input, 2.0, Some);
         let script = rec.finish();
         assert!(script.contains("joy-after 1.500 red 500"), "{script}");
     }
@@ -571,11 +586,11 @@ mod tests {
     fn output_is_sorted_by_event_time() {
         let mut rec = InputRecorder::new(0.0);
         let mut input = base_input();
-        rec.observe(&input, 1.0);
+        rec.observe(&input, 1.0, Some);
         rec.record_key(0x20, true, 9.0);
         rec.record_key(0x20, false, 9.5);
         input.ports[0].counter_x = 4;
-        rec.observe(&input, 2.0);
+        rec.observe(&input, 2.0, Some);
         let script = rec.finish();
         let mouse_pos = script.find("mouse-after").unwrap();
         let key_pos = script.find("key-after").unwrap();
@@ -588,18 +603,37 @@ mod tests {
         let mut input = base_input();
         input.set_parallel_adapter(true, [true, true]);
         input.set_port_device(0, PortDevice::LightPen);
-        rec.observe(&input, 1.0);
+        rec.observe(&input, 1.0, Some);
         input.set_joystick(3, false, false, true, false, true, false);
         input.set_light_pen_position(Some((300, 120)));
         input.set_mouse_button(0, 0, true);
-        rec.observe(&input, 1.5);
+        rec.observe(&input, 1.5, Some);
         input.set_joystick(3, false, false, false, false, false, false);
         input.set_mouse_button(0, 0, false);
-        rec.observe(&input, 2.0);
+        rec.observe(&input, 2.0, Some);
         let script = rec.finish();
         assert!(script.contains("joy-after 1.500 left 500 4"), "{script}");
         assert!(script.contains("joy-after 1.500 red 500 4"), "{script}");
         assert!(script.contains("pen-after 1.500 300 120 1"), "{script}");
         assert!(script.contains("click-after 1.500 left 500\n"), "{script}");
+    }
+
+    #[test]
+    fn pen_lines_are_written_in_screenshot_pixels() {
+        // The bus holds the pen in rendered-field coordinates; `pen-after`
+        // replays screenshot pixels, so each move goes through the
+        // caller's mapping, and one it cannot place reads as the pen off
+        // the glass rather than a position in the wrong space.
+        let mut rec = InputRecorder::new(0.0);
+        let mut input = base_input();
+        input.set_port_device(1, PortDevice::LightPen);
+        rec.observe(&input, 1.0, |_| unreachable!("the pen has not moved"));
+        input.set_light_pen_position(Some((300, 120)));
+        rec.observe(&input, 1.5, |(x, y)| Some((x - 48, 2 * y - 18)));
+        input.set_light_pen_position(Some((40, 4)));
+        rec.observe(&input, 2.0, |_| None);
+        let script = rec.finish();
+        assert!(script.contains("pen-after 1.500 252 222 2"), "{script}");
+        assert!(script.contains("pen-after 2.000 -1 -1 2"), "{script}");
     }
 }

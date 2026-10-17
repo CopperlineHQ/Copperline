@@ -160,15 +160,14 @@ fn build_rdsk_block(total_cyls: u32) -> Vec<u8> {
     b
 }
 
-/// One bootable partition, `DH0`, spanning cylinders 1..total_cyls-1.
-fn build_part_block(total_cyls: u32, dostype: u32) -> Vec<u8> {
+/// One bootable partition, `name`, spanning cylinders 1..total_cyls-1.
+fn build_part_block(total_cyls: u32, dostype: u32, name: &[u8]) -> Vec<u8> {
     let mut b = vec![0u8; SECTOR_SIZE];
     b[0..4].copy_from_slice(b"PART");
     put_be32(&mut b, 4, 64);
     put_be32(&mut b, 12, 7); // host id
     put_be32(&mut b, 16, !0); // next partition: none
     put_be32(&mut b, 20, 1); // flags: PBFB_BOOTABLE
-    let name = b"DH0";
     b[36] = name.len() as u8;
     b[37..37 + name.len()].copy_from_slice(name);
     let env: [u32; 17] = [
@@ -231,6 +230,11 @@ fn rdbless_image() -> Image {
 /// An explicit one-partition RDB (RDSK+PART cylinder 0, `DH0` on cylinders
 /// 1..N) wrapping the same OFS payload the RDB-less variant uses.
 fn rdb_image() -> Image {
+    rdb_image_named(b"DH0")
+}
+
+/// [`rdb_image`] with the partition called `name`.
+fn rdb_image_named(name: &[u8]) -> Image {
     let payload = build_ofs_payload();
     assert_eq!(payload.len() as u64 % CYL_BYTES, 0);
     let part_cyls = (payload.len() as u64 / CYL_BYTES) as u32;
@@ -239,7 +243,8 @@ fn rdb_image() -> Image {
 
     let mut bytes = vec![0u8; CYL_BYTES as usize + payload.len()];
     bytes[..SECTOR_SIZE].copy_from_slice(&build_rdsk_block(total_cyls));
-    bytes[SECTOR_SIZE..2 * SECTOR_SIZE].copy_from_slice(&build_part_block(total_cyls, dostype));
+    bytes[SECTOR_SIZE..2 * SECTOR_SIZE]
+        .copy_from_slice(&build_part_block(total_cyls, dostype, name));
     bytes[CYL_BYTES as usize..].copy_from_slice(&payload);
     let partition_sectors = payload.len() as u64 / SECTOR_SIZE as u64;
     Image {
@@ -369,6 +374,11 @@ fn scratch_dir(name: &str) -> PathBuf {
 /// actually mounted the unit's partition, autobooted from it, and ran its
 /// Startup-Sequence.
 fn run_mounter_test(tag: &str, image: &Image) {
+    run_mounter_test_on(tag, image, "");
+}
+
+/// [`run_mounter_test`] with `machine` (TOML sections) added to the config.
+fn run_mounter_test_on(tag: &str, image: &Image, machine: &str) {
     if cfg!(debug_assertions) {
         eprintln!(
             "skipping copperhf.device M3 mounter test ({tag}); run with --release \
@@ -394,7 +404,7 @@ fn run_mounter_test(tag: &str, image: &Image) {
     std::fs::write(
         &config,
         format!(
-            "rom = \"<bundled-aros>\"\n\n[copperhf]\nunit0 = {}\n",
+            "rom = \"<bundled-aros>\"\n\n{machine}[copperhf]\nunit0 = {}\n",
             toml_path(&image_path)
         ),
     )
@@ -453,6 +463,25 @@ fn aros_autoboots_from_rdb_image() {
 #[test]
 fn aros_autoboots_from_rdbless_image() {
     run_mounter_test("rdbless", &rdbless_image());
+}
+
+/// The filesystem opens the device through `BADDR(fssm_Device) + 1` used as
+/// a C string, so the mounter's device-name BSTR has to end in a NUL. A
+/// 4-character partition name with this 16-entry DosEnvec makes the
+/// mounter's allocation exactly 152 bytes, leaving no zeroed AllocMem slack
+/// after the name: without the NUL, the next byte is the first byte of the
+/// BootNode allocated straight after it. On the A3000 that memory is
+/// motherboard RAM at $07xxxxxx, so the byte is the non-zero high byte of a
+/// pointer, the name reads as "copperhf.device" plus garbage, and AROS's
+/// filesystem cannot open the device (the A1200 hides it: its pointers
+/// start with $00).
+#[test]
+fn aros_autoboots_from_four_char_partition_in_32bit_ram() {
+    run_mounter_test_on(
+        "rdb-32bit-ram",
+        &rdb_image_named(b"CDH0"),
+        "[machine]\nmodel = \"A3000\"\n\n",
+    );
 }
 
 /// [`find_bootmark`] must be a structural check, not a raw byte search: the

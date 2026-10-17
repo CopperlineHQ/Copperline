@@ -202,10 +202,12 @@ void resident_init(struct ExecBase *_sysbase __asm("a6"))
 
 /* Open(dev, ioreq, unitNumber, flags) -- register convention verbatim
  * from exec.doc's device-vector contract (A6=devbase, A1=ioreq, D0=unit,
- * D1=flags). Fails with IOERR_OPENFAIL unless unit < CHF_UNITS and the
- * matching CHF_UNIT_PRESENT bit is set (COPPERHF-DEVICE-PLAN.md's M2
- * spec); on success io_Unit is left holding the raw unit NUMBER, per this
- * device's io_Unit-is-not-a-pointer convention (copperhf_board.h). */
+ * D1=flags). Fails with TDERR_BadUnitNum unless unit < CHF_UNITS and the
+ * matching CHF_UNIT_PRESENT bit is set -- not IOERR_OPENFAIL, which a bus
+ * scanner takes to mean the whole driver is unusable (see
+ * CHF_TDERR_BADUNITNUM in copperhf_board.h); on success io_Unit is left
+ * holding the raw unit NUMBER, per this device's io_Unit-is-not-a-pointer
+ * convention (copperhf_board.h). */
 void dev_open(struct IOStdReq *ioreq __asm("a1"), ULONG unit __asm("d0"),
               ULONG flags __asm("d1"), struct CopperhfDevice *dev __asm("a6"))
 {
@@ -215,7 +217,7 @@ void dev_open(struct IOStdReq *ioreq __asm("a1"), ULONG unit __asm("d0"),
     UWORD present = *(volatile UWORD *)(board + CHF_UNIT_PRESENT);
 
     if (unit >= units || !(present & (1U << unit))) {
-        ioreq->io_Error = CHF_IOERR_OPENFAIL;
+        ioreq->io_Error = CHF_TDERR_BADUNITNUM;
         ioreq->io_Device = NULL;
         return;
     }
@@ -340,12 +342,15 @@ static void chf_do_devicequery(struct IOStdReq *ioreq, struct ExecBase *_sysbase
  * trackdisk.doc, "this command only returns when the handler is removed"
  * (TD_REMCHANGEINT), so it is always effectively asynchronous regardless
  * of what IOF_QUICK the caller passed in -- callers are required to use
- * SendIO(), never DoIO(), with this command. */
+ * SendIO(), never DoIO(), with this command. Marked NT_MESSAGE like a
+ * doorbell request (see dev_beginio), so CheckIO reports it in flight
+ * until TD_REMCHANGEINT replies it. */
 static void chf_do_addchangeint(struct IOStdReq *ioreq, struct CopperhfDevice *dev,
                                  struct ExecBase *_sysbase)
 {
     ioreq->io_Error = 0;
     ioreq->io_Flags &= ~IOF_QUICK;
+    ioreq->io_Message.mn_Node.ln_Type = NT_MESSAGE;
     Disable();
     AddTail(&dev->dev_ChangeInts, (struct Node *)ioreq);
     Enable();
@@ -581,7 +586,20 @@ void chf_post_dma(struct IOStdReq *ioreq)
  * pointer as a single 32-bit write (copperhf_board.h: "a single 32-bit
  * write commits immediately"). Never calls ReplyMsg on that path -- that
  * is int_handler.s's job once the completion actually shows up on
- * CHF_COMPLETE_GET. */
+ * CHF_COMPLETE_GET.
+ *
+ * A request sent to the doorbell is marked NT_MESSAGE first, the state
+ * PutMsg leaves a message in when a device queues it. Exec decides
+ * whether a request is still in flight from ln_Type alone: Kickstart's
+ * WaitIO stops waiting as soon as it reads NT_REPLYMSG and unlinks the
+ * request from its reply port, and AROS's WaitIO/CheckIO only wait while
+ * it reads NT_MESSAGE. A fresh request leaves OpenDevice as NT_REPLYMSG
+ * and a reused one still carries NT_REPLYMSG from its last reply, so
+ * without this WaitIO could return before INT2 replied the request. On
+ * Kickstart the unlink then follows a stale or NULL ln_Succ; a NULL one
+ * writes over AbsExecBase at $4. The window is the time between the
+ * doorbell and the completion interrupt being taken, so any CPU that
+ * reaches WaitIO first hits it. */
 void dev_beginio(struct IOStdReq *ioreq __asm("a1"), struct CopperhfDevice *dev __asm("a6"))
 {
     switch (ioreq->io_Command) {
@@ -600,7 +618,12 @@ void dev_beginio(struct IOStdReq *ioreq __asm("a1"), struct CopperhfDevice *dev 
 
     ioreq->io_Flags &= ~IOF_QUICK;
     ioreq->io_Error = 0;
+    ioreq->io_Message.mn_Node.ln_Type = NT_MESSAGE;
     chf_pre_dma(sysbase(), ioreq);
+    /* The host reads the request header at the doorbell write and can
+     * complete it at the next board tick: keep the plain stores above
+     * from being sunk past the volatile one. */
+    __asm__ __volatile__("" ::: "memory");
     *(volatile ULONG *)((UBYTE *)dev->dev_BoardBase + CHF_DOORBELL) = (ULONG)ioreq;
 }
 

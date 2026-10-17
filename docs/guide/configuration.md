@@ -1517,8 +1517,8 @@ Either port accepts any device, as on real hardware:
   trigger) is the port's third-button line (`POTxX`, read through
   `POTGOR`), since `/FIRx` is the pulse line itself. In the window the
   pen follows the host pointer over the display and a left click presses
-  the switch; headless, `--pen-after SECS X Y` holds it over a screen
-  pixel (in `--mouse-to-after` coordinates) and `--joy-after SECS red MS
+  the switch; headless, `--pen-after SECS X Y` holds it over a pixel of a
+  `--screenshot-after` capture and `--joy-after SECS red MS
   PORT` or `--click-after SECS left MS PORT` works the switch. The
   control protocol has `input.pen`.
 - `none` -- an empty port.

@@ -40,10 +40,12 @@ env_logger = "0.11"
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
 
-# The root manifest's chd patch (RUSTSEC-2026-0344); [patch] applies only at
-# a workspace root, so this standalone workspace repeats it. Remove together.
+# The root manifest's chd and pixels patches (RUSTSEC-2026-0344; the
+# unbounded surface-acquire retry, parasyte/pixels#462); [patch] applies only
+# at a workspace root, so this standalone workspace repeats them. Remove together.
 [patch.crates-io]
 chd = { git = "https://github.com/CopperlineHQ/chd-rs", rev = "a0170de589031c74dc7245c9dc05dade5d919dc6" }
+pixels = { git = "https://github.com/parasyte/pixels", rev = "c681486feaaaf413b2db5c7b57d342677f0dfd87" }
 
 [profile.release]
 opt-level = 3

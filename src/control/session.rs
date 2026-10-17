@@ -9,6 +9,7 @@ use crate::debugger::{BreakCond, MmioWatch, WatchAccess, WatchSource};
 use crate::emulator::Emulator;
 use crate::inputrec::InputRecorder;
 use crate::inputsched::{JoyState, ReplayAction};
+use crate::video::present_common::{CaptureFieldMap, ScreenshotFraming};
 use std::collections::BTreeMap;
 
 /// One installed break of any kind, as requested over the protocol.
@@ -106,6 +107,11 @@ pub struct MachineInputState {
     /// (`--record-input`). The windowed path journals through the App's
     /// recorder instead and leaves this `None`.
     pub recorder: Option<InputRecorder>,
+    /// How a `--screenshot-after` capture of this machine would be framed.
+    /// The recorder writes light-pen lines in those pixels, which is what
+    /// `--pen-after` replays, while `input.pen` positions arrive in
+    /// `capture.screenshot` (rendered-field) coordinates.
+    pub screenshot_framing: ScreenshotFraming,
 }
 
 impl MachineInputState {
@@ -113,6 +119,7 @@ impl MachineInputState {
         Self {
             scheduled: Vec::new(),
             recorder,
+            screenshot_framing: ScreenshotFraming::default(),
         }
     }
 
@@ -142,14 +149,14 @@ impl MachineInputState {
     pub fn apply_due_scheduled(&mut self, emu: &mut Emulator) {
         let now = emu.bus().emulated_seconds();
         for action in self.take_due(now) {
-            inject_input(emu, &mut self.recorder, action);
+            inject_input(emu, &mut self.recorder, self.screenshot_framing, action);
         }
     }
 
     /// Apply `action` now, journaled. Returns the emulated time it
     /// landed at.
     pub fn inject_now(&mut self, emu: &mut Emulator, action: InputAction) -> f64 {
-        inject_input(emu, &mut self.recorder, action)
+        inject_input(emu, &mut self.recorder, self.screenshot_framing, action)
     }
 
     /// Discard input aimed at the current emulated timeline. Used when
@@ -472,11 +479,13 @@ pub fn describe_spec(spec: &BreakSpec) -> String {
 }
 
 /// Apply one input action through the bus primitives, note it for
-/// reverse replay, and journal it in the recorder when one is active.
-/// Returns the emulated time the action landed at.
+/// reverse replay, and journal it in the recorder when one is active
+/// (light-pen lines in the pixels of a screenshot framed by
+/// `screenshot_framing`). Returns the emulated time the action landed at.
 pub fn inject_input(
     emu: &mut Emulator,
     recorder: &mut Option<InputRecorder>,
+    screenshot_framing: ScreenshotFraming,
     action: InputAction,
 ) -> f64 {
     let secs = emu.bus().emulated_seconds();
@@ -505,39 +514,48 @@ pub fn inject_input(
                 index,
                 pressed,
             });
-            observe_recorder(emu, recorder, secs);
+            observe_recorder(emu, recorder, screenshot_framing, secs);
         }
         InputAction::MouseMove { port, dx, dy } => {
             emu.bus_mut().input.add_mouse_delta(port as usize, dx, dy);
             emu.tt_note_input(ReplayAction::MouseMove { port, dx, dy });
-            observe_recorder(emu, recorder, secs);
+            observe_recorder(emu, recorder, screenshot_framing, secs);
         }
         InputAction::Joy { port, state: j } => {
             let input = &mut emu.bus_mut().input;
             input.set_joystick(port as usize, j.up, j.down, j.left, j.right, j.red, j.blue);
             input.set_cd32_buttons(port as usize, j.play, j.rwd, j.ffw, j.green, j.yellow);
             emu.tt_note_input(ReplayAction::Joy { port, state: j });
-            observe_recorder(emu, recorder, secs);
+            observe_recorder(emu, recorder, screenshot_framing, secs);
         }
         InputAction::Pot { port, x, y } => {
             emu.bus_mut().input.set_analogue(port as usize, x, y);
             emu.tt_note_input(ReplayAction::Pot { port, x, y });
-            observe_recorder(emu, recorder, secs);
+            observe_recorder(emu, recorder, screenshot_framing, secs);
         }
         InputAction::Pen { position } => {
             emu.bus_mut().input.set_light_pen_position(position);
             emu.tt_note_input(ReplayAction::Pen { position });
-            observe_recorder(emu, recorder, secs);
+            observe_recorder(emu, recorder, screenshot_framing, secs);
         }
     }
     secs
 }
 
 /// The recorder captures mouse/joystick state by diffing `InputState`
-/// snapshots (the same once-per-quantum pattern the window uses).
-fn observe_recorder(emu: &Emulator, recorder: &mut Option<InputRecorder>, secs: f64) {
+/// snapshots (the same once-per-quantum pattern the window uses). With no
+/// presentation pipeline here, a pen move is placed on the screenshot by
+/// the framing the window would give this field from power-on defaults.
+fn observe_recorder(
+    emu: &Emulator,
+    recorder: &mut Option<InputRecorder>,
+    screenshot_framing: ScreenshotFraming,
+    secs: f64,
+) {
     if let Some(rec) = recorder.as_mut() {
-        rec.observe(&emu.bus().input, secs);
+        rec.observe(&emu.bus().input, secs, |field| {
+            CaptureFieldMap::for_bus(emu.bus(), screenshot_framing)?.capture_point(field)
+        });
     }
 }
 

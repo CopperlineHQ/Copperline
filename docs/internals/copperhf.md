@@ -166,14 +166,33 @@ The boot ROM contains an Exec device built from:
   unit. It returns with Z clear.
 
 `BeginIO` never calls `ReplyMsg` itself: it clears `IOF_QUICK`, writes 0 to
-`io_Error`, and rings `CHF_DOORBELL` with the request pointer as a single
-32-bit write. The request completes through the INT2 handler after the
-host worker has finished and the board applies its result.
+`io_Error`, marks the request `NT_MESSAGE`, and rings `CHF_DOORBELL` with the
+request pointer as a single 32-bit write. The request completes through the
+INT2 handler after the host worker has finished and the board applies its
+result.
 
-`Open` fails with `IOERR_OPENFAIL` unless the requested unit is below
-`CHF_UNITS` and its `CHF_UNIT_PRESENT` bit is set; on success it sets
-`io_Unit` to the raw unit number, `io_Device` to the device base, and
-`io_Error` to 0. `Close` decrements the open count and never expunges:
+The `NT_MESSAGE` mark is what tells exec the request is in flight, since
+`WaitIO` and `CheckIO` look at `ln_Type` and nothing else. A request leaves
+`OpenDevice`, or its previous reply, as `NT_REPLYMSG`. Kickstart's `WaitIO`
+stops waiting as soon as it reads that and unlinks the request from its
+reply port. AROS's `SendIO`/`DoIO` clear the field, and its `WaitIO` only
+waits while it reads `NT_MESSAGE`. Left unmarked, `WaitIO` returns before
+the completion interrupt is taken. On Kickstart the unlink then follows a
+NULL `ln_Succ` on a fresh request and clears AbsExecBase at `$4`. Whether
+`WaitIO` gets there first depends only on how soon the CPU takes INT2, so a
+fast CPU can, and `[cpu] jit`, which takes interrupts only at batch
+boundaries, often does. A held `TD_ADDCHANGEINT` is marked the same way.
+
+`Open` fails with `TDERR_BadUnitNum` (32) unless the requested unit is
+below `CHF_UNITS` and its `CHF_UNIT_PRESENT` bit is set. That is the
+code `scsi.device` gives for a target that does not answer, and bus
+scanners depend on it. HDToolBox 3.1 opens every SCSI address and LUN
+in turn (unit `LUN * 10 + address`) and takes an `IOERR_OPENFAIL` (-1)
+from `OpenDevice` to mean the driver itself cannot be opened, abandoning
+the whole scan; answering -1 would hide every drive behind an empty
+unit 0, and every drive past unit 0, since unit 10 is probed next. On
+success `Open` sets `io_Unit` to the raw unit number, `io_Device` to the
+device base, and `io_Error` to 0. `Close` decrements the open count and never expunges:
 this is a ROM-resident device, so `Expunge` unconditionally refuses
 (returns 0) regardless of open count. `AbortIO` always reports
 `IOERR_NOCMD`; cancellation is not implemented, so queued work continues
@@ -260,6 +279,15 @@ mount and autoboot. A bare (RDB-less) hardfile reaches the guest wrapped
 in an RDB that the host synthesizes (`HardDriveImage::open` in
 `src/harddrive.rs`), so the mounter has no separate bare-partition path.
 
+The two BSTRs the mounter builds, the partition name (`dn_Name`) and the
+device name (`fssm_Device`), both end in a NUL. Filesystems use
+`BADDR(bstr) + 1` as a C string: the ROM FastFileSystem and AROS's AFFS
+pass the device name straight to `OpenDevice`. Without the NUL, the byte
+after the name was whatever the next allocation started with. In RAM above
+16 MB (an A3000's or A4000's motherboard RAM) that is the non-zero high
+byte of a pointer, so `OpenDevice` failed and the partition was listed in
+the boot menu but never mounted.
+
 Its I/O is polled (`chf_do_io` spins on `CHF_COMPLETE_GET`/`ACK` itself),
 which is why it runs before `int_handler.s` is installed: its request
 blocks have no reply port for the INT2 server to `ReplyMsg` to.
@@ -271,7 +299,8 @@ The integration matrix includes:
   checks over the bundled AROS ROM, covering an `OpenDevice` read/write
   round trip, the extended command set (NSD query, TD64, `HD_SCSICMD`,
   change interrupts and `TD_EJECT`) driven by a guest probe, RDB and
-  RDB-less autoboot, and `[copperhf]` machine wiring. The AROS-boot
+  RDB-less autoboot (including an A3000, whose RAM is above 16 MB), and
+  `[copperhf]` machine wiring. The AROS-boot
   suites skip themselves in debug builds.
 - `tests/copperhf_m6.rs`: bundled AROS and a synthetic LSEG fixture exercise
   filesystem registration, relocation, and partition-node construction

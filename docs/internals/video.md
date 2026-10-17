@@ -760,16 +760,33 @@ scale uniformly.
 Every redraw first re-syncs the surface to the host window's current size
 (`resync_surface_size`), rather than trusting the Resized event to have
 arrived first. `pixels` rebuilds its swapchain from the size the last
-`resize_surface` gave it, and retries the acquire in a loop with no bound,
-so a surface left behind by a resize the app has not seen yet is a hang and
-not a misdraw: a driver that rejects the mismatched extent (Mesa's X11
-Vulkan WSI answers `VK_ERROR_OUT_OF_DATE_KHR`) sends that loop round
-forever, and because it runs inside the event callback it also starves the
-Resized event that would have corrected the size. Entering or leaving
-fullscreen is the usual trigger: the window manager resizes the window a
-moment before the event is delivered. Both window kinds record the size
-their surface was configured with, and all resizes go through the wrappers
-that keep that record in step.
+`resize_surface` gave it, so a surface left behind by a resize the app has
+not seen yet is rejected by drivers that check the extent against the window
+(Mesa's X11 Vulkan WSI and the Windows Vulkan drivers answer
+`VK_ERROR_OUT_OF_DATE_KHR`). `pixels` 0.17.2 retried that acquire in a loop
+with no bound, so the stale size was a hang rather than a misdraw (issue
+#362, fullscreen toggles on X11); Copperline patches in the bounded retry
+from parasyte/pixels#462, which gives up after one reconfigure. Both window
+kinds record the size their surface was configured with, and all resizes go
+through the wrappers that keep that record in step.
+
+The present worker widens the gap between that check and the acquire: a
+frame is planned on the main thread and presented later, and on Windows the
+main thread pumps the modal size-move loop while the user drags an edge, so
+the window changes size under frames still queued. Before 0.17.2's loop was
+bounded this hung the window -- the worker rebuilt the swapchain at the
+stale size without end, while the main thread waited in
+`PresentWorker::reclaim` to apply the Resized event -- and the swapchain
+churn slowed the whole host. Each `PresentJob` therefore carries the surface
+size it was planned for, and the worker drops a job whose window has since
+changed size (`worker_surface_current`) instead of acquiring for it; the
+Resized behind the change reclaims the GPU side and reconfigures it, and the
+next frame is planned for the new size. A resize between the worker's check
+and the acquire is what the bounded retry is for: that present fails with
+an out-of-date surface, which is logged at debug level as a dropped frame
+(`log_present_error`). The worker cannot ask winit for the size on macOS
+(see above), where the Metal layer never reports a resized surface out of
+date.
 
 The frontend-independent half of this pass lives in
 `video/present_common.rs`: the post-render pipeline (vertical/horizontal
