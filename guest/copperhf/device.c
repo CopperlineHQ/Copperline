@@ -342,12 +342,15 @@ static void chf_do_devicequery(struct IOStdReq *ioreq, struct ExecBase *_sysbase
  * trackdisk.doc, "this command only returns when the handler is removed"
  * (TD_REMCHANGEINT), so it is always effectively asynchronous regardless
  * of what IOF_QUICK the caller passed in -- callers are required to use
- * SendIO(), never DoIO(), with this command. */
+ * SendIO(), never DoIO(), with this command. Marked NT_MESSAGE like a
+ * doorbell request (see dev_beginio), so CheckIO reports it in flight
+ * until TD_REMCHANGEINT replies it. */
 static void chf_do_addchangeint(struct IOStdReq *ioreq, struct CopperhfDevice *dev,
                                  struct ExecBase *_sysbase)
 {
     ioreq->io_Error = 0;
     ioreq->io_Flags &= ~IOF_QUICK;
+    ioreq->io_Message.mn_Node.ln_Type = NT_MESSAGE;
     Disable();
     AddTail(&dev->dev_ChangeInts, (struct Node *)ioreq);
     Enable();
@@ -583,7 +586,20 @@ void chf_post_dma(struct IOStdReq *ioreq)
  * pointer as a single 32-bit write (copperhf_board.h: "a single 32-bit
  * write commits immediately"). Never calls ReplyMsg on that path -- that
  * is int_handler.s's job once the completion actually shows up on
- * CHF_COMPLETE_GET. */
+ * CHF_COMPLETE_GET.
+ *
+ * A request sent to the doorbell is marked NT_MESSAGE first, the state
+ * PutMsg leaves a message in when a device queues it. Exec decides
+ * whether a request is still in flight from ln_Type alone: Kickstart's
+ * WaitIO stops waiting as soon as it reads NT_REPLYMSG and unlinks the
+ * request from its reply port, and AROS's WaitIO/CheckIO only wait while
+ * it reads NT_MESSAGE. A fresh request leaves OpenDevice as NT_REPLYMSG
+ * and a reused one still carries NT_REPLYMSG from its last reply, so
+ * without this WaitIO could return before INT2 replied the request. On
+ * Kickstart the unlink then follows a stale or NULL ln_Succ; a NULL one
+ * writes over AbsExecBase at $4. The window is the time between the
+ * doorbell and the completion interrupt being taken, so any CPU that
+ * reaches WaitIO first hits it. */
 void dev_beginio(struct IOStdReq *ioreq __asm("a1"), struct CopperhfDevice *dev __asm("a6"))
 {
     switch (ioreq->io_Command) {
@@ -602,7 +618,12 @@ void dev_beginio(struct IOStdReq *ioreq __asm("a1"), struct CopperhfDevice *dev 
 
     ioreq->io_Flags &= ~IOF_QUICK;
     ioreq->io_Error = 0;
+    ioreq->io_Message.mn_Node.ln_Type = NT_MESSAGE;
     chf_pre_dma(sysbase(), ioreq);
+    /* The host reads the request header at the doorbell write and can
+     * complete it at the next board tick: keep the plain stores above
+     * from being sunk past the volatile one. */
+    __asm__ __volatile__("" ::: "memory");
     *(volatile ULONG *)((UBYTE *)dev->dev_BoardBase + CHF_DOORBELL) = (ULONG)ioreq;
 }
 

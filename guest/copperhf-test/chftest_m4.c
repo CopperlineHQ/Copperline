@@ -23,6 +23,8 @@
 //   - OpenDevice on units with no drive behind them (an empty slot, and a
 //     SCSI scanner's LUN-encoded unit 10) failing with TDERR_BadUnitNum,
 //     never IOERR_OPENFAIL
+//   - a request the device has queued reading as in flight to CheckIO
+//     until its completion interrupt replies it
 //
 // One CMD_WRITE marker per subtest into unit 0, one block apart, so the
 // Rust test can report exactly which check failed rather than a single
@@ -101,6 +103,7 @@ _Static_assert(sizeof(struct SCSICmd) == 30, "sizeof(SCSICmd) == 30");
 #define BLK_CHANGEINT_STORY 8
 #define BLK_SCSI_SENSE 9
 #define BLK_OPEN_ABSENT 10
+#define BLK_INFLIGHT 11
 
 #define UNIT_EMPTY 2 /* a slot the host test leaves unattached */
 #define UNIT_LUN1 10 /* SCSI target 0, LUN 1 in scsi.device's numbering */
@@ -411,6 +414,32 @@ static BOOL test_open_absent(void)
     return open_fails_bad_unit(UNIT_EMPTY) && open_fails_bad_unit(UNIT_LUN1);
 }
 
+// A queued request must read as in flight until INT2 replies it: exec's
+// WaitIO and CheckIO judge that from ln_Type alone. Under Disable() the
+// completion interrupt cannot be taken, so whatever the board has done,
+// CheckIO straight after SendIO must still see the request in flight.
+// ln_Type starts at NT_REPLYMSG, the state a reused request is in after
+// its previous reply was collected (AROS's SendIO clears it to 0 instead,
+// which its CheckIO also reads as done). A device that leaves ln_Type
+// alone lets WaitIO return before the transfer, and on Kickstart unlink
+// the request through a stale ln_Succ.
+static BOOL test_inflight(void)
+{
+    struct IORequest *done;
+
+    req0->io_Command = CMD_READ;
+    req0->io_Length = BLOCK_SIZE;
+    req0->io_Data = readbuf;
+    req0->io_Offset = 0;
+    req0->io_Message.mn_Node.ln_Type = NT_REPLYMSG;
+    Disable();
+    SendIO((struct IORequest *)req0);
+    done = CheckIO((struct IORequest *)req0);
+    Enable();
+    WaitIO((struct IORequest *)req0);
+    return done == NULL && req0->io_Error == 0 && req0->io_Actual == BLOCK_SIZE;
+}
+
 // The change-interrupt story, on unit 1: TD_ADDCHANGEINT queues our
 // Interrupt and blocks (SendIO -- trackdisk.doc: "this command only
 // returns when the handler is removed"); TD_EJECT (io_Length 1) then bumps
@@ -422,6 +451,7 @@ static BOOL test_change_interrupt_story(void)
 {
     ULONG spins;
     BOOL fired;
+    BOOL held;
     struct Message *reply;
 
     change_interrupt.is_Node.ln_Type = NT_INTERRUPT;
@@ -435,6 +465,10 @@ static BOOL test_change_interrupt_story(void)
     addreq->io_Length = sizeof(struct Interrupt);
     addreq->io_Data = &change_interrupt;
     SendIO((struct IORequest *)addreq); /* never completes until REMCHANGEINT */
+    // Held by the device, so it must read as in flight (see test_inflight).
+    // Checked here but reported at the end, so a failure still runs the
+    // story through to the REMCHANGEINT that releases the request.
+    held = CheckIO((struct IORequest *)addreq) == NULL;
 
     req1->io_Command = CHF_CMD_TD_EJECT;
     req1->io_Length = 1; /* non-zero: eject (0 would be an "insert" no-op) */
@@ -470,7 +504,7 @@ static BOOL test_change_interrupt_story(void)
     req1->io_Command = CHF_CMD_TD_CHANGESTATE;
     req1->io_Length = 0;
     DoIO((struct IORequest *)req1);
-    return req1->io_Error == 0 && req1->io_Actual == 1;
+    return held && req1->io_Error == 0 && req1->io_Actual == 1;
 }
 
 int main(void)
@@ -522,6 +556,10 @@ int main(void)
                                     "M4-SENSE-BAD");
             all_ok &= write_marker(BLK_OPEN_ABSENT, test_open_absent(), "M4-OPENABS-OK",
                                     "M4-OPENABS-BAD");
+            // Last: against a device that gets this wrong, the early
+            // WaitIO return leaves a reply arriving later on port0.
+            all_ok &= write_marker(BLK_INFLIGHT, test_inflight(), "M4-INFLIGHT-OK",
+                                    "M4-INFLIGHT-BAD");
 
             // Flush every marker to the backing image before the host test
             // reads the file.
