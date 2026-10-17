@@ -142,20 +142,20 @@ pub struct CliArgs {
     /// per frame of recorded movement.
     pub mouse_after: Vec<(f32, i32, i32, u8)>,
     /// `--mouse-to-after SECS X Y [PORT]`: at SECS emulated seconds,
-    /// servo the guest pointer to presented-pixel (X, Y) -- the same
-    /// coordinates a screenshot is measured in -- by watching sprite 0
-    /// and correcting relative motion until it lands. PORT defaults to 1
-    /// (carried 0-based). See `src/pointer.rs` for why absolute pointer
-    /// positioning has to be closed-loop.
+    /// servo the guest pointer to pixel (X, Y) of a `--screenshot-after`
+    /// capture by watching sprite 0 and correcting relative motion until
+    /// it lands. PORT defaults to 1 (carried 0-based). See
+    /// `src/pointer.rs` for why absolute pointer positioning has to be
+    /// closed-loop.
     pub mouse_to_after: Vec<(f32, i32, i32, u8)>,
     /// `--pot-after SECS X Y [PORT]`: at SECS emulated seconds, set an
     /// analogue controller's stick/paddle position (each axis 0-255, the
     /// count POTxDAT latches). PORT defaults to 2 (carried 0-based).
     pub pot_after: Vec<(f32, u8, u8, u8)>,
     /// `--pen-after SECS X Y [PORT]`: at SECS emulated seconds, hold the
-    /// light pen over presented pixel (X, Y) -- the `--mouse-to-after`
-    /// coordinates -- or lift it off the glass with a negative
-    /// coordinate. PORT (carried 0-based) names the port the pen must be
+    /// light pen over pixel (X, Y) of a `--screenshot-after` capture --
+    /// the `--mouse-to-after` coordinates -- or lift it off the glass with
+    /// a negative coordinate. PORT (carried 0-based) names the port the pen must be
     /// in; `None` means whichever port has the pen.
     pub pen_after: Vec<(f32, i32, i32, Option<u8>)>,
     /// `--record-input PATH`: record every input event that reaches the

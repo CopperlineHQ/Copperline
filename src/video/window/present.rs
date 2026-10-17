@@ -1753,19 +1753,6 @@ pub(super) fn blend_rgba_over_opaque(dst: u32, sr: u32, sg: u32, sb: u32, sa: u3
     rgba(r, g, b)
 }
 
-/// Whether horizontal recentring is enabled. On unless COPPERLINE_HCENTER is
-/// set to a falsey value (0/false/off/no), so full-overscan presentation can
-/// show the standard display exactly as rendered when debugging alignment.
-pub(super) fn hcenter_enabled() -> bool {
-    match crate::envcfg::var("COPPERLINE_HCENTER") {
-        Some(v) => !matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "off" | "no"
-        ),
-        None => true,
-    }
-}
-
 /// Whether frames present from the present worker's thread
 /// (`COPPERLINE_THREADED_PRESENT`, default on).
 pub(super) fn threaded_present_enabled() -> bool {

@@ -423,7 +423,12 @@ impl App {
                     tolerance,
                     max_frames,
                     |emu, action| {
-                        crate::control::session::inject_input(emu, &mut None, action);
+                        crate::control::session::inject_input(
+                            emu,
+                            &mut None,
+                            Default::default(),
+                            action,
+                        );
                     },
                 ) {
                     Ok(value) => proto::ok_line(&id, value),

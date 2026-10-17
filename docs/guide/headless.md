@@ -242,9 +242,9 @@ timestamps. Every flag repeats:
 | `--click-after SECS BTN MS [PORT]` | Hold mouse button `left`, `right` or `middle` for MS (default port 1) |
 | `--joy-after SECS BTN MS [PORT]` | Hold a joystick/CD32-pad control for MS on port 1-4 (default port 2; 3 and 4 are the parallel-port adapter's sockets) |
 | `--mouse-after SECS DX DY [PORT]` | Move the mouse by a relative delta (DX, DY) (default port 1) |
-| `--mouse-to-after SECS X Y [PORT]` | Steer the sprite 0 pointer to screen pixel (X, Y) (default port 1) |
+| `--mouse-to-after SECS X Y [PORT]` | Steer the sprite 0 pointer to pixel (X, Y) of a `--screenshot-after` capture ([below](#pointing-at-the-screen)) (default port 1) |
 | `--pot-after SECS X Y [PORT]` | Set an analogue paddle/pot position, 0-255 per axis (default port 2) |
-| `--pen-after SECS X Y [PORT]` | Hold the light pen over pixel (X, Y), the `--mouse-to-after` coordinates; a negative coordinate lifts it off (default: the port with the pen) |
+| `--pen-after SECS X Y [PORT]` | Hold the light pen over pixel (X, Y) of a `--screenshot-after` capture, as `--mouse-to-after` takes; a negative coordinate lifts it off (default: the port with the pen) |
 | `--insert-disk-after SECS DFN PATH` | Insert a disk image into `df0`..`df3` |
 | `--defer-disk-insert SECS DFN` | Start with DFN empty and insert its configured disk at SECS |
 | `--insert-cd-after SECS PATH` | Swap the CD image (`.cue`, `.iso`, `.nrg`, `.chd`) in the machine's CD drive |
@@ -285,6 +285,30 @@ keeps its absolute timestamps under `--load-state`, and is available in
 same typing queue serves the control protocol's `input.type` and the
 window's *Paste as Keystrokes* action (`Cmd+Shift+V` / `Alt+Shift+V`, see
 [](ui.md)).
+
+(pointing-at-the-screen)=
+### Pointing at the screen
+
+`--mouse-to-after` and `--pen-after` take a position you can read straight
+off a `--screenshot-after` PNG: X and Y are pixels of that capture, framed
+as the run's `[video] overscan` and TV centre frame it (the default
+capture, not the `--native-screenshots` crop). Copperline maps the pixel
+back through the capture's framing to the rendered field before acting on
+it, so a target waits until the first frame has been presented. The
+control protocol's `input.mouse_to` and `input.pen` instead take the
+coordinates of its own `capture.screenshot`, which is the unframed field.
+
+The Amiga mouse reports relative motion only, so `--mouse-to-after` steers:
+it feeds mouse counts, watches where the hardware draws sprite 0 (the
+pointer), and corrects until the pointer lands within 2 pixels of the
+target. Software reads the mouse at vertical blank and moves the pointer
+in the next field, so each correction takes about two fields; a target
+across the screen typically arrives in 10 to 25 fields. Targets run one at
+a time in timestamp order, and one the pointer cannot reach within 60
+fields (or that it settles short of) logs a warning. A guest that draws
+its pointer into a bitplane rather than with sprite 0, or a display taken
+over by an RTG board, has no pointer to watch, and the target is dropped
+with a warning.
 
 A light pen (`[input] port1`/`port2 = "lightpen"`) is positioned with
 `--pen-after` and its tip switch / trigger is the port's `red` button in
@@ -350,6 +374,10 @@ To record an interactive session to a script file:
   (see [Recording input](ui.md#recording-input)).
 - Or launch with `--record-input /tmp/session.clscript`, which records the
   whole run and writes the file on exit.
+
+Mouse motion is recorded as relative `mouse-after` counts. Light-pen moves
+are recorded as `pen-after` lines in `--screenshot-after` pixels, so a
+replay holds the pen over the same picture position.
 
 ## Setting a deterministic real-time clock (RTC)
 

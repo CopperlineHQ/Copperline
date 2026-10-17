@@ -3799,10 +3799,30 @@ impl App {
         true
     }
 
-    /// Hold the light pen over presented pixel (`x`, `y`) -- or lift it
-    /// off the glass with a negative coordinate -- from `--pen-after` or
-    /// the control protocol. `port` names the port the pen must be in;
-    /// `None` takes whichever port has one.
+    /// `--pen-after`: hold the light pen over pixel (`x`, `y`) of a
+    /// `--screenshot-after` capture, or lift it off the glass with a
+    /// negative coordinate. The pixel goes back through the capture's
+    /// framing to the rendered-field pixel it shows; a pixel showing no
+    /// field (black glass past the raster) is a pen the beam never passes.
+    fn apply_scheduled_pen_target(&mut self, x: i32, y: i32, port: Option<u8>) {
+        let field = if x < 0 || y < 0 {
+            None
+        } else if let Some(map) = self.capture_field_map() {
+            let field = map.field_point(x, y);
+            info!("auto-pen: screenshot pixel ({x}, {y}) is rendered-field pixel {field:?}");
+            field
+        } else {
+            warn!("pen: the screenshot shows an RTG board's frame, so the pen is lifted");
+            None
+        };
+        let (x, y) = field.unwrap_or((-1, -1));
+        self.apply_scripted_pen_position(x, y, port);
+    }
+
+    /// Hold the light pen over rendered-field pixel (`x`, `y`) -- the
+    /// control protocol's `capture.screenshot` coordinates -- or lift it
+    /// off the glass with a negative coordinate. `port` names the port the
+    /// pen must be in; `None` takes whichever port has one.
     fn apply_scripted_pen_position(&mut self, x: i32, y: i32, port: Option<u8>) {
         let input = &mut self.emu.bus_mut().input;
         let pen_port = input.light_pen_port();
@@ -4375,17 +4395,23 @@ impl App {
         }
         // Fire any scheduled --pen-after light-pen positions (one-shot
         // each).
+        // Positions are screenshot pixels, which mean nothing until a frame
+        // has been presented. Every pen event waits for one, lifts
+        // included, and the due ones then apply in time order, so a lift
+        // scheduled after a placement cannot overtake it.
+        let presented = self.present_placement.is_some() || self.rtg_present_dims.is_some();
         let mut pen_sets = Vec::new();
         self.auto_pens.retain(|&(at, x, y, port)| {
-            if emu_secs >= at {
-                pen_sets.push((x, y, port));
+            if presented && emu_secs >= at {
+                pen_sets.push((at, x, y, port));
                 false
             } else {
                 true
             }
         });
-        for (x, y, port) in pen_sets {
-            self.apply_scripted_pen_position(x, y, port);
+        pen_sets.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (_, x, y, port) in pen_sets {
+            self.apply_scheduled_pen_target(x, y, port);
         }
         let mut disk_inserts = Vec::new();
         let mut disk_change_available = self.netplay.as_ref().is_none_or(|s| s.can_change_disk());
@@ -4446,8 +4472,14 @@ impl App {
         // timestamp. Skipped while the core is not advancing so paused
         // wall-clock time records nothing.
         if self.powered_on && !self.cpu_halted && !self.paused {
+            // Pen lines are written in screenshot pixels; the framing is
+            // copied out first so it can be resolved while the recorder is
+            // borrowed, and only when the pen actually moved.
+            let framing = app_session::CaptureFramingInputs::of(self);
             if let Some(rec) = self.input_recorder.as_mut() {
-                rec.observe(&self.emu.bus().input, emu_secs);
+                rec.observe(&self.emu.bus().input, emu_secs, |field| {
+                    app_session::capture_field_map_for(framing)?.capture_point(field)
+                });
             }
         }
     }

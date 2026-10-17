@@ -479,46 +479,93 @@ impl App {
     }
 
     /// Advance the scripted `--mouse-to-after` pointer targets: start the
-    /// next one that is due when nothing is steering, then give the
-    /// running servo this frame's correction.
+    /// next one that is due when nothing is steering, then let the
+    /// running servo look at the display.
     ///
-    /// One correction per frame is the servo's whole contract -- it has
-    /// to see what the previous delta did before choosing the next -- and
-    /// this runs once per emulated frame, in the same pass the other
-    /// scheduled input fires from.
+    /// Targets are pixels of a `--screenshot-after` capture, so the servo
+    /// steers in those: each poll maps sprite 0's rendered-field origin
+    /// through the capture's framing ([`Self::capture_field_map`]). A
+    /// target therefore waits for the first presented frame, and one that
+    /// falls due while an RTG board's frame is the screenshot is dropped,
+    /// since that picture has no sprite pointer.
+    ///
+    /// This runs on every pass of the frame loop, in the same pass the
+    /// other scheduled input fires from. A pass is an instruction budget
+    /// rather than a field, so the servo itself decides when there is
+    /// something new to see and a correction to make (`ServoStep::Wait`
+    /// otherwise).
     pub(super) fn advance_scripted_pointer_targets(&mut self, emu_secs: f64) {
-        if self.active_mouse_to.is_none() {
-            if let Some(pos) = self
+        let due = self.active_mouse_to.is_none()
+            && self.auto_mouse_to.iter().any(|&(at, ..)| emu_secs >= at);
+        if self.active_mouse_to.is_none() && !due {
+            return;
+        }
+        let Some(map) = self.capture_field_map() else {
+            if self.rtg_present_dims.is_some() {
+                if self.active_mouse_to.take().is_none() {
+                    if let Some(pos) = self
+                        .auto_mouse_to
+                        .iter()
+                        .position(|&(at, ..)| emu_secs >= at)
+                    {
+                        self.auto_mouse_to.remove(pos);
+                    }
+                }
+                warn!(
+                    "auto-mouse-to: the display is an RTG board's frame, which has no sprite \
+                     pointer to steer"
+                );
+            }
+            return;
+        };
+        if due {
+            let pos = self
                 .auto_mouse_to
                 .iter()
                 .position(|&(at, ..)| emu_secs >= at)
-            {
-                let (_, x, y, port) = self.auto_mouse_to.remove(pos);
+                .expect("a due target");
+            let (_, x, y, port) = self.auto_mouse_to.remove(pos);
+            info!(
+                "auto-mouse-to: steering the pointer to screenshot pixel ({x}, {y}) on port {}",
+                port + 1
+            );
+            if self.native_screenshots {
                 info!(
-                    "auto-mouse-to: steering the pointer to ({x}, {y}) on port {}",
-                    port + 1
+                    "auto-mouse-to: targets are measured in the default screenshot framing, \
+                     not the --native-screenshots crop"
                 );
-                self.active_mouse_to = Some(crate::pointer::PointerServo::new(
+            }
+            // Seed the learned ratio in screenshot pixels: a count moves a
+            // lo-res pointer two field columns and one field row.
+            let (sx, sy) = map.scale();
+            self.active_mouse_to = Some(
+                crate::pointer::PointerServo::new(
                     port,
                     (x, y),
                     crate::pointer::DEFAULT_TOLERANCE,
                     crate::pointer::DEFAULT_MAX_FRAMES,
-                ));
-            }
+                )
+                .with_gain((2.0 * sx, sy)),
+            );
         }
         let Some(servo) = self.active_mouse_to.as_mut() else {
             return;
         };
-        match servo.poll(self.emu.bus()) {
+        let bus = self.emu.bus();
+        let at = crate::pointer::pointer_position(bus).and_then(|field| map.capture_point(field));
+        match servo.poll_observed(bus.emulated_frames(), at) {
             crate::pointer::ServoStep::Move { port, dx, dy } => {
                 self.apply_scripted_mouse_delta(port, dx, dy);
             }
+            crate::pointer::ServoStep::Wait => {}
             crate::pointer::ServoStep::Arrived { x, y, frames } => {
-                info!("auto-mouse-to: pointer at ({x}, {y}) after {frames} frame(s)");
+                info!(
+                    "auto-mouse-to: pointer at screenshot pixel ({x}, {y}) after {frames} frame(s)"
+                );
                 self.active_mouse_to = None;
             }
             crate::pointer::ServoStep::Failed(why) => {
-                warn!("auto-mouse-to: {why}");
+                warn!("auto-mouse-to: {why} (screenshot pixels)");
                 self.active_mouse_to = None;
             }
         }

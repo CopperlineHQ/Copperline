@@ -112,9 +112,9 @@ repeat.
 | `--click-after SECS BUTTON MS [PORT]` | Mouse button (`left`/`right`/`middle`) for MS ms (default port 1) |
 | `--joy-after SECS BUTTON MS [PORT]` | Joystick / CD32-pad control (`up`/`down`/`left`/`right`/`red`/`blue`/...) on port 1-4 (default port 2; 3/4 = parallel-port adapter) |
 | `--mouse-after SECS DX DY [PORT]` | Relative mouse motion (default port 1) |
-| `--mouse-to-after SECS X Y [PORT]` | Steer the pointer to screen pixel (X, Y) via sprite 0 (default port 1) |
+| `--mouse-to-after SECS X Y [PORT]` | Steer the pointer via sprite 0 to pixel (X, Y) of a `--screenshot-after` capture (default port 1) |
 | `--pot-after SECS X Y [PORT]` | Analogue stick/paddle position, 0-255 per axis (default port 2) |
-| `--pen-after SECS X Y [PORT]` | Hold the light pen over screen pixel (X, Y) (`--mouse-to-after` coordinates; negative lifts it off); `--joy-after ... red` is its switch |
+| `--pen-after SECS X Y [PORT]` | Hold the light pen over pixel (X, Y) of a `--screenshot-after` capture (negative lifts it off); `--joy-after ... red` is its switch |
 | `--insert-disk-after SECS DFN PATH` | Insert a disk image into `df0`..`df3` |
 | `--insert-cd-after SECS PATH` | Swap the CD image in the machine's CD drive (CDTV/CD32/SCSI CD-ROM) |
 | `--expect-screenshot SECS PATH [TOL]` | Compare the frame at SECS with the PNG at PATH (TOL = fraction or pixel count); mismatch writes `<stem>.actual.png` + `<stem>.diff.png`, exit status 3 at run end |

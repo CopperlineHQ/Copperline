@@ -1222,6 +1222,15 @@ fn main() -> Result<()> {
         // The headless server owns the machine, so it journals
         // --record-input itself; windowed mode journals through the App.
         config.record_input = cli.record_input.clone();
+        // Its recorder writes light-pen lines in --screenshot-after pixels,
+        // so the capture geometry must be the one a replay will have: the
+        // resolved pixel aspect (capture height) and overscan, env
+        // overrides included, exactly as the window resolves them below.
+        video::set_pixel_aspect(config::resolve_pixel_aspect(cfg.pixel_aspect));
+        config.screenshot_framing = copperline::video::present_common::ScreenshotFraming {
+            overscan: copperline::config::resolve_overscan(cfg.overscan),
+            tv_centre: cfg.tv_centre,
+        };
         // --run + --control: the first resume stops the moment the guest
         // OS loads the program, like --gdb.
         config.stop_on_load = run_prog_name.clone();
@@ -2645,14 +2654,14 @@ mod tests {
         let mut rec = copperline::inputrec::InputRecorder::new(0.0);
         let mut input = copperline::bus::InputState::default();
         input.set_port_device(1, copperline::bus::PortDevice::Joystick);
-        rec.observe(&input, 1.0);
+        rec.observe(&input, 1.0, Some);
         rec.record_key(0x45, true, 1.5);
         rec.record_key(0x45, false, 1.75);
         input.ports[0].counter_x = 5;
         input.ports[0].fire = true;
-        rec.observe(&input, 2.0);
+        rec.observe(&input, 2.0, Some);
         input.ports[0].fire = false;
-        rec.observe(&input, 2.5);
+        rec.observe(&input, 2.5, Some);
         rec.record_disk_insert(0, Path::new("/tmp/demo.adf"), 3.0);
         let path = temp_script("roundtrip", &rec.finish());
 

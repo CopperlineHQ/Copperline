@@ -57,6 +57,10 @@ pub struct Config {
     /// startup, so the first resume stops the moment the guest OS loads
     /// it (before its first instruction), like `gdbstub::Config`.
     pub stop_on_load: Option<String>,
+    /// The machine's screenshot framing (`[video] overscan`, the TV
+    /// centre), so `--record-input` can write light-pen lines in the
+    /// pixels `--pen-after` replays.
+    pub screenshot_framing: crate::video::present_common::ScreenshotFraming,
     pub reverse_budget_mb: usize,
     pub reverse_interval_frames: u64,
 }
@@ -69,6 +73,7 @@ impl Config {
             info_file: None,
             record_input: None,
             stop_on_load: None,
+            screenshot_framing: Default::default(),
             reverse_budget_mb: crate::envcfg::var("COPPERLINE_DBG_RR_BUDGET_MB")
                 .and_then(|s| s.trim().parse::<usize>().ok())
                 .unwrap_or(crate::debugger::RR_DEFAULT_BUDGET_MB),
