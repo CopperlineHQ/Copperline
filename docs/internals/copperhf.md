@@ -279,6 +279,15 @@ mount and autoboot. A bare (RDB-less) hardfile reaches the guest wrapped
 in an RDB that the host synthesizes (`HardDriveImage::open` in
 `src/harddrive.rs`), so the mounter has no separate bare-partition path.
 
+The two BSTRs the mounter builds, the partition name (`dn_Name`) and the
+device name (`fssm_Device`), both end in a NUL. Filesystems use
+`BADDR(bstr) + 1` as a C string: the ROM FastFileSystem and AROS's AFFS
+pass the device name straight to `OpenDevice`. Without the NUL, the byte
+after the name was whatever the next allocation started with. In RAM above
+16 MB (an A3000's or A4000's motherboard RAM) that is the non-zero high
+byte of a pointer, so `OpenDevice` failed and the partition was listed in
+the boot menu but never mounted.
+
 Its I/O is polled (`chf_do_io` spins on `CHF_COMPLETE_GET`/`ACK` itself),
 which is why it runs before `int_handler.s` is installed: its request
 blocks have no reply port for the INT2 server to `ReplyMsg` to.
@@ -290,7 +299,8 @@ The integration matrix includes:
   checks over the bundled AROS ROM, covering an `OpenDevice` read/write
   round trip, the extended command set (NSD query, TD64, `HD_SCSICMD`,
   change interrupts and `TD_EJECT`) driven by a guest probe, RDB and
-  RDB-less autoboot, and `[copperhf]` machine wiring. The AROS-boot
+  RDB-less autoboot (including an A3000, whose RAM is above 16 MB), and
+  `[copperhf]` machine wiring. The AROS-boot
   suites skip themselves in debug builds.
 - `tests/copperhf_m6.rs`: bundled AROS and a synthetic LSEG fixture exercise
   filesystem registration, relocation, and partition-node construction
