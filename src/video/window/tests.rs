@@ -11407,6 +11407,52 @@ fn draw_re_applies_a_surface_size_the_window_has_moved_past() {
     assert_eq!(resize((1432, 1162), (0, 0)), Some((0, 0)));
 }
 
+/// The present worker acquires only for a window still at the size its job
+/// was planned for. On Windows the main thread pumps the modal size-move
+/// loop while the user drags, so the window changes size under frames still
+/// queued for the worker; acquiring against that surface had `pixels` rebuild
+/// the swapchain at the stale size without end, while the main thread waited
+/// on the worker to reclaim the GPU side -- the window hung and the
+/// swapchain churn slowed the whole host.
+#[test]
+fn present_worker_drops_a_frame_the_window_has_resized_past() {
+    let current = |planned, live: Option<(u32, u32)>| {
+        super::worker_surface_current(
+            planned,
+            live.map(|(w, h)| winit::dpi::PhysicalSize::new(w, h)),
+        )
+    };
+
+    // The window is where the job was planned: present it.
+    assert!(current((1432, 1162), Some((1432, 1162))));
+    // A drag moved either edge after the job was queued: drop it.
+    assert!(!current((1432, 1162), Some((1440, 1162))));
+    assert!(!current((1432, 1162), Some((1432, 1150))));
+    // Minimized under a queued frame: never present into a 0x0 window.
+    assert!(!current((1432, 1162), Some((0, 0))));
+    // Where the worker cannot ask the window (macOS), it presents as before.
+    assert!(current((1432, 1162), None));
+}
+
+/// A surface still out of date after `pixels`' one reconfigure is the race
+/// the worker's size check cannot close (a resize between the check and the
+/// acquire). It drops the frame quietly; every other present failure is still
+/// an error.
+#[test]
+fn an_out_of_date_surface_is_a_dropped_frame_not_an_error() {
+    use pixels::{Error, GetSurfaceError};
+    assert!(super::present_raced_a_resize(&Error::GetSurface(
+        GetSurfaceError::Outdated
+    )));
+    assert!(!super::present_raced_a_resize(&Error::GetSurface(
+        GetSurfaceError::Lost
+    )));
+    assert!(!super::present_raced_a_resize(&Error::GetSurface(
+        GetSurfaceError::Init
+    )));
+    assert!(!super::present_raced_a_resize(&Error::Validation));
+}
+
 // --- Performance overlay (issue #370) ---
 
 #[test]

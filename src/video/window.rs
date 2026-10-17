@@ -1991,6 +1991,11 @@ type PresentAfter<'a> =
 struct PresentJob {
     frame: Option<Vec<u8>>,
     emulated_frame: Option<u64>,
+    /// The surface size the draws were planned for, which is the size the
+    /// GPU side's surface is configured with when the worker gets the job:
+    /// only the main thread reconfigures it, and only after reclaiming the
+    /// GPU side, which waits out every job already queued.
+    surface: (u32, u32),
     draws: Vec<scaler::ScalerDraw>,
     pass: PresentPass,
     /// The presentation buffer for a display draw that samples it on the
@@ -2206,6 +2211,14 @@ fn worker_notify_window(window: &Arc<Window>) -> Option<&Window> {
     }
 }
 
+/// The host window's size as the present worker sees it, for
+/// `worker_surface_current`. None on macOS, where the worker must not call
+/// winit (see `worker_notify_window`) and the Metal layer never reports a
+/// resized surface out of date anyway.
+fn worker_live_size(window: &Window) -> Option<PhysicalSize<u32>> {
+    (!cfg!(target_os = "macos")).then(|| window.inner_size())
+}
+
 impl PresentWorker {
     fn new(window: Arc<Window>) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::sync_channel::<PresentCmd>(PRESENT_FRAMES_IN_FLIGHT + 2);
@@ -2221,9 +2234,11 @@ impl PresentWorker {
                         PresentCmd::Lend(gpu) => held = Some(gpu),
                         PresentCmd::Frame(job) => {
                             if let Some(gpu) = held.as_mut() {
-                                let notify = worker_notify_window(&window);
-                                if let Err(e) = present_job(gpu, notify, &job, None, None) {
-                                    error!("pixels.render: {e}");
+                                if worker_surface_current(job.surface, worker_live_size(&window)) {
+                                    let notify = worker_notify_window(&window);
+                                    if let Err(e) = present_job(gpu, notify, &job, None, None) {
+                                        log_present_error(&e);
+                                    }
                                 }
                             }
                             let back = PresentBack::Frame {
@@ -5988,6 +6003,7 @@ impl ApplicationHandler for App {
                         let mut job = PresentJob {
                             frame: worker_frame,
                             emulated_frame: self.last_rendered_emulated_frame,
+                            surface: surface_size,
                             draws,
                             pass,
                             picture,
@@ -6026,7 +6042,7 @@ impl ApplicationHandler for App {
                                     Err(_) => present_job(gpu, Some(&window), &job, after, None),
                                 };
                                 if let Err(e) = &result {
-                                    error!("pixels.render: {e}");
+                                    log_present_error(e);
                                 }
                                 if let Some(path) = capture_path {
                                     let saved =

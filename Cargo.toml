@@ -460,6 +460,15 @@ wat = "1"
 # (https://github.com/SnowflakePowered/chd-rs/pull/23).
 [patch.crates-io]
 chd = { git = "https://github.com/CopperlineHQ/chd-rs", rev = "a0170de589031c74dc7245c9dc05dade5d919dc6" }
+# pixels 0.17.2's render_with retries a failed surface acquire in a loop with
+# no bound, reconfiguring from its cached surface size each time. When that
+# size is stale the loop never ends: on Windows with Vulkan, a resize landing
+# while the present worker holds a frame spins it forever rebuilding the
+# swapchain, and the main thread hangs waiting to reclaim the GPU side. This
+# revision is 0.17.2 plus upstream's bounded retry (parasyte/pixels#462) and
+# an examples-only clippy pass. crates/copperline-player and fuzz carry the
+# same patch. Remove all of them once a pixels release includes #462.
+pixels = { git = "https://github.com/parasyte/pixels", rev = "c681486feaaaf413b2db5c7b57d342677f0dfd87" }
 
 [lints.clippy]
 # Chipset pipeline functions take per-signal argument lists that mirror the
