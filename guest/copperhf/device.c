@@ -202,10 +202,12 @@ void resident_init(struct ExecBase *_sysbase __asm("a6"))
 
 /* Open(dev, ioreq, unitNumber, flags) -- register convention verbatim
  * from exec.doc's device-vector contract (A6=devbase, A1=ioreq, D0=unit,
- * D1=flags). Fails with IOERR_OPENFAIL unless unit < CHF_UNITS and the
- * matching CHF_UNIT_PRESENT bit is set (COPPERHF-DEVICE-PLAN.md's M2
- * spec); on success io_Unit is left holding the raw unit NUMBER, per this
- * device's io_Unit-is-not-a-pointer convention (copperhf_board.h). */
+ * D1=flags). Fails with TDERR_BadUnitNum unless unit < CHF_UNITS and the
+ * matching CHF_UNIT_PRESENT bit is set -- not IOERR_OPENFAIL, which a bus
+ * scanner takes to mean the whole driver is unusable (see
+ * CHF_TDERR_BADUNITNUM in copperhf_board.h); on success io_Unit is left
+ * holding the raw unit NUMBER, per this device's io_Unit-is-not-a-pointer
+ * convention (copperhf_board.h). */
 void dev_open(struct IOStdReq *ioreq __asm("a1"), ULONG unit __asm("d0"),
               ULONG flags __asm("d1"), struct CopperhfDevice *dev __asm("a6"))
 {
@@ -215,7 +217,7 @@ void dev_open(struct IOStdReq *ioreq __asm("a1"), ULONG unit __asm("d0"),
     UWORD present = *(volatile UWORD *)(board + CHF_UNIT_PRESENT);
 
     if (unit >= units || !(present & (1U << unit))) {
-        ioreq->io_Error = CHF_IOERR_OPENFAIL;
+        ioreq->io_Error = CHF_TDERR_BADUNITNUM;
         ioreq->io_Device = NULL;
         return;
     }

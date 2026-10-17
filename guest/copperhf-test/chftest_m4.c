@@ -20,6 +20,9 @@
 //     completes on its own), TD_EJECT (io_Length 1), poll the Interrupt's
 //     is_Code flag, TD_REMCHANGEINT (which both completes the removal and
 //     ReplyMsg's the held ADDCHANGEINT)
+//   - OpenDevice on units with no drive behind them (an empty slot, and a
+//     SCSI scanner's LUN-encoded unit 10) failing with TDERR_BadUnitNum,
+//     never IOERR_OPENFAIL
 //
 // One CMD_WRITE marker per subtest into unit 0, one block apart, so the
 // Rust test can report exactly which check failed rather than a single
@@ -40,6 +43,7 @@
 #include <exec/nodes.h>
 #include <devices/newstyle.h>
 #include <devices/scsidisk.h>
+#include <devices/trackdisk.h>
 #include <proto/exec.h>
 #include <clib/alib_protos.h>
 #include <stddef.h>
@@ -96,6 +100,10 @@ _Static_assert(sizeof(struct SCSICmd) == 30, "sizeof(SCSICmd) == 30");
 #define BLK_SCSI_READCAP 7
 #define BLK_CHANGEINT_STORY 8
 #define BLK_SCSI_SENSE 9
+#define BLK_OPEN_ABSENT 10
+
+#define UNIT_EMPTY 2 /* a slot the host test leaves unattached */
+#define UNIT_LUN1 10 /* SCSI target 0, LUN 1 in scsi.device's numbering */
 
 static struct MsgPort *port0;
 static struct IOStdReq *req0; /* unit 0: DoIO round trips */
@@ -379,6 +387,30 @@ static BOOL test_scsi_readcap(void)
     return block_len == BLOCK_SIZE;
 }
 
+// OpenDevice on a unit with no drive must fail with TDERR_BadUnitNum, the
+// scsi.device answer for an empty target. IOERR_OPENFAIL (-1) is wrong here:
+// HDToolBox 3.1 stops its whole bus scan at the first OpenDevice that
+// returns it, and scans unit 10 (target 0, LUN 1) straight after unit 0.
+static BOOL open_fails_bad_unit(ULONG unit)
+{
+    struct IOStdReq *probe;
+    BYTE err;
+
+    probe = (struct IOStdReq *)CreateExtIO(port0, sizeof(struct IOStdReq));
+    if (!probe)
+        return FALSE;
+    err = OpenDevice((CONST_STRPTR) "copperhf.device", unit, (struct IORequest *)probe, 0);
+    if (err == 0)
+        CloseDevice((struct IORequest *)probe);
+    DeleteExtIO((struct IORequest *)probe);
+    return err == TDERR_BadUnitNum;
+}
+
+static BOOL test_open_absent(void)
+{
+    return open_fails_bad_unit(UNIT_EMPTY) && open_fails_bad_unit(UNIT_LUN1);
+}
+
 // The change-interrupt story, on unit 1: TD_ADDCHANGEINT queues our
 // Interrupt and blocks (SendIO -- trackdisk.doc: "this command only
 // returns when the handler is removed"); TD_EJECT (io_Length 1) then bumps
@@ -488,6 +520,8 @@ int main(void)
                                     "M4-CHGINT-OK", "M4-CHGINT-BAD");
             all_ok &= write_marker(BLK_SCSI_SENSE, test_scsi_autosense(), "M4-SENSE-OK",
                                     "M4-SENSE-BAD");
+            all_ok &= write_marker(BLK_OPEN_ABSENT, test_open_absent(), "M4-OPENABS-OK",
+                                    "M4-OPENABS-BAD");
 
             // Flush every marker to the backing image before the host test
             // reads the file.

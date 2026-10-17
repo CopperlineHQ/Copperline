@@ -170,10 +170,16 @@ The boot ROM contains an Exec device built from:
 32-bit write. The request completes through the INT2 handler after the
 host worker has finished and the board applies its result.
 
-`Open` fails with `IOERR_OPENFAIL` unless the requested unit is below
-`CHF_UNITS` and its `CHF_UNIT_PRESENT` bit is set; on success it sets
-`io_Unit` to the raw unit number, `io_Device` to the device base, and
-`io_Error` to 0. `Close` decrements the open count and never expunges:
+`Open` fails with `TDERR_BadUnitNum` (32) unless the requested unit is
+below `CHF_UNITS` and its `CHF_UNIT_PRESENT` bit is set. That is the
+code `scsi.device` gives for a target that does not answer, and bus
+scanners depend on it. HDToolBox 3.1 opens every SCSI address and LUN
+in turn (unit `LUN * 10 + address`) and takes an `IOERR_OPENFAIL` (-1)
+from `OpenDevice` to mean the driver itself cannot be opened, abandoning
+the whole scan; answering -1 would hide every drive behind an empty
+unit 0, and every drive past unit 0, since unit 10 is probed next. On
+success `Open` sets `io_Unit` to the raw unit number, `io_Device` to the
+device base, and `io_Error` to 0. `Close` decrements the open count and never expunges:
 this is a ROM-resident device, so `Expunge` unconditionally refuses
 (returns 0) regardless of open count. `AbortIO` always reports
 `IOERR_NOCMD`; cancellation is not implemented, so queued work continues
