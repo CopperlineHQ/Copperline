@@ -546,6 +546,19 @@ colour clocks relative to the BLTSIZE poke. Tests:
 `scheduled_shift_carry_crosses_normal_mode_row_boundary`,
 `scheduled_a_shift_zero_fills_first_word_of_new_blit`.
 
+B DMA also updates raw BLTBDAT and the retained B shifter hold at each fetch,
+so a later operation with USEB clear consumes the last fetched/shifted data.
+One ROM A500 controls distinguish the line texture used to select a pixel
+from the hold retained for a subsequent normal-mode blit. With B DMA disabled,
+the first pixel retains a zero-filled shift of the raw word; subsequent
+pixels retain the pre-rotation texture. B-DMA lines retain the post-rotation
+texture instead. Line completion preserves the previous raw B word as carry
+for a later CPU BLTBDAT write using the then-current BSH. These updates occur
+on fetch/pixel events, so terminal drain does not overwrite a newer CPU write.
+The [follow-up measurements](a500-copper-blitter-followup-2026-10-17.md)
+record the tested patterns, shifts, lengths and write orders. This corrects
+retained data; the separate inter-pixel BZERO exceptions remain unresolved.
+
 ### Mid-operation register writes
 
 The HRM documents the blitter as an asynchronous DMA engine, says BLTSIZE
@@ -561,7 +574,7 @@ classification of writes while BBUSY is set:
 | `BLTAFWM`, `BLTALWM` | Deferred | First/last-word masks captured by the scheduled state at BLTSIZE. |
 | `BLT[ABCD]PTH/PTL` | Deferred | Pointer writes do not retarget the already-scheduled transfer. |
 | `BLT[ABCD]MOD` | Deferred | Modulos captured at BLTSIZE. |
-| `BLTBDAT` | Immediate, write-time shifter | The write runs the B barrel shifter with the BSH/DESC current at write time (unlike BLTADAT/BLTCDAT); USEB-off blits consume that latched hold word. The first B write after the previous blit drops BBUSY zeros the B old register; later writes shift through the latched B data. |
+| `BLTBDAT` | Immediate, write-time shifter | The write runs the B barrel shifter with the BSH/DESC current at write time (unlike BLTADAT/BLTCDAT); USEB-off blits consume that latched hold word. Normal-mode completion resets the next write's old-word input; line completion preserves the raw B carry. B DMA also updates raw data and the hold. |
 | `BLTSIZE` | Deferred restart | A second start strobe drains the current blit first, then starts the replacement from the post-completion pointer state. |
 | `DMACON.DMAEN/BLTEN` | Immediate | Gate blitter bus grants immediately; clearing leaves BBUSY set and preserves the pending blit until re-enabled. |
 | `DMACON.BLTPRI` | Immediate | Bus arbitration observes the priority bit directly. |

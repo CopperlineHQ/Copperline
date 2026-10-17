@@ -207,7 +207,7 @@ pub struct Blitter {
     pub bltsizv: u16,
     bltbold: u16,
     bltbold_init: bool,
-    /// The B hold register as latched by the last BLTBDAT write. Unlike
+    /// The B hold register, updated by BLTBDAT writes and B DMA. Unlike
     /// BLTADAT/BLTCDAT, writing BLTBDAT runs the B barrel shifter with the
     /// BSH and DESC values current AT WRITE TIME (vAmiga pokeBLTBDAT), and
     /// a blit with USEB clear consumes this latched hold word for every
@@ -627,7 +627,9 @@ impl Blitter {
         } else {
             self.execute_normal(h, w, ram);
         }
-        self.bltbold_init = true;
+        if self.bltcon1 & BLTCON1_LINE == 0 {
+            self.bltbold_init = true;
+        }
         self.finish_blit();
     }
 
@@ -693,6 +695,13 @@ impl Blitter {
             PendingBlit::Normal(state) => {
                 let phase_before = state.phase;
                 let done = state.tick_slot(ram, &mut self.bzero);
+                if state.use_b && matches!(phase_before, NormalBlitPhase::B) {
+                    // DMA loads raw BLTBDAT and the B shifter hold on the
+                    // fetch cycle. Publish here so later CPU writes during
+                    // terminal drain are not overwritten at release.
+                    self.bltbdat = state.b_prev;
+                    self.b_hold_latch = state.cur_b;
+                }
                 // The final body tick enters E with BBUSY still set. E
                 // clears it; the final D write in F is still pending.
                 if matches!(state.phase, NormalBlitPhase::F | NormalBlitPhase::Done) {
@@ -720,7 +729,27 @@ impl Blitter {
             }
             PendingBlit::Line(state) => {
                 let phase_before = state.phase;
+                let b_hold = if matches!(phase_before, LineBlitPhase::L4) && !state.use_b {
+                    Some(state.current_pixel_b_hold())
+                } else {
+                    None
+                };
                 let done = state.tick_slot(ram, &mut self.bzero);
+                if state.use_b && matches!(phase_before, LineBlitPhase::LB) {
+                    // The line shifter holds the fetched word rotated by
+                    // BSH; invert that rotation for the raw data register.
+                    self.bltbdat = state.bdat.rotate_left(state.bsh as u32);
+                    self.b_hold_latch = state.bdat;
+                } else if matches!(phase_before, LineBlitPhase::L4) {
+                    // B-DMA lines retain the post-rotation texture; without
+                    // B DMA the hold is the line shifter value for this
+                    // pixel, including the zero-input start case.
+                    self.b_hold_latch = if state.use_b {
+                        state.bdat
+                    } else {
+                        b_hold.expect("USEB-off line pixel has a captured B hold")
+                    };
+                }
                 // The final pixel enters Tail with BBUSY still set.
                 // The internal NOTHING tick clears it before TailDone.
                 if matches!(state.phase, LineBlitPhase::TailDone | LineBlitPhase::Done) {
@@ -974,12 +1003,22 @@ impl Blitter {
         };
         match &mut pending {
             PendingBlit::Normal(state) => {
-                state.run_to_completion(ram, &mut self.bzero);
+                state.run_to_completion(
+                    ram,
+                    &mut self.bzero,
+                    &mut self.bltbdat,
+                    &mut self.b_hold_latch,
+                );
                 state.release_registers(self);
                 self.finish_blit();
             }
             PendingBlit::Line(state) => {
-                state.run_to_completion(ram, &mut self.bzero);
+                state.run_to_completion(
+                    ram,
+                    &mut self.bzero,
+                    &mut self.bltbdat,
+                    &mut self.b_hold_latch,
+                );
                 state.release_registers(self);
                 self.finish_blit();
             }
@@ -1070,6 +1109,8 @@ impl Blitter {
                     bpt = bpt.wrapping_add(step as u32);
                     let shifted = shift_combine(b_prev, v, bsh, desc);
                     b_prev = v;
+                    self.bltbdat = v;
+                    self.b_hold_latch = shifted;
                     shifted
                 } else {
                     // USEB off: the write-time-shifted hold word, constant
@@ -1223,7 +1264,16 @@ impl Blitter {
                 let fetched = read_word(ram, bpt);
                 bpt = bpt.wrapping_add(bmod_step as i16 as i32 as u32);
                 bdat = fetched.rotate_right(bsh as u32);
+                self.bltbdat = fetched;
+                self.b_hold_latch = bdat;
             }
+            let useb_off_hold = if use_b {
+                None
+            } else {
+                let raw = bdat.rotate_left(bsh as u32);
+                let previous = if pixel == 0 { 0 } else { raw };
+                Some(shift_combine(previous, raw, bsh as u32, false))
+            };
             // A SING-suppressed dot only locks the store: the A shifter, the
             // minterm and the BZERO update still run on the full inputs.
             let line_pixel = !sing || !one_dot;
@@ -1271,6 +1321,11 @@ impl Blitter {
             dpt = cpt;
             bdat = bdat.rotate_left(1);
             bsh = bsh.wrapping_sub(1) & 0x000F;
+            self.b_hold_latch = if use_b {
+                bdat
+            } else {
+                useb_off_hold.expect("USEB-off line pixel has a captured B hold")
+            };
         }
 
         // Write back final state. Real hardware reflects the
@@ -1455,10 +1510,32 @@ impl LineBlitState {
         self.slots_remaining
     }
 
-    fn run_to_completion(&mut self, ram: &mut [u8], bzero: &mut bool) {
+    fn run_to_completion(
+        &mut self,
+        ram: &mut [u8],
+        bzero: &mut bool,
+        bltbdat: &mut u16,
+        b_hold_latch: &mut u16,
+    ) {
         while self.slots_remaining != 0 {
             self.slots_remaining = self.slots_remaining.saturating_sub(1);
+            let phase_before = self.phase;
+            let b_hold = if matches!(phase_before, LineBlitPhase::L4) && !self.use_b {
+                Some(self.current_pixel_b_hold())
+            } else {
+                None
+            };
             self.process_phase(ram, bzero);
+            if self.use_b && matches!(phase_before, LineBlitPhase::LB) {
+                *bltbdat = self.bdat.rotate_left(self.bsh as u32);
+                *b_hold_latch = self.bdat;
+            } else if matches!(phase_before, LineBlitPhase::L4) {
+                *b_hold_latch = if self.use_b {
+                    self.bdat
+                } else {
+                    b_hold.expect("USEB-off line pixel has a captured B hold")
+                };
+            }
         }
     }
 
@@ -1532,6 +1609,20 @@ impl LineBlitState {
         }
     }
 
+    /// BLTBDAT's line hold for the next pixel. The first pixel shifts from
+    /// a zero previous word; later pixels feed the raw texture word back
+    /// through the shifter. Recover raw from the live line texture and BSH
+    /// so this remains correct if BLTBDAT is written while the blit is busy.
+    fn current_pixel_b_hold(&self) -> u16 {
+        let raw = self.bdat.rotate_left(self.bsh as u32);
+        let previous = if self.previous_a_hold.is_some() {
+            raw
+        } else {
+            0
+        };
+        shift_combine(previous, raw, self.bsh as u32, false)
+    }
+
     fn process_latched_pixel(&mut self, ram: &mut [u8], bzero: &mut bool) {
         // A SING-suppressed dot only locks the store: the A shifter, the
         // minterm and the BZERO update still run on the full inputs
@@ -1595,7 +1686,6 @@ impl LineBlitState {
         if std::mem::replace(&mut self.registers_released, true) {
             return;
         }
-        blitter.bltbold_init = true;
         let mut con1 = self.con1 & !BLTCON1_SIGN;
         if (self.acc as i16) < 0 {
             con1 |= BLTCON1_SIGN;
@@ -1943,10 +2033,21 @@ impl NormalBlitState {
         self.slots_remaining
     }
 
-    fn run_to_completion(&mut self, ram: &mut [u8], bzero: &mut bool) {
+    fn run_to_completion(
+        &mut self,
+        ram: &mut [u8],
+        bzero: &mut bool,
+        bltbdat: &mut u16,
+        b_hold_latch: &mut u16,
+    ) {
         while self.slots_remaining != 0 {
             self.slots_remaining = self.slots_remaining.saturating_sub(1);
+            let phase_before = self.phase;
             self.process_phase(ram, bzero);
+            if self.use_b && matches!(phase_before, NormalBlitPhase::B) {
+                *bltbdat = self.b_prev;
+                *b_hold_latch = self.cur_b;
+            }
         }
     }
 
@@ -3048,6 +3149,243 @@ mod tests {
         assert!(b.tick_scheduled_slot(&mut ram)); // F writes the queued D word.
 
         assert_eq!(read_word(&ram, 0x20), 0x1234);
+    }
+
+    #[test]
+    fn scheduled_normal_b_dma_publishes_raw_data_and_shifted_hold_at_fetch() {
+        let mut ram = vec![0u8; 256];
+        write_word(&mut ram, 0x10, 0x1234);
+        let mut b = Blitter::new();
+        b.bltcon0 = BLTCON0_USE_B | BLTCON0_USE_D | 0x00F0;
+        b.bltcon1 = 3 << 12;
+        b.bltbpt = 0x10;
+        b.bltdpt = 0x20;
+        b.start_scheduled((1 << 6) | 1, &ram);
+
+        for _ in 0..3 {
+            assert!(!b.tick_scheduled_slot(&mut ram));
+        }
+        assert!(!b.tick_scheduled_slot(&mut ram)); // B fetch
+        assert_eq!(b.bltbdat, 0x1234);
+        let held = shift_combine(0, 0x1234, 3, false);
+        assert_eq!(b.b_hold_latch, held);
+        b.finish_scheduled_now(&mut ram);
+
+        // A later copy with USEB off consumes the DMA-updated hold word.
+        b.bltcon0 = BLTCON0_USE_D | 0x00CC; // D := B
+        b.bltdpt = 0x30;
+        b.start_scheduled((1 << 6) | 1, &ram);
+        b.finish_scheduled_now(&mut ram);
+        assert_eq!(read_word(&ram, 0x30), held);
+    }
+
+    #[test]
+    fn scheduled_b_dma_disabled_leaves_bltbdat_unchanged() {
+        let mut ram = vec![0u8; 128];
+        let mut b = Blitter::new();
+        b.bltbdat = 0x55AA;
+        b.bltcon0 = BLTCON0_USE_D | 0x00F0;
+        b.start_scheduled((1 << 6) | 1, &ram);
+        b.finish_scheduled_now(&mut ram);
+        assert_eq!(b.bltbdat, 0x55AA);
+    }
+
+    #[test]
+    fn scheduled_normal_b_dma_and_post_fetch_cpu_write_survive_terminal_drain() {
+        let mut ram = vec![0u8; 256];
+        write_word(&mut ram, 0x10, 0x1234);
+        let mut b = Blitter::new();
+        b.bltcon0 = BLTCON0_USE_B | BLTCON0_USE_D | 0x00F0;
+        b.bltbpt = 0x10;
+        b.bltdpt = 0x20;
+        b.start_scheduled((1 << 6) | 1, &ram);
+        while !matches!(b.pending.as_ref(), Some(PendingBlit::Normal(state)) if matches!(state.phase, NormalBlitPhase::B))
+        {
+            assert!(!b.tick_scheduled_slot(&mut ram));
+        }
+        assert!(!b.tick_scheduled_slot(&mut ram)); // last B fetch
+        b.write_bltbdat(0xABCD);
+        b.finish_scheduled_now(&mut ram);
+        assert_eq!(b.bltbdat, 0xABCD);
+    }
+
+    #[test]
+    fn scheduled_line_b_dma_publishes_raw_word_and_rotated_hold() {
+        let mut ram = vec![0u8; 256];
+        write_word(&mut ram, 0x10, 0x1234);
+        let mut b = Blitter::new();
+        b.bltcon0 = BLTCON0_USE_B | BLTCON0_USE_C | 0x000A;
+        b.bltcon1 = BLTCON1_LINE | (3 << 12);
+        b.bltbpt = 0x10;
+        b.bltcpt = 0x20;
+        b.start_scheduled((1 << 6) | 2, &ram);
+        while !matches!(b.pending.as_ref(), Some(PendingBlit::Line(state)) if matches!(state.phase, LineBlitPhase::LB))
+        {
+            assert!(!b.tick_scheduled_slot(&mut ram));
+        }
+        assert!(!b.tick_scheduled_slot(&mut ram)); // B fetch
+        assert_eq!(b.bltbdat, 0x1234);
+        assert_eq!(b.b_hold_latch, 0x1234u16.rotate_right(3));
+        while !matches!(b.pending.as_ref(), Some(PendingBlit::Line(state)) if matches!(state.phase, LineBlitPhase::L4))
+        {
+            assert!(!b.tick_scheduled_slot(&mut ram));
+        }
+        assert!(!b.tick_scheduled_slot(&mut ram)); // pixel rotates hold
+        assert_eq!(b.b_hold_latch, 0x1234u16.rotate_right(3).rotate_left(1));
+    }
+
+    #[test]
+    fn scheduled_line_terminal_drain_preserves_post_fetch_bltbdat_write() {
+        let mut ram = vec![0u8; 256];
+        write_word(&mut ram, 0x10, 0x1234);
+        let mut b = Blitter::new();
+        b.bltcon0 = BLTCON0_USE_B | BLTCON0_USE_C | 0x000A;
+        b.bltcon1 = BLTCON1_LINE;
+        b.bltbpt = 0x10;
+        b.bltcpt = 0x20;
+        b.start_scheduled((1 << 6) | 2, &ram);
+        while !matches!(b.pending.as_ref(), Some(PendingBlit::Line(state)) if matches!(state.phase, LineBlitPhase::L4))
+        {
+            assert!(!b.tick_scheduled_slot(&mut ram));
+        }
+        assert!(!b.tick_scheduled_slot(&mut ram)); // final B shifter rotation
+        b.write_bltbdat(0xABCD);
+        b.finish_scheduled_now(&mut ram);
+        assert_eq!(b.bltbdat, 0xABCD);
+    }
+
+    #[test]
+    fn scheduled_line_without_b_dma_retains_pre_rotation_hold_and_bdathistory() {
+        for (raw, expected_hold, expected_shifted) in
+            [(0x2800, 0x5000, 0xA000), (0xD7FF, 0xAFFF, 0x5FFC)]
+        {
+            let mut ram = vec![0u8; 256];
+            let mut b = Blitter::new();
+            b.bltcon1 = BLTCON1_LINE;
+            b.write_bltbdat(raw);
+            b.bltcon0 = BLTCON0_USE_C | 0x000A;
+            b.bltcpt = 0x20;
+            b.start_scheduled((2 << 6) | 2, &ram);
+            b.finish_scheduled_now(&mut ram);
+
+            assert_eq!(b.bltbdat, raw);
+            assert_eq!(b.b_hold_latch, expected_hold);
+            assert!(!b.bltbold_init);
+
+            // The next CPU write uses the retained raw word as the barrel
+            // shifter's previous input at BSH=14.
+            b.write_bltcon1(14 << 12);
+            b.write_bltbdat(0);
+            assert_eq!(b.b_hold_latch, expected_shifted);
+            b.write_bltcon1(0);
+            b.write_bltbdat(0);
+            assert_eq!(b.b_hold_latch, 0);
+        }
+    }
+
+    #[test]
+    fn scheduled_line_without_b_dma_matches_hold_write_order_matrix() {
+        let raws = [0x0001, 0x8000, 0xA55A, 0x1248];
+        for raw in raws {
+            for initial_bsh in [0u16, 1, 7, 15] {
+                for pixels in 1u16..=3 {
+                    for order in 0..3 {
+                        let mut ram = vec![0u8; 256];
+                        let mut b = Blitter::new();
+                        b.bltcon1 = BLTCON1_LINE | (initial_bsh << 12);
+                        b.write_bltbdat(raw);
+                        b.bltcon0 = BLTCON0_USE_C | 0x000A;
+                        b.bltcpt = 0x20;
+                        b.start_scheduled((pixels << 6) | 2, &ram);
+                        b.finish_scheduled_now(&mut ram);
+
+                        let last_pre_rotation_bsh = initial_bsh.wrapping_sub(pixels - 1) & 0x0F;
+                        let held = if pixels == 1 {
+                            shift_combine(0, raw, initial_bsh as u32, false)
+                        } else {
+                            raw.rotate_right(last_pre_rotation_bsh as u32)
+                        };
+                        assert_eq!(
+                            b.b_hold_latch, held,
+                            "raw={raw:04X} bsh={initial_bsh} pixels={pixels}"
+                        );
+                        assert_eq!(b.bltbdat, raw);
+
+                        let final_bsh = initial_bsh.wrapping_sub(pixels) & 0x0F;
+                        match order {
+                            0 => {} // omit BLTBDAT write
+                            1 => {
+                                b.write_bltbdat(0);
+                                assert_eq!(
+                                    b.b_hold_latch,
+                                    shift_combine(raw, 0, final_bsh as u32, false),
+                                    "zero before CON1: raw={raw:04X} bsh={initial_bsh} pixels={pixels}"
+                                );
+                                b.write_bltcon1(0);
+                            }
+                            _ => {
+                                b.write_bltcon1(0);
+                                b.write_bltbdat(0);
+                                assert_eq!(b.b_hold_latch, 0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scheduled_repeated_normal_b_fetch_publishes_last_raw_and_hold() {
+        let mut ram = vec![0u8; 256];
+        write_word(&mut ram, 0x10, 0x1234);
+        write_word(&mut ram, 0x12, 0xABCD);
+        let mut b = Blitter::new();
+        b.bltcon0 = BLTCON0_USE_B | BLTCON0_USE_D | 0x00F0;
+        b.bltcon1 = 5 << 12;
+        b.bltbpt = 0x10;
+        b.bltdpt = 0x40;
+        b.start_scheduled((1 << 6) | 2, &ram);
+        b.finish_scheduled_now(&mut ram);
+        assert_eq!(b.bltbdat, 0xABCD);
+        assert_eq!(b.b_hold_latch, shift_combine(0x1234, 0xABCD, 5, false));
+    }
+
+    #[test]
+    fn scheduled_repeated_line_b_fetch_publishes_raw_across_bsh_wrap() {
+        let mut ram = vec![0u8; 256];
+        write_word(&mut ram, 0x10, 0x1234);
+        write_word(&mut ram, 0x12, 0xABCD);
+        let mut b = Blitter::new();
+        b.bltcon0 = BLTCON0_USE_B | BLTCON0_USE_C | 0x000A;
+        b.bltcon1 = BLTCON1_LINE;
+        b.bltbpt = 0x10;
+        b.bltbmod = 2;
+        b.bltcpt = 0x40;
+        b.start_scheduled((2 << 6) | 2, &ram);
+        b.finish_scheduled_now(&mut ram);
+        assert_eq!(b.bltbdat, 0xABCD);
+        assert_eq!(b.b_hold_latch, 0xABCDu16.rotate_right(15).rotate_left(1));
+    }
+
+    #[test]
+    fn scheduled_line_b_dma_preserves_cpu_bdat_carry_on_completion() {
+        let mut ram = vec![0u8; 256];
+        write_word(&mut ram, 0x10, 0xD7FF);
+        let mut b = Blitter::new();
+        b.bltcon1 = BLTCON1_LINE | (14 << 12);
+        b.write_bltbdat(0x2800); // establishes the CPU shifter carry
+        b.bltcon0 = BLTCON0_USE_B | BLTCON0_USE_C | 0x000A;
+        b.bltbpt = 0x10;
+        b.bltcpt = 0x40;
+        b.start_scheduled((1 << 6) | 2, &ram);
+        b.finish_scheduled_now(&mut ram);
+
+        assert_eq!(b.bltbdat, 0xD7FF);
+        assert!(!b.bltbold_init);
+        b.write_bltcon1(14 << 12);
+        b.write_bltbdat(0);
+        assert_eq!(b.b_hold_latch, 0x5FFC);
     }
 
     #[test]
