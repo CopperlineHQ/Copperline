@@ -600,10 +600,12 @@ impl CaptureFieldMap {
     /// The map a frontend with no presentation pipeline of its own would
     /// get for the bus's last completed field: the placement and aperture
     /// decided from that field alone, with the presentation latches at
-    /// their power-on defaults (standard aperture, no recentring history,
-    /// no smart-centre trim). It agrees with the window's while the
-    /// display is steady. `None` while an RTG board drives the display,
-    /// since a screenshot then shows the board's frame.
+    /// their power-on defaults (standard aperture, no recentring history)
+    /// and smart framing's automatic centring settled on this field's
+    /// content envelope. It agrees with the window's while the display is
+    /// steady; the window's latches only differ during their settling
+    /// windows after a change. `None` while an RTG board drives the
+    /// display, since a screenshot then shows the board's frame.
     pub fn for_bus(bus: &crate::bus::Bus, framing: ScreenshotFraming) -> Option<Self> {
         let ScreenshotFraming {
             overscan,
@@ -638,12 +640,29 @@ impl CaptureFieldMap {
         } else {
             placement.rows
         };
+        let present_width = FB_WIDTH * canvas_scale;
+        if crate::envcfg::flag("COPPERLINE_SHOT_RAW") {
+            // The raw-buffer capture (see `render_present_frame`).
+            return Some(Self::presentation_buffer(
+                placement,
+                present_rows,
+                present_width,
+            ));
+        }
         let tv_aperture_rows =
             latch.resolve_tv_aperture(standard_tv_aperture_frame(geometry, present_rows, &base));
+        if overscan == Overscan::Smart {
+            // Smart framing centres the glass on the content envelope, so
+            // this needs the field rendered once to know where that is.
+            let mut fb = vec![0u32; crate::video::MAX_CANVAS_PIXELS];
+            let content = bitplane::render_display_only_with_content(bus, &mut fb)
+                .and_then(|rect| placement.content_rect(rect, present_rows));
+            latch.settle_smart_centre(content, geometry.programmable);
+        }
         Some(Self::new(
             placement,
             present_rows,
-            FB_WIDTH * canvas_scale,
+            present_width,
             overscan,
             latch.tv_centre(overscan, tv_centre),
             tv_aperture_rows,
@@ -1003,6 +1022,20 @@ impl PresentationLatch {
             self.smart_centre.resolve(content, emulated_frame);
         }
         before != self.smart_centre.h
+    }
+
+    /// Settle the smart-centre decision on `content` as if it had held
+    /// for the latch's whole stability window: the trim a steady display
+    /// showing it has reached. For a frontend that does not present every
+    /// field and so cannot advance the latch frame by frame.
+    pub fn settle_smart_centre(
+        &mut self,
+        content: Option<bitplane::ContentRect>,
+        programmable: bool,
+    ) {
+        for frame in 0..u64::from(SmartCentreLatch::STABLE_FRAMES) {
+            self.resolve_smart_centre(content, frame, programmable);
+        }
     }
 
     /// Manual centring remains a trim over the automatic correction.

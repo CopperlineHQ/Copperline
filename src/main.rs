@@ -1222,8 +1222,13 @@ fn main() -> Result<()> {
         // The headless server owns the machine, so it journals
         // --record-input itself; windowed mode journals through the App.
         config.record_input = cli.record_input.clone();
+        // Its recorder writes light-pen lines in --screenshot-after pixels,
+        // so the capture geometry must be the one a replay will have: the
+        // resolved pixel aspect (capture height) and overscan, env
+        // overrides included, exactly as the window resolves them below.
+        video::set_pixel_aspect(config::resolve_pixel_aspect(cfg.pixel_aspect));
         config.screenshot_framing = copperline::video::present_common::ScreenshotFraming {
-            overscan: cfg.overscan,
+            overscan: copperline::config::resolve_overscan(cfg.overscan),
             tv_centre: cfg.tv_centre,
         };
         // --run + --control: the first resume stops the moment the guest

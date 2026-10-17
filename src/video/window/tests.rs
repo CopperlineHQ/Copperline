@@ -6125,6 +6125,75 @@ fn a_scheduled_pen_position_is_a_screenshot_pixel() {
 }
 
 #[test]
+fn a_window_without_a_presentation_pipeline_settles_smart_centring_the_same_way() {
+    // Smart framing trims the glass toward an off-centre playfield once
+    // its envelope has held for the latch's settling window. The headless
+    // control server presents nothing, so it settles the trim on the one
+    // field it renders; on a steady display that is the window's trim.
+    use crate::config::{Overscan, TvCentre};
+    use crate::video::present_common::{CaptureFieldMap, ScreenshotFraming};
+    let (mut app, _fixture) = pointer_machine();
+    // Move the playfield 16 lo-res pixels right of the standard window:
+    // the fixture's Copper list rewrites DIWSTRT, DIWSTOP, DDFSTRT and
+    // DDFSTOP (its words 5, 7, 9 and 11) every field.
+    let chip_ram = &mut app.emu.bus_mut().mem.chip_ram;
+    poke_chip_words(chip_ram, POINTER_COPPER_LIST + 10, &[0x2C91]);
+    poke_chip_words(chip_ram, POINTER_COPPER_LIST + 14, &[0x2CD1]);
+    poke_chip_words(chip_ram, POINTER_COPPER_LIST + 18, &[0x0040]);
+    poke_chip_words(chip_ram, POINTER_COPPER_LIST + 22, &[0x00D8]);
+    settle_pointer_machine(&mut app);
+    let framing = ScreenshotFraming {
+        overscan: Overscan::Smart,
+        tv_centre: TvCentre::default(),
+    };
+    apply_screenshot_framing(&mut app, framing);
+    // The window advances its latch once per presented field.
+    for _ in 0..30 {
+        step_fields(&mut app, 1);
+        present_pointer_frame(&mut app);
+    }
+    assert_ne!(
+        app.present_tv_centre,
+        TvCentre::default(),
+        "the off-centre playfield earns an automatic trim"
+    );
+    assert_eq!(
+        CaptureFieldMap::for_bus(app.emu.bus(), framing),
+        app.capture_field_map()
+    );
+}
+
+#[test]
+fn deferred_pen_events_apply_in_time_order() {
+    // Positions wait for a presented frame; a lift must wait with them,
+    // or a later lift would overtake an earlier placement and leave the
+    // pen down. Several due at once apply in time order whatever order
+    // they were scheduled in.
+    let (mut app, _fixture) = pointer_machine();
+    app.emu
+        .bus_mut()
+        .input
+        .set_port_device(1, crate::bus::PortDevice::LightPen);
+    app.auto_pens.push((0.0, 200, 150, None));
+    app.auto_pens.push((0.0, -1, -1, None));
+    app.auto_pens.push((0.02, 120, 100, None));
+    app.auto_pens.push((0.01, -1, -1, None));
+    app.fire_scheduled_events();
+    assert_eq!(app.auto_pens.len(), 4, "everything waits for a frame");
+    settle_pointer_machine(&mut app);
+    present_pointer_frame(&mut app);
+    app.fire_scheduled_events();
+    assert!(app.auto_pens.is_empty());
+    let last = app.capture_field_map().unwrap().field_point(120, 100);
+    assert!(last.is_some());
+    assert_eq!(
+        app.emu.bus().input.light_pen.position,
+        last,
+        "the latest event, the placement at 0.02 s, wins"
+    );
+}
+
+#[test]
 fn a_scheduled_pen_position_waits_for_a_presented_frame() {
     // A screenshot pixel means nothing before there is a screenshot; the
     // position is held, not dropped or applied in the wrong space.

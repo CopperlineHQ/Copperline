@@ -4396,18 +4396,21 @@ impl App {
         // Fire any scheduled --pen-after light-pen positions (one-shot
         // each).
         // Positions are screenshot pixels, which mean nothing until a frame
-        // has been presented; lifting the pen needs no picture.
+        // has been presented. Every pen event waits for one, lifts
+        // included, and the due ones then apply in time order, so a lift
+        // scheduled after a placement cannot overtake it.
         let presented = self.present_placement.is_some() || self.rtg_present_dims.is_some();
         let mut pen_sets = Vec::new();
         self.auto_pens.retain(|&(at, x, y, port)| {
-            if emu_secs >= at && (presented || x < 0 || y < 0) {
-                pen_sets.push((x, y, port));
+            if presented && emu_secs >= at {
+                pen_sets.push((at, x, y, port));
                 false
             } else {
                 true
             }
         });
-        for (x, y, port) in pen_sets {
+        pen_sets.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (_, x, y, port) in pen_sets {
             self.apply_scheduled_pen_target(x, y, port);
         }
         let mut disk_inserts = Vec::new();
