@@ -267,6 +267,14 @@ Next run, in order:
    minterms and A-bit combinations. Do not introduce an unexplained A-bit
    mask or fixed IRQ delay to fit the observed rows.
 
+Wrap-up update: kind50 collection completed with all 528 records. Its packet
+SHA-256 is
+`270476765cff39dd28f97ee08d3ed976da8f2f8a8683c32b7ea3050061decb4d`.
+Fresh-ROM restoration and reset release are verified, with no errors.
+Timing interpretation remains pending. The probe tools and handoff are
+committed in `amiga-hardware-probes` at `30989b2`; its 139 Python tests pass.
+The Copperline implementation is committed at `d66432b2`.
+
 ## Scope qualification
 
 The MHO98 accepts 50M acquisition depth at 2 ms/div and exports 12.5M digital
