@@ -961,6 +961,47 @@ pub(super) fn surface_resize_for_draw(
     ((inner.width, inner.height) != configured).then_some(inner)
 }
 
+/// Whether the present worker may acquire the surface for a job planned at
+/// `planned` (`PresentJob::surface`), given the host window's live size, or
+/// None where the worker cannot ask (`worker_live_size`).
+///
+/// The main thread re-syncs the surface before it plans a frame
+/// (`App::resync_surface_size`), but the worker acquires later, and on
+/// Windows the main thread pumps the modal size-move loop while the user
+/// drags: the window changes size under frames still queued. A Vulkan driver
+/// then reports the swapchain out of date, and `pixels` reconfigures from its
+/// stale size -- the same churn as issue #362, now on a thread the Resized
+/// event cannot reach, while the main thread waits in `PresentWorker::reclaim`
+/// to resize. The frame was drawn for the old geometry anyway, so it is
+/// dropped instead: the Resized behind the change reclaims the GPU side and
+/// reconfigures it on the main thread, and the next frame is planned for the
+/// new size.
+pub(super) fn worker_surface_current(planned: (u32, u32), live: Option<PhysicalSize<u32>>) -> bool {
+    live.is_none_or(|live| surface_resize_for_draw(planned, live).is_none())
+}
+
+/// Whether a present failed only because the surface was out of date: a
+/// resize landed between the size check and the acquire. `pixels` now gives
+/// up after one reconfigure (parasyte/pixels#462) rather than rebuilding the
+/// swapchain at its stale size forever; the frame is dropped, and the Resized
+/// event behind it reconfigures from the live size. Routine during a drag, so
+/// it is no error.
+pub(super) fn present_raced_a_resize(e: &pixels::Error) -> bool {
+    matches!(
+        e,
+        pixels::Error::GetSurface(pixels::GetSurfaceError::Outdated)
+    )
+}
+
+/// Log a failed present at the level it deserves (`present_raced_a_resize`).
+pub(super) fn log_present_error(e: &pixels::Error) {
+    if present_raced_a_resize(e) {
+        log::debug!("present dropped a frame for an out-of-date surface: {e}");
+    } else {
+        error!("pixels.render: {e}");
+    }
+}
+
 pub(super) fn window_present_mode(vsync: bool) -> pixels::wgpu::PresentMode {
     // pixels' enable_vsync(true) selects AutoVsync, which prefers
     // FifoRelaxed where supported (including Vulkan on X11). That permits tearing
