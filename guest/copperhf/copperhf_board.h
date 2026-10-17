@@ -61,7 +61,10 @@
 // Any other command -> io_Error = IOERR_NOCMD.
 //
 // Error codes (io_Error, matching exec.library's io.h negative range):
-//   IOERR_OPENFAIL    -1  targeted unit is absent (empty slot or >= CHF_UNITS)
+//   IOERR_OPENFAIL    -1  a request reached the doorbell for an absent unit
+//                         (empty slot or >= CHF_UNITS). OpenDevice on such a
+//                         unit is refused guest-side with TDERR_BadUnitNum
+//                         instead -- see CHF_TDERR_BADUNITNUM below.
 //   IOERR_NOCMD       -3  unrecognised io_Command
 //   IOERR_BADLENGTH   -4  io_Length/io_Offset not a 512-byte multiple, or the
 //                         requested range runs past the end of the unit
@@ -211,6 +214,16 @@
 #define CHF_IOERR_NOCMD      (-3)
 #define CHF_IOERR_BADLENGTH  (-4)
 #define CHF_IOERR_BADADDRESS (-5)
+
+// OpenDevice's error for a unit with no drive behind it: an empty slot, or
+// a unit number >= CHF_UNITS such as the LUN-encoded 10..76 a SCSI scanner
+// probes. devices/trackdisk.h's TDERR_BadUnitNum, which scsi.device also
+// answers for a target that is not there. Never IOERR_OPENFAIL: HDToolBox
+// 3.1 reads -1 from OpenDevice as "this driver cannot be opened at all" and
+// abandons its whole bus scan at the first unit that returns it, so no
+// drive above an empty slot -- or above unit 0, whose LUN 1 it probes next
+// as unit 10 -- would ever be listed.
+#define CHF_TDERR_BADUNITNUM 32
 
 #define CHF_SECTOR_SIZE 512
 
