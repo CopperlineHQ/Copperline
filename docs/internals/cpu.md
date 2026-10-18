@@ -752,8 +752,12 @@ each part answers the MMU's instructions and registers:
   have no effect. `cpu/ec030_acu.rs` completes those instructions from the
   trap the core surfaces before taking it -- `StepResult::FlineTrap` from a
   precise step (the precise loop steps a PMMU opword with the plain
-  `step()` on this part), `BatchExit::FlineTrap` from a JIT batch -- so
-  both paths agree. The ACU registers live in the core's TT0/TT1/MMUSR
+  `step()` on this part, judging the next opword through the instruction
+  cache the way the core will fetch it), `BatchExit::FlineTrap` from a JIT
+  batch -- so both paths agree. A bus error on one of the instruction's
+  accesses ends it the way the core ends its own faulted instructions:
+  nothing is committed, no trace exception follows, and execution resumes
+  at the fault handler's entry. The ACU registers live in the core's TT0/TT1/MMUSR
   fields. `PMOVE` to TC/SRP/CRP is undefined on the EC030; it takes no
   exception here, drops writes and reads back zero. The other ACUSR bits
   are undefined and read as zero, and the 68030 `PTEST` form's level and

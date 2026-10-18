@@ -8946,10 +8946,16 @@ mod tests {
 
     /// Exception handlers for the MMU-less CPU tests: each records its
     /// vector in D7 and parks, so a test can tell "no exception" (D7 = 0)
-    /// from the bus error, illegal instruction, privilege violation or
-    /// Line-F an MMU-less part must not (or must) raise.
+    /// from the bus error, illegal instruction, privilege violation, trace
+    /// or Line-F an MMU-less part must not (or must) raise.
     fn install_parking_handlers(bus: &mut Bus) {
-        for (vector, handler) in [(2u16, 0x0200u32), (4, 0x0210), (8, 0x0220), (11, 0x0230)] {
+        for (vector, handler) in [
+            (2u16, 0x0200u32),
+            (4, 0x0210),
+            (8, 0x0220),
+            (9, 0x0240),
+            (11, 0x0230),
+        ] {
             write_chip_long(bus, u32::from(vector) * 4, handler);
             write_program(bus, handler, &[0x7E00 | vector, 0x60FE]); // MOVEQ #v,D7 ; BRA.S *
         }
@@ -9034,6 +9040,100 @@ mod tests {
                 !machine.cpu.pmmu_enabled,
                 "translation stays off, jit={jit}"
             );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ec030_acu_dispatches_the_opword_in_the_instruction_cache() -> Result<()> {
+        // The instruction cache does not snoop writes: after the CPU
+        // overwrites a cached PFLUSHA with a NOP, the next pass still
+        // fetches PFLUSHA, which the ACU must execute rather than leave
+        // to the core's Line-F. The precise loop picks the core step from
+        // a look at the next opword, so that look must go through the
+        // cache too; the batch path services the opcode the core fetched.
+        let program = [
+            0x7001u16, // MOVEQ #1,D0
+            0x4E7B, 0x0002, // MOVEC D0,CACR (instruction cache on)
+            0xF000, 0x2400, // $1006: PFLUSHA
+            0x33FC, 0x4E71, 0x0000, 0x1006, // MOVE.W #$4E71,$1006 (NOP)
+            0x5201, // ADDQ.B #1,D1
+            0x0C01, 0x0002, // CMPI.B #2,D1
+            0x66EC, // BNE.S $1006
+            0x7407, // MOVEQ #7,D2
+        ];
+        let mut bus = test_bus_with_pc(0x0000_1000);
+        write_program(&mut bus, 0x0000_1000, &program);
+        install_parking_handlers(&mut bus);
+        let mut machine = M68kMachine::new(bus, CpuModel::M68EC030, false)?;
+        machine.bus_mut().agnus.hpos = 0x21;
+        machine.set_cache_emulation(true, false);
+        machine.step_slice(13)?;
+        assert_eq!(machine.d(7), 0, "no Line-F");
+        assert_eq!(machine.d(1) & 0xFF, 2, "both passes ran");
+        assert_eq!(machine.d(2), 7, "ran to the end");
+        Ok(())
+    }
+
+    #[test]
+    fn ec030_acu_bus_error_commits_nothing_and_takes_no_trace() -> Result<()> {
+        // A bus error on any of an ACU instruction's accesses ends it the
+        // way the core ends its own: the fault's handler runs next from
+        // its entry, AC0 keeps its value, and the trace the instruction
+        // would have raised (T1 is set) does not follow the fault.
+        let cases: [(&str, &[u16], u32); 3] = [
+            (
+                "operand read",
+                &[0xF038, 0x0800, 0x3000], // PMOVE $3000.W,AC0
+                0x3000,
+            ),
+            (
+                "extension word fetch",
+                &[0xF038, 0x0800, 0x3000], // PMOVE $3000.W,AC0
+                0x0106,
+            ),
+            (
+                // The outer displacement is still fetched after the base
+                // displacement faults, from the handler entry onwards.
+                "base displacement fetch",
+                &[0xF030, 0x0800, 0x0172, 0x0000, 0x3000, 0x0004], // PMOVE ([$3000.L,A0],4),AC0
+                0x010A,
+            ),
+        ];
+        for (name, pmove, fault_at) in cases {
+            for jit in [false, true] {
+                let mut bus = test_bus_with_pc(0x0000_0100);
+                write_program(&mut bus, 0x0000_0100, &[0x46FC, 0xA700]); // MOVE #$A700,SR (T1)
+                write_program(&mut bus, 0x0000_0104, pmove);
+                write_program(&mut bus, 0x0000_0104 + 2 * pmove.len() as u32, &[0x7407]); // MOVEQ #7,D2
+                install_parking_handlers(&mut bus);
+                bus.inject_bus_fault(crate::bus::FaultInjection {
+                    start: fault_at,
+                    end: fault_at + 3,
+                    on_read: true,
+                    on_write: false,
+                    remaining: Some(1),
+                    hits: 0,
+                });
+                let mut machine = M68kMachine::new(bus, CpuModel::M68EC030, false)?;
+                machine.bus_mut().agnus.hpos = 0x21;
+                machine.cpu.mmu_tt0 = 0x1234_8107;
+                machine.set_jit_enabled(jit);
+                // MOVE to SR, the faulting PMOVE, then the bus error
+                // handler's MOVEQ and its parking branch.
+                machine.step_slice(4)?;
+                assert_eq!(machine.d(7), 2, "{name}: bus error handler, jit={jit}");
+                assert_eq!(machine.pc(), 0x0000_0202, "{name}: parked in it, jit={jit}");
+                assert_eq!(
+                    machine.cpu.mmu_tt0, 0x1234_8107,
+                    "{name}: AC0 kept, jit={jit}"
+                );
+                assert_ne!(
+                    machine.d(2),
+                    7,
+                    "{name}: the PMOVE did not complete, jit={jit}"
+                );
+            }
         }
         Ok(())
     }

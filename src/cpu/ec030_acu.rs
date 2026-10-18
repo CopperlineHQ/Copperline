@@ -26,13 +26,18 @@
 //! The core raises Line-F for every PMMU encoding on its `M68EC030` type,
 //! surfacing the trap before it is taken (`StepResult::FlineTrap` from a
 //! precise step, `BatchExit::FlineTrap` from a batch); both paths hand it
-//! to [`M68kMachine::service_fline_trap`].
+//! to [`M68kMachine::service_fline_trap`]. A bus error on one of the
+//! instruction's accesses ends it the way the core ends its own faulted
+//! instructions: the fault is already stacked, nothing is committed, and
+//! no trace exception follows.
 //! TODO: move this into the m68k core's EC030 PMMU decode.
 
 use m68k::core::ea::{AddressingMode, EaResult};
+use m68k::core::execute::{RUN_MODE_BERR_AERR_RESET, RUN_MODE_NORMAL};
 use m68k::{CpuType, Size};
 
 use super::M68kMachine;
+use crate::bus::CpuBusAccessKind;
 
 /// ACUSR bit 6: the PTEST address matched AC0 and/or AC1.
 const ACUSR_AC: u32 = 1 << 6;
@@ -68,7 +73,18 @@ impl M68kMachine {
     /// answers, so the precise loop must step it through
     /// [`Self::service_fline_trap`].
     pub(super) fn ec030_acu_instruction_next(&self) -> bool {
-        self.cpu.cpu_type == CpuType::M68EC030 && is_pmmu_general(self.bus.peek_word(self.cpu.pc))
+        if self.cpu.cpu_type != CpuType::M68EC030 {
+            return false;
+        }
+        // The opword the core will fetch: the instruction cache's copy when
+        // it holds one (it does not snoop writes, so it can be stale),
+        // otherwise memory.
+        let pc = self.bus.mask(self.cpu.pc);
+        let opword = match self.bus.cache_read(pc, 2, CpuBusAccessKind::Fetch) {
+            Some(word) => word as u16,
+            None => self.bus.peek_word(pc),
+        };
+        is_pmmu_general(opword)
     }
 
     /// Finish an F-line instruction the core surfaced instead of executing:
@@ -83,7 +99,12 @@ impl M68kMachine {
         if !self.cpu.is_supervisor() {
             return self.cpu.exception_privilege(&mut self.bus);
         }
-        match self.ec030_acu_execute(opcode) {
+        let outcome = self.ec030_acu_execute(opcode);
+        if self.acu_faulted() {
+            self.end_faulted_acu_instruction();
+            return outcome.unwrap_or(0);
+        }
+        match outcome {
             Some(mut cycles) => {
                 if self.cpu.check_trace() {
                     cycles += self.cpu.exception_trace(&mut self.bus);
@@ -94,11 +115,40 @@ impl M68kMachine {
         }
     }
 
+    /// Whether one of the current instruction's accesses took a bus or
+    /// address error. The core has then already stacked the fault and
+    /// entered its handler, and turns further accesses into no-ops.
+    fn acu_faulted(&self) -> bool {
+        self.cpu.run_mode == RUN_MODE_BERR_AERR_RESET
+    }
+
+    /// Close out a faulted ACU instruction, as the core's
+    /// `end_faulted_instruction` does for its own: resume at the handler
+    /// entry and leave the fault run mode. An extension fetch after the
+    /// fault still advanced the PC from there, so the entry is re-read from
+    /// the vector just taken. A double fault has halted the CPU, which
+    /// keeps the fault run mode until reset.
+    fn end_faulted_acu_instruction(&mut self) {
+        if self.cpu.stopped != 0 {
+            return;
+        }
+        if let Some(vector) = self.cpu.last_exception_vector {
+            let entry = self.cpu.vbr.wrapping_add(vector.wrapping_mul(4));
+            self.cpu.pc = self.bus.peek_long(entry);
+        }
+        self.cpu.run_mode = RUN_MODE_NORMAL;
+    }
+
     /// Execute supervisor-mode PMMU opcode `opcode` on the EC030's ACU.
     /// `None` means the encoding is not an ACU instruction and the caller
-    /// raises Line-F.
+    /// raises Line-F (unless an access faulted, see
+    /// [`Self::acu_faulted`]). No ACU register changes once an access has
+    /// faulted.
     fn ec030_acu_execute(&mut self, opcode: u16) -> Option<i32> {
         let ext = self.cpu.read_imm_16(&mut self.bus);
+        if self.acu_faulted() {
+            return None;
+        }
         let mode = ((opcode >> 3) & 7) as u8;
         let reg = (opcode & 7) as u8;
         let to_memory = ext & 0x0200 != 0;
@@ -116,6 +166,9 @@ impl M68kMachine {
                     self.cpu.write_32(&mut self.bus, addr, value);
                 } else {
                     let value = self.cpu.read_32(&mut self.bus, addr);
+                    if self.acu_faulted() {
+                        return Some(4);
+                    }
                     if preg == 2 {
                         self.cpu.mmu_tt0 = value;
                     } else {
@@ -143,7 +196,11 @@ impl M68kMachine {
                     let value = self.cpu.mmu_sr as u16;
                     self.cpu.write_16(&mut self.bus, addr, value);
                 } else {
-                    self.cpu.mmu_sr = u32::from(self.cpu.read_16(&mut self.bus, addr));
+                    let value = self.cpu.read_16(&mut self.bus, addr);
+                    if self.acu_faulted() {
+                        return Some(4);
+                    }
+                    self.cpu.mmu_sr = u32::from(value);
                 }
                 Some(4)
             }
@@ -183,7 +240,7 @@ impl M68kMachine {
         }
         let am = AddressingMode::decode(mode, reg)?;
         match self.cpu.resolve_ea(&mut self.bus, am, Size::Long) {
-            EaResult::Memory(addr) => Some(addr),
+            EaResult::Memory(addr) if !self.acu_faulted() => Some(addr),
             _ => None,
         }
     }
