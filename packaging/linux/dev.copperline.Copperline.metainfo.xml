@@ -60,6 +60,11 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="1.0.1" date="2026-10-18">
+      <description>
+        <p>A maintenance release for Copperline 1.0. AGA machines now keep the $D8 bitplane fetch stop as the real chipset does, which fixes sheared pictures such as Pacmania on the A1200, and the blitter no longer loses its last word when a fast CPU sets up the next blit early. Warm reboots on the A3000 and A4000 no longer look like cold starts, so the Kickstart 3.2 boot menu works, and the 68060 starts with its FPU disabled as real boards do. The copperhf hard-disk driver works with HDToolBox and under the JIT, A2065 Ethernet honours receive filters, dropped ZIP floppy images load, fast host mice no longer move backwards, and resizing the window no longer hangs on some Windows systems. Settings changed from the menu are now remembered, screenshots save the picture as it is displayed, the drive counter can show cylinder and side, and WinUAE floppy sound sets can be used. WHDLoad 20.1 and security updates to bundled libraries are included.</p>
+      </description>
+    </release>
     <release version="1.0.0" date="2026-10-10">
       <description>
         <p>Copperline 1.0, the first stable release. A new Smart framing mode recentres the picture within bounds and, with integer scaling and autocrop, fits the full display at the largest whole-pixel scale. Native 1:1 screenshots save the original Amiga pixels. The window can open scaled, maximized, at a chosen position or on a chosen monitor, and its title shows the machine and ROM. VHD hard-disk images attach read/write, the bundled A2091 ROM uses Fast RAM for bounce buffers, and AGA sprites that use SSCAN2 scan-doubling now match at the right positions. The About panel has a Check for updates button that contacts GitHub only when pressed. WinUAE-style debug output ports are supported, the bundled AROS ROM is refreshed with about 35 KB more free memory, and the app now declares its real macOS minimum, 14.2.</p>
