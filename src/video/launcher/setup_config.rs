@@ -486,7 +486,7 @@ impl MachineSetup {
             raw.input.port3 = None;
             raw.input.port4 = None;
         }
-        if self.cpu != CpuModel::M68060 {
+        if !self.cpu.is_68060() {
             raw.cpu.unimplemented = None;
         }
         // The slot holds one card: a host disk attached there displaces it.

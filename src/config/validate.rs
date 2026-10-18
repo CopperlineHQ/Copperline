@@ -46,6 +46,12 @@ impl TryFrom<RawConfig> for Config {
                 "[cpu] fpu = true needs the 68020+ coprocessor interface; \
                  a 68000/68010 cannot drive a 68881/68882"
             ));
+        } else if fpu && !cpu.can_have_fpu() {
+            errors.push(anyhow!(
+                "[cpu] fpu = true: the 68EC040/68EC060 have no FPU and no \
+                 coprocessor interface to add one (use the 68040/68060 for \
+                 an on-die FPU)"
+            ));
         }
         // The on-chip caches are silicon: model them by default whenever the
         // CPU has them (AmigaOS turns them on via CACR), so a 020/030 matches
@@ -70,9 +76,9 @@ impl TryFrom<RawConfig> for Config {
                         UnimplementedPolicy::Trap
                     }
                 };
-                if cpu != CpuModel::M68060 {
+                if !cpu.is_68060() {
                     errors.push(anyhow!(
-                        "[cpu] unimplemented applies only to the 68060 \
+                        "[cpu] unimplemented applies only to the 68060/68EC060 \
                          (other models implement their full instruction sets)"
                     ));
                 }
@@ -81,13 +87,13 @@ impl TryFrom<RawConfig> for Config {
         };
         if cpu_icache && !cpu.has_instruction_cache() {
             errors.push(anyhow!(
-                "[cpu] icache = true needs a 68020/68EC020/68030/68040 \
-                 (the 68000 has no instruction cache)"
+                "[cpu] icache = true needs a 68020 or later \
+                 (the 68000/68010 have no instruction cache)"
             ));
         }
         if cpu_dcache && !cpu.has_data_cache() {
             errors.push(anyhow!(
-                "[cpu] dcache = true needs a 68030 or 68040 \
+                "[cpu] dcache = true needs a 68030, 68040 or 68060 \
                  (the 68000/68020 have no data cache)"
             ));
         }
@@ -1111,7 +1117,7 @@ impl TryFrom<RawConfig> for Config {
         if raw.zz9k.enabled.unwrap_or(false) {
             let version = match raw.zz9k.zorro {
                 None => {
-                    if cpu_has_32bit_bus(cpu) {
+                    if cpu.has_32bit_bus() {
                         ZorroVersion::III
                     } else {
                         ZorroVersion::II
@@ -1238,7 +1244,7 @@ impl TryFrom<RawConfig> for Config {
             .iter()
             .chain(wasm_boards.iter().map(|w| &w.spec));
         for board in board_specs {
-            if board.version == ZorroVersion::III && !cpu_has_32bit_bus(cpu) {
+            if board.version == ZorroVersion::III && !cpu.has_32bit_bus() {
                 errors.push(anyhow!(
                     "zorro board {:?} is Zorro III, which needs a 32-bit CPU \
                      (68020/68030/68040/68060); {:?} has a 24-bit address bus",
@@ -1821,8 +1827,12 @@ fn parse_cpu(s: &str) -> Result<CpuModel> {
         "68030" | "030" => Ok(CpuModel::M68030),
         "68040" | "040" => Ok(CpuModel::M68040),
         "68060" | "060" => Ok(CpuModel::M68060),
+        "68ec030" | "ec030" => Ok(CpuModel::M68EC030),
+        "68ec040" | "ec040" => Ok(CpuModel::M68EC040),
+        "68ec060" | "ec060" => Ok(CpuModel::M68EC060),
         _ => Err(anyhow!(
-            "unknown cpu model {:?}: expected 68000 / 68010 / 68EC020 / 68020 / 68030 / 68040 / 68060",
+            "unknown cpu model {:?}: expected 68000 / 68010 / 68EC020 / 68020 / \
+             68EC030 / 68030 / 68EC040 / 68040 / 68EC060 / 68060",
             s
         )),
     }
@@ -2046,7 +2056,7 @@ pub fn machine_profile_defaults(model: MachineModel) -> Config {
     // a Zorro III board, so the gate is the same one Zorro III RAM uses: a
     // CPU with a 32-bit address bus. That is the A3000 and A4000 today, and
     // any future profile that qualifies, without a model list to maintain.
-    if cpu_has_32bit_bus(d.cpu) {
+    if d.cpu.has_32bit_bus() {
         d.rtg = RtgCard::Z3660;
     }
     d
@@ -2316,7 +2326,7 @@ fn validate_mb_ram(mb: usize, mem_controller: MemController, cpu: CpuModel) -> R
              fitted by the A3000/A4000 profiles)"
         );
     }
-    if !cpu_has_32bit_bus(cpu) {
+    if !cpu.has_32bit_bus() {
         bail!(
             "motherboard RAM ends at $08000000, beyond a 24-bit address bus: \
              {:?} cannot reach it (needs a 68020/68030/68040/68060)",
@@ -2361,7 +2371,7 @@ fn validate_accel_ram(accel: usize, cpu: CpuModel) -> Result<()> {
     if accel == 0 {
         return Ok(());
     }
-    if !cpu_has_32bit_bus(cpu) {
+    if !cpu.has_32bit_bus() {
         bail!(
             "accelerator RAM sits at $08000000-$0FFFFFFF, beyond a 24-bit \
              address bus: {:?} cannot reach it (needs a 68020/68030/68040/68060)",
@@ -2378,15 +2388,8 @@ fn validate_accel_ram(accel: usize, cpu: CpuModel) -> Result<()> {
     Ok(())
 }
 
-fn cpu_has_32bit_bus(cpu: CpuModel) -> bool {
-    matches!(
-        cpu,
-        CpuModel::M68020 | CpuModel::M68030 | CpuModel::M68040 | CpuModel::M68060
-    )
-}
-
 fn validate_rtg_card(rtg: RtgCard, vram_bytes: usize, cpu: CpuModel) -> Result<()> {
-    if rtg == RtgCard::Z3660 && !cpu_has_32bit_bus(cpu) {
+    if rtg == RtgCard::Z3660 && !cpu.has_32bit_bus() {
         bail!(
             "[rtg] card = \"z3660\" is a Zorro III board and needs a CPU \
              with a 32-bit address bus (68020/68030/68040/68060); {:?} has \
@@ -2394,7 +2397,7 @@ fn validate_rtg_card(rtg: RtgCard, vram_bytes: usize, cpu: CpuModel) -> Result<(
             cpu
         );
     }
-    if rtg == RtgCard::GraffityZ3 && !cpu_has_32bit_bus(cpu) {
+    if rtg == RtgCard::GraffityZ3 && !cpu.has_32bit_bus() {
         bail!(
             "[rtg] card = \"graffityz3\" is a Zorro III board and needs a CPU \
              with a 32-bit address bus (68020/68030/68040/68060); {:?} has \
@@ -2419,7 +2422,7 @@ fn validate_z3_ram(z3: usize, cpu: CpuModel) -> Result<()> {
     if z3 == 0 {
         return Ok(());
     }
-    if !cpu_has_32bit_bus(cpu) {
+    if !cpu.has_32bit_bus() {
         bail!(
             "Zorro III RAM needs a CPU with a 32-bit address bus \
              (68020/68030/68040/68060); {:?} has a 24-bit bus",

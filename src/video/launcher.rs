@@ -1393,12 +1393,19 @@ impl MachineSetup {
         // `reason` is returned when the applicability condition is *false*.
         let reason = |applicable: bool, why: &'static str| (!applicable).then_some(why);
         match field {
-            F::Fpu => reason(self.cpu != CpuModel::M68000, "needs 68020+"),
+            F::Fpu => reason(
+                self.cpu.can_have_fpu(),
+                if matches!(self.cpu, CpuModel::M68000 | CpuModel::M68010) {
+                    "needs 68020+"
+                } else {
+                    "EC part: no FPU"
+                },
+            ),
             // Gate on the model's actual cache capability so the launcher tracks
             // CpuModel rather than a second hand-maintained list (the 040 has
             // both caches; only the 68000 has neither).
             F::Icache => reason(self.cpu.has_instruction_cache(), "needs 68020+"),
-            F::Dcache => reason(self.cpu.has_data_cache(), "needs 68030/040"),
+            F::Dcache => reason(self.cpu.has_data_cache(), "needs 68030+"),
             // The 68000/68010 shared-bus float model needs the precise
             // core, so the JIT never engages there (see cpu.rs).
             F::Jit => reason(
@@ -5883,10 +5890,7 @@ impl LauncherState {
 // --- helpers --------------------------------------------------------------
 
 fn cpu_is_32bit(cpu: CpuModel) -> bool {
-    matches!(
-        cpu,
-        CpuModel::M68020 | CpuModel::M68030 | CpuModel::M68040 | CpuModel::M68060
-    )
+    cpu.has_32bit_bus()
 }
 
 /// Whether `field` appears anywhere with the given row kind. Used to classify a
@@ -6494,8 +6498,11 @@ fn cpu_name(cpu: CpuModel) -> &'static str {
         CpuModel::M68010 => "68010",
         CpuModel::M68EC020 => "68EC020",
         CpuModel::M68020 => "68020",
+        CpuModel::M68EC030 => "68EC030",
         CpuModel::M68030 => "68030",
+        CpuModel::M68EC040 => "68EC040",
         CpuModel::M68040 => "68040",
+        CpuModel::M68EC060 => "68EC060",
         CpuModel::M68060 => "68060",
     }
 }

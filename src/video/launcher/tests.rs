@@ -2037,6 +2037,38 @@ fn launcher_cycles_to_the_68060_with_50mhz_defaults() {
 }
 
 #[test]
+fn launcher_offers_the_mmu_less_ec_parts() {
+    let mut s = MachineSetup::default();
+    for model in [CpuModel::M68EC030, CpuModel::M68EC040, CpuModel::M68EC060] {
+        for _ in 0..CPUS.len() {
+            if s.cpu == model {
+                break;
+            }
+            s.cycle(LauncherField::Cpu, true);
+        }
+        assert_eq!(s.cpu, model, "cycled to {model:?}");
+        assert!(!s.fpu, "{model:?} has no FPU by default");
+        assert!(s.toggle_value(LauncherField::Icache), "{model:?}");
+        assert!(s.toggle_value(LauncherField::Dcache), "{model:?}");
+        assert_eq!(s.disabled_reason(LauncherField::Z3Ram), None, "{model:?}");
+        let raw = s.to_raw();
+        assert_eq!(
+            raw.cpu.model.as_deref(),
+            Some(format!("{model:?}").trim_start_matches('M')),
+            "{model:?} round-trips through the config"
+        );
+    }
+    // The EC030 can still take a 68881/68882; the EC040/EC060 cannot.
+    s.cpu = CpuModel::M68EC030;
+    assert_eq!(s.disabled_reason(LauncherField::Fpu), None);
+    s.cpu = CpuModel::M68EC040;
+    assert_eq!(
+        s.disabled_reason(LauncherField::Fpu),
+        Some("EC part: no FPU")
+    );
+}
+
+#[test]
 fn launcher_exposes_both_cache_toggles_for_the_68040() {
     let mut s = MachineSetup::default();
     // Step the CPU selector along to the 68040.
