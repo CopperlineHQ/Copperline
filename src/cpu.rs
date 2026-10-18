@@ -15,6 +15,8 @@ use log::{debug, trace};
 use m68k::core::memory::{BusFault, BusFaultKind};
 use m68k::{AddressBus, BatchExit, CpuCore, CpuType, FastMem, StepResult};
 
+mod ec030_acu;
+
 pub const CIA_A_BASE: u32 = 0x00BF_E000;
 pub const CIA_A_SIZE: u32 = 0x0000_1000;
 pub const CIA_B_BASE: u32 = 0x00BF_D000;
@@ -471,7 +473,7 @@ pub fn build(
     let mut machine = M68kMachine::new(bus, cpu_model, fpu_enabled)?;
     machine.cpu.emulate_unimplemented_060 =
         unimplemented == crate::config::UnimplementedPolicy::Native;
-    if cpu_model == CpuModel::M68060 && unimplemented == crate::config::UnimplementedPolicy::Trap {
+    if cpu_model.is_68060() && unimplemented == crate::config::UnimplementedPolicy::Trap {
         log::info!(
             "68060 unimplemented instructions will trap faithfully: the OS \
              needs 68060.library (or set [cpu] unimplemented = \"native\")"
@@ -489,6 +491,14 @@ impl M68kMachine {
     pub fn new(bus: Bus, cpu_model: CpuModel, fpu_enabled: bool) -> Result<Self> {
         let mut cpu = CpuCore::new();
         cpu.set_cpu_type(cpu_type_for_model(cpu_model));
+        // The EC parts have no paged MMU, but the core types they run on
+        // (060, LC040) may carry one. With it removed, translation never
+        // engages: the EC060's TC, URP and SRP still take MOVEC without an
+        // exception (the E/P bits are simply undefined), its PFLUSH is a
+        // no-op and PLPA never changes An (MC68060UM appendix B.2).
+        if !cpu_model.has_mmu() {
+            cpu.has_pmmu = false;
+        }
         cpu.address_mask = address_mask_for_model(cpu_model);
         // The 060 FPU (fitted or absent) is gated by PCR.DFP, which
         // `reset_cpu` sets on every reset -- including the one below.
@@ -3140,11 +3150,21 @@ impl M68kMachine {
                 let cpu_was_stopped = self.cpu.is_stopped();
                 // The no-op handler declines every trap, so the CPU takes the
                 // real exception -- the plain step() would surface traps as
-                // StepResults instead of raising them.
-                match self
-                    .cpu
-                    .step_with_hle_handler(&mut self.bus, &mut m68k::NoOpHleHandler)
-                {
+                // StepResults instead of raising them. That is what an EC030
+                // PMMU instruction needs: the core reports it as Line-F and
+                // the access control unit model completes it.
+                let step = if self.ec030_acu_instruction_next() {
+                    match self.cpu.step(&mut self.bus) {
+                        StepResult::FlineTrap { opcode } => StepResult::Ok {
+                            cycles: self.service_fline_trap(opcode),
+                        },
+                        other => other,
+                    }
+                } else {
+                    self.cpu
+                        .step_with_hle_handler(&mut self.bus, &mut m68k::NoOpHleHandler)
+                };
+                match step {
                     StepResult::Ok { cycles } => {
                         if DEBUG_HOOKS && self.bus.bus.smc.is_some() {
                             // Mark the instruction just retired as code.
@@ -3367,8 +3387,10 @@ impl M68kMachine {
                         .saturating_add(JIT_CPU_CLOCKS_PER_INSTRUCTION);
                     instructions = instructions.saturating_add(1);
                 }
-                BatchExit::FlineTrap { .. } => {
-                    let cycles = self.cpu.take_fline_exception(&mut self.bus);
+                // An EC030 PMMU instruction completes in the access control
+                // unit model instead of trapping.
+                BatchExit::FlineTrap { opcode } => {
+                    let cycles = self.service_fline_trap(opcode);
                     batch_clocks = batch_clocks
                         .saturating_add(positive_cpu_cycles(cycles))
                         .saturating_add(JIT_CPU_CLOCKS_PER_INSTRUCTION);
@@ -5256,11 +5278,26 @@ fn cpu_type_for_model(model: CpuModel) -> CpuType {
         CpuModel::M68010 => CpuType::M68010,
         CpuModel::M68EC020 => CpuType::M68EC020,
         CpuModel::M68020 => CpuType::M68020,
+        CpuModel::M68EC030 => CpuType::M68EC030,
         CpuModel::M68030 => CpuType::M68030,
         // Full 68040: FPU on-die (default_fpu) and the MMU enabled (has_pmmu).
-        // The FPU-less LC/EC variants are not modelled (see CpuModel docs).
+        // `fpu = false` keeps this type and pre-empts FP opcodes in
+        // `force_fpu_line_f_if_needed`.
         CpuModel::M68040 => CpuType::M68040,
-        CpuModel::M68060 => CpuType::M68060,
+        // The EC040 replaces the paged MMU with an access control unit
+        // whose registers answer at the MMU's MOVEC codes (TC and MMUSR are
+        // the ACU's control/status pair, ITT/DTT its IACR/DACR; MC68040UM
+        // appendix B.6), and PTEST/PFLUSH raise no exception. The core's
+        // M68EC040 type traps those MOVEC codes as illegal instead -- AROS's
+        // 040 boot path clears TC with MOVEC and dies there -- so run the
+        // LC040 type, which differs from it only in that MOVEC table, with
+        // the paged MMU removed by `M68kMachine::new`.
+        // TODO: map to CpuType::M68EC040 once the core's EC040 MOVEC set
+        // follows appendix B.6.
+        CpuModel::M68EC040 => CpuType::M68LC040,
+        // The EC060 is the 060 execution unit; `M68kMachine::new` removes
+        // its paged MMU, and its missing FPU is `fpu_present = false`.
+        CpuModel::M68060 | CpuModel::M68EC060 => CpuType::M68060,
     }
 }
 
@@ -5276,11 +5313,10 @@ fn cache_lines_for_cpu_type(cpu_type: CpuType) -> usize {
 }
 
 fn address_mask_for_model(model: CpuModel) -> u32 {
-    match model {
-        CpuModel::M68000 | CpuModel::M68010 | CpuModel::M68EC020 => ADDRESS_MASK_24BIT,
-        CpuModel::M68020 | CpuModel::M68030 | CpuModel::M68040 | CpuModel::M68060 => {
-            ADDRESS_MASK_32BIT
-        }
+    if model.has_32bit_bus() {
+        ADDRESS_MASK_32BIT
+    } else {
+        ADDRESS_MASK_24BIT
     }
 }
 
@@ -8904,6 +8940,285 @@ mod tests {
 
             machine.reset_after_bus_reset();
             assert_eq!(machine.cpu.pcr, reset_pcr, "after reset, fpu={fpu}");
+        }
+        Ok(())
+    }
+
+    /// Exception handlers for the MMU-less CPU tests: each records its
+    /// vector in D7 and parks, so a test can tell "no exception" (D7 = 0)
+    /// from the bus error, illegal instruction, privilege violation, trace
+    /// or Line-F an MMU-less part must not (or must) raise.
+    fn install_parking_handlers(bus: &mut Bus) {
+        for (vector, handler) in [
+            (2u16, 0x0200u32),
+            (4, 0x0210),
+            (8, 0x0220),
+            (9, 0x0240),
+            (11, 0x0230),
+        ] {
+            write_chip_long(bus, u32::from(vector) * 4, handler);
+            write_program(bus, handler, &[0x7E00 | vector, 0x60FE]); // MOVEQ #v,D7 ; BRA.S *
+        }
+    }
+
+    /// The EC030's access control unit program: AC0 round trip, a PTEST
+    /// hit and miss, PFLUSHA, and the TC encodings the part lacks.
+    const EC030_ACU_PROGRAM: [u16; 31] = [
+        0xF038, 0x0800, 0x3000, // PMOVE $3000.W,AC0
+        0xF038, 0x0A00, 0x3004, // PMOVE AC0,$3004.W
+        0x207C, 0x0012, 0x3456, // MOVEA.L #$00123456,A0
+        0xF010, 0x8211, // PTESTR #1,(A0)
+        0xF038, 0x6200, 0x3008, // PMOVE ACUSR,$3008.W
+        0x207C, 0x0100, 0x0000, // MOVEA.L #$01000000,A0
+        0xF010, 0x8211, // PTESTR #1,(A0)
+        0xF038, 0x6200, 0x300A, // PMOVE ACUSR,$300A.W
+        0xF000, 0x2400, // PFLUSHA
+        0xF038, 0x4200, 0x300C, // PMOVE TC,$300C.W
+        0xF038, 0x4000, 0x3010, // PMOVE $3010.W,TC
+        0x7007, // MOVEQ #7,D0
+    ];
+
+    fn ec030_acu_machine(jit: bool) -> Result<M68kMachine> {
+        let mut bus = test_bus_with_pc(0x0000_0100);
+        write_program(&mut bus, 0x0000_0100, &EC030_ACU_PROGRAM);
+        install_parking_handlers(&mut bus);
+        // AC0: enabled, $00xxxxxx, any function code, reads and writes.
+        write_chip_long(&mut bus, 0x3000, 0x0000_8107);
+        write_chip_long(&mut bus, 0x3008, 0xFFFF_FFFF);
+        write_chip_long(&mut bus, 0x300C, 0xFFFF_FFFF);
+        // A TC value that would enable a 68030's translation.
+        write_chip_long(&mut bus, 0x3010, 0x80C0_7760);
+        let mut machine = M68kMachine::new(bus, CpuModel::M68EC030, false)?;
+        machine.bus_mut().agnus.hpos = 0x21;
+        machine.set_jit_enabled(jit);
+        Ok(machine)
+    }
+
+    #[test]
+    fn ec030_access_control_unit_answers_pmmu_instructions() -> Result<()> {
+        // The 68EC030 has an access control unit where the 68030's PMMU
+        // sits: PMOVE reaches AC0/AC1/ACUSR, PTEST sets ACUSR bit 6 on an
+        // AC match, PFLUSH has no effect, and none of them trap (M68000PRM
+        // PMOVE/PTEST (MC68EC030)). The batch path surfaces the core's
+        // Line-F the same way as the precise step, so both must agree.
+        for jit in [false, true] {
+            let mut machine = ec030_acu_machine(jit)?;
+            assert!(!machine.cpu.has_pmmu, "the EC030 has no paged MMU");
+            assert_eq!(
+                machine.jit_enabled() && machine.jit_fast_path_ok(),
+                jit,
+                "batch path in use"
+            );
+            machine.step_slice(13)?;
+
+            assert_eq!(machine.d(7), 0, "no exception, jit={jit}");
+            assert_eq!(machine.d(0), 7, "ran to the end, jit={jit}");
+            assert_eq!(machine.cpu.mmu_tt0, 0x0000_8107, "AC0 loaded, jit={jit}");
+            assert_eq!(read_chip_long(machine.bus(), 0x3004), 0x0000_8107);
+            assert_eq!(
+                read_chip_word(machine.bus(), 0x3008),
+                0x0040,
+                "PTEST inside AC0 sets ACUSR.AC, jit={jit}"
+            );
+            assert_eq!(
+                read_chip_word(machine.bus(), 0x300A),
+                0x0000,
+                "PTEST outside AC0/AC1 clears it, jit={jit}"
+            );
+            assert_eq!(
+                machine.cpu.a(0),
+                0x0100_0000,
+                "PTEST leaves An alone, jit={jit}"
+            );
+            assert_eq!(
+                read_chip_long(machine.bus(), 0x300C),
+                0,
+                "there is no TC to read back, jit={jit}"
+            );
+            assert_eq!(machine.cpu.mmu_tc, 0, "a TC write is dropped, jit={jit}");
+            assert!(
+                !machine.cpu.pmmu_enabled,
+                "translation stays off, jit={jit}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ec030_acu_dispatches_the_opword_in_the_instruction_cache() -> Result<()> {
+        // The instruction cache does not snoop writes: after the CPU
+        // overwrites a cached PFLUSHA with a NOP, the next pass still
+        // fetches PFLUSHA, which the ACU must execute rather than leave
+        // to the core's Line-F. The precise loop picks the core step from
+        // a look at the next opword, so that look must go through the
+        // cache too; the batch path services the opcode the core fetched.
+        let program = [
+            0x7001u16, // MOVEQ #1,D0
+            0x4E7B, 0x0002, // MOVEC D0,CACR (instruction cache on)
+            0xF000, 0x2400, // $1006: PFLUSHA
+            0x33FC, 0x4E71, 0x0000, 0x1006, // MOVE.W #$4E71,$1006 (NOP)
+            0x5201, // ADDQ.B #1,D1
+            0x0C01, 0x0002, // CMPI.B #2,D1
+            0x66EC, // BNE.S $1006
+            0x7407, // MOVEQ #7,D2
+        ];
+        let mut bus = test_bus_with_pc(0x0000_1000);
+        write_program(&mut bus, 0x0000_1000, &program);
+        install_parking_handlers(&mut bus);
+        let mut machine = M68kMachine::new(bus, CpuModel::M68EC030, false)?;
+        machine.bus_mut().agnus.hpos = 0x21;
+        machine.set_cache_emulation(true, false);
+        machine.step_slice(13)?;
+        assert_eq!(machine.d(7), 0, "no Line-F");
+        assert_eq!(machine.d(1) & 0xFF, 2, "both passes ran");
+        assert_eq!(machine.d(2), 7, "ran to the end");
+        Ok(())
+    }
+
+    #[test]
+    fn ec030_acu_bus_error_commits_nothing_and_takes_no_trace() -> Result<()> {
+        // A bus error on any of an ACU instruction's accesses ends it the
+        // way the core ends its own: the fault's handler runs next from
+        // its entry, AC0 keeps its value, and the trace the instruction
+        // would have raised (T1 is set) does not follow the fault.
+        let cases: [(&str, &[u16], u32); 3] = [
+            (
+                "operand read",
+                &[0xF038, 0x0800, 0x3000], // PMOVE $3000.W,AC0
+                0x3000,
+            ),
+            (
+                "extension word fetch",
+                &[0xF038, 0x0800, 0x3000], // PMOVE $3000.W,AC0
+                0x0106,
+            ),
+            (
+                // The outer displacement is still fetched after the base
+                // displacement faults, from the handler entry onwards.
+                "base displacement fetch",
+                &[0xF030, 0x0800, 0x0172, 0x0000, 0x3000, 0x0004], // PMOVE ([$3000.L,A0],4),AC0
+                0x010A,
+            ),
+        ];
+        for (name, pmove, fault_at) in cases {
+            for jit in [false, true] {
+                let mut bus = test_bus_with_pc(0x0000_0100);
+                write_program(&mut bus, 0x0000_0100, &[0x46FC, 0xA700]); // MOVE #$A700,SR (T1)
+                write_program(&mut bus, 0x0000_0104, pmove);
+                write_program(&mut bus, 0x0000_0104 + 2 * pmove.len() as u32, &[0x7407]); // MOVEQ #7,D2
+                install_parking_handlers(&mut bus);
+                bus.inject_bus_fault(crate::bus::FaultInjection {
+                    start: fault_at,
+                    end: fault_at + 3,
+                    on_read: true,
+                    on_write: false,
+                    remaining: Some(1),
+                    hits: 0,
+                });
+                let mut machine = M68kMachine::new(bus, CpuModel::M68EC030, false)?;
+                machine.bus_mut().agnus.hpos = 0x21;
+                machine.cpu.mmu_tt0 = 0x1234_8107;
+                machine.set_jit_enabled(jit);
+                // MOVE to SR, the faulting PMOVE, then the bus error
+                // handler's MOVEQ and its parking branch.
+                machine.step_slice(4)?;
+                assert_eq!(machine.d(7), 2, "{name}: bus error handler, jit={jit}");
+                assert_eq!(machine.pc(), 0x0000_0202, "{name}: parked in it, jit={jit}");
+                assert_eq!(
+                    machine.cpu.mmu_tt0, 0x1234_8107,
+                    "{name}: AC0 kept, jit={jit}"
+                );
+                assert_ne!(
+                    machine.d(2),
+                    7,
+                    "{name}: the PMOVE did not complete, jit={jit}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ec030_pmmu_instructions_are_privileged_and_validate_their_encoding() -> Result<()> {
+        // User mode: privilege violation, as on the full 68030.
+        let mut bus = test_bus_with_pc(0x0000_0100);
+        write_program(
+            &mut bus,
+            0x0000_0100,
+            &[
+                0x41F8, 0x4000, // LEA $4000.W,A0
+                0x4E60, // MOVE A0,USP
+                0x46FC, 0x0000, // MOVE #$0000,SR (user mode)
+                0xF000, 0x2400, // PFLUSHA
+            ],
+        );
+        install_parking_handlers(&mut bus);
+        let mut machine = M68kMachine::new(bus, CpuModel::M68EC030, false)?;
+        machine.bus_mut().agnus.hpos = 0x21;
+        machine.step_slice(5)?;
+        assert_eq!(
+            machine.d(7),
+            8,
+            "user-mode PFLUSHA is a privilege violation"
+        );
+
+        // Encodings the ACU does not have stay Line-F: PMOVE to a
+        // postincrement operand (not control alterable; A0 must not step)
+        // and the 68851's PVALID.
+        for program in [[0xF018u16, 0x0A00], [0xF010, 0x2800]] {
+            let mut bus = test_bus_with_pc(0x0000_0100);
+            write_program(&mut bus, 0x0000_0100, &[0x41F8, 0x4000]); // LEA $4000.W,A0
+            write_program(&mut bus, 0x0000_0104, &program);
+            install_parking_handlers(&mut bus);
+            let mut machine = M68kMachine::new(bus, CpuModel::M68EC030, false)?;
+            machine.bus_mut().agnus.hpos = 0x21;
+            machine.step_slice(3)?;
+            assert_eq!(machine.d(7), 11, "{program:04X?} raises Line-F");
+            assert_eq!(machine.cpu.a(0), 0x4000, "{program:04X?} leaves A0 alone");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ec040_and_ec060_take_mmu_movec_but_never_translate() -> Result<()> {
+        // The EC040's access control unit answers at the MMU's MOVEC codes
+        // (MC68040UM appendix B.6), and the EC060 takes MOVEC to TC/URP/SRP
+        // without an exception (MC68060UM appendix B.2): AROS's 040 boot
+        // clears TC this way. With no paged MMU, setting TC.E then changes
+        // nothing -- the store below lands untranslated.
+        for model in [CpuModel::M68EC040, CpuModel::M68EC060] {
+            let mut bus = test_bus_with_pc(0x0000_0100);
+            write_program(
+                &mut bus,
+                0x0000_0100,
+                &[
+                    0x7000, // MOVEQ #0,D0
+                    0x4E7B, 0x0003, // MOVEC D0,TC
+                    0x4E7B, 0x0806, // MOVEC D0,URP
+                    0x4E7B, 0x0807, // MOVEC D0,SRP
+                    0x203C, 0x0000, 0x8000, // MOVE.L #$8000,D0
+                    0x4E7B, 0x0003, // MOVEC D0,TC (TC.E)
+                    0x31FC, 0x0001, 0x3000, // MOVE.W #1,$3000.W
+                    0x7407, // MOVEQ #7,D2
+                ],
+            );
+            install_parking_handlers(&mut bus);
+            let mut machine = M68kMachine::new(bus, model, false)?;
+            machine.bus_mut().agnus.hpos = 0x21;
+            assert!(!machine.cpu.has_pmmu, "{model:?} has no paged MMU");
+            machine.step_slice(8)?;
+            assert_eq!(machine.d(7), 0, "{model:?}: no exception");
+            assert_eq!(machine.d(2), 7, "{model:?}: ran to the end");
+            assert_eq!(read_chip_word(machine.bus(), 0x3000), 1, "{model:?}");
+        }
+
+        // The EC060 identifies as an LC/EC060 in PCR.
+        let machine = machine_with_program_model(0x0100, &[0x4E71], CpuModel::M68EC060)?;
+        assert_eq!(machine.cpu.pcr >> 16, 0x0431);
+        // The full parts keep their MMU.
+        for model in [CpuModel::M68030, CpuModel::M68040, CpuModel::M68060] {
+            let machine = machine_with_program_model(0x0100, &[0x4E71], model)?;
+            assert!(machine.cpu.has_pmmu, "{model:?} has its paged MMU");
         }
         Ok(())
     }

@@ -1579,13 +1579,16 @@ pub(super) const DENISE_CHOICES: [Option<DeniseRevision>; 4] = [
     Some(DeniseRevision::AgaLisa),
 ];
 pub(super) const VIDEO_CHOICES: [VideoStandard; 2] = [VideoStandard::Pal, VideoStandard::Ntsc];
-pub(super) const CPUS: [CpuModel; 7] = [
+pub(super) const CPUS: [CpuModel; 10] = [
     CpuModel::M68000,
     CpuModel::M68010,
     CpuModel::M68EC020,
     CpuModel::M68020,
+    CpuModel::M68EC030,
     CpuModel::M68030,
+    CpuModel::M68EC040,
     CpuModel::M68040,
+    CpuModel::M68EC060,
     CpuModel::M68060,
 ];
 /// Storage-idle thresholds for the Warp boot row, in emulated seconds.

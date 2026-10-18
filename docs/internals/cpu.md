@@ -314,7 +314,8 @@ has rather than silently running cacheless after a load.
 
 ## The 68060
 
-The 68060 is modelled as the full part: on-die FPU and MMU, the 8 KB
+The 68060 is modelled as the full part (the LC060 and EC060 drop its FPU,
+the EC060 its MMU too): on-die FPU and MMU, the 8 KB
 caches (in the same pragmatic direct-mapped host model as the other
 parts), and its own timing engine.
 
@@ -609,7 +610,8 @@ covers, both still open on the Copperline side:
 
 ## MMU
 
-The 68030, 68040, and 68060 model the on-chip MMU (`has_pmmu`), so software
+The 68030, 68040, and 68060 model the on-chip MMU (`has_pmmu`; the EC parts
+without one are covered at the end of this section), so software
 that sets up and enables address translation runs rather than having its MMU
 writes ignored. The 030 and 040 differ enough to need separate walkers: the
 68030 uses its programmable table walk (CRP/SRP selection, the optional
@@ -721,6 +723,50 @@ substitution on the re-executed instruction's matching access. Remaining:
 the used/modified/limit MMUSR bits and descriptor write-back, CRP limit
 checks, and the DT=1 page-descriptor root; the 030 walk has no ATC, so
 every access re-walks the tables.
+
+### The MMU-less EC parts
+
+The 68EC030, 68EC040 and 68EC060 (`CpuModel::M68EC0x0`) are the full
+parts with the paged MMU removed: `M68kMachine::new` clears `has_pmmu` for
+every model without one, so the walk never runs and every address passes
+through untranslated, whatever software writes to TC. What differs is how
+each part answers the MMU's instructions and registers:
+
+- **68EC060** runs the core's 060 type with `fpu_present` clear (PCR
+  identifies $0431, shared with the LC060). MOVEC to TC/URP/SRP takes no
+  exception (MC68060UM appendix B.2 leaves the TC E/P bits and root pointers
+  undefined), `PFLUSH` is a no-op and `PLPA` leaves An unchanged, all of
+  which follow from translation being off.
+- **68EC040** runs the core's **LC040** type. The EC040's access control
+  unit answers at the MMU's MOVEC codes -- TC and MMUSR become its
+  control/status pair and ITT/DTT its IACR/DACR (MC68040UM appendix B.6) --
+  and `PTEST`/`PFLUSH` raise no exception. The core's own EC040 type traps
+  those MOVEC codes as illegal instructions, which kills AROS's 040 boot
+  (it clears TC with MOVEC); the LC040 type differs from it only in that
+  MOVEC table and raises Line-F on FP opcodes the same way.
+- **68EC030** runs the core's EC030 type, which raises Line-F on every PMMU
+  encoding. The silicon has an access control unit there instead
+  (M68000PRM `PMOVE`/`PTEST` (MC68EC030)): `PMOVE` moves AC0/AC1 (the
+  68030's TT0/TT1 encodings and format) and ACUSR (the MMUSR encoding),
+  `PTEST` sets ACUSR bit 6 when AC0 or AC1 matches, and `PFLUSH`/`PLOAD`
+  have no effect. `cpu/ec030_acu.rs` completes those instructions from the
+  trap the core surfaces before taking it -- `StepResult::FlineTrap` from a
+  precise step (the precise loop steps a PMMU opword with the plain
+  `step()` on this part, judging the next opword through the instruction
+  cache the way the core will fetch it), `BatchExit::FlineTrap` from a JIT
+  batch -- so both paths agree. A bus error on one of the instruction's
+  accesses ends it the way the core ends its own faulted instructions:
+  nothing is committed, no trace exception follows, and execution resumes
+  at the fault handler's entry. The ACU registers live in the core's TT0/TT1/MMUSR
+  fields. `PMOVE` to TC/SRP/CRP is undefined on the EC030; it takes no
+  exception here, drops writes and reads back zero. The other ACUSR bits
+  are undefined and read as zero, and the 68030 `PTEST` form's level and
+  address-register operands are ignored. Bundled AROS needs this: it picks
+  its MMU code from AttnFlags alone, so on any 68030 it issues `PTEST`
+  without a trap handler.
+
+Both core-side gaps (the EC040's MOVEC set, the EC030's ACU) are marked
+TODO at their workarounds for when the m68k crate models them itself.
 
 ## Interrupts and STOP
 

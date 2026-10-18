@@ -156,14 +156,17 @@ pacing_budget = "cycles"
 
 [cpu]
 
-# CPU type. One of: 68000, 68010, 68EC020, 68020, 68030, 68040, 68060.
-# 68EC020 uses the 68020 instruction set with a 24-bit external address bus.
+# CPU type. One of: 68000, 68010, 68EC020, 68020, 68EC030, 68030, 68EC040,
+# 68040, 68EC060, 68060. 68EC020 uses the 68020 instruction set with a
+# 24-bit external address bus; 68EC030/68EC040/68EC060 are their full parts
+# without the paged MMU (the 040/060 ones without an FPU as well).
 model = "68000"
 
 # FPU (68881/68882 coprocessor; on-die on the full 68040/68060). Needs a
-# 68020 or later -- a 68000/68010 cannot drive one. The 68040 and 68060 enable
-# it by default; on other 020+ CPUs opt in here. fpu = false on the 68060
-# models the FPU-less LC/EC parts (PCR.DFP).
+# 68020 or later -- a 68000/68010 cannot drive one, and the 68EC040/68EC060
+# have none. The 68040 and 68060 enable it by default; on other 020+ CPUs opt
+# in here. fpu = false on the 68040/68060 models their FPU-less LC parts
+# (on the 060 through PCR.DFP).
 # fpu = true
 
 # CPU clock in MHz. Defaults to the model's stock speed (68000/68010 ~7.09,
@@ -197,7 +200,7 @@ model = "68000"
 # core, so it is ignored there). Off by default.
 # jit = true
 
-# 68060 only: the 68060 dropped MOVEP, CHK2/CMP2, CAS2, misaligned CAS,
+# 68060/68EC060 only: the 68060 dropped MOVEP, CHK2/CMP2, CAS2, misaligned CAS,
 # 64-bit MUL/DIV, and most FPU operations beyond basic arithmetic from
 # silicon. "trap" (default) raises the chip's unimplemented-instruction
 # exceptions for the OS-side 68060.library to emulate, exactly like a
