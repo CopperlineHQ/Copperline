@@ -1036,6 +1036,90 @@ impl HardDriveImage {
         }
     }
 
+    /// Read consecutive sectors from `lba` into `buf`, one sector per
+    /// `SECTOR_SIZE` bytes (a trailing partial sector is left untouched).
+    ///
+    /// The result is what [`Self::read_sector`] per sector would give, but a
+    /// raw image file or an in-memory image moves the whole run in one host
+    /// access. A controller answering a multi-sector request then pays one
+    /// seek and one read instead of both for every 512 bytes; per-sector
+    /// file I/O made large guest transfers cost far more host time than
+    /// they take in emulated time. Containers with their own sector mapping
+    /// (CHD, VHD, a session overlay, a physical disk) still go a sector at a
+    /// time.
+    pub fn read_sectors(&mut self, lba: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        let whole = buf.len() - buf.len() % SECTOR_SIZE;
+        let sectors = (whole / SECTOR_SIZE) as u64;
+        // Sectors inside the synthesized RDB cylinder come from memory.
+        let overlay = self.overlay_sectors();
+        let in_overlay = overlay.saturating_sub(lba).min(sectors) as usize * SECTOR_SIZE;
+        let (head, tail) = buf[..whole].split_at_mut(in_overlay);
+        for (i, sector) in head.chunks_exact_mut(SECTOR_SIZE).enumerate() {
+            self.read_sector(lba + i as u64, sector)?;
+        }
+        if tail.is_empty() {
+            return Ok(());
+        }
+        let lba = lba + (in_overlay / SECTOR_SIZE) as u64;
+        let file_lba = lba - overlay;
+        match &mut self.backing {
+            Backing::File(file) => {
+                file.seek(SeekFrom::Start(file_lba * SECTOR_SIZE as u64))?;
+                file.read_exact(tail)
+            }
+            Backing::Memory(image) => {
+                let off = file_lba as usize * SECTOR_SIZE;
+                tail.copy_from_slice(&image[off..off + tail.len()]);
+                Ok(())
+            }
+            _ => {
+                for (i, sector) in tail.chunks_exact_mut(SECTOR_SIZE).enumerate() {
+                    self.read_sector(lba + i as u64, sector)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Write consecutive sectors from `buf` starting at `lba`, one sector
+    /// per `SECTOR_SIZE` bytes (a trailing partial sector is ignored). The
+    /// bulk counterpart of [`Self::write_sector`]; see
+    /// [`Self::read_sectors`] for which backings move the run in one access.
+    pub fn write_sectors(&mut self, lba: u64, buf: &[u8]) -> std::io::Result<()> {
+        let whole = buf.len() - buf.len() % SECTOR_SIZE;
+        let sectors = (whole / SECTOR_SIZE) as u64;
+        // The synthesized RDB cylinder (and its write warning) stays on the
+        // per-sector path.
+        let overlay = self.overlay_sectors();
+        let in_overlay = overlay.saturating_sub(lba).min(sectors) as usize * SECTOR_SIZE;
+        let (head, tail) = buf[..whole].split_at(in_overlay);
+        for (i, sector) in head.chunks_exact(SECTOR_SIZE).enumerate() {
+            self.write_sector(lba + i as u64, sector)?;
+        }
+        if tail.is_empty() {
+            return Ok(());
+        }
+        let lba = lba + (in_overlay / SECTOR_SIZE) as u64;
+        let file_lba = lba - overlay;
+        match &mut self.backing {
+            Backing::File(file) => {
+                file.seek(SeekFrom::Start(file_lba * SECTOR_SIZE as u64))?;
+                file.write_all(tail)
+            }
+            Backing::Memory(image) => {
+                let off = file_lba as usize * SECTOR_SIZE;
+                image[off..off + tail.len()].copy_from_slice(tail);
+                Ok(())
+            }
+            _ => {
+                for (i, sector) in tail.chunks_exact(SECTOR_SIZE).enumerate() {
+                    self.write_sector(lba + i as u64, sector)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
     pub fn flush(&mut self) -> std::io::Result<()> {
         // A real disk can be pulled out of its reader, so anything still held
         // back is a hazard an image file does not have.
@@ -1714,5 +1798,140 @@ mod tests {
             assert_eq!(sum, 0, "RDB checksum rule broken for bootpri {pri}");
         }
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// `count` sectors from `lba`, read one [`HardDriveImage::read_sector`]
+    /// call at a time: the reference the bulk calls must reproduce.
+    fn sector_by_sector(disk: &mut HardDriveImage, lba: u64, count: u64) -> Vec<u8> {
+        let mut out = vec![0u8; count as usize * SECTOR_SIZE];
+        for (i, sector) in out.chunks_exact_mut(SECTOR_SIZE).enumerate() {
+            disk.read_sector(lba + i as u64, sector).unwrap();
+        }
+        out
+    }
+
+    /// Every byte distinct from its neighbours' sector, so a run read from
+    /// the wrong offset cannot pass.
+    fn patterned_sectors(count: usize, seed: u8) -> Vec<u8> {
+        (0..count * SECTOR_SIZE)
+            .map(|i| (i / SECTOR_SIZE) as u8 ^ (i as u8).wrapping_mul(7) ^ seed)
+            .collect()
+    }
+
+    #[test]
+    fn bulk_sector_transfers_match_per_sector_access_on_a_raw_image() {
+        let bytes = patterned_sectors(64, 0);
+        let path = temp_image("bulk.hdf", &bytes);
+        let mut disk = open_ide(&path);
+        assert!(
+            disk.rdb_overlay.is_none(),
+            "patterned image must not be wrapped"
+        );
+
+        let mut run = vec![0u8; 10 * SECTOR_SIZE];
+        disk.read_sectors(3, &mut run).unwrap();
+        assert_eq!(run, sector_by_sector(&mut disk, 3, 10));
+        assert_eq!(run, bytes[3 * SECTOR_SIZE..13 * SECTOR_SIZE]);
+
+        let written = patterned_sectors(4, 0xA5);
+        disk.write_sectors(20, &written).unwrap();
+        disk.flush().unwrap();
+        assert_eq!(sector_by_sector(&mut disk, 20, 4), written);
+        let on_disk = std::fs::read(&path).unwrap();
+        assert_eq!(on_disk[20 * SECTOR_SIZE..24 * SECTOR_SIZE], written);
+        // The neighbours either side of the run are untouched.
+        assert_eq!(on_disk[..20 * SECTOR_SIZE], bytes[..20 * SECTOR_SIZE]);
+        assert_eq!(on_disk[24 * SECTOR_SIZE..], bytes[24 * SECTOR_SIZE..]);
+
+        // A trailing partial sector is neither read nor written.
+        let mut ragged = vec![0xEEu8; SECTOR_SIZE + 100];
+        disk.read_sectors(1, &mut ragged).unwrap();
+        assert_eq!(ragged[..SECTOR_SIZE], bytes[SECTOR_SIZE..2 * SECTOR_SIZE]);
+        assert!(ragged[SECTOR_SIZE..].iter().all(|&b| b == 0xEE));
+        disk.write_sectors(30, &ragged).unwrap();
+        disk.flush().unwrap();
+        let on_disk = std::fs::read(&path).unwrap();
+        assert_eq!(on_disk[31 * SECTOR_SIZE..], bytes[31 * SECTOR_SIZE..]);
+
+        // A run past the end of the image fails, as its last sector would.
+        let mut past_end = vec![0u8; 2 * SECTOR_SIZE];
+        assert!(disk.read_sectors(63, &mut past_end).is_err());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn bulk_sector_transfers_straddle_the_synthesized_rdb_cylinder() {
+        let bytes = bare_partition_bytes(2);
+        let path = temp_image("bulk-bare.hdf", &bytes);
+        let mut disk = open_ide(&path);
+        let cyl = u64::from(CYL_SECTORS);
+
+        // Two overlay sectors, then the partition's first two.
+        let mut run = vec![0u8; 4 * SECTOR_SIZE];
+        disk.read_sectors(cyl - 2, &mut run).unwrap();
+        assert_eq!(run, sector_by_sector(&mut disk, cyl - 2, 4));
+        assert_eq!(&run[2 * SECTOR_SIZE..2 * SECTOR_SIZE + 4], b"DOS\x01");
+        let mut rdb = vec![0u8; 2 * SECTOR_SIZE];
+        disk.read_sectors(0, &mut rdb).unwrap();
+        assert_eq!(&rdb[..4], b"RDSK");
+        assert_eq!(&rdb[SECTOR_SIZE..SECTOR_SIZE + 4], b"PART");
+
+        // A write across the boundary: the overlay half stays in memory,
+        // the partition half lands at the start of the file.
+        let written = patterned_sectors(2, 0x3C);
+        disk.write_sectors(cyl - 1, &written).unwrap();
+        disk.flush().unwrap();
+        assert_eq!(sector_by_sector(&mut disk, cyl - 1, 2), written);
+        let on_disk = std::fs::read(&path).unwrap();
+        assert_eq!(on_disk[..SECTOR_SIZE], written[SECTOR_SIZE..]);
+        assert_eq!(on_disk[SECTOR_SIZE..], bytes[SECTOR_SIZE..]);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn bulk_sector_transfers_match_per_sector_access_in_memory_and_in_a_session() {
+        let bytes = bare_partition_bytes(2);
+        let cyl = u64::from(CYL_SECTORS);
+
+        // A gzip-compressed hardfile unpacks into an in-memory backing.
+        let packed = temp_image("bulk.hdz", &gzip(&bytes));
+        let mut memory = open_ide(&packed);
+        assert!(matches!(memory.backing, Backing::Memory(_)));
+        // A session copy keeps its own sector store (the per-sector path).
+        let plain = temp_image("bulk-session.hdf", &bytes);
+        let mut session = HardDriveImage::open_session(
+            &plain,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
+        assert!(matches!(session.backing, Backing::Session(_)));
+
+        for disk in [&mut memory, &mut session] {
+            let written = patterned_sectors(6, 0x69);
+            disk.write_sectors(cyl + 2, &written).unwrap();
+            let mut run = vec![0u8; 10 * SECTOR_SIZE];
+            disk.read_sectors(cyl, &mut run).unwrap();
+            assert_eq!(run, sector_by_sector(disk, cyl, 10));
+            assert_eq!(run[2 * SECTOR_SIZE..8 * SECTOR_SIZE], written);
+        }
+        // Neither backing reaches the host file.
+        assert_eq!(std::fs::read(&plain).unwrap(), bytes);
+
+        // A read-only session refuses a bulk write the way it refuses one
+        // sector.
+        session.set_session_read_only(true);
+        let refused = session
+            .write_sectors(cyl, &[0u8; 2 * SECTOR_SIZE])
+            .unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied);
+
+        let _ = std::fs::remove_file(&packed);
+        let _ = std::fs::remove_file(&plain);
     }
 }
