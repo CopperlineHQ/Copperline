@@ -427,6 +427,19 @@ impl Cia {
         }
     }
 
+    fn edge_step_pending(&self) -> bool {
+        self.ta_start_delay != 0
+            || self.tb_start_delay != 0
+            || self.enable_pipe_pending()
+            || self.control_pipe_pending()
+            || self.icr_read_race
+            || (self.sdr_out.is_some() && self.ta_running)
+            || (self.regs[REG_CRA] & CR_PBON != 0 && self.ta_running)
+            || (self.regs[REG_CRB] & CR_PBON != 0 && self.tb_running)
+            || self.ta_pb_pulse_low
+            || self.tb_pb_pulse_low
+    }
+
     /// CPU data sampled during E-high sees the reload mux before the
     /// falling-edge counter commit. Keep the internal counter untouched.
     pub(crate) fn read_at_transfer(&mut self, reg: usize) -> u8 {
@@ -976,23 +989,15 @@ impl Cia {
         if ticks == 0 {
             return false;
         }
-        // Resolve startup on the PHI2 grid even in CNT/cascade mode. In
-        // particular a batched call must not feed timer B underflows that
-        // happened while its own START pipeline was still filling.
-        if ticks > 1
-            && (self.ta_start_delay != 0
-                || self.tb_start_delay != 0
-                || self.enable_pipe_pending()
-                || self.control_pipe_pending())
-        {
+        // Resolve pipelines and edge-sensitive outputs on the PHI2 grid.
+        // A batch must preserve PB toggle parity and one-edge pulse widths,
+        // expire an ICR-read race after its first edge, and not spend elapsed
+        // ticks on an IRQ delay armed by serial completion at the final edge.
+        // Once these effects settle, retain arithmetic batching for timers.
+        if ticks > 1 && self.edge_step_pending() {
             let mut edge = false;
             let mut remaining = ticks;
-            while remaining != 0
-                && (self.ta_start_delay != 0
-                    || self.tb_start_delay != 0
-                    || self.enable_pipe_pending()
-                    || self.control_pipe_pending())
-            {
+            while remaining != 0 && self.edge_step_pending() {
                 edge |= self.tick(1);
                 remaining -= 1;
             }
@@ -1523,6 +1528,102 @@ mod tests {
             serde_json::to_value(&cia).unwrap(),
             serde_json::to_value(&restored).unwrap()
         );
+    }
+
+    #[test]
+    fn timer_pb_outputs_are_independent_of_tick_partitioning() {
+        for which in [Which::A, Which::B] {
+            for timer_a in [true, false] {
+                for mode in [
+                    CR_PBON,
+                    CR_PBON | CR_OUTMODE,
+                    CR_PBON | 8,
+                    CR_PBON | CR_OUTMODE | 8,
+                ] {
+                    for latch in [0, 1, 3, 15] {
+                        let mut initial = Cia::new(which);
+                        let (lo, hi, control) = if timer_a {
+                            (REG_TALO, REG_TAHI, REG_CRA)
+                        } else {
+                            (REG_TBLO, REG_TBHI, REG_CRB)
+                        };
+                        initial.write(lo, latch);
+                        initial.write(hi, 0);
+                        initial.write(control, 0x11 | mode);
+                        initial.tick(4);
+                        for ticks in [2, 3, 4, 7, 16, 33] {
+                            let mut batch = initial.clone();
+                            let mut stepped = initial.clone();
+                            let edge = batch.tick(ticks);
+                            let mut stepped_edge = false;
+                            for _ in 0..ticks {
+                                stepped_edge |= stepped.tick(1);
+                            }
+                            assert_eq!(edge, stepped_edge);
+                            assert_eq!(
+                                batch.port_b_pins(), stepped.port_b_pins(),
+                                "which={which:?} timer_a={timer_a} mode={mode} latch={latch} ticks={ticks}"
+                            );
+                            assert_eq!(
+                                serde_json::to_value(&batch).unwrap(),
+                                serde_json::to_value(&stepped).unwrap(),
+                                "which={which:?} timer_a={timer_a} mode={mode} latch={latch} ticks={ticks}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn icr_race_batch_does_not_delay_an_underflow_on_a_later_edge() {
+        let mut initial = Cia::new(Which::A);
+        initial.write(REG_ICR, 0x80 | ICR_TA);
+        initial.write(REG_TALO, 3);
+        initial.write(REG_TAHI, 0);
+        initial.write(REG_CRA, 1);
+        initial.tick(3); // Count=2; underflow is three edges away.
+        initial.read(REG_ICR);
+        let mut batch = initial.clone();
+        let mut stepped = initial.clone();
+        let edge = batch.tick(3);
+        let mut stepped_edge = false;
+        for _ in 0..3 {
+            stepped_edge |= stepped.tick(1);
+        }
+        assert_eq!(edge, stepped_edge);
+        assert_eq!(
+            serde_json::to_value(&batch).unwrap(),
+            serde_json::to_value(&stepped).unwrap()
+        );
+    }
+
+    #[test]
+    fn serial_completion_on_last_batch_edge_keeps_irq_pin_delay() {
+        let mut initial = Cia::new(Which::A);
+        initial.write(REG_TALO, 1);
+        initial.write(REG_TAHI, 0);
+        initial.write(REG_CRA, 0x51); // Output mode, START + LOAD.
+        initial.tick(5); // First reload leaves count=1.
+        initial.write(REG_ICR, 0x80 | ICR_SP);
+        initial.write(REG_SDR, 0xa5);
+        initial.tick(14); // Seven underflows; the eighth is two edges away.
+        assert_eq!(initial.sdr_shift_count, 7);
+        assert!(!initial.irq_line_asserted());
+        let mut batch = initial.clone();
+        let mut stepped = initial.clone();
+        assert!(!stepped.tick(1));
+        assert!(!stepped.tick(1));
+        assert!(
+            !batch.tick(2),
+            "serial IRQ must not precede its final-edge arm"
+        );
+        assert_eq!(
+            serde_json::to_value(&batch).unwrap(),
+            serde_json::to_value(&stepped).unwrap()
+        );
+        assert!(batch.tick(1), "serial IRQ asserts on the following edge");
     }
 
     #[test]

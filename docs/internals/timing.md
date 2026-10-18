@@ -851,6 +851,15 @@ enabled input tick. One-shot batches stop at their first underflow. A zero
 START+LOAD also produces carry on the last LOAD stage, before the first
 decrement, and can stop a one-shot there.
 
+CIA batches step individual PHI2 edges while timer PB outputs, serial output,
+an ICR-read race, or control pipelines need edge ordering. This preserves PB
+toggle parity and one-edge pulse widths, and prevents elapsed batch time from
+consuming the IRQ-pin delay of a serial completion on the final edge. Once
+these effects settle, ordinary timer counting remains batched. Regression
+tests compare complete states after identical clock sequences partitioned
+into one batch or individual edges. This is a batching consistency correction,
+not a new measurement of physical IRQ propagation or a latency recalibration.
+
 Synchronous CPU timer reads sample the reload data mux before the falling
 edge commits the counter. At an eligible PHI2 reload slot, internal count
 zero therefore reads as the latch value. This changes readout, not the
