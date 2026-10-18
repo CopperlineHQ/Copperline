@@ -107,23 +107,30 @@ enum DmaBank {
 /// or touches unmapped space). Banks are tried in [`dma_write_word`]'s order
 /// and never overlap, so a range that resolves here is exactly the bytes
 /// word-by-word accesses would reach.
+///
+/// Those accesses wrap at the top of the 32-bit address space, so a range
+/// that runs past it is no single bank's either, even where a board's
+/// window (one a guest configured at the very top) reaches beyond it. The
+/// bounds are worked in `u64` so this also holds on 32-bit hosts.
 fn dma_ram_range(mem: &Memory, addr: u32, len: usize) -> Option<(DmaBank, usize)> {
-    let a = addr as usize;
-    let end = a.checked_add(len)?;
-    if end <= mem.chip_ram.len() {
-        return Some((DmaBank::Chip, a));
+    let a = u64::from(addr);
+    let end = a.checked_add(u64::try_from(len).ok()?)?;
+    if end > 1 << 32 {
+        return None;
     }
-    let slow = SLOW_RAM_BASE as usize;
-    if a >= slow && end - slow <= mem.slow_ram.len() {
-        return Some((DmaBank::Slow, a - slow));
+    let fits = |base: u64, bank_len: usize| a >= base && end - base <= bank_len as u64;
+    if fits(0, mem.chip_ram.len()) {
+        return Some((DmaBank::Chip, a as usize));
     }
-    let mb = mem.mb_ram_base() as usize;
-    if a >= mb && end - mb <= mem.mb_ram.len() {
-        return Some((DmaBank::Motherboard, a - mb));
+    if fits(SLOW_RAM_BASE, mem.slow_ram.len()) {
+        return Some((DmaBank::Slow, (a - SLOW_RAM_BASE) as usize));
     }
-    let accel = ACCEL_RAM_BASE as usize;
-    if a >= accel && end - accel <= mem.accel_ram.len() {
-        return Some((DmaBank::Accelerator, a - accel));
+    let mb = mem.mb_ram_base();
+    if fits(mb, mem.mb_ram.len()) {
+        return Some((DmaBank::Motherboard, (a - mb) as usize));
+    }
+    if fits(ACCEL_RAM_BASE, mem.accel_ram.len()) {
+        return Some((DmaBank::Accelerator, (a - ACCEL_RAM_BASE) as usize));
     }
     mem.zorro
         .region_at(addr, len)
@@ -821,6 +828,36 @@ mod tests {
         assert_eq!(host.dma_ram(0x0040_0000, 2), None);
         assert_eq!(host.dma_ram(slow + 0xF0, 0x20), None);
         assert_eq!(host.dma_ram(0xFFFF_FFF0, 0x20), None);
+    }
+
+    #[test]
+    fn dma_ram_stops_at_the_top_of_the_address_space() {
+        // A guest may configure a Zorro III RAM board at the very top, so
+        // its window reaches past 4 GB. DMA wraps to chip RAM there, so a
+        // range across the top must take the wrapping byte/word path
+        // rather than one copy out of the board.
+        let mut mem = mem_with(0x100, 0);
+        mem.zorro
+            .add_board(crate::zorro::BoardSpec::z3_ram(128 * 1024))
+            .unwrap();
+        // er_Z3BaseAddress (offset 0x44): a word write assigns the base.
+        mem.zorro
+            .config_write(crate::zorro::AUTOCONFIG_BASE + 0x44, 2, 0xFFFF);
+        assert_eq!(mem.zorro.region_at(0xFFFF_FFF0, 0x20), Some((0, 0xFFF0)));
+        let data: Vec<u8> = (1..=0x20u8).collect();
+        {
+            let mut host = DeviceHost::new(&mut mem);
+            assert_eq!(host.dma_ram(0xFFFF_FFE0, 0x20).map(<[u8]>::len), Some(0x20));
+            assert_eq!(host.dma_ram(0xFFFF_FFF0, 0x20), None);
+            assert!(host.dma_ram_mut(0xFFFF_FFF0, 0x20).is_none());
+            host.dma_write(0xFFFF_FFF0, &data);
+            let mut back = vec![0u8; data.len()];
+            host.dma_read(0xFFFF_FFF0, &mut back);
+            assert_eq!(back, data);
+        }
+        assert_eq!(mem.zorro.board_ram(0)[0xFFF0..0x1_0000], data[..0x10]);
+        assert_eq!(mem.chip_ram[..0x10], data[0x10..]);
+        assert!(mem.zorro.board_ram(0)[0x1_0000..].iter().all(|&b| b == 0));
     }
 
     #[test]
