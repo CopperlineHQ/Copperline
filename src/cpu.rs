@@ -5776,6 +5776,130 @@ mod tests {
         Ok(machine)
     }
 
+    #[test]
+    fn cia_timer_irqs_preserve_movem_sample_phase() -> Result<()> {
+        const BASE: u32 = 0x0003_0000;
+        const SAMPLE: usize = 0x0003_1000;
+        const L2_COUNT: usize = 0x0003_2000;
+        const L6_COUNT: usize = 0x0003_2002;
+        const DONE: usize = 0x0003_2004;
+        const MAGIC: [u8; 4] = *b"CIAR";
+
+        fn read_word(mem: &[u8], at: usize) -> u16 {
+            u16::from_be_bytes([mem[at], mem[at + 1]])
+        }
+        fn fnv1a(bytes: &[u8]) -> u64 {
+            bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3)
+            })
+        }
+        fn run_phase(phase: u16) -> Result<(u16, u16, u64, Vec<u8>)> {
+            let fixture = include_bytes!("../timing-test/cia-movem-irq.bin");
+            let mut image = fixture.to_vec();
+            let phase_guards = [0xc1, 0xa1, 0xc0, 0xde, 0, 0, 0xde, 0xad, 0xfe, 0xed];
+            let guard_start = image
+                .windows(10)
+                .position(|window| window == phase_guards)
+                .expect("guarded phase word in fixture");
+            assert_eq!(
+                image
+                    .windows(10)
+                    .filter(|window| *window == phase_guards)
+                    .count(),
+                1,
+                "fixture has a unique phase patch site"
+            );
+            image[guard_start + 4..guard_start + 6].copy_from_slice(&(phase & 15).to_be_bytes());
+
+            let mut bus = test_bus_with_pc(BASE);
+            bus.irq_latency_setting = 6;
+            bus.set_cpu_bus_arbitration_enabled(true);
+            let words = image
+                .chunks_exact(2)
+                .map(|word| u16::from_be_bytes([word[0], word[1]]))
+                .collect::<Vec<_>>();
+            write_program(&mut bus, BASE, &words);
+            let mut machine = M68kMachine::new(bus, CpuModel::M68000, false)?;
+            machine.bus_mut().agnus.hpos = 0x21;
+            let mut completed = false;
+            for _ in 0..250_000 {
+                machine.step_slice(1)?;
+                if machine.stopped() {
+                    machine.bus_mut().advance_cpu_idle_devices(1);
+                }
+                let mem = &machine.bus.bus.mem.chip_ram;
+                if mem[DONE..DONE + 4] == MAGIC {
+                    completed = true;
+                    break;
+                }
+            }
+            let mem = &machine.bus.bus.mem.chip_ram;
+            assert!(
+                completed,
+                "phase {phase}: fixture failed to complete; PC={:#010x}",
+                machine.cpu.pc
+            );
+            let l2 = read_word(mem, L2_COUNT);
+            let l6 = read_word(mem, L6_COUNT);
+            let bytes = mem[SAMPLE..SAMPLE + 600].to_vec();
+            assert!(
+                l2 > 0 && l6 >= 2,
+                "phase {phase}: STOP wake and loop should observe CIA IRQs, got L2={l2} L6={l6}"
+            );
+            assert_eq!(
+                machine.a(7),
+                0x0007_fffe,
+                "phase {phase}: balanced MOVEM/RTE stack"
+            );
+            assert_eq!(
+                machine.a(1),
+                SAMPLE as u32,
+                "phase {phase}: exactly 600 predecrement stores"
+            );
+            assert!(
+                bytes.iter().all(|byte| *byte != 0xa5),
+                "phase {phase}: sample loop did not overwrite all 600 bytes"
+            );
+            Ok((l2, l6, fnv1a(&bytes), bytes))
+        }
+
+        // Frozen from the working unqualified CIA-poll baseline; these are
+        // not hardware goldens. Phases 11 and 12 are the measured production-
+        // qualification regression cases; the full sweep pins neighboring
+        // phases and their boundary.
+        let expected: [(u16, u16, u64); 16] = [
+            (1, 2, 15_119_320_034_064_197_141),
+            (1, 2, 15_119_320_034_064_197_141),
+            (1, 2, 15_119_320_034_064_197_141),
+            (1, 2, 15_119_320_034_064_197_141),
+            (1, 2, 15_119_320_034_064_197_141),
+            (1, 2, 15_119_320_034_064_197_141),
+            (1, 2, 15_119_320_034_064_197_141),
+            (1, 2, 15_119_320_034_064_197_141),
+            (1, 2, 15_119_320_034_064_197_141),
+            (1, 2, 15_119_320_034_064_197_141),
+            (1, 2, 15_119_320_034_064_197_141),
+            (1, 2, 15_419_993_572_040_101_253),
+            (1, 2, 15_419_993_572_040_101_253),
+            (1, 2, 15_419_993_572_040_101_253),
+            (1, 2, 15_419_993_572_040_101_253),
+            (1, 2, 15_419_993_572_040_101_253),
+        ];
+        for phase in 0..16 {
+            let result = run_phase(phase)?;
+            assert_eq!(
+                (result.0, result.1, result.2),
+                expected[phase as usize],
+                "phase {phase}: CIA IRQ/MOVEM sample differs from frozen baseline"
+            );
+            if phase == 0 || phase == 7 || phase == 15 {
+                let repeated = run_phase(phase)?;
+                assert_eq!(result, repeated, "phase {phase} must replay byte-for-byte");
+            }
+        }
+        Ok(())
+    }
+
     fn run_one_instruction_at(pc: u32, words: &[u16]) -> Result<CpuStepSlice> {
         let mut machine = machine_with_program(pc, words)?;
         machine.step_slice(1)

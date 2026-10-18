@@ -3293,6 +3293,67 @@ fn intena_unmask_of_latched_exter_arms_recognition_delay() {
 }
 
 #[test]
+fn cpu_poll_lead_only_advances_internal_paula_source_deadlines() {
+    fn asserted_source(source: u16, latency: u32) -> Bus {
+        let mut bus = empty_bus();
+        bus.irq_latency_setting = latency;
+        bus.paula.intena = INT_MASTER | source;
+        bus.paula.intreq = source;
+        bus.arm_irq_recognition_latency();
+        bus
+    }
+
+    let mut internal = asserted_source(INT_VERTB, 6);
+    internal.advance_chipset(2);
+    assert_eq!(internal.cpu_poll_intreq(2) & INT_VERTB, 0);
+    assert_ne!(internal.cpu_poll_intreq(4) & INT_VERTB, 0);
+    internal.advance_chipset(2);
+    assert_eq!(internal.cpu_poll_intreq(0) & INT_VERTB, 0);
+    assert_ne!(
+        internal.cpu_poll_intreq(2) & INT_VERTB,
+        0,
+        "the calibrated internal-source poll lead reaches its deadline"
+    );
+    assert_ne!(internal.cpu_poll_intreq(4) & INT_VERTB, 0);
+
+    let mut exter = asserted_source(INT_EXTER, 6);
+    exter.advance_chipset(2);
+    assert_eq!(exter.cpu_poll_intreq(4) & INT_EXTER, 0);
+    exter.advance_chipset(2);
+    assert_eq!(exter.cpu_poll_intreq(2) & INT_EXTER, 0);
+    assert_eq!(exter.cpu_poll_intreq(4) & INT_EXTER, 0);
+    exter.advance_chipset(2);
+    assert_ne!(exter.cpu_poll_intreq(2) & INT_EXTER, 0);
+
+    let mut software_exter = empty_bus();
+    software_exter.irq_latency_setting = 6;
+    software_exter.paula.intena = INT_MASTER | INT_EXTER;
+    software_exter.custom_write(0x09C, 2, u64::from(0x8000 | INT_EXTER));
+    software_exter.advance_chipset(4);
+    assert_eq!(software_exter.cpu_poll_intreq(2) & INT_EXTER, 0);
+    software_exter.advance_chipset(2);
+    assert_ne!(software_exter.cpu_poll_intreq(2) & INT_EXTER, 0);
+
+    let mut ports = asserted_source(INT_PORTS, 6);
+    ports.advance_chipset(2);
+    assert_eq!(ports.cpu_poll_intreq(4) & INT_PORTS, 0);
+    ports.advance_chipset(2);
+    assert_eq!(ports.cpu_poll_intreq(2) & INT_PORTS, 0);
+    ports.advance_chipset(2);
+    assert_ne!(ports.cpu_poll_intreq(2) & INT_PORTS, 0);
+
+    let uncalibrated = asserted_source(INT_EXTER, 0);
+    assert_ne!(uncalibrated.cpu_poll_intreq(2) & INT_EXTER, 0);
+
+    let mut accelerated = asserted_source(INT_VERTB, 6);
+    accelerated.cpu_clocks_per_cck = 4;
+    accelerated.advance_chipset(4);
+    assert_eq!(accelerated.cpu_poll_intreq(2) & INT_VERTB, 0);
+    accelerated.advance_chipset(2);
+    assert_ne!(accelerated.cpu_poll_intreq(2) & INT_VERTB, 0);
+}
+
+#[test]
 fn a_later_interrupt_source_does_not_postpone_one_already_in_the_pipe() {
     // Every source has its own path through the level encoder, so one
     // asserting cannot hold back another already on its way to the pins. A

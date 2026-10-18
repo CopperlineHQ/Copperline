@@ -24,6 +24,28 @@ The correction replaces the doubling instruction with an equal-cost NOP.
 
 ## Building
 
+`cia-movem-irq.asm` is an asset-free CPU/CIA interrupt regression fixture,
+loaded directly by `cpu::tests::cia_timer_irqs_preserve_movem_sample_phase`.
+It starts continuous CIA-B and CIA-A timers, wakes from STOP, and samples six
+register bytes per iteration while level-2/level-6 handlers permute registers
+through balanced MOVEM save/restore lists. Sixteen relative timer-start phases
+check interrupt counts and the complete 600-byte sample buffer's checksum.
+This reproduces the interrupt-sensitive pattern used by Voyage's startup
+without including its code, disk, or a Kickstart ROM. The expected values are
+regression references from the last working polling behavior, not hardware
+captures. Run it with:
+
+```sh
+cargo test --locked --lib cia_timer_irqs_preserve_movem_sample_phase
+vasmm68k_mot -Fbin -m68000 -o timing-test/cia-movem-irq.bin timing-test/cia-movem-irq.asm
+```
+
+The assembled fixture is committed so the test needs no assembler.
+Toni Wilen's WinUAE provided an independent CIA/Copper interrupt control
+comparison during diagnosis; the sample hashes remain regression references.
+See [the polling investigation](../docs/internals/a500-irq-focus-2026-10-15.md)
+for provenance and the outstanding external-interrupt measurements.
+
 Needs [vasm](http://sun.hasenbraten.de/vasm/) (`vasmm68k_mot`, Motorola syntax):
 
 ```sh
