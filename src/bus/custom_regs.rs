@@ -938,7 +938,13 @@ impl Bus {
                     );
                 }
                 let coper_was_pending = self.paula.intreq & INT_COPER != 0;
+                let previous_requests = self.paula.intreq;
                 let asserted = self.paula.write_intreq(val);
+                self.irq_copper_request_mask &= self.paula.intreq;
+                if matches!(source, BeamWriteSource::Copper) {
+                    self.irq_copper_request_mask |=
+                        self.paula.intreq & !previous_requests & (INT_PORTS | INT_EXTER);
+                }
                 let copper_asserted = matches!(source, BeamWriteSource::Copper)
                     && val & 0x8000 != 0
                     && val & INT_COPER != 0
@@ -947,7 +953,9 @@ impl Bus {
                     self.pending_copper_irq_beam = Some((self.agnus.vpos, self.agnus.hpos));
                     self.coper_cpu_irq_delay_cck = COPER_CPU_IRQ_DELAY_CCK;
                 }
-                if copper_asserted && asserted {
+                if matches!(source, BeamWriteSource::Copper) && asserted {
+                    // A new INTREQ write is a source edge even for PORTS.
+                    // Unmasking an already-latched PORTS level remains distinct.
                     self.note_irq_source_asserted();
                 } else {
                     self.note_irq_latches_changed();

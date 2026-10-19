@@ -15253,3 +15253,51 @@ fn copper_blitter_start_latches_progress_without_dma_and_cpu_is_already_strobed(
         }
     }
 }
+
+#[test]
+fn copper_written_ports_and_exter_use_internal_poll_phase_but_keep_stop_deadline() {
+    for source in [INT_PORTS, INT_EXTER] {
+        let mut bus = empty_bus();
+        bus.irq_latency_setting = 6;
+        bus.paula.intena = INT_MASTER | source;
+        bus.write_custom_word_from(0x09c, 0x8000 | source, BeamWriteSource::Copper);
+        assert_ne!(bus.paula.intreq & source, 0, "raw request is immediate");
+        assert_eq!(bus.cpu_visible_intreq() & source, 0);
+        bus.advance_chipset(4);
+        assert_eq!(bus.cpu_visible_intreq() & source, 0, "STOP still waits");
+        assert_ne!(bus.cpu_poll_intreq(2) & source, 0, "running poll qualifies");
+        bus.advance_chipset(2);
+        assert_ne!(bus.cpu_visible_intreq() & source, 0);
+        bus.write_custom_word_from(0x09c, source, BeamWriteSource::Cpu);
+        assert_eq!(bus.irq_copper_request_mask & source, 0);
+        bus.paula.intreq |= source; // A later external pin edge has no poll lead.
+        bus.arm_irq_recognition_latency();
+        bus.advance_chipset(4);
+        assert_eq!(bus.cpu_poll_intreq(2) & source, 0);
+    }
+}
+
+#[test]
+fn copper_request_origin_survives_snapshot_and_defaults_for_older_states() {
+    let mut bus = empty_bus();
+    bus.irq_latency_setting = 6;
+    bus.paula.intena = INT_MASTER | INT_EXTER;
+    bus.write_custom_word_from(0x09c, 0x8000 | INT_EXTER, BeamWriteSource::Copper);
+    bus.advance_chipset(4);
+    let payload = rmp_serde::to_vec_named(&bus).unwrap();
+    let restored: Bus = rmp_serde::from_slice(&payload).unwrap();
+    assert_eq!(restored.irq_copper_request_mask, INT_EXTER);
+    assert_ne!(restored.cpu_poll_intreq(2) & INT_EXTER, 0);
+    assert_eq!(restored.cpu_visible_intreq() & INT_EXTER, 0);
+
+    let mut old = rmpv::decode::read_value(&mut &payload[..]).unwrap();
+    let rmpv::Value::Map(fields) = &mut old else {
+        panic!("Bus snapshot must use named fields");
+    };
+    fields.retain(|(key, _)| key.as_str() != Some("irq_copper_request_mask"));
+    let mut legacy = Vec::new();
+    rmpv::encode::write_value(&mut legacy, &old).unwrap();
+    let legacy: Bus = rmp_serde::from_slice(&legacy).unwrap();
+    assert_eq!(legacy.irq_copper_request_mask, 0);
+    assert_eq!(legacy.cpu_poll_intreq(2) & INT_EXTER, 0);
+}

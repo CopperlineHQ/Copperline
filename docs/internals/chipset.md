@@ -169,9 +169,9 @@ an overlay still resume, while new proven-disjoint blits save an empty one.
 Paula owns the interrupt system (INTENA/INTREQ, delivered through the
 modelled IPL-pin pipe and 68000 boundary sampling), serial, and audio.
 
-The IPL pipeline (`DEFAULT_IRQ_LATENCY_CCK`, 5 CCK) models the propagation
-delay from interrupt assertion through the level encoder to the CPU IPL
-pins (see [interrupt-recognition latency](timing.md#interrupt-recognition-latency)):
+The recognition pipeline (`DEFAULT_IRQ_LATENCY_CCK`, 6 CCK) is calibrated
+against the combined A500 board/CPU STOP path; it is not an isolated measurement
+of propagation to the CPU IPL pins (see [interrupt-recognition latency](timing.md#interrupt-recognition-latency)):
 
 - **Independent pipelines**: each interrupt source runs its own pipe
   (the per-bit `irq_latency_visible_at` deadlines in `src/bus.rs`), so

@@ -747,7 +747,9 @@ readback:
    against the combined A500 board/CPU STOP path, rather than a direct
    measurement of Paula's IPL pins. Later sources cannot postpone an earlier
    deadline. CPU mask/acknowledge writes update the bookkeeping; unmasking a
-   latched PORTS level retains its existing immediate behavior.
+   latched PORTS level retains its existing immediate behavior. A new
+   Copper-written PORTS request is a source assertion, not an INTENA unmask,
+   and receives a recognition deadline.
 2. A running stock 68000 samples candidates at bus-access starts. Its ordinary
    qualified prefetch poll uses the deadline minus two CCK; a core-marked
    unqualified operand poll uses the deadline minus four CCK. The core holds
@@ -773,6 +775,16 @@ DMA or priority transition. The previous full six-CCK qualification at a
 prefetch's start counted its trailing transfer twice, making ordinary
 instruction recognition two CCK late. Globally shortening the deadline
 fixed those instructions but broke the already accurate STOP path.
+
+Copper-generated PORTS/EXTER requests use the same running-instruction poll
+qualification as internal Paula requests. The request bit alone cannot identify
+an external CIA edge: a Copper INTREQ write can set either bit. A serialized
+origin mask preserves that distinction until acknowledgement. Pin-fed CIA and
+unmeasured CPU-written external request paths keep their previous qualification.
+Paired A500 STOP/running/readback controls and remaining CIA request-visibility
+differences are recorded in the sibling probe repository at
+`docs/irq-stage-investigation-2026-10-19.md`. These measurements do not justify
+removing the six-clock default or claiming an isolated IPL-pin delay.
 
 The six-CCK default is calibrated against `amiga-hardware-probes` captures from a
 PAL A500 with 512 KB chip RAM, 512 KB slow RAM, ECS Agnus and OCS Denise.
