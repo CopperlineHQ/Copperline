@@ -90,6 +90,11 @@ pub struct Cia {
     sdr_shift_count: u8,
     #[serde(default)]
     sdr_output_half_clock: bool,
+    #[serde(default)]
+    sdr_output_flag_armed: bool,
+    /// Serial output event to ICR visibility, in E-clocks (A500 kind64).
+    #[serde(default)]
+    sdr_output_flag_delay: u8,
     cnt_pin_high: bool,
     ta_pb_output_high: bool,
     tb_pb_output_high: bool,
@@ -246,6 +251,8 @@ impl Cia {
             sdr_pending: None,
             sdr_shift_count: 0,
             sdr_output_half_clock: false,
+            sdr_output_flag_armed: false,
+            sdr_output_flag_delay: 0,
             cnt_pin_high: true,
             ta_pb_output_high: true,
             tb_pb_output_high: true,
@@ -448,6 +455,7 @@ impl Cia {
             || self.control_pipe_pending()
             || self.icr_read_race
             || (self.sdr_out.is_some() && self.ta_running)
+            || self.sdr_output_flag_delay != 0
             || (self.regs[REG_CRA] & CR_PBON != 0 && self.ta_running)
             || (self.regs[REG_CRB] & CR_PBON != 0 && self.tb_running)
             || self.ta_pb_pulse_low
@@ -773,6 +781,7 @@ impl Cia {
             // even after lone sync bits shifted into the register.
             self.sdr_shift_count = 0;
             self.sdr_output_half_clock = false;
+            self.sdr_output_flag_armed = false;
             self.sdr_out = None;
             self.sdr_pending = None;
         }
@@ -853,6 +862,7 @@ impl Cia {
                         self.sdr_out = Some(val);
                         self.sdr_shift_count = 0;
                         self.sdr_output_half_clock = false;
+                        self.sdr_output_flag_armed = false;
                     }
                 }
             }
@@ -1073,6 +1083,7 @@ impl Cia {
         // Delayed asserts armed earlier (by FLAG, SDR, TOD, or mask
         // writes) surface here on the E-clock grid.
         let mut pin_edge = self.drain_irq_pin_delay(ticks);
+        let sp_mask = self.clock_sdr_output_flag();
         let mut timer_mask: u8 = 0;
         let mut ta_underflows = 0;
         let mut ta_last_edge_underflow = false;
@@ -1103,7 +1114,7 @@ impl Cia {
                 self.update_pb_output(REG_CRA, true, ta_previous_pulse);
             }
         }
-        let sp_mask = self.tick_sdr_output(ta_underflows);
+        self.arm_sdr_output_flag(ta_underflows);
         let delayed_ta_underflows = self
             .tb_ta_pending_underflows
             .saturating_add(ta_underflows)
@@ -1194,7 +1205,6 @@ impl Cia {
     // board tie (CIA-B) through cnt_rising_edge.
     fn pulse_cnt(&mut self) -> bool {
         let mut timer_mask = 0;
-        let mut sp_mask = 0;
         let ta_control = self.effective_ta_control();
         let tb_control = self.effective_tb_control();
         let tb_input_mode = TimerBInputMode::from_crb(tb_control);
@@ -1212,7 +1222,7 @@ impl Cia {
             if ta_underflows != 0 {
                 self.update_timer_a_pb_output();
             }
-            sp_mask |= self.tick_sdr_output(ta_underflows);
+            self.arm_sdr_output_flag(ta_underflows);
             self.tb_ta_pending_underflows =
                 self.tb_ta_pending_underflows.saturating_add(ta_underflows);
         }
@@ -1231,9 +1241,7 @@ impl Cia {
                 self.update_timer_b_pb_output();
             }
         }
-        let edge = self.latch_timer_interrupts(timer_mask);
-        let _ = self.latch_interrupts(sp_mask);
-        edge
+        self.latch_timer_interrupts(timer_mask)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -1255,12 +1263,21 @@ impl Cia {
             return 0;
         }
         // Output CNT toggles on each Timer-A underflow: two half-clocks
-        // shift one bit. A500 captures place completion at sixteen underflows.
+        // shift one bit. The output event is on half-clock15; half-clock16
+        // finishes the byte and promotes a pending write. Its ICR flag has
+        // a separate E-clock pipeline; do not shorten the byte period.
         let mut half_clocks = u64::from(ta_underflows);
         let mut completed = 0;
         while self.sdr_out.is_some() {
-            let remaining =
-                u64::from(16 - 2 * self.sdr_shift_count) - u64::from(self.sdr_output_half_clock);
+            let progress =
+                u64::from(2 * self.sdr_shift_count) + u64::from(self.sdr_output_half_clock);
+            let remaining = 16 - progress;
+            // The explicit armed state also lets a legacy snapshot saved at
+            // progress15 generate its event rather than losing the flag.
+            if !self.sdr_output_flag_armed && progress + half_clocks >= 15 {
+                completed = ICR_SP;
+                self.sdr_output_flag_armed = true;
+            }
             if half_clocks < remaining {
                 half_clocks += u64::from(self.sdr_output_half_clock);
                 self.sdr_shift_count += (half_clocks / 2) as u8;
@@ -1268,12 +1285,28 @@ impl Cia {
                 break;
             }
             half_clocks -= remaining;
-            completed = ICR_SP;
             self.sdr_out = self.sdr_pending.take();
             self.sdr_shift_count = 0;
             self.sdr_output_half_clock = false;
+            self.sdr_output_flag_armed = false;
         }
         completed
+    }
+
+    fn arm_sdr_output_flag(&mut self, underflows: u32) {
+        if self.tick_sdr_output(underflows) != 0 && self.sdr_output_flag_delay == 0 {
+            // Independent TA/TB brackets distinguish this fixed E-clock
+            // visibility pipeline from the Timer-A-dependent byte period.
+            self.sdr_output_flag_delay = 4;
+        }
+    }
+
+    fn clock_sdr_output_flag(&mut self) -> u8 {
+        if self.sdr_output_flag_delay == 0 {
+            return 0;
+        }
+        self.sdr_output_flag_delay -= 1;
+        u8::from(self.sdr_output_flag_delay == 0) * ICR_SP
     }
 
     /// Latch delayed interrupt sources (TOD alarm, FLAG, serial): the
@@ -1663,8 +1696,8 @@ mod tests {
         initial.tick(5); // First reload leaves count=1.
         initial.write(REG_ICR, 0x80 | ICR_SP);
         initial.write(REG_SDR, 0xa5);
-        initial.tick(30); // Fifteen underflows; completion is two edges away.
-        assert_eq!(initial.sdr_shift_count, 7);
+        initial.tick(32); // Output event armed; flag visibility is two edges away.
+        assert_eq!(initial.sdr_output_flag_delay, 2);
         assert!(!initial.irq_line_asserted());
         let mut batch = initial.clone();
         let mut stepped = initial.clone();
@@ -2531,7 +2564,7 @@ mod tests {
     }
 
     #[test]
-    fn sdr_output_sets_sp_after_sixteen_timer_a_underflows() {
+    fn sdr_output_flag_follows_fifteenth_half_clock_by_four_e_cycles() {
         let mut cia = Cia::new(Which::A);
         cia.write(REG_TALO, 0);
         cia.write(REG_TAHI, 0);
@@ -2540,7 +2573,7 @@ mod tests {
         cia.write(REG_CRA, CRA_SPMODE | 0x01);
         cia.tick(2);
 
-        for _ in 0..15 {
+        for _ in 0..18 {
             cia.tick(1);
         }
         assert_eq!(cia.read(REG_ICR) & ICR_SP, 0);
@@ -2559,8 +2592,10 @@ mod tests {
             let mut restored: Cia =
                 serde_json::from_slice(&serde_json::to_vec(&cia).unwrap()).unwrap();
             for state in [&mut cia, &mut restored] {
-                assert_eq!(state.tick_sdr_output(14), 0);
+                assert_eq!(state.tick_sdr_output(13), 0);
                 assert_eq!(state.tick_sdr_output(1), ICR_SP);
+                assert!(state.sdr_output_half_clock);
+                assert_eq!(state.tick_sdr_output(1), 0);
                 assert!(!state.sdr_output_half_clock);
                 assert_eq!(state.tick_sdr_output(16), 0, "no queued byte");
             }
@@ -2581,14 +2616,16 @@ mod tests {
             cia.write(REG_SDR, 0x5a);
             assert_eq!(cia.tick_sdr_output(3), 0);
             cia.write(REG_SDR, 0x3c);
-            assert_eq!(cia.tick_sdr_output(7), 0);
+            assert_eq!(cia.tick_sdr_output(6), 0);
             assert_eq!(
                 cia.tick_sdr_output(1),
                 ICR_SP,
                 "first byte is not restarted"
             );
-            assert_eq!(cia.tick_sdr_output(15), 0);
+            assert_eq!(cia.tick_sdr_output(1), 0, "handoff must not reassert SP");
+            assert_eq!(cia.tick_sdr_output(14), 0);
             assert_eq!(cia.tick_sdr_output(1), ICR_SP, "one queued completion");
+            assert_eq!(cia.tick_sdr_output(1), 0, "pending byte finishes at32");
             assert_eq!(cia.tick_sdr_output(32), 0, "no third byte");
             cia.write(REG_SDR, 0xff);
             assert_eq!(cia.tick_sdr_output(16), ICR_SP, "idle write still starts");
@@ -2641,6 +2678,59 @@ mod tests {
                 serde_json::to_value(&stepped).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn serial_flag_pipeline_survives_batching_save_restore_and_stopped_timer() {
+        let mut initial = Cia::new(Which::A);
+        initial.write(REG_CRA, CRA_SPMODE);
+        initial.write(REG_ICR, 0x80 | ICR_SP);
+        initial.write(REG_SDR, 0xa5);
+        initial.arm_sdr_output_flag(15);
+        assert_eq!(initial.sdr_output_flag_delay, 4);
+        assert_eq!(initial.icr_data & ICR_SP, 0);
+        initial.tick(3);
+        assert_eq!(initial.icr_data & ICR_SP, 0);
+        let mut restored: Cia =
+            serde_json::from_value(serde_json::to_value(&initial).unwrap()).unwrap();
+        for state in [&mut initial, &mut restored] {
+            assert!(!state.tick(1), "flag precedes the external IRQ pin");
+            assert_eq!(state.icr_data & ICR_SP, ICR_SP);
+            assert!(state.tick(1));
+            assert_eq!(state.read(REG_ICR) & ICR_SP, ICR_SP);
+            state.arm_sdr_output_flag(1);
+            state.tick(8);
+            assert_eq!(
+                state.read(REG_ICR) & ICR_SP,
+                0,
+                "handoff does not rearm the flag"
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(&initial).unwrap(),
+            serde_json::to_value(&restored).unwrap()
+        );
+    }
+
+    #[test]
+    fn legacy_serial_fifteenth_half_clock_does_not_lose_pending_flag() {
+        let mut initial = Cia::new(Which::B);
+        initial.write(REG_CRA, CRA_SPMODE);
+        initial.write(REG_SDR, 0xa5);
+        initial.tick_sdr_output(15);
+        let mut legacy = serde_json::to_value(&initial).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("sdr_output_flag_armed");
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("sdr_output_flag_delay");
+        let mut restored: Cia = serde_json::from_value(legacy).unwrap();
+        restored.arm_sdr_output_flag(1);
+        restored.tick(4);
+        assert_eq!(restored.read(REG_ICR) & ICR_SP, ICR_SP);
     }
 
     #[test]
