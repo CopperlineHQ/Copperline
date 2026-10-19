@@ -910,7 +910,11 @@ impl Bus {
                     );
                 }
                 self.paula.write_intena(val);
-                self.note_irq_latches_changed();
+                if matches!(source, BeamWriteSource::Cpu) {
+                    self.note_cpu_irq_latches_changed();
+                } else {
+                    self.note_irq_latches_changed();
+                }
                 false
             }
             0x09C => {
@@ -940,9 +944,13 @@ impl Bus {
                 let coper_was_pending = self.paula.intreq & INT_COPER != 0;
                 let previous_requests = self.paula.intreq;
                 let asserted = self.paula.write_intreq(val);
-                self.irq_copper_request_mask &= self.paula.intreq;
-                if matches!(source, BeamWriteSource::Copper) {
-                    self.irq_copper_request_mask |=
+                self.irq_software_request_mask &= self.paula.intreq;
+                if matches!(source, BeamWriteSource::Cpu) {
+                    self.irq_software_request_mask |= self.paula.intreq
+                        & !previous_requests
+                        & (INT_PORTS | INT_EXTER | INT_COPER);
+                } else if matches!(source, BeamWriteSource::Copper) {
+                    self.irq_software_request_mask |=
                         self.paula.intreq & !previous_requests & (INT_PORTS | INT_EXTER);
                 }
                 let copper_asserted = matches!(source, BeamWriteSource::Copper)
@@ -957,6 +965,8 @@ impl Bus {
                     // A new INTREQ write is a source edge even for PORTS.
                     // Unmasking an already-latched PORTS level remains distinct.
                     self.note_irq_source_asserted();
+                } else if matches!(source, BeamWriteSource::Cpu) {
+                    self.note_cpu_irq_latches_changed();
                 } else {
                     self.note_irq_latches_changed();
                 }

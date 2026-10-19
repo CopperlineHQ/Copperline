@@ -925,10 +925,11 @@ pub struct Bus {
     irq_latency_visible_at: [u64; 16],
     irq_latency_mask: u16,
     irq_latency_last_pending: u16,
-    /// PORTS/EXTER requests latched by Copper INTREQ writes rather than an
-    /// external pin. Their CPU polls follow the internal Paula request path.
-    #[serde(default)]
-    irq_copper_request_mask: u16,
+    /// Measured software-written PORTS/EXTER/COPER requests, not external-pin
+    /// edges. CPU writes qualify the CPU-write deadline; Copper PORTS/EXTER
+    /// requests qualify the internal Paula poll phase.
+    #[serde(default, alias = "irq_copper_request_mask")]
+    irq_software_request_mask: u16,
     /// Configured IPL-pipe length in cck (from COPPERLINE_IRQ_LATENCY_CCK or the
     /// default); 0 disables the pipe and the cpu.rs boundary-sampling delay. A
     /// field (not a global) so tests can set it per-instance -- mechanism tests
@@ -3773,7 +3774,7 @@ impl Bus {
             irq_latency_visible_at: [0; 16],
             irq_latency_mask: 0,
             irq_latency_last_pending: 0,
-            irq_copper_request_mask: 0,
+            irq_software_request_mask: 0,
             irq_latency_setting: irq_latency_setting_from_env(),
             beam_top_palette: Palette::new(),
             beam_bottom_palette: Palette::new(),
@@ -5461,7 +5462,7 @@ impl Bus {
         self.irq_latency_visible_at = [0; 16];
         self.irq_latency_mask = 0;
         self.irq_latency_last_pending = 0;
-        self.irq_copper_request_mask = 0;
+        self.irq_software_request_mask = 0;
         self.trace_cia_irq_pins = (false, false);
         self.trace_intreq = 0;
         self.beam_top_palette = Palette::new();
@@ -7786,7 +7787,7 @@ impl Bus {
     /// are considered: this never predicts a future device interrupt. The
     /// two/four-CCK leads are calibrated for internal Paula sources only;
     /// Pin-fed `INT_PORTS`/`INT_EXTER` retain their previous no-lead deadline.
-    /// Copper writes to those Paula request bits use the measured internal
+    /// Software writes to those Paula request bits use the measured internal
     /// poll phase; the bit number alone does not identify an external edge.
     pub(crate) fn cpu_poll_intreq(&self, lead_cck: u32) -> u16 {
         let lead_cck = if self.cpu_clocks_per_cck == 2 && !self.cpu_short_bus_cycle {
@@ -7802,14 +7803,14 @@ impl Bus {
         // has elapsed; sources released earlier stay visible. The COPER/STOP-
         // derived two/four-CCK leads were not calibrated for INT2/INT6 routes,
         // so preserve their previous no-lead deadline pending separate
-        // transition/poll measurement. Copper-generated requests for those
+        // transition/poll measurement. Software-generated requests for those
         // bits instead follow the internal poll phase measured on A500.
         let mut delayed = self.irq_latency_mask;
         while delayed != 0 {
             let bit = delayed.trailing_zeros() as usize;
             delayed &= delayed - 1;
             let source_lead_cck = if (1u16 << bit) & (INT_PORTS | INT_EXTER) != 0
-                && (1u16 << bit) & self.irq_copper_request_mask == 0
+                && (1u16 << bit) & self.irq_software_request_mask == 0
             {
                 0
             } else {
@@ -7899,6 +7900,27 @@ impl Bus {
         let delayed = newly & !INT_PORTS;
         if delayed != 0 && self.irq_latency_setting != 0 {
             self.arm_irq_latency_bits(delayed, self.irq_latency_setting);
+        }
+        self.irq_latency_mask &= pending;
+        self.irq_latency_last_pending = pending;
+    }
+
+    /// CPU-written Paula request/mask strobes reach the recognition path two
+    /// CCK before the Copper/source deadline's reference point. Kind58 A500
+    /// controls cover direct requests and prelatched software unmask, STOP and
+    /// running code. Preserve the unmeasured pin-fed unmask path.
+    fn note_cpu_irq_latches_changed(&mut self) {
+        if self.cpu_clocks_per_cck != 2 || self.cpu_short_bus_cycle {
+            self.note_irq_latches_changed();
+            return;
+        }
+        self.note_intreq_set_edges();
+        let pending = self.current_enabled_irq_sources();
+        let newly = pending & !self.irq_latency_last_pending;
+        let software = newly & self.irq_software_request_mask;
+        if self.irq_latency_setting != 0 {
+            self.arm_irq_latency_bits(software, self.irq_latency_setting.saturating_sub(2));
+            self.arm_irq_latency_bits(newly & !software & !INT_PORTS, self.irq_latency_setting);
         }
         self.irq_latency_mask &= pending;
         self.irq_latency_last_pending = pending;

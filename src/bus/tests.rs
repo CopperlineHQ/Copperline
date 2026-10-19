@@ -3329,9 +3329,9 @@ fn cpu_poll_lead_only_advances_internal_paula_source_deadlines() {
     software_exter.irq_latency_setting = 6;
     software_exter.paula.intena = INT_MASTER | INT_EXTER;
     software_exter.custom_write(0x09C, 2, u64::from(0x8000 | INT_EXTER));
-    software_exter.advance_chipset(4);
+    software_exter.advance_chipset(1);
     assert_eq!(software_exter.cpu_poll_intreq(2) & INT_EXTER, 0);
-    software_exter.advance_chipset(2);
+    software_exter.advance_chipset(1);
     assert_ne!(software_exter.cpu_poll_intreq(2) & INT_EXTER, 0);
 
     let mut ports = asserted_source(INT_PORTS, 6);
@@ -15269,7 +15269,7 @@ fn copper_written_ports_and_exter_use_internal_poll_phase_but_keep_stop_deadline
         bus.advance_chipset(2);
         assert_ne!(bus.cpu_visible_intreq() & source, 0);
         bus.write_custom_word_from(0x09c, source, BeamWriteSource::Cpu);
-        assert_eq!(bus.irq_copper_request_mask & source, 0);
+        assert_eq!(bus.irq_software_request_mask & source, 0);
         bus.paula.intreq |= source; // A later external pin edge has no poll lead.
         bus.arm_irq_recognition_latency();
         bus.advance_chipset(4);
@@ -15286,7 +15286,7 @@ fn copper_request_origin_survives_snapshot_and_defaults_for_older_states() {
     bus.advance_chipset(4);
     let payload = rmp_serde::to_vec_named(&bus).unwrap();
     let restored: Bus = rmp_serde::from_slice(&payload).unwrap();
-    assert_eq!(restored.irq_copper_request_mask, INT_EXTER);
+    assert_eq!(restored.irq_software_request_mask, INT_EXTER);
     assert_ne!(restored.cpu_poll_intreq(2) & INT_EXTER, 0);
     assert_eq!(restored.cpu_visible_intreq() & INT_EXTER, 0);
 
@@ -15294,10 +15294,54 @@ fn copper_request_origin_survives_snapshot_and_defaults_for_older_states() {
     let rmpv::Value::Map(fields) = &mut old else {
         panic!("Bus snapshot must use named fields");
     };
-    fields.retain(|(key, _)| key.as_str() != Some("irq_copper_request_mask"));
+    let mut copper_only_fields = fields.clone();
+    for (key, _) in &mut copper_only_fields {
+        if key.as_str() == Some("irq_software_request_mask") {
+            *key = rmpv::Value::from("irq_copper_request_mask");
+        }
+    }
+    let mut copper_only_payload = Vec::new();
+    rmpv::encode::write_value(
+        &mut copper_only_payload,
+        &rmpv::Value::Map(copper_only_fields),
+    )
+    .unwrap();
+    let copper_only: Bus = rmp_serde::from_slice(&copper_only_payload).unwrap();
+    assert_eq!(copper_only.irq_software_request_mask, INT_EXTER);
+    fields.retain(|(key, _)| key.as_str() != Some("irq_software_request_mask"));
     let mut legacy = Vec::new();
     rmpv::encode::write_value(&mut legacy, &old).unwrap();
     let legacy: Bus = rmp_serde::from_slice(&legacy).unwrap();
-    assert_eq!(legacy.irq_copper_request_mask, 0);
+    assert_eq!(legacy.irq_software_request_mask, 0);
     assert_eq!(legacy.cpu_poll_intreq(2) & INT_EXTER, 0);
+}
+
+#[test]
+fn cpu_software_request_and_unmask_share_a500_recognition_phase() {
+    for source in [INT_PORTS, INT_EXTER, INT_COPER] {
+        for unmask in [false, true] {
+            let mut bus = empty_bus();
+            bus.irq_latency_setting = 6;
+            if !unmask {
+                bus.paula.intena = INT_MASTER | source;
+            }
+            bus.write_custom_word_from(0x09c, 0x8000 | source, BeamWriteSource::Cpu);
+            if unmask {
+                bus.write_custom_word_from(
+                    0x09a,
+                    0x8000 | INT_MASTER | source,
+                    BeamWriteSource::Cpu,
+                );
+            }
+            assert_ne!(bus.paula.intreq & source, 0);
+            assert_eq!(bus.cpu_visible_intreq() & source, 0);
+            bus.advance_chipset(2);
+            assert_ne!(bus.cpu_poll_intreq(2) & source, 0);
+            assert_eq!(bus.cpu_visible_intreq() & source, 0);
+            bus.advance_chipset(2);
+            assert_ne!(bus.cpu_visible_intreq() & source, 0);
+            bus.write_custom_word_from(0x09c, source, BeamWriteSource::Cpu);
+            assert_eq!(bus.irq_software_request_mask & source, 0);
+        }
+    }
 }
