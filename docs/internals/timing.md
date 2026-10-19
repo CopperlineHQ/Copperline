@@ -847,7 +847,8 @@ Timer-A underflows reach timer B's cascade input one E-clock later. The
 pending final pulse is saved and included in STOP wakeup predictions, even
 when timer A has already stopped. Batched updates retain that final pulse
 and deliver all preceding ones; latch zero produces one underflow per
-enabled input tick. One-shot batches stop at their first underflow. A zero
+enabled input tick. One-shot batches normally stop at their first underflow;
+the zero-latch high-byte auto-start exception is described below. A zero
 START+LOAD also produces carry on the last LOAD stage, before the first
 decrement, and can stop a one-shot there.
 
@@ -859,6 +860,24 @@ these effects settle, ordinary timer counting remains batched. Regression
 tests compare complete states after identical clock sequences partitioned
 into one batch or individual edges. This is a batching consistency correction,
 not a new measurement of physical IRQ propagation or a latency recalibration.
+
+Physical A500 captures from 19 October 2026 additionally constrain the
+Timer-A PB6 and serial output behavior on both CIAs. Pulse mode idles low
+and drives high for the underflow pulse, including when DDRB selects input.
+START initializes the toggle latch high. Adjacent zero-latch underflows
+merge into one asserted pulse and therefore produce only one toggle edge;
+a gap rearms the next edge. High-byte one-shot auto-start also initializes
+the toggle latch. With a zero latch it produces two adjacent Timer-A carries
+before stopping, observable through timer B's cascade input.
+
+Serial output advances one bit per two Timer-A underflows and asserts SP
+after sixteen underflows for a clean byte. Serial input still shifts eight
+external CNT edges. The output half-clock phase and auto-start carry are
+saved, with defaults for older states. These measurements do not establish
+serial buffering semantics, Timer-B zero-latch auto-start, electrical IRQ
+latency, or CPU IPL sampling. Captures, provenance and comparison rules are
+in the sibling `amiga-hardware-probes` repository's
+`docs/cia-hardware-verification-2026-10-19.md`.
 
 Synchronous CPU timer reads sample the reload data mux before the falling
 edge commits the counter. At an eligible PHI2 reload slot, internal count

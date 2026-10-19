@@ -39,6 +39,10 @@ pub struct Cia {
     /// Clock-source and one-shot controls reach counting after two PHI2 edges.
     #[serde(default)]
     ta_control_pipe: Option<[u8; 2]>,
+    /// A stopped one-shot loaded with zero through TAHI emits two adjacent
+    /// underflows. The first LOAD carry does not yet stop the auto-start.
+    #[serde(default)]
+    ta_auto_zero_carry_pending: bool,
 
     // Timer B
     pub tb_count: u16,
@@ -81,9 +85,13 @@ pub struct Cia {
     sdr: u8,
     sdr_out: Option<u8>,
     sdr_shift_count: u8,
+    #[serde(default)]
+    sdr_output_half_clock: bool,
     cnt_pin_high: bool,
     ta_pb_output_high: bool,
     tb_pb_output_high: bool,
+    // Legacy serialized names: these mark an active one-E-clock pulse.
+    // The physical pulse is high; pulse mode otherwise drives the pin low.
     ta_pb_pulse_low: bool,
     tb_pb_pulse_low: bool,
     pc_pulse_pending: bool,
@@ -210,6 +218,7 @@ impl Cia {
             ta_enable_pipe: None,
             tb_enable_pipe: None,
             ta_control_pipe: None,
+            ta_auto_zero_carry_pending: false,
             tb_control_pipe: None,
             tb_ta_pending_underflows: 0,
             which,
@@ -232,6 +241,7 @@ impl Cia {
             sdr: 0,
             sdr_out: None,
             sdr_shift_count: 0,
+            sdr_output_half_clock: false,
             cnt_pin_high: true,
             ta_pb_output_high: true,
             tb_pb_output_high: true,
@@ -711,14 +721,24 @@ impl Cia {
     pub fn port_b_pins(&self) -> u8 {
         let mut v = self.read_port(REG_PRB, REG_DDRB);
         if self.regs[REG_CRA] & CR_PBON != 0 {
-            if self.ta_pb_output_high {
+            let high = if self.regs[REG_CRA] & CR_OUTMODE != 0 {
+                self.ta_pb_output_high
+            } else {
+                self.ta_pb_pulse_low
+            };
+            if high {
                 v |= 1 << 6;
             } else {
                 v &= !(1 << 6);
             }
         }
         if self.regs[REG_CRB] & CR_PBON != 0 {
-            if self.tb_pb_output_high {
+            let high = if self.regs[REG_CRB] & CR_OUTMODE != 0 {
+                self.tb_pb_output_high
+            } else {
+                self.tb_pb_pulse_low
+            };
+            if high {
                 v |= 1 << 7;
             } else {
                 v &= !(1 << 7);
@@ -748,6 +768,7 @@ impl Cia {
             // SPMODE, so the next byte always starts on a fresh count
             // even after lone sync bits shifted into the register.
             self.sdr_shift_count = 0;
+            self.sdr_output_half_clock = false;
             self.sdr_out = None;
         }
 
@@ -771,6 +792,8 @@ impl Cia {
                     // timer.
                     self.ta_count = self.ta_latch;
                     if self.ta_oneshot {
+                        self.ta_pb_output_high = true;
+                        self.ta_auto_zero_carry_pending = self.ta_latch == 0;
                         self.ta_enable_pipe = Some(Self::enable_pipe(
                             self.ta_running,
                             self.ta_start_delay,
@@ -798,6 +821,7 @@ impl Cia {
                 if !self.tb_running {
                     self.tb_count = self.tb_latch;
                     if self.tb_oneshot {
+                        self.tb_pb_output_high = true;
                         self.tb_enable_pipe = Some(Self::enable_pipe(
                             self.tb_running,
                             self.tb_start_delay,
@@ -820,6 +844,7 @@ impl Cia {
                 if self.regs[REG_CRA] & CRA_SPMODE != 0 {
                     self.sdr_out = Some(val);
                     self.sdr_shift_count = 0;
+                    self.sdr_output_half_clock = false;
                 }
             }
             REG_ICR => {
@@ -868,6 +893,7 @@ impl Cia {
                 let _ = self.tod_check_alarm();
             }
             REG_CRA => {
+                self.ta_auto_zero_carry_pending = false;
                 self.ta_control_pipe =
                     Some(self.ta_control_pipe.unwrap_or([self.ta_count_control(); 2]));
                 let prev_run = self.ta_running;
@@ -893,6 +919,7 @@ impl Cia {
                     }
                 }
                 if !prev_run && self.ta_running {
+                    self.ta_pb_output_high = true;
                     self.ta_start_delay = if val & CR_LOAD != 0 { 3 } else { 0 };
                     started_timer = true;
                 }
@@ -923,6 +950,7 @@ impl Cia {
                 //        1 = TOD writes update the alarm register.
                 self.tod_write_alarm = val & 0x80 != 0;
                 if !prev_run && self.tb_running {
+                    self.tb_pb_output_high = true;
                     self.tb_start_delay = if val & CR_LOAD != 0 { 3 } else { 0 };
                     started_timer = true;
                 }
@@ -1021,17 +1049,17 @@ impl Cia {
         self.tb_enable_pipe = Some(((tb_pipe << 1) | u8::from(self.tb_running)) & 3);
         self.ta_start_delay = self.ta_start_delay.saturating_sub(1);
         self.tb_start_delay = self.tb_start_delay.saturating_sub(1);
-        // PBON pulse mode holds PB6/PB7 low for one E-clock. A pulse armed by
-        // the previous timer/CNT underflow returns high at this E-clock; a new
+        // PBON pulse mode holds PB6/PB7 high for one E-clock. A pulse armed by
+        // the previous timer/CNT underflow returns low at this E-clock; a new
         // underflow later in this call can arm the next pulse. Reads only
         // observe the pin and never shorten the pulse.
+        let ta_previous_pulse = self.ta_pb_pulse_low;
+        let tb_previous_pulse = self.tb_pb_pulse_low;
         if self.ta_pb_pulse_low {
             self.ta_pb_pulse_low = false;
-            self.ta_pb_output_high = true;
         }
         if self.tb_pb_pulse_low {
             self.tb_pb_pulse_low = false;
-            self.tb_pb_output_high = true;
         }
         // Delayed asserts armed earlier (by FLAG, SDR, TOD, or mask
         // writes) surface here on the E-clock grid.
@@ -1054,12 +1082,16 @@ impl Cia {
                 ta_underflows != 0 && input_ticks == ticks && self.ta_count == self.ta_latch;
             timer_mask |= u8::from(ta_underflows != 0) * ICR_TA;
             if timer_mask & ICR_TA != 0 && ta_control & 8 != 0 {
-                self.ta_running = false;
-                self.ta_enable_pipe = Some(0);
-                self.regs[REG_CRA] &= !0x01;
+                if self.ta_auto_zero_carry_pending {
+                    self.ta_auto_zero_carry_pending = false;
+                } else {
+                    self.ta_running = false;
+                    self.ta_enable_pipe = Some(0);
+                    self.regs[REG_CRA] &= !0x01;
+                }
             }
             if timer_mask & ICR_TA != 0 {
-                self.update_timer_a_pb_output();
+                self.update_pb_output(REG_CRA, true, ta_previous_pulse);
             }
         }
         let sp_mask = self.tick_sdr_output(ta_underflows);
@@ -1102,7 +1134,7 @@ impl Cia {
                 self.regs[REG_CRB] &= !0x01;
             }
             if timer_mask & ICR_TB != 0 {
-                self.update_timer_b_pb_output();
+                self.update_pb_output(REG_CRB, false, tb_previous_pulse);
             }
         }
         // Timer underflows drive the pin in the same E-cycle; serial
@@ -1213,13 +1245,18 @@ impl Cia {
         if self.regs[REG_CRA] & CRA_SPMODE == 0 || self.sdr_out.is_none() || ta_underflows == 0 {
             return 0;
         }
-        let pulses = ta_underflows.min(8 - self.sdr_shift_count as u32) as u8;
-        self.sdr_shift_count += pulses;
+        // Output CNT toggles on each Timer-A underflow: two half-clocks
+        // shift one bit. A500 captures place completion at sixteen underflows.
+        let half_clocks = u64::from(ta_underflows) + u64::from(self.sdr_output_half_clock);
+        let bits = (half_clocks / 2).min(u64::from(8 - self.sdr_shift_count)) as u8;
+        self.sdr_output_half_clock = half_clocks & 1 != 0;
+        self.sdr_shift_count += bits;
         if self.sdr_shift_count < 8 {
             return 0;
         }
         self.sdr_out = None;
         self.sdr_shift_count = 0;
+        self.sdr_output_half_clock = false;
         ICR_SP
     }
 
@@ -1337,29 +1374,31 @@ impl Cia {
     }
 
     fn update_timer_a_pb_output(&mut self) {
-        self.update_pb_output(REG_CRA, true);
+        self.update_pb_output(REG_CRA, true, false);
     }
 
     fn update_timer_b_pb_output(&mut self) {
-        self.update_pb_output(REG_CRB, false);
+        self.update_pb_output(REG_CRB, false, false);
     }
 
-    fn update_pb_output(&mut self, control_reg: usize, timer_a: bool) {
+    fn update_pb_output(&mut self, control_reg: usize, timer_a: bool, previous_pulse: bool) {
         let control = self.regs[control_reg];
         if control & CR_PBON == 0 {
             return;
         }
-        if control & CR_OUTMODE != 0 {
+        // Consecutive underflows merge into a continuous high pulse. The
+        // toggle flip-flop responds to the pulse's rising edge, not each
+        // E-clock while it remains high (observable with latch zero).
+        if control & CR_OUTMODE != 0 && !previous_pulse {
             if timer_a {
                 self.ta_pb_output_high = !self.ta_pb_output_high;
             } else {
                 self.tb_pb_output_high = !self.tb_pb_output_high;
             }
-        } else if timer_a {
-            self.ta_pb_output_high = false;
+        }
+        if timer_a {
             self.ta_pb_pulse_low = true;
         } else {
-            self.tb_pb_output_high = false;
             self.tb_pb_pulse_low = true;
         }
     }
@@ -1608,7 +1647,7 @@ mod tests {
         initial.tick(5); // First reload leaves count=1.
         initial.write(REG_ICR, 0x80 | ICR_SP);
         initial.write(REG_SDR, 0xa5);
-        initial.tick(14); // Seven underflows; the eighth is two edges away.
+        initial.tick(30); // Fifteen underflows; completion is two edges away.
         assert_eq!(initial.sdr_shift_count, 7);
         assert!(!initial.irq_line_asserted());
         let mut batch = initial.clone();
@@ -2281,6 +2320,133 @@ mod tests {
     }
 
     #[test]
+    fn pb_pulse_mode_idles_low_and_underflow_pulses_high() {
+        for which in [Which::A, Which::B] {
+            for (lo, hi, control, bit) in [
+                (REG_TALO, REG_TAHI, REG_CRA, 0x40),
+                (REG_TBLO, REG_TBHI, REG_CRB, 0x80),
+            ] {
+                for ddr in [0, 0xff] {
+                    let mut cia = Cia::new(which);
+                    cia.write(REG_DDRB, ddr);
+                    cia.write(REG_PRB, 0xff);
+                    cia.write(lo, 0);
+                    cia.write(hi, 0);
+                    cia.write(control, CR_PBON | 0x09);
+                    assert_eq!(cia.port_b_pins() & bit, 0, "pulse idle is low");
+                    cia.tick(2);
+                    cia.tick(1);
+                    assert_ne!(cia.port_b_pins() & bit, 0, "underflow pulse is high");
+                    cia.tick(1);
+                    assert_eq!(cia.port_b_pins() & bit, 0, "one-shot pulse expires");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn restarting_timer_initializes_toggle_output_high() {
+        for (lo, hi, control, bit) in [
+            (REG_TALO, REG_TAHI, REG_CRA, 0x40),
+            (REG_TBLO, REG_TBHI, REG_CRB, 0x80),
+        ] {
+            let mut cia = Cia::new(Which::A);
+            cia.write(lo, 3);
+            cia.write(hi, 0);
+            cia.write(control, CR_PBON | CR_OUTMODE | 0x11);
+            cia.tick(7);
+            assert_eq!(cia.port_b_pins() & bit, 0);
+            cia.write(control, CR_PBON | CR_OUTMODE);
+            cia.tick(2);
+            cia.write(lo, 200);
+            cia.write(hi, 0);
+            cia.write(control, CR_PBON | CR_OUTMODE | 1);
+            cia.tick(3);
+            assert_ne!(cia.port_b_pins() & bit, 0, "START resets the toggle latch");
+        }
+    }
+
+    #[test]
+    fn consecutive_zero_latch_underflows_hold_toggle_until_a_gap() {
+        for (lo, hi, control, bit) in [
+            (REG_TALO, REG_TAHI, REG_CRA, 0x40),
+            (REG_TBLO, REG_TBHI, REG_CRB, 0x80),
+        ] {
+            let mut cia = Cia::new(Which::A);
+            cia.write(lo, 0);
+            cia.write(hi, 0);
+            cia.write(control, CR_PBON | CR_OUTMODE | 0x11);
+            cia.tick(4);
+            assert_eq!(cia.port_b_pins() & bit, 0);
+            let mut restored: Cia =
+                serde_json::from_slice(&serde_json::to_vec(&cia).unwrap()).unwrap();
+            cia.tick(1000);
+            restored.tick(1000);
+            assert_eq!(
+                cia.port_b_pins() & bit,
+                0,
+                "held underflow has one rising edge"
+            );
+            assert_eq!(
+                serde_json::to_value(&cia).unwrap(),
+                serde_json::to_value(&restored).unwrap()
+            );
+            cia.write(lo, 3);
+            cia.tick(1); // Final consecutive underflow reloads the new latch.
+            cia.tick(1); // A non-underflow edge releases the pulse.
+            cia.tick(3); // Next underflow has a new rising edge.
+            assert_ne!(cia.port_b_pins() & bit, 0);
+        }
+    }
+
+    #[test]
+    fn one_shot_high_byte_autostart_initializes_toggle_high() {
+        for (lo, hi, control, bit) in [
+            (REG_TALO, REG_TAHI, REG_CRA, 0x40),
+            (REG_TBLO, REG_TBHI, REG_CRB, 0x80),
+        ] {
+            let mut cia = Cia::new(Which::B);
+            cia.write(lo, 3);
+            cia.write(hi, 0);
+            cia.write(control, CR_PBON | CR_OUTMODE | 0x19);
+            cia.tick(7);
+            assert_eq!(cia.port_b_pins() & bit, 0);
+            cia.write(lo, 200);
+            cia.write(hi, 0);
+            cia.tick(4);
+            assert_ne!(cia.port_b_pins() & bit, 0);
+        }
+    }
+
+    #[test]
+    fn high_byte_zero_autostart_delivers_two_underflows_to_cascade() {
+        for which in [Which::A, Which::B] {
+            for latch in [0, 1, 3] {
+                let mut cia = Cia::new(which);
+                cia.write(REG_TBLO, 0xff);
+                cia.write(REG_TBHI, 0xff);
+                cia.write(REG_CRB, 0x51);
+                cia.tick(4);
+                cia.write(REG_CRA, CR_PBON | CR_OUTMODE | 8);
+                cia.write(REG_TALO, latch);
+                cia.write(REG_TAHI, 0);
+                let saved = serde_json::to_vec(&cia).unwrap();
+                let mut restored: Cia = serde_json::from_slice(&saved).unwrap();
+                cia.tick(20);
+                restored.tick(20);
+                let expected = if latch == 0 { 2 } else { 1 };
+                assert_eq!(0xffff - cia.tb_count, expected);
+                assert!(!cia.ta_running);
+                assert_eq!(cia.port_b_pins() & 0x40, 0);
+                assert_eq!(
+                    serde_json::to_value(&cia).unwrap(),
+                    serde_json::to_value(&restored).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn timer_a_toggle_output_overrides_pb6_pin() {
         let mut cia = Cia::new(Which::A);
         cia.write(REG_DDRB, 0x00);
@@ -2293,7 +2459,11 @@ mod tests {
         cia.tick(1);
         assert_eq!(cia.read(REG_PRB) & 0x40, 0);
         cia.tick(1);
-        assert_ne!(cia.read(REG_PRB) & 0x40, 0);
+        assert_eq!(
+            cia.read(REG_PRB) & 0x40,
+            0,
+            "continuous underflow has no second rising edge"
+        );
     }
 
     #[test]
@@ -2306,14 +2476,14 @@ mod tests {
         cia.tick(2);
 
         cia.tick(1);
-        assert_eq!(cia.read(REG_PRB) & 0x80, 0);
-        assert_eq!(
+        assert_ne!(cia.read(REG_PRB) & 0x80, 0);
+        assert_ne!(
             cia.read(REG_PRB) & 0x80,
             0,
             "reading PRB must not shorten the E-clock pulse"
         );
         cia.tick(1);
-        assert_ne!(cia.read(REG_PRB) & 0x80, 0);
+        assert_eq!(cia.read(REG_PRB) & 0x80, 0);
     }
 
     #[test]
@@ -2345,7 +2515,7 @@ mod tests {
     }
 
     #[test]
-    fn sdr_output_sets_sp_after_eight_timer_a_underflows() {
+    fn sdr_output_sets_sp_after_sixteen_timer_a_underflows() {
         let mut cia = Cia::new(Which::A);
         cia.write(REG_TALO, 0);
         cia.write(REG_TAHI, 0);
@@ -2354,12 +2524,35 @@ mod tests {
         cia.write(REG_CRA, CRA_SPMODE | 0x01);
         cia.tick(2);
 
-        for _ in 0..7 {
+        for _ in 0..15 {
             cia.tick(1);
         }
         assert_eq!(cia.read(REG_ICR) & ICR_SP, 0);
         cia.tick(1);
         assert_eq!(cia.read(REG_ICR) & ICR_SP, ICR_SP);
+    }
+
+    #[test]
+    fn serial_output_half_clock_survives_save_restore() {
+        for which in [Which::A, Which::B] {
+            let mut cia = Cia::new(which);
+            cia.write(REG_CRA, CRA_SPMODE);
+            cia.write(REG_SDR, 0xa5);
+            assert_eq!(cia.tick_sdr_output(1), 0);
+            assert!(cia.sdr_output_half_clock);
+            let mut restored: Cia =
+                serde_json::from_slice(&serde_json::to_vec(&cia).unwrap()).unwrap();
+            for state in [&mut cia, &mut restored] {
+                assert_eq!(state.tick_sdr_output(14), 0);
+                assert_eq!(state.tick_sdr_output(1), ICR_SP);
+                assert!(!state.sdr_output_half_clock);
+                assert_eq!(state.tick_sdr_output(16), 0, "no queued byte");
+            }
+            assert_eq!(
+                serde_json::to_value(&cia).unwrap(),
+                serde_json::to_value(&restored).unwrap()
+            );
+        }
     }
 
     #[test]
