@@ -84,6 +84,9 @@ pub struct Cia {
     /// to CIA-A's SP pin, so this is where the keyboard byte lands.
     sdr: u8,
     sdr_out: Option<u8>,
+    /// One pending output byte; active SDR writes do not restart the shifter.
+    #[serde(default)]
+    sdr_pending: Option<u8>,
     sdr_shift_count: u8,
     #[serde(default)]
     sdr_output_half_clock: bool,
@@ -240,6 +243,7 @@ impl Cia {
             icr_mask: 0,
             sdr: 0,
             sdr_out: None,
+            sdr_pending: None,
             sdr_shift_count: 0,
             sdr_output_half_clock: false,
             cnt_pin_high: true,
@@ -770,6 +774,7 @@ impl Cia {
             self.sdr_shift_count = 0;
             self.sdr_output_half_clock = false;
             self.sdr_out = None;
+            self.sdr_pending = None;
         }
 
         match reg {
@@ -842,9 +847,13 @@ impl Cia {
             REG_SDR => {
                 self.sdr = val;
                 if self.regs[REG_CRA] & CRA_SPMODE != 0 {
-                    self.sdr_out = Some(val);
-                    self.sdr_shift_count = 0;
-                    self.sdr_output_half_clock = false;
+                    if self.sdr_out.is_some() {
+                        self.sdr_pending = Some(val);
+                    } else {
+                        self.sdr_out = Some(val);
+                        self.sdr_shift_count = 0;
+                        self.sdr_output_half_clock = false;
+                    }
                 }
             }
             REG_ICR => {
@@ -1247,17 +1256,24 @@ impl Cia {
         }
         // Output CNT toggles on each Timer-A underflow: two half-clocks
         // shift one bit. A500 captures place completion at sixteen underflows.
-        let half_clocks = u64::from(ta_underflows) + u64::from(self.sdr_output_half_clock);
-        let bits = (half_clocks / 2).min(u64::from(8 - self.sdr_shift_count)) as u8;
-        self.sdr_output_half_clock = half_clocks & 1 != 0;
-        self.sdr_shift_count += bits;
-        if self.sdr_shift_count < 8 {
-            return 0;
+        let mut half_clocks = u64::from(ta_underflows);
+        let mut completed = 0;
+        while self.sdr_out.is_some() {
+            let remaining =
+                u64::from(16 - 2 * self.sdr_shift_count) - u64::from(self.sdr_output_half_clock);
+            if half_clocks < remaining {
+                half_clocks += u64::from(self.sdr_output_half_clock);
+                self.sdr_shift_count += (half_clocks / 2) as u8;
+                self.sdr_output_half_clock = half_clocks & 1 != 0;
+                break;
+            }
+            half_clocks -= remaining;
+            completed = ICR_SP;
+            self.sdr_out = self.sdr_pending.take();
+            self.sdr_shift_count = 0;
+            self.sdr_output_half_clock = false;
         }
-        self.sdr_out = None;
-        self.sdr_shift_count = 0;
-        self.sdr_output_half_clock = false;
-        ICR_SP
+        completed
     }
 
     /// Latch delayed interrupt sources (TOD alarm, FLAG, serial): the
@@ -2551,6 +2567,78 @@ mod tests {
             assert_eq!(
                 serde_json::to_value(&cia).unwrap(),
                 serde_json::to_value(&restored).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn serial_active_writes_preserve_completion_and_queue_only_one_byte() {
+        for which in [Which::A, Which::B] {
+            let mut cia = Cia::new(which);
+            cia.write(REG_CRA, CRA_SPMODE);
+            cia.write(REG_SDR, 0xa5);
+            assert_eq!(cia.tick_sdr_output(5), 0);
+            cia.write(REG_SDR, 0x5a);
+            assert_eq!(cia.tick_sdr_output(3), 0);
+            cia.write(REG_SDR, 0x3c);
+            assert_eq!(cia.tick_sdr_output(7), 0);
+            assert_eq!(
+                cia.tick_sdr_output(1),
+                ICR_SP,
+                "first byte is not restarted"
+            );
+            assert_eq!(cia.tick_sdr_output(15), 0);
+            assert_eq!(cia.tick_sdr_output(1), ICR_SP, "one queued completion");
+            assert_eq!(cia.tick_sdr_output(32), 0, "no third byte");
+            cia.write(REG_SDR, 0xff);
+            assert_eq!(cia.tick_sdr_output(16), ICR_SP, "idle write still starts");
+        }
+    }
+
+    #[test]
+    fn serial_pending_save_restore_and_direction_reset() {
+        let mut cia = Cia::new(Which::A);
+        cia.write(REG_CRA, CRA_SPMODE);
+        cia.write(REG_SDR, 0xa5);
+        cia.tick_sdr_output(5);
+        cia.write(REG_SDR, 0x5a);
+        let mut restored: Cia =
+            serde_json::from_value(serde_json::to_value(&cia).unwrap()).unwrap();
+        assert_eq!(restored.tick_sdr_output(27), ICR_SP);
+        assert!(restored.sdr_out.is_none());
+        assert!(restored.sdr_pending.is_none());
+        cia.write(REG_CRA, 0);
+        assert!(cia.sdr_out.is_none());
+        assert!(cia.sdr_pending.is_none());
+        assert_eq!(cia.sdr_shift_count, 0);
+        assert!(!cia.sdr_output_half_clock);
+        let mut legacy = serde_json::to_value(&cia).unwrap();
+        legacy.as_object_mut().unwrap().remove("sdr_pending");
+        let legacy: Cia = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.sdr_pending.is_none());
+    }
+
+    #[test]
+    fn serial_pending_batches_preserve_irq_edges_and_state() {
+        for ticks in [1, 2, 17, 31, 32, 33, 65, 100] {
+            let mut batch = Cia::new(Which::A);
+            batch.write(REG_TALO, 0);
+            batch.write(REG_TAHI, 0);
+            batch.write(REG_CRA, CRA_SPMODE | 1);
+            batch.tick(4);
+            batch.write(REG_ICR, 0x80 | ICR_SP);
+            batch.write(REG_SDR, 0xa5);
+            batch.tick(5);
+            batch.write(REG_SDR, 0x5a);
+            let mut stepped = batch.clone();
+            let mut stepped_edge = false;
+            for _ in 0..ticks {
+                stepped_edge |= stepped.tick(1);
+            }
+            assert_eq!(batch.tick(ticks), stepped_edge);
+            assert_eq!(
+                serde_json::to_value(&batch).unwrap(),
+                serde_json::to_value(&stepped).unwrap()
             );
         }
     }
