@@ -122,15 +122,30 @@ A cache hit serves the access with no bus cycle; a miss pays the real
 chip-bus (or zero-wait external) cost. CACR writes inside a batch are
 synced to the models at the batch boundary.
 
-The fastmem window is only offered when nothing intercepts plain fast-RAM
-accesses: cache models, memory-write debug hooks, the heat map, SMC
-detection, and injected bus faults all force every access back onto the
-bus (so on default 020+ configs, whose caches are modelled, the window
-engages only when the user opts the caches off -- and the core also
-declines it whenever the guest enables the MMU, since fastmem addresses
-are physical). Arming any per-instruction debug or diagnostic hook
-(breakpoints, watches, traces, `COPPERLINE_DBG_*`) drops the whole slice
-back to the precise loop, so the debugger always sees every instruction.
+The fastmem window is offered with the cache models present. The core
+reads and writes the window directly, past every `CpuBus` method, so a
+store there never reaches the data cache's write-through invalidation,
+and the instruction cache does not snoop anyway: a line held inside the
+window would serve stale bytes to the accesses the batch still sends
+through the bus (instructions the full dispatcher runs, extension words,
+exception frames). The models therefore hold no lines inside the window
+while the core has it (`CpuBus::keep_caches_out_of_window`): capturing a
+window drops the lines it overlaps, and a miss there allocates nothing.
+Under JIT a fast-RAM access is free whether it hits or misses, so nothing
+is lost. Chip RAM and ROM, which the window never covers, stay cached, and
+so does the window bank in a batch that runs without the window (the core
+declines it while the guest has the MMU on, since fastmem addresses are
+physical); the next capture drops those lines again. Code inside the
+window is coherent the moment it changes, whether the guest rewrites it or
+a device DMAs it there (LoadSeg through copperhf): compiled traces compare
+their code bytes on every entry, and no cache line can hold the old bytes
+until the batch-boundary CACR sync applies the guest's cache clear. The
+window is still withheld while something must see every plain fast-RAM
+access: memory-write debug hooks, the heat map, SMC detection, and
+injected bus faults force each access back onto the bus. Arming any
+per-instruction debug or diagnostic hook (breakpoints, watches, traces,
+`COPPERLINE_DBG_*`) drops the whole slice back to the precise loop, so the
+debugger always sees every instruction.
 
 The host-side instruction profiler (`profile::samples::InstructionSampler`)
 retains at most 262,144 pending instruction/IRQ records, about 42 MiB on
