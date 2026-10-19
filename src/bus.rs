@@ -7236,6 +7236,8 @@ impl Bus {
             }
             let mut wait_cck = 0;
             while !self.cpu_can_use_current_slot()
+                || (matches!(kind, CpuBusAccessKind::Read | CpuBusAccessKind::Fetch)
+                    && self.cpu_cycle_crosses_line_end_refresh())
                 || (self.cpu_short_bus_cycle && self.emulated_cck < self.cpu_chip_port_free_at)
             {
                 if self.frame_analyzer_enabled {

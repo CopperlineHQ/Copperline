@@ -11816,6 +11816,47 @@ fn cpu_chip_access_uses_two_color_clocks_slot_plus_bus_free_tail() {
 }
 
 #[test]
+fn stock_cpu_cycle_waits_before_crossing_line_end_refresh() {
+    let mut bus = empty_bus();
+    bus.set_cpu_bus_arbitration_enabled(true);
+    bus.agnus.hpos = 0x0e0;
+    assert!(bus.cpu_can_use_current_slot());
+    bus.agnus.hpos = 0x0e1;
+    assert!(
+        !bus.cpu_cycle_crosses_line_end_refresh(),
+        "uncontended reads keep their phase"
+    );
+    bus.last_chip_bus_owner = ChipBusOwner::Copper;
+    assert!(bus.cpu_cycle_crosses_line_end_refresh());
+    assert!(matches!(
+        bus.cpu_bus_denial_class(true),
+        CpuWaitClass::Refresh
+    ));
+    bus.grant_cpu_bus_access(2, CpuBusAccessKind::Read);
+    let (cck, tick) = bus.take_slice_bus_advance();
+    assert!(cck > 2);
+    assert_eq!(tick.new_lines, 1);
+    bus.agnus.hpos = 0x0e1;
+    bus.set_cpu_short_bus_cycle(true);
+    assert!(
+        bus.cpu_can_use_current_slot(),
+        "020 bus scheduling remains independent"
+    );
+    for kind in [CpuBusAccessKind::Custom, CpuBusAccessKind::Write] {
+        let mut other = empty_bus();
+        other.set_cpu_bus_arbitration_enabled(true);
+        other.agnus.hpos = 0x0e1;
+        other.last_chip_bus_owner = ChipBusOwner::Copper;
+        other.grant_cpu_bus_access(2, kind);
+        assert_eq!(
+            other.take_slice_bus_advance().0,
+            2,
+            "writes/registers preserve their grant phase"
+        );
+    }
+}
+
+#[test]
 fn aga_68020_chip_reads_wait_for_data_but_writes_are_posted() {
     let mut bus = empty_bus();
     bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);

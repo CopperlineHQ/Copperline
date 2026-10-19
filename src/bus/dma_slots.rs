@@ -808,6 +808,17 @@ impl Bus {
         )
     }
 
+    pub(super) fn cpu_cycle_crosses_line_end_refresh(&self) -> bool {
+        // Kind65 and trace controls isolate DRAM read turnaround after a
+        // Copper transfer immediately before refresh. Uncontended reads,
+        // writes and register grants retain their existing phase.
+        !self.cpu_short_bus_cycle
+            && !self.aga_enabled()
+            && self.last_chip_bus_owner == ChipBusOwner::Copper
+            && Self::line_end_refresh_slot(self.agnus.hpos + 1)
+            && !Self::line_end_refresh_slot(self.agnus.hpos)
+    }
+
     /// Who is denying the CPU the current colour clock, for the frame
     /// analyzer's wait attribution. `for_cpu` selects the arbitration view
     /// the waiting access is actually subject to: a synchronous grant sees
@@ -829,7 +840,13 @@ impl Bus {
                 CpuWaitClass::BlitterNasty
             }
             ChipBusOwner::Blitter => CpuWaitClass::BlitterNice,
-            ChipBusOwner::Cpu | ChipBusOwner::Idle => CpuWaitClass::Port,
+            ChipBusOwner::Cpu | ChipBusOwner::Idle => {
+                if self.cpu_cycle_crosses_line_end_refresh() {
+                    CpuWaitClass::Refresh
+                } else {
+                    CpuWaitClass::Port
+                }
+            }
         }
     }
 
