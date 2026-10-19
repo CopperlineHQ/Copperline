@@ -98,6 +98,34 @@ impl TryFrom<RawConfig> for Config {
             ));
         }
         let cpu_jit = raw.cpu.jit.unwrap_or(false);
+        let cpu_speed = match raw.cpu.speed.as_deref() {
+            None => CpuSpeed::Fixed,
+            Some(s) => match parse_cpu_speed(s) {
+                Ok(speed) => speed,
+                Err(e) => {
+                    errors.push(e);
+                    CpuSpeed::Fixed
+                }
+            },
+        };
+        // "fastest" adapts the JIT's billing, so it means nothing to the
+        // precise core: refuse it rather than silently running at the
+        // fixed clock. The 68000/68010 never take the JIT path at all
+        // (their shared-bus float model needs the precise core).
+        if cpu_speed == CpuSpeed::Fastest {
+            if matches!(cpu, CpuModel::M68000 | CpuModel::M68010) {
+                errors.push(anyhow!(
+                    "[cpu] speed = \"fastest\" needs a 68020 or later: the \
+                     68000/68010 always run on the precise core, which has no \
+                     adaptive clock"
+                ));
+            } else if !cpu_jit {
+                errors.push(anyhow!(
+                    "[cpu] speed = \"fastest\" needs [cpu] jit = true (--jit): \
+                     only the JIT's clock adapts to the host"
+                ));
+            }
+        }
         if let Some(speed) = raw.emulation.speed.as_deref() {
             log::warn!(
                 "[emulation] speed = {speed:?} is deprecated and ignored: the \
@@ -1390,6 +1418,7 @@ impl TryFrom<RawConfig> for Config {
             cpu_dcache,
             cpu_unimplemented,
             cpu_jit,
+            cpu_speed,
             emulation,
             chip_ram_bytes,
             fast_ram_bytes,
@@ -1787,6 +1816,18 @@ pub(crate) fn parse_serial_mode(s: &str) -> Result<SerialMode> {
         _ => Err(anyhow!(
             "unknown [serial] mode {:?}: expected \"off\", \"stdout\", \"midi\", \"tcp\", \
              \"tcp-connect\", \"pty\", \"modem\", or \"device\"",
+            s
+        )),
+    }
+}
+
+/// `[cpu] speed` / `--cpu-speed`.
+pub fn parse_cpu_speed(s: &str) -> Result<CpuSpeed> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "fixed" => Ok(CpuSpeed::Fixed),
+        "fastest" => Ok(CpuSpeed::Fastest),
+        _ => Err(anyhow!(
+            "unknown [cpu] speed {:?}: expected \"fixed\" or \"fastest\"",
             s
         )),
     }

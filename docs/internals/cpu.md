@@ -96,9 +96,8 @@ approximate (`M68kMachine::step_slice_jit`):
   accesses bill nothing (an ideal zero-wait external bus) -- the machine
   behaves like a perfect pipelined accelerator whose throughput tracks
   `[cpu] clock_mhz` directly, e.g. ~50 MIPS for a 50 MHz 68040 in fast
-  RAM. This is the deterministic equivalent of a "fastest possible"
-  mode: a truly host-speed CPU would make emulated results depend on the
-  host, which Copperline never allows;
+  RAM. At a fixed clock this is deterministic; the opt-in
+  `[cpu] speed = "fastest"` (below) varies the clock with the host;
 - chip and slow RAM accesses still arbitrate into DMA slots through the
   normal `CpuBus` paths and advance the beam as they land (that bus is
   shared silicon), and CIA/RTC accesses keep their E-clock costs, keeping
@@ -141,6 +140,28 @@ or clearing the buffer allows sampling to resume but preserves the counter.
 The profile status and summary retain the loss count after the sampler stops.
 This bound is independent of frame polling, so a debugger execution path that
 does not drain samples cannot grow the buffer indefinitely.
+
+(jit-fastest-speed)=
+### Fastest possible (`[cpu] speed = "fastest"`)
+
+The opt-in host-adaptive mode, WinUAE's *Fastest possible*, adds no second
+timing model. `M68kMachine::set_jit_speed_factor` divides every CPU clock
+the JIT path bills (the flat per-instruction clock and the exception and
+interrupt entry costs) by a factor, kept as a 16.16 fixed-point divisor
+with its sub-clock remainder carried across batches. Dividing the CPU's
+own clocks is exactly a faster CPU clock: chip-bus and CIA accesses keep
+their bus-time costs, fast RAM and ROM stay free, and beam, DMA and
+interrupt delivery remain as consistent as at any fixed `clock_mhz`. At a
+factor of 1 the divisor is unity and the billing path is the unscaled one,
+so the fixed-clock JIT and the precise core are untouched. The precise core
+never reads the factor.
+
+The factor comes from the emulator's speed governor
+(`src/emulator/fastest.rs`), which watches the host time each real-time
+quantum costs against the emulated time it advanced; [the pacing
+chapter](#jit-fastest-pacing) describes the control loop and when it may
+adapt. It never adapts outside paced quanta, so headless runs stay at
+the configured clock and remain deterministic.
 
 The 68000 and 68010 never take the batch path. On the small-box machines
 every CPU cycle drives the one bus shared with Agnus, and the floating-bus

@@ -124,6 +124,16 @@ pub struct M68kMachine {
     /// each instruction a flat bus-cycle cost. Configuration, not machine
     /// state: like `fpu_enabled` it is never serialized.
     jit_enabled: bool,
+    /// `[cpu] speed = "fastest"`: the CPU clocks the JIT path bills, as a
+    /// 16.16 fraction of the clocks it retired. `JIT_CLOCK_DIVISOR_UNITY`
+    /// (the fixed clock) except while the emulator's speed governor runs
+    /// the JIT faster than `clock_mhz`; dividing the CPU's own clocks is
+    /// exactly a faster CPU clock, while chip-bus and CIA accesses keep
+    /// their bus-time costs. Host configuration, never serialized.
+    jit_clock_divisor_q16: u32,
+    /// Sub-clock remainder of the scaled billing (16.16), carried across
+    /// batches so a fractional divisor bills exactly over time.
+    jit_clock_carry_q16: u32,
     /// Last CACR value pushed into the cache models, so the per-instruction
     /// sync is a single compare when nothing changed.
     last_cacr: u32,
@@ -403,9 +413,15 @@ const JIT_BATCH_INSTRUCTIONS: usize = 64;
 /// machine's nominal speed: one instruction per clock models an ideal
 /// pipelined accelerator, making guest throughput track `[cpu] clock_mhz`
 /// directly (a 50 MHz 68040 runs ~50 MIPS in fast RAM). Deterministic by
-/// construction -- a truly host-speed "fastest possible" mode would make
-/// emulated results depend on the host, which Copperline never allows.
+/// construction at a fixed clock; the opt-in, host-dependent
+/// `[cpu] speed = "fastest"` scales the billed clocks instead (see
+/// `M68kMachine::set_jit_speed_factor`), never this constant.
 const JIT_CPU_CLOCKS_PER_INSTRUCTION: u32 = 1;
+
+/// Unity value of `M68kMachine::jit_clock_divisor_q16` (16.16 fixed
+/// point): the JIT path bills its CPU clocks unscaled, so it runs at
+/// exactly `[cpu] clock_mhz`.
+const JIT_CLOCK_DIVISOR_UNITY: u32 = 1 << 16;
 
 struct CpuBus {
     bus: Bus,
@@ -536,6 +552,8 @@ impl M68kMachine {
             },
             fpu_enabled,
             jit_enabled: false,
+            jit_clock_divisor_q16: JIT_CLOCK_DIVISOR_UNITY,
+            jit_clock_carry_q16: 0,
             last_cacr: 0,
             dbg_ipl_main_cyc: 0,
             dbg_ipl_irq_cyc: 0,
@@ -2933,6 +2951,51 @@ impl M68kMachine {
         self.jit_enabled
     }
 
+    /// Whether `step_slice` currently takes the batch/JIT path: JIT on and
+    /// no debug hook or model property forcing the precise core.
+    pub fn jit_batch_path_active(&self) -> bool {
+        self.jit_enabled && self.jit_fast_path_ok()
+    }
+
+    /// Run the JIT path `factor` times faster than the configured clock
+    /// (`[cpu] speed = "fastest"`): every CPU clock it bills -- the flat
+    /// per-instruction cost, exception and interrupt entry -- is divided by
+    /// `factor`, which is exactly a faster CPU clock. Chip-bus and CIA
+    /// accesses keep their bus-time costs, as on a real accelerator. A
+    /// factor of 1 or below (or not finite) restores the fixed clock,
+    /// whose billing path is then the unscaled one. The precise core never
+    /// reads this.
+    pub fn set_jit_speed_factor(&mut self, factor: f64) {
+        let divisor = if factor.is_finite() && factor > 1.0 {
+            ((f64::from(JIT_CLOCK_DIVISOR_UNITY) / factor).round() as u32)
+                .clamp(1, JIT_CLOCK_DIVISOR_UNITY)
+        } else {
+            JIT_CLOCK_DIVISOR_UNITY
+        };
+        if divisor == JIT_CLOCK_DIVISOR_UNITY {
+            self.jit_clock_carry_q16 = 0;
+        }
+        self.jit_clock_divisor_q16 = divisor;
+    }
+
+    /// The JIT speed factor in effect (1.0 = the configured clock).
+    pub fn jit_speed_factor(&self) -> f64 {
+        f64::from(JIT_CLOCK_DIVISOR_UNITY) / f64::from(self.jit_clock_divisor_q16)
+    }
+
+    /// CPU clocks the JIT path bills for `clocks` retired at the configured
+    /// clock (see `set_jit_speed_factor`). Identity at the fixed clock.
+    #[inline]
+    fn jit_scaled_clocks(&mut self, clocks: u32) -> u32 {
+        if self.jit_clock_divisor_q16 == JIT_CLOCK_DIVISOR_UNITY {
+            return clocks;
+        }
+        let total = u64::from(clocks) * u64::from(self.jit_clock_divisor_q16)
+            + u64::from(self.jit_clock_carry_q16);
+        self.jit_clock_carry_q16 = (total & 0xFFFF) as u32;
+        (total >> 16) as u32
+    }
+
     /// Whether `step_slice` may take the batch/JIT path right now: every
     /// per-instruction debug or diagnostic hook the precise loop services
     /// must be idle, and the FPU-absence shim must not be needed (the
@@ -3347,8 +3410,9 @@ impl M68kMachine {
             let bus_before = self.bus.bus.slice_bus_advanced_cck();
             let cpu_cck_before = cpu_cck;
             if let Some(irq) = self.service_pending_irq_cycles() {
-                cpu_cycles = cpu_cycles.saturating_add(positive_cpu_cycles(irq.cycles));
-                cpu_cck = cpu_cck.saturating_add(self.charge_cpu_clocks(irq.cycles));
+                let irq_clocks = self.jit_scaled_clocks(positive_cpu_cycles(irq.cycles));
+                cpu_cycles = cpu_cycles.saturating_add(irq_clocks);
+                cpu_cck = cpu_cck.saturating_add(self.charge_cpu_clocks(irq_clocks as i32));
             }
             // A level the boundary could not deliver (the CPU is still
             // inside a handler at that priority) must not ride into the
@@ -3418,6 +3482,7 @@ impl M68kMachine {
                     instructions = instructions.saturating_add(1);
                 }
             }
+            let batch_clocks = self.jit_scaled_clocks(batch_clocks);
             cpu_cycles = cpu_cycles.saturating_add(batch_clocks);
             cpu_cck = cpu_cck
                 .saturating_add(self.charge_cpu_clocks_less_bus_overlap(batch_clocks as i32));
@@ -7846,6 +7911,47 @@ mod tests {
             cacheless > cached * 2,
             "cache model should dominate chip-loop speed: cacheless {cacheless} vs cached {cached}"
         );
+        Ok(())
+    }
+
+    /// `[cpu] speed = "fastest"` speeds the JIT up by dividing the CPU
+    /// clocks it bills: the same instructions take a quarter of the clocks
+    /// (and so of the chipset time) at factor 4, a fractional factor
+    /// carries its remainder exactly across batches, and factor 1 is the
+    /// fixed clock's unscaled billing.
+    #[test]
+    fn jit_speed_factor_divides_the_billed_cpu_clocks() -> Result<()> {
+        let program = [0x4E71u16, 0x60FC]; // nop; bra.s <nop>
+        let pc = FAST_RAM_BASE as u32 + 0x100;
+        let run = |factor: f64| -> Result<(u32, u32, f64)> {
+            let mut machine = machine_with_program_model(pc, &program, CpuModel::M68030)?;
+            machine.set_jit_enabled(true);
+            machine.set_jit_speed_factor(factor);
+            let (mut clocks, mut cck) = (0u32, 0u32);
+            for _ in 0..10 {
+                let slice = machine.step_slice(4096)?;
+                assert_eq!(slice.instructions, 4096);
+                clocks += slice.cpu_cycles;
+                cck += slice.cpu_cck;
+            }
+            Ok((clocks, cck, machine.jit_speed_factor()))
+        };
+        let (fixed_clocks, fixed_cck, fixed_factor) = run(1.0)?;
+        assert_eq!(fixed_clocks, 40_960, "one clock per instruction");
+        assert_eq!(fixed_factor, 1.0);
+        let (fast_clocks, fast_cck, fast_factor) = run(4.0)?;
+        assert_eq!(fast_factor, 4.0);
+        assert_eq!(fast_clocks * 4, fixed_clocks);
+        assert_eq!(fast_cck * 4, fixed_cck);
+        let (third_clocks, _, _) = run(3.0)?;
+        assert!(
+            third_clocks.abs_diff(fixed_clocks / 3) <= 1,
+            "{third_clocks} clocks at factor 3"
+        );
+        // Out-of-range factors fall back to the fixed clock.
+        for factor in [0.5, f64::NAN, f64::INFINITY] {
+            assert_eq!(run(factor)?.0, fixed_clocks, "factor {factor}");
+        }
         Ok(())
     }
 

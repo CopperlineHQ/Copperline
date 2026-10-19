@@ -767,6 +767,7 @@ fn raw_config_serialize_round_trips() {
             dcache: None,
             unimplemented: None,
             jit: None,
+            speed: None,
         },
         memory: RawMemory {
             chip: Some("2M".to_string()),
@@ -4413,6 +4414,78 @@ fn cpu_jit_parses_and_defaults_off() -> Result<()> {
             "#,
     )?;
     assert!(cfg.cpu_jit);
+    Ok(())
+}
+
+#[test]
+fn cpu_speed_defaults_fixed_and_fastest_needs_the_jit_on_a_68020_plus() -> Result<()> {
+    assert_eq!(parse_config("")?.cpu_speed, CpuSpeed::Fixed);
+    let cfg = parse_config(
+        r#"
+            [cpu]
+            model = "68030"
+            jit = true
+            speed = "fastest"
+            "#,
+    )?;
+    assert_eq!(cfg.cpu_speed, CpuSpeed::Fastest);
+    assert_eq!(
+        parse_config("[cpu]\nmodel = \"68030\"\njit = true\nspeed = \"Fixed\"\n")?.cpu_speed,
+        CpuSpeed::Fixed
+    );
+
+    // Without the JIT there is no adaptive clock: refused, not ignored.
+    let err = parse_config("[cpu]\nmodel = \"68030\"\nspeed = \"fastest\"\n").unwrap_err();
+    assert!(err.to_string().contains("[cpu] jit"), "{err:#}");
+    // The 68000/68010 never leave the precise core, JIT or not.
+    for model in ["68000", "68010"] {
+        let err = parse_config(&format!(
+            "[cpu]\nmodel = \"{model}\"\njit = true\nspeed = \"fastest\"\n"
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("68020"), "{model}: {err:#}");
+    }
+    let err = parse_config("[cpu]\nspeed = \"max\"\n").unwrap_err();
+    assert!(err.to_string().contains("fastest"), "{err:#}");
+    Ok(())
+}
+
+#[test]
+fn cpu_speed_cli_override_matches_the_config_field() -> Result<()> {
+    let cfg = load_overrides(&ConfigOverrides {
+        cpu: Some("68030".to_string()),
+        cpu_jit: Some(true),
+        cpu_speed: Some("fastest".to_string()),
+        ..ConfigOverrides::default()
+    })?;
+    assert_eq!(cfg.cpu_speed, CpuSpeed::Fastest);
+    // --no-jit on a fastest config is the same refusal as the TOML.
+    assert!(load_overrides(&ConfigOverrides {
+        cpu: Some("68030".to_string()),
+        cpu_jit: Some(false),
+        cpu_speed: Some("fastest".to_string()),
+        ..ConfigOverrides::default()
+    })
+    .is_err());
+    Ok(())
+}
+
+#[test]
+fn fastest_cpu_speed_blocks_run_ahead() -> Result<()> {
+    let cfg = parse_config(
+        r#"
+            [cpu]
+            model = "68030"
+            jit = true
+            speed = "fastest"
+            [emulation]
+            run_ahead_frames = 2
+            "#,
+    )?;
+    assert_eq!(
+        cfg.runahead_machine_block_reason(),
+        Some("fastest CPU speed")
+    );
     Ok(())
 }
 

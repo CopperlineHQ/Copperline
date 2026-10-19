@@ -656,6 +656,19 @@ fn netplay_rejects_host_parallel_devices_and_noncanonical_toccata_state() -> Res
 }
 
 #[test]
+fn netplay_rejects_the_fastest_cpu_speed() -> Result<()> {
+    // Lockstep peers must retire identical instruction streams, and the
+    // adaptive JIT clock follows each host's own speed.
+    let mut cfg = safe_config()?;
+    cfg.cpu = crate::config::CpuModel::M68030;
+    cfg.cpu_jit = true;
+    cfg.cpu_speed = crate::config::CpuSpeed::Fastest;
+    let error = validate_config(&cfg).unwrap_err().to_string();
+    assert!(error.contains("fastest CPU speed"), "{error}");
+    Ok(())
+}
+
+#[test]
 fn netplay_rejects_sf2000sd() -> Result<()> {
     // A ROM-only board still autoconfigs on the chain, and the `Hardware`
     // manifest bundles neither the board nor its ROM (the SF2000 firmware

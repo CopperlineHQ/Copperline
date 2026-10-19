@@ -579,6 +579,9 @@ pub struct MachineSetup {
     dcache: bool,
     /// Fast batch/trace-JIT CPU execution (`[cpu] jit`); not cycle-exact.
     jit: bool,
+    /// `[cpu] speed = "fastest"`: the JIT clock adapts to the host. Kept
+    /// while the JIT is off (the row greys), emitted only while it applies.
+    jit_fastest: bool,
     // Memory (bytes)
     chip_ram: usize,
     fast_ram: usize,
@@ -1175,6 +1178,7 @@ impl MachineSetup {
         self.icache = base.cpu_icache;
         self.dcache = base.cpu_dcache;
         self.jit = base.cpu_jit;
+        self.jit_fastest = base.cpu_speed == crate::config::CpuSpeed::Fastest;
         self.chip_ram = base.chip_ram_bytes;
         self.fast_ram = base.fast_ram_bytes;
         self.slow_ram = base.slow_ram_bytes;
@@ -1412,6 +1416,14 @@ impl MachineSetup {
                 !matches!(self.cpu, CpuModel::M68000 | CpuModel::M68010),
                 "needs 68020+",
             ),
+            // Only the JIT's clock adapts to the host.
+            F::JitSpeed => {
+                if matches!(self.cpu, CpuModel::M68000 | CpuModel::M68010) {
+                    Some("needs 68020+")
+                } else {
+                    reason(self.jit, "needs JIT")
+                }
+            }
             F::Z3Ram => reason(cpu_is_32bit(self.cpu), "needs 32-bit CPU"),
             // The CPU-slot space at $08000000 is beyond a 24-bit bus too.
             F::AccelRam => reason(cpu_is_32bit(self.cpu), "needs 32-bit CPU"),

@@ -64,6 +64,7 @@ range checks as the equivalent TOML fields:
 | `--cpu-clock MHZ` | `[cpu] clock_mhz` | a number of MHz |
 | `--fpu` / `--no-fpu` | `[cpu] fpu` | fit / omit a 68881/68882 |
 | `--jit` / `--no-jit` | `[cpu] jit` | experimental fast batch/trace-JIT CPU execution (68020+; not cycle-exact) |
+| `--cpu-speed MODE` | `[cpu] speed` | `fixed` (default) or `fastest`: the JIT clock adapts to the host while paced (needs `--jit`; not reproducible) |
 | `--clipboard` / `--no-clipboard` | `[clipboard] share` | share the host clipboard with the guest's `clipboard.device`; fits an extra autoconfig board, so it is opt-in (default: off) |
 | `--cartridge MODEL` | `[cartridge] model` | `none` (default) or `hrtmon`, the bundled HRTMon freezer cartridge |
 | `--chip SIZE` | `[memory] chip` | `512K`, `1M`, `2M`, ... |
@@ -597,6 +598,9 @@ clock_mhz = 14.0    # optional; defaults to the model's stock speed
 #                   # instructions directly)
 # jit = true        # experimental: fast batch/trace-JIT CPU execution
 #                   # (68020+; not cycle-exact)
+# speed = "fastest" # with jit: adapt the JIT clock to the host while the
+#                   # window paces to real time, like WinUAE's "fastest
+#                   # possible" (not reproducible; default "fixed")
 ```
 
 - `model`: the 68010 models the vector base register, the format-stacking
@@ -668,6 +672,50 @@ clock_mhz = 14.0    # optional; defaults to the model's stock speed
   launcher greys the toggle). Known issue: the bundled AROS ROM's boot
   screen may stay grey under JIT on some 020+ configurations (the guest
   still runs; Kickstart ROMs are unaffected).
+- `speed` (also `--cpu-speed`) picks how fast the JIT runs. `"fixed"` (the
+  default) runs it at `clock_mhz`, deterministically. `"fastest"` is the
+  equivalent of WinUAE's *Fastest possible* CPU setting: while the window
+  paces the machine to real time, the JIT's effective clock adapts to what
+  the host can sustain. It starts at `clock_mhz`, which is also its floor
+  (it never runs slower), and rises while the host has headroom, up to
+  2000 MHz. The chipset, audio and emulated time stay in real time, so the
+  pointer and sound stay smooth, and the CPU gets the host time that is
+  left. Every tenth of a second Copperline compares the main thread's host
+  time (emulation plus the window's own work, pacing sleeps excluded) with
+  the emulated time that passed. It raises the clock while that stays below
+  about 80% and the CPU is actually busy; a CPU waiting in STOP, or one
+  stalled on the chip bus, keeps its clock. It lowers the clock as soon as
+  the share passes about 93%, for example when another program loads the
+  host. The performance overlay (`cpu N MHz`)
+  and the control protocol's `status` reply (`jit_mhz`) show the current
+  clock, and the launcher's CPU page has a matching **JIT speed** row,
+  greyed until the JIT is on.
+
+  The mode is deliberately not reproducible: how many instructions run per
+  frame depends on the host and on what else it is doing, so two runs
+  differ. Copperline logs this once at start. In detail:
+  - It needs `jit = true` on a 68020 or later; any other combination is
+    rejected with an error.
+  - Runs without a wall clock -- `--screenshot-after`, `--dump-frames`,
+    `--gif-after`, `--expect-screenshot`, `--exit-on-return`,
+    `--benchmark-until`, headless `--control` and `--gdb` sessions -- have
+    nothing to keep up with, so they stay at `clock_mhz` and match
+    `speed = "fixed"` exactly. They remain deterministic; raise `clock_mhz`
+    for a faster fixed CPU there. (`COPPERLINE_HEADLESS_PACED=1` paces such
+    a run like the window, and the clock then adapts as it would there; see
+    [Headless operation](headless.md).)
+  - Warp Speed holds the clock the paced run had reached; adaptation
+    resumes when warp ends.
+  - Netplay refuses it, and run-ahead stays inactive under it: both depend
+    on re-running or comparing frames that must come out identical.
+  - Save states do not store the adapted clock. Loading one keeps the clock
+    the session had (a new session starts from `clock_mhz`), and a resumed
+    windowed run is not byte-identical to the original.
+  - `--record-input`/`--script` replays, `--expect-screenshot` comparisons
+    and reverse debugging are exact only in unpaced runs, where the clock is
+    fixed.
+  - Any debugger hook that forces the precise core (breakpoints, traces,
+    `COPPERLINE_DBG_*`) suspends adaptation, just as it suspends the JIT.
 
 ## `[memory]`
 

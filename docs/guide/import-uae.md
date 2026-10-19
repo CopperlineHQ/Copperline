@@ -43,6 +43,7 @@ annotated:
 | UAE setting | Copperline equivalent |
 |---|---|
 | Model and CPU / FPU | `[machine] profile`, `[cpu]` model and FPU |
+| JIT (`cachesize` > 0, 68020+) and "fastest possible" (`cpu_speed=max`) | `[cpu] jit`, `[cpu] speed = "fastest"` (approximated) |
 | Memory sizes (Chip, Slow, Fast, Z3, Motherboard) | `[memory]` sections |
 | Chipset revision, PAL/NTSC | `[chipset]` revision and video |
 | Kickstart ROM paths | `rom`, `extended_rom` |

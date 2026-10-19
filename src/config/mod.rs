@@ -123,6 +123,9 @@ pub struct Config {
     /// the machine behaves like one with an accelerator card fitted.
     /// Defaults off.
     pub cpu_jit: bool,
+    /// Fixed clock or host-adaptive "fastest" JIT speed (`[cpu] speed`).
+    /// `Fastest` is only ever set together with `cpu_jit` on a 68020+.
+    pub cpu_speed: CpuSpeed,
     pub emulation: Emulation,
     pub chip_ram_bytes: usize,
     pub fast_ram_bytes: usize,
@@ -2396,6 +2399,32 @@ pub enum UnimplementedPolicy {
     Native,
 }
 
+/// How fast the `[cpu] jit` CPU runs (`[cpu] speed`, `--cpu-speed`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CpuSpeed {
+    /// The CPU runs at `[cpu] clock_mhz`: deterministic, the same on every
+    /// host.
+    #[default]
+    Fixed,
+    /// WinUAE's "fastest possible": while the run is paced to the wall
+    /// clock, the JIT's effective clock adapts to what the host can sustain,
+    /// from `[cpu] clock_mhz` upward, keeping the chipset in real time.
+    /// Not cycle-exact and not reproducible; unpaced runs (headless
+    /// captures, benchmarks) stay at `clock_mhz`. Needs `[cpu] jit` on a
+    /// 68020 or later.
+    Fastest,
+}
+
+impl CpuSpeed {
+    /// The config/CLI spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CpuSpeed::Fixed => "fixed",
+            CpuSpeed::Fastest => "fastest",
+        }
+    }
+}
+
 /// PAL Amiga colour clock (CCK), in Hz. The 68000 bus advances one slot per
 /// CCK; the CPU runs at a whole multiple of it (2x for a stock 68000).
 pub const COLOR_CLOCK_HZ: f64 = 3_546_895.0;
@@ -2755,6 +2784,7 @@ impl Default for Config {
             cpu_dcache: false,
             cpu_unimplemented: UnimplementedPolicy::Trap,
             cpu_jit: false,
+            cpu_speed: CpuSpeed::Fixed,
             emulation: Emulation {
                 power_on: true,
                 auto_launch: false,
@@ -2901,6 +2931,12 @@ impl Config {
     /// serialized core. Dynamic media and observers are checked on the live
     /// Bus by the window session.
     pub fn runahead_machine_block_reason(&self) -> Option<&'static str> {
+        // Run-ahead re-emulates frames from a snapshot and must land on the
+        // same machine state each time; the adaptive JIT clock changes with
+        // host timing, so a re-run would not.
+        if self.cpu_speed == CpuSpeed::Fastest {
+            return Some("fastest CPU speed");
+        }
         if !self.filesys.is_empty() {
             return Some("host directory volume");
         }
@@ -3057,6 +3093,9 @@ pub struct ConfigOverrides {
     /// Fast CPU execution via the batch/trace-JIT path (`--jit`/`--no-jit`).
     /// Same semantics as `[cpu] jit`.
     pub cpu_jit: Option<bool>,
+    /// JIT CPU speed (`--cpu-speed fixed|fastest`). Same syntax as
+    /// `[cpu] speed`.
+    pub cpu_speed: Option<String>,
     /// Host clipboard sharing (`--clipboard`/`--no-clipboard`). Same
     /// semantics as `[clipboard] share`.
     pub clipboard: Option<bool>,
@@ -3233,6 +3272,7 @@ impl ConfigOverrides {
             && self.fpu.is_none()
             && self.cpu_clock_mhz.is_none()
             && self.cpu_jit.is_none()
+            && self.cpu_speed.is_none()
             && self.chip.is_none()
             && self.fast.is_none()
             && self.slow.is_none()
@@ -3314,6 +3354,9 @@ impl ConfigOverrides {
         }
         if let Some(jit) = self.cpu_jit {
             raw.cpu.jit = Some(jit);
+        }
+        if let Some(speed) = &self.cpu_speed {
+            raw.cpu.speed = Some(speed.clone());
         }
         if let Some(share) = self.clipboard {
             raw.clipboard.share = Some(share);

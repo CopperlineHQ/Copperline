@@ -265,6 +265,7 @@ menu's font size (it follows *Menu Size*), refreshed twice a second:
 | `audio 148 ms` | Live audio output lead -- the cushion that absorbs host scheduling hiccups (steady state is about 150 ms) |
 | `xrun 0` | Audio underrun frames per second: the audible symptom of the host falling behind |
 | `slip 0` | Times the pacer reset its host-time target after exceeding the catch-up limit (for example, after a host stall), since the last guest reset |
+| `cpu 212 MHz` | Only under `[cpu] speed = "fastest"`: the JIT's current effective clock, which follows the host's headroom (see [Configuration](configuration.md)) |
 
 Copperline never skips frames to keep pace: when the host cannot sustain
 real time the machine slows down (fps and the speed factor fall below

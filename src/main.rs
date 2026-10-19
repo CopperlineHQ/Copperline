@@ -1133,9 +1133,16 @@ fn main() -> Result<()> {
     // them -- so the guest sees a drive that answers almost nothing. Pace a
     // bridged machine like a real Amiga, whatever else was asked for.
     let bridged = cfg.floppy.bridges.iter().any(Option::is_some);
-    let paced = !headless_capture || bridged;
+    // A diagnostic: pace a capture run like the window, to measure real-time
+    // pacing behaviour ([cpu] speed = "fastest" adapting, frame costs) on a
+    // host with no visible window. Scheduled captures still fire on emulated
+    // time; only the wall-clock sleep returns.
+    let headless_paced = headless_capture && copperline::envcfg::flag("COPPERLINE_HEADLESS_PACED");
+    let paced = !headless_capture || bridged || headless_paced;
     if bridged && headless_capture {
         info!("emulation timing: paced to wall-clock because a physical floppy drive is attached");
+    } else if headless_paced {
+        info!("emulation timing: paced to wall-clock (COPPERLINE_HEADLESS_PACED)");
     }
     info!("emulation timing: deterministic core, paced={paced}");
     // Host clipboard sharing is off unless the configuration asked for it,
@@ -3244,6 +3251,22 @@ mod tests {
     fn cpu_clock_rejects_non_numeric() {
         let err = parse(&["--cpu-clock", "fast"]).unwrap_err();
         assert!(err.to_string().contains("--cpu-clock"), "{err:#}");
+    }
+
+    #[test]
+    fn cpu_speed_flag_parses_and_rejects_unknown_values() -> Result<()> {
+        assert_eq!(parse(&[])?.overrides.cpu_speed, None);
+        assert_eq!(
+            parse(&["--cpu-speed", "fastest"])?
+                .overrides
+                .cpu_speed
+                .as_deref(),
+            Some("fastest")
+        );
+        let err = parse(&["--cpu-speed", "max"]).unwrap_err();
+        assert!(err.to_string().contains("--cpu-speed"), "{err:#}");
+        assert!(parse(&["--cpu-speed"]).is_err());
+        Ok(())
     }
 }
 

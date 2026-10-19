@@ -138,6 +138,7 @@ impl Hardware {
                     .is_68060()
                     .then(|| format!("{:?}", cfg.cpu_unimplemented).to_ascii_lowercase()),
                 jit: Some(false),
+                speed: None,
             },
             memory: RawMemory {
                 chip: Some(cfg.chip_ram_bytes.to_string()),
