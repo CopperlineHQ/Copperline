@@ -288,3 +288,33 @@ capture also lacks the selected edge, so reset does not explain every case.
 A subsequent normal Kickstart capture has varied address/control signals
 and REGEN activity. Require actual qualified bus windows before interpreting
 any future scope recording; a reported STOP state alone is insufficient.
+
+
+## Copper start pipeline, 19 October follow-up
+
+Model the Copper BLTSIZE/BLTSIZH start path with its busy latch one DMA slot
+(two colour clocks) after data fetch, and engine progression/zero reset two
+slots (four clocks) after fetch. This separation fits the measured observations;
+CPU writes enter through the existing completed-cycle
+path. Keep CPU custom-read sampling unchanged: moving it globally repaired
+Copper observations but broke CPU controls. The pending start pipeline advances
+even when blitter DMA is disabled, reserves no memory slots, participates in
+slot/deadline predictions, and is retained in snapshots. Forced synchronous
+completion drains it before evaluating the blit.
+
+A500 pressure, onset and completion-marker probes distinguish these phases.
+A single four-clock delay made completion agree but delayed busy assertion;
+a two-clock delay still completed early. Separating the busy and engine stages
+repairs the repeated early BBUSY/BFD completion-marker family. This is a
+measured start-path correction, not a change to the body or terminal sequencer.
+Evidence, ROM fingerprints, versioned packets, rejected candidates and detailed
+validation live in the sibling repository at
+`amiga-hardware-probes/docs/bus-pressure-2026-10-19.md` and
+`references/bus-{pressure,onset,phase-completion}*`.
+
+One onset observation of initial BZERO remains different before the first
+nonzero blit. The probe does not precondition that accumulator, so warm hardware
+reset and emulator construction cannot be assumed to establish the same state.
+A deliberately primed probe is needed
+before inferring reset behavior. Existing CPU register-handoff discrepancies
+also remain a separate investigation.

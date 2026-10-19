@@ -231,6 +231,10 @@ pub struct Blitter {
     pub bzero: bool,
 
     pending: Option<PendingBlit>,
+    /// Clocks until the Copper start pipeline reaches the engine/zero stage.
+    /// The busy latch precedes that stage by up to two colour clocks.
+    #[serde(default)]
+    start_strobe_clocks: u8,
     dma_addr_mask: u32,
     /// One-shot signal to the bus: the sequencer just entered its terminal
     /// BLTDONE micro-cycle. The bus schedules the measured INTREQ.BLIT
@@ -479,6 +483,7 @@ impl Blitter {
             bbusy: false,
             bzero: true,
             pending: None,
+            start_strobe_clocks: 0,
             dma_addr_mask: CHIP_DMA_ADDR_MASK,
             irq_arm_pending: false,
         }
@@ -589,6 +594,7 @@ impl Blitter {
     }
 
     fn finish_blit(&mut self) {
+        self.start_strobe_clocks = 0;
         self.busy = false;
         self.bbusy = false;
     }
@@ -638,12 +644,33 @@ impl Blitter {
         self.start_scheduled_dims(h, w, ram);
     }
 
+    pub(crate) fn start_scheduled_delayed(&mut self, size: u16, ram: &[u8], clocks: u8) {
+        let old_zero = self.bzero;
+        self.start_scheduled(size, ram);
+        self.defer_start_strobe(clocks, old_zero);
+    }
+
     pub fn start_scheduled_ecs(&mut self, bltsizh: u16, ram: &[u8]) {
         let (h, w) = decode_ecs_bltsize(self.bltsizv, bltsizh);
         self.start_scheduled_dims(h, w, ram);
     }
 
+    pub(crate) fn start_scheduled_ecs_delayed(&mut self, size: u16, ram: &[u8], clocks: u8) {
+        let old_zero = self.bzero;
+        self.start_scheduled_ecs(size, ram);
+        self.defer_start_strobe(clocks, old_zero);
+    }
+
+    fn defer_start_strobe(&mut self, clocks: u8, old_zero: bool) {
+        self.start_strobe_clocks = clocks;
+        if clocks != 0 {
+            self.bbusy = false;
+            self.bzero = old_zero;
+        }
+    }
+
     fn start_scheduled_dims(&mut self, h: u32, w: u32, ram: &[u8]) {
+        self.start_strobe_clocks = 0;
         self.busy = true;
         self.bbusy = true;
         self.bzero = true;
@@ -684,7 +711,23 @@ impl Blitter {
         self.debug_watched_write.take()
     }
 
+    pub(crate) fn start_strobe_pending(&self) -> bool {
+        self.start_strobe_clocks != 0
+    }
+
     pub fn tick_scheduled_slot(&mut self, ram: &mut [u8]) -> bool {
+        if self.start_strobe_clocks != 0 {
+            self.start_strobe_clocks -= 1;
+            // The start/busy latch precedes the engine/zero reset by one
+            // DMA slot (two colour clocks). CPU starts arrive already strobed.
+            if self.start_strobe_clocks <= 2 {
+                self.bbusy = true;
+            }
+            if self.start_strobe_clocks == 0 {
+                self.bzero = true;
+            }
+            return false;
+        }
         if !self.busy {
             return false;
         }
@@ -783,8 +826,18 @@ impl Blitter {
             return None;
         }
         match self.pending.as_ref()? {
-            PendingBlit::Line(state) => Some(state.slots_remaining().max(1)),
-            PendingBlit::Normal(state) => Some(state.slots_remaining().max(1)),
+            PendingBlit::Line(state) => Some(
+                state
+                    .slots_remaining()
+                    .max(1)
+                    .saturating_add(u32::from(self.start_strobe_clocks)),
+            ),
+            PendingBlit::Normal(state) => Some(
+                state
+                    .slots_remaining()
+                    .max(1)
+                    .saturating_add(u32::from(self.start_strobe_clocks)),
+            ),
         }
     }
 
@@ -816,7 +869,7 @@ impl Blitter {
     /// states. The bus still advances the pipeline through these cycles (they
     /// elapse in real time), it just does not reserve the slot for them.
     pub fn current_slot_needs_bus(&self) -> bool {
-        if !self.busy {
+        if !self.busy || self.start_strobe_clocks != 0 {
             return false;
         }
         match self.pending.as_ref() {
@@ -830,7 +883,7 @@ impl Blitter {
     /// will process (see BlitSlotClass). `Internal` when no blit is pending
     /// so callers need no extra guard.
     pub fn current_slot_class(&self) -> BlitSlotClass {
-        if !self.busy {
+        if !self.busy || self.start_strobe_clocks != 0 {
             return BlitSlotClass::Internal;
         }
         match self.pending.as_ref() {
@@ -853,16 +906,24 @@ impl Blitter {
             return None;
         }
         let limit = limit.min(64);
-        match self.pending.as_ref()? {
-            PendingBlit::Normal(state) => Some(state.slot_access_pattern(limit)),
-            PendingBlit::Line(state) => Some(state.slot_access_pattern(limit)),
+        let prefix = u32::from(self.start_strobe_clocks).min(limit);
+        if prefix == limit {
+            return Some((0, limit));
         }
+        let (mask, count) = match self.pending.as_ref()? {
+            PendingBlit::Normal(state) => state.slot_access_pattern(limit - prefix),
+            PendingBlit::Line(state) => state.slot_access_pattern(limit - prefix),
+        };
+        Some((mask << prefix, count + prefix))
     }
 
     /// Diagnostic label of the pipeline cycle the next `tick_scheduled_slot`
     /// will process (the COPPERLINE_DIAG_BLT_SLOTS slot-trace probe). "-"
     /// when no blit is pending.
     pub fn current_slot_label(&self) -> &'static str {
+        if self.start_strobe_clocks != 0 {
+            return "STROBE";
+        }
         match self.pending.as_ref() {
             Some(PendingBlit::Normal(state)) => match state.phase {
                 NormalBlitPhase::StartDelay => {
@@ -998,6 +1059,11 @@ impl Blitter {
     }
 
     pub fn finish_scheduled_now(&mut self, ram: &mut [u8]) -> bool {
+        if self.start_strobe_clocks != 0 {
+            self.start_strobe_clocks = 0;
+            self.bbusy = true;
+            self.bzero = true;
+        }
         let Some(mut pending) = self.pending.take() else {
             return false;
         };
@@ -2535,6 +2601,55 @@ mod tests {
             "scheduled vs synchronous blit RAM diverged"
         );
         assert_eq!(sched_b.bzero, sync_b.bzero, "BZERO diverged");
+    }
+
+    #[test]
+    fn deferred_start_preserves_status_and_predicts_the_strobe_clocks() {
+        for line in [false, true] {
+            let mut ram = vec![0u8; 0x10000];
+            let mut b = Blitter::new();
+            b.bltcon0 = 0x01ff;
+            b.bltcon1 = if line { 1 } else { 0 };
+            b.bltdpt = 0x1000;
+            b.bzero = false;
+            b.start_scheduled_delayed(0x41, &ram, 4);
+            assert!(!b.bbusy && !b.bzero);
+            assert!(!b.current_slot_needs_bus());
+            assert_eq!(b.scheduled_slot_access_pattern(2), Some((0, 2)));
+            let total = b.scheduled_slots_remaining().unwrap();
+            assert!(!b.tick_scheduled_slot(&mut ram));
+            assert!(!b.bbusy && !b.bzero);
+            let mut restored: Blitter =
+                serde_json::from_slice(&serde_json::to_vec(&b).unwrap()).unwrap();
+            assert!(!b.tick_scheduled_slot(&mut ram));
+            assert!(!restored.tick_scheduled_slot(&mut ram));
+            assert!(b.bbusy && !b.bzero);
+            for _ in 0..2 {
+                assert!(!b.tick_scheduled_slot(&mut ram));
+                assert!(!restored.tick_scheduled_slot(&mut ram));
+            }
+            assert!(b.bbusy && b.bzero);
+            assert_eq!(b.scheduled_slots_remaining(), Some(total - 4));
+            assert_eq!(
+                serde_json::to_value(&b).unwrap(),
+                serde_json::to_value(&restored).unwrap()
+            );
+            b.finish_scheduled_now(&mut ram);
+            assert!(!b.busy && !b.bbusy);
+        }
+    }
+
+    #[test]
+    fn forced_drain_of_deferred_start_initializes_the_zero_accumulator() {
+        let mut ram = vec![0u8; 0x10000];
+        let mut b = Blitter::new();
+        b.bltcon0 = 0x0100; // D-only, zero minterm.
+        b.bltdpt = 0x1000;
+        b.bzero = false;
+        b.start_scheduled_delayed(0x41, &ram, 2);
+        assert!(b.finish_scheduled_now(&mut ram));
+        assert!(b.bzero);
+        assert_eq!(b.start_strobe_clocks, 0);
     }
 
     #[test]

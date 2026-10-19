@@ -722,7 +722,9 @@ impl Bus {
                 // is idle.
                 self.paula.intreq &= !crate::chipset::paula::INT_BLIT;
                 self.blit_irq_delay_cck = None;
-                self.blitter_bzero_visible_at = 0;
+                if !matches!(source, BeamWriteSource::Copper) {
+                    self.blitter_bzero_visible_at = 0;
+                }
                 self.note_irq_latches_changed();
                 // A blit over the exception-vector area is useful crash context:
                 // flag it so the CPU wrapper can dump the instruction history.
@@ -774,7 +776,16 @@ impl Bus {
                         if w == 0 { 64 } else { w },
                     );
                 }
-                self.blitter.start_scheduled(val, &self.mem.chip_ram);
+                // Copper size data arrives before the start pipeline: busy
+                // latches after two CCK, engine/zero reset after four. CPU
+                // custom writes arrive after their completed bus cycle.
+                let strobe_clocks = if matches!(source, BeamWriteSource::Copper) {
+                    4
+                } else {
+                    0
+                };
+                self.blitter
+                    .start_scheduled_delayed(val, &self.mem.chip_ram, strobe_clocks);
                 if diag_blt_slots() {
                     eprintln!(
                         "BLTP {} {} {} START con0={:04x} con1={:04x} size={:04x} dmacon={:04x}",
@@ -816,7 +827,9 @@ impl Bus {
                 // blitter-done interrupt request.
                 self.paula.intreq &= !crate::chipset::paula::INT_BLIT;
                 self.blit_irq_delay_cck = None;
-                self.blitter_bzero_visible_at = 0;
+                if !matches!(source, BeamWriteSource::Copper) {
+                    self.blitter_bzero_visible_at = 0;
+                }
                 self.note_irq_latches_changed();
                 if self.blitter_start_may_write_lowmem() {
                     self.diag_lowmem_blit = true;
@@ -831,7 +844,13 @@ impl Bus {
                         if w == 0 { 0x800 } else { w },
                     );
                 }
-                self.blitter.start_scheduled_ecs(val, &self.mem.chip_ram);
+                let strobe_clocks = if matches!(source, BeamWriteSource::Copper) {
+                    4
+                } else {
+                    0
+                };
+                self.blitter
+                    .start_scheduled_ecs_delayed(val, &self.mem.chip_ram, strobe_clocks);
                 self.record_blit_accounting();
                 self.slice_preempted = true;
                 false

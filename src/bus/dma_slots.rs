@@ -226,7 +226,7 @@ impl Bus {
         // drift from the hardware timeline.
         let blitter_non_bus_advanced = !matches!(owner, ChipBusOwner::Blitter)
             && self.blitter.busy
-            && self.blitter_dma_enabled()
+            && (self.blitter_dma_enabled() || self.blitter.start_strobe_pending())
             && match self.blitter.current_slot_class() {
                 crate::chipset::blitter::BlitSlotClass::Bus => false,
                 crate::chipset::blitter::BlitSlotClass::Internal => true,
@@ -362,7 +362,7 @@ impl Bus {
         //   starved CPU is granted (the BLS line blocks busIsFree).
         if !matches!(owner, ChipBusOwner::Blitter)
             && self.blitter.busy
-            && self.blitter_dma_enabled()
+            && (self.blitter_dma_enabled() || self.blitter.start_strobe_pending())
             && blitter_non_bus_advanced
         {
             if diag_blt_slots() {

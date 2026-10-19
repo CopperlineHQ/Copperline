@@ -15220,3 +15220,36 @@ fn clipboard_doorbell_raises_int2_until_the_guest_acknowledges() {
     bus.advance_devices(4);
     assert_ne!(bus.paula.intreq & INT_PORTS, 0);
 }
+
+#[test]
+fn copper_blitter_start_latches_progress_without_dma_and_cpu_is_already_strobed() {
+    for source in [BeamWriteSource::Copper, BeamWriteSource::Cpu] {
+        for ecs_size in [false, true] {
+            let mut bus = empty_bus();
+            bus.set_agnus_revision(AgnusRevision::Ecs8372Rev4);
+            bus.agnus.dmacon = 0; // Register strobes are independent of DMAEN.
+            bus.blitter.bltcon0 = 0x01ff;
+            bus.blitter.bltdpt = 0x1000;
+            bus.blitter.bzero = false;
+            if ecs_size {
+                bus.blitter.bltsizv = 1;
+            }
+            let (register, size) = if ecs_size { (0x05e, 1) } else { (0x058, 0x41) };
+            assert!(!bus.write_custom_word_from(register, size, source));
+            if matches!(source, BeamWriteSource::Copper) {
+                assert!(!bus.blitter.bbusy && !bus.blitter.bzero);
+                bus.advance_chipset(1);
+                assert!(!bus.blitter.bbusy && !bus.blitter.bzero);
+                bus.advance_chipset(1);
+                assert!(bus.blitter.bbusy && !bus.blitter.bzero);
+                bus.advance_chipset(2);
+                assert!(bus.blitter.bbusy && bus.blitter.bzero);
+                assert!(!bus.blitter.start_strobe_pending());
+            } else {
+                assert!(bus.blitter.bbusy && bus.blitter.bzero);
+                assert!(!bus.blitter.start_strobe_pending());
+            }
+            assert_eq!(bus.mem.chip_ram[0x1000], 0);
+        }
+    }
+}
