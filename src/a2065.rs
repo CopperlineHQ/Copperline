@@ -710,24 +710,33 @@ mod tests {
     /// with buffers, set CSR3 BSWP and point CSR1/CSR2 at the init block.
     /// Returns the RAM offsets of the TX and RX buffers.
     fn set_up_rings(board: &mut A2065, mem: &mut crate::memory::Memory) -> (u32, u32) {
-        set_up_rings_at(board, mem, CHIP_RAM_SELECT)
+        set_up_rings_at(
+            board,
+            mem,
+            CHIP_RAM_SELECT,
+            CHIP_RAM_SELECT,
+            CHIP_RAM_SELECT,
+        )
     }
 
-    /// [`set_up_rings`] with every chip-side pointer (CSR1/CSR2, ring bases,
-    /// buffers) based at `chip_base` instead of the RAM's `$8000`.
+    /// [`set_up_rings`] with the chip-side pointers based independently:
+    /// CSR1/CSR2 at `init_base`, the ring bases at `ring_base`, the buffer
+    /// pointers at `buf_base`. The RAM layout is the same whatever the bases.
     fn set_up_rings_at(
         board: &mut A2065,
         mem: &mut crate::memory::Memory,
-        chip_base: u32,
+        init_base: u32,
+        ring_base: u32,
+        buf_base: u32,
     ) -> (u32, u32) {
         // Layout in board RAM (offsets):
         //   init block @ 0x000, RX ring @ 0x100, TX ring @ 0x200,
         //   RX buffer @ 0x400, TX buffer @ 0x600.
-        let iadr = chip_base;
-        let rx_ring = chip_base + 0x100;
-        let tx_ring = chip_base + 0x200;
-        let rx_buf = chip_base + 0x400;
-        let tx_buf = chip_base + 0x600;
+        let iadr = init_base;
+        let rx_ring = ring_base + 0x100;
+        let tx_ring = ring_base + 0x200;
+        let rx_buf = buf_base + 0x400;
+        let tx_buf = buf_base + 0x600;
 
         // helper to write a word at a RAM offset (low 15 bits of a LANCE
         // address) through the CPU window.
@@ -1162,7 +1171,7 @@ mod tests {
         // never taken and nothing was received.
         let mut board = A2065::new(NetConfig::Loopback).unwrap();
         let mut mem = host_mem();
-        let (tx_buf, rx_buf) = set_up_rings_at(&mut board, &mut mem, 0);
+        let (tx_buf, rx_buf) = set_up_rings_at(&mut board, &mut mem, 0, 0, 0);
         write_csr(&mut board, &mut mem, 0, CSR0_INIT);
         assert_ne!(read_csr(&mut board, &mut mem, 0) & CSR0_IDON, 0);
         write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
@@ -1192,6 +1201,104 @@ mod tests {
         assert_ne!(rx_desc_status(&mut board, &mut mem, 0) & DESC_OWN, 0);
         let rx = rx_buf as usize;
         assert!(board.ram[rx..rx + 64].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn ring_bases_without_a15_read_descriptors_as_zero() {
+        // Valid init block; only RDRA/TDRA lack A15. The chip reads every
+        // descriptor as 0 (host-owned), so it sends and receives nothing and
+        // the descriptors in RAM keep their OWN bits.
+        let mut board = A2065::new(NetConfig::Loopback).unwrap();
+        let mut mem = host_mem();
+        let (tx_buf, rx_buf) =
+            set_up_rings_at(&mut board, &mut mem, CHIP_RAM_SELECT, 0, CHIP_RAM_SELECT);
+        write_csr(&mut board, &mut mem, 0, CSR0_INIT);
+        assert_ne!(read_csr(&mut board, &mut mem, 0) & CSR0_IDON, 0);
+        assert_eq!(
+            (board.rx_ring, board.tx_ring),
+            (0x100, 0x200),
+            "init block was read"
+        );
+        write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
+
+        {
+            let mut host = DeviceHost::new(&mut mem);
+            for i in 0..64u32 {
+                board.write(RAM_BASE + tx_buf + i, 1, 0x40 + i, &mut host);
+            }
+        }
+        arm_tx_desc(&mut board, &mut mem, 0, 64, DESC_OWN | DESC_STP | DESC_ENP);
+        write_csr(&mut board, &mut mem, 0, CSR0_TDMD);
+        assert_eq!(read_csr(&mut board, &mut mem, 0) & CSR0_TINT, 0);
+        assert!(
+            board.net.as_mut().unwrap().poll().is_none(),
+            "nothing goes on the wire"
+        );
+        {
+            let mut host = DeviceHost::new(&mut mem);
+            let status = board.read(RAM_BASE + 0x202, 2, &mut host) >> 8;
+            assert_eq!(
+                status as u8,
+                DESC_OWN | DESC_STP | DESC_ENP,
+                "TX descriptor unchanged"
+            );
+        }
+
+        board.net.as_mut().unwrap().send(&[0xFF; 60]);
+        board.tick(1, &mut DeviceHost::new(&mut mem));
+        assert_eq!(read_csr(&mut board, &mut mem, 0) & CSR0_RINT, 0);
+        assert_eq!(
+            rx_desc_status(&mut board, &mut mem, 0),
+            DESC_OWN,
+            "RX descriptor unchanged"
+        );
+        let rx = rx_buf as usize;
+        assert!(board.ram[rx..rx + 64].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn buffer_pointers_without_a15_read_zero_and_drop_writes() {
+        // Valid init block and rings; only the buffer pointers lack A15. The
+        // descriptors work, but TX buffer reads return 0 and RX buffer writes
+        // are dropped.
+        let mut board = A2065::new(NetConfig::Loopback).unwrap();
+        let mut mem = host_mem();
+        let (tx_buf, rx_buf) =
+            set_up_rings_at(&mut board, &mut mem, CHIP_RAM_SELECT, CHIP_RAM_SELECT, 0);
+        write_csr(&mut board, &mut mem, 0, CSR0_INIT);
+        write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
+
+        {
+            let mut host = DeviceHost::new(&mut mem);
+            for i in 0..64u32 {
+                board.write(RAM_BASE + tx_buf + i, 1, 0x40 + i, &mut host);
+                board.write(RAM_BASE + rx_buf + i, 1, 0x5A, &mut host);
+            }
+        }
+        arm_tx_desc(&mut board, &mut mem, 0, 64, DESC_OWN | DESC_STP | DESC_ENP);
+        write_csr(&mut board, &mut mem, 0, CSR0_TDMD);
+        assert_ne!(read_csr(&mut board, &mut mem, 0) & CSR0_TINT, 0);
+        let frame = board
+            .net
+            .as_mut()
+            .unwrap()
+            .poll()
+            .expect("descriptor is taken");
+        assert_eq!(frame, vec![0; 64], "TX buffer reads as zero");
+
+        board.net.as_mut().unwrap().send(&[0xAA; 60]);
+        board.tick(1, &mut DeviceHost::new(&mut mem));
+        assert_ne!(read_csr(&mut board, &mut mem, 0) & CSR0_RINT, 0);
+        assert_eq!(
+            rx_desc_status(&mut board, &mut mem, 0) & DESC_OWN,
+            0,
+            "RX descriptor returned"
+        );
+        let rx = rx_buf as usize;
+        assert!(
+            board.ram[rx..rx + 64].iter().all(|&b| b == 0x5A),
+            "RX buffer unchanged"
+        );
     }
 
     /// The hardware example: a frame from 00:00:9f:39:a8:d1, as the 68000
