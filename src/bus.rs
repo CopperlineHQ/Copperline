@@ -9653,20 +9653,20 @@ impl Bus {
 
     pub fn custom_read(&mut self, addr: u64, size: usize) -> u64 {
         let off = (addr & 0xFFF) as u16;
-        let mut sampled_intreq = None;
+        let mut sampled_words = [None; 2];
         self.grant_cpu_bus_access_sampled(
             Some(custom_register_cpu_addr(addr)),
             size,
             CpuBusAccessKind::Custom,
             |bus, slot, stride| {
                 let word_off = off.wrapping_add((slot as usize * stride) as u16) & 0xFFE;
-                if word_off == 0x01E {
-                    // Paula's request latch is read on the granted transfer,
-                    // before the 68000 bus-cycle tail. A Copper write during
-                    // that tail must not change the value already captured.
+                if matches!(word_off, 0x00E | 0x01E) {
+                    // Capture INTREQR and read/clear CLXDAT on the granted
+                    // transfer. Events during the CPU bus-cycle tail belong
+                    // to the next read, after this value is already captured.
                     // Keep other registers' independently calibrated phases.
                     bus.flush_timed_devices();
-                    sampled_intreq = Some(bus.read_custom_word(word_off));
+                    sampled_words[slot as usize] = Some(bus.read_custom_word(word_off));
                 }
             },
         );
@@ -9691,7 +9691,7 @@ impl Bus {
         self.poll_stats.tick_read_custom(off & 0xFFE);
         let value = match size {
             1 => {
-                let val = sampled_intreq.unwrap_or_else(|| self.read_custom_word(off & 0xFFE));
+                let val = sampled_words[0].unwrap_or_else(|| self.read_custom_word(off & 0xFFE));
                 trace!("custom R8  off={:03X} val_word={:04X}", off, val);
                 if diag_cpu_read_matches(off & 0xFFE, size) {
                     self.diag_cpu_read(off & 0xFFE, size, val as u64);
@@ -9706,17 +9706,9 @@ impl Bus {
                 // MOVE.L from $DFFxxx reads two consecutive register
                 // words: high word at addr, low word at addr+2. Each
                 // register is 16 bits wide on the custom chip bus.
-                let hi = if off & 0xFFE == 0x01E {
-                    sampled_intreq.unwrap_or_else(|| self.read_custom_word(off))
-                } else {
-                    self.read_custom_word(off)
-                };
+                let hi = sampled_words[0].unwrap_or_else(|| self.read_custom_word(off));
                 let lo_off = off.wrapping_add(2);
-                let lo = if lo_off & 0xFFE == 0x01E {
-                    sampled_intreq.unwrap_or_else(|| self.read_custom_word(lo_off))
-                } else {
-                    self.read_custom_word(lo_off)
-                };
+                let lo = sampled_words[1].unwrap_or_else(|| self.read_custom_word(lo_off));
                 let v = ((hi as u64) << 16) | (lo as u64);
                 trace!("custom R32 off={:03X} val={:08X}", off, v);
                 if diag_cpu_read_matches(off, size) {
@@ -9728,7 +9720,7 @@ impl Bus {
                 v
             }
             _ => {
-                let val = sampled_intreq.unwrap_or_else(|| self.read_custom_word(off));
+                let val = sampled_words[0].unwrap_or_else(|| self.read_custom_word(off));
                 trace!("custom R16 off={:03X} val={:04X}", off, val);
                 if diag_cpu_read_matches(off, size) {
                     self.diag_cpu_read(off, size, val as u64);

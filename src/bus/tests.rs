@@ -13319,6 +13319,46 @@ fn potgo_starts_counters_and_potgor_reflects_button_pins() {
 }
 
 #[test]
+fn clxdat_transfer_leaves_bus_tail_collision_for_next_read() {
+    for (addr, size, first, second) in [
+        (0x00E, 2, 0x8000, 0x8200),
+        (0x00E, 1, 0x80, 0x82),
+        (0x00E, 4, 0x8000_0000, 0x8200_0000),
+        (0x00C, 4, 0x8000, 0x8200),
+    ] {
+        let mut bus = empty_bus();
+        let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0083);
+        bus.agnus.vpos = 0x2C;
+        bus.agnus.hpos = 0x34;
+        bus.denise.diwstrt = 0x2C83;
+        bus.denise.diwstop = 0x2DC1;
+        for sprite in [0, 2] {
+            bus.denise.sprpos[sprite] = pos;
+            bus.denise.sprctl[sprite] = ctl;
+        }
+        bus.current_frame_sprite_display_enable_x_by_y[0] = Some(0);
+        bus.current_frame_render_base = bus.capture_render_snapshot();
+        bus.write_custom_word_from(0x144, 0x8000, BeamWriteSource::Cpu);
+        bus.write_custom_word_from(0x154, 0x8000, BeamWriteSource::Cpu);
+        // The single overlapping sprite pixel becomes visible at $3A.
+        // For a long read at $00C, CLXDAT is the second bus transfer.
+        bus.advance_chipset(if addr == 0x00C { 2 } else { 4 });
+        bus.set_cpu_bus_arbitration_enabled(true);
+        assert_eq!(
+            bus.custom_read(addr, size),
+            first,
+            "first size={size} addr={addr:x}"
+        );
+        assert_eq!(
+            bus.custom_read(addr, size),
+            second,
+            "next size={size} addr={addr:x}"
+        );
+        assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
+    }
+}
+
+#[test]
 fn clxdat_reads_and_clears_collision_latch() {
     let mut bus = empty_bus();
 

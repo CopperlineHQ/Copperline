@@ -10,6 +10,22 @@ model is in [](cpu.md). Every rule here is backed by named regression tests
 plus `src/bus/tests.rs` and `src/video/bitplane/tests.rs`), and many by a
 golden probe render (see [](#cross-checking-against-hardware)).
 
+## Custom-register read sampling
+
+On the arbitrated 68000 path, INTREQR and CLXDAT are sampled on their
+respective granted word transfers, before the trailing colour clock of the
+CPU bus cycle. CLXDAT also clears the collision latch at that point. A
+collision arriving during the tail belongs to the next read; it must not
+be returned and cleared by the preceding transfer. Byte reads retain the
+selected lane, and long reads sample each custom-bus word separately.
+Other custom registers retain their independently calibrated read phases.
+
+Saved A500 kind72/73 collision sweeps in `amiga-hardware-probes` verify
+21 repaired early observations without new field or qualification
+regressions. Eight early differences remain; this does not establish
+complete display/collision pipeline accuracy. The behavioral regression is
+`clxdat_transfer_leaves_bus_tail_collision_for_next_read` in `src/bus/tests.rs`.
+
 ## Chip-bus arbitration
 
 Every colour clock of every scanline has an owner, decided in priority
