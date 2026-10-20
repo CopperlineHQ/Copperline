@@ -4304,10 +4304,8 @@ fn blitter_completion_deadline_skips_fixed_dma_slots() {
     bus.advance_chipset(1);
     assert!(!bus.blitter.busy);
     assert_eq!(&bus.mem.chip_ram[0x20..0x22], &[0x12, 0x34]);
-    assert_eq!(bus.paula.intreq & INT_BLIT, 0);
-    assert_eq!(bus.next_blitter_irq_cck(), Some(1));
-    bus.advance_chipset(1);
     assert_ne!(bus.paula.intreq & INT_BLIT, 0);
+    assert_eq!(bus.next_blitter_irq_cck(), None);
 }
 
 #[test]
@@ -4351,9 +4349,6 @@ fn blitter_completion_deadline_accounts_for_copper_dma_slots() {
     assert_eq!(bus.paula.intreq & INT_BLIT, 0);
     bus.advance_chipset(1);
     assert!(!bus.blitter.busy);
-    assert_eq!(bus.paula.intreq & INT_BLIT, 0);
-    assert_eq!(bus.next_blitter_irq_cck(), Some(2));
-    bus.advance_chipset(1);
     assert_eq!(bus.paula.intreq & INT_BLIT, 0);
     assert_eq!(bus.next_blitter_irq_cck(), Some(1));
     bus.advance_chipset(1);
@@ -11243,15 +11238,16 @@ fn bltsize_stale_blit_clear_rearms_interrupt_recognition_for_next_completion() {
     let completion_cck = bus.next_blitter_completion_cck().unwrap();
     bus.advance_chipset(completion_cck);
     assert_eq!(bus.paula.intreq & INT_BLIT, 0);
-    assert_eq!(bus.next_blitter_irq_cck(), Some(2));
-    bus.advance_chipset(2);
+    assert_eq!(bus.next_blitter_irq_cck(), Some(1));
+    bus.advance_chipset(1);
     assert_ne!(bus.paula.intreq & INT_BLIT, 0);
     assert_ne!(bus.read_custom_word(0x01E) & INT_BLIT, 0);
     assert_eq!(bus.irq_latency_mask & INT_BLIT, INT_BLIT);
     assert_eq!(bus.cpu_visible_intreq() & INT_BLIT, 0);
-    assert_eq!(bus.next_irq_visible_cck(), Some(3));
+    assert_eq!(bus.next_irq_visible_cck(), Some(4));
 
-    bus.advance_chipset(2);
+    // Earlier readback does not move the absolute CPU recognition deadline.
+    bus.advance_chipset(3);
     assert_eq!(bus.cpu_visible_intreq() & INT_BLIT, 0);
     bus.advance_chipset(1);
     assert_ne!(bus.cpu_visible_intreq() & INT_BLIT, 0);
@@ -12508,8 +12504,8 @@ fn bltpri_cpu_uses_first_d_bubble_but_waits_for_bus_accesses() {
     assert_eq!(bus.debug_custom_word(0x002), Some(after_f));
     assert_eq!(&bus.mem.chip_ram[0x20..0x22], &[0x12, 0x34]);
     assert_eq!(bus.paula.intreq & INT_BLIT, 0);
-    assert_eq!(bus.next_blitter_irq_cck(), Some(2));
-    bus.advance_chipset(2);
+    assert_eq!(bus.next_blitter_irq_cck(), Some(1));
+    bus.advance_chipset(1);
     assert_ne!(bus.paula.intreq & INT_BLIT, 0);
     assert_eq!(bus.next_blitter_irq_cck(), None);
 }
@@ -12555,13 +12551,13 @@ fn blithog_set_blocks_cpu_slowdown_back_pressure_until_blitter_finishes() {
     // clocks. The terminal (internal) E/F cycles ride the CPU's
     // granted/tail clocks -- BBUSY has already dropped -- so the engine
     // finishes within the same span. The interrupt request trails the
-    // engine completion by two color clocks.
+    // engine completion by one color clock.
     let (cck, _) = bus.take_slice_bus_advance();
     assert_eq!(cck, 14);
     assert!(!bus.blitter.busy);
     assert_eq!(bus.paula.intreq & INT_BLIT, 0);
-    assert_eq!(bus.next_blitter_irq_cck(), Some(2));
-    bus.advance_chipset(2);
+    assert_eq!(bus.next_blitter_irq_cck(), Some(1));
+    bus.advance_chipset(1);
     assert_ne!(bus.paula.intreq & INT_BLIT, 0);
     assert_eq!(bus.next_blitter_irq_cck(), None);
 }

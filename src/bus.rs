@@ -137,8 +137,9 @@ fn external_access_cck_x100_setting() -> u32 {
 /// COPPERLINE_IRQ_LATENCY_CCK overrides the deadline; zero also disables
 /// instruction-boundary sample gating for the raw mechanism-test model.
 const DEFAULT_IRQ_LATENCY_CCK: u32 = 6;
-/// Native BLIT INTREQR and CPU-source phase offset measured from E.
-const BLIT_IRQ_READBACK_DELAY_CCK: u32 = 3;
+/// Native BLIT readback is visible three CCK after E starts (two after its
+/// slot completes). Pre-aging by the same offset preserves CPU recognition.
+const BLIT_IRQ_READBACK_DELAY_CCK: u32 = 2;
 
 /// CPU clocks a 020+ chip read spends returning data past the data-return
 /// colour clock, before the execution unit can use it.
@@ -1323,7 +1324,7 @@ pub struct Bus {
     heatmap: Option<Box<crate::heatmap::HeatMap>>,
     blitter_slowdown_cpu_misses: u8,
     /// Pending INTREQ.BLIT raise, in colour clocks. The scheduled sequencer
-    /// arms the interrupt on E and raises it three colour clocks after E's
+    /// arms the interrupt on E and raises it two colour clocks after E's
     /// tick; the final F/D flush can finish first. Forced drains raise
     /// immediately.
     blit_irq_delay_cck: Option<u32>,
@@ -7602,7 +7603,7 @@ impl Bus {
             self.raise_blit_irq(source, 0);
         }
         // A scheduled completion leaves the source countdown armed by E.
-        // The OneROM A500 sweeps place INTREQ.BLIT three clocks after that
+        // The OneROM A500 sweeps place INTREQ.BLIT two clocks after that
         // tick, independently of whether the final D access was delayed.
     }
 
@@ -7634,7 +7635,7 @@ impl Bus {
     }
 
     /// OneROM measurements constrain the native BLIT source's recognition
-    /// phase to begin three colour clocks before its INTREQR edge. This is a
+    /// phase to begin two colour clocks before its INTREQR edge. This is a
     /// timing-model inference from the relative source and status deadlines.
     /// Start only a newly enabled native BLIT source early; software and
     /// Copper INTREQ writes retain the generic recognition delay.

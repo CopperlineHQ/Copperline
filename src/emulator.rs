@@ -5477,23 +5477,23 @@ mod tests {
             bus.blitter.start_scheduled((1 << 6) | 2, &bus.mem.chip_ram);
 
             // E arms the delayed interrupt; the next F slot finishes the
-            // engine while two clocks of the IRQ delay are still pending.
+            // engine while one clock of the IRQ delay is still pending.
             for _ in 0..8 {
                 bus.advance_chipset(1);
             }
             assert!(!bus.blitter.busy);
             assert_eq!(bus.next_blitter_completion_cck(), None);
-            assert_eq!(bus.next_blitter_irq_cck(), Some(2));
+            assert_eq!(bus.next_blitter_irq_cck(), Some(1));
             assert_eq!(bus.paula.intreq & crate::chipset::paula::INT_BLIT, 0);
         }
 
-        let irq_instructions = emu.instructions_for_cck(2).max(1);
+        let irq_instructions = emu.instructions_for_cck(1).max(1);
         let (chunk, deadline) = emu.idle_fast_forward_chunk(super::INSTRUCTIONS_PER_REALTIME_SLICE);
         assert_eq!(
             chunk, irq_instructions,
             "a stopped CPU must nap only as far as the pending INTREQ.BLIT assertion"
         );
-        assert_eq!(deadline, Some(2));
+        assert_eq!(deadline, Some(1));
     }
 
     #[test]
