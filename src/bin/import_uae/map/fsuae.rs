@@ -100,15 +100,20 @@ fn model_preset(model: &str) -> Option<Preset> {
             cpu: "68020",
             ..A1200
         },
+        // The Blizzard presets turn 32-bit addressing on, so `cpu = auto`
+        // leaves them a full 68020 rather than the board's CPU.
         "A1200/1230" => Preset {
+            cpu: "68020",
             accelerator: Some("blizzard-1230-iv"),
             ..A1200
         },
         "A1200/1240" => Preset {
+            cpu: "68020",
             accelerator: Some("blizzard-1240"),
             ..A1200
         },
         "A1200/1260" => Preset {
+            cpu: "68020",
             accelerator: Some("blizzard-1260"),
             ..A1200
         },
@@ -150,6 +155,13 @@ fn accelerator_board(value: &str) -> Option<(&'static str, &'static str, u64)> {
     })
 }
 
+/// Whether Ramsey takes `mb` megabytes of motherboard RAM, as Copperline's
+/// `validate_mb_ram` checks it: 1M-4M on 1M banks or 8M, 12M or 16M on 4M
+/// banks, and on the A4000's Ramsey-07 also 20M-64M in 4M steps.
+fn ramsey_takes(mb: u64, a4000: bool) -> bool {
+    mb <= 4 || (mb.is_multiple_of(4) && mb <= if a4000 { 64 } else { 16 })
+}
+
 /// A value the way FS-UAE compares them (`fs_uae_values_matches` in
 /// src/fs-uae/config-common.c): case-insensitively, ignoring everything but
 /// letters, digits and '+', so "68040-NOMMU" is "68040nommu".
@@ -181,12 +193,17 @@ impl CpuState {
     }
 }
 
-/// The machine's CPU before any `cpu` option, and the FPUs it fits by
-/// default (see [`Preset`]).
+/// The machine's CPU before its `cpu` option: `base` is the preset's own
+/// (FS-UAE's A500 when no model is named; unknown for a preset this
+/// converter does not recognize), which FS-UAE keeps for `cpu = auto` or a
+/// value it does not know, and `board` an accelerator board's, which it
+/// takes instead when there is no `cpu` option at all (`configure_cpu`).
+/// `fpu_external` is the 6888x the machine fits beside a 68020/68030 that a
+/// `cpu` option names (see [`Preset`]).
 #[derive(Clone, Copy)]
 struct MachineCpu {
-    cpu: CpuState,
-    fpu: bool,
+    base: Option<CpuState>,
+    board: Option<CpuState>,
     fpu_external: bool,
 }
 
@@ -195,21 +212,20 @@ struct MachineCpu {
 enum PartFpu {
     /// The part settles it.
     Fixed(bool),
-    /// The machine's own FPU stays (FS-UAE's 68020).
-    Kept,
-    /// The 6888x the machine fits beside an external-FPU CPU.
+    /// The 6888x the machine fits beside an external-FPU CPU
+    /// (`default_fpu_noninternal`).
     External,
 }
 
 /// A `cpu` value (already through [`fs_value`]) as `configure_cpu` sets it
 /// up: (core, 24-bit addressing, an EC part, FPU).
 fn fsuae_cpu(value: &str) -> Option<(u32, bool, bool, PartFpu)> {
-    use PartFpu::{External, Fixed, Kept};
+    use PartFpu::{External, Fixed};
     Some(match value {
         "68000" => (68000, true, false, Fixed(false)),
         "68010" => (68010, true, false, Fixed(false)),
         "68ec020" => (68020, true, false, External),
-        "68020" => (68020, false, false, Kept),
+        "68020" => (68020, false, false, External),
         "68ec030" => (68030, false, true, Fixed(false)),
         "68030" => (68030, false, false, External),
         "68ec040" => (68040, false, true, Fixed(false)),
@@ -222,13 +238,12 @@ fn fsuae_cpu(value: &str) -> Option<(u32, bool, bool, PartFpu)> {
     })
 }
 
-/// The CPU a `cpu` value makes, on a machine that fits `fpu` by default
-/// and `fpu_external` beside a 68EC020/68030.
-fn named_cpu(part: (u32, bool, bool, PartFpu), fpu: bool, fpu_external: bool) -> CpuState {
+/// The CPU a `cpu` value makes, on a machine that fits `fpu_external`
+/// beside a 68020/68030.
+fn named_cpu(part: (u32, bool, bool, PartFpu), fpu_external: bool) -> CpuState {
     let (core, narrow, ec, part_fpu) = part;
     let fpu = match part_fpu {
         PartFpu::Fixed(fpu) => fpu,
-        PartFpu::Kept => fpu,
         PartFpu::External => fpu_external,
     };
     CpuState {
@@ -239,29 +254,30 @@ fn named_cpu(part: (u32, bool, bool, PartFpu), fpu: bool, fpu_external: bool) ->
     }
 }
 
-/// The machine's CPU before any `cpu` option: the preset's (FS-UAE's A500
-/// when no model is named), or its accelerator board's, which FS-UAE takes
-/// as if a `cpu` option named it. `None` for a preset this converter does
-/// not recognize and no board.
-fn machine_cpu(preset: Option<Preset>, board_cpu: Option<&str>) -> Option<MachineCpu> {
-    let (fpu, fpu_external) = preset.map_or((false, false), |p| (p.fpu, p.fpu_external));
-    let cpu = match board_cpu {
-        Some(cpu) => named_cpu(fsuae_cpu(cpu)?, fpu, fpu_external),
-        None => {
-            let (core, narrow, ec, _) = fsuae_cpu(preset?.cpu)?;
-            CpuState {
-                core,
-                narrow,
-                ec,
-                fpu,
-            }
-        }
-    };
-    Some(MachineCpu {
-        cpu,
-        fpu,
+/// The machine's CPUs before its `cpu` option (see [`MachineCpu`]). A
+/// preset this converter does not recognize is taken to fit no 6888x of its
+/// own, as most models do not.
+fn machine_cpu(preset: Option<Preset>, board_cpu: Option<&str>) -> MachineCpu {
+    let fpu_external = preset.is_some_and(|p| p.fpu_external);
+    // With no `cpu` option, FS-UAE keeps the model's default FPU.
+    let base = preset.and_then(|p| {
+        let (core, narrow, ec, _) = fsuae_cpu(p.cpu)?;
+        Some(CpuState {
+            core,
+            narrow,
+            ec,
+            fpu: p.fpu,
+        })
+    });
+    // The board's CPU is taken as if a `cpu` option named it.
+    let board = board_cpu
+        .and_then(fsuae_cpu)
+        .map(|part| named_cpu(part, fpu_external));
+    MachineCpu {
+        base,
+        board,
         fpu_external,
-    })
+    }
 }
 
 fn mmu_off_note(model: &str) -> String {
@@ -359,7 +375,7 @@ fn map_cpu<'a>(
     seen: &mut HashMap<&'a str, ()>,
     doc: &mut DocumentMut,
     report: &mut ImportReport,
-    machine: Option<MachineCpu>,
+    machine: MachineCpu,
 ) -> Option<&'static str> {
     const NO_MACHINE_CPU: &str = "the CPU comes from an amiga_model preset this converter does \
                                   not recognize; set [cpu] model and fpu by hand";
@@ -372,18 +388,20 @@ fn map_cpu<'a>(
         seen.insert(&e.key, ());
     }
 
-    let mut state = machine.map(|m| m.cpu);
+    // Any `cpu` option, "auto" and unknown values included, passes over the
+    // board's CPU.
+    let cpu_entry = by_key("cpu");
+    let mut state = match cpu_entry {
+        Some(_) => machine.base,
+        None => machine.board.or(machine.base),
+    };
     let mut cpu_named = false;
-    if let Some(e) = by_key("cpu") {
+    if let Some(e) = cpu_entry {
         let value = fs_value(&e.value);
         if value != "auto" {
             match fsuae_cpu(&value) {
                 Some(part) => {
-                    // A machine this converter does not recognize is taken
-                    // to fit no FPU of its own, as most models do not.
-                    let (fpu, fpu_external) =
-                        machine.map_or((false, false), |m| (m.fpu, m.fpu_external));
-                    let cpu = named_cpu(part, fpu, fpu_external);
+                    let cpu = named_cpu(part, machine.fpu_external);
                     if value.ends_with("nommu") {
                         report.approximated(&e.key, &e.value, mmu_off_note(cpu.model()));
                     }
@@ -497,8 +515,15 @@ fn map_cpu<'a>(
 
     let cpu = state?;
     let model = cpu.model();
-    // The preset has already written the machine's own model.
-    if cpu_named || machine.map(|m| m.cpu.model()) != Some(model) {
+    // A named CPU is always said; otherwise only when the file does not
+    // already say it: a recognized preset has written its machine's model,
+    // and without one Copperline's own is the 68000.
+    let written = doc
+        .get("cpu")
+        .and_then(|cpu| cpu.get("model"))
+        .and_then(|model| model.as_str())
+        .unwrap_or("68000");
+    if cpu_named || written != model {
         set_str(doc, &["cpu"], "model", model);
     }
     if let Some(e) = width_entry {
@@ -577,8 +602,8 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
                 // profile would have supplied.
                 set_str(&mut doc, &["machine"], "profile", p.profile);
                 set_str(&mut doc, &["chipset"], "revision", p.chipset);
-                if let Some(machine) = machine {
-                    set_str(&mut doc, &["cpu"], "model", machine.cpu.model());
+                if let Some(cpu) = machine.board.or(machine.base) {
+                    set_str(&mut doc, &["cpu"], "model", cpu.model());
                 }
                 set_str(&mut doc, &["memory"], "chip", p.chip);
                 annotate(
@@ -632,30 +657,38 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
     // the 24-bit address space; FS-UAE refuses motherboard RAM without
     // 32-bit addressing, and Copperline refuses both.
     let wide = cpu_model.is_some_and(|m| !matches!(m, "68000" | "68010" | "68EC020"));
+    let ramsey = preset
+        .map(|p| p.profile)
+        .filter(|profile| matches!(*profile, "A3000" | "A4000"));
     let mut motherboard = preset
         .and_then(|p| p.motherboard)
         .map(|size| (size.to_string(), model_entry));
     if let Some(e) = by_key("motherboard_ram") {
         seen.insert(&e.key, ());
-        match e.value.trim().parse::<u64>() {
-            // Said even when zero: the A3000/A4000 profiles fit some.
-            Ok(kb) if kb.is_multiple_of(1024) => {
-                let size = if kb == 0 {
-                    "0".to_string()
-                } else {
-                    format!("{}M", kb / 1024)
-                };
-                motherboard = Some((size, Some(e)));
-            }
-            _ => report.unsupported(
+        let kb = e.value.trim().parse::<u64>().ok();
+        match kb.filter(|kb| kb.is_multiple_of(1024)) {
+            None => report.unsupported(
                 &e.key,
                 &e.value,
                 "expected a KB integer, a whole number of megabytes",
             ),
+            Some(kb) if ramsey.is_some_and(|p| !ramsey_takes(kb / 1024, p == "A4000")) => report
+                .unsupported(
+                    &e.key,
+                    &e.value,
+                    format!(
+                        "the {}'s Ramsey takes 1M-4M of motherboard RAM in 1M steps or 8M, 12M \
+                         or 16M (the A4000 also 20M-64M in 4M steps); its preset size was kept",
+                        ramsey.unwrap_or_default()
+                    ),
+                ),
+            // Said even when zero: the A3000/A4000 profiles fit some.
+            Some(0) => motherboard = Some(("0".to_string(), Some(e))),
+            Some(kb) => motherboard = Some((format!("{}M", kb / 1024), Some(e))),
         }
     }
     if let Some((size, source)) = motherboard {
-        let ramsey = preset.is_some_and(|p| matches!(p.profile, "A3000" | "A4000"));
+        let ramsey = ramsey.is_some();
         if ramsey && (wide || size == "0") {
             set_str(&mut doc, &["memory"], "motherboard", &size);
         } else if let Some(e) = source.filter(|_| size != "0") {
@@ -1410,6 +1443,63 @@ mod tests {
         let text = "amiga_model = A1200\nmotherboard_ram = 8192\n";
         assert!(!convert_valid(text).contains("motherboard ="));
         assert_eq!(flagged_keys(text), ["motherboard_ram"]);
+    }
+
+    #[test]
+    fn a_named_68020_takes_the_machine_s_external_fpu() {
+        // configure_cpu gives both 68020 forms default_fpu_noninternal: none
+        // beside the A4000/040's on-chip default, the 68882 on an A4000.
+        let out = convert_valid("amiga_model = A4000/040\ncpu = 68020\n");
+        assert!(out.contains(r#"model = "68020""#), "{out}");
+        assert!(!out.contains("fpu ="), "{out}");
+        let out = convert_valid("amiga_model = A4000\ncpu = 68020\n");
+        assert!(out.contains("fpu = true"), "{out}");
+    }
+
+    #[test]
+    fn an_accelerator_option_alone_brings_its_cpu() {
+        // No amiga_model and no cpu: FS-UAE's A500 takes the board's CPU,
+        // which must reach the board's RAM.
+        let text = "accelerator = blizzard-1260\n";
+        let out = convert_valid(text);
+        assert!(out.contains(r#"model = "68060""#), "{out}");
+        assert!(out.contains(r#"accelerator = "32M""#), "{out}");
+        assert_eq!(flagged_keys(text), ["accelerator"]);
+    }
+
+    #[test]
+    fn cpu_auto_keeps_the_machine_s_own_cpu_over_its_board() {
+        // configure_cpu takes the board's CPU only with no `cpu` option at
+        // all; `auto` keeps the model's own, at the model's address width.
+        let text = "amiga_model = A1200\naccelerator = blizzard-1260\ncpu = auto\n";
+        let out = convert_valid(text);
+        assert!(out.contains(r#"model = "68EC020""#), "{out}");
+        // ...whose 24 address lines cannot reach the board's RAM.
+        assert!(!out.contains("accelerator ="), "{out}");
+        assert_eq!(flagged_keys(text), ["accelerator"]);
+        // The Blizzard presets turn 32-bit addressing on.
+        let out = convert_valid("amiga_model = A1200/1260\ncpu = auto\n");
+        assert!(out.contains(r#"model = "68020""#), "{out}");
+        assert!(out.contains(r#"accelerator = "32M""#), "{out}");
+    }
+
+    #[test]
+    fn motherboard_ram_must_fill_ramsey_banks() {
+        // validate_mb_ram: Ramsey-04 stops at 16M, and no Ramsey takes 5M;
+        // the preset's own size stays.
+        for text in [
+            "amiga_model = A3000\nmotherboard_ram = 32768\n",
+            "amiga_model = A4000\nmotherboard_ram = 5120\n",
+        ] {
+            let out = convert_valid(text);
+            assert!(out.contains(r#"motherboard = "8M""#), "{out}");
+            assert_eq!(flagged_keys(text), ["motherboard_ram"]);
+        }
+        // Ramsey-07 extends in 4M steps to 64M.
+        let out = convert_valid("amiga_model = A4000\nmotherboard_ram = 32768\n");
+        assert!(out.contains(r#"motherboard = "32M""#), "{out}");
+        let out = convert_valid("amiga_model = A3000\nmotherboard_ram = 2048\n");
+        assert!(out.contains(r#"motherboard = "2M""#), "{out}");
     }
 
     #[test]
