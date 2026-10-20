@@ -2,42 +2,522 @@
 //! WinUAE/Amiberry, not a rename: sizes are in KB rather than an
 //! index/MB mix, and `amiga_model` is a database preset that implies a
 //! chipset+CPU+RAM combination rather than each axis being spelled out
-//! separately. An explicit `chipset`/`cpu_type`/`*_memory` always overrides
-//! the preset, matching FS-UAE's own precedence.
+//! separately. An explicit `chipset`/`cpu`/`*_memory` always overrides the
+//! preset, matching FS-UAE's own precedence.
 
-use super::{annotate, apply_drive_sounds, clamp_chip_mb, set_str, table, DriveSound, MapOutcome};
+use super::{
+    addressing_note, annotate, apply_drive_sounds, can_fit_fpu, clamp_chip_mb, cpu_part,
+    leading_number, parse_bool, parse_cpu_type, set_cpu_fpu, set_str, table, DriveSound,
+    MapOutcome, CPU_CORES,
+};
 use crate::parse::Entry;
 use crate::report::ImportReport;
 use std::collections::HashMap;
 use toml_edit::DocumentMut;
 
-/// (chipset revision, CPU model, chip RAM, fast RAM) for the common
-/// `amiga_model` presets. Not exhaustive -- FS-UAE's database covers many
-/// more variants (CD32, CDTV, A3000, A4000/040, ...); unrecognized presets
-/// are flagged rather than guessed at.
-fn model_preset(
-    model: &str,
-) -> Option<(
-    &'static str,
-    &'static str,
-    &'static str,
-    &'static str,
-    &'static str,
-)> {
-    match model.to_ascii_uppercase().as_str() {
-        "A500" => Some(("OCS", "68000", "512K", "0", "A500")),
-        "A500+" | "A500PLUS" => Some(("ECS", "68000", "1M", "0", "A500Plus")),
-        "A600" => Some(("ECS", "68000", "1M", "0", "A600")),
-        "A1200" => Some(("AGA", "68020", "2M", "0", "A1200")),
-        "A1200/020" => Some(("AGA", "68020", "2M", "8M", "A1200")),
+/// An `amiga_model` preset as FS-UAE 3.1.66 builds it: UAE's built-in
+/// quickstart for the model (the `bip_*` functions in FS-UAE's bundled
+/// src/cfgfile.cpp, run at FS-UAE's accuracy 1), then the CPU defaults that
+/// src/fs-uae/config-model.c gives the model and the accelerator board it
+/// fits (config-accelerator.c). Not exhaustive: other presets (CDTV, A1000,
+/// the PowerPC boards, ...) are flagged rather than guessed at.
+#[derive(Clone, Copy)]
+struct Preset {
+    chipset: &'static str,
+    profile: &'static str,
+    chip: &'static str,
+    /// The CPU with no `cpu` option, as a `cpu` value (see [`fsuae_cpu`]).
+    cpu: &'static str,
+    /// Whether an FPU is fitted with no `cpu` option (`default_fpu`), and
+    /// beside a 68EC020/68030 that a `cpu` option names
+    /// (`default_fpu_noninternal`).
+    fpu: bool,
+    fpu_external: bool,
+    /// Ramsey motherboard RAM (the quickstart's `mbresmem_low_size`).
+    motherboard: Option<&'static str>,
+    /// The accelerator board fitted when no `accelerator` option names one.
+    accelerator: Option<&'static str>,
+    /// The CD32 Full Motion Video module.
+    fmv: bool,
+}
+
+fn model_preset(model: &str) -> Option<Preset> {
+    const A500: Preset = Preset {
+        chipset: "OCS",
+        profile: "A500",
+        chip: "512K",
+        cpu: "68000",
+        fpu: false,
+        fpu_external: false,
+        motherboard: None,
+        accelerator: None,
+        fmv: false,
+    };
+    // A plain A1200 runs its 68020 on 24 address lines: the 68EC020.
+    const A1200: Preset = Preset {
+        chipset: "AGA",
+        profile: "A1200",
+        chip: "2M",
+        cpu: "68ec020",
+        ..A500
+    };
+    // The A3000 and A4000 quickstarts fit a 68882 and 8M of motherboard
+    // RAM. FS-UAE runs the A4000's 68030 with MMU emulation off and calls it
+    // the 68EC030, as the A4000/030 shipped.
+    const A4000: Preset = Preset {
+        chipset: "AGA",
+        profile: "A4000",
+        chip: "2M",
+        cpu: "68ec030",
+        fpu: true,
+        fpu_external: true,
+        motherboard: Some("8M"),
+        ..A500
+    };
+    const CD32: Preset = Preset {
+        chipset: "AGA",
+        profile: "CD32",
+        chip: "2M",
+        cpu: "68ec020",
+        ..A500
+    };
+    Some(match model.to_ascii_uppercase().as_str() {
+        "A500" => A500,
+        "A500+" | "A500PLUS" => Preset {
+            chipset: "ECS",
+            profile: "A500Plus",
+            chip: "1M",
+            ..A500
+        },
+        "A600" => Preset {
+            chipset: "ECS",
+            profile: "A600",
+            chip: "1M",
+            ..A500
+        },
+        "A1200" | "A1200/3.0" => A1200,
+        "A1200/020" => Preset {
+            cpu: "68020",
+            ..A1200
+        },
+        "A1200/1230" => Preset {
+            accelerator: Some("blizzard-1230-iv"),
+            ..A1200
+        },
+        "A1200/1240" => Preset {
+            accelerator: Some("blizzard-1240"),
+            ..A1200
+        },
+        "A1200/1260" => Preset {
+            accelerator: Some("blizzard-1260"),
+            ..A1200
+        },
         // Copperline has no A2000 profile; the A500 is the same chipset
         // generation and the closest machine it does model.
-        "A2000" => Some(("ECS", "68000", "1M", "0", "A500")),
-        "A3000" => Some(("ECS", "68030", "2M", "8M", "A3000")),
-        "A4000/030" => Some(("AGA", "68030", "2M", "8M", "A4000")),
-        "A4000/040" => Some(("AGA", "68040", "2M", "8M", "A4000")),
-        _ => None,
+        "A2000" => Preset {
+            chipset: "ECS",
+            chip: "1M",
+            ..A500
+        },
+        "A3000" => Preset {
+            chipset: "ECS",
+            profile: "A3000",
+            cpu: "68030",
+            ..A4000
+        },
+        "A4000" | "A4000/030" => A4000,
+        "A4000/040" => Preset {
+            cpu: "68040",
+            fpu_external: false,
+            ..A4000
+        },
+        "CD32" => CD32,
+        "CD32/FMV" => Preset { fmv: true, ..CD32 },
+        _ => return None,
+    })
+}
+
+/// An `accelerator` board as config-accelerator.c fits it: (name, its CPU
+/// as a `cpu` value, board RAM in megabytes). FS-UAE runs the 1240's and
+/// 1260's CPUs with MMU emulation off ("68040-NOMMU"/"68060-NOMMU"), but
+/// the boards carry the full parts, so they import as those.
+fn accelerator_board(value: &str) -> Option<(&'static str, &'static str, u64)> {
+    Some(match fs_value(value).as_str() {
+        "blizzard1230iv" => ("Blizzard 1230 IV", "68ec030", 32),
+        "blizzard1240" => ("Blizzard 1240", "68040", 32),
+        "blizzard1260" => ("Blizzard 1260", "68060", 32),
+        _ => return None,
+    })
+}
+
+/// A value the way FS-UAE compares them (`fs_uae_values_matches` in
+/// src/fs-uae/config-common.c): case-insensitively, ignoring everything but
+/// letters, digits and '+', so "68040-NOMMU" is "68040nommu".
+fn fs_value(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '+')
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// The CPU as FS-UAE leaves it in UAE's prefs: the core, 24-bit
+/// addressing, whether an FPU is fitted, and whether the part is an EC one
+/// without its MMU. FS-UAE runs its EC parts with MMU emulation off, but so
+/// it does its -NOMMU parts and anything a `uae_*` line sets up, and
+/// WinUAE's MMU "None" is the same speed setting on a full part; so the EC
+/// parts are tracked by name, and only a `cpu` value makes one.
+#[derive(Clone, Copy)]
+struct CpuState {
+    core: u32,
+    narrow: bool,
+    ec: bool,
+    fpu: bool,
+}
+
+impl CpuState {
+    fn model(self) -> &'static str {
+        cpu_part(self.core, self.narrow, !self.ec, self.fpu)
     }
+}
+
+/// The machine's CPU before any `cpu` option, and the FPUs it fits by
+/// default (see [`Preset`]).
+#[derive(Clone, Copy)]
+struct MachineCpu {
+    cpu: CpuState,
+    fpu: bool,
+    fpu_external: bool,
+}
+
+/// What a `cpu` value does to the FPU.
+#[derive(Clone, Copy)]
+enum PartFpu {
+    /// The part settles it.
+    Fixed(bool),
+    /// The machine's own FPU stays (FS-UAE's 68020).
+    Kept,
+    /// The 6888x the machine fits beside an external-FPU CPU.
+    External,
+}
+
+/// A `cpu` value (already through [`fs_value`]) as `configure_cpu` sets it
+/// up: (core, 24-bit addressing, an EC part, FPU).
+fn fsuae_cpu(value: &str) -> Option<(u32, bool, bool, PartFpu)> {
+    use PartFpu::{External, Fixed, Kept};
+    Some(match value {
+        "68000" => (68000, true, false, Fixed(false)),
+        "68010" => (68010, true, false, Fixed(false)),
+        "68ec020" => (68020, true, false, External),
+        "68020" => (68020, false, false, Kept),
+        "68ec030" => (68030, false, true, Fixed(false)),
+        "68030" => (68030, false, false, External),
+        "68ec040" => (68040, false, true, Fixed(false)),
+        "68lc040" => (68040, false, false, Fixed(false)),
+        "68040nommu" | "68040" => (68040, false, false, Fixed(true)),
+        "68ec060" => (68060, false, true, Fixed(false)),
+        "68lc060" => (68060, false, false, Fixed(false)),
+        "68060nommu" | "68060" => (68060, false, false, Fixed(true)),
+        _ => return None,
+    })
+}
+
+/// The CPU a `cpu` value makes, on a machine that fits `fpu` by default
+/// and `fpu_external` beside a 68EC020/68030.
+fn named_cpu(part: (u32, bool, bool, PartFpu), fpu: bool, fpu_external: bool) -> CpuState {
+    let (core, narrow, ec, part_fpu) = part;
+    let fpu = match part_fpu {
+        PartFpu::Fixed(fpu) => fpu,
+        PartFpu::Kept => fpu,
+        PartFpu::External => fpu_external,
+    };
+    CpuState {
+        core,
+        narrow,
+        ec,
+        fpu,
+    }
+}
+
+/// The machine's CPU before any `cpu` option: the preset's (FS-UAE's A500
+/// when no model is named), or its accelerator board's, which FS-UAE takes
+/// as if a `cpu` option named it. `None` for a preset this converter does
+/// not recognize and no board.
+fn machine_cpu(preset: Option<Preset>, board_cpu: Option<&str>) -> Option<MachineCpu> {
+    let (fpu, fpu_external) = preset.map_or((false, false), |p| (p.fpu, p.fpu_external));
+    let cpu = match board_cpu {
+        Some(cpu) => named_cpu(fsuae_cpu(cpu)?, fpu, fpu_external),
+        None => {
+            let (core, narrow, ec, _) = fsuae_cpu(preset?.cpu)?;
+            CpuState {
+                core,
+                narrow,
+                ec,
+                fpu,
+            }
+        }
+    };
+    Some(MachineCpu {
+        cpu,
+        fpu,
+        fpu_external,
+    })
+}
+
+fn mmu_off_note(model: &str) -> String {
+    format!(
+        "FS-UAE switches MMU emulation off here; Copperline's {model} keeps its MMU, which \
+         stays idle unless software enables translation (the 68EC parts have none)"
+    )
+}
+
+/// Fit or remove the FPU, saying so when an on-chip FPU on a 68EC040/68EC060
+/// makes it the full part: no real chip has one without the MMU, so this is
+/// FS-UAE's -NOMMU CPU.
+fn set_fpu(cpu: &mut CpuState, on: bool, e: &Entry, report: &mut ImportReport) {
+    if on && !cpu.fpu && cpu.ec && cpu.core >= 68040 {
+        let full = cpu_part(cpu.core, false, true, true);
+        report.approximated(&e.key, &e.value, mmu_off_note(full));
+    }
+    cpu.fpu = on;
+}
+
+/// Apply an `mmu` or `uae_mmu_model` line: MMU emulation for the core, or
+/// off. Off is FS-UAE's speed setting rather than a different chip, so it
+/// leaves the part alone and says so; the EC parts are `cpu` values of
+/// their own.
+fn set_mmu(cpu: &mut CpuState, e: &Entry, report: &mut ImportReport) {
+    let value = e.value.trim().to_ascii_lowercase();
+    if value.contains("ec") {
+        // `configure_cpu` knows only the numbers, and FS-UAE's UAE core
+        // reads mmu_model with `_tstol`: it has no EC MMU.
+        report.unsupported(
+            &e.key,
+            &e.value,
+            "FS-UAE has no EC MMU setting (its UAE core reads the MMU as a number); name the \
+             part with cpu = 68EC030, 68EC040 or 68EC060",
+        );
+        return;
+    }
+    match leading_number(&value) {
+        Some(0) => {
+            if !cpu.ec && cpu.core >= 68030 {
+                report.approximated(&e.key, &e.value, mmu_off_note(cpu.model()));
+            }
+        }
+        // An MMU added to an EC part makes the full part (an FPU-less
+        // 68EC040/68EC060 the LC one).
+        Some(n) if n == cpu.core && n >= 68030 => cpu.ec = false,
+        Some(n) if CPU_CORES.contains(&n) => report.unsupported(
+            &e.key,
+            &e.value,
+            format!(
+                "FS-UAE emulates an MMU only for a 68030, 68040 or 68060, each with its own CPU; \
+                 this one does not fit a {}",
+                cpu.model()
+            ),
+        ),
+        _ => report.unsupported(
+            &e.key,
+            &e.value,
+            "unrecognized MMU; expected 0, 68030, 68040 or 68060",
+        ),
+    }
+}
+
+/// FS-UAE's raw UAE CPU options, handed to UAE's own parser.
+const UAE_CPU_KEYS: [&str; 5] = [
+    "uae_cpu_type",
+    "uae_cpu_model",
+    "uae_fpu_model",
+    "uae_mmu_model",
+    "uae_cpu_24bit_addressing",
+];
+
+/// Map FS-UAE's `cpu`, `fpu` and `mmu` options, then its raw `uae_*` CPU
+/// options, onto `[cpu] model` and `fpu`, returning the model (`None` when
+/// the machine's CPU is unknown). Verified against FS-UAE 3.1.66:
+/// doc/options/cpu lists the parts, and `configure_cpu` in
+/// src/fs-uae/config-hardware.c turns each into UAE's cpu_model, fpu_model,
+/// mmu_model and cpu_24bit_addressing, then applies `fpu` (0, 68881, 68882,
+/// 68040, 68060) and the undocumented `mmu` (0, 68030, 68040, 68060) on
+/// top, warning about and ignoring any that do not fit the core; "auto", or
+/// no option, keeps the machine's default. The EC parts are named directly,
+/// and the 68LC040/68LC060 are the 68040/68060 without their FPU.
+/// "68040-NOMMU"/"68060-NOMMU" are the full parts with MMU emulation
+/// switched off for speed -- UAE's mmu_model=0, WinUAE's MMU "None" -- and
+/// no real 68040/68060 has its FPU without the MMU, so they become the full
+/// Copperline parts, as `mmu = 0` leaves its part alone.
+///
+/// Only after all of that does FS-UAE hand each `uae_*` line to UAE's own
+/// parser (main.c calls `fs_uae_read_custom_uae_options` after
+/// `fs_uae_configure_amiga_hardware`), in file order. That order matters:
+/// UAE clears the FPU with every `cpu_model` line, and its core in FS-UAE
+/// reads `mmu_model` as a number, with no EC MMU.
+fn map_cpu<'a>(
+    entries: &'a [Entry],
+    seen: &mut HashMap<&'a str, ()>,
+    doc: &mut DocumentMut,
+    report: &mut ImportReport,
+    machine: Option<MachineCpu>,
+) -> Option<&'static str> {
+    const NO_MACHINE_CPU: &str = "the CPU comes from an amiga_model preset this converter does \
+                                  not recognize; set [cpu] model and fpu by hand";
+    let by_key = |k: &str| entries.iter().rev().find(|e| e.key == k);
+    let is_uae_cpu_key = |e: &&Entry| UAE_CPU_KEYS.contains(&e.key.as_str());
+    for e in entries
+        .iter()
+        .filter(|e| matches!(e.key.as_str(), "cpu" | "fpu" | "mmu") || is_uae_cpu_key(e))
+    {
+        seen.insert(&e.key, ());
+    }
+
+    let mut state = machine.map(|m| m.cpu);
+    let mut cpu_named = false;
+    if let Some(e) = by_key("cpu") {
+        let value = fs_value(&e.value);
+        if value != "auto" {
+            match fsuae_cpu(&value) {
+                Some(part) => {
+                    // A machine this converter does not recognize is taken
+                    // to fit no FPU of its own, as most models do not.
+                    let (fpu, fpu_external) =
+                        machine.map_or((false, false), |m| (m.fpu, m.fpu_external));
+                    let cpu = named_cpu(part, fpu, fpu_external);
+                    if value.ends_with("nommu") {
+                        report.approximated(&e.key, &e.value, mmu_off_note(cpu.model()));
+                    }
+                    state = Some(cpu);
+                    cpu_named = true;
+                }
+                // FS-UAE warns and keeps the machine's CPU.
+                None => report.unsupported(
+                    &e.key,
+                    &e.value,
+                    "unrecognized CPU; FS-UAE knows 68000, 68010, 68EC020, 68020, 68EC030, \
+                     68030, 68EC040, 68LC040, 68040-NOMMU, 68040, 68EC060, 68LC060, \
+                     68060-NOMMU and 68060",
+                ),
+            }
+        }
+    }
+
+    // The last line that named an FPU, and the last that set the core or
+    // the address width.
+    let mut fpu_entry: Option<&Entry> = None;
+    let mut width_entry: Option<&Entry> = None;
+    if let Some(e) = by_key("fpu").filter(|e| fs_value(&e.value) != "auto") {
+        match state.as_mut() {
+            None => report.unsupported(&e.key, &e.value, NO_MACHINE_CPU),
+            Some(cpu) => {
+                let value = fs_value(&e.value);
+                let fits = match value.as_str() {
+                    "0" => Some(true),
+                    "68881" | "68882" => Some(matches!(cpu.core, 68020 | 68030)),
+                    "68040" => Some(cpu.core == 68040),
+                    "68060" => Some(cpu.core == 68060),
+                    _ => None,
+                };
+                match fits {
+                    Some(true) => {
+                        set_fpu(cpu, value != "0", e, report);
+                        fpu_entry = Some(e);
+                    }
+                    Some(false) => report.unsupported(
+                        &e.key,
+                        &e.value,
+                        format!(
+                            "FS-UAE ignores this FPU on a {}: a 68881/68882 pairs only with a \
+                             68020/68030, the 68040/68060 FPU only with its own CPU",
+                            cpu.model()
+                        ),
+                    ),
+                    None => report.unsupported(
+                        &e.key,
+                        &e.value,
+                        "unrecognized FPU; expected 0, 68881, 68882, 68040 or 68060",
+                    ),
+                }
+            }
+        }
+    }
+    if let Some(e) = by_key("mmu").filter(|e| fs_value(&e.value) != "auto") {
+        match state.as_mut() {
+            None => report.unsupported(&e.key, &e.value, NO_MACHINE_CPU),
+            Some(cpu) => set_mmu(cpu, e, report),
+        }
+    }
+
+    for e in entries.iter().filter(is_uae_cpu_key) {
+        let Some(cpu) = state.as_mut() else {
+            report.unsupported(&e.key, &e.value, NO_MACHINE_CPU);
+            continue;
+        };
+        match e.key.as_str() {
+            // A new core is no longer the EC part a `cpu` value named.
+            "uae_cpu_model" => match leading_number(&e.value).filter(|n| CPU_CORES.contains(n)) {
+                Some(core) => {
+                    cpu.ec &= core == cpu.core;
+                    cpu.core = core;
+                    cpu.fpu = false;
+                    width_entry = Some(e);
+                }
+                None => report.unsupported(
+                    &e.key,
+                    &e.value,
+                    "unrecognized CPU model; UAE reads only the core's number (68000 to 68060)",
+                ),
+            },
+            "uae_cpu_type" => match parse_cpu_type(&e.value) {
+                Some((core, narrow, fpu)) => {
+                    cpu.ec &= core == cpu.core;
+                    cpu.core = core;
+                    cpu.narrow = narrow.unwrap_or(core < 68020);
+                    cpu.fpu = fpu;
+                    width_entry = Some(e);
+                }
+                None => report.unsupported(&e.key, &e.value, "unrecognized CPU type"),
+            },
+            "uae_fpu_model" => {
+                let lower = e.value.trim().to_ascii_lowercase();
+                let on = !(lower.is_empty() || lower == "0" || lower == "none");
+                set_fpu(cpu, on, e, report);
+                fpu_entry = Some(e);
+            }
+            "uae_mmu_model" => set_mmu(cpu, e, report),
+            _ => match parse_bool(&e.value) {
+                Some(narrow) => {
+                    cpu.narrow = narrow;
+                    width_entry = Some(e);
+                }
+                None => report.unsupported(&e.key, &e.value, "unrecognized boolean"),
+            },
+        }
+    }
+
+    let cpu = state?;
+    let model = cpu.model();
+    // The preset has already written the machine's own model.
+    if cpu_named || machine.map(|m| m.cpu.model()) != Some(model) {
+        set_str(doc, &["cpu"], "model", model);
+    }
+    if let Some(e) = width_entry {
+        if let Some(note) = addressing_note(cpu.core, cpu.narrow) {
+            report.approximated(&e.key, &e.value, note);
+        }
+    }
+    // The `fpu` option is checked against the core above, so only a raw
+    // uae_fpu_model can ask a 68000/68010 for one.
+    if let Some(e) = fpu_entry.filter(|_| cpu.fpu && !can_fit_fpu(model)) {
+        report.unsupported(
+            &e.key,
+            &e.value,
+            "a 68000/68010 has no coprocessor interface for a 68881/68882; Copperline cannot \
+             fit one",
+        );
+    }
+    set_cpu_fpu(doc, model, cpu.fpu, fpu_entry.is_some());
+    Some(model)
 }
 
 pub fn map(entries: &[Entry]) -> MapOutcome {
@@ -55,23 +535,52 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
             "the source config named no machine model (amiga_model), so the machine is whatever Copperline defaults to -- currently a stock A500 (68000 at 7.09MHz, 512K chip plus 512K slow, ECS Agnus with OCS Denise, PAL). Set [machine] profile if you wanted something else; the CPU/chipset/memory keys that did translate still override it either way.",
         );
     }
-    if let Some(e) = by_key("amiga_model") {
+    // The machine before any explicit key: FS-UAE's own default A500 when
+    // no model is named, the preset otherwise, and unknown for a preset
+    // this mapper does not recognize.
+    let model_entry = by_key("amiga_model");
+    let preset = match model_entry {
+        Some(e) => model_preset(&e.value),
+        None => model_preset("A500"),
+    };
+    // An `accelerator` option, else the preset's board; FS-UAE takes the
+    // board's CPU when no `cpu` option names one.
+    let board_entry = by_key("accelerator");
+    let board = match board_entry {
+        Some(e) => {
+            seen.insert(&e.key, ());
+            let board = accelerator_board(&e.value);
+            if board.is_none() {
+                report.unsupported(
+                    &e.key,
+                    &e.value,
+                    "Copperline models no PowerPC board, and no accelerator board as such; \
+                     set [cpu] and [memory] accelerator by hand",
+                );
+            }
+            board
+        }
+        None => preset
+            .and_then(|p| p.accelerator)
+            .and_then(accelerator_board),
+    };
+    let machine = machine_cpu(preset, board.map(|(_, cpu, _)| cpu));
+    if let Some(e) = model_entry {
         seen.insert(&e.key, ());
-        match model_preset(&e.value) {
-            Some((chipset, cpu, chip_mem, fast_mem, profile)) => {
+        match preset {
+            Some(p) => {
                 // The profile carries the machine's own wiring (the IDE
                 // port an A1200/A600/A4000 has, the RTC socket, and the
                 // rest); without it a `hard_drive_N` mapped onto [ide]
                 // below has no controller to attach to. The explicit
                 // chipset/CPU/memory set here still override whatever the
                 // profile would have supplied.
-                set_str(&mut doc, &["machine"], "profile", profile);
-                set_str(&mut doc, &["chipset"], "revision", chipset);
-                set_str(&mut doc, &["cpu"], "model", cpu);
-                set_str(&mut doc, &["memory"], "chip", chip_mem);
-                if fast_mem != "0" {
-                    set_str(&mut doc, &["memory"], "fast", fast_mem);
+                set_str(&mut doc, &["machine"], "profile", p.profile);
+                set_str(&mut doc, &["chipset"], "revision", p.chipset);
+                if let Some(machine) = machine {
+                    set_str(&mut doc, &["cpu"], "model", machine.cpu.model());
                 }
+                set_str(&mut doc, &["memory"], "chip", p.chip);
                 annotate(
                     &mut doc,
                     &["chipset"],
@@ -81,6 +590,16 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
                         e.value
                     ),
                 );
+                if p.fmv {
+                    doc["fmv"] = toml_edit::value(true);
+                    report.approximated(
+                        &e.key,
+                        &e.value,
+                        "FS-UAE fits Commodore's FMV module ROM from its Kickstarts folder; \
+                         fmv = true fits Copperline's bundled open replacement ROM (set \
+                         fmv_rom to the Commodore image to use that instead)",
+                    );
+                }
             }
             None => report.approximated(
                 &e.key,
@@ -104,15 +623,98 @@ pub fn map(entries: &[Entry]) -> MapOutcome {
             None => report.unsupported(&e.key, &e.value, "unrecognized chipset value"),
         }
     }
-    if let Some(e) = by_key("cpu_type") {
+    let cpu_model = map_cpu(entries, &mut seen, &mut doc, &mut report, machine);
+
+    // --- RAM only a 32-bit CPU reaches ------------------------------------
+    // Ramsey motherboard RAM (FS-UAE's `motherboard_ram`, in KB like its
+    // other memory options, or the preset's) and an accelerator board's RAM
+    // (`accelerator_memory`, also KB, or the board's own) both sit above
+    // the 24-bit address space; FS-UAE refuses motherboard RAM without
+    // 32-bit addressing, and Copperline refuses both.
+    let wide = cpu_model.is_some_and(|m| !matches!(m, "68000" | "68010" | "68EC020"));
+    let mut motherboard = preset
+        .and_then(|p| p.motherboard)
+        .map(|size| (size.to_string(), model_entry));
+    if let Some(e) = by_key("motherboard_ram") {
         seen.insert(&e.key, ());
-        let digits: String = e.value.chars().take_while(|c| c.is_ascii_digit()).collect();
-        let known = ["68000", "68010", "68020", "68030", "68040", "68060"];
-        if known.contains(&digits.as_str()) {
-            set_str(&mut doc, &["cpu"], "model", &digits);
-        } else {
-            report.unsupported(&e.key, &e.value, "unrecognized CPU model");
+        match e.value.trim().parse::<u64>() {
+            // Said even when zero: the A3000/A4000 profiles fit some.
+            Ok(kb) if kb.is_multiple_of(1024) => {
+                let size = if kb == 0 {
+                    "0".to_string()
+                } else {
+                    format!("{}M", kb / 1024)
+                };
+                motherboard = Some((size, Some(e)));
+            }
+            _ => report.unsupported(
+                &e.key,
+                &e.value,
+                "expected a KB integer, a whole number of megabytes",
+            ),
         }
+    }
+    if let Some((size, source)) = motherboard {
+        let ramsey = preset.is_some_and(|p| matches!(p.profile, "A3000" | "A4000"));
+        if ramsey && (wide || size == "0") {
+            set_str(&mut doc, &["memory"], "motherboard", &size);
+        } else if let Some(e) = source.filter(|_| size != "0") {
+            report.unsupported(
+                &e.key,
+                &e.value,
+                if ramsey {
+                    "motherboard RAM needs a CPU with 32-bit addressing"
+                } else {
+                    "Copperline fits motherboard RAM only to the A3000/A4000's Ramsey controller"
+                },
+            );
+        }
+    }
+    let accel_entry = by_key("accelerator_memory");
+    if let Some(e) = accel_entry {
+        seen.insert(&e.key, ());
+    }
+    if let Some((name, _, board_mb)) = board {
+        let mut mb = board_mb;
+        if let Some(e) = accel_entry {
+            match e.value.trim().parse::<u64>() {
+                Ok(kb) => mb = kb / 1024,
+                Err(_) => report.unsupported(&e.key, &e.value, "expected a KB integer"),
+            }
+        }
+        // No board RAM is FS-UAE's way of fitting no board at all.
+        if let Some(e) = board_entry.or(model_entry).filter(|_| mb > 0) {
+            if !wide {
+                report.unsupported(
+                    &e.key,
+                    &e.value,
+                    format!("the {name} board's RAM needs a CPU with 32-bit addressing"),
+                );
+            } else if mb > 128 {
+                report.unsupported(
+                    &e.key,
+                    &e.value,
+                    format!("{mb}M of board RAM is beyond Copperline's 128M CPU-slot space"),
+                );
+            } else {
+                set_str(&mut doc, &["memory"], "accelerator", &format!("{mb}M"));
+                report.approximated(
+                    &e.key,
+                    &e.value,
+                    format!(
+                        "Copperline does not model the {name} board: its CPU and board RAM \
+                         are imported (the RAM as [memory] accelerator, Copperline's CPU-slot \
+                         RAM), but not the board's own ROM or SCSI kit"
+                    ),
+                );
+            }
+        }
+    } else if let Some(e) = accel_entry {
+        report.unsupported(
+            &e.key,
+            &e.value,
+            "board RAM for an accelerator, and no board this converter maps is fitted",
+        );
     }
 
     // --- memory (FS-UAE: literal KB, not an index/MB mix) ----------------
@@ -582,6 +1184,284 @@ mod tests {
         let out = map(&entries);
         assert_eq!(out.report.flagged.len(), 1);
         assert!(out.report.flagged[0].note.contains("path variables"));
+    }
+
+    /// `convert`, then checked the way Copperline loads a config, so a
+    /// mapping can never hand the user a file it would refuse.
+    fn convert_valid(text: &str) -> String {
+        let out = convert(text);
+        let raw = copperline::config::RawConfig::parse(&out).expect("valid TOML");
+        if let Err(e) = copperline::config::Config::try_from(raw) {
+            panic!("{out}\nis refused: {e:#}");
+        }
+        out
+    }
+
+    fn flagged_keys(text: &str) -> Vec<String> {
+        let entries = crate::parse::parse(text);
+        map(&entries)
+            .report
+            .flagged
+            .into_iter()
+            .map(|f| f.source_key)
+            .collect()
+    }
+
+    #[test]
+    fn the_cpu_option_names_every_ec_and_lc_part() {
+        // FS-UAE's doc/options/cpu values; the LC parts are the full
+        // 68040/68060 without their FPU.
+        for (value, model, fpu) in [
+            ("68000", "68000", None),
+            ("68010", "68010", None),
+            ("68EC020", "68EC020", None),
+            ("68020", "68020", None),
+            ("68EC030", "68EC030", None),
+            ("68030", "68030", None),
+            ("68EC040", "68EC040", None),
+            ("68LC040", "68040", Some(false)),
+            ("68040", "68040", None),
+            ("68EC060", "68EC060", None),
+            ("68LC060", "68060", Some(false)),
+            ("68060", "68060", None),
+        ] {
+            let text = format!("cpu = {value}\n");
+            let out = convert_valid(&text);
+            assert!(out.contains(&format!(r#"model = "{model}""#)), "{out}");
+            match fpu {
+                Some(fpu) => assert!(out.contains(&format!("fpu = {fpu}")), "{out}"),
+                None => assert!(!out.contains("fpu ="), "{out}"),
+            }
+            assert!(flagged_keys(&text).is_empty(), "{value}");
+        }
+        // FS-UAE compares values ignoring case and punctuation.
+        assert!(convert("cpu = 68ec030\n").contains(r#"model = "68EC030""#));
+        assert!(convert("cpu = 68lc_040\n").contains(r#"model = "68040""#));
+        // `cpu_type` is not an FS-UAE option (FS-UAE's own is `cpu`).
+        assert!(!convert("cpu_type = 68030\n").contains("model ="));
+    }
+
+    #[test]
+    fn a_nommu_cpu_is_the_full_part_and_says_so() {
+        // No real 68040/68060 has its FPU without the MMU: FS-UAE's -NOMMU
+        // is the full part with MMU emulation switched off.
+        for core in ["68040", "68060"] {
+            let text = format!("cpu = {core}-NOMMU\n");
+            let out = convert_valid(&text);
+            assert!(out.contains(&format!(r#"model = "{core}""#)), "{out}");
+            assert!(!out.contains("fpu ="), "{out}");
+            assert_eq!(flagged_keys(&text), ["cpu"]);
+        }
+    }
+
+    #[test]
+    fn fpu_and_mmu_options_adjust_the_part_as_fsuae_does() {
+        let out = convert_valid("cpu = 68EC030\nfpu = 68882\n");
+        assert!(out.contains(r#"model = "68EC030""#), "{out}");
+        assert!(out.contains("fpu = true"), "{out}");
+        let out = convert_valid("cpu = 68LC040\nfpu = 68040\n");
+        assert!(out.contains(r#"model = "68040""#), "{out}");
+        assert!(out.contains("fpu = true"), "{out}");
+        let out = convert_valid("cpu = 68060\nfpu = 0\n");
+        assert!(out.contains("fpu = false"), "{out}");
+        // An MMU added to an EC part makes the full (or LC) part.
+        let out = convert_valid("cpu = 68EC030\nmmu = 68030\n");
+        assert!(out.contains(r#"model = "68030""#), "{out}");
+        let out = convert_valid("cpu = 68EC040\nmmu = 68040\n");
+        assert!(out.contains(r#"model = "68040""#), "{out}");
+        assert!(out.contains("fpu = false"), "{out}");
+        // The FPU fits the preset's CPU when no `cpu` is named.
+        let out = convert_valid("amiga_model = A1200\nfpu = 68881\n");
+        assert!(out.contains(r#"model = "68EC020""#), "{out}");
+        assert!(out.contains("fpu = true"), "{out}");
+        // The on-chip FPU on an EC part is FS-UAE's -NOMMU CPU.
+        let text = "cpu = 68EC040\nfpu = 68040\n";
+        assert!(convert_valid(text).contains(r#"model = "68040""#));
+        assert_eq!(flagged_keys(text), ["fpu"]);
+        // `mmu = 0` leaves the part alone, but says Copperline's has one.
+        let text = "cpu = 68030\nmmu = 0\n";
+        assert!(convert_valid(text).contains(r#"model = "68030""#));
+        assert_eq!(flagged_keys(text), ["mmu"]);
+        assert!(flagged_keys("cpu = 68EC030\nmmu = 0\n").is_empty());
+    }
+
+    #[test]
+    fn fpu_and_mmu_options_fsuae_ignores_are_reported_not_emitted() {
+        // FS-UAE warns about and ignores an FPU or MMU that does not fit
+        // the core, so the import does too.
+        let text = "cpu = 68EC040\nfpu = 68881\n";
+        let out = convert_valid(text);
+        assert!(out.contains(r#"model = "68EC040""#), "{out}");
+        assert!(!out.contains("fpu ="), "{out}");
+        assert_eq!(flagged_keys(text), ["fpu"]);
+        // The default A500's 68000 has no coprocessor interface.
+        let text = "fpu = 68881\n";
+        assert!(!convert_valid(text).contains("fpu ="));
+        assert_eq!(flagged_keys(text), ["fpu"]);
+        let text = "cpu = 68030\nmmu = 68040\n";
+        assert!(convert_valid(text).contains(r#"model = "68030""#));
+        assert_eq!(flagged_keys(text), ["mmu"]);
+        // An unknown CPU keeps the machine's, as FS-UAE does.
+        let text = "cpu = 68EC031\n";
+        assert!(!convert_valid(text).contains("model ="));
+        assert_eq!(flagged_keys(text), ["cpu"]);
+        // With a preset this converter does not know, there is no CPU to
+        // check an FPU against.
+        let text = "amiga_model = A4000/PPC\nfpu = 68881\nuae_cpu_model = 68030\n";
+        assert!(!convert(text).contains("fpu ="));
+        assert_eq!(flagged_keys(text), ["amiga_model", "fpu", "uae_cpu_model"]);
+    }
+
+    #[test]
+    fn uae_cpu_options_apply_after_fsuae_s_own_in_file_order() {
+        // FS-UAE hands uae_* lines to UAE's parser after its own options.
+        let out = convert_valid("cpu = 68030\nuae_cpu_model = 68040\nuae_fpu_model = 68040\n");
+        assert!(out.contains(r#"model = "68040""#), "{out}");
+        assert!(out.contains("fpu = true"), "{out}");
+        // UAE clears the FPU with every cpu_model line, so the order of the
+        // lines decides whether the FPU survives.
+        let out = convert_valid("cpu = 68030\nuae_fpu_model = 68882\nuae_cpu_model = 68030\n");
+        assert!(out.contains("fpu = false"), "{out}");
+        let out = convert_valid("cpu = 68030\nuae_cpu_model = 68030\nuae_fpu_model = 68882\n");
+        assert!(out.contains("fpu = true"), "{out}");
+        // A cpu_model line leaves the address width alone: the A500's 24-bit
+        // 68000 becomes a 68EC020, until 32-bit addressing is asked for.
+        let out = convert_valid("uae_cpu_model = 68020\n");
+        assert!(out.contains(r#"model = "68EC020""#), "{out}");
+        let out = convert_valid("uae_cpu_model = 68020\nuae_cpu_24bit_addressing = false\n");
+        assert!(out.contains(r#"model = "68020""#), "{out}");
+        let out = convert_valid("amiga_model = A1200\nuae_cpu_24bit_addressing = false\n");
+        assert!(out.contains(r#"model = "68020""#), "{out}");
+        // An MMU switched on makes the full part; an FPU-less 68040 with
+        // its MMU is the LC040.
+        let out = convert_valid("cpu = 68EC040\nuae_mmu_model = 68040\n");
+        assert!(out.contains(r#"model = "68040""#), "{out}");
+        assert!(out.contains("fpu = false"), "{out}");
+        // The deprecated old-style type still reads.
+        let out = convert_valid("uae_cpu_type = 68ec020/68881\n");
+        assert!(out.contains(r#"model = "68EC020""#), "{out}");
+        assert!(out.contains("fpu = true"), "{out}");
+    }
+
+    #[test]
+    fn uae_cpu_options_copperline_cannot_take_are_reported_not_emitted() {
+        // FS-UAE's UAE core reads mmu_model as a number: no EC MMU.
+        let text = "cpu = 68030\nuae_mmu_model = 68ec030\n";
+        assert!(convert_valid(text).contains(r#"model = "68030""#));
+        assert_eq!(flagged_keys(text), ["uae_mmu_model"]);
+        let text = "cpu = 68030\nuae_mmu_model = 68040\n";
+        assert!(convert_valid(text).contains(r#"model = "68030""#));
+        assert_eq!(flagged_keys(text), ["uae_mmu_model"]);
+        // A 6888x on a 68000.
+        let text = "uae_fpu_model = 68881\n";
+        assert!(!convert_valid(text).contains("fpu ="));
+        assert_eq!(flagged_keys(text), ["uae_fpu_model"]);
+        // An on-chip FPU on an EC part is the -NOMMU CPU: the full part.
+        let text = "cpu = 68EC060\nuae_fpu_model = 68060\n";
+        assert!(convert_valid(text).contains(r#"model = "68060""#));
+        assert_eq!(flagged_keys(text), ["uae_fpu_model"]);
+        // Address widths the Copperline part does not have.
+        let text = "uae_cpu_24bit_addressing = false\n";
+        assert!(!convert_valid(text).contains("model ="));
+        assert_eq!(flagged_keys(text), ["uae_cpu_24bit_addressing"]);
+        let text = "uae_cpu_model = 68030\n";
+        assert!(convert_valid(text).contains(r#"model = "68030""#));
+        assert_eq!(flagged_keys(text), ["uae_cpu_model"]);
+        let text = "uae_cpu_model = 68EC030\n";
+        assert!(!convert_valid(text).contains("model ="));
+        assert_eq!(flagged_keys(text), ["uae_cpu_model"]);
+    }
+
+    #[test]
+    fn big_box_presets_bring_their_68882_and_motherboard_ram() {
+        // bip_a3000/bip_a4000: a 68882 and 8M of Ramsey motherboard RAM,
+        // not a Zorro II board; FS-UAE's A4000 is the 68EC030 one.
+        let out = convert_valid("amiga_model = A3000\n");
+        assert!(out.contains(r#"model = "68030""#), "{out}");
+        assert!(out.contains("fpu = true"), "{out}");
+        assert!(out.contains(r#"motherboard = "8M""#), "{out}");
+        assert!(!out.contains("fast ="), "{out}");
+        let out = convert_valid("amiga_model = A4000\n");
+        assert!(out.contains(r#"model = "68EC030""#), "{out}");
+        assert!(out.contains("fpu = true"), "{out}");
+        assert!(out.contains(r#"motherboard = "8M""#), "{out}");
+        let out = convert_valid("amiga_model = A4000/040\n");
+        assert!(out.contains(r#"model = "68040""#), "{out}");
+        assert!(!out.contains("fpu ="), "{out}");
+        // A named CPU keeps the board's 68882 beside it (FS-UAE's
+        // default_fpu_noninternal), or drops it for an EC part.
+        let out = convert_valid("amiga_model = A4000\ncpu = 68030\n");
+        assert!(out.contains(r#"model = "68030""#), "{out}");
+        assert!(out.contains("fpu = true"), "{out}");
+        let out = convert_valid("amiga_model = A3000\ncpu = 68EC030\n");
+        assert!(out.contains(r#"model = "68EC030""#), "{out}");
+        assert!(!out.contains("fpu ="), "{out}");
+        // An explicit size replaces the preset's; a 24-bit CPU reaches none.
+        let out = convert_valid("amiga_model = A4000\nmotherboard_ram = 16384\n");
+        assert!(out.contains(r#"motherboard = "16M""#), "{out}");
+        let out = convert_valid("amiga_model = A4000\nmotherboard_ram = 0\n");
+        assert!(out.contains(r#"motherboard = "0""#), "{out}");
+        // (Copperline refuses an A3000 with a 68000 whatever the import
+        // does: the profile's own motherboard RAM and Zorro III RTG card
+        // need 32 address lines too.)
+        let text = "amiga_model = A3000\ncpu = 68000\n";
+        assert!(!convert(text).contains("motherboard ="));
+        assert_eq!(flagged_keys(text), ["amiga_model"]);
+        let text = "amiga_model = A1200\nmotherboard_ram = 8192\n";
+        assert!(!convert_valid(text).contains("motherboard ="));
+        assert_eq!(flagged_keys(text), ["motherboard_ram"]);
+    }
+
+    #[test]
+    fn cd32_and_blizzard_presets_map_to_their_parts() {
+        let out = convert_valid("amiga_model = CD32\n");
+        assert!(out.contains(r#"profile = "CD32""#), "{out}");
+        assert!(out.contains(r#"model = "68EC020""#), "{out}");
+        assert!(!out.contains("fmv"), "{out}");
+        let text = "amiga_model = CD32/FMV\n";
+        assert!(convert_valid(text).contains("fmv = true"));
+        assert_eq!(flagged_keys(text), ["amiga_model"]);
+        // config-accelerator.c: each board's CPU and 32M of board RAM, which
+        // becomes Copperline's CPU-slot RAM; the board itself is flagged.
+        for (model, cpu) in [
+            ("A1200/1230", "68EC030"),
+            ("A1200/1240", "68040"),
+            ("A1200/1260", "68060"),
+        ] {
+            let text = format!("amiga_model = {model}\n");
+            let out = convert_valid(&text);
+            assert!(out.contains(r#"profile = "A1200""#), "{out}");
+            assert!(out.contains(&format!(r#"model = "{cpu}""#)), "{out}");
+            assert!(!out.contains("fpu ="), "{out}");
+            assert!(out.contains(r#"accelerator = "32M""#), "{out}");
+            assert_eq!(flagged_keys(&text), ["amiga_model"]);
+        }
+        // A named CPU wins over the board's; the board's RAM needs one with
+        // 32 address lines.
+        let out =
+            convert_valid("amiga_model = A1200/1260\ncpu = 68030\naccelerator_memory = 65536\n");
+        assert!(out.contains(r#"model = "68030""#), "{out}");
+        assert!(out.contains(r#"accelerator = "64M""#), "{out}");
+        let text = "amiga_model = A1200/1230\ncpu = 68EC020\n";
+        assert!(!convert_valid(text).contains("accelerator ="));
+        assert_eq!(flagged_keys(text), ["amiga_model"]);
+        // An `accelerator` option fits the board to any machine; PowerPC
+        // boards are not modelled.
+        let out = convert_valid("amiga_model = A1200\naccelerator = blizzard-1260\n");
+        assert!(out.contains(r#"model = "68060""#), "{out}");
+        let text = "amiga_model = A1200\naccelerator = blizzard-ppc\n";
+        assert!(convert_valid(text).contains(r#"model = "68EC020""#));
+        assert_eq!(flagged_keys(text), ["accelerator"]);
+    }
+
+    #[test]
+    fn the_plain_a1200_preset_is_a_68ec020() {
+        // FS-UAE's doc/options/cpu: "A1200" is a 68EC020, "A1200/020" the
+        // full 68020.
+        let out = convert_valid("amiga_model = A1200\n");
+        assert!(out.contains(r#"model = "68EC020""#), "{out}");
+        let out = convert_valid("amiga_model = A1200/020\n");
+        assert!(out.contains(r#"model = "68020""#), "{out}");
     }
 
     #[test]
