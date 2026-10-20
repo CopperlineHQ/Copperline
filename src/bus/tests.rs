@@ -9520,6 +9520,15 @@ fn sprite_dma_chained_descriptor_with_same_vstart_arms_after_control_fetch_line(
     );
 }
 
+// These graphical fixtures stage write events in the render-write domain.
+// Observe the same framebuffer pixels using the absolute pixel-counter clock;
+// write-event and comparator origins are deliberately different domains.
+fn advance_collision_fixture_observation(bus: &mut Bus, cck: u32) {
+    let pixel_origin = super::RENDER_DIW_HSTART_FB0 as u32 / 2;
+    let write_origin = super::RENDER_COPPER_WAIT_HPOS_FB0;
+    bus.advance_chipset(cck + pixel_origin - write_origin);
+}
+
 #[test]
 fn visible_sprite_pixels_accumulate_live_sprite_sprite_clxdat() {
     let mut bus = empty_bus();
@@ -9556,7 +9565,7 @@ fn visible_sprite_pixels_accumulate_live_sprite_sprite_clxdat() {
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
 
     let remaining = 0x3A - bus.agnus.hpos;
-    bus.advance_chipset(remaining);
+    advance_collision_fixture_observation(&mut bus, remaining);
     assert_eq!(bus.custom_read(0x00E, 2), 0x8200);
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
 }
@@ -9635,7 +9644,7 @@ fn manual_sprite_data_writes_accumulate_live_sprite_sprite_clxdat() {
 
     bus.write_custom_word_from(0x144, 0x8000, BeamWriteSource::Cpu);
     bus.write_custom_word_from(0x154, 0x8000, BeamWriteSource::Cpu);
-    bus.advance_chipset(6);
+    advance_collision_fixture_observation(&mut bus, 6);
 
     assert_eq!(bus.custom_read(0x00E, 2), 0x8200);
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
@@ -9687,7 +9696,7 @@ fn attached_manual_sprite_data_writes_accumulate_live_sprite_sprite_clxdat() {
     bus.write_custom_word_from(0x144, 0x0000, BeamWriteSource::Cpu);
     bus.write_custom_word_from(0x14C, 0x8000, BeamWriteSource::Cpu);
     bus.write_custom_word_from(0x154, 0x8000, BeamWriteSource::Cpu);
-    bus.advance_chipset(6);
+    advance_collision_fixture_observation(&mut bus, 6);
 
     assert_eq!(bus.custom_read(0x00E, 2), 0x8200);
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
@@ -9723,7 +9732,7 @@ fn attached_manual_sprite_odd_data_writes_accumulate_later_live_sprite_sprite_cl
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
 
     bus.write_custom_word_from(0x14C, 0x2000, BeamWriteSource::Cpu);
-    bus.advance_chipset(9);
+    advance_collision_fixture_observation(&mut bus, 9);
 
     assert_eq!(bus.custom_read(0x00E, 2), 0x8200);
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
@@ -9864,7 +9873,7 @@ fn manual_sprite_data_writes_accumulate_live_sprite_playfield_clxdat() {
     });
 
     bus.write_custom_word_from(0x144, 0x8000, BeamWriteSource::Cpu);
-    bus.advance_chipset(6);
+    advance_collision_fixture_observation(&mut bus, 6);
 
     assert_eq!(bus.custom_read(0x00E, 2), 0x8022);
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
@@ -9907,7 +9916,7 @@ fn attached_manual_sprite_data_writes_accumulate_live_sprite_playfield_clxdat() 
 
     bus.write_custom_word_from(0x144, 0x0000, BeamWriteSource::Cpu);
     bus.write_custom_word_from(0x14C, 0x8000, BeamWriteSource::Cpu);
-    bus.advance_chipset(6);
+    advance_collision_fixture_observation(&mut bus, 6);
 
     assert_eq!(bus.custom_read(0x00E, 2), 0x8022);
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
@@ -9951,7 +9960,7 @@ fn bplcon3_spres_hires_narrows_live_sprite_sprite_clxdat() {
         sprite_fetch_control_words_at_reset_line(&mut bus);
         bus.agnus.vpos = 0x2C;
         bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
-        bus.advance_chipset(remaining);
+        advance_collision_fixture_observation(&mut bus, remaining);
 
         bus.custom_read(0x00E, 2)
     };
@@ -10001,7 +10010,7 @@ fn aga_spres_shres_combines_adjacent_sprite_samples_for_live_clxdat() {
         sprite_fetch_control_words_at_reset_line(&mut bus);
         bus.agnus.vpos = 0x2C;
         bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
-        bus.advance_chipset(remaining);
+        advance_collision_fixture_observation(&mut bus, remaining);
 
         bus.custom_read(0x00E, 2)
     };
@@ -10058,7 +10067,7 @@ fn same_line_clxcon_odd_sprite_enable_does_not_retime_earlier_live_sprite_sprite
             bus.write_custom_word_from(0x098, 1 << 12, BeamWriteSource::Cpu);
         }
         let remaining = 0x3A - bus.agnus.hpos;
-        bus.advance_chipset(remaining);
+        advance_collision_fixture_observation(&mut bus, remaining);
 
         bus.custom_read(0x00E, 2)
     };
@@ -10140,7 +10149,7 @@ fn bitplane_dma_capture_accumulates_live_dual_playfield_clxdat() {
     write_chip_word(&mut bus, 0x0100, 0x4000);
     write_chip_word(&mut bus, 0x0200, 0x4000);
 
-    bus.advance_chipset(6);
+    advance_collision_fixture_observation(&mut bus, 6);
 
     assert_eq!(bus.custom_read(0x00E, 2), 0x8001);
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
@@ -10729,7 +10738,7 @@ fn bpldat_writes_update_latched_planes_for_live_playfield_clxdat() {
             bus.write_custom_word_from(0x11A, 0x8000, BeamWriteSource::Cpu);
         }
         let remaining = 0x48 - bus.agnus.hpos;
-        bus.advance_chipset(remaining);
+        advance_collision_fixture_observation(&mut bus, remaining);
 
         bus.custom_read(0x00E, 2)
     };
@@ -10818,7 +10827,7 @@ fn captured_sprite_and_bitplane_rows_accumulate_live_sprite_playfield_clxdat() {
     bus.advance_chipset(1);
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
     let remaining = 0x40 - bus.agnus.hpos;
-    bus.advance_chipset(remaining);
+    advance_collision_fixture_observation(&mut bus, remaining);
 
     assert_eq!(bus.custom_read(0x00E, 2), 0x8022);
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
@@ -10863,7 +10872,7 @@ fn explicit_bpl1dat_output_accumulates_live_sprite_playfield_clxdat() {
     let before_bpl1dat = 0x34 - bus.agnus.hpos;
     bus.advance_chipset(before_bpl1dat);
     bus.write_custom_word_from(0x110, 0x8000, BeamWriteSource::Cpu);
-    bus.advance_chipset(6);
+    advance_collision_fixture_observation(&mut bus, 6);
 
     assert_eq!(bus.custom_read(0x00E, 2), 0x8020);
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
@@ -10888,7 +10897,7 @@ fn manual_sprite_and_bpl1dat_writes_accumulate_live_sprite_playfield_clxdat() {
 
     bus.write_custom_word_from(0x144, 0x8000, BeamWriteSource::Cpu);
     bus.write_custom_word_from(0x110, 0x8000, BeamWriteSource::Cpu);
-    bus.advance_chipset(6);
+    advance_collision_fixture_observation(&mut bus, 6);
 
     assert_eq!(bus.custom_read(0x00E, 2), 0x8020);
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
@@ -10940,7 +10949,7 @@ fn same_line_bplcon1_scroll_increase_latches_later_live_sprite_playfield_clxdat(
 
     bus.write_custom_word_from(0x102, 0x0004, BeamWriteSource::Cpu);
     let remaining = 0x48 - bus.agnus.hpos;
-    bus.advance_chipset(remaining);
+    advance_collision_fixture_observation(&mut bus, remaining);
 
     assert_eq!(bus.custom_read(0x00E, 2), 0x8022);
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
@@ -11040,7 +11049,7 @@ fn bplcon3_spres_hires_narrows_live_sprite_playfield_clxdat() {
         bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
         bus.advance_chipset(1);
         let remaining = 0x40 - bus.agnus.hpos;
-        bus.advance_chipset(remaining);
+        advance_collision_fixture_observation(&mut bus, remaining);
 
         bus.custom_read(0x00E, 2)
     };
@@ -11099,7 +11108,7 @@ fn same_line_bplcon3_spres_write_does_not_retime_earlier_live_sprite_playfield_c
             bus.write_custom_word_from(0x106, BPLCON3_SPRES_HIRES, BeamWriteSource::Cpu);
         }
         let remaining = 0x40 - bus.agnus.hpos;
-        bus.advance_chipset(remaining);
+        advance_collision_fixture_observation(&mut bus, remaining);
 
         bus.custom_read(0x00E, 2)
     };
@@ -13319,6 +13328,32 @@ fn potgo_starts_counters_and_potgor_reflects_button_pins() {
 }
 
 #[test]
+fn clxdat_uses_absolute_pixel_clock_and_transfer_start() {
+    let mut bus = empty_bus();
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = 0x3A;
+    bus.denise.diwstrt = 0x2C81;
+    bus.denise.diwstop = 0x2DC1;
+    bus.denise.ddfstrt = 0x0038;
+    bus.denise.ddfstop = 0x0038;
+    bus.denise.bplcon0 = 0x2400;
+    for (plane, addr) in [(0, 0x100), (1, 0x200)] {
+        bus.denise.bplpt[plane] = addr;
+        bus.display_dma_bplpt[plane] = addr;
+        write_chip_word(&mut bus, addr as usize, 0x8000);
+    }
+    bus.advance_chipset(6);
+    assert_eq!(bus.agnus.hpos, 0x40);
+    bus.set_cpu_bus_arbitration_enabled(true);
+    // DIW $81 opens half-way through H=$40: pixel x=62. The word
+    // starts before that pixel, while its trailing clocks run past it.
+    assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
+    assert_eq!(bus.custom_read(0x00E, 2), 0x8001);
+    assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
+}
+
+#[test]
 fn clxdat_transfer_leaves_bus_tail_collision_for_next_read() {
     for (addr, size, first, second) in [
         (0x00E, 2, 0x8000, 0x8200),
@@ -13340,9 +13375,10 @@ fn clxdat_transfer_leaves_bus_tail_collision_for_next_read() {
         bus.current_frame_render_base = bus.capture_render_snapshot();
         bus.write_custom_word_from(0x144, 0x8000, BeamWriteSource::Cpu);
         bus.write_custom_word_from(0x154, 0x8000, BeamWriteSource::Cpu);
-        // The single overlapping sprite pixel becomes visible at $3A.
+        // The sprite at POS $83 emits at absolute H=$42. Start this
+        // read at H=$41, so that pixel is clocked during its tail.
         // For a long read at $00C, CLXDAT is the second bus transfer.
-        bus.advance_chipset(if addr == 0x00C { 2 } else { 4 });
+        bus.advance_chipset(if addr == 0x00C { 11 } else { 13 });
         bus.set_cpu_bus_arbitration_enabled(true);
         assert_eq!(
             bus.custom_read(addr, size),

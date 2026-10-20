@@ -10,7 +10,7 @@ use super::*;
 impl Bus {
     pub(super) fn accumulate_live_collisions_until_current_beam(&mut self) {
         const VISIBLE_END_HPOS: u32 =
-            RENDER_COPPER_WAIT_HPOS_FB0 + (RENDER_FRAMEBUFFER_WIDTH as u32 / 4);
+            (RENDER_DIW_HSTART_FB0 as u32 * 2 + RENDER_FRAMEBUFFER_WIDTH as u32).div_ceil(4);
         let visible_start_vpos = self.current_frame_visible_start_vpos;
         let visible_end_vpos =
             visible_start_vpos + self.current_frame_geometry.visible_lines as u32;
@@ -67,7 +67,7 @@ impl Bus {
 
     pub(super) fn accumulate_live_collisions_to_frame_end(&mut self) {
         const VISIBLE_END_HPOS: u32 =
-            RENDER_COPPER_WAIT_HPOS_FB0 + (RENDER_FRAMEBUFFER_WIDTH as u32 / 4);
+            (RENDER_DIW_HSTART_FB0 as u32 * 2 + RENDER_FRAMEBUFFER_WIDTH as u32).div_ceil(4);
         let visible_start_vpos = self.current_frame_visible_start_vpos;
         let visible_end_vpos =
             visible_start_vpos + self.current_frame_geometry.visible_lines as u32;
@@ -126,14 +126,8 @@ impl Bus {
         ) else {
             return;
         };
-        let x_start = old_hpos
-            .saturating_sub(RENDER_COPPER_WAIT_HPOS_FB0)
-            .saturating_mul(4)
-            .min(RENDER_FRAMEBUFFER_WIDTH as u32) as i32;
-        let x_stop = new_hpos
-            .saturating_sub(RENDER_COPPER_WAIT_HPOS_FB0)
-            .saturating_mul(4)
-            .min(RENDER_FRAMEBUFFER_WIDTH as u32) as i32;
+        let x_start = framebuffer_x_for_collision_beam(old_hpos);
+        let x_stop = framebuffer_x_for_collision_beam(new_hpos);
         if x_start >= x_stop {
             return;
         }
@@ -213,14 +207,8 @@ impl Bus {
         ) else {
             return;
         };
-        let x_start = old_hpos
-            .saturating_sub(RENDER_COPPER_WAIT_HPOS_FB0)
-            .saturating_mul(4)
-            .min(RENDER_FRAMEBUFFER_WIDTH as u32) as i32;
-        let x_stop = new_hpos
-            .saturating_sub(RENDER_COPPER_WAIT_HPOS_FB0)
-            .saturating_mul(4)
-            .min(RENDER_FRAMEBUFFER_WIDTH as u32) as i32;
+        let x_start = framebuffer_x_for_collision_beam(old_hpos);
+        let x_stop = framebuffer_x_for_collision_beam(new_hpos);
         if x_start >= x_stop {
             return;
         }
@@ -304,6 +292,17 @@ impl Bus {
             }
             bits
         };
+        if clxdat & 1 != 0
+            && self.denise.clxdat & 1 == 0
+            && diag_cpu_bus_on()
+            && diag_cpu_bus_addr_matches(Some(0x00df_f00e), 2)
+        {
+            let row = self.current_frame_bitplane_rows[fb_y].as_ref().unwrap();
+            let first =
+                (0..row.words_per_row).find(|&word| row.planes[0][word] & row.planes[1][word] != 0);
+            log::info!("CLXPROBE dma v={vpos:03x} from={old_hpos:02x} to={new_hpos:02x} first_word={first:?} words={} beam={:03x}:{:02x}",
+                       row.words_per_row, self.agnus.vpos, self.agnus.hpos);
+        }
         self.denise.or_clxdat(clxdat);
         self.record_live_collision_timing(
             (x_stop - x_start) as u64,
@@ -332,14 +331,8 @@ impl Bus {
         ) else {
             return;
         };
-        let x_start = old_hpos
-            .saturating_sub(RENDER_COPPER_WAIT_HPOS_FB0)
-            .saturating_mul(4)
-            .min(RENDER_FRAMEBUFFER_WIDTH as u32) as i32;
-        let x_stop = new_hpos
-            .saturating_sub(RENDER_COPPER_WAIT_HPOS_FB0)
-            .saturating_mul(4)
-            .min(RENDER_FRAMEBUFFER_WIDTH as u32) as i32;
+        let x_start = framebuffer_x_for_collision_beam(old_hpos);
+        let x_stop = framebuffer_x_for_collision_beam(new_hpos);
         if x_start >= x_stop {
             return;
         }
@@ -406,6 +399,13 @@ impl Bus {
             vertical_open,
             sprite_display_enable_x,
         );
+        if clxdat & 1 != 0
+            && self.denise.clxdat & 1 == 0
+            && diag_cpu_bus_on()
+            && diag_cpu_bus_addr_matches(Some(0x00df_f00e), 2)
+        {
+            log::info!("CLXPROBE manual v={vpos:03x} from={old_hpos:02x} to={new_hpos:02x} beam={:03x}:{:02x}", self.agnus.vpos, self.agnus.hpos);
+        }
         self.denise.or_clxdat(clxdat);
         self.record_live_collision_timing(
             (x_stop - x_start) as u64,
@@ -434,14 +434,8 @@ impl Bus {
         ) else {
             return;
         };
-        let x_start = old_hpos
-            .saturating_sub(RENDER_COPPER_WAIT_HPOS_FB0)
-            .saturating_mul(4)
-            .min(RENDER_FRAMEBUFFER_WIDTH as u32) as i32;
-        let x_stop = new_hpos
-            .saturating_sub(RENDER_COPPER_WAIT_HPOS_FB0)
-            .saturating_mul(4)
-            .min(RENDER_FRAMEBUFFER_WIDTH as u32) as i32;
+        let x_start = framebuffer_x_for_collision_beam(old_hpos);
+        let x_stop = framebuffer_x_for_collision_beam(new_hpos);
         if x_start >= x_stop {
             return;
         }

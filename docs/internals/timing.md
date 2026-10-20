@@ -12,19 +12,27 @@ golden probe render (see [](#cross-checking-against-hardware)).
 
 ## Custom-register read sampling
 
-On the arbitrated 68000 path, INTREQR and CLXDAT are sampled on their
-respective granted word transfers, before the trailing colour clock of the
-CPU bus cycle. CLXDAT also clears the collision latch at that point. A
-collision arriving during the tail belongs to the next read; it must not
-be returned and cleared by the preceding transfer. Byte reads retain the
-selected lane, and long reads sample each custom-bus word separately.
-Other custom registers retain their independently calibrated read phases.
+On the arbitrated 68000 path, CLXDAT is sampled and cleared at the start
+of its granted word transfer. Pixels clocked during that word or its trailing
+CPU clock belong to the next read. Paula INTREQR retains its independently
+calibrated end-of-slot sample. Byte reads select their lane; long reads sample
+each custom-bus word separately. Other registers retain their existing phases.
 
-Saved A500 kind72/73 collision sweeps in `amiga-hardware-probes` verify
-21 repaired early observations without new field or qualification
-regressions. Eight early differences remain; this does not establish
-complete display/collision pipeline accuracy. The behavioral regression is
-`clxdat_transfer_leaves_bus_tail_collision_for_next_read` in `src/bus/tests.rs`.
+Live collision scans use the absolute pixel-comparator conversion
+`x = 4 * H - 2 * DIW_HSTART_FB0`, matching the window and sprite coordinates.
+The render-write anchor is a different domain and must not advance the
+collision cursor. At H=$40 the pixel cursor is x=60; DIWSTRT=$81 opens at
+x=62 during that clock. Reading CLXDAT at the transfer's start must not include
+that later pixel. DMA grants, rendered positions and register-write events
+are unchanged.
+
+Saved A500 kind72/73 sweeps in `amiga-hardware-probes` now match all719
+qualified cases:29 early observations repaired in total, including the final
+eight. The561 unmatched timing cohorts remain excluded, not counted as matches.
+This is scoped validation, not a claim of complete collision accuracy. Named
+regressions in `src/bus/tests.rs` check the absolute DIW boundary and retention
+of bus-tail collisions across byte/word/long reads. Graphical fixture
+observations use the pixel clock without changing their expected bit values.
 
 ## Chip-bus arbitration
 

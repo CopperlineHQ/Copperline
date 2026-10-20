@@ -190,6 +190,14 @@ The reverse-debugging variables (`COPPERLINE_DBG_RWATCH`, `COPPERLINE_DBG_RR`,
 `COPPERLINE_DBG_RR_BUDGET_MB`, `COPPERLINE_DBG_RR_INTERVAL`) are described in
 [](reverse.md).
 
+When `COPPERLINE_DIAG_CPU_BUS=1` includes `$DFF00E` in
+`COPPERLINE_DIAG_CPU_BUS_ADDR`, `CLXPROBE` records identify the first live
+playfield producer of a newly latched collision bit0: DMA/manual source,
+scanline, scan interval and, for DMA, the first overlapping word index.
+These are model replay events, not electrical pin measurements. Keep the log
+in a file and verify that instrumentation preserves the result packet before
+using it to explain a mismatch.
+
 ## Subsystem diagnostic variables
 
 These log subsystem internals, mostly for emulator development. The table lists

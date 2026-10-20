@@ -1766,6 +1766,12 @@ pub enum CpuBusAccessKind {
     Custom,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CpuBusSamplePhase {
+    Start,
+    End,
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ChipBusOwner {
     Refresh,
@@ -7152,6 +7158,21 @@ impl Bus {
         kind: CpuBusAccessKind,
         mut sample: impl FnMut(&mut Self, u32, usize),
     ) {
+        self.grant_cpu_bus_access_sampled_phased(addr, size, kind, |bus, slot, stride, phase| {
+            if phase == CpuBusSamplePhase::End {
+                sample(bus, slot, stride);
+            }
+        });
+    }
+
+    /// Observe either boundary of a granted word without changing its duration.
+    fn grant_cpu_bus_access_sampled_phased(
+        &mut self,
+        addr: Option<u32>,
+        size: usize,
+        kind: CpuBusAccessKind,
+        mut sample: impl FnMut(&mut Self, u32, usize, CpuBusSamplePhase),
+    ) {
         if !self.cpu_bus_arbitration_enabled {
             return;
         }
@@ -7267,6 +7288,9 @@ impl Bus {
                 self.cpu_trace_access =
                     addr.map(|addr| cpu_trace_access_for_slot(addr, size, kind, wide_bus, slot));
             }
+            if !self.cpu_short_bus_cycle {
+                sample(self, slot, slot_stride, CpuBusSamplePhase::Start);
+            }
             let slot_start_cck = self.emulated_cck;
             let (cck, tick) = self.advance_one_chip_bus_quantum(Some(ChipBusOwner::Cpu));
             self.cpu_trace_access = None;
@@ -7282,7 +7306,7 @@ impl Bus {
             // data-return colour clock billed below, and where the CPU resumes
             // inside that clock is carried by `cpu_chip_clock_phase`.
             if !self.cpu_short_bus_cycle {
-                sample(self, slot, slot_stride);
+                sample(self, slot, slot_stride, CpuBusSamplePhase::End);
                 let (cck, tick) = self.advance_one_chip_bus_quantum(None);
                 self.record_slice_bus_advance(cck, tick);
             }
@@ -9654,17 +9678,22 @@ impl Bus {
     pub fn custom_read(&mut self, addr: u64, size: usize) -> u64 {
         let off = (addr & 0xFFF) as u16;
         let mut sampled_words = [None; 2];
-        self.grant_cpu_bus_access_sampled(
+        self.grant_cpu_bus_access_sampled_phased(
             Some(custom_register_cpu_addr(addr)),
             size,
             CpuBusAccessKind::Custom,
-            |bus, slot, stride| {
+            |bus, slot, stride, phase| {
                 let word_off = off.wrapping_add((slot as usize * stride) as u16) & 0xFFE;
-                if matches!(word_off, 0x00E | 0x01E) {
-                    // Capture INTREQR and read/clear CLXDAT on the granted
-                    // transfer. Events during the CPU bus-cycle tail belong
-                    // to the next read, after this value is already captured.
-                    // Keep other registers' independently calibrated phases.
+                let sample_phase = if word_off == 0x00E {
+                    CpuBusSamplePhase::Start
+                } else {
+                    CpuBusSamplePhase::End
+                };
+                if matches!(word_off, 0x00E | 0x01E) && phase == sample_phase {
+                    // Denise's collision latch is sampled/cleared at the
+                    // start of the granted word, before pixels clocked during
+                    // that slot can enter it. Paula INTREQR retains its
+                    // separately calibrated end-of-slot sampling phase.
                     bus.flush_timed_devices();
                     sampled_words[slot as usize] = Some(bus.read_custom_word(word_off));
                 }
@@ -12367,6 +12396,14 @@ impl LiveCollisionLineReplay {
             segment.x >= x_start && segment.x < x_stop && segment.control.bplcon0 & 0x0400 != 0
         })
     }
+}
+
+// Pixel comparators use Denise's absolute horizontal position (2H),
+// independently of the render-write event anchor used by the helper below.
+fn framebuffer_x_for_collision_beam(hpos: u32) -> i32 {
+    hpos.saturating_mul(4)
+        .saturating_sub(RENDER_DIW_HSTART_FB0 as u32 * 2)
+        .min(RENDER_FRAMEBUFFER_WIDTH as u32) as i32
 }
 
 fn framebuffer_x_for_live_collision_hpos(hpos: u32) -> i32 {
