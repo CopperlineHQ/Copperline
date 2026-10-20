@@ -345,6 +345,24 @@ impl Bus {
             // Line and frame lengths feed the Copper's wake bound.
             self.invalidate_copper_wake_bound();
         }
+        // A pointer write lost to Agnus's DMA counter update must not enter
+        // either the live pointer or the render replay. Debug/watch traces
+        // above still record the attempted bus write.
+        if matches!(off, 0x0E0..=0x0F6) {
+            // CPU writes arrive here after the bus-cycle tail. Use the actual
+            // grant, as render recording does, rather than that later beam.
+            let write_slot = match source {
+                BeamWriteSource::Copper => (self.agnus.vpos, self.agnus.hpos),
+                BeamWriteSource::Cpu | BeamWriteSource::CpuCopperIrq => self
+                    .cpu_custom_access_slot
+                    .unwrap_or((self.agnus.vpos, self.agnus.hpos)),
+            };
+            if self
+                .bitplane_pointer_write_conflicts_with_dma(((off - 0x0E0) / 4) as usize, write_slot)
+            {
+                return false;
+            }
+        }
         if is_render_relevant_custom_write(off)
             && !matches!(off, 0x180..=0x1BE)
             && (off != 0x1E4 || self.denise_ecs_registers())

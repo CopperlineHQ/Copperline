@@ -5245,7 +5245,8 @@ fn bplxptl_half_write_merges_into_dma_advanced_live_pointer() {
     let mut bus = empty_bus();
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = 0x3E;
+    // Set up before the 0x3E pointer-update conflict window.
+    bus.agnus.hpos = 0x3D;
     bus.denise.diwstrt = 0x2C81;
     bus.denise.diwstop = 0x2DC1;
     bus.denise.ddfstrt = 0x0038;
@@ -5257,7 +5258,7 @@ fn bplxptl_half_write_merges_into_dma_advanced_live_pointer() {
 
     // Two lores words fetched (0x1FFF8 -> 0x1FFFC), then the line-end
     // modulo add carries into the high word: 0x1FFFC + 0x10 = 0x2000C.
-    bus.advance_chipset(10);
+    bus.advance_chipset(11);
     assert_eq!(bus.display_dma_bplpt[0], 0x0002_000C);
 
     // A PTL-only rewrite keeps the DMA-advanced high half, not the high
@@ -5275,7 +5276,8 @@ fn bitplane_pointers_carry_across_vertical_blank_without_reload() {
     let mut bus = empty_bus();
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = 0x3E;
+    // Set up before the 0x3E pointer-update conflict window.
+    bus.agnus.hpos = 0x3D;
     bus.denise.diwstrt = 0x2C81;
     bus.denise.diwstop = 0x2DC1;
     bus.denise.ddfstrt = 0x0038;
@@ -5284,7 +5286,7 @@ fn bitplane_pointers_carry_across_vertical_blank_without_reload() {
     assert!(!bus.custom_write(0x0E0, 2, 0x0000));
     assert!(!bus.custom_write(0x0E2, 2, 0x0100));
 
-    bus.advance_chipset(10);
+    bus.advance_chipset(11);
     assert_eq!(bus.display_dma_bplpt[0], 0x0104);
 
     // Stop bitplane DMA and run past the next vertical blank; the live
@@ -15379,6 +15381,59 @@ fn cpu_software_request_and_unmask_share_a500_recognition_phase() {
             assert_ne!(bus.cpu_visible_intreq() & source, 0);
             bus.write_custom_word_from(0x09c, source, BeamWriteSource::Cpu);
             assert_eq!(bus.irq_software_request_mask & source, 0);
+        }
+    }
+}
+
+#[test]
+fn bitplane_pointer_half_writes_lose_only_to_the_selected_dma_counter_window() {
+    for source in [BeamWriteSource::Cpu, BeamWriteSource::Copper] {
+        for plane in 0..2 {
+            for half in [0, 2] {
+                for delta in [-1_i32, 0, 1] {
+                    let mut bus = empty_bus();
+                    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+                    bus.agnus.vpos = 0x42;
+                    // Two-plane lores: BPL2 at 0x3B, BPL1 at 0x3F.
+                    let fetch = if plane == 0 { 0x3F } else { 0x3B };
+                    bus.agnus.hpos = (fetch - 1 + delta) as u32;
+                    if matches!(source, BeamWriteSource::Cpu) {
+                        bus.cpu_custom_access_slot = Some((bus.agnus.vpos, bus.agnus.hpos));
+                        bus.agnus.hpos += 2; // Apply after the CPU cycle's tail.
+                    }
+                    bus.denise.diwstrt = 0x2C81;
+                    bus.denise.diwstop = 0xF4C1;
+                    bus.denise.ddfstrt = 0x0038;
+                    bus.denise.ddfstop = 0x00D0;
+                    bus.denise.bplcon0 = 0x2000;
+                    bus.display_dma_bplpt[plane] = 0x1A000;
+                    bus.denise.bplpt[plane] = 0x1A000;
+                    let off = 0xE0 + plane as u16 * 4 + half;
+                    let value = if half == 0 { 5 } else { 0x9000 };
+                    bus.write_custom_word_from(off, value, source);
+                    let expected = if delta == 0 {
+                        0x1A000
+                    } else if half == 0 {
+                        0x5A000
+                    } else {
+                        0x19000
+                    };
+                    assert_eq!(
+                        bus.display_dma_bplpt[plane], expected,
+                        "plane={plane} half={half} delta={delta}"
+                    );
+                    if delta == 0 {
+                        assert!(!bus
+                            .current_frame_render_events
+                            .iter()
+                            .any(|e| e.offset == off));
+                        // Another plane's counter is not being updated.
+                        let other = 1 - plane;
+                        bus.write_custom_word_from(0xE2 + other as u16 * 4, 0x9000, source);
+                        assert_eq!(bus.display_dma_bplpt[other] & 0xFFFF, 0x9000);
+                    }
+                }
+            }
         }
     }
 }

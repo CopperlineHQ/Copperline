@@ -522,6 +522,39 @@ impl Bus {
         slot.get() & DDF_SEQ_SLOT_PLANE_MASK != 0
     }
 
+    /// OCS/ECS Agnus reads a plane counter before its DMA data slot. A
+    /// register half-write in that preceding CCK loses to the counter update.
+    /// The A500 kind73 low/high-half and plane-selection controls constrain
+    /// this window; Alice's wider fetch pipeline is not covered by that probe.
+    pub(super) fn bitplane_pointer_write_conflicts_with_dma(
+        &self,
+        plane: usize,
+        write_slot: (u32, u32),
+    ) -> bool {
+        if self.aga_enabled()
+            || write_slot.0 != self.agnus.vpos
+            || self.ocs_same_line_diw_start_blocked_vpos == Some(self.agnus.vpos)
+            || self.mem.chip_ram.is_empty()
+            || visible_framebuffer_y(
+                self.agnus.vpos,
+                self.current_frame_visible_start_vpos,
+                self.current_frame_geometry.visible_lines,
+            )
+            .is_none()
+        {
+            return false;
+        }
+        let Some(slot) = self
+            .ddf_seq_hot_line
+            .slot_at
+            .get(write_slot.1.saturating_add(1) as usize)
+        else {
+            return false;
+        };
+        self.ddf_seq_ensure_hot_line();
+        usize::from(slot.get() & DDF_SEQ_SLOT_PLANE_MASK) == plane + 1
+    }
+
     pub(super) fn ddf_trace_events_at(&self, hpos: u32) -> u32 {
         let Some(event) = self.ddf_seq_hot_line.event_at.get(hpos as usize) else {
             return 0;
