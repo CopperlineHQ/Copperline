@@ -465,6 +465,48 @@ impl Cia {
     /// CPU data sampled during E-high sees the reload mux before the
     /// falling-edge counter commit. Keep the internal counter untouched.
     pub(crate) fn read_at_transfer(&mut self, reg: usize) -> u8 {
+        if reg == REG_PRB {
+            let mut v = self.read(reg);
+            // The output mux, like the timer reload mux below, is visible
+            // during E-high before the falling-edge counter commit. Preview
+            // only the underflow output; do not advance the timer or IRQ pin.
+            for (control, count, running, delay, pipe, phi2, pulse, bit) in [
+                (
+                    self.regs[REG_CRA],
+                    self.ta_count,
+                    self.ta_running,
+                    self.ta_start_delay,
+                    self.ta_enable_pipe,
+                    self.effective_ta_control() & 0x20 == 0,
+                    self.ta_pb_pulse_low,
+                    0x40,
+                ),
+                (
+                    self.regs[REG_CRB],
+                    self.tb_count,
+                    self.tb_running,
+                    self.tb_start_delay,
+                    self.tb_enable_pipe,
+                    TimerBInputMode::from_crb(self.effective_tb_control()) == TimerBInputMode::Phi2,
+                    self.tb_pb_pulse_low,
+                    0x80,
+                ),
+            ] {
+                if control & CR_PBON != 0
+                    && count == 0
+                    && delay == 0
+                    && Self::enable_pipe(running, delay, pipe) & 2 != 0
+                    && phi2
+                {
+                    if control & CR_OUTMODE == 0 {
+                        v |= bit;
+                    } else if !pulse {
+                        v ^= bit;
+                    }
+                }
+            }
+            return v;
+        }
         let reload = match reg {
             REG_TALO | REG_TAHI
                 if self.ta_count == 0
@@ -1537,6 +1579,28 @@ pub fn reg_from_addr(addr: u64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transfer_pb_read_previews_underflow_without_committing_it() {
+        for which in [Which::A, Which::B] {
+            let mut cia = Cia::new(which);
+            cia.regs[REG_CRA] = CR_PBON | CR_OUTMODE;
+            cia.ta_running = true;
+            cia.ta_count = 0;
+            cia.ta_latch = 34;
+            assert_ne!(cia.port_b_pins() & 0x40, 0);
+            assert_eq!(cia.read_at_transfer(REG_PRB) & 0x40, 0);
+            assert_eq!(cia.ta_count, 0);
+            assert_ne!(cia.port_b_pins() & 0x40, 0);
+            assert_eq!(cia.icr_data, 0);
+            assert!(!cia.irq_pin);
+            cia.ta_running = false;
+            assert_ne!(cia.read_at_transfer(REG_PRB) & 0x40, 0);
+            cia.ta_running = true;
+            cia.ta_counts_cnt = true;
+            assert_ne!(cia.read_at_transfer(REG_PRB) & 0x40, 0);
+        }
+    }
 
     #[test]
     fn live_zero_count_reads_reload_data_without_changing_counter() {
