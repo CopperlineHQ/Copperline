@@ -109,6 +109,10 @@ pub(crate) struct SpeedGovernor {
     floor_mhz: f64,
     ceiling_mhz: f64,
     effective_mhz: f64,
+    /// Whether the clock has ever moved off the floor. Until it has, the
+    /// governor is the fixed clock (an unpaced run never adapts), and a
+    /// new floor must be followed exactly.
+    adapted: bool,
     window: Window,
 }
 
@@ -120,6 +124,7 @@ impl SpeedGovernor {
             floor_mhz,
             ceiling_mhz: CEILING_MHZ.max(floor_mhz),
             effective_mhz: floor_mhz,
+            adapted: false,
             window: Window::default(),
         }
     }
@@ -141,11 +146,18 @@ impl SpeedGovernor {
     }
 
     /// Move the floor (a loaded save state brought a differently clocked
-    /// CPU), keeping the effective clock where the new bounds allow.
+    /// CPU). A governor that never adapted is the fixed clock and follows
+    /// the new floor exactly, so an unpaced run that loads a state still
+    /// matches `speed = "fixed"`; one that adapted keeps the clock it
+    /// reached (also through warp) where the new bounds allow.
     pub(crate) fn rebase(&mut self, floor_mhz: f64) {
         self.floor_mhz = floor_mhz;
         self.ceiling_mhz = CEILING_MHZ.max(floor_mhz);
-        self.effective_mhz = self.effective_mhz.clamp(floor_mhz, self.ceiling_mhz);
+        self.effective_mhz = if self.adapted {
+            self.effective_mhz.clamp(floor_mhz, self.ceiling_mhz)
+        } else {
+            floor_mhz
+        };
         self.discard_window();
     }
 
@@ -185,6 +197,7 @@ impl SpeedGovernor {
             return None;
         }
         self.effective_mhz = to_mhz;
+        self.adapted = true;
         Some(Decision {
             load,
             achieved_mips,
@@ -396,9 +409,35 @@ mod tests {
     }
 
     #[test]
+    fn rebase_follows_the_new_floor_until_the_clock_has_adapted() {
+        // Never adapted (an unpaced run): the governor is the fixed clock,
+        // so a state with a different clock is followed exactly, whichever
+        // way it moves.
+        let mut governor = SpeedGovernor::new(24.83);
+        governor.rebase(14.18);
+        assert_eq!(governor.effective_mhz(), 14.18);
+        assert_eq!(governor.factor(), 1.0);
+        governor.rebase(49.66);
+        assert_eq!(governor.factor(), 1.0);
+        // Once a paced window has moved it, the reached clock is kept.
+        let window = QuantumSample {
+            busy: Duration::from_millis(10),
+            gap: Duration::ZERO,
+            emulated_seconds: WINDOW_SECONDS,
+            instructions: 10_000_000,
+            jit_active: true,
+        };
+        assert!(governor.observe(window).is_some());
+        let reached = governor.effective_mhz();
+        governor.rebase(24.83);
+        assert_eq!(governor.effective_mhz(), reached);
+    }
+
+    #[test]
     fn rebase_keeps_the_effective_clock_within_the_new_bounds() {
         let mut governor = SpeedGovernor::new(25.0);
         governor.effective_mhz = 300.0;
+        governor.adapted = true;
         governor.rebase(50.0);
         assert_eq!(governor.effective_mhz(), 300.0);
         assert_eq!(governor.factor(), 6.0);

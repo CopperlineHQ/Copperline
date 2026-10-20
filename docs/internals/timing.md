@@ -807,6 +807,11 @@ the same by moving the JIT's effective clock
   spent emulating (pacing sleep excluded), the host time since the previous
   quantum ended (the frontend's share of the main thread), the emulated time
   advanced, the instructions retired, and whether the JIT batch path ran.
+  Time the window spends presenting a frame on the main thread (the RTG,
+  inspector and screenshot paths, which can block on vsync) is reported
+  through `Emulator::note_frontend_wait` and left out of the frontend
+  share: it is a wait, not work, and frames the present worker takes never
+  touch the main thread at all.
 - Every 0.1 s of emulated *or* host time, whichever comes first, the
   governor computes the load: host time over emulated time, 1.0 when the
   host only just keeps up. Closing on host time as well bounds how long an
@@ -828,6 +833,10 @@ the same by moving the JIT's effective clock
   dialog, a debugger break) discards the window, as does any quantum
   stepped on the precise core (debug hooks armed, a run-to-PC request).
   `reanchor_realtime_clock` discards it too.
+- A save-state load rebases the floor to the state's clock. A governor
+  that has never moved the clock follows the new floor exactly, so an
+  unpaced run that loads a state still matches `speed = "fixed"`; one
+  that has adapted keeps its clock within the new bounds.
 - Unpaced quanta (warp, run-ahead bursts, headless runs) discard the
   window and leave the clock where it is. A headless run therefore never
   leaves `clock_mhz` and is byte-identical to `speed = "fixed"`, unless

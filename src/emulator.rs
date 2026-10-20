@@ -99,6 +99,10 @@ pub struct Emulator {
     /// sleep), so the governor can charge the frontend's main-thread time
     /// between quanta. Only kept while `fastest` is set.
     fastest_last_quantum_end: Option<Instant>,
+    /// Host time the frontend spent blocked since the last quantum (a frame
+    /// it presented itself waiting on vsync; see `note_frontend_wait`),
+    /// taken out of the gap the governor charges as frontend load.
+    fastest_frontend_wait: Duration,
     audio_profile: AudioRuntimeProfile,
     real_pacing_profile: RealPacingProfile,
     /// Unfinished host execution quantum left by instruction-granular control
@@ -502,6 +506,7 @@ impl Emulator {
             cpu_jit: false,
             fastest: None,
             fastest_last_quantum_end: None,
+            fastest_frontend_wait: Duration::ZERO,
             audio_profile: AudioRuntimeProfile::new(),
             real_pacing_profile: RealPacingProfile::new(),
             realtime_quantum_remaining: 0,
@@ -576,6 +581,19 @@ impl Emulator {
         f64::from(self.machine.cpu_clocks_per_cck()) * crate::config::COLOR_CLOCK_HZ / 1.0e6
     }
 
+    /// Report host time the frontend spent presenting a frame on the main
+    /// thread between quanta. Presentation can block there (vsync with
+    /// FIFO, the synchronous RTG and inspector paths), and that wait would
+    /// otherwise read as frontend load and hold the fastest-mode clock down
+    /// with the host idle; frames the present worker takes never reach the
+    /// main thread at all, so excluding this keeps both paths alike. A
+    /// no-op unless `[cpu] speed = "fastest"` is active.
+    pub fn note_frontend_wait(&mut self, waited: Duration) {
+        if self.fastest.is_some() {
+            self.fastest_frontend_wait = self.fastest_frontend_wait.saturating_add(waited);
+        }
+    }
+
     /// The effective JIT clock in MHz while `[cpu] speed = "fastest"` is
     /// active, `None` for the fixed clock.
     pub fn jit_effective_mhz(&self) -> Option<f64> {
@@ -604,7 +622,8 @@ impl Emulator {
             .fastest_last_quantum_end
             .replace(now)
             .map(|end| started.saturating_duration_since(end))
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .saturating_sub(std::mem::take(&mut self.fastest_frontend_wait));
         let paced = self.paces_realtime() && !self.runahead_phase;
         let sample = fastest::QuantumSample {
             busy,
@@ -1639,6 +1658,7 @@ impl Emulator {
             governor.discard_window();
         }
         self.fastest_last_quantum_end = None;
+        self.fastest_frontend_wait = Duration::ZERO;
         if self.stats.started_at.is_none() && !self.paces_realtime() {
             return;
         }
@@ -5313,6 +5333,113 @@ mod tests {
         let mhz = emu.jit_effective_mhz().unwrap();
         assert!((mhz - floor * 1.25).abs() < 1e-9);
         assert_eq!(emu.perf_counters().jit_mhz, Some(mhz));
+    }
+
+    /// A frame the frontend presents itself can block the main thread on
+    /// vsync between quanta. That wait is not frontend work: a synchronous
+    /// presenter that paces the loop must not hold the clock down while
+    /// the host has headroom.
+    #[test]
+    fn fastest_governor_does_not_count_presentation_waits_as_load() {
+        use crate::timebase::{Duration, Instant};
+        // 3 ms of emulation and 14 ms between quanta per 1/60 s quantum:
+        // with the gap counted the load is ~1.0, so the clock must hold.
+        let run = |reported_wait: Duration| {
+            let mut emu = jit_counting_emulator(crate::config::CpuSpeed::Fastest);
+            emu.set_paced(true);
+            let quantum = 1.0 / 60.0;
+            for n in 0..12u64 {
+                let started = Instant::now();
+                emu.fastest_last_quantum_end = Some(started - Duration::from_millis(14));
+                emu.note_frontend_wait(reported_wait);
+                emu.retired_instructions = (n + 1) * 1_000_000;
+                emu.govern_fastest(
+                    started,
+                    Duration::from_millis(3),
+                    emu.bus().emulated_seconds() - quantum,
+                    n * 1_000_000,
+                    false,
+                );
+            }
+            emu.machine.jit_speed_factor()
+        };
+        assert_eq!(run(Duration::ZERO), 1.0, "a busy frontend holds the clock");
+        assert!(
+            run(Duration::from_millis(13)) > 1.0,
+            "a presenter blocked on vsync is headroom, not load"
+        );
+    }
+
+    /// Loading a state with a different CPU clock into a fastest-mode
+    /// machine that never adapted (an unpaced run) must leave it at the
+    /// state's clock, exactly as `speed = "fixed"` would.
+    #[test]
+    fn fastest_cpu_speed_follows_a_loaded_states_clock_until_it_adapts() {
+        let state_at = |clocks_per_cck: u32| {
+            let mut rom = vec![0u8; crate::memory::ROM_SIZE];
+            rom[0x10..0x14].copy_from_slice(&[0x52, 0x80, 0x60, 0xFC]);
+            let bus = crate::bus::Bus::new(
+                crate::memory::Memory {
+                    chip_ram: vec![0u8; 512 * 1024],
+                    slow_ram: Vec::new(),
+                    mb_ram: Vec::new(),
+                    accel_ram: Vec::new(),
+                    rom,
+                    overlay: false,
+                    zorro: crate::zorro::ZorroChain::default(),
+                    extended_rom: Vec::new(),
+                    extended_rom_base: 0,
+                    wcs: Vec::new(),
+                    wcs_write_protected: false,
+                },
+                crate::chipset::paula::Paula::new(
+                    Box::new(crate::serial::NullSerialSink),
+                    Box::new(crate::audio::NullSink),
+                ),
+                crate::floppy::FloppyController::default(),
+            );
+            let mut emu = super::Emulator::new(
+                bus,
+                crate::config::CpuModel::M68030,
+                false,
+                Default::default(),
+                crate::config::PacingBudget::Cycles,
+                clocks_per_cck,
+                false,
+            )
+            .unwrap();
+            emu.machine.debug_set_register(17, 0x00F8_0010);
+            emu.set_cpu_jit(true);
+            emu.step_frame().unwrap();
+            emu.save_state_bytes().unwrap()
+        };
+        let slower = state_at(4);
+
+        // Never adapted: the loaded clock rules, factor 1.
+        let mut emu = jit_counting_emulator(crate::config::CpuSpeed::Fastest);
+        emu.step_frame().unwrap();
+        emu.load_state_bytes(&slower).unwrap();
+        assert_eq!(emu.machine.cpu_clocks_per_cck(), 4);
+        assert_eq!(emu.machine.jit_speed_factor(), 1.0);
+        let floor = emu.jit_effective_mhz().unwrap();
+        assert!((floor - 14.19).abs() < 0.01, "{floor}");
+
+        // Adapted (a paced window raised it): the reached clock is kept.
+        let mut emu = jit_counting_emulator(crate::config::CpuSpeed::Fastest);
+        emu.set_paced(true);
+        emu.retired_instructions = 10_000_000;
+        emu.govern_fastest(
+            crate::timebase::Instant::now(),
+            crate::timebase::Duration::from_millis(10),
+            emu.bus().emulated_seconds() - 0.1,
+            0,
+            false,
+        );
+        let reached = emu.jit_effective_mhz().unwrap();
+        assert!(reached > 24.9, "{reached}");
+        emu.load_state_bytes(&slower).unwrap();
+        assert_eq!(emu.jit_effective_mhz(), Some(reached));
+        assert!(emu.machine.jit_speed_factor() > 1.0);
     }
 
     /// The mode needs the JIT: without it the governor is never armed.

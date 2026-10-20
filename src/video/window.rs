@@ -6070,6 +6070,10 @@ impl ApplicationHandler for App {
                                         )
                                     })
                                     .transpose();
+                                // A frame presented here can block the main
+                                // thread on vsync; the fastest-mode governor
+                                // must not mistake that for frontend load.
+                                let present_started = Instant::now();
                                 let result = match &mut capture {
                                     Ok(capture) => present_job(
                                         gpu,
@@ -6080,6 +6084,7 @@ impl ApplicationHandler for App {
                                     ),
                                     Err(_) => present_job(gpu, Some(&window), &job, after, None),
                                 };
+                                self.emu.note_frontend_wait(present_started.elapsed());
                                 if let Err(e) = &result {
                                     log_present_error(e);
                                 }

@@ -7955,6 +7955,69 @@ mod tests {
         Ok(())
     }
 
+    /// The interrupt entry's CPU clocks scale with the JIT speed factor
+    /// like the rest of its billing, but the entry's chip-RAM accesses (a
+    /// stack in chip RAM, the vector table at VBR 0) keep their chip-bus
+    /// cost: the same chip slots are granted at any factor, and a chip-RAM
+    /// stack still costs the chipset time those slots take, where a
+    /// fast-RAM stack gets the whole speed-up.
+    #[test]
+    fn jit_speed_factor_scales_interrupt_entry_clocks_but_not_chip_accesses() -> Result<()> {
+        let pc = FAST_RAM_BASE as u32 + 0x100;
+        let handler = FAST_RAM_BASE as u32 + 0x200;
+        let fast_stack = FAST_RAM_BASE as u32 + 0x8000;
+        let chip_stack = 0x0004_0000;
+        // (CPU clocks billed, chipset colour clocks advanced, chip slots
+        // granted to the CPU) for the slice that takes the interrupt and
+        // retires the handler's first instruction.
+        let run = |factor: f64, stack: u32| -> Result<(u32, u32, u64)> {
+            let mut bus = test_bus_with_pc(pc);
+            write_program(&mut bus, pc, &[0x46FC, 0x2000, 0x60FE]); // move #$2000,SR; bra.s *
+            write_program(&mut bus, handler, &[0x4E71, 0x60FE]); // nop; bra.s *
+            set_autovector(&mut bus, 3, handler);
+            bus.paula.intena = INT_MASTER | INT_VERTB;
+            bus.irq_latency_setting = 0;
+            let mut machine = M68kMachine::new(bus, CpuModel::M68030, false)?;
+            machine.set_jit_enabled(true);
+            machine.debug_set_register(15, stack);
+            machine.step_slice(2)?;
+            machine.set_jit_speed_factor(factor);
+            machine.bus_mut().paula.intreq = INT_VERTB;
+            let slots_before = machine.bus().cpu_granted_chip_slots();
+            let slice = machine.step_slice(1)?;
+            assert_eq!(
+                machine.pc(),
+                handler + 2,
+                "entry taken, handler NOP retired"
+            );
+            assert_eq!(machine.a(7), stack - 8, "format $0 frame pushed");
+            Ok((
+                slice.cpu_cycles,
+                slice.bus_advanced_cck,
+                machine.bus().cpu_granted_chip_slots() - slots_before,
+            ))
+        };
+        let fast_1 = run(1.0, fast_stack)?;
+        let fast_4 = run(4.0, fast_stack)?;
+        let chip_1 = run(1.0, chip_stack)?;
+        let chip_4 = run(4.0, chip_stack)?;
+        // The CPU's own clocks divide by the factor wherever the stack is.
+        assert!(fast_1.0 > 8, "entry billed {} clocks", fast_1.0);
+        assert_eq!(fast_4.0, fast_1.0 / 4);
+        assert_eq!(chip_4.0, chip_1.0 / 4);
+        // The chip-bus accesses do not: the same slots at both factors,
+        // and more of them with the stack in chip RAM.
+        assert_eq!(fast_4.2, fast_1.2);
+        assert_eq!(chip_4.2, chip_1.2);
+        assert!(chip_4.2 >= fast_4.2 + 4, "{chip_4:?} vs {fast_4:?}");
+        // A fast-RAM stack takes the speed-up in chipset time; a chip-RAM
+        // stack still pays every granted slot.
+        assert!(fast_4.1 < fast_1.1, "{fast_4:?} vs {fast_1:?}");
+        assert!(chip_4.1 >= chip_4.2 as u32, "{chip_4:?}");
+        assert!(chip_4.1 > fast_4.1, "{chip_4:?} vs {fast_4:?}");
+        Ok(())
+    }
+
     /// The fastmem window is only offered while nothing intercepts plain
     /// fast-RAM accesses, and covers the largest fitted fast bank.
     #[test]

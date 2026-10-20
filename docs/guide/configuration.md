@@ -708,9 +708,11 @@ clock_mhz = 14.0    # optional; defaults to the model's stock speed
     resumes when warp ends.
   - Netplay refuses it, and run-ahead stays inactive under it: both depend
     on re-running or comparing frames that must come out identical.
-  - Save states do not store the adapted clock. Loading one keeps the clock
-    the session had (a new session starts from `clock_mhz`), and a resumed
-    windowed run is not byte-identical to the original.
+  - Save states do not store the adapted clock. A session whose clock has
+    not adapted yet (any unpaced run) takes the loaded state's CPU clock
+    exactly, as `speed = "fixed"` does; one that has adapted keeps the
+    clock it reached. A resumed windowed run is not byte-identical to the
+    original.
   - `--record-input`/`--script` replays, `--expect-screenshot` comparisons
     and reverse debugging are exact only in unpaced runs, where the clock is
     fixed.
