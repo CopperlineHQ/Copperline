@@ -358,25 +358,10 @@ struct NormalBlitState {
     d_hold: u16,
     d_hold_pt: u32,
 
-    // Source words (A and B channels) snapshotted from chip RAM at BLTSIZE.
-    // On real hardware the blitter owns the chip bus for the whole blit and
-    // consumes its source before the CPU can write those addresses again;
-    // code that reuses a scratch buffer for back-to-back blits relies on this.
-    // We read the source
-    // up front so a CPU overwrite mid-blit cannot corrupt it, while still
-    // computing and writing D progressively (so mid-blit BLTCON0/DMACON/DOFF
-    // changes and beam timing keep working). C stays live: it is the
-    // destination read-modify-write channel, so a self-overlapping blit must
-    // still see its own freshly written D words.
-    //
-    // The snapshot, on its own, breaks self-overlapping blits that feed D back
-    // through the A or B channel (not just C), such as a vertical XOR fill with
-    // D = A ^ B where B points one row above D (apt==dpt, bpt==dpt-rowbytes).
-    // Each output row must read the row this same blit just wrote. To keep both
-    // behaviours, A/B read the snapshot EXCEPT at addresses this blit has
-    // already written via D, where they read the freshly written word
-    // (`d_overlay`). When D cannot reach either source, the snapshots suffice
-    // and no overlay is needed. C remains live even in that case.
+    // Legacy serialized snapshot/overlay bookkeeping. A/B DMA now reads live
+    // RAM at its granted slot, including CPU changes and D-to-source feedback.
+    // Keep the wire fields so pending blits in existing saves still load;
+    // new blits do not pre-read or allocate source snapshots.
     snap_a: Vec<u16>,
     snap_b: Vec<u16>,
     snap_a_idx: usize,
@@ -392,6 +377,11 @@ struct NormalBlitState {
     /// state (at the BBUSY drop, or at completion when drained earlier).
     #[serde(default)]
     registers_released: bool,
+    /// CPU starts acquire startup clocks from fixed-DMA-free slots. Copper
+    /// starts already traverse the separately timed deferred register pipeline.
+    /// Older saves retain their calibrated internal startup when absent.
+    #[serde(default)]
+    startup_eligible: bool,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -664,6 +654,9 @@ impl Blitter {
     fn defer_start_strobe(&mut self, clocks: u8, old_zero: bool) {
         self.start_strobe_clocks = clocks;
         if clocks != 0 {
+            if let Some(PendingBlit::Normal(state)) = &mut self.pending {
+                state.startup_eligible = false;
+            }
             self.bbusy = false;
             self.bzero = old_zero;
         }
@@ -917,6 +910,30 @@ impl Blitter {
         Some((mask << prefix, count + prefix))
     }
 
+    /// CPU normal-start slots in the upcoming pattern. They wait for fixed
+    /// DMA, but can advance alongside Copper; body bus-free slots cannot.
+    pub(crate) fn startup_clock_mask(&self, limit: u32) -> u64 {
+        let Some(PendingBlit::Normal(state)) = &self.pending else {
+            return 0;
+        };
+        if !state.startup_eligible || !self.busy {
+            return 0;
+        }
+        let limit = limit.min(64);
+        let prefix = u32::from(self.start_strobe_clocks).min(limit);
+        let count = match state.phase {
+            NormalBlitPhase::StartDelay => state.start_extra.saturating_add(2),
+            NormalBlitPhase::Init => 1,
+            _ => 0,
+        }
+        .min(limit - prefix);
+        if count == 0 {
+            0
+        } else {
+            (u64::MAX >> (64 - count)) << prefix
+        }
+    }
+
     /// Diagnostic label of the pipeline cycle the next `tick_scheduled_slot`
     /// will process (the COPPERLINE_DIAG_BLT_SLOTS slot-trace probe). "-"
     /// when no blit is pending.
@@ -972,24 +989,10 @@ impl Blitter {
                 let fill = state.ife || state.efe;
                 let access = match state.phase {
                     NormalBlitPhase::A if state.use_a => {
-                        let snap = state.snap_a.get(state.snap_a_idx).copied().unwrap_or(0);
-                        (
-                            0,
-                            state.apt,
-                            state.overlay_read(state.apt, snap, ram.len()),
-                            false,
-                            false,
-                        )
+                        (0, state.apt, read_word(ram, state.apt), false, false)
                     }
                     NormalBlitPhase::B if state.use_b => {
-                        let snap = state.snap_b.get(state.snap_b_idx).copied().unwrap_or(0);
-                        (
-                            1,
-                            state.bpt,
-                            state.overlay_read(state.bpt, snap, ram.len()),
-                            false,
-                            false,
-                        )
+                        (1, state.bpt, read_word(ram, state.bpt), false, false)
                     }
                     NormalBlitPhase::C if state.use_c => {
                         (2, state.cpt, read_word(ram, state.cpt), false, false)
@@ -1787,28 +1790,6 @@ impl NormalBlitState {
         let use_d = con0 & BLTCON0_USE_D != 0;
         let fill = desc && con1 & (BLTCON1_IFE | BLTCON1_EFE) != 0;
 
-        // Pre-read the A and B source words in the exact order and at the
-        // exact addresses the pipeline will consume them (one per word, w
-        // words per row, advancing by `step` per word and the channel modulo
-        // per row). See the snap_a/snap_b field comment for why.
-        let snap_source = |enabled: bool, base: u32, modulo: i32| -> Vec<u16> {
-            if !enabled || ram.is_empty() {
-                return Vec::new();
-            }
-            let mut out = Vec::with_capacity((h * w) as usize);
-            let mut ptr = base;
-            for _row in 0..h {
-                for _word in 0..w {
-                    out.push(read_word(ram, ptr));
-                    ptr = ptr.wrapping_add(step as u32);
-                }
-                ptr = ptr.wrapping_add(modulo as u32);
-            }
-            out
-        };
-        let snap_a = snap_source(use_a, blitter.bltapt, mod_sign * blitter.bltamod as i32);
-        let snap_b = snap_source(use_b, blitter.bltbpt, mod_sign * blitter.bltbmod as i32);
-
         Self {
             debug_watch_addrs: blitter.debug_watch_addrs.clone(),
             debug_watched_write: None,
@@ -1854,8 +1835,8 @@ impl NormalBlitState {
             pipeline_full: false,
             d_hold: 0,
             d_hold_pt: blitter.bltdpt,
-            snap_a,
-            snap_b,
+            snap_a: Vec::new(),
+            snap_b: Vec::new(),
             snap_a_idx: 0,
             snap_b_idx: 0,
             track_overlay: use_d
@@ -1863,12 +1844,12 @@ impl NormalBlitState {
                 && !Self::sources_disjoint_from_d(blitter, h, w, ram.len()),
             d_overlay: std::collections::BTreeMap::new(),
             registers_released: false,
+            startup_eligible: true,
         }
     }
 
-    /// Prove that no D write can feed back through a snapshotted A/B read.
-    /// Keep the general overlay path for descending or strided transfers,
-    /// and whenever chip_off could wrap, alias or hit unpopulated RAM.
+    /// Legacy overlay bookkeeping policy, retained for pending-state wire
+    /// compatibility. Source reads now use live RAM regardless of this result.
     fn sources_disjoint_from_d(blitter: &Blitter, h: u32, w: u32, ram_len: usize) -> bool {
         let use_a = blitter.bltcon0 & BLTCON0_USE_A != 0;
         let use_b = blitter.bltcon0 & BLTCON0_USE_B != 0;
@@ -1921,7 +1902,8 @@ impl NormalBlitState {
     /// Whether the phase the next tick_slot will process is a chip-bus access.
     /// The A/D phases exist in every blit's per-word cadence but only access
     /// memory when their channel is enabled; B/C phases are only entered when
-    /// their channel is enabled. StartDelay/Init/E are internal cycles.
+    /// their channel is enabled. Startup/E do not claim the bus; startup still
+    /// needs a blitter-eligible clock (see current_slot_class).
     fn current_slot_needs_bus(&self) -> bool {
         match self.phase {
             NormalBlitPhase::A => self.use_a,
@@ -1938,21 +1920,20 @@ impl NormalBlitState {
     }
 
     /// Arbitration class of the pending pipeline cycle (see BlitSlotClass).
-    /// New blits use two internal startup clocks. Disabled-channel body
+    /// CPU normal startup consumes two fixed-DMA-free clocks; deferred Copper
+    /// startup remains internal. Disabled-channel body
     /// cycles and the D bubble are bus-free; the E flush and D-less F are
     /// internal. Nonzero startup extras occur only in older saved states.
     fn current_slot_class(&self) -> BlitSlotClass {
         match self.phase {
-            NormalBlitPhase::StartDelay => {
-                if self.start_extra == 0 {
-                    BlitSlotClass::Internal
-                } else {
-                    BlitSlotClass::BusFree
-                }
+            NormalBlitPhase::StartDelay if self.startup_eligible || self.start_extra != 0 => {
+                BlitSlotClass::BusFree
             }
-            NormalBlitPhase::Init | NormalBlitPhase::E | NormalBlitPhase::Done => {
-                BlitSlotClass::Internal
-            }
+            NormalBlitPhase::Init if self.startup_eligible => BlitSlotClass::BusFree,
+            NormalBlitPhase::StartDelay
+            | NormalBlitPhase::Init
+            | NormalBlitPhase::E
+            | NormalBlitPhase::Done => BlitSlotClass::Internal,
             NormalBlitPhase::FillIdle => BlitSlotClass::BusFree,
             NormalBlitPhase::A | NormalBlitPhase::B | NormalBlitPhase::C | NormalBlitPhase::D => {
                 if self.current_slot_needs_bus() {
@@ -2004,13 +1985,14 @@ impl NormalBlitState {
                 | NormalBlitPhase::C
                 | NormalBlitPhase::D
                 | NormalBlitPhase::FillIdle => true,
-                // Only legacy serialized extra BLT_STRT cycles need a free
-                // bus; a current zero-extra StartDelay is internal.
-                NormalBlitPhase::StartDelay => start_extra != 0,
+                // CPU startup stages wait for fixed-DMA-free clocks; the bus
+                // predictor separately permits their overlap with Copper.
+                NormalBlitPhase::StartDelay => self.startup_eligible || start_extra != 0,
+                NormalBlitPhase::Init => self.startup_eligible,
                 // The terminal BLTDONE cycle is the final D write for USED
                 // programs and internal otherwise.
                 NormalBlitPhase::F => self.use_d && pipeline_full,
-                NormalBlitPhase::Init | NormalBlitPhase::E | NormalBlitPhase::Done => false,
+                NormalBlitPhase::E | NormalBlitPhase::Done => false,
             };
             if needs {
                 mask |= 1u64 << k;
@@ -2244,28 +2226,13 @@ impl NormalBlitState {
         masked
     }
 
-    // Read a snapshotted source word, but prefer a word this blit has already
-    // written through D at the same address (self-overlap; see d_overlay).
-    fn overlay_read(&self, addr: u32, snap: u16, ram_len: usize) -> u16 {
-        if self.track_overlay {
-            if let Some(off) = chip_off(addr, ram_len) {
-                if let Some(&v) = self.d_overlay.get(&off) {
-                    return v;
-                }
-            }
-        }
-        snap
-    }
-
     fn fetch_a(&mut self, ram: &[u8]) {
         let a_raw = if self.use_a {
-            // Source was snapshotted at BLTSIZE; pointer still advances so the
-            // post-blit BLTAPT write-back matches hardware.
+            // Sample the source when A actually receives its DMA slot.
             let addr = self.apt;
-            let snap = self.snap_a.get(self.snap_a_idx).copied().unwrap_or(0);
             self.snap_a_idx += 1;
             self.apt = self.apt.wrapping_add(self.step as u32);
-            self.overlay_read(addr, snap, ram.len())
+            read_word(ram, addr)
         } else {
             self.bltadat
         };
@@ -2279,10 +2246,9 @@ impl NormalBlitState {
         debug_assert!(self.use_b);
         let b_raw = {
             let addr = self.bpt;
-            let snap = self.snap_b.get(self.snap_b_idx).copied().unwrap_or(0);
             self.snap_b_idx += 1;
             self.bpt = self.bpt.wrapping_add(self.step as u32);
-            self.overlay_read(addr, snap, ram.len())
+            read_word(ram, addr)
         };
         let b = shift_combine(self.b_prev, b_raw, self.bsh, self.desc);
         self.b_prev = b_raw;
@@ -2601,6 +2567,28 @@ mod tests {
             "scheduled vs synchronous blit RAM diverged"
         );
         assert_eq!(sched_b.bzero, sync_b.bzero, "BZERO diverged");
+    }
+
+    #[test]
+    fn normal_startup_launch_source_survives_restore_and_defaults_for_old_states() {
+        for clocks in [0, 4] {
+            let ram = vec![0u8; 256];
+            let mut b = Blitter::new();
+            b.bltcon0 = 0x09f0;
+            b.start_scheduled_delayed(0x41, &ram, clocks);
+            let restored: Blitter = bincode::deserialize(&bincode::serialize(&b).unwrap()).unwrap();
+            assert_eq!(
+                restored.startup_clock_mask(64),
+                if clocks == 0 { 3 } else { 0 }
+            );
+            let Some(PendingBlit::Normal(state)) = &b.pending else {
+                unreachable!()
+            };
+            let mut old = serde_json::to_value(state).unwrap();
+            old.as_object_mut().unwrap().remove("startup_eligible");
+            let legacy: NormalBlitState = serde_json::from_value(old).unwrap();
+            assert_eq!(legacy.current_slot_class(), BlitSlotClass::Internal);
+        }
     }
 
     #[test]
@@ -3558,32 +3546,30 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_normal_snapshots_source_at_start_against_later_overwrite() {
-        // A scheduled blit must consume the A/B source as it was at BLTSIZE,
-        // even if the CPU overwrites that buffer before the blit ticks. This
-        // mirrors real hardware (the blitter owns the bus and reads its source
-        // before the CPU can touch it) and is what makes back-to-back blits
-        // through a shared scratch buffer correct.
-        let mut ram = vec![0u8; 256];
-        write_word(&mut ram, 0x10, 0xABCD); // B source word, two rows.
-        write_word(&mut ram, 0x12, 0x1234);
-
-        let mut b = Blitter::new();
-        b.bltcon0 = BLTCON0_USE_B | BLTCON0_USE_D | 0x00CC; // D := B.
-        b.bltcon1 = 0;
-        b.bltbpt = 0x10;
-        b.bltdpt = 0x20;
-        b.start_scheduled((2u16 << 6) | 1, &ram); // h=2, w=1.
-
-        // CPU clobbers the source buffer after BLTSIZE but before the blit
-        // ticks; the snapshot must shield the blit from this.
-        write_word(&mut ram, 0x10, 0x0000);
-        write_word(&mut ram, 0x12, 0x0000);
-
-        while !b.tick_scheduled_slot(&mut ram) {}
-
-        assert_eq!(read_word(&ram, 0x20), 0xABCD);
-        assert_eq!(read_word(&ram, 0x22), 0x1234);
+    fn scheduled_normal_samples_each_source_at_its_dma_slot() {
+        for (control, phase) in [(0x09f0, "A"), (0x05cc, "B")] {
+            let mut ram = vec![0u8; 256];
+            write_word(&mut ram, 0x10, 0xabcd);
+            write_word(&mut ram, 0x12, 0x1234);
+            let mut b = Blitter::new();
+            b.bltcon0 = control;
+            b.bltafwm = 0xffff;
+            b.bltalwm = 0xffff;
+            b.bltapt = 0x10;
+            b.bltbpt = 0x10;
+            b.bltdpt = 0x20;
+            b.start_scheduled((2u16 << 6) | 1, &ram);
+            write_word(&mut ram, 0x10, 0x5555);
+            while b.current_slot_label() != phase {
+                b.tick_scheduled_slot(&mut ram);
+            }
+            b.tick_scheduled_slot(&mut ram); // First word is now latched.
+            write_word(&mut ram, 0x10, 0);
+            write_word(&mut ram, 0x12, 0xeeee); // Second word has not been fetched.
+            while !b.tick_scheduled_slot(&mut ram) {}
+            assert_eq!(read_word(&ram, 0x20), 0x5555);
+            assert_eq!(read_word(&ram, 0x22), 0xeeee);
+        }
     }
 
     #[test]

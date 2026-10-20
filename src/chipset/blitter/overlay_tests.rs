@@ -36,9 +36,8 @@ fn restore(blitter: &Blitter) -> Blitter {
 
 fn force_legacy_overlay(blitter: &mut Blitter) {
     if let Some(PendingBlit::Normal(state)) = &mut blitter.pending {
-        // Exactly the pre-optimization policy. Keeping the old path intact
-        // gives the differential tests the same sequencer and timing, with
-        // every A/B lookup and D insertion going through the ordered map.
+        // Retain old-style overlay bookkeeping across save/load. Source reads
+        // now use live RAM regardless of these legacy acceleration fields.
         state.track_overlay = state.use_d && (state.use_a || state.use_b);
     }
 }
@@ -324,13 +323,16 @@ fn overlay_elision_and_legacy_tracked_states_resume_at_every_slot() {
 }
 
 #[test]
-fn physical_alias_feedback_keeps_the_overlay() {
+fn physical_alias_feedback_uses_live_ram_without_legacy_overlay() {
     let mut ram: Vec<u8> = (0..256).map(|i| (i * 19 + 7) as u8).collect();
     let mut correct = configured(0xD, 0, 0);
     correct.bltcon0 = 0x0D66; // D = A XOR B
     correct.bltapt = 0x40;
     correct.bltbpt = 0x108; // Physically the row before D, despite raw disjoint spans.
     correct.bltdpt = 0x10;
+    let mut expected = ram.clone();
+    let mut synchronous = restore(&correct);
+    synchronous.execute_dims(3, 4, &mut expected);
     correct.start_scheduled_dims(3, 4, &ram);
     assert!(normal(&correct).track_overlay);
     let mut missing_overlay = restore(&correct);
@@ -342,5 +344,12 @@ fn physical_alias_feedback_keeps_the_overlay() {
         correct.tick_scheduled_slot(&mut ram);
         missing_overlay.tick_scheduled_slot(&mut incorrect_ram);
     }
-    assert_ne!(ram, incorrect_ram, "fixture must exercise D-to-B feedback");
+    assert_eq!(
+        ram, expected,
+        "scheduled D-to-B feedback versus synchronous"
+    );
+    assert_eq!(
+        ram, incorrect_ram,
+        "live RAM makes legacy overlay unnecessary"
+    );
 }

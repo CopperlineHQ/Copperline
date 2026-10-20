@@ -15386,6 +15386,53 @@ fn cpu_software_request_and_unmask_share_a500_recognition_phase() {
 }
 
 #[test]
+fn normal_blitter_startup_preserves_a500_cpu_source_write_order() {
+    // A500 kind77: source overwrite wins at delay0 with four planes, and
+    // delays0..2 with six. No display DMA and later writes copy the old word.
+    for planes in [0, 4, 6] {
+        for nasty in [false, true] {
+            for nops in 0..4 {
+                let mut bus = empty_bus();
+                bus.agnus.dmacon = DMACON_DMAEN | DMACON_BLTEN;
+                if planes != 0 {
+                    bus.agnus.dmacon |= DMACON_BPLEN;
+                }
+                if nasty {
+                    bus.agnus.dmacon |= DMACON_BLTPRI;
+                }
+                bus.agnus.vpos = 0x42;
+                bus.agnus.hpos = if planes == 6 { 178 } else { 130 };
+                bus.denise.diwstrt = 0x2c81;
+                bus.denise.diwstop = 0xf4c1;
+                bus.denise.ddfstrt = 0x38;
+                bus.denise.ddfstop = 0xd0;
+                bus.denise.bplcon0 = (planes << 12) | 0x0200;
+                bus.blitter.bltcon0 = 0x09f0;
+                bus.blitter.bltafwm = 0xffff;
+                bus.blitter.bltalwm = 0xffff;
+                bus.blitter.bltapt = 0x12000;
+                bus.blitter.bltdpt = 0x10000;
+                write_chip_word(&mut bus, 0x12000, 0xaaaa);
+                bus.blitter.start_scheduled(0x41, &bus.mem.chip_ram);
+                bus.advance_chipset(2 + 2 * nops);
+                bus.set_cpu_bus_arbitration_enabled(true);
+                bus.begin_cpu_slice();
+                bus.grant_cpu_bus_access_at(Some(0x12000), 2, CpuBusAccessKind::Write);
+                write_chip_word(&mut bus, 0x12000, 0x5555);
+                bus.advance_chipset(40);
+                let new_wins = (planes == 4 && nops == 0) || (planes == 6 && nops <= 2);
+                let expected: u16 = if new_wins { 0x5555 } else { 0xaaaa };
+                assert_eq!(
+                    &bus.mem.chip_ram[0x10000..0x10002],
+                    &expected.to_be_bytes(),
+                    "planes={planes} nasty={nasty} nops={nops}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn bitplane_pointer_half_writes_lose_only_to_the_selected_dma_counter_window() {
     for source in [BeamWriteSource::Cpu, BeamWriteSource::Copper] {
         for plane in 0..2 {

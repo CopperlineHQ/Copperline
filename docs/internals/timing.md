@@ -475,9 +475,14 @@ The [measurement report and remaining plan](a500-timing-measurements-2026-10-14.
 records the scope and comparison baselines. The measurements refine the earlier
 cross-emulator slot traces:
 
-- **Startup**: StartDelay and Init consume two colour clocks after the
-  CPU-visible BLTSIZE write completes. Normal and line programs use the same
-  startup. Adding extra register-commit clocks here double-counted time already
+- **Startup**: CPU-launched normal-mode StartDelay and Init each consume a
+  fixed-DMA-free colour clock after the BLTSIZE write completes. They do not
+  claim the bus and can advance alongside Copper transfers. A500
+  source-overwrite races distinguish the first-stage stall under six-plane DMA
+  from the second-stage stall under four-plane DMA. Copper-launched blits retain
+  the separately calibrated deferred register pipeline and internal startup;
+  line startup also retains its internal timing. Adding extra register-commit
+  clocks here double-counted time already
   advanced by the CPU register-write bus cycle.
 - **Body**: the source cadence follows the enabled-channel speed table: A
   is always visited, B and C only when enabled, and D when D is enabled
@@ -502,7 +507,18 @@ cross-emulator slot traces:
 Normal-mode A/B barrel-shifter carry is cleared at the first word of a new
 BLTSIZE, then carries from the last source word of one row into the first
 source word of the next inside that blit; masks, modulos, and fill carry
-still observe row boundaries. Line blits follow vAmiga's four line
+still observe row boundaries.
+
+Normal A/B sources are read from live chip RAM in their granted DMA slots,
+just like C. BLTSIZE latches registers, not the contents of future source
+addresses: A500 kind77 copies a CPU overwrite made after launch when the CPU
+wins before the source fetch. An already fetched word remains latched for
+the shifter/minterm pipeline. D-to-A/B feedback and physical aliases therefore
+follow live RAM too. Legacy snapshot/overlay fields remain loadable in saved
+pending blits, but do not determine source data; new blits allocate no source
+snapshot buffers.
+
+Line blits follow vAmiga's four line
 micro-programs, indexed by the USEB/USEC pair: with USEB clear each pixel
 is four cycles (L1-L4: L2 fetches C when USEC is set, L3 propagates, L4
 stores), and with USEB set each pixel is six (an LB cycle fetches B --

@@ -236,6 +236,9 @@ impl Bus {
                         !(matches!(forced_owner, Some(ChipBusOwner::Cpu))
                             && self.blitter_yields_to_waiting_cpu())
                     }
+                    ChipBusOwner::Copper => {
+                        fixed_dma_owner.is_none() && self.blitter.startup_clock_mask(1) != 0
+                    }
                     _ => false,
                 },
             };
@@ -955,6 +958,7 @@ impl Bus {
         }
 
         let mut copper = self.copper.clone();
+        let startup_mask = self.blitter.startup_clock_mask(slot_count);
         let mut slot_idx = 0u32;
         let mut elapsed = 0u32;
         let mut hpos = self.agnus.hpos;
@@ -1038,9 +1042,9 @@ impl Bus {
 
             let slot_needs_bus = access_mask & (1u64 << slot_idx) != 0;
             let slot_consumed = if slot_needs_bus {
-                // Bus accesses and bus-free micro-cycles both need a colour
-                // clock the blitter could have won.
-                slot_grantable && !copper_blocks
+                // Body cycles need a clock the blitter could have won. CPU
+                // startup can overlap Copper, but still waits for fixed DMA.
+                slot_grantable && (!copper_blocks || startup_mask & (1u64 << slot_idx) != 0)
             } else {
                 // Internal cycle: elapses unconditionally.
                 true
