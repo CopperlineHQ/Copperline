@@ -401,7 +401,7 @@ impl App {
             audio_underrun_frames: audio.callback_underrun_frames,
         };
         let audio_lead_ms = audio.output_lead_seconds * 1000.0;
-        let readout = match &self.perf.baseline {
+        let mut readout = match &self.perf.baseline {
             Some(base) if base.running == running && running => {
                 perf_readout(base, &current, audio_lead_ms, counters.pacer_slips)
             }
@@ -413,6 +413,7 @@ impl App {
                 ..Default::default()
             },
         };
+        readout.jit_mhz = counters.jit_mhz;
         self.perf.baseline = Some(current);
         let lines = perf_overlay_lines(&readout);
         if lines != self.perf.lines {

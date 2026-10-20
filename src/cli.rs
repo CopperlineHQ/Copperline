@@ -762,6 +762,15 @@ where
             "--jit" => {
                 overrides.cpu_jit = Some(true);
             }
+            "--cpu-speed" => {
+                let speed = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--cpu-speed requires fixed or fastest"))?;
+                // Validate here for an immediate, flag-named error; the
+                // config validation repeats the check on the merged view.
+                crate::config::parse_cpu_speed(&speed).map_err(|e| anyhow!("--cpu-speed: {e}"))?;
+                overrides.cpu_speed = Some(speed);
+            }
             "--no-jit" => {
                 overrides.cpu_jit = Some(false);
             }
@@ -2020,6 +2029,9 @@ fn print_help() {
          --fpu / --no-fpu               fit / omit a 68881/68882 (68040/68060 on-die)\n  \
          --jit / --no-jit               fast batch/trace-JIT CPU execution (not cycle-exact,\n  \
          \x20                            like an accelerator card; default: off)\n  \
+         --cpu-speed fixed|fastest      JIT CPU speed: fixed runs at --cpu-clock; fastest\n  \
+         \x20                            adapts the clock to the host while paced (needs\n  \
+         \x20                            --jit; not reproducible; default: fixed)\n  \
          --clipboard / --no-clipboard   share the host clipboard with the guest's\n  \
          \x20                            clipboard.device; fits an extra autoconfig board,\n  \
          \x20                            so it is off unless asked for (default: off)\n  \

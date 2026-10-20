@@ -441,6 +441,16 @@ expectations, frame dumps, GIF clips, save-state writes, scheduled input,
 scheduled floppy or CD inserts, input recording, `--exit-on-return`,
 `--profile-live-audio`, `--gdb` or `--control`.
 
+To measure real-time behaviour instead of throughput, `COPPERLINE_HEADLESS_PACED=1`
+paces a windowless capture run (`--screenshot-after`, `--exit-on-return` and
+the like) to the wall clock exactly as the window does, sleeping each frame
+until real time catches up. Scheduled captures and input still fire on
+emulated time. Together with `COPPERLINE_REAL_PACING_PROFILE=1` it shows how a
+configuration holds real time on this host, and it is how `[cpu] speed =
+"fastest"` can be watched adapting without a window (an unpaced headless run
+stays at `clock_mhz`). It only changes host timing, except under `[cpu] speed
+= "fastest"`, where pacing is what moves the clock.
+
 ## Automated compatibility testing (vAmigaTS)
 
 Copperline includes a test runner for the [vAmigaTS](https://github.com/dirkwhoffmann/vAmigaTS)

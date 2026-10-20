@@ -1352,8 +1352,9 @@ Two profiling knobs cover the audio/pacing boundary, both emitting one
   itself never logs; it only updates atomic counters under this flag.
 - `COPPERLINE_REAL_PACING_PROFILE=1` -- the real-speed pacing line:
   retired instructions, raw `m68k` cycles, chip-bus wait CCK, device CCK,
-  CPU chip-bus slots, host sleep count/time, and wall-time late
-  count/time. Kept separate so CPU/device pacing can be measured without
+  CPU chip-bus slots, host sleep count/time, wall-time late count/time,
+  and, under `[cpu] speed = "fastest"`, the JIT's effective clock
+  (`jit_mhz`). Kept separate so CPU/device pacing can be measured without
   enabling the lower-level cpal counters.
 
 Default live-audio warnings are emitted from the producer side at the same

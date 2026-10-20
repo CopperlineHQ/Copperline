@@ -119,6 +119,66 @@ pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
         }
     }
 
+    // --- JIT and "fastest possible" -------------------------------------
+    // WinUAE's JIT is on whenever its translation cache has a size.
+    // Copperline's batch/trace JIT is the nearest thing and, like WinUAE's,
+    // needs a 68020 or later; "fastest possible" (`cpu_speed=max`) then
+    // becomes the host-adaptive JIT clock.
+    let jit_capable = matches!(cpu_model.as_str(), "68020" | "68030" | "68040" | "68060");
+    let mut jit = false;
+    if let Some(e) = by_key("cachesize") {
+        seen.insert(&e.key, ());
+        match e.value.trim().parse::<u32>() {
+            Ok(0) => {}
+            Ok(_) if jit_capable => {
+                table(&mut doc, &["cpu"])["jit"] = toml_edit::value(true);
+                jit = true;
+                report.approximated(
+                    &e.key,
+                    &e.value,
+                    "WinUAE's JIT compiler became Copperline's batch/trace [cpu] jit \
+                     (accelerator-style timing, not cycle-exact); the translation-cache \
+                     size has no equivalent",
+                );
+            }
+            Ok(_) => report.unsupported(
+                &e.key,
+                &e.value,
+                "Copperline's [cpu] jit needs a 68020 or later",
+            ),
+            Err(_) => report.unsupported(&e.key, &e.value, "unrecognized JIT cache size"),
+        }
+    }
+    if let Some(e) = by_key("cpu_speed") {
+        seen.insert(&e.key, ());
+        match e.value.trim().to_ascii_lowercase().as_str() {
+            // Real speed is Copperline's fixed clock, the default.
+            "real" => {}
+            "max" if jit => {
+                set_str(&mut doc, &["cpu"], "speed", "fastest");
+                report.approximated(
+                    &e.key,
+                    &e.value,
+                    "\"fastest possible\" became [cpu] speed = \"fastest\": the JIT clock \
+                     adapts to the host while the window paces to real time (not \
+                     reproducible); cpu_throttle has no equivalent",
+                );
+            }
+            "max" => report.unsupported(
+                &e.key,
+                &e.value,
+                "\"fastest possible\" without WinUAE's JIT has no equivalent: Copperline's \
+                 [cpu] speed = \"fastest\" adapts only the JIT's clock (cachesize > 0 on a \
+                 68020 or later)",
+            ),
+            _ => report.unsupported(
+                &e.key,
+                &e.value,
+                "unrecognized CPU speed; expected max or real",
+            ),
+        }
+    }
+
     // --- Memory ------------------------------------------------------
     // Each key has its own unit, verified against Amiberry's cfgfile.cpp
     // (`cfgfile_intval`'s trailing argument is a multiplier): chip counts
@@ -1318,15 +1378,6 @@ pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
             "no master output-volume field ([audio] only has floppy_sounds_volume)",
         ),
         (
-            "cpu_speed",
-            "no equivalent: this is a baseline wall-clock throttle (max = bypass pacing \
-             entirely, real = pin to authentic 68000 timing), not a clock-rate override \
-             ([cpu] clock_mhz is a different thing -- see below); Copperline's [emulation] \
-             warp_speed only sets the ceiling of an on-demand turbo toggle that's off by \
-             default, so mapping to it would misrepresent \"always run flat out\" as a \
-             feature the user has to switch on by hand",
-        ),
-        (
             "uaeserial",
             "selects UAE's own internal custom serial.device implementation, not a host \
              wiring choice; there's nothing in [serial] this corresponds to",
@@ -1484,6 +1535,26 @@ mod tests {
         map(&entries, std::path::Path::new("test.uae"))
             .doc
             .to_string()
+    }
+
+    #[test]
+    fn jit_and_fastest_possible_map_to_the_adaptive_jit_clock() {
+        let out = convert("cpu_type=68030\ncachesize=8192\ncpu_speed=max\n");
+        assert!(out.contains("jit = true"), "{out}");
+        assert!(out.contains(r#"speed = "fastest""#), "{out}");
+        // Real speed is the default fixed clock: nothing to write.
+        let out = convert("cpu_type=68030\ncachesize=8192\ncpu_speed=real\n");
+        assert!(out.contains("jit = true"), "{out}");
+        assert!(!out.contains("speed ="), "{out}");
+        // Fastest possible without the JIT, or the JIT on a 68000, has no
+        // Copperline equivalent: reported, never emitted as an invalid
+        // config.
+        let out = convert("cpu_type=68030\ncachesize=0\ncpu_speed=max\n");
+        assert!(!out.contains("jit ="), "{out}");
+        assert!(!out.contains("speed ="), "{out}");
+        let out = convert("cpu_type=68000\ncachesize=8192\ncpu_speed=max\n");
+        assert!(!out.contains("jit ="), "{out}");
+        assert!(!out.contains("speed ="), "{out}");
     }
 
     #[test]

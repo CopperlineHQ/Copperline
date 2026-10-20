@@ -240,8 +240,10 @@ fn build() -> Vec<ToolDef> {
             "Report the emulation state: `state` (paused/running), `pc`, `frame`, `vpos`, \
              `hpos`, `cck` (colour clocks), `seconds` (emulated), `retired_instructions`, \
              `cpu`, `paced`/`warp`, `tt_armed` (reverse execution available), \
-             `double_faulted`, and host counters (`host_busy_ms`, `pacer_slips`, audio lead \
-             and underruns). Cheap and side-effect free; call it to orient before stepping.",
+             `double_faulted`, host counters (`host_busy_ms`, `pacer_slips`, audio lead \
+             and underruns), and `jit_mhz` (the effective clock under `[cpu] speed = \
+             \"fastest\"`, null at a fixed clock). Cheap and side-effect free; call it to \
+             orient before stepping.",
             no_params(),
             json!({}),
         ),

@@ -373,6 +373,7 @@ impl UssFile {
         cfg.cpu_icache = hardware.cpu_icache;
         cfg.cpu_dcache = hardware.cpu_dcache;
         cfg.cpu_jit = false;
+        cfg.cpu_speed = config::CpuSpeed::Fixed;
         cfg.fpu = false;
         cfg.chipset = hardware.chipset;
         cfg.agnus_revision = hardware.agnus_revision;
