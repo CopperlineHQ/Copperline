@@ -621,8 +621,9 @@ dependencies = [
 
 [[package]]
 name = "chd"
-version = "0.3.4"
-source = "git+https://github.com/CopperlineHQ/chd-rs?rev=a0170de589031c74dc7245c9dc05dade5d919dc6#a0170de589031c74dc7245c9dc05dade5d919dc6"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "400d9065552452205d0ecc7670c93477c332f0cc6c8051684c5e69ac6f83ef23"
 dependencies = [
  "arrayvec",
  "bitreader",

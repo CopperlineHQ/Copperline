@@ -317,7 +317,9 @@ fluxbridge = { git = "https://github.com/CopperlineHQ/FluxBridge", branch = "mai
 serialport = { version = "4.9", default-features = false, optional = true }
 # CHD (MAME "Compressed Hunks of Data") CD images (src/cdrom/chd.rs). Pure
 # Rust, so it builds for wasm32 browser targets like the rest of the core.
-chd = "0.3"
+# 0.3.5 is the floor: earlier releases decode zstd hunks with ruzstd < 0.9.1,
+# where a crafted hunk can allocate gigabytes (RUSTSEC-2026-0344).
+chd = "0.3.5"
 delharc = "0.8"
 zip = { version = "9.0.4", default-features = false, features = ["deflate"] }
 gif = "0.14"
@@ -449,17 +451,7 @@ syn = { version = "3", features = ["full", "visit"] }
 # plugins live as readable text in the tests rather than checked-in binaries.
 wat = "1"
 
-# chd 0.3.4, the latest release, requires ruzstd 0.8, whose zstd decoder
-# never bounds a block's decompressed size: a crafted CHD hunk under 128 KB
-# can allocate gigabytes and abort the process (RUSTSEC-2026-0344, fixed in
-# ruzstd 0.9.1). The CopperlineHQ fork pins the chd-v0.3.4 release with only
-# that bump applied. The nested workspaces (crates/copperline-player,
-# crates/copperline-web, crates/copperline-libretro, fuzz) carry the same
-# patch, since [patch] applies only at a workspace root. Remove all of them
-# once a chd release requires ruzstd >= 0.9.1
-# (https://github.com/SnowflakePowered/chd-rs/pull/23).
 [patch.crates-io]
-chd = { git = "https://github.com/CopperlineHQ/chd-rs", rev = "a0170de589031c74dc7245c9dc05dade5d919dc6" }
 # pixels 0.17.2's render_with retries a failed surface acquire in a loop with
 # no bound, reconfiguring from its cached surface size each time. When that
 # size is stale the loop never ends: on Windows with Vulkan, a resize landing
