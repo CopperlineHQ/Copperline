@@ -930,10 +930,7 @@ impl FaultPolicySet {
 /// `Bus::with_hard_drive_image_mut`. `Floppy`/`Cd` parse successfully (the
 /// wire schema is honoured) but have no resolution yet -- `floppy`/`cd`
 /// use a different image-backing path than `HardDriveImage`, deferred to
-/// a follow-up (`docs/debugger/disk-fault.md`'s "Status"). `Scsi` also
-/// parses but is not yet resolved: this phase covers `copperhf`/`pcmcia`/
-/// `ide` only (see the same doc section) -- SCSI needs the A2091/A4091
-/// board-chain traversal, left for the same follow-up.
+/// a follow-up (`docs/debugger/disk-fault.md`'s "Status").
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DiskFaultTarget {
     Copperhf { unit: usize },
@@ -995,6 +992,7 @@ impl DiskFaultTarget {
             DiskFaultTarget::Copperhf { .. }
                 | DiskFaultTarget::Pcmcia
                 | DiskFaultTarget::Ide { .. }
+                | DiskFaultTarget::Scsi { .. }
         )
     }
 }

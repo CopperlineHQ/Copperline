@@ -5938,10 +5938,14 @@ impl Bus {
     /// Resolves a `disk.fault.*` target to its backing
     /// [`crate::harddrive::HardDriveImage`] and runs `f` against it --
     /// `None` if the target names a kind this phase does not resolve yet
-    /// (`scsi`/`floppy`/`cd`, see [`crate::diskfault::DiskFaultTarget`]'s
-    /// doc comment) or no device/unit/media matches. IDE checks `gayle`
+    /// (`floppy`/`cd`, see [`crate::diskfault::DiskFaultTarget`]'s doc
+    /// comment) or no device/unit/media matches. IDE checks `gayle`
     /// (A600/A1200) and `ide_a4000` (A4000) in turn since a machine
-    /// profile only ever configures one of the two.
+    /// profile only ever configures one of the two; SCSI checks `sdmac`
+    /// (A3000-internal WD33C93) then the Zorro chain's A2091 (also
+    /// WD33C93) and A4091 (53C710, its own `targets` array) in turn, same
+    /// reasoning as `scsi_cd_mut` above -- a profile fits at most one SCSI
+    /// controller, so only one of these ever has the target.
     pub fn with_hard_drive_image_mut<R>(
         &mut self,
         target: &crate::diskfault::DiskFaultTarget,
@@ -5964,7 +5968,25 @@ impl Bus {
             }
             T::Pcmcia => self.pcmcia.as_mut()?.hard_disk_mut().map(f),
             T::Copperhf { unit } => self.copperhf_board_mut()?.with_unit_image_mut(*unit, f),
-            T::Scsi { .. } | T::Floppy { .. } | T::Cd => None,
+            T::Scsi { unit } => {
+                if let Some(sdmac) = &mut self.sdmac {
+                    if let Some(img) = sdmac.disk_mut(*unit) {
+                        return Some(f(img));
+                    }
+                }
+                for dev in self.devices.iter_mut() {
+                    let img = match dev {
+                        crate::zorro_device::BoardDevice::A2091(board) => board.disk_mut(*unit),
+                        crate::zorro_device::BoardDevice::A4091(board) => board.disk_mut(*unit),
+                        _ => None,
+                    };
+                    if let Some(img) = img {
+                        return Some(f(img));
+                    }
+                }
+                None
+            }
+            T::Floppy { .. } | T::Cd => None,
         }
     }
 

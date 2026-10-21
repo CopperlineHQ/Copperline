@@ -3305,8 +3305,8 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
                 .map_err(CtlError::invalid_params)?;
             if !parsed_target.supported() {
                 return Err(CtlError::invalid_params(format!(
-                    "target {}: not yet supported by disk.fault (scsi/floppy/cd targets \
-                     are a follow-up; copperhf/pcmcia/ide are implemented)",
+                    "target {}: not yet supported by disk.fault (floppy/cd targets \
+                     are a follow-up; copperhf/pcmcia/ide/scsi are implemented)",
                     parsed_target.to_json()
                 )));
             }

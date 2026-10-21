@@ -142,6 +142,12 @@ impl Sdmac {
         self.wd.first_cd_mut()
     }
 
+    /// Mutable view of target `id`'s disk image -- `disk.fault.*` target
+    /// resolution.
+    pub fn disk_mut(&mut self, id: usize) -> Option<&mut crate::harddrive::HardDriveImage> {
+        self.wd.disk_mut(id)
+    }
+
     /// Let go of any real disk of the host's, and say how many went.
     pub fn release_host_disks(&mut self) -> usize {
         self.wd.release_host_disks()

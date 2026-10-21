@@ -301,6 +301,12 @@ impl A4091 {
             .find_map(ScsiTarget::cd_mut)
     }
 
+    /// Mutable view of target `id`'s disk image -- `disk.fault.*` target
+    /// resolution.
+    pub fn disk_mut(&mut self, id: usize) -> Option<&mut crate::harddrive::HardDriveImage> {
+        self.targets.get_mut(id)?.as_mut()?.disk_mut()
+    }
+
     /// Let go of any real disk of the host's, and say how many went.
     ///
     /// This board keeps its own targets rather than a WD33C93's, so the same

@@ -723,6 +723,15 @@ impl ScsiTarget {
             ScsiTarget::Disk(_) => None,
         }
     }
+
+    /// Mutable view of the disk image behind this target, when it is one --
+    /// `disk_ref`'s counterpart, for `disk.fault.*` target resolution.
+    pub fn disk_mut(&mut self) -> Option<&mut HardDriveImage> {
+        match self {
+            ScsiTarget::Disk(disk) => Some(&mut disk.disk),
+            ScsiTarget::CdRom(_) => None,
+        }
+    }
 }
 
 impl From<ScsiDisk> for ScsiTarget {
@@ -855,6 +864,12 @@ impl Wd33c93 {
 
     pub fn target_present(&self, id: usize) -> bool {
         self.targets.get(id).is_some_and(Option::is_some)
+    }
+
+    /// Mutable view of target `id`'s disk image, when one is attached and
+    /// is a disk (not a CD-ROM) -- `disk.fault.*` target resolution.
+    pub fn disk_mut(&mut self, id: usize) -> Option<&mut HardDriveImage> {
+        self.targets.get_mut(id)?.as_mut()?.disk_mut()
     }
 
     /// Let go of any real disk of the host's, and say how many went.
@@ -1621,6 +1636,45 @@ mod tests {
             ScsiDisk::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap(),
         );
         (wd, path)
+    }
+
+    /// `disk.fault.*` target resolution (`Bus::with_hard_drive_image_mut`'s
+    /// `T::Scsi` arm) goes through `Wd33c93::disk_mut(id)` -- proves it
+    /// reaches the right target's own `HardDriveImage` (a fault policy set
+    /// through it actually governs that target's writes) and nothing else
+    /// (`disk_mut` on an empty id is `None`, not some other target).
+    #[test]
+    fn disk_mut_reaches_the_targets_own_image_and_nothing_else() {
+        let (mut wd, path) = chip_with_disk(8);
+        assert!(wd.disk_mut(1).is_none(), "no target attached at id 1");
+
+        let img = wd.disk_mut(0).expect("target 0 is a disk");
+        img.fault
+            .set(
+                None,
+                &serde_json::json!({"rules": [{"op": "write", "action": "drop"}]}),
+                1,
+            )
+            .unwrap();
+        img.write_sector(0, &[0xAAu8; SECTOR_SIZE]).unwrap();
+        assert_eq!(wd.disk_mut(0).unwrap().fault.stats.dropped, 1);
+
+        let mut reopened = HardDriveImage::open(
+            &path,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
+        let mut sector = vec![0u8; SECTOR_SIZE];
+        reopened.read_sector(0, &mut sector).unwrap();
+        assert!(
+            sector.iter().all(|&b| b == 0),
+            "the drop fired on the target `disk_mut` actually resolved to"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     fn wr_reg(wd: &mut Wd33c93, reg: u8, val: u8) {
