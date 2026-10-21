@@ -5935,6 +5935,39 @@ impl Bus {
         })
     }
 
+    /// Resolves a `disk.fault.*` target to its backing
+    /// [`crate::harddrive::HardDriveImage`] and runs `f` against it --
+    /// `None` if the target names a kind this phase does not resolve yet
+    /// (`scsi`/`floppy`/`cd`, see [`crate::diskfault::DiskFaultTarget`]'s
+    /// doc comment) or no device/unit/media matches. IDE checks `gayle`
+    /// (A600/A1200) and `ide_a4000` (A4000) in turn since a machine
+    /// profile only ever configures one of the two.
+    pub fn with_hard_drive_image_mut<R>(
+        &mut self,
+        target: &crate::diskfault::DiskFaultTarget,
+        f: impl FnOnce(&mut crate::harddrive::HardDriveImage) -> R,
+    ) -> Option<R> {
+        use crate::diskfault::DiskFaultTarget as T;
+        match target {
+            T::Ide { unit } => {
+                if let Some(gayle) = &mut self.gayle {
+                    if let Some(img) = gayle.hard_disk_mut(*unit) {
+                        return Some(f(img));
+                    }
+                }
+                if let Some(ide) = &mut self.ide_a4000 {
+                    if let Some(img) = ide.hard_disk_mut(*unit) {
+                        return Some(f(img));
+                    }
+                }
+                None
+            }
+            T::Pcmcia => self.pcmcia.as_mut()?.hard_disk_mut().map(f),
+            T::Copperhf { unit } => self.copperhf_board_mut()?.with_unit_image_mut(*unit, f),
+            T::Scsi { .. } | T::Floppy { .. } | T::Cd => None,
+        }
+    }
+
     /// Block until the copperhf.device board (if configured) has no
     /// requests in flight -- every completion already surfaced, every
     /// guest-visible effect already applied. A no-op if there is no

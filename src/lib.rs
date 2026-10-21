@@ -75,6 +75,7 @@ pub mod pcmcia;
 // The remote GDB stub (`--gdb`). Gated so player builds -- shipped games
 // with no debugging surface -- can compile it out; everything else keeps it
 // through the default features.
+pub mod diskfault;
 #[cfg(feature = "gdb")]
 pub mod gdbstub;
 pub mod graffity;

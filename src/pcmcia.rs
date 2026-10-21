@@ -155,6 +155,16 @@ impl PcmciaCard {
         }
     }
 
+    /// The hard disk behind a CF card (`disk.fault.*`'s `{"kind":
+    /// "pcmcia"}` target); `None` for an SRAM card, which has no disk
+    /// image at all.
+    pub fn hard_disk_mut(&mut self) -> Option<&mut crate::harddrive::HardDriveImage> {
+        match self {
+            Self::Cf(card) => card.hard_disk_mut(),
+            Self::Sram(_) => None,
+        }
+    }
+
     /// One line for logs, OSDs, and `pcmcia.query`.
     pub fn describe(&self) -> String {
         match self {

@@ -130,6 +130,30 @@ pub enum CoreOp {
     },
     FaultList,
     FaultClear,
+    /// `disk.fault.*`: the device-level fault-injection layer
+    /// (`crate::diskfault`), a deliberately separate namespace from
+    /// `fault.inject` above -- see `crate::diskfault`'s module doc for
+    /// why ("installed on the image-backed block layer... below the
+    /// controller emulation", not a guest bus error).
+    DiskFaultSet {
+        target: Value,
+        policy: Value,
+        seed: u64,
+        id: Option<String>,
+    },
+    DiskFaultClear {
+        id: Option<String>,
+        target: Option<Value>,
+    },
+    DiskFaultList {
+        target: Option<Value>,
+    },
+    DiskFaultStats {
+        target: Value,
+    },
+    DiskFaultResetStats {
+        target: Value,
+    },
     /// Arm/disarm the memory heat map over a window, or read it.
     HeatMapSet {
         window: Option<(u32, u32)>,
@@ -1259,6 +1283,41 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
         }),
         "fault.list" => core(CoreOp::FaultList),
         "fault.clear" => core(CoreOp::FaultClear),
+        "disk.fault.set" => {
+            let target = p
+                .get("target")
+                .cloned()
+                .ok_or_else(|| CtlError::invalid_params("target is required"))?;
+            let policy = p
+                .get("policy")
+                .cloned()
+                .ok_or_else(|| CtlError::invalid_params("policy is required"))?;
+            core(CoreOp::DiskFaultSet {
+                target,
+                policy,
+                seed: p.u64_opt("seed")?.unwrap_or(0),
+                id: p.str_opt("id")?,
+            })
+        }
+        "disk.fault.clear" => core(CoreOp::DiskFaultClear {
+            id: p.str_opt("id")?,
+            target: p.get("target").cloned(),
+        }),
+        "disk.fault.list" => core(CoreOp::DiskFaultList {
+            target: p.get("target").cloned(),
+        }),
+        "disk.fault.stats" => core(CoreOp::DiskFaultStats {
+            target: p
+                .get("target")
+                .cloned()
+                .ok_or_else(|| CtlError::invalid_params("target is required"))?,
+        }),
+        "disk.fault.reset_stats" => core(CoreOp::DiskFaultResetStats {
+            target: p
+                .get("target")
+                .cloned()
+                .ok_or_else(|| CtlError::invalid_params("target is required"))?,
+        }),
         "cia.get" => core(CoreOp::CiaGet {
             b: match p.str_req("cia")?.as_str() {
                 "a" | "A" => false,
@@ -3236,6 +3295,132 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             emu.bus_mut().clear_injected_bus_faults();
             Ok(json!({"faults": 0}))
         }
+        CoreOp::DiskFaultSet {
+            target,
+            policy,
+            seed,
+            id,
+        } => {
+            let parsed_target = crate::diskfault::DiskFaultTarget::from_json(target)
+                .map_err(CtlError::invalid_params)?;
+            if !parsed_target.supported() {
+                return Err(CtlError::invalid_params(format!(
+                    "target {}: not yet supported by disk.fault (scsi/floppy/cd targets \
+                     are a follow-up; copperhf/pcmcia/ide are implemented)",
+                    parsed_target.to_json()
+                )));
+            }
+            let result = emu
+                .bus_mut()
+                .with_hard_drive_image_mut(&parsed_target, |img| {
+                    img.fault.set(id.clone(), policy, *seed)
+                });
+            match result {
+                None => Err(CtlError::invalid_params(format!(
+                    "target {}: no matching device/unit/media attached",
+                    parsed_target.to_json()
+                ))),
+                Some(Err(e)) => Err(CtlError::invalid_params(e)),
+                Some(Ok(id)) => Ok(json!({"id": id})),
+            }
+        }
+        CoreOp::DiskFaultClear { id, target } => {
+            let mut cleared = Vec::new();
+            let mut targets: Vec<crate::diskfault::DiskFaultTarget> = Vec::new();
+            if let Some(target) = target {
+                targets.push(
+                    crate::diskfault::DiskFaultTarget::from_json(target)
+                        .map_err(CtlError::invalid_params)?,
+                );
+            } else {
+                targets.extend(every_disk_fault_target(emu));
+            }
+            for t in &targets {
+                if let Some((ids, released)) = emu
+                    .bus_mut()
+                    .with_hard_drive_image_mut(t, |img| img.fault.clear(id.as_deref()))
+                {
+                    for held in released {
+                        // `on_clear: release` (the default): replay held
+                        // writes onto the image in order, same as a real
+                        // flush release -- `disk.fault.clear` must leave
+                        // the image exactly as a flush would have, not
+                        // quietly discard data the policy only meant to
+                        // delay.
+                        let _ = emu.bus_mut().with_hard_drive_image_mut(t, |img| {
+                            img.write_sector(held.lba, &held.data)
+                        });
+                    }
+                    cleared.extend(ids);
+                }
+            }
+            Ok(json!({"cleared": cleared}))
+        }
+        CoreOp::DiskFaultList { target } => {
+            let targets: Vec<crate::diskfault::DiskFaultTarget> = if let Some(target) = target {
+                vec![crate::diskfault::DiskFaultTarget::from_json(target)
+                    .map_err(CtlError::invalid_params)?]
+            } else {
+                every_disk_fault_target(emu)
+            };
+            let mut faults = Vec::new();
+            for t in &targets {
+                emu.bus_mut().with_hard_drive_image_mut(t, |img| {
+                    for policy in &img.fault.policies {
+                        faults.push(json!({
+                            "id": policy.id,
+                            "target": t.to_json(),
+                            "policy": {
+                                "on_clear": match policy.on_clear {
+                                    crate::diskfault::OnClear::Release => "release",
+                                    crate::diskfault::OnClear::Drop => "drop",
+                                },
+                                "rules": policy.rules.iter().map(crate::diskfault::Rule::to_json).collect::<Vec<_>>(),
+                            },
+                            "seed": policy.seed,
+                            "hits": policy.rules.iter().map(|r| r.state.hits).collect::<Vec<_>>(),
+                        }));
+                    }
+                });
+            }
+            Ok(json!({"faults": faults}))
+        }
+        CoreOp::DiskFaultStats { target } => {
+            let parsed_target = crate::diskfault::DiskFaultTarget::from_json(target)
+                .map_err(CtlError::invalid_params)?;
+            let stats = emu
+                .bus_mut()
+                .with_hard_drive_image_mut(&parsed_target, |img| img.fault.stats);
+            match stats {
+                None => Err(CtlError::invalid_params(format!(
+                    "target {}: no matching device/unit/media attached",
+                    parsed_target.to_json()
+                ))),
+                Some(s) => Ok(json!({
+                    "requests": s.requests,
+                    "reads": s.reads,
+                    "writes": s.writes,
+                    "flushes": s.flushes,
+                    "trims": s.trims,
+                    "dropped": s.dropped,
+                    "torn": s.torn,
+                    "reordered": s.reordered,
+                    "flush_ignored": s.flush_ignored,
+                    "stale_served": s.stale_served,
+                    "corrupted": s.corrupted,
+                    "errored": s.errored,
+                    "delayed_ms": s.delayed_ms,
+                    "cut": s.cut,
+                })),
+            }
+        }
+        CoreOp::DiskFaultResetStats { target } => {
+            let parsed_target = crate::diskfault::DiskFaultTarget::from_json(target)
+                .map_err(CtlError::invalid_params)?;
+            emu.bus_mut()
+                .with_hard_drive_image_mut(&parsed_target, |img| img.fault.reset_stats());
+            Ok(json!({}))
+        }
         CoreOp::HeatMapSet { window } => {
             emu.bus_mut().set_heat_map(*window);
             Ok(match emu.bus().heat_map() {
@@ -3439,6 +3624,27 @@ pub fn cd_record_value(record: &crate::cdtrace::CdCommandRecord) -> Value {
         "outcome": record.outcome.map(crate::cdtrace::CdOutcome::name),
         "summary": record.describe(),
     })
+}
+
+/// Every target `disk.fault.list`/`disk.fault.clear` probe when called
+/// with no `target` at all ("every policy on every target"): every
+/// copperhf unit slot, both IDE slots, and the PCMCIA slot, filtered down
+/// to whichever actually resolve to an attached image right now.
+/// Probing-and-filtering rather than asking each board for "your
+/// attached units" directly keeps this one place in sync with
+/// `Bus::with_hard_drive_image_mut`'s own resolution rules instead of
+/// duplicating them.
+fn every_disk_fault_target(emu: &mut Emulator) -> Vec<crate::diskfault::DiskFaultTarget> {
+    use crate::diskfault::DiskFaultTarget as T;
+    let mut candidates: Vec<T> = (0..crate::copperhf::NUM_UNITS)
+        .map(|unit| T::Copperhf { unit })
+        .collect();
+    candidates.push(T::Pcmcia);
+    candidates.extend((0..2).map(|unit| T::Ide { unit }));
+    candidates
+        .into_iter()
+        .filter(|t| emu.bus_mut().with_hard_drive_image_mut(t, |_| ()).is_some())
+        .collect()
 }
 
 /// The `cd.trace` reply: whether the machine has a traced CD drive, its

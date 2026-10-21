@@ -813,6 +813,22 @@ impl CopperhfBoard {
     /// I/O is in flight, so this only answers while the board is quiesced
     /// (as it is for a save state) and reports nothing otherwise rather
     /// than waiting on the worker.
+    /// Runs `f` against unit `unit`'s backing image, for `disk.fault.*`
+    /// (`{"kind": "copperhf", "unit": N}`). `try_lock`, not a blocking
+    /// lock, matching [`Self::unit_image_names`]'s own caution around the
+    /// worker-thread mutex: a control-protocol call arriving while a job
+    /// is in flight simply reports "not available" rather than blocking
+    /// the main thread on the worker.
+    pub fn with_unit_image_mut<R>(
+        &self,
+        unit: usize,
+        f: impl FnOnce(&mut HardDriveImage) -> R,
+    ) -> Option<R> {
+        let mut units = self.units.try_lock().ok()?;
+        let disk = units.get_mut(unit)?.as_mut()?;
+        Some(f(&mut disk.disk))
+    }
+
     pub fn unit_image_names(&self) -> Vec<String> {
         let Ok(units) = self.units.try_lock() else {
             return Vec::new();
