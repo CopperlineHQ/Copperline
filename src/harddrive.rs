@@ -1050,9 +1050,12 @@ impl HardDriveImage {
         // Checked here too, not just inside `write_sector_real`: a fault
         // policy's `DoneOk`/`ProceedWith` outcome below returns without
         // ever reaching `write_sector_real`, which would otherwise let an
-        // active policy make a read-only session image look writable.
-        if self.is_read_only() {
-            return Err(Self::read_only_error());
+        // active policy make a write-protected medium (a CHD with no
+        // write overlay, a read-only session copy, a read-only physical
+        // device -- everything `write_protected` covers, not just the
+        // session case) look writable.
+        if self.write_protected() {
+            return Err(Self::write_protected_error());
         }
         if self.fault.is_empty() {
             return self.write_sector_real(lba, buf);
@@ -1070,7 +1073,16 @@ impl HardDriveImage {
             Ok(()) => &pre_write,
             Err(_) => &[],
         };
-        match self.fault.on_write(lba, buf, SECTOR_SIZE, pre_write) {
+        let outcome = self.fault.on_write(lba, buf, SECTOR_SIZE, pre_write);
+        // A `reorder` window overflow evicts the oldest/random held write
+        // by committing it for real rather than discarding it --
+        // `on_write` has no I/O of its own, so it queues the eviction and
+        // this is where it gets replayed, the same "already decided"
+        // shape `write_sector_replay` uses for a flush/clear release.
+        for evicted in self.fault.take_evicted() {
+            self.write_sector_real(evicted.lba, &evicted.data)?;
+        }
+        match outcome {
             crate::diskfault::Outcome::Proceed => self.write_sector_real(lba, buf),
             crate::diskfault::Outcome::DoneOk => Ok(()),
             crate::diskfault::Outcome::ProceedWith(data) if data.len() >= SECTOR_SIZE => {
@@ -1093,14 +1105,10 @@ impl HardDriveImage {
         }
     }
 
-    fn is_read_only(&self) -> bool {
-        matches!(&self.backing, Backing::Session(image) if image.read_only())
-    }
-
-    fn read_only_error() -> std::io::Error {
+    fn write_protected_error() -> std::io::Error {
         std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
-            "session disk is read-only",
+            "medium is write-protected",
         )
     }
 
@@ -1115,8 +1123,8 @@ impl HardDriveImage {
     }
 
     fn write_sector_real(&mut self, lba: u64, buf: &[u8]) -> std::io::Result<()> {
-        if self.is_read_only() {
-            return Err(Self::read_only_error());
+        if self.write_protected() {
+            return Err(Self::write_protected_error());
         }
         if let Some(overlay) = &mut self.rdb_overlay {
             if lba < u64::from(CYL_SECTORS) {
@@ -2221,6 +2229,125 @@ mod tests {
             after,
             vec![0x42u8; SECTOR_SIZE],
             "flush must release the held write to disk"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reorder_window_overflow_commits_the_evicted_write_instead_of_discarding_it() {
+        let (path, mut drive, base) = fault_test_drive("fault-reorder-evict.hdf");
+        drive
+            .fault
+            .set(
+                None,
+                &serde_json::json!({"rules": [{"op": "write", "action": "reorder", "window": 1}]}),
+                1,
+            )
+            .unwrap();
+        drive.write_sector(base, &[0xAAu8; SECTOR_SIZE]).unwrap();
+        // Window 1, second write: one of the two held writes must be
+        // evicted. It has to land on the real image right away, not be
+        // discarded -- a real write cache full enough to evict still has
+        // to put the dirty data somewhere.
+        drive
+            .write_sector(base + 1, &[0xBBu8; SECTOR_SIZE])
+            .unwrap();
+
+        let mut reopened = HardDriveImage::open(
+            &path,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
+        let mut a = vec![0u8; SECTOR_SIZE];
+        let mut b = vec![0u8; SECTOR_SIZE];
+        reopened.read_sector(base, &mut a).unwrap();
+        reopened.read_sector(base + 1, &mut b).unwrap();
+        let committed = usize::from(a == vec![0xAAu8; SECTOR_SIZE])
+            + usize::from(b == vec![0xBBu8; SECTOR_SIZE]);
+        assert_eq!(
+            committed, 1,
+            "exactly one of the two held writes must have been committed by the eviction"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_cut_from_a_read_rule_discards_held_writes_before_a_clear_can_replay_them() {
+        let (path, mut drive, base) = fault_test_drive("fault-cut-read-discard.hdf");
+        drive
+            .fault
+            .set(
+                Some("holder".into()),
+                &serde_json::json!({"rules": [{"op": "write", "action": "reorder", "window": 8}]}),
+                1,
+            )
+            .unwrap();
+        drive.write_sector(base, &[0x55u8; SECTOR_SIZE]).unwrap();
+        drive
+            .fault
+            .set(
+                Some("cutter".into()),
+                &serde_json::json!({"rules": [{"op": "read", "action": "cut"}]}),
+                1,
+            )
+            .unwrap();
+        // A different lba from the held write: reads of a held sector
+        // return the held data before any read rule (including this
+        // `cut`) is even evaluated, same as a write cache answering from
+        // itself -- reading an unheld sector is what actually exercises
+        // the `cut` rule here.
+        let mut buf = vec![0u8; SECTOR_SIZE];
+        assert!(drive.read_sector(base + 1, &mut buf).is_err());
+        assert!(drive.fault.cut);
+        let holder = drive
+            .fault
+            .policies
+            .iter()
+            .find(|p| p.id == "holder")
+            .unwrap();
+        assert!(
+            holder.rules[0].state.reorder_queue.is_empty(),
+            "a cut triggered by a read rule must discard held writes, not leave them for a \
+             later clear to replay as if they had survived the power cut"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn flush_releases_the_newest_held_write_when_the_same_sector_was_held_twice() {
+        let (path, mut drive, base) = fault_test_drive("fault-flush-dedup.hdf");
+        drive
+            .fault
+            .set(
+                None,
+                &serde_json::json!({"rules": [{"op": "write", "action": "reorder", "window": 8}]}),
+                1,
+            )
+            .unwrap();
+        drive.write_sector(base, &[0x11u8; SECTOR_SIZE]).unwrap();
+        drive.write_sector(base, &[0x22u8; SECTOR_SIZE]).unwrap();
+        drive.flush().unwrap();
+
+        let mut reopened = HardDriveImage::open(
+            &path,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
+        let mut sector = vec![0u8; SECTOR_SIZE];
+        reopened.read_sector(base, &mut sector).unwrap();
+        assert_eq!(
+            sector,
+            vec![0x22u8; SECTOR_SIZE],
+            "a flush must release the newest held write for a sector held twice, not an \
+             arbitrary one of the two"
         );
         let _ = std::fs::remove_file(&path);
     }

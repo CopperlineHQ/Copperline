@@ -2439,6 +2439,12 @@ impl FloppyController {
         // `HardDriveImage::write_sector` uses for the same reason:
         // `drop`/`tear`/`reorder` must prevent or change what actually
         // commits, which only works ahead of the write.
+        // A `reorder` window overflow's evicted write (committed for
+        // real, not discarded -- see `FaultPolicySet::take_evicted`'s doc
+        // comment) can only be replayed once `fault`'s and `image.data`'s
+        // borrows below have ended, so it is collected here and replayed
+        // after the match.
+        let mut evicted: Vec<crate::diskfault::HeldWrite> = Vec::new();
         let fault = &mut image.fault;
         let write_result: Result<()> = match &mut image.data {
             FloppyImageData::StandardAdf(image_data) => {
@@ -2492,6 +2498,7 @@ impl FloppyController {
                                 crate::diskfault::Outcome::Fail(_) => {}
                             }
                         }
+                        evicted.extend(fault.take_evicted());
                         kept
                     };
                     if sectors.is_empty() {
@@ -2533,6 +2540,9 @@ impl FloppyController {
                 debug!("floppy.df{} image write complete", drive_idx);
             }
             Err(e) => warn!("floppy.df{} image write failed: {e:#}", drive_idx),
+        }
+        for held in evicted {
+            self.drive_write_held_sector(drive_idx, held.lba, &held.data);
         }
     }
 

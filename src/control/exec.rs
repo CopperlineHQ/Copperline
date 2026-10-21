@@ -3326,7 +3326,31 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
                     parsed_target.to_json()
                 ))),
                 Some(Err(e)) => Err(CtlError::invalid_params(e)),
-                Some(Ok(id)) => Ok(json!({"id": id})),
+                Some(Ok((id, released))) => {
+                    // Replacing an existing policy's rules under this id
+                    // releases its own held reorder-queue writes (per its
+                    // `on_clear`), same replay as `disk.fault.clear` --
+                    // otherwise they would just vanish, never committed
+                    // and never clearable, even though the guest already
+                    // saw them succeed and read them back.
+                    for held in released {
+                        match &parsed_target {
+                            crate::diskfault::DiskFaultTarget::Floppy { drive } => {
+                                emu.bus_mut()
+                                    .floppy
+                                    .drive_write_held_sector(*drive, held.lba, &held.data);
+                            }
+                            _ => {
+                                let _ = emu
+                                    .bus_mut()
+                                    .with_hard_drive_image_mut(&parsed_target, |img| {
+                                        img.write_sector_replay(held.lba, &held.data)
+                                    });
+                            }
+                        }
+                    }
+                    Ok(json!({"id": id}))
+                }
             }
         }
         CoreOp::DiskFaultClear { id, target } => {

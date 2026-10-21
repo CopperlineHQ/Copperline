@@ -178,14 +178,27 @@ pub struct RuleState {
     pub hits: u64,
     pub reorder_queue: VecDeque<HeldWrite>,
     /// `stale`: lba -> (reads remaining at the old value, the pre-write
-    /// bytes to keep serving).
-    pub stale_pending: std::collections::HashMap<u64, (u64, Vec<u8>)>,
+    /// bytes to keep serving). `BTreeMap`, not a hash map: this
+    /// round-trips through a save state, and `HashMap`'s per-process
+    /// `RandomState` would make two saves of the same machine serialize
+    /// differently once two or more sectors are armed -- the same defect
+    /// the blitter's `d_overlay` had, fixed the same way.
+    pub stale_pending: std::collections::BTreeMap<u64, (u64, Vec<u8>)>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct HeldWrite {
     pub lba: u64,
     pub data: Vec<u8>,
+    /// The target's request-sequence number at the moment this write was
+    /// held, so a release that flattens several rules' queues together
+    /// can tell which of two holds to the same `lba` is newer -- see
+    /// `take_release_on_flush`'s doc comment. `0` for a state saved
+    /// before this field existed (the oldest possible value, so an old
+    /// held write never wins a dedup against a freshly-held one after a
+    /// state.load).
+    #[serde(default)]
+    pub seq: u64,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -475,6 +488,13 @@ pub struct FaultPolicySet {
     /// existed, or if cut is false.
     #[serde(default)]
     pub cut_by: Option<String>,
+    /// A `reorder` window overflow's evicted write, queued here for the
+    /// caller to commit for real (see `take_evicted`'s doc comment) --
+    /// not state (never saved/loaded): the caller drains this in the
+    /// same call that produced it, before any save state could land in
+    /// between.
+    #[serde(skip)]
+    pending_evicted: VecDeque<HeldWrite>,
 }
 
 /// What a caller (`HardDriveImage::read_sector` and friends) must do with
@@ -521,12 +541,18 @@ impl FaultPolicySet {
         self.policies.is_empty()
     }
 
+    /// Returns the policy's id and, when `set` *replaces* an existing
+    /// policy at that id, the old policy's held reorder-queue writes the
+    /// caller must replay onto the image (same `on_clear` semantics as
+    /// [`Self::clear`] -- `release` returns them, `drop` discards them),
+    /// so replacing a policy's rules mid-session can no longer silently
+    /// lose writes the guest already saw succeed and read back.
     pub fn set(
         &mut self,
         id: Option<String>,
         policy_json: &serde_json::Value,
         seed: u64,
-    ) -> Result<String, String> {
+    ) -> Result<(String, Vec<HeldWrite>), String> {
         if self.policies.len() >= MAX_POLICIES_PER_TARGET
             && !id
                 .as_ref()
@@ -584,12 +610,18 @@ impl FaultPolicySet {
             on_clear,
             rules,
         };
+        let mut released = Vec::new();
         if let Some(existing) = self.policies.iter_mut().find(|p| p.id == id) {
+            if matches!(existing.on_clear, OnClear::Release) {
+                for rule in &mut existing.rules {
+                    released.extend(rule.state.reorder_queue.drain(..));
+                }
+            }
             *existing = policy;
         } else {
             self.policies.push(policy);
         }
-        Ok(id)
+        Ok((id, released))
     }
 
     /// Returns the ids actually cleared. `release` policies' held writes
@@ -634,6 +666,24 @@ impl FaultPolicySet {
 
     pub fn reset_stats(&mut self) {
         self.stats = Stats::default();
+    }
+
+    /// `cut` models the volatile write cache being lost in a power cut,
+    /// whichever op's rule actually fired it -- a `write` rule's `Cut`
+    /// arm is not the only path that can latch `cut`, so every held
+    /// reorder write and armed `stale` entry is discarded here, shared by
+    /// all three `on_write`/`on_read`/`on_flush` `Cut` arms. Without this,
+    /// a cut latched by a `read` or `flush` rule would leave the queues
+    /// full, and a later `disk.fault.clear` with `on_clear: release`
+    /// would replay data that should have been lost in the cut onto the
+    /// disk -- exactly what a power-loss recovery test is meant to catch.
+    fn discard_held_state_on_cut(&mut self) {
+        for p in &mut self.policies {
+            for r in &mut p.rules {
+                r.state.reorder_queue.clear();
+                r.state.stale_pending.clear();
+            }
+        }
     }
 
     /// Records a fired-rule event, dropping the oldest once
@@ -807,15 +857,42 @@ impl FaultPolicySet {
                 }
                 Action::Reorder { window } => {
                     self.stats.reordered += 1;
+                    // Always a full sector, even when an earlier
+                    // `continue: true` action (`tear`) already truncated
+                    // `out`: every release path (`take_release_on_flush`/
+                    // `take_evicted`/`disk.fault.clear`) writes a held
+                    // write's `data` as a whole sector, and a shorter
+                    // buffer there panics instead of torn-and-held. The
+                    // untouched tail is spliced from `pre_write`, same
+                    // reasoning as the top-level tear-tail splice in
+                    // `HardDriveImage::write_sector`.
+                    let held_data = if out.len() < sector_bytes {
+                        let mut full = pre_write.to_vec();
+                        full.resize(sector_bytes, 0);
+                        full[..out.len()].copy_from_slice(&out);
+                        full
+                    } else {
+                        out.clone()
+                    };
                     let rule = self.rule_mut(loc);
                     rule.state.reorder_queue.push_back(HeldWrite {
                         lba,
-                        data: out.clone(),
+                        data: held_data,
+                        seq,
                     });
                     if rule.state.reorder_queue.len() > window {
                         let evict =
                             (rng_for(seed, seq, 0x2000) as usize) % rule.state.reorder_queue.len();
-                        rule.state.reorder_queue.remove(evict);
+                        // Committed, not discarded: a real write cache
+                        // full enough to evict still has to put the
+                        // evicted dirty data somewhere, it does not throw
+                        // it away. `on_write` has no I/O of its own
+                        // (diskfault.rs touches no image), so the evicted
+                        // write is queued here for the caller to commit
+                        // for real -- see `take_evicted`'s doc comment.
+                        if let Some(evicted) = rule.state.reorder_queue.remove(evict) {
+                            self.pending_evicted.push_back(evicted);
+                        }
                     }
                     outcome = Outcome::DoneOk;
                 }
@@ -834,11 +911,7 @@ impl FaultPolicySet {
                 Action::Cut => {
                     self.cut = true;
                     self.cut_by = Some(self.policies[loc.0].id.clone());
-                    for p in &mut self.policies {
-                        for r in &mut p.rules {
-                            r.state.reorder_queue.clear();
-                        }
-                    }
+                    self.discard_held_state_on_cut();
                     return Outcome::Fail(ErrorCode::NotReady);
                 }
                 Action::Stale { count } => {
@@ -937,6 +1010,7 @@ impl FaultPolicySet {
                 Action::Cut => {
                     self.cut = true;
                     self.cut_by = Some(self.policies[loc.0].id.clone());
+                    self.discard_held_state_on_cut();
                     return Outcome::Fail(ErrorCode::NotReady);
                 }
                 _ => {}
@@ -987,6 +1061,7 @@ impl FaultPolicySet {
                 Action::Cut => {
                     self.cut = true;
                     self.cut_by = Some(self.policies[loc.0].id.clone());
+                    self.discard_held_state_on_cut();
                     return Outcome::Fail(ErrorCode::NotReady);
                 }
                 _ => {}
@@ -1006,22 +1081,58 @@ impl FaultPolicySet {
     /// Drains every policy's reorder queue in a seeded random order, for
     /// `HardDriveImage::flush` to replay onto the image once
     /// [`Self::on_flush`] has returned `Proceed` (not `ignore`d).
+    /// A flush is a barrier: once it completes, each lba must hold its
+    /// newest write, even though several policies/rules each held their
+    /// own queue and the guest may have written the same sector more
+    /// than once before the flush landed. Dedup by lba (keeping the
+    /// entry with the highest `seq`) *before* shuffling, not after --
+    /// shuffling first and then keeping "whichever copy of this lba
+    /// landed last in the random order" would still let an older write
+    /// win by chance.
     pub fn take_release_on_flush(&mut self) -> Vec<HeldWrite> {
-        let mut out = Vec::new();
         let seq = self.seq;
+        // `BTreeMap`, not a hash map: `into_values()` below must iterate
+        // in a fixed order (ascending lba) for the shuffle that follows
+        // to be reproducible -- the same determinism reasoning as
+        // `stale_pending`'s own doc comment.
+        let mut by_lba: std::collections::BTreeMap<u64, HeldWrite> =
+            std::collections::BTreeMap::new();
         for policy in &mut self.policies {
             for rule in &mut policy.rules {
-                let mut items: Vec<_> = rule.state.reorder_queue.drain(..).collect();
-                let mut i = items.len();
-                while i > 1 {
-                    i -= 1;
-                    let j = (rng_for(policy.seed, seq, 0x3000 + i as u64) as usize) % (i + 1);
-                    items.swap(i, j);
+                for held in rule.state.reorder_queue.drain(..) {
+                    by_lba
+                        .entry(held.lba)
+                        .and_modify(|existing| {
+                            if held.seq >= existing.seq {
+                                *existing = held.clone();
+                            }
+                        })
+                        .or_insert(held);
                 }
-                out.extend(items);
             }
         }
-        out
+        let mut items: Vec<HeldWrite> = by_lba.into_values().collect();
+        // Every rule's queue is merged into one list by this point, so
+        // the shuffle draw is keyed on the target's own `seq` (not a
+        // per-policy seed) -- still deterministic for a given seed and
+        // guest input schedule, since `seq` itself only advances from
+        // those.
+        let mut i = items.len();
+        while i > 1 {
+            i -= 1;
+            let j = (rng_for(seq, seq, 0x3000 + i as u64) as usize) % (i + 1);
+            items.swap(i, j);
+        }
+        items
+    }
+
+    /// Writes a `reorder` window overflow evicted (see the `Action::
+    /// Reorder` arm of [`Self::on_write`]'s doc comment) -- drained by
+    /// the caller right after the `on_write` call that produced them, so
+    /// the evicted data still lands on the real medium instead of being
+    /// silently discarded.
+    pub fn take_evicted(&mut self) -> Vec<HeldWrite> {
+        self.pending_evicted.drain(..).collect()
     }
 }
 
@@ -1296,6 +1407,82 @@ mod tests {
         assert!(matches!(set.on_flush(), Outcome::Proceed));
         let released = set.take_release_on_flush();
         assert_eq!(released.len(), 2);
+    }
+
+    #[test]
+    fn flush_release_keeps_only_the_newest_write_for_a_sector_held_twice() {
+        let mut set = FaultPolicySet::default();
+        set.set(
+            None,
+            &policy(serde_json::json!([{"op": "write", "action": "reorder", "window": 8}])),
+            1,
+        )
+        .unwrap();
+        set.on_write(5, &[1u8; 512], 512, &[]);
+        set.on_write(5, &[2u8; 512], 512, &[]);
+        assert!(matches!(set.on_flush(), Outcome::Proceed));
+        let released = set.take_release_on_flush();
+        assert_eq!(
+            released.len(),
+            1,
+            "the two holds of lba 5 must collapse into one"
+        );
+        assert_eq!(released[0].data, vec![2u8; 512], "the newer write must win");
+    }
+
+    #[test]
+    fn replacing_a_policy_by_id_releases_its_held_writes_instead_of_discarding_them() {
+        let mut set = FaultPolicySet::default();
+        set.set(
+            Some("p".into()),
+            &policy(serde_json::json!([{"op": "write", "action": "reorder", "window": 8}])),
+            1,
+        )
+        .unwrap();
+        set.on_write(5, &[0x42u8; 512], 512, &[]);
+        let (_, released) = set
+            .set(
+                Some("p".into()),
+                &policy(serde_json::json!([{"op": "write", "action": "drop"}])),
+                1,
+            )
+            .unwrap();
+        assert_eq!(
+            released.len(),
+            1,
+            "replacing a policy by id must release its held writes, not drop them silently"
+        );
+        assert_eq!(released[0].lba, 5);
+        assert_eq!(released[0].data, vec![0x42u8; 512]);
+    }
+
+    #[test]
+    fn tear_then_reorder_holds_a_full_sector_not_a_sub_sector_buffer() {
+        let mut set = FaultPolicySet::default();
+        set.set(
+            None,
+            &policy(serde_json::json!([
+                {"op": "write", "action": "tear", "at": "bytes", "n": 100, "continue": true},
+                {"op": "write", "action": "reorder", "window": 4},
+            ])),
+            1,
+        )
+        .unwrap();
+        let pre_write = vec![0x99u8; 512];
+        set.on_write(5, &[0x42u8; 512], 512, &pre_write);
+        assert!(matches!(set.on_flush(), Outcome::Proceed));
+        let released = set.take_release_on_flush();
+        assert_eq!(released.len(), 1);
+        // Must be a full sector (not a 100-byte sliver): the caller's own
+        // `write_sector_real` always slices `data[..SECTOR_SIZE]` when
+        // replaying a held write, which panics on anything shorter.
+        assert_eq!(released[0].data.len(), 512);
+        assert_eq!(&released[0].data[..100], &[0x42u8; 100]);
+        assert_eq!(
+            &released[0].data[100..],
+            &pre_write[100..],
+            "the untouched tail must be spliced from the pre-write bytes"
+        );
     }
 
     #[test]
