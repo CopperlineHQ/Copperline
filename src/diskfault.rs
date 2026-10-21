@@ -26,6 +26,11 @@ use std::collections::VecDeque;
 pub const MAX_POLICIES_PER_TARGET: usize = 16;
 pub const MAX_RULES_PER_POLICY: usize = 64;
 pub const MAX_REORDER_WINDOW: usize = 64;
+/// `pending_events` is bounded to this many, oldest dropped first -- no
+/// `events.subscribe` wiring drains it yet (see `FaultPolicySet::
+/// pending_events`'s own doc comment), so without a cap a long soak run
+/// with a frequently-matching rule would grow it without bound.
+pub const MAX_PENDING_EVENTS: usize = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Op {
@@ -426,7 +431,6 @@ pub struct Stats {
     pub corrupted: u64,
     pub errored: u64,
     pub delayed_ms: u64,
-    pub cut: bool,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -448,17 +452,29 @@ pub struct FaultPolicySet {
     pub policies: Vec<Policy>,
     pub seq: u64,
     pub stats: Stats,
-    /// Drained by the control layer for `events.subscribe`'s `disk.fault`
-    /// family -- not state (never saved/loaded), so it is skipped rather
-    /// than round-tripped through a save state the way `policies`/`seq`
-    /// are.
+    /// Meant for the control layer to drain for `events.subscribe`'s
+    /// `disk.fault` family (not yet wired up) -- not state (never saved/
+    /// loaded), so it is skipped rather than round-tripped through a save
+    /// state the way `policies`/`seq` are. Bounded to
+    /// [`MAX_PENDING_EVENTS`], oldest dropped first, since nothing drains
+    /// it today.
     #[serde(skip)]
-    pub pending_events: Vec<FaultEvent>,
+    pub pending_events: VecDeque<FaultEvent>,
     /// Set by `cut`: every request fails `not_ready` until an explicit
     /// `disk.fault.clear`, even across a `machine.reset` (the proposal's
     /// "power-cut recovery test" -- a reset must not quietly un-cut the
-    /// drive).
+    /// drive). The single source of truth for cut state -- `disk.fault.
+    /// stats`'s `cut` field reports this directly rather than keeping a
+    /// second copy in `Stats`, so `reset_stats` can never desync one from
+    /// the other.
     pub cut: bool,
+    /// The id of the policy whose rule fired `cut`, so `clear` can tell
+    /// whether the policy being removed is the one actually holding the
+    /// latch (as opposed to an unrelated policy that merely happens to
+    /// share the target). `None` for a state saved before this field
+    /// existed, or if cut is false.
+    #[serde(default)]
+    pub cut_by: Option<String>,
 }
 
 /// What a caller (`HardDriveImage::read_sector` and friends) must do with
@@ -546,7 +562,22 @@ impl FaultPolicySet {
             .get("seed")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(seed);
-        let id = id.unwrap_or_else(|| format!("f{}", self.policies.len() + 1));
+        // Not just `f{len + 1}`: once policies have been added and removed
+        // out of order that is no longer collision-free (e.g. [f1, f3]
+        // after clearing f2 has len 2, so the next auto id would recompute
+        // f3 and silently overwrite the existing one below). Scan forward
+        // from there instead, skipping any id -- auto- or explicitly-
+        // assigned -- already in use.
+        let id = id.unwrap_or_else(|| {
+            let mut n = self.policies.len() + 1;
+            loop {
+                let candidate = format!("f{n}");
+                if !self.policies.iter().any(|p| p.id == candidate) {
+                    break candidate;
+                }
+                n += 1;
+            }
+        });
         let policy = Policy {
             id: id.clone(),
             seed,
@@ -584,14 +615,35 @@ impl FaultPolicySet {
         if cleared.is_empty() {
             return (cleared, released);
         }
-        if self.policies.is_empty() {
+        // Un-cut when either the policy that actually caused it is among
+        // those just cleared, or (for a cut latched before `cut_by`
+        // existed, or by some policy no longer present) the whole set is
+        // now empty -- never on an unrelated policy's clear while the
+        // cutting one is still installed.
+        if self.policies.is_empty()
+            || self
+                .cut_by
+                .as_deref()
+                .is_some_and(|by| cleared.iter().any(|id| id == by))
+        {
             self.cut = false;
+            self.cut_by = None;
         }
         (cleared, released)
     }
 
     pub fn reset_stats(&mut self) {
         self.stats = Stats::default();
+    }
+
+    /// Records a fired-rule event, dropping the oldest once
+    /// [`MAX_PENDING_EVENTS`] are queued -- see `pending_events`'s own doc
+    /// comment for why this needs a cap at all.
+    fn push_event(&mut self, event: FaultEvent) {
+        if self.pending_events.len() >= MAX_PENDING_EVENTS {
+            self.pending_events.pop_front();
+        }
+        self.pending_events.push_back(event);
     }
 
     /// Finds the first matching, still-dormant-or-live rule across every
@@ -726,7 +778,7 @@ impl FaultPolicySet {
             let seed = self.policy_seed(loc);
             let id = self.policies[loc.0].id.clone();
             let action = self.rule_mut(loc).action.clone();
-            self.pending_events.push(FaultEvent {
+            self.push_event(FaultEvent {
                 id,
                 rule: loc.1,
                 action: action.name().to_string(),
@@ -781,7 +833,7 @@ impl FaultPolicySet {
                 }
                 Action::Cut => {
                     self.cut = true;
-                    self.stats.cut = true;
+                    self.cut_by = Some(self.policies[loc.0].id.clone());
                     for p in &mut self.policies {
                         for r in &mut p.rules {
                             r.state.reorder_queue.clear();
@@ -860,7 +912,7 @@ impl FaultPolicySet {
             let seed = self.policy_seed(loc);
             let id = self.policies[loc.0].id.clone();
             let action = self.rule_mut(loc).action.clone();
-            self.pending_events.push(FaultEvent {
+            self.push_event(FaultEvent {
                 id,
                 rule: loc.1,
                 action: action.name().to_string(),
@@ -884,7 +936,7 @@ impl FaultPolicySet {
                 }
                 Action::Cut => {
                     self.cut = true;
-                    self.stats.cut = true;
+                    self.cut_by = Some(self.policies[loc.0].id.clone());
                     return Outcome::Fail(ErrorCode::NotReady);
                 }
                 _ => {}
@@ -904,7 +956,7 @@ impl FaultPolicySet {
         for loc in locs {
             let id = self.policies[loc.0].id.clone();
             let action = self.rule_mut(loc).action.clone();
-            self.pending_events.push(FaultEvent {
+            self.push_event(FaultEvent {
                 id,
                 rule: loc.1,
                 action: action.name().to_string(),
@@ -934,7 +986,7 @@ impl FaultPolicySet {
                 }
                 Action::Cut => {
                     self.cut = true;
-                    self.stats.cut = true;
+                    self.cut_by = Some(self.policies[loc.0].id.clone());
                     return Outcome::Fail(ErrorCode::NotReady);
                 }
                 _ => {}
@@ -1069,6 +1121,21 @@ mod tests {
         assert!(matches!(outcome, Outcome::DoneOk));
         assert_eq!(set.stats.dropped, 1);
         assert_eq!(set.pending_events.len(), 1);
+    }
+
+    #[test]
+    fn pending_events_never_grows_past_the_cap() {
+        let mut set = FaultPolicySet::default();
+        set.set(
+            None,
+            &policy(serde_json::json!([{"action": "delay", "ms": 0}])),
+            1,
+        )
+        .unwrap();
+        for lba in 0..(MAX_PENDING_EVENTS as u64 + 50) {
+            set.on_write(lba, &[0u8; 512], 512, &[]);
+        }
+        assert_eq!(set.pending_events.len(), MAX_PENDING_EVENTS);
     }
 
     #[test]

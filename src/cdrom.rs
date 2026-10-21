@@ -722,13 +722,20 @@ impl CdImage {
         buf: &mut [u8; DATA_SECTOR_BYTES],
     ) -> Result<()> {
         self.read_data_sector_real(sector, buf)?;
+        self.apply_read_fault(sector, buf)
+    }
+
+    /// Applies the fault policy set to bytes a real read already put in
+    /// `buf`, in place -- shared by `read_data_sector`/`read_audio_sector`/
+    /// `read_raw_sector` so CDDA playback and SCSI raw-mode reads are
+    /// faulted exactly like cooked data reads, not silently exempt from
+    /// `disk.fault.set`'s read-side actions.
+    fn apply_read_fault(&mut self, sector: u32, buf: &mut [u8]) -> Result<()> {
         if self.fault.is_empty() {
             return Ok(());
         }
-        match self
-            .fault
-            .on_read(u64::from(sector), buf, DATA_SECTOR_BYTES)
-        {
+        let len = buf.len();
+        match self.fault.on_read(u64::from(sector), buf, len) {
             crate::diskfault::Outcome::Proceed | crate::diskfault::Outcome::DoneOk => Ok(()),
             crate::diskfault::Outcome::ProceedWith(data) => {
                 let n = data.len().min(buf.len());
@@ -788,7 +795,8 @@ impl CdImage {
         if kind.is_data() {
             bail!("sector {sector} is in a data track");
         }
-        self.read_payload(sector, buf)
+        self.read_payload(sector, buf)?;
+        self.apply_read_fault(sector, buf)
     }
 
     /// Read one full 2352-byte raw frame at `sector`, whatever the track
@@ -801,21 +809,20 @@ impl CdImage {
             .with_context(|| format!("sector {sector} beyond end of disc"))?;
         match kind {
             TrackKind::Mode1_2352 | TrackKind::Mode2_2352 | TrackKind::Audio => {
-                self.read_payload(sector, buf)
+                self.read_payload(sector, buf)?;
             }
             TrackKind::Mode1_2048 => {
                 let mut data = [0u8; DATA_SECTOR_BYTES];
                 self.read_payload(sector, &mut data)?;
                 synthesize_mode1_sector(sector, &data, buf);
-                Ok(())
             }
             TrackKind::Mode2_2336 => {
                 let mut data = [0u8; MODE2_SECTOR_BYTES];
                 self.read_payload(sector, &mut data)?;
                 synthesize_mode2_sector(sector, &data, buf);
-                Ok(())
             }
         }
+        self.apply_read_fault(sector, buf)
     }
 
     /// Whether `sector` falls inside an audio track region.

@@ -1047,6 +1047,13 @@ impl HardDriveImage {
     /// reaches the image, which is only possible ahead of the write, not
     /// after (see [`crate::diskfault::FaultPolicySet::on_write`]).
     pub fn write_sector(&mut self, lba: u64, buf: &[u8]) -> std::io::Result<()> {
+        // Checked here too, not just inside `write_sector_real`: a fault
+        // policy's `DoneOk`/`ProceedWith` outcome below returns without
+        // ever reaching `write_sector_real`, which would otherwise let an
+        // active policy make a read-only session image look writable.
+        if self.is_read_only() {
+            return Err(Self::read_only_error());
+        }
         if self.fault.is_empty() {
             return self.write_sector_real(lba, buf);
         }
@@ -1086,12 +1093,30 @@ impl HardDriveImage {
         }
     }
 
+    fn is_read_only(&self) -> bool {
+        matches!(&self.backing, Backing::Session(image) if image.read_only())
+    }
+
+    fn read_only_error() -> std::io::Error {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "session disk is read-only",
+        )
+    }
+
+    /// Writes a sector that a fault policy already decided on (a held
+    /// reorder-queue write being released by a flush or by
+    /// `disk.fault.clear`) straight to the image, bypassing `write_sector`'s
+    /// own fault check -- re-entering it would let `drop`/`tear`/`corrupt`
+    /// roll again on data that already passed those checks once. See
+    /// `flush`'s use of `write_sector_real` for the same reasoning.
+    pub fn write_sector_replay(&mut self, lba: u64, buf: &[u8]) -> std::io::Result<()> {
+        self.write_sector_real(lba, buf)
+    }
+
     fn write_sector_real(&mut self, lba: u64, buf: &[u8]) -> std::io::Result<()> {
-        if matches!(&self.backing, Backing::Session(image) if image.read_only()) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "session disk is read-only",
-            ));
+        if self.is_read_only() {
+            return Err(Self::read_only_error());
         }
         if let Some(overlay) = &mut self.rdb_overlay {
             if lba < u64::from(CYL_SECTORS) {
@@ -2083,6 +2108,36 @@ mod tests {
     }
 
     #[test]
+    fn a_read_only_session_image_stays_read_only_under_an_active_fault_policy() {
+        let bytes = bare_partition_bytes(4);
+        let path = temp_image("fault-readonly.hdf", &bytes);
+        let mut drive = HardDriveImage::open_session(
+            &path,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
+        drive.set_session_read_only(true);
+        drive
+            .fault
+            .set(
+                None,
+                &serde_json::json!({"rules": [{"op": "write", "action": "drop"}]}),
+                1,
+            )
+            .unwrap();
+        let base = u64::from(CYL_SECTORS) + 10;
+        let err = drive
+            .write_sector(base, &[1u8; SECTOR_SIZE])
+            .expect_err("a read-only session image must reject writes even under a fault policy");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn a_drop_policy_leaves_the_image_file_unchanged() {
         let (path, mut drive, base) = fault_test_drive("fault-drop.hdf");
         drive
@@ -2245,7 +2300,41 @@ mod tests {
             .unwrap();
         assert!(drive.write_sector(base, &[1u8; SECTOR_SIZE]).is_err());
         assert!(drive.write_sector(base, &[2u8; SECTOR_SIZE]).is_err());
-        assert!(drive.fault.stats.cut);
+        assert!(drive.fault.cut);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn clearing_the_cutting_policy_un_cuts_while_clearing_another_policy_does_not() {
+        let (path, mut drive, base) = fault_test_drive("fault-cut-clear.hdf");
+        drive
+            .fault
+            .set(
+                Some("harmless".into()),
+                &serde_json::json!({"rules": [{"op": "read", "action": "delay", "ms": 1}]}),
+                1,
+            )
+            .unwrap();
+        drive
+            .fault
+            .set(
+                Some("cutter".into()),
+                &serde_json::json!({"rules": [{"action": "cut"}]}),
+                1,
+            )
+            .unwrap();
+        assert!(drive.write_sector(base, &[1u8; SECTOR_SIZE]).is_err());
+        assert!(drive.fault.cut);
+        drive.fault.clear(Some("harmless"));
+        assert!(
+            drive.fault.cut,
+            "clearing an unrelated policy must not release the cut latch"
+        );
+        drive.fault.clear(Some("cutter"));
+        assert!(
+            !drive.fault.cut,
+            "clearing the policy that actually cut the target must release the latch"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

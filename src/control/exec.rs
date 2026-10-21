@@ -3361,7 +3361,7 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
                             }
                             _ => {
                                 let _ = emu.bus_mut().with_hard_drive_image_mut(t, |img| {
-                                    img.write_sector(held.lba, &held.data)
+                                    img.write_sector_replay(held.lba, &held.data)
                                 });
                             }
                         }
@@ -3405,13 +3405,13 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
                 .map_err(CtlError::invalid_params)?;
             let stats = emu
                 .bus_mut()
-                .with_fault_policy_mut(&parsed_target, |fault| fault.stats);
+                .with_fault_policy_mut(&parsed_target, |fault| (fault.stats, fault.cut));
             match stats {
                 None => Err(CtlError::invalid_params(format!(
                     "target {}: no matching device/unit/media attached",
                     parsed_target.to_json()
                 ))),
-                Some(s) => Ok(json!({
+                Some((s, cut)) => Ok(json!({
                     "requests": s.requests,
                     "reads": s.reads,
                     "writes": s.writes,
@@ -3425,7 +3425,11 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
                     "corrupted": s.corrupted,
                     "errored": s.errored,
                     "delayed_ms": s.delayed_ms,
-                    "cut": s.cut,
+                    // Not `stats.cut`: that field was removed, since a
+                    // separate copy of the same latch let `reset_stats`
+                    // desync it from the real `fault.cut` (the actual
+                    // not_ready-everything gate) -- report the real one.
+                    "cut": cut,
                 })),
             }
         }
@@ -3643,11 +3647,16 @@ pub fn cd_record_value(record: &crate::cdtrace::CdCommandRecord) -> Value {
 
 /// Every target `disk.fault.list`/`disk.fault.clear` probe when called
 /// with no `target` at all ("every policy on every target"): every
-/// copperhf unit slot, both IDE slots, and the PCMCIA slot, filtered down
-/// to whichever actually resolve to an attached image right now.
-/// Probing-and-filtering rather than asking each board for "your
-/// attached units" directly keeps this one place in sync with
-/// `Bus::with_hard_drive_image_mut`'s own resolution rules instead of
+/// copperhf unit slot, both IDE slots, the PCMCIA slot, every SCSI unit
+/// slot (0..8, the widest of `Wd33c93`'s 8 and `A4091`'s 7), every
+/// floppy drive (0..4), and the CD drive -- filtered down to whichever
+/// actually resolve right now. Filtering through `Bus::
+/// with_fault_policy_mut` (not `with_hard_drive_image_mut`, which always
+/// returns `None` for `floppy`/`cd`) keeps every target kind `disk.fault.
+/// set` supports reachable by a blanket list/clear, not just the
+/// `HardDriveImage`-backed ones. Probing-and-filtering rather than
+/// asking each board for "your attached units" directly keeps this one
+/// place in sync with the bus's own resolution rules instead of
 /// duplicating them.
 fn every_disk_fault_target(emu: &mut Emulator) -> Vec<crate::diskfault::DiskFaultTarget> {
     use crate::diskfault::DiskFaultTarget as T;
@@ -3656,9 +3665,12 @@ fn every_disk_fault_target(emu: &mut Emulator) -> Vec<crate::diskfault::DiskFaul
         .collect();
     candidates.push(T::Pcmcia);
     candidates.extend((0..2).map(|unit| T::Ide { unit }));
+    candidates.extend((0..8).map(|unit| T::Scsi { unit }));
+    candidates.extend((0..4).map(|drive| T::Floppy { drive }));
+    candidates.push(T::Cd);
     candidates
         .into_iter()
-        .filter(|t| emu.bus_mut().with_hard_drive_image_mut(t, |_| ()).is_some())
+        .filter(|t| emu.bus_mut().with_fault_policy_mut(t, |_| ()).is_some())
         .collect()
 }
 
