@@ -24,6 +24,19 @@ pub(super) struct FloppyImage {
     pub(super) write_protected: bool,
     pub(super) legacy_extended_adf: bool,
     pub(super) backing: FloppyImageBacking,
+    /// `disk.fault.*`'s policy set (`docs/debugger/disk-fault.md`). Only
+    /// consulted for `FloppyImageData::StandardAdf` -- `Tracks` (extended
+    /// ADF / raw MFM) has no logical sector grid for a `lba` to name, so
+    /// `disk.fault.set` rejects it explicitly (`FloppyController::
+    /// drive_sector_model_error`) rather than silently installing a policy
+    /// the write/read hooks never consult. Unlike `HardDriveImage::fault`
+    /// (deliberately kept out of its serde shadow), this field derives
+    /// `Serialize`/`Deserialize` along with the rest of `FloppyImage`, so a
+    /// floppy's installed policies *do* survive `state.save`/`state.load`
+    /// for free -- ahead of the hard-drive-image kinds' own "Status" gap,
+    /// not a parity requirement this phase had to chase.
+    #[serde(default)]
+    pub(super) fault: crate::diskfault::FaultPolicySet,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -121,6 +134,7 @@ impl FloppyImage {
             write_protected: write_protected || protected,
             legacy_extended_adf,
             backing: FloppyImageBacking::Memory,
+            fault: crate::diskfault::FaultPolicySet::default(),
         })
     }
 
@@ -151,13 +165,78 @@ impl FloppyImage {
             write_protected,
             legacy_extended_adf,
             backing,
+            fault: crate::diskfault::FaultPolicySet::default(),
         })
     }
 
-    pub(super) fn track_stream(&self, track: usize) -> Option<TrackStream> {
+    /// Whether this image has a sector grid `disk.fault.*` can address --
+    /// only `StandardAdf`. `Tracks` (extended ADF / raw MFM) is a cell-timed
+    /// bitstream per track with no logical sector numbering outside what an
+    /// `AmigaDos`-decoded track happens to carry, and `RawMfm` has none at
+    /// all (mastered protection tracks, not filesystem-shaped data) -- see
+    /// this struct's `fault` field doc comment.
+    pub(super) fn has_sector_model(&self) -> bool {
+        matches!(self.data, FloppyImageData::StandardAdf(_))
+    }
+
+    /// Faulted read: like `HardDriveImage::read_sector`, decides nothing
+    /// before the real read (reading has no write-ordering hazard to
+    /// prevent) -- copies the track's sectors out of `adf` first, lets
+    /// `fault.on_read` corrupt/fail/serve-stale each one in turn (a `cut`/
+    /// `error` mid-track fails the whole track read, matching a real drive
+    /// losing the rest of its revolution when the head can't be trusted
+    /// partway through), then encodes whatever survived. Only reachable
+    /// for `StandardAdf` (`has_sector_model`); `Tracks` always goes through
+    /// `track_stream`'s original, fault-blind path below.
+    fn faulted_adf_track_words(&mut self, track: usize, adf_len: usize) -> Option<Vec<u16>> {
+        let FloppyImageData::StandardAdf(adf) = &self.data else {
+            return None;
+        };
+        let off = track * SECTORS_PER_TRACK * BYTES_PER_SECTOR;
+        if off + SECTORS_PER_TRACK * BYTES_PER_SECTOR > adf_len {
+            return None;
+        }
+        let mut track_bytes = adf[off..off + SECTORS_PER_TRACK * BYTES_PER_SECTOR].to_vec();
+        for sector in 0..SECTORS_PER_TRACK {
+            let lba = (track * SECTORS_PER_TRACK + sector) as u64;
+            let sec_off = sector * BYTES_PER_SECTOR;
+            let buf = &mut track_bytes[sec_off..sec_off + BYTES_PER_SECTOR];
+            match self.fault.on_read(lba, buf, BYTES_PER_SECTOR) {
+                crate::diskfault::Outcome::Proceed | crate::diskfault::Outcome::DoneOk => {}
+                crate::diskfault::Outcome::ProceedWith(data) => {
+                    let n = data.len().min(buf.len());
+                    buf[..n].copy_from_slice(&data[..n]);
+                }
+                // No hardware channel carries a per-sector read failure
+                // back through this path (real trackdisk.device detects a
+                // bad sector by its own checksum over data a real head
+                // misread, not a status line) -- modelled the same way a
+                // real bad sector would actually surface: the guest reads
+                // data that fails its own checksum, not a clean I/O error.
+                // `error`/`cut` therefore behave like maximal `corrupt`
+                // here rather than failing the track outright; flagged in
+                // the implementation report as a floppy-specific
+                // simplification, not a silent gap.
+                crate::diskfault::Outcome::Fail(_) => {
+                    for byte in buf.iter_mut() {
+                        *byte = !*byte;
+                    }
+                }
+            }
+        }
+        Some(encode_amigados_track(track, &track_bytes))
+    }
+
+    pub(super) fn track_stream(&mut self, track: usize) -> Option<TrackStream> {
         match &self.data {
             FloppyImageData::StandardAdf(adf) => {
-                Some(synthetic_track_stream(encode_adf_track(track, adf)))
+                if self.fault.is_empty() {
+                    return Some(synthetic_track_stream(encode_adf_track(track, adf)));
+                }
+                let adf_len = adf.len();
+                Some(synthetic_track_stream(
+                    self.faulted_adf_track_words(track, adf_len)?,
+                ))
             }
             FloppyImageData::Tracks(tracks) => {
                 let image_track = tracks.get(track)?.as_ref()?;

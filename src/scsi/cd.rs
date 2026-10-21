@@ -137,6 +137,13 @@ impl ScsiCdRom {
         self.play_end = 0;
     }
 
+    /// The mounted disc's image -- `disk.fault.*` target resolution
+    /// (`Bus::cd_image_mut`), reusing `Bus::scsi_cd_mut`'s own SCSI/ATAPI
+    /// board-chain search rather than a second one.
+    pub fn image_mut(&mut self) -> &mut CdImage {
+        &mut self.image
+    }
+
     /// Runtime disc swap: eject now and mount the new disc after the
     /// tray delay, raising the medium-change unit attention at mount.
     pub fn swap_disc(&mut self, image: CdImage, path: &Path) {
@@ -970,6 +977,37 @@ mod tests {
             SK_ILLEGAL_REQUEST,
             ASC_LBA_OUT_OF_RANGE,
         );
+        cleanup(&paths);
+    }
+
+    /// `disk.fault.*`'s read hook (`CdImage::read_data_sector`) through a
+    /// real SCSI READ(10): CD has a genuine hardware error channel (unlike
+    /// floppy), so `error` fails the command outright via sense data,
+    /// exactly as a real drive's medium-error response would reach the
+    /// driver -- `CdImage::read_data_sector`'s doc comment on why `error`
+    /// bails rather than inverting bytes the way floppy's "no error
+    /// channel" fallback does.
+    #[test]
+    fn a_fault_on_a_cd_target_fails_read10_with_a_medium_error() {
+        let (mut cd, paths) = mixed_disc();
+        cd.image_mut()
+            .fault
+            .set(
+                None,
+                &serde_json::json!({"rules": [{"op": "read", "lba": {"from": 0, "to": 0}, "action": "error", "code": "media"}]}),
+                1,
+            )
+            .unwrap();
+        check_sense(
+            &mut cd,
+            &[0x28, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+            SK_HARDWARE_ERROR,
+            0x00,
+        );
+        // A sector the policy doesn't select still reads clean.
+        let data = data_in(&mut cd, &[0x28, 0, 0, 0, 0, 1, 0, 0, 1, 0]);
+        assert!(data.iter().all(|&b| b == 1));
+        assert_eq!(cd.image_mut().fault.stats.errored, 1);
         cleanup(&paths);
     }
 

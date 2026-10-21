@@ -5937,9 +5937,9 @@ impl Bus {
 
     /// Resolves a `disk.fault.*` target to its backing
     /// [`crate::harddrive::HardDriveImage`] and runs `f` against it --
-    /// `None` if the target names a kind this phase does not resolve yet
-    /// (`floppy`/`cd`, see [`crate::diskfault::DiskFaultTarget`]'s doc
-    /// comment) or no device/unit/media matches. IDE checks `gayle`
+    /// `None` if the target is `floppy`/`cd` (neither is `HardDriveImage`-
+    /// backed; see [`Self::with_fault_policy_mut`]/[`Self::cd_image_mut`]
+    /// for those) or no device/unit/media matches. IDE checks `gayle`
     /// (A600/A1200) and `ide_a4000` (A4000) in turn since a machine
     /// profile only ever configures one of the two; SCSI checks `sdmac`
     /// (A3000-internal WD33C93) then the Zorro chain's A2091 (also
@@ -5987,6 +5987,40 @@ impl Bus {
                 None
             }
             T::Floppy { .. } | T::Cd => None,
+        }
+    }
+
+    /// `disk.fault.*` target resolution for `cd` -- the CD drive's image,
+    /// across both the SCSI and ATAPI paths `scsi_cd_mut` already
+    /// searches (A3000-internal/A2091/A4091 SCSI, then Gayle/A4000/
+    /// Zorro-IDE ATAPI), so this needs no board-chain traversal of its
+    /// own.
+    pub fn cd_image_mut(&mut self) -> Option<&mut crate::cdrom::CdImage> {
+        self.scsi_cd_mut().map(crate::scsi::ScsiCdRom::image_mut)
+    }
+
+    /// Resolves a `disk.fault.*` target to the [`crate::diskfault::
+    /// FaultPolicySet`] it owns -- every target kind, unlike
+    /// `with_hard_drive_image_mut` (`copperhf`/`pcmcia`/`ide`/`scsi`
+    /// only). `DiskFaultSet`/`List`/`Stats`/`ResetStats` only ever touch
+    /// the policy set itself, so they go through this; `DiskFaultClear`'s
+    /// held-write replay needs real write capability (which a policy set
+    /// alone can't give a `floppy` target), so it still resolves
+    /// `copperhf`/`pcmcia`/`ide`/`scsi` via `with_hard_drive_image_mut`
+    /// and `floppy` via `FloppyController::drive_write_held_sector`
+    /// directly (`cd` never holds a reorder queue at all -- read-only, see
+    /// `CdImage::read_data_sector`'s doc comment -- so it never needs a
+    /// replay path).
+    pub fn with_fault_policy_mut<R>(
+        &mut self,
+        target: &crate::diskfault::DiskFaultTarget,
+        f: impl FnOnce(&mut crate::diskfault::FaultPolicySet) -> R,
+    ) -> Option<R> {
+        use crate::diskfault::DiskFaultTarget as T;
+        match target {
+            T::Floppy { drive } => self.floppy.drive_fault_mut(*drive).map(f),
+            T::Cd => self.cd_image_mut().map(|img| f(&mut img.fault)),
+            _ => self.with_hard_drive_image_mut(target, |img| f(&mut img.fault)),
         }
     }
 

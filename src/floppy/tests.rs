@@ -4681,6 +4681,89 @@ fn memory_backed_extended_adf_write_exports_updated_track() -> Result<()> {
     Ok(())
 }
 
+/// `disk.fault.*`'s write hook (`FloppyController::finish_write_words`'s
+/// `StandardAdf` arm) must actually see a real guest write through the
+/// genuine DMA/MFM path, not just the pure `FaultPolicySet` engine in
+/// isolation -- drives one sector's write through the same CIA/DSKLEN/
+/// DMACON sequence `memory_backed_extended_adf_write_exports_updated_track`
+/// uses for the `Tracks` format, with a `drop` policy armed first, and
+/// checks the in-memory `StandardAdf` buffer never changed.
+#[test]
+fn a_drop_policy_on_a_standard_adf_floppy_leaves_the_sector_unchanged() -> Result<()> {
+    let mut ctrl = FloppyController::default();
+    ctrl.insert_memory_disk_image_bytes(0, vec![0u8; ADF_SIZE], "fault-drop.adf".into(), false)?;
+    ctrl.drive_fault_mut(0)
+        .expect("image just inserted")
+        .set(
+            None,
+            &serde_json::json!({"rules": [{"op": "write", "action": "drop"}]}),
+            1,
+        )
+        .unwrap();
+
+    let mut source = vec![0u8; SECTORS_PER_TRACK * BYTES_PER_SECTOR];
+    source.fill(0xA5);
+    let words = encode_amigados_track(0, &source);
+    let mut chip_ram = vec![0u8; words.len() * 2 + 2];
+    for (i, word) in words.iter().copied().enumerate() {
+        let [hi, lo] = word.to_be_bytes();
+        chip_ram[i * 2] = hi;
+        chip_ram[i * 2 + 1] = lo;
+    }
+
+    ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
+    ctrl.tick(MOTOR_READY_CCK, 0, &mut chip_ram);
+    ctrl.set_dskpt_low(0);
+    let len = DSKLEN_DMAEN | DSKLEN_WRITE | (words.len() as u16 & DSKLEN_MASK);
+    assert!(!ctrl.write_dsklen(len, 0));
+    assert!(!ctrl.write_dsklen(len, 0));
+    let dmacon = DMACON_DMAEN | DMACON_DISK;
+    while !ctrl.tick(ctrl.word_cck(), dmacon, &mut chip_ram) {}
+
+    // A track write covers all 11 sectors; a selector-less rule matches
+    // every one of them, not just the one this test cares about.
+    assert_eq!(
+        ctrl.drive_fault_mut(0).unwrap().stats.dropped,
+        SECTORS_PER_TRACK as u64
+    );
+    match &ctrl.drives[0].image.as_ref().unwrap().data {
+        FloppyImageData::StandardAdf(adf) => {
+            assert!(
+                adf[..SECTORS_PER_TRACK * BYTES_PER_SECTOR]
+                    .iter()
+                    .all(|&b| b == 0),
+                "a dropped write must never reach the in-memory image"
+            );
+        }
+        FloppyImageData::Tracks(_) => panic!("expected StandardAdf"),
+    }
+    Ok(())
+}
+
+/// `disk.fault.set` must reject a `floppy` target whose *currently
+/// inserted* image has no sector grid (extended ADF / raw MFM,
+/// `FloppyImageData::Tracks`) rather than silently installing a policy
+/// the write/read hooks never consult (`FloppyController::
+/// drive_has_sector_model`'s doc comment) -- `exec.rs`'s `DiskFaultSet`
+/// handler is what actually turns this into the control-protocol error;
+/// this proves the underlying signal it checks is correct.
+#[test]
+fn drive_has_sector_model_is_false_for_an_extended_adf_image() -> Result<()> {
+    let label = temp_path("fault-tracks.ext.adf");
+    let track_data = vec![0u8; SECTORS_PER_TRACK * BYTES_PER_SECTOR];
+    let image = ext2_track_image(0, (track_data.len() * 8) as u32, 1, &track_data);
+    let mut ctrl = FloppyController::default();
+    ctrl.insert_memory_disk_image_bytes(0, image, label, false)?;
+
+    assert_eq!(ctrl.drive_has_sector_model(0), Some(false));
+    assert_eq!(
+        ctrl.drive_has_sector_model(1),
+        None,
+        "no image at all is distinct from a Tracks-backed one"
+    );
+    Ok(())
+}
+
 #[test]
 fn writable_extended_adf_preserves_multi_revolution_raw_track_payload() -> Result<()> {
     let raw_words: [u16; 4] = [0x1111, 0x2222, 0x3333, 0x4444];
@@ -6195,6 +6278,7 @@ fn netplay_track_transfer_preserves_legacy_multi_revolution_and_empty_metadata()
         write_protected: false,
         legacy_extended_adf: true,
         backing: FloppyImageBacking::File,
+        fault: crate::diskfault::FaultPolicySet::default(),
     };
     if let FloppyImageData::Tracks(tracks) = &mut image.data {
         tracks.resize_with(168, || None);

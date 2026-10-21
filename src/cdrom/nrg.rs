@@ -124,6 +124,7 @@ pub(super) fn load(path: &Path) -> Result<CdImage> {
             sources: vec![source],
             extents,
         }),
+        fault: Box::new(crate::diskfault::FaultPolicySet::default()),
     })
 }
 

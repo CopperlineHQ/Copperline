@@ -102,6 +102,17 @@ pub struct CdImage {
     tracks: Vec<CdTrack>,
     total_sectors: u32,
     backend: Backend,
+    /// `disk.fault.*`'s policy set (`docs/debugger/disk-fault.md`). Live
+    /// only, like `HardDriveImage::fault` -- the manual `Serialize`/
+    /// `Deserialize` impls below don't touch it, so a loaded state always
+    /// comes back with no policy installed, same gap, same reason. Boxed
+    /// (unlike `HardDriveImage::fault`): `CdImage` lives inside
+    /// `ScsiTarget::CdRom`/`AtaDevice::Atapi`, whose sibling variants
+    /// (`Disk(ScsiDisk)`/`Disk(IdeDrive)`) are already smaller, so an
+    /// inline `FaultPolicySet` (`Stats`'s dozen-plus `u64` counters alone)
+    /// pushed those enums' largest-variant gap past clippy's
+    /// `large_enum_variant` threshold.
+    pub fault: Box<crate::diskfault::FaultPolicySet>,
 }
 
 /// Sector storage behind a `CdImage`: cue sheet files (or a bare ISO)
@@ -281,6 +292,7 @@ impl<'de> serde::Deserialize<'de> for CdImage {
                     tracks,
                     total_sectors,
                     backend: Backend::Bin(BinBackend { sources, extents }),
+                    fault: Box::new(crate::diskfault::FaultPolicySet::default()),
                 })
             }
             CdImageState::Chd { path } => state_path(&path, true)
@@ -333,6 +345,7 @@ impl CdImage {
             tracks,
             total_sectors,
             backend: Backend::Chd(Box::new(backend)),
+            fault: Box::new(crate::diskfault::FaultPolicySet::default()),
         })
     }
 
@@ -355,6 +368,7 @@ impl CdImage {
                 sector_count: sectors,
             }],
             total_sectors: sectors,
+            fault: Box::new(crate::diskfault::FaultPolicySet::default()),
             backend: Backend::Bin(BinBackend {
                 sources: vec![source],
                 extents: vec![Extent {
@@ -647,6 +661,7 @@ impl CdImage {
             tracks,
             total_sectors: disc,
             backend: Backend::Bin(BinBackend { sources, extents }),
+            fault: Box::new(crate::diskfault::FaultPolicySet::default()),
         })
     }
 
@@ -677,8 +692,41 @@ impl CdImage {
     }
 
     /// Read the 2048 bytes of user data in a data sector. Fails on audio
-    /// tracks.
+    /// tracks. Faulted exactly like `HardDriveImage::read_sector`: the real
+    /// read happens first (a read has no write-ordering hazard to guard),
+    /// then the policy set may corrupt/fail the result -- CD is read-only
+    /// medium, so only the read-side actions (`corrupt`/`error`/`delay`/
+    /// `cut`; `stale` shares the same not-yet-wired status
+    /// `FaultPolicySet::arm_stale`'s doc comment already carries) ever
+    /// reach this path; nothing calls `on_write` for a CD target at all,
+    /// so a policy rule selecting `op: write` against one is schema-valid
+    /// but unreachable rather than specially rejected.
     pub fn read_data_sector(
+        &mut self,
+        sector: u32,
+        buf: &mut [u8; DATA_SECTOR_BYTES],
+    ) -> Result<()> {
+        self.read_data_sector_real(sector, buf)?;
+        if self.fault.is_empty() {
+            return Ok(());
+        }
+        match self
+            .fault
+            .on_read(u64::from(sector), buf, DATA_SECTOR_BYTES)
+        {
+            crate::diskfault::Outcome::Proceed | crate::diskfault::Outcome::DoneOk => Ok(()),
+            crate::diskfault::Outcome::ProceedWith(data) => {
+                let n = data.len().min(buf.len());
+                buf[..n].copy_from_slice(&data[..n]);
+                Ok(())
+            }
+            crate::diskfault::Outcome::Fail(code) => {
+                bail!("disk fault: {}", code.as_str())
+            }
+        }
+    }
+
+    fn read_data_sector_real(
         &mut self,
         sector: u32,
         buf: &mut [u8; DATA_SECTOR_BYTES],

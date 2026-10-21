@@ -3,12 +3,16 @@
 //! Deterministic device-level fault injection for image-backed block
 //! devices (`docs/debugger/disk-fault.md`): dropped/torn/reordered
 //! writes, ignored flushes, stale/corrupt reads, media errors, delays
-//! and simulated power-cuts. Installed on [`crate::harddrive::HardDriveImage`]
-//! itself, so every controller that already shares that sector-I/O layer
-//! (copperhf, IDE, SCSI, PCMCIA) gets the same policy engine for free --
-//! see `HardDriveImage::read_sector`/`write_sector`/`flush`. `floppy` and
-//! `cd` targets use a different image-backing path and are not covered
-//! yet (`docs/debugger/disk-fault.md`'s "Status").
+//! and simulated power-cuts. This type (`FaultPolicySet`) is the one
+//! engine every target kind installs: on
+//! [`crate::harddrive::HardDriveImage`] itself for copperhf/IDE/SCSI/
+//! PCMCIA (every controller that already shares that sector-I/O layer
+//! gets it for free -- see `HardDriveImage::read_sector`/`write_sector`/
+//! `flush`), on `FloppyImage` (`src/floppy/formats.rs`, `StandardAdf`
+//! images only -- extended ADF/raw MFM has no sector grid to fault, see
+//! `FloppyImage::has_sector_model`'s doc comment) for `floppy`, and on
+//! [`crate::cdrom::CdImage`] (read-side actions only -- CD is read-only
+//! medium) for `cd`.
 //!
 //! Every random choice (probability tests, reorder release order, corrupt
 //! bit positions) is drawn from a generator keyed on the policy's seed and
@@ -927,10 +931,15 @@ impl FaultPolicySet {
 }
 
 /// A `disk.fault.*` `target` parameter, resolved by
-/// `Bus::with_hard_drive_image_mut`. `Floppy`/`Cd` parse successfully (the
-/// wire schema is honoured) but have no resolution yet -- `floppy`/`cd`
-/// use a different image-backing path than `HardDriveImage`, deferred to
-/// a follow-up (`docs/debugger/disk-fault.md`'s "Status").
+/// `Bus::with_fault_policy_mut` (every kind) and `Bus::
+/// with_hard_drive_image_mut` (`copperhf`/`pcmcia`/`ide`/`scsi`, which
+/// also need real I/O capability for `disk.fault.clear`'s held-write
+/// replay, not just the policy set). `Floppy` additionally needs
+/// `FloppyController::drive_has_sector_model` checked at `disk.fault.set`
+/// time: a `Tracks`-backed (extended ADF/raw MFM) image has no sector
+/// grid to fault, so installing a policy on one would silently never
+/// fire rather than erroring -- see `FloppyImage::has_sector_model`'s doc
+/// comment.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DiskFaultTarget {
     Copperhf { unit: usize },
@@ -981,19 +990,6 @@ impl DiskFaultTarget {
             }
             DiskFaultTarget::Cd => serde_json::json!({"kind": "cd"}),
         }
-    }
-
-    /// Whether this phase's `Bus::with_hard_drive_image_mut` can reach a
-    /// real device for this target at all (independent of whether one
-    /// happens to be attached right now).
-    pub fn supported(&self) -> bool {
-        matches!(
-            self,
-            DiskFaultTarget::Copperhf { .. }
-                | DiskFaultTarget::Pcmcia
-                | DiskFaultTarget::Ide { .. }
-                | DiskFaultTarget::Scsi { .. }
-        )
     }
 }
 

@@ -3303,17 +3303,22 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
         } => {
             let parsed_target = crate::diskfault::DiskFaultTarget::from_json(target)
                 .map_err(CtlError::invalid_params)?;
-            if !parsed_target.supported() {
-                return Err(CtlError::invalid_params(format!(
-                    "target {}: not yet supported by disk.fault (floppy/cd targets \
-                     are a follow-up; copperhf/pcmcia/ide/scsi are implemented)",
-                    parsed_target.to_json()
-                )));
+            if let crate::diskfault::DiskFaultTarget::Floppy { drive } = &parsed_target {
+                match emu.bus_mut().floppy.drive_has_sector_model(*drive) {
+                    Some(true) | None => {} // None: no image yet -- the generic "no matching device/unit/media attached" reply below covers it.
+                    Some(false) => {
+                        return Err(CtlError::invalid_params(format!(
+                            "target {}: the inserted image is extended ADF/raw MFM, which has \
+                             no sector grid for disk.fault to address (StandardAdf images only)",
+                            parsed_target.to_json()
+                        )));
+                    }
+                }
             }
             let result = emu
                 .bus_mut()
-                .with_hard_drive_image_mut(&parsed_target, |img| {
-                    img.fault.set(id.clone(), policy, *seed)
+                .with_fault_policy_mut(&parsed_target, |fault| {
+                    fault.set(id.clone(), policy, *seed)
                 });
             match result {
                 None => Err(CtlError::invalid_params(format!(
@@ -3338,7 +3343,7 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             for t in &targets {
                 if let Some((ids, released)) = emu
                     .bus_mut()
-                    .with_hard_drive_image_mut(t, |img| img.fault.clear(id.as_deref()))
+                    .with_fault_policy_mut(t, |fault| fault.clear(id.as_deref()))
                 {
                     for held in released {
                         // `on_clear: release` (the default): replay held
@@ -3346,10 +3351,20 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
                         // flush release -- `disk.fault.clear` must leave
                         // the image exactly as a flush would have, not
                         // quietly discard data the policy only meant to
-                        // delay.
-                        let _ = emu.bus_mut().with_hard_drive_image_mut(t, |img| {
-                            img.write_sector(held.lba, &held.data)
-                        });
+                        // delay. `cd` never reaches here: read-only, so it
+                        // never holds a reorder queue to release.
+                        match t {
+                            crate::diskfault::DiskFaultTarget::Floppy { drive } => {
+                                emu.bus_mut()
+                                    .floppy
+                                    .drive_write_held_sector(*drive, held.lba, &held.data);
+                            }
+                            _ => {
+                                let _ = emu.bus_mut().with_hard_drive_image_mut(t, |img| {
+                                    img.write_sector(held.lba, &held.data)
+                                });
+                            }
+                        }
                     }
                     cleared.extend(ids);
                 }
@@ -3365,8 +3380,8 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             };
             let mut faults = Vec::new();
             for t in &targets {
-                emu.bus_mut().with_hard_drive_image_mut(t, |img| {
-                    for policy in &img.fault.policies {
+                emu.bus_mut().with_fault_policy_mut(t, |fault| {
+                    for policy in &fault.policies {
                         faults.push(json!({
                             "id": policy.id,
                             "target": t.to_json(),
@@ -3390,7 +3405,7 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
                 .map_err(CtlError::invalid_params)?;
             let stats = emu
                 .bus_mut()
-                .with_hard_drive_image_mut(&parsed_target, |img| img.fault.stats);
+                .with_fault_policy_mut(&parsed_target, |fault| fault.stats);
             match stats {
                 None => Err(CtlError::invalid_params(format!(
                     "target {}: no matching device/unit/media attached",
@@ -3418,7 +3433,7 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             let parsed_target = crate::diskfault::DiskFaultTarget::from_json(target)
                 .map_err(CtlError::invalid_params)?;
             emu.bus_mut()
-                .with_hard_drive_image_mut(&parsed_target, |img| img.fault.reset_stats());
+                .with_fault_policy_mut(&parsed_target, |fault| fault.reset_stats());
             Ok(json!({}))
         }
         CoreOp::HeatMapSet { window } => {
