@@ -102,11 +102,10 @@ pub struct CdImage {
     tracks: Vec<CdTrack>,
     total_sectors: u32,
     backend: Backend,
-    /// `disk.fault.*`'s policy set (`docs/debugger/disk-fault.md`). Live
-    /// only, like `HardDriveImage::fault` -- the manual `Serialize`/
-    /// `Deserialize` impls below don't touch it, so a loaded state always
-    /// comes back with no policy installed, same gap, same reason. Boxed
-    /// (unlike `HardDriveImage::fault`): `CdImage` lives inside
+    /// `disk.fault.*`'s policy set (`docs/debugger/disk-fault.md`),
+    /// including it -- part of `CdImageState` (`state.save`/
+    /// `state.load`), see that enum's own `fault` field doc comment.
+    /// Boxed (unlike `HardDriveImage::fault`): `CdImage` lives inside
     /// `ScsiTarget::CdRom`/`AtaDevice::Atapi`, whose sibling variants
     /// (`Disk(ScsiDisk)`/`Disk(IdeDrive)`) are already smaller, so an
     /// inline `FaultPolicySet` (`Stats`'s dozen-plus `u64` counters alone)
@@ -232,7 +231,11 @@ impl SourceSpec {
 
 /// Serde shadow of `CdImage`: the image files are read-only, so only
 /// their paths are stored and deserialization reopens them (a CHD also
-/// re-reads its header and track metadata).
+/// re-reads its header and track metadata). `fault` travels regardless
+/// of backend -- `disk.fault.*`'s own requirement ("`state.save`
+/// includes the held-write queues, rule counters and generator state"),
+/// `#[serde(default)]` per variant so a state saved before this field
+/// existed still loads, with no policies installed.
 #[derive(serde::Serialize, serde::Deserialize)]
 enum CdImageState {
     Bin {
@@ -240,9 +243,13 @@ enum CdImageState {
         tracks: Vec<CdTrack>,
         extents: Vec<Extent>,
         total_sectors: u32,
+        #[serde(default)]
+        fault: Box<crate::diskfault::FaultPolicySet>,
     },
     Chd {
         path: PathBuf,
+        #[serde(default)]
+        fault: Box<crate::diskfault::FaultPolicySet>,
     },
 }
 
@@ -259,9 +266,11 @@ impl serde::Serialize for CdImage {
                 tracks: self.tracks.clone(),
                 extents: bin.extents.clone(),
                 total_sectors: self.total_sectors,
+                fault: self.fault.clone(),
             },
             Backend::Chd(chd) => CdImageState::Chd {
                 path: state_path(chd.path(), false).map_err(serde::ser::Error::custom)?,
+                fault: self.fault.clone(),
             },
         }
         .serialize(serializer)
@@ -276,6 +285,7 @@ impl<'de> serde::Deserialize<'de> for CdImage {
                 tracks,
                 extents,
                 total_sectors,
+                fault,
             } => {
                 let sources = sources
                     .iter()
@@ -292,11 +302,15 @@ impl<'de> serde::Deserialize<'de> for CdImage {
                     tracks,
                     total_sectors,
                     backend: Backend::Bin(BinBackend { sources, extents }),
-                    fault: Box::new(crate::diskfault::FaultPolicySet::default()),
+                    fault,
                 })
             }
-            CdImageState::Chd { path } => state_path(&path, true)
+            CdImageState::Chd { path, fault } => state_path(&path, true)
                 .and_then(|p| Self::load_chd(&p))
+                .map(|mut img| {
+                    img.fault = fault;
+                    img
+                })
                 .map_err(|e| {
                     serde::de::Error::custom(format!(
                         "reopening CD image {}: {e:#}",

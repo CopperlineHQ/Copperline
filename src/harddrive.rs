@@ -94,10 +94,9 @@ pub struct HardDriveImage {
     overlay_write_warned: bool,
     /// Lowercase bus tag ("ide"/"scsi") for log messages.
     bus_name: &'static str,
-    /// Live only -- not part of `HardDriveImageState`/`state.save` yet
-    /// (see `docs/debugger/disk-fault.md`'s "Status"): a loaded state
-    /// always comes back with no policies installed, same as a freshly
-    /// opened image.
+    /// `disk.fault.*`'s installed policies -- part of `HardDriveImageState`
+    /// (`state.save`/`state.load`), see that struct's own `fault` field
+    /// doc comment.
     pub fault: crate::diskfault::FaultPolicySet,
 }
 
@@ -135,6 +134,15 @@ struct HardDriveImageState<P = PathBuf, B = Vec<u8>, S = SessionImage> {
     /// backing, and for a write-protected CHD.
     #[serde(default)]
     chd_overlay: Option<BTreeMap<u64, Vec<u8>>>,
+    /// `disk.fault.*`'s installed policies, counters and in-flight state
+    /// (`docs/debugger/disk-fault.md`): the proposal's own requirement --
+    /// "`state.save` includes the held-write queues, rule counters and
+    /// generator state ... so a fault scenario replays exactly from a
+    /// snapshot." `#[serde(default)]` so a state saved before this field
+    /// existed still loads, with no policies installed, same as a freshly
+    /// opened image.
+    #[serde(default)]
+    fault: crate::diskfault::FaultPolicySet,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -184,6 +192,7 @@ impl serde::Serialize for HardDriveImage {
                 })?,
                 _ => None,
             },
+            fault: self.fault.clone(),
         }
         .serialize(serializer)
     }
@@ -203,7 +212,7 @@ impl<'de> serde::Deserialize<'de> for HardDriveImage {
                     rdb_overlay: state.rdb_overlay,
                     overlay_write_warned: state.overlay_write_warned,
                     bus_name,
-                    fault: crate::diskfault::FaultPolicySet::default(),
+                    fault: state.fault,
                 });
             }
             #[cfg(target_arch = "wasm32")]
@@ -260,7 +269,7 @@ impl<'de> serde::Deserialize<'de> for HardDriveImage {
             rdb_overlay: state.rdb_overlay,
             overlay_write_warned: state.overlay_write_warned,
             bus_name,
-            fault: crate::diskfault::FaultPolicySet::default(),
+            fault: state.fault,
         })
     }
 }
@@ -1383,6 +1392,7 @@ mod tests {
                 _ => unreachable!(),
             },
             chd_overlay: None,
+            fault: original.fault.clone(),
         };
         assert_eq!(encoded, bincode::serialize(&owned).unwrap());
         original.write_sector(lba, &[0x5A; SECTOR_SIZE]).unwrap();
@@ -1706,6 +1716,7 @@ mod tests {
                 writable: false,
             }),
             chd_overlay: None,
+            fault: Default::default(),
         };
         let bytes = bincode::serialize(&state).unwrap();
         let image: HardDriveImage = bincode::deserialize(&bytes).unwrap();
@@ -2251,6 +2262,62 @@ mod tests {
         // exactly the "a build/session that never touches `disk.fault`
         // pays nothing" contract the rest of this phase assumes.
         assert_eq!(drive.fault.stats.requests, 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `disk.fault.*`'s own requirement: "`state.save` includes the
+    /// held-write queues, rule counters and generator state ... so a
+    /// fault scenario replays exactly from a snapshot." Arms `reorder`,
+    /// holds a write in it (never committed to the file), round-trips
+    /// the whole `HardDriveImage` through `bincode` the same way
+    /// `serde_reopens_file_backed_image_and_serves_same_sectors` proves
+    /// an ordinary image survives, then checks the restored handle still
+    /// holds that exact write -- not just that `policies.len()` matches,
+    /// which a bug re-creating empty policies on load could satisfy
+    /// without actually carrying the queued data.
+    #[test]
+    fn a_held_reorder_write_survives_a_state_round_trip() {
+        let (path, mut drive, base) = fault_test_drive("fault-serde.hdf");
+        drive
+            .fault
+            .set(
+                None,
+                &serde_json::json!({"rules": [{"op": "write", "action": "reorder", "window": 4}]}),
+                1,
+            )
+            .unwrap();
+        drive.write_sector(base, &[0x99u8; SECTOR_SIZE]).unwrap();
+
+        let encoded = bincode::serialize(&drive).unwrap();
+        let mut restored: HardDriveImage = bincode::deserialize(&encoded).unwrap();
+
+        assert_eq!(restored.fault.policies.len(), 1);
+        assert_eq!(restored.fault.stats.reordered, 1);
+
+        // Not on disk: the restored handle's own backing file still has
+        // the original zeroed content.
+        let mut on_disk = vec![0u8; SECTOR_SIZE];
+        restored.read_sector_real(base, &mut on_disk).unwrap();
+        assert!(
+            on_disk.iter().all(|&b| b == 0),
+            "the held write must still not be on disk after a state round trip"
+        );
+
+        // The restored policy's own reorder queue still answers the read,
+        // the same "a write cache would answer from itself" behaviour the
+        // original handle had before the round trip.
+        let mut live = vec![0u8; SECTOR_SIZE];
+        restored.read_sector(base, &mut live).unwrap();
+        assert_eq!(live, vec![0x99u8; SECTOR_SIZE]);
+
+        restored.flush().unwrap();
+        let mut after = vec![0u8; SECTOR_SIZE];
+        restored.read_sector_real(base, &mut after).unwrap();
+        assert_eq!(
+            after,
+            vec![0x99u8; SECTOR_SIZE],
+            "flush on the restored handle must still release the queue"
+        );
         let _ = std::fs::remove_file(&path);
     }
 }
