@@ -2449,7 +2449,13 @@ impl FloppyController {
                         let mut kept = Vec::with_capacity(sectors.len());
                         for (sector, data) in sectors {
                             let lba = (track * SECTORS_PER_TRACK + sector) as u64;
-                            match fault.on_write(lba, &data, BYTES_PER_SECTOR) {
+                            // `stale`'s pre-write capture -- `image_data`
+                            // is still this sector's old content, the
+                            // same buffer the tear-tail splice below reads
+                            // from for the same reason.
+                            let off = adf_sector_offset(track, sector);
+                            let pre_write = &image_data[off..off + BYTES_PER_SECTOR];
+                            match fault.on_write(lba, &data, BYTES_PER_SECTOR, pre_write) {
                                 crate::diskfault::Outcome::Proceed => kept.push((sector, data)),
                                 // `drop`/`reorder`: not committed this write.
                                 crate::diskfault::Outcome::DoneOk => {}

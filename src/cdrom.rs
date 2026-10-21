@@ -696,11 +696,12 @@ impl CdImage {
     /// read happens first (a read has no write-ordering hazard to guard),
     /// then the policy set may corrupt/fail the result -- CD is read-only
     /// medium, so only the read-side actions (`corrupt`/`error`/`delay`/
-    /// `cut`; `stale` shares the same not-yet-wired status
-    /// `FaultPolicySet::arm_stale`'s doc comment already carries) ever
-    /// reach this path; nothing calls `on_write` for a CD target at all,
-    /// so a policy rule selecting `op: write` against one is schema-valid
-    /// but unreachable rather than specially rejected.
+    /// `cut`) ever reach this path; nothing calls `on_write` for a CD
+    /// target at all, so a policy rule selecting `op: write` against one
+    /// is schema-valid but unreachable rather than specially rejected --
+    /// `stale` in particular can never arm here either, since arming is
+    /// `on_write`'s doing (`FaultPolicySet::on_write`'s `Action::Stale`
+    /// arm) and nothing ever writes to a CD target to trigger it.
     pub fn read_data_sector(
         &mut self,
         sector: u32,

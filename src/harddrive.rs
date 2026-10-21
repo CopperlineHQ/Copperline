@@ -1041,7 +1041,20 @@ impl HardDriveImage {
         if self.fault.is_empty() {
             return self.write_sector_real(lba, buf);
         }
-        match self.fault.on_write(lba, buf, SECTOR_SIZE) {
+        // Only `stale` actually needs this (to arm what a later read
+        // serves back); every other action ignores it. Read unconditionally
+        // rather than only when a `stale` rule happens to be installed --
+        // simpler, and this whole branch already only runs with some
+        // policy active. A sector that has never been written (a fresh
+        // sparse image) has nothing meaningful to go stale to, so a read
+        // failure here is not itself a write failure -- an empty
+        // `pre_write` just means `stale` has nothing to arm this time.
+        let mut pre_write = [0u8; SECTOR_SIZE];
+        let pre_write: &[u8] = match self.read_sector_real(lba, &mut pre_write) {
+            Ok(()) => &pre_write,
+            Err(_) => &[],
+        };
+        match self.fault.on_write(lba, buf, SECTOR_SIZE, pre_write) {
             crate::diskfault::Outcome::Proceed => self.write_sector_real(lba, buf),
             crate::diskfault::Outcome::DoneOk => Ok(()),
             crate::diskfault::Outcome::ProceedWith(data) if data.len() >= SECTOR_SIZE => {
@@ -2142,6 +2155,72 @@ mod tests {
             after,
             vec![0x42u8; SECTOR_SIZE],
             "flush must release the held write to disk"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `stale` arms on the write that matches it (`FaultPolicySet::
+    /// on_write`'s `Action::Stale` arm, fed `write_sector`'s own
+    /// pre-write read) and is consumed by the next `count` reads
+    /// (`FaultPolicySet::on_read`'s stale-pending scan) before reverting
+    /// to the real, already-committed data -- "a drive that acknowledged
+    /// before committing": the write itself *does* land for real (unlike
+    /// `reorder`, nothing holds it back), only what reads see of it lags.
+    #[test]
+    fn a_stale_policy_serves_pre_write_bytes_for_exactly_count_reads() {
+        let (path, mut drive, base) = fault_test_drive("fault-stale.hdf");
+        drive
+            .fault
+            .set(
+                None,
+                &serde_json::json!({"rules": [{"op": "write", "action": "stale", "count": 2}]}),
+                1,
+            )
+            .unwrap();
+        drive.write_sector(base, &[0x7Eu8; SECTOR_SIZE]).unwrap();
+
+        // The write itself landed for real -- a reopened handle (no
+        // policy attached) sees the new data immediately.
+        let mut reopened = HardDriveImage::open(
+            &path,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
+        let mut on_disk = vec![0u8; SECTOR_SIZE];
+        reopened.read_sector(base, &mut on_disk).unwrap();
+        assert_eq!(
+            on_disk,
+            vec![0x7Eu8; SECTOR_SIZE],
+            "stale only lags what reads through the policy see, not the write itself"
+        );
+
+        // The first two reads through the faulted drive see the old
+        // (zeroed) content.
+        for n in 1..=2 {
+            let mut sector = vec![0xFFu8; SECTOR_SIZE];
+            drive.read_sector(base, &mut sector).unwrap();
+            assert!(
+                sector.iter().all(|&b| b == 0),
+                "read {n} should still see the pre-write bytes"
+            );
+        }
+        assert_eq!(drive.fault.stats.stale_served, 2);
+
+        // The third read reverts to the real, already-committed data.
+        let mut sector = vec![0u8; SECTOR_SIZE];
+        drive.read_sector(base, &mut sector).unwrap();
+        assert_eq!(
+            sector,
+            vec![0x7Eu8; SECTOR_SIZE],
+            "the count is exhausted; reads must see the real data again"
+        );
+        assert_eq!(
+            drive.fault.stats.stale_served, 2,
+            "not consumed a third time"
         );
         let _ = std::fs::remove_file(&path);
     }

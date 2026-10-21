@@ -696,7 +696,23 @@ impl FaultPolicySet {
     /// `disk.fault.list`'s hit counts -- `list`'s counts come from
     /// `Rule::state.hits` directly, `events` is for `events.subscribe`).
     #[allow(clippy::too_many_arguments)]
-    pub fn on_write(&mut self, lba: u64, data: &[u8], sector_bytes: usize) -> Outcome {
+    /// `pre_write` is the sector's content immediately before this write
+    /// commits -- the caller's responsibility to read, since only it
+    /// knows how (and whether it already has to, e.g. `tear`'s `at:
+    /// bytes` splice reads it too). Only consulted for a matched `Stale`
+    /// rule, to arm what `on_read` serves back; every other action
+    /// ignores it. `data`/`sector_bytes` describe exactly one sector per
+    /// call in every current caller (`HardDriveImage::write_sector`,
+    /// the floppy write hook's per-sector loop), so `stale_pending` is
+    /// keyed on this call's single `lba` -- a future multi-sector caller
+    /// would need to call this once per sector, not once per request.
+    pub fn on_write(
+        &mut self,
+        lba: u64,
+        data: &[u8],
+        sector_bytes: usize,
+        pre_write: &[u8],
+    ) -> Outcome {
         if self.cut {
             return Outcome::Fail(ErrorCode::NotReady);
         }
@@ -773,7 +789,15 @@ impl FaultPolicySet {
                     }
                     return Outcome::Fail(ErrorCode::NotReady);
                 }
-                Action::Ignore { .. } | Action::Stale { .. } => {}
+                Action::Stale { count } => {
+                    if count > 0 {
+                        self.rule_mut(loc)
+                            .state
+                            .stale_pending
+                            .insert(lba, (count, pre_write.to_vec()));
+                    }
+                }
+                Action::Ignore { .. } => {}
             }
         }
         outcome
@@ -798,6 +822,36 @@ impl FaultPolicySet {
                     return Outcome::ProceedWith(data.to_vec());
                 }
             }
+        }
+        // `stale` (armed by a prior matching write, `on_write`'s `Action::
+        // Stale` arm): serves the pre-write bytes for `count` more reads,
+        // then reverts to the committed data -- found first via an
+        // immutable scan so the actual decrement/removal below doesn't
+        // need a second mutable borrow of `self.policies` alongside it.
+        let mut stale_hit = None;
+        'find_stale: for (pi, policy) in self.policies.iter().enumerate() {
+            for (ri, rule) in policy.rules.iter().enumerate() {
+                if rule.state.stale_pending.contains_key(&lba) {
+                    stale_hit = Some((pi, ri));
+                    break 'find_stale;
+                }
+            }
+        }
+        if let Some((pi, ri)) = stale_hit {
+            let rule = &mut self.policies[pi].rules[ri];
+            let (remaining, bytes) = rule
+                .state
+                .stale_pending
+                .get_mut(&lba)
+                .expect("just found by the scan above");
+            let n = bytes.len().min(data.len());
+            let served = bytes[..n].to_vec();
+            *remaining -= 1;
+            if *remaining == 0 {
+                rule.state.stale_pending.remove(&lba);
+            }
+            self.stats.stale_served += 1;
+            return Outcome::ProceedWith(served);
         }
         let locs = self.find_rule(Op::Read, lba, count, seq.wrapping_mul(7).wrapping_add(1));
         let mut out = data.to_vec();
@@ -838,17 +892,6 @@ impl FaultPolicySet {
         }
         outcome
     }
-
-    /// `stale`'s own trigger is "after a sector is written" rather than a
-    /// direct read-time rule match, so [`Self::on_write`] calls this once
-    /// the real write has landed (the caller's responsibility -- see
-    /// `HardDriveImage::write_sector`) to arm the pending-stale record,
-    /// and [`Self::on_read`] would need to consult it; wiring the actual
-    /// read-time substitution is left to a follow-up once a real `stale`
-    /// test exists to verify the arm/consume sequencing against, per this
-    /// phase's scope (flagged in the implementation report rather than
-    /// guessed at silently).
-    pub fn arm_stale(&mut self, _lba: u64, _pre_write: &[u8], _count: u64) {}
 
     pub fn on_flush(&mut self) -> Outcome {
         if self.cut {
@@ -1022,7 +1065,7 @@ mod tests {
             1,
         )
         .unwrap();
-        let outcome = set.on_write(0, &[0u8; 512], 512);
+        let outcome = set.on_write(0, &[0u8; 512], 512, &[]);
         assert!(matches!(outcome, Outcome::DoneOk));
         assert_eq!(set.stats.dropped, 1);
         assert_eq!(set.pending_events.len(), 1);
@@ -1038,7 +1081,7 @@ mod tests {
         )
         .unwrap();
         let data = vec![0xAAu8; 1024];
-        let outcome = set.on_write(0, &data, 512);
+        let outcome = set.on_write(0, &data, 512, &[]);
         match outcome {
             Outcome::ProceedWith(out) => assert_eq!(out.len(), 512),
             other => panic!(
@@ -1058,7 +1101,7 @@ mod tests {
             1,
         )
         .unwrap();
-        let outcome = set.on_write(0, &[0xAAu8; 512], 512);
+        let outcome = set.on_write(0, &[0xAAu8; 512], 512, &[]);
         assert!(matches!(outcome, Outcome::DoneOk));
     }
 
@@ -1099,14 +1142,17 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            set.on_write(0, &[0u8; 512], 512),
+            set.on_write(0, &[0u8; 512], 512, &[]),
             Outcome::Proceed
         ));
         assert!(matches!(
-            set.on_write(0, &[0u8; 512], 512),
+            set.on_write(0, &[0u8; 512], 512, &[]),
             Outcome::Proceed
         ));
-        assert!(matches!(set.on_write(0, &[0u8; 512], 512), Outcome::DoneOk));
+        assert!(matches!(
+            set.on_write(0, &[0u8; 512], 512, &[]),
+            Outcome::DoneOk
+        ));
     }
 
     #[test]
@@ -1115,7 +1161,7 @@ mod tests {
         set.set(None, &policy(serde_json::json!([{"action": "cut"}])), 1)
             .unwrap();
         assert!(matches!(
-            set.on_write(0, &[0u8; 512], 512),
+            set.on_write(0, &[0u8; 512], 512, &[]),
             Outcome::Fail(ErrorCode::NotReady)
         ));
         assert!(matches!(
@@ -1124,7 +1170,7 @@ mod tests {
         ));
         set.clear(None);
         assert!(matches!(
-            set.on_write(0, &[0u8; 512], 512),
+            set.on_write(0, &[0u8; 512], 512, &[]),
             Outcome::Proceed
         ));
     }
@@ -1142,7 +1188,7 @@ mod tests {
             )
             .unwrap();
             (0..50)
-                .map(|i| matches!(set.on_write(i, &[0u8; 512], 512), Outcome::DoneOk))
+                .map(|i| matches!(set.on_write(i, &[0u8; 512], 512, &[]), Outcome::DoneOk))
                 .collect::<Vec<_>>()
         };
         assert_eq!(run(), run());
@@ -1158,7 +1204,10 @@ mod tests {
         )
         .unwrap();
         let new_data = vec![0x42u8; 512];
-        assert!(matches!(set.on_write(5, &new_data, 512), Outcome::DoneOk));
+        assert!(matches!(
+            set.on_write(5, &new_data, 512, &[]),
+            Outcome::DoneOk
+        ));
         assert_eq!(set.stats.reordered, 1);
         let mut buf = vec![0u8; 512];
         let outcome = set.on_read(5, &mut buf, 512);
@@ -1175,8 +1224,8 @@ mod tests {
             1,
         )
         .unwrap();
-        set.on_write(1, &[1u8; 512], 512);
-        set.on_write(2, &[2u8; 512], 512);
+        set.on_write(1, &[1u8; 512], 512, &[]);
+        set.on_write(2, &[2u8; 512], 512, &[]);
         assert!(matches!(set.on_flush(), Outcome::Proceed));
         let released = set.take_release_on_flush();
         assert_eq!(released.len(), 2);
