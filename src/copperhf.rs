@@ -808,11 +808,6 @@ impl CopperhfBoard {
         mask
     }
 
-    /// The file names of the units' images, in unit order, for naming the
-    /// machine's media. The unit table belongs to the worker thread while
-    /// I/O is in flight, so this only answers while the board is quiesced
-    /// (as it is for a save state) and reports nothing otherwise rather
-    /// than waiting on the worker.
     /// Runs `f` against unit `unit`'s backing image, for `disk.fault.*`
     /// (`{"kind": "copperhf", "unit": N}`). `try_lock`, not a blocking
     /// lock, matching [`Self::unit_image_names`]'s own caution around the
@@ -829,6 +824,11 @@ impl CopperhfBoard {
         Some(f(&mut disk.disk))
     }
 
+    /// The file names of the units' images, in unit order, for naming the
+    /// machine's media. The unit table belongs to the worker thread while
+    /// I/O is in flight, so this only answers while the board is quiesced
+    /// (as it is for a save state) and reports nothing otherwise rather
+    /// than waiting on the worker.
     pub fn unit_image_names(&self) -> Vec<String> {
         let Ok(units) = self.units.try_lock() else {
             return Vec::new();

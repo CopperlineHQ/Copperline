@@ -742,8 +742,13 @@ impl CdImage {
                 buf[..n].copy_from_slice(&data[..n]);
                 Ok(())
             }
+            // Not `bail!`: a plain string error can't be told apart from
+            // any other read failure, so a caller wanting the exact code
+            // (`crate::diskfault::fault_error_code_anyhow`, used by the
+            // SCSI CD target to pick a sense key) needs the typed error
+            // itself, not just its message.
             crate::diskfault::Outcome::Fail(code) => {
-                bail!("disk fault: {}", code.as_str())
+                Err(crate::diskfault::FaultIoError(code).into())
             }
         }
     }

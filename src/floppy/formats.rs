@@ -27,14 +27,14 @@ pub(super) struct FloppyImage {
     /// `disk.fault.*`'s policy set (`docs/debugger/disk-fault.md`). Only
     /// consulted for `FloppyImageData::StandardAdf` -- `Tracks` (extended
     /// ADF / raw MFM) has no logical sector grid for a `lba` to name, so
-    /// `disk.fault.set` rejects it explicitly (`FloppyController::
-    /// drive_sector_model_error`) rather than silently installing a policy
-    /// the write/read hooks never consult. Unlike `HardDriveImage::fault`
-    /// (deliberately kept out of its serde shadow), this field derives
-    /// `Serialize`/`Deserialize` along with the rest of `FloppyImage`, so a
-    /// floppy's installed policies *do* survive `state.save`/`state.load`
-    /// for free -- ahead of the hard-drive-image kinds' own "Status" gap,
-    /// not a parity requirement this phase had to chase.
+    /// `disk.fault.set`'s handler rejects it explicitly (checking
+    /// `FloppyController::drive_has_sector_model`) rather than silently
+    /// installing a policy the write/read hooks never consult. This field
+    /// derives `Serialize`/`Deserialize` along with the rest of
+    /// `FloppyImage` directly, unlike `HardDriveImage::fault` (kept out of
+    /// `HardDriveImage`'s own derive and round-tripped through its serde
+    /// shadow struct instead) -- both survive `state.save`/`state.load`,
+    /// just via different mechanisms.
     #[serde(default)]
     pub(super) fault: crate::diskfault::FaultPolicySet,
 }

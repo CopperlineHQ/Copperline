@@ -5964,6 +5964,18 @@ impl Bus {
                         return Some(f(img));
                     }
                 }
+                // A Zorro IDE board (LIDE and similar) is checked last,
+                // after the machine's own built-in IDE -- a board that
+                // attaches alongside Gayle/A4000 IDE rather than
+                // replacing it still gets its own `unit` range reached
+                // this way.
+                for dev in self.devices.iter_mut() {
+                    if let crate::zorro_device::BoardDevice::IdeZorro(board) = dev {
+                        if let Some(img) = board.hard_disk_mut(*unit) {
+                            return Some(f(img));
+                        }
+                    }
+                }
                 None
             }
             T::Pcmcia => self.pcmcia.as_mut()?.hard_disk_mut().map(f),
@@ -5993,10 +6005,27 @@ impl Bus {
     /// `disk.fault.*` target resolution for `cd` -- the CD drive's image,
     /// across both the SCSI and ATAPI paths `scsi_cd_mut` already
     /// searches (A3000-internal/A2091/A4091 SCSI, then Gayle/A4000/
-    /// Zorro-IDE ATAPI), so this needs no board-chain traversal of its
-    /// own.
+    /// Zorro-IDE ATAPI) and, when neither resolves, the CD32's Akiko or
+    /// the CDTV's own controller -- neither is SCSI/ATAPI, each holds its
+    /// mounted disc as a `CdImage` directly.
     pub fn cd_image_mut(&mut self) -> Option<&mut crate::cdrom::CdImage> {
-        self.scsi_cd_mut().map(crate::scsi::ScsiCdRom::image_mut)
+        // Checked (not matched directly into the return), then re-resolved
+        // below: an `if let` across the whole function body here ties the
+        // borrow to every branch's lifetime, which the borrow checker
+        // then refuses to let the `akiko`/`cdtv` branches reborrow after.
+        if self.scsi_cd_mut().is_some() {
+            return self.scsi_cd_mut().map(crate::scsi::ScsiCdRom::image_mut);
+        }
+        if self
+            .akiko
+            .as_mut()
+            .is_some_and(|akiko| akiko.disc_mut().is_some())
+        {
+            return self.akiko.as_mut().and_then(crate::akiko::Akiko::disc_mut);
+        }
+        self.cdtv
+            .as_mut()
+            .and_then(crate::cdtv::CdtvController::disc_mut)
     }
 
     /// Resolves a `disk.fault.*` target to the [`crate::diskfault::

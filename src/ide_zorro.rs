@@ -287,6 +287,15 @@ impl IdeZorro {
         self.ata.iter_mut().find_map(AtaBus::first_atapi_mut)
     }
 
+    /// The hard disk in a numbered slot across both channels
+    /// (`disk.fault.*`'s `{"kind": "ide", "unit": N}` target): units 0/1
+    /// are channel 0's master/slave, 2/3 are channel 1's -- mirroring
+    /// `Gayle::hard_disk_mut`/`IdeA4000::hard_disk_mut` for a board with
+    /// two channels instead of one.
+    pub fn hard_disk_mut(&mut self, unit: usize) -> Option<&mut crate::harddrive::HardDriveImage> {
+        self.ata.get_mut(unit / 2)?.hard_disk_mut(unit % 2)
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn pending_host_disks(&self, out: &mut Vec<(String, String, bool)>) {
         for bus in &self.ata {

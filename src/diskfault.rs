@@ -26,6 +26,9 @@ use std::collections::VecDeque;
 pub const MAX_POLICIES_PER_TARGET: usize = 16;
 pub const MAX_RULES_PER_POLICY: usize = 64;
 pub const MAX_REORDER_WINDOW: usize = 64;
+/// A `corrupt` rule's `bits`, bounded well past any real sector's bit
+/// count -- see the `"corrupt"` arm of `Rule::from_json`'s doc comment.
+pub const MAX_CORRUPT_BITS: u64 = 65536;
 /// `pending_events` is bounded to this many, oldest dropped first -- no
 /// `events.subscribe` wiring drains it yet (see `FaultPolicySet::
 /// pending_events`'s own doc comment), so without a cap a long soak run
@@ -137,6 +140,38 @@ impl ErrorCode {
     }
 }
 
+/// Carries an `ErrorCode` as the payload of the error a fault `error`/
+/// `cut` action produces (`HardDriveImage`/`CdImage`'s `fault_io_error`),
+/// so a controller that wants the exact code -- not just "this request
+/// failed" -- can recover it with [`fault_error_code`]/
+/// [`fault_error_code_anyhow`] instead of guessing from error text or
+/// collapsing every code to one generic failure.
+#[derive(Debug, Clone, Copy)]
+pub struct FaultIoError(pub ErrorCode);
+
+impl std::fmt::Display for FaultIoError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "disk fault: {}", self.0.as_str())
+    }
+}
+
+impl std::error::Error for FaultIoError {}
+
+/// Recovers the exact `ErrorCode` from an `io::Error` a fault action
+/// produced, if `err` actually came from one -- `None` for an ordinary
+/// I/O failure (a real disk error, a session being read-only, ...),
+/// which a caller should keep treating as a generic failure.
+pub fn fault_error_code(err: &std::io::Error) -> Option<ErrorCode> {
+    err.get_ref()?.downcast_ref::<FaultIoError>().map(|e| e.0)
+}
+
+/// [`fault_error_code`] for the `anyhow::Result` callers on the `cd`
+/// target's read path use (`CdImage::read_data_sector` and friends)
+/// instead of `std::io::Result`.
+pub fn fault_error_code_anyhow(err: &anyhow::Error) -> Option<ErrorCode> {
+    err.downcast_ref::<FaultIoError>().map(|e| e.0)
+}
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Action {
     Drop,
@@ -184,6 +219,23 @@ pub struct RuleState {
     /// differently once two or more sectors are armed -- the same defect
     /// the blitter's `d_overlay` had, fixed the same way.
     pub stale_pending: std::collections::BTreeMap<u64, (u64, Vec<u8>)>,
+    /// `after`'s gate: the target-wide stat (in `after.kind`'s units) at
+    /// the moment this rule was installed, so "after N requests" counts
+    /// from installation, not from whatever the shared counter already
+    /// read (a policy installed after 1000 prior requests must still
+    /// wait its own N, not go live immediately) or from the last
+    /// `disk.fault.reset_stats` (which must not affect installed
+    /// policies). `0` for a rule with no `after` or loaded from a state
+    /// saved before this field existed -- the latter only ever makes an
+    /// already-satisfied gate look satisfied a little earlier, never the
+    /// reverse.
+    #[serde(default)]
+    pub after_baseline: u64,
+    /// Latches once `after`'s gate is satisfied, so a later
+    /// `disk.fault.reset_stats` zeroing the shared counters can never
+    /// make an already-live rule look dormant again.
+    #[serde(default)]
+    pub after_satisfied: bool,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -318,8 +370,18 @@ impl Rule {
                 let bits = obj
                     .get("bits")
                     .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(1) as u32;
-                Action::Corrupt { bits }
+                    .unwrap_or(1);
+                // `apply_corrupt` draws and flips one bit per iteration --
+                // a value anywhere near `u32::MAX` loops billions of times
+                // per hit and hangs the emulator, so this is bounded well
+                // past any real sector's bit count (the largest sector
+                // this engine faults is a few KiB) rather than accepted
+                // as schema-valid and left to the caller to discover the
+                // hang.
+                if bits > MAX_CORRUPT_BITS {
+                    return Err(err("bits", &format!("must be at most {MAX_CORRUPT_BITS}")));
+                }
+                Action::Corrupt { bits: bits as u32 }
             }
             "error" => {
                 let code = obj
@@ -499,6 +561,7 @@ pub struct FaultPolicySet {
 
 /// What a caller (`HardDriveImage::read_sector` and friends) must do with
 /// one request after the policy set has had a chance to act on it.
+#[derive(Debug)]
 pub enum Outcome {
     /// Proceed with the real I/O unmodified.
     Proceed,
@@ -571,11 +634,25 @@ impl FaultPolicySet {
                 "limit: at most {MAX_RULES_PER_POLICY} rules per policy"
             ));
         }
-        let rules = rules_json
+        let mut rules = rules_json
             .iter()
             .enumerate()
             .map(|(i, r)| Rule::from_json(r, i))
             .collect::<Result<Vec<_>, _>>()?;
+        // `after`'s gate counts from installation: snapshot the relevant
+        // shared counter now so `find_rule`'s dormancy check can measure
+        // elapsed requests from here, not from zero or from whatever the
+        // counter already read.
+        for rule in &mut rules {
+            if let Some(after) = rule.after {
+                rule.state.after_baseline = match after.kind {
+                    AfterKind::Requests => self.stats.requests,
+                    AfterKind::Reads => self.stats.reads,
+                    AfterKind::Writes => self.stats.writes,
+                    AfterKind::Flushes => self.stats.flushes,
+                };
+            }
+        }
         let on_clear = match policy_json
             .get("on_clear")
             .and_then(serde_json::Value::as_str)
@@ -710,8 +787,12 @@ impl FaultPolicySet {
                 if !rule.op.matches(op) {
                     continue;
                 }
+                // `op` here is always the caller's fixed request kind
+                // (`on_write`/`on_read`/`on_flush` each hardcode their own
+                // `Op::Write`/`Read`/`Flush`), never `Op::Any` -- a `lba`
+                // range always applies.
                 if let Some(range) = rule.lba {
-                    if op != Op::Any && !range.overlaps(lba, count) {
+                    if !range.overlaps(lba, count) {
                         continue;
                     }
                 }
@@ -722,18 +803,30 @@ impl FaultPolicySet {
                 }
                 // `self.stats.*` already counts *this* request (`bump_stats`
                 // runs before `find_rule`), so "dormant until N have been
-                // seen" is `n <= a.n`, not `n < a.n`: at `a.n == 2`, the
-                // rule must stay dormant through the 2nd request (now
-                // counted) and only go live on the 3rd.
-                let dormant = rule.after.is_some_and(|a| {
-                    let n = match a.kind {
-                        AfterKind::Requests => self.stats.requests,
-                        AfterKind::Reads => self.stats.reads,
-                        AfterKind::Writes => self.stats.writes,
-                        AfterKind::Flushes => self.stats.flushes,
-                    };
-                    n <= a.n
-                });
+                // seen" is `elapsed <= a.n`, not `elapsed < a.n`: at
+                // `a.n == 2`, the rule must stay dormant through the 2nd
+                // request since installation (now counted) and only go
+                // live on the 3rd. `elapsed` counts from `after_baseline`
+                // (this rule's installation), not from zero -- and once
+                // satisfied, `after_satisfied` latches permanently so a
+                // later `disk.fault.reset_stats` can't undo it (see
+                // `RuleState::after_satisfied`'s doc comment).
+                let dormant = !rule.state.after_satisfied
+                    && rule.after.is_some_and(|a| {
+                        let n = match a.kind {
+                            AfterKind::Requests => self.stats.requests,
+                            AfterKind::Reads => self.stats.reads,
+                            AfterKind::Writes => self.stats.writes,
+                            AfterKind::Flushes => self.stats.flushes,
+                        };
+                        let elapsed = n.saturating_sub(rule.state.after_baseline);
+                        if elapsed > a.n {
+                            rule.state.after_satisfied = true;
+                            false
+                        } else {
+                            true
+                        }
+                    });
                 if dormant {
                     continue;
                 }
@@ -767,7 +860,7 @@ impl FaultPolicySet {
     /// Called before any real I/O for every request kind, so `cut`
     /// (which can be matched by `op: any`) and stats bookkeeping are
     /// uniform across read/write/flush/trim.
-    fn bump_stats(&mut self, op: Op, lba: u64, count: u64) {
+    fn bump_stats(&mut self, op: Op) {
         self.seq += 1;
         self.stats.requests += 1;
         match op {
@@ -777,7 +870,6 @@ impl FaultPolicySet {
             Op::Trim => self.stats.trims += 1,
             Op::Any => {}
         }
-        let _ = (lba, count);
     }
 
     fn apply_corrupt(&self, bits: u32, data: &mut [u8], seed: u64, seq: u64) {
@@ -797,7 +889,6 @@ impl FaultPolicySet {
     /// rule that actually fired (for the `disk.fault` event family and
     /// `disk.fault.list`'s hit counts -- `list`'s counts come from
     /// `Rule::state.hits` directly, `events` is for `events.subscribe`).
-    #[allow(clippy::too_many_arguments)]
     /// `pre_write` is the sector's content immediately before this write
     /// commits -- the caller's responsibility to read, since only it
     /// knows how (and whether it already has to, e.g. `tear`'s `at:
@@ -819,7 +910,7 @@ impl FaultPolicySet {
             return Outcome::Fail(ErrorCode::NotReady);
         }
         let count = (data.len() / sector_bytes).max(1) as u64;
-        self.bump_stats(Op::Write, lba, count);
+        self.bump_stats(Op::Write);
         let seq = self.seq;
         let locs = self.find_rule(Op::Write, lba, count, seq.wrapping_mul(7));
         let mut out = data.to_vec();
@@ -845,7 +936,12 @@ impl FaultPolicySet {
                 Action::Tear { at, n } => {
                     self.stats.torn += 1;
                     let keep = match at {
-                        TearAt::Sector => (n as usize * sector_bytes).min(out.len()),
+                        // `saturating_mul`, not `*`: an `n` anywhere near
+                        // `u64::MAX` would otherwise overflow `usize`
+                        // (panicking in a debug build) before the `.min`
+                        // below ever gets a chance to clamp it down to
+                        // something the buffer could actually hold.
+                        TearAt::Sector => (n as usize).saturating_mul(sector_bytes).min(out.len()),
                         TearAt::Bytes => (n as usize).min(out.len()),
                     };
                     out.truncate(keep);
@@ -933,7 +1029,7 @@ impl FaultPolicySet {
             return Outcome::Fail(ErrorCode::NotReady);
         }
         let count = (data.len() / sector_bytes).max(1) as u64;
-        self.bump_stats(Op::Read, lba, count);
+        self.bump_stats(Op::Read);
         let seq = self.seq;
         // Reads check every policy's reorder queue for this lba first
         // (a write cache would answer from itself), independent of
@@ -1023,7 +1119,7 @@ impl FaultPolicySet {
         if self.cut {
             return Outcome::Fail(ErrorCode::NotReady);
         }
-        self.bump_stats(Op::Flush, 0, 0);
+        self.bump_stats(Op::Flush);
         let seq = self.seq;
         let locs = self.find_rule(Op::Flush, 0, 0, seq.wrapping_mul(7).wrapping_add(2));
         let mut outcome = Outcome::Proceed;
@@ -1067,14 +1163,13 @@ impl FaultPolicySet {
                 _ => {}
             }
         }
-        if matches!(outcome, Outcome::Proceed) {
-            // A flush with no `ignore` rule releases every policy's held
-            // queue, in a seeded random order (not FIFO) -- the proposal's
-            // "A flush releases the whole queue in a seeded random order".
-            // The caller (`HardDriveImage::flush`) drains
-            // `take_release_on_flush` after this returns `Proceed` and
-            // replays each held write for real.
-        }
+        // A flush with no `ignore` rule releases every policy's held
+        // queue, in a seeded random order (not FIFO) -- the proposal's "A
+        // flush releases the whole queue in a seeded random order". The
+        // caller (`HardDriveImage::flush`) drains `take_release_on_flush`
+        // once this returns `Proceed` and replays each held write for
+        // real; nothing needs doing here, this is just that contract's
+        // anchor point.
         outcome
     }
 
@@ -1334,6 +1429,70 @@ mod tests {
     }
 
     #[test]
+    fn after_gate_counts_from_installation_not_from_zero() {
+        let mut set = FaultPolicySet::default();
+        // Three writes already happened (an unrelated rule, so they don't
+        // themselves get dropped) before the gated rule is even installed.
+        set.set(
+            Some("noop".into()),
+            &policy(serde_json::json!([{"op": "read", "action": "delay", "ms": 0}])),
+            1,
+        )
+        .unwrap();
+        set.on_write(0, &[0u8; 512], 512, &[]);
+        set.on_write(0, &[0u8; 512], 512, &[]);
+        set.on_write(0, &[0u8; 512], 512, &[]);
+        set.set(
+            Some("gated".into()),
+            &policy(serde_json::json!([
+                {"op": "write", "action": "drop", "after": {"writes": 2}}
+            ])),
+            1,
+        )
+        .unwrap();
+        // If the gate counted from zero, 3 prior writes would already
+        // satisfy "after 2 writes" and this first write would be dropped.
+        assert!(matches!(
+            set.on_write(0, &[0u8; 512], 512, &[]),
+            Outcome::Proceed
+        ));
+        assert!(matches!(
+            set.on_write(0, &[0u8; 512], 512, &[]),
+            Outcome::Proceed
+        ));
+        assert!(matches!(
+            set.on_write(0, &[0u8; 512], 512, &[]),
+            Outcome::DoneOk
+        ));
+    }
+
+    #[test]
+    fn reset_stats_does_not_undo_an_already_satisfied_after_gate() {
+        let mut set = FaultPolicySet::default();
+        set.set(
+            None,
+            &policy(serde_json::json!([
+                {"op": "write", "action": "drop", "after": {"writes": 2}}
+            ])),
+            1,
+        )
+        .unwrap();
+        set.on_write(0, &[0u8; 512], 512, &[]);
+        set.on_write(0, &[0u8; 512], 512, &[]);
+        assert!(matches!(
+            set.on_write(0, &[0u8; 512], 512, &[]),
+            Outcome::DoneOk
+        ));
+        set.reset_stats();
+        // The catalogue's own promise: reset_stats does not affect
+        // installed policies -- an already-live gate must stay live.
+        assert!(matches!(
+            set.on_write(0, &[0u8; 512], 512, &[]),
+            Outcome::DoneOk
+        ));
+    }
+
+    #[test]
     fn cut_fails_this_and_every_later_request_until_cleared() {
         let mut set = FaultPolicySet::default();
         set.set(None, &policy(serde_json::json!([{"action": "cut"}])), 1)
@@ -1507,5 +1666,53 @@ mod tests {
         assert!(fresh
             .set(None, &policy(serde_json::Value::Array(too_many_rules)), 1)
             .is_err());
+    }
+
+    #[test]
+    fn corrupt_bits_near_u32_max_is_rejected_instead_of_hanging() {
+        let mut set = FaultPolicySet::default();
+        assert!(set
+            .set(
+                None,
+                &policy(serde_json::json!([{"action": "corrupt", "bits": 4_000_000_000u64}])),
+                1
+            )
+            .is_err());
+        // Just over the cap, and right at it, draw the line correctly.
+        assert!(set
+            .set(
+                None,
+                &policy(serde_json::json!([{"action": "corrupt", "bits": MAX_CORRUPT_BITS + 1}])),
+                1
+            )
+            .is_err());
+        assert!(set
+            .set(
+                None,
+                &policy(serde_json::json!([{"action": "corrupt", "bits": MAX_CORRUPT_BITS}])),
+                1
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn tear_at_sector_with_n_near_u64_max_does_not_overflow() {
+        let mut set = FaultPolicySet::default();
+        set.set(
+            None,
+            &policy(serde_json::json!([
+                {"op": "write", "action": "tear", "at": "sector", "n": u64::MAX}
+            ])),
+            1,
+        )
+        .unwrap();
+        // Must not panic (a plain `n as usize * sector_bytes` would
+        // overflow `usize` here) and must clamp down to the whole
+        // sector, same as any other `n` large enough to keep it all.
+        let outcome = set.on_write(0, &[0x42u8; 512], 512, &[0u8; 512]);
+        match outcome {
+            Outcome::ProceedWith(data) => assert_eq!(data, vec![0x42u8; 512]),
+            other => panic!("expected ProceedWith(whole sector), got {other:?}"),
+        }
     }
 }

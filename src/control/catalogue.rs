@@ -866,13 +866,12 @@ fn build() -> Vec<ToolDef> {
         entry(
             "disk.fault.set",
             "Install a deterministic device-level fault policy on an image-backed block \
-             target (copperhf, PCMCIA, or IDE unit -- SCSI, floppy and CD targets are not \
-             resolved yet): dropped/torn/reordered writes, ignored flushes, stale/corrupt \
-             reads, media errors, delays and simulated power-cuts, seeded for exact \
-             reproducibility. With `id`, replaces that policy in place (same installation \
-             order); several policies may be active on one target at once, evaluated in \
-             installation order. See the control protocol reference's \"disk.fault\" \
-             section for the full rule/action schema.",
+             target -- copperhf, PCMCIA, IDE, SCSI, floppy, or CD: dropped/torn/reordered \
+             writes, ignored flushes, stale/corrupt reads, media errors, delays and \
+             simulated power-cuts, seeded for exact reproducibility. With `id`, replaces \
+             that policy in place (releasing its own held writes first); several policies \
+             may be active on one target at once, evaluated in installation order. See \
+             `docs/debugger/disk-fault.md` for the full target/rule/action schema.",
             object(
                 vec![
                     (

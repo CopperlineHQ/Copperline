@@ -72,6 +72,7 @@ project:
         - file: debugger/dap.md
         - file: debugger/diverge.md
         - file: debugger/control.md
+        - file: debugger/disk-fault.md
         - file: debugger/workflows.md
     - title: Internals
       children:

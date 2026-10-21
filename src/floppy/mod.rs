@@ -920,7 +920,17 @@ impl FloppyController {
         &mut self,
         drive: usize,
     ) -> Option<&mut crate::diskfault::FaultPolicySet> {
-        Some(&mut self.drives.get_mut(drive)?.image.as_mut()?.fault)
+        let d = self.drives.get_mut(drive)?;
+        // Any `disk.fault.*` call reaching this drive can change what a
+        // read ought to see from here on (a newly installed rule, a
+        // cleared one, a dropped/released held write) -- the cached
+        // track has to be rebuilt from `image_data` (which `track_stream`
+        // re-applies `fault` against on every rebuild) rather than keep
+        // serving whatever was decoded before this call. Harmless to
+        // invalidate even for a read-only `list`/`stats` call: the next
+        // access just re-decodes the same track.
+        d.cached_track = None;
+        Some(&mut d.image.as_mut()?.fault)
     }
 
     /// `None` when `drive_fault_mut` would also be `None` (no image at

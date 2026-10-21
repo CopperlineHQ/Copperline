@@ -983,11 +983,21 @@ impl HardDriveImage {
     /// error bits, SCSI sense key, copperhf `io_Error` -- the proposal's
     /// `error` action table) can recover it from an ordinary
     /// `std::io::Result`, same as any other `read_sector`/`write_sector`
-    /// failure. Phase 1 (this milestone) surfaces it as a generic I/O
-    /// error; a controller wanting the exact code can match on
-    /// `crate::diskfault::fault_error_code`.
+    /// failure, via `crate::diskfault::fault_error_code`.
+    /// `WriteProtect` carries `PermissionDenied` specifically: several
+    /// callers already classify a *real* write-protected medium by that
+    /// kind (this file's own `write_protected_error`, copperhf's
+    /// `WorkerResult::WriteProtected` check), so a fault-injected
+    /// `write_protect` is classified identically with no extra plumbing
+    /// in those call sites. Every other code is `Other`, recoverable via
+    /// `fault_error_code` for a controller that wants to distinguish them.
     fn fault_io_error(code: crate::diskfault::ErrorCode) -> std::io::Error {
-        std::io::Error::other(format!("disk fault: {}", code.as_str()))
+        let kind = if matches!(code, crate::diskfault::ErrorCode::WriteProtect) {
+            std::io::ErrorKind::PermissionDenied
+        } else {
+            std::io::ErrorKind::Other
+        };
+        std::io::Error::new(kind, crate::diskfault::FaultIoError(code))
     }
 
     /// Faulted read: decides nothing before the real read (a read has no

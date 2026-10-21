@@ -4740,6 +4740,23 @@ fn a_drop_policy_on_a_standard_adf_floppy_leaves_the_sector_unchanged() -> Resul
     Ok(())
 }
 
+/// `drive_fault_mut` (the accessor every `disk.fault.*` handler resolves
+/// a `floppy` target through) must invalidate the drive's cached track,
+/// so a rule installed after the track was already decoded actually
+/// takes effect on the next read instead of serving the stale cache.
+#[test]
+fn installing_a_fault_policy_invalidates_the_drives_cached_track() -> Result<()> {
+    let mut ctrl = FloppyController::default();
+    ctrl.insert_memory_disk_image_bytes(0, vec![0u8; ADF_SIZE], "fault-cache.adf".into(), false)?;
+    ctrl.drives[0].cached_track = Some(0);
+    assert!(ctrl.drive_fault_mut(0).is_some());
+    assert_eq!(
+        ctrl.drives[0].cached_track, None,
+        "disk.fault.set reaching this drive must force the next access to re-decode the track"
+    );
+    Ok(())
+}
+
 /// `disk.fault.set` must reject a `floppy` target whose *currently
 /// inserted* image has no sector grid (extended ADF / raw MFM,
 /// `FloppyImageData::Tracks`) rather than silently installing a policy

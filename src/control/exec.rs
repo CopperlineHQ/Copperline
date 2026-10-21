@@ -3301,6 +3301,15 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             seed,
             id,
         } => {
+            // A copperhf target's unit table is owned by the worker
+            // thread between requests (`src/copperhf.rs`'s module doc,
+            // "Ownership and quiescing") -- quiesced unconditionally
+            // (a no-op with no `[copperhf]` board configured, same as
+            // every other `copperhf_quiesce` call site), not just for a
+            // copperhf target, so resolution never races a queued-but-
+            // not-yet-executed job and a policy set now applies
+            // identically regardless of how far the worker had got.
+            emu.bus_mut().copperhf_quiesce();
             let parsed_target = crate::diskfault::DiskFaultTarget::from_json(target)
                 .map_err(CtlError::invalid_params)?;
             if let crate::diskfault::DiskFaultTarget::Floppy { drive } = &parsed_target {
@@ -3354,6 +3363,18 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             }
         }
         CoreOp::DiskFaultClear { id, target } => {
+            emu.bus_mut().copperhf_quiesce();
+            // An id is only unique within a target's own namespace
+            // (auto-assigned ids all restart at `f1` on every target), so
+            // clearing by id across every target would clear unrelated
+            // policies that merely happen to share that id -- require a
+            // target whenever an id is given; omitting both clears every
+            // policy on every target instead.
+            if id.is_some() && target.is_none() {
+                return Err(CtlError::invalid_params(
+                    "target is required when id is given: ids are unique only within a target",
+                ));
+            }
             let mut cleared = Vec::new();
             let mut targets: Vec<crate::diskfault::DiskFaultTarget> = Vec::new();
             if let Some(target) = target {
@@ -3396,6 +3417,7 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             Ok(json!({"cleared": cleared}))
         }
         CoreOp::DiskFaultList { target } => {
+            emu.bus_mut().copperhf_quiesce();
             let targets: Vec<crate::diskfault::DiskFaultTarget> = if let Some(target) = target {
                 vec![crate::diskfault::DiskFaultTarget::from_json(target)
                     .map_err(CtlError::invalid_params)?]
@@ -3425,6 +3447,7 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             Ok(json!({"faults": faults}))
         }
         CoreOp::DiskFaultStats { target } => {
+            emu.bus_mut().copperhf_quiesce();
             let parsed_target = crate::diskfault::DiskFaultTarget::from_json(target)
                 .map_err(CtlError::invalid_params)?;
             let stats = emu
@@ -3458,11 +3481,19 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             }
         }
         CoreOp::DiskFaultResetStats { target } => {
+            emu.bus_mut().copperhf_quiesce();
             let parsed_target = crate::diskfault::DiskFaultTarget::from_json(target)
                 .map_err(CtlError::invalid_params)?;
-            emu.bus_mut()
+            let result = emu
+                .bus_mut()
                 .with_fault_policy_mut(&parsed_target, |fault| fault.reset_stats());
-            Ok(json!({}))
+            match result {
+                None => Err(CtlError::invalid_params(format!(
+                    "target {}: no matching device/unit/media attached",
+                    parsed_target.to_json()
+                ))),
+                Some(()) => Ok(json!({})),
+            }
         }
         CoreOp::HeatMapSet { window } => {
             emu.bus_mut().set_heat_map(*window);
@@ -4812,6 +4843,42 @@ mod tests {
         let reply = exec_core(&mut emu, &mut ctx, &core("cd.trace", json!({}))).unwrap();
         assert_eq!(reply["available"], false);
         assert_eq!(reply["records"], json!([]));
+    }
+
+    #[test]
+    fn disk_fault_clear_requires_a_target_when_id_is_given() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        let err = exec_core(
+            &mut emu,
+            &mut ctx,
+            &core("disk.fault.clear", json!({"id": "f1"})),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, proto::INVALID_PARAMS);
+        // Neither id nor target: clears every policy on every target, no
+        // error (nothing to clear on a bare emulator, but not a usage
+        // mistake either).
+        let reply = exec_core(&mut emu, &mut ctx, &core("disk.fault.clear", json!({})))
+            .expect("omitting both id and target is allowed");
+        assert_eq!(reply["cleared"], json!([]));
+    }
+
+    #[test]
+    fn disk_fault_reset_stats_errors_on_an_unresolvable_target_like_stats_does() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        let target = json!({"target": {"kind": "ide", "unit": 0}});
+        let stats_err = exec_core(
+            &mut emu,
+            &mut ctx,
+            &core("disk.fault.stats", target.clone()),
+        )
+        .unwrap_err();
+        let reset_err =
+            exec_core(&mut emu, &mut ctx, &core("disk.fault.reset_stats", target)).unwrap_err();
+        assert_eq!(stats_err.code, proto::INVALID_PARAMS);
+        assert_eq!(reset_err.code, proto::INVALID_PARAMS);
     }
 
     #[test]

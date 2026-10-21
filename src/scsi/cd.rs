@@ -17,8 +17,9 @@
 use super::{
     be16, be24, be32, cdb_len, ScsiExec, ASC_ILLEGAL_MODE_FOR_THIS_TRACK, ASC_INVALID_FIELD_IN_CDB,
     ASC_INVALID_OPCODE, ASC_LBA_OUT_OF_RANGE, ASC_LUN_NOT_SUPPORTED, ASC_MEDIUM_MAY_HAVE_CHANGED,
-    ASC_MEDIUM_NOT_PRESENT, CHECK_CONDITION, GOOD, SENSE_LEN, SK_HARDWARE_ERROR,
-    SK_ILLEGAL_REQUEST, SK_NOT_READY, SK_UNIT_ATTENTION,
+    ASC_MEDIUM_NOT_PRESENT, ASC_WRITE_PROTECTED, CHECK_CONDITION, GOOD, SENSE_LEN,
+    SK_ABORTED_COMMAND, SK_DATA_PROTECT, SK_HARDWARE_ERROR, SK_ILLEGAL_REQUEST, SK_MEDIUM_ERROR,
+    SK_NOT_READY, SK_UNIT_ATTENTION,
 };
 use crate::cdrom::{
     CdImage, CdTrack, DATA_SECTOR_BYTES, LEADIN_SECTORS, RAW_SECTOR_BYTES, SECTORS_PER_SECOND,
@@ -85,6 +86,23 @@ pub struct ScsiCdRom {
     /// Disc waiting in the tray after a runtime swap; mounts (with the
     /// medium-change unit attention) when the countdown expires.
     pending: Option<PendingDisc>,
+}
+
+/// Maps a `CdImage::read_*` failure to the sense key/ASC this target
+/// reports for it: a fault-injected `error`/`cut` (recovered via
+/// [`crate::diskfault::fault_error_code_anyhow`]) carries its exact
+/// `ErrorCode` through to the matching sense key -- `media` to MEDIUM
+/// ERROR in particular, not the blanket HARDWARE ERROR every code used
+/// to report -- instead of collapsing every code to the same reply.
+fn sense_for_cd_error(err: &anyhow::Error) -> (u8, u8) {
+    use crate::diskfault::ErrorCode;
+    match crate::diskfault::fault_error_code_anyhow(err) {
+        Some(ErrorCode::Media) => (SK_MEDIUM_ERROR, 0x00),
+        Some(ErrorCode::Timeout | ErrorCode::Aborted) => (SK_ABORTED_COMMAND, 0x00),
+        Some(ErrorCode::NotReady) => (SK_NOT_READY, 0x00),
+        Some(ErrorCode::WriteProtect) => (SK_DATA_PROTECT, ASC_WRITE_PROTECTED),
+        None => (SK_HARDWARE_ERROR, 0x00),
+    }
 }
 
 impl ScsiCdRom {
@@ -611,7 +629,8 @@ impl ScsiCdRom {
             let mut buf = [0u8; DATA_SECTOR_BYTES];
             if let Err(e) = self.image.read_data_sector(sector, &mut buf) {
                 log::warn!("scsi cd {}: read lba {sector}: {e}", self.path.display());
-                return self.check(SK_HARDWARE_ERROR, 0x00);
+                let (sk, asc) = sense_for_cd_error(&e);
+                return self.check(sk, asc);
             }
             data[(i as usize) * DATA_SECTOR_BYTES..][..DATA_SECTOR_BYTES].copy_from_slice(&buf);
         }
@@ -674,7 +693,8 @@ impl ScsiCdRom {
             };
             if let Err(e) = result {
                 log::warn!("scsi cd {}: read cd lba {sector}: {e}", self.path.display());
-                return self.check(SK_HARDWARE_ERROR, 0x00);
+                let (sk, asc) = sense_for_cd_error(&e);
+                return self.check(sk, asc);
             }
         }
         self.play_pos = (lba + count - 1) as u32;
@@ -998,10 +1018,12 @@ mod tests {
                 1,
             )
             .unwrap();
+        // `code: "media"` maps to MEDIUM ERROR specifically, not the
+        // blanket HARDWARE ERROR every code used to report.
         check_sense(
             &mut cd,
             &[0x28, 0, 0, 0, 0, 0, 0, 0, 1, 0],
-            SK_HARDWARE_ERROR,
+            SK_MEDIUM_ERROR,
             0x00,
         );
         // A sector the policy doesn't select still reads clean.

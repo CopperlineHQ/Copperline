@@ -108,10 +108,12 @@ pub const CHECK_CONDITION: u8 = 0x02;
 
 // Sense keys / additional sense codes (shared with the CD-ROM target).
 pub(crate) const SK_NOT_READY: u8 = 0x02;
+pub(crate) const SK_MEDIUM_ERROR: u8 = 0x03;
 pub(crate) const SK_HARDWARE_ERROR: u8 = 0x04;
 pub(crate) const SK_ILLEGAL_REQUEST: u8 = 0x05;
 pub(crate) const SK_UNIT_ATTENTION: u8 = 0x06;
 pub(crate) const SK_DATA_PROTECT: u8 = 0x07;
+pub(crate) const SK_ABORTED_COMMAND: u8 = 0x0B;
 pub(crate) const ASC_INVALID_OPCODE: u8 = 0x20;
 pub(crate) const ASC_WRITE_PROTECTED: u8 = 0x27;
 pub(crate) const ASC_LBA_OUT_OF_RANGE: u8 = 0x21;
@@ -132,6 +134,32 @@ pub(crate) const SENSE_LEN: usize = 18;
 /// its completion interrupt, so drivers see busy-then-interrupt rather
 /// than an instant flip mid-instruction.
 const CMD_DELAY_CCK: u32 = 64;
+
+/// Maps an `io::Error` from `HardDriveImage::read_sector`/`write_sector`
+/// to the sense key/ASC a SCSI target reports for it: a fault-injected
+/// `error`/`cut` carries its exact [`crate::diskfault::ErrorCode`]
+/// (recovered via [`crate::diskfault::fault_error_code`]) through to the
+/// matching sense key instead of the blanket HARDWARE ERROR every code
+/// used to report; an ordinary I/O failure that isn't one of ours still
+/// falls back to the existing `PermissionDenied` -> DATA PROTECT check
+/// (a real write-protected medium with no fault policy active) and
+/// HARDWARE ERROR after that.
+pub(crate) fn sense_for_io_error(err: &std::io::Error) -> (u8, u8) {
+    use crate::diskfault::ErrorCode;
+    if let Some(code) = crate::diskfault::fault_error_code(err) {
+        return match code {
+            ErrorCode::Media => (SK_MEDIUM_ERROR, 0x00),
+            ErrorCode::Timeout | ErrorCode::Aborted => (SK_ABORTED_COMMAND, 0x00),
+            ErrorCode::NotReady => (SK_NOT_READY, 0x00),
+            ErrorCode::WriteProtect => (SK_DATA_PROTECT, ASC_WRITE_PROTECTED),
+        };
+    }
+    if err.kind() == std::io::ErrorKind::PermissionDenied {
+        (SK_DATA_PROTECT, ASC_WRITE_PROTECTED)
+    } else {
+        (SK_HARDWARE_ERROR, 0x00)
+    }
+}
 
 pub(crate) fn be16(b: &[u8], off: usize) -> u32 {
     (u32::from(b[off]) << 8) | u32::from(b[off + 1])
@@ -541,7 +569,8 @@ impl ScsiDisk {
                         "scsi {}: synchronize cache: {error}",
                         self.disk.path().display()
                     );
-                    self.check(SK_HARDWARE_ERROR, 0x00)
+                    let (sk, asc) = sense_for_io_error(&error);
+                    self.check(sk, asc)
                 }
             },
             // READ DEFECT DATA(10): no defects.
@@ -594,7 +623,8 @@ impl ScsiDisk {
                 "scsi {}: read of {count} sector(s) at lba {lba}: {e}",
                 self.disk.path().display()
             );
-            return self.check(SK_HARDWARE_ERROR, 0x00);
+            let (sk, asc) = sense_for_io_error(&e);
+            return self.check(sk, asc);
         }
         (ScsiExec::DataIn(data), GOOD)
     }
@@ -626,15 +656,8 @@ impl ScsiDisk {
                         self.disk.path().display(),
                         data.len() / SECTOR_SIZE
                     );
-                    // A refused write on a write-protected medium is
-                    // DATA PROTECT / WRITE PROTECTED, which the guest's
-                    // filesystem turns into its own write-protect error
-                    // rather than a disk fault.
-                    if e.kind() == std::io::ErrorKind::PermissionDenied {
-                        self.set_sense(SK_DATA_PROTECT, ASC_WRITE_PROTECTED);
-                    } else {
-                        self.set_sense(SK_HARDWARE_ERROR, 0x00);
-                    }
+                    let (sk, asc) = sense_for_io_error(&e);
+                    self.set_sense(sk, asc);
                     return CHECK_CONDITION;
                 }
                 match self.disk.flush() {
@@ -644,7 +667,8 @@ impl ScsiDisk {
                             "scsi {}: flush after write: {error}",
                             self.disk.path().display()
                         );
-                        self.set_sense(SK_HARDWARE_ERROR, 0x00);
+                        let (sk, asc) = sense_for_io_error(&error);
+                        self.set_sense(sk, asc);
                         CHECK_CONDITION
                     }
                 }
