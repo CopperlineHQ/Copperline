@@ -66,7 +66,15 @@ evaluated in installation order, and within a policy, rules are
 evaluated in list order. For a given request, the first matching rule
 whose `probability` test passes applies its action and stops
 evaluation, unless it sets `"continue": true` (rule fields below), in
-which case later rules may also match and apply on top of it.
+which case later rules may also match and apply on top of it. A write's
+fate, once decided, wins over anything a later continuing rule tries to
+do to the data: `"drop"` is final -- a later `"corrupt"`/`"tear"` cannot
+make a dropped write land anyway, and a later `"drop"` discards whatever
+an earlier `"reorder"` already queued -- and `"reorder"` defers the
+decision -- a later `"corrupt"` mutates the queued copy in place rather
+than also landing an independent write, and a later `"error"` removes
+the queued copy before failing, since a write the guest sees fail never
+left anything in a real drive's cache for a later flush to resurrect.
 
 Rule fields (all but `action` optional):
 
@@ -95,11 +103,13 @@ Rule fields (all but `action` optional):
 - `"drop"`: acknowledge the write; nothing reaches the image.
 - `"tear"`: commit only part of the write, modelling a power cut
   mid-request. `"at": "sector"` (default) with `"n"`: keep the first `n`
-  whole sectors; `"at": "bytes"` with `"n"`: keep the first `n` bytes of
-  the one sector a caller passes (every current caller is single-sector,
-  so `"at": "sector"` beyond `n: 0`/`n: 1` is a no-op). The untouched
-  tail is spliced from what the sector already held, not left as
-  whatever the guest's buffer happened to contain.
+  whole sectors (IDE WRITE MULTIPLE, SCSI WRITE(10)/(12)/(16), and a
+  copperhf multi-sector job all commit a whole multi-sector request as
+  one `disk.fault` request, so `n` can span more than one sector of it);
+  `"at": "bytes"` with `"n"`: keep the first `n` bytes of the whole
+  request. The untouched tail -- whatever is left after `n` -- is
+  spliced from what the medium already held, not left as whatever the
+  guest's buffer happened to contain.
 - `"reorder"`: hold the write in a bounded queue (`"window"`, `1..=64`)
   instead of committing it immediately; a read of a held sector still
   sees it, as a write cache would. A flush (or `disk.fault.clear`)
@@ -125,9 +135,10 @@ Rule fields (all but `action` optional):
   (MEDIUM ERROR / ABORTED COMMAND / NOT READY / DATA PROTECT), copperhf's
   `io_Error` (`TDERR_WriteProt` for `write_protect`, a generic failure
   otherwise).
-- `"delay"`: accumulates into `disk.fault.stats`' `delayed_ms`, for a
-  test to assert a policy fired; it does not currently add latency to
-  the request itself.
+- `"delay"`: accumulates into `disk.fault.stats`' `delayed_ms`. On a
+  `scsi` target, this also adds the equivalent extra colour-clock delay
+  to the command's completion -- on every other target it currently
+  only shows up in the stats, with no added latency yet.
 - `"cut"`: simulate a power cut. Every later request on this target
   fails `not_ready` until an explicit `disk.fault.clear`, even across a
   `machine.reset` -- a reset must not quietly un-cut the drive. Discards

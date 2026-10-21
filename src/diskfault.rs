@@ -557,6 +557,14 @@ pub struct FaultPolicySet {
     /// between.
     #[serde(skip)]
     pending_evicted: VecDeque<HeldWrite>,
+    /// A `delay` fired during the most recent `on_write`/`on_read`/
+    /// `on_flush` call, in milliseconds -- not state (never saved/
+    /// loaded): a controller able to add real completion latency (not
+    /// every one is; see [`Self::take_delay_ms`]'s doc comment) drains
+    /// this right after the call that produced it, same shape as
+    /// `take_evicted`.
+    #[serde(skip)]
+    pending_delay_ms: u64,
 }
 
 /// What a caller (`HardDriveImage::read_sector` and friends) must do with
@@ -597,6 +605,21 @@ fn rng_for(seed: u64, seq: u64, draw: u64) -> u64 {
         state = 0xDEAD_BEEF_CAFE_F00D;
     }
     next_rng(&mut state)
+}
+
+/// A free function, not a method: touches no `FaultPolicySet` field, and
+/// a `deferred_at` continuation needs to corrupt a buffer it already
+/// holds a mutable borrow into (via `deferred_write_mut`) alongside a
+/// `&self` call, which an `&self` method here would conflict with.
+fn apply_corrupt(bits: u32, data: &mut [u8], seed: u64, seq: u64) {
+    if data.is_empty() {
+        return;
+    }
+    for b in 0..bits {
+        let r = rng_for(seed, seq, 0x1000 + u64::from(b));
+        let bit = (r as usize) % (data.len() * 8);
+        data[bit / 8] ^= 1 << (bit % 8);
+    }
 }
 
 impl FaultPolicySet {
@@ -872,17 +895,6 @@ impl FaultPolicySet {
         }
     }
 
-    fn apply_corrupt(&self, bits: u32, data: &mut [u8], seed: u64, seq: u64) {
-        if data.is_empty() {
-            return;
-        }
-        for b in 0..bits {
-            let r = rng_for(seed, seq, 0x1000 + u64::from(b));
-            let bit = (r as usize) % (data.len() * 8);
-            data[bit / 8] ^= 1 << (bit % 8);
-        }
-    }
-
     /// Handles one write request: `lba`/`data` name the whole request
     /// (one or more consecutive sectors). Returns what the caller should
     /// do and, via `events`, one `(id, rule_index, action)` tuple per
@@ -915,6 +927,27 @@ impl FaultPolicySet {
         let locs = self.find_rule(Op::Write, lba, count, seq.wrapping_mul(7));
         let mut out = data.to_vec();
         let mut outcome = Outcome::Proceed;
+        // Two of `continue: true`'s rules fix what a chain of actions
+        // means when they disagree about whether this write ever really
+        // reaches the image:
+        //
+        // `dropped_for_good`: once `drop` fires, the write is gone for
+        // good -- a later action that would otherwise resurrect it
+        // (`reorder` queuing a copy for a future flush, `corrupt`/`tear`
+        // producing a `ProceedWith`) is a no-op instead, and `drop` at
+        // any later point in the chain also discards whatever an
+        // earlier `reorder` already queued.
+        //
+        // `deferred_at`: once `reorder` fires, the write is already
+        // queued (not an independent real commit) -- a later `corrupt`
+        // mutates *that queued copy* in place instead of also producing
+        // its own `ProceedWith` (which was landing a second, overwriting
+        // copy directly while the queue still held a stale one), and a
+        // later `error` removes this call's own queued copy before
+        // failing (a command the guest sees fail never left anything in
+        // a real drive's write cache for a later flush to resurrect).
+        let mut dropped_for_good = false;
+        let mut deferred_at: Option<(usize, usize)> = None;
         for loc in locs {
             let seed = self.policy_seed(loc);
             let id = self.policies[loc.0].id.clone();
@@ -931,10 +964,26 @@ impl FaultPolicySet {
             match action {
                 Action::Drop => {
                     self.stats.dropped += 1;
+                    if let Some(at) = deferred_at.take() {
+                        self.remove_deferred_write(at, lba, seq);
+                    }
+                    dropped_for_good = true;
                     outcome = Outcome::DoneOk;
                 }
                 Action::Tear { at, n } => {
                     self.stats.torn += 1;
+                    // `dropped_for_good`: already gone, nothing left to
+                    // tear. `deferred_at`: an earlier `reorder` in this
+                    // chain already queued the write and owns its fate
+                    // from here -- a safe no-op rather than also
+                    // reaching into the queued copy, which `reorder`
+                    // itself already handles correctly in the opposite
+                    // order (`tear` then `reorder` truncates `out` first,
+                    // and `reorder` queues whatever `out` holds by the
+                    // time it runs).
+                    if dropped_for_good || deferred_at.is_some() {
+                        continue;
+                    }
                     let keep = match at {
                         // `saturating_mul`, not `*`: an `n` anywhere near
                         // `u64::MAX` would otherwise overflow `usize`
@@ -953,22 +1002,31 @@ impl FaultPolicySet {
                 }
                 Action::Reorder { window } => {
                     self.stats.reordered += 1;
-                    // Always a full sector, even when an earlier
-                    // `continue: true` action (`tear`) already truncated
-                    // `out`: every release path (`take_release_on_flush`/
-                    // `take_evicted`/`disk.fault.clear`) writes a held
-                    // write's `data` as a whole sector, and a shorter
-                    // buffer there panics instead of torn-and-held. The
-                    // untouched tail is spliced from `pre_write`, same
-                    // reasoning as the top-level tear-tail splice in
-                    // `HardDriveImage::write_sector`.
-                    let held_data = if out.len() < sector_bytes {
+                    if dropped_for_good || deferred_at.is_some() {
+                        continue;
+                    }
+                    // Always a whole number of sectors, even when an
+                    // earlier `continue: true` action (`tear`) already
+                    // truncated `out`: every release path
+                    // (`take_release_on_flush`/`take_evicted`/
+                    // `disk.fault.clear`) writes a held write's `data`
+                    // sector-by-sector, and a buffer that doesn't end on
+                    // a sector boundary panics there instead of
+                    // torn-and-held. The untouched tail is spliced from
+                    // `pre_write`, same reasoning as the top-level
+                    // tear-tail splice in `HardDriveImage::write_sector`
+                    // -- for a multi-sector request (`write_sectors`),
+                    // `pre_write` spans the same range as `out`, so the
+                    // splice lands in the right sector even when the cut
+                    // falls past the first one.
+                    let rounded = out.len().max(1).div_ceil(sector_bytes) * sector_bytes;
+                    let held_data = if out.len() == rounded && !out.is_empty() {
+                        out.clone()
+                    } else {
                         let mut full = pre_write.to_vec();
-                        full.resize(sector_bytes, 0);
+                        full.resize(rounded, 0);
                         full[..out.len()].copy_from_slice(&out);
                         full
-                    } else {
-                        out.clone()
                     };
                     let rule = self.rule_mut(loc);
                     rule.state.reorder_queue.push_back(HeldWrite {
@@ -976,6 +1034,7 @@ impl FaultPolicySet {
                         data: held_data,
                         seq,
                     });
+                    deferred_at = Some(loc);
                     if rule.state.reorder_queue.len() > window {
                         let evict =
                             (rng_for(seed, seq, 0x2000) as usize) % rule.state.reorder_queue.len();
@@ -987,6 +1046,13 @@ impl FaultPolicySet {
                         // write is queued here for the caller to commit
                         // for real -- see `take_evicted`'s doc comment.
                         if let Some(evicted) = rule.state.reorder_queue.remove(evict) {
+                            // If the entry this call just pushed is the
+                            // one evicted, there is no longer a queued
+                            // copy for a later action in this chain to
+                            // adjust.
+                            if evicted.lba == lba && evicted.seq == seq {
+                                deferred_at = None;
+                            }
                             self.pending_evicted.push_back(evicted);
                         }
                     }
@@ -994,15 +1060,33 @@ impl FaultPolicySet {
                 }
                 Action::Corrupt { bits } => {
                     self.stats.corrupted += 1;
-                    self.apply_corrupt(bits, &mut out, seed, seq);
-                    outcome = Outcome::ProceedWith(out.clone());
+                    if dropped_for_good {
+                        continue;
+                    }
+                    if let Some(at) = deferred_at {
+                        if let Some(held) = self.deferred_write_mut(at, lba, seq) {
+                            apply_corrupt(bits, held, seed, seq);
+                        }
+                    } else {
+                        apply_corrupt(bits, &mut out, seed, seq);
+                        outcome = Outcome::ProceedWith(out.clone());
+                    }
                 }
                 Action::Error { code } => {
                     self.stats.errored += 1;
+                    if let Some(at) = deferred_at {
+                        // The guest sees this write fail -- nothing a
+                        // real drive's write cache held for it survives
+                        // that, so this call's own queued copy (not any
+                        // other write already legitimately held before
+                        // it) must go too.
+                        self.remove_deferred_write(at, lba, seq);
+                    }
                     return Outcome::Fail(code);
                 }
                 Action::Delay { ms } => {
                     self.stats.delayed_ms += ms;
+                    self.pending_delay_ms += ms;
                 }
                 Action::Cut => {
                     self.cut = true;
@@ -1011,7 +1095,7 @@ impl FaultPolicySet {
                     return Outcome::Fail(ErrorCode::NotReady);
                 }
                 Action::Stale { count } => {
-                    if count > 0 {
+                    if count > 0 && !dropped_for_good {
                         self.rule_mut(loc)
                             .state
                             .stale_pending
@@ -1022,6 +1106,50 @@ impl FaultPolicySet {
             }
         }
         outcome
+    }
+
+    /// The data of the held write this call's own `reorder` queued at
+    /// `at` (a `(policy, rule)` index pair), if it is still there --
+    /// `None` if a window eviction already released it before a later
+    /// `continue: true` action in the same call got a chance to touch
+    /// it. Identified by `(lba, seq)`, not just "whatever is at the back
+    /// of the queue": an eviction can reorder what is actually last.
+    fn deferred_write_mut(
+        &mut self,
+        at: (usize, usize),
+        lba: u64,
+        seq: u64,
+    ) -> Option<&mut Vec<u8>> {
+        self.policies
+            .get_mut(at.0)?
+            .rules
+            .get_mut(at.1)?
+            .state
+            .reorder_queue
+            .iter_mut()
+            .rev()
+            .find(|w| w.lba == lba && w.seq == seq)
+            .map(|w| &mut w.data)
+    }
+
+    /// Removes this call's own held write from `at`, if still queued --
+    /// see [`Self::deferred_write_mut`]'s doc comment on why eviction can
+    /// make that conditional.
+    fn remove_deferred_write(&mut self, at: (usize, usize), lba: u64, seq: u64) {
+        let Some(policy) = self.policies.get_mut(at.0) else {
+            return;
+        };
+        let Some(rule) = policy.rules.get_mut(at.1) else {
+            return;
+        };
+        if let Some(pos) = rule
+            .state
+            .reorder_queue
+            .iter()
+            .rposition(|w| w.lba == lba && w.seq == seq)
+        {
+            rule.state.reorder_queue.remove(pos);
+        }
     }
 
     pub fn on_read(&mut self, lba: u64, data: &mut [u8], sector_bytes: usize) -> Outcome {
@@ -1093,7 +1221,7 @@ impl FaultPolicySet {
             match action {
                 Action::Corrupt { bits } => {
                     self.stats.corrupted += 1;
-                    self.apply_corrupt(bits, &mut out, seed, seq);
+                    apply_corrupt(bits, &mut out, seed, seq);
                     outcome = Outcome::ProceedWith(out.clone());
                 }
                 Action::Error { code } => {
@@ -1102,6 +1230,7 @@ impl FaultPolicySet {
                 }
                 Action::Delay { ms } => {
                     self.stats.delayed_ms += ms;
+                    self.pending_delay_ms += ms;
                 }
                 Action::Cut => {
                     self.cut = true;
@@ -1153,6 +1282,7 @@ impl FaultPolicySet {
                 }
                 Action::Delay { ms } => {
                     self.stats.delayed_ms += ms;
+                    self.pending_delay_ms += ms;
                 }
                 Action::Cut => {
                     self.cut = true;
@@ -1228,6 +1358,22 @@ impl FaultPolicySet {
     /// silently discarded.
     pub fn take_evicted(&mut self) -> Vec<HeldWrite> {
         self.pending_evicted.drain(..).collect()
+    }
+
+    /// Drains the millisecond total a `delay` rule accumulated during the
+    /// most recent `on_write`/`on_read`/`on_flush` call. `HardDriveImage`
+    /// itself has no notion of emulated time, so it cannot act on this --
+    /// a controller with a completion-timing mechanism that can accept a
+    /// variable extra delay (`ScsiDisk`'s own `post(csr, cck)`, in
+    /// particular) calls this right after the I/O call that may have
+    /// produced it and adds the converted-to-cck equivalent to its own
+    /// completion schedule. Not every controller has an injection point
+    /// this simple to add latency at (IDE/copperhf/floppy/CD's own
+    /// completion timing is structured differently); `delay` on those
+    /// targets still only shows up in `disk.fault.stats`' `delayed_ms`
+    /// for now, same as before this method existed.
+    pub fn take_delay_ms(&mut self) -> u64 {
+        std::mem::take(&mut self.pending_delay_ms)
     }
 }
 
@@ -1641,6 +1787,96 @@ mod tests {
             &released[0].data[100..],
             &pre_write[100..],
             "the untouched tail must be spliced from the pre-write bytes"
+        );
+    }
+
+    #[test]
+    fn drop_then_continue_corrupt_still_drops_the_write() {
+        let mut set = FaultPolicySet::default();
+        set.set(
+            None,
+            &policy(serde_json::json!([
+                {"op": "write", "action": "drop", "continue": true},
+                {"op": "write", "action": "corrupt", "bits": 8},
+            ])),
+            1,
+        )
+        .unwrap();
+        let outcome = set.on_write(0, &[0x11u8; 512], 512, &[0u8; 512]);
+        assert!(
+            matches!(outcome, Outcome::DoneOk),
+            "drop must win even though corrupt continues after it, got {outcome:?}"
+        );
+        assert!(
+            set.take_release_on_flush().is_empty(),
+            "a dropped write must not resurface anywhere"
+        );
+    }
+
+    #[test]
+    fn reorder_then_continue_corrupt_mutates_the_held_copy_not_a_second_commit() {
+        let mut set = FaultPolicySet::default();
+        set.set(
+            None,
+            &policy(serde_json::json!([
+                {"op": "write", "action": "reorder", "window": 4, "continue": true},
+                {"op": "write", "action": "corrupt", "bits": 4096},
+            ])),
+            1,
+        )
+        .unwrap();
+        let original = vec![0u8; 512];
+        let outcome = set.on_write(0, &original, 512, &original);
+        assert!(
+            matches!(outcome, Outcome::DoneOk),
+            "must not also produce an independent commit, got {outcome:?}"
+        );
+        let released = set.take_release_on_flush();
+        assert_eq!(released.len(), 1, "exactly one held copy, not two");
+        assert_ne!(
+            released[0].data, original,
+            "the held copy must carry the corruption, not an untouched one committed separately"
+        );
+    }
+
+    #[test]
+    fn reorder_then_continue_error_removes_the_held_write() {
+        let mut set = FaultPolicySet::default();
+        set.set(
+            None,
+            &policy(serde_json::json!([
+                {"op": "write", "action": "reorder", "window": 4, "continue": true},
+                {"op": "write", "action": "error", "code": "aborted"},
+            ])),
+            1,
+        )
+        .unwrap();
+        let outcome = set.on_write(0, &[0x22u8; 512], 512, &[0u8; 512]);
+        assert!(matches!(outcome, Outcome::Fail(_)));
+        assert!(
+            set.take_release_on_flush().is_empty(),
+            "a write the guest saw fail must not survive in the held queue for a later flush \
+             to resurrect"
+        );
+    }
+
+    #[test]
+    fn drop_after_continue_reorder_removes_the_held_write() {
+        let mut set = FaultPolicySet::default();
+        set.set(
+            None,
+            &policy(serde_json::json!([
+                {"op": "write", "action": "reorder", "window": 4, "continue": true},
+                {"op": "write", "action": "drop"},
+            ])),
+            1,
+        )
+        .unwrap();
+        let outcome = set.on_write(0, &[0x33u8; 512], 512, &[0u8; 512]);
+        assert!(matches!(outcome, Outcome::DoneOk));
+        assert!(
+            set.take_release_on_flush().is_empty(),
+            "drop firing after reorder must also discard what reorder already queued"
         );
     }
 

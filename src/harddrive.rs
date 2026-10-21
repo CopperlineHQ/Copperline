@@ -1057,6 +1057,23 @@ impl HardDriveImage {
     /// reaches the image, which is only possible ahead of the write, not
     /// after (see [`crate::diskfault::FaultPolicySet::on_write`]).
     pub fn write_sector(&mut self, lba: u64, buf: &[u8]) -> std::io::Result<()> {
+        self.write_sectors(lba, buf)
+    }
+
+    /// `write_sector`'s multi-sector counterpart: the request-level entry
+    /// point a controller committing several consecutive sectors as one
+    /// operation (IDE WRITE MULTIPLE, SCSI WRITE(10)/(12)/(16), a
+    /// copperhf multi-sector job) should call once for the whole buffer,
+    /// not once per sector -- `tear {at: "sector"}` can only truncate a
+    /// request down to its first N sectors if the policy set actually
+    /// sees the request as one multi-sector whole (`on_write`'s own
+    /// `count` already reflects `buf.len() / sector_bytes` either way,
+    /// but every prior caller only ever passed one sector at a time, so
+    /// `count` was always 1 and a `tear` keeping "the first 2 sectors" of
+    /// an 8-sector request had nothing beyond the first sector to keep).
+    /// `buf.len()` must be a positive multiple of `SECTOR_SIZE`.
+    pub fn write_sectors(&mut self, lba: u64, buf: &[u8]) -> std::io::Result<()> {
+        debug_assert!(!buf.is_empty() && buf.len().is_multiple_of(SECTOR_SIZE));
         // Checked here too, not just inside `write_sector_real`: a fault
         // policy's `DoneOk`/`ProceedWith` outcome below returns without
         // ever reaching `write_sector_real`, which would otherwise let an
@@ -1068,7 +1085,7 @@ impl HardDriveImage {
             return Err(Self::write_protected_error());
         }
         if self.fault.is_empty() {
-            return self.write_sector_real(lba, buf);
+            return self.write_sectors_real(lba, buf);
         }
         // Only `stale` actually needs this (to arm what a later read
         // serves back); every other action ignores it. Read unconditionally
@@ -1078,38 +1095,53 @@ impl HardDriveImage {
         // sparse image) has nothing meaningful to go stale to, so a read
         // failure here is not itself a write failure -- an empty
         // `pre_write` just means `stale` has nothing to arm this time.
-        let mut pre_write = [0u8; SECTOR_SIZE];
-        let pre_write: &[u8] = match self.read_sector_real(lba, &mut pre_write) {
-            Ok(()) => &pre_write,
-            Err(_) => &[],
-        };
-        let outcome = self.fault.on_write(lba, buf, SECTOR_SIZE, pre_write);
+        // Spans the whole request (not just one sector), read sector by
+        // sector since `read_sector_real` itself is single-sector.
+        let sectors = buf.len() / SECTOR_SIZE;
+        let mut pre_write = vec![0u8; buf.len()];
+        for i in 0..sectors {
+            let mut one = [0u8; SECTOR_SIZE];
+            if self.read_sector_real(lba + i as u64, &mut one).is_ok() {
+                pre_write[i * SECTOR_SIZE..(i + 1) * SECTOR_SIZE].copy_from_slice(&one);
+            }
+        }
+        let outcome = self.fault.on_write(lba, buf, SECTOR_SIZE, &pre_write);
         // A `reorder` window overflow evicts the oldest/random held write
         // by committing it for real rather than discarding it --
         // `on_write` has no I/O of its own, so it queues the eviction and
         // this is where it gets replayed, the same "already decided"
         // shape `write_sector_replay` uses for a flush/clear release.
+        // `write_sectors_real`, not `write_sector_real`: an evicted held
+        // write can itself span several sectors (a `reorder` that caught
+        // a multi-sector request whole).
         for evicted in self.fault.take_evicted() {
-            self.write_sector_real(evicted.lba, &evicted.data)?;
+            self.write_sectors_real(evicted.lba, &evicted.data)?;
         }
         match outcome {
-            crate::diskfault::Outcome::Proceed => self.write_sector_real(lba, buf),
+            crate::diskfault::Outcome::Proceed => self.write_sectors_real(lba, buf),
             crate::diskfault::Outcome::DoneOk => Ok(()),
-            crate::diskfault::Outcome::ProceedWith(data) if data.len() >= SECTOR_SIZE => {
-                self.write_sector_real(lba, &data)
-            }
-            // `tear`'s `at: bytes` mode: fewer than a whole sector reached
-            // the image, modelling a power cut mid-sector. Every backing
-            // below writes whole sectors, so the untouched tail is spliced
-            // from what is on disk *now* -- not left as whatever the
-            // caller's buffer happened to hold -- matching "a one-sector
-            // request... may leave a partial sector" rather than
-            // corrupting the tail with garbage.
+            // `tear`'s `at: bytes` mode, or `at: "sector"` leaving a
+            // trailing partial sector (or no partial sector at all, if
+            // `data` happens to end exactly on a boundary): whatever
+            // whole sectors `data` covers land as-is; a trailing partial
+            // sector splices its untouched tail from what is on disk
+            // *now* -- not left as whatever the caller's buffer happened
+            // to hold -- modelling a power cut mid-sector, same as the
+            // original single-sector tear-tail splice.
             crate::diskfault::Outcome::ProceedWith(data) => {
-                let mut sector = vec![0u8; SECTOR_SIZE];
-                self.read_sector_real(lba, &mut sector)?;
-                sector[..data.len()].copy_from_slice(&data);
-                self.write_sector_real(lba, &sector)
+                let whole = (data.len() / SECTOR_SIZE) * SECTOR_SIZE;
+                if whole > 0 {
+                    self.write_sectors_real(lba, &data[..whole])?;
+                }
+                let tail = &data[whole..];
+                if !tail.is_empty() {
+                    let tail_lba = lba + (whole / SECTOR_SIZE) as u64;
+                    let mut sector = vec![0u8; SECTOR_SIZE];
+                    self.read_sector_real(tail_lba, &mut sector)?;
+                    sector[..tail.len()].copy_from_slice(tail);
+                    self.write_sector_real(tail_lba, &sector)?;
+                }
+                Ok(())
             }
             crate::diskfault::Outcome::Fail(code) => Err(Self::fault_io_error(code)),
         }
@@ -1122,14 +1154,29 @@ impl HardDriveImage {
         )
     }
 
-    /// Writes a sector that a fault policy already decided on (a held
-    /// reorder-queue write being released by a flush or by
-    /// `disk.fault.clear`) straight to the image, bypassing `write_sector`'s
-    /// own fault check -- re-entering it would let `drop`/`tear`/`corrupt`
-    /// roll again on data that already passed those checks once. See
-    /// `flush`'s use of `write_sector_real` for the same reasoning.
+    /// Writes a held write a fault policy already decided on (a reorder
+    /// release via a flush or `disk.fault.clear`) straight to the image,
+    /// bypassing `write_sector`/`write_sectors`'s own fault check --
+    /// re-entering it would let `drop`/`tear`/`corrupt` roll again on
+    /// data that already passed those checks once. `write_sectors_real`,
+    /// not `write_sector_real`: `buf` can span several sectors (a
+    /// `reorder` that caught a multi-sector request whole). See
+    /// `flush`'s own replay loop for the same reasoning.
     pub fn write_sector_replay(&mut self, lba: u64, buf: &[u8]) -> std::io::Result<()> {
-        self.write_sector_real(lba, buf)
+        self.write_sectors_real(lba, buf)
+    }
+
+    /// `write_sector_real` for a buffer spanning one or more consecutive
+    /// sectors -- every backing's own `write_sector`/`write_all` still
+    /// only ever receives one sector per call (none of the backing
+    /// implementations are multi-sector aware, and extending each is out
+    /// of scope here), so this just loops it rather than widening the
+    /// per-backing commit path itself.
+    fn write_sectors_real(&mut self, lba: u64, buf: &[u8]) -> std::io::Result<()> {
+        for (i, chunk) in buf.chunks(SECTOR_SIZE).enumerate() {
+            self.write_sector_real(lba + i as u64, chunk)?;
+        }
+        Ok(())
     }
 
     fn write_sector_real(&mut self, lba: u64, buf: &[u8]) -> std::io::Result<()> {
@@ -1266,13 +1313,16 @@ impl HardDriveImage {
                 crate::diskfault::Outcome::DoneOk => return Ok(()), // `ignore`: acknowledged, nothing released
                 crate::diskfault::Outcome::Proceed | crate::diskfault::Outcome::ProceedWith(_) => {
                     // Released in a seeded random order, not FIFO --
-                    // `write_sector_real` (not `write_sector`): these
-                    // writes were already decided when they were first
-                    // held, so replaying them through the fault layer
-                    // again would re-roll `drop`/`tear`/`corrupt` on data
-                    // that already passed those checks once.
+                    // `write_sectors_real` (not `write_sector`/
+                    // `write_sectors`): these writes were already decided
+                    // when they were first held, so replaying them
+                    // through the fault layer again would re-roll
+                    // `drop`/`tear`/`corrupt` on data that already passed
+                    // those checks once; `held.data` can itself span
+                    // several sectors (a `reorder` that caught a
+                    // multi-sector request whole).
                     for held in self.fault.take_release_on_flush() {
-                        self.write_sector_real(held.lba, &held.data)?;
+                        self.write_sectors_real(held.lba, &held.data)?;
                     }
                 }
             }
@@ -2359,6 +2409,51 @@ mod tests {
             "a flush must release the newest held write for a sector held twice, not an \
              arbitrary one of the two"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn tear_at_sector_truncates_a_multi_sector_write_sectors_request() {
+        let (path, mut drive, base) = fault_test_drive("fault-tear-multi.hdf");
+        drive
+            .fault
+            .set(
+                None,
+                &serde_json::json!({"rules": [{"op": "write", "action": "tear", "at": "sector", "n": 2}]}),
+                1,
+            )
+            .unwrap();
+        let mut buf = Vec::new();
+        for s in 0u8..4 {
+            buf.extend(std::iter::repeat_n(s + 1, SECTOR_SIZE));
+        }
+        drive.write_sectors(base, &buf).unwrap();
+
+        let mut reopened = HardDriveImage::open(
+            &path,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
+        for s in 0u64..4 {
+            let mut sector = vec![0u8; SECTOR_SIZE];
+            reopened.read_sector(base + s, &mut sector).unwrap();
+            if s < 2 {
+                assert_eq!(
+                    sector,
+                    vec![s as u8 + 1; SECTOR_SIZE],
+                    "sector {s} is within the first 2 sectors tear kept, must be committed"
+                );
+            } else {
+                assert!(
+                    sector.iter().all(|&b| b == 0),
+                    "sector {s} is past the first 2 sectors tear kept, must not be committed"
+                );
+            }
+        }
         let _ = std::fs::remove_file(&path);
     }
 

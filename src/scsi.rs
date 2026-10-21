@@ -649,16 +649,31 @@ impl ScsiDisk {
                     0x2A | 0xAA => u64::from(be32(cdb, 2)),
                     _ => be64(cdb, 2), // 0x8A: WRITE(16)
                 };
-                // Whole sectors only; a trailing partial one is dropped.
-                if let Err(e) = self.disk.write_sectors(lba, data) {
-                    log::warn!(
-                        "scsi {}: write of {} sector(s) at lba {lba}: {e}",
-                        self.disk.path().display(),
-                        data.len() / SECTOR_SIZE
-                    );
-                    let (sk, asc) = sense_for_io_error(&e);
-                    self.set_sense(sk, asc);
-                    return CHECK_CONDITION;
+                // Only whole sectors commit -- a short trailing chunk
+                // (shouldn't happen: `rw_command` sized `data` to a
+                // sector multiple) is simply not written, not an error.
+                let whole = (data.len() / SECTOR_SIZE) * SECTOR_SIZE;
+                if whole > 0 {
+                    if let Err(e) = self.disk.write_sectors(lba, &data[..whole]) {
+                        log::warn!("scsi {}: write lba {lba}: {e}", self.disk.path().display());
+                        let (sk, asc) = sense_for_io_error(&e);
+                        self.set_sense(sk, asc);
+                        return CHECK_CONDITION;
+                    }
+                }
+                // Only Force Unit Access actually demands the medium be
+                // synced before completion -- an ordinary WRITE's data
+                // only has to reach the medium by the next SYNCHRONIZE
+                // CACHE (or FUA write), same as a real drive's write-back
+                // cache. Flushing after every write regardless (the
+                // previous behaviour here) meant a `reorder` fault policy
+                // could never hold a write across more than one SCSI
+                // command -- its own completion silently released the
+                // whole queue immediately. WRITE(6) (`0x0A`) has no
+                // control byte to carry FUA at all, so it never forces it.
+                let fua = cdb[0] != 0x0A && cdb[1] & 0x08 != 0;
+                if !fua {
+                    return GOOD;
                 }
                 match self.disk.flush() {
                     Ok(()) => GOOD,
@@ -691,6 +706,29 @@ pub enum ScsiTarget {
 }
 
 impl ScsiTarget {
+    /// Converts a `delay` rule's accumulated milliseconds (see
+    /// `FaultPolicySet::take_delay_ms`'s doc comment) into a colour-clock
+    /// count the caller adds to its own completion delay, draining it so
+    /// it is only ever added once. `CdRom` always returns 0: its own
+    /// command-completion timing isn't wired up to this yet, so `delay`
+    /// there still only shows up in `disk.fault.stats`.
+    fn take_delay_cck(&mut self) -> u32 {
+        match self {
+            ScsiTarget::Disk(disk) => {
+                let ms = disk.disk.fault.take_delay_ms();
+                // `PAULA_CLOCK_HZ` colour clocks per second -- the same
+                // seconds-to-cck conversion `cd.trace`'s own timestamps
+                // use, just driven by a millisecond count instead of a
+                // `f64` seconds value.
+                u32::try_from(
+                    ms.saturating_mul(u64::from(crate::chipset::paula::PAULA_CLOCK_HZ)) / 1000,
+                )
+                .unwrap_or(u32::MAX)
+            }
+            ScsiTarget::CdRom(_) => 0,
+        }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn pending_host_disk(&self) -> Option<(String, String, bool)> {
         match self {
@@ -1274,18 +1312,23 @@ impl Wd33c93 {
         let Some(txn) = self.xfer.take() else {
             return;
         };
-        let status = self.commit_status(txn);
+        let (status, extra_delay) = self.commit_status(txn);
         self.regs[usize::from(WD_TARGET_LUN)] = status;
         self.regs[usize::from(WD_COMMAND_PHASE)] = 0x60;
-        self.post(CSR_SEL_XFER_DONE, CMD_DELAY_CCK);
+        // `disk.fault.set {..., action: "delay"}` adds its accumulated
+        // latency on top of the usual fixed completion delay here, not a
+        // no-op that only shows up in `disk.fault.stats`' `delayed_ms`.
+        self.post(CSR_SEL_XFER_DONE, CMD_DELAY_CCK.saturating_add(extra_delay));
         // The target then disconnects, which interrupts again once the
         // completion status has been acknowledged.
         self.post(CSR_DISC, CMD_DELAY_CCK);
     }
 
     /// Resolve the transaction's final status byte, committing a data-out
-    /// payload to the target.
-    fn commit_status(&mut self, txn: Transaction) -> u8 {
+    /// payload to the target, and any extra completion delay a `delay`
+    /// fault rule asked for (in colour clocks, for the caller to add to
+    /// its own completion schedule).
+    fn commit_status(&mut self, txn: Transaction) -> (u8, u32) {
         if txn.dir == Some(DmaDir::Out) {
             let id = usize::from(txn.target_id);
             if txn.data.len() < txn.out_expected {
@@ -1298,10 +1341,11 @@ impl Wd33c93 {
             let mut data = txn.data;
             data.resize(txn.out_expected, 0);
             if let Some(target) = self.targets[id].as_mut() {
-                return target.complete_out(&txn.cdb, &data);
+                let status = target.complete_out(&txn.cdb, &data);
+                return (status, target.take_delay_cck());
             }
         }
-        txn.status
+        (txn.status, 0)
     }
 
     /// The data phase stalled because the target changed phase while the
@@ -1580,7 +1624,7 @@ impl Wd33c93 {
             }
             ManualPhase::Data => {
                 // Data-out payload complete: commit and stage the status.
-                let status = self.commit_status(txn);
+                let (status, extra_delay) = self.commit_status(txn);
                 self.xfer = Some(Transaction {
                     target_id: 0,
                     cdb: Vec::new(),
@@ -1592,7 +1636,10 @@ impl Wd33c93 {
                 });
                 self.manual = Some(ManualPhase::Status);
                 self.regs[usize::from(WD_COMMAND_PHASE)] = 0x46;
-                self.post(CSR_XFER_DONE | PHS_STATUS, CMD_DELAY_CCK);
+                self.post(
+                    CSR_XFER_DONE | PHS_STATUS,
+                    CMD_DELAY_CCK.saturating_add(extra_delay),
+                );
             }
             _ => {}
         }
@@ -1977,6 +2024,108 @@ mod tests {
             ScsiDisk::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap();
         assert_eq!(disk.complete_out(&[], &[0u8; SECTOR_SIZE]), GOOD);
         assert_eq!(disk.complete_out(&[0x2A, 0, 0], &[0u8; SECTOR_SIZE]), GOOD);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn an_ordinary_write_without_fua_does_not_release_a_held_reorder_queue() {
+        let path = temp_image(64);
+        let mut disk =
+            ScsiDisk::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap();
+        disk.disk
+            .fault
+            .set(
+                None,
+                &serde_json::json!({"rules": [{"op": "write", "action": "reorder", "window": 8}]}),
+                1,
+            )
+            .unwrap();
+        let cdb = [0x2A, 0, 0, 0, 0, 1, 0, 0, 1, 0]; // WRITE(10), FUA clear
+        assert_eq!(disk.complete_out(&cdb, &[0xAAu8; SECTOR_SIZE]), GOOD);
+        assert!(
+            !disk.disk.fault.policies[0].rules[0]
+                .state
+                .reorder_queue
+                .is_empty(),
+            "an ordinary (non-FUA) WRITE must not implicitly flush a held reorder queue"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_fua_write_releases_a_held_reorder_queue() {
+        let path = temp_image(64);
+        let mut disk =
+            ScsiDisk::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap();
+        disk.disk
+            .fault
+            .set(
+                None,
+                &serde_json::json!({"rules": [{"op": "write", "action": "reorder", "window": 8}]}),
+                1,
+            )
+            .unwrap();
+        let cdb = [0x2A, 0x08, 0, 0, 0, 1, 0, 0, 1, 0]; // WRITE(10), FUA set
+        assert_eq!(disk.complete_out(&cdb, &[0xAAu8; SECTOR_SIZE]), GOOD);
+        assert!(
+            disk.disk.fault.policies[0].rules[0]
+                .state
+                .reorder_queue
+                .is_empty(),
+            "a FUA write must flush the medium, releasing any held reorder queue"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn write6_never_forces_unit_access() {
+        let path = temp_image(64);
+        let mut disk =
+            ScsiDisk::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap();
+        disk.disk
+            .fault
+            .set(
+                None,
+                &serde_json::json!({"rules": [{"op": "write", "action": "reorder", "window": 8}]}),
+                1,
+            )
+            .unwrap();
+        // WRITE(6): no control byte at all to carry FUA.
+        let cdb = [0x0A, 0, 0, 1, 1, 0];
+        assert_eq!(disk.complete_out(&cdb, &[0xAAu8; SECTOR_SIZE]), GOOD);
+        assert!(
+            !disk.disk.fault.policies[0].rules[0]
+                .state
+                .reorder_queue
+                .is_empty(),
+            "WRITE(6) has no FUA bit and must never force a flush"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_delay_rule_converts_to_a_nonzero_colour_clock_count_once() {
+        let path = temp_image(64);
+        let mut disk =
+            ScsiDisk::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap();
+        disk.disk
+            .fault
+            .set(
+                None,
+                &serde_json::json!({"rules": [{"op": "write", "action": "delay", "ms": 10}]}),
+                1,
+            )
+            .unwrap();
+        let cdb = [0x2A, 0, 0, 0, 0, 1, 0, 0, 1, 0];
+        assert_eq!(disk.complete_out(&cdb, &[0u8; SECTOR_SIZE]), GOOD);
+        let mut target = ScsiTarget::Disk(disk);
+        let cck = target.take_delay_cck();
+        assert!(cck > 0, "a delay rule must convert to a nonzero cck count");
+        assert_eq!(
+            target.take_delay_cck(),
+            0,
+            "drained once by the caller, not left to accumulate across completions"
+        );
         std::fs::remove_file(&path).ok();
     }
 

@@ -1217,28 +1217,45 @@ impl AtaBus {
 
     fn commit_write_buffer(&mut self) -> Result<(), ()> {
         let sectors = self.buf.len() / SECTOR_SIZE;
-        for i in 0..sectors {
-            let Some(lba) = self.current_lba() else {
-                self.command_error(ERR_IDNF);
-                return Err(());
-            };
-            let total = self.drive().map(|d| d.disk.total_sectors()).unwrap_or(0);
-            if lba >= total {
-                self.command_error(ERR_IDNF);
-                return Err(());
-            }
-            let start = i * SECTOR_SIZE;
-            let sector: [u8; SECTOR_SIZE] =
-                self.buf[start..start + SECTOR_SIZE].try_into().unwrap();
-            let res = self
-                .drive()
-                .map(|d| d.disk.write_sector(lba, &sector))
-                .unwrap_or_else(|| Err(std::io::ErrorKind::NotFound.into()));
-            if let Err(e) = res {
-                log::warn!("IDE write lba {lba}: {e}");
-                self.command_error(ata_error_bits(&e));
-                return Err(());
-            }
+        // `current_lba`/`advance_lba` always move in a contiguous run of
+        // exactly `sectors` logical sectors starting here, in both LBA
+        // and CHS mode (CHS mode's own cylinder/head/sector rollover
+        // matches `current_lba`'s linearization exactly) -- so the whole
+        // WRITE MULTIPLE/WRITE SECTOR(S) request is committed as one
+        // `write_sectors` call instead of one `write_sector` per sector,
+        // letting `disk.fault.set`'s `tear {at: "sector"}` actually
+        // truncate at the Nth sector of a multi-sector request rather
+        // than only ever seeing a single sector at a time. Checked
+        // up front (not per sector, as the loop this replaces did):
+        // `write_sectors` commits the whole request as one operation, so
+        // it cannot partially commit a request that runs out of range
+        // partway through the way the old per-sector loop could.
+        let Some(base_lba) = self.current_lba() else {
+            self.command_error(ERR_IDNF);
+            return Err(());
+        };
+        let total = self.drive().map(|d| d.disk.total_sectors()).unwrap_or(0);
+        if base_lba
+            .checked_add(sectors as u64)
+            .is_none_or(|end| end > total)
+        {
+            self.command_error(ERR_IDNF);
+            return Err(());
+        }
+        // Copied out first: `self.drive()`'s `&mut self` borrow would
+        // otherwise conflict with reading `self.buf` from inside the
+        // closure below.
+        let payload = self.buf[..sectors * SECTOR_SIZE].to_vec();
+        let res = self
+            .drive()
+            .map(|d| d.disk.write_sectors(base_lba, &payload))
+            .unwrap_or_else(|| Err(std::io::ErrorKind::NotFound.into()));
+        if let Err(e) = res {
+            log::warn!("IDE write lba {base_lba}: {e}");
+            self.command_error(ata_error_bits(&e));
+            return Err(());
+        }
+        for _ in 0..sectors {
             self.advance_lba();
         }
         Ok(())

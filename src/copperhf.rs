@@ -540,6 +540,11 @@ fn execute_job(units: &UnitsShared, job: WorkerJob) -> WorkerResult {
                 let Some(payload) = payload.get(..bytes) else {
                     return WorkerResult::RwFailed;
                 };
+                // One `write_sectors` call for the whole job, not one
+                // `write_sector` per sector: `disk.fault.set`'s
+                // `tear {at: "sector"}` can only truncate at the Nth
+                // sector of a multi-sector job if the policy set sees it
+                // as one multi-sector request to begin with.
                 if let Err(e) = disk.disk.write_sectors(start_lba, payload) {
                     log::warn!(
                         "copperhf: unit {unit}: write of {sectors} sector(s) at {start_lba} \
