@@ -296,6 +296,9 @@ const DENISE_HPOS_LAG_CCK: u32 = 4;
 // clocks after the chip-bus slot that carried it, regardless of whether the
 // Copper or the CPU drove the bus (see `record_render_write`).
 const DENISE_WRITE_EFFECT_DELAY_CCK: u32 = 4;
+// CLXCON feeds the live comparator through a shorter register path than
+// render writes. Paired A500 Copper-gate and independent DIW controls.
+const DENISE_COLLISION_MATCH_DELAY_CCK: u32 = 2;
 // Agnus applies its two-cycle register class (DMACON, BPLxPT, BPLxMOD,
 // SPRxPT; vAmiga `DMA_CYCLES(2)` in `recordRegisterChange`) two colour
 // clocks after the chip-bus slot that carried the write.
@@ -9690,10 +9693,8 @@ impl Bus {
                     CpuBusSamplePhase::End
                 };
                 if matches!(word_off, 0x00E | 0x01E) && phase == sample_phase {
-                    // Denise's collision latch is sampled/cleared at the
-                    // start of the granted word, before pixels clocked during
-                    // that slot can enter it. Paula INTREQR retains its
-                    // separately calibrated end-of-slot sampling phase.
+                    // CLXDAT samples/clears before the word's trailing
+                    // clocks; INTREQR retains its end-of-slot sampling.
                     bus.flush_timed_devices();
                     sampled_words[slot as usize] = Some(bus.read_custom_word(word_off));
                 }
@@ -12169,10 +12170,35 @@ fn live_bitplane_collision_bits_in_range(
 
     for x in x_start..x_stop {
         let control = control_replay.control_for_x(x);
-        if control.bplcon0 & 0x0400 == 0 {
+        let collision_x = if !live_collision_aga_decode(control.agnus_revision)
+            && !bitplane_hires(control.bplcon0)
+            && !bitplane_shres(control.bplcon0)
+        {
+            row.fetch_origin_cck.map(|origin| {
+                // BPL1's transfer is the last slot of the eight-CCK lores
+                // fetch unit. A500 isolated first/last-bit gates place
+                // the live lores stream two CCK after that transfer.
+                // Its startup is independent of DIW and render placement.
+                let data_hpos = u32::from(origin) + 7 + 2;
+                data_hpos as i32 * 4 - RENDER_DIW_HSTART_FB0 * 2
+            })
+        } else {
+            None
+        };
+        let (window_start, window_stop) =
+            live_display_window_x(control.diwstrt, control.diwstop, control.diwhigh);
+        if x < window_start || (window_stop > window_start && x >= window_stop) {
             continue;
         }
-        let Some(collision) = live_bitplane_collision_pixel_at(
+        let collision = if let Some(data_x) = collision_x {
+            // The first BPL1 trigger enables comparison one lores pixel
+            // before copied data reaches the shifters. Before that trigger
+            // there is no comparison, even with DIW already open.
+            if x < data_x - 2 {
+                continue;
+            }
+            live_dma_playfield_collision_pixel_at(row, control, x - data_x)
+        } else if let Some(collision) = live_bitplane_collision_pixel_at(
             row,
             control.agnus_revision,
             control.bplcon0,
@@ -12185,19 +12211,56 @@ fn live_bitplane_collision_bits_in_range(
             control.ddfstrt,
             control.bpldat,
             x,
-        ) else {
+        ) {
+            collision
+        } else {
             continue;
         };
-        if collision.pf1 && collision.pf2 {
+        if collision.pf1_match && collision.pf2_match {
             return 1;
         }
     }
     0
 }
 
+// Classic lores DMA data before the first shifted sample is zero, rather
+// than "no collision comparator". CLXCON's zero match is observable there.
+fn live_dma_playfield_collision_pixel_at(
+    row: &CapturedBitplaneRow,
+    control: LiveCollisionControl,
+    relative_x: i32,
+) -> LivePlayfieldCollisionPixel {
+    let mode = BitplaneMode::from_bplcon0(control.bplcon0, false);
+    let mut idx = 0;
+    for plane in 0..mode.display_planes().min(row.nplanes) {
+        let native_x = relative_x.div_euclid(2)
+            - live_scroll_for_plane(control.bplcon0, control.bplcon1, plane) as i32;
+        if native_x < 0 || native_x as usize >= row.words_per_row * 16 {
+            continue;
+        }
+        let native_x = native_x as usize;
+        let word = if plane < mode.dma_planes() {
+            row.planes[plane][native_x / 16]
+        } else {
+            control.bpldat[plane]
+        };
+        if word & (0x8000 >> (native_x & 15)) != 0 {
+            idx |= 1 << plane;
+        }
+    }
+    live_playfield_collision_pixel(
+        idx,
+        control.clxcon,
+        control.clxcon2,
+        control.bplcon0 & 0x0400 != 0,
+    )
+}
+
 #[derive(Clone, Copy, Default)]
 struct LivePlayfieldCollisionPixel {
+    #[cfg(test)]
     pf1: bool,
+    #[cfg(test)]
     pf2: bool,
     pf1_match: bool,
     pf2_match: bool,
@@ -12341,11 +12404,24 @@ impl LiveCollisionLineReplay {
         for event in index.video_control_writes_before_visible_line(line) {
             line_start.apply_write(event.offset, event.value);
         }
+        let mut positioned_events: Vec<_> = line_events
+            .iter()
+            .map(|event| {
+                let x = if matches!(event.offset & 0x01fe, 0x098 | 0x10e) {
+                    // Match registers feed the comparator, not the image
+                    // renderer's independently calibrated write anchor.
+                    framebuffer_x_for_collision_beam(event.hpos)
+                } else {
+                    framebuffer_x_for_live_collision_hpos(event.hpos)
+                };
+                (x, event)
+            })
+            .collect();
+        positioned_events.sort_by_key(|(x, _)| *x);
         let mut control = line_start;
         let mut segments: Vec<LiveCollisionControlSegment> = Vec::with_capacity(line_events.len());
-        for event in line_events {
+        for (x, event) in positioned_events {
             control.apply_write(event.offset, event.value);
-            let x = framebuffer_x_for_live_collision_hpos(event.hpos);
             if let Some(last) = segments.last_mut() {
                 if last.x == x {
                     last.control = control;
@@ -12879,7 +12955,9 @@ fn live_playfield_collision_pixel(
     let odd_match_raw = live_clxcon_planes_match(idx, clxcon, clxcon2, 0);
     let odd_match = odd_match_raw && (dual_playfield || even_match);
     LivePlayfieldCollisionPixel {
+        #[cfg(test)]
         pf1: dual_playfield && idx & 0b010101 != 0,
+        #[cfg(test)]
         pf2: if dual_playfield {
             idx & 0b101010 != 0
         } else {

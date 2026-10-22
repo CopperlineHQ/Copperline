@@ -10066,19 +10066,18 @@ fn same_line_clxcon_odd_sprite_enable_does_not_retime_earlier_live_sprite_sprite
             bus.advance_chipset(before_enable);
             bus.write_custom_word_from(0x098, 1 << 12, BeamWriteSource::Cpu);
         }
-        let remaining = 0x3A - bus.agnus.hpos;
-        advance_collision_fixture_observation(&mut bus, remaining);
+        let remaining = 0x44 - bus.agnus.hpos;
+        bus.advance_chipset(remaining);
 
         bus.custom_read(0x00E, 2)
     };
 
-    // The CLXCON events record at the write slot + the write-effect delay:
-    // slot $34 -> event $38 (before the sprite pixels), slot $36 -> event
-    // $3A (after them) -- the same recorded boundary the pre-delay test
-    // staged directly at $38/$3A.
+    // Match-register writes use the absolute comparator coordinate and
+    // a two-CCK delay: slot $3E -> $40 (before the sprite at H=$41.5), whereas
+    // slot $40 -> $42 is after its first opaque pixel.
     assert_eq!(clxdat_after_visible_sprite_pixels(1 << 12, None), 0x8200);
-    assert_eq!(clxdat_after_visible_sprite_pixels(0, Some(0x34)), 0x8200);
-    assert_eq!(clxdat_after_visible_sprite_pixels(0, Some(0x36)), 0x8000);
+    assert_eq!(clxdat_after_visible_sprite_pixels(0, Some(0x3E)), 0x8200);
+    assert_eq!(clxdat_after_visible_sprite_pixels(0, Some(0x40)), 0x8000);
 }
 
 #[test]
@@ -10142,6 +10141,7 @@ fn bitplane_dma_capture_accumulates_live_dual_playfield_clxdat() {
     bus.denise.ddfstrt = 0x0038;
     bus.denise.ddfstop = 0x0038;
     bus.denise.bplcon0 = 0x2400;
+    bus.denise.clxcon = 0x00c3;
     bus.denise.bplpt[0] = 0x0100;
     bus.denise.bplpt[1] = 0x0200;
     bus.display_dma_bplpt[0] = 0x0100;
@@ -10723,6 +10723,7 @@ fn bpldat_writes_update_latched_planes_for_live_playfield_clxdat() {
         bus.denise.ddfstrt = 0x0038;
         bus.denise.ddfstop = 0x0040;
         bus.denise.bplcon0 = 0x7400;
+        bus.denise.clxcon = 0x0861;
         for plane in 0..4 {
             let ptr = 0x0100 + plane * 0x40;
             bus.denise.bplpt[plane] = ptr as u32;
@@ -10750,7 +10751,7 @@ fn bpldat_writes_update_latched_planes_for_live_playfield_clxdat() {
 }
 
 #[test]
-fn same_line_bplcon0_dual_playfield_enable_does_not_retime_earlier_live_clxdat() {
+fn same_line_bplcon0_dual_playfield_enable_preserves_pf_pf_collision() {
     let clxdat_after_row_capture = |initial_bplcon0, enable_hpos: Option<u32>| {
         let mut bus = empty_bus();
         bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
@@ -10761,6 +10762,7 @@ fn same_line_bplcon0_dual_playfield_enable_does_not_retime_earlier_live_clxdat()
         bus.denise.ddfstrt = 0x0038;
         bus.denise.ddfstop = 0x0040;
         bus.denise.bplcon0 = initial_bplcon0;
+        bus.denise.clxcon = 0x00c3;
         bus.denise.bplpt[0] = 0x0100;
         bus.denise.bplpt[1] = 0x0200;
         bus.display_dma_bplpt[0] = 0x0100;
@@ -10783,7 +10785,7 @@ fn same_line_bplcon0_dual_playfield_enable_does_not_retime_earlier_live_clxdat()
     };
 
     assert_eq!(clxdat_after_row_capture(0x2400, None), 0x8001);
-    assert_eq!(clxdat_after_row_capture(0x2000, Some(0x40)), 0x8000);
+    assert_eq!(clxdat_after_row_capture(0x2000, Some(0x40)), 0x8001);
 }
 
 #[test]
@@ -13338,6 +13340,7 @@ fn clxdat_uses_absolute_pixel_clock_and_transfer_start() {
     bus.denise.ddfstrt = 0x0038;
     bus.denise.ddfstop = 0x0038;
     bus.denise.bplcon0 = 0x2400;
+    bus.denise.clxcon = 0x00c3;
     for (plane, addr) in [(0, 0x100), (1, 0x200)] {
         bus.denise.bplpt[plane] = addr;
         bus.display_dma_bplpt[plane] = addr;
@@ -13973,9 +13976,9 @@ fn live_collision_replay_accepts_lisa_clxcon2_with_ecs_agnus() {
         RENDER_VISIBLE_START_VPOS as i32,
     );
     let enable_x =
-        framebuffer_x_for_live_collision_hpos(bus.current_frame_collision_control_events[0].hpos);
+        super::framebuffer_x_for_collision_beam(bus.current_frame_collision_control_events[0].hpos);
     let reset_x =
-        framebuffer_x_for_live_collision_hpos(bus.current_frame_collision_control_events[1].hpos);
+        super::framebuffer_x_for_collision_beam(bus.current_frame_collision_control_events[1].hpos);
 
     let before = replay.control_for_x(enable_x - 1);
     let enabled = replay.control_for_x(enable_x);

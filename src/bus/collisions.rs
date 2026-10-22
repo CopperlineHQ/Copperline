@@ -224,9 +224,13 @@ impl Bus {
                 .iter()
                 .any(|source| live_sprite_source_may_overlap_x_range(source, x_start, x_stop))
         };
-        let needs_dual_playfield_collision =
-            self.live_playfield_collision_may_have_dual_playfield() && self.denise.clxdat & 1 == 0;
-        if !has_overlapping_sprite_source && !needs_dual_playfield_collision {
+        let needs_playfield_collision = self.current_frame_bitplane_rows[fb_y]
+            .as_ref()
+            .unwrap()
+            .nplanes
+            >= 2
+            && self.denise.clxdat & 1 == 0;
+        if !has_overlapping_sprite_source && !needs_playfield_collision {
             return;
         }
         self.ensure_current_collision_control_index();
@@ -258,17 +262,12 @@ impl Bus {
             control_index,
             vpos as i32,
         );
-        let needs_dual_playfield_collision = needs_dual_playfield_collision
-            && control_replay.dual_playfield_in_range(x_start, x_stop);
-        if !has_overlapping_sprite_source && !needs_dual_playfield_collision {
-            return;
-        }
         let sprite_display_enable_x =
             self.current_frame_sprite_display_enable_x_by_y[fb_y].map(|x| x as i32);
         let clxdat = {
             let row = self.current_frame_bitplane_rows[fb_y].as_ref().unwrap();
             let mut bits = 0;
-            if needs_dual_playfield_collision {
+            if needs_playfield_collision {
                 bits |= live_bitplane_collision_bits_in_range(
                     row,
                     &control_replay,

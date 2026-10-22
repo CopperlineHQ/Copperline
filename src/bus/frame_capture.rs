@@ -1688,6 +1688,7 @@ impl Bus {
                 (v, h, delay)
             }
         };
+        let collision_match_slot = matches!(offset & 0x01fe, 0x098 | 0x10e).then_some((vpos, hpos));
         hpos += delay;
         let line_cck = self.agnus.current_line_cck();
         if hpos >= line_cck {
@@ -1703,6 +1704,20 @@ impl Bus {
             offset,
             value,
             source,
+        };
+        let collision_event = if let Some((mut vpos, mut hpos)) = collision_match_slot {
+            hpos += DENISE_COLLISION_MATCH_DELAY_CCK;
+            if hpos >= line_cck {
+                hpos -= line_cck;
+                vpos = (vpos + 1) % self.agnus.current_frame_lines();
+            }
+            BeamRegisterWrite {
+                vpos,
+                hpos,
+                ..event
+            }
+        } else {
+            event
         };
         if matches!(source, BeamWriteSource::CpuCopperIrq)
             && matches!(offset & 0x01FE, 0x180..=0x1BE)
@@ -1728,14 +1743,15 @@ impl Bus {
         }
         self.current_frame_render_events.push(event);
         if is_live_collision_relevant_custom_write(offset) {
-            self.current_frame_collision_events.push(event);
+            self.current_frame_collision_events.push(collision_event);
         }
         // CLXCON2 joins the control replay only where the register exists:
         // Lisa latches $10E, so pre-AGA machines keep today's event stream.
         if is_live_collision_control_custom_write(offset)
             || ((offset & 0x01FE) == 0x10E && self.denise_is_lisa())
         {
-            self.current_frame_collision_control_events.push(event);
+            self.current_frame_collision_control_events
+                .push(collision_event);
             self.current_frame_collision_control_index = None;
         }
         if is_live_collision_bpldat_custom_write(offset) {
