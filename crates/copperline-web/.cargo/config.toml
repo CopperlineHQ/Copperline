@@ -1,0 +1,8 @@
+# A single machine's state (`copperline::emulator::Emu`) is large enough
+# that `cargo test`'s default per-test thread stack can overflow building
+# even one on the stack -- already worked around ad hoc for one test in
+# `netplay.rs` (four machines at once) by spawning a thread with a bigger
+# stack. Raising the default here covers every test, present and future,
+# instead of requiring each one to opt in by hand.
+[env]
+RUST_MIN_STACK = "67108864"
