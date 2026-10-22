@@ -528,6 +528,13 @@ renders remain byte-identical. These references record the deterministic
 probe output; the timing model's hardware evidence is described in
 [`docs/internals/timing.md`](../docs/internals/timing.md#cia-register-transfers-and-timer-startup).
 
+The A500 timing branch also refreshes previously stale references verified
+byte-identical with binaries before and after its v1 rebase: timing-table
+rows 26, 27, 28 and 31 change from 6230/6428/3A23/131F to
+623B/6433/3A22/1316 (hex). The clxprobe second row clears PF-PF bit 0
+as well as sprite-playfield bit 1 when the enabled plane match fails.
+These fixture updates introduce no further emulation changes.
+
 Each probe is its own `#[test]`, so the harness runs the emulator boots in
 parallel on the available cores (the full suite of 45 takes ~20 s on an
 8-core host vs ~90 s sequentially).
@@ -668,7 +675,8 @@ pair -- the sprite register-FSM class), `regprobe-bytemirror` (CPU byte
 writes latch the mirrored word into COLOR00 -- both byte lanes must render
 the same magenta), `clxprobe` (the CLXDAT collision matrix rendered as
 bit cells for two CLXCON programs, including a plane enabled beyond the
-BPU count), `audprobe-en` (the AUD0 interrupt cadence as a
+BPU count; its unsatisfied match clears both PF-PF bit 0 and odd
+sprite-playfield bit 1), `audprobe-en` (the AUD0 interrupt cadence as a
 one-row-per-line strip across a scripted AUDxEN enable / same-word
 disable-re-enable punch / disable / cold-restart sequence -- the issue #74
 deferred AUDxEN-disable class, which the Paula HRM rework regressed once;
