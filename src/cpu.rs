@@ -458,6 +458,10 @@ struct CpuBus {
     /// Mirror of `M68kMachine::jit_enabled` so `fast_mem` can gate the
     /// zero-cost fastmem window without reaching back up to the machine.
     jit_enabled: bool,
+    /// Whether CACR has the 68040/060 layout (`cacr_040_layout`). Follows
+    /// the core's CPU type like `address_mask`, so `cache_control` can
+    /// decode CACR inside a JIT batch.
+    cacr_040_layout: bool,
 }
 
 pub fn build(
@@ -502,6 +506,7 @@ impl M68kMachine {
         // what makes the batch/JIT path honour a missing FPU.
         cpu.fpu_present = fpu_enabled;
 
+        let cacr_040 = cacr_040_layout(cpu.cpu_type);
         let mut machine = Self {
             cpu,
             bus: CpuBus {
@@ -523,6 +528,7 @@ impl M68kMachine {
                 ipl_sample_held: false,
                 diag_current_pc: 0,
                 jit_enabled: false,
+                cacr_040_layout: cacr_040,
             },
             fpu_enabled,
             jit_enabled: false,
@@ -1774,6 +1780,7 @@ impl M68kMachine {
         // address_mask all live in CpuCore); keep the bus adapter's mask copy
         // in step so external decode agrees with the restored core.
         self.bus.address_mask = cpu.address_mask;
+        self.bus.cacr_040_layout = cacr_040_layout(cpu.cpu_type);
         self.cpu = cpu;
         self.bus.bus = bus;
         // The cache is silicon, not dynamic state: a CPU that has one keeps it
@@ -3343,9 +3350,10 @@ impl M68kMachine {
             let cpu_was_stopped = self.cpu.is_stopped();
             let result = self.cpu.run_batch(&mut self.bus, budget, &[]);
             if self.bus.icache.is_some() || self.bus.dcache.is_some() {
-                // A CACR write inside the batch (MOVEC) must reach the
-                // cache models -- enables, disables, and flushes -- just
-                // as the precise loop syncs it per instruction.
+                // A CACR write or CINV/CPUSH inside the batch already
+                // reached the cache models as it completed
+                // (`CpuBus::cache_control`); this catches `last_cacr` up
+                // so the next sync stays a single compare.
                 self.apply_cacr_updates();
             }
             instructions = instructions.saturating_add(result.instructions as usize);
@@ -3500,62 +3508,13 @@ impl M68kMachine {
     /// strobes. Called after every instruction; a single compare when
     /// nothing changed.
     fn apply_cacr_updates(&mut self) {
-        use m68k::{
-            CACR_040_DE, CACR_040_IE, CACR_CD, CACR_CED, CACR_CEI, CACR_CI, CACR_ED, CACR_EI,
-            CACR_FD, CACR_FI,
-        };
         let ops = std::mem::take(&mut self.cpu.cacr_pending_ops);
         let cacr = self.cpu.cacr;
         if ops == 0 && cacr == self.last_cacr {
             return;
         }
         self.last_cacr = cacr;
-        let caar = self.cpu.caar;
-        // The 68040/68060 CACR uses different enable bits (IE/DE - the 060's
-        // EIC/EDC sit at the same positions) and has no freeze or CACR clear
-        // strobes - invalidation arrives through CINV/CPUSH, which decode.rs
-        // surfaces as the CACR_CI/CACR_CD pending ops below. The 060's
-        // branch-cache strobes (CABC/CUBC) are consumed inside the core.
-        if matches!(
-            self.cpu.cpu_type,
-            CpuType::M68EC040 | CpuType::M68LC040 | CpuType::M68040 | CpuType::M68060
-        ) {
-            if let Some(icache) = self.bus.icache.as_deref_mut() {
-                icache.enabled = cacr & CACR_040_IE != 0;
-                icache.frozen = false;
-                if ops & CACR_CI != 0 {
-                    icache.clear_all();
-                }
-            }
-            if let Some(dcache) = self.bus.dcache.as_deref_mut() {
-                dcache.enabled = cacr & CACR_040_DE != 0;
-                dcache.frozen = false;
-                if ops & CACR_CD != 0 {
-                    dcache.clear_all();
-                }
-            }
-            return;
-        }
-        if let Some(icache) = self.bus.icache.as_deref_mut() {
-            icache.enabled = cacr & CACR_EI != 0;
-            icache.frozen = cacr & CACR_FI != 0;
-            if ops & CACR_CI != 0 {
-                icache.clear_all();
-            }
-            if ops & CACR_CEI != 0 {
-                icache.clear_entry_by_index(caar);
-            }
-        }
-        if let Some(dcache) = self.bus.dcache.as_deref_mut() {
-            dcache.enabled = cacr & CACR_ED != 0;
-            dcache.frozen = cacr & CACR_FD != 0;
-            if ops & CACR_CD != 0 {
-                dcache.clear_all();
-            }
-            if ops & CACR_CED != 0 {
-                dcache.clear_entry_by_index(caar);
-            }
-        }
+        self.bus.apply_cache_control(cacr, self.cpu.caar, ops);
     }
 
     fn reset_cpu(&mut self) {
@@ -5009,6 +4968,66 @@ impl CpuBus {
             len: accel_len,
         })
     }
+
+    /// Set the cache models' enable and freeze state from `cacr` and run
+    /// the clear strobes in `ops` (a `CpuCore::cacr_pending_ops` value).
+    fn apply_cache_control(&mut self, cacr: u32, caar: u32, ops: u32) {
+        use m68k::{
+            CACR_040_DE, CACR_040_IE, CACR_CD, CACR_CED, CACR_CEI, CACR_CI, CACR_ED, CACR_EI,
+            CACR_FD, CACR_FI,
+        };
+        // The 68040/68060 CACR uses different enable bits (IE/DE - the 060's
+        // EIC/EDC sit at the same positions) and has no freeze or CACR clear
+        // strobes - invalidation arrives through CINV/CPUSH, which decode.rs
+        // surfaces as the CACR_CI/CACR_CD pending ops below. The 060's
+        // branch-cache strobes (CABC/CUBC) are consumed inside the core.
+        if self.cacr_040_layout {
+            if let Some(icache) = self.icache.as_deref_mut() {
+                icache.enabled = cacr & CACR_040_IE != 0;
+                icache.frozen = false;
+                if ops & CACR_CI != 0 {
+                    icache.clear_all();
+                }
+            }
+            if let Some(dcache) = self.dcache.as_deref_mut() {
+                dcache.enabled = cacr & CACR_040_DE != 0;
+                dcache.frozen = false;
+                if ops & CACR_CD != 0 {
+                    dcache.clear_all();
+                }
+            }
+            return;
+        }
+        if let Some(icache) = self.icache.as_deref_mut() {
+            icache.enabled = cacr & CACR_EI != 0;
+            icache.frozen = cacr & CACR_FI != 0;
+            if ops & CACR_CI != 0 {
+                icache.clear_all();
+            }
+            if ops & CACR_CEI != 0 {
+                icache.clear_entry_by_index(caar);
+            }
+        }
+        if let Some(dcache) = self.dcache.as_deref_mut() {
+            dcache.enabled = cacr & CACR_ED != 0;
+            dcache.frozen = cacr & CACR_FD != 0;
+            if ops & CACR_CD != 0 {
+                dcache.clear_all();
+            }
+            if ops & CACR_CED != 0 {
+                dcache.clear_entry_by_index(caar);
+            }
+        }
+    }
+}
+
+/// Whether `cpu_type` has the 68040/060 CACR layout (IE/DE enables,
+/// invalidation by CINV/CPUSH) rather than the 68020/030 one.
+fn cacr_040_layout(cpu_type: CpuType) -> bool {
+    matches!(
+        cpu_type,
+        CpuType::M68EC040 | CpuType::M68LC040 | CpuType::M68040 | CpuType::M68060
+    )
 }
 
 impl AddressBus for CpuBus {
@@ -5018,6 +5037,20 @@ impl AddressBus for CpuBus {
 
     fn fast_mem(&mut self) -> Option<FastMem> {
         self.jit_fast_mem()
+    }
+
+    /// A CACR write or CINV/CPUSH inside a JIT batch takes effect before
+    /// the next fetch, as on the CPU: the batch would otherwise keep
+    /// serving lines the guest has just invalidated (code it rewrote and
+    /// is about to run) until the batch ends. The precise loop never gets
+    /// here; it syncs after every instruction (`apply_cacr_updates`),
+    /// which also catches up `last_cacr` after a batch.
+    fn cache_control(&mut self, cacr: u32, caar: u32, strobes: u32) -> bool {
+        if self.icache.is_none() && self.dcache.is_none() {
+            return false;
+        }
+        self.apply_cache_control(cacr, caar, strobes);
+        true
     }
 
     fn begin_instruction_fetches(&mut self) {
@@ -5836,6 +5869,7 @@ mod tests {
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
+            cacr_040_layout: false,
         };
 
         assert_eq!(bus.read_long(0), 0x1111_4EF9);
@@ -5866,6 +5900,7 @@ mod tests {
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
+            cacr_040_layout: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
         // Start on a refresh slot (0x003) so the fetch both waits for and then
@@ -5907,6 +5942,7 @@ mod tests {
                 ipl_sample_held: false,
                 diag_current_pc: 0,
                 jit_enabled: false,
+                cacr_040_layout: false,
             };
             bus.bus
                 .set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
@@ -5963,6 +5999,7 @@ mod tests {
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
+            cacr_040_layout: false,
         };
         // INTENA/INTREQ, whose read ports INTENAR ($01C) and INTREQR ($01E) are
         // adjacent and beam-independent, so the pair reads back deterministically.
@@ -6007,6 +6044,7 @@ mod tests {
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
+            cacr_040_layout: false,
         };
         let base = CHIP_RAM_BASE as u32;
         write_chip_long(&mut bus.bus, base, 0x1122_3344);
@@ -6047,6 +6085,7 @@ mod tests {
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
+            cacr_040_layout: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
 
@@ -6096,6 +6135,7 @@ mod tests {
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
+            cacr_040_layout: false,
         };
 
         // Warm the opcode longword and a separate extension longword.
@@ -6306,6 +6346,7 @@ mod tests {
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
+            cacr_040_layout: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
         let fast = FAST_RAM_BASE as u32 + 0x40;
@@ -6366,6 +6407,7 @@ mod tests {
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
+            cacr_040_layout: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
 
@@ -6502,6 +6544,7 @@ mod tests {
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
+            cacr_040_layout: false,
         };
         let before = bus.read_long(ROM_BASE as u32);
         bus.write_long(ROM_BASE as u32, 0xDEAD_BEEF);
@@ -6531,6 +6574,7 @@ mod tests {
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
+            cacr_040_layout: false,
         };
         // $F00000 with no extended ROM fitted is genuinely undecoded (the
         // chip-register space at $C00000-$DFFFFF is not: Gary mirrors the
@@ -6566,6 +6610,7 @@ mod tests {
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
+            cacr_040_layout: false,
         }
     }
 
@@ -7961,6 +8006,101 @@ mod tests {
             translated <= plain + 16,
             "an identity-mapped loop took {translated} cck under the MMU, {plain} without it"
         );
+        Ok(())
+    }
+
+    /// Run a self-modifying chip-RAM program at $1000 with the cache
+    /// models installed and `cacr` written, precise or under JIT, and
+    /// return d3. The program runs `mulu.l #$33333333,d3` (immediate at
+    /// $1008), stores $44444444 over that immediate, invalidates the
+    /// instruction cache with `strobe` (the words placed at $1018), and
+    /// loops to run the patched instruction again. The first 64
+    /// instructions cover both passes, so under JIT the store, the
+    /// invalidation and the rerun all fall inside one batch.
+    fn run_chip_smc_after_cache_invalidate(
+        model: CpuModel,
+        cacr: u32,
+        strobe: &[u16],
+        jit: bool,
+    ) -> Result<u32> {
+        let mut program = vec![
+            0x7801u16, // $1000: moveq #1,d4
+            0x7601,    // $1002: loop: moveq #1,d3
+            0x4C3C, 0x3000, 0x3333, 0x3333, // $1004: mulu.l #$33333333,d3
+            0x247C, 0x0000, 0x1008, // $100C: movea.l #$1008,a2
+            0x24BC, 0x4444, 0x4444, // $1012: move.l #$44444444,(a2)
+        ];
+        program.extend_from_slice(strobe);
+        // dbra d4,loop: back to $1002 from the displacement word.
+        let disp_at = 0x1018 + 2 * strobe.len() as u32 + 2;
+        program.extend_from_slice(&[0x51CC, 0x1002u32.wrapping_sub(disp_at) as u16]);
+        program.push(0x60FE); // bra.s *
+        let mut bus = test_bus_with_pc(0x1000);
+        write_program(&mut bus, 0x1000, &program);
+        let mut machine = M68kMachine::new(bus, model, true)?;
+        machine.bus_mut().agnus.hpos = 0x21;
+        machine.set_cache_emulation(true, true);
+        machine.cpu.cacr = cacr;
+        machine.apply_cacr_updates();
+        machine.set_jit_enabled(jit);
+        assert!(
+            !jit || machine.jit_fast_path_ok(),
+            "{model:?} takes the batch path"
+        );
+        let mut retired = 0usize;
+        while retired < 64 {
+            retired += machine.step_slice(64 - retired)?.instructions;
+        }
+        Ok(machine.d(3))
+    }
+
+    /// A 68020/030 MOVEC that sets the CACR clear-instruction-cache strobe
+    /// empties the cache before the next fetch, so a rewritten instruction
+    /// run straight after it executes the new bytes. Under JIT the strobe
+    /// must reach the cache models before the batch fetches again, not at
+    /// its end, or the rerun is served the stale line. The code is in chip
+    /// RAM, which the fastmem window never covers.
+    #[test]
+    fn jit_movec_cacr_clear_invalidates_icache_before_the_next_fetch() -> Result<()> {
+        use m68k::{CACR_CI, CACR_ED, CACR_EI};
+        let strobe = [
+            0x203C,
+            0x0000,
+            (CACR_ED | CACR_CI | CACR_EI) as u16, // move.l #(ED|CI|EI),d0
+            0x4E7B,
+            0x0002, // movec d0,cacr
+        ];
+        for model in [CpuModel::M68020, CpuModel::M68030] {
+            for jit in [false, true] {
+                assert_eq!(
+                    run_chip_smc_after_cache_invalidate(model, CACR_EI | CACR_ED, &strobe, jit)?,
+                    0x4444_4444,
+                    "{model:?} jit={jit}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The 68040/060 invalidate through CINV/CPUSH instead of a CACR
+    /// strobe. Under JIT the invalidation must likewise reach the cache
+    /// models before the batch fetches again.
+    #[test]
+    fn jit_cinv_and_cpush_invalidate_icache_before_the_next_fetch() -> Result<()> {
+        use m68k::{CACR_040_DE, CACR_040_IE};
+        for model in [CpuModel::M68040, CpuModel::M68060] {
+            // cinva ic, and cpusha bc (what CacheClearU issues on these parts)
+            for strobe in [0xF498u16, 0xF4F8] {
+                for jit in [false, true] {
+                    let cacr = CACR_040_IE | CACR_040_DE;
+                    assert_eq!(
+                        run_chip_smc_after_cache_invalidate(model, cacr, &[strobe], jit)?,
+                        0x4444_4444,
+                        "{model:?} {strobe:#06X} jit={jit}"
+                    );
+                }
+            }
+        }
         Ok(())
     }
 

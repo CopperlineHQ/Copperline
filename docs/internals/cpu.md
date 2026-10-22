@@ -119,8 +119,12 @@ is exactly the caches that let chip-RAM-resident code run at CPU speed
 instead of paying chip-bus arbitration on every fetch, so bypassing them
 made a fast-RAM-less Workbench measure 3x slower under JIT than precise.
 A cache hit serves the access with no bus cycle; a miss pays the real
-chip-bus (or zero-wait external) cost. CACR writes inside a batch are
-synced to the models at the batch boundary.
+chip-bus (or zero-wait external) cost. A MOVEC to CACR or a CINV/CPUSH
+inside a batch reaches the models before the next fetch, as on the CPU:
+the core hands it to `CpuBus` through `AddressBus::cache_control` as the
+instruction completes. Code that is rewritten, has its cache cleared
+and runs again within one batch (LoadSeg over previously cached chip
+RAM, then CacheClearU) therefore executes the new bytes.
 
 The fastmem window is only offered when nothing intercepts plain fast-RAM
 accesses: cache models, memory-write debug hooks, the heat map, SMC
