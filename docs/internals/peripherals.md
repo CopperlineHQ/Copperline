@@ -850,6 +850,18 @@ payload as `MCNT - 4`), the init-block MODE gates (DTX/DRX and the LOOP
 internal-loopback self-test SANA-II drivers run at power-up), and MISS on
 an RX ring overrun.
 
+The LANCE sees the board RAM at chip addresses `$8000`-`$FFFF`, as the
+Linux, NetBSD and Commodore drivers program it: A15 selects the RAM and
+A16-A23 are not decoded (`chip_ram_index`). Every chip access goes through
+that decode: the CSR1/CSR2 init-block address, the ring bases, the
+descriptors and the buffers. An access with A15 clear reads 0 and drops the
+write, with no MERR, so rings placed there read as host-owned and nothing is
+sent or received, and buffers placed there transmit zeros and lose received
+data, as on a real Ameristar A2065. CSR3 BSWP applies only to frame bytes
+(`frame_byte_addr`): with BSWP clear each 16-bit word of frame data is
+byte-swapped, while the init block and descriptors are always read
+big-endian.
+
 The `nat` backend (`net/nat/`, `net-nat` build feature) is a slirp-style
 userspace NAT: a dedicated `a2065-nat` thread owns a smoltcp interface
 that terminates ARP and the guest's TCP on the virtual gateway

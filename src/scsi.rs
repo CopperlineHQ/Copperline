@@ -589,18 +589,12 @@ impl ScsiDisk {
             return (ScsiExec::DataOut(bytes), GOOD);
         }
         let mut data = vec![0u8; bytes];
-        for i in 0..count {
-            if let Err(e) = self
-                .disk
-                .read_sector(lba + i, &mut data[(i as usize) * SECTOR_SIZE..])
-            {
-                log::warn!(
-                    "scsi {}: read lba {}: {e}",
-                    self.disk.path().display(),
-                    lba + i
-                );
-                return self.check(SK_HARDWARE_ERROR, 0x00);
-            }
+        if let Err(e) = self.disk.read_sectors(lba, &mut data) {
+            log::warn!(
+                "scsi {}: read of {count} sector(s) at lba {lba}: {e}",
+                self.disk.path().display()
+            );
+            return self.check(SK_HARDWARE_ERROR, 0x00);
         }
         (ScsiExec::DataIn(data), GOOD)
     }
@@ -625,27 +619,23 @@ impl ScsiDisk {
                     0x2A | 0xAA => u64::from(be32(cdb, 2)),
                     _ => be64(cdb, 2), // 0x8A: WRITE(16)
                 };
-                for (i, sector) in data.chunks(SECTOR_SIZE).enumerate() {
-                    if sector.len() < SECTOR_SIZE {
-                        break;
+                // Whole sectors only; a trailing partial one is dropped.
+                if let Err(e) = self.disk.write_sectors(lba, data) {
+                    log::warn!(
+                        "scsi {}: write of {} sector(s) at lba {lba}: {e}",
+                        self.disk.path().display(),
+                        data.len() / SECTOR_SIZE
+                    );
+                    // A refused write on a write-protected medium is
+                    // DATA PROTECT / WRITE PROTECTED, which the guest's
+                    // filesystem turns into its own write-protect error
+                    // rather than a disk fault.
+                    if e.kind() == std::io::ErrorKind::PermissionDenied {
+                        self.set_sense(SK_DATA_PROTECT, ASC_WRITE_PROTECTED);
+                    } else {
+                        self.set_sense(SK_HARDWARE_ERROR, 0x00);
                     }
-                    if let Err(e) = self.disk.write_sector(lba + i as u64, sector) {
-                        log::warn!(
-                            "scsi {}: write lba {}: {e}",
-                            self.disk.path().display(),
-                            lba + i as u64
-                        );
-                        // A refused write on a write-protected medium is
-                        // DATA PROTECT / WRITE PROTECTED, which the guest's
-                        // filesystem turns into its own write-protect
-                        // error rather than a disk fault.
-                        if e.kind() == std::io::ErrorKind::PermissionDenied {
-                            self.set_sense(SK_DATA_PROTECT, ASC_WRITE_PROTECTED);
-                        } else {
-                            self.set_sense(SK_HARDWARE_ERROR, 0x00);
-                        }
-                        return CHECK_CONDITION;
-                    }
+                    return CHECK_CONDITION;
                 }
                 match self.disk.flush() {
                     Ok(()) => GOOD,

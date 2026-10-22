@@ -92,6 +92,51 @@ pub(crate) fn dma_write_word(mem: &mut Memory, addr: u32, w: u16) -> bool {
     false
 }
 
+/// Which RAM bank a DMA range resolved to (see [`dma_ram_range`]).
+#[derive(Clone, Copy)]
+enum DmaBank {
+    Chip,
+    Slow,
+    Motherboard,
+    Accelerator,
+    Zorro(usize),
+}
+
+/// The bank and offset holding the whole DMA range `[addr, addr + len)`, or
+/// `None` when no single RAM bank holds all of it (it straddles two banks,
+/// or touches unmapped space). Banks are tried in [`dma_write_word`]'s order
+/// and never overlap, so a range that resolves here is exactly the bytes
+/// word-by-word accesses would reach.
+///
+/// Those accesses wrap at the top of the 32-bit address space, so a range
+/// that runs past it is no single bank's either, even where a board's
+/// window (one a guest configured at the very top) reaches beyond it. The
+/// bounds are worked in `u64` so this also holds on 32-bit hosts.
+fn dma_ram_range(mem: &Memory, addr: u32, len: usize) -> Option<(DmaBank, usize)> {
+    let a = u64::from(addr);
+    let end = a.checked_add(u64::try_from(len).ok()?)?;
+    if end > 1 << 32 {
+        return None;
+    }
+    let fits = |base: u64, bank_len: usize| a >= base && end - base <= bank_len as u64;
+    if fits(0, mem.chip_ram.len()) {
+        return Some((DmaBank::Chip, a as usize));
+    }
+    if fits(SLOW_RAM_BASE, mem.slow_ram.len()) {
+        return Some((DmaBank::Slow, (a - SLOW_RAM_BASE) as usize));
+    }
+    let mb = mem.mb_ram_base();
+    if fits(mb, mem.mb_ram.len()) {
+        return Some((DmaBank::Motherboard, (a - mb) as usize));
+    }
+    if fits(ACCEL_RAM_BASE, mem.accel_ram.len()) {
+        return Some((DmaBank::Accelerator, (a - ACCEL_RAM_BASE) as usize));
+    }
+    mem.zorro
+        .region_at(addr, len)
+        .map(|(board, off)| (DmaBank::Zorro(board), off))
+}
+
 /// 24-bit DMA bus-master byte read (the CDTV diagnostic peek uses this).
 /// Returns `None` when the address is not backed by RAM. Byte reads only need
 /// the single byte in range, so the bounds differ from the word read above.
@@ -338,10 +383,47 @@ impl<'a> DeviceHost<'a> {
         dma_read_byte(self.mem, addr)
     }
 
+    /// The guest RAM behind the whole range `[addr, addr + len)`, when one
+    /// RAM bank (chip, slow, motherboard, accelerator, or a Zorro board's)
+    /// holds all of it; `None` otherwise. Lets a bus master move a buffer in
+    /// one copy, with word or byte accesses left for a range that straddles
+    /// banks or touches unmapped space.
+    pub fn dma_ram(&self, addr: u32, len: usize) -> Option<&[u8]> {
+        let (bank, off) = dma_ram_range(self.mem, addr, len)?;
+        let ram: &[u8] = match bank {
+            DmaBank::Chip => &self.mem.chip_ram,
+            DmaBank::Slow => &self.mem.slow_ram,
+            DmaBank::Motherboard => &self.mem.mb_ram,
+            DmaBank::Accelerator => &self.mem.accel_ram,
+            DmaBank::Zorro(board) => self.mem.zorro.board_ram(board),
+        };
+        Some(&ram[off..off + len])
+    }
+
+    /// Writable [`Self::dma_ram`]. A range that resolves counts as a DMA
+    /// write for the CPU data-cache invalidation (`wrote_memory`).
+    pub fn dma_ram_mut(&mut self, addr: u32, len: usize) -> Option<&mut [u8]> {
+        let (bank, off) = dma_ram_range(self.mem, addr, len)?;
+        self.touched_memory = true;
+        self.wrote_memory = true;
+        let ram: &mut [u8] = match bank {
+            DmaBank::Chip => &mut self.mem.chip_ram,
+            DmaBank::Slow => &mut self.mem.slow_ram,
+            DmaBank::Motherboard => &mut self.mem.mb_ram,
+            DmaBank::Accelerator => &mut self.mem.accel_ram,
+            DmaBank::Zorro(board) => self.mem.zorro.board_ram_mut(board),
+        };
+        Some(&mut ram[off..off + len])
+    }
+
     /// Bulk DMA read into `buf` starting at Amiga `addr` (byte-granular 24-bit
     /// decode; unmapped bytes read as 0xFF). The WASM plugin host's `dma_read`
     /// import routes here.
     pub fn dma_read(&self, addr: u32, buf: &mut [u8]) {
+        if let Some(ram) = self.dma_ram(addr, buf.len()) {
+            buf.copy_from_slice(ram);
+            return;
+        }
         for (i, b) in buf.iter_mut().enumerate() {
             *b = dma_read_byte(self.mem, addr.wrapping_add(i as u32)).unwrap_or(0xFF);
         }
@@ -353,6 +435,10 @@ impl<'a> DeviceHost<'a> {
     pub fn dma_write(&mut self, addr: u32, buf: &[u8]) {
         self.touched_memory = true;
         self.wrote_memory = true;
+        if let Some(ram) = self.dma_ram_mut(addr, buf.len()) {
+            ram.copy_from_slice(buf);
+            return;
+        }
         for (i, b) in buf.iter().enumerate() {
             dma_write_byte(self.mem, addr.wrapping_add(i as u32), *b);
         }
@@ -713,5 +799,107 @@ mod tests {
         mem.accel_ram = vec![0u8; 0x100];
         assert_eq!(dma_read_word(&mem, 0xFFFF_FFFF), None);
         assert_eq!(dma_read_byte(&mem, 0xFFFF_FFFF), None);
+    }
+
+    #[test]
+    fn dma_ram_spans_one_bank_and_never_a_range_that_straddles_two() {
+        let mut mem = mem_with(0x100, 0x100);
+        mem.mb_ram = vec![0u8; 0x100];
+        mem.accel_ram = vec![0u8; 0x100];
+        for (i, b) in mem.chip_ram.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let slow = SLOW_RAM_BASE as u32;
+        let mb = mem.mb_ram_base() as u32;
+        let accel = ACCEL_RAM_BASE as u32;
+        let host = DeviceHost::new(&mut mem);
+
+        assert_eq!(host.dma_ram(0x10, 4), Some(&[0x10, 0x11, 0x12, 0x13][..]));
+        // Exactly to the top of a bank is inside it; one byte more is not.
+        assert_eq!(host.dma_ram(0xF0, 0x10).map(<[u8]>::len), Some(0x10));
+        assert_eq!(host.dma_ram(0xF0, 0x11), None);
+        assert!(host.dma_ram(slow + 0x80, 0x80).is_some());
+        assert!(host.dma_ram(accel, 0x100).is_some());
+        // The motherboard bank ends where the accelerator bank begins: a
+        // range across the join is two banks, left to the word loop.
+        assert!(host.dma_ram(mb + 0xF0, 0x10).is_some());
+        assert_eq!(host.dma_ram(mb + 0xF0, 0x20), None);
+        // Unmapped space, and a range that runs into it.
+        assert_eq!(host.dma_ram(0x0040_0000, 2), None);
+        assert_eq!(host.dma_ram(slow + 0xF0, 0x20), None);
+        assert_eq!(host.dma_ram(0xFFFF_FFF0, 0x20), None);
+    }
+
+    #[test]
+    fn dma_ram_stops_at_the_top_of_the_address_space() {
+        // A guest may configure a Zorro III RAM board at the very top, so
+        // its window reaches past 4 GB. DMA wraps to chip RAM there, so a
+        // range across the top must take the wrapping byte/word path
+        // rather than one copy out of the board.
+        let mut mem = mem_with(0x100, 0);
+        mem.zorro
+            .add_board(crate::zorro::BoardSpec::z3_ram(128 * 1024))
+            .unwrap();
+        // er_Z3BaseAddress (offset 0x44): a word write assigns the base.
+        mem.zorro
+            .config_write(crate::zorro::AUTOCONFIG_BASE + 0x44, 2, 0xFFFF);
+        assert_eq!(mem.zorro.region_at(0xFFFF_FFF0, 0x20), Some((0, 0xFFF0)));
+        let data: Vec<u8> = (1..=0x20u8).collect();
+        {
+            let mut host = DeviceHost::new(&mut mem);
+            assert_eq!(host.dma_ram(0xFFFF_FFE0, 0x20).map(<[u8]>::len), Some(0x20));
+            assert_eq!(host.dma_ram(0xFFFF_FFF0, 0x20), None);
+            assert!(host.dma_ram_mut(0xFFFF_FFF0, 0x20).is_none());
+            host.dma_write(0xFFFF_FFF0, &data);
+            let mut back = vec![0u8; data.len()];
+            host.dma_read(0xFFFF_FFF0, &mut back);
+            assert_eq!(back, data);
+        }
+        assert_eq!(mem.zorro.board_ram(0)[0xFFF0..0x1_0000], data[..0x10]);
+        assert_eq!(mem.chip_ram[..0x10], data[0x10..]);
+        assert!(mem.zorro.board_ram(0)[0x1_0000..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn dma_ram_mut_counts_as_a_dma_write_only_when_it_resolves() {
+        let mut mem = mem_with(0x100, 0);
+        let mut host = DeviceHost::new(&mut mem);
+        assert!(host.dma_ram_mut(0xF0, 0x20).is_none());
+        assert!(!host.wrote_memory());
+        host.dma_ram_mut(0x20, 4)
+            .unwrap()
+            .copy_from_slice(&[1, 2, 3, 4]);
+        assert!(host.wrote_memory() && host.touched_memory());
+        assert_eq!(mem.chip_ram[0x20..0x24], [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn bulk_byte_dma_matches_byte_at_a_time_inside_and_across_banks() {
+        let mut mem = mem_with(0x100, 0x100);
+        mem.mb_ram = vec![0u8; 0x100];
+        mem.accel_ram = vec![0u8; 0x100];
+        let mb = mem.mb_ram_base() as u32;
+        let data: Vec<u8> = (0..0x40u8).map(|b| b ^ 0x5A).collect();
+        {
+            let mut host = DeviceHost::new(&mut mem);
+            // Inside one bank (one copy) and across the motherboard/
+            // accelerator join (byte at a time): both land every byte.
+            host.dma_write(0x40, &data);
+            host.dma_write(mb + 0xE0, &data);
+            let mut back = vec![0u8; data.len()];
+            host.dma_read(0x40, &mut back);
+            assert_eq!(back, data);
+            host.dma_read(mb + 0xE0, &mut back);
+            assert_eq!(back, data);
+            // Running off the top of chip RAM: the unmapped bytes read as
+            // 0xFF, as they always have.
+            let mut tail = vec![0u8; 0x20];
+            host.dma_read(0xF0, &mut tail);
+            assert_eq!(tail[..0x10], [0u8; 0x10]);
+            assert_eq!(tail[0x10..], [0xFFu8; 0x10]);
+        }
+        assert_eq!(mem.chip_ram[0x40..0x80], data[..]);
+        assert_eq!(mem.mb_ram[0xE0..], data[..0x20]);
+        assert_eq!(mem.accel_ram[..0x20], data[0x20..]);
     }
 }

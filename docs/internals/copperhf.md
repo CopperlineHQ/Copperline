@@ -234,6 +234,17 @@ Each request passes through three stages:
    the completion pointer, and raise INT2. Media changes are applied in the
    same order.
 
+A request's sectors move as one run. A raw image file or an in-memory image
+is read or written with a single host access per request
+(`HardDriveImage::read_sectors`/`write_sectors`); CHD, VHD, session and
+physical-disk backings still go a sector at a time through their own block
+mapping. A guest buffer that lies inside one RAM bank is copied to or from
+guest memory in one go, and a buffer that straddles banks or touches unmapped
+space falls back to word-sized accesses. None of this changes what the guest
+sees or when. It only bounds the host time a request costs: copying sector by
+sector made a guest streaming large transfers cost far more host time than
+emulated time, and the emulation fell behind real time.
+
 ### The determinism model
 
 A request completes on the first board `tick()` after its doorbell write.

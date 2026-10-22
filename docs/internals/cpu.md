@@ -118,8 +118,12 @@ is exactly the caches that let chip-RAM-resident code run at CPU speed
 instead of paying chip-bus arbitration on every fetch, so bypassing them
 made a fast-RAM-less Workbench measure 3x slower under JIT than precise.
 A cache hit serves the access with no bus cycle; a miss pays the real
-chip-bus (or zero-wait external) cost. CACR writes inside a batch are
-synced to the models at the batch boundary.
+chip-bus (or zero-wait external) cost. A MOVEC to CACR or a CINV/CPUSH
+inside a batch reaches the models before the next fetch, as on the CPU:
+the core hands it to `CpuBus` through `AddressBus::cache_control` as the
+instruction completes. Code that is rewritten, has its cache cleared
+and runs again within one batch (LoadSeg over previously cached chip
+RAM, then CacheClearU) therefore executes the new bytes.
 
 The fastmem window is offered with the cache models present. The core
 reads and writes the window directly, past every `CpuBus` method, so a
@@ -132,19 +136,37 @@ while the core has it (`CpuBus::keep_caches_out_of_window`): capturing a
 window drops the lines it overlaps, and a miss there allocates nothing.
 Under JIT a fast-RAM access is free whether it hits or misses, so nothing
 is lost. Chip RAM and ROM, which the window never covers, stay cached, and
-so does the window bank in a batch that runs without the window (the core
-declines it while the guest has the MMU on, since fastmem addresses are
-physical); the next capture drops those lines again. Code inside the
-window is coherent the moment it changes, whether the guest rewrites it or
-a device DMAs it there (LoadSeg through copperhf): compiled traces compare
-their code bytes on every entry, and no cache line can hold the old bytes
-until the batch-boundary CACR sync applies the guest's cache clear. The
-window is still withheld while something must see every plain fast-RAM
-access: memory-write debug hooks, the heat map, SMC detection, and
-injected bus faults force each access back onto the bus. Arming any
-per-instruction debug or diagnostic hook (breakpoints, watches, traces,
+so does the window bank in a batch that runs without the window; the next
+capture drops those lines again. Code inside the window is coherent the
+moment it changes, whether the guest rewrites it or a device DMAs it there
+(LoadSeg through copperhf): compiled traces compare their code bytes on
+every entry, and no cache line can hold the old bytes. The window is
+withheld while something must see every plain fast-RAM access:
+memory-write debug hooks, the heat map, SMC detection, and injected bus
+faults force each access back onto the bus. Arming any per-instruction
+debug or diagnostic hook (breakpoints, watches, traces,
 `COPPERLINE_DBG_*`) drops the whole slice back to the precise loop, so the
 debugger always sees every instruction.
+
+The window holds physical addresses, and it stays in use when the guest
+enables the MMU (bundled AROS does at boot, as do mmu.library, MuForce and
+Linux/m68k). The core then translates each window access through the
+transparent-translation registers and the ATC alone, never a table search.
+An access they cannot map into the window -- an ATC miss, a cached
+translation the access would fault on, a page-crossing access, a physical
+address outside the bank -- runs on the ordinary bus path, which searches
+the tables (billing the descriptor reads) and raises the fault with the
+precise core's frame. The core translates before it calls `CpuBus`, so the
+cache models see the same physical addresses as the window and keep no
+lines inside it under translation either. Compiled traces translate the
+same way, and are re-recorded if the guest switches the MMU on or off
+under them. While the window translates, no 68030 ATC hit records a use in
+the replacement order -- not through the window, a trace or the bus path --
+so entries age by when table searches loaded them (the precise core keeps
+least-recently-used replacement). Table searches happen at the same
+instructions whether a trace or the interpreter runs them, so that saved
+state does not depend on what the trace JIT has compiled: a resumed state,
+whose JIT caches start empty, behaves like the uninterrupted run.
 
 The host-side instruction profiler (`profile::samples::InstructionSampler`)
 retains at most 262,144 pending instruction/IRQ records, about 42 MiB on
@@ -669,8 +691,30 @@ One register set (`mmu_*` in `CpuCore`) is canonical for both paths, so the 030
 root pointers overload the CRP/SRP address slots, dispatched by `cpu_type`). The
 enable bit differs by part -- TC[31] on the 030, TC[15] on the 040 -- via
 `tc_enable()`. `PMOVE`/`MOVEC` load the registers (including the 030 MMUSR
-via `PMOVE PSR`); `PLOAD`/`PFLUSH` are accepted as no-ops on the 030 walk
-(which has no ATC to flush).
+via `PMOVE PSR`).
+
+The 68030 keeps recent translations in its address translation cache, as
+the silicon does: 22 fully associative entries, each tagged with the
+access's function code and logical page (`mmu::Atc030` in the `m68k`
+crate). A hit costs the access nothing; only a miss searches the tables,
+and only a miss pays for the descriptor fetches, which are billed like any
+other memory read. The page is as large as the address bits the configured
+TC levels leave untranslated, so an early-termination descriptor that maps
+more than a page fills one entry per page used. Entries are replaced least
+recently used first. `PFLUSHA`, `PFLUSH fc,#mask` and `PFLUSH
+fc,#mask,<ea>` invalidate what they name, `PLOAD` searches the tables and
+loads an entry, and a `PMOVE` to TC, SRP or CRP flushes the cache unless it
+is the `PMOVEFD` form. A write to a descriptor does not reach the cache;
+software flushes, as on real hardware. A write to a write-protected page
+misses and re-walks, which raises the fault. Not modelled: entries for
+invalid translations (the B bit), the CI and modified bits, and the part's
+exact replacement order. The cache is saved with the CPU state, so a
+resumed run misses where the original would have. Before it existed every
+translated access, including instruction fetches that hit the instruction
+cache, re-walked the tables. A 68030 with its MMU on (bundled AROS enables
+it at boot) ran a CPU-bound loop about twelve times slower than it does
+with the cache, and under `[cpu] jit` most of the host time went to table
+walks.
 
 A 68040 table walk costs three descriptor fetches, far too much to pay on every
 access, so the 040 walker is fronted by an address-translation cache
@@ -757,8 +801,7 @@ read's result in the data input buffer (mmu.library emulates lazily-zeroed
 pages this way) or absorbing a faulted write, honoured as a one-shot
 substitution on the re-executed instruction's matching access. Remaining:
 the used/modified/limit MMUSR bits and descriptor write-back, CRP limit
-checks, and the DT=1 page-descriptor root; the 030 walk has no ATC, so
-every access re-walks the tables.
+checks, and the DT=1 page-descriptor root.
 
 ### The MMU-less EC parts
 

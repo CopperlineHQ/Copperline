@@ -160,8 +160,9 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "chd"
-version = "0.3.4"
-source = "git+https://github.com/CopperlineHQ/chd-rs?rev=a0170de589031c74dc7245c9dc05dade5d919dc6#a0170de589031c74dc7245c9dc05dade5d919dc6"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "400d9065552452205d0ecc7670c93477c332f0cc6c8051684c5e69ac6f83ef23"
 dependencies = [
  "arrayvec",
  "bitreader",
@@ -598,9 +599,9 @@ dependencies = [
 
 [[package]]
 name = "m68k"
-version = "0.14.6"
+version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6e4f48ab35e05ea00285865cd57f8346657100655e4bd54c69725c32bfabe12"
+checksum = "91cac6cd830bba6da0f6d75dc59d3f2315fb207b4557c5ae7851f212a801f454"
 dependencies = [
  "serde",
 ]

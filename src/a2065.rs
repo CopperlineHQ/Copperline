@@ -13,7 +13,17 @@
 //! Board window layout (per the Linux `a2065` driver and WinUAE):
 //! - `$0000..`     MAC address PROM (the station address the driver reads)
 //! - `$4000`       LANCE RDP (register data port), `$4002` RAP (address port)
-//! - `$8000..$FFFF` 32 KiB shared RAM (LANCE address 0 maps here)
+//! - `$8000..$FFFF` 32 KiB shared RAM
+//!
+//! The LANCE sees the shared RAM at the same addresses, chip `$8000..$FFFF`:
+//! the board answers chip DMA only with A15 set, so every address a driver
+//! gives the chip (CSR1/CSR2 init block, ring bases, buffer pointers) carries
+//! `$8000`, as in Linux `a2065.c`, NetBSD `if_le.c` (`sc_addr = 0x8000`) and
+//! Commodore's `a2065.device`. A16-A23 are not decoded. A chip access with
+//! A15 clear does not reach the RAM: reads return 0 and writes are dropped.
+//! That reproduces a real A3000/A2065 given `$0000`-based addresses: the
+//! queued TX descriptors read as host-owned so nothing is sent, TDMD stays
+//! set, and no frame is received; no MERR is raised.
 //!
 //! The LANCE programming model (Am7990 datasheet): the host selects a CSR via
 //! RAP and reads/writes it via RDP. CSR1/CSR2 hold the init-block address; on
@@ -23,9 +33,14 @@
 //! descriptors the host left owned by the chip. RINT/TINT in CSR0 raise INT2
 //! when interrupts are enabled.
 //!
-//! Word fields in the init block and descriptors are accessed big-endian, the
-//! layout a 68000 driver writes with the LANCE's byte-swap (CSR3 BSWP) set;
-//! packet payloads are byte streams and are not swapped. The engine models the
+//! Word fields in the init block and descriptors are accessed big-endian
+//! whatever CSR3 says; BSWP affects only frame data. With BSWP set (what
+//! `a2065.device`, Linux and NetBSD program) the frame is a plain byte stream
+//! in RAM. With BSWP clear the chip takes the low byte of each 16-bit word
+//! first, so each byte pair is swapped between RAM and the wire, in both
+//! directions; on hardware that sends `00:00:9f:39:a8:d1` as
+//! `00:00:39:9f:d1:a8`. The pairing follows the RAM word lanes (address bit
+//! 0), not the buffer start. The engine models the
 //! Am7990 features a real driver exercises -- TX/RX buffer chaining across
 //! descriptors, the stored FCS trailer counted in MCNT, the init-block MODE
 //! gates (DTX/DRX and the LOOP internal-loopback self-test), and MISS on an RX
@@ -42,6 +57,11 @@ const REG_RDP: u32 = 0x4000;
 const REG_RAP: u32 = 0x4002;
 const RAM_BASE: u32 = 0x8000;
 const RAM_SIZE: usize = 0x8000; // 32 KiB on-board RAM
+/// LANCE address bit that selects the shared RAM (chip `$8000..$FFFF`).
+const CHIP_RAM_SELECT: u32 = 0x8000;
+
+// CSR3 bits (Am7990).
+const CSR3_BSWP: u16 = 1 << 2;
 
 // CSR0 bits (Am7990).
 const CSR0_INIT: u16 = 1 << 0;
@@ -186,22 +206,41 @@ impl A2065 {
         self.net = backend;
     }
 
-    // ----- board RAM word access (big-endian) ----------------------------
+    // ----- chip-side RAM access (LANCE addresses) -------------------------
 
-    fn ram_word(&self, addr: u32) -> u16 {
-        let a = (addr as usize) & (RAM_SIZE - 1);
-        if a + 1 < RAM_SIZE {
-            (u16::from(self.ram[a]) << 8) | u16::from(self.ram[a + 1])
-        } else {
-            0
+    /// RAM index of a LANCE address, or None when A15 is clear and the
+    /// access does not reach the RAM.
+    fn chip_ram_index(addr: u32) -> Option<usize> {
+        (addr & CHIP_RAM_SELECT != 0).then_some((addr as usize) & (RAM_SIZE - 1))
+    }
+
+    fn chip_byte(&self, addr: u32) -> u8 {
+        Self::chip_ram_index(addr).map_or(0, |a| self.ram[a])
+    }
+
+    fn set_chip_byte(&mut self, addr: u32, b: u8) {
+        if let Some(a) = Self::chip_ram_index(addr) {
+            self.ram[a] = b;
         }
     }
 
+    /// Init block and descriptor word, big-endian (BSWP does not apply).
+    fn ram_word(&self, addr: u32) -> u16 {
+        (u16::from(self.chip_byte(addr)) << 8) | u16::from(self.chip_byte(addr + 1))
+    }
+
     fn set_ram_word(&mut self, addr: u32, w: u16) {
-        let a = (addr as usize) & (RAM_SIZE - 1);
-        if a + 1 < RAM_SIZE {
-            self.ram[a] = (w >> 8) as u8;
-            self.ram[a + 1] = w as u8;
+        self.set_chip_byte(addr, (w >> 8) as u8);
+        self.set_chip_byte(addr + 1, w as u8);
+    }
+
+    /// LANCE address of frame byte `addr`: with BSWP clear the chip takes the
+    /// low byte of each RAM word first.
+    fn frame_byte_addr(&self, addr: u32) -> u32 {
+        if self.csr3 & CSR3_BSWP != 0 {
+            addr
+        } else {
+            addr ^ 1
         }
     }
 
@@ -316,7 +355,7 @@ impl A2065 {
                     if frame.len() >= MAX_FRAME {
                         break;
                     }
-                    frame.push(self.ram[(buf_addr as usize + i) & (RAM_SIZE - 1)]);
+                    frame.push(self.chip_byte(self.frame_byte_addr(buf_addr + i as u32)));
                 }
             }
             if self.mode & MODE_LOOP != 0 {
@@ -377,8 +416,8 @@ impl A2065 {
             let (buf_addr, cap) = self.desc_buffer(dbase);
             let n = remaining.min(cap);
             for i in 0..n {
-                let a = (buf_addr as usize + i) & (RAM_SIZE - 1);
-                self.ram[a] = *frame.get(copied + i).unwrap_or(&0);
+                let a = self.frame_byte_addr(buf_addr + i as u32);
+                self.set_chip_byte(a, *frame.get(copied + i).unwrap_or(&0));
             }
             copied += n;
             remaining -= n;
@@ -662,23 +701,48 @@ mod tests {
         board.read(REG_RDP, 2, &mut host) as u16
     }
 
+    /// LANCE address of board RAM offset `off`, as a real driver programs it.
+    fn chip(off: u32) -> u32 {
+        CHIP_RAM_SELECT | off
+    }
+
     /// Lay an init block + a 1-entry RX ring and 1-entry TX ring into board RAM,
-    /// with buffers, and point CSR1/CSR2 at the init block. Returns the LANCE
-    /// addresses of the TX and RX buffers.
+    /// with buffers, set CSR3 BSWP and point CSR1/CSR2 at the init block.
+    /// Returns the RAM offsets of the TX and RX buffers.
     fn set_up_rings(board: &mut A2065, mem: &mut crate::memory::Memory) -> (u32, u32) {
-        // Layout in board RAM (LANCE addresses):
+        set_up_rings_at(
+            board,
+            mem,
+            CHIP_RAM_SELECT,
+            CHIP_RAM_SELECT,
+            CHIP_RAM_SELECT,
+        )
+    }
+
+    /// [`set_up_rings`] with the chip-side pointers based independently:
+    /// CSR1/CSR2 at `init_base`, the ring bases at `ring_base`, the buffer
+    /// pointers at `buf_base`. The RAM layout is the same whatever the bases.
+    fn set_up_rings_at(
+        board: &mut A2065,
+        mem: &mut crate::memory::Memory,
+        init_base: u32,
+        ring_base: u32,
+        buf_base: u32,
+    ) -> (u32, u32) {
+        // Layout in board RAM (offsets):
         //   init block @ 0x000, RX ring @ 0x100, TX ring @ 0x200,
         //   RX buffer @ 0x400, TX buffer @ 0x600.
-        let iadr = 0x000u32;
-        let rx_ring = 0x100u32;
-        let tx_ring = 0x200u32;
-        let rx_buf = 0x400u32;
-        let tx_buf = 0x600u32;
+        let iadr = init_base;
+        let rx_ring = ring_base + 0x100;
+        let tx_ring = ring_base + 0x200;
+        let rx_buf = buf_base + 0x400;
+        let tx_buf = buf_base + 0x600;
 
-        // helper to write a word at a LANCE address through the CPU window.
+        // helper to write a word at a RAM offset (low 15 bits of a LANCE
+        // address) through the CPU window.
         let put = |board: &mut A2065, mem: &mut crate::memory::Memory, addr: u32, w: u16| {
             let mut host = DeviceHost::new(mem);
-            board.write(RAM_BASE + addr, 2, u32::from(w), &mut host);
+            board.write(RAM_BASE + (addr & 0x7FFF), 2, u32::from(w), &mut host);
         };
 
         // Raw descriptor fixtures use PROM; destination filtering is tested separately.
@@ -708,10 +772,11 @@ mod tests {
         put(board, mem, tx_ring, tx_buf as u16);
         put(board, mem, tx_ring + 2, (tx_buf >> 16) as u16 & 0xFF);
 
-        // Point CSR1/CSR2 at the init block.
+        // Point CSR1/CSR2 at the init block; 68000 byte order for frame data.
         write_csr(board, mem, 1, iadr as u16);
         write_csr(board, mem, 2, (iadr >> 16) as u16);
-        (tx_buf, rx_buf)
+        write_csr(board, mem, 3, CSR3_BSWP);
+        (tx_buf & 0x7FFF, rx_buf & 0x7FFF)
     }
 
     #[cfg(any(
@@ -828,7 +893,7 @@ mod tests {
             let mut board = A2065::new(NetConfig::Loopback).unwrap();
             let mut mem = host_mem();
             set_up_rings(&mut board, &mut mem);
-            board.set_ram_word(0, 0);
+            board.set_ram_word(chip(0), 0);
             write_csr(&mut board, &mut mem, 0, CSR0_INIT);
             write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
             let mut frame = vec![0u8; 60];
@@ -839,23 +904,23 @@ mod tests {
                 "unjoined group must be rejected"
             );
             assert_eq!(board.rx_cur, 0);
-            assert_ne!(board.desc_status(0x100) & DESC_OWN, 0);
+            assert_ne!(board.desc_status(chip(0x100)) & DESC_OWN, 0);
             assert_eq!(board.csr0 & (CSR0_RINT | CSR0_MISS), 0);
 
             // Programming RAM alone must not change the latched filter.
-            board.set_ram_word(8 + (index / 16) * 2, 1 << (index % 16));
+            board.set_ram_word(chip(8) + (index / 16) * 2, 1 << (index % 16));
             assert_eq!(board.receive_frame(&frame), RxResult::Filtered);
             write_csr(&mut board, &mut mem, 0, CSR0_STOP);
             write_csr(&mut board, &mut mem, 0, CSR0_INIT);
             write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
             assert_eq!(board.receive_frame(&frame), RxResult::Written);
-            assert_eq!(board.desc_status(0x100), DESC_STP | DESC_ENP);
-            assert_eq!(board.ram_word(0x106), 64);
+            assert_eq!(board.desc_status(chip(0x100)), DESC_STP | DESC_ENP);
+            assert_eq!(board.ram_word(chip(0x106)), 64);
             assert_eq!(&board.ram[0x400..0x43c], &frame);
             assert_ne!(board.csr0 & CSR0_RINT, 0);
 
             // Leaving requires another INIT; old packet ownership is not reused.
-            board.set_ram_word(8 + (index / 16) * 2, 0);
+            board.set_ram_word(chip(8) + (index / 16) * 2, 0);
             write_csr(&mut board, &mut mem, 0, CSR0_STOP);
             write_csr(&mut board, &mut mem, 0, CSR0_INIT);
             write_csr(&mut board, &mut mem, 0, CSR0_STRT);
@@ -869,7 +934,7 @@ mod tests {
         let mut board = A2065::new(NetConfig::Loopback).unwrap();
         let mut mem = host_mem();
         set_up_rings(&mut board, &mut mem);
-        board.set_ram_word(0, 0);
+        board.set_ram_word(chip(0), 0);
         write_csr(&mut board, &mut mem, 0, CSR0_INIT);
         write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
 
@@ -885,8 +950,8 @@ mod tests {
         // One tick must skip the unjoined group and receive the following
         // station packet in the first descriptor, with no missed-frame flag.
         assert_eq!(&board.ram[0x400..0x43c], &station);
-        assert_eq!(board.desc_status(0x100), DESC_STP | DESC_ENP);
-        assert_eq!(board.ram_word(0x106), 64);
+        assert_eq!(board.desc_status(chip(0x100)), DESC_STP | DESC_ENP);
+        assert_eq!(board.ram_word(chip(0x106)), 64);
         assert_ne!(board.csr0 & CSR0_RINT, 0);
         assert_eq!(board.csr0 & CSR0_MISS, 0);
         assert!(board.net.as_mut().unwrap().poll().is_none());
@@ -912,7 +977,7 @@ mod tests {
         let mut board = A2065::new(NetConfig::None).unwrap();
         let mut mem = host_mem();
         set_up_rings(&mut board, &mut mem);
-        board.set_ram_word(0, 0);
+        board.set_ram_word(chip(0), 0);
         write_csr(&mut board, &mut mem, 0, CSR0_INIT);
         write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
         let polls = Arc::new(AtomicUsize::new(0));
@@ -920,7 +985,7 @@ mod tests {
         board.tick(1, &mut DeviceHost::new(&mut mem));
         assert_eq!(polls.load(Ordering::Relaxed), MAX_RX_POLLS);
         assert_eq!(board.rx_cur, 0);
-        assert_ne!(board.desc_status(0x100) & DESC_OWN, 0);
+        assert_ne!(board.desc_status(chip(0x100)) & DESC_OWN, 0);
         assert_eq!(board.csr0 & (CSR0_RINT | CSR0_MISS), 0);
         polls.store(0, Ordering::Relaxed);
         board.tick(1, &mut DeviceHost::new(&mut mem));
@@ -932,7 +997,7 @@ mod tests {
         let mut board = A2065::new(NetConfig::Loopback).unwrap();
         let mut mem = host_mem();
         set_up_rings(&mut board, &mut mem);
-        board.set_ram_word(0, 0);
+        board.set_ram_word(chip(0), 0);
         write_csr(&mut board, &mut mem, 0, CSR0_INIT);
         write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
         let mut rejected = vec![0; 60];
@@ -946,7 +1011,7 @@ mod tests {
         net.send(&station);
         board.tick(1, &mut DeviceHost::new(&mut mem));
         assert_eq!(board.csr0 & (CSR0_RINT | CSR0_MISS), 0);
-        assert_ne!(board.desc_status(0x100) & DESC_OWN, 0);
+        assert_ne!(board.desc_status(chip(0x100)) & DESC_OWN, 0);
         board.tick(1, &mut DeviceHost::new(&mut mem));
         assert_eq!(&board.ram[0x400..0x43c], &station);
         assert_ne!(board.csr0 & CSR0_RINT, 0);
@@ -975,7 +1040,7 @@ mod tests {
         assert_eq!(*modes.lock().unwrap(), [false]);
         board.lance_init(); // fixture sets PROM
         assert_eq!(*modes.lock().unwrap(), [false, true]);
-        board.set_ram_word(0, 0); // RAM alone must not change the latch
+        board.set_ram_word(chip(0), 0); // RAM alone must not change the latch
         assert_eq!(*modes.lock().unwrap(), [false, true]);
         let state = serde_json::to_string(&board).unwrap();
         let mut restored: A2065 = serde_json::from_str(&state).unwrap();
@@ -993,7 +1058,7 @@ mod tests {
         let mut board = A2065::new(NetConfig::None).unwrap();
         let mut mem = host_mem();
         set_up_rings(&mut board, &mut mem);
-        board.set_ram_word(0, 0);
+        board.set_ram_word(chip(0), 0);
         board.lance_init();
         assert!(board.accepts_destination(&board.mac));
         assert!(board.accepts_destination(&[0xff; 6]));
@@ -1100,6 +1165,209 @@ mod tests {
     }
 
     #[test]
+    fn chip_addresses_without_a15_do_not_reach_the_ram() {
+        // A driver that gives the chip RAM offsets instead of $8000-based
+        // addresses. On a real A3000/A2065 the queued TX descriptors were
+        // never taken and nothing was received.
+        let mut board = A2065::new(NetConfig::Loopback).unwrap();
+        let mut mem = host_mem();
+        let (tx_buf, rx_buf) = set_up_rings_at(&mut board, &mut mem, 0, 0, 0);
+        write_csr(&mut board, &mut mem, 0, CSR0_INIT);
+        assert_ne!(read_csr(&mut board, &mut mem, 0) & CSR0_IDON, 0);
+        write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
+
+        {
+            let mut host = DeviceHost::new(&mut mem);
+            for i in 0..64u32 {
+                board.write(RAM_BASE + tx_buf + i, 1, i, &mut host);
+            }
+        }
+        arm_tx_desc(&mut board, &mut mem, 0, 64, DESC_OWN | DESC_STP | DESC_ENP);
+        write_csr(&mut board, &mut mem, 0, CSR0_TDMD);
+        assert_eq!(read_csr(&mut board, &mut mem, 0) & CSR0_TINT, 0);
+        assert!(
+            board.net.as_mut().unwrap().poll().is_none(),
+            "nothing goes on the wire"
+        );
+        {
+            let mut host = DeviceHost::new(&mut mem);
+            let status = board.read(RAM_BASE + 0x202, 2, &mut host) >> 8;
+            assert_ne!(status as u8 & DESC_OWN, 0, "TX descriptor not taken");
+        }
+
+        board.net.as_mut().unwrap().send(&[0xFF; 60]);
+        board.tick(1, &mut DeviceHost::new(&mut mem));
+        assert_eq!(read_csr(&mut board, &mut mem, 0) & CSR0_RINT, 0);
+        assert_ne!(rx_desc_status(&mut board, &mut mem, 0) & DESC_OWN, 0);
+        let rx = rx_buf as usize;
+        assert!(board.ram[rx..rx + 64].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn ring_bases_without_a15_read_descriptors_as_zero() {
+        // Valid init block; only RDRA/TDRA lack A15. The chip reads every
+        // descriptor as 0 (host-owned), so it sends and receives nothing and
+        // the descriptors in RAM keep their OWN bits.
+        let mut board = A2065::new(NetConfig::Loopback).unwrap();
+        let mut mem = host_mem();
+        let (tx_buf, rx_buf) =
+            set_up_rings_at(&mut board, &mut mem, CHIP_RAM_SELECT, 0, CHIP_RAM_SELECT);
+        write_csr(&mut board, &mut mem, 0, CSR0_INIT);
+        assert_ne!(read_csr(&mut board, &mut mem, 0) & CSR0_IDON, 0);
+        assert_eq!(
+            (board.rx_ring, board.tx_ring),
+            (0x100, 0x200),
+            "init block was read"
+        );
+        write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
+
+        {
+            let mut host = DeviceHost::new(&mut mem);
+            for i in 0..64u32 {
+                board.write(RAM_BASE + tx_buf + i, 1, 0x40 + i, &mut host);
+            }
+        }
+        arm_tx_desc(&mut board, &mut mem, 0, 64, DESC_OWN | DESC_STP | DESC_ENP);
+        write_csr(&mut board, &mut mem, 0, CSR0_TDMD);
+        assert_eq!(read_csr(&mut board, &mut mem, 0) & CSR0_TINT, 0);
+        assert!(
+            board.net.as_mut().unwrap().poll().is_none(),
+            "nothing goes on the wire"
+        );
+        {
+            let mut host = DeviceHost::new(&mut mem);
+            let status = board.read(RAM_BASE + 0x202, 2, &mut host) >> 8;
+            assert_eq!(
+                status as u8,
+                DESC_OWN | DESC_STP | DESC_ENP,
+                "TX descriptor unchanged"
+            );
+        }
+
+        board.net.as_mut().unwrap().send(&[0xFF; 60]);
+        board.tick(1, &mut DeviceHost::new(&mut mem));
+        assert_eq!(read_csr(&mut board, &mut mem, 0) & CSR0_RINT, 0);
+        assert_eq!(
+            rx_desc_status(&mut board, &mut mem, 0),
+            DESC_OWN,
+            "RX descriptor unchanged"
+        );
+        let rx = rx_buf as usize;
+        assert!(board.ram[rx..rx + 64].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn buffer_pointers_without_a15_read_zero_and_drop_writes() {
+        // Valid init block and rings; only the buffer pointers lack A15. The
+        // descriptors work, but TX buffer reads return 0 and RX buffer writes
+        // are dropped.
+        let mut board = A2065::new(NetConfig::Loopback).unwrap();
+        let mut mem = host_mem();
+        let (tx_buf, rx_buf) =
+            set_up_rings_at(&mut board, &mut mem, CHIP_RAM_SELECT, CHIP_RAM_SELECT, 0);
+        write_csr(&mut board, &mut mem, 0, CSR0_INIT);
+        write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
+
+        {
+            let mut host = DeviceHost::new(&mut mem);
+            for i in 0..64u32 {
+                board.write(RAM_BASE + tx_buf + i, 1, 0x40 + i, &mut host);
+                board.write(RAM_BASE + rx_buf + i, 1, 0x5A, &mut host);
+            }
+        }
+        arm_tx_desc(&mut board, &mut mem, 0, 64, DESC_OWN | DESC_STP | DESC_ENP);
+        write_csr(&mut board, &mut mem, 0, CSR0_TDMD);
+        assert_ne!(read_csr(&mut board, &mut mem, 0) & CSR0_TINT, 0);
+        let frame = board
+            .net
+            .as_mut()
+            .unwrap()
+            .poll()
+            .expect("descriptor is taken");
+        assert_eq!(frame, vec![0; 64], "TX buffer reads as zero");
+
+        board.net.as_mut().unwrap().send(&[0xAA; 60]);
+        board.tick(1, &mut DeviceHost::new(&mut mem));
+        assert_ne!(read_csr(&mut board, &mut mem, 0) & CSR0_RINT, 0);
+        assert_eq!(
+            rx_desc_status(&mut board, &mut mem, 0) & DESC_OWN,
+            0,
+            "RX descriptor returned"
+        );
+        let rx = rx_buf as usize;
+        assert!(
+            board.ram[rx..rx + 64].iter().all(|&b| b == 0x5A),
+            "RX buffer unchanged"
+        );
+    }
+
+    /// The hardware example: a frame from 00:00:9f:39:a8:d1, as the 68000
+    /// stores it in RAM.
+    fn sample_frame() -> Vec<u8> {
+        let mut frame = vec![0xFF; 6];
+        frame.extend_from_slice(&[0x00, 0x00, 0x9F, 0x39, 0xA8, 0xD1]);
+        frame.extend_from_slice(&[0x08, 0x00, 0x45, 0x00]);
+        frame.extend((0..44u8).map(|i| i.wrapping_mul(37)));
+        frame
+    }
+
+    fn swap_byte_pairs(data: &[u8]) -> Vec<u8> {
+        data.chunks(2)
+            .flat_map(|p| p.iter().rev().copied())
+            .collect()
+    }
+
+    /// Send `ram_frame` from the TX buffer, then receive `wire_frame` into
+    /// the RX buffer, with CSR3 = `csr3`. Returns the bytes put on the wire
+    /// and the bytes stored in the RX buffer.
+    fn frame_data_round_trip(csr3: u16, ram_frame: &[u8], wire_frame: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        let mut board = A2065::new(NetConfig::Loopback).unwrap();
+        let mut mem = host_mem();
+        let (tx_buf, rx_buf) = set_up_rings(&mut board, &mut mem);
+        write_csr(&mut board, &mut mem, 3, csr3);
+        write_csr(&mut board, &mut mem, 0, CSR0_INIT);
+        write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
+        {
+            let mut host = DeviceHost::new(&mut mem);
+            for (i, b) in ram_frame.iter().enumerate() {
+                board.write(RAM_BASE + tx_buf + i as u32, 1, u32::from(*b), &mut host);
+            }
+        }
+        let len = ram_frame.len() as u16;
+        arm_tx_desc(&mut board, &mut mem, 0, len, DESC_OWN | DESC_STP | DESC_ENP);
+        write_csr(&mut board, &mut mem, 0, CSR0_TDMD);
+        let wire = board.net.as_mut().unwrap().poll().expect("frame sent");
+
+        board.net.as_mut().unwrap().send(wire_frame);
+        board.tick(1, &mut DeviceHost::new(&mut mem));
+        assert_ne!(read_csr(&mut board, &mut mem, 0) & CSR0_RINT, 0);
+        assert_eq!(
+            board.ram_word(chip(0x106)) as usize,
+            wire_frame.len() + FCS_LEN
+        );
+        let rx = rx_buf as usize;
+        (wire, board.ram[rx..rx + wire_frame.len()].to_vec())
+    }
+
+    #[test]
+    fn bswp_clear_swaps_frame_bytes_within_each_word() {
+        let frame = sample_frame();
+        let (wire, rx) = frame_data_round_trip(0, &frame, &frame);
+        // What the real board put on the wire with BSWP clear.
+        assert_eq!(&wire[6..12], &[0x00, 0x00, 0x39, 0x9F, 0xD1, 0xA8]);
+        assert_eq!(wire, swap_byte_pairs(&frame));
+        assert_eq!(rx, swap_byte_pairs(&frame));
+    }
+
+    #[test]
+    fn bswp_set_keeps_frame_bytes_in_ram_order() {
+        let frame = sample_frame();
+        let (wire, rx) = frame_data_round_trip(CSR3_BSWP, &frame, &frame);
+        assert_eq!(wire, frame);
+        assert_eq!(rx, frame);
+    }
+
+    #[test]
     fn stop_clears_running_and_int() {
         let mut board = A2065::new(NetConfig::Loopback).unwrap();
         let mut mem = host_mem();
@@ -1119,9 +1387,10 @@ mod tests {
     }
 
     /// Lay an init block with the given MODE word plus multi-entry rings into
-    /// board RAM: RX ring at 0x100 (2^rx_log2 entries, chip-owned, each with a
-    /// rx_cap-byte buffer at 0x1000 + n*rx_cap), TX ring at 0x200 (2^tx_log2
-    /// entries, host-owned, buffers at 0x3000 + n*0x200).
+    /// board RAM (offsets; the chip sees them at `$8000 +`): RX ring at 0x100
+    /// (2^rx_log2 entries, chip-owned, each with a rx_cap-byte buffer at
+    /// 0x1000 + n*rx_cap), TX ring at 0x200 (2^tx_log2 entries, host-owned,
+    /// buffers at 0x3000 + n*0x200), CSR3 BSWP set.
     fn set_up_rings_geom(
         board: &mut A2065,
         mem: &mut crate::memory::Memory,
@@ -1130,12 +1399,12 @@ mod tests {
         rx_cap: u16,
         tx_log2: u16,
     ) {
-        let iadr = 0x000u32;
-        let rx_ring = 0x100u32;
-        let tx_ring = 0x200u32;
+        let iadr = chip(0x000);
+        let rx_ring = chip(0x100);
+        let tx_ring = chip(0x200);
         let put = |board: &mut A2065, mem: &mut crate::memory::Memory, addr: u32, w: u16| {
             let mut host = DeviceHost::new(mem);
-            board.write(RAM_BASE + addr, 2, u32::from(w), &mut host);
+            board.write(RAM_BASE + (addr & 0x7FFF), 2, u32::from(w), &mut host);
         };
         put(board, mem, iadr, mode);
         put(board, mem, iadr + 2, 0x0002);
@@ -1157,7 +1426,7 @@ mod tests {
         );
         for n in 0..(1u32 << rx_log2) {
             let dbase = rx_ring + n * 8;
-            let buf = 0x1000 + n * u32::from(rx_cap);
+            let buf = chip(0x1000) + n * u32::from(rx_cap);
             put(board, mem, dbase, buf as u16);
             put(
                 board,
@@ -1174,12 +1443,13 @@ mod tests {
         }
         for n in 0..(1u32 << tx_log2) {
             let dbase = tx_ring + n * 8;
-            let buf = 0x3000 + n * 0x200;
+            let buf = chip(0x3000) + n * 0x200;
             put(board, mem, dbase, buf as u16);
             put(board, mem, dbase + 2, (buf >> 16) as u16 & 0xFF);
         }
         write_csr(board, mem, 1, iadr as u16);
         write_csr(board, mem, 2, (iadr >> 16) as u16);
+        write_csr(board, mem, 3, CSR3_BSWP);
     }
 
     /// Hand TX descriptor `n` to the chip with a byte count and status bits.

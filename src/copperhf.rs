@@ -519,33 +519,36 @@ fn execute_job(units: &UnitsShared, job: WorkerJob) -> WorkerResult {
             let Some(disk) = guard[unit].as_mut() else {
                 return WorkerResult::DiskChanged;
             };
+            // The request moves as one run: a raw image file costs one host
+            // read or write per request, not a seek and a read or write for
+            // every 512-byte sector.
+            let bytes = sectors as usize * SECTOR_SIZE;
             if read {
-                let mut out = Vec::with_capacity(sectors as usize * SECTOR_SIZE);
-                let mut sector = [0u8; SECTOR_SIZE];
-                for i in 0..sectors {
-                    if let Err(e) = disk.disk.read_sector(start_lba + i, &mut sector) {
-                        log::warn!("copperhf: unit {unit}: read_sector failed: {e}");
-                        return WorkerResult::RwFailed;
-                    }
-                    out.extend_from_slice(&sector);
+                let mut out = vec![0u8; bytes];
+                if let Err(e) = disk.disk.read_sectors(start_lba, &mut out) {
+                    log::warn!(
+                        "copperhf: unit {unit}: read of {sectors} sector(s) at {start_lba} \
+                         failed: {e}"
+                    );
+                    return WorkerResult::RwFailed;
                 }
                 WorkerResult::RwOk {
                     read_data: Some(out),
                 }
             } else {
                 let payload = write_payload.unwrap_or_default();
-                for i in 0..sectors {
-                    let start = i as usize * SECTOR_SIZE;
-                    let Some(chunk) = payload.get(start..start + SECTOR_SIZE) else {
-                        return WorkerResult::RwFailed;
-                    };
-                    if let Err(e) = disk.disk.write_sector(start_lba + i, chunk) {
-                        log::warn!("copperhf: unit {unit}: write_sector failed: {e}");
-                        if e.kind() == std::io::ErrorKind::PermissionDenied {
-                            return WorkerResult::WriteProtected;
-                        }
-                        return WorkerResult::RwFailed;
+                let Some(payload) = payload.get(..bytes) else {
+                    return WorkerResult::RwFailed;
+                };
+                if let Err(e) = disk.disk.write_sectors(start_lba, payload) {
+                    log::warn!(
+                        "copperhf: unit {unit}: write of {sectors} sector(s) at {start_lba} \
+                         failed: {e}"
+                    );
+                    if e.kind() == std::io::ErrorKind::PermissionDenied {
+                        return WorkerResult::WriteProtected;
                     }
+                    return WorkerResult::RwFailed;
                 }
                 WorkerResult::RwOk { read_data: None }
             }
@@ -1706,7 +1709,14 @@ fn write_u16(host: &mut DeviceHost, addr: u32, value: u16) -> bool {
 /// Word-granular checked bulk read (see [`read_u32`]'s doc comment for why
 /// this exists instead of the bulk byte helpers). `len` need not be even;
 /// the odd trailing byte, if any, is taken from a word read's high byte.
+///
+/// A buffer that one RAM bank holds whole (the span its word accesses
+/// cover, so an odd length's last word too) is copied in one go, with the
+/// same result as the word loop below, which handles everything else.
 fn dma_read_bytes(host: &DeviceHost, addr: u32, len: usize) -> Option<Vec<u8>> {
+    if let Some(ram) = host.dma_ram(addr, len.next_multiple_of(2)) {
+        return Some(ram[..len].to_vec());
+    }
     let mut buf = Vec::with_capacity(len);
     let mut a = addr;
     while buf.len() + 2 <= len {
@@ -1722,7 +1732,19 @@ fn dma_read_bytes(host: &DeviceHost, addr: u32, len: usize) -> Option<Vec<u8>> {
     Some(buf)
 }
 
+/// Word-granular checked bulk write, the counterpart of [`dma_read_bytes`]
+/// (including its one-copy path for a buffer inside one RAM bank). An odd
+/// length leaves the byte after the buffer as it was.
 fn dma_write_bytes(host: &mut DeviceHost, addr: u32, data: &[u8]) -> bool {
+    // Nothing to move is no DMA write at all: it must not count as one for
+    // the CPU data-cache invalidation.
+    if data.is_empty() {
+        return true;
+    }
+    if let Some(ram) = host.dma_ram_mut(addr, data.len().next_multiple_of(2)) {
+        ram[..data.len()].copy_from_slice(data);
+        return true;
+    }
     let mut a = addr;
     let mut chunks = data.chunks_exact(2);
     for chunk in &mut chunks {
@@ -2320,6 +2342,100 @@ mod tests {
         let ptr = 0x1000u32;
         let bogus_data = 0xFFFF_0000u32; // well past chip_ram's length
         write_request(&mut mem, ptr, 0, CMD_READ, 0, 512, bogus_data, 0);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+        assert_eq!(io_error(&mem, ptr), IOERR_BADADDRESS);
+    }
+
+    #[test]
+    fn multi_sector_write_then_read_round_trips_and_stays_inside_the_buffer() {
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, open_image("multi", 16));
+        let mut mem = memory();
+        let (ptr, src, dst) = (0x1000u32, 0x8000usize, 0x2_0000usize);
+        let len = 8 * SECTOR_SIZE;
+        let pattern: Vec<u8> = (0..len).map(|i| (i / 3) as u8 ^ 0xC3).collect();
+        mem.chip_ram[src..src + len].copy_from_slice(&pattern);
+        write_request(&mut mem, ptr, 0, CMD_WRITE, 0, len as u32, src as u32, 1024);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+        assert_eq!(io_error(&mem, ptr), 0);
+        assert_eq!(io_actual(&mem, ptr), len as u32);
+
+        // Guard bytes either side of the read buffer must survive.
+        mem.chip_ram[dst - 1] = 0x11;
+        mem.chip_ram[dst + len] = 0x22;
+        write_request(&mut mem, ptr, 0, CMD_READ, 0, len as u32, dst as u32, 1024);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+        assert!(host.wrote_memory());
+        assert_eq!(io_error(&mem, ptr), 0);
+        assert_eq!(mem.chip_ram[dst..dst + len], pattern[..]);
+        assert_eq!(
+            (mem.chip_ram[dst - 1], mem.chip_ram[dst + len]),
+            (0x11, 0x22)
+        );
+
+        // The sectors either side of the written run kept the image's own
+        // pattern.
+        write_request(&mut mem, ptr, 0, CMD_READ, 0, 4 * 512, dst as u32, 512);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+        let image = |i: usize| (i % 251) as u8;
+        assert!((0..512).all(|i| mem.chip_ram[dst + i] == image(512 + i)));
+        assert_eq!(
+            mem.chip_ram[dst + 512..dst + 512 + 3 * 512],
+            pattern[..3 * 512]
+        );
+    }
+
+    #[test]
+    fn transfer_buffer_across_two_ram_banks_still_moves_every_byte() {
+        // Motherboard RAM ends where accelerator RAM begins: a buffer across
+        // that join is no single bank, so it takes the word-by-word path.
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, open_image("join", 16));
+        let mut mem = memory();
+        mem.mb_ram = vec![0u8; 0x1000];
+        mem.accel_ram = vec![0u8; 0x1000];
+        let join = crate::memory::ACCEL_RAM_BASE as u32;
+        assert_eq!(mem.mb_ram_base() as u32 + 0x1000, join);
+        let ptr = 0x1000u32;
+        write_request(&mut mem, ptr, 0, CMD_READ, 0, 1024, join - 512, 0);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+        assert_eq!(io_error(&mem, ptr), 0);
+        let image = |i: usize| (i % 251) as u8;
+        assert!((0..512).all(|i| mem.mb_ram[0x1000 - 512 + i] == image(i)));
+        assert!((0..512).all(|i| mem.accel_ram[i] == image(512 + i)));
+
+        // And back out again: a write from the same straddling buffer.
+        mem.mb_ram[0x1000 - 512..].fill(0xAB);
+        mem.accel_ram[..512].fill(0xCD);
+        write_request(&mut mem, ptr, 0, CMD_WRITE, 0, 1024, join - 512, 4096);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+        assert_eq!(io_error(&mem, ptr), 0);
+        write_request(&mut mem, ptr, 0, CMD_READ, 0, 1024, 0x4000, 4096);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+        assert!(mem.chip_ram[0x4000..0x4200].iter().all(|&b| b == 0xAB));
+        assert!(mem.chip_ram[0x4200..0x4400].iter().all(|&b| b == 0xCD));
+    }
+
+    #[test]
+    fn read_buffer_running_off_the_end_of_ram_is_bad_address() {
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, open_image("offend", 16));
+        let mut mem = memory();
+        let top = mem.chip_ram.len() as u32;
+        let ptr = 0x1000u32;
+        write_request(&mut mem, ptr, 0, CMD_READ, 0, 1024, top - 512, 0);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+        assert_eq!(io_error(&mem, ptr), IOERR_BADADDRESS);
+        // A write from such a buffer fails at the doorbell, before any I/O.
+        write_request(&mut mem, ptr, 0, CMD_WRITE, 0, 1024, top - 512, 0);
         let mut host = DeviceHost::new(&mut mem);
         ring_doorbell_long(&mut board, &mut host, ptr);
         assert_eq!(io_error(&mem, ptr), IOERR_BADADDRESS);
