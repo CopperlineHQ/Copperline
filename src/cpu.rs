@@ -7852,6 +7852,118 @@ mod tests {
         Ok(())
     }
 
+    /// With the fastmem window offered (cache models off), the core
+    /// compiles traces that record through a subroutine call. When a JIT
+    /// batch boundary closes such a recording right after the callee's
+    /// RTS, and the return address already heads a compiled loop, the
+    /// trace links into that loop and must resume AT the return address.
+    /// Resuming one word past the RTS runs callee code on the caller's
+    /// frame: Kickstart 3.2's LoadSeg relocation loop on an A3000 with
+    /// caches off returned through its caller's frame into low memory and
+    /// died with an illegal-instruction alert. Here the code after the
+    /// RTS marks D5, and every slice ends right after the RTS.
+    #[test]
+    fn jit_fastmem_call_trace_resumes_at_its_return_address() -> Result<()> {
+        let pc = FAST_RAM_BASE as u32 + 0x100;
+        let stack = FAST_RAM_BASE as u32 + 0x8000;
+        let program = [
+            0x4FF9u16, // lea stack,a7
+            (stack >> 16) as u16,
+            stack as u16,
+            0x7A00, // moveq #0,d5
+            0x7400, // moveq #0,d2
+            0x6106, // head: bsr.s leaf
+            0x5347, // ret: subq.w #1,d7
+            0x66FC, // bne.s ret
+            0x60F8, // bra.s head
+            0x7E28, // leaf: moveq #40,d7
+            0x5282, // addq.l #1,d2
+            0x4E75, // rts
+            0x7AFF, // moveq #-1,d5 (reached only past the rts)
+            0x60FE, // bra.s *
+        ];
+        const ITERATIONS: u32 = 40;
+        let mut machine = machine_with_program_model(pc, &program, CpuModel::M68030)?;
+        machine.set_jit_enabled(true);
+        assert!(
+            machine.bus.jit_fast_mem().is_some(),
+            "the window is offered"
+        );
+        let mut step = |count: usize| -> Result<()> {
+            let slice = machine.step_slice(count)?;
+            assert_eq!(slice.instructions, count);
+            Ok(())
+        };
+        // Setup plus the first call, ending right after the RTS.
+        step(3 + 4)?;
+        for _ in 1..ITERATIONS {
+            // Countdown (40 x SUBQ/BNE) and the branch back to the call.
+            step(81)?;
+            // BSR, MOVEQ, ADDQ, RTS.
+            step(4)?;
+        }
+        assert_eq!(machine.d(5), 0, "no callee code ran past its RTS");
+        assert_eq!(machine.d(2), ITERATIONS, "one leaf call per iteration");
+        assert_eq!(
+            machine.pc(),
+            pc + 12,
+            "every slice ended at the return address"
+        );
+        Ok(())
+    }
+
+    /// A 68030 with its MMU on answers repeat accesses to a page from its
+    /// address translation cache, so a loop under an identity map costs the
+    /// chip clocks it costs untranslated, give or take its first table
+    /// searches. Without the cache every instruction fetch re-read a page
+    /// descriptor from chip RAM, and an MMU-on 030 (bundled AROS turns the
+    /// MMU on at boot) ran a CPU-bound loop about twelve times slower.
+    #[test]
+    fn mmu_030_loop_pays_for_table_searches_only_on_atc_misses() -> Result<()> {
+        let program = [
+            0x7263u16, // moveq #99,d1
+            0x4E71,    // nop
+            0x51C9, 0xFFFC, // dbra d1,<nop>
+            0x60FE, // bra.s *
+        ];
+        let run = |mmu: bool| -> Result<u32> {
+            let mut machine = machine_with_program_model(0x1000, &program, CpuModel::M68030)?;
+            if mmu {
+                // One level of 4096 short page descriptors mapping every
+                // 4 KB page to itself: TC = E, PS 4 KB, IS 8, TIA 12.
+                let table = 0x4_0000usize;
+                let chip = &mut machine.bus_mut().mem.chip_ram;
+                for page in 0..4096u32 {
+                    let at = table + page as usize * 4;
+                    chip[at..at + 4].copy_from_slice(&((page << 12) | 1).to_be_bytes());
+                }
+                machine.cpu.mmu_crp_limit = 2;
+                machine.cpu.mmu_crp_aptr = table as u32;
+                machine.cpu.mmu_tc = 0x80C8_C000;
+                machine.cpu.pmmu_enabled = true;
+            }
+            // Elapsed chipset time. On the 020+ the slice's bus advance
+            // already includes the execution time `cpu_cck` reports (it is
+            // charged through `advance_cpu_internal_cycles`), so it alone
+            // is the total.
+            let mut retired = 0usize;
+            let mut cck = 0u32;
+            while retired < 220 {
+                let slice = machine.step_slice(220 - retired)?;
+                retired += slice.instructions;
+                cck += slice.bus_advanced_cck;
+            }
+            Ok(cck)
+        };
+        let plain = run(false)?;
+        let translated = run(true)?;
+        assert!(
+            translated <= plain + 16,
+            "an identity-mapped loop took {translated} cck under the MMU, {plain} without it"
+        );
+        Ok(())
+    }
+
     #[test]
     fn stopped_cpu_wakes_when_cia_timer_raises_device_interrupt() -> Result<()> {
         let mut bus = test_bus_with_pc(0x0000_0100);

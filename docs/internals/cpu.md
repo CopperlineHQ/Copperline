@@ -631,8 +631,30 @@ One register set (`mmu_*` in `CpuCore`) is canonical for both paths, so the 030
 root pointers overload the CRP/SRP address slots, dispatched by `cpu_type`). The
 enable bit differs by part -- TC[31] on the 030, TC[15] on the 040 -- via
 `tc_enable()`. `PMOVE`/`MOVEC` load the registers (including the 030 MMUSR
-via `PMOVE PSR`); `PLOAD`/`PFLUSH` are accepted as no-ops on the 030 walk
-(which has no ATC to flush).
+via `PMOVE PSR`).
+
+The 68030 keeps recent translations in its address translation cache, as
+the silicon does: 22 fully associative entries, each tagged with the
+access's function code and logical page (`mmu::Atc030` in the `m68k`
+crate). A hit costs the access nothing; only a miss searches the tables,
+and only a miss pays for the descriptor fetches, which are billed like any
+other memory read. The page is as large as the address bits the configured
+TC levels leave untranslated, so an early-termination descriptor that maps
+more than a page fills one entry per page used. Entries are replaced least
+recently used first. `PFLUSHA`, `PFLUSH fc,#mask` and `PFLUSH
+fc,#mask,<ea>` invalidate what they name, `PLOAD` searches the tables and
+loads an entry, and a `PMOVE` to TC, SRP or CRP flushes the cache unless it
+is the `PMOVEFD` form. A write to a descriptor does not reach the cache;
+software flushes, as on real hardware. A write to a write-protected page
+misses and re-walks, which raises the fault. Not modelled: entries for
+invalid translations (the B bit), the CI and modified bits, and the part's
+exact replacement order. The cache is saved with the CPU state, so a
+resumed run misses where the original would have. Before it existed every
+translated access, including instruction fetches that hit the instruction
+cache, re-walked the tables. A 68030 with its MMU on (bundled AROS enables
+it at boot) ran a CPU-bound loop about twelve times slower than it does
+with the cache, and under `[cpu] jit` most of the host time went to table
+walks.
 
 A 68040 table walk costs three descriptor fetches, far too much to pay on every
 access, so the 040 walker is fronted by an address-translation cache
@@ -719,8 +741,7 @@ read's result in the data input buffer (mmu.library emulates lazily-zeroed
 pages this way) or absorbing a faulted write, honoured as a one-shot
 substitution on the re-executed instruction's matching access. Remaining:
 the used/modified/limit MMUSR bits and descriptor write-back, CRP limit
-checks, and the DT=1 page-descriptor root; the 030 walk has no ATC, so
-every access re-walks the tables.
+checks, and the DT=1 page-descriptor root.
 
 ## Interrupts and STOP
 
