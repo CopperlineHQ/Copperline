@@ -1071,9 +1071,13 @@ impl HardDriveImage {
     /// but every prior caller only ever passed one sector at a time, so
     /// `count` was always 1 and a `tear` keeping "the first 2 sectors" of
     /// an 8-sector request had nothing beyond the first sector to keep).
-    /// `buf.len()` must be a positive multiple of `SECTOR_SIZE`.
+    /// A trailing partial sector (shorter than `SECTOR_SIZE`) is neither
+    /// read nor written, same as [`Self::read_sectors`].
     pub fn write_sectors(&mut self, lba: u64, buf: &[u8]) -> std::io::Result<()> {
-        debug_assert!(!buf.is_empty() && buf.len().is_multiple_of(SECTOR_SIZE));
+        let buf = &buf[..buf.len() - buf.len() % SECTOR_SIZE];
+        if buf.is_empty() {
+            return Ok(());
+        }
         // Checked here too, not just inside `write_sector_real`: a fault
         // policy's `DoneOk`/`ProceedWith` outcome below returns without
         // ever reaching `write_sector_real`, which would otherwise let an
@@ -1167,16 +1171,44 @@ impl HardDriveImage {
     }
 
     /// `write_sector_real` for a buffer spanning one or more consecutive
-    /// sectors -- every backing's own `write_sector`/`write_all` still
-    /// only ever receives one sector per call (none of the backing
-    /// implementations are multi-sector aware, and extending each is out
-    /// of scope here), so this just loops it rather than widening the
-    /// per-backing commit path itself.
+    /// sectors. The synthesized RDB cylinder (and its write warning) stays
+    /// on the per-sector path; sectors past it move in one host write for
+    /// `Backing::File`/`Backing::Memory` -- the same bulk optimization
+    /// [`Self::read_sectors`] uses for reads -- so a controller committing
+    /// a multi-sector run pays one seek and one write, not one per sector.
+    /// Other backings have their own sector mapping and still go one
+    /// sector at a time.
     fn write_sectors_real(&mut self, lba: u64, buf: &[u8]) -> std::io::Result<()> {
-        for (i, chunk) in buf.chunks(SECTOR_SIZE).enumerate() {
+        debug_assert!(buf.len().is_multiple_of(SECTOR_SIZE));
+        let sectors = (buf.len() / SECTOR_SIZE) as u64;
+        let overlay = self.overlay_sectors();
+        let in_overlay = overlay.saturating_sub(lba).min(sectors) as usize * SECTOR_SIZE;
+        let (head, tail) = buf.split_at(in_overlay);
+        for (i, chunk) in head.chunks_exact(SECTOR_SIZE).enumerate() {
             self.write_sector_real(lba + i as u64, chunk)?;
         }
-        Ok(())
+        if tail.is_empty() {
+            return Ok(());
+        }
+        let lba = lba + (in_overlay / SECTOR_SIZE) as u64;
+        let file_lba = lba - overlay;
+        match &mut self.backing {
+            Backing::File(file) => {
+                file.seek(SeekFrom::Start(file_lba * SECTOR_SIZE as u64))?;
+                file.write_all(tail)
+            }
+            Backing::Memory(image) => {
+                let off = file_lba as usize * SECTOR_SIZE;
+                image[off..off + tail.len()].copy_from_slice(tail);
+                Ok(())
+            }
+            _ => {
+                for (i, chunk) in tail.chunks_exact(SECTOR_SIZE).enumerate() {
+                    self.write_sector_real(lba + i as u64, chunk)?;
+                }
+                Ok(())
+            }
+        }
     }
 
     fn write_sector_real(&mut self, lba: u64, buf: &[u8]) -> std::io::Result<()> {
@@ -1261,45 +1293,6 @@ impl HardDriveImage {
             _ => {
                 for (i, sector) in tail.chunks_exact_mut(SECTOR_SIZE).enumerate() {
                     self.read_sector(lba + i as u64, sector)?;
-                }
-                Ok(())
-            }
-        }
-    }
-
-    /// Write consecutive sectors from `buf` starting at `lba`, one sector
-    /// per `SECTOR_SIZE` bytes (a trailing partial sector is ignored). The
-    /// bulk counterpart of [`Self::write_sector`]; see
-    /// [`Self::read_sectors`] for which backings move the run in one access.
-    pub fn write_sectors(&mut self, lba: u64, buf: &[u8]) -> std::io::Result<()> {
-        let whole = buf.len() - buf.len() % SECTOR_SIZE;
-        let sectors = (whole / SECTOR_SIZE) as u64;
-        // The synthesized RDB cylinder (and its write warning) stays on the
-        // per-sector path.
-        let overlay = self.overlay_sectors();
-        let in_overlay = overlay.saturating_sub(lba).min(sectors) as usize * SECTOR_SIZE;
-        let (head, tail) = buf[..whole].split_at(in_overlay);
-        for (i, sector) in head.chunks_exact(SECTOR_SIZE).enumerate() {
-            self.write_sector(lba + i as u64, sector)?;
-        }
-        if tail.is_empty() {
-            return Ok(());
-        }
-        let lba = lba + (in_overlay / SECTOR_SIZE) as u64;
-        let file_lba = lba - overlay;
-        match &mut self.backing {
-            Backing::File(file) => {
-                file.seek(SeekFrom::Start(file_lba * SECTOR_SIZE as u64))?;
-                file.write_all(tail)
-            }
-            Backing::Memory(image) => {
-                let off = file_lba as usize * SECTOR_SIZE;
-                image[off..off + tail.len()].copy_from_slice(tail);
-                Ok(())
-            }
-            _ => {
-                for (i, sector) in tail.chunks_exact(SECTOR_SIZE).enumerate() {
-                    self.write_sector(lba + i as u64, sector)?;
                 }
                 Ok(())
             }
