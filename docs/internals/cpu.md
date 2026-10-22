@@ -126,11 +126,28 @@ The fastmem window is only offered when nothing intercepts plain fast-RAM
 accesses: cache models, memory-write debug hooks, the heat map, SMC
 detection, and injected bus faults all force every access back onto the
 bus (so on default 020+ configs, whose caches are modelled, the window
-engages only when the user opts the caches off -- and the core also
-declines it whenever the guest enables the MMU, since fastmem addresses
-are physical). Arming any per-instruction debug or diagnostic hook
-(breakpoints, watches, traces, `COPPERLINE_DBG_*`) drops the whole slice
-back to the precise loop, so the debugger always sees every instruction.
+engages only when the user opts the caches off). Arming any
+per-instruction debug or diagnostic hook (breakpoints, watches, traces,
+`COPPERLINE_DBG_*`) drops the whole slice back to the precise loop, so the
+debugger always sees every instruction.
+
+The window holds physical addresses, and it stays in use when the guest
+enables the MMU (bundled AROS does at boot, as do mmu.library, MuForce and
+Linux/m68k). The core then translates each window access through the
+transparent-translation registers and the ATC alone, never a table search.
+An access they cannot map into the window -- an ATC miss, a cached
+translation the access would fault on, a page-crossing access, a physical
+address outside the bank -- runs on the ordinary bus path, which searches
+the tables (billing the descriptor reads) and raises the fault with the
+precise core's frame. Compiled traces translate the same way, and are
+re-recorded if the guest switches the MMU on or off under them. While the
+window translates, no 68030 ATC hit records a use in the replacement order
+-- not through the window, a trace or the bus path -- so entries age by when
+table searches loaded them (the precise core keeps least-recently-used
+replacement). Table searches happen at the same instructions whether a
+trace or the interpreter runs them, so that saved state does not depend on
+what the trace JIT has compiled: a resumed state, whose JIT caches start
+empty, behaves like the uninterrupted run.
 
 The host-side instruction profiler (`profile::samples::InstructionSampler`)
 retains at most 262,144 pending instruction/IRQ records, about 42 MiB on
