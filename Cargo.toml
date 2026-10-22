@@ -182,7 +182,10 @@ fluxbridge = ["dep:fluxbridge"]
 host-serial = ["dep:serialport"]
 
 [dependencies]
-m68k = { version = "0.14", features = ["serde"] }
+# 0.14.7 is the floor: earlier releases give the 68030 MMU no address
+# translation cache, so every translated access re-walks the page tables,
+# and resume a trace-JIT link exit after a callee's RTS one word past it.
+m68k = { version = "0.14.7", features = ["serde"] }
 # The MT-32 synthesiser engine: our own port of Munt, pinned by revision.
 mt32-rs = { git = "https://github.com/CopperlineHQ/mt32-rs", rev = "aa54c40c232a826f3d6f117ac8a0b165e7571f32", optional = true }
 # The General MIDI synthesiser (Coppersynth), pinned by revision.
