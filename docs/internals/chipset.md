@@ -503,3 +503,33 @@ Deliberate non-goals, recorded so they are not re-investigated: A2024 /
 UHRES dual-scan display (a one-time "not emulated" warning is kept),
 genlock ZD output beyond register storage, and AGA "double CAS"
 memory-timing fidelity beyond what `timing-test/` measurements justify.
+
+### A500 single/dual playfield collision checks
+
+Paired A500 measurements confirm sprite?PF1 matching differs: single-playfield
+mode also requires the even-plane match, while dual-playfield mode permits the
+odd match independently. The matrix found no corresponding mode difference in
+sprite?PF2 or PF?PF bit0. The active paired test pins sprite matching.
+
+The consensus fixture `src/bus/tests/data/a500_playfield_modes.csv` comes from
+two independent512-case PAL A500 runs, two repeats per condition. It covers two
+lores planes, four constant patterns, four CLXCON enable masks and four desired
+values, sprite0 on/off, and DPF off/on. BPLDAT starts zero before constant DMA
+output. Full references are versioned in
+`amiga-hardware-probes/references/playfield-modes-v1`; ROM SHA256 is
+`3a614aba9686ad37d83a210a0016b6ec870e36d1fa07294ba0e4ab0c31d82765`.
+
+Live PF?PF readback still disagrees in328 observations. The two PF?PF fixture
+tests are explicitly ignored as known failures, while the external hardware
+replay remains strict at512 required matches. A match-mask-only candidate still
+missed88 cases and introduced20 field regressions, so it was rejected. The
+zero-burst follow-up locates a zero match near fetch/display start, but differing
+CPU read brackets prevent fitting a precise collision delay from sample indexes.
+These fixtures describe measured behavior, not complete collision support or
+unmeasured AGA, sprite, or early DMA timing.
+
+Run the active paired regression with
+`python tools/cargo_report.py -- test --profile ci --locked --lib bus::tests::playfield_modes`.
+To inspect the known conformance failures explicitly, append `-- --ignored`.
+The ignored tests are expected to fail until the PF?PF implementation is fixed;
+passing them alone is insufficient without the full strict512-case replay.

@@ -15560,3 +15560,5 @@ fn bitplane_pointer_half_writes_lose_only_to_the_selected_dma_counter_window() {
         }
     }
 }
+
+mod playfield_modes;
