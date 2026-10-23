@@ -391,9 +391,9 @@ from. The changes also show on the
 opened during the session, so **Save As** and **Save default** include them.
 
 A session started from a file you named -- `--config`, or a
-`copperline.toml` in the working directory -- leaves that file alone, as does
-a `--factory` run: their menu changes last for the session, and the
-configuration screen's **Save As** keeps them. A machine started from the
+`copperline.toml` in the working directory or beside the executable -- leaves
+that file alone, as does a `--factory` run: their menu changes last for the
+session, and the configuration screen's **Save As** keeps them. A machine started from the
 configuration screen writes to the saved default even when **Load...** brought
 another file in; the loaded file itself is never rewritten. Scheduled headless
 runs never write the default.
@@ -782,8 +782,9 @@ The Keyboard Shortcuts window.
 (machine-configuration-screen)=
 ## Machine configuration screen
 
-Starting Copperline with no machine specified -- no `./copperline.toml`, no
-`--config`, no ROM or override, and not a headless run -- opens the
+Starting Copperline with no machine specified -- no `./copperline.toml` or
+`copperline.toml` beside the executable, no `--config`, no ROM or override,
+and not a headless run -- opens the
 configuration screen instead of booting. It is also available any time from the
 menu's **Machine Configuration...** item, seeded with the running machine's
 settings.
@@ -1012,7 +1013,7 @@ The layout is:
   **Save default** saves the running configuration as the one Copperline
   starts with, including settings changed from the menu during the session:
   this screen opens showing it, and a run with no `--config`
-  and no `./copperline.toml` boots it (see [](configuration.md));
+  and no `copperline.toml` boots it (see [](configuration.md));
   `--factory` ignores it for one run. **Reset default** deletes that saved
   default after an "Are you sure?", returning Copperline to factory
   settings. The close gadget, or a click anywhere else, puts the dialog
@@ -1415,7 +1416,9 @@ of the folders above -- plus gamepad calibration, keyboard mappings, the
 default WHDLoad library and other per-user host data -- live inside it, so
 the whole installation moves as one folder. Delete `portable.txt` to return
 to the platform location above; Copperline does not move existing files in
-either direction.
+either direction. An installation can also carry its own machine: a
+`copperline.toml` in the same folder boots straight into that machine,
+skipping the configuration screen (see [](configuration.md)).
 
 (controller-ports)=
 ## Controller ports

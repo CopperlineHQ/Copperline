@@ -3,7 +3,8 @@
 //! Copperline: Amiga emulator.
 //!
 //! Usage: copperline [--config FILE] [ROM]
-//!   If no --config is given, looks for ./copperline.toml.
+//!   If no --config is given, looks for ./copperline.toml, then for a
+//!   copperline.toml beside the executable.
 //!   If no ROM is given (neither argument nor `rom =` in the config), boots
 //!   the bundled AROS open-source Kickstart replacement (see src/romsearch.rs).
 
@@ -1552,12 +1553,31 @@ fn build_placeholder_machine() -> Result<Emulator> {
 /// The saved default that menu settings changes are written through to: a
 /// session started from it (or from the built-in defaults, which a first
 /// change turns into one), but not one whose settings belong to a file the
-/// user named (`--config`, `./copperline.toml`) or that `--factory` keeps
-/// independent of the saved default.
+/// user put in place (`--config`, `./copperline.toml`, a `copperline.toml`
+/// beside the executable) or that `--factory` keeps independent of the
+/// saved default.
 fn menu_settings_file(config_path: Option<&Path>, factory: bool) -> Option<PathBuf> {
-    (config_path.is_none() && !factory && !Path::new("copperline.toml").exists())
+    (config_path.is_none() && !factory && implicit_config_file(factory).is_none())
         .then(copperline::paths::default_config_file)
         .flatten()
+}
+
+/// The configuration file a run that names no `--config` boots by itself:
+/// `./copperline.toml`, else the installation's `copperline.toml` beside the
+/// executable. Either one is a machine somebody put there to be run, so it
+/// skips the launcher like `--config` does. `--factory` passes over the
+/// installation's file, which a run picks up without naming it, the same
+/// way it passes over the saved default; the working directory's file is
+/// the caller's own choice and still wins.
+fn implicit_config_file(factory: bool) -> Option<PathBuf> {
+    let cwd = Path::new("copperline.toml");
+    if cwd.exists() {
+        Some(cwd.to_path_buf())
+    } else if factory {
+        None
+    } else {
+        copperline::paths::installation_config_file()
+    }
 }
 
 fn run_configuration_screen(
@@ -1663,7 +1683,7 @@ fn launcher_requested(cli: &CliArgs) -> bool {
         && cli.run.is_none()
         && cli.overrides.is_empty()
         && !cli.list_monitors
-        && !Path::new("copperline.toml").exists()
+        && implicit_config_file(cli.factory).is_none()
         && cli.screenshot_after.is_empty()
         && !cli.native_screenshots
         && cli.expect_screenshot.is_empty()
@@ -1816,33 +1836,40 @@ fn load_raw_config(
     factory: bool,
 ) -> Result<config::RawConfig> {
     // Resolve which file (if any) backs the config: the explicit --config
-    // path, then ./copperline.toml if present, then the configuration saved
-    // with Save default, otherwise the built-in defaults. CLI overrides
-    // layer on top of whichever it is.
-    let cwd = Path::new("copperline.toml");
+    // path, then ./copperline.toml or the installation's copperline.toml
+    // beside the executable, then the configuration saved with Save
+    // default, otherwise the built-in defaults. CLI overrides layer on top
+    // of whichever it is.
+    let implicit = explicit
+        .is_none()
+        .then(|| implicit_config_file(factory))
+        .flatten();
     // Only if it was actually saved: most installations have no default, so
     // this is normally one `stat` that finds nothing.
     let saved = (!factory)
         .then(copperline::paths::default_config_file)
         .flatten()
         .filter(|path| path.is_file());
-    let raw = load_startup_config(explicit, cwd, saved.as_deref(), overrides)?;
+    let raw = load_startup_config(explicit, implicit.as_deref(), saved.as_deref(), overrides)?;
     // Before any conversion: implicit battery-RAM paths use this policy.
     copperline::paths::adopt(raw.paths());
     Ok(raw)
 }
 
+/// Load the first configuration that applies: `explicit` (`--config`), else
+/// `implicit` (see [`implicit_config_file`]), else the `saved` default,
+/// else the built-in settings.
 fn load_startup_config(
     explicit: Option<&Path>,
-    cwd: &Path,
+    implicit: Option<&Path>,
     saved: Option<&Path>,
     overrides: &ConfigOverrides,
 ) -> Result<config::RawConfig> {
     let path = if explicit.is_some() {
         explicit
-    } else if cwd.exists() {
-        info!("loading config from {}", cwd.display());
-        Some(cwd)
+    } else if let Some(implicit) = implicit {
+        info!("loading config from {}", implicit.display());
+        Some(implicit)
     } else if let Some(saved) = saved {
         info!(
             "loading the saved default configuration {}",
@@ -1896,7 +1923,6 @@ mod tests {
     #[test]
     fn unreadable_saved_default_falls_back_and_preserves_cli_overrides() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let cwd = dir.path().join("copperline.toml");
         let missing = dir.path().join("default.toml");
         let overrides = ConfigOverrides {
             model: Some("A1200".into()),
@@ -1905,7 +1931,7 @@ mod tests {
         // A disappearing file and a path that cannot be read as a file both
         // recover, without depending on root/host permission behavior.
         for saved in [&missing, dir.path()] {
-            let raw = load_startup_config(None, &cwd, Some(saved), &overrides)?;
+            let raw = load_startup_config(None, None, Some(saved), &overrides)?;
             assert_eq!(
                 Config::try_from(raw)?.machine,
                 Some(config::MachineModel::A1200)
@@ -1918,16 +1944,42 @@ mod tests {
     #[test]
     fn invalid_saved_default_recovers_but_requested_configs_report_errors() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let cwd = dir.path().join("copperline.toml");
+        let implicit = dir.path().join("copperline.toml");
         let saved = dir.path().join("default.toml");
         std::fs::write(&saved, "[broken")?;
         let overrides = ConfigOverrides::default();
-        let raw = load_startup_config(None, &cwd, Some(&saved), &overrides)?;
+        let raw = load_startup_config(None, None, Some(&saved), &overrides)?;
         Config::try_from(raw)?;
         assert_eq!(std::fs::read_to_string(&saved)?, "[broken");
-        assert!(load_startup_config(Some(&saved), &cwd, None, &overrides).is_err());
-        std::fs::write(&cwd, "[broken")?;
-        assert!(load_startup_config(None, &cwd, Some(&saved), &overrides).is_err());
+        assert!(load_startup_config(Some(&saved), None, None, &overrides).is_err());
+        std::fs::write(&implicit, "[broken")?;
+        assert!(load_startup_config(None, Some(&implicit), Some(&saved), &overrides).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn implicit_config_sits_between_the_explicit_one_and_the_saved_default() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let explicit = dir.path().join("explicit.toml");
+        let implicit = dir.path().join("copperline.toml");
+        let saved = dir.path().join("default.toml");
+        std::fs::write(&explicit, "[machine]\nprofile = \"A600\"\n")?;
+        std::fs::write(&implicit, "[machine]\nprofile = \"A1200\"\n")?;
+        std::fs::write(&saved, "[machine]\nprofile = \"A500Plus\"\n")?;
+        let overrides = ConfigOverrides::default();
+        let machine = |explicit: Option<&Path>, implicit: Option<&Path>| -> Result<_> {
+            let raw = load_startup_config(explicit, implicit, Some(&saved), &overrides)?;
+            Ok(Config::try_from(raw)?.machine)
+        };
+        assert_eq!(
+            machine(Some(&explicit), Some(&implicit))?,
+            Some(config::MachineModel::A600)
+        );
+        assert_eq!(
+            machine(None, Some(&implicit))?,
+            Some(config::MachineModel::A1200)
+        );
+        assert_eq!(machine(None, None)?, Some(config::MachineModel::A500Plus));
         Ok(())
     }
 

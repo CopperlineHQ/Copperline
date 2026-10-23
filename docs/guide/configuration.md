@@ -1,18 +1,35 @@
 # Configuration reference
 
 Copperline is configured by a TOML file: the file passed with `--config`,
-else `./copperline.toml` if present, else the configuration saved with the
-configuration screen's **Save default** button (see [](ui.md)). Every field
-is optional; missing fields use the defaults documented here.
+else `./copperline.toml` if present, else a `copperline.toml` beside the
+Copperline executable, else the configuration saved with the configuration
+screen's **Save default** button (see [](ui.md)). Every field is optional;
+missing fields use the defaults documented here.
 `copperline.example.toml` in the repository root is a commented companion to
 this reference.
 
-`--factory` ignores the saved default and starts from Copperline's own
-settings; `--config` and `./copperline.toml` always win over it anyway. With
-no default saved, the flag changes nothing.
+A `copperline.toml` in the working directory or beside the executable
+describes a machine to run: like `--config`, it skips the configuration
+screen, and the machine starts running at once (unless the file sets
+`[emulation] power_on = false`). The copy beside the executable works
+whatever directory Copperline is started from, so an installation can
+carry its own default machine. For a downloaded `.AppImage`, put it beside
+the `.AppImage` file. On macOS, put it beside `Copperline.app`; a copy
+inside the bundle's `Contents/MacOS` folder also works, but the one beside
+the bundle wins. macOS runs a downloaded app that has not been moved out of
+its download folder from a temporary private copy, which cannot see the
+files beside it. Move `Copperline.app` with the Finder (to Applications,
+say) before relying on a file beside it. Relative paths inside it are still
+resolved against the working directory, as in any configuration file. Use
+absolute paths when Copperline might be started from somewhere else.
+
+`--factory` ignores the saved default and a `copperline.toml` beside the
+executable, and starts from Copperline's own settings. `--config` and
+`./copperline.toml` always win over it anyway. With neither default
+present, the flag changes nothing.
 
 Settings changed from the menu during a session that started without
-`--config`, `./copperline.toml` or `--factory` are written into the saved
+`--config`, a `copperline.toml` or `--factory` are written into the saved
 default as they change (only the changed keys; see
 [Settings the menu remembers](ui.md#menu-settings-persist)).
 
@@ -22,7 +39,7 @@ the saved file untouched. A saved default that parses but no longer
 validates -- a disk image that moved, a drive not yet mounted -- opens the
 configuration screen on the built-in settings with the reason on its status
 line, so it can be fixed before **Save default** replaces it. Errors in
-`--config` or `./copperline.toml` still report the requested configuration
+`--config` or a `copperline.toml` still report the requested configuration
 problem.
 
 Configuration parsing rejects unknown keys, invalid CPU or chipset names,

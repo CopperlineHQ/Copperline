@@ -1,7 +1,9 @@
 # Copperline configuration. Copy this to `copperline.toml` in the working
-# directory, or pass it explicitly with `--config path/to/file.toml`. Any
-# field can be omitted; a missing field takes the default the comments
-# below give. docs/guide/configuration.md is the full reference.
+# directory or beside the Copperline executable or `Copperline.app` (either
+# boots straight into the machine, skipping the launcher), or pass it
+# explicitly with `--config path/to/file.toml`. Any field can be omitted; a
+# missing field takes the default the comments below give.
+# docs/guide/configuration.md is the full reference.
 
 # Kickstart ROM image: 512 KiB, or a 256 KiB Kickstart 1.x part (the A1000
 # profile takes its 64 KiB bootstrap ROM here instead). Byte-swapped EPROM

@@ -102,9 +102,9 @@ configuration says. Arguments:
 | `program` | The hunk executable on the host (required). Its directory is mounted in the guest. |
 | `args` | Command-line arguments for the program (`--run-args`): a string, or an array whose elements are each quoted for the AmigaDOS command line. |
 | `copperline` | The emulator binary. Default: `COPPERLINE_BIN`, then a `copperline` next to `copperline-ctl`, then PATH. |
-| `config` | A TOML configuration file (`--config`). If omitted, Copperline checks `copperline.toml` in its working directory, then the launcher's saved default, then built-in settings. |
+| `config` | A TOML configuration file (`--config`). If omitted, Copperline checks `copperline.toml` in its working directory, then beside its executable, then the launcher's saved default, then built-in settings. |
 | `rom` | A Kickstart ROM supplied as Copperline's positional ROM argument. If omitted, the selected configuration's ROM is used, falling back to bundled AROS. |
-| `factory` | Ignore the saved default configuration (`--factory`). |
+| `factory` | Ignore the saved default configuration and a `copperline.toml` beside the executable (`--factory`). |
 | `model`, `chipset`, `cpu`, `chip`, `fast`, `slow` | The matching `copperline` flags. |
 | `memoryFill` | `--ram-init`: `zero`, `random[:SEED]`, `pattern:WORD`, or `0xWORD` for uninitialized-read testing. |
 | `fpu` | Fit or omit an FPU (`--fpu` / `--no-fpu`). |
