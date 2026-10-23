@@ -3644,6 +3644,7 @@ fn status_value(emu: &Emulator, ctx: &SessionCtx) -> Value {
         "retired_instructions": emu.retired_instructions(),
         "host_busy_ms": perf.busy.as_secs_f64() * 1000.0,
         "pacer_slips": perf.pacer_slips,
+        "jit_mhz": perf.jit_mhz,
         "audio_lead_ms": audio.output_lead_seconds * 1000.0,
         "audio_underrun_frames": audio.callback_underrun_frames,
     })

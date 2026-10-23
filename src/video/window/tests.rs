@@ -11929,6 +11929,7 @@ fn perf_overlay_lines_format_one_data_point_per_line() {
         audio_lead_ms: 148.3,
         audio_underruns_per_s: 0.0,
         pacer_slips: 2,
+        jit_mhz: None,
     };
     assert_eq!(
         super::perf_overlay_lines(&r),
@@ -11942,6 +11943,19 @@ fn perf_overlay_lines_format_one_data_point_per_line() {
             "slip 2",
         ]
     );
+}
+
+#[test]
+fn perf_overlay_shows_the_fastest_mode_jit_clock() {
+    // `[cpu] speed = "fastest"` adds the governor's effective clock as a
+    // last line; the fixed clock (above) prints none.
+    let r = super::PerfReadout {
+        jit_mhz: Some(212.4),
+        ..Default::default()
+    };
+    let lines = super::perf_overlay_lines(&r);
+    assert_eq!(lines.len(), 8);
+    assert_eq!(lines.last().map(String::as_str), Some("cpu 212 MHz"));
 }
 
 /// The classic overlay anchor: the whole display region, what every

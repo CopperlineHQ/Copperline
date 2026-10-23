@@ -4,7 +4,11 @@
 //! analogue (or vice versa) would need per-flavour branching, and none of
 //! the core axes below have that split.
 
-use super::{annotate, apply_drive_sounds, clamp_chip_mb, set_str, table, DriveSound, MapOutcome};
+use super::{
+    addressing_note, annotate, apply_drive_sounds, can_fit_fpu, clamp_chip_mb, cpu_part,
+    leading_number, parse_bool, parse_cpu_type, set_cpu_fpu, set_str, table, DriveSound,
+    MapOutcome, CPU_CORES,
+};
 use crate::parse::Entry;
 use crate::report::ImportReport;
 use std::collections::HashMap;
@@ -21,9 +25,8 @@ pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
     let by_key = |k: &str| entries.iter().rev().find(|e| e.key == k);
     // Several settings have more than one spelling in the wild: WinUAE's
     // own name and the one Amiberry actually writes. Real Amiberry configs
-    // carry `rtc=`/`cpu_model=`, not the `cs_rtc=`/`cpu_type=` this mapper
-    // was first written against, so both are accepted and the first present
-    // wins.
+    // carry `rtc=`, not the `cs_rtc=` this mapper was first written
+    // against, so both are accepted and the first present wins.
     let by_any = |ks: &[&str]| ks.iter().find_map(|k| by_key(k));
 
     // --- chipset -----------------------------------------------------
@@ -61,21 +64,8 @@ pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
         }
     }
 
-    // --- CPU -------------------------------------------------------------
-    let mut cpu_model = String::new();
-    if let Some(e) = by_any(&["cpu_type", "cpu_model"]) {
-        seen.insert(&e.key, ());
-        // WinUAE spells e.g. "68020", "68020i" (no MMU), "68030mmu",
-        // "68040", "68060" -- Copperline only cares about the model digits.
-        let digits: String = e.value.chars().take_while(|c| c.is_ascii_digit()).collect();
-        let known = ["68000", "68010", "68020", "68030", "68040", "68060"];
-        if known.contains(&digits.as_str()) {
-            set_str(&mut doc, &["cpu"], "model", &digits);
-            cpu_model = digits;
-        } else {
-            report.unsupported(&e.key, &e.value, "unrecognized CPU model");
-        }
-    }
+    // --- CPU, FPU and MMU -------------------------------------------------
+    let cpu_model = map_cpu(&by_key, &mut seen, &mut doc, &mut report);
     if let Some(e) = by_key("cpu_compatible") {
         seen.insert(&e.key, ());
         report.approximated(
@@ -109,13 +99,74 @@ pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
         // Only the 68060 dropped instructions from silicon, so Copperline
         // rejects `[cpu] unimplemented` on anything else. WinUAE writes the
         // key regardless of the configured CPU, so emitting it unguarded
-        // made every non-060 config fail validation.
-        if cpu_model == "68060" {
+        // made every non-060 config fail validation. The 68EC060 is the
+        // same 060 execution unit, with the same traps.
+        if matches!(cpu_model, Some("68060" | "68EC060")) {
             match parse_bool(&e.value) {
                 Some(true) => set_str(&mut doc, &["cpu"], "unimplemented", "trap"),
                 Some(false) => set_str(&mut doc, &["cpu"], "unimplemented", "native"),
                 None => report.unsupported(&e.key, &e.value, "unrecognized boolean"),
             }
+        }
+    }
+
+    // --- JIT and "fastest possible" -------------------------------------
+    // WinUAE's JIT is on whenever its translation cache has a size.
+    // Copperline's batch/trace JIT is the nearest thing and, like WinUAE's,
+    // needs a 68020 or later, the EC parts included; "fastest possible"
+    // (`cpu_speed=max`) then becomes the host-adaptive JIT clock.
+    let jit_capable = cpu_model.is_some_and(|m| !matches!(m, "68000" | "68010"));
+    let mut jit = false;
+    if let Some(e) = by_key("cachesize") {
+        seen.insert(&e.key, ());
+        match e.value.trim().parse::<u32>() {
+            Ok(0) => {}
+            Ok(_) if jit_capable => {
+                table(&mut doc, &["cpu"])["jit"] = toml_edit::value(true);
+                jit = true;
+                report.approximated(
+                    &e.key,
+                    &e.value,
+                    "WinUAE's JIT compiler became Copperline's batch/trace [cpu] jit \
+                     (accelerator-style timing, not cycle-exact); the translation-cache \
+                     size has no equivalent",
+                );
+            }
+            Ok(_) => report.unsupported(
+                &e.key,
+                &e.value,
+                "Copperline's [cpu] jit needs a 68020 or later",
+            ),
+            Err(_) => report.unsupported(&e.key, &e.value, "unrecognized JIT cache size"),
+        }
+    }
+    if let Some(e) = by_key("cpu_speed") {
+        seen.insert(&e.key, ());
+        match e.value.trim().to_ascii_lowercase().as_str() {
+            // Real speed is Copperline's fixed clock, the default.
+            "real" => {}
+            "max" if jit => {
+                set_str(&mut doc, &["cpu"], "speed", "fastest");
+                report.approximated(
+                    &e.key,
+                    &e.value,
+                    "\"fastest possible\" became [cpu] speed = \"fastest\": the JIT clock \
+                     adapts to the host while the window paces to real time (not \
+                     reproducible); cpu_throttle has no equivalent",
+                );
+            }
+            "max" => report.unsupported(
+                &e.key,
+                &e.value,
+                "\"fastest possible\" without WinUAE's JIT has no equivalent: Copperline's \
+                 [cpu] speed = \"fastest\" adapts only the JIT's clock (cachesize > 0 on a \
+                 68020 or later)",
+            ),
+            _ => report.unsupported(
+                &e.key,
+                &e.value,
+                "unrecognized CPU speed; expected max or real",
+            ),
         }
     }
 
@@ -387,14 +438,6 @@ pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
             ),
             None => report.unsupported(&e.key, &e.value, "unrecognized boolean"),
         }
-    }
-
-    // --- FPU ------------------------------------------------------------
-    if let Some(e) = by_key("fpu_model") {
-        seen.insert(&e.key, ());
-        let lower = e.value.trim().to_ascii_lowercase();
-        let has_fpu = !(lower.is_empty() || lower == "0" || lower == "none");
-        table(&mut doc, &["cpu"])["fpu"] = toml_edit::value(has_fpu);
     }
 
     // --- Audio ------------------------------------------------------
@@ -1318,15 +1361,6 @@ pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
             "no master output-volume field ([audio] only has floppy_sounds_volume)",
         ),
         (
-            "cpu_speed",
-            "no equivalent: this is a baseline wall-clock throttle (max = bypass pacing \
-             entirely, real = pin to authentic 68000 timing), not a clock-rate override \
-             ([cpu] clock_mhz is a different thing -- see below); Copperline's [emulation] \
-             warp_speed only sets the ceiling of an on-demand turbo toggle that's off by \
-             default, so mapping to it would misrepresent \"always run flat out\" as a \
-             feature the user has to switch on by hand",
-        ),
-        (
             "uaeserial",
             "selects UAE's own internal custom serial.device implementation, not a host \
              wiring choice; there's nothing in [serial] this corresponds to",
@@ -1388,14 +1422,174 @@ fn bytes_to_size(bytes: u64) -> String {
     }
 }
 
-/// WinUAE/Amiberry booleans are spelled `true`/`false`, `yes`/`no`, or
-/// `1`/`0` depending on the key's age.
-fn parse_bool(value: &str) -> Option<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "true" | "yes" | "1" => Some(true),
-        "false" | "no" | "0" => Some(false),
-        _ => None,
+/// Map WinUAE/Amiberry's CPU keys to `[cpu] model` and `fpu`, returning the
+/// Copperline model chosen (`None` when the source names no usable core).
+/// WinUAE has no EC or LC CPU models: the part is spelled across several
+/// keys. Verified against WinUAE's and Amiberry's cfgfile.cpp (the writer's
+/// "do not reorder" CPU block and the parser's `cpu_model`, `fpu_model`,
+/// `mmu_model` and `cpu_type` cases) and their CPU panels (WinUAE's
+/// od-win32/win32gui.cpp, Amiberry's src/osdep/imgui/cpu.cpp):
+///
+/// - `cpu_model` is the core, read as its leading digits (68000-68060).
+/// - `cpu_24bit_addressing=true` brings out only 24 address lines; on a
+///   68020 that is the 68EC020. Both GUIs offer it up to the 68030, and
+///   WinUAE forces it off on the 68040/68060 (main.cpp `fixup_cpu`).
+/// - `fpu_model` (68881, 68882, 68040, 68060) is written only when an FPU is
+///   fitted, and reading `cpu_model` resets it, so after a `cpu_model` its
+///   absence is "no FPU": the 68LC040/68LC060 on a 68040/68060 core.
+/// - `mmu_model` is written only while MMU emulation is on: the core's own
+///   number for the full MMU, or `68ec030`/`68ec040`/`68ec060` for the GUIs'
+///   "EC" MMU, which keeps only the transparent translation registers (the
+///   68EC030's access control unit, the 68EC040/68EC060). With MMU
+///   emulation off (the GUIs' "None", their speed default) the core is
+///   still the full part -- WinUAE takes its MMU register writes and never
+///   translates -- so it maps to the full Copperline model.
+/// - Both emulators write the old-style `cpu_type` first, but it is lossy
+///   (a 68030 is written as "68020", a 68060 as "68040"; only "68ec020" and
+///   a "/68881" suffix say anything more), so it is read only when
+///   `cpu_model` is absent.
+fn map_cpu<'a>(
+    by_key: &dyn Fn(&str) -> Option<&'a Entry>,
+    seen: &mut HashMap<&'a str, ()>,
+    doc: &mut DocumentMut,
+    report: &mut ImportReport,
+) -> Option<&'static str> {
+    for k in [
+        "cpu_model",
+        "cpu_type",
+        "fpu_model",
+        "mmu_model",
+        "cpu_24bit_addressing",
+    ] {
+        if let Some(e) = by_key(k) {
+            seen.insert(&e.key, ());
+        }
     }
+    let fpu_entry = by_key("fpu_model");
+    let fpu_named = fpu_entry.map(|e| {
+        let lower = e.value.trim().to_ascii_lowercase();
+        !(lower.is_empty() || lower == "0" || lower == "none")
+    });
+
+    // (core, 24-bit addressing if the key says, FPU fitted)
+    let core = match (by_key("cpu_model"), by_key("cpu_type")) {
+        (Some(e), _) => match leading_number(&e.value).filter(|n| CPU_CORES.contains(n)) {
+            Some(n) => Some((n, None, false)),
+            None => {
+                report.unsupported(
+                    &e.key,
+                    &e.value,
+                    "unrecognized CPU model: WinUAE reads only the core's number (68000 to \
+                     68060), and an EC part is that core plus mmu_model=68ec0x0 or \
+                     cpu_24bit_addressing",
+                );
+                None
+            }
+        },
+        (None, Some(e)) => {
+            let core = parse_cpu_type(&e.value);
+            if core.is_none() {
+                report.unsupported(&e.key, &e.value, "unrecognized CPU model");
+            }
+            core
+        }
+        (None, None) => None,
+    };
+    let Some((core, implied_24bit, implied_fpu)) = core else {
+        // With no core, "no FPU" still holds for whatever CPU the machine
+        // has, but a fitted one may not suit it (the default 68000 takes
+        // none).
+        if fpu_named == Some(false) {
+            table(doc, &["cpu"])["fpu"] = toml_edit::value(false);
+        }
+        let mut orphans = vec![by_key("mmu_model"), by_key("cpu_24bit_addressing")];
+        if fpu_named == Some(true) {
+            orphans.push(fpu_entry);
+        }
+        for e in orphans.into_iter().flatten() {
+            report.unsupported(
+                &e.key,
+                &e.value,
+                "the source config names no CPU model to apply this to",
+            );
+        }
+        return None;
+    };
+
+    let addr24 = by_key("cpu_24bit_addressing").and_then(|e| match parse_bool(&e.value) {
+        Some(on) => Some((e, on)),
+        None => {
+            report.unsupported(&e.key, &e.value, "unrecognized boolean");
+            None
+        }
+    });
+    let narrow = addr24
+        .map(|(_, on)| on)
+        .or(implied_24bit)
+        .unwrap_or(core < 68020);
+    let fpu = fpu_named.unwrap_or(implied_fpu);
+
+    let mmu_entry = by_key("mmu_model");
+    let mut mmu_ec = false;
+    if let Some(e) = mmu_entry {
+        // As WinUAE reads it: "ec" anywhere selects the EC MMU, and the
+        // number after it is the core less 68000 ("68ec030" is 68030).
+        let lower = e.value.trim().to_ascii_lowercase();
+        let (ec, n) = match lower.find("ec") {
+            Some(at) => (true, leading_number(&lower[at + 2..]).map(|n| 68000 + n)),
+            None => (false, leading_number(&lower)),
+        };
+        match n {
+            Some(0) if !ec => {}
+            Some(n) if n != core => report.unsupported(
+                &e.key,
+                &e.value,
+                "names a different CPU from cpu_model; WinUAE pairs a CPU only with its own MMU",
+            ),
+            Some(_) if core < 68030 => report.unsupported(
+                &e.key,
+                &e.value,
+                "WinUAE emulates an MMU only on the 68030, 68040 and 68060 (and Copperline does \
+                 not model the 68020's external 68851)",
+            ),
+            Some(_) => mmu_ec = ec,
+            None => report.unsupported(&e.key, &e.value, "unrecognized MMU model"),
+        }
+    }
+
+    let model = cpu_part(core, narrow, !mmu_ec, fpu);
+    set_str(doc, &["cpu"], "model", model);
+
+    if let Some((e, on)) = addr24 {
+        if let Some(note) = addressing_note(core, on) {
+            report.approximated(&e.key, &e.value, note);
+        }
+    }
+    if let Some(e) = mmu_entry.filter(|_| mmu_ec && fpu && core >= 68040) {
+        report.approximated(
+            &e.key,
+            &e.value,
+            format!(
+                "no real {core} has its FPU without the MMU (the 68EC0{n} has neither); \
+                 imported as the full {model} with its FPU, whose MMU WinUAE's EC setting had \
+                 masked off",
+                n = core % 100
+            ),
+        );
+    }
+
+    // An EC MMU with an FPU stays the full part above, so only the
+    // 68000/68010 can be asked for an FPU they cannot take.
+    if let Some(e) = fpu_entry.filter(|_| fpu && !can_fit_fpu(model)) {
+        report.unsupported(
+            &e.key,
+            &e.value,
+            "a 68000/68010 has no coprocessor interface for a 68881/68882 (WinUAE fits one \
+             outside its compatible CPU modes; Copperline cannot)",
+        );
+    }
+    set_cpu_fpu(doc, model, fpu, fpu_entry.is_some());
+    Some(model)
 }
 
 /// One `[[filesys]]` mount read out of a `filesystem2`/`uaehf` line.
@@ -1484,6 +1678,190 @@ mod tests {
         map(&entries, std::path::Path::new("test.uae"))
             .doc
             .to_string()
+    }
+
+    #[test]
+    fn jit_and_fastest_possible_map_to_the_adaptive_jit_clock() {
+        let out = convert("cpu_type=68030\ncachesize=8192\ncpu_speed=max\n");
+        assert!(out.contains("jit = true"), "{out}");
+        assert!(out.contains(r#"speed = "fastest""#), "{out}");
+        // Real speed is the default fixed clock: nothing to write.
+        let out = convert("cpu_type=68030\ncachesize=8192\ncpu_speed=real\n");
+        assert!(out.contains("jit = true"), "{out}");
+        assert!(!out.contains("speed ="), "{out}");
+        // Fastest possible without the JIT, or the JIT on a 68000, has no
+        // Copperline equivalent: reported, never emitted as an invalid
+        // config.
+        let out = convert("cpu_type=68030\ncachesize=0\ncpu_speed=max\n");
+        assert!(!out.contains("jit ="), "{out}");
+        assert!(!out.contains("speed ="), "{out}");
+        let out = convert("cpu_type=68000\ncachesize=8192\ncpu_speed=max\n");
+        assert!(!out.contains("jit ="), "{out}");
+        assert!(!out.contains("speed ="), "{out}");
+    }
+
+    /// `convert`, then checked the way Copperline loads a config, so a
+    /// mapping can never hand the user a file it would refuse.
+    fn convert_valid(text: &str) -> String {
+        let out = convert(text);
+        let raw = copperline::config::RawConfig::parse(&out).expect("valid TOML");
+        if let Err(e) = copperline::config::Config::try_from(raw) {
+            panic!("{out}\nis refused: {e:#}");
+        }
+        out
+    }
+
+    fn flagged_keys(text: &str) -> Vec<String> {
+        let entries = crate::parse::parse(text);
+        map(&entries, std::path::Path::new("test.uae"))
+            .report
+            .flagged
+            .into_iter()
+            .map(|f| f.source_key)
+            .collect()
+    }
+
+    #[test]
+    fn ec_parts_come_from_the_mmu_and_addressing_keys() {
+        // The CPU lines exactly as WinUAE/Amiberry write them: the lossy
+        // cpu_type first, then cpu_model, an fpu_model only when one is
+        // fitted, an mmu_model only with MMU emulation on.
+        let out = convert_valid(
+            "cpu_type=68ec020\ncpu_model=68020\ncpu_compatible=true\n\
+             cpu_24bit_addressing=true\n",
+        );
+        assert!(out.contains(r#"model = "68EC020""#), "{out}");
+        let out = convert_valid(
+            "cpu_type=68020\ncpu_model=68030\nmmu_model=68ec030\n\
+             cpu_24bit_addressing=false\n",
+        );
+        assert!(out.contains(r#"model = "68EC030""#), "{out}");
+        // The 68EC030 keeps its coprocessor interface.
+        let out = convert_valid(
+            "cpu_type=68020/68881\ncpu_model=68030\nfpu_model=68882\nmmu_model=68ec030\n",
+        );
+        assert!(out.contains(r#"model = "68EC030""#), "{out}");
+        assert!(out.contains("fpu = true"), "{out}");
+        for core in ["68040", "68060"] {
+            let out = convert_valid(&format!(
+                "cpu_type=68040\ncpu_model={core}\nmmu_model=68ec0{}\n\
+                 cpu_24bit_addressing=false\n",
+                &core[3..]
+            ));
+            let ec = format!("68EC{}", &core[2..]);
+            assert!(out.contains(&format!(r#"model = "{ec}""#)), "{out}");
+            assert!(!out.contains("fpu ="), "{out}");
+        }
+        // The full MMU, or none emulated, is the full part.
+        let out = convert_valid("cpu_model=68030\nmmu_model=68030\n");
+        assert!(out.contains(r#"model = "68030""#), "{out}");
+        let out = convert_valid("cpu_model=68030\n");
+        assert!(out.contains(r#"model = "68030""#), "{out}");
+    }
+
+    #[test]
+    fn a_68040_or_68060_with_no_fpu_model_is_the_lc_part() {
+        // WinUAE writes fpu_model only when one is fitted, and reading
+        // cpu_model clears it: its absence is the 68LC040/68LC060.
+        for core in ["68040", "68060"] {
+            let out = convert_valid(&format!("cpu_model={core}\nmmu_model={core}\n"));
+            assert!(out.contains(&format!(r#"model = "{core}""#)), "{out}");
+            assert!(out.contains("fpu = false"), "{out}");
+            let out = convert_valid(&format!("cpu_model={core}\nfpu_model={core}\n"));
+            assert!(out.contains("fpu = true"), "{out}");
+        }
+        // The old-style cpu_type alone brings the on-chip FPU along.
+        let out = convert_valid("cpu_type=68040\n");
+        assert!(out.contains(r#"model = "68040""#), "{out}");
+        assert!(!out.contains("fpu = false"), "{out}");
+    }
+
+    #[test]
+    fn the_lossy_cpu_type_line_never_overrides_cpu_model() {
+        // WinUAE writes a 68030 as cpu_type=68020 and a 68060 as
+        // cpu_type=68040 just before the real cpu_model.
+        let out = convert_valid("cpu_type=68020\ncpu_model=68030\n");
+        assert!(out.contains(r#"model = "68030""#), "{out}");
+        let out = convert_valid("cpu_type=68040\ncpu_model=68060\nfpu_model=68060\n");
+        assert!(out.contains(r#"model = "68060""#), "{out}");
+        // On its own it still says what it can.
+        let out = convert_valid("cpu_type=68ec020/68881\n");
+        assert!(out.contains(r#"model = "68EC020""#), "{out}");
+        assert!(out.contains("fpu = true"), "{out}");
+        let out = convert_valid("cpu_type=68ec020\n");
+        assert!(out.contains(r#"model = "68EC020""#), "{out}");
+    }
+
+    #[test]
+    fn an_ec_mmu_beside_an_fpu_keeps_the_full_part() {
+        // No real 68040/68060 has the FPU without the MMU, and Copperline
+        // refuses an FPU on the 68EC040/68EC060: the full part keeps the
+        // FPU, and the report says so.
+        for core in ["68040", "68060"] {
+            let text = format!(
+                "cpu_model={core}\nfpu_model={core}\nmmu_model=68ec0{}\n",
+                &core[3..]
+            );
+            let out = convert_valid(&text);
+            assert!(out.contains(&format!(r#"model = "{core}""#)), "{out}");
+            assert_eq!(flagged_keys(&text), ["mmu_model"]);
+        }
+    }
+
+    #[test]
+    fn cpu_combinations_copperline_cannot_take_are_reported_not_emitted() {
+        // A 6888x on a 68000/68010 is a WinUAE extension.
+        let text = "cpu_model=68000\nfpu_model=68881\ncpu_24bit_addressing=true\n";
+        let out = convert_valid(text);
+        assert!(!out.contains("fpu ="), "{out}");
+        assert_eq!(flagged_keys(text), ["fpu_model"]);
+        // Addressing the chip does not have is approximated away.
+        let text = "cpu_model=68000\ncpu_24bit_addressing=false\n";
+        assert!(convert_valid(text).contains(r#"model = "68000""#));
+        assert_eq!(flagged_keys(text), ["cpu_24bit_addressing"]);
+        let text = "cpu_model=68030\ncpu_24bit_addressing=true\n";
+        assert!(convert_valid(text).contains(r#"model = "68030""#));
+        assert_eq!(flagged_keys(text), ["cpu_24bit_addressing"]);
+        // ...but WinUAE itself drops it on a 68040/68060.
+        assert!(
+            flagged_keys("cpu_model=68040\nfpu_model=68040\ncpu_24bit_addressing=true\n")
+                .is_empty()
+        );
+        // An MMU on the wrong core, or below the 68030.
+        let text = "cpu_model=68030\nmmu_model=68ec040\n";
+        assert!(convert_valid(text).contains(r#"model = "68030""#));
+        assert_eq!(flagged_keys(text), ["mmu_model"]);
+        let text = "cpu_model=68020\nmmu_model=68020\n";
+        assert!(convert_valid(text).contains(r#"model = "68020""#));
+        assert_eq!(flagged_keys(text), ["mmu_model"]);
+        // WinUAE reads cpu_model as a number, so an EC spelling there is
+        // not a CPU it would run.
+        let text = "cpu_model=68EC030\n";
+        assert!(!convert_valid(text).contains("model ="));
+        assert_eq!(flagged_keys(text), ["cpu_model"]);
+        // With no CPU named, a fitted FPU has nothing to check against
+        // (the default machine's 68000 takes none); "no FPU" always holds.
+        let text = "fpu_model=68881\nmmu_model=68ec030\n";
+        assert!(!convert_valid(text).contains("fpu ="));
+        assert_eq!(flagged_keys(text), ["mmu_model", "fpu_model"]);
+        assert!(convert_valid("fpu_model=0\n").contains("fpu = false"));
+    }
+
+    #[test]
+    fn the_ec_parts_take_the_jit_and_the_68ec060_its_trap_policy() {
+        let out =
+            convert_valid("cpu_model=68030\nmmu_model=68ec030\ncachesize=8192\ncpu_speed=max\n");
+        assert!(out.contains("jit = true"), "{out}");
+        assert!(out.contains(r#"speed = "fastest""#), "{out}");
+        let out = convert_valid("cpu_model=68020\ncpu_24bit_addressing=true\ncachesize=8192\n");
+        assert!(out.contains(r#"model = "68EC020""#), "{out}");
+        assert!(out.contains("jit = true"), "{out}");
+        // The 68EC060 is a 68060 for the unimplemented-instruction policy;
+        // the 68EC040 has none to set.
+        let out = convert_valid("cpu_model=68060\nmmu_model=68ec060\ncpu_no_unimplemented=false\n");
+        assert!(out.contains(r#"unimplemented = "native""#), "{out}");
+        let out = convert_valid("cpu_model=68040\nmmu_model=68ec040\ncpu_no_unimplemented=true\n");
+        assert!(!out.contains("unimplemented ="), "{out}");
     }
 
     #[test]

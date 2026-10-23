@@ -132,6 +132,12 @@ impl MachineSetup {
             F::Video => video_name(self.video).to_string(),
             F::Cpu => cpu_name(self.cpu).to_string(),
             F::Clock => format_mhz(self.clock_mhz),
+            F::JitSpeed => if self.jit_fastest {
+                "Fastest"
+            } else {
+                "Fixed clock"
+            }
+            .to_string(),
             F::ChipRam => size_label(self.chip_ram),
             F::FastRam => size_label(self.fast_ram),
             F::SlowRam => size_label(self.slow_ram),
@@ -598,6 +604,7 @@ impl MachineSetup {
                 }
             }
             F::Clock => self.clock_mhz = cycle_floats(&CLOCK_PRESETS, self.clock_mhz, forward),
+            F::JitSpeed => self.jit_fastest = !self.jit_fastest,
             F::ChipRam => self.chip_ram = cycle_slice(&CHIP_PRESETS, self.chip_ram, forward),
             F::FastRam => self.fast_ram = cycle_nearest(&FAST_PRESETS, self.fast_ram, forward),
             F::SlowRam => self.slow_ram = cycle_nearest(&SLOW_PRESETS, self.slow_ram, forward),

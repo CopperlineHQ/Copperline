@@ -791,6 +791,9 @@ struct PerfReadout {
     /// hopelessly behind real time and dropped emulated time. Frames are
     /// never skipped in paced mode; this counts the only case where time is.
     pacer_slips: u32,
+    /// The effective JIT clock under `[cpu] speed = "fastest"`, in MHz (a
+    /// level, sampled as is); `None` at a fixed clock, which prints nothing.
+    jit_mhz: Option<f64>,
 }
 
 fn perf_readout(
@@ -828,6 +831,7 @@ fn perf_readout(
         audio_lead_ms,
         audio_underruns_per_s: underruns / dt,
         pacer_slips,
+        jit_mhz: None,
     }
 }
 
@@ -842,6 +846,9 @@ fn perf_overlay_lines(r: &PerfReadout) -> Vec<String> {
         format!("xrun {:.0}", r.audio_underruns_per_s),
         format!("slip {}", r.pacer_slips),
     ]
+    .into_iter()
+    .chain(r.jit_mhz.map(|mhz| format!("cpu {mhz:.0} MHz")))
+    .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -6063,6 +6070,10 @@ impl ApplicationHandler for App {
                                         )
                                     })
                                     .transpose();
+                                // A frame presented here can block the main
+                                // thread on vsync; the fastest-mode governor
+                                // must not mistake that for frontend load.
+                                let present_started = Instant::now();
                                 let result = match &mut capture {
                                     Ok(capture) => present_job(
                                         gpu,
@@ -6073,6 +6084,7 @@ impl ApplicationHandler for App {
                                     ),
                                     Err(_) => present_job(gpu, Some(&window), &job, after, None),
                                 };
+                                self.emu.note_frontend_wait(present_started.elapsed());
                                 if let Err(e) = &result {
                                     log_present_error(e);
                                 }

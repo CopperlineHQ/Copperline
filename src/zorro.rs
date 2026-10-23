@@ -926,6 +926,15 @@ impl ZorroChain {
             .map(|&(base, len, idx)| (base, len, idx))
     }
 
+    /// The configured RAM window holding `addr` as (base, len, board
+    /// index), for the CPU's JIT fastmem window.
+    pub fn ram_region_containing(&self, addr: u32) -> Option<(u32, u32, usize)> {
+        self.regions
+            .iter()
+            .copied()
+            .find(|&(base, len, _)| addr.wrapping_sub(base) < len)
+    }
+
     /// Configured RAM windows as (base, len) pairs, for the debugger's
     /// memory hunt.
     pub fn ram_regions(&self) -> Vec<(u32, u32)> {

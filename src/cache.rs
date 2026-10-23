@@ -17,7 +17,10 @@
 //! such a write: the synchronous device-access path via
 //! `DeviceHost::touched_memory`, and tick-path DMA via
 //! `DeviceHost::wrote_memory`/`Bus::devices_wrote_memory`, consumed at
-//! instruction boundaries and before any data-cache read hit; see cpu.rs.) We do not model burst timing (IBE/DBE
+//! instruction boundaries and before any data-cache read hit; see cpu.rs.)
+//! Under `[cpu] jit` the core also reads and writes the fastmem window
+//! directly, so neither cache holds lines inside it while the core has it
+//! (`CpuBus::keep_caches_out_of_window`). We do not model burst timing (IBE/DBE
 //! are stored but inert on the 030).
 //!
 //! A hit serves the access with no bus cycle, which is the real effect that
@@ -116,6 +119,20 @@ impl LongwordCache {
     /// Invalidate everything (CACR clear-cache, CINV/CPUSH, reset).
     pub fn invalidate_all(&mut self) {
         self.valid.fill(false);
+    }
+
+    /// Invalidate every entry whose longword starts inside
+    /// `base..base + len`.
+    pub fn invalidate_range(&mut self, base: u32, len: u32) {
+        for idx in 0..self.valid.len() {
+            if !self.valid[idx] {
+                continue;
+            }
+            let addr = (self.tags[idx] << self.tag_shift) | ((idx as u32) << 2);
+            if addr.wrapping_sub(base) < len {
+                self.valid[idx] = false;
+            }
+        }
     }
 }
 
@@ -221,6 +238,12 @@ impl CpuCache {
 
     pub fn clear_all(&mut self) {
         self.cache.invalidate_all();
+    }
+
+    /// Drop every line holding memory inside `base..base + len` (a
+    /// longword-aligned range), whatever the enable and freeze bits say.
+    pub fn clear_range(&mut self, base: u32, len: u32) {
+        self.cache.invalidate_range(base, len);
     }
 }
 
@@ -332,5 +355,29 @@ mod tests {
         c.clear_entry_by_index(0x1000);
         assert_eq!(c.read(0x1000, 4), None);
         assert_eq!(c.read(0x1004, 4), Some(2));
+    }
+
+    #[test]
+    fn clear_range_drops_only_lines_inside_the_range() {
+        let mut c = CpuCache::new(LINES_040);
+        c.enabled = true;
+        // Each address sits on its own line index, so no fill evicts another.
+        c.fill_after_miss(0x0020_0000, 4, |_| 1); // range start
+        c.fill_after_miss(0x0020_FFFC, 4, |_| 2); // range end
+        c.fill_after_miss(0x001F_FFF8, 4, |_| 3); // just below
+        c.fill_after_miss(0x0021_0004, 4, |_| 4); // just above
+        c.fill_after_miss(0x00F8_0010, 4, |_| 5); // elsewhere (ROM)
+        c.clear_range(0x0020_0000, 0x1_0000);
+        assert_eq!(c.read(0x0020_0000, 4), None);
+        assert_eq!(c.read(0x0020_FFFC, 4), None);
+        assert_eq!(c.read(0x001F_FFF8, 4), Some(3));
+        assert_eq!(c.read(0x0021_0004, 4), Some(4));
+        assert_eq!(c.read(0x00F8_0010, 4), Some(5));
+        // A line at the top of the 32-bit space keeps its full tag.
+        c.fill_after_miss(0xFFFF_FFF4, 4, |_| 6);
+        c.clear_range(0x0000_0000, 0x1_0000);
+        assert_eq!(c.read(0xFFFF_FFF4, 4), Some(6));
+        c.clear_range(0xFFFF_0000, 0x1_0000);
+        assert_eq!(c.read(0xFFFF_FFF4, 4), None);
     }
 }

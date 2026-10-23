@@ -42,7 +42,8 @@ annotated:
 
 | UAE setting | Copperline equivalent |
 |---|---|
-| Model and CPU / FPU | `[machine] profile`, `[cpu]` model and FPU |
+| Model, CPU and FPU, including the EC and LC parts (`cpu_model` with `cpu_24bit_addressing`, `fpu_model` and `mmu_model`) | `[machine] profile`, `[cpu]` model and FPU |
+| JIT (`cachesize` > 0, 68020+) and "fastest possible" (`cpu_speed=max`) | `[cpu] jit`, `[cpu] speed = "fastest"` (approximated) |
 | Memory sizes (Chip, Slow, Fast, Z3, Motherboard) | `[memory]` sections |
 | Chipset revision, PAL/NTSC | `[chipset]` revision and video |
 | Kickstart ROM paths | `rom`, `extended_rom` |
@@ -62,9 +63,24 @@ annotated:
 | Fullscreen and status bar | `[display]` |
 
 The table describes the WinUAE/Amiberry mapper. The FS-UAE mapper covers the
-model, CPU, memory, chipset and video standard, Kickstart, floppy drives and
-their sounds (`floppy_drive_N_sounds`), and hard drives; everything else in an
-FS-UAE file is listed as not translated.
+model, CPU (`cpu`, with `fpu` and `mmu`, including the EC and LC parts, and the
+raw `uae_cpu_model`, `uae_fpu_model`, `uae_mmu_model`,
+`uae_cpu_24bit_addressing` and `uae_cpu_type` overrides), memory (including
+`motherboard_ram` and an accelerator board's `accelerator_memory`), chipset and
+video standard, Kickstart, floppy drives and their sounds
+(`floppy_drive_N_sounds`), and hard drives; everything else in an FS-UAE file
+is listed as not translated.
+
+FS-UAE's `amiga_model` presets translate to the matching machine profile with
+the hardware FS-UAE gives them: the plain `A1200` (and `A1200/3.0`) and `CD32`
+have a 68EC020 and only `A1200/020` a full 68020, the `A3000` and `A4000` carry
+a 68882 and 8 MB of motherboard RAM (the `A4000` is the 68EC030 model, as
+FS-UAE runs it), and `CD32/FMV` fits the FMV module with Copperline's bundled
+open ROM, listed as approximated. Copperline does not model the Blizzard
+boards, so `A1200/1230`, `A1200/1240` and `A1200/1260` (or an `accelerator`
+option naming one) bring the board's CPU and its 32 MB of board RAM, as
+`[memory] accelerator`, and are listed as approximated. The PowerPC presets
+and other models (`CDTV`, `A1000`, ...) are listed as not recognized.
 
 Drive sounds are chosen per drive in WinUAE and FS-UAE but once for every drive
 in Copperline, so the first drive the source configures decides and a drive
@@ -75,6 +91,20 @@ Copperline's `Floppy Sounds` folder (see [Configuration](configuration.md)).
 
 ## Important differences
 
+- **EC and LC CPUs:** WinUAE and Amiberry have no EC or LC CPU models of
+  their own. The converter reads them from the other CPU keys: a 68020 with
+  `cpu_24bit_addressing=true` is the 68EC020, an `mmu_model` of `68ec030`,
+  `68ec040` or `68ec060` (the "EC" MMU setting) is that EC part, and a
+  68040/68060 with no `fpu_model` is the LC part (`fpu = false`). With MMU
+  emulation off, the CPU stays the full part. FS-UAE names the parts
+  directly, and applies any `uae_*` CPU lines after its own options in file
+  order, as the converter does (a `uae_cpu_model` line removes the FPU, as
+  in UAE). FS-UAE's UAE core has no EC MMU, so a `uae_mmu_model` of
+  `68ec0x0` is listed rather than read. Copperline's full 68040/68060 always
+  have their MMU, so FS-UAE's `68040-NOMMU`/`68060-NOMMU` and an MMU model of
+  0 are listed as approximated, as is an EC MMU with an FPU (no such chip
+  exists; it imports as the full part). An FPU or MMU Copperline cannot fit
+  to the CPU is listed rather than written.
 - **Virtual controller hardfiles map onto `[copperhf]`:** WinUAE/Amiberry's `uaeN`
   controller and FS-UAE's unnamed default controller both mean the same thing --
   the emulator's own `uaehf.device`, a virtual hardfile board with no

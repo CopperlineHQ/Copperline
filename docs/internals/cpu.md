@@ -86,19 +86,32 @@ model locally).
 for the core's instruction-budgeted batch path
 (`CpuCore::run_batch`): hot straight-line runs and self-loops execute as
 compiled Cranelift traces (the `cpu-jit` cargo feature; without it, wasm
-builds included, the same trace machinery runs interpreted), and the
-largest fast-RAM bank is offered to the core as a zero-cost direct-memory
-window (`AddressBus::fast_mem`). The timing contract is deliberately
-approximate (`M68kMachine::step_slice_jit`):
+builds included, the same trace machinery runs interpreted), and one
+fast-RAM bank is offered to the core as a zero-cost direct-memory window
+(`AddressBus::fast_mem`). The core takes a single window, so it follows
+the code (`CpuBus::jit_fast_mem`): the bank the batch starts executing
+in, else the bank it covered last (a call into ROM or an interrupt
+handler in chip RAM keeps its caller's bank, with the caller's stack and
+data), else the largest bank. A fixed choice can cover RAM nothing uses:
+Kickstart 3.2 on an A3000 lists the motherboard RAM it sizes itself at a
+higher allocation priority (30) than a Zorro III board (20), so with 16 MB
+on the motherboard and a 256 MB board, ExecBase, libraries and programs
+land in the smaller bank until it fills. The choice is emulated state, not
+only host speed: accesses through the window allocate no cache lines
+(below), while fast-RAM accesses outside it do and can evict chip-RAM
+lines, so the bank decides which chip fetches hit the cache models. It
+depends only on the PC and the previous choice, and save states carry it
+(`MachineRuntimeState`). ROM is never offered, since the window is
+writable. The timing contract is deliberately approximate
+(`M68kMachine::step_slice_jit`):
 
 - every retired instruction is billed a flat single CPU clock, converted
   to colour clocks at the configured clock ratio, and fast-RAM/ROM
   accesses bill nothing (an ideal zero-wait external bus) -- the machine
   behaves like a perfect pipelined accelerator whose throughput tracks
   `[cpu] clock_mhz` directly, e.g. ~50 MIPS for a 50 MHz 68040 in fast
-  RAM. This is the deterministic equivalent of a "fastest possible"
-  mode: a truly host-speed CPU would make emulated results depend on the
-  host, which Copperline never allows;
+  RAM. At a fixed clock this is deterministic; the opt-in
+  `[cpu] speed = "fastest"` (below) varies the clock with the host;
 - chip and slow RAM accesses still arbitrate into DMA slots through the
   normal `CpuBus` paths and advance the beam as they land (that bus is
   shared silicon), and CIA/RTC accesses keep their E-clock costs, keeping
@@ -126,12 +139,28 @@ instruction completes. Code that is rewritten, has its cache cleared
 and runs again within one batch (LoadSeg over previously cached chip
 RAM, then CacheClearU) therefore executes the new bytes.
 
-The fastmem window is only offered when nothing intercepts plain fast-RAM
-accesses: cache models, memory-write debug hooks, the heat map, SMC
-detection, and injected bus faults all force every access back onto the
-bus (so on default 020+ configs, whose caches are modelled, the window
-engages only when the user opts the caches off). Arming any
-per-instruction debug or diagnostic hook (breakpoints, watches, traces,
+The fastmem window is offered with the cache models present. The core
+reads and writes the window directly, past every `CpuBus` method, so a
+store there never reaches the data cache's write-through invalidation,
+and the instruction cache does not snoop anyway: a line held inside the
+window would serve stale bytes to the accesses the batch still sends
+through the bus (instructions the full dispatcher runs, extension words,
+exception frames). The models therefore hold no lines inside the window
+while the core has it (`CpuBus::keep_caches_out_of_window`): capturing a
+window drops the lines it overlaps, and a miss there allocates nothing.
+Under JIT a fast-RAM access is free whether it hits or misses, so nothing
+is lost. Chip RAM and ROM, which the window never covers, stay cached, and
+so does the window bank in a batch that runs without the window; the next
+capture drops those lines again. When the window moves to another bank,
+the bank it left is cached like any other, and capturing the new bank
+drops its lines first. Code inside the window is coherent the
+moment it changes, whether the guest rewrites it or a device DMAs it there
+(LoadSeg through copperhf): compiled traces compare their code bytes on
+every entry, and no cache line can hold the old bytes. The window is
+withheld while something must see every plain fast-RAM access:
+memory-write debug hooks, the heat map, SMC detection, and injected bus
+faults force each access back onto the bus. Arming any per-instruction
+debug or diagnostic hook (breakpoints, watches, traces,
 `COPPERLINE_DBG_*`) drops the whole slice back to the precise loop, so the
 debugger always sees every instruction.
 
@@ -143,15 +172,17 @@ An access they cannot map into the window -- an ATC miss, a cached
 translation the access would fault on, a page-crossing access, a physical
 address outside the bank -- runs on the ordinary bus path, which searches
 the tables (billing the descriptor reads) and raises the fault with the
-precise core's frame. Compiled traces translate the same way, and are
-re-recorded if the guest switches the MMU on or off under them. While the
-window translates, no 68030 ATC hit records a use in the replacement order
--- not through the window, a trace or the bus path -- so entries age by when
-table searches loaded them (the precise core keeps least-recently-used
-replacement). Table searches happen at the same instructions whether a
-trace or the interpreter runs them, so that saved state does not depend on
-what the trace JIT has compiled: a resumed state, whose JIT caches start
-empty, behaves like the uninterrupted run.
+precise core's frame. The core translates before it calls `CpuBus`, so the
+cache models see the same physical addresses as the window and keep no
+lines inside it under translation either. Compiled traces translate the
+same way, and are re-recorded if the guest switches the MMU on or off
+under them. While the window translates, no 68030 ATC hit records a use in
+the replacement order -- not through the window, a trace or the bus path --
+so entries age by when table searches loaded them (the precise core keeps
+least-recently-used replacement). Table searches happen at the same
+instructions whether a trace or the interpreter runs them, so that saved
+state does not depend on what the trace JIT has compiled: a resumed state,
+whose JIT caches start empty, behaves like the uninterrupted run.
 
 The host-side instruction profiler (`profile::samples::InstructionSampler`)
 retains at most 262,144 pending instruction/IRQ records, about 42 MiB on
@@ -162,6 +193,28 @@ or clearing the buffer allows sampling to resume but preserves the counter.
 The profile status and summary retain the loss count after the sampler stops.
 This bound is independent of frame polling, so a debugger execution path that
 does not drain samples cannot grow the buffer indefinitely.
+
+(jit-fastest-speed)=
+### Fastest possible (`[cpu] speed = "fastest"`)
+
+The opt-in host-adaptive mode, WinUAE's *Fastest possible*, adds no second
+timing model. `M68kMachine::set_jit_speed_factor` divides every CPU clock
+the JIT path bills (the flat per-instruction clock and the exception and
+interrupt entry costs) by a factor, kept as a 16.16 fixed-point divisor
+with its sub-clock remainder carried across batches. Dividing the CPU's
+own clocks is exactly a faster CPU clock: chip-bus and CIA accesses keep
+their bus-time costs, fast RAM and ROM stay free, and beam, DMA and
+interrupt delivery remain as consistent as at any fixed `clock_mhz`. At a
+factor of 1 the divisor is unity and the billing path is the unscaled one,
+so the fixed-clock JIT and the precise core are untouched. The precise core
+never reads the factor.
+
+The factor comes from the emulator's speed governor
+(`src/emulator/fastest.rs`), which watches the host time each real-time
+quantum costs against the emulated time it advanced; [the pacing
+chapter](#jit-fastest-pacing) describes the control loop and when it may
+adapt. It never adapts outside paced quanta, so headless runs stay at
+the configured clock and remain deterministic.
 
 The 68000 and 68010 never take the batch path. On the small-box machines
 every CPU cycle drives the one bus shared with Agnus, and the floating-bus
@@ -357,7 +410,8 @@ has rather than silently running cacheless after a load.
 (the-68060)=
 ## The 68060
 
-The 68060 is modelled as the full part: on-die FPU and MMU, the 8 KB
+The 68060 is modelled as the full part (the LC060 and EC060 drop its FPU,
+the EC060 its MMU too): on-die FPU and MMU, the 8 KB
 caches (in the same pragmatic direct-mapped host model as the other
 parts), and its own timing engine.
 
@@ -652,7 +706,8 @@ covers, both still open on the Copperline side:
 
 ## MMU
 
-The 68030, 68040, and 68060 model the on-chip MMU (`has_pmmu`), so software
+The 68030, 68040, and 68060 model the on-chip MMU (`has_pmmu`; the EC parts
+without one are covered at the end of this section), so software
 that sets up and enables address translation runs rather than having its MMU
 writes ignored. The 030 and 040 differ enough to need separate walkers: the
 68030 uses its programmable table walk (CRP/SRP selection, the optional
@@ -785,6 +840,50 @@ pages this way) or absorbing a faulted write, honoured as a one-shot
 substitution on the re-executed instruction's matching access. Remaining:
 the used/modified/limit MMUSR bits and descriptor write-back, CRP limit
 checks, and the DT=1 page-descriptor root.
+
+### The MMU-less EC parts
+
+The 68EC030, 68EC040 and 68EC060 (`CpuModel::M68EC0x0`) are the full
+parts with the paged MMU removed: `M68kMachine::new` clears `has_pmmu` for
+every model without one, so the walk never runs and every address passes
+through untranslated, whatever software writes to TC. What differs is how
+each part answers the MMU's instructions and registers:
+
+- **68EC060** runs the core's 060 type with `fpu_present` clear (PCR
+  identifies $0431, shared with the LC060). MOVEC to TC/URP/SRP takes no
+  exception (MC68060UM appendix B.2 leaves the TC E/P bits and root pointers
+  undefined), `PFLUSH` is a no-op and `PLPA` leaves An unchanged, all of
+  which follow from translation being off.
+- **68EC040** runs the core's **LC040** type. The EC040's access control
+  unit answers at the MMU's MOVEC codes -- TC and MMUSR become its
+  control/status pair and ITT/DTT its IACR/DACR (MC68040UM appendix B.6) --
+  and `PTEST`/`PFLUSH` raise no exception. The core's own EC040 type traps
+  those MOVEC codes as illegal instructions, which kills AROS's 040 boot
+  (it clears TC with MOVEC); the LC040 type differs from it only in that
+  MOVEC table and raises Line-F on FP opcodes the same way.
+- **68EC030** runs the core's EC030 type, which raises Line-F on every PMMU
+  encoding. The silicon has an access control unit there instead
+  (M68000PRM `PMOVE`/`PTEST` (MC68EC030)): `PMOVE` moves AC0/AC1 (the
+  68030's TT0/TT1 encodings and format) and ACUSR (the MMUSR encoding),
+  `PTEST` sets ACUSR bit 6 when AC0 or AC1 matches, and `PFLUSH`/`PLOAD`
+  have no effect. `cpu/ec030_acu.rs` completes those instructions from the
+  trap the core surfaces before taking it -- `StepResult::FlineTrap` from a
+  precise step (the precise loop steps a PMMU opword with the plain
+  `step()` on this part, judging the next opword through the instruction
+  cache the way the core will fetch it), `BatchExit::FlineTrap` from a JIT
+  batch -- so both paths agree. A bus error on one of the instruction's
+  accesses ends it the way the core ends its own faulted instructions:
+  nothing is committed, no trace exception follows, and execution resumes
+  at the fault handler's entry. The ACU registers live in the core's TT0/TT1/MMUSR
+  fields. `PMOVE` to TC/SRP/CRP is undefined on the EC030; it takes no
+  exception here, drops writes and reads back zero. The other ACUSR bits
+  are undefined and read as zero, and the 68030 `PTEST` form's level and
+  address-register operands are ignored. Bundled AROS needs this: it picks
+  its MMU code from AttnFlags alone, so on any 68030 it issues `PTEST`
+  without a trap handler.
+
+Both core-side gaps (the EC040's MOVEC set, the EC030's ACU) are marked
+TODO at their workarounds for when the m68k crate models them itself.
 
 ## Interrupts and STOP
 

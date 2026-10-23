@@ -133,9 +133,12 @@ impl Hardware {
                 clock_mhz: Some(cfg.cpu_clock_mhz),
                 icache: Some(cfg.cpu_icache),
                 dcache: Some(cfg.cpu_dcache),
-                unimplemented: (cfg.cpu == CpuModel::M68060)
+                unimplemented: cfg
+                    .cpu
+                    .is_68060()
                     .then(|| format!("{:?}", cfg.cpu_unimplemented).to_ascii_lowercase()),
                 jit: Some(false),
+                speed: None,
             },
             memory: RawMemory {
                 chip: Some(cfg.chip_ram_bytes.to_string()),

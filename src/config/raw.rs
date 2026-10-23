@@ -1290,6 +1290,10 @@ pub(crate) struct RawCpu {
     /// off.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) jit: Option<bool>,
+    /// JIT CPU speed: "fixed" (default) runs at `clock_mhz`; "fastest"
+    /// adapts the JIT's effective clock to the host while paced.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) speed: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]

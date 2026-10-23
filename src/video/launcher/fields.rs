@@ -407,6 +407,7 @@ pub enum LauncherField {
     Icache,
     Dcache,
     Jit,
+    JitSpeed,
     // Memory
     ChipRam,
     FastRam,
@@ -900,13 +901,14 @@ pub(super) const SYSTEM_ROWS: [Row; 8] = [
     row(F::Rtg, "RTG card", Cycle),
     row(F::Cartridge, "Freezer cartridge", Cycle),
 ];
-pub(super) const CPU_ROWS: [Row; 6] = [
+pub(super) const CPU_ROWS: [Row; 7] = [
     row(F::Cpu, "CPU", Cycle),
     row(F::Fpu, "FPU (68881/2)", Cycle),
     row(F::Clock, "Clock", Cycle),
     row(F::Icache, "Instruction cache", Cycle),
     row(F::Dcache, "Data cache", Cycle),
     row(F::Jit, "JIT accelerator", Cycle),
+    row(F::JitSpeed, "JIT speed", Cycle),
 ];
 pub(super) const MEMORY_ROWS: [Row; 8] = [
     row(F::ChipRam, "Chip RAM", Cycle),
@@ -1579,13 +1581,16 @@ pub(super) const DENISE_CHOICES: [Option<DeniseRevision>; 4] = [
     Some(DeniseRevision::AgaLisa),
 ];
 pub(super) const VIDEO_CHOICES: [VideoStandard; 2] = [VideoStandard::Pal, VideoStandard::Ntsc];
-pub(super) const CPUS: [CpuModel; 7] = [
+pub(super) const CPUS: [CpuModel; 10] = [
     CpuModel::M68000,
     CpuModel::M68010,
     CpuModel::M68EC020,
     CpuModel::M68020,
+    CpuModel::M68EC030,
     CpuModel::M68030,
+    CpuModel::M68EC040,
     CpuModel::M68040,
+    CpuModel::M68EC060,
     CpuModel::M68060,
 ];
 /// Storage-idle thresholds for the Warp boot row, in emulated seconds.

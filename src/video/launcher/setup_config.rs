@@ -78,6 +78,7 @@ impl MachineSetup {
             icache: cfg.cpu_icache,
             dcache: cfg.cpu_dcache,
             jit: cfg.cpu_jit,
+            jit_fastest: cfg.cpu_speed == crate::config::CpuSpeed::Fastest,
             chip_ram: cfg.chip_ram_bytes,
             fast_ram: cfg.fast_ram_bytes,
             slow_ram: cfg.slow_ram_bytes,
@@ -486,7 +487,7 @@ impl MachineSetup {
             raw.input.port3 = None;
             raw.input.port4 = None;
         }
-        if self.cpu != CpuModel::M68060 {
+        if !self.cpu.is_68060() {
             raw.cpu.unimplemented = None;
         }
         // The slot holds one card: a host disk attached there displaces it.
@@ -550,6 +551,13 @@ impl MachineSetup {
         }
         if self.jit != base.cpu_jit {
             raw.cpu.jit = Some(self.jit);
+        }
+        // Emitted only where it applies (the JIT on a 68020+), so turning
+        // the JIT off or picking a 68000 never yields a config that fails
+        // validation; the choice is kept for when the JIT comes back.
+        if self.jit_fastest && self.jit && !matches!(self.cpu, CpuModel::M68000 | CpuModel::M68010)
+        {
+            raw.cpu.speed = Some(crate::config::CpuSpeed::Fastest.as_str().to_string());
         }
         // Memory
         if self.chip_ram != base.chip_ram_bytes {
