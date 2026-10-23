@@ -27,8 +27,8 @@
 # Local asset directory for the ignored integration tests.
 /test-assets/
 
-# Optional local research checkout of m68k; production builds use the pinned
-# upstream Git revision in Cargo.toml.
+# Optional local research checkout of m68k; production builds use the
+# crates.io release in Cargo.toml.
 /vendor/m68k/
 /crates/m68k/
 

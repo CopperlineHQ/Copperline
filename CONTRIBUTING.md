@@ -33,10 +33,6 @@ can be made.
 
 Run the asset-free checks before opening a pull request:
 
-For compact agent output with full file-backed logs, use
-[`tools/cargo_report.py`](tools/cargo-report.md), for example
-`python tools/cargo_report.py -- test --locked`.
-
 ```sh
 cargo fmt --check
 cargo clippy --all-targets --all-features --locked -- -D warnings

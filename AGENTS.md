@@ -17,14 +17,8 @@ machine-specific instructions, and take precedence over this file.
 
 ## Building and configuring
 
-Run Cargo through `python tools/cargo_report.py -- <cargo arguments>` so full
-stdout/stderr are saved before tool output reaches the model. Success returns
-only status, duration and warning count; failures return bounded diagnostics
-and log paths. Use the indicated errors/test cases for follow-up rather than
-printing entire logs. See `tools/cargo-report.md` for usage and limitations.
-
 ```sh
-python tools/cargo_report.py -- build --release # debug builds are far too slow for emulation use
+cargo build --release    # debug builds are far too slow for emulation use
 ```
 
 Copperline bundles the open-source AROS boot ROM, so it boots with no config
@@ -235,10 +229,9 @@ the loaded hunks.
 ## Working on Copperline itself
 
 ```sh
-python tools/cargo_report.py -- test                        # no external assets needed
-python tools/cargo_report.py -- test --release -- --ignored # needs local ROMs/disks
-python tools/cargo_report.py -- clippy
-python tools/cargo_report.py -- fmt -- --check
+cargo test                        # unit suite, no external assets needed
+cargo test --release -- --ignored # integration tests (need local ROMs/disks)
+cargo clippy && cargo fmt --check # both expected clean
 ```
 
 `main` is the development line and `v1` the 1.x maintenance branch. Base bug
