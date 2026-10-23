@@ -10,20 +10,18 @@ while hardware already reads low. Forty different cases see the Paula request
 early. These are separate paths: the PB6 difference does not justify moving the
 timer or imposing a common interrupt delay.
 
-`Cia::read_at_transfer` now previews the impending Phi2 underflow output when a
-live zero counter is sampled during E-high, as the existing timer read previews
-its reload mux. The preview does not commit the counter, interrupt flag, physical
-pin, or pulse state. Pulse/toggle behavior and consecutive-underflow merging use
-the existing output rules. Stopped and CNT-driven counters do not predict a
-Phi2 underflow. The same transfer path handles both timer output bits; the new
-hardware boundary evidence directly covers Timer A/PB6 on both CIAs.
+Early PB-port readback preview is deferred to the separate
+`wip/cia-propagation-pb-stop` branch. This PR retains ordinary PB pulse and
+toggle behavior, but does not claim to resolve these early readback cases.
+The preview needs stronger acceptance evidence alongside the zero-latch
+pulse sweep before merging.
 
 References: `amiga-hardware-probes/references/cia-source-v3/run{1,2}`;
 ROM SHA-256 `045adb8f6329d940cfb9b039ae2374c7f4aa41e249c77ba7f51bbbb2ba0e3112`.
 The two physical runs have different phase brackets, with five repetitions per
 descriptor and identical measured-value vectors; they are not byte-identical
-independent phase cohorts. The fix repairs all20 PB6 cases without a new field
-or qualification difference. An independent four-request sampling sweep checks
+independent phase cohorts. The experimental preview repairs all20 PB6 cases without a new field
+or qualification difference, but is not included in the mergeable subset. An independent four-request sampling sweep checks
 the result at neighboring observation phases. Request propagation remains
 unresolved; `DEFAULT_IRQ_LATENCY_CCK` is unchanged.
 

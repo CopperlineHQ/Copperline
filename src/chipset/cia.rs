@@ -39,11 +39,6 @@ pub struct Cia {
     /// Clock-source and one-shot controls reach counting after two PHI2 edges.
     #[serde(default)]
     ta_control_pipe: Option<[u8; 2]>,
-    /// A stopped one-shot loaded with zero through TAHI emits two adjacent
-    /// underflows. The first LOAD carry does not yet stop the auto-start.
-    #[serde(default)]
-    ta_auto_zero_carry_pending: bool,
-
     // Timer B
     pub tb_count: u16,
     pub tb_latch: u16,
@@ -226,7 +221,6 @@ impl Cia {
             ta_enable_pipe: None,
             tb_enable_pipe: None,
             ta_control_pipe: None,
-            ta_auto_zero_carry_pending: false,
             tb_control_pipe: None,
             tb_ta_pending_underflows: 0,
             which,
@@ -511,48 +505,6 @@ impl Cia {
                 value &= !1;
             }
             return value;
-        }
-        if reg == REG_PRB {
-            let mut v = self.read(reg);
-            // The output mux, like the timer reload mux below, is visible
-            // during E-high before the falling-edge counter commit. Preview
-            // only the underflow output; do not advance the timer or IRQ pin.
-            for (control, count, running, delay, pipe, phi2, pulse, bit) in [
-                (
-                    self.regs[REG_CRA],
-                    self.ta_count,
-                    self.ta_running,
-                    self.ta_start_delay,
-                    self.ta_enable_pipe,
-                    self.effective_ta_control() & 0x20 == 0,
-                    self.ta_pb_pulse_high,
-                    0x40,
-                ),
-                (
-                    self.regs[REG_CRB],
-                    self.tb_count,
-                    self.tb_running,
-                    self.tb_start_delay,
-                    self.tb_enable_pipe,
-                    TimerBInputMode::from_crb(self.effective_tb_control()) == TimerBInputMode::Phi2,
-                    self.tb_pb_pulse_high,
-                    0x80,
-                ),
-            ] {
-                if control & CR_PBON != 0
-                    && count == 0
-                    && delay == 0
-                    && Self::enable_pipe(running, delay, pipe) & 2 != 0
-                    && phi2
-                {
-                    if control & CR_OUTMODE == 0 {
-                        v |= bit;
-                    } else if !pulse {
-                        v ^= bit;
-                    }
-                }
-            }
-            return v;
         }
         let reload = match reg {
             REG_TALO | REG_TAHI
@@ -896,7 +848,6 @@ impl Cia {
                     self.ta_count = self.ta_latch;
                     if self.ta_oneshot {
                         self.ta_pb_output_high = true;
-                        self.ta_auto_zero_carry_pending = self.ta_latch == 0;
                         self.ta_enable_pipe = Some(Self::enable_pipe(
                             self.ta_running,
                             self.ta_start_delay,
@@ -1001,7 +952,6 @@ impl Cia {
                 let _ = self.tod_check_alarm();
             }
             REG_CRA => {
-                self.ta_auto_zero_carry_pending = false;
                 self.ta_control_pipe =
                     Some(self.ta_control_pipe.unwrap_or([self.ta_count_control(); 2]));
                 let prev_run = self.ta_running;
@@ -1214,13 +1164,9 @@ impl Cia {
                 ta_underflows != 0 && input_ticks == ticks && self.ta_count == self.ta_latch;
             timer_mask |= u8::from(ta_underflows != 0) * ICR_TA;
             if timer_mask & ICR_TA != 0 && ta_control & 8 != 0 {
-                if self.ta_auto_zero_carry_pending {
-                    self.ta_auto_zero_carry_pending = false;
-                } else {
-                    self.ta_running = false;
-                    self.ta_enable_pipe = Some(0);
-                    self.regs[REG_CRA] &= !0x01;
-                }
+                self.ta_running = false;
+                self.ta_enable_pipe = Some(0);
+                self.regs[REG_CRA] &= !0x01;
             }
             if timer_mask & ICR_TA != 0 {
                 self.update_pb_output(REG_CRA, true, ta_previous_pulse);
@@ -1647,28 +1593,6 @@ pub fn reg_from_addr(addr: u64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn transfer_pb_read_previews_underflow_without_committing_it() {
-        for which in [Which::A, Which::B] {
-            let mut cia = Cia::new(which);
-            cia.regs[REG_CRA] = CR_PBON | CR_OUTMODE;
-            cia.ta_running = true;
-            cia.ta_count = 0;
-            cia.ta_latch = 34;
-            assert_ne!(cia.port_b_pins() & 0x40, 0);
-            assert_eq!(cia.read_at_transfer(REG_PRB) & 0x40, 0);
-            assert_eq!(cia.ta_count, 0);
-            assert_ne!(cia.port_b_pins() & 0x40, 0);
-            assert_eq!(cia.icr_data, 0);
-            assert!(!cia.irq_pin);
-            cia.ta_running = false;
-            assert_ne!(cia.read_at_transfer(REG_PRB) & 0x40, 0);
-            cia.ta_running = true;
-            cia.ta_counts_cnt = true;
-            assert_ne!(cia.read_at_transfer(REG_PRB) & 0x40, 0);
-        }
-    }
 
     #[test]
     fn live_zero_count_reads_reload_data_without_changing_counter() {
@@ -2636,34 +2560,6 @@ mod tests {
             cia.write(hi, 0);
             cia.tick(4);
             assert_ne!(cia.port_b_pins() & bit, 0);
-        }
-    }
-
-    #[test]
-    fn high_byte_zero_autostart_delivers_two_underflows_to_cascade() {
-        for which in [Which::A, Which::B] {
-            for latch in [0, 1, 3] {
-                let mut cia = Cia::new(which);
-                cia.write(REG_TBLO, 0xff);
-                cia.write(REG_TBHI, 0xff);
-                cia.write(REG_CRB, 0x51);
-                cia.tick(4);
-                cia.write(REG_CRA, CR_PBON | CR_OUTMODE | 8);
-                cia.write(REG_TALO, latch);
-                cia.write(REG_TAHI, 0);
-                let saved = serde_json::to_vec(&cia).unwrap();
-                let mut restored: Cia = serde_json::from_slice(&saved).unwrap();
-                cia.tick(20);
-                restored.tick(20);
-                let expected = if latch == 0 { 2 } else { 1 };
-                assert_eq!(0xffff - cia.tb_count, expected);
-                assert!(!cia.ta_running);
-                assert_eq!(cia.port_b_pins() & 0x40, 0);
-                assert_eq!(
-                    serde_json::to_value(&cia).unwrap(),
-                    serde_json::to_value(&restored).unwrap()
-                );
-            }
         }
     }
 
