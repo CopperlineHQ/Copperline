@@ -86,10 +86,24 @@ model locally).
 for the core's instruction-budgeted batch path
 (`CpuCore::run_batch`): hot straight-line runs and self-loops execute as
 compiled Cranelift traces (the `cpu-jit` cargo feature; without it, wasm
-builds included, the same trace machinery runs interpreted), and the
-largest fast-RAM bank is offered to the core as a zero-cost direct-memory
-window (`AddressBus::fast_mem`). The timing contract is deliberately
-approximate (`M68kMachine::step_slice_jit`):
+builds included, the same trace machinery runs interpreted), and one
+fast-RAM bank is offered to the core as a zero-cost direct-memory window
+(`AddressBus::fast_mem`). The core takes a single window, so it follows
+the code (`CpuBus::jit_fast_mem`): the bank the batch starts executing
+in, else the bank it covered last (a call into ROM or an interrupt
+handler in chip RAM keeps its caller's bank, with the caller's stack and
+data), else the largest bank. A fixed choice can cover RAM nothing uses:
+Kickstart 3.2 on an A3000 lists the motherboard RAM it sizes itself at a
+higher allocation priority (30) than a Zorro III board (20), so with 16 MB
+on the motherboard and a 256 MB board, ExecBase, libraries and programs
+land in the smaller bank until it fills. The choice is emulated state, not
+only host speed: accesses through the window allocate no cache lines
+(below), while fast-RAM accesses outside it do and can evict chip-RAM
+lines, so the bank decides which chip fetches hit the cache models. It
+depends only on the PC and the previous choice, and save states carry it
+(`MachineRuntimeState`). ROM is never offered, since the window is
+writable. The timing contract is deliberately approximate
+(`M68kMachine::step_slice_jit`):
 
 - every retired instruction is billed a flat single CPU clock, converted
   to colour clocks at the configured clock ratio, and fast-RAM/ROM
@@ -137,7 +151,9 @@ window drops the lines it overlaps, and a miss there allocates nothing.
 Under JIT a fast-RAM access is free whether it hits or misses, so nothing
 is lost. Chip RAM and ROM, which the window never covers, stay cached, and
 so does the window bank in a batch that runs without the window; the next
-capture drops those lines again. Code inside the window is coherent the
+capture drops those lines again. When the window moves to another bank,
+the bank it left is cached like any other, and capturing the new bank
+drops its lines first. Code inside the window is coherent the
 moment it changes, whether the guest rewrites it or a device DMAs it there
 (LoadSeg through copperhf): compiled traces compare their code bytes on
 every entry, and no cache line can hold the old bytes. The window is

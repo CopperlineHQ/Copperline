@@ -31,7 +31,7 @@ What is captured:
 | Component | Contents |
 |---|---|
 | `CpuCore` | registers, SR flags, prefetch queue, pending interrupt/stop state, MMU/CACR state, cycle-timing configuration, `cpu_type` and address mask |
-| `MachineRuntimeState` | the `M68kMachine` fields outside the core: `last_cacr`, `sync_cck_on`, `cpu_clocks_per_cck`, `cpu_clock_carry` |
+| `MachineRuntimeState` | the `M68kMachine` fields outside the core: `last_cacr`, `sync_cck_on`, `cpu_clocks_per_cck`, `cpu_clock_carry`, and `jit_window_bank` (the fast-RAM bank the JIT fastmem window covers while code runs outside fast RAM; it decides which fast-RAM accesses allocate cache lines, and saves without it read `None`) |
 | `icache` / `dcache` | the CPU cache models (`Option<Box<CpuCache>>`, `None` when absent or opted out). When the state carries `None`, load keeps the running machine's cache model, if it has one, and re-derives its enable and freeze bits from the restored CACR |
 | `Bus` | chip, slow, motherboard, and accelerator RAM, ROM and extended ROM, Zorro boards (including their RAM), both CIAs, RTC, Agnus/Copper/Denise/Paula/blitter state, floppy controller with in-memory disk images, Gayle IDE and its PCMCIA card (an SRAM card's contents included), A2091 SCSI, Akiko/CDTV with NVRAM, beam-event capture buffers, DMA pointers, interrupt latches, and the bus-arbitration counters |
 

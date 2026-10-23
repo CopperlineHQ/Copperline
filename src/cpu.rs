@@ -332,6 +332,13 @@ struct MachineRuntimeState {
     sync_cck_on: bool,
     cpu_clocks_per_cck: u32,
     cpu_clock_carry: u32,
+    /// `CpuBus::jit_window_bank`: the bank the JIT fastmem window covers
+    /// while code runs outside fast RAM. It decides which fast-RAM accesses
+    /// allocate cache lines, and so which chip-RAM lines they evict. Saves
+    /// from before it existed read None: the largest bank until code runs
+    /// from a fast bank, as those builds always chose.
+    #[serde(default)]
+    jit_window_bank: Option<u32>,
 }
 
 /// Same-process rollback also needs the interrupt sample consumed at the next
@@ -486,10 +493,26 @@ struct CpuBus {
     cache_free_window: Option<(u32, u32)>,
     /// Whether `fast_mem` handed out the window during the current batch.
     window_offered: bool,
+    /// Base of the fast-RAM bank the fastmem window covered last, which
+    /// the window keeps while code runs outside fast RAM (`jit_fast_mem`).
+    /// Emulated state: it decides which fast-RAM accesses allocate cache
+    /// lines, so save states carry it (`MachineRuntimeState`).
+    jit_window_bank: Option<u32>,
     /// Whether CACR has the 68040/060 layout (`cacr_040_layout`). Follows
     /// the core's CPU type like `address_mask`, so `cache_control` can
     /// decode CACR inside a JIT batch.
     cacr_040_layout: bool,
+}
+
+/// A fast-RAM bank the JIT fastmem window can cover (`CpuBus::jit_fast_mem`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FastRamBank {
+    /// A configured Zorro RAM board's window.
+    Zorro { base: u32, len: u32, idx: usize },
+    /// Ramsey motherboard RAM.
+    Motherboard,
+    /// CPU-slot accelerator RAM.
+    Accel,
 }
 
 pub fn build(
@@ -566,6 +589,7 @@ impl M68kMachine {
                 jit_enabled: false,
                 cache_free_window: None,
                 window_offered: false,
+                jit_window_bank: None,
                 cacr_040_layout: cacr_040,
             },
             fpu_enabled,
@@ -1635,6 +1659,7 @@ impl M68kMachine {
             sync_cck_on: self.sync_cck_on,
             cpu_clocks_per_cck: self.cpu_clocks_per_cck,
             cpu_clock_carry: self.cpu_clock_carry,
+            jit_window_bank: self.bus.jit_window_bank,
         }
     }
 
@@ -1840,6 +1865,7 @@ impl M68kMachine {
         self.sync_cck_on = runtime.sync_cck_on;
         self.cpu_clocks_per_cck = runtime.cpu_clocks_per_cck;
         self.cpu_clock_carry = runtime.cpu_clock_carry;
+        self.bus.jit_window_bank = runtime.jit_window_bank;
         // The short-bus-cycle flag is derived from the (restored) CPU model and
         // not serialized, so re-establish it here.
         let short_bus = !self.cpu.is_pre_68020;
@@ -3411,8 +3437,8 @@ impl M68kMachine {
     /// - chip-bus accesses still arbitrate into DMA slots through `CpuBus`
     ///   and advance the beam as they land, so chipset side effects stay
     ///   ordered against display DMA, just not cycle-exactly;
-    /// - accesses inside the fastmem window (the largest fast-RAM bank, see
-    ///   `CpuBus::fast_mem`) cost nothing at all;
+    /// - accesses inside the fastmem window (the fast-RAM bank the code
+    ///   runs from, see `CpuBus::jit_fast_mem`) cost nothing at all;
     /// - interrupts are recognized at batch boundaries (and once inside
     ///   each batch entry), so their latency is bounded by
     ///   `JIT_BATCH_INSTRUCTIONS` rather than modelled.
@@ -5015,11 +5041,30 @@ impl CpuBus {
     }
 
     /// The zero-cost guest-RAM window offered to the core's batch/JIT path
-    /// (`AddressBus::fast_mem`): the largest fast-RAM bank fitted -- a
-    /// configured Zorro board, Ramsey motherboard RAM, or CPU-slot
-    /// accelerator RAM. Chip and slow RAM are never offered: their CPU
-    /// accesses arbitrate into chip-bus DMA slots and drive the shared data
-    /// bus, side effects the window contract forbids.
+    /// (`AddressBus::fast_mem`): one fast-RAM bank -- a configured Zorro
+    /// board, Ramsey motherboard RAM, or CPU-slot accelerator RAM. Chip and
+    /// slow RAM are never offered: their CPU accesses arbitrate into
+    /// chip-bus DMA slots and drive the shared data bus, side effects the
+    /// window contract forbids.
+    ///
+    /// The core takes a single window, so the bank follows the code: the
+    /// bank the batch starts executing in, else the bank the window covered
+    /// last (a call into ROM or an interrupt handler in chip RAM keeps its
+    /// caller's bank, which holds the caller's stack and data), else the
+    /// largest bank. The guest OS decides where code and data live --
+    /// Kickstart puts its own structures in the local bank it sizes itself,
+    /// ahead of any Zorro board -- so a fixed choice such as the largest
+    /// bank can cover RAM nothing uses.
+    ///
+    /// The choice is emulated state, not just host speed: accesses through
+    /// the window allocate no cache lines (`keep_caches_out_of_window`),
+    /// while fast-RAM accesses outside it do and can evict chip-RAM lines,
+    /// so the bank decides which chip fetches hit the cache models and with
+    /// that the chip-bus timing. It depends only on the PC and the previous
+    /// choice, so a run is deterministic, and save states carry it
+    /// (`MachineRuntimeState::jit_window_bank`). `cpu_pc` is the logical
+    /// PC; under a remapping MMU it may name no bank or another one, which
+    /// only makes the choice less useful, since the window is physical.
     ///
     /// Returns None while anything that intercepts plain fast-RAM accesses
     /// is armed (memory-write debug hooks, the heat map, SMC detection,
@@ -5053,9 +5098,39 @@ impl CpuBus {
         {
             return None;
         }
-        let zorro = self.bus.mem.zorro.largest_ram_region();
-        let mb_len = self.bus.mem.mb_ram.len() as u32;
-        let accel_len = self.bus.mem.accel_ram.len() as u32;
+        let bank = self
+            .fast_ram_bank_at(self.bus.cpu_pc)
+            .or_else(|| {
+                self.jit_window_bank
+                    .and_then(|addr| self.fast_ram_bank_at(addr))
+            })
+            .or_else(|| self.largest_fast_ram_bank())?;
+        let window = self.fast_mem_for(bank);
+        self.jit_window_bank = Some(window.base);
+        Some(window)
+    }
+
+    /// The fast-RAM bank holding `addr`, if any.
+    fn fast_ram_bank_at(&self, addr: u32) -> Option<FastRamBank> {
+        let mem = &self.bus.mem;
+        if addr.wrapping_sub(ACCEL_RAM_BASE as u32) < mem.accel_ram.len() as u32 {
+            return Some(FastRamBank::Accel);
+        }
+        if addr.wrapping_sub(mem.mb_ram_base() as u32) < mem.mb_ram.len() as u32 {
+            return Some(FastRamBank::Motherboard);
+        }
+        mem.zorro
+            .ram_region_containing(addr)
+            .map(|(base, len, idx)| FastRamBank::Zorro { base, len, idx })
+    }
+
+    /// The largest fitted fast-RAM bank: a Zorro board wins a tie, then
+    /// motherboard RAM.
+    fn largest_fast_ram_bank(&self) -> Option<FastRamBank> {
+        let mem = &self.bus.mem;
+        let zorro = mem.zorro.largest_ram_region();
+        let mb_len = mem.mb_ram.len() as u32;
+        let accel_len = mem.accel_ram.len() as u32;
         let zorro_len = zorro.map_or(0, |(_, len, _)| len);
         let best = zorro_len.max(mb_len).max(accel_len);
         if best == 0 {
@@ -5063,26 +5138,33 @@ impl CpuBus {
         }
         if best == zorro_len {
             let (base, len, idx) = zorro?;
-            let ram = self.bus.mem.zorro.board_ram_mut(idx);
-            return Some(FastMem {
-                ptr: ram.as_mut_ptr(),
-                base,
-                len,
-            });
+            return Some(FastRamBank::Zorro { base, len, idx });
         }
         if best == mb_len {
-            let base = self.bus.mem.mb_ram_base() as u32;
-            return Some(FastMem {
-                ptr: self.bus.mem.mb_ram.as_mut_ptr(),
-                base,
-                len: mb_len,
-            });
+            return Some(FastRamBank::Motherboard);
         }
-        Some(FastMem {
-            ptr: self.bus.mem.accel_ram.as_mut_ptr(),
-            base: ACCEL_RAM_BASE as u32,
-            len: accel_len,
-        })
+        Some(FastRamBank::Accel)
+    }
+
+    fn fast_mem_for(&mut self, bank: FastRamBank) -> FastMem {
+        let mem = &mut self.bus.mem;
+        match bank {
+            FastRamBank::Zorro { base, len, idx } => FastMem {
+                ptr: mem.zorro.board_ram_mut(idx).as_mut_ptr(),
+                base,
+                len,
+            },
+            FastRamBank::Motherboard => FastMem {
+                base: mem.mb_ram_base() as u32,
+                len: mem.mb_ram.len() as u32,
+                ptr: mem.mb_ram.as_mut_ptr(),
+            },
+            FastRamBank::Accel => FastMem {
+                base: ACCEL_RAM_BASE as u32,
+                len: mem.accel_ram.len() as u32,
+                ptr: mem.accel_ram.as_mut_ptr(),
+            },
+        }
     }
 
     /// Keep the cache models coherent with a fastmem window the core is
@@ -6042,6 +6124,7 @@ mod tests {
             jit_enabled: false,
             cache_free_window: None,
             window_offered: false,
+            jit_window_bank: None,
             cacr_040_layout: false,
         };
 
@@ -6075,6 +6158,7 @@ mod tests {
             jit_enabled: false,
             cache_free_window: None,
             window_offered: false,
+            jit_window_bank: None,
             cacr_040_layout: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
@@ -6119,6 +6203,7 @@ mod tests {
                 jit_enabled: false,
                 cache_free_window: None,
                 window_offered: false,
+                jit_window_bank: None,
                 cacr_040_layout: false,
             };
             bus.bus
@@ -6178,6 +6263,7 @@ mod tests {
             jit_enabled: false,
             cache_free_window: None,
             window_offered: false,
+            jit_window_bank: None,
             cacr_040_layout: false,
         };
         // INTENA/INTREQ, whose read ports INTENAR ($01C) and INTREQR ($01E) are
@@ -6225,6 +6311,7 @@ mod tests {
             jit_enabled: false,
             cache_free_window: None,
             window_offered: false,
+            jit_window_bank: None,
             cacr_040_layout: false,
         };
         let base = CHIP_RAM_BASE as u32;
@@ -6268,6 +6355,7 @@ mod tests {
             jit_enabled: false,
             cache_free_window: None,
             window_offered: false,
+            jit_window_bank: None,
             cacr_040_layout: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
@@ -6320,6 +6408,7 @@ mod tests {
             jit_enabled: false,
             cache_free_window: None,
             window_offered: false,
+            jit_window_bank: None,
             cacr_040_layout: false,
         };
 
@@ -6533,6 +6622,7 @@ mod tests {
             jit_enabled: false,
             cache_free_window: None,
             window_offered: false,
+            jit_window_bank: None,
             cacr_040_layout: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
@@ -6596,6 +6686,7 @@ mod tests {
             jit_enabled: false,
             cache_free_window: None,
             window_offered: false,
+            jit_window_bank: None,
             cacr_040_layout: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
@@ -6735,6 +6826,7 @@ mod tests {
             jit_enabled: false,
             cache_free_window: None,
             window_offered: false,
+            jit_window_bank: None,
             cacr_040_layout: false,
         };
         let before = bus.read_long(ROM_BASE as u32);
@@ -6767,6 +6859,7 @@ mod tests {
             jit_enabled: false,
             cache_free_window: None,
             window_offered: false,
+            jit_window_bank: None,
             cacr_040_layout: false,
         };
         // $F00000 with no extended ROM fitted is genuinely undecoded (the
@@ -6805,6 +6898,7 @@ mod tests {
             jit_enabled: false,
             cache_free_window: None,
             window_offered: false,
+            jit_window_bank: None,
             cacr_040_layout: false,
         }
     }
@@ -8158,13 +8252,16 @@ mod tests {
     }
 
     /// The fastmem window is only offered while nothing intercepts plain
-    /// fast-RAM accesses, and covers the largest fitted fast bank.
+    /// fast-RAM accesses. It covers the bank the code runs from, keeps that
+    /// bank while code runs outside fast RAM, and covers the largest bank
+    /// until code has run from one.
     #[test]
     fn jit_fast_mem_window_gates_and_bank_choice() -> Result<()> {
         let mut machine = machine_with_program_model(0x0100, &[0x4E71], CpuModel::M68020)?;
         // Not offered until JIT mode is on.
         assert!(machine.bus.jit_fast_mem().is_none());
         machine.set_jit_enabled(true);
+        machine.bus.bus.cpu_pc = 0x0100;
         let window = machine.bus.jit_fast_mem().expect("zorro fast RAM window");
         assert_eq!(window.base, FAST_RAM_BASE as u32);
         assert_eq!(window.len, 64 * 1024);
@@ -8173,11 +8270,203 @@ mod tests {
         machine.bus.dbg_memw_addr = Some(0x1234);
         assert!(machine.bus.jit_fast_mem().is_none());
         machine.bus.dbg_memw_addr = None;
-        // A bigger motherboard bank wins.
+        // A bigger motherboard bank does not take the window while code
+        // still runs from chip RAM: the window keeps the bank it covered.
         machine.bus.bus.mem.fit_mb_ram(2 * 1024 * 1024);
-        let window = machine.bus.jit_fast_mem().expect("motherboard window");
+        let window = machine.bus.jit_fast_mem().expect("zorro window kept");
+        assert_eq!(window.base, FAST_RAM_BASE as u32);
+        // Code running from motherboard RAM moves the window there, and a
+        // call into ROM keeps it.
+        for pc in [0x07E0_1000, ROM_BASE as u32 + 0x100] {
+            machine.bus.bus.cpu_pc = pc;
+            let window = machine.bus.jit_fast_mem().expect("motherboard window");
+            assert_eq!(window.base, 0x07E0_0000, "pc {pc:#X}");
+            assert_eq!(window.len, 2 * 1024 * 1024, "pc {pc:#X}");
+        }
+        // Code in the Zorro board takes it back although that bank is
+        // smaller.
+        machine.bus.bus.cpu_pc = FAST_RAM_BASE as u32 + 0x40;
+        let window = machine.bus.jit_fast_mem().expect("zorro window");
+        assert_eq!(window.base, FAST_RAM_BASE as u32);
+        // Before any code has run from fast RAM, the largest bank.
+        machine.bus.jit_window_bank = None;
+        machine.bus.bus.cpu_pc = 0x0100;
+        let window = machine.bus.jit_fast_mem().expect("largest bank");
         assert_eq!(window.base, 0x07E0_0000);
-        assert_eq!(window.len, 2 * 1024 * 1024);
+        Ok(())
+    }
+
+    /// Code that alternates between two fast-RAM banks moves the window
+    /// with it, and the cache models stay coherent across each move. The
+    /// program reads a longword in the Zorro board while running from
+    /// motherboard RAM (the data cache takes a line for it), jumps into
+    /// the Zorro board, which rewrites that longword through the window,
+    /// and jumps back to read it again. A line kept from the first read
+    /// would serve the old value. One-instruction batches make the window
+    /// follow every jump.
+    #[test]
+    fn jit_window_follows_code_across_banks_and_matches_precise_core() -> Result<()> {
+        use m68k::{CACR_ED, CACR_EI};
+        let mb_code = 0x07E0_0100u32;
+        let mb_data = 0x07E0_0800u32;
+        let z_code = FAST_RAM_BASE as u32 + 0x100;
+        let z_data = FAST_RAM_BASE as u32 + 0x800;
+        let hi = |v: u32| (v >> 16) as u16;
+        let lo = |v: u32| v as u16;
+        let back = mb_code + 30;
+        let mb_program = [
+            0x207C,
+            hi(z_data),
+            lo(z_data), // movea.l #z_data,a0
+            0x267C,
+            hi(mb_data),
+            lo(mb_data), // movea.l #mb_data,a3
+            0x227C,
+            0x0000,
+            0x2000, // movea.l #$2000,a1 (chip RAM)
+            0x2290, // move.l (a0),(a1)
+            0x2A13, // move.l (a3),d5
+            0x4EF9,
+            hi(z_code),
+            lo(z_code), // jmp z_code
+            0x4E71,     // nop (padding)
+            0x2350,
+            0x0004, // back: move.l (a0),4(a1)
+            0x2353,
+            0x0008, // move.l (a3),8(a1)
+            0x60FE, // bra.s *
+        ];
+        let z_program = [
+            0x20BC,
+            0x2222,
+            0x2222, // move.l #$22222222,(a0)
+            0x26BC,
+            0x3333,
+            0x3333, // move.l #$33333333,(a3)
+            0x4EF9,
+            hi(back),
+            lo(back), // jmp back
+        ];
+        let run = |jit: bool| -> Result<(u32, u32, u32)> {
+            let mut bus = test_bus_with_pc(mb_code);
+            bus.mem.fit_mb_ram(2 * 1024 * 1024);
+            let mb_base = bus.mem.mb_ram_base() as u32;
+            write_words(
+                &mut bus.mem.mb_ram,
+                (mb_code - mb_base) as usize,
+                &mb_program,
+            );
+            write_words(
+                &mut bus.mem.mb_ram,
+                (mb_data - mb_base) as usize,
+                &[0x5555, 0x5555],
+            );
+            write_program(&mut bus, z_code, &z_program);
+            write_program(&mut bus, z_data, &[0x1111, 0x1111]);
+            let mut machine = M68kMachine::new(bus, CpuModel::M68030, false)?;
+            machine.bus_mut().agnus.hpos = 0x21;
+            machine.set_cache_emulation(true, true);
+            machine.cpu.cacr = CACR_EI | CACR_ED;
+            machine.apply_cacr_updates();
+            machine.set_jit_enabled(jit);
+            for _ in 0..16 {
+                machine.step_slice(1)?;
+            }
+            Ok((
+                read_chip_long(machine.bus(), 0x2000),
+                read_chip_long(machine.bus(), 0x2004),
+                read_chip_long(machine.bus(), 0x2008),
+            ))
+        };
+        let expected = (0x1111_1111, 0x2222_2222, 0x3333_3333);
+        assert_eq!(run(false)?, expected, "precise");
+        assert_eq!(run(true)?, expected, "jit");
+        Ok(())
+    }
+
+    /// The window bank kept while code runs outside fast RAM is emulated
+    /// state: fast-RAM fetches outside the window take instruction-cache
+    /// lines and can evict chip-RAM code, while fetches through it take
+    /// none, so the bank decides which chip fetches hit. A JMP loop runs
+    /// through chip RAM, the Zorro board and ROM with the instruction
+    /// cache on; a snapshot taken at the ROM PC, with the window still on
+    /// the Zorro bank, must resume on the same bank and the same chip-bus
+    /// timing, whether it lands in a fresh machine or one that has since
+    /// moved its window elsewhere.
+    #[test]
+    fn jit_window_bank_survives_save_restore_outside_fast_ram() -> Result<()> {
+        use m68k::CACR_EI;
+        let chip_code = 0x0100u32;
+        let z_code = FAST_RAM_BASE as u32 + 0x100;
+        let rom_code = ROM_BASE as u32 + 0x180;
+        let jump = |addr: u32| [0x4EF9, (addr >> 16) as u16, addr as u16];
+        let make = || -> Result<M68kMachine> {
+            let mut bus = test_bus_with_pc(chip_code);
+            bus.mem.fit_mb_ram(2 * 1024 * 1024);
+            write_program(&mut bus, chip_code, &jump(z_code));
+            write_program(&mut bus, z_code, &jump(rom_code));
+            write_program(&mut bus, rom_code, &jump(chip_code));
+            let mut machine = M68kMachine::new(bus, CpuModel::M68030, false)?;
+            machine.bus_mut().agnus.hpos = 0x21;
+            machine.set_cache_emulation(true, true);
+            machine.cpu.cacr = CACR_EI;
+            machine.apply_cacr_updates();
+            machine.set_jit_enabled(true);
+            Ok(machine)
+        };
+        let mut live = make()?;
+        live.step_slice(1)?; // chip -> Zorro; the chip code takes a cache line
+        live.step_slice(1)?; // Zorro -> ROM; the window now covers the Zorro bank
+        assert_eq!(live.pc(), rom_code);
+        assert_eq!(live.bus.jit_window_bank, Some(FAST_RAM_BASE as u32));
+        let mut saved = Vec::new();
+        live.write_state(&mut saved)?;
+
+        let mut fresh = make()?;
+        fresh.apply_state(&mut &saved[..])?;
+        let mut moved = make()?;
+        moved.bus.jit_window_bank = Some(0x07E0_0000);
+        moved.apply_state(&mut &saved[..])?;
+        for resumed in [&fresh, &moved] {
+            assert_eq!(resumed.bus.jit_window_bank, Some(FAST_RAM_BASE as u32));
+        }
+
+        let live_result = live.step_slice(6)?;
+        for (name, resumed) in [("fresh", &mut fresh), ("moved", &mut moved)] {
+            let resumed_result = resumed.step_slice(6)?;
+            assert_eq!(resumed.pc(), live.pc(), "{name}");
+            assert_eq!(
+                resumed_result.bus_advanced_cck, live_result.bus_advanced_cck,
+                "{name}: restoring a JIT snapshot in ROM changed chip-bus fetch timing"
+            );
+        }
+        Ok(())
+    }
+
+    /// A save from before the window bank was carried has no
+    /// `jit_window_bank` field and reads as None: the largest bank until
+    /// code runs from a fast bank.
+    #[test]
+    fn machine_runtime_state_without_window_bank_reads_none() -> Result<()> {
+        #[derive(serde::Serialize)]
+        struct OlderMachineRuntimeState {
+            last_cacr: u32,
+            sync_cck_on: bool,
+            cpu_clocks_per_cck: u32,
+            cpu_clock_carry: u32,
+        }
+        let older = OlderMachineRuntimeState {
+            last_cacr: 0x0101,
+            sync_cck_on: true,
+            cpu_clocks_per_cck: 4,
+            cpu_clock_carry: 1,
+        };
+        let mut bytes = Vec::new();
+        chunk::encode(&older, &mut bytes)?;
+        let state: MachineRuntimeState = chunk::decode(&bytes)?;
+        assert_eq!(state.last_cacr, 0x0101);
+        assert_eq!(state.cpu_clock_carry, 1);
+        assert_eq!(state.jit_window_bank, None);
         Ok(())
     }
 
