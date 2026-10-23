@@ -332,6 +332,13 @@ struct MachineRuntimeState {
     sync_cck_on: bool,
     cpu_clocks_per_cck: u32,
     cpu_clock_carry: u32,
+    /// `CpuBus::jit_window_bank`: the bank the JIT fastmem window covers
+    /// while code runs outside fast RAM. It decides which fast-RAM accesses
+    /// allocate cache lines, and so which chip-RAM lines they evict. Saves
+    /// from before it existed read None: the largest bank until code runs
+    /// from a fast bank, as those builds always chose.
+    #[serde(default)]
+    jit_window_bank: Option<u32>,
 }
 
 /// Same-process rollback also needs the interrupt sample consumed at the next
@@ -488,7 +495,8 @@ struct CpuBus {
     window_offered: bool,
     /// Base of the fast-RAM bank the fastmem window covered last, which
     /// the window keeps while code runs outside fast RAM (`jit_fast_mem`).
-    /// Host-side speed bookkeeping, never serialized: it changes no result.
+    /// Emulated state: it decides which fast-RAM accesses allocate cache
+    /// lines, so save states carry it (`MachineRuntimeState`).
     jit_window_bank: Option<u32>,
     /// Whether CACR has the 68040/060 layout (`cacr_040_layout`). Follows
     /// the core's CPU type like `address_mask`, so `cache_control` can
@@ -1651,6 +1659,7 @@ impl M68kMachine {
             sync_cck_on: self.sync_cck_on,
             cpu_clocks_per_cck: self.cpu_clocks_per_cck,
             cpu_clock_carry: self.cpu_clock_carry,
+            jit_window_bank: self.bus.jit_window_bank,
         }
     }
 
@@ -1856,6 +1865,7 @@ impl M68kMachine {
         self.sync_cck_on = runtime.sync_cck_on;
         self.cpu_clocks_per_cck = runtime.cpu_clocks_per_cck;
         self.cpu_clock_carry = runtime.cpu_clock_carry;
+        self.bus.jit_window_bank = runtime.jit_window_bank;
         // The short-bus-cycle flag is derived from the (restored) CPU model and
         // not serialized, so re-establish it here.
         let short_bus = !self.cpu.is_pre_68020;
@@ -5044,10 +5054,17 @@ impl CpuBus {
     /// largest bank. The guest OS decides where code and data live --
     /// Kickstart puts its own structures in the local bank it sizes itself,
     /// ahead of any Zorro board -- so a fixed choice such as the largest
-    /// bank can cover RAM nothing uses. The choice never changes results,
-    /// only which accesses skip the bus. `cpu_pc` is the logical PC; under
-    /// a remapping MMU it may name no bank or another one, which costs only
-    /// speed, since the window itself is physical.
+    /// bank can cover RAM nothing uses.
+    ///
+    /// The choice is emulated state, not just host speed: accesses through
+    /// the window allocate no cache lines (`keep_caches_out_of_window`),
+    /// while fast-RAM accesses outside it do and can evict chip-RAM lines,
+    /// so the bank decides which chip fetches hit the cache models and with
+    /// that the chip-bus timing. It depends only on the PC and the previous
+    /// choice, so a run is deterministic, and save states carry it
+    /// (`MachineRuntimeState::jit_window_bank`). `cpu_pc` is the logical
+    /// PC; under a remapping MMU it may name no bank or another one, which
+    /// only makes the choice less useful, since the window is physical.
     ///
     /// Returns None while anything that intercepts plain fast-RAM accesses
     /// is armed (memory-write debug hooks, the heat map, SMC detection,
@@ -8364,6 +8381,92 @@ mod tests {
         let expected = (0x1111_1111, 0x2222_2222, 0x3333_3333);
         assert_eq!(run(false)?, expected, "precise");
         assert_eq!(run(true)?, expected, "jit");
+        Ok(())
+    }
+
+    /// The window bank kept while code runs outside fast RAM is emulated
+    /// state: fast-RAM fetches outside the window take instruction-cache
+    /// lines and can evict chip-RAM code, while fetches through it take
+    /// none, so the bank decides which chip fetches hit. A JMP loop runs
+    /// through chip RAM, the Zorro board and ROM with the instruction
+    /// cache on; a snapshot taken at the ROM PC, with the window still on
+    /// the Zorro bank, must resume on the same bank and the same chip-bus
+    /// timing, whether it lands in a fresh machine or one that has since
+    /// moved its window elsewhere.
+    #[test]
+    fn jit_window_bank_survives_save_restore_outside_fast_ram() -> Result<()> {
+        use m68k::CACR_EI;
+        let chip_code = 0x0100u32;
+        let z_code = FAST_RAM_BASE as u32 + 0x100;
+        let rom_code = ROM_BASE as u32 + 0x180;
+        let jump = |addr: u32| [0x4EF9, (addr >> 16) as u16, addr as u16];
+        let make = || -> Result<M68kMachine> {
+            let mut bus = test_bus_with_pc(chip_code);
+            bus.mem.fit_mb_ram(2 * 1024 * 1024);
+            write_program(&mut bus, chip_code, &jump(z_code));
+            write_program(&mut bus, z_code, &jump(rom_code));
+            write_program(&mut bus, rom_code, &jump(chip_code));
+            let mut machine = M68kMachine::new(bus, CpuModel::M68030, false)?;
+            machine.bus_mut().agnus.hpos = 0x21;
+            machine.set_cache_emulation(true, true);
+            machine.cpu.cacr = CACR_EI;
+            machine.apply_cacr_updates();
+            machine.set_jit_enabled(true);
+            Ok(machine)
+        };
+        let mut live = make()?;
+        live.step_slice(1)?; // chip -> Zorro; the chip code takes a cache line
+        live.step_slice(1)?; // Zorro -> ROM; the window now covers the Zorro bank
+        assert_eq!(live.pc(), rom_code);
+        assert_eq!(live.bus.jit_window_bank, Some(FAST_RAM_BASE as u32));
+        let mut saved = Vec::new();
+        live.write_state(&mut saved)?;
+
+        let mut fresh = make()?;
+        fresh.apply_state(&mut &saved[..])?;
+        let mut moved = make()?;
+        moved.bus.jit_window_bank = Some(0x07E0_0000);
+        moved.apply_state(&mut &saved[..])?;
+        for resumed in [&fresh, &moved] {
+            assert_eq!(resumed.bus.jit_window_bank, Some(FAST_RAM_BASE as u32));
+        }
+
+        let live_result = live.step_slice(6)?;
+        for (name, resumed) in [("fresh", &mut fresh), ("moved", &mut moved)] {
+            let resumed_result = resumed.step_slice(6)?;
+            assert_eq!(resumed.pc(), live.pc(), "{name}");
+            assert_eq!(
+                resumed_result.bus_advanced_cck, live_result.bus_advanced_cck,
+                "{name}: restoring a JIT snapshot in ROM changed chip-bus fetch timing"
+            );
+        }
+        Ok(())
+    }
+
+    /// A save from before the window bank was carried has no
+    /// `jit_window_bank` field and reads as None: the largest bank until
+    /// code runs from a fast bank.
+    #[test]
+    fn machine_runtime_state_without_window_bank_reads_none() -> Result<()> {
+        #[derive(serde::Serialize)]
+        struct OlderMachineRuntimeState {
+            last_cacr: u32,
+            sync_cck_on: bool,
+            cpu_clocks_per_cck: u32,
+            cpu_clock_carry: u32,
+        }
+        let older = OlderMachineRuntimeState {
+            last_cacr: 0x0101,
+            sync_cck_on: true,
+            cpu_clocks_per_cck: 4,
+            cpu_clock_carry: 1,
+        };
+        let mut bytes = Vec::new();
+        chunk::encode(&older, &mut bytes)?;
+        let state: MachineRuntimeState = chunk::decode(&bytes)?;
+        assert_eq!(state.last_cacr, 0x0101);
+        assert_eq!(state.cpu_clock_carry, 1);
+        assert_eq!(state.jit_window_bank, None);
         Ok(())
     }
 

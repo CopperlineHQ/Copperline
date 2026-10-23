@@ -96,9 +96,13 @@ data), else the largest bank. A fixed choice can cover RAM nothing uses:
 Kickstart 3.2 on an A3000 lists the motherboard RAM it sizes itself at a
 higher allocation priority (30) than a Zorro III board (20), so with 16 MB
 on the motherboard and a 256 MB board, ExecBase, libraries and programs
-land in the smaller bank until it fills. The choice changes which
-accesses skip the bus, never a result. ROM is never offered, since the
-window is writable. The timing contract is deliberately approximate
+land in the smaller bank until it fills. The choice is emulated state, not
+only host speed: accesses through the window allocate no cache lines
+(below), while fast-RAM accesses outside it do and can evict chip-RAM
+lines, so the bank decides which chip fetches hit the cache models. It
+depends only on the PC and the previous choice, and save states carry it
+(`MachineRuntimeState`). ROM is never offered, since the window is
+writable. The timing contract is deliberately approximate
 (`M68kMachine::step_slice_jit`):
 
 - every retired instruction is billed a flat single CPU clock, converted
