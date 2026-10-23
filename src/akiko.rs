@@ -650,6 +650,13 @@ impl Akiko {
         self.disc.as_ref().or(self.pending_disc.as_ref())
     }
 
+    /// `disk.fault.*`'s `cd` target: the actually-mounted disc only, not
+    /// one still pending in the tray (not yet readable, so there is
+    /// nothing for a fault policy to act on).
+    pub fn disc_mut(&mut self) -> Option<&mut CdImage> {
+        self.disc.as_mut()
+    }
+
     /// Whether the drive is actively working: streaming CD audio, a TOC
     /// dump in progress, or a data read with the host still feeding PBX
     /// buffer slots (the same gate as run_sector_read). Feeds the

@@ -909,6 +909,75 @@ impl FloppyController {
         Ok(())
     }
 
+    /// `disk.fault.*` target resolution (`Bus::with_fault_policy_mut`'s
+    /// `T::Floppy` arm): the policy set belongs to the image itself
+    /// (`FloppyImage::fault`), not the drive, so a `None` here means no
+    /// image is currently inserted at `drive` -- indistinguishable from
+    /// `drive` being out of range at this layer, same as every other
+    /// `disk.fault.*` target's "no matching device/unit/media attached"
+    /// reply.
+    pub fn drive_fault_mut(
+        &mut self,
+        drive: usize,
+    ) -> Option<&mut crate::diskfault::FaultPolicySet> {
+        let d = self.drives.get_mut(drive)?;
+        // Any `disk.fault.*` call reaching this drive can change what a
+        // read ought to see from here on (a newly installed rule, a
+        // cleared one, a dropped/released held write) -- the cached
+        // track has to be rebuilt from `image_data` (which `track_stream`
+        // re-applies `fault` against on every rebuild) rather than keep
+        // serving whatever was decoded before this call. Harmless to
+        // invalidate even for a read-only `list`/`stats` call: the next
+        // access just re-decodes the same track.
+        d.cached_track = None;
+        Some(&mut d.image.as_mut()?.fault)
+    }
+
+    /// `None` when `drive_fault_mut` would also be `None` (no image at
+    /// all); `Some(true)` when the inserted image is `StandardAdf` (has a
+    /// sector grid `disk.fault.*` can address) and `Some(false)` for
+    /// `Tracks` (extended ADF / raw MFM, no sector model -- see
+    /// `FloppyImage::has_sector_model`'s doc comment). `disk.fault.set`
+    /// checks this before installing a policy so a `Tracks`-backed image
+    /// gets a specific, honest error instead of a policy that silently
+    /// never fires (the write/read hooks only ever consult `fault` on the
+    /// `StandardAdf` path).
+    pub fn drive_has_sector_model(&self, drive: usize) -> Option<bool> {
+        Some(self.drives.get(drive)?.image.as_ref()?.has_sector_model())
+    }
+
+    /// Replays one held write (`disk.fault.clear`'s `on_clear: release`,
+    /// or a flush release) directly onto a `StandardAdf` image, bypassing
+    /// the fault policy entirely -- the data already passed `drop`/`tear`/
+    /// `corrupt` once when it was first held, so re-running it through
+    /// `finish_write_words` would re-roll those checks on data that
+    /// already cleared them. `lba` is `track * SECTORS_PER_TRACK +
+    /// sector`, the same encoding `finish_write_words` derives it with.
+    /// `None` (not committed) if the drive/image/sector-model
+    /// preconditions `drive_fault_mut`/`drive_has_sector_model` already
+    /// checked no longer hold, or the lba is out of range -- a caller that
+    /// got this far should treat that as "nothing to do", not an error.
+    pub fn drive_write_held_sector(&mut self, drive: usize, lba: u64, data: &[u8]) -> Option<()> {
+        let image = self.drives.get_mut(drive)?.image.as_mut()?;
+        let FloppyImageData::StandardAdf(image_data) = &mut image.data else {
+            return None;
+        };
+        let track = (lba / SECTORS_PER_TRACK as u64) as usize;
+        let sector = (lba % SECTORS_PER_TRACK as u64) as usize;
+        let off = adf_sector_offset(track, sector);
+        if off + BYTES_PER_SECTOR > image_data.len() || data.len() < BYTES_PER_SECTOR {
+            return None;
+        }
+        let mut sector_data = [0u8; BYTES_PER_SECTOR];
+        sector_data.copy_from_slice(&data[..BYTES_PER_SECTOR]);
+        let sectors = [(sector, sector_data)];
+        apply_standard_adf_sectors(image_data, track, &sectors);
+        if image.backing == FloppyImageBacking::File {
+            let _ = write_standard_adf_sectors_to_disk(&image.path, track, &sectors);
+        }
+        Some(())
+    }
+
     /// Put a real drive on `drive_idx`, replacing any mounted image. The
     /// bridge supplies the track under the head from then on. `speed_percent`
     /// is the serving speed from `[floppy.dfN] bridge_speed`, already
@@ -2373,9 +2442,78 @@ impl FloppyController {
         let path = image.path.clone();
         let legacy_extended_adf = image.legacy_extended_adf;
         let backing = image.backing;
+        // Disjoint field borrow from `image.data` below (both taken
+        // directly off `image`, not through a method), so `disk.fault.*`
+        // can see every decoded sector of a `StandardAdf` write before it
+        // reaches the image, the same "decide before any real I/O" shape
+        // `HardDriveImage::write_sector` uses for the same reason:
+        // `drop`/`tear`/`reorder` must prevent or change what actually
+        // commits, which only works ahead of the write.
+        // A `reorder` window overflow's evicted write (committed for
+        // real, not discarded -- see `FaultPolicySet::take_evicted`'s doc
+        // comment) can only be replayed once `fault`'s and `image.data`'s
+        // borrows below have ended, so it is collected here and replayed
+        // after the match.
+        let mut evicted: Vec<crate::diskfault::HeldWrite> = Vec::new();
+        let fault = &mut image.fault;
         let write_result: Result<()> = match &mut image.data {
             FloppyImageData::StandardAdf(image_data) => {
                 decode_non_empty_track_write(track, write_words).and_then(|sectors| {
+                    let sectors: Vec<(usize, [u8; BYTES_PER_SECTOR])> = if fault.is_empty() {
+                        sectors
+                    } else {
+                        let mut kept = Vec::with_capacity(sectors.len());
+                        for (sector, data) in sectors {
+                            let lba = (track * SECTORS_PER_TRACK + sector) as u64;
+                            // `stale`'s pre-write capture -- `image_data`
+                            // is still this sector's old content, the
+                            // same buffer the tear-tail splice below reads
+                            // from for the same reason.
+                            let off = adf_sector_offset(track, sector);
+                            let pre_write = &image_data[off..off + BYTES_PER_SECTOR];
+                            match fault.on_write(lba, &data, BYTES_PER_SECTOR, pre_write) {
+                                crate::diskfault::Outcome::Proceed => kept.push((sector, data)),
+                                // `drop`/`reorder`: not committed this write.
+                                crate::diskfault::Outcome::DoneOk => {}
+                                crate::diskfault::Outcome::ProceedWith(replacement)
+                                    if replacement.len() >= BYTES_PER_SECTOR =>
+                                {
+                                    let mut out = [0u8; BYTES_PER_SECTOR];
+                                    out.copy_from_slice(&replacement[..BYTES_PER_SECTOR]);
+                                    kept.push((sector, out));
+                                }
+                                crate::diskfault::Outcome::ProceedWith(replacement) => {
+                                    // `tear(at: bytes)`: splice the
+                                    // untouched tail from what this sector
+                                    // already holds, not the guest's own
+                                    // just-decoded data -- a real power cut
+                                    // mid-sector never lets the rest of the
+                                    // sector see the write in flight, same
+                                    // reasoning as `HardDriveImage::
+                                    // write_sector`'s own tear-tail splice.
+                                    let off = adf_sector_offset(track, sector);
+                                    let mut out = [0u8; BYTES_PER_SECTOR];
+                                    out.copy_from_slice(&image_data[off..off + BYTES_PER_SECTOR]);
+                                    out[..replacement.len()].copy_from_slice(&replacement);
+                                    kept.push((sector, out));
+                                }
+                                // No hardware channel carries a hard write
+                                // failure back through this path (a real
+                                // floppy controller's completion interrupt
+                                // carries no status/error line the way IDE/
+                                // SCSI/copperhf do) -- `error`/`cut` drop
+                                // the sector rather than fail it, the
+                                // closest honest floppy-side equivalent;
+                                // flagged in the implementation report.
+                                crate::diskfault::Outcome::Fail(_) => {}
+                            }
+                        }
+                        evicted.extend(fault.take_evicted());
+                        kept
+                    };
+                    if sectors.is_empty() {
+                        return Ok(());
+                    }
                     apply_standard_adf_sectors(image_data, track, &sectors);
                     match backing {
                         FloppyImageBacking::File => {
@@ -2412,6 +2550,9 @@ impl FloppyController {
                 debug!("floppy.df{} image write complete", drive_idx);
             }
             Err(e) => warn!("floppy.df{} image write failed: {e:#}", drive_idx),
+        }
+        for held in evicted {
+            self.drive_write_held_sector(drive_idx, held.lba, &held.data);
         }
     }
 
@@ -2783,7 +2924,7 @@ impl FloppyController {
             return;
         }
 
-        if let Some(image) = drive.image.as_ref() {
+        if let Some(image) = drive.image.as_mut() {
             if let Some(stream) = image.track_stream(track) {
                 drive.cached.revs = stream.revs;
             }

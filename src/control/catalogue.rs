@@ -864,6 +864,84 @@ fn build() -> Vec<ToolDef> {
             json!({}),
         ),
         entry(
+            "disk.fault.set",
+            "Install a deterministic device-level fault policy on an image-backed block \
+             target -- copperhf, PCMCIA, IDE, SCSI, floppy, or CD: dropped/torn/reordered \
+             writes, ignored flushes, stale/corrupt reads, media errors, delays and \
+             simulated power-cuts, seeded for exact reproducibility. With `id`, replaces \
+             that policy in place (releasing its own held writes first); several policies \
+             may be active on one target at once, evaluated in installation order. See \
+             `docs/debugger/disk-fault.md` for the full target/rule/action schema.",
+            object(
+                vec![
+                    (
+                        "target",
+                        json!({"type": "object", "description": "{\"kind\": \"copperhf\"|\"pcmcia\"|\"ide\"|\"scsi\"|\"floppy\"|\"cd\", \"unit\"/\"drive\": N}"}),
+                    ),
+                    (
+                        "policy",
+                        json!({"type": "object", "description": "{\"on_clear\": \"release\"|\"drop\", \"rules\": [...]}"}),
+                    ),
+                    ("seed", uint("Generator seed (default 0); a rule may override it", None, None)),
+                    ("id", string("Policy id (default: auto-assigned); set replaces an existing id atomically")),
+                ],
+                &["target", "policy"],
+            ),
+            json!({
+                "target": {"kind": "ide", "unit": 0},
+                "seed": 42,
+                "policy": {"rules": [{"op": "write", "action": "drop", "probability": 0.01}]}
+            }),
+        ),
+        entry(
+            "disk.fault.clear",
+            "Clear fault policies: by `id`, every policy on `target`, or every policy on \
+             every target with neither given. Held writes in a reorder window are \
+             released in order unless the policy's `on_clear` says `drop`.",
+            object(
+                vec![
+                    ("id", string("Policy id to clear")),
+                    (
+                        "target",
+                        json!({"type": "object", "description": "Clear every policy on this target"}),
+                    ),
+                ],
+                &[],
+            ),
+            json!({"target": {"kind": "ide", "unit": 0}}),
+        ),
+        entry(
+            "disk.fault.list",
+            "List installed fault policies, optionally filtered to one `target`: each \
+             policy's id, target, seed, rules (with their own `hits` counts, so a test can \
+             assert a rule actually fired), and `on_clear`.",
+            object(vec![("target", json!({"type": "object", "description": "Limit to this target"}))], &[]),
+            json!({}),
+        ),
+        entry(
+            "disk.fault.stats",
+            "Cumulative fault-injection stats for `target` since attach or the last \
+             `disk.fault.reset_stats`: request/read/write/flush/trim counts and \
+             dropped/torn/reordered/flush_ignored/stale_served/corrupted/errored counts, \
+             total injected delay, and whether the target is in a `cut` (simulated \
+             power-loss) state.",
+            object(
+                vec![("target", json!({"type": "object", "description": "{\"kind\": ..., \"unit\"/\"drive\": N}"}))],
+                &["target"],
+            ),
+            json!({"target": {"kind": "copperhf", "unit": 0}}),
+        ),
+        entry(
+            "disk.fault.reset_stats",
+            "Reset `target`'s cumulative fault-injection stats to zero. Does not affect \
+             installed policies or their rule hit counts.",
+            object(
+                vec![("target", json!({"type": "object", "description": "{\"kind\": ..., \"unit\"/\"drive\": N}"}))],
+                &["target"],
+            ),
+            json!({"target": {"kind": "copperhf", "unit": 0}}),
+        ),
+        entry(
             "memory.heatmap",
             "Enable (default) or disable the memory heat map over the window \
              `base`..`base+span` (default the whole 16 MB map): a 256x256 grid of cells, \

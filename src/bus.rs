@@ -5935,6 +5935,124 @@ impl Bus {
         })
     }
 
+    /// Resolves a `disk.fault.*` target to its backing
+    /// [`crate::harddrive::HardDriveImage`] and runs `f` against it --
+    /// `None` if the target is `floppy`/`cd` (neither is `HardDriveImage`-
+    /// backed; see [`Self::with_fault_policy_mut`]/[`Self::cd_image_mut`]
+    /// for those) or no device/unit/media matches. IDE checks `gayle`
+    /// (A600/A1200) and `ide_a4000` (A4000) in turn since a machine
+    /// profile only ever configures one of the two; SCSI checks `sdmac`
+    /// (A3000-internal WD33C93) then the Zorro chain's A2091 (also
+    /// WD33C93) and A4091 (53C710, its own `targets` array) in turn, same
+    /// reasoning as `scsi_cd_mut` above -- a profile fits at most one SCSI
+    /// controller, so only one of these ever has the target.
+    pub fn with_hard_drive_image_mut<R>(
+        &mut self,
+        target: &crate::diskfault::DiskFaultTarget,
+        f: impl FnOnce(&mut crate::harddrive::HardDriveImage) -> R,
+    ) -> Option<R> {
+        use crate::diskfault::DiskFaultTarget as T;
+        match target {
+            T::Ide { unit } => {
+                if let Some(gayle) = &mut self.gayle {
+                    if let Some(img) = gayle.hard_disk_mut(*unit) {
+                        return Some(f(img));
+                    }
+                }
+                if let Some(ide) = &mut self.ide_a4000 {
+                    if let Some(img) = ide.hard_disk_mut(*unit) {
+                        return Some(f(img));
+                    }
+                }
+                // A Zorro IDE board (LIDE and similar) is checked last,
+                // after the machine's own built-in IDE -- a board that
+                // attaches alongside Gayle/A4000 IDE rather than
+                // replacing it still gets its own `unit` range reached
+                // this way.
+                for dev in self.devices.iter_mut() {
+                    if let crate::zorro_device::BoardDevice::IdeZorro(board) = dev {
+                        if let Some(img) = board.hard_disk_mut(*unit) {
+                            return Some(f(img));
+                        }
+                    }
+                }
+                None
+            }
+            T::Pcmcia => self.pcmcia.as_mut()?.hard_disk_mut().map(f),
+            T::Copperhf { unit } => self.copperhf_board_mut()?.with_unit_image_mut(*unit, f),
+            T::Scsi { unit } => {
+                if let Some(sdmac) = &mut self.sdmac {
+                    if let Some(img) = sdmac.disk_mut(*unit) {
+                        return Some(f(img));
+                    }
+                }
+                for dev in self.devices.iter_mut() {
+                    let img = match dev {
+                        crate::zorro_device::BoardDevice::A2091(board) => board.disk_mut(*unit),
+                        crate::zorro_device::BoardDevice::A4091(board) => board.disk_mut(*unit),
+                        _ => None,
+                    };
+                    if let Some(img) = img {
+                        return Some(f(img));
+                    }
+                }
+                None
+            }
+            T::Floppy { .. } | T::Cd => None,
+        }
+    }
+
+    /// `disk.fault.*` target resolution for `cd` -- the CD drive's image,
+    /// across both the SCSI and ATAPI paths `scsi_cd_mut` already
+    /// searches (A3000-internal/A2091/A4091 SCSI, then Gayle/A4000/
+    /// Zorro-IDE ATAPI) and, when neither resolves, the CD32's Akiko or
+    /// the CDTV's own controller -- neither is SCSI/ATAPI, each holds its
+    /// mounted disc as a `CdImage` directly.
+    pub fn cd_image_mut(&mut self) -> Option<&mut crate::cdrom::CdImage> {
+        // Checked (not matched directly into the return), then re-resolved
+        // below: an `if let` across the whole function body here ties the
+        // borrow to every branch's lifetime, which the borrow checker
+        // then refuses to let the `akiko`/`cdtv` branches reborrow after.
+        if self.scsi_cd_mut().is_some() {
+            return self.scsi_cd_mut().map(crate::scsi::ScsiCdRom::image_mut);
+        }
+        if self
+            .akiko
+            .as_mut()
+            .is_some_and(|akiko| akiko.disc_mut().is_some())
+        {
+            return self.akiko.as_mut().and_then(crate::akiko::Akiko::disc_mut);
+        }
+        self.cdtv
+            .as_mut()
+            .and_then(crate::cdtv::CdtvController::disc_mut)
+    }
+
+    /// Resolves a `disk.fault.*` target to the [`crate::diskfault::
+    /// FaultPolicySet`] it owns -- every target kind, unlike
+    /// `with_hard_drive_image_mut` (`copperhf`/`pcmcia`/`ide`/`scsi`
+    /// only). `DiskFaultSet`/`List`/`Stats`/`ResetStats` only ever touch
+    /// the policy set itself, so they go through this; `DiskFaultClear`'s
+    /// held-write replay needs real write capability (which a policy set
+    /// alone can't give a `floppy` target), so it still resolves
+    /// `copperhf`/`pcmcia`/`ide`/`scsi` via `with_hard_drive_image_mut`
+    /// and `floppy` via `FloppyController::drive_write_held_sector`
+    /// directly (`cd` never holds a reorder queue at all -- read-only, see
+    /// `CdImage::read_data_sector`'s doc comment -- so it never needs a
+    /// replay path).
+    pub fn with_fault_policy_mut<R>(
+        &mut self,
+        target: &crate::diskfault::DiskFaultTarget,
+        f: impl FnOnce(&mut crate::diskfault::FaultPolicySet) -> R,
+    ) -> Option<R> {
+        use crate::diskfault::DiskFaultTarget as T;
+        match target {
+            T::Floppy { drive } => self.floppy.drive_fault_mut(*drive).map(f),
+            T::Cd => self.cd_image_mut().map(|img| f(&mut img.fault)),
+            _ => self.with_hard_drive_image_mut(target, |img| f(&mut img.fault)),
+        }
+    }
+
     /// Block until the copperhf.device board (if configured) has no
     /// requests in flight -- every completion already surfaced, every
     /// guest-visible effect already applied. A no-op if there is no

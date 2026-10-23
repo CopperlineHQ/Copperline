@@ -17,8 +17,9 @@
 use super::{
     be16, be24, be32, cdb_len, ScsiExec, ASC_ILLEGAL_MODE_FOR_THIS_TRACK, ASC_INVALID_FIELD_IN_CDB,
     ASC_INVALID_OPCODE, ASC_LBA_OUT_OF_RANGE, ASC_LUN_NOT_SUPPORTED, ASC_MEDIUM_MAY_HAVE_CHANGED,
-    ASC_MEDIUM_NOT_PRESENT, CHECK_CONDITION, GOOD, SENSE_LEN, SK_HARDWARE_ERROR,
-    SK_ILLEGAL_REQUEST, SK_NOT_READY, SK_UNIT_ATTENTION,
+    ASC_MEDIUM_NOT_PRESENT, ASC_WRITE_PROTECTED, CHECK_CONDITION, GOOD, SENSE_LEN,
+    SK_ABORTED_COMMAND, SK_DATA_PROTECT, SK_HARDWARE_ERROR, SK_ILLEGAL_REQUEST, SK_MEDIUM_ERROR,
+    SK_NOT_READY, SK_UNIT_ATTENTION,
 };
 use crate::cdrom::{
     CdImage, CdTrack, DATA_SECTOR_BYTES, LEADIN_SECTORS, RAW_SECTOR_BYTES, SECTORS_PER_SECOND,
@@ -87,6 +88,23 @@ pub struct ScsiCdRom {
     pending: Option<PendingDisc>,
 }
 
+/// Maps a `CdImage::read_*` failure to the sense key/ASC this target
+/// reports for it: a fault-injected `error`/`cut` (recovered via
+/// [`crate::diskfault::fault_error_code_anyhow`]) carries its exact
+/// `ErrorCode` through to the matching sense key -- `media` to MEDIUM
+/// ERROR in particular, not the blanket HARDWARE ERROR every code used
+/// to report -- instead of collapsing every code to the same reply.
+fn sense_for_cd_error(err: &anyhow::Error) -> (u8, u8) {
+    use crate::diskfault::ErrorCode;
+    match crate::diskfault::fault_error_code_anyhow(err) {
+        Some(ErrorCode::Media) => (SK_MEDIUM_ERROR, 0x00),
+        Some(ErrorCode::Timeout | ErrorCode::Aborted) => (SK_ABORTED_COMMAND, 0x00),
+        Some(ErrorCode::NotReady) => (SK_NOT_READY, 0x00),
+        Some(ErrorCode::WriteProtect) => (SK_DATA_PROTECT, ASC_WRITE_PROTECTED),
+        None => (SK_HARDWARE_ERROR, 0x00),
+    }
+}
+
 impl ScsiCdRom {
     /// Open a CD-ROM unit from a CUE/BIN, bare ISO, Nero NRG, or CHD image.
     pub fn open(path: &Path) -> anyhow::Result<Self> {
@@ -135,6 +153,13 @@ impl ScsiCdRom {
         self.play = PlayPhase::Idle;
         self.play_pos = 0;
         self.play_end = 0;
+    }
+
+    /// The mounted disc's image -- `disk.fault.*` target resolution
+    /// (`Bus::cd_image_mut`), reusing `Bus::scsi_cd_mut`'s own SCSI/ATAPI
+    /// board-chain search rather than a second one.
+    pub fn image_mut(&mut self) -> &mut CdImage {
+        &mut self.image
     }
 
     /// Runtime disc swap: eject now and mount the new disc after the
@@ -604,7 +629,8 @@ impl ScsiCdRom {
             let mut buf = [0u8; DATA_SECTOR_BYTES];
             if let Err(e) = self.image.read_data_sector(sector, &mut buf) {
                 log::warn!("scsi cd {}: read lba {sector}: {e}", self.path.display());
-                return self.check(SK_HARDWARE_ERROR, 0x00);
+                let (sk, asc) = sense_for_cd_error(&e);
+                return self.check(sk, asc);
             }
             data[(i as usize) * DATA_SECTOR_BYTES..][..DATA_SECTOR_BYTES].copy_from_slice(&buf);
         }
@@ -667,7 +693,8 @@ impl ScsiCdRom {
             };
             if let Err(e) = result {
                 log::warn!("scsi cd {}: read cd lba {sector}: {e}", self.path.display());
-                return self.check(SK_HARDWARE_ERROR, 0x00);
+                let (sk, asc) = sense_for_cd_error(&e);
+                return self.check(sk, asc);
             }
         }
         self.play_pos = (lba + count - 1) as u32;
@@ -970,6 +997,39 @@ mod tests {
             SK_ILLEGAL_REQUEST,
             ASC_LBA_OUT_OF_RANGE,
         );
+        cleanup(&paths);
+    }
+
+    /// `disk.fault.*`'s read hook (`CdImage::read_data_sector`) through a
+    /// real SCSI READ(10): CD has a genuine hardware error channel (unlike
+    /// floppy), so `error` fails the command outright via sense data,
+    /// exactly as a real drive's medium-error response would reach the
+    /// driver -- `CdImage::read_data_sector`'s doc comment on why `error`
+    /// bails rather than inverting bytes the way floppy's "no error
+    /// channel" fallback does.
+    #[test]
+    fn a_fault_on_a_cd_target_fails_read10_with_a_medium_error() {
+        let (mut cd, paths) = mixed_disc();
+        cd.image_mut()
+            .fault
+            .set(
+                None,
+                &serde_json::json!({"rules": [{"op": "read", "lba": {"from": 0, "to": 0}, "action": "error", "code": "media"}]}),
+                1,
+            )
+            .unwrap();
+        // `code: "media"` maps to MEDIUM ERROR specifically, not the
+        // blanket HARDWARE ERROR every code used to report.
+        check_sense(
+            &mut cd,
+            &[0x28, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+            SK_MEDIUM_ERROR,
+            0x00,
+        );
+        // A sector the policy doesn't select still reads clean.
+        let data = data_in(&mut cd, &[0x28, 0, 0, 0, 0, 1, 0, 0, 1, 0]);
+        assert!(data.iter().all(|&b| b == 1));
+        assert_eq!(cd.image_mut().fault.stats.errored, 1);
         cleanup(&paths);
     }
 

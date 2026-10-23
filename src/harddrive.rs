@@ -94,6 +94,10 @@ pub struct HardDriveImage {
     overlay_write_warned: bool,
     /// Lowercase bus tag ("ide"/"scsi") for log messages.
     bus_name: &'static str,
+    /// `disk.fault.*`'s installed policies -- part of `HardDriveImageState`
+    /// (`state.save`/`state.load`), see that struct's own `fault` field
+    /// doc comment.
+    pub fault: crate::diskfault::FaultPolicySet,
 }
 
 /// Serde shadow of `HardDriveImage`. File-backed images store only the host
@@ -130,6 +134,15 @@ struct HardDriveImageState<P = PathBuf, B = Vec<u8>, S = SessionImage> {
     /// backing, and for a write-protected CHD.
     #[serde(default)]
     chd_overlay: Option<BTreeMap<u64, Vec<u8>>>,
+    /// `disk.fault.*`'s installed policies, counters and in-flight state
+    /// (`docs/debugger/disk-fault.md`): the proposal's own requirement --
+    /// "`state.save` includes the held-write queues, rule counters and
+    /// generator state ... so a fault scenario replays exactly from a
+    /// snapshot." `#[serde(default)]` so a state saved before this field
+    /// existed still loads, with no policies installed, same as a freshly
+    /// opened image.
+    #[serde(default)]
+    fault: crate::diskfault::FaultPolicySet,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -179,6 +192,7 @@ impl serde::Serialize for HardDriveImage {
                 })?,
                 _ => None,
             },
+            fault: self.fault.clone(),
         }
         .serialize(serializer)
     }
@@ -198,6 +212,7 @@ impl<'de> serde::Deserialize<'de> for HardDriveImage {
                     rdb_overlay: state.rdb_overlay,
                     overlay_write_warned: state.overlay_write_warned,
                     bus_name,
+                    fault: state.fault,
                 });
             }
             #[cfg(target_arch = "wasm32")]
@@ -254,6 +269,7 @@ impl<'de> serde::Deserialize<'de> for HardDriveImage {
             rdb_overlay: state.rdb_overlay,
             overlay_write_warned: state.overlay_write_warned,
             bus_name,
+            fault: state.fault,
         })
     }
 }
@@ -558,6 +574,7 @@ impl HardDriveImage {
             rdb_overlay: None,
             overlay_write_warned: false,
             bus_name,
+            fault: crate::diskfault::FaultPolicySet::default(),
         })
     }
 
@@ -886,6 +903,7 @@ impl HardDriveImage {
             rdb_overlay,
             overlay_write_warned: false,
             bus_name,
+            fault: crate::diskfault::FaultPolicySet::default(),
         })
     }
 
@@ -959,7 +977,51 @@ impl HardDriveImage {
             .map_or(0, |_| u64::from(CYL_SECTORS))
     }
 
+    /// `disk.fault.*`'s own error reply shape: wraps the fault
+    /// [`crate::diskfault::ErrorCode`] so a caller that wants to translate
+    /// it into the controller's native error representation (IDE status/
+    /// error bits, SCSI sense key, copperhf `io_Error` -- the proposal's
+    /// `error` action table) can recover it from an ordinary
+    /// `std::io::Result`, same as any other `read_sector`/`write_sector`
+    /// failure, via `crate::diskfault::fault_error_code`.
+    /// `WriteProtect` carries `PermissionDenied` specifically: several
+    /// callers already classify a *real* write-protected medium by that
+    /// kind (this file's own `write_protected_error`, copperhf's
+    /// `WorkerResult::WriteProtected` check), so a fault-injected
+    /// `write_protect` is classified identically with no extra plumbing
+    /// in those call sites. Every other code is `Other`, recoverable via
+    /// `fault_error_code` for a controller that wants to distinguish them.
+    fn fault_io_error(code: crate::diskfault::ErrorCode) -> std::io::Error {
+        let kind = if matches!(code, crate::diskfault::ErrorCode::WriteProtect) {
+            std::io::ErrorKind::PermissionDenied
+        } else {
+            std::io::ErrorKind::Other
+        };
+        std::io::Error::new(kind, crate::diskfault::FaultIoError(code))
+    }
+
+    /// Faulted read: decides nothing before the real read (a read has no
+    /// write-ordering hazard to prevent), does the real read, then lets
+    /// the policy set override the result -- a held reorder-queue write
+    /// for this lba, bit corruption, or a simulated error/cut, per
+    /// [`crate::diskfault::FaultPolicySet::on_read`]'s own doc comment.
     pub fn read_sector(&mut self, lba: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        self.read_sector_real(lba, buf)?;
+        if self.fault.is_empty() {
+            return Ok(());
+        }
+        match self.fault.on_read(lba, buf, SECTOR_SIZE) {
+            crate::diskfault::Outcome::Proceed | crate::diskfault::Outcome::DoneOk => Ok(()),
+            crate::diskfault::Outcome::ProceedWith(data) => {
+                let n = data.len().min(buf.len());
+                buf[..n].copy_from_slice(&data[..n]);
+                Ok(())
+            }
+            crate::diskfault::Outcome::Fail(code) => Err(Self::fault_io_error(code)),
+        }
+    }
+
+    fn read_sector_real(&mut self, lba: u64, buf: &mut [u8]) -> std::io::Result<()> {
         if let Some(overlay) = &self.rdb_overlay {
             if lba < u64::from(CYL_SECTORS) {
                 let off = lba as usize * SECTOR_SIZE;
@@ -990,12 +1052,168 @@ impl HardDriveImage {
         }
     }
 
+    /// Faulted write: the policy set decides *before* any real I/O --
+    /// `drop`/`tear`/`reorder` must prevent or change what actually
+    /// reaches the image, which is only possible ahead of the write, not
+    /// after (see [`crate::diskfault::FaultPolicySet::on_write`]).
     pub fn write_sector(&mut self, lba: u64, buf: &[u8]) -> std::io::Result<()> {
-        if matches!(&self.backing, Backing::Session(image) if image.read_only()) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "session disk is read-only",
-            ));
+        self.write_sectors(lba, buf)
+    }
+
+    /// `write_sector`'s multi-sector counterpart: the request-level entry
+    /// point a controller committing several consecutive sectors as one
+    /// operation (IDE WRITE MULTIPLE, SCSI WRITE(10)/(12)/(16), a
+    /// copperhf multi-sector job) should call once for the whole buffer,
+    /// not once per sector -- `tear {at: "sector"}` can only truncate a
+    /// request down to its first N sectors if the policy set actually
+    /// sees the request as one multi-sector whole (`on_write`'s own
+    /// `count` already reflects `buf.len() / sector_bytes` either way,
+    /// but every prior caller only ever passed one sector at a time, so
+    /// `count` was always 1 and a `tear` keeping "the first 2 sectors" of
+    /// an 8-sector request had nothing beyond the first sector to keep).
+    /// A trailing partial sector (shorter than `SECTOR_SIZE`) is neither
+    /// read nor written, same as [`Self::read_sectors`].
+    pub fn write_sectors(&mut self, lba: u64, buf: &[u8]) -> std::io::Result<()> {
+        let buf = &buf[..buf.len() - buf.len() % SECTOR_SIZE];
+        if buf.is_empty() {
+            return Ok(());
+        }
+        // Checked here too, not just inside `write_sector_real`: a fault
+        // policy's `DoneOk`/`ProceedWith` outcome below returns without
+        // ever reaching `write_sector_real`, which would otherwise let an
+        // active policy make a write-protected medium (a CHD with no
+        // write overlay, a read-only session copy, a read-only physical
+        // device -- everything `write_protected` covers, not just the
+        // session case) look writable.
+        if self.write_protected() {
+            return Err(Self::write_protected_error());
+        }
+        if self.fault.is_empty() {
+            return self.write_sectors_real(lba, buf);
+        }
+        // Only `stale` actually needs this (to arm what a later read
+        // serves back); every other action ignores it. Read unconditionally
+        // rather than only when a `stale` rule happens to be installed --
+        // simpler, and this whole branch already only runs with some
+        // policy active. A sector that has never been written (a fresh
+        // sparse image) has nothing meaningful to go stale to, so a read
+        // failure here is not itself a write failure -- an empty
+        // `pre_write` just means `stale` has nothing to arm this time.
+        // Spans the whole request (not just one sector), read sector by
+        // sector since `read_sector_real` itself is single-sector.
+        let sectors = buf.len() / SECTOR_SIZE;
+        let mut pre_write = vec![0u8; buf.len()];
+        for i in 0..sectors {
+            let mut one = [0u8; SECTOR_SIZE];
+            if self.read_sector_real(lba + i as u64, &mut one).is_ok() {
+                pre_write[i * SECTOR_SIZE..(i + 1) * SECTOR_SIZE].copy_from_slice(&one);
+            }
+        }
+        let outcome = self.fault.on_write(lba, buf, SECTOR_SIZE, &pre_write);
+        // A `reorder` window overflow evicts the oldest/random held write
+        // by committing it for real rather than discarding it --
+        // `on_write` has no I/O of its own, so it queues the eviction and
+        // this is where it gets replayed, the same "already decided"
+        // shape `write_sector_replay` uses for a flush/clear release.
+        // `write_sectors_real`, not `write_sector_real`: an evicted held
+        // write can itself span several sectors (a `reorder` that caught
+        // a multi-sector request whole).
+        for evicted in self.fault.take_evicted() {
+            self.write_sectors_real(evicted.lba, &evicted.data)?;
+        }
+        match outcome {
+            crate::diskfault::Outcome::Proceed => self.write_sectors_real(lba, buf),
+            crate::diskfault::Outcome::DoneOk => Ok(()),
+            // `tear`'s `at: bytes` mode, or `at: "sector"` leaving a
+            // trailing partial sector (or no partial sector at all, if
+            // `data` happens to end exactly on a boundary): whatever
+            // whole sectors `data` covers land as-is; a trailing partial
+            // sector splices its untouched tail from what is on disk
+            // *now* -- not left as whatever the caller's buffer happened
+            // to hold -- modelling a power cut mid-sector, same as the
+            // original single-sector tear-tail splice.
+            crate::diskfault::Outcome::ProceedWith(data) => {
+                let whole = (data.len() / SECTOR_SIZE) * SECTOR_SIZE;
+                if whole > 0 {
+                    self.write_sectors_real(lba, &data[..whole])?;
+                }
+                let tail = &data[whole..];
+                if !tail.is_empty() {
+                    let tail_lba = lba + (whole / SECTOR_SIZE) as u64;
+                    let mut sector = vec![0u8; SECTOR_SIZE];
+                    self.read_sector_real(tail_lba, &mut sector)?;
+                    sector[..tail.len()].copy_from_slice(tail);
+                    self.write_sector_real(tail_lba, &sector)?;
+                }
+                Ok(())
+            }
+            crate::diskfault::Outcome::Fail(code) => Err(Self::fault_io_error(code)),
+        }
+    }
+
+    fn write_protected_error() -> std::io::Error {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "medium is write-protected",
+        )
+    }
+
+    /// Writes a held write a fault policy already decided on (a reorder
+    /// release via a flush or `disk.fault.clear`) straight to the image,
+    /// bypassing `write_sector`/`write_sectors`'s own fault check --
+    /// re-entering it would let `drop`/`tear`/`corrupt` roll again on
+    /// data that already passed those checks once. `write_sectors_real`,
+    /// not `write_sector_real`: `buf` can span several sectors (a
+    /// `reorder` that caught a multi-sector request whole). See
+    /// `flush`'s own replay loop for the same reasoning.
+    pub fn write_sector_replay(&mut self, lba: u64, buf: &[u8]) -> std::io::Result<()> {
+        self.write_sectors_real(lba, buf)
+    }
+
+    /// `write_sector_real` for a buffer spanning one or more consecutive
+    /// sectors. The synthesized RDB cylinder (and its write warning) stays
+    /// on the per-sector path; sectors past it move in one host write for
+    /// `Backing::File`/`Backing::Memory` -- the same bulk optimization
+    /// [`Self::read_sectors`] uses for reads -- so a controller committing
+    /// a multi-sector run pays one seek and one write, not one per sector.
+    /// Other backings have their own sector mapping and still go one
+    /// sector at a time.
+    fn write_sectors_real(&mut self, lba: u64, buf: &[u8]) -> std::io::Result<()> {
+        debug_assert!(buf.len().is_multiple_of(SECTOR_SIZE));
+        let sectors = (buf.len() / SECTOR_SIZE) as u64;
+        let overlay = self.overlay_sectors();
+        let in_overlay = overlay.saturating_sub(lba).min(sectors) as usize * SECTOR_SIZE;
+        let (head, tail) = buf.split_at(in_overlay);
+        for (i, chunk) in head.chunks_exact(SECTOR_SIZE).enumerate() {
+            self.write_sector_real(lba + i as u64, chunk)?;
+        }
+        if tail.is_empty() {
+            return Ok(());
+        }
+        let lba = lba + (in_overlay / SECTOR_SIZE) as u64;
+        let file_lba = lba - overlay;
+        match &mut self.backing {
+            Backing::File(file) => {
+                file.seek(SeekFrom::Start(file_lba * SECTOR_SIZE as u64))?;
+                file.write_all(tail)
+            }
+            Backing::Memory(image) => {
+                let off = file_lba as usize * SECTOR_SIZE;
+                image[off..off + tail.len()].copy_from_slice(tail);
+                Ok(())
+            }
+            _ => {
+                for (i, chunk) in tail.chunks_exact(SECTOR_SIZE).enumerate() {
+                    self.write_sector_real(lba + i as u64, chunk)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn write_sector_real(&mut self, lba: u64, buf: &[u8]) -> std::io::Result<()> {
+        if self.write_protected() {
+            return Err(Self::write_protected_error());
         }
         if let Some(overlay) = &mut self.rdb_overlay {
             if lba < u64::from(CYL_SECTORS) {
@@ -1081,46 +1299,31 @@ impl HardDriveImage {
         }
     }
 
-    /// Write consecutive sectors from `buf` starting at `lba`, one sector
-    /// per `SECTOR_SIZE` bytes (a trailing partial sector is ignored). The
-    /// bulk counterpart of [`Self::write_sector`]; see
-    /// [`Self::read_sectors`] for which backings move the run in one access.
-    pub fn write_sectors(&mut self, lba: u64, buf: &[u8]) -> std::io::Result<()> {
-        let whole = buf.len() - buf.len() % SECTOR_SIZE;
-        let sectors = (whole / SECTOR_SIZE) as u64;
-        // The synthesized RDB cylinder (and its write warning) stays on the
-        // per-sector path.
-        let overlay = self.overlay_sectors();
-        let in_overlay = overlay.saturating_sub(lba).min(sectors) as usize * SECTOR_SIZE;
-        let (head, tail) = buf[..whole].split_at(in_overlay);
-        for (i, sector) in head.chunks_exact(SECTOR_SIZE).enumerate() {
-            self.write_sector(lba + i as u64, sector)?;
-        }
-        if tail.is_empty() {
-            return Ok(());
-        }
-        let lba = lba + (in_overlay / SECTOR_SIZE) as u64;
-        let file_lba = lba - overlay;
-        match &mut self.backing {
-            Backing::File(file) => {
-                file.seek(SeekFrom::Start(file_lba * SECTOR_SIZE as u64))?;
-                file.write_all(tail)
-            }
-            Backing::Memory(image) => {
-                let off = file_lba as usize * SECTOR_SIZE;
-                image[off..off + tail.len()].copy_from_slice(tail);
-                Ok(())
-            }
-            _ => {
-                for (i, sector) in tail.chunks_exact(SECTOR_SIZE).enumerate() {
-                    self.write_sector(lba + i as u64, sector)?;
+    pub fn flush(&mut self) -> std::io::Result<()> {
+        if !self.fault.is_empty() {
+            match self.fault.on_flush() {
+                crate::diskfault::Outcome::Fail(code) => return Err(Self::fault_io_error(code)),
+                crate::diskfault::Outcome::DoneOk => return Ok(()), // `ignore`: acknowledged, nothing released
+                crate::diskfault::Outcome::Proceed | crate::diskfault::Outcome::ProceedWith(_) => {
+                    // Released in a seeded random order, not FIFO --
+                    // `write_sectors_real` (not `write_sector`/
+                    // `write_sectors`): these writes were already decided
+                    // when they were first held, so replaying them
+                    // through the fault layer again would re-roll
+                    // `drop`/`tear`/`corrupt` on data that already passed
+                    // those checks once; `held.data` can itself span
+                    // several sectors (a `reorder` that caught a
+                    // multi-sector request whole).
+                    for held in self.fault.take_release_on_flush() {
+                        self.write_sectors_real(held.lba, &held.data)?;
+                    }
                 }
-                Ok(())
             }
         }
+        self.flush_real()
     }
 
-    pub fn flush(&mut self) -> std::io::Result<()> {
+    fn flush_real(&mut self) -> std::io::Result<()> {
         // A real disk can be pulled out of its reader, so anything still held
         // back is a hazard an image file does not have.
         #[cfg(not(target_arch = "wasm32"))]
@@ -1275,6 +1478,7 @@ mod tests {
                 _ => unreachable!(),
             },
             chd_overlay: None,
+            fault: original.fault.clone(),
         };
         assert_eq!(encoded, bincode::serialize(&owned).unwrap());
         original.write_sector(lba, &[0x5A; SECTOR_SIZE]).unwrap();
@@ -1598,6 +1802,7 @@ mod tests {
                 writable: false,
             }),
             chd_overlay: None,
+            fault: Default::default(),
         };
         let bytes = bincode::serialize(&state).unwrap();
         let image: HardDriveImage = bincode::deserialize(&bytes).unwrap();
@@ -1933,5 +2138,500 @@ mod tests {
 
         let _ = std::fs::remove_file(&packed);
         let _ = std::fs::remove_file(&plain);
+    }
+
+    // -- disk.fault (`crate::diskfault`) integration ------------------------
+    //
+    // End-to-end against the real production path -- `HardDriveImage::open`,
+    // `read_sector`/`write_sector`/`flush`, a real temp file on disk -- not
+    // against `FaultPolicySet` directly (that is `diskfault.rs`'s own unit
+    // suite). `base` sits past the synthesized RDB overlay cylinder, same as
+    // the multi-member/gzip tests above, so these LBAs land in the real file.
+
+    fn fault_test_drive(name: &str) -> (PathBuf, HardDriveImage, u64) {
+        let bytes = bare_partition_bytes(4);
+        let path = temp_image(name, &bytes);
+        let drive = HardDriveImage::open(
+            &path,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
+        // Past the overlay cylinder *and* past `bare_partition_bytes`'s own
+        // "DOS\x01"/"MARK" sentinel bytes (offset 0, sector 5) -- genuinely
+        // zero in the source image, so "unchanged" has an unambiguous
+        // meaning here.
+        let base = u64::from(CYL_SECTORS) + 10;
+        (path, drive, base)
+    }
+
+    #[test]
+    fn a_read_only_session_image_stays_read_only_under_an_active_fault_policy() {
+        let bytes = bare_partition_bytes(4);
+        let path = temp_image("fault-readonly.hdf", &bytes);
+        let mut drive = HardDriveImage::open_session(
+            &path,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
+        drive.set_session_read_only(true);
+        drive
+            .fault
+            .set(
+                None,
+                &serde_json::json!({"rules": [{"op": "write", "action": "drop"}]}),
+                1,
+            )
+            .unwrap();
+        let base = u64::from(CYL_SECTORS) + 10;
+        let err = drive
+            .write_sector(base, &[1u8; SECTOR_SIZE])
+            .expect_err("a read-only session image must reject writes even under a fault policy");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_drop_policy_leaves_the_image_file_unchanged() {
+        let (path, mut drive, base) = fault_test_drive("fault-drop.hdf");
+        drive
+            .fault
+            .set(
+                None,
+                &serde_json::json!({"rules": [{"op": "write", "action": "drop"}]}),
+                1,
+            )
+            .unwrap();
+        drive.write_sector(base, &[0xAAu8; SECTOR_SIZE]).unwrap();
+        assert_eq!(drive.fault.stats.dropped, 1);
+
+        let mut reopened = HardDriveImage::open(
+            &path,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
+        let mut sector = vec![0u8; SECTOR_SIZE];
+        reopened.read_sector(base, &mut sector).unwrap();
+        assert!(
+            sector.iter().all(|&b| b == 0),
+            "a dropped write must never reach the image file"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_reorder_policy_holds_a_write_until_flush_releases_it() {
+        let (path, mut drive, base) = fault_test_drive("fault-reorder.hdf");
+        drive
+            .fault
+            .set(
+                None,
+                &serde_json::json!({"rules": [{"op": "write", "action": "reorder", "window": 4}]}),
+                1,
+            )
+            .unwrap();
+        drive.write_sector(base, &[0x42u8; SECTOR_SIZE]).unwrap();
+
+        // Not on disk yet: the write is only held in memory.
+        let mut reopened = HardDriveImage::open(
+            &path,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
+        let mut sector = vec![0u8; SECTOR_SIZE];
+        reopened.read_sector(base, &mut sector).unwrap();
+        assert!(
+            sector.iter().all(|&b| b == 0),
+            "held write must not reach disk before flush"
+        );
+
+        // The read path on the *same* drive (not reopened) sees it anyway,
+        // as a write cache would.
+        let mut live = vec![0u8; SECTOR_SIZE];
+        drive.read_sector(base, &mut live).unwrap();
+        assert_eq!(live, vec![0x42u8; SECTOR_SIZE]);
+
+        drive.flush().unwrap();
+        let mut reopened_after = HardDriveImage::open(
+            &path,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
+        let mut after = vec![0u8; SECTOR_SIZE];
+        reopened_after.read_sector(base, &mut after).unwrap();
+        assert_eq!(
+            after,
+            vec![0x42u8; SECTOR_SIZE],
+            "flush must release the held write to disk"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reorder_window_overflow_commits_the_evicted_write_instead_of_discarding_it() {
+        let (path, mut drive, base) = fault_test_drive("fault-reorder-evict.hdf");
+        drive
+            .fault
+            .set(
+                None,
+                &serde_json::json!({"rules": [{"op": "write", "action": "reorder", "window": 1}]}),
+                1,
+            )
+            .unwrap();
+        drive.write_sector(base, &[0xAAu8; SECTOR_SIZE]).unwrap();
+        // Window 1, second write: one of the two held writes must be
+        // evicted. It has to land on the real image right away, not be
+        // discarded -- a real write cache full enough to evict still has
+        // to put the dirty data somewhere.
+        drive
+            .write_sector(base + 1, &[0xBBu8; SECTOR_SIZE])
+            .unwrap();
+
+        let mut reopened = HardDriveImage::open(
+            &path,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
+        let mut a = vec![0u8; SECTOR_SIZE];
+        let mut b = vec![0u8; SECTOR_SIZE];
+        reopened.read_sector(base, &mut a).unwrap();
+        reopened.read_sector(base + 1, &mut b).unwrap();
+        let committed = usize::from(a == vec![0xAAu8; SECTOR_SIZE])
+            + usize::from(b == vec![0xBBu8; SECTOR_SIZE]);
+        assert_eq!(
+            committed, 1,
+            "exactly one of the two held writes must have been committed by the eviction"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_cut_from_a_read_rule_discards_held_writes_before_a_clear_can_replay_them() {
+        let (path, mut drive, base) = fault_test_drive("fault-cut-read-discard.hdf");
+        drive
+            .fault
+            .set(
+                Some("holder".into()),
+                &serde_json::json!({"rules": [{"op": "write", "action": "reorder", "window": 8}]}),
+                1,
+            )
+            .unwrap();
+        drive.write_sector(base, &[0x55u8; SECTOR_SIZE]).unwrap();
+        drive
+            .fault
+            .set(
+                Some("cutter".into()),
+                &serde_json::json!({"rules": [{"op": "read", "action": "cut"}]}),
+                1,
+            )
+            .unwrap();
+        // A different lba from the held write: reads of a held sector
+        // return the held data before any read rule (including this
+        // `cut`) is even evaluated, same as a write cache answering from
+        // itself -- reading an unheld sector is what actually exercises
+        // the `cut` rule here.
+        let mut buf = vec![0u8; SECTOR_SIZE];
+        assert!(drive.read_sector(base + 1, &mut buf).is_err());
+        assert!(drive.fault.cut);
+        let holder = drive
+            .fault
+            .policies
+            .iter()
+            .find(|p| p.id == "holder")
+            .unwrap();
+        assert!(
+            holder.rules[0].state.reorder_queue.is_empty(),
+            "a cut triggered by a read rule must discard held writes, not leave them for a \
+             later clear to replay as if they had survived the power cut"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn flush_releases_the_newest_held_write_when_the_same_sector_was_held_twice() {
+        let (path, mut drive, base) = fault_test_drive("fault-flush-dedup.hdf");
+        drive
+            .fault
+            .set(
+                None,
+                &serde_json::json!({"rules": [{"op": "write", "action": "reorder", "window": 8}]}),
+                1,
+            )
+            .unwrap();
+        drive.write_sector(base, &[0x11u8; SECTOR_SIZE]).unwrap();
+        drive.write_sector(base, &[0x22u8; SECTOR_SIZE]).unwrap();
+        drive.flush().unwrap();
+
+        let mut reopened = HardDriveImage::open(
+            &path,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
+        let mut sector = vec![0u8; SECTOR_SIZE];
+        reopened.read_sector(base, &mut sector).unwrap();
+        assert_eq!(
+            sector,
+            vec![0x22u8; SECTOR_SIZE],
+            "a flush must release the newest held write for a sector held twice, not an \
+             arbitrary one of the two"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn tear_at_sector_truncates_a_multi_sector_write_sectors_request() {
+        let (path, mut drive, base) = fault_test_drive("fault-tear-multi.hdf");
+        drive
+            .fault
+            .set(
+                None,
+                &serde_json::json!({"rules": [{"op": "write", "action": "tear", "at": "sector", "n": 2}]}),
+                1,
+            )
+            .unwrap();
+        let mut buf = Vec::new();
+        for s in 0u8..4 {
+            buf.extend(std::iter::repeat_n(s + 1, SECTOR_SIZE));
+        }
+        drive.write_sectors(base, &buf).unwrap();
+
+        let mut reopened = HardDriveImage::open(
+            &path,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
+        for s in 0u64..4 {
+            let mut sector = vec![0u8; SECTOR_SIZE];
+            reopened.read_sector(base + s, &mut sector).unwrap();
+            if s < 2 {
+                assert_eq!(
+                    sector,
+                    vec![s as u8 + 1; SECTOR_SIZE],
+                    "sector {s} is within the first 2 sectors tear kept, must be committed"
+                );
+            } else {
+                assert!(
+                    sector.iter().all(|&b| b == 0),
+                    "sector {s} is past the first 2 sectors tear kept, must not be committed"
+                );
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `stale` arms on the write that matches it (`FaultPolicySet::
+    /// on_write`'s `Action::Stale` arm, fed `write_sector`'s own
+    /// pre-write read) and is consumed by the next `count` reads
+    /// (`FaultPolicySet::on_read`'s stale-pending scan) before reverting
+    /// to the real, already-committed data -- "a drive that acknowledged
+    /// before committing": the write itself *does* land for real (unlike
+    /// `reorder`, nothing holds it back), only what reads see of it lags.
+    #[test]
+    fn a_stale_policy_serves_pre_write_bytes_for_exactly_count_reads() {
+        let (path, mut drive, base) = fault_test_drive("fault-stale.hdf");
+        drive
+            .fault
+            .set(
+                None,
+                &serde_json::json!({"rules": [{"op": "write", "action": "stale", "count": 2}]}),
+                1,
+            )
+            .unwrap();
+        drive.write_sector(base, &[0x7Eu8; SECTOR_SIZE]).unwrap();
+
+        // The write itself landed for real -- a reopened handle (no
+        // policy attached) sees the new data immediately.
+        let mut reopened = HardDriveImage::open(
+            &path,
+            "DH0",
+            "ide",
+            None,
+            0,
+            crate::diskimage::FileSystem::FFS,
+        )
+        .unwrap();
+        let mut on_disk = vec![0u8; SECTOR_SIZE];
+        reopened.read_sector(base, &mut on_disk).unwrap();
+        assert_eq!(
+            on_disk,
+            vec![0x7Eu8; SECTOR_SIZE],
+            "stale only lags what reads through the policy see, not the write itself"
+        );
+
+        // The first two reads through the faulted drive see the old
+        // (zeroed) content.
+        for n in 1..=2 {
+            let mut sector = vec![0xFFu8; SECTOR_SIZE];
+            drive.read_sector(base, &mut sector).unwrap();
+            assert!(
+                sector.iter().all(|&b| b == 0),
+                "read {n} should still see the pre-write bytes"
+            );
+        }
+        assert_eq!(drive.fault.stats.stale_served, 2);
+
+        // The third read reverts to the real, already-committed data.
+        let mut sector = vec![0u8; SECTOR_SIZE];
+        drive.read_sector(base, &mut sector).unwrap();
+        assert_eq!(
+            sector,
+            vec![0x7Eu8; SECTOR_SIZE],
+            "the count is exhausted; reads must see the real data again"
+        );
+        assert_eq!(
+            drive.fault.stats.stale_served, 2,
+            "not consumed a third time"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn cut_fails_requests_and_survives_the_image_reopening_unresolved() {
+        let (path, mut drive, base) = fault_test_drive("fault-cut.hdf");
+        drive
+            .fault
+            .set(None, &serde_json::json!({"rules": [{"action": "cut"}]}), 1)
+            .unwrap();
+        assert!(drive.write_sector(base, &[1u8; SECTOR_SIZE]).is_err());
+        assert!(drive.write_sector(base, &[2u8; SECTOR_SIZE]).is_err());
+        assert!(drive.fault.cut);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn clearing_the_cutting_policy_un_cuts_while_clearing_another_policy_does_not() {
+        let (path, mut drive, base) = fault_test_drive("fault-cut-clear.hdf");
+        drive
+            .fault
+            .set(
+                Some("harmless".into()),
+                &serde_json::json!({"rules": [{"op": "read", "action": "delay", "ms": 1}]}),
+                1,
+            )
+            .unwrap();
+        drive
+            .fault
+            .set(
+                Some("cutter".into()),
+                &serde_json::json!({"rules": [{"action": "cut"}]}),
+                1,
+            )
+            .unwrap();
+        assert!(drive.write_sector(base, &[1u8; SECTOR_SIZE]).is_err());
+        assert!(drive.fault.cut);
+        drive.fault.clear(Some("harmless"));
+        assert!(
+            drive.fault.cut,
+            "clearing an unrelated policy must not release the cut latch"
+        );
+        drive.fault.clear(Some("cutter"));
+        assert!(
+            !drive.fault.cut,
+            "clearing the policy that actually cut the target must release the latch"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn stats_count_requests_by_kind() {
+        let (path, mut drive, base) = fault_test_drive("fault-stats.hdf");
+        drive.write_sector(base, &[0u8; SECTOR_SIZE]).unwrap();
+        drive.write_sector(base, &[0u8; SECTOR_SIZE]).unwrap();
+        let mut buf = vec![0u8; SECTOR_SIZE];
+        drive.read_sector(base, &mut buf).unwrap();
+        // Writes/reads above happened with no policy installed at all
+        // (`HardDriveImage::write_sector`/`read_sector` skip the fault
+        // path entirely while `fault.is_empty()`), so stats stay zero --
+        // exactly the "a build/session that never touches `disk.fault`
+        // pays nothing" contract the rest of this phase assumes.
+        assert_eq!(drive.fault.stats.requests, 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `disk.fault.*`'s own requirement: "`state.save` includes the
+    /// held-write queues, rule counters and generator state ... so a
+    /// fault scenario replays exactly from a snapshot." Arms `reorder`,
+    /// holds a write in it (never committed to the file), round-trips
+    /// the whole `HardDriveImage` through `bincode` the same way
+    /// `serde_reopens_file_backed_image_and_serves_same_sectors` proves
+    /// an ordinary image survives, then checks the restored handle still
+    /// holds that exact write -- not just that `policies.len()` matches,
+    /// which a bug re-creating empty policies on load could satisfy
+    /// without actually carrying the queued data.
+    #[test]
+    fn a_held_reorder_write_survives_a_state_round_trip() {
+        let (path, mut drive, base) = fault_test_drive("fault-serde.hdf");
+        drive
+            .fault
+            .set(
+                None,
+                &serde_json::json!({"rules": [{"op": "write", "action": "reorder", "window": 4}]}),
+                1,
+            )
+            .unwrap();
+        drive.write_sector(base, &[0x99u8; SECTOR_SIZE]).unwrap();
+
+        let encoded = bincode::serialize(&drive).unwrap();
+        let mut restored: HardDriveImage = bincode::deserialize(&encoded).unwrap();
+
+        assert_eq!(restored.fault.policies.len(), 1);
+        assert_eq!(restored.fault.stats.reordered, 1);
+
+        // Not on disk: the restored handle's own backing file still has
+        // the original zeroed content.
+        let mut on_disk = vec![0u8; SECTOR_SIZE];
+        restored.read_sector_real(base, &mut on_disk).unwrap();
+        assert!(
+            on_disk.iter().all(|&b| b == 0),
+            "the held write must still not be on disk after a state round trip"
+        );
+
+        // The restored policy's own reorder queue still answers the read,
+        // the same "a write cache would answer from itself" behaviour the
+        // original handle had before the round trip.
+        let mut live = vec![0u8; SECTOR_SIZE];
+        restored.read_sector(base, &mut live).unwrap();
+        assert_eq!(live, vec![0x99u8; SECTOR_SIZE]);
+
+        restored.flush().unwrap();
+        let mut after = vec![0u8; SECTOR_SIZE];
+        restored.read_sector_real(base, &mut after).unwrap();
+        assert_eq!(
+            after,
+            vec![0x99u8; SECTOR_SIZE],
+            "flush on the restored handle must still release the queue"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -1293,6 +1293,29 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn write_protected_chd_rejects_writes_even_under_an_active_fault_policy() {
+        let path = temp_path("noverlay-fault.chd");
+        write_hard_disk(&path, 4, [11; 20]);
+        std::fs::create_dir(overlay_path(&path)).unwrap();
+        let mut drive = open(&path);
+        assert!(drive.write_protected());
+        drive
+            .fault
+            .set(
+                None,
+                &serde_json::json!({"rules": [{"op": "write", "action": "drop"}]}),
+                1,
+            )
+            .unwrap();
+        let err = drive.write_sector(0, &[0; SECTOR_SIZE]).expect_err(
+            "a write-protected CHD with no overlay must reject writes even under a drop policy",
+        );
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        let _ = std::fs::remove_dir(overlay_path(&path));
+        cleanup(&path);
+    }
+
+    #[test]
     fn save_state_carries_the_overlay_and_restores_it() {
         let path = temp_path("state.chd");
         write_hard_disk(&path, 8, [12; 20]);

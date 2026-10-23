@@ -256,6 +256,13 @@ impl CdtvController {
         self.disc.as_ref().or(self.pending_disc.as_ref())
     }
 
+    /// `disk.fault.*`'s `cd` target: the actually-mounted disc only, not
+    /// one still pending in the tray (not yet readable, so there is
+    /// nothing for a fault policy to act on).
+    pub fn disc_mut(&mut self) -> Option<&mut CdImage> {
+        self.disc.as_mut()
+    }
+
     /// Whether the drive is actively working: streaming CD audio, or a
     /// data read in flight (sectors still owed, DMA running, or the
     /// completion interrupt pending). Feeds the status-bar CD LED.

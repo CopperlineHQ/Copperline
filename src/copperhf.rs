@@ -540,6 +540,11 @@ fn execute_job(units: &UnitsShared, job: WorkerJob) -> WorkerResult {
                 let Some(payload) = payload.get(..bytes) else {
                     return WorkerResult::RwFailed;
                 };
+                // One `write_sectors` call for the whole job, not one
+                // `write_sector` per sector: `disk.fault.set`'s
+                // `tear {at: "sector"}` can only truncate at the Nth
+                // sector of a multi-sector job if the policy set sees it
+                // as one multi-sector request to begin with.
                 if let Err(e) = disk.disk.write_sectors(start_lba, payload) {
                     log::warn!(
                         "copperhf: unit {unit}: write of {sectors} sector(s) at {start_lba} \
@@ -806,6 +811,22 @@ impl CopperhfBoard {
             }
         }
         mask
+    }
+
+    /// Runs `f` against unit `unit`'s backing image, for `disk.fault.*`
+    /// (`{"kind": "copperhf", "unit": N}`). `try_lock`, not a blocking
+    /// lock, matching [`Self::unit_image_names`]'s own caution around the
+    /// worker-thread mutex: a control-protocol call arriving while a job
+    /// is in flight simply reports "not available" rather than blocking
+    /// the main thread on the worker.
+    pub fn with_unit_image_mut<R>(
+        &self,
+        unit: usize,
+        f: impl FnOnce(&mut HardDriveImage) -> R,
+    ) -> Option<R> {
+        let mut units = self.units.try_lock().ok()?;
+        let disk = units.get_mut(unit)?.as_mut()?;
+        Some(f(&mut disk.disk))
     }
 
     /// The file names of the units' images, in unit order, for naming the

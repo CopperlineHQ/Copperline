@@ -102,6 +102,16 @@ pub struct CdImage {
     tracks: Vec<CdTrack>,
     total_sectors: u32,
     backend: Backend,
+    /// `disk.fault.*`'s policy set (`docs/debugger/disk-fault.md`),
+    /// including it -- part of `CdImageState` (`state.save`/
+    /// `state.load`), see that enum's own `fault` field doc comment.
+    /// Boxed (unlike `HardDriveImage::fault`): `CdImage` lives inside
+    /// `ScsiTarget::CdRom`/`AtaDevice::Atapi`, whose sibling variants
+    /// (`Disk(ScsiDisk)`/`Disk(IdeDrive)`) are already smaller, so an
+    /// inline `FaultPolicySet` (`Stats`'s dozen-plus `u64` counters alone)
+    /// pushed those enums' largest-variant gap past clippy's
+    /// `large_enum_variant` threshold.
+    pub fault: Box<crate::diskfault::FaultPolicySet>,
 }
 
 /// Sector storage behind a `CdImage`: cue sheet files (or a bare ISO)
@@ -221,7 +231,11 @@ impl SourceSpec {
 
 /// Serde shadow of `CdImage`: the image files are read-only, so only
 /// their paths are stored and deserialization reopens them (a CHD also
-/// re-reads its header and track metadata).
+/// re-reads its header and track metadata). `fault` travels regardless
+/// of backend -- `disk.fault.*`'s own requirement ("`state.save`
+/// includes the held-write queues, rule counters and generator state"),
+/// `#[serde(default)]` per variant so a state saved before this field
+/// existed still loads, with no policies installed.
 #[derive(serde::Serialize, serde::Deserialize)]
 enum CdImageState {
     Bin {
@@ -229,9 +243,13 @@ enum CdImageState {
         tracks: Vec<CdTrack>,
         extents: Vec<Extent>,
         total_sectors: u32,
+        #[serde(default)]
+        fault: Box<crate::diskfault::FaultPolicySet>,
     },
     Chd {
         path: PathBuf,
+        #[serde(default)]
+        fault: Box<crate::diskfault::FaultPolicySet>,
     },
 }
 
@@ -248,9 +266,11 @@ impl serde::Serialize for CdImage {
                 tracks: self.tracks.clone(),
                 extents: bin.extents.clone(),
                 total_sectors: self.total_sectors,
+                fault: self.fault.clone(),
             },
             Backend::Chd(chd) => CdImageState::Chd {
                 path: state_path(chd.path(), false).map_err(serde::ser::Error::custom)?,
+                fault: self.fault.clone(),
             },
         }
         .serialize(serializer)
@@ -265,6 +285,7 @@ impl<'de> serde::Deserialize<'de> for CdImage {
                 tracks,
                 extents,
                 total_sectors,
+                fault,
             } => {
                 let sources = sources
                     .iter()
@@ -281,10 +302,15 @@ impl<'de> serde::Deserialize<'de> for CdImage {
                     tracks,
                     total_sectors,
                     backend: Backend::Bin(BinBackend { sources, extents }),
+                    fault,
                 })
             }
-            CdImageState::Chd { path } => state_path(&path, true)
+            CdImageState::Chd { path, fault } => state_path(&path, true)
                 .and_then(|p| Self::load_chd(&p))
+                .map(|mut img| {
+                    img.fault = fault;
+                    img
+                })
                 .map_err(|e| {
                     serde::de::Error::custom(format!(
                         "reopening CD image {}: {e:#}",
@@ -333,6 +359,7 @@ impl CdImage {
             tracks,
             total_sectors,
             backend: Backend::Chd(Box::new(backend)),
+            fault: Box::new(crate::diskfault::FaultPolicySet::default()),
         })
     }
 
@@ -355,6 +382,7 @@ impl CdImage {
                 sector_count: sectors,
             }],
             total_sectors: sectors,
+            fault: Box::new(crate::diskfault::FaultPolicySet::default()),
             backend: Backend::Bin(BinBackend {
                 sources: vec![source],
                 extents: vec![Extent {
@@ -647,6 +675,7 @@ impl CdImage {
             tracks,
             total_sectors: disc,
             backend: Backend::Bin(BinBackend { sources, extents }),
+            fault: Box::new(crate::diskfault::FaultPolicySet::default()),
         })
     }
 
@@ -677,8 +706,54 @@ impl CdImage {
     }
 
     /// Read the 2048 bytes of user data in a data sector. Fails on audio
-    /// tracks.
+    /// tracks. Faulted exactly like `HardDriveImage::read_sector`: the real
+    /// read happens first (a read has no write-ordering hazard to guard),
+    /// then the policy set may corrupt/fail the result -- CD is read-only
+    /// medium, so only the read-side actions (`corrupt`/`error`/`delay`/
+    /// `cut`) ever reach this path; nothing calls `on_write` for a CD
+    /// target at all, so a policy rule selecting `op: write` against one
+    /// is schema-valid but unreachable rather than specially rejected --
+    /// `stale` in particular can never arm here either, since arming is
+    /// `on_write`'s doing (`FaultPolicySet::on_write`'s `Action::Stale`
+    /// arm) and nothing ever writes to a CD target to trigger it.
     pub fn read_data_sector(
+        &mut self,
+        sector: u32,
+        buf: &mut [u8; DATA_SECTOR_BYTES],
+    ) -> Result<()> {
+        self.read_data_sector_real(sector, buf)?;
+        self.apply_read_fault(sector, buf)
+    }
+
+    /// Applies the fault policy set to bytes a real read already put in
+    /// `buf`, in place -- shared by `read_data_sector`/`read_audio_sector`/
+    /// `read_raw_sector` so CDDA playback and SCSI raw-mode reads are
+    /// faulted exactly like cooked data reads, not silently exempt from
+    /// `disk.fault.set`'s read-side actions.
+    fn apply_read_fault(&mut self, sector: u32, buf: &mut [u8]) -> Result<()> {
+        if self.fault.is_empty() {
+            return Ok(());
+        }
+        let len = buf.len();
+        match self.fault.on_read(u64::from(sector), buf, len) {
+            crate::diskfault::Outcome::Proceed | crate::diskfault::Outcome::DoneOk => Ok(()),
+            crate::diskfault::Outcome::ProceedWith(data) => {
+                let n = data.len().min(buf.len());
+                buf[..n].copy_from_slice(&data[..n]);
+                Ok(())
+            }
+            // Not `bail!`: a plain string error can't be told apart from
+            // any other read failure, so a caller wanting the exact code
+            // (`crate::diskfault::fault_error_code_anyhow`, used by the
+            // SCSI CD target to pick a sense key) needs the typed error
+            // itself, not just its message.
+            crate::diskfault::Outcome::Fail(code) => {
+                Err(crate::diskfault::FaultIoError(code).into())
+            }
+        }
+    }
+
+    fn read_data_sector_real(
         &mut self,
         sector: u32,
         buf: &mut [u8; DATA_SECTOR_BYTES],
@@ -725,7 +800,8 @@ impl CdImage {
         if kind.is_data() {
             bail!("sector {sector} is in a data track");
         }
-        self.read_payload(sector, buf)
+        self.read_payload(sector, buf)?;
+        self.apply_read_fault(sector, buf)
     }
 
     /// Read one full 2352-byte raw frame at `sector`, whatever the track
@@ -738,21 +814,20 @@ impl CdImage {
             .with_context(|| format!("sector {sector} beyond end of disc"))?;
         match kind {
             TrackKind::Mode1_2352 | TrackKind::Mode2_2352 | TrackKind::Audio => {
-                self.read_payload(sector, buf)
+                self.read_payload(sector, buf)?;
             }
             TrackKind::Mode1_2048 => {
                 let mut data = [0u8; DATA_SECTOR_BYTES];
                 self.read_payload(sector, &mut data)?;
                 synthesize_mode1_sector(sector, &data, buf);
-                Ok(())
             }
             TrackKind::Mode2_2336 => {
                 let mut data = [0u8; MODE2_SECTOR_BYTES];
                 self.read_payload(sector, &mut data)?;
                 synthesize_mode2_sector(sector, &data, buf);
-                Ok(())
             }
         }
+        self.apply_read_fault(sector, buf)
     }
 
     /// Whether `sector` falls inside an audio track region.
