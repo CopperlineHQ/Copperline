@@ -354,6 +354,7 @@ the cache disabled) re-establishes the model's cache cold and re-derives its
 enable bits from the restored CACR, so the machine keeps the cache its CPU
 has rather than silently running cacheless after a load.
 
+(the-68060)=
 ## The 68060
 
 The 68060 is modelled as the full part: on-die FPU and MMU, the 8 KB

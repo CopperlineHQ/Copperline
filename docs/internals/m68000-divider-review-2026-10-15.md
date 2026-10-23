@@ -89,7 +89,7 @@ propagation/sample mechanism from CPU-specific poll points before changing
 general latency. No CPU code was changed during this verification.
 
 The full method, provenance, comparison and next-step plan are in
-[the probe report](C:/Users/seppo/amiga/amiga-hardware-probes/docs/divider-irq-verification-2026-10-15.md).
+[the probe report](https://github.com/HakatomOy/amiga-hardware-probes/blob/main/docs/divider-irq-verification-2026-10-15.md).
 Accepted source ID:
 `5d1558cd75f40b7e947773e4778873a8e8ccf42876309960aed568e3f2261d40`.
 Both hardware result packets have SHA-256
