@@ -2314,6 +2314,28 @@ fn floppy_index_flag_sync_delay_is_visible_to_cia_b_icr_polling() {
 }
 
 #[test]
+fn cia_event_deadline_includes_divider_phase_and_deferred_time() {
+    for phase in 0..5 {
+        for pending in 0..=3 {
+            let mut bus = empty_bus();
+            bus.cia_a.ta_count = 2;
+            bus.cia_a.ta_latch = 2;
+            bus.cia_a.ta_running = true;
+            bus.device_clock.cia_tick_remainder_cck = phase;
+            bus.pending_device_cck = pending;
+            assert_eq!(bus.next_cia_event_cck(), Some(15 - phase - pending));
+        }
+    }
+    let mut bus = empty_bus();
+    assert_eq!(bus.next_cia_event_cck(), None);
+    bus.cia_b.ta_running = true;
+    bus.cia_b.ta_count = 0;
+    bus.device_clock.cia_tick_remainder_cck = 4;
+    bus.pending_device_cck = 2;
+    assert_eq!(bus.next_cia_event_cck(), Some(1));
+}
+
+#[test]
 fn realtime_slice_bus_advance_ticks_shared_device_clock() {
     let mut bus = empty_bus();
     bus.device_clock.realtime_enabled = true;

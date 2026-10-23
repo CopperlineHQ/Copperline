@@ -128,8 +128,8 @@ pub(crate) const MACH: ChunkSpec = value(b"MACH", 1, "machine runtime");
 pub(crate) const ICAC: ChunkSpec = value(b"ICAC", 1, "instruction cache");
 pub(crate) const DCAC: ChunkSpec = value(b"DCAC", 1, "data cache");
 pub(crate) const MEM: ChunkSpec = bus(b"MEM ", 1, "memory", &["mem", "ram_init"], true);
-pub(crate) const CIAA: ChunkSpec = bus(b"CIAA", 1, "CIA-A", &["cia_a"], true);
-pub(crate) const CIAB: ChunkSpec = bus(b"CIAB", 1, "CIA-B", &["cia_b"], true);
+pub(crate) const CIAA: ChunkSpec = bus(b"CIAA", 2, "CIA-A", &["cia_a"], true);
+pub(crate) const CIAB: ChunkSpec = bus(b"CIAB", 2, "CIA-B", &["cia_b"], true);
 pub(crate) const PAUL: ChunkSpec = bus(b"PAUL", 1, "Paula", &["paula"], true);
 pub(crate) const AGNS: ChunkSpec = bus(b"AGNS", 1, "Agnus", &["agnus"], true);
 pub(crate) const COPR: ChunkSpec = bus(b"COPR", 1, "Copper", &["copper"], true);
@@ -677,7 +677,54 @@ pub(crate) struct Migration {
 /// the step here that rewrites the previous shape (rename or restructure
 /// fields, fill values a default cannot express) so states written at the
 /// previous version keep loading.
-pub(crate) const MIGRATIONS: &[Migration] = &[];
+pub(crate) const MIGRATIONS: &[Migration] = &[
+    Migration {
+        tag: CIAA.tag,
+        from: 1,
+        apply: migrate_cia_pulse_v1,
+    },
+    Migration {
+        tag: CIAB.tag,
+        from: 1,
+        apply: migrate_cia_pulse_v1,
+    },
+];
+
+/// Preserve the saved physical PB level on load. Version 1 stored the
+/// active-low pulse in output_high; version 2 has a separate active-high mux.
+/// An inherited high pulse expires on the next E edge under the corrected model.
+fn migrate_cia_pulse_v1(value: &mut rmpv::Value) -> Result<()> {
+    let rmpv::Value::Map(entries) = value else {
+        bail!("CIA v1 payload is not a map")
+    };
+    // Bus chunks retain the named Bus field around the device payload.
+    if let Some((_, cia)) = entries
+        .iter_mut()
+        .find(|(k, _)| matches!(k.as_str(), Some("cia_a" | "cia_b")))
+    {
+        return migrate_cia_pulse_v1(cia);
+    }
+    let regs = entries
+        .iter()
+        .find(|(k, _)| k.as_str() == Some("regs"))
+        .and_then(|(_, v)| v.as_array())
+        .context("CIA v1 regs missing")?;
+    let controls = [14, 15].map(|i| regs.get(i).and_then(|v| v.as_u64()).unwrap_or(0));
+    for (timer, control) in ["ta", "tb"].into_iter().zip(controls) {
+        let output = format!("{timer}_pb_output_high");
+        let pin_high = entries
+            .iter()
+            .find(|(k, _)| k.as_str() == Some(output.as_str()))
+            .and_then(|(_, v)| v.as_bool())
+            .context("CIA v1 PB output missing")?;
+        // Pulse mode selects the pulse mux; toggle mode retains its own latch.
+        let pulse_high = control & 6 == 2 && pin_high;
+        let old = format!("{timer}_pb_pulse_low");
+        entries.retain(|(k, _)| k.as_str() != Some(old.as_str()));
+        entries.push((format!("{timer}_pb_pulse_high").into(), pulse_high.into()));
+    }
+    Ok(())
+}
 
 /// Bring a chunk's payload to `spec.version`: returned as is when the
 /// versions match, rewritten through the migration steps when older.
@@ -723,4 +770,59 @@ pub(crate) fn upgrade(
     rmpv::encode::write_value(&mut out, &value)
         .map_err(|e| anyhow!("re-encoding upgraded {name} chunk: {e}"))?;
     Ok(out)
+}
+
+#[cfg(test)]
+mod cia_migration_tests {
+    use super::*;
+    use crate::chipset::cia::{Cia, Which, REG_CRA, REG_CRB};
+
+    #[test]
+    fn cia_v1_pulse_migration_preserves_saved_pin_then_expires() -> Result<()> {
+        for which in [Which::A, Which::B] {
+            for pin_high in [false, true] {
+                let mut cia = Cia::new(which);
+                cia.write(REG_CRA, 2);
+                cia.write(REG_CRB, 2);
+                let mut bytes = Vec::new();
+                encode(&cia, &mut bytes)?;
+                let mut value = rmpv::decode::read_value(&mut bytes.as_slice())?;
+                let rmpv::Value::Map(ref mut entries) = value else {
+                    unreachable!()
+                };
+                entries.retain(|(k, _)| {
+                    !matches!(k.as_str(), Some("ta_pb_pulse_high" | "tb_pb_pulse_high"))
+                });
+                for timer in ["ta", "tb"] {
+                    let key = format!("{timer}_pb_output_high");
+                    entries
+                        .iter_mut()
+                        .find(|(k, _)| k.as_str() == Some(key.as_str()))
+                        .unwrap()
+                        .1 = pin_high.into();
+                    entries.push((format!("{timer}_pb_pulse_low").into(), (!pin_high).into()));
+                }
+                let mut old = Vec::new();
+                let field = if which == Which::A { "cia_a" } else { "cia_b" };
+                let wrapped = rmpv::Value::Map(vec![(field.into(), value)]);
+                rmpv::encode::write_value(&mut old, &wrapped)?;
+                let spec = if which == Which::A { &CIAA } else { &CIAB };
+                let migrated = upgrade(spec, 1, old, MIGRATIONS)?;
+                let wrapped = rmpv::decode::read_value(&mut migrated.as_slice())?;
+                let rmpv::Value::Map(entries) = wrapped else {
+                    unreachable!()
+                };
+                let mut device = Vec::new();
+                rmpv::encode::write_value(&mut device, &entries[0].1)?;
+                let mut restored: Cia = decode(&device)?;
+                assert_eq!(
+                    restored.port_b_pins() & 0xc0,
+                    if pin_high { 0xc0 } else { 0 }
+                );
+                restored.tick(1);
+                assert_eq!(restored.port_b_pins() & 0xc0, 0);
+            }
+        }
+        Ok(())
+    }
 }

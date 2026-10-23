@@ -2894,15 +2894,8 @@ impl Emulator {
             event_cck = Some(event_cck.map_or(cck, |earliest: u32| earliest.min(cck)));
             *chunk = (*chunk).min(self.instructions_for_cck(cck).max(1));
         };
-        if let Some(ticks) = bus
-            .cia_a
-            .next_underflow_ticks()
-            .into_iter()
-            .chain(bus.cia_b.next_underflow_ticks())
-            .min()
-        {
-            cap_cck(ticks.saturating_mul(5), &mut chunk);
-            chunk = chunk.min(self.instructions_for_cia_ticks(ticks).max(1));
+        if let Some(cck) = bus.next_cia_event_cck() {
+            cap_cck(cck, &mut chunk);
         }
         // An interrupt already latched in INTREQ but still inside its
         // IPL-pin recognition pipe is invisible to the CPU right now, and a
@@ -2989,10 +2982,6 @@ impl Emulator {
     fn instruction_budget(&mut self) -> usize {
         let (quantum, _target) = realtime_budget(self.cpu_cycles_per_instruction);
         quantum
-    }
-
-    fn instructions_for_cia_ticks(&self, ticks: u32) -> usize {
-        self.instructions_for_cck(ticks.saturating_mul(5))
     }
 
     fn instructions_for_cck(&self, cck: u32) -> usize {

@@ -476,6 +476,9 @@ probe_tests! {
     // CLXDAT collision matrix bits rendered as cells (the collision
     // matching/enable regression class).
     golden_clxprobe => probe("clxprobe", "clxprobe.bin", 16.0);
+    // Raw startup/BBUSY/BZERO and descending destination-restore snapshots.
+    golden_a500_blit_boundaries => probe("a500-blit-boundaries", "a500-blit-boundaries.bin", 16.0);
+    golden_a500_display_boundaries => probe_ecs("a500-display-boundaries", "a500-display-boundaries.bin", 16.0);
     // AUD0 interrupt cadence strip across a scripted AUDxEN
     // enable/punch/disable/restart sequence (the issue #74 deferred
     // AUDxEN-disable regression class).

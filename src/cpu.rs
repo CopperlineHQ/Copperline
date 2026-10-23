@@ -2907,11 +2907,9 @@ impl M68kMachine {
             let now = self.bus.bus.emulated_cck();
             let phase = *self.stop_poll_phase.get_or_insert((now & 1) as u8);
             if level > ((self.cpu.get_sr() >> 8) & 7) as u8 && now & 1 != u64::from(phase) {
-                // STOP continues polling IPL every four CPU clocks. Wait
-                // for its next poll instead of waking on any CCK boundary.
-                self.bus.bus.advance_devices(1);
-                self.bus.flush_timed_devices_dcache_coherent();
-                level = self.pending_irq_level();
+                // Observation never advances time. Dispatch owns and accounts
+                // for the wait to STOP's next four-CPU-clock poll.
+                level = 0;
             }
         } else if !self.cpu.is_stopped() {
             self.stop_poll_phase = None;
@@ -3581,6 +3579,25 @@ impl M68kMachine {
     }
 
     fn service_pending_irq_cycles(&mut self) -> Option<IrqDispatch> {
+        self.bus.flush_timed_devices_dcache_coherent();
+        let mut poll_wait_cycles = 0;
+        if self.cpu.is_stopped()
+            && self.cpu.cpu_type == CpuType::M68000
+            && self.cpu_clocks_per_cck == 2
+            && self.bus.bus.irq_latency_setting != 0
+        {
+            let now = self.bus.bus.emulated_cck();
+            let phase = *self.stop_poll_phase.get_or_insert((now & 1) as u8);
+            if self.pending_irq_level() > ((self.cpu.get_sr() >> 8) & 7) as u8
+                && now & 1 != u64::from(phase)
+            {
+                self.bus.bus.advance_cpu_internal_cycles(1);
+                // This wait precedes exception execution. Include it in both
+                // clock accounts so reconciliation cannot subtract it from
+                // the exception's nominal internal cycles.
+                poll_wait_cycles = self.cpu_clocks_per_cck as i32;
+            }
+        }
         let level = self.refresh_irq_line();
         if !self.cpu.check_interrupts() {
             return None;
@@ -3601,7 +3618,7 @@ impl M68kMachine {
             .unwrap_or(u32::from(level) + 24)
             .min(u32::from(u16::MAX)) as u16;
         Some(IrqDispatch {
-            cycles,
+            cycles: cycles.saturating_add(poll_wait_cycles),
             #[cfg(feature = "control")]
             level,
             #[cfg(feature = "control")]
@@ -4586,11 +4603,27 @@ impl CpuBus {
                 return;
             }
             Some(PlainMemRegion::ChipRam(off)) => {
-                self.bus
-                    .grant_cpu_bus_access_at(Some(addr), size, CpuBusAccessKind::Write);
-                self.bus.record_cpu_chip_ram_write(off, size, value);
+                let mut committed = false;
+                self.bus.grant_cpu_bus_access_sampled(
+                    Some(addr),
+                    size,
+                    CpuBusAccessKind::Write,
+                    |bus, slot, stride| {
+                        let byte = slot as usize * stride;
+                        let part = (size - byte).min(stride);
+                        let word = value >> ((size - byte - part) * 8);
+                        bus.record_cpu_chip_ram_write(off + byte, part, word);
+                        write_be(&mut bus.mem.chip_ram, off + byte, part, word);
+                        committed = true;
+                    },
+                );
+                // Unclocked debugger/setup accesses and the 020+ posted-write
+                // path do not invoke the classic transfer callback.
+                if !committed {
+                    self.bus.record_cpu_chip_ram_write(off, size, value);
+                    write_be(&mut self.bus.mem.chip_ram, off, size, value);
+                }
                 self.bus.ui_note_cpu_ram_write(addr, size);
-                write_be(&mut self.bus.mem.chip_ram, off, size, value);
                 self.dbg_note_memw(addr, size);
                 if off as u32 != addr {
                     // The write landed through an Agnus image repeat: note
@@ -7573,6 +7606,19 @@ mod tests {
     }
 
     #[test]
+    fn chip_ram_writes_land_before_final_blitter_d_tail_write() {
+        for (size, value) in [(1, 0x55), (2, 0x5555), (4, 0x5555_3344)] {
+            let mut bus = cpu_bus_before_final_d_only_blitter_write(0xABCD);
+            bus.write_sized_unobserved(0x0400, size, value);
+            assert_eq!(read_chip_word(&bus.bus, 0x0400), 0);
+            assert!(!bus.bus.blitter.busy);
+            if size == 4 {
+                assert_eq!(read_chip_word(&bus.bus, 0x0402), 0x3344);
+            }
+        }
+    }
+
+    #[test]
     fn chip_ram_byte_read_samples_before_final_blitter_d_tail_write() {
         let mut bus = cpu_bus_before_final_d_only_blitter_write(0xABCD);
 
@@ -8966,6 +9012,46 @@ mod tests {
             0xFF,
             "the reboot after RESET reads as warm"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn stopped_irq_refresh_does_not_advance_time_or_consume_poll_wait() -> Result<()> {
+        let mut bus = test_bus_with_pc(0x100);
+        write_program(&mut bus, 0x100, &[0x4e72, 0x2000]);
+        write_program(&mut bus, 0x200, &[0x4e71]);
+        set_autovector(&mut bus, 1, 0x200);
+        bus.paula.intena = INT_MASTER | 4;
+        bus.irq_latency_setting = 6;
+        let mut machine = M68kMachine::new(bus, CpuModel::M68000, false)?;
+        machine.step_slice(1)?;
+        machine.bus_mut().paula.intreq = 4;
+        for _ in 0..7 {
+            machine.bus_mut().advance_cpu_idle_devices(1);
+        }
+        let before = machine.bus().emulated_cck();
+        assert_eq!(machine.refresh_irq_line(), 0);
+        assert_eq!(machine.bus().emulated_cck(), before);
+        assert_eq!(machine.bus().slice_bus_advanced_cck(), 0);
+        let mut checkpoint = Vec::new();
+        machine.write_state(&mut checkpoint)?;
+        let run = machine.step_slice(1)?;
+        assert!(!machine.stopped());
+        assert_eq!(
+            machine.bus().emulated_cck() - before,
+            u64::from(run.bus_advanced_cck)
+        );
+        assert_ne!(run.bus_advanced_cck, 0);
+        let automatic_time = machine.bus().emulated_cck();
+        let automatic_pc = machine.pc();
+        machine.apply_state(&mut std::io::Cursor::new(checkpoint))?;
+        machine.bus_mut().advance_cpu_idle_devices(1);
+        let aligned = machine.step_slice(1)?;
+        assert_eq!(machine.bus().emulated_cck(), automatic_time);
+        assert_eq!(machine.pc(), automatic_pc);
+        assert_eq!(run.bus_advanced_cck, aligned.bus_advanced_cck + 1);
+        assert_eq!(run.cpu_cck, aligned.cpu_cck + 1);
+        assert_eq!(run.cpu_cycles, aligned.cpu_cycles + 2);
         Ok(())
     }
 

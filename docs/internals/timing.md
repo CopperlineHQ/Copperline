@@ -1152,3 +1152,25 @@ itself and `bltprobe-pace`) also move whenever the bundled AROS ROM is
 refreshed, because their phase depends on how long the ROM takes to boot.
 `timing-test/README.md` ("CI golden renders") has the details, including
 the vAmiga cross-checks behind individual probes.
+
+### A500 review boundary regressions
+
+The `a500-blit-boundaries` and `a500-display-boundaries` golden probes retain
+raw startup, BBUSY/BZERO, descending destination-restore, collision-clear,
+pointer-write and line-end-refresh samples. The display probe pairs single
+and dual playfields. They supplement the versioned numerical hardware captures;
+rendered emulator goldens are not hardware measurements.
+
+The destination-restore measurements require classic CPU RAM writes to land
+at each granted word transfer, before DMA runs in the bus cycle's free tail.
+Committing the complete write after that tail reverses CPU/blitter ordering
+despite apparently correct grants. The same transfer boundary is used for
+byte, word and longword writes, including separate classic longword halves.
+
+CIA mask writes do not acknowledge an already-latched interrupt: IR and the
+external request remain asserted until an ICR read. One-shot START readback can
+show STOP during the E-high transfer before falling-edge decrement/underflow
+commit; this preview does not apply during the LOAD hold. Internal carry and
+timer-A-to-timer-B cascade state are preserved. These constraints come from
+paired measurements of both CIAs, with explicit acknowledge, masked-source,
+zero/one/nonzero-latch and timing-gap controls in `amiga-hardware-probes`.

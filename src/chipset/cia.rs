@@ -98,10 +98,10 @@ pub struct Cia {
     cnt_pin_high: bool,
     ta_pb_output_high: bool,
     tb_pb_output_high: bool,
-    // Legacy serialized names: these mark an active one-E-clock pulse.
+    // Active one-E-clock high pulse (CIA chunk v2).
     // The physical pulse is high; pulse mode otherwise drives the pin low.
-    ta_pb_pulse_low: bool,
-    tb_pb_pulse_low: bool,
+    ta_pb_pulse_high: bool,
+    tb_pb_pulse_high: bool,
     pc_pulse_pending: bool,
     flag_pin_high: bool,
 
@@ -256,8 +256,8 @@ impl Cia {
             cnt_pin_high: true,
             ta_pb_output_high: true,
             tb_pb_output_high: true,
-            ta_pb_pulse_low: false,
-            tb_pb_pulse_low: false,
+            ta_pb_pulse_high: false,
+            tb_pb_pulse_high: false,
             pc_pulse_pending: false,
             flag_pin_high: true,
             tod_count: 0,
@@ -294,6 +294,18 @@ impl Cia {
     /// the CIA's IR line - they just read ICR directly.
     pub fn debug_icr_data(&self) -> u8 {
         self.icr_data
+    }
+
+    /// Earliest timer, delayed serial flag, or external IRQ-pin event.
+    /// STOP must observe flag completion even when the next timer edge is later.
+    pub fn next_event_ticks(&self) -> Option<u32> {
+        self.next_underflow_ticks()
+            .into_iter()
+            .chain(
+                (self.sdr_output_flag_delay != 0).then_some(u32::from(self.sdr_output_flag_delay)),
+            )
+            .chain((self.irq_pin_delay_eticks != 0).then_some(u32::from(self.irq_pin_delay_eticks)))
+            .min()
     }
 
     pub fn next_underflow_ticks(&self) -> Option<u32> {
@@ -458,13 +470,48 @@ impl Cia {
             || self.sdr_output_flag_delay != 0
             || (self.regs[REG_CRA] & CR_PBON != 0 && self.ta_running)
             || (self.regs[REG_CRB] & CR_PBON != 0 && self.tb_running)
-            || self.ta_pb_pulse_low
-            || self.tb_pb_pulse_low
+            || self.ta_pb_pulse_high
+            || self.tb_pb_pulse_high
     }
 
     /// CPU data sampled during E-high sees the reload mux before the
     /// falling-edge counter commit. Keep the internal counter untouched.
     pub(crate) fn read_at_transfer(&mut self, reg: usize) -> u8 {
+        if matches!(reg, REG_CRA | REG_CRB) {
+            let (count, running, delay, pipe, control, phi2) = if reg == REG_CRA {
+                (
+                    self.ta_count,
+                    self.ta_running,
+                    self.ta_start_delay,
+                    self.ta_enable_pipe,
+                    self.effective_ta_control(),
+                    self.effective_ta_control() & 0x20 == 0,
+                )
+            } else {
+                (
+                    self.tb_count,
+                    self.tb_running,
+                    self.tb_start_delay,
+                    self.tb_enable_pipe,
+                    self.effective_tb_control(),
+                    TimerBInputMode::from_crb(self.effective_tb_control()) == TimerBInputMode::Phi2,
+                )
+            };
+            let mut value = self.read(reg);
+            // One-shot STOP is visible at the E-high transfer before the
+            // falling-edge underflow commit (A500 kind126). Do not suppress
+            // the internal LOAD carry or the delayed TA-to-TB cascade.
+            if running
+                && phi2
+                && control & 8 != 0
+                && count == 0
+                && delay == 0
+                && Self::enable_pipe(running, delay, pipe) & 2 != 0
+            {
+                value &= !1;
+            }
+            return value;
+        }
         if reg == REG_PRB {
             let mut v = self.read(reg);
             // The output mux, like the timer reload mux below, is visible
@@ -478,7 +525,7 @@ impl Cia {
                     self.ta_start_delay,
                     self.ta_enable_pipe,
                     self.effective_ta_control() & 0x20 == 0,
-                    self.ta_pb_pulse_low,
+                    self.ta_pb_pulse_high,
                     0x40,
                 ),
                 (
@@ -488,7 +535,7 @@ impl Cia {
                     self.tb_start_delay,
                     self.tb_enable_pipe,
                     TimerBInputMode::from_crb(self.effective_tb_control()) == TimerBInputMode::Phi2,
-                    self.tb_pb_pulse_low,
+                    self.tb_pb_pulse_high,
                     0x80,
                 ),
             ] {
@@ -778,7 +825,7 @@ impl Cia {
             let high = if self.regs[REG_CRA] & CR_OUTMODE != 0 {
                 self.ta_pb_output_high
             } else {
-                self.ta_pb_pulse_low
+                self.ta_pb_pulse_high
             };
             if high {
                 v |= 1 << 6;
@@ -790,7 +837,7 @@ impl Cia {
             let high = if self.regs[REG_CRB] & CR_OUTMODE != 0 {
                 self.tb_pb_output_high
             } else {
-                self.tb_pb_pulse_low
+                self.tb_pb_pulse_high
             };
             if high {
                 v |= 1 << 7;
@@ -1087,11 +1134,34 @@ impl Cia {
             let mut edge = false;
             let mut remaining = ticks;
             while remaining != 0 && self.edge_step_pending() {
-                edge |= self.tick(1);
-                remaining -= 1;
+                // Resolve pipeline/pulse edges individually, but skip the
+                // quiet span before the next underflow or serial/pin event.
+                // PBON and an active shifter alone must not force 709k calls/s.
+                let transient = self.ta_start_delay != 0
+                    || self.tb_start_delay != 0
+                    || self.enable_pipe_pending()
+                    || self.control_pipe_pending()
+                    || self.icr_read_race
+                    || self.sdr_output_flag_delay != 0
+                    || self.ta_pb_pulse_high
+                    || self.tb_pb_pulse_high
+                    || self.tb_ta_pending_underflows != 0;
+                let span = if transient {
+                    1
+                } else {
+                    self.next_event_ticks()
+                        .map_or(remaining, |n| n.saturating_sub(1).max(1))
+                }
+                .min(remaining);
+                edge |= self.tick_settled(span);
+                remaining -= span;
             }
             return edge | self.tick(remaining);
         }
+        self.tick_settled(ticks)
+    }
+
+    fn tick_settled(&mut self, ticks: u32) -> bool {
         let ta_pipe = Self::enable_pipe(self.ta_running, self.ta_start_delay, self.ta_enable_pipe);
         let tb_pipe = Self::enable_pipe(self.tb_running, self.tb_start_delay, self.tb_enable_pipe);
         let ta_control = self.effective_ta_control();
@@ -1114,13 +1184,13 @@ impl Cia {
         // the previous timer/CNT underflow returns low at this E-clock; a new
         // underflow later in this call can arm the next pulse. Reads only
         // observe the pin and never shorten the pulse.
-        let ta_previous_pulse = self.ta_pb_pulse_low;
-        let tb_previous_pulse = self.tb_pb_pulse_low;
-        if self.ta_pb_pulse_low {
-            self.ta_pb_pulse_low = false;
+        let ta_previous_pulse = self.ta_pb_pulse_high;
+        let tb_previous_pulse = self.tb_pb_pulse_high;
+        if self.ta_pb_pulse_high {
+            self.ta_pb_pulse_high = false;
         }
-        if self.tb_pb_pulse_low {
-            self.tb_pb_pulse_low = false;
+        if self.tb_pb_pulse_high {
+            self.tb_pb_pulse_high = false;
         }
         // Delayed asserts armed earlier (by FLAG, SDR, TOD, or mask
         // writes) surface here on the E-clock grid.
@@ -1363,11 +1433,8 @@ impl Cia {
         self.icr_data |= fired_mask;
         let enabled = fired_mask & self.icr_mask;
         if enabled != 0 {
-            let was_set = self.icr_data & ICR_IR != 0;
             self.icr_data |= ICR_IR;
-            if !was_set {
-                self.arm_irq_pin();
-            }
+            self.arm_irq_pin();
         }
         false
     }
@@ -1442,9 +1509,10 @@ impl Cia {
         if self.icr_data & self.icr_mask & 0x1F != 0 {
             self.icr_data |= ICR_IR;
             self.arm_irq_pin();
-        } else {
+        } else if self.icr_data & ICR_IR == 0 {
             // IR records that an enabled interrupt occurred. Clearing the
-            // mask does not acknowledge this latch; only reading ICR does.
+            // mask acknowledges neither IR nor the pin (A500 kind125).
+            // Only reading ICR releases the latched request.
             self.irq_pin = false;
             self.irq_pin_delay_eticks = 0;
         }
@@ -1488,9 +1556,9 @@ impl Cia {
             }
         }
         if timer_a {
-            self.ta_pb_pulse_low = true;
+            self.ta_pb_pulse_high = true;
         } else {
-            self.tb_pb_pulse_low = true;
+            self.tb_pb_pulse_high = true;
         }
     }
 }
@@ -1726,6 +1794,43 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn one_shot_stop_transfer_preview_preserves_pending_underflow() {
+        for (control, lo, hi, source) in [
+            (REG_CRA, REG_TALO, REG_TAHI, ICR_TA),
+            (REG_CRB, REG_TBLO, REG_TBHI, ICR_TB),
+        ] {
+            let mut cia = Cia::new(Which::A);
+            cia.write(lo, 1);
+            cia.write(hi, 0);
+            cia.write(control, 0x19);
+            cia.tick(4);
+            assert_eq!(cia.read(control) & 1, 1);
+            assert_eq!(cia.read_at_transfer(control) & 1, 0);
+            assert_eq!(cia.debug_icr_data() & source, 0);
+            cia.tick(1);
+            assert_ne!(cia.debug_icr_data() & source, 0);
+            assert_eq!(cia.read(control) & 1, 0);
+        }
+    }
+
+    #[test]
+    fn stop_deadline_includes_delayed_serial_flag_and_pin() {
+        let mut cia = Cia::new(Which::A);
+        cia.ta_running = true;
+        cia.ta_count = 20;
+        cia.ta_latch = 20;
+        cia.sdr_output_flag_delay = 4;
+        cia.write(REG_ICR, 0x80 | ICR_SP);
+        assert_eq!(cia.next_event_ticks(), Some(4));
+        assert!(!cia.tick(4));
+        assert_ne!(cia.debug_icr_data() & ICR_SP, 0);
+        assert!(!cia.irq_line_asserted());
+        assert_eq!(cia.next_event_ticks(), Some(1));
+        assert!(cia.tick(1));
+        assert!(cia.irq_line_asserted());
     }
 
     #[test]
@@ -2363,11 +2468,14 @@ mod tests {
                 cia.tick(4);
                 cia.write(REG_ICR, source);
                 assert_eq!(cia.icr_data, ICR_IR | source);
-                // Re-enabling an unacknowledged source must drive the pin
-                // even though IR was already latched before the mask write.
-                cia.write(REG_ICR, 0x80 | source);
-                assert!(cia.tick(1));
-                assert_eq!(cia.read(REG_ICR), ICR_IR | source);
+                assert!(cia.irq_line_asserted());
+                // A different enabled delayed source cannot lose the request.
+                cia.write(REG_ICR, 0x80 | ICR_SP);
+                cia.latch_interrupts(ICR_SP);
+                cia.tick(1);
+                assert!(cia.irq_line_asserted());
+                assert_eq!(cia.read(REG_ICR), ICR_IR | source | ICR_SP);
+                assert!(!cia.irq_line_asserted());
                 assert_eq!(cia.read(REG_ICR), 0);
             }
         }

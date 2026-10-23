@@ -7786,6 +7786,23 @@ impl Bus {
         self.blit_irq_delay_cck.filter(|&cck| cck != 0)
     }
 
+    /// CIA deadline relative to the current beam, including deferred device time.
+    pub fn next_cia_event_cck(&self) -> Option<u32> {
+        let ticks = self
+            .cia_a
+            .next_event_ticks()
+            .into_iter()
+            .chain(self.cia_b.next_event_ticks())
+            .min()?;
+        Some(
+            ticks
+                .saturating_mul(5)
+                .saturating_sub(self.device_clock.cia_tick_remainder_cck)
+                .saturating_sub(self.pending_device_cck)
+                .max(1),
+        )
+    }
+
     pub fn next_serial_event_cck(&self) -> Option<u32> {
         self.paula.next_serial_event_cck()
     }

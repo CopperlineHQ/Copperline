@@ -291,17 +291,6 @@ impl Bus {
             }
             bits
         };
-        if clxdat & 1 != 0
-            && self.denise.clxdat & 1 == 0
-            && diag_cpu_bus_on()
-            && diag_cpu_bus_addr_matches(Some(0x00df_f00e), 2)
-        {
-            let row = self.current_frame_bitplane_rows[fb_y].as_ref().unwrap();
-            let first =
-                (0..row.words_per_row).find(|&word| row.planes[0][word] & row.planes[1][word] != 0);
-            log::info!("CLXPROBE dma v={vpos:03x} from={old_hpos:02x} to={new_hpos:02x} first_word={first:?} words={} beam={:03x}:{:02x}",
-                       row.words_per_row, self.agnus.vpos, self.agnus.hpos);
-        }
         self.denise.or_clxdat(clxdat);
         self.record_live_collision_timing(
             (x_stop - x_start) as u64,
@@ -398,13 +387,6 @@ impl Bus {
             vertical_open,
             sprite_display_enable_x,
         );
-        if clxdat & 1 != 0
-            && self.denise.clxdat & 1 == 0
-            && diag_cpu_bus_on()
-            && diag_cpu_bus_addr_matches(Some(0x00df_f00e), 2)
-        {
-            log::info!("CLXPROBE manual v={vpos:03x} from={old_hpos:02x} to={new_hpos:02x} beam={:03x}:{:02x}", self.agnus.vpos, self.agnus.hpos);
-        }
         self.denise.or_clxdat(clxdat);
         self.record_live_collision_timing(
             (x_stop - x_start) as u64,

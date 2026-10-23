@@ -847,12 +847,6 @@ impl Blitter {
         }
     }
 
-    /// Legacy compatibility query. BLTPRI follows actual bus requests, so
-    /// startup and pipeline bubbles never add a separate CPU warm-up fence.
-    pub fn bltpri_warmup_fences_cpu(&self) -> bool {
-        false
-    }
-
     /// Whether the blit pipeline cycle that the next `tick_scheduled_slot`
     /// will process performs a chip-bus access. Idle pipeline cycles (the "-"
     /// slots in the HRM blitter cycle diagrams, e.g. the non-write half of a
@@ -1777,7 +1771,7 @@ impl LineBlitState {
 }
 
 impl NormalBlitState {
-    fn new(blitter: &Blitter, h: u32, w: u32, ram: &[u8]) -> Self {
+    fn new(blitter: &Blitter, h: u32, w: u32, _ram: &[u8]) -> Self {
         let con0 = blitter.bltcon0;
         let con1 = blitter.bltcon1;
         let desc = con1 & BLTCON1_DESC != 0;
@@ -1839,49 +1833,11 @@ impl NormalBlitState {
             snap_b: Vec::new(),
             snap_a_idx: 0,
             snap_b_idx: 0,
-            track_overlay: use_d
-                && (use_a || use_b)
-                && !Self::sources_disjoint_from_d(blitter, h, w, ram.len()),
+            track_overlay: false,
             d_overlay: std::collections::BTreeMap::new(),
             registers_released: false,
             startup_eligible: true,
         }
-    }
-
-    /// Legacy overlay bookkeeping policy, retained for pending-state wire
-    /// compatibility. Source reads now use live RAM regardless of this result.
-    fn sources_disjoint_from_d(blitter: &Blitter, h: u32, w: u32, ram_len: usize) -> bool {
-        let use_a = blitter.bltcon0 & BLTCON0_USE_A != 0;
-        let use_b = blitter.bltcon0 & BLTCON0_USE_B != 0;
-        if blitter.bltcon1 & BLTCON1_DESC != 0
-            || blitter.bltdmod != 0
-            || (use_a && blitter.bltamod != 0)
-            || (use_b && blitter.bltbmod != 0)
-        {
-            return false;
-        }
-        let Some(byte_len) = h.checked_mul(w).and_then(|words| words.checked_mul(2)) else {
-            return false;
-        };
-        if byte_len == 0 {
-            return false;
-        }
-        // Half-open byte spans stay wholly below both masks used by chip_off,
-        // so their physical offsets equal their unmasked pointers. The final
-        // two-byte word must fit too; merely masking the start is insufficient.
-        let span = |base: u32| -> Option<(u32, u32)> {
-            let end = base.checked_add(byte_len)?;
-            (end <= CHIP_DMA_ADDR_MASK + 1 && end as usize <= ram_len).then_some((base, end))
-        };
-        let Some((d_start, d_end)) = span(blitter.bltdpt) else {
-            return false;
-        };
-        let disjoint =
-            |base| span(base).is_some_and(|(start, end)| end <= d_start || d_end <= start);
-        // Pointers, direction and modulos are latched into the pending state.
-        // Mid-blit control writes can suppress D, but cannot retarget it into
-        // these source spans; no per-slot recheck or extra saved field is needed.
-        (!use_a || disjoint(blitter.bltapt)) && (!use_b || disjoint(blitter.bltbpt))
     }
 
     fn disable_d_output(&mut self) {
@@ -2277,11 +2233,6 @@ impl NormalBlitState {
                     .contains(&(self.d_hold_pt & 0x00FF_FFFE))
             {
                 self.debug_watched_write = Some((self.d_hold_pt, self.d_hold));
-            }
-            if self.track_overlay {
-                if let Some(off) = chip_off(self.d_hold_pt, ram.len()) {
-                    self.d_overlay.insert(off, self.d_hold);
-                }
             }
         }
         self.pipeline_full = false;

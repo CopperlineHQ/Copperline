@@ -24,6 +24,23 @@ The correction replaces the doubling instruction with an equal-cost NOP.
 
 ## Building
 
+The A500 hardware-review boundary probes are registered in
+`tests/probe_golden.rs`, with their source and assembled binaries committed:
+
+- `a500-blit-boundaries`: raw DMACONR, destination words and beam samples
+  after 0–7 NOP gaps. Separate rows exercise D-only startup, zero-result A-to-D
+  copies, and descending two-word destination restores under BLTPRI.
+- `a500-display-boundaries`: paired single/dual-playfield early CLXDAT reads
+  and clears, BPL2PTL writes around initial fetch, and CPU beam reads across
+  line-end refresh. Each four-line row renders collision/beam/collision/beam.
+
+Both load at `$30000`, disable interrupts, and render raw result bits as pixels.
+Their goldens protect the emulator's snapshots; they do not turn a screenshot
+into a hardware timing reference. Corresponding versioned A500 measurements
+and qualification rules remain in `amiga-hardware-probes/references/` and its
+`docs/pr-810-review.md`. Assemble with the existing vasm workflow; use
+`-m68000 -no-opt` to preserve the explicit instruction gaps.
+
 `cia-movem-irq.asm` is an asset-free CPU/CIA interrupt regression fixture,
 loaded directly by `cpu::tests::cia_timer_irqs_preserve_movem_sample_phase`.
 It starts continuous CIA-B and CIA-A timers, wakes from STOP, and samples six
