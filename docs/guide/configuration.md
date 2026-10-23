@@ -19,9 +19,12 @@ inside the bundle's `Contents/MacOS` folder also works, but the one beside
 the bundle wins. macOS runs a downloaded app that has not been moved out of
 its download folder from a temporary private copy, which cannot see the
 files beside it. Move `Copperline.app` with the Finder (to Applications,
-say) before relying on a file beside it. Relative paths inside it are still
-resolved against the working directory, as in any configuration file. Use
-absolute paths when Copperline might be started from somewhere else.
+say) before relying on a file beside it. Relative paths inside it work as
+in any configuration file: a media path such as `rom = "KICK31.ROM"` that
+is not in the working directory is looked for in the matching media folder
+(see [Relative media paths](#relative-media-paths)), so a ROM kept in
+`~/Documents/Copperline/roms` is found whatever directory Copperline was
+started from.
 
 `--factory` ignores the saved default and a `copperline.toml` beside the
 executable, and starts from Copperline's own settings. `--config` and
@@ -63,7 +66,38 @@ rom = "C:/Kickstarts/KICK31.ROM"    # forward slashes also work on Windows
 
 Single-quoted literal strings are the least error-prone. macOS and Linux paths
 use forward slashes and need none of this. TOML paths do not expand `~` or
-shell variables; use an absolute path or a path relative to the working directory.
+shell variables; use an absolute path or a relative one (see below).
+
+(relative-media-paths)=
+## Relative media paths
+
+A relative path is looked for in the working directory first. A ROM, disk
+or CD path that is not there is then looked for in the matching media
+folder from [`[paths]`](#paths-config). By default these are
+under the host data directory, so `rom = "KICK31.ROM"` finds
+`~/Documents/Copperline/roms/KICK31.ROM` and `[copperhf] unit0 =
+"Workbench.hdf"` finds `~/Documents/Copperline/harddrives/Workbench.hdf`,
+whichever directory Copperline was started from. That matters for a copy
+started from the Dock, the Start menu or a desktop launcher, whose working
+directory is rarely one you chose.
+
+| Paths | Media folder |
+|---|---|
+| `rom`, `extended_rom`, `fmv_rom`, `[scsi] rom`/`rom_odd`, `[lide] rom`/`rom_bank2`, `[sf2000sd] rom`, `[cartridge] rom` | `roms` |
+| `[serial] mt32_control_rom`, `mt32_pcm_rom` | `roms/mt32`, then `roms` |
+| `[floppy.dfN]` images | `floppies` |
+| `[ide]`, `[scsi]`, `[lide]`, `[copperhf]` and `[sf2000sd]` drives | `harddrives`, then `cds` |
+| `[[filesys]]` folders, a `[pcmcia]` CF card | `harddrives` |
+| `[cd] image` | `cds` |
+
+A path with folders in it is looked up the same way
+(`rom = "kickstarts/KICK31.ROM"` finds `roms/kickstarts/KICK31.ROM`). A
+media folder that does not exist is skipped; none is created. A path found
+in neither place is reported as written. Absolute paths are always used
+as they are, and every other relative path in a configuration (bezel
+stickers, shaders, printer output, battery-RAM files and so on) is still
+relative to the working directory. Paths given to scheduled input such as
+`--insert-disk-after` are also used as written.
 
 ## Command-line overrides
 
@@ -275,6 +309,7 @@ A key that names its own file (`rom`, `fmv_rom`, `[scsi] rom`, `[lide] rom`,
 `[cartridge] rom`, `[whdload] whd_package` / `skick_package`) is used
 instead of the search.
 
+(paths-config)=
 ## `[paths]` -- where files go
 
 ```toml
@@ -286,15 +321,17 @@ instead of the search.
 # nvram = "nvram"            # battery-backed RAMs, incl. CD32 game saves
 # traces = "traces"          # debugger traces and waveform captures
 # configs = "configs"        # configurations saved from the launcher
-# roms = "roms"              # the rest set where an empty file dialog opens:
+# roms = "roms"              # the rest are media folders (see below):
 # mt32_roms = "roms/mt32"    # MT-32 control and PCM ROMs
 # floppies = "floppies"
 # harddrives = "harddrives"
 # cds = "cds"
 ```
 
-`[paths]` sets where Copperline writes its output files and where file
-dialogs open when their field is empty. Every key is optional and falls back
+`[paths]` sets where Copperline writes its output files, where file
+dialogs open when their field is empty, and where a relative media path is
+looked for when the working directory does not have it (see
+[Relative media paths](#relative-media-paths)). Every key is optional and falls back
 to the default directory structure under the host data directory
 (`~/Documents/Copperline` on macOS and Linux,
 `%USERPROFILE%\Documents\Copperline` on Windows, or the application folder
@@ -302,8 +339,8 @@ in a [portable installation](ui.md#where-files-go)).
 
 Relative paths are resolved against `base` (which itself defaults to the host
 data directory), while absolute paths are used directly. Output folders are
-created automatically on first write. Dialog folders are not created
-automatically and only open in existing directories.
+created automatically on first write. Media folders are not created
+automatically and are only used when they exist.
 
 These name folders on the machine that runs the configuration, so a config
 copied to another machine may name folders that are not there. At startup

@@ -570,6 +570,74 @@ fn the_battery_ram_follows_the_paths_in_force() -> Result<()> {
     Ok(())
 }
 
+/// A relative media path the working directory does not have is taken from
+/// the matching `[paths]` media folder, so an installed copy started from
+/// anywhere still finds `rom = "KICK31.ROM"`. Each kind looks in its own
+/// folder, and a drive unit in either the hard-drive or the CD folder.
+#[test]
+fn relative_media_paths_fall_back_to_the_media_folders() -> Result<()> {
+    let _guard = crate::paths::adopted_store_lock();
+    if crate::paths::config_dir().is_none() {
+        // No host-data directory, so no media folders to fall back to.
+        return Ok(());
+    }
+    let base = temp_path("media");
+    for dir in ["roms", "floppies", "harddrives", "cds"] {
+        fs::create_dir_all(base.join(dir))?;
+    }
+    let rom = "copperline-media-test.rom";
+    let adf = "copperline-media-test.adf";
+    let hdf = "copperline-media-test.hdf";
+    let iso = "copperline-media-test.iso";
+    fs::write(base.join("roms").join(rom), [])?;
+    fs::write(
+        base.join("floppies").join(adf),
+        vec![0u8; 80 * 2 * 11 * 512],
+    )?;
+    fs::write(base.join("harddrives").join(hdf), [])?;
+    fs::write(base.join("cds").join(iso), [])?;
+    crate::paths::adopt(crate::pathconf::Paths {
+        base: Some(base.clone()),
+        ..Default::default()
+    });
+
+    let parsed = parse_config(&format!(
+        r#"
+            rom = "{rom}"
+            [floppy.df0]
+            path = "{adf}"
+            [copperhf]
+            unit0 = "{hdf}"
+            [scsi]
+            controller = "a2091"
+            unit0 = "{hdf}"
+            unit1 = "{iso}"
+            unit2 = "copperline-media-test-missing.hdf"
+            "#
+    ));
+    let _ = fs::remove_dir_all(&base);
+    let cfg = parsed?;
+
+    assert_eq!(cfg.rom_path, base.join("roms").join(rom));
+    assert_eq!(
+        cfg.floppy.drives[0].as_ref().map(|d| d.path.clone()),
+        Some(base.join("floppies").join(adf))
+    );
+    assert_eq!(
+        cfg.copperhf.units[0].as_ref().map(|d| d.path.clone()),
+        Some(base.join("harddrives").join(hdf))
+    );
+    let scsi = |unit: usize| cfg.scsi.units[unit].as_ref().map(|d| d.path.clone());
+    assert_eq!(scsi(0), Some(base.join("harddrives").join(hdf)));
+    assert_eq!(scsi(1), Some(base.join("cds").join(iso)));
+    // Found nowhere: kept as written, so the error names what was written.
+    assert_eq!(
+        scsi(2),
+        Some(PathBuf::from("copperline-media-test-missing.hdf"))
+    );
+    Ok(())
+}
+
 #[test]
 fn battmem_defaults_to_a_backing_file_only_where_an_rp5c01_sits() -> Result<()> {
     // The big boxes get the default backing file with their Ricoh part.

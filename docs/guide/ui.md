@@ -942,7 +942,10 @@ The layout is:
     - **Paths**: the `[paths]` section of the configuration (see
       [](configuration.md)): the base folder on top, then one row per
       folder. The **ROMs**, **Floppies**, **Hard drives** and **CD images**
-      rows set where file dialogs open rather than where output goes. A row
+      rows set where file dialogs open, and where a relative media path is
+      looked for (see
+      [Relative media paths](configuration.md#relative-media-paths)),
+      rather than where output goes. A row
       reads `(default)` until a folder is chosen for it; **Browse** picks
       one and a **Reset** button then appears to put the row back to
       inheriting. The base folder always shows its full path, and swaps

@@ -26,7 +26,7 @@ src/
   config/           # TOML config + validation + machine profiles
                     #   (mod.rs, raw.rs, validate.rs, resolve.rs, about.rs, tests.rs)
   paths.rs          # host data directories (platform config dir, portable mode)
-  pathconf.rs       # [paths]: output locations and file-dialog start folders
+  pathconf.rs       # [paths]: output locations and media folders
   envcfg.rs         # cached COPPERLINE_* environment-variable snapshot
   emulator.rs       # frame loop driving CPU, chipset, and host I/O
   warpboot.rs       # warp boot: run unpaced until a condition holds, then pace

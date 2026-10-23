@@ -618,7 +618,10 @@ pub fn game_and_options(raw: &RawConfig) -> (Option<PathBuf>, Options) {
         Some(dir) => kickstart_dirs.push(PathBuf::from(dir)),
         None => {
             if let Some(rom) = &raw.rom {
-                if let Some(dir) = Path::new(rom).parent() {
+                // Where the ROM really is: a bare name found in the ROMs
+                // folder makes that folder the one to scan.
+                let rom = crate::paths::locate_media(rom, crate::paths::Media::Rom);
+                if let Some(dir) = rom.parent() {
                     if !dir.as_os_str().is_empty() {
                         kickstart_dirs.push(dir.to_path_buf());
                     }

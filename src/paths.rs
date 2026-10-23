@@ -611,11 +611,13 @@ pub fn modem_profile_file() -> PathBuf {
     battery_ram("modem.profile")
 }
 
-// --- where a dialog opens ------------------------------------------------
+// --- where media is kept -------------------------------------------------
 //
-// Not Copperline's to write, and not created: these only say where a file
-// dialog starts when the field it was opened from is empty. A field with a
-// value opens beside that value, which beats any fixed answer.
+// Not Copperline's to write, and not created: these say where a file
+// dialog starts when the field it was opened from is empty, and where
+// [`locate_media`] looks for a relative path the working directory lacks.
+// A field with a value opens beside that value, which beats any fixed
+// answer.
 //
 // Each returns `None` when the directory does not exist, so a dialog is
 // never pointed at somewhere that isn't there. Make the folder and it gets
@@ -651,6 +653,85 @@ pub fn harddrives_dir() -> Option<PathBuf> {
 /// CD images.
 pub fn cds_dir() -> Option<PathBuf> {
     media_dir(|p, h| p.cds_dir(h))
+}
+
+// --- where a configuration's relative media path is ----------------------
+
+/// What a media path in a configuration names, which decides the folder a
+/// relative one is looked for in when the working directory does not have
+/// it. The same grouping the launcher's dialogs open at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Media {
+    /// Kickstart, extended and expansion-board ROMs.
+    Rom,
+    /// MT-32 control and PCM ROMs: their own folder, then the ROMs folder.
+    Mt32Rom,
+    /// Floppy images.
+    Floppy,
+    /// Hard-disk images and host-filesystem folders.
+    HardDrive,
+    /// CD images.
+    Cd,
+    /// A drive unit's image, which may be either: the hard-drive folder,
+    /// then the CD folder. Which one a CHD is takes reading it, so the
+    /// name alone cannot pick the folder.
+    Drive,
+}
+
+/// Where a media path from a configuration actually is.
+///
+/// The working directory first, so a path that resolves there keeps
+/// meaning that file. Only a relative path the
+/// working directory does not have is then looked for in the matching
+/// media folder (`[paths] roms` and friends, `~/Documents/Copperline/roms`
+/// by default) -- which is what makes `rom = "KICK31.ROM"` mean something
+/// to an installed copy started from the Dock or the Start menu, whose
+/// working directory is nobody's choice. Found nowhere, the path comes back
+/// as written, so the error that follows names what the person wrote.
+///
+/// A missing media folder costs one `stat`, and an unreachable one was
+/// already dropped when `[paths]` was adopted, so this cannot hang on a
+/// dead network share.
+pub fn locate_media(path: impl Into<PathBuf>, media: Media) -> PathBuf {
+    let path = path.into();
+    let dirs: &[fn() -> Option<PathBuf>] = match media {
+        Media::Rom => &[roms_dir],
+        Media::Mt32Rom => &[mt32_roms_dir, roms_dir],
+        Media::Floppy => &[floppies_dir],
+        Media::HardDrive => &[harddrives_dir],
+        Media::Cd => &[cds_dir],
+        Media::Drive => &[harddrives_dir, cds_dir],
+    };
+    let found = locate_in(&path, dirs.iter().filter_map(|dir| dir()));
+    match found {
+        Some(found) => {
+            log::info!(
+                "{} is not in the working directory; using {}",
+                path.display(),
+                found.display()
+            );
+            found
+        }
+        None => path,
+    }
+}
+
+/// The first of `dirs` holding the relative `path`, when the working
+/// directory does not. `None` for an absolute or empty path, for one the
+/// working directory has, and for one found nowhere.
+fn locate_in(path: &std::path::Path, dirs: impl Iterator<Item = PathBuf>) -> Option<PathBuf> {
+    use std::path::Component;
+    // A root or a drive prefix anchors the path already, and joining one
+    // onto a folder would replace the folder rather than look inside it.
+    let anchored = matches!(
+        path.components().next(),
+        None | Some(Component::Prefix(_) | Component::RootDir)
+    );
+    if anchored || path.exists() {
+        return None;
+    }
+    dirs.map(|dir| dir.join(path))
+        .find(|candidate| candidate.exists())
 }
 
 /// Where the launcher saves machine configurations.
@@ -824,6 +905,47 @@ mod tests {
 
         // The MT-32 pair sit under the ROMs folder rather than beside it.
         assert_eq!(cfg.mt32_roms_dir(host), roms.join("mt32"));
+    }
+
+    /// A relative media path the working directory lacks is looked for in
+    /// the media folders, in order; anything the working directory has, or
+    /// that is anchored already, is left alone.
+    #[test]
+    fn a_relative_media_path_falls_back_to_its_folder() {
+        use std::path::Path;
+        let scratch = ScratchDir::new("locate");
+        let first = scratch.0.join("first");
+        let second = scratch.0.join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let dirs = || [first.clone(), second.clone()].into_iter();
+
+        // Only the second folder has it: that one, after skipping the first.
+        let name = Path::new("copperline-locate-test.rom");
+        assert!(!name.exists(), "the working directory must not hold it");
+        std::fs::write(second.join(name), []).unwrap();
+        assert_eq!(locate_in(name, dirs()), Some(second.join(name)));
+        // Both have it: the first wins.
+        std::fs::write(first.join(name), []).unwrap();
+        assert_eq!(locate_in(name, dirs()), Some(first.join(name)));
+
+        // Subdirectories resolve inside the folder too.
+        let nested = Path::new("kick").join("copperline-locate-test.rom");
+        std::fs::create_dir_all(second.join("kick")).unwrap();
+        std::fs::write(second.join(&nested), []).unwrap();
+        assert_eq!(locate_in(&nested, dirs()), Some(second.join(&nested)));
+
+        // The working directory wins whatever the folders hold. `cargo
+        // test` runs from the package root, which has a Cargo.toml.
+        let here = Path::new("Cargo.toml");
+        assert!(here.exists());
+        std::fs::write(first.join(here), []).unwrap();
+        assert_eq!(locate_in(here, dirs()), None);
+
+        // Found nowhere, empty, or anchored: left as written.
+        assert_eq!(locate_in(Path::new("copperline-nowhere.rom"), dirs()), None);
+        assert_eq!(locate_in(Path::new(""), dirs()), None);
+        assert_eq!(locate_in(&first.join(name), dirs()), None);
     }
 
     /// Restores the working directory when dropped, so a failing assertion
