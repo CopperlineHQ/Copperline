@@ -229,8 +229,10 @@ pub struct CliArgs {
     /// validation.
     pub overrides: ConfigOverrides,
     /// `--factory`: start from Copperline's own defaults, ignoring a
-    /// configuration saved with Save default. An explicit `--config` still
-    /// wins -- this says "not the saved default", not "no configuration".
+    /// configuration saved with Save default and an installation's
+    /// `copperline.toml` beside the executable. An explicit `--config` (or
+    /// `./copperline.toml`) still wins -- this says "not a default this run
+    /// did not name", not "no configuration".
     pub factory: bool,
 }
 
@@ -1996,9 +1998,10 @@ fn print_help() {
          \n\
          Options:\n  \
          -c, --config FILE              load configuration from FILE (default: ./copperline.toml,\n  \
-         \x20                            then the configuration saved with Save default)\n  \
-         --factory                      ignore the saved default and start from Copperline's own\n  \
-         \x20                            settings\n  \
+         \x20                            then copperline.toml beside the executable, then the\n  \
+         \x20                            configuration saved with Save default)\n  \
+         --factory                      ignore the saved default and a copperline.toml beside the\n  \
+         \x20                            executable, and start from Copperline's own settings\n  \
          --whdload GAME                 boot a WHDLoad game package: an .lha/.lzh or .zip\n  \
          \x20                            archive, or a directory holding a .slave\n  \
          \x20                            (see docs/guide/whdload.md)\n  \

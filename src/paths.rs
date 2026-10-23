@@ -24,13 +24,75 @@ use std::path::PathBuf;
 /// switch, so portable archives need no machine-specific configuration.
 pub const PORTABLE_MARKER: &str = "portable.txt";
 
+/// The machine configuration an installation keeps beside its executable (or
+/// downloaded AppImage, or macOS `.app` bundle): a run that names no
+/// `--config` and finds no `./copperline.toml` boots it straight away,
+/// launcher skipped, whatever directory it was started from. See
+/// [`installation_config_file`].
+pub const INSTALLATION_CONFIG: &str = "copperline.toml";
+
+/// Return the directory containing `program` when a file called `name` sits
+/// beside it.
+fn program_dir_holding(program: &std::path::Path, name: &str) -> Option<PathBuf> {
+    let dir = program.parent()?;
+    dir.join(name).is_file().then(|| dir.to_path_buf())
+}
+
 /// Return the directory containing `program` when it carries the portable
 /// marker.
 fn marked_program_dir(program: &std::path::Path) -> Option<PathBuf> {
-    let dir = program.parent()?;
-    dir.join(PORTABLE_MARKER)
-        .is_file()
-        .then(|| dir.to_path_buf())
+    program_dir_holding(program, PORTABLE_MARKER)
+}
+
+/// The downloaded AppImage the running binary was mounted from, if any (see
+/// [`portable_config_dir`]).
+fn appimage_path() -> Option<PathBuf> {
+    if cfg!(target_os = "linux") {
+        crate::envcfg::var_os("APPIMAGE").map(PathBuf::from)
+    } else {
+        None
+    }
+}
+
+/// The `.app` bundle `executable` is the binary of, when it sits at the
+/// bundle's `Contents/MacOS/` like a macOS application's does.
+fn app_bundle(executable: &std::path::Path) -> Option<&std::path::Path> {
+    let macos = executable.parent()?;
+    let contents = macos.parent()?;
+    let bundle = contents.parent()?;
+    (macos.file_name()? == "MacOS"
+        && contents.file_name()? == "Contents"
+        && bundle.extension()? == "app")
+        .then_some(bundle)
+}
+
+/// The installation's own configuration, [`INSTALLATION_CONFIG`] beside the
+/// executable, if one is there. The user-visible place wins over the
+/// binary's own directory: the AppImage's download directory over its
+/// read-only mount (as for the portable marker), and on macOS the folder
+/// holding the `.app` over the bundle's `Contents/MacOS/`, which still
+/// works when nothing sits beside the bundle.
+pub fn installation_config_file() -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok();
+    installation_config(
+        appimage_path().as_deref(),
+        executable.as_deref(),
+        cfg!(target_os = "macos"),
+    )
+}
+
+fn installation_config(
+    appimage: Option<&std::path::Path>,
+    executable: Option<&std::path::Path>,
+    app_bundles: bool,
+) -> Option<PathBuf> {
+    let bundle = executable.filter(|_| app_bundles).and_then(app_bundle);
+    appimage
+        .into_iter()
+        .chain(bundle)
+        .chain(executable)
+        .find_map(|program| program_dir_holding(program, INSTALLATION_CONFIG))
+        .map(|dir| dir.join(INSTALLATION_CONFIG))
 }
 
 /// Resolve portable mode from the program path the user launched. An AppImage
@@ -110,10 +172,7 @@ pub fn config_dir() -> Option<PathBuf> {
 }
 
 fn discover_config_dir() -> Option<PathBuf> {
-    #[cfg(target_os = "linux")]
-    let appimage = crate::envcfg::var_os("APPIMAGE").map(PathBuf::from);
-    #[cfg(not(target_os = "linux"))]
-    let appimage: Option<PathBuf> = None;
+    let appimage = appimage_path();
     let executable = std::env::current_exe().ok();
     if let Some(dir) = portable_config_dir(appimage.as_deref(), executable.as_deref()) {
         return Some(dir);
@@ -841,6 +900,99 @@ mod tests {
         assert_eq!(
             portable_config_dir(None, Some(&executable)).map(|dir| dir.join("states")),
             Some(root.0.join("states"))
+        );
+    }
+
+    #[test]
+    fn installation_config_is_the_file_beside_the_executable() {
+        let root = ScratchDir::new("installation-config");
+        let executable = root.0.join("copperline.exe");
+
+        assert_eq!(installation_config(None, Some(&executable), false), None);
+        // A directory of that name is not a configuration to boot.
+        std::fs::create_dir(root.0.join(INSTALLATION_CONFIG)).unwrap();
+        assert_eq!(installation_config(None, Some(&executable), false), None);
+        std::fs::remove_dir(root.0.join(INSTALLATION_CONFIG)).unwrap();
+
+        std::fs::write(root.0.join(INSTALLATION_CONFIG), []).unwrap();
+        assert_eq!(
+            installation_config(None, Some(&executable), false),
+            Some(root.0.join(INSTALLATION_CONFIG))
+        );
+    }
+
+    #[test]
+    fn app_bundle_is_found_only_from_its_contents_macos_binary() {
+        let bundle = std::path::Path::new("/Applications/Copperline.app");
+        assert_eq!(
+            app_bundle(&bundle.join("Contents/MacOS/copperline")),
+            Some(bundle)
+        );
+        for elsewhere in [
+            "/Applications/Copperline.app/Contents/Resources/copperline",
+            "/Applications/Copperline.app/MacOS/copperline",
+            "/Applications/Copperline/Contents/MacOS/copperline",
+            "/usr/local/bin/copperline",
+            "copperline",
+        ] {
+            assert_eq!(
+                app_bundle(std::path::Path::new(elsewhere)),
+                None,
+                "{elsewhere}"
+            );
+        }
+    }
+
+    #[test]
+    fn app_bundle_installation_config_sits_beside_the_bundle() {
+        let root = ScratchDir::new("app-bundle-installation-config");
+        let macos = root.0.join("Copperline.app/Contents/MacOS");
+        std::fs::create_dir_all(&macos).unwrap();
+        let executable = macos.join("copperline");
+
+        // Inside the bundle, beside the binary, keeps working.
+        std::fs::write(macos.join(INSTALLATION_CONFIG), []).unwrap();
+        assert_eq!(
+            installation_config(None, Some(&executable), true),
+            Some(macos.join(INSTALLATION_CONFIG))
+        );
+        // Beside the bundle, where the Finder shows it, wins.
+        std::fs::write(root.0.join(INSTALLATION_CONFIG), []).unwrap();
+        assert_eq!(
+            installation_config(None, Some(&executable), true),
+            Some(root.0.join(INSTALLATION_CONFIG))
+        );
+        // Off macOS a bundle-shaped path is only a directory tree.
+        assert_eq!(
+            installation_config(None, Some(&executable), false),
+            Some(macos.join(INSTALLATION_CONFIG))
+        );
+        std::fs::remove_file(macos.join(INSTALLATION_CONFIG)).unwrap();
+        assert_eq!(
+            installation_config(None, Some(&executable), true),
+            Some(root.0.join(INSTALLATION_CONFIG))
+        );
+    }
+
+    #[test]
+    fn appimage_installation_config_sits_beside_the_download() {
+        let root = ScratchDir::new("appimage-installation-config");
+        let download = root.0.join("download");
+        let mount = root.0.join("mount/usr/bin");
+        std::fs::create_dir_all(&download).unwrap();
+        std::fs::create_dir_all(&mount).unwrap();
+        let appimage = download.join("Copperline.AppImage");
+        let executable = mount.join("copperline");
+
+        std::fs::write(mount.join(INSTALLATION_CONFIG), []).unwrap();
+        assert_eq!(
+            installation_config(Some(&appimage), Some(&executable), false),
+            Some(mount.join(INSTALLATION_CONFIG))
+        );
+        std::fs::write(download.join(INSTALLATION_CONFIG), []).unwrap();
+        assert_eq!(
+            installation_config(Some(&appimage), Some(&executable), false),
+            Some(download.join(INSTALLATION_CONFIG))
         );
     }
 

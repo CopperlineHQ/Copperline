@@ -1703,7 +1703,8 @@ pub struct App {
     machine_config: RawConfig,
     /// The saved default configuration that menu settings changes write
     /// through to, or `None` when the session's settings belong to a file
-    /// the user named (`--config`, `./copperline.toml`) or to `--factory`.
+    /// the user put in place (`--config`, `./copperline.toml`, a
+    /// `copperline.toml` beside the executable) or to `--factory`.
     menu_settings_file: Option<PathBuf>,
     /// The menu-controlled settings as last persisted, or as the machine
     /// started: [`Self::persist_menu_settings`] writes only what differs.

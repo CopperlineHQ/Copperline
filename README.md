@@ -90,7 +90,7 @@ Run Copperline from the terminal:
 ./target/release/copperline
 ```
 
-Running with no arguments and no `./copperline.toml` opens the interactive configuration launcher (defaulting to an A500 profile with the bundled AROS ROM).
+Running with no arguments and no `copperline.toml` (in the working directory or beside the executable) opens the interactive configuration launcher (defaulting to an A500 profile with the bundled AROS ROM).
 
 To boot directly into a Kickstart ROM, configuration file, or floppy image:
 

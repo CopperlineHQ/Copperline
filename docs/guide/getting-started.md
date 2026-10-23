@@ -192,10 +192,11 @@ Run Copperline from the terminal:
 ./target/release/copperline
 ```
 
-When started with no arguments and no `copperline.toml` in the current directory,
-Copperline displays the interactive launcher screen where you can configure
-machine models, memory, storage, and peripherals. Any machine, media, or
-headless option skips the launcher; `--factory` on its own does not.
+When started with no arguments and no `copperline.toml` in the current directory
+or beside the Copperline executable, Copperline displays the interactive
+launcher screen where you can configure machine models, memory, storage, and
+peripherals. Any machine, media, or headless option skips the launcher;
+`--factory` on its own does not.
 
 With no saved default, the launcher starts with an Amiga 500 (Rev 6A): ECS
 8372A Agnus, OCS 8362 Denise, 512 KiB chip RAM, 512 KiB slow RAM, and the
@@ -204,9 +205,15 @@ bundled AROS Kickstart replacement. **Save default** writes your settings to
 [Where files go](ui.md#where-files-go)) and every later run that names no
 configuration loads it. If that saved default has **Run on startup** set
 (`[emulation] auto_launch`), the launcher starts the machine straight away.
-`--factory` ignores the saved default, and also leaves Coppersynth's and the
-modem's stored settings untouched; an explicit `--config` or a local
-`copperline.toml` still takes precedence.
+`--factory` ignores the saved default and a `copperline.toml` beside the
+executable, and also leaves Coppersynth's and the modem's stored settings
+untouched; an explicit `--config` or a local `copperline.toml` still takes
+precedence.
+
+A `copperline.toml` beside the Copperline executable (on macOS, beside
+`Copperline.app`) boots straight into its machine, running, from any working
+directory, so an installation can carry its own default machine (see
+[](configuration.md)).
 
 To boot directly into a specific Kickstart ROM or configuration file:
 
