@@ -65,9 +65,14 @@ impl IdeA4000 {
         self.ata.first_atapi_mut()
     }
 
-    /// Advance every ATAPI drive on this interface (master and slave alike).
-    pub fn tick_atapi(&mut self, cck: u32, cd_audio: &mut crate::chipset::paula::CdAudioRing) {
-        self.ata.tick_atapi(cck, cd_audio);
+    /// Advance every drive on this interface (master and slave alike).
+    pub fn tick_drives(&mut self, cck: u32, cd_audio: &mut crate::chipset::paula::CdAudioRing) {
+        self.ata.tick(cck, cd_audio);
+    }
+
+    /// Colour clocks until a timed drive's next step.
+    pub fn next_drive_event_cck(&self) -> Option<u32> {
+        self.ata.next_event_cck()
     }
 
     #[cfg(not(target_arch = "wasm32"))]

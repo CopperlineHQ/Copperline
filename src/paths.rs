@@ -913,6 +913,9 @@ mod tests {
     #[test]
     fn a_relative_media_path_falls_back_to_its_folder() {
         use std::path::Path;
+        // Relative names resolve against the working directory, which
+        // another test moves.
+        let _cwd = cwd_lock();
         let scratch = ScratchDir::new("locate");
         let first = scratch.0.join("first");
         let second = scratch.0.join("second");
@@ -948,14 +951,32 @@ mod tests {
         assert_eq!(locate_in(&first.join(name), dirs()), None);
     }
 
-    /// Restores the working directory when dropped, so a failing assertion
-    /// cannot leave the rest of the suite running somewhere else: the CWD
-    /// is process state, and `set_current_dir` with no guard holds until
-    /// the process ends, not until the test does.
-    struct CwdGuard(PathBuf);
+    /// Serializes the tests that rely on the working directory with the one
+    /// that moves it: the CWD is process state, shared by every test thread.
+    fn cwd_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Moves the working directory for one test, holding [`cwd_lock`], and
+    /// restores it when dropped, so a failing assertion cannot leave the
+    /// rest of the suite running somewhere else: `set_current_dir` with no
+    /// guard holds until the process ends, not until the test does.
+    struct CwdGuard {
+        home: PathBuf,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+    impl CwdGuard {
+        fn enter(dir: &std::path::Path) -> Self {
+            let lock = cwd_lock();
+            let home = std::env::current_dir().unwrap();
+            std::env::set_current_dir(dir).unwrap();
+            Self { home, _lock: lock }
+        }
+    }
     impl Drop for CwdGuard {
         fn drop(&mut self) {
-            let _ = std::env::set_current_dir(&self.0);
+            let _ = std::env::set_current_dir(&self.home);
         }
     }
 
@@ -964,8 +985,7 @@ mod tests {
         // The no-legacy branch below reads the adopted store.
         let _store = adopted_store_lock();
         let scratch = ScratchDir::new("battery");
-        let _cwd = CwdGuard(std::env::current_dir().unwrap());
-        std::env::set_current_dir(&scratch.0).unwrap();
+        let _cwd = CwdGuard::enter(&scratch.0);
 
         // Nothing there: the new place, under the host data directory.
         let fresh = akiko_nvram_file();

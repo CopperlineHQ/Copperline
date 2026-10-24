@@ -72,7 +72,11 @@ A600/A1200 machines get the Gayle gate array: the ID register at
 a 4-byte stride, byte registers on the odd word half), and the IDE
 interrupt and status bits. The drives, task file, and command engine are
 the shared ATA core in `ata.rs`, over the shared drive backend described
-below; PIO transfers complete synchronously within the access. Gayle
+below; on an untimed drive PIO transfers complete synchronously within
+the access, and a drive with period mechanics holds BSY until its
+mechanism has the data (see "Drive mechanics" below). A timed drive's
+INTRQ can rise from the bus tick rather than a register access, so Gayle
+latches the edge into `$DA9000` there too. Gayle
 byte-swaps the IDE bus, so IDENTIFY data words are low-byte-first while
 sector data passes through untouched -- Kickstart 3.1 expects exactly
 this. The absent-slave behaviour follows the WinUAE-verified model so
@@ -237,9 +241,17 @@ the real 7.0 boot ROM booting a Workbench install end-to-end:
 
 Data phases run through the DMAC handshake (a word per DMAC cycle into
 chip, slow, or Zorro RAM with the 24-bit ACR auto-incrementing) or
-through the PIO data register with DBR. Like the Gayle model, transfers
-complete within the access; completion interrupts are delivered after a
-short emulated delay, and INT2 is the level `CNTR_INTEN && ISTR &
+through the PIO data register with DBR. On an untimed target, like the
+untimed Gayle model, transfers complete within the access. A target with
+drive mechanics only starts the data-in phase once its first block is in
+the drive's buffer (the chip stays BSY|CIP until then), `dma_remaining`
+and DBR are capped to the blocks already buffered, to the room left in
+the drive's write buffer and to the profile's asynchronous SCSI rate --
+always ending on a word boundary of the phase, since both DMACs move a word
+per cycle -- and a write's status follows once the media (or the write
+cache, unless the CDB sets FUA) has the data. The A2091 and SDMAC report
+the chip's next timed event to the idle fast-forward. Completion interrupts
+are delivered after a short emulated delay, and INT2 is the level `CNTR_INTEN && ISTR &
 (INTS|E_INT)` fed to Paula's PORTS latch each tick. DMAC bus-master
 cycles are not yet arbitrated against the CPU (TODO in `a2091.rs`).
 
@@ -277,6 +289,15 @@ The autoconfig identity is Commodore product 84 with `er_InitDiagVec`
 `$0200`. With no `rom` named, Copperline serves the open-source A4091
 project's `a4091_cdfs.rom` release (`assets/a4091/`), which carries
 `a4091.device` and a CD filesystem.
+
+With a timed disk (drive mechanics) the SCRIPTS processor can stall: a
+table-indirect block move the target is not ready for -- DATA IN bytes not
+yet in the drive's buffer or not yet carried at the SCSI bus rate, DATA OUT
+bytes beyond that rate or the room left in the drive's buffer, STATUS
+before the overhead, seek or media write is done -- rewinds DSP to the move and records when it can complete, and the
+board's tick resumes `run_scripts` then, exactly as the real chip waits for
+the target's REQ. The live nexus (`Connection`), its timing and the stall
+are part of the save state.
 
 ### A3000 Super DMAC (`sdmac.rs`)
 
@@ -321,6 +342,72 @@ the WP bit in the MODE SENSE header), copperhf as `TDERR_WriteProt` with
 `CHF_UNIT_RDONLY`/`TD_PROTSTATUS` set, and the ATA core as an aborted
 command (ATA has no write-protect status). The filesystem turns those into
 its own write-protect error instead of a disk fault.
+
+### Drive mechanics (`harddrive/mechanics.rs`, `harddrive/profiles.rs`)
+
+A hard disk may carry `DriveMechanics` (`timing` in the config; `None`,
+the default, is the instant drive). The model is pure arithmetic on the
+device clock -- colour clocks accumulated from the controller's ticks --
+and the request stream:
+
+- **Command overhead**, from the profile.
+- **Seek**: `t2t + (full - t2t) * d^p`, with `d` the distance as a fraction
+  of the stroke and `p` chosen so the mean over random seeks equals the
+  datasheet average (`p = (sqrt(1 + 8/k) - 3) / 2`,
+  `k = (avg - t2t) / (full - t2t)`). A head switch on the same cylinder
+  costs the profile's head-switch time.
+- **Rotation**: the platter angle is `(now - spindle_ready) mod rev`, so the
+  wait for a sector is exact rather than averaged.
+- **Media**: each zone keeps its native sectors per track; the image's LBA
+  space is shared between the zones in proportion to their native capacity,
+  so any image size runs at the drive's rates and seek distances scale onto
+  the real stroke. Track and cylinder skew (published, or the head-switch
+  and track-to-track times rounded up to whole sectors) make sequential
+  transfers across track boundaries cost what they did.
+- **Read-ahead**: after a read the head keeps reading into the buffer, up to
+  the profile's prefetch limit. A later request in that stream is served
+  from it; a profile with `partial_hits = false` takes only complete hits.
+- **Writes** pass through the buffer: a block is accepted while there is
+  room, and on a write-cache drive the command completes before the data
+  reaches the platter, with the mechanism busy until it does. Sectors still
+  on their way keep their buffer space into the next command, so a
+  following write waits for room.
+- **Spin-up, standby and idle head park**, for the drives whose manuals
+  describe them.
+
+Only `+ - * /` and `sqrt` are used on floating point (no `powf`; a power
+is built from repeated square roots), so every platform computes the same
+times. Netplay bundles carry each slot's resolved profile, and save states
+carry the whole mechanism.
+
+The ATA engine (`ata.rs`) asks the mechanics for every sector's ready time
+when a READ is issued and offers each DRQ block when its last sector is in
+the buffer, holding BSY until then; a WRITE takes blocks (its first one
+included) while the buffer has room and completes when the media (or, with write cache, the buffer)
+has the data. A pending step's due time caps the emulator's STOP-state
+idle fast-forward (`Bus::next_storage_event_cck`), so a guest waiting on
+the disk interrupt is woken on time. A drive spinning up from power-on
+(`spin_up`) reads back BSY alone and ignores commands; SEEK, IDLE/STANDBY
+(immediate or with the timer, which `DriveMechanics::set_standby_timer`
+applies) and CHECK POWER MODE are implemented on timed drives only, so an
+untimed drive keeps aborting them exactly as before. The SCSI disk target
+answers NOT READY / becoming ready (02/04/01) while spinning up, except to
+INQUIRY, REQUEST SENSE and START STOP UNIT, which spins a timed drive down
+and up. Commands that need neither spindle nor heads (INQUIRY, REQUEST
+SENSE, mode pages, capacity, any error status) answer after the controller
+overhead alone, without waiting for a spindle coming up to speed or
+starting a stopped one; SYNCHRONIZE CACHE reports once the mechanism has
+finished writing, and a WRITE with FUA (or a WRITE AND VERIFY) reports
+from the media even on a write-cache drive.
+
+An image no larger than the profile's drive lies on its outer cylinders
+like a partition at the start of the disk, so seeks between its cylinders
+are real cylinder distances; a larger image is shared between the zones in
+proportion to their capacity with more cylinders than the drive has, and
+seek distances scale onto the real stroke. Stretching a small image across
+the whole stroke instead would put adjacent image cylinders several
+physical cylinders apart and lose a revolution at every cylinder crossing,
+which the cylinder skew cannot cover.
 
 The drive controllers latch read/write activity, which the bus drains to
 light the status-bar HDD LED; the LED holds for a short minimum period so

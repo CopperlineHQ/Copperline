@@ -748,6 +748,16 @@ pub struct MachineSetup {
     /// firmware author's own, not Copperline's to ship, so `None` here
     /// means exactly "hardware-only mode", nothing more to carry.
     sf2000sd_rom: Option<PathBuf>,
+    /// The Emulation page's hard-drive rows: the `timing` written to every
+    /// hard-drive section, and their `spin_up`.
+    drive_timing: crate::config::DriveTiming,
+    drive_spin_up: bool,
+    /// What the loaded configuration said, so a save that leaves the page
+    /// alone keeps sections that differed from each other as written.
+    drive_timing_loaded: (crate::config::DriveTiming, bool),
+    /// The `[[drive_profile]]` ids the configuration defines, offered after
+    /// the built-in drives.
+    drive_profile_ids: Vec<String>,
     // Host FS mounts. The GUI edits the first FILESYS_GUI_SLOTS entries
     // (directory + optional volume name + boot priority, -128 = never boot);
     // any further hand-written [[filesys]] entries are carried in
@@ -1410,6 +1420,11 @@ impl MachineSetup {
             // both caches; only the 68000 has neither).
             F::Icache => reason(self.cpu.has_instruction_cache(), "needs 68020+"),
             F::Dcache => reason(self.cpu.has_data_cache(), "needs 68030+"),
+            // Only a timed drive has a spindle to spin up.
+            F::DriveSpinUp => reason(
+                self.drive_timing != crate::config::DriveTiming::Instant,
+                "needs drive timing",
+            ),
             // The 68000/68010 shared-bus float model needs the precise
             // core, so the JIT never engages there (see cpu.rs).
             F::Jit => reason(
@@ -6001,6 +6016,9 @@ fn drive_raw(
         // directory mount; FFS is the default, so it too stays unwritten,
         // keeping a saved config minimal exactly like `name` above.
         filesystem: (p.is_dir() && !filesystem.ffs).then(|| "ofs".to_string()),
+        // A drive's own `timing` is not edited here; it is carried from the
+        // loaded configuration (`carry_unowned_keys`).
+        timing: None,
     })
 }
 

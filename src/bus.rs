@@ -7908,6 +7908,29 @@ impl Bus {
         self.paula.next_serial_event_cck()
     }
 
+    /// Colour clocks until a storage controller next changes state on its
+    /// own -- a timed drive presenting data or completing, a delayed
+    /// controller interrupt -- so a CPU halted in STOP waiting for the
+    /// disk does not nap past it.
+    pub fn next_storage_event_cck(&self) -> Option<u32> {
+        use crate::zorro_device::ZorroDevice;
+        let gayle = self.gayle.as_ref().and_then(|g| g.next_drive_event_cck());
+        let ide_a4000 = self
+            .ide_a4000
+            .as_ref()
+            .and_then(|ide| ide.next_drive_event_cck());
+        let sdmac = self.sdmac.as_ref().and_then(|s| s.next_event_cck());
+        let boards = self
+            .devices
+            .iter()
+            .filter_map(ZorroDevice::next_event_cck)
+            .min();
+        [gayle, ide_a4000, sdmac, boards]
+            .into_iter()
+            .flatten()
+            .min()
+    }
+
     pub fn next_pot_event_cck(&self) -> Option<u32> {
         // The pot counters step at H-sync, so while a scan is running cap the
         // advance at the next line boundary (the same deadline CIA-B TOD uses)
@@ -8312,7 +8335,7 @@ impl Bus {
         {
             let Self { gayle, paula, .. } = self;
             if let Some(gayle) = gayle.as_mut() {
-                gayle.tick_atapi(cck, paula.cd_audio_mut());
+                gayle.tick_drives(cck, paula.cd_audio_mut());
             }
         }
         {
@@ -8320,7 +8343,7 @@ impl Bus {
                 ide_a4000, paula, ..
             } = self;
             if let Some(ide_a4000) = ide_a4000.as_mut() {
-                ide_a4000.tick_atapi(cck, paula.cd_audio_mut());
+                ide_a4000.tick_drives(cck, paula.cd_audio_mut());
             }
         }
 

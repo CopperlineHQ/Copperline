@@ -472,6 +472,13 @@ pub trait ZorroDevice {
     /// interrupt lines. Boards own their internal idle fast paths.
     fn tick(&mut self, cck: u32, host: &mut DeviceHost);
 
+    /// Colour clocks until the board next needs a tick to change state on
+    /// its own (a timed drive's step coming due), for the emulator's idle
+    /// fast-forward; `None` when nothing is scheduled.
+    fn next_event_cck(&self) -> Option<u32> {
+        None
+    }
+
     /// INT2 (PORTS) line state. Level-sensitive: held true while asserted.
     fn int2_line(&self) -> bool {
         false
@@ -587,6 +594,15 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::Cd32Fmv(d) => ZorroDevice::tick(d.as_mut(), cck, host),
             BoardDevice::Copperhf(d) => ZorroDevice::tick(d, cck, host),
             BoardDevice::Sf2000Sd(d) => ZorroDevice::tick(d, cck, host),
+        }
+    }
+
+    fn next_event_cck(&self) -> Option<u32> {
+        match self {
+            BoardDevice::A2091(d) => ZorroDevice::next_event_cck(d),
+            BoardDevice::A4091(d) => ZorroDevice::next_event_cck(d),
+            BoardDevice::IdeZorro(d) => ZorroDevice::next_event_cck(d),
+            _ => None,
         }
     }
 

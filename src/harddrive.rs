@@ -19,6 +19,8 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 pub mod chd;
+pub mod mechanics;
+pub mod profiles;
 mod session;
 mod vhd;
 use chd::ChdHardDisk;

@@ -6491,3 +6491,65 @@ fn the_netplay_row_is_an_enabled_disabled_stepper_on_both_pages() {
         assert!(!state.netplay.enabled);
     }
 }
+
+#[test]
+fn hard_drive_timing_rows_cycle_and_round_trip() {
+    let raw: RawConfig =
+        toml::from_str("[machine]\nprofile = \"A1200\"\n[ide]\nmaster = \"wb.hdf\"\n").unwrap();
+    let mut setup = MachineSetup::from_raw(&raw).unwrap();
+    assert_eq!(setup.value_label(F::DriveTiming), "Instant");
+    assert!(setup.disabled_reason(F::DriveSpinUp).is_some());
+    assert_eq!(setup.to_raw().ide.timing, None);
+    setup.cycle(F::DriveTiming, true);
+    assert_eq!(setup.value_label(F::DriveTiming), "Period (machine's own)");
+    setup.cycle(F::DriveTiming, true);
+    assert_eq!(setup.value_label(F::DriveTiming), "conner-cp2024");
+    setup.cycle(F::DriveSpinUp, true);
+    let out = setup.to_raw();
+    assert_eq!(out.ide.timing.as_deref(), Some("conner-cp2024"));
+    assert_eq!(out.ide.spin_up, Some(true));
+    // No SCSI controller or lide board fitted: nothing written there.
+    assert_eq!(out.scsi.timing, None);
+    assert_eq!(out.lide.timing, None);
+    let back = MachineSetup::from_raw(&out).unwrap();
+    assert_eq!(back.value_label(F::DriveTiming), "conner-cp2024");
+    assert_eq!(back.value_label(F::DriveSpinUp), "On");
+}
+
+#[test]
+fn hard_drive_timing_left_alone_keeps_each_section_and_drive_as_written() {
+    let text = r#"
+        [machine]
+        profile = "A4000"
+        [ide]
+        timing = "period"
+        master = { path = "wb.hdf", timing = "wd-ac2120" }
+        [scsi]
+        controller = "a2091"
+        timing = "quantum-prodrive-80s"
+        unit0 = "work.hdf"
+
+        [[drive_profile]]
+        id = "mine"
+        base = "conner-cp30104"
+        "#;
+    let raw: RawConfig = toml::from_str(text).unwrap();
+    let setup = MachineSetup::from_raw(&raw).unwrap();
+    let out = setup.to_raw();
+    assert_eq!(out.ide.timing.as_deref(), Some("period"));
+    assert_eq!(out.scsi.timing.as_deref(), Some("quantum-prodrive-80s"));
+    assert_eq!(
+        out.ide.master.as_ref().and_then(|d| d.timing.as_deref()),
+        Some("wd-ac2120")
+    );
+    assert_eq!(out.drive_profile.len(), 1);
+    // The user's own profile is offered after the built-ins.
+    let mut setup = setup;
+    for _ in 0..200 {
+        if setup.value_label(F::DriveTiming) == "mine" {
+            return;
+        }
+        setup.cycle(F::DriveTiming, true);
+    }
+    panic!("the [[drive_profile]] was never offered");
+}

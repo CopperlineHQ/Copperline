@@ -255,6 +255,8 @@ fn lide_host_disk_attach_requires_a_fitted_channel() {
         rom: Some(PathBuf::from("lide.rom")),
         rom_bank2: None,
         drives: [None, None, None, None],
+        timing: DriveTiming::Instant,
+        spin_up: false,
     };
     let ok = parse_host_disks(
         &[host_disk_entry("sdb", "lide0-master")],
@@ -288,6 +290,8 @@ fn lide_host_disk_attach_requires_a_fitted_channel() {
         rom: Some(PathBuf::from("lide.rom")),
         rom_bank2: None,
         drives: [None, None, None, None],
+        timing: DriveTiming::Instant,
+        spin_up: false,
     };
     let parsed = parse_host_disks(
         &[
@@ -320,6 +324,8 @@ fn lide_host_disk_attach_accepts_a_bare_board_with_no_images() {
         rom: None,
         rom_bank2: None,
         drives: [None, None, None, None],
+        timing: DriveTiming::Instant,
+        spin_up: false,
     };
     assert!(
         bare.enabled(),
@@ -372,11 +378,14 @@ fn lide_host_disk_attach_rejects_a_slot_already_holding_an_image() {
                 volume_name: None,
                 boot_pri: 0,
                 filesystem: crate::diskimage::FileSystem::FFS,
+                timing: None,
             }),
             None,
             None,
             None,
         ],
+        timing: DriveTiming::Instant,
+        spin_up: false,
     };
     let error = parse_host_disks(
         &[host_disk_entry("sdb", "lide0-master")],
@@ -855,6 +864,7 @@ fn raw_config_serialize_round_trips() {
         ide: RawIde {
             master: Some(RawDrive::from_path("hd0.hdf")),
             slave: None,
+            ..RawIde::default()
         },
         floppy: RawFloppy {
             drives: Some(2),
@@ -2892,6 +2902,7 @@ fn copperhf_unit_round_trips_through_saved_toml() {
                 name: Some("Work".to_string()),
                 bootpri: None,
                 filesystem: None,
+                timing: None,
             }),
             unit1: Some(RawDrive::from_path("data.hdf")),
             ..RawCopperhf::default()
@@ -3729,6 +3740,7 @@ fn mixed_named_and_bare_drives_round_trip_through_saved_toml() {
                 name: Some("Work".to_string()),
                 bootpri: None,
                 filesystem: None,
+                timing: None,
             }),
             unit1: Some(RawDrive::from_path("data.hdf")),
             ..RawScsi::default()
@@ -3746,6 +3758,7 @@ fn drive_entry_round_trips_through_toml() {
     let bare = RawIde {
         master: Some(RawDrive::from_path("disk.hdf")),
         slave: None,
+        ..RawIde::default()
     };
     let text = toml::to_string(&bare).unwrap();
     assert!(text.contains(r#"master = "disk.hdf""#), "{text}");
@@ -3757,8 +3770,10 @@ fn drive_entry_round_trips_through_toml() {
             name: Some("Games".to_string()),
             bootpri: None,
             filesystem: None,
+            timing: None,
         }),
         slave: None,
+        ..RawIde::default()
     };
     let text = toml::to_string(&named).unwrap();
     let parsed: RawIde = toml::from_str(&text).unwrap();
@@ -3772,8 +3787,10 @@ fn drive_entry_round_trips_through_toml() {
             name: None,
             bootpri: Some(6),
             filesystem: None,
+            timing: None,
         }),
         slave: None,
+        ..RawIde::default()
     };
     let text = toml::to_string(&prioritised).unwrap();
     assert!(!text.contains("name"), "{text}");
@@ -6426,4 +6443,199 @@ fn cli_serial_device_implies_device_mode() -> Result<()> {
     let cfg = load_overrides(&overrides)?;
     assert_eq!(cfg.serial.mode, SerialMode::TcpConnect);
     Ok(())
+}
+
+#[test]
+fn drive_timing_defaults_to_instant_everywhere() -> Result<()> {
+    let cfg = parse_config("[machine]\nprofile = \"A1200\"\n[ide]\nmaster = \"wb.hdf\"\n")?;
+    assert_eq!(cfg.ide.timing, DriveTiming::Instant);
+    assert!(!cfg.ide.spin_up);
+    assert!(cfg.drive_profile(DriveSlot::Ide(0)).is_none());
+    Ok(())
+}
+
+#[test]
+fn period_timing_resolves_the_machines_own_drive() -> Result<()> {
+    let a600 = parse_config(
+        "[machine]\nprofile = \"A600\"\n[ide]\ntiming = \"period\"\nmaster = \"wb.hdf\"\n",
+    )?;
+    assert_eq!(
+        a600.drive_profile(DriveSlot::Ide(0)).unwrap().id,
+        "conner-cp2024"
+    );
+    let a1200 = parse_config(
+        "[machine]\nprofile = \"A1200\"\n[ide]\ntiming = \"period\"\nmaster = \"wb.hdf\"\n",
+    )?;
+    assert_eq!(
+        a1200.drive_profile(DriveSlot::Ide(0)).unwrap().id,
+        "conner-cp2064"
+    );
+    let a4000 = parse_config(
+        "[machine]\nprofile = \"A4000\"\n[ide]\ntiming = \"period\"\nmaster = \"wb.hdf\"\n",
+    )?;
+    assert_eq!(
+        a4000.drive_profile(DriveSlot::Ide(0)).unwrap().id,
+        "seagate-st3144a"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_drives_own_timing_overrides_its_section() -> Result<()> {
+    let cfg = parse_config(
+        r#"
+        [machine]
+        profile = "A1200"
+        [ide]
+        timing = "period"
+        spin_up = true
+        master = "wb.hdf"
+        slave = { path = "work.hdf", timing = "seagate-st9080a" }
+        "#,
+    )?;
+    assert_eq!(
+        cfg.drive_profile(DriveSlot::Ide(0)).unwrap().id,
+        "conner-cp2064"
+    );
+    assert_eq!(
+        cfg.drive_profile(DriveSlot::Ide(1)).unwrap().id,
+        "seagate-st9080a"
+    );
+    assert!(cfg.drive_spin_up(DriveSlot::Ide(1)));
+    let instant = parse_config(
+        r#"
+        [machine]
+        profile = "A1200"
+        [ide]
+        timing = "period"
+        master = { path = "wb.hdf", timing = "instant" }
+        "#,
+    )?;
+    assert!(instant.drive_profile(DriveSlot::Ide(0)).is_none());
+    Ok(())
+}
+
+#[test]
+fn unknown_drive_profiles_are_rejected() {
+    let error = parse_config(
+        "[machine]\nprofile = \"A1200\"\n[ide]\ntiming = \"maxtor-9999\"\nmaster = \"wb.hdf\"\n",
+    )
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("not a known drive profile"),
+        "{error:#}"
+    );
+    let error = parse_config(
+        "[machine]\nprofile = \"A1200\"\n[ide]\nmaster = { path = \"wb.hdf\", timing = \"\" }\n",
+    )
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("timing"), "{error:#}");
+}
+
+#[test]
+fn timing_is_refused_on_drives_with_no_spindle_to_model() {
+    let error = parse_config("[copperhf]\nunit0 = { path = \"wb.hdf\", timing = \"period\" }\n")
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("timing"), "{error:#}");
+}
+
+#[test]
+fn drive_timing_round_trips_through_the_raw_form() {
+    let mut drive = RawDrive::from_path("wb.hdf");
+    drive.timing = Some("conner-cp2064".to_string());
+    let ide = RawIde {
+        master: Some(drive),
+        timing: Some("period".to_string()),
+        spin_up: Some(true),
+        ..RawIde::default()
+    };
+    let text = toml::to_string(&ide).unwrap();
+    let back: RawIde = toml::from_str(&text).unwrap();
+    assert_eq!(back, ide);
+    // A drive without its own timing still writes the bare path.
+    let bare = RawIde {
+        master: Some(RawDrive::from_path("wb.hdf")),
+        ..RawIde::default()
+    };
+    assert!(toml::to_string(&bare)
+        .unwrap()
+        .contains(r#"master = "wb.hdf""#));
+}
+
+#[test]
+fn hd_timing_override_sets_every_drive_section() -> Result<()> {
+    let mut raw = RawConfig::default();
+    let overrides = ConfigOverrides {
+        hd_timing: Some("period".to_string()),
+        ..ConfigOverrides::default()
+    };
+    overrides.apply_to(&mut raw);
+    assert_eq!(raw.ide.timing.as_deref(), Some("period"));
+    assert_eq!(raw.scsi.timing.as_deref(), Some("period"));
+    assert_eq!(raw.lide.timing.as_deref(), Some("period"));
+    // Timing alone fits no SCSI or lide board.
+    let cfg: Config = raw.try_into()?;
+    assert!(!cfg.scsi.enabled());
+    assert!(!cfg.lide.enabled());
+    Ok(())
+}
+
+#[test]
+fn drive_profiles_can_be_defined_and_used() -> Result<()> {
+    let cfg = parse_config(
+        r#"
+        [machine]
+        profile = "A1200"
+        [ide]
+        timing = "my-quantum"
+        master = "wb.hdf"
+        slave = { path = "work.hdf", timing = "faster-conner" }
+
+        [[drive_profile]]
+        id = "my-quantum"
+        label = "Quantum GoDrive GLS 170"
+        rpm = 3600
+        heads = 4
+        zones = [
+            { cylinders = 700, sectors_per_track = 70 },
+            { cylinders = 695, sectors_per_track = 50 },
+        ]
+        seek_ms = [5, 17, 30]
+        buffer_kib = 96
+
+        [[drive_profile]]
+        id = "faster-conner"
+        base = "conner-cp2064"
+        seek_ms = [4, 15, 30]
+        spin_up_s = 6
+        "#,
+    )?;
+    let quantum = cfg.drive_profile(DriveSlot::Ide(0)).unwrap();
+    assert_eq!(quantum.label, "Quantum GoDrive GLS 170");
+    assert_eq!(quantum.cylinders(), 1395);
+    assert_eq!(quantum.seek_us, [5000, 17_000, 30_000]);
+    assert_eq!(quantum.buffer_kib, 96);
+    let conner = cfg.drive_profile(DriveSlot::Ide(1)).unwrap();
+    assert_eq!(conner.rpm, 3486, "the base profile's figures stay");
+    assert_eq!(conner.seek_us, [4000, 15_000, 30_000]);
+    assert_eq!((conner.spin_up_ms, conner.standby_spin_up_ms), (6000, 6000));
+    Ok(())
+}
+
+#[test]
+fn bad_drive_profiles_are_rejected() {
+    for (body, expect) in [
+        ("id = \"x\"\nrpm = 3600\nheads = 2\ncylinders = 600\nsectors_per_track = 30\nseek_ms = [20, 10, 30]\n", "track-to-track < average"),
+        ("id = \"period\"\nbase = \"conner-cp2064\"\n", "reserved"),
+        ("id = \"x\"\nbase = \"nope\"\n", "not a built-in"),
+        ("id = \"x\"\nrpm = 3600\nheads = 2\nseek_ms = [5, 15, 30]\n", "zones"),
+        ("id = \"x\"\nheads = 2\n", "rpm, heads and seek_ms"),
+    ] {
+        let text = format!("[[drive_profile]]\n{body}");
+        let error = parse_config(&text).unwrap_err();
+        assert!(format!("{error:#}").contains(expect), "{body}: {error:#}");
+    }
+    let twice = "[[drive_profile]]\nid = \"x\"\nbase = \"wd-ac2120\"\n\
+                 [[drive_profile]]\nid = \"x\"\nbase = \"wd-ac2120\"\n";
+    assert!(format!("{:#}", parse_config(twice).unwrap_err()).contains("defined twice"));
 }

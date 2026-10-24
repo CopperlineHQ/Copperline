@@ -146,7 +146,7 @@ const DBC_MASK: u32 = 0x00FF_FFFF;
 
 /// SCSI bus information-transfer phases, encoded as the MSG/C_D/I_O signal
 /// triple the 53C710 phase compares match against.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 enum Phase {
     DataOut,
     DataIn,
@@ -173,6 +173,7 @@ impl Phase {
 /// target sequences MSG_OUT (accept IDENTIFY) -> COMMAND (accept the CDB) ->
 /// DATA_IN/OUT -> STATUS -> MSG_IN (command complete) -> disconnect; each
 /// block move transfers one phase's worth and advances the state.
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Connection {
     target: usize,
     lun: u8,
@@ -193,6 +194,9 @@ struct Connection {
     /// The command-complete message has been delivered; WAIT DISCONNECT frees
     /// the bus.
     disconnect_ready: bool,
+    /// A timed target's schedule for the command (drive mechanics).
+    #[serde(default)]
+    timing: Option<crate::scsi::TxnTiming>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -214,10 +218,15 @@ pub struct A4091 {
     /// (0-6; 7 is the host adapter). Kept across resets; part of save state.
     #[serde(default)]
     targets: [Option<ScsiTarget>; 7],
-    /// The live nexus while a SCRIPTS command is in flight. Rebuilt as the
-    /// driver reissues commands, so it is not persisted.
-    #[serde(skip)]
+    /// The live nexus while a SCRIPTS command is in flight. Persisted, since
+    /// a timed target can hold it across a stall.
+    #[serde(default)]
     conn: Option<Connection>,
+    /// The SCRIPTS processor is waiting at a block move until this device
+    /// clock time, because a timed target has not yet asserted REQ for the
+    /// phase (its data, status or buffer space is not ready).
+    #[serde(default)]
+    stall_until: Option<u64>,
 }
 
 /// 53C710 register-file reset values at their big-endian byte addresses:
@@ -252,6 +261,7 @@ impl A4091 {
             scsi_fifo: Vec::new(),
             targets: Default::default(),
             conn: None,
+            stall_until: None,
         })
     }
 
@@ -396,6 +406,7 @@ impl A4091 {
         }
         self.scsi_fifo.clear();
         self.conn = None;
+        self.stall_until = None;
     }
 
     pub fn load_rom(path: &Path) -> Result<Vec<u8>> {
@@ -504,19 +515,91 @@ impl A4091 {
             status: 0,
             after_msg_in: Phase::Command,
             disconnect_ready: false,
+            timing: None,
         });
+    }
+
+    /// The device clock of the connected target, when it is a timed disk.
+    fn target_now(&self) -> Option<u64> {
+        let conn = self.conn.as_ref()?;
+        self.targets
+            .get(conn.target)?
+            .as_ref()?
+            .mechanics()
+            .map(|m| m.now())
+    }
+
+    /// When a timed target can complete a block move of `count` bytes in
+    /// the current phase: its data-in bytes in the drive's buffer and moved
+    /// at the SCSI bus rate, its data-out bytes taken at that rate, or its
+    /// status ready. `None` when nothing has to wait.
+    fn block_move_due(&self, phase: Phase, count: usize) -> Option<u64> {
+        let conn = self.conn.as_ref()?;
+        let timing = conn.timing.as_ref()?;
+        let mechanics = self.targets.get(conn.target)?.as_ref()?.mechanics()?;
+        let bus = |end: u64| timing.phase_start + mechanics.bus_time_for(end);
+        match phase {
+            Phase::DataIn => {
+                let end = timing.moved + count.min(conn.out.len()) as u64;
+                Some(timing.data_ready_through(end as usize).max(bus(end)))
+            }
+            Phase::DataOut => {
+                let carried = bus(timing.moved + count as u64);
+                if !timing.writing {
+                    return Some(carried);
+                }
+                // Write data only goes as fast as the drive's buffer frees.
+                let offers = self.write_offers(conn, timing, count);
+                Some(carried.max(mechanics.write_acceptance_time(&offers)))
+            }
+            Phase::Status => Some(timing.status_at),
+            _ => None,
+        }
+    }
+
+    /// When each whole write block a DATA OUT move of `count` bytes
+    /// completes reaches the drive over the SCSI bus.
+    fn write_offers(
+        &self,
+        conn: &Connection,
+        timing: &crate::scsi::TxnTiming,
+        count: usize,
+    ) -> Vec<u64> {
+        let Some(mechanics) = self
+            .targets
+            .get(conn.target)
+            .and_then(Option::as_ref)
+            .and_then(ScsiTarget::mechanics)
+        else {
+            return Vec::new();
+        };
+        let block = crate::harddrive::SECTOR_SIZE;
+        let before = conn.data_out.len() / block;
+        let after = (conn.data_out.len() + count) / block;
+        (before + 1..=after)
+            .map(|k| timing.phase_start + mechanics.bus_time_for((k * block) as u64))
+            .collect()
     }
 
     /// Table-indirect block move for the current phase: transfer up to the
     /// entry's byte count between the target and the initiator buffer at
-    /// DSA+offset, advancing the target's phase as each phase drains.
-    fn run_block_move(&mut self, host: &mut crate::zorro_device::DeviceHost, offset: u32) {
+    /// DSA+offset, advancing the target's phase as each phase drains. A timed
+    /// target that is not ready for the move yet returns when it will be,
+    /// with nothing moved.
+    fn run_block_move(
+        &mut self,
+        host: &mut crate::zorro_device::DeviceHost,
+        offset: u32,
+    ) -> Option<u64> {
         let dsa = self.reg32(REG_DSA);
         let count = (self.dma_read32(host, dsa.wrapping_add(offset)) & DBC_MASK) as usize;
         let addr = self.dma_read32(host, dsa.wrapping_add(offset).wrapping_add(4));
-        let Some(phase) = self.conn.as_ref().map(|c| c.phase) else {
-            return;
-        };
+        let phase = self.conn.as_ref().map(|c| c.phase)?;
+        if let (Some(due), Some(now)) = (self.block_move_due(phase, count), self.target_now()) {
+            if due > now {
+                return Some(due);
+            }
+        }
         match phase {
             // Initiator -> target directions.
             Phase::MsgOut => {
@@ -541,8 +624,30 @@ impl A4091 {
                 if let Some(&b) = buf.last() {
                     self.regs[REG_SFBR] = b;
                 }
+                // A timed drive takes each whole block into its buffer as it
+                // arrives (and the buffer has room), and writes it to the
+                // media as the platter comes round.
+                let offers = match self.conn.as_ref() {
+                    Some(c) => match c.timing.as_ref().filter(|t| t.writing) {
+                        Some(timing) => self.write_offers(c, timing, buf.len()),
+                        None => Vec::new(),
+                    },
+                    None => Vec::new(),
+                };
                 if let Some(c) = self.conn.as_mut() {
                     c.data_out.extend_from_slice(&buf);
+                    if let Some(timing) = c.timing.as_mut() {
+                        timing.moved += buf.len() as u64;
+                    }
+                }
+                if !offers.is_empty() {
+                    let target = self.conn.as_ref().map(|c| c.target);
+                    if let Some(mechanics) = target
+                        .and_then(|t| self.targets.get_mut(t)?.as_mut())
+                        .and_then(ScsiTarget::mechanics_mut)
+                    {
+                        mechanics.accept_write_sectors(&offers);
+                    }
                 }
                 let done = self
                     .conn
@@ -557,6 +662,11 @@ impl A4091 {
                 let bytes: Vec<u8> = {
                     let c = self.conn.as_mut().unwrap();
                     let n = count.min(c.out.len());
+                    if phase == Phase::DataIn {
+                        if let Some(timing) = c.timing.as_mut() {
+                            timing.moved += n as u64;
+                        }
+                    }
                     c.out.drain(..n).collect()
                 };
                 if let Some(&b) = bytes.last() {
@@ -568,6 +678,7 @@ impl A4091 {
                 }
             }
         }
+        None
     }
 
     /// Consume the MSG_OUT bytes (IDENTIFY plus any negotiation message). A
@@ -599,14 +710,28 @@ impl A4091 {
         if let Some(c) = self.conn.as_mut() {
             c.cdb = cdb.to_vec();
         }
-        let (exec, status) = match self.targets[target].as_mut() {
-            Some(dev) => dev.execute(cdb, lun),
-            None => (ScsiExec::NoData, 0x02),
+        let (exec, status, mut timing) = match self.targets[target].as_mut() {
+            Some(dev) => {
+                let (exec, status) = dev.execute(cdb, lun);
+                let timing = crate::scsi::plan_target_timing(dev, target as u8, cdb, &exec, status);
+                (exec, status, timing)
+            }
+            None => (ScsiExec::NoData, 0x02, None),
         };
+        // The bus rate counts from when the data phase can begin: once the
+        // first data-in block is in the buffer, or now for data-out.
+        let now = self.targets[target]
+            .as_ref()
+            .and_then(ScsiTarget::mechanics)
+            .map(|m| m.now());
+        if let (Some(timing), Some(now)) = (timing.as_mut(), now) {
+            timing.phase_start = timing.ready.first().copied().unwrap_or(now).max(now);
+        }
         let Some(conn) = self.conn.as_mut() else {
             return;
         };
         conn.status = status;
+        conn.timing = timing;
         match exec {
             ScsiExec::DataIn(data) if !data.is_empty() => {
                 conn.out = VecDeque::from(data);
@@ -635,11 +760,27 @@ impl A4091 {
         else {
             return;
         };
-        let status = match self.targets[target].as_mut() {
-            Some(dev) => dev.complete_out(&cdb, &data),
-            None => 0x02,
+        let writing = self
+            .conn
+            .as_ref()
+            .and_then(|c| c.timing.as_ref())
+            .is_some_and(|t| t.writing);
+        let (status, status_at) = match self.targets[target].as_mut() {
+            Some(dev) => {
+                let status = dev.complete_out(&cdb, &data);
+                let status_at = if writing {
+                    crate::scsi::finish_timed_write(dev, &cdb)
+                } else {
+                    None
+                };
+                (status, status_at)
+            }
+            None => (0x02, None),
         };
         if let Some(conn) = self.conn.as_mut() {
+            if let (Some(timing), Some(at)) = (conn.timing.as_mut(), status_at) {
+                timing.status_at = at;
+            }
             conn.status = status;
             conn.out = VecDeque::from(vec![status]);
             conn.phase = Phase::Status;
@@ -712,7 +853,13 @@ impl A4091 {
                 // Block move: table-indirect transfer in the current phase.
                 0b00 => {
                     let offset = u32::from_be_bytes(insn[4..8].try_into().unwrap());
-                    self.run_block_move(host, offset);
+                    if let Some(due) = self.run_block_move(host, offset) {
+                        // The target has not asserted REQ for this phase
+                        // yet: the processor waits at the block move.
+                        self.set_reg32(REG_DSP, dsp);
+                        self.stall_until = Some(due);
+                        return;
+                    }
                 }
                 // I/O instructions.
                 0b01 => match (dcmd >> 3) & 7 {
@@ -979,6 +1126,7 @@ impl crate::zorro_device::ZorroDevice for A4091 {
                 // Abort: latch the DSTAT cause; DIEN gates only the line.
                 if b & ISTAT_ABRT != 0 {
                     self.regs[REG_DSTAT] |= DSTAT_ABRT;
+                    self.stall_until = None;
                 }
                 continue;
             }
@@ -996,6 +1144,7 @@ impl crate::zorro_device::ZorroDevice for A4091 {
             }
             // Writing DSP's low byte starts the SCRIPTS processor.
             if r == REG_DSP + 3 {
+                self.stall_until = None;
                 self.run_scripts(host);
             }
         }
@@ -1012,10 +1161,34 @@ impl crate::zorro_device::ZorroDevice for A4091 {
         }
     }
 
+    fn next_event_cck(&self) -> Option<u32> {
+        let due = self.stall_until?;
+        let now = self.target_now().unwrap_or(due);
+        Some(
+            u32::try_from(due.saturating_sub(now))
+                .unwrap_or(u32::MAX)
+                .max(1),
+        )
+    }
+
     fn tick(&mut self, cck: u32, host: &mut crate::zorro_device::DeviceHost) {
-        // The chip itself completes everything within the SCRIPTS run; only
-        // the targets carry emulated-time state (a CD-ROM drive's tray
-        // countdown and CD-DA streaming into the host mixer ring).
+        // Timed disks advance their mechanics, and a SCRIPTS run stalled at
+        // a block move resumes once the target is ready for it.
+        for target in self.targets.iter_mut().flatten() {
+            if let Some(mechanics) = target.mechanics_mut() {
+                mechanics.advance(cck);
+            }
+        }
+        if let Some(due) = self.stall_until {
+            if self.target_now().is_none_or(|now| now >= due) {
+                self.stall_until = None;
+                self.run_scripts(host);
+            }
+        }
+        // Otherwise the chip completes everything within the SCRIPTS run;
+        // the targets carry the rest of the emulated-time state (a CD-ROM
+        // drive's tray countdown and CD-DA streaming into the host mixer
+        // ring).
         if let Some(cd_audio) = host.cd_audio_opt() {
             for target in self.targets.iter_mut().flatten() {
                 if let ScsiTarget::CdRom(cd) = target {
@@ -1423,5 +1596,177 @@ mod tests {
         let b = board_with_rom(test_rom_64k());
         assert_eq!(b.peek_word(0x48), Some(0x1FFF));
         assert_eq!(b.peek_word(IO_OFFSET), None);
+    }
+
+    #[test]
+    fn scripts_stall_at_a_timed_targets_data_phase_until_the_drive_has_it() {
+        // A timed disk (period mechanics) behind the driver's usual I/O
+        // script: SELECT, MOVE through MSG_OUT/COMMAND/DATA_IN/STATUS/MSG_IN,
+        // WAIT DISCONNECT, INT. The processor must wait at the DATA_IN move
+        // until the drive has sought and read the block, then finish.
+        let path = std::env::temp_dir().join(format!(
+            "copperline-a4091-timed-{}-{:?}.hdf",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let mut image = vec![0u8; 82_029 * 512];
+        for (i, b) in image[70_000 * 512..70_001 * 512].iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+        std::fs::write(&path, &image).unwrap();
+        let profile = crate::harddrive::profiles::builtin_profile("quantum-prodrive-40s").unwrap();
+        let disk =
+            crate::scsi::ScsiDisk::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS)
+                .unwrap();
+        let mut b = board_with_rom(test_rom_64k());
+        b.attach_drive(
+            0,
+            ScsiTarget::from(disk).with_mechanics(|total| {
+                Some(crate::harddrive::mechanics::DriveMechanics::new(
+                    &profile, total, 3_546_895, false,
+                ))
+            }),
+        );
+        let mut mem = test_memory();
+        let put32 = |mem: &mut Memory, addr: usize, v: u32| {
+            mem.chip_ram[addr..addr + 4].copy_from_slice(&v.to_be_bytes());
+        };
+        // ds table at $3000: select entry, then (count, address) per phase.
+        put32(&mut mem, 0x3000, 0x0001_0000);
+        for (i, (count, addr)) in [
+            (1, 0x4000),
+            (10, 0x4010),
+            (512, 0x5000),
+            (1, 0x4020),
+            (1, 0x4030),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            put32(&mut mem, 0x3008 + i * 8, count);
+            put32(&mut mem, 0x300C + i * 8, addr);
+        }
+        mem.chip_ram[0x4000] = 0x80; // IDENTIFY
+        mem.chip_ram[0x4010..0x401A].copy_from_slice(&[0x28, 0, 0, 1, 0x11, 0x70, 0, 0, 1, 0]);
+        mem.chip_ram[0x1000..0x1040].copy_from_slice(&[
+            0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // SELECT [ds+0]
+            0x16, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, // MOVE MSG_OUT [ds+8]
+            0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, // MOVE COMMAND [ds+16]
+            0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, // MOVE DATA_IN [ds+24]
+            0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, // MOVE STATUS [ds+32]
+            0x17, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x28, // MOVE MSG_IN [ds+40]
+            0x48, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // WAIT DISCONNECT
+            0x98, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x77, // INT $77
+        ]);
+        let mut host = DeviceHost::new(&mut mem);
+        let io = |r: usize| IO_OFFSET + r as u32;
+        b.write(io(REG_DIEN), 1, 0x04, &mut host);
+        b.write(io(REG_DSA), 4, 0x3000, &mut host);
+        b.write(io(REG_DSP), 4, 0x1000, &mut host);
+        // Stalled at the DATA_IN move: no interrupt, nothing landed yet.
+        assert!(!ZorroDevice::int2_line(&b));
+        assert!(b.stall_until.is_some());
+        assert_eq!(b.reg32(REG_DSP), 0x1018, "DSP rewound to the DATA_IN move");
+        assert!(ZorroDevice::next_event_cck(&b).is_some());
+        let mut elapsed = 0u64;
+        while !ZorroDevice::int2_line(&b) {
+            ZorroDevice::tick(&mut b, 100, &mut host);
+            elapsed += 100;
+            assert!(elapsed < 3_546_895, "the script never finished");
+        }
+        assert_eq!(b.read(io(REG_DSPS), 4, &mut host), 0x77);
+        assert_eq!(
+            &mem.chip_ram[0x5000..0x5200],
+            &image[70_000 * 512..70_001 * 512]
+        );
+        assert_eq!(mem.chip_ram[0x4020], 0x00, "GOOD status");
+        // A long seek and the rotational wait: several milliseconds.
+        assert!(elapsed > 3_546_895 / 200, "finished after {elapsed} cck");
+        let _ = std::fs::remove_file(path);
+    }
+    #[test]
+    fn scripts_stall_a_data_out_move_while_the_drive_buffer_is_full() {
+        // WRITE(10) of four sectors to a drive with a two-sector buffer: the
+        // DATA_OUT move can only finish once the first sector has reached
+        // the media and freed its space, not at the SCSI bus rate.
+        let path = std::env::temp_dir().join(format!(
+            "copperline-a4091-timed-write-{}-{:?}.hdf",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, vec![0u8; 2048 * 512]).unwrap();
+        let profile = crate::harddrive::profiles::builtin_profile("seagate-st125n").unwrap();
+        let disk =
+            crate::scsi::ScsiDisk::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS)
+                .unwrap();
+        let mut b = board_with_rom(test_rom_64k());
+        b.attach_drive(
+            0,
+            ScsiTarget::from(disk).with_mechanics(|total| {
+                Some(crate::harddrive::mechanics::DriveMechanics::new(
+                    &profile, total, 3_546_895, false,
+                ))
+            }),
+        );
+        let mut mem = test_memory();
+        let put32 = |mem: &mut Memory, addr: usize, v: u32| {
+            mem.chip_ram[addr..addr + 4].copy_from_slice(&v.to_be_bytes());
+        };
+        put32(&mut mem, 0x3000, 0x0001_0000);
+        for (i, (count, addr)) in [
+            (1, 0x4000),
+            (10, 0x4010),
+            (2048, 0x5000),
+            (1, 0x4020),
+            (1, 0x4030),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            put32(&mut mem, 0x3008 + i * 8, count);
+            put32(&mut mem, 0x300C + i * 8, addr);
+        }
+        mem.chip_ram[0x4000] = 0x80; // IDENTIFY
+        mem.chip_ram[0x4010..0x401A].copy_from_slice(&[0x2A, 0, 0, 0, 0x02, 0, 0, 0, 4, 0]);
+        for (i, b) in mem.chip_ram[0x5000..0x5800].iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+        mem.chip_ram[0x1000..0x1040].copy_from_slice(&[
+            0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // SELECT [ds+0]
+            0x16, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, // MOVE MSG_OUT [ds+8]
+            0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, // MOVE COMMAND [ds+16]
+            0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, // MOVE DATA_OUT [ds+24]
+            0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, // MOVE STATUS [ds+32]
+            0x17, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x28, // MOVE MSG_IN [ds+40]
+            0x48, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // WAIT DISCONNECT
+            0x98, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x77, // INT $77
+        ]);
+        let mut host = DeviceHost::new(&mut mem);
+        let io = |r: usize| IO_OFFSET + r as u32;
+        b.write(io(REG_DIEN), 1, 0x04, &mut host);
+        b.write(io(REG_DSA), 4, 0x3000, &mut host);
+        b.write(io(REG_DSP), 4, 0x1000, &mut host);
+        assert_eq!(b.reg32(REG_DSP), 0x1018, "stalled at the DATA_OUT move");
+        let (mut elapsed, mut moved_at) = (0u64, None);
+        while !ZorroDevice::int2_line(&b) {
+            ZorroDevice::tick(&mut b, 100, &mut host);
+            elapsed += 100;
+            if b.reg32(REG_DSP) != 0x1018 {
+                moved_at.get_or_insert(elapsed);
+            }
+            assert!(elapsed < 3_546_895, "the script never finished");
+        }
+        assert_eq!(b.read(io(REG_DSPS), 4, &mut host), 0x77);
+        assert_eq!(mem.chip_ram[0x4020], 0x00, "GOOD status");
+        // 2 KB at 1.5 MB/s is under 1.4 ms; the first sector's seek and
+        // rotational wait on a band-stepper drive take far longer.
+        let moved_at = moved_at.unwrap();
+        assert!(
+            moved_at > 3_546_895 * 6 / 1000,
+            "DATA_OUT finished after {moved_at} cck"
+        );
+        let image = std::fs::read(&path).unwrap();
+        assert_eq!(&image[512 * 512..516 * 512], &mem.chip_ram[0x5000..0x5800]);
+        let _ = std::fs::remove_file(path);
     }
 }
