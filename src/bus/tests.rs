@@ -15564,4 +15564,65 @@ fn bitplane_pointer_half_writes_lose_only_to_the_selected_dma_counter_window() {
     }
 }
 
+/// A timed SCSI disk's next event -- here a TEST UNIT READY's completion,
+/// due after the drive's command overhead -- must reach the STOP-state
+/// idle horizon through every controller that can carry one, or a halted
+/// CPU waiting for the interrupt naps straight past it.
+#[test]
+fn timed_scsi_completions_cap_the_stop_horizon() {
+    use crate::scsi::{ScsiDisk, ScsiTarget, Wd33c93, WD_CDB_1, WD_COMMAND, WD_DESTINATION_ID};
+    let path = std::env::temp_dir().join(format!(
+        "copperline-bus-timed-scsi-{}-{:?}.hdf",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::write(&path, vec![0u8; 2048 * 512]).unwrap();
+    let profile = crate::harddrive::profiles::builtin_profile("quantum-lps-52s").unwrap();
+    let timed = || {
+        ScsiTarget::from(
+            ScsiDisk::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap(),
+        )
+        .with_mechanics(|total| {
+            Some(crate::harddrive::mechanics::DriveMechanics::new(
+                &profile, total, 3_546_895, false,
+            ))
+        })
+    };
+    let test_unit_ready = |wd: &mut Wd33c93| {
+        wd.write_sasr(WD_DESTINATION_ID);
+        wd.write_data_port(0);
+        wd.write_sasr(WD_CDB_1);
+        for _ in 0..6 {
+            wd.write_data_port(0);
+        }
+        wd.write_sasr(WD_COMMAND);
+        wd.write_data_port(0x08); // Select-with-ATN-and-Transfer
+    };
+
+    let mut bus = empty_bus();
+    assert_eq!(bus.next_storage_event_cck(), None);
+    let mut a2091 = crate::a2091::A2091::new(vec![0u8; 0x4000]).unwrap();
+    a2091.attach_drive(0, timed());
+    test_unit_ready(&mut a2091.wd);
+    bus.attach_devices(vec![crate::zorro_device::BoardDevice::A2091(a2091)]);
+    let horizon = bus
+        .next_storage_event_cck()
+        .expect("the A2091 reports its deadline");
+    assert!(
+        horizon > 1000,
+        "the drive's overhead, not an immediate event: {horizon}"
+    );
+
+    let mut bus = empty_bus();
+    let mut sdmac = crate::sdmac::Sdmac::new();
+    sdmac.attach_drive(0, timed());
+    test_unit_ready(&mut sdmac.wd);
+    bus.attach_sdmac(sdmac);
+    assert!(
+        bus.next_storage_event_cck().is_some(),
+        "the SDMAC reports its deadline"
+    );
+    let _ = std::fs::remove_file(path);
+}
+
 mod playfield_modes;

@@ -977,13 +977,21 @@ pub(crate) fn plan_target_timing(
 ) -> Option<TxnTiming> {
     let mechanics = target.mechanics_mut()?;
     let mut timing = TxnTiming::default();
-    let overhead_only = |mechanics: &mut crate::harddrive::mechanics::DriveMechanics,
-                         timing: &mut TxnTiming| {
-        timing.status_at = mechanics.overhead();
+    // A command that needs neither spindle nor heads -- an error status,
+    // INQUIRY, REQUEST SENSE, mode pages, capacity -- is answered by the
+    // drive's controller: it neither starts a stopped spindle nor waits for
+    // one coming up to speed.
+    let controller_only = |mechanics: &crate::harddrive::mechanics::DriveMechanics,
+                           timing: &mut TxnTiming| {
+        timing.status_at = mechanics.controller_overhead();
         timing.ready = vec![timing.status_at];
     };
     if status != GOOD {
-        overhead_only(mechanics, &mut timing);
+        controller_only(mechanics, &mut timing);
+    } else if matches!(cdb.first(), Some(0x35 | 0x91)) {
+        // SYNCHRONIZE CACHE: status once a write cache has flushed.
+        timing.status_at = mechanics.flush_done();
+        timing.ready = vec![timing.status_at];
     } else if cdb.first() == Some(&0x1B) {
         // START STOP UNIT: Start spins the drive up (status at once with
         // Immed, otherwise once it is ready); Stop spins it down, and the
@@ -1018,7 +1026,7 @@ pub(crate) fn plan_target_timing(
                 timing.status_at = mechanics.seek_to(lba);
                 timing.ready = vec![timing.status_at];
             }
-            _ => overhead_only(mechanics, &mut timing),
+            _ => controller_only(mechanics, &mut timing),
         }
     }
     if crate::envcfg::flag("COPPERLINE_DIAG_HDTIMING") {
@@ -1037,16 +1045,28 @@ pub(crate) fn plan_target_timing(
 
 /// Finish a timed media write once its last block is in: when the status
 /// may follow -- at once from a write cache, otherwise once the media has
-/// the data (the mechanism stays busy flushing either way).
-pub(crate) fn finish_timed_write(target: &mut ScsiTarget) -> Option<u64> {
+/// the data (the mechanism stays busy flushing either way). A write that
+/// forces the media (`forces_media`) always waits for it.
+pub(crate) fn finish_timed_write(target: &mut ScsiTarget, cdb: &[u8]) -> Option<u64> {
     let mechanics = target.mechanics_mut()?;
     let now = mechanics.now();
     let on_media = mechanics.end_write();
-    Some(if mechanics.write_cache() {
+    Some(if mechanics.write_cache() && !forces_media(cdb) {
         now
     } else {
         on_media
     })
+}
+
+/// Whether a write CDB demands its data be on the media before status:
+/// Force Unit Access on WRITE(10/12/16), and WRITE AND VERIFY, which
+/// reads the data back. WRITE(6) has no FUA bit.
+pub(crate) fn forces_media(cdb: &[u8]) -> bool {
+    match cdb.first() {
+        Some(0x2E | 0xAE | 0x8E) => true,
+        Some(0x2A | 0xAA | 0x8A) => cdb.get(1).is_some_and(|b| b & 0x08 != 0),
+        _ => false,
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1251,6 +1271,13 @@ impl Wd33c93 {
                         if due > now {
                             consider(due - now);
                         }
+                        // A write waiting for the drive's buffer to free.
+                        if txn.dir == Some(DmaDir::Out) && timing.writing {
+                            let room = mech.write_room_at(1);
+                            if room > now {
+                                consider(room - now);
+                            }
+                        }
                     }
                 }
             }
@@ -1326,6 +1353,13 @@ impl Wd33c93 {
                 (ready_blocks * SECTOR_SIZE).min(txn.data.len())
             };
             available = available.min(ready_bytes.saturating_sub(txn.offset));
+        }
+        if txn.dir == Some(DmaDir::Out) && timing.writing {
+            // Write data only goes as fast as the drive's buffer frees: a
+            // block is taken once it has room, and the part of a block
+            // already received holds its place.
+            let room = mechanics.write_room_sectors() as usize * SECTOR_SIZE;
+            available = available.min(room.saturating_sub(txn.data.len() % SECTOR_SIZE));
         }
         let bus = mechanics
             .bus_bytes_between(timing.phase_start, now)
@@ -1411,6 +1445,13 @@ impl Wd33c93 {
                     .data
                     .len()
                     .saturating_sub(txn.offset)
+                    .min(self.tc().max(1) as usize);
+                remaining == 0 || self.paced(remaining, txn) > 0
+            }
+            (Some(DmaDir::Out), Some(txn)) => {
+                let remaining = txn
+                    .out_expected
+                    .saturating_sub(txn.data.len())
                     .min(self.tc().max(1) as usize);
                 remaining == 0 || self.paced(remaining, txn) > 0
             }
@@ -1776,7 +1817,7 @@ impl Wd33c93 {
                 // busy flushing either way).
                 if txn.timing.as_ref().is_some_and(|t| t.writing) {
                     let now = target.mechanics().map_or(0, |m| m.now());
-                    if let Some(done) = finish_timed_write(target) {
+                    if let Some(done) = finish_timed_write(target, &txn.cdb) {
                         let wait = u32::try_from(done.saturating_sub(now)).unwrap_or(u32::MAX);
                         extra = extra.saturating_add(wait);
                     }
@@ -1916,7 +1957,7 @@ impl Wd33c93 {
     }
 
     fn pio_write_byte(&mut self, b: u8) {
-        if self.pio_dir != Some(DmaDir::Out) {
+        if self.pio_dir != Some(DmaDir::Out) || !self.pio_ready() {
             self.regs[usize::from(WD_DATA)] = b;
             return;
         }
@@ -2722,11 +2763,15 @@ mod tests {
     }
 
     fn timed_chip_on(path: &std::path::Path, profile: &str) -> Wd33c93 {
+        timed_chip_spin(path, profile, false)
+    }
+
+    fn timed_chip_spin(path: &std::path::Path, profile: &str, spin_up: bool) -> Wd33c93 {
         let profile = crate::harddrive::profiles::builtin_profile(profile).unwrap();
         let disk = ScsiDisk::open(path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap();
         let target = ScsiTarget::from(disk).with_mechanics(|total| {
             Some(crate::harddrive::mechanics::DriveMechanics::new(
-                &profile, total, PAL_CCK_HZ, false,
+                &profile, total, PAL_CCK_HZ, spin_up,
             ))
         });
         let mut wd = Wd33c93::new();
@@ -2946,5 +2991,171 @@ mod tests {
             "first byte after {first} cck"
         );
         std::fs::remove_file(&path).ok();
+    }
+    /// Finish a sel-xfer command's tail: the disconnect interrupt.
+    fn absorb_disconnect(wd: &mut Wd33c93) {
+        run_until_int(wd);
+        rd_reg(wd, WD_SCSI_STATUS);
+    }
+
+    #[test]
+    fn controller_commands_answer_while_the_disk_spins_up() {
+        let path = temp_image(2048);
+        let mut wd = timed_chip_spin(&path, "quantum-lps-52s", true);
+        let (data, csr, first, _, _) =
+            timed_dma_command(&mut wd, &[0x12, 0, 0, 0, 36, 0], 36, None);
+        assert_eq!(csr, CSR_SEL_XFER_DONE);
+        assert_eq!(data.len(), 36);
+        assert!(
+            first < u64::from(PAL_CCK_HZ) / 50,
+            "INQUIRY waited {first} cck for the spindle"
+        );
+        absorb_disconnect(&mut wd);
+        // Not ready yet, and saying so takes the controller, not the 13 s.
+        let (_, csr, _, done, _) = timed_dma_command(&mut wd, &[0, 0, 0, 0, 0, 0], 0, None);
+        assert_eq!(csr, CSR_SEL_XFER_DONE);
+        assert_eq!(rd_reg(&mut wd, WD_TARGET_LUN), CHECK_CONDITION);
+        assert!(
+            done < u64::from(PAL_CCK_HZ) / 50,
+            "TEST UNIT READY took {done} cck"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn controller_commands_leave_a_stopped_disk_stopped() {
+        let (mut wd, path) = timed_chip(2048, "quantum-lps-52s");
+        let (_, csr, _, _, _) = timed_dma_command(&mut wd, &[0x1B, 0, 0, 0, 0, 0], 0, None);
+        assert_eq!(csr, CSR_SEL_XFER_DONE);
+        absorb_disconnect(&mut wd);
+        let (_, csr, first, _, _) = timed_dma_command(&mut wd, &[0x12, 0, 0, 0, 36, 0], 36, None);
+        assert_eq!(csr, CSR_SEL_XFER_DONE);
+        assert!(
+            first < u64::from(PAL_CCK_HZ) / 50,
+            "INQUIRY waited {first} cck"
+        );
+        let mechanics = wd.targets[0].as_ref().unwrap().mechanics().unwrap();
+        assert!(mechanics.in_standby(), "INQUIRY must not start the spindle");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn timed_dma_write_stalls_while_the_drive_buffer_is_full() {
+        // The ST125N's 1 KB buffer holds two sectors.
+        let (mut wd, path) = timed_chip(2048, "seagate-st125n");
+        let payload: Vec<u8> = (0..16 * SECTOR_SIZE).map(|i| (i % 251) as u8).collect();
+        wr_reg(&mut wd, WD_CONTROL, 0x80);
+        wr_reg(&mut wd, WD_DESTINATION_ID, 0);
+        wr_reg(&mut wd, WD_TARGET_LUN, 0);
+        set_cdb(&mut wd, &[0x2A, 0, 0, 0, 0x02, 0, 0, 0, 16, 0]); // WRITE(10) lba 512 x16
+        set_tc(&mut wd, payload.len() as u32);
+        wr_reg(&mut wd, WD_COMMAND, 0x08);
+        let (mut sent, mut elapsed) = (0usize, 0u64);
+        let mut timeline = Vec::new();
+        while !wd.int_asserted() {
+            wd.tick(64);
+            elapsed += 64;
+            assert!(
+                elapsed < 30 * u64::from(PAL_CCK_HZ),
+                "command never finished"
+            );
+            while wd.dma_request() == Some(DmaDir::Out) && wd.dma_remaining() > 0 {
+                wd.dma_out_byte(payload[sent]);
+                sent += 1;
+                if wd.dma_request().is_some() && wd.dma_remaining() > 0 {
+                    wd.dma_out_byte(payload[sent]);
+                    sent += 1;
+                }
+            }
+            timeline.push((elapsed, sent));
+        }
+        assert_eq!(rd_reg(&mut wd, WD_SCSI_STATUS), CSR_SEL_XFER_DONE);
+        assert_eq!(sent, payload.len());
+        let full = timeline
+            .iter()
+            .position(|&(_, n)| n >= 2 * SECTOR_SIZE)
+            .unwrap();
+        assert_eq!(timeline[full].1, 2 * SECTOR_SIZE, "no more than the buffer");
+        assert_eq!(
+            timeline[full + 1].1,
+            2 * SECTOR_SIZE,
+            "the next tick finds no room"
+        );
+        let resumed = timeline[full..]
+            .iter()
+            .find(|&&(_, n)| n > 2 * SECTOR_SIZE)
+            .unwrap();
+        // Room comes back as the first sector reaches the media: a seek
+        // and rotational wait on a stepper drive, milliseconds at least.
+        assert!(
+            resumed.0 - timeline[full].0 > u64::from(PAL_CCK_HZ) / 1000,
+            "stalled only {} cck",
+            resumed.0 - timeline[full].0
+        );
+        let image = std::fs::read(&path).unwrap();
+        assert_eq!(image[512 * SECTOR_SIZE..528 * SECTOR_SIZE], payload[..]);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn timed_pio_write_drops_dbr_while_the_drive_buffer_is_full() {
+        let (mut wd, path) = timed_chip(2048, "seagate-st125n");
+        wr_reg(&mut wd, WD_CONTROL, 0x00); // PIO
+        wr_reg(&mut wd, WD_DESTINATION_ID, 0);
+        set_cdb(&mut wd, &[0x2A, 0, 0, 0, 0x02, 0, 0, 0, 4, 0]); // WRITE(10) lba 512 x4
+        set_tc(&mut wd, 4 * SECTOR_SIZE as u32);
+        wr_reg(&mut wd, WD_COMMAND, 0x08);
+        let (mut sent, mut elapsed) = (0usize, 0u64);
+        while sent < 2 * SECTOR_SIZE {
+            if wd.read_aux_status() & ASR_DBR != 0 {
+                wr_reg(&mut wd, WD_DATA, 0x77);
+                sent += 1;
+                continue;
+            }
+            wd.tick(64);
+            elapsed += 64;
+            assert!(elapsed < u64::from(PAL_CCK_HZ), "DBR never rose");
+        }
+        assert_eq!(
+            wd.read_aux_status() & ASR_DBR,
+            0,
+            "no room for a third sector"
+        );
+        wd.tick(64);
+        assert_eq!(wd.read_aux_status() & ASR_DBR, 0, "still no room");
+        assert!(wd.next_event_cck().is_some());
+        let mut waited = 64u64;
+        while wd.read_aux_status() & ASR_DBR == 0 {
+            wd.tick(64);
+            waited += 64;
+            assert!(waited < u64::from(PAL_CCK_HZ), "room never came back");
+        }
+        assert!(
+            waited > u64::from(PAL_CCK_HZ) / 1000,
+            "DBR back after {waited} cck"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn fua_write_reports_from_the_media_past_the_write_cache() {
+        let status_at = |cdb1: u8| {
+            let (mut wd, path) = timed_chip(2048, "seagate-st9655ag");
+            let payload = vec![0x3Cu8; SECTOR_SIZE];
+            let cdb = [0x2A, cdb1, 0, 0, 0x07, 0xD0, 0, 0, 1, 0]; // WRITE(10) lba 2000 x1
+            let (_, csr, _, done, _) =
+                timed_dma_command(&mut wd, &cdb, SECTOR_SIZE as u32, Some(&payload));
+            assert_eq!(csr, CSR_SEL_XFER_DONE);
+            assert_eq!(rd_reg(&mut wd, WD_TARGET_LUN), GOOD);
+            std::fs::remove_file(&path).ok();
+            done
+        };
+        let cached = status_at(0);
+        let forced = status_at(0x08); // FUA
+                                      // FUA waits out the write seek and the sector coming round.
+        assert!(
+            forced > cached + u64::from(PAL_CCK_HZ) / 200,
+            "cached {cached} cck, FUA {forced} cck"
+        );
     }
 }

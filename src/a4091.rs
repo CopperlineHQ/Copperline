@@ -543,10 +543,42 @@ impl A4091 {
                 let end = timing.moved + count.min(conn.out.len()) as u64;
                 Some(timing.data_ready_through(end as usize).max(bus(end)))
             }
-            Phase::DataOut => Some(bus(timing.moved + count as u64)),
+            Phase::DataOut => {
+                let carried = bus(timing.moved + count as u64);
+                if !timing.writing {
+                    return Some(carried);
+                }
+                // Write data only goes as fast as the drive's buffer frees.
+                let offers = self.write_offers(conn, timing, count);
+                Some(carried.max(mechanics.write_acceptance_time(&offers)))
+            }
             Phase::Status => Some(timing.status_at),
             _ => None,
         }
+    }
+
+    /// When each whole write block a DATA OUT move of `count` bytes
+    /// completes reaches the drive over the SCSI bus.
+    fn write_offers(
+        &self,
+        conn: &Connection,
+        timing: &crate::scsi::TxnTiming,
+        count: usize,
+    ) -> Vec<u64> {
+        let Some(mechanics) = self
+            .targets
+            .get(conn.target)
+            .and_then(Option::as_ref)
+            .and_then(ScsiTarget::mechanics)
+        else {
+            return Vec::new();
+        };
+        let block = crate::harddrive::SECTOR_SIZE;
+        let before = conn.data_out.len() / block;
+        let after = (conn.data_out.len() + count) / block;
+        (before + 1..=after)
+            .map(|k| timing.phase_start + mechanics.bus_time_for((k * block) as u64))
+            .collect()
     }
 
     /// Table-indirect block move for the current phase: transfer up to the
@@ -592,28 +624,29 @@ impl A4091 {
                 if let Some(&b) = buf.last() {
                     self.regs[REG_SFBR] = b;
                 }
-                let mut handover = 0;
+                // A timed drive takes each whole block into its buffer as it
+                // arrives (and the buffer has room), and writes it to the
+                // media as the platter comes round.
+                let offers = match self.conn.as_ref() {
+                    Some(c) => match c.timing.as_ref().filter(|t| t.writing) {
+                        Some(timing) => self.write_offers(c, timing, buf.len()),
+                        None => Vec::new(),
+                    },
+                    None => Vec::new(),
+                };
                 if let Some(c) = self.conn.as_mut() {
-                    let before = c.data_out.len() / crate::harddrive::SECTOR_SIZE;
                     c.data_out.extend_from_slice(&buf);
                     if let Some(timing) = c.timing.as_mut() {
                         timing.moved += buf.len() as u64;
-                        if timing.writing {
-                            handover = c.data_out.len() / crate::harddrive::SECTOR_SIZE - before;
-                        }
                     }
                 }
-                // A timed drive takes each whole block into its buffer as it
-                // arrives and writes it to the media as the platter comes
-                // round.
-                if handover > 0 {
+                if !offers.is_empty() {
                     let target = self.conn.as_ref().map(|c| c.target);
                     if let Some(mechanics) = target
                         .and_then(|t| self.targets.get_mut(t)?.as_mut())
                         .and_then(ScsiTarget::mechanics_mut)
                     {
-                        let now = mechanics.now();
-                        mechanics.write_sectors(handover as u32, now);
+                        mechanics.accept_write_sectors(&offers);
                     }
                 }
                 let done = self
@@ -736,7 +769,7 @@ impl A4091 {
             Some(dev) => {
                 let status = dev.complete_out(&cdb, &data);
                 let status_at = if writing {
-                    crate::scsi::finish_timed_write(dev)
+                    crate::scsi::finish_timed_write(dev, &cdb)
                 } else {
                     None
                 };
@@ -1649,6 +1682,91 @@ mod tests {
         assert_eq!(mem.chip_ram[0x4020], 0x00, "GOOD status");
         // A long seek and the rotational wait: several milliseconds.
         assert!(elapsed > 3_546_895 / 200, "finished after {elapsed} cck");
+        let _ = std::fs::remove_file(path);
+    }
+    #[test]
+    fn scripts_stall_a_data_out_move_while_the_drive_buffer_is_full() {
+        // WRITE(10) of four sectors to a drive with a two-sector buffer: the
+        // DATA_OUT move can only finish once the first sector has reached
+        // the media and freed its space, not at the SCSI bus rate.
+        let path = std::env::temp_dir().join(format!(
+            "copperline-a4091-timed-write-{}-{:?}.hdf",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, vec![0u8; 2048 * 512]).unwrap();
+        let profile = crate::harddrive::profiles::builtin_profile("seagate-st125n").unwrap();
+        let disk =
+            crate::scsi::ScsiDisk::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS)
+                .unwrap();
+        let mut b = board_with_rom(test_rom_64k());
+        b.attach_drive(
+            0,
+            ScsiTarget::from(disk).with_mechanics(|total| {
+                Some(crate::harddrive::mechanics::DriveMechanics::new(
+                    &profile, total, 3_546_895, false,
+                ))
+            }),
+        );
+        let mut mem = test_memory();
+        let put32 = |mem: &mut Memory, addr: usize, v: u32| {
+            mem.chip_ram[addr..addr + 4].copy_from_slice(&v.to_be_bytes());
+        };
+        put32(&mut mem, 0x3000, 0x0001_0000);
+        for (i, (count, addr)) in [
+            (1, 0x4000),
+            (10, 0x4010),
+            (2048, 0x5000),
+            (1, 0x4020),
+            (1, 0x4030),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            put32(&mut mem, 0x3008 + i * 8, count);
+            put32(&mut mem, 0x300C + i * 8, addr);
+        }
+        mem.chip_ram[0x4000] = 0x80; // IDENTIFY
+        mem.chip_ram[0x4010..0x401A].copy_from_slice(&[0x2A, 0, 0, 0, 0x02, 0, 0, 0, 4, 0]);
+        for (i, b) in mem.chip_ram[0x5000..0x5800].iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+        mem.chip_ram[0x1000..0x1040].copy_from_slice(&[
+            0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // SELECT [ds+0]
+            0x16, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, // MOVE MSG_OUT [ds+8]
+            0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, // MOVE COMMAND [ds+16]
+            0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, // MOVE DATA_OUT [ds+24]
+            0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, // MOVE STATUS [ds+32]
+            0x17, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x28, // MOVE MSG_IN [ds+40]
+            0x48, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // WAIT DISCONNECT
+            0x98, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x77, // INT $77
+        ]);
+        let mut host = DeviceHost::new(&mut mem);
+        let io = |r: usize| IO_OFFSET + r as u32;
+        b.write(io(REG_DIEN), 1, 0x04, &mut host);
+        b.write(io(REG_DSA), 4, 0x3000, &mut host);
+        b.write(io(REG_DSP), 4, 0x1000, &mut host);
+        assert_eq!(b.reg32(REG_DSP), 0x1018, "stalled at the DATA_OUT move");
+        let (mut elapsed, mut moved_at) = (0u64, None);
+        while !ZorroDevice::int2_line(&b) {
+            ZorroDevice::tick(&mut b, 100, &mut host);
+            elapsed += 100;
+            if b.reg32(REG_DSP) != 0x1018 {
+                moved_at.get_or_insert(elapsed);
+            }
+            assert!(elapsed < 3_546_895, "the script never finished");
+        }
+        assert_eq!(b.read(io(REG_DSPS), 4, &mut host), 0x77);
+        assert_eq!(mem.chip_ram[0x4020], 0x00, "GOOD status");
+        // 2 KB at 1.5 MB/s is under 1.4 ms; the first sector's seek and
+        // rotational wait on a band-stepper drive take far longer.
+        let moved_at = moved_at.unwrap();
+        assert!(
+            moved_at > 3_546_895 * 6 / 1000,
+            "DATA_OUT finished after {moved_at} cck"
+        );
+        let image = std::fs::read(&path).unwrap();
+        assert_eq!(&image[512 * 512..516 * 512], &mem.chip_ram[0x5000..0x5800]);
         let _ = std::fs::remove_file(path);
     }
 }

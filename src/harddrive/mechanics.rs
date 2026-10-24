@@ -279,9 +279,6 @@ struct Stream {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct WriteState {
     walker: Walker,
-    /// Commit times of buffered sectors not yet known to be on the media,
-    /// oldest first (pruned as the clock passes them).
-    commits: VecDeque<u64>,
 }
 
 /// The profile converted to colour clocks and laid out over one image.
@@ -333,6 +330,11 @@ pub struct DriveMechanics {
     /// the spindle stops on its own.
     #[serde(default)]
     standby_timer: Option<u64>,
+    /// When each write sector in the buffer reaches the media, oldest first.
+    /// Kept across commands: a write cache still flushing one command's data
+    /// holds that much buffer against the next.
+    #[serde(default)]
+    write_commits: VecDeque<u64>,
 }
 
 impl DriveMechanics {
@@ -429,6 +431,7 @@ impl DriveMechanics {
             standby: false,
             last_activity: spindle_ready,
             standby_timer: None,
+            write_commits: VecDeque::new(),
         };
         mechanics.head.track = mechanics.locate(0).0;
         mechanics.head.t = spindle_ready;
@@ -503,8 +506,22 @@ impl DriveMechanics {
         self.spindle_ready.max(self.now)
     }
 
-    /// Time a non-data command finishes: the command overhead, after any
-    /// spin-up or flush still in progress.
+    /// When the drive's controller answers a command that needs neither the
+    /// spindle nor the heads (INQUIRY, REQUEST SENSE, an error status, mode
+    /// pages): the command overhead from now, without starting a stopped
+    /// spindle or waiting for one coming up to speed.
+    pub fn controller_overhead(&self) -> u64 {
+        self.now + self.timing.overhead
+    }
+
+    /// When a cache flush (SCSI SYNCHRONIZE CACHE) can report: once the
+    /// mechanism has finished what it is still writing.
+    pub fn flush_done(&self) -> u64 {
+        self.now.max(self.busy_until) + self.timing.overhead
+    }
+
+    /// Time a command that uses the mechanism but moves no data finishes:
+    /// the command overhead, after any spin-up or flush still in progress.
     pub fn overhead(&mut self) -> u64 {
         let start = self.command_start();
         self.busy_until = start;
@@ -610,57 +627,72 @@ impl DriveMechanics {
         let start = self.command_start();
         self.advance_stream(start);
         self.stream = None;
+        self.prune_write_commits();
         self.write = Some(WriteState {
             walker: Walker {
                 next_lba: lba,
                 t: self.head.t.max(start),
                 track: self.head.track,
             },
-            commits: VecDeque::new(),
         });
     }
 
-    /// `count` more sectors of write data reached the drive's buffer at
-    /// `available`: returns when the last of them is on the media.
+    /// `count` more sectors of write data reached the drive at `available`:
+    /// returns when the last of them is on the media. Each is taken into the
+    /// buffer once it has room.
     pub fn write_sectors(&mut self, count: u32, available: u64) -> u64 {
-        let now = self.now;
+        let offers = vec![available; count as usize];
+        self.accept_write_sectors(&offers).1
+    }
+
+    /// Write sectors offered to the drive at the given times, in order: each
+    /// is taken into the buffer at its offer time or once the buffer has
+    /// room, whichever is later. Returns when the last was taken and when it
+    /// reaches the media.
+    pub fn accept_write_sectors(&mut self, offers: &[u64]) -> (u64, u64) {
+        self.prune_write_commits();
         let Some(mut ws) = self.write.take() else {
-            return available;
+            let last = offers.last().copied().unwrap_or(self.now);
+            return (last, last);
         };
-        while ws.commits.front().is_some_and(|&t| t <= now) {
-            ws.commits.pop_front();
-        }
-        for _ in 0..count {
-            ws.walker.t = ws.walker.t.max(available);
-            let (ready, next) = self.step(ws.walker, true);
-            ws.walker = next;
-            ws.commits.push_back(ready);
-        }
-        let last = ws.walker.t;
+        let mut queue = std::mem::take(&mut self.write_commits);
+        let times = self.schedule_writes(&mut ws, &mut queue, offers);
+        self.write_commits = queue;
         self.write = Some(ws);
-        last
+        times
+    }
+
+    /// When write sectors offered at the given times would all be in the
+    /// buffer, without taking them.
+    pub fn write_acceptance_time(&self, offers: &[u64]) -> u64 {
+        let Some(ws) = &self.write else {
+            return offers.last().copied().unwrap_or(self.now);
+        };
+        let mut ws = ws.clone();
+        let mut queue = self.write_commits.clone();
+        self.schedule_writes(&mut ws, &mut queue, offers).0
     }
 
     /// When the buffer has room for `count` more write sectors.
     pub fn write_room_at(&self, count: u32) -> u64 {
-        let Some(ws) = &self.write else {
-            return self.now;
-        };
-        let pending = ws.commits.iter().filter(|&&t| t > self.now).count() as u64;
-        let cap = self.timing.buffer_sectors;
-        let count = u64::from(count).min(cap);
-        if pending + count <= cap {
-            return self.now;
-        }
-        // The buffer frees as sectors reach the media, oldest first.
-        let first_pending = ws.commits.len() as u64 - pending;
-        let index = first_pending + (pending + count - cap) - 1;
-        ws.commits[index as usize]
+        Self::room_time(
+            &self.write_commits,
+            self.timing.buffer_sectors,
+            u64::from(count),
+            self.now,
+        )
+    }
+
+    /// Write sectors the buffer can take right now.
+    pub fn write_room_sectors(&self) -> u64 {
+        let pending = self.write_commits.iter().filter(|&&t| t > self.now).count() as u64;
+        self.timing.buffer_sectors.saturating_sub(pending)
     }
 
     /// Finish the write: returns when the last sector is on the media. The
     /// mechanism stays busy until then even when write cache let the
-    /// command complete earlier.
+    /// command complete earlier, and the sectors still on their way keep
+    /// their buffer space until they get there.
     pub fn end_write(&mut self) -> u64 {
         let Some(ws) = self.write.take() else {
             return self.now.max(self.busy_until);
@@ -755,6 +787,47 @@ impl DriveMechanics {
             }
             self.head = next;
             self.last_activity = ready;
+        }
+    }
+
+    /// Take sectors into the buffer one at a time (see
+    /// [`Self::accept_write_sectors`]), recording each one's commit time in
+    /// `queue`: the drive's own, or a copy for a dry run.
+    fn schedule_writes(
+        &self,
+        ws: &mut WriteState,
+        queue: &mut VecDeque<u64>,
+        offers: &[u64],
+    ) -> (u64, u64) {
+        let mut accepted = 0;
+        for &offer in offers {
+            accepted = Self::room_time(queue, self.timing.buffer_sectors, 1, offer.max(accepted));
+            ws.walker.t = ws.walker.t.max(accepted);
+            let (ready, next) = self.step(ws.walker, true);
+            ws.walker = next;
+            queue.push_back(ready);
+        }
+        (accepted, ws.walker.t)
+    }
+
+    /// The earliest time at or after `at` when `queue` (commit times, oldest
+    /// first) leaves room in a buffer of `capacity` sectors for `count` more.
+    fn room_time(queue: &VecDeque<u64>, capacity: u64, count: u64, at: u64) -> u64 {
+        let count = count.clamp(1, capacity.max(1));
+        let pending = queue.iter().filter(|&&t| t > at).count() as u64;
+        if pending + count <= capacity {
+            return at;
+        }
+        // The buffer frees as sectors reach the media, oldest first.
+        let first_pending = queue.len() as u64 - pending;
+        let index = first_pending + (pending + count - capacity) - 1;
+        queue[index as usize].max(at)
+    }
+
+    /// Drop commit times the clock has passed.
+    fn prune_write_commits(&mut self) {
+        while self.write_commits.front().is_some_and(|&t| t <= self.now) {
+            self.write_commits.pop_front();
         }
     }
 
@@ -1021,6 +1094,30 @@ mod tests {
         drive.write_sectors(16, drive.now);
         let room = drive.write_room_at(1);
         assert!(room > drive.now, "a full buffer must wait for a commit");
+        drive.end_write();
+    }
+
+    #[test]
+    fn cached_write_sectors_keep_their_buffer_space_into_the_next_command() {
+        let mut profile = builtin_profile("seagate-st9655ag").unwrap();
+        profile.buffer_kib = 1; // two sectors
+        let mut drive = DriveMechanics::new(&profile, profile.capacity_sectors(), PAL, false);
+        drive.begin_write(90_000);
+        let last = drive.write_sectors(2, drive.now);
+        drive.end_write();
+        drive.advance(1000);
+        assert!(
+            last > drive.now,
+            "the cached sectors are still on their way"
+        );
+        drive.begin_write(90_002);
+        let room = drive.write_room_at(1);
+        assert!(
+            room > drive.now,
+            "the last command's sectors fill the buffer"
+        );
+        assert!(room <= last, "room frees as the first of them commits");
+        assert_eq!(drive.write_room_sectors(), 0);
         drive.end_write();
     }
 

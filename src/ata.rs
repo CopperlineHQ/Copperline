@@ -149,6 +149,9 @@ enum PendingStep {
     /// The buffer has room: take the next `chunk` write sectors (DRQ,
     /// INTRQ).
     WriteBlock { chunk: u32 },
+    /// The buffer has room for a WRITE's first block: DRQ without an
+    /// interrupt, as PIO data-out offers its first block.
+    FirstWriteBlock { chunk: u32 },
     /// The command is done (INTRQ).
     Complete,
 }
@@ -807,6 +810,12 @@ impl AtaBus {
                 self.buf_pos = 0;
                 self.status = ST_DRDY | ST_DSC | ST_DRQ;
                 self.raise_irq();
+            }
+            PendingStep::FirstWriteBlock { chunk } => {
+                self.buf.clear();
+                self.buf.resize(chunk as usize * SECTOR_SIZE, 0);
+                self.buf_pos = 0;
+                self.status = ST_DRDY | ST_DSC | ST_DRQ;
             }
             PendingStep::Complete => {
                 self.status = ST_DRDY | ST_DSC;
@@ -1520,10 +1529,11 @@ impl AtaBus {
         self.schedule(due, PendingStep::Complete);
     }
 
-    /// Finish a non-data command: after the command overhead on a timed
-    /// drive, at once on an untimed one.
+    /// Finish a command that needs neither spindle nor heads: after the
+    /// controller's overhead on a timed drive (a stopped drive is not
+    /// started for it), at once on an untimed one.
     fn complete_after_overhead(&mut self) {
-        match self.mechanics().map(|m| m.overhead()) {
+        match self.mechanics().map(|m| m.controller_overhead()) {
             Some(due) => self.schedule(due, PendingStep::Complete),
             None => {
                 self.status = ST_DRDY | ST_DSC;
@@ -1595,7 +1605,7 @@ impl AtaBus {
                     remaining: 0,
                     block: 1,
                 };
-                match self.mechanics().map(|m| m.overhead()) {
+                match self.mechanics().map(|m| m.controller_overhead()) {
                     Some(due) => self.schedule(due, PendingStep::DataReady),
                     None => {
                         self.status = ST_DRDY | ST_DSC | ST_DRQ;
@@ -1729,19 +1739,27 @@ impl AtaBus {
                 };
                 let chunk = count.min(block);
                 self.buf.clear();
-                self.buf.resize(chunk as usize * SECTOR_SIZE, 0);
                 self.buf_pos = 0;
                 self.transfer = Transfer::PioOut {
                     remaining: count - chunk,
                     block,
                 };
-                if let Some(lba) = self.current_lba() {
-                    if let Some(mechanics) = self.mechanics() {
+                // A timed drive offers the first block once its buffer has
+                // room -- a write cache still flushing an earlier command can
+                // be holding it.
+                let lba = self.current_lba();
+                let room = self.mechanics().map(|mechanics| {
+                    if let Some(lba) = lba {
                         mechanics.begin_write(lba);
                     }
+                    mechanics.write_room_at(chunk)
+                });
+                if let Some(room) = room {
+                    self.schedule(room, PendingStep::FirstWriteBlock { chunk });
+                    return;
                 }
-                // First DRQ block is ready without an interrupt (ATA PIO out):
-                // even a timed drive's buffer takes it at once.
+                // First DRQ block is ready without an interrupt (ATA PIO out).
+                self.buf.resize(chunk as usize * SECTOR_SIZE, 0);
                 self.status = ST_DRDY | ST_DSC | ST_DRQ;
             }
             // SET MULTIPLE MODE
@@ -2285,8 +2303,16 @@ mod tests {
     }
 
     fn timed_bus_spin(sectors: u64, profile: &str, spin_up: bool) -> (AtaBus, PathBuf) {
-        let path = temp_disk_image(sectors);
         let profile = crate::harddrive::profiles::builtin_profile(profile).unwrap();
+        timed_bus_with(sectors, profile, spin_up)
+    }
+
+    fn timed_bus_with(
+        sectors: u64,
+        profile: crate::harddrive::mechanics::DriveProfile,
+        spin_up: bool,
+    ) -> (AtaBus, PathBuf) {
+        let path = temp_disk_image(sectors);
         let drive = AtaDevice::from(
             IdeDrive::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap(),
         )
@@ -2394,6 +2420,37 @@ mod tests {
         let waited = run_until_ready(&mut bus);
         assert!(waited > 0);
         assert!(bus.take_irq_edge());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_write_waits_for_room_a_cached_write_still_holds() {
+        let mut profile = crate::harddrive::profiles::builtin_profile("seagate-st9655ag").unwrap();
+        assert!(profile.write_cache);
+        profile.buffer_kib = 1; // two sectors
+        let (mut bus, path) = timed_bus_with(125_096, profile, false);
+        issue(&mut bus, 0x30, 50_000, 2);
+        for _ in 0..2 {
+            run_until_ready(&mut bus);
+            assert_eq!(bus.status & ST_DRQ, ST_DRQ);
+            for _ in 0..SECTOR_SIZE / 2 {
+                bus.write_reg(Some(IdeReg::Data), 2, 0xA55A);
+            }
+        }
+        // Write cache: done once both sectors are in the buffer.
+        run_until_ready(&mut bus);
+        assert!(bus.take_irq_edge());
+        bus.read_reg(Some(IdeReg::StatusCommand), 1);
+        bus.tick(1000, &mut crate::chipset::paula::CdAudioRing::default());
+        issue(&mut bus, 0x30, 50_002, 1);
+        assert_eq!(
+            bus.status & (ST_BSY | ST_DRQ),
+            ST_BSY,
+            "the buffer is still full of the last command's sectors"
+        );
+        let waited = run_until_ready(&mut bus);
+        assert!(waited > 1000, "DRQ after {waited} cck");
+        assert_eq!(bus.status & ST_DRQ, ST_DRQ);
         let _ = std::fs::remove_file(path);
     }
 

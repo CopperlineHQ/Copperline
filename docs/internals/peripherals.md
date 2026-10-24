@@ -245,11 +245,13 @@ through the PIO data register with DBR. On an untimed target, like the
 untimed Gayle model, transfers complete within the access. A target with
 drive mechanics only starts the data-in phase once its first block is in
 the drive's buffer (the chip stays BSY|CIP until then), `dma_remaining`
-and DBR are capped to the blocks already buffered and to the profile's
-asynchronous SCSI rate -- always ending on a word boundary of the phase,
-since both DMACs move a word per cycle -- and a write's status follows
-once the media (or the write cache) has the data. Completion interrupts are
-delivered after a short emulated delay, and INT2 is the level `CNTR_INTEN && ISTR &
+and DBR are capped to the blocks already buffered, to the room left in
+the drive's write buffer and to the profile's asynchronous SCSI rate --
+always ending on a word boundary of the phase, since both DMACs move a word
+per cycle -- and a write's status follows once the media (or the write
+cache, unless the CDB sets FUA) has the data. The A2091 and SDMAC report
+the chip's next timed event to the idle fast-forward. Completion interrupts
+are delivered after a short emulated delay, and INT2 is the level `CNTR_INTEN && ISTR &
 (INTS|E_INT)` fed to Paula's PORTS latch each tick. DMAC bus-master
 cycles are not yet arbitrated against the CPU (TODO in `a2091.rs`).
 
@@ -291,8 +293,8 @@ project's `a4091_cdfs.rom` release (`assets/a4091/`), which carries
 With a timed disk (drive mechanics) the SCRIPTS processor can stall: a
 table-indirect block move the target is not ready for -- DATA IN bytes not
 yet in the drive's buffer or not yet carried at the SCSI bus rate, DATA OUT
-bytes beyond that rate, STATUS before the overhead, seek or media write is
-done -- rewinds DSP to the move and records when it can complete, and the
+bytes beyond that rate or the room left in the drive's buffer, STATUS
+before the overhead, seek or media write is done -- rewinds DSP to the move and records when it can complete, and the
 board's tick resumes `run_scripts` then, exactly as the real chip waits for
 the target's REQ. The live nexus (`Connection`), its timing and the stall
 are part of the save state.
@@ -367,7 +369,9 @@ and the request stream:
   from it; a profile with `partial_hits = false` takes only complete hits.
 - **Writes** pass through the buffer: a block is accepted while there is
   room, and on a write-cache drive the command completes before the data
-  reaches the platter, with the mechanism busy until it does.
+  reaches the platter, with the mechanism busy until it does. Sectors still
+  on their way keep their buffer space into the next command, so a
+  following write waits for room.
 - **Spin-up, standby and idle head park**, for the drives whose manuals
   describe them.
 
@@ -378,8 +382,8 @@ carry the whole mechanism.
 
 The ATA engine (`ata.rs`) asks the mechanics for every sector's ready time
 when a READ is issued and offers each DRQ block when its last sector is in
-the buffer, holding BSY until then; a WRITE takes blocks while the buffer
-has room and completes when the media (or, with write cache, the buffer)
+the buffer, holding BSY until then; a WRITE takes blocks (its first one
+included) while the buffer has room and completes when the media (or, with write cache, the buffer)
 has the data. A pending step's due time caps the emulator's STOP-state
 idle fast-forward (`Bus::next_storage_event_cck`), so a guest waiting on
 the disk interrupt is woken on time. A drive spinning up from power-on
@@ -389,7 +393,12 @@ applies) and CHECK POWER MODE are implemented on timed drives only, so an
 untimed drive keeps aborting them exactly as before. The SCSI disk target
 answers NOT READY / becoming ready (02/04/01) while spinning up, except to
 INQUIRY, REQUEST SENSE and START STOP UNIT, which spins a timed drive down
-and up.
+and up. Commands that need neither spindle nor heads (INQUIRY, REQUEST
+SENSE, mode pages, capacity, any error status) answer after the controller
+overhead alone, without waiting for a spindle coming up to speed or
+starting a stopped one; SYNCHRONIZE CACHE reports once the mechanism has
+finished writing, and a WRITE with FUA (or a WRITE AND VERIFY) reports
+from the media even on a write-cache drive.
 
 An image no larger than the profile's drive lies on its outer cylinders
 like a partition at the start of the disk, so seeks between its cylinders
