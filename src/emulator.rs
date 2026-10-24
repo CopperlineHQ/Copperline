@@ -4085,10 +4085,12 @@ fn build_machine_inner(
                 let mut board = crate::a4091::A4091::new(rom)?;
                 for (unit, drive) in cfg.scsi.units.iter().enumerate() {
                     let Some(drive) = drive else { continue };
-                    board.attach_drive(unit, open_scsi_target(drive, unit)?);
+                    board.attach_drive(unit, timed_scsi(open_scsi_target(drive, unit)?, cfg, unit));
                 }
                 #[cfg(not(target_arch = "wasm32"))]
-                attach_scsi_host_disks(cfg, |unit, target| board.attach_drive(unit, target));
+                attach_scsi_host_disks(cfg, |unit, target| {
+                    board.attach_drive(unit, timed_scsi(target, cfg, unit))
+                });
                 zorro.add_board(crate::zorro::BoardSpec::a4091(slot))?;
                 info!(
                     "scsi: A4091 controller on the Zorro chain (slot {slot}), ROM {}",

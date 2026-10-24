@@ -2327,8 +2327,8 @@ unit2 = "game.cue"           # .cue/.iso/.nrg/.chd attaches a CD-ROM drive
 ```
 
 The `[scsi]` section attaches a SCSI host adapter with up to **seven
-drives**. `timing` and `spin_up` give the hard disks on the A2091 and the
-A3000's SCSI the seek, rotation and transfer times of a real drive of the
+drives**. `timing` and `spin_up` give the hard disks on any of the three
+controllers the seek, rotation and transfer times of a real drive of the
 period; see [Drive timing](#drive-timing). `controller` picks which one:
 
 - `"a2091"` (the default on machines without onboard SCSI): a Commodore
@@ -2563,9 +2563,9 @@ at the speed of the machine with that drive fitted.
   (table below).
 - A profile id from the table of built-in drives below.
 
-Set on the section (`[ide]`, `[lide]`, and `[scsi]` on the A2091/A590
-and A3000 controllers), it covers every hard disk there; set in a drive's
-own table, it covers just that drive. A `[[host_disk]]` on
+Set on the section (`[ide]`, `[scsi]` on any of its three controllers,
+`[lide]`), it covers every hard disk there; set in a drive's own table, it
+covers just that drive. A `[[host_disk]]` on
 one of the section's slots takes the section's `timing`. `--hd-timing
 TIMING` sets the section `timing` from the command line.
 
@@ -2586,6 +2586,7 @@ owner reports and reviews:
 | A3000 (`[scsi]`, `controller = "a3000"`) | `quantum-lps-52s` | the A3000's 52 MB Quantum |
 | A2091 in a big-box machine (`[scsi]`) | `quantum-lps-52s` | the A2000HD's 52 MB Quantum |
 | A2091 on an A500, A500+, A1000 or CDTV (`[scsi]`) | `seagate-st125n` | the A590 side-car's 20 MB Seagate |
+| A4091 (`[scsi]`, `controller = "a4091"`) | `seagate-st31200n` | a 1 GB SCSI-2 drive, the class the A4000T shipped with |
 | any machine (`[lide]`) | `wd-ac2120` | a period 3.5" IDE drive |
 
 Built-in drives (`copperline --list-drive-profiles` prints this table):

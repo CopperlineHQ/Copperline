@@ -288,6 +288,15 @@ The autoconfig identity is Commodore product 84 with `er_InitDiagVec`
 project's `a4091_cdfs.rom` release (`assets/a4091/`), which carries
 `a4091.device` and a CD filesystem.
 
+With a timed disk (drive mechanics) the SCRIPTS processor can stall: a
+table-indirect block move the target is not ready for -- DATA IN bytes not
+yet in the drive's buffer or not yet carried at the SCSI bus rate, DATA OUT
+bytes beyond that rate, STATUS before the overhead, seek or media write is
+done -- rewinds DSP to the move and records when it can complete, and the
+board's tick resumes `run_scripts` then, exactly as the real chip waits for
+the target's REQ. The live nexus (`Connection`), its timing and the stall
+are part of the save state.
+
 ### A3000 Super DMAC (`sdmac.rs`)
 
 The SDMAC is the SCSI DMA controller on the A3000 motherboard, not a

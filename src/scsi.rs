@@ -922,23 +922,100 @@ enum ManualPhase {
     BusFree,
 }
 
-/// A timed target's schedule for one command (drive mechanics).
+/// A timed target's schedule for one command (drive mechanics), shared by
+/// the WD33C93 and the 53C710 (`crate::a4091`).
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-struct TxnTiming {
+pub(crate) struct TxnTiming {
     /// When each 512-byte block of the data-in payload is in the drive's
     /// buffer; a single entry covers a whole non-media payload (INQUIRY,
     /// MODE SENSE, sense data).
-    ready: Vec<u64>,
+    pub(crate) ready: Vec<u64>,
     /// The earliest the status phase may follow (the command overhead or a
     /// seek, for a command with no media transfer).
-    status_at: u64,
+    pub(crate) status_at: u64,
     /// A media write is in progress: write blocks go to the mechanics as
     /// they arrive.
-    writing: bool,
+    pub(crate) writing: bool,
     /// When the current data phase began, and the bytes it has moved, for
     /// the SCSI bus rate.
-    phase_start: u64,
-    moved: u64,
+    pub(crate) phase_start: u64,
+    pub(crate) moved: u64,
+}
+
+impl TxnTiming {
+    /// When the data-in bytes up to (not including) `end` are all in the
+    /// drive's buffer.
+    pub(crate) fn data_ready_through(&self, end: usize) -> u64 {
+        if self.ready.len() <= 1 {
+            return self.ready.first().copied().unwrap_or(0);
+        }
+        let index = end.saturating_sub(1) / SECTOR_SIZE;
+        self.ready[index.min(self.ready.len() - 1)]
+    }
+}
+
+/// Plan a timed disk target's command: when its data-in blocks are in the
+/// buffer, when its status may follow, or that a media write began. `None`
+/// for an untimed target.
+pub(crate) fn plan_target_timing(
+    target: &mut ScsiTarget,
+    id: u8,
+    cdb: &[u8],
+    exec: &ScsiExec,
+    status: u8,
+) -> Option<TxnTiming> {
+    let mechanics = target.mechanics_mut()?;
+    let mut timing = TxnTiming::default();
+    let overhead_only = |mechanics: &mut crate::harddrive::mechanics::DriveMechanics,
+                         timing: &mut TxnTiming| {
+        timing.status_at = mechanics.overhead();
+        timing.ready = vec![timing.status_at];
+    };
+    if status != GOOD {
+        overhead_only(mechanics, &mut timing);
+    } else {
+        match (media_access(cdb), exec) {
+            (Some(MediaAccess::Read { lba }), ScsiExec::DataIn(data)) if !data.is_empty() => {
+                let blocks = data.len().div_ceil(SECTOR_SIZE) as u32;
+                timing.ready = mechanics.read(lba, blocks);
+            }
+            (Some(MediaAccess::Write { lba }), ScsiExec::DataOut(expected)) if *expected > 0 => {
+                mechanics.begin_write(lba);
+                timing.writing = true;
+            }
+            (Some(MediaAccess::Seek { lba }), _) => {
+                timing.status_at = mechanics.seek_to(lba);
+                timing.ready = vec![timing.status_at];
+            }
+            _ => overhead_only(mechanics, &mut timing),
+        }
+    }
+    if crate::envcfg::flag("COPPERLINE_DIAG_HDTIMING") {
+        log::info!(
+            "hdtiming scsi id {id}: cdb {:02X?} status {status:#04X} at {}: \
+             data ready {:?}, status at {}, writing {}",
+            cdb,
+            mechanics.now(),
+            timing.ready.first(),
+            timing.status_at,
+            timing.writing
+        );
+    }
+    Some(timing)
+}
+
+/// Finish a timed media write once its last block is in: when the status
+/// may follow -- at once from a write cache, otherwise once the media has
+/// the data (the mechanism stays busy flushing either way).
+pub(crate) fn finish_timed_write(target: &mut ScsiTarget) -> Option<u64> {
+    let mechanics = target.mechanics_mut()?;
+    let now = mechanics.now();
+    let on_media = mechanics.end_write();
+    Some(if mechanics.write_cache() {
+        now
+    } else {
+        on_media
+    })
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1178,44 +1255,8 @@ impl Wd33c93 {
         exec: &ScsiExec,
         status: u8,
     ) -> Option<TxnTiming> {
-        let mechanics = self.target_mechanics(id)?;
-        let mut timing = TxnTiming::default();
-        let overhead_only = |mechanics: &mut crate::harddrive::mechanics::DriveMechanics,
-                             timing: &mut TxnTiming| {
-            timing.status_at = mechanics.overhead();
-            timing.ready = vec![timing.status_at];
-        };
-        if status != GOOD {
-            overhead_only(mechanics, &mut timing);
-            return Some(timing);
-        }
-        match (media_access(cdb), exec) {
-            (Some(MediaAccess::Read { lba, .. }), ScsiExec::DataIn(data)) if !data.is_empty() => {
-                let blocks = data.len().div_ceil(SECTOR_SIZE) as u32;
-                timing.ready = mechanics.read(lba, blocks);
-            }
-            (Some(MediaAccess::Write { lba }), ScsiExec::DataOut(expected)) if *expected > 0 => {
-                mechanics.begin_write(lba);
-                timing.writing = true;
-            }
-            (Some(MediaAccess::Seek { lba }), _) => {
-                timing.status_at = mechanics.seek_to(lba);
-                timing.ready = vec![timing.status_at];
-            }
-            _ => overhead_only(mechanics, &mut timing),
-        }
-        if crate::envcfg::flag("COPPERLINE_DIAG_HDTIMING") {
-            log::info!(
-                "hdtiming scsi id {id}: cdb {:02X?} status {status:#04X} at {}: \
-                 data ready {:?}, status at {}, writing {}",
-                cdb,
-                mechanics.now(),
-                timing.ready.first(),
-                timing.status_at,
-                timing.writing
-            );
-        }
-        Some(timing)
+        let target = self.targets.get_mut(usize::from(id))?.as_mut()?;
+        plan_target_timing(target, id, cdb, exec, status)
     }
 
     /// When the next data-in byte the host needs is in the drive's buffer.
@@ -1703,14 +1744,8 @@ impl Wd33c93 {
                 // data, or at once from a write cache (the mechanism stays
                 // busy flushing either way).
                 if txn.timing.as_ref().is_some_and(|t| t.writing) {
-                    if let Some(mechanics) = target.mechanics_mut() {
-                        let now = mechanics.now();
-                        let on_media = mechanics.end_write();
-                        let done = if mechanics.write_cache() {
-                            now
-                        } else {
-                            on_media
-                        };
+                    let now = target.mechanics().map_or(0, |m| m.now());
+                    if let Some(done) = finish_timed_write(target) {
                         let wait = u32::try_from(done.saturating_sub(now)).unwrap_or(u32::MAX);
                         extra = extra.saturating_add(wait);
                     }
