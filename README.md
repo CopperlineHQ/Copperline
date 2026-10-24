@@ -51,6 +51,19 @@ chmod +x Copperline-*.AppImage
 
 *Note:* On Linux, presentation requires a Vulkan driver. Most modern GPUs support Vulkan natively. For virtual machines or older hardware, install the Mesa software Vulkan driver (`mesa-vulkan-drivers` on Debian/Ubuntu/Fedora, or `vulkan-swrast` on Arch).
 
+### Windows
+
+Download `Copperline-X.Y.Z-win-x64-setup.exe` or
+`Copperline-X.Y.Z-win-arm64-setup.exe` from the
+[releases page](https://github.com/CopperlineHQ/Copperline/releases), matching
+your PC's architecture. The installer needs no administrator rights and adds
+a Start menu shortcut. Run a newer installer to update; uninstall through
+Windows Settings. Your settings and saves are preserved.
+
+Portable ZIPs remain available for both architectures; extract the whole
+archive and run `copperline.exe`. See the [Windows installation
+guide](docs/guide/getting-started.md#installing-on-windows).
+
 ### Building from source
 
 ```sh

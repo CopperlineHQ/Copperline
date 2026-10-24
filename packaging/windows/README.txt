@@ -1,17 +1,23 @@
-Copperline - portable Windows build
-====================================
+Copperline - Windows build
+=========================
 
 Copperline is a cycle-driven Amiga emulator (OCS/ECS/AGA).
 
 Running
 -------
-This is a portable build: no installation is required. Unzip it anywhere and
-run copperline.exe. It needs no administrator rights and no Visual C++
-Redistributable (the C runtime is linked statically into the executable).
+The installer adds a Start menu shortcut and an optional desktop shortcut.
+By default, it installs into %LOCALAPPDATA%\Programs\Copperline for the
+current user. Run a newer installer to update it. Remove it through Windows
+Settings -> Apps -> Installed apps; settings, saves and media you added are
+preserved.
+
+The ZIP is portable: unzip the whole archive anywhere and run copperline.exe.
+Both packages need no administrator rights and no Visual C++ Redistributable
+(the C runtime is linked statically into the executable).
 
 On first launch Windows SmartScreen may show "Windows protected your PC"
-because the executable is not code-signed. Click "More info", then
-"Run anyway" to start it.
+because the installer and executables are not code-signed. Click "More info",
+then "Run anyway" to start it.
 
 Boot ROM
 --------
