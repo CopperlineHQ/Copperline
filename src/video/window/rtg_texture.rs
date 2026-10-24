@@ -20,6 +20,12 @@
 //! the soft low-resolution intermediate underneath it must never peek out
 //! around the picture -- and the [`RtgUniforms`] mapping puts the image in
 //! the middle of it, with the fragments around it painted black.
+//!
+//! Whatever the window composes for an RTG frame on the CPU -- the corner
+//! overlays, the copy of the board frame they blend over, and the whole
+//! picture while a menu forces the CPU present -- is laid out by
+//! [`picture_rect`] and [`picture_texel`], the same placement and sample
+//! the pass takes, so it lands where the pass draws.
 
 use pixels::wgpu;
 use std::borrow::Cow;
@@ -112,6 +118,32 @@ pub(super) fn integer_fit_uniforms(rect: (f32, f32), native: (u32, u32)) -> RtgU
     RtgUniforms {
         rect: [(1.0 - w) / 2.0, (1.0 - h) / 2.0, w, h],
     }
+}
+
+/// The part of a `viewport`-sized rect the pass draws the board picture
+/// over, as `[x, y, w, h]` fractions of it: the whole-number fit under
+/// integer scaling, the whole viewport under smooth scaling.
+pub(super) fn picture_rect(
+    viewport: (f32, f32),
+    native: (u32, u32),
+    integer_scaling: bool,
+) -> [f32; 4] {
+    if integer_scaling {
+        integer_fit_uniforms(viewport, native).rect
+    } else {
+        FILL_VIEWPORT.rect
+    }
+}
+
+/// The board pixel the pass shows at `centre` -- a pixel centre, as a
+/// fraction of the viewport along one axis -- when the picture starts at
+/// `start` and spans `len` of it, `native` board pixels across; `None` in
+/// the black margin. The CPU form of the shader's per-fragment test and
+/// point sample: both ends of the picture are inside, and the sample
+/// clamps to the last pixel as the sampler does.
+pub(super) fn picture_texel(centre: f32, start: f32, len: f32, native: u32) -> Option<u32> {
+    let t = (centre - start) / len;
+    ((0.0..=1.0).contains(&t) && native > 0).then(|| ((t * native as f32) as u32).min(native - 1))
 }
 
 /// A native-resolution RTG display texture and the pipeline that scales it
@@ -352,10 +384,8 @@ impl RtgTexture {
         if w < 1.0 || h < 1.0 {
             return;
         }
-        let uniforms = if integer_scaling {
-            integer_fit_uniforms((w, h), self.dims)
-        } else {
-            FILL_VIEWPORT
+        let uniforms = RtgUniforms {
+            rect: picture_rect((w, h), self.dims, integer_scaling),
         };
         queue.write_buffer(&self.uniforms, 0, uniforms.as_bytes());
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -486,8 +516,28 @@ mod tests {
         (w, h): (u32, u32),
         integer_scaling: bool,
     ) -> Vec<[u8; 4]> {
+        render_board(
+            device,
+            queue,
+            &[RED, GREEN, BLUE, WHITE],
+            (2, 2),
+            (w, h),
+            integer_scaling,
+        )
+    }
+
+    /// Draw a `native`-sized `board` frame into a `w` x `h` target through
+    /// the real pass, and read the result back per pixel.
+    fn render_board(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        board: &[u32],
+        native: (u32, u32),
+        (w, h): (u32, u32),
+        integer_scaling: bool,
+    ) -> Vec<[u8; 4]> {
         let mut rtg = RtgTexture::new(device, FORMAT);
-        rtg.upload(device, queue, &[RED, GREEN, BLUE, WHITE], 2, 2);
+        rtg.upload(device, queue, board, native.0, native.1);
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("rtg_texture_test_target"),
             size: wgpu::Extent3d {
@@ -648,5 +698,90 @@ mod tests {
         assert_eq!(at(&px, 11, 0), GREEN.to_le_bytes());
         assert_eq!(at(&px, 0, 7), BLUE.to_le_bytes());
         assert_eq!(at(&px, 11, 7), WHITE.to_le_bytes());
+    }
+
+    /// Smooth scaling stretches the picture over the whole viewport;
+    /// integer scaling places it where the whole-number fit does.
+    #[test]
+    fn the_picture_rect_follows_the_scaling_mode() {
+        assert_eq!(
+            picture_rect((1300.0, 1000.0), (640, 480), false),
+            FILL_VIEWPORT.rect
+        );
+        assert_eq!(
+            picture_rect((1300.0, 1000.0), (640, 480), true),
+            integer_fit_uniforms((1300.0, 1000.0), (640, 480)).rect
+        );
+    }
+
+    /// The window lays out what it composes for an RTG frame on the CPU
+    /// by `picture_rect` and `picture_texel`, and that only lines up if
+    /// they put every board pixel exactly where the pass does: for each
+    /// pixel of the real pass's output, the board pixel (or the black
+    /// margin) the CPU figures say is there. The board's neighbours all
+    /// differ in colour, so a pixel off on either axis shows. The rects
+    /// leave whole-pixel margins: a margin of half a pixel puts a pixel
+    /// centre exactly on the picture's edge, where the GPU's interpolated
+    /// coordinate and the CPU's own can round either way.
+    #[test]
+    fn the_cpu_placement_puts_every_board_pixel_where_the_pass_does() {
+        let Some(gpu) = gpu() else {
+            return;
+        };
+        let (device, queue) = (gpu.device(), gpu.queue());
+        // Eight colours, every channel 0 or 255; along a row neighbours
+        // step by one, down a column by three, so no two adjacent pixels
+        // share one.
+        let palette: Vec<u32> = (0..8u32)
+            .map(|i| {
+                0xFF00_0000
+                    | if i & 1 != 0 { 0xFF } else { 0 }
+                    | if i & 2 != 0 { 0xFF00 } else { 0 }
+                    | if i & 4 != 0 { 0xFF_0000 } else { 0 }
+            })
+            .collect();
+        let native = (7u32, 5u32);
+        let board: Vec<u32> = (0..native.1)
+            .flat_map(|y| (0..native.0).map(move |x| (x + 3 * y) as usize % 8))
+            .map(|i| palette[i])
+            .collect();
+        for (w, h) in [
+            // 3x, one black pixel each side on both axes.
+            (23u32, 17u32),
+            // 2x, held down by the height: a wide margin across.
+            (30, 12),
+            // An exact 2x fit: no margin at all.
+            (14, 10),
+            // Too small for 1x: the smooth fill, point-sampled.
+            (6, 4),
+        ] {
+            let px = render_board(device, queue, &board, native, (w, h), true);
+            let picture = picture_rect((w as f32, h as f32), native, true);
+            for y in 0..h {
+                let row = picture_texel(
+                    (y as f32 + 0.5) / h as f32,
+                    picture[1],
+                    picture[3],
+                    native.1,
+                );
+                for x in 0..w {
+                    let column = picture_texel(
+                        (x as f32 + 0.5) / w as f32,
+                        picture[0],
+                        picture[2],
+                        native.0,
+                    );
+                    let want = match (column, row) {
+                        (Some(bx), Some(by)) => board[(by * native.0 + bx) as usize].to_le_bytes(),
+                        _ => BLACK,
+                    };
+                    assert_eq!(
+                        px[(y * w + x) as usize],
+                        want,
+                        "{w}x{h} at ({x}, {y}): board {column:?}, {row:?}"
+                    );
+                }
+            }
+        }
     }
 }
