@@ -3795,6 +3795,22 @@ fn timed_ata(
     device
 }
 
+/// Give the disk on a SCSI unit the period mechanics its `timing` asks for.
+fn timed_scsi(
+    target: impl Into<crate::scsi::ScsiTarget>,
+    cfg: &Config,
+    unit: usize,
+) -> crate::scsi::ScsiTarget {
+    let slot = crate::config::DriveSlot::Scsi(unit);
+    let target = target
+        .into()
+        .with_mechanics(|total| cfg.drive_mechanics(slot, total));
+    if let Some(mechanics) = target.mechanics() {
+        info!("{slot:?}: timed as {}", mechanics.label());
+    }
+    target
+}
+
 /// Open every drive the config bridges to real hardware.
 ///
 /// Failing to open one is fatal rather than a warning: a bay configured as a
@@ -4036,10 +4052,12 @@ fn build_machine_inner(
                 let mut board = crate::a2091::A2091::new(rom)?;
                 for (unit, drive) in cfg.scsi.units.iter().enumerate() {
                     let Some(drive) = drive else { continue };
-                    board.attach_drive(unit, open_scsi_target(drive, unit)?);
+                    board.attach_drive(unit, timed_scsi(open_scsi_target(drive, unit)?, cfg, unit));
                 }
                 #[cfg(not(target_arch = "wasm32"))]
-                attach_scsi_host_disks(cfg, |unit, target| board.attach_drive(unit, target));
+                attach_scsi_host_disks(cfg, |unit, target| {
+                    board.attach_drive(unit, timed_scsi(target, cfg, unit))
+                });
                 zorro.add_board(crate::zorro::BoardSpec::a2091(slot))?;
                 info!(
                     "scsi: A2091 controller on the Zorro chain (slot {slot}), ROM {}",
@@ -4656,13 +4674,14 @@ fn build_machine_inner(
         if cfg.scsi.controller == crate::config::ScsiController::A3000 {
             for (unit, drive) in cfg.scsi.units.iter().enumerate() {
                 let Some(drive) = drive else { continue };
-                sdmac.attach_drive(unit, open_scsi_target(drive, unit)?);
+                sdmac.attach_drive(unit, timed_scsi(open_scsi_target(drive, unit)?, cfg, unit));
                 drives += 1;
             }
             #[cfg(not(target_arch = "wasm32"))]
             {
-                drives +=
-                    attach_scsi_host_disks(cfg, |unit, target| sdmac.attach_drive(unit, target));
+                drives += attach_scsi_host_disks(cfg, |unit, target| {
+                    sdmac.attach_drive(unit, timed_scsi(target, cfg, unit))
+                });
             }
         }
         bus.attach_sdmac(sdmac);

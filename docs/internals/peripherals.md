@@ -241,9 +241,15 @@ the real 7.0 boot ROM booting a Workbench install end-to-end:
 
 Data phases run through the DMAC handshake (a word per DMAC cycle into
 chip, slow, or Zorro RAM with the 24-bit ACR auto-incrementing) or
-through the PIO data register with DBR. Like the Gayle model, transfers
-complete within the access; completion interrupts are delivered after a
-short emulated delay, and INT2 is the level `CNTR_INTEN && ISTR &
+through the PIO data register with DBR. On an untimed target, like the
+untimed Gayle model, transfers complete within the access. A target with
+drive mechanics only starts the data-in phase once its first block is in
+the drive's buffer (the chip stays BSY|CIP until then), `dma_remaining`
+and DBR are capped to the blocks already buffered and to the profile's
+asynchronous SCSI rate -- always ending on a word boundary of the phase,
+since both DMACs move a word per cycle -- and a write's status follows
+once the media (or the write cache) has the data. Completion interrupts are
+delivered after a short emulated delay, and INT2 is the level `CNTR_INTEN && ISTR &
 (INTS|E_INT)` fed to Paula's PORTS latch each tick. DMAC bus-master
 cycles are not yet arbitrated against the CPU (TODO in `a2091.rs`).
 

@@ -2323,10 +2323,13 @@ unit0 = "workbench.hdf"      # SCSI IDs 0-6
 unit1 = "data.hdf"
 unit2 = "game.cue"           # .cue/.iso/.nrg/.chd attaches a CD-ROM drive
 # unit3..unit6 = ...
+# timing = "period"          # period drive mechanics (see Drive timing)
 ```
 
 The `[scsi]` section attaches a SCSI host adapter with up to **seven
-drives**. `controller` picks which one:
+drives**. `timing` and `spin_up` give the hard disks on the A2091 and the
+A3000's SCSI the seek, rotation and transfer times of a real drive of the
+period; see [Drive timing](#drive-timing). `controller` picks which one:
 
 - `"a2091"` (the default on machines without onboard SCSI): a Commodore
   A2091 (Commodore DMAC + WD33C93A) as a Zorro II autoconfig board. It
@@ -2545,9 +2548,12 @@ manufacturer's datasheet:
   that hide head switches on sequential transfers;
 - the drive's buffer, read-ahead and (where the drive had it) write cache.
 
-The guest sees what a real drive shows: BSY while it seeks and reads, each
-block of data and its interrupt when the drive has it, and an activity LED
-that stays lit through the seek. Loading, booting and benchmarks then run
+The guest sees what a real drive shows: on IDE, BSY while it seeks and
+reads and each block of data and its interrupt when the drive has it; on
+SCSI, the command still in progress until the drive has data, the data
+phase at the drive's buffer and SCSI-bus pace, and status once a write is
+on the media (or in a write cache); and an activity LED that stays lit
+through the seek. Loading, booting and benchmarks then run
 at the speed of the machine with that drive fitted.
 
 `timing` takes:
@@ -2557,8 +2563,9 @@ at the speed of the machine with that drive fitted.
   (table below).
 - A profile id from the table of built-in drives below.
 
-Set on the section (`[ide]`, `[lide]`), it covers every drive there; set
-in a drive's own table, it covers just that drive. A `[[host_disk]]` on
+Set on the section (`[ide]`, `[lide]`, and `[scsi]` on the A2091/A590
+and A3000 controllers), it covers every hard disk there; set in a drive's
+own table, it covers just that drive. A `[[host_disk]]` on
 one of the section's slots takes the section's `timing`. `--hd-timing
 TIMING` sets the section `timing` from the command line.
 
@@ -2576,6 +2583,9 @@ owner reports and reviews:
 | A600 (`[ide]`) | `conner-cp2024` | the 20 MB A600HD |
 | A1200 (`[ide]`) | `conner-cp2064` | the A1200HD's Conner "60 meg" |
 | A4000 (`[ide]`) | `seagate-st3144a` | the early A4000/040's 120 MB drive |
+| A3000 (`[scsi]`, `controller = "a3000"`) | `quantum-lps-52s` | the A3000's 52 MB Quantum |
+| A2091 in a big-box machine (`[scsi]`) | `quantum-lps-52s` | the A2000HD's 52 MB Quantum |
+| A2091 on an A500, A500+, A1000 or CDTV (`[scsi]`) | `seagate-st125n` | the A590 side-car's 20 MB Seagate |
 | any machine (`[lide]`) | `wd-ac2120` | a period 3.5" IDE drive |
 
 Built-in drives (`copperline --list-drive-profiles` prints this table):

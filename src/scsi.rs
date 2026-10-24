@@ -11,10 +11,14 @@
 //! The manual path (Select + Transfer Info per phase) is modeled too for
 //! drivers that step phases themselves.
 //!
-//! Transfers complete within the access in this model (like the Gayle IDE
-//! model); completion interrupts are delivered after a short emulated
-//! delay so software that issues a command and then polls the auxiliary
-//! status register observes the busy-then-interrupt sequence.
+//! An untimed target completes its transfer within the access (like the
+//! untimed IDE model); completion interrupts are delivered after a short
+//! emulated delay so software that issues a command and then polls the
+//! auxiliary status register observes the busy-then-interrupt sequence. A
+//! disk with period mechanics ([`crate::harddrive::mechanics`]) only
+//! asserts REQ for data once its mechanism has it, feeds the data phase at
+//! its buffer and SCSI-bus pace, and returns status once the media (or
+//! the write cache) has a write.
 
 use crate::chipset::paula::CdAudioRing;
 use crate::harddrive::{HardDriveImage, SECTOR_SIZE};
@@ -188,6 +192,40 @@ pub(crate) fn cdb_len(opcode: u8) -> usize {
     }
 }
 
+/// What a CDB asks of a disk's mechanism, for timing it: a media read or
+/// write starting at `lba` (its length is the data the target returns or
+/// expects), a seek, or (`None`) nothing beyond the command overhead.
+pub(crate) enum MediaAccess {
+    Read { lba: u64 },
+    Write { lba: u64 },
+    Seek { lba: u64 },
+}
+
+pub(crate) fn media_access(cdb: &[u8]) -> Option<MediaAccess> {
+    let byte = |i: usize| u64::from(cdb.get(i).copied().unwrap_or(0));
+    let be = |start: usize, len: usize| (start..start + len).fold(0u64, |v, i| (v << 8) | byte(i));
+    let opcode = *cdb.first()?;
+    Some(match opcode {
+        // READ(6) / WRITE(6): 21-bit LBA.
+        0x08 => MediaAccess::Read {
+            lba: ((byte(1) & 0x1F) << 16) | (byte(2) << 8) | byte(3),
+        },
+        0x0A => MediaAccess::Write {
+            lba: ((byte(1) & 0x1F) << 16) | (byte(2) << 8) | byte(3),
+        },
+        0x28 | 0xA8 => MediaAccess::Read { lba: be(2, 4) },
+        0x2A | 0x2E => MediaAccess::Write { lba: be(2, 4) },
+        0xAA | 0xAE => MediaAccess::Write { lba: be(2, 4) },
+        0x88 => MediaAccess::Read { lba: be(2, 8) },
+        0x8A | 0x8E => MediaAccess::Write { lba: be(2, 8) },
+        0x0B => MediaAccess::Seek {
+            lba: ((byte(1) & 0x1F) << 16) | (byte(2) << 8) | byte(3),
+        },
+        0x2B => MediaAccess::Seek { lba: be(2, 4) },
+        _ => return None,
+    })
+}
+
 // ----- disk target -----------------------------------------------------------
 
 /// What a CDB asks the target to do next on the bus.
@@ -206,6 +244,9 @@ pub enum ScsiExec {
 pub struct ScsiDisk {
     pub disk: HardDriveImage,
     sense: [u8; SENSE_LEN],
+    /// Period drive mechanics; `None` completes commands instantly.
+    #[serde(default)]
+    mechanics: Option<Box<crate::harddrive::mechanics::DriveMechanics>>,
 }
 
 impl ScsiDisk {
@@ -217,7 +258,20 @@ impl ScsiDisk {
         Self {
             disk,
             sense: [0u8; SENSE_LEN],
+            mechanics: None,
         }
+    }
+
+    /// Give the disk period mechanics (or take them away).
+    pub fn set_mechanics(
+        &mut self,
+        mechanics: Option<crate::harddrive::mechanics::DriveMechanics>,
+    ) {
+        self.mechanics = mechanics.map(Box::new);
+    }
+
+    pub fn mechanics(&self) -> Option<&crate::harddrive::mechanics::DriveMechanics> {
+        self.mechanics.as_deref()
     }
 
     /// The current sense buffer, without the REQUEST SENSE side effect of
@@ -263,6 +317,7 @@ impl ScsiDisk {
         Ok(Self {
             disk,
             sense: [0u8; SENSE_LEN],
+            mechanics: None,
         })
     }
 
@@ -285,6 +340,7 @@ impl ScsiDisk {
                 writable,
             )?,
             sense: [0u8; SENSE_LEN],
+            mechanics: None,
         })
     }
 
@@ -745,6 +801,35 @@ impl ScsiTarget {
         }
     }
 
+    /// Give a disk target period mechanics built for its image size; a
+    /// CD-ROM target has no spindle model here and is left as it is.
+    pub fn with_mechanics(
+        mut self,
+        build: impl FnOnce(u64) -> Option<crate::harddrive::mechanics::DriveMechanics>,
+    ) -> Self {
+        if let ScsiTarget::Disk(disk) = &mut self {
+            disk.set_mechanics(build(disk.disk.total_sectors()));
+        }
+        self
+    }
+
+    /// The disk's mechanics, when it is a timed disk.
+    pub fn mechanics(&self) -> Option<&crate::harddrive::mechanics::DriveMechanics> {
+        match self {
+            ScsiTarget::Disk(disk) => disk.mechanics.as_deref(),
+            ScsiTarget::CdRom(_) => None,
+        }
+    }
+
+    pub(crate) fn mechanics_mut(
+        &mut self,
+    ) -> Option<&mut crate::harddrive::mechanics::DriveMechanics> {
+        match self {
+            ScsiTarget::Disk(disk) => disk.mechanics.as_deref_mut(),
+            ScsiTarget::CdRom(_) => None,
+        }
+    }
+
     /// Parse and execute a CDB up to (but not including) any data-out
     /// payload; see [`ScsiDisk::execute`].
     pub fn execute(&mut self, cdb: &[u8], lun: u8) -> (ScsiExec, u8) {
@@ -837,6 +922,25 @@ enum ManualPhase {
     BusFree,
 }
 
+/// A timed target's schedule for one command (drive mechanics).
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+struct TxnTiming {
+    /// When each 512-byte block of the data-in payload is in the drive's
+    /// buffer; a single entry covers a whole non-media payload (INQUIRY,
+    /// MODE SENSE, sense data).
+    ready: Vec<u64>,
+    /// The earliest the status phase may follow (the command overhead or a
+    /// seek, for a command with no media transfer).
+    status_at: u64,
+    /// A media write is in progress: write blocks go to the mechanics as
+    /// they arrive.
+    writing: bool,
+    /// When the current data phase began, and the bytes it has moved, for
+    /// the SCSI bus rate.
+    phase_start: u64,
+    moved: u64,
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Transaction {
     target_id: u8,
@@ -850,6 +954,9 @@ struct Transaction {
     dir: Option<DmaDir>,
     /// Target status byte; for data-out commands resolved at commit time.
     status: u8,
+    /// A timed target's schedule; `None` for an instant target.
+    #[serde(default)]
+    timing: Option<TxnTiming>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -875,6 +982,10 @@ pub struct Wd33c93 {
     /// Target id selected by a manual Select command.
     manual_target: Option<u8>,
     activity: bool,
+    /// A timed target has the data-in phase pending until its first block
+    /// is in the drive's buffer.
+    #[serde(default)]
+    deferred_data: bool,
 }
 
 impl Default for Wd33c93 {
@@ -899,6 +1010,7 @@ impl Wd33c93 {
             manual: None,
             manual_target: None,
             activity: false,
+            deferred_data: false,
         }
     }
 
@@ -991,9 +1103,185 @@ impl Wd33c93 {
     }
 
     /// Colour clocks until the chip next changes state on its own, for the
-    /// emulator's idle fast-forward.
+    /// emulator's idle fast-forward: a delayed interrupt coming due, a timed
+    /// target's data arriving. Only reported with a timed target on the
+    /// bus, so an untimed bus naps exactly as it always has.
     pub fn next_event_cck(&self) -> Option<u32> {
-        None
+        if !self
+            .targets
+            .iter()
+            .flatten()
+            .any(|t| t.mechanics().is_some())
+        {
+            return None;
+        }
+        let mut next: Option<u64> = None;
+        let mut consider = |cck: u64| next = Some(next.map_or(cck, |n| n.min(cck)));
+        if !self.asr_int {
+            if let Some(&(_, delay)) = self.pending.front() {
+                consider(u64::from(delay));
+            }
+        }
+        if let Some(txn) = self.xfer.as_ref() {
+            if let (Some(timing), Some(now)) = (txn.timing.as_ref(), self.target_now(txn.target_id))
+            {
+                if self.deferred_data {
+                    if let Some(due) = self.first_ready(txn) {
+                        consider(due.saturating_sub(now));
+                    }
+                }
+                let active = self.dma_dir.is_some() || self.pio_dir.is_some();
+                if active {
+                    if let Some(due) = timing.ready.iter().copied().find(|&t| t > now) {
+                        consider(due - now);
+                    }
+                    if let Some(mech) = self.targets[usize::from(txn.target_id)]
+                        .as_ref()
+                        .and_then(ScsiTarget::mechanics)
+                    {
+                        let due = timing.phase_start + mech.bus_time_for(timing.moved + 2);
+                        if due > now {
+                            consider(due - now);
+                        }
+                    }
+                }
+            }
+        }
+        next.map(|cck| u32::try_from(cck).unwrap_or(u32::MAX).max(1))
+    }
+
+    /// The device clock of target `id`, when it is a timed disk.
+    fn target_now(&self, id: u8) -> Option<u64> {
+        self.targets
+            .get(usize::from(id))?
+            .as_ref()?
+            .mechanics()
+            .map(|m| m.now())
+    }
+
+    fn target_mechanics(
+        &mut self,
+        id: u8,
+    ) -> Option<&mut crate::harddrive::mechanics::DriveMechanics> {
+        self.targets
+            .get_mut(usize::from(id))?
+            .as_mut()?
+            .mechanics_mut()
+    }
+
+    /// Plan a timed target's command: when its data-in blocks are in the
+    /// buffer, when its status may follow, or that a media write began.
+    fn plan_timing(
+        &mut self,
+        id: u8,
+        cdb: &[u8],
+        exec: &ScsiExec,
+        status: u8,
+    ) -> Option<TxnTiming> {
+        let mechanics = self.target_mechanics(id)?;
+        let mut timing = TxnTiming::default();
+        let overhead_only = |mechanics: &mut crate::harddrive::mechanics::DriveMechanics,
+                             timing: &mut TxnTiming| {
+            timing.status_at = mechanics.overhead();
+            timing.ready = vec![timing.status_at];
+        };
+        if status != GOOD {
+            overhead_only(mechanics, &mut timing);
+            return Some(timing);
+        }
+        match (media_access(cdb), exec) {
+            (Some(MediaAccess::Read { lba, .. }), ScsiExec::DataIn(data)) if !data.is_empty() => {
+                let blocks = data.len().div_ceil(SECTOR_SIZE) as u32;
+                timing.ready = mechanics.read(lba, blocks);
+            }
+            (Some(MediaAccess::Write { lba }), ScsiExec::DataOut(expected)) if *expected > 0 => {
+                mechanics.begin_write(lba);
+                timing.writing = true;
+            }
+            (Some(MediaAccess::Seek { lba }), _) => {
+                timing.status_at = mechanics.seek_to(lba);
+                timing.ready = vec![timing.status_at];
+            }
+            _ => overhead_only(mechanics, &mut timing),
+        }
+        if crate::envcfg::flag("COPPERLINE_DIAG_HDTIMING") {
+            log::info!(
+                "hdtiming scsi id {id}: cdb {:02X?} status {status:#04X} at {}: \
+                 data ready {:?}, status at {}, writing {}",
+                cdb,
+                mechanics.now(),
+                timing.ready.first(),
+                timing.status_at,
+                timing.writing
+            );
+        }
+        Some(timing)
+    }
+
+    /// When the next data-in byte the host needs is in the drive's buffer.
+    fn first_ready(&self, txn: &Transaction) -> Option<u64> {
+        let timing = txn.timing.as_ref()?;
+        let index = if timing.ready.len() == 1 {
+            0
+        } else {
+            (txn.offset / SECTOR_SIZE).min(timing.ready.len().saturating_sub(1))
+        };
+        timing.ready.get(index).copied()
+    }
+
+    /// Cap a data phase's `remaining` bytes to what a timed target can move
+    /// now: the data-in blocks already in its buffer and the SCSI bus rate.
+    /// The cap always ends on a word boundary of the phase (until the data's
+    /// own end), since the DMAC moves words: a word it has started is
+    /// always finished.
+    fn paced(&self, remaining: usize, txn: &Transaction) -> usize {
+        let Some(timing) = txn.timing.as_ref() else {
+            return remaining;
+        };
+        let Some(mechanics) = self.targets[usize::from(txn.target_id)]
+            .as_ref()
+            .and_then(ScsiTarget::mechanics)
+        else {
+            return remaining;
+        };
+        let now = mechanics.now();
+        let mut available = remaining;
+        if txn.dir == Some(DmaDir::In) {
+            let ready_blocks = timing.ready.partition_point(|&t| t <= now);
+            let ready_bytes = if ready_blocks >= timing.ready.len() {
+                txn.data.len()
+            } else {
+                (ready_blocks * SECTOR_SIZE).min(txn.data.len())
+            };
+            available = available.min(ready_bytes.saturating_sub(txn.offset));
+        }
+        let bus = mechanics
+            .bus_bytes_between(timing.phase_start, now)
+            .saturating_sub(timing.moved);
+        available = available.min(usize::try_from(bus).unwrap_or(usize::MAX));
+        if available < remaining {
+            let moved = usize::try_from(timing.moved).unwrap_or(usize::MAX);
+            available = (moved.saturating_add(available) & !1).saturating_sub(moved);
+        }
+        available
+    }
+
+    /// Colour clocks until a timed command's status may follow.
+    fn status_wait(&self, txn: &Transaction) -> u32 {
+        let (Some(timing), Some(now)) = (txn.timing.as_ref(), self.target_now(txn.target_id))
+        else {
+            return 0;
+        };
+        u32::try_from(timing.status_at.saturating_sub(now)).unwrap_or(u32::MAX)
+    }
+
+    /// Colour clocks until the data a timed target owes next is ready (for
+    /// delaying the REQ that starts a manual data-in phase).
+    fn data_wait(&self, txn: &Transaction) -> u32 {
+        let (Some(due), Some(now)) = (self.first_ready(txn), self.target_now(txn.target_id)) else {
+            return 0;
+        };
+        u32::try_from(due.saturating_sub(now)).unwrap_or(u32::MAX)
     }
 
     /// Hardware reset (board /RST or system reset): clear chip state but
@@ -1009,6 +1297,7 @@ impl Wd33c93 {
         self.pio_dir = None;
         self.manual = None;
         self.manual_target = None;
+        self.deferred_data = false;
     }
 
     pub fn take_activity(&mut self) -> bool {
@@ -1034,10 +1323,28 @@ impl Wd33c93 {
         if self.busy {
             v |= ASR_BSY | ASR_CIP;
         }
-        if self.pio_dir.is_some() {
+        if self.pio_ready() {
             v |= ASR_DBR;
         }
         v
+    }
+
+    /// Whether the data register has a byte for the host (data-in) or room
+    /// for one (data-out); a timed target's data-in byte must have reached
+    /// its buffer first.
+    fn pio_ready(&self) -> bool {
+        match (self.pio_dir, self.xfer.as_ref()) {
+            (Some(DmaDir::In), Some(txn)) => {
+                let remaining = txn
+                    .data
+                    .len()
+                    .saturating_sub(txn.offset)
+                    .min(self.tc().max(1) as usize);
+                remaining == 0 || self.paced(remaining, txn) > 0
+            }
+            (Some(_), _) => true,
+            (None, _) => false,
+        }
     }
 
     fn incr_sasr(&mut self) {
@@ -1121,6 +1428,20 @@ impl Wd33c93 {
     /// Advance emulated time: deliver the next queued interrupt cause once
     /// its delay has elapsed (and the previous one has been acknowledged).
     pub fn tick(&mut self, cck: u32) {
+        for target in self.targets.iter_mut().flatten() {
+            if let Some(mechanics) = target.mechanics_mut() {
+                mechanics.advance(cck);
+            }
+        }
+        if self.deferred_data {
+            let due = self
+                .xfer
+                .as_ref()
+                .and_then(|t| Some((self.first_ready(t)?, self.target_now(t.target_id)?)));
+            if due.is_none_or(|(due, now)| due <= now) {
+                self.start_data_phase();
+            }
+        }
         if self.asr_int {
             return;
         }
@@ -1259,6 +1580,7 @@ impl Wd33c93 {
         let len = cdb_len(self.regs[usize::from(WD_CDB_1)]);
         let cdb: Vec<u8> = self.regs[usize::from(WD_CDB_1)..usize::from(WD_CDB_1) + len].to_vec();
         let (exec, status) = self.targets[id].as_mut().unwrap().execute(&cdb, lun);
+        let timing = self.plan_timing(id as u8, &cdb, &exec, status);
         let mut txn = Transaction {
             target_id: id as u8,
             cdb,
@@ -1267,6 +1589,7 @@ impl Wd33c93 {
             out_expected: 0,
             dir: None,
             status,
+            timing,
         };
         match exec {
             ScsiExec::DataIn(data) if !data.is_empty() => {
@@ -1301,6 +1624,30 @@ impl Wd33c93 {
             self.finish_to_status();
             return;
         };
+        // A timed target asserts REQ for data-in only once its first block
+        // is in its buffer; until then the command is still in progress.
+        if dir == DmaDir::In {
+            let waiting = self
+                .xfer
+                .as_ref()
+                .and_then(|t| Some((self.first_ready(t)?, self.target_now(t.target_id)?)));
+            if let Some((due, now)) = waiting {
+                if due > now {
+                    self.deferred_data = true;
+                    self.busy = true;
+                    return;
+                }
+            }
+        }
+        self.deferred_data = false;
+        if let Some(txn) = self.xfer.as_ref() {
+            if let Some(now) = self.target_now(txn.target_id) {
+                if let Some(timing) = self.xfer.as_mut().and_then(|t| t.timing.as_mut()) {
+                    timing.phase_start = now;
+                    timing.moved = 0;
+                }
+            }
+        }
         self.regs[usize::from(WD_COMMAND_PHASE)] = 0x45;
         if self.dma_mode() {
             self.dma_dir = Some(dir);
@@ -1315,10 +1662,13 @@ impl Wd33c93 {
     fn finish_to_status(&mut self) {
         self.dma_dir = None;
         self.pio_dir = None;
+        self.deferred_data = false;
         let Some(txn) = self.xfer.take() else {
             return;
         };
+        let wait = self.status_wait(&txn);
         let (status, extra_delay) = self.commit_status(txn);
+        let extra_delay = extra_delay.saturating_add(wait);
         self.regs[usize::from(WD_TARGET_LUN)] = status;
         self.regs[usize::from(WD_COMMAND_PHASE)] = 0x60;
         // `disk.fault.set {..., action: "delay"}` adds its accumulated
@@ -1348,7 +1698,24 @@ impl Wd33c93 {
             data.resize(txn.out_expected, 0);
             if let Some(target) = self.targets[id].as_mut() {
                 let status = target.complete_out(&txn.cdb, &data);
-                return (status, target.take_delay_cck());
+                let mut extra = target.take_delay_cck();
+                // A timed write: status follows once the media has the
+                // data, or at once from a write cache (the mechanism stays
+                // busy flushing either way).
+                if txn.timing.as_ref().is_some_and(|t| t.writing) {
+                    if let Some(mechanics) = target.mechanics_mut() {
+                        let now = mechanics.now();
+                        let on_media = mechanics.end_write();
+                        let done = if mechanics.write_cache() {
+                            now
+                        } else {
+                            on_media
+                        };
+                        let wait = u32::try_from(done.saturating_sub(now)).unwrap_or(u32::MAX);
+                        extra = extra.saturating_add(wait);
+                    }
+                }
+                return (status, extra);
             }
         }
         (txn.status, 0)
@@ -1376,8 +1743,8 @@ impl Wd33c93 {
     pub fn dma_remaining(&self) -> usize {
         let tc = self.tc() as usize;
         match (self.dma_dir, self.xfer.as_ref()) {
-            (Some(DmaDir::In), Some(t)) => tc.min(t.data.len() - t.offset),
-            (Some(DmaDir::Out), Some(t)) => tc.min(t.out_expected - t.data.len()),
+            (Some(DmaDir::In), Some(t)) => self.paced(tc.min(t.data.len() - t.offset), t),
+            (Some(DmaDir::Out), Some(t)) => self.paced(tc.min(t.out_expected - t.data.len()), t),
             _ => 0,
         }
     }
@@ -1388,6 +1755,9 @@ impl Wd33c93 {
         };
         let b = txn.data.get(txn.offset).copied().unwrap_or(0);
         txn.offset += 1;
+        if let Some(timing) = txn.timing.as_mut() {
+            timing.moved += 1;
+        }
         self.dec_tc();
         self.activity = true;
         self.check_data_phase_end();
@@ -1398,11 +1768,28 @@ impl Wd33c93 {
         let Some(txn) = self.xfer.as_mut() else {
             return;
         };
+        let mut handover = false;
         if txn.data.len() < txn.out_expected {
             txn.data.push(b);
+            handover = txn.data.len() % SECTOR_SIZE == 0;
+        }
+        let id = txn.target_id;
+        if let Some(timing) = txn.timing.as_mut() {
+            timing.moved += 1;
+            handover &= timing.writing;
+        } else {
+            handover = false;
         }
         self.dec_tc();
         self.activity = true;
+        // A timed drive takes each whole block into its buffer as it
+        // arrives and writes it to the media as the platter comes round.
+        if handover {
+            if let Some(mechanics) = self.target_mechanics(id) {
+                let now = mechanics.now();
+                mechanics.write_sectors(1, now);
+            }
+        }
         self.check_data_phase_end();
     }
 
@@ -1456,7 +1843,7 @@ impl Wd33c93 {
     // ----- PIO data register --------------------------------------------------------
 
     fn pio_read_byte(&mut self) -> u8 {
-        if self.pio_dir != Some(DmaDir::In) {
+        if self.pio_dir != Some(DmaDir::In) || !self.pio_ready() {
             return self.regs[usize::from(WD_DATA)];
         }
         self.dma_in_byte()
@@ -1504,6 +1891,7 @@ impl Wd33c93 {
                     out_expected: 1,
                     dir: Some(DmaDir::Out),
                     status: GOOD,
+                    timing: None,
                 });
                 self.arm_manual_data(DmaDir::Out);
             }
@@ -1517,6 +1905,7 @@ impl Wd33c93 {
                     out_expected: count,
                     dir: Some(DmaDir::Out),
                     status: GOOD,
+                    timing: None,
                 });
                 self.arm_manual_data(DmaDir::Out);
             }
@@ -1536,6 +1925,7 @@ impl Wd33c93 {
                     out_expected: 0,
                     dir: Some(DmaDir::In),
                     status,
+                    timing: None,
                 });
                 self.arm_manual_data(DmaDir::In);
             }
@@ -1549,6 +1939,7 @@ impl Wd33c93 {
                     out_expected: 0,
                     dir: Some(DmaDir::In),
                     status: GOOD,
+                    timing: None,
                 });
                 self.arm_manual_data(DmaDir::In);
             }
@@ -1591,6 +1982,7 @@ impl Wd33c93 {
                 let lun = self.regs[usize::from(WD_TARGET_LUN)] & 7;
                 if let Some(target) = self.targets[id].as_mut() {
                     let (exec, status) = target.execute(&txn.data, lun);
+                    let timing = self.plan_timing(txn.target_id, &txn.data, &exec, status);
                     let mut next = Transaction {
                         target_id: txn.target_id,
                         cdb: txn.data.clone(),
@@ -1599,6 +1991,7 @@ impl Wd33c93 {
                         out_expected: 0,
                         dir: None,
                         status,
+                        timing,
                     };
                     let csr = match exec {
                         ScsiExec::DataIn(data) if !data.is_empty() => {
@@ -1624,8 +2017,17 @@ impl Wd33c93 {
                         } else {
                             0x46
                         };
+                    // A timed target requests the data-in phase once it has
+                    // the data, and the status phase once its command
+                    // overhead (or seek) is over; data-out goes at once into
+                    // its buffer.
+                    let wait = match next.dir {
+                        Some(DmaDir::In) => self.data_wait(&next),
+                        Some(DmaDir::Out) => 0,
+                        None => self.status_wait(&next),
+                    };
                     self.xfer = Some(next);
-                    self.post(csr, CMD_DELAY_CCK);
+                    self.post(csr, CMD_DELAY_CCK.saturating_add(wait));
                 }
             }
             ManualPhase::Data => {
@@ -1639,6 +2041,7 @@ impl Wd33c93 {
                     out_expected: 0,
                     dir: None,
                     status,
+                    timing: None,
                 });
                 self.manual = Some(ManualPhase::Status);
                 self.regs[usize::from(WD_COMMAND_PHASE)] = 0x46;
@@ -2240,6 +2643,199 @@ mod tests {
         assert_eq!(rd_reg(&mut wd, WD_TARGET_LUN), GOOD);
         run_until_int(&mut wd);
         assert_eq!(rd_reg(&mut wd, WD_SCSI_STATUS), CSR_DISC);
+        std::fs::remove_file(&path).ok();
+    }
+
+    // ----- timed targets (period mechanics) -------------------------------
+
+    const PAL_CCK_HZ: u32 = 3_546_895;
+
+    fn timed_chip(sectors: u64, profile: &str) -> (Wd33c93, PathBuf) {
+        let path = temp_image(sectors);
+        (timed_chip_on(&path, profile), path)
+    }
+
+    fn timed_chip_on(path: &std::path::Path, profile: &str) -> Wd33c93 {
+        let profile = crate::harddrive::profiles::builtin_profile(profile).unwrap();
+        let disk = ScsiDisk::open(path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap();
+        let target = ScsiTarget::from(disk).with_mechanics(|total| {
+            Some(crate::harddrive::mechanics::DriveMechanics::new(
+                &profile, total, PAL_CCK_HZ, false,
+            ))
+        });
+        let mut wd = Wd33c93::new();
+        wd.attach_target(0, target);
+        wd
+    }
+
+    /// Issue a DMA-mode Select-and-Transfer and act as the DMAC, pumping
+    /// whatever the chip offers each tick a word at a time exactly as the
+    /// A2091 and SDMAC front-ends do (the second byte only if the chip still
+    /// offers one, a pad byte otherwise). Returns the data-in bytes, the
+    /// CSR, the colour clocks until the first byte moved and until the
+    /// completion interrupt, and every per-tick DMA amount in bytes.
+    fn timed_dma_command(
+        wd: &mut Wd33c93,
+        cdb: &[u8],
+        tc: u32,
+        data_out: Option<&[u8]>,
+    ) -> (Vec<u8>, u8, u64, u64, Vec<usize>) {
+        wr_reg(wd, WD_CONTROL, 0x80); // DMA mode
+        wr_reg(wd, WD_DESTINATION_ID, 0);
+        wr_reg(wd, WD_TARGET_LUN, 0);
+        set_cdb(wd, cdb);
+        set_tc(wd, tc);
+        wr_reg(wd, WD_COMMAND, 0x08);
+        let (mut data, mut out_pos, mut elapsed, mut first) = (Vec::new(), 0usize, 0u64, None);
+        let mut chunks = Vec::new();
+        while !wd.int_asserted() {
+            wd.tick(64);
+            elapsed += 64;
+            assert!(
+                elapsed < 10 * u64::from(PAL_CCK_HZ),
+                "command never finished"
+            );
+            let mut moved = 0;
+            while let Some(dir) = wd.dma_request() {
+                if wd.dma_remaining() == 0 {
+                    break;
+                }
+                let second = |wd: &Wd33c93| wd.dma_request().is_some() && wd.dma_remaining() > 0;
+                match dir {
+                    DmaDir::In => {
+                        data.push(wd.dma_in_byte());
+                        moved += 1;
+                        if second(wd) {
+                            data.push(wd.dma_in_byte());
+                            moved += 1;
+                        } else {
+                            data.push(0); // the DMAC's pad byte
+                        }
+                    }
+                    DmaDir::Out => {
+                        let out = data_out.expect("data-out payload");
+                        wd.dma_out_byte(out[out_pos]);
+                        out_pos += 1;
+                        moved += 1;
+                        if second(wd) {
+                            wd.dma_out_byte(out[out_pos]);
+                            out_pos += 1;
+                            moved += 1;
+                        }
+                    }
+                }
+            }
+            if moved > 0 {
+                first.get_or_insert(elapsed);
+                chunks.push(moved);
+            }
+        }
+        let csr = rd_reg(wd, WD_SCSI_STATUS);
+        (data, csr, first.unwrap_or(elapsed), elapsed, chunks)
+    }
+
+    #[test]
+    fn timed_read_waits_for_the_media_then_paces_the_dma() {
+        let path = temp_image(82_029);
+        let mut image = std::fs::read(&path).unwrap();
+        for (i, b) in image[70_000 * SECTOR_SIZE..70_016 * SECTOR_SIZE]
+            .iter_mut()
+            .enumerate()
+        {
+            *b = (i % 253) as u8;
+        }
+        std::fs::write(&path, &image).unwrap();
+        let mut wd = timed_chip_on(&path, "quantum-prodrive-40s");
+        let cdb = [0x28, 0, 0, 1, 0x11, 0x70, 0, 0, 16, 0]; // READ(10) lba 70000 x16
+        let (data, csr, first, done, chunks) =
+            timed_dma_command(&mut wd, &cdb, 16 * SECTOR_SIZE as u32, None);
+        assert_eq!(csr, CSR_SEL_XFER_DONE);
+        assert_eq!(data, image[70_000 * SECTOR_SIZE..70_016 * SECTOR_SIZE]);
+        // A long seek and the rotational wait come before the first byte.
+        assert!(
+            first > u64::from(PAL_CCK_HZ) / 200,
+            "first byte after {first} cck"
+        );
+        // 16 sectors at the ProDrive's 875-1094 KB/s take several ms more.
+        assert!(
+            done - first > u64::from(PAL_CCK_HZ) / 200,
+            "data took {} cck",
+            done - first
+        );
+        // Whole words every time but the last.
+        assert!(
+            chunks[..chunks.len() - 1].iter().all(|n| n % 2 == 0),
+            "{chunks:?}"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn timed_inquiry_waits_for_the_command_overhead() {
+        let (mut wd, path) = timed_chip(2048, "seagate-st125n");
+        let (data, csr, first, _, _) =
+            timed_dma_command(&mut wd, &[0x12, 0, 0, 0, 36, 0], 36, None);
+        assert_eq!(csr, CSR_SEL_XFER_DONE);
+        assert_eq!(data.len(), 36);
+        // The ST125N's 2 ms overhead.
+        assert!(
+            first >= u64::from(PAL_CCK_HZ) * 2 / 1000,
+            "first byte after {first} cck"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn timed_write_reports_status_when_the_media_has_it() {
+        let (mut wd, path) = timed_chip(2048, "seagate-st125n");
+        let payload = vec![0x5Au8; 4 * SECTOR_SIZE];
+        let cdb = [0x2A, 0, 0, 0, 0x02, 0, 0, 0, 4, 0]; // WRITE(10) lba 512 x4
+        let (_, csr, _, done, _) =
+            timed_dma_command(&mut wd, &cdb, payload.len() as u32, Some(&payload));
+        assert_eq!(csr, CSR_SEL_XFER_DONE);
+        assert_eq!(rd_reg(&mut wd, WD_TARGET_LUN), GOOD);
+        // Overhead, a seek on a stepper drive and four sectors of media.
+        assert!(
+            done > u64::from(PAL_CCK_HZ) / 100,
+            "status after {done} cck"
+        );
+        let image = std::fs::read(&path).unwrap();
+        assert!(image[512 * SECTOR_SIZE..516 * SECTOR_SIZE]
+            .iter()
+            .all(|&b| b == 0x5A));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn timed_pio_holds_dbr_until_the_data_is_ready() {
+        let (mut wd, path) = timed_chip(2048, "seagate-st125n");
+        wr_reg(&mut wd, WD_CONTROL, 0x00); // PIO
+        wr_reg(&mut wd, WD_DESTINATION_ID, 0);
+        set_cdb(&mut wd, &[0x12, 0, 0, 0, 36, 0]);
+        set_tc(&mut wd, 36);
+        wr_reg(&mut wd, WD_COMMAND, 0x08);
+        assert_eq!(
+            wd.read_aux_status() & ASR_DBR,
+            0,
+            "no data before the overhead"
+        );
+        assert!(wd.read_aux_status() & ASR_BSY != 0);
+        assert!(wd.next_event_cck().is_some());
+        let mut waited = 0;
+        while wd.read_aux_status() & ASR_DBR == 0 {
+            wd.tick(64);
+            waited += 64;
+            assert!(waited < u64::from(PAL_CCK_HZ), "DBR never rose");
+        }
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn untimed_targets_report_no_events() {
+        let (mut wd, path) = chip_with_disk(64);
+        set_cdb(&mut wd, &[0x12, 0, 0, 0, 36, 0]);
+        wr_reg(&mut wd, WD_COMMAND, 0x08);
+        assert!(wd.next_event_cck().is_none());
         std::fs::remove_file(&path).ok();
     }
 }
