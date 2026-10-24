@@ -11,27 +11,27 @@ use super::{
     copy_present_frame, copy_tv_aperture_to_window, copy_window_present_frame,
     cursor_position_in_texture, draw_seven_segment_digit, draw_status_bar, fdd_counter_readout,
     fdd_track_counter_rect, fdd_track_digit_rect, host_shortcut_modifier_pressed,
-    host_to_amiga_rawkey, joystick_toggle_rect, kbdpanel, keyboard_toggle_rect, led_row_rect,
-    mask_present_frame_to_tv, paint_test_screen, parse_amiga_key, pause_button_rect,
-    plan_present_scaling_for, power_button_rect, present_height, presentation_pixels_equal,
-    presentation_source_y_offset, raw_device_qualifier_family_held, raw_device_qualifier_rawkey,
-    rawkey_is_held, rawkey_transition_is_duplicate, reboot_button_rect,
-    repeated_main_key_should_drop, rgba, short_status_error, shorten_status_paths,
-    shot_button_rect, should_render_emulated_frame, standard_window_top_row,
-    status_with_latched_fdd_track, take_integral_mouse_delta, texture_height, texture_width,
-    tint_display_rows, tint_lut, tint_rows_in_place, track_counter_digit_rect,
-    track_counter_layout, tv_aperture_source_row, tv_centre_source_offset, tv_source_h_bounds,
-    volume_mute_hit_rect, volume_percent_from_pos, volume_slider_knob_rect,
-    volume_slider_track_rect, BarControl, DriveBar, JoystickInputMode, MediaBar, PresentationLatch,
-    StatusBarView, ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT, AMIGA_RAWKEY_LEFT_SHIFT,
-    AMIGA_RAWKEY_RIGHT_ALT, AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH, BUTTON_GLYPH_DISABLED, CD_BODY,
-    CD_LED_OFF, CD_LED_ON, CD_TRACK_SEGMENT_OFF, CD_TRACK_SEGMENT_ON, DISK_BODY, DISK_BODY_SHADOW,
-    DISK_LABEL, FDD_LED_OFF, FDD_LED_ON, HDD_LED_OFF, HDD_LED_ON, POWER_GLYPH_OFF, POWER_GLYPH_ON,
-    POWER_LED_BRIGHT, POWER_LED_DIM, POWER_LED_OFF, STANDARD_PAL_VISIBLE_LINES,
-    STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG, TRACK_SEGMENT_OFF, TRACK_SEGMENT_ON,
-    TUBE_NTSC_PRESENT_HEIGHT, TUBE_PAL_PRESENT_HEIGHT, TV_CAPTURED_SOURCE_X, TV_CAPTURED_WIDTH,
-    TV_LIVE_PAD_X, TV_NTSC_PRESENT_HEIGHT, TV_PAL_PRESENT_HEIGHT, TV_PRESENT_SOURCE_Y, VOLUME_FILL,
-    VOLUME_GLYPH_X,
+    host_to_amiga_rawkey, joystick_toggle_rect, kbdpanel, key_event_is_focus_gain_replay,
+    keyboard_toggle_rect, led_row_rect, mask_present_frame_to_tv, paint_test_screen,
+    parse_amiga_key, pause_button_rect, plan_present_scaling_for, power_button_rect,
+    present_height, presentation_pixels_equal, presentation_source_y_offset,
+    raw_device_qualifier_family_held, raw_device_qualifier_rawkey, rawkey_is_held,
+    rawkey_transition_is_duplicate, reboot_button_rect, repeated_main_key_should_drop, rgba,
+    short_status_error, shorten_status_paths, shot_button_rect, should_render_emulated_frame,
+    standard_window_top_row, status_with_latched_fdd_track, take_integral_mouse_delta,
+    texture_height, texture_width, tint_display_rows, tint_lut, tint_rows_in_place,
+    track_counter_digit_rect, track_counter_layout, tv_aperture_source_row,
+    tv_centre_source_offset, tv_source_h_bounds, volume_mute_hit_rect, volume_percent_from_pos,
+    volume_slider_knob_rect, volume_slider_track_rect, BarControl, DriveBar, JoystickInputMode,
+    MediaBar, PresentationLatch, StatusBarView, ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT,
+    AMIGA_RAWKEY_LEFT_SHIFT, AMIGA_RAWKEY_RIGHT_ALT, AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH,
+    BUTTON_GLYPH_DISABLED, CD_BODY, CD_LED_OFF, CD_LED_ON, CD_TRACK_SEGMENT_OFF,
+    CD_TRACK_SEGMENT_ON, DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL, FDD_LED_OFF, FDD_LED_ON,
+    HDD_LED_OFF, HDD_LED_ON, POWER_GLYPH_OFF, POWER_GLYPH_ON, POWER_LED_BRIGHT, POWER_LED_DIM,
+    POWER_LED_OFF, STANDARD_PAL_VISIBLE_LINES, STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG,
+    TRACK_SEGMENT_OFF, TRACK_SEGMENT_ON, TUBE_NTSC_PRESENT_HEIGHT, TUBE_PAL_PRESENT_HEIGHT,
+    TV_CAPTURED_SOURCE_X, TV_CAPTURED_WIDTH, TV_LIVE_PAD_X, TV_NTSC_PRESENT_HEIGHT,
+    TV_PAL_PRESENT_HEIGHT, TV_PRESENT_SOURCE_Y, VOLUME_FILL, VOLUME_GLYPH_X,
 };
 use crate::audio::{AudioSink, NullSink};
 use crate::bus::{FrontPanelStatus, RenderRegisterSnapshot};
@@ -143,6 +143,40 @@ fn host_repeat_filter_accepts_unheld_amiga_qualifier_press() {
         true,
         true
     ));
+}
+
+#[test]
+fn focus_gain_replayed_presses_are_dropped_and_focus_loss_releases_kept() {
+    // Issue #817: switching to the window by keyboard (Alt+Tab, i3's
+    // Mod+N) had winit replay the shortcut's keys as synthetic presses
+    // whose releases the window manager kept, leaving the Amiga holding
+    // and repeating them.
+    assert!(key_event_is_focus_gain_replay(ElementState::Pressed, true));
+    assert!(!key_event_is_focus_gain_replay(
+        ElementState::Released,
+        true
+    ));
+    assert!(!key_event_is_focus_gain_replay(
+        ElementState::Pressed,
+        false
+    ));
+    assert!(!key_event_is_focus_gain_replay(
+        ElementState::Released,
+        false
+    ));
+
+    // With the replayed press dropped, a real release of the same key
+    // that does reach the window afterwards tells the keyboard nothing.
+    let mut app = test_app();
+    app.main_window_focused = true;
+    app.input_recorder = Some(crate::inputrec::InputRecorder::new(0.0));
+    let rawkey = host_to_amiga_rawkey(KeyCode::Digit2).expect("Digit2 has an Amiga key");
+    app.handle_live_amiga_key_event(rawkey, false);
+    assert!(!app.amiga_rawkey_held(rawkey));
+    assert_eq!(
+        app.input_recorder.as_ref().map(|rec| rec.events_recorded()),
+        Some(0)
+    );
 }
 
 #[test]
