@@ -907,7 +907,9 @@ impl PresentLayout {
             let b = f64::from(d0) + ((start + len) as f64 / s - src0 as f64) * k;
             let lo = a.floor().max(f64::from(d0)) as u32;
             let hi = b.ceil().min(f64::from(d0 + dlen)) as u32;
-            (hi > lo).then_some((lo, hi - lo))
+            // Lazily: for a box wholly off this side of the display the
+            // clamps cross, and `hi - lo` would underflow.
+            (hi > lo).then(|| (lo, hi - lo))
         };
         let (x, w) = span(rect.x, rect.w, sx, kx, dx, dw)?;
         let (y, h) = span(rect.y, rect.h, sy, ky, dy, dh)?;
