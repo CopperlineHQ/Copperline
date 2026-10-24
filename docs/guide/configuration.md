@@ -896,7 +896,9 @@ are resampled there. Only when the window is too small for even a 1:1 copy
 fall back to the smooth fit rather than cropping to what fits. RTG board
 modes follow the setting too: their frame is scaled from its own native
 resolution, so a 640x480 board screen is drawn at 1x, 2x, 3x of *those*
-pixels inside the display area.
+pixels inside the display area. The performance readout, the on-screen
+messages and the recording badge sit at the corners of that picture, and
+it keeps its size and place while a menu or panel is open over it.
 
 Integer scaling draws from the unresampled canvas (one host row per woven
 scanline, matching `pixel_aspect = "square"`). Under the default TV aspect,
