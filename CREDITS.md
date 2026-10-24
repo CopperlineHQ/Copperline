@@ -16,6 +16,7 @@ Code contributions from (the full list is on
 - Volker Schwaberow
 - Matt Harlum
 - Tinic Uro
+- Seppo Tomperi
 
 ## Patreon sponsors
 

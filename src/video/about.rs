@@ -35,6 +35,7 @@ const CONTRIBUTORS: &[&str] = &[
     "Volker Schwaberow",
     "Matt Harlum",
     "Tinic Uro",
+    "Seppo Tomperi",
 ];
 const PATREON_SPONSORS: &[&str] = &["Lee Hobson", "Sphair"];
 
