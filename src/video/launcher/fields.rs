@@ -468,6 +468,9 @@ pub enum LauncherField {
     // rather than crowding the Storage tab's own 12 rows.
     LideBoard,
     LideRom,
+    // Period hard-drive mechanics, on the Emulation page.
+    DriveTiming,
+    DriveSpinUp,
     LideRomBank2,
     LideDrive0,
     LideDrive1,
@@ -1253,8 +1256,12 @@ pub(super) const AUDIO_ROWS: [Row; 7] = [
     // folder (`crate::paths::floppy_sounds_dir`).
     row(F::FloppySoundSet, "Floppy sound set", Cycle),
 ];
+// The last two rows are the period mechanics every `[ide]`, `[scsi]` and
+// `[lide]` hard disk is timed with (written as each section's `timing`) and
+// whether timed drives spin up at power-on: machine behaviour like the warp
+// rows, kept here because the Storage page's twelve rows are spoken for.
 #[cfg(not(feature = "game-library"))]
-pub(super) const EMULATION_ROWS: [Row; 7] = [
+pub(super) const EMULATION_ROWS: [Row; 9] = [
     row(F::PowerOn, "Power on startup", Cycle),
     row(F::AutoLaunch, "Run on startup", Cycle),
     row(F::RealtimePriority, "Realtime priority", Cycle),
@@ -1262,9 +1269,11 @@ pub(super) const EMULATION_ROWS: [Row; 7] = [
     row(F::Warp, "Warp speed", Cycle),
     row(F::WarpBoot, "Warp boot", Cycle),
     row(F::WarpBootIdle, "Warp boot idle", Cycle),
+    row(F::DriveTiming, "Hard drive timing", Cycle),
+    row(F::DriveSpinUp, "Drive spin-up", Cycle),
 ];
 #[cfg(feature = "game-library")]
-pub(super) const EMULATION_ROWS: [Row; 8] = [
+pub(super) const EMULATION_ROWS: [Row; 10] = [
     row(F::PowerOn, "Power on startup", Cycle),
     row(F::AutoLaunch, "Run on startup", Cycle),
     row(F::RealtimePriority, "Realtime priority", Cycle),
@@ -1272,6 +1281,8 @@ pub(super) const EMULATION_ROWS: [Row; 8] = [
     row(F::Warp, "Warp speed", Cycle),
     row(F::WarpBoot, "Warp boot", Cycle),
     row(F::WarpBootIdle, "Warp boot idle", Cycle),
+    row(F::DriveTiming, "Hard drive timing", Cycle),
+    row(F::DriveSpinUp, "Drive spin-up", Cycle),
     // Off, the strip loses its WHDLoad entry and the pages behind it stop
     // doing anything at all -- no database read, no cover worker, no scan.
     row(F::WhdloadEnabled, "WHDLoad", Cycle),

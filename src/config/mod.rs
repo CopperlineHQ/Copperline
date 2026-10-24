@@ -288,6 +288,9 @@ pub struct Config {
     /// autoconfigs on the chain like the SCSI/lide boards. See
     /// `crate::sf2000sd` for the register protocol.
     pub sf2000sd: Sf2000SdConfig,
+    /// `[[drive_profile]]`: user-defined drive mechanisms, found by `timing`
+    /// before the built-in profiles of the same id.
+    pub drive_profiles: Vec<crate::harddrive::mechanics::DriveProfile>,
     /// A2065 Ethernet board (`[a2065]`): when set, an A2065 NIC autoconfigs on
     /// the Zorro chain using the named host network backend. Networking is
     /// non-deterministic, so a fitted A2065 breaks byte-identical replay.
@@ -1276,6 +1279,9 @@ pub struct DriveImage {
     /// 1.3's ROM has no FFS handler built in, so OFS is the choice for a
     /// directory mount meant to work under 1.3 with no guest-side setup.
     pub filesystem: crate::diskimage::FileSystem,
+    /// This drive's own `timing`, overriding its section's; `None` takes
+    /// the section's.
+    pub timing: Option<DriveTiming>,
 }
 
 impl Default for DriveImage {
@@ -1285,8 +1291,58 @@ impl Default for DriveImage {
             volume_name: None,
             boot_pri: HARDFILE_DEFAULT_BOOT_PRI,
             filesystem: crate::diskimage::FileSystem::FFS,
+            timing: None,
         }
     }
+}
+
+/// How a hard drive's mechanism is timed (`timing` on `[ide]`, `[scsi]`,
+/// `[lide]` and their drive entries; `--hd-timing`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum DriveTiming {
+    /// Transfers complete within the access that starts them (the default).
+    #[default]
+    Instant,
+    /// The drive the machine shipped with on this interface
+    /// (`crate::harddrive::profiles::period_profile_id`).
+    Period,
+    /// A named drive profile: a `[[drive_profile]]` or a built-in.
+    Profile(String),
+}
+
+impl DriveTiming {
+    /// Parse a `timing` value. Profile ids are checked against the known
+    /// profiles separately, once the `[[drive_profile]]` tables are read.
+    pub fn parse(value: &str) -> Result<Self> {
+        let value = value.trim();
+        Ok(match value.to_ascii_lowercase().as_str() {
+            "instant" | "off" | "none" => DriveTiming::Instant,
+            "period" => DriveTiming::Period,
+            "" => bail!("timing must not be empty (\"instant\", \"period\", or a profile id)"),
+            id => DriveTiming::Profile(id.to_string()),
+        })
+    }
+
+    /// The value as `timing` writes it.
+    pub fn config_value(&self) -> &str {
+        match self {
+            DriveTiming::Instant => "instant",
+            DriveTiming::Period => "period",
+            DriveTiming::Profile(id) => id,
+        }
+    }
+}
+
+/// A hard-drive slot on one of the period drive interfaces, for resolving
+/// its `timing`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DriveSlot {
+    /// `[ide]` master (0) or slave (1).
+    Ide(usize),
+    /// `[scsi]` unit 0-6.
+    Scsi(usize),
+    /// `[lide]` drive 0-3.
+    Lide(usize),
 }
 
 /// Priority a synthesized hard-disk partition boots at when the config says
@@ -1323,6 +1379,10 @@ pub fn is_cd_image_path(path: &std::path::Path) -> bool {
 pub struct IdeConfig {
     pub master: Option<DriveImage>,
     pub slave: Option<DriveImage>,
+    /// Drive mechanics for the drives that name none of their own.
+    pub timing: DriveTiming,
+    /// Model the power-on spin-up of timed drives.
+    pub spin_up: bool,
 }
 
 /// The card `[pcmcia]` puts in the A600/A1200 slot.
@@ -1427,6 +1487,10 @@ pub struct ScsiConfig {
     pub rom_odd: Option<PathBuf>,
     /// Drive images by SCSI ID (0-6; ID 7 is the controller).
     pub units: [Option<DriveImage>; 7],
+    /// Drive mechanics for the disk units that name none of their own.
+    pub timing: DriveTiming,
+    /// Model the power-on spin-up of timed drives.
+    pub spin_up: bool,
 }
 
 impl ScsiConfig {
@@ -1507,6 +1571,10 @@ pub struct LideConfig {
     /// Drive images, in (channel, master/slave) order: 0-1 are channel 0's,
     /// 2-3 are channel 1's (RIPPLE only).
     pub drives: [Option<DriveImage>; 4],
+    /// Drive mechanics for the disks that name none of their own.
+    pub timing: DriveTiming,
+    /// Model the power-on spin-up of timed drives.
+    pub spin_up: bool,
 }
 
 /// `[recording]`: GIF clip settings.
@@ -2853,6 +2921,7 @@ impl Default for Config {
             copperhf: CopperhfConfig::default(),
             lide: LideConfig::default(),
             sf2000sd: Sf2000SdConfig::default(),
+            drive_profiles: Vec::new(),
             a2065_net: None,
             toccata: false,
             clipboard_share: None,
@@ -2905,6 +2974,101 @@ impl Default for Config {
 }
 
 impl Config {
+    /// The drive interface a slot hangs off, for `timing = "period"`.
+    pub fn drive_bus(&self, slot: DriveSlot) -> crate::harddrive::profiles::DriveBus {
+        use crate::harddrive::profiles::DriveBus;
+        match slot {
+            DriveSlot::Ide(_) if self.gate_array.gayle_id().is_some() => DriveBus::Gayle,
+            DriveSlot::Ide(_) => DriveBus::A4000Ide,
+            DriveSlot::Lide(_) => DriveBus::Lide,
+            DriveSlot::Scsi(_) => match self.scsi.controller {
+                ScsiController::A2091 => DriveBus::A2091,
+                ScsiController::A4091 => DriveBus::A4091,
+                ScsiController::A3000 => DriveBus::A3000Scsi,
+            },
+        }
+    }
+
+    /// The `timing` that applies to a slot: the drive's own, else its
+    /// section's.
+    pub fn drive_timing(&self, slot: DriveSlot) -> &DriveTiming {
+        let (section, drive) = match slot {
+            DriveSlot::Ide(0) => (&self.ide.timing, self.ide.master.as_ref()),
+            DriveSlot::Ide(_) => (&self.ide.timing, self.ide.slave.as_ref()),
+            DriveSlot::Scsi(unit) => (
+                &self.scsi.timing,
+                self.scsi.units.get(unit).and_then(Option::as_ref),
+            ),
+            DriveSlot::Lide(index) => (
+                &self.lide.timing,
+                self.lide.drives.get(index).and_then(Option::as_ref),
+            ),
+        };
+        drive.and_then(|d| d.timing.as_ref()).unwrap_or(section)
+    }
+
+    /// The mechanism a drive in `slot` runs with, or `None` for an instant
+    /// drive. A host disk attached to the slot takes the section's timing.
+    pub fn drive_profile(
+        &self,
+        slot: DriveSlot,
+    ) -> Option<crate::harddrive::mechanics::DriveProfile> {
+        let id = match self.drive_timing(slot) {
+            DriveTiming::Instant => return None,
+            DriveTiming::Period => {
+                crate::harddrive::profiles::period_profile_id(self.drive_bus(slot), self.machine)
+            }
+            DriveTiming::Profile(id) => id.as_str(),
+        };
+        self.find_drive_profile(id)
+    }
+
+    /// A drive profile by id: `[[drive_profile]]` first, then the built-ins.
+    pub fn find_drive_profile(
+        &self,
+        id: &str,
+    ) -> Option<crate::harddrive::mechanics::DriveProfile> {
+        self.drive_profiles
+            .iter()
+            .find(|p| p.id.eq_ignore_ascii_case(id))
+            .cloned()
+            .or_else(|| crate::harddrive::profiles::builtin_profile(&id.to_ascii_lowercase()))
+    }
+
+    /// Whether timed drives in `slot` model their power-on spin-up.
+    pub fn drive_spin_up(&self, slot: DriveSlot) -> bool {
+        match slot {
+            DriveSlot::Ide(_) => self.ide.spin_up,
+            DriveSlot::Scsi(_) => self.scsi.spin_up,
+            DriveSlot::Lide(_) => self.lide.spin_up,
+        }
+    }
+
+    /// Colour clocks per second for the machine's video standard: the clock
+    /// drive mechanics count in.
+    pub fn colour_clock_hz(&self) -> u32 {
+        match self.video_standard {
+            VideoStandard::Pal => 3_546_895,
+            VideoStandard::Ntsc => 3_579_545,
+        }
+    }
+
+    /// The mechanics for a drive in `slot` behind an image of
+    /// `total_sectors`, or `None` for an instant drive.
+    pub fn drive_mechanics(
+        &self,
+        slot: DriveSlot,
+        total_sectors: u64,
+    ) -> Option<crate::harddrive::mechanics::DriveMechanics> {
+        let profile = self.drive_profile(slot)?;
+        Some(crate::harddrive::mechanics::DriveMechanics::new(
+            &profile,
+            total_sectors,
+            self.colour_clock_hz(),
+            self.drive_spin_up(slot),
+        ))
+    }
+
     /// Settle host clipboard sharing for a session about to build a
     /// machine: on only where the configuration asked for it, off
     /// everywhere else, and off under netplay even when asked.
@@ -3117,6 +3281,9 @@ pub struct ConfigOverrides {
     /// `[memory] accelerator`.
     pub accelerator: Option<String>,
     pub floppy_drives: Option<u8>,
+    /// Hard-drive mechanics on every drive interface (`--hd-timing`): sets
+    /// the `timing` of `[ide]`, `[scsi]` and `[lide]`.
+    pub hd_timing: Option<String>,
     /// Drive speed override (`--floppy-speed`): a percentage (100/200/400/
     /// 800) or 0 for turbo. Same values as `[floppy] speed`.
     pub floppy_speed: Option<u16>,
@@ -3280,6 +3447,7 @@ impl ConfigOverrides {
             && self.motherboard.is_none()
             && self.accelerator.is_none()
             && self.floppy_drives.is_none()
+            && self.hd_timing.is_none()
             && self.floppy_speed.is_none()
             && self.floppy_bridge.iter().all(Option::is_none)
             && self.floppy_bridge_port.iter().all(Option::is_none)
@@ -3381,6 +3549,11 @@ impl ConfigOverrides {
         }
         if let Some(drives) = self.floppy_drives {
             raw.floppy.drives = Some(drives);
+        }
+        if let Some(timing) = &self.hd_timing {
+            raw.ide.timing = Some(timing.clone());
+            raw.scsi.timing = Some(timing.clone());
+            raw.lide.timing = Some(timing.clone());
         }
         if let Some(speed) = self.floppy_speed {
             raw.floppy.speed = Some(speed);

@@ -58,6 +58,7 @@ pub(super) fn prepare_sources(cfg: &mut Config) -> Result<()> {
             volume_name: Some(mount.volume),
             boot_pri: mount.boot_pri,
             filesystem: crate::diskimage::FileSystem::OFS,
+            timing: None,
         };
         if prepared.gate_array.gayle_id().is_some() || prepared.ide_a4000 {
             if prepared.ide.master.is_none() {
@@ -121,6 +122,14 @@ struct Hardware {
     scsi: Option<String>,
     lide: Option<String>,
     cartridge: Option<String>,
+    /// Each timed hard-disk slot's drive mechanism, resolved on the host,
+    /// so every peer times its drives alike. Absent from a bundle made by
+    /// a build without drive timing.
+    #[serde(default)]
+    drive_timing: Vec<(Kind, crate::harddrive::mechanics::DriveProfile)>,
+    /// `spin_up` of `[ide]`, `[scsi]` and `[lide]`.
+    #[serde(default)]
+    spin_up: [bool; 3],
 }
 
 impl Hardware {
@@ -216,6 +225,10 @@ impl Hardware {
                 .then(|| format!("{:?}", cfg.scsi.controller)),
             lide: cfg.lide.enabled().then(|| cfg.lide.board.name().to_owned()),
             cartridge: cfg.cartridge.model.map(|m| format!("{m:?}")),
+            drive_timing: hard_disk_slots(cfg)
+                .filter_map(|(kind, slot)| Some((kind, cfg.drive_profile(slot)?)))
+                .collect(),
+            spin_up: [cfg.ide.spin_up, cfg.scsi.spin_up, cfg.lide.spin_up],
         }
     }
 
@@ -574,6 +587,7 @@ impl Bundle {
 
     pub fn stage(&self) -> Result<Staged> {
         let mut cfg = self.manifest.hardware.config()?;
+        [cfg.ide.spin_up, cfg.scsi.spin_up, cfg.lide.spin_up] = self.manifest.hardware.spin_up;
         let directory = tempfile::Builder::new()
             .prefix("copperline-netplay-")
             .tempdir()?;
@@ -608,11 +622,32 @@ impl Bundle {
                     cfg.cartridge.rom = Some(path);
                 }
                 Kind::Ide(n) | Kind::Scsi(n) | Kind::Lide(n) => {
+                    // The host's drive mechanism for this slot, pinned by id
+                    // with the profile itself carried along, so a profile
+                    // this peer does not have (or has differently) cannot
+                    // make the two machines diverge.
+                    let timing = self
+                        .manifest
+                        .hardware
+                        .drive_timing
+                        .iter()
+                        .find(|(kind, _)| *kind == info.kind)
+                        .map(|(_, profile)| {
+                            profile
+                                .validate()
+                                .map_err(|e| anyhow::anyhow!("netplay drive profile: {e}"))?;
+                            cfg.drive_profiles.retain(|p| p.id != profile.id);
+                            cfg.drive_profiles.push(profile.clone());
+                            Ok::<_, anyhow::Error>(DriveTiming::Profile(profile.id.clone()))
+                        })
+                        .transpose()?
+                        .or(Some(DriveTiming::Instant));
                     let drive = Some(DriveImage {
                         path,
                         volume_name: None,
                         boot_pri: HARDFILE_DEFAULT_BOOT_PRI,
                         filesystem: crate::diskimage::FileSystem::FFS,
+                        timing,
                     });
                     match info.kind {
                         Kind::Ide(0) => cfg.ide.master = drive,
@@ -650,6 +685,31 @@ impl Bundle {
             directory,
         })
     }
+}
+
+/// The configured hard-disk slots on the period drive interfaces, by bundle
+/// kind.
+fn hard_disk_slots(cfg: &Config) -> impl Iterator<Item = (Kind, DriveSlot)> + '_ {
+    let ide = [&cfg.ide.master, &cfg.ide.slave]
+        .into_iter()
+        .enumerate()
+        .filter(|(_, d)| d.is_some())
+        .map(|(n, _)| (Kind::Ide(n as u8), DriveSlot::Ide(n)));
+    let scsi = cfg
+        .scsi
+        .units
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| d.is_some())
+        .map(|(n, _)| (Kind::Scsi(n as u8), DriveSlot::Scsi(n)));
+    let lide = cfg
+        .lide
+        .drives
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| d.is_some())
+        .map(|(n, _)| (Kind::Lide(n as u8), DriveSlot::Lide(n)));
+    ide.chain(scsi).chain(lide)
 }
 
 fn read_limited(path: &Path, limit: usize) -> Result<Vec<u8>> {

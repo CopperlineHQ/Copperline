@@ -9,8 +9,12 @@
 //! registers differ, so the front-ends keep those and hand every register access
 //! to [`AtaBus`].
 //!
-//! Transfers complete within the access that triggers them: a command reads or
-//! writes its sectors immediately and BSY is never observable.
+//! An untimed drive (the default) completes a transfer within the access
+//! that triggers it: a command reads or writes its sectors immediately and
+//! BSY is never observable. A drive given period mechanics
+//! ([`crate::harddrive::mechanics`]) holds BSY while it seeks, waits for
+//! the platter and reads or writes the media, and presents each DRQ block
+//! and its completion interrupt at the colour clock the mechanism allows.
 
 use crate::harddrive::{HardDriveImage, RDB_HEADS, RDB_SPT};
 use std::path::Path;
@@ -20,9 +24,7 @@ pub use crate::harddrive::SECTOR_SIZE;
 /// word 47 and accept from SET MULTIPLE.
 pub const MAX_MULTIPLE: u8 = 16;
 
-// ATA status bits. BSY is defined for completeness: transfers complete
-// within the access in this model, so it is never observable.
-#[allow(dead_code)]
+// ATA status bits. BSY is only ever observable on a drive with mechanics.
 pub(crate) const ST_BSY: u8 = 0x80;
 pub(crate) const ST_DRDY: u8 = 0x40;
 pub(crate) const ST_DSC: u8 = 0x10;
@@ -136,6 +138,33 @@ enum Transfer {
     },
 }
 
+/// What a timed drive does when its pending step comes due.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum PendingStep {
+    /// Read the next `chunk` sectors from the image and offer them (DRQ,
+    /// INTRQ).
+    ReadBlock { chunk: u32 },
+    /// Offer the already-prepared buffer (IDENTIFY).
+    DataReady,
+    /// The buffer has room: take the next `chunk` write sectors (DRQ,
+    /// INTRQ).
+    WriteBlock { chunk: u32 },
+    /// The buffer has room for a WRITE's first block: DRQ without an
+    /// interrupt, as PIO data-out offers its first block.
+    FirstWriteBlock { chunk: u32 },
+    /// The command is done (INTRQ).
+    Complete,
+}
+
+/// A timed drive's next step and the device-clock time it fires at. BSY is
+/// set until then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct Pending {
+    due: u64,
+    slot: usize,
+    step: PendingStep,
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct IdeDrive {
     /// The sector store (shared with the SCSI targets): HDF file,
@@ -149,9 +178,24 @@ pub struct IdeDrive {
     heads: u8,
     spt: u8,
     multiple: u8,
+    /// Period drive mechanics; `None` completes transfers instantly.
+    #[serde(default)]
+    mechanics: Option<Box<crate::harddrive::mechanics::DriveMechanics>>,
 }
 
 impl IdeDrive {
+    /// Give the drive period mechanics (or take them away).
+    pub fn set_mechanics(
+        &mut self,
+        mechanics: Option<crate::harddrive::mechanics::DriveMechanics>,
+    ) {
+        self.mechanics = mechanics.map(Box::new);
+    }
+
+    pub fn mechanics(&self) -> Option<&crate::harddrive::mechanics::DriveMechanics> {
+        self.mechanics.as_deref()
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn materialize_host_disk(&mut self) -> anyhow::Result<()> {
         self.disk.materialize_host_disk()
@@ -206,6 +250,7 @@ impl IdeDrive {
             heads,
             spt,
             multiple: 0,
+            mechanics: None,
         }
     }
 
@@ -238,6 +283,7 @@ impl IdeDrive {
             heads,
             spt,
             multiple: 0,
+            mechanics: None,
         })
     }
 
@@ -317,6 +363,20 @@ impl IdeDrive {
 pub enum AtaDevice {
     Disk(IdeDrive),
     Atapi(AtapiDrive),
+}
+
+impl AtaDevice {
+    /// Give a hard disk period mechanics built for its image size; an
+    /// ATAPI drive has no spindle model here and is left as it is.
+    pub fn with_mechanics(
+        mut self,
+        build: impl FnOnce(u64) -> Option<crate::harddrive::mechanics::DriveMechanics>,
+    ) -> Self {
+        if let AtaDevice::Disk(drive) = &mut self {
+            drive.set_mechanics(build(drive.disk.total_sectors()));
+        }
+        self
+    }
 }
 
 impl From<IdeDrive> for AtaDevice {
@@ -436,6 +496,15 @@ pub struct AtaBus {
     /// Set whenever the drive does real work (command issued or data port
     /// moved during a transfer); drained by the bus for the HDD LED.
     activity: bool,
+    /// A timed drive's next step (drive mechanics); BSY until it fires.
+    #[serde(default)]
+    pending: Option<Pending>,
+    /// Device-clock ready times of the current timed READ's sectors, and
+    /// how many of them have been offered to the host.
+    #[serde(default)]
+    read_ready: Vec<u64>,
+    #[serde(default)]
+    read_next: usize,
 }
 
 impl Default for AtaBus {
@@ -464,6 +533,9 @@ impl AtaBus {
             transfer: Transfer::None,
             packet_byte_limit: 0,
             activity: false,
+            pending: None,
+            read_ready: Vec::new(),
+            read_next: 0,
         }
     }
 
@@ -537,16 +609,35 @@ impl AtaBus {
         })
     }
 
-    /// Advance every ATAPI drive on this cable (master and slave alike),
-    /// not just [`Self::first_atapi_mut`]'s single disc-swap target -- a
-    /// second CD-ROM's own pending-swap countdown or CD-DA playback needs
-    /// its own tick just as much as the first's.
-    pub fn tick_atapi(&mut self, cck: u32, cd_audio: &mut crate::chipset::paula::CdAudioRing) {
+    /// Advance every drive on this cable (master and slave alike): ATAPI
+    /// drives run their disc-swap countdowns and CD-DA playback -- a second
+    /// CD-ROM needs its own tick just as much as
+    /// [`Self::first_atapi_mut`]'s disc-swap target -- and timed hard disks
+    /// advance their mechanics, firing a pending step that came due.
+    pub fn tick(&mut self, cck: u32, cd_audio: &mut crate::chipset::paula::CdAudioRing) {
         for drive in self.drives.iter_mut().flatten() {
-            if let AtaDevice::Atapi(drive) = drive {
-                drive.cdrom.tick(cck, cd_audio);
+            match drive {
+                AtaDevice::Atapi(drive) => drive.cdrom.tick(cck, cd_audio),
+                AtaDevice::Disk(drive) => {
+                    if let Some(mechanics) = drive.mechanics.as_mut() {
+                        mechanics.advance(cck);
+                    }
+                }
             }
         }
+        self.fire_pending();
+    }
+
+    /// Colour clocks until a timed drive's pending step fires, for the
+    /// emulator's idle fast-forward.
+    pub fn next_event_cck(&self) -> Option<u32> {
+        let pending = self.pending?;
+        let now = self.slot_now(pending.slot).unwrap_or(pending.due);
+        Some(
+            u32::try_from(pending.due.saturating_sub(now))
+                .unwrap_or(u32::MAX)
+                .max(1),
+        )
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -609,7 +700,9 @@ impl AtaBus {
     /// Drain the activity latch set by command issue and data-port traffic.
     /// The bus polls this after each access to time the HDD LED.
     pub fn take_activity(&mut self) -> bool {
-        std::mem::take(&mut self.activity)
+        // A timed drive is busy for the whole seek and transfer, not just
+        // while the host moves words.
+        std::mem::take(&mut self.activity) || self.pending.is_some()
     }
 
     /// The INTRQ line as the host sees it: masked by the control block's
@@ -647,6 +740,103 @@ impl AtaBus {
 
     fn pair_present(&self) -> bool {
         self.drives[1 - self.selected().min(1)].is_some()
+    }
+
+    /// The status register as the host reads it: a timed drive still
+    /// spinning up from power-on holds BSY alone, as a real drive does
+    /// until it is ready.
+    fn visible_status(&mut self) -> u8 {
+        if self.mechanics().is_some_and(|m| m.spinning_up()) {
+            return ST_BSY;
+        }
+        self.status
+    }
+
+    /// The selected drive's mechanics, when it is a timed hard disk.
+    fn mechanics(&mut self) -> Option<&mut crate::harddrive::mechanics::DriveMechanics> {
+        self.drive()?.mechanics.as_deref_mut()
+    }
+
+    /// The device clock of the drive in `slot`, when it is timed.
+    fn slot_now(&self, slot: usize) -> Option<u64> {
+        match self.drives.get(slot)? {
+            Some(AtaDevice::Disk(drive)) => drive.mechanics.as_ref().map(|m| m.now()),
+            _ => None,
+        }
+    }
+
+    /// Run `step` for the selected drive at `due`: at once if that time has
+    /// already come, otherwise with BSY held until it does.
+    fn schedule(&mut self, due: u64, step: PendingStep) {
+        let slot = self.selected();
+        let now = self.slot_now(slot).unwrap_or(due);
+        if due <= now {
+            self.run_step(step);
+        } else {
+            self.status = ST_BSY | ST_DRDY;
+            self.pending = Some(Pending { due, slot, step });
+        }
+    }
+
+    fn fire_pending(&mut self) {
+        while let Some(pending) = self.pending {
+            if self
+                .slot_now(pending.slot)
+                .is_some_and(|now| now < pending.due)
+            {
+                return;
+            }
+            self.pending = None;
+            self.run_step(pending.step);
+        }
+    }
+
+    fn run_step(&mut self, step: PendingStep) {
+        match step {
+            PendingStep::ReadBlock { chunk } => {
+                if self.fill_read_buffer(chunk).is_ok() {
+                    self.read_next += chunk as usize;
+                    self.status = ST_DRDY | ST_DSC | ST_DRQ;
+                    self.raise_irq();
+                }
+            }
+            PendingStep::DataReady => {
+                self.status = ST_DRDY | ST_DSC | ST_DRQ;
+                self.raise_irq();
+            }
+            PendingStep::WriteBlock { chunk } => {
+                self.buf.clear();
+                self.buf.resize(chunk as usize * SECTOR_SIZE, 0);
+                self.buf_pos = 0;
+                self.status = ST_DRDY | ST_DSC | ST_DRQ;
+                self.raise_irq();
+            }
+            PendingStep::FirstWriteBlock { chunk } => {
+                self.buf.clear();
+                self.buf.resize(chunk as usize * SECTOR_SIZE, 0);
+                self.buf_pos = 0;
+                self.status = ST_DRDY | ST_DSC | ST_DRQ;
+            }
+            PendingStep::Complete => {
+                self.status = ST_DRDY | ST_DSC;
+                self.raise_irq();
+            }
+        }
+    }
+
+    /// Offer the next `chunk` sectors of a READ: when the timed drive has
+    /// them in its buffer, or at once on an untimed one.
+    fn offer_read_block(&mut self, chunk: u32) {
+        if self.mechanics().is_none() || self.read_ready.is_empty() {
+            if self.fill_read_buffer(chunk).is_ok() {
+                self.status = ST_DRDY | ST_DSC | ST_DRQ;
+                self.raise_irq();
+            }
+            return;
+        }
+        let last = (self.read_next + chunk as usize).min(self.read_ready.len()) - 1;
+        let due = self.read_ready[last.min(self.read_ready.len() - 1)];
+        self.schedule(due, PendingStep::ReadBlock { chunk });
     }
 
     fn raise_irq(&mut self) {
@@ -698,11 +888,11 @@ impl AtaBus {
             Some(IdeReg::CylHigh) => u32::from(self.cyl_high[self.selected()]),
             Some(IdeReg::DriveHead) => u32::from(self.drive_head),
             Some(IdeReg::StatusCommand) => {
-                let v = self.status;
+                let v = self.visible_status();
                 self.clear_irq();
                 u32::from(v)
             }
-            Some(IdeReg::AltStatusDevCtl) => u32::from(self.status),
+            Some(IdeReg::AltStatusDevCtl) => u32::from(self.visible_status()),
             None => 0,
         }
     }
@@ -750,6 +940,9 @@ impl AtaBus {
         self.transfer = Transfer::None;
         self.buf.clear();
         self.buf_pos = 0;
+        self.pending = None;
+        self.read_ready.clear();
+        self.read_next = 0;
         self.clear_irq();
         // A soft reset resets both devices on the cable, so both slots get
         // their signatures; a mixed disk+ATAPI bus probed by toggling
@@ -850,24 +1043,28 @@ impl AtaBus {
             return;
         }
         let chunk = remaining.min(block);
-        if self.fill_read_buffer(chunk).is_ok() {
-            self.transfer = Transfer::PioIn {
-                remaining: remaining - chunk,
-                block,
-            };
-            self.status = ST_DRDY | ST_DSC | ST_DRQ;
-            self.raise_irq();
-        }
+        self.transfer = Transfer::PioIn {
+            remaining: remaining - chunk,
+            block,
+        };
+        self.offer_read_block(chunk);
     }
 
     fn pio_out_block_filled(&mut self) {
         let Transfer::PioOut { remaining, block } = self.transfer.clone() else {
             return;
         };
+        let sectors = (self.buf.len() / SECTOR_SIZE) as u32;
         // Commit the buffered sectors at the current task-file position.
         if self.commit_write_buffer().is_err() {
             return;
         }
+        // A timed drive takes the block into its buffer now and writes it
+        // to the media as the platter comes round.
+        let committed = self.mechanics().map(|m| {
+            let now = m.now();
+            m.write_sectors(sectors, now)
+        });
         if remaining == 0 {
             if let Some(drive) = self.drive() {
                 if let Err(error) = drive.disk.flush() {
@@ -876,19 +1073,39 @@ impl AtaBus {
                     return;
                 }
             }
-            self.status = ST_DRDY | ST_DSC;
             self.transfer = Transfer::None;
-            self.raise_irq();
+            match committed {
+                Some(_) => {
+                    let mechanics = self.mechanics().expect("timed drive");
+                    let now = mechanics.now();
+                    let on_media = mechanics.end_write();
+                    let done = if mechanics.write_cache() {
+                        now
+                    } else {
+                        on_media
+                    };
+                    self.schedule(done, PendingStep::Complete);
+                }
+                None => {
+                    self.status = ST_DRDY | ST_DSC;
+                    self.raise_irq();
+                }
+            }
             return;
         }
         let chunk = remaining.min(block);
-        self.buf.clear();
-        self.buf.resize(chunk as usize * SECTOR_SIZE, 0);
-        self.buf_pos = 0;
         self.transfer = Transfer::PioOut {
             remaining: remaining - chunk,
             block,
         };
+        if committed.is_some() {
+            let room = self.mechanics().expect("timed drive").write_room_at(chunk);
+            self.schedule(room, PendingStep::WriteBlock { chunk });
+            return;
+        }
+        self.buf.clear();
+        self.buf.resize(chunk as usize * SECTOR_SIZE, 0);
+        self.buf_pos = 0;
         self.status = ST_DRDY | ST_DSC | ST_DRQ;
         self.raise_irq();
     }
@@ -1261,6 +1478,70 @@ impl AtaBus {
         Ok(())
     }
 
+    /// SEEK, IDLE / STANDBY (immediate or with a timer) and CHECK POWER MODE
+    /// on a timed drive.
+    fn power_or_seek_command(&mut self, cmd: u8) {
+        // The standby timer in the sector count: 1-240 in 5 s units,
+        // 241-251 in 30 min units, 0 disables it.
+        let timer_ms = match self.sector_count {
+            0 => None,
+            n @ 1..=240 => Some(u64::from(n) * 5000),
+            n @ 241..=251 => Some(u64::from(n - 240) * 30 * 60_000),
+            252 => Some(21 * 60_000),
+            255 => Some(21 * 60_000 + 15_000),
+            _ => Some(8 * 3_600_000),
+        };
+        let lba = self.current_lba();
+        let mechanics = self.mechanics().expect("timed drive");
+        let due = match cmd {
+            0x70 => match lba {
+                Some(lba) => mechanics.seek_to(lba),
+                None => {
+                    self.command_error(ERR_IDNF);
+                    return;
+                }
+            },
+            // STANDBY IMMEDIATE / STANDBY: the spindle stops now.
+            0xE0 | 0x94 | 0xE2 | 0x96 => {
+                if matches!(cmd, 0xE2 | 0x96) {
+                    mechanics.set_standby_timer(timer_ms);
+                }
+                let due = mechanics.overhead();
+                mechanics.enter_standby();
+                due
+            }
+            // IDLE IMMEDIATE / IDLE: spin up if stopped.
+            0xE1 | 0x95 | 0xE3 | 0x97 => {
+                if matches!(cmd, 0xE3 | 0x97) {
+                    mechanics.set_standby_timer(timer_ms);
+                }
+                mechanics.leave_standby().max(mechanics.overhead())
+            }
+            // CHECK POWER MODE: 0x00 in the sector count while stopped,
+            // 0xFF while spinning (active or idle).
+            _ => {
+                let stopped = mechanics.spun_down();
+                let due = mechanics.now();
+                self.sector_count = if stopped { 0x00 } else { 0xFF };
+                due
+            }
+        };
+        self.schedule(due, PendingStep::Complete);
+    }
+
+    /// Finish a command that needs neither spindle nor heads: after the
+    /// controller's overhead on a timed drive (a stopped drive is not
+    /// started for it), at once on an untimed one.
+    fn complete_after_overhead(&mut self) {
+        match self.mechanics().map(|m| m.controller_overhead()) {
+            Some(due) => self.schedule(due, PendingStep::Complete),
+            None => {
+                self.status = ST_DRDY | ST_DSC;
+                self.raise_irq();
+            }
+        }
+    }
+
     fn command_error(&mut self, error_bits: u8) {
         self.error = error_bits;
         self.status = ST_DRDY | ST_DSC | ST_ERR;
@@ -1285,6 +1566,11 @@ impl AtaBus {
                 self.sector_number,
                 self.sector_count
             );
+        }
+        if self.pending.is_some() || self.mechanics().is_some_and(|m| m.spinning_up()) {
+            // A drive ignores the command register while BSY is set.
+            log::debug!("ide: command {cmd:#04X} written while BSY; ignored");
+            return;
         }
         self.clear_irq();
         if self.drives[self.selected()].is_none() {
@@ -1319,8 +1605,13 @@ impl AtaBus {
                     remaining: 0,
                     block: 1,
                 };
-                self.status = ST_DRDY | ST_DSC | ST_DRQ;
-                self.raise_irq();
+                match self.mechanics().map(|m| m.controller_overhead()) {
+                    Some(due) => self.schedule(due, PendingStep::DataReady),
+                    None => {
+                        self.status = ST_DRDY | ST_DSC | ST_DRQ;
+                        self.raise_irq();
+                    }
+                }
             }
             // IDENTIFY PACKET DEVICE: the ATAPI counterpart of 0xEC, and
             // likewise aborts against the wrong device type.
@@ -1414,10 +1705,21 @@ impl AtaBus {
                     remaining: count - chunk,
                     block,
                 };
-                if self.fill_read_buffer(chunk).is_ok() {
-                    self.status = ST_DRDY | ST_DSC | ST_DRQ;
-                    self.raise_irq();
+                // A timed drive plans the whole command now: every sector's
+                // ready time, from which each DRQ block is offered. Sectors
+                // past the end of the disk are not planned; reaching them
+                // fails the command as on an untimed drive.
+                self.read_ready.clear();
+                self.read_next = 0;
+                let start = self.current_lba();
+                let total = self.drive().map(|d| d.disk.total_sectors()).unwrap_or(0);
+                if let (Some(lba), true) = (start, self.mechanics().is_some()) {
+                    if lba < total {
+                        let planned = u64::from(count).min(total - lba) as u32;
+                        self.read_ready = self.mechanics().expect("timed drive").read(lba, planned);
+                    }
                 }
+                self.offer_read_block(chunk);
             }
             // WRITE SECTORS (with/without retry) and WRITE MULTIPLE.
             0x30 | 0x31 | 0xC5 => {
@@ -1437,13 +1739,27 @@ impl AtaBus {
                 };
                 let chunk = count.min(block);
                 self.buf.clear();
-                self.buf.resize(chunk as usize * SECTOR_SIZE, 0);
                 self.buf_pos = 0;
                 self.transfer = Transfer::PioOut {
                     remaining: count - chunk,
                     block,
                 };
+                // A timed drive offers the first block once its buffer has
+                // room -- a write cache still flushing an earlier command can
+                // be holding it.
+                let lba = self.current_lba();
+                let room = self.mechanics().map(|mechanics| {
+                    if let Some(lba) = lba {
+                        mechanics.begin_write(lba);
+                    }
+                    mechanics.write_room_at(chunk)
+                });
+                if let Some(room) = room {
+                    self.schedule(room, PendingStep::FirstWriteBlock { chunk });
+                    return;
+                }
                 // First DRQ block is ready without an interrupt (ATA PIO out).
+                self.buf.resize(chunk as usize * SECTOR_SIZE, 0);
                 self.status = ST_DRDY | ST_DSC | ST_DRQ;
             }
             // SET MULTIPLE MODE
@@ -1457,8 +1773,7 @@ impl AtaBus {
                     requested <= MAX_MULTIPLE && (requested == 0 || requested.is_power_of_two());
                 if let (true, Some(drive)) = (ok, self.drive()) {
                     drive.multiple = requested;
-                    self.status = ST_DRDY | ST_DSC;
-                    self.raise_irq();
+                    self.complete_after_overhead();
                 } else {
                     self.command_error(ERR_ABRT);
                 }
@@ -1483,17 +1798,30 @@ impl AtaBus {
                     drive.cylinders =
                         (total / (u64::from(heads) * u64::from(spt)).max(1)).clamp(1, 65535) as u16;
                 }
-                self.status = ST_DRDY | ST_DSC;
-                self.raise_irq();
+                self.complete_after_overhead();
             }
-            // RECALIBRATE
+            // RECALIBRATE: a timed drive seeks back to cylinder 0.
             0x10..=0x1F => {
                 if self.selected_is_atapi() {
                     self.atapi_type_mismatch_abort();
                     return;
                 }
-                self.status = ST_DRDY | ST_DSC;
-                self.raise_irq();
+                match self.mechanics().map(|m| m.seek_to(0)) {
+                    Some(due) => self.schedule(due, PendingStep::Complete),
+                    None => {
+                        self.status = ST_DRDY | ST_DSC;
+                        self.raise_irq();
+                    }
+                }
+            }
+            // SEEK and the power-management commands, on a timed drive (an
+            // instant drive has no spindle or actuator to manage and keeps
+            // aborting them). The ATA-1 opcodes 0x94-0x98 are the older
+            // spellings of 0xE0-0xE5.
+            0x70 | 0xE0..=0xE3 | 0xE5 | 0x94..=0x98
+                if self.mechanics().is_some() && !self.selected_is_atapi() =>
+            {
+                self.power_or_seek_command(cmd);
             }
             // NOP: per ATA-2 always aborts.
             0x00 => self.command_error(ERR_ABRT),
@@ -1962,5 +2290,284 @@ mod tests {
 
         let _ = std::fs::remove_file(&path0);
         let _ = std::fs::remove_file(&path2);
+    }
+
+    // ----- timed drives (period mechanics) --------------------------------
+
+    const PAL_CCK_HZ: u32 = 3_546_895;
+
+    /// A bus with one hard disk of `sectors` timed as `profile` on the
+    /// master slot.
+    fn timed_bus(sectors: u64, profile: &str) -> (AtaBus, PathBuf) {
+        timed_bus_spin(sectors, profile, false)
+    }
+
+    fn timed_bus_spin(sectors: u64, profile: &str, spin_up: bool) -> (AtaBus, PathBuf) {
+        let profile = crate::harddrive::profiles::builtin_profile(profile).unwrap();
+        timed_bus_with(sectors, profile, spin_up)
+    }
+
+    fn timed_bus_with(
+        sectors: u64,
+        profile: crate::harddrive::mechanics::DriveProfile,
+        spin_up: bool,
+    ) -> (AtaBus, PathBuf) {
+        let path = temp_disk_image(sectors);
+        let drive = AtaDevice::from(
+            IdeDrive::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap(),
+        )
+        .with_mechanics(|total| {
+            Some(crate::harddrive::mechanics::DriveMechanics::new(
+                &profile, total, PAL_CCK_HZ, spin_up,
+            ))
+        });
+        let mut bus = AtaBus::new();
+        bus.attach_drive(0, drive);
+        bus.reset();
+        (bus, path)
+    }
+
+    fn issue(bus: &mut AtaBus, cmd: u8, lba: u32, count: u8) {
+        bus.write_reg(Some(IdeReg::SectorCount), 1, u32::from(count));
+        bus.write_reg(Some(IdeReg::SectorNumber), 1, lba & 0xFF);
+        bus.write_reg(Some(IdeReg::CylLow), 1, (lba >> 8) & 0xFF);
+        bus.write_reg(Some(IdeReg::CylHigh), 1, (lba >> 16) & 0xFF);
+        bus.write_reg(
+            Some(IdeReg::DriveHead),
+            1,
+            u32::from(DH_LBA) | ((lba >> 24) & 0x0F),
+        );
+        bus.write_reg(Some(IdeReg::StatusCommand), 1, u32::from(cmd));
+    }
+
+    /// Tick until BSY drops; returns the colour clocks it took.
+    fn run_until_ready(bus: &mut AtaBus) -> u64 {
+        let mut ring = crate::chipset::paula::CdAudioRing::default();
+        let mut waited = 0u64;
+        while bus.read_reg(Some(IdeReg::AltStatusDevCtl), 1) as u8 & ST_BSY != 0 {
+            bus.tick(100, &mut ring);
+            waited += 100;
+            assert!(
+                waited < 30 * u64::from(PAL_CCK_HZ),
+                "drive never became ready"
+            );
+        }
+        waited
+    }
+
+    fn drain_block(bus: &mut AtaBus) {
+        for _ in 0..SECTOR_SIZE / 2 {
+            bus.read_reg(Some(IdeReg::Data), 2);
+        }
+    }
+
+    #[test]
+    fn timed_read_holds_bsy_through_the_seek_then_raises_drq_and_intrq() {
+        let (mut bus, path) = timed_bus(125_096, "conner-cp2064");
+        issue(&mut bus, 0x20, 100_000, 1);
+        let status = bus.read_reg(Some(IdeReg::AltStatusDevCtl), 1) as u8;
+        assert_eq!(
+            status & (ST_BSY | ST_DRQ),
+            ST_BSY,
+            "BSY without DRQ while seeking"
+        );
+        assert!(!bus.irq_level());
+        assert!(bus.next_event_cck().is_some());
+        let waited = run_until_ready(&mut bus);
+        // Overhead + a long seek + latency: several milliseconds at least.
+        assert!(waited > u64::from(PAL_CCK_HZ) / 200, "only {waited} cck");
+        let status = bus.read_reg(Some(IdeReg::AltStatusDevCtl), 1) as u8;
+        assert_eq!(status & (ST_BSY | ST_DRQ), ST_DRQ);
+        assert!(bus.take_irq_edge());
+        drain_block(&mut bus);
+        assert_eq!(bus.status & (ST_BSY | ST_DRQ), 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn timed_read_offers_later_sectors_at_media_rate() {
+        let (mut bus, path) = timed_bus(125_096, "conner-cp2064");
+        issue(&mut bus, 0x20, 0, 40);
+        run_until_ready(&mut bus);
+        drain_block(&mut bus);
+        // Draining sector 1 at once finds sector 2 still on its way under
+        // the head: a sector of a 38-sector track at 3486 rpm is ~1600 cck.
+        let mut ticks = Vec::new();
+        for _ in 0..30 {
+            ticks.push(run_until_ready(&mut bus));
+            drain_block(&mut bus);
+        }
+        let total: u64 = ticks.iter().sum();
+        let per_sector = total as f64 / ticks.len() as f64;
+        assert!(
+            (1200.0..2200.0).contains(&per_sector),
+            "{per_sector} cck per sector"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn timed_write_completes_when_the_media_has_it() {
+        let (mut bus, path) = timed_bus(125_096, "conner-cp2064");
+        issue(&mut bus, 0x30, 50_000, 1);
+        // The first block is taken into the buffer at once.
+        assert_eq!(bus.status & (ST_BSY | ST_DRQ), ST_DRQ);
+        for _ in 0..SECTOR_SIZE / 2 {
+            bus.write_reg(Some(IdeReg::Data), 2, 0xA55A);
+        }
+        assert_eq!(bus.status & ST_BSY, ST_BSY, "writing to the media");
+        assert!(!bus.irq_level());
+        let waited = run_until_ready(&mut bus);
+        assert!(waited > 0);
+        assert!(bus.take_irq_edge());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_write_waits_for_room_a_cached_write_still_holds() {
+        let mut profile = crate::harddrive::profiles::builtin_profile("seagate-st9655ag").unwrap();
+        assert!(profile.write_cache);
+        profile.buffer_kib = 1; // two sectors
+        let (mut bus, path) = timed_bus_with(125_096, profile, false);
+        issue(&mut bus, 0x30, 50_000, 2);
+        for _ in 0..2 {
+            run_until_ready(&mut bus);
+            assert_eq!(bus.status & ST_DRQ, ST_DRQ);
+            for _ in 0..SECTOR_SIZE / 2 {
+                bus.write_reg(Some(IdeReg::Data), 2, 0xA55A);
+            }
+        }
+        // Write cache: done once both sectors are in the buffer.
+        run_until_ready(&mut bus);
+        assert!(bus.take_irq_edge());
+        bus.read_reg(Some(IdeReg::StatusCommand), 1);
+        bus.tick(1000, &mut crate::chipset::paula::CdAudioRing::default());
+        issue(&mut bus, 0x30, 50_002, 1);
+        assert_eq!(
+            bus.status & (ST_BSY | ST_DRQ),
+            ST_BSY,
+            "the buffer is still full of the last command's sectors"
+        );
+        let waited = run_until_ready(&mut bus);
+        assert!(waited > 1000, "DRQ after {waited} cck");
+        assert_eq!(bus.status & ST_DRQ, ST_DRQ);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_command_written_while_bsy_is_ignored() {
+        let (mut bus, path) = timed_bus(125_096, "conner-cp2064");
+        issue(&mut bus, 0x20, 90_000, 1);
+        let before = bus.pending;
+        issue(&mut bus, 0xEC, 0, 1);
+        assert_eq!(bus.pending, before);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn soft_reset_cancels_a_pending_step() {
+        let (mut bus, path) = timed_bus(125_096, "conner-cp2064");
+        issue(&mut bus, 0x20, 90_000, 1);
+        assert!(bus.pending.is_some());
+        bus.write_reg(Some(IdeReg::AltStatusDevCtl), 1, u32::from(CTL_SRST));
+        bus.write_reg(Some(IdeReg::AltStatusDevCtl), 1, 0);
+        assert!(bus.pending.is_none());
+        assert_eq!(bus.status & ST_BSY, 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn untimed_drive_still_completes_within_the_access() {
+        let path = temp_disk_image(64);
+        let mut bus = AtaBus::new();
+        bus.attach_drive(
+            0,
+            IdeDrive::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap(),
+        );
+        bus.reset();
+        issue(&mut bus, 0x20, 10, 1);
+        assert_eq!(bus.status & (ST_BSY | ST_DRQ), ST_DRQ);
+        assert!(bus.next_event_cck().is_none());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn timed_state_survives_a_save_state_round_trip() {
+        let (mut bus, path) = timed_bus(125_096, "conner-cp2064");
+        issue(&mut bus, 0x20, 70_000, 4);
+        let saved = bincode::serialize(&bus).unwrap();
+        let mut restored: AtaBus = bincode::deserialize(&saved).unwrap();
+        assert_eq!(restored.pending, bus.pending);
+        assert_eq!(run_until_ready(&mut restored), run_until_ready(&mut bus));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_spinning_up_drive_holds_bsy_and_ignores_commands() {
+        let (mut bus, path) = timed_bus_spin(125_096, "conner-cp2064", true);
+        assert_eq!(bus.read_reg(Some(IdeReg::StatusCommand), 1) as u8, ST_BSY);
+        issue(&mut bus, 0xEC, 0, 1);
+        assert!(bus.pending.is_none(), "IDENTIFY ignored while spinning up");
+        let waited = run_until_ready(&mut bus);
+        // The CP2064 takes 10 s to come up to speed.
+        assert!(
+            waited >= 10 * u64::from(PAL_CCK_HZ) - 100,
+            "ready after {waited} cck"
+        );
+        issue(&mut bus, 0xEC, 0, 1);
+        run_until_ready(&mut bus);
+        assert_eq!(bus.status & ST_DRQ, ST_DRQ);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn standby_check_power_mode_and_spin_up_on_access() {
+        let (mut bus, path) = timed_bus(125_096, "seagate-st9080a");
+        issue(&mut bus, 0xE5, 0, 0); // CHECK POWER MODE
+        run_until_ready(&mut bus);
+        assert_eq!(bus.read_reg(Some(IdeReg::SectorCount), 1), 0xFF, "spinning");
+        issue(&mut bus, 0xE0, 0, 0); // STANDBY IMMEDIATE
+        run_until_ready(&mut bus);
+        issue(&mut bus, 0xE5, 0, 0);
+        run_until_ready(&mut bus);
+        assert_eq!(bus.read_reg(Some(IdeReg::SectorCount), 1), 0x00, "stopped");
+        issue(&mut bus, 0x20, 1000, 1);
+        let waited = run_until_ready(&mut bus);
+        // The ST9080A's 2 s from standby to ready.
+        assert!(
+            waited >= 2 * u64::from(PAL_CCK_HZ),
+            "read after {waited} cck"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn seek_completes_after_the_actuator_settles() {
+        let (mut bus, path) = timed_bus(125_096, "conner-cp2064");
+        issue(&mut bus, 0x70, 120_000, 0);
+        assert_eq!(bus.status & ST_BSY, ST_BSY);
+        let waited = run_until_ready(&mut bus);
+        // A near full-stroke seek on a 40 ms drive.
+        assert!(
+            waited > u64::from(PAL_CCK_HZ) / 50,
+            "seek took {waited} cck"
+        );
+        assert!(bus.take_irq_edge());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn untimed_drives_still_abort_power_commands() {
+        let path = temp_disk_image(64);
+        let mut bus = AtaBus::new();
+        bus.attach_drive(
+            0,
+            IdeDrive::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap(),
+        );
+        bus.reset();
+        issue(&mut bus, 0xE0, 0, 0);
+        assert_eq!(bus.status & ST_ERR, ST_ERR);
+        assert_eq!(bus.error, ERR_ABRT);
+        let _ = std::fs::remove_file(path);
     }
 }

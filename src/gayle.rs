@@ -156,9 +156,17 @@ impl Gayle {
         self.ata.first_atapi_mut()
     }
 
-    /// Advance every ATAPI drive behind this port (master and slave alike).
-    pub fn tick_atapi(&mut self, cck: u32, cd_audio: &mut crate::chipset::paula::CdAudioRing) {
-        self.ata.tick_atapi(cck, cd_audio);
+    /// Advance every drive behind this port (master and slave alike). A
+    /// timed drive's step can raise INTRQ here rather than inside a
+    /// register access, so the edge is latched into `$DA9000` the same way.
+    pub fn tick_drives(&mut self, cck: u32, cd_audio: &mut crate::chipset::paula::CdAudioRing) {
+        self.ata.tick(cck, cd_audio);
+        self.latch_ide_irq();
+    }
+
+    /// Colour clocks until a timed drive's next step.
+    pub fn next_drive_event_cck(&self) -> Option<u32> {
+        self.ata.next_event_cck()
     }
 
     #[cfg(not(target_arch = "wasm32"))]

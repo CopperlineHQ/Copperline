@@ -420,6 +420,10 @@ impl crate::zorro_device::ZorroDevice for A2091 {
         })
     }
 
+    fn next_event_cck(&self) -> Option<u32> {
+        self.wd.next_event_cck()
+    }
+
     fn tick(&mut self, cck: u32, host: &mut crate::zorro_device::DeviceHost) {
         Self::tick(self, cck, host.memory_mut());
         if std::mem::take(&mut self.wrote_memory) {

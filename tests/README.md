@@ -146,6 +146,20 @@ need no local assets; the 1.3 and 3.1 cases use the same Kickstart lookup as the
 cargo test --release --test a2091_dma -- --ignored --nocapture
 ```
 
+`tests/hd_timing.rs` runs the committed `guest/hdbench/` benchmark (sequential
+reads at 512 B to 256 KiB, random 4 KiB reads, a 256 KiB write, all timed with
+the E-clock) through the machine's own disk driver on a private 16 MiB disk,
+and checks each drive profile's pace (`timing`, `docs/guide/configuration.md`
+"Drive timing"). The A2091 cases run under the bundled AROS ROM with no local
+assets and include a determinism rerun; the A1200 and A4000 IDE cases need
+`Kickstart v3.1 r40.68 (1993)(Commodore)(A1200)[!].rom` and
+`Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom`, and the A4000 one checks
+the Seagate ST3144A against the period ScsiSpeed figures.
+
+```sh
+cargo test --release --test hd_timing -- --ignored --nocapture
+```
+
 ### Open CD32 FMV ROM
 
 `tests/cd32_fmv_aros.rs` contains two Cannon Fodder paths. The AROS case uses
