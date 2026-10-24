@@ -322,7 +322,7 @@ serialport = { version = "4.9", default-features = false, optional = true }
 # Rust, so it builds for wasm32 browser targets like the rest of the core.
 # 0.3.5 is the floor: earlier releases decode zstd hunks with ruzstd < 0.9.1,
 # where a crafted hunk can allocate gigabytes (RUSTSEC-2026-0344).
-chd = "0.3.5"
+chd = "0.4.0"
 delharc = "0.8"
 zip = { version = "9.0.4", default-features = false, features = ["deflate"] }
 gif = "0.14"
