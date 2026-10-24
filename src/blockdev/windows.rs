@@ -1748,7 +1748,7 @@ mod tests {
         // A refusal it explained reaches the user in its own words.
         let refused = parse_answer_with(
             "error PhysicalDrive0 is the disk this computer runs from",
-            |raw| Ok::<usize, anyhow::Error>(raw),
+            Ok::<usize, anyhow::Error>,
         )
         .expect_err("a refusal is not a success");
         assert!(refused.to_string().contains("runs from"), "{refused}");
@@ -1765,7 +1765,7 @@ mod tests {
             "PhysicalDrive1 1a4",
         ] {
             assert!(
-                parse_answer_with(nonsense, |raw| Ok::<usize, anyhow::Error>(raw)).is_err(),
+                parse_answer_with(nonsense, Ok::<usize, anyhow::Error>).is_err(),
                 "{nonsense:?} must not become a handle"
             );
         }

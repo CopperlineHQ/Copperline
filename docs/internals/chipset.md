@@ -169,9 +169,9 @@ an overlay still resume, while new proven-disjoint blits save an empty one.
 Paula owns the interrupt system (INTENA/INTREQ, delivered through the
 modelled IPL-pin pipe and 68000 boundary sampling), serial, and audio.
 
-The IPL pipeline (`DEFAULT_IRQ_LATENCY_CCK`, 5 CCK) models the propagation
-delay from interrupt assertion through the level encoder to the CPU IPL
-pins (see [interrupt-recognition latency](timing.md#interrupt-recognition-latency)):
+The recognition pipeline (`DEFAULT_IRQ_LATENCY_CCK`, 6 CCK) is calibrated
+against the combined A500 board/CPU STOP path; it is not an isolated measurement
+of propagation to the CPU IPL pins (see [interrupt-recognition latency](timing.md#interrupt-recognition-latency)):
 
 - **Independent pipelines**: each interrupt source runs its own pipe
   (the per-bit `irq_latency_visible_at` deadlines in `src/bus.rs`), so
@@ -503,3 +503,48 @@ Deliberate non-goals, recorded so they are not re-investigated: A2024 /
 UHRES dual-scan display (a one-time "not emulated" warning is kept),
 genlock ZD output beyond register storage, and AGA "double CAS"
 memory-timing fidelity beyond what `timing-test/` measurements justify.
+
+### A500 single/dual playfield collision checks
+
+Paired A500 measurements confirm sprite?PF1 matching differs: single-playfield
+mode also requires the even-plane match, while dual-playfield mode permits the
+odd match independently. The matrix found no corresponding mode difference in
+sprite?PF2 or PF?PF bit0. The active paired test pins sprite matching.
+
+The consensus fixture `src/bus/tests/data/a500_playfield_modes.csv` comes from
+two independent512-case PAL A500 runs, two repeats per condition. It covers two
+lores planes, four constant patterns, four CLXCON enable masks and four desired
+values, sprite0 on/off, and DPF off/on. BPLDAT starts zero before constant DMA
+output. Full references are versioned in
+`amiga-hardware-probes/references/playfield-modes-v1`; ROM SHA256 is
+`3a614aba9686ad37d83a210a0016b6ec870e36d1fa07294ba0e4ab0c31d82765`.
+
+Live PF-PF bit0 uses the enabled CLXCON odd/even matches in either playfield
+mode, including zero-valued data. Classic lores DMA comparison starts one lores
+pixel before the first copied BPL1 word reaches the comparator. Its data stream
+follows the captured fetch origin, independently of DIW. The first BPL1 slot
+is at origin+7 CCK; data follows two CCK later. DIW still gates comparison.
+
+CLXCON/CLXCON2 collision-control events use the absolute pixel comparator
+coordinate and a two-CCK register delay, separately from render-write placement.
+The event keeps the correct scanline when those delays straddle line end.
+CLXDAT's CPU sampling phase is unchanged.
+
+The additional fixture `src/bus/tests/data/a500_playfield_gates.csv` contains896
+consensus cases from two independently repeated A500 sweeps. Finite Copper
+lists open/close CLXCON gates, with an INTREQR completion witness and zero second
+CLXDAT controls. Independent DDF/DIW shifts and isolated first/last-bit words
+distinguish mask delay, startup and stream placement. References:
+`amiga-hardware-probes/references/playfield-gate-v1` and
+`amiga-hardware-probes/references/playfield-word-gate-v1`.
+
+The original late-clear matrix retains24 mismatches: Copperline clears four
+CCK later in those cases, crossing the short startup zero interval. Its strict
+512-case contract remains unchanged; these are unresolved CPU/DMA observation
+timing differences. This correction does not claim complete AGA, hires, manual
+bitplane or sprite-edge timing coverage.
+
+Run the active paired regression with
+`python tools/cargo_report.py -- test --profile ci --locked --lib bus::tests::playfield_modes`.
+The paired PF-PF tests and the new gated hardware fixture are active. External
+ROM replay remains necessary to cover the CPU and DMA instruction paths.

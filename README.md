@@ -210,6 +210,7 @@ See [CREDITS.md](CREDITS.md) for contributor and third-party software credits.
 - [DiagROM](https://www.diagrom.com/) by John "Chucky" Hertell
 - [HRTMon](https://github.com/wepl/hrtmon) by Alain Malek, Bert Jahn and contributors (bundled freezer-cartridge monitor, GPL-2.0-or-later)
 - [m68k](https://crates.io/crates/m68k) CPU core
+- Toni Wilen (WinUAE developer), whose [blitter hardware observations](https://eab.abime.net/showpost.php?p=1426048) helped guide the One ROM A500 timing experiments.
 
 ## License
 

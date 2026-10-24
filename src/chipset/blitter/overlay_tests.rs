@@ -36,10 +36,10 @@ fn restore(blitter: &Blitter) -> Blitter {
 
 fn force_legacy_overlay(blitter: &mut Blitter) {
     if let Some(PendingBlit::Normal(state)) = &mut blitter.pending {
-        // Exactly the pre-optimization policy. Keeping the old path intact
-        // gives the differential tests the same sequencer and timing, with
-        // every A/B lookup and D insertion going through the ordered map.
+        // Retain old-style overlay bookkeeping across save/load. Source reads
+        // now use live RAM regardless of these legacy acceleration fields.
         state.track_overlay = state.use_d && (state.use_a || state.use_b);
+        state.d_overlay.insert(0x100, 0xdead);
     }
 }
 
@@ -65,14 +65,6 @@ fn assert_slot_equivalent(actual: &Blitter, reference: &Blitter, ram: &[u8], exp
         reference.current_slot_needs_bus()
     );
     assert_eq!(
-        actual.current_slot_counts_for_bls(),
-        reference.current_slot_counts_for_bls()
-    );
-    assert_eq!(
-        actual.bltpri_warmup_fences_cpu(),
-        reference.bltpri_warmup_fences_cpu()
-    );
-    assert_eq!(
         actual.scheduled_slot_access_pattern(64),
         reference.scheduled_slot_access_pattern(64)
     );
@@ -87,7 +79,7 @@ fn live_writes(blitter: &mut Blitter, ram: &mut [u8], slot: usize, suppress_d: b
         // Neither direction nor the line-mode bit reinterprets the pending
         // normal blit. These are public register writes, not state mutations.
         8 => blitter.write_bltcon1(0xF000 | BLTCON1_LINE | BLTCON1_DESC | BLTCON1_DOFF),
-        // CPU source overwrites must still be hidden by A/B snapshots. C is
+        // CPU source overwrites must be visible through live A/B reads. C is
         // deliberately the destination and must continue to read live RAM.
         11 => {
             write_word(ram, 0x22, 0xFEDC);
@@ -127,83 +119,6 @@ fn tick_pair(actual: &mut Blitter, reference: &mut Blitter, ram: &mut [u8], expe
         reference.take_debug_watched_write()
     );
     assert_slot_equivalent(actual, reference, ram, expected);
-}
-
-#[test]
-fn overlay_elision_requires_disjoint_identity_mapped_packed_spans() {
-    let ram = vec![0; 512];
-    let tracks = |blitter: &Blitter, h, w, ram: &[u8]| {
-        NormalBlitState::new(blitter, h, w, ram).track_overlay
-    };
-    for channels in [0x9, 0x5, 0xD, 0xF] {
-        let b = configured(channels, 0, 0);
-        assert!(!tracks(&b, 3, 4, &ram));
-    }
-    // Source/destination adjacency is safe, including a word ending exactly
-    // at populated RAM's upper boundary. C may overlap D because it is live.
-    let mut b = configured(0xF, 0, 0);
-    b.bltapt = 0xE8;
-    b.bltbpt = 0x118;
-    assert!(!tracks(&b, 3, 4, &ram));
-    b.bltdpt = 0x1E8;
-    assert!(!tracks(&b, 3, 4, &ram));
-    // Modulos of disabled channels do not affect any accessed source address.
-    b = configured(0x9, 0, 0);
-    b.bltbmod = -2;
-    assert!(!tracks(&b, 3, 4, &ram));
-    b = configured(0x5, 0, 0);
-    b.bltamod = 2;
-    assert!(!tracks(&b, 3, 4, &ram));
-
-    for (apt, bpt, dpt, ram_len) in [
-        (0x100, 0x80, 0x100, 512),    // A equals D
-        (0x20, 0x100, 0x100, 512),    // B equals D
-        (0xF0, 0x80, 0x100, 512),     // A partially overlaps D
-        (0x20, 0x110, 0x100, 512),    // B partially overlaps D
-        (0x300, 0x80, 0x100, 512),    // populated-RAM mask aliases A to D
-        (0x20, 0x80, 0x300, 512),     // populated-RAM mask aliases D
-        (0x200100, 0x80, 0x100, 512), // DMA mask aliases A to D
-        (0x20, 0x80, 0x1F0, 512),     // D crosses populated RAM boundary
-        (0x1F0, 0x80, 0x100, 512),    // A crosses populated RAM boundary
-        (0x20, 0x178, 0x100, 384),    // B enters an unpopulated hole
-        (0x20, 0x80, 0x100, 0),       // no chip RAM
-    ] {
-        b = configured(0xF, 0, 0);
-        b.bltapt = apt;
-        b.bltbpt = bpt;
-        b.bltdpt = dpt;
-        assert!(tracks(&b, 3, 4, &vec![0; ram_len]));
-    }
-    for channel in 0..3 {
-        for modulo in [-2, 2] {
-            b = configured(0xF, 0, 0);
-            match channel {
-                0 => b.bltamod = modulo,
-                1 => b.bltbmod = modulo,
-                _ => b.bltdmod = modulo,
-            }
-            assert!(tracks(&b, 3, 4, &ram));
-        }
-    }
-    b = configured(0xF, BLTCON1_DESC, 0);
-    assert!(tracks(&b, 3, 4, &ram));
-    b = configured(0xF, 0, 0);
-    b.bltdpt = CHIP_DMA_ADDR_MASK - 7;
-    assert!(!NormalBlitState::sources_disjoint_from_d(&b, 3, 4, 1 << 22));
-    b.bltdpt = u32::MAX - 7;
-    assert!(!NormalBlitState::sources_disjoint_from_d(
-        &b,
-        3,
-        4,
-        usize::MAX
-    ));
-    assert!(!NormalBlitState::sources_disjoint_from_d(
-        &b,
-        u32::MAX,
-        4,
-        512
-    ));
-    assert!(!NormalBlitState::sources_disjoint_from_d(&b, 0, 4, 512));
 }
 
 #[test]
@@ -274,7 +189,7 @@ fn overlay_elision_and_legacy_tracked_states_resume_at_every_slot() {
             }
             actual.set_debug_watch_addrs(&[0x100, 0x104, 0x110]);
             actual.start_scheduled_dims(3, 4, &ram);
-            assert_eq!(normal(&actual).track_overlay, overlap);
+            assert!(!normal(&actual).track_overlay);
             let mut reference = restore(&actual);
             force_legacy_overlay(&mut reference);
             let mut expected = ram.clone();
@@ -286,7 +201,7 @@ fn overlay_elision_and_legacy_tracked_states_resume_at_every_slot() {
                 let mut resumed_reference = restore(&reference);
                 let mut resumed_ram = ram.clone();
                 let mut resumed_expected = expected.clone();
-                assert_eq!(normal(&resumed).track_overlay, overlap);
+                assert!(!normal(&resumed).track_overlay);
                 assert!(normal(&resumed_reference).track_overlay);
                 saved_populated_overlay |= !normal(&resumed_reference).d_overlay.is_empty();
                 for future in slot..100 {
@@ -332,15 +247,18 @@ fn overlay_elision_and_legacy_tracked_states_resume_at_every_slot() {
 }
 
 #[test]
-fn physical_alias_feedback_keeps_the_overlay() {
+fn physical_alias_feedback_uses_live_ram_without_legacy_overlay() {
     let mut ram: Vec<u8> = (0..256).map(|i| (i * 19 + 7) as u8).collect();
     let mut correct = configured(0xD, 0, 0);
     correct.bltcon0 = 0x0D66; // D = A XOR B
     correct.bltapt = 0x40;
     correct.bltbpt = 0x108; // Physically the row before D, despite raw disjoint spans.
     correct.bltdpt = 0x10;
+    let mut expected = ram.clone();
+    let mut synchronous = restore(&correct);
+    synchronous.execute_dims(3, 4, &mut expected);
     correct.start_scheduled_dims(3, 4, &ram);
-    assert!(normal(&correct).track_overlay);
+    assert!(!normal(&correct).track_overlay);
     let mut missing_overlay = restore(&correct);
     let mut incorrect_ram = ram.clone();
     if let Some(PendingBlit::Normal(state)) = &mut missing_overlay.pending {
@@ -350,5 +268,12 @@ fn physical_alias_feedback_keeps_the_overlay() {
         correct.tick_scheduled_slot(&mut ram);
         missing_overlay.tick_scheduled_slot(&mut incorrect_ram);
     }
-    assert_ne!(ram, incorrect_ram, "fixture must exercise D-to-B feedback");
+    assert_eq!(
+        ram, expected,
+        "scheduled D-to-B feedback versus synchronous"
+    );
+    assert_eq!(
+        ram, incorrect_ram,
+        "live RAM makes legacy overlay unnecessary"
+    );
 }

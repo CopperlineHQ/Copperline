@@ -229,6 +229,8 @@ pub struct M68kMachine {
     /// clocks. Carried across instructions so an accelerated CPU (many clocks
     /// per cck) is not rounded up to a whole cck on every instruction.
     cpu_clock_carry: u32,
+    /// Parity of the 68000 STOP polling grid in colour clocks.
+    stop_poll_phase: Option<u8>,
     dbg_sched_on: bool,
     dbg_sched_top_vpos: u32,
     dbg_sched_top_frame: u64,
@@ -332,6 +334,8 @@ struct MachineRuntimeState {
     sync_cck_on: bool,
     cpu_clocks_per_cck: u32,
     cpu_clock_carry: u32,
+    #[serde(default)]
+    stop_poll_phase: Option<u8>,
     /// `CpuBus::jit_window_bank`: the bank the JIT fastmem window covers
     /// while code runs outside fast RAM. It decides which fast-RAM accesses
     /// allocate cache lines, and so which chip-RAM lines they evict. Saves
@@ -461,15 +465,21 @@ struct CpuBus {
     /// defined for the complete instruction being resident, not merely its
     /// opcode word.
     instruction_fetches_cached: bool,
-    /// IPL level as sampled at the CPU's most recent bus access. The real
-    /// 68000 latches its IPL pins during bus cycles, and the take-interrupt
-    /// decision at an instruction boundary uses the value latched during the
-    /// PREVIOUS instruction's last bus access -- a level that rises during an
-    /// instruction's trailing internal cycles is not seen until one
-    /// instruction later. Transient: re-sampled on every access, never
-    /// serialized in file saves (a loaded state re-samples within one instruction).
+    /// IPL level eligible for the next instruction-boundary decision, sampled
+    /// at a CPU bus access. Bus-side deadline qualification and core poll
+    /// markers determine which sample is consumed. Transient: re-sampled on
+    /// every access, never serialized in file saves (a loaded state re-samples
+    /// within one instruction).
     /// Exact rollback captures it in `MachineRollbackState`.
     sampled_irq_level: u8,
+    /// Ordinary operand-read poll sample for stock 68000 instructions. The
+    /// board's boundary-qualification sample remains separate above; this
+    /// earlier candidate is used only by core-marked operand poll points.
+    sampled_operand_irq_level: u8,
+    /// The CPU model, rather than the active bus clock ratio, gates the
+    /// additional 68000 poll candidates. The Bus helper itself limits early
+    /// candidates to the stock two-CPU-clocks-per-CCK path.
+    m68000_ipl_poll: bool,
     /// Set by the core's `ipl_hold_sample` poll-point marker: the current
     /// `sampled_irq_level` is the instruction's microcode poll value and
     /// later accesses in the same instruction must not re-latch it (e.g.
@@ -584,6 +594,8 @@ impl M68kMachine {
                 last_fetch_cache_hit: false,
                 instruction_fetches_cached: false,
                 sampled_irq_level: 0,
+                sampled_operand_irq_level: 0,
+                m68000_ipl_poll: cpu_model == CpuModel::M68000,
                 ipl_sample_held: false,
                 diag_current_pc: 0,
                 jit_enabled: false,
@@ -631,6 +643,7 @@ impl M68kMachine {
             sync_cck_on: sync_cck_enabled_setting(),
             cpu_clocks_per_cck: 2,
             cpu_clock_carry: 0,
+            stop_poll_phase: None,
             dbg_sched_on: crate::envcfg::flag("COPPERLINE_DIAG_SCHED"),
             dbg_sched_top_vpos: 0,
             dbg_sched_top_frame: 0,
@@ -1659,6 +1672,7 @@ impl M68kMachine {
             sync_cck_on: self.sync_cck_on,
             cpu_clocks_per_cck: self.cpu_clocks_per_cck,
             cpu_clock_carry: self.cpu_clock_carry,
+            stop_poll_phase: self.stop_poll_phase,
             jit_window_bank: self.bus.jit_window_bank,
         }
     }
@@ -1847,6 +1861,8 @@ impl M68kMachine {
         self.bus.address_mask = cpu.address_mask;
         self.bus.cacr_040_layout = cacr_040_layout(cpu.cpu_type);
         self.cpu = cpu;
+        self.bus.m68000_ipl_poll = self.cpu.cpu_type == CpuType::M68000;
+        self.bus.sampled_operand_irq_level = 0;
         self.bus.bus = bus;
         // The cache is silicon, not dynamic state: a CPU that has one keeps it
         // across a restore. Snapshots taken with the cache modelled carry warm
@@ -1865,6 +1881,7 @@ impl M68kMachine {
         self.sync_cck_on = runtime.sync_cck_on;
         self.cpu_clocks_per_cck = runtime.cpu_clocks_per_cck;
         self.cpu_clock_carry = runtime.cpu_clock_carry;
+        self.stop_poll_phase = runtime.stop_poll_phase;
         self.bus.jit_window_bank = runtime.jit_window_bank;
         // The short-bus-cycle flag is derived from the (restored) CPU model and
         // not serialized, so re-establish it here.
@@ -1976,6 +1993,7 @@ impl M68kMachine {
         self.cpu.invalidate_prefetch();
         self.cpu.stopped = u32::from(state.stopped);
         self.cpu_clock_carry = 0;
+        self.stop_poll_phase = None;
     }
 
     /// Set one GDB-style core register: D0-D7, A0-A7, SR, PC.
@@ -2952,14 +2970,28 @@ impl M68kMachine {
         // core slice.
         self.bus.flush_timed_devices_dcache_coherent();
         let mut level = self.pending_irq_level();
-        // The boundary decision uses the IPL level latched at the previous
-        // instruction's last bus access (CpuBus::sample_ipl), not the live
-        // level: on real silicon a level that rose after that sample is taken
-        // one instruction later. A STOPped CPU keeps sampling its pins, so it
-        // wakes on the live level. min() so a level that dropped since the
-        // sample (e.g. the instruction's own INTREQ clear) is never delivered
-        // stale. COPPERLINE_IRQ_LATENCY_CCK=0 disables this together with the
-        // IPL pipe (the raw immediate model, used by mechanism tests).
+        if self.cpu.is_stopped()
+            && self.cpu.cpu_type == CpuType::M68000
+            && self.cpu_clocks_per_cck == 2
+            && self.bus.bus.irq_latency_setting != 0
+        {
+            let now = self.bus.bus.emulated_cck();
+            let phase = *self.stop_poll_phase.get_or_insert((now & 1) as u8);
+            if level > ((self.cpu.get_sr() >> 8) & 7) as u8 && now & 1 != u64::from(phase) {
+                // Observation never advances time. Dispatch owns and accounts
+                // for the wait to STOP's next four-CPU-clock poll.
+                level = 0;
+            }
+        } else if !self.cpu.is_stopped() {
+            self.stop_poll_phase = None;
+        }
+        // The boundary decision uses the previous instruction's qualified
+        // sample (CpuBus::sample_ipl), not the latest live level. A STOPped
+        // CPU continues polling and wakes from the currently eligible level.
+        // min() so a level that dropped since the sample (e.g. the
+        // instruction's own INTREQ clear) is never delivered stale.
+        // COPPERLINE_IRQ_LATENCY_CCK=0 disables this with the IPL pipe, giving
+        // mechanism tests the raw immediate model.
         // JIT batches run whole stretches of instructions without per-access
         // IPL latching, so the sampled level can be arbitrarily stale there;
         // a JIT machine takes the live level instead (the raw model).
@@ -3407,6 +3439,9 @@ impl M68kMachine {
         // save states are taken -- the accumulator is not serialized.
         self.bus.flush_timed_devices_dcache_coherent();
         self.bus.bus.set_cpu_bus_arbitration_enabled(false);
+        if self.cpu.is_stopped() && self.stop_poll_phase.is_none() {
+            self.stop_poll_phase = Some((self.bus.bus.emulated_cck() & 1) as u8);
+        }
         let (bus_advanced_cck, _bus_tick) = self.bus.bus.take_slice_bus_advance();
         if stopped {
             trace!(
@@ -3682,6 +3717,25 @@ impl M68kMachine {
     }
 
     fn service_pending_irq_cycles(&mut self) -> Option<IrqDispatch> {
+        self.bus.flush_timed_devices_dcache_coherent();
+        let mut poll_wait_cycles = 0;
+        if self.cpu.is_stopped()
+            && self.cpu.cpu_type == CpuType::M68000
+            && self.cpu_clocks_per_cck == 2
+            && self.bus.bus.irq_latency_setting != 0
+        {
+            let now = self.bus.bus.emulated_cck();
+            let phase = *self.stop_poll_phase.get_or_insert((now & 1) as u8);
+            if self.pending_irq_level() > ((self.cpu.get_sr() >> 8) & 7) as u8
+                && now & 1 != u64::from(phase)
+            {
+                self.bus.bus.advance_cpu_internal_cycles(1);
+                // This wait precedes exception execution. Include it in both
+                // clock accounts so reconciliation cannot subtract it from
+                // the exception's nominal internal cycles.
+                poll_wait_cycles = self.cpu_clocks_per_cck as i32;
+            }
+        }
         let level = self.refresh_irq_line();
         if !self.cpu.check_interrupts() {
             return None;
@@ -3702,7 +3756,7 @@ impl M68kMachine {
             .unwrap_or(u32::from(level) + 24)
             .min(u32::from(u16::MAX)) as u16;
         Some(IrqDispatch {
-            cycles,
+            cycles: cycles.saturating_add(poll_wait_cycles),
             #[cfg(feature = "control")]
             level,
             #[cfg(feature = "control")]
@@ -3727,13 +3781,15 @@ impl M68kMachine {
             return 0;
         }
 
-        // Bring-up guard: hold off an autovector whose handler slot still
+        // Bring-up guard for the accelerated CPU path: hold off a vector whose handler slot still
         // reads zero. The peek is untranslated, so it only means anything
         // while the MMU is off (with translation enabled, VBR holds a
         // virtual address and the physical bytes under it are unrelated --
         // Linux/m68k maps its vector table high while low chip RAM is
         // cleared, and the guard would silence every interrupt for good).
-        if !self.cpu.tc_enable() {
+        // A 68000 must acknowledge even an uninitialized handler. Its ROM
+        // supplies the vector byte; suppressing delivery hides broken ROMs.
+        if self.bus.bus.cpu_short_bus_cycle() && !self.cpu.tc_enable() {
             let vector_addr = self
                 .cpu
                 .vbr
@@ -4339,8 +4395,22 @@ impl CpuBus {
                 return read_be(&self.bus.mem.rom, off, size);
             }
             Some(PlainMemRegion::ChipRam(off)) => {
-                self.bus.grant_cpu_bus_access_at(Some(addr), size, kind);
-                return read_be(&self.bus.mem.chip_ram, off, size);
+                let mut sampled = None;
+                self.bus.grant_cpu_bus_access_sampled(
+                    Some(addr),
+                    size,
+                    kind,
+                    |bus, slot, stride| {
+                        let offset = slot as usize * stride;
+                        let width = size.saturating_sub(offset).min(stride);
+                        let value = read_be(&bus.mem.chip_ram, off + offset, width);
+                        sampled = Some(match sampled {
+                            Some(previous) => (previous << (width * 8)) | value,
+                            None => value,
+                        });
+                    },
+                );
+                return sampled.unwrap_or_else(|| read_be(&self.bus.mem.chip_ram, off, size));
             }
             Some(PlainMemRegion::ZorroRam(board, off)) => {
                 // Expansion (Zorro) RAM runs at external-bus speed, off the
@@ -4399,11 +4469,15 @@ impl CpuBus {
 
         if range_contains(CIA_A_BASE, CIA_A_SIZE, addr) {
             self.bus.cpu_cia_access(Self::access_words(size));
-            return self.bus.cia_a_read(u64::from(addr - CIA_A_BASE), size) as u32;
+            let value = self.bus.cia_a_read(u64::from(addr - CIA_A_BASE), size) as u32;
+            self.bus.cpu_cia_access_finish();
+            return value;
         }
         if range_contains(CIA_B_BASE, CIA_B_SIZE, addr) {
             self.bus.cpu_cia_access(Self::access_words(size));
-            return self.bus.cia_b_read(u64::from(addr - CIA_B_BASE), size) as u32;
+            let value = self.bus.cia_b_read(u64::from(addr - CIA_B_BASE), size) as u32;
+            self.bus.cpu_cia_access_finish();
+            return value;
         }
         if self.bus.cdtv.is_some() && range_contains(CDTV_BATTRAM_BASE, CDTV_BATTRAM_SIZE, addr) {
             // CDTV battery-backed bookmark RAM overlays the top half of
@@ -4667,11 +4741,27 @@ impl CpuBus {
                 return;
             }
             Some(PlainMemRegion::ChipRam(off)) => {
-                self.bus
-                    .grant_cpu_bus_access_at(Some(addr), size, CpuBusAccessKind::Write);
-                self.bus.record_cpu_chip_ram_write(off, size, value);
+                let mut committed = false;
+                self.bus.grant_cpu_bus_access_sampled(
+                    Some(addr),
+                    size,
+                    CpuBusAccessKind::Write,
+                    |bus, slot, stride| {
+                        let byte = slot as usize * stride;
+                        let part = (size - byte).min(stride);
+                        let word = value >> ((size - byte - part) * 8);
+                        bus.record_cpu_chip_ram_write(off + byte, part, word);
+                        write_be(&mut bus.mem.chip_ram, off + byte, part, word);
+                        committed = true;
+                    },
+                );
+                // Unclocked debugger/setup accesses and the 020+ posted-write
+                // path do not invoke the classic transfer callback.
+                if !committed {
+                    self.bus.record_cpu_chip_ram_write(off, size, value);
+                    write_be(&mut self.bus.mem.chip_ram, off, size, value);
+                }
                 self.bus.ui_note_cpu_ram_write(addr, size);
-                write_be(&mut self.bus.mem.chip_ram, off, size, value);
                 self.dbg_note_memw(addr, size);
                 if off as u32 != addr {
                     // The write landed through an Agnus image repeat: note
@@ -4763,6 +4853,7 @@ impl CpuBus {
             let effect = self
                 .bus
                 .cia_a_write(u64::from(addr - CIA_A_BASE), size, u64::from(value));
+            self.bus.cpu_cia_access_finish();
             if effect.disable_overlay {
                 // Gary's overlay flip-flop clears the moment the CIA drives
                 // OVL low: the guest's very next access may already expect
@@ -4786,6 +4877,7 @@ impl CpuBus {
             let effect = self
                 .bus
                 .cia_b_write(u64::from(addr - CIA_B_BASE), size, u64::from(value));
+            self.bus.cpu_cia_access_finish();
             if effect.timer_started {
                 self.bus.slice_preempted = true;
             }
@@ -5016,13 +5108,10 @@ impl CpuBus {
 }
 
 impl CpuBus {
-    /// Latch the IPL level presented to the CPU by (the end of) a bus access.
-    /// The real 68000 samples its IPL pins during bus cycles, and the
-    /// take-interrupt decision at an instruction boundary uses the value
-    /// latched during the previous instruction's last bus access -- a level
-    /// that rises during an instruction's trailing internal cycles is not
-    /// seen until one instruction later (Moira models the same points as
-    /// POLL_IPL). `refresh_irq_line` consumes this latch.
+    /// Refresh the boundary-qualified and operand-poll candidates during a
+    /// CPU bus access. The bus applies recognition-deadline eligibility at
+    /// each candidate's poll point; the core's poll marker selects which one
+    /// `refresh_irq_line` consumes.
     #[inline]
     fn sample_ipl(&mut self) {
         // A poll-point hold (AddressBus::ipl_hold_sample) pins the sample
@@ -5031,10 +5120,21 @@ impl CpuBus {
         if self.ipl_sample_held {
             return;
         }
-        self.sampled_irq_level = if self.bus.cartridge_nmi_pending() {
+        let nmi = self.bus.cartridge_nmi_pending();
+        let master_enabled = self.bus.paula.intena & INT_MASTER != 0;
+        let qualified_lead = if self.m68000_ipl_poll { 2 } else { 0 };
+        let operand_lead = if self.m68000_ipl_poll { 4 } else { 0 };
+        self.sampled_irq_level = if nmi {
             7
-        } else if self.bus.paula.intena & INT_MASTER != 0 {
-            pending_ipl(self.bus.paula.intena & self.bus.cpu_visible_intreq())
+        } else if master_enabled {
+            pending_ipl(self.bus.paula.intena & self.bus.cpu_poll_intreq(qualified_lead))
+        } else {
+            0
+        };
+        self.sampled_operand_irq_level = if nmi {
+            7
+        } else if master_enabled {
+            pending_ipl(self.bus.paula.intena & self.bus.cpu_poll_intreq(operand_lead))
         } else {
             0
         };
@@ -5442,6 +5542,21 @@ impl AddressBus for CpuBus {
         self.ipl_sample_held = true;
     }
 
+    fn ipl_hold_operand_sample(&mut self) {
+        // Operand reads use the separate 68000 poll candidate captured at
+        // their start; the boundary sample above remains eligible only at
+        // its own bus-poll qualification point.
+        self.sampled_irq_level = self.sampled_operand_irq_level;
+        self.ipl_sample_held = true;
+    }
+
+    fn ipl_poll_internal(&mut self) {
+        // A divider microcode poll can precede its final prefetch. Sample
+        // the pins now, rather than holding the preceding operand access.
+        self.sample_ipl();
+        self.ipl_sample_held = true;
+    }
+
     fn ipl_release_sample(&mut self) {
         // Exception dispatch: the handler-entry refill is a fresh poll
         // point, so drop any hold from the faulted instruction.
@@ -5488,7 +5603,15 @@ impl AddressBus for CpuBus {
                 );
             }
         }
-        AUTOVECTOR_SENTINEL
+        if !self.bus.cpu_short_bus_cycle() {
+            // On the 68000 motherboard bus the CPU-space IACK address
+            // selects the ROM tail. The low byte supplies the vector;
+            // words 24..31 in a normal Kickstart emulate autovectors.
+            // Do not substitute a vector when a custom ROM omits them.
+            u32::from(self.bus.peek_word_any(0x00ff_fff0 + u32::from(level) * 2) & 0xff)
+        } else {
+            AUTOVECTOR_SENTINEL
+        }
     }
 
     fn reset_devices(&mut self) {
@@ -5701,7 +5824,7 @@ mod tests {
     }
 
     fn reset_rom(sp: u32, pc: u32) -> Vec<u8> {
-        let mut rom = vec![0; ROM_SIZE];
+        let mut rom = crate::memory::test_rom_with_interrupt_vectors();
         rom[0..4].copy_from_slice(&sp.to_be_bytes());
         rom[4..8].copy_from_slice(&pc.to_be_bytes());
         rom
@@ -5939,6 +6062,130 @@ mod tests {
         Ok(machine)
     }
 
+    #[test]
+    fn cia_timer_irqs_preserve_movem_sample_phase() -> Result<()> {
+        const BASE: u32 = 0x0003_0000;
+        const SAMPLE: usize = 0x0003_1000;
+        const L2_COUNT: usize = 0x0003_2000;
+        const L6_COUNT: usize = 0x0003_2002;
+        const DONE: usize = 0x0003_2004;
+        const MAGIC: [u8; 4] = *b"CIAR";
+
+        fn read_word(mem: &[u8], at: usize) -> u16 {
+            u16::from_be_bytes([mem[at], mem[at + 1]])
+        }
+        fn fnv1a(bytes: &[u8]) -> u64 {
+            bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3)
+            })
+        }
+        fn run_phase(phase: u16) -> Result<(u16, u16, u64, Vec<u8>)> {
+            let fixture = include_bytes!("../timing-test/cia-movem-irq.bin");
+            let mut image = fixture.to_vec();
+            let phase_guards = [0xc1, 0xa1, 0xc0, 0xde, 0, 0, 0xde, 0xad, 0xfe, 0xed];
+            let guard_start = image
+                .windows(10)
+                .position(|window| window == phase_guards)
+                .expect("guarded phase word in fixture");
+            assert_eq!(
+                image
+                    .windows(10)
+                    .filter(|window| *window == phase_guards)
+                    .count(),
+                1,
+                "fixture has a unique phase patch site"
+            );
+            image[guard_start + 4..guard_start + 6].copy_from_slice(&(phase & 15).to_be_bytes());
+
+            let mut bus = test_bus_with_pc(BASE);
+            bus.irq_latency_setting = 6;
+            bus.set_cpu_bus_arbitration_enabled(true);
+            let words = image
+                .chunks_exact(2)
+                .map(|word| u16::from_be_bytes([word[0], word[1]]))
+                .collect::<Vec<_>>();
+            write_program(&mut bus, BASE, &words);
+            let mut machine = M68kMachine::new(bus, CpuModel::M68000, false)?;
+            machine.bus_mut().agnus.hpos = 0x21;
+            let mut completed = false;
+            for _ in 0..250_000 {
+                machine.step_slice(1)?;
+                if machine.stopped() {
+                    machine.bus_mut().advance_cpu_idle_devices(1);
+                }
+                let mem = &machine.bus.bus.mem.chip_ram;
+                if mem[DONE..DONE + 4] == MAGIC {
+                    completed = true;
+                    break;
+                }
+            }
+            let mem = &machine.bus.bus.mem.chip_ram;
+            assert!(
+                completed,
+                "phase {phase}: fixture failed to complete; PC={:#010x}",
+                machine.cpu.pc
+            );
+            let l2 = read_word(mem, L2_COUNT);
+            let l6 = read_word(mem, L6_COUNT);
+            let bytes = mem[SAMPLE..SAMPLE + 600].to_vec();
+            assert!(
+                l2 > 0 && l6 >= 2,
+                "phase {phase}: STOP wake and loop should observe CIA IRQs, got L2={l2} L6={l6}"
+            );
+            assert_eq!(
+                machine.a(7),
+                0x0007_fffe,
+                "phase {phase}: balanced MOVEM/RTE stack"
+            );
+            assert_eq!(
+                machine.a(1),
+                SAMPLE as u32,
+                "phase {phase}: exactly 600 predecrement stores"
+            );
+            assert!(
+                bytes.iter().all(|byte| *byte != 0xa5),
+                "phase {phase}: sample loop did not overwrite all 600 bytes"
+            );
+            Ok((l2, l6, fnv1a(&bytes), bytes))
+        }
+
+        // Frozen from the working unqualified CIA-poll baseline; these are
+        // not hardware goldens. Phases 11 and 12 are the measured production-
+        // qualification regression cases; the full sweep pins neighboring
+        // phases and their boundary.
+        let expected: [(u16, u16, u64); 16] = [
+            (1, 2, 15_119_320_034_064_197_141),
+            (1, 2, 15_119_320_034_064_197_141),
+            (1, 2, 15_119_320_034_064_197_141),
+            (1, 2, 15_119_320_034_064_197_141),
+            (1, 2, 15_119_320_034_064_197_141),
+            (1, 2, 15_119_320_034_064_197_141),
+            (1, 2, 15_119_320_034_064_197_141),
+            (1, 2, 15_119_320_034_064_197_141),
+            (1, 2, 15_119_320_034_064_197_141),
+            (1, 2, 15_119_320_034_064_197_141),
+            (1, 2, 15_119_320_034_064_197_141),
+            (1, 2, 15_419_993_572_040_101_253),
+            (1, 2, 15_419_993_572_040_101_253),
+            (1, 2, 15_419_993_572_040_101_253),
+            (1, 2, 15_419_993_572_040_101_253),
+            (1, 2, 15_419_993_572_040_101_253),
+        ];
+        for phase in 0..16 {
+            let result = run_phase(phase)?;
+            assert_eq!(
+                (result.0, result.1, result.2),
+                expected[phase as usize],
+                "phase {phase}: CIA IRQ/MOVEM sample differs from frozen baseline"
+            );
+            if phase == 0 || phase == 7 || phase == 15 {
+                let repeated = run_phase(phase)?;
+                assert_eq!(result, repeated, "phase {phase} must replay byte-for-byte");
+            }
+        }
+        Ok(())
+    }
+
     fn run_one_instruction_at(pc: u32, words: &[u16]) -> Result<CpuStepSlice> {
         let mut machine = machine_with_program(pc, words)?;
         machine.step_slice(1)
@@ -6119,6 +6366,8 @@ mod tests {
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
+            sampled_operand_irq_level: 0,
+            m68000_ipl_poll: false,
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
@@ -6153,6 +6402,8 @@ mod tests {
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
+            sampled_operand_irq_level: 0,
+            m68000_ipl_poll: false,
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
@@ -6198,6 +6449,8 @@ mod tests {
                 last_fetch_cache_hit: false,
                 instruction_fetches_cached: false,
                 sampled_irq_level: 0,
+                sampled_operand_irq_level: 0,
+                m68000_ipl_poll: false,
                 ipl_sample_held: false,
                 diag_current_pc: 0,
                 jit_enabled: false,
@@ -6258,6 +6511,8 @@ mod tests {
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
+            sampled_operand_irq_level: 0,
+            m68000_ipl_poll: false,
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
@@ -6306,6 +6561,8 @@ mod tests {
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
+            sampled_operand_irq_level: 0,
+            m68000_ipl_poll: false,
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
@@ -6350,6 +6607,8 @@ mod tests {
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
+            sampled_operand_irq_level: 0,
+            m68000_ipl_poll: false,
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
@@ -6403,6 +6662,8 @@ mod tests {
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
+            sampled_operand_irq_level: 0,
+            m68000_ipl_poll: false,
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
@@ -6617,6 +6878,8 @@ mod tests {
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
+            sampled_operand_irq_level: 0,
+            m68000_ipl_poll: false,
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
@@ -6681,6 +6944,8 @@ mod tests {
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
+            sampled_operand_irq_level: 0,
+            m68000_ipl_poll: false,
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
@@ -6821,6 +7086,8 @@ mod tests {
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
+            sampled_operand_irq_level: 0,
+            m68000_ipl_poll: false,
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
@@ -6854,6 +7121,8 @@ mod tests {
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
+            sampled_operand_irq_level: 0,
+            m68000_ipl_poll: false,
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
@@ -6893,6 +7162,8 @@ mod tests {
             last_fetch_cache_hit: false,
             instruction_fetches_cached: false,
             sampled_irq_level: 0,
+            sampled_operand_irq_level: 0,
+            m68000_ipl_poll: false,
             ipl_sample_held: false,
             diag_current_pc: 0,
             jit_enabled: false,
@@ -6901,6 +7172,37 @@ mod tests {
             jit_window_bank: None,
             cacr_040_layout: false,
         }
+    }
+
+    #[test]
+    fn motherboard_iack_uses_rom_tail_vector_byte() {
+        let mut bus = cpu_bus(test_bus_with_pc(0x100));
+        for level in 1..=7 {
+            assert_eq!(bus.interrupt_acknowledge(level), u32::from(24 + level));
+        }
+        // High data bits do not participate in the 68000 vector number.
+        let offset = ROM_SIZE - 16 + 2 * 2;
+        bus.bus.mem.rom[offset..offset + 2].copy_from_slice(&[0xab, 0x40]);
+        assert_eq!(bus.interrupt_acknowledge(2), 0x40);
+        bus.bus.mem.rom[offset..offset + 2].fill(0);
+        assert_eq!(bus.interrupt_acknowledge(2), 0);
+    }
+
+    #[test]
+    fn missing_rom_iack_word_dispatches_vector_zero() -> Result<()> {
+        let mut bus = test_bus_with_pc(0x100);
+        write_program(&mut bus, 0x100, &[0x4e72, 0x2000, 0x60fe]);
+        write_program(&mut bus, 0x200, &[0x7007, 0x60fe]);
+        write_chip_long(&mut bus, 0, 0x200);
+        bus.mem.rom[ROM_SIZE - 12..ROM_SIZE - 10].fill(0);
+        bus.paula.intena = INT_MASTER | INT_PORTS;
+        bus.irq_latency_setting = 0;
+        let mut machine = M68kMachine::new(bus, CpuModel::M68000, false)?;
+        machine.step_slice(1)?;
+        machine.bus_mut().paula.intreq = INT_PORTS;
+        machine.step_slice(20)?;
+        assert_eq!(machine.d(0), 7);
+        Ok(())
     }
 
     /// `getreg`/`putreg` as every AmigaOS clock probe writes them: the
@@ -7560,6 +7862,100 @@ mod tests {
         // yielding its regular slots, so it advanced its scheduled work.
         assert!(machine.bus().blitter.scheduled_slots_remaining() < initial_slots);
         Ok(())
+    }
+
+    fn cpu_bus_before_final_d_only_blitter_write(initial_word: u16) -> CpuBus {
+        const BLITTER_DMA_ENABLE: u16 = 1 << 6;
+
+        let mut bus = test_bus_with_pc(0x100);
+        bus.agnus.hpos = 0x20;
+        bus.agnus.dmacon = DMACON_DMAEN | BLITTER_DMA_ENABLE;
+        write_chip_word(&mut bus, 0x0400, initial_word);
+        // D-only clear.
+        bus.blitter.bltcon0 = 0x0100;
+
+        // The first D1 slot writes 0x03FE; the terminal F flush writes
+        // 0x0400, after the CPU samples that address during E.
+        bus.blitter.bltdpt = 0x03FE;
+        bus.blitter.start_scheduled((1 << 6) | 2, &bus.mem.chip_ram);
+
+        // D-only, two-word clear: STRT, INIT, A0, D0, A1, D1. E is the
+        // next internal phase; a CPU grant there advances E -> F, then the
+        // bus-cycle tail gives the blitter its final D slot.
+        for _ in 0..6 {
+            bus.advance_chipset(1);
+        }
+        assert_eq!(bus.blitter.current_slot_label(), "E");
+        assert!(!bus.blitter.current_slot_needs_bus());
+        assert_eq!(read_chip_word(&bus, 0x0400), initial_word);
+
+        let mut bus = cpu_bus(bus);
+        bus.bus.set_cpu_bus_arbitration_enabled(true);
+        bus
+    }
+
+    #[test]
+    fn chip_ram_writes_land_before_final_blitter_d_tail_write() {
+        for (size, value) in [(1, 0x55), (2, 0x5555), (4, 0x5555_3344)] {
+            let mut bus = cpu_bus_before_final_d_only_blitter_write(0xABCD);
+            bus.write_sized_unobserved(0x0400, size, value);
+            assert_eq!(read_chip_word(&bus.bus, 0x0400), 0);
+            assert!(!bus.bus.blitter.busy);
+            if size == 4 {
+                assert_eq!(read_chip_word(&bus.bus, 0x0402), 0x3344);
+            }
+        }
+    }
+
+    #[test]
+    fn chip_ram_byte_read_samples_before_final_blitter_d_tail_write() {
+        let mut bus = cpu_bus_before_final_d_only_blitter_write(0xABCD);
+
+        let value = bus.read_sized_uncached(0x0400, 1, CpuBusAccessKind::Read);
+
+        assert_eq!(value, 0xAB);
+        assert_eq!(read_chip_word(&bus.bus, 0x0400), 0x0000);
+        assert!(!bus.bus.blitter.busy);
+    }
+
+    #[test]
+    fn chip_ram_word_read_samples_before_final_blitter_d_tail_write() {
+        let mut bus = cpu_bus_before_final_d_only_blitter_write(0xABCD);
+
+        let value = bus.read_sized_uncached(0x0400, 2, CpuBusAccessKind::Read);
+
+        assert_eq!(value, 0xABCD);
+        assert_eq!(read_chip_word(&bus.bus, 0x0400), 0x0000);
+        assert!(!bus.bus.blitter.busy);
+    }
+
+    #[test]
+    fn chip_ram_long_read_samples_each_word_on_its_own_grant() {
+        let mut bus = cpu_bus_before_final_d_only_blitter_write(0xABCD);
+        write_chip_word(&mut bus.bus, 0x0402, 0x1234);
+
+        let value = bus.read_sized_uncached(0x0400, 4, CpuBusAccessKind::Read);
+
+        assert_eq!(value, 0xABCD_1234);
+        assert_eq!(read_chip_word(&bus.bus, 0x0400), 0x0000);
+        assert_eq!(read_chip_word(&bus.bus, 0x0402), 0x1234);
+        assert!(!bus.bus.blitter.busy);
+    }
+
+    #[test]
+    fn aga_68000_chip_ram_long_read_samples_all_four_bytes_in_one_grant() {
+        use crate::chipset::agnus::AgnusRevision;
+        use crate::chipset::denise::DeniseRevision;
+
+        let mut bus = cpu_bus(test_bus(reset_rom(0, 0)));
+        bus.bus
+            .set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+        bus.bus.set_cpu_bus_arbitration_enabled(true);
+        bus.bus.mem.chip_ram[0x0400..0x0404].copy_from_slice(&0xABCD_1234u32.to_be_bytes());
+
+        let value = bus.read_sized_uncached(0x0400, 4, CpuBusAccessKind::Read);
+
+        assert_eq!(value, 0xABCD_1234);
     }
 
     #[test]
@@ -9062,11 +9458,118 @@ mod tests {
     }
 
     #[test]
+    fn internal_ipl_poll_samples_fresh_and_holds_until_release() {
+        let mut bus = test_bus_with_pc(0x100);
+        bus.paula.intena = INT_MASTER | INT_VERTB;
+        bus.irq_latency_setting = 0;
+        let mut machine = M68kMachine::new(bus, CpuModel::M68000, false).unwrap();
+
+        let rom = ROM_BASE as u32 + 0x100;
+        machine.bus.read_word(rom);
+        assert_eq!(machine.bus.sampled_irq_level, 0);
+
+        machine.bus.bus.paula.intreq = INT_VERTB;
+        AddressBus::ipl_poll_internal(&mut machine.bus);
+        assert_eq!(machine.bus.sampled_irq_level, 3);
+        assert!(machine.bus.ipl_sample_held);
+
+        machine.bus.bus.paula.intreq = 0;
+        machine.bus.read_word(rom);
+        assert_eq!(machine.bus.sampled_irq_level, 3);
+
+        AddressBus::ipl_release_sample(&mut machine.bus);
+        machine.bus.read_word(rom);
+        assert_eq!(machine.bus.sampled_irq_level, 0);
+        assert!(!machine.bus.ipl_sample_held);
+    }
+
+    #[test]
+    fn m68000_operand_and_qualified_poll_samples_use_distinct_deadlines() -> Result<()> {
+        let mut bus = test_bus_with_pc(0x100);
+        bus.paula.intena = INT_MASTER | INT_VERTB;
+        bus.paula.intreq = INT_VERTB;
+        bus.irq_latency_setting = 6;
+        // Let Paula's asserted source arm its recognition deadline, then place
+        // the next ROM read exactly four CCKs before that deadline. The ROM
+        // access itself consumes two CCKs on the stock 68000 bus.
+        bus.advance_devices(1);
+        let remaining = bus.next_irq_visible_cck().expect("IRQ latency armed");
+        assert!(remaining >= 4);
+        bus.advance_devices(remaining - 4);
+        assert_eq!(bus.cpu_visible_intreq() & INT_VERTB, 0);
+
+        let mut machine = M68kMachine::new(bus, CpuModel::M68000, false)?;
+        machine.bus.bus.set_cpu_bus_arbitration_enabled(true);
+        let rom = ROM_BASE as u32 + 0x100;
+        machine.bus.read_word(rom);
+        assert_eq!(machine.bus.sampled_irq_level, 0);
+        assert_eq!(machine.bus.sampled_operand_irq_level, 3);
+        assert_eq!(machine.bus.bus.cpu_visible_intreq() & INT_VERTB, 0);
+
+        // The operand poll hook uses the value captured at read start even
+        // though the read has advanced time. It can qualify four CCKs ahead
+        // while the instruction-boundary sample remains two CCKs ahead.
+        AddressBus::ipl_hold_operand_sample(&mut machine.bus);
+        assert_eq!(machine.bus.sampled_irq_level, 3);
+        assert!(machine.bus.ipl_sample_held);
+        assert_eq!(machine.bus.bus.cpu_visible_intreq() & INT_VERTB, 0);
+
+        AddressBus::ipl_release_sample(&mut machine.bus);
+        let remaining = machine
+            .bus
+            .bus
+            .next_irq_visible_cck()
+            .expect("IRQ remains in its recognition delay");
+        assert!(remaining >= 2);
+        machine.bus.bus.advance_devices(remaining - 2);
+        assert_eq!(machine.bus.bus.cpu_visible_intreq() & INT_VERTB, 0);
+        machine.bus.read_word(rom);
+        assert_eq!(machine.bus.sampled_irq_level, 3);
+        assert_eq!(machine.bus.bus.cpu_visible_intreq() & INT_VERTB, INT_VERTB);
+        Ok(())
+    }
+
+    #[test]
+    fn early_ipl_poll_is_limited_to_stock_m68000_and_zero_latency_is_raw() -> Result<()> {
+        let delayed_bus = || {
+            let mut bus = test_bus_with_pc(0x100);
+            bus.paula.intena = INT_MASTER | INT_VERTB;
+            bus.paula.intreq = INT_VERTB;
+            bus.irq_latency_setting = 6;
+            bus.advance_devices(1);
+            let remaining = bus.next_irq_visible_cck().expect("IRQ latency armed");
+            assert!(remaining >= 2);
+            bus.advance_devices(remaining - 2);
+            bus
+        };
+
+        let bus = delayed_bus();
+        assert_eq!(bus.cpu_visible_intreq() & INT_VERTB, 0);
+        let mut m68010 = M68kMachine::new(bus, CpuModel::M68010, false)?;
+        m68010.bus.bus.set_cpu_bus_arbitration_enabled(true);
+        assert!(!m68010.bus.m68000_ipl_poll);
+        m68010.bus.read_word(ROM_BASE as u32 + 0x100);
+        assert_eq!(m68010.bus.sampled_irq_level, 0);
+
+        let mut raw_bus = test_bus_with_pc(0x100);
+        raw_bus.paula.intena = INT_MASTER | INT_VERTB;
+        raw_bus.paula.intreq = INT_VERTB;
+        raw_bus.irq_latency_setting = 0;
+        raw_bus.advance_devices(1);
+        let mut raw = M68kMachine::new(raw_bus, CpuModel::M68000, false)?;
+        raw.bus.bus.set_cpu_bus_arbitration_enabled(true);
+        raw.bus.read_word(ROM_BASE as u32 + 0x100);
+        assert_eq!(raw.bus.sampled_irq_level, 3);
+        assert_eq!(raw.bus.sampled_operand_irq_level, 3);
+        Ok(())
+    }
+
+    #[test]
     fn irq_recognition_uses_previous_instruction_ipl_sample() -> Result<()> {
-        // The 68000 latches its IPL pins during bus cycles: a level that
-        // rises AFTER an instruction's last bus access is not seen at the
-        // next instruction boundary -- it is recognized one instruction
-        // later, once a bus access has sampled the new level.
+        // The instruction-boundary decision uses the previous instruction's
+        // qualified sample: a source that becomes pending AFTER the final
+        // bus access is ineligible at the next boundary and is recognized
+        // after a later access takes a fresh sample.
         let mut bus = test_bus_with_pc(0x0000_0100);
         write_program(
             &mut bus,
@@ -9179,10 +9682,9 @@ mod tests {
 
         assert_eq!(slice.instructions, 3);
         assert_eq!(machine.d(0), 0x55);
-        // The cycle-exact core keeps a two-word prefetch queue filled ahead of
-        // the program counter, so after the handler's one-word MOVEQ #$55 at
-        // $0200 the reported PC is $0200 + 2 (executed) + 4 (queued ahead).
-        assert_eq!(machine.pc(), 0x0000_0206);
+        // Only the handler's MOVEQ has retired after the two mainline
+        // instructions. Prefetch does not advance the architectural PC.
+        assert_eq!(machine.pc(), 0x0000_0202);
         assert_ne!(machine.bus().paula.intreq & INT_PORTS, 0);
         assert_eq!(machine.bus().delivered_irq_pending & INT_PORTS, INT_PORTS);
         Ok(())
@@ -9261,6 +9763,125 @@ mod tests {
             0xFF,
             "the reboot after RESET reads as warm"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn stopped_irq_refresh_does_not_advance_time_or_consume_poll_wait() -> Result<()> {
+        let mut bus = test_bus_with_pc(0x100);
+        write_program(&mut bus, 0x100, &[0x4e72, 0x2000]);
+        write_program(&mut bus, 0x200, &[0x4e71]);
+        set_autovector(&mut bus, 1, 0x200);
+        bus.paula.intena = INT_MASTER | 4;
+        bus.irq_latency_setting = 6;
+        let mut machine = M68kMachine::new(bus, CpuModel::M68000, false)?;
+        machine.step_slice(1)?;
+        machine.bus_mut().paula.intreq = 4;
+        for _ in 0..7 {
+            machine.bus_mut().advance_cpu_idle_devices(1);
+        }
+        let before = machine.bus().emulated_cck();
+        assert_eq!(machine.refresh_irq_line(), 0);
+        assert_eq!(machine.bus().emulated_cck(), before);
+        assert_eq!(machine.bus().slice_bus_advanced_cck(), 0);
+        let mut checkpoint = Vec::new();
+        machine.write_state(&mut checkpoint)?;
+        let run = machine.step_slice(1)?;
+        assert!(!machine.stopped());
+        assert_eq!(
+            machine.bus().emulated_cck() - before,
+            u64::from(run.bus_advanced_cck)
+        );
+        assert_ne!(run.bus_advanced_cck, 0);
+        let automatic_time = machine.bus().emulated_cck();
+        let automatic_pc = machine.pc();
+        machine.apply_state(&mut std::io::Cursor::new(checkpoint))?;
+        machine.bus_mut().advance_cpu_idle_devices(1);
+        let aligned = machine.step_slice(1)?;
+        assert_eq!(machine.bus().emulated_cck(), automatic_time);
+        assert_eq!(machine.pc(), automatic_pc);
+        assert_eq!(run.bus_advanced_cck, aligned.bus_advanced_cck + 1);
+        assert_eq!(run.cpu_cck, aligned.cpu_cck + 1);
+        assert_eq!(run.cpu_cycles, aligned.cpu_cycles + 2);
+        Ok(())
+    }
+
+    #[test]
+    fn stopped_cpu_poll_phase_survives_restore_between_polls() -> Result<()> {
+        let mut bus = test_bus_with_pc(0x100);
+        write_program(&mut bus, 0x100, &[0x4e72, 0x2000]);
+        write_program(&mut bus, 0x200, &[0x3b6e, 0x0006, 0x0000]);
+        set_autovector(&mut bus, 1, 0x200);
+        bus.paula.intena = INT_MASTER | 4;
+        bus.irq_latency_setting = 6;
+        let mut machine = M68kMachine::new(bus, CpuModel::M68000, false)?;
+        machine.cpu.dar[13] = 0x400;
+        machine.cpu.dar[14] = CUSTOM_BASE;
+        machine.step_slice(1)?;
+        let phase = machine.stop_poll_phase;
+        machine.bus_mut().advance_cpu_idle_devices(1);
+        machine.bus_mut().paula.intreq = 4;
+        machine.bus_mut().advance_cpu_idle_devices(6);
+        let mut checkpoint = Vec::new();
+        machine.write_state(&mut checkpoint)?;
+        machine.step_slice(1)?;
+        let expected_beam = machine.bus().peek_word_any(0x400);
+        let expected_time = machine.bus().emulated_cck();
+        machine.apply_state(&mut std::io::Cursor::new(&checkpoint))?;
+        assert_eq!(machine.stop_poll_phase, phase);
+        machine.step_slice(1)?;
+        assert_eq!(machine.bus().peek_word_any(0x400), expected_beam);
+        assert_eq!(machine.bus().emulated_cck(), expected_time);
+        Ok(())
+    }
+
+    #[test]
+    fn copper_softint_wakes_stop_at_a500_hardware_beam_positions() -> Result<()> {
+        // amiga-hardware-probes: WAIT line 64 at sixteen horizontal phases, then
+        // MOVE SET|SOFTINT to INTREQ. The first handler instruction copies
+        // VHPOSR, exactly as on the physical 512K-chip/512K-slow A500.
+        for phase in 0..16 {
+            let target_h = 0x40 + phase * 2;
+            let mut bus = test_bus_with_pc(0x100);
+            bus.set_agnus_revision(crate::chipset::agnus::AgnusRevision::Ecs8372Rev4);
+            write_program(&mut bus, 0x100, &[0x4e72, 0x2000]); // STOP #$2000
+            write_program(&mut bus, 0x200, &[0x3b6e, 0x0006, 0x0000]);
+            write_program(
+                &mut bus,
+                0x300,
+                &[
+                    0x4001 | target_h,
+                    0xfffe,
+                    0x009c,
+                    0x8004, // SET|SOFTINT
+                    0xffff,
+                    0xfffe,
+                ],
+            );
+            set_autovector(&mut bus, 1, 0x200);
+            bus.paula.intena = INT_MASTER | 0x0004;
+            bus.agnus.dmacon = DMACON_DMAEN | DMACON_COPEN;
+            bus.copper.jump(0x300);
+            bus.irq_latency_setting = 6;
+            let mut machine = M68kMachine::new(bus, CpuModel::M68000, false)?;
+            machine.cpu.dar[13] = 0x400;
+            machine.cpu.dar[14] = 0x00df_f000;
+            machine.step_slice(1)?;
+            assert!(machine.stopped());
+            for _ in 0..20_000 {
+                machine.step_slice(1)?;
+                if !machine.stopped() {
+                    break;
+                }
+                machine.bus_mut().advance_cpu_idle_devices(1);
+            }
+            assert!(!machine.stopped(), "SOFTINT must wake STOP");
+            assert_eq!(
+                machine.bus().peek_word_any(0x400),
+                0x4000 | (target_h + 37),
+                "hardware VHPOSR capture at phase {phase}"
+            );
+        }
         Ok(())
     }
 

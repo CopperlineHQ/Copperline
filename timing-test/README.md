@@ -16,7 +16,52 @@ perturbed by the system ROM. Loading to a fixed address also matters: the ROM's
 boot buffer can land in slow RAM, and code-fetch timing must not depend on where
 the code happens to sit.
 
+The beam-based rows use `227 * vertical + horizontal` colour clocks on PAL.
+The VHPOSR horizontal byte already counts colour clocks. Earlier binaries
+incorrectly doubled that byte, creating a discontinuous clock at scanline
+boundaries; those elapsed values must be remeasured before comparing timing.
+The correction replaces the doubling instruction with an equal-cost NOP.
+
 ## Building
+
+The A500 hardware-review boundary probes are registered in
+`tests/probe_golden.rs`, with their source and assembled binaries committed:
+
+- `a500-blit-boundaries`: raw DMACONR, destination words and beam samples
+  after 0–7 NOP gaps. Separate rows exercise D-only startup, zero-result A-to-D
+  copies, and descending two-word destination restores under BLTPRI.
+- `a500-display-boundaries`: paired single/dual-playfield early CLXDAT reads
+  and clears, BPL2PTL writes around initial fetch, and CPU beam reads across
+  line-end refresh. Each four-line row renders collision/beam/collision/beam.
+
+Both load at `$30000`, disable interrupts, and render raw result bits as pixels.
+Their goldens protect the emulator's snapshots; they do not turn a screenshot
+into a hardware timing reference. Corresponding versioned A500 measurements
+and qualification rules remain in `amiga-hardware-probes/references/` and its
+`docs/pr-810-review.md`. Assemble with the existing vasm workflow; use
+`-m68000 -no-opt` to preserve the explicit instruction gaps.
+
+`cia-movem-irq.asm` is an asset-free CPU/CIA interrupt regression fixture,
+loaded directly by `cpu::tests::cia_timer_irqs_preserve_movem_sample_phase`.
+It starts continuous CIA-B and CIA-A timers, wakes from STOP, and samples six
+register bytes per iteration while level-2/level-6 handlers permute registers
+through balanced MOVEM save/restore lists. Sixteen relative timer-start phases
+check interrupt counts and the complete 600-byte sample buffer's checksum.
+This reproduces the interrupt-sensitive pattern used by Voyage's startup
+without including its code, disk, or a Kickstart ROM. The expected values are
+regression references from the last working polling behavior, not hardware
+captures. Run it with:
+
+```sh
+cargo test --locked --lib cia_timer_irqs_preserve_movem_sample_phase
+vasmm68k_mot -Fbin -m68000 -o timing-test/cia-movem-irq.bin timing-test/cia-movem-irq.asm
+```
+
+The assembled fixture is committed so the test needs no assembler.
+Toni Wilen's WinUAE provided an independent CIA/Copper interrupt control
+comparison during diagnosis; the sample hashes remain regression references.
+See [the polling investigation](../docs/internals/a500-irq-focus-2026-10-15.md)
+for provenance and the outstanding external-interrupt measurements.
 
 Needs [vasm](http://sun.hasenbraten.de/vasm/) (`vasmm68k_mot`, Motorola syntax):
 
@@ -488,7 +533,24 @@ The two probes that render live E-clock-referenced counts (`timing-test`,
 bootblock handoff depends on how long the ROM took to boot, so their
 displayed counts shift by a tick or two whenever the bundled AROS ROM is
 refreshed (or a count sitting on an 8-iteration display-bucket edge flips a
-whole bar word). Re-bless and review the diff after a ROM refresh.
+whole bar word). Hardware timing fixes can move the bootblock handoff phase
+too. Re-bless and review the diff after either kind of change.
+
+The OneROM A500 CIA/interrupt timing corrections refresh these two references:
+the timing table changes with the corrected CIA transfer, START/STOP,
+running FORCE LOAD hold, interrupt timing and fixed-DMA starvation counting;
+three `bltprobe-pace` polling bars shorten by one word as
+their counts cross an eight-iteration display bucket. The other 43 golden
+renders remain byte-identical. These references record the deterministic
+probe output; the timing model's hardware evidence is described in
+[`docs/internals/timing.md`](../docs/internals/timing.md#cia-register-transfers-and-timer-startup).
+
+The A500 timing branch also refreshes previously stale references verified
+byte-identical with binaries before and after its v1 rebase: timing-table
+rows 26, 27, 28 and 31 change from 6230/6428/3A23/131F to
+623B/6433/3A22/1316 (hex). The clxprobe second row clears PF-PF bit 0
+as well as sprite-playfield bit 1 when the enabled plane match fails.
+These fixture updates introduce no further emulation changes.
 
 Each probe is its own `#[test]`, so the harness runs the emulator boots in
 parallel on the available cores (the full suite of 45 takes ~20 s on an
@@ -630,7 +692,8 @@ pair -- the sprite register-FSM class), `regprobe-bytemirror` (CPU byte
 writes latch the mirrored word into COLOR00 -- both byte lanes must render
 the same magenta), `clxprobe` (the CLXDAT collision matrix rendered as
 bit cells for two CLXCON programs, including a plane enabled beyond the
-BPU count), `audprobe-en` (the AUD0 interrupt cadence as a
+BPU count; its unsatisfied match clears both PF-PF bit 0 and odd
+sprite-playfield bit 1), `audprobe-en` (the AUD0 interrupt cadence as a
 one-row-per-line strip across a scripted AUDxEN enable / same-word
 disable-re-enable punch / disable / cold-restart sequence -- the issue #74
 deferred AUDxEN-disable class, which the Paula HRM rework regressed once;

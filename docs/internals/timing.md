@@ -10,6 +10,30 @@ model is in [](cpu.md). Every rule here is backed by named regression tests
 plus `src/bus/tests.rs` and `src/video/bitplane/tests.rs`), and many by a
 golden probe render (see [](#cross-checking-against-hardware)).
 
+## Custom-register read sampling
+
+On the arbitrated 68000 path, CLXDAT is sampled and cleared at the start
+of its granted word transfer. Pixels clocked during that word or its trailing
+CPU clock belong to the next read. Paula INTREQR retains its independently
+calibrated end-of-slot sample. Byte reads select their lane; long reads sample
+each custom-bus word separately. Other registers retain their existing phases.
+
+Live collision scans use the absolute pixel-comparator conversion
+`x = 4 * H - 2 * DIW_HSTART_FB0`, matching the window and sprite coordinates.
+The render-write anchor is a different domain and must not advance the
+collision cursor. At H=$40 the pixel cursor is x=60; DIWSTRT=$81 opens at
+x=62 during that clock. Reading CLXDAT at the transfer's start must not include
+that later pixel. DMA grants, rendered positions and register-write events
+are unchanged.
+
+Saved A500 kind72/73 sweeps in `amiga-hardware-probes` now match all719
+qualified cases:29 early observations repaired in total, including the final
+eight. The561 unmatched timing cohorts remain excluded, not counted as matches.
+This is scoped validation, not a claim of complete collision accuracy. Named
+regressions in `src/bus/tests.rs` check the absolute DIW boundary and retention
+of bus-tail collisions across byte/word/long reads. Graphical fixture
+observations use the pixel clock without changing their expected bit values.
+
 ## Chip-bus arbitration
 
 Every colour clock of every scanline has an owner, decided in priority
@@ -164,18 +188,27 @@ save state).
 
 ### CPU vs blitter
 
-DMACON's BLTPRI ("blitter nasty") is modelled as on hardware: with BLTPRI
-set the blitter wins every slot it requests, and the request line stays
-asserted through the blit's warm-up -- the startup ladder and, for
-D-writing blits, the first word's cycles including the empty first-D
-bubble -- so the CPU is fenced out of those holes too (the Copper and
-fixed DMA still use them). Once the pipeline is primed, genuinely bus-free
-micro-cycles (line-mode Bresenham cycles, fill's idle cycle,
-disabled-channel gaps) release the request and stay CPU-available even
-under BLTPRI, matching FS-UAE/vAmiga per-slot arbitration. Without
-BLTPRI, the blitter yields a slot after the CPU has missed three
-consecutive slots, matching the Minimig RTL. The counter and the
-back-pressure rule are detailed under [](#cpu-contention) below.
+BLTPRI affects ownership only on colour clocks when the blitter actually
+requests the chip bus. A requested slot goes to the blitter ahead of the CPU;
+startup ladder cycles, the empty first-D bubble, line-mode Bresenham cycles,
+fill idle cycles, and disabled-channel gaps do not create a separate warm-up
+fence. The CPU can use those idle slots even when BLTPRI is set. With BLTPRI
+clear, the blitter still holds requested slots until the CPU has missed three
+consecutive chip-bus clocks, then yields one slot; fixed-DMA denials count
+among those misses. The starvation threshold and reset rule are described in
+[](#cpu-contention) below.
+
+This model is supported by chip-bus regressions and aligned One ROM captures,
+not title-specific timing assumptions. An independent colour-clock sequence
+model that gives BLTPRI precedence only when a blitter bus request is asserted
+reproduces every one of the 3,456 hardware priority-on busy samples. Across
+busy, IRQ and destination-memory observers, 3,456 aligned trials for each of
+the two BLTPRI settings match both hardware and WinUAE in masked state and
+elapsed colour clocks: 20,736 hardware trials total, with no mismatches. The
+priority-on busy and IRQ ROM source IDs are `93adfec44fe58ea38aba0e07e81f7949d1eaf519dc6bcc5914d10f2f5d2ccf1f`
+and `18786132832d8aab99388ce1a1c52fbd12ff01465f40a73d21c71799f07edd53`.
+The full capture provenance and scope are documented in the probe repository
+at `docs/rom-timing-isolation-2026-10-14.md`.
 
 ### Sprite DMA control rewrites
 
@@ -451,16 +484,30 @@ the same slot-eligibility primitive the live engine uses.
 
 ### Per-slot FSM
 
-Scheduled blits use explicit phases matching the hardware controller,
-cross-checked cycle-for-cycle against vAmiga's slot-accurate blitter with
-a two-sided slot-trace probe (`COPPERLINE_DIAG_BLT_SLOTS` in Copperline,
-`VAMIGA_BLT_PROBE` hooks in a local vAmiga build):
+Scheduled blits use explicit phases for the hardware controller. ROM-resident
+One ROM probes on a PAL A500 (ECS Agnus, OCS Denise, 512 KB chip + 512 KB slow)
+separately observe busy, interrupt and destination-memory reads. Launch phases
+are aligned before starting the blit; the observer's first chip-bus access is
+the measured read, followed by a raw beam timestamp. Across all normal USE
+masks, eight D-enabled fill masks and two line modes, the busy, IRQ and memory
+observers cover 20,736 trials across BLTPRI clear and set. Hardware, WinUAE
+Best Compatibility and Copperline match in observed state and elapsed read
+time. DMACONR.BZERO is measured separately: three clocks of normal propagation,
+plus one for fill's USE-D/no-USE-C idle phase, match the complete 4,608-row
+packet byte-for-byte. Broader line-mode flag semantics remain unresolved.
+The [measurement report and remaining plan](a500-timing-measurements-2026-10-14.md)
+records the scope and comparison baselines. The measurements refine the earlier
+cross-emulator slot traces:
 
-- **Startup**: two internal extra slots (the BLTSIZE register-commit
-  cycle plus the BLT_STRT arbitration cycles real Agnus spends before the
-  micro-program begins) followed by the StartDelay/Init slots, so the
-  first body cycle runs at poke+4, matching vAmiga's BLT_STRT1/BLT_STRT2
-  timeline. The startup applies to normal and line blits alike.
+- **Startup**: CPU-launched normal-mode StartDelay and Init each consume a
+  fixed-DMA-free colour clock after the BLTSIZE write completes. They do not
+  claim the bus and can advance alongside Copper transfers. A500
+  source-overwrite races distinguish the first-stage stall under six-plane DMA
+  from the second-stage stall under four-plane DMA. Copper-launched blits retain
+  the separately calibrated deferred register pipeline and internal startup;
+  line startup also retains its internal timing. Adding extra register-commit
+  clocks here double-counted time already
+  advanced by the CPU register-write bus cycle.
 - **Body**: the source cadence follows the enabled-channel speed table: A
   is always visited, B and C only when enabled, and D when D is enabled
   or no C next-word state exists. D output is delayed through the hold
@@ -468,25 +515,34 @@ a two-sided slot-trace probe (`COPPERLINE_DIAG_BLT_SLOTS` in Copperline,
   does not claim the chip bus -- including D-only clears, which write
   "-- D0 -- D1 | -- D2" on hardware. The first destination word is
   written on the next D slot and the final word in the F flush slot.
-- **Termination**: every program ends with two terminal micro-cycles (the
-  internal D-hold flush and the BLTDONE cycle -- the final D write for
-  USED programs, internal otherwise). DMACONR's BBUSY drops with the
-  sequencer's final body cycle, BEFORE those terminal cycles: polling
-  loops see BBUSY clear two cycles before the last D word lands. The
-  register file is published at that same point (pointers, BLTCDAT, and
-  a line blit's ASH/BSH/SIGN/accumulator), so the terminal cycles only
-  retire the queued D word and never write registers back over values
-  software has already programmed for its next blit.
-  INTREQ.BLIT rises one colour clock after the BLTDONE cycle's FIRST
-  attempt (vAmiga `scheduleIrqRel(BLIT, 1)` runs before the bus
-  allocation check), so a bus-blocked final D write raises the interrupt
-  before the word lands; the Copper's blitter-finished gate opens when
-  the BLTDONE cycle completes.
+- **Termination**: the last body cycle is followed by E (internal flush) and
+  F (the final D write when enabled). BBUSY clears when E completes; the engine
+  remains active until F completes. The interrupt is armed at E's completion
+  and asserted three colour clocks later, independently of a stalled F write.
+  The bus countdown starts at four because the arming clock itself decrements
+  it once. A chip-RAM CPU read samples its own granted slot before the trailing
+  bus-cycle clock can perform a blitter write. Reading RAM after that tail
+  incorrectly returned a destination word which hardware had not yet exposed
+  to the CPU. Custom-register readback retains its separate timing path.
+  The register file is released when BBUSY drops, so terminal cycles
+  retire the queued D word without overwriting registers programmed for
+  the next blit.
 
 Normal-mode A/B barrel-shifter carry is cleared at the first word of a new
 BLTSIZE, then carries from the last source word of one row into the first
 source word of the next inside that blit; masks, modulos, and fill carry
-still observe row boundaries. Line blits follow vAmiga's four line
+still observe row boundaries.
+
+Normal A/B sources are read from live chip RAM in their granted DMA slots,
+just like C. BLTSIZE latches registers, not the contents of future source
+addresses: A500 kind77 copies a CPU overwrite made after launch when the CPU
+wins before the source fetch. An already fetched word remains latched for
+the shifter/minterm pipeline. D-to-A/B feedback and physical aliases therefore
+follow live RAM too. Legacy snapshot/overlay fields remain loadable in saved
+pending blits, but do not determine source data; new blits allocate no source
+snapshot buffers.
+
+Line blits follow vAmiga's four line
 micro-programs, indexed by the USEB/USEC pair: with USEB clear each pixel
 is four cycles (L1-L4: L2 fetches C when USEC is set, L3 propagates, L4
 stores), and with USEB set each pixel is six (an LB cycle fetches B --
@@ -496,7 +552,24 @@ even when SING suppresses the store (unlike copy mode, where a locked D
 slot is bus-idle); with USEC clear no line cycle touches the bus, and the
 terminal BLTDONE cycle of a USEB program is itself a bus-idle cycle.
 A SING-suppressed dot only locks the store: the A shifter, minterm and
-BZERO update still run on the full inputs. The Bresenham error
+BZERO update still run on the full inputs.
+
+One ROM measurements on the PAL A500 additionally show a register-texture
+(USEB clear) BZERO evaluation after the texture counter wraps from BSH=0
+to 15 between pixels. The model evaluates the preceding pixel's shifted A
+and C holds with B=$ffff; it does not write a D word. That B input fits the
+earlier selected cases, but is not a universal hardware rule: the
+[one-hot and minterm controls](a500-copper-blitter-followup-2026-10-17.md)
+find repeatable exceptions at effective A bits 13 and 11, despite matching
+destination data and direct-A flag controls.
+L2 evaluates those old holds before fetching the next C word, and L3
+exposes the queued clear. A blit starting at BSH=15 has no preceding pixel
+and does not trigger this check. Save states preserve the prior A hold and
+pending clear. The wrap-stage input/reduction exceptions, B-DMA and other
+non-wrap effects remain unresolved; see the
+[One ROM measurement report](a500-line-bzero-2026-10-15.md).
+
+The Bresenham error
 accumulator (BLTAPT's low word) advances only while USEA is enabled, the
 line texture register is BLTBDAT rotated by the LIVE BSH each pixel (no
 write-time latch, unlike the USEB-off copy hold word), and C DMA fetches
@@ -513,6 +586,19 @@ colour clocks relative to the BLTSIZE poke. Tests:
 `scheduled_shift_carry_crosses_normal_mode_row_boundary`,
 `scheduled_a_shift_zero_fills_first_word_of_new_blit`.
 
+B DMA also updates raw BLTBDAT and the retained B shifter hold at each fetch,
+so a later operation with USEB clear consumes the last fetched/shifted data.
+One ROM A500 controls distinguish the line texture used to select a pixel
+from the hold retained for a subsequent normal-mode blit. With B DMA disabled,
+the first pixel retains a zero-filled shift of the raw word; subsequent
+pixels retain the pre-rotation texture. B-DMA lines retain the post-rotation
+texture instead. Line completion preserves the previous raw B word as carry
+for a later CPU BLTBDAT write using the then-current BSH. These updates occur
+on fetch/pixel events, so terminal drain does not overwrite a newer CPU write.
+The [follow-up measurements](a500-copper-blitter-followup-2026-10-17.md)
+record the tested patterns, shifts, lengths and write orders. This corrects
+retained data; the separate inter-pixel BZERO exceptions remain unresolved.
+
 ### Mid-operation register writes
 
 The HRM documents the blitter as an asynchronous DMA engine, says BLTSIZE
@@ -528,7 +614,7 @@ classification of writes while BBUSY is set:
 | `BLTAFWM`, `BLTALWM` | Deferred | First/last-word masks captured by the scheduled state at BLTSIZE. |
 | `BLT[ABCD]PTH/PTL` | Deferred | Pointer writes do not retarget the already-scheduled transfer. |
 | `BLT[ABCD]MOD` | Deferred | Modulos captured at BLTSIZE. |
-| `BLTBDAT` | Immediate, write-time shifter | The write runs the B barrel shifter with the BSH/DESC current at write time (unlike BLTADAT/BLTCDAT); USEB-off blits consume that latched hold word. The first B write after the previous blit drops BBUSY zeros the B old register; later writes shift through the latched B data. |
+| `BLTBDAT` | Immediate, write-time shifter | The write runs the B barrel shifter with the BSH/DESC current at write time (unlike BLTADAT/BLTCDAT); USEB-off blits consume that latched hold word. Normal-mode completion resets the next write's old-word input; line completion preserves the raw B carry. B DMA also updates raw data and the hold. |
 | `BLTSIZE` | Deferred restart | A second start strobe drains the current blit first, then starts the replacement from the post-completion pointer state. |
 | `DMACON.DMAEN/BLTEN` | Immediate | Gate blitter bus grants immediately; clearing leaves BBUSY set and preserves the pending blit until re-enabled. |
 | `DMACON.BLTPRI` | Immediate | Bus arbitration observes the priority bit directly. |
@@ -577,56 +663,47 @@ both emulators.
 ### CPU contention
 
 With BLTPRI clear, Copperline models the Agnus blitter-slowdown counter
-(the Minimig RTL `bls_cnt`). A busy "nice" blitter still holds the chip bus
-on its access cycles -- the CPU gets no regular alternate slot. Each colour
-clock the waiting CPU misses still increments the diagnostic miss count, but
-the BLS pressure counter only advances when the pending blitter micro-cycle
-is a real pressure source: a bus access, fill's explicit idle cycle, or
-line-mode BUSIDLE. Ordinary normal-mode "-" cycles from disabled channels or
-the empty D pipeline bubble stall through fixed DMA but do not make the
-blitter yield earlier. After `BLITTER_SLOWDOWN_CPU_MISS_LIMIT` (3)
-consecutive pressure misses the blitter yields one slot, matching the HRM
-"one bus cycle in four" rule while also matching UAE's `blitter_nasty`
-distinction between normal idle cycles and fill/line BUSIDLE. Idle blit
-pipeline cycles never claim the bus and stay CPU-available -- with one
-exception: with BLTPRI set, the blit's warm-up holes (the startup ladder
-and, for D-writing blits, the first word's cycles including the empty
-first-D bubble) fence the CPU, because the sequencer's bus request is held
-asserted by its queued back-to-back first fetches. Software depends on the
-warm-up fence: MFM-decode trackloaders (e.g. Jim Power's) save the word
-below a decode blit's destination, write BLTSIZE, and restore it two
-instructions later; granting the CPU the startup and first-D holes let the
-restore (and its prefetches) land mid-blit and the blitter overwrite the
-restored word, corrupting the last data word of every decoded sector. Once
-the pipeline is primed, bus-free micro-cycles are CPU-available even under
-BLTPRI -- line-heavy demo main loops (Rampage's vector parts) depend on
-that CPU time, and a whole-blit fence overshoots the FS-UAE/vAmiga
-references on timing-test row 26 by ~+70 cck. The counter resets when the
-CPU gets the bus, when BLTPRI is set, or when blitter DMA cannot run.
+(the Minimig RTL `bls_cnt`). A busy "nice" blitter holds every slot in which
+its pipeline requests the chip bus; the CPU receives no regular alternate
+slot. Each consecutive chip-bus clock that denies the waiting CPU advances
+the counter, including fixed-DMA denials during a disabled-channel gap or
+pipeline bubble. An idle blitter phase does not itself reset the counter; a
+CPU grant does. After `BLITTER_SLOWDOWN_CPU_MISS_LIMIT` (3) misses, the
+blitter yields one slot, matching the HRM "one bus cycle in four" rule and
+the Minimig RTL. BLTPRI disables this starvation yield.
+
+With BLTPRI set, the blitter wins only a slot where its current micro-cycle
+requests a bus access. Idle startup and pipeline cycles remain available to
+the CPU, including startup-ladder cycles and the empty first-D bubble. Once
+running, fill's explicit idle cycle and line-mode BUSIDLE likewise do not
+request the bus. The aligned One ROM busy, IRQ and memory observer captures
+match hardware, WinUAE and Copperline for both BLTPRI settings, across 3,456
+trials per observer and setting. The separate kind-22 BZERO matrix also matches
+the tested normal/fill readback; line-texture controls expose additional flag
+behavior that remains under investigation. The historical game-specific
+examples are removed as evidence for the rule.
 
 A 68000 `TAS` read-modify-write is unsafe on chip RAM (the HRM warns
 against it); the `m68k` backend exposes it as a byte read then a byte
 write, so Copperline models `TAS` against chip RAM as two separately
 Agnus-arbitrated accesses, each subject to the same back-pressure rule.
 Tests: `blithog_clear_busy_blitter_yields_to_cpu_only_after_starvation`,
-`bltpri_stalls_cpu_chip_access_through_blitter_access_cycles`.
+`bltpri_cpu_uses_first_d_bubble_but_waits_for_bus_accesses`,
+`bltpri_line_blit_bresenham_cycles_stay_cpu_available`,
+`bltpri_leaves_startup_and_first_d_bubble_available_to_cpu`.
 
 The Frame Analyzer's CPU wait view (and the `cpu` record of a
-`profile.start` export) attributes every colour clock the CPU spends in this
-wait loop to the case that denied it: fixed DMA (`refresh`, `bitplane`,
-`sprite`, `disk`, `audio`), the Copper's access clock (`copper`), `blitter`
-for the nice hold before the counter yields, `blitter_nasty` for a
-BLTPRI-set blitter including the warm-up fence (where the slot's recorded
-owner is idle), and `port` for the 020+ chip port's two-clock turnaround,
-which is a wait on the CPU's own bus unit rather than a denial. The class is
-taken before each missed clock from the arbitration view the waiting access
-is subject to: a synchronous grant sees the CPU's view (fence and yield
-included); a posted 020+ write drains through the ordinary arbitration,
-where a busy blitter keeps every access cycle. It is recorded on the cold
-bus-observer path, so arming it leaves the timeline untouched. Tests:
+`profile.start` export) attributes each denied colour clock to the actual
+owner: fixed DMA (`refresh`, `bitplane`, `sprite`, `disk`, `audio`), the
+Copper's access clock (`copper`), a BLTPRI-clear blitter hold (`blitter`), or
+a BLTPRI-set blitter bus access (`blitter_nasty`). An idle pipeline cycle is
+not attributed to the blitter. The `port` class describes the 020+ chip
+port's two-clock turnaround, a wait on the CPU's own bus unit rather than a
+denial. A synchronous grant sees the CPU's arbitration view, including the
+three-miss yield; a posted 020+ write drains through ordinary arbitration,
+where a busy blitter keeps every requested access cycle. Tests:
 `frame_analyzer_attributes_cpu_wait_to_nice_blitter`,
-`frame_analyzer_attributes_cpu_wait_to_bltpri_fence`.
-
+`frame_analyzer_attributes_cpu_wait_to_bltpri_bus_access`.
 The analyzer has two recording levels. The cheap level keeps the one-byte
 owner and CPU-wait grids used by the live heatmap. The full level adds one
 24-byte record per raster colour clock and is armed only for an open Frame
@@ -701,36 +778,249 @@ References: HRM [Blitter Hardware, chapter
 
 ## Interrupt-recognition latency
 
-A 68000 does not enter an exception the moment INTREQ rises. Two hardware
-mechanisms sit between the two events, and Copperline models both:
+A 68000 does not enter an exception the moment INTREQ rises. Copperline
+separates source recognition, instruction poll qualification and register
+readback:
 
-1. **The Paula IPL pipe.** A change to the enabled-pending interrupt set
-   reaches the CPU's IPL pins only after a few chip clocks of pipelining
-   inside Paula (`DEFAULT_IRQ_LATENCY_CCK = 5`, `src/bus.rs`;
-   `COPPERLINE_IRQ_LATENCY_CCK` overrides, `0` disables both mechanisms).
-   The delay is attached to asynchronous Paula/CIA/blitter/Copper source
-   assertions. A CPU write that merely changes INTENA/INTREQ masking or
-   acknowledges a latch normally only updates the delayed-bit bookkeeping.
-   PORTS is level-fed by CIA-A/Gayle-style INT2 sources and remains
-   immediately visible when software unmasks an already-latched level; other
-   newly exposed latched sources are treated as freshly-present CPU IPL
-   inputs and still pass through the pipe. INTREQR reads are never delayed:
-   the pipe sits between the level encoder and the pins, not on the register.
-2. **Boundary sampling.** The CPU latches its IPL pins during bus cycles,
-   and the take-interrupt decision at an instruction boundary uses the level
-   latched at the *previous* instruction's last bus access
-   (`CpuBus::sample_ipl`, `src/cpu.rs`). A level that rises during an
-   instruction's trailing internal cycles is therefore recognised one
-   instruction later, exactly as on silicon.
+1. Each newly asserted source receives an independent recognition deadline
+   (`DEFAULT_IRQ_LATENCY_CCK = 6`, `src/bus.rs`). The default is calibrated
+   against the combined A500 board/CPU STOP path, rather than a direct
+   measurement of Paula's IPL pins. Later sources cannot postpone an earlier
+   deadline. CPU mask/acknowledge writes update the bookkeeping; unmasking a
+   latched PORTS level retains its existing immediate behavior. A new
+   Copper-written PORTS request is a source assertion, not an INTENA unmask,
+   and receives a recognition deadline.
+2. A running stock 68000 samples candidates at bus-access starts. Its ordinary
+   qualified prefetch poll uses the deadline minus two CCK; a core-marked
+   unqualified operand poll uses the deadline minus four CCK. The core holds
+   the selected sample through subsequent accesses. Memory TST polls on its
+   operand word (the low word for TST.L); DIVS can mark an internal poll before
+   its final prefetch. Other CPU models and accelerated bus ratios retain
+   their previous qualification. STOP uses the unchanged deadline directly
+   and preserves its two-CCK polling grid. A cleared source is not delivered
+   from a stale sample. `COPPERLINE_IRQ_LATENCY_CCK=0` selects the raw model.
+3. INTREQR is the raw Paula latch, independent of the recognition deadline.
+   A 68000 CPU read captures it during its granted transfer, before the bus
+   cycle's trailing CCK. Reading after the tail incorrectly included Copper
+   writes that occurred after the data transfer. Long accesses sample the
+   INTREQR word in its own slot. Other custom registers retain their separately
+   calibrated phases, and the shorter 020+ data-return path is unchanged.
 
-Together these reproduce the raise-to-handler-entry positions measured
-against vAmiga (and the vAmigaTS real-A500 photos) across VERTB and
-copper-poked INTREQ sources under a range of foreground loops; the residual
-is 0..+7 CCK of per-instruction IPL poll-point detail the m68k core does
-not model. An earlier revision used a blanket 65 CCK "recognition latency"
-calibrated against timing-test row 19 with a mis-decoded VHPOSR (the low
-byte is the CCK position, not CCK/2); that delivered every interrupt ~50 CCK
-late and dominated the vAmigaTS cputim/irqtim divergence.
+The [focused One ROM measurements](a500-irq-focus-2026-10-15.md) match all
+2,212 A500 observations after these corrections; the earlier 2,560-divider
+and 896-STOP result packets also match hardware byte-for-byte. WinUAE Best
+Compatibility agrees on the same measured fields. This closes the observed
+poll/readback differences in those suites, not every instruction, source,
+DMA or priority transition. The previous full six-CCK qualification at a
+prefetch's start counted its trailing transfer twice, making ordinary
+instruction recognition two CCK late. Globally shortening the deadline
+fixed those instructions but broke the already accurate STOP path.
+
+Copper-generated PORTS/EXTER requests use the same running-instruction poll
+qualification as internal Paula requests. The request bit alone cannot identify
+an external CIA edge: a Copper INTREQ write can set either bit. A serialized
+origin mask preserves that distinction until acknowledgement. Pin-fed CIA and
+unmeasured CPU-written external request paths keep their previous qualification.
+Paired A500 STOP/running/readback controls and remaining CIA request-visibility
+differences are recorded in the sibling probe repository at
+`docs/irq-stage-investigation-2026-10-19.md`. These measurements do not justify
+removing the six-clock default or claiming an isolated IPL-pin delay.
+
+The six-CCK default is calibrated against `amiga-hardware-probes` captures from a
+PAL A500 with 512 KB chip RAM, 512 KB slow RAM, ECS Agnus and OCS Denise.
+With only Copper DMA enabled, a WAIT at line 64 followed by a MOVE that
+sets SOFTINT wakes a STOPped 68000: the handler's first instruction records
+VHPOSR 37 CCK after the WAIT target at all sixteen horizontal phases,
+twice each. The previous five-CCK default recorded 36. This validates the
+combined Copper/interrupt/CPU/readback path, not an isolated measurement of
+the propagation delay at Paula's pins.
+
+A subsequent RAM-resident ROM probe on the same A500 measured both 37 and
+38 CCK with DMA disabled. A fixed WAIT at line 96, horizontal 64, and a
+NOP sweep before STOP separated the CPU phase from the Copper target.
+Across 256 trials, the parity of the logged entry beam predicted the
+result exactly; inserting EXG (six CPU clocks) reversed the relationship.
+The stock 68000 STOP path therefore retains a four-CPU-clock (two-CCK) polling
+grid from STOP entry and recognizes a newly visible IPL at the next poll.
+This phase is saved with the machine. The boundary-recognition setting remains
+six CCK; changing that constant cannot reproduce both results.
+
+On the 68000/68010 motherboard bus, interrupt acknowledge reads the low
+byte of the ROM word at `$FFFFF0 + 2 * level`. Normal Kickstart's final
+eight words contain vector numbers 24 through 31. A custom ROM must supply
+these words; Copperline does not replace a missing word with an autovector
+or suppress delivery because a RAM handler is zero. The freezer cartridge
+retains its own acknowledge behavior. The accelerated CPU bus path retains
+autovector delivery. This ROM-data behavior was checked on the One ROM A500
+by changing the level-1 word to select the installed vector-30 handler.
+The zero-footer measurement ROM now reproduces the physical machine's
+illegal-instruction fault at `$003020`, rather than completing its trials.
+
+### CIA register transfers and timer startup
+
+A CIA access uses the 68000's synchronous VPA/E bus cycle, not an ordinary
+four-clock DTACK cycle ([MC68000 User's Manual, appendix B](https://www.nxp.com/docs/en/reference-manual/MC68000UM.pdf)). The E period is
+ten CPU clocks, six low and four high. `cpu_cia_access` synchronizes the
+transfer to the E falling edge. The register transfer occurs before that
+edge's CIA update; `cpu_cia_access_finish` applies the edge and then advances
+the final six CPU clocks. Applying a START write after its transfer edge
+would miss the first timer pipeline stage and postpone underflow by an
+entire E-clock. The total access cost is unchanged.
+
+Timers A and B propagate START through two count-enable stages on PHI2.
+Clearing START reads back immediately, but counting continues for the two
+edges while those stages drain. A STOP-only delay sweep measured two extra
+decrements on both timers of both physical CIAs (320 trials). One-shot
+underflow stops counting directly. START+LOAD, including a stopped one-shot
+timer's high-byte auto-start, holds counting for three E-clock edges.
+FORCE LOAD with START still set applies the same three-edge hold to an
+already-running timer; it does not require a stopped-to-running transition.
+A One ROM sweep on the physical A500 measured this on both timers of both
+CIAs: 640 reload trials, five launch phases and sixteen read delays. Before
+the correction every live sample was three counts too low; afterwards both
+the live and fully stopped counts matched all 640 hardware samples exactly.
+This also removes the three-E-clock bias in repeated `timing-test` stopwatch
+rows, whose one-shot high-byte write starts the timer before CRA FORCE LOAD.
+On a CPU VPA write the transfer edge feeds the first stage. The timer's START bit is readable
+during startup; one-shot underflow still clears it. Startup advances on
+PHI2 even for CNT/cascade modes, and underflow predictions include the
+remaining stages so a stopped CPU cannot nap past an interrupt. The
+LOAD holds and count-enable stages travel in snapshots. Older snapshots
+reconstruct the stages from their running flag and startup delay; legacy
+USS imports restore a steady running or stopped timer.
+
+The clock-source and one-shot qualifiers also pass through two PHI2 stages.
+Changing a running timer B from PHI2 to timer-A underflows retains two final
+PHI2 decrements; changing back delays the first PHI2 decrement by two edges.
+Clearing one-shot together with START does not cancel a one-shot underflow
+already in those stages. The qualifier history travels in snapshots.
+
+Timer-A underflows reach timer B's cascade input one E-clock later. The
+pending final pulse is saved and included in STOP wakeup predictions, even
+when timer A has already stopped. Batched updates retain that final pulse
+and deliver all preceding ones; latch zero produces one underflow per
+enabled input tick. One-shot batches stop at their first underflow. A zero
+START+LOAD also produces carry on the last LOAD stage, before the first
+decrement, and can stop a one-shot there.
+
+CIA batches step individual PHI2 edges while timer PB outputs, serial output,
+an ICR-read race, or control pipelines need edge ordering. This preserves PB
+toggle parity and one-edge pulse widths, and prevents elapsed batch time from
+consuming the IRQ-pin delay of a serial completion on the final edge. Once
+these effects settle, ordinary timer counting remains batched. Regression
+tests compare complete states after identical clock sequences partitioned
+into one batch or individual edges. This is a batching consistency correction,
+not a new measurement of physical IRQ propagation or a latency recalibration.
+
+Physical A500 captures from 19 October 2026 additionally constrain the
+Timer-A PB6 and serial output behavior on both CIAs. Pulse mode idles low
+and drives high for the underflow pulse, including when DDRB selects input.
+START initializes the toggle latch high. Adjacent zero-latch underflows
+merge into one asserted pulse and therefore produce only one toggle edge;
+a gap rearms the next edge. High-byte one-shot auto-start also initializes
+the toggle latch. Zero-latch auto-start carry and early PB readback remain
+under investigation on the separate `wip/cia-propagation-pb-stop` branch.
+
+Serial output advances one bit per two Timer-A underflows and asserts SP
+after sixteen underflows for a clean byte. Serial input still shifts eight
+external CNT edges. The output half-clock phase is saved, with defaults for older states. These measurements do not establish
+serial buffering semantics, Timer-B zero-latch auto-start, electrical IRQ
+latency, or CPU IPL sampling. Captures, provenance and comparison rules are
+in the sibling `amiga-hardware-probes` repository's
+`docs/cia-hardware-verification-2026-10-19.md`.
+
+Synchronous CPU timer reads sample the reload data mux before the falling
+edge commits the counter. At an eligible PHI2 reload slot, internal count
+zero therefore reads as the latch value. This changes readout, not the
+internal countdown or the continuous period of `latch + 1`. Counter
+inspection and fully stopped reads still expose the actual stored count.
+
+These details were isolated with One ROM on the real 512K-chip/512K-slow PAL
+A500 on 13–14 October 2026: independent reference timers were frozen before
+reading, live reads were bracketed by a reference STOP, and timer B counted
+timer-A underflows. A dense 6240-trial live-read sweep fits the same
+E-clock-calibrated read curve on hardware and Copperline, including 60
+hardware reload-boundary samples at latch 15. The calibration offset belongs
+to the probe's instruction sequence and is not an emulator timing setting.
+
+The earlier sparse period probe's reference interval includes setup and
+reads after the first target sample, so matching that whole interval does
+not establish matching target-read phase. Use the bracketed reference and
+large-latch controls for this comparison; raw trial indices and matching
+NOP counts alone are insufficient.
+
+ICR's IR bit is a latch: clearing an interrupt mask does not clear a
+previously recorded enabled interrupt. Reading ICR acknowledges the latch.
+Re-enabling a still-pending source arms the IRQ pin even when IR was already
+set. The mask-clear captures constrain this readback behavior, rather than
+the electrical pin's precise deassertion edge.
+
+The hardware probe's CIA measurements include register programming, the
+timer, interrupt dispatch and VHPOSR readback. Its launch instruction/E-clock
+phase varies between trials and between boots, so whole-record equality is
+not an accuracy metric. Compare phase-matched samples or elapsed-time
+distributions, and exclude ambiguous VHPOSR reads at horizontal wrap.
+
+## Blitter slowdown and fixed DMA
+
+With BLTPRI clear, the slowdown counter follows consecutive denied CPU
+access slots. A refresh or other fixed-DMA slot still counts while the
+blitter is in a disabled-channel gap or destination pipeline bubble. A CPU
+grant resets the counter; an idle blitter phase does not. Fixed DMA retains
+its priority, and BLTPRI disables this CPU starvation yield.
+
+One ROM measurements on the same A500 compared D-only, descending-fill and
+line blits with a stopped CPU, normal polling and BLTPRI polling (540 trials).
+For a 220-by-22-word D-only clear, normal polling measured 9923–9934 colour
+clocks. Ignoring fixed-DMA misses during idle blitter phases produced
+9876–9890; counting them produces 9925–9935. The stopped-CPU and BLTPRI
+controls are unchanged. These ranges include launch phase, register access
+and readback time; they are not a constant to add to a blit.
+
+### Division bus phase and probe clock conversion
+
+The MC68000 divider computes before its final instruction prefetch and IPL
+sample. Both DIVU and DIVS therefore flush their internal clocks before topping
+up the prefetch queue; operand reads still precede computation. MULU/MULS keep
+their separate early-prefetch sequence. One ROM division sweeps vary operands,
+addressing modes, bitplane count and loop length. A Copper interrupt during the
+divide confirms that hardware takes the exception before the following marker
+instruction; the previous early-prefetch sequence could execute that marker
+first. WinUAE Best Compatibility agrees with the hardware ordering.
+
+The earlier claim that 64 six-plane DIVU operations were 191 colour clocks
+early was derived from a defective test clock. The horizontal VHPOSR byte
+already counts colour clocks; multiplying it by two made the computed time
+jump backwards at a scanline boundary. The corrected test uses
+`227 * vertical + horizontal`. A NOP replaces the redundant doubling so the
+probe's own instruction size and cycle cost do not change. Raw beam endpoints
+and an independent CIA timer cross-check elapsed measurements. Launch phase
+still matters under display DMA; an isolated table value must not be treated
+as an operand-independent divider penalty.
+
+The aligned sweep includes seven bitplane counts, eight operand/control
+kernels, eight launch phases and 1/2/16/64 iterations. All 1,732 unambiguous
+Copperline samples with the same actual launch beam as hardware have identical
+elapsed colour clocks. WinUAE has 1,640 such pairs, also identical. In the
+six-plane, 64-iteration kernels, normal DIVU measures 4763--4767 clocks,
+worst-case DIVU measures 5102, and DIVS measures 5249--5257 on all three.
+These totals include the shared loop and observation overhead.
+
+The stopped-CPU event horizon also includes the pending BLIT assertion:
+the engine can finish its final write while the interrupt countdown still has
+two clocks left. Bounding idle advances only by engine completion would then
+sleep past the source assertion even though running-CPU readback was correct.
+
+The native BLIT source phase is modeled three CCK before its INTREQR readback
+edge, rather than starting the full recognition interval after readback.
+The synchronized 896-row A500/WinUAE IRQ probe isolates this from identical
+Copper-generated BLIT/COPER/SOFT controls and RAM/ROM handler placement.
+After correction the native NOP-phase cases match; EXG-phase cases remain
+two CCK late. This is an inferred timing model and a documented remaining
+scheduler/poll-phase question, not a direct capture of Paula's IPL pins.
+
+The Copper polling row's fixed beam values overlap after sweeping polling
+phase; they do not establish an additional fixed Copper interrupt delay.
 
 ## Beam-register readback
 
@@ -919,3 +1209,25 @@ itself and `bltprobe-pace`) also move whenever the bundled AROS ROM is
 refreshed, because their phase depends on how long the ROM takes to boot.
 `timing-test/README.md` ("CI golden renders") has the details, including
 the vAmiga cross-checks behind individual probes.
+
+### A500 review boundary regressions
+
+The `a500-blit-boundaries` and `a500-display-boundaries` golden probes retain
+raw startup, BBUSY/BZERO, descending destination-restore, collision-clear,
+pointer-write and line-end-refresh samples. The display probe pairs single
+and dual playfields. They supplement the versioned numerical hardware captures;
+rendered emulator goldens are not hardware measurements.
+
+The destination-restore measurements require classic CPU RAM writes to land
+at each granted word transfer, before DMA runs in the bus cycle's free tail.
+Committing the complete write after that tail reverses CPU/blitter ordering
+despite apparently correct grants. The same transfer boundary is used for
+byte, word and longword writes, including separate classic longword halves.
+
+CIA mask writes do not acknowledge an already-latched interrupt: IR and the
+external request remain asserted until an ICR read. One-shot START readback can
+show STOP during the E-high transfer before falling-edge decrement/underflow
+commit; this preview does not apply during the LOAD hold. Internal carry and
+timer-A-to-timer-B cascade state are preserved. These constraints come from
+paired measurements of both CIAs, with explicit acknowledge, masked-source,
+zero/one/nonzero-latch and timing-gap controls in `amiga-hardware-probes`.

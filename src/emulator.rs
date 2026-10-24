@@ -3047,9 +3047,9 @@ impl Emulator {
         };
         if let Some(ticks) = bus
             .cia_a
-            .next_underflow_ticks()
+            .next_event_ticks()
             .into_iter()
-            .chain(bus.cia_b.next_underflow_ticks())
+            .chain(bus.cia_b.next_event_ticks())
             .min()
         {
             chunk = chunk.min(self.instructions_for_cia_ticks(ticks).max(1));
@@ -3075,6 +3075,9 @@ impl Emulator {
             cap_cck(cck, &mut chunk);
         }
         if let Some(cck) = bus.next_blitter_completion_cck() {
+            cap_cck(cck, &mut chunk);
+        }
+        if let Some(cck) = bus.next_blitter_irq_cck() {
             cap_cck(cck, &mut chunk);
         }
         if let Some(cck) = bus.next_serial_event_cck() {
@@ -5621,7 +5624,7 @@ mod tests {
     }
 
     fn emulator_with_call_program() -> super::Emulator {
-        let mut rom = vec![0u8; crate::memory::ROM_SIZE];
+        let mut rom = crate::memory::test_rom_with_interrupt_vectors();
         let put = |mem: &mut [u8], off: usize, word: u16| {
             mem[off..off + 2].copy_from_slice(&word.to_be_bytes());
         };
@@ -5740,7 +5743,7 @@ mod tests {
     /// interrupt mask at 0 so VERTB (level 3) wakes the CPU, `$2700`
     /// masks every interrupt so nothing ever does.
     fn emulator_stopped_waiting_for_vblank(stop_sr: u16) -> super::Emulator {
-        let mut rom = vec![0u8; crate::memory::ROM_SIZE];
+        let mut rom = crate::memory::test_rom_with_interrupt_vectors();
         let put = |mem: &mut [u8], off: usize, word: u16| {
             mem[off..off + 2].copy_from_slice(&word.to_be_bytes());
         };
@@ -5798,6 +5801,36 @@ mod tests {
         emu.debug_step_instructions(2).unwrap();
         assert!(emu.machine.stopped(), "the program should be in STOP");
         emu
+    }
+
+    #[test]
+    fn stopped_cpu_fast_forward_is_bounded_by_pending_blitter_irq() {
+        let mut emu = emulator_stopped_waiting_for_vblank(0x2700);
+        {
+            let bus = emu.machine.bus_mut();
+            bus.agnus.hpos = 0x20;
+            bus.agnus.dmacon = crate::chipset::agnus::DMACON_DMAEN | (1 << 6);
+            bus.blitter.bltcon0 = 0x0100; // D-only clear.
+            bus.blitter.bltdpt = 0x0400;
+            bus.blitter.start_scheduled((1 << 6) | 2, &bus.mem.chip_ram);
+
+            // E arms the delayed interrupt; the next F slot finishes the
+            // engine while one clock of the IRQ delay is still pending.
+            for _ in 0..8 {
+                bus.advance_chipset(1);
+            }
+            assert!(!bus.blitter.busy);
+            assert_eq!(bus.next_blitter_completion_cck(), None);
+            assert_eq!(bus.next_blitter_irq_cck(), Some(1));
+            assert_eq!(bus.paula.intreq & crate::chipset::paula::INT_BLIT, 0);
+        }
+
+        let irq_instructions = emu.instructions_for_cck(1).max(1);
+        let chunk = emu.idle_fast_forward_chunk(super::INSTRUCTIONS_PER_REALTIME_SLICE);
+        assert_eq!(
+            chunk, irq_instructions,
+            "a stopped CPU must nap only as far as the pending INTREQ.BLIT assertion"
+        );
     }
 
     #[test]

@@ -2,6 +2,17 @@
 
 //! Memory regions backing the Amiga bus.
 
+/// A synthetic motherboard ROM still needs interrupt-acknowledge words.
+#[cfg(test)]
+pub(crate) fn test_rom_with_interrupt_vectors() -> Vec<u8> {
+    let mut rom = vec![0; ROM_SIZE];
+    for level in 0..8 {
+        let offset = ROM_SIZE - 16 + level * 2;
+        rom[offset..offset + 2].copy_from_slice(&(24 + level as u16).to_be_bytes());
+    }
+    rom
+}
+
 use crate::zorro::ZorroChain;
 use anyhow::{Context, Result};
 use std::path::Path;

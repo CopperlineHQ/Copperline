@@ -10,7 +10,7 @@ use super::*;
 impl Bus {
     pub(super) fn accumulate_live_collisions_until_current_beam(&mut self) {
         const VISIBLE_END_HPOS: u32 =
-            RENDER_COPPER_WAIT_HPOS_FB0 + (RENDER_FRAMEBUFFER_WIDTH as u32 / 4);
+            (RENDER_DIW_HSTART_FB0 as u32 * 2 + RENDER_FRAMEBUFFER_WIDTH as u32).div_ceil(4);
         let visible_start_vpos = self.current_frame_visible_start_vpos;
         let visible_end_vpos =
             visible_start_vpos + self.current_frame_geometry.visible_lines as u32;
@@ -67,7 +67,7 @@ impl Bus {
 
     pub(super) fn accumulate_live_collisions_to_frame_end(&mut self) {
         const VISIBLE_END_HPOS: u32 =
-            RENDER_COPPER_WAIT_HPOS_FB0 + (RENDER_FRAMEBUFFER_WIDTH as u32 / 4);
+            (RENDER_DIW_HSTART_FB0 as u32 * 2 + RENDER_FRAMEBUFFER_WIDTH as u32).div_ceil(4);
         let visible_start_vpos = self.current_frame_visible_start_vpos;
         let visible_end_vpos =
             visible_start_vpos + self.current_frame_geometry.visible_lines as u32;
@@ -126,14 +126,8 @@ impl Bus {
         ) else {
             return;
         };
-        let x_start = old_hpos
-            .saturating_sub(RENDER_COPPER_WAIT_HPOS_FB0)
-            .saturating_mul(4)
-            .min(RENDER_FRAMEBUFFER_WIDTH as u32) as i32;
-        let x_stop = new_hpos
-            .saturating_sub(RENDER_COPPER_WAIT_HPOS_FB0)
-            .saturating_mul(4)
-            .min(RENDER_FRAMEBUFFER_WIDTH as u32) as i32;
+        let x_start = framebuffer_x_for_collision_beam(old_hpos);
+        let x_stop = framebuffer_x_for_collision_beam(new_hpos);
         if x_start >= x_stop {
             return;
         }
@@ -213,14 +207,8 @@ impl Bus {
         ) else {
             return;
         };
-        let x_start = old_hpos
-            .saturating_sub(RENDER_COPPER_WAIT_HPOS_FB0)
-            .saturating_mul(4)
-            .min(RENDER_FRAMEBUFFER_WIDTH as u32) as i32;
-        let x_stop = new_hpos
-            .saturating_sub(RENDER_COPPER_WAIT_HPOS_FB0)
-            .saturating_mul(4)
-            .min(RENDER_FRAMEBUFFER_WIDTH as u32) as i32;
+        let x_start = framebuffer_x_for_collision_beam(old_hpos);
+        let x_stop = framebuffer_x_for_collision_beam(new_hpos);
         if x_start >= x_stop {
             return;
         }
@@ -236,9 +224,13 @@ impl Bus {
                 .iter()
                 .any(|source| live_sprite_source_may_overlap_x_range(source, x_start, x_stop))
         };
-        let needs_dual_playfield_collision =
-            self.live_playfield_collision_may_have_dual_playfield() && self.denise.clxdat & 1 == 0;
-        if !has_overlapping_sprite_source && !needs_dual_playfield_collision {
+        let needs_playfield_collision = self.current_frame_bitplane_rows[fb_y]
+            .as_ref()
+            .unwrap()
+            .nplanes
+            >= 2
+            && self.denise.clxdat & 1 == 0;
+        if !has_overlapping_sprite_source && !needs_playfield_collision {
             return;
         }
         self.ensure_current_collision_control_index();
@@ -270,17 +262,12 @@ impl Bus {
             control_index,
             vpos as i32,
         );
-        let needs_dual_playfield_collision = needs_dual_playfield_collision
-            && control_replay.dual_playfield_in_range(x_start, x_stop);
-        if !has_overlapping_sprite_source && !needs_dual_playfield_collision {
-            return;
-        }
         let sprite_display_enable_x =
             self.current_frame_sprite_display_enable_x_by_y[fb_y].map(|x| x as i32);
         let clxdat = {
             let row = self.current_frame_bitplane_rows[fb_y].as_ref().unwrap();
             let mut bits = 0;
-            if needs_dual_playfield_collision {
+            if needs_playfield_collision {
                 bits |= live_bitplane_collision_bits_in_range(
                     row,
                     &control_replay,
@@ -332,14 +319,8 @@ impl Bus {
         ) else {
             return;
         };
-        let x_start = old_hpos
-            .saturating_sub(RENDER_COPPER_WAIT_HPOS_FB0)
-            .saturating_mul(4)
-            .min(RENDER_FRAMEBUFFER_WIDTH as u32) as i32;
-        let x_stop = new_hpos
-            .saturating_sub(RENDER_COPPER_WAIT_HPOS_FB0)
-            .saturating_mul(4)
-            .min(RENDER_FRAMEBUFFER_WIDTH as u32) as i32;
+        let x_start = framebuffer_x_for_collision_beam(old_hpos);
+        let x_stop = framebuffer_x_for_collision_beam(new_hpos);
         if x_start >= x_stop {
             return;
         }
@@ -434,14 +415,8 @@ impl Bus {
         ) else {
             return;
         };
-        let x_start = old_hpos
-            .saturating_sub(RENDER_COPPER_WAIT_HPOS_FB0)
-            .saturating_mul(4)
-            .min(RENDER_FRAMEBUFFER_WIDTH as u32) as i32;
-        let x_stop = new_hpos
-            .saturating_sub(RENDER_COPPER_WAIT_HPOS_FB0)
-            .saturating_mul(4)
-            .min(RENDER_FRAMEBUFFER_WIDTH as u32) as i32;
+        let x_start = framebuffer_x_for_collision_beam(old_hpos);
+        let x_stop = framebuffer_x_for_collision_beam(new_hpos);
         if x_start >= x_stop {
             return;
         }

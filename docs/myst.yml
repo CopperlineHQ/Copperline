@@ -92,6 +92,34 @@ project:
         - file: internals/netplay.md
         - file: internals/savestate.md
         - file: internals/reference-docs.md
+        - file: internals/a500-bitplane-pointer-collision-2026-10-20.md
+          hidden: true
+        - file: internals/a500-bzero-bus-validation-2026-10-16.md
+          hidden: true
+        - file: internals/a500-cia-output-readback-2026-10-19.md
+          hidden: true
+        - file: internals/a500-cia-serial-buffer-2026-10-19.md
+          hidden: true
+        - file: internals/a500-cia-serial-flag-2026-10-19.md
+          hidden: true
+        - file: internals/a500-copper-blitter-followup-2026-10-17.md
+          hidden: true
+        - file: internals/a500-copper-refresh-2026-10-19.md
+          hidden: true
+        - file: internals/a500-cpu-software-irq-2026-10-19.md
+          hidden: true
+        - file: internals/a500-irq-focus-2026-10-15.md
+          hidden: true
+        - file: internals/a500-line-bzero-2026-10-15.md
+          hidden: true
+        - file: internals/a500-line-c-input-2026-10-15.md
+          hidden: true
+        - file: internals/a500-native-blit-request-2026-10-20.md
+          hidden: true
+        - file: internals/a500-timing-measurements-2026-10-14.md
+          hidden: true
+        - file: internals/m68000-divider-review-2026-10-15.md
+          hidden: true
   exports:
     - format: pdf
       template: lapreprint-typst
@@ -145,6 +173,20 @@ project:
         - internals/netplay.md
         - internals/savestate.md
         - internals/reference-docs.md
+        - internals/a500-bitplane-pointer-collision-2026-10-20.md
+        - internals/a500-bzero-bus-validation-2026-10-16.md
+        - internals/a500-cia-output-readback-2026-10-19.md
+        - internals/a500-cia-serial-buffer-2026-10-19.md
+        - internals/a500-cia-serial-flag-2026-10-19.md
+        - internals/a500-copper-blitter-followup-2026-10-17.md
+        - internals/a500-copper-refresh-2026-10-19.md
+        - internals/a500-cpu-software-irq-2026-10-19.md
+        - internals/a500-irq-focus-2026-10-15.md
+        - internals/a500-line-bzero-2026-10-15.md
+        - internals/a500-line-c-input-2026-10-15.md
+        - internals/a500-native-blit-request-2026-10-20.md
+        - internals/a500-timing-measurements-2026-10-14.md
+        - internals/m68000-divider-review-2026-10-15.md
 site:
   template: book-theme
   options:

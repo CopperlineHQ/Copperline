@@ -124,28 +124,22 @@ fn external_access_cck_x100_setting() -> u32 {
     }
 }
 
-/// Paula INTREQ/INTENA -> CPU IPL-pin propagation delay in color clocks
-/// (DEFAULT ON). A change to the enabled-pending interrupt set does not reach
-/// the 68000's IPL pins combinationally: Paula pipelines the encoded level to
-/// the pins over a few chip clocks (vAmiga models the same pipe as iplPipe,
-/// with the pin taking the new value ~4 DMA cycles after the level change).
-/// Together with the IPL sampling model in cpu.rs (the interrupt decision at
-/// an instruction boundary uses the level sampled at the PREVIOUS instruction's
-/// last bus access, as on the real 68000), this reproduces the raise-to-entry
-/// latency measured against vAmiga and the vAmigaTS real-hardware photos.
+/// Default interrupt-recognition deadline in colour clocks. One ROM runs on
+/// a PAL A500 calibrate six CCK for the combined board/CPU STOP path: with
+/// only Copper DMA, the handler reads VHPOSR 37 CCK after the WAIT target.
+/// This is not an isolated measurement of Paula's IPL-pin propagation.
 ///
-/// History: this was 65 for a while, calibrated against timing-test row 19
-/// with a mis-decoded VHPOSR (the low byte is the cck position, not cck/2);
-/// that made every IRQ delivery ~50 cck late and dominated the vAmigaTS
-/// cputim/irqtim/inttim divergence. Set COPPERLINE_IRQ_LATENCY_CCK to override
-/// (0 disables the pipe AND the boundary-sampling delay = raw model).
-///
-/// 5 = the ~4-cycle pin pipe plus the one-cck register-change commit a poked
-/// INTREQ takes before the level encoder sees it (folded into one constant;
-/// an IRQ-latency probe against vAmiga across seven source/loop geometries
-/// lands within 0..+7 cck, the residual being per-instruction IPL poll-point
-/// detail the m68k core does not model).
-const DEFAULT_IRQ_LATENCY_CCK: u32 = 5;
+/// Running 68000 instructions poll before the instruction boundary. Their
+/// qualified final-prefetch sample uses this deadline minus two CCK, while
+/// a core-marked unqualified operand sample uses it minus four CCK. Applying
+/// the full STOP deadline at a prefetch's start counted its transfer twice.
+/// See cpu_poll_intreq and docs/internals/a500-irq-focus-2026-10-15.md.
+/// COPPERLINE_IRQ_LATENCY_CCK overrides the deadline; zero also disables
+/// instruction-boundary sample gating for the raw mechanism-test model.
+const DEFAULT_IRQ_LATENCY_CCK: u32 = 6;
+/// Native BLIT readback is visible three CCK after E starts (two after its
+/// slot completes). Pre-aging by the same offset preserves CPU recognition.
+const BLIT_IRQ_READBACK_DELAY_CCK: u32 = 2;
 
 /// CPU clocks a 020+ chip read spends returning data past the data-return
 /// colour clock, before the execution unit can use it.
@@ -302,6 +296,9 @@ const DENISE_HPOS_LAG_CCK: u32 = 4;
 // clocks after the chip-bus slot that carried it, regardless of whether the
 // Copper or the CPU drove the bus (see `record_render_write`).
 const DENISE_WRITE_EFFECT_DELAY_CCK: u32 = 4;
+// CLXCON feeds the live comparator through a shorter register path than
+// render writes. Paired A500 Copper-gate and independent DIW controls.
+const DENISE_COLLISION_MATCH_DELAY_CCK: u32 = 2;
 // Agnus applies its two-cycle register class (DMACON, BPLxPT, BPLxMOD,
 // SPRxPT; vAmiga `DMA_CYCLES(2)` in `recordRegisterChange`) two colour
 // clocks after the chip-bus slot that carried the write.
@@ -923,25 +920,20 @@ pub struct Bus {
     pub(crate) delivered_copper_irq_beam: Option<(u32, u32)>,
     coper_cpu_irq_delay_cck: u32,
 
-    /// Paula INTREQ -> CPU IPL-pin propagation pipe (COPPERLINE_IRQ_LATENCY_CCK,
-    /// see DEFAULT_IRQ_LATENCY_CCK). When the setting is non-zero, a newly
-    /// raised maskable interrupt is held invisible to the CPU for that many cck
-    /// (`irq_latency_mask` = the delayed bits, `irq_latency_visible_at` = the
-    /// colour clock each delayed bit reaches the pins at,
-    /// `irq_latency_last_pending` = previous pending set for rising-edge detect).
-    /// INTREQR reads are NOT delayed (the pipe sits between the level encoder
-    /// and the pins, not on the register).
-    ///
-    /// Each source pipes independently: every source has its own path through
-    /// the level encoder, so one asserting cannot hold another that is already
-    /// on its way to the pins. A single shared countdown restarted by every new
-    /// source stretched an earlier interrupt's delay by the later one's, which
-    /// on a machine with several active sources (audio channels, the Copper,
-    /// vertical blank) jittered handler entry across tens of raster lines
-    /// instead of the few colour clocks the pipe is worth.
+    /// Per-source instruction-boundary recognition deadlines, configured by
+    /// COPPERLINE_IRQ_LATENCY_CCK (see DEFAULT_IRQ_LATENCY_CCK). STOP uses the
+    /// deadline directly; running-68000 poll candidates apply the distinct
+    /// qualification offsets in cpu_poll_intreq. INTREQR reads the raw latch
+    /// at its CPU transfer slot, independently of these deadlines.
+    /// A later source cannot postpone one already awaiting recognition.
     irq_latency_visible_at: [u64; 16],
     irq_latency_mask: u16,
     irq_latency_last_pending: u16,
+    /// Measured software-written PORTS/EXTER/COPER requests, not external-pin
+    /// edges. CPU writes qualify the CPU-write deadline; Copper PORTS/EXTER
+    /// requests qualify the internal Paula poll phase.
+    #[serde(default, alias = "irq_copper_request_mask")]
+    irq_software_request_mask: u16,
     /// Configured IPL-pipe length in cck (from COPPERLINE_IRQ_LATENCY_CCK or the
     /// default); 0 disables the pipe and the cpu.rs boundary-sampling delay. A
     /// field (not a global) so tests can set it per-instance -- mechanism tests
@@ -1334,12 +1326,15 @@ pub struct Bus {
     #[serde(skip)]
     heatmap: Option<Box<crate::heatmap::HeatMap>>,
     blitter_slowdown_cpu_misses: u8,
-    /// Pending INTREQ.BLIT raise, in colour clocks. Real Agnus raises the
-    /// blitter interrupt one clock after the sequencer's BLTDONE cycle
-    /// (vAmiga scheduleIrqRel(BLIT, 1) at the terminal micro-cycle), so a
-    /// scheduled completion arms this one-cck countdown instead of setting
-    /// INTREQ in the final slot itself. Forced drains raise immediately.
+    /// Pending INTREQ.BLIT raise, in colour clocks. The scheduled sequencer
+    /// arms the interrupt on E and raises it two colour clocks after E's
+    /// tick; the final F/D flush can finish first. Forced drains raise
+    /// immediately.
     blit_irq_delay_cck: Option<u32>,
+    /// Absolute colour-clock deadline for the delayed DMACONR.BZERO clear.
+    /// This is independent of the sequencer's mathematical BZERO accumulator.
+    #[serde(default)]
+    blitter_bzero_visible_at: u64,
     slice_bus_advanced_cck: u32,
     slice_bus_tick: AgnusTick,
     // Deferred timed-device clock. Ticking CIA/serial/pots/audio/floppy/Akiko
@@ -1774,6 +1769,12 @@ pub enum CpuBusAccessKind {
     Custom,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CpuBusSamplePhase {
+    Start,
+    End,
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ChipBusOwner {
     Refresh,
@@ -1845,9 +1846,7 @@ pub enum CpuWaitClass {
     /// Blitter holding the bus with BLTPRI clear: the "nice" hold before
     /// the blitter-slowdown counter yields a slot.
     BlitterNice,
-    /// Blitter holding the bus with BLTPRI set ("blitter nasty"), including
-    /// the warm-up fence, where the blitter's own slot needs no bus and the
-    /// recorded slot owner is idle.
+    /// Blitter holding the bus with BLTPRI set ("blitter nasty").
     BlitterNasty,
     Port,
 }
@@ -3785,6 +3784,7 @@ impl Bus {
             irq_latency_visible_at: [0; 16],
             irq_latency_mask: 0,
             irq_latency_last_pending: 0,
+            irq_software_request_mask: 0,
             irq_latency_setting: irq_latency_setting_from_env(),
             beam_top_palette: Palette::new(),
             beam_bottom_palette: Palette::new(),
@@ -3920,6 +3920,7 @@ impl Bus {
             ui_mem_writers: Vec::new(),
             blitter_slowdown_cpu_misses: 0,
             blit_irq_delay_cck: None,
+            blitter_bzero_visible_at: 0,
             slice_bus_advanced_cck: 0,
             slice_bus_tick: AgnusTick::default(),
             pending_device_cck: 0,
@@ -5471,6 +5472,7 @@ impl Bus {
         self.irq_latency_visible_at = [0; 16];
         self.irq_latency_mask = 0;
         self.irq_latency_last_pending = 0;
+        self.irq_software_request_mask = 0;
         self.trace_cia_irq_pins = (false, false);
         self.trace_intreq = 0;
         self.beam_top_palette = Palette::new();
@@ -7094,6 +7096,8 @@ impl Bus {
     /// remainder is the live E phase). Software loops that poll or toggle a
     /// CIA lock to the E clock through this - the vAmigaTS CIA/cnt ramps
     /// count it directly.
+    /// Call `cpu_cia_access_finish` after the register transfer to complete
+    /// the six-CPU-clock trailing E-low phase.
     pub fn cpu_cia_access(&mut self, words: u32) {
         if !self.cpu_bus_arbitration_enabled || words == 0 {
             return;
@@ -7103,12 +7107,36 @@ impl Bus {
         let phase = (self.device_clock.cia_tick_remainder_cck as usize).min(4);
         self.cia_trace_phase = phase as u8;
         let delay = E_SYNC_DELAY_CCK[phase];
-        let cck = delay + words * 2;
-        let tick = self.advance_chipset(cck);
-        self.record_slice_bus_advance(cck, tick);
-        self.credit_cpu_off_chip_access(cck);
+        // The register transfer precedes the final six CPU clocks of the
+        // VPA cycle. Keep the existing E-clock synchronization and total
+        // cycle length, but let the caller observe/mutate the CIA before
+        // advancing that trailing E-low phase.
+        let cck = delay + words * 2 - 3;
+        let before_edge = cck - 1;
+        let tick = self.advance_chipset(before_edge);
+        self.record_slice_bus_advance(before_edge, tick);
+        self.credit_cpu_off_chip_access(before_edge);
         self.flush_timed_devices();
+        // Data/control are present when PHI2 falls. The register transfer
+        // must precede that edge's timer update, not follow it: otherwise a
+        // START/LOAD write misses the first count-enable pipeline stage.
+        // Attribute it to the slot ending at this edge, which has already
+        // been recorded; the trailing bus phase must not overwrite it.
         self.cia_trace_slot = Some((self.agnus.vpos, self.agnus.hpos));
+        let tick = self.advance_chipset(1);
+        self.record_slice_bus_advance(1, tick);
+        self.credit_cpu_off_chip_access(1);
+    }
+
+    pub fn cpu_cia_access_finish(&mut self) {
+        if !self.cpu_bus_arbitration_enabled {
+            return;
+        }
+        self.flush_timed_devices(); // PHI2 edge, after the register transfer
+        let tick = self.advance_chipset(3);
+        self.record_slice_bus_advance(3, tick);
+        self.credit_cpu_off_chip_access(3);
+        self.flush_timed_devices();
     }
 
     pub fn cpu_slow_external_access(&mut self, words: u32) {
@@ -7239,6 +7267,33 @@ impl Bus {
         size: usize,
         kind: CpuBusAccessKind,
     ) {
+        self.grant_cpu_bus_access_sampled(addr, size, kind, |_, _, _| {});
+    }
+
+    /// Sample a 68000 memory transfer at the granted slot, before DMA can
+    /// change RAM during the trailing colour clock of the CPU bus cycle.
+    pub(crate) fn grant_cpu_bus_access_sampled(
+        &mut self,
+        addr: Option<u32>,
+        size: usize,
+        kind: CpuBusAccessKind,
+        mut sample: impl FnMut(&mut Self, u32, usize),
+    ) {
+        self.grant_cpu_bus_access_sampled_phased(addr, size, kind, |bus, slot, stride, phase| {
+            if phase == CpuBusSamplePhase::End {
+                sample(bus, slot, stride);
+            }
+        });
+    }
+
+    /// Observe either boundary of a granted word without changing its duration.
+    fn grant_cpu_bus_access_sampled_phased(
+        &mut self,
+        addr: Option<u32>,
+        size: usize,
+        kind: CpuBusAccessKind,
+        mut sample: impl FnMut(&mut Self, u32, usize, CpuBusSamplePhase),
+    ) {
         if !self.cpu_bus_arbitration_enabled {
             return;
         }
@@ -7276,6 +7331,7 @@ impl Bus {
         } else {
             bus_slots_for_cpu_access(size)
         };
+        let slot_stride = if wide_bus { 4 } else { 2 };
         // The chip bus' CPU port is single-ported: a new access finds it free
         // only after any posted write has retired, so reads cannot pass a
         // pending write and a second write stalls on the one in-flight cycle.
@@ -7323,6 +7379,8 @@ impl Bus {
             }
             let mut wait_cck = 0;
             while !self.cpu_can_use_current_slot()
+                || (matches!(kind, CpuBusAccessKind::Read | CpuBusAccessKind::Fetch)
+                    && self.cpu_cycle_crosses_line_end_refresh())
                 || (self.cpu_short_bus_cycle && self.emulated_cck < self.cpu_chip_port_free_at)
             {
                 if self.frame_analyzer_enabled {
@@ -7351,6 +7409,9 @@ impl Bus {
                 self.cpu_trace_access =
                     addr.map(|addr| cpu_trace_access_for_slot(addr, size, kind, wide_bus, slot));
             }
+            if !self.cpu_short_bus_cycle {
+                sample(self, slot, slot_stride, CpuBusSamplePhase::Start);
+            }
             let slot_start_cck = self.emulated_cck;
             let (cck, tick) = self.advance_one_chip_bus_quantum(Some(ChipBusOwner::Cpu));
             self.cpu_trace_access = None;
@@ -7366,6 +7427,7 @@ impl Bus {
             // data-return colour clock billed below, and where the CPU resumes
             // inside that clock is carried by `cpu_chip_clock_phase`.
             if !self.cpu_short_bus_cycle {
+                sample(self, slot, slot_stride, CpuBusSamplePhase::End);
                 let (cck, tick) = self.advance_one_chip_bus_quantum(None);
                 self.record_slice_bus_advance(cck, tick);
             }
@@ -7597,7 +7659,11 @@ impl Bus {
     fn note_cpu_missed_chip_bus_cycle(&mut self, cck: u32) {
         self.cpu_missed_chip_slots = self.cpu_missed_chip_slots.wrapping_add(1);
         self.cpu_wait_cck_total = self.cpu_wait_cck_total.wrapping_add(u64::from(cck));
-        if self.blitter_slowdown_counter_enabled() && self.blitter.current_slot_counts_for_bls() {
+        // BLS follows the waiting CPU, not the blitter's current pipeline
+        // phase. Fixed DMA can deny the CPU while a disabled blit channel
+        // leaves an idle slot; those misses still count towards the yield.
+        // A grant, rather than an idle blitter phase, resets the counter.
+        if self.blitter_slowdown_counter_enabled() {
             self.blitter_slowdown_cpu_misses = self
                 .blitter_slowdown_cpu_misses
                 .saturating_add(1)
@@ -7678,34 +7744,54 @@ impl Bus {
             // hardware timeline has already been collapsed, so raise now
             // and drop any raise already armed by the terminal cycle.
             self.blit_irq_delay_cck = None;
-            self.raise_blit_irq(source);
+            self.blitter_bzero_visible_at = 0;
+            self.raise_blit_irq(source, 0);
         }
-        // Scheduled completions do not raise here: INTREQ.BLIT is armed
-        // when the sequencer ENTERS its terminal BLTDONE cycle (see
-        // note_blitter_slot_ticked), one colour clock after that cycle's
-        // first attempt -- which real Agnus asserts even while a contended
-        // final D write is still blocked (vAmiga scheduleIrqRel(BLIT, 1)
-        // runs before the bus allocation check).
+        // A scheduled completion leaves the source countdown armed by E.
+        // The OneROM A500 sweeps place INTREQ.BLIT two clocks after that
+        // tick, independently of whether the final D access was delayed.
     }
 
-    /// Post-tick bookkeeping shared by the blitter's bus-slot and
-    /// idle-cycle tick sites: arm the INTREQ.BLIT raise when the sequencer
-    /// just entered its terminal BLTDONE cycle. Armed with 2 because the
-    /// arming tick's own advance_beam decrements it once in the same
-    /// colour clock; the raise then lands at the end of the terminal
-    /// cycle's first attempt.
-    pub(crate) fn note_blitter_slot_ticked(&mut self) {
+    /// Consume the terminal IRQ arm and record the delayed BZERO clear when a
+    /// scheduled slot changes the mathematical accumulator from true to
+    /// false. The BZERO deadline includes this slot's following beam advance;
+    /// reads through that deadline expose the cleared value.
+    pub(crate) fn note_blitter_slot_ticked(&mut self, bzero_before: bool, bzero_delay_cck: u32) {
         if self.blitter.take_irq_arm() {
-            self.blit_irq_delay_cck = Some(2);
+            // The E slot's following beam advance consumes one clock.
+            self.blit_irq_delay_cck = Some(BLIT_IRQ_READBACK_DELAY_CCK + 1);
+        }
+        if bzero_before && !self.blitter.bzero {
+            self.blitter_bzero_visible_at = self
+                .emulated_cck
+                .saturating_add(1 + u64::from(bzero_delay_cck));
         }
     }
 
-    fn raise_blit_irq(&mut self, source: &'static str) {
+    fn raise_blit_irq(&mut self, source: &'static str, source_age_cck: u32) {
         self.note_bus_event_named(BUS_EVENT_BLIT_IRQ, Some("blitter_irq"));
         let intreq_before = self.paula.intreq;
         self.paula.intreq |= INT_BLIT;
+        if source_age_cck != 0 {
+            self.pre_age_enabled_irq_source(INT_BLIT, source_age_cck);
+        }
         self.note_irq_source_asserted();
         self.trace_blitter_completion(source, intreq_before);
+    }
+
+    /// OneROM measurements constrain the native BLIT source's recognition
+    /// phase to begin two colour clocks before its INTREQR edge. This is a
+    /// timing-model inference from the relative source and status deadlines.
+    /// Start only a newly enabled native BLIT source early; software and
+    /// Copper INTREQ writes retain the generic recognition delay.
+    fn pre_age_enabled_irq_source(&mut self, source: u16, age_cck: u32) {
+        let setting = self.irq_latency_setting;
+        if setting == 0 {
+            return;
+        }
+        let pending = self.current_enabled_irq_sources();
+        let newly = pending & !self.irq_latency_last_pending & source;
+        self.arm_irq_latency_bits(newly, setting.saturating_sub(age_cck));
     }
 
     #[cfg(test)]
@@ -7811,6 +7897,13 @@ impl Bus {
         Some(prediction.unwrap_or_else(|| slots.saturating_mul(CHIP_BUS_SLOT_CCK).max(1)))
     }
 
+    /// Colour clocks until a scheduled BLIT interrupt still in its
+    /// post-BLTDONE delay is asserted. The blitter engine can have finished
+    /// its final D flush before this deadline.
+    pub fn next_blitter_irq_cck(&self) -> Option<u32> {
+        self.blit_irq_delay_cck.filter(|&cck| cck != 0)
+    }
+
     pub fn next_serial_event_cck(&self) -> Option<u32> {
         self.paula.next_serial_event_cck()
     }
@@ -7832,17 +7925,48 @@ impl Bus {
     }
 
     pub fn cpu_visible_intreq(&self) -> u16 {
+        self.cpu_poll_intreq(0)
+    }
+
+    /// Resolve a running CPU's microcode poll against the instruction-boundary
+    /// recognition deadline. A 68000 final-prefetch poll precedes that boundary
+    /// by two colour clocks; an unqualified operand poll precedes it by four.
+    /// STOP uses the boundary deadline directly. Only already asserted sources
+    /// are considered: this never predicts a future device interrupt. The
+    /// two/four-CCK leads are calibrated for internal Paula sources only;
+    /// Pin-fed `INT_PORTS`/`INT_EXTER` retain their previous no-lead deadline.
+    /// Software writes to those Paula request bits use the measured internal
+    /// poll phase; the bit number alone does not identify an external edge.
+    pub(crate) fn cpu_poll_intreq(&self, lead_cck: u32) -> u16 {
+        let lead_cck = if self.cpu_clocks_per_cck == 2 && !self.cpu_short_bus_cycle {
+            lead_cck
+        } else {
+            0
+        };
         let mut visible = self.paula.intreq;
         if self.coper_cpu_irq_delay_cck != 0 {
             visible &= !INT_COPER;
         }
         // Hold each newly-raised interrupt invisible until its own pipe delay
-        // has elapsed; sources released earlier stay visible.
+        // has elapsed; sources released earlier stay visible. The COPER/STOP-
+        // derived two/four-CCK leads were not calibrated for INT2/INT6 routes,
+        // so preserve their previous no-lead deadline pending separate
+        // transition/poll measurement. Software-generated requests for those
+        // bits instead follow the internal poll phase measured on A500.
         let mut delayed = self.irq_latency_mask;
         while delayed != 0 {
             let bit = delayed.trailing_zeros() as usize;
             delayed &= delayed - 1;
-            if self.emulated_cck < self.irq_latency_visible_at[bit] {
+            let source_lead_cck = if (1u16 << bit) & (INT_PORTS | INT_EXTER) != 0
+                && (1u16 << bit) & self.irq_software_request_mask == 0
+            {
+                0
+            } else {
+                lead_cck
+            };
+            if self.emulated_cck.saturating_add(u64::from(source_lead_cck))
+                < self.irq_latency_visible_at[bit]
+            {
                 visible &= !(1u16 << bit);
             }
         }
@@ -7866,7 +7990,7 @@ impl Bus {
     }
 
     /// Colour clocks until the earliest interrupt still inside its
-    /// recognition pipe reaches the CPU's IPL pins, for bounding an idle
+    /// recognition deadline becomes eligible, for bounding an idle
     /// STOP nap. `None` when nothing is in flight.
     pub fn next_irq_visible_cck(&self) -> Option<u32> {
         let mut delayed = self.irq_latency_mask;
@@ -7924,6 +8048,27 @@ impl Bus {
         let delayed = newly & !INT_PORTS;
         if delayed != 0 && self.irq_latency_setting != 0 {
             self.arm_irq_latency_bits(delayed, self.irq_latency_setting);
+        }
+        self.irq_latency_mask &= pending;
+        self.irq_latency_last_pending = pending;
+    }
+
+    /// CPU-written Paula request/mask strobes reach the recognition path two
+    /// CCK before the Copper/source deadline's reference point. Kind58 A500
+    /// controls cover direct requests and prelatched software unmask, STOP and
+    /// running code. Preserve the unmeasured pin-fed unmask path.
+    fn note_cpu_irq_latches_changed(&mut self) {
+        if self.cpu_clocks_per_cck != 2 || self.cpu_short_bus_cycle {
+            self.note_irq_latches_changed();
+            return;
+        }
+        self.note_intreq_set_edges();
+        let pending = self.current_enabled_irq_sources();
+        let newly = pending & !self.irq_latency_last_pending;
+        let software = newly & self.irq_software_request_mask;
+        if self.irq_latency_setting != 0 {
+            self.arm_irq_latency_bits(software, self.irq_latency_setting.saturating_sub(2));
+            self.arm_irq_latency_bits(newly & !software & !INT_PORTS, self.irq_latency_setting);
         }
         self.irq_latency_mask &= pending;
         self.irq_latency_last_pending = pending;
@@ -9406,7 +9551,11 @@ impl Bus {
     pub fn cia_a_read(&mut self, addr: u64, size: usize) -> u64 {
         self.sync_realtime_devices();
         let reg = reg_from_addr(addr);
-        let mut v = self.cia_a.read(reg);
+        let mut v = if self.cpu_bus_arbitration_enabled {
+            self.cia_a.read_at_transfer(reg)
+        } else {
+            self.cia_a.read(reg)
+        };
         if reg == REG_PRA {
             // PRA bits 6 and 7 (/FIR0, /FIR1) report the live port-1/port-2
             // primary button: left-mouse button or joystick fire (they share
@@ -9543,7 +9692,11 @@ impl Bus {
     pub fn cia_b_read(&mut self, addr: u64, size: usize) -> u64 {
         self.sync_realtime_devices();
         let reg = reg_from_addr(addr);
-        let mut v = self.cia_b.read(reg);
+        let mut v = if self.cpu_bus_arbitration_enabled {
+            self.cia_b.read_at_transfer(reg)
+        } else {
+            self.cia_b.read(reg)
+        };
         if reg == REG_PRA {
             // CIA-B PA0-2 are the parallel port's Centronics status inputs
             // (BUSY, POUT, SEL), pulled up when nothing drives them. An
@@ -9644,10 +9797,26 @@ impl Bus {
     // -----------------------------------------------------------------
 
     pub fn custom_read(&mut self, addr: u64, size: usize) -> u64 {
-        self.grant_cpu_bus_access_at(
+        let off = (addr & 0xFFF) as u16;
+        let mut sampled_words = [None; 2];
+        self.grant_cpu_bus_access_sampled_phased(
             Some(custom_register_cpu_addr(addr)),
             size,
             CpuBusAccessKind::Custom,
+            |bus, slot, stride, phase| {
+                let word_off = off.wrapping_add((slot as usize * stride) as u16) & 0xFFE;
+                let sample_phase = if word_off == 0x00E {
+                    CpuBusSamplePhase::Start
+                } else {
+                    CpuBusSamplePhase::End
+                };
+                if matches!(word_off, 0x00E | 0x01E) && phase == sample_phase {
+                    // CLXDAT samples/clears before the word's trailing
+                    // clocks; INTREQR retains its end-of-slot sampling.
+                    bus.flush_timed_devices();
+                    sampled_words[slot as usize] = Some(bus.read_custom_word(word_off));
+                }
+            },
         );
         if self.cpu_short_bus_cycle {
             self.bill_020_read_data_wait();
@@ -9664,14 +9833,13 @@ impl Bus {
         // reflect timed-device state, so apply the deferred device clocks before
         // reading.
         self.flush_timed_devices();
-        let off = (addr & 0xFFF) as u16;
         if self.regcheck.is_some() {
             self.note_cpu_custom_access(addr, off, size, true);
         }
         self.poll_stats.tick_read_custom(off & 0xFFE);
         let value = match size {
             1 => {
-                let val = self.read_custom_word(off & 0xFFE);
+                let val = sampled_words[0].unwrap_or_else(|| self.read_custom_word(off & 0xFFE));
                 trace!("custom R8  off={:03X} val_word={:04X}", off, val);
                 if diag_cpu_read_matches(off & 0xFFE, size) {
                     self.diag_cpu_read(off & 0xFFE, size, val as u64);
@@ -9686,8 +9854,9 @@ impl Bus {
                 // MOVE.L from $DFFxxx reads two consecutive register
                 // words: high word at addr, low word at addr+2. Each
                 // register is 16 bits wide on the custom chip bus.
-                let hi = self.read_custom_word(off);
-                let lo = self.read_custom_word(off.wrapping_add(2));
+                let hi = sampled_words[0].unwrap_or_else(|| self.read_custom_word(off));
+                let lo_off = off.wrapping_add(2);
+                let lo = sampled_words[1].unwrap_or_else(|| self.read_custom_word(lo_off));
                 let v = ((hi as u64) << 16) | (lo as u64);
                 trace!("custom R32 off={:03X} val={:08X}", off, v);
                 if diag_cpu_read_matches(off, size) {
@@ -9699,7 +9868,7 @@ impl Bus {
                 v
             }
             _ => {
-                let val = self.read_custom_word(off);
+                let val = sampled_words[0].unwrap_or_else(|| self.read_custom_word(off));
                 trace!("custom R16 off={:03X} val={:04X}", off, val);
                 if diag_cpu_read_matches(off, size) {
                     self.diag_cpu_read(off, size, val as u64);
@@ -10083,10 +10252,10 @@ impl Bus {
         let value = match off {
             0x002 => {
                 let mut r = self.agnus.dmacon & 0x07FF;
-                if self.blitter.busy {
+                if self.blitter.bbusy {
                     r |= 1 << 14;
                 }
-                if self.blitter.bzero {
+                if self.blitter.bzero || self.emulated_cck < self.blitter_bzero_visible_at {
                     r |= 1 << 13;
                 }
                 r
@@ -12119,10 +12288,35 @@ fn live_bitplane_collision_bits_in_range(
 
     for x in x_start..x_stop {
         let control = control_replay.control_for_x(x);
-        if control.bplcon0 & 0x0400 == 0 {
+        let collision_x = if !live_collision_aga_decode(control.agnus_revision)
+            && !bitplane_hires(control.bplcon0)
+            && !bitplane_shres(control.bplcon0)
+        {
+            row.fetch_origin_cck.map(|origin| {
+                // BPL1's transfer is the last slot of the eight-CCK lores
+                // fetch unit. A500 isolated first/last-bit gates place
+                // the live lores stream two CCK after that transfer.
+                // Its startup is independent of DIW and render placement.
+                let data_hpos = u32::from(origin) + 7 + 2;
+                data_hpos as i32 * 4 - RENDER_DIW_HSTART_FB0 * 2
+            })
+        } else {
+            None
+        };
+        let (window_start, window_stop) =
+            live_display_window_x(control.diwstrt, control.diwstop, control.diwhigh);
+        if x < window_start || (window_stop > window_start && x >= window_stop) {
             continue;
         }
-        let Some(collision) = live_bitplane_collision_pixel_at(
+        let collision = if let Some(data_x) = collision_x {
+            // The first BPL1 trigger enables comparison one lores pixel
+            // before copied data reaches the shifters. Before that trigger
+            // there is no comparison, even with DIW already open.
+            if x < data_x - 2 {
+                continue;
+            }
+            live_dma_playfield_collision_pixel_at(row, control, x - data_x)
+        } else if let Some(collision) = live_bitplane_collision_pixel_at(
             row,
             control.agnus_revision,
             control.bplcon0,
@@ -12135,19 +12329,56 @@ fn live_bitplane_collision_bits_in_range(
             control.ddfstrt,
             control.bpldat,
             x,
-        ) else {
+        ) {
+            collision
+        } else {
             continue;
         };
-        if collision.pf1 && collision.pf2 {
+        if collision.pf1_match && collision.pf2_match {
             return 1;
         }
     }
     0
 }
 
+// Classic lores DMA data before the first shifted sample is zero, rather
+// than "no collision comparator". CLXCON's zero match is observable there.
+fn live_dma_playfield_collision_pixel_at(
+    row: &CapturedBitplaneRow,
+    control: LiveCollisionControl,
+    relative_x: i32,
+) -> LivePlayfieldCollisionPixel {
+    let mode = BitplaneMode::from_bplcon0(control.bplcon0, false);
+    let mut idx = 0;
+    for plane in 0..mode.display_planes().min(row.nplanes) {
+        let native_x = relative_x.div_euclid(2)
+            - live_scroll_for_plane(control.bplcon0, control.bplcon1, plane) as i32;
+        if native_x < 0 || native_x as usize >= row.words_per_row * 16 {
+            continue;
+        }
+        let native_x = native_x as usize;
+        let word = if plane < mode.dma_planes() {
+            row.planes[plane][native_x / 16]
+        } else {
+            control.bpldat[plane]
+        };
+        if word & (0x8000 >> (native_x & 15)) != 0 {
+            idx |= 1 << plane;
+        }
+    }
+    live_playfield_collision_pixel(
+        idx,
+        control.clxcon,
+        control.clxcon2,
+        control.bplcon0 & 0x0400 != 0,
+    )
+}
+
 #[derive(Clone, Copy, Default)]
 struct LivePlayfieldCollisionPixel {
+    #[cfg(test)]
     pf1: bool,
+    #[cfg(test)]
     pf2: bool,
     pf1_match: bool,
     pf2_match: bool,
@@ -12291,11 +12522,24 @@ impl LiveCollisionLineReplay {
         for event in index.video_control_writes_before_visible_line(line) {
             line_start.apply_write(event.offset, event.value);
         }
+        let mut positioned_events: Vec<_> = line_events
+            .iter()
+            .map(|event| {
+                let x = if matches!(event.offset & 0x01fe, 0x098 | 0x10e) {
+                    // Match registers feed the comparator, not the image
+                    // renderer's independently calibrated write anchor.
+                    framebuffer_x_for_collision_beam(event.hpos)
+                } else {
+                    framebuffer_x_for_live_collision_hpos(event.hpos)
+                };
+                (x, event)
+            })
+            .collect();
+        positioned_events.sort_by_key(|(x, _)| *x);
         let mut control = line_start;
         let mut segments: Vec<LiveCollisionControlSegment> = Vec::with_capacity(line_events.len());
-        for event in line_events {
+        for (x, event) in positioned_events {
             control.apply_write(event.offset, event.value);
-            let x = framebuffer_x_for_live_collision_hpos(event.hpos);
             if let Some(last) = segments.last_mut() {
                 if last.x == x {
                     last.control = control;
@@ -12346,6 +12590,14 @@ impl LiveCollisionLineReplay {
             segment.x >= x_start && segment.x < x_stop && segment.control.bplcon0 & 0x0400 != 0
         })
     }
+}
+
+// Pixel comparators use Denise's absolute horizontal position (2H),
+// independently of the render-write event anchor used by the helper below.
+fn framebuffer_x_for_collision_beam(hpos: u32) -> i32 {
+    hpos.saturating_mul(4)
+        .saturating_sub(RENDER_DIW_HSTART_FB0 as u32 * 2)
+        .min(RENDER_FRAMEBUFFER_WIDTH as u32) as i32
 }
 
 fn framebuffer_x_for_live_collision_hpos(hpos: u32) -> i32 {
@@ -12821,7 +13073,9 @@ fn live_playfield_collision_pixel(
     let odd_match_raw = live_clxcon_planes_match(idx, clxcon, clxcon2, 0);
     let odd_match = odd_match_raw && (dual_playfield || even_match);
     LivePlayfieldCollisionPixel {
+        #[cfg(test)]
         pf1: dual_playfield && idx & 0b010101 != 0,
+        #[cfg(test)]
         pf2: if dual_playfield {
             idx & 0b101010 != 0
         } else {

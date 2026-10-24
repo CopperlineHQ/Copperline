@@ -13,6 +13,7 @@
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::time::Duration;
 
 fn request(id: u64, method: &str, params: Value) -> String {

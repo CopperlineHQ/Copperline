@@ -20,7 +20,7 @@ impl Bus {
                 if self.blitter.bbusy {
                     r |= 1 << 14;
                 }
-                if self.blitter.bzero {
+                if self.blitter.bzero || self.emulated_cck < self.blitter_bzero_visible_at {
                     r |= 1 << 13;
                 }
                 self.trace_dmaconr_read(r);
@@ -344,6 +344,24 @@ impl Bus {
         if is_beam_timing_custom_write(off) {
             // Line and frame lengths feed the Copper's wake bound.
             self.invalidate_copper_wake_bound();
+        }
+        // A pointer write lost to Agnus's DMA counter update must not enter
+        // either the live pointer or the render replay. Debug/watch traces
+        // above still record the attempted bus write.
+        if matches!(off, 0x0E0..=0x0F6) {
+            // CPU writes arrive here after the bus-cycle tail. Use the actual
+            // grant, as render recording does, rather than that later beam.
+            let write_slot = match source {
+                BeamWriteSource::Copper => (self.agnus.vpos, self.agnus.hpos),
+                BeamWriteSource::Cpu | BeamWriteSource::CpuCopperIrq => self
+                    .cpu_custom_access_slot
+                    .unwrap_or((self.agnus.vpos, self.agnus.hpos)),
+            };
+            if self
+                .bitplane_pointer_write_conflicts_with_dma(((off - 0x0E0) / 4) as usize, write_slot)
+            {
+                return false;
+            }
         }
         if is_render_relevant_custom_write(off)
             && !matches!(off, 0x180..=0x1BE)
@@ -722,6 +740,9 @@ impl Bus {
                 // is idle.
                 self.paula.intreq &= !crate::chipset::paula::INT_BLIT;
                 self.blit_irq_delay_cck = None;
+                if !matches!(source, BeamWriteSource::Copper) {
+                    self.blitter_bzero_visible_at = 0;
+                }
                 self.note_irq_latches_changed();
                 // A blit over the exception-vector area is useful crash context:
                 // flag it so the CPU wrapper can dump the instruction history.
@@ -773,7 +794,16 @@ impl Bus {
                         if w == 0 { 64 } else { w },
                     );
                 }
-                self.blitter.start_scheduled(val, &self.mem.chip_ram);
+                // Copper size data arrives before the start pipeline: busy
+                // latches after two CCK, engine/zero reset after four. CPU
+                // custom writes arrive after their completed bus cycle.
+                let strobe_clocks = if matches!(source, BeamWriteSource::Copper) {
+                    4
+                } else {
+                    0
+                };
+                self.blitter
+                    .start_scheduled_delayed(val, &self.mem.chip_ram, strobe_clocks);
                 if diag_blt_slots() {
                     eprintln!(
                         "BLTP {} {} {} START con0={:04x} con1={:04x} size={:04x} dmacon={:04x}",
@@ -815,6 +845,9 @@ impl Bus {
                 // blitter-done interrupt request.
                 self.paula.intreq &= !crate::chipset::paula::INT_BLIT;
                 self.blit_irq_delay_cck = None;
+                if !matches!(source, BeamWriteSource::Copper) {
+                    self.blitter_bzero_visible_at = 0;
+                }
                 self.note_irq_latches_changed();
                 if self.blitter_start_may_write_lowmem() {
                     self.diag_lowmem_blit = true;
@@ -829,7 +862,13 @@ impl Bus {
                         if w == 0 { 0x800 } else { w },
                     );
                 }
-                self.blitter.start_scheduled_ecs(val, &self.mem.chip_ram);
+                let strobe_clocks = if matches!(source, BeamWriteSource::Copper) {
+                    4
+                } else {
+                    0
+                };
+                self.blitter
+                    .start_scheduled_ecs_delayed(val, &self.mem.chip_ram, strobe_clocks);
                 self.record_blit_accounting();
                 self.slice_preempted = true;
                 false
@@ -889,7 +928,11 @@ impl Bus {
                     );
                 }
                 self.paula.write_intena(val);
-                self.note_irq_latches_changed();
+                if matches!(source, BeamWriteSource::Cpu) {
+                    self.note_cpu_irq_latches_changed();
+                } else {
+                    self.note_irq_latches_changed();
+                }
                 false
             }
             0x09C => {
@@ -917,7 +960,17 @@ impl Bus {
                     );
                 }
                 let coper_was_pending = self.paula.intreq & INT_COPER != 0;
+                let previous_requests = self.paula.intreq;
                 let asserted = self.paula.write_intreq(val);
+                self.irq_software_request_mask &= self.paula.intreq;
+                if matches!(source, BeamWriteSource::Cpu) {
+                    self.irq_software_request_mask |= self.paula.intreq
+                        & !previous_requests
+                        & (INT_PORTS | INT_EXTER | INT_COPER);
+                } else if matches!(source, BeamWriteSource::Copper) {
+                    self.irq_software_request_mask |=
+                        self.paula.intreq & !previous_requests & (INT_PORTS | INT_EXTER);
+                }
                 let copper_asserted = matches!(source, BeamWriteSource::Copper)
                     && val & 0x8000 != 0
                     && val & INT_COPER != 0
@@ -926,8 +979,12 @@ impl Bus {
                     self.pending_copper_irq_beam = Some((self.agnus.vpos, self.agnus.hpos));
                     self.coper_cpu_irq_delay_cck = COPER_CPU_IRQ_DELAY_CCK;
                 }
-                if copper_asserted && asserted {
+                if matches!(source, BeamWriteSource::Copper) && asserted {
+                    // A new INTREQ write is a source edge even for PORTS.
+                    // Unmasking an already-latched PORTS level remains distinct.
                     self.note_irq_source_asserted();
+                } else if matches!(source, BeamWriteSource::Cpu) {
+                    self.note_cpu_irq_latches_changed();
                 } else {
                     self.note_irq_latches_changed();
                 }

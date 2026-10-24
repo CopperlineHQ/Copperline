@@ -402,9 +402,14 @@ Three things are versioned, at three rates:
   reordered fields, and widened integers. Unknown chunks are skipped, so a
   build may add a chunk without invalidating its states for older builds.
 
-In this build every chunk, `DESC` and `META` included, is at version 1 and
-`chunk::MIGRATIONS` is empty; the migration tests supply their own step
-table through `savestate::load_with_migrations`.
+CIA-A and CIA-B chunks are version 2; other chunks remain version 1.
+The CIA migration replaces the old active-low PB pulse fields with explicit
+active-high pulse fields. In pulse mode it preserves the saved physical pin
+level on load, then lets an inherited high expire on the next E edge under
+the corrected output model. Toggle output latches retain their saved values.
+States saved by intermediate, unreleased timing prototypes at CIA version 1
+cannot be distinguished from released version-1 states; recreate those
+investigation checkpoints. `chunk::MIGRATIONS` registers both CIA upgrades.
 
 The rule for a change to a serialized struct is therefore:
 

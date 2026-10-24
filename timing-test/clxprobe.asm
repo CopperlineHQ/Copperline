@@ -11,10 +11,10 @@
 ;                  bit 15 (the unused CLXDAT bit reads high).
 ;   rows 112..119: CLXCON $01C7 (plane 3 ALSO enabled, beyond the 2-plane
 ;                  BPU). The missing plane reads 0 and never matches, which
-;                  kills the odd-group MATCH condition: bit 1 drops out,
-;                  while bit 0 persists (the dual-playfield odd-even overlap
-;                  latches on pixel presence, not the CLXCON match) --
-;                  pinning the enabled-plane-beyond-BPU semantics.
+;                  kills the odd-group MATCH condition: bits 0 and 1 drop
+;                  out. PF-PF bit 0 uses the enabled-plane match masks too,
+;                  as confirmed by the paired A500 collision measurements.
+;                  This pins the enabled-plane-beyond-BPU semantics.
 ;
 ; The rectangles and sprite stay on screen, so any change to the live
 ; collision scan, the matching matrix, or sprite-playfield overlap
