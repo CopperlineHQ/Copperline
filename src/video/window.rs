@@ -950,6 +950,18 @@ fn repeated_main_key_should_drop(
     }
 }
 
+/// Whether a key event is winit replaying a key that was already down when
+/// a window gained the focus. On X11 and Windows every such key arrives as
+/// a synthetic press; it went down for some other window, usually as the
+/// very shortcut that switched here (Alt+Tab, a tiling window manager's
+/// Mod+N), and the window manager keeps its release. Passed on, the press
+/// leaves the Amiga holding a key it is never told was let go, which
+/// input.device then repeats. The synthetic releases winit sends on focus
+/// loss stay: they are how a key held at the switch is let go.
+fn key_event_is_focus_gain_replay(state: ElementState, is_synthetic: bool) -> bool {
+    is_synthetic && state == ElementState::Pressed
+}
+
 fn animated_focus_needs_continuous_redraw(running: bool, showing: bool) -> bool {
     running && showing
 }
@@ -2019,10 +2031,12 @@ struct PictureFrame {
 
 enum PresentPass {
     Plain,
-    /// The RTG board's own texture over the display rect.
+    /// The RTG board's own texture over the display rect, then the
+    /// corner overlays' boxes from the composed texture back over it.
     Rtg {
         rect: (f32, f32, f32, f32),
         integer_scaling: bool,
+        overlays: Vec<scaler::ScalerDraw>,
     },
     Crt(CrtPresent),
 }
@@ -2094,7 +2108,11 @@ fn present_job(
             PresentPass::Rtg {
                 rect,
                 integer_scaling,
-            } => rtg_texture.render(&ctx.queue, encoder, target, *rect, *integer_scaling),
+                overlays,
+            } => {
+                rtg_texture.render(&ctx.queue, encoder, target, *rect, *integer_scaling);
+                scaler.render_overlays(&ctx.queue, encoder, target, overlays);
+            }
             PresentPass::Crt(crt) => {
                 if crt.bezel_active {
                     let opening = bezel::opening_rect(crt.style, crt.viewport);
@@ -4808,6 +4826,18 @@ impl ApplicationHandler for App {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        // Ahead of netplay too: a replayed press must not reach the shared
+        // machine's input either.
+        if let WindowEvent::KeyboardInput {
+            event: KeyEvent { state, .. },
+            is_synthetic,
+            ..
+        } = &event
+        {
+            if key_event_is_focus_gain_replay(*state, *is_synthetic) {
+                return;
+            }
+        }
         if self.netplay_window_event(event_loop, &event) {
             return;
         }
@@ -5629,14 +5659,26 @@ impl ApplicationHandler for App {
                     // display region after the UI has been drawn into it, so
                     // an open menu or panel would be painted over and vanish.
                     // Fall back to the CPU present, which composites the UI on
-                    // top as usual, at the cost of the FB_WIDTH downscale for
-                    // as long as the overlay is open.
+                    // top as usual, at the cost of the FB_WIDTH downscale
+                    // (or, under integer scaling, the texture's resolution)
+                    // for as long as the overlay is open. The picture keeps
+                    // the pass's size and place either way.
                     // The guest's fn-88 overlay is composited on the CPU
                     // canvas too, so it needs the same fallback: the GPU
-                    // RTG pass would overdraw it.
+                    // RTG pass would overdraw it. So does the drop hint,
+                    // which scrims the whole display as a panel does.
+                    //
+                    // The corner overlays (record badge, performance
+                    // readout, OSD message) keep the GPU pass: they are
+                    // small boxes, put back over the board texture after
+                    // it is drawn, and the readout and the badge stay up
+                    // for long stretches that the soft fallback would
+                    // spoil.
                     let rtg_gpu = self.rtg_present_dims.is_some()
                         && !self.ui.active()
-                        && guest_overlay.is_empty();
+                        && guest_overlay.is_empty()
+                        && !self.drop_hover;
+                    let corner_overlays = recording || self.perf_overlay || osd.is_some();
                     // The CRT pass re-draws the display rect from the same
                     // buffer, so it also re-draws whatever the UI composited
                     // into it -- through curvature and a phosphor mask, which
@@ -5716,6 +5758,19 @@ impl ApplicationHandler for App {
                         }
                         let window = r.window.clone();
                         let layout = main_present_layout(r, display_src);
+                        // Under integer scaling the RTG pass draws the
+                        // board's picture at a whole multiple of its own
+                        // pixels, centred in the display rather than
+                        // stretched over it. What the CPU composes for the
+                        // frame -- the picture itself while the CPU present
+                        // stands in for the pass, the copy the corner
+                        // overlays blend over, the overlays -- is laid out
+                        // where the pass puts it, so nothing moves or
+                        // resizes between the two paths.
+                        let rtg_integer_picture = self
+                            .rtg_present_dims
+                            .filter(|_| integer_scaling_requested())
+                            .map(|dims| (dims, layout.rtg_integer_picture(dims)));
                         // A frame the main thread presents itself composes
                         // straight into the pixels buffer, with the GPU side
                         // at home; it goes back into `r` at the end.
@@ -5747,13 +5802,26 @@ impl ApplicationHandler for App {
                         if picture_on_gpu {
                             // The picture reaches the surface from its own
                             // texture; the frame's display rows go unsampled.
-                        } else if rtg_gpu {
+                        } else if rtg_gpu && !corner_overlays {
                             // The GPU pass overdraws the display region; black it
                             // out so nothing stale shows at the seams.
                             let rows = present_height() * texture_scale;
                             let stride = texture_width(texture_scale) * 4;
                             frame[..rows * stride].fill(0);
+                        } else if let Some((dims, picture)) = rtg_integer_picture {
+                            // Under the GPU RTG pass a copy of the board frame
+                            // only shows through the corner overlays: their
+                            // boxes are translucent, so they blend over it like
+                            // they blend over any picture, and the GPU then
+                            // puts just those boxes back over the native one.
+                            // Under integer scaling that copy has to sit where
+                            // the pass puts the picture, which the FB_WIDTH
+                            // copy below (stretched over the display, as the
+                            // smooth fit draws it) does not.
+                            copy_rtg_picture(&self.rtg_fb, dims, picture, frame, texture_scale);
                         } else {
+                            // Under the GPU RTG pass this copy only shows
+                            // through the corner overlays, as above.
                             copy_window_present_frame(
                                 &self.present_fb,
                                 self.present_rows,
@@ -5825,13 +5893,17 @@ impl ApplicationHandler for App {
                         // The corner overlays anchor to the display region the
                         // viewer actually sees: the whole display classically,
                         // the sub-rect while autocrop or per-axis scaling
-                        // presents one.
-                        let overlay_anchor = display_src.map(|src| src.rect).unwrap_or((
-                            0,
-                            0,
-                            FB_WIDTH,
-                            present_height(),
-                        ));
+                        // presents one, and the board's picture while an RTG
+                        // frame sits at a whole multiple inside the display.
+                        let overlay_anchor = match rtg_integer_picture {
+                            Some((_, picture)) => picture_canvas_rect(picture),
+                            None => display_src.map(|src| src.rect).unwrap_or((
+                                0,
+                                0,
+                                FB_WIDTH,
+                                present_height(),
+                            )),
+                        };
                         if !guest_overlay.is_empty() {
                             // The guest's debug overlay sits directly on the
                             // picture, under every piece of host chrome.
@@ -5845,23 +5917,38 @@ impl ApplicationHandler for App {
                                 overlay_anchor,
                             );
                         }
+                        // The boxes the corner overlays paint, for the GPU
+                        // RTG pass to put back over the board texture.
+                        let mut overlay_boxes = Vec::new();
                         if recording {
                             // Painted into the presentation texture only, so
                             // the badge never appears in the recorded file.
-                            draw_record_badge(frame, texture_scale, corner, overlay_anchor);
+                            overlay_boxes.push(draw_record_badge(
+                                frame,
+                                texture_scale,
+                                corner,
+                                overlay_anchor,
+                            ));
                         }
                         if self.perf_overlay {
-                            draw_perf_overlay(
+                            overlay_boxes.extend(draw_perf_overlay(
                                 frame,
                                 &self.perf.lines,
                                 texture_scale,
                                 recording,
                                 corner,
                                 overlay_anchor,
-                            );
+                            ));
                         }
                         if let Some((text, warning)) = &osd {
-                            draw_osd(frame, text, *warning, texture_scale, corner, overlay_anchor);
+                            overlay_boxes.push(draw_osd(
+                                frame,
+                                text,
+                                *warning,
+                                texture_scale,
+                                corner,
+                                overlay_anchor,
+                            ));
                         }
                         // The focus lights its control the way the pointer
                         // does, breathing between the two.
@@ -5945,15 +6032,13 @@ impl ApplicationHandler for App {
                             texture_height(texture_scale) as u32,
                         );
                         let pass = if rtg_gpu {
-                            let (cx, cy, cw, ch) = present_clip;
-                            let disp_h = if debug_layout {
-                                ch as f32
-                            } else {
-                                ch as f32 * present_height() as f32 / window_present_height() as f32
-                            };
                             PresentPass::Rtg {
-                                rect: (cx as f32, cy as f32, cw as f32, disp_h),
+                                rect: layout.rtg_viewport(),
                                 integer_scaling: integer_scaling_requested(),
+                                overlays: overlay_boxes
+                                    .iter()
+                                    .filter_map(|&rect| layout.overlay_draw(rect, texture_scale))
+                                    .collect(),
                             }
                         } else if crt_active || bezel_active {
                             let scanlines = crt_scanline_count(

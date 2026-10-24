@@ -2001,12 +2001,14 @@ pub(super) fn edge(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> f32 {
 /// `anchor` is the visible display region in canvas pixels `(x, y, w,
 /// h)` -- the whole display classically, the crop rect under autocrop --
 /// so the badge stays in the corner the viewer actually sees.
+/// Returns the box it painted, in texture pixels: everything it draws
+/// lies inside it.
 pub(super) fn draw_record_badge(
     frame: &mut [u8],
     texture_scale: usize,
     corner_inset: usize,
     anchor: (usize, usize, usize, usize),
-) {
+) -> Rect {
     let s = texture_scale;
     let px = 2 * s;
     let pad = 4 * s;
@@ -2021,19 +2023,14 @@ pub(super) fn draw_record_badge(
     let box_h = text_h + 2 * pad;
     let box_x = ((anchor.0 + anchor.2) * s).saturating_sub(margin + corner_inset + box_w);
     let box_y = anchor.1 * s + margin + corner_inset;
+    let rect = Rect {
+        x: box_x,
+        y: box_y,
+        w: box_w,
+        h: box_h,
+    };
 
-    fill_rect_blend(
-        frame,
-        Rect {
-            x: box_x,
-            y: box_y,
-            w: box_w,
-            h: box_h,
-        },
-        OSD_BG,
-        0.68,
-        s,
-    );
+    fill_rect_blend(frame, rect, OSD_BG, 0.68, s);
     // Red record dot, centred on the text line.
     let cx = (box_x + pad + dot_d / 2) as f32;
     let cy = (box_y + box_h / 2) as f32;
@@ -2069,6 +2066,7 @@ pub(super) fn draw_record_badge(
         OSD_TEXT,
         px,
     );
+    rect
 }
 
 /// Right-aligned performance readout in the top-right of the display
@@ -2290,6 +2288,8 @@ fn rasterize_guest_overlay(
     }
 }
 
+/// Returns the box the readout painted, in texture pixels (everything it
+/// draws lies inside it), or `None` when there was nothing to draw.
 pub(super) fn draw_perf_overlay(
     frame: &mut [u8],
     lines: &[String],
@@ -2297,7 +2297,7 @@ pub(super) fn draw_perf_overlay(
     below_record_badge: bool,
     corner_inset: usize,
     anchor: (usize, usize, usize, usize),
-) {
+) -> Option<Rect> {
     let s = texture_scale;
     let px = crate::video::menu_scale().factor() * s;
     let pad = 4 * s;
@@ -2311,7 +2311,7 @@ pub(super) fn draw_perf_overlay(
         .max()
         .unwrap_or(0);
     if text_w == 0 {
-        return;
+        return None;
     }
     let box_w = text_w + 2 * pad;
     let box_h = lines.len() * text_h + lines.len().saturating_sub(1) * line_gap + 2 * pad;
@@ -2326,19 +2326,14 @@ pub(super) fn draw_perf_overlay(
         } else {
             margin
         };
+    let rect = Rect {
+        x: box_x,
+        y: box_y,
+        w: box_w,
+        h: box_h,
+    };
 
-    fill_rect_blend(
-        frame,
-        Rect {
-            x: box_x,
-            y: box_y,
-            w: box_w,
-            h: box_h,
-        },
-        OSD_BG,
-        0.68,
-        s,
-    );
+    fill_rect_blend(frame, rect, OSD_BG, 0.68, s);
     let fw = texture_width(s);
     let fh = texture_height(s);
     let mut y = box_y + pad;
@@ -2348,6 +2343,7 @@ pub(super) fn draw_perf_overlay(
         font::draw_text(frame, fw, fh, x, y, line, OSD_TEXT, px);
         y += text_h + line_gap;
     }
+    Some(rect)
 }
 
 /// `corner_inset` is how far a drawn monitor front and a bowed preset cut
@@ -2357,6 +2353,8 @@ pub(super) fn draw_perf_overlay(
 /// direction the corner is missing in, and it is the placement the figure
 /// was solved for. Moving on one axis alone would need a different figure
 /// and a much longer run.
+/// Returns the rect it painted, in texture pixels: the box, widened to
+/// the text when a message too long for the display runs out of it.
 pub(super) fn draw_osd(
     frame: &mut [u8],
     text: &str,
@@ -2364,7 +2362,7 @@ pub(super) fn draw_osd(
     texture_scale: usize,
     corner_inset: usize,
     anchor: (usize, usize, usize, usize),
-) {
+) -> Rect {
     let s = texture_scale;
     let px = 2 * s; // font pixel -> device pixels
     let pad = 4 * s;
@@ -2385,19 +2383,14 @@ pub(super) fn draw_osd(
     // What is left of the width once the box has come in off the corner.
     let box_w = (text_w + 2 * pad).min(anchor_right.saturating_sub(box_x + margin));
     let box_y = display_h.saturating_sub(margin + box_h + corner_inset);
+    let rect = Rect {
+        x: box_x,
+        y: box_y,
+        w: box_w,
+        h: box_h,
+    };
 
-    fill_rect_blend(
-        frame,
-        Rect {
-            x: box_x,
-            y: box_y,
-            w: box_w,
-            h: box_h,
-        },
-        OSD_BG,
-        0.68,
-        s,
-    );
+    fill_rect_blend(frame, rect, OSD_BG, 0.68, s);
     let text_x = box_x + pad;
     let text_y = box_y + pad;
     font::draw_text(
@@ -2420,6 +2413,13 @@ pub(super) fn draw_osd(
         if warning { OSD_TEXT_WARNING } else { OSD_TEXT },
         px,
     );
+    // The text is not clipped to the box: a message too long for it runs
+    // on, its shadow a pixel past the glyphs, until the frame edge.
+    let drawn_w = pad + s + font::text_width(text, px);
+    Rect {
+        w: rect.w.max(drawn_w.min(fw.saturating_sub(rect.x))),
+        ..rect
+    }
 }
 
 /// Fill `rect` by alpha-blending `color` over the existing texture

@@ -11,27 +11,27 @@ use super::{
     copy_present_frame, copy_tv_aperture_to_window, copy_window_present_frame,
     cursor_position_in_texture, draw_seven_segment_digit, draw_status_bar, fdd_counter_readout,
     fdd_track_counter_rect, fdd_track_digit_rect, host_shortcut_modifier_pressed,
-    host_to_amiga_rawkey, joystick_toggle_rect, kbdpanel, keyboard_toggle_rect, led_row_rect,
-    mask_present_frame_to_tv, paint_test_screen, parse_amiga_key, pause_button_rect,
-    plan_present_scaling_for, power_button_rect, present_height, presentation_pixels_equal,
-    presentation_source_y_offset, raw_device_qualifier_family_held, raw_device_qualifier_rawkey,
-    rawkey_is_held, rawkey_transition_is_duplicate, reboot_button_rect,
-    repeated_main_key_should_drop, rgba, short_status_error, shorten_status_paths,
-    shot_button_rect, should_render_emulated_frame, standard_window_top_row,
-    status_with_latched_fdd_track, take_integral_mouse_delta, texture_height, texture_width,
-    tint_display_rows, tint_lut, tint_rows_in_place, track_counter_digit_rect,
-    track_counter_layout, tv_aperture_source_row, tv_centre_source_offset, tv_source_h_bounds,
-    volume_mute_hit_rect, volume_percent_from_pos, volume_slider_knob_rect,
-    volume_slider_track_rect, BarControl, DriveBar, JoystickInputMode, MediaBar, PresentationLatch,
-    StatusBarView, ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT, AMIGA_RAWKEY_LEFT_SHIFT,
-    AMIGA_RAWKEY_RIGHT_ALT, AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH, BUTTON_GLYPH_DISABLED, CD_BODY,
-    CD_LED_OFF, CD_LED_ON, CD_TRACK_SEGMENT_OFF, CD_TRACK_SEGMENT_ON, DISK_BODY, DISK_BODY_SHADOW,
-    DISK_LABEL, FDD_LED_OFF, FDD_LED_ON, HDD_LED_OFF, HDD_LED_ON, POWER_GLYPH_OFF, POWER_GLYPH_ON,
-    POWER_LED_BRIGHT, POWER_LED_DIM, POWER_LED_OFF, STANDARD_PAL_VISIBLE_LINES,
-    STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG, TRACK_SEGMENT_OFF, TRACK_SEGMENT_ON,
-    TUBE_NTSC_PRESENT_HEIGHT, TUBE_PAL_PRESENT_HEIGHT, TV_CAPTURED_SOURCE_X, TV_CAPTURED_WIDTH,
-    TV_LIVE_PAD_X, TV_NTSC_PRESENT_HEIGHT, TV_PAL_PRESENT_HEIGHT, TV_PRESENT_SOURCE_Y, VOLUME_FILL,
-    VOLUME_GLYPH_X,
+    host_to_amiga_rawkey, joystick_toggle_rect, kbdpanel, key_event_is_focus_gain_replay,
+    keyboard_toggle_rect, led_row_rect, mask_present_frame_to_tv, paint_test_screen,
+    parse_amiga_key, pause_button_rect, plan_present_scaling_for, power_button_rect,
+    present_height, presentation_pixels_equal, presentation_source_y_offset,
+    raw_device_qualifier_family_held, raw_device_qualifier_rawkey, rawkey_is_held,
+    rawkey_transition_is_duplicate, reboot_button_rect, repeated_main_key_should_drop, rgba,
+    short_status_error, shorten_status_paths, shot_button_rect, should_render_emulated_frame,
+    standard_window_top_row, status_with_latched_fdd_track, take_integral_mouse_delta,
+    texture_height, texture_width, tint_display_rows, tint_lut, tint_rows_in_place,
+    track_counter_digit_rect, track_counter_layout, tv_aperture_source_row,
+    tv_centre_source_offset, tv_source_h_bounds, volume_mute_hit_rect, volume_percent_from_pos,
+    volume_slider_knob_rect, volume_slider_track_rect, BarControl, DriveBar, JoystickInputMode,
+    MediaBar, PresentationLatch, StatusBarView, ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT,
+    AMIGA_RAWKEY_LEFT_SHIFT, AMIGA_RAWKEY_RIGHT_ALT, AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH,
+    BUTTON_GLYPH_DISABLED, CD_BODY, CD_LED_OFF, CD_LED_ON, CD_TRACK_SEGMENT_OFF,
+    CD_TRACK_SEGMENT_ON, DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL, FDD_LED_OFF, FDD_LED_ON,
+    HDD_LED_OFF, HDD_LED_ON, POWER_GLYPH_OFF, POWER_GLYPH_ON, POWER_LED_BRIGHT, POWER_LED_DIM,
+    POWER_LED_OFF, STANDARD_PAL_VISIBLE_LINES, STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG,
+    TRACK_SEGMENT_OFF, TRACK_SEGMENT_ON, TUBE_NTSC_PRESENT_HEIGHT, TUBE_PAL_PRESENT_HEIGHT,
+    TV_CAPTURED_SOURCE_X, TV_CAPTURED_WIDTH, TV_LIVE_PAD_X, TV_NTSC_PRESENT_HEIGHT,
+    TV_PAL_PRESENT_HEIGHT, TV_PRESENT_SOURCE_Y, VOLUME_FILL, VOLUME_GLYPH_X,
 };
 use crate::audio::{AudioSink, NullSink};
 use crate::bus::{FrontPanelStatus, RenderRegisterSnapshot};
@@ -143,6 +143,40 @@ fn host_repeat_filter_accepts_unheld_amiga_qualifier_press() {
         true,
         true
     ));
+}
+
+#[test]
+fn focus_gain_replayed_presses_are_dropped_and_focus_loss_releases_kept() {
+    // Issue #817: switching to the window by keyboard (Alt+Tab, i3's
+    // Mod+N) had winit replay the shortcut's keys as synthetic presses
+    // whose releases the window manager kept, leaving the Amiga holding
+    // and repeating them.
+    assert!(key_event_is_focus_gain_replay(ElementState::Pressed, true));
+    assert!(!key_event_is_focus_gain_replay(
+        ElementState::Released,
+        true
+    ));
+    assert!(!key_event_is_focus_gain_replay(
+        ElementState::Pressed,
+        false
+    ));
+    assert!(!key_event_is_focus_gain_replay(
+        ElementState::Released,
+        false
+    ));
+
+    // With the replayed press dropped, a real release of the same key
+    // that does reach the window afterwards tells the keyboard nothing.
+    let mut app = test_app();
+    app.main_window_focused = true;
+    app.input_recorder = Some(crate::inputrec::InputRecorder::new(0.0));
+    let rawkey = host_to_amiga_rawkey(KeyCode::Digit2).expect("Digit2 has an Amiga key");
+    app.handle_live_amiga_key_event(rawkey, false);
+    assert!(!app.amiga_rawkey_held(rawkey));
+    assert_eq!(
+        app.input_recorder.as_ref().map(|rec| rec.events_recorded()),
+        Some(0)
+    );
 }
 
 #[test]
@@ -12321,6 +12355,305 @@ fn the_overlays_leave_the_corner_on_both_axes() {
         "the performance readout did not come in from the right"
     );
     assert_eq!(y0, margin + inset, "the performance readout did not drop");
+}
+
+/// The GPU RTG pass overdraws the display after the composed buffer is
+/// drawn, and only the boxes the corner overlays report are put back over
+/// it: a pixel one of them paints outside its box would vanish on an RTG
+/// screen. Each box is exactly the painted extent, and a message too long
+/// for the display reports the text that runs out of its box too.
+#[test]
+fn corner_overlays_report_a_box_holding_every_pixel_they_paint() {
+    // The painted extent of `frame`, as a rect.
+    let painted = |frame: &[u8], scale: usize| {
+        let (mut x0, mut x1, mut y0, mut y1) = (usize::MAX, 0usize, usize::MAX, 0usize);
+        for y in 0..texture_height(scale) {
+            for x in 0..texture_width(scale) {
+                if pixel(frame, x, y, scale) != [0, 0, 0, 0] {
+                    x0 = x0.min(x);
+                    x1 = x1.max(x);
+                    y0 = y0.min(y);
+                    y1 = y1.max(y);
+                }
+            }
+        }
+        assert!(x0 <= x1, "nothing was painted");
+        super::Rect {
+            x: x0,
+            y: y0,
+            w: x1 - x0 + 1,
+            h: y1 - y0 + 1,
+        }
+    };
+    let contains = |outer: super::Rect, inner: super::Rect| {
+        inner.x >= outer.x
+            && inner.y >= outer.y
+            && inner.x + inner.w <= outer.x + outer.w
+            && inner.y + inner.h <= outer.y + outer.h
+    };
+    let lines = vec!["50.0 fps".to_string(), "slip 0".to_string()];
+    for scale in [1, 2] {
+        let blank = || vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+
+        let mut frame = blank();
+        let rect = super::draw_record_badge(&mut frame, scale, 0, full_anchor());
+        assert_eq!(rect, painted(&frame, scale), "record badge at {scale}x");
+
+        let mut frame = blank();
+        let rect = super::draw_perf_overlay(&mut frame, &lines, scale, true, 0, full_anchor())
+            .expect("a readout with lines paints a box");
+        assert_eq!(rect, painted(&frame, scale), "perf readout at {scale}x");
+
+        let mut frame = blank();
+        let rect = super::draw_osd(&mut frame, "Saved", false, scale, 0, full_anchor());
+        assert_eq!(rect, painted(&frame, scale), "OSD at {scale}x");
+
+        let mut frame = blank();
+        let long = "Saved ".repeat(40);
+        let rect = super::draw_osd(&mut frame, &long, false, scale, 0, full_anchor());
+        let extent = painted(&frame, scale);
+        assert!(
+            contains(rect, extent),
+            "the long OSD painted {extent:?} outside its reported {rect:?} at {scale}x"
+        );
+        assert!(rect.x + rect.w <= texture_width(scale));
+    }
+    // Nothing to draw reports no box.
+    let mut frame = vec![0u8; texture_width(1) * texture_height(1) * 4];
+    assert_eq!(
+        super::draw_perf_overlay(&mut frame, &[], 1, false, 0, full_anchor()),
+        None
+    );
+}
+
+/// An overlay box's draw lands on the surface pixels the display draw put
+/// it on, and samples each one at the texture position the display draw
+/// sampled it at -- so the box put back over the RTG pass is
+/// indistinguishable from the one the display draw drew -- in the
+/// classic whole-canvas layout at a whole multiple and at a fractional
+/// fit, and in a sub-rect layout. A box entirely off the display has no
+/// draw.
+#[test]
+fn an_overlay_draw_resamples_its_box_where_the_display_draw_did() {
+    use super::scaler::ScaleFilter::{Nearest, SharpBilinear};
+    let canvas_h = super::window_present_height();
+    let classic = (0, 0, FB_WIDTH, canvas_h);
+    let layout = |src_canvas, display_dst, filter| super::PresentLayout {
+        src_canvas,
+        display_dst,
+        filter,
+        chrome_dst: None,
+        factors: None,
+    };
+    // The sample position, in uv, of surface pixel `p` on one axis for a
+    // draw whose source starts at `src0` spanning `src_len` uv, landing at
+    // `d0` spanning `dlen` pixels.
+    let sample = |p: u32, src0: f32, src_len: f32, d0: u32, dlen: u32| {
+        src0 + (p as f32 + 0.5 - d0 as f32) / dlen as f32 * src_len
+    };
+    let cases = [
+        // 2x integer: a box drawn at 2x lands on exact doubles.
+        (
+            layout(
+                classic,
+                (10, 20, 2 * FB_WIDTH as u32, 2 * canvas_h as u32),
+                Nearest,
+            ),
+            2,
+        ),
+        // A smooth fit at no whole multiple.
+        (
+            layout(
+                classic,
+                (3, 0, FB_WIDTH as u32 * 3 / 2 + 1, canvas_h as u32 * 7 / 5),
+                SharpBilinear,
+            ),
+            1,
+        ),
+        // An autocrop rect, scaled to its own fit.
+        (
+            layout((38, 71, 640, 400), (100, 50, 1280, 900), SharpBilinear),
+            2,
+        ),
+    ];
+    for (layout, scale) in cases {
+        let display = layout.draws()[0];
+        let rect = super::Rect {
+            x: 101 * scale,
+            y: 87 * scale,
+            w: 37 * scale + 1,
+            h: 13 * scale,
+        };
+        let draw = layout
+            .overlay_draw(rect, scale)
+            .expect("a box on the display has a draw");
+        assert_eq!(draw.filter, layout.filter);
+        assert_eq!(draw.picture, None);
+        let (x, y, w, h) = draw.dst;
+        let (dx, dy, dw, dh) = layout.display_dst;
+        let (sx, sy, sw, sh) = layout.src_canvas;
+        // The box's footprint, rounded out by less than a pixel a side.
+        let kx = dw as f32 / sw as f32;
+        let ky = dh as f32 / sh as f32;
+        let left = dx as f32 + (rect.x as f32 / scale as f32 - sx as f32) * kx;
+        let right = dx as f32 + ((rect.x + rect.w) as f32 / scale as f32 - sx as f32) * kx;
+        let top = dy as f32 + (rect.y as f32 / scale as f32 - sy as f32) * ky;
+        let bottom = dy as f32 + ((rect.y + rect.h) as f32 / scale as f32 - sy as f32) * ky;
+        assert!(x as f32 <= left && left - (x as f32) < 1.0, "{layout:?}");
+        assert!((x + w) as f32 >= right && ((x + w) as f32) - right < 1.0);
+        assert!(y as f32 <= top && top - (y as f32) < 1.0);
+        assert!((y + h) as f32 >= bottom && ((y + h) as f32) - bottom < 1.0);
+        for p in x..x + w {
+            let sub = sample(p, draw.src[0], draw.src[2], x, w);
+            let full = sample(p, display.src[0], display.src[2], dx, dw);
+            assert!((sub - full).abs() < 1e-5, "{layout:?} column {p}");
+        }
+        for p in y..y + h {
+            let sub = sample(p, draw.src[1], draw.src[3], y, h);
+            let full = sample(p, display.src[1], display.src[3], dy, dh);
+            assert!((sub - full).abs() < 1e-5, "{layout:?} row {p}");
+        }
+    }
+    // Left of an autocrop rect, wholly cropped away: nothing to put back.
+    let cropped = layout((38, 71, 640, 400), (100, 50, 1280, 900), SharpBilinear);
+    let off = super::Rect {
+        x: 0,
+        y: 100,
+        w: 20,
+        h: 20,
+    };
+    assert_eq!(cropped.overlay_draw(off, 1), None);
+    let empty = super::Rect { w: 0, ..off };
+    assert_eq!(
+        layout(classic, (0, 0, 716, 581), Nearest).overlay_draw(empty, 1),
+        None
+    );
+}
+
+/// The RTG pass draws over the display's rows of the display rect: the
+/// canvas's first `present_height()` rows in the classic layout, where
+/// the chrome below them stays the composed texture's, and the whole
+/// rect of a debug pane, whose canvas is the display alone.
+#[test]
+fn the_rtg_viewport_is_the_display_rows_of_the_display_rect() {
+    let canvas_h = super::window_present_height();
+    let ph = super::present_height();
+    let layout = |src_canvas, display_dst| super::PresentLayout {
+        src_canvas,
+        display_dst,
+        filter: super::scaler::ScaleFilter::Nearest,
+        chrome_dst: None,
+        factors: None,
+    };
+    let classic = layout(
+        (0, 0, FB_WIDTH, canvas_h),
+        (5, 7, 2 * FB_WIDTH as u32, 2 * canvas_h as u32),
+    );
+    assert_eq!(
+        classic.rtg_viewport(),
+        (5.0, 7.0, 2.0 * FB_WIDTH as f32, 2.0 * ph as f32)
+    );
+    let pane = layout((0, 0, FB_WIDTH, ph), (40, 30, 900, 677));
+    assert_eq!(pane.rtg_viewport(), (40.0, 30.0, 900.0, 677.0));
+}
+
+/// Issue 816: under integer scaling the RTG pass draws the board's
+/// picture at a whole multiple of its own pixels, centred in the display
+/// with black margins around it, so the corner overlays anchor to the
+/// picture and not to the display around it. A 640x480 board sits 38
+/// canvas columns in from each side of the 716-wide display at 1x and
+/// at 2x alike, and the performance readout comes the usual margin in
+/// from the picture's top-right corner, where the whole display's anchor
+/// put it over the margin. A display too small for a 1:1 copy is filled,
+/// so its picture is the whole display.
+#[test]
+fn an_integer_rtg_picture_anchors_the_corner_overlays_inside_it() {
+    let canvas_h = super::window_present_height();
+    let ph = super::present_height();
+    assert!(ph >= 480, "the display holds a 480-row board at 1x");
+    let classic = |display_dst| super::PresentLayout {
+        src_canvas: (0, 0, FB_WIDTH, canvas_h),
+        display_dst,
+        filter: super::scaler::ScaleFilter::Nearest,
+        chrome_dst: None,
+        factors: None,
+    };
+    // The picture's rows, in canvas pixels, rounded in.
+    let top = (ph - 480) as f32 / 2.0;
+    let rows = (top.ceil() as usize, (top + 480.0).floor() as usize);
+    let lines = vec!["50.0 fps".to_string(), "slip 0".to_string()];
+    for m in [1u32, 2] {
+        let layout = classic((100, 20, m * FB_WIDTH as u32, m * canvas_h as u32));
+        let anchor = super::picture_canvas_rect(layout.rtg_integer_picture((640, 480)));
+        assert_eq!(anchor, (38, rows.0, 640, rows.1 - rows.0), "at {m}x");
+        for scale in [1, 2] {
+            let margin = 8 * scale;
+            let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+            let rect = super::draw_perf_overlay(&mut frame, &lines, scale, false, 0, anchor)
+                .expect("a readout with lines paints a box");
+            assert_eq!(rect.x + rect.w, (38 + 640) * scale - margin);
+            assert_eq!(rect.y, rows.0 * scale + margin);
+            assert!(rect.x >= 38 * scale && rect.y + rect.h <= rows.1 * scale);
+            let old = super::draw_perf_overlay(&mut frame, &lines, scale, false, 0, full_anchor())
+                .expect("a readout with lines paints a box");
+            assert!(
+                old.x + old.w > (38 + 640) * scale,
+                "the whole display's anchor no longer reaches past the picture"
+            );
+        }
+    }
+    let small = classic((0, 0, 600, 500));
+    assert_eq!(
+        super::picture_canvas_rect(small.rtg_integer_picture((640, 480))),
+        full_anchor()
+    );
+}
+
+/// The CPU copy of an RTG frame under integer scaling lays the board out
+/// where the pass draws it: every texture pixel shows the board pixel
+/// under its centre, the margin around the picture is black, and the
+/// chrome rows below the display are left alone. Here a 32x16 board,
+/// every pixel its own colour, covers canvas columns 100..164 and rows
+/// 50..82, two canvas pixels per board pixel. A frame shorter than its
+/// claimed size shows only the margin.
+#[test]
+fn the_integer_rtg_copy_lays_the_board_where_the_pass_draws_it() {
+    const BLACK: [u8; 4] = 0xFF00_0000u32.to_le_bytes();
+    const UNTOUCHED: [u8; 4] = [0xAB; 4];
+    let ph = super::present_height();
+    let native = (32u32, 16u32);
+    let board: Vec<u32> = (0..32 * 16).map(|i| 0xFF00_0000 | i).collect();
+    let picture = [
+        100.0 / FB_WIDTH as f32,
+        50.0 / ph as f32,
+        64.0 / FB_WIDTH as f32,
+        32.0 / ph as f32,
+    ];
+    for scale in [1, 2] {
+        let mut frame = vec![0xABu8; texture_width(scale) * texture_height(scale) * 4];
+        super::copy_rtg_picture(&board, native, picture, &mut frame, scale);
+        for y in 0..texture_height(scale) {
+            for x in 0..texture_width(scale) {
+                let want = if y >= ph * scale {
+                    UNTOUCHED
+                } else if (100 * scale..164 * scale).contains(&x)
+                    && (50 * scale..82 * scale).contains(&y)
+                {
+                    let (bx, by) = (
+                        (x - 100 * scale) / (2 * scale),
+                        (y - 50 * scale) / (2 * scale),
+                    );
+                    board[by * 32 + bx].to_le_bytes()
+                } else {
+                    BLACK
+                };
+                assert_eq!(pixel(&frame, x, y, scale), want, "({x}, {y}) at {scale}x");
+            }
+        }
+    }
+    let mut frame = vec![0xABu8; texture_width(1) * texture_height(1) * 4];
+    super::copy_rtg_picture(&board[..100], native, picture, &mut frame, 1);
+    assert!((0..ph).all(|y| (0..FB_WIDTH).all(|x| pixel(&frame, x, y, 1) == BLACK)));
 }
 
 #[test]
