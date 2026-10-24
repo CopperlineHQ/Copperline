@@ -77,6 +77,7 @@ pub fn prepare(
             volume_name: Some(volume.into()),
             boot_pri: priority,
             filesystem: FileSystem::OFS,
+            timing: None,
         });
     }
     ensure!(
