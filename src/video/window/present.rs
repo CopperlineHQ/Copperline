@@ -873,6 +873,59 @@ impl PresentLayout {
         draws
     }
 
+    /// The draw that puts `rect` -- backing-texture pixels at
+    /// `texture_scale`, inside the display region: an overlay box --
+    /// back on the surface exactly where the display draw put it, for a
+    /// pass that overdraws the display after the scaler has drawn it (the
+    /// RTG board texture).
+    ///
+    /// The destination is `rect`'s footprint rounded out to whole surface
+    /// pixels and clipped to the display rect, and the source is mapped
+    /// back from that rounded destination rather than taken from `rect`:
+    /// the sub-draw then samples each pixel it covers at the position the
+    /// whole display draw sampled it at, so the box lands on the same
+    /// pixels with no seam. `None` when no part of `rect` is on the
+    /// display.
+    pub(super) fn overlay_draw(
+        &self,
+        rect: Rect,
+        texture_scale: usize,
+    ) -> Option<scaler::ScalerDraw> {
+        let (sx, sy, sw, sh) = self.src_canvas;
+        let (dx, dy, dw, dh) = self.display_dst;
+        if sw == 0 || sh == 0 || dw == 0 || dh == 0 || texture_scale == 0 {
+            return None;
+        }
+        let s = texture_scale as f64;
+        // Surface pixels per canvas pixel on each axis.
+        let kx = f64::from(dw) / sw as f64;
+        let ky = f64::from(dh) / sh as f64;
+        // One axis: texels `start..start + len` to whole surface pixels,
+        // clipped to the destination `d0..d0 + dlen`.
+        let span = |start: usize, len: usize, src0: usize, k: f64, d0: u32, dlen: u32| {
+            let a = f64::from(d0) + (start as f64 / s - src0 as f64) * k;
+            let b = f64::from(d0) + ((start + len) as f64 / s - src0 as f64) * k;
+            let lo = a.floor().max(f64::from(d0)) as u32;
+            let hi = b.ceil().min(f64::from(d0 + dlen)) as u32;
+            (hi > lo).then_some((lo, hi - lo))
+        };
+        let (x, w) = span(rect.x, rect.w, sx, kx, dx, dw)?;
+        let (y, h) = span(rect.y, rect.h, sy, ky, dy, dh)?;
+        let canvas_w = FB_WIDTH as f64;
+        let canvas_h = window_present_height() as f64;
+        Some(scaler::ScalerDraw {
+            src: [
+                ((sx as f64 + f64::from(x - dx) / kx) / canvas_w) as f32,
+                ((sy as f64 + f64::from(y - dy) / ky) / canvas_h) as f32,
+                (f64::from(w) / kx / canvas_w) as f32,
+                (f64::from(h) / ky / canvas_h) as f32,
+            ],
+            dst: (x, y, w, h),
+            filter: self.filter,
+            picture: None,
+        })
+    }
+
     /// Invert the layout for a host cursor position: surface physical
     /// pixels to logical canvas pixels, or `None` outside both rects.
     pub(super) fn cursor_position(

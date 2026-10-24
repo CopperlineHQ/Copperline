@@ -881,9 +881,22 @@ reuse that CL-GD5428 core. The window presents
 that frame at its native resolution through a dedicated GPU texture
 (`window/rtg_texture.rs`) rather than the 716-wide chipset buffer, and the
 TV aperture crop is suppressed -- it is a chipset crop rect, and applying it
-would show a sub-rect of the board's screen. While a menu, panel or guest
-overlay is open the window falls back to the CPU present path (at the cost
-of the downscale) so the overlay is not overdrawn by the GPU pass. If the
+would show a sub-rect of the board's screen. The GPU pass draws over the
+display rect after the scaler has drawn the composed texture, so anything
+the CPU composed over the picture would be painted out. While a menu,
+panel, guest overlay or drop hint is up the window falls back to the CPU
+present path (at the cost of the downscale) so it is not overdrawn. The
+corner overlays -- the `REC` badge, the performance readout and the OSD
+message -- keep the GPU pass instead, since the badge and the readout stay
+up for long stretches: they are composed as usual over the `FB_WIDTH` copy
+of the board frame, each drawer reports the box it painted, and after the
+RTG texture `PresentScaler::render_overlays` redraws just those boxes from
+the composed texture on top. `PresentLayout::overlay_draw` maps each box to
+whole surface pixels and derives its source rect back from them, so the
+redrawn box is sampled exactly as the display draw sampled it and leaves
+no seam; only what shows through the translucent box is the downscaled
+copy. The redraws take uniform slots of their own, because every queue
+write lands before any of the frame's commands run. If the
 board claims the display but its frame does not compose yet (mode set
 before the resolution registers), presentation falls back to the chipset
 render rather than freezing on a stale frame.

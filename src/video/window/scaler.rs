@@ -345,6 +345,16 @@ impl ScalerDraw {
 /// layout. Each needs its own uniform buffer, written once per frame.
 const MAX_DRAWS: usize = 2;
 
+/// Most draws [`PresentScaler::render_overlays`] puts back per frame: one
+/// per corner overlay (the record badge, the performance readout, the
+/// OSD message). They take uniform slots after the [`MAX_DRAWS`] ones,
+/// because every queue write lands before any of the frame's commands
+/// run: a slot shared with `render` would hand its draw the overlay's
+/// rect.
+const MAX_OVERLAY_DRAWS: usize = 3;
+
+const UNIFORM_SLOTS: usize = MAX_DRAWS + MAX_OVERLAY_DRAWS;
+
 /// Where the picture lands on the surface: the destination rect for a
 /// `canvas`-sized logical picture on a `surface`, both in physical
 /// pixels, centred either at the whole-canvas-pixel `multiple` or at the
@@ -388,8 +398,8 @@ pub(super) struct PresentScaler {
     background_pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    uniforms: [wgpu::Buffer; MAX_DRAWS],
-    bind_groups: Option<[wgpu::BindGroup; MAX_DRAWS]>,
+    uniforms: [wgpu::Buffer; UNIFORM_SLOTS],
+    bind_groups: Option<[wgpu::BindGroup; UNIFORM_SLOTS]>,
     /// The texture the bind groups view, compared by identity: `pixels`
     /// recreates its backing texture on a buffer resize, and the stale
     /// views have to be dropped with it.
@@ -635,29 +645,7 @@ impl PresentScaler {
             self.bound_texture = Some(texture.clone());
             self.bound_picture = Some(self.picture.clone());
         }
-        for (i, draw) in draws.iter().take(MAX_DRAWS).enumerate() {
-            let [pic_a, pic_b, pic_c, pic_d] = draw
-                .picture
-                .map(|map| map.uniforms())
-                .unwrap_or([[0; 4]; 4]);
-            let uniforms = ScalerUniforms {
-                rect: draw.src,
-                params: [
-                    match draw.filter {
-                        ScaleFilter::Nearest => 1.0,
-                        ScaleFilter::SharpBilinear => 0.0,
-                    },
-                    if draw.picture.is_some() { 1.0 } else { 0.0 },
-                    0.0,
-                    0.0,
-                ],
-                pic_a,
-                pic_b,
-                pic_c,
-                pic_d,
-            };
-            queue.write_buffer(&self.uniforms[i], 0, uniforms.as_bytes());
-        }
+        write_draw_uniforms(queue, &self.uniforms[..MAX_DRAWS], draws);
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("present_scaler_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -684,15 +672,91 @@ impl PresentScaler {
             return;
         };
         pass.set_pipeline(&self.pipeline);
-        for (i, draw) in draws.iter().take(MAX_DRAWS).enumerate() {
-            let (x, y, w, h) = draw.dst;
-            if w == 0 || h == 0 {
-                continue;
-            }
-            pass.set_bind_group(0, &bind_groups[i], &[]);
-            pass.set_viewport(x as f32, y as f32, w as f32, h as f32, 0.0, 1.0);
-            pass.draw(0..3, 0..1);
+        record_draws(&mut pass, &bind_groups[..MAX_DRAWS], draws);
+    }
+
+    /// Put `draws` -- sub-rects of the texture this frame's `render`
+    /// drew -- back over what `target` already holds, with no background
+    /// first: the corner overlays the CPU composed over the display,
+    /// redrawn on top of a pass that has since overdrawn the display rect
+    /// (the RTG board texture). At most [`MAX_OVERLAY_DRAWS`]; extras are
+    /// ignored. It samples the texture `render` bound, so it follows
+    /// `render` in the same frame, and draws nothing before the first.
+    pub(super) fn render_overlays(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        draws: &[ScalerDraw],
+    ) {
+        let Some(bind_groups) = self.bind_groups.as_ref() else {
+            return;
+        };
+        if draws.is_empty() {
+            return;
         }
+        write_draw_uniforms(queue, &self.uniforms[MAX_DRAWS..], draws);
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("present_scaler_overlay_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        record_draws(&mut pass, &bind_groups[MAX_DRAWS..], draws);
+    }
+}
+
+/// Write each of `draws` into the uniform buffer of the same index in
+/// `slots`; draws past the last slot are ignored.
+fn write_draw_uniforms(queue: &wgpu::Queue, slots: &[wgpu::Buffer], draws: &[ScalerDraw]) {
+    for (buffer, draw) in slots.iter().zip(draws) {
+        let [pic_a, pic_b, pic_c, pic_d] = draw
+            .picture
+            .map(|map| map.uniforms())
+            .unwrap_or([[0; 4]; 4]);
+        let uniforms = ScalerUniforms {
+            rect: draw.src,
+            params: [
+                match draw.filter {
+                    ScaleFilter::Nearest => 1.0,
+                    ScaleFilter::SharpBilinear => 0.0,
+                },
+                if draw.picture.is_some() { 1.0 } else { 0.0 },
+                0.0,
+                0.0,
+            ],
+            pic_a,
+            pic_b,
+            pic_c,
+            pic_d,
+        };
+        queue.write_buffer(buffer, 0, uniforms.as_bytes());
+    }
+}
+
+/// Record each of `draws` into `pass` through the bind group of the same
+/// index in `slots` (whose uniforms `write_draw_uniforms` filled), at its
+/// destination rect; empty rects and draws past the last slot are skipped.
+fn record_draws(pass: &mut wgpu::RenderPass<'_>, slots: &[wgpu::BindGroup], draws: &[ScalerDraw]) {
+    for (bind_group, draw) in slots.iter().zip(draws) {
+        let (x, y, w, h) = draw.dst;
+        if w == 0 || h == 0 {
+            continue;
+        }
+        pass.set_bind_group(0, bind_group, &[]);
+        pass.set_viewport(x as f32, y as f32, w as f32, h as f32, 0.0, 1.0);
+        pass.draw(0..3, 0..1);
     }
 }
 
@@ -810,6 +874,32 @@ mod tests {
         draws: &[ScalerDraw],
         picture: Option<(&[u32], (u32, u32))>,
     ) -> Vec<[u8; 4]> {
+        render_draws_then(
+            device,
+            queue,
+            texels,
+            tex_size,
+            target_size,
+            target_format,
+            draws,
+            picture,
+            |_, _, _| {},
+        )
+    }
+
+    /// [`render_draws`], with `after` recording more passes into the same
+    /// encoder after the scaler's, as `present_job` does.
+    fn render_draws_then(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texels: &[u32],
+        tex_size: (u32, u32),
+        target_size: (u32, u32),
+        target_format: wgpu::TextureFormat,
+        draws: &[ScalerDraw],
+        picture: Option<(&[u32], (u32, u32))>,
+        after: impl FnOnce(&PresentScaler, &mut wgpu::CommandEncoder, &wgpu::TextureView),
+    ) -> Vec<[u8; 4]> {
         let (tw, th) = tex_size;
         let (w, h) = target_size;
         let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -885,6 +975,7 @@ mod tests {
             scaler.upload_picture(device, queue, texels, w, h);
         }
         scaler.render(device, queue, &texture, &mut encoder, &view, draws);
+        after(&scaler, &mut encoder, &view);
 
         let padded = (w * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -997,6 +1088,75 @@ mod tests {
                 None,
             );
             assert!(px.iter().all(|p| *p == BLACK));
+        }
+    }
+
+    /// The RTG present order: the scaler draws the composed texture, the
+    /// board texture overdraws the display rect, and `render_overlays`
+    /// puts the overlay boxes back on top. Inside a box the surface is
+    /// what the scaler's own draw gave it, sampled from the box's texels;
+    /// the rest of the board's rect stays the board's; outside it both of
+    /// `render`'s draws survive, so the overlay draws took slots of their
+    /// own rather than rewriting the frame's display or chrome uniforms.
+    #[test]
+    fn overlay_draws_put_their_boxes_back_over_a_later_pass() {
+        let Some(gpu) = gpu() else {
+            return;
+        };
+        const CYAN: u32 = 0xFFFF_FF00;
+        const YELLOW: u32 = 0xFF00_FFFF;
+        const BOARD: u32 = 0xFF00_0000;
+        let row0 = [RED, GREEN, BLUE, WHITE];
+        let row1 = [CYAN, YELLOW, RED, GREEN];
+        let texels: Vec<u32> = row0.iter().chain(&row1).copied().collect();
+        let draw = |src, dst| ScalerDraw {
+            src,
+            dst,
+            filter: ScaleFilter::Nearest,
+            picture: None,
+        };
+        // The 4x2 texture at 4x as the display, its lower row again as a
+        // chrome band underneath.
+        let draws = [
+            draw([0.0, 0.0, 1.0, 1.0], (0, 0, 16, 8)),
+            draw([0.0, 0.5, 1.0, 0.5], (0, 8, 16, 4)),
+        ];
+        // Texels (1..3, 0) and (0, 1) of the display, back on their own
+        // surface pixels.
+        let overlays = [
+            draw([0.25, 0.0, 0.5, 0.5], (4, 0, 8, 4)),
+            draw([0.0, 0.5, 0.25, 0.5], (0, 4, 4, 4)),
+        ];
+        let mut board = super::super::rtg_texture::RtgTexture::new(gpu.device(), FORMAT);
+        board.upload(gpu.device(), gpu.queue(), &[BOARD], 1, 1);
+        let px = render_draws_then(
+            gpu.device(),
+            gpu.queue(),
+            &texels,
+            (4, 2),
+            (16, 12),
+            FORMAT,
+            &draws,
+            None,
+            |scaler, encoder, view| {
+                // The board covers all but the display's last two rows.
+                board.render(gpu.queue(), encoder, view, (0.0, 0.0, 16.0, 6.0), false);
+                scaler.render_overlays(gpu.queue(), encoder, view, &overlays);
+            },
+        );
+        for y in 0..12 {
+            for x in 0..16 {
+                let expected = if y < 4 && (4..12).contains(&x) {
+                    row0[x / 4]
+                } else if (4..8).contains(&y) && x < 4 {
+                    row1[0]
+                } else if y < 6 {
+                    BOARD
+                } else {
+                    row1[x / 4]
+                };
+                assert_eq!(px[y * 16 + x], expected.to_le_bytes(), "({x}, {y})");
+            }
         }
     }
 
