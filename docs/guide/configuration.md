@@ -126,6 +126,7 @@ range checks as the equivalent TOML fields:
 | `--accelerator SIZE` | `[memory] accelerator` | CPU-slot RAM at `$08000000` (32-bit CPUs): `0` to `128M` |
 | `--floppy-drives COUNT` | `[floppy] drives` | `0` to `4` wired drives (`DF0:` plus external drives) |
 | `--floppy-speed PERCENT` | `[floppy] speed` | `100` (real), `200`, `400`, `800`, or `0` (turbo) |
+| `--hd-timing TIMING` | `[ide]`, `[scsi]`, `[lide]` `timing` | `instant` (default), `period`, or a drive profile id (see [Drive timing](#drive-timing)) |
 | `--floppy-bridge DFN NAME` | `[floppy.dfN] bridge` | drive a physical floppy drive: `greaseweazle`, or `off` |
 | `--floppy-bridge-port DFN PORT` | `[floppy.dfN] bridge_port` | that interface's serial port (default: auto-detect) |
 | `--floppy-bridge-cable DFN SEL` | `[floppy.dfN] bridge_cable` | drive select: `a`/`b` (IBM PC cable) or `0`-`3` (Shugart) |
@@ -2242,6 +2243,10 @@ appears in the status bar on IDE machines. On the `A4000` profile the same
 `$DD2020` (no Gayle involved; Kickstart's `scsi.device` drives it the same
 way).
 
+`timing` and `spin_up` give the drives the seek, rotation and transfer
+times of a real drive of the period instead of completing every transfer at
+once; see [Drive timing](#drive-timing).
+
 A path ending in `.cue`, `.iso`, `.nrg`, or a `.chd` holding a CD (chdman's
 `createcd`; one holding a hard disk, `createhd`, attaches as the hard disk
 described above -- the CHD's own metadata decides, not its name) attaches an
@@ -2508,6 +2513,111 @@ banking and is never offered one; `rom_bank2 = ""` opts out on its own
 without touching `rom`. Either key can instead name a release download of
 your own, which always wins over the bundled default. The bundled files are
 found as described under [Where bundled files are found](#bundled-assets).
+
+`timing` and `spin_up` time the board's hard disks like real drives of the
+period, as on `[ide]`; see [Drive timing](#drive-timing).
+
+(drive-timing)=
+## Drive timing -- period hard-drive mechanics
+
+```toml
+[machine]
+profile = "A1200"
+
+[ide]
+timing = "period"          # "instant" (the default), "period", or a profile id
+# spin_up = true           # also model the drive spinning up at power-on
+master = "System.hdf"
+slave = { path = "Work.hdf", timing = "seagate-st9080a" }   # this drive only
+```
+
+By default a hard drive completes every transfer within the access that
+starts it, which is far faster than any real drive of the period. `timing`
+gives a drive the mechanism of a real one instead, modelled from its
+manufacturer's datasheet:
+
+- the drive's command overhead;
+- a seek curve through the datasheet's track-to-track, average and
+  full-stroke times;
+- the rotational wait for the first sector, from the platter's position at
+  that moment;
+- the media rate of each recording zone, with the track and cylinder skew
+  that hide head switches on sequential transfers;
+- the drive's buffer, read-ahead and (where the drive had it) write cache.
+
+The guest sees what a real drive shows: BSY while it seeks and reads, each
+block of data and its interrupt when the drive has it, and an activity LED
+that stays lit through the seek. Loading, booting and benchmarks then run
+at the speed of the machine with that drive fitted.
+
+`timing` takes:
+
+- `"instant"`: the default, and the behaviour of every earlier version.
+- `"period"`: the drive the machine shipped with on that interface
+  (table below).
+- A profile id from the table of built-in drives below.
+
+Set on the section (`[ide]`, `[lide]`), it covers every drive there; set
+in a drive's own table, it covers just that drive. A `[[host_disk]]` on
+one of the section's slots takes the section's `timing`. `--hd-timing
+TIMING` sets the section `timing` from the command line.
+
+`spin_up = true` also models the drive coming up to speed at power-on: it
+stays busy for its spin-up time (seconds), so Kickstart's IDE probe waits
+for it just as it did on the real machine -- including Kickstart 3.0's
+habit of giving up on a slow drive. It is off by default because it adds
+those seconds to every boot.
+
+Commodore never documented which drives it fitted, so `period` follows
+owner reports and reviews:
+
+| Machine / interface | `period` is | Fitted to |
+|---|---|---|
+| A600 (`[ide]`) | `conner-cp2024` | the 20 MB A600HD |
+| A1200 (`[ide]`) | `conner-cp2064` | the A1200HD's Conner "60 meg" |
+| A4000 (`[ide]`) | `seagate-st3144a` | the early A4000/040's 120 MB drive |
+| any machine (`[lide]`) | `wd-ac2120` | a period 3.5" IDE drive |
+
+Built-in drives (`copperline --list-drive-profiles` prints this table):
+
+| id | Drive | rpm | Seek ms (avg) | Media rate | Buffer |
+|---|---|---|---|---|---|
+| `conner-cp2024` | Conner CP2024, 21 MB 2.5" ATA, 1990 | 3433 | 23 | 937 KB/s | 8 KB |
+| `conner-cp2044` | Conner CP2044, 43 MB 2.5" ATA, 1990 | 3486 | 19 | 1130 KB/s | 32 KB |
+| `conner-cp2064` | Conner CP2064, 64 MB 2.5" ATA, 1990 | 3486 | 19 | 1130 KB/s | 32 KB |
+| `conner-cp2084` | Conner CP2084, 85 MB 2.5" ATA, 1991 | 3486 | 19 | 1130 KB/s | 32 KB |
+| `seagate-st9080a` | Seagate ST9080A, 64 MB 2.5" ATA, 1992 | 3449 | 16 | 1.21-1.59 MB/s | 32 KB |
+| `seagate-st9145a` | Seagate ST9145A, 128 MB 2.5" ATA, 1992 | 3449 | 16 | 1.21-1.59 MB/s | 64 KB |
+| `seagate-st9235a` | Seagate ST9235A, 210 MB 2.5" ATA, 1992 | 3449 | 16 | 1.21-1.59 MB/s | 64 KB |
+| `seagate-st9655ag` | Seagate ST9655AG, 524 MB 2.5" ATA, 1994 | 3980 | 16 | 2.1-2.8 MB/s | 120 KB, write cache |
+| `ibm-dpra-21215` | IBM DPRA-21215, 1.2 GB 2.5" ATA, 1995 | 4900 | 12 | 3.6-5.7 MB/s | 64 KB |
+| `seagate-st3144a` | Seagate ST3144A, 130 MB 3.5" ATA, 1991 | 3211 | 16 | 0.88-1.18 MB/s | 32 KB |
+| `conner-cp30084` | Conner CP30084, 84 MB 3.5" ATA, 1991 | 3400 | 19 | 1131 KB/s | 64 KB |
+| `conner-cp30104` | Conner CP30104, 120 MB 3.5" ATA, 1991 | 3400 | 19 | 1131 KB/s | 64 KB |
+| `wd-ac2120` | WD Caviar AC2120, 120 MB 3.5" ATA, 1992 | 3605 | 15 | 1.23-1.48 MB/s | 32 KB |
+| `quantum-fireball-1080at` | Quantum Fireball 1080AT, 1.08 GB 3.5" ATA, 1995 | 5400 | 12 | 4.1-8.2 MB/s | 128 KB |
+| `seagate-st125n` | Seagate ST125N, 21 MB 3.5" SCSI, 1987 | 3600 | 38 | 799 KB/s | none |
+| `seagate-st157n` | Seagate ST157N, 49 MB 3.5" SCSI, 1987 | 3600 | 38 | 799 KB/s | none |
+| `quantum-prodrive-40s` | Quantum ProDrive 40S, 42 MB 3.5" SCSI, 1988 | 3662 | 19 | 0.87-1.09 MB/s | 64 KB |
+| `quantum-prodrive-80s` | Quantum ProDrive 80S, 84 MB 3.5" SCSI, 1988 | 3662 | 19 | 0.87-1.09 MB/s | 64 KB |
+| `quantum-lps-52s` | Quantum ProDrive LPS 52S, 52 MB 3.5" SCSI, 1990 | 3660 | 17 | 1.03-1.59 MB/s | 64 KB |
+| `quantum-lps-105s` | Quantum ProDrive LPS 105S, 105 MB 3.5" SCSI, 1990 | 3660 | 17 | 1.03-1.59 MB/s | 64 KB |
+| `seagate-st31200n` | Seagate Hawk 1LP ST31200N, 1.05 GB 3.5" SCSI, 1995 | 5411 | 9.3 | 2.9-5.0 MB/s | 256 KB |
+| `quantum-fireball-1080s` | Quantum Fireball 1080S, 1.08 GB 3.5" SCSI, 1995 | 5400 | 12 | 4.1-8.2 MB/s | 128 KB |
+
+Any profile works on any interface. A profile describes the mechanism, not
+the capacity: an image larger or smaller than the drive it names spins,
+seeks and transfers like that drive, with the image's sectors spread
+across its full stroke. `HDD-TIMING-PLAN.md` in the source tree records
+each profile's sources and the figures that had to be estimated.
+
+The model runs in emulated time, so a timed machine is as reproducible as
+any other: headless runs repeat byte for byte, a save state resumes
+exactly (and carries the drive model it was saved with), and netplay peers
+share the host's drive models. Only spinning hard disks are timed:
+`[copperhf]`, `[sf2000sd]`, `[[filesys]]` folders, a `[pcmcia]` card and
+CD-ROM drives keep their own behaviour, and `timing` on a `[copperhf]` or
+`[sf2000sd]` unit is an error.
 
 ## `[sf2000sd]` -- the SF2000 accelerator's Zorro II SD card controller
 

@@ -37,6 +37,55 @@ pub(super) fn carry_unowned_keys(src: &RawConfig, dst: &mut RawConfig) {
     dst.input.autofire_hz = src.input.autofire_hz;
     dst.serial.phonebook = src.serial.phonebook.clone();
     dst.serial.session = src.serial.session.clone();
+    dst.ide.timing = src.ide.timing.clone();
+    dst.ide.spin_up = src.ide.spin_up;
+    dst.scsi.timing = src.scsi.timing.clone();
+    dst.scsi.spin_up = src.scsi.spin_up;
+    dst.lide.timing = src.lide.timing.clone();
+    dst.lide.spin_up = src.lide.spin_up;
+    carry_drive_timing(src, dst, false);
+}
+
+/// Carry each drive entry's own `timing`, which the launcher does not edit.
+/// With `create`, a drive entry in `src` that carries one is copied into
+/// `dst` as a skeleton holding just that (how `carried` remembers them);
+/// without, `timing` only lands on drives `dst` already has, so a drive
+/// the user removed stays removed.
+pub(super) fn carry_drive_timing(src: &RawConfig, dst: &mut RawConfig, create: bool) {
+    fn carry(src: Option<&RawDrive>, dst: &mut Option<RawDrive>, create: bool) {
+        let Some(timing) = src.and_then(|d| d.timing.clone()) else {
+            return;
+        };
+        match dst {
+            Some(drive) => drive.timing = Some(timing),
+            None if create => {
+                let mut skeleton =
+                    RawDrive::from_path(src.map(|d| d.path.clone()).unwrap_or_default());
+                skeleton.timing = Some(timing);
+                *dst = Some(skeleton);
+            }
+            None => {}
+        }
+    }
+    carry(src.ide.master.as_ref(), &mut dst.ide.master, create);
+    carry(src.ide.slave.as_ref(), &mut dst.ide.slave, create);
+    carry(src.scsi.unit0.as_ref(), &mut dst.scsi.unit0, create);
+    carry(src.scsi.unit1.as_ref(), &mut dst.scsi.unit1, create);
+    carry(src.scsi.unit2.as_ref(), &mut dst.scsi.unit2, create);
+    carry(src.scsi.unit3.as_ref(), &mut dst.scsi.unit3, create);
+    carry(src.scsi.unit4.as_ref(), &mut dst.scsi.unit4, create);
+    carry(src.scsi.unit5.as_ref(), &mut dst.scsi.unit5, create);
+    carry(src.scsi.unit6.as_ref(), &mut dst.scsi.unit6, create);
+    let src_lide = src.lide.drive_slots();
+    for (slot, src_drive) in src_lide.iter().enumerate() {
+        let dst_drive = match slot {
+            0 => &mut dst.lide.drive0,
+            1 => &mut dst.lide.drive1,
+            2 => &mut dst.lide.drive2,
+            _ => &mut dst.lide.drive3,
+        };
+        carry(src_drive.as_ref(), dst_drive, create);
+    }
 }
 
 impl MachineSetup {
@@ -408,6 +457,7 @@ impl MachineSetup {
             carried: {
                 let mut carried = RawConfig::default();
                 carry_unowned_keys(raw, &mut carried);
+                carry_drive_timing(raw, &mut carried, true);
                 carried
             },
         })

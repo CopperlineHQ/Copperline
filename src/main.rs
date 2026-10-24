@@ -658,6 +658,36 @@ fn run_net_helper_setup(action: &str) -> Result<()> {
 /// Print the host audio input devices for `--sampler-list-audio-inputs`. These
 /// are the names `--sampler-audio-input` and `[parallel] sampler_input` match
 /// against.
+/// Print the built-in drive profiles for `--list-drive-profiles`: the ids
+/// `timing` and `--hd-timing` accept, with the figures that set each one's
+/// pace.
+fn print_drive_profiles() {
+    println!("Built-in hard-drive profiles (for [ide]/[scsi]/[lide] timing and --hd-timing):");
+    println!(
+        "  {:<24} {:>5} {:>17} {:>15} {:>7}  drive",
+        "id", "rpm", "seek ms t2t/avg/max", "media KB/s", "buffer"
+    );
+    for profile in copperline::harddrive::profiles::builtin_profiles() {
+        let [t2t, avg, full] = profile.seek_us.map(|us| f64::from(us) / 1000.0);
+        let (outer, inner) = profile.media_rate_range();
+        let media = if outer == inner {
+            format!("{}", outer / 1000)
+        } else {
+            format!("{}-{}", inner / 1000, outer / 1000)
+        };
+        println!(
+            "  {:<24} {:>5} {:>17} {:>15} {:>6}K  {}",
+            profile.id,
+            profile.rpm,
+            format!("{t2t}/{avg}/{full}"),
+            media,
+            profile.buffer_kib,
+            profile.label
+        );
+    }
+    println!("  \"period\" picks the drive the machine shipped with; \"instant\" (the default) turns timing off.");
+}
+
 fn print_sampler_input_devices() -> Result<()> {
     println!("Audio input devices (for --sampler-audio-input / [parallel] sampler_input):");
     let devices = copperline::sampler::list_input_devices();
@@ -825,6 +855,10 @@ fn main() -> Result<()> {
     }
     if cli.list_sampler_inputs {
         return print_sampler_input_devices();
+    }
+    if cli.list_drive_profiles {
+        print_drive_profiles();
+        return Ok(());
     }
     // The synthesizer's battery-backed memory is the frontend's to
     // ask for; `--factory` leaves the file alone in both directions,

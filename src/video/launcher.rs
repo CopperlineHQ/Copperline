@@ -6001,6 +6001,9 @@ fn drive_raw(
         // directory mount; FFS is the default, so it too stays unwritten,
         // keeping a saved config minimal exactly like `name` above.
         filesystem: (p.is_dir() && !filesystem.ffs).then(|| "ofs".to_string()),
+        // A drive's own `timing` is not edited here; it is carried from the
+        // loaded configuration (`carry_unowned_keys`).
+        timing: None,
     })
 }
 

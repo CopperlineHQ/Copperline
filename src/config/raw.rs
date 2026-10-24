@@ -774,6 +774,9 @@ pub(crate) struct RawDrive {
     /// "ofs" or "ffs"; only valid on a host-directory mount. Defaults to FFS
     /// when absent.
     pub(crate) filesystem: Option<String>,
+    /// Drive mechanics for this drive alone ("instant", "period", or a
+    /// profile id), overriding the section's `timing`.
+    pub(crate) timing: Option<String>,
 }
 
 impl RawDrive {
@@ -783,6 +786,7 @@ impl RawDrive {
             name: None,
             bootpri: None,
             filesystem: None,
+            timing: None,
         }
     }
 }
@@ -792,7 +796,11 @@ impl Serialize for RawDrive {
     where
         S: serde::Serializer,
     {
-        if self.name.is_none() && self.bootpri.is_none() && self.filesystem.is_none() {
+        if self.name.is_none()
+            && self.bootpri.is_none()
+            && self.filesystem.is_none()
+            && self.timing.is_none()
+        {
             // No overrides: a plain string keeps saved configs minimal.
             return serializer.serialize_str(&self.path);
         }
@@ -800,7 +808,8 @@ impl Serialize for RawDrive {
         let len = 1
             + usize::from(self.name.is_some())
             + usize::from(self.bootpri.is_some())
-            + usize::from(self.filesystem.is_some());
+            + usize::from(self.filesystem.is_some())
+            + usize::from(self.timing.is_some());
         let mut map = serializer.serialize_map(Some(len))?;
         map.serialize_entry("path", &self.path)?;
         if let Some(name) = &self.name {
@@ -811,6 +820,9 @@ impl Serialize for RawDrive {
         }
         if let Some(filesystem) = &self.filesystem {
             map.serialize_entry("filesystem", filesystem)?;
+        }
+        if let Some(timing) = &self.timing {
+            map.serialize_entry("timing", timing)?;
         }
         map.end()
     }
@@ -826,7 +838,8 @@ impl<'de> Deserialize<'de> for RawDrive {
             type Value = RawDrive;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 f.write_str(
-                    "a drive image path, or a table with `path` and optional `name`/`bootpri`",
+                    "a drive image path, or a table with `path` and optional \
+                     `name`/`bootpri`/`filesystem`/`timing`",
                 )
             }
             fn visit_str<E: serde::de::Error>(self, v: &str) -> std::result::Result<RawDrive, E> {
@@ -846,6 +859,7 @@ impl<'de> Deserialize<'de> for RawDrive {
                 let mut name: Option<String> = None;
                 let mut bootpri: Option<i8> = None;
                 let mut filesystem: Option<String> = None;
+                let mut timing: Option<String> = None;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "path" => {
@@ -872,10 +886,16 @@ impl<'de> Deserialize<'de> for RawDrive {
                             }
                             filesystem = Some(map.next_value()?);
                         }
+                        "timing" => {
+                            if timing.is_some() {
+                                return Err(serde::de::Error::duplicate_field("timing"));
+                            }
+                            timing = Some(map.next_value()?);
+                        }
                         other => {
                             return Err(serde::de::Error::unknown_field(
                                 other,
-                                &["path", "name", "bootpri", "filesystem"],
+                                &["path", "name", "bootpri", "filesystem", "timing"],
                             ));
                         }
                     }
@@ -886,6 +906,7 @@ impl<'de> Deserialize<'de> for RawDrive {
                     name,
                     bootpri,
                     filesystem,
+                    timing,
                 })
             }
         }
@@ -900,6 +921,13 @@ pub(crate) struct RawIde {
     pub(crate) master: Option<RawDrive>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) slave: Option<RawDrive>,
+    /// Drive mechanics for the section's drives: "instant" (the default),
+    /// "period", or a profile id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) timing: Option<String>,
+    /// Model the power-on spin-up of timed drives.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) spin_up: Option<bool>,
 }
 
 /// `[pcmcia]`: the card in the A600/A1200 credit-card slot.
@@ -949,6 +977,13 @@ pub(crate) struct RawScsi {
     pub(crate) unit5: Option<RawDrive>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unit6: Option<RawDrive>,
+    /// Drive mechanics for the section's disk units: "instant" (the
+    /// default), "period", or a profile id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) timing: Option<String>,
+    /// Model the power-on spin-up of timed drives.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) spin_up: Option<bool>,
 }
 
 /// `[copperhf]` `copperhf.device`-compatible virtual hardfile controller: a
@@ -1022,6 +1057,13 @@ pub(crate) struct RawLide {
     /// Channel 1 slave (RIPPLE only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) drive3: Option<RawDrive>,
+    /// Drive mechanics for the board's disks: "instant" (the default),
+    /// "period", or a profile id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) timing: Option<String>,
+    /// Model the power-on spin-up of timed drives.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) spin_up: Option<bool>,
 }
 
 impl RawLide {
@@ -1649,11 +1691,17 @@ pub(super) fn drive_image(raw: RawDrive) -> Result<DriveImage> {
             }
         }
     };
+    let timing = raw
+        .timing
+        .as_deref()
+        .map(|t| DriveTiming::parse(t).map_err(|e| anyhow!("drive timing: {e}")))
+        .transpose()?;
     Ok(DriveImage {
         path,
         volume_name,
         boot_pri: raw.bootpri.unwrap_or(HARDFILE_DEFAULT_BOOT_PRI),
         filesystem,
+        timing,
     })
 }
 
@@ -1676,6 +1724,13 @@ fn hard_disk_only_drive_image(
         bail!(
             "[{section}] {}: {controller} serves hard disks only, not CD images \
              (attach this to [scsi] or [ide]/[lide] instead)",
+            path.display()
+        );
+    }
+    if raw.timing.is_some() {
+        bail!(
+            "[{section}] {}: {controller} is not a period drive interface, so `timing` \
+             does not apply to it",
             path.display()
         );
     }

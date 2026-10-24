@@ -670,6 +670,8 @@ impl TryFrom<RawConfig> for Config {
         let ide = IdeConfig {
             master: raw.ide.master.map(drive_image).transpose()?,
             slave: raw.ide.slave.map(drive_image).transpose()?,
+            timing: parse_section_timing(raw.ide.timing.as_deref(), "ide", &mut errors),
+            spin_up: raw.ide.spin_up.unwrap_or(false),
         };
         // Two machines have an IDE port: a Gayle one (A600/A1200) and the
         // A4000's, which is the same ATA cable off the Fat Gary bus. `[ide]`
@@ -756,6 +758,8 @@ impl TryFrom<RawConfig> for Config {
                 raw.scsi.unit5.map(drive_image).transpose()?,
                 raw.scsi.unit6.map(drive_image).transpose()?,
             ],
+            timing: parse_section_timing(raw.scsi.timing.as_deref(), "scsi", &mut errors),
+            spin_up: raw.scsi.spin_up.unwrap_or(false),
         };
         // Explicit A2091/A4091 boards, and a non-empty SCSI bus on machines
         // which default to one, use their bundled open ROMs (resolved to real
@@ -908,6 +912,8 @@ impl TryFrom<RawConfig> for Config {
             rom: lide_rom,
             rom_bank2: lide_rom_bank2,
             drives: lide_drives,
+            timing: parse_section_timing(raw.lide.timing.as_deref(), "lide", &mut errors),
+            spin_up: raw.lide.spin_up.unwrap_or(false),
         };
         // Unconditional, not gated on `lide.enabled()`: each checks a
         // specific pair of fields directly (drive count vs. the board's
@@ -1333,6 +1339,9 @@ impl TryFrom<RawConfig> for Config {
             None => None,
         };
 
+        let drive_profiles: Vec<crate::harddrive::mechanics::DriveProfile> = Vec::new();
+        check_drive_timing_ids(&ide, &scsi, &lide, &drive_profiles, &mut errors);
+
         match errors.len() {
             0 => {}
             1 => return Err(errors.remove(0)),
@@ -1513,6 +1522,7 @@ impl TryFrom<RawConfig> for Config {
             copperhf,
             lide,
             sf2000sd,
+            drive_profiles,
             a2065_net,
             toccata,
             clipboard_share,
@@ -2978,4 +2988,65 @@ fn validate_floppy_image_path(idx: usize, path: &Path) -> Result<()> {
         meta.len(),
         ADF_SIZE
     );
+}
+
+/// Parse a drive section's `timing`, recording a bad value as an error.
+fn parse_section_timing(
+    value: Option<&str>,
+    section: &str,
+    errors: &mut Vec<anyhow::Error>,
+) -> DriveTiming {
+    match value.map(DriveTiming::parse) {
+        None => DriveTiming::Instant,
+        Some(Ok(timing)) => timing,
+        Some(Err(e)) => {
+            errors.push(anyhow!("[{section}] timing: {e}"));
+            DriveTiming::Instant
+        }
+    }
+}
+
+/// Every `timing` that names a profile must name one that exists: a
+/// `[[drive_profile]]` or a built-in.
+fn check_drive_timing_ids(
+    ide: &IdeConfig,
+    scsi: &ScsiConfig,
+    lide: &LideConfig,
+    custom: &[crate::harddrive::mechanics::DriveProfile],
+    errors: &mut Vec<anyhow::Error>,
+) {
+    let known = |id: &str| {
+        custom.iter().any(|p| p.id.eq_ignore_ascii_case(id))
+            || crate::harddrive::profiles::builtin_profile(id).is_some()
+    };
+    let drive_timings = |drives: &[Option<DriveImage>]| -> Vec<Option<DriveTiming>> {
+        drives
+            .iter()
+            .map(|d| d.as_ref().and_then(|d| d.timing.clone()))
+            .collect()
+    };
+    let sections = [
+        (
+            "ide",
+            &ide.timing,
+            drive_timings(&[ide.master.clone(), ide.slave.clone()]),
+        ),
+        ("scsi", &scsi.timing, drive_timings(&scsi.units)),
+        ("lide", &lide.timing, drive_timings(&lide.drives)),
+    ];
+    for (section, timing, drives) in sections {
+        for timing in std::iter::once(Some(timing.clone()))
+            .chain(drives)
+            .flatten()
+        {
+            if let DriveTiming::Profile(id) = &timing {
+                if !known(id) {
+                    errors.push(anyhow!(
+                        "[{section}] timing = {id:?} is not a known drive profile \
+                         (copperline --list-drive-profiles lists them)"
+                    ));
+                }
+            }
+        }
+    }
 }

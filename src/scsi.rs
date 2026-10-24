@@ -990,6 +990,12 @@ impl Wd33c93 {
         }
     }
 
+    /// Colour clocks until the chip next changes state on its own, for the
+    /// emulator's idle fast-forward.
+    pub fn next_event_cck(&self) -> Option<u32> {
+        None
+    }
+
     /// Hardware reset (board /RST or system reset): clear chip state but
     /// keep the attached targets. No interrupt is posted.
     pub fn reset(&mut self) {

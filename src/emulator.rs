@@ -3083,6 +3083,9 @@ impl Emulator {
         if let Some(cck) = bus.next_serial_event_cck() {
             cap_cck(cck, &mut chunk);
         }
+        if let Some(cck) = bus.next_storage_event_cck() {
+            cap_cck(cck, &mut chunk);
+        }
         // A serial sink wired to a live host byte source (TCP, pty, the
         // browser channel) can start a reception at any wall-clock moment,
         // invisibly to the event horizon computed here. Bound the blind nap
@@ -3774,6 +3777,24 @@ fn open_ide_target(
     }
 }
 
+/// Give the drive in an `[ide]`/`[lide]` slot the period mechanics its
+/// `timing` asks for (`None`, an instant drive, by default).
+fn timed_ata(
+    device: impl Into<crate::ata::AtaDevice>,
+    cfg: &Config,
+    slot: crate::config::DriveSlot,
+) -> crate::ata::AtaDevice {
+    let device = device
+        .into()
+        .with_mechanics(|total| cfg.drive_mechanics(slot, total));
+    if let crate::ata::AtaDevice::Disk(drive) = &device {
+        if let Some(mechanics) = drive.mechanics() {
+            info!("{slot:?}: timed as {}", mechanics.label());
+        }
+    }
+    device
+}
+
 /// Open every drive the config bridges to real hardware.
 ///
 /// Failing to open one is fatal rather than a warning: a bay configured as a
@@ -4110,14 +4131,19 @@ fn build_machine_inner(
                 drive.boot_pri,
                 drive.filesystem,
             )?;
-            board.attach_drive(ch, unit, target);
+            board.attach_drive(
+                ch,
+                unit,
+                timed_ata(target, cfg, crate::config::DriveSlot::Lide(idx)),
+            );
         }
         #[cfg(not(target_arch = "wasm32"))]
         attach_lide_host_disks(cfg, |ch, unit, drive| {
             if ch >= channels {
                 return; // config validation already rejects this; defensive only
             }
-            board.attach_drive(ch, unit, drive);
+            let slot = crate::config::DriveSlot::Lide(ch * 2 + unit);
+            board.attach_drive(ch, unit, timed_ata(drive, cfg, slot));
         });
         zorro.add_board(crate::zorro::BoardSpec::lide(cfg.lide.board, slot, has_rom))?;
         info!(
@@ -4501,35 +4527,48 @@ fn build_machine_inner(
     if let Some(id) = cfg.gate_array.gayle_id() {
         let mut gayle = crate::gayle::Gayle::new(id);
         if let Some(drive) = &cfg.ide.master {
+            info!("ide: master {}", drive.path.display());
             gayle.attach_drive(
                 0,
-                open_ide_target(
-                    &drive.path,
-                    0,
-                    drive.volume_name.as_deref(),
-                    drive.boot_pri,
-                    drive.filesystem,
-                )?,
+                timed_ata(
+                    open_ide_target(
+                        &drive.path,
+                        0,
+                        drive.volume_name.as_deref(),
+                        drive.boot_pri,
+                        drive.filesystem,
+                    )?,
+                    cfg,
+                    crate::config::DriveSlot::Ide(0),
+                ),
             );
-            info!("ide: master {}", drive.path.display());
         }
         if let Some(drive) = &cfg.ide.slave {
+            info!("ide: slave {}", drive.path.display());
             gayle.attach_drive(
                 1,
-                open_ide_target(
-                    &drive.path,
-                    1,
-                    drive.volume_name.as_deref(),
-                    drive.boot_pri,
-                    drive.filesystem,
-                )?,
+                timed_ata(
+                    open_ide_target(
+                        &drive.path,
+                        1,
+                        drive.volume_name.as_deref(),
+                        drive.boot_pri,
+                        drive.filesystem,
+                    )?,
+                    cfg,
+                    crate::config::DriveSlot::Ide(1),
+                ),
             );
-            info!("ide: slave {}", drive.path.display());
         }
         // Real host disks last, so an image in the same slot has already been
         // refused by configuration validation rather than silently replaced.
         #[cfg(not(target_arch = "wasm32"))]
-        attach_ide_host_disks(cfg, |slot, drive| gayle.attach_drive(slot, drive));
+        attach_ide_host_disks(cfg, |slot, drive| {
+            gayle.attach_drive(
+                slot,
+                timed_ata(drive, cfg, crate::config::DriveSlot::Ide(slot)),
+            )
+        });
         // The PCMCIA common-memory window ($600000-$9FFFFF) is Zorro II
         // space: with more than 4 MiB of fast RAM configured there Gayle's
         // slot decode gives way to the RAM board, as on a real A1200 where
@@ -4566,23 +4605,32 @@ fn build_machine_inner(
         let mut ide = crate::ide_a4000::IdeA4000::new();
         for (slot, drive) in [(0, &cfg.ide.master), (1, &cfg.ide.slave)] {
             let Some(drive) = drive else { continue };
-            ide.attach_drive(
-                slot,
-                open_ide_target(
-                    &drive.path,
-                    slot,
-                    drive.volume_name.as_deref(),
-                    drive.boot_pri,
-                    drive.filesystem,
-                )?,
-            );
             let which = if slot == 0 { "master" } else { "slave" };
             info!("ide: {which} {}", drive.path.display());
+            ide.attach_drive(
+                slot,
+                timed_ata(
+                    open_ide_target(
+                        &drive.path,
+                        slot,
+                        drive.volume_name.as_deref(),
+                        drive.boot_pri,
+                        drive.filesystem,
+                    )?,
+                    cfg,
+                    crate::config::DriveSlot::Ide(slot),
+                ),
+            );
         }
         // The A4000's interface takes a real disk exactly as Gayle's does;
         // configuration accepts one for either, so both must wire it up.
         #[cfg(not(target_arch = "wasm32"))]
-        attach_ide_host_disks(cfg, |slot, drive| ide.attach_drive(slot, drive));
+        attach_ide_host_disks(cfg, |slot, drive| {
+            ide.attach_drive(
+                slot,
+                timed_ata(drive, cfg, crate::config::DriveSlot::Ide(slot)),
+            )
+        });
         bus.attach_ide_a4000(ide);
         info!("ide: A4000 motherboard interface at $DD2020");
     }

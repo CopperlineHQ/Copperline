@@ -599,13 +599,18 @@ impl crate::zorro_device::ZorroDevice for IdeZorro {
 
     fn tick(&mut self, cck: u32, host: &mut crate::zorro_device::DeviceHost) {
         // No interrupts, no DMA, no timers of its own, but every attached
-        // ATAPI drive still needs its per-cck tick for pending disc-swap
-        // mounting and CD-DA audio streaming -- RIPPLE has up to four
-        // ATAPI-capable slots across its two channels, not just one.
+        // drive still needs its per-cck tick: ATAPI drives for pending
+        // disc-swap mounting and CD-DA audio streaming -- RIPPLE has up to
+        // four ATAPI-capable slots across its two channels, not just one --
+        // and timed hard disks for their mechanics.
         let cd_audio = host.cd_audio();
         for bus in &mut self.ata {
-            bus.tick_atapi(cck, cd_audio);
+            bus.tick(cck, cd_audio);
         }
+    }
+
+    fn next_event_cck(&self) -> Option<u32> {
+        self.ata.iter().filter_map(AtaBus::next_event_cck).min()
     }
 
     fn take_activity(&mut self) -> bool {
