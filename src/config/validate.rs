@@ -1339,7 +1339,7 @@ impl TryFrom<RawConfig> for Config {
             None => None,
         };
 
-        let drive_profiles: Vec<crate::harddrive::mechanics::DriveProfile> = Vec::new();
+        let drive_profiles = parse_drive_profiles(&raw.drive_profile, &mut errors);
         check_drive_timing_ids(&ide, &scsi, &lide, &drive_profiles, &mut errors);
 
         match errors.len() {
@@ -3049,4 +3049,163 @@ fn check_drive_timing_ids(
             }
         }
     }
+}
+
+/// Build the `[[drive_profile]]` mechanisms, recording every problem.
+fn parse_drive_profiles(
+    raw: &[RawDriveProfile],
+    errors: &mut Vec<anyhow::Error>,
+) -> Vec<crate::harddrive::mechanics::DriveProfile> {
+    let mut profiles: Vec<crate::harddrive::mechanics::DriveProfile> = Vec::new();
+    for entry in raw {
+        match drive_profile(entry) {
+            Ok(profile) => {
+                if profiles.iter().any(|p| p.id == profile.id) {
+                    errors.push(anyhow!(
+                        "[[drive_profile]] id {:?} is defined twice",
+                        profile.id
+                    ));
+                } else {
+                    profiles.push(profile);
+                }
+            }
+            Err(e) => errors.push(anyhow!("[[drive_profile]] {:?}: {e:#}", entry.id)),
+        }
+    }
+    profiles
+}
+
+fn drive_profile(raw: &RawDriveProfile) -> Result<crate::harddrive::mechanics::DriveProfile> {
+    use crate::harddrive::mechanics::{DriveProfile, Zone};
+    let id = raw.id.trim().to_ascii_lowercase();
+    if matches!(id.as_str(), "" | "instant" | "off" | "none" | "period") {
+        bail!("id must name the drive (\"instant\" and \"period\" are reserved)");
+    }
+    let us = |ms: f64, what: &str| -> Result<u32> {
+        if !(0.0..=600_000.0).contains(&ms) {
+            bail!("{what} = {ms} is out of range");
+        }
+        Ok((ms * 1000.0).round() as u32)
+    };
+    let ms_of_s = |s: f64, what: &str| -> Result<u32> {
+        if !(0.0..=600.0).contains(&s) {
+            bail!("{what} = {s} is out of range");
+        }
+        Ok((s * 1000.0).round() as u32)
+    };
+    let mut profile = match &raw.base {
+        Some(base) => crate::harddrive::profiles::builtin_profile(&base.to_ascii_lowercase())
+            .ok_or_else(|| anyhow!("base = {base:?} is not a built-in drive profile"))?,
+        None => {
+            if raw.rpm.is_none() || raw.heads.is_none() || raw.seek_ms.is_none() {
+                bail!("rpm, heads and seek_ms are needed without a base profile");
+            }
+            DriveProfile {
+                id: String::new(),
+                label: String::new(),
+                rpm: 0,
+                heads: 0,
+                zones: Vec::new(),
+                seek_us: [0; 3],
+                write_seek_us: None,
+                head_switch_us: 3000,
+                skew_sectors: None,
+                command_overhead_us: 1000,
+                buffer_kib: 32,
+                prefetch_sectors: None,
+                read_ahead: true,
+                partial_hits: true,
+                write_cache: false,
+                spin_up_ms: 10_000,
+                standby_spin_up_ms: 10_000,
+                idle_park_ms: None,
+                scsi_kb_per_s: 0,
+            }
+        }
+    };
+    profile.id = id.clone();
+    profile.label = raw.label.clone().unwrap_or(id);
+    if let Some(rpm) = raw.rpm {
+        profile.rpm = rpm;
+    }
+    if let Some(heads) = raw.heads {
+        profile.heads = heads;
+    }
+    match (&raw.zones, raw.cylinders, raw.sectors_per_track) {
+        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
+            bail!("give either zones or cylinders and sectors_per_track, not both")
+        }
+        (Some(zones), None, None) => {
+            profile.zones = zones
+                .iter()
+                .map(|z| Zone {
+                    cylinders: z.cylinders,
+                    sectors_per_track: z.sectors_per_track,
+                })
+                .collect();
+        }
+        (None, Some(cylinders), Some(sectors_per_track)) => {
+            profile.zones = vec![Zone {
+                cylinders,
+                sectors_per_track,
+            }];
+        }
+        (None, None, None) if !profile.zones.is_empty() => {}
+        _ => bail!("give zones, or cylinders and sectors_per_track"),
+    }
+    if let Some([t2t, avg, full]) = raw.seek_ms {
+        profile.seek_us = [
+            us(t2t, "seek_ms")?,
+            us(avg, "seek_ms")?,
+            us(full, "seek_ms")?,
+        ];
+    }
+    if let Some([t2t, avg, full]) = raw.write_seek_ms {
+        profile.write_seek_us = Some([
+            us(t2t, "write_seek_ms")?,
+            us(avg, "write_seek_ms")?,
+            us(full, "write_seek_ms")?,
+        ]);
+    }
+    if let Some(ms) = raw.head_switch_ms {
+        profile.head_switch_us = us(ms, "head_switch_ms")?;
+    }
+    if let Some([track, cylinder]) = raw.skew {
+        profile.skew_sectors = Some((track, cylinder));
+    }
+    if let Some(ms) = raw.overhead_ms {
+        profile.command_overhead_us = us(ms, "overhead_ms")?;
+    }
+    if let Some(kib) = raw.buffer_kib {
+        profile.buffer_kib = kib;
+    }
+    if raw.prefetch_sectors.is_some() {
+        profile.prefetch_sectors = raw.prefetch_sectors;
+    }
+    if let Some(on) = raw.read_ahead {
+        profile.read_ahead = on;
+    }
+    if let Some(on) = raw.partial_hits {
+        profile.partial_hits = on;
+    }
+    if let Some(on) = raw.write_cache {
+        profile.write_cache = on;
+    }
+    if let Some(s) = raw.spin_up_s {
+        profile.spin_up_ms = ms_of_s(s, "spin_up_s")?;
+        if raw.standby_spin_up_s.is_none() {
+            profile.standby_spin_up_ms = profile.spin_up_ms;
+        }
+    }
+    if let Some(s) = raw.standby_spin_up_s {
+        profile.standby_spin_up_ms = ms_of_s(s, "standby_spin_up_s")?;
+    }
+    if let Some(s) = raw.idle_park_s {
+        profile.idle_park_ms = Some(ms_of_s(s, "idle_park_s")?);
+    }
+    if let Some(rate) = raw.scsi_kb_per_s {
+        profile.scsi_kb_per_s = rate;
+    }
+    profile.validate().map_err(|e| anyhow!("{e}"))?;
+    Ok(profile)
 }

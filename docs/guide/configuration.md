@@ -2569,11 +2569,23 @@ covers just that drive. A `[[host_disk]]` on
 one of the section's slots takes the section's `timing`. `--hd-timing
 TIMING` sets the section `timing` from the command line.
 
-`spin_up = true` also models the drive coming up to speed at power-on: it
-stays busy for its spin-up time (seconds), so Kickstart's IDE probe waits
-for it just as it did on the real machine -- including Kickstart 3.0's
-habit of giving up on a slow drive. It is off by default because it adds
+`spin_up = true` also models the drive coming up to speed at power-on: an
+IDE drive stays busy for its spin-up time (seconds), and a SCSI drive
+answers NOT READY, "becoming ready", until it is up, so Kickstart's probe
+waits for it just as it did on the real machine -- including Kickstart 3.0's
+habit of giving up on a slow IDE drive. It is off by default because it adds
 those seconds to every boot.
+
+A timed drive also does what its power management did. On IDE, SEEK and the
+power commands work (IDLE and STANDBY, immediate or with a standby timer,
+and CHECK POWER MODE), so spin-down tools work: a stopped drive pays its
+standby-to-ready time on the next access. An untimed drive still rejects
+them, as before. On SCSI, START STOP UNIT spins a timed drive down and up.
+The Seagate 2.5" drives also park their heads after 5 seconds without a
+command, so the next access seeks in from the edge.
+
+The configuration screen sets the timing of every section at once on its
+*A/V & Emu -> Emulation* page (see [](ui.md)).
 
 Commodore never documented which drives it fitted, so `period` follows
 owner reports and reviews:
@@ -2617,9 +2629,36 @@ Built-in drives (`copperline --list-drive-profiles` prints this table):
 | `quantum-fireball-1080s` | Quantum Fireball 1080S, 1.08 GB 3.5" SCSI, 1995 | 5400 | 12 | 4.1-8.2 MB/s | 128 KB |
 
 Any profile works on any interface. A profile describes the mechanism, not
-the capacity: an image larger or smaller than the drive it names spins,
-seeks and transfers like that drive, with the image's sectors spread
-across its full stroke. `HDD-TIMING-PLAN.md` in the source tree records
+the capacity: an image smaller than the drive sits on its outer cylinders,
+as a partition at the start of the real disk would, and a larger one is
+spread across its full stroke with more sectors to each cylinder. Either
+way it spins, seeks and transfers like the drive it names.
+
+A drive that is not built in can be described with `[[drive_profile]]`,
+from scratch or as changes to a built-in one, and named in `timing` like
+any other:
+
+```toml
+[[drive_profile]]
+id = "quantum-gls-170"        # what timing = "..." names
+label = "Quantum GoDrive GLS 170"
+rpm = 3600
+heads = 4
+zones = [                     # outermost first; or cylinders = N and
+    { cylinders = 700, sectors_per_track = 70 },  # sectors_per_track = N
+    { cylinders = 695, sectors_per_track = 50 },  # for an unzoned drive
+]
+seek_ms = [5, 17, 30]         # track-to-track, average, full stroke
+buffer_kib = 96
+# write_seek_ms, head_switch_ms (3), skew = [track, cylinder], overhead_ms (1),
+# prefetch_sectors, read_ahead (true), partial_hits (true), write_cache
+# (false), spin_up_s (10), standby_spin_up_s, idle_park_s, scsi_kb_per_s
+
+[[drive_profile]]
+id = "quick-conner"
+base = "conner-cp2064"        # every figure from the built-in...
+seek_ms = [4, 15, 30]         # ...except these
+``` `HDD-TIMING-PLAN.md` in the source tree records
 each profile's sources and the figures that had to be estimated.
 
 The model runs in emulated time, so a timed machine is as reproducible as

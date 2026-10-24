@@ -129,6 +129,9 @@ pub struct RawConfig {
     /// `[[zorro]]` board entries, configured in file order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) zorro: Vec<RawZorroBoard>,
+    /// `[[drive_profile]]` user-defined hard-drive mechanisms for `timing`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) drive_profile: Vec<RawDriveProfile>,
     /// `[paths]`: where this machine's output goes and where its file
     /// dialogs open. Absent until somebody moves something, and every
     /// entry within it optional, so a configuration that never mentions
@@ -928,6 +931,72 @@ pub(crate) struct RawIde {
     /// Model the power-on spin-up of timed drives.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) spin_up: Option<bool>,
+}
+
+/// One `[[drive_profile]]`: a hard-drive mechanism for `timing`, either
+/// from scratch or as changes to a built-in `base` profile. Times are in
+/// milliseconds (seconds for spin-up, standby and the idle head park), as
+/// manuals quote them.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawDriveProfile {
+    pub(crate) id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) label: Option<String>,
+    /// A built-in profile to start from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) base: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rpm: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) heads: Option<u32>,
+    /// One zone: physical cylinders and sectors per track. `zones` instead
+    /// describes a zoned drive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) cylinders: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) sectors_per_track: Option<u32>,
+    /// Recording zones, outermost first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) zones: Option<Vec<RawDriveZone>>,
+    /// Track-to-track, average and full-stroke seek.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) seek_ms: Option<[f64; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) write_seek_ms: Option<[f64; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) head_switch_ms: Option<f64>,
+    /// Track and cylinder skew in sectors.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) skew: Option<[u32; 2]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) overhead_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) buffer_kib: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) prefetch_sectors: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) read_ahead: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) partial_hits: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) write_cache: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) spin_up_s: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) standby_spin_up_s: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) idle_park_s: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) scsi_kb_per_s: Option<u32>,
+}
+
+/// One recording zone of a `[[drive_profile]]`.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawDriveZone {
+    pub(crate) cylinders: u32,
+    pub(crate) sectors_per_track: u32,
 }
 
 /// `[pcmcia]`: the card in the A600/A1200 credit-card slot.

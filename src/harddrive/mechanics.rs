@@ -228,11 +228,14 @@ impl SeekCurve {
     }
 }
 
-/// One zone as laid out over the image: the image's LBA space is shared
-/// between the zones in proportion to their native capacity, and each zone
-/// keeps its native sectors per track and head count, so the image runs at
-/// the drive's media rates whatever its size; only the number of cylinders
-/// differs, and seek distances scale onto the drive's real stroke.
+/// One zone as laid out over the image. An image no larger than the drive
+/// occupies its outer cylinders exactly as a partition at the start of the
+/// real disk would. A larger one is shared between the zones in proportion
+/// to their native capacity, each zone keeping its native sectors per track
+/// and head count but needing more cylinders than the drive has; seek
+/// distances then scale onto the real stroke, so adjacent image cylinders
+/// stay a track-to-track seek apart. Either way the image runs at the
+/// drive's media rates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ZoneMap {
     first_lba: u64,
@@ -323,8 +326,13 @@ pub struct DriveMechanics {
     spindle_ready: u64,
     /// Standby: the spindle is stopped until the next media access.
     standby: bool,
-    /// End of the last media activity, for the idle head park.
+    /// End of the last media activity, for the idle head park and the
+    /// standby timer.
     last_activity: u64,
+    /// The host-set standby timer (ATA IDLE/STANDBY): idle this long and
+    /// the spindle stops on its own.
+    #[serde(default)]
+    standby_timer: Option<u64>,
 }
 
 impl DriveMechanics {
@@ -343,16 +351,24 @@ impl DriveMechanics {
         let head_switch = us_to_cck(u64::from(profile.head_switch_us), cck_hz);
         let native: u128 = u128::from(profile.capacity_sectors().max(1));
         let total = total_sectors.max(1);
+        let stretched = u128::from(total) > native;
         let mut zones = Vec::with_capacity(profile.zones.len());
         let mut cum: u128 = 0;
         let mut first_cyl = 0u32;
         for zone in &profile.zones {
             let spt = u64::from(zone.sectors_per_track.max(1));
-            let first_lba = (u128::from(total) * cum / native) as u64;
-            cum += u128::from(zone.cylinders) * u128::from(spt) * u128::from(heads);
-            let end_lba = (u128::from(total) * cum / native) as u64;
             let per_cyl = heads * spt;
-            let image_cyls = (end_lba - first_lba).div_ceil(per_cyl).max(1);
+            let (first_lba, end_lba, image_cyls) = if stretched {
+                let first = (u128::from(total) * cum / native) as u64;
+                cum += u128::from(zone.cylinders) * u128::from(per_cyl);
+                let end = (u128::from(total) * cum / native) as u64;
+                (first, end, (end - first).div_ceil(per_cyl).max(1))
+            } else {
+                let first = (cum as u64).min(total);
+                cum += u128::from(zone.cylinders) * u128::from(per_cyl);
+                let end = (cum as u64).min(total);
+                (first, end, u64::from(zone.cylinders.max(1)))
+            };
             // Skews in whole sectors, as the low-level format lays them out:
             // published values where the manual gives them, otherwise just
             // long enough to cover a head switch / a track-to-track seek.
@@ -412,6 +428,7 @@ impl DriveMechanics {
             spindle_ready,
             standby: false,
             last_activity: spindle_ready,
+            standby_timer: None,
         };
         mechanics.head.track = mechanics.locate(0).0;
         mechanics.head.t = spindle_ready;
@@ -459,6 +476,19 @@ impl DriveMechanics {
         self.flush_pending_writes();
         self.stream = None;
         self.standby = true;
+    }
+
+    /// Set (or, with `None`, clear) the standby timer, in milliseconds of
+    /// idle time.
+    pub fn set_standby_timer(&mut self, ms: Option<u64>) {
+        self.standby_timer = ms.map(|ms| us_to_cck(ms * 1000, self.timing.cck_hz));
+    }
+
+    /// Whether the spindle is stopped now, counting a standby timer that ran
+    /// out while the drive sat idle (ATA CHECK POWER MODE).
+    pub fn spun_down(&mut self) -> bool {
+        self.apply_standby_timer(self.now.max(self.busy_until));
+        self.standby
     }
 
     /// Spin up out of standby (IDLE): returns when the drive is ready.
@@ -678,6 +708,7 @@ impl DriveMechanics {
     /// long enough to have parked them.
     fn command_start(&mut self) -> u64 {
         let mut base = self.now.max(self.busy_until);
+        self.apply_standby_timer(base);
         if self.standby {
             self.standby = false;
             self.spindle_ready = base + self.timing.standby_spin_up;
@@ -696,6 +727,19 @@ impl DriveMechanics {
             }
         }
         base + self.timing.overhead
+    }
+
+    /// The spindle stops on its own once the drive has sat idle for the
+    /// standby timer.
+    fn apply_standby_timer(&mut self, at: u64) {
+        let Some(timer) = self.standby_timer else {
+            return;
+        };
+        self.advance_stream(at);
+        if !self.standby && self.write.is_none() && at >= self.last_activity + timer {
+            self.stream = None;
+            self.standby = true;
+        }
     }
 
     /// Commit the read-ahead stream's sectors that are on the buffer by
@@ -981,9 +1025,27 @@ mod tests {
     }
 
     #[test]
-    fn zones_cover_the_whole_image_in_proportion() {
+    fn a_small_image_sits_on_the_outer_cylinders() {
+        // A 16 MB image on a 120 MB drive is a partition at the start of the
+        // disk: all of it in the outer zone, adjacent image cylinders one
+        // physical cylinder apart.
         let profile = builtin_profile("wd-ac2120").unwrap();
-        for total in [50_000u64, 246_880, 4_000_000] {
+        let drive = DriveMechanics::new(&profile, 32_768, PAL, false);
+        let zones = &drive.timing.zones;
+        assert_eq!(zones[0].first_lba, 0);
+        assert_eq!(zones[0].end_lba, 32_768);
+        assert_eq!(zones[1].first_lba, 32_768);
+        assert_eq!(zones[1].end_lba, 32_768);
+        let (a, _) = drive.locate(0);
+        let (b, _) = drive.locate(4 * 48);
+        assert_eq!(drive.position(b) - drive.position(a), 1.0);
+        assert_eq!(drive.locate(32_767).0.zone, 0);
+    }
+
+    #[test]
+    fn a_large_image_spreads_across_the_stroke_in_proportion() {
+        let profile = builtin_profile("wd-ac2120").unwrap();
+        for total in [246_880u64 + 1, 4_000_000] {
             let drive = DriveMechanics::new(&profile, total, PAL, false);
             let zones = &drive.timing.zones;
             assert_eq!(zones[0].first_lba, 0);
@@ -991,6 +1053,11 @@ mod tests {
             // 970 x 48 of 970 x 48 + 379 x 40 sectors per surface.
             let share = zones[0].end_lba as f64 / total as f64;
             assert!((share - 46_560.0 / 61_720.0).abs() < 1e-4);
+            // Adjacent image cylinders are at most one physical cylinder
+            // apart, so a sequential crossing stays a track-to-track seek.
+            let (a, _) = drive.locate(0);
+            let (b, _) = drive.locate(4 * 48);
+            assert!(drive.position(b) - drive.position(a) <= 1.0);
             for lba in [0, total / 3, total - 1] {
                 let (track, sector) = drive.locate(lba);
                 assert!(sector < zones[track.zone as usize].spt);
@@ -1034,6 +1101,29 @@ mod tests {
         let ready = drive.overhead();
         assert!(ms(ready - start) >= 2000.0, "{} ms", ms(ready - start));
         assert!(!drive.in_standby());
+    }
+
+    #[test]
+    fn the_standby_timer_spins_an_idle_drive_down() {
+        let profile = builtin_profile("conner-cp2064").unwrap();
+        let mut drive = DriveMechanics::new(&profile, profile.capacity_sectors(), PAL, false);
+        drive.set_standby_timer(Some(5000));
+        drive.read(100, 1);
+        drive.advance(u64_to_u32(u64::from(PAL) * 4)); // 4 s idle
+        assert!(!drive.spun_down());
+        drive.advance(u64_to_u32(u64::from(PAL) * 2)); // 6 s idle
+        assert!(drive.spun_down());
+        let start = drive.now;
+        let ready = drive.overhead();
+        assert!(
+            ms(ready - start) >= 10_000.0,
+            "spin-up from standby: {} ms",
+            ms(ready - start)
+        );
+    }
+
+    fn u64_to_u32(v: u64) -> u32 {
+        u32::try_from(v).unwrap()
     }
 
     #[test]

@@ -130,14 +130,19 @@ integers.
    the media like a miss. No manual found documents this behaviour
    either way. It is a hypothesis drawn from the period A4000
    measurements (see "Validation"), to be confirmed in phase 2.
-3. **Map LBA to a physical position.** The image's LBA space is spread
-   across the profile's full stroke: zone and cylinder come from
-   `lba / total_sectors` scaled onto the profile's physical cylinders, and
-   sectors-per-track from that zone. The image size therefore never
-   changes the mechanism -- a 2 GB HDF on a "64 MB drive" profile seeks
-   and spins like that drive, with more sectors per scaled cylinder. (The
-   alternative, extending the cylinder count, would push seeks beyond the
-   datasheet full-stroke time.)
+3. **Map LBA to a physical position.** An image no larger than the drive
+   lies on its outer cylinders, as a partition at the start of the real
+   disk would: the drive's own zones, tracks and cylinders, used from the
+   outside in. A larger image is shared between the zones in proportion to
+   their native capacity; each zone keeps its sectors per track and head
+   count but needs more cylinders than the drive has, and seek distances
+   scale onto the real stroke -- so a 2 GB HDF on a "64 MB drive" profile
+   still seeks within the datasheet full-stroke time and spins like that
+   drive. (As implemented. The first version stretched every image across
+   the full stroke; the guest benchmark caught that a small image then puts
+   adjacent cylinders several physical cylinders apart, so every cylinder
+   crossing costs more than the cylinder skew covers and loses a
+   revolution.)
 4. **Seek** from the current cylinder: zero for the same cylinder, a
    head-switch time for a different head on the same cylinder, otherwise
    a curve through the three datasheet numbers. For a seek of `n >= 1`
@@ -533,8 +538,11 @@ rpm = 3600
   controller (explicit per-drive TOML entries still win), and
   `--list-drive-profiles` prints the built-in table (id, label, key specs)
   and exits.
-- Launcher: one "Hard drive timing" choice (Instant / Period / named
-  profiles) on the storage page, writing the section defaults.
+- Launcher: a "Hard drive timing" choice (Instant / Period / every
+  profile) and "Drive spin-up", writing the section defaults. As
+  implemented they sit on the A/V & Emu -> Emulation page: the Storage
+  page's twelve rows are full, and a ninth Storage nav chip wraps onto a
+  third row that pushes the last Storage row out of the panel.
 - Raw parsing (`src/config/raw.rs`): `RawDrive`'s table form (its
   hand-written visitor and its field list in the `unknown_field` error)
   and the `RawIde`/`RawScsi`/`RawLide` sections gain `timing`; the three
@@ -577,13 +585,12 @@ rpm = 3600
    commit, Gayle `$DA9000` latching from `tick`; WD33C93 completion
    delayed by the drive, DMA paced by buffer and bus; every existing test
    unchanged with timing off.
-3. **Guest benchmark**: a small program under `guest/hdbench/`, run with
-   `--run ... --exit-on-return` (no assets needed under the bundled AROS
-   ROM, and under real Kickstarts for the Commodore drivers), timing
-   sequential reads at 512 B to 256 KiB buffer sizes and random 4 KiB
-   reads through the device with the E-clock, printing to serial. Gate
-   the results for each built-in profile against the period measurements
-   below as an `#[ignore]` integration test, with generous windows (the
+3. **Guest benchmark** (`guest/hdbench/`, `tests/hd_timing.rs`): run with
+   `--run ... --exit-on-return` under the bundled AROS ROM (A2091, no
+   assets) and real Kickstarts (A1200, A4000 IDE), timing sequential reads
+   at 512 B to 256 KiB, random 4 KiB reads and a write through the device
+   with the E-clock, reporting through a result file. The results are
+   gated as an `#[ignore]` integration test with generous windows (the
    CPU-side cost of each driver differs).
 4. **Determinism**: two headless runs of the benchmark are byte-identical;
    a save state taken mid-transfer resumes identically.
@@ -630,15 +637,41 @@ What these say about the model:
   rotation wait; another is a look-ahead bounded by a segment or a
   track. So no single flag fits all four rows yet.
 
-  Phase 2 runs ScsiSpeed itself against the profile and calibrates the
-  look-ahead rule from all four rows. The evidence goes in the profile's
-  comment.
+  Measured with `hdbench` under Kickstart 3.1 on an emulated A4000/040
+  (16 MiB image, so the outer zone), as implemented:
+
+  | Request | Period ScsiSpeed | `partial_hits = false` | `partial_hits = true` |
+  |---|---|---|---|
+  | 512 B | 145 KB/s | 352 KB/s | 352 KB/s |
+  | 4 KB | 198 KB/s | 181 KB/s | 1003 KB/s |
+  | 32 KB | 804 KB/s | 645 KB/s | 1001 KB/s |
+  | 256 KB | 1030 KB/s | 891 KB/s | 1002 KB/s |
+
+  Complete-hit-only firmware is the only one of the two that reproduces the
+  4 KB row (within 9%; partial hits put it five times too fast), and it is
+  within 20% on the large ones, so the profile keeps `partial_hits =
+  false`. The 512 B row runs faster than the period figure under both:
+  it is all buffer hits, so it measures the driver and benchmark per
+  request rather than the drive, and ScsiSpeed's own per-request cost is
+  not modelled.
+
+  The other profiles measured the same way: the A1200 with
+  `conner-cp2064` reads 909 KB/s sequentially (929 KB/s is the profile's
+  skewed media rate) and averages 26.5 ms per random 4 KB read over the
+  outer 16 MiB; the A2091 (AROS, 68000) with `quantum-prodrive-80s` reads
+  877 KB/s at 30.8 ms per random read, and with the bufferless
+  `seagate-st125n` 599 KB/s and 29 KB/s on single sectors -- a revolution
+  per request, as a drive with no read-ahead must.
 - **Period benchmark tools**: DiskSpeed 4.2, ScsiSpeed and SysInfo are
   freely distributed (Aminet), so the same binaries can run headless under
   Copperline with scripted input and a screenshot of the result. Treat
-  them as local assets, like ROMs, and never commit them.
+  them as local assets, like ROMs, and never commit them. Running ScsiSpeed
+  itself would close the remaining gap at 32 KB and 256 KB.
 
 ## Phases
+
+All five are implemented on `feat/hdd-timing`, one commit each, plus the
+launcher choice and the guest benchmark in phase 5.
 
 1. **Mechanics core + built-in profiles + unit tests.** No wiring, no
    config. Lands safely on its own.
@@ -658,8 +691,12 @@ What these say about the model:
      the next access pays an unpark-and-seek, not a spin-up. The GoDrive
      GLS "autoidle" is similar, but whether its spindle stops is
      unconfirmed;
-   - `[[drive_profile]]`, `--list-drive-profiles`, the launcher choice,
-     and the `hdbench` integration test.
+   - `[[drive_profile]]` (with `base` to change one built-in figure), the
+     launcher choice and the `hdbench` integration test.
+     `--list-drive-profiles` landed with phase 2, since its docs and error
+     messages point at it;
+   - SCSI START STOP UNIT spinning a timed drive down and up, and NOT
+     READY / becoming ready while it spins up.
 
 This is a new feature with new config surface, so it is based on `main`,
 not `v1` (`RELEASE.md`, "Branches").

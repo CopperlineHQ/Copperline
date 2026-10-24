@@ -118,6 +118,7 @@ pub(crate) const SK_ILLEGAL_REQUEST: u8 = 0x05;
 pub(crate) const SK_UNIT_ATTENTION: u8 = 0x06;
 pub(crate) const SK_DATA_PROTECT: u8 = 0x07;
 pub(crate) const SK_ABORTED_COMMAND: u8 = 0x0B;
+pub(crate) const ASC_LOGICAL_UNIT_NOT_READY: u8 = 0x04;
 pub(crate) const ASC_INVALID_OPCODE: u8 = 0x20;
 pub(crate) const ASC_WRITE_PROTECTED: u8 = 0x27;
 pub(crate) const ASC_LBA_OUT_OF_RANGE: u8 = 0x21;
@@ -450,6 +451,16 @@ impl ScsiDisk {
                 }
                 _ => self.check(SK_ILLEGAL_REQUEST, ASC_LUN_NOT_SUPPORTED),
             };
+        }
+        // A timed drive still coming up to speed answers everything but
+        // INQUIRY, REQUEST SENSE and START STOP UNIT with NOT READY,
+        // "becoming ready", as a real drive does while it spins up.
+        if !matches!(op, 0x03 | 0x12 | 0x1B)
+            && self.mechanics.as_ref().is_some_and(|m| m.spinning_up())
+        {
+            self.set_sense(SK_NOT_READY, ASC_LOGICAL_UNIT_NOT_READY);
+            self.sense[13] = 0x01;
+            return (ScsiExec::NoData, CHECK_CONDITION);
         }
         let total = self.disk.total_sectors();
         match op {
@@ -973,6 +984,26 @@ pub(crate) fn plan_target_timing(
     };
     if status != GOOD {
         overhead_only(mechanics, &mut timing);
+    } else if cdb.first() == Some(&0x1B) {
+        // START STOP UNIT: Start spins the drive up (status at once with
+        // Immed, otherwise once it is ready); Stop spins it down, and the
+        // next media command spins it up again.
+        let start = cdb.get(4).is_some_and(|b| b & 0x01 != 0);
+        let immediate = cdb.get(1).is_some_and(|b| b & 0x01 != 0);
+        timing.status_at = if start {
+            let ready = mechanics.leave_standby();
+            let done = mechanics.overhead();
+            if immediate {
+                done
+            } else {
+                ready.max(done)
+            }
+        } else {
+            let done = mechanics.overhead();
+            mechanics.enter_standby();
+            done
+        };
+        timing.ready = vec![timing.status_at];
     } else {
         match (media_access(cdb), exec) {
             (Some(MediaAccess::Read { lba }), ScsiExec::DataIn(data)) if !data.is_empty() => {
@@ -2727,7 +2758,7 @@ mod tests {
             wd.tick(64);
             elapsed += 64;
             assert!(
-                elapsed < 10 * u64::from(PAL_CCK_HZ),
+                elapsed < 30 * u64::from(PAL_CCK_HZ),
                 "command never finished"
             );
             let mut moved = 0;
@@ -2871,6 +2902,49 @@ mod tests {
         set_cdb(&mut wd, &[0x12, 0, 0, 0, 36, 0]);
         wr_reg(&mut wd, WD_COMMAND, 0x08);
         assert!(wd.next_event_cck().is_none());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_spinning_up_disk_answers_not_ready_becoming_ready() {
+        let path = temp_image(2048);
+        let profile = crate::harddrive::profiles::builtin_profile("quantum-lps-52s").unwrap();
+        let disk = ScsiDisk::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap();
+        let mut target = ScsiTarget::from(disk).with_mechanics(|total| {
+            Some(crate::harddrive::mechanics::DriveMechanics::new(
+                &profile, total, PAL_CCK_HZ, true,
+            ))
+        });
+        let (_, status) = target.execute(&[0x00, 0, 0, 0, 0, 0], 0);
+        assert_eq!(status, CHECK_CONDITION);
+        let (sense, _) = target.execute(&[0x03, 0, 0, 0, 18, 0], 0);
+        let ScsiExec::DataIn(sense) = sense else {
+            panic!("REQUEST SENSE returns data");
+        };
+        assert_eq!((sense[2], sense[12], sense[13]), (SK_NOT_READY, 0x04, 0x01));
+        let (_, status) = target.execute(&[0x12, 0, 0, 0, 36, 0], 0);
+        assert_eq!(status, GOOD, "INQUIRY answers while spinning up");
+        target.mechanics_mut().unwrap().advance(14 * PAL_CCK_HZ);
+        let (_, status) = target.execute(&[0x00, 0, 0, 0, 0, 0], 0);
+        assert_eq!(status, GOOD);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn stop_unit_spins_the_disk_down_until_the_next_media_command() {
+        let (mut wd, path) = timed_chip(2048, "quantum-lps-52s");
+        let (_, csr, _, _, _) = timed_dma_command(&mut wd, &[0x1B, 0, 0, 0, 0, 0], 0, None);
+        assert_eq!(csr, CSR_SEL_XFER_DONE);
+        run_until_int(&mut wd); // the disconnect
+        rd_reg(&mut wd, WD_SCSI_STATUS);
+        let cdb = [0x28, 0, 0, 0, 0, 0x10, 0, 0, 1, 0];
+        let (_, csr, first, _, _) = timed_dma_command(&mut wd, &cdb, SECTOR_SIZE as u32, None);
+        assert_eq!(csr, CSR_SEL_XFER_DONE);
+        // Spinning up again from standby: the LPS 52S's 13 s.
+        assert!(
+            first >= 13 * u64::from(PAL_CCK_HZ),
+            "first byte after {first} cck"
+        );
         std::fs::remove_file(&path).ok();
     }
 }

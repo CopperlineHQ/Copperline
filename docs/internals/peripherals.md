@@ -382,7 +382,23 @@ the buffer, holding BSY until then; a WRITE takes blocks while the buffer
 has room and completes when the media (or, with write cache, the buffer)
 has the data. A pending step's due time caps the emulator's STOP-state
 idle fast-forward (`Bus::next_storage_event_cck`), so a guest waiting on
-the disk interrupt is woken on time.
+the disk interrupt is woken on time. A drive spinning up from power-on
+(`spin_up`) reads back BSY alone and ignores commands; SEEK, IDLE/STANDBY
+(immediate or with the timer, which `DriveMechanics::set_standby_timer`
+applies) and CHECK POWER MODE are implemented on timed drives only, so an
+untimed drive keeps aborting them exactly as before. The SCSI disk target
+answers NOT READY / becoming ready (02/04/01) while spinning up, except to
+INQUIRY, REQUEST SENSE and START STOP UNIT, which spins a timed drive down
+and up.
+
+An image no larger than the profile's drive lies on its outer cylinders
+like a partition at the start of the disk, so seeks between its cylinders
+are real cylinder distances; a larger image is shared between the zones in
+proportion to their capacity with more cylinders than the drive has, and
+seek distances scale onto the real stroke. Stretching a small image across
+the whole stroke instead would put adjacent image cylinders several
+physical cylinders apart and lose a revolution at every cylinder crossing,
+which the cylinder skew cannot cover.
 
 The drive controllers latch read/write activity, which the bus drains to
 light the status-bar HDD LED; the LED holds for a short minimum period so

@@ -617,6 +617,8 @@ video = "PAL"
 # timing = "period"      # time the drives like the machine's own period drive
 #                        # ("instant", the default; "period"; or a profile id)
 # spin_up = true         # also model the power-on spin-up (opt-in)
+#                        # [[drive_profile]] tables describe further drives
+#                        # (docs/guide/configuration.md, "Drive timing")
 # master = "workbench.hdf"
 # slave = "data.hdf"
 # master = { path = "workbench.hdf", bootpri = 6 }

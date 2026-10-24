@@ -255,6 +255,12 @@ impl MachineSetup {
                 Some(ScsiController::A4091) => "A4091 (Z3)".to_string(),
                 Some(ScsiController::A3000) => "A3000 (onboard)".to_string(),
             },
+            F::DriveTiming => match &self.drive_timing {
+                crate::config::DriveTiming::Instant => "Instant".to_string(),
+                crate::config::DriveTiming::Period => "Period (machine's own)".to_string(),
+                crate::config::DriveTiming::Profile(id) => id.clone(),
+            },
+            F::DriveSpinUp => if self.drive_spin_up { "On" } else { "Off" }.to_string(),
             F::LideBoard => match self.lide_board {
                 None => "None".to_string(),
                 Some(LidePersonality::Ripple) => "RIPPLE".to_string(),
@@ -752,6 +758,30 @@ impl MachineSetup {
                 self.scsi_controller = cycle_slice(&choices, self.scsi_controller, forward);
                 self.drop_unreachable_host_disks();
             }
+            F::DriveTiming => {
+                use crate::config::DriveTiming;
+                let mut choices = vec![DriveTiming::Instant, DriveTiming::Period];
+                let builtin = crate::harddrive::profiles::builtin_profiles();
+                choices.extend(builtin.iter().map(|p| DriveTiming::Profile(p.id.clone())));
+                choices.extend(
+                    self.drive_profile_ids
+                        .iter()
+                        .filter(|id| !builtin.iter().any(|p| &p.id == *id))
+                        .map(|id| DriveTiming::Profile(id.clone())),
+                );
+                let n = choices.len();
+                let at = choices
+                    .iter()
+                    .position(|c| *c == self.drive_timing)
+                    .unwrap_or(0);
+                let next = if forward {
+                    (at + 1) % n
+                } else {
+                    (at + n - 1) % n
+                };
+                self.drive_timing = choices[next].clone();
+            }
+            F::DriveSpinUp => self.drive_spin_up = !self.drive_spin_up,
             F::LideBoard => {
                 self.lide_board = cycle_slice(&LIDE_BOARDS, self.lide_board, forward);
                 // Drop drives beyond the new board's channel count, so a

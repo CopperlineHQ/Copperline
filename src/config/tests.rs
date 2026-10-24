@@ -6579,3 +6579,63 @@ fn hd_timing_override_sets_every_drive_section() -> Result<()> {
     assert!(!cfg.lide.enabled());
     Ok(())
 }
+
+#[test]
+fn drive_profiles_can_be_defined_and_used() -> Result<()> {
+    let cfg = parse_config(
+        r#"
+        [machine]
+        profile = "A1200"
+        [ide]
+        timing = "my-quantum"
+        master = "wb.hdf"
+        slave = { path = "work.hdf", timing = "faster-conner" }
+
+        [[drive_profile]]
+        id = "my-quantum"
+        label = "Quantum GoDrive GLS 170"
+        rpm = 3600
+        heads = 4
+        zones = [
+            { cylinders = 700, sectors_per_track = 70 },
+            { cylinders = 695, sectors_per_track = 50 },
+        ]
+        seek_ms = [5, 17, 30]
+        buffer_kib = 96
+
+        [[drive_profile]]
+        id = "faster-conner"
+        base = "conner-cp2064"
+        seek_ms = [4, 15, 30]
+        spin_up_s = 6
+        "#,
+    )?;
+    let quantum = cfg.drive_profile(DriveSlot::Ide(0)).unwrap();
+    assert_eq!(quantum.label, "Quantum GoDrive GLS 170");
+    assert_eq!(quantum.cylinders(), 1395);
+    assert_eq!(quantum.seek_us, [5000, 17_000, 30_000]);
+    assert_eq!(quantum.buffer_kib, 96);
+    let conner = cfg.drive_profile(DriveSlot::Ide(1)).unwrap();
+    assert_eq!(conner.rpm, 3486, "the base profile's figures stay");
+    assert_eq!(conner.seek_us, [4000, 15_000, 30_000]);
+    assert_eq!((conner.spin_up_ms, conner.standby_spin_up_ms), (6000, 6000));
+    Ok(())
+}
+
+#[test]
+fn bad_drive_profiles_are_rejected() {
+    for (body, expect) in [
+        ("id = \"x\"\nrpm = 3600\nheads = 2\ncylinders = 600\nsectors_per_track = 30\nseek_ms = [20, 10, 30]\n", "track-to-track < average"),
+        ("id = \"period\"\nbase = \"conner-cp2064\"\n", "reserved"),
+        ("id = \"x\"\nbase = \"nope\"\n", "not a built-in"),
+        ("id = \"x\"\nrpm = 3600\nheads = 2\nseek_ms = [5, 15, 30]\n", "zones"),
+        ("id = \"x\"\nheads = 2\n", "rpm, heads and seek_ms"),
+    ] {
+        let text = format!("[[drive_profile]]\n{body}");
+        let error = parse_config(&text).unwrap_err();
+        assert!(format!("{error:#}").contains(expect), "{body}: {error:#}");
+    }
+    let twice = "[[drive_profile]]\nid = \"x\"\nbase = \"wd-ac2120\"\n\
+                 [[drive_profile]]\nid = \"x\"\nbase = \"wd-ac2120\"\n";
+    assert!(format!("{:#}", parse_config(twice).unwrap_err()).contains("defined twice"));
+}

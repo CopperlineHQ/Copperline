@@ -937,8 +937,14 @@ The layout is:
     - **Emulation**: power on at startup; run on startup (`[emulation]
       auto_launch`, which runs an opened configuration at once); realtime
       priority; pacing budget; warp speed; warp boot and its storage-idle
-      threshold; and the **WHDLoad** switch, which removes the WHDLoad tab
-      and everything behind it when off.
+      threshold; **Hard drive timing** (Instant, Period, or any built-in or
+      `[[drive_profile]]` drive, written as the `timing` of every fitted
+      `[ide]`/`[scsi]`/`[lide]` section -- see
+      [Drive timing](configuration.md#drive-timing)) and **Drive spin-up**;
+      and the **WHDLoad** switch, which removes the WHDLoad tab and
+      everything behind it when off. A configuration whose sections time
+      their drives differently keeps them as written until the row is
+      changed.
     - **Paths**: the `[paths]` section of the configuration (see
       [](configuration.md)): the base folder on top, then one row per
       folder. The **ROMs**, **Floppies**, **Hard drives** and **CD images**

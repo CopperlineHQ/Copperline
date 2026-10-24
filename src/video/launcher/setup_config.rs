@@ -43,7 +43,24 @@ pub(super) fn carry_unowned_keys(src: &RawConfig, dst: &mut RawConfig) {
     dst.scsi.spin_up = src.scsi.spin_up;
     dst.lide.timing = src.lide.timing.clone();
     dst.lide.spin_up = src.lide.spin_up;
+    dst.drive_profile = src.drive_profile.clone();
     carry_drive_timing(src, dst, false);
+}
+
+/// The hard-drive timing rows' value for a loaded configuration: the first
+/// section that times its drives (IDE, then SCSI, then lide), and whether any
+/// section spins its drives up.
+fn loaded_drive_timing(cfg: &Config) -> (crate::config::DriveTiming, bool) {
+    use crate::config::DriveTiming;
+    let timing = [&cfg.ide.timing, &cfg.scsi.timing, &cfg.lide.timing]
+        .into_iter()
+        .find(|t| **t != DriveTiming::Instant)
+        .cloned()
+        .unwrap_or_default();
+    (
+        timing,
+        cfg.ide.spin_up || cfg.scsi.spin_up || cfg.lide.spin_up,
+    )
 }
 
 /// Carry each drive entry's own `timing`, which the launcher does not edit.
@@ -303,6 +320,10 @@ impl MachineSetup {
             ),
             sf2000sd_card_boot_off: boot_is_off(raw.sf2000sd.card.as_ref().and_then(|d| d.bootpri)),
             sf2000sd_rom: raw.sf2000sd.rom.as_deref().map(PathBuf::from),
+            drive_timing: loaded_drive_timing(&cfg).0,
+            drive_spin_up: loaded_drive_timing(&cfg).1,
+            drive_timing_loaded: loaded_drive_timing(&cfg),
+            drive_profile_ids: cfg.drive_profiles.iter().map(|p| p.id.clone()).collect(),
             filesys_dirs: std::array::from_fn(|i| {
                 raw.filesys.get(i).map(|m| PathBuf::from(&m.path))
             }),
@@ -525,8 +546,30 @@ impl MachineSetup {
         self.write_zorro_config(&mut raw);
         raw.paths = self.paths.clone();
         carry_unowned_keys(&self.carried, &mut raw);
+        self.write_drive_timing(&mut raw);
         self.drop_unfitting_carried_keys(&mut raw);
         raw
+    }
+
+    /// The Emulation page's hard-drive rows, written as every fitted
+    /// hard-drive section's `timing` and `spin_up` -- but only once they have
+    /// been changed, so a configuration whose sections differ keeps them as
+    /// it had them.
+    fn write_drive_timing(&self, raw: &mut RawConfig) {
+        if (self.drive_timing.clone(), self.drive_spin_up) == self.drive_timing_loaded {
+            return;
+        }
+        let timing = (self.drive_timing != crate::config::DriveTiming::Instant)
+            .then(|| self.drive_timing.config_value().to_string());
+        let spin_up = self.drive_spin_up.then_some(true);
+        raw.ide.timing = timing.clone();
+        raw.ide.spin_up = spin_up;
+        let scsi = self.scsi_controller.is_some();
+        raw.scsi.timing = timing.clone().filter(|_| scsi);
+        raw.scsi.spin_up = spin_up.filter(|_| scsi);
+        let lide = self.lide_board.is_some();
+        raw.lide.timing = timing.filter(|_| lide);
+        raw.lide.spin_up = spin_up.filter(|_| lide);
     }
 
     /// Drop carried keys the edited machine can no longer take. They have no

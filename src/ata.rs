@@ -739,6 +739,16 @@ impl AtaBus {
         self.drives[1 - self.selected().min(1)].is_some()
     }
 
+    /// The status register as the host reads it: a timed drive still
+    /// spinning up from power-on holds BSY alone, as a real drive does
+    /// until it is ready.
+    fn visible_status(&mut self) -> u8 {
+        if self.mechanics().is_some_and(|m| m.spinning_up()) {
+            return ST_BSY;
+        }
+        self.status
+    }
+
     /// The selected drive's mechanics, when it is a timed hard disk.
     fn mechanics(&mut self) -> Option<&mut crate::harddrive::mechanics::DriveMechanics> {
         self.drive()?.mechanics.as_deref_mut()
@@ -869,11 +879,11 @@ impl AtaBus {
             Some(IdeReg::CylHigh) => u32::from(self.cyl_high[self.selected()]),
             Some(IdeReg::DriveHead) => u32::from(self.drive_head),
             Some(IdeReg::StatusCommand) => {
-                let v = self.status;
+                let v = self.visible_status();
                 self.clear_irq();
                 u32::from(v)
             }
-            Some(IdeReg::AltStatusDevCtl) => u32::from(self.status),
+            Some(IdeReg::AltStatusDevCtl) => u32::from(self.visible_status()),
             None => 0,
         }
     }
@@ -1459,6 +1469,57 @@ impl AtaBus {
         Ok(())
     }
 
+    /// SEEK, IDLE / STANDBY (immediate or with a timer) and CHECK POWER MODE
+    /// on a timed drive.
+    fn power_or_seek_command(&mut self, cmd: u8) {
+        // The standby timer in the sector count: 1-240 in 5 s units,
+        // 241-251 in 30 min units, 0 disables it.
+        let timer_ms = match self.sector_count {
+            0 => None,
+            n @ 1..=240 => Some(u64::from(n) * 5000),
+            n @ 241..=251 => Some(u64::from(n - 240) * 30 * 60_000),
+            252 => Some(21 * 60_000),
+            255 => Some(21 * 60_000 + 15_000),
+            _ => Some(8 * 3_600_000),
+        };
+        let lba = self.current_lba();
+        let mechanics = self.mechanics().expect("timed drive");
+        let due = match cmd {
+            0x70 => match lba {
+                Some(lba) => mechanics.seek_to(lba),
+                None => {
+                    self.command_error(ERR_IDNF);
+                    return;
+                }
+            },
+            // STANDBY IMMEDIATE / STANDBY: the spindle stops now.
+            0xE0 | 0x94 | 0xE2 | 0x96 => {
+                if matches!(cmd, 0xE2 | 0x96) {
+                    mechanics.set_standby_timer(timer_ms);
+                }
+                let due = mechanics.overhead();
+                mechanics.enter_standby();
+                due
+            }
+            // IDLE IMMEDIATE / IDLE: spin up if stopped.
+            0xE1 | 0x95 | 0xE3 | 0x97 => {
+                if matches!(cmd, 0xE3 | 0x97) {
+                    mechanics.set_standby_timer(timer_ms);
+                }
+                mechanics.leave_standby().max(mechanics.overhead())
+            }
+            // CHECK POWER MODE: 0x00 in the sector count while stopped,
+            // 0xFF while spinning (active or idle).
+            _ => {
+                let stopped = mechanics.spun_down();
+                let due = mechanics.now();
+                self.sector_count = if stopped { 0x00 } else { 0xFF };
+                due
+            }
+        };
+        self.schedule(due, PendingStep::Complete);
+    }
+
     /// Finish a non-data command: after the command overhead on a timed
     /// drive, at once on an untimed one.
     fn complete_after_overhead(&mut self) {
@@ -1496,7 +1557,7 @@ impl AtaBus {
                 self.sector_count
             );
         }
-        if self.pending.is_some() {
+        if self.pending.is_some() || self.mechanics().is_some_and(|m| m.spinning_up()) {
             // A drive ignores the command register while BSY is set.
             log::debug!("ide: command {cmd:#04X} written while BSY; ignored");
             return;
@@ -1734,6 +1795,15 @@ impl AtaBus {
                         self.raise_irq();
                     }
                 }
+            }
+            // SEEK and the power-management commands, on a timed drive (an
+            // instant drive has no spindle or actuator to manage and keeps
+            // aborting them). The ATA-1 opcodes 0x94-0x98 are the older
+            // spellings of 0xE0-0xE5.
+            0x70 | 0xE0..=0xE3 | 0xE5 | 0x94..=0x98
+                if self.mechanics().is_some() && !self.selected_is_atapi() =>
+            {
+                self.power_or_seek_command(cmd);
             }
             // NOP: per ATA-2 always aborts.
             0x00 => self.command_error(ERR_ABRT),
@@ -2208,8 +2278,13 @@ mod tests {
 
     const PAL_CCK_HZ: u32 = 3_546_895;
 
-    /// A bus with one CP2064-timed hard disk of `sectors` on the master slot.
+    /// A bus with one hard disk of `sectors` timed as `profile` on the
+    /// master slot.
     fn timed_bus(sectors: u64, profile: &str) -> (AtaBus, PathBuf) {
+        timed_bus_spin(sectors, profile, false)
+    }
+
+    fn timed_bus_spin(sectors: u64, profile: &str, spin_up: bool) -> (AtaBus, PathBuf) {
         let path = temp_disk_image(sectors);
         let profile = crate::harddrive::profiles::builtin_profile(profile).unwrap();
         let drive = AtaDevice::from(
@@ -2217,7 +2292,7 @@ mod tests {
         )
         .with_mechanics(|total| {
             Some(crate::harddrive::mechanics::DriveMechanics::new(
-                &profile, total, PAL_CCK_HZ, false,
+                &profile, total, PAL_CCK_HZ, spin_up,
             ))
         });
         let mut bus = AtaBus::new();
@@ -2247,7 +2322,7 @@ mod tests {
             bus.tick(100, &mut ring);
             waited += 100;
             assert!(
-                waited < 10 * u64::from(PAL_CCK_HZ),
+                waited < 30 * u64::from(PAL_CCK_HZ),
                 "drive never became ready"
             );
         }
@@ -2367,6 +2442,75 @@ mod tests {
         let mut restored: AtaBus = bincode::deserialize(&saved).unwrap();
         assert_eq!(restored.pending, bus.pending);
         assert_eq!(run_until_ready(&mut restored), run_until_ready(&mut bus));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_spinning_up_drive_holds_bsy_and_ignores_commands() {
+        let (mut bus, path) = timed_bus_spin(125_096, "conner-cp2064", true);
+        assert_eq!(bus.read_reg(Some(IdeReg::StatusCommand), 1) as u8, ST_BSY);
+        issue(&mut bus, 0xEC, 0, 1);
+        assert!(bus.pending.is_none(), "IDENTIFY ignored while spinning up");
+        let waited = run_until_ready(&mut bus);
+        // The CP2064 takes 10 s to come up to speed.
+        assert!(
+            waited >= 10 * u64::from(PAL_CCK_HZ) - 100,
+            "ready after {waited} cck"
+        );
+        issue(&mut bus, 0xEC, 0, 1);
+        run_until_ready(&mut bus);
+        assert_eq!(bus.status & ST_DRQ, ST_DRQ);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn standby_check_power_mode_and_spin_up_on_access() {
+        let (mut bus, path) = timed_bus(125_096, "seagate-st9080a");
+        issue(&mut bus, 0xE5, 0, 0); // CHECK POWER MODE
+        run_until_ready(&mut bus);
+        assert_eq!(bus.read_reg(Some(IdeReg::SectorCount), 1), 0xFF, "spinning");
+        issue(&mut bus, 0xE0, 0, 0); // STANDBY IMMEDIATE
+        run_until_ready(&mut bus);
+        issue(&mut bus, 0xE5, 0, 0);
+        run_until_ready(&mut bus);
+        assert_eq!(bus.read_reg(Some(IdeReg::SectorCount), 1), 0x00, "stopped");
+        issue(&mut bus, 0x20, 1000, 1);
+        let waited = run_until_ready(&mut bus);
+        // The ST9080A's 2 s from standby to ready.
+        assert!(
+            waited >= 2 * u64::from(PAL_CCK_HZ),
+            "read after {waited} cck"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn seek_completes_after_the_actuator_settles() {
+        let (mut bus, path) = timed_bus(125_096, "conner-cp2064");
+        issue(&mut bus, 0x70, 120_000, 0);
+        assert_eq!(bus.status & ST_BSY, ST_BSY);
+        let waited = run_until_ready(&mut bus);
+        // A near full-stroke seek on a 40 ms drive.
+        assert!(
+            waited > u64::from(PAL_CCK_HZ) / 50,
+            "seek took {waited} cck"
+        );
+        assert!(bus.take_irq_edge());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn untimed_drives_still_abort_power_commands() {
+        let path = temp_disk_image(64);
+        let mut bus = AtaBus::new();
+        bus.attach_drive(
+            0,
+            IdeDrive::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap(),
+        );
+        bus.reset();
+        issue(&mut bus, 0xE0, 0, 0);
+        assert_eq!(bus.status & ST_ERR, ST_ERR);
+        assert_eq!(bus.error, ERR_ABRT);
         let _ = std::fs::remove_file(path);
     }
 }
