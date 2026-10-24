@@ -5651,8 +5651,10 @@ impl ApplicationHandler for App {
                     // display region after the UI has been drawn into it, so
                     // an open menu or panel would be painted over and vanish.
                     // Fall back to the CPU present, which composites the UI on
-                    // top as usual, at the cost of the FB_WIDTH downscale for
-                    // as long as the overlay is open.
+                    // top as usual, at the cost of the FB_WIDTH downscale
+                    // (or, under integer scaling, the texture's resolution)
+                    // for as long as the overlay is open. The picture keeps
+                    // the pass's size and place either way.
                     // The guest's fn-88 overlay is composited on the CPU
                     // canvas too, so it needs the same fallback: the GPU
                     // RTG pass would overdraw it. So does the drop hint,
@@ -5748,6 +5750,19 @@ impl ApplicationHandler for App {
                         }
                         let window = r.window.clone();
                         let layout = main_present_layout(r, display_src);
+                        // Under integer scaling the RTG pass draws the
+                        // board's picture at a whole multiple of its own
+                        // pixels, centred in the display rather than
+                        // stretched over it. What the CPU composes for the
+                        // frame -- the picture itself while the CPU present
+                        // stands in for the pass, the copy the corner
+                        // overlays blend over, the overlays -- is laid out
+                        // where the pass puts it, so nothing moves or
+                        // resizes between the two paths.
+                        let rtg_integer_picture = self
+                            .rtg_present_dims
+                            .filter(|_| integer_scaling_requested())
+                            .map(|dims| (dims, layout.rtg_integer_picture(dims)));
                         // A frame the main thread presents itself composes
                         // straight into the pixels buffer, with the GPU side
                         // at home; it goes back into `r` at the end.
@@ -5785,13 +5800,20 @@ impl ApplicationHandler for App {
                             let rows = present_height() * texture_scale;
                             let stride = texture_width(texture_scale) * 4;
                             frame[..rows * stride].fill(0);
+                        } else if let Some((dims, picture)) = rtg_integer_picture {
+                            // Under the GPU RTG pass a copy of the board frame
+                            // only shows through the corner overlays: their
+                            // boxes are translucent, so they blend over it like
+                            // they blend over any picture, and the GPU then
+                            // puts just those boxes back over the native one.
+                            // Under integer scaling that copy has to sit where
+                            // the pass puts the picture, which the FB_WIDTH
+                            // copy below (stretched over the display, as the
+                            // smooth fit draws it) does not.
+                            copy_rtg_picture(&self.rtg_fb, dims, picture, frame, texture_scale);
                         } else {
                             // Under the GPU RTG pass this copy only shows
-                            // through the corner overlays: their boxes are
-                            // translucent, so they blend over the FB_WIDTH
-                            // copy of the board frame like they blend over
-                            // any picture, and the GPU then puts just those
-                            // boxes back over the native one.
+                            // through the corner overlays, as above.
                             copy_window_present_frame(
                                 &self.present_fb,
                                 self.present_rows,
@@ -5863,13 +5885,17 @@ impl ApplicationHandler for App {
                         // The corner overlays anchor to the display region the
                         // viewer actually sees: the whole display classically,
                         // the sub-rect while autocrop or per-axis scaling
-                        // presents one.
-                        let overlay_anchor = display_src.map(|src| src.rect).unwrap_or((
-                            0,
-                            0,
-                            FB_WIDTH,
-                            present_height(),
-                        ));
+                        // presents one, and the board's picture while an RTG
+                        // frame sits at a whole multiple inside the display.
+                        let overlay_anchor = match rtg_integer_picture {
+                            Some((_, picture)) => picture_canvas_rect(picture),
+                            None => display_src.map(|src| src.rect).unwrap_or((
+                                0,
+                                0,
+                                FB_WIDTH,
+                                present_height(),
+                            )),
+                        };
                         if !guest_overlay.is_empty() {
                             // The guest's debug overlay sits directly on the
                             // picture, under every piece of host chrome.
@@ -5998,14 +6024,8 @@ impl ApplicationHandler for App {
                             texture_height(texture_scale) as u32,
                         );
                         let pass = if rtg_gpu {
-                            let (cx, cy, cw, ch) = present_clip;
-                            let disp_h = if debug_layout {
-                                ch as f32
-                            } else {
-                                ch as f32 * present_height() as f32 / window_present_height() as f32
-                            };
                             PresentPass::Rtg {
-                                rect: (cx as f32, cy as f32, cw as f32, disp_h),
+                                rect: layout.rtg_viewport(),
                                 integer_scaling: integer_scaling_requested(),
                                 overlays: overlay_boxes
                                     .iter()

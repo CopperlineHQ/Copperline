@@ -12516,6 +12516,132 @@ fn an_overlay_draw_resamples_its_box_where_the_display_draw_did() {
     );
 }
 
+/// The RTG pass draws over the display's rows of the display rect: the
+/// canvas's first `present_height()` rows in the classic layout, where
+/// the chrome below them stays the composed texture's, and the whole
+/// rect of a debug pane, whose canvas is the display alone.
+#[test]
+fn the_rtg_viewport_is_the_display_rows_of_the_display_rect() {
+    let canvas_h = super::window_present_height();
+    let ph = super::present_height();
+    let layout = |src_canvas, display_dst| super::PresentLayout {
+        src_canvas,
+        display_dst,
+        filter: super::scaler::ScaleFilter::Nearest,
+        chrome_dst: None,
+        factors: None,
+    };
+    let classic = layout(
+        (0, 0, FB_WIDTH, canvas_h),
+        (5, 7, 2 * FB_WIDTH as u32, 2 * canvas_h as u32),
+    );
+    assert_eq!(
+        classic.rtg_viewport(),
+        (5.0, 7.0, 2.0 * FB_WIDTH as f32, 2.0 * ph as f32)
+    );
+    let pane = layout((0, 0, FB_WIDTH, ph), (40, 30, 900, 677));
+    assert_eq!(pane.rtg_viewport(), (40.0, 30.0, 900.0, 677.0));
+}
+
+/// Issue 816: under integer scaling the RTG pass draws the board's
+/// picture at a whole multiple of its own pixels, centred in the display
+/// with black margins around it, so the corner overlays anchor to the
+/// picture and not to the display around it. A 640x480 board sits 38
+/// canvas columns in from each side of the 716-wide display at 1x and
+/// at 2x alike, and the performance readout comes the usual margin in
+/// from the picture's top-right corner, where the whole display's anchor
+/// put it over the margin. A display too small for a 1:1 copy is filled,
+/// so its picture is the whole display.
+#[test]
+fn an_integer_rtg_picture_anchors_the_corner_overlays_inside_it() {
+    let canvas_h = super::window_present_height();
+    let ph = super::present_height();
+    assert!(ph >= 480, "the display holds a 480-row board at 1x");
+    let classic = |display_dst| super::PresentLayout {
+        src_canvas: (0, 0, FB_WIDTH, canvas_h),
+        display_dst,
+        filter: super::scaler::ScaleFilter::Nearest,
+        chrome_dst: None,
+        factors: None,
+    };
+    // The picture's rows, in canvas pixels, rounded in.
+    let top = (ph - 480) as f32 / 2.0;
+    let rows = (top.ceil() as usize, (top + 480.0).floor() as usize);
+    let lines = vec!["50.0 fps".to_string(), "slip 0".to_string()];
+    for m in [1u32, 2] {
+        let layout = classic((100, 20, m * FB_WIDTH as u32, m * canvas_h as u32));
+        let anchor = super::picture_canvas_rect(layout.rtg_integer_picture((640, 480)));
+        assert_eq!(anchor, (38, rows.0, 640, rows.1 - rows.0), "at {m}x");
+        for scale in [1, 2] {
+            let margin = 8 * scale;
+            let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+            let rect = super::draw_perf_overlay(&mut frame, &lines, scale, false, 0, anchor)
+                .expect("a readout with lines paints a box");
+            assert_eq!(rect.x + rect.w, (38 + 640) * scale - margin);
+            assert_eq!(rect.y, rows.0 * scale + margin);
+            assert!(rect.x >= 38 * scale && rect.y + rect.h <= rows.1 * scale);
+            let old = super::draw_perf_overlay(&mut frame, &lines, scale, false, 0, full_anchor())
+                .expect("a readout with lines paints a box");
+            assert!(
+                old.x + old.w > (38 + 640) * scale,
+                "the whole display's anchor no longer reaches past the picture"
+            );
+        }
+    }
+    let small = classic((0, 0, 600, 500));
+    assert_eq!(
+        super::picture_canvas_rect(small.rtg_integer_picture((640, 480))),
+        full_anchor()
+    );
+}
+
+/// The CPU copy of an RTG frame under integer scaling lays the board out
+/// where the pass draws it: every texture pixel shows the board pixel
+/// under its centre, the margin around the picture is black, and the
+/// chrome rows below the display are left alone. Here a 32x16 board,
+/// every pixel its own colour, covers canvas columns 100..164 and rows
+/// 50..82, two canvas pixels per board pixel. A frame shorter than its
+/// claimed size shows only the margin.
+#[test]
+fn the_integer_rtg_copy_lays_the_board_where_the_pass_draws_it() {
+    const BLACK: [u8; 4] = 0xFF00_0000u32.to_le_bytes();
+    const UNTOUCHED: [u8; 4] = [0xAB; 4];
+    let ph = super::present_height();
+    let native = (32u32, 16u32);
+    let board: Vec<u32> = (0..32 * 16).map(|i| 0xFF00_0000 | i).collect();
+    let picture = [
+        100.0 / FB_WIDTH as f32,
+        50.0 / ph as f32,
+        64.0 / FB_WIDTH as f32,
+        32.0 / ph as f32,
+    ];
+    for scale in [1, 2] {
+        let mut frame = vec![0xABu8; texture_width(scale) * texture_height(scale) * 4];
+        super::copy_rtg_picture(&board, native, picture, &mut frame, scale);
+        for y in 0..texture_height(scale) {
+            for x in 0..texture_width(scale) {
+                let want = if y >= ph * scale {
+                    UNTOUCHED
+                } else if (100 * scale..164 * scale).contains(&x)
+                    && (50 * scale..82 * scale).contains(&y)
+                {
+                    let (bx, by) = (
+                        (x - 100 * scale) / (2 * scale),
+                        (y - 50 * scale) / (2 * scale),
+                    );
+                    board[by * 32 + bx].to_le_bytes()
+                } else {
+                    BLACK
+                };
+                assert_eq!(pixel(&frame, x, y, scale), want, "({x}, {y}) at {scale}x");
+            }
+        }
+    }
+    let mut frame = vec![0xABu8; texture_width(1) * texture_height(1) * 4];
+    super::copy_rtg_picture(&board[..100], native, picture, &mut frame, 1);
+    assert!((0..ph).all(|y| (0..FB_WIDTH).all(|x| pixel(&frame, x, y, 1) == BLACK)));
+}
+
 #[test]
 fn perf_counters_accrue_busy_time_and_reset_with_the_guest() {
     let mut app = test_app();
