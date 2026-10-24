@@ -121,6 +121,10 @@ impl App {
             .launcher_state()
             .and_then(|s| s.setup.path(field))
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            // A bare file name has an empty parent, and is looked for in the
+            // media folder when the working directory lacks it -- so that is
+            // where its dialog opens too.
+            .filter(|d| !d.as_os_str().is_empty())
             .or_else(|| Self::media_start_dir(field));
         // A hard-drive slot can be a raw image or a host directory (built
         // into an in-memory FFS/OFS volume at open time; see

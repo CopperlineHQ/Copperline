@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Where Copperline puts what it produces, and where its file dialogs start.
+//! Where Copperline puts what it produces, where its file dialogs start,
+//! and where a configuration's relative media paths are looked for.
 //!
 //! The `[paths]` section of a configuration, and no file of its own: one
 //! TOML says what the machine is and where its output goes, which is one
@@ -34,8 +35,8 @@ use serde::{Deserialize, Serialize};
 /// answers, short enough that a stale mount is a pause and not a hang.
 const PROBE_BUDGET: Duration = Duration::from_millis(1500);
 
-/// Directories Copperline writes into, and the directories its file
-/// dialogs open at. Serialised with `skip_serializing_if` throughout so a
+/// Directories Copperline writes into, and the media directories its file
+/// dialogs open at and relative media paths fall back to. Serialised with `skip_serializing_if` throughout so a
 /// saved configuration records only what was actually set -- an inherited
 /// entry is absent rather than written out with its computed value, which
 /// would freeze today's default into a file that then stops following it.
@@ -69,13 +70,15 @@ pub struct Paths {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub configs: Option<PathBuf>,
 
-    // --- where the file dialogs start -------------------------------
+    // --- where media is kept ----------------------------------------
     //
     // These are not Copperline's to write. A dialog already opens beside
     // whatever is in the field it was launched from, which is better than
-    // any fixed answer; these only decide where it opens when that field
-    // is empty. Nothing is created for them, because a handful of empty
-    // folders nobody asked for is worse than none.
+    // any fixed answer; these decide where it opens when that field is
+    // empty, and where a relative media path the working directory lacks
+    // is looked for (`paths::locate_media`). Nothing is created for them,
+    // because a handful of empty folders nobody asked for is worse than
+    // none.
     /// Kickstart and extended ROM images.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub roms: Option<PathBuf>,
@@ -342,12 +345,14 @@ impl Paths {
         self.dir(host_data, self.configs.as_deref(), default_name::CONFIGS)
     }
 
-    /// Where a ROM dialog opens when its field is empty.
+    /// Where a ROM dialog opens when its field is empty, and where a
+    /// relative ROM path is looked for.
     pub fn roms_dir(&self, host_data: &Path) -> PathBuf {
         self.dir(host_data, self.roms.as_deref(), default_name::ROMS)
     }
 
-    /// Where an MT-32 ROM dialog opens. Under the ROMs directory rather
+    /// Where an MT-32 ROM dialog opens, and where a relative MT-32 ROM
+    /// path is looked for first. Under the ROMs directory rather
     /// than beside it: they are ROMs, just not the machine's own.
     pub fn mt32_roms_dir(&self, host_data: &Path) -> PathBuf {
         match self.mt32_roms.as_deref() {
@@ -357,12 +362,14 @@ impl Paths {
         }
     }
 
-    /// Where a floppy dialog opens when its field is empty.
+    /// Where a floppy dialog opens when its field is empty, and where a
+    /// relative floppy path is looked for.
     pub fn floppies_dir(&self, host_data: &Path) -> PathBuf {
         self.dir(host_data, self.floppies.as_deref(), default_name::FLOPPIES)
     }
 
-    /// Where a hard-disk dialog opens when its field is empty.
+    /// Where a hard-disk dialog opens when its field is empty, and where a
+    /// relative hard-disk path is looked for.
     pub fn harddrives_dir(&self, host_data: &Path) -> PathBuf {
         self.dir(
             host_data,
@@ -371,7 +378,8 @@ impl Paths {
         )
     }
 
-    /// Where a CD dialog opens when its field is empty.
+    /// Where a CD dialog opens when its field is empty, and where a
+    /// relative CD path is looked for.
     pub fn cds_dir(&self, host_data: &Path) -> PathBuf {
         self.dir(host_data, self.cds.as_deref(), default_name::CDS)
     }

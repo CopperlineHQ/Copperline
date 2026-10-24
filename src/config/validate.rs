@@ -5,6 +5,7 @@ use crate::bus::PortDevice;
 use crate::chipset::agnus::{AgnusRevision, VideoStandard};
 use crate::chipset::denise::DeniseRevision;
 use crate::memory::RamInit;
+use crate::paths::{locate_media, Media};
 use anyhow::{anyhow, bail, Context, Result};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -551,12 +552,20 @@ impl TryFrom<RawConfig> for Config {
             },
             midi_out: raw.serial.midi_out.clone(),
             midi_in: raw.serial.midi_in.clone(),
-            mt32_control_rom: raw.serial.mt32_control_rom.as_ref().map(PathBuf::from),
+            mt32_control_rom: raw
+                .serial
+                .mt32_control_rom
+                .as_ref()
+                .map(|p| locate_media(p, Media::Mt32Rom)),
             mt32_lcd: match raw.serial.mt32_lcd.as_deref() {
                 None => defaults.serial.mt32_lcd,
                 Some(s) => parse_mt32_lcd(s)?,
             },
-            mt32_pcm_rom: raw.serial.mt32_pcm_rom.as_ref().map(PathBuf::from),
+            mt32_pcm_rom: raw
+                .serial
+                .mt32_pcm_rom
+                .as_ref()
+                .map(|p| locate_media(p, Media::Mt32Rom)),
             mt32_panel: raw.serial.mt32_panel.unwrap_or(defaults.serial.mt32_panel),
             coppersynth_soundfont: raw.serial.coppersynth_soundfont.as_ref().map(PathBuf::from),
             coppersynth_mt32_mode: raw.serial.coppersynth_mt32_mode.clone(),
@@ -736,8 +745,8 @@ impl TryFrom<RawConfig> for Config {
 
         let mut scsi = ScsiConfig {
             controller: scsi_controller,
-            rom: raw.scsi.rom.map(PathBuf::from),
-            rom_odd: raw.scsi.rom_odd.map(PathBuf::from),
+            rom: raw.scsi.rom.map(|p| locate_media(p, Media::Rom)),
+            rom_odd: raw.scsi.rom_odd.map(|p| locate_media(p, Media::Rom)),
             units: [
                 raw.scsi.unit0.map(drive_image).transpose()?,
                 raw.scsi.unit1.map(drive_image).transpose()?,
@@ -830,7 +839,7 @@ impl TryFrom<RawConfig> for Config {
                 .rom
                 .as_deref()
                 .filter(|s| !s.is_empty())
-                .map(PathBuf::from),
+                .map(|p| locate_media(p, Media::Rom)),
         };
 
         let lide_board = match raw.lide.board.as_deref() {
@@ -867,13 +876,13 @@ impl TryFrom<RawConfig> for Config {
             .rom
             .as_deref()
             .filter(|r| !r.is_empty())
-            .map(PathBuf::from);
+            .map(|p| locate_media(p, Media::Rom));
         let mut lide_rom_bank2 = raw
             .lide
             .rom_bank2
             .as_deref()
             .filter(|r| !r.is_empty())
-            .map(PathBuf::from);
+            .map(|p| locate_media(p, Media::Rom));
         // A fitted board (named explicitly, or carrying a drive image) with
         // no ROM opinion of its own gets the bundled lide.rom, the same way
         // an explicitly-fitted A4091 gets its bundled ROM below -- this
@@ -982,7 +991,7 @@ impl TryFrom<RawConfig> for Config {
                 .rom
                 .as_deref()
                 .filter(|path| !path.is_empty())
-                .map(PathBuf::from);
+                .map(|p| locate_media(p, Media::Rom));
             if rom.is_some() && model.is_none() {
                 return Err(anyhow!(
                     "[cartridge] rom applies only to a fitted cartridge (model = \"hrtmon\")"
@@ -1401,14 +1410,17 @@ impl TryFrom<RawConfig> for Config {
                 anyhow::bail!("fmv = true conflicts with fmv_rom = \"\"");
             }
             (_, Some("")) => None,
-            (_, Some(path)) => Some(PathBuf::from(path)),
+            (_, Some(path)) => Some(locate_media(path, Media::Rom)),
             (Some(true), None) => Some(PathBuf::from(BUNDLED_FMV_ROM)),
             (Some(false) | None, None) => defaults.fmv_rom_path,
         };
         Ok(Config {
             host_disks,
             pcmcia,
-            rom_path: raw.rom.map(PathBuf::from).unwrap_or(defaults.rom_path),
+            rom_path: raw
+                .rom
+                .map(|p| locate_media(p, Media::Rom))
+                .unwrap_or(defaults.rom_path),
             netplay_storage: false,
             netplay_read_only: Vec::new(),
             cpu,
@@ -1434,7 +1446,7 @@ impl TryFrom<RawConfig> for Config {
                 .filesys
                 .iter()
                 .map(|m| crate::filesys::MountSpec {
-                    path: std::path::PathBuf::from(&m.path),
+                    path: locate_media(&m.path, Media::HardDrive),
                     volume: m.volume.clone().unwrap_or_else(|| {
                         std::path::Path::new(&m.path)
                             .file_name()
@@ -1470,10 +1482,10 @@ impl TryFrom<RawConfig> for Config {
             cdtv_cd: defaults.cdtv_cd,
             extended_rom_path: raw
                 .extended_rom
-                .map(PathBuf::from)
+                .map(|p| locate_media(p, Media::Rom))
                 .or(defaults.extended_rom_path),
             fmv_rom_path,
-            cd_image_path: raw.cd.image.map(PathBuf::from),
+            cd_image_path: raw.cd.image.map(|p| locate_media(p, Media::Cd)),
             cd_insert_delay_secs,
             cd32_nvram_path: raw
                 .cd
@@ -2590,7 +2602,7 @@ fn parse_floppy(
             if image.trim().is_empty() {
                 bail!("floppy.df{} path is empty", idx);
             }
-            let image = PathBuf::from(image);
+            let image = locate_media(image, Media::Floppy);
             validate_floppy_image_path(idx, &image)?;
             images.push(image);
         }
@@ -2881,7 +2893,7 @@ pub(super) fn parse_pcmcia(raw: &RawPcmcia, has_slot: bool) -> Result<PcmciaConf
                 );
             }
             PcmciaCardConfig::Cf {
-                path: PathBuf::from(path),
+                path: locate_media(path, Media::HardDrive),
             }
         }
         Some("sram") => {

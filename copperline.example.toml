@@ -36,8 +36,10 @@ rom = "kickstart.rom"
 # these up here when you uncomment them.
 
 
-# [paths] -- specifies where Copperline saves generated files and where file
-# dialogs default to when a field is empty. Every key is optional; defaults
+# [paths] -- specifies where Copperline saves generated files, where file
+# dialogs default to when a field is empty, and where a relative ROM, disk or
+# CD path is looked for when it is not in the working directory (so
+# rom = "KICK31.ROM" finds roms/KICK31.ROM). Every key is optional; defaults
 # use subdirectories in the host data directory (~/Documents/Copperline,
 # %USERPROFILE%\Documents\Copperline, or the application folder in portable
 # mode). Relative paths are resolved against `base`, while absolute paths
@@ -50,7 +52,7 @@ rom = "kickstart.rom"
 # nvram = "nvram"             # battery-backed RAMs, incl. CD32 game saves
 # traces = "traces"           # debugger traces and waveform captures
 # configs = "configs"         # configurations saved from the launcher
-# roms = "roms"               # dialog folders: only used if the folder exists
+# roms = "roms"               # media folders: only used if the folder exists
 # mt32_roms = "roms/mt32"
 # floppies = "floppies"
 # harddrives = "harddrives"

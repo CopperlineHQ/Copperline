@@ -1632,7 +1632,7 @@ pub(super) fn drive_image(raw: RawDrive) -> Result<DriveImage> {
             }
         }
     };
-    let path = PathBuf::from(raw.path);
+    let path = crate::paths::locate_media(raw.path, crate::paths::Media::Drive);
     let filesystem = match raw.filesystem {
         None => crate::diskimage::FileSystem::FFS,
         Some(fs) => {
@@ -1669,7 +1669,9 @@ fn hard_disk_only_drive_image(
     section: &str,
     controller: &str,
 ) -> Result<DriveImage> {
-    let path = PathBuf::from(&raw.path);
+    // Found before it is classified: a CHD is told apart by reading it,
+    // which a relative path outside the working directory cannot be.
+    let path = crate::paths::locate_media(&raw.path, crate::paths::Media::Drive);
     if crate::config::is_cd_image_path(&path) {
         bail!(
             "[{section}] {}: {controller} serves hard disks only, not CD images \
