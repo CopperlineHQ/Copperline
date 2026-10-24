@@ -12309,6 +12309,179 @@ fn the_overlays_leave_the_corner_on_both_axes() {
     assert_eq!(y0, margin + inset, "the performance readout did not drop");
 }
 
+/// The GPU RTG pass overdraws the display after the composed buffer is
+/// drawn, and only the boxes the corner overlays report are put back over
+/// it: a pixel one of them paints outside its box would vanish on an RTG
+/// screen. Each box is exactly the painted extent, and a message too long
+/// for the display reports the text that runs out of its box too.
+#[test]
+fn corner_overlays_report_a_box_holding_every_pixel_they_paint() {
+    // The painted extent of `frame`, as a rect.
+    let painted = |frame: &[u8], scale: usize| {
+        let (mut x0, mut x1, mut y0, mut y1) = (usize::MAX, 0usize, usize::MAX, 0usize);
+        for y in 0..texture_height(scale) {
+            for x in 0..texture_width(scale) {
+                if pixel(frame, x, y, scale) != [0, 0, 0, 0] {
+                    x0 = x0.min(x);
+                    x1 = x1.max(x);
+                    y0 = y0.min(y);
+                    y1 = y1.max(y);
+                }
+            }
+        }
+        assert!(x0 <= x1, "nothing was painted");
+        super::Rect {
+            x: x0,
+            y: y0,
+            w: x1 - x0 + 1,
+            h: y1 - y0 + 1,
+        }
+    };
+    let contains = |outer: super::Rect, inner: super::Rect| {
+        inner.x >= outer.x
+            && inner.y >= outer.y
+            && inner.x + inner.w <= outer.x + outer.w
+            && inner.y + inner.h <= outer.y + outer.h
+    };
+    let lines = vec!["50.0 fps".to_string(), "slip 0".to_string()];
+    for scale in [1, 2] {
+        let blank = || vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+
+        let mut frame = blank();
+        let rect = super::draw_record_badge(&mut frame, scale, 0, full_anchor());
+        assert_eq!(rect, painted(&frame, scale), "record badge at {scale}x");
+
+        let mut frame = blank();
+        let rect = super::draw_perf_overlay(&mut frame, &lines, scale, true, 0, full_anchor())
+            .expect("a readout with lines paints a box");
+        assert_eq!(rect, painted(&frame, scale), "perf readout at {scale}x");
+
+        let mut frame = blank();
+        let rect = super::draw_osd(&mut frame, "Saved", false, scale, 0, full_anchor());
+        assert_eq!(rect, painted(&frame, scale), "OSD at {scale}x");
+
+        let mut frame = blank();
+        let long = "Saved ".repeat(40);
+        let rect = super::draw_osd(&mut frame, &long, false, scale, 0, full_anchor());
+        let extent = painted(&frame, scale);
+        assert!(
+            contains(rect, extent),
+            "the long OSD painted {extent:?} outside its reported {rect:?} at {scale}x"
+        );
+        assert!(rect.x + rect.w <= texture_width(scale));
+    }
+    // Nothing to draw reports no box.
+    let mut frame = vec![0u8; texture_width(1) * texture_height(1) * 4];
+    assert_eq!(
+        super::draw_perf_overlay(&mut frame, &[], 1, false, 0, full_anchor()),
+        None
+    );
+}
+
+/// An overlay box's draw lands on the surface pixels the display draw put
+/// it on, and samples each one at the texture position the display draw
+/// sampled it at -- so the box put back over the RTG pass is
+/// indistinguishable from the one the display draw drew -- in the
+/// classic whole-canvas layout at a whole multiple and at a fractional
+/// fit, and in a sub-rect layout. A box entirely off the display has no
+/// draw.
+#[test]
+fn an_overlay_draw_resamples_its_box_where_the_display_draw_did() {
+    use super::scaler::ScaleFilter::{Nearest, SharpBilinear};
+    let canvas_h = super::window_present_height();
+    let classic = (0, 0, FB_WIDTH, canvas_h);
+    let layout = |src_canvas, display_dst, filter| super::PresentLayout {
+        src_canvas,
+        display_dst,
+        filter,
+        chrome_dst: None,
+        factors: None,
+    };
+    // The sample position, in uv, of surface pixel `p` on one axis for a
+    // draw whose source starts at `src0` spanning `src_len` uv, landing at
+    // `d0` spanning `dlen` pixels.
+    let sample = |p: u32, src0: f32, src_len: f32, d0: u32, dlen: u32| {
+        src0 + (p as f32 + 0.5 - d0 as f32) / dlen as f32 * src_len
+    };
+    let cases = [
+        // 2x integer: a box drawn at 2x lands on exact doubles.
+        (
+            layout(
+                classic,
+                (10, 20, 2 * FB_WIDTH as u32, 2 * canvas_h as u32),
+                Nearest,
+            ),
+            2,
+        ),
+        // A smooth fit at no whole multiple.
+        (
+            layout(
+                classic,
+                (3, 0, FB_WIDTH as u32 * 3 / 2 + 1, canvas_h as u32 * 7 / 5),
+                SharpBilinear,
+            ),
+            1,
+        ),
+        // An autocrop rect, scaled to its own fit.
+        (
+            layout((38, 71, 640, 400), (100, 50, 1280, 900), SharpBilinear),
+            2,
+        ),
+    ];
+    for (layout, scale) in cases {
+        let display = layout.draws()[0];
+        let rect = super::Rect {
+            x: 101 * scale,
+            y: 87 * scale,
+            w: 37 * scale + 1,
+            h: 13 * scale,
+        };
+        let draw = layout
+            .overlay_draw(rect, scale)
+            .expect("a box on the display has a draw");
+        assert_eq!(draw.filter, layout.filter);
+        assert_eq!(draw.picture, None);
+        let (x, y, w, h) = draw.dst;
+        let (dx, dy, dw, dh) = layout.display_dst;
+        let (sx, sy, sw, sh) = layout.src_canvas;
+        // The box's footprint, rounded out by less than a pixel a side.
+        let kx = dw as f32 / sw as f32;
+        let ky = dh as f32 / sh as f32;
+        let left = dx as f32 + (rect.x as f32 / scale as f32 - sx as f32) * kx;
+        let right = dx as f32 + ((rect.x + rect.w) as f32 / scale as f32 - sx as f32) * kx;
+        let top = dy as f32 + (rect.y as f32 / scale as f32 - sy as f32) * ky;
+        let bottom = dy as f32 + ((rect.y + rect.h) as f32 / scale as f32 - sy as f32) * ky;
+        assert!(x as f32 <= left && left - (x as f32) < 1.0, "{layout:?}");
+        assert!((x + w) as f32 >= right && ((x + w) as f32) - right < 1.0);
+        assert!(y as f32 <= top && top - (y as f32) < 1.0);
+        assert!((y + h) as f32 >= bottom && ((y + h) as f32) - bottom < 1.0);
+        for p in x..x + w {
+            let sub = sample(p, draw.src[0], draw.src[2], x, w);
+            let full = sample(p, display.src[0], display.src[2], dx, dw);
+            assert!((sub - full).abs() < 1e-5, "{layout:?} column {p}");
+        }
+        for p in y..y + h {
+            let sub = sample(p, draw.src[1], draw.src[3], y, h);
+            let full = sample(p, display.src[1], display.src[3], dy, dh);
+            assert!((sub - full).abs() < 1e-5, "{layout:?} row {p}");
+        }
+    }
+    // Left of an autocrop rect, wholly cropped away: nothing to put back.
+    let cropped = layout((38, 71, 640, 400), (100, 50, 1280, 900), SharpBilinear);
+    let off = super::Rect {
+        x: 0,
+        y: 100,
+        w: 20,
+        h: 20,
+    };
+    assert_eq!(cropped.overlay_draw(off, 1), None);
+    let empty = super::Rect { w: 0, ..off };
+    assert_eq!(
+        layout(classic, (0, 0, 716, 581), Nearest).overlay_draw(empty, 1),
+        None
+    );
+}
+
 #[test]
 fn perf_counters_accrue_busy_time_and_reset_with_the_guest() {
     let mut app = test_app();
