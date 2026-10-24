@@ -1242,7 +1242,10 @@ keyboard-owned LED toggle, a 10-event type-ahead buffer with $FA
 overflow, and ghost suppression on the real A500 key matrix (the seven
 qualifiers are on dedicated lines and never ghost). The protocol was
 cross-checked against real-hardware-validated replacement keyboard
-firmware. Mouse deltas
+firmware. Only transitions made while the window has the focus count:
+a key already down when it gains the focus (typically the shortcut that
+switched to it, whose release the window manager keeps) reaches the
+machine only once it is pressed again. Mouse deltas
 feed the mouse port's JOYxDAT quadrature counters (JOY0DAT for the usual
 port 1). Gamepads are read through `gilrs`
 with its bundled SDL controller database enabled: a recognised pad

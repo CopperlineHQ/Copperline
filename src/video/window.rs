@@ -943,6 +943,18 @@ fn repeated_main_key_should_drop(
     }
 }
 
+/// Whether a key event is winit replaying a key that was already down when
+/// a window gained the focus. On X11 and Windows every such key arrives as
+/// a synthetic press; it went down for some other window, usually as the
+/// very shortcut that switched here (Alt+Tab, a tiling window manager's
+/// Mod+N), and the window manager keeps its release. Passed on, the press
+/// leaves the Amiga holding a key it is never told was let go, which
+/// input.device then repeats. The synthetic releases winit sends on focus
+/// loss stay: they are how a key held at the switch is let go.
+fn key_event_is_focus_gain_replay(state: ElementState, is_synthetic: bool) -> bool {
+    is_synthetic && state == ElementState::Pressed
+}
+
 fn animated_focus_needs_continuous_redraw(running: bool, showing: bool) -> bool {
     running && showing
 }
@@ -4806,6 +4818,18 @@ impl ApplicationHandler for App {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        // Ahead of netplay too: a replayed press must not reach the shared
+        // machine's input either.
+        if let WindowEvent::KeyboardInput {
+            event: KeyEvent { state, .. },
+            is_synthetic,
+            ..
+        } = &event
+        {
+            if key_event_is_focus_gain_replay(*state, *is_synthetic) {
+                return;
+            }
+        }
         if self.netplay_window_event(event_loop, &event) {
             return;
         }
