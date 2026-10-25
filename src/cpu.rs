@@ -3472,6 +3472,7 @@ impl M68kMachine {
     /// the configured clock ratio. Sub-cck remainders carry across calls so an
     /// accelerated CPU (many clocks per cck) accumulates fractional cck
     /// instead of being rounded up to a whole cck per instruction.
+    #[cfg(test)]
     fn charge_cpu_clocks(&mut self, cycles: i32) -> u32 {
         self.charge_cpu_clock_value(positive_cpu_cycles(cycles))
     }
@@ -5257,7 +5258,7 @@ fn cacr_040_layout(cpu_type: CpuType) -> bool {
 
 impl AddressBus for CpuBus {
     fn batch_boundary(&mut self, retired: u32, pc: u32, sr: u16) -> bool {
-        self.sync_jit_batch(retired, pc, sr)
+        self.note_jit_batch_boundary(retired, pc, sr)
     }
 
     fn last_fetch_was_cached(&self) -> bool {
@@ -5281,6 +5282,7 @@ impl AddressBus for CpuBus {
     /// here; it syncs after every instruction (`apply_cacr_updates`),
     /// which also catches up `last_cacr` after a batch.
     fn cache_control(&mut self, cacr: u32, caar: u32, strobes: u32) -> bool {
+        self.flush_jit_batch_prefix();
         if self.icache.is_none() && self.dcache.is_none() {
             return false;
         }
@@ -5460,6 +5462,7 @@ impl AddressBus for CpuBus {
     }
 
     fn interrupt_acknowledge(&mut self, level: u8) -> u32 {
+        self.flush_jit_batch_prefix();
         // A freezer cartridge's level-7 interrupt: consumed at its
         // acknowledge, so the monitor is entered exactly once per press
         // (the 68000 recognises level 7 on its transition). The vector the
@@ -5511,6 +5514,8 @@ impl AddressBus for CpuBus {
     }
 
     fn reset_devices(&mut self) {
+        self.flush_jit_batch_prefix();
+        self.jit_bus_boundary |= self.jit_batch.is_some();
         self.bus.reset_custom_chips_from_cpu_reset();
     }
 }
@@ -8420,6 +8425,41 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn jit_pending_irq_after_sr_unmask_matches_instruction_boundaries() -> Result<()> {
+        use crate::chipset::paula::INT_SOFT;
+        let pc = FAST_RAM_BASE as u32 + 0x100;
+        let handler = FAST_RAM_BASE as u32 + 0x1000;
+        let run = |chunk: usize| -> Result<(u64, u32, u32)> {
+            let mut bus = test_bus_with_pc(pc);
+            let mut program = vec![0x4e71; 128];
+            program.extend([0x46fc, 0x2000, 0x5280, 0x60fe]); // unmask, then ADDQ D0
+            write_program(&mut bus, pc, &program);
+            write_program(&mut bus, handler, &[0x742a, 0x4e72, 0x2700]);
+            set_autovector(&mut bus, 1, handler);
+            bus.irq_latency_setting = 0;
+            bus.paula.intena = INT_MASTER | INT_SOFT;
+            bus.paula.intreq = INT_SOFT;
+            let mut machine = M68kMachine::new(bus, CpuModel::M68040, true)?;
+            machine.set_jit_enabled(true);
+            machine.cpu.set_sr(0x2700);
+            for _ in 0..1024 {
+                if machine.step_slice(chunk)?.stopped {
+                    assert_eq!(
+                        machine.d(0),
+                        0,
+                        "IRQ precedes the instruction after unmasking"
+                    );
+                    assert_eq!(machine.d(2), 42);
+                    return Ok((machine.bus().emulated_cck(), machine.pc(), machine.a(7)));
+                }
+            }
+            panic!("pending interrupt did not reach its handler");
+        };
+        assert_eq!(run(4096)?, run(1)?);
         Ok(())
     }
 

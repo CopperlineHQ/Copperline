@@ -9,6 +9,8 @@ use super::*;
 #[derive(Clone, Copy)]
 pub(super) struct JitBatchTiming {
     retired: u32,
+    observed_retired: u32,
+    observed_sr: u16,
     clocks: u32,
     cck: u32,
     clocks_per_cck: u32,
@@ -37,8 +39,58 @@ impl CpuBus {
 
     pub(super) fn note_jit_bus_access(&mut self, address: u32, size: usize) {
         if self.jit_batch.is_some() && !self.jit_plain_access(address, size) {
+            self.flush_jit_batch_prefix();
             self.jit_bus_boundary = true;
         }
+    }
+
+    /// Record progress cheaply between decoded instructions. The initial
+    /// budget already stops at the next hardware deadline; local memory cannot
+    /// observe device time before then. Shared-bus accesses flush this prefix
+    /// before touching hardware, and the host flushes the final batch count.
+    pub(super) fn note_jit_batch_boundary(&mut self, retired: u32, pc: u32, sr: u16) -> bool {
+        let Some(timing) = self.jit_batch.as_mut() else {
+            return false;
+        };
+        timing.observed_retired = retired;
+        timing.observed_sr = sr;
+        self.diag_current_pc = pc;
+        self.bus.cpu_pc = pc;
+        self.jit_batch_should_stop(retired, sr)
+    }
+
+    pub(super) fn flush_jit_batch_prefix(&mut self) {
+        if let Some(timing) = self
+            .jit_batch
+            .as_ref()
+            .filter(|timing| timing.observed_retired > timing.retired)
+        {
+            self.sync_jit_batch(
+                timing.observed_retired,
+                self.diag_current_pc,
+                timing.observed_sr,
+            );
+        }
+    }
+
+    fn jit_batch_should_stop(&self, retired: u32, sr: u16) -> bool {
+        let Some(timing) = self.jit_batch.as_ref() else {
+            return false;
+        };
+        let irq = if self.bus.paula.intena & INT_MASTER != 0 {
+            pending_ipl(self.bus.paula.intena & self.bus.cpu_visible_intreq())
+                > ((sr >> 8) & 7) as u8
+        } else {
+            false
+        };
+        // Always allow progress on entry, including a bring-up interrupt whose
+        // vector has not been installed yet. The host applies that guard.
+        retired != 0
+            && (self.jit_bus_boundary
+                || irq
+                || self.bus.cartridge_nmi_pending()
+                || self.bus.slice_preempted
+                || self.bus.emulated_cck() >= timing.deadline)
     }
 
     pub(super) fn sync_jit_batch(&mut self, retired: u32, pc: u32, sr: u16) -> bool {
@@ -71,22 +123,8 @@ impl CpuBus {
         }
         self.diag_current_pc = pc;
         self.bus.cpu_pc = pc;
-        let irq = if self.bus.paula.intena & INT_MASTER != 0 {
-            pending_ipl(self.bus.paula.intena & self.bus.cpu_visible_intreq())
-                > ((sr >> 8) & 7) as u8
-        } else {
-            false
-        };
-        // Always allow progress on entry, including a bring-up interrupt whose
-        // vector has not been installed yet. The host applies that guard.
-        let stop = retired != 0
-            && (self.jit_bus_boundary
-                || irq
-                || self.bus.cartridge_nmi_pending()
-                || self.bus.slice_preempted
-                || self.bus.emulated_cck() >= timing.deadline);
         self.jit_batch = Some(timing);
-        stop
+        self.jit_batch_should_stop(retired, sr)
     }
 }
 
@@ -159,7 +197,7 @@ impl M68kMachine {
             if let Some(irq) = self.service_pending_irq_cycles() {
                 let clocks = self.jit_scaled_clocks(positive_cpu_cycles(irq.cycles));
                 cpu_cycles = cpu_cycles.saturating_add(clocks);
-                let cck = self.charge_cpu_clocks(clocks as i32);
+                let cck = self.charge_cpu_clocks_less_bus_overlap(clocks as i32);
                 cpu_cck = cpu_cck.saturating_add(cck);
                 if self.sync_cck_on {
                     let on_bus = self
@@ -176,7 +214,14 @@ impl M68kMachine {
             // Recompute INTREQ on every host boundary, including after RTE.
             // Never leave a stale request latched in the core's batch runner.
             self.cpu.set_irq(0);
-            let horizon = self.bus.bus.jit_event_horizon_cck();
+            // Shared-bus code already has a one-instruction budget. Predicting
+            // blitter, disk and CIA deadlines cannot shorten it, and doing so
+            // for every fetch is expensive in polling loops.
+            let horizon = if count - instructions > 1 && self.bus.jit_plain_access(self.cpu.pc, 2) {
+                self.bus.bus.jit_event_horizon_cck()
+            } else {
+                1
+            };
             let budget = self.jit_batch_budget(count - instructions, horizon) as u32;
             self.bus.diag_current_pc = self.cpu.pc;
             self.bus.bus.cpu_pc = self.cpu.pc;
@@ -184,6 +229,8 @@ impl M68kMachine {
             self.bus.jit_bus_boundary = false;
             self.bus.jit_batch = Some(JitBatchTiming {
                 retired: 0,
+                observed_retired: 0,
+                observed_sr: self.cpu.get_sr(),
                 clocks: 0,
                 cck: 0,
                 clocks_per_cck: self.cpu_clocks_per_cck,

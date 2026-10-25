@@ -115,9 +115,15 @@ at each batch boundary. The timing contract is deliberately approximate
   CIA, Copper, blitter, audio, storage, beam or interrupt deadline (at most
   64 colour clocks for asynchronous devices). Both fractional clock carries
   participate in that conversion. The core's `AddressBus::batch_boundary`
-  callback bills completed instructions before ordinary bus accesses, and
-  MMIO/shared-bus accesses return to the host before another native burst.
-  Instructions fetched from shared RAM use single-instruction batches.
+  callback records completed instructions without advancing devices for each
+  decoded local-memory operation. The bus bills that prefix immediately before
+  a shared-bus/device access, cache-control operation or RESET; the host bills
+  the final count at batch exit. The initial budget still bounds all deferred
+  work by the hardware deadline. MMIO/shared-bus accesses return to the host
+  before another native burst.
+  Instructions fetched from shared RAM use single-instruction batches and skip
+  deadline prediction, which cannot shorten that budget. Interrupt-entry
+  posted-write overlap is charged to the interrupt itself.
   Interrupts are recognized at those boundaries,
   from the live INTENA/INTREQ state; a level the boundary cannot deliver
   is never left in the core, since the batch would take it as soon as the
