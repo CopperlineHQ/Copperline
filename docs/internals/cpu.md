@@ -136,12 +136,12 @@ recaptured at each native batch boundary. The timing contract is deliberately ap
   Their timing is billed directly on return, without building or updating the
   deferred-prefix state; interrupts and timed devices retain the same boundary.
   With emulated caches, a slice reuses unchanged local-memory exclusions until
-  a bus write, RESET or primary-bank change. Slice entry and state adoption
-  invalidate that bookkeeping, so replaced backing memory is captured afresh;
-  raw pointers are still captured separately for every native batch. Single
-  instructions also retain the primary-bank choice while the raw PC stays
-  between the same RAM decode edges. A native batch discards that interval,
-  so returning from another bank selects the correct primary window again.
+  a peripheral write, RESET or primary-bank change. Ordinary RAM stores keep
+  those mappings unchanged. Slice entry and state adoption invalidate that
+  bookkeeping, so replaced backing memory is captured afresh;
+  raw pointers are still captured separately for every native batch. Interrupt
+  polling flushes devices once at its boundary; a stopped 68000 also flushes
+  before deciding whether to wait for its next poll phase.
   Interrupt-entry
   posted-write overlap is charged to the interrupt itself.
   Interrupts are recognized at those boundaries,
