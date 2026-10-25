@@ -738,8 +738,9 @@ clock_mhz = 14.0    # optional; defaults to the model's stock speed
   The chipset stays still during CPU-only work. Bursts yield on shared-bus
   accesses, STOP, debugger stops or the host deadline; chip and device accesses
   retain their normal timing. A small time reserve protects presentation.
-  The regular CPU workload starts at `clock_mhz` and can fall below it, down
-  to 1 MHz, when chipset/frontend work would otherwise miss real time. There
+  The regular CPU workload starts at `clock_mhz` and adapts upward when CPU
+  work has headroom, or downward (as far as 1 MHz) when chipset/frontend work
+  would otherwise miss real time. There
   is no synthetic MHz ceiling on spare-time CPU work. Chipset-heavy workloads
   can still exceed the host's capacity.
   The performance overlay (`cpu N MHz`) and control status (`jit_mhz`) report
@@ -768,7 +769,7 @@ clock_mhz = 14.0    # optional; defaults to the model's stock speed
   - Save states do not store the adapted clock. A session whose clock has
     not adapted yet (any unpaced run) takes the loaded state's CPU clock
     exactly, as `speed = "fixed"` does; one that has adapted keeps its baseline
-    within the loaded clock bounds and restarts throughput measurement. A resumed
+    within the governor's bounds and restarts throughput measurement. A resumed
     windowed run is not byte-identical to the original.
   - `--record-input`/`--script` replays, `--expect-screenshot` comparisons
     and reverse debugging are exact only in unpaced runs, where the clock is

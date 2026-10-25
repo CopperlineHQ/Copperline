@@ -9,9 +9,15 @@
 use crate::timebase::{Duration, Instant};
 const WINDOW_SECONDS: f64 = 0.1;
 const HITCH_GAP: Duration = Duration::from_millis(100);
-const TARGET_LOAD: f64 = 0.50;
-const RAISE_BELOW_LOAD: f64 = 0.35;
-const LOWER_ABOVE_LOAD: f64 = 0.65;
+// Keep regular batches large enough to run application traces. Reserving
+// half the host for bursts made decoded work and deadline prediction dominate
+// on slower hosts; the normal clock governor already has stable load bounds.
+const TARGET_LOAD: f64 = 0.85;
+const RAISE_BELOW_LOAD: f64 = 0.80;
+const LOWER_ABOVE_LOAD: f64 = 0.93;
+const CLOCK_BOUND_FRACTION: f64 = 0.25;
+// A sanity bound for billed clocks, independent of unbounded spare throughput.
+const MAX_BASELINE_MHZ: f64 = 2000.0;
 const MIN_MHZ: f64 = 1.0;
 
 /// Leave time for presentation and host scheduling jitter. This is a fixed
@@ -29,6 +35,9 @@ pub(crate) struct QuantumSample {
     pub emulated_seconds: f64,
     /// Includes instructions retired in spare-time bursts.
     pub instructions: u64,
+    /// Regular instructions only, used to distinguish clock-bound work from
+    /// STOP/shared-bus waits. Spare bursts must not trigger baseline increases.
+    pub regular_instructions: u64,
     pub jit_active: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -47,6 +56,7 @@ pub(crate) struct SpeedGovernor {
     host_seconds: f64,
     emulated_seconds: f64,
     instructions: u64,
+    regular_instructions: u64,
 }
 impl SpeedGovernor {
     pub(crate) fn new(configured_mhz: f64) -> Self {
@@ -58,6 +68,7 @@ impl SpeedGovernor {
             host_seconds: 0.0,
             emulated_seconds: 0.0,
             instructions: 0,
+            regular_instructions: 0,
         }
     }
     /// Equivalent one-instruction-per-clock rate, including spare CPU work.
@@ -71,12 +82,15 @@ impl SpeedGovernor {
         self.host_seconds = 0.0;
         self.emulated_seconds = 0.0;
         self.instructions = 0;
+        self.regular_instructions = 0;
     }
     pub(crate) fn rebase(&mut self, configured_mhz: f64) {
         self.configured_mhz = configured_mhz;
         self.baseline_mhz = if self.adapted {
-            self.baseline_mhz
-                .clamp(MIN_MHZ.min(configured_mhz), configured_mhz)
+            self.baseline_mhz.clamp(
+                MIN_MHZ.min(configured_mhz),
+                MAX_BASELINE_MHZ.max(configured_mhz),
+            )
         } else {
             configured_mhz
         };
@@ -91,12 +105,16 @@ impl SpeedGovernor {
         self.host_seconds += (sample.busy + sample.gap).as_secs_f64();
         self.emulated_seconds += sample.emulated_seconds.max(0.0);
         self.instructions = self.instructions.saturating_add(sample.instructions);
+        self.regular_instructions = self
+            .regular_instructions
+            .saturating_add(sample.regular_instructions);
         if self.emulated_seconds < WINDOW_SECONDS && self.host_seconds < WINDOW_SECONDS {
             return None;
         }
         let seconds = self.emulated_seconds;
         let host = self.host_seconds;
         let instructions = self.instructions;
+        let regular_instructions = self.regular_instructions;
         self.discard_window();
         if seconds <= 0.0 {
             return None;
@@ -104,16 +122,21 @@ impl SpeedGovernor {
         let load = host / seconds;
         let achieved_mips = instructions as f64 / seconds / 1.0e6;
         self.measured_mips = Some(achieved_mips);
+        let regular_mips = regular_instructions as f64 / seconds / 1.0e6;
+        let clock_bound = regular_mips >= CLOCK_BOUND_FRACTION * self.baseline_mhz;
         let correction = (TARGET_LOAD / load.max(f64::EPSILON)).sqrt();
         let step = if load > LOWER_ABOVE_LOAD {
             correction.max(0.25)
-        } else if load < RAISE_BELOW_LOAD {
+        } else if load < RAISE_BELOW_LOAD && clock_bound {
             correction.min(1.25)
         } else {
             return None;
         };
         let from_mhz = self.baseline_mhz;
-        let to_mhz = (from_mhz * step).clamp(MIN_MHZ.min(self.configured_mhz), self.configured_mhz);
+        let to_mhz = (from_mhz * step).clamp(
+            MIN_MHZ.min(self.configured_mhz),
+            MAX_BASELINE_MHZ.max(self.configured_mhz),
+        );
         if from_mhz == to_mhz {
             return None;
         }
@@ -135,6 +158,7 @@ mod tests {
             busy: Duration::from_secs_f64(busy),
             emulated_seconds: 0.1,
             instructions: 50_000_000,
+            regular_instructions: 50_000_000,
             jit_active: true,
             ..Default::default()
         }
@@ -151,11 +175,41 @@ mod tests {
         for _ in 0..30 {
             g.observe(sample(0.01));
         }
-        assert_eq!(
-            g.baseline_mhz, 25.0,
-            "recovery is capped; bursts spend the spare time"
+        assert!(
+            g.baseline_mhz > 25.0,
+            "clock-bound work can recover above the configured clock"
         );
     }
+    #[test]
+    fn regular_work_that_fits_does_not_back_off_to_half_load() {
+        let mut g = SpeedGovernor::new(25.0);
+        for _ in 0..20 {
+            g.observe(sample(0.085));
+        }
+        assert_eq!(g.factor(), 1.0);
+    }
+
+    #[test]
+    fn spare_instructions_do_not_make_idle_regular_work_clock_bound() {
+        let mut g = SpeedGovernor::new(25.0);
+        for _ in 0..20 {
+            g.observe(QuantumSample {
+                regular_instructions: 0,
+                ..sample(0.01)
+            });
+        }
+        assert_eq!(g.factor(), 1.0);
+        assert_eq!(
+            g.effective_mhz(),
+            500.0,
+            "telemetry still includes spare work"
+        );
+        for _ in 0..10 {
+            g.observe(sample(0.01));
+        }
+        assert!(g.factor() > 1.0, "regular clock-bound work can accelerate");
+    }
+
     #[test]
     fn chipset_cost_leaves_baseline_headroom_on_a_slower_host() {
         let mut g = SpeedGovernor::new(25.0);

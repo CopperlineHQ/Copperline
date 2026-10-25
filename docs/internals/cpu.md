@@ -205,8 +205,8 @@ does not drain samples cannot grow the buffer indefinitely.
 ### Fastest possible
 
 `[cpu] speed = "fastest"` has two paced phases. The regular execution quantum
-advances the machine using the configured CPU clock, reduced by a baseline
-governor if host load is too high. Before presentation, bounded spare-time
+advances the machine using an adaptive CPU clock, starting at the configured
+clock and moving up or down with regular host load. Before presentation, bounded spare-time
 bursts run local CPU work without advancing the chipset. A burst retires at
 most 4096 instructions and yields at shared-memory/device accesses; their
 ordinary bus cycles still advance hardware. STOP and debugger hooks suppress

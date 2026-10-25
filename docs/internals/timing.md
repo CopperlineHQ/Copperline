@@ -1096,11 +1096,15 @@ Precise stepping, reverse debugging and run-ahead never enter this phase.
 The baseline governor (`src/emulator/fastest.rs`) samples regular emulation
 cost plus frontend work, excluding burst work, pacing sleep and explicitly
 reported presentation waits. Every 0.1 seconds of host or guest time it aims
-for 50% baseline load: it lowers above 65%, recovers below 35%, and holds in
-between. Corrections use the square root of target/load, capped at a 4x cut
-or 1.25x recovery. The baseline stays between 1 MHz and the configured clock;
-remaining time belongs to bursts, with no artificial throughput ceiling.
-A lower configured clock remains its own minimum. Host stalls over 100 ms,
+for 85% regular load: it lowers above 93%, rises below 80%, and holds in
+between. Raising also requires regular instruction throughput of at least 25%
+of the billed clock, excluding spare instructions, so STOP and shared-bus
+waits do not cause a clock increase. Corrections use the square root of
+target/load, capped at a 4x cut or 1.25x rise. The baseline can move above or
+below the configured clock, between 1 MHz and a 2 GHz sanity bound (or the
+configured clock when outside those bounds). Spare-time work has no synthetic
+MHz ceiling. Keeping regular load near the established governor target avoids
+forcing application loops into small, inefficient batches on slower hosts. Host stalls over 100 ms,
 precise stepping and pacing re-anchors discard the sample window.
 
 The displayed equivalent MHz is measured retired instructions per emulated
