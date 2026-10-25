@@ -522,6 +522,15 @@ impl Bus {
         slot.get() & DDF_SEQ_SLOT_PLANE_MASK != 0
     }
 
+    /// First actual fetch in a same-line interval. The cached sequencer
+    /// already includes delayed register edges and end-of-fetch drains.
+    pub(super) fn ddf_seq_next_fetch(&self, start: u32, end: u32) -> Option<u32> {
+        self.ddf_seq_ensure_hot_line();
+        (start..end.min(DDF_SEQ_MAX_LINE_CCKS as u32)).find(|&hpos| {
+            self.ddf_seq_hot_line.slot_at[hpos as usize].get() & DDF_SEQ_SLOT_PLANE_MASK != 0
+        })
+    }
+
     /// OCS/ECS Agnus reads a plane counter before its DMA data slot. A
     /// register half-write in that preceding CCK loses to the counter update.
     /// The A500 kind73 low/high-half and plane-selection controls constrain

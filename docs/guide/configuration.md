@@ -716,6 +716,8 @@ clock_mhz = 14.0    # optional; defaults to the model's stock speed
   behaves like an ideal accelerator running at `clock_mhz`: one
   instruction per CPU clock with zero-wait fast RAM and ROM, so a 50 MHz
   68040 delivers on the order of 50 MIPS (raise `clock_mhz` for more).
+  Inactive chipset spans are skipped up to the next hardware event; this
+  optimization also applies to the precise CPU and preserves its timing.
   Native bursts stop at hardware deadlines and synchronize before device
   accesses. Interrupts are recognized at those boundaries, so chip-level races and
   cycle-counted effects no longer line up; leave it off for anything

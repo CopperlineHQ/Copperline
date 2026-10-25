@@ -7804,7 +7804,9 @@ impl Bus {
 
         let mut remaining = target_cck;
         while remaining > 0 {
-            let (cck, tick) = self.advance_one_chip_bus_quantum_limited(None, remaining);
+            let (cck, tick) = self
+                .advance_inactive_chip_bus_span(remaining)
+                .unwrap_or_else(|| self.advance_one_chip_bus_quantum_limited(None, remaining));
             remaining = remaining.saturating_sub(cck);
             add_agnus_tick(&mut total, tick);
         }
@@ -7829,11 +7831,15 @@ impl Bus {
             let quantum_limit = invariant_copper_deadline
                 .map(|deadline| remaining.min(deadline))
                 .unwrap_or(remaining);
-            let (cck, tick) = self.advance_one_chip_bus_quantum_limited_inner(
-                None,
-                quantum_limit,
-                before_deadline,
-            );
+            let (cck, tick) = self
+                .advance_inactive_chip_bus_span(quantum_limit)
+                .unwrap_or_else(|| {
+                    self.advance_one_chip_bus_quantum_limited_inner(
+                        None,
+                        quantum_limit,
+                        before_deadline,
+                    )
+                });
             remaining = remaining.saturating_sub(cck);
             add_agnus_tick(&mut total, tick);
             invariant_copper_deadline = invariant_copper_deadline

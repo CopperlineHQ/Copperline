@@ -9,6 +9,15 @@ bus or the renderer live in `src/bus/tests.rs` and
 `src/video/bitplane/tests.rs`. The suites are large and are the best
 specification of the modelled behaviour.
 
+Inactive spans between fixed DMA slots can advance in one call. The scheduler
+stops before the next fetch from the cached DDF sequencer, a Copper WAIT wake,
+a pending Copper restart, a delayed blitter interrupt, refresh or line rollover.
+A busy blitter, posted CPU write, wide FMODE fetch mode or slot observer keeps
+the per-colour-clock path. Beam and capture bookkeeping still use the ordinary
+advance routine; audio clocks accumulate over the same interval. Differential
+tests compare every serialized bus field against the quantum-by-quantum path,
+including spans crossing scanlines and frames.
+
 ## Agnus (`agnus.rs`)
 
 Agnus owns the beam: `vpos`/`hpos` counters advanced per colour clock, PAL
