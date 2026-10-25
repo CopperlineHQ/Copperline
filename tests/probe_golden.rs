@@ -50,6 +50,8 @@ const BOOTBLOCK_SIZE: usize = 1024;
 /// has 2-cck resolution on ECS vs 4-cck on OCS, so phase probes differ).
 #[derive(Clone, Copy)]
 enum Machine {
+    /// Fixed-clock JIT accelerator with local fast RAM.
+    Jit,
     Ocs,
     Ecs,
     /// A1200 shape (68EC020, AGA, 2M chip) for probes of AGA-only
@@ -142,13 +144,20 @@ fn build_adf(boot: &[u8], program: &[u8]) -> Vec<u8> {
 // Windows temp path's backslashes are not parsed as escape sequences.
 fn probe_config(adf: &Path, machine: Machine) -> String {
     let chipset = match machine {
+        Machine::Jit => "revision = \"ECS\"\n",
         Machine::Ocs => "revision = \"OCS\"\n",
         Machine::Ecs => "revision = \"ECS\"\nagnus = \"8372A\"\ndenise = \"OCS\"\n",
         Machine::Aga => "revision = \"AGA\"\n",
     };
     let (cpu, memory) = match machine {
+        Machine::Jit => ("68040", "chip = \"2M\"\nfast = \"8M\"\n"),
         Machine::Ocs | Machine::Ecs => ("68000", "chip = \"512K\"\nslow = \"512K\"\n"),
         Machine::Aga => ("68EC020", "chip = \"2M\"\n"),
+    };
+    let acceleration = if matches!(machine, Machine::Jit) {
+        "jit = true\nclock_mhz = 25\n"
+    } else {
+        ""
     };
     format!(
         "rom = \"<bundled-aros>\"\n\
@@ -156,6 +165,7 @@ fn probe_config(adf: &Path, machine: Machine) -> String {
          overscan = \"full\"\n\
          [cpu]\n\
          model = \"{cpu}\"\n\
+         {acceleration}\
          [memory]\n\
          {memory}\
          [chipset]\n\
@@ -356,6 +366,7 @@ macro_rules! probe_tests {
 }
 
 probe_tests! {
+    golden_jit_bus_boundary => Probe { name: "jit-bus-boundary", program: "jit-bus-boundary.bin", seconds: 16.0, machine: Machine::Jit };
     golden_timing_test => probe("timing-test", "test.bin", 32.0);
     golden_ddfprobe => probe("ddfprobe", "ddfprobe.bin", 16.0);
     golden_ddfprobe_diw1 => probe("ddfprobe-diw1", "ddfprobe-diw1.bin", 16.0);

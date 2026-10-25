@@ -815,3 +815,14 @@ COPPERLINE_BLESS_GOLDEN=1 cargo test --release --test probe_golden
 
 On a mismatch, CI uploads the actual renders and diff masks
 (`target/probe-golden/`) as workflow artifacts.
+
+### JIT hardware-access boundary probe
+
+`jit-bus-boundary.asm` runs a fixed 25 MHz 68040 JIT with 8 MB fast RAM.
+It copies its loop into fast RAM and brackets COLOR00 writes with native
+register loops. The repeated green markers expose stale chipset time at the
+write boundary. `golden_jit_bus_boundary` covers the render; CPU unit tests
+compare timer IRQs and MMIO observations against one-instruction scheduling.
+This accelerator timing model has no matching vAmiga reference. Assemble with
+`vasmm68k_mot -Fbin -m68020 -o timing-test/jit-bus-boundary.bin
+timing-test/jit-bus-boundary.asm`.

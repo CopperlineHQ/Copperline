@@ -715,7 +715,8 @@ clock_mhz = 14.0    # optional; defaults to the model's stock speed
   behaves like an ideal accelerator running at `clock_mhz`: one
   instruction per CPU clock with zero-wait fast RAM and ROM, so a 50 MHz
   68040 delivers on the order of 50 MIPS (raise `clock_mhz` for more).
-  Interrupts are recognized at batch boundaries, so chip-level races and
+  Native bursts stop at hardware deadlines and synchronize before device
+  accesses. Interrupts are recognized at those boundaries, so chip-level races and
   cycle-counted effects no longer line up; leave it off for anything
   timing-sensitive (games, demos). Chip and slow RAM still arbitrate onto
   the shared chip bus in order, and the on-chip cache models stay active

@@ -27,9 +27,9 @@
 # Local asset directory for the ignored integration tests.
 /test-assets/
 
-# Optional local research checkout of m68k; production builds use the
-# crates.io release in Cargo.toml.
-/vendor/m68k/
+# Local build state of the patched CPU core.
+/vendor/m68k/target/
+/vendor/m68k/Cargo.lock
 /crates/m68k/
 
 # HRTMon cartridge image build output (the committed artifact is

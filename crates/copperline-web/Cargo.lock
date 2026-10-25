@@ -603,8 +603,6 @@ checksum = "7277c9742229dc25243236d578b6471a798c554512c6f6a04365ec2e87c2a3bb"
 [[package]]
 name = "m68k"
 version = "0.14.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91cac6cd830bba6da0f6d75dc59d3f2315fb207b4557c5ae7851f212a801f454"
 dependencies = [
  "serde",
 ]

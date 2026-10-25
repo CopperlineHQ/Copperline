@@ -16,6 +16,8 @@ use m68k::core::memory::{BusFault, BusFaultKind};
 use m68k::{AddressBus, BatchExit, CpuCore, CpuType, FastMem, StepResult};
 
 mod ec030_acu;
+mod jit;
+use jit::JitBatchTiming;
 
 pub const CIA_A_BASE: u32 = 0x00BF_E000;
 pub const CIA_A_SIZE: u32 = 0x0000_1000;
@@ -410,14 +412,9 @@ impl Components {
 /// a straight-line advance, so only the opcode word is marked.
 const MAX_INSTRUCTION_BYTES: u32 = 12;
 
-/// Instruction budget per `run_batch` call in the JIT slice. Interrupts are
-/// only recognized between batches (plus once inside each batch entry), so
-/// this bounds interrupt latency in JIT mode to a small fraction of a
-/// scanline of billed time. Larger batches let compiled traces run longer
-/// between host round-trips but delay interrupt delivery; AROS boot at
-/// accelerated clock ratios proved sensitive to latencies beyond about a
-/// scanline.
-const JIT_BATCH_INSTRUCTIONS: usize = 64;
+/// Maximum native batch size; the actual budget also stops at the next
+/// hardware deadline. Slow bus accesses request an earlier host boundary.
+const JIT_BATCH_INSTRUCTIONS: usize = 4096;
 
 /// Flat CPU-clock cost billed per instruction retired by the JIT slice.
 /// The batch path reports no cycle counts, so this constant sets the JIT
@@ -512,6 +509,9 @@ struct CpuBus {
     /// the core's CPU type like `address_mask`, so `cache_control` can
     /// decode CACR inside a JIT batch.
     cacr_040_layout: bool,
+    /// Transient accounting inside one run_batch call, never snapshotted.
+    jit_batch: Option<JitBatchTiming>,
+    jit_bus_boundary: bool,
 }
 
 /// A fast-RAM bank the JIT fastmem window can cover (`CpuBus::jit_fast_mem`).
@@ -603,6 +603,8 @@ impl M68kMachine {
                 window_offered: false,
                 jit_window_bank: None,
                 cacr_040_layout: cacr_040,
+                jit_batch: None,
+                jit_bus_boundary: false,
             },
             fpu_enabled,
             jit_enabled: false,
@@ -3459,174 +3461,6 @@ impl M68kMachine {
         })
     }
 
-    /// Fast execution slice for `[cpu] jit`: run the core's
-    /// instruction-budgeted batch path (natively compiled hot traces with
-    /// the `cpu-jit` build feature, the interpreted trace loop without)
-    /// instead of cycle-stepping one instruction at a time.
-    ///
-    /// The timing contract is deliberately approximate -- the machine
-    /// behaves like one with an accelerator card fitted:
-    /// - every retired instruction is billed a flat
-    ///   `JIT_CPU_CLOCKS_PER_INSTRUCTION` CPU clocks, converted to chipset
-    ///   time at the configured clock ratio exactly like the precise path;
-    /// - chip-bus accesses still arbitrate into DMA slots through `CpuBus`
-    ///   and advance the beam as they land, so chipset side effects stay
-    ///   ordered against display DMA, just not cycle-exactly;
-    /// - accesses inside the fastmem window (the fast-RAM bank the code
-    ///   runs from, see `CpuBus::jit_fast_mem`) cost nothing at all;
-    /// - interrupts are recognized at batch boundaries (and once inside
-    ///   each batch entry), so their latency is bounded by
-    ///   `JIT_BATCH_INSTRUCTIONS` rather than modelled.
-    fn step_slice_jit(&mut self, count: usize) -> Result<CpuStepSlice> {
-        self.bus.bus.begin_cpu_slice();
-        self.bus.bus.slice_preempted = false;
-        self.bus.bus.set_cpu_bus_arbitration_enabled(true);
-        // A batch is charged as one lump, so the shared chip clock phase would
-        // be stale at every access after the first. This slice keeps the older
-        // per-slice accounting, matching the batch model's stated coarseness.
-        self.bus.bus.set_cpu_access_phase_sync(false);
-
-        let mut instructions = 0usize;
-        let mut cpu_cycles = 0u32;
-        let mut cpu_cck = 0u32;
-        let mut stopped = false;
-
-        while instructions < count {
-            let bus_before = self.bus.bus.slice_bus_advanced_cck();
-            let cpu_cck_before = cpu_cck;
-            if let Some(irq) = self.service_pending_irq_cycles() {
-                let irq_clocks = self.jit_scaled_clocks(positive_cpu_cycles(irq.cycles));
-                cpu_cycles = cpu_cycles.saturating_add(irq_clocks);
-                cpu_cck = cpu_cck.saturating_add(self.charge_cpu_clocks(irq_clocks as i32));
-            }
-            // A level the boundary could not deliver (the CPU is still
-            // inside a handler at that priority) must not ride into the
-            // batch: the batch core would service it the moment RTE drops
-            // the mask WITHOUT recomputing INTREQ, spuriously re-entering
-            // a handler whose request was already cleared. Interrupts are
-            // delivered exclusively at slice boundaries, from live state.
-            self.cpu.set_irq(0);
-            let budget = (count - instructions).min(JIT_BATCH_INSTRUCTIONS) as u32;
-            self.bus.diag_current_pc = self.cpu.pc;
-            self.bus.bus.cpu_pc = self.cpu.pc;
-            let cpu_was_stopped = self.cpu.is_stopped();
-            self.bus.window_offered = false;
-            let result = self.cpu.run_batch(&mut self.bus, budget, &[]);
-            if !self.bus.window_offered {
-                // The core ran this batch without a window (a debug gate
-                // withheld it), so every access went through `CpuBus` and
-                // the cache models may cache the bank again. The next
-                // capture drops those lines first.
-                self.bus.cache_free_window = None;
-            }
-            if self.bus.icache.is_some() || self.bus.dcache.is_some() {
-                // A CACR write or CINV/CPUSH inside the batch already
-                // reached the cache models as it completed
-                // (`CpuBus::cache_control`); this catches `last_cacr` up
-                // so the next sync stays a single compare.
-                self.apply_cacr_updates();
-            }
-            instructions = instructions.saturating_add(result.instructions as usize);
-            let mut batch_clocks = result
-                .instructions
-                .saturating_mul(JIT_CPU_CLOCKS_PER_INSTRUCTION);
-            let mut exit_stopped = false;
-            match result.exit {
-                BatchExit::BudgetExhausted | BatchExit::WatchedPc { .. } => {}
-                BatchExit::Stopped => exit_stopped = true,
-                // The batch path surfaces traps instead of taking them; the
-                // precise loop's no-op HLE policy is to let every one become
-                // its real hardware exception. Mirror that here, billing the
-                // exception entry and counting the trapping instruction.
-                BatchExit::AlineTrap { .. } => {
-                    let cycles = self.cpu.take_aline_exception(&mut self.bus);
-                    batch_clocks = batch_clocks
-                        .saturating_add(positive_cpu_cycles(cycles))
-                        .saturating_add(JIT_CPU_CLOCKS_PER_INSTRUCTION);
-                    instructions = instructions.saturating_add(1);
-                }
-                // An EC030 PMMU instruction completes in the access control
-                // unit model instead of trapping.
-                BatchExit::FlineTrap { opcode } => {
-                    let cycles = self.service_fline_trap(opcode);
-                    batch_clocks = batch_clocks
-                        .saturating_add(positive_cpu_cycles(cycles))
-                        .saturating_add(JIT_CPU_CLOCKS_PER_INSTRUCTION);
-                    instructions = instructions.saturating_add(1);
-                }
-                BatchExit::TrapInstruction { trap_num } => {
-                    let cycles = self.cpu.take_trap_exception(&mut self.bus, trap_num);
-                    batch_clocks = batch_clocks
-                        .saturating_add(positive_cpu_cycles(cycles))
-                        .saturating_add(JIT_CPU_CLOCKS_PER_INSTRUCTION);
-                    instructions = instructions.saturating_add(1);
-                }
-                BatchExit::Breakpoint { .. } => {
-                    let cycles = self.cpu.take_bkpt_exception(&mut self.bus);
-                    batch_clocks = batch_clocks
-                        .saturating_add(positive_cpu_cycles(cycles))
-                        .saturating_add(JIT_CPU_CLOCKS_PER_INSTRUCTION);
-                    instructions = instructions.saturating_add(1);
-                }
-                BatchExit::IllegalInstruction { .. } => {
-                    let cycles = self.cpu.take_illegal_exception(&mut self.bus);
-                    batch_clocks = batch_clocks
-                        .saturating_add(positive_cpu_cycles(cycles))
-                        .saturating_add(JIT_CPU_CLOCKS_PER_INSTRUCTION);
-                    instructions = instructions.saturating_add(1);
-                }
-            }
-            let batch_clocks = self.jit_scaled_clocks(batch_clocks);
-            cpu_cycles = cpu_cycles.saturating_add(batch_clocks);
-            cpu_cck = cpu_cck
-                .saturating_add(self.charge_cpu_clocks_less_bus_overlap(batch_clocks as i32));
-
-            if self.sync_cck_on {
-                // Advance the chipset through the batch's billed CPU time
-                // beyond what its bus accesses already advanced, exactly as
-                // the precise loop does per instruction.
-                let cpu_cck_iter = cpu_cck.saturating_sub(cpu_cck_before);
-                let bus_iter = self
-                    .bus
-                    .bus
-                    .slice_bus_advanced_cck()
-                    .saturating_sub(bus_before);
-                self.bus
-                    .bus
-                    .advance_cpu_internal_cycles(cpu_cck_iter.saturating_sub(bus_iter));
-            }
-
-            if exit_stopped {
-                if !cpu_was_stopped {
-                    self.bus.bus.note_cpu_stop(false);
-                }
-                stopped = true;
-                break;
-            }
-            if self.bus.bus.slice_preempted {
-                break;
-            }
-        }
-
-        self.bus.flush_timed_devices_dcache_coherent();
-        self.bus.bus.set_cpu_bus_arbitration_enabled(false);
-        let (bus_advanced_cck, _bus_tick) = self.bus.bus.take_slice_bus_advance();
-        if stopped {
-            trace!(
-                "m68k CPU stopped at PC={:#010X} SR={:#06X}",
-                self.pc(),
-                self.sr()
-            );
-        }
-        Ok(CpuStepSlice {
-            instructions,
-            cpu_cycles,
-            cpu_cck,
-            bus_advanced_cck,
-            stopped,
-        })
-    }
-
     /// Convert an instruction's CPU clocks to colour clocks of chipset time at
     /// the configured clock ratio. Sub-cck remainders carry across calls so an
     /// accelerated CPU (many clocks per cck) accumulates fractional cck
@@ -4236,6 +4070,7 @@ impl CpuBus {
     }
 
     fn read_sized_unobserved(&mut self, address: u32, size: usize, kind: CpuBusAccessKind) -> u32 {
+        self.note_jit_bus_access(address, size);
         let addr = self.mask(address);
         if kind == CpuBusAccessKind::Read {
             self.bus
@@ -4710,6 +4545,7 @@ impl CpuBus {
     }
 
     fn write_sized(&mut self, address: u32, size: usize, value: u32) {
+        self.note_jit_bus_access(address, size);
         self.write_sized_unobserved(address, size, value);
         // MMIO watches see the write once it has landed, stamped like a
         // read: at the end of the access, when the device has it.
@@ -5368,6 +5204,10 @@ fn cacr_040_layout(cpu_type: CpuType) -> bool {
 }
 
 impl AddressBus for CpuBus {
+    fn batch_boundary(&mut self, retired: u32, pc: u32, sr: u16) -> bool {
+        self.sync_jit_batch(retired, pc, sr)
+    }
+
     fn last_fetch_was_cached(&self) -> bool {
         self.last_fetch_cache_hit
     }
@@ -6375,6 +6215,8 @@ mod tests {
             window_offered: false,
             jit_window_bank: None,
             cacr_040_layout: false,
+            jit_batch: None,
+            jit_bus_boundary: false,
         };
 
         assert_eq!(bus.read_long(0), 0x1111_4EF9);
@@ -6411,6 +6253,8 @@ mod tests {
             window_offered: false,
             jit_window_bank: None,
             cacr_040_layout: false,
+            jit_batch: None,
+            jit_bus_boundary: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
         // Start on a refresh slot (0x003) so the fetch both waits for and then
@@ -6458,6 +6302,8 @@ mod tests {
                 window_offered: false,
                 jit_window_bank: None,
                 cacr_040_layout: false,
+                jit_batch: None,
+                jit_bus_boundary: false,
             };
             bus.bus
                 .set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
@@ -6520,6 +6366,8 @@ mod tests {
             window_offered: false,
             jit_window_bank: None,
             cacr_040_layout: false,
+            jit_batch: None,
+            jit_bus_boundary: false,
         };
         // INTENA/INTREQ, whose read ports INTENAR ($01C) and INTREQR ($01E) are
         // adjacent and beam-independent, so the pair reads back deterministically.
@@ -6570,6 +6418,8 @@ mod tests {
             window_offered: false,
             jit_window_bank: None,
             cacr_040_layout: false,
+            jit_batch: None,
+            jit_bus_boundary: false,
         };
         let base = CHIP_RAM_BASE as u32;
         write_chip_long(&mut bus.bus, base, 0x1122_3344);
@@ -6616,6 +6466,8 @@ mod tests {
             window_offered: false,
             jit_window_bank: None,
             cacr_040_layout: false,
+            jit_batch: None,
+            jit_bus_boundary: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
 
@@ -6671,6 +6523,8 @@ mod tests {
             window_offered: false,
             jit_window_bank: None,
             cacr_040_layout: false,
+            jit_batch: None,
+            jit_bus_boundary: false,
         };
 
         // Warm the opcode longword and a separate extension longword.
@@ -6887,6 +6741,8 @@ mod tests {
             window_offered: false,
             jit_window_bank: None,
             cacr_040_layout: false,
+            jit_batch: None,
+            jit_bus_boundary: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
         let fast = FAST_RAM_BASE as u32 + 0x40;
@@ -6953,6 +6809,8 @@ mod tests {
             window_offered: false,
             jit_window_bank: None,
             cacr_040_layout: false,
+            jit_batch: None,
+            jit_bus_boundary: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
 
@@ -7095,6 +6953,8 @@ mod tests {
             window_offered: false,
             jit_window_bank: None,
             cacr_040_layout: false,
+            jit_batch: None,
+            jit_bus_boundary: false,
         };
         let before = bus.read_long(ROM_BASE as u32);
         bus.write_long(ROM_BASE as u32, 0xDEAD_BEEF);
@@ -7130,6 +6990,8 @@ mod tests {
             window_offered: false,
             jit_window_bank: None,
             cacr_040_layout: false,
+            jit_batch: None,
+            jit_bus_boundary: false,
         };
         // $F00000 with no extended ROM fitted is genuinely undecoded (the
         // chip-register space at $C00000-$DFFFFF is not: Gary mirrors the
@@ -7171,6 +7033,8 @@ mod tests {
             window_offered: false,
             jit_window_bank: None,
             cacr_040_layout: false,
+            jit_batch: None,
+            jit_bus_boundary: false,
         }
     }
 
@@ -8420,6 +8284,77 @@ mod tests {
     /// Traps surfaced by the batch path (which never takes them itself)
     /// must be raised as real hardware exceptions, mirroring the precise
     /// path's no-op HLE policy.
+    #[test]
+    fn jit_mmio_after_native_prefix_observes_elapsed_chipset_time() -> Result<()> {
+        let pc = FAST_RAM_BASE as u32 + 0x100;
+        let mut program = vec![0x4e71; 512];
+        program.extend([0x3039, 0x00df, 0xf006, 0x60fe]); // VHPOSR -> D0
+        let run = |chunk: usize| -> Result<(u32, u64)> {
+            let mut machine = machine_with_program_model(pc, &program, CpuModel::M68040)?;
+            machine.set_jit_enabled(true);
+            let mut retired = 0;
+            while retired < 513 {
+                retired += machine.step_slice(chunk.min(513 - retired))?.instructions;
+            }
+            Ok((machine.d(0), machine.bus().emulated_cck()))
+        };
+        let single = run(1)?;
+        assert_ne!(single.0, 0, "beam must advance before the register read");
+        assert_eq!(
+            run(4096)?,
+            single,
+            "native prefix must precede the MMIO read"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn jit_cia_deadline_and_mid_batch_timer_start_match_instruction_boundaries() -> Result<()> {
+        use crate::chipset::paula::INT_PORTS;
+        let pc = FAST_RAM_BASE as u32 + 0x100;
+        let handler = FAST_RAM_BASE as u32 + 0x1000;
+        for start_in_guest in [false, true] {
+            for factor in [1.0, 4.0, 80.0] {
+                let run = |chunk: usize| -> Result<(u64, u32, u32)> {
+                    let mut bus = test_bus_with_pc(pc);
+                    let mut program = vec![0x4e71; 128];
+                    if start_in_guest {
+                        program.extend([0x13fc, 0x0011, 0x00bf, 0xee01]); // CIA-A CRA
+                    }
+                    program.push(0x60fe);
+                    write_program(&mut bus, pc, &program);
+                    write_program(&mut bus, handler, &[0x702a, 0x4e72, 0x2700]);
+                    set_autovector(&mut bus, 2, handler);
+                    bus.irq_latency_setting = 0;
+                    bus.paula.intena = INT_MASTER | INT_PORTS;
+                    bus.cia_a.write(4, 10);
+                    bus.cia_a.write(5, 0);
+                    bus.cia_a.write(13, 0x81);
+                    if !start_in_guest {
+                        bus.cia_a.write(14, 0x11);
+                    }
+                    let mut machine = M68kMachine::new(bus, CpuModel::M68040, true)?;
+                    machine.set_jit_enabled(true);
+                    machine.set_jit_speed_factor(factor);
+                    machine.cpu.set_sr(0x2000);
+                    for _ in 0..100_000 {
+                        if machine.step_slice(chunk)?.stopped {
+                            assert_eq!(machine.d(0), 42);
+                            return Ok((machine.bus().emulated_cck(), machine.pc(), machine.a(7)));
+                        }
+                    }
+                    panic!("CIA interrupt did not reach its handler");
+                };
+                assert_eq!(
+                    run(4096)?,
+                    run(1)?,
+                    "guest_start={start_in_guest} factor={factor}"
+                );
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn jit_slice_takes_trap_exceptions() -> Result<()> {
         let pc = FAST_RAM_BASE as u32 + 0x100;

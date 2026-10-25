@@ -7884,6 +7884,47 @@ impl Bus {
         std::mem::take(&mut self.devices_wrote_memory)
     }
 
+    /// Conservative deadline for a CPU burst using only local memory. Shared
+    /// bus/MMIO accesses end the burst independently. Keep a 64-CCK ceiling for
+    /// asynchronous host devices whose arrivals cannot be predicted.
+    pub(crate) fn jit_event_horizon_cck(&self) -> u32 {
+        let cia = self
+            .cia_a
+            .next_event_ticks()
+            .into_iter()
+            .chain(self.cia_b.next_event_ticks())
+            .min()
+            .map(|ticks| {
+                ticks
+                    .saturating_mul(5)
+                    .saturating_sub(self.device_clock.cia_tick_remainder_cck)
+            });
+        [
+            Some(64),
+            cia,
+            self.next_irq_visible_cck(),
+            self.agnus.cck_until_line_ticks(1),
+            self.next_copper_wakeup_cck(),
+            self.next_blitter_completion_cck(),
+            self.next_blitter_irq_cck(),
+            self.next_audio_irq_cck(),
+            self.next_serial_event_cck(),
+            self.next_storage_event_cck(),
+            self.next_keyboard_event_cck(),
+            self.next_pot_event_cck(),
+            self.next_cia_b_tod_alarm_cck(),
+            self.floppy.next_completion_cck(self.agnus.dmacon),
+            self.floppy.next_sync_irq_cck(self.agnus.dmacon),
+            self.floppy.next_index_pulse_cck(),
+            Some(self.next_frame_event_cck()),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(1)
+        .max(1)
+    }
+
     pub fn next_blitter_completion_cck(&self) -> Option<u32> {
         if !self.blitter_dma_enabled() {
             return None;

@@ -116,7 +116,14 @@ writable. The timing contract is deliberately approximate
   normal `CpuBus` paths and advance the beam as they land (that bus is
   shared silicon), and CIA/RTC accesses keep their E-clock costs, keeping
   chipset side effects ordered against display DMA;
-- interrupts are recognized at batch boundaries (every 64 instructions),
+- native batches are capped at 4096 instructions and bounded by the next
+  CIA, Copper, blitter, audio, storage, beam or interrupt deadline (at most
+  64 colour clocks for asynchronous devices). Both fractional clock carries
+  participate in that conversion. The core's `AddressBus::batch_boundary`
+  callback bills completed instructions before ordinary bus accesses, and
+  MMIO/shared-bus accesses return to the host before another native burst.
+  Instructions fetched from shared RAM use single-instruction batches.
+  Interrupts are recognized at those boundaries,
   from the live INTENA/INTREQ state; a level the boundary cannot deliver
   is never left in the core, since the batch would take it as soon as the
   mask drops without recomputing INTREQ (a spurious handler re-entry);
@@ -918,3 +925,13 @@ the machine instead:
   The window pauses and reports `CPU halted: double fault at pc ...` once,
   on the Console and to the control protocol as a `double_fault` stop, and
   leaves the state for inspection.
+
+### Local CPU-core extensions
+
+`vendor/m68k` carries the published 0.14.7 core plus the batch synchronization
+hook required by this scheduler. The original license and local patch inventory
+are in that directory. The callback is a no-op for ordinary m68k embedders;
+Copperline uses it to preserve hardware-access ordering without calling the host
+from every instruction inside a native trace. Batch accounting is transient;
+the persistent CPU-clock and Q16 remainders return to `MachineRuntimeState`
+before a save or rollback can occur.
