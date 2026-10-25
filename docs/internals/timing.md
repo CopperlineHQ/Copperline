@@ -1100,9 +1100,10 @@ for 85% regular load: it lowers above 93%, rises below 80%, and holds in
 between. Raising also requires regular instruction throughput of at least 25%
 of the billed clock, excluding spare instructions, so STOP and shared-bus
 waits do not cause a clock increase. Corrections use the square root of
-target/load, capped at a 4x cut or 1.25x rise. The baseline can move above or
-below the configured clock, between 1 MHz and a 2 GHz sanity bound (or the
-configured clock when outside those bounds). Spare-time work has no synthetic
+target/load, capped at a 4x cut or 1.25x rise. The baseline ranges from the
+configured clock to a 2 GHz sanity bound (or the configured clock if higher).
+The configured minimum also applies after state loads and while in warp;
+chipset overload must not ratchet idle or bus-bound guests below it. Spare-time work has no synthetic
 MHz ceiling. Keeping regular load near the established governor target avoids
 forcing application loops into small, inefficient batches on slower hosts. Host stalls over 100 ms,
 precise stepping and pacing re-anchors discard the sample window.

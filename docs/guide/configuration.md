@@ -738,11 +738,11 @@ clock_mhz = 14.0    # optional; defaults to the model's stock speed
   The chipset stays still during CPU-only work. Bursts yield on shared-bus
   accesses, STOP, debugger stops or the host deadline; chip and device accesses
   retain their normal timing. A small time reserve protects presentation.
-  The regular CPU workload starts at `clock_mhz` and adapts upward when CPU
-  work has headroom, or downward (as far as 1 MHz) when chipset/frontend work
-  would otherwise miss real time. There
-  is no synthetic MHz ceiling on spare-time CPU work. Chipset-heavy workloads
-  can still exceed the host's capacity.
+  The regular CPU workload starts at `clock_mhz`, rises when CPU work has
+  headroom, and backs off toward that configured minimum under load. It never
+  runs below `clock_mhz`, even if chipset work alone exceeds host capacity.
+  Spare-time CPU work has no synthetic MHz ceiling; demanding workloads can
+  still run below real time.
   The performance overlay (`cpu N MHz`) and control status (`jit_mhz`) report
   measured throughput as an equivalent one-instruction-per-clock rate, including
   bursts. The launcher's CPU page has a matching **JIT speed** row,

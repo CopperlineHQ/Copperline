@@ -569,7 +569,7 @@ impl Emulator {
         self.fastest = Some(fastest::SpeedGovernor::new(floor_mhz));
         log::warn!(
             "cpu speed: fastest -- spare host time runs CPU bursts after a \
-             {floor_mhz:.2} MHz initial baseline (adapted to host load) while paced to real time; NOT cycle-exact and \
+             {floor_mhz:.2} MHz minimum clock (adapted to host load) while paced to real time; NOT cycle-exact and \
              NOT reproducible (runs differ from run to run and host to host; \
              unpaced headless runs stay at {floor_mhz:.2} MHz)"
         );
@@ -1634,7 +1634,7 @@ impl Emulator {
         let floor_mhz = self.configured_cpu_mhz();
         if let Some(governor) = self.fastest.as_mut() {
             governor.rebase(floor_mhz);
-            let factor = governor.factor();
+            let factor = governor.factor_for_pacing(self.paced);
             self.machine.set_jit_speed_factor(factor);
         }
     }
@@ -2443,11 +2443,7 @@ impl Emulator {
         }
         self.paced = paced;
         if let Some(governor) = self.fastest.as_ref() {
-            let factor = if paced {
-                governor.factor()
-            } else {
-                governor.effective_mhz().max(self.configured_cpu_mhz()) / self.configured_cpu_mhz()
-            };
+            let factor = governor.factor_for_pacing(paced);
             self.machine.set_jit_speed_factor(factor);
         }
         if paced {
@@ -5436,14 +5432,14 @@ mod tests {
         let mut emu = jit_counting_emulator(crate::config::CpuSpeed::Fastest);
         let floor = emu.jit_effective_mhz().expect("governor armed");
         assert!((floor - 24.83).abs() < 0.01, "{floor}");
-        // A whole overloaded window: 200 ms host time for 100 ms emulated
-        // at 100 MIPS, requiring a reduction in regular CPU work.
+        // A whole light window: 10 ms host time for 100 ms emulated
+        // at 100 MIPS, allowing a rise in the regular CPU clock.
         emu.retired_instructions = 10_000_000;
         let emulated_before = emu.bus().emulated_seconds() - 0.1;
         let quantum = |emu: &mut super::Emulator, precise: bool| {
             emu.govern_fastest(
                 Instant::now(),
-                Duration::from_millis(200),
+                Duration::from_millis(10),
                 emulated_before,
                 0,
                 emu.retired_instructions,
@@ -5457,8 +5453,8 @@ mod tests {
         assert_eq!(emu.machine.jit_speed_factor(), 1.0, "precise: no change");
         quantum(&mut emu, false);
         assert!(
-            (emu.machine.jit_speed_factor() - 0.65192).abs() < 1e-3,
-            "paced overload reduces the baseline: {}",
+            (emu.machine.jit_speed_factor() - 1.25).abs() < 1e-3,
+            "paced CPU-bound work raises the baseline: {}",
             emu.machine.jit_speed_factor()
         );
         let mhz = emu.jit_effective_mhz().unwrap();
@@ -5474,7 +5470,7 @@ mod tests {
     fn fastest_governor_does_not_count_presentation_waits_as_load() {
         use crate::timebase::{Duration, Instant};
         // 3 ms of emulation and 14 ms between quanta per 1/60 s quantum:
-        // with the gap counted the load is ~1.0, so the baseline must fall.
+        // with the gap counted the load is ~1.0, so the baseline stays at its floor.
         let run = |reported_wait: Duration| {
             let mut emu = jit_counting_emulator(crate::config::CpuSpeed::Fastest);
             emu.set_paced(true);
@@ -5495,10 +5491,7 @@ mod tests {
             }
             emu.machine.jit_speed_factor()
         };
-        assert!(
-            run(Duration::ZERO) < 1.0,
-            "a busy frontend reduces the baseline"
-        );
+        assert_eq!(run(Duration::ZERO), 1.0, "a busy frontend holds the floor");
         assert!(
             run(Duration::from_millis(13)) > 1.0,
             "a presenter blocked on vsync is headroom, not load"
@@ -5559,21 +5552,21 @@ mod tests {
         let floor = emu.jit_effective_mhz().unwrap();
         assert!((floor - 14.19).abs() < 0.01, "{floor}");
 
-        // A paced overload reduces the baseline. Loading a slower configured
+        // A light paced window raises the baseline. Loading a slower configured
         // clock keeps the adapted rate, even above that clock; telemetry restarts.
         let mut emu = jit_counting_emulator(crate::config::CpuSpeed::Fastest);
         emu.set_paced(true);
         emu.retired_instructions = 10_000_000;
         emu.govern_fastest(
             crate::timebase::Instant::now(),
-            crate::timebase::Duration::from_millis(200),
+            crate::timebase::Duration::from_millis(10),
             emu.bus().emulated_seconds() - 0.1,
             0,
             emu.retired_instructions,
             false,
         );
         let baseline = emu.machine.jit_speed_factor() * emu.configured_cpu_mhz();
-        assert!(baseline < 24.0);
+        assert!(baseline > 25.0);
         emu.load_state_bytes(&slower).unwrap();
         assert!((emu.jit_effective_mhz().unwrap() - baseline).abs() < 0.001);
         assert!(emu.machine.jit_speed_factor() > 1.0);
@@ -5592,7 +5585,7 @@ mod tests {
             false,
         );
         let baseline = emu.machine.jit_speed_factor();
-        assert!(baseline < 1.0);
+        assert_eq!(baseline, 1.0);
         emu.set_paced(false);
         assert_eq!(
             emu.machine.jit_speed_factor(),
@@ -5601,6 +5594,27 @@ mod tests {
         );
         emu.set_paced(true);
         assert_eq!(emu.machine.jit_speed_factor(), baseline);
+    }
+
+    #[test]
+    fn fastest_state_load_during_warp_preserves_the_configured_floor() {
+        let mut emu = jit_counting_emulator(crate::config::CpuSpeed::Fastest);
+        emu.step_frame().unwrap();
+        let state = emu.save_state_bytes().unwrap();
+        emu.set_paced(true);
+        emu.govern_fastest(
+            crate::timebase::Instant::now(),
+            crate::timebase::Duration::from_millis(200),
+            emu.bus().emulated_seconds() - 0.1,
+            emu.retired_instructions,
+            0,
+            false,
+        );
+        emu.set_paced(false);
+        assert!(emu.machine.jit_speed_factor() >= 1.0);
+        emu.load_state_bytes(&state).unwrap();
+        assert!(!emu.paced());
+        assert!(emu.machine.jit_speed_factor() >= 1.0);
     }
 
     #[test]
