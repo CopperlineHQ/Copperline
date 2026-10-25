@@ -75,10 +75,16 @@ which is what makes cycle-budgeted pacing trustworthy. Instruction
 semantics are also checked against Toni Wilen's WinUAE cputest suites
 (every opcode of a CPU model, hundreds of register and memory states each,
 including exception stack frames): `crates/cputest-runner` drives the
-generated test sets against the published `m68k` core, and the nightly
+generated test sets against the same `m68k` revision as the emulator, and the nightly
 `cputest.yml` workflow runs the full 68000 suite
 (`crates/cputest-runner/tools/cputest-gen.sh` generates the data for any
 model locally).
+
+The lockfile workflow also runs `python3 tools/check-m68k-locks.py`, which
+requires the root application, player, web, libretro and conformance runner to
+resolve the same m68k version and source. The core's own unit and native JIT
+suites run in the core repository's CI; Cargo does not run dependency unit
+tests as part of Copperline's suite.
 
 ## The batch/JIT execution mode
 
@@ -926,12 +932,17 @@ the machine instead:
   on the Console and to the control protocol as a `double_fault` stop, and
   leaves the state for inspection.
 
-### Local CPU-core extensions
+### CPU-core extensions awaiting upstream
 
-`vendor/m68k` carries the published 0.14.7 core plus batch synchronization
-and multiple direct-memory regions. The original license and local patch
-inventory are in that directory. The callback is a no-op for ordinary m68k
-embedders; Copperline uses it to preserve hardware-access ordering without calling the host
-from every instruction inside a native trace. Batch accounting is transient;
-the persistent CPU-clock and Q16 remainders return to `MachineRuntimeState`
-before a save or rollback can occur.
+The pinned [CopperlineHQ/m68k-rs](https://github.com/CopperlineHQ/m68k-rs)
+fork combines upstream [PR #222](https://github.com/benletchford/m68k-rs/pull/222)
+(batch synchronization) and [PR #223](https://github.com/benletchford/m68k-rs/pull/223)
+(multiple physical RAM/ROM regions). Copperline consumes that Git revision as a
+normal Cargo dependency. A follow-up dependency change will return to upstream
+once both proposals are accepted.
+
+The boundary callback is a no-op for ordinary m68k embedders; Copperline uses
+it to preserve hardware-access ordering without calling the host from every
+instruction inside a native trace. Batch accounting is transient; the persistent
+CPU-clock and Q16 remainders return to `MachineRuntimeState` before a save or
+rollback can occur.

@@ -2,7 +2,7 @@ name: cputest conformance
 
 # Nightly m68k instruction conformance: crates/cputest-runner drives the
 # WinUAE cputest-generated test sets (every opcode of a CPU model,
-# hundreds of state combinations each) against the published m68k core.
+# hundreds of state combinations each) against the same m68k core revision used by the emulator.
 # The crate is wired into no push/pull-request workflow because the .dat
 # sets are generated locally (~25MB per CPU model) by its
 # tools/cputest-gen.sh -- but that script is fully self-contained on a

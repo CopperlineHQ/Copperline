@@ -231,7 +231,7 @@ so rollback neither accesses a live directory mount nor persists guest writes.
 The flow of a frame:
 
 1. The frame loop hands the CPU an instruction budget. The CPU executes
-   one instruction at a time through the published `m68k` core (or, with
+   one instruction at a time through the `m68k` core (or, with
    the experimental `[cpu] jit`, in fixed multi-instruction batches; see
    [](cpu.md)). Every memory access the instruction makes is routed through
    the bus adapter and *billed in colour clocks* (CCK, 3.546895 MHz -- the

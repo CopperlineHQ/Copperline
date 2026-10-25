@@ -27,9 +27,8 @@
 # Local asset directory for the ignored integration tests.
 /test-assets/
 
-# Local build state of the patched CPU core.
-/vendor/m68k/target/
-/vendor/m68k/Cargo.lock
+# Optional local CPU-core research checkout; production uses Cargo dependencies.
+/vendor/m68k/
 /crates/m68k/
 
 # HRTMon cartridge image build output (the committed artifact is
