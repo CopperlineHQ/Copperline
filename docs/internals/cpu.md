@@ -130,7 +130,10 @@ at each batch boundary. The timing contract is deliberately approximate
   Instructions fetched from shared RAM use single-instruction batches and skip
   deadline prediction, which cannot shorten that budget. Those batches also
   omit direct-pointer capture, since they cannot enter a native trace; ordinary
-  bus access retains the same local-memory cache exclusions. Interrupt-entry
+  bus access retains the same local-memory cache exclusions. Without emulated
+  caches, they also skip the unused extra-region table and per-access prefix
+  classification: there is no completed instruction prefix to synchronize.
+  Interrupt-entry
   posted-write overlap is charged to the interrupt itself.
   Interrupts are recognized at those boundaries,
   from the live INTENA/INTREQ state; a level the boundary cannot deliver
@@ -217,8 +220,13 @@ advances the machine using an adaptive CPU clock, starting at the configured
 clock and moving up or down with regular host load, never below that minimum. Before presentation, bounded spare-time
 bursts run local CPU work without advancing the chipset. A burst retires at
 most 4096 instructions and yields at shared-memory/device accesses; their
-ordinary bus cycles still advance hardware. STOP and debugger hooks suppress
-bursts. The host checks a fixed deadline between bursts and reserves time for
+ordinary bus cycles still advance hardware. After interrupt recognition, another
+burst may resume local work within the original host deadline. The whole spare
+phase allows at most 256 colour clocks (about 72 microseconds) of chipset advance
+before yielding, plus any overshoot from the final instruction's bus transaction
+and DMA contention. Polling therefore cannot keep advancing devices throughout
+the spare host interval. STOP, debugger hooks and slice preemption end the phase.
+The host checks the fixed deadline between bursts and reserves time for
 presentation. The regular governor measures only baseline work plus frontend
 cost, excluding bonus work and sleep; throughput telemetry includes all work.
 

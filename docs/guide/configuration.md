@@ -735,7 +735,9 @@ clock_mhz = 14.0    # optional; defaults to the model's stock speed
   uses spare time before presentation for CPU bursts from local RAM/ROM.
   The chipset stays still during CPU-only work. Bursts yield on shared-bus
   accesses, STOP, debugger stops or the host deadline; chip and device accesses
-  retain their normal timing. A small time reserve protects presentation.
+  retain their normal timing. After a device access, local work can resume
+  within the same deadline, with a small chipset-time budget limiting polling
+  loops. A small time reserve protects presentation.
   The regular CPU workload starts at `clock_mhz`, rises when CPU work has
   headroom, and backs off toward that configured minimum under load. It never
   runs below `clock_mhz`, even if chipset work alone exceeds host capacity.

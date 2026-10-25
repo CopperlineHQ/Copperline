@@ -3053,9 +3053,9 @@ impl M68kMachine {
     /// per-instruction cost, exception and interrupt entry -- is divided by
     /// `factor`, which is exactly a faster CPU clock. Chip-bus and CIA
     /// accesses keep their bus-time costs, as on a real accelerator. A
-    /// factor below 1 reduces CPU work during paced overload; 1 restores the fixed clock,
-    /// whose billing path is then the unscaled one. The precise core never
-    /// reads this.
+    /// factor of 1 restores the fixed clock, whose billing path is then the
+    /// unscaled one. The paced governor never chooses a factor below 1. The
+    /// precise core never reads this.
     pub fn set_jit_speed_factor(&mut self, factor: f64) {
         let divisor = if factor.is_finite() && factor > 0.0 {
             ((f64::from(JIT_CLOCK_DIVISOR_UNITY) / factor).round() as u32)
@@ -5284,6 +5284,13 @@ impl AddressBus for CpuBus {
     }
 
     fn fast_mem_regions(&mut self) -> [Option<FastMemRegion>; MAX_FAST_MEM_REGIONS] {
+        // One instruction cannot enter native code. With no emulated caches,
+        // there are no exclusions to maintain either: avoid walking every bank
+        // and building a pointer table that run_batch will immediately discard.
+        // The primary window still records the selected bank for save/restore.
+        if self.jit_single_instruction_batch() && self.icache.is_none() && self.dcache.is_none() {
+            return [None; MAX_FAST_MEM_REGIONS];
+        }
         let regions = self.jit_extra_regions();
         if self.jit_single_instruction_batch() {
             [None; MAX_FAST_MEM_REGIONS]
@@ -8809,7 +8816,7 @@ mod tests {
     fn jit_single_instruction_batches_preserve_local_memory_cache_exclusions() -> Result<()> {
         use m68k::{CACR_ED, CACR_EI};
         let pc = FAST_RAM_BASE as u32 + 0x100;
-        let run = |chunk| -> Result<(u32, u32, u32, u64)> {
+        let run = |chunk, caches| -> Result<(u32, u32, u32, u64)> {
             let mut machine = machine_with_program_model(
                 pc,
                 &[
@@ -8824,20 +8831,24 @@ mod tests {
             let mb = machine.bus.bus.mem.mb_ram_base() as u32;
             assert_eq!(mb, 0x07e0_0000);
             machine.bus.bus.mem.rom[..4].copy_from_slice(&0x1234_5678u32.to_be_bytes());
-            machine.set_cache_emulation(true, true);
-            machine.cpu.cacr = CACR_ED | CACR_EI;
-            machine.apply_cacr_updates();
-            machine.bus.read_long(mb);
-            assert!(machine
-                .bus
-                .cache_read(mb, 4, CpuBusAccessKind::Read)
-                .is_some());
+            if caches {
+                machine.set_cache_emulation(true, true);
+                machine.cpu.cacr = CACR_ED | CACR_EI;
+                machine.apply_cacr_updates();
+                machine.bus.read_long(mb);
+                assert!(machine
+                    .bus
+                    .cache_read(mb, 4, CpuBusAccessKind::Read)
+                    .is_some());
+            }
             machine.set_jit_enabled(true);
             for _ in 0..8 {
                 if machine.step_slice(chunk)?.stopped {
                     assert_eq!(machine.d(0), 0x1234_5678);
                     assert_eq!(machine.d(1), machine.d(0));
-                    assert!(machine.bus.in_cache_free_window(mb, 4));
+                    if caches {
+                        assert!(machine.bus.in_cache_free_window(mb, 4));
+                    }
                     assert!(machine
                         .bus
                         .cache_read(mb, 4, CpuBusAccessKind::Read)
@@ -8852,7 +8863,9 @@ mod tests {
             }
             panic!("program did not reach STOP");
         };
-        assert_eq!(run(1)?, run(4096)?);
+        for caches in [false, true] {
+            assert_eq!(run(1, caches)?, run(4096, caches)?);
+        }
         Ok(())
     }
 

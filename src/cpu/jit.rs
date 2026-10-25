@@ -11,7 +11,6 @@ pub(super) struct JitBatchTiming {
     budget: u32,
     retired: u32,
     observed_retired: u32,
-    observed_sr: u16,
     clocks: u32,
     cck: u32,
     clocks_per_cck: u32,
@@ -45,7 +44,14 @@ impl CpuBus {
     }
 
     pub(super) fn note_jit_bus_access(&mut self, address: u32, size: usize) {
-        if self.jit_batch.is_some() && !self.jit_plain_access(address, size) {
+        // A one-instruction batch has no completed prefix before this access,
+        // and returns to the host before the next instruction anyway.
+        if self
+            .jit_batch
+            .as_ref()
+            .is_some_and(|timing| timing.budget > 1)
+            && !self.jit_plain_access(address, size)
+        {
             self.flush_jit_batch_prefix();
             self.jit_bus_boundary = true;
         }
@@ -60,7 +66,6 @@ impl CpuBus {
             return false;
         };
         timing.observed_retired = retired;
-        timing.observed_sr = sr;
         self.diag_current_pc = pc;
         self.bus.cpu_pc = pc;
         self.jit_batch_should_stop(retired, sr)
@@ -72,11 +77,7 @@ impl CpuBus {
             .as_ref()
             .filter(|timing| timing.observed_retired > timing.retired)
         {
-            self.sync_jit_batch(
-                timing.observed_retired,
-                self.diag_current_pc,
-                timing.observed_sr,
-            );
+            self.sync_jit_batch(timing.observed_retired, self.diag_current_pc);
         }
     }
 
@@ -84,25 +85,27 @@ impl CpuBus {
         let Some(timing) = self.jit_batch.as_ref() else {
             return false;
         };
+        // Always allow progress on entry, including a bring-up interrupt whose
+        // vector has not been installed yet. The host applies that guard.
+        if retired == 0 {
+            return false;
+        }
         let irq = if self.bus.paula.intena & INT_MASTER != 0 {
             pending_ipl(self.bus.paula.intena & self.bus.cpu_visible_intreq())
                 > ((sr >> 8) & 7) as u8
         } else {
             false
         };
-        // Always allow progress on entry, including a bring-up interrupt whose
-        // vector has not been installed yet. The host applies that guard.
-        retired != 0
-            && (self.jit_bus_boundary
-                || irq
-                || self.bus.cartridge_nmi_pending()
-                || self.bus.slice_preempted
-                || self.bus.emulated_cck() >= timing.deadline)
+        self.jit_bus_boundary
+            || irq
+            || self.bus.cartridge_nmi_pending()
+            || self.bus.slice_preempted
+            || self.bus.emulated_cck() >= timing.deadline
     }
 
-    pub(super) fn sync_jit_batch(&mut self, retired: u32, pc: u32, sr: u16) -> bool {
+    pub(super) fn sync_jit_batch(&mut self, retired: u32, pc: u32) {
         let Some(mut timing) = self.jit_batch.take() else {
-            return false;
+            return;
         };
         let instructions = retired.saturating_sub(timing.retired);
         if instructions != 0 {
@@ -131,7 +134,6 @@ impl CpuBus {
         self.diag_current_pc = pc;
         self.bus.cpu_pc = pc;
         self.jit_batch = Some(timing);
-        self.jit_batch_should_stop(retired, sr)
     }
 }
 
@@ -140,11 +142,6 @@ impl M68kMachine {
     /// retaining both fractional-clock carries. One instruction is the minimum
     /// when a slow configured CPU cannot stop exactly on a colour-clock edge.
     fn jit_batch_budget(&self, remaining: usize, horizon: u32) -> usize {
-        if !self.bus.jit_plain_access(self.cpu.pc, 2) {
-            // Code on the shared bus must synchronize its fetches as well as
-            // operands. Native bursts are reserved for local RAM and ROM.
-            return 1;
-        }
         if self.jit_clock_divisor_q16 == 0 {
             return remaining.min(JIT_BATCH_INSTRUCTIONS);
         }
@@ -224,12 +221,17 @@ impl M68kMachine {
             // Shared-bus code already has a one-instruction budget. Predicting
             // blitter, disk and CIA deadlines cannot shorten it, and doing so
             // for every fetch is expensive in polling loops.
-            let horizon = if count - instructions > 1 && self.bus.jit_plain_access(self.cpu.pc, 2) {
+            let local_code = count - instructions > 1 && self.bus.jit_plain_access(self.cpu.pc, 2);
+            let horizon = if local_code {
                 self.bus.bus.jit_event_horizon_cck()
             } else {
                 1
             };
-            let budget = self.jit_batch_budget(count - instructions, horizon) as u32;
+            let budget = if local_code {
+                self.jit_batch_budget(count - instructions, horizon) as u32
+            } else {
+                1
+            };
             self.bus.diag_current_pc = self.cpu.pc;
             self.bus.bus.cpu_pc = self.cpu.pc;
             self.bus.window_offered = false;
@@ -238,7 +240,6 @@ impl M68kMachine {
                 budget,
                 retired: 0,
                 observed_retired: 0,
-                observed_sr: self.cpu.get_sr(),
                 clocks: 0,
                 cck: 0,
                 clocks_per_cck: self.cpu_clocks_per_cck,
@@ -251,8 +252,7 @@ impl M68kMachine {
             });
             let cpu_was_stopped = self.cpu.is_stopped();
             let result = self.cpu.run_batch(&mut self.bus, budget, &[]);
-            self.bus
-                .sync_jit_batch(result.instructions, self.cpu.pc, self.cpu.get_sr());
+            self.bus.sync_jit_batch(result.instructions, self.cpu.pc);
             let timing = self.bus.jit_batch.take().expect("active JIT batch");
             self.cpu_clock_carry = timing.clock_carry;
             self.jit_clock_carry_q16 = timing.carry_q16;

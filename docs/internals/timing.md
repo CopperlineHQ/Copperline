@@ -1089,8 +1089,11 @@ fix) resolved that blanking regression.
 time. After its regular quantum, `step_real_until` spends spare time before
 the presentation target on bounded CPU-only bursts. It reserves 10% of the
 quantum (200 microseconds to 2 milliseconds) for presentation and scheduling.
-A burst yields on shared-bus progress, STOP or an observed debugger stop.
-The target is fixed before the burst phase, so bus progress cannot extend it.
+Each burst yields on shared-bus progress so interrupt recognition runs before
+local work resumes. The whole phase stops on STOP, debugger stops, slice
+preemption or a cumulative 256 colour clocks of chipset progress, allowing
+only the final bus instruction to overshoot that budget. The target is fixed
+before the burst phase, so bus progress cannot extend it.
 Precise stepping, reverse debugging and run-ahead never enter this phase.
 
 The baseline governor (`src/emulator/fastest.rs`) samples regular emulation

@@ -20,6 +20,11 @@ mod fastest;
 
 const INSTRUCTIONS_PER_SLICE: usize = 32_000;
 const INSTRUCTIONS_PER_REALTIME_SLICE: usize = 8_192;
+/// About 72 microseconds of chipset time per spare phase. Occasional OS
+/// register accesses may resume local work, but a polling loop cannot spend
+/// the whole host deadline advancing devices. Checked between instructions,
+/// so the final bus transaction (including DMA contention) may cross the cap.
+const SPARE_CHIPSET_BUDGET_CCK: u64 = 256;
 /// Longest blind STOP-state fast-forward, in colour clocks, while a serial
 /// sink with a live host input side is attached (see the cap site in
 /// `idle_fast_forward_chunk`). 256 cck is about 72 microseconds: well under
@@ -2978,9 +2983,11 @@ impl Emulator {
     }
 
     /// The closure is the host deadline in production and a bounded budget
-    /// in tests. Yield on STOP, an observed stop, or any shared-bus advance;
-    /// the following paced quantum supplies the next hardware interval.
+    /// in tests. Each shared-bus access yields to interrupt recognition, then
+    /// another burst may run within the same fixed host deadline. Bound their
+    /// cumulative chipset advance so polling cannot extend the spare phase.
     fn run_spare_cpu_while(&mut self, mut has_time: impl FnMut() -> bool) -> Result<()> {
+        let mut chipset_cck = 0u64;
         while self.machine.jit_batch_path_active()
             && !self.machine.stopped()
             && !self.machine.ui_debug_stop_pending()
@@ -2988,7 +2995,12 @@ impl Emulator {
         {
             let run = self.execute_cpu_slice_mode(INSTRUCTIONS_PER_REALTIME_SLICE, true)?;
             self.machine.refresh_irq_line();
-            if run.actual_instructions == 0 || run.cpu_stopped || run.bus_advanced_cck != 0 {
+            chipset_cck += u64::from(run.bus_advanced_cck);
+            if run.actual_instructions == 0
+                || run.cpu_stopped
+                || self.bus().slice_preempted
+                || chipset_cck >= SPARE_CHIPSET_BUDGET_CCK
+            {
                 break;
             }
         }
@@ -5645,6 +5657,84 @@ mod tests {
             emu.retired_instructions, before,
             "precise mode cannot burst"
         );
+    }
+
+    fn spare_cpu_program(words: &[u16]) -> super::Emulator {
+        let mut emu = jit_counting_emulator(crate::config::CpuSpeed::Fastest);
+        for (index, word) in words.iter().enumerate() {
+            let offset = 0x10 + index * 2;
+            emu.bus_mut().mem.rom[offset..offset + 2].copy_from_slice(&word.to_be_bytes());
+        }
+        emu
+    }
+
+    #[test]
+    fn spare_cpu_resumes_after_device_access_and_stops_at_stop() {
+        let mut emu = spare_cpu_program(&[
+            0x33fc, 0x00f0, 0x00df, 0xf180, // MOVE.W #$f0,COLOR00
+            0x5280, // ADDQ.L #1,D0
+            0x4e72, 0x2700, // STOP
+        ]);
+        emu.run_spare_cpu_while(|| true).unwrap();
+        assert_eq!(emu.bus().denise.palette[0], 0x00f0);
+        assert_eq!(emu.machine.d(0), 1, "resume local work after MMIO");
+        assert!(emu.machine.stopped());
+    }
+
+    #[test]
+    fn spare_cpu_bounds_chipset_advance_in_a_device_polling_loop() {
+        let mut emu = spare_cpu_program(&[
+            0x3039, 0x00df, 0xf006, // MOVE.W VHPOSR,D0
+            0x5281, // ADDQ.L #1,D1
+            0x60f6, // BRA.S back to VHPOSR read
+        ]);
+        let before = emu.bus().emulated_cck();
+        let mut bursts = 0;
+        emu.run_spare_cpu_while(|| {
+            bursts += 1;
+            bursts < 10_000
+        })
+        .unwrap();
+        let advanced = emu.bus().emulated_cck() - before;
+        assert!(
+            advanced >= super::SPARE_CHIPSET_BUDGET_CCK,
+            "polling must resume: {advanced}"
+        );
+        assert!(
+            advanced < super::SPARE_CHIPSET_BUDGET_CCK + 16,
+            "stop after the last bus instruction: {advanced}"
+        );
+        assert!(
+            bursts < 10_000,
+            "chipset budget, not host deadline, stops polling"
+        );
+        assert!(emu.machine.d(1) > 1);
+    }
+
+    #[test]
+    fn spare_cpu_delivers_enabled_interrupt_before_resuming_local_work() {
+        let mut emu = spare_cpu_program(&[
+            0x33fc, 0xc004, 0x00df, 0xf09a, // MOVE.W #master+SOFT,INTENA
+            0x7001, // MOVEQ #1,D0: must not run before the handler
+            0x4e72, 0x2700,
+        ]);
+        emu.bus_mut().mem.rom[0x40..0x46].copy_from_slice(&[0x72, 0x07, 0x4e, 0x72, 0x27, 0x00]); // MOVEQ #7,D1; STOP
+        emu.bus_mut().mem.chip_ram[25 * 4..25 * 4 + 4]
+            .copy_from_slice(&0x00f8_0040u32.to_be_bytes());
+        emu.machine.debug_set_register(15, 0x4000);
+        emu.machine.debug_set_register(16, 0x2000);
+        // Isolate recognition between bursts from Paula's propagation delay;
+        // the request is immediately eligible when INTENA enables it.
+        emu.bus_mut().irq_latency_setting = 0;
+        emu.bus_mut().custom_write(0x09c, 2, 0x8004); // pending SOFT
+        emu.run_spare_cpu_while(|| true).unwrap();
+        assert_eq!(emu.machine.d(1), 7, "the next burst services the interrupt");
+        assert_eq!(
+            emu.machine.d(0),
+            0,
+            "IRQ precedes the next ordinary instruction"
+        );
+        assert!(emu.machine.stopped());
     }
 
     /// The mode needs the JIT: without it the governor is never armed.
