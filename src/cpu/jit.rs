@@ -7,8 +7,14 @@ use super::*;
 /// State exists only while the core owns a batch. Persistent fractional clocks
 /// move back to M68kMachine before any caller can save or roll back the machine.
 #[derive(Clone, Copy)]
-pub(super) struct JitBatchTiming {
-    budget: u32,
+pub(super) enum JitBatchTiming {
+    /// No deferred prefix: bill the instruction directly after run_batch.
+    Single,
+    Multiple(JitTiming),
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct JitTiming {
     retired: u32,
     observed_retired: u32,
     clocks: u32,
@@ -24,9 +30,7 @@ pub(super) struct JitBatchTiming {
 
 impl CpuBus {
     pub(super) fn jit_single_instruction_batch(&self) -> bool {
-        self.jit_batch
-            .as_ref()
-            .is_some_and(|timing| timing.budget == 1)
+        matches!(self.jit_batch, Some(JitBatchTiming::Single))
     }
 
     fn jit_plain_access(&self, address: u32, size: usize) -> bool {
@@ -46,10 +50,7 @@ impl CpuBus {
     pub(super) fn note_jit_bus_access(&mut self, address: u32, size: usize) {
         // A one-instruction batch has no completed prefix before this access,
         // and returns to the host before the next instruction anyway.
-        if self
-            .jit_batch
-            .as_ref()
-            .is_some_and(|timing| timing.budget > 1)
+        if matches!(self.jit_batch, Some(JitBatchTiming::Multiple(_)))
             && !self.jit_plain_access(address, size)
         {
             self.flush_jit_batch_prefix();
@@ -65,24 +66,25 @@ impl CpuBus {
         let Some(timing) = self.jit_batch.as_mut() else {
             return false;
         };
-        timing.observed_retired = retired;
         self.diag_current_pc = pc;
         self.bus.cpu_pc = pc;
+        let JitBatchTiming::Multiple(timing) = timing else {
+            return false;
+        };
+        timing.observed_retired = retired;
         self.jit_batch_should_stop(retired, sr)
     }
 
     pub(super) fn flush_jit_batch_prefix(&mut self) {
-        if let Some(timing) = self
-            .jit_batch
-            .as_ref()
-            .filter(|timing| timing.observed_retired > timing.retired)
-        {
-            self.sync_jit_batch(timing.observed_retired, self.diag_current_pc);
+        if let Some(JitBatchTiming::Multiple(timing)) = self.jit_batch.as_ref() {
+            if timing.observed_retired > timing.retired {
+                self.sync_jit_batch(timing.observed_retired, self.diag_current_pc);
+            }
         }
     }
 
     fn jit_batch_should_stop(&self, retired: u32, sr: u16) -> bool {
-        let Some(timing) = self.jit_batch.as_ref() else {
+        let Some(JitBatchTiming::Multiple(timing)) = self.jit_batch.as_ref() else {
             return false;
         };
         // Always allow progress on entry, including a bring-up interrupt whose
@@ -104,7 +106,7 @@ impl CpuBus {
     }
 
     pub(super) fn sync_jit_batch(&mut self, retired: u32, pc: u32) {
-        let Some(mut timing) = self.jit_batch.take() else {
+        let Some(JitBatchTiming::Multiple(mut timing)) = self.jit_batch.take() else {
             return;
         };
         let instructions = retired.saturating_sub(timing.retired);
@@ -133,7 +135,7 @@ impl CpuBus {
         }
         self.diag_current_pc = pc;
         self.bus.cpu_pc = pc;
-        self.jit_batch = Some(timing);
+        self.jit_batch = Some(JitBatchTiming::Multiple(timing));
     }
 }
 
@@ -236,28 +238,60 @@ impl M68kMachine {
             self.bus.bus.cpu_pc = self.cpu.pc;
             self.bus.window_offered = false;
             self.bus.jit_bus_boundary = false;
-            self.bus.jit_batch = Some(JitBatchTiming {
-                budget,
-                retired: 0,
-                observed_retired: 0,
-                clocks: 0,
-                cck: 0,
-                clocks_per_cck: self.cpu_clocks_per_cck,
-                clock_carry: self.cpu_clock_carry,
-                divisor_q16: self.jit_clock_divisor_q16,
-                carry_q16: self.jit_clock_carry_q16,
-                bus_checkpoint: self.bus.bus.slice_bus_advanced_cck(),
-                deadline: self.bus.bus.emulated_cck() + u64::from(horizon),
-                sync: self.sync_cck_on,
+            let bus_checkpoint = self.bus.bus.slice_bus_advanced_cck();
+            self.bus.jit_batch = Some(if budget == 1 {
+                JitBatchTiming::Single
+            } else {
+                JitBatchTiming::Multiple(JitTiming {
+                    retired: 0,
+                    observed_retired: 0,
+                    clocks: 0,
+                    cck: 0,
+                    clocks_per_cck: self.cpu_clocks_per_cck,
+                    clock_carry: self.cpu_clock_carry,
+                    divisor_q16: self.jit_clock_divisor_q16,
+                    carry_q16: self.jit_clock_carry_q16,
+                    bus_checkpoint,
+                    deadline: self.bus.bus.emulated_cck() + u64::from(horizon),
+                    sync: self.sync_cck_on,
+                })
             });
             let cpu_was_stopped = self.cpu.is_stopped();
             let result = self.cpu.run_batch(&mut self.bus, budget, &[]);
-            self.bus.sync_jit_batch(result.instructions, self.cpu.pc);
-            let timing = self.bus.jit_batch.take().expect("active JIT batch");
-            self.cpu_clock_carry = timing.clock_carry;
-            self.jit_clock_carry_q16 = timing.carry_q16;
-            cpu_cycles = cpu_cycles.saturating_add(timing.clocks);
-            cpu_cck = cpu_cck.saturating_add(timing.cck);
+            if budget == 1 {
+                // There is no completed prefix within a single instruction.
+                // Avoid constructing/copying deferred timing state and running
+                // its boundary checks; keep the same end-of-instruction bill.
+                self.bus.jit_batch = None;
+                if result.instructions != 0 {
+                    let clocks = self.jit_scaled_clocks(JIT_CPU_CLOCKS_PER_INSTRUCTION);
+                    let cck = self.charge_cpu_clocks_less_bus_overlap(clocks as i32);
+                    cpu_cycles = cpu_cycles.saturating_add(clocks);
+                    cpu_cck = cpu_cck.saturating_add(cck);
+                    if self.sync_cck_on {
+                        let on_bus = self
+                            .bus
+                            .bus
+                            .slice_bus_advanced_cck()
+                            .saturating_sub(bus_checkpoint);
+                        self.bus
+                            .bus
+                            .advance_cpu_internal_cycles(cck.saturating_sub(on_bus));
+                    }
+                    self.bus.flush_timed_devices_dcache_coherent();
+                }
+                self.bus.diag_current_pc = self.cpu.pc;
+                self.bus.bus.cpu_pc = self.cpu.pc;
+            } else {
+                self.bus.sync_jit_batch(result.instructions, self.cpu.pc);
+                let Some(JitBatchTiming::Multiple(timing)) = self.bus.jit_batch.take() else {
+                    unreachable!("active multi-instruction JIT batch");
+                };
+                self.cpu_clock_carry = timing.clock_carry;
+                self.jit_clock_carry_q16 = timing.carry_q16;
+                cpu_cycles = cpu_cycles.saturating_add(timing.clocks);
+                cpu_cck = cpu_cck.saturating_add(timing.cck);
+            }
             instructions = instructions.saturating_add(result.instructions as usize);
             if !self.bus.window_offered {
                 self.bus.cache_free_window = None;

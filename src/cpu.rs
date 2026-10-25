@@ -8619,39 +8619,46 @@ mod tests {
     fn jit_speed_factor_divides_the_billed_cpu_clocks() -> Result<()> {
         let program = [0x4E71u16, 0x60FC]; // nop; bra.s <nop>
         let pc = FAST_RAM_BASE as u32 + 0x100;
-        let run = |factor: f64| -> Result<(u32, u32, f64)> {
+        let run = |factor: f64, chunk: usize| -> Result<(u32, u32, f64)> {
             let mut machine = machine_with_program_model(pc, &program, CpuModel::M68030)?;
             machine.set_jit_enabled(true);
             machine.set_jit_speed_factor(factor);
             let (mut clocks, mut cck) = (0u32, 0u32);
-            for _ in 0..10 {
-                let slice = machine.step_slice(4096)?;
-                assert_eq!(slice.instructions, 4096);
+            let mut remaining = 40_960;
+            while remaining != 0 {
+                let budget = chunk.min(remaining);
+                let slice = machine.step_slice(budget)?;
+                assert_eq!(slice.instructions, budget);
+                remaining -= slice.instructions;
                 clocks += slice.cpu_cycles;
                 cck += slice.cpu_cck;
             }
             Ok((clocks, cck, machine.jit_speed_factor()))
         };
-        let (fixed_clocks, fixed_cck, fixed_factor) = run(1.0)?;
+        let (fixed_clocks, fixed_cck, fixed_factor) = run(1.0, 4096)?;
         assert_eq!(fixed_clocks, 40_960, "one clock per instruction");
         assert_eq!(fixed_factor, 1.0);
-        let (fast_clocks, fast_cck, fast_factor) = run(4.0)?;
+        let (fast_clocks, fast_cck, fast_factor) = run(4.0, 4096)?;
         assert_eq!(fast_factor, 4.0);
         assert_eq!(fast_clocks * 4, fixed_clocks);
         assert_eq!(fast_cck * 4, fixed_cck);
-        let (third_clocks, _, _) = run(3.0)?;
+        let (third_clocks, _, _) = run(3.0, 4096)?;
         assert!(
             third_clocks.abs_diff(fixed_clocks / 3) <= 1,
             "{third_clocks} clocks at factor 3"
         );
         assert_eq!(
-            run(0.5)?.0,
+            run(0.5, 4096)?.0,
             fixed_clocks * 2,
             "overload backoff bills twice the clocks"
         );
         // Invalid factors fall back to the fixed clock.
         for factor in [0.0, -1.0, f64::NAN, f64::INFINITY] {
-            assert_eq!(run(factor)?.0, fixed_clocks, "factor {factor}");
+            assert_eq!(run(factor, 4096)?.0, fixed_clocks, "factor {factor}");
+        }
+        for factor in [0.5, 1.0, 1.5, 3.0, 80.0] {
+            assert_eq!(run(factor, 1)?, run(factor, 4096)?, "factor={factor}");
+            assert_eq!(run(factor, 63)?, run(factor, 4096)?, "factor={factor}");
         }
         Ok(())
     }

@@ -133,6 +133,8 @@ at each batch boundary. The timing contract is deliberately approximate
   bus access retains the same local-memory cache exclusions. Without emulated
   caches, they also skip the unused extra-region table and per-access prefix
   classification: there is no completed instruction prefix to synchronize.
+  Their timing is billed directly on return, without building or updating the
+  deferred-prefix state; interrupts and timed devices retain the same boundary.
   Interrupt-entry
   posted-write overlap is charged to the interrupt itself.
   Interrupts are recognized at those boundaries,
