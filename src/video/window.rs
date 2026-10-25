@@ -6265,7 +6265,7 @@ impl ApplicationHandler for App {
         if self.netplay.is_some() {
             if let DeviceEvent::MouseMotion { delta } = event {
                 if self.mouse_captured && self.main_window_focused {
-                    self.add_host_mouse_delta(delta.0, delta.1);
+                    self.add_captured_mouse_delta(delta.0, delta.1);
                 }
             }
             return;
@@ -6273,7 +6273,7 @@ impl ApplicationHandler for App {
         match event {
             DeviceEvent::MouseMotion { delta } => {
                 if self.mouse_captured {
-                    self.add_host_mouse_delta(delta.0, delta.1);
+                    self.add_captured_mouse_delta(delta.0, delta.1);
                 }
             }
             DeviceEvent::Key(event) => self.handle_raw_device_key_event(event),

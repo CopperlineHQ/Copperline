@@ -770,6 +770,16 @@ from parasyte/pixels#462, which gives up after one reconfigure. Both window
 kinds record the size their surface was configured with, and all resizes go
 through the wrappers that keep that record in step.
 
+Captured desktop mouse motion also inverts `PresentLayout`'s display scale:
+raw deltas are multiplied by the source-canvas extent divided by the physical
+display extent on each axis. This uses the same picture layout as uncaptured
+cursor mapping, including cropped, per-axis, RTG and debugger-pane placement.
+The result reaches the host sensitivity multiplier and fractional accumulator
+before whole counts enter the emulated mouse. Uncaptured cursor positions have
+already passed through the inverse layout and are not scaled again. Scripted
+and control-protocol counts, gamepad mouse motion, and the emulated JOYxDAT
+counter model are independent of this captured-device conversion.
+
 The present worker widens the gap between that check and the acquire: a
 frame is planned on the main thread and presented later, and on Windows the
 main thread pumps the modal size-move loop while the user drags an edge, so

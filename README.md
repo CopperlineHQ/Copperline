@@ -137,6 +137,11 @@ ordinary windows.
 - **Mouse capture**: `Cmd+G` (macOS) / `Alt+G` (Linux/Windows)
 - **Joystick toggle**: `Cmd+J` (macOS) / `Alt+J` (Linux/Windows) switches between physical gamepad and keyboard arrows.
 
+Captured mouse movement compensates for the picture's display scale, so
+enlarging the window or entering fullscreen does not amplify its speed.
+Adjust the live mouse speed with `[input] mouse_sensitivity` or the launcher's
+*Input* tab.
+
 See the [UI guide](docs/guide/ui.md) for full interface details.
 
 The camera button captures the displayed picture, including scaling, shaders

@@ -949,6 +949,19 @@ impl PresentLayout {
         draws
     }
 
+    /// Invert the display scale for relative host motion. Keep fractions here:
+    /// slow movement must accumulate after scaling and sensitivity are applied.
+    pub(super) fn mouse_delta(&self, dx: f64, dy: f64) -> Option<(f64, f64)> {
+        let (_, _, w, h) = self.display_dst;
+        if w == 0 || h == 0 {
+            return None;
+        }
+        Some((
+            dx * self.src_canvas.2 as f64 / f64::from(w),
+            dy * self.src_canvas.3 as f64 / f64::from(h),
+        ))
+    }
+
     /// Invert the layout for a host cursor position: surface physical
     /// pixels to logical canvas pixels, or `None` outside both rects.
     pub(super) fn cursor_position(
