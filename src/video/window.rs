@@ -5149,10 +5149,9 @@ impl ApplicationHandler for App {
                 let previous_cursor_pos = self.cursor_pos;
                 self.last_cursor_phys = Some(position);
                 let display_src = self.display_canvas_src();
-                let pos = self
-                    .render
-                    .as_ref()
-                    .and_then(|r| main_cursor_position(r, display_src, position));
+                let pos = self.render.as_ref().and_then(|r| {
+                    main_cursor_position(r, display_src, self.rtg_present_dims, position)
+                });
                 // A button held on the dial turns it by following the hand
                 // round the face.
                 #[cfg(feature = "mt32")]
@@ -5583,7 +5582,8 @@ impl ApplicationHandler for App {
                 let display_src = self.display_canvas_src();
                 let window_aperture_rows = self.window_tv_aperture_rows();
                 if let (Some(phys), Some(r)) = (self.last_cursor_phys, self.render.as_ref()) {
-                    self.cursor_pos = main_cursor_position(r, display_src, phys);
+                    self.cursor_pos =
+                        main_cursor_position(r, display_src, self.rtg_present_dims, phys);
                 }
                 let status = status_with_latched_fdd_track(
                     self.emu.bus().front_panel_status(),
@@ -5749,7 +5749,7 @@ impl ApplicationHandler for App {
                             }
                         }
                         let window = r.window.clone();
-                        let layout = main_present_layout(r, display_src);
+                        let layout = main_present_layout(r, display_src, self.rtg_present_dims);
                         // Under integer scaling the RTG pass draws the
                         // board's picture at a whole multiple of its own
                         // pixels, centred in the display rather than
@@ -5962,10 +5962,9 @@ impl ApplicationHandler for App {
                         // layout; every overlay pass below keys its viewport off
                         // the same display rect, and the cursor mapping inverts
                         // the same layout, so all of them agree by construction.
-                        // The branches that draw over the display (RTG, CRT,
-                        // bezel) only run when the sub-rect modes are
-                        // suspended, so their layout is the classic
-                        // whole-texture letterbox.
+                        // CRT and bezel passes use the classic whole-texture
+                        // letterbox. Integer RTG has its own native fit and
+                        // a separate chrome band.
                         // COPPERLINE_DIAG_AUTOCROP: the window half of the
                         // renderer-side envelope trace -- the exact rects the
                         // scaler pass draws this frame, logged when they

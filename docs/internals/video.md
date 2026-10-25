@@ -898,11 +898,18 @@ no seam; only what shows through the translucent box is the downscaled
 copy. The redraws take uniform slots of their own, because every queue
 write lands before any of the frame's commands run.
 
-Under integer scaling the pass draws the board frame at a whole multiple
-of its native resolution, centred in the display rect with black margins
-(`rtg_texture::picture_rect`), so the `FB_WIDTH` copy, stretched over the
-whole display, no longer sits where the picture does. Everything the CPU
-composes for the frame follows the pass's placement instead:
+Under integer scaling `surface_present_layout` fits the board's native
+dimensions against the host surface above a separately drawn chrome band.
+It does not inherit the chipset canvas's integer fit, which can restrict a
+640x480 board to 1x on a 1080p surface even though its native pixels fit at
+2x. The chrome band retains its classic size and docks to the bottom, as
+with autocrop. The debugger pane fits the same native dimensions within
+its own viewport, without a chrome band. A surface too small for 1x uses
+an aspect-preserving fractional fit. Smooth RTG keeps the classic layout.
+
+The native fit fills the display destination; unused host surface around
+it remains black. Everything the CPU composes for the frame follows the
+pass's placement through `rtg_texture::picture_rect`:
 `PresentLayout::rtg_integer_picture` gives the picture's rect as fractions
 of the display region, `copy_rtg_picture` lays the native frame into
 those display rows with the pass's own per-pixel test and point sample

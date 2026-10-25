@@ -12543,6 +12543,117 @@ fn the_rtg_viewport_is_the_display_rows_of_the_display_rect() {
     assert_eq!(pane.rtg_viewport(), (40.0, 30.0, 900.0, 677.0));
 }
 
+/// Native RTG pixels fit against the host display area, before any chipset
+/// canvas letterboxing. In particular 640x480 reaches 2x on 1080p even though
+/// the full canvas and chrome fit only once. DPI changes texture resolution,
+/// never the physical multiple of a board pixel.
+#[test]
+fn integer_rtg_layout_fits_native_pixels_against_the_surface() {
+    use super::scaler::ScaleFilter::Nearest;
+    use winit::dpi::PhysicalPosition;
+    for dpi in [1.0, 1.5, 2.0] {
+        for (surface, native, expected) in [
+            ((1920, 1080), (640, 480), (1280, 960)),
+            ((1920, 1040), (640, 480), (1280, 960)),
+            ((1280, 720), (640, 480), (640, 480)),
+            ((3840, 2160), (640, 480), (2560, 1920)),
+            ((1920, 1080), (800, 600), (800, 600)),
+            ((1920, 1080), (320, 200), (1600, 1000)),
+        ] {
+            let layout = super::surface_present_layout(surface, dpi, true, None, Some(native));
+            let (x, y, w, h) = layout.display_dst;
+            assert_eq!((w, h), expected, "{surface:?} {native:?} DPI {dpi}");
+            let chrome_h = layout.chrome_dst.map_or(0, |c| c.3);
+            assert_eq!(x, (surface.0 - w) / 2);
+            assert_eq!(y, (surface.1 - chrome_h - h) / 2);
+            assert_eq!(layout.filter, Nearest);
+            assert_eq!(layout.src_canvas, (0, 0, FB_WIDTH, super::present_height()));
+            assert_eq!(layout.rtg_integer_picture(native), [0.0, 0.0, 1.0, 1.0]);
+            assert_eq!(
+                layout.rtg_viewport(),
+                (x as f32, y as f32, w as f32, h as f32)
+            );
+            // The CPU fallback samples the whole board into the display rows,
+            // while overlays and pointer mapping follow this same placement.
+            assert_eq!(layout.draws()[0].dst, layout.display_dst);
+            assert_eq!(
+                layout.cursor_position(PhysicalPosition::new(x as f64, y as f64)),
+                Some((0, 0))
+            );
+            assert_eq!(
+                layout.cursor_position(PhysicalPosition::new(
+                    (x + w / 2) as f64,
+                    (y + h / 2) as f64
+                )),
+                Some((FB_WIDTH as i32 / 2, super::present_height() as i32 / 2))
+            );
+            assert!(layout
+                .cursor_position(PhysicalPosition::new((x + w) as f64, y as f64))
+                .is_none());
+            if let Some((cx, cy, cw, ch)) = layout.chrome_dst {
+                assert_eq!(cy + ch, surface.1);
+                assert!(y + h <= cy);
+                assert_eq!(layout.draws()[1].dst, (cx, cy, cw, ch));
+                assert_eq!(
+                    layout.cursor_position(PhysicalPosition::new(cx as f64, cy as f64)),
+                    Some((0, super::present_height() as i32))
+                );
+            }
+        }
+    }
+    let classic = super::surface_present_layout((1920, 1080), 1.0, true, None, None);
+    assert_eq!(classic.display_dst.2, FB_WIDTH as u32);
+    assert_eq!(
+        classic.rtg_integer_picture((640, 480))[2] * FB_WIDTH as f32,
+        640.0
+    );
+}
+
+/// With no bar the entire viewport is available. Panel bands reserve their
+/// actual height; a native mode that cannot fit at 1x shrinks with its own
+/// aspect instead of being cropped or stretched to the chipset canvas.
+#[test]
+fn integer_rtg_layout_reserves_chrome_and_falls_back_below_native_size() {
+    use super::scaler::ScaleFilter::{Nearest, SharpBilinear};
+    let native = (640, 480);
+    let full = super::integer_rtg_present_layout((0, 0, 1280, 960), native, None);
+    assert_eq!(full.display_dst, (0, 0, 1280, 960));
+    assert_eq!(full.filter, Nearest);
+    assert_eq!(full.draws().len(), 1);
+    let panel = (602, 900, 716, 180);
+    let layout = super::integer_rtg_present_layout((0, 0, 1920, 1080), native, Some(panel));
+    assert_eq!(layout.display_dst, (640, 210, 640, 480));
+    assert_eq!(layout.chrome_dst, Some(panel));
+    let small = super::surface_present_layout((600, 450), 1.0, true, None, Some(native));
+    assert_eq!(small.filter, SharpBilinear);
+    let (_, _, w, h) = small.display_dst;
+    assert!(w <= 600 && h <= 450);
+    assert!((w as f64 / h as f64 - 4.0 / 3.0).abs() < 0.01);
+    assert_eq!(small.rtg_integer_picture(native), [0.0, 0.0, 1.0, 1.0]);
+    // Invalid modes and smooth scaling retain the existing canvas layout.
+    for (integer, native) in [(true, (0, 480)), (true, (640, 0)), (false, (640, 480))] {
+        assert_eq!(
+            super::surface_present_layout((1920, 1080), 1.0, integer, None, Some(native)),
+            super::surface_present_layout((1920, 1080), 1.0, integer, None, None)
+        );
+    }
+}
+
+/// The debugger uses the same native fit within its offset display pane,
+/// including its pointer transform, without reserving main-window chrome.
+#[test]
+fn integer_rtg_layout_fits_the_debug_pane() {
+    use winit::dpi::PhysicalPosition;
+    let layout = super::debug_present_layout((17, 73, 1920, 1080), true, None, Some((640, 480)));
+    assert_eq!(layout.display_dst, (337, 133, 1280, 960));
+    assert!(layout.chrome_dst.is_none());
+    assert_eq!(
+        layout.cursor_position(PhysicalPosition::new(337.0, 133.0)),
+        Some((0, 0))
+    );
+    assert_eq!(layout.rtg_integer_picture((640, 480)), [0.0, 0.0, 1.0, 1.0]);
+}
+
 /// Issue 816: under integer scaling the RTG pass draws the board's
 /// picture at a whole multiple of its own pixels, centred in the display
 /// with black margins around it, so the corner overlays anchor to the

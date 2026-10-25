@@ -64,6 +64,8 @@ build option; unoptimized debug builds are too slow for real-time emulation.
 display offsets. Combine it with **Autocrop** and **Integer** scaling to fit
 the detected display at the largest whole-pixel scale, including artwork
 outside the normal TV aperture. See [display configuration](docs/guide/configuration.md).
+RTG integer scaling fits the board's native resolution to the available display
+area: a 640x480 desktop reaches 2x on a 1920x1080 screen, with room for the status bar.
 
 The [Debug workspace](docs/debugger/window.md) puts the Amiga display beside
 its debugger, Frame Analyzer, and Console in one desktop window. Open

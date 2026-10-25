@@ -616,27 +616,6 @@ pub(super) fn cap_texture_scale(plan: PresentPlan, hidpi: bool) -> PresentPlan {
     }
 }
 
-/// The live plan for the emulator window, from its configured surface
-/// size and the current scaling setting. Recomputed where it is needed
-/// rather than stored, so it can never lag a resize or a toggle.
-pub(super) fn main_present_plan(r: &Render) -> PresentPlan {
-    plan_present_scaling(
-        integer_scaling_requested(),
-        r.window.scale_factor(),
-        (r.surface_size.0.max(1), r.surface_size.1.max(1)),
-    )
-}
-
-/// The surface rect the emulator window's picture is drawn into: the
-/// scaler pass's destination, and the rect cursor mapping inverts.
-pub(super) fn main_clip_rect(r: &Render) -> (u32, u32, u32, u32) {
-    scaler::clip_rect_for(
-        (r.surface_size.0.max(1), r.surface_size.1.max(1)),
-        (FB_WIDTH as u32, window_present_height() as u32),
-        main_present_plan(r).multiple,
-    )
-}
-
 /// The emulator window's presentation layout: what part of the canvas
 /// the display draw shows, where it and the chrome band land on the
 /// surface, and how they are filtered. One function feeds the scaler
@@ -648,19 +627,20 @@ pub(super) struct PresentLayout {
     /// pixels `(x, y, w, h)`. The whole window canvas -- chrome included
     /// -- in the classic layout; the display region's sub-rect (an
     /// autocrop content rect, the TV aperture under per-axis integer
-    /// scaling) in a sub-rect layout.
+    /// scaling, or the full display rows for native RTG) in a sub-rect layout.
     pub(super) src_canvas: (usize, usize, usize, usize),
     /// Where that lands on the surface, physical pixels.
     pub(super) display_dst: (u32, u32, u32, u32),
     pub(super) filter: scaler::ScaleFilter,
     /// The chrome band's destination when the layout splits it from the
-    /// display (a sub-rect layout: autocrop, per-axis integer scaling):
+    /// display (a sub-rect layout: autocrop, per-axis integer scaling, RTG):
     /// the texture rows below `present_height` drawn across the surface
     /// bottom.
     pub(super) chrome_dst: Option<(u32, u32, u32, u32)>,
     /// The whole-number factors of the display draw, as surface pixels
     /// `(per canvas column, per field line)` -- a uniform multiple `m`
-    /// is `(m, 2 * m)` -- or `None` for a smooth fit.
+    /// is `(m, 2 * m)` -- or `None` when fitting smoothly or drawing the
+    /// RTG board's native pixels rather than canvas pixels.
     pub(super) factors: Option<(usize, usize)>,
 }
 
@@ -731,29 +711,58 @@ pub(super) fn aperture_canvas_rect(tv_aperture_rows: usize) -> (usize, usize, us
 /// display region to show (an autocrop content rect, the TV aperture
 /// under per-axis integer scaling) with the pixel shape to draw it at,
 /// or `None` for the classic whole-canvas letterbox (both modes off or
-/// suspended).
-pub(super) fn main_present_layout(r: &Render, src: Option<DisplaySrc>) -> PresentLayout {
+/// suspended). An integer-scaled RTG frame fits its own native dimensions
+/// instead of inheriting the chipset canvas's integer fit.
+pub(super) fn main_present_layout(
+    r: &Render,
+    src: Option<DisplaySrc>,
+    rtg: Option<(u32, u32)>,
+) -> PresentLayout {
     if let Some(viewport) = r.debug_viewport {
-        return debug_present_layout(viewport, integer_scaling_requested(), src);
+        return debug_present_layout(viewport, integer_scaling_requested(), src, rtg);
     }
     let surface = (r.surface_size.0.max(1), r.surface_size.1.max(1));
-    let Some(src) = src.filter(|src| src.rect.2 > 0 && src.rect.3 > 0) else {
-        let plan = main_present_plan(r);
+    surface_present_layout(
+        surface,
+        r.window.scale_factor(),
+        integer_scaling_requested(),
+        src,
+        rtg,
+    )
+}
+
+/// Main-window layout without a host window, shared by rendering and input
+/// and directly testable at physical surface sizes and DPI factors.
+pub(super) fn surface_present_layout(
+    surface: (u32, u32),
+    scale_factor: f64,
+    integer: bool,
+    src: Option<DisplaySrc>,
+    rtg: Option<(u32, u32)>,
+) -> PresentLayout {
+    let plan = plan_present_scaling(integer, scale_factor, surface);
+    let classic = scaler::clip_rect_for(
+        surface,
+        (FB_WIDTH as u32, window_present_height() as u32),
+        plan.multiple,
+    );
+    let src = src.filter(|src| src.rect.2 > 0 && src.rect.3 > 0);
+    let rtg = rtg.filter(|&(w, h)| integer && w > 0 && h > 0);
+    if src.is_none() && rtg.is_none() {
         return PresentLayout {
             src_canvas: (0, 0, FB_WIDTH, window_present_height()),
-            display_dst: main_clip_rect(r),
+            display_dst: classic,
             filter: plan.filter(),
             chrome_dst: None,
             factors: plan.multiple.map(|m| (m, 2 * m)),
         };
-    };
+    }
     // The chrome band keeps exactly the size and position the classic
     // letterbox gives it -- only bottom-anchored -- so toggling autocrop
     // resizes the picture, never the bar, and the band can never eat
     // more height than the crop gains (a surface-width bar on a 5K
     // fullscreen would be over 300 rows tall).
     let chrome_rows = window_present_height() - present_height();
-    let classic = main_clip_rect(r);
     let chrome_dst = (chrome_rows > 0 && classic.3 > 0).then(|| {
         let h =
             ((u64::from(classic.3) * chrome_rows as u64 / window_present_height().max(1) as u64)
@@ -761,11 +770,48 @@ pub(super) fn main_present_layout(r: &Render, src: Option<DisplaySrc>) -> Presen
                 .clamp(1, surface.1);
         (classic.0, surface.1 - h, classic.2, h)
     });
+    if let Some(native) = rtg {
+        return integer_rtg_present_layout((0, 0, surface.0, surface.1), native, chrome_dst);
+    }
     // The *requested* setting, not the classic plan's resolved multiple:
     // a surface too small for the whole canvas can still hold a whole
     // multiple of the crop (a 700-wide window around a 640-wide game),
     // and display_src_layout takes its own fit against the rect.
-    display_src_layout(surface, integer_scaling_requested(), src, chrome_dst)
+    display_src_layout(
+        surface,
+        integer,
+        src.expect("a valid display source"),
+        chrome_dst,
+    )
+}
+
+/// Fit native RTG pixels against the available host display area, independently
+/// of the chipset canvas. Chrome keeps its classic size in a separate bottom
+/// band, as it does for autocrop. Both the GPU board pass and the composed CPU
+/// fallback use this layout, including its overlay and pointer transforms.
+pub(super) fn integer_rtg_present_layout(
+    viewport: (u32, u32, u32, u32),
+    native: (u32, u32),
+    chrome_dst: Option<(u32, u32, u32, u32)>,
+) -> PresentLayout {
+    let (x, y, w, h) = viewport;
+    let avail = (
+        w.max(1),
+        h.saturating_sub(chrome_dst.map_or(0, |c| c.3)).max(1),
+    );
+    let multiple = (avail.0 / native.0).min(avail.1 / native.1) as usize;
+    let (dx, dy, dw, dh) = scaler::clip_rect_for(avail, native, (multiple > 0).then_some(multiple));
+    PresentLayout {
+        src_canvas: (0, 0, FB_WIDTH, present_height()),
+        display_dst: (x + dx, y + dy, dw, dh),
+        filter: if multiple > 0 {
+            scaler::ScaleFilter::Nearest
+        } else {
+            scaler::ScaleFilter::SharpBilinear
+        },
+        chrome_dst,
+        factors: None,
+    }
 }
 
 /// The debug display uses the same scaler and input transform, within its
@@ -774,7 +820,11 @@ pub(super) fn debug_present_layout(
     viewport: (u32, u32, u32, u32),
     integer: bool,
     src: Option<DisplaySrc>,
+    rtg: Option<(u32, u32)>,
 ) -> PresentLayout {
+    if let Some(native) = rtg.filter(|&(w, h)| integer && w > 0 && h > 0) {
+        return integer_rtg_present_layout(viewport, native, None);
+    }
     let (x, y, width, height) = viewport;
     let src = src
         .filter(|src| src.rect.2 > 0 && src.rect.3 > 0)
@@ -840,9 +890,8 @@ impl PresentLayout {
     }
 
     /// The viewport the RTG board pass draws over: [`Self::picture_rect`]
-    /// with the display's height kept fractional. An RTG frame suspends
-    /// the sub-rect modes, so the rect is the whole display region, the
-    /// canvas's first `present_height()` rows.
+    /// with the display's height kept fractional. Integer RTG layouts sample
+    /// only the display rows; classic layouts also include chrome below them.
     pub(super) fn rtg_viewport(&self) -> (f32, f32, f32, f32) {
         let (x, y, w, h) = self.display_dst;
         let picture_rows = self
@@ -1189,9 +1238,10 @@ pub(in crate::video) fn scale_rect(rect: Rect, scale: usize) -> Rect {
 pub(super) fn main_cursor_position(
     r: &Render,
     src: Option<DisplaySrc>,
+    rtg: Option<(u32, u32)>,
     position: winit::dpi::PhysicalPosition<f64>,
 ) -> Option<(i32, i32)> {
-    main_present_layout(r, src).cursor_position(position)
+    main_present_layout(r, src, rtg).cursor_position(position)
 }
 
 /// Map a position and clip rect in surface physical pixels to texture pixels.

@@ -477,10 +477,9 @@ impl App {
                 let previous_cursor_pos = self.cursor_pos;
                 self.last_cursor_phys = Some(*position);
                 let display_src = self.display_canvas_src();
-                let pos = self
-                    .render
-                    .as_ref()
-                    .and_then(|r| main_cursor_position(r, display_src, *position));
+                let pos = self.render.as_ref().and_then(|r| {
+                    main_cursor_position(r, display_src, self.rtg_present_dims, *position)
+                });
                 self.cursor_pos = pos;
                 if bar_hover_changed(&bar_layout(&self.media_bar()), previous_cursor_pos, pos) {
                     self.request_redraw();
