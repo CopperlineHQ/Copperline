@@ -2194,6 +2194,7 @@ fn debug_viewport_uses_the_same_pixel_rect_for_picture_and_input() {
                     par: (1, 1),
                     horizontal_repeat: 1,
                 }),
+                None,
             );
             let (x, y, w, h) = layout.display_dst;
             assert!(x >= viewport.0 && y >= viewport.1);
