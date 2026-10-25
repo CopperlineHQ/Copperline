@@ -826,3 +826,10 @@ compare timer IRQs and MMIO observations against one-instruction scheduling.
 This accelerator timing model has no matching vAmiga reference. Assemble with
 `vasmm68k_mot -Fbin -m68020 -o timing-test/jit-bus-boundary.bin
 timing-test/jit-bus-boundary.asm`.
+
+The JIT bus-boundary reference includes ROM direct-memory coverage. Excluding
+ROM from the CPU cache changes the bootstrap's clock phase; the beam-polled
+markers may start a few pixels differently than the former RAM-only window.
+Native-prefix/device ordering is also checked against single-instruction
+scheduling in the CPU tests. Inactive chipset span batching must leave this
+reference byte-identical.

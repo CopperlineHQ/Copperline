@@ -3982,6 +3982,7 @@ impl TraceJit {
                 );
                 Some(MemEnv {
                     fm_readonly,
+                    resolved_ptrs: std::cell::RefCell::new(std::collections::HashMap::new()),
                     pointer_sig,
                     pointer_fn,
                     tracked_writes,
@@ -9594,6 +9595,7 @@ struct MemEnv {
     fm_base: Value,
     fm_len: Value,
     fm_readonly: Value,
+    resolved_ptrs: std::cell::RefCell<std::collections::HashMap<Value, Value>>,
     pointer_sig: cranelift_codegen::ir::SigRef,
     pointer_fn: Value,
     address_mask: u32,
@@ -9693,12 +9695,97 @@ fn resolved_window_off(
     let slow = builder.create_block();
     let join = builder.create_block();
     builder.append_block_param(join, types::I32);
-    builder.ins().brif(miss, slow, &[], join, &[off.into()]);
+    builder.append_block_param(join, env.fm_ptr_ty);
+    let off_ptr = if env.fm_ptr_ty == types::I32 {
+        off
+    } else {
+        builder.ins().uextend(env.fm_ptr_ty, off)
+    };
+    let primary = builder.ins().iadd(env.fm_ptr, off_ptr);
+    builder
+        .ins()
+        .brif(miss, slow, &[], join, &[off.into(), primary.into()]);
     builder.switch_to_block(slow);
-    let extra = translated_window_off(builder, env, bail, masked, bytes, write);
-    builder.ins().jump(join, &[extra.into()]);
+    let extra = extra_window_pointer(builder, env, bail, masked, bytes, write);
+    builder.ins().jump(join, &[off.into(), extra.into()]);
     builder.switch_to_block(join);
-    builder.block_params(join)[0]
+    let off = builder.block_params(join)[0];
+    env.resolved_ptrs
+        .borrow_mut()
+        .insert(off, builder.block_params(join)[1]);
+    off
+}
+
+/// Search the small physical region table in generated code. Calling a host
+/// helper here forces native register spills even on the primary-window path.
+#[cfg(all(feature = "jit", not(target_family = "wasm")))]
+fn extra_window_pointer(
+    builder: &mut FunctionBuilder<'_>,
+    env: &MemEnv,
+    bail: Block,
+    address: Value,
+    bytes: u32,
+    write: bool,
+) -> Value {
+    use crate::core::window::Region;
+    let count = builder.ins().load(
+        env.fm_ptr_ty,
+        MemFlags::trusted(),
+        env.cpu,
+        offset_of!(CpuCore, fm_region_count) as i32,
+    );
+    let table = builder
+        .ins()
+        .iadd_imm(env.cpu, offset_of!(CpuCore, fm_regions) as i64);
+    let scan = builder.create_block();
+    let next = builder.create_block();
+    let found = builder.create_block();
+    builder.append_block_param(scan, env.fm_ptr_ty);
+    builder.append_block_param(found, env.fm_ptr_ty);
+    let zero = builder.ins().iconst(env.fm_ptr_ty, 0);
+    builder.ins().jump(scan, &[zero.into()]);
+    builder.switch_to_block(scan);
+    let index = builder.block_params(scan)[0];
+    let exhausted = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, index, count);
+    branch_guard(builder, bail, exhausted);
+    let offset = builder
+        .ins()
+        .imul_imm(index, std::mem::size_of::<Region>() as i64);
+    let region = builder.ins().iadd(table, offset);
+    let base = load_u32(builder, region, offset_of!(Region, base));
+    let len = load_u32(builder, region, offset_of!(Region, len));
+    let off = builder.ins().isub(address, base);
+    let short = builder
+        .ins()
+        .icmp_imm(IntCC::UnsignedLessThan, len, i64::from(bytes));
+    let end = builder.ins().iadd_imm(len, -i64::from(bytes));
+    let outside = builder.ins().icmp(IntCC::UnsignedGreaterThan, off, end);
+    let mut miss = builder.ins().bor(short, outside);
+    if write {
+        let writable = load_u8(builder, region, offset_of!(Region, writable));
+        let readonly = builder.ins().icmp_imm(IntCC::Equal, writable, 0);
+        miss = builder.ins().bor(miss, readonly);
+    }
+    let ptr = builder.ins().load(
+        env.fm_ptr_ty,
+        MemFlags::trusted(),
+        region,
+        offset_of!(Region, ptr) as i32,
+    );
+    let off = if env.fm_ptr_ty == types::I32 {
+        off
+    } else {
+        builder.ins().uextend(env.fm_ptr_ty, off)
+    };
+    let ptr = builder.ins().iadd(ptr, off);
+    builder.ins().brif(miss, next, &[], found, &[ptr.into()]);
+    builder.switch_to_block(next);
+    let index = builder.ins().iadd_imm(index, 1);
+    builder.ins().jump(scan, &[index.into()]);
+    builder.switch_to_block(found);
+    builder.block_params(found)[0]
 }
 
 /// The window offset of a `bytes`-long data access at the logical `masked`
@@ -9730,6 +9817,9 @@ fn translated_window_off(
 
 #[cfg(all(feature = "jit", not(target_family = "wasm")))]
 fn window_host_addr(builder: &mut FunctionBuilder<'_>, env: &MemEnv, off: Value) -> Value {
+    if let Some(&ptr) = env.resolved_ptrs.borrow().get(&off) {
+        return ptr;
+    }
     let primary = builder.create_block();
     let extra = builder.create_block();
     let join = builder.create_block();
