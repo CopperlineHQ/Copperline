@@ -227,7 +227,7 @@ both fractional carries on return. No host clock enters the core, no transient
 burst state is serialized, and hardware event synchronization uses the same
 batch-boundary contract. Fixed clocks and unpaced headless runs retain their
 usual deterministic billing. See [pacing](#jit-fastest-pacing) for policy and
-[](jit-performance.md) for measured results and reproduction commands.
+[](jit-performance.md) for measurement methods and reproduction commands.
 
 The 68000 and 68010 never take the batch path. On the small-box machines
 every CPU cycle drives the one bus shared with Agnus, and the floating-bus

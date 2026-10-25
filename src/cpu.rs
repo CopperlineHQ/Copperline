@@ -5004,6 +5004,15 @@ impl CpuBus {
         Some(window)
     }
 
+    /// Direct windows bypass the shared-bus data latch, so the 68000/68010
+    /// never receive them: ROM and OS memory sizing depend on the latch's
+    /// fetch/access order. Interceptors must also see every access -- memory
+    /// write hooks, heat maps, self-modifying-code detection and injected bus
+    /// faults all withhold both the primary window and additional regions.
+    ///
+    /// The core captures windows again on every run_batch. Recomputing the
+    /// selected bank, mappings and cache exclusions there picks up autoconfig,
+    /// RESET and restored/replaced backing memory before direct access resumes.
     fn jit_windows_allowed(&self) -> bool {
         self.jit_enabled
             && self.bus.cpu_short_bus_cycle()

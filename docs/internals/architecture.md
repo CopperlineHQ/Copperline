@@ -232,10 +232,12 @@ The flow of a frame:
 
 1. The frame loop hands the CPU an instruction budget. The CPU executes
    one instruction at a time through the `m68k` core (or, with
-   the experimental `[cpu] jit`, in fixed multi-instruction batches; see
-   [](cpu.md)). Every memory access the instruction makes is routed through
-   the bus adapter and *billed in colour clocks* (CCK, 3.546895 MHz -- the
-   chip bus clock). The precise CPU loop selects its diagnostic-capable or
+   the experimental `[cpu] jit`, in batches bounded by hardware deadlines,
+   up to 4096 instructions for local RAM/ROM and one for shared-bus code;
+   see [](cpu.md)). Shared-memory and device accesses pass through the bus
+   adapter and are *billed in colour clocks* (CCK, 3.546895 MHz -- the
+   chip bus clock). JIT direct-memory accesses use the local RAM/ROM windows
+   described in the CPU chapter. The precise CPU loop selects its diagnostic-capable or
    branch-free normal form once per slice. Arming a debugger, trace, watchpoint, waveform PC
    trigger or diagnostic recorder selects the former; normal and browser
    runs therefore do not retest every inactive hook after every instruction.
