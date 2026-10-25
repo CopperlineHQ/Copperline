@@ -901,8 +901,10 @@ The fit uses the window area above the status bar and open panel strips,
 independently of the chipset canvas: a 640x480 board screen fits at 2x on
 a 1920x1080 display. The debugger's display pane uses the same native fit.
 The performance readout, the on-screen messages and the recording badge
-sit at the corners of that picture, and
-it keeps its size and place while a menu or panel is open over it.
+sit at the corners of that picture. Menus, panels and their translucent
+backgrounds are composited over the native RTG texture, so opening them
+preserves its exact pixel blocks, size and position, including with the
+status bar hidden.
 
 Integer scaling draws from the unresampled canvas (one host row per woven
 scanline, matching `pixel_aspect = "square"`). Under the default TV aspect,

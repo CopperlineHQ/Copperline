@@ -2628,6 +2628,23 @@ pub(super) fn blend_pixel(
     let alpha = alpha.clamp(0.0, 1.0);
     let off = (y * texture_width(texture_scale) + x) * 4;
     let src = color.to_le_bytes();
+    if frame[off + 3] < 0xFF {
+        // Straight-alpha UI layers can sit over a native GPU picture. Keep
+        // the unattenuated colour and accumulated coverage until that final
+        // composite, rather than baking an opaque black background into it.
+        let dst_alpha = frame[off + 3] as f32 / 255.0;
+        let coverage = alpha + dst_alpha * (1.0 - alpha);
+        if coverage > 0.0 {
+            for chan in 0..3 {
+                frame[off + chan] = ((src[chan] as f32 * alpha
+                    + frame[off + chan] as f32 * dst_alpha * (1.0 - alpha))
+                    / coverage)
+                    .round() as u8;
+            }
+            frame[off + 3] = (coverage * 255.0).round() as u8;
+        }
+        return;
+    }
     for chan in 0..3 {
         let dst = frame[off + chan] as f32;
         let src = src[chan] as f32;

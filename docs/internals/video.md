@@ -881,22 +881,19 @@ reuse that CL-GD5428 core. The window presents
 that frame at its native resolution through a dedicated GPU texture
 (`window/rtg_texture.rs`) rather than the 716-wide chipset buffer, and the
 TV aperture crop is suppressed -- it is a chipset crop rect, and applying it
-would show a sub-rect of the board's screen. The GPU pass draws over the
-display rect after the scaler has drawn the composed texture, so anything
-the CPU composed over the picture would be painted out. While a menu,
-panel, guest overlay or drop hint is up the window falls back to the CPU
-present path (at the cost of the downscale) so it is not overdrawn. The
-corner overlays -- the `REC` badge, the performance readout and the OSD
-message -- keep the GPU pass instead, since the badge and the readout stay
-up for long stretches: they are composed as usual over the `FB_WIDTH` copy
-of the board frame, each drawer reports the box it painted, and after the
-RTG texture `PresentScaler::render_overlays` redraws just those boxes from
-the composed texture on top. `PresentLayout::overlay_draw` maps each box to
-whole surface pixels and derives its source rect back from them, so the
-redrawn box is sampled exactly as the display draw sampled it and leaves
-no seam; only what shows through the translucent box is the downscaled
-copy. The redraws take uniform slots of their own, because every queue
-write lands before any of the frame's commands run.
+would show a sub-rect of the board's screen. The GPU pass always draws the
+native RTG texture, including while menus, panels, guest debug overlays or
+drop hints are visible. The CPU clears the display rows to transparent and
+paints only the UI. `blend_pixel` preserves straight-alpha colours and
+accumulates coverage, keeping existing opaque CPU composition unchanged.
+After RTG, `PresentScaler::render_overlays` alpha-composites the UI layer
+using `PresentLayout::rtg_ui_draw`. Its shader premultiplies colours in
+linear light before sharp-bilinear filtering, preventing transparent
+neighbours from introducing dark fringes. UI text has its own filter;
+the board's native integer blocks never pass through the UI canvas.
+Chrome outside the display region remains part of the initial scaler draw.
+The UI redraw takes a separate uniform slot because every queue write
+lands before any of the frame's commands run.
 
 Under integer scaling `surface_present_layout` fits the board's native
 dimensions against the host surface above a separately drawn chrome band.
@@ -911,15 +908,12 @@ The native fit fills the display destination; unused host surface around
 it remains black. Everything the CPU composes for the frame follows the
 pass's placement through `rtg_texture::picture_rect`:
 `PresentLayout::rtg_integer_picture` gives the picture's rect as fractions
-of the display region, `copy_rtg_picture` lays the native frame into
-those display rows with the pass's own per-pixel test and point sample
-(`rtg_texture::picture_texel`) and the pass's black around it, and the
-corner overlays anchor to the picture's whole canvas pixels
+of the display region, and the corner overlays anchor to its whole canvas pixels
 (`picture_canvas_rect`) rather than to the display. The readout, badge and
 message therefore sit at the picture's corners and blend over the same
-board pixels the pass draws under them, and the CPU fallback for a menu,
-panel or guest overlay shows the picture at the pass's size and place
-rather than stretched, at the texture's resolution. If the
+board pixels the pass draws under them. Opening a menu or panel leaves
+the layout and native board texture unchanged, including when the status
+bar is hidden. If the
 board claims the display but its frame does not compose yet (mode set
 before the resolution registers), presentation falls back to the chipset
 render rather than freezing on a stale frame.

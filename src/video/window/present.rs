@@ -915,6 +915,25 @@ impl PresentLayout {
         rtg_texture::picture_rect((w, h), native, true)
     }
 
+    /// The transparent CPU UI layer over the native RTG picture. Its glyphs
+    /// are canvas pixels, so filter them independently of the board's exact
+    /// whole-pixel blocks when the native fit is fractional in canvas units.
+    pub(super) fn rtg_ui_draw(&self) -> Option<scaler::ScalerDraw> {
+        self.overlay_draw(
+            Rect {
+                x: 0,
+                y: 0,
+                w: FB_WIDTH,
+                h: present_height(),
+            },
+            1,
+        )
+        .map(|draw| scaler::ScalerDraw {
+            filter: scaler::ScaleFilter::SharpBilinear,
+            ..draw
+        })
+    }
+
     /// The scaler-pass draws this layout amounts to. The classic layout
     /// is one whole-texture draw; a sub-rect layout samples the rect's
     /// uv sub-rect and adds the chrome band below it.
@@ -1505,67 +1524,6 @@ pub(super) fn picture_canvas_rect(picture: [f32; 4]) -> (usize, usize, usize, us
     let (x, w) = span(picture[0], picture[2], FB_WIDTH);
     let (y, h) = span(picture[1], picture[3], present_height());
     (x, y, w, h)
-}
-
-/// Lay an RTG board frame (`native` pixels, row-major) into the display
-/// rows of the window texture where the RTG pass draws it under integer
-/// scaling: `picture` is the part of the display it covers
-/// ([`PresentLayout::rtg_integer_picture`]), every texture pixel shows
-/// the board pixel the pass samples at its centre, and the margin around
-/// the picture is the pass's black. The `FB_WIDTH` copy
-/// [`copy_window_present_frame`] makes stretches the frame over the whole
-/// display instead, which is only where the smooth fit puts it.
-pub(super) fn copy_rtg_picture(
-    board: &[u32],
-    native: (u32, u32),
-    picture: [f32; 4],
-    frame: &mut [u8],
-    texture_scale: usize,
-) {
-    const BLACK: u32 = 0xFF00_0000;
-    let board_w = native.0 as usize;
-    let stride_px = texture_width(texture_scale);
-    let stride = stride_px * 4;
-    let rows = present_height() * texture_scale;
-    let display = &mut frame[..rows * stride];
-    if board.len() < board_w * native.1 as usize {
-        // Not a frame of the size it claims: show the margin, not garbage.
-        for px in display.chunks_exact_mut(4) {
-            px.copy_from_slice(&BLACK.to_le_bytes());
-        }
-        return;
-    }
-    // The board column under each texture column; `None` in the margin.
-    let columns: Vec<Option<u32>> = (0..stride_px)
-        .map(|x| {
-            let centre = (x as f32 + 0.5) / stride_px as f32;
-            rtg_texture::picture_texel(centre, picture[0], picture[2], native.0)
-        })
-        .collect();
-    // Runs of texture rows show one board row (or the margin): a run's
-    // later rows copy the row just built.
-    let mut built: Option<(Option<u32>, usize)> = None;
-    for y in 0..rows {
-        let centre = (y as f32 + 0.5) / rows as f32;
-        let src_y = rtg_texture::picture_texel(centre, picture[1], picture[3], native.1);
-        let dst_off = y * stride;
-        if let Some((built_y, built_off)) = built {
-            if built_y == src_y {
-                display.copy_within(built_off..built_off + stride, dst_off);
-                continue;
-            }
-        }
-        built = Some((src_y, dst_off));
-        let row = src_y.map(|src_y| &board[src_y as usize * board_w..][..board_w]);
-        let dst = &mut display[dst_off..dst_off + stride];
-        for (px, column) in dst.chunks_exact_mut(4).zip(&columns) {
-            let colour = match (row, column) {
-                (Some(row), Some(x)) => row[*x as usize],
-                _ => BLACK,
-            };
-            px.copy_from_slice(&colour.to_le_bytes());
-        }
-    }
 }
 
 /// The live-window TV copy presents the captured aperture

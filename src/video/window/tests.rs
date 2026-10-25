@@ -12706,51 +12706,20 @@ fn an_integer_rtg_picture_anchors_the_corner_overlays_inside_it() {
     );
 }
 
-/// The CPU copy of an RTG frame under integer scaling lays the board out
-/// where the pass draws it: every texture pixel shows the board pixel
-/// under its centre, the margin around the picture is black, and the
-/// chrome rows below the display are left alone. Here a 32x16 board,
-/// every pixel its own colour, covers canvas columns 100..164 and rows
-/// 50..82, two canvas pixels per board pixel. A frame shorter than its
-/// claimed size shows only the margin.
 #[test]
-fn the_integer_rtg_copy_lays_the_board_where_the_pass_draws_it() {
-    const BLACK: [u8; 4] = 0xFF00_0000u32.to_le_bytes();
-    const UNTOUCHED: [u8; 4] = [0xAB; 4];
-    let ph = super::present_height();
-    let native = (32u32, 16u32);
-    let board: Vec<u32> = (0..32 * 16).map(|i| 0xFF00_0000 | i).collect();
-    let picture = [
-        100.0 / FB_WIDTH as f32,
-        50.0 / ph as f32,
-        64.0 / FB_WIDTH as f32,
-        32.0 / ph as f32,
-    ];
-    for scale in [1, 2] {
-        let mut frame = vec![0xABu8; texture_width(scale) * texture_height(scale) * 4];
-        super::copy_rtg_picture(&board, native, picture, &mut frame, scale);
-        for y in 0..texture_height(scale) {
-            for x in 0..texture_width(scale) {
-                let want = if y >= ph * scale {
-                    UNTOUCHED
-                } else if (100 * scale..164 * scale).contains(&x)
-                    && (50 * scale..82 * scale).contains(&y)
-                {
-                    let (bx, by) = (
-                        (x - 100 * scale) / (2 * scale),
-                        (y - 50 * scale) / (2 * scale),
-                    );
-                    board[by * 32 + bx].to_le_bytes()
-                } else {
-                    BLACK
-                };
-                assert_eq!(pixel(&frame, x, y, scale), want, "({x}, {y}) at {scale}x");
-            }
-        }
-    }
-    let mut frame = vec![0xABu8; texture_width(1) * texture_height(1) * 4];
-    super::copy_rtg_picture(&board[..100], native, picture, &mut frame, 1);
-    assert!((0..ph).all(|y| (0..FB_WIDTH).all(|x| pixel(&frame, x, y, 1) == BLACK)));
+fn translucent_ui_accumulates_coverage_without_an_opaque_background() {
+    let mut frame = vec![0u8; texture_width(1) * texture_height(1) * 4];
+    let blend = super::statusbar::blend_pixel;
+    blend(&mut frame, 0, 0, rgba(200, 100, 50), 0.0, 1);
+    assert_eq!(pixel(&frame, 0, 0, 1), [0; 4]);
+    blend(&mut frame, 0, 0, rgba(200, 100, 50), 0.5, 1);
+    assert_eq!(pixel(&frame, 0, 0, 1), [200, 100, 50, 128]);
+    blend(&mut frame, 0, 0, rgba(0, 200, 150), 0.5, 1);
+    assert_eq!(pixel(&frame, 0, 0, 1), [67, 167, 117, 192]);
+    // Existing opaque CPU composition keeps its original rounding.
+    frame[..4].copy_from_slice(&rgba(11, 21, 33).to_le_bytes());
+    blend(&mut frame, 0, 0, rgba(200, 100, 50), 0.25, 1);
+    assert_eq!(pixel(&frame, 0, 0, 1), [58, 41, 37, 255]);
 }
 
 #[test]

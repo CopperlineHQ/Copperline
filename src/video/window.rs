@@ -2024,7 +2024,7 @@ struct PictureFrame {
 enum PresentPass {
     Plain,
     /// The RTG board's own texture over the display rect, then the
-    /// corner overlays' boxes from the composed texture back over it.
+    /// transparent CPU UI layer back over it.
     Rtg {
         rect: (f32, f32, f32, f32),
         integer_scaling: bool,
@@ -5644,39 +5644,16 @@ impl ApplicationHandler for App {
                 let ui_data = self.build_panel_view_data();
                 let inspector_ui = self.debugger_ui.as_mut().filter(|_| debug_layout);
                 if let Some(r) = self.render.as_mut() {
-                    // RTG with a working GPU pipeline presents the native frame
-                    // through its own texture in the GPU render pass below.
-                    //
-                    // Not while the UI is up, though: that pass overdraws the
-                    // display region after the UI has been drawn into it, so
-                    // an open menu or panel would be painted over and vanish.
-                    // Fall back to the CPU present, which composites the UI on
-                    // top as usual, at the cost of the FB_WIDTH downscale
-                    // (or, under integer scaling, the texture's resolution)
-                    // for as long as the overlay is open. The picture keeps
-                    // the pass's size and place either way.
-                    // The guest's fn-88 overlay is composited on the CPU
-                    // canvas too, so it needs the same fallback: the GPU
-                    // RTG pass would overdraw it. So does the drop hint,
-                    // which scrims the whole display as a panel does.
-                    //
-                    // The corner overlays (record badge, performance
-                    // readout, OSD message) keep the GPU pass: they are
-                    // small boxes, put back over the board texture after
-                    // it is drawn, and the readout and the badge stay up
-                    // for long stretches that the soft fallback would
-                    // spoil.
-                    let rtg_gpu = self.rtg_present_dims.is_some()
-                        && !self.ui.active()
-                        && guest_overlay.is_empty()
-                        && !self.drop_hover;
-                    let corner_overlays = recording || self.perf_overlay || osd.is_some();
+                    // RTG always presents the native board texture. The CPU
+                    // paints only a transparent UI layer, alpha-composited
+                    // after it, so opening a menu, panel or guest overlay
+                    // cannot switch the board to a twice-resampled copy.
+                    let rtg_gpu = self.rtg_present_dims.is_some();
                     // The CRT pass re-draws the display rect from the same
                     // buffer, so it also re-draws whatever the UI composited
                     // into it -- through curvature and a phosphor mask, which
                     // is unreadable for menu and panel text. Suspend it while
-                    // an overlay is open, as the RTG arm above does for its
-                    // own reason.
+                    // an overlay is open.
                     //
                     // Off for two kinds of frame that have no 15 kHz line
                     // structure to reproduce: RTG board scanout (which reaches
@@ -5754,11 +5731,9 @@ impl ApplicationHandler for App {
                         // board's picture at a whole multiple of its own
                         // pixels, centred in the display rather than
                         // stretched over it. What the CPU composes for the
-                        // frame -- the picture itself while the CPU present
-                        // stands in for the pass, the copy the corner
-                        // overlays blend over, the overlays -- is laid out
-                        // where the pass puts it, so nothing moves or
-                        // resizes between the two paths.
+                        // frame -- the transparent UI and its corner
+                        // overlays -- is laid out where the pass puts it,
+                        // independently of whether a menu or panel is open.
                         let rtg_integer_picture = self
                             .rtg_present_dims
                             .filter(|_| integer_scaling_requested())
@@ -5794,26 +5769,14 @@ impl ApplicationHandler for App {
                         if picture_on_gpu {
                             // The picture reaches the surface from its own
                             // texture; the frame's display rows go unsampled.
-                        } else if rtg_gpu && !corner_overlays {
-                            // The GPU pass overdraws the display region; black it
-                            // out so nothing stale shows at the seams.
+                        } else if rtg_gpu {
+                            // Leave the display transparent for the UI pass.
+                            // Native RTG pixels never enter this lower-resolution
+                            // canvas, even behind translucent panels or menus.
                             let rows = present_height() * texture_scale;
                             let stride = texture_width(texture_scale) * 4;
                             frame[..rows * stride].fill(0);
-                        } else if let Some((dims, picture)) = rtg_integer_picture {
-                            // Under the GPU RTG pass a copy of the board frame
-                            // only shows through the corner overlays: their
-                            // boxes are translucent, so they blend over it like
-                            // they blend over any picture, and the GPU then
-                            // puts just those boxes back over the native one.
-                            // Under integer scaling that copy has to sit where
-                            // the pass puts the picture, which the FB_WIDTH
-                            // copy below (stretched over the display, as the
-                            // smooth fit draws it) does not.
-                            copy_rtg_picture(&self.rtg_fb, dims, picture, frame, texture_scale);
                         } else {
-                            // Under the GPU RTG pass this copy only shows
-                            // through the corner overlays, as above.
                             copy_window_present_frame(
                                 &self.present_fb,
                                 self.present_rows,
@@ -5909,38 +5872,23 @@ impl ApplicationHandler for App {
                                 overlay_anchor,
                             );
                         }
-                        // The boxes the corner overlays paint, for the GPU
-                        // RTG pass to put back over the board texture.
-                        let mut overlay_boxes = Vec::new();
                         if recording {
                             // Painted into the presentation texture only, so
                             // the badge never appears in the recorded file.
-                            overlay_boxes.push(draw_record_badge(
-                                frame,
-                                texture_scale,
-                                corner,
-                                overlay_anchor,
-                            ));
+                            draw_record_badge(frame, texture_scale, corner, overlay_anchor);
                         }
                         if self.perf_overlay {
-                            overlay_boxes.extend(draw_perf_overlay(
+                            let _ = draw_perf_overlay(
                                 frame,
                                 &self.perf.lines,
                                 texture_scale,
                                 recording,
                                 corner,
                                 overlay_anchor,
-                            ));
+                            );
                         }
                         if let Some((text, warning)) = &osd {
-                            overlay_boxes.push(draw_osd(
-                                frame,
-                                text,
-                                *warning,
-                                texture_scale,
-                                corner,
-                                overlay_anchor,
-                            ));
+                            draw_osd(frame, text, *warning, texture_scale, corner, overlay_anchor);
                         }
                         // The focus lights its control the way the pointer
                         // does, breathing between the two.
@@ -6026,10 +5974,7 @@ impl ApplicationHandler for App {
                             PresentPass::Rtg {
                                 rect: layout.rtg_viewport(),
                                 integer_scaling: integer_scaling_requested(),
-                                overlays: overlay_boxes
-                                    .iter()
-                                    .filter_map(|&rect| layout.overlay_draw(rect, texture_scale))
-                                    .collect(),
+                                overlays: layout.rtg_ui_draw().into_iter().collect(),
                             }
                         } else if crt_active || bezel_active {
                             let scanlines = crt_scanline_count(

@@ -21,11 +21,9 @@
 //! around the picture -- and the [`RtgUniforms`] mapping puts the image in
 //! the middle of it, with the fragments around it painted black.
 //!
-//! Whatever the window composes for an RTG frame on the CPU -- the corner
-//! overlays, the copy of the board frame they blend over, and the whole
-//! picture while a menu forces the CPU present -- is laid out by
-//! [`picture_rect`] and [`picture_texel`], the same placement and sample
-//! the pass takes, so it lands where the pass draws.
+//! The window paints UI into a transparent canvas and alpha-composites it
+//! after this pass. Menus, panels, corner overlays and guest debug overlays
+//! therefore share the display layout without resampling the board pixels.
 
 use pixels::wgpu;
 use std::borrow::Cow;
@@ -133,17 +131,6 @@ pub(super) fn picture_rect(
     } else {
         FILL_VIEWPORT.rect
     }
-}
-
-/// The board pixel the pass shows at `centre` -- a pixel centre, as a
-/// fraction of the viewport along one axis -- when the picture starts at
-/// `start` and spans `len` of it, `native` board pixels across; `None` in
-/// the black margin. The CPU form of the shader's per-fragment test and
-/// point sample: both ends of the picture are inside, and the sample
-/// clamps to the last pixel as the sampler does.
-pub(super) fn picture_texel(centre: f32, start: f32, len: f32, native: u32) -> Option<u32> {
-    let t = (centre - start) / len;
-    ((0.0..=1.0).contains(&t) && native > 0).then(|| ((t * native as f32) as u32).min(native - 1))
 }
 
 /// A native-resolution RTG display texture and the pipeline that scales it
@@ -714,17 +701,22 @@ mod tests {
         );
     }
 
-    /// The window lays out what it composes for an RTG frame on the CPU
-    /// by `picture_rect` and `picture_texel`, and that only lines up if
-    /// they put every board pixel exactly where the pass does: for each
-    /// pixel of the real pass's output, the board pixel (or the black
-    /// margin) the CPU figures say is there. The board's neighbours all
-    /// differ in colour, so a pixel off on either axis shows. The rects
-    /// leave whole-pixel margins: a margin of half a pixel puts a pixel
-    /// centre exactly on the picture's edge, where the GPU's interpolated
-    /// coordinate and the CPU's own can round either way.
+    /// The board pixel the pass shows at `centre` -- a pixel centre, as a
+    /// fraction of the viewport along one axis -- when the picture starts at
+    /// `start` and spans `len` of it, `native` board pixels across; `None` in
+    /// the black margin. The CPU form of the shader's per-fragment test and
+    /// point sample: both ends of the picture are inside, and the sample
+    /// clamps to the last pixel as the sampler does.
+    fn picture_texel(centre: f32, start: f32, len: f32, native: u32) -> Option<u32> {
+        let t = (centre - start) / len;
+        ((0.0..=1.0).contains(&t) && native > 0)
+            .then(|| ((t * native as f32) as u32).min(native - 1))
+    }
+
+    /// Every native texel reaches the expected uniform host-pixel block,
+    /// including black margins and the too-small fallback.
     #[test]
-    fn the_cpu_placement_puts_every_board_pixel_where_the_pass_does() {
+    fn the_native_pass_puts_every_board_pixel_in_its_uniform_blocks() {
         let Some(gpu) = gpu() else {
             return;
         };
