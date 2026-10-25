@@ -516,6 +516,9 @@ struct CpuBus {
     cacr_040_layout: bool,
     /// Transient accounting inside one run_batch call, never snapshotted.
     jit_batch: Option<JitBatchTiming>,
+    /// Cache exclusions may be reused only within one CPU slice, until a
+    /// write, RESET or primary-bank change. Never caches a backing pointer.
+    jit_cache_exclusions_current: bool,
     jit_bus_boundary: bool,
 }
 
@@ -610,6 +613,7 @@ impl M68kMachine {
                 jit_window_bank: None,
                 cacr_040_layout: cacr_040,
                 jit_batch: None,
+                jit_cache_exclusions_current: false,
                 jit_bus_boundary: false,
             },
             fpu_enabled,
@@ -1886,6 +1890,7 @@ impl M68kMachine {
         // capture drops those lines before the core writes the window.
         self.bus.cache_free_window = None;
         self.bus.cache_free_regions = [None; MAX_FAST_MEM_REGIONS];
+        self.bus.jit_cache_exclusions_current = false;
         self.last_cacr = runtime.last_cacr;
         self.sync_cck_on = runtime.sync_cck_on;
         self.cpu_clocks_per_cck = runtime.cpu_clocks_per_cck;
@@ -4564,6 +4569,9 @@ impl CpuBus {
     }
 
     fn write_sized_unobserved(&mut self, address: u32, size: usize, value: u32) {
+        // Autoconfig and peripheral writes can change mappings. Conservatively
+        // invalidate on every bus write; direct RAM stores cannot remap banks.
+        self.jit_cache_exclusions_current = false;
         let addr = self.mask(address);
         self.note_cpu_data_bus(addr, size, value);
         if self.bus.smc.is_some() {
@@ -4990,6 +4998,7 @@ impl CpuBus {
     /// table holds still depend on it for cache and bus timing.
     fn jit_fast_mem(&mut self) -> Option<FastMem> {
         if !self.jit_windows_allowed() {
+            self.jit_cache_exclusions_current = false;
             return None;
         }
         let bank = self
@@ -5000,6 +5009,9 @@ impl CpuBus {
             })
             .or_else(|| self.largest_fast_ram_bank())?;
         let window = self.fast_mem_for(bank);
+        if self.jit_window_bank != Some(window.base) {
+            self.jit_cache_exclusions_current = false;
+        }
         self.jit_window_bank = Some(window.base);
         Some(window)
     }
@@ -5010,9 +5022,10 @@ impl CpuBus {
     /// write hooks, heat maps, self-modifying-code detection and injected bus
     /// faults all withhold both the primary window and additional regions.
     ///
-    /// The core captures windows again on every run_batch. Recomputing the
-    /// selected bank, mappings and cache exclusions there picks up autoconfig,
-    /// RESET and restored/replaced backing memory before direct access resumes.
+    /// The primary bank and native pointers are captured again for every
+    /// batch. Cache exclusions refresh after mapping invalidation and at each
+    /// slice entry, covering autoconfig, RESET and restored/replaced backing
+    /// memory before direct access resumes.
     fn jit_windows_allowed(&self) -> bool {
         self.jit_enabled
             && self.bus.cpu_short_bus_cycle()
@@ -5028,6 +5041,7 @@ impl CpuBus {
         let mut regions = [None; MAX_FAST_MEM_REGIONS];
         if !self.jit_windows_allowed() {
             self.cache_free_regions.fill(None);
+            self.jit_cache_exclusions_current = false;
             return regions;
         }
         let mut count = 0;
@@ -5105,6 +5119,7 @@ impl CpuBus {
             self.cache_free_regions = ranges;
         }
         self.window_offered |= count != 0;
+        self.jit_cache_exclusions_current = true;
         regions
     }
 
@@ -5284,19 +5299,20 @@ impl AddressBus for CpuBus {
     }
 
     fn fast_mem_regions(&mut self) -> [Option<FastMemRegion>; MAX_FAST_MEM_REGIONS] {
-        // One instruction cannot enter native code. With no emulated caches,
-        // there are no exclusions to maintain either: avoid walking every bank
-        // and building a pointer table that run_batch will immediately discard.
-        // The primary window still records the selected bank for save/restore.
-        if self.jit_single_instruction_batch() && self.icache.is_none() && self.dcache.is_none() {
+        if self.jit_single_instruction_batch() {
+            // A single instruction cannot use native windows. Keep the cache
+            // exclusions, but rebuild them only when this slice's mappings or
+            // selected bank might have changed. No raw pointers are reused.
+            if self.icache.is_some() || self.dcache.is_some() {
+                if self.jit_cache_exclusions_current {
+                    self.window_offered |= self.cache_free_regions.iter().any(Option::is_some);
+                } else {
+                    self.jit_extra_regions();
+                }
+            }
             return [None; MAX_FAST_MEM_REGIONS];
         }
-        let regions = self.jit_extra_regions();
-        if self.jit_single_instruction_batch() {
-            [None; MAX_FAST_MEM_REGIONS]
-        } else {
-            regions
-        }
+        self.jit_extra_regions()
     }
 
     /// A CACR write or CINV/CPUSH inside a JIT batch takes effect before
@@ -5538,6 +5554,7 @@ impl AddressBus for CpuBus {
     }
 
     fn reset_devices(&mut self) {
+        self.jit_cache_exclusions_current = false;
         self.flush_jit_batch_prefix();
         self.jit_bus_boundary |= self.jit_batch.is_some();
         self.bus.reset_custom_chips_from_cpu_reset();
@@ -6302,6 +6319,7 @@ mod tests {
             jit_window_bank: None,
             cacr_040_layout: false,
             jit_batch: None,
+            jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
         };
 
@@ -6341,6 +6359,7 @@ mod tests {
             jit_window_bank: None,
             cacr_040_layout: false,
             jit_batch: None,
+            jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
@@ -6391,6 +6410,7 @@ mod tests {
                 jit_window_bank: None,
                 cacr_040_layout: false,
                 jit_batch: None,
+                jit_cache_exclusions_current: false,
                 jit_bus_boundary: false,
             };
             bus.bus
@@ -6456,6 +6476,7 @@ mod tests {
             jit_window_bank: None,
             cacr_040_layout: false,
             jit_batch: None,
+            jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
         };
         // INTENA/INTREQ, whose read ports INTENAR ($01C) and INTREQR ($01E) are
@@ -6509,6 +6530,7 @@ mod tests {
             jit_window_bank: None,
             cacr_040_layout: false,
             jit_batch: None,
+            jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
         };
         let base = CHIP_RAM_BASE as u32;
@@ -6558,6 +6580,7 @@ mod tests {
             jit_window_bank: None,
             cacr_040_layout: false,
             jit_batch: None,
+            jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
@@ -6616,6 +6639,7 @@ mod tests {
             jit_window_bank: None,
             cacr_040_layout: false,
             jit_batch: None,
+            jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
         };
 
@@ -6835,6 +6859,7 @@ mod tests {
             jit_window_bank: None,
             cacr_040_layout: false,
             jit_batch: None,
+            jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
@@ -6904,6 +6929,7 @@ mod tests {
             jit_window_bank: None,
             cacr_040_layout: false,
             jit_batch: None,
+            jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
@@ -7049,6 +7075,7 @@ mod tests {
             jit_window_bank: None,
             cacr_040_layout: false,
             jit_batch: None,
+            jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
         };
         let before = bus.read_long(ROM_BASE as u32);
@@ -7087,6 +7114,7 @@ mod tests {
             jit_window_bank: None,
             cacr_040_layout: false,
             jit_batch: None,
+            jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
         };
         // $F00000 with no extended ROM fitted is genuinely undecoded (the
@@ -7131,6 +7159,7 @@ mod tests {
             jit_window_bank: None,
             cacr_040_layout: false,
             jit_batch: None,
+            jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
         }
     }
@@ -8873,6 +8902,68 @@ mod tests {
         for caches in [false, true] {
             assert_eq!(run(1, caches)?, run(4096, caches)?);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn jit_chip_code_refreshes_cache_exclusions_after_guest_autoconfig() -> Result<()> {
+        use m68k::{CACR_ED, CACR_EI};
+        let mut machine = machine_with_program_model(
+            0x100,
+            &[
+                0x4e71, // NOP captures the original exclusions
+                0x13fc, 0x0040, 0x00e8, 0x0048, // configure the new Z2 board at $400000
+                0x2039, 0x0040, 0x0000, // MOVE.L newly mapped RAM,D0
+                0x4e72, 0x2700,
+            ],
+            CpuModel::M68030,
+        )?;
+        machine.bus.bus.mem.zorro.add_board_with_rom(
+            BoardSpec::fast_ram(64 * 1024),
+            &0x1234_5678u32.to_be_bytes(),
+        )?;
+        machine.set_cache_emulation(true, true);
+        machine.cpu.cacr = CACR_ED | CACR_EI;
+        machine.apply_cacr_updates();
+        machine.bus.jit_window_bank = Some(FAST_RAM_BASE as u32);
+        machine.set_jit_enabled(true);
+        assert!(machine.step_slice(64)?.stopped);
+        assert_eq!(machine.d(0), 0x1234_5678);
+        assert!(machine.bus.in_cache_free_window(0x0040_0000, 4));
+        assert!(machine
+            .bus
+            .cache_read(0x0040_0000, 4, CpuBusAccessKind::Read)
+            .is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn jit_chip_code_refreshes_cache_exclusions_after_backing_memory_replacement() -> Result<()> {
+        use m68k::{CACR_ED, CACR_EI};
+        let mut machine = machine_with_program_model(
+            0x100,
+            &[0x2010, 0x60fc], // MOVE.L (A0),D0; BRA back
+            CpuModel::M68030,
+        )?;
+        machine.bus.bus.mem.fit_mb_ram(2 * 1024 * 1024);
+        machine.set_cache_emulation(true, true);
+        machine.cpu.cacr = CACR_ED | CACR_EI;
+        machine.apply_cacr_updates();
+        machine.bus.jit_window_bank = Some(FAST_RAM_BASE as u32);
+        machine.set_jit_enabled(true);
+        machine.cpu.dar[8] = machine.bus.bus.mem.mb_ram_base() as u32;
+        machine.step_slice(64)?;
+        machine.bus.bus.mem.fit_mb_ram(4 * 1024 * 1024);
+        let mb = machine.bus.bus.mem.mb_ram_base() as u32;
+        machine.bus.bus.mem.mb_ram[..4].copy_from_slice(&0x8765_4321u32.to_be_bytes());
+        machine.cpu.dar[8] = mb;
+        machine.step_slice(64)?;
+        assert_eq!(machine.d(0), 0x8765_4321);
+        assert!(machine.bus.in_cache_free_window(mb, 4));
+        assert!(machine
+            .bus
+            .cache_read(mb, 4, CpuBusAccessKind::Read)
+            .is_none());
         Ok(())
     }
 

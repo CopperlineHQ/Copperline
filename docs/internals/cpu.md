@@ -135,6 +135,10 @@ at each batch boundary. The timing contract is deliberately approximate
   classification: there is no completed instruction prefix to synchronize.
   Their timing is billed directly on return, without building or updating the
   deferred-prefix state; interrupts and timed devices retain the same boundary.
+  With emulated caches, a slice reuses unchanged local-memory exclusions until
+  a bus write, RESET or primary-bank change. Slice entry and state adoption
+  invalidate that bookkeeping, so replaced backing memory is captured afresh;
+  raw pointers are still captured separately for every native batch.
   Interrupt-entry
   posted-write overlap is charged to the interrupt itself.
   Interrupts are recognized at those boundaries,

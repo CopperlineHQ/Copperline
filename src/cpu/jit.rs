@@ -191,6 +191,9 @@ impl M68kMachine {
     /// Hardware accesses and interrupts synchronize at instruction boundaries;
     /// direct-memory traces can run until the next device deadline.
     pub(super) fn step_slice_jit(&mut self, count: usize) -> Result<CpuStepSlice> {
+        // Host-side memory replacement and state adoption happen between
+        // slices; cache exclusions must be derived from their new mappings.
+        self.bus.jit_cache_exclusions_current = false;
         self.bus.bus.begin_cpu_slice();
         self.bus.bus.slice_preempted = false;
         self.bus.bus.set_cpu_bus_arbitration_enabled(true);
