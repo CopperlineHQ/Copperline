@@ -8,6 +8,7 @@ use super::*;
 /// move back to M68kMachine before any caller can save or roll back the machine.
 #[derive(Clone, Copy)]
 pub(super) struct JitBatchTiming {
+    budget: u32,
     retired: u32,
     observed_retired: u32,
     observed_sr: u16,
@@ -23,6 +24,12 @@ pub(super) struct JitBatchTiming {
 }
 
 impl CpuBus {
+    pub(super) fn jit_single_instruction_batch(&self) -> bool {
+        self.jit_batch
+            .as_ref()
+            .is_some_and(|timing| timing.budget == 1)
+    }
+
     fn jit_plain_access(&self, address: u32, size: usize) -> bool {
         matches!(
             self.classify_plain_memory(self.mask(address), size),
@@ -228,6 +235,7 @@ impl M68kMachine {
             self.bus.window_offered = false;
             self.bus.jit_bus_boundary = false;
             self.bus.jit_batch = Some(JitBatchTiming {
+                budget,
                 retired: 0,
                 observed_retired: 0,
                 observed_sr: self.cpu.get_sr(),

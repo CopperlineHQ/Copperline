@@ -5268,11 +5268,19 @@ impl AddressBus for CpuBus {
     fn fast_mem(&mut self) -> Option<FastMem> {
         let window = self.jit_fast_mem()?;
         self.keep_caches_out_of_window(window.base, window.len);
-        Some(window)
+        // A single instruction cannot run a native trace. Avoid capturing and
+        // validating direct pointers for each shared-bus fetch, but preserve
+        // the cache exclusions used by adjacent batches that do run directly.
+        (!self.jit_single_instruction_batch()).then_some(window)
     }
 
     fn fast_mem_regions(&mut self) -> [Option<FastMemRegion>; MAX_FAST_MEM_REGIONS] {
-        self.jit_extra_regions()
+        let regions = self.jit_extra_regions();
+        if self.jit_single_instruction_batch() {
+            [None; MAX_FAST_MEM_REGIONS]
+        } else {
+            regions
+        }
     }
 
     /// A CACR write or CINV/CPUSH inside a JIT batch takes effect before
@@ -8785,6 +8793,57 @@ mod tests {
         machine.bus.bus.cpu_pc = 0x0100;
         let window = machine.bus.jit_fast_mem().expect("largest bank");
         assert_eq!(window.base, 0x07E0_0000);
+        Ok(())
+    }
+
+    #[test]
+    fn jit_single_instruction_batches_preserve_local_memory_cache_exclusions() -> Result<()> {
+        use m68k::{CACR_ED, CACR_EI};
+        let pc = FAST_RAM_BASE as u32 + 0x100;
+        let run = |chunk| -> Result<(u32, u32, u32, u64)> {
+            let mut machine = machine_with_program_model(
+                pc,
+                &[
+                    0x2039, 0x00f8, 0x0000, // MOVE.L ROM,D0
+                    0x23c0, 0x07e0, 0x0000, // MOVE.L D0,motherboard RAM
+                    0x2239, 0x07e0, 0x0000, // MOVE.L motherboard RAM,D1
+                    0x4e72, 0x2700,
+                ],
+                CpuModel::M68030,
+            )?;
+            machine.bus.bus.mem.fit_mb_ram(2 * 1024 * 1024);
+            let mb = machine.bus.bus.mem.mb_ram_base() as u32;
+            assert_eq!(mb, 0x07e0_0000);
+            machine.bus.bus.mem.rom[..4].copy_from_slice(&0x1234_5678u32.to_be_bytes());
+            machine.set_cache_emulation(true, true);
+            machine.cpu.cacr = CACR_ED | CACR_EI;
+            machine.apply_cacr_updates();
+            machine.bus.read_long(mb);
+            assert!(machine
+                .bus
+                .cache_read(mb, 4, CpuBusAccessKind::Read)
+                .is_some());
+            machine.set_jit_enabled(true);
+            for _ in 0..8 {
+                if machine.step_slice(chunk)?.stopped {
+                    assert_eq!(machine.d(0), 0x1234_5678);
+                    assert_eq!(machine.d(1), machine.d(0));
+                    assert!(machine.bus.in_cache_free_window(mb, 4));
+                    assert!(machine
+                        .bus
+                        .cache_read(mb, 4, CpuBusAccessKind::Read)
+                        .is_none());
+                    return Ok((
+                        machine.d(0),
+                        machine.d(1),
+                        machine.pc(),
+                        machine.bus().emulated_cck(),
+                    ));
+                }
+            }
+            panic!("program did not reach STOP");
+        };
+        assert_eq!(run(1)?, run(4096)?);
         Ok(())
     }
 

@@ -122,7 +122,9 @@ at each batch boundary. The timing contract is deliberately approximate
   work by the hardware deadline. MMIO/shared-bus accesses return to the host
   before another native burst.
   Instructions fetched from shared RAM use single-instruction batches and skip
-  deadline prediction, which cannot shorten that budget. Interrupt-entry
+  deadline prediction, which cannot shorten that budget. Those batches also
+  omit direct-pointer capture, since they cannot enter a native trace; ordinary
+  bus access retains the same local-memory cache exclusions. Interrupt-entry
   posted-write overlap is charged to the interrupt itself.
   Interrupts are recognized at those boundaries,
   from the live INTENA/INTREQ state; a level the boundary cannot deliver
