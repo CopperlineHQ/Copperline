@@ -172,6 +172,7 @@ impl M68kMachine {
             instructions = instructions.saturating_add(result.instructions as usize);
             if !self.bus.window_offered {
                 self.bus.cache_free_window = None;
+                self.bus.cache_free_regions.fill(None);
             }
             if self.bus.icache.is_some() || self.bus.dcache.is_some() {
                 self.apply_cacr_updates();

@@ -1145,12 +1145,11 @@ impl CpuCore {
                 let off = if TRANSLATED {
                     self.code_window_off(addr)
                 } else {
-                    let off = addr.wrapping_sub(self.fm_base);
-                    (off <= self.fm_len - 2).then_some(off)
+                    self.physical_window_off(addr, 2, false)
                 };
                 if let Some(off) = off {
                     let opcode = unsafe {
-                        let p = (self.fm_ptr as *const u8).add(off as usize);
+                        let p = self.window_host_ptr(off);
                         u16::from_be_bytes([*p, *p.add(1)])
                     };
                     self.pc = self.pc.wrapping_add(2);

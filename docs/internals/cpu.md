@@ -86,23 +86,18 @@ model locally).
 for the core's instruction-budgeted batch path
 (`CpuCore::run_batch`): hot straight-line runs and self-loops execute as
 compiled Cranelift traces (the `cpu-jit` cargo feature; without it, wasm
-builds included, the same trace machinery runs interpreted), and one
-fast-RAM bank is offered to the core as a zero-cost direct-memory window
-(`AddressBus::fast_mem`). The core takes a single window, so it follows
-the code (`CpuBus::jit_fast_mem`): the bank the batch starts executing
-in, else the bank it covered last (a call into ROM or an interrupt
-handler in chip RAM keeps its caller's bank, with the caller's stack and
-data), else the largest bank. A fixed choice can cover RAM nothing uses:
-Kickstart 3.2 on an A3000 lists the motherboard RAM it sizes itself at a
-higher allocation priority (30) than a Zorro III board (20), so with 16 MB
-on the motherboard and a 256 MB board, ExecBase, libraries and programs
-land in the smaller bank until it fills. The choice is emulated state, not
-only host speed: accesses through the window allocate no cache lines
-(below), while fast-RAM accesses outside it do and can evict chip-RAM
-lines, so the bank decides which chip fetches hit the cache models. It
-depends only on the PC and the previous choice, and save states carry it
-(`MachineRuntimeState`). ROM is never offered, since the window is
-writable. The timing contract is deliberately approximate
+builds included, the same trace machinery runs interpreted). The primary
+fast-RAM window follows the PC, then the previous bank, then the largest
+bank (`AddressBus::fast_mem`). Up to eight additional physical regions cover
+read-only main/extended ROM and other motherboard, accelerator and Zorro
+fast RAM (`AddressBus::fast_mem_regions`). Stores and entire read-modify-write
+instructions targeting ROM fall back to the bus; ranges crossing a region
+boundary also fall back before committing register updates. Chip/slow RAM,
+ROM overlay, WCS and device/cartridge mappings retain their bus handling.
+The primary bank remains serialized (`MachineRuntimeState::jit_window_bank`):
+when more banks are fitted than the table holds, the selection still affects
+which accesses allocate cache lines. Mappings and permissions are recaptured
+at each batch boundary. The timing contract is deliberately approximate
 (`M68kMachine::step_slice_jit`):
 
 - every retired instruction is billed a flat single CPU clock, converted
@@ -156,11 +151,10 @@ exception frames). The models therefore hold no lines inside the window
 while the core has it (`CpuBus::keep_caches_out_of_window`): capturing a
 window drops the lines it overlaps, and a miss there allocates nothing.
 Under JIT a fast-RAM access is free whether it hits or misses, so nothing
-is lost. Chip RAM and ROM, which the window never covers, stay cached, and
-so does the window bank in a batch that runs without the window; the next
-capture drops those lines again. When the window moves to another bank,
-the bank it left is cached like any other, and capturing the new bank
-drops its lines first. Code inside the window is coherent the
+is lost. Chip RAM stays cached. Every offered region is excluded from cache allocation,
+including extra RAM and ROM. A mapping change clears newly covered lines;
+a batch without direct regions permits ordinary caching again. The region
+list is transient and is rebuilt, with cache eviction, after save/restore. Code inside the window is coherent the
 moment it changes, whether the guest rewrites it or a device DMAs it there
 (LoadSeg through copperhf): compiled traces compare their code bytes on
 every entry, and no cache line can hold the old bytes. The window is
@@ -171,7 +165,7 @@ debug or diagnostic hook (breakpoints, watches, traces,
 `COPPERLINE_DBG_*`) drops the whole slice back to the precise loop, so the
 debugger always sees every instruction.
 
-The window holds physical addresses, and it stays in use when the guest
+All regions hold physical addresses, and it stays in use when the guest
 enables the MMU (bundled AROS does at boot, as do mmu.library, MuForce and
 Linux/m68k). The core then translates each window access through the
 transparent-translation registers and the ATC alone, never a table search.

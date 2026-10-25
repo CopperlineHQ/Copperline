@@ -711,7 +711,8 @@ clock_mhz = 14.0    # optional; defaults to the model's stock speed
 - `jit` (experimental, also `--jit`/`--no-jit`) runs the CPU through the
   m68k core's batch/trace-JIT path instead of the cycle-exact
   per-instruction model: hot code compiles to native traces and fast-RAM
-  accesses run through a zero-cost direct-memory window. The machine
+  accesses run through direct-memory windows covering multiple fast-RAM banks
+  and read-only ROM. Chip RAM and device accesses retain bus timing. The machine
   behaves like an ideal accelerator running at `clock_mhz`: one
   instruction per CPU clock with zero-wait fast RAM and ROM, so a 50 MHz
   68040 delivers on the order of 50 MIPS (raise `clock_mhz` for more).

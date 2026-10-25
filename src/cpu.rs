@@ -13,7 +13,10 @@ use crate::savestate::{chunk, split};
 use anyhow::{anyhow, bail, Result};
 use log::{debug, trace};
 use m68k::core::memory::{BusFault, BusFaultKind};
-use m68k::{AddressBus, BatchExit, CpuCore, CpuType, FastMem, StepResult};
+use m68k::{
+    AddressBus, BatchExit, CpuCore, CpuType, FastMem, FastMemRegion, StepResult,
+    MAX_FAST_MEM_REGIONS,
+};
 
 mod ec030_acu;
 mod jit;
@@ -498,6 +501,7 @@ struct CpuBus {
     /// bookkeeping, never serialized: a restore clears it, and the next
     /// window capture drops whatever lines the restored caches hold there.
     cache_free_window: Option<(u32, u32)>,
+    cache_free_regions: [Option<(u32, u32)>; MAX_FAST_MEM_REGIONS],
     /// Whether `fast_mem` handed out the window during the current batch.
     window_offered: bool,
     /// Base of the fast-RAM bank the fastmem window covered last, which
@@ -600,6 +604,7 @@ impl M68kMachine {
                 diag_current_pc: 0,
                 jit_enabled: false,
                 cache_free_window: None,
+                cache_free_regions: [None; MAX_FAST_MEM_REGIONS],
                 window_offered: false,
                 jit_window_bank: None,
                 cacr_040_layout: cacr_040,
@@ -1879,6 +1884,7 @@ impl M68kMachine {
         // the window, caches it), so forget the cache-free window: the next
         // capture drops those lines before the core writes the window.
         self.bus.cache_free_window = None;
+        self.bus.cache_free_regions = [None; MAX_FAST_MEM_REGIONS];
         self.last_cacr = runtime.last_cacr;
         self.sync_cck_on = runtime.sync_cck_on;
         self.cpu_clocks_per_cck = runtime.cpu_clocks_per_cck;
@@ -4976,62 +4982,12 @@ impl CpuBus {
         };
     }
 
-    /// The zero-cost guest-RAM window offered to the core's batch/JIT path
-    /// (`AddressBus::fast_mem`): one fast-RAM bank -- a configured Zorro
-    /// board, Ramsey motherboard RAM, or CPU-slot accelerator RAM. Chip and
-    /// slow RAM are never offered: their CPU accesses arbitrate into
-    /// chip-bus DMA slots and drive the shared data bus, side effects the
-    /// window contract forbids.
-    ///
-    /// The core takes a single window, so the bank follows the code: the
-    /// bank the batch starts executing in, else the bank the window covered
-    /// last (a call into ROM or an interrupt handler in chip RAM keeps its
-    /// caller's bank, which holds the caller's stack and data), else the
-    /// largest bank. The guest OS decides where code and data live --
-    /// Kickstart puts its own structures in the local bank it sizes itself,
-    /// ahead of any Zorro board -- so a fixed choice such as the largest
-    /// bank can cover RAM nothing uses.
-    ///
-    /// The choice is emulated state, not just host speed: accesses through
-    /// the window allocate no cache lines (`keep_caches_out_of_window`),
-    /// while fast-RAM accesses outside it do and can evict chip-RAM lines,
-    /// so the bank decides which chip fetches hit the cache models and with
-    /// that the chip-bus timing. It depends only on the PC and the previous
-    /// choice, so a run is deterministic, and save states carry it
-    /// (`MachineRuntimeState::jit_window_bank`). `cpu_pc` is the logical
-    /// PC; under a remapping MMU it may name no bank or another one, which
-    /// only makes the choice less useful, since the window is physical.
-    ///
-    /// Returns None while anything that intercepts plain fast-RAM accesses
-    /// is armed (memory-write debug hooks, the heat map, SMC detection,
-    /// injected bus faults) so those features keep seeing every access;
-    /// the batch path then simply routes everything through the normal bus
-    /// methods. Recomputed on every `run_batch` call, so a bank that
-    /// autoconfig places (or a RESET tears down) is picked up at the next
-    /// batch boundary.
-    ///
-    /// The cache models do not withhold the window: under JIT a fast-RAM
-    /// access costs nothing whether or not it hits a cache line, so caching
-    /// the window bank buys nothing. `fast_mem` keeps the models out of the
-    /// window instead (`keep_caches_out_of_window`); chip RAM and ROM,
-    /// which the window never covers, stay cached.
-    ///
-    /// A 68000/68010 never gets a window at all: on the small-box machines
-    /// every CPU cycle -- fast RAM included -- drives the one bus shared
-    /// with Agnus, and `note_cpu_data_bus` must latch each transfer so
-    /// undriven (unmapped) reads float to the last driven value. Kickstart
-    /// and AROS memory sizing read exactly those floats, so bypassing the
-    /// latch wedges the boot. The 020+ run fast RAM on their own local
-    /// bus (`cpu_short_bus_cycle`), where the latch is deliberately not
-    /// driven and the window is side-effect free.
+    /// Primary local-RAM window, chosen by PC, then the previous bank, then
+    /// size. Additional RAM and read-only ROM are captured alongside it.
+    /// Keep this choice in save states: machines with more regions than the
+    /// table holds still depend on it for cache and bus timing.
     fn jit_fast_mem(&mut self) -> Option<FastMem> {
-        if !self.jit_enabled
-            || !self.bus.cpu_short_bus_cycle()
-            || self.dbg_memw_addr.is_some()
-            || self.bus.heat_map_armed()
-            || self.bus.smc.is_some()
-            || self.bus.bus_faults_armed()
-        {
+        if !self.jit_windows_allowed() {
             return None;
         }
         let bank = self
@@ -5044,6 +5000,101 @@ impl CpuBus {
         let window = self.fast_mem_for(bank);
         self.jit_window_bank = Some(window.base);
         Some(window)
+    }
+
+    fn jit_windows_allowed(&self) -> bool {
+        self.jit_enabled
+            && self.bus.cpu_short_bus_cycle()
+            && self.dbg_memw_addr.is_none()
+            && !self.bus.heat_map_armed()
+            && self.bus.smc.is_none()
+            && !self.bus.bus_faults_armed()
+    }
+
+    /// Capture only side-effect-free mappings. Shared chip/slow RAM, the
+    /// switchable overlay, WCS and device/cartridge windows stay on the bus.
+    fn jit_extra_regions(&mut self) -> [Option<FastMemRegion>; MAX_FAST_MEM_REGIONS] {
+        let mut regions = [None; MAX_FAST_MEM_REGIONS];
+        if !self.jit_windows_allowed() {
+            self.cache_free_regions.fill(None);
+            return regions;
+        }
+        let mut count = 0;
+        let mut push = |ptr, base, len, writable| {
+            if len >= 4 && count < regions.len() {
+                regions[count] = Some(FastMemRegion {
+                    ptr,
+                    base,
+                    len,
+                    writable,
+                });
+                count += 1;
+            }
+        };
+        let mem = &mut self.bus.mem;
+        if !mem
+            .zorro
+            .ram_overlaps(ROM_BASE as u32, mem.rom.len() as u32)
+        {
+            push(
+                mem.rom.as_mut_ptr(),
+                ROM_BASE as u32,
+                mem.rom.len() as u32,
+                false,
+            );
+        }
+        if !mem
+            .zorro
+            .ram_overlaps(mem.extended_rom_base as u32, mem.extended_rom.len() as u32)
+        {
+            push(
+                mem.extended_rom.as_mut_ptr(),
+                mem.extended_rom_base as u32,
+                mem.extended_rom.len() as u32,
+                false,
+            );
+        }
+        let mb_base = mem.mb_ram_base() as u32;
+        if self.jit_window_bank != Some(mb_base) {
+            push(
+                mem.mb_ram.as_mut_ptr(),
+                mb_base,
+                mem.mb_ram.len() as u32,
+                true,
+            );
+        }
+        if self.jit_window_bank != Some(ACCEL_RAM_BASE as u32) {
+            push(
+                mem.accel_ram.as_mut_ptr(),
+                ACCEL_RAM_BASE as u32,
+                mem.accel_ram.len() as u32,
+                true,
+            );
+        }
+        // Copy descriptors, not allocations; no heap work in the batch path.
+        let mut banks = [None; MAX_FAST_MEM_REGIONS];
+        for (slot, bank) in banks.iter_mut().zip(mem.zorro.fast_ram_windows()) {
+            *slot = Some(bank);
+        }
+        for (base, len, idx) in banks.into_iter().flatten() {
+            if self.jit_window_bank != Some(base) {
+                push(mem.zorro.board_ram_mut(idx).as_mut_ptr(), base, len, true);
+            }
+        }
+        let ranges = regions.map(|r| r.map(|r| (r.base, r.len)));
+        if ranges != self.cache_free_regions {
+            for (base, len) in ranges.into_iter().flatten() {
+                for cache in [self.icache.as_deref_mut(), self.dcache.as_deref_mut()]
+                    .into_iter()
+                    .flatten()
+                {
+                    cache.clear_range(base, len);
+                }
+            }
+            self.cache_free_regions = ranges;
+        }
+        self.window_offered |= count != 0;
+        regions
     }
 
     /// The fast-RAM bank holding `addr`, if any.
@@ -5134,12 +5185,12 @@ impl CpuBus {
     /// (`keep_caches_out_of_window`).
     #[inline]
     fn in_cache_free_window(&self, addr: u32, size: usize) -> bool {
-        let Some((base, len)) = self.cache_free_window else {
-            return false;
-        };
         let first = addr & !3;
         let last = addr.wrapping_add(size.max(1) as u32 - 1) | 3;
-        range_contains(base, len, first) || range_contains(base, len, last)
+        self.cache_free_window
+            .into_iter()
+            .chain(self.cache_free_regions.iter().flatten().copied())
+            .any(|(base, len)| range_contains(base, len, first) || range_contains(base, len, last))
     }
 
     /// Set the cache models' enable and freeze state from `cacr` and run
@@ -5216,6 +5267,10 @@ impl AddressBus for CpuBus {
         let window = self.jit_fast_mem()?;
         self.keep_caches_out_of_window(window.base, window.len);
         Some(window)
+    }
+
+    fn fast_mem_regions(&mut self) -> [Option<FastMemRegion>; MAX_FAST_MEM_REGIONS] {
+        self.jit_extra_regions()
     }
 
     /// A CACR write or CINV/CPUSH inside a JIT batch takes effect before
@@ -6212,6 +6267,7 @@ mod tests {
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
+            cache_free_regions: [None; MAX_FAST_MEM_REGIONS],
             window_offered: false,
             jit_window_bank: None,
             cacr_040_layout: false,
@@ -6250,6 +6306,7 @@ mod tests {
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
+            cache_free_regions: [None; MAX_FAST_MEM_REGIONS],
             window_offered: false,
             jit_window_bank: None,
             cacr_040_layout: false,
@@ -6299,6 +6356,7 @@ mod tests {
                 diag_current_pc: 0,
                 jit_enabled: false,
                 cache_free_window: None,
+                cache_free_regions: [None; MAX_FAST_MEM_REGIONS],
                 window_offered: false,
                 jit_window_bank: None,
                 cacr_040_layout: false,
@@ -6363,6 +6421,7 @@ mod tests {
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
+            cache_free_regions: [None; MAX_FAST_MEM_REGIONS],
             window_offered: false,
             jit_window_bank: None,
             cacr_040_layout: false,
@@ -6415,6 +6474,7 @@ mod tests {
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
+            cache_free_regions: [None; MAX_FAST_MEM_REGIONS],
             window_offered: false,
             jit_window_bank: None,
             cacr_040_layout: false,
@@ -6463,6 +6523,7 @@ mod tests {
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
+            cache_free_regions: [None; MAX_FAST_MEM_REGIONS],
             window_offered: false,
             jit_window_bank: None,
             cacr_040_layout: false,
@@ -6520,6 +6581,7 @@ mod tests {
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
+            cache_free_regions: [None; MAX_FAST_MEM_REGIONS],
             window_offered: false,
             jit_window_bank: None,
             cacr_040_layout: false,
@@ -6738,6 +6800,7 @@ mod tests {
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
+            cache_free_regions: [None; MAX_FAST_MEM_REGIONS],
             window_offered: false,
             jit_window_bank: None,
             cacr_040_layout: false,
@@ -6806,6 +6869,7 @@ mod tests {
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
+            cache_free_regions: [None; MAX_FAST_MEM_REGIONS],
             window_offered: false,
             jit_window_bank: None,
             cacr_040_layout: false,
@@ -6950,6 +7014,7 @@ mod tests {
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
+            cache_free_regions: [None; MAX_FAST_MEM_REGIONS],
             window_offered: false,
             jit_window_bank: None,
             cacr_040_layout: false,
@@ -6987,6 +7052,7 @@ mod tests {
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
+            cache_free_regions: [None; MAX_FAST_MEM_REGIONS],
             window_offered: false,
             jit_window_bank: None,
             cacr_040_layout: false,
@@ -7030,6 +7096,7 @@ mod tests {
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
+            cache_free_regions: [None; MAX_FAST_MEM_REGIONS],
             window_offered: false,
             jit_window_bank: None,
             cacr_040_layout: false,
@@ -8624,6 +8691,44 @@ mod tests {
         machine.bus.bus.cpu_pc = 0x0100;
         let window = machine.bus.jit_fast_mem().expect("largest bank");
         assert_eq!(window.base, 0x07E0_0000);
+        Ok(())
+    }
+
+    #[test]
+    fn jit_extra_windows_keep_rom_readonly_and_other_banks_cache_coherent() -> Result<()> {
+        use m68k::{CACR_ED, CACR_EI};
+        let mut machine = machine_with_program_model(0x0100, &[0x4E71], CpuModel::M68030)?;
+        machine.bus.bus.mem.fit_mb_ram(2 * 1024 * 1024);
+        machine.set_cache_emulation(true, true);
+        machine.cpu.cacr = CACR_ED | CACR_EI;
+        machine.apply_cacr_updates();
+        machine.set_jit_enabled(true);
+        machine.bus.bus.cpu_pc = FAST_RAM_BASE as u32;
+        machine.bus.fast_mem().unwrap();
+        let mb = machine.bus.bus.mem.mb_ram_base() as u32;
+        machine.bus.read_long(mb);
+        assert!(machine
+            .bus
+            .cache_read(mb, 4, CpuBusAccessKind::Read)
+            .is_some());
+        let regions = machine.bus.fast_mem_regions();
+        assert!(regions
+            .iter()
+            .flatten()
+            .any(|r| r.base == ROM_BASE as u32 && !r.writable));
+        assert!(regions.iter().flatten().any(|r| r.base == mb && r.writable));
+        assert!(!regions.iter().flatten().any(|r| r.base == 0));
+        assert!(machine
+            .bus
+            .cache_read(mb, 4, CpuBusAccessKind::Read)
+            .is_none());
+        machine.bus.read_long(mb);
+        assert!(machine
+            .bus
+            .cache_read(mb, 4, CpuBusAccessKind::Read)
+            .is_none());
+        machine.bus.dbg_memw_addr = Some(mb);
+        assert!(machine.bus.fast_mem_regions().iter().all(Option::is_none));
         Ok(())
     }
 

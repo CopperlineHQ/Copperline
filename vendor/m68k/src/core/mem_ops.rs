@@ -600,66 +600,40 @@ fn decode_alu(opcode: u16) -> Option<DecodedMemOp> {
 /// It is a type parameter so the physical instantiation of the executor
 /// compiles exactly as it did before translation existed.
 #[derive(Clone, Copy)]
-struct Win<const TRANSLATED: bool> {
-    ptr: *mut u8,
-    base: u32,
-    len: u32,
-}
+struct Win<const TRANSLATED: bool>;
 
 impl<const TRANSLATED: bool> Win<TRANSLATED> {
     #[inline]
     fn from_cpu(cpu: &CpuCore) -> Option<Self> {
-        if cpu.fm_len == 0 {
-            return None;
-        }
         debug_assert_eq!(TRANSLATED, cpu.fm_mmu.enabled());
-        Some(Win {
-            ptr: cpu.fm_ptr as *mut u8,
-            base: cpu.fm_base,
-            len: cpu.fm_len,
-        })
+        (cpu.fm_len != 0).then_some(Win)
     }
 
-    /// Window offset for a data access of `bytes` at (masked) `addr`, or
-    /// None if it must take the bus: part of it falls outside the window,
-    /// or the PMMU cannot translate it without a table search. `write` asks
-    /// for write permission (a read-modify-write needs it too).
+    // Operands carry prevalidated host addresses, never offsets into a
+    // different allocation. No borrow of CpuCore survives register updates.
     #[inline(always)]
     fn data(self, cpu: &CpuCore, addr: u32, bytes: u32, write: bool) -> Option<usize> {
-        if TRANSLATED {
-            return cpu
-                .translated_window_off(addr, bytes, write, false)
-                .map(|off| off as usize);
-        }
-        self.off(addr, bytes)
+        let off = if TRANSLATED {
+            cpu.translated_window_off(addr, bytes, write, false)
+        } else {
+            cpu.physical_window_off(addr, bytes, write)
+        }?;
+        Some(cpu.window_host_ptr(off) as usize)
     }
 
-    /// Window offset for the instruction-stream word at (masked) `addr`.
     #[inline(always)]
     fn code(self, cpu: &CpuCore, addr: u32) -> Option<usize> {
         if TRANSLATED {
             return translated_code(cpu, addr);
         }
-        self.off(addr, 2)
-    }
-
-    /// Window offset for an access of `bytes` at (masked) physical `addr`,
-    /// or None if any part of the access falls outside the window.
-    #[inline]
-    fn off(self, addr: u32, bytes: u32) -> Option<usize> {
-        let o = addr.wrapping_sub(self.base);
-        // `fm_len >= 4` is guaranteed at capture, so `len - bytes` can't wrap.
-        if o <= self.len - bytes {
-            Some(o as usize)
-        } else {
-            None
-        }
+        cpu.physical_window_off(addr, 2, false)
+            .map(|off| cpu.window_host_ptr(off) as usize)
     }
 
     #[inline]
     fn read(self, off: usize, size: Size) -> u32 {
         unsafe {
-            let p = self.ptr.add(off);
+            let p = off as *mut u8;
             match size {
                 Size::Byte => *p as u32,
                 Size::Word => u16::from_be_bytes([*p, *p.add(1)]) as u32,
@@ -671,7 +645,7 @@ impl<const TRANSLATED: bool> Win<TRANSLATED> {
     #[inline]
     fn write(self, off: usize, size: Size, value: u32) {
         unsafe {
-            let p = self.ptr.add(off);
+            let p = off as *mut u8;
             match size {
                 Size::Byte => *p = value as u8,
                 Size::Word => {
@@ -697,7 +671,7 @@ impl<const TRANSLATED: bool> Win<TRANSLATED> {
 fn translated_code(cpu: &CpuCore, addr: u32) -> Option<usize> {
     cpu.remembered_code_off(addr)
         .or_else(|| cpu.translated_window_off(addr, 2, false, true))
-        .map(|off| off as usize)
+        .map(|off| cpu.window_host_ptr(off) as usize)
 }
 
 /// Deferred post-increment/pre-decrement address-register updates. Two
@@ -895,7 +869,7 @@ fn fast_movem_word_postinc<const T: bool>(cpu: &mut CpuCore, win: Win<T>, base: 
         return false;
     }
     let masked = cpu.address(raw);
-    if bytes > win.len || masked as u64 + bytes as u64 > cpu.address_mask as u64 + 1 {
+    if masked as u64 + bytes as u64 > cpu.address_mask as u64 + 1 {
         return false;
     }
     let Some(mut off) = win.data(cpu, masked, bytes, false) else {
@@ -995,9 +969,6 @@ fn fast_movem_long_predec<const T: bool>(cpu: &mut CpuCore, win: Win<T>, base: u
         return false;
     }
     let start = raw.wrapping_sub(bytes);
-    if bytes > win.len {
-        return false;
-    }
     let Some(mut off) = win.data(cpu, cpu.address(start), bytes, true) else {
         return false;
     };
@@ -1028,9 +999,6 @@ fn fast_movem_long_postinc<const T: bool>(cpu: &mut CpuCore, win: Win<T>, base: 
     let bytes = mask.count_ones() * 4;
     let raw = cpu.dar[8 + base as usize];
     if cpu.is_pre_68020 && (raw & 1) != 0 {
-        return false;
-    }
-    if bytes > win.len {
         return false;
     }
     let Some(mut off) = win.data(cpu, cpu.address(raw), bytes, false) else {

@@ -364,6 +364,12 @@ pub struct CpuCore {
     pub(crate) fm_base: u32,
     #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) fm_len: u32,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub(crate) fm_readonly: bool,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub(crate) fm_regions: [super::window::Region; super::memory::MAX_FAST_MEM_REGIONS],
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub(crate) fm_region_count: usize,
     // Nonzero only for a tracked read window; raw stores are forbidden then.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) fm_bus: usize,
@@ -566,6 +572,9 @@ impl CpuCore {
             fm_ptr: 0,
             fm_base: 0,
             fm_len: 0,
+            fm_readonly: false,
+            fm_regions: [super::window::Region::default(); super::memory::MAX_FAST_MEM_REGIONS],
+            fm_region_count: 0,
             fm_bus: 0,
             fm_write_hook: 0,
             fm_store_filter: 0,

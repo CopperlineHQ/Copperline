@@ -1245,6 +1245,20 @@ fn trace_code_bus_address(cpu: &CpuCore, addr: u32) -> Option<u32> {
     Some(cpu.address(phys))
 }
 
+fn code_regions_equal(cpu: &CpuCore, code: &[u8], segments: &[TraceCodeSegment]) -> bool {
+    if cpu.fm_mmu.enabled() {
+        return translated_code_segments_eq(cpu, code, segments);
+    }
+    segments.iter().all(|s| {
+        let Some(off) = cpu.physical_window_off(s.start, s.len, false) else {
+            return false;
+        };
+        // SAFETY: this entire segment fits in one stable readable region.
+        let live = unsafe { std::slice::from_raw_parts(cpu.window_host_ptr(off), s.len as usize) };
+        live == &code[s.code_offset as usize..(s.code_offset + s.len) as usize]
+    })
+}
+
 /// Validate through the bus when fastmem validation fails, preserving the
 /// architecturally first changed instruction for the ordinary miss path.
 fn validate_trace_code_slow<B: AddressBus>(
@@ -1252,6 +1266,9 @@ fn validate_trace_code_slow<B: AddressBus>(
     cpu: &CpuCore,
     bus: &mut B,
 ) -> SlowTraceCodeValidation {
+    if code_regions_equal(cpu, &trace.code, &trace.code_segments) {
+        return SlowTraceCodeValidation::Valid;
+    }
     for (index, op) in trace.ops.iter().enumerate() {
         let Some(addr) = trace_code_bus_address(cpu, cpu.address(op.pc)) else {
             return SlowTraceCodeValidation::Unavailable;
@@ -1338,7 +1355,7 @@ fn translated_code_segments_eq(
             let expected = &expected_code[code_offset..code_offset + chunk as usize];
             // SAFETY: the window lookup bounds `chunk` bytes from `off`, and
             // `expected` has exactly `chunk` bytes.
-            let live = unsafe { (cpu.fm_ptr as *const u8).add(off as usize) };
+            let live = cpu.window_host_ptr(off);
             if !unsafe { trace_code_eq(live, expected.as_ptr(), chunk as usize) } {
                 return false;
             }
@@ -3953,7 +3970,20 @@ impl TraceJit {
                     ptr_ty,
                     crate::core::window::trace_window_off as *const () as usize as i64,
                 );
+                let fm_readonly = load_u8(&mut builder, cpu_ptr, offset_of!(CpuCore, fm_readonly));
+                let mut pointer_sig = module.make_signature();
+                pointer_sig.params.push(AbiParam::new(ptr_ty));
+                pointer_sig.params.push(AbiParam::new(types::I32));
+                pointer_sig.returns.push(AbiParam::new(ptr_ty));
+                let pointer_sig = builder.import_signature(pointer_sig);
+                let pointer_fn = builder.ins().iconst(
+                    ptr_ty,
+                    crate::core::window::trace_window_ptr as *const () as usize as i64,
+                );
                 Some(MemEnv {
+                    fm_readonly,
+                    pointer_sig,
+                    pointer_fn,
                     tracked_writes,
                     translated,
                     cpu: cpu_ptr,
@@ -7229,7 +7259,7 @@ fn execute_portable_movem_word_postinc(cpu: &mut CpuCore, trace: TraceBuildOp) -
             continue;
         }
         let value = unsafe {
-            let p = (cpu.fm_ptr as *const u8).add(next_off);
+            let p = cpu.window_host_ptr(next_off as u32);
             u16::from_be_bytes([*p, *p.add(1)]) as i16 as i32 as u32
         };
         cpu.dar[reg] = value;
@@ -7270,7 +7300,7 @@ fn execute_portable_movem_long_predec(
     for (slot, reg) in movem_predec_regs_ascending(mask).enumerate() {
         let value = cpu.dar[reg];
         unsafe {
-            let p = (cpu.fm_ptr as *mut u8).add(off as usize + 4 * slot);
+            let p = cpu.window_host_ptr(off).add(4 * slot);
             let b = value.to_be_bytes();
             *p = b[0];
             *p.add(1) = b[1];
@@ -7300,7 +7330,7 @@ fn execute_portable_movem_long_postinc(cpu: &mut CpuCore, trace: TraceBuildOp) -
     let off = cpu.window_range_off(base_val & cpu.address_mask, total, false)?;
     for (slot, reg) in movem_postinc_regs_ascending(mask).enumerate() {
         let value = unsafe {
-            let p = (cpu.fm_ptr as *const u8).add(off as usize + 4 * slot);
+            let p = cpu.window_host_ptr(off).add(4 * slot);
             u32::from_be_bytes([*p, *p.add(1), *p.add(2), *p.add(3)])
         };
         cpu.dar[reg] = value;
@@ -7422,7 +7452,7 @@ fn execute_portable_link(cpu: &mut CpuCore, trace: TraceBuildOp, spans: CodeSpan
     }
     let an = cpu.dar[8 + reg as usize];
     unsafe {
-        let p = (cpu.fm_ptr as *mut u8).add(off as usize);
+        let p = cpu.window_host_ptr(off);
         let b = an.to_be_bytes();
         *p = b[0];
         *p.add(1) = b[1];
@@ -7448,7 +7478,7 @@ fn execute_portable_unlk(cpu: &mut CpuCore, trace: TraceBuildOp) -> Option<i32> 
     }
     let off = cpu.window_off(addr & cpu.address_mask, 4, false, false)?;
     let value = unsafe {
-        let p = (cpu.fm_ptr as *const u8).add(off as usize);
+        let p = cpu.window_host_ptr(off);
         u32::from_be_bytes([*p, *p.add(1), *p.add(2), *p.add(3)])
     };
     cpu.dar[15] = addr.wrapping_add(4);
@@ -7716,7 +7746,7 @@ fn execute_portable_move_imm_mem(
         cpu.window_off(raw & cpu.address_mask, bytes, true, false)
     };
     let write = |cpu: &mut CpuCore, off: u32, value: u32| unsafe {
-        let p = (cpu.fm_ptr as *mut u8).add(off as usize);
+        let p = cpu.window_host_ptr(off);
         match size {
             Size::Byte => *p = value as u8,
             Size::Word => {
@@ -7830,7 +7860,7 @@ fn execute_portable_and_imm_byte_mem(
     if spans.store_hits_code(masked, 1) {
         return None;
     }
-    let ptr = unsafe { (cpu.fm_ptr as *mut u8).add(off as usize) };
+    let ptr = cpu.window_host_ptr(off);
     let result = unsafe { *ptr } & immediate;
     unsafe { *ptr = result };
     cpu.set_logic_flags(u32::from(result), Size::Byte);
@@ -7967,7 +7997,7 @@ fn execute_portable_move_mem(
     };
     let read = |cpu: &CpuCore, off: u32| -> u32 {
         unsafe {
-            let p = (cpu.fm_ptr as *const u8).add(off as usize);
+            let p = cpu.window_host_ptr(off);
             match size {
                 Size::Byte => *p as u32,
                 Size::Word => u16::from_be_bytes([*p, *p.add(1)]) as u32,
@@ -7976,7 +8006,7 @@ fn execute_portable_move_mem(
         }
     };
     let write = |cpu: &mut CpuCore, off: u32, value: u32| unsafe {
-        let p = (cpu.fm_ptr as *mut u8).add(off as usize);
+        let p = cpu.window_host_ptr(off);
         match size {
             Size::Byte => *p = value as u8,
             Size::Word => {
@@ -9563,6 +9593,9 @@ struct MemEnv {
     fm_ptr_ty: Type,
     fm_base: Value,
     fm_len: Value,
+    fm_readonly: Value,
+    pointer_sig: cranelift_codegen::ir::SigRef,
+    pointer_fn: Value,
     address_mask: u32,
     aligned_only: bool,
     code_start: u32,
@@ -9627,15 +9660,45 @@ fn checked_window_off(
         branch_guard(builder, bail, bad);
     }
     let masked = builder.ins().band_imm(addr, env.address_mask as i64);
+    let off = resolved_window_off(builder, env, bail, masked, size.bytes(), write);
+    (off, masked)
+}
+
+/// The primary window stays inline. A miss uses the same resident-MMU and
+/// read/write-permission lookup as the portable path, then rejoins with a
+/// physical token. No guest state changes until every operand has passed.
+#[cfg(all(feature = "jit", not(target_family = "wasm")))]
+fn resolved_window_off(
+    builder: &mut FunctionBuilder<'_>,
+    env: &MemEnv,
+    bail: Block,
+    masked: Value,
+    bytes: u32,
+    write: bool,
+) -> Value {
     if env.translated {
-        let off = translated_window_off(builder, env, bail, masked, size.bytes(), write);
-        return (off, masked);
+        return translated_window_off(builder, env, bail, masked, bytes, write);
     }
     let off = builder.ins().isub(masked, env.fm_base);
-    let limit = builder.ins().iadd_imm(env.fm_len, -(size.bytes() as i64));
-    let bad = builder.ins().icmp(IntCC::UnsignedGreaterThan, off, limit);
-    branch_guard(builder, bail, bad);
-    (off, masked)
+    let short = builder
+        .ins()
+        .icmp_imm(IntCC::UnsignedLessThan, env.fm_len, i64::from(bytes));
+    let limit = builder.ins().iadd_imm(env.fm_len, -i64::from(bytes));
+    let outside = builder.ins().icmp(IntCC::UnsignedGreaterThan, off, limit);
+    let mut miss = builder.ins().bor(short, outside);
+    if write {
+        let readonly = builder.ins().icmp_imm(IntCC::NotEqual, env.fm_readonly, 0);
+        miss = builder.ins().bor(miss, readonly);
+    }
+    let slow = builder.create_block();
+    let join = builder.create_block();
+    builder.append_block_param(join, types::I32);
+    builder.ins().brif(miss, slow, &[], join, &[off.into()]);
+    builder.switch_to_block(slow);
+    let extra = translated_window_off(builder, env, bail, masked, bytes, write);
+    builder.ins().jump(join, &[extra.into()]);
+    builder.switch_to_block(join);
+    builder.block_params(join)[0]
 }
 
 /// The window offset of a `bytes`-long data access at the logical `masked`
@@ -9667,12 +9730,28 @@ fn translated_window_off(
 
 #[cfg(all(feature = "jit", not(target_family = "wasm")))]
 fn window_host_addr(builder: &mut FunctionBuilder<'_>, env: &MemEnv, off: Value) -> Value {
+    let primary = builder.create_block();
+    let extra = builder.create_block();
+    let join = builder.create_block();
+    builder.append_block_param(join, env.fm_ptr_ty);
+    let inside = builder.ins().icmp(IntCC::UnsignedLessThan, off, env.fm_len);
+    builder.ins().brif(inside, primary, &[], extra, &[]);
+    builder.switch_to_block(primary);
     let off_ptr = if env.fm_ptr_ty == types::I32 {
         off
     } else {
         builder.ins().uextend(env.fm_ptr_ty, off)
     };
-    builder.ins().iadd(env.fm_ptr, off_ptr)
+    let ptr = builder.ins().iadd(env.fm_ptr, off_ptr);
+    builder.ins().jump(join, &[ptr.into()]);
+    builder.switch_to_block(extra);
+    let call = builder
+        .ins()
+        .call_indirect(env.pointer_sig, env.pointer_fn, &[env.cpu, off]);
+    let ptr = builder.inst_results(call)[0];
+    builder.ins().jump(join, &[ptr.into()]);
+    builder.switch_to_block(join);
+    builder.block_params(join)[0]
 }
 
 /// Big-endian sized load from the window; result is a zero-extended I32.
@@ -9741,20 +9820,7 @@ fn emit_movem_word_postinc(
         i64::from(last_valid_start),
     );
     branch_guard(builder, bail, wraps);
-    let off = if env.translated {
-        translated_window_off(builder, env, bail, masked, bytes, false)
-    } else {
-        let too_short =
-            builder
-                .ins()
-                .icmp_imm(IntCC::UnsignedLessThan, env.fm_len, i64::from(bytes));
-        branch_guard(builder, bail, too_short);
-        let off = builder.ins().isub(masked, env.fm_base);
-        let limit = builder.ins().iadd_imm(env.fm_len, -i64::from(bytes));
-        let outside = builder.ins().icmp(IntCC::UnsignedGreaterThan, off, limit);
-        branch_guard(builder, bail, outside);
-        off
-    };
+    let off = resolved_window_off(builder, env, bail, masked, bytes, false);
 
     let mut ordinal = 0i64;
     for reg in 0..8 {
@@ -10026,23 +10092,8 @@ fn checked_window_off_range(
         let bad = builder.ins().icmp_imm(IntCC::NotEqual, low, 0);
         branch_guard(builder, bail, bad);
     }
-    if env.translated {
-        let masked = builder.ins().band_imm(addr, env.address_mask as i64);
-        let off = translated_window_off(builder, env, bail, masked, bytes, write);
-        return (off, masked);
-    }
-    // A window shorter than the whole transfer must bail before the limit
-    // below wraps to a large unsigned value and admits every offset.
-    let short_window =
-        builder
-            .ins()
-            .icmp_imm(IntCC::UnsignedLessThan, env.fm_len, i64::from(bytes));
-    branch_guard(builder, bail, short_window);
     let masked = builder.ins().band_imm(addr, env.address_mask as i64);
-    let off = builder.ins().isub(masked, env.fm_base);
-    let limit = builder.ins().iadd_imm(env.fm_len, -(bytes as i64));
-    let bad = builder.ins().icmp(IntCC::UnsignedGreaterThan, off, limit);
-    branch_guard(builder, bail, bad);
+    let off = resolved_window_off(builder, env, bail, masked, bytes, write);
     (off, masked)
 }
 
@@ -10859,7 +10910,7 @@ fn execute_portable_call_through(
         return None;
     }
     unsafe {
-        let p = (cpu.fm_ptr as *mut u8).add(off as usize);
+        let p = cpu.window_host_ptr(off);
         let b = return_pc.to_be_bytes();
         *p = b[0];
         *p.add(1) = b[1];
@@ -10895,7 +10946,7 @@ fn execute_portable_return_exit(cpu: &mut CpuCore, trace: TraceBuildOp) -> Optio
     }
     let off = cpu.window_off(sp & cpu.address_mask, 4, false, false)?;
     let target = unsafe {
-        let p = (cpu.fm_ptr as *const u8).add(off as usize);
+        let p = cpu.window_host_ptr(off);
         u32::from_be_bytes([*p, *p.add(1), *p.add(2), *p.add(3)])
     };
     cpu.dar[15] = sp.wrapping_add(4).wrapping_add(displacement as i32 as u32);
@@ -10919,7 +10970,7 @@ fn execute_portable_rts_return(cpu: &mut CpuCore, trace: TraceBuildOp) -> Option
     }
     let off = cpu.window_off(sp & cpu.address_mask, 4, false, false)?;
     let popped = unsafe {
-        let p = (cpu.fm_ptr as *const u8).add(off as usize);
+        let p = cpu.window_host_ptr(off);
         u32::from_be_bytes([*p, *p.add(1), *p.add(2), *p.add(3)])
     };
     if popped != expected_return {

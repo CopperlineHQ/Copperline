@@ -6,7 +6,7 @@
 //!
 //! Arguments: positive trial count (default 3), `mem` or `reg` (default mem).
 //! CSV sections: core,trial,batch,seconds,MIPS;
-//! machine,trial,code_in_ROM,guest_clock_factor,seconds,MIPS,CCK;
+//! machine,trial,code_in_ROM,second_data_bank,guest_clock_factor,seconds,MIPS,CCK;
 //! chipset,trial,seconds (ten emulated PAL seconds).
 //! Fixed synthetic code, idle DMA, masked IRQs, no OS, no display renderer.
 //! Cache models are allocated but guest CACR stays at its reset value.
@@ -155,37 +155,41 @@ fn main() -> anyhow::Result<()> {
             );
         }
         for rom_code in [false, true] {
-            for factor in [1.0, 80.0] {
-                let mut machine = cpu::build(
-                    bus(rom_code, program),
-                    CpuModel::M68040,
-                    true,
-                    7,
-                    Default::default(),
-                    false,
-                )?;
-                machine.set_cache_emulation(true, true);
-                machine.set_jit_enabled(true);
-                machine.set_jit_speed_factor(factor);
-                for _ in 0..WARM / 65536 {
-                    machine.step_slice(65536)?;
+            for second_data_bank in [false, true] {
+                let mut code = program.to_vec();
+                if second_data_bank && code.len() == MEM_PROGRAM.len() {
+                    code[2..6].copy_from_slice(&0x07e0_0800u32.to_be_bytes());
                 }
-                let before = machine.d(0);
-                let start_cck = machine.bus().emulated_cck();
-                let start = Instant::now();
-                for _ in 0..COUNT / 65536 {
-                    assert_eq!(machine.step_slice(65536)?.instructions, 65536);
-                }
-                let elapsed = start.elapsed().as_secs_f64();
-                assert_eq!(
-                    machine.d(0).wrapping_sub(before),
-                    (COUNT / per_increment) as u32
-                );
-                println!(
-                    "machine,{trial},{rom_code},{factor},{elapsed:.6},{:.2},{}",
+                for factor in [1.0, 80.0] {
+                    let mut bus = bus(rom_code, &code);
+                    if second_data_bank {
+                        bus.mem.fit_mb_ram(2 * 1024 * 1024);
+                    }
+                    let mut machine =
+                        cpu::build(bus, CpuModel::M68040, true, 7, Default::default(), false)?;
+                    machine.set_cache_emulation(true, true);
+                    machine.set_jit_enabled(true);
+                    machine.set_jit_speed_factor(factor);
+                    for _ in 0..WARM / 65536 {
+                        machine.step_slice(65536)?;
+                    }
+                    let before = machine.d(0);
+                    let start_cck = machine.bus().emulated_cck();
+                    let start = Instant::now();
+                    for _ in 0..COUNT / 65536 {
+                        assert_eq!(machine.step_slice(65536)?.instructions, 65536);
+                    }
+                    let elapsed = start.elapsed().as_secs_f64();
+                    assert_eq!(
+                        machine.d(0).wrapping_sub(before),
+                        (COUNT / per_increment) as u32
+                    );
+                    println!(
+                    "machine,{trial},{rom_code},{second_data_bank},{factor},{elapsed:.6},{:.2},{}",
                     COUNT as f64 / elapsed / 1e6,
                     machine.bus().emulated_cck() - start_cck
                 );
+                }
             }
         }
         let mut chipset = bus(false, program);

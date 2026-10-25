@@ -55,6 +55,30 @@ pub struct FastMem {
     pub len: u32,
 }
 
+/// Maximum number of additional direct-memory regions captured per batch.
+pub const MAX_FAST_MEM_REGIONS: usize = 8;
+
+/// Additional side-effect-free memory, including read-only ROM.
+///
+/// The stability, backing-storage and interception requirements of [`FastMem`]
+/// apply. `writable = false` permits fetches and reads only: stores and entire
+/// read-modify-write instructions fall back to the bus. Regions must not wrap
+/// the 32-bit address space or overlap one another/the primary window. Invalid
+/// or overlapping entries are ignored. Mapping changes must end the batch
+/// before another instruction executes; backing allocations must stay valid
+/// until the batch returns. Guest addresses are physical, including with PMMU.
+#[derive(Debug, Clone, Copy)]
+pub struct FastMemRegion {
+    /// Stable host pointer backing the first byte.
+    pub ptr: *mut u8,
+    /// First physical guest address.
+    pub base: u32,
+    /// Number of contiguous bytes.
+    pub len: u32,
+    /// Whether direct stores are side-effect-free and permitted.
+    pub writable: bool,
+}
+
 /// Read-direct RAM whose writes must still pass through the bus.
 ///
 /// This is an opt-in native-JIT capability for 68020 and later CPUs, not a
@@ -414,6 +438,15 @@ pub trait AddressBus {
     #[inline]
     fn fast_mem(&mut self) -> Option<FastMem> {
         None
+    }
+
+    /// Additional plain RAM/ROM windows, searched only after the primary
+    /// window misses. If there is no primary window, the first valid region
+    /// becomes it (retaining read-only protection). TrackedMem is used only
+    /// when neither this method nor fast_mem exposes a valid region.
+    #[inline]
+    fn fast_mem_regions(&mut self) -> [Option<FastMemRegion>; MAX_FAST_MEM_REGIONS] {
+        [None; MAX_FAST_MEM_REGIONS]
     }
 
     /// Optionally expose read-direct RAM with intercepted writes. Native traces

@@ -18,6 +18,20 @@
 
 use super::cpu::CpuCore;
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Region {
+    pub ptr: usize,
+    pub base: u32,
+    pub len: u32,
+    pub writable: bool,
+}
+
+impl Region {
+    pub fn covers(self, addr: u32, bytes: u32) -> bool {
+        bytes != 0 && bytes <= self.len && addr.wrapping_sub(self.base) <= self.len - bytes
+    }
+}
+
 /// `fm_code_page` when no program-space translation is remembered: page
 /// bases are even.
 pub(crate) const NO_CODE_PAGE: u32 = 1;
@@ -71,7 +85,7 @@ impl CpuCore {
         }
         // The page may run past the end of the window.
         let off = addr.wrapping_add(self.fm_code_delta);
-        let off = (off <= self.fm_len - 2).then_some(off);
+        let off = self.physical_window_off(self.fm_base.wrapping_add(off), 2, false);
         debug_assert_eq!(off, self.translated_window_off(addr, 2, false, true));
         off
     }
@@ -103,9 +117,7 @@ impl CpuCore {
         if self.fm_mmu.enabled() {
             return self.translated_window_off(addr, bytes, write, instruction);
         }
-        let off = addr.wrapping_sub(self.fm_base);
-        // `run_batch` installs only windows of at least four bytes.
-        (off <= self.fm_len - bytes).then_some(off)
+        self.physical_window_off(addr, bytes, write)
     }
 
     /// [`Self::window_off`] for a data transfer of any length (the portable
@@ -116,8 +128,7 @@ impl CpuCore {
         if self.fm_mmu.enabled() {
             return self.translated_window_off(addr, bytes, write, false);
         }
-        let off = addr.wrapping_sub(self.fm_base);
-        (bytes <= self.fm_len && off <= self.fm_len - bytes).then_some(off)
+        self.physical_window_off(addr, bytes, write)
     }
 
     /// Window offset of a `bytes`-byte access at the logical, address-masked
@@ -155,8 +166,7 @@ impl CpuCore {
             return None;
         }
         let phys = crate::mmu::probe_resident(self, mmu, addr, write, instruction)?;
-        let off = self.address(phys).wrapping_sub(self.fm_base);
-        (bytes <= self.fm_len && off <= self.fm_len - bytes).then_some(off)
+        self.physical_window_off(self.address(phys), bytes, write)
     }
 }
 
@@ -170,6 +180,113 @@ pub(crate) extern "C" fn trace_window_off(cpu: *const CpuCore, addr: u32, reques
     // SAFETY: a generated trace passes the CpuCore it was entered with,
     // which nothing writes while this call reads it.
     let cpu = unsafe { &*cpu };
-    cpu.translated_window_off(addr, request & 0xFF, request & 0x100 != 0, false)
+    cpu.window_access_off(addr, request & 0xFF, request & 0x100 != 0, false)
         .unwrap_or(u32::MAX)
 }
+
+impl CpuCore {
+    pub(crate) fn capture_extra_window(&mut self, fm: super::memory::FastMemRegion) {
+        let end = u64::from(fm.base) + u64::from(fm.len);
+        let ptr = fm.ptr as usize;
+        let cpu = self as *const Self as usize;
+        let cpu_end = cpu + std::mem::size_of::<Self>();
+        if ptr == 0
+            || fm.len < 4
+            || end > (1u64 << 32)
+            || ptr.checked_add(fm.len as usize).is_none()
+            || (ptr < cpu_end && cpu < ptr + fm.len as usize)
+        {
+            return;
+        }
+        let overlaps = |base: u32, len: u32| {
+            len != 0
+                && u64::from(fm.base) < u64::from(base) + u64::from(len)
+                && u64::from(base) < end
+        };
+        if overlaps(self.fm_base, self.fm_len)
+            || self.fm_regions[..self.fm_region_count]
+                .iter()
+                .any(|r| overlaps(r.base, r.len))
+        {
+            return;
+        }
+        if self.fm_len == 0 {
+            self.fm_ptr = ptr;
+            self.fm_base = fm.base;
+            self.fm_len = fm.len;
+            self.fm_readonly = !fm.writable;
+        } else {
+            self.fm_regions[self.fm_region_count] = Region {
+                ptr,
+                base: fm.base,
+                len: fm.len,
+                writable: fm.writable,
+            };
+            self.fm_region_count += 1;
+        }
+        self.trace_record_skip = [super::trace_jit::TRACE_PC_NONE; 4];
+        self.trace_probe_skip = [super::trace_jit::TRACE_PC_NONE; 4];
+    }
+
+    /// An offset token is a physical address minus fm_base, wrapping at 32 bits.
+    /// It is an allocation offset ONLY when it lies in the primary window.
+    /// Every consumer must resolve it with window_host_ptr before dereferencing.
+    #[inline]
+    pub(crate) fn physical_window_off(&self, addr: u32, bytes: u32, write: bool) -> Option<u32> {
+        let off = addr.wrapping_sub(self.fm_base);
+        if bytes != 0 && bytes <= self.fm_len && off <= self.fm_len - bytes {
+            return (!write || !self.fm_readonly).then_some(off);
+        }
+        // u32::MAX is the native helper's miss sentinel. An access at exactly
+        // fm_base-1 remains correct through the bus rather than being accelerated.
+        if off == u32::MAX {
+            return None;
+        }
+        self.fm_regions[..self.fm_region_count]
+            .iter()
+            .find(|r| r.covers(addr, bytes))
+            .filter(|r| !write || r.writable)
+            .map(|_| off)
+    }
+
+    #[inline]
+    pub(crate) fn window_access_off(
+        &self,
+        addr: u32,
+        bytes: u32,
+        write: bool,
+        instruction: bool,
+    ) -> Option<u32> {
+        if self.fm_mmu.enabled() {
+            self.translated_window_off(addr, bytes, write, instruction)
+        } else {
+            self.physical_window_off(addr, bytes, write)
+        }
+    }
+
+    /// Resolve a previously range- and permission-checked physical token.
+    #[inline]
+    pub(crate) fn window_host_ptr(&self, off: u32) -> *mut u8 {
+        if off < self.fm_len {
+            // SAFETY: every caller has validated the complete access range.
+            return unsafe { (self.fm_ptr as *mut u8).add(off as usize) };
+        }
+        let addr = self.fm_base.wrapping_add(off);
+        self.fm_regions[..self.fm_region_count]
+            .iter()
+            .find(|r| r.covers(addr, 1))
+            .map_or(std::ptr::null_mut(), |r| unsafe {
+                (r.ptr as *mut u8).add(addr.wrapping_sub(r.base) as usize)
+            })
+    }
+}
+
+#[cfg(all(feature = "jit", not(target_family = "wasm")))]
+pub(crate) extern "C" fn trace_window_ptr(cpu: *const CpuCore, off: u32) -> usize {
+    // SAFETY: generated code owns the live CpuCore and has preflighted this token.
+    unsafe { (&*cpu).window_host_ptr(off) as usize }
+}
+
+#[cfg(test)]
+#[path = "window_tests.rs"]
+mod tests;
