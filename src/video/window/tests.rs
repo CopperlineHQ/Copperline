@@ -12412,110 +12412,6 @@ fn corner_overlays_report_a_box_holding_every_pixel_they_paint() {
     );
 }
 
-/// An overlay box's draw lands on the surface pixels the display draw put
-/// it on, and samples each one at the texture position the display draw
-/// sampled it at -- so the box put back over the RTG pass is
-/// indistinguishable from the one the display draw drew -- in the
-/// classic whole-canvas layout at a whole multiple and at a fractional
-/// fit, and in a sub-rect layout. A box entirely off the display has no
-/// draw.
-#[test]
-fn an_overlay_draw_resamples_its_box_where_the_display_draw_did() {
-    use super::scaler::ScaleFilter::{Nearest, SharpBilinear};
-    let canvas_h = super::window_present_height();
-    let classic = (0, 0, FB_WIDTH, canvas_h);
-    let layout = |src_canvas, display_dst, filter| super::PresentLayout {
-        src_canvas,
-        display_dst,
-        filter,
-        chrome_dst: None,
-        factors: None,
-    };
-    // The sample position, in uv, of surface pixel `p` on one axis for a
-    // draw whose source starts at `src0` spanning `src_len` uv, landing at
-    // `d0` spanning `dlen` pixels.
-    let sample = |p: u32, src0: f32, src_len: f32, d0: u32, dlen: u32| {
-        src0 + (p as f32 + 0.5 - d0 as f32) / dlen as f32 * src_len
-    };
-    let cases = [
-        // 2x integer: a box drawn at 2x lands on exact doubles.
-        (
-            layout(
-                classic,
-                (10, 20, 2 * FB_WIDTH as u32, 2 * canvas_h as u32),
-                Nearest,
-            ),
-            2,
-        ),
-        // A smooth fit at no whole multiple.
-        (
-            layout(
-                classic,
-                (3, 0, FB_WIDTH as u32 * 3 / 2 + 1, canvas_h as u32 * 7 / 5),
-                SharpBilinear,
-            ),
-            1,
-        ),
-        // An autocrop rect, scaled to its own fit.
-        (
-            layout((38, 71, 640, 400), (100, 50, 1280, 900), SharpBilinear),
-            2,
-        ),
-    ];
-    for (layout, scale) in cases {
-        let display = layout.draws()[0];
-        let rect = super::Rect {
-            x: 101 * scale,
-            y: 87 * scale,
-            w: 37 * scale + 1,
-            h: 13 * scale,
-        };
-        let draw = layout
-            .overlay_draw(rect, scale)
-            .expect("a box on the display has a draw");
-        assert_eq!(draw.filter, layout.filter);
-        assert_eq!(draw.picture, None);
-        let (x, y, w, h) = draw.dst;
-        let (dx, dy, dw, dh) = layout.display_dst;
-        let (sx, sy, sw, sh) = layout.src_canvas;
-        // The box's footprint, rounded out by less than a pixel a side.
-        let kx = dw as f32 / sw as f32;
-        let ky = dh as f32 / sh as f32;
-        let left = dx as f32 + (rect.x as f32 / scale as f32 - sx as f32) * kx;
-        let right = dx as f32 + ((rect.x + rect.w) as f32 / scale as f32 - sx as f32) * kx;
-        let top = dy as f32 + (rect.y as f32 / scale as f32 - sy as f32) * ky;
-        let bottom = dy as f32 + ((rect.y + rect.h) as f32 / scale as f32 - sy as f32) * ky;
-        assert!(x as f32 <= left && left - (x as f32) < 1.0, "{layout:?}");
-        assert!((x + w) as f32 >= right && ((x + w) as f32) - right < 1.0);
-        assert!(y as f32 <= top && top - (y as f32) < 1.0);
-        assert!((y + h) as f32 >= bottom && ((y + h) as f32) - bottom < 1.0);
-        for p in x..x + w {
-            let sub = sample(p, draw.src[0], draw.src[2], x, w);
-            let full = sample(p, display.src[0], display.src[2], dx, dw);
-            assert!((sub - full).abs() < 1e-5, "{layout:?} column {p}");
-        }
-        for p in y..y + h {
-            let sub = sample(p, draw.src[1], draw.src[3], y, h);
-            let full = sample(p, display.src[1], display.src[3], dy, dh);
-            assert!((sub - full).abs() < 1e-5, "{layout:?} row {p}");
-        }
-    }
-    // Left of an autocrop rect, wholly cropped away: nothing to put back.
-    let cropped = layout((38, 71, 640, 400), (100, 50, 1280, 900), SharpBilinear);
-    let off = super::Rect {
-        x: 0,
-        y: 100,
-        w: 20,
-        h: 20,
-    };
-    assert_eq!(cropped.overlay_draw(off, 1), None);
-    let empty = super::Rect { w: 0, ..off };
-    assert_eq!(
-        layout(classic, (0, 0, 716, 581), Nearest).overlay_draw(empty, 1),
-        None
-    );
-}
-
 /// The RTG pass draws over the display's rows of the display rect: the
 /// canvas's first `present_height()` rows in the classic layout, where
 /// the chrome below them stays the composed texture's, and the whole
@@ -12573,8 +12469,8 @@ fn integer_rtg_layout_fits_native_pixels_against_the_surface() {
                 layout.rtg_viewport(),
                 (x as f32, y as f32, w as f32, h as f32)
             );
-            // The CPU fallback samples the whole board into the display rows,
-            // while overlays and pointer mapping follow this same placement.
+            // The transparent UI is independent; guest pointer mapping follows
+            // the native board placement.
             assert_eq!(layout.draws()[0].dst, layout.display_dst);
             assert_eq!(
                 layout.cursor_position(PhysicalPosition::new(x as f64, y as f64)),
@@ -12652,6 +12548,87 @@ fn integer_rtg_layout_fits_the_debug_pane() {
         Some((0, 0))
     );
     assert_eq!(layout.rtg_integer_picture((640, 480)), [0.0, 0.0, 1.0, 1.0]);
+}
+
+/// Host UI stays square at a whole canvas multiple in every RTG mode,
+/// including the square canvas used by live integer scaling (570 rows).
+#[test]
+fn rtg_ui_canvas_fit_preserves_glyph_aspect_and_pointer_coordinates() {
+    use winit::dpi::PhysicalPosition;
+    for rows in [537usize, 570] {
+        for (surface, chrome_h) in [
+            ((1920u32, 1080u32), 44),
+            ((1920, 1080), 0),
+            ((800, 600), 0),
+            ((3840, 2160), 132),
+        ] {
+            let viewport = (17, 29, surface.0, surface.1 - chrome_h);
+            let chrome =
+                (chrome_h > 0).then_some((17, 29 + surface.1 - chrome_h, surface.0, chrome_h));
+            let ui = super::ui_canvas_layout(viewport, true, chrome, (FB_WIDTH, rows));
+            let (x, y, w, h) = ui.display_dst;
+            let m = (surface.0 / FB_WIDTH as u32).min((surface.1 - chrome_h) / rows as u32);
+            assert!(m >= 1);
+            assert_eq!((w, h), (m * FB_WIDTH as u32, m * rows as u32));
+            assert_eq!(ui.chrome_dst, chrome);
+            assert_eq!(
+                ui.cursor_position(PhysicalPosition::new(x as f64, y as f64)),
+                Some((0, 0))
+            );
+            assert_eq!(
+                ui.cursor_position(PhysicalPosition::new(
+                    (x + w / 2) as f64,
+                    (y + h / 2) as f64
+                )),
+                Some((FB_WIDTH as i32 / 2, rows as i32 / 2))
+            );
+        }
+    }
+    let small = super::ui_canvas_layout((0, 0, 600, 400), true, None, (716, 570));
+    assert!(small.factors.is_none());
+    assert!((small.display_dst.2 as f64 / small.display_dst.3 as f64 - 716.0 / 570.0).abs() < 0.01);
+}
+
+#[test]
+fn rtg_corner_sprites_keep_ui_scale_at_the_picture_corners() {
+    let ph = super::present_height();
+    let ui = super::ui_canvas_layout(
+        (0, 0, 1920, 1036),
+        true,
+        Some((602, 1036, 716, 44)),
+        (FB_WIDTH, ph),
+    );
+    let k = ui.display_dst.2 as f32 / FB_WIDTH as f32;
+    for native in [(640, 480), (1280, 720), (1920, 1080), (320, 200)] {
+        let board = super::integer_rtg_present_layout(
+            (0, 0, 1920, 1080),
+            native,
+            Some((602, 1036, 716, 44)),
+        );
+        let (bx, by, bw, bh) = board.rtg_viewport();
+        for scale in [1, 2] {
+            let mut frame = vec![0; texture_width(scale) * texture_height(scale) * 4];
+            let anchor = (0, 0, FB_WIDTH, ph);
+            let rec = super::draw_record_badge(&mut frame, scale, 0, anchor);
+            let perf =
+                super::draw_perf_overlay(&mut frame, &["50 fps".into()], scale, true, 0, anchor)
+                    .unwrap();
+            let osd = super::draw_osd(&mut frame, "Ready", false, scale, 0, anchor);
+            for (rect, bottom) in [(rec, false), (perf, false), (osd, true)] {
+                let dst = super::rtg_corner_dst(&ui, &board, rect, scale, bottom);
+                assert_eq!(dst[2] / rect.w as f32, dst[3] / rect.h as f32);
+                assert_eq!(dst[2] / rect.w as f32, k / scale as f32);
+                if bottom {
+                    assert!((dst[0] - bx - 8.0 * k).abs() < 1e-3);
+                    assert!((by + bh - dst[1] - dst[3] - 8.0 * k).abs() < 1e-3);
+                } else {
+                    assert!((bx + bw - dst[0] - dst[2] - 8.0 * k).abs() < 1e-3);
+                }
+                assert!(dst[0] >= bx && dst[1] >= by);
+                assert!(dst[0] + dst[2] <= bx + bw + 1e-3 && dst[1] + dst[3] <= by + bh + 1e-3);
+            }
+        }
+    }
 }
 
 /// Issue 816: under integer scaling the RTG pass draws the board's

@@ -787,8 +787,8 @@ pub(super) fn surface_present_layout(
 
 /// Fit native RTG pixels against the available host display area, independently
 /// of the chipset canvas. Chrome keeps its classic size in a separate bottom
-/// band, as it does for autocrop. Both the GPU board pass and the composed CPU
-/// fallback use this layout, including its overlay and pointer transforms.
+/// band, as it does for autocrop. This is the native board and guest-input
+/// layout; host menus and panels have an independent uniform canvas fit.
 pub(super) fn integer_rtg_present_layout(
     viewport: (u32, u32, u32, u32),
     native: (u32, u32),
@@ -915,25 +915,6 @@ impl PresentLayout {
         rtg_texture::picture_rect((w, h), native, true)
     }
 
-    /// The transparent CPU UI layer over the native RTG picture. Its glyphs
-    /// are canvas pixels, so filter them independently of the board's exact
-    /// whole-pixel blocks when the native fit is fractional in canvas units.
-    pub(super) fn rtg_ui_draw(&self) -> Option<scaler::ScalerDraw> {
-        self.overlay_draw(
-            Rect {
-                x: 0,
-                y: 0,
-                w: FB_WIDTH,
-                h: present_height(),
-            },
-            1,
-        )
-        .map(|draw| scaler::ScalerDraw {
-            filter: scaler::ScaleFilter::SharpBilinear,
-            ..draw
-        })
-    }
-
     /// The scaler-pass draws this layout amounts to. The classic layout
     /// is one whole-texture draw; a sub-rect layout samples the rect's
     /// uv sub-rect and adds the chrome band below it.
@@ -966,61 +947,6 @@ impl PresentLayout {
             });
         }
         draws
-    }
-
-    /// The draw that puts `rect` -- backing-texture pixels at
-    /// `texture_scale`, inside the display region: an overlay box --
-    /// back on the surface exactly where the display draw put it, for a
-    /// pass that overdraws the display after the scaler has drawn it (the
-    /// RTG board texture).
-    ///
-    /// The destination is `rect`'s footprint rounded out to whole surface
-    /// pixels and clipped to the display rect, and the source is mapped
-    /// back from that rounded destination rather than taken from `rect`:
-    /// the sub-draw then samples each pixel it covers at the position the
-    /// whole display draw sampled it at, so the box lands on the same
-    /// pixels with no seam. `None` when no part of `rect` is on the
-    /// display.
-    pub(super) fn overlay_draw(
-        &self,
-        rect: Rect,
-        texture_scale: usize,
-    ) -> Option<scaler::ScalerDraw> {
-        let (sx, sy, sw, sh) = self.src_canvas;
-        let (dx, dy, dw, dh) = self.display_dst;
-        if sw == 0 || sh == 0 || dw == 0 || dh == 0 || texture_scale == 0 {
-            return None;
-        }
-        let s = texture_scale as f64;
-        // Surface pixels per canvas pixel on each axis.
-        let kx = f64::from(dw) / sw as f64;
-        let ky = f64::from(dh) / sh as f64;
-        // One axis: texels `start..start + len` to whole surface pixels,
-        // clipped to the destination `d0..d0 + dlen`.
-        let span = |start: usize, len: usize, src0: usize, k: f64, d0: u32, dlen: u32| {
-            let a = f64::from(d0) + (start as f64 / s - src0 as f64) * k;
-            let b = f64::from(d0) + ((start + len) as f64 / s - src0 as f64) * k;
-            let lo = a.floor().max(f64::from(d0)) as u32;
-            let hi = b.ceil().min(f64::from(d0 + dlen)) as u32;
-            // Lazily: for a box wholly off this side of the display the
-            // clamps cross, and `hi - lo` would underflow.
-            (hi > lo).then(|| (lo, hi - lo))
-        };
-        let (x, w) = span(rect.x, rect.w, sx, kx, dx, dw)?;
-        let (y, h) = span(rect.y, rect.h, sy, ky, dy, dh)?;
-        let canvas_w = FB_WIDTH as f64;
-        let canvas_h = window_present_height() as f64;
-        Some(scaler::ScalerDraw {
-            src: [
-                ((sx as f64 + f64::from(x - dx) / kx) / canvas_w) as f32,
-                ((sy as f64 + f64::from(y - dy) / ky) / canvas_h) as f32,
-                (f64::from(w) / kx / canvas_w) as f32,
-                (f64::from(h) / ky / canvas_h) as f32,
-            ],
-            dst: (x, y, w, h),
-            filter: self.filter,
-            picture: None,
-        })
     }
 
     /// Invert the layout for a host cursor position: surface physical
@@ -1258,9 +1184,95 @@ pub(super) fn main_cursor_position(
     r: &Render,
     src: Option<DisplaySrc>,
     rtg: Option<(u32, u32)>,
+    ui_active: bool,
     position: winit::dpi::PhysicalPosition<f64>,
 ) -> Option<(i32, i32)> {
-    main_present_layout(r, src, rtg).cursor_position(position)
+    if ui_active {
+        main_ui_present_layout(r, src, rtg).cursor_position(position)
+    } else {
+        main_present_layout(r, src, rtg).cursor_position(position)
+    }
+}
+
+/// Physical area above chrome, including the board and the independent UI fit.
+pub(super) fn rtg_ui_viewport(r: &Render, board: &PresentLayout) -> (u32, u32, u32, u32) {
+    let (x, y, w, h) =
+        r.debug_viewport
+            .unwrap_or((0, 0, r.surface_size.0.max(1), r.surface_size.1.max(1)));
+    (
+        x,
+        y,
+        w,
+        h.saturating_sub(board.chrome_dst.map_or(0, |c| c.3)).max(1),
+    )
+}
+
+pub(super) fn main_ui_present_layout(
+    r: &Render,
+    src: Option<DisplaySrc>,
+    rtg: Option<(u32, u32)>,
+) -> PresentLayout {
+    let board = main_present_layout(r, src, rtg);
+    if rtg.is_some() && integer_scaling_requested() {
+        ui_canvas_layout(
+            rtg_ui_viewport(r, &board),
+            true,
+            board.chrome_dst,
+            (FB_WIDTH, present_height()),
+        )
+    } else {
+        board
+    }
+}
+
+/// Host glyphs keep their canvas aspect and largest whole pixel multiple,
+/// independently of the board mode. The viewport already excludes chrome.
+pub(super) fn ui_canvas_layout(
+    viewport: (u32, u32, u32, u32),
+    integer: bool,
+    chrome: Option<(u32, u32, u32, u32)>,
+    canvas: (usize, usize),
+) -> PresentLayout {
+    let mut layout = display_src_layout(
+        (viewport.2, viewport.3),
+        integer,
+        DisplaySrc {
+            rect: (0, 0, canvas.0, canvas.1),
+            par: (1, 1),
+            horizontal_repeat: 1,
+        },
+        None,
+    );
+    layout.display_dst.0 += viewport.0;
+    layout.display_dst.1 += viewport.1;
+    layout.chrome_dst = chrome;
+    layout
+}
+
+/// Corner sprites retain the UI's uniform glyph scale, but follow the board's
+/// corners even when those lie outside the host menu/panel canvas.
+pub(super) fn rtg_corner_dst(
+    ui: &PresentLayout,
+    board: &PresentLayout,
+    rect: Rect,
+    scale: usize,
+    bottom_left: bool,
+) -> [f32; 4] {
+    let k = ui.display_dst.2 as f32 / ui.src_canvas.2 as f32;
+    let s = scale as f32;
+    let (x, y, w, h) = board.rtg_viewport();
+    let (dx, dy) = if bottom_left {
+        (
+            x + rect.x as f32 / s * k,
+            y + h - (present_height() as f32 - rect.y as f32 / s) * k,
+        )
+    } else {
+        (
+            x + w - (FB_WIDTH as f32 - rect.x as f32 / s) * k,
+            y + rect.y as f32 / s * k,
+        )
+    };
+    [dx, dy, rect.w as f32 / s * k, rect.h as f32 / s * k]
 }
 
 /// Map a position and clip rect in surface physical pixels to texture pixels.

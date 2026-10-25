@@ -147,7 +147,11 @@ impl App {
         // sub-rect's under autocrop or per-axis scaling, the classic
         // letterbox otherwise -- so the trace shows the same mapping the
         // position below went through.
-        let layout = main_present_layout(r, display_src, self.rtg_present_dims);
+        let layout = if self.ui.active() {
+            main_ui_present_layout(r, display_src, self.rtg_present_dims)
+        } else {
+            main_present_layout(r, display_src, self.rtg_present_dims)
+        };
         let clip = layout.display_dst;
         let texture = (
             texture_width(r.texture_scale) as u32,

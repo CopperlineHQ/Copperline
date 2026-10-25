@@ -218,33 +218,6 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     }
     return composed;
 }
-
-// UI colours use straight alpha on the CPU. Premultiply before filtering,
-// so transparent texels cannot darken the edges of glyphs and overlay boxes.
-fn ui_texel(p: vec2<i32>) -> vec4<f32> {
-    let dims = vec2<i32>(textureDimensions(tex));
-    let c = textureLoad(tex, clamp(p, vec2<i32>(0), dims - 1), 0);
-    return vec4<f32>(c.rgb * c.a, c.a);
-}
-
-@fragment
-fn fs_overlay(in: VOut) -> @location(0) vec4<f32> {
-    let dims = vec2<f32>(textureDimensions(tex));
-    let t = (u.rect.xy + in.uv * u.rect.zw) * dims;
-    let tf = fract(t);
-    let tpp = max(vec2<f32>(abs(dpdx(t.x)), abs(dpdy(t.y))), vec2<f32>(1e-6));
-    let sharp = clamp(tf / tpp, vec2<f32>(0.0), vec2<f32>(0.5))
-        + clamp((tf - vec2<f32>(1.0)) / tpp + vec2<f32>(0.5), vec2<f32>(0.0), vec2<f32>(0.5));
-    let sub = select(sharp, vec2<f32>(0.5), u.params.x > 0.5);
-    let p = floor(t) + sub - 0.5;
-    let p0 = vec2<i32>(floor(p));
-    let f = fract(p);
-    return mix(
-        mix(ui_texel(p0), ui_texel(p0 + vec2<i32>(1, 0)), f.x),
-        mix(ui_texel(p0 + vec2<i32>(0, 1)), ui_texel(p0 + vec2<i32>(1, 1)), f.x),
-        f.y,
-    );
-}
 "#;
 
 /// How the pass resamples the texture onto the destination rect.
@@ -372,15 +345,7 @@ impl ScalerDraw {
 /// layout. Each needs its own uniform buffer, written once per frame.
 const MAX_DRAWS: usize = 2;
 
-/// Most draws [`PresentScaler::render_overlays`] puts back per frame: one
-/// per corner overlay (the record badge, the performance readout, the
-/// OSD message). They take uniform slots after the [`MAX_DRAWS`] ones,
-/// because every queue write lands before any of the frame's commands
-/// run: a slot shared with `render` would hand its draw the overlay's
-/// rect.
-const MAX_OVERLAY_DRAWS: usize = 3;
-
-const UNIFORM_SLOTS: usize = MAX_DRAWS + MAX_OVERLAY_DRAWS;
+const UNIFORM_SLOTS: usize = MAX_DRAWS;
 
 /// Where the picture lands on the surface: the destination rect for a
 /// `canvas`-sized logical picture on a `surface`, both in physical
@@ -422,7 +387,6 @@ pub(super) fn clip_rect_for(
 /// backing texture.
 pub(super) struct PresentScaler {
     pipeline: wgpu::RenderPipeline,
-    overlay_pipeline: wgpu::RenderPipeline,
     background_pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -510,7 +474,7 @@ impl PresentScaler {
             bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
-        let create_pipeline = |label, entry_point, layout, blend| {
+        let create_pipeline = |label, entry_point, layout| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout,
@@ -531,7 +495,7 @@ impl PresentScaler {
                     entry_point: Some(entry_point),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: target_format,
-                        blend: Some(blend),
+                        blend: Some(wgpu::BlendState::REPLACE),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -540,24 +504,10 @@ impl PresentScaler {
                 cache: None,
             })
         };
-        let pipeline = create_pipeline(
-            "present_scaler_pipeline",
-            "fs_main",
-            Some(&pipeline_layout),
-            wgpu::BlendState::REPLACE,
-        );
-        let overlay_pipeline = create_pipeline(
-            "present_scaler_overlay",
-            "fs_overlay",
-            Some(&pipeline_layout),
-            wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
-        );
-        let background_pipeline = create_pipeline(
-            "present_scaler_background",
-            "fs_background",
-            None,
-            wgpu::BlendState::REPLACE,
-        );
+        let pipeline =
+            create_pipeline("present_scaler_pipeline", "fs_main", Some(&pipeline_layout));
+        let background_pipeline =
+            create_pipeline("present_scaler_background", "fs_background", None);
         // One linear sampler serves both filters: the nearest path
         // samples exactly at texel centres, where linear filtering
         // returns that texel alone.
@@ -581,7 +531,6 @@ impl PresentScaler {
         });
         Self {
             pipeline,
-            overlay_pipeline,
             background_pipeline,
             bind_group_layout,
             sampler,
@@ -716,48 +665,6 @@ impl PresentScaler {
         };
         pass.set_pipeline(&self.pipeline);
         record_draws(&mut pass, &bind_groups[..MAX_DRAWS], draws);
-    }
-
-    /// Put `draws` -- sub-rects of the texture this frame's `render`
-    /// drew -- back over what `target` already holds, with no background
-    /// first, alpha-blending the UI over the native RTG board texture.
-    /// The CPU texture contains transparent display rows wherever no UI
-    /// was drawn, so menus, scrims and corner overlays never resample the
-    /// board pixels beneath them. At most [`MAX_OVERLAY_DRAWS`]; extras are
-    /// ignored. It samples the texture `render` bound, so it follows
-    /// `render` in the same frame, and draws nothing before the first.
-    pub(super) fn render_overlays(
-        &self,
-        queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
-        target: &wgpu::TextureView,
-        draws: &[ScalerDraw],
-    ) {
-        let Some(bind_groups) = self.bind_groups.as_ref() else {
-            return;
-        };
-        if draws.is_empty() {
-            return;
-        }
-        write_draw_uniforms(queue, &self.uniforms[MAX_DRAWS..], draws);
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("present_scaler_overlay_pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        pass.set_pipeline(&self.overlay_pipeline);
-        record_draws(&mut pass, &bind_groups[MAX_DRAWS..], draws);
     }
 }
 
@@ -1143,68 +1050,6 @@ mod tests {
     /// `render`'s draws survive, so the overlay draws took slots of their
     /// own rather than rewriting the frame's display or chrome uniforms.
     #[test]
-    fn overlay_draws_put_their_boxes_back_over_a_later_pass() {
-        let Some(gpu) = gpu() else {
-            return;
-        };
-        const CYAN: u32 = 0xFFFF_FF00;
-        const YELLOW: u32 = 0xFF00_FFFF;
-        const BOARD: u32 = 0xFF00_0000;
-        let row0 = [RED, GREEN, BLUE, WHITE];
-        let row1 = [CYAN, YELLOW, RED, GREEN];
-        let texels: Vec<u32> = row0.iter().chain(&row1).copied().collect();
-        let draw = |src, dst| ScalerDraw {
-            src,
-            dst,
-            filter: ScaleFilter::Nearest,
-            picture: None,
-        };
-        // The 4x2 texture at 4x as the display, its lower row again as a
-        // chrome band underneath.
-        let draws = [
-            draw([0.0, 0.0, 1.0, 1.0], (0, 0, 16, 8)),
-            draw([0.0, 0.5, 1.0, 0.5], (0, 8, 16, 4)),
-        ];
-        // Texels (1..3, 0) and (0, 1) of the display, back on their own
-        // surface pixels.
-        let overlays = [
-            draw([0.25, 0.0, 0.5, 0.5], (4, 0, 8, 4)),
-            draw([0.0, 0.5, 0.25, 0.5], (0, 4, 4, 4)),
-        ];
-        let mut board = super::super::rtg_texture::RtgTexture::new(gpu.device(), FORMAT);
-        board.upload(gpu.device(), gpu.queue(), &[BOARD], 1, 1);
-        let px = render_draws_then(
-            gpu.device(),
-            gpu.queue(),
-            &texels,
-            (4, 2),
-            (16, 12),
-            FORMAT,
-            &draws,
-            None,
-            |scaler, encoder, view| {
-                // The board covers all but the display's last two rows.
-                board.render(gpu.queue(), encoder, view, (0.0, 0.0, 16.0, 6.0), false);
-                scaler.render_overlays(gpu.queue(), encoder, view, &overlays);
-            },
-        );
-        for y in 0..12 {
-            for x in 0..16 {
-                let expected = if y < 4 && (4..12).contains(&x) {
-                    row0[x / 4]
-                } else if (4..8).contains(&y) && x < 4 {
-                    row1[0]
-                } else if y < 6 {
-                    BOARD
-                } else {
-                    row1[x / 4]
-                };
-                assert_eq!(px[y * 16 + x], expected.to_le_bytes(), "({x}, {y})");
-            }
-        }
-    }
-
-    #[test]
     fn display_and_chrome_draws_preserve_the_black_background_between_them() {
         let Some(gpu) = gpu() else {
             return;
@@ -1243,143 +1088,6 @@ mod tests {
                 };
                 assert_eq!(px[y * 12 + x], expected, "({x}, {y})");
             }
-        }
-    }
-
-    /// The real menu veil and glyphs composite over a native 640x480 board
-    /// at 2x, with and without a chrome band. One-pixel board details stay
-    /// uniform 2x2 blocks while the menu is open, rather than passing through
-    /// the differently-sized UI canvas. Closing it restores every board pixel.
-    #[test]
-    fn rtg_menu_preserves_native_pixel_blocks_with_or_without_chrome() {
-        use super::super::{integer_rtg_present_layout, texture_height, texture_width, UiState};
-        use crate::video::{menu, ui};
-        let Some(gpu) = gpu() else {
-            return;
-        };
-        let native = (640u32, 480u32);
-        let board: Vec<u32> = (0..native.0 * native.1)
-            .map(|p| {
-                if (p % native.0 + p / native.0).is_multiple_of(2) {
-                    RED
-                } else {
-                    BLUE
-                }
-            })
-            .collect();
-        let mut rtg = super::super::rtg_texture::RtgTexture::new(gpu.device(), FORMAT);
-        rtg.upload(gpu.device(), gpu.queue(), &board, native.0, native.1);
-        let menu = UiState {
-            menu_open: true,
-            menu_rows: vec![menu::MenuRow {
-                label: "Quit".into(),
-                value: None,
-                enabled: true,
-                kind: menu::MenuRowKind::Action(menu::MenuAction::Quit),
-            }],
-            ..Default::default()
-        };
-        for scale in [1, 2] {
-            let tex_size = (texture_width(scale) as u32, texture_height(scale) as u32);
-            let blank = vec![0u32; (tex_size.0 * tex_size.1) as usize];
-            let mut ui_frame = vec![0u8; blank.len() * 4];
-            ui::draw(&mut ui_frame, scale, &menu, None, None);
-            assert!(
-                ui_frame.chunks_exact(4).any(|p| p[3] == 255),
-                "menu has opaque ink"
-            );
-            assert!(
-                ui_frame.chunks_exact(4).any(|p| p[3] > 0 && p[3] < 255),
-                "veil is translucent"
-            );
-            let ink: Vec<u32> = ui_frame
-                .chunks_exact(4)
-                .map(|p| u32::from_le_bytes(p.try_into().unwrap()))
-                .collect();
-            for chrome in [None, Some((602, 1036, 716, 44))] {
-                let layout = integer_rtg_present_layout((0, 0, 1920, 1080), native, chrome);
-                let draw = layout.rtg_ui_draw().expect("a visible UI layer");
-                assert_eq!(draw.filter, ScaleFilter::SharpBilinear);
-                assert_eq!((layout.display_dst.2, layout.display_dst.3), (1280, 960));
-                let render = |texels: &[u32]| {
-                    render_draws_then(
-                        gpu.device(),
-                        gpu.queue(),
-                        texels,
-                        tex_size,
-                        (1920, 1080),
-                        FORMAT,
-                        &layout.draws(),
-                        None,
-                        |scaler, encoder, target| {
-                            rtg.render(gpu.queue(), encoder, target, layout.rtg_viewport(), true);
-                            scaler.render_overlays(gpu.queue(), encoder, target, &[draw]);
-                        },
-                    )
-                };
-                let closed = render(&blank);
-                let open = render(&ink);
-                assert_ne!(open, closed, "the menu is visible");
-                assert_eq!(closed[0], BLACK);
-                assert_eq!(
-                    open[0], BLACK,
-                    "unused host margins stay outside the UI layer"
-                );
-                let (dx, dy, _, _) = layout.display_dst;
-                // This one-row menu hangs at the bottom; its uniform veil
-                // covers the upper half, away from glyphs and panel edges.
-                for by in 0..native.1 / 2 {
-                    for bx in 0..native.0 {
-                        let at = |px: &[[u8; 4]], x, y| px[(y * 1920 + x) as usize];
-                        let (x, y) = (dx + 2 * bx, dy + 2 * by);
-                        let unshaded = board[(by * native.0 + bx) as usize].to_le_bytes();
-                        let shaded = at(&open, x, y);
-                        assert_ne!(shaded, unshaded);
-                        for (ox, oy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                            assert_eq!(at(&closed, x + ox, y + oy), unshaded);
-                            assert_eq!(
-                                at(&open, x + ox, y + oy),
-                                shaded,
-                                "board ({bx}, {by}), scale {scale}, chrome {chrome:?}"
-                            );
-                        }
-                    }
-                }
-                assert_eq!(
-                    render(&blank),
-                    closed,
-                    "closing the menu restores the board"
-                );
-            }
-        }
-    }
-
-    /// Filtering straight-alpha UI must ignore RGB stored in transparent
-    /// texels, or a transparent neighbour gives an opaque glyph a dark fringe.
-    #[test]
-    fn rtg_ui_filters_premultiplied_colours_before_blending() {
-        let Some(gpu) = gpu() else {
-            return;
-        };
-        let mut board = super::super::rtg_texture::RtgTexture::new(gpu.device(), FORMAT);
-        board.upload(gpu.device(), gpu.queue(), &[RED], 1, 1);
-        let draw = ScalerDraw::full((0, 0, 1, 1), ScaleFilter::SharpBilinear);
-        let px = render_draws_then(
-            gpu.device(),
-            gpu.queue(),
-            &[WHITE, BLUE & 0x00FF_FFFF],
-            (2, 1),
-            (1, 1),
-            FORMAT,
-            &[draw],
-            None,
-            |scaler, encoder, target| {
-                board.render(gpu.queue(), encoder, target, (0.0, 0.0, 1.0, 1.0), false);
-                scaler.render_overlays(gpu.queue(), encoder, target, &[draw]);
-            },
-        );
-        for (actual, expected) in px[0].into_iter().zip([255u8, 188, 188, 255]) {
-            assert!(actual.abs_diff(expected) <= 1, "{actual} != {expected}");
         }
     }
 

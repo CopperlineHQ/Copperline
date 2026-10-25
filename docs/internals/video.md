@@ -886,14 +886,23 @@ native RTG texture, including while menus, panels, guest debug overlays or
 drop hints are visible. The CPU clears the display rows to transparent and
 paints only the UI. `blend_pixel` preserves straight-alpha colours and
 accumulates coverage, keeping existing opaque CPU composition unchanged.
-After RTG, `PresentScaler::render_overlays` alpha-composites the UI layer
-using `PresentLayout::rtg_ui_draw`. Its shader premultiplies colours in
-linear light before sharp-bilinear filtering, preventing transparent
-neighbours from introducing dark fringes. UI text has its own filter;
-the board's native integer blocks never pass through the UI canvas.
-Chrome outside the display region remains part of the initial scaler draw.
-The UI redraw takes a separate uniform slot because every queue write
-lands before any of the frame's commands run.
+Each painted guest/host layer or corner sprite is captured into an atlas
+by `rtg_ui::Frame`, then cleared from the CPU display rows. The native RTG
+fragment shader samples that byte-encoded atlas and blends in encoded
+colour space, matching CPU UI brightness. It premultiplies colours before
+filtering to prevent transparent neighbours introducing dark fringes, then
+decodes the final colour for the sRGB target. This is one RTG draw, not a
+second full-picture blend pass. Empty drawers add no atlas layer; a frame
+without UI takes the native-only path without an upload or UI sampling.
+Chrome remains part of the initial scaler draw.
+
+Host menus and panels use `main_ui_present_layout`: an independent uniform
+fit of the UI canvas above chrome, at a whole multiple when one fits.
+Pointer mapping switches to this same fit while host UI is active.
+`rtg_corner_dst` places the REC/performance/OSD sprites at board corners
+without changing their glyph aspect or scale. The host drawer reports its
+scrims so their backdrop extends across board pixels outside the UI fit,
+without stretching the menu or panel itself.
 
 Under integer scaling `surface_present_layout` fits the board's native
 dimensions against the host surface above a separately drawn chrome band.
@@ -904,16 +913,9 @@ with autocrop. The debugger pane fits the same native dimensions within
 its own viewport, without a chrome band. A surface too small for 1x uses
 an aspect-preserving fractional fit. Smooth RTG keeps the classic layout.
 
-The native fit fills the display destination; unused host surface around
-it remains black. Everything the CPU composes for the frame follows the
-pass's placement through `rtg_texture::picture_rect`:
-`PresentLayout::rtg_integer_picture` gives the picture's rect as fractions
-of the display region, and the corner overlays anchor to its whole canvas pixels
-(`picture_canvas_rect`) rather than to the display. The readout, badge and
-message therefore sit at the picture's corners and blend over the same
-board pixels the pass draws under them. Opening a menu or panel leaves
-the layout and native board texture unchanged, including when the status
-bar is hidden. If the
+The native fit fills the board destination; unused host surface around
+it remains black. Opening a menu or panel leaves that fit and the native
+board texture unchanged, including when the status bar is hidden. If the
 board claims the display but its frame does not compose yet (mode set
 before the resolution registers), presentation falls back to the chipset
 render rather than freezing on a stale frame.

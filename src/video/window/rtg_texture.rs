@@ -11,20 +11,13 @@
 //! -- one hardware-filtered scale from native pixels to the physical display
 //! rect, bypassing the intermediate entirely.
 //!
-//! The UI buffer (status bar, menus, cursor mapping) is untouched: the RTG
-//! texture only overdraws the display region on top of it.
-//!
-//! Under `[display] scaling = "integer"` the same pass draws the board
-//! frame at a whole-number multiple of its native resolution instead of
-//! stretching it to the rect. The viewport stays the whole display rect --
-//! the soft low-resolution intermediate underneath it must never peek out
-//! around the picture -- and the [`RtgUniforms`] mapping puts the image in
-//! the middle of it, with the fragments around it painted black.
-//!
-//! The window paints UI into a transparent canvas and alpha-composites it
-//! after this pass. Menus, panels, corner overlays and guest debug overlays
-//! therefore share the display layout without resampling the board pixels.
+//! The board has its own native fit. Menus and panels retain a uniform fit
+//! of the host UI canvas; corner sprites retain that scale at board corners.
+//! Painted sprites are packed into a byte-encoded atlas and composited here
+//! in the same encoded colour space as the CPU. Empty UI frames use only the
+//! native board pass, with no atlas upload or overlay texture reads.
 
+use super::rtg_ui::{Frame as UiFrame, Layer, EMPTY_LAYER, MAX_LAYERS};
 use pixels::wgpu;
 use std::borrow::Cow;
 use zerocopy::{Immutable, IntoBytes};
@@ -35,12 +28,16 @@ struct VOut {
     @location(0) uv: vec2<f32>,
 };
 
+struct UiLayer { src: vec4<f32>, dst: vec4<f32>, backdrop: vec4<f32> };
+
 struct RtgUniforms {
     // xy: where the picture starts inside the viewport, zw: how much of the
     // viewport it covers, both in the viewport's own 0..1 space. The
     // identity (0, 0, 1, 1) fills the viewport, which is the smooth-scaling
     // mapping.
     rect: vec4<f32>,
+    ui_info: vec4<u32>,
+    layers: array<UiLayer, 5>,
 };
 
 @vertex
@@ -57,6 +54,38 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VOut {
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var<uniform> u: RtgUniforms;
 
+@group(0) @binding(3) var ui: texture_2d<f32>;
+
+fn encoded(c: vec3<f32>) -> vec3<f32> {
+    return select(1.055 * pow(c, vec3<f32>(1.0 / 2.4)) - 0.055,
+                  c * 12.92, c <= vec3<f32>(0.0031308));
+}
+fn linear(c: vec3<f32>) -> vec3<f32> {
+    return select(pow((c + 0.055) / 1.055, vec3<f32>(2.4)),
+                  c / 12.92, c <= vec3<f32>(0.04045));
+}
+fn ui_texel(p: vec2<f32>, src: vec4<f32>) -> vec4<f32> {
+    let at = clamp(vec2<i32>(p), vec2<i32>(src.xy), vec2<i32>(src.xy + src.zw) - 1);
+    let c = textureLoad(ui, at, 0);
+    return vec4<f32>(c.rgb * c.a, c.a);
+}
+fn ui_sample(position: vec2<f32>, layer: UiLayer) -> vec4<f32> {
+    let uv = (position - layer.dst.xy) / layer.dst.zw;
+    if (any(uv < vec2<f32>(0.0)) || any(uv >= vec2<f32>(1.0))) {
+        return vec4<f32>(layer.backdrop.rgb * layer.backdrop.a, layer.backdrop.a);
+    }
+    let t = layer.src.xy + uv * layer.src.zw;
+    let tf = fract(t);
+    let tpp = max(layer.src.zw / layer.dst.zw, vec2<f32>(1e-6));
+    let sharp = clamp(tf / tpp, vec2<f32>(0.0), vec2<f32>(0.5))
+        + clamp((tf - 1.0) / tpp + 0.5, vec2<f32>(0.0), vec2<f32>(0.5));
+    let p = floor(t) + sharp - 0.5;
+    let p0 = floor(p);
+    let f = fract(p);
+    return mix(mix(ui_texel(p0, layer.src), ui_texel(p0 + vec2<f32>(1.0, 0.0), layer.src), f.x),
+               mix(ui_texel(p0 + vec2<f32>(0.0, 1.0), layer.src), ui_texel(p0 + 1.0, layer.src), f.x), f.y);
+}
+
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let t = (in.uv - u.rect.xy) / u.rect.zw;
@@ -66,17 +95,26 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     // edge, and are discarded here.
     let texel = textureSample(tex, samp, t);
     let inside = t.x >= 0.0 && t.x <= 1.0 && t.y >= 0.0 && t.y <= 1.0;
-    return select(vec4<f32>(0.0, 0.0, 0.0, 1.0), texel, inside);
+    let board = select(vec4<f32>(0.0, 0.0, 0.0, 1.0), texel, inside);
+    if (u.ui_info.x == 0u) { return board; }
+    var colour = encoded(board.rgb);
+    for (var i = 0u; i < u.ui_info.x; i += 1u) {
+        let over = ui_sample(in.pos.xy, u.layers[i]);
+        // CPU UI blends byte-encoded colours, rounding each composite.
+        colour = round((colour * (1.0 - over.a) + over.rgb) * 255.0) / 255.0;
+    }
+    return vec4<f32>(linear(colour), 1.0);
 }
 "#;
 
 /// The uniform block the RTG pass sees; mirrors `RtgUniforms` in the WGSL
-/// source. `#[repr(C)]` with one 16-byte member, so the two layouts agree
-/// with no padding.
+/// source. Every member occupies whole 16-byte uniform slots.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, IntoBytes, Immutable)]
 pub(super) struct RtgUniforms {
     rect: [f32; 4],
+    ui_info: [u32; 4],
+    layers: [Layer; MAX_LAYERS],
 }
 
 /// Size of the uniform block, in bytes. Also the layout's
@@ -87,6 +125,8 @@ const UNIFORM_BYTES: u64 = std::mem::size_of::<RtgUniforms>() as u64;
 /// smooth scaling always uses, and what integer scaling falls back to.
 const FILL_VIEWPORT: RtgUniforms = RtgUniforms {
     rect: [0.0, 0.0, 1.0, 1.0],
+    ui_info: [0; 4],
+    layers: [EMPTY_LAYER; MAX_LAYERS],
 };
 
 /// Where a `native`-sized board frame sits inside a display rect `w` x `h`
@@ -115,6 +155,7 @@ pub(super) fn integer_fit_uniforms(rect: (f32, f32), native: (u32, u32)) -> RtgU
     let h = native_h * scale / rect_h;
     RtgUniforms {
         rect: [(1.0 - w) / 2.0, (1.0 - h) / 2.0, w, h],
+        ..FILL_VIEWPORT
     }
 }
 
@@ -148,6 +189,25 @@ pub(super) struct RtgTexture {
     bind_group_linear: Option<wgpu::BindGroup>,
     bind_group_nearest: Option<wgpu::BindGroup>,
     dims: (u32, u32),
+    ui_texture: wgpu::Texture,
+    ui_dims: (u32, u32),
+}
+
+fn ui_texture(device: &wgpu::Device, dims: (u32, u32)) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("rtg_ui_atlas"),
+        size: wgpu::Extent3d {
+            width: dims.0,
+            height: dims.1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    })
 }
 
 impl RtgTexture {
@@ -182,6 +242,16 @@ impl RtgTexture {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
                         min_binding_size: wgpu::BufferSize::new(UNIFORM_BYTES),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
                     },
                     count: None,
                 },
@@ -256,6 +326,8 @@ impl RtgTexture {
             bind_group_linear: None,
             bind_group_nearest: None,
             dims: (0, 0),
+            ui_texture: ui_texture(device, (1, 1)),
+            ui_dims: (1, 1),
         }
     }
 
@@ -287,32 +359,8 @@ impl RtgTexture {
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             });
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            let bind_group = |sampler: &wgpu::Sampler, label: &str| {
-                device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some(label),
-                    layout: &self.bind_group_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: self.uniforms.as_entire_binding(),
-                        },
-                    ],
-                })
-            };
-            let linear = bind_group(&self.sampler_linear, "rtg_texture_bg_linear");
-            let nearest = bind_group(&self.sampler_nearest, "rtg_texture_bg_nearest");
             self.texture = Some(texture);
-            self.bind_group_linear = Some(linear);
-            self.bind_group_nearest = Some(nearest);
+            self.rebind(device);
             self.dims = (w, h);
         }
         let bytes =
@@ -345,6 +393,94 @@ impl RtgTexture {
         );
     }
 
+    fn rebind(&mut self, device: &wgpu::Device) {
+        let Some(texture) = &self.texture else {
+            return;
+        };
+        let view = texture.create_view(&Default::default());
+        let ui_view = self.ui_texture.create_view(&Default::default());
+        let bind = |sampler: &wgpu::Sampler| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("rtg_compositor_bind_group"),
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.uniforms.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&ui_view),
+                    },
+                ],
+            })
+        };
+        self.bind_group_linear = Some(bind(&self.sampler_linear));
+        self.bind_group_nearest = Some(bind(&self.sampler_nearest));
+    }
+
+    pub(super) fn upload_ui(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, ui: &UiFrame) {
+        if ui.layers.is_empty() {
+            return;
+        }
+        let dims = (ui.width as u32, (ui.pixels.len() / ui.width) as u32);
+        if dims != self.ui_dims {
+            self.ui_texture = ui_texture(device, dims);
+            self.ui_dims = dims;
+            self.rebind(device);
+        }
+        queue.write_texture(
+            self.ui_texture.as_image_copy(),
+            ui.pixels.as_slice().as_bytes(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(dims.0 * 4),
+                rows_per_image: Some(dims.1),
+            },
+            wgpu::Extent3d {
+                width: dims.0,
+                height: dims.1,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    pub(super) fn render_composited(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        viewport: (f32, f32, f32, f32),
+        board: (f32, f32, f32, f32),
+        integer: bool,
+        ui: &UiFrame,
+    ) {
+        if ui.layers.is_empty() {
+            self.render(queue, encoder, target, board, integer);
+            return;
+        }
+        let mut uniforms = RtgUniforms {
+            rect: [
+                (board.0 - viewport.0) / viewport.2,
+                (board.1 - viewport.1) / viewport.3,
+                board.2 / viewport.2,
+                board.3 / viewport.3,
+            ],
+            ..FILL_VIEWPORT
+        };
+        uniforms.ui_info[0] = ui.layers.len() as u32;
+        uniforms.layers[..ui.layers.len()].copy_from_slice(&ui.layers);
+        self.render_uniforms(queue, encoder, target, viewport, integer, uniforms);
+    }
+
     /// Draw the uploaded texture into the `(x, y, w, h)` viewport rect of
     /// `target` (physical surface pixels), on top of what is already there.
     ///
@@ -360,6 +496,22 @@ impl RtgTexture {
         viewport: (f32, f32, f32, f32),
         integer_scaling: bool,
     ) {
+        let uniforms = RtgUniforms {
+            rect: picture_rect((viewport.2, viewport.3), self.dims, integer_scaling),
+            ..FILL_VIEWPORT
+        };
+        self.render_uniforms(queue, encoder, target, viewport, integer_scaling, uniforms);
+    }
+
+    fn render_uniforms(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        viewport: (f32, f32, f32, f32),
+        integer_scaling: bool,
+        uniforms: RtgUniforms,
+    ) {
         let bind_group = match integer_scaling {
             true => &self.bind_group_nearest,
             false => &self.bind_group_linear,
@@ -371,9 +523,6 @@ impl RtgTexture {
         if w < 1.0 || h < 1.0 {
             return;
         }
-        let uniforms = RtgUniforms {
-            rect: picture_rect((w, h), self.dims, integer_scaling),
-        };
         queue.write_buffer(&self.uniforms, 0, uniforms.as_bytes());
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("rtg_texture_pass"),
@@ -523,8 +672,25 @@ mod tests {
         (w, h): (u32, u32),
         integer_scaling: bool,
     ) -> Vec<[u8; 4]> {
+        render_board_ui(device, queue, board, native, (w, h), integer_scaling, None)
+    }
+
+    type TestRect = (f32, f32, f32, f32);
+
+    fn render_board_ui(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        board: &[u32],
+        native: (u32, u32),
+        (w, h): (u32, u32),
+        integer_scaling: bool,
+        ui: Option<(&UiFrame, TestRect, TestRect)>,
+    ) -> Vec<[u8; 4]> {
         let mut rtg = RtgTexture::new(device, FORMAT);
         rtg.upload(device, queue, board, native.0, native.1);
+        if let Some((ui, ..)) = ui {
+            rtg.upload_ui(device, queue, ui);
+        }
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("rtg_texture_test_target"),
             size: wgpu::Extent3d {
@@ -563,13 +729,25 @@ mod tests {
             occlusion_query_set: None,
             multiview_mask: None,
         }));
-        rtg.render(
-            queue,
-            &mut encoder,
-            &view,
-            (0.0, 0.0, w as f32, h as f32),
-            integer_scaling,
-        );
+        if let Some((ui, viewport, board)) = ui {
+            rtg.render_composited(
+                queue,
+                &mut encoder,
+                &view,
+                viewport,
+                board,
+                integer_scaling,
+                ui,
+            );
+        } else {
+            rtg.render(
+                queue,
+                &mut encoder,
+                &view,
+                (0.0, 0.0, w as f32, h as f32),
+                integer_scaling,
+            );
+        }
 
         // Read the target back through a padded copy, as the bezel tests do.
         let padded = (w * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
@@ -699,6 +877,250 @@ mod tests {
             picture_rect((1300.0, 1000.0), (640, 480), true),
             integer_fit_uniforms((1300.0, 1000.0), (640, 480)).rect
         );
+    }
+
+    fn menu() -> crate::video::ui::UiState {
+        use crate::video::{
+            menu::{MenuAction, MenuRow, MenuRowKind},
+            ui::UiState,
+        };
+        UiState {
+            menu_open: true,
+            menu_rows: vec![MenuRow {
+                label: "Quit".into(),
+                value: None,
+                enabled: true,
+                kind: MenuRowKind::Action(MenuAction::Quit),
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// The same real menu veil must have the same brightness over a board
+    /// texture as over an opaque CPU chipset frame, including at high DPI.
+    #[test]
+    fn menu_veil_matches_cpu_encoded_colour_blending() {
+        use super::super::{texture_height, texture_width, Rect};
+        use crate::video::{present_height, ui, FB_WIDTH};
+        let Some(gpu) = gpu() else {
+            return;
+        };
+        let (w, h) = (FB_WIDTH as u32, present_height() as u32);
+        for scale in [1, 2] {
+            let stride = texture_width(scale);
+            let rect = Rect {
+                x: 0,
+                y: 0,
+                w: stride,
+                h: present_height() * scale,
+            };
+            for value in [0u32, 64, 128, 255] {
+                let colour = 0xFF00_0000 | value | value << 8 | value << 16;
+                let mut reference = colour.to_le_bytes().repeat(stride * texture_height(scale));
+                ui::draw(&mut reference, scale, &menu(), None, None);
+                let mut layer = vec![0; reference.len()];
+                let scrims = ui::draw(&mut layer, scale, &menu(), None, None);
+                let mut frame = UiFrame::default();
+                frame.capture(
+                    &mut layer,
+                    stride,
+                    rect,
+                    [0.0, 0.0, w as f32, h as f32],
+                    ui::scrim_pixel(scrims),
+                );
+                let px = render_board_ui(
+                    gpu.device(),
+                    gpu.queue(),
+                    &[colour],
+                    (1, 1),
+                    (w, h),
+                    false,
+                    Some((
+                        &frame,
+                        (0.0, 0.0, w as f32, h as f32),
+                        (0.0, 0.0, w as f32, h as f32),
+                    )),
+                );
+                for (actual, expected) in px[0].into_iter().zip(reference[..4].iter().copied()) {
+                    assert!(
+                        actual.abs_diff(expected) <= 1,
+                        "board {value}, scale {scale}: {actual} != CPU {expected}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn encoded_ui_filter_ignores_transparent_neighbour_colours() {
+        let Some(gpu) = gpu() else {
+            return;
+        };
+        let mut source: Vec<u8> = [WHITE, BLUE & 0x00FF_FFFF]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        let mut ui = UiFrame::default();
+        ui.capture(
+            &mut source,
+            2,
+            super::super::Rect {
+                x: 0,
+                y: 0,
+                w: 2,
+                h: 1,
+            },
+            [0.0, 0.0, 1.0, 1.0],
+            0,
+        );
+        let px = render_board_ui(
+            gpu.device(),
+            gpu.queue(),
+            &[RED],
+            (1, 1),
+            (1, 1),
+            false,
+            Some((&ui, (0.0, 0.0, 1.0, 1.0), (0.0, 0.0, 1.0, 1.0))),
+        );
+        for (actual, expected) in px[0].into_iter().zip([255u8, 128, 128, 255]) {
+            assert!(actual.abs_diff(expected) <= 1, "{actual} != {expected}");
+        }
+    }
+
+    #[test]
+    fn compositor_preserves_the_order_and_brightness_of_all_five_layers() {
+        use super::super::{statusbar::blend_pixel, texture_height, texture_width, Rect};
+        let Some(gpu) = gpu() else {
+            return;
+        };
+        let base = 0xFF20_4080u32;
+        let mut reference = base
+            .to_le_bytes()
+            .repeat(texture_width(1) * texture_height(1));
+        let mut ui = UiFrame::default();
+        for colour in [
+            0x8000_00FFu32,
+            0x4000_FF00,
+            0xADFF_0000,
+            0x73FF_FFFF,
+            0x730B_0908,
+        ] {
+            let alpha = colour.to_le_bytes()[3] as f32 / 255.0;
+            blend_pixel(&mut reference, 0, 0, colour, alpha, 1);
+            let mut source = colour.to_le_bytes().repeat(16);
+            ui.capture(
+                &mut source,
+                4,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: 4,
+                    h: 4,
+                },
+                [0.0, 0.0, 4.0, 4.0],
+                0,
+            );
+        }
+        assert_eq!(ui.layers.len(), MAX_LAYERS);
+        let px = render_board_ui(
+            gpu.device(),
+            gpu.queue(),
+            &[base],
+            (1, 1),
+            (4, 4),
+            false,
+            Some((&ui, (0.0, 0.0, 4.0, 4.0), (0.0, 0.0, 4.0, 4.0))),
+        );
+        for pixel in px {
+            for (actual, expected) in pixel.into_iter().zip(reference[..4].iter().copied()) {
+                assert!(actual.abs_diff(expected) <= 1, "{actual} != CPU {expected}");
+            }
+        }
+    }
+
+    #[test]
+    fn menu_preserves_native_blocks_with_independent_ui_fit() {
+        use super::super::{
+            integer_rtg_present_layout, texture_height, texture_width, ui_canvas_layout, Rect,
+        };
+        use crate::video::{present_height, ui, FB_WIDTH};
+        let Some(gpu) = gpu() else {
+            return;
+        };
+        for native in [(640u32, 480u32), (1280, 720), (320, 200)] {
+            let board: Vec<u32> = (0..native.0 * native.1)
+                .map(|p| {
+                    if (p % native.0 + p / native.0).is_multiple_of(2) {
+                        RED
+                    } else {
+                        BLUE
+                    }
+                })
+                .collect();
+            for chrome in [None, Some((602, 1036, 716, 44))] {
+                let layout = integer_rtg_present_layout((0, 0, 1920, 1080), native, chrome);
+                let avail_h = 1080 - chrome.map_or(0, |c| c.3);
+                let ui_layout = ui_canvas_layout(
+                    (0, 0, 1920, avail_h),
+                    true,
+                    chrome,
+                    (FB_WIDTH, present_height()),
+                );
+                let mut source = vec![0; texture_width(1) * texture_height(1) * 4];
+                let count = ui::draw(&mut source, 1, &menu(), None, None);
+                let mut ui = UiFrame::default();
+                let (x, y, w, h) = ui_layout.rtg_viewport();
+                ui.capture(
+                    &mut source,
+                    texture_width(1),
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        w: FB_WIDTH,
+                        h: present_height(),
+                    },
+                    [x, y, w, h],
+                    ui::scrim_pixel(count),
+                );
+                let viewport = (0.0, 0.0, 1920.0, avail_h as f32);
+                let render = |ui: &UiFrame| {
+                    render_board_ui(
+                        gpu.device(),
+                        gpu.queue(),
+                        &board,
+                        native,
+                        (1920, 1080),
+                        true,
+                        Some((ui, viewport, layout.rtg_viewport())),
+                    )
+                };
+                let closed = render(&UiFrame::default());
+                let open = render(&ui);
+                let (dx, dy, dw, dh) = layout.display_dst;
+                let m = dw / native.0;
+                assert_eq!(dh / native.1, m);
+                for by in 0..native.1 / 3 {
+                    for bx in 0..native.0 {
+                        let at = |px: &[[u8; 4]], x, y| px[(y * 1920 + x) as usize];
+                        let (x, y) = (dx + m * bx, dy + m * by);
+                        let unshaded = board[(by * native.0 + bx) as usize].to_le_bytes();
+                        let shaded = at(&open, x, y);
+                        assert_ne!(shaded, unshaded);
+                        for oy in 0..m {
+                            for ox in 0..m {
+                                assert_eq!(at(&closed, x + ox, y + oy), unshaded);
+                                assert_eq!(
+                                    at(&open, x + ox, y + oy),
+                                    shaded,
+                                    "{native:?} ({bx},{by}) chrome {chrome:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+                assert_eq!(render(&UiFrame::default()), closed);
+            }
+        }
     }
 
     /// The board pixel the pass shows at `centre` -- a pixel centre, as a

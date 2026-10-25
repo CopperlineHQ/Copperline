@@ -2028,7 +2028,8 @@ enum PresentPass {
     Rtg {
         rect: (f32, f32, f32, f32),
         integer_scaling: bool,
-        overlays: Vec<scaler::ScalerDraw>,
+        ui: rtg_ui::Frame,
+        ui_viewport: (f32, f32, f32, f32),
     },
     Crt(CrtPresent),
 }
@@ -2084,6 +2085,9 @@ fn present_job(
             picture.rows,
         );
     }
+    if let PresentPass::Rtg { ui, .. } = &job.pass {
+        rtg_texture.upload_ui(pixels.device(), pixels.queue(), ui);
+    }
     let mut draw = |encoder: &mut wgpu::CommandEncoder,
                     target: &wgpu::TextureView,
                     ctx: &pixels::PixelsContext<'_>| {
@@ -2100,10 +2104,18 @@ fn present_job(
             PresentPass::Rtg {
                 rect,
                 integer_scaling,
-                overlays,
+                ui,
+                ui_viewport,
             } => {
-                rtg_texture.render(&ctx.queue, encoder, target, *rect, *integer_scaling);
-                scaler.render_overlays(&ctx.queue, encoder, target, overlays);
+                rtg_texture.render_composited(
+                    &ctx.queue,
+                    encoder,
+                    target,
+                    *ui_viewport,
+                    *rect,
+                    *integer_scaling,
+                    ui,
+                );
             }
             PresentPass::Crt(crt) => {
                 if crt.bezel_active {
@@ -5150,7 +5162,13 @@ impl ApplicationHandler for App {
                 self.last_cursor_phys = Some(position);
                 let display_src = self.display_canvas_src();
                 let pos = self.render.as_ref().and_then(|r| {
-                    main_cursor_position(r, display_src, self.rtg_present_dims, position)
+                    main_cursor_position(
+                        r,
+                        display_src,
+                        self.rtg_present_dims,
+                        self.ui.active(),
+                        position,
+                    )
                 });
                 // A button held on the dial turns it by following the hand
                 // round the face.
@@ -5582,8 +5600,13 @@ impl ApplicationHandler for App {
                 let display_src = self.display_canvas_src();
                 let window_aperture_rows = self.window_tv_aperture_rows();
                 if let (Some(phys), Some(r)) = (self.last_cursor_phys, self.render.as_ref()) {
-                    self.cursor_pos =
-                        main_cursor_position(r, display_src, self.rtg_present_dims, phys);
+                    self.cursor_pos = main_cursor_position(
+                        r,
+                        display_src,
+                        self.rtg_present_dims,
+                        self.ui.active(),
+                        phys,
+                    );
                 }
                 let status = status_with_latched_fdd_track(
                     self.emu.bus().front_panel_status(),
@@ -5727,17 +5750,22 @@ impl ApplicationHandler for App {
                         }
                         let window = r.window.clone();
                         let layout = main_present_layout(r, display_src, self.rtg_present_dims);
-                        // Under integer scaling the RTG pass draws the
-                        // board's picture at a whole multiple of its own
-                        // pixels, centred in the display rather than
-                        // stretched over it. What the CPU composes for the
-                        // frame -- the transparent UI and its corner
-                        // overlays -- is laid out where the pass puts it,
-                        // independently of whether a menu or panel is open.
-                        let rtg_integer_picture = self
-                            .rtg_present_dims
-                            .filter(|_| integer_scaling_requested())
-                            .map(|dims| (dims, layout.rtg_integer_picture(dims)));
+                        let ui_layout =
+                            main_ui_present_layout(r, display_src, self.rtg_present_dims);
+                        let mut rtg_ui = rtg_ui::Frame::default();
+                        let full_ui = Rect {
+                            x: 0,
+                            y: 0,
+                            w: texture_width(texture_scale),
+                            h: present_height() * texture_scale,
+                        };
+                        let ui_viewport = if integer_scaling_requested() {
+                            let (x, y, w, h) = rtg_ui_viewport(r, &layout);
+                            (x as f32, y as f32, w as f32, h as f32)
+                        } else {
+                            layout.rtg_viewport()
+                        };
+                        let as_rect = |(x, y, w, h)| [x, y, w, h];
                         // A frame the main thread presents itself composes
                         // straight into the pixels buffer, with the GPU side
                         // at home; it goes back into `r` at the end.
@@ -5850,14 +5878,20 @@ impl ApplicationHandler for App {
                         // the sub-rect while autocrop or per-axis scaling
                         // presents one, and the board's picture while an RTG
                         // frame sits at a whole multiple inside the display.
-                        let overlay_anchor = match rtg_integer_picture {
-                            Some((_, picture)) => picture_canvas_rect(picture),
-                            None => display_src.map(|src| src.rect).unwrap_or((
+                        let overlay_anchor = if rtg_gpu {
+                            let picture = self
+                                .rtg_present_dims
+                                .filter(|_| integer_scaling_requested())
+                                .map(|dims| layout.rtg_integer_picture(dims))
+                                .unwrap_or([0.0, 0.0, 1.0, 1.0]);
+                            picture_canvas_rect(picture)
+                        } else {
+                            display_src.map(|src| src.rect).unwrap_or((
                                 0,
                                 0,
                                 FB_WIDTH,
                                 present_height(),
-                            )),
+                            ))
                         };
                         if !guest_overlay.is_empty() {
                             // The guest's debug overlay sits directly on the
@@ -5871,14 +5905,33 @@ impl ApplicationHandler for App {
                                 texture_scale,
                                 overlay_anchor,
                             );
+                            if rtg_gpu {
+                                rtg_ui.capture(
+                                    frame,
+                                    texture_width(texture_scale),
+                                    full_ui,
+                                    as_rect(layout.rtg_viewport()),
+                                    0,
+                                );
+                            }
                         }
                         if recording {
                             // Painted into the presentation texture only, so
                             // the badge never appears in the recorded file.
-                            draw_record_badge(frame, texture_scale, corner, overlay_anchor);
+                            let rect =
+                                draw_record_badge(frame, texture_scale, corner, overlay_anchor);
+                            if rtg_gpu {
+                                rtg_ui.capture(
+                                    frame,
+                                    texture_width(texture_scale),
+                                    rect,
+                                    rtg_corner_dst(&ui_layout, &layout, rect, texture_scale, false),
+                                    0,
+                                );
+                            }
                         }
                         if self.perf_overlay {
-                            let _ = draw_perf_overlay(
+                            let rect = draw_perf_overlay(
                                 frame,
                                 &self.perf.lines,
                                 texture_scale,
@@ -5886,9 +5939,42 @@ impl ApplicationHandler for App {
                                 corner,
                                 overlay_anchor,
                             );
+                            if rtg_gpu {
+                                if let Some(rect) = rect {
+                                    rtg_ui.capture(
+                                        frame,
+                                        texture_width(texture_scale),
+                                        rect,
+                                        rtg_corner_dst(
+                                            &ui_layout,
+                                            &layout,
+                                            rect,
+                                            texture_scale,
+                                            false,
+                                        ),
+                                        0,
+                                    );
+                                }
+                            }
                         }
                         if let Some((text, warning)) = &osd {
-                            draw_osd(frame, text, *warning, texture_scale, corner, overlay_anchor);
+                            let rect = draw_osd(
+                                frame,
+                                text,
+                                *warning,
+                                texture_scale,
+                                corner,
+                                overlay_anchor,
+                            );
+                            if rtg_gpu {
+                                rtg_ui.capture(
+                                    frame,
+                                    texture_width(texture_scale),
+                                    rect,
+                                    rtg_corner_dst(&ui_layout, &layout, rect, texture_scale, true),
+                                    0,
+                                );
+                            }
                         }
                         // The focus lights its control the way the pointer
                         // does, breathing between the two.
@@ -5898,13 +5984,23 @@ impl ApplicationHandler for App {
                             nav_is_open,
                             nav_bar_target.is_some(),
                         );
-                        ui::draw(frame, texture_scale, &self.ui, ui_hover, ui_data.as_ref());
+                        let mut scrims =
+                            ui::draw(frame, texture_scale, &self.ui, ui_hover, ui_data.as_ref());
                         ui::set_nav_light(None, 0.0, false, false);
                         // The drag hint sits on top of everything: the drop will
                         // land wherever the drag is released, panels or not. The
                         // launcher refuses drops, so no hint over it.
                         if self.drop_hover && !matches!(self.ui.panel, Some(Panel::Launcher(_))) {
-                            ui::draw_drop_hint(frame, texture_scale);
+                            scrims += ui::draw_drop_hint(frame, texture_scale);
+                        }
+                        if rtg_gpu && scrims > 0 {
+                            rtg_ui.capture(
+                                frame,
+                                texture_width(texture_scale),
+                                full_ui,
+                                as_rect(ui_layout.rtg_viewport()),
+                                ui::scrim_pixel(scrims),
+                            );
                         }
                         // The scaler pass draws the composited buffer with this
                         // layout; every overlay pass below keys its viewport off
@@ -5974,7 +6070,8 @@ impl ApplicationHandler for App {
                             PresentPass::Rtg {
                                 rect: layout.rtg_viewport(),
                                 integer_scaling: integer_scaling_requested(),
-                                overlays: layout.rtg_ui_draw().into_iter().collect(),
+                                ui: rtg_ui,
+                                ui_viewport,
                             }
                         } else if crt_active || bezel_active {
                             let scanlines = crt_scanline_count(
@@ -8120,6 +8217,7 @@ mod output_capture;
 mod present;
 mod presenter;
 mod rtg_texture;
+mod rtg_ui;
 mod scaler;
 pub(in crate::video) mod statusbar;
 mod stickers;

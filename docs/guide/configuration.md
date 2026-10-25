@@ -902,7 +902,9 @@ independently of the chipset canvas: a 640x480 board screen fits at 2x on
 a 1920x1080 display. The debugger's display pane uses the same native fit.
 The performance readout, the on-screen messages and the recording badge
 sit at the corners of that picture. Menus, panels and their translucent
-backgrounds are composited over the native RTG texture, so opening them
+backgrounds use the same brightness as chipset displays. Menus and panels
+keep the UI canvas's proportions and scale, independently of the board mode.
+They are composited over the native RTG texture, so opening them
 preserves its exact pixel blocks, size and position, including with the
 status bar hidden.
 

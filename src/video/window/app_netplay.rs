@@ -478,7 +478,13 @@ impl App {
                 self.last_cursor_phys = Some(*position);
                 let display_src = self.display_canvas_src();
                 let pos = self.render.as_ref().and_then(|r| {
-                    main_cursor_position(r, display_src, self.rtg_present_dims, *position)
+                    main_cursor_position(
+                        r,
+                        display_src,
+                        self.rtg_present_dims,
+                        self.ui.active(),
+                        *position,
+                    )
                 });
                 self.cursor_pos = pos;
                 if bar_hover_changed(&bar_layout(&self.media_bar()), previous_cursor_pos, pos) {
