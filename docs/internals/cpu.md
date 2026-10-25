@@ -196,7 +196,9 @@ This bound is independent of frame polling, so a debugger execution path that
 does not drain samples cannot grow the buffer indefinitely.
 
 (jit-fastest-speed)=
-### Fastest possible (`[cpu] speed = "fastest"` has two paced phases. The regular execution quantum
+### Fastest possible
+
+`[cpu] speed = "fastest"` has two paced phases. The regular execution quantum
 advances the machine using the configured CPU clock, reduced by a baseline
 governor if host load is too high. Before presentation, bounded spare-time
 bursts run local CPU work without advancing the chipset. A burst retires at
@@ -210,7 +212,8 @@ cost, excluding bonus work and sleep; throughput telemetry includes all work.
 both fractional carries on return. No host clock enters the core, no transient
 burst state is serialized, and hardware event synchronization uses the same
 batch-boundary contract. Fixed clocks and unpaced headless runs retain their
-usual deterministic billing. See [pacing](#jit-fastest-pacing) for policy.
+usual deterministic billing. See [pacing](#jit-fastest-pacing) for policy and
+[](jit-performance.md) for measured results and reproduction commands.
 
 The 68000 and 68010 never take the batch path. On the small-box machines
 every CPU cycle drives the one bus shared with Agnus, and the floating-bus
@@ -917,10 +920,10 @@ the machine instead:
 
 ### Local CPU-core extensions
 
-`vendor/m68k` carries the published 0.14.7 core plus the batch synchronization
-hook required by this scheduler. The original license and local patch inventory
-are in that directory. The callback is a no-op for ordinary m68k embedders;
-Copperline uses it to preserve hardware-access ordering without calling the host
+`vendor/m68k` carries the published 0.14.7 core plus batch synchronization
+and multiple direct-memory regions. The original license and local patch
+inventory are in that directory. The callback is a no-op for ordinary m68k
+embedders; Copperline uses it to preserve hardware-access ordering without calling the host
 from every instruction inside a native trace. Batch accounting is transient;
 the persistent CPU-clock and Q16 remainders return to `MachineRuntimeState`
 before a save or rollback can occur.

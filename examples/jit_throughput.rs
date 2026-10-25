@@ -231,7 +231,9 @@ fn paced_trials(repeats: usize) -> anyhow::Result<()> {
             )?;
             emu.set_cpu_jit(true);
             emu.set_cpu_speed(speed);
-            for _ in 0..25 {
+            // Give adaptive clock policies time to settle before comparison
+            // with older builds (250 quanta are about four guest seconds).
+            for _ in 0..250 {
                 emu.step_frame()?;
             }
             let instructions = emu.stats.instructions;
