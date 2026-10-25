@@ -123,7 +123,7 @@ impl TryFrom<RawConfig> for Config {
             } else if !cpu_jit {
                 errors.push(anyhow!(
                     "[cpu] speed = \"fastest\" needs [cpu] jit = true (--jit): \
-                     only the JIT's clock adapts to the host"
+                     only JIT execution can use spare host time"
                 ));
             }
         }

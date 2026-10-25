@@ -241,7 +241,7 @@ fn build() -> Vec<ToolDef> {
              `hpos`, `cck` (colour clocks), `seconds` (emulated), `retired_instructions`, \
              `cpu`, `paced`/`warp`, `tt_armed` (reverse execution available), \
              `double_faulted`, host counters (`host_busy_ms`, `pacer_slips`, audio lead \
-             and underruns), and `jit_mhz` (the effective clock under `[cpu] speed = \
+             and underruns), and `jit_mhz` (measured throughput in equivalent MHz, including CPU bursts, under `[cpu] speed = \
              \"fastest\"`, null at a fixed clock). Cheap and side-effect free; call it to \
              orient before stepping.",
             no_params(),

@@ -733,21 +733,18 @@ clock_mhz = 14.0    # optional; defaults to the model's stock speed
   still runs; Kickstart ROMs are unaffected).
 - `speed` (also `--cpu-speed`) picks how fast the JIT runs. `"fixed"` (the
   default) runs it at `clock_mhz`, deterministically. `"fastest"` is the
-  equivalent of WinUAE's *Fastest possible* CPU setting: while the window
-  paces the machine to real time, the JIT's effective clock adapts to what
-  the host can sustain. It starts at `clock_mhz`, which is also its floor
-  (it never runs slower), and rises while the host has headroom, up to
-  2000 MHz. The chipset, audio and emulated time stay in real time, so the
-  pointer and sound stay smooth, and the CPU gets the host time that is
-  left. Every tenth of a second Copperline compares the main thread's host
-  time (emulation plus the window's own work, pacing sleeps excluded) with
-  the emulated time that passed. It raises the clock while that stays below
-  about 80% and the CPU is actually busy; a CPU waiting in STOP, or one
-  stalled on the chip bus, keeps its clock. It lowers the clock as soon as
-  the share passes about 93%, for example when another program loads the
-  host. The performance overlay (`cpu N MHz`)
-  and the control protocol's `status` reply (`jit_mhz`) show the current
-  clock, and the launcher's CPU page has a matching **JIT speed** row,
+  CPU-throughput mode: while the machine is paced to real time, Copperline
+  uses spare time before presentation for CPU bursts from local RAM/ROM.
+  The chipset stays still during CPU-only work. Bursts yield on shared-bus
+  accesses, STOP, debugger stops or the host deadline; chip and device accesses
+  retain their normal timing. A small time reserve protects presentation.
+  The regular CPU workload starts at `clock_mhz` and can fall below it, down
+  to 1 MHz, when chipset/frontend work would otherwise miss real time. There
+  is no synthetic MHz ceiling on spare-time CPU work. Chipset-heavy workloads
+  can still exceed the host's capacity.
+  The performance overlay (`cpu N MHz`) and control status (`jit_mhz`) report
+  measured throughput as an equivalent one-instruction-per-clock rate, including
+  bursts. The launcher's CPU page has a matching **JIT speed** row,
   greyed until the JIT is on.
 
   The mode is deliberately not reproducible: how many instructions run per
@@ -763,20 +760,22 @@ clock_mhz = 14.0    # optional; defaults to the model's stock speed
     for a faster fixed CPU there. (`COPPERLINE_HEADLESS_PACED=1` paces such
     a run like the window, and the clock then adapts as it would there; see
     [Headless operation](headless.md).)
-  - Warp Speed holds the clock the paced run had reached; adaptation
-    resumes when warp ends.
+  - Warp Speed uses the last measured throughput as a fixed CPU rate,
+    at least the configured clock;
+    spare-time bursts and baseline adaptation resume when warp ends.
   - Netplay refuses it, and run-ahead stays inactive under it: both depend
     on re-running or comparing frames that must come out identical.
   - Save states do not store the adapted clock. A session whose clock has
     not adapted yet (any unpaced run) takes the loaded state's CPU clock
-    exactly, as `speed = "fixed"` does; one that has adapted keeps the
-    clock it reached. A resumed windowed run is not byte-identical to the
-    original.
+    exactly, as `speed = "fixed"` does; one that has adapted keeps its baseline
+    within the loaded clock bounds and restarts throughput measurement. A resumed
+    windowed run is not byte-identical to the original.
   - `--record-input`/`--script` replays, `--expect-screenshot` comparisons
     and reverse debugging are exact only in unpaced runs, where the clock is
     fixed.
   - Any debugger hook that forces the precise core (breakpoints, traces,
-    `COPPERLINE_DBG_*`) suspends adaptation, just as it suspends the JIT.
+    `COPPERLINE_DBG_*`) suspends adaptation and spare-time bursts, just as it
+    suspends the JIT.
 
 ## `[memory]`
 

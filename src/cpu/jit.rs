@@ -100,6 +100,9 @@ impl M68kMachine {
             // operands. Native bursts are reserved for local RAM and ROM.
             return 1;
         }
+        if self.jit_clock_divisor_q16 == 0 {
+            return remaining.min(JIT_BATCH_INSTRUCTIONS);
+        }
         let clocks = u64::from(horizon) * u64::from(self.cpu_clocks_per_cck)
             - u64::from(self.cpu_clock_carry);
         let q16 = (clocks << 16).saturating_sub(u64::from(self.jit_clock_carry_q16));
@@ -107,6 +110,37 @@ impl M68kMachine {
         remaining
             .min(JIT_BATCH_INSTRUCTIONS)
             .min(instructions as usize)
+    }
+
+    /// One bounded spare-host-time burst. Local CPU work consumes no chipset
+    /// clocks; shared-bus accesses retain arbitration and end the burst.
+    /// Restore fractional timing before returning so snapshots never contain
+    /// the transient zero divisor. The caller owns the host deadline.
+    pub(crate) fn step_jit_spare_slice(&mut self, count: usize) -> Result<CpuStepSlice> {
+        if !self.jit_batch_path_active() {
+            return Ok(CpuStepSlice {
+                instructions: 0,
+                cpu_cycles: 0,
+                cpu_cck: 0,
+                bus_advanced_cck: 0,
+                stopped: self.stopped(),
+            });
+        }
+        let saved = (
+            self.jit_clock_divisor_q16,
+            self.jit_clock_carry_q16,
+            self.cpu_clock_carry,
+        );
+        self.jit_clock_divisor_q16 = 0;
+        self.jit_clock_carry_q16 = 0;
+        self.cpu_clock_carry = 0;
+        let result = self.step_slice_jit(count);
+        (
+            self.jit_clock_divisor_q16,
+            self.jit_clock_carry_q16,
+            self.cpu_clock_carry,
+        ) = saved;
+        result
     }
 
     /// Fast execution remains a one-clock-per-instruction accelerator model.
@@ -219,7 +253,7 @@ impl M68kMachine {
                         .advance_cpu_internal_cycles(cck.saturating_sub(on_bus));
                 }
             }
-            if stopped || self.bus.bus.slice_preempted {
+            if stopped || self.bus.bus.slice_preempted || self.jit_clock_divisor_q16 == 0 {
                 break;
             }
         }

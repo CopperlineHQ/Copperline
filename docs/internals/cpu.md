@@ -196,26 +196,21 @@ This bound is independent of frame polling, so a debugger execution path that
 does not drain samples cannot grow the buffer indefinitely.
 
 (jit-fastest-speed)=
-### Fastest possible (`[cpu] speed = "fastest"`)
+### Fastest possible (`[cpu] speed = "fastest"` has two paced phases. The regular execution quantum
+advances the machine using the configured CPU clock, reduced by a baseline
+governor if host load is too high. Before presentation, bounded spare-time
+bursts run local CPU work without advancing the chipset. A burst retires at
+most 4096 instructions and yields at shared-memory/device accesses; their
+ordinary bus cycles still advance hardware. STOP and debugger hooks suppress
+bursts. The host checks a fixed deadline between bursts and reserves time for
+presentation. The regular governor measures only baseline work plus frontend
+cost, excluding bonus work and sleep; throughput telemetry includes all work.
 
-The opt-in host-adaptive mode, WinUAE's *Fastest possible*, adds no second
-timing model. `M68kMachine::set_jit_speed_factor` divides every CPU clock
-the JIT path bills (the flat per-instruction clock and the exception and
-interrupt entry costs) by a factor, kept as a 16.16 fixed-point divisor
-with its sub-clock remainder carried across batches. Dividing the CPU's
-own clocks is exactly a faster CPU clock: chip-bus and CIA accesses keep
-their bus-time costs, fast RAM and ROM stay free, and beam, DMA and
-interrupt delivery remain as consistent as at any fixed `clock_mhz`. At a
-factor of 1 the divisor is unity and the billing path is the unscaled one,
-so the fixed-clock JIT and the precise core are untouched. The precise core
-never reads the factor.
-
-The factor comes from the emulator's speed governor
-(`src/emulator/fastest.rs`), which watches the host time each real-time
-quantum costs against the emulated time it advanced; [the pacing
-chapter](#jit-fastest-pacing) describes the control loop and when it may
-adapt. It never adapts outside paced quanta, so headless runs stay at
-the configured clock and remain deterministic.
+`step_jit_spare_slice` temporarily uses a zero CPU-clock divisor and restores
+both fractional carries on return. No host clock enters the core, no transient
+burst state is serialized, and hardware event synchronization uses the same
+batch-boundary contract. Fixed clocks and unpaced headless runs retain their
+usual deterministic billing. See [pacing](#jit-fastest-pacing) for policy.
 
 The 68000 and 68010 never take the batch path. On the small-box machines
 every CPU cycle drives the one bus shared with Agnus, and the floating-bus

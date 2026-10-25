@@ -4,7 +4,7 @@
 //! cargo run --release --no-default-features --features cpu-jit \
 //!     --example jit_throughput -- 5 mem
 //!
-//! Arguments: positive trial count (default 3), `mem` or `reg` (default mem).
+//! Arguments: positive trial count (default 3), `mem`, `reg` or `paced` (default mem).
 //! CSV sections: core,trial,batch,seconds,MIPS;
 //! machine,trial,code_in_ROM,second_data_bank,guest_clock_factor,seconds,MIPS,CCK;
 //! chipset,trial,seconds (ten emulated PAL seconds).
@@ -108,10 +108,18 @@ fn main() -> anyhow::Result<()> {
         .transpose()?
         .unwrap_or(3);
     anyhow::ensure!(repeats != 0, "trial count must be positive");
-    let memory = match args.next().as_deref().unwrap_or("mem") {
+    let mode = args.next().unwrap_or_else(|| "mem".to_owned());
+    if mode == "paced" {
+        anyhow::ensure!(
+            args.next().is_none(),
+            "usage: jit_throughput [trials] paced"
+        );
+        return paced_trials(repeats);
+    }
+    let memory = match mode.as_str() {
         "mem" => true,
         "reg" => false,
-        _ => anyhow::bail!("workload must be mem or reg"),
+        _ => anyhow::bail!("workload must be mem, reg or paced"),
     };
     anyhow::ensure!(
         args.next().is_none(),
@@ -198,6 +206,52 @@ fn main() -> anyhow::Result<()> {
             chipset.advance_devices(70938);
         }
         println!("chipset,{trial},{:.6}", start.elapsed().as_secs_f64());
+    }
+    Ok(())
+}
+
+/// Real-time pacing diagnostic: CPU work uses host elapsed time, never a guest
+/// timer. The machine is synthetic and has no frontend rendering/audio cost.
+fn paced_trials(repeats: usize) -> anyhow::Result<()> {
+    use copperline::{
+        config::{CpuSpeed, PacingBudget},
+        emulator::Emulator,
+    };
+    println!("paced,trial,mode,host_seconds,guest_seconds,host_MIPS,guest_MIPS,pacer_slips");
+    for trial in 0..repeats {
+        for speed in [CpuSpeed::Fixed, CpuSpeed::Fastest] {
+            let mut emu = Emulator::new(
+                bus(true, &MEM_PROGRAM),
+                CpuModel::M68040,
+                true,
+                Default::default(),
+                PacingBudget::Cycles,
+                7,
+                true,
+            )?;
+            emu.set_cpu_jit(true);
+            emu.set_cpu_speed(speed);
+            for _ in 0..25 {
+                emu.step_frame()?;
+            }
+            let instructions = emu.stats.instructions;
+            let emulated = emu.bus().emulated_seconds();
+            let slips = emu.stats.pacer_slips;
+            let started = Instant::now();
+            for _ in 0..100 {
+                emu.step_frame()?;
+            }
+            let host = started.elapsed().as_secs_f64();
+            let guest = emu.bus().emulated_seconds() - emulated;
+            let retired = (emu.stats.instructions - instructions) as f64;
+            println!(
+                "paced,{trial},{},{host:.6},{guest:.6},{:.2},{:.2},{}",
+                speed.as_str(),
+                retired / host / 1e6,
+                retired / guest / 1e6,
+                emu.stats.pacer_slips - slips
+            );
+        }
     }
     Ok(())
 }

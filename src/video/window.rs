@@ -791,7 +791,7 @@ struct PerfReadout {
     /// hopelessly behind real time and dropped emulated time. Frames are
     /// never skipped in paced mode; this counts the only case where time is.
     pacer_slips: u32,
-    /// The effective JIT clock under `[cpu] speed = "fastest"`, in MHz (a
+    /// Measured JIT throughput under `[cpu] speed = "fastest"`, in equivalent MHz (a
     /// level, sampled as is); `None` at a fixed clock, which prints nothing.
     jit_mhz: Option<f64>,
 }

@@ -132,7 +132,8 @@ pub struct M68kMachine {
     /// `[cpu] speed = "fastest"`: the CPU clocks the JIT path bills, as a
     /// 16.16 fraction of the clocks it retired. `JIT_CLOCK_DIVISOR_UNITY`
     /// (the fixed clock) except while the emulator's speed governor runs
-    /// the JIT faster than `clock_mhz`; dividing the CPU's own clocks is
+    /// the regular JIT workload below `clock_mhz`; a transient zero divisor
+    /// is used only inside a spare-time burst; dividing the CPU's own clocks is
     /// exactly a faster CPU clock, while chip-bus and CIA accesses keep
     /// their bus-time costs. Host configuration, never serialized.
     jit_clock_divisor_q16: u32,
@@ -3052,13 +3053,13 @@ impl M68kMachine {
     /// per-instruction cost, exception and interrupt entry -- is divided by
     /// `factor`, which is exactly a faster CPU clock. Chip-bus and CIA
     /// accesses keep their bus-time costs, as on a real accelerator. A
-    /// factor of 1 or below (or not finite) restores the fixed clock,
+    /// factor below 1 reduces CPU work during paced overload; 1 restores the fixed clock,
     /// whose billing path is then the unscaled one. The precise core never
     /// reads this.
     pub fn set_jit_speed_factor(&mut self, factor: f64) {
-        let divisor = if factor.is_finite() && factor > 1.0 {
+        let divisor = if factor.is_finite() && factor > 0.0 {
             ((f64::from(JIT_CLOCK_DIVISOR_UNITY) / factor).round() as u32)
-                .clamp(1, JIT_CLOCK_DIVISOR_UNITY)
+                .clamp(1, JIT_CLOCK_DIVISOR_UNITY * 1024)
         } else {
             JIT_CLOCK_DIVISOR_UNITY
         };
@@ -8579,8 +8580,13 @@ mod tests {
             third_clocks.abs_diff(fixed_clocks / 3) <= 1,
             "{third_clocks} clocks at factor 3"
         );
-        // Out-of-range factors fall back to the fixed clock.
-        for factor in [0.5, f64::NAN, f64::INFINITY] {
+        assert_eq!(
+            run(0.5)?.0,
+            fixed_clocks * 2,
+            "overload backoff bills twice the clocks"
+        );
+        // Invalid factors fall back to the fixed clock.
+        for factor in [0.0, -1.0, f64::NAN, f64::INFINITY] {
             assert_eq!(run(factor)?.0, fixed_clocks, "factor {factor}");
         }
         Ok(())
@@ -8646,6 +8652,54 @@ mod tests {
         assert!(fast_4.1 < fast_1.1, "{fast_4:?} vs {fast_1:?}");
         assert!(chip_4.1 >= chip_4.2 as u32, "{chip_4:?}");
         assert!(chip_4.1 > fast_4.1, "{chip_4:?} vs {fast_4:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn jit_spare_slice_yields_on_device_access_and_restores_fractional_clocks() -> Result<()> {
+        let pc = FAST_RAM_BASE as u32 + 0x100;
+        let mut m = machine_with_program_model(
+            pc,
+            &[0x5280, 0x33fc, 0x00f0, 0x00df, 0xf180, 0x60f4],
+            CpuModel::M68030,
+        )?;
+        m.set_jit_enabled(true);
+        assert!(m.jit_batch_path_active());
+        m.set_jit_speed_factor(0.5);
+        m.jit_clock_carry_q16 = 123;
+        m.cpu_clock_carry = 1;
+        let before = m.bus().emulated_cck();
+        let burst = m.step_jit_spare_slice(4096)?;
+        assert_eq!(
+            burst.instructions, 2,
+            "return after the first MMIO instruction"
+        );
+        assert!(burst.bus_advanced_cck > 0);
+        assert!(m.bus().emulated_cck() > before);
+        assert_eq!(m.bus().denise.palette[0], 0x00f0);
+        assert_eq!(m.jit_speed_factor(), 0.5);
+        assert_eq!(m.jit_clock_carry_q16, 123);
+        assert_eq!(m.cpu_clock_carry, 1);
+        let before = m.bus().emulated_cck();
+        assert!(m.step_slice(128)?.instructions > 0);
+        assert!(m.bus().emulated_cck() > before, "ordinary billing resumes");
+        Ok(())
+    }
+
+    #[test]
+    fn jit_spare_slice_stop_does_not_fast_forward_timers() -> Result<()> {
+        let pc = FAST_RAM_BASE as u32 + 0x100;
+        let mut m = machine_with_program_model(pc, &[0x4e72, 0x2700], CpuModel::M68030)?;
+        m.set_jit_enabled(true);
+        assert!(m.jit_batch_path_active());
+        m.cpu.set_sr(0x2700);
+        let cck = m.bus().emulated_cck();
+        let cia = bincode::serialize(&m.bus().cia_a)?;
+        let run = m.step_jit_spare_slice(4096)?;
+        assert!(run.stopped);
+        assert_eq!(run.instructions, 1);
+        assert_eq!(m.bus().emulated_cck(), cck);
+        assert_eq!(bincode::serialize(&m.bus().cia_a)?, cia);
         Ok(())
     }
 
