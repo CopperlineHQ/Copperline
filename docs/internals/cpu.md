@@ -102,8 +102,8 @@ boundary also fall back before committing register updates. Chip/slow RAM,
 ROM overlay, WCS and device/cartridge mappings retain their bus handling.
 The primary bank remains serialized (`MachineRuntimeState::jit_window_bank`):
 when more banks are fitted than the table holds, the selection still affects
-which accesses allocate cache lines. Mappings and permissions are recaptured
-at each batch boundary. The timing contract is deliberately approximate
+which accesses allocate cache lines. Native mappings and permissions are
+recaptured at each native batch boundary. The timing contract is deliberately approximate
 (`M68kMachine::step_slice_jit`):
 
 - every retired instruction is billed a flat single CPU clock, converted
@@ -129,8 +129,8 @@ at each batch boundary. The timing contract is deliberately approximate
   before another native burst.
   Instructions fetched from shared RAM use single-instruction batches and skip
   deadline prediction, which cannot shorten that budget. Those batches also
-  omit direct-pointer capture, since they cannot enter a native trace; ordinary
-  bus access retains the same local-memory cache exclusions. Without emulated
+  hand no direct pointers to the core, since they cannot enter a native trace;
+  ordinary bus access retains the same local-memory cache exclusions. Without emulated
   caches, they also skip the unused extra-region table and per-access prefix
   classification: there is no completed instruction prefix to synchronize.
   Their timing is billed directly on return, without building or updating the
@@ -138,7 +138,10 @@ at each batch boundary. The timing contract is deliberately approximate
   With emulated caches, a slice reuses unchanged local-memory exclusions until
   a bus write, RESET or primary-bank change. Slice entry and state adoption
   invalidate that bookkeeping, so replaced backing memory is captured afresh;
-  raw pointers are still captured separately for every native batch.
+  raw pointers are still captured separately for every native batch. Single
+  instructions also retain the primary-bank choice while the raw PC stays
+  between the same RAM decode edges. A native batch discards that interval,
+  so returning from another bank selects the correct primary window again.
   Interrupt-entry
   posted-write overlap is charged to the interrupt itself.
   Interrupts are recognized at those boundaries,

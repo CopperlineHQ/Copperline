@@ -935,6 +935,12 @@ impl ZorroChain {
             .find(|&(base, len, _)| addr.wrapping_sub(base) < len)
     }
 
+    /// Every configured RAM-backed aperture, including boards outside the
+    /// guest free-memory list. CPU primary-window selection uses this decode.
+    pub(crate) fn ram_windows(&self) -> impl Iterator<Item = (u32, u32, usize)> + '_ {
+        self.regions.iter().copied()
+    }
+
     /// Whether any configured RAM board overlaps a physical range. Used to
     /// keep lower-priority ROM decode out of the JIT direct-memory table.
     pub(crate) fn ram_overlaps(&self, base: u32, len: u32) -> bool {

@@ -519,6 +519,9 @@ struct CpuBus {
     /// Cache exclusions may be reused only within one CPU slice, until a
     /// write, RESET or primary-bank change. Never caches a backing pointer.
     jit_cache_exclusions_current: bool,
+    /// Raw-PC interval with an unchanged primary-bank choice. Transient and
+    /// valid only with the slice-local cache exclusions, never a raw pointer.
+    jit_primary_pc_span: std::ops::Range<u64>,
     jit_bus_boundary: bool,
 }
 
@@ -614,6 +617,7 @@ impl M68kMachine {
                 cacr_040_layout: cacr_040,
                 jit_batch: None,
                 jit_cache_exclusions_current: false,
+                jit_primary_pc_span: 0..0,
                 jit_bus_boundary: false,
             },
             fpu_enabled,
@@ -5013,6 +5017,15 @@ impl CpuBus {
             self.jit_cache_exclusions_current = false;
         }
         self.jit_window_bank = Some(window.base);
+        // In overlapping maps the largest-bank fallback can pick a bank whose
+        // base decodes to another bank on the next capture. Reuse only after
+        // that remembered-base lookup would keep the same choice.
+        if self.jit_single_instruction_batch()
+            && (self.icache.is_some() || self.dcache.is_some())
+            && self.fast_ram_bank_at(window.base) == Some(bank)
+        {
+            self.jit_primary_pc_span = self.fast_ram_selection_span(self.bus.cpu_pc);
+        }
         Some(window)
     }
 
@@ -5022,8 +5035,9 @@ impl CpuBus {
     /// write hooks, heat maps, self-modifying-code detection and injected bus
     /// faults all withhold both the primary window and additional regions.
     ///
-    /// The primary bank and native pointers are captured again for every
-    /// batch. Cache exclusions refresh after mapping invalidation and at each
+    /// Native pointers are captured again for every native batch. Single
+    /// instructions reuse the primary choice within unchanged RAM decode
+    /// edges. Cache exclusions refresh after mapping invalidation and at each
     /// slice entry, covering autoconfig, RESET and restored/replaced backing
     /// memory before direct access resumes.
     fn jit_windows_allowed(&self) -> bool {
@@ -5121,6 +5135,36 @@ impl CpuBus {
         self.window_offered |= count != 0;
         self.jit_cache_exclusions_current = true;
         regions
+    }
+
+    /// Nearest RAM decode edges around the raw PC. Within this interval the
+    /// PC selects the same bank (or no bank, preserving the previous choice).
+    /// Every RAM-backed Zorro aperture participates, including non-MEMLIST
+    /// boards and overlapping windows. Wrapped ends match bank lookup's
+    /// wrapping subtraction; u64 also represents the exclusive 32-bit limit.
+    fn fast_ram_selection_span(&self, pc: u32) -> std::ops::Range<u64> {
+        let mem = &self.bus.mem;
+        let mut span = 0..(1u64 << 32);
+        for (base, len) in [
+            (ACCEL_RAM_BASE as u32, mem.accel_ram.len() as u32),
+            (mem.mb_ram_base() as u32, mem.mb_ram.len() as u32),
+        ]
+        .into_iter()
+        .chain(mem.zorro.ram_windows().map(|(base, len, _)| (base, len)))
+        {
+            if len == 0 {
+                continue;
+            }
+            for edge in [base, base.wrapping_add(len)] {
+                let edge = u64::from(edge);
+                if edge <= u64::from(pc) {
+                    span.start = span.start.max(edge);
+                } else {
+                    span.end = span.end.min(edge);
+                }
+            }
+        }
+        span
     }
 
     /// The fast-RAM bank holding `addr`, if any.
@@ -5290,6 +5334,19 @@ impl AddressBus for CpuBus {
     }
 
     fn fast_mem(&mut self) -> Option<FastMem> {
+        let single = self.jit_single_instruction_batch();
+        if single
+            && self.jit_cache_exclusions_current
+            && self
+                .jit_primary_pc_span
+                .contains(&u64::from(self.bus.cpu_pc))
+        {
+            self.window_offered |= self.cache_free_window.is_some();
+            return None;
+        }
+        // A native batch can select another bank before returning to an old
+        // interval, so it must discard that interval even if mappings survive.
+        self.jit_primary_pc_span = 0..0;
         let window = self.jit_fast_mem()?;
         self.keep_caches_out_of_window(window.base, window.len);
         // A single instruction cannot run a native trace. Avoid capturing and
@@ -6320,6 +6377,7 @@ mod tests {
             cacr_040_layout: false,
             jit_batch: None,
             jit_cache_exclusions_current: false,
+            jit_primary_pc_span: 0..0,
             jit_bus_boundary: false,
         };
 
@@ -6360,6 +6418,7 @@ mod tests {
             cacr_040_layout: false,
             jit_batch: None,
             jit_cache_exclusions_current: false,
+            jit_primary_pc_span: 0..0,
             jit_bus_boundary: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
@@ -6411,6 +6470,7 @@ mod tests {
                 cacr_040_layout: false,
                 jit_batch: None,
                 jit_cache_exclusions_current: false,
+                jit_primary_pc_span: 0..0,
                 jit_bus_boundary: false,
             };
             bus.bus
@@ -6477,6 +6537,7 @@ mod tests {
             cacr_040_layout: false,
             jit_batch: None,
             jit_cache_exclusions_current: false,
+            jit_primary_pc_span: 0..0,
             jit_bus_boundary: false,
         };
         // INTENA/INTREQ, whose read ports INTENAR ($01C) and INTREQR ($01E) are
@@ -6531,6 +6592,7 @@ mod tests {
             cacr_040_layout: false,
             jit_batch: None,
             jit_cache_exclusions_current: false,
+            jit_primary_pc_span: 0..0,
             jit_bus_boundary: false,
         };
         let base = CHIP_RAM_BASE as u32;
@@ -6581,6 +6643,7 @@ mod tests {
             cacr_040_layout: false,
             jit_batch: None,
             jit_cache_exclusions_current: false,
+            jit_primary_pc_span: 0..0,
             jit_bus_boundary: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
@@ -6640,6 +6703,7 @@ mod tests {
             cacr_040_layout: false,
             jit_batch: None,
             jit_cache_exclusions_current: false,
+            jit_primary_pc_span: 0..0,
             jit_bus_boundary: false,
         };
 
@@ -6860,6 +6924,7 @@ mod tests {
             cacr_040_layout: false,
             jit_batch: None,
             jit_cache_exclusions_current: false,
+            jit_primary_pc_span: 0..0,
             jit_bus_boundary: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
@@ -6930,6 +6995,7 @@ mod tests {
             cacr_040_layout: false,
             jit_batch: None,
             jit_cache_exclusions_current: false,
+            jit_primary_pc_span: 0..0,
             jit_bus_boundary: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
@@ -7076,6 +7142,7 @@ mod tests {
             cacr_040_layout: false,
             jit_batch: None,
             jit_cache_exclusions_current: false,
+            jit_primary_pc_span: 0..0,
             jit_bus_boundary: false,
         };
         let before = bus.read_long(ROM_BASE as u32);
@@ -7115,6 +7182,7 @@ mod tests {
             cacr_040_layout: false,
             jit_batch: None,
             jit_cache_exclusions_current: false,
+            jit_primary_pc_span: 0..0,
             jit_bus_boundary: false,
         };
         // $F00000 with no extended ROM fitted is genuinely undecoded (the
@@ -7160,6 +7228,7 @@ mod tests {
             cacr_040_layout: false,
             jit_batch: None,
             jit_cache_exclusions_current: false,
+            jit_primary_pc_span: 0..0,
             jit_bus_boundary: false,
         }
     }
@@ -8845,6 +8914,131 @@ mod tests {
         machine.bus.bus.cpu_pc = 0x0100;
         let window = machine.bus.jit_fast_mem().expect("largest bank");
         assert_eq!(window.base, 0x07E0_0000);
+        Ok(())
+    }
+
+    #[test]
+    fn jit_single_bank_selection_tracks_decode_edges_and_native_batches() -> Result<()> {
+        let mut machine = machine_with_program_model(0x100, &[0x4e71], CpuModel::M68030)?;
+        machine.bus.bus.mem.fit_mb_ram(2 * 1024 * 1024);
+        machine.bus.bus.mem.fit_accel_ram(64 * 1024);
+        machine
+            .bus
+            .bus
+            .mem
+            .zorro
+            .add_board_configured_at(BoardSpec::copperline_id(), 0x0040_0000)?;
+        machine.set_cache_emulation(true, true);
+        machine.set_jit_enabled(true);
+        let mb = machine.bus.bus.mem.mb_ram_base() as u32;
+        let accel = ACCEL_RAM_BASE as u32;
+        let zorro = FAST_RAM_BASE as u32;
+        let bus = &mut machine.bus;
+        bus.jit_batch = Some(JitBatchTiming::Single);
+        for (pc, expected) in [
+            (0x100, mb),
+            (0x102, mb),
+            (0x003f_fffe, mb),
+            // Non-MEMLIST RAM also changes the primary bank at its edge.
+            (0x0040_0000, 0x0040_0000),
+            (0x0040_fffe, 0x0040_0000),
+            (0x0041_0000, 0x0040_0000),
+            (mb - 2, 0x0040_0000),
+            (mb, mb),
+            (accel - 2, mb),
+            (accel, accel),
+            (accel + 0x10000, accel),
+            (mb + 0x100, mb),
+        ] {
+            bus.bus.cpu_pc = pc;
+            bus.window_offered = false;
+            assert!(bus.fast_mem().is_none());
+            assert!(bus.fast_mem_regions().iter().all(Option::is_none));
+            assert_eq!(bus.jit_window_bank, Some(expected), "PC {pc:#x}");
+            assert!(bus.window_offered);
+            assert!(bus.in_cache_free_window(expected, 2));
+        }
+        // A native batch moves the primary window. Returning inside the old
+        // single-instruction interval must select its bank again.
+        bus.jit_batch = None;
+        bus.bus.cpu_pc = zorro;
+        assert_eq!(bus.fast_mem().unwrap().base, zorro);
+        bus.fast_mem_regions();
+        bus.jit_batch = Some(JitBatchTiming::Single);
+        bus.bus.cpu_pc = mb + 0x102;
+        assert!(bus.fast_mem().is_none());
+        bus.fast_mem_regions();
+        assert_eq!(bus.jit_window_bank, Some(mb));
+        Ok(())
+    }
+
+    #[test]
+    fn jit_single_bank_selection_settles_overlapping_largest_bank_fallback() -> Result<()> {
+        let mut machine = machine_with_program_model(0x100, &[0x4e71], CpuModel::M68030)?;
+        for bytes in [128 * 1024, 256 * 1024] {
+            machine
+                .bus
+                .bus
+                .mem
+                .zorro
+                .add_board_configured_at(BoardSpec::fast_ram(bytes), 0x0040_0000)?;
+        }
+        machine.set_cache_emulation(true, true);
+        machine.set_jit_enabled(true);
+        let bus = &mut machine.bus;
+        bus.jit_batch = Some(JitBatchTiming::Single);
+        // The largest bank wins initially. Once remembered by base, the first
+        // overlapping decoder wins, even though the PC still runs in chip RAM.
+        for bytes in [256 * 1024, 128 * 1024, 128 * 1024] {
+            bus.bus.cpu_pc += 2;
+            assert!(bus.fast_mem().is_none());
+            bus.fast_mem_regions();
+            assert_eq!(bus.cache_free_window, Some((0x0040_0000, bytes)));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn jit_primary_selection_span_handles_overlapping_and_wrapping_ram() -> Result<()> {
+        let mut machine = machine_with_program_model(0x100, &[0x4e71], CpuModel::M68030)?;
+        machine.bus.bus.mem.fit_accel_ram(64 * 1024);
+        let accel = ACCEL_RAM_BASE as u32;
+        machine
+            .bus
+            .bus
+            .mem
+            .zorro
+            .add_board_configured_at(BoardSpec::fast_ram(64 * 1024), accel + 0x8000)?;
+        machine
+            .bus
+            .bus
+            .mem
+            .zorro
+            .add_board_configured_at(BoardSpec::fast_ram(64 * 1024), 0xffff_8000)?;
+        let bus = &machine.bus;
+        assert_eq!(
+            bus.fast_ram_selection_span(accel),
+            u64::from(accel)..u64::from(accel + 0x8000)
+        );
+        assert_eq!(
+            bus.fast_ram_bank_at(accel + 0x8000),
+            Some(FastRamBank::Accel)
+        );
+        assert_eq!(
+            bus.fast_ram_selection_span(accel + 0x8000),
+            u64::from(accel + 0x8000)..u64::from(accel + 0x10000)
+        );
+        assert!(matches!(
+            bus.fast_ram_bank_at(accel + 0x10000),
+            Some(FastRamBank::Zorro { .. })
+        ));
+        assert_eq!(
+            bus.fast_ram_selection_span(0xffff_ffff),
+            0xffff_8000..0x1_0000_0000
+        );
+        assert_eq!(bus.fast_ram_selection_span(0), 0..0x8000);
+        assert_eq!(bus.fast_ram_bank_at(0), bus.fast_ram_bank_at(0xffff_ffff));
+        assert!(bus.fast_ram_bank_at(0x8000).is_none());
         Ok(())
     }
 
