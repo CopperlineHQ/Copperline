@@ -228,10 +228,11 @@ build one by hand on a Linux host:
 
 ## Windows
 
-Windows distribution is a portable zip per architecture
-(`packaging/windows/`). The `Windows` workflow builds them natively on
-`windows-latest` (x86-64) and `windows-11-arm` (ARM64) and, on a `v*` tag,
-attaches `Copperline-X.Y.Z-win-x64.zip` and
+Windows distribution includes an installer and a portable ZIP per
+architecture (`packaging/windows/`). The `Windows` workflow builds them
+natively on `windows-latest` (x86-64) and `windows-11-arm` (ARM64) and, on a `v*` tag,
+attaches `Copperline-X.Y.Z-win-x64-setup.exe`,
+`Copperline-X.Y.Z-win-arm64-setup.exe`, `Copperline-X.Y.Z-win-x64.zip` and
 `Copperline-X.Y.Z-win-arm64.zip` to the GitHub Release automatically. The
 same workflow runs the full release build on pull requests that touch the
 code, so it doubles as the Windows build check for both architectures (the
@@ -248,6 +249,51 @@ Windows host (add
 ```pwsh
 packaging/windows/build-zip.ps1
 ```
+
+The installer wraps that exact ZIP payload using Inno Setup 6.3 or newer
+(preinstalled on both GitHub runner images). To build both formats locally:
+
+```pwsh
+packaging/windows/build-installer.ps1
+# Or reuse a ZIP already built from this checkout:
+packaging/windows/build-installer.ps1 -ZipPath Copperline-X.Y.Z-win-x64.zip
+```
+
+Pass `-Target aarch64-pc-windows-msvc` for ARM64. The installer is per-user,
+defaults to `%LOCALAPPDATA%\Programs\Copperline`, adds Start menu and optional
+desktop shortcuts, and registers an uninstaller. Its stable Inno `AppId`
+allows later installers to update the same installation. Uninstall removes
+only shipped files and shortcuts, preserving user-created configuration,
+saves and media. The installer is unsigned, like the portable executables.
+
+CI silently installs each architecture on its native runner, checks every
+installed payload file against the ZIP, verifies shortcuts, reinstalls to
+restore a missing tool while preserving user files, boots the installed
+emulator on the bundled AROS ROM from outside the checkout, starts both
+command-line tools, then uninstalls and checks removal and data preservation.
+Logs and the boot screenshot are workflow artifacts. The release job waits
+for these checks as well as ZIP boot smoke, unit tests and golden renders
+on both architectures before attaching all four packages. Manual runs with
+`release_tag` also attach both formats to an existing release.
+
+The installer smoke test requires PowerShell 7. To reproduce it on a clean
+Windows VM, install PowerShell 7 first:
+
+```pwsh
+winget install --id Microsoft.PowerShell --source winget
+```
+
+Then run the test with `pwsh`:
+
+```pwsh
+pwsh -File packaging/windows/test-installer.ps1 `
+  -InstallerPath Copperline-X.Y.Z-win-x64-setup.exe `
+  -ZipPath Copperline-X.Y.Z-win-x64.zip `
+  -WorkDir "$env:TEMP\copperline-installer-smoke"
+```
+
+The test refuses an existing installation and keeps logs, the screenshot
+and preserved user-file fixtures for inspection.
 
 ## macOS disk image
 
@@ -281,8 +327,8 @@ each platform to the GitHub Release. Each ZIP includes the core, its
 These cores are loaded manually in RetroArch; see `docs/guide/libretro.md`.
 
 Before announcing the release, confirm the DMG, AppImage, network helper,
-both Windows ZIPs, PDF manual, and all three libretro ZIPs are attached,
-and that the browser and documentation publishing workflows have passed.
+both Windows installers and ZIPs, PDF manual, and all three libretro ZIPs are
+attached, and that the browser and documentation publishing workflows have passed.
 
 ## Crate packaging
 

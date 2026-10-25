@@ -3,8 +3,8 @@ name: Windows
 # Everything here runs as a two-leg matrix: x86-64 on windows-latest and
 # ARM64 on the windows-11-arm runner, each leg building natively for its own
 # architecture (no cross-compiling). Per architecture, two parallel builder
-# jobs produce the portable Windows zip and the prebuilt test executables
-# (the zip uses the shipping release profile; tests use the optimized ci
+# jobs produce the portable Windows ZIP plus installer and the prebuilt test
+# executables (packages use the shipping release profile; tests use the optimized ci
 # profile without fat LTO), then the checks fan out in
 # parallel against those artifacts, mirroring ci.yml: the packaged zip is
 # booted from a clean directory (and its copperline-ctl / import-uae
@@ -13,9 +13,9 @@ name: Windows
 # against the prebuilt test binaries. This is also the only Windows coverage
 # (the main CI runs on macOS and Linux), so the code-path triggers below run
 # the full release build on pull requests too. On a v* tag push (or a manual
-# run with release_tag) both zips are attached to the GitHub Release by the
-# release job, which runs only after every check on both architectures has
-# passed.
+# run with release_tag) both ZIPs and installers are attached to the GitHub
+# Release by the release job, which runs only after every check on both
+# architectures has passed.
 on:
   push:
     branches: [main, v1]
@@ -39,15 +39,12 @@ on:
       - ".cargo/**"
       - "packaging/windows/**"
       - ".github/workflows/windows.yml"
-  # Manual rebuild. Use this to attach zips to a release whose tag predates
-  # this workflow (the v* tag tree has no windows.yml, so a tag push cannot
-  # trigger it): run it against a branch that has the source parity you want
-  # (for v0.2.0, main is identical to the tag bar the Homebrew bump) and set
-  # release_tag to push the built zips onto that existing release.
+  # Manual rebuild/back-fill: run on a branch with the desired source parity
+  # and set release_tag to attach its ZIPs and installers to that release.
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Existing release tag to attach the zips to (e.g. v0.2.0). Leave blank to only upload workflow artifacts."
+        description: "Existing release tag to attach the ZIPs and installers to. Leave blank to only upload workflow artifacts."
         required: false
         default: ""
 
@@ -59,10 +56,10 @@ concurrency:
 # and crowd out the shared entries when several matrices run together.
 jobs:
   build:
-    name: Build Windows zip (${{ matrix.arch }})
-    # Compiles the release binary and packages the portable zip; the sibling
-    # test-bins job compiles the test executables in parallel on its own
-    # runner.
+    name: Build Windows packages (${{ matrix.arch }})
+    # Compiles the release binary and packages the portable ZIP and installer;
+    # the sibling test-bins job compiles the test executables in parallel on
+    # its own runner.
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -119,6 +116,15 @@ jobs:
         with:
           name: copperline-windows-${{ matrix.arch }}
           path: ${{ steps.artifact.outputs.path }}
+          if-no-files-found: error
+      - name: Build installer from the release ZIP
+        shell: pwsh
+        run: packaging/windows/build-installer.ps1 -Target ${{ matrix.target }} -ZipPath "${{ steps.artifact.outputs.path }}"
+      - name: Upload installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: copperline-windows-installer-${{ matrix.arch }}
+          path: Copperline-*-win-${{ matrix.arch }}-setup.exe
           if-no-files-found: error
 
   test-bins:
@@ -254,6 +260,51 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "$tool --help exited with $LASTEXITCODE" }
           }
 
+  installer-smoke:
+    name: Installer lifecycle smoke (${{ matrix.arch }})
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
+    steps:
+      # Only the test driver: no source-tree assets may satisfy ROM lookup.
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: packaging/windows/test-installer.ps1
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: copperline-windows-${{ matrix.arch }}
+          path: packages
+      - uses: actions/download-artifact@v8
+        with:
+          name: copperline-windows-installer-${{ matrix.arch }}
+          path: packages
+      - name: Install, boot, reinstall and uninstall
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = Get-ChildItem packages/Copperline-*-win-${{ matrix.arch }}-setup.exe
+          $zip = Get-ChildItem packages/Copperline-*-win-${{ matrix.arch }}.zip
+          packaging/windows/test-installer.ps1 -InstallerPath $installer.FullName -ZipPath $zip.FullName -WorkDir "$env:RUNNER_TEMP\installer-smoke"
+      - name: Upload installer logs and boot screenshot
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: installer-smoke-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/installer-smoke/*.log
+            ${{ runner.temp }}/installer-smoke/*.png
+          if-no-files-found: ignore
+          retention-days: 7
+
   unit-tests:
     name: Unit tests (${{ matrix.arch }})
     needs: test-bins
@@ -347,12 +398,12 @@ jobs:
           if-no-files-found: ignore
 
   release:
-    name: Attach zips to release
+    name: Attach Windows packages to release
     # Runs only once every Windows check on both architectures has passed,
     # preserving the old single-job ordering where the tests gated the
     # release attach. Plain ubuntu: this job only moves the already-built
     # artifacts.
-    needs: [zip-smoke, unit-tests, probe-golden]
+    needs: [zip-smoke, installer-smoke, unit-tests, probe-golden]
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
     runs-on: ubuntu-latest
     permissions:
@@ -363,32 +414,34 @@ jobs:
           pattern: copperline-windows-*
           merge-multiple: true
       - name: Locate artifacts
-        id: artifacts
-        # Fail fast if the downloaded zips are not where this job expects
+        # Fail fast if the downloaded packages are not where this job expects
         # them; an unmatched glob would otherwise pass the literal pattern
         # to the upload steps below. Both architectures must be present --
-        # a release with only one of the two zips is a packaging bug.
+        # a release missing either architecture or package format is a bug.
         run: |
           for arch in x64 arm64; do
-            zip=(Copperline-*-win-"$arch".zip)
-            if [ ! -f "${zip[0]}" ]; then
-              echo "no Copperline-*-win-$arch.zip in $PWD" >&2
-              exit 1
-            fi
+            for suffix in .zip -setup.exe; do
+              matches=(Copperline-*-win-"$arch$suffix")
+              if [ "${#matches[@]}" -ne 1 ] || [ ! -s "${matches[0]}" ]; then
+                echo "expected exactly one non-empty Copperline-*-win-$arch$suffix in $PWD" >&2
+                exit 1
+              fi
+            done
           done
-          echo "paths=$(ls Copperline-*-win-*.zip | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v3
         with:
-          files: Copperline-*-win-*.zip
+          files: |
+            Copperline-*-win-*.zip
+            Copperline-*-win-*-setup.exe
+          fail_on_unmatched_files: true
       - name: Attach to existing release (manual run)
         if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         # --clobber so a re-run replaces the assets instead of failing on a
         # name clash; --repo because this job runs without a checkout.
         run: |
-          for zip in ${{ steps.artifacts.outputs.paths }}; do
-            gh release upload "${{ inputs.release_tag }}" "$zip" --clobber --repo "${{ github.repository }}"
-          done
+          gh release upload "$RELEASE_TAG" Copperline-*-win-*.zip Copperline-*-win-*-setup.exe --clobber --repo "${{ github.repository }}"
