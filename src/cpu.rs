@@ -8933,6 +8933,63 @@ mod tests {
         Ok(())
     }
 
+    /// A compiled ROM loop touches three independently allocated fast banks.
+    /// Restoring into a fresh CPU must rebuild every pointer/cache exclusion,
+    /// while preserving the remembered primary bank and device clock carries.
+    #[test]
+    fn jit_multiple_regions_survive_fresh_save_restore() -> Result<()> {
+        use crate::memory::ACCEL_RAM_BASE;
+        use m68k::{CACR_ED, CACR_EI};
+        let rom = ROM_BASE as u32 + 0x100;
+        let make = || -> Result<M68kMachine> {
+            let mut bus = test_bus_with_pc(rom);
+            bus.mem.fit_mb_ram(2 * 1024 * 1024);
+            bus.mem.fit_accel_ram(2 * 1024 * 1024);
+            // MOVE.L (A0),D0; ADDQ.L #1,D0; MOVE.L D0,(A0)/(A1)/(A2); BRA.
+            write_program(
+                &mut bus,
+                rom,
+                &[0x2010, 0x5280, 0x2080, 0x2280, 0x2480, 0x60f4],
+            );
+            let mb = bus.mem.mb_ram_base() as u32;
+            let mut machine = M68kMachine::new(bus, CpuModel::M68030, false)?;
+            machine.cpu.set_a(0, FAST_RAM_BASE as u32 + 0x800);
+            machine.cpu.set_a(1, mb + 0x800);
+            machine.cpu.set_a(2, ACCEL_RAM_BASE as u32 + 0x800);
+            machine.set_cache_emulation(true, true);
+            machine.cpu.cacr = CACR_EI | CACR_ED;
+            machine.apply_cacr_updates();
+            machine.set_jit_enabled(true);
+            Ok(machine)
+        };
+        let mut live = make()?;
+        live.step_slice(6 * 2048)?;
+        assert_eq!(live.pc(), rom);
+        assert_eq!(live.d(0), 2048);
+        let mut state = Vec::new();
+        live.write_state(&mut state)?;
+        let mut fresh = make()?;
+        fresh.apply_state(&mut &state[..])?;
+        assert!(fresh.bus.cache_free_regions.iter().all(Option::is_none));
+        for budget in [512, 513, 1024] {
+            let expected = live.step_slice(budget)?;
+            let actual = fresh.step_slice(budget)?;
+            assert_eq!(actual.bus_advanced_cck, expected.bus_advanced_cck);
+            assert_eq!(fresh.bus().emulated_cck(), live.bus().emulated_cck());
+            assert_eq!(fresh.pc(), live.pc());
+            assert_eq!(fresh.cpu.dar, live.cpu.dar);
+            assert_eq!(fresh.cpu.get_sr(), live.cpu.get_sr());
+            assert_eq!(fresh.bus().mem.mb_ram, live.bus().mem.mb_ram);
+            assert_eq!(fresh.bus().mem.accel_ram, live.bus().mem.accel_ram);
+            assert_eq!(
+                fresh.bus().mem.zorro.board_ram(0),
+                live.bus().mem.zorro.board_ram(0)
+            );
+            assert_eq!(fresh.bus.jit_window_bank, live.bus.jit_window_bank);
+        }
+        Ok(())
+    }
+
     /// A save from before the window bank was carried has no
     /// `jit_window_bank` field and reads as None: the largest bank until
     /// code runs from a fast bank.
