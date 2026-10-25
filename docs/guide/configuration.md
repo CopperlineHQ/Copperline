@@ -1586,8 +1586,10 @@ run. (`auto` is still accepted here as a backward-compatibility alias for
 mouse, 0-100. `50` (the default, shown as *Default* in the GUI) is a neutral
 multiplier, `0` is a quarter speed and `100` quadruple, on an exponential scale
 so each step is an even ratio. Captured and uncaptured mouse motion both compensate
-for the picture's display scale before this multiplier is applied, so a larger
-window or fullscreen picture does not increase mouse speed. Guest mouse
+for the picture's display scale before this multiplier is applied. Captured
+movement uses logical host size, so a larger window or fullscreen picture does
+not increase mouse speed and monitor DPI does not change the sensitivity.
+Captured RTG motion uses the board's native pixels. Guest mouse
 preferences and host cursor acceleration can still affect the feel.
 It is a host-input scale applied to live mouse motion only: it never touches
 the emulated machine or scripted `--mouse-after` input, so headless and recorded runs stay

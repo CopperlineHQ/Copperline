@@ -949,17 +949,36 @@ impl PresentLayout {
         draws
     }
 
-    /// Invert the display scale for relative host motion. Keep fractions here:
-    /// slow movement must accumulate after scaling and sensitivity are applied.
-    pub(super) fn mouse_delta(&self, dx: f64, dy: f64) -> Option<(f64, f64)> {
-        let (_, _, w, h) = self.display_dst;
-        if w == 0 || h == 0 {
+    /// Invert logical display magnification for captured host motion. Native
+    /// RTG pixels, rather than the UI canvas, define the board's mouse grid.
+    /// Keep fractions until sensitivity and the shared accumulator are applied.
+    pub(super) fn mouse_delta(
+        &self,
+        dx: f64,
+        dy: f64,
+        scale_factor: f64,
+        rtg_native: Option<(u32, u32)>,
+    ) -> Option<(f64, f64)> {
+        let (sw, sh, w, h) = if let Some((sw, sh)) = rtg_native {
+            // A classic smooth layout includes chrome in display_dst; the
+            // board is drawn only in the viewport's picture rows.
+            let (_, _, w, h) = self.rtg_viewport();
+            (f64::from(sw), f64::from(sh), f64::from(w), f64::from(h))
+        } else {
+            (
+                self.src_canvas.2 as f64,
+                self.src_canvas.3 as f64,
+                f64::from(self.display_dst.2),
+                f64::from(self.display_dst.3),
+            )
+        };
+        if sw <= 0.0 || sh <= 0.0 || w <= 0.0 || h <= 0.0 {
             return None;
         }
-        Some((
-            dx * self.src_canvas.2 as f64 / f64::from(w),
-            dy * self.src_canvas.3 as f64 / f64::from(h),
-        ))
+        // macOS points and Wayland surface-local units need this conversion
+        // to physical pixels. For Windows/X11 raw counts it makes the chosen
+        // sensitivity independent of monitor DPI at a fixed logical size.
+        Some((dx * scale_factor * sw / w, dy * scale_factor * sh / h))
     }
 
     /// Invert the layout for a host cursor position: surface physical

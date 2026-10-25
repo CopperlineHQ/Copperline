@@ -1451,14 +1451,17 @@ fullscreen, where there is no desktop to reach for. An explicit
 
 Uncaptured, host cursor motion over the display still drives the
 emulated mouse, and `[input] mouse_sensitivity` scales it the same way
-it scales captured motion. Both paths compensate for the picture's horizontal
-and vertical display scale, including fullscreen, autocrop, and RTG placement,
-so enlarging the picture does not amplify mouse movement. Fractional movement
-accumulates, allowing precise adjustments at large scales. The default
-sensitivity is a neutral multiplier; the guest's mouse speed and acceleration
-still affect its pointer. Captured motion uses raw device counts, while
-uncaptured motion follows the host desktop cursor, so host acceleration can
-make them feel different.
+it scales captured motion. Captured movement compensates for the picture's
+horizontal and vertical magnification in logical host pixels, including
+fullscreen, autocrop, and RTG placement. This keeps its speed steady when
+enlarging the picture or moving between monitors with different DPI settings.
+RTG uses the board's native pixel grid for this conversion. Fractional
+movement accumulates, allowing precise adjustments at large scales.
+The default sensitivity is a neutral multiplier; the guest's mouse speed and
+acceleration still affect its pointer. On Windows, X11, and Wayland, captured
+motion is unaccelerated, while uncaptured motion follows the host desktop
+cursor, so host acceleration can make them feel different. On macOS, both
+follow the system's accelerated pointer motion.
 
 The JOYxDAT counters are eight bits wide, and the guest works out how far
 the mouse moved from the difference between two reads, normally once a

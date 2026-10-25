@@ -770,15 +770,21 @@ from parasyte/pixels#462, which gives up after one reconfigure. Both window
 kinds record the size their surface was configured with, and all resizes go
 through the wrappers that keep that record in step.
 
-Captured desktop mouse motion also inverts `PresentLayout`'s display scale:
-raw deltas are multiplied by the source-canvas extent divided by the physical
-display extent on each axis. This uses the same picture layout as uncaptured
-cursor mapping, including cropped, per-axis, RTG and debugger-pane placement.
+Captured desktop mouse motion also inverts `PresentLayout`'s display scale.
+Captured deltas are multiplied by the window's DPI scale factor before
+inverting the physical picture rectangle: macOS supplies points and Wayland
+supplies surface-local motion; for Windows/X11 device counts, this keeps
+sensitivity independent of DPI at a fixed logical picture size.
+Chipset motion uses the source-canvas extent, including crop and per-axis
+scaling. RTG motion instead uses the board's native dimensions divided by the
+physical RTG viewport, excluding chrome even in a classic smooth layout. This
+preserves equal axis factors for square board pixels drawn at an integer
+multiple, independently of the host UI canvas's dimensions.
 The result reaches the host sensitivity multiplier and fractional accumulator
 before whole counts enter the emulated mouse. Uncaptured cursor positions have
-already passed through the inverse layout and are not scaled again. Scripted
-and control-protocol counts, gamepad mouse motion, and the emulated JOYxDAT
-counter model are independent of this captured-device conversion.
+already passed through their inverse canvas layout and are not scaled again.
+Scripted and control-protocol counts, gamepad mouse motion, and the emulated
+JOYxDAT counter model are independent of this captured-device conversion.
 
 The present worker widens the gap between that check and the acquire: a
 frame is planned on the main thread and presented later, and on Windows the

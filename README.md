@@ -139,6 +139,7 @@ ordinary windows.
 
 Captured mouse movement compensates for the picture's display scale, so
 enlarging the window or entering fullscreen does not amplify its speed.
+The conversion accounts for monitor DPI and uses native board pixels for RTG.
 Adjust the live mouse speed with `[input] mouse_sensitivity` or the launcher's
 *Input* tab.
 

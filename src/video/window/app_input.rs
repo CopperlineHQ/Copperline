@@ -352,14 +352,15 @@ impl App {
         input.set_mouse_button(port, 1, false);
     }
 
-    /// Raw captured motion has not passed through the cursor-position map.
-    /// Apply the same inverse display scale before the shared accumulator,
-    /// so enlarging the picture does not amplify the displayed movement.
+    /// Captured motion has not passed through the cursor-position map. Remove
+    /// logical picture magnification before the shared accumulator; native RTG
+    /// dimensions define its mouse grid independently of the host UI canvas.
     pub(super) fn add_captured_mouse_delta(&mut self, dx: f64, dy: f64) {
-        let delta = self.render.as_ref().map_or(Some((dx, dy)), |r| {
-            main_present_layout(r, self.display_canvas_src(), self.rtg_present_dims)
-                .mouse_delta(dx, dy)
-        });
+        let delta =
+            self.render.as_ref().map_or(Some((dx, dy)), |r| {
+                main_present_layout(r, self.display_canvas_src(), self.rtg_present_dims)
+                    .mouse_delta(dx, dy, r.window.scale_factor(), self.rtg_present_dims)
+            });
         if let Some((dx, dy)) = delta {
             self.add_host_mouse_delta(dx, dy);
         }
