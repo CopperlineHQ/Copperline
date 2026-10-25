@@ -458,7 +458,7 @@ pub struct Config {
     /// affecting this start-up value.
     pub joystick_input_mode: JoystickInputMode,
     /// Host mouse sensitivity, 0-100 (`[input] mouse_sensitivity` /
-    /// `--mouse-sensitivity`). 50 (default) is 1:1 with the host mouse; 0 is a
+    /// `--mouse-sensitivity`). 50 (default) is a neutral multiplier; 0 is a
     /// quarter speed and 100 quadruple, on an exponential scale. A host-input
     /// scale only -- it does not affect the emulated machine or scripted mouse
     /// input.

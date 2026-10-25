@@ -942,10 +942,12 @@ floppy_sounds_volume = 100
 # joystick = "gamepad"
 
 # Host mouse sensitivity, 0-100. 50 (default, shown as "Default" in the GUI)
-# tracks the host mouse 1:1; 0 is a quarter speed and 100 quadruple, on an
-# exponential scale. A host-input scale only -- it does not affect the emulated
-# machine or scripted --mouse-after input. Also --mouse-sensitivity N, the
-# launcher's Input tab, and Cmd/Alt+Shift+> / < (held to ramp) to adjust live.
+# is a neutral multiplier; 0 is a quarter speed and 100 quadruple, on an
+# exponential scale. Live mouse motion compensates for the picture's display
+# scale first, including when captured. A host-input scale only -- it does not
+# affect the emulated machine or scripted --mouse-after input. Also
+# --mouse-sensitivity N, the launcher's Input tab, and Cmd/Alt+Shift+> / <
+# (held to ramp) to adjust live.
 # mouse_sensitivity = 50
 
 # When the host mouse is grabbed (pointer confined to the window, host cursor

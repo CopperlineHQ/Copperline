@@ -259,14 +259,8 @@ impl App {
             let dx = pos.0 - prev.0;
             let dy = pos.1 - prev.1;
             if dx != 0 || dy != 0 {
-                // Through the same scale the captured path uses, so the
-                // sensitivity setting means something on both sides of a
-                // grab instead of silently doing nothing until the mouse is
-                // captured. The units still differ -- these are texture
-                // pixels where a captured delta is a raw device count -- so
-                // this equalises the operator's knob, not the underlying
-                // ratio; at the default sensitivity the factor is 1.0 and
-                // the long-standing 1:1 tracking is unchanged.
+                // Cursor positions already invert the display layout; only
+                // the sensitivity multiplier remains to be applied.
                 self.add_host_mouse_delta(f64::from(dx), f64::from(dy));
             }
         }
@@ -356,6 +350,20 @@ impl App {
         let input = &mut self.emu.bus_mut().input;
         input.set_mouse_button(port, 0, false);
         input.set_mouse_button(port, 1, false);
+    }
+
+    /// Captured motion has not passed through the cursor-position map. Remove
+    /// logical picture magnification before the shared accumulator; native RTG
+    /// dimensions define its mouse grid independently of the host UI canvas.
+    pub(super) fn add_captured_mouse_delta(&mut self, dx: f64, dy: f64) {
+        let delta =
+            self.render.as_ref().map_or(Some((dx, dy)), |r| {
+                main_present_layout(r, self.display_canvas_src(), self.rtg_present_dims)
+                    .mouse_delta(dx, dy, r.window.scale_factor(), self.rtg_present_dims)
+            });
+        if let Some((dx, dy)) = delta {
+            self.add_host_mouse_delta(dx, dy);
+        }
     }
 
     pub(super) fn add_host_mouse_delta(&mut self, dx: f64, dy: f64) {

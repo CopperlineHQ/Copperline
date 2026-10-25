@@ -1926,6 +1926,176 @@ fn uncaptured_cursor_motion_honours_the_sensitivity_setting() {
     );
 }
 
+#[test]
+fn captured_mouse_motion_preserves_displayed_travel_when_enlarged() {
+    for multiple in [1, 2, 4] {
+        let (mut app, _) = pointer_machine();
+        let before = settle_pointer_machine(&mut app);
+        let layout = super::surface_present_layout(
+            (
+                (FB_WIDTH * multiple) as u32,
+                (super::window_present_height() * multiple) as u32,
+            ),
+            1.0,
+            false,
+            None,
+            None,
+        );
+        let (dx, dy) = layout.mouse_delta(20.0, 8.0, 1.0, None).unwrap();
+        app.add_host_mouse_delta(dx, dy);
+        step_fields(&mut app, POINTER_RESPONSE_FIELDS);
+        let after = pointer_origin(&app);
+        // This guest moves its sprite one comparator unit per mouse count:
+        // two rendered columns horizontally, one scan line vertically.
+        assert_eq!((after.0 - before.0) * multiple as i32, 40);
+        assert_eq!((after.1 - before.1) * multiple as i32, 8);
+    }
+}
+
+#[test]
+fn captured_mouse_motion_matches_the_cropped_cursor_map() {
+    use winit::dpi::PhysicalPosition;
+    let crop = super::DisplaySrc {
+        rect: (40, 20, 320, 200),
+        par: (3, 2),
+        horizontal_repeat: 1,
+    };
+    let cropped = super::display_src_layout((960, 400), true, crop, None);
+    assert_eq!(
+        cropped.mouse_delta(12.0, -8.0, 1.0, None),
+        Some((4.0, -4.0))
+    );
+    for layout in [
+        cropped,
+        super::surface_present_layout((1920, 1080), 1.0, false, None, None),
+        super::debug_present_layout((30, 40, 1280, 960), true, Some(crop), None),
+    ] {
+        let (x, y, w, h) = layout.display_dst;
+        let from = PhysicalPosition::new(x as f64 + w as f64 / 4.0, y as f64 + h as f64 / 4.0);
+        let to = PhysicalPosition::new(from.x + w as f64 / 4.0, from.y + h as f64 / 4.0);
+        let a = layout.cursor_position(from).unwrap();
+        let b = layout.cursor_position(to).unwrap();
+        let (dx, dy) = layout
+            .mouse_delta(to.x - from.x, to.y - from.y, 1.0, None)
+            .unwrap();
+        assert!((dx - f64::from(b.0 - a.0)).abs() < 1.0, "{layout:?}");
+        assert!((dy - f64::from(b.1 - a.1)).abs() < 1.0, "{layout:?}");
+    }
+    let mut empty = cropped;
+    empty.display_dst.2 = 0;
+    assert!(empty.mouse_delta(1.0, 1.0, 1.0, None).is_none());
+    empty.display_dst = (0, 0, 10, 0);
+    assert!(empty.mouse_delta(1.0, 1.0, 1.0, None).is_none());
+}
+
+#[test]
+fn captured_mouse_motion_uses_logical_units_on_hidpi_displays() {
+    use winit::dpi::PhysicalPosition;
+    let src = super::DisplaySrc {
+        rect: (0, 0, 320, 200),
+        par: (1, 1),
+        horizontal_repeat: 1,
+    };
+    for dpi in [1.0, 1.5, 2.0, 3.0] {
+        for zoom in [1, 2, 4] {
+            let layout = super::display_src_layout(
+                (
+                    (320.0 * dpi * zoom as f64) as u32,
+                    (200.0 * dpi * zoom as f64) as u32,
+                ),
+                false,
+                src,
+                None,
+            );
+            let (dx, dy) = layout.mouse_delta(8.0, -4.0, dpi, None).unwrap();
+            assert_eq!((dx, dy), (8.0 / zoom as f64, -4.0 / zoom as f64));
+            // CursorMoved uses physical pixels; one captured logical unit
+            // covers dpi physical pixels at the same presentation scale.
+            let from = PhysicalPosition::new(80.0 * dpi, 40.0 * dpi);
+            let to = PhysicalPosition::new(from.x + 8.0 * dpi, from.y - 4.0 * dpi);
+            let a = layout.cursor_position(from).unwrap();
+            let b = layout.cursor_position(to).unwrap();
+            assert_eq!((dx, dy), (f64::from(b.0 - a.0), f64::from(b.1 - a.1)));
+        }
+    }
+}
+
+#[test]
+fn captured_rtg_mouse_motion_uses_native_pixels_for_each_mode() {
+    for native in [(640, 480), (1280, 720), (1920, 1080), (1280, 1024)] {
+        for multiple in [1, 2, 4] {
+            let layout = super::integer_rtg_present_layout(
+                (0, 0, native.0 * multiple, native.1 * multiple),
+                native,
+                None,
+            );
+            for dpi in [1.0, 1.5, 2.0] {
+                let (dx, dy) = layout.mouse_delta(12.0, 12.0, dpi, Some(native)).unwrap();
+                assert_eq!(dx, dy, "{native:?}, {multiple}x, DPI {dpi}");
+                assert_eq!(dx, 12.0 * dpi / f64::from(multiple));
+            }
+        }
+    }
+    // Smooth layouts include chrome below the board. It must not reduce
+    // the vertical pointer speed, even when that band is very tall.
+    let ph = super::present_height();
+    let layout = super::PresentLayout {
+        src_canvas: (0, 0, FB_WIDTH, ph + 200),
+        display_dst: (10, 20, 1280, ((ph + 200) * 2) as u32),
+        filter: super::scaler::ScaleFilter::SharpBilinear,
+        chrome_dst: None,
+        factors: None,
+    };
+    assert_eq!(
+        layout.mouse_delta(12.0, 12.0, 1.0, Some((640, ph as u32))),
+        Some((6.0, 6.0))
+    );
+}
+
+#[test]
+fn captured_mouse_motion_without_a_render_keeps_the_input_path_usable() {
+    let mut app = test_app();
+    assert!(app.render.is_none());
+    let port = app.mouse_port().unwrap();
+    let before = app.emu.bus().input.ports[port];
+    app.set_mouse_sensitivity(0);
+    for _ in 0..4 {
+        app.add_captured_mouse_delta(1.0, -1.0);
+    }
+    let after = app.emu.bus().input.ports[port];
+    assert_eq!(after.counter_x.wrapping_sub(before.counter_x), 1);
+    assert_eq!(before.counter_y.wrapping_sub(after.counter_y), 1);
+}
+
+#[test]
+fn scaled_mouse_motion_keeps_fractions_and_scripted_counts_remain_exact() {
+    let mut app = test_app();
+    app.set_mouse_sensitivity(0);
+    let layout = super::surface_present_layout(
+        (
+            FB_WIDTH as u32 * 4,
+            super::window_present_height() as u32 * 4,
+        ),
+        1.0,
+        false,
+        None,
+        None,
+    );
+    let port = app.mouse_port().unwrap();
+    let before = app.emu.bus().input.ports[port];
+    for _ in 0..16 {
+        let (dx, dy) = layout.mouse_delta(1.0, -1.0, 1.0, None).unwrap();
+        app.add_host_mouse_delta(dx, dy);
+    }
+    let after = app.emu.bus().input.ports[port];
+    assert_eq!(after.counter_x.wrapping_sub(before.counter_x), 1);
+    assert_eq!(before.counter_y.wrapping_sub(after.counter_y), 1);
+    app.apply_scripted_mouse_delta(port as u8, 20, -10);
+    let scripted = app.emu.bus().input.ports[port];
+    assert_eq!(scripted.counter_x.wrapping_sub(after.counter_x), 20);
+    assert_eq!(after.counter_y.wrapping_sub(scripted.counter_y), 10);
+}
+
 /// A tool window borrows the host cursor while it is open. It used to
 /// release the capture outright and never give it back, so every trip to
 /// the debugger left the machine uncaptured for good -- worst in
