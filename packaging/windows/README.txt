@@ -1,5 +1,5 @@
 Copperline - Windows build
-=========================
+==========================
 
 Copperline is a cycle-driven Amiga emulator (OCS/ECS/AGA).
 
@@ -8,8 +8,8 @@ Running
 The installer adds a Start menu shortcut and an optional desktop shortcut.
 By default, it installs into %LOCALAPPDATA%\Programs\Copperline for the
 current user. Run a newer installer to update it. Remove it through Windows
-Settings -> Apps -> Installed apps; settings, saves and media you added are
-preserved.
+Settings -> Apps (Installed apps on Windows 11, Apps & features on Windows 10);
+settings, saves and media you added are preserved.
 
 The ZIP is portable: unzip the whole archive anywhere and run copperline.exe.
 Both packages need no administrator rights and no Visual C++ Redistributable

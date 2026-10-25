@@ -1,6 +1,7 @@
 #!/usr/bin/env pwsh
 # Run on a clean Windows host: installs into the default per-user location,
 # checks the complete ZIP payload, repairs the install, then uninstalls it.
+#Requires -Version 7
 param(
     [Parameter(Mandatory)]
     [string]$InstallerPath,
@@ -17,7 +18,7 @@ $ZipPath = (Resolve-Path -LiteralPath $ZipPath).Path
 $WorkDir = [IO.Path]::GetFullPath($WorkDir)
 $installDir = Join-Path $env:LOCALAPPDATA "Programs\Copperline"
 $uninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CopperlineHQ.Copperline_is1"
-$startShortcut = Join-Path ([Environment]::GetFolderPath("Programs", "DoNotVerify")) "Copperline\Copperline.lnk"
+$startShortcut = Join-Path ([Environment]::GetFolderPath("Programs", "DoNotVerify")) "Copperline.lnk"
 $desktopShortcut = Join-Path ([Environment]::GetFolderPath("DesktopDirectory", "DoNotVerify")) "Copperline.lnk"
 $uninstaller = Join-Path $installDir "unins000.exe"
 

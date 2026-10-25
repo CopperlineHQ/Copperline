@@ -83,9 +83,10 @@ It creates a Start menu shortcut and offers an optional desktop shortcut.
 Start Copperline from either shortcut.
 
 Run a newer installer to update the same installation. Remove it through
-**Settings -> Apps -> Installed apps**; uninstalling removes the shipped
-program files and shortcuts while preserving your settings, saves and any
-media you added. By default, user data is in
+**Settings -> Apps** (**Installed apps** on Windows 11, **Apps & features**
+on Windows 10); uninstalling removes the shipped program files and shortcuts
+while preserving your settings, saves and any media you added. By default,
+user data is in
 `%USERPROFILE%\Documents\Copperline`; see [portable data](ui.md#where-files-go).
 
 The installer and executables are unsigned, so Windows SmartScreen may show

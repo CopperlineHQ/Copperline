@@ -22,7 +22,6 @@ AppPublisherURL=https://copperline.dev/
 AppSupportURL=https://github.com/CopperlineHQ/Copperline/issues
 AppUpdatesURL=https://github.com/CopperlineHQ/Copperline/releases
 DefaultDirName={localappdata}\Programs\Copperline
-DefaultGroupName=Copperline
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 MinVersion=10.0
@@ -38,7 +37,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 OutputBaseFilename=Copperline-{#AppVersion}-win-{#AppArch}-setup
 SetupIconFile=..\..\assets\brand\copperline.ico
 UninstallDisplayIcon={app}\copperline.exe
-LicenseFile={#PayloadDir}\LICENSE.txt
+InfoBeforeFile={#PayloadDir}\LICENSE.txt
 VersionInfoVersion={#AppVersionNumeric}
 VersionInfoTextVersion={#AppVersion}
 WizardStyle=modern
@@ -54,7 +53,7 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; Flags: unchecked
 Source: "{#PayloadDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\Copperline"; Filename: "{app}\copperline.exe"; WorkingDir: "{app}"
+Name: "{autoprograms}\Copperline"; Filename: "{app}\copperline.exe"; WorkingDir: "{app}"
 Name: "{autodesktop}\Copperline"; Filename: "{app}\copperline.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]

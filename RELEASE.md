@@ -276,10 +276,17 @@ for these checks as well as ZIP boot smoke, unit tests and golden renders
 on both architectures before attaching all four packages. Manual runs with
 `release_tag` also attach both formats to an existing release.
 
-To reproduce the installer smoke test on a clean Windows VM:
+The installer smoke test requires PowerShell 7. To reproduce it on a clean
+Windows VM, install PowerShell 7 first:
 
 ```pwsh
-packaging/windows/test-installer.ps1 `
+winget install --id Microsoft.PowerShell --source winget
+```
+
+Then run the test with `pwsh`:
+
+```pwsh
+pwsh -File packaging/windows/test-installer.ps1 `
   -InstallerPath Copperline-X.Y.Z-win-x64-setup.exe `
   -ZipPath Copperline-X.Y.Z-win-x64.zip `
   -WorkDir "$env:TEMP\copperline-installer-smoke"
