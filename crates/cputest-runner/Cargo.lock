@@ -29,7 +29,7 @@ checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
 [[package]]
 name = "m68k"
 version = "0.14.7"
-source = "git+https://github.com/CopperlineHQ/m68k-rs?rev=05d74ca562eca8ca842a1f9fd9db5bd2a3ac5877#05d74ca562eca8ca842a1f9fd9db5bd2a3ac5877"
+source = "git+https://github.com/CopperlineHQ/m68k-rs?rev=9a2ebba6947989c3612733742dd1ded7563c828e#9a2ebba6947989c3612733742dd1ded7563c828e"
 
 [[package]]
 name = "shlex"
