@@ -819,8 +819,10 @@ fixed those instructions but broke the already accurate STOP path.
 Copper-generated PORTS/EXTER requests use the same running-instruction poll
 qualification as internal Paula requests. The request bit alone cannot identify
 an external CIA edge: a Copper INTREQ write can set either bit. A serialized
-origin mask preserves that distinction until acknowledgement. Pin-fed CIA and
-unmeasured CPU-written external request paths keep their previous qualification.
+origin mask preserves that distinction until acknowledgement. Staged CIA inputs
+also carry an origin tag and use the common running poll phase. Other external
+devices and unmeasured CPU-written external request paths retain their previous
+qualification.
 Paired A500 STOP/running/readback controls and remaining CIA request-visibility
 differences are recorded in the sibling probe repository at
 `docs/irq-stage-investigation-2026-10-19.md`. These measurements do not justify
@@ -834,6 +836,75 @@ VHPOSR 37 CCK after the WAIT target at all sixteen horizontal phases,
 twice each. The previous five-CCK default recorded 36. This validates the
 combined Copper/interrupt/CPU/readback path, not an isolated measurement of
 the propagation delay at Paula's pins.
+
+### CIA output phase and raw request visibility
+
+The CIA ICR latch, external output, Paula request latch and CPU recognition
+are distinct observations. The CIA keeps its timer/readback logic on the
+E-clock grid. The bus forwards an ordinary timer assertion at the following
+falling phase (two CCK after the rising-edge divider event). An assertion
+delayed by an ICR-read race uses the next rising phase instead. The common
+one-E delayed-output path also uses this phase for mask-enable, TOD, FLAG and
+serial assertions. Electrical phase measurements establish the timer and
+ICR-race behavior; applying the same phase to these other delayed sources is
+an extrapolation, not an independently measured external-source latency.
+Settled SP/TOD/FLAG checks verify acknowledgement order only. This preserves
+the measured approximately six-CPU-clock difference between ordinary and
+race-delayed output, without delaying ICR flags by another whole E-clock.
+
+Paula receives the modeled output through a separate four-CCK input stage.
+INTREQR remains clear before that stage completes. An ICR acknowledgement
+cancels an unforwarded assertion; once forwarded, Paula retains its own latch
+until INTREQ acknowledgement. A held input does not restart its input delay.
+Absolute event deadlines preserve these stages across batched device advances,
+and pending stages bound stopped-CPU advances.
+
+The first CIA-fed request qualifies two CCK before the generic recognition
+reference: four CCK after raw-request visibility at the unchanged six-CCK
+default. A running stock 68000 uses the same qualified two/four-CCK poll leads
+as other Paula requests, while STOP uses the boundary deadline. A serialized CIA
+origin mask persists through CIA ICR acknowledgement until INTREQ is cleared;
+unrelated INT2/INT6 devices keep their former qualification. This is a CIA-route
+correction, not a global reduction. The output,
+input and recognition stages cannot be collapsed into one delay: consuming the
+source/input span makes STOP bus activity early; adding the full generic delay
+after input makes it late. The selected reference fits both STOP-entry phase
+groups and retains the software loader regression. Other Paula interrupt
+routes and their existing polling rules are unchanged.
+
+STOP fast-forwarding also preserves the exact predicted device horizon after
+converting it to an instruction budget. For example, a three-CCK event must not
+advance four CCK because that budget rounded up. Device and slice accounting
+use the bounded advance; already-executed bus time is never rewound. This does
+not force CPU recognition at the device event: the STOP polling grid still
+governs acceptance. With the staged CIA route above, the exact bound repairs
+33 phase-qualified A500 STOP-entry beam observations while preserving running
+and masked controls and the ECS/OCS loader regression. Applying this scheduler
+change to the earlier propagation model had broken that loader; the two stages
+must be validated together.
+
+The sibling probe repository retains the exact ROMs' source fingerprints,
+original four-channel captures and comparison rules in
+`references/cia-recognition-20261024-v1/`. The masked read controls return clear
+in the approximately 1.06–3.53 CPU-clock /AS window after CIA /IRQ and set in the
+5.06–7.53 window. Physical /IPL follows /IRQ by about 8 CPU clocks. These are
+observed bus intervals, not direct measurements of an internal CPU poll or an
+exact transistor-level Paula latch. Full beam/refresh cohorts remain incomplete;
+do not count observed-range agreement as an exact timing match.
+
+CIA external-input forwarding and CPU qualification have distinct reference
+points; changing INTREQR's common read phase also changes other Paula sources.
+The input/qualification split preserves the combined CPU deadline while keeping
+INTREQR's existing end-of-slot read sampling for internal and external sources.
+Before a CPU IPL poll, flush a deferred device batch only when an enabled CIA
+input is already due for forwarding. This applies elapsed device time without
+advancing the CPU clock; otherwise the batch can hide a request from a running
+instruction even though the STOP scheduler observes it. Future requests remain
+pending and use the ordinary qualification deadline.
+Keep external serial traffic conditioned separately: an attached keyboard's
+synchronization bits can set CIA-A's SP flag even without keypresses. Hardware
+comparisons assume an attached keyboard; condition its startup traffic before
+comparing CIA readback.
 
 A subsequent RAM-resident ROM probe on the same A500 measured both 37 and
 38 CCK with DMA disabled. A fixed WAIT at line 96, horizontal 64, and a
@@ -899,7 +970,8 @@ Timer-A underflows reach timer B's cascade input one E-clock later. The
 pending final pulse is saved and included in STOP wakeup predictions, even
 when timer A has already stopped. Batched updates retain that final pulse
 and deliver all preceding ones; latch zero produces one underflow per
-enabled input tick. One-shot batches stop at their first underflow. A zero
+enabled input tick. One-shot batches normally stop at their first underflow;
+the zero-latch high-byte auto-start exception is described below. A zero
 START+LOAD also produces carry on the last LOAD stage, before the first
 decrement, and can stop a one-shot there.
 
@@ -918,16 +990,21 @@ and drives high for the underflow pulse, including when DDRB selects input.
 START initializes the toggle latch high. Adjacent zero-latch underflows
 merge into one asserted pulse and therefore produce only one toggle edge;
 a gap rearms the next edge. High-byte one-shot auto-start also initializes
-the toggle latch. Zero-latch auto-start carry and early PB readback remain
-under investigation on the separate `wip/cia-propagation-pb-stop` branch.
+the toggle latch. Automatic high-byte start can carry from the old stopped
+counter before the new count's underflow. A500 kind133 crosses old count 0/1/3/15
+with new latch 0/1/3/15 on both CIAs: an old zero produces two carries, while
+an old nonzero produces one. Explicit LOAD and stopped controls remain separate.
+The earlier new-zero-only rule confused counter history with latch value.
 
 Serial output advances one bit per two Timer-A underflows and asserts SP
 after sixteen underflows for a clean byte. Serial input still shifts eight
-external CNT edges. The output half-clock phase is saved, with defaults for older states. These measurements do not establish
-serial buffering semantics, Timer-B zero-latch auto-start, electrical IRQ
-latency, or CPU IPL sampling. Captures, provenance and comparison rules are
-in the sibling `amiga-hardware-probes` repository's
-`docs/cia-hardware-verification-2026-10-19.md`.
+external CNT edges. The output half-clock phase, pending automatic reload and
+old-zero carry are saved, with defaults for older states. Those original serial
+measurements alone do not establish Timer-B auto-start, electrical IRQ latency
+or CPU IPL sampling; their separate follow-ups are described above and in
+[the CIA measurement record](a500-cia-output-readback-2026-10-19.md).
+Captures, provenance and comparison rules remain in the sibling
+`amiga-hardware-probes` repository's `docs/cia-hardware-verification-2026-10-19.md`.
 
 Synchronous CPU timer reads sample the reload data mux before the falling
 edge commits the counter. At an eligible PHI2 reload slot, internal count

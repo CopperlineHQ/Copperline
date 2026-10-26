@@ -479,6 +479,10 @@ probe_tests! {
     // Raw startup/BBUSY/BZERO and descending destination-restore snapshots.
     golden_a500_blit_boundaries => probe("a500-blit-boundaries", "a500-blit-boundaries.bin", 16.0);
     golden_a500_display_boundaries => probe_ecs("a500-display-boundaries", "a500-display-boundaries.bin", 16.0);
+    // Both CIA timer-A outputs, raw INTREQR, PRB and ICR across instruction
+    // gaps. Model regression snapshot; electrical evidence and phase limits
+    // are documented separately in internals/timing.md.
+    golden_a500_cia_request => probe_ecs("a500-cia-request", "a500-cia-request.bin", 16.0);
     // AUD0 interrupt cadence strip across a scripted AUDxEN
     // enable/punch/disable/restart sequence (the issue #74 deferred
     // AUDxEN-disable regression class).
