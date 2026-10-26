@@ -13,7 +13,7 @@ It boots out of the box with the bundled open-source AROS Kickstart replacement,
 
 - **Chipset and machine models**: OCS, ECS, and AGA support with profiles from the A500 through the A4000, plus CDTV and CD32.
 - **Configurable CPU and memory**: Motorola 68000 through 68060, optional FPU and MMU support, and configurable Chip, Fast, and Slow RAM.
-- **Accelerated execution**: Optional 68020+ JIT with a reproducible fixed CPU clock or a paced `fastest` mode that uses available host time while bounding chipset advancement. See [CPU configuration](docs/guide/configuration.md).
+- **Accelerated execution**: Optional 68020+ JIT, either at a fixed, reproducible clock or in a `fastest` mode that gives the CPU whatever host time the real-time chipset leaves. See [CPU configuration](docs/guide/configuration.md).
 - **Storage and media**: Floppy disk images (ADF, ADZ, DMS, IPF, SCP, and ZIP-packed ADF), physical floppy drives via Greaseweazle (FluxBridge), IDE (Gayle/A4000 and expansion boards), SCSI (A2091, A3000, A4091), virtual hard disks (`copperhf.device`), CD-ROM, and host directory mounts.
 - **Audio and video**: 4-channel Paula audio, RTG graphics cards (Picasso II/II+, Z3660), host MIDI in/out bridging, and built-in Roland MT-32 and General MIDI synthesis.
 - **Expansion and networking**: Zorro II/III autoconfig, A2065 Ethernet, host-backed bsdsocket.library, and sandboxed WebAssembly expansion plugins.

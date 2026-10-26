@@ -710,19 +710,19 @@ clock_mhz = 14.0    # optional; defaults to the model's stock speed
   does at boot); until then the chip runs scalar, as on real silicon.
 - `jit` (experimental, also `--jit`/`--no-jit`) runs the CPU through the
   m68k core's batch/trace-JIT path instead of the cycle-exact
-  per-instruction model: hot code compiles to native traces and fast-RAM
-  accesses run through direct-memory windows covering multiple fast-RAM banks
-  and read-only ROM. Chip RAM and device accesses retain bus timing. The machine
+  per-instruction model: hot code compiles to native traces, and fast RAM
+  and ROM are read and written directly, with no bus cost. The machine
   behaves like an ideal accelerator running at `clock_mhz`: one
   instruction per CPU clock with zero-wait fast RAM and ROM, so a 50 MHz
   68040 delivers on the order of 50 MIPS (raise `clock_mhz` for more).
-  Native bursts stop at hardware deadlines and synchronize before device
-  accesses. Interrupts are recognized at those boundaries, so chip-level races and
-  cycle-counted effects no longer line up; leave it off for anything
-  timing-sensitive (games, demos). Chip and slow RAM still arbitrate onto
-  the shared chip bus in order, and the on-chip cache models stay active
-  (as on a real accelerator, they are what lets chip-RAM-resident code
-  run at CPU speed), so displays, blits, and device I/O work normally.
+  The CPU runs ahead of the chipset in batches that end at the next
+  hardware event or chip-bus access, and interrupts are recognized only
+  there, so chip-level races and cycle-counted effects no longer line up;
+  leave it off for anything timing-sensitive (games, demos). Chip and
+  slow RAM still arbitrate onto the shared chip bus in order, and the
+  on-chip cache models stay active (as on a real accelerator, they are
+  what lets chip-RAM-resident code run at CPU speed), so displays, blits,
+  and device I/O work normally.
   Requires a 68020 or later: the 68000/68010 share one bus with the chipset
   and their floating-bus and prefetch semantics need the precise core, so
   `jit = true` on those models logs a note and stays precise (the
@@ -731,22 +731,26 @@ clock_mhz = 14.0    # optional; defaults to the model's stock speed
   still runs; Kickstart ROMs are unaffected).
 - `speed` (also `--cpu-speed`) picks how fast the JIT runs. `"fixed"` (the
   default) runs it at `clock_mhz`, deterministically. `"fastest"` is the
-  CPU-throughput mode: while the machine is paced to real time, Copperline
-  uses spare time before presentation for CPU bursts from local RAM/ROM.
-  The chipset stays still during CPU-only work. Bursts yield on shared-bus
-  accesses, STOP, debugger stops or the host deadline; chip and device accesses
-  retain their normal timing. After a device access, local work can resume
-  within the same deadline, with a small chipset-time budget limiting polling
-  loops. A small time reserve protects presentation.
-  The regular CPU workload starts at `clock_mhz`, rises when CPU work has
-  headroom, and backs off toward that configured minimum under load. It never
-  runs below `clock_mhz`, even if chipset work alone exceeds host capacity.
-  Spare-time CPU work has no synthetic MHz ceiling; demanding workloads can
-  still run below real time.
-  The performance overlay (`cpu N MHz`) and control status (`jit_mhz`) report
-  measured throughput as an equivalent one-instruction-per-clock rate, including
-  bursts. The launcher's CPU page has a matching **JIT speed** row,
-  greyed until the JIT is on.
+  equivalent of WinUAE's *Fastest possible* CPU setting: while the window
+  paces the machine to real time, the chipset, audio and emulated time
+  stay in real time, so the pointer and sound stay smooth, and the CPU
+  gets the host time that is left. It uses that time in two ways:
+  - The JIT's clock adapts. It starts at `clock_mhz`, which is also its
+    floor (it never runs slower), and rises while the host has headroom
+    and the CPU is actually busy; a CPU waiting in STOP, or one stalled on
+    the chip bus, keeps its clock. When the host gets loaded, for example
+    by another program, the clock backs off toward `clock_mhz` again.
+  - Before each frame is presented, the remaining host time runs extra
+    CPU-only bursts. Code working in fast RAM and ROM runs there without
+    advancing the chipset; a chip RAM or device access keeps its normal
+    timing, and a short limit stops a polling loop from running the
+    chipset through the whole interval.
+
+  A chipset-heavy configuration can still run slower than real time on a
+  slow host. The performance overlay (`cpu N MHz`) and the control
+  protocol's `status` reply (`jit_mhz`) show the measured throughput as an
+  equivalent clock, bursts included, and the launcher's CPU page has a
+  matching **JIT speed** row, greyed until the JIT is on.
 
   The mode is deliberately not reproducible: how many instructions run per
   frame depends on the host and on what else it is doing, so two runs
@@ -761,21 +765,21 @@ clock_mhz = 14.0    # optional; defaults to the model's stock speed
     for a faster fixed CPU there. (`COPPERLINE_HEADLESS_PACED=1` paces such
     a run like the window, and the clock then adapts as it would there; see
     [Headless operation](headless.md).)
-  - Warp Speed uses the last measured throughput as a fixed CPU rate,
-    at least the configured clock;
-    spare-time bursts and baseline adaptation resume when warp ends.
+  - Warp Speed runs the CPU at the last measured throughput as a fixed
+    clock (never below `clock_mhz`); adaptation and the bursts resume when
+    warp ends.
   - Netplay refuses it, and run-ahead stays inactive under it: both depend
     on re-running or comparing frames that must come out identical.
   - Save states do not store the adapted clock. A session whose clock has
     not adapted yet (any unpaced run) takes the loaded state's CPU clock
-    exactly, as `speed = "fixed"` does; one that has adapted keeps its baseline
-    within the governor's bounds and restarts throughput measurement. A resumed
+    exactly, as `speed = "fixed"` does; one that has adapted keeps the
+    clock it reached (never below the state's `clock_mhz`). A resumed
     windowed run is not byte-identical to the original.
   - `--record-input`/`--script` replays, `--expect-screenshot` comparisons
     and reverse debugging are exact only in unpaced runs, where the clock is
     fixed.
   - Any debugger hook that forces the precise core (breakpoints, traces,
-    `COPPERLINE_DBG_*`) suspends adaptation and spare-time bursts, just as it
+    `COPPERLINE_DBG_*`) suspends adaptation and the bursts, just as it
     suspends the JIT.
 
 ## `[memory]`

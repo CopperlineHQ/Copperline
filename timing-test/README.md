@@ -818,18 +818,18 @@ On a mismatch, CI uploads the actual renders and diff masks
 
 ### JIT hardware-access boundary probe
 
-`jit-bus-boundary.asm` runs a fixed 25 MHz 68040 JIT with 8 MB fast RAM.
-It copies its loop into fast RAM and brackets COLOR00 writes with native
-register loops. The repeated green markers expose stale chipset time at the
-write boundary. `golden_jit_bus_boundary` covers the render; CPU unit tests
-compare timer IRQs and MMIO observations against one-instruction scheduling.
-This accelerator timing model has no matching vAmiga reference. Assemble with
+`jit-bus-boundary.asm` runs on a fixed 25 MHz 68040 JIT with 8 MB fast RAM.
+It copies its loop into fast RAM and brackets COLOR00 writes with
+register-only delay loops that compile to native traces. If the chipset
+has not caught up with the CPU's elapsed time when a write lands, the green
+markers move or collapse. `golden_jit_bus_boundary` covers the render, and
+CPU unit tests compare timer interrupts and MMIO reads against
+one-instruction scheduling. vAmiga has no matching accelerator timing
+model, so it is not a reference for this probe. Assemble with
 `vasmm68k_mot -Fbin -m68020 -o timing-test/jit-bus-boundary.bin
 timing-test/jit-bus-boundary.asm`.
 
-The JIT bus-boundary reference includes ROM direct-memory coverage. Excluding
-ROM from the CPU cache changes the bootstrap's clock phase; the beam-polled
-markers may start a few pixels differently than the former RAM-only window.
-Native-prefix/device ordering is also checked against single-instruction
-scheduling in the CPU tests. Inactive chipset span batching must leave this
-reference byte-identical.
+The render also depends on the JIT's memory mapping: ROM runs through a
+direct region and is kept out of the cache models, which places the
+bootstrap's markers a few pixels differently than caching ROM would.
+Batching idle chipset spans must leave the render byte-identical.

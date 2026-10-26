@@ -1085,39 +1085,77 @@ fix) resolved that blanking regression.
 (jit-fastest-pacing)=
 ### Fastest-possible JIT speed
 
-`[cpu] speed = "fastest"` changes guest throughput according to available host
-time. After its regular quantum, `step_real_until` spends spare time before
-the presentation target on bounded CPU-only bursts. It reserves 10% of the
-quantum (200 microseconds to 2 milliseconds) for presentation and scheduling.
-Each burst yields on shared-bus progress so interrupt recognition runs before
-local work resumes. The whole phase stops on STOP, debugger stops, slice
-preemption or a cumulative 256 colour clocks of chipset progress, allowing
-only the final bus instruction to overshoot that budget. The target is fixed
-before the burst phase, so bus progress cannot extend it.
-Precise stepping, reverse debugging and run-ahead never enter this phase.
+`[cpu] speed = "fastest"` (JIT only) is the one setting where pacing does
+change emulated behaviour, and it is opt-in and documented as not
+reproducible. WinUAE's *Fastest possible* keeps the chipset in real time
+and gives the CPU whatever host time each frame leaves; Copperline does
+the same with an adaptive JIT clock and spare-time CPU bursts
+([](#jit-fastest-speed)). Each paced quantum first advances the machine
+at the current clock. `step_real_until` then fixes a deadline 10% of the
+quantum (between 200 microseconds and 2 milliseconds) before the
+presentation target and runs bursts until then, so bus progress during
+the bursts cannot extend it. Precise stepping, reverse debugging and
+run-ahead never enter the burst phase.
 
-The baseline governor (`src/emulator/fastest.rs`) samples regular emulation
-cost plus frontend work, excluding burst work, pacing sleep and explicitly
-reported presentation waits. Every 0.1 seconds of host or guest time it aims
-for 85% regular load: it lowers above 93%, rises below 80%, and holds in
-between. Raising also requires regular instruction throughput of at least 25%
-of the billed clock, excluding spare instructions, so STOP and shared-bus
-waits do not cause a clock increase. Corrections use the square root of
-target/load, capped at a 4x cut or 1.25x rise. The baseline ranges from the
-configured clock to a 2 GHz sanity bound (or the configured clock if higher).
-The configured minimum also applies after state loads and while in warp;
-chipset overload must not ratchet idle or bus-bound guests below it. Spare-time work has no synthetic
-MHz ceiling. Keeping regular load near the established governor target avoids
-forcing application loops into small, inefficient batches on slower hosts. Host stalls over 100 ms,
-precise stepping and pacing re-anchors discard the sample window.
+`SpeedGovernor` in `src/emulator/fastest.rs` chooses the regular clock:
 
-The displayed equivalent MHz is measured retired instructions per emulated
-second, including bursts. Save states omit host adaptation; loads rebase the
-baseline and clear measured throughput. Warp uses the last measured rate as
-a fixed clock, at least the configured rate. Fresh unpaced runs stay at the configured clock and match
-`speed = "fixed"`; `COPPERLINE_HEADLESS_PACED=1` explicitly enables the paced
-policy for headless measurements. The `jit_throughput` example's `paced` mode
-prints both host and guest elapsed time so slowdown cannot inflate scores.
+- After every real-time quantum `step_real_until` reports the host time it
+  spent on regular emulation (bursts and pacing sleep excluded), the host
+  time since the previous quantum ended (the frontend's share of the main
+  thread), the emulated time advanced, the instructions retired, and
+  whether the JIT batch path ran. Time the window spends presenting a frame
+  on the main thread (the RTG, inspector and screenshot paths, which can
+  block on vsync) is reported through `Emulator::note_frontend_wait` and
+  left out of the frontend share: it is a wait, not work, and frames the
+  present worker takes never touch the main thread at all.
+- Every 0.1 s of emulated *or* host time, whichever comes first, the
+  governor computes the load: host time over emulated time, 1.0 when the
+  host only just keeps up. Closing on host time as well bounds how long an
+  overloaded clock survives in wall time.
+- Above 0.93 it lowers the clock and below 0.80 it raises it, each time by
+  the square root of `0.85 / load`: at most a 4x cut or a 1.25x rise per
+  window. A full proportional step overshoots near saturation, where frame
+  cost climbs faster than the clock, and made the clock hunt between two
+  values in measurements; half the log-gain settles. Between the two
+  thresholds it holds, so measurement noise does not make it hunt. Host
+  cost grows less than in proportion to the clock (the chipset's work per
+  emulated second is fixed), so the steps approach the band from below.
+- It only raises the clock when the CPU is clock-bound: the regular
+  quantum retired at least a quarter of an instruction per billed clock.
+  A CPU idling in STOP or starved by chip-bus waits gains nothing from a
+  faster clock, and ramping it would only cause a hiccup when the workload
+  changes. Burst instructions are left out of this test, so a CPU that is
+  busy only in its bursts does not raise the regular clock.
+- The clock stays between `clock_mhz` and 2000 MHz. The floor matters when
+  chipset or frontend work alone overloads the host: lowering the CPU
+  cannot cure that, and would leave an idle or bus-bound guest at a clock
+  it never qualifies to raise again.
+- A gap of more than 100 ms between quanta (a paused machine, a modal
+  dialog, a debugger break) discards the window, as does any quantum
+  stepped on the precise core (debug hooks armed, a run-to-PC request).
+  `reanchor_realtime_clock` discards it too.
+- A save-state load rebases the floor to the state's clock. A governor
+  that has never moved the clock follows the new floor exactly, so an
+  unpaced run that loads a state still matches `speed = "fixed"`; one
+  that has adapted keeps its clock within the new bounds.
+- Warp runs unpaced at the last measured throughput (bursts included) as
+  a fixed clock, never below `clock_mhz`. Other unpaced quanta (run-ahead
+  bursts, headless runs) discard the window and leave the clock where it
+  is. A headless run therefore never leaves `clock_mhz` and is
+  byte-identical to `speed = "fixed"`, unless `COPPERLINE_HEADLESS_PACED=1`
+  paces it like the window to measure exactly this.
+
+Measuring wall time rather than CPU time makes the controller back off
+when other processes compete for the core. It also copes with hosts whose
+scheduler parks a lightly loaded thread on efficiency cores at a low clock
+(macOS does): the paced thread looks expensive at first, moves to a
+performance core as the load rises, its cost per instruction falls, and
+the governor raises the clock further.
+
+The performance overlay's `cpu N MHz` and the control protocol's `jit_mhz`
+report measured throughput rather than the regular clock: retired
+instructions per emulated second, bursts included, expressed as an
+equivalent one-instruction-per-clock rate.
 
 ### Thread scheduling priority
 
