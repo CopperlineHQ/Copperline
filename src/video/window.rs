@@ -1252,6 +1252,10 @@ pub struct App {
     /// `--exit-on-return`: the `--run` completion marker to poll for the
     /// guest program's return code, which ends the run.
     run_return_marker: Option<PathBuf>,
+    /// The filesys write generation the marker was last read at. The guest
+    /// writes the marker through a filesys unit, so it cannot change until
+    /// that generation does.
+    run_return_checked: Option<u64>,
     /// The guest stopped the emulator through uaelib `ExitEmu`; the event
     /// loop exits on its next pass.
     guest_exit_requested: bool,
@@ -2931,6 +2935,7 @@ impl App {
             pending_auto_expect: Vec::new(),
             verdict: crate::verdict::RunVerdict::default(),
             run_return_marker: None,
+            run_return_checked: None,
             guest_exit_requested: false,
             auto_save_state: Vec::new(),
             pending_auto_save_state: save_state_after,
@@ -4072,12 +4077,19 @@ impl App {
     }
 
     /// Poll the `--run` completion marker for the guest's return code.
-    /// Returns true once it is recorded: the run is over. One host `stat`
-    /// per frame, like the warp-launch gate's own marker probe.
+    /// Returns true once it is recorded: the run is over. The marker is only
+    /// re-read after a filesys unit completed a write or close, since paced
+    /// runs step many short frames and a host file read per frame showed up
+    /// in profiles.
     fn poll_run_return(&mut self) -> bool {
         let Some(marker) = self.run_return_marker.as_deref() else {
             return false;
         };
+        let generation = crate::filesys::host_write_generation();
+        if self.run_return_checked == Some(generation) {
+            return false;
+        }
+        self.run_return_checked = Some(generation);
         let Some(code) = crate::runprog::read_return_code(marker) else {
             return false;
         };

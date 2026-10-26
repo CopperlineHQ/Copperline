@@ -30,6 +30,23 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Writes and closes the filesys units have completed, process-wide and never
+/// reset (save-state loads included). Host code waiting for a file the guest
+/// writes, such as the `--run` completion marker, re-reads it only after this
+/// changes: a stale count can cost an extra read but never miss a write.
+static HOST_WRITE_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// The current [`HOST_WRITE_GENERATION`].
+pub fn host_write_generation() -> u64 {
+    HOST_WRITE_GENERATION.load(Ordering::Relaxed)
+}
+
+/// Record a completed write or close (see [`HOST_WRITE_GENERATION`]).
+pub(crate) fn note_host_write() {
+    HOST_WRITE_GENERATION.fetch_add(1, Ordering::Relaxed);
+}
 
 use m68k::AddressBus;
 
@@ -1414,6 +1431,7 @@ impl FilesysUnit {
                 }
             }
             ACTION_END => {
+                note_host_write();
                 self.files.remove(&arg(bus, 1));
                 (DOSTRUE, 0)
             }
@@ -1482,6 +1500,7 @@ impl FilesysUnit {
                 // Arg1 = fh_Arg1 cookie, Arg2 = buffer APTR, Arg3 = length.
                 // Res1 = bytes written, or -1 with Res2 = error.
                 use std::io::Write;
+                note_host_write();
                 let key = arg(bus, 1);
                 let buf = arg(bus, 2);
                 let len = arg(bus, 3) as usize;
