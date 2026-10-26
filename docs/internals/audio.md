@@ -51,6 +51,20 @@ Four satisfies both, and puts the worst surviving image about 47 dB under
 the tone. Raising the oversample rate or lengthening the kernel does not
 measurably improve on it.
 
+Silence is the common case, and the pipeline above would still integrate
+176,400 oversample steps and evaluate four 64-tap kernels 44,100 times a
+second. While every channel is idle, each one holds a constant level, and
+once a decimator's whole history equals that level, pushing it again only
+moves the write position and its output no longer changes. `advance_audio`
+detects that state (`held_audio_output`) and then advances the grid
+positions and re-emits the settled outputs instead
+(`advance_held_audio`). Every mixer frame still runs the rest of the mix,
+so drive sounds, CD audio, synths, scopes and stems are unaffected, and the
+state it leaves is bit-identical to the stepped path's
+(`held_audio_matches_stepped_advance_bit_for_bit`). Any channel that starts
+outputting, or a level change, returns to the stepped path until the
+history has settled again.
+
 The genuine zero-order-hold images of Paula's own sample rate are *not*
 filtered out, because they are real output: the 500 Hz sine test at
 `AUDxPER` 177 keeps its images at 19.5 and 20.5 kHz, exactly as the

@@ -217,6 +217,20 @@ impl Decimator {
         window.iter().zip(&self.taps).map(|(&s, &t)| s * t).sum()
     }
 
+    /// Whether every history entry is exactly `sample`. Pushing that sample
+    /// again then changes nothing but the write position, and `output` stays
+    /// the same wherever that position is.
+    pub fn holds(&self, sample: f32) -> bool {
+        let bits = sample.to_bits();
+        self.history.iter().all(|h| h.to_bits() == bits)
+    }
+
+    /// Push `count` copies of a sample the history already [`holds`](Self::holds):
+    /// only the write position moves.
+    pub fn advance_held(&mut self, count: u64) {
+        self.head = ((self.head as u64 + count) % TAPS as u64) as usize;
+    }
+
     /// The largest output magnitude the kernel can produce from input
     /// bounded by 1.0, the sum of the absolute taps. Unlike any bound
     /// argued from how fast the source can change, this holds for every

@@ -551,6 +551,12 @@ pub struct Paula {
     /// with the mix they add up to.
     #[serde(default = "channel_decimators")]
     channel_decimator: [Decimator; 4],
+    /// While every channel is idle, the level each one holds and the
+    /// band-limited output its decimator settled on, once verified that the
+    /// histories are full of those levels (`held_audio`). Derived, not
+    /// emulated state: a restored Paula verifies it again.
+    #[serde(skip)]
+    held_audio: Option<([i32; 4], [f32; 4])>,
 
     /// Effective filter state (what the mix actually applies), resolved from
     /// the mode and the guest's /LED line.
@@ -711,6 +717,7 @@ impl Paula {
             channel_area: [0; 4],
             area_cck: 0,
             channel_decimator: channel_decimators(),
+            held_audio: None,
             led_filter_enabled: true,
             led_filter_mode: crate::config::AudioFilterMode::Auto,
             led_filter_guest_on: true,
@@ -963,6 +970,7 @@ impl Paula {
         self.channel_area = [0; 4];
         self.area_cck = 0;
         self.channel_decimator = channel_decimators();
+        self.held_audio = None;
         // A reset releases the guest's /LED line; the filter override is a host
         // preference and stays put.
         self.led_filter_guest_on = true;
@@ -1727,6 +1735,17 @@ impl Paula {
     /// words are supplied separately through `grant_audio_dma`, which
     /// lets Agnus own the documented channel slots.
     pub fn advance_audio(&mut self, cck: u32, dmacon: u16) -> u16 {
+        if let Some(mixed) = self.held_audio_output() {
+            self.advance_held_audio(cck, mixed);
+            return 0;
+        }
+        self.held_audio = None;
+        self.advance_audio_stepped(cck, dmacon)
+    }
+
+    /// The general `advance_audio`: integrate each channel's staircase and
+    /// run its period counter, step by step between output changes.
+    fn advance_audio_stepped(&mut self, cck: u32, dmacon: u16) -> u16 {
         let mut irq_bits = 0;
         let mut remaining = cck;
         while remaining > 0 {
@@ -1762,6 +1781,66 @@ impl Paula {
         }
 
         irq_bits
+    }
+
+    /// The band-limited channel levels, when every channel is idle and each
+    /// decimator has settled on the level its channel holds. No period
+    /// counter runs then, so each oversample frame averages that same level:
+    /// the box average `level * width / width` is exact in f32 (|level *
+    /// width| stays far below 2^24), so pushing it would leave every history
+    /// unchanged. Verified once per held level, then reused until something
+    /// else drives the channels (`advance_audio` clears it on that path).
+    fn held_audio_output(&mut self) -> Option<[f32; 4]> {
+        if self.chans.iter().any(AudChannel::outputting) {
+            return None;
+        }
+        let inputs: [i32; 4] = std::array::from_fn(|i| self.channel_mixed_sample(i));
+        if let Some((held, mixed)) = self.held_audio {
+            if held == inputs {
+                return Some(mixed);
+            }
+        }
+        let settled = (0..4).all(|i| {
+            self.channel_area[i] == i64::from(inputs[i]) * i64::from(self.area_cck)
+                && self.channel_decimator[i].holds(inputs[i] as f32)
+        });
+        if !settled {
+            return None;
+        }
+        let mixed = std::array::from_fn(|i| self.channel_decimator[i].output());
+        self.held_audio = Some((inputs, mixed));
+        Some(mixed)
+    }
+
+    /// `advance_audio` for held channels: the same mixer and oversample grid,
+    /// with each decimator's write position advanced instead of rewritten
+    /// with the level it already holds, and the settled output re-emitted.
+    /// Every mixer frame still runs the rest of the mix (LED filter, drive
+    /// sounds, CD audio, synths, scopes and stems).
+    fn advance_held_audio(&mut self, cck: u32, mixed: [f32; 4]) {
+        let mut remaining = cck;
+        while remaining > 0 {
+            let step = remaining.min(self.cck_until_next_oversample_frame());
+            self.area_cck += step;
+            let before = self.oversample_index();
+            self.host_sample_acc += step as u64 * MIX_SAMPLE_RATE as u64;
+            remaining -= step;
+            let pushed = self.oversample_index() - before;
+            if pushed != 0 {
+                for decimator in &mut self.channel_decimator {
+                    decimator.advance_held(pushed);
+                }
+                self.area_cck = 0;
+            }
+            if self.host_sample_acc >= PAULA_CLOCK_HZ as u64 {
+                self.host_sample_acc -= PAULA_CLOCK_HZ as u64;
+                self.push_mixed_frame(mixed);
+            }
+        }
+        let levels: [i32; 4] = std::array::from_fn(|i| self.channel_mixed_sample(i));
+        for (area, level) in self.channel_area.iter_mut().zip(levels) {
+            *area = i64::from(level) * i64::from(self.area_cck);
+        }
     }
 
     /// Which of the [`PAULA_OVERSAMPLE`] slices of the current mixer frame
@@ -2648,6 +2727,50 @@ mod tests {
         }
         let cck = (f64::from(PAULA_CLOCK_HZ) * seconds) as u32;
         paula.tick_audio(cck, dmacon, pattern);
+    }
+
+    /// Idle channels holding a level take the held path once their
+    /// decimators have settled on it. That path must leave exactly the state
+    /// and emit exactly the frames the stepped path would, across uneven
+    /// spans, a volume change while idle, and the re-settling after it.
+    #[test]
+    fn held_audio_matches_stepped_advance_bit_for_bit() {
+        let make = || {
+            let (mut paula, frames) = paula_with_collect_sink();
+            let pattern: Vec<u8> = (0..64u8).map(|i| i.wrapping_mul(37) ^ 0x5a).collect();
+            play_all_channels(&mut paula, &pattern, 200, 0.01);
+            (paula, frames)
+        };
+        let (mut held, held_frames) = make();
+        let (mut stepped, stepped_frames) = make();
+        let idle_dmacon = DMACON_DMAEN;
+        let mut random = 0x2468_ace1u32;
+        for round in 0..400 {
+            random = random.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let span = 1 + random % 1500;
+            if round == 200 {
+                held.write_audio_reg(0x08, 23, 0);
+                stepped.write_audio_reg(0x08, 23, 0);
+            }
+            held.advance_audio(span, idle_dmacon);
+            stepped.advance_audio_stepped(span, idle_dmacon);
+            assert_eq!(
+                bincode::serialize(&held).unwrap(),
+                bincode::serialize(&stepped).unwrap(),
+                "state after round {round}"
+            );
+        }
+        assert!(held.held_audio.is_some(), "the held path was taken");
+        assert!(!held_frames.borrow().is_empty());
+        let (held_frames, stepped_frames) = (held_frames.borrow(), stepped_frames.borrow());
+        assert_eq!(held_frames.len(), stepped_frames.len());
+        for (i, (a, b)) in held_frames.iter().zip(stepped_frames.iter()).enumerate() {
+            assert_eq!(
+                (a.0.to_bits(), a.1.to_bits()),
+                (b.0.to_bits(), b.1.to_bits()),
+                "frame {i}"
+            );
+        }
     }
 
     fn paula_with_collect_sink() -> (Paula, SharedFrames) {
