@@ -140,7 +140,11 @@ The timing contract is deliberately approximate
   instruction;
 - inside a batch the core reports each completed instruction through
   `AddressBus::batch_boundary`, which only records the count: no device
-  advances while the batch runs from local memory. `CpuBus` bills the
+  advances while the batch runs from local memory. Because it runs before
+  every decoded instruction, the hook compares a cached interrupt level and
+  stop condition against the SR mask; only a shared-bus access or a prefix
+  flush, the sole ways the interrupt state can change mid-batch, makes it
+  read the chipset again. `CpuBus` bills the
   completed prefix when something could observe it -- before a chip-bus or
   device access, a cache-control operation or RESET -- and the host bills
   the rest when the batch returns. A chip-bus or device access ends the

@@ -30,6 +30,26 @@ pub(super) struct JitTiming {
     /// words from the shared bus. That instruction finishes in this batch;
     /// the next boundary returns to the host.
     fetch_retired: Option<u32>,
+    /// Interrupt level the CPU would see, and whether an NMI, a slice
+    /// preemption or the hardware deadline ends the batch. Local instructions
+    /// cannot change any of them, so the boundary hook compares these instead
+    /// of re-reading the chipset; a shared-bus access or prefix flush marks
+    /// them stale.
+    irq_level: u8,
+    host_stop: bool,
+    stop_state_stale: bool,
+}
+
+/// The pending interrupt level and host stop condition for a batch boundary.
+fn jit_stop_state(bus: &Bus, deadline: u64) -> (u8, bool) {
+    let irq_level = if bus.paula.intena & INT_MASTER != 0 {
+        pending_ipl(bus.paula.intena & bus.cpu_visible_intreq())
+    } else {
+        0
+    };
+    let host_stop =
+        bus.cartridge_nmi_pending() || bus.slice_preempted || bus.emulated_cck() >= deadline;
+    (irq_level, host_stop)
 }
 
 impl CpuBus {
@@ -63,12 +83,15 @@ impl CpuBus {
             && !self.jit_plain_access(address, size)
         {
             self.flush_jit_batch_prefix();
-            match self.jit_batch.as_mut() {
-                Some(JitBatchTiming::Multiple(timing)) if fetch => {
+            if let Some(JitBatchTiming::Multiple(timing)) = self.jit_batch.as_mut() {
+                // The access itself can raise interrupts or move the beam.
+                timing.stop_state_stale = true;
+                if fetch {
                     timing.fetch_retired.get_or_insert(timing.observed_retired);
+                    return;
                 }
-                _ => self.jit_bus_boundary = true,
             }
+            self.jit_bus_boundary = true;
         }
     }
 
@@ -76,17 +99,31 @@ impl CpuBus {
     /// budget already stops at the next hardware deadline; local memory cannot
     /// observe device time before then. Shared-bus accesses flush this prefix
     /// before touching hardware, and the host flushes the final batch count.
+    /// This runs before every decoded instruction, so it compares cached state
+    /// and touches the chipset only after something marked that state stale.
     pub(super) fn note_jit_batch_boundary(&mut self, retired: u32, pc: u32, sr: u16) -> bool {
-        let Some(timing) = self.jit_batch.as_mut() else {
+        let Some(batch) = self.jit_batch.as_mut() else {
             return false;
         };
         self.diag_current_pc = pc;
         self.bus.cpu_pc = pc;
-        let JitBatchTiming::Multiple(timing) = timing else {
+        let JitBatchTiming::Multiple(timing) = batch else {
             return false;
         };
         timing.observed_retired = retired;
-        self.jit_batch_should_stop(retired, sr)
+        // Always allow progress on entry, including a bring-up interrupt whose
+        // vector has not been installed yet. The host applies that guard.
+        if retired == 0 {
+            return false;
+        }
+        if self.jit_bus_boundary || timing.fetch_retired.is_some_and(|at| retired > at) {
+            return true;
+        }
+        if timing.stop_state_stale {
+            (timing.irq_level, timing.host_stop) = jit_stop_state(&self.bus, timing.deadline);
+            timing.stop_state_stale = false;
+        }
+        timing.host_stop || timing.irq_level > ((sr >> 8) & 7) as u8
     }
 
     pub(super) fn flush_jit_batch_prefix(&mut self) {
@@ -95,29 +132,6 @@ impl CpuBus {
                 self.sync_jit_batch(timing.observed_retired, self.diag_current_pc);
             }
         }
-    }
-
-    fn jit_batch_should_stop(&self, retired: u32, sr: u16) -> bool {
-        let Some(JitBatchTiming::Multiple(timing)) = self.jit_batch.as_ref() else {
-            return false;
-        };
-        // Always allow progress on entry, including a bring-up interrupt whose
-        // vector has not been installed yet. The host applies that guard.
-        if retired == 0 {
-            return false;
-        }
-        let irq = if self.bus.paula.intena & INT_MASTER != 0 {
-            pending_ipl(self.bus.paula.intena & self.bus.cpu_visible_intreq())
-                > ((sr >> 8) & 7) as u8
-        } else {
-            false
-        };
-        self.jit_bus_boundary
-            || timing.fetch_retired.is_some_and(|at| retired > at)
-            || irq
-            || self.bus.cartridge_nmi_pending()
-            || self.bus.slice_preempted
-            || self.bus.emulated_cck() >= timing.deadline
     }
 
     pub(super) fn sync_jit_batch(&mut self, retired: u32, pc: u32) {
@@ -147,10 +161,36 @@ impl CpuBus {
             timing.bus_checkpoint = self.bus.slice_bus_advanced_cck();
             timing.retired = retired;
             self.flush_timed_devices_dcache_coherent();
+            timing.stop_state_stale = true;
         }
         self.diag_current_pc = pc;
         self.bus.cpu_pc = pc;
         self.jit_batch = Some(JitBatchTiming::Multiple(timing));
+    }
+}
+
+#[cfg(test)]
+impl CpuBus {
+    /// Open a multi-instruction batch with no deadline, for hook tests.
+    pub(super) fn begin_test_jit_batch(&mut self) {
+        self.jit_bus_boundary = false;
+        self.jit_batch = Some(JitBatchTiming::Multiple(JitTiming {
+            retired: 0,
+            observed_retired: 0,
+            clocks: 0,
+            cck: 0,
+            clocks_per_cck: 7,
+            clock_carry: 0,
+            divisor_q16: JIT_CLOCK_DIVISOR_UNITY,
+            carry_q16: 0,
+            bus_checkpoint: self.bus.slice_bus_advanced_cck(),
+            deadline: u64::MAX,
+            sync: false,
+            fetch_retired: None,
+            irq_level: 0,
+            host_stop: false,
+            stop_state_stale: true,
+        }));
     }
 }
 
@@ -273,6 +313,9 @@ impl M68kMachine {
                     deadline: self.bus.bus.emulated_cck() + u64::from(horizon),
                     sync: self.sync_cck_on,
                     fetch_retired: None,
+                    irq_level: 0,
+                    host_stop: false,
+                    stop_state_stale: true,
                 })
             });
             let cpu_was_stopped = self.cpu.is_stopped();

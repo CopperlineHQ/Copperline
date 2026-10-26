@@ -8857,6 +8857,54 @@ mod tests {
         Ok(())
     }
 
+    /// The boundary hook runs before every decoded instruction and compares
+    /// a cached interrupt level. Local instructions cannot change it; a
+    /// prefix flush (which ticks devices) or a shared-bus access must refresh
+    /// it before the next comparison.
+    #[test]
+    fn jit_boundary_hook_refreshes_interrupt_state_after_flushes_and_bus_access() -> Result<()> {
+        use crate::chipset::paula::INT_SOFT;
+        let mut machine =
+            machine_with_program_model(FAST_RAM_BASE as u32 + 0x100, &[0x4e71], CpuModel::M68040)?;
+        let bus = &mut machine.bus;
+        bus.bus.irq_latency_setting = 0;
+        bus.bus.paula.intena = INT_MASTER | INT_SOFT;
+        let pc = FAST_RAM_BASE as u32 + 0x100;
+
+        bus.begin_test_jit_batch();
+        assert!(!bus.note_jit_batch_boundary(1, pc, 0x2000));
+        bus.bus.paula.intreq = INT_SOFT;
+        assert!(
+            !bus.note_jit_batch_boundary(2, pc, 0x2000),
+            "cached: a local instruction cannot raise INTREQ"
+        );
+        bus.flush_jit_batch_prefix();
+        assert!(
+            bus.note_jit_batch_boundary(2, pc, 0x2000),
+            "a flush refreshes it"
+        );
+        assert!(
+            !bus.note_jit_batch_boundary(2, pc, 0x2700),
+            "SR masks it per call"
+        );
+
+        bus.bus.paula.intreq = 0;
+        bus.begin_test_jit_batch();
+        assert!(!bus.note_jit_batch_boundary(1, pc, 0x2000));
+        bus.flush_jit_batch_prefix();
+        assert!(!bus.note_jit_batch_boundary(1, pc, 0x2000));
+        bus.bus.paula.intreq = INT_SOFT;
+        // An opcode fetched from chip RAM with no new prefix to bill: only the
+        // access itself can mark the cached state stale.
+        bus.note_jit_bus_access(0x0000_0100, 2, true);
+        assert!(
+            bus.note_jit_batch_boundary(1, pc, 0x2000),
+            "a shared-bus access refreshes it"
+        );
+        bus.jit_batch = None;
+        Ok(())
+    }
+
     /// A native batch that branches into shared-bus RAM finishes the first
     /// instruction fetched there before returning to the host. Yielding
     /// between that fetch and its dispatch would make the core fetch the
