@@ -41,8 +41,9 @@
 //
 // Kickstart 1.3 (V34) is supported: both entry points probe the library
 // versions at runtime and fall back from the V36+ calls (AddBootNode,
-// AddDosEntry/RemDosEntry/LockDosList) to their 1.3-era equivalents. On
-// V34 a non-boot mount (bootpri -128) uses AddDosNode; a bootable mount
+// AddDosEntry/RemDosEntry/LockDosList) to their 1.3-era equivalents. A
+// non-boot mount (bootpri -128) is added without its ConfigDev (V36+
+// AddBootNode with NULL, V34 AddDosNode); on V34 a bootable mount
 // hand-builds the BootNode that V36's AddBootNode would have built and
 // Enqueue()s it on eb_MountList with ln_Name pointing at the ConfigDev --
 // the linkage V34 AddDosNode cannot make (it takes no ConfigDev), and the
@@ -685,7 +686,13 @@ static void mount_boards(UBYTE *board, struct Library *_expbase,
         struct DosEnvec *env = BADDR(fssm->fssm_Environ);
         BYTE pri = (BYTE)env->de_BootPri;
         if (_expbase->lib_Version >= 36) {
-            AddBootNode(pri, ADNF_STARTPROC, dn, cd);
+            // The ConfigDev is what makes the node an autoboot candidate,
+            // not the priority: Kickstart 3.x strap and its Early Startup
+            // menu offer any node carrying one, -128 included, and with no
+            // other bootable device strap boots it. "Pass a NULL ConfigDev
+            // pointer to create a non-bootable node" (expansion.doc/
+            // AddBootNode), as guest/copperhf/mounter.c does.
+            AddBootNode(pri, ADNF_STARTPROC, dn, pri == -128 ? NULL : cd);
         } else if (pri == -128) {
             // AddBootNode is V36+. V34's AddDosNode (V33+) queues the
             // node on eb_MountList too, so V34 dos.library mounts it at
