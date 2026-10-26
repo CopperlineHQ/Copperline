@@ -603,7 +603,7 @@ checksum = "7277c9742229dc25243236d578b6471a798c554512c6f6a04365ec2e87c2a3bb"
 [[package]]
 name = "m68k"
 version = "0.14.7"
-source = "git+https://github.com/CopperlineHQ/m68k-rs?rev=f50b139a344039c74f964d5ffe9958c83419189d#f50b139a344039c74f964d5ffe9958c83419189d"
+source = "git+https://github.com/CopperlineHQ/m68k-rs?rev=05d74ca562eca8ca842a1f9fd9db5bd2a3ac5877#05d74ca562eca8ca842a1f9fd9db5bd2a3ac5877"
 dependencies = [
  "serde",
 ]

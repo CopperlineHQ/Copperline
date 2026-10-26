@@ -16,7 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Match the emulator dependency; CI checks all CPU consumer lockfiles.
-m68k = { git = "https://github.com/CopperlineHQ/m68k-rs", rev = "f50b139a344039c74f964d5ffe9958c83419189d" }
+m68k = { git = "https://github.com/CopperlineHQ/m68k-rs", rev = "05d74ca562eca8ca842a1f9fd9db5bd2a3ac5877" }
 
 [build-dependencies]
 cc = "1"
