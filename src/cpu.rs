@@ -4085,7 +4085,7 @@ impl CpuBus {
     }
 
     fn read_sized_unobserved(&mut self, address: u32, size: usize, kind: CpuBusAccessKind) -> u32 {
-        self.note_jit_bus_access(address, size);
+        self.note_jit_bus_access(address, size, kind == CpuBusAccessKind::Fetch);
         let addr = self.mask(address);
         if kind == CpuBusAccessKind::Read {
             self.bus
@@ -4560,7 +4560,7 @@ impl CpuBus {
     }
 
     fn write_sized(&mut self, address: u32, size: usize, value: u32) {
-        self.note_jit_bus_access(address, size);
+        self.note_jit_bus_access(address, size, false);
         self.write_sized_unobserved(address, size, value);
         // MMIO watches see the write once it has landed, stamped like a
         // read: at the end of the access, when the device has it.
@@ -4996,10 +4996,15 @@ impl CpuBus {
         };
     }
 
-    /// Primary local-RAM window, chosen by PC, then the previous bank, then
-    /// size. Additional RAM and read-only ROM are captured alongside it.
-    /// Keep this choice in save states: machines with more regions than the
-    /// table holds still depend on it for cache and bus timing.
+    /// Primary local-RAM window: the bank the batch starts executing in,
+    /// else the bank covered last (a call into ROM or a chip-RAM interrupt
+    /// handler keeps its caller's bank, stack and data), else the largest.
+    /// The guest decides where code and data live -- Kickstart sizes its own
+    /// local bank ahead of any Zorro board -- so a fixed choice can cover
+    /// RAM nothing uses. Additional RAM and read-only ROM are captured
+    /// alongside it (`jit_extra_regions`). Keep this choice in save states:
+    /// machines with more banks than the region table holds still depend on
+    /// it for cache allocation and bus timing.
     fn jit_fast_mem(&mut self) -> Option<FastMem> {
         if !self.jit_windows_allowed() {
             self.jit_cache_exclusions_current = false;
@@ -8849,6 +8854,41 @@ mod tests {
         machine.bus.bus.cpu_pc = 0x0100;
         let window = machine.bus.jit_fast_mem().expect("largest bank");
         assert_eq!(window.base, 0x07E0_0000);
+        Ok(())
+    }
+
+    /// A native batch that branches into shared-bus RAM finishes the first
+    /// instruction fetched there before returning to the host. Yielding
+    /// between that fetch and its dispatch would make the core fetch the
+    /// opcode again, arbitrating a second chip-bus cycle for it. Slow RAM
+    /// sits above fast RAM, so the forward jump starts no trace recording
+    /// (whose code reads would also use the bus).
+    #[test]
+    fn jit_batch_entering_shared_ram_fetches_each_opcode_once() -> Result<()> {
+        let pc = FAST_RAM_BASE as u32 + 0x100;
+        let slow = SLOW_RAM_BASE as u32 + 0x100;
+        let mut program = vec![0x4e71; 64];
+        program.push(0x4ef9); // JMP slow
+        program.extend([(slow >> 16) as u16, slow as u16]);
+        let run = |chunk: usize| -> Result<(u32, u32, u64)> {
+            let mut machine = machine_with_program_model(pc, &program, CpuModel::M68030)?;
+            // MOVEQ #5,D0; ADDQ.L #1,D0; STOP #$2700
+            write_program(
+                &mut machine.bus.bus,
+                slow,
+                &[0x7005, 0x5280, 0x4e72, 0x2700],
+            );
+            machine.set_jit_enabled(true);
+            for _ in 0..1024 {
+                if machine.step_slice(chunk)?.stopped {
+                    return Ok((machine.d(0), machine.pc(), machine.bus().emulated_cck()));
+                }
+            }
+            panic!("program did not reach STOP");
+        };
+        let single = run(1)?;
+        assert_eq!(single.0, 6);
+        assert_eq!(run(4096)?, single);
         Ok(())
     }
 

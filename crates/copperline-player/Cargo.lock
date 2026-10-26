@@ -2005,7 +2005,7 @@ checksum = "7277c9742229dc25243236d578b6471a798c554512c6f6a04365ec2e87c2a3bb"
 [[package]]
 name = "m68k"
 version = "0.14.7"
-source = "git+https://github.com/CopperlineHQ/m68k-rs?rev=d70b438ff5d57e840267079ade1efa6c26647fc8#d70b438ff5d57e840267079ade1efa6c26647fc8"
+source = "git+https://github.com/CopperlineHQ/m68k-rs?rev=f50b139a344039c74f964d5ffe9958c83419189d#f50b139a344039c74f964d5ffe9958c83419189d"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",

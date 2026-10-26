@@ -3397,7 +3397,7 @@ dependencies = [
 [[package]]
 name = "m68k"
 version = "0.14.7"
-source = "git+https://github.com/CopperlineHQ/m68k-rs?rev=d70b438ff5d57e840267079ade1efa6c26647fc8#d70b438ff5d57e840267079ade1efa6c26647fc8"
+source = "git+https://github.com/CopperlineHQ/m68k-rs?rev=f50b139a344039c74f964d5ffe9958c83419189d#f50b139a344039c74f964d5ffe9958c83419189d"
 dependencies = [
  "cranelift-codegen 0.132.3",
  "cranelift-frontend 0.132.3",

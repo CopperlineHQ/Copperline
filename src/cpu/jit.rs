@@ -26,6 +26,10 @@ pub(super) struct JitTiming {
     bus_checkpoint: u32,
     deadline: u64,
     sync: bool,
+    /// Completed-instruction count when the batch fetched opcode or extension
+    /// words from the shared bus. That instruction finishes in this batch;
+    /// the next boundary returns to the host.
+    fetch_retired: Option<u32>,
 }
 
 impl CpuBus {
@@ -47,14 +51,24 @@ impl CpuBus {
         )
     }
 
-    pub(super) fn note_jit_bus_access(&mut self, address: u32, size: usize) {
+    /// `fetch` marks an instruction-stream access. The completed prefix is
+    /// billed before it like any shared-bus access, but the fetched
+    /// instruction may still finish in this batch: the core repeats a fetch
+    /// when the host yields between fetch and dispatch, which would bill the
+    /// same shared-bus fetch twice. Interrupts and deadlines still yield there.
+    pub(super) fn note_jit_bus_access(&mut self, address: u32, size: usize, fetch: bool) {
         // A one-instruction batch has no completed prefix before this access,
         // and returns to the host before the next instruction anyway.
         if matches!(self.jit_batch, Some(JitBatchTiming::Multiple(_)))
             && !self.jit_plain_access(address, size)
         {
             self.flush_jit_batch_prefix();
-            self.jit_bus_boundary = true;
+            match self.jit_batch.as_mut() {
+                Some(JitBatchTiming::Multiple(timing)) if fetch => {
+                    timing.fetch_retired.get_or_insert(timing.observed_retired);
+                }
+                _ => self.jit_bus_boundary = true,
+            }
         }
     }
 
@@ -99,6 +113,7 @@ impl CpuBus {
             false
         };
         self.jit_bus_boundary
+            || timing.fetch_retired.is_some_and(|at| retired > at)
             || irq
             || self.bus.cartridge_nmi_pending()
             || self.bus.slice_preempted
@@ -257,6 +272,7 @@ impl M68kMachine {
                     bus_checkpoint,
                     deadline: self.bus.bus.emulated_cck() + u64::from(horizon),
                     sync: self.sync_cck_on,
+                    fetch_retired: None,
                 })
             });
             let cpu_was_stopped = self.cpu.is_stopped();
