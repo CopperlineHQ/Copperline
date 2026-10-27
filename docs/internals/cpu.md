@@ -130,12 +130,12 @@ The timing contract is deliberately approximate
   shared silicon), and CIA/RTC accesses keep their E-clock costs, keeping
   chipset side effects ordered against display DMA;
 - a batch of code in fast RAM or ROM runs at most 4096 instructions and
-  stops at the next hardware deadline: the next CIA timer or alarm, Copper
-  wake-up, blitter completion or interrupt, audio, floppy, storage,
-  serial, keyboard or pot event, the end of the scanline, or a pending
-  interrupt's recognition latency, and in any case within 64 colour
-  clocks, which bounds host-driven devices whose events cannot be
-  predicted. The budget converts that horizon to instructions with both
+  stops at the next hardware deadline: the next CIA timer or alarm, a
+  CIA interrupt reaching Paula's request input, Copper wake-up, blitter
+  completion or interrupt, audio, floppy, storage, serial, keyboard or pot
+  event, the end of the scanline, or a pending interrupt's recognition
+  latency, and in any case within 64 colour clocks, which bounds
+  host-driven devices whose events cannot be predicted. The budget converts that horizon to instructions with both
   fractional clock carries, so a batch overshoots it by at most one
   instruction;
 - inside such a batch the core reports each completed instruction through

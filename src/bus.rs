@@ -7905,20 +7905,11 @@ impl Bus {
     /// bus/MMIO accesses end the burst independently. Keep a 64-CCK ceiling for
     /// asynchronous host devices whose arrivals cannot be predicted.
     pub(crate) fn jit_event_horizon_cck(&self) -> u32 {
-        let cia = self
-            .cia_a
-            .next_event_ticks()
-            .into_iter()
-            .chain(self.cia_b.next_event_ticks())
-            .min()
-            .map(|ticks| {
-                ticks
-                    .saturating_mul(5)
-                    .saturating_sub(self.device_clock.cia_tick_remainder_cck)
-            });
         [
             Some(64),
-            cia,
+            // Timer and alarm events, and a staged interrupt's arrival at
+            // Paula's external request input.
+            self.next_cia_event_cck(),
             self.next_irq_visible_cck(),
             self.agnus.cck_until_line_ticks(1),
             self.next_copper_wakeup_cck(),
