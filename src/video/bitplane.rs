@@ -1339,7 +1339,10 @@ impl ControlState {
     /// unchanged: the advance only triggers when scroll covers the phase.
     fn reload_advance_for_scroll(&self, scroll: usize) -> i32 {
         let gulp = self.fetch_period() as i32;
-        let start = effective_ddf_start_hpos(
+        // The phase is the fetch RUN's, not the register's: a DDFSTRT below
+        // the hardwired start on ECS/AGA runs from $18 (see
+        // `ddf_run_start_hpos`).
+        let start = ddf_run_start_hpos(
             self.agnus_revision,
             self.hires() || self.shres(),
             self.ddfstrt,
@@ -1378,7 +1381,13 @@ impl ControlState {
             // Roots II AGA: lo-res BPL64, DDFSTRT $58/$38, earliness
             // 48 px -> boundary past the range, taps 16..43 render
             // linearly, which the previous last-earliness-window rule
-            // folded; phases 0..28 swept) golden probes. TODO: verify
+            // folded; phases 0..28 swept) golden probes. A DDFSTRT below
+            // the hardwired start takes the $18 run's phase, so lo-res
+            // BPL64 $10..$16 never folds (ddfprobe-agafold3, issue #836:
+            // Skeleton Krew CD32 scrolls DDFSTRT $10 with taps 0..63; the
+            // register's phase 16 folded taps >= 48 a gulp left, the
+            // camera jumping 64 px with black past the fetched data;
+            // vAmiga-verified band by band). TODO: verify
             // the hi-res/SHRES pipeline scaling on FS-UAE or real
             // hardware; only lo-res is pinned.
             let gulp_native = gulp * native_per_cck;
@@ -7434,6 +7443,23 @@ fn effective_ddf_start_hpos(revision: AgnusRevision, hires: bool, raw: u16) -> u
     // from the previous line), so word counts and picture placement stay
     // linear in the raw register (vAmigaTS Agnus/DDF oldhwstop3/4 photos).
     start.min(BITPLANE_DDF_HARD_STOP)
+}
+
+/// Colour clock at which the bitplane fetch run armed by `raw` DDFSTRT
+/// begins. An ECS Agnus or AGA Alice comparator match below the hardwired
+/// start window ($18) only latches BPHSTART: the run starts when SHW rises
+/// at $18, and SHW drops at every line end there, so such a run sits on the
+/// $18 unit phase on every line, not on the register's (vAmiga's ECS
+/// sequencer path, which AGA takes; `chipset::ddf_sequencer` walks the same).
+/// OCS keeps the raw comparator anchor: its surviving SHW latch arms the run
+/// at the match itself (see `effective_ddf_start_hpos`).
+fn ddf_run_start_hpos(revision: AgnusRevision, hires: bool, raw: u16) -> u16 {
+    let start = effective_ddf_start_hpos(revision, hires, raw);
+    if matches!(revision, AgnusRevision::Ocs) {
+        start
+    } else {
+        start.max(BITPLANE_DDF_HARD_START)
+    }
 }
 
 fn effective_ddf_window(

@@ -138,6 +138,18 @@ Roots tap >= 16, pulling the swirl a gulp left and shearing the
 kaleidoscope line by line. The hi-res/SHRES scaling of the pipeline is
 not yet externally verified; only lo-res is pinned.
 
+The phase is the fetch run's, not the register's. On ECS Agnus and AGA
+Alice a DDFSTRT below the hardwired start (`$18`) only latches BPHSTART;
+the run starts when SHW rises at `$18`, on every line, so DDFSTRT
+`$10`..`$16` takes the `$18` run's phase (24 cck past the 32-cck grid on
+the 64-bit fetch, boundary past the tap range: nothing folds). OCS keeps
+the raw comparator anchor, since its surviving SHW latch arms the run at
+the match itself. Pinned by `ddfprobe-agafold3`, vAmiga-verified band by
+band: the Skeleton Krew CD32 constellation (issue #836: lo-res BPL64,
+DDFSTRT `$10`, taps swept across 0..63 while the camera scrolls) folded
+taps >= 48 from the register's phase-16 boundary, jumping the playfield
+one gulp left with black past the fetched data on the right.
+
 BPLCON1-delayed samples at the left edge of a scanline do not reuse the
 previous line's final bitplane word. Before the current line's shifter has a
 sample for a delayed tap, replay marks playfield output active but returns
